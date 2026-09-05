@@ -1,0 +1,73 @@
+# Modern-sspec documentization score gate for the test runner.
+# A spec file whose sspec documentization score is below the minimum makes the
+# test run ERROR (exit 1). Scores are cached under .simple/cache/sspec-score-gate/
+# keyed on the full analysis identity (path + source hash + rule/tool version),
+# so an unchanged spec under unchanged scorer rules is never re-analyzed.
+use std.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.env.{env_get_i64}
+use app.sspec_maintain.analyzer.{analyze_sspec_text}
+
+const SSPEC_SCORE_GATE_MIN_DEFAULT = 80
+const SSPEC_SCORE_GATE_SCHEMA = "sspec-score-gate/v1"
+const SSPEC_SCORE_GATE_CACHE_DIR = ".simple/cache/sspec-score-gate"
+
+# Minimum score; 0 disables the gate. SIMPLE_SSPEC_MIN_SCORE overrides.
+fn sspec_score_gate_min() -> i64:
+    val configured = env_get_i64("SIMPLE_SSPEC_MIN_SCORE", SSPEC_SCORE_GATE_MIN_DEFAULT)
+    if configured < 0:
+        return 0
+    configured
+
+fn sspec_score_gate_identity(path: text, source: text) -> text:
+    # The rule/tool versions live in the report; folding the schema string here
+    # means a scorer change that bumps them invalidates every entry (the
+    # mistake the sspec-maintain scan cache made — see the memory note).
+    sha256_text(SSPEC_SCORE_GATE_SCHEMA + "\n" + path + "\n" + sha256_text(source))
+
+fn _gate_cache_path(identity: text) -> text:
+    SSPEC_SCORE_GATE_CACHE_DIR + "/" + identity + ".score"
+
+# -> (score, cached). score is -1 when the file cannot be read or analyzed:
+# fail-open on IO (the test verdict itself already covers the file) but the
+# caller still treats -1 as "not below min" so a read glitch cannot fail a run.
+fn sspec_score_gate_check(path: text) -> (i64, bool):
+    val source = file_read(path) ?? ""
+    if source == "":
+        return (-1, false)
+    val identity = sspec_score_gate_identity(path, source)
+    val cache_path = _gate_cache_path(identity)
+    if file_exists(cache_path):
+        val cached = ((file_read(cache_path) ?? "").split("\n")[0]).trim()
+        val parsed = cached.to_i64() ?? -1
+        if parsed >= 0:
+            return (parsed, true)
+    val report = analyze_sspec_text(path, source)
+    val score = report.score.effective_aggregate
+    # Cache the real rule/tool versions alongside the score so a scorer bump
+    # with an unchanged schema string is still detectable by inspection.
+    dir_create_all(SSPEC_SCORE_GATE_CACHE_DIR)
+    file_write(cache_path, "{score}\n# rules {report.rule_version}; tool {report.tool_version}\n")
+    (score, false)
+
+# Check every spec file in `paths`; print one ERROR line per below-min spec.
+# -> count of below-minimum specs (the caller turns >0 into exit 1).
+fn sspec_score_gate_report(paths: [text]) -> i64:
+    val min_score = sspec_score_gate_min()
+    if min_score == 0:
+        return 0
+    var below = 0
+    var cached_count: i64 = 0
+    for path in paths:
+        if not path.ends_with("_spec.spl"):
+            continue
+        val (score, cached) = sspec_score_gate_check(path)
+        if cached:
+            cached_count = cached_count + 1
+        if score >= 0 and score < min_score:
+            below = below + 1
+            print "  SSPEC SCORE FAIL  {path}: documentization score {score} < {min_score} (run: bin/simple src/app/sspec_maintain/main.spl scan {path})"
+    if paths.len() > 0:
+        print "SSPEC score gate: {below} below {min_score} ({cached_count} cached)"
+    below

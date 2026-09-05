@@ -1,0 +1,77 @@
+# @req REQ-SPKC-039
+# Sorted-key dict canonicalization in model/canonical.spl.
+#
+# Why this spec exists: S1-C originally shipped a SECOND "canonical bytes"
+# encoder inside balance/score.spl, because CanonicalValue had no object
+# shape. Two independent definitions of canonical bytes is how cross-platform
+# determinism diverges silently. CDict closed that gap and score.spl now
+# delegates here, so these are the tests that keep the one encoder honest.
+
+use std.spec.{describe, it, expect}
+use app.spipe.model.canonical.{CanonicalValue, canonical_json, canonical_bytes, cfield}
+
+describe("spipe canonical dict"):
+    it("emits object fields in sorted key order, not construction order"):
+        val v = CanonicalValue.CDict([
+            cfield("zulu", CanonicalValue.CInt(1)),
+            cfield("alpha", CanonicalValue.CInt(2)),
+            cfield("mike", CanonicalValue.CInt(3)),
+        ])
+        expect(canonical_json(v)).to_equal("{\"alpha\":2,\"mike\":3,\"zulu\":1}")
+
+    it("is independent of construction order"):
+        val a = CanonicalValue.CDict([
+            cfield("b", CanonicalValue.CText("2")),
+            cfield("a", CanonicalValue.CText("1")),
+        ])
+        val b = CanonicalValue.CDict([
+            cfield("a", CanonicalValue.CText("1")),
+            cfield("b", CanonicalValue.CText("2")),
+        ])
+        expect(canonical_json(a)).to_equal(canonical_json(b))
+
+    it("sorts keys by BYTE order, so non-ASCII keys are stable"):
+        # The keys differ only beyond ASCII; a char-oriented comparison can
+        # order these differently than a byte-oriented one, which would make
+        # output host-dependent.
+        val v = CanonicalValue.CDict([
+            cfield("é", CanonicalValue.CInt(2)),
+            cfield("z", CanonicalValue.CInt(1)),
+        ])
+        # "z" is 0x7A; "é" is 0xC3 0xA9 -- so "z" sorts first by bytes.
+        expect(canonical_json(v)).to_equal("{\"z\":1,\"é\":2}")
+
+    it("round-trips non-ASCII values without corruption"):
+        val v = CanonicalValue.CDict([
+            cfield("k", CanonicalValue.CText("日本語 — arrows → ok")),
+        ])
+        expect(canonical_json(v)).to_equal("{\"k\":\"日本語 — arrows → ok\"}")
+
+    it("nests dicts and lists"):
+        val v = CanonicalValue.CDict([
+            cfield("list", CanonicalValue.CList([
+                CanonicalValue.CInt(1),
+                CanonicalValue.CDict([cfield("x", CanonicalValue.CText("y"))]),
+            ])),
+            cfield("flat", CanonicalValue.CInt(0)),
+        ])
+        expect(canonical_json(v)).to_equal("{\"flat\":0,\"list\":[1,{\"x\":\"y\"}]}")
+
+    it("escapes quotes in keys as well as values"):
+        val v = CanonicalValue.CDict([
+            cfield("a\"b", CanonicalValue.CText("c\"d")),
+        ])
+        expect(canonical_json(v)).to_equal("{\"a\\\"b\":\"c\\\"d\"}")
+
+    it("produces byte output matching its text output"):
+        val v = CanonicalValue.CDict([cfield("a", CanonicalValue.CInt(1))])
+        expect(canonical_bytes(v)).to_equal(canonical_json(v).bytes())
+
+    it("is stable across repeated emission"):
+        val v = CanonicalValue.CDict([
+            cfield("n", CanonicalValue.CInt(7)),
+            cfield("s", CanonicalValue.CText("é")),
+        ])
+        expect(canonical_json(v)).to_equal(canonical_json(v))
+
+    return ()

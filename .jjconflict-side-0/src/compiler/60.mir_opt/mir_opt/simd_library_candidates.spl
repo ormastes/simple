@@ -1,0 +1,291 @@
+"""SIMD Library Adoption Candidates
+
+Identifies and annotates crypto and compression library functions that are
+candidates for SIMD auto-vectorization. Used by the SIMD Auto-Application
+pass to annotate known-hot library loops with vectorization hints.
+
+Categories: "crypto", "compression", "matrix"
+"""
+
+# ============================================================================
+# SimdCandidate — one vectorizable library function
+# ============================================================================
+
+pub struct SimdCandidate:
+    """A library function identified as a SIMD vectorization candidate.
+
+    func_name       — simple function name (e.g. "xor_block")
+    module_path     — fully qualified module path
+    category        — "crypto" | "compression" | "matrix"
+    vector_op       — abstract SIMD operation (e.g. "xor_block", "crc32_update")
+    min_width       — minimum SIMD width in bits (e.g. 128)
+    preferred_width — preferred SIMD width in bits (e.g. 256)
+    data_type       — element type: "u8" | "u32" | "u64" | "f32" | "f64"
+    stride          — element stride in bytes for vectorized access
+    trip_count_hint — expected loop iteration count (-1 = unknown)
+    """
+    func_name:       text
+    module_path:     text
+    category:        text
+    vector_op:       text
+    min_width:       i64
+    preferred_width: i64
+    data_type:       text
+    stride:          i64
+    trip_count_hint: i64
+
+pub fn simd_candidate_create(name: text, module: text, cat: text, op: text, min_w: i64, pref_w: i64, dt: text) -> SimdCandidate:
+    """Construct a SimdCandidate with default stride=1 and unknown trip count."""
+    SimdCandidate(
+        func_name:       name,
+        module_path:     module,
+        category:        cat,
+        vector_op:       op,
+        min_width:       min_w,
+        preferred_width: pref_w,
+        data_type:       dt,
+        stride:          1,
+        trip_count_hint: -1
+    )
+
+pub fn simd_candidate_is_vectorizable_at(c: SimdCandidate, width: i64) -> bool:
+    """True if width >= min_width — the target can satisfy the minimum lane requirement."""
+    width >= c.min_width
+
+pub fn simd_candidate_speedup_estimate(c: SimdCandidate, width: i64) -> i64:
+    """Naive speedup estimate: ratio of provided width to min_width."""
+    if c.min_width == 0:
+        return 1
+    width / c.min_width
+
+pub fn simd_candidate_summary(c: SimdCandidate) -> text:
+    """One-line summary of this candidate."""
+    c.func_name + " [" + c.category + "] op=" + c.vector_op + " min=" + c.min_width.to_text() + "b pref=" + c.preferred_width.to_text() + "b type=" + c.data_type
+
+# ============================================================================
+# CryptoSimdCandidates — pre-filled crypto candidate registry
+# ============================================================================
+
+pub struct CryptoSimdCandidates:
+    """Registry of SIMD-vectorizable crypto library functions.
+
+    xor_block   — XOR 16/32 bytes at a time (AES, ChaCha key streams)
+    rotate_block — 32-bit word rotations (ChaCha20/Salsa20 quarter-round)
+    clmul_pair  — carry-less multiply pair (GCM/GHASH authentication)
+    """
+    xor_block:    SimdCandidate
+    rotate_block: SimdCandidate
+    clmul_pair:   SimdCandidate
+
+pub fn crypto_simd_candidates_create() -> CryptoSimdCandidates:
+    """Pre-fill all three crypto candidates with standard SIMD metadata."""
+    CryptoSimdCandidates(
+        xor_block:    simd_candidate_create("xor_block",    "std.crypto.block",  "crypto",  "xor_block",    128, 256, "u8"),
+        rotate_block: simd_candidate_create("rotate_block", "std.crypto.chacha", "crypto",  "rotate32",     128, 256, "u32"),
+        clmul_pair:   simd_candidate_create("clmul_pair",   "std.crypto.gcm",    "crypto",  "clmul",        128, 128, "u64")
+    )
+
+pub fn crypto_simd_best_for_width(r: CryptoSimdCandidates, width: i64) -> text:
+    """Return the name of the candidate with the best speedup estimate at width."""
+    val s_xor    = simd_candidate_speedup_estimate(r.xor_block,    width)
+    val s_rot    = simd_candidate_speedup_estimate(r.rotate_block, width)
+    val s_clmul  = simd_candidate_speedup_estimate(r.clmul_pair,   width)
+    var best_name  = r.xor_block.func_name
+    var best_score = s_xor
+    if s_rot > best_score:
+        best_name  = r.rotate_block.func_name
+        best_score = s_rot
+    if s_clmul > best_score:
+        best_name  = r.clmul_pair.func_name
+        best_score = s_clmul
+    best_name
+
+pub fn crypto_simd_all_viable_at(r: CryptoSimdCandidates, width: i64) -> i64:
+    """Count of crypto candidates viable at the given SIMD width."""
+    var count: i64 = 0
+    if simd_candidate_is_vectorizable_at(r.xor_block,    width):
+        count = count + 1
+    if simd_candidate_is_vectorizable_at(r.rotate_block, width):
+        count = count + 1
+    if simd_candidate_is_vectorizable_at(r.clmul_pair,   width):
+        count = count + 1
+    count
+
+pub fn crypto_simd_report(r: CryptoSimdCandidates) -> text:
+    """Multi-line report of all crypto candidates."""
+    "CryptoSimdCandidates:\n" +
+    "  " + simd_candidate_summary(r.xor_block)    + "\n" +
+    "  " + simd_candidate_summary(r.rotate_block) + "\n" +
+    "  " + simd_candidate_summary(r.clmul_pair)
+
+# ============================================================================
+# CompressionSimdCandidates — pre-filled compression candidate registry
+# ============================================================================
+
+pub struct CompressionSimdCandidates:
+    """Registry of SIMD-vectorizable compression library functions.
+
+    crc32_update   — CRC32 via PCLMULQDQ or table-less approach
+    checksum_block — Adler-32 / Fletcher-32 parallel sum
+    match_copy_run — LZ4/Zstd match-copy inner loop
+    """
+    crc32_update:   SimdCandidate
+    checksum_block: SimdCandidate
+    match_copy_run: SimdCandidate
+
+pub fn compression_simd_candidates_create() -> CompressionSimdCandidates:
+    """Pre-fill all three compression candidates with standard SIMD metadata."""
+    CompressionSimdCandidates(
+        crc32_update:   simd_candidate_create("crc32_update",   "std.compress.crc",     "compression", "crc32_update",   128, 256, "u32"),
+        checksum_block: simd_candidate_create("checksum_block", "std.compress.checksum","compression", "adler32_block",  128, 256, "u8"),
+        match_copy_run: simd_candidate_create("match_copy_run", "std.compress.lz",      "compression", "memcpy_overlap", 128, 256, "u8")
+    )
+
+pub fn compression_simd_best_for_width(r: CompressionSimdCandidates, width: i64) -> text:
+    """Return the name of the candidate with the best speedup estimate at width."""
+    val s_crc   = simd_candidate_speedup_estimate(r.crc32_update,   width)
+    val s_chk   = simd_candidate_speedup_estimate(r.checksum_block, width)
+    val s_match = simd_candidate_speedup_estimate(r.match_copy_run, width)
+    var best_name  = r.crc32_update.func_name
+    var best_score = s_crc
+    if s_chk > best_score:
+        best_name  = r.checksum_block.func_name
+        best_score = s_chk
+    if s_match > best_score:
+        best_name  = r.match_copy_run.func_name
+        best_score = s_match
+    best_name
+
+pub fn compression_simd_all_viable_at(r: CompressionSimdCandidates, width: i64) -> i64:
+    """Count of compression candidates viable at the given SIMD width."""
+    var count: i64 = 0
+    if simd_candidate_is_vectorizable_at(r.crc32_update,   width):
+        count = count + 1
+    if simd_candidate_is_vectorizable_at(r.checksum_block, width):
+        count = count + 1
+    if simd_candidate_is_vectorizable_at(r.match_copy_run, width):
+        count = count + 1
+    count
+
+pub fn compression_simd_report(r: CompressionSimdCandidates) -> text:
+    """Multi-line report of all compression candidates."""
+    "CompressionSimdCandidates:\n" +
+    "  " + simd_candidate_summary(r.crc32_update)   + "\n" +
+    "  " + simd_candidate_summary(r.checksum_block) + "\n" +
+    "  " + simd_candidate_summary(r.match_copy_run)
+
+# ============================================================================
+# VectorizationMetadata — optimizer annotation for a candidate
+# ============================================================================
+
+pub struct VectorizationMetadata:
+    """Metadata attached to a candidate for the auto-vectorization optimizer.
+
+    candidate_name      — identifies the SimdCandidate this annotates
+    is_profitable       — whether vectorization is expected to be profitable
+    break_even_elements — min trip count for vectorization to pay off
+    alignment_required  — required data alignment in bytes (0 = no requirement)
+    has_loop_carried_dep — true if there is a loop-carried dependency
+    reduction_kind      — "" | "sum" | "xor" | "min" | "max"
+    """
+    candidate_name:      text
+    is_profitable:       bool
+    break_even_elements: i64
+    alignment_required:  i64
+    has_loop_carried_dep: bool
+    reduction_kind:      text
+
+pub fn vectorization_metadata_pure_parallel(name: text, align: i64) -> VectorizationMetadata:
+    """No loop-carried deps, always profitable — pure data-parallel loop."""
+    VectorizationMetadata(
+        candidate_name:      name,
+        is_profitable:       true,
+        break_even_elements: 4,
+        alignment_required:  align,
+        has_loop_carried_dep: false,
+        reduction_kind:      ""
+    )
+
+pub fn vectorization_metadata_reduction(name: text, kind: text, break_even: i64) -> VectorizationMetadata:
+    """Reduction loop — has loop-carried dep but is still vectorizable via reduction."""
+    VectorizationMetadata(
+        candidate_name:      name,
+        is_profitable:       true,
+        break_even_elements: break_even,
+        alignment_required:  0,
+        has_loop_carried_dep: true,
+        reduction_kind:      kind
+    )
+
+pub fn vectorization_metadata_not_profitable(name: text, reason: text) -> VectorizationMetadata:
+    """Marks a candidate as not profitable; reason is embedded in candidate_name."""
+    VectorizationMetadata(
+        candidate_name:      name + " (" + reason + ")",
+        is_profitable:       false,
+        break_even_elements: -1,
+        alignment_required:  0,
+        has_loop_carried_dep: false,
+        reduction_kind:      ""
+    )
+
+pub fn vectorization_metadata_can_auto_vectorize(m: VectorizationMetadata) -> bool:
+    """True if profitable AND either no loop-carried dep or a recognised reduction."""
+    if m.is_profitable == false:
+        return false
+    if m.has_loop_carried_dep == false:
+        return true
+    m.reduction_kind != ""
+
+pub fn vectorization_metadata_summary(m: VectorizationMetadata) -> text:
+    """One-line summary of this metadata annotation."""
+    val profitable = if m.is_profitable: "profitable" else: "not-profitable"
+    val dep        = if m.has_loop_carried_dep: " dep=" + m.reduction_kind else: " no-dep"
+    m.candidate_name + " [" + profitable + dep + " align=" + m.alignment_required.to_text() + "]"
+
+# ============================================================================
+# LibraryCandidateReport — aggregate report across all categories
+# ============================================================================
+
+pub struct LibraryCandidateReport:
+    """Aggregate SIMD candidate report for the optimizer.
+
+    crypto              — crypto candidate registry
+    compression         — compression candidate registry
+    total_candidates    — total number of candidates tracked
+    vectorizable_at_128 — count viable at 128-bit SIMD
+    vectorizable_at_256 — count viable at 256-bit SIMD
+    """
+    crypto:              CryptoSimdCandidates
+    compression:         CompressionSimdCandidates
+    total_candidates:    i64
+    vectorizable_at_128: i64
+    vectorizable_at_256: i64
+
+pub fn library_candidate_report_create() -> LibraryCandidateReport:
+    """Build the aggregate report; counts are computed from the registries."""
+    val c   = crypto_simd_candidates_create()
+    val z   = compression_simd_candidates_create()
+    val v128 = crypto_simd_all_viable_at(c, 128) + compression_simd_all_viable_at(z, 128)
+    val v256 = crypto_simd_all_viable_at(c, 256) + compression_simd_all_viable_at(z, 256)
+    LibraryCandidateReport(
+        crypto:              c,
+        compression:         z,
+        total_candidates:    6,
+        vectorizable_at_128: v128,
+        vectorizable_at_256: v256
+    )
+
+pub fn library_candidate_report_evaluate(r: LibraryCandidateReport, width: i64) -> text:
+    """Summary of what is viable at the given SIMD width."""
+    val crypto_count = crypto_simd_all_viable_at(r.crypto, width)
+    val comp_count   = compression_simd_all_viable_at(r.compression, width)
+    val total        = crypto_count + comp_count
+    "At " + width.to_text() + "-bit: " + total.to_text() + " candidates viable (" +
+    crypto_count.to_text() + " crypto, " + comp_count.to_text() + " compression)"
+
+pub fn library_candidate_report_full(r: LibraryCandidateReport) -> text:
+    """Full multi-line report of all candidate registries and width summaries."""
+    crypto_simd_report(r.crypto)       + "\n" +
+    compression_simd_report(r.compression) + "\n" +
+    library_candidate_report_evaluate(r, 128) + "\n" +
+    library_candidate_report_evaluate(r, 256)

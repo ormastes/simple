@@ -1,0 +1,108 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_vllm_host_env_contract}"
+PROBE_BUILD_DIR="$BUILD_DIR/vllm_host_probe"
+PROBE_REPORT="$BUILD_DIR/vllm_host_env_contract_report.md"
+OUT_ENV="$BUILD_DIR/evidence.env"
+PROBE_ENV="$PROBE_BUILD_DIR/evidence.env"
+PROBE_STDOUT="$BUILD_DIR/vllm_host_probe_stdout.log"
+EXPECTED_MODEL="contract-base-model"
+EXPECTED_ENDPOINT="http://127.0.0.1:18000/v1"
+mkdir -p "$BUILD_DIR"
+rm -f "$OUT_ENV" "$PROBE_REPORT" "$PROBE_STDOUT"
+
+failures=""
+checked_count=0
+
+add_failure() {
+    if [ -z "$failures" ]; then
+        failures="$1"
+    else
+        failures="$failures|$1"
+    fi
+}
+
+env_value() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$PROBE_ENV" 2>/dev/null | tail -n 1
+}
+
+require_env_value() {
+    key="$1"
+    expected="$2"
+    checked_count=$((checked_count + 1))
+    actual="$(env_value "$key")"
+    if [ "$actual" != "$expected" ]; then
+        add_failure "env_${key}_expected_${expected}_got_${actual:-missing}"
+    fi
+}
+
+require_report_pattern() {
+    pattern="$1"
+    label="$2"
+    checked_count=$((checked_count + 1))
+    if ! rg -q "$pattern" "$PROBE_REPORT"; then
+        add_failure "$label"
+    fi
+}
+
+set +e
+env -u BASE_MODEL \
+    -u ENDPOINT \
+    LLM_VLLM_BASE_MODEL="$EXPECTED_MODEL" \
+    LLM_VLLM_ENDPOINT="$EXPECTED_ENDPOINT" \
+    BUILD_DIR="$PROBE_BUILD_DIR" \
+    REPORT_PATH="$PROBE_REPORT" \
+    sh scripts/check/check-llm-runtime-vllm-host-probe.shs >"$PROBE_STDOUT" 2>&1
+probe_exit=$?
+set -e
+
+if [ "$probe_exit" -ne 0 ]; then
+    add_failure "probe_exit_expected_0_got_$probe_exit"
+fi
+
+if [ ! -s "$PROBE_ENV" ]; then
+    add_failure "missing_probe_env"
+else
+    require_env_value llm_runtime_vllm_host_probe_base_model "$EXPECTED_MODEL"
+    require_env_value llm_runtime_vllm_host_probe_endpoint "$EXPECTED_ENDPOINT"
+    require_env_value llm_runtime_vllm_host_probe_endpoint_scheme_status configured
+    require_env_value llm_runtime_vllm_host_probe_endpoint_host_status configured
+fi
+
+if [ ! -s "$PROBE_REPORT" ]; then
+    add_failure "missing_probe_report"
+else
+    require_report_pattern "^- base_model: \`$EXPECTED_MODEL\`" "report_missing_base_model"
+    require_report_pattern "^- endpoint: \`$EXPECTED_ENDPOINT\`" "report_missing_endpoint"
+fi
+
+if [ -z "$failures" ]; then
+    status="pass"
+    reason="vllm_host_documented_env_contract_present"
+else
+    status="fail"
+    reason="$failures"
+fi
+
+{
+    printf '%s\n' "llm_runtime_vllm_host_env_contract_status=$status"
+    printf '%s\n' "llm_runtime_vllm_host_env_contract_reason=$reason"
+    printf '%s\n' "llm_runtime_vllm_host_env_contract_checked_count=$checked_count"
+    printf '%s\n' "llm_runtime_vllm_host_env_contract_probe_exit=$probe_exit"
+    printf '%s\n' "llm_runtime_vllm_host_env_contract_probe_env=$PROBE_ENV"
+    printf '%s\n' "llm_runtime_vllm_host_env_contract_probe_report=$PROBE_REPORT"
+    printf '%s\n' "llm_runtime_vllm_host_env_contract_probe_stdout=$PROBE_STDOUT"
+} >"$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    printf '%s\n' "STATUS: PASS llm-runtime-vllm-host-env-contract checked_count=$checked_count"
+    exit 0
+fi
+
+printf '%s\n' "STATUS: FAIL llm-runtime-vllm-host-env-contract reason=$reason"
+exit 1

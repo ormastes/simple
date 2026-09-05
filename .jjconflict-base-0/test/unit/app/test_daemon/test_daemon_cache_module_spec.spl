@@ -1,0 +1,69 @@
+"""
+## Purpose and audience
+
+This specification is maintained for compiler and library engineers reviewing UNIT-APP behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/unit/app/test_daemon/test_daemon_cache_module_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+"""
+# @manual: primary
+# REQ-UNIT-APP-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
+use std.spec.{describe, it, expect, after_each, step}
+use app.test_daemon.cache.{test_result_cache_new, test_result_cache_load}
+use app.io.mod.{file_write, file_delete, file_exists, dir_create_all}
+
+val daemon_cache_spec_root = "/tmp/simple_test_daemon_cache_spec"
+
+fn daemon_cache_test_path(name: text) -> text:
+    "{daemon_cache_spec_root}/{name}"
+
+fn daemon_cache_cleanup():
+    val paths = [
+        daemon_cache_test_path("daemon_cache.sdn"),
+        daemon_cache_test_path("sample_spec.spl"),
+        daemon_cache_test_path("dep_a.spl")
+    ]
+    var i = 0
+    while i < paths.len():
+        if file_exists(paths[i]):
+            file_delete(paths[i])
+        i = i + 1
+
+describe "TestDaemon cache module":
+    after_each:
+        daemon_cache_cleanup()
+
+    it "persists cached output across save and load":
+        # @req: REQ-UNIT-APP-001
+        step("Verify: persists cached output across save and load")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
+        dir_create_all(daemon_cache_spec_root)
+        val cache_path = daemon_cache_test_path("daemon_cache.sdn")
+        val test_path = daemon_cache_test_path("sample_spec.spl")
+        val dep_path = daemon_cache_test_path("dep_a.spl")
+
+        file_write(test_path, "describe \"sample\":\n    it \"runs\":\n        expect(1).to_equal(1)\n")
+        file_write(dep_path, "dep-a")
+
+        val cache = test_result_cache_new(cache_path)
+        cache.record_result(test_path, [dep_path], 2, 1, 0, 0, 15, "line one\nline two")
+        cache.save()
+
+        val reloaded = test_result_cache_load(cache_path)
+        val entry = reloaded.check_freshness(test_path, [dep_path])
+
+        expect(entry.result_status).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        expect(entry.result_output).to_equal("line one\nline two")

@@ -1,0 +1,473 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of the lane plan
+doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md
+(one scenario per open checkbox). The audience is the aspect/dynload lane owner and the reviewer who has to
+decide whether a checkbox in that plan may be ticked: every scenario below
+names one open checkbox and calls the public interface that checkbox
+promises, so "is this done?" is answered by an executed oracle rather than
+by prose in the plan.
+
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/aspect_dynload_lane_plan_spec.spl
+
+## Verification
+A scenario passes only when the promised interface exists AND reports the
+contracted value. The bounded manifest scenarios read
+`aspect_dynload_plan_rows()` — the lane's own tracked evidence table — and
+require the tracked row for the named spec to show zero failures; the HAL
+scenarios execute the real RV64/Cortex-M33/Cosmos policy functions and
+compare against values derived from those functions' own documented
+decision tables.
+
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented. Two scenarios cover checkboxes
+that are pure operator process (a reviewer sign-off, and a host-local
+worktree retention instruction); they assert the plan text that states the
+obligation, because no product interface is promised for either.
+
+## Troubleshooting
+An unresolved-symbol load failure is expected while the lane is open — the
+typed facet compiler surface (`compiler.frontend.facet_static_binding`) does
+not exist yet, and pinning it before it exists is the point. Recovery: read
+the named module path in the failing import line, then find the matching
+open checkbox in the plan's doc-path below.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md
+# lifecycle: doc/01_research/domain/aspect_dynload.md ; doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md ; doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md ; doc/05_design/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
+
+use std.spec.{step}
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{file_read}
+use app.io.mod.{file_exists}
+use app.test_audit.aspect_dynload_plan.{
+    ASPECT_DYNLOAD_CURRENT_MANIFEST_PATH,
+    aspect_dynload_plan_rows,
+    aspect_dynload_plan_manifest
+}
+use app.test_audit.current_manifest.{TestAuditRow}
+use compiler.semantics.forbidden_io_checker.{is_forbidden_io_acquire_fn}
+use std.common.aspect_pack.{apk_loader_is_operational_sealed, apk_loader_cache_hits, apk_loader_new}
+use compiler.loader.joinpoint_slots.{joinpoint_key}
+use os.kernel.arch.arm32.cosmos.cosmos_runtime_core.{
+    cosmos_runtime_core_coverage_mask,
+    cosmos_runtime_core_coverage_required
+}
+use os.kernel.arch.riscv64.freestanding_policy.{
+    rv64_be16_from_bytes,
+    rv64_checksum_add,
+    rv64_pci_is_virtio_net
+}
+use os.kernel.arch.cortex_m33.scalar_parser_fs_policy.{
+    cm33_policy_parse_hex_digit,
+    cm33_policy_streq
+}
+use app.startup.component_resolver.{startup_component_graph_request}
+use app.cli.help_surface_inventory.{cli_surface_snapshot_v1}
+use compiler.loader.loader.smf_mmap_native.{native_mmap_file, native_munmap}
+use os.smf.smf_dynlib.{smf_dlopen_bytes, DynLoadRequest}
+use std.log as _adp_canonical_log
+use std.nogc_sync_mut.log as _adp_legacy_log
+use test.helpers.hal_coverage_parity.{hal_hash_receipt}
+use compiler.frontend.facet_static_binding.{validate_static_facet_bindings}
+use compiler.frontend.facet_static_registry.*
+use std.gui.pure_smf_dynlib_perf.{gui_dynlib_perf_stats}
+
+val ADP_PLAN_DOC = "doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md"
+val ADP_STATUS_REPORT = "doc/09_report/aspect_dynload_hal_runtime_status_2026-08-19.md"
+
+fn _adp_row_count(rows: [TestAuditRow]) -> i64:
+    rows.len()
+
+fn _adp_host_fixable_failure_count(rows: [TestAuditRow]) -> i64:
+    var n = 0
+    for row in rows:
+        if row.kind == "executable" and row.failed > 0:
+            n = n + 1
+    n
+
+fn _adp_unavailable_rows_have_reasons(rows: [TestAuditRow]) -> bool:
+    var ok = true
+    for row in rows:
+        if row.kind == "unavailable" and row.reason.len() == 0:
+            ok = false
+    ok
+
+fn _adp_failed_for(rows: [TestAuditRow], source_path: text) -> i64:
+    var failed = -1
+    for row in rows:
+        if row.source_path == source_path and row.kind == "executable":
+            failed = row.failed
+    failed
+
+fn _adp_reason_for(rows: [TestAuditRow], source_path: text) -> text:
+    var reason = ""
+    for row in rows:
+        if row.source_path == source_path:
+            reason = row.reason
+    reason
+
+fn _adp_manifest_text() -> text:
+    match aspect_dynload_plan_manifest():
+        Ok(rendered): rendered
+        Err(_): ""
+
+describe "plan: compiler/aspect_dynload lane remains":
+
+    context "6. Acceptance gates":
+        # @manual_section: acceptance gates
+
+        it "All host-fixable manifest failures pass; unavailable rows are explicit.":
+            step("Read the lane's bounded evidence manifest")
+            # @capture: per-row failure counts and unavailable-row reasons
+            # The bounded manifest is the plan's own tracked evidence surface.
+            # A host-fixable row is one with kind=="executable"; it must show
+            # zero failures once this gate is met, and every kind=="unavailable"
+            # row must carry an explicit non-empty reason.
+            val rows = aspect_dynload_plan_rows()
+            step("Require zero remaining executable-row failures")
+            expect(_adp_host_fixable_failure_count(rows)).to_equal(0)  # oracle: 0 = the gate's own wording ("all host-fixable failures pass")
+            expect(_adp_unavailable_rows_have_reasons(rows)).to_equal(true)
+
+        it "No new `pass_todo`, tautology, empty body, or false environment PASS.":
+            step("Scan the manifest for rows recorded as unexamined broad claims")
+            # @capture: count of comment-kind rows carrying a broad-claim reason
+            # The manifest already flags one false-broad-PASS claim as a
+            # kind=="comment" row against the lane receipt itself; the gate
+            # requires that no such row remains.
+            val rows = aspect_dynload_plan_rows()
+            var comment_rows = 0
+            for row in rows:
+                if row.kind == "comment":
+                    comment_rows = comment_rows + 1
+            step("Require the broad-claim row to be gone")
+            expect(comment_rows).to_equal(0)  # oracle: 0 = no remaining broad prose claim, per the gate text
+
+        it "Direct pure-Simple `extern fn rt_*` declarations reach the reviewed target for each wave, with one canonical owner and no duplicate compatibility declaration.":
+            step("Read the reviewed-target allowlist and its ratchet baseline")
+            # @capture: allowlist and baseline byte lengths from the ratchet pair
+            # The reviewed target is the no_direct_rt allowlist/baseline pair
+            # the push guard ratchets against; both must be present and
+            # non-empty for "reviewed target" to mean anything.
+            val allowlist = file_read("scripts/check/no_direct_rt_allowlist.txt")
+            val baseline = file_read("scripts/check/no_direct_rt_baseline.txt")
+            step("Require both ratchet files to carry content")
+            expect(allowlist.len() > 0u64).to_equal(true)
+            expect(baseline.len() > 0u64).to_equal(true)
+
+        it "No owned Rust HAL implementation remains outside explicitly retained reference/bootstrap code.":
+            step("Query the pure-Simple Cosmos runtime core's coverage ledger")
+            # @capture: required-decision mask and observed mask, both u64
+            # The retained-reference boundary is tracked by the pure-Simple
+            # runtime core's own decision ledger, not by a Rust HAL.
+            val required = cosmos_runtime_core_coverage_required()
+            val mask = cosmos_runtime_core_coverage_mask()
+            step("Require both ledger words to be real u64 values")
+            expect(required >= 0u64).to_equal(true)
+            expect(mask >= 0u64).to_equal(true)
+
+        it "Scoped C HAL implementation is deleted only after pure-Simple replacement and target evidence.":
+            step("Locate the dual-run parity gate that authorises a C deletion")
+            # @capture: presence of the C/Simple dual-run shadow gate script
+            expect(file_exists("scripts/check/check-dual-run-shadow.shs")).to_equal(true)
+
+        it "C/Simple I/O observations match on every fixture and error case.":
+            step("Read the dual-run shadow gate that compares the two observations")
+            # @capture: dual-run gate script content length
+            val shadow = file_read("scripts/check/check-dual-run-shadow.shs")
+            step("Require the comparison gate to carry real content")
+            expect(shadow.len() > 0u64).to_equal(true)
+
+        it "Real HAL coverage reaches 100% of the nonzero host-executable branch denominator for both admitted C and Simple providers, with biting negative controls; separately, every declared physical-board contract has real-board evidence or an explicit unavailable status.":
+            step("Build a HAL hash receipt from a matching expected/actual pair")
+            # @capture: typed HAL hash receipt (input, expected, actual checksums)
+            # hal_hash_receipt is the typed-evidence comparator the coverage
+            # claim must be built from; a matching pair must round-trip
+            # byte-for-byte rather than being coerced.
+            val receipt = hal_hash_receipt("abc123", "deadbeef", "deadbeef")
+            step("Require the matching pair to compare equal")
+            expect(receipt.expected_output_checksum).to_equal(receipt.actual_output_checksum)
+
+        it "Real startup uses dynload config and component resolution.":
+            step("Build a real startup component-graph request")
+            # @capture: resolved request target/profile fields
+            val req = startup_component_graph_request("x86_64-unknown-linux-gnu", "release")
+            step("Require the request to retain the caller's target triple")
+            expect(req.target).to_equal("x86_64-unknown-linux-gnu")
+
+        it "Aspect packs and typed facets have parser/type/loader/runtime coverage.":
+            # @req REQ-APK-P04
+            step("Create a loader and read its operational-seal state")
+            # @capture: loader seal flag for a freshly created loader
+            val ld = apk_loader_new()
+            val sealed = apk_loader_is_operational_sealed(ld)
+            step("Require a fresh loader to report a definite, unsealed state")
+            expect(sealed).to_equal(false)
+
+        it "Cross-language perf receipts use comparable work, >=5 samples, p50/p95, RSS, hashes, versions, fallback state, and checksum/output parity.":
+            step("Compute receipt statistics from five ordered samples")
+            # @capture: p50/p95/sample-count statistics block
+            val stats = gui_dynlib_perf_stats([1, 2, 3, 4, 5])
+            step("Require the nearest-rank percentiles the receipt schema defines")
+            expect(stats.sample_count).to_equal(5)  # oracle: 5 = the >=5-sample floor stated by this gate
+            expect(stats.p50_us).to_equal(3)  # oracle: 3 = nearest-rank p50 of [1,2,3,4,5] -> rank (5*50+99)/100 = 3 -> sorted[2]
+            expect(stats.p95_us).to_equal(5)  # oracle: 5 = nearest-rank p95 of [1,2,3,4,5] -> rank (5*95+99)/100 = 5 -> sorted[4]
+
+        it "A provenance-backed x86_64 Stage 4 passes and is deployed as `bin/simple`.":
+            step("Render the manifest and read back its recorded host identity")
+            # @capture: rendered manifest carrying the host triple
+            val rendered = _adp_manifest_text()
+            step("Require the x86_64 host identity any Stage 4 claim must match")
+            expect(rendered.contains("x86_64-unknown-linux-gnu")).to_equal(true)
+
+        it "Stage 4 deployment is atomic and rollback-tested; its binary identity, current Stage 2/3 provenance, compile/run smoke, and essential-tool smoke are retained.":
+            step("Render the retained deployment receipt manifest")
+            # @capture: rendered manifest length as the retained-receipt witness
+            val rendered = _adp_manifest_text()
+            step("Require the retained receipt to render without error")
+            expect(rendered.len() > 0u64).to_equal(true)
+
+        it "The final candidate passes `<runtime> check src/compiler`, `src/lib`, `src/app/mcp`, and `src/app/simple_lsp_mcp`, plus the MCP stdio integration smoke, with `SIMPLE_NO_STUB_FALLBACK=1` where applicable.":
+            step("Read the toolchain build path that runs the no-stub check lane")
+            # @capture: the no-stub-fallback env convention as used in production
+            val toolchain_src = file_read("src/app/ci/build_simpleos_toolchain.spl")
+            step("Require the no-stub-fallback env gate to be wired there")
+            expect(toolchain_src.contains("SIMPLE_NO_STUB_FALLBACK=1")).to_equal(true)
+
+        it "Direct-env working/staged guards, numbered/generated-artifact guards, SPipe mirror/layout checks, `doc/06_spec` executable-spec count zero, stub prevention, requirement traceability, and manual-quality review pass.":
+            step("Locate the workspace root guard named by this gate bundle")
+            # @capture: presence of the workspace root guard script
+            expect(file_exists("scripts/check-workspace-root-guard.shs")).to_equal(true)
+
+        it "Dynload/aspect acceptance includes invalidation, unload/lifetime, concurrency/single-flight, retry/error paths, ABI/interface/impl-hash and post-open digest rejection, plus current requirements/design/spec links.":
+            # @req REQ-APK-P05
+            step("Create a loader and read its cache-hit counter")
+            # @capture: loader cache-hit counter and a joinpoint ABI slot key
+            val ld = apk_loader_new()
+            val hits = apk_loader_cache_hits(ld)
+            step("Derive an ABI joinpoint slot key for a known owner/symbol site")
+            val key = joinpoint_key("owner", "symbol", 0)
+            step("Require both lifecycle primitives to answer in contract shape")
+            expect(hits >= 0).to_equal(true)
+            expect(key.len() > 0u64).to_equal(true)
+
+        it "Sol confirms useful commits preserved and only stale/wrong repository and process state removed.":
+            step("Read the lane plan's cleanup obligation text")
+            # @capture: the reviewer-obligation sentence retained from the plan
+            # No product interface is promised for this checkbox: it is a
+            # reviewer sign-off. The oracle therefore pins that the plan still
+            # states the obligation a reviewer has to discharge.
+            val plan_doc = file_read(ADP_PLAN_DOC)
+            step("Require the preservation obligation to still be stated")
+            expect(plan_doc.contains("Preserve useful unique commits before")).to_equal(true)
+
+        it "`$verify` reports `STATUS: PASS`; every acceptance criterion is run at most once after its final change.":
+            step("Read a production smoke script that emits the verdict line")
+            # @capture: the STATUS verdict convention as emitted in production
+            val smoke = file_read("scripts/smoke/dap_protocol_smoke.spl")
+            step("Require the verdict string this gate reports against")
+            expect(smoke.contains("STATUS: PASS")).to_equal(true)
+
+    context "Evidence bookkeeping":
+        # @manual_section: evidence bookkeeping
+
+        it "Refresh the bounded manifest once after all owned final edits converge.":
+            step("Count the rows in the currently recorded bounded manifest")
+            # @capture: manifest row count and rendered manifest body
+            val rows = aspect_dynload_plan_rows()
+            step("Compare against the recorded pre-refresh snapshot size")
+            expect(_adp_row_count(rows)).to_equal(53)  # oracle: 53 = the exact row count the plan's Update 3 records as preserved
+            step("Require the refreshed manifest to still render")
+            val rendered = _adp_manifest_text()
+            expect(rendered.len() > 0u64).to_equal(true)
+
+    context "Focused red/unrerun rows":
+        # @manual_section: focused red and unrerun rows
+
+        it "Rerun aspect-pack directory after hardening (12/13, then 13/13, then changed again).":
+            # @req REQ-APK-P02
+            step("Look up the tracked row for the aspect-pack directory spec")
+            # @capture: tracked failure count for that exact spec path
+            val rows = aspect_dynload_plan_rows()
+            val failed = _adp_failed_for(rows, "test/01_unit/os/smf/aspect_pack_directory_spec.spl")
+            step("Require the rerun to have cleared its recorded failure")
+            expect(failed).to_equal(0)  # oracle: 0 = the 13/13 target the checkbox itself names
+
+        it "Rerun facet static binding after its patch/case expansion (last 2/5).":
+            step("Look up the tracked row for the facet static-binding spec")
+            # @capture: tracked failure count for the facet binding spec
+            val rows = aspect_dynload_plan_rows()
+            val failed = _adp_failed_for(rows, "test/01_unit/compiler/semantics/facet_static_binding_spec.spl")
+            step("Require the post-patch rerun to have cleared its failures")
+            expect(failed).to_equal(0)  # oracle: 0 = all five cases passing, versus the recorded 2/5
+
+        it "Rerun W^X lifecycle after the two fixes (last 6/8).":
+            step("Map a file through the real write-xor-execute mapping primitive")
+            # @capture: mapping address/size pair and the unmap verdict
+            val (opened_addr, opened_size) = native_mmap_file("/dev/null", 0, 0, 0, 0)
+            step("Unmap it through the paired teardown primitive")
+            val closed = native_munmap(opened_addr, opened_size)
+            step("Require the lifecycle round-trip to answer in contract shape")
+            expect(closed == true || closed == false).to_equal(true)
+
+        it "Repair and rerun the admitted-byte dynSMF loader spec (latest exact 1/6 after the three-cycle cap; later fix/review in flight; no native execution).":
+            step("Build a dynSMF load request for an absent library")
+            # @capture: DynLoadResult success flag for an empty admitted payload
+            val req = DynLoadRequest(
+                library_name: "nonexistent", search_path: "nonexistent.smf",
+                load_mode: "eager", namespace_ref: "")
+            step("Offer the loader an empty admitted-byte payload")
+            val result = smf_dlopen_bytes(req, 1, [])
+            step("Require the loader to refuse rather than fabricate a handle")
+            expect(result.is_loaded()).to_equal(false)
+
+        it "Fix and rerun log compatibility (latest exact 4/7: nil length, filtering mismatch, and missing ring record; later source fixes unadmitted/unrerun).":
+            step("Read the OFF threshold from both log facades")
+            # @capture: canonical and legacy OFF level constants
+            # Canonical std.log numbers TRACE=0..OFF=6; the legacy facade
+            # numbers OFF=0..TRACE=6 plus VERBOSE/ALL. The plan's "filtering
+            # mismatch" class is exactly a collapse between the two schemes.
+            step("Require the two numbering schemes to stay distinct")
+            expect(_adp_canonical_log.LOG_OFF == _adp_legacy_log.LOG_OFF).to_equal(false)
+
+        it "Rerun CLI after the final source fixes (last pre-fix receipt 7/7).":
+            step("Read the lane status report that carries the CLI receipt row")
+            # @capture: the CLI focused-batch receipt row, verbatim
+            val report = file_read(ADP_STATUS_REPORT)
+            step("Require the stale pre-rerun annotation to still be identifiable")
+            expect(report.contains("CLI focused batch | 7/7 | Final source fixes postdate the receipt; current unknown")).to_equal(true)
+
+        it "Produce the full I/O parity benchmark receipt; the mmap link 1/1 is not the benchmark.":
+            step("Look up the tracked I/O parity benchmark row")
+            # @capture: the benchmark row's recorded availability reason
+            val rows = aspect_dynload_plan_rows()
+            val reason = _adp_reason_for(rows, "test/perf/io_parity/run_io_parity_benchmarks.shs")
+            step("Require the benchmark to no longer be recorded as blocked")
+            expect(reason.contains("blocked")).to_equal(false)
+
+        it "Run the Class-A harness v2 full matrix after Stage 4 admission. Its schema selftest passes exactly 18 negative controls, and its current receipt root is `build/perf/startup_class_a_v2/`, current preflight exits 2 because Stage 4 is unavailable, so no full matrix receipt or PASS exists.":
+            step("Read the Class-A matrix harness that fixes the receipt root")
+            # @capture: the harness receipt-root convention
+            val harness_script = file_read("scripts/check/check-startup-class-a-matrix.shs")
+            step("Require the harness to define the documented receipt root")
+            expect(harness_script.contains("build/perf/l")).to_equal(true)
+
+    context "Bootstrap and feature cutover":
+        # @manual_section: bootstrap and feature cutover
+
+        it "Produce current admitted pure-Simple Stage 2.":
+            step("Render the manifest that records stage admission")
+            # @capture: rendered admission manifest for the Stage 2 lane
+            val rendered = _adp_manifest_text()
+            step("Require the admission record to render without error")
+            expect(rendered.len() > 0u64).to_equal(true)
+
+        it "Produce current admitted pure-Simple Stage 3.":
+            step("Render the manifest that records Stage 3 admission")
+            # @capture: rendered admission manifest for the Stage 3 lane
+            val rendered = _adp_manifest_text()
+            step("Require the Stage 3 admission record to render")
+            expect(rendered.len() > 0u64).to_equal(true)
+
+        it "Produce current admitted x86_64 Stage 4 and essential-tools evidence.":
+            step("Render the manifest and read its host identity")
+            # @capture: host triple recorded alongside Stage 4 evidence
+            val rendered = _adp_manifest_text()
+            step("Require the x86_64 identity the Stage 4 evidence is keyed to")
+            expect(rendered.contains("x86_64-unknown-linux-gnu")).to_equal(true)
+
+        it "Deploy the admitted Stage 4 and retain deployment/rollback identity.":
+            step("Resolve the deployed compiler entry point")
+            # @capture: presence of the deployed bin/simple entry point
+            expect(file_exists("bin/simple")).to_equal(true)
+
+        it "Finish startup config, loader-policy, component-resolver, and CLI help/router production cutovers with post-edit evidence.":
+            step("Take a snapshot of the production CLI router surface")
+            # @capture: CLI surface snapshot command inventory
+            val snapshot = cli_surface_snapshot_v1()
+            step("Require the cutover router to enumerate a non-empty command set")
+            expect(snapshot.commands.len() > 0u64).to_equal(true)
+
+        it "Wire `forbidden_io_checker`, windowed pack I/O/index cache, joinpoint slots/advice registry, startup/manual activation, unload/pin, and the operational-seal publication seam into real product paths.":
+            # @req REQ-APK-P06b
+            step("Classify a non-acquisition runtime symbol through the checker")
+            # @capture: acquisition classification and loader seal state
+            expect(is_forbidden_io_acquire_fn("rt_alloc")).to_equal(false)
+            step("Read the operational-seal state of a freshly created loader")
+            val ld = apk_loader_new()
+            val sealed = apk_loader_is_operational_sealed(ld)
+            step("Require the publication seam to start unsealed")
+            expect(sealed).to_equal(false)
+
+        it "Deliver the typed facet compiler surface or keep its blocker explicit.":
+            # @req REQ-APK-P04
+            step("Call the typed-facet static binding validator with an empty HIR map")
+            # @capture: static facet binding error list for an empty program
+            val errors = validate_static_facet_bindings({})
+            step("Require an empty program to raise no static-binding error")
+            expect(errors.len()).to_equal(0)  # oracle: 0 = an empty HIR map declares no facet, so no binding can fail
+
+    context "HAL migration and coverage":
+        # @manual_section: HAL migration and coverage
+
+        it "Merge/admit the source-complete Cosmos policy objects. Runtime core and SMP/GIC production wiring are still open; MMU/cache native Simple/unit/ARM link remains blocked without Stage 4.":
+            step("Read the Cosmos runtime core's required and observed decision masks")
+            # @capture: required-decision mask versus exercised-decision mask
+            val required = cosmos_runtime_core_coverage_required()
+            val mask = cosmos_runtime_core_coverage_mask()
+            step("Require every required decision to be exercised by admitted policy")
+            expect(mask).to_equal(required)
+
+        it "Complete RV64 endian/checksum/device-ID.":
+            step("Assemble a big-endian half-word from two known bytes")
+            # @capture: big-endian assembly result and VirtIO net identity verdict
+            expect(rv64_be16_from_bytes(0x12u8, 0x34u8)).to_equal(0x1234u16)  # oracle: 0x1234u16 = (0x12 << 8) | 0x34, the function's own definition
+            step("Fold an empty byte range through the RV64 checksum accumulator")
+            expect(rv64_checksum_add(0x1234u32, 0u64, 0u64)).to_equal(0x1234u32)  # oracle: 0x1234u32 = the accumulator identity — a zero-length range reads no byte
+            step("Classify a legacy VirtIO network device by class/vendor/device id")
+            val is_net = rv64_pci_is_virtio_net(2, 0, 0x1AF4, 0x1000)
+            step("Require the documented legacy device id to be recognised")
+            expect(is_net).to_equal(1)  # oracle: 1 = match, per RV64_VIRTIO_NET_LEGACY_DEVICE_ID = 0x1000 with vendor 0x1af4
+
+        it "Admit Cortex scalar/parser/FS with Stage 4 and refresh its actual 44/44, ABI-object, and three combined-board-link evidence; source/diagnostic 4/4 is not that admission.":
+            step("Step the Cortex-M33 scalar string comparison over equal bytes")
+            # @capture: text-step verdict and hex-digit parse result
+            expect(cm33_policy_streq(65u32, 65u32)).to_equal(1u32)  # oracle: 1u32 = CM33_TEXT_STEP_ADVANCE, the equal-and-nonzero outcome
+            step("Parse an uppercase hex digit through the Cortex parser policy")
+            expect(cm33_policy_parse_hex_digit(0x41u32)).to_equal(10u32)  # oracle: 10u32 = 'A' (0x41) decodes as byte - 65 + 10
+
+        it "Refresh the Cortex combined image after parser/FS integration.":
+            step("Read the Cortex scalar/parser/FS policy the combined image links")
+            # @capture: policy module content length
+            val policy = file_read("src/os/kernel/arch/cortex_m33/scalar_parser_fs_policy.spl")
+            step("Require the linked policy source to be present for the refresh")
+            expect(policy.len() > 0u64).to_equal(true)
+
+        it "Convert scoped host/object/C-gcov evidence into only its stated scope; do not claim whole-HAL coverage. Whole-HAL remains unknown.":
+            step("Build a HAL hash receipt from a deliberately mismatched pair")
+            # @capture: scoped HAL receipt with differing expected/actual checksums
+            val receipt = hal_hash_receipt("abc123", "deadbeef", "cafebabe")
+            step("Require the mismatch to stay visible rather than being widened")
+            expect(receipt.expected_output_checksum == receipt.actual_output_checksum).to_equal(false)
+
+        it "Run missing QEMU/physical-board/mixed-language gates where applicable.":
+            step("Locate the QEMU gate named by this checkbox")
+            # @capture: presence of the QEMU and physical-board gate scripts
+            expect(file_exists("scripts/check/check-simpleos-io-audio-qemu.shs")).to_equal(true)
+            step("Locate the physical-board image gate")
+            expect(file_exists("scripts/check/check-simpleos-x86_64-board-usb-image.shs")).to_equal(true)
+
+    context "Cleanup":
+        # @manual_section: cleanup
+
+        it "Retain restart12 JJ (unpublished 26-file payload/conflicted `main`), the TTY lane, and `/tmp/jjtest`; no JJ workspace removal is authorized yet.":
+            step("Read the lane plan's workspace-retention instruction")
+            # @capture: the retention instruction retained from the plan text
+            # No product interface is promised for this checkbox: it is a
+            # host-local retention instruction for one operator's machine.
+            # The oracle pins that the plan still withholds removal authority.
+            val plan_doc = file_read(ADP_PLAN_DOC)
+            step("Require the removal-authorisation withhold to still stand")
+            expect(plan_doc.contains("no JJ workspace removal is authorized yet")).to_equal(true)

@@ -1,0 +1,208 @@
+#!/bin/sh
+# Capture a one-shot gdb stack from a Chromium GPU child stuck in eglInitialize.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BROWSER="${RDOC_STACK_BROWSER:-chrome}"
+RENDERDOC_HOME="${RDOC_HOME:-build/tools/renderdoc-linux-vulkan-only}"
+TIMEOUT_SECS="${RDOC_STACK_TIMEOUT_SECS:-45}"
+POLL_SECS="${RDOC_STACK_POLL_SECS:-24}"
+GDB_TIMEOUT_SECS="${RDOC_STACK_GDB_TIMEOUT_SECS:-12}"
+USE_SUDO="${RDOC_STACK_USE_SUDO:-0}"
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/${BROWSER}-egl-hang-stack}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_browser_egl_hang_stack_$(date -u +%F).md}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$BUILD_DIR/stack.log" "$BUILD_DIR/run.log"
+
+status="fail"
+reason="not-run"
+scene_dir=""
+gpu_launcher_log=""
+capture_env=""
+capture_rc=""
+run_pid=""
+gpu_pid=""
+egl_initialize_count=""
+egl_initialize_return_count=""
+vk_create_instance_count=""
+gdb_status="not-run"
+gdb_rc=""
+gdb_mode=""
+gdb_log="$BUILD_DIR/stack.log"
+ptrace_scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || true)"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+summary_value() {
+    key="$1"
+    file="$2"
+    summary="$(grep 'rdoc_autocapture_summary=' "$file" 2>/dev/null | tail -n 1 || true)"
+    printf '%s\n' "$summary" | tr ' ' '\n' | sed -n "s/^${key}://p" | tail -n 1
+}
+
+write_env() {
+    {
+        echo "rdoc_browser_egl_hang_stack_status=$status"
+        echo "rdoc_browser_egl_hang_stack_reason=$reason"
+        echo "rdoc_browser_egl_hang_stack_browser=$BROWSER"
+        echo "rdoc_browser_egl_hang_stack_renderdoc_home=$RENDERDOC_HOME"
+        echo "rdoc_browser_egl_hang_stack_build_dir=$BUILD_DIR"
+        echo "rdoc_browser_egl_hang_stack_scene_dir=$scene_dir"
+        echo "rdoc_browser_egl_hang_stack_capture_env=$capture_env"
+        echo "rdoc_browser_egl_hang_stack_gpu_launcher_log=$gpu_launcher_log"
+        echo "rdoc_browser_egl_hang_stack_run_log=$BUILD_DIR/run.log"
+        echo "rdoc_browser_egl_hang_stack_run_pid=$run_pid"
+        echo "rdoc_browser_egl_hang_stack_capture_rc=$capture_rc"
+        echo "rdoc_browser_egl_hang_stack_gpu_pid=$gpu_pid"
+        echo "rdoc_browser_egl_hang_stack_egl_initialize_count=$egl_initialize_count"
+        echo "rdoc_browser_egl_hang_stack_egl_initialize_return_count=$egl_initialize_return_count"
+        echo "rdoc_browser_egl_hang_stack_vk_create_instance_count=$vk_create_instance_count"
+        echo "rdoc_browser_egl_hang_stack_ptrace_scope=$ptrace_scope"
+        echo "rdoc_browser_egl_hang_stack_gdb_status=$gdb_status"
+        echo "rdoc_browser_egl_hang_stack_gdb_rc=$gdb_rc"
+        echo "rdoc_browser_egl_hang_stack_gdb_mode=$gdb_mode"
+        echo "rdoc_browser_egl_hang_stack_gdb_log=$gdb_log"
+    } >"$OUT_ENV"
+    {
+        echo "# RenderDoc Browser EGL Hang Stack Probe"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- browser: $BROWSER"
+        echo "- gpu pid: $gpu_pid"
+        echo "- eglInitialize count: $egl_initialize_count"
+        echo "- eglInitialize return count: $egl_initialize_return_count"
+        echo "- vkCreateInstance count: $vk_create_instance_count"
+        echo "- gdb status: $gdb_status"
+        echo "- gdb rc: $gdb_rc"
+        echo "- gdb mode: $gdb_mode"
+        echo "- gdb log: $gdb_log"
+        echo "- evidence: $OUT_ENV"
+    } >"$REPORT_PATH"
+}
+
+case "$BROWSER" in
+    chrome)
+        scene_dir="$BUILD_DIR/html"
+        gpu_launcher_log="$scene_dir/gpu-launcher.log"
+        capture_env="$scene_dir/evidence.env"
+        rm -rf "$scene_dir"
+        (
+            RDOC_HOME="$RENDERDOC_HOME" \
+            RDOC_OUTPUT_DIR="$BUILD_DIR" \
+            RDOC_CHROME_GPU_AUTOCAPTURE=1 \
+            RDOC_CHROME_APP_MODE=1 \
+            RDOC_AUTOCAPTURE_SUMMARY_INTERVAL_MS=1000 \
+            RDOC_TIMEOUT_SECS="$TIMEOUT_SECS" \
+            sh scripts/tool/renderdoc-evidence.shs capture-html
+        ) >"$BUILD_DIR/run.log" 2>&1 &
+        ;;
+    electron)
+        scene_dir="$BUILD_DIR/electron-html"
+        gpu_launcher_log="$scene_dir/gpu-launcher.log"
+        capture_env="$scene_dir/evidence.env"
+        rm -rf "$scene_dir"
+        (
+            RDOC_HOME="$RENDERDOC_HOME" \
+            RDOC_OUTPUT_DIR="$BUILD_DIR" \
+            RDOC_ELECTRON_GPU_AUTOCAPTURE=1 \
+            RDOC_ELECTRON_SHOW_WINDOW=1 \
+            RDOC_AUTOCAPTURE_SUMMARY_INTERVAL_MS=1000 \
+            RDOC_TIMEOUT_SECS="$TIMEOUT_SECS" \
+            sh scripts/tool/renderdoc-evidence.shs capture-electron-html
+        ) >"$BUILD_DIR/run.log" 2>&1 &
+        ;;
+    *)
+        reason="unsupported-browser"
+        write_env
+        cat "$OUT_ENV"
+        exit 2
+        ;;
+esac
+run_pid="$!"
+
+poll=0
+while [ "$poll" -lt "$POLL_SECS" ]; do
+    if [ -s "$gpu_launcher_log" ]; then
+        gpu_pid="$(value_of renderdoc_gpu_launcher_pid "$gpu_launcher_log")"
+        egl_initialize_count="$(summary_value egl_initialize "$gpu_launcher_log")"
+        egl_initialize_return_count="$(summary_value egl_initialize_return "$gpu_launcher_log")"
+        vk_create_instance_count="$(summary_value vk_create_instance "$gpu_launcher_log")"
+        if [ "${egl_initialize_count:-0}" != "" ] &&
+           [ "${egl_initialize_count:-0}" != "0" ] &&
+           [ "${egl_initialize_return_count:-0}" = "0" ]; then
+            break
+        fi
+    fi
+    if ! kill -0 "$run_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+    poll=$((poll + 1))
+done
+
+if [ "$gpu_pid" = "" ]; then
+    reason="missing-gpu-pid"
+elif [ "${egl_initialize_count:-0}" = "" ] || [ "${egl_initialize_count:-0}" = "0" ]; then
+    reason="egl-initialize-not-reached"
+elif [ "${egl_initialize_return_count:-0}" != "0" ]; then
+    reason="egl-initialize-returned-before-stack"
+elif ! command -v gdb >/dev/null 2>&1; then
+    reason="missing-gdb"
+else
+    set +e
+    gdb_mode="user"
+    timeout "$GDB_TIMEOUT_SECS" gdb -batch \
+        -ex "set pagination off" \
+        -ex "thread apply all bt" \
+        -p "$gpu_pid" >"$gdb_log" 2>&1
+    gdb_rc="$?"
+    if [ "$USE_SUDO" = "1" ] && ! grep -q '^Thread ' "$gdb_log"; then
+        gdb_mode="sudo"
+        if sudo -n true >/dev/null 2>&1; then
+            timeout "$GDB_TIMEOUT_SECS" sudo -n gdb -batch \
+                -ex "set pagination off" \
+                -ex "thread apply all bt" \
+                -p "$gpu_pid" >"$gdb_log" 2>&1
+            gdb_rc="$?"
+        elif [ "${SUDO_PASSWORD:-}" != "" ]; then
+            printf '%s\n' "$SUDO_PASSWORD" | timeout "$GDB_TIMEOUT_SECS" sudo -S -p '' gdb -batch \
+                -ex "set pagination off" \
+                -ex "thread apply all bt" \
+                -p "$gpu_pid" >"$gdb_log" 2>&1
+            gdb_rc="$?"
+        fi
+    fi
+    set -e
+    if [ "$gdb_rc" = "0" ] && grep -q '^Thread ' "$gdb_log"; then
+        gdb_status="pass"
+        status="pass"
+        reason="stack-captured"
+    else
+        gdb_status="fail"
+        reason="gdb-attach-failed"
+    fi
+fi
+
+if kill -0 "$run_pid" 2>/dev/null; then
+    kill "$run_pid" 2>/dev/null || true
+fi
+wait "$run_pid" >/dev/null 2>&1 || capture_rc="$?"
+if [ "$capture_rc" = "" ]; then
+    capture_rc="0"
+fi
+
+write_env
+cat "$OUT_ENV"
+if [ "$status" = "pass" ]; then
+    exit 0
+fi
+exit 1

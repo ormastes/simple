@@ -1,0 +1,81 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @tag:system
+# @tag:evidence-image-admission
+# @req REQ-004 REQ-007 NFR-002
+# codex-system-test
+
+"""
+Negative image-admission coverage through the production SimpleOS image
+builder. These scenarios prove that unadmitted payloads cannot create
+/SYS/SIMPLETOOL.SDN. They do not prove image boot or guest execution.
+"""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, file_exists}
+use os.installer.image_builder.{build_install_image_with_simple_binary}
+use os.tools.pkg.pkg_format.{PkgArch}
+
+describe "SimpleOS deploy image Simple toolchain payload":
+    it "should reject a marker payload without a provenance stamp":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject a marker payload without a provenance stamp")
+        val root = "build/tmp/simpleos_deploy_image_marker_rejection"
+        dir_create_all(root)
+        val payload = root + "/simple-target.smf"
+        val image = root + "/simpleos-disk.img"
+        expect(rt_file_write_text(payload, "SMF_FAKE_TARGET_SIMPLE\nrole=compiler-interpreter-loader\n")).to_equal(true)
+
+        step("Submit a marker payload to the production image builder")
+        expect(file_write(payload, "SMF_FAKE_TARGET_SIMPLE\nrole=compiler-interpreter-loader\n")).to_be(true)
+        val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", image, 64, payload)
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("lacks target provenance")
+        expect(file_exists(image + ".contents/rootfs/SYS/SIMPLETOOL.SDN")).to_be(false)
+
+    it "should reject payload provenance from the Rust bootstrap seed":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject payload provenance from the Rust bootstrap seed")
+        val root = "build/tmp/simpleos_deploy_image_seed_rejection"
+        dir_create_all(root)
+        val payload = root + "/simple"
+        val image = root + "/simpleos-disk.img"
+
+        step("Submit seed provenance to the production image builder")
+        expect(file_write(payload, "not-an-admitted-elf\n")).to_be(true)
+        expect(file_write(payload + ".build_stamp",
+            "target=x86_64-unknown-simpleos\n" +
+            "entry=src/app/simpleos_tool/main.spl\n" +
+            "entry_closure=true\n" +
+            "compiler=src/compiler_rust/target/bootstrap/simple\n" +
+            "backend=llvm\n")).to_be(true)
+        val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", image, 64, payload)
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("bootstrap seed")
+        expect(file_exists(image + ".contents/rootfs/SYS/SIMPLETOOL.SDN")).to_be(false)
+
+    it "should reject a payload stamped for the wrong target":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject a payload stamped for the wrong target")
+        val root = "build/tmp/simpleos_deploy_image_target_rejection"
+        dir_create_all(root)
+        val payload = root + "/simple"
+        val image = root + "/simpleos-disk.img"
+
+        step("Submit wrong-target provenance to the production image builder")
+        expect(file_write(payload, "not-an-admitted-elf\n")).to_be(true)
+        expect(file_write(payload + ".build_stamp",
+            "target=aarch64-unknown-simpleos\n" +
+            "entry=src/app/simpleos_tool/main.spl\n" +
+            "entry_closure=true\n" +
+            "compiler=build/bootstrap/stage4/x86_64-unknown-linux-gnu/simple\n" +
+            "backend=llvm\n")).to_be(true)
+        val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", image, 64, payload)
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("target mismatch")
+        expect(file_exists(image + ".contents/rootfs/SYS/SIMPLETOOL.SDN")).to_be(false)

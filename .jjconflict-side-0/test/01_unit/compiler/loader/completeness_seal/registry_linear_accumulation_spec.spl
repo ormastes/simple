@@ -1,0 +1,143 @@
+"""
+# Completeness-seal registry linear accumulation
+
+The registry must preserve the exact generation, module, operation, handler,
+and duplicate-diagnostic ordering while building and validating its immutable
+replacement generation in expected linear time. Duplicate validation retains
+the first holder for each operation key in an O(u) index, where u is the number
+of unique keys, without changing the registry's public representation.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.loader.completeness_seal.admission.{AdmittedModule}
+use compiler.loader.completeness_seal.registry.{
+    empty_registry,
+    publish,
+    registry_error_code,
+    registry_error_text
+}
+
+fn admitted(module_id: text, keys: [text], handlers: [text]) -> AdmittedModule:
+    AdmittedModule(
+        module_id: module_id,
+        seal_hash: "COMPLETESEALV1-linear",
+        identities: [],
+        op_keys: keys,
+        op_handlers: handlers
+    )
+
+describe "completeness-seal registry accumulation":
+    it "preserves module and operation insertion order across generations":
+        val first = admitted("mod_a", ["a#one", "a#two"], ["a.one", "a.two"])
+        val second = admitted("mod_b", ["b#one", "b#two"], ["b.one", "b.two"])
+        val third = admitted("mod_c", ["c#one"], ["c.one"])
+
+        match publish(empty_registry("COMPLETESEALV1-linear"), [first, second]):
+            case Err(_):
+                assert_true(false)
+            case Ok(gen1):
+                match publish(gen1, [third]):
+                    case Err(_):
+                        assert_true(false)
+                    case Ok(gen2):
+                        assert_equal(gen2.generation, 2)
+                        assert_equal(gen2.module_ids.len(), 3)
+                        assert_equal(gen2.module_ids[0], "mod_a")
+                        assert_equal(gen2.module_ids[1], "mod_b")
+                        assert_equal(gen2.module_ids[2], "mod_c")
+                        assert_equal(gen2.entries.len(), 5)
+                        assert_equal(gen2.entries[0].op_key, "a#one")
+                        assert_equal(gen2.entries[1].op_key, "a#two")
+                        assert_equal(gen2.entries[2].op_key, "b#one")
+                        assert_equal(gen2.entries[3].op_key, "b#two")
+                        assert_equal(gen2.entries[4].op_key, "c#one")
+                        assert_equal(gen2.entries[0].handler, "a.one")
+                        assert_equal(gen2.entries[4].handler, "c.one")
+
+    it "preserves duplicate diagnostics in encounter order":
+        val claimant = admitted(
+            "mod_dup",
+            ["k#first", "k#second", "k#first", "k#second"],
+            ["dup.first", "dup.second", "dup.third", "dup.fourth"]
+        )
+        match publish(empty_registry("COMPLETESEALV1-linear"), [claimant]):
+            case Ok(_):
+                assert_true(false)
+            case Err(errors):
+                assert_equal(errors.len(), 2)
+                assert_equal(registry_error_code(errors[0]), "E-REGISTRY-002")
+                assert_equal(registry_error_code(errors[1]), "E-REGISTRY-002")
+                assert_equal(
+                    registry_error_text(errors[0]),
+                    "E-REGISTRY-002: operation key k#first is already provided by mod_dup; mod_dup may not replace it"
+                )
+                assert_equal(
+                    registry_error_text(errors[1]),
+                    "E-REGISTRY-002: operation key k#second is already provided by mod_dup; mod_dup may not replace it"
+                )
+
+    it "retains first holders and exact order across prior and new modules":
+        val prior = admitted(
+            "mod_prior",
+            ["k#prior", "k#stable"],
+            ["prior.one", "prior.stable"]
+        )
+        match publish(empty_registry("COMPLETESEALV1-linear"), [prior]):
+            case Err(_):
+                assert_true(false)
+            case Ok(gen1):
+                val current = admitted(
+                    "mod_current",
+                    ["k#prior", "k#cross", "k#local", "k#local"],
+                    ["current.prior", "current.cross", "current.local1", "current.local2"]
+                )
+                val newest = admitted(
+                    "mod_new",
+                    ["k#cross", "k#prior"],
+                    ["new.cross", "new.prior"]
+                )
+                match publish(gen1, [current, newest]):
+                    case Ok(_):
+                        assert_true(false)
+                    case Err(errors):
+                        assert_equal(errors.len(), 4)
+                        assert_equal(
+                            registry_error_text(errors[0]),
+                            "E-REGISTRY-002: operation key k#prior is already provided by mod_prior; mod_current may not replace it"
+                        )
+                        assert_equal(
+                            registry_error_text(errors[1]),
+                            "E-REGISTRY-002: operation key k#local is already provided by mod_current; mod_current may not replace it"
+                        )
+                        assert_equal(
+                            registry_error_text(errors[2]),
+                            "E-REGISTRY-002: operation key k#cross is already provided by mod_current; mod_new may not replace it"
+                        )
+                        assert_equal(
+                            registry_error_text(errors[3]),
+                            "E-REGISTRY-002: operation key k#prior is already provided by mod_prior; mod_new may not replace it"
+                        )
+
+    it "pins linear accumulation in the authoritative registry source":
+        # This pins implementation shape only; runtime cost is not measured by
+        # a source contract. Source-contract specs run from the repository root.
+        val source = file_read("src/compiler/99.loader/completeness_seal/registry.spl")
+        val build_begin = source.index_of("fn _build(")
+        val build_end = source.index_of("# Step 2 — VALIDATE", build_begin)
+        val validate_begin = source.index_of("fn _validate(", build_end)
+        val validate_end = source.index_of("# Step 3 — SWAP", validate_begin)
+        assert_true(build_begin >= 0 and build_end > build_begin)
+        assert_true(validate_begin >= 0 and validate_end > validate_begin)
+        val build_body = source.substring(build_begin, build_end)
+        val validate_body = source.substring(validate_begin, validate_end)
+        assert_equal(build_body.count("entries.push("), 2)
+        assert_equal(build_body.count("ids.push("), 2)
+        assert_equal(validate_body.count("var first_holder_by_key: Dict<text, text> = {}"), 1)
+        assert_equal(validate_body.count("first_holder_by_key.contains_key(e.op_key)"), 1)
+        assert_equal(validate_body.count("first_holder_by_key[e.op_key] = e.module_id"), 1)
+        assert_equal(validate_body.count("_find_holder("), 0)
+        assert_equal(validate_body.count("for prior in"), 0)
+        assert_equal(build_body.count("entries = entries + ["), 0)
+        assert_equal(build_body.count("ids = ids + ["), 0)
+        assert_equal(validate_body.count("first_holder_by_key[e.op_key] ="), 1)

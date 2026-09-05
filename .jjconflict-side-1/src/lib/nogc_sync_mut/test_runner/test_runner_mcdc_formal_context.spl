@@ -1,0 +1,185 @@
+# codex-impl
+# Cold, bounded derivation of proof-bound masking context evidence from the
+# exact leaf observations emitted by MIR probes.
+
+use std.common.convert.{try_parse_int}
+use std.common.mcdc.model.{McdcEvaluation}
+use std.common.mcdc.masking_context.{
+    McdcMaskingContext, McdcMaskingContextEvidence
+}
+
+pub struct RunnerMcdcContextRequirement:
+    required_outcome: bool
+    postfix_program: text
+
+pub struct RunnerMcdcContextPlan:
+    context: McdcMaskingContext
+    requirements: [RunnerMcdcContextRequirement]
+
+fn runner_mcdc_eval_bit(row: McdcEvaluation, ordinal: i64, values: bool) -> bool:
+    val word = ordinal / 64
+    val bit = 1 << (ordinal % 64)
+    if values:
+        match word:
+            0: return (row.true_mask0 & bit) != 0
+            1: return (row.true_mask1 & bit) != 0
+            2: return (row.true_mask2 & bit) != 0
+            _: return (row.true_mask3 & bit) != 0
+    match word:
+        0: return (row.evaluated_mask0 & bit) != 0
+        1: return (row.evaluated_mask1 & bit) != 0
+        2: return (row.evaluated_mask2 & bit) != 0
+        _: return (row.evaluated_mask3 & bit) != 0
+    return false
+
+# 0=false, 1=true, 2=unknown because the leaf was short-circuited.
+fn runner_mcdc_eval_program(program: text, row: McdcEvaluation) -> i64:
+    if program.len() == 0 or program.len() > 4096: return -1
+    val tokens = program.split(",")
+    if tokens.len() == 0 or tokens.len() > 511: return -1
+    var stack: [i64] = []
+    for token in tokens:
+        if token == "a" or token == "o":
+            if stack.len() < 2: return -1
+            val right = stack.pop()
+            val left = stack.pop()
+            if token == "a":
+                if left == 0 or right == 0: stack.push(0)
+                elif left == 1 and right == 1: stack.push(1)
+                else: stack.push(2)
+            else:
+                if left == 1 or right == 1: stack.push(1)
+                elif left == 0 and right == 0: stack.push(0)
+                else: stack.push(2)
+        elif token.starts_with("c"):
+            val parsed = try_parse_int(token.slice(1, token.len()))
+            if parsed == nil or parsed.unwrap() < 0 or parsed.unwrap() > 255:
+                return -1
+            val ordinal = parsed.unwrap()
+            if not runner_mcdc_eval_bit(row, ordinal, false): stack.push(2)
+            elif runner_mcdc_eval_bit(row, ordinal, true): stack.push(1)
+            else: stack.push(0)
+        else:
+            return -1
+        if stack.len() > 256: return -1
+    if stack.len() != 1: return -1
+    return stack[0]
+
+fn runner_mcdc_eval_program_cached(
+    program: text, row: McdcEvaluation, cache: mut Dict<text, i64>
+) -> i64:
+    if cache.contains_key(program): return cache[program]
+    val result = runner_mcdc_eval_program(program, row)
+    cache[program] = result
+    return result
+
+pub fn runner_mcdc_parse_contexts(manifest: text) -> [RunnerMcdcContextPlan]?:
+    if manifest.len() > 67108864: return nil
+    var plans: [RunnerMcdcContextPlan] = []
+    var total_program_bytes = 0
+    for raw in manifest.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("context|"):
+            if line.len() > 1048576: return nil
+            val fields = line.split("|")
+            if fields.len() < 8: return nil
+            val decision = try_parse_int(fields[1]); val target = try_parse_int(fields[2])
+            val proof = try_parse_int(fields[3]); val context_id = try_parse_int(fields[4])
+            val count = try_parse_int(fields[5])
+            if (decision == nil or target == nil or proof == nil or
+                context_id == nil or count == nil): return nil
+            if (decision.unwrap() <= 0 or target.unwrap() < 0 or target.unwrap() > 255 or
+                proof.unwrap() <= 0 or context_id.unwrap() <= 0 or
+                count.unwrap() < 0 or count.unwrap() > 64): return nil
+            if fields[6] != "true" and fields[6] != "false": return nil
+            if fields[7].trim() == "" or fields.len() != 8 + count.unwrap(): return nil
+            var requirements: [RunnerMcdcContextRequirement] = []
+            var index = 0
+            while index < count.unwrap():
+                val encoded = fields[8 + index].split(":")
+                if encoded.len() != 3: return nil
+                val ordinal = try_parse_int(encoded[0])
+                if ordinal == nil or ordinal.unwrap() != index: return nil
+                if encoded[1] != "true" and encoded[1] != "false": return nil
+                total_program_bytes = total_program_bytes + encoded[2].len()
+                if total_program_bytes > 268435456: return nil
+                # Validate all opcodes and stack effects using an empty row;
+                # a valid program returns a tri-state, never -1.
+                val empty = McdcEvaluation(
+                    decision_id: decision.unwrap(), owner_id: 0, sequence: 0,
+                    outcome: false,
+                    evaluated_mask0: 0, evaluated_mask1: 0,
+                    evaluated_mask2: 0, evaluated_mask3: 0,
+                    true_mask0: 0, true_mask1: 0, true_mask2: 0, true_mask3: 0,
+                    masked_mask0: 0, masked_mask1: 0,
+                    masked_mask2: 0, masked_mask3: 0)
+                if runner_mcdc_eval_program(encoded[2], empty) < 0: return nil
+                requirements.push(RunnerMcdcContextRequirement(
+                    required_outcome: encoded[1] == "true",
+                    postfix_program: encoded[2]))
+                index = index + 1
+            plans.push(RunnerMcdcContextPlan(
+                context: McdcMaskingContext(
+                    decision_id: decision.unwrap(), target_ordinal: target.unwrap(),
+                    proof_id: proof.unwrap(), context_id: context_id.unwrap(),
+                    requirement_count: count.unwrap(),
+                    strong_coupling: fields[6] == "true"),
+                requirements: requirements))
+    return Some(plans)
+
+pub fn runner_mcdc_derive_context_evidence(
+    plans: [RunnerMcdcContextPlan], rows: [McdcEvaluation]
+) -> [McdcMaskingContextEvidence]:
+    var result: [McdcMaskingContextEvidence] = []
+    for row in rows:
+        # Cold-path memoization evaluates each distinct sibling-subtree
+        # program once per row. With compiler nesting capped at 64, total work
+        # is bounded expected O(E*C), not pairwise O(E^2).
+        var program_cache: Dict<text, i64> = {}
+        for plan in plans:
+            if plan.context.decision_id != row.decision_id: continue
+            var rejected = false
+            var satisfied_words: [i64] = [0, 0, 0, 0]
+            var masked_words: [i64] = [0, 0, 0, 0]
+            var requirement_ordinal = 0
+            for requirement in plan.requirements:
+                val observed = runner_mcdc_eval_program_cached(
+                    requirement.postfix_program, row, program_cache)
+                if observed < 0:
+                    rejected = true
+                elif observed == 2:
+                    masked_words[requirement_ordinal / 64] = (
+                        masked_words[requirement_ordinal / 64] |
+                        (1 << (requirement_ordinal % 64)))
+                elif (observed == 1) != requirement.required_outcome:
+                    rejected = true
+                else:
+                    satisfied_words[requirement_ordinal / 64] = (
+                        satisfied_words[requirement_ordinal / 64] |
+                        (1 << (requirement_ordinal % 64)))
+                requirement_ordinal = requirement_ordinal + 1
+            if not rejected:
+                result.push(McdcMaskingContextEvidence(
+                    decision_id: row.decision_id, owner_id: row.owner_id,
+                    sequence: row.sequence,
+                    target_ordinal: plan.context.target_ordinal,
+                    proof_id: plan.context.proof_id,
+                    context_id: plan.context.context_id,
+                    satisfied0: satisfied_words[0], satisfied1: satisfied_words[1],
+                    satisfied2: satisfied_words[2], satisfied3: satisfied_words[3],
+                    masked0: masked_words[0], masked1: masked_words[1],
+                    masked2: masked_words[2], masked3: masked_words[3]))
+    return result
+
+pub fn runner_mcdc_context_evidence_wire(
+    evidence: McdcMaskingContextEvidence
+) -> text:
+    return "context-evidence|{evidence.decision_id}|{evidence.owner_id}|{evidence.sequence}|" +
+        "{evidence.target_ordinal}|{evidence.proof_id}|{evidence.context_id}|" +
+        "{evidence.satisfied0}|{evidence.satisfied1}|{evidence.satisfied2}|{evidence.satisfied3}|" +
+        "{evidence.masked0}|{evidence.masked1}|{evidence.masked2}|{evidence.masked3}"
+
+pub fn runner_mcdc_context_wire(context: McdcMaskingContext) -> text:
+    return "formal-context|{context.decision_id}|{context.target_ordinal}|" +
+        "{context.proof_id}|{context.context_id}|{context.requirement_count}|" +
+        (if context.strong_coupling: "true" else: "false")

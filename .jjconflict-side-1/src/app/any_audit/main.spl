@@ -1,0 +1,58 @@
+# `Any` inventory driver (agent Y1, 2026-08-21).
+#
+# Usage:
+#   bin/simple run src/app/any_audit/main.spl --list <file-of-paths>
+#   bin/simple run src/app/any_audit/main.spl <path.spl> ...
+#
+# Output contract (stdout, one record per line, machine-readable):
+#   SITE <path> <line> <class>
+#   FILE <path> <total>            # only for files with total > 0
+#   CLASS <class> <count>
+#   SUMMARY files=<n> sites=<k>
+#
+# The shell gate supplies the file list; this program does no directory walk,
+# for the same reason the any-escape census driver does none: the scope must be
+# auditable from the caller, not buried in the program.
+
+use app.any_audit.classify.{ANY_CLASSES}
+use app.any_audit.scan.{scan_source, AnySite}
+use std.nogc_sync_mut.fs.{read_file}
+use std.nogc_sync_mut.cli.{get_cli_args}
+
+fn _paths_from_args(args: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < args.len():
+        val a: text = args[i]
+        if a == "--list":
+            if i + 1 < args.len():
+                for line in read_file(args[i + 1]).split("\n"):
+                    val p: text = line.trim()
+                    if p != "":
+                        out = out.push(p)
+            i = i + 2
+        else:
+            out = out.push(a)
+            i = i + 1
+    out
+
+fn main():
+    val paths: [text] = _paths_from_args(get_cli_args())
+    var all_sites: [AnySite] = []
+    var files = 0
+    for p in paths:
+        val src: text = read_file(p)
+        files = files + 1
+        val census = scan_source(p, src)
+        if census.total > 0:
+            for s in census.sites:
+                print "SITE " + s.path + " " + s.line.to_text() + " " + s.kind
+                all_sites = all_sites.push(s)
+            print "FILE " + p + " " + census.total.to_text()
+    for cls in ANY_CLASSES:
+        var c = 0
+        for s in all_sites:
+            if s.kind == cls:
+                c = c + 1
+        print "CLASS " + cls + " " + c.to_text()
+    print "SUMMARY files=" + files.to_text() + " sites=" + all_sites.len().to_text()

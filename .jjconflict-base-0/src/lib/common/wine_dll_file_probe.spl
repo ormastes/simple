@@ -1,0 +1,50 @@
+"""Modeled DLL filesystem probe that validates selected candidate bytes."""
+
+use common.wine_dll_file_bytes.{wine_dll_validate_file_bytes}
+use common.wine_kernel32_module_loader.{wine_kernel32_plan_dll_search_order}
+
+class WineDllProbeFile:
+    path: text
+    bytes: [u8]
+
+class WineDllFileProbeResult:
+    ok: bool
+    error: text
+    dll_name: text
+    selected_path: text
+    byte_count: i64
+    image_size: i64
+    entrypoint_rva: i64
+    evidence: text
+    status: text
+
+fn _file(path: text, bytes: [u8]) -> WineDllProbeFile:
+    WineDllProbeFile(path: path, bytes: bytes)
+
+fn _result(ok: bool, error: text, dll_name: text, selected_path: text, byte_count: i64, image_size: i64, entrypoint_rva: i64, evidence: text, status: text) -> WineDllFileProbeResult:
+    WineDllFileProbeResult(ok: ok, error: error, dll_name: dll_name.lower(), selected_path: selected_path, byte_count: byte_count, image_size: image_size, entrypoint_rva: entrypoint_rva, evidence: evidence, status: status)
+
+fn _find_file(files: [WineDllProbeFile], path: text) -> WineDllProbeFile:
+    for item in files:
+        if item.path == path:
+            return item
+    _file("", [])
+
+pub fn wine_dll_probe_file(path: text, bytes: [u8]) -> WineDllProbeFile:
+    _file(path, bytes)
+
+pub fn wine_dll_probe_candidate_bytes(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile]) -> WineDllFileProbeResult:
+    val search = wine_kernel32_plan_dll_search_order(dll_name, application_directory, working_directory, path_dirs, known_dlls)
+    if not search.ok:
+        return _result(false, "dll-search:" + search.error, dll_name, "", 0, 0, 0, search.evidence, "rejected")
+
+    for candidate in search.candidate_paths:
+        val found = _find_file(files, candidate)
+        if found.path != "":
+            val validated = wine_dll_validate_file_bytes(search.dll_name, found.path, found.bytes)
+            if not validated.ok:
+                return _result(false, "dll-bytes:" + validated.error, search.dll_name, found.path, validated.byte_count, validated.image_size, validated.entrypoint_rva, search.evidence + " " + validated.evidence + " dll-file-probe-candidate-found", "rejected")
+            val evidence = search.evidence + " " + validated.evidence + " dll-file-probe-candidate-found dll-file-probe-validated search-order-selected-existing-file no-persistent-dll-view no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
+            return _result(true, "", search.dll_name, found.path, validated.byte_count, validated.image_size, validated.entrypoint_rva, evidence, "dll-file-probe-validated")
+
+    _result(false, "dll-file-not-found", search.dll_name, "", 0, 0, 0, search.evidence + " dll-file-probe-searched-candidates no-host-file-opened", "rejected")

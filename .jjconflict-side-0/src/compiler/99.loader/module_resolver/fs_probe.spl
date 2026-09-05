@@ -1,0 +1,60 @@
+"""Memoized filesystem existence probes for module resolution.
+
+Pure-Simple mirror of `src/compiler_rust/compiler/src/fs_probe.rs`.
+
+Module resolution probes a large, fixed candidate set per import: the
+search-root walk up to the workspace boundary, crossed with the stdlib variant
+roots, the numbered-directory forms, and the legacy `src/lib/std/src` /
+`simple/std_lib/src` / `std_lib/src` layouts. Each candidate costs a `statx`,
+and the idioms used throughout this directory cost more than one per question:
+`is_file(p)` is `rt_file_exists(p) and not rt_dir_exists(p)` (two), and
+`file_exists(p) and is_file(p)` is three statx for a single yes/no.
+
+Measured 2026-08-20 (`strace -c -f`, `bin/simple lint` on a one-line file):
+891,477 `statx` calls, 202,042 ENOENT — 21.6% of all syscall time — with
+individual directories such as `src/compiler/00.common` stat'd 2,798 times in
+one process. The candidate set does not change while a resolution pass runs,
+so each distinct path is probed once and the answer reused.
+
+The memo is cleared by `clear_fs_probe_cache()`, called from
+`ModuleResolver.clear_cache()`, so a test run that creates files between
+passes sees fresh state.
+"""
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_exists(path: text) -> bool
+
+# Bit 0 = regular-file existence, bit 1 = directory existence.
+val KIND_FILE: i64 = 1
+val KIND_DIR: i64 = 2
+val KIND_UNPROBED: i64 = -1
+
+# Memo of path -> kind bits. One entry per distinct path probed.
+var _path_kind_cache: {text: i64} = {}
+
+fn path_kind(path: text) -> i64:
+    """Kind bits for `path`, probing the filesystem at most once per path."""
+    val cached = _path_kind_cache.get(path) ?? KIND_UNPROBED
+    if cached != KIND_UNPROBED:
+        return cached
+
+    var kind: i64 = 0
+    if rt_file_exists(path):
+        kind = kind + KIND_FILE
+    if rt_dir_exists(path):
+        kind = kind + KIND_DIR
+
+    _path_kind_cache[path] = kind
+    kind
+
+fn probe_file_exists(path: text) -> bool:
+    """Memoized `rt_file_exists`."""
+    (path_kind(path) / KIND_FILE) % 2 == 1
+
+fn probe_dir_exists(path: text) -> bool:
+    """Memoized `rt_dir_exists`."""
+    (path_kind(path) / KIND_DIR) % 2 == 1
+
+fn clear_fs_probe_cache():
+    """Drop every memoized probe. Called whenever the resolver caches clear."""
+    _path_kind_cache = {}

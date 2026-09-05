@@ -1,0 +1,45 @@
+use std.spec
+use std.io_runtime.{file_read}
+
+# Parse-shard children must stay on the slim parse lane.
+# doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md
+#
+# Measured 2026-08-22 on a 2-way shard of the lint_entry closure (193 files):
+# the full worker (native_build_worker.spl -> cli_native_build -> driver) held
+# 3.8 GB RSS because evaluating driver.spl loads all ~665 compiler modules; the
+# slim entry holds ~0.53 GB because the parse lane no longer imports
+# driver_orchestration / driver_bootstrap (which pull backends, MIR, LLVM).
+# These pins are source-level so they run in milliseconds; the RSS budget
+# itself is enforced by scripts/check/check-parse-shard-rss-budget.shs.
+describe "parse shard slim entry":
+
+    it "dispatches parse shards to parse_shard_main.spl, not the full worker":
+        val src = file_read("src/app/cli/native_build_main.spl")
+        val fn_at = src.index_of("fn run_parse_shards(")
+        val slim_at = src.index_of("\"src/app/cli/parse_shard_main.spl\"")
+        expect(fn_at > 0).to_be_true()
+        expect(slim_at > fn_at).to_be_true()
+
+    it "keeps the parse lane off the back-half closure":
+        # Each of these edges re-attached the whole compiler to a process that
+        # only parses. driver_types (CompileContext) still imports MIR types and
+        # is the accepted floor; these two are the ones that were cut.
+        val parsing = file_read("src/compiler/80.driver/driver_source_pipeline_parsing.spl")
+        expect(parsing.contains("use compiler.driver.driver_orchestration.")).to_be_false()
+        expect(parsing.contains("use compiler.driver.driver_bootstrap.")).to_be_false()
+        expect(parsing.contains("use compiler.driver.driver_phase_gates.")).to_be_true()
+        val gates = file_read("src/compiler/80.driver/driver_phase_gates.spl")
+        expect(gates.contains("use compiler.backend.")).to_be_false()
+        expect(gates.contains("use compiler.mir")).to_be_false()
+        expect(gates.contains("use compiler.driver.driver_orchestration.")).to_be_false()
+        val entry = file_read("src/compiler/80.driver/driver_parse_shard_entry.spl")
+        expect(entry.contains("use compiler.driver.driver.")).to_be_false()
+        expect(entry.contains("use compiler.driver.driver_orchestration.")).to_be_false()
+        val slim = file_read("src/app/cli/parse_shard_main.spl")
+        expect(slim.contains("use app.io._CliCompile.compile_targets")).to_be_false()
+
+    it "re-exports the moved gates from their original homes":
+        val orch = file_read("src/compiler/80.driver/driver_orchestration.spl")
+        expect(orch.contains("pub use compiler.driver.driver_phase_gates.")).to_be_true()
+        val boot = file_read("src/compiler/80.driver/driver_bootstrap.spl")
+        expect(boot.contains("pub use compiler.driver.driver_phase_gates.")).to_be_true()

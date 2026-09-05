@@ -1,0 +1,809 @@
+# Calc semantic UI access controller.
+#
+# This is an Office-owned adapter for the shared simple.access/v1 protocol.
+# It deliberately contains no transport, subprocess, retry, or SGTTI logic:
+# the deployed UI service remains the sole protocol/transport owner.
+
+use common.ui.access.{
+    UI_ACCESS_PROTOCOL_VERSION,
+    UI_ACCESS_MAX_EVENTS,
+    UiAccessProp,
+    UiAccessNode,
+    UiAccessSurface,
+    UiAccessEvent,
+    UiAccessSnapshot,
+    ui_access_canonical_id,
+    ui_access_find_node,
+    ui_access_snapshot_to_json,
+    ui_access_node_to_json,
+    ui_access_surface_to_json,
+    ui_access_recent_events,
+    ui_access_history_events,
+    ui_access_record_action
+}
+use app.office.sheets.sheets_app.{SheetsApp}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{CellRef, CellValue, cell_ref_to_string, cell_display_text, parse_cell_ref}
+use app.office.file_formats.{recalculate_formula_cells}
+use app.office.sheets.formula.{evaluate_formula}
+use common.ui.builder.{column, button, text_field, build_tree_with_title}
+use common.ui.spreadsheet_grid.{spreadsheet_grid_default_metrics, spreadsheet_grid_width, spreadsheet_grid_widget}
+use app.office.sheets.grid_render.{office_grid_body}
+use common.ui.widget.{UITree, UIEvent, WidgetNode, WidgetKind}
+use nogc_sync_mut.ui.session.{UISession}
+use std.common.encoding.utf8.{text_truncate_bytes}
+use std.common.string_core.{char_from_code}
+use common.text_advanced.{escape_json}
+
+pub val CALC_ACCESS_SURFACE_ID: text = "main"
+pub val CALC_ACCESS_APP_ID: text = "office.calc"
+pub val CALC_ACCESS_FORMULA_INPUT_ID: text = "formula_input"
+pub val CALC_ACCESS_CONFIRM_EDIT_ID: text = "confirm_edit"
+pub val CALC_ACCESS_GRID_ID: text = "sheet_grid"
+pub val CALC_ACCESS_ROOT_ID: text = "root"
+
+# Typed cell identity.
+#
+# Every visible cell is a REAL semantic node named `cell_<CellRef>` (cell_A1,
+# cell_T30). The id is produced in exactly one place — `calc_cell_widget_id`
+# below — so the access snapshot, the widget tree, the streaming JSON, and the
+# action router can never disagree about a cell's name.
+#
+# The literal-first-argument manifest scanner (src/app/ui_manifest) cannot see
+# these ids: they are computed, not literal. The typed pattern that WOULD make
+# them visible is declared as a pattern id, not a fixed id:
+#
+#     cell_grid.cells: pattern = CALC_CELL_ID_PATTERN   # "cell_" + "{CellRef}"
+#     param CellRef: text matching column-letters + row-number, 1-based
+#
+# so a spec target `cell_A1` type-checks against `CellRef = "A1"`.  The pattern
+# literal is BUILT BY CONCATENATION on purpose: "{CellRef}" written inside a
+# Simple string literal would be string-interpolated at compile time.
+# Compiling that declaration is Agent C's manifest/pattern work; this module
+# only supplies the single canonical id constructor it will bind to.
+pub val CALC_CELL_ID_PREFIX: text = "cell_"
+# Input-hardening bounds for externally supplied commands (simple.access/v1).
+pub val CALC_ACCESS_MAX_REF_LEN: i32 = 8
+pub val CALC_ACCESS_MAX_TEXT_LEN: i32 = 4096
+pub val CALC_CELL_ID_PATTERN: text = "cell_" + "{" + "CellRef" + "}"
+
+struct CalcViewItem:
+    """One node of the SINGLE Calc semantic view.
+
+    Both projections — the simple.access/v1 snapshot and the shared
+    UISession widget tree — are generated from this list. Nothing about a
+    Calc node's identity, kind, value, or action set is written twice.
+    """
+    widget_id: text
+    kind: text
+    text_value: text
+    focused: bool
+    selected: bool
+    props: [UiAccessProp]
+    actions: [text]
+
+struct CalcAccessActionResult:
+    ok: bool
+    code: text
+    request_id: text
+    canonical_id: text
+    snapshot_revision: i64
+
+class CalcAccessController:
+    app: SheetsApp
+    sheet: Sheet
+    events: [UiAccessEvent]
+    sequence: i64
+    last_action_ok: bool
+    last_action_code: text
+    last_action_request_id: text
+    last_action_canonical_id: text
+    last_action_revision: i64
+    pending_action_value: text
+    snapshot_json_buffer: text
+
+impl CalcAccessController:
+    static fn new() -> CalcAccessController:
+        val app = SheetsApp.new()
+        CalcAccessController(app: app, sheet: app.workbook.active(), events: [], sequence: 0,
+            last_action_ok: true, last_action_code: "ok", last_action_request_id: "",
+            last_action_canonical_id: "", last_action_revision: 0,
+            pending_action_value: "", snapshot_json_buffer: "")
+
+    static fn with_sheet(sheet: Sheet) -> CalcAccessController:
+        """Create the shared Calc interaction model around a loaded sheet.
+
+        SheetsApp navigation and edit-mode helpers read `workbook.active()`.
+        Install the loaded sheet there as well as in the controller so a cell
+        selected from a file never reads formula text from an unrelated empty
+        workbook.
+        """
+        var app = SheetsApp.new()
+        app.workbook.sheets = [sheet]
+        app.workbook.active_sheet = 0
+        CalcAccessController(app: app, sheet: sheet, events: [], sequence: 0,
+            last_action_ok: true, last_action_code: "ok", last_action_request_id: "",
+            last_action_canonical_id: "", last_action_revision: 0,
+            pending_action_value: "", snapshot_json_buffer: "")
+
+    fn active_ref() -> text:
+        cell_ref_to_string(self.app.active_cell)
+
+    fn snapshot() -> UiAccessSnapshot:
+        """Project the ONE Calc semantic view into simple.access/v1.
+
+        Every node here comes from `calc_view_nodes`; this method contains no
+        node construction of its own, so the access tree cannot drift from the
+        widget tree that `ui_tree` builds from the same view.
+        """
+        UiAccessSnapshot(
+            protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+            snapshot_revision: self.sequence,
+            mode: "tui",
+            active_surface: CALC_ACCESS_SURFACE_ID,
+            surfaces: [calc_view_surface()],
+            nodes: calc_view_nodes(self.app, self.sheet, true),
+            recent_events: ui_access_recent_events(self.events, UI_ACCESS_MAX_EVENTS)
+        )
+
+    fn snapshot_json() -> text:
+        """Serialize inside the controller so Phase-3 native code never has
+        to return the large UiAccessSnapshot aggregate across a call ABI."""
+        ui_access_snapshot_to_json(self.snapshot())
+
+    fn snapshot_json_fast() -> text:
+        """Serialize the live 20x30 surface from the single view.
+
+        Uses the SHARED access-snapshot serialization instead of a second,
+        hand-concatenated copy of the wire format. `with_child_ids` stays off
+        so each payload keeps the compact shape the host has always sent.
+        """
+        ui_access_snapshot_to_json(UiAccessSnapshot(
+            protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+            snapshot_revision: self.sequence,
+            mode: "tui",
+            active_surface: CALC_ACCESS_SURFACE_ID,
+            surfaces: [calc_view_surface()],
+            nodes: calc_view_nodes(self.app, self.sheet, false),
+            recent_events: []
+        ))
+
+    me build_snapshot_json_fast():
+        """Retain the large projection in the controller owner.
+
+        Phase-3 can lose a large text returned directly across a class-method
+        ABI boundary. The access host reads this field in the same owner frame.
+        """
+        self.snapshot_json_buffer = self.snapshot_json_fast()
+
+    fn snapshot_json_stream_prefix() -> text:
+        """Chunk 1: envelope header plus the non-cell nodes of the one view."""
+        var parts: [text] = [
+            "{\"protocol_version\":" + UI_ACCESS_PROTOCOL_VERSION.to_text() +
+            ",\"snapshot_revision\":" + self.sequence.to_text() +
+            ",\"mode\":\"tui\",\"active_surface\":\"" + CALC_ACCESS_SURFACE_ID + "\",\"surfaces\":[" +
+            ui_access_surface_to_json(calc_view_surface()) + "],\"nodes\":[" +
+            ui_access_node_to_json(calc_view_root_node([]))
+        ]
+        for item in calc_control_view_items(self.app):
+            parts = parts.push("," + ui_access_node_to_json(calc_view_access_node(item, [])))
+        parts.join("")
+
+    fn snapshot_json_stream_row(row: i32) -> text:
+        if row < 0 or row >= self.app.visible_rows: return ""
+        val active = self.active_ref()
+        var parts: [text] = []
+        var col = 0
+        while col < self.app.visible_cols:
+            val ref = cell_ref_to_string(CellRef(col: self.app.scroll_col + col, row: self.app.scroll_row + row))
+            parts = parts.push("," + ui_access_node_to_json(
+                calc_view_access_node(calc_cell_view_item(self.app, self.sheet, ref, active), [])
+            ))
+            col = col + 1
+        parts.join("")
+
+    fn snapshot_json_stream_cell(row: i32, col: i32) -> text:
+        if row < 0 or row >= self.app.visible_rows or col < 0 or col >= self.app.visible_cols: return ""
+        val active = self.active_ref()
+        val ref = cell_ref_to_string(CellRef(col: self.app.scroll_col + col, row: self.app.scroll_row + row))
+        "," + ui_access_node_to_json(
+            calc_view_access_node(calc_cell_view_item(self.app, self.sheet, ref, active), [])
+        )
+
+    fn snapshot_json_stream_suffix() -> text:
+        "],\"recent_events\":[]}"
+
+    fn history_json(count: i32) -> text:
+        val bounded = if count <= 0 or count > UI_ACCESS_MAX_EVENTS: UI_ACCESS_MAX_EVENTS else: count
+        val start = if self.events.len() > bounded: self.events.len() - bounded else: 0
+        var parts: [text] = ["{\"protocol_version\":1,\"snapshot_revision\":" + self.sequence.to_text() + ",\"events\":["]
+        var i = start
+        while i < self.events.len():
+            val event = self.events[i]
+            if i > start: parts = parts.push(",")
+            parts = parts.push("{\"surface_id\":\"" + escape_json(event.surface_id) + "\",\"widget_id\":\"" + escape_json(event.widget_id) + "\",\"canonical_id\":\"" + escape_json(event.canonical_id) + "\",\"event_kind\":\"" + escape_json(event.event_kind) + "\",\"payload\":\"" + escape_json(event.payload) + "\",\"sequence\":" + event.sequence.to_text() + "}")
+            i = i + 1
+        parts = parts.push("]}")
+        parts.join("")
+
+    fn has_request_id(request_id: text) -> bool:
+        if request_id == "": return false
+        val marker = "request_id=" + request_id
+        for event in self.events:
+            if event.payload.contains(marker): return true
+        false
+
+    fn request_result_code(request_id: text) -> text:
+        if request_id == "": return ""
+        val request_marker = "request_id=" + request_id + ";code="
+        var result = ""
+        for event in self.events:
+            val at = event.payload.index_of(request_marker)
+            if at >= 0:
+                result = event.payload.slice(at + request_marker.len(), event.payload.len())
+        result
+
+    fn snapshot_revision() -> i64:
+        self.sequence
+
+    fn has_canonical_id(canonical_id: text) -> bool:
+        """Validate a target without exporting a snapshot aggregate."""
+        ui_access_find_node(self.snapshot(), canonical_id) != nil
+
+    fn find_json(canonical_id: text) -> text:
+        """Return a bounded canonical-node result for the live find route."""
+        if not canonical_id.starts_with(CALC_ACCESS_SURFACE_ID + "#cell_"):
+            return "{\"protocol_version\":1,\"snapshot_revision\":" + self.sequence.to_text() + ",\"nodes\":[]}"
+        val ref = canonical_id.substring((CALC_ACCESS_SURFACE_ID + "#cell_").len())
+        if parse_cell_ref(ref) == nil:
+            return "{\"protocol_version\":1,\"snapshot_revision\":" + self.sequence.to_text() + ",\"nodes\":[]}"
+        val display = cell_display_text(self.sheet.get_cell(ref))
+        "{\"protocol_version\":1,\"snapshot_revision\":" + self.sequence.to_text() +
+            ",\"nodes\":[{\"canonical_id\":\"" + escape_json(canonical_id) + "\",\"surface_id\":\"main\",\"widget_id\":\"cell_" + escape_json(ref) +
+            "\",\"kind\":\"cell\",\"text\":\"" + escape_json(display) + "\",\"value\":\"" + escape_json(display) + "\"}]}"
+
+    me act(canonical_id: text, action: text, value: text, request_id: text) -> CalcAccessActionResult:
+        self.pending_action_value = value
+        self.act_in_place(canonical_id, action, value, request_id)
+        CalcAccessActionResult(
+            ok: self.last_action_ok,
+            code: self.last_action_code,
+            request_id: self.last_action_request_id,
+            canonical_id: self.last_action_canonical_id,
+            snapshot_revision: self.last_action_revision
+        )
+
+    me act_in_place(canonical_id: text, action: text, value: text, request_id: text):
+        """Apply an action without returning an aggregate result.
+
+        Phase-3 hosted native callers read the scalar result fields after this
+        method. The public `act` wrapper remains source-compatible elsewhere.
+        """
+        val rid = if request_id != "": request_id else: "calc-act-" + (self.sequence + 1).to_text()
+        val prefix = CALC_ACCESS_SURFACE_ID + "#"
+        if not canonical_id.starts_with(prefix):
+            self._finish_action_in_place(false, "surface_not_found", rid, canonical_id)
+            return
+        val widget_id = canonical_id.substring(prefix.len())
+        self._record(widget_id, "access_request", "request_id=" + rid + ";action=" + action)
+        if widget_id.starts_with(CALC_CELL_ID_PREFIX) and action == "select":
+            val ref_text = widget_id.substring(5)
+            # A ref longer than ZZ100-class notation cannot name a real cell
+            # and can overflow the i32 letter/digit accumulators in
+            # parse_cell_ref, wrapping onto an unrelated in-range cell.
+            if ref_text.len() > CALC_ACCESS_MAX_REF_LEN:
+                self._finish_action_in_place(false, "target_not_found", rid, canonical_id)
+                return
+            val ref = parse_cell_ref(ref_text)
+            if ref == nil:
+                self._finish_action_in_place(false, "target_not_found", rid, canonical_id)
+                return
+            # navigate_to clamps negatives but has NO upper clamp: an
+            # out-of-sheet ref (cell_A99999) would scroll the model off the
+            # real 26x100 grid. Reject instead of silently misbehaving.
+            if ref.col >= self.sheet.col_count or ref.row >= self.sheet.row_count:
+                self._finish_action_in_place(false, "target_out_of_bounds", rid, canonical_id)
+                return
+            self.app.navigate_to(ref.col, ref.row)
+            self._finish_action_in_place(true, "ok", rid, canonical_id)
+            return
+        if widget_id == CALC_ACCESS_FORMULA_INPUT_ID and action == "type_text":
+            # The incoming semantic action replaces the complete formula-bar
+            # value, so re-reading the current workbook cell is unnecessary.
+            # Avoid returning Workbook.active()/Cell aggregates through the
+            # Phase-3 native ABI before the value is overwritten.
+            # Trust boundary: an unbounded external value would be stored
+            # verbatim and echoed into every later snapshot/JSON payload.
+            if self.pending_action_value.len() > CALC_ACCESS_MAX_TEXT_LEN:
+                self._finish_action_in_place(false, "value_too_long", rid, canonical_id)
+                return
+            self.app.editing = true
+            self.app.formula_text = self.pending_action_value
+            self._finish_action_in_place(true, "ok", rid, canonical_id)
+            return
+        if widget_id == CALC_ACCESS_CONFIRM_EDIT_ID and action == "invoke":
+            if not self.app.editing:
+                self._finish_action_in_place(false, "interaction_required", rid, canonical_id)
+                return
+            val ref = cell_ref_to_string(self.app.active_cell)
+            # A malformed expression must not replace the real cell value.
+            # Formula evaluation is performed before mutation and any error is
+            # returned through the normal correlated action result.
+            if self.app.formula_text.starts_with("="):
+                match evaluate_formula(self.app.formula_text, self.sheet):
+                    CellValue.ErrorVal(_):
+                        self._finish_action_in_place(false, "malformed_formula", rid, canonical_id)
+                        return
+                    _:
+                        pass_dn
+            self.sheet.set_value(ref, self.app.formula_text)
+            self.sheet = recalculate_formula_cells(self.sheet)
+            # SheetsApp navigation always reads workbook.active(); keep that
+            # authoritative sheet identical to the recalculated controller
+            # value so later selections cannot resurrect stale formulas.
+            self.app.workbook.sheets = [self.sheet]
+            self.app.editing = false
+            self.app.modified = true
+            self._finish_action_in_place(true, "ok", rid, canonical_id)
+            return
+        self._finish_action_in_place(false, "unsupported_action", rid, canonical_id)
+
+    fn history(surface_id: text, count: i32) -> [UiAccessEvent]:
+        val bounded = if count > UI_ACCESS_MAX_EVENTS: UI_ACCESS_MAX_EVENTS else: count
+        ui_access_history_events(self.events, surface_id, bounded)
+
+    fn tui_text() -> text:
+        val active_ref = cell_ref_to_string(self.app.active_cell)
+        var out = "Simple Calc\nCell: " + active_ref + "  Formula: " + self.app.formula_text + "\n\n"
+        # Shared web/TUI grid contract: terminal paint is local, but viewport
+        # dimensions and row-major labels are not.  The grid body itself is
+        # shared with the Calc TUI via app.office.sheets.grid_render; this
+        # surface differs from it only by rendering at the live scroll origin.
+        val metrics = spreadsheet_grid_default_metrics()
+        out = out + office_grid_body(
+            self.sheet,
+            self.app.scroll_col,
+            self.app.scroll_row,
+            self.app.visible_cols,
+            self.app.visible_rows,
+            metrics
+        )
+        val content = out + "\n\n" + (if self.app.editing: "Editing" else: "Ready")
+        _calc_access_frame(content, spreadsheet_grid_width(metrics), 37)
+
+    fn ui_tree() -> UITree:
+        """Project the SAME Calc semantic view into the shared UISession tree.
+
+        Identity, kind, value, selection and action set all come from
+        `calc_control_view_items` / `calc_cell_view_items` — the same producers
+        the access snapshot uses. This method only chooses the widget builder
+        for each view kind; it invents no ids and reads no cell twice.
+        """
+        var children: [WidgetNode] = []
+        for item in calc_control_view_items(self.app):
+            if item.widget_id == CALC_ACCESS_FORMULA_INPUT_ID:
+                var formula = text_field(item.widget_id, item.text_value, "Enter a value or formula")
+                formula = formula.set_prop("action", item.actions[0])
+                formula = formula.set_prop("text", item.text_value)
+                children.push(formula)
+            elif item.widget_id == CALC_ACCESS_CONFIRM_EDIT_ID:
+                var confirm = button(item.widget_id, item.text_value, item.actions[0])
+                confirm = confirm.set_prop("text", item.text_value)
+                children.push(confirm)
+
+        # The live UISession is the discovery and action authority.  Publish
+        # every visible cell through the same common grid semantic tree used
+        # by the web producer and common.ui.layout.
+        val metrics = spreadsheet_grid_default_metrics()
+        var cells: [WidgetNode] = []
+        for item in calc_cell_view_items(self.app, self.sheet):
+            val ref = _calc_view_prop(item, "ref")
+            var cell = button(item.widget_id, item.text_value, item.actions[0])
+            cell = cell.set_prop("text", item.text_value)
+            cell = cell.set_prop("value", item.text_value)
+            cell = cell.set_prop("ref", ref)
+            cell = cell.set_prop("raw_formula", self.sheet.get_cell(ref).value)
+            if item.selected:
+                cell = cell.set_prop("selected", "true")
+            cells.push(cell)
+        children.push(spreadsheet_grid_widget(CALC_ACCESS_GRID_ID, cells, metrics))
+        build_tree_with_title(column(CALC_ACCESS_ROOT_ID, children), "Simple Calc", "glass_dark")
+
+    me apply_ui_event(event: UIEvent) -> CalcAccessActionResult:
+        """Apply one shared UISession event to the real Calc model."""
+        match event:
+            UIEvent.FocusEvent(target_id, kind):
+                if kind == "focus" and target_id.starts_with(CALC_CELL_ID_PREFIX):
+                    return self.act(
+                        ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, target_id),
+                        "select",
+                        "",
+                        ""
+                    )
+            UIEvent.InputChange(target_id, value):
+                if target_id == CALC_ACCESS_FORMULA_INPUT_ID:
+                    return self.act(calc_access_formula_input_id(), "type_text", value, "")
+            UIEvent.Action(name):
+                if name == "invoke":
+                    return self.act(calc_access_confirm_edit_id(), "invoke", "", "")
+            _:
+                pass_dn
+        CalcAccessActionResult(
+            ok: true,
+            code: "ok",
+            request_id: "",
+            canonical_id: "",
+            snapshot_revision: self.sequence
+        )
+
+    me apply_ui_event_to_session(mut session: UISession, event: UIEvent) -> CalcAccessActionResult:
+        """Apply an access event and patch only its affected live widgets.
+
+        The Calc tree is deliberately constructed once at server startup: it
+        contains all 600 viewport cells so every discovered target remains
+        actionable.  Replacing that tree after every keystroke used to rebuild
+        and diff the entire grid.  Keep the model authoritative, then mutate
+        only the stable widgets whose observable properties changed.
+        """
+        val previous_active = cell_ref_to_string(self.app.active_cell)
+        val previous_scroll_row = self.app.scroll_row
+        val previous_scroll_col = self.app.scroll_col
+        val action_result = self.apply_ui_event(event)
+        if not action_result.ok:
+            return action_result
+        session.dispatch(event)
+        val active_ref = cell_ref_to_string(self.app.active_cell)
+
+        # A viewport move changes stable identities (for example A1:T30 to
+        # A2:T31), so it is the one case that must replace the semantic grid.
+        # Ordinary edits remain incremental.
+        if previous_scroll_row != self.app.scroll_row or previous_scroll_col != self.app.scroll_col:
+            session.update_tree(self.ui_tree())
+            return action_result
+
+        # A changed selection has exactly two affected cell widgets.
+        if previous_active != active_ref:
+            session.set_surface_widget_prop(
+                CALC_ACCESS_SURFACE_ID, calc_cell_widget_id(previous_active), "selected", "false"
+            )
+            session.set_surface_widget_prop(
+                CALC_ACCESS_SURFACE_ID, calc_cell_widget_id(active_ref), "selected", "true"
+            )
+            session.set_surface_widget_value(
+                CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, self.app.formula_text
+            )
+            session.set_surface_widget_prop(
+                CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, "text", self.app.formula_text
+            )
+
+        match event:
+            UIEvent.InputChange(target_id, _):
+                if target_id == CALC_ACCESS_FORMULA_INPUT_ID:
+                    session.set_surface_widget_value(
+                        CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, self.app.formula_text
+                    )
+                    session.set_surface_widget_prop(
+                        CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, "text", self.app.formula_text
+                    )
+            UIEvent.Action(name):
+                if name == "invoke":
+                    val display = cell_display_text(self.sheet.get_cell(active_ref))
+                    session.set_surface_widget_value(
+                        CALC_ACCESS_SURFACE_ID, calc_cell_widget_id(active_ref), display
+                    )
+                    session.set_surface_widget_prop(
+                        CALC_ACCESS_SURFACE_ID, calc_cell_widget_id(active_ref), "text", display
+                    )
+                    session.set_surface_widget_prop(
+                        CALC_ACCESS_SURFACE_ID, calc_cell_widget_id(active_ref), "raw_formula", self.sheet.get_cell(active_ref).value
+                    )
+            _:
+                pass_dn
+        action_result
+
+    me apply_terminal_byte(mut session: UISession, byte: i64, pending_escape: i32) -> i32:
+        """Apply one terminal byte through the same model as UI access.
+
+        The session host owns this method's controller and UISession.  The
+        input reader never touches either object; it only places bytes on its
+        channel. Return 3 for quit; 0, 1, and 2 are ESC decoder states.
+        """
+        if byte < 0 or byte == 113: # EOF or q
+            return 3
+        if pending_escape == 1:
+            if byte == 91:
+                return 2
+            return 0
+        if pending_escape == 2:
+            var col = self.app.active_cell.col
+            var row = self.app.active_cell.row
+            if byte == 65 and row > 0:
+                row = row - 1
+            elif byte == 66:
+                row = row + 1
+            elif byte == 67:
+                col = col + 1
+            elif byte == 68 and col > 0:
+                col = col - 1
+            val ref = cell_ref_to_string(CellRef(col: col, row: row))
+            self.apply_ui_event_to_session(session, UIEvent.FocusEvent(calc_cell_widget_id(ref), "focus"))
+            return 0
+        if byte == 27:
+            return 1
+        if byte == 10 or byte == 13:
+            if self.app.editing:
+                self.apply_ui_event_to_session(session, UIEvent.Action(name: "invoke"))
+            else:
+                self.app.enter_edit_mode()
+                session.set_surface_widget_value(
+                    CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, self.app.formula_text
+                )
+            return 0
+        if byte == 127 or byte == 8:
+            if self.app.editing and self.app.formula_text.len() > 0:
+                val next = self.app.formula_text.substring(0, self.app.formula_text.len() - 1)
+                self.apply_ui_event_to_session(session, UIEvent.InputChange(CALC_ACCESS_FORMULA_INPUT_ID, next))
+            return 0
+        if byte >= 32 and byte <= 126:
+            if not self.app.editing:
+                self.app.enter_edit_mode()
+            val next = self.app.formula_text + char_from_code(byte)
+            self.apply_ui_event_to_session(session, UIEvent.InputChange(CALC_ACCESS_FORMULA_INPUT_ID, next))
+        0
+
+    me apply_terminal_byte_direct(byte: i64, pending_escape: i32) -> i32:
+        """Apply terminal input without constructing a semantic widget session.
+
+        The deployed Calc access transport reads snapshots directly from this
+        controller, so its startup and keyboard path do not need the 600-node
+        UISession projection. GUI hosts still construct that projection.
+        """
+        if byte < 0 or byte == 113: return 3
+        if pending_escape == 1:
+            if byte == 91: return 2
+            return 0
+        if pending_escape == 2:
+            var col = self.app.active_cell.col
+            var row = self.app.active_cell.row
+            if byte == 65 and row > 0: row = row - 1
+            elif byte == 66: row = row + 1
+            elif byte == 67: col = col + 1
+            elif byte == 68 and col > 0: col = col - 1
+            val ref = cell_ref_to_string(CellRef(col: col, row: row))
+            self.apply_ui_event(UIEvent.FocusEvent(calc_cell_widget_id(ref), "focus"))
+            return 0
+        if byte == 27: return 1
+        if byte == 10 or byte == 13:
+            if self.app.editing:
+                self.apply_ui_event(UIEvent.Action(name: "invoke"))
+            else:
+                self.app.enter_edit_mode()
+            return 0
+        if byte == 127 or byte == 8:
+            if self.app.editing and self.app.formula_text.len() > 0:
+                val next = self.app.formula_text.substring(0, self.app.formula_text.len() - 1)
+                self.apply_ui_event(UIEvent.InputChange(CALC_ACCESS_FORMULA_INPUT_ID, next))
+            return 0
+        if byte >= 32 and byte <= 126:
+            if not self.app.editing: self.app.enter_edit_mode()
+            val next = self.app.formula_text + char_from_code(byte)
+            self.apply_ui_event(UIEvent.InputChange(CALC_ACCESS_FORMULA_INPUT_ID, next))
+        0
+
+    me _record(widget_id: text, kind: text, payload: text):
+        self.sequence = self.sequence + 1
+        self.events = ui_access_record_action(
+            self.events,
+            self.sequence,
+            CALC_ACCESS_SURFACE_ID,
+            widget_id,
+            kind,
+            payload
+        )
+
+    me _finish_action(ok: bool, code: text, request_id: text, canonical_id: text) -> CalcAccessActionResult:
+        self._finish_action_in_place(ok, code, request_id, canonical_id)
+        CalcAccessActionResult(
+            ok: self.last_action_ok,
+            code: self.last_action_code,
+            request_id: self.last_action_request_id,
+            canonical_id: self.last_action_canonical_id,
+            snapshot_revision: self.last_action_revision
+        )
+
+    me _finish_action_in_place(ok: bool, code: text, request_id: text, canonical_id: text):
+        val hash = canonical_id.find("#")
+        val widget_id = if hash >= 0: canonical_id.substring(hash + 1) else: canonical_id
+        self._record(widget_id, "access_result", "request_id=" + request_id + ";code=" + code)
+        self.last_action_ok = ok
+        self.last_action_code = code
+        self.last_action_request_id = request_id
+        self.last_action_canonical_id = canonical_id
+        self.last_action_revision = self.sequence
+
+fn calc_access_controller_new() -> CalcAccessController:
+    CalcAccessController.new()
+
+fn calc_access_controller_with_sheet(sheet: Sheet) -> CalcAccessController:
+    CalcAccessController.with_sheet(sheet)
+
+fn calc_access_cell_id(ref: text) -> text:
+    ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, calc_cell_widget_id(ref.upper()))
+
+fn calc_access_formula_input_id() -> text:
+    ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID)
+
+fn calc_access_confirm_edit_id() -> text:
+    ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, CALC_ACCESS_CONFIRM_EDIT_ID)
+
+# =========================================================================
+# The single Calc semantic view
+# =========================================================================
+
+fn calc_cell_widget_id(ref: text) -> text:
+    """The one and only constructor of a Calc cell's semantic id."""
+    CALC_CELL_ID_PREFIX + ref
+
+fn _calc_view_prop(item: CalcViewItem, key: text) -> text:
+    for prop in item.props:
+        if prop.key == key: return prop.value
+    ""
+
+fn calc_cell_view_item(app: SheetsApp, sheet: Sheet, ref: text, active_ref: text) -> CalcViewItem:
+    val display = cell_display_text(sheet.get_cell(ref))
+    val is_active = ref == active_ref
+    CalcViewItem(
+        widget_id: calc_cell_widget_id(ref),
+        kind: "cell",
+        text_value: display,
+        focused: is_active,
+        selected: is_active,
+        props: [
+            UiAccessProp(key: "ref", value: ref),
+            UiAccessProp(key: "value", value: display)
+        ],
+        actions: ["select"]
+    )
+
+fn calc_control_view_items(app: SheetsApp) -> [CalcViewItem]:
+    """The non-grid controls of the Calc view, in wire order."""
+    [
+        CalcViewItem(
+            widget_id: CALC_ACCESS_FORMULA_INPUT_ID,
+            kind: "input",
+            text_value: app.formula_text,
+            focused: app.editing,
+            selected: false,
+            props: [UiAccessProp(key: "value", value: app.formula_text)],
+            actions: ["type_text"]
+        ),
+        CalcViewItem(
+            widget_id: CALC_ACCESS_CONFIRM_EDIT_ID,
+            kind: "button",
+            text_value: "Confirm edit",
+            focused: false,
+            selected: false,
+            props: [UiAccessProp(key: "value", value: "Confirm edit")],
+            actions: ["invoke"]
+        ),
+        CalcViewItem(
+            widget_id: CALC_ACCESS_GRID_ID,
+            kind: "grid",
+            text_value: "Sheet grid",
+            focused: false,
+            selected: false,
+            props: [UiAccessProp(key: "value", value: "Sheet grid")],
+            actions: []
+        )
+    ]
+
+fn calc_cell_view_items(app: SheetsApp, sheet: Sheet) -> [CalcViewItem]:
+    val active_ref = cell_ref_to_string(app.active_cell)
+    var items: [CalcViewItem] = []
+    var row = 0
+    while row < app.visible_rows:
+        var col = 0
+        while col < app.visible_cols:
+            val ref = cell_ref_to_string(CellRef(col: app.scroll_col + col, row: app.scroll_row + row))
+            items = items.push(calc_cell_view_item(app, sheet, ref, active_ref))
+            col = col + 1
+        row = row + 1
+    items
+
+fn calc_view_access_node(item: CalcViewItem, child_ids: [text]) -> UiAccessNode:
+    """Project one view item into a simple.access/v1 node."""
+    UiAccessNode(
+        canonical_id: ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, item.widget_id),
+        surface_id: CALC_ACCESS_SURFACE_ID,
+        widget_id: item.widget_id,
+        kind: item.kind,
+        visible: true,
+        focused: item.focused,
+        enabled: true,
+        selected: item.selected,
+        text_value: item.text_value,
+        props: item.props,
+        child_ids: child_ids,
+        action_names: item.actions
+    )
+
+fn calc_view_item_ids(items: [CalcViewItem]) -> [text]:
+    var ids: [text] = []
+    for item in items:
+        ids = ids.push(ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, item.widget_id))
+    ids
+
+fn calc_view_root_node(child_ids: [text]) -> UiAccessNode:
+    UiAccessNode(
+        canonical_id: ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, CALC_ACCESS_ROOT_ID),
+        surface_id: CALC_ACCESS_SURFACE_ID,
+        widget_id: CALC_ACCESS_ROOT_ID,
+        kind: "spreadsheet",
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text_value: "Simple Calc",
+        props: [UiAccessProp(key: "value", value: "Simple Calc")],
+        child_ids: child_ids,
+        action_names: []
+    )
+
+fn calc_view_nodes(app: SheetsApp, sheet: Sheet, with_child_ids: bool) -> [UiAccessNode]:
+    """Derive the whole access node list from the single view.
+
+    `with_child_ids` is off for the chunked streaming host, whose wire has
+    always omitted the 600-entry root child list to keep each chunk small.
+    """
+    val controls = calc_control_view_items(app)
+    val cells = calc_cell_view_items(app, sheet)
+    val cell_ids = if with_child_ids: calc_view_item_ids(cells) else: []
+    var root_children: [text] = []
+    if with_child_ids:
+        # Historic wire: formula_input, confirm_edit, then every cell. The
+        # grid container id is additive.
+        root_children = [
+            ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID),
+            ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, CALC_ACCESS_CONFIRM_EDIT_ID),
+            ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, CALC_ACCESS_GRID_ID)
+        ]
+        for cid in cell_ids:
+            root_children = root_children.push(cid)
+    var nodes: [UiAccessNode] = [calc_view_root_node(root_children)]
+    for item in controls:
+        val children = if item.widget_id == CALC_ACCESS_GRID_ID: cell_ids else: []
+        nodes = nodes.push(calc_view_access_node(item, children))
+    for cell in cells:
+        nodes = nodes.push(calc_view_access_node(cell, []))
+    nodes
+
+fn calc_view_surface() -> UiAccessSurface:
+    UiAccessSurface(
+        surface_id: CALC_ACCESS_SURFACE_ID,
+        title: "Simple Calc",
+        active: true,
+        window_id: "",
+        app_id: CALC_ACCESS_APP_ID,
+        root_canonical_id: ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, CALC_ACCESS_ROOT_ID)
+    )
+
+fn _calc_access_pad(value: text, width: i32) -> text:
+    var out = value
+    while out.len() < width:
+        out = out + " "
+    out
+
+fn _calc_access_frame(content: text, width: i32, height: i32) -> text:
+    val source_lines = content.split("\n")
+    var lines: [text] = []
+    var row = 0
+    while row < height:
+        var line = if row < source_lines.len(): source_lines[row] else: ""
+        if line.len() > width:
+            line = text_truncate_bytes(line, width)
+        lines = lines.push(_calc_access_pad(line, width))
+        row = row + 1
+    lines.join("\n")
+
+export CALC_ACCESS_SURFACE_ID, CALC_ACCESS_APP_ID, CalcAccessActionResult
+export CALC_ACCESS_FORMULA_INPUT_ID, CALC_ACCESS_CONFIRM_EDIT_ID

@@ -1,0 +1,702 @@
+# Shared showcase logic — identical on 2d / gui / web / wm.
+#
+# This module is NOT pure: `WidgetNode` is a HANDLE over a module-global
+# widget store (common.ui.widget_store_ops), so building a tree mutates
+# process-global state. The correct claim is "no I/O and no host imports;
+# store-backed". Because the store is global, every caller (and every spec
+# example) passes its own `prefix` so ids cannot collide.
+#
+# What it contains, and why:
+# - a toolbar (the existing `menubar` builder, kind Menubar — no new widget
+#   kind is introduced),
+# - two LINKED scroll panels: scrolling the left one mirrors onto the right,
+# - one UNLINKED scroll panel, the negative control that proves the link is a
+#   real mechanism and not a global scroll,
+# - two internal dialog windows with visible title labels,
+# - an event probe pane whose labels are rewritten on every event, so each
+#   input is VISIBLE in the next frame's DrawIR rather than only in a log.
+#
+# Scrollbars are not widgets: they are drag behaviour on a `Scroll` node via
+# widget_hit.widget_scrollbar_pointer_*, and their geometry is emitted by
+# widget_draw_ir. widget_hit.spl is NOT modified by this module.
+
+use common.ui.builder.{
+    column, row, panel, dialog, label, menubar, statusbar, scroll, text_input,
+    button, checkbox, progress,
+    build_tree_with_title, with_height
+}
+use common.ui.widget.{UIState, UIMode}
+use common.ui.widget_store_ops.{WidgetNode, get_internal_prop, set_internal_prop, encode_child_ids}
+use common.ui.layout.{compute_layout, find_rect}
+use common.ui.widget_hit.{
+    widget_hit_test, widget_set_pressed, widget_clear_pressed,
+    widget_dispatch_click, widget_dispatch_scroll, widget_dispatch_key,
+    widget_scrollbar_pointer_down, widget_scrollbar_pointer_move,
+    widget_scrollbar_pointer_up
+}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu, widget_tree_to_draw_ir}
+use common.ui.draw_ir.{
+    DrawIrComposition, DrawIrBatch, DrawIrCommand, DrawIrPoint, DrawIrGlyphRunPayload,
+    DrawIrStyleProp,
+    draw_ir_batch, draw_ir_embedding_config, draw_ir_rect, draw_ir_text,
+    draw_edge, draw_ir_edge_command, draw_ir_path_command, draw_ir_point,
+    draw_ir_text_resolved_font,
+    draw_ir_glyph_run_payload, draw_ir_style_prop,
+    DRAW_IR_BACKEND_CPU, DRAW_IR_EDGE_STRAIGHT
+}
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3, draw_ir_v2_to_v3_with_ids}
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use common.ui.screen_host.{ScreenHost}
+use common.ui.host_input_event.{HostInputEvent, host_key_text, HOST_BTN_LEFT, HOST_BTN_NONE}
+
+# --- Id suffixes ----------------------------------------------------------
+
+val SC_TOOLBAR: text = "_toolbar"
+val SC_LINK_SRC: text = "_panel_left"
+val SC_LINK_DST: text = "_panel_right"
+val SC_FREE: text = "_panel_free"
+val SC_PROBE: text = "_probe"
+val SC_PROBE_LAST: text = "_probe_last"
+val SC_PROBE_CLICK: text = "_probe_click"
+val SC_PROBE_DRAG: text = "_probe_drag"
+val SC_PROBE_KEYS: text = "_probe_keys"
+val SC_PROBE_INPUT: text = "_probe_input"
+val SC_STATUS: text = "_status"
+val SC_CONTENT: text = "_content"
+
+# Screen switcher: the menubar doubles as the navigation row. Overview (index
+# 0) is the default and keeps the original tree untouched — the existing spec
+# clicks menu_0 at (20,10) and must keep landing on an actionable item.
+val SC_SCREENS: [text] = ["overview", "fonts", "shapes", "scroll", "blend"]
+val SC_MENU_LABELS: [text] = ["Overview", "Fonts", "Shapes", "Scroll", "Blend"]
+
+# MEASURED, and the reason SC_ROW_H exists: a scroll container is given
+# whatever height its parent has spare (186px inside an 800x600 root) and its
+# children are then SHRUNK to fit that box — rows came back 2..10px tall. So
+# neither the `max_height` prop nor `with_height` on the container makes the
+# content overflow, and `_scroll_max_offset` stays 0: the panel silently
+# refuses to scroll and every scroll assertion passes vacuously against 0.
+# Pinning each ROW's height is what actually creates overflow, and it is
+# load-bearing, not cosmetic.
+#
+# Row counts stay modest: the widget store is global and layout is recomputed
+# on every dispatch, so a 40-row panel blows the interpreter's 10M-operation
+# budget in specs. Hosts wanting a denser demo call showcase_build_sized.
+val SC_PANEL_VIEWPORT_H: i32 = 40
+val SC_FREE_VIEWPORT_H: i32 = 30
+val SC_ROW_H: i32 = 24
+val SC_PANEL_ROWS: i32 = 10
+val SC_FREE_ROWS: i32 = 6
+val SC_WHEEL_STEP: i32 = 24
+# Pixel height for the toolbar/statusbar. The layout engine's 1px default for
+# menubar/statusbar is a TUI character-cell contract (spec-locked in
+# widget_menubar_statusbar_spec); in the pixel hosts a 1px bar centres its
+# text ABOVE the bar and it clips away. Pinning a real height here keeps the
+# shared layout contract intact while making the bars usable in pixels.
+val SC_BAR_H: i32 = 22
+
+struct ShowcaseRunReport:
+    host_name: text
+    frames: i64
+    clicks: i64
+    drags: i64
+    typed_text: text
+    left_offset: i32
+    right_offset: i32
+    free_offset: i32
+
+# =========================================================================
+# Tree construction
+# =========================================================================
+
+fn _rows(prefix: text, tag: text, n: i32) -> [WidgetNode]:
+    """`n` labels at a PINNED height, so their combined extent exceeds the
+    scroll container's box and a scrollbar is actually emitted. Without the
+    pinned height the rows shrink to fit and nothing ever scrolls."""
+    var out: [WidgetNode] = []
+    var i = 0
+    while i < n:
+        out.push(with_height(label("{prefix}_{tag}{i}", "{tag} row {i}"), SC_ROW_H))
+        i = i + 1
+    out
+
+fn showcase_build(prefix: text) -> UIState:
+    """Build the showcase tree under `prefix` and return its UIState.
+
+    `prefix` isolates this instance in the global widget store; two builds
+    with the same prefix share nodes by design."""
+    showcase_build_sized(prefix, SC_PANEL_ROWS, SC_FREE_ROWS)
+
+fn showcase_build_sized(prefix: text, panel_rows: i32, free_rows: i32) -> UIState:
+    """showcase_build with explicit row counts, for hosts that want a denser
+    demo than the spec-friendly default."""
+    val toolbar = with_height(menubar("{prefix}{SC_TOOLBAR}", SC_MENU_LABELS), SC_BAR_H)
+
+    val left = scroll("{prefix}{SC_LINK_SRC}", SC_PANEL_VIEWPORT_H, _rows(prefix, "L", panel_rows))
+    val right = scroll("{prefix}{SC_LINK_DST}", SC_PANEL_VIEWPORT_H, _rows(prefix, "R", panel_rows))
+    val linked = row("{prefix}_linked", [left, right])
+
+    val free = scroll("{prefix}{SC_FREE}", SC_FREE_VIEWPORT_H, _rows(prefix, "F", free_rows))
+
+    val probe = panel("{prefix}{SC_PROBE}", "Event Probe", [
+        label("{prefix}{SC_PROBE_LAST}", "last: -"),
+        label("{prefix}{SC_PROBE_CLICK}", "clicks: 0"),
+        label("{prefix}{SC_PROBE_DRAG}", "drag: -"),
+        label("{prefix}{SC_PROBE_KEYS}", "typed: "),
+        text_input("{prefix}{SC_PROBE_INPUT}", "type here")
+    ])
+
+    val win_a = dialog("{prefix}_win_a", "Window A", [
+        label("{prefix}_win_a_title", "Window A"),
+        label("{prefix}_win_a_body", "alpha")
+    ])
+    val win_b = dialog("{prefix}_win_b", "Window B", [
+        label("{prefix}_win_b_title", "Window B"),
+        label("{prefix}_win_b_body", "beta")
+    ])
+    val windows = row("{prefix}_windows", [win_a, win_b])
+
+    val status = with_height(statusbar("{prefix}{SC_STATUS}", "ready", "0 events"), SC_BAR_H)
+    val root = column("{prefix}_root", [toolbar, linked, free, windows, probe, status])
+
+    # The prefix must survive into showcase_apply, which only receives the
+    # UIState. UIState has no spare field, so it is stashed on the root node.
+    set_internal_prop(root.id, "sc_prefix", prefix)
+    UIState.new(build_tree_with_title(root, "Simple Showcase", "glass_dark"))
+
+fn showcase_prefix(st: UIState) -> text:
+    """Recover the prefix stashed by showcase_build."""
+    get_internal_prop(st.tree.root_id, "sc_prefix")
+
+# =========================================================================
+# Screen state + switching
+# =========================================================================
+
+fn showcase_screen(st: UIState) -> text:
+    """Active screen id ("overview" when never switched)."""
+    val prefix = showcase_prefix(st)
+    val raw = get_internal_prop("{prefix}{SC_PROBE}", "sc_screen")
+    if raw == "":
+        return "overview"
+    raw
+
+fn _menu_index_of_hit(prefix: text, hit: text) -> i32:
+    """"{prefix}_toolbar_menu_{i}" -> i, or -1 for any other hit."""
+    val base = "{prefix}{SC_TOOLBAR}_menu_"
+    if not hit.starts_with(base):
+        return -1
+    hit.substring(base.len(), hit.len()).to_int() ?? -1
+
+fn _scroll_screen_content(prefix: text) -> WidgetNode:
+    """Bigger independent scroll trio: the scroll/clip evidence screen. Ids
+    are per-screen so this content's scroll state never collides with the
+    overview panels (and survives round trips through other screens)."""
+    val left = scroll("{prefix}{SC_CONTENT}_scroll_left", 70, _rows(prefix + "_sl", "L", 12))
+    val right = scroll("{prefix}{SC_CONTENT}_scroll_right", 70, _rows(prefix + "_sr", "R", 12))
+    val pair = row("{prefix}{SC_CONTENT}_scroll_pair", [left, right])
+    val free = scroll("{prefix}{SC_CONTENT}_scroll_free", 44, _rows(prefix + "_sf", "F", 10))
+    column("{prefix}{SC_CONTENT}_scroll", [pair, free])
+
+fn _blend_screen_content(prefix: text) -> WidgetNode:
+    """Widget coverage beside the alpha evidence: a real button, checkbox and
+    progress bar, all live (the button/checkbox arm clicks like any other).
+    The controls row's height is pinned — an unpinned row inside a panel
+    stretches its children to the whole content band and buries the custom
+    alpha batch under band-height buttons."""
+    panel("{prefix}{SC_CONTENT}_blend", "Blend & Controls", [
+        with_height(
+            row("{prefix}{SC_CONTENT}_blend_controls", [
+                button("{prefix}{SC_CONTENT}_blend_btn", "Apply", "apply"),
+                checkbox("{prefix}{SC_CONTENT}_blend_chk", "enabled", true),
+                progress("{prefix}{SC_CONTENT}_blend_prog", 65)
+            ]),
+            SC_ROW_H)
+    ])
+
+fn _screen_caption(screen: text) -> text:
+    if screen == "fonts":
+        return "Fonts: bitmap 5x7 vs vector TTF"
+    if screen == "shapes":
+        return "Shapes: rects, alpha, polylines"
+    if screen == "blend":
+        return "Blend: src-over alpha + controls"
+    screen
+
+fn _screen_content(prefix: text, screen: text) -> WidgetNode:
+    """The switched-in middle content node. Built (re-upserted) on every
+    activation — ids are per-screen, so re-entry refreshes the same nodes."""
+    if screen == "scroll":
+        return _scroll_screen_content(prefix)
+    if screen == "blend":
+        return _blend_screen_content(prefix)
+    # fonts / shapes: a titled frame; the feature surface is the custom batch
+    # layered inside it by showcase_composition_extras.
+    panel("{prefix}{SC_CONTENT}_{screen}", _screen_caption(screen), [
+        label("{prefix}{SC_CONTENT}_{screen}_note", "")
+    ])
+
+fn _switch_screen(prefix: text, idx: i32):
+    """Rewrite the root column's children for the target screen. Toolbar,
+    probe and status keep their fixed ids and are never rebuilt, so probe
+    evidence (clicks/drag/typed) survives switching. Overview restores the
+    exact original child list."""
+    if idx < 0 or idx >= SC_SCREENS.len():
+        return
+    val screen = SC_SCREENS[idx]
+    set_internal_prop("{prefix}{SC_PROBE}", "sc_screen", screen)
+    val root_id = "{prefix}_root"
+    if screen == "overview":
+        set_internal_prop(root_id, "ui_children", encode_child_ids([
+            "{prefix}{SC_TOOLBAR}", "{prefix}_linked", "{prefix}{SC_FREE}",
+            "{prefix}_windows", "{prefix}{SC_PROBE}", "{prefix}{SC_STATUS}"
+        ]))
+        return
+    val content = _screen_content(prefix, screen)
+    set_internal_prop(root_id, "ui_children", encode_child_ids([
+        "{prefix}{SC_TOOLBAR}", content.id, "{prefix}{SC_PROBE}", "{prefix}{SC_STATUS}"
+    ]))
+
+# =========================================================================
+# Custom (non-widget) feature batches
+#
+# Widgets never emit PATH commands and always route text through the resolved
+# TTF font, so the bitmap-glyph lane and polyline paths can only come from
+# authored v2 commands. These batches are appended to the widget composition
+# (v3 hosts: via showcase_scene; GPU hosts: via showcase_composition), one
+# GROUP per screen with the band as its clip.
+# =========================================================================
+
+fn _probe_top(prefix: text, w: i32, h: i32) -> i32:
+    """Top edge of the probe panel — the bottom of the content band."""
+    val root = WidgetNode(id: "{prefix}_root")
+    val rects = compute_layout(root, 0, 0, w, h)
+    match find_rect(rects, "{prefix}{SC_PROBE}"):
+        case Some(r):
+            r.y
+        case None:
+            h
+
+fn _uniform_adv(value: text, advance: i32) -> [i32]:
+    """Uniform advance table. Noto Sans Mono (the default selected font) is
+    monospace, so a flat advance is the font's real metric, not a fudge."""
+    var out: [i32] = []
+    for ch in value:
+        out.push(advance)
+    out
+
+fn _style_value(props: [DrawIrStyleProp], key: text) -> text:
+    for prop in props:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _default_vector_font_identity(prefix: text, w: i32, h: i32) -> text:
+    """The font-identity the showcase tree's own labels resolve to, read off a
+    widget text command's computed style. (The layering gate forbids
+    common.encoding.font_registry in this tier — this stays inside common.ui.)"""
+    val comp = widget_tree_to_draw_ir(WidgetNode(id: "{prefix}_root"), w, h, DRAW_IR_BACKEND_CPU)
+    for batch in comp.batches:
+        for cmd in batch.commands:
+            val identity = _style_value(cmd.computed_style, "font-identity")
+            if identity != "":
+                return identity
+    ""
+
+fn _pt(x: i32, y: i32) -> DrawIrPoint:
+    draw_ir_point(x, y)
+
+fn _charset_run(x: i32, y: i32, value: text, advance: i32) -> DrawIrGlyphRunPayload:
+    """Glyph run over the shared 5x7 charset — the same id convention as
+    widget_draw_ir's _charset_glyph_run (absolute pen xs, baseline y+7). The
+    v2→v3 adapter only emits glyphs from cmd.glyph_run, so authored text that
+    skips this paints NOTHING on v3 hosts."""
+    var glyph_ids: [u32] = []
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var clusters: [i64] = []
+    var pen = x
+    var index = 0
+    for ch in value:
+        glyph_ids.push(glyph_index_for_char(ch).to_u32())
+        xs.push(pen)
+        ys.push(y + 7)
+        clusters.push(index.to_i64())
+        pen = pen + advance
+        index = index + 1
+    draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, true)
+
+fn _colored_path(id: text, points: [DrawIrPoint], color: u32) -> DrawIrCommand:
+    """The GPU executor reads a path's stroke color from
+    computed_style["color"] (decimal u32 text, opaque only) while the v2→v3
+    adapter paints PATH from cmd.color — set BOTH so GPU and v3 hosts draw
+    the same polyline."""
+    var cmd = draw_ir_path_command(id, points, [
+        draw_ir_style_prop("color", color.to_i64().to_string())
+    ], "")
+    cmd.color = color
+    cmd
+
+fn _shapes_commands(prefix: text, bw: i32, bh: i32) -> [DrawIrCommand]:
+    """Rects (solid + 50% alpha), rule lines, and polylines — the PATH lane
+    the widget tree cannot emit. Batch-local coordinates."""
+    var cmds: [DrawIrCommand] = []
+    cmds.push(draw_ir_rect("{prefix}sh_r1", 2, 18, 40, 16, 4283134207u32))        # 0xFF7F3FFF solid
+    cmds.push(draw_ir_rect("{prefix}sh_r2", 46, 18, 40, 16, 4289247360u32))       # 0xFF40C080 solid
+    cmds.push(draw_ir_rect("{prefix}sh_r3", 90, 18, 40, 16, 2155878655u32))       # 0x804040FF 50% alpha
+    cmds.push(draw_ir_rect("{prefix}sh_rule", 2, 40, 128, 1, 4294967295u32))      # 1px rule line
+    var tri = _colored_path("{prefix}sh_tri", [
+        _pt(140, 40), _pt(158, 18), _pt(176, 40), _pt(140, 40)
+    ], 4294638144u32)                                                                # 0xFFFFC040
+    cmds.push(tri)
+    var zig = _colored_path("{prefix}sh_zig", [
+        _pt(186, 40), _pt(196, 24), _pt(206, 40), _pt(216, 24), _pt(226, 40)
+    ], 4294924559u32)                                                                # 0xFFFF608F
+    cmds.push(zig)
+    var edge = draw_ir_edge_command(draw_edge(
+        "{prefix}sh_edge", "{prefix}sh_r1", "{prefix}sh_r2",
+        DRAW_IR_EDGE_STRAIGHT, [_pt(42, 26), _pt(46, 26)], []))
+    edge.color = 4294638144u32
+    cmds.push(edge)
+    var diamond = _colored_path("{prefix}sh_diamond", [
+        _pt(252, 20), _pt(266, 32), _pt(252, 44), _pt(238, 32), _pt(252, 20)
+    ], 4282511359u32)                                                                # 0xFF80FFFF
+    cmds.push(diamond)
+    cmds
+
+fn _fonts_commands(prefix: text, bw: i32, bh: i32) -> [DrawIrCommand]:
+    """Both font lanes, labeled: a PLAIN text command (no font-identity, no
+    advances — the bitmap 5x7 glyph lane on GPU hosts, and the only lane the
+    2D software raster has) and resolved-font TTF text (the vector lane).
+    Every authored text also carries a 5x7 charset glyph run: the v2→v3
+    adapter emits glyphs only from cmd.glyph_run, and without one the text
+    paints nothing on v3 hosts (the honest bitmap fallback there)."""
+    var cmds: [DrawIrCommand] = []
+    var bitmap = draw_ir_text("{prefix}f_bmap", 2, 18, "Pack my box 123 - bitmap 5x7", 4289247360u32, "")
+    bitmap.glyph_run = _charset_run(2, 18, "Pack my box 123 - bitmap 5x7", 6)
+    cmds.push(bitmap)
+    val identity = _default_vector_font_identity(prefix, bw, bh)
+    if identity != "":
+        val t1 = "Pack my box 123 - vector TTF 9px"
+        var v9 = draw_ir_text_resolved_font(
+            "{prefix}f_vec9", 2, 32, t1, 4294967295u32, "mono", identity,
+            _uniform_adv(t1, 6), t1.len() * 6, 11, 9, "")
+        v9.glyph_run = _charset_run(2, 32, t1, 6)
+        cmds.push(v9)
+        val t2 = "Pack my box - vector TTF 13px"
+        var v13 = draw_ir_text_resolved_font(
+            "{prefix}f_vec13", 2, 48, t2, 4290679295u32, "mono", identity,
+            _uniform_adv(t2, 8), t2.len() * 8, 16, 13, "")
+        v13.glyph_run = _charset_run(2, 48, t2, 8)
+        cmds.push(v13)
+    cmds
+
+fn _blend_commands(prefix: text, bw: i32, bh: i32) -> [DrawIrCommand]:
+    """Src-over alpha evidence: two half-alpha rects overlap; then an opacity
+    ladder 25/50/75/100%. The raster's put() blends; web uses CSS rgba; GPU
+    hosts composite on-device."""
+    var cmds: [DrawIrCommand] = []
+    cmds.push(draw_ir_rect("{prefix}bl_a", 2, 34, 60, 20, 2149548096u32))         # 0x80FF4040
+    cmds.push(draw_ir_rect("{prefix}bl_b", 40, 38, 60, 20, 2147746047u32))        # 0x804040FF
+    cmds.push(draw_ir_rect("{prefix}bl_l25", 110, 34, 22, 20, 1077952575u32))     # 0x40FFFFFF
+    cmds.push(draw_ir_rect("{prefix}bl_l50", 136, 34, 22, 20, 2155878655u32))     # 0x80FFFFFF
+    cmds.push(draw_ir_rect("{prefix}bl_l75", 162, 34, 22, 20, 3233804735u32))     # 0xC0FFFFFF
+    cmds.push(draw_ir_rect("{prefix}bl_l100", 188, 34, 22, 20, 4294967295u32))    # 0xFFFFFFFF
+    cmds
+
+fn _screen_extra_commands(prefix: text, screen: text, bw: i32, bh: i32) -> [DrawIrCommand]:
+    if screen == "shapes":
+        return _shapes_commands(prefix, bw, bh)
+    if screen == "fonts":
+        return _fonts_commands(prefix, bw, bh)
+    if screen == "blend":
+        return _blend_commands(prefix, bw, bh)
+    []
+
+fn showcase_composition_extras(prefix: text, screen: text, w: i32, h: i32, backend: text) -> [DrawIrBatch]:
+    """Custom feature batches for the active screen, clipped to the content
+    band between toolbar and probe. Overview/scroll need none (all widgets)."""
+    var out: [DrawIrBatch] = []
+    if screen == "" or screen == "overview" or screen == "scroll":
+        return out
+    val band_top = SC_BAR_H + 2
+    val band_h = _probe_top(prefix, w, h) - band_top - 2
+    if band_h < 30:
+        return out
+    val emb = draw_ir_embedding_config(
+        "", "{prefix}{SC_CONTENT}_{screen}_extras",
+        2, band_top, w - 4, band_h, 1, 1000, true)
+    out.push(draw_ir_batch(
+        "{prefix}{SC_CONTENT}_{screen}_extras", backend, emb,
+        _screen_extra_commands(prefix, screen, w - 4, band_h)))
+    out
+
+# =========================================================================
+# Scroll props and the linked-panel mirror
+# =========================================================================
+
+# Replicates widget_hit.spl's private `_prop_int_of` body exactly. That
+# function is private, so this module copies the verified body rather than
+# inventing a cast. Do NOT write `raw.to_i64().to_i32()`: a chained
+# `.to_i64()` on a method result returns garbage under JIT in this repo.
+fn _scroll_offset(n: WidgetNode) -> i32:
+    val raw = n.get_prop("scroll_offset")
+    if raw == "":
+        return 0
+    raw.to_int() ?? 0
+
+fn showcase_scroll_offset(prefix: text, suffix: text) -> i32:
+    """Committed scroll offset of one of the showcase panels."""
+    _scroll_offset(WidgetNode(id: "{prefix}{suffix}"))
+
+fn _sync_linked(prefix: text):
+    """Mirror the left panel's committed scroll_offset onto the right panel.
+
+    Runs AFTER widget_dispatch_scroll / widget_scrollbar_pointer_move have
+    already clamped the source, so the mirrored value is in range for an
+    identically sized panel. One-directional by design: left drives right.
+    `_panel_free` is deliberately never synced."""
+    val src = WidgetNode(id: "{prefix}{SC_LINK_SRC}")
+    val dst = WidgetNode(id: "{prefix}{SC_LINK_DST}")
+    val off = _scroll_offset(src)
+    if _scroll_offset(dst) != off:
+        dst.set_prop("scroll_offset", "{off}")
+
+# =========================================================================
+# Probe pane — every event becomes visible text in the next frame.
+# =========================================================================
+
+fn _probe(prefix: text, message: text):
+    WidgetNode(id: "{prefix}{SC_PROBE_LAST}").set_prop("label", "last: {message}")
+
+fn _counter(prefix: text, key: text) -> i64:
+    val raw = get_internal_prop("{prefix}{SC_PROBE}", key)
+    if raw == "":
+        return 0
+    (raw.to_int() ?? 0).to_i64()
+
+fn _bump_counter(prefix: text, key: text) -> i64:
+    val next = _counter(prefix, key) + 1
+    set_internal_prop("{prefix}{SC_PROBE}", key, "{next}")
+    next
+
+fn showcase_click_count(prefix: text) -> i64:
+    _counter(prefix, "click_count")
+
+fn showcase_drag_count(prefix: text) -> i64:
+    _counter(prefix, "drag_count")
+
+fn showcase_typed_text(prefix: text) -> text:
+    get_internal_prop("{prefix}{SC_PROBE}", "typed_text")
+
+fn _bump_click(prefix: text):
+    val n = _bump_counter(prefix, "click_count")
+    WidgetNode(id: "{prefix}{SC_PROBE_CLICK}").set_prop("label", "clicks: {n}")
+
+fn _append_typed(prefix: text, ch: text):
+    if ch == "":
+        return
+    val joined = showcase_typed_text(prefix) + ch
+    set_internal_prop("{prefix}{SC_PROBE}", "typed_text", joined)
+    WidgetNode(id: "{prefix}{SC_PROBE_KEYS}").set_prop("label", "typed: {joined}")
+
+fn _set_drag_anchor(prefix: text, x: i32, y: i32):
+    set_internal_prop("{prefix}{SC_PROBE}", "drag_anchor", "{x},{y}")
+
+fn _clear_drag_anchor(prefix: text):
+    set_internal_prop("{prefix}{SC_PROBE}", "drag_anchor", "")
+
+fn _drag_active(prefix: text) -> bool:
+    get_internal_prop("{prefix}{SC_PROBE}", "drag_anchor") != ""
+
+fn _probe_drag(prefix: text, x: i32, y: i32):
+    val n = _bump_counter(prefix, "drag_count")
+    WidgetNode(id: "{prefix}{SC_PROBE_DRAG}").set_prop("label", "drag: {x},{y} ({n})")
+
+fn _pressed_target(prefix: text) -> text:
+    get_internal_prop("{prefix}{SC_PROBE}", "pressed_target")
+
+fn _set_pressed_target(prefix: text, target_id: text):
+    set_internal_prop("{prefix}{SC_PROBE}", "pressed_target", target_id)
+
+fn _actionable_target(root: WidgetNode, w: i32, h: i32, x: i32, y: i32) -> text:
+    val hit = widget_hit_test(root, w, h, x, y)
+    if not hit.found:
+        return ""
+    val kind = WidgetNode(id: hit.id).kind_name()
+    if kind == "button" or kind == "checkbox" or kind == "input" or kind == "textfield":
+        return hit.id
+    # Menubar items are Text-kind by construction (builder.spl `menubar`), but
+    # they ARE the showcase toolbar's click targets: root.id is
+    # "{prefix}_root" and toolbar items are "{prefix}_toolbar_menu_{i}", so a
+    # hit there arms a click exactly like a button does. Without this the
+    # toolbar was inert — scripted clicks on it never counted.
+    if kind == "text":
+        val prefix = root.id.substring(0, root.id.len() - 5)
+        if hit.id.starts_with("{prefix}{SC_TOOLBAR}_menu_"):
+            return hit.id
+    ""
+
+# =========================================================================
+# Reducer
+# =========================================================================
+
+fn _focus(st: UIState, target_id: text) -> UIState:
+    if target_id == "":
+        return st
+    UIState(
+        tree: st.tree, mode: st.mode,
+        focused_id: target_id, command_buffer: st.command_buffer
+    )
+
+fn showcase_focus(st: UIState, target_id: text) -> UIState:
+    """Explicit focus move — hosts and specs use this to aim key events."""
+    _focus(st, target_id)
+
+fn showcase_apply(st: UIState, ev: HostInputEvent, w: i32, h: i32) -> UIState:
+    """Fold one ingress event into the showcase. Host-agnostic: this is the
+    logic that is byte-identical across all four targets."""
+    var out = st
+    val prefix = showcase_prefix(st)
+    val root = st.tree.root_node()
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel):
+            if wheel != 0:
+                widget_dispatch_scroll(root, w, h, x, y, wheel * SC_WHEEL_STEP)
+                _sync_linked(prefix)
+                _probe(prefix, "wheel {wheel} @{x},{y}")
+            else if pressed and button == HOST_BTN_LEFT:
+                _set_drag_anchor(prefix, x, y)
+                val bar = widget_scrollbar_pointer_down(root, w, h, x, y)
+                if bar == "":
+                    widget_clear_pressed(root)
+                    val hit = _actionable_target(root, w, h, x, y)
+                    if hit != "":
+                        widget_set_pressed(root, w, h, x, y)
+                    _set_pressed_target(prefix, hit)
+                    _probe(prefix, "press {hit} @{x},{y}")
+                else:
+                    _set_pressed_target(prefix, "")
+                    _probe(prefix, "scrollbar down {bar} @{x},{y}")
+            else if pressed and button == HOST_BTN_NONE:
+                widget_scrollbar_pointer_move(root, w, h, y)
+                _sync_linked(prefix)
+                if _drag_active(prefix):
+                    _probe_drag(prefix, x, y)
+                else:
+                    _probe(prefix, "move @{x},{y}")
+            else:
+                widget_scrollbar_pointer_up(root)
+                val armed = _pressed_target(prefix)
+                val released = _actionable_target(root, w, h, x, y)
+                widget_clear_pressed(root)
+                if button == HOST_BTN_LEFT and armed != "" and released == armed:
+                    val hit = widget_dispatch_click(root, w, h, x, y)
+                    if hit == armed:
+                        _bump_click(prefix)
+                        _probe(prefix, "click {hit} @{x},{y}")
+                        out = _focus(out, hit)
+                        # Toolbar clicks double as screen navigation.
+                        val menu_idx = _menu_index_of_hit(prefix, hit)
+                        if menu_idx >= 0:
+                            _switch_screen(prefix, menu_idx)
+                            _probe(prefix, "screen {SC_SCREENS[menu_idx]}")
+                    else:
+                        _probe(prefix, "release rejected @{x},{y}")
+                else:
+                    _probe(prefix, "up @{x},{y}")
+                _set_pressed_target(prefix, "")
+                _sync_linked(prefix)
+                _clear_drag_anchor(prefix)
+        HostInputEvent.Key(code, ch, down, mods):
+            if down:
+                val key = host_key_text(ev)
+                widget_dispatch_key(st.focused_id, key)
+                _append_typed(prefix, ch)
+                _probe(prefix, "key '{ch}' code {code} mods {mods}")
+        HostInputEvent.Resize(nw, nh):
+            _probe(prefix, "resize {nw}x{nh}")
+    out
+
+# =========================================================================
+# Frame production + the shared host loop
+# =========================================================================
+
+fn showcase_composition(st: UIState, w: i32, h: i32, backend: text) -> DrawIrComposition:
+    """Widget tree composition + the active screen's custom feature batches.
+    This is THE composition producer: v3 hosts consume it through
+    showcase_scene, GPU hosts (Metal/Vulkan) consume it directly, so every
+    screen's content is produced exactly once here."""
+    val prefix = showcase_prefix(st)
+    var comp = widget_tree_to_draw_ir(st.tree.root_node(), w, h, backend)
+    val extras = showcase_composition_extras(prefix, showcase_screen(st), w, h, backend)
+    for batch in extras:
+        comp.batches.push(batch)
+    comp
+
+fn showcase_scene(st: UIState, w: i32, h: i32) -> DrawIrV3Scene:
+    """Widget tree -> DrawIR v2 composition -> DrawIrV3 scene VALUE. This is
+    the single production path; no host sees a writer."""
+    draw_ir_v2_to_v3(showcase_composition(st, w, h, DRAW_IR_BACKEND_CPU))
+
+fn _showcase_scene_id(prefix: text) -> u32:
+    # This strict tier may import only common.ui.*. Keep the small stable ID
+    # fold local rather than punching a common.hash exception into layering.
+    var hash: i64 = 5381
+    for ch in prefix.chars():
+        hash = ((hash * 33) + ch.char_code_at(0)) & 2147483647
+    hash.to_u32()
+
+fn showcase_scene_with_generation(st: UIState, w: i32, h: i32,
+                                  generation: u32) -> DrawIrV3Scene:
+    """Widget scene stamped by the owner loop for retained host caching."""
+    draw_ir_v2_to_v3_with_ids(
+        showcase_composition(st, w, h, DRAW_IR_BACKEND_CPU),
+        _showcase_scene_id(showcase_prefix(st)), generation)
+
+fn showcase_report(st: UIState, host_name: text, frames: i64) -> ShowcaseRunReport:
+    """Machine-readable transcript captured alongside a screenshot."""
+    val prefix = showcase_prefix(st)
+    ShowcaseRunReport(
+        host_name: host_name,
+        frames: frames,
+        clicks: showcase_click_count(prefix),
+        drags: showcase_drag_count(prefix),
+        typed_text: showcase_typed_text(prefix),
+        left_offset: showcase_scroll_offset(prefix, SC_LINK_SRC),
+        right_offset: showcase_scroll_offset(prefix, SC_LINK_DST),
+        free_offset: showcase_scroll_offset(prefix, SC_FREE)
+    )
+
+fn showcase_run(host: ScreenHost, prefix: text, max_frames: i64) -> ShowcaseRunReport:
+    """The one loop all four targets run. Only `host` differs between them."""
+    var st = showcase_build(prefix)
+    var frames: i64 = 0
+    var generation: u32 = 1u32
+    while frames < max_frames:
+        val (w, h) = host.size()
+        if not host.present_scene(showcase_scene_with_generation(st, w, h, generation)):
+            break
+        frames = frames + 1
+        var ev = host.poll_input()
+        while ev != nil:
+            # poll_input owns host-specific resize admission. Re-sample after
+            # polling so the resize event itself and any immediately queued
+            # pointer event use the newly accepted viewport, not the previous
+            # frame's dimensions.
+            val (event_w, event_h) = host.size()
+            st = showcase_apply(st, ev!, event_w, event_h)
+            generation = generation + 1u32
+            ev = host.poll_input()
+    showcase_report(st, host.host_name(), frames)
+
+export ShowcaseRunReport
+export SC_TOOLBAR, SC_LINK_SRC, SC_LINK_DST, SC_FREE, SC_PROBE
+export SC_PROBE_LAST, SC_PROBE_CLICK, SC_PROBE_DRAG, SC_PROBE_KEYS, SC_PROBE_INPUT
+export SC_STATUS, SC_PANEL_VIEWPORT_H, SC_FREE_VIEWPORT_H, SC_WHEEL_STEP
+export SC_PANEL_ROWS, SC_FREE_ROWS, SC_ROW_H, SC_BAR_H
+export SC_SCREENS, SC_MENU_LABELS
+export showcase_build, showcase_build_sized, showcase_prefix, showcase_apply, showcase_focus
+export showcase_scene, showcase_scene_with_generation
+export showcase_composition, showcase_composition_extras, showcase_screen, showcase_report, showcase_run
+export showcase_scroll_offset, showcase_click_count, showcase_drag_count, showcase_typed_text

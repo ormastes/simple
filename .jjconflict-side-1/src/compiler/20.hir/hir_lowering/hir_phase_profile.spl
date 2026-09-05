@@ -1,0 +1,266 @@
+# HIR sub-phase profiler (level-gated, default OFF).
+#
+# Set SIMPLE_HIR_PHASE_PROFILE=1 to get one line per lowered module naming
+# where its wall time went. This exists because the real 662-module closure
+# costs 60-190 s per module in phase 2/6 while fixture packages cost 0.11 s,
+# and the per-module `dt=` stamp in the build progress log names the module
+# but not the mechanism inside it
+# (doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md).
+#
+# Cost when disabled: one env probe per process (the verdict is cached in
+# `_hir_prof_state`) plus one `if` per instrumented boundary. No clock is
+# read and no string is built, which matters because the no-GC compiler
+# allocates for every formatted string.
+
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+
+extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_stdout_flush()
+
+# 0 = not yet probed, 1 = enabled, 2 = disabled.
+var _hir_prof_state: i64 = 0
+
+# Slot layout. Kept as parallel arrays rather than a Dict so that an
+# accumulate is two bracket ops with no hashing on a hot boundary.
+val HIR_PROF_IMPORTS: i64 = 0        # resolve_import_symbols + package siblings
+val HIR_PROF_DECLARE: i64 = 1        # declare_module_symbols
+val HIR_PROF_ENUMS: i64 = 2          # lower_module_enum_definitions (incl. imported)
+val HIR_PROF_FUNCTIONS: i64 = 3      # lower_function over the module's own bodies
+val HIR_PROF_GLOB: i64 = 4           # register_glob_imported_symbols roots
+# RIS* slots (2026-08-21): sub-steps reached from `register_imported_symbol`.
+# All are NESTED inside HIR_PROF_IMPORTS (and several inside each other), so
+# they are reported on their own line and never added to `measured`.
+val HIR_PROF_RIS_CALLABLE_DEPS: i64 = 5   # materialize_imported_callable_type_dependencies
+val HIR_PROF_RIS_DECLARED_DEP: i64 = 6    # ..._callable_declared_dependency
+val HIR_PROF_RIS_EXPLICIT_DEP: i64 = 7    # ..._callable_explicit_dependency (import sweep)
+val HIR_PROF_RIS_FIELD_DEP: i64 = 8       # materialize_imported_field_dependency
+val HIR_PROF_RIS_PAYLOAD: i64 = 9         # register_materialized_payload_named_dependency
+val HIR_PROF_RIS_METHODS: i64 = 10        # register_imported_type_methods_inner
+val HIR_PROF_RIS_SIGTYPE: i64 = 11        # declared_imported_surface_callable_type
+val HIR_PROF_RIS_DEFINE: i64 = 12         # SymbolTable.define from register_imported_symbol
+val HIR_PROF_RIS_CANON: i64 = 13          # name canonicalization (split/join) helpers
+val HIR_PROF_RIS_SCAN: i64 = 14           # register_imported_symbol_inner: six surface name scans
+val HIR_PROF_RIS_FIELDS: i64 = 15         # composite branch: field dependency loop
+val HIR_PROF_RIS_PROJECT: i64 = 16        # composite branch: field type projection + table store
+val HIR_PROF_SLOT_COUNT: i64 = 17
+
+var _hir_prof_ms: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+var _hir_prof_calls: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+var _hir_prof_module_start_ms: i64 = 0
+# Nested-expansion counter for the glob walk: roots vs total expansions is
+# exactly the ratio the GLB3 note in module_import_resolution.spl argues
+# about, so it is worth counting rather than re-deriving.
+var _hir_prof_glob_expansions: i64 = 0
+var _hir_prof_imported_symbol_calls: i64 = 0
+# RISDONE (2026-08-21): registrations skipped because this importer already
+# completed the identical (declaring module, imported name, local name,
+# materialize_enum) tuple. `reg_imported` counts the ones that actually ran,
+# so the pair is the observable mechanism counter for the memo.
+var _hir_prof_imported_symbol_skips: i64 = 0
+var _hir_prof_enum_lowerings: i64 = 0
+# Qualified-type resolution MISSES: the repeated work the RIS split exists to
+# locate. A miss is what triggers declared/explicit dependency materialization.
+var _hir_prof_qtype_queries: i64 = 0
+var _hir_prof_qtype_misses: i64 = 0
+var _hir_prof_explicit_scans: i64 = 0
+var _hir_prof_explicit_items: i64 = 0
+
+fn hir_phase_profile_enabled() -> bool:
+    if _hir_prof_state == 0:
+        _hir_prof_state = if (env_get_opt("SIMPLE_HIR_PHASE_PROFILE") ?? "") == "1": 1 else: 2
+    _hir_prof_state == 1
+
+# EXCL (2026-08-22): exclusive time per slot. Every `now()` opens a frame
+# (pushes a child-time accumulator) and the paired `add()` closes it, so
+# `_hir_prof_excl_ms[slot]` is the slot's time MINUS the time of every
+# profiled slot nested inside it. The RIS slots recurse into each other
+# (field_dep -> register_imported_symbol -> methods -> callable_deps -> ...),
+# which made the inclusive numbers sum to several times the module total and
+# hid where one first-time registration actually spends its ~40 ms. All
+# `now()`/`add()` pairs are balanced on every path (audited 2026-08-22).
+var _hir_prof_excl_ms: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+var _hir_prof_child_stack: [i64] = []
+
+fn hir_phase_profile_now() -> i64:
+    """Clock read for one boundary; 0 when profiling is off (never read)."""
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return 0
+    if not hir_phase_profile_enabled():
+        return 0
+    _hir_prof_child_stack.push(0)
+    rt_time_now_monotonic_ms()
+
+fn hir_phase_profile_add(slot: i64, started_ms: i64):
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return 0
+    if not hir_phase_profile_enabled():
+        return
+    val elapsed = rt_time_now_monotonic_ms() - started_ms
+    var child_ms = 0
+    if _hir_prof_child_stack.len() > 0:
+        child_ms = _hir_prof_child_stack.pop()
+    if _hir_prof_child_stack.len() > 0:
+        val top = _hir_prof_child_stack.len() - 1
+        _hir_prof_child_stack[top] = _hir_prof_child_stack[top] + elapsed
+    if slot < 0 or slot >= HIR_PROF_SLOT_COUNT:
+        return
+    _hir_prof_ms[slot] = _hir_prof_ms[slot] + elapsed
+    _hir_prof_excl_ms[slot] = _hir_prof_excl_ms[slot] + (elapsed - child_ms)
+    _hir_prof_calls[slot] = _hir_prof_calls[slot] + 1
+
+fn hir_phase_profile_count_glob_expansion():
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
+    if hir_phase_profile_enabled():
+        _hir_prof_glob_expansions = _hir_prof_glob_expansions + 1
+
+fn hir_phase_profile_count_imported_symbol():
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
+    if hir_phase_profile_enabled():
+        _hir_prof_imported_symbol_calls = _hir_prof_imported_symbol_calls + 1
+
+fn hir_phase_profile_count_imported_symbol_skip():
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
+    if hir_phase_profile_enabled():
+        _hir_prof_imported_symbol_skips = _hir_prof_imported_symbol_skips + 1
+
+fn hir_phase_profile_count_qtype(missed: bool):
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
+    if hir_phase_profile_enabled():
+        _hir_prof_qtype_queries = _hir_prof_qtype_queries + 1
+        if missed:
+            _hir_prof_qtype_misses = _hir_prof_qtype_misses + 1
+
+fn hir_phase_profile_count_explicit_scan(items: i64):
+    """One full `use`-item sweep of a declaring surface, plus the number of
+    import items it compared. Items-per-scan is the term that grows with the
+    closure, so it is counted rather than inferred."""
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return 0
+    if hir_phase_profile_enabled():
+        _hir_prof_explicit_scans = _hir_prof_explicit_scans + 1
+        _hir_prof_explicit_items = _hir_prof_explicit_items + items
+
+fn hir_phase_profile_count_enum_lowering():
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
+    if hir_phase_profile_enabled():
+        _hir_prof_enum_lowerings = _hir_prof_enum_lowerings + 1
+
+fn hir_phase_profile_module_begin():
+    if not hir_phase_profile_enabled():
+        return
+    var slot = 0
+    while slot < HIR_PROF_SLOT_COUNT:
+        _hir_prof_ms[slot] = 0
+        _hir_prof_excl_ms[slot] = 0
+        _hir_prof_calls[slot] = 0
+        slot = slot + 1
+    val fresh_child_stack: [i64] = []
+    _hir_prof_child_stack = fresh_child_stack
+    _hir_prof_glob_expansions = 0
+    _hir_prof_imported_symbol_calls = 0
+    _hir_prof_imported_symbol_skips = 0
+    _hir_prof_enum_lowerings = 0
+    _hir_prof_qtype_queries = 0
+    _hir_prof_qtype_misses = 0
+    _hir_prof_explicit_scans = 0
+    _hir_prof_explicit_items = 0
+    _hir_prof_module_start_ms = rt_time_now_monotonic_ms()
+
+fn hir_phase_profile_module_end(module_name: text):
+    """One line per module. `other` is the residual (item lowering, struct/
+    trait/impl passes, diagnostics) so the row always adds up to `total` and a
+    dominant cost cannot hide in an uninstrumented gap."""
+    if not hir_phase_profile_enabled():
+        return
+    val total = rt_time_now_monotonic_ms() - _hir_prof_module_start_ms
+    var measured = 0
+    var slot = 0
+    while slot < HIR_PROF_SLOT_COUNT:
+        # The glob slot is nested INSIDE imports; counting it in `measured`
+        # would double-count it and make `other` negative.
+        if slot != HIR_PROF_GLOB and slot <= HIR_PROF_FUNCTIONS:
+            measured = measured + _hir_prof_ms[slot]
+        slot = slot + 1
+    eprint("[hir-prof] module={module_name} total={total}ms"
+        + " imports={_hir_prof_ms[HIR_PROF_IMPORTS]}ms/{_hir_prof_calls[HIR_PROF_IMPORTS]}"
+        + " (glob={_hir_prof_ms[HIR_PROF_GLOB]}ms/{_hir_prof_calls[HIR_PROF_GLOB]} roots,"
+        + " expansions={_hir_prof_glob_expansions},"
+        + " reg_imported={_hir_prof_imported_symbol_calls},"
+        + " reg_skipped={_hir_prof_imported_symbol_skips})"
+        + " declare={_hir_prof_ms[HIR_PROF_DECLARE]}ms"
+        + " enums={_hir_prof_ms[HIR_PROF_ENUMS]}ms/{_hir_prof_calls[HIR_PROF_ENUMS]}"
+        + " (lowerings={_hir_prof_enum_lowerings})"
+        + " functions={_hir_prof_ms[HIR_PROF_FUNCTIONS]}ms/{_hir_prof_calls[HIR_PROF_FUNCTIONS]}"
+        + " other={total - measured}ms")
+    eprint("[hir-prof-ris] module={module_name}"
+        + " callable_deps={_hir_prof_ms[HIR_PROF_RIS_CALLABLE_DEPS]}ms/{_hir_prof_calls[HIR_PROF_RIS_CALLABLE_DEPS]}"
+        + " declared_dep={_hir_prof_ms[HIR_PROF_RIS_DECLARED_DEP]}ms/{_hir_prof_calls[HIR_PROF_RIS_DECLARED_DEP]}"
+        + " explicit_dep={_hir_prof_ms[HIR_PROF_RIS_EXPLICIT_DEP]}ms/{_hir_prof_calls[HIR_PROF_RIS_EXPLICIT_DEP]}"
+        + " (scans={_hir_prof_explicit_scans}, items={_hir_prof_explicit_items})"
+        + " field_dep={_hir_prof_ms[HIR_PROF_RIS_FIELD_DEP]}ms/{_hir_prof_calls[HIR_PROF_RIS_FIELD_DEP]}"
+        + " payload={_hir_prof_ms[HIR_PROF_RIS_PAYLOAD]}ms/{_hir_prof_calls[HIR_PROF_RIS_PAYLOAD]}"
+        + " methods={_hir_prof_ms[HIR_PROF_RIS_METHODS]}ms/{_hir_prof_calls[HIR_PROF_RIS_METHODS]}"
+        + " sigtype={_hir_prof_ms[HIR_PROF_RIS_SIGTYPE]}ms/{_hir_prof_calls[HIR_PROF_RIS_SIGTYPE]}"
+        + " define={_hir_prof_ms[HIR_PROF_RIS_DEFINE]}ms/{_hir_prof_calls[HIR_PROF_RIS_DEFINE]}"
+        + " canon={_hir_prof_ms[HIR_PROF_RIS_CANON]}ms/{_hir_prof_calls[HIR_PROF_RIS_CANON]}"
+        + " scan={_hir_prof_ms[HIR_PROF_RIS_SCAN]}ms/{_hir_prof_calls[HIR_PROF_RIS_SCAN]}"
+        + " fields={_hir_prof_ms[HIR_PROF_RIS_FIELDS]}ms/{_hir_prof_calls[HIR_PROF_RIS_FIELDS]}"
+        + " project={_hir_prof_ms[HIR_PROF_RIS_PROJECT]}ms/{_hir_prof_calls[HIR_PROF_RIS_PROJECT]}"
+        + " qtype={_hir_prof_qtype_queries}/{_hir_prof_qtype_misses} miss")
+    eprint("[hir-prof-excl] module={module_name}"
+        + " imports={_hir_prof_excl_ms[HIR_PROF_IMPORTS]}ms"
+        + " glob={_hir_prof_excl_ms[HIR_PROF_GLOB]}ms"
+        + " enums={_hir_prof_excl_ms[HIR_PROF_ENUMS]}ms"
+        + " functions={_hir_prof_excl_ms[HIR_PROF_FUNCTIONS]}ms"
+        + " callable_deps={_hir_prof_excl_ms[HIR_PROF_RIS_CALLABLE_DEPS]}ms"
+        + " declared_dep={_hir_prof_excl_ms[HIR_PROF_RIS_DECLARED_DEP]}ms"
+        + " explicit_dep={_hir_prof_excl_ms[HIR_PROF_RIS_EXPLICIT_DEP]}ms"
+        + " field_dep={_hir_prof_excl_ms[HIR_PROF_RIS_FIELD_DEP]}ms"
+        + " payload={_hir_prof_excl_ms[HIR_PROF_RIS_PAYLOAD]}ms"
+        + " methods={_hir_prof_excl_ms[HIR_PROF_RIS_METHODS]}ms"
+        + " sigtype={_hir_prof_excl_ms[HIR_PROF_RIS_SIGTYPE]}ms"
+        + " define={_hir_prof_excl_ms[HIR_PROF_RIS_DEFINE]}ms"
+        + " scan={_hir_prof_excl_ms[HIR_PROF_RIS_SCAN]}ms"
+        + " fields={_hir_prof_excl_ms[HIR_PROF_RIS_FIELDS]}ms"
+        + " project={_hir_prof_excl_ms[HIR_PROF_RIS_PROJECT]}ms")
+    rt_stdout_flush()
+
+# Ambiguous-callable-dependency trace (SIMPLE_AMBIGDBG=1, default off).
+# Restored 2026-08-28: the helper and every caller were deleted by the stale
+# snapshot 4edef8fab8 (doc/08_tracking/bug/clobber_4edef8fab8_458_files_unrepaired_2026-08-27.md).
+var _hir_ambig_trace_state: i64 = 0
+
+fn hir_ambig_dep_trace_enabled() -> bool:
+    """Cached env verdict: the environment is read ONCE per process, every
+    later call is a single i64 compare. Call sites MUST test this before
+    building their message -- interpolation is evaluated at the call site."""
+    if _hir_ambig_trace_state == 0:
+        _hir_ambig_trace_state = if (env_get_opt("SIMPLE_AMBIGDBG") ?? "") == "1": 1 else: 2
+    _hir_ambig_trace_state == 1
+
+fn hir_ambig_dep_trace(message: text):
+    """Emit one trace line. Silent unless SIMPLE_AMBIGDBG=1."""
+    if not hir_ambig_dep_trace_enabled(): return
+    eprint("[ambig-dep] {message}")

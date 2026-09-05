@@ -1,0 +1,249 @@
+"""Boot-owned reader for an on-image Simplebox SAM1/SCR1 catalog bundle.
+
+Only loader-package boot code can pin or consume this value.  The reader
+derives the manifest from the embedded canonical SAM1 bytes; it never accepts
+a caller-authored manifest projection or a verification boolean.  Catalog
+mutation remains behind the existing loader boot-ingestion transaction.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.installer.hosted_safe_artifact_io_v1.{
+    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
+    hosted_safe_artifact_relative_path_valid_v1
+}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1,
+    SimpleboxSafeArtifactBindingReceiptV1,
+    SimpleboxSignedCatalogExternalCandidateV1,
+    SimpleboxSignedCatalogProvisionErrorV1,
+    SimpleboxSignedCatalogProvisionResultV1,
+    simplebox_signed_catalog_candidate_plan_v1
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS,
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootPopulationErrorV1
+}
+use os.kernel.loader.simplebox_signed_catalog_boot_ingestion_v1.{
+    SimpleboxSignedCatalogBootIngestionErrorV1,
+    simplebox_signed_catalog_boot_ingest_composed_v1
+}
+use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{
+    ClangSysrootCatalogBundleV1, CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1
+}
+use os.kernel.loader.signed_catalog_scr1_decoder_v1.{
+    signed_catalog_scr1_decode_v1
+}
+
+pub(package) struct SimpleboxPinnedCatalogImageV1:
+    artifact_path: text
+    scr1_path: text
+    expected_target: ManifestTarget
+    payload_bytes: [u8]
+    scr1_bytes: [u8]
+    trust_roots: [ExecutableManifestTrustedSignerV1]
+    clang_bundle: ClangSysrootCatalogBundleV1?
+
+pub enum SimpleboxPinnedCatalogImageErrorV1:
+    None
+    BoundsRejected
+    TrustRootsRejected
+    Scr1Rejected
+    PayloadRejected
+    BundleRejected
+    BootIngestionRejected
+
+pub struct SimpleboxPinnedCatalogImageResultV1:
+    ok: bool
+    error: SimpleboxPinnedCatalogImageErrorV1
+    ingestion_error: SimpleboxSignedCatalogBootIngestionErrorV1
+    population_error: InstalledArtifactBootPopulationErrorV1
+    target: ManifestTarget
+    artifact_sha256: text
+    signed_record_sha256: text
+
+fn _pinned_copy_bytes_v1(source: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for byte in source: copied.push(byte)
+    copied
+
+fn _pinned_copy_roots_v1(
+    source: [ExecutableManifestTrustedSignerV1],
+) -> [ExecutableManifestTrustedSignerV1]:
+    var copied: [ExecutableManifestTrustedSignerV1] = []
+    for root in source:
+        copied.push(ExecutableManifestTrustedSignerV1(
+            key_id: root.key_id, public_key: _pinned_copy_bytes_v1(root.public_key)))
+    copied
+
+fn _pinned_roots_shape_valid_v1(
+    roots: [ExecutableManifestTrustedSignerV1],
+) -> bool:
+    if roots.len() == 0 or roots.len() > EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS:
+        return false
+    var index: i64 = 0
+    while index < roots.len():
+        val root = roots[index]
+        if root.key_id.len() == 0 or root.key_id.len() > 128 or
+            root.public_key.len() != 32:
+            return false
+        var key_index: i64 = 0
+        while key_index < root.key_id.len():
+            val code = root.key_id.char_code_at(key_index)
+            if code < 33 or code > 126 or code == 58: return false
+            key_index = key_index + 1
+        var prior: i64 = 0
+        while prior < index:
+            if roots[prior].key_id == root.key_id: return false
+            prior = prior + 1
+        index = index + 1
+    true
+
+fn _pinned_empty_target_v1() -> ManifestTarget:
+    ManifestTarget(os: "", arch: "", abi: "")
+
+fn _pinned_receipt_path_v1(path: text) -> text:
+    if path.starts_with("/"): return path.substring(1, path.len())
+    path
+
+fn _pinned_fail_v1(
+    error: SimpleboxPinnedCatalogImageErrorV1,
+    ingestion_error: SimpleboxSignedCatalogBootIngestionErrorV1 =
+        SimpleboxSignedCatalogBootIngestionErrorV1.None,
+    population_error: InstalledArtifactBootPopulationErrorV1 =
+        InstalledArtifactBootPopulationErrorV1.None,
+) -> SimpleboxPinnedCatalogImageResultV1:
+    SimpleboxPinnedCatalogImageResultV1(
+        ok: false, error: error, ingestion_error: ingestion_error,
+        population_error: population_error, target: _pinned_empty_target_v1(),
+        artifact_sha256: "", signed_record_sha256: "")
+
+pub(package) fn simplebox_pinned_catalog_image_create_v1(
+    artifact_path: text,
+    scr1_path: text,
+    expected_target: ManifestTarget,
+    payload_bytes: [u8],
+    scr1_bytes: [u8],
+    trust_roots: [ExecutableManifestTrustedSignerV1],
+) -> SimpleboxPinnedCatalogImageV1?:
+    """Deep-pin immutable image bytes and roots inside the loader package."""
+    val artifact_receipt_path = _pinned_receipt_path_v1(artifact_path)
+    val scr1_receipt_path = _pinned_receipt_path_v1(scr1_path)
+    if not artifact_path.starts_with("/") or not scr1_path.starts_with("/") or
+        not hosted_safe_artifact_relative_path_valid_v1(artifact_receipt_path) or
+        not hosted_safe_artifact_relative_path_valid_v1(scr1_receipt_path) or
+        artifact_receipt_path == scr1_receipt_path or
+        expected_target.os != "simpleos" or expected_target.abi != "simpleos" or
+        expected_target.arch == "" or payload_bytes.len() == 0 or
+        payload_bytes.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        scr1_bytes.len() == 0 or
+        scr1_bytes.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        not _pinned_roots_shape_valid_v1(trust_roots):
+        return nil
+    Some(SimpleboxPinnedCatalogImageV1(
+        artifact_path: artifact_path, scr1_path: scr1_path,
+        expected_target: expected_target,
+        payload_bytes: _pinned_copy_bytes_v1(payload_bytes),
+        scr1_bytes: _pinned_copy_bytes_v1(scr1_bytes),
+        trust_roots: _pinned_copy_roots_v1(trust_roots), clang_bundle: nil))
+
+pub(package) fn simplebox_pinned_catalog_image_attach_clang_v1(
+    image: SimpleboxPinnedCatalogImageV1,
+    bundle: ClangSysrootCatalogBundleV1
+) -> SimpleboxPinnedCatalogImageV1?:
+    """Select the exact nine-record transaction before irreversible ingest."""
+    if not bundle.ok or bundle.records.len() !=
+       CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1 or
+       bundle.policy.platform_target != image.expected_target or
+       bundle.policy.trust_roots != image.trust_roots:
+        return nil
+    Some(SimpleboxPinnedCatalogImageV1(
+        artifact_path: image.artifact_path, scr1_path: image.scr1_path,
+        expected_target: image.expected_target,
+        payload_bytes: _pinned_copy_bytes_v1(image.payload_bytes),
+        scr1_bytes: _pinned_copy_bytes_v1(image.scr1_bytes),
+        trust_roots: _pinned_copy_roots_v1(image.trust_roots),
+        clang_bundle: Some(bundle)))
+
+fn _pinned_decode_scr1_v1(
+    bytes: [u8],
+) -> SimpleboxSignedCatalogExternalCandidateV1?:
+    val decoded = signed_catalog_scr1_decode_v1(bytes)
+    if not decoded.?: return nil
+    val value = decoded.unwrap()
+    Some(SimpleboxSignedCatalogExternalCandidateV1(
+        sam1_identity_sha256: value.sam1_identity_sha256,
+        record: value.record))
+
+pub fn simplebox_pinned_catalog_image_shape_valid_v1(
+    payload_bytes: [u8],
+    scr1_bytes: [u8],
+    trust_roots: [ExecutableManifestTrustedSignerV1],
+) -> bool:
+    """Pure diagnostic gate; success grants no catalog or loader authority."""
+    if payload_bytes.len() == 0 or
+        payload_bytes.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        not _pinned_roots_shape_valid_v1(trust_roots):
+        return false
+    val decoded = _pinned_decode_scr1_v1(scr1_bytes)
+    if not decoded.?: return false
+    val candidate = decoded.unwrap()
+    val planned = simplebox_signed_catalog_candidate_plan_v1(
+        candidate.record.manifest.target, trust_roots, candidate,
+        scr1_bytes, payload_bytes)
+    planned.ok
+
+pub(package) fn simplebox_pinned_catalog_image_ingest_v1(
+    image: SimpleboxPinnedCatalogImageV1,
+) -> SimpleboxPinnedCatalogImageResultV1:
+    """Decode, bind, authenticate, and consume the pinned image exactly once."""
+    if image.payload_bytes.len() == 0 or
+        image.payload_bytes.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        image.scr1_bytes.len() == 0 or
+        image.scr1_bytes.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1:
+        return _pinned_fail_v1(SimpleboxPinnedCatalogImageErrorV1.BoundsRejected)
+    if not _pinned_roots_shape_valid_v1(image.trust_roots):
+        return _pinned_fail_v1(SimpleboxPinnedCatalogImageErrorV1.TrustRootsRejected)
+    val decoded = _pinned_decode_scr1_v1(image.scr1_bytes)
+    if not decoded.?:
+        return _pinned_fail_v1(SimpleboxPinnedCatalogImageErrorV1.Scr1Rejected)
+    val candidate = decoded.unwrap()
+    val target = candidate.record.manifest.target
+    if target.os != image.expected_target.os or
+        target.arch != image.expected_target.arch or
+        target.abi != image.expected_target.abi:
+        return _pinned_fail_v1(SimpleboxPinnedCatalogImageErrorV1.BundleRejected)
+    val provisioned = simplebox_signed_catalog_candidate_plan_v1(
+        target, image.trust_roots, candidate,
+        image.scr1_bytes, image.payload_bytes)
+    if not provisioned.ok:
+        val mapped = if provisioned.error ==
+            SimpleboxSignedCatalogProvisionErrorV1.PayloadHashMismatch:
+            SimpleboxPinnedCatalogImageErrorV1.PayloadRejected
+        else:
+            SimpleboxPinnedCatalogImageErrorV1.BundleRejected
+        return _pinned_fail_v1(mapped)
+    val pinned_provisioned = SimpleboxSignedCatalogProvisionResultV1(
+        ok: true, error: SimpleboxSignedCatalogProvisionErrorV1.None,
+        receipt: SimpleboxSafeArtifactBindingReceiptV1(
+            artifact_relative_path: _pinned_receipt_path_v1(image.artifact_path),
+            artifact_sha256: provisioned.receipt.artifact_sha256,
+            artifact_byte_count: provisioned.receipt.artifact_byte_count,
+            signed_record_relative_path: _pinned_receipt_path_v1(image.scr1_path),
+            signed_record_sha256: provisioned.receipt.signed_record_sha256,
+            sam1_identity_sha256: provisioned.receipt.sam1_identity_sha256),
+        plan: provisioned.plan)
+    val ingested = simplebox_signed_catalog_boot_ingest_composed_v1(
+        pinned_provisioned, image.clang_bundle)
+    if not ingested.ok:
+        return _pinned_fail_v1(
+            SimpleboxPinnedCatalogImageErrorV1.BootIngestionRejected,
+            ingested.error, ingested.population_error)
+    SimpleboxPinnedCatalogImageResultV1(
+        ok: true, error: SimpleboxPinnedCatalogImageErrorV1.None,
+        ingestion_error: SimpleboxSignedCatalogBootIngestionErrorV1.None,
+        population_error: InstalledArtifactBootPopulationErrorV1.None,
+        target: target, artifact_sha256: ingested.artifact_sha256,
+        signed_record_sha256: ingested.signed_record_sha256)

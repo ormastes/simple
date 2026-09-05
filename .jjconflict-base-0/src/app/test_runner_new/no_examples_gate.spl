@@ -1,0 +1,51 @@
+"""Fail-closed policy for a test run that executed nothing.
+
+Importable on purpose, for the same reason `daemon_backlog.spl` is:
+`test_runner_client.spl` is a standalone script with a bare `fn main` and
+cannot be imported by a spec (documented fn-main collision), so the DECISION
+lives here where a unit spec can pin it and the client keeps only the I/O.
+
+WHY THIS POLICY EXISTS — measured 2026-08-21.
+
+Two concurrent `simple test <spec>` processes in the same worktree could make
+one of them return rc=0 with ZERO test output: no examples, no failure, no
+verdict line. 42 of 122 spec logs in a 2-way sharded run came back that way,
+and a serial re-run of the same specs was clean. Every sweep that reads exit
+codes scored those 42 as PASSED.
+
+The mechanism was in the shared light-daemon lane (duplicate daemons racing to
+answer the same request — see light_daemon.spl `claim_lane`), but the reason it
+was INVISIBLE is here: the client returned the child's exit code verbatim, so
+an empty response body carried a 0 straight out to the caller.
+
+Every real spec execution ends with a `SPEC FILE VERDICT:` line — emitted by
+test_runner_single.spl, and synthesised by the daemon and by the client for a
+killed worker. So "exited 0 and produced no verdict line" is exactly "ran zero
+examples", and a runner given >= 1 spec that executed nothing must never exit
+0, no matter which lane lost the output.
+
+# @req REQ-TESTRUNNER-NO-EXAMPLES-FAIL-CLOSED
+"""
+
+val NO_EXAMPLES_VERDICT_MARKER: text = "SPEC FILE VERDICT:"
+
+fn output_has_verdict(output: text) -> bool:
+    """True when a run's captured output carries at least one verdict line."""
+    output.contains(NO_EXAMPLES_VERDICT_MARKER)
+
+fn no_examples_exit_code(output: text, code: i64) -> i64:
+    """Exit code a spec run must report, given its output and the child's code.
+
+    A non-zero child code is passed through untouched — it is already loud.
+    A zero code with no verdict line is rewritten to 1: that is the silent
+    false green this module exists to close. A zero code WITH a verdict line
+    is a genuine pass and stays 0."""
+    if code != 0:
+        return code
+    if output_has_verdict(output):
+        return 0
+    1
+
+fn no_examples_is_silent_green(output: text, code: i64) -> bool:
+    """True when this result is a run that executed nothing yet claimed success."""
+    code == 0 and not output_has_verdict(output)

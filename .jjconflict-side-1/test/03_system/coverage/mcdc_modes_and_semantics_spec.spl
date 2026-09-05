@@ -1,0 +1,135 @@
+# @req REQ-001 REQ-002 REQ-003 REQ-007 REQ-014
+# @manual: primary
+"""Production MC/DC mode, masking, identity, and dynamic dormant-path contract."""
+use std.spec.*
+use std.spec.step
+use std.common.mcdc.model.*
+use std.nogc_sync_mut.mcdc.analyzer.*
+use std.nogc_sync_mut.mcdc.dynamic_aspect.*
+use std.io.{dir_create_all}
+use std.io_runtime.{process_run, file_size}
+use std.common.convert.{try_parse_int}
+
+val E2E_CHILD = "test/fixtures/mcdc/mcdc_e2e_child_spec.spl"
+val ARTIFACT_FIXTURE = "test/fixtures/mcdc/mcdc_artifact_fixture.spl"
+val DYNAMIC_FIXTURE = "test/fixtures/mcdc/mcdc_dynamic_lifecycle_fixture.spl"
+val E2E_OUT = "build/mcdc-system-e2e"
+
+fn run_mcdc_child(mode: text) -> (text, text, i64):
+    process_run("env", [
+        "SIMPLE_LIB=src", "SIMPLE_MCDC_MODE=" + mode,
+        "SIMPLE_MCDC_INCLUDE=mcdc_e2e_child_spec.spl",
+        "SIMPLE_SAFETY_PROFILE=normal", "bin/simple", "test", E2E_CHILD,
+        "--mode=native", "--clean", "--force-rebuild", "--no-db", "--verbose"
+    ])
+
+fn compile_fixture(output: text, mode: text = "") -> (text, text, i64):
+    var args: [text] = ["compile", ARTIFACT_FIXTURE, "--native", "-o", output]
+    if mode != "": args.push("--mcdc-mode=" + mode)
+    process_run("bin/simple", args)
+
+fn text_section_bytes(size_output: text) -> i64:
+    for raw in size_output.split("\n"):
+        val line = raw.trim()
+        if not line.starts_with(".text"): continue
+        var fields: [text] = []
+        for field in line.split(" "):
+            if field.trim() != "": fields.push(field.trim())
+        if fields.len() >= 2:
+            return try_parse_int(fields[1]) ?? -1
+    -1
+
+fn evaluation(sequence: i64, outcome: bool, evaluated: i64, truth: i64, masked: i64 = 0) -> McdcEvaluation:
+    McdcEvaluation(decision_id: 41, owner_id: 7, sequence: sequence, outcome: outcome,
+        evaluated_mask0: evaluated, evaluated_mask1: 0, evaluated_mask2: 0, evaluated_mask3: 0,
+        true_mask0: truth, true_mask1: 0, true_mask2: 0, true_mask3: 0,
+        masked_mask0: masked, masked_mask1: 0, masked_mask2: 0, masked_mask3: 0)
+
+describe "MC/DC modes and semantics":
+    it "should expose three explicit modes while static off remains the default":
+        step("configure MC/DC mode")
+        expect(mcdc_mode_name(McdcMode.StaticOff)).to_equal("off")
+        expect(mcdc_mode_name(McdcMode.StaticOn)).to_equal("on")
+        expect(mcdc_mode_name(McdcMode.DynamicAspect)).to_equal("dynamic")
+        expect(mcdc_default_policy(McdcMode.StaticOff).mode).to_equal(McdcMode.StaticOff)
+
+    it "should preserve short-circuit masking and find exact independent pairs":
+        step("exercise independent conditions")
+        # A and B: B is masked when A is false.
+        val report = analyze_mcdc([
+            evaluation(1, false, 1, 0, 2),
+            evaluation(2, true, 3, 3),
+            evaluation(3, false, 3, 1)
+        ], 2, 32)
+        expect(report.covered_count).to_equal(2)
+        expect(report.condition_count).to_equal(2)
+        expect(report.saturated).to_equal(false)
+
+    it "should keep deterministic decision identity and dormant dynamic storage absent":
+        step("load dynamic MC/DC aspect")
+        val path = mcdc_authored_path_v1("src\\flight\\control.spl")
+        expect(mcdc_runtime_decision_id_v1(path, 19)).to_equal(mcdc_runtime_decision_id_v1(path, 19))
+        val aspect = McdcDynamicAspect.create(0, "mcdc", "missing-readiness", 1, 1, 7,
+            mcdc_default_policy(McdcMode.DynamicAspect))
+        expect(aspect.enter_decision(7)).to_equal(0)
+        expect(aspect.has_recorder_storage()).to_equal(false)
+
+    # @capture exec
+    # @capture binary
+    # @capture artifact
+    it "should drive compilation runtime evidence aggregation exact gating and dynamic lifecycle end to end":
+        step("configure MC/DC mode")
+        dir_create_all(E2E_OUT)
+
+        # The production native test runner compiles the generated wrapper,
+        # extracts the compiler obligation manifest, injects it into the child,
+        # extracts raw recorder rows, aggregates them, and invokes the exact
+        # normal-profile report gate. Exit zero is therefore an end-to-end
+        # verdict, not a helper-model assertion.
+        val (static_out, static_err, static_code) = run_mcdc_child("on")
+        expect(static_code).to_equal(0)
+        expect(static_out + static_err).to_contain("MC/DC: covered")
+        expect(static_out + static_err).to_contain("approved exclusions")
+        expect(static_out + static_err).to_contain("MCDC-GATE-v1|accepted=true")
+
+        step("load dynamic MC/DC aspect")
+        val (dynamic_out, dynamic_err, dynamic_code) = run_mcdc_child("dynamic")
+        expect(dynamic_code).to_equal(0)
+        expect(dynamic_out + dynamic_err).to_contain("MC/DC: covered")
+        expect(dynamic_out + dynamic_err).to_contain("MCDC-GATE-v1|accepted=true")
+
+        val dynamic_bin = E2E_OUT + "/dynamic-lifecycle"
+        val (dynamic_compile_out, dynamic_compile_err, dynamic_compile_code) = process_run(
+            "bin/simple", ["compile", DYNAMIC_FIXTURE, "--native", "-o", dynamic_bin,
+                "--mcdc-mode=dynamic-aspect"])
+        expect(dynamic_compile_code).to_equal(0)
+        val (lifecycle_out, lifecycle_err, lifecycle_code) = process_run(dynamic_bin, [])
+        expect(lifecycle_code).to_equal(0)
+        expect(lifecycle_out + lifecycle_err).to_contain("mcdc-dynamic-load-unload-ok")
+
+        step("configure MC/DC mode")
+        val baseline_bin = E2E_OUT + "/baseline"
+        val off_bin = E2E_OUT + "/static-off"
+        val on_bin = E2E_OUT + "/static-on"
+        val (_, _, baseline_code) = compile_fixture(baseline_bin)
+        val (_, _, off_code) = compile_fixture(off_bin, "static-off")
+        val (on_compile_out, on_err, on_code) = compile_fixture(on_bin, "static-on")
+        expect(baseline_code).to_equal(0)
+        expect(off_code).to_equal(0)
+        expect(on_code).to_equal(0)
+        expect(on_compile_out + on_err).to_contain("__SIMPLE_MCDC_OBLIGATION_MANIFEST_BEGIN__")
+        expect(on_compile_out + on_err).to_contain("__SIMPLE_MCDC_OBLIGATION_MANIFEST_END__")
+        expect(file_size(off_bin)).to_equal(file_size(baseline_bin))
+        val (baseline_size_out, _, baseline_size_code) = process_run("size", ["-A", baseline_bin])
+        val (off_size_out, _, off_size_code) = process_run("size", ["-A", off_bin])
+        expect(baseline_size_code).to_equal(0)
+        expect(off_size_code).to_equal(0)
+        expect(text_section_bytes(baseline_size_out)).to_be_greater_than(0)
+        expect(text_section_bytes(off_size_out)).to_equal(text_section_bytes(baseline_size_out))
+        val (off_symbols, off_nm_err, off_nm_code) = process_run("nm", ["-a", off_bin])
+        val (on_symbols, on_nm_err, on_nm_code) = process_run("nm", ["-a", on_bin])
+        expect(off_nm_code).to_equal(0)
+        expect(on_nm_code).to_equal(0)
+        expect(off_nm_err + on_nm_err).to_equal("")
+        expect(off_symbols.contains("mcdc_static_probe") or off_symbols.contains("mcdc_dynamic_probe")).to_equal(false)
+        expect(on_symbols).to_contain("mcdc_static_probe")

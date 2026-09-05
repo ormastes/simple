@@ -1,0 +1,122 @@
+# Standalone probe: full 4 GiB address space on the rv32 SoC (sparse page-backed
+# RAM) + address-dispatch sanity on the rv64 SoC at >= 2^31 boundaries.
+#
+# The user directive: "fix riscv 32 and 64 too small address space least 4gb on
+# 32 bit". The rv32 SoC must ADDRESS the full 32-bit space with no signed-i32
+# truncation/aliasing, backed by a sparse model (a dense 4 GiB array is
+# impossible). This probe drives everything through the REAL dispatch
+# (soc_mem_read/soc_mem_write, soc64_mem_read/soc64_mem_write) — not the sparse
+# model directly — because the bug class (128 MiB RAM_END cap, offset
+# truncation at addr >= 0x8000_0000) lives in the dispatch path.
+#
+# The SSpec runner daemon hangs on this tree (deployed-seed bug), so this probe
+# prints PASS/FAIL and a final ALL PASS line.
+# Run: bin/simple run test/01_unit/lib/hardware/soc_rtl/addr4g_probe.spl
+
+use std.hardware.soc_rtl.soc_top.{SocState, soc_create_bytes, soc_mem_read, soc_mem_write}
+use std.hardware.soc_rtl.ram_sparse.{sparse_pages_allocated}
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc64_mem_read, soc64_mem_write}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+# Write a word through the rv32 data-bus dispatch, returning the updated state.
+fn wr32(soc: SocState, addr: u32, data: u32) -> SocState:
+    val r = soc_mem_write(soc, addr, data, 2)
+    r.state
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # ══ rv32: full 4 GiB DRAM, sparse-backed ══════════════════════════════
+    # Configure DRAM to span the entire 32-bit space above RAM_BASE.
+    var soc = soc_create_bytes(0xFFFFFFFF)
+
+    # Canary addresses: RAM base (2 GiB), 3 GiB, and top-of-space (word-aligned).
+    val A_BASE: u32 = 0x80000000   # RAM base
+    val A_3G: u32   = 0xC0000000   # 3 GiB
+    val A_TOP: u32  = 0xFFFFFFF8   # top of 32-bit space (last aligned dword)
+
+    val V_BASE: u32 = 0xAAAA0001
+    val V_3G: u32   = 0xBBBB0002
+    val V_TOP: u32  = 0xCCCC0003
+
+    soc = wr32(soc, A_BASE, V_BASE)
+    soc = wr32(soc, A_3G, V_3G)
+    soc = wr32(soc, A_TOP, V_TOP)
+
+    val r_base = soc_mem_read(soc, A_BASE)
+    val r_3g   = soc_mem_read(soc, A_3G)
+    val r_top  = soc_mem_read(soc, A_TOP)
+    print("rv32 base={r_base} 3g={r_3g} top={r_top} pages={sparse_pages_allocated(soc.sparse)}")
+
+    fails = fails + check("rv32 round-trip @0x80000000 (RAM base, 2 GiB)", r_base == V_BASE)
+    fails = fails + check("rv32 round-trip @0xC0000000 (3 GiB — i32 sign-ext canary)", r_3g == V_3G)
+    fails = fails + check("rv32 round-trip @0xFFFFFFF8 (top of 4 GiB space)", r_top == V_TOP)
+
+    # Sparse: exactly the 3 touched pages allocated (not millions) — proves the
+    # model never materializes the full 4 GiB.
+    fails = fails + check("rv32 sparse pages == 3 (touched only)", sparse_pages_allocated(soc.sparse) == 3)
+
+    # Aliasing canary: a 128 MiB mask bug (offset & 0x07FF_FFFF) would fold
+    # 0xC0000000 (offset 0x4000_0000) onto offset 0 == RAM base. Confirm the
+    # 3 GiB write did NOT disturb the base word.
+    fails = fails + check("rv32 3 GiB write does NOT alias RAM base (mask-bug canary)", soc_mem_read(soc, A_BASE) == V_BASE)
+    fails = fails + check("rv32 top-of-space write does NOT alias 3 GiB", soc_mem_read(soc, A_3G) == V_3G)
+
+    # ══ rv32: MMIO dispatch stays intact with 4 GiB RAM configured ═════════
+    val pages_before_mmio = sparse_pages_allocated(soc.sparse)
+    # UART THR (0x1000_0000) and CLINT (0x0200_0000) are below RAM_BASE — must
+    # never be swallowed by the widened RAM range.
+    soc = wr32(soc, 0x10000000, 0x41)     # UART THR
+    soc = wr32(soc, 0x02000000, 0x1)      # CLINT msip
+    # Mailbox (0x80FF_0000) sits INSIDE the RAM range but must decode to the
+    # mailbox peripheral, not RAM (checked before RAM in wb_decode_address).
+    soc = wr32(soc, 0x80FF0000, 0x7)      # Mailbox reg
+    fails = fails + check("rv32 MMIO writes allocate NO sparse pages (dispatch intact)", sparse_pages_allocated(soc.sparse) == pages_before_mmio)
+    # RAM still reads correctly after MMIO traffic.
+    fails = fails + check("rv32 RAM @base intact after MMIO traffic", soc_mem_read(soc, A_BASE) == V_BASE)
+    # Unmapped read below RAM but above peripherals returns 0 (bus default).
+    fails = fails + check("rv32 unmapped gap reads 0", soc_mem_read(soc, 0x50000000) == 0)
+
+    # ══ rv32: sub-word (byte) write through dispatch into high page ════════
+    val r2 = soc_mem_write(soc, 0xC0000001, 0xFF, 0)   # byte write @3G+1
+    soc = r2.state
+    # 0xBBBB0002 with byte[1] := 0xFF -> 0xBBBBFF02
+    fails = fails + check("rv32 byte RMW @3 GiB correct", soc_mem_read(soc, A_3G) == 0xBBBBFF02)
+
+    # ══ rv64: address dispatch at >= 2^31 boundaries + DTB overlay ═════════
+    # 4 MiB DRAM (dense ram64 is O(N^2) to build — keep small). RAM base is
+    # itself 2^31, so any RAM access exercises the >= 2^31 dispatch compare.
+    var soc64 = soc_top_64_init(0x400000)
+
+    soc64 = soc64_mem_write(soc64, 0x80000000, 8, 0x1122334455667788)   # @2 GiB, dword
+    soc64 = soc64_mem_write(soc64, 0x80300000, 4, 0x0BADF00D)           # near top of 4 MiB, word
+    val r64_base = soc64_mem_read(soc64, 0x80000000, 8)
+    val r64_hi   = soc64_mem_read(soc64, 0x80300000, 4)
+    print("rv64 base={r64_base} hi={r64_hi}")
+    fails = fails + check("rv64 dword round-trip @0x80000000 (>= 2^31 dispatch)", r64_base == 0x1122334455667788)
+    fails = fails + check("rv64 word round-trip @0x80300000", r64_hi == 0x0BADF00D)
+
+    # Out-of-RAM high address must NOT be misclassified as RAM (no sign flip):
+    # 0xC0000000 is above the 4 MiB DRAM window -> unmapped -> reads 0.
+    fails = fails + check("rv64 @0xC0000000 out-of-DRAM reads 0 (no sign-flip misroute)", soc64_mem_read(soc64, 0xC0000000, 8) == 0)
+
+    # DTB overlay wins: the FDT header at 0x8800_0000 is checked BEFORE DRAM, so
+    # reads there return the magic bytes (0xD0 0x0D 0xFE 0xED, big-endian) and
+    # writes are ignored (read-only overlay).
+    val dtb_b0 = soc64_mem_read(soc64, 0x88000000, 1)
+    fails = fails + check("rv64 DTB overlay magic byte @0x88000000 == 0xD0", dtb_b0 == 0xD0)
+    val soc64_w = soc64_mem_write(soc64, 0x88000000, 4, 0xDEADBEEF)     # attempt overwrite
+    soc64 = soc64_w
+    fails = fails + check("rv64 DTB overlay is read-only (write ignored, still 0xD0)", soc64_mem_read(soc64, 0x88000000, 1) == 0xD0)
+
+    if fails == 0:
+        print("ADDR4G_PROBE: ALL PASS")
+    else:
+        print("ADDR4G_PROBE: {fails} FAIL")
+    fails

@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Purpose: Prove indexed static match-coverage membership preserves exact results.
+Audience: compiler engineers maintaining HIR exhaustiveness checks.
+"""
+
+use std.spec
+use compiler.hir.match_coverage.{ResolvedMatchCoverage}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val MATCH_COVERAGE_SOURCE = "src/compiler/20.hir/match_coverage.spl"
+
+fn coverage(all_ids: [i64], covered_ids: [i64]) -> ResolvedMatchCoverage:
+    var names: [text] = []
+    for id in all_ids:
+        names = names.push("V{id}")
+    ResolvedMatchCoverage(
+        scrutinee_type_id: 10,
+        enum_symbol_id: 20,
+        enum_name: "Indexed",
+        all_variant_ids: all_ids,
+        all_variant_names: names,
+        covered_variant_ids: covered_ids,
+        has_wildcard: false
+    )
+
+fn static_missing_body() -> text:
+    val source = rt_file_read_text(MATCH_COVERAGE_SOURCE) ?? ""
+    val start = source.split("    fn static_missing_variant_ids() -> [i64]:")
+    if start.len() != 2:
+        return ""
+    val finish = start[1].split("\n    fn static_missing_variant_names()")
+    if finish.len() < 2:
+        return ""
+    finish[0]
+
+describe "indexed static match coverage":
+    it "preserves declaration order, repeated declarations, and signed ids":
+        step("Verify: indexed membership preserves exact missing-id order and multiplicity")
+        val result = coverage([5, 2, 5, 9, -1], [2, 2, 20, -1]).static_missing_variant_ids()
+        expect(result).to_equal([5, 5, 9])
+
+    it "returns every declared id when no arm is covered":
+        step("Verify: absent membership takes the missing branch for every declaration")
+        val result = coverage([7, 3, 7], []).static_missing_variant_ids()
+        expect(result).to_equal([7, 3, 7])
+
+    it "returns no ids when every declaration is covered":
+        step("Verify: present membership skips the missing branch for every declaration")
+        val result = coverage([8, 4, 6], [6, 8, 4]).static_missing_variant_ids()
+        expect(result).to_equal([])
+
+    it "returns no ids for an empty declaration set":
+        step("Verify: empty declarations remain empty even with unrelated covered ids")
+        val result = coverage([], [1, 2]).static_missing_variant_ids()
+        expect(result).to_equal([])
+
+    it "builds one covered-id index before one declaration scan":
+        step("Verify: source shape prevents the nested membership scan from returning")
+        val body = static_missing_body()
+        expect(body == "").to_equal(false)
+
+        val covered_loops = body.split("for cid in self.covered_variant_ids:")
+        val declaration_loops = body.split("for vid in self.all_variant_ids:")
+        expect(covered_loops.len()).to_equal(2)
+        expect(declaration_loops.len()).to_equal(2)
+        expect(body.contains("covered_ids[cid] = true")).to_equal(true)
+        expect(body.contains("if not covered_ids.has(vid):")).to_equal(true)
+        expect(body.contains("if cid == vid:")).to_equal(false)
+
+        val index_position = body.index_of("for cid in self.covered_variant_ids:")
+        val scan_position = body.index_of("for vid in self.all_variant_ids:")
+        expect(index_position).to_be_less_than(scan_position)

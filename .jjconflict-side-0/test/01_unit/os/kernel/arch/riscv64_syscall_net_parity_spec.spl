@@ -1,0 +1,95 @@
+"""
+## Purpose and audience
+Purpose: Pin RV64 socket syscall routing to the shared checked socket owner.
+Audience: kernel engineers maintaining freestanding syscall adapters.
+## Operator workflow
+Run this spec with the unit suite; each assertion identifies a missing exact
+endpoint check or a forbidden arch-local socket-policy fork.
+## Compatibility and limitations
+This is a routing contract. Socket transport behavior remains owned by
+socket_compat and the portable syscall owner.
+# @manual: primary
+REQ-OS-KERNEL-001
+"""
+# @req: REQ-OS-KERNEL-001
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "RV64 portable network syscall parity":
+    it "routes socket through the shared current-task capability owner":
+        step("Verify: RV64 authorizes 70 through 76 only through the portable owner")
+        val source = rt_file_read_text("src/os/kernel/arch/riscv64/syscall.spl")
+        expect(source).to_contain("args.id >= 70u64 and args.id <= 76u64")
+        expect(source).to_contain("portable_net_capability_allowed_v1(args, sched, ipc_mgr)")
+        expect(source).to_contain("portable_net_dispatch_v1(args)")
+        expect(source).to_contain("portable_net_bind_args_checked_v1(args, sched, ipc_mgr)")
+
+    it "keeps close in the portable socket owner":
+        step("Verify: RV64 socket close cannot fork resource teardown")
+        val source = rt_file_read_text("src/os/kernel/arch/riscv64/syscall.spl")
+        expect(source).to_contain("if args.id == 33u64")
+        expect(source).to_contain("portable_net_close_v1(args.arg0 as i64)")
+
+    it "checks concrete bound ports rather than wildcard listener authority":
+        step("Verify: bind parses a sockaddr and listen plus accept use its recorded port")
+        val source = rt_file_read_text("src/os/kernel/ipc/syscall_net_portable_v1.spl")
+        expect(source).to_contain("portable_net_copy_sockaddr_in_v1(args.arg1, args.arg2)")
+        expect(source).to_contain("CapabilityKind.NetListen(port: addr.port)")
+        expect(source).to_contain("posix_bound_port_for_fd(args.arg0 as i32)")
+        expect(source).to_contain("no wildcard `NetListen(0)` fallback")
+
+    it "requires a distinct descriptor-allocation authority for socket":
+        step("Verify: listener setup cannot borrow outbound connection authority")
+        val source = rt_file_read_text("src/os/kernel/ipc/syscall_net_portable_v1.spl")
+        expect(source).to_contain("case 70u64:")
+        expect(source).to_contain("CapabilityKind.NetSocketCreate")
+
+    it "uses accepted-listener provenance for server I/O":
+        step("Verify: accepted DBD children send and receive with NetListen 5433")
+        val portable = rt_file_read_text("src/os/kernel/ipc/syscall_net_portable_v1.spl")
+        val sockets = rt_file_read_text("src/os/kernel/socket_compat.spl")
+        expect(portable).to_contain("case 75u64:")
+        expect(portable).to_contain("case 76u64:")
+        expect(portable).to_contain("posix_server_port_for_fd(args.arg0 as i32)")
+        expect(portable).to_contain("CapabilityKind.NetListen(port: port)")
+        expect(sockets).to_contain("_record_server_io_port(accepted_fd, port)")
+        expect(sockets).to_contain("_clear_server_io_port(fd)")
+
+    it "does not let outbound descriptors borrow listener authority":
+        step("Verify: descriptors without listener provenance require NetConnect")
+        val portable = rt_file_read_text("src/os/kernel/ipc/syscall_net_portable_v1.spl")
+        expect(portable).to_contain("nil: ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))")
+
+    it "shares dispatch with the shim instead of copying policy":
+        step("Verify: x86 shim and RV64 use one socket dispatch core")
+        val source = rt_file_read_text("src/os/kernel/abi/syscall_shim_net.spl")
+        expect(source).to_contain("portable_net_capability_allowed_v1")
+        expect(source).to_contain("val args = _make_args(71u64")
+        expect(source).to_contain("val args = _make_args(72u64")
+        expect(source).to_contain("args, g_shim_scheduler, g_shim_ipc")
+        expect(source).to_contain("return _EPERM")
+        expect(source).to_contain("portable_net_bind_args_checked_v1(")
+        expect(source).to_contain("portable_net_dispatch_v1(args).value")
+        expect(source).to_contain("portable_net_dispatch_v1(_make_args(76u64")
+
+    it "makes wildcard and wrong-endpoint shim binds fail before dispatch":
+        step("Verify: C-ABI bind/listen handlers cannot bypass the exact endpoint gate")
+        val shim = rt_file_read_text("src/os/kernel/abi/syscall_shim_net.spl")
+        val portable = rt_file_read_text("src/os/kernel/ipc/syscall_net_portable_v1.spl")
+        expect(shim).to_contain("portable_net_bind_args_checked_v1(")
+        expect(shim).to_contain("if not portable_net_capability_allowed_v1(")
+        expect(portable).to_contain("match portable_net_copy_sockaddr_in_v1(args.arg1, args.arg2):")
+        expect(portable).to_contain("portable_net_dispatch_bind_checked_v1(")
+        expect(portable).to_contain("address: addr.addr, port: addr.port")
+        expect(portable).to_contain("posix_bound_port_for_fd(args.arg0 as i32)")
+        expect(portable.contains("CapabilityKind.NetBindIpv4(address: 0u32")).to_equal(false)
+
+    it "disables the ambiguous generic port-only bind route":
+        step("Verify: generic syscall 71 cannot mistake sockaddr length for listener authority")
+        val generic = rt_file_read_text("src/os/kernel/ipc/syscall.spl")
+        expect(generic).to_contain("case 71:    # NetBind")
+        expect(generic).to_contain("portable_net_bind_args_checked_v1 instead")
+        expect(generic).to_contain("SyscallResult(value: SYSCALL_EPERM)")
+        expect(generic.contains("CapabilityKind.NetListen(port: args.arg2 as u16)")).to_equal(false)

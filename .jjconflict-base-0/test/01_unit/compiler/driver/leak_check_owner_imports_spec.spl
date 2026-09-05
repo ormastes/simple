@@ -1,0 +1,60 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+"""
+# Leak Check Owner Imports Contract
+
+The Stage4 closure must resolve leak-check runtime types and driver calls from
+their concrete owner modules rather than through multi-hop facades; the runtime
+observable of that contract is that the tracker operations and entry type,
+imported from those owners, work end to end.
+"""
+
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "leak check owner imports":
+    # @manual scenario evidence
+    it "imports the interpreter call and result type from concrete owners":
+        # @req REQ-SSPEC-COMPILER
+        step("imports the interpreter call and result type from concrete owners")
+        val source = rt_file_read_text("src/compiler/tools/leak_check/main.spl") ?? ""
+        expect(source).to_contain("use compiler.driver.driver_public_interpret_bridge.\{interpret_file\}")
+        expect(source).to_contain("use compiler.common.driver_core_types.\{CompileResult\}")
+        expect(source).to_not_contain("use compiler.driver.\{interpret_file, CompileResult\}")
+    it "imports MemLeakEntry directly while retaining adjacent tracker operations":
+        # @req REQ-SSPEC-COMPILER
+        step("imports MemLeakEntry directly while retaining adjacent tracker operations")
+        val source = rt_file_read_text("src/compiler/tools/leak_check/main.spl") ?? ""
+        expect(source).to_contain("use std.mem_tracker.types.\{MemLeakEntry\}")
+        expect(source).to_contain("mem_enable, mem_disable, mem_snapshot, mem_dump_leaks, parse_leak_dump")
+        expect(source.contains("parse_leak_dump, MemLeakEntry")).to_equal(false)
+
+    it "routes runner file reads through the canonical runtime facade":
+        val growth = read_file_text("src/compiler/tools/leak_check/growth_runner.spl")
+        val static_runner = read_file_text("src/compiler/tools/leak_check/static_runner.spl")
+        val internal = read_file_text("src/compiler/tools/leak_check/internal_runner.spl")
+        val external = read_file_text("src/compiler/tools/leak_check/external_runner.spl")
+
+        expect(growth).to_contain(r"use std.io_runtime.{file_exists, read_file_text}")
+        expect(static_runner).to_contain(r"use std.io_runtime.{file_exists, read_file_text}")
+        expect(internal).to_contain(r"use std.io_runtime.{file_exists, read_file_text}")
+        expect(external).to_contain(r"use std.io_runtime.{file_exists}")
+        expect(growth.contains("extern fn rt_file_exists")).to_equal(false)
+        expect(growth.contains("extern fn rt_file_read_text")).to_equal(false)
+        expect(static_runner.contains("extern fn rt_file_exists")).to_equal(false)
+        expect(static_runner.contains("extern fn rt_file_read_text")).to_equal(false)
+        expect(internal.contains("extern fn rt_file_exists")).to_equal(false)
+        expect(internal.contains("extern fn rt_file_read_text")).to_equal(false)
+        expect(external.contains("extern fn rt_file_exists")).to_equal(false)
+        expect(external.contains("extern fn rt_file_read_text")).to_equal(false)
+
+    it "preserves facade file-existence and text-read behavior":
+        val path = "src/compiler/tools/leak_check/growth_runner.spl"
+        expect(file_exists(path)).to_equal(true)
+        expect(read_file_text(path)).to_contain("Leak Check - Growth Runner")

@@ -1,0 +1,48 @@
+# Cohesive dynSMF session teardown owner.
+
+use os.smf.dynsmf_session.{
+    DynSmfSession,
+    DynSmfLoadedLibrary,
+    DynSmfEvidenceRow
+}
+use os.smf.smf_dynlib.{smf_dlclose}
+
+# Close every loaded library exactly once, in reverse load order. Unlike
+# repeated dynsmf_session_unload calls this is one O(libraries) pass and
+# updates rows in place, avoiding O(n^2) scans and array copies at shutdown.
+fn dynsmf_session_close(session: DynSmfSession) -> DynSmfSession:
+    var out = session
+    var idx = out.loaded.len()
+    while idx > 0:
+        idx = idx - 1
+        val lib = out.loaded[idx]
+        if lib.status == "loaded":
+            val close = smf_dlclose(lib.handle)
+            if close.success:
+                out.generation = out.generation + 1
+                out.loaded[idx] = DynSmfLoadedLibrary(
+                    id: lib.id,
+                    handle: lib.handle,
+                    generation: lib.generation,
+                    status: "unloaded",
+                    symbol_registry: "")
+                out.evidence.push(DynSmfEvidenceRow(
+                    library_id: lib.id,
+                    action: "unload",
+                    policy_source: out.policy.source,
+                    status: "unloaded",
+                    handle: lib.handle,
+                    generation: out.generation,
+                    reason: "smf_dlclose"))
+            else:
+                out.evidence.push(DynSmfEvidenceRow(
+                    library_id: lib.id,
+                    action: "unload",
+                    policy_source: out.policy.source,
+                    status: "failed",
+                    handle: lib.handle,
+                    generation: out.generation,
+                    reason: close.error_msg))
+    out
+
+export dynsmf_session_close

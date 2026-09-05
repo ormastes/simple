@@ -1,0 +1,63 @@
+"""
+## Purpose and audience
+Purpose: Prove function bodies retain scoped unsafe capability names as metadata.
+Audience: frontend and bootstrap maintainers changing split parser ownership.
+"""
+# @req: REQ-COMPILER-FRONTEND-001
+
+use core.ast.{
+    ast_reset, module_get_decls, decl_get_body, decl_get_name,
+    stmt_get_expr, expr_get_tag, expr_get_str, expr_get_stmts,
+    EXPR_UNSAFE_BLOCK, EXPR_CALL
+}
+use core.parser.{parse_module, parser_has_errors}
+
+use std.spec.step
+
+fn unsafe_call_for(decl_idx: i64) -> i64:
+    val body = decl_get_body(decl_idx)
+    expect(body.len()).to_equal(1)
+    val scoped = stmt_get_expr(body[0])
+    expect(expr_get_tag(scoped)).to_equal(EXPR_UNSAFE_BLOCK)
+    # Capability identifiers belong only to this metadata slot. If `ffi`
+    # instead becomes an ordinary array/call expression, native codegen later
+    # reports `GlobalLoad: unresolved identifier 'ffi'` for every wrapper.
+    expect(expr_get_str(scoped)).to_equal("ffi")
+    val scoped_body = expr_get_stmts(scoped)
+    expect(scoped_body.len()).to_equal(1)
+    stmt_get_expr(scoped_body[0])
+
+describe "scoped unsafe function-body parser ownership":
+
+    it "keeps optional-array, tuple, and scalar FFI wrappers out of GlobalLoad":
+        step("Parse representative io/system SFFI wrapper bodies")
+        val source =
+            "fn read_lines(path: text) -> [text]?:\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        rt_file_read_lines(path)\n" +
+            "fn run(cmd: text, args: [text]) -> (text, text, i64):\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        rt_process_run(cmd, args)\n" +
+            "fn unlock(fd: i64) -> bool:\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        rt_file_unlock(fd)\n"
+
+        ast_reset()
+        parse_module(source, "scoped_unsafe_function_body_parser_spec_fixture.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(3)
+        expect(decl_get_name(decls[0])).to_equal("read_lines")
+        expect(decl_get_name(decls[1])).to_equal("run")
+        expect(decl_get_name(decls[2])).to_equal("unlock")
+
+        val read_call = unsafe_call_for(decls[0])
+        val run_call = unsafe_call_for(decls[1])
+        val unlock_call = unsafe_call_for(decls[2])
+        expect(expr_get_tag(read_call)).to_equal(EXPR_CALL)
+        expect(expr_get_tag(run_call)).to_equal(EXPR_CALL)
+        expect(expr_get_tag(unlock_call)).to_equal(EXPR_CALL)
+        expect(expr_get_str(read_call)).to_equal("rt_file_read_lines")
+        expect(expr_get_str(run_call)).to_equal("rt_process_run")
+        expect(expr_get_str(unlock_call)).to_equal("rt_file_unlock")

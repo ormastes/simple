@@ -1,0 +1,74 @@
+# HIR verification-contract lowering.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_verification.{hir_verification_append_clause, hir_verification_decreases_type_valid}
+use compiler.frontend.parser_types.{ContractBlock, ContractClause}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.expressions.*
+use compiler.common.dependency.visibility.{Visibility}
+
+impl HirLowering:
+    me lower_verification_contract_clause(
+        parser_clause: ContractClause,
+        kind: HirContractClauseKind,
+        binding_name: text,
+        binding_type: HirType,
+        require_bool: bool
+    ) -> HirContractClause:
+        self.symbols.push_scope(ScopeKind.Block)
+        if binding_name != "":
+            self.symbols.define(binding_name, SymbolKind.Variable, Some(binding_type), parser_clause.span, Visibility.Private, false, nil)
+        val predicate = self.lower_hir_expr(parser_clause.expr)
+        self.symbols.pop_scope()
+        if require_bool:
+            var predicate_is_bool = false
+            if predicate.has_type_:
+                match predicate.type_.kind:
+                    case HirTypeKind.Bool: predicate_is_bool = true
+                    case _: pass
+            if not predicate_is_bool:
+                self.error("FV2-E-CONTRACT-TYPE: contract predicate must have exact bool type", parser_clause.span)
+        HirContractClause(kind: kind, predicate: predicate, binding_name: binding_name, span: parser_clause.span)
+
+    me lower_verification_decreases_clause(parser_clause: ContractClause) -> HirContractClause:
+        val clause = self.lower_verification_contract_clause(
+            parser_clause, HirContractClauseKind.Decreases, "",
+            HirType(kind: HirTypeKind.Unit, span: parser_clause.span), false)
+        val exact_unsigned_measure = clause.predicate.has_type_ and
+            hir_verification_decreases_type_valid(clause.predicate.type_)
+        if not exact_unsigned_measure:
+            self.error("FV2-E-CONTRACT-DECREASES-TYPE: decreases requires an exact unsigned fixed-width measure", parser_clause.span)
+        clause
+
+    me lower_verification_contract(contract: ContractBlock, return_type: HirType) -> HirContractBlock?:
+        var has_decreases = false
+        if val _measure = contract.decrease_measure:
+            has_decreases = true
+        val has_contract = contract.preconditions.len() > 0 or contract.invariants.len() > 0 or
+            contract.postconditions.len() > 0 or contract.error_postconditions.len() > 0 or
+            contract.proof_uses != "" or has_decreases
+        if not has_contract:
+            return nil
+        var normal_type = return_type
+        var error_type = HirType(kind: HirTypeKind.Unit, span: return_type.span)
+        var result_outcome = false
+        match return_type.kind:
+            case HirTypeKind.Result(ok_type, err_type):
+                normal_type = ok_type
+                error_type = err_type
+                result_outcome = true
+            case _: pass
+        if contract.error_postconditions.len() > 0 and not result_outcome:
+            self.error("FV2-E-CONTRACT-ERROR-OUTCOME: out_err requires Result return semantics", return_type.span)
+        var clauses: [HirContractClause] = []
+        for clause in contract.preconditions:
+            clauses = hir_verification_append_clause(clauses, self.lower_verification_contract_clause(clause, HirContractClauseKind.Requires, "", return_type, true))
+        for clause in contract.invariants:
+            clauses = hir_verification_append_clause(clauses, self.lower_verification_contract_clause(clause, HirContractClauseKind.StatePredicate, "", return_type, true))
+        for clause in contract.postconditions:
+            clauses = hir_verification_append_clause(clauses, self.lower_verification_contract_clause(clause, HirContractClauseKind.EnsuresNormal, contract.postcondition_binding, normal_type, true))
+        for clause in contract.error_postconditions:
+            clauses = hir_verification_append_clause(clauses, self.lower_verification_contract_clause(clause, HirContractClauseKind.EnsuresError, contract.error_binding, error_type, true))
+        if val measure = contract.decrease_measure:
+            clauses = hir_verification_append_clause(clauses, self.lower_verification_decreases_clause(measure))
+        val outcome = if result_outcome: HirContractOutcome.Result else: HirContractOutcome.Plain
+        Some(HirContractBlock(clauses: clauses, proof_uses: contract.proof_uses, outcome: outcome))

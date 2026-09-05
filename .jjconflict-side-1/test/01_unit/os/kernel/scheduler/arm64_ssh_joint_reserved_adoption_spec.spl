@@ -1,0 +1,116 @@
+"""Scheduler boundary for loader-owned ARM64 SSH joint reservations."""
+
+use std.spec.{describe, it, expect, fail}
+use std.fs_driver.mount_table.{MountTable}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityStateV1,
+    executable_authority_loader_owner_initialize,
+    executable_authority_issue_verified,
+    executable_authority_begin_joint_reservation_v1,
+    executable_authority_abort_joint_reservation_v1,
+    executable_authority_snapshot
+}
+use os.kernel.loader.executable_load_plan_v1.{
+    executable_load_consumer_new_v1
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_validate
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+
+fn joint_image() -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1, open_handle_id: 17u64, mount_id: 2u64,
+        filesystem_name: "dbfs",
+        canonical_source_path: "/servers/simple-web",
+        mount_generation: 3u64, file_id: 17u64, file_generation: 4u64,
+        size_bytes: 4096u64, role: "web-server",
+        target: ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos"),
+        verified_load_ranges: [ExecutableLoadRangeV1(
+            file_offset: 0u64, file_size: 4096u64,
+            virtual_address: 0x400000u64, memory_size: 4096u64,
+            writable: false, executable: true)],
+        image_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        admission_id: "ssh-joint-scheduler-1", trust_epoch: 5u64,
+        read_count: 0u64, read_bytes: 0u64, consumed: false)
+
+describe "scheduler joint-reserved executable adoption":
+    it "requires the matching lease and terminally cleans a committed failure":
+        val owner_result = executable_authority_loader_owner_initialize(
+            8, 0x5343484A4F494E54u64)
+        if owner_result.is_err(): fail("authority owner init failed")
+        val owner = owner_result.unwrap()
+        val consumer = executable_load_consumer_new_v1(
+            "simpleos", "aarch64", "simpleos")
+        val launch = executable_launch_arguments_v1_validate(
+            "/servers/simple-web", ["/servers/simple-web"], [])
+        if launch.is_err(): fail("launch fixture invalid")
+
+        val matching_token = executable_authority_issue_verified(
+            owner, joint_image(), true, 0x400100u64).unwrap()
+        val matching = executable_authority_begin_joint_reservation_v1(
+            owner, matching_token, consumer, 0x400100u64,
+            "/servers/simple-web").unwrap()
+        var matching_scheduler = Scheduler.new_bootstrap()
+        var empty_table = MountTable.new()
+        val rejected_after_commit =
+            matching_scheduler.adopt_joint_reserved_executable_pid_with_launch_v1(
+                empty_table, owner, matching_token, matching.lease, consumer,
+                launch.unwrap(), 0x400100u64, TaskPriority.Normal,
+                CapabilitySet.empty())
+        expect(rejected_after_commit.pid).to_equal(0u64)
+        expect(executable_authority_snapshot(
+            owner, matching_token).unwrap().state).to_equal(
+                ExecutableAuthorityStateV1.CloseRetryable)
+
+        val token_a = executable_authority_issue_verified(
+            owner, joint_image(), true, 0x400100u64).unwrap()
+        val token_b = executable_authority_issue_verified(
+            owner, joint_image(), true, 0x400100u64).unwrap()
+        val reserved_a = executable_authority_begin_joint_reservation_v1(
+            owner, token_a, consumer, 0x400100u64,
+            "/servers/simple-web").unwrap()
+        val reserved_b = executable_authority_begin_joint_reservation_v1(
+            owner, token_b, consumer, 0x400100u64,
+            "/servers/simple-web").unwrap()
+        var mismatch_scheduler = Scheduler.new_bootstrap()
+        val mismatched =
+            mismatch_scheduler.adopt_joint_reserved_executable_pid_with_launch_v1(
+                empty_table, owner, token_a, reserved_b.lease, consumer,
+                launch.unwrap(), 0x400100u64, TaskPriority.Normal,
+                CapabilitySet.empty())
+        expect(mismatched.pid).to_equal(0u64)
+        expect(executable_authority_snapshot(owner, token_a).unwrap().state).to_equal(
+            ExecutableAuthorityStateV1.JointReserved)
+        expect(executable_authority_snapshot(owner, token_b).unwrap().state).to_equal(
+            ExecutableAuthorityStateV1.JointReserved)
+        expect(executable_authority_abort_joint_reservation_v1(
+            owner, reserved_a.lease).is_ok()).to_be_true()
+        expect(executable_authority_abort_joint_reservation_v1(
+            owner, reserved_b.lease).is_ok()).to_be_true()
+
+        val path_token = executable_authority_issue_verified(
+            owner, joint_image(), true, 0x400100u64).unwrap()
+        val path_reserved = executable_authority_begin_joint_reservation_v1(
+            owner, path_token, consumer, 0x400100u64,
+            "/servers/simple-web").unwrap()
+        val wrong_launch = executable_launch_arguments_v1_validate(
+            "/servers/other", ["/servers/other"], []).unwrap()
+        var path_scheduler = Scheduler.new_bootstrap()
+        val wrong_binding =
+            path_scheduler.adopt_joint_reserved_executable_pid_with_launch_v1(
+                empty_table, owner, path_token, path_reserved.lease, consumer,
+                wrong_launch, 0x400100u64, TaskPriority.Normal,
+                CapabilitySet.empty())
+        expect(wrong_binding.pid).to_equal(0u64)
+        expect(executable_authority_snapshot(
+            owner, path_token).unwrap().state).to_equal(
+                ExecutableAuthorityStateV1.JointReserved)
+        expect(executable_authority_abort_joint_reservation_v1(
+            owner, path_reserved.lease).is_ok()).to_be_true()

@@ -1,0 +1,185 @@
+#!/bin/sh
+
+# Deterministic producer/consumer contract for the unified ARM64 QEMU kernel.
+# This library emits no receipt: it only validates build inputs and publishes an
+# atomic artifact manifest after the caller has completed a real native build.
+
+arm64_unified_sha256() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    arm64_unified_hash_line="$(sha256sum "$1")" || return 1
+    arm64_unified_hash="${arm64_unified_hash_line%% *}"
+    printf '%s\n' "$arm64_unified_hash" | grep -Eq '^[0-9a-f]{64}$' || return 1
+    printf '%s\n' "$arm64_unified_hash"
+}
+
+arm64_unified_source_snapshot() {
+    arm64_unified_snapshot_out="$1"
+    shift
+    python3 - "$arm64_unified_snapshot_out" "$@" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+out = sys.argv[1]
+roots = [os.fsencode(value) for value in sys.argv[2:]]
+paths = []
+for root in roots:
+    if os.path.islink(root):
+        raise SystemExit("symlink source root: " + os.fsdecode(root))
+    if os.path.isdir(root):
+        for base, dirs, files in os.walk(root):
+            dirs.sort()
+            files.sort()
+            if any(os.path.islink(os.path.join(base, name)) for name in dirs):
+                raise SystemExit("symlink source directory below: " + os.fsdecode(base))
+            paths.extend(os.path.join(base, name) for name in files)
+    elif os.path.isfile(root) or os.path.islink(root):
+        paths.append(root)
+    else:
+        raise SystemExit("missing source root: " + os.fsdecode(root))
+paths = sorted(set(paths))
+if not paths:
+    raise SystemExit("empty source snapshot")
+digest = hashlib.sha256()
+for path in paths:
+    mode = os.lstat(path).st_mode
+    if stat.S_ISLNK(mode):
+        raise SystemExit("symlink source file: " + os.fsdecode(path))
+    elif stat.S_ISREG(mode):
+        kind = b"F"
+        with open(path, "rb") as stream:
+            payload = stream.read()
+    else:
+        raise SystemExit("unsupported source node: " + os.fsdecode(path))
+    record = (kind + b"\0" + path + b"\0" + str(len(payload)).encode() +
+              b"\0" + hashlib.sha256(payload).hexdigest().encode() + b"\0")
+    digest.update(record)
+if os.path.islink(out):
+    raise SystemExit("symlink snapshot output: " + os.fsdecode(out))
+temporary = out + ".tmp." + str(os.getpid())
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(temporary, flags, 0o600)
+try:
+    with os.fdopen(descriptor, "w", encoding="ascii", newline="\n") as stream:
+        stream.write("source_fingerprint=" + digest.hexdigest() + "\n")
+        stream.write("source_file_count=" + str(len(paths)) + "\n")
+    os.replace(temporary, out)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+}
+
+arm64_unified_elf_identity() {
+    arm64_unified_elf="$1"
+    [ -f "$arm64_unified_elf" ] && [ ! -L "$arm64_unified_elf" ] &&
+        [ -s "$arm64_unified_elf" ] || return 1
+    arm64_unified_header="$(od -An -tx1 -N 32 "$arm64_unified_elf" 2>/dev/null | tr -d ' \n')" || return 1
+    [ "${#arm64_unified_header}" -eq 64 ] || return 1
+    [ "${arm64_unified_header#7f454c460201}" != "$arm64_unified_header" ] || return 1
+    # ELF64, little-endian, current version, ET_EXEC, EM_AARCH64.
+    [ "$(printf '%s' "$arm64_unified_header" | cut -c 33-40)" = 0200b700 ] || return 1
+    [ "$(printf '%s' "$arm64_unified_header" | cut -c 41-48)" = 01000000 ] || return 1
+    arm64_unified_entry_hex="$(printf '%s' "$arm64_unified_header" | cut -c 49-64)"
+    [ "$arm64_unified_entry_hex" != 0000000000000000 ] || return 1
+    ARM64_UNIFIED_ELF_CLASS=elf64
+    ARM64_UNIFIED_ELF_ENDIAN=little
+    ARM64_UNIFIED_ELF_TYPE=exec
+    ARM64_UNIFIED_ELF_MACHINE=aarch64
+    ARM64_UNIFIED_ELF_ENTRY_HEX="$arm64_unified_entry_hex"
+}
+
+arm64_unified_manifest_field() {
+    arm64_unified_field_key="$1"
+    arm64_unified_field_manifest="$2"
+    [ "$(grep -c "^${arm64_unified_field_key}=" "$arm64_unified_field_manifest" || true)" -eq 1 ] || return 1
+    sed -n "s/^${arm64_unified_field_key}=//p" "$arm64_unified_field_manifest"
+}
+
+arm64_unified_validate_manifest() {
+    arm64_unified_manifest="$1"
+    arm64_unified_expected_kernel="$2"
+    arm64_unified_expected_disk="$3"
+    arm64_unified_expected_entry="$4"
+    arm64_unified_expected_linker="$5"
+    arm64_unified_expected_compiler="$6"
+    arm64_unified_expected_provenance="$7"
+    arm64_unified_expected_disk_manifest="$8"
+    shift 8
+    [ -f "$arm64_unified_manifest" ] && [ ! -L "$arm64_unified_manifest" ] || return 1
+    arm64_unified_manifest_before="$(arm64_unified_sha256 "$arm64_unified_manifest")" || return 1
+    [ "$(arm64_unified_manifest_field schema "$arm64_unified_manifest")" = simpleos-arm64-unified-kernel-manifest-v1 ] || return 1
+    [ "$(arm64_unified_manifest_field status "$arm64_unified_manifest")" = pass ] || return 1
+    [ "$(arm64_unified_manifest_field artifact_kind "$arm64_unified_manifest")" = simpleos-arm64-unified-qemu-kernel ] || return 1
+    [ "$(arm64_unified_manifest_field entry_path "$arm64_unified_manifest")" = "$arm64_unified_expected_entry" ] || return 1
+    [ "$(arm64_unified_manifest_field backend "$arm64_unified_manifest")" = cranelift ] || return 1
+    [ "$(arm64_unified_manifest_field target "$arm64_unified_manifest")" = aarch64-unknown-none ] || return 1
+    arm64_unified_source_revision="$(arm64_unified_manifest_field source_revision "$arm64_unified_manifest")" || return 1
+    arm64_unified_source_fingerprint="$(arm64_unified_manifest_field source_fingerprint "$arm64_unified_manifest")" || return 1
+    arm64_unified_source_count="$(arm64_unified_manifest_field source_file_count "$arm64_unified_manifest")" || return 1
+    printf '%s\n' "$arm64_unified_source_revision" | grep -Eq '^[0-9a-f]{40}$' || return 1
+    printf '%s\n' "$arm64_unified_source_fingerprint" | grep -Eq '^[0-9a-f]{64}$' || return 1
+    printf '%s\n' "$arm64_unified_source_count" | grep -Eq '^[1-9][0-9]*$' || return 1
+    arm64_unified_current_revision="$(git rev-parse --verify HEAD)" || return 1
+    [ "$arm64_unified_source_revision" = "$arm64_unified_current_revision" ] || return 1
+    arm64_unified_snapshot="$(mktemp "${TMPDIR:-/tmp}/simpleos-arm64-source.XXXXXX")" || return 1
+    if ! arm64_unified_source_snapshot "$arm64_unified_snapshot" "$@"; then
+        rm -f "$arm64_unified_snapshot"
+        return 1
+    fi
+    arm64_unified_current_fingerprint="$(arm64_unified_manifest_field source_fingerprint "$arm64_unified_snapshot")" || {
+        rm -f "$arm64_unified_snapshot"
+        return 1
+    }
+    arm64_unified_current_count="$(arm64_unified_manifest_field source_file_count "$arm64_unified_snapshot")" || {
+        rm -f "$arm64_unified_snapshot"
+        return 1
+    }
+    rm -f "$arm64_unified_snapshot"
+    [ "$arm64_unified_source_fingerprint" = "$arm64_unified_current_fingerprint" ] || return 1
+    [ "$arm64_unified_source_count" = "$arm64_unified_current_count" ] || return 1
+    [ "$(arm64_unified_manifest_field kernel_path "$arm64_unified_manifest")" = "$arm64_unified_expected_kernel" ] || return 1
+    [ "$(arm64_unified_manifest_field disk_path "$arm64_unified_manifest")" = "$arm64_unified_expected_disk" ] || return 1
+    [ "$(arm64_unified_manifest_field disk_profile "$arm64_unified_manifest")" = desktop-fonts ] || return 1
+    [ "$(arm64_unified_manifest_field disk_access "$arm64_unified_manifest")" = read-only ] || return 1
+    [ "$(arm64_unified_manifest_field linker_script_path "$arm64_unified_manifest")" = "$arm64_unified_expected_linker" ] || return 1
+    [ "$(arm64_unified_manifest_field compiler_path "$arm64_unified_manifest")" = "$arm64_unified_expected_compiler" ] || return 1
+    [ "$(arm64_unified_manifest_field compiler_provenance_path "$arm64_unified_manifest")" = "$arm64_unified_expected_provenance" ] || return 1
+    [ "$(arm64_unified_manifest_field disk_manifest_path "$arm64_unified_manifest")" = "$arm64_unified_expected_disk_manifest" ] || return 1
+    [ -f "$arm64_unified_expected_entry" ] && [ ! -L "$arm64_unified_expected_entry" ] || return 1
+    [ -f "$arm64_unified_expected_linker" ] && [ ! -L "$arm64_unified_expected_linker" ] || return 1
+    [ -x "$arm64_unified_expected_compiler" ] && [ ! -L "$arm64_unified_expected_compiler" ] || return 1
+    [ -f "$arm64_unified_expected_provenance" ] && [ ! -L "$arm64_unified_expected_provenance" ] || return 1
+    [ -f "$arm64_unified_expected_disk_manifest" ] && [ ! -L "$arm64_unified_expected_disk_manifest" ] || return 1
+    arm64_unified_elf_identity "$arm64_unified_expected_kernel" || return 1
+    [ "$(arm64_unified_manifest_field elf_class "$arm64_unified_manifest")" = "$ARM64_UNIFIED_ELF_CLASS" ] || return 1
+    [ "$(arm64_unified_manifest_field elf_endian "$arm64_unified_manifest")" = "$ARM64_UNIFIED_ELF_ENDIAN" ] || return 1
+    [ "$(arm64_unified_manifest_field elf_type "$arm64_unified_manifest")" = "$ARM64_UNIFIED_ELF_TYPE" ] || return 1
+    [ "$(arm64_unified_manifest_field elf_machine "$arm64_unified_manifest")" = "$ARM64_UNIFIED_ELF_MACHINE" ] || return 1
+    [ "$(arm64_unified_manifest_field elf_entry_hex "$arm64_unified_manifest")" = "$ARM64_UNIFIED_ELF_ENTRY_HEX" ] || return 1
+    [ "$(arm64_unified_manifest_field kernel_sha256 "$arm64_unified_manifest")" = "$(arm64_unified_sha256 "$arm64_unified_expected_kernel")" ] || return 1
+    [ "$(arm64_unified_manifest_field disk_sha256 "$arm64_unified_manifest")" = "$(arm64_unified_sha256 "$arm64_unified_expected_disk")" ] || return 1
+    [ "$(arm64_unified_manifest_field entry_sha256 "$arm64_unified_manifest")" = "$(arm64_unified_sha256 "$arm64_unified_expected_entry")" ] || return 1
+    [ "$(arm64_unified_manifest_field linker_script_sha256 "$arm64_unified_manifest")" = "$(arm64_unified_sha256 "$(arm64_unified_manifest_field linker_script_path "$arm64_unified_manifest")")" ] || return 1
+    [ "$(arm64_unified_manifest_field compiler_sha256 "$arm64_unified_manifest")" = "$(arm64_unified_sha256 "$(arm64_unified_manifest_field compiler_path "$arm64_unified_manifest")")" ] || return 1
+    arm64_unified_compiler_path="$(arm64_unified_manifest_field compiler_path "$arm64_unified_manifest")" || return 1
+    arm64_unified_compiler_provenance="$(arm64_unified_manifest_field compiler_provenance_path "$arm64_unified_manifest")" || return 1
+    [ "$(arm64_unified_manifest_field compiler_provenance_sha256 "$arm64_unified_manifest")" = "$(arm64_unified_sha256 "$arm64_unified_compiler_provenance")" ] || return 1
+    [ "$(arm64_unified_manifest_field status "$arm64_unified_compiler_provenance")" = pass ] || return 1
+    [ "$(arm64_unified_manifest_field artifact_kind "$arm64_unified_compiler_provenance")" = pure-simple-bootstrap-compiler ] || return 1
+    [ "$(arm64_unified_manifest_field output_sha256 "$arm64_unified_compiler_provenance")" = "$(arm64_unified_sha256 "$arm64_unified_compiler_path")" ] || return 1
+    arm64_unified_disk_manifest="$(arm64_unified_manifest_field disk_manifest_path "$arm64_unified_manifest")" || return 1
+    [ "$(arm64_unified_manifest_field disk_manifest_sha256 "$arm64_unified_manifest")" = "$(arm64_unified_sha256 "$arm64_unified_disk_manifest")" ] || return 1
+    [ "$(arm64_unified_manifest_field schema "$arm64_unified_disk_manifest")" = simpleos-arm64-unified-font-disk-v1 ] || return 1
+    [ "$(arm64_unified_manifest_field status "$arm64_unified_disk_manifest")" = pass ] || return 1
+    [ "$(arm64_unified_manifest_field disk_path "$arm64_unified_disk_manifest")" = "$arm64_unified_expected_disk" ] || return 1
+    [ "$(arm64_unified_manifest_field disk_sha256 "$arm64_unified_disk_manifest")" = "$(arm64_unified_sha256 "$arm64_unified_expected_disk")" ] || return 1
+    [ "$(arm64_unified_manifest_field readonly "$arm64_unified_disk_manifest")" = true ] || return 1
+    [ "$(arm64_unified_sha256 "$arm64_unified_manifest")" = "$arm64_unified_manifest_before" ] || return 1
+}

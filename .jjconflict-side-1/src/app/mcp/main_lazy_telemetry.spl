@@ -1,0 +1,391 @@
+# MCP token-savings telemetry — persistent per-call ledger + ponytail memo
+#
+# Records what the context-mode mimic (simple_ctx_*) and the ponytail mimic
+# (simple_ponytail) keep OUT of the model context, so `simple_token_stats`
+# can show per-feature savings.
+#
+#   telemetry.sdn       tok_events   | id, feature, tool, ts, captured, returned, hit |
+#   telemetry_memo.sdn  tok_memo     | key, ts, bytes, findings |   (findings escaped)
+#
+# Both live next to the ctx store (`.simple/ctx/`, override SIMPLE_CTX_DIR)
+# and are written atomically (tmp + rename), same pattern as chunks.sdn.
+#
+# Definitions (also in doc/07_guide/app/mcp/mcp.md § Token savings):
+#   bytes_captured  raw program/page/file bytes the tool consumed and stored
+#                   or scanned — what a plain Bash/Read would have put in
+#                   the context.
+#   bytes_returned  the tool result text actually sent back to the LLM.
+#   tokens_saved    max(0, captured - returned) / 4  (4 bytes ≈ 1 token).
+#   ponytail hit    same file content + mode + level already analyzed: the
+#                   cached findings are returned BYTE-IDENTICAL, so the model
+#                   receives exactly what a miss would have sent — a hit saves
+#                   NO tokens. It saves the repeat analysis (source re-scan +
+#                   findings recomputation): the prior analysis bytes count
+#                   ONLY under `repeat_work_avoided_bytes`, never under
+#                   bytes_captured / tokens_saved (that double-counted until
+#                   2026-08-28).
+
+use std.io_runtime.{env_get, file_read, file_write, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
+use std.database.core.{parse_sdn_table}
+use std.common.crypto.sha256.{sha256_text}
+use .main_lazy_json.{extract_field, make_tool_result}
+
+const TOK_FEATURE_CTX: text = "ctx"
+const TOK_FEATURE_PONYTAIL: text = "ponytail"
+const _TOK_SECS_7D: i64 = 604800
+
+fn _tok_store_dir() -> text:
+    val override = env_get("SIMPLE_CTX_DIR") ?? ""
+    if override != "":
+        return override
+    ".simple/ctx"
+
+fn tok_telemetry_path() -> text:
+    _tok_store_dir() + "/telemetry.sdn"
+
+fn tok_memo_path() -> text:
+    _tok_store_dir() + "/telemetry_memo.sdn"
+
+fn _tok_ensure_dir() -> bool:
+    val dir = _tok_store_dir()
+    if file_exists(dir):
+        return true
+    dir_create(dir, true)
+
+fn _tok_write_atomic(path: text, content: text) -> bool:
+    val tmp = path + ".tmp"
+    if not file_write(tmp, content):
+        return false
+    file_move_cross_device(tmp, path)
+
+fn _tok_now_secs() -> i64:
+    time_now_unix_micros() / 1000000
+
+# Same cell escaping as the ctx chunk store: one line, no raw double quote.
+fn _tok_escape_cell(s: text) -> text:
+    var r = s.replace("\\", "\\\\")
+    r = r.replace("\"", "\\q")
+    r = r.replace("\r", "\\r")
+    r = r.replace("\n", "\\n")
+    r = r.replace("\t", "\\t")
+    r
+
+fn _tok_unescape_cell(s: text) -> text:
+    var out: [text] = []
+    var esc = false
+    for ch in s:
+        if esc:
+            esc = false
+            if ch == "n":
+                out.push("\n")
+            elif ch == "r":
+                out.push("\r")
+            elif ch == "t":
+                out.push("\t")
+            elif ch == "q":
+                out.push("\"")
+            else:
+                out.push(ch)
+        elif ch == "\\":
+            esc = true
+        else:
+            out.push(ch)
+    out.join("")
+
+fn _tok_cell(s: text) -> text:
+    val e = _tok_escape_cell(s)
+    if e.contains(","):
+        return "\"" + e + "\""
+    e
+
+# ---------------------------------------------------------------------------
+# Event ledger
+# ---------------------------------------------------------------------------
+
+struct TokEvent:
+    id: i64
+    feature: text
+    tool: text
+    ts: i64
+    captured: i64
+    returned: i64
+    hit: bool
+
+fn tok_load_events() -> [TokEvent]:
+    var out: [TokEvent] = []
+    val path = tok_telemetry_path()
+    if not file_exists(path):
+        return out
+    val table = parse_sdn_table(file_read(path))
+    match table:
+        Some(t):
+            for row in t.rows:
+                out.push(TokEvent(
+                    id: (row.get("id") ?? "0").to_int() ?? 0,
+                    feature: row.get("feature") ?? "",
+                    tool: row.get("tool") ?? "",
+                    ts: (row.get("ts") ?? "0").to_int() ?? 0,
+                    captured: (row.get("captured") ?? "0").to_int() ?? 0,
+                    returned: (row.get("returned") ?? "0").to_int() ?? 0,
+                    hit: (row.get("hit") ?? "0") == "1"
+                ))
+        nil:
+            pass
+    out
+
+fn _tok_header() -> text:
+    "# token-savings telemetry — written by simple_ctx_* / simple_ponytail. Do not edit by hand.\ntok_events | id, feature, tool, ts, captured, returned, hit |\n"
+
+# Append one event with an explicit timestamp (seconds). The explicit `ts`
+# is the seam specs use to plant old events for the 7-day window.
+fn tok_record_at(feature: text, tool: text, ts: i64, captured: i64, returned: i64, hit: bool) -> bool:
+    if not _tok_ensure_dir():
+        return false
+    val path = tok_telemetry_path()
+    var next: i64 = 1
+    var body = ""
+    if file_exists(path):
+        body = file_read(path)
+        for e in tok_load_events():
+            if e.id >= next:
+                next = e.id + 1
+    else:
+        body = _tok_header()
+    val hit_s = if hit: "1" else: "0"
+    val line = "    " + str(next) + ", " + feature + ", " + tool + ", " + str(ts) + ", " + str(captured) + ", " + str(returned) + ", " + hit_s + "\n"
+    _tok_write_atomic(path, body + line)
+
+fn tok_record(feature: text, tool: text, captured: i64, returned: i64, hit: bool) -> bool:
+    tok_record_at(feature, tool, _tok_now_secs(), captured, returned, hit)
+
+fn tok_tokens_saved(captured: i64, returned: i64) -> i64:
+    val d = captured - returned
+    if d <= 0:
+        return 0
+    d / 4
+
+# Truncates the event ledger. The ponytail memo is kept: it is a cache, not
+# a counter, and clearing it would only force re-analysis.
+fn tok_reset() -> bool:
+    val path = tok_telemetry_path()
+    if file_exists(path):
+        return file_delete(path)
+    true
+
+# ---------------------------------------------------------------------------
+# Rollup
+# ---------------------------------------------------------------------------
+
+struct TokRollup:
+    calls: i64
+    hits: i64
+    captured: i64
+    returned: i64
+    saved: i64
+    avoided: i64   # repeat-work bytes a cache hit did not re-scan/recompute (not a token saving)
+    calls_7d: i64
+    hits_7d: i64
+    saved_7d: i64
+
+fn _tok_empty_rollup() -> TokRollup:
+    TokRollup(calls: 0, hits: 0, captured: 0, returned: 0, saved: 0, avoided: 0, calls_7d: 0, hits_7d: 0, saved_7d: 0)
+
+fn tok_rollup(events: [TokEvent], feature: text, now: i64) -> TokRollup:
+    var r = _tok_empty_rollup()
+    val since = now - _TOK_SECS_7D
+    for e in events:
+        if feature != "" and e.feature != feature:
+            continue
+        # A memo hit returns byte-identical output: nothing was kept out of
+        # the context, so it contributes 0 to captured/saved and its prior
+        # analysis bytes go to `avoided` instead.
+        var s: i64 = 0
+        r.calls = r.calls + 1
+        if e.hit:
+            r.hits = r.hits + 1
+            r.avoided = r.avoided + e.captured
+            r.returned = r.returned + e.returned
+        else:
+            s = tok_tokens_saved(e.captured, e.returned)
+            r.captured = r.captured + e.captured
+            r.returned = r.returned + e.returned
+            r.saved = r.saved + s
+        if e.ts >= since:
+            r.calls_7d = r.calls_7d + 1
+            r.saved_7d = r.saved_7d + s
+            if e.hit:
+                r.hits_7d = r.hits_7d + 1
+    r
+
+fn tok_stats_text() -> text:
+    val events = tok_load_events()
+    val now = _tok_now_secs()
+    val ctx = tok_rollup(events, TOK_FEATURE_CTX, now)
+    val pony = tok_rollup(events, TOK_FEATURE_PONYTAIL, now)
+    val all = tok_rollup(events, "", now)
+    var lines: [text] = []
+    lines.push("token stats store: " + tok_telemetry_path())
+    lines.push("ctx-mimic: calls=" + str(ctx.calls) + " bytes_captured=" + str(ctx.captured) + " bytes_returned=" + str(ctx.returned) + " tokens_saved=" + str(ctx.saved) + " last_7d: calls=" + str(ctx.calls_7d) + " tokens_saved=" + str(ctx.saved_7d))
+    lines.push("ponytail-mimic: calls=" + str(pony.calls) + " cache_hits=" + str(pony.hits) + " bytes_captured=" + str(pony.captured) + " bytes_returned=" + str(pony.returned) + " tokens_saved=" + str(pony.saved) + " repeat_work_avoided_bytes=" + str(pony.avoided) + " last_7d: calls=" + str(pony.calls_7d) + " cache_hits=" + str(pony.hits_7d) + " tokens_saved=" + str(pony.saved_7d))
+    lines.push("total: calls=" + str(all.calls) + " bytes_captured=" + str(all.captured) + " bytes_returned=" + str(all.returned) + " tokens_saved=" + str(all.saved) + " last_7d: tokens_saved=" + str(all.saved_7d))
+    lines.push("(tokens_saved = max(0, bytes_captured - bytes_returned) / 4 over cache MISSES only; a ponytail cache hit returns byte-identical findings, saves 0 tokens, and counts its prior analysis bytes under repeat_work_avoided_bytes)")
+    lines.join("\n")
+
+# ---------------------------------------------------------------------------
+# Ponytail memo (content-hash keyed)
+# ---------------------------------------------------------------------------
+
+struct TokMemo:
+    key: text
+    ts: i64
+    bytes: i64
+    findings: text
+
+fn tok_memo_key(source: text, mode: text, level: text) -> text:
+    sha256_text(mode + "\n|" + level + "\n|" + source)
+
+fn _tok_load_memos() -> [TokMemo]:
+    var out: [TokMemo] = []
+    val path = tok_memo_path()
+    if not file_exists(path):
+        return out
+    val table = parse_sdn_table(file_read(path))
+    match table:
+        Some(t):
+            for row in t.rows:
+                out.push(TokMemo(
+                    key: row.get("key") ?? "",
+                    ts: (row.get("ts") ?? "0").to_int() ?? 0,
+                    bytes: (row.get("bytes") ?? "0").to_int() ?? 0,
+                    findings: _tok_unescape_cell(row.get("findings") ?? "")
+                ))
+        nil:
+            pass
+    out
+
+fn tok_memo_get(key: text) -> TokMemo?:
+    for m in _tok_load_memos():
+        if m.key == key:
+            return Some(m)
+    nil
+
+fn tok_memo_put(key: text, bytes: i64, findings: text) -> bool:
+    if not _tok_ensure_dir():
+        return false
+    val path = tok_memo_path()
+    var body = ""
+    if file_exists(path):
+        body = file_read(path)
+    else:
+        body = "# ponytail memo — content-hash keyed findings. Do not edit by hand.\ntok_memo | key, ts, bytes, findings |\n"
+    val line = "    " + key + ", " + str(_tok_now_secs()) + ", " + str(bytes) + ", " + _tok_cell(findings) + "\n"
+    _tok_write_atomic(path, body + line)
+
+# ---------------------------------------------------------------------------
+# Tool handler: simple_token_stats
+# ---------------------------------------------------------------------------
+
+
+fn _tok_wants_reset(body: text) -> bool:
+    if extract_field(body, "reset") == "true":
+        return true
+    extract_field(body, "args").contains("--reset")
+
+# ---------------------------------------------------------------------------
+# Code burn: where the tokens actually went
+# ---------------------------------------------------------------------------
+#
+# `tok_stats_text` answers "how much did the mimics save". This answers the
+# other half — WHICH tool spent the budget — by ranking every feature/tool
+# pair on bytes_returned (what actually reached the model). `saved` on the
+# same row is the comparison against the unoptimized original: the bytes the
+# tool consumed minus the bytes it handed back.
+
+struct TokBurn:
+    key: text
+    calls: i64
+    captured: i64
+    returned: i64
+    saved: i64
+
+fn _tok_burn_find(rows: [TokBurn], key: text) -> i64:
+    var i: i64 = 0
+    for r in rows:
+        if r.key == key:
+            return i
+        i = i + 1
+    -1
+
+# Grouped by "<feature>/<tool>", ranked by bytes_returned descending.
+fn tok_burn_rows(events: [TokEvent]) -> [TokBurn]:
+    var rows: [TokBurn] = []
+    for e in events:
+        val key = e.feature + "/" + e.tool
+        val at = _tok_burn_find(rows, key)
+        var row = if at >= 0: rows[at] else: TokBurn(key: key, calls: 0, captured: 0, returned: 0, saved: 0)
+        row.calls = row.calls + 1
+        row.returned = row.returned + e.returned
+        if not e.hit:
+            row.captured = row.captured + e.captured
+            row.saved = row.saved + tok_tokens_saved(e.captured, e.returned)
+        if at >= 0:
+            rows[at] = row
+        else:
+            rows.push(row)
+    # Selection sort: the row count is the number of distinct tools, not events.
+    var i: i64 = 0
+    while i < rows.len():
+        var best = i
+        var j = i + 1
+        while j < rows.len():
+            if rows[j].returned > rows[best].returned:
+                best = j
+            j = j + 1
+        if best != i:
+            val tmp = rows[i]
+            rows[i] = rows[best]
+            rows[best] = tmp
+        i = i + 1
+    rows
+
+fn _tok_pct(part: i64, whole: i64) -> i64:
+    if whole <= 0:
+        return 0
+    (part * 100) / whole
+
+fn tok_burn_text() -> text:
+    val events = tok_load_events()
+    val rows = tok_burn_rows(events)
+    var lines: [text] = []
+    lines.push("code burn — where tokens were spent (ledger: " + tok_telemetry_path() + ")")
+    if rows.len() == 0:
+        lines.push("(no recorded calls yet)")
+        return lines.join("\n")
+    var total_returned: i64 = 0
+    var total_saved: i64 = 0
+    for r in rows:
+        total_returned = total_returned + r.returned
+        total_saved = total_saved + r.saved
+    lines.push("feature/tool | calls | bytes_to_model | share% | tokens_saved_vs_original")
+    for r in rows:
+        lines.push(r.key + " | " + str(r.calls) + " | " + str(r.returned) + " | " + str(_tok_pct(r.returned, total_returned)) + "% | " + str(r.saved))
+    lines.push("TOTAL | " + str(events.len()) + " | " + str(total_returned) + " | 100% | " + str(total_saved))
+    val original = total_returned + total_saved * 4
+    lines.push("unoptimized original would have been ~" + str(original) + " byte(s); optimized to " + str(total_returned) + " (" + str(_tok_pct(total_returned, original)) + "% of original)")
+    lines.push("(bytes_to_model = what the tool returned; tokens_saved = max(0, captured - returned)/4 over cache misses)")
+    lines.join("\n")
+
+fn handle_simple_token_burn(id: text, body: text) -> text:
+    make_tool_result(id, tok_burn_text())
+
+fn handle_simple_token_stats(id: text, body: text) -> text:
+    if _tok_wants_reset(body):
+        tok_reset()
+        return make_tool_result(id, "token stats reset\n" + tok_stats_text())
+    make_tool_result(id, tok_stats_text())
+
+export handle_simple_token_stats, tok_stats_text, tok_rollup, tok_tokens_saved
+export handle_simple_token_burn, tok_burn_text, tok_burn_rows, TokBurn
+export tok_record, tok_record_at, tok_load_events, tok_reset
+export tok_memo_key, tok_memo_get, tok_memo_put, tok_telemetry_path, tok_memo_path
+export TokEvent, TokRollup, TokMemo, TOK_FEATURE_CTX, TOK_FEATURE_PONYTAIL

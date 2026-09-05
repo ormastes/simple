@@ -1,0 +1,46 @@
+# Simple Compiler (Self-Hosting) Configuration
+
+project:
+  name: simple-compiler
+  version: 1.0.0-rc.1
+  type: application
+  language: Simple
+  tier: core
+
+  root: .
+  features:
+    default: [jit]
+    jit: []
+    aot: []
+    interpreter: []
+
+  dependencies:
+    - project: ../lib
+    - project: ../../rust
+
+# Allocatable mission-critical migration, STEP 1 (2026-08-28).
+# The compiler (layers 00-90), the interpreter (10.frontend/core/interpreter,
+# 95.interp) and the loader (99.loader) all live under this manifest, so one
+# pin covers all three. `critical` = robust + REQ-MC rules; allocation is
+# permitted for the toolchain (see mission_critical/alloc_diagnostic_config.spl
+# `mc_alloc_toolchain_allowances`). `warning_phase` drops every critical-tier
+# deny to a WARNING so the tree keeps building while every violation is
+# visible. `mc_exceptions` names what is not held to the tier yet, with a
+# reason; each skip is reported. Format:
+# doc/07_guide/language/mission_critical_warning_phase_exceptions.md
+lints:
+  profile: critical
+  warning_phase: true
+  mc_exceptions: "src/compiler/90.tools/verify=verify scanners drive rt_* and extern surfaces directly; migrate after the checkers they scan, src/compiler/85.mdsoc=MDSOC weaving hosts dynamic composition (dynamic_composition.spl); needs the capability-scoped unsafe boundary first (REQ-MC-004), src/compiler/70.backend/backend/sffi_minimal.spl=backend->runtime FFI export boundary; provider-scoped rt_* declarations, mirrors the frontend L0->L7 pattern (lane_L3 triage 2026-08-28), src/compiler/70.backend/linker/lld_sffi.spl=LLD linker SFFI interface module; provider-scoped externs to the linker ABI (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/cuda_backend.spl=CUDA runtime ABI boundary; provider-scoped rt_* declarations for the CUDA driver API (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/cuda_backend.spl=wildcard_match: PTX/CUDA opcode and capability-tier dispatch keyed on i64 tags, closed at the ISA level but open at .spl syntax; an unreachable-arm rewrite would trade the current explicit default for a hot-path panic hazard (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/vulkan_backend.spl=wildcard_match: Vulkan pipeline/format opcode dispatch keyed on i64 tags, same class as cuda_backend.spl (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/cranelift_codegen_adapter.spl=wildcard_match: Cranelift IR opcode lowering dispatch keyed on i64 tags (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/vhdl_validation.spl=wildcard_match: VHDL AST-node-kind dispatch keyed on i64 tags (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/vhdl_expr.spl=wildcard_match: VHDL expression-kind dispatch keyed on i64 tags (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/lean_mir_translate.spl=wildcard_match: Lean/MIR node-kind translation dispatch keyed on i64 tags (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/interpreter_binop.spl=wildcard_match: MIR binop-kind dispatch keyed on i64 tags, backend constant-fold interpreter (lane_L3 triage 2026-08-28), src/compiler/90.tools/sffi_gen/specs=SFFI code-generator templates; rt_* identifiers here are STRING PAYLOADS the generator emits into generated output files, not live call sites, and must not be counted against the product ratchet without a generator-aware census exclusion (lane_L3 triage 2026-08-28, needs separate verification before promotion), src/compiler/80.driver/driver_bootstrap.spl=bootstrap-stage CLI driver (exposes only compile/native-build, see .claude/rules/commands.md); rt_env_get sites gate bootstrap debug/build-entry flags before the std alias layer is available during bootstrap (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/stage4_symbol_closure.spl=primitive_api false-positive: macho_prefixes/windows_paths/msvc_linker bool params are internal platform-selection flags for archive/symbol naming, not business-domain public API (lane_L3 triage 2026-08-28), src/compiler/70.backend/backend/native/riscv_rvv.spl=primitive_api false-positive: funct3/funct6/vm/vd/vs2/vs1/eew i64 params are raw RVV instruction-encoding bitfields; the primitive IS the ISA encoding payload, same shape as L1's flat_pool_codec finding (lane_L3 triage 2026-08-28)"
+
+access:
+  friends:
+    hir: [types, traits, mir, frontend]
+    mir: [hir, types, mir_opt, backend]
+    traits: [types, mir, backend]
+    types: [mir, backend, driver]
+    backend: [mir, mir_opt, types, driver]
+    mir_opt: [backend, driver]
+    driver: [backend, frontend, hir, mir, types, mir_opt, mdsoc, tools, interp, loader]
+    mdsoc: [driver]
+    tools: [driver]

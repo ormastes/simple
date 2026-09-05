@@ -1,0 +1,231 @@
+"""Process-canonical lifecycle authority for NVFS shared mount sessions."""
+
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeFilesystemLease, NvmeSharedFilesystemInterface, NvmeQueueRole,
+    nvme_shared_filesystem_interface, nvme_shared_filesystem_interface_reason,
+    nvme_namespace_mode_name
+}
+
+val NVFS_MOUNT_SESSION_CAPACITY_V1: i32 = 64
+val NVFS_MOUNT_SESSION_GENERATION_MAX_V1: u32 = 0xffffffffu32
+val NVFS_MOUNT_EPOCH_MAX_V1: u64 = 18446744073709551615u64
+
+pub struct NvfsMountSessionV1:
+    _slot: i32
+    _slot_generation: u32
+    _mount_id: u64
+    _mount_generation: u64
+
+impl NvfsMountSessionV1:
+    pub static fn invalid_probe() -> NvfsMountSessionV1:
+        NvfsMountSessionV1(_slot: -1, _slot_generation: 0u32, _mount_id: 0u64, _mount_generation: 0u64)
+    pub fn mount_id() -> u64: self._mount_id
+    pub fn mount_generation() -> u64: self._mount_generation
+
+pub enum NvfsMountSessionErrorV1:
+    InvalidInterface
+    CapacityExhausted
+    GenerationExhausted
+    InvalidSession
+    StaleSession
+    BindingMismatch
+
+impl NvfsMountSessionErrorV1:
+    pub fn to_text() -> text:
+        match self:
+            case NvfsMountSessionErrorV1.InvalidInterface: "nvfs-session: invalid canonical shared interface"
+            case NvfsMountSessionErrorV1.CapacityExhausted: "nvfs-session: bounded capacity exhausted"
+            case NvfsMountSessionErrorV1.GenerationExhausted: "nvfs-session: generation exhausted"
+            case NvfsMountSessionErrorV1.InvalidSession: "nvfs-session: invalid session"
+            case NvfsMountSessionErrorV1.StaleSession: "nvfs-session: stale or closed session"
+            case NvfsMountSessionErrorV1.BindingMismatch: "nvfs-session: shared interface binding mismatch"
+
+struct NvfsMountSessionSlotV1:
+    active: bool
+    retired: bool
+    generation: u32
+    mount_id: u64
+    mount_generation: u64
+    lease: NvmeFilesystemLease
+
+struct NvfsMountSessionStateV1:
+    slots: [NvfsMountSessionSlotV1]
+    next_mount_id: u64
+    next_mount_generation: u64
+    live_count: i32
+    last_code: u32
+    last_session: NvfsMountSessionV1
+
+val _NVFS_SESSION_OK_V1: u32 = 0u32
+val _NVFS_SESSION_INVALID_INTERFACE_V1: u32 = 1u32
+val _NVFS_SESSION_CAPACITY_V1: u32 = 2u32
+val _NVFS_SESSION_EXHAUSTED_V1: u32 = 3u32
+val _NVFS_SESSION_INVALID_V1: u32 = 4u32
+val _NVFS_SESSION_STALE_V1: u32 = 5u32
+val _NVFS_SESSION_MISMATCH_V1: u32 = 6u32
+
+fn _nvfs_session_initial_state_v1() -> NvfsMountSessionStateV1:
+    NvfsMountSessionStateV1(
+        slots: [], next_mount_id: 1u64, next_mount_generation: 1u64,
+        live_count: 0, last_code: _NVFS_SESSION_OK_V1,
+        last_session: NvfsMountSessionV1.invalid_probe())
+
+var g_nvfs_mount_session_state_v1: Mutex = mutex_new(_nvfs_session_initial_state_v1())
+
+fn _nvfs_interface_valid_v1(interface: NvmeSharedFilesystemInterface) -> bool:
+    if nvme_shared_filesystem_interface_reason(interface.lease) != "ready":
+        return false
+    val canonical_r = nvme_shared_filesystem_interface(interface.lease)
+    if canonical_r.is_err():
+        return false
+    val canonical = canonical_r.unwrap()
+    (interface.provider == canonical.provider and
+     nvme_namespace_mode_name(interface.mode) == nvme_namespace_mode_name(canonical.mode) and
+     interface.queue_id == canonical.queue_id and
+     interface.fat32_ready == canonical.fat32_ready and
+     interface.nvfs_ready == canonical.nvfs_ready and
+     interface.dbfs_ready == canonical.dbfs_ready and
+     interface.fat32_ready and interface.nvfs_ready and interface.dbfs_ready)
+
+fn _nvfs_queue_role_tag_v1(role: NvmeQueueRole) -> u8:
+    match role:
+        case NvmeQueueRole.Admin: 1u8
+        case NvmeQueueRole.System: 2u8
+        case NvmeQueueRole.Data: 3u8
+
+fn _nvfs_same_lease_v1(a: NvmeFilesystemLease, b: NvmeFilesystemLease) -> bool:
+    (a.namespace_identity.lba_count == b.namespace_identity.lba_count and
+     a.namespace_identity.eui64 == b.namespace_identity.eui64 and
+     a.namespace_identity.nguid_lo == b.namespace_identity.nguid_lo and
+     a.namespace_identity.nguid_hi == b.namespace_identity.nguid_hi and
+     a.namespace_identity.uuid_lo == b.namespace_identity.uuid_lo and
+     a.namespace_identity.uuid_hi == b.namespace_identity.uuid_hi and
+     a.namespace_identity.controller_id == b.namespace_identity.controller_id and
+     a.namespace_identity.nsid == b.namespace_identity.nsid and
+     a.namespace_identity.lba_size == b.namespace_identity.lba_size and
+     a.base_lba == b.base_lba and a.lba_count == b.lba_count and
+     nvme_namespace_mode_name(a.mode) == nvme_namespace_mode_name(b.mode) and
+     a.queue.owner_task == b.queue.owner_task and a.queue.rights == b.queue.rights and
+     a.queue.controller_id == b.queue.controller_id and a.queue.nsid == b.queue.nsid and
+     a.queue.queue_id == b.queue.queue_id and a.queue.max_depth == b.queue.max_depth and
+     _nvfs_queue_role_tag_v1(a.queue.role) == _nvfs_queue_role_tag_v1(b.queue.role) and
+     a.provider == b.provider and a.grant_kind == b.grant_kind and
+     a.shared_block_interface == b.shared_block_interface and
+     a.iommu_or_broker == b.iommu_or_broker)
+
+fn _nvfs_session_error_v1(code: u32) -> NvfsMountSessionErrorV1:
+    match code:
+        case _NVFS_SESSION_INVALID_INTERFACE_V1: NvfsMountSessionErrorV1.InvalidInterface
+        case _NVFS_SESSION_CAPACITY_V1: NvfsMountSessionErrorV1.CapacityExhausted
+        case _NVFS_SESSION_EXHAUSTED_V1: NvfsMountSessionErrorV1.GenerationExhausted
+        case _NVFS_SESSION_INVALID_V1: NvfsMountSessionErrorV1.InvalidSession
+        case _NVFS_SESSION_STALE_V1: NvfsMountSessionErrorV1.StaleSession
+        case _: NvfsMountSessionErrorV1.BindingMismatch
+
+fn _nvfs_session_shape_valid_v1(session: NvfsMountSessionV1) -> bool:
+    session._slot >= 0 and session._slot_generation != 0u32 and
+        session._mount_id != 0u64 and session._mount_generation != 0u64
+
+pub fn nvfs_mount_session_open_v1(interface: NvmeSharedFilesystemInterface) -> Result<NvfsMountSessionV1, NvfsMountSessionErrorV1>:
+    if not _nvfs_interface_valid_v1(interface):
+        return Err(NvfsMountSessionErrorV1.InvalidInterface)
+    val updated = mutex_with_lock(g_nvfs_mount_session_state_v1, \state:
+        var next = state
+        next.last_code = _NVFS_SESSION_OK_V1
+        next.last_session = NvfsMountSessionV1.invalid_probe()
+        if (state.next_mount_id == 0u64 or state.next_mount_id == NVFS_MOUNT_EPOCH_MAX_V1 or
+            state.next_mount_generation == 0u64 or state.next_mount_generation == NVFS_MOUNT_EPOCH_MAX_V1):
+            next.last_code = _NVFS_SESSION_EXHAUSTED_V1
+        else:
+            var slot_index: i32 = -1
+            var i: i32 = 0
+            while i < state.slots.len():
+                if not state.slots[i].active and not state.slots[i].retired:
+                    slot_index = i
+                    break
+                i = i + 1
+            if slot_index < 0 and state.slots.len() >= NVFS_MOUNT_SESSION_CAPACITY_V1:
+                next.last_code = _NVFS_SESSION_CAPACITY_V1
+            else:
+                val mount_id = state.next_mount_id
+                val mount_generation = state.next_mount_generation
+                if slot_index < 0:
+                    slot_index = state.slots.len()
+                    next.slots.push(NvfsMountSessionSlotV1(
+                        active: true, retired: false, generation: 1u32,
+                        mount_id: mount_id, mount_generation: mount_generation,
+                        lease: interface.lease))
+                else:
+                    val generation = state.slots[slot_index].generation
+                    next.slots[slot_index] = NvfsMountSessionSlotV1(
+                        active: true, retired: false, generation: generation,
+                        mount_id: mount_id, mount_generation: mount_generation,
+                        lease: interface.lease)
+                val generation = next.slots[slot_index].generation
+                next.next_mount_id = mount_id + 1u64
+                next.next_mount_generation = mount_generation + 1u64
+                next.live_count = state.live_count + 1
+                next.last_session = NvfsMountSessionV1(
+                    _slot: slot_index, _slot_generation: generation,
+                    _mount_id: mount_id, _mount_generation: mount_generation)
+        next)
+    if updated.last_code != _NVFS_SESSION_OK_V1:
+        return Err(_nvfs_session_error_v1(updated.last_code))
+    Ok(updated.last_session)
+
+pub fn nvfs_mount_session_validate_v1(session: NvfsMountSessionV1, interface: NvmeSharedFilesystemInterface) -> Result<bool, NvfsMountSessionErrorV1>:
+    if not _nvfs_interface_valid_v1(interface):
+        return Err(NvfsMountSessionErrorV1.InvalidInterface)
+    if not _nvfs_session_shape_valid_v1(session):
+        return Err(NvfsMountSessionErrorV1.InvalidSession)
+    val updated = mutex_with_lock(g_nvfs_mount_session_state_v1, \state:
+        var next = state
+        next.last_code = _NVFS_SESSION_OK_V1
+        if session._slot >= state.slots.len():
+            next.last_code = _NVFS_SESSION_STALE_V1
+        else:
+            val slot = state.slots[session._slot]
+            if (not slot.active or slot.generation != session._slot_generation or
+                slot.mount_id != session._mount_id or slot.mount_generation != session._mount_generation):
+                next.last_code = _NVFS_SESSION_STALE_V1
+            elif not _nvfs_same_lease_v1(slot.lease, interface.lease):
+                next.last_code = _NVFS_SESSION_MISMATCH_V1
+        next)
+    if updated.last_code != _NVFS_SESSION_OK_V1:
+        return Err(_nvfs_session_error_v1(updated.last_code))
+    Ok(true)
+
+pub fn nvfs_mount_session_close_v1(session: NvfsMountSessionV1) -> Result<bool, NvfsMountSessionErrorV1>:
+    if not _nvfs_session_shape_valid_v1(session):
+        return Err(NvfsMountSessionErrorV1.InvalidSession)
+    val updated = mutex_with_lock(g_nvfs_mount_session_state_v1, \state:
+        var next = state
+        next.last_code = _NVFS_SESSION_OK_V1
+        if session._slot >= state.slots.len():
+            next.last_code = _NVFS_SESSION_STALE_V1
+        else:
+            val slot = state.slots[session._slot]
+            if (not slot.active or slot.generation != session._slot_generation or
+                slot.mount_id != session._mount_id or slot.mount_generation != session._mount_generation):
+                next.last_code = _NVFS_SESSION_STALE_V1
+            else:
+                val retired = slot.generation == NVFS_MOUNT_SESSION_GENERATION_MAX_V1
+                val generation = if retired: slot.generation else: slot.generation + 1u32
+                next.slots[session._slot] = NvfsMountSessionSlotV1(
+                    active: false, retired: retired, generation: generation,
+                    mount_id: 0u64, mount_generation: 0u64, lease: slot.lease)
+                next.live_count = state.live_count - 1
+        next)
+    if updated.last_code != _NVFS_SESSION_OK_V1:
+        return Err(_nvfs_session_error_v1(updated.last_code))
+    Ok(true)
+
+pub fn nvfs_mount_session_live_count_v1() -> i32:
+    val state = mutex_with_lock(g_nvfs_mount_session_state_v1, \state: state)
+    state.live_count
+
+export NvfsMountSessionV1, NvfsMountSessionErrorV1
+export nvfs_mount_session_open_v1, nvfs_mount_session_validate_v1
+export nvfs_mount_session_close_v1, nvfs_mount_session_live_count_v1
+export NVFS_MOUNT_SESSION_CAPACITY_V1

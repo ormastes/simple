@@ -1,0 +1,63 @@
+# @cover src/lib/nogc_sync_mut/replay/adapters/jit_replay.spl 60%
+# @cover src/lib/nogc_sync_mut/replay/adapters/jit_replay_event.spl 60%
+# System tests for the JitReplayAdapter layer.
+#
+# Verifies enum round-trips, event struct construction, adapter lifecycle,
+# on_jit_compile event recording, and checkpoint management.
+#
+# **Feature IDs:** #REPLAY-JIT-001 to #REPLAY-JIT-006
+# **Category:** System / Replay Adapters
+
+use std.replay.adapters.jit_replay_event.JitReplayEventKind
+use std.replay.adapters.jit_replay_event.JitReplayEvent
+use std.replay.adapters.jit_replay.JitReplayMode
+use std.replay.adapters.jit_replay.JitReplayAdapter
+use std.replay.adapters.jit_replay.JitCheckpoint
+use std.spec
+
+describe "JitReplayAdapter":
+
+    describe "JitReplayEventKind":
+        it "round-trips Compile via to_i32 and from_i32":
+            val k = JitReplayEventKind::Compile
+            val v = k.to_i32()
+            val k2 = JitReplayEventKind::from_i32(v)
+            expect(k2.to_i32()).to_equal(0)
+
+        it "to_text returns expected label":
+            val k = JitReplayEventKind::Compile
+            expect(k.to_text()).to_equal("Compile")
+
+    describe "JitReplayEvent creation":
+        it "creates event with expected fields":
+            val ev = JitReplayEvent {
+                seq_id: 3,
+                kind: JitReplayEventKind::Execute,
+                function_hash: 111,
+                module_hash: 222,
+                args_hash: 333,
+                result: 0,
+                timestamp: 9999,
+            }
+            expect(ev.seq_id).to_equal(3)
+            expect(ev.function_hash).to_equal(111)
+            expect(ev.args_hash).to_equal(333)
+
+    describe "JitReplayAdapter lifecycle":
+        it "create Off mode has zero events":
+            val adapter = JitReplayAdapter::create(JitReplayMode::Off, "")
+            expect(adapter.event_count()).to_equal(0)
+
+        it "create Record mode stores mode":
+            val adapter = JitReplayAdapter::create(JitReplayMode::Record, "/tmp/jit.trace")
+            expect(adapter.mode.to_text()).to_equal("record")
+
+        it "on_jit_compile in Record mode logs one event":
+            val adapter = JitReplayAdapter::create(JitReplayMode::Record, "/tmp/jit.trace")
+            adapter.on_jit_compile("my_fn", "my_module")
+            expect(adapter.event_count()).to_equal(1)
+
+        it "save_checkpoint returns id >= 0":
+            val adapter = JitReplayAdapter::create(JitReplayMode::Record, "/tmp/jit.trace")
+            val id = adapter.save_checkpoint()
+            expect(id).to_be_greater_than(-1)

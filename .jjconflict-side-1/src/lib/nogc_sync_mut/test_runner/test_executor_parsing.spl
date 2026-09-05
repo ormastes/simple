@@ -1,0 +1,1016 @@
+# Test Executor Parsing & Discovery
+#
+# Binary location discovery, test output parsing, coverage wrapper generation,
+# and static test listing helpers.
+#
+# Split from test_runner_execute.spl for maintainability.
+
+use std.test_runner.test_runner_types.{
+    TestFileResult, TestOptions, TestOmissionEvidence, TestOmissionStatus
+}
+use std.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_owner}
+use std.test_runner.test_runner_mcdc_report.{test_runner_result_with_mcdc_evidence}
+use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
+use std.io.{file_exists, file_write, file_delete}
+use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out}
+use std.io.{env_get}
+use std.sffi.cli.{cli_get_args}
+use std.string_core.{char_code}
+use lib.common.env_access.model.{env_canonical_evidence_artifact_path}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+
+# std::fs::canonicalize — resolves a symlink chain in-process, same alias
+# std.spec.engine_probe uses for the same /proc/self/exe resolution.
+
+fn _tp_get_temp_dir() -> text:
+    val tmpdir = env_get("TMPDIR")
+    if tmpdir != "" and tmpdir != nil:
+        return tmpdir
+    val tmp = env_get("TMP")
+    if tmp != "" and tmp != nil:
+        return tmp
+    val temp = env_get("TEMP")
+    if temp != "" and temp != nil:
+        return temp
+    val os_env = env_get("OS")
+    if os_env != "" and os_env != nil:
+        if os_env.lower().contains("windows"):
+            return "C:/Windows/Temp"
+    "/tmp"
+
+# =========================================================================
+# Binary Location Discovery
+# =========================================================================
+
+val COVERAGE_BEGIN = "__SIMPLE_COVERAGE_SDN_BEGIN__"
+val COVERAGE_END = "__SIMPLE_COVERAGE_SDN_END__"
+val COMPILER_COVERAGE_BEGIN = "__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__"
+val COMPILER_COVERAGE_END = "__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__"
+val MCDC_OBLIGATION_BEGIN = "__SIMPLE_MCDC_OBLIGATION_MANIFEST_BEGIN__"
+val MCDC_OBLIGATION_END = "__SIMPLE_MCDC_OBLIGATION_MANIFEST_END__"
+val MCDC_EVIDENCE_OUTPUT_BEGIN = "__SIMPLE_MCDC_EVIDENCE_BEGIN__"
+val MCDC_EVIDENCE_OUTPUT_END = "__SIMPLE_MCDC_EVIDENCE_END__"
+
+# RESTORED 2026-07-30. Added by 3dc58bd607 "feat(test): ingest compiler
+# coverage manifests", then deleted by f119f8b712 "chore: consolidate completed
+# agent session work" while every caller was left in place -- so
+# test_runner_execute.spl still imports and calls both, and the stage4 native
+# link failed with undefined _extract_compiler_coverage_manifest_sdn /
+# _strip_compiler_coverage_manifest_blocks. This was a dangling reference, NOT
+# the mangler bare-extern defect it was first mistaken for.
+fn extract_compiler_coverage_manifest_sdn(output: text) -> (text, bool):
+    """Extract exactly one complete compiler-owned coverage manifest block."""
+    var in_block = false
+    var complete_blocks = 0
+    var result = ""
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean == COMPILER_COVERAGE_BEGIN:
+            if in_block or complete_blocks != 0:
+                return ("", false)
+            in_block = true
+        elif clean == COMPILER_COVERAGE_END:
+            if not in_block:
+                return ("", false)
+            in_block = false
+            complete_blocks = complete_blocks + 1
+        elif in_block:
+            if result != "":
+                result = result + "\n"
+            result = result + raw_line
+    (result, complete_blocks == 1 and not in_block and result.trim() != "")
+
+fn strip_compiler_coverage_manifest_blocks(output: text) -> text:
+    var in_block = false
+    var outside_lines: [text] = []
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean == COMPILER_COVERAGE_BEGIN:
+            in_block = true
+        elif clean == COMPILER_COVERAGE_END:
+            in_block = false
+        elif not in_block:
+            outside_lines.push(raw_line)
+    outside_lines.join("\n")
+
+fn extract_compiler_mcdc_obligation_manifest(output: text) -> (text, bool):
+    """Extract exactly one compiler-owned obligations-only MC/DC manifest."""
+    var in_block = false
+    var complete_blocks = 0
+    var result = ""
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean == MCDC_OBLIGATION_BEGIN:
+            if in_block or complete_blocks != 0: return ("", false)
+            in_block = true
+        elif clean == MCDC_OBLIGATION_END:
+            if not in_block: return ("", false)
+            in_block = false
+            complete_blocks = complete_blocks + 1
+        elif in_block:
+            if result != "": result = result + "\n"
+            result = result + raw_line
+    (result, complete_blocks == 1 and not in_block and result.trim() != "")
+
+fn find_simple_new_binary() -> text:
+    ""
+
+fn find_runtime_lib_dir() -> text:
+    val env_path = env_get("SIMPLE_RUNTIME_PATH")
+    if env_path != "" and env_path != nil:
+        return env_path
+    if file_exists("build/lib/libsimple_compiler.so"):
+        return "build/lib"
+    if file_exists("build/bootstrap/lib/libsimple_compiler.so"):
+        return "build/bootstrap/lib"
+    if file_exists("lib/libsimple_compiler.so"):
+        return "lib"
+    ""
+
+# Cache for find_simple_binary — avoids 15 file_exists probes per test spawn
+var _cached_binary_path = ""
+
+fn find_simple_binary() -> text:
+    if _cached_binary_path != "":
+        return _cached_binary_path
+
+    # Prefer the currently running executable — subprocess tests should use
+    # the same binary that invoked the test runner (self-hosted consistency).
+    # Guard: when "test" is dispatched by interpreting a .spl entry file
+    # in-process (e.g. src/app/test_runner_new/main.spl via the seed), argv[0]
+    # is that source file's own path — it exists on disk but is not
+    # executable, so trusting it verbatim makes the subprocess spawn fail
+    # immediately. Only trust argv[0] when it looks like the compiled binary.
+    val args = cli_get_args()
+    if args.len() > 0:
+        val self_exe = args[0]
+        if self_exe != "" and (self_exe.ends_with("/simple") or self_exe.ends_with("simple.exe")) and file_exists(self_exe):
+            _cached_binary_path = self_exe
+            return self_exe
+
+    # Check environment variable
+    val env_path = env_get("SIMPLE_RUNTIME")
+    if env_path != "" and env_path != nil:
+        if file_exists(env_path):
+            _cached_binary_path = env_path
+            return env_path
+
+    # argv[0] is NOT the executable on the paths that matter. Measured
+    # 2026-08-19: `simple run probe.spl extra1` reports
+    # cli_get_args() == ["probe.spl", "extra1"] — the SCRIPT, never the binary
+    # — and `simple test <dir>` is the same shape, so the branch above never
+    # fires. Resolution then fell through to the literal "bin/simple" candidate
+    # below, i.e. the DEPLOYED binary, so every spec in a directory run was
+    # executed by a build other than the one under test. Verified by `ps`
+    # during `/mnt/data/tmp/classfix/release/simple test test/01_unit/app/ui`:
+    #   timeout --kill-after=5s 120s bin/simple run .../color_spec.spl
+    # See doc/08_tracking/bug/
+    #   directory_test_runs_spawn_deployed_bin_simple_not_binary_under_test_2026-08-19.md
+    #
+    # The kernel's own answer for "which executable is this process" is the
+    # /proc self-exe link. It must be CANONICALISED here, in the parent, and
+    # never handed to the spawner verbatim: children are launched through
+    # `timeout ... <binary> run <spec>`, where /proc/self/exe belongs to
+    # `timeout`, so passing the literal link made every child exit 125.
+    # `rt_path_absolute` is std::fs::canonicalize — it resolves the symlink
+    # chain in-process — and this is the same resolution
+    # `std.spec.engine_probe.simple_binary()` already uses for the same reason.
+    # Checked before the candidate list so a stale deployed binary can never
+    # shadow the running one; an explicit SIMPLE_RUNTIME above still wins.
+    # Hosts without /proc (macOS, Windows) fall through unchanged.
+    for self_link in ["/proc/self/exe", "/proc/curproc/file"]:
+        if file_exists(self_link):
+            val resolved = path_absolute(self_link) ?? ""
+            if resolved.len() > 0 and resolved != self_link and file_exists(resolved):
+                _cached_binary_path = resolved
+                return resolved
+
+    # Fallback: try multiple known locations.
+    val candidates = [
+        "bin/simple",
+        "./bin/simple",
+        "bin/release/linux-x86_64/simple",
+        "./bin/release/linux-x86_64/simple",
+        "bin/release/aarch64-apple-darwin-macho/simple",
+        "./bin/release/aarch64-apple-darwin-macho/simple",
+        "bin/release/macos-arm64/simple",
+        "./bin/release/macos-arm64/simple",
+        "bin/release/darwin-aarch64/simple",
+        "./bin/release/darwin-aarch64/simple",
+        "bin/release/macos-x86_64/simple",
+        "./bin/release/macos-x86_64/simple",
+    ]
+
+    for candidate in candidates:
+        if file_exists(candidate):
+            _cached_binary_path = candidate
+            return candidate
+
+    # Fallback to bin/simple so the active setup symlink remains the default.
+    _cached_binary_path = "bin/simple"
+    "bin/simple"
+
+# =========================================================================
+# Test Output Parsing
+# =========================================================================
+
+fn _is_test_error_line(clean: text) -> bool:
+    clean.contains("semantic:") or clean.contains("parse error:") or clean.contains("compile failed:") or clean.contains("ERROR:") or clean.starts_with("Error:") or clean.starts_with("error:") or clean.contains("unsupported path call:") or clean.contains("not found")
+
+fn extract_error_message(output: text) -> text:
+    # Extract first meaningful error message from test output.
+    # NOTE: iterates via .split("\n") rather than a manual pos/index_of(needle,
+    # start) scan — the seed/bootstrap interpreter's two-argument text.index_of
+    # ignores the start offset and always returns the first match, which made
+    # the old `pos = next + 1` loop never advance (infinite spin). See
+    # doc/08_tracking/bug/test_runner_fresh_seed_silent_noop_2026-07-17.md.
+    var result = ""
+    var count = 0
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if _is_test_error_line(clean):
+            if result != "":
+                result = result + "; "
+            result = result + clean
+            count = count + 1
+            if count >= 3:
+                break
+    if result != "":
+        return result
+    # Fallback: no compiler/runtime error line. A BDD assertion failure prints
+    # `✗ <example name>` followed by `expected <got> to <matcher> <want>`; with
+    # neither matched above, the caller collapsed 100+ real assertion failures
+    # into the opaque "Process exited with code 1"
+    # (doc/08_tracking/bug/test_01_unit_process_exit_cluster_2026-08-26.md).
+    # Surface the first failing example and its expectation instead.
+    var prev_was_failure = false
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean.starts_with("✗"):
+            if result != "":
+                break
+            result = clean
+            prev_was_failure = true
+        elif prev_was_failure and clean.starts_with("expected "):
+            result = result + " -- " + clean
+            break
+        else:
+            prev_was_failure = false
+    result
+
+val SCENARIO_OMISSION_PREFIX = "__SIMPLE_SCENARIO_OMISSION_V1__|"
+
+fn parse_test_omission_evidence(output: text) -> ([TestOmissionEvidence], text):
+    var evidence: [TestOmissionEvidence] = []
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if not clean.starts_with(SCENARIO_OMISSION_PREFIX):
+            continue
+        if evidence.len() >= 64:
+            return (evidence, "SCENARIO-E-OMISSION-CAP")
+        val fields = clean.split("|")
+        if fields.len() != 9:
+            return (evidence, "SCENARIO-E-OMISSION-WIRE")
+        val status = if fields[1] == "BLOCKED":
+            TestOmissionStatus.Blocked
+        elif fields[1] == "UNSUPPORTED":
+            TestOmissionStatus.Unsupported
+        else:
+            return (evidence, "SCENARIO-E-OMISSION-STATUS")
+        if (fields[2].trim() == "" or fields[3].trim() == "" or
+            fields[4].trim() == "" or fields[5].trim() == "" or
+            fields[6].trim() == "" or fields[7].trim() == "" or
+            fields[8].trim() == ""):
+            return (evidence, "SCENARIO-E-OMISSION-INCOMPLETE")
+        var artifacts: [text] = []
+        if fields[7].trim() != "":
+            for artifact in fields[7].split(";"):
+                if (not env_canonical_evidence_artifact_path(artifact) or
+                    artifacts.len() >= 64):
+                    return (evidence, "SCENARIO-E-OMISSION-ARTIFACT")
+                artifacts.push(artifact.trim())
+        evidence.push(TestOmissionEvidence(
+            status: status,
+            scenario_id: fields[2],
+            reason: fields[3],
+            prerequisite: fields[4],
+            owner: fields[5],
+            tracking_id: fields[6],
+            artifact_paths: artifacts,
+            resume_command: fields[8]
+        ))
+    (evidence, "")
+
+fn parse_test_output(output: text) -> (i64, i64, i64, i64):
+    var total_passed = 0
+    var total_failed = 0
+    var total_skipped = 0
+    var total_pending = 0
+    var summary_passed = -1
+    var summary_failed = -1
+    var summary_skipped = -1
+    var summary_pending = -1
+    var summary_passed_pos = -1
+    var summary_failed_pos = -1
+    var bdd_summary_pos = -1
+    var results_seen = false
+    var results_valid = false
+    var results_pos = -1
+    var results_passed = 0
+    var results_failed = 0
+    var results_skipped = 0
+    var results_pending = 0
+    # NOTE: line_idx replaces a byte-offset `pos` that used to come from a
+    # manual index_of(needle, start)-based scan. The seed/bootstrap
+    # interpreter's two-argument text.index_of ignores the start offset and
+    # always returns the first match, so `pos = next + 1` never advanced and
+    # the loop spun forever. Iterating via .split("\n") sidesteps the buggy
+    # primitive entirely; line_idx only needs to preserve *relative* ordering
+    # between the tracked positions, which an incrementing per-line counter
+    # does identically to the old byte offsets. See
+    # doc/08_tracking/bug/test_runner_fresh_seed_silent_noop_2026-07-17.md.
+    var line_idx = 0
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line)
+        val trimmed = clean.trim()
+        val canonical_results = trimmed.starts_with("Results:") and trimmed.contains(" total") and trimmed.contains(" passed") and trimmed.contains(" failed")
+        # Cargo/rustc-style summary, e.g.
+        #   "test result: FAILED. 2 passed; 1 failed; 0 ignored"
+        #   "test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out"
+        # This branch was MISSING until 2026-08-31, so a cargo transcript
+        # summarised as 0 passed / 0 failed — indistinguishable from "no tests
+        # ran". A sibling product module (rust_test_runner.spl:60,69) already
+        # consumed exactly this shape, so it is a real supported input, not an
+        # imagined one. See doc/08_tracking/bug/
+        # simpleos_testrun_row_feeds_unsupported_transcript_shape_2026-08-31.md.
+        # Recognition needs the " passed"/" failed" fields as well as the
+        # prefix, so authored prose ("test result: inconclusive, see log") is
+        # not mistaken for a summary — the same discrimination the canonical
+        # branch gets from its " total"/" passed"/" failed" requirement.
+        # NOTE: matching is case-sensitive on purpose. Cargo prints the verdict
+        # uppercase ("FAILED."), so `extract_number_before(_, "failed")` cannot
+        # latch onto the verdict word and always finds the "1 failed" field.
+        val cargo_results = trimmed.starts_with("test result:") and trimmed.contains(" passed") and trimmed.contains(" failed")
+        # Both forms are members of the SAME summary family: they reset the
+        # segment identically and share results_pos, so every existing
+        # precedence rule (later direct Passed:/Failed: wins, later BDD
+        # "N examples, M failures" wins, last summary of the file wins) applies
+        # to the cargo form unchanged, with no new return path.
+        val summary_family = canonical_results or cargo_results
+        if summary_family:
+            # Start a new summary segment. Authored output before a canonical-
+            # shaped line must not leak into a later real BDD/direct summary.
+            total_passed = 0
+            total_failed = 0
+            total_skipped = 0
+            total_pending = 0
+            summary_passed = -1
+            summary_failed = -1
+            summary_skipped = -1
+            summary_pending = -1
+            summary_passed_pos = -1
+            summary_failed_pos = -1
+            bdd_summary_pos = -1
+            results_seen = true
+            results_valid = false
+            results_pos = line_idx
+            if canonical_results:
+                val result_total = extract_number_before(s: trimmed, keyword: "total")
+                val result_passed = extract_number_before(s: trimmed, keyword: "passed")
+                val result_failed = extract_number_before(s: trimmed, keyword: "failed")
+                if result_total >= 0 and result_passed >= 0 and result_failed >= 0 and result_total == result_passed + result_failed:
+                    results_valid = true
+                    results_passed = result_passed
+                    results_failed = result_failed
+                    val parsed_skipped = extract_number_before(s: trimmed, keyword: "skipped")
+                    val parsed_pending = extract_number_before(s: trimmed, keyword: "pending")
+                    results_skipped = if parsed_skipped >= 0: parsed_skipped else: 0
+                    results_pending = if parsed_pending >= 0: parsed_pending else: 0
+            else:
+                # Cargo has no "total" field, so there is no cross-check to make
+                # here; do not invent one. `ignored` is cargo's skip concept;
+                # cargo has no pending concept at all.
+                val cargo_passed = extract_number_before(s: trimmed, keyword: "passed")
+                val cargo_failed = extract_number_before(s: trimmed, keyword: "failed")
+                if cargo_passed >= 0 and cargo_failed >= 0:
+                    results_valid = true
+                    results_passed = cargo_passed
+                    results_failed = cargo_failed
+                    val cargo_ignored = extract_number_before(s: trimmed, keyword: "ignored")
+                    results_skipped = if cargo_ignored >= 0: cargo_ignored else: 0
+                    results_pending = 0
+        elif trimmed.starts_with("Passed:"):
+            summary_passed = extract_number_after_colon(s: trimmed, prefix: "Passed:")
+            summary_passed_pos = line_idx
+        elif trimmed.starts_with("Failed:"):
+            summary_failed = extract_number_after_colon(s: trimmed, prefix: "Failed:")
+            summary_failed_pos = line_idx
+        elif clean.contains("example") and clean.contains("failure"):
+            # Accept both plural ("2 examples, 0 failures") and singular
+            # ("1 example, 1 failure") summary lines. The interpreter's BDD
+            # describe-end uses singular when count == 1; the compile/SMF
+            # path always uses plural. Searching for the singular substring
+            # ("example", "failure") matches both forms because both plurals
+            # start with the singular prefix, so a spec with exactly 1 failing
+            # example no longer silently false-greens.
+            val examples_count = extract_number_before(s: clean, keyword: "example")
+            val failures_count = extract_number_before(s: clean, keyword: "failure")
+            if examples_count >= 0 and failures_count >= 0:
+                bdd_summary_pos = line_idx
+                val passed = examples_count - failures_count
+                if passed > 0:
+                    total_passed = total_passed + passed
+                total_failed = total_failed + failures_count
+        # Parse summary line: "Pending: N" from spec.spl print_summary
+        if trimmed.starts_with("Pending:"):
+            summary_pending = extract_number_after_colon(s: trimmed, prefix: "Pending:")
+        elif trimmed.starts_with("Skipped:"):
+            summary_skipped = extract_number_after_colon(s: trimmed, prefix: "Skipped:")
+        # Count individual "... pending" test lines
+        elif not summary_family and clean.contains("... pending"):
+            total_pending = total_pending + 1
+        # Count skipped (separate from pending)
+        if not summary_family and not trimmed.starts_with("Skipped:") and clean.contains("skipped"):
+            val skip_count2 = extract_number_before(s: clean, keyword: "skipped")
+            if skip_count2 > 0:
+                total_skipped = total_skipped + skip_count2
+        line_idx = line_idx + 1
+    # The last complete summary family is authoritative: the outer runner emits
+    # Results last, while direct specs emit Passed/Failed after authored output.
+    val direct_summary_pos = if summary_passed_pos > summary_failed_pos: summary_passed_pos else: summary_failed_pos
+    val direct_summary_after_results = summary_passed >= 0 and summary_failed >= 0 and summary_passed_pos > results_pos and summary_failed_pos > results_pos
+    if direct_summary_after_results and direct_summary_pos >= bdd_summary_pos:
+        val skipped = if summary_skipped >= 0: summary_skipped else: total_skipped
+        val pending = if summary_pending >= 0: summary_pending else: total_pending
+        return (summary_passed, summary_failed, skipped, pending)
+    if bdd_summary_pos > results_pos:
+        return (total_passed, total_failed, total_skipped, total_pending)
+    if results_seen:
+        if not results_valid:
+            return (0, 0, 0, 0)
+        return (results_passed, results_failed, results_skipped, results_pending)
+    if summary_passed >= 0 and summary_failed >= 0:
+        val skipped = if summary_skipped >= 0: summary_skipped else: total_skipped
+        val pending = if summary_pending >= 0: summary_pending else: total_pending
+        return (summary_passed, summary_failed, skipped, pending)
+    (total_passed, total_failed, total_skipped, total_pending)
+
+fn output_has_zero_pass_summary(output: text) -> bool:
+    var saw_passed_zero = false
+    var saw_failed_zero = false
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean == "Passed: 0":
+            saw_passed_zero = true
+        elif clean == "Failed: 0":
+            saw_failed_zero = true
+    saw_passed_zero and saw_failed_zero
+
+# find_raw: first index of keyword in s, or -1. Returns a RAW i64 (never i64?),
+# so a match at offset 3 is not lost to the seed-JIT flat-optional payload-3 == nil
+# collision. `text.index_of` returns i64?, whose flat seed-JIT representation uses
+# the in-band sentinel 3 for None, so a genuine match at offset 3 read back as nil
+# — e.g. "example" sits at offset 3 in "10 examples".."99 examples", so every spec
+# with 10-99 examples false-failed with "no parseable pass/fail summary". See
+# doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md (the
+# senior guidance there: prefer >=0 sentinel-style APIs in critical paths until
+# the flat-optional representation is retagged) and
+# jit_option_i64_value3_reads_as_none_2026-07-24.md.
+fn find_raw(s: text, keyword: text) -> i64:
+    val klen = keyword.len()
+    if klen == 0:
+        return 0
+    val slen = s.len()
+    var i = 0
+    while i + klen <= slen:
+        if s[i:i + klen] == keyword:
+            return i
+        i = i + 1
+    -1
+
+# Decode an all-digit run to i64 WITHOUT text.to_int(). Measured in-guest on
+# SimpleOS x86_64 (OVMF -> GRUB-EFI, real firmware, 2026-08-31): the probe
+# `("2".to_int() ?? 0) == 2` prints NO in a freestanding image while
+# starts_with/contains/slice-equality/split all print YES — so `to_int`'s
+# Optional decode is the single failing layer there, and every count this file
+# extracts came back 0. Same defect class find_raw's own comment documents for
+# `text.index_of` (flat-optional in-band sentinel), and the same remedy the
+# senior guidance there prescribes: prefer raw >=0 sentinel arithmetic over an
+# Optional in critical paths. char_code + i64 compares are already mandatory in
+# both callers for the unrelated pointer-cmp miscompile, so this keeps the whole
+# digit path on primitives that are proven to work in-guest.
+# See doc/08_tracking/bug/
+# simpleos_testrun_row_feeds_unsupported_transcript_shape_2026-08-31.md.
+fn digits_to_i64(digits: text) -> i64:
+    var acc = 0
+    var i = 0
+    while i < digits.len():
+        val code: i64 = char_code(digits[i:i + 1])
+        if code < 48 or code > 57:
+            return -1
+        acc = acc * 10 + (code - 48)
+        i = i + 1
+    acc
+
+fn extract_number_after_colon(s: text, prefix: text) -> i64:
+    val idx = find_raw(s, prefix)
+    if idx < 0:
+        return -1
+    val after = s[idx + prefix.len():].trim()
+    if after.len() == 0:
+        return -1
+    # Collect digits from start. Digit test MUST use char_code + i64 compares:
+    # text `<`/`>` miscompiles to a raw pointer cmp on the native flat-HIR path
+    # (see doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md).
+    var end_pos = 0
+    while end_pos < after.len():
+        val code: i64 = char_code(after[end_pos:end_pos + 1])
+        if code < 48 or code > 57:
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return -1
+    val num_str = after[0:end_pos]
+    digits_to_i64(num_str)
+
+fn extract_number_before(s: text, keyword: text) -> i64:
+    val idx = find_raw(s, keyword)
+    if idx < 0:
+        return -1
+    var end = idx - 1
+    # Skip whitespace
+    while end >= 0:
+        val ch = s[end:end + 1]
+        if ch != " ":
+            break
+        end = end - 1
+    if end < 0:
+        return -1
+    # Collect digits backwards. char_code + i64 compares, NOT text `<`/`>` —
+    # same native-path pointer-cmp miscompile as extract_number_after_colon.
+    var start = end
+    while start >= 0:
+        val code: i64 = char_code(s[start:start + 1])
+        if code < 48 or code > 57:
+            break
+        start = start - 1
+    start = start + 1
+    if start > end:
+        return -1
+    val num_str = s[start:end + 1]
+    digits_to_i64(num_str)
+
+# =========================================================================
+# Child Process Arguments & Result Building
+# =========================================================================
+
+fn build_child_args(file_path: text, options: TestOptions) -> [text]:
+    # Use the explicit run subcommand so *_spec.spl children do not get
+    # routed back into `simple test`, which recursively spawns test runners.
+    var args: [text] = ["run", file_path]
+    if options.gc_log:
+        args.push("--gc-log")
+    if options.gc_off:
+        args.push("--gc=off")
+    args
+
+# A deliberately-crashing fixture writes this file immediately BEFORE crashing
+# itself, so its presence is what separates CRASHED from TERMINATED. The runner
+# consumes (deletes) it so a stale sentinel cannot mis-label a later run.
+fn take_crash_sentinel(file_path: text) -> bool:
+    val sentinel = file_path + ".crashed"
+    if not file_exists(sentinel):
+        return false
+    file_delete(sentinel)
+    true
+
+# Second, sentinel-free CRASHED signal: the child's own dying words.
+#
+# The sentinel above is only ever written by a deliberately-crashing FIXTURE, so
+# on its own it classifies every real segfault in a real spec as TERMINATED --
+# exactly backwards. The signal number is unrecoverable here (see
+# make_result_from_output), so the only other evidence is what the child managed
+# to print before dying. A process killed by an external SIGTERM (earlyoom) is
+# silent: it gets no chance to emit any of these. A process that faults, aborts,
+# or panics does. Absence of a marker is therefore NOT taken as proof of a crash
+# -- silence falls through to TERMINATED, the unverified class.
+fn has_crash_evidence(combined: text) -> bool:
+    if combined.contains("fatal runtime error"):
+        return true
+    if combined.contains("Segmentation fault") or combined.contains("SIGSEGV"):
+        return true
+    if combined.contains("SIGABRT") or combined.contains("Aborted"):
+        return true
+    if combined.contains("panicked at") or combined.contains("stack overflow"):
+        return true
+    if combined.contains("double free") or combined.contains("memory allocation of"):
+        return true
+    false
+
+fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
+    # Outcome classification -- contract frozen in .spipe/unstable_test_mode/state.md.
+    #
+    # The signal number DOES reach this layer. `exit_status_to_code`
+    # (runtime/src/value/sffi/env_process.rs:22-34) returns `128 + signal` when
+    # `status.code()` is None; its own doc comment records that the old
+    # `unwrap_or(-1)` collapse was the bug and this is the fix. (An earlier
+    # version of THIS comment claimed the opposite and misled two lanes -- it
+    # was wrong, and 137/139/134 were falling through to the stdout-scrape
+    # mapper below, i.e. a segfault could be classified by scraping stdout.)
+    #
+    # `-1` now survives only for (a) timeout -- env_process.rs:563-567 returns a
+    # hard-coded -1 with timed_out=true and appends a "\nTIMEOUT\n" marker at
+    # :1275 -- and (b) spawn/reap failure. Both are unverified, not failures.
+    #
+    # TIMEOUT and TERMINATED are UNVERIFIED, never failures: earlyoom is
+    # actively SIGTERMing `simple` on this host (fires at 10% memory, zero
+    # swap), so a signal death says nothing about the code under test. They
+    # carry failed: 0 so they cannot inflate the failed count -- but the
+    # non-empty error keeps is_ok() false, so they cannot be swallowed into a
+    # green run either. CRASHED and ERROR remain real failures.
+    # process_bounded_timed_out is the EXACT runtime contract (trailing
+    # "\nTIMEOUT\n" marker); the contains() disjuncts are kept for the
+    # process_run_timeout paths, whose "[TIMEOUT: Process killed after Ns]"
+    # note is appended by the Simple layer itself and is not trailing.
+    if process_bounded_timed_out(exit_code, stderr) or (exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out"))):
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT: no result after {timeout_secs}s (unverified)", timed_out: true, cached: false)
+
+    # Frozen contract for a signal death (128 + signo):
+    #   SIGTERM(15)/143            -> TERMINATED, unverified, failed: 0
+    #     earlyoom SIGTERMs `simple` on this host, so it says nothing about the
+    #     code under test.
+    #   SIGKILL(9)/137             -> CRASHED, failed: 1
+    #     earlyoom's FIRST move is SIGTERM, so a raw SIGKILL is not attributable
+    #     to it and is indistinguishable from the compiler dying. Under-reporting
+    #     a crash IS the silent-green defect.
+    #   SIGILL(4)/SIGABRT(6)/SIGBUS(7)/SIGFPE(8)/SIGSEGV(11) -> CRASHED, failed: 1
+    #   144 (128+16)               -> kept in the unverified class, as before.
+    val signo = if exit_code > 128 and exit_code < 192: exit_code - 128 else: 0
+    if signo == 4 or signo == 6 or signo == 7 or signo == 8 or signo == 9 or signo == 11:
+        val sentinel_seen = take_crash_sentinel(file_path)
+        val extra = if sentinel_seen:
+            " after writing its crash sentinel"
+        elif has_crash_evidence(stdout + "\n" + stderr):
+            "; last output: {extract_error_message(stdout + "\n" + stderr)}"
+        else:
+            ""
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal {signo} (exit {exit_code}){extra}", timed_out: false, cached: false)
+
+    # SIGHUP(1)/SIGINT(2)/SIGTERM(15) are the outside-killer set (same set as
+    # test_runner_fork.spl's `is_outside_kill`, which likewise excludes SIGKILL).
+    # Any other signal death joins them in the unverified class rather than
+    # falling through to the stdout-scrape mapper below.
+    if exit_code == -1 or exit_code == 143 or exit_code == 144 or signo > 0:
+        if take_crash_sentinel(file_path):
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after writing its crash sentinel", timed_out: false, cached: false)
+        if has_crash_evidence(stdout + "\n" + stderr):
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after emitting a fault diagnostic; last output: {extract_error_message(stdout + "\n" + stderr)}", timed_out: false, cached: false)
+        if exit_code == -1:
+            # -1 without the runtime's trailing TIMEOUT marker is NOT a signal
+            # death (those arrive as 128+signo) and NOT a timeout: it is a
+            # spawn/reap failure at the process layer. Label it distinctly so
+            # the three -1-adjacent outcomes never share one message.
+            return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TERMINATED: child produced no exit status -- spawn or reap failure at the process layer, not a timeout and not a signal death (unverified)", timed_out: false, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TERMINATED: child died by signal with no crash sentinel and no fault diagnostic (unverified -- an external killer such as earlyoom cannot be ruled out)", timed_out: false, cached: false)
+
+    # Stdout summaries are presentation, not authenticated execution evidence.
+    # Every mode that still reaches this legacy mapper must fail closed under
+    # --assert-ran until it supplies the structured evidence path.
+    if env_get("SIMPLE_TEST_ASSERT_RAN") == "1":
+        if exit_code != 0:
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "Process exited with code {exit_code}", timed_out: false, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: structured BDD evidence is unavailable for this execution mode", timed_out: false, cached: false)
+
+    val combined = stdout + "\n" + stderr
+
+    # Bounded capture truncation makes every scraped count a LOWER BOUND.
+    # `rt_fork_parent_wait_bounded` (src/runtime/runtime_fork.c) keeps the head
+    # and the tail of an over-long child stream and splices
+    # `[output truncated: N bytes omitted]` where the MIDDLE was dropped, so any
+    # per-example line that lived in that middle is simply gone. Reporting the
+    # surviving numbers as the file's result silently under-reports the example
+    # count while still calling the file green -- the exact failure recorded in
+    # doc/08_tracking/bug/stage4_test_runner_pipe_capture_truncation_rt_fork_2026-07-20.md.
+    # Fail closed instead. Keyed on the literal marker prefix (which always ends
+    # in a colon) so prose merely mentioning truncation cannot red a file.
+    if combined.contains("[output truncated:"):
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "child output was truncated by the bounded capture; example counts are unverifiable (see runtime_fork.c FORK_CAPTURE_LIMIT)", timed_out: false, cached: false)
+
+    val (passed, failed, skipped, pending) = parse_test_output(combined)
+    val (omissions, omission_problem) = parse_test_omission_evidence(combined)
+    if omission_problem != "":
+        return TestFileResult(
+            path: file_path, passed: passed, failed: 1, skipped: skipped,
+            pending: pending, duration_ms: duration_ms, setup_ms: 0,
+            error: "ERROR: {omission_problem}", timed_out: false, cached: false)
+    if omissions.len() > 0:
+        var blocked = 0
+        var unsupported = 0
+        for omission in omissions:
+            if omission.status == TestOmissionStatus.Blocked:
+                blocked = blocked + 1
+            else:
+                unsupported = unsupported + 1
+        val status = if failed > 0 or exit_code != 0:
+            "ERROR"
+        elif blocked > 0:
+            "BLOCKED"
+        else:
+            "UNSUPPORTED"
+        val first = omissions[0]
+        return test_runner_result_with_mcdc_evidence(TestFileResult(
+            path: file_path, passed: passed, failed: failed, skipped: skipped,
+            pending: pending, duration_ms: duration_ms, setup_ms: 0,
+            error: "{status}: {first.reason}; prerequisite={first.prerequisite}; owner={first.owner}; tracking={first.tracking_id}; resume={first.resume_command}",
+            timed_out: false, cached: false, blocked: blocked,
+            unsupported: unsupported, omission_evidence: omissions), combined)
+
+    if passed == 0 and failed == 0:
+        if exit_code == 0:
+            val filter = env_get("SIMPLE_TEST_FILTER")
+            if filter != "" and filter != nil:
+                return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
+            if output_has_zero_pass_summary(combined):
+                return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
+            # No parseable pass/fail summary and no explicit zero-result signal
+            # (filter / "Passed: 0 + Failed: 0") was found. Silently defaulting
+            # to a synthetic PASS here would false-green any spec whose output
+            # format we fail to parse. Refuse the synthetic pass instead.
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "no parseable pass/fail summary in test output; refusing synthetic pass", timed_out: false, cached: false)
+        else:
+            # Extract error message from output
+            val extracted_error = extract_error_message(combined)
+            val error_msg = if extracted_error != "":
+                extracted_error
+            else:
+                "Process exited with code {exit_code}"
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error_msg, timed_out: false, cached: false)
+
+    # A child process failure always makes the file fail, even when it printed
+    # a green summary before crashing or hitting an internal error.
+    var effective_failed = failed
+    if exit_code != 0 and effective_failed == 0:
+        effective_failed = 1
+
+    # Extract error messages when tests fail
+    var error = ""
+    if effective_failed > 0:
+        error = extract_error_message(combined)
+        if error == "" and exit_code != 0:
+            error = "Process exited with code {exit_code}"
+
+    test_runner_result_with_mcdc_evidence(
+        TestFileResult(path: file_path, passed: passed, failed: effective_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
+        combined
+    )
+
+fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
+    if path == "" or not file_exists(path):
+        return (0, 0, 0)
+    val content = read_file_content(path)
+    val parts = content.split("\n")
+    if parts.len() < 3 or parts[0] != "simple-bdd-v1":
+        return (0, 0, 0)
+    val passed_text = parts[1].trim()
+    val failed_text = parts[2].trim()
+    if passed_text == "" or failed_text == "":
+        return (0, 0, 0)
+    val passed = passed_text.to_int() ?? 0
+    val failed = failed_text.to_int() ?? 0
+    if passed < 0 or failed < 0 or passed.to_text() != passed_text or failed.to_text() != failed_text:
+        return (0, 0, 0)
+    if content != "simple-bdd-v1\n{passed_text}\n{failed_text}\n":
+        return (0, 0, 0)
+    (passed, failed, 1)
+
+fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
+    if evidence_path == "" or env_get("SIMPLE_TEST_ASSERT_RAN") != "1":
+        return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
+    # -1 (timeout / spawn failure) and every 128+signo death (incl. a
+    # shell-propagated 143/144) need the classification above, not the generic
+    # non-zero-exit path below.
+    if exit_code == -1 or (exit_code > 128 and exit_code < 192):
+        return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
+    val combined = stdout + "\n" + stderr
+    if combined.contains("[output truncated:"):
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "child output was truncated; typed scenario status is unverifiable",
+            timed_out: false, cached: false)
+    val (_, _, skipped, pending) = parse_test_output(combined)
+    val (omissions, omission_problem) = parse_test_omission_evidence(combined)
+    if omission_problem != "":
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: skipped,
+            pending: pending, duration_ms: duration_ms, setup_ms: 0,
+            error: "ERROR: {omission_problem}", timed_out: false, cached: false)
+    if omissions.len() > 0:
+        var blocked = 0
+        var unsupported = 0
+        for omission in omissions:
+            if omission.status == TestOmissionStatus.Blocked:
+                blocked = blocked + 1
+            else:
+                unsupported = unsupported + 1
+        val first = omissions[0]
+        val (structured_passed, structured_failed, _) = read_structured_test_evidence(evidence_path)
+        val status = if structured_failed > 0 or exit_code != 0:
+            "ERROR"
+        elif blocked > 0:
+            "BLOCKED"
+        else:
+            "UNSUPPORTED"
+        return test_runner_result_with_mcdc_evidence(TestFileResult(
+            path: file_path, passed: structured_passed, failed: structured_failed,
+            skipped: skipped, pending: pending, duration_ms: duration_ms,
+            setup_ms: 0,
+            error: "{status}: {first.reason}; prerequisite={first.prerequisite}; owner={first.owner}; tracking={first.tracking_id}; resume={first.resume_command}",
+            timed_out: false, cached: false, blocked: blocked,
+            unsupported: unsupported, omission_evidence: omissions), combined)
+    val (passed, evidence_failed, valid) = read_structured_test_evidence(evidence_path)
+    if exit_code != 0:
+        val failed = if evidence_failed > 0: evidence_failed else: 1
+        return TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "Process exited with code {exit_code}", timed_out: false, cached: false)
+    if valid == 0 or passed + evidence_failed == 0:
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: no BDD examples executed", timed_out: false, cached: false)
+    val error = if evidence_failed > 0: "test-runner: spec failed" else: ""
+    test_runner_result_with_mcdc_evidence(
+        TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
+        combined
+    )
+
+# =========================================================================
+# Coverage Wrapper Generation
+# =========================================================================
+
+fn coverage_wrapper_suffix(file_path: text) -> text:
+    if file_path.ends_with("_spec.spl"):
+        "_spec.spl"
+    else:
+        ".spl"
+
+fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text):
+    val configured_mcdc = env_get("SIMPLE_MCDC_MODE") ?? ""
+    val mcdc_enabled = configured_mcdc == "on" or
+        configured_mcdc == "dynamic"
+    if not options.coverage and not mcdc_enabled:
+        return (file_path, "")
+    val content = read_file_content(file_path)
+    if content == "":
+        return (file_path, "")
+
+    var base = file_path.replace("/", "_")
+    base = base.replace(".spl", "")
+    val tmp_path = _tp_get_temp_dir() + "/simple_cov_" + base + coverage_wrapper_suffix(file_path)
+
+    var lines: [text] = []
+    if mcdc_enabled:
+        lines.push("use std.io.{{env_get, file_is_regular_no_follow, file_read_text_bounded}}")
+        lines.push("use std.sffi.cli.{{cli_get_args}}")
+        lines.push("use std.common.convert.{{try_parse_int}}")
+        lines.push("use std.common.crypto.sha256.{{sha256_text}}")
+        lines.push("use std.common.mcdc.model.{{McdcMode, mcdc_default_policy}}")
+        lines.push("use std.test_runner.test_runner_mcdc_runtime.{{test_runner_prepare_mcdc_recording, test_runner_produce_mcdc_evidence_v1}}")
+        lines.push("use std.nogc_sync_mut.mcdc.dynamic_probe.{{mcdc_dynamic_probe_controller_load_builtin_current_owner}}")
+        lines.push("use std.spec.scenario_governance.{{scenario_governance_mcdc_exclusions_reset, scenario_governance_mcdc_exclusions_snapshot}}")
+        lines.push("")
+        lines.push("fn __simple_mcdc_manifest_arg(prefix: text) -> text:")
+        lines.push("    var found = \"\"")
+        lines.push("    for arg in cli_get_args():")
+        lines.push("        if arg.starts_with(prefix):")
+        lines.push("            if found != \"\": panic(\"test-runner: duplicate MC/DC manifest contract\")")
+        lines.push("            found = arg.replace(prefix, \"\")")
+        lines.push("    found")
+        lines.push("")
+        lines.push("val __simple_mcdc_manifest_path = __simple_mcdc_manifest_arg(\"--simple-mcdc-manifest=\")")
+        lines.push("val __simple_mcdc_manifest_length = try_parse_int(__simple_mcdc_manifest_arg(\"--simple-mcdc-manifest-length=\"))")
+        lines.push("val __simple_mcdc_manifest_sha256 = __simple_mcdc_manifest_arg(\"--simple-mcdc-manifest-sha256=\")")
+        lines.push("if __simple_mcdc_manifest_path == \"\" or __simple_mcdc_manifest_length == nil or __simple_mcdc_manifest_length.unwrap() < 0 or __simple_mcdc_manifest_length.unwrap() > 67108864 or __simple_mcdc_manifest_sha256.len() != 64 or not file_is_regular_no_follow(__simple_mcdc_manifest_path): panic(\"test-runner: invalid MC/DC manifest contract\")")
+        lines.push("val __simple_mcdc_manifest = file_read_text_bounded(__simple_mcdc_manifest_path, __simple_mcdc_manifest_length.unwrap()) ?? \"\"")
+        lines.push("if __simple_mcdc_manifest.len() != __simple_mcdc_manifest_length.unwrap() or sha256_text(__simple_mcdc_manifest) != __simple_mcdc_manifest_sha256: panic(\"test-runner: MC/DC manifest integrity mismatch\")")
+        lines.push("")
+        lines.push("val __simple_mcdc_mode = if (env_get(\"SIMPLE_MCDC_MODE\") ?? \"\") == \"dynamic\": McdcMode.DynamicAspect else: McdcMode.StaticOn")
+        lines.push("scenario_governance_mcdc_exclusions_reset()")
+        lines.push("val __simple_mcdc_ready = test_runner_prepare_mcdc_recording(__simple_mcdc_mode, mcdc_default_policy(__simple_mcdc_mode))")
+        lines.push("if not __simple_mcdc_ready: panic(\"test-runner: MC/DC recorder preparation failed\")")
+        lines.push("if __simple_mcdc_mode == McdcMode.DynamicAspect and not mcdc_dynamic_probe_controller_load_builtin_current_owner(): panic(\"test-runner: dynamic MC/DC aspect load failed\")")
+        lines.push("")
+    lines.push(content)
+    lines.push("")
+    if options.coverage:
+        lines.push("# === Coverage Dump (auto-generated) ===")
+        lines.push("extern fn rt_coverage_enabled() -> bool")
+        lines.push("extern fn rt_coverage_dump_sdn() -> text")
+        lines.push("")
+        lines.push("fn __simple_cov_dump():")
+        lines.push("    if not rt_coverage_enabled():")
+        lines.push("        return")
+        lines.push("    val sdn = rt_coverage_dump_sdn()")
+        lines.push("    print \"" + COVERAGE_BEGIN + "\"")
+        lines.push("    print sdn")
+        lines.push("    print \"" + COVERAGE_END + "\"")
+        lines.push("")
+        lines.push("__simple_cov_dump()")
+    if mcdc_enabled:
+        lines.push("")
+        lines.push("fn __simple_mcdc_dump():")
+        lines.push("    val exclusions = scenario_governance_mcdc_exclusions_snapshot()")
+        lines.push("    val evidence = test_runner_produce_mcdc_evidence_v1(__simple_mcdc_mode, __simple_mcdc_manifest, exclusions)")
+        lines.push("    print \"" + MCDC_EVIDENCE_OUTPUT_BEGIN + "\"")
+        lines.push("    print evidence")
+        lines.push("    print \"" + MCDC_EVIDENCE_OUTPUT_END + "\"")
+        lines.push("")
+        lines.push("__simple_mcdc_dump()")
+
+    val wrapped = lines.join("\n")
+    file_write(tmp_path, wrapped)
+    (tmp_path, tmp_path)
+
+fn extract_coverage_sdn(output: text) -> text:
+    var in_block = false
+    var result = ""
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean == COVERAGE_BEGIN:
+            in_block = true
+        elif clean == COVERAGE_END:
+            in_block = false
+        elif in_block:
+            if result != "":
+                result = result + "\n"
+            result = result + raw_line
+    result
+
+fn strip_coverage_blocks(output: text) -> text:
+    var in_block = false
+    var result = ""
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean == COVERAGE_BEGIN:
+            in_block = true
+        elif clean == COVERAGE_END:
+            in_block = false
+        elif not in_block:
+            if result != "":
+                result = result + "\n"
+            result = result + raw_line
+    result
+
+# =========================================================================
+# G3: Static test listing (parse source without execution)
+# =========================================================================
+
+fn list_tests_static(files: [text]) -> [text]:
+    var test_names: [text] = []
+    for file_path in files:
+        val content = read_file_content(file_path)
+        if content == "":
+            continue
+        val lines = content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            # Match: it "...", slow_it "...", test "..."
+            val name = extract_static_test_name(trimmed)
+            if name != "":
+                test_names.push("{file_path}::{name}")
+    test_names
+
+fn extract_static_test_name(line: text) -> text:
+    # it "description"
+    if line.starts_with("it \""):
+        val end = line.index_of("\"", 4)
+        if end > 4:
+            return line[4:end]
+    # slow_it "description"
+    if line.starts_with("slow_it \""):
+        val end = line.index_of("\"", 9)
+        if end > 9:
+            return "[slow] " + line[9:end]
+    # test "description"
+    if line.starts_with("test \""):
+        val end = line.index_of("\"", 6)
+        if end > 6:
+            return line[6:end]
+    # pending_on "description"
+    if line.starts_with("pending_on \""):
+        val end = line.index_of("\"", 12)
+        if end > 12:
+            return "[pending] " + line[12:end]
+    ""
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export COVERAGE_BEGIN, COVERAGE_END, COMPILER_COVERAGE_BEGIN, COMPILER_COVERAGE_END
+export MCDC_OBLIGATION_BEGIN, MCDC_OBLIGATION_END
+export extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks
+export extract_compiler_mcdc_obligation_manifest
+export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
+export extract_error_message, parse_test_output, parse_test_omission_evidence
+export extract_number_before, extract_number_after_colon
+export build_child_args, make_result_from_output, read_structured_test_evidence, make_result_from_structured_evidence
+export coverage_wrapper_suffix, build_coverage_wrapper
+export extract_coverage_sdn, strip_coverage_blocks
+export list_tests_static, extract_static_test_name

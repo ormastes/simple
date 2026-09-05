@@ -1,0 +1,154 @@
+# SCV read-only Git/jj sidecar backend adapter (MIG-13, scv_v2_final_report §5.3).
+#
+# Read-only by construction: every git interaction goes through `process_run`
+# with query subcommands only (`rev-parse`, `ls-tree`, `hash-object` without
+# `-w`); no function in this module ever writes into the git repository or
+# executes jj (jj presence is probed by directory existence alone).
+
+use app.io.mod (file_exists, process_run)
+use std.nogc_sync_mut.io.dir_ops.{dir_list}
+use std.scv.core.{scv_meta_dir}
+use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_write_text}
+use std.scv.integrity.{scv_current_tree_content}
+use std.scv.stabilize.{scv_verify_backends_git}
+
+fn scv_backend_map_path(root: text) -> text:
+    "{scv_meta_dir(root)}/backend_map.sdn"
+
+fn scv_git_head_sha(git_dir: text) -> text:
+    val (out, _err, code) = process_run("git", ["-C", git_dir, "rev-parse", "HEAD"])
+    if code != 0:
+        return ""
+    out.trim()
+
+fn scv_git_head_branch(git_dir: text) -> text:
+    val (out, _err, code) = process_run("git", ["-C", git_dir, "rev-parse", "--abbrev-ref", "HEAD"])
+    if code != 0:
+        return ""
+    out.trim()
+
+fn scv_jj_present(git_dir: text) -> bool:
+    # Probe only: jj is never executed. `.jj` is a directory, so list the
+    # parent and look for the entry name.
+    for entry in dir_list(git_dir):
+        if entry == ".jj" or entry.ends_with("/.jj"):
+            return true
+    false
+
+# `scv backend status` — report sidecar availability, read-only.
+fn scv_backend_status(root: text, git_dir: text) -> text:
+    var out = ""
+    val head = scv_git_head_sha(git_dir)
+    if head == "":
+        return "ERROR — nothing was checked (no git repository at {git_dir})\n"
+    out = out + "git: available head={head} branch={scv_git_head_branch(git_dir)}\n"
+    if scv_jj_present(git_dir):
+        out = out + "jj: available (.jj present; probe only, never executed)\n"
+    else:
+        out = out + "jj: absent\n"
+    out = out + "scv: op={scv_current_op(root)} commit={scv_read_workspace_commit(root)}\n"
+    if head == "":
+        return out + "ERROR — nothing was checked (no git repository at {git_dir})\n"
+    out + "PASS — backend status read, 0 mutations\n"
+
+# `scv backend map` — write SCV commit <-> git commit candidate mapping rows to
+# .scv/meta/backend_map.sdn by comparing the current SCV tree against
+# `git ls-tree -r <rev>` (same comparison basis as verify-backends).
+fn scv_backend_map(root: text, git_dir: text, rev: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    val head = scv_git_head_sha(git_dir)
+    if head == "":
+        return "ERROR — nothing was checked (no git repository at {git_dir})\n"
+    val (ls_out, ls_err, ls_code) = process_run("git", ["-C", git_dir, "ls-tree", "-r", rev])
+    if ls_code != 0:
+        return "ERROR — nothing was checked (git ls-tree failed: {ls_err.trim()})\n"
+    var git_paths: [text] = []
+    var git_shas: [text] = []
+    for line in ls_out.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val tab = trimmed.index_of("\t")
+        if tab <= 0:
+            continue
+        val meta_parts = trimmed[:tab].split(" ")
+        if meta_parts.len() < 3 or meta_parts[1] != "blob":
+            continue
+        git_paths.push(trimmed[tab + 1:])
+        git_shas.push(meta_parts[2])
+    val scv_commit = scv_read_workspace_commit(root)
+    var rows = "backend_map:\n"
+    rows = rows + "  scv_commit: {scv_commit}\n"
+    rows = rows + "  git_commit: {head}\n"
+    rows = rows + "  rev: {rev}\n"
+    rows = rows + "  paths:\n"
+    var mapped = 0
+    var unmapped = 0
+    for row in scv_current_tree_content(root).split("\n"):
+        val trimmed = row.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() < 3:
+            continue
+        val rel = parts[0]
+        var git_sha = ""
+        var i = 0
+        while i < git_paths.len():
+            if git_paths[i] == rel:
+                git_sha = git_shas[i]
+            i = i + 1
+        if git_sha == "":
+            rows = rows + "    {rel}, {parts[2]}, unmapped\n"
+            unmapped = unmapped + 1
+        else:
+            rows = rows + "    {rel}, {parts[2]}, {git_sha}\n"
+            mapped = mapped + 1
+    if mapped + unmapped == 0:
+        return "ERROR — nothing was checked (empty SCV tree)\n"
+    if not scv_write_text(scv_backend_map_path(root), rows):
+        return "ERROR — nothing was checked (cannot write backend_map.sdn)\n"
+    "PASS — {mapped} path(s) mapped, {unmapped} unmapped -> {scv_backend_map_path(root)}\n"
+
+# `scv backend verify` — re-run the byte-for-byte differential comparison.
+fn scv_backend_verify(root: text, git_dir: text, rev: text) -> text:
+    scv_verify_backends_git(root, git_dir, rev)
+
+# --- promote-verify (MIG-15, scv_v2_final_report §16.2 exact tree agreement) --
+
+fn scv_promotion_path(root: text) -> text:
+    "{scv_meta_dir(root)}/promotion.sdn"
+
+fn scv_result_verdict_pass(result: text) -> bool:
+    var verdict = ""
+    for line in result.split("\n"):
+        if line.trim() != "":
+            verdict = line.trim()
+    verdict.starts_with("PASS")
+
+# `scv promote-verify --git <path> [--rev REV]` — exact-tree agreement guard
+# around promotion: the SCV tree must byte-agree with the git tree BEFORE the
+# promotion is recorded and AFTER the mapping row is written. Any disagreement
+# at any step is a FAIL and nothing is marked published (fail-closed: the
+# promotion record is written only after both comparisons pass).
+fn scv_promote_verify(root: text, git_dir: text, rev: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    val pre = scv_verify_backends_git(root, git_dir, rev)
+    if pre.starts_with("ERROR — nothing was checked"):
+        return pre
+    if not scv_result_verdict_pass(pre):
+        return "{pre}FAIL — promotion blocked: pre-promotion tree disagreement; nothing marked published\n"
+    val map_result = scv_backend_map(root, git_dir, rev)
+    if not scv_result_verdict_pass(map_result):
+        return "{map_result}FAIL — promotion blocked: backend mapping failed; nothing marked published\n"
+    val post = scv_verify_backends_git(root, git_dir, rev)
+    if not scv_result_verdict_pass(post):
+        return "{post}FAIL — promotion blocked: post-mapping tree disagreement; nothing marked published\n"
+    val scv_commit = scv_read_workspace_commit(root)
+    val git_commit = scv_git_head_sha(git_dir)
+    val record = "promotion:\n  scv_commit: {scv_commit}\n  git_commit: {git_commit}\n  rev: {rev}\n  published: true\n"
+    if not scv_write_text(scv_promotion_path(root), record):
+        return "FAIL — promotion record write failed; nothing marked published\n"
+    "pre: {pre.trim()}\npost: {post.trim()}\nPASS — exact tree agreement verified before and after promotion; published -> {scv_promotion_path(root)}\n"

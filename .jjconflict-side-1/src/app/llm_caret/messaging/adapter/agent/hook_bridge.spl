@@ -1,0 +1,125 @@
+"""Provider lifecycle normalization for durably queued hook events."""
+
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore}
+use app.llm_caret.messaging.application.task_service.{TaskState, transition_task}
+use app.llm_caret.messaging.application.message_service.{prepare_message}
+use app.llm_caret.messaging.domain.model.{MessageOrigin}
+use app.llm_caret.messaging.domain.receipt.{MessageReceipt, ReceiptState, ReceiptEvidence}
+
+struct HookBridgeDecision:
+    accepted: bool
+    lifecycle_state: text
+    progress_kind: text
+    error: text
+
+fn claude_hook_decision(event_name: text) -> HookBridgeDecision:
+    if event_name == "SessionStart": return HookBridgeDecision(accepted: true, lifecycle_state: "idle", progress_kind: "session", error: "")
+    if event_name == "UserPromptSubmit" or event_name == "PreToolUse" or event_name == "PostToolUse":
+        return HookBridgeDecision(accepted: true, lifecycle_state: "running", progress_kind: "milestone", error: "")
+    if event_name == "PostToolUseFailure": return HookBridgeDecision(accepted: true, lifecycle_state: "blocked", progress_kind: "blocked", error: "")
+    if event_name == "PermissionRequest": return HookBridgeDecision(accepted: true, lifecycle_state: "waiting_input", progress_kind: "approval", error: "")
+    if event_name == "SubagentStart": return HookBridgeDecision(accepted: true, lifecycle_state: "running", progress_kind: "subagent_join", error: "")
+    if event_name == "SubagentStop": return HookBridgeDecision(accepted: true, lifecycle_state: "idle", progress_kind: "subagent_stop", error: "")
+    if event_name == "TaskCreated": return HookBridgeDecision(accepted: true, lifecycle_state: "running", progress_kind: "task", error: "")
+    if event_name == "TaskCompleted" or event_name == "Stop": return HookBridgeDecision(accepted: true, lifecycle_state: "completed", progress_kind: "terminal", error: "")
+    if event_name == "SessionEnd": return HookBridgeDecision(accepted: true, lifecycle_state: "idle", progress_kind: "session_end", error: "")
+    HookBridgeDecision(accepted: false, lifecycle_state: "", progress_kind: "", error: "unknown_claude_hook")
+
+fn gemini_hook_decision(event_name: text) -> HookBridgeDecision:
+    if event_name == "SessionStart": return HookBridgeDecision(accepted: true, lifecycle_state: "idle", progress_kind: "session", error: "")
+    if event_name == "BeforeAgent" or event_name == "BeforeToolSelection" or event_name == "BeforeTool" or event_name == "AfterModel":
+        return HookBridgeDecision(accepted: true, lifecycle_state: "running", progress_kind: "milestone", error: "")
+    if event_name == "AfterAgent": return HookBridgeDecision(accepted: true, lifecycle_state: "completed", progress_kind: "terminal", error: "")
+    if event_name == "SessionEnd": return HookBridgeDecision(accepted: true, lifecycle_state: "idle", progress_kind: "session_end", error: "")
+    HookBridgeDecision(accepted: false, lifecycle_state: "", progress_kind: "", error: "unknown_gemini_hook")
+
+fn codex_hook_decision(event_name: text) -> HookBridgeDecision:
+    if event_name == "notification" or event_name == "thread/started":
+        return HookBridgeDecision(accepted: true, lifecycle_state: "idle", progress_kind: "session", error: "")
+    if event_name == "turn/started": return HookBridgeDecision(accepted: true, lifecycle_state: "running", progress_kind: "milestone", error: "")
+    if event_name == "turn/waiting_input": return HookBridgeDecision(accepted: true, lifecycle_state: "waiting_input", progress_kind: "approval", error: "")
+    if event_name == "turn/blocked": return HookBridgeDecision(accepted: true, lifecycle_state: "blocked", progress_kind: "blocked", error: "")
+    if event_name == "turn/completed": return HookBridgeDecision(accepted: true, lifecycle_state: "completed", progress_kind: "terminal", error: "")
+    if event_name == "turn/failed": return HookBridgeDecision(accepted: true, lifecycle_state: "failed", progress_kind: "terminal", error: "")
+    if event_name == "turn/interrupted": return HookBridgeDecision(accepted: true, lifecycle_state: "idle", progress_kind: "canceled", error: "")
+    HookBridgeDecision(accepted: false, lifecycle_state: "", progress_kind: "", error: "unknown_codex_notification")
+
+fn normalize_hook_event(provider: text, event_name: text) -> HookBridgeDecision:
+    if provider == "claude": return claude_hook_decision(event_name)
+    if provider == "gemini": return gemini_hook_decision(event_name)
+    if provider == "codex": return codex_hook_decision(event_name)
+    HookBridgeDecision(accepted: false, lifecycle_state: "", progress_kind: "", error: "unknown_hook_provider")
+
+fn hook_task_state(state: text) -> TaskState:
+    match state:
+        "running": TaskState.Running
+        "waiting_input": TaskState.WaitingInput
+        "blocked": TaskState.Blocked
+        "completed": TaskState.Completed
+        "failed": TaskState.Failed
+        "idle": TaskState.Running
+        _: TaskState.Running
+
+fn terminal_hook_state(state: text) -> bool:
+    state == "completed" or state == "failed"
+
+fn publish_hook_progress(store: PureSqlMessagingStore, event_id: text, task_id: text,
+        room_id: text, agent_id: text, state: text, progress_kind: text, at: i64) -> bool:
+    val room = store.room(room_id)
+    if room.room_id.value == "": return false
+    var publish = true
+    for binding in store.agent_bindings():
+        if binding.room_id.value == room_id and binding.agent_id.value == agent_id:
+            if binding.update_policy == "silent": publish = false
+            if binding.update_policy == "final_only" and not terminal_hook_state(state): publish = false
+    if not publish: return true
+    val body = "Task " + task_id + " " + state
+    val prepared = prepare_message("update-" + event_id, room.workspace_id.value, room_id,
+        store.message_count() + 1, agent_id, agent_id, MessageOrigin.AgentUpdate, body,
+        "", "", task_id, event_id, 0, at)
+    if not prepared.accepted: return false
+    store.append_message(prepared.message, "hook-update-" + event_id).ok
+
+fn apply_hook_task_event(store: PureSqlMessagingStore, event_id: text,
+        decision: HookBridgeDecision, at: i64) -> bool:
+    val correlation = store.hook_correlation(event_id)
+    if correlation.event_id == "": return true
+    var found = false
+    for task in store.tasks():
+        if task.task_id == correlation.task_id:
+            found = true
+            var required_input = ""
+            if decision.lifecycle_state == "waiting_input":
+                required_input = "Provider session requires input"
+            val changed = transition_task(task, hook_task_state(decision.lifecycle_state),
+                decision.progress_kind, required_input, at)
+            if not changed.accepted or not store.put_task(changed.task).ok: return false
+            if not publish_hook_progress(store, event_id, correlation.task_id,
+                    correlation.room_id, correlation.agent_id, decision.lifecycle_state,
+                    decision.progress_kind, at): return false
+            if terminal_hook_state(decision.lifecycle_state):
+                if not store.put_receipt(MessageReceipt(message_id: task.origin_message_id,
+                        identity_id: correlation.agent_id, state: ReceiptState.Handled,
+                        evidence: ReceiptEvidence.Synthetic, occurred_at: at,
+                        detail: correlation.task_id)).ok: return false
+    found
+
+fn drain_hook_events(store: PureSqlMessagingStore, limit: i64) -> (i64, i64):
+    var handled = 0
+    var failed = 0
+    for event in store.queued_hook_events(limit):
+        val decision = normalize_hook_event(event.provider, event.event_name)
+        if decision.accepted and apply_hook_task_event(store, event.event_id, decision, event.received_at):
+            store.append_audit("agent_hook_" + decision.progress_kind, event.provider,
+                event.event_id, "state=" + decision.lifecycle_state, event.received_at)
+            store.mark_hook_event(event.event_id, "handled")
+            handled = handled + 1
+        else:
+            val error = if not decision.accepted: decision.error else: "hook_task_update_failed"
+            store.append_audit("agent_hook_rejected", event.provider, event.event_id,
+                error, event.received_at)
+            store.mark_hook_event(event.event_id, "failed")
+            failed = failed + 1
+    (handled, failed)
+
+export HookBridgeDecision, normalize_hook_event, drain_hook_events

@@ -1,0 +1,268 @@
+"""
+## Purpose and audience
+
+Prove that execution evidence never guesses causes, declared budgets remain
+independent, and approved cohort baselines detect robust regressions without
+ratcheting themselves.
+"""
+
+use std.common.perf.execution_metrics.{ResourceEvidenceQuality, TerminationCause, BaselineState, DecisionStatus, ResourceUsage, TerminationEvidence, ResourceBudget, AnomalyPolicy, ApprovedBaseline, ExecutionCohort, DriftPolicy, classify_termination, evaluate_resource_budget, cohorts_compatible, approved_baseline_promote, approved_baseline_supersede, approved_baseline_mark_suspect, compare_approved_baseline, required_spans_present, work_normalized_duration, suspicious_apparent_speedup, execution_cohort_key, estimate_doubling_exponent, complexity_regression, retention_slope, tail_evidence, incremental_invalidation_evidence_valid, drift_state_initial, drift_state_update, drift_detected}
+use std.spec.{step, expect_not}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, standard_resource_budget, parse_cgroup_v2_events, cgroup_memory_high_event, cgroup_memory_max_event, cgroup_process_limit_event}
+use std.common.perf.execution_metrics_sdn.{ExecutionSubjectRecord, ExecutionRunRecord, BaselineRecord, serialize_execution_subjects, serialize_execution_runs, serialize_baseline_history}
+use std.test_runner.test_runner_types.{TestFileResult}
+use std.test_runner.test_runner_metrics.{test_machine_environment_id}
+
+fn neutral_evidence(exit_code: i64, signal: i64) -> TerminationEvidence:
+    TerminationEvidence(
+        infrastructure_failed: false,
+        wall_watchdog_fired: false,
+        no_progress_watchdog_fired: false,
+        cpu_limit_event: false,
+        memory_high_event: false,
+        memory_max_event: false,
+        process_limit_event: false,
+        output_limit_event: false,
+        externally_terminated: false,
+        signal: signal,
+        exit_code: exit_code
+    )
+
+fn usage_with_wall(wall_ms: i64) -> ResourceUsage:
+    ResourceUsage(
+        wall_ms: wall_ms,
+        user_cpu_ms: 40,
+        system_cpu_ms: 10,
+        peak_tree_charge_bytes: 4096,
+        peak_direct_child_rss_bytes: 2048,
+        heap_live_end_bytes: 512,
+        heap_peak_bytes: 1024,
+        io_read_bytes: 100,
+        io_write_bytes: 200,
+        pids_peak: 2,
+        evidence_quality: ResourceEvidenceQuality.ExactTree,
+        termination: TerminationCause.Exited,
+        signal: 0,
+        exit_code: 0
+    )
+
+fn ordinary_budget() -> ResourceBudget:
+    ResourceBudget(
+        max_wall_ms: 100,
+        max_cpu_ms: 100,
+        max_tree_charge_bytes: 8192,
+        max_direct_child_rss_bytes: 4096,
+        max_io_read_bytes: 1000,
+        max_io_write_bytes: 1000,
+        max_pids: 4
+    )
+
+fn default_policy() -> AnomalyPolicy:
+    AnomalyPolicy(
+        warning_relative_percent: 10,
+        warning_mad_multiplier: 3.0,
+        failure_relative_percent: 15,
+        failure_mad_multiplier: 4.0,
+        absolute_floor: 5.0
+    )
+
+describe "affirmative termination evidence":
+    # @req: REQ-002, REQ-003, REQ-004
+    it "does not turn exit 137 into a timeout or OOM":
+        step("Classify termination from affirmative evidence")
+        val cause = classify_termination(neutral_evidence(137, 9))
+        expect(cause).to_equal(TerminationCause.Signal)
+
+    it "does not turn exit 139 into a memory violation":
+        step("Classify termination from affirmative evidence")
+        val cause = classify_termination(neutral_evidence(139, 11))
+        expect(cause).to_equal(TerminationCause.Signal)
+
+    it "uses an explicit memory maximum event":
+        step("Classify termination from affirmative evidence")
+        var evidence = neutral_evidence(137, 9)
+        evidence.memory_max_event = true
+        expect(classify_termination(evidence)).to_equal(TerminationCause.MemoryMax)
+
+    it "keeps external termination unverified":
+        step("Classify termination from affirmative evidence")
+        var evidence = neutral_evidence(143, 15)
+        evidence.externally_terminated = true
+        expect(classify_termination(evidence)).to_equal(TerminationCause.ExternalTermination)
+
+    it "derives cgroup violations only from increasing event counters":
+        step("Run a child tree and collect resource evidence")
+        val before = parse_cgroup_v2_events("low 0\nhigh 2\nmax 0\noom 0\noom_kill 0", "max 1")
+        val unchanged = parse_cgroup_v2_events("low 0\nhigh 2\nmax 0\noom 0\noom_kill 0", "max 1")
+        val after = parse_cgroup_v2_events("low 0\nhigh 3\nmax 1\noom 1\noom_kill 1", "max 2")
+        expect(cgroup_memory_high_event(before, unchanged)).to_be(false)
+        expect(cgroup_memory_max_event(before, unchanged)).to_be(false)
+        expect(cgroup_process_limit_event(before, unchanged)).to_be(false)
+        expect(cgroup_memory_high_event(before, after)).to_be(true)
+        expect(cgroup_memory_max_event(before, after)).to_be(true)
+        expect(cgroup_process_limit_event(before, after)).to_be(true)
+
+describe "independent declared budgets":
+    # @req: REQ-001, REQ-011
+    it "maps resource classes to fixed standard quantities":
+        step("Create a bounded execution resource scope")
+        val tiny = execution_resource_scope(ExecutionResourceClass.Tiny)
+        val standard = standard_resource_budget(ExecutionResourceClass.Standard)
+        expect(tiny.timeout_ms).to_equal(30_000)
+        expect(tiny.budget.max_pids).to_equal(32)
+        expect(tiny.budget.max_fds).to_equal(64)
+        expect(standard.max_tree_charge_bytes).to_equal(2_147_483_648)
+
+    it "fails a wall budget directly":
+        step("Explain the budget and anomaly decisions")
+        val decision = evaluate_resource_budget(usage_with_wall(125), ordinary_budget())
+        expect(decision.status).to_equal(DecisionStatus.Failure)
+        expect(decision.reason).to_equal("wall budget exceeded")
+
+    it "passes without reading historical samples":
+        step("Explain the budget and anomaly decisions")
+        val decision = evaluate_resource_budget(usage_with_wall(80), ordinary_budget())
+        expect(decision.status).to_equal(DecisionStatus.Pass)
+
+describe "cohort-safe frozen baselines":
+    # @req: REQ-007, REQ-008, REQ-009
+    it "keeps execution scenarios distinct":
+        step("Record spans and work counters")
+        val cold = ExecutionCohort(scenario: "full_cold", semantic_configuration_id: "sem", machine_environment_id: "host", workload_id: "work", ordered_aspect_plan_id: "a")
+        val warm = ExecutionCohort(scenario: "full_warm_cache", semantic_configuration_id: "sem", machine_environment_id: "host", workload_id: "work", ordered_aspect_plan_id: "a")
+        expect(cohorts_compatible(cold, warm)).to_be(false)
+
+    it "does not collapse an undeclared machine class to a universal identity":
+        step("Record spans and work counters")
+        expect_not(test_machine_environment_id() == "unavailable")
+
+    it "separates interpreter native aspect and concurrency identities":
+        step("Record spans and work counters")
+        val interpreter = ExecutionCohort(
+            scenario: "test", semantic_configuration_id: "sem", machine_environment_id: "host",
+            workload_id: "work", ordered_aspect_plan_id: "aspect-a", execution_mode: "interpreter",
+            target: "x86_64-linux", optimization: "debug", cache_state: "cold",
+            bootstrap_stage: "stage4", concurrency: 1, compiler_digest: "compiler-a",
+            runtime_digest: "runtime-a", schema_digest: "schema-a")
+        val native = ExecutionCohort(
+            scenario: "test", semantic_configuration_id: "sem", machine_environment_id: "host",
+            workload_id: "work", ordered_aspect_plan_id: "aspect-b", execution_mode: "native",
+            target: "x86_64-linux", optimization: "opt", cache_state: "warm",
+            bootstrap_stage: "stage4", concurrency: 8, compiler_digest: "compiler-a",
+            runtime_digest: "runtime-a", schema_digest: "schema-a")
+        expect(cohorts_compatible(interpreter, native)).to_be(false)
+        expect_not(execution_cohort_key(interpreter) == execution_cohort_key(native))
+
+    it "detects a confirmed twenty-five percent regression without changing the baseline":
+        step("Compare against an approved cohort baseline")
+        val baseline = ApprovedBaseline(cohort_id: "cohort-a", state: BaselineState.Approved, samples: [98.0, 100.0, 102.0], generation: 7)
+        val decision = compare_approved_baseline(baseline, [124.0, 125.0, 126.0], "cohort-a", true, default_policy())
+        expect(decision.status).to_equal(DecisionStatus.Failure)
+        expect(baseline.generation).to_equal(7)
+        expect(baseline.state).to_equal(BaselineState.Approved)
+
+    it "requires explicit promotion":
+        step("Compare against an approved cohort baseline")
+        val provisional = ApprovedBaseline(cohort_id: "cohort-a", state: BaselineState.Provisional, samples: [100.0], generation: 7)
+        val promoted = approved_baseline_promote(provisional, 8)
+        expect(promoted.state).to_equal(BaselineState.Approved)
+        expect(promoted.generation).to_equal(8)
+        expect(provisional.state).to_equal(BaselineState.Provisional)
+
+    it "retains a superseded prior generation":
+        step("Compare against an approved cohort baseline")
+        val approved = ApprovedBaseline(cohort_id: "cohort-a", state: BaselineState.Approved, samples: [100.0], generation: 8)
+        val prior = approved_baseline_supersede(approved)
+        expect(prior.state).to_equal(BaselineState.Superseded)
+        expect(prior.generation).to_equal(8)
+        expect(approved.state).to_equal(BaselineState.Approved)
+
+    it "marks an approved generation suspect without changing its evidence":
+        step("Compare against an approved cohort baseline")
+        val approved = ApprovedBaseline(cohort_id: "cohort-a", state: BaselineState.Approved, samples: [98.0, 100.0, 102.0], generation: 8)
+        val suspect = approved_baseline_mark_suspect(approved)
+        expect(suspect.state).to_equal(BaselineState.Suspect)
+        expect(suspect.generation).to_equal(8)
+        expect(suspect.samples).to_equal([98.0, 100.0, 102.0])
+        expect(approved.state).to_equal(BaselineState.Approved)
+
+    it "rejects missing required phases":
+        step("Record spans and work counters")
+        expect(required_spans_present(["Parse", "HirLower"], ["Parse", "HirLower", "TypeCheck"])).to_be(false)
+
+    it "flags a faster build whose completed work collapsed":
+        step("Record spans and work counters")
+        expect(work_normalized_duration(100.0, 20)).to_equal(5.0)
+        expect(work_normalized_duration(100.0, 0)).to_equal(-1.0)
+        expect(suspicious_apparent_speedup(100.0, 60.0, 1_000, 400, 90)).to_be(true)
+        expect(suspicious_apparent_speedup(100.0, 95.0, 1_000, 950, 90)).to_be(false)
+
+describe "complexity retention and gradual drift probes":
+    # @req: REQ-009, REQ-010, REQ-012
+    it "retains a rare tail spike instead of deleting it":
+        step("Compare against an approved cohort baseline")
+        val samples = [100.0, 101.0, 99.0, 100.0, 500.0]
+        val tail = tail_evidence(samples, 4.0, 5.0)
+        expect(tail.sample_count).to_equal(5)
+        expect(tail.maximum).to_equal(500.0)
+        expect(tail.outlier_count).to_equal(1)
+
+    it "requires a reason for incremental invalidation misses":
+        step("Record spans and work counters")
+        expect(incremental_invalidation_evidence_valid(9, 1, "source-content-digest-changed")).to_be(true)
+        expect(incremental_invalidation_evidence_valid(9, 1, "")).to_be(false)
+
+    it "detects quadratic growth across N 2N 4N and 8N":
+        step("Record spans and work counters")
+        val exponent = estimate_doubling_exponent([10.0, 40.0, 160.0, 640.0])
+        expect(exponent).to_be_greater_than(1.9)
+        expect(complexity_regression([10.0, 40.0, 160.0, 640.0], 1.4)).to_be(true)
+
+    it "reports retained memory slope after cleanup":
+        step("Explain the budget and anomaly decisions")
+        expect(retention_slope([100.0, 110.0, 120.0, 130.0])).to_equal(10.0)
+
+    it "detects a consecutive gradual shift":
+        step("Compare against an approved cohort baseline")
+        val policy = DriftPolicy(ewma_alpha: 0.25, cusum_allowance: 1.0, cusum_threshold: 100.0, consecutive_threshold: 3)
+        val first = drift_state_update(drift_state_initial(), 103.0, 100.0, policy)
+        val second = drift_state_update(first, 104.0, 100.0, policy)
+        val third = drift_state_update(second, 105.0, 100.0, policy)
+        expect(drift_detected(third, policy)).to_be(true)
+
+    it "length-prefixes cohort fields to prevent delimiter ambiguity":
+        step("Record spans and work counters")
+        val left = ExecutionCohort(scenario: "a|b", semantic_configuration_id: "c", machine_environment_id: "d", workload_id: "e", ordered_aspect_plan_id: "f")
+        val right = ExecutionCohort(scenario: "a", semantic_configuration_id: "b|c", machine_environment_id: "d", workload_id: "e", ordered_aspect_plan_id: "f")
+        expect_not(execution_cohort_key(left) == execution_cohort_key(right))
+
+describe "stable and volatile SDN persistence":
+    # @req: REQ-005, REQ-006, REQ-014
+    it "keeps subjects separate from run observations":
+        step("Record spans and work counters")
+        val subject_sdn = serialize_execution_subjects([ExecutionSubjectRecord(subject_id: "compiler", subject_kind: "build", policy_id: "default", required_phase_set_id: "compiler-v1")])
+        val baseline = ApprovedBaseline(cohort_id: "cohort", state: BaselineState.Approved, samples: [100.0], generation: 1)
+        val anomaly = compare_approved_baseline(baseline, [100.0], "cohort", true, default_policy())
+        val run = ExecutionRunRecord(run_id: "run-1", subject_id: "compiler", cohort_id: "cohort", started_at: "2026-08-24T00:00:00Z", usage: usage_with_wall(80), budget: evaluate_resource_budget(usage_with_wall(80), ordinary_budget()), anomaly: anomaly, artifact_digest: "sha256:abc")
+        val run_sdn = serialize_execution_runs([run])
+        expect(subject_sdn).to_contain("subjects |subject_id")
+        expect_not(subject_sdn.contains("wall_ms"))
+        expect(run_sdn).to_contain("runs |run_id")
+        expect(run_sdn).to_contain("peak_tree_charge_bytes")
+        expect(run_sdn).to_contain("exact_tree")
+        val baseline_sdn = serialize_baseline_history([BaselineRecord(baseline_id: "b7", cohort_id: "cohort", state: BaselineState.Superseded, generation: 7, median_value: 100.0, sample_count: 5, sample_artifact_digest: "sha256:samples")])
+        expect(baseline_sdn).to_contain("baselines |baseline_id")
+        expect(baseline_sdn).to_contain("superseded")
+
+    it "keeps legacy test results source-compatible while evidence migrates":
+        step("Record spans and work counters")
+        val result = TestFileResult(
+            path: "test/01_unit/example_spec.spl", passed: 1, failed: 0,
+            skipped: 0, pending: 0, duration_ms: 12, setup_ms: 2,
+            error: "", timed_out: false, cached: false
+        )
+        expect(result.compile_ms).to_equal(0)
+        expect(result.execution_ms).to_equal(0)
+        expect(result.resource_usage).to_be_nil()
+        expect(result.budget_status).to_equal("incomplete")
+        expect(result.anomaly_status).to_equal("incomplete")

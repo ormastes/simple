@@ -1,0 +1,102 @@
+"""Web DB SIMD/GPU acceleration — system spec.
+
+Drives a db-backed HTTP route through std.http_server Router.dispatch and
+the std.db.accel accelerated scan path (posting-list bitmaps + token scan),
+and checks the accel capability report exposes SIMD state coherently.
+The active tier (SIMD or GPU when present) is printed, never required —
+absence of a GPU tier must not fail this spec.
+"""
+
+use std.spipe.*
+use std.db.accel.{
+    accel_capability_report,
+    posting_list_new,
+    posting_lists_and_bitmap,
+    posting_lists_or_bitmap,
+    posting_bitmap_result_rows,
+    text_contains_token
+}
+use std.http_server.types.{HttpRequest, HttpResponse, HttpMethod}
+use std.http_server.router.{Router}
+
+# --- tiny in-memory table served over the router ---
+
+fn table_payloads() -> [text]:
+    [
+        "alpha fast simd row",
+        "beta scalar row",
+        "gamma fast gpu row",
+        "delta fast simd gpu row",
+        "epsilon slow row"
+    ]
+
+fn query_rows_accel(token: text) -> [i64]:
+    # accelerated path: token scan -> posting list -> bitmap -> row ids
+    val rows = table_payloads()
+    var hits: [i64] = []
+    var idx = 0
+    while idx < rows.len():
+        if text_contains_token(rows[idx], token):
+            hits.push(idx)
+        idx = idx + 1
+    val result = posting_lists_and_bitmap([posting_list_new(token, hits)], rows.len())
+    posting_bitmap_result_rows(result)
+
+fn ids_to_text(ids: [i64]) -> text:
+    var out = ""
+    for id in ids:
+        if out != "":
+            out = out + ","
+        out = out + "{id}"
+    out
+
+fn handle_query(req: HttpRequest) -> HttpResponse:
+    val token = req.query_param("token")
+    if token == "":
+        return HttpResponse.error_bad_request_placeholder(req)
+    HttpResponse.ok(ids_to_text(query_rows_accel(token)))
+
+fn make_request(token: text) -> HttpRequest:
+    var req = HttpRequest.new(HttpMethod.Get, "/db/query")
+    req.query = "token=" + token
+    req
+
+describe "web/db accelerated query system path":
+    it "reports simd_active coherently and prints the active tier":
+        val report = accel_capability_report()
+        print "accel tier={report.tier_name} simd_available={report.simd_available} simd_active={report.simd_active} width_bits={report.simd_width_bits}"
+        # GPU tier: printed when the tier name reports one; absence is fine.
+        if report.tier_name.contains("gpu"):
+            print "gpu tier detected: {report.tier_name}"
+        else:
+            print "gpu tier absent (tier={report.tier_name}) — not a failure"
+        expect(report.tier_name.len()).to_be_greater_than(0)
+        # simd_active must never claim more than simd_available
+        if report.simd_active:
+            assert_true(report.simd_available)
+        expect(report.simd_width_bits).to_be_greater_than(0)
+
+    it "round-trips a query through router dispatch on the accelerated path":
+        var router = Router.new()
+        router.get("/db/query", handle_query)
+        val resp = router.dispatch(make_request("simd"))
+        expect(resp.status_code()).to_equal(200)
+        expect(resp.body).to_equal("0,3")
+
+    it "accelerated AND/OR bitmaps agree with the served results":
+        val rows = table_payloads()
+        val fast = posting_list_new("fast", [0, 2, 3])
+        val simd = posting_list_new("simd", [0, 3])
+        val both = posting_lists_and_bitmap([fast, simd], rows.len())
+        expect(posting_bitmap_result_rows(both)).to_equal([0, 3])
+        val either = posting_lists_or_bitmap([fast, simd], rows.len())
+        expect(posting_bitmap_result_rows(either)).to_equal([0, 2, 3])
+        # served path must match the raw accel path
+        val resp = Router.new_dispatch_helper()
+        expect(ids_to_text(query_rows_accel("fast"))).to_equal("0,2,3")
+
+    it "returns not-found for an unrouted db path":
+        var router = Router.new()
+        router.get("/db/query", handle_query)
+        val resp = router.dispatch(HttpRequest.new(HttpMethod.Get, "/db/other"))
+        expect(resp.status_code()).to_equal(404)

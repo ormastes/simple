@@ -1,0 +1,53 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_pipeline_v9_flat.{strict_riscv_scalar_runtime_pipeline_v9_flat_direct}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v9_flat_to_vhdl.{compile_strict_riscv_scalar_runtime_pipeline_v9_flat, scalar_runtime_pipeline_v9_flat_driver_closure_diagnostic, scalar_runtime_pipeline_v9_flat_aggregate_child_entity_diagnostic, scalar_runtime_pipeline_v9_flat_route_receipt}
+
+describe "strict flattened runtime scalar pipeline v9 VHDL emission":
+    it "renders the closed unified-M and CSR direct graph with receipt and child hashes":
+        val config = CoreConfig.rv64im_zicsr_zifencei()
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct("runtime_pipeline_v9_rv64", config, LsuConfig.rv64_product_default()).unwrap()
+        expect(scalar_runtime_pipeline_v9_flat_driver_closure_diagnostic(pipeline)).to_equal("")
+        val result = compile_strict_riscv_scalar_runtime_pipeline_v9_flat("runtime_pipeline_v9_rv64", config, LsuConfig.rv64_product_default())
+        expect(result.is_success()).to_be(true)
+        if result.is_success():
+            expect(result.route).to_equal("hwir-gen2-scalar-runtime-pipeline-v9-flat-direct")
+            expect(result.hwir_graph_sha256).to_equal(pipeline.structural_sha256())
+            expect(result.vhdl).to_contain("-- simple-hwir v9-flat-route-receipt=" + scalar_runtime_pipeline_v9_flat_route_receipt(pipeline))
+            expect(result.vhdl).to_contain("-- simple-hwir child-m-provider=" + pipeline.muldiv.structural_sha256())
+            expect(result.vhdl).to_contain("-- simple-hwir child-csr=" + pipeline.csr.structural_sha256())
+            var previous_instance: i64 = -1
+            for child in [("decoder", pipeline.decoder.summary.name),
+                    ("uop_skid", pipeline.uop_skid.entity_name), ("alu", pipeline.alu.summary.name),
+                    ("control", pipeline.control.entity_name), ("system", pipeline.system.summary.name),
+                    ("illegal_provider", pipeline.illegal_provider.summary.name),
+                    ("router", pipeline.router.summary.name),
+                    ("immediate_adapter", pipeline.immediate_adapter.summary.name),
+                    ("pending", pipeline.pending.entity_name), ("projection", pipeline.projection.summary.name),
+                    ("muldiv", pipeline.muldiv.entity_name), ("csr", pipeline.csr.entity_name),
+                    ("lsu", pipeline.lsu.entity_name), ("fence", pipeline.fence.entity_name),
+                    ("selector", pipeline.selector.summary.name),
+                    ("completion_merge", pipeline.completion_merge.summary.name),
+                    ("completion_skid", pipeline.completion_skid.entity_name),
+                    ("global_fault_gate", pipeline.global_fault_gate.summary.name),
+                    ("fault_owner", pipeline.fault_owner.entity_name),
+                    ("defaults", pipeline.defaults.summary.name),
+                    ("zero_defaults", pipeline.zero_defaults.summary.name)]:
+                val instance: i64 = result.vhdl.find(child[0] + ": entity work." + child[1])
+                expect(instance).to_be_greater_than(previous_instance)
+                previous_instance = instance
+            expect(result.vhdl).to_contain("csr_commit_value : out std_logic_vector(63 downto 0)")
+
+    it "retains the V9 route when canonical construction rejects input":
+        val result = compile_strict_riscv_scalar_runtime_pipeline_v9_flat("", CoreConfig.rv32im(), LsuConfig.rv32_product_default())
+        expect(result.is_success()).to_be(false)
+        expect(result.route).to_equal("hwir-gen2-scalar-runtime-pipeline-v9-flat-direct")
+        expect(result.diagnostic).to_contain("HWIR-E-RISCV-RUNTIME-PIPELINE-V9-ID")
+
+    it "rejects case-insensitive aggregate entity collisions with different graphs":
+        expect(scalar_runtime_pipeline_v9_flat_aggregate_child_entity_diagnostic(
+            ["provider_rtl", "PROVIDER_RTL"], ["graph-a", "graph-b"])).to_equal(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V9-FLAT-VHDL-ENTITY-COLLISION: one case-insensitive child entity name requires one exact graph")
+        expect(scalar_runtime_pipeline_v9_flat_aggregate_child_entity_diagnostic(
+            ["provider_rtl", "PROVIDER_RTL"], ["graph-a", "graph-a"])).to_equal("")

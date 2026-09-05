@@ -1,0 +1,42 @@
+# @cover src/compiler/00.common/assurance/policy_schema.spl
+# Probe: does executing the 00.common assurance graph poison a later
+# parse_full_frontend in the SAME interpreter session?
+#
+# This is the exact hazard that made the profile/alias table get duplicated in
+# five places (doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md,
+# rationale comment at src/compiler/80.driver/driver_safety_severity.spl:4-22).
+# The filed repro is specific to compiler.tools.lint.main, whose
+# config_and_model.spl holds module-level Dict state. 00.common/assurance holds
+# NO module-level state, so the hazard should not transfer — but "should not"
+# is not evidence, and WP-3 threads this module into the driver, the
+# interpreter, `run` and the test runner. If this file goes red, the typed
+# policy may not be imported by those layers and WP-3's design is wrong.
+#
+# Ordering is load-bearing: the assurance example MUST run before the frontend
+# example, matching the filed repro's A/B.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.common.assurance.policy_schema.{
+    AssuranceStrictness, ResolvedAssurancePolicyV1
+}
+
+fn lower_source(src: text, module_name: text) -> i64:
+    val parsed = parse_full_frontend(src, "testdata/{module_name}.spl", module_name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/{module_name}.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    hir.functions.len()
+
+describe "00.common assurance graph does not poison the frontend":
+    it "first: executes the assurance policy graph (hash + strictness)":
+        val p = ResolvedAssurancePolicyV1.default()
+        expect(p.strictness.name()).to_equal("moderate")
+        expect(p.policy_hash().starts_with("APOLV1-")).to_equal(true)
+        expect(AssuranceStrictness.from_name("mission-critical").name()).to_equal("critical")
+
+    it "then: parse_full_frontend still lowers a module (no dict-to-int)":
+        val n = lower_source("fn probe_target() -> i64:\n    7\n", "policy_probe")
+        expect(n >= 1).to_equal(true)

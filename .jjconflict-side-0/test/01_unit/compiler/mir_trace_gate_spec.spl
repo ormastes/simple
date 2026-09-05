@@ -1,0 +1,47 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.mir.mir_data.{mir_trace_requested}
+
+describe "MIR trace gate":
+    it "stays off when no fine-grained trace is requested":
+        expect(mir_trace_requested("", "", "")).to_be(false)
+        expect(mir_trace_requested("0", "0", "0")).to_be(false)
+
+    it "preserves every explicit fine-grained trace switch":
+        expect(mir_trace_requested("1", "", "")).to_be(true)
+        expect(mir_trace_requested("", "1", "")).to_be(true)
+        expect(mir_trace_requested("", "", "1")).to_be(true)
+
+    it "does not treat unrelated values as trace requests":
+        expect(mir_trace_requested("true", "phase", "yes")).to_be(false)
+
+    it "routes every integer literal receipt through one shared trace decision":
+        val source = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        val int_dispatch = "match expr_value.kind:\n            case IntLit(value, _):"
+        val int_arm = source.split(int_dispatch)[1].split("case FloatLit(value, _):")[0]
+        expect(int_arm).to_contain("val int_trace_enabled = mir_lower_expr_trace_state == 1")
+        expect(int_arm).to_contain("if int_trace_enabled:\n                    print \"[mir-lower-expr] int:start\"")
+        expect(int_arm).to_contain("if int_trace_enabled:\n                    print \"[mir-lower-expr] int:builder\"")
+        expect(int_arm).to_contain("if int_trace_enabled:\n                    print \"[mir-lower-expr] int:emitted\"")
+        expect(int_arm).to_contain("if int_trace_enabled:\n                    print \"[mir-lower-expr] int:done\"")
+        expect(int_arm.contains("SIMPLE_BOOTSTRAP")).to_equal(false)
+
+    it "refreshes the cached policy before module expression lowering":
+        val expr_source = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        val module_source = file_read("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+        val function_source = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        val begin_session = expr_source.split("me begin_expr_trace_session():")[1].split("me find_global_static")[0]
+        val lower_expr = expr_source.split("me lower_expr(expr: HirExpr) -> LocalId:")[1].split("me lower_expr_impl(expr: HirExpr) -> LocalId:")[0]
+        val before_impl = lower_expr.split("var span_result = self.lower_expr_impl(expr)")[0]
+        val lower_module = module_source.split("me lower_module(module: HirModule) -> MirModule:")[1]
+        val lower_initializers = module_source.split("me lower_runtime_module_initializers_named(")[1].split("var dynamic = runtime_module_initializers_in_declaration_order(consts)")[0]
+        val lower_function = function_source.split("me lower_function_with_gpu_metadata(")[1].split("val trace_enabled = mir_lower_trace_enabled()")[0]
+        expect(begin_session).to_contain("if mir_trace_enabled():")
+        expect(begin_session).to_contain("mir_lower_expr_trace_state = 1")
+        expect(begin_session).to_contain("mir_lower_expr_trace_state = 0")
+        expect(before_impl).to_contain("if mir_lower_expr_trace_state < 0:")
+        expect(before_impl).to_contain("if mir_trace_enabled():")
+        expect(lower_module.split("self.begin_expr_trace_session()")[0].contains("self.symbols = module.symbols")).to_equal(false)
+        expect(lower_module.split("self.begin_expr_trace_session()")[1]).to_contain("self.symbols = module.symbols")
+        expect(lower_initializers).to_contain("self.begin_expr_trace_session()")
+        expect(lower_function).to_contain("self.begin_expr_trace_session()")

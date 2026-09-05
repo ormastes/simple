@@ -1,0 +1,107 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.lifecycle.{SystemEd25519ReceiptAuthorityV1, FileDurableLifecycleV1, DeterministicCandidateTransitionAuthorityV1, PROVIDER_LIFECYCLE_MAX_BYTES, PROVIDER_GENERATION_QUARANTINE_MAX_BYTES, PROVIDER_LIFECYCLE_MAX_REPLAY_ROWS, PROVIDER_LIFECYCLE_MAX_CANDIDATE_ROWS, PROVIDER_LIFECYCLE_MAX_PUBLICATION_ROWS}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use app.io.mod.{file_atomic_write, file_delete, host_os, process_run}
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
+
+fn lifecycle_seed() -> [u8]:
+    var seed: [u8] = []
+    var i = 0
+    while i < 32:
+        seed.push(17u8)
+        i = i + 1
+    seed
+
+fn placeholder_rows(count: i64) -> text:
+    var rows: [text] = []
+    var i = 0
+    while i < count:
+        rows.push("{}")
+        i = i + 1
+    rows.join(",")
+
+fn lifecycle_with_rows(replay: text, candidates: text,
+                       publications: text) -> text:
+    "{\"candidates\":[" + candidates + "],\"current_logical_root\":\"sha256:" +
+        "0" * 64 + "\",\"provider_generation\":1,\"publications\":[" +
+        publications + "],\"replay\":[" + replay +
+        "],\"schema\":\"spipe-provider-lifecycle-store-v1\",\"scope_digest\":\"sha256:" +
+        "1" * 64 + "\",\"snapshot\":\"spks1-" + "0" * 64 +
+        "\",\"workspace\":\"WS-PROVIDER\"}"
+
+describe "SPipe provider lifecycle production ports":
+    it "serializes writers with compare-and-swap and rejects a stale writer":
+        val store = FileDurableLifecycleV1.configured_absolute(
+            "/tmp/simple-spipe-provider-port-cas-v1").unwrap()
+        val initial = "{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}"
+        store.commit(initial).unwrap()
+        val expected = sha256_u8_hex(text_to_bytes(store.load().unwrap()))
+        val next = "{\"candidates\":[],\"current_logical_root\":\"\",\"replay\":[],\"schema\":\"spipe-provider-lifecycle-store-v1\",\"scope_digest\":\"\",\"snapshot\":\"\",\"workspace\":\"\"}"
+        expect(store.commit_if_unchanged(expected, next)).to_equal(Ok(()))
+        expect(store.commit_if_unchanged(expected, initial)).to_equal(Err("lifecycle_conflict"))
+        expect(store.load().unwrap()).to_equal(next)
+
+    it "rejects oversized lifecycle and quarantine bytes before replacing durable state":
+        val path = "/tmp/simple-spipe-provider-port-bounds-v1"
+        val lifecycle_path = path + "/provider-lifecycle-v1.json"
+        val quarantine_path = path + "/provider-generation-quarantine-v1-pg-00000000000000000000000000000001.json"
+        file_delete(lifecycle_path)
+        file_delete(quarantine_path)
+        val store = FileDurableLifecycleV1.configured_absolute(path).unwrap()
+        val initial = "{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}"
+        store.commit(initial).unwrap()
+        expect(store.commit("x" * (PROVIDER_LIFECYCLE_MAX_BYTES + 1))).to_equal(
+            Err("limit_exceeded"))
+        expect(store.load().unwrap()).to_equal(initial)
+        expect(store.commit_generation_quarantine(1,
+            "q" * (PROVIDER_GENERATION_QUARANTINE_MAX_BYTES + 1))).to_equal(
+                Err("limit_exceeded"))
+        expect(store.load_generation_quarantine(1).unwrap()).to_equal("")
+
+    it "rejects lifecycle and quarantine symlinks through the bounded no-follow reader":
+        if host_os() != "windows":
+            val path = "/tmp/simple-spipe-provider-port-nofollow-v1"
+            val target = path + "/target.json"
+            val lifecycle_path = path + "/provider-lifecycle-v1.json"
+            val quarantine_path = path + "/provider-generation-quarantine-v1-pg-00000000000000000000000000000001.json"
+            val store = FileDurableLifecycleV1.configured_absolute(path).unwrap()
+            store.commit("{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}").unwrap()
+            expect(file_atomic_write(target, "attacker-controlled")).to_be(true)
+            file_delete(lifecycle_path)
+            val (_, _, lifecycle_link_code) = process_run("/bin/ln",
+                ["-s", target, lifecycle_path])
+            expect(lifecycle_link_code).to_equal(0)
+            expect(store.load()).to_equal(Err("snapshot_corrupt"))
+            file_delete(quarantine_path)
+            val (_, _, quarantine_link_code) = process_run("/bin/ln",
+                ["-s", target, quarantine_path])
+            expect(quarantine_link_code).to_equal(0)
+            expect(store.load_generation_quarantine(1)).to_equal(
+                Err("snapshot_corrupt"))
+            file_delete(lifecycle_path)
+            file_delete(quarantine_path)
+            file_delete(target)
+
+    it "rejects every lifecycle history count before restoring individual rows":
+        var service = SpipeProviderServiceV1.empty()
+        expect(service.restore_lifecycle(lifecycle_with_rows(
+            placeholder_rows(PROVIDER_LIFECYCLE_MAX_REPLAY_ROWS + 1), "", ""))).to_equal(Err("limit_exceeded"))
+        expect(service.restore_lifecycle(lifecycle_with_rows("",
+            placeholder_rows(PROVIDER_LIFECYCLE_MAX_CANDIDATE_ROWS + 1), ""))).to_equal(Err("limit_exceeded"))
+        expect(service.restore_lifecycle(lifecycle_with_rows("", "",
+            placeholder_rows(PROVIDER_LIFECYCLE_MAX_PUBLICATION_ROWS + 1)))).to_equal(Err("limit_exceeded"))
+
+    it "composes wall clock and explicit key material outside wire input":
+        val authority = SystemEd25519ReceiptAuthorityV1.configured(
+            lifecycle_seed(), "AUTH-PRODUCTION", 1).unwrap()
+        val signature = authority.sign(text_to_bytes("production-authority-probe")).unwrap()
+        expect(authority.available()).to_equal(true)
+        expect(authority.now_ms()).to_be_greater_than(0)
+        expect(signature.len()).to_be_greater_than(0)
+
+    it "owns monotonic lifecycle transition time independently from receipt time":
+        var authority = DeterministicCandidateTransitionAuthorityV1.test_only(100).unwrap()
+        expect(authority.next_recorded_at_ms(80).unwrap()).to_equal(101)
+        expect(authority.next_recorded_at_ms(250).unwrap()).to_equal(250)
+        expect(authority.next_recorded_at_ms(250).unwrap()).to_equal(251)

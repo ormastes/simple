@@ -1,0 +1,209 @@
+# Atomic one-entry CSR completion owner.
+#
+# The child projection computes one frozen Zicsr access.  This owner captures
+# its full completion and CSR write intent, holds both under backpressure, and
+# asserts the CSR commit only on the same accepted completion cycle.
+
+use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwConstant, HwModuleDef, HwNodeId,
+    HwOrigin, HwPort, HwSignal}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
+    HwSeqInstancePin, HwSeqOutputBinding, HwSeqRule, HwSeqValue,
+    HwSequentialModuleDef, HwSequentialPlan, HwStateRegister}
+use compiler.mir.hwir.riscv_scalar_csr_projection.{strict_riscv_scalar_csr_projection_hwir}
+
+fn csr_completion_fields(x: i32) -> [(text, i32)]:
+    [("privilege", 2), ("original_instruction", 32),
+        ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+        ("pc_before", x), ("pc_after", x), ("rd", 5), ("rd_write", 1),
+        ("rd_value", x), ("memory_address", x), ("memory_read_mask", 32),
+        ("memory_write_mask", 32), ("memory_read_data", x),
+        ("memory_write_data", x), ("execute_trap_valid", 1),
+        ("execute_trap_cause", x), ("execute_trap_tval", x),
+        ("memory_trap_valid", 1), ("memory_trap_cause", x),
+        ("memory_trap_tval", x), ("redirect_valid", 1),
+        ("redirect_target", x), ("event_id", 64),
+        ("decode_event_id", 64), ("illegal_valid", 1)]
+
+fn csr_owner_ports(x: i32) -> [HwPort]:
+    var ports = [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("dispatch_valid", "Bits", 1), HwPort.input("completion_ready", "Bits", 1),
+        HwPort.input("in_privilege", "Bits", 2), HwPort.input("in_pc", "Bits", x),
+        HwPort.input("rs1_index", "Bits", 5), HwPort.input("rs1_value", "Bits", x),
+        HwPort.input("csr_present", "Bits", 1), HwPort.input("csr_read_value", "Bits", x),
+        HwPort.input("dispatch_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64), HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("dispatch_canonical_instruction", "Bits", 32),
+        HwPort.input("dispatch_instruction_length_bytes", "Bits", 3),
+        HwPort.input("dispatch_rd", "Bits", 5),
+        HwPort.output("dispatch_ready", "Bits", 1), HwPort.output("dispatch_accept", "Bits", 1),
+        HwPort.output("completion_valid", "Bits", 1),
+        HwPort.output("completion_decode_valid", "Bits", 1),
+        HwPort.output("protocol_fault", "Bits", 1),
+        HwPort.output("csr_access_read_enable", "Bits", 1),
+        HwPort.output("csr_access_address", "Bits", 12),
+        HwPort.output("csr_commit_valid", "Bits", 1),
+        HwPort.output("csr_commit_address", "Bits", 12),
+        HwPort.output("csr_commit_value", "Bits", x)]
+    for field in csr_completion_fields(x):
+        val output_name = if field[0] == "event_id" or field[0] == "decode_event_id" or
+            field[0] == "illegal_valid":
+            "completion_" + field[0]
+        else:
+            field[0]
+        ports.push(HwPort.output(output_name, "Bits", field[1]))
+    ports
+
+fn csr_projection_input_signal(port_name: text) -> text:
+    if port_name == "in_valid": return "csr_projection_valid"
+    if port_name == "in_order": return "dispatch_event_id"
+    port_name
+
+fn csr_projection_pins(projection: HwModuleDef) -> [HwSeqInstancePin]:
+    var pins: [HwSeqInstancePin] = []
+    for port in projection.ports:
+        pins.push(HwSeqInstancePin(port_name: port.name,
+            signal_name: if port.direction == "in":
+                csr_projection_input_signal(port.name)
+            else:
+                "projected_" + port.name,
+            direction: port.direction, bit_width: port.bit_width))
+    pins
+
+fn csr_owner_registers(x: i32) -> [HwStateRegister]:
+    var registers = [HwStateRegister(name: "full_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "fault_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "csr_write_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "csr_address_reg", bit_width: 12,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "csr_value_reg", bit_width: x,
+            clock_domain: "default", reset_value: 0)]
+    for field in csr_completion_fields(x):
+        registers.push(HwStateRegister(name: field[0] + "_reg", bit_width: field[1],
+            clock_domain: "default", reset_value: 0))
+    registers
+
+fn csr_capture_assignments(x: i32) -> [HwSeqAssignment]:
+    var assignments = [HwSeqAssignment(destination: "full_reg", value: HwSeqValue.copy("dispatch_valid", 1)),
+        HwSeqAssignment(destination: "csr_write_reg", value: HwSeqValue.copy("projected_csr_write_enable", 1)),
+        HwSeqAssignment(destination: "csr_address_reg", value: HwSeqValue.copy("projected_csr_address", 12)),
+        HwSeqAssignment(destination: "csr_value_reg", value: HwSeqValue.copy("projected_csr_write_value", x))]
+    for field in csr_completion_fields(x):
+        var source = "projected_retire_" + field[0]
+        if field[0] == "execute_trap_valid": source = "projected_execute_exception"
+        elif field[0] == "execute_trap_cause": source = "projected_retire_cause"
+        elif field[0] == "execute_trap_tval": source = "projected_retire_tval"
+        elif field[0] == "event_id": source = "dispatch_event_id"
+        elif field[0] == "decode_event_id": source = "decode_event_id"
+        elif field[0] == "illegal_valid": source = "illegal_valid"
+        if field[0] == "memory_trap_valid" or field[0] == "memory_trap_cause" or
+            field[0] == "memory_trap_tval" or field[0] == "redirect_valid" or
+            field[0] == "redirect_target":
+            assignments.push(HwSeqAssignment(destination: field[0] + "_reg",
+                value: HwSeqValue.zero(field[1])))
+        else:
+            assignments.push(HwSeqAssignment(destination: field[0] + "_reg",
+                value: HwSeqValue.copy(source, field[1])))
+    assignments
+
+fn csr_clear_assignments(x: i32) -> [HwSeqAssignment]:
+    var assignments = [HwSeqAssignment(destination: "full_reg", value: HwSeqValue.zero(1)),
+        HwSeqAssignment(destination: "csr_write_reg", value: HwSeqValue.zero(1)),
+        HwSeqAssignment(destination: "csr_address_reg", value: HwSeqValue.zero(12)),
+        HwSeqAssignment(destination: "csr_value_reg", value: HwSeqValue.zero(x))]
+    for field in csr_completion_fields(x):
+        assignments.push(HwSeqAssignment(destination: field[0] + "_reg",
+            value: HwSeqValue.zero(field[1])))
+    assignments
+
+fn csr_owner_outputs(x: i32) -> [HwSeqOutputBinding]:
+    val empty = [HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")]
+    val accepted = [HwSeqGuard.high("dispatch_valid"), HwSeqGuard.low("full_reg"),
+        HwSeqGuard.low("fault_reg"), HwSeqGuard.high("dispatch_identity_ok")]
+    val occupied = [HwSeqGuard.high("full_reg")]
+    val commit = [HwSeqGuard.high("full_reg"), HwSeqGuard.high("completion_ready"),
+        HwSeqGuard.high("csr_write_reg"), HwSeqGuard.low("fault_reg"),
+        HwSeqGuard.low("illegal_valid_reg"), HwSeqGuard.low("execute_trap_valid_reg")]
+    var outputs = [HwSeqOutputBinding.all("dispatch_ready", empty),
+        HwSeqOutputBinding.all("dispatch_accept", accepted),
+        HwSeqOutputBinding.direct("completion_valid", "full_reg", 1),
+        HwSeqOutputBinding.direct("completion_decode_valid", "full_reg", 1),
+        HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1),
+        HwSeqOutputBinding.direct("csr_access_read_enable", "projected_csr_read_enable", 1),
+        HwSeqOutputBinding.direct("csr_access_address", "projected_csr_lookup_address", 12),
+        HwSeqOutputBinding.all("csr_commit_valid", commit),
+        HwSeqOutputBinding.guarded("csr_commit_address", "csr_address_reg", 12, commit),
+        HwSeqOutputBinding.guarded("csr_commit_value", "csr_value_reg", x, commit)]
+    for field in csr_completion_fields(x):
+        val output_name = if field[0] == "event_id" or field[0] == "decode_event_id" or
+            field[0] == "illegal_valid": "completion_" + field[0] else: field[0]
+        outputs.push(HwSeqOutputBinding.guarded(output_name,
+            field[0] + "_reg", field[1], occupied))
+    outputs
+
+pub fn strict_riscv_scalar_csr_owner(module_name: text, config: CoreConfig,
+    instruction: u32) -> Result<HwSequentialModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-RISCV-CSR-OWNER-ID: CSR owner requires a module name")
+    val child_name = module_name + "_access_projection"
+    val projection = strict_riscv_scalar_csr_projection_hwir(child_name, config, instruction)?
+    val x = config.xlen
+    val encoded_rd = ((instruction >> 7) & 31) as i64
+    val plan = HwSequentialPlan(owner_id: HwNodeId.child(module_name, "sequential"),
+        registers: csr_owner_registers(x), rules: [
+            HwSeqRule(name: "consume", guards: [HwSeqGuard.high("completion_ready"),
+                    HwSeqGuard.high("full_reg")], assignments: csr_clear_assignments(x)),
+            HwSeqRule(name: "identity_fault", guards: [HwSeqGuard.high("dispatch_valid"),
+                    HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"),
+                    HwSeqGuard.low("dispatch_identity_ok")], assignments: [
+                    HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("dispatch_valid", 1))]),
+            HwSeqRule(name: "capture", guards: [HwSeqGuard.high("dispatch_valid"),
+                    HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"),
+                    HwSeqGuard.high("dispatch_identity_ok")], assignments: csr_capture_assignments(x))],
+        outputs: csr_owner_outputs(x), decoder_pins: csr_projection_pins(projection))
+    val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(module_name),
+        entity_name: module_name, config: config, origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "csr-access"),
+                source_name: "riscv.scalar.zicsr.atomic-access"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "csr-commit"),
+                source_name: "riscv.scalar.zicsr.accepted-commit")],
+        ports: csr_owner_ports(x), datapath_signals: [
+            HwSignal.comb("event_ids_match", "Bits", 1),
+            HwSignal.comb("instruction_match", "Bits", 1),
+            HwSignal.comb("length_match", "Bits", 1), HwSignal.comb("rd_match", "Bits", 1),
+            HwSignal.comb("event_and_instruction_match", "Bits", 1),
+            HwSignal.comb("length_and_rd_match", "Bits", 1),
+            HwSignal.comb("dispatch_identity_ok", "Bits", 1),
+            HwSignal.comb("full_is_low", "Bits", 1), HwSignal.comb("fault_is_low", "Bits", 1),
+            HwSignal.comb("empty_healthy", "Bits", 1),
+            HwSignal.comb("valid_and_identity", "Bits", 1),
+            HwSignal.comb("csr_projection_valid", "Bits", 1)],
+        datapath_constants: [
+            HwConstant.bits("expected_instruction", 32, instruction as i64),
+            HwConstant.bits("expected_length", 3, 4),
+            HwConstant.bits("expected_rd", 5, encoded_rd),
+            HwConstant.bits("zero1", 1, 0)],
+        datapath_bit_vector_constants: [],
+        datapath_comb_ops: [HwCombOp.binary("eq", "event_ids_match",
+                "dispatch_event_id", "decode_event_id", 64),
+            HwCombOp.binary("eq", "instruction_match", "dispatch_canonical_instruction",
+                "expected_instruction", 32),
+            HwCombOp.binary("eq", "length_match", "dispatch_instruction_length_bytes",
+                "expected_length", 3),
+            HwCombOp.binary("eq", "rd_match", "dispatch_rd", "expected_rd", 5),
+            HwCombOp.binary("and", "event_and_instruction_match", "event_ids_match",
+                "instruction_match", 1),
+            HwCombOp.binary("and", "length_and_rd_match", "length_match", "rd_match", 1),
+            HwCombOp.binary("and", "dispatch_identity_ok", "event_and_instruction_match",
+                "length_and_rd_match", 1),
+            HwCombOp.binary("eq", "full_is_low", "full_reg", "zero1", 1),
+            HwCombOp.binary("eq", "fault_is_low", "fault_reg", "zero1", 1),
+            HwCombOp.binary("and", "empty_healthy", "full_is_low", "fault_is_low", 1),
+            HwCombOp.binary("and", "valid_and_identity", "dispatch_valid", "dispatch_identity_ok", 1),
+            HwCombOp.binary("and", "csr_projection_valid", "valid_and_identity", "empty_healthy", 1)],
+        datapath_compare_ops: [], datapath_select_ops: [], datapath_bit_extract_ops: [],
+        datapath_fixed_slice_ops: [], plan: plan, child_entity: child_name,
+        child_graph_sha256: projection.structural_sha256())
+    val diagnostic = module.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

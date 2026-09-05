@@ -1,0 +1,54 @@
+# Unified debug/profile capability tiers (design §2).
+#
+# `CapLevel` is the honesty contract every debug/profile implementation
+# answers with. It is deliberately three-valued, not a bool:
+#
+#   Native      the real backend mechanism is in play (host clock,
+#               cuEvent, VkQuery timestamp pool, MTL GPU times, a real
+#               hardware breakpoint) -- the number means what its name says.
+#   Emulated    the answer is CORRECT but synthesized by us rather than
+#               measured by the device (SVM-G host-side step counting,
+#               interpreter node counters). Trustworthy for the quantity it
+#               names (`steps` is exact), NOT a device-time measurement.
+#   Unavailable the capability genuinely does not exist on this target/host.
+#               Callers must treat the paired numbers as absent (-1), never
+#               as zero.
+#
+# Rule of use: an implementation reports the WEAKEST tier that covers
+# everything it claims. A backend with a real wall clock but only
+# synthesized step counts reports its level per-field in
+# `ProfileReport.detail`, and its `profile_level()` names the tier of the
+# primary device measurement (see profile_target.spl).
+
+pub enum CapLevel:
+    Native
+    Emulated
+    Unavailable
+
+pub fn cap_level_name(level: CapLevel) -> text:
+    """Stable lowercase wire name -- used in reports, SDN `detail` payloads,
+    the capability doctor matrix, and cross-backend conformance diffs. The
+    exact spelling is part of the contract; do not localise it."""
+    match level:
+        case CapLevel.Native: "native"
+        case CapLevel.Emulated: "emulated"
+        case CapLevel.Unavailable: "unavailable"
+
+pub fn cap_level_from_name(name: text) -> CapLevel:
+    """Inverse of `cap_level_name`. Any unrecognised spelling decodes to
+    `Unavailable` -- the fail-CLOSED direction, so a typo or a newer
+    backend's unknown tier can never be mistaken for a working capability."""
+    if name == "native":
+        CapLevel.Native
+    elif name == "emulated":
+        CapLevel.Emulated
+    else:
+        CapLevel.Unavailable
+
+pub fn cap_level_is_usable(level: CapLevel) -> bool:
+    """True when the capability answers at all (Native or Emulated).
+    `Unavailable` is the only non-usable tier."""
+    match level:
+        case CapLevel.Native: true
+        case CapLevel.Emulated: true
+        case CapLevel.Unavailable: false

@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/10.frontend/core/lexer.spl"
+io_runtime="$root/src/lib/nogc_sync_mut/io_runtime.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+rust_array="$root/src/compiler_rust/compiler/src/interpreter_extern/sffi_array.rs"
+native_c="$root/src/runtime/runtime_native.c"
+simple_array="$root/src/runtime/simple_core/core_array_ops.spl"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for raw in rt_array_free; do
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+done
+
+# Array release remains explicitly unsafe because an i64 does not encode
+# ownership. Every provider must nevertheless reject malformed/unregistered
+# values instead of treating a wrong argument type as a successful no-op.
+grep -A14 '^pub fn rt_array_free_fn' "$rust_array" | grep -q 'let raw = array.as_int()?;'
+! grep -A14 '^pub fn rt_array_free_fn' "$rust_array" | grep -q 'if let Value::Int'
+grep -A4 '^void rt_array_free(SplArray\* value)' "$native_c" | grep -q 'if (!array || !rt_core_unregister_array(array)) return;'
+grep -A8 '^pub fn rt_array_free(array: i64):' "$simple_array" | grep -q 'if _sffi_array_is_valid(array) < 1:'
+! grep -q '^extern fn rt_file_read_text(' "$module"
+! grep -q '^fn _sffi_file_read_text(' "$module"
+grep -q '^pub fn file_read_nullable(path: text) -> text?:' "$io_runtime"
+grep -A2 '^pub fn file_read_nullable(path: text) -> text?:' "$io_runtime" | grep -q 'rt_file_read_text(path)'
+! grep -q '^extern fn rt_env_get(' "$module"
+! grep -q '^fn _sffi_env_get(' "$module"
+grep -q '^pub fn env_get_nullable(key: text) -> text?:' "$io_runtime"
+grep -A2 '^pub fn env_get_nullable(key: text) -> text?:' "$io_runtime" | grep -q 'rt_env_get(key)'
+! grep -q '^extern fn rt_env_set(' "$module"
+! grep -q '^fn _sffi_env_set(' "$module"
+grep -B1 '^pub fn env_set(key: text, value: text) -> bool:' "$io_runtime" | grep -q '^@always_inline$'
+grep -q '^pub fn env_set(key: text, value: text) -> bool:' "$io_runtime"
+grep -A2 '^pub fn env_set(key: text, value: text) -> bool:' "$io_runtime" | grep -q 'rt_env_set(key, value)'
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 1 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 1 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 1 ]
+for expected in file_read_nullable:2 env_get_nullable:13 \
+    env_set:28 _sffi_array_free:5; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+# The character-validation loop must remain pure Simple; environment I/O in
+# that loop would turn source length into foreign-dispatch count.
+if sed -n '/^fn env_value_nul_free/,/^fn lex_state_get/p' "$module" | grep -q '_sffi_'; then
+    echo "compiler lexer introduced foreign dispatch in the per-character NUL scan" >&2
+    exit 1
+fi
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "compiler lexer SFFI authority audit: PASS (array release remains unsafe; Rust rejects wrong value types; C/Simple reject invalid handles; canonical reads/writes retain direct-call shape)"

@@ -1,0 +1,260 @@
+# codex-impl
+# Linux production host for the exact RT/HAL comparator arena. Executables are
+# opened O_NOFOLLOW by the runtime, hashed through that pinned descriptor, and
+# validated as static ELF, then launched with fexecve from the same descriptor
+# and a fixed non-secret environment. Requests and
+# exact receipts use private pipes and a fixed scalar schema only.
+
+use std.common.convert.{try_parse_int}
+use std.common.env_access.model.{EnvToolIdentity, EnvAccessPlan, env_access_plan_error}
+use std.common.rt_hal.model.{RtHalOperationKind}
+use std.nogc_sync_mut.rt_hal.exact_boundary.{
+    RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactJoin
+}
+use std.nogc_sync_mut.rt_hal.process_task_arena.{
+    RtHalIsolatedHostCapabilities, RtHalIsolatedHostPort,
+    rt_hal_process_host_install, rt_hal_process_adapter_register,
+    rt_hal_c_process_adapter, rt_hal_rust_process_adapter,
+    rt_hal_process_install_boundary_exact, rt_hal_process_arena_shutdown
+}
+use std.nogc_sync_mut.io.env_ops.{host_os}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io.thread.{thread_native_current_id, thread_native_sleep_ms}
+use std.nogc_sync_mut.io.process_ops.{
+    process_read_stdout_result, process_close_piped, process_pin_executable,
+    process_close_pinned_executable, process_spawn_pinned_piped
+}
+
+
+const RT_HAL_HOST_MAX_ADAPTERS = 16
+const RT_HAL_HOST_MAX_TASKS = 256
+const RT_HAL_HOST_OUTPUT_CAP = 512
+
+struct RtHalHostBinding:
+    adapter_handle: i64
+    pinned_handle: i64
+
+struct RtHalHostTask:
+    handle: i64
+    active: bool
+    output: text
+
+pub struct RtHalIsolatedExactHostConfig:
+    compare_c: bool
+    compare_rust: bool
+    c_tool: EnvToolIdentity?
+    rust_tool: EnvToolIdentity?
+    worker_count: i64
+    queue_capacity: i64
+    timeout_ticks: i64
+    max_output_bytes: i64
+
+var rt_hal_host_bindings: [RtHalHostBinding] = []
+var rt_hal_host_tasks: [RtHalHostTask] = []
+
+fn host_owner() -> i64:
+    thread_native_current_id()
+
+fn host_binding_index(adapter_handle: i64) -> i64:
+    var index = 0
+    while index < rt_hal_host_bindings.len():
+        if rt_hal_host_bindings[index].adapter_handle == adapter_handle: return index
+        index = index + 1
+    -1
+
+fn host_task_index(handle: i64) -> i64:
+    var index = 0
+    while index < rt_hal_host_tasks.len():
+        if rt_hal_host_tasks[index].handle == handle: return index
+        index = index + 1
+    -1
+
+fn host_bind(adapter_handle: i64, provider_id: text, kind: text, tool_id: text, canonical_path: text, identity_hash: text, schema: text) -> bool:
+    if host_os() != "linux" or schema != "rthal-scalar-v1": return false
+    if provider_id != "c-comparator" and provider_id != "rust-comparator": return false
+    if kind != "c" and kind != "rust": return false
+    if host_binding_index(adapter_handle) >= 0 or rt_hal_host_bindings.len() >= RT_HAL_HOST_MAX_ADAPTERS: return false
+    val pinned = process_pin_executable(canonical_path)
+    if pinned < 3: return false
+    val observed = file_hash_sha256("/proc/self/fd/{pinned}")
+    if "sha256:" + observed != identity_hash:
+        process_close_pinned_executable(pinned)
+        return false
+    rt_hal_host_bindings.push(RtHalHostBinding(adapter_handle: adapter_handle, pinned_handle: pinned))
+    true
+
+fn append_digest(arguments: [text], digest: RtHalDigest256) -> [text]:
+    var result = arguments
+    result.push("{digest.word0}")
+    result.push("{digest.word1}")
+    result.push("{digest.word2}")
+    result.push("{digest.word3}")
+    result
+
+fn host_spawn_exact(adapter_handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt, replay: bool) -> i64:
+    val binding_index = host_binding_index(adapter_handle)
+    if binding_index < 0: return -1
+    var task_slot = 0
+    while task_slot < rt_hal_host_tasks.len() and rt_hal_host_tasks[task_slot].active:
+        task_slot = task_slot + 1
+    if task_slot >= RT_HAL_HOST_MAX_TASKS: return -1
+    var arguments: [text] = [
+        "rthal-scalar-v1", if replay: "replay" else: "compare",
+        "{request.case_id}",
+        if request.operation == RtHalOperationKind.Effectful: "1" else: "0"
+    ]
+    arguments = append_digest(arguments, request.operation_digest)
+    arguments = append_digest(arguments, request.input_digest)
+    arguments = append_digest(arguments, receipt.outcome_digest)
+    arguments = append_digest(arguments, receipt.error_digest)
+    arguments = append_digest(arguments, receipt.trace_digest)
+    val pid = process_spawn_pinned_piped(rt_hal_host_bindings[binding_index].pinned_handle, arguments)
+    if pid <= 0: return -1
+    val task = RtHalHostTask(handle: pid, active: true, output: "")
+    if task_slot < rt_hal_host_tasks.len(): rt_hal_host_tasks[task_slot] = task
+    else: rt_hal_host_tasks.push(task)
+    pid
+
+fn host_spawn_compare(adapter_handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt) -> i64:
+    host_spawn_exact(adapter_handle, request, receipt, false)
+
+fn host_spawn_replay(adapter_handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt) -> i64:
+    host_spawn_exact(adapter_handle, request, receipt, true)
+
+fn zero_digest() -> RtHalDigest256:
+    RtHalDigest256(word0: 0, word1: 0, word2: 0, word3: 0)
+
+fn invalid_exact_join() -> RtHalExactJoin:
+    RtHalExactJoin(completed: false, outcome_digest: zero_digest(), error_digest: zero_digest(), trace_digest: zero_digest())
+
+fn parse_digest(fields: [text], start: i64) -> RtHalDigest256?:
+    val word0 = try_parse_int(fields[start])
+    val word1 = try_parse_int(fields[start + 1])
+    val word2 = try_parse_int(fields[start + 2])
+    val word3 = try_parse_int(fields[start + 3])
+    if word0 == nil or word1 == nil or word2 == nil or word3 == nil: return nil
+    RtHalDigest256(word0: word0 ?? 0, word1: word1 ?? 0, word2: word2 ?? 0, word3: word3 ?? 0)
+
+fn parse_exact_join(output: text) -> RtHalExactJoin:
+    val fields = output.trim().split(" ")
+    if fields.len() != 13 or fields[0] != "RTHAL1": return invalid_exact_join()
+    val outcome = parse_digest(fields, 1)
+    val error = parse_digest(fields, 5)
+    val trace = parse_digest(fields, 9)
+    if outcome == nil or error == nil or trace == nil: return invalid_exact_join()
+    RtHalExactJoin(completed: true, outcome_digest: outcome.unwrap(), error_digest: error.unwrap(), trace_digest: trace.unwrap())
+
+fn host_join_exact(handle: i64, deadline_ticks: i64) -> RtHalExactJoin:
+    val index = host_task_index(handle)
+    if index < 0 or not rt_hal_host_tasks[index].active or deadline_ticks <= 0: return invalid_exact_join()
+    val started = current_time_ms()
+    while current_time_ms() - started <= deadline_ticks:
+        match process_read_stdout_result(handle):
+            Ok(Some(chunk)):
+                if chunk.len() > RT_HAL_HOST_OUTPUT_CAP - rt_hal_host_tasks[index].output.len(): return invalid_exact_join()
+                rt_hal_host_tasks[index].output = rt_hal_host_tasks[index].output + chunk
+            Ok(nil): ()
+            Err(problem):
+                if problem == "process_stdout_eof":
+                    return parse_exact_join(rt_hal_host_tasks[index].output)
+                return invalid_exact_join()
+        thread_native_sleep_ms(1)
+    invalid_exact_join()
+
+fn host_cancel_and_reap(handle: i64, deadline_ticks: i64) -> bool:
+    val index = host_task_index(handle)
+    if index < 0: return false
+    val stopped = process_close_piped(handle)
+    if stopped: rt_hal_host_tasks[index].active = false
+    stopped
+
+fn host_close(handle: i64) -> bool:
+    val index = host_task_index(handle)
+    if index < 0: return false
+    if not rt_hal_host_tasks[index].active: return true
+    val closed = process_close_piped(handle)
+    if closed: rt_hal_host_tasks[index].active = false
+    closed
+
+fn host_shutdown() -> bool:
+    var ok = true
+    for task in rt_hal_host_tasks:
+        if task.active and not process_close_piped(task.handle): ok = false
+    for binding in rt_hal_host_bindings:
+        if not process_close_pinned_executable(binding.pinned_handle): ok = false
+    rt_hal_host_tasks = []
+    rt_hal_host_bindings = []
+    ok
+
+pub fn rt_hal_linux_isolated_host_port() -> RtHalIsolatedHostPort:
+    val supported = host_os() == "linux"
+    RtHalIsolatedHostPort(
+        capabilities: RtHalIsolatedHostCapabilities(
+            available: supported, canonical_executable_identity: supported,
+            static_executable_closure: supported,
+            fixed_scalar_argv: supported, private_ipc: supported,
+            no_symlink_path_transport: supported,
+            process_tree_containment: supported,
+            bounded_timed_join: supported, cancellation_and_reap: supported,
+            portable_host_contract: supported
+        ), current_owner_fn: host_owner, bind_adapter_fn: host_bind,
+        cancel_and_reap_fn: host_cancel_and_reap, close_fn: host_close,
+        spawn_compare_exact_fn: host_spawn_compare,
+        spawn_replay_exact_fn: host_spawn_replay,
+        join_exact_until_fn: host_join_exact, shutdown_fn: host_shutdown
+    )
+
+pub fn rt_hal_install_isolated_exact_host(config: RtHalIsolatedExactHostConfig) -> text:
+    if host_os() != "linux": return "RTHAL-W-PARALLEL-UNSUPPORTED"
+    if config.queue_capacity <= 0 or config.queue_capacity > 16:
+        return "RTHAL-E-BOUND"
+    val installed = rt_hal_process_host_install(rt_hal_linux_isolated_host_port(), config.queue_capacity)
+    if installed != "": return installed
+    if config.compare_c:
+        if config.c_tool == nil:
+            rt_hal_process_arena_shutdown()
+            return "RTHAL-W-PARALLEL-UNSUPPORTED"
+        val problem = rt_hal_process_adapter_register(rt_hal_c_process_adapter(101, config.c_tool.unwrap()))
+        if problem != "":
+            rt_hal_process_arena_shutdown()
+            return problem
+    if config.compare_rust:
+        if config.rust_tool == nil:
+            rt_hal_process_arena_shutdown()
+            return "RTHAL-W-PARALLEL-UNSUPPORTED"
+        val problem = rt_hal_process_adapter_register(rt_hal_rust_process_adapter(102, config.rust_tool.unwrap()))
+        if problem != "":
+            rt_hal_process_arena_shutdown()
+            return problem
+    val boundary = rt_hal_process_install_boundary_exact(
+        config.compare_c, config.compare_rust, config.worker_count,
+        config.queue_capacity, config.timeout_ticks, config.max_output_bytes
+    )
+    if boundary != "": rt_hal_process_arena_shutdown()
+    boundary
+
+pub fn rt_hal_install_isolated_exact_host_from_plan(
+    plan: EnvAccessPlan, compare_c: bool, compare_rust: bool,
+    c_tool_id: text, rust_tool_id: text, worker_count: i64,
+    queue_capacity: i64, timeout_ticks: i64, max_output_bytes: i64
+) -> text:
+    val plan_problem = env_access_plan_error(plan)
+    if plan_problem != "": return plan_problem
+    var c_tool: EnvToolIdentity? = nil
+    var rust_tool: EnvToolIdentity? = nil
+    for admitted in plan.allowed_tools:
+        if admitted.tool_id == c_tool_id: c_tool = admitted
+        if admitted.tool_id == rust_tool_id: rust_tool = admitted
+    if compare_c and c_tool == nil: return "ENV-E-TOOL-NOT-ALLOWED"
+    if compare_rust and rust_tool == nil: return "ENV-E-TOOL-NOT-ALLOWED"
+    rt_hal_install_isolated_exact_host(RtHalIsolatedExactHostConfig(
+        compare_c: compare_c, compare_rust: compare_rust,
+        c_tool: c_tool, rust_tool: rust_tool,
+        worker_count: worker_count, queue_capacity: queue_capacity,
+        timeout_ticks: timeout_ticks, max_output_bytes: max_output_bytes
+    ))
+
+export RtHalIsolatedExactHostConfig
+export rt_hal_linux_isolated_host_port, rt_hal_install_isolated_exact_host
+export rt_hal_install_isolated_exact_host_from_plan

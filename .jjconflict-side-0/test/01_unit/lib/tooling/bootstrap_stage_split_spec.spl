@@ -1,0 +1,41 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.tooling.bootstrap_stage_split.*
+
+fn manifest() -> CompilerArtifactManifestV1:
+    CompilerArtifactManifestV1(COMPILER_ARTIFACT_MANIFEST_SCHEMA_V1, sha256_text("s"), sha256_text("p"), "canonical-stage3", "x86_64-unknown-linux-gnu", "cabi", "rabi", "simple-stage3 v1", "build/a", sha256_text("a"), "build/simple", sha256_text("e"), "build/c.a", sha256_text("c"), "build/i", sha256_text("i"), "build/r.a", sha256_text("r"))
+
+fn unit(path: text = "src/app/cli/main.spl") -> ToolCompileUnitV1:
+    ToolCompileUnitV1(path, sha256_text(path), "build/o", sha256_text("o"))
+
+describe "Stage4 tools-only contracts":
+    it "should accept exact canonical Stage3 and zero compiler units":
+        step("Validate the admitted compiler manifest, journal, and link receipt")
+        val m = manifest()
+        expect(m.diagnostic()).to_equal("")
+        val j = ToolCompileJournalV1(TOOL_COMPILE_JOURNAL_SCHEMA_V1, m.hash(), m.compiler_executable_hash, m.target, 0, [unit()])
+        expect(j.diagnostic(m)).to_equal("")
+        val r = ToolingLinkReceiptV1(TOOLING_LINK_RECEIPT_SCHEMA_V1, m.hash(), m.target, m.compiler_abi, m.runtime_abi, sha256_text("j"), 0, "build/out", sha256_text("out"), true, true)
+        expect(r.diagnostic(m)).to_equal("")
+
+    it "should reject compiler traversal, duplication, and nonzero counter":
+        step("Validate fail-closed tool ownership and compiler-source counting")
+        val m = manifest()
+        expect(stage4_tool_units_diagnostic([unit("src/compiler/x.spl")])).to_contain("TOOL-OWNER")
+        expect(stage4_tool_units_diagnostic([unit(), unit()])).to_contain("DUPLICATE")
+        val j = ToolCompileJournalV1(TOOL_COMPILE_JOURNAL_SCHEMA_V1, m.hash(), m.compiler_executable_hash, m.target, 1, [unit()])
+        expect(j.diagnostic(m)).to_contain("COMPILER-TRAVERSAL")
+
+    it "should reject Rust identity and foreign journal authority":
+        step("Validate compiler producer and journal authority")
+        val m = manifest()
+        val seed = CompilerArtifactManifestV1(m.schema_version, m.source_hash, m.producer_hash, m.backend, m.target, m.compiler_abi, m.runtime_abi, "Rust-built bootstrap seed only", m.admission_receipt_path, m.admission_receipt_hash, m.compiler_executable_path, m.compiler_executable_hash, m.compiler_archive_path, m.compiler_archive_hash, m.compiler_interface_path, m.compiler_interface_hash, m.runtime_archive_path, m.runtime_archive_hash)
+        expect(seed.diagnostic()).to_contain("IDENTITY")
+        val foreign = ToolCompileJournalV1(TOOL_COMPILE_JOURNAL_SCHEMA_V1, sha256_text("other"), m.compiler_executable_hash, m.target, 0, [unit()])
+        expect(foreign.diagnostic(m)).to_contain("JOURNAL-AUTHORITY")
+
+    it "should require both linked-tool smokes":
+        step("Validate the linked tool smoke receipt")
+        val m = manifest()
+        val r = ToolingLinkReceiptV1(TOOLING_LINK_RECEIPT_SCHEMA_V1, m.hash(), m.target, m.compiler_abi, m.runtime_abi, sha256_text("j"), 0, "build/out", sha256_text("out"), true, false)
+        expect(r.diagnostic(m)).to_contain("SMOKE")

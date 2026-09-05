@@ -1,0 +1,50 @@
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "aggregate-copy registered receiver source contract":
+    it "validates the complete runtime receiver range in LLVM and Cranelift":
+        val llvm = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs") ?? ""
+        val cranelift = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs") ?? ""
+
+        expect(llvm).to_contain("u64::MAX - 7")
+        expect(llvm).to_contain("get_function(\"rt_struct_receiver_valid\")")
+        expect(llvm).to_contain("aggcopy_src_valid_call")
+        expect(llvm).to_contain("aggcopy_src_valid")
+        expect(llvm).to_contain("zero fallback word")
+        expect(llvm).to_contain("aggcopy_word_guarded")
+        expect(llvm).to_contain("aggcopy_deep_valid_call")
+        expect(llvm).to_contain("aggcopy_deep_valid")
+        expect(llvm).to_not_contain("aggcopy_deep_istag")
+
+        expect(cranelift).to_contain("iconst(types::I64, !7i64)")
+        expect(cranelift.split("\"rt_struct_receiver_valid\"").len() - 1).to_be_greater_than(1)
+        expect(cranelift).to_contain("src_is_valid")
+        expect(cranelift).to_contain("store(MemFlags::new(), zero, new_ptr, off)")
+        expect(cranelift).to_contain("select(src_is_valid, word, zero)")
+        expect(cranelift).to_contain("select(is_handle, inner, word)")
+
+    it "fails closed before any struct allocation result is stored through":
+        val llvm = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs") ?? ""
+        val cranelift = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs") ?? ""
+        val simple_cranelift = rt_file_read_text(
+            "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl") ?? ""
+
+        expect(llvm.split("self.guard_struct_alloc_nonnull(").len() - 1).to_be_greater_than(1)
+        expect(llvm).to_contain("build_is_null(ptr, \"struct_alloc_is_null\")")
+        expect(llvm).to_contain("build_unreachable()")
+        expect(llvm).to_contain("rt_panic")
+
+        expect(cranelift.split("guard_struct_alloc_nonnull(ctx, builder").len() - 1).to_be_greater_than(1)
+        expect(cranelift).to_contain("icmp_imm(IntCC::Equal, ptr, 0)")
+        expect(cranelift).to_contain("rt_panic")
+        expect(cranelift).to_contain("native struct allocation failed")
+
+        expect(simple_cranelift).to_contain("fn guard_struct_alloc_result")
+        expect(simple_cranelift).to_contain("cranelift_icmp(ctx, CL_CMP_NE, allocation, zero)")
+        expect(simple_cranelift).to_contain("guard_struct_alloc_result(ctx, cl_module, base)")
+        expect(simple_cranelift).to_contain("cranelift_trap(ctx, 14)")

@@ -1,0 +1,76 @@
+"""Authenticated manifest descriptors are the only typed-facet seal authority."""
+
+use std.spec.*
+use std.common.aspect_pack.{
+    ApkFacetManifestDescriptorV1, ApkFacetInterfaceDescriptorV1,
+    ApkFacetMethodManifestDescriptorV1, apk_facet_manifest_descriptor_digest_v1,
+}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.core.parser_decls.{parser_set_aspect_context, parser_clear_aspect_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.driver.driver_facet_manifest_authority.{
+    facet_manifest_authority_from_source
+}
+use compiler.semantics.resolve.{resolve_methods}
+
+val HEX_A: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val HEX_B: text = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val HEX_C: text = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val HEX_D: text = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+fn facet_test_module(): compiler.hir.hir_types.HirModule:
+    parser_set_aspect_context("telemetry", 7, HEX_A)
+    val parsed = parse_full_frontend(
+        "aspect telemetry:\n" +
+        "    facet interface Readable:\n" +
+        "        fn read(self) -> i64\n",
+        "apk://telemetry.main", "telemetry.main", Logger(level: 0))
+    parser_clear_aspect_context()
+    HirLowering.with_filename("apk://telemetry.main").lower_module(parsed)
+
+fn admitted_source(canonical_name: text) -> SourceFile:
+    val descriptor = ApkFacetManifestDescriptorV1(
+        authority_id: "catalog/telemetry", signature_digest: HEX_B,
+        types: [],
+        interfaces: [ApkFacetInterfaceDescriptorV1(
+            canonical_type_name: canonical_name,
+            interface_id: HEX_C, interface_abi_hash: HEX_D)],
+        methods: [ApkFacetMethodManifestDescriptorV1(
+            interface_id: HEX_C, method_name: "read",
+            method_id: HEX_D, signature_hash: HEX_B)],
+        implementations: [])
+    SourceFile(path: "apk://telemetry.main", content: "", module_name: "telemetry.main",
+        aspect_id: "telemetry", aspect_version: 7,
+        descriptor_digest: apk_facet_manifest_descriptor_digest_v1(descriptor).unwrap(),
+        facet_manifest: Some(descriptor))
+
+describe "facet manifest authority adapter":
+    it "maps authenticated canonical rows onto process-local symbols":
+        val module = facet_test_module()
+        val converted = facet_manifest_authority_from_source(
+            admitted_source("telemetry.main.Readable"), module)
+        expect(converted.is_ok()).to_equal(true)
+        val authority = converted.unwrap()
+        val interface = module.facet_interfaces[0]
+        expect(authority.interface_id_by_symbol[interface.symbol.id]).to_equal(HEX_C)
+        expect(authority.method_id_by_symbol[interface.methods[0].symbol.id]).to_equal(HEX_D)
+
+    it "rejects a short HIR name that is not the authenticated canonical name":
+        val converted = facet_manifest_authority_from_source(
+            admitted_source("Readable"), facet_test_module())
+        expect(converted.is_err()).to_equal(true)
+
+    it "rejects descriptor content that does not corroborate the admitted digest":
+        var source = admitted_source("telemetry.main.Readable")
+        source.descriptor_digest = HEX_A
+        val converted = facet_manifest_authority_from_source(source, facet_test_module())
+        expect(converted.is_err()).to_equal(true)
+
+    it "rejects authenticated rows that disagree with compiler canonicalization":
+        val module = facet_test_module()
+        val authority = facet_manifest_authority_from_source(
+            admitted_source("telemetry.main.Readable"), module).unwrap()
+        val (_, errors) = resolve_methods(module, Some(authority))
+        expect(errors.map(|error| error.message).join("\n")).to_contain("E-FACET004")

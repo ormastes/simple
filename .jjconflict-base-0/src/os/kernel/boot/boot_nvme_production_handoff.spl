@@ -1,0 +1,77 @@
+# Pure-Simple NVMe production boot handoff.
+#
+# This module is intentionally narrow: the real NVMe driver provisions a
+# lease-backed BlockDevice plus transfer evidence here, and the freestanding boot
+# filesystem mount consumes it. It avoids coupling VFS initialization back to the
+# broader boot filesystem probing module.
+
+use os.services.block_device.{BlockDevice}
+use os.drivers.nvme.nvme_storage_model.{NvmeTransferEvidence, NvmeFilesystemLease}
+use os.kernel.fs.block_device_identity_owner_v1.{BlockDeviceRegionBindingV1}
+
+var _boot_nvme_devices: [BlockDevice] = []
+var _boot_nvme_evidence: [NvmeTransferEvidence] = []
+var _boot_nvme_leases: [NvmeFilesystemLease] = []
+var _boot_nvme_bindings: [BlockDeviceRegionBindingV1] = []
+
+fn boot_nvme_production_handoff_provision(dev: BlockDevice, evidence: NvmeTransferEvidence, lease: NvmeFilesystemLease):
+    _boot_nvme_devices = [dev]
+    _boot_nvme_evidence = [evidence]
+    _boot_nvme_leases = [lease]
+    _boot_nvme_bindings = []
+
+fn boot_nvme_production_handoff_provision_bound(
+    dev: BlockDevice,
+    evidence: NvmeTransferEvidence,
+    lease: NvmeFilesystemLease,
+    binding: BlockDeviceRegionBindingV1
+):
+    """Provision the production handoff together with its backend region identity.
+
+    This function was IMPORTED at two sites and CALLED at three — including the
+    only publication point on the production FAT32 boot path,
+    `_vfs_boot_init_pure_nvme_fat32` — and DEFINED NOWHERE. The result was that
+    `boot_nvme_production_handoff_ready()` was false on every boot, because
+    `boot_nvme_production_handoff_provision` (the unbound variant, the only
+    writer of the module's state) has no callers at all. So
+    `boot_fs_mount_freestanding_production()` — the entry `os_main` uses —
+    always refused with `pure-nvme-production-device-not-provisioned`, no matter
+    how completely the NVMe stack had come up. Measured in-guest under OVMF:
+    the full pure-Simple bring-up succeeded (BAR mapped, controller identified,
+    namespace 8192x512, both queues created, bounce buffer allocated, this
+    function called and returned) and the very next line still said the device
+    was not provisioned.
+
+    The `_bound` half is the region identity: callers pair the lease with the
+    `BlockDeviceRegionBindingV1` returned by `nvme_boot_runtime_backend_binding`,
+    so a consumer can check it is addressing the region the driver actually
+    granted rather than trusting the lease alone.
+    """
+    _boot_nvme_devices = [dev]
+    _boot_nvme_evidence = [evidence]
+    _boot_nvme_leases = [lease]
+    _boot_nvme_bindings = [binding]
+
+fn boot_nvme_production_handoff_binding_ready() -> bool:
+    _boot_nvme_bindings.len() > 0
+
+fn boot_nvme_production_handoff_binding() -> BlockDeviceRegionBindingV1:
+    _boot_nvme_bindings[0]
+
+fn boot_nvme_production_handoff_clear():
+    _boot_nvme_devices = []
+    _boot_nvme_evidence = []
+    _boot_nvme_leases = []
+    _boot_nvme_bindings = []
+
+fn boot_nvme_production_handoff_ready() -> bool:
+    _boot_nvme_devices.len() > 0 and _boot_nvme_evidence.len() > 0 and _boot_nvme_leases.len() > 0
+
+fn boot_nvme_production_handoff_device() -> BlockDevice:
+    _boot_nvme_devices[0]
+
+fn boot_nvme_production_handoff_evidence() -> NvmeTransferEvidence:
+    _boot_nvme_evidence[0]
+
+fn boot_nvme_production_handoff_lease() -> NvmeFilesystemLease:
+    _boot_nvme_leases[0]

@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler_rust/compiler/src/interpreter_extern/dynamic_sffi.rs"
+
+grep -q 'fn validate_dynamic_i64_contract(name: &str, arity: usize)' "$module"
+grep -q 'runtime_sffi::spec_for(name)' "$module"
+grep -q 'spec.params.iter().any' "$module"
+grep -q 'spec.returns != \[cranelift_codegen::ir::types::I64\]' "$module"
+
+# Admission is cold-path only: one check for each main/satellite/manifest cache
+# miss. Cached calls reuse the admitted address+arity and never rescan registry.
+[ "$(grep -c 'validate_dynamic_i64_contract(name, evaluated_args.len())' "$module")" -eq 3 ]
+[ "$(grep -c 'cached.arity != evaluated_args.len()' "$module")" -eq 3 ]
+! sed -n '/fn call_fptr(/,/^}/p' "$module" | grep -q 'spec_for\|validate_dynamic_i64_contract'
+
+# Unsupported values and null pointers remain typed errors, never zero values.
+grep -q 'SFFI_UNSUPPORTED_CONVERSION' "$module"
+grep -q 'SFFI_NULL_FORBIDDEN' "$module"
+! sed -n '/fn value_to_i64(/,/^}/p' "$module" | grep -q 'Ok(0)\|Value::Nil'
+
+echo "dynamic SFFI typed-admission audit: PASS (compiler-owned exact i64 ABI required on cache miss; cached hot path adds only arity compare; unsupported values fail closed)"

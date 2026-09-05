@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+module=src/compiler/70.backend/backend/backend_helpers.spl
+env_facade=src/lib/nogc_sync_mut/io_runtime.spl
+simd_facade=src/lib/nogc_sync_mut/simd.spl
+
+if rg -q '^extern fn rt_' "$module"; then
+    echo "backend helpers must use canonical runtime facades" >&2
+    exit 1
+fi
+
+rg -q '^use std\.io_runtime\.\{env_get_opt\}$' "$module"
+rg -q '^use std\.simd\.\{has_avx2\}$' "$module"
+test "$(rg -c 'env_get_opt\(' "$module")" -eq 5
+test "$(rg -c 'has_avx2\(\)' "$module")" -eq 1
+rg -Uq '@always_inline\npub fn env_get_opt\(key: text\) -> text\?:' "$env_facade"
+rg -Uq '@always_inline\nfn has_avx2\(\) -> bool:' "$simd_facade"
+if rg -q 'unsafe\(capabilities: \[ffi\]\)' "$module"; then
+    echo "backend helpers must not regain local FFI authority" >&2
+    exit 1
+fi

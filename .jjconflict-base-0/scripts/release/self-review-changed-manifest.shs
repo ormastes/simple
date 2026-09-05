@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Build the exact provider-resolved manifest consumed by the Simple evaluator.
+set -euo pipefail
+
+if [[ $# -ne 13 ]]; then
+  echo "usage: self-review-changed-manifest.shs REPOSITORY_PROVIDER REPOSITORY_ID REPOSITORY_NODE_ID REPOSITORY PR BASE_REPOSITORY_ID BASE_REPOSITORY_NODE_ID BASE_REPOSITORY BASE_REF BASE_SHA HEAD_SHA MERGE_BASE_SHA OUTPUT" >&2
+  exit 64
+fi
+
+provider=$1
+repository_id=$2
+repository_node_id=$3
+repository=$4
+pull_request=$5
+base_repository_id=$6
+base_repository_node_id=$7
+base_repository=$8
+base_ref=$9
+base_sha=${10}
+head_sha=${11}
+merge_base_sha=${12}
+output=${13}
+
+[[ $provider == github ]]
+[[ $repository_id =~ ^[1-9][0-9]*$ ]]
+[[ $repository_node_id =~ ^[A-Za-z0-9._:-]+$ ]]
+[[ $repository =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]
+[[ $pull_request =~ ^[1-9][0-9]*$ ]]
+[[ $base_repository_id =~ ^[1-9][0-9]*$ ]]
+[[ $base_repository_node_id =~ ^[A-Za-z0-9._:-]+$ ]]
+[[ $base_repository =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]
+[[ $base_ref =~ ^refs/heads/[A-Za-z0-9._/-]+$ ]]
+[[ $base_sha =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+[[ $head_sha =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+[[ $merge_base_sha =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+[[ -n $output && $output != / && $output != ../* && $output != */../* && $output != */.. &&
+   $output != *$'\n'* && $output != *$'\r'* && $output != *$'\t'* ]]
+git cat-file -e "$base_sha^{commit}"
+git cat-file -e "$head_sha^{commit}"
+git cat-file -e "$merge_base_sha^{commit}"
+test "$(git merge-base "$base_sha" "$head_sha")" = "$merge_base_sha"
+
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT INT TERM
+
+safe_path() {
+  local path=$1
+  [[ -n $path && $path != /* && $path != */ && $path != *//* &&
+     $path != *\\* && $path != *'|'* && $path != *$'\n'* && $path != *$'\r'* &&
+     $path != *$'\t'* && $path != .git && $path != .git/* &&
+     $path != ../* && $path != */../* && $path != */.. &&
+     $path != ./* && $path != */./* && $path != */. &&
+     $path =~ ^[A-Za-z0-9_@+,.\/-]+$ ]]
+}
+
+tree_type() {
+  local revision=$1 path=$2 entry mode
+  entry=$(git ls-tree "$revision" -- "$path")
+  if [[ -z $entry ]]; then printf 'absent'; return; fi
+  mode=${entry%% *}
+  case $mode in
+    100*) printf 'regular' ;;
+    120000) printf 'symlink' ;;
+    160000) printf 'submodule' ;;
+    *) printf 'unsupported' ;;
+  esac
+}
+
+blob_facts() {
+  local revision=$1 path=$2 prefix=$3 kind semantic encoding blob
+  if [[ $revision == absent ]]; then
+    printf '%scontent_kind: absent\n%ssemantic_class: absent\n%sencoding: absent\n' "$prefix" "$prefix" "$prefix"
+    return
+  fi
+  blob="$scratch/blob"
+  # Use plumbing here. `git show REV:path` initializes diff/submodule
+  # presentation state on some Git versions, so a malformed historical
+  # .gitmodules can reject an otherwise unrelated exact-path manifest.
+  git cat-file blob "$revision:$path" >"$blob"
+  if ! iconv -f UTF-8 -t UTF-8 "$blob" >/dev/null 2>&1; then
+    encoding=non_utf8
+  else
+    encoding=utf8
+  fi
+  case $path in
+    *.md|*.txt|*.rst|*.adoc|LICENSE|*/LICENSE|NOTICE|*/NOTICE|CHANGELOG|*/CHANGELOG|AUTHORS|*/AUTHORS|CONTRIBUTORS|*/CONTRIBUTORS) kind=text ;;
+    *) kind=code ;;
+  esac
+  semantic=ordinary
+  if grep -aEiq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}' "$blob"; then
+    semantic=credential_secret
+  elif grep -aEiq -- '(password|passwd|secret|access[_-]?token|api[_-]?key|private[_-]?key)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9_+/=-]{16,}' "$blob"; then
+    semantic=credential_secret
+  fi
+  printf '%scontent_kind: %s\n%ssemantic_class: %s\n%sencoding: %s\n' "$prefix" "$kind" "$prefix" "$semantic" "$prefix" "$encoding"
+}
+
+mkdir -p "$(dirname "$output")"
+diff_sha256=$(git diff --raw -z --find-renames --find-copies "$merge_base_sha" "$head_sha" -- | sha256sum | awk '{print $1}')
+{
+  printf 'changed_paths:\n'
+  printf '  schema: spipe-changed-path-manifest/1\n'
+  printf '  repository_provider: %s\n' "$provider"
+  printf '  repository_id: %s\n' "$repository_id"
+  printf '  repository_node_id: %s\n' "$repository_node_id"
+  printf '  repository: %s\n' "$repository"
+  printf '  pull_request_number: %s\n' "$pull_request"
+  printf '  head_sha: %s\n' "$head_sha"
+  printf '  base_repository_provider: %s\n' "$provider"
+  printf '  base_repository_id: %s\n' "$base_repository_id"
+  printf '  base_repository_node_id: %s\n' "$base_repository_node_id"
+  printf '  base_repository: %s\n' "$base_repository"
+  printf '  base_ref: %s\n' "$base_ref"
+  printf '  base_sha: %s\n' "$base_sha"
+  printf '  merge_base_sha: %s\n' "$merge_base_sha"
+  printf '  diff_sha256: %s\n' "$diff_sha256"
+  printf '  changes:\n'
+} >"$output"
+
+mapfile -d '' diff_fields < <(git diff --name-status -z --find-renames --find-copies "$merge_base_sha" "$head_sha" --)
+index=0
+change_count=0
+while (( index < ${#diff_fields[@]} )); do
+  raw_status=${diff_fields[index]}
+  ((index += 1))
+  previous_path=
+  path=
+  case $raw_status in
+    A) status=added; path=${diff_fields[index]}; ((index += 1)) ;;
+    M) status=modified; path=${diff_fields[index]}; ((index += 1)) ;;
+    D) status=deleted; path=${diff_fields[index]}; ((index += 1)) ;;
+    R*) status=renamed; previous_path=${diff_fields[index]}; path=${diff_fields[index + 1]}; ((index += 2)) ;;
+    C*) status=copied; previous_path=${diff_fields[index]}; path=${diff_fields[index + 1]}; ((index += 2)) ;;
+    T) status=type_changed; path=${diff_fields[index]}; ((index += 1)) ;;
+    *) echo "self-review manifest: unsupported git status $raw_status" >&2; exit 1 ;;
+  esac
+  safe_path "$path" || { echo "self-review manifest: unsafe path" >&2; exit 1; }
+  if [[ -n $previous_path ]]; then
+    safe_path "$previous_path" || { echo "self-review manifest: unsafe previous path" >&2; exit 1; }
+  fi
+
+  current_revision=$head_sha
+  previous_revision=$merge_base_sha
+  current_type=$(tree_type "$head_sha" "$path")
+  previous_lookup=${previous_path:-$path}
+  previous_type=$(tree_type "$merge_base_sha" "$previous_lookup")
+  if [[ $status == added ]]; then previous_revision=absent; previous_type=absent; fi
+  if [[ $status == deleted ]]; then current_revision=absent; current_type=absent; fi
+
+  current_facts=$(blob_facts "$current_revision" "$path" "")
+  previous_facts=$(blob_facts "$previous_revision" "$previous_lookup" previous_)
+  {
+    printf '    - status: %s\n' "$status"
+    printf '      path: %s\n' "$path"
+    if [[ -n $previous_path ]]; then
+      printf '      previous_path: %s\n' "$previous_path"
+    else
+      printf '      previous_path:\n'
+    fi
+    printf '%s\n' "$current_facts" | sed 's/^/      /'
+    printf '%s\n' "$previous_facts" | sed 's/^/      /'
+    printf '      file_type: %s\n' "$current_type"
+    printf '      previous_file_type: %s\n' "$previous_type"
+  } >>"$output"
+  ((change_count += 1))
+done
+
+if (( change_count == 0 )); then
+  echo "self-review manifest: empty PR diff is not admissible" >&2
+  exit 1
+fi
+printf 'self-review manifest: PASS — %d exact changed path record(s)\n' "$change_count"

@@ -1,0 +1,255 @@
+## Pure Simple rootfs guest-path ownership and deterministic preflight (v1).
+## This module plans declarations only; it never stages or installs bytes.
+
+pub const ROOTFS_GUEST_PATH_MAX_ROWS_V1: i64 = 64
+pub const ROOTFS_GUEST_PATH_MAX_BYTES_V1: i64 = 255
+pub const ROOTFS_OWNERSHIP_TEXT_MAX_BYTES_V1: i64 = 128
+pub const ROOTFS_PRIMARY_BUNDLE_OWNER_V1: text = "primary-signed-bundle"
+pub const ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1: text = "signed-primary-tool-bundle-v1"
+pub const ROOTFS_ROLE_BYTE_OWNER_V1: text = "byte-owner"
+pub const ROOTFS_ROLE_PACKAGE_PROVISION_V1: text = "package-provision"
+
+class RootfsGuestPathClaimV1:
+    guest_path: text
+    source_owner: text
+    provenance: text
+    role: text
+    package_name: text
+    provided_by: text
+    provided_by_provenance: text
+    installs_bytes: bool
+
+class RootfsGuestPathPlanRowV1:
+    guest_path: text
+    source_owner: text
+    provenance: text
+    role: text
+    package_name: text
+    provided_by: text
+    provided_by_provenance: text
+    installs_bytes: bool
+
+class RootfsGuestPathPreflightResultV1:
+    ok: bool
+    error_code: text
+    error_path: text
+    detail: text
+    plan: [RootfsGuestPathPlanRowV1]
+
+fn _rootfs_printable_bounded_v1(value: text, max_bytes: i64, allow_empty: bool) -> bool:
+    val raw = value.bytes()
+    if raw.len() > max_bytes or (not allow_empty and raw.len() == 0):
+        return false
+    for byte in raw:
+        val code = byte.to_i64()
+        if code < 32 or code > 126:
+            return false
+    true
+
+fn rootfs_guest_path_canonical_v1(path: text) -> Result<text, text>:
+    if not _rootfs_printable_bounded_v1(path, ROOTFS_GUEST_PATH_MAX_BYTES_V1, false) or
+       not path.starts_with("/") or path == "/" or path.contains("//") or
+       path.ends_with("/") or path.contains("/./") or path.ends_with("/.") or
+       path.contains("/../") or path.ends_with("/.."):
+        return Err("guest path must be absolute canonical printable ASCII within 255 bytes")
+    Ok(path)
+
+fn _rootfs_primary_path_index_v1(path: text) -> i64:
+    if path == "/bin/simplebox": return 0
+    if path == "/usr/bin/sha256sum": return 1
+    if path == "/usr/bin/md5sum": return 2
+    if path == "/usr/bin/grep": return 3
+    if path == "/usr/bin/ps": return 4
+    -1
+
+fn _rootfs_primary_claim_exact_v1(claim: RootfsGuestPathClaimV1) -> bool:
+    _rootfs_primary_path_index_v1(claim.guest_path) >= 0 and
+        claim.source_owner == ROOTFS_PRIMARY_BUNDLE_OWNER_V1 and
+        claim.provenance == ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1 and
+        claim.role == ROOTFS_ROLE_BYTE_OWNER_V1 and claim.package_name == "" and
+        claim.provided_by == "" and claim.provided_by_provenance == "" and
+        claim.installs_bytes
+
+fn _rootfs_legacy_path_v1(package_name: text, path: text) -> bool:
+    (package_name == "simplebox" and path == "/bin/simplebox") or
+        (package_name == "simpleos-tools" and
+         (path == "/usr/bin/sha256sum" or path == "/usr/bin/md5sum" or
+          path == "/usr/bin/grep" or path == "/usr/bin/ps"))
+
+fn _rootfs_legacy_claim_exact_v1(claim: RootfsGuestPathClaimV1) -> bool:
+    _rootfs_legacy_path_v1(claim.package_name, claim.guest_path) and
+        claim.source_owner == "package:{claim.package_name}" and
+        claim.provenance == "package-manifest-v1" and
+        claim.role == ROOTFS_ROLE_BYTE_OWNER_V1 and claim.provided_by == "" and
+        claim.provided_by_provenance == "" and claim.installs_bytes
+
+fn _rootfs_error_v1(code: text, path: text, detail: text) -> RootfsGuestPathPreflightResultV1:
+    RootfsGuestPathPreflightResultV1(
+        ok: false, error_code: code, error_path: path, detail: detail, plan: [])
+
+fn _rootfs_row_v1(claim: RootfsGuestPathClaimV1, convert_legacy: bool) -> RootfsGuestPathPlanRowV1:
+    if convert_legacy:
+        return RootfsGuestPathPlanRowV1(
+            guest_path: claim.guest_path, source_owner: claim.source_owner,
+            provenance: claim.provenance, role: ROOTFS_ROLE_PACKAGE_PROVISION_V1,
+            package_name: claim.package_name,
+            provided_by: ROOTFS_PRIMARY_BUNDLE_OWNER_V1,
+            provided_by_provenance: ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1,
+            installs_bytes: false)
+    RootfsGuestPathPlanRowV1(
+        guest_path: claim.guest_path, source_owner: claim.source_owner,
+        provenance: claim.provenance, role: claim.role,
+        package_name: claim.package_name, provided_by: claim.provided_by,
+        provided_by_provenance: claim.provided_by_provenance,
+        installs_bytes: claim.installs_bytes)
+
+fn _rootfs_text_lt_v1(left: text, right: text) -> bool:
+    val left_bytes = left.bytes()
+    val right_bytes = right.bytes()
+    var index: i64 = 0
+    while index < left_bytes.len() and index < right_bytes.len():
+        val a = left_bytes[index].to_i64()
+        val b = right_bytes[index].to_i64()
+        if a < b: return true
+        if a > b: return false
+        index = index + 1
+    left_bytes.len() < right_bytes.len()
+
+fn _rootfs_row_lt_v1(left: RootfsGuestPathPlanRowV1,
+    right: RootfsGuestPathPlanRowV1) -> bool:
+    if left.guest_path != right.guest_path:
+        return _rootfs_text_lt_v1(left.guest_path, right.guest_path)
+    if left.installs_bytes != right.installs_bytes:
+        return left.installs_bytes
+    if left.package_name != right.package_name:
+        return _rootfs_text_lt_v1(left.package_name, right.package_name)
+    if left.role != right.role:
+        return _rootfs_text_lt_v1(left.role, right.role)
+    if left.source_owner != right.source_owner:
+        return _rootfs_text_lt_v1(left.source_owner, right.source_owner)
+    if left.provenance != right.provenance:
+        return _rootfs_text_lt_v1(left.provenance, right.provenance)
+    if left.provided_by != right.provided_by:
+        return _rootfs_text_lt_v1(left.provided_by, right.provided_by)
+    _rootfs_text_lt_v1(left.provided_by_provenance, right.provided_by_provenance)
+
+fn _rootfs_sort_plan_v1(rows: [RootfsGuestPathPlanRowV1]) -> [RootfsGuestPathPlanRowV1]:
+    var out = rows
+    var index: i64 = 1
+    while index < out.len():
+        val item = out[index]
+        var prior = index - 1
+        var moving = true
+        while moving and prior >= 0:
+            if _rootfs_row_lt_v1(item, out[prior]):
+                out[prior + 1] = out[prior]
+                prior = prior - 1
+            else:
+                moving = false
+        out[prior + 1] = item
+        index = index + 1
+    out
+
+fn _rootfs_claim_metadata_valid_v1(claim: RootfsGuestPathClaimV1) -> bool:
+    _rootfs_printable_bounded_v1(claim.source_owner, ROOTFS_OWNERSHIP_TEXT_MAX_BYTES_V1, false) and
+        _rootfs_printable_bounded_v1(claim.provenance, ROOTFS_OWNERSHIP_TEXT_MAX_BYTES_V1, false) and
+        _rootfs_printable_bounded_v1(claim.role, ROOTFS_OWNERSHIP_TEXT_MAX_BYTES_V1, false) and
+        _rootfs_printable_bounded_v1(claim.package_name, ROOTFS_OWNERSHIP_TEXT_MAX_BYTES_V1, true) and
+        _rootfs_printable_bounded_v1(claim.provided_by, ROOTFS_OWNERSHIP_TEXT_MAX_BYTES_V1, true) and
+        _rootfs_printable_bounded_v1(claim.provided_by_provenance, ROOTFS_OWNERSHIP_TEXT_MAX_BYTES_V1, true)
+
+fn _rootfs_role_valid_v1(row: RootfsGuestPathPlanRowV1) -> bool:
+    if row.role == ROOTFS_ROLE_BYTE_OWNER_V1:
+        return row.installs_bytes and row.provided_by == "" and
+            row.provided_by_provenance == ""
+    if row.role == ROOTFS_ROLE_PACKAGE_PROVISION_V1:
+        return not row.installs_bytes and row.package_name != "" and
+            row.provided_by != "" and row.provided_by_provenance != ""
+    false
+
+fn rootfs_guest_path_preflight_v1(
+    claims: [RootfsGuestPathClaimV1], primary_enabled: bool,
+) -> RootfsGuestPathPreflightResultV1:
+    if claims.len() > ROOTFS_GUEST_PATH_MAX_ROWS_V1:
+        return _rootfs_error_v1("row-limit-exceeded", "", "maximum is 64 claims")
+    var primary_seen: [bool] = [false; 5]
+    var primary_count: i64 = 0
+    for claim in claims:
+        val canonical = rootfs_guest_path_canonical_v1(claim.guest_path)
+        if canonical.is_err():
+            return _rootfs_error_v1("invalid-guest-path", claim.guest_path, canonical.unwrap_err())
+        if not _rootfs_claim_metadata_valid_v1(claim):
+            return _rootfs_error_v1("invalid-claim-metadata", claim.guest_path, "metadata must be bounded printable ASCII")
+        if claim.source_owner == ROOTFS_PRIMARY_BUNDLE_OWNER_V1 or
+           claim.provenance == ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1:
+            if not primary_enabled:
+                return _rootfs_error_v1("primary-claim-disabled", claim.guest_path, claim.source_owner)
+            if not _rootfs_primary_claim_exact_v1(claim):
+                return _rootfs_error_v1("primary-claim-contract", claim.guest_path, "spoofed or extra primary claim")
+            val primary_index = _rootfs_primary_path_index_v1(claim.guest_path)
+            if primary_seen[primary_index]:
+                return _rootfs_error_v1("primary-claim-duplicate", claim.guest_path, claim.source_owner)
+            primary_seen[primary_index] = true
+            primary_count = primary_count + 1
+    if primary_enabled and primary_count != 5:
+        return _rootfs_error_v1("primary-claim-set-incomplete", "", "exactly five primary claims are required")
+
+    var plan: [RootfsGuestPathPlanRowV1] = []
+    for claim in claims:
+        val legacy_path = _rootfs_legacy_path_v1(claim.package_name, claim.guest_path)
+        if primary_enabled and legacy_path and not _rootfs_legacy_claim_exact_v1(claim):
+            return _rootfs_error_v1("legacy-claim-malformed", claim.guest_path, claim.package_name)
+        val row = _rootfs_row_v1(claim, primary_enabled and legacy_path)
+        if not _rootfs_role_valid_v1(row):
+            return _rootfs_error_v1("role-semantics-invalid", row.guest_path, row.role)
+        if row.provided_by != "" and row.source_owner == row.provided_by:
+            return _rootfs_error_v1("provided-by-self", row.guest_path, row.source_owner)
+        for prior in plan:
+            if prior.guest_path == row.guest_path:
+                if prior.installs_bytes and row.installs_bytes:
+                    return _rootfs_error_v1("duplicate-byte-owner", row.guest_path, row.source_owner)
+                if prior.source_owner == row.source_owner:
+                    if prior.role == row.role:
+                        return _rootfs_error_v1("duplicate-source-claim", row.guest_path, row.source_owner)
+                    return _rootfs_error_v1("conflicting-source-role", row.guest_path, row.source_owner)
+                if prior.package_name != "" and prior.package_name == row.package_name:
+                    if prior.role == row.role:
+                        return _rootfs_error_v1("duplicate-package-reference", row.guest_path, row.package_name)
+                    return _rootfs_error_v1("conflicting-package-role", row.guest_path, row.package_name)
+        plan.push(row)
+    for row in plan:
+        if row.provided_by != "":
+            var matches: i64 = 0
+            for provider in plan:
+                if provider.guest_path == row.guest_path and
+                   provider.source_owner == row.provided_by and
+                   not provider.installs_bytes:
+                    return _rootfs_error_v1("provided-by-cycle", row.guest_path, row.provided_by)
+                if provider.guest_path == row.guest_path and provider.installs_bytes and
+                   provider.source_owner == row.provided_by and
+                   provider.provenance == row.provided_by_provenance:
+                    matches = matches + 1
+            if matches != 1:
+                return _rootfs_error_v1("provided-by-owner-mismatch", row.guest_path, row.provided_by)
+    RootfsGuestPathPreflightResultV1(
+        ok: true, error_code: "", error_path: "", detail: "",
+        plan: _rootfs_sort_plan_v1(plan))
+
+fn rootfs_primary_signed_bundle_claims_v1() -> [RootfsGuestPathClaimV1]:
+    val paths = [
+        "/bin/simplebox", "/usr/bin/sha256sum", "/usr/bin/md5sum",
+        "/usr/bin/grep", "/usr/bin/ps",
+    ]
+    var claims: [RootfsGuestPathClaimV1] = []
+    for path in paths:
+        claims.push(RootfsGuestPathClaimV1(
+            guest_path: path, source_owner: ROOTFS_PRIMARY_BUNDLE_OWNER_V1,
+            provenance: ROOTFS_PRIMARY_BUNDLE_PROVENANCE_V1,
+            role: ROOTFS_ROLE_BYTE_OWNER_V1, package_name: "", provided_by: "",
+            provided_by_provenance: "", installs_bytes: true))
+    claims
+
+export RootfsGuestPathClaimV1, RootfsGuestPathPlanRowV1
+export RootfsGuestPathPreflightResultV1
+export rootfs_guest_path_canonical_v1, rootfs_guest_path_preflight_v1
+export rootfs_primary_signed_bundle_claims_v1

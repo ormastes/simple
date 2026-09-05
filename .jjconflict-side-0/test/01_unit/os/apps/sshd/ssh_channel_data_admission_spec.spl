@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Purpose: Specify allocation-free CHANNEL_DATA preflight and owner-side flow control.
+Audience: maintainers of the filesystem-launched Pure Simple SSH server.
+"""
+# @req: REQ-OS-APPS-001
+# @cover src/os/apps/sshd/ssh_channel.spl 80%
+use std.spipe.*
+use std.spec.step
+use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, DEFAULT_MAX_PACKET, SSH_MSG_CHANNEL_DATA, ssh_parse_channel_data_header_v1}
+
+fn channel_data(recipient: u32, declared: u32, body: [u8]) -> [u8]:
+    var payload: [u8] = [
+        SSH_MSG_CHANNEL_DATA,
+        ((recipient >> 24) & 255u32).to_u8(),
+        ((recipient >> 16) & 255u32).to_u8(),
+        ((recipient >> 8) & 255u32).to_u8(),
+        (recipient & 255u32).to_u8(),
+        ((declared >> 24) & 255u32).to_u8(),
+        ((declared >> 16) & 255u32).to_u8(),
+        ((declared >> 8) & 255u32).to_u8(),
+        (declared & 255u32).to_u8()
+    ]
+    for byte in body:
+        payload.push(byte)
+    payload
+
+describe "SSH channel data admission":
+    it "preflights one canonical data extent before owner admission":
+        step("Parse only the fixed header and exact string extent")
+        val parsed = ssh_parse_channel_data_header_v1(
+            channel_data(7u32, 3u32, [1u8, 2u8, 3u8]))
+        expect(parsed.is_ok()).to_be(true)
+        val header = parsed.unwrap()
+        expect(header.recipient).to_equal(7u32)
+        expect(header.data_offset).to_equal(9u64)
+        expect(header.data_length).to_equal(3u32)
+
+    it "rejects truncated and trailing string extents":
+        step("Reject declarations that do not consume the exact packet")
+        expect(ssh_parse_channel_data_header_v1(
+            channel_data(7u32, 4u32, [1u8, 2u8, 3u8])).is_err()).to_be(true)
+        expect(ssh_parse_channel_data_header_v1(
+            channel_data(7u32, 2u32, [1u8, 2u8, 3u8])).is_err()).to_be(true)
+
+    it "charges packet and window limits once and rejects data after EOF or close":
+        step("Commit flow-control state only at the canonical channel owner")
+        var table = ChannelTable.new()
+        val local_id = table.open(
+            ChannelType.Session, 19u32, 64u32, DEFAULT_MAX_PACKET)
+        expect(table.admit_local_data(local_id, DEFAULT_MAX_PACKET + 1u32).admitted).to_be(false)
+        expect(table.channels[0].local_window).to_equal(2097152u32)
+        expect(table.admit_local_data(local_id, 16u32).admitted).to_be(true)
+        expect(table.mark_peer_eof(local_id)).to_be(true)
+        expect(table.admit_local_data(local_id, 1u32).admitted).to_be(false)
+        expect(table.close(local_id)).to_be(true)
+        expect(table.admit_local_data(local_id, 1u32).admitted).to_be(false)

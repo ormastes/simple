@@ -1,0 +1,76 @@
+# WM Browser Event Routing Evidence
+
+- status: fail
+- reason: missing-wm-event-check-json
+- proof source artifact:  /  / 
+- blur/tolerance used: false
+
+## Raw Evidence
+- wm_browser_event_routing_status=fail
+- wm_browser_event_routing_reason=missing-wm-event-check-json
+- wm_browser_event_routing_validation_status=fail
+- wm_browser_event_routing_validation_reason=missing-wm-event-check-json
+- wm_browser_event_routing_proof_symlink_status=
+- wm_browser_event_routing_proof_hardlink_status=
+- wm_browser_event_routing_target=
+- wm_browser_event_routing_surface_id=
+- wm_browser_event_routing_proof_source=
+- wm_browser_event_routing_proof_source_file_status=
+- wm_browser_event_routing_proof_source_size_bytes=
+- wm_browser_event_routing_proof_source_actual_size_bytes=
+- wm_browser_event_routing_proof_source_file_reason=
+- wm_browser_event_routing_proof_source_artifact_status=
+- wm_browser_event_routing_browser_engine=
+- wm_browser_event_routing_electron_user_agent=
+- wm_browser_event_routing_electron_process_version=
+- wm_browser_event_routing_chrome_process_version=
+- wm_browser_event_routing_result_path=build/wm_browser_event_goal_2026_07_06/wm-event-check.json
+- wm_browser_event_routing_ready=
+- wm_browser_event_routing_wm_found=
+- wm_browser_event_routing_window_cmd_count=
+- wm_browser_event_routing_input_event_count=
+- wm_browser_event_routing_focus_count=
+- wm_browser_event_routing_move_count=
+- wm_browser_event_routing_maximize_count=
+- wm_browser_event_routing_title_command_count=
+- wm_browser_event_routing_text_input_count=
+- wm_browser_event_routing_pointer_down_count=
+- wm_browser_event_routing_pointer_up_count=
+- wm_browser_event_routing_event_sequence=
+- wm_browser_event_routing_performance_now_available=
+- wm_browser_event_routing_performance_now_delta_ms=
+- wm_browser_event_routing_input_to_paint_ms=
+- wm_browser_event_routing_animation_frame_available=
+- wm_browser_event_routing_animation_frame_count=
+- wm_browser_event_routing_css_animation_probe=
+- wm_browser_event_routing_title_text=
+- wm_browser_event_routing_title_context_text=
+- wm_browser_event_routing_traffic_button_count=
+- wm_browser_event_routing_title_input_tag=
+- wm_browser_event_routing_titlebar_height=
+- wm_browser_event_routing_titlebar_display=
+- wm_browser_event_routing_titlebar_cursor=
+- wm_browser_event_routing_titlebar_background=
+- wm_browser_event_routing_title_color=
+- wm_browser_event_routing_title_font_weight=
+- wm_browser_event_routing_title_input_min_width=
+- wm_browser_event_routing_title_input_width=
+- wm_browser_event_routing_title_input_width_px=
+- wm_browser_event_routing_title_input_height=
+- wm_browser_event_routing_title_input_cursor=
+- wm_browser_event_routing_title_input_background=
+- wm_browser_event_routing_close_button_background=
+- wm_browser_event_routing_minimize_button_background=
+- wm_browser_event_routing_maximize_button_background=
+- wm_browser_event_routing_expected_move_x=
+- wm_browser_event_routing_expected_move_y=
+- wm_browser_event_routing_move_payload_x=
+- wm_browser_event_routing_move_payload_y=
+- wm_browser_event_routing_move_payload_source=
+- wm_browser_event_routing_move_payload_window_id_hint=
+- wm_browser_event_routing_title_command_text=
+- wm_browser_event_routing_text_input_text=
+- wm_browser_event_routing_blur_or_tolerance_used=false
+
+## Probe Output
+- /Users/ormastes/.npm/_npx/1323dbbc85759269/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron exited with signal SIGINT

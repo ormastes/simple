@@ -1,0 +1,76 @@
+"""
+## Shared font-atlas CPU memory performance
+
+Measures the common reference extraction path and Engine2D/Engine3D cache-key
+separation. This is CPU memory evidence only; it cannot qualify atlas VRAM,
+uploads, fences, queue completion, or device readback.
+"""
+
+# @req: NFR-010
+# @tag: perf, memory, text-rendering, engine2d, engine3d
+
+use std.spec.*
+use std.common.gpu.font_atlas_composite.{
+    font_atlas_subrect_pixels, font_atlas_composite_cache_identity
+}
+
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_aux_live_bytes() -> i64
+extern fn rt_heap_array_capacity_bytes() -> i64
+
+struct MemorySnapshot:
+    live_bytes: i64
+    aux_bytes: i64
+    capacity_bytes: i64
+
+fn snapshot() -> MemorySnapshot:
+    MemorySnapshot(
+        live_bytes: rt_heap_live_bytes(),
+        aux_bytes: rt_heap_aux_live_bytes(),
+        capacity_bytes: rt_heap_array_capacity_bytes())
+
+fn growth(after: i64, before: i64) -> i64:
+    if after >= before: after - before else: 0
+
+fn counters_available(value: MemorySnapshot) -> bool:
+    value.live_bytes > 0 or value.aux_bytes > 0 or value.capacity_bytes > 0
+
+fn atlas_fixture() -> [u32]:
+    var atlas: [u32] = []
+    var i: i64 = 0
+    while i < 4096:
+        val alpha = (i % 256).to_u32()
+        atlas.push(alpha << 24)
+        i = i + 1
+    atlas
+
+describe "shared font atlas memory performance":
+    it "records repeated reference extraction allocation growth":
+        val atlas = atlas_fixture()
+        val before = snapshot()
+        var checksum: i64 = 0
+        var output_bytes: i64 = 0
+        var i: i64 = 0
+        while i < 256:
+            val pixels = font_atlas_subrect_pixels(
+                atlas, 64, 64, 16, 16, 32, 32, 0xFFFFFFFFu32)
+            output_bytes = output_bytes + pixels.len().to_i64() * 4
+            checksum = checksum + pixels[0].to_i64()
+            i = i + 1
+        val after = snapshot()
+        val retained = growth(after.live_bytes, before.live_bytes)
+        val auxiliary = growth(after.aux_bytes, before.aux_bytes)
+        val capacity = growth(after.capacity_bytes, before.capacity_bytes)
+        expect(output_bytes).to_equal(1048576)
+        expect(checksum).to_be_greater_than(0)
+        expect(retained + auxiliary + capacity).to_be_less_than(134217729)
+        val status = if counters_available(after): "measured" else: "unavailable"
+        print "text_memory operation=font_atlas_reference_extract counter_status={status} iterations=256 atlas_width=64 atlas_height=64 atlas_cpu_bytes=16384 quad_width=32 quad_height=32 output_bytes={output_bytes} allocation_count=unavailable retained_growth_bytes={retained} aux_growth_bytes={auxiliary} capacity_growth_bytes={capacity} process_hwm_kib=unavailable device_memory_bytes=unavailable upload_bytes=unavailable checksum={checksum}"
+
+    it "keeps Engine2D and Engine3D cache identities distinct without device claims":
+        val key2d = font_atlas_composite_cache_identity(
+            "shared-multilingual", "vulkan2d", "device", "atlas", "font")
+        val key3d = font_atlas_composite_cache_identity(
+            "shared-multilingual", "vulkan3d", "device", "atlas", "font")
+        expect(key2d == key3d).to_equal(false)
+        print "text_memory operation=font_atlas_target_identity engine2d_key_bytes={key2d.len()} engine3d_key_bytes={key3d.len()} device_memory_bytes=unavailable queue_completion=unavailable readback=unavailable"

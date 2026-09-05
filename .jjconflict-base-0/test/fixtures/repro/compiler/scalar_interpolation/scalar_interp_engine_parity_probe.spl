@@ -1,0 +1,68 @@
+# Engine-parity probe for SCALAR-to-text rendering reached through string
+# INTERPOLATION (`"{x}"`) rather than through a direct `print(x)` argument.
+#
+# Filed with doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md
+# and doc/08_tracking/bug/stress_f02_i64_boxing_truncation_2026-07-17.md.
+#
+# Run this file under BOTH engines and diff stdout; the two must be identical:
+#   env SIMPLE_EXECUTION_MODE=interpreter bin/simple run <this file>
+#   env SIMPLE_EXECUTION_MODE=jit         bin/simple run <this file>
+#
+# It cannot be a plain spec body: `bin/simple test` is the tree-walking
+# interpreter and never routes through the cranelift/JIT backend, so a spec
+# assertion can only ever observe the engine that was already correct.
+#
+# Every line is `KEY=<rendered>` so a caller can compare line-by-line.
+
+fn ret_i64_max() -> i64:
+    return 9223372036854775807
+
+fn main():
+    # --- i64 near/over the 61-bit tagged-payload boundary.
+    # BoxInt packs `(value << 3) | TAG_INT`, so anything outside [-2^60, 2^60)
+    # loses its top bits. These are the exact magnitudes that regressed.
+    val annot: i64 = 9223372036854775807
+    print("I64_MAX_ANNOT={annot}")
+    val infer = 9223372036854775807
+    print("I64_MAX_INFER={infer}")
+    print("I64_MAX_TOSTRING={annot.to_string()}")
+    print("I64_MAX_FNRET={ret_i64_max()}")
+    var arr: [i64] = [9223372036854775807]
+    print("I64_MAX_ARRELEM={arr[0]}")
+
+    val i64_min: i64 = -9223372036854775807 - 1
+    print("I64_MIN={i64_min}")
+    val pow62: i64 = 4611686018427387904
+    print("I64_POW62={pow62}")
+    val pow61: i64 = 2305843009213693951
+    print("I64_POW61_MINUS1={pow61}")
+    val pow60: i64 = 1152921504606846976
+    print("I64_POW60={pow60}")
+    val neg_big: i64 = -4611686018427387904
+    print("I64_NEG_POW62={neg_big}")
+
+    # --- the historically-working control: small magnitudes fit the payload.
+    val small: i64 = 42
+    print("I64_SMALL={small}")
+    val neg_small: i64 = -7
+    print("I64_NEG_SMALL={neg_small}")
+
+    # --- sibling scalar renderers, so a regression in ANY of them is caught
+    # by the same parity comparison rather than needing a new probe.
+    val u_big: u64 = 18446744073709551615
+    print("U64_MAX={u_big}")
+    val i32v: i32 = -2147483648
+    print("I32_MIN={i32v}")
+    val fv: f64 = 1.5
+    print("F64={fv}")
+    val bv: bool = true
+    print("BOOL={bv}")
+    val tv: text = "hi"
+    print("TEXT={tv}")
+
+    # --- multi-hole and repeated-hole shapes: the renderer result is a tagged
+    # handle that must survive being concatenated more than once.
+    print("MULTI={annot} {small} {annot}")
+    print("NESTED={annot.to_string()} {u_big}")
+
+main()

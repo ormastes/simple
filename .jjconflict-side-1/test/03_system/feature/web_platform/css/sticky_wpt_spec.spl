@@ -1,0 +1,147 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# codex-system-test
+# @req REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM
+"""# CSS Sticky Positioning
+
+Proves bounded root-scroll `position: sticky; top:<px>` through Web layout,
+canonical Draw IR, and exact expected-color Engine2D coverage/count. Nested
+scrollports, finite wrappers, other inset axes, nested sticky roots, and
+containing-block bottom constraints remain RED.
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
+use std.gc_async_mut.gpu.browser_engine.html_string_parser.{browser_renderer_normalize_style_rules}
+
+val WIDTH: i32 = 80
+val HEIGHT: i32 = 60
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _renders_color(style: text, body: text, color: u32) -> bool:
+    val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(style)
+    val html = "<html><head><style>" + css + "</style></head><body>" + body + "</body></html>"
+    val result = render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT)
+    val pixels = result.pixel_data
+    _count_color(pixels, color) > 0
+
+describe "REQ-WEB-BROWSER-003/004: CSS sticky positioning":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should pin one top-inset sticky subtree during root scrolling":
+        # @req REQ-WEB-BROWSER-003/004
+        # @req REQ-WEB-BROWSER-003/004
+        # @req REQ-SSPEC-SYSTEM
+        step("should pin one top-inset sticky subtree during root scrolling")
+        val html = _sticky_html()
+
+    context "CSS position sticky rendering coverage":
+
+        it "position sticky element renders at scroll-adjusted position":
+            val style = ".sticky { position: sticky; top: 0; width: 20px; height: 10px; background-color: #2563eb; }"
+            val body = "<div class='sticky'></div>"
+            expect(_renders_color(style, body, 0xFF2563EBu32)).to_equal(true)
+
+        it "sticky element stays visible within containing block":
+            val style = ".sticky { position: sticky; top: 5px; width: 20px; height: 10px; background-color: #16a34a; }"
+            val body = "<div class='sticky'></div>"
+            expect(_renders_color(style, body, 0xFF16A34Au32)).to_equal(true)
+
+    it "should leave unsupported sticky declarations in normal scrolled flow":
+        step("Verify: should leave unsupported sticky declarations in normal scrolled flow")
+        for inset in [
+            "", "top:auto;", "inset:auto;", "inset-block:auto;",
+            "inset-block-start:auto;",
+            "top:0;transform:translateY(2px);",
+            "top:0;transform:skewX(10deg);",
+            "top:0;translate:0 2px;"
+        ]:
+            val html = (
+                "<style>html,body{{margin:0}}#spacer{height:4px}" +
+                "#probe{position:sticky;" + inset +
+                "width:4px;height:4px;background:#2563eb}" +
+                "#tail{height:20px}</style><div id='spacer'></div>" +
+                "<div id='probe'></div><div id='tail'></div>"
+            )
+            expect(simple_web_layout_debug_style_by_id(
+                html, "probe", "position"
+            )).to_equal("sticky")
+            val result =
+                simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+                    html, 16, 12, 0, 6,
+                    browser_text_input_overlay_empty()
+                )
+            val index = _sticky_command_index(
+                result.composition.batches[0].commands, "probe"
+            )
+            expect(index).to_be_greater_than(-1)
+            if index >= 0:
+                val command = result.composition.batches[0].commands[index]
+                expect([command.x, command.y, command.width, command.height]).to_equal(
+                    [0, -2, 4, 4]
+                )
+                expect(_sticky_style(command, "top")).to_equal("auto")
+            val raster = Engine2dCompositorBackend.create_named(
+                16, 12, "software"
+            )
+            val frame = raster.render_draw_ir_composition(
+                result.composition, []
+            )
+            raster.shutdown()
+            expect(_sticky_color_count(
+                frame.pixels, 0xFF2563EBu32
+            )).to_equal(8)
+
+    it "should not root-pin sticky nodes inside finite or scrolling wrappers":
+        step("Verify: should not root-pin sticky nodes inside finite or scrolling wrappers")
+        for wrapper_style in [
+            "height:8px;", "height:8px;overflow-y:scroll;"
+        ]:
+            val html = (
+                "<style>html,body{{margin:0}}#wrapper{" + wrapper_style +
+                "}#spacer{height:4px}#probe{position:sticky;top:0;" +
+                "width:4px;height:4px;background:#2563eb}" +
+                "#inner-tail{height:20px}#outer-tail{height:20px}</style>" +
+                "<div id='wrapper'><div id='spacer'></div>" +
+                "<div id='probe'></div><div id='inner-tail'></div></div>" +
+                "<div id='outer-tail'></div>"
+            )
+            val result =
+                simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+                    html, 16, 12, 0, 6,
+                    browser_text_input_overlay_empty()
+                )
+            val index = _sticky_command_index(
+                result.composition.batches[0].commands, "probe"
+            )
+            expect(index).to_be_greater_than(-1)
+            if index >= 0:
+                val command = result.composition.batches[0].commands[index]
+                expect([command.x, command.y, command.width, command.height]).to_equal(
+                    [0, -2, 4, 4]
+                )
+                expect(command.parent_id).to_equal("wrapper")
+            val raster = Engine2dCompositorBackend.create_named(
+                16, 12, "software"
+            )
+            val frame = raster.render_draw_ir_composition(
+                result.composition, []
+            )
+            raster.shutdown()
+            expect(_sticky_color_count(
+                frame.pixels, 0xFF2563EBu32
+            )).to_equal(8)

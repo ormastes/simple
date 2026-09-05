@@ -1,0 +1,45 @@
+#!/bin/sh
+# Static raw-file-read elimination guard for the quick C-codegen sample.
+# This checks source shape only; it does not admit, sign, or verify a provider.
+#
+# Verdict is the LAST line on stdout (.claude/rules/vcs.md):
+#   PASS / FAIL / ERROR  ->  exit 0 / 1 / 2
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/app/compile/test_codegen_quick.spl"
+
+if [ ! -f "$module" ]; then
+    echo "ERROR — nothing was checked (missing audited file: $module)"
+    exit 2
+fi
+
+checked=0
+failures=''
+
+expect_count() {
+    _label=$1; _actual=$2; _want=$3
+    checked=$((checked + 1))
+    [ "$_actual" -eq "$_want" ] ||
+        failures="${failures}${failures:+; }$_label expected $_want, got $_actual"
+}
+
+expect_count 'local_raw_extern_declarations' \
+    "$(grep -c '^extern fn rt_file_read_text' "$module")" 0
+expect_count 'result_lift_import' \
+    "$(grep -c '^use std.io_runtime.{read_file_text_result}$' "$module")" 1
+expect_count 'result_lift_call' \
+    "$(grep -c 'read_file_text_result("examples/native_v2_test.spl")' "$module")" 1
+expect_count 'error_arm' "$(grep -c 'case Err(error):' "$module")" 1
+expect_count 'codegen_call' "$(grep -c 'generate_c_code(source)' "$module")" 1
+
+if [ "$checked" -eq 0 ]; then
+    echo 'ERROR — nothing was checked (no assertions evaluated)'
+    exit 2
+fi
+if [ -n "$failures" ]; then
+    echo "FAIL — $checked assertion(s) checked, quick codegen file-read authority: $failures"
+    exit 1
+fi
+echo "PASS — $checked assertion(s) checked, quick codegen file-read authority: local_raw_declarations=0 result_lifts=1 codegen_calls=1 fabricated_empty_source=absent artifact_admission=absent"
+exit 0

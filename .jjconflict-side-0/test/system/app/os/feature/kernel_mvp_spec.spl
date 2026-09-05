@@ -1,0 +1,178 @@
+# Kernel MVP smoke spec
+#
+# Focused checks for x86_64 ring-3 entry, filesystem-backed exec, shell
+# dmesg exposure, and fault-path rejection contracts.
+
+use std.spec
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.x86_64.context.{X86ContextSwitch}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt, x86_dispatch_installed_syscall, x86_dispatch_installed_syscall_abi}
+use os.kernel.arch.x86_64.trap_runtime.{X86TrapRuntime}
+use os.kernel.loader.executable_source.{_set_synthetic_vfs_file_for_test, _clear_synthetic_vfs_for_test, resolve_executable_bytes}
+use os.kernel.loader.process_image.{build_user_process_image, X86_64_USER_STACK_TOP}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.interrupts.gdt.{GDT_USER_CS, GDT_USER_DS}
+use os.apps.shell.shell_app.{ShellApp}
+
+fn _make_x86_64_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(62.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x40.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(64.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(64.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(56.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(5.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x10.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x40.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x40.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(4.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(4.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x10.to_u8())
+    bytes.push(0x00.to_u8())
+    bytes.push(0x00.to_u8())
+    while bytes.len() < 0x1000:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes
+
+fn _contains_line(lines: [text], needle: text) -> bool:
+    var i: u64 = 0
+    while i < lines.len():
+        if lines[i].contains(needle):
+            return true
+        i = i + 1
+    false
+
+describe "x86_64_ring3_smoke":
+    it "creates a ring-3 context with the user selectors and aligned stack":
+        val ctx = X86ContextSwitch.create(0x401000, X86_64_USER_STACK_TOP, true)
+        expect(ctx.cs).to_equal((GDT_USER_CS as u64) | 3)
+        expect(ctx.ss).to_equal((GDT_USER_DS as u64) | 3)
+        expect(ctx.rsp % 16).to_equal(0)
+        expect(ctx.rflags).to_equal(0x202)
+
+    it "builds an x86_64 user image with the stable stack top":
+        val image = build_user_process_image("/usr/bin/x86_exec_probe", _make_x86_64_exec(), Architecture.X86_64)
+        expect(image.is_ok()).to_equal(true)
+        val built = image.unwrap()
+        expect(built.entry).to_equal(0x400000)
+        expect(built.stack_top).to_equal(X86_64_USER_STACK_TOP)
+        expect(built.argv[0]).to_equal("/usr/bin/x86_exec_probe")
+
+describe "x86_64_fat32_exec":
+    it "resolves filesystem-backed x86_64 bytes and builds a process image":
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", _make_x86_64_exec())
+        val bytes = resolve_executable_bytes("/sys/apps/hello_world", Architecture.X86_64)
+        expect(bytes.is_ok()).to_equal(true)
+
+        val image = build_user_process_image("/sys/apps/hello_world", bytes.unwrap(), Architecture.X86_64)
+        expect(image.is_ok()).to_equal(true)
+        val built = image.unwrap()
+        expect(built.binary_path).to_equal("/sys/apps/hello_world")
+        expect(built.entry).to_equal(0x400000)
+        expect(built.stack_top).to_equal(X86_64_USER_STACK_TOP)
+        _clear_synthetic_vfs_for_test()
+
+describe "x86_64_shell_smoke":
+    it "advertises dmesg in the shell help output":
+        val shell = ShellApp.new()
+        shell.output_lines = []
+        shell.execute("help")
+        expect(shell.last_exit_code).to_equal(0)
+        expect(_contains_line(shell.output_lines, "dmesg [N]")).to_equal(true)
+
+describe "x86_64_fault_smoke":
+    it "rejects ring-3 entry when no user task exists":
+        X86Interrupt.install_bootstrap_runtime(8)
+        expect(x86_dispatch_installed_syscall_abi(14, 0, 0, 0, 0, 0, 0)).to_equal(-22)
+
+    it "returns ENOSYS for an unknown installed syscall id":
+        val runtime = X86TrapRuntime.new(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        X86Interrupt.install_runtime_bundle(runtime)
+        val result = x86_dispatch_installed_syscall(SyscallArgs(
+            id: 999,
+            arg0: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0
+        ))
+        expect(result.is_err()).to_equal(false)
+        expect(result.unwrap().value).to_equal(-1)
+
+describe "kernel_log_and_dmesg_exposure":
+    it "keeps ordered kernel log entries readable for dmesg-style consumers":
+        val log = KernelLog.new(4)
+        log.write(3, 1, 101, "boot: service init")
+        log.write(6, 1, 101, "boot: shell ready")
+        val entries = log.read(0, 0, 4)
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].message).to_equal("boot: service init")
+        expect(entries[1].message).to_equal("boot: shell ready")
+

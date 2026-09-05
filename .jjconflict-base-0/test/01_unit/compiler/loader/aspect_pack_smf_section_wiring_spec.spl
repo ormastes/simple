@@ -1,0 +1,539 @@
+"""
+## Purpose and audience
+Purpose: Prove that aspect pack is a registered SMF section reachable from the load path.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-APKW-04
+doc/01_research/local/REQ-APKW-04.md
+doc/03_plan/sys_test/REQ-APKW-04.md
+doc/04_architecture/REQ-APKW-04.md
+doc/05_design/REQ-APKW-04.md
+"""
+# @req: REQ-APKW-04
+
+# REPRODUCING SPEC for the aspect-pack wiring gap (design
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+# §12.1 "SMF header compatibility" and §23 "Existing SMF and loader").
+#
+# Before this change `std.common.aspect_pack` was a standalone byte-array
+# container with ZERO product callers: no SMF section type was registered for
+# it, the SMF writer could not emit one, and nothing on any load path ever
+# looked for one. The catalog was unreachable from a real module load.
+#
+# Implemented links exercised below:
+#   smf_build_aspect_pack_image        (writes SectionType.AspectPackDirectory,
+#                                       wire byte 16, and stamps the disjoint
+#                                       SMF_FLAG_ASPECT_PACK extension bit)
+#   -> SmfReaderMemory header flag + section table
+#   -> smf_register_aspect_pack        (loader-side section -> provider bridge)
+#
+# The ModuleLoader.load integration is deliberately NOT implemented by the
+# producer slice. REQ-APKW-03..05 remain explicit pending examples below; they
+# must not be mistaken for producer coverage or silently compiled out.
+
+use std.spec.{describe, it, step}
+use compiler.loader.aspect_pack_section.{
+    smf_find_section_by_wire_type, smf_has_aspect_pack, smf_aspect_pack_bytes,
+    smf_register_aspect_pack, smf_validate_optional_aspect_pack,
+    SMF_SECTION_ASPECT_PACK_DIRECTORY
+}
+use compiler.loader.module_loader_compat.{
+    ModuleLoader, LoadResult, moduleloader_aspect_loader_handle,
+    moduleloader_try_aspect_facet, moduleloader_aspect_facet,
+    moduleloader_unload_aspect_facet, modulefacetref_is_live, modulefacetref_release,
+    moduleloader_mapped_symbol_bytes, moduleloader_nested_module_refcount,
+    moduleloader_exec_mapping_count
+}
+use compiler.backend.linker.smf_writer.{smf_build_aspect_pack_image, SectionType, SmfWriter, SmfWriterSymbol,
+    SmfWriterSymbolBinding, SmfWriterSymbolType, SmfRelocation, RelocationType}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.smf_segment_load.{smf_section_extent}
+use std.common.aspect_pack.{
+    ApkModuleSourceV2, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2,
+    APK_ENTRY_FACET, APK_ACT_LAZY_FACET, apk_loader_new, apk_load_facet,
+    apk_loader_packs_opened, apk_loader_modules_decompressed,
+    apk_loader_bytes_decompressed, apk_loader_generation,
+    apk_module_identity_v1,
+    apk_prepare_facet_v1, apk_publish_prepared_facet_v1, apk_try_facet,
+    apk_facet_pin_v1, apk_facet_unpin_v1,
+    apk_activation_stack_enter_v1, apk_activation_stack_exit_v1
+}
+use std.io_runtime.{file_write_bytes, file_read_bytes, mkdir_p}
+
+fn _read_smf() -> [u8]:
+    file_read_bytes(_pack_path())
+
+fn _pack_path() -> text:
+    "build/test/aspect_pack_wiring.smf"
+
+fn _payload(tag: text) -> [u8]:
+    # Complete ordinary SMF with a real Abs64 relocation.  The payload is
+    # intentionally executable-loader input, not opaque marker text.
+    var code: [i64] = []
+    var i = 0
+    while i < 16:
+        code.push(0)
+        i = i + 1
+    code.push(195)
+    var writer = SmfWriter.create()
+    writer.add_code_section("nested", code)
+    writer.add_symbol(SmfWriterSymbol(name: "nested_entry", binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function, section_index: 1, value: 0,
+        size: 16, layout_phase: 2, is_event_loop_anchor: false, layout_pinned: true))
+    writer.add_symbol(SmfWriterSymbol(name: "nested_local", binding: SmfWriterSymbolBinding.Local,
+        sym_type: SmfWriterSymbolType.Function, section_index: 1, value: 8,
+        size: 8, layout_phase: 2, is_event_loop_anchor: false, layout_pinned: true))
+    writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 1,
+        reloc_type: RelocationType.Abs64, addend: tag.len()))
+    val raw = writer.write().unwrap()
+    var out: [u8] = []
+    for b in raw:
+        out.push(b as u8)
+    out
+
+fn _pack_bytes() -> [u8]:
+    var mods: [ApkModuleSourceV2] = []
+    mods.push(ApkModuleSourceV2(module_id: "debug.core", aspect_id: "debug",
+        module_abi_hash: "abi-debug-1", required_core_public_abi_hash: "",
+        variant_fingerprint: "", payload: _payload("debug.core")))
+    mods.push(ApkModuleSourceV2(module_id: "trace.spans", aspect_id: "trace",
+        module_abi_hash: "abi-trace-1", required_core_public_abi_hash: "",
+        variant_fingerprint: "", payload: _payload("trace.spans")))
+    val built = apk_build_pack_v2(mods)
+    built.bytes
+
+fn _catalog_bytes() -> [u8]:
+    var entries: [ApkCatalogEntryV2] = []
+    entries.push(ApkCatalogEntryV2(facet_key: "Widget/Debuggable",
+        pack_path: _pack_path(), module_id: "debug.core",
+        entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: "abi-debug-1"))
+    val built = apk_build_catalog_v2(entries)
+    built.bytes
+
+fn _catalog_two_keys_bytes() -> [u8]:
+    var entries: [ApkCatalogEntryV2] = []
+    entries.push(ApkCatalogEntryV2(facet_key: "Widget/Debuggable",
+        pack_path: _pack_path(), module_id: "debug.core", entry_kind: APK_ENTRY_FACET,
+        activation: APK_ACT_LAZY_FACET, abi_hash: "abi-debug-1"))
+    entries.push(ApkCatalogEntryV2(facet_key: "Widget/Inspectable",
+        pack_path: _pack_path(), module_id: "debug.core", entry_kind: APK_ENTRY_FACET,
+        activation: APK_ACT_LAZY_FACET, abi_hash: "abi-debug-1"))
+    apk_build_catalog_v2(entries).bytes
+
+fn _i64_le_bytes(value: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 8:
+        out.push(((value >> (i * 8)) & 255) as u8)
+        i = i + 1
+    out
+
+"""Write a real SMF file whose section table carries `.aspect_pack`."""
+fn _write_pack_smf() -> bool:
+    val _d = mkdir_p("build/test")
+    match generate_aspect_pack_smf(_pack_bytes()):
+        case Err(e):
+            false
+        case Ok(img):
+            file_write_bytes(_pack_path(), img)
+
+fn _mutated_path(tag: text) -> text:
+    "build/test/aspect_pack_wiring_{tag}.smf"
+
+fn _with_executable_aspect_flags(bytes: [u8]) -> [u8]:
+    var out = bytes
+    val header = out.len() - 128
+    out[header + 8] = 0x41u8
+    out
+
+fn _without_aspect_flag(bytes: [u8]) -> [u8]:
+    var out = bytes
+    val header = out.len() - 128
+    out[header + 8] = 0u8
+    out
+
+fn _as_markerless_ordinary_smf(bytes: [u8]) -> [u8]:
+    var out = _without_aspect_flag(bytes)
+    val reader = match SmfReaderMemory.from_data(out):
+        case Ok(r): r
+        case Err(e): panic("reader: {e}")
+    # Reclassify the sole section as ordinary code; validation is header-only
+    # and does not execute or publish these fixture bytes.
+    out[reader.sections_offset] = 1u8
+    out
+
+fn _with_duplicate_aspect_section(bytes: [u8]) -> [u8]:
+    val reader = match SmfReaderMemory.from_data(bytes):
+        case Ok(r): r
+        case Err(e): panic("reader: {e}")
+    val header_start = bytes.len() - 128
+    val section_start = reader.sections_offset
+    val section_end = section_start + 64
+    var out = bytes[0:section_end]
+    out = out.concat(bytes[section_start:section_start + 64])
+    out = out.concat(bytes[section_end:header_start])
+    out = out.concat(bytes[header_start:bytes.len()])
+    val new_header = out.len() - 128
+    out[new_header + 16] = 2u8
+    out[new_header + 17] = 0u8
+    out[new_header + 18] = 0u8
+    out[new_header + 19] = 0u8
+    out
+
+fn _with_malformed_aspect_payload(bytes: [u8]) -> [u8]:
+    var out = bytes
+    val reader = match SmfReaderMemory.from_data(out):
+        case Ok(r): r
+        case Err(e): panic("reader: {e}")
+    val section_index = smf_find_section_by_wire_type(reader, SMF_SECTION_ASPECT_PACK_DIRECTORY)
+    val extent = match smf_section_extent(reader, section_index):
+        case Ok(e): e
+        case Err(e): panic("extent: {e}")
+    out[extent.file_offset] = 0u8
+    out
+
+describe "aspect pack is a registered SMF section reachable from the load path":
+    # @manual scenario evidence
+
+    it "REQ-APKW-01 SmfWriter emits SectionType.AspectPackDirectory as wire byte 16":
+        # @req: REQ-APKW-04
+        step("Verify: REQ-APKW-01 SmfWriter emits SectionType.AspectPackDirectory as wire byte 16")
+        expect(SectionType.AspectPackDirectory.to_wire_u8() as i64).to_equal(SMF_SECTION_ASPECT_PACK_DIRECTORY)
+        expect(SectionType.AspectPackDirectory.name()).to_equal(".aspect_pack")
+
+    it "REQ-APKW-02 the written SMF sets SMF_FLAG_ASPECT_PACK and carries the section":
+        # @req: REQ-APKW-04
+        step("Verify: REQ-APKW-02 the written SMF sets SMF_FLAG_ASPECT_PACK and carries the section")
+        expect(_write_pack_smf()).to_equal(true)
+        val reader = match SmfReaderMemory.from_data(_read_smf()):
+            case Ok(r): r
+            case Err(e): panic("reader: {e}")
+        # header flag (design §12.1: an old loader must reject this file)
+        expect(reader.header.flags.aspect_pack).to_equal(true)
+        # section table entry, found by wire type -- not by index convention
+        expect(smf_find_section_by_wire_type(reader, SMF_SECTION_ASPECT_PACK_DIRECTORY) >= 0).to_equal(true)
+        expect(smf_has_aspect_pack(reader)).to_equal(true)
+        # the section payload is the SMFAPK1 container, byte-exact
+        val extracted = match smf_aspect_pack_bytes(reader):
+            case Ok(b): b
+            case Err(e): panic("extract: {e}")
+        expect(extracted.len()).to_equal(_pack_bytes().len())
+
+    it "REQ-APKW-03 ModuleLoader.load registers the pack it found in the section table":
+        # @req: REQ-APKW-04
+        step("Load a standalone aspect SMF through the product loader")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(module):
+                expect(module.path).to_equal(_pack_path())
+            case LoadResult.Error(message):
+                panic("load: {message}")
+            case _:
+                panic("unexpected loader result")
+        val aspect_loader = moduleloader_aspect_loader_handle(loader)
+        val got = apk_load_facet(aspect_loader, _catalog_bytes(), "Widget/Debuggable")
+        expect(got.error_code).to_equal("")
+        expect(got.module_id).to_equal("debug.core")
+
+    it "REQ-APKW-04 a facet routes through the catalog into the pack that load() opened":
+        # @req: REQ-APKW-04
+        step("Acquire an exact catalog key through ModuleLoader's single aspect owner")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        var facet_ref = moduleloader_aspect_facet(loader, _catalog_bytes(), "Widget/Debuggable")
+        val got = facet_ref.load
+        expect(got.error_code).to_equal("")
+        expect(got.ok).to_equal(true)
+        expect(got.found).to_equal(true)
+        expect(got.facet_key).to_equal("Widget/Debuggable")
+        expect(got.module_id).to_equal("debug.core")
+        expect(got.pack_path).to_equal(_pack_path())
+        expect(got.payload).to_equal(_payload("debug.core"))
+        val nested_reader = SmfReaderMemory.from_data(got.payload).unwrap()
+        expect(nested_reader.read_relocations().unwrap().len()).to_equal(1)
+        expect(loader.is_loaded(apk_module_identity_v1(_pack_path(), "debug.core"))).to_equal(true)
+        expect(modulefacetref_is_live(facet_ref)).to_equal(true)
+        expect(modulefacetref_release(facet_ref)).to_equal(true)
+        expect(modulefacetref_is_live(facet_ref)).to_equal(false)
+
+    it "publishes only after nested parse/map/relocation and owns nested unload":
+        step("Load a relocation-bearing nested SMF exactly once")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        var first = loader.aspect_facet(_catalog_bytes(), "Widget/Debuggable")
+        val handle = moduleloader_aspect_loader_handle(loader)
+        val generation = apk_loader_generation(handle)
+        val opened = apk_loader_packs_opened(handle)
+        val inflated = apk_loader_modules_decompressed(handle)
+        val identity = apk_module_identity_v1(_pack_path(), "debug.core")
+        val nested = loader.get_module(identity).unwrap()
+        val entry = nested.get_symbol("nested_entry").unwrap()
+        expect(nested.get_symbol("nested_local") == nil).to_equal(true)
+        expect(moduleloader_mapped_symbol_bytes(loader, identity, "nested_entry", 0, 8)).to_equal(
+            _i64_le_bytes(entry.address + 8 + "debug.core".len()))
+        expect(moduleloader_exec_mapping_count(loader, identity)).to_equal(1)
+        var second = loader.aspect_facet_visible("Widget/Debuggable")
+        expect(second.load.from_cache).to_equal(true)
+        expect(second.load.generation).to_equal(generation)
+        expect(apk_loader_packs_opened(handle)).to_equal(opened)
+        expect(apk_loader_modules_decompressed(handle)).to_equal(inflated)
+        expect(first.release()).to_equal(true)
+        expect(second.release()).to_equal(true)
+        expect(moduleloader_unload_aspect_facet(loader, "Widget/Debuggable")).to_equal(true)
+        expect(loader.is_loaded(apk_module_identity_v1(_pack_path(), "debug.core"))).to_equal(false)
+        expect(moduleloader_exec_mapping_count(loader, identity)).to_equal(0)
+
+    it "two facet keys share one nested mapping with counted lifetime":
+        step("Acquire two keys routed to the same nested module")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        var first = loader.aspect_facet(_catalog_two_keys_bytes(), "Widget/Debuggable")
+        var second = loader.aspect_facet_visible("Widget/Inspectable")
+        val identity = apk_module_identity_v1(_pack_path(), "debug.core")
+        expect(first.load.found).to_equal(true)
+        expect(second.load.found).to_equal(true)
+        expect(moduleloader_nested_module_refcount(loader, identity)).to_equal(2)
+        expect(first.release()).to_equal(true)
+        expect(second.release()).to_equal(true)
+        expect(loader.unload_aspect_facet("Widget/Debuggable")).to_equal(true)
+        expect(loader.is_loaded(identity)).to_equal(true)
+        expect(moduleloader_nested_module_refcount(loader, identity)).to_equal(1)
+        expect(loader.unload_aspect_facet("Widget/Inspectable")).to_equal(true)
+        expect(loader.is_loaded(identity)).to_equal(false)
+        expect(moduleloader_nested_module_refcount(loader, identity)).to_equal(0)
+
+    it "sabotage: corrupt nested SMF aborts without binding, generation, or counters":
+        step("Repack a nested image whose SMF trailer magic is corrupt")
+        var bad_payload = _payload("debug.core")
+        bad_payload[bad_payload.len() - 128] = 0u8
+        var mods: [ApkModuleSourceV2] = []
+        mods.push(ApkModuleSourceV2(module_id: "debug.core", aspect_id: "debug",
+            module_abi_hash: "abi-debug-1", required_core_public_abi_hash: "",
+            variant_fingerprint: "", payload: bad_payload))
+        val bad_pack = apk_build_pack_v2(mods).bytes
+        val bad_path = _mutated_path("nested_corrupt")
+        val bad_outer = smf_build_aspect_pack_image(bad_pack).unwrap()
+        expect(file_write_bytes(bad_path, bad_outer)).to_equal(true)
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "Widget/Debuggable", pack_path: bad_path,
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET,
+            activation: APK_ACT_LAZY_FACET, abi_hash: "abi-debug-1"))
+        val bad_catalog = apk_build_catalog_v2(entries).bytes
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(bad_path):
+            case LoadResult.Success(_): pass
+            case _: panic("outer pack admission failed")
+        val handle = moduleloader_aspect_loader_handle(loader)
+        val got = loader.aspect_facet(bad_catalog, "Widget/Debuggable").load
+        expect(got.error_code).to_equal("APK_NESTED_SMF_INVALID")
+        expect(apk_loader_generation(handle)).to_equal(0)
+        expect(apk_loader_packs_opened(handle)).to_equal(0)
+        expect(apk_loader_modules_decompressed(handle)).to_equal(0)
+        expect(loader.try_aspect_facet("Widget/Debuggable").load.found).to_equal(false)
+        expect(loader.is_loaded(apk_module_identity_v1(bad_path, "debug.core"))).to_equal(false)
+        expect(moduleloader_exec_mapping_count(loader, apk_module_identity_v1(bad_path, "debug.core"))).to_equal(0)
+
+    it "tampered prepare receipt cannot publish caller-modified fields":
+        step("Mutate a prepared module id and require fail-closed consumption")
+        expect(_write_pack_smf()).to_equal(true)
+        val reader = SmfReaderMemory.from_data(_read_smf()).unwrap()
+        val ld = apk_loader_new()
+        expect(smf_register_aspect_pack(ld, _pack_path(), reader)).to_equal(2)
+        var prepared = apk_prepare_facet_v1(ld, _catalog_bytes(), "Widget/Debuggable", false)
+        prepared.module_id = "forged.module"
+        val published = apk_publish_prepared_facet_v1(prepared)
+        expect(published.error_code).to_equal("APK_PREPARE_TAMPERED")
+        expect(apk_loader_generation(ld)).to_equal(0)
+        expect(apk_loader_packs_opened(ld)).to_equal(0)
+        expect(apk_try_facet(ld, "Widget/Debuggable").found).to_equal(false)
+
+    it "stable module identity is injective across delimiter-shaped tuples":
+        step("Distinguish adversarial pack/module tuple boundaries")
+        val left = apk_module_identity_v1("a#aspect/b", "c")
+        val right = apk_module_identity_v1("a", "b#aspect/c")
+        expect(left == right).to_equal(false)
+
+    it "resident facet hit and miss perform no I/O and a cold miss creates no owner":
+        step("Miss before admission without allocating the lazy aspect owner")
+        var cold = ModuleLoader.with_defaults()
+        val cold_miss = moduleloader_try_aspect_facet(cold, "Widget/Debuggable").load
+        expect(cold_miss.ok).to_equal(true)
+        expect(cold_miss.found).to_equal(false)
+        expect(cold_miss.facet_key).to_equal("Widget/Debuggable")
+        expect(moduleloader_aspect_loader_handle(cold)).to_equal(-1)
+
+        step("Bind once, then prove exact-key resident hit and miss leave I/O counters unchanged")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        var first_ref = loader.aspect_facet(_catalog_bytes(), "Widget/Debuggable")
+        val first = first_ref.load
+        expect(first.found).to_equal(true)
+        val handle = moduleloader_aspect_loader_handle(loader)
+        val opened = apk_loader_packs_opened(handle)
+        val inflated = apk_loader_modules_decompressed(handle)
+        val bytes = apk_loader_bytes_decompressed(handle)
+
+        var hit_ref = loader.try_aspect_facet("Widget/Debuggable")
+        val hit = hit_ref.load
+        expect(hit.found).to_equal(true)
+        expect(hit.from_cache).to_equal(true)
+        expect(hit.generation).to_equal(first.generation)
+        expect(hit.payload.len()).to_equal(first.payload.len())
+        val miss = loader.try_aspect_facet("Widget/Missing").load
+        expect(miss.ok).to_equal(true)
+        expect(miss.found).to_equal(false)
+        expect(miss.facet_key).to_equal("Widget/Missing")
+        expect(apk_loader_packs_opened(handle)).to_equal(opened)
+        expect(apk_loader_modules_decompressed(handle)).to_equal(inflated)
+        expect(apk_loader_bytes_decompressed(handle)).to_equal(bytes)
+        expect(modulefacetref_release(hit_ref)).to_equal(true)
+        expect(modulefacetref_release(first_ref)).to_equal(true)
+
+    it "facade references pin their generation and become stale after release and reload":
+        step("Hold a pinned facade reference across a refused pack unload")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        var old_ref = loader.aspect_facet(_catalog_bytes(), "Widget/Debuggable")
+        expect(old_ref.load.found).to_equal(true)
+        val old_generation = old_ref.load.generation
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(true)
+        expect(old_ref.is_live()).to_equal(true)
+
+        step("Release, unload, reload, and reject the stale generation")
+        expect(old_ref.release()).to_equal(true)
+        expect(old_ref.release()).to_equal(false)
+        expect(old_ref.is_live()).to_equal(false)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(false)
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("reload failed")
+        var new_ref = loader.aspect_facet(_catalog_bytes(), "Widget/Debuggable")
+        expect(new_ref.load.found).to_equal(true)
+        expect(new_ref.load.generation).to_be_greater_than(old_generation)
+        expect(old_ref.is_live()).to_equal(false)
+        expect(new_ref.is_live()).to_equal(true)
+        expect(new_ref.release()).to_equal(true)
+
+    it "REQ-APKW-05 a module with no aspect-pack section registers nothing":
+        # @req: REQ-APKW-04
+        step("Validate a markerless ordinary SMF without allocating provider state")
+        expect(_write_pack_smf()).to_equal(true)
+        val ordinary = _as_markerless_ordinary_smf(_read_smf())
+        val reader = match SmfReaderMemory.from_data(ordinary):
+            case Ok(r): r
+            case Err(e): panic("reader: {e}")
+        match smf_validate_optional_aspect_pack(reader):
+            case Ok(candidate): expect(candidate.present).to_equal(false)
+            case Err(e): panic("ordinary SMF: {e}")
+
+    it "rejects mismatched, duplicate, and executable aspect markers before lazy state exists":
+        step("Mutate the canonical image into four forbidden contracts")
+        expect(_write_pack_smf()).to_equal(true)
+        val canonical = _read_smf()
+        val bad_images = [
+            _without_aspect_flag(canonical),
+            _with_duplicate_aspect_section(canonical),
+            _with_executable_aspect_flags(canonical),
+            _with_malformed_aspect_payload(canonical)
+        ]
+        var loader = ModuleLoader.with_defaults()
+        expect(moduleloader_aspect_loader_handle(loader)).to_equal(-1)
+        var i = 0
+        while i < bad_images.len():
+            val path = _mutated_path(i.to_text())
+            expect(file_write_bytes(path, bad_images[i])).to_equal(true)
+            match loader.load(path):
+                case LoadResult.Error(_): pass
+                case _: panic("forbidden aspect artifact was admitted")
+            expect(loader.is_loaded(path)).to_equal(false)
+            expect(moduleloader_aspect_loader_handle(loader)).to_equal(-1)
+            i = i + 1
+
+    it "unload unregisters the pack and reload admits the same path again":
+        step("Load, resolve, unload, observe removal, then reload")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        val handle = moduleloader_aspect_loader_handle(loader)
+        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(true)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(false)
+        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(false)
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("reload failed")
+        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(true)
+
+    it "pinned and activating facets block pack removal without partial unload":
+        step("Exercise both lifecycle refusal branches, then release cleanly")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        val handle = moduleloader_aspect_loader_handle(loader)
+        val key = "Widget/Debuggable"
+        expect(apk_load_facet(handle, _catalog_bytes(), key).found).to_equal(true)
+        expect(apk_facet_pin_v1(handle, key)).to_equal(true)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(true)
+        expect(apk_facet_unpin_v1(handle, key)).to_equal(true)
+        expect(apk_activation_stack_enter_v1(handle, key)).to_equal(true)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(true)
+        apk_activation_stack_exit_v1(handle, key)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(false)
+
+    it "REQ-APKW-06 the section bridge registers the pack with an aspect-pack loader":
+        # @req: REQ-APKW-04
+        step("Verify: REQ-APKW-06 the section bridge registers the pack with an aspect-pack loader")
+        expect(_write_pack_smf()).to_equal(true)
+        val reader = match SmfReaderMemory.from_data(_read_smf()):
+            case Ok(r): r
+            case Err(e): panic("reader: {e}")
+        val ld = apk_loader_new()
+        # -1 = nothing registered, i.e. the section -> provider bridge is gone.
+        expect(smf_register_aspect_pack(ld, _pack_path(), reader)).to_equal(2)  # oracle: 2 — named expected value from the requirement
+
+    it "REQ-APKW-07 a facet routes through the catalog into the SMF-registered pack":
+        # @req: REQ-APKW-04
+        step("Verify: REQ-APKW-07 a facet routes through the catalog into the SMF-registered pack")
+        expect(_write_pack_smf()).to_equal(true)
+        val reader = match SmfReaderMemory.from_data(_read_smf()):
+            case Ok(r): r
+            case Err(e): panic("reader: {e}")
+        val ld = apk_loader_new()
+        expect(smf_register_aspect_pack(ld, _pack_path(), reader)).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        val got = apk_load_facet(ld, _catalog_bytes(), "Widget/Debuggable")
+        # Without the registration above this is APK_PACK_MISSING.
+        expect(got.error_code).to_equal("")
+        expect(got.found).to_equal(true)
+        expect(got.module_id).to_equal("debug.core")
+        expect(got.payload).to_equal(_payload("debug.core"))
+        expect(apk_loader_packs_opened(ld)).to_be_greater_than(0)

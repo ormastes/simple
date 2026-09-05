@@ -1,0 +1,206 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+CONTRACT="$ROOT_DIR/scripts/check/lib/simpleos-toolchain-desktop-boot-receipt-contract.shs"
+. "$CONTRACT"
+
+write_selftest_receipt() {
+    selftest_output=$1
+    selftest_schema=$2
+    selftest_run=$3
+    selftest_source=$4
+    selftest_status=$5
+    selftest_rust_seed=$6
+    selftest_host_compile=$7
+    selftest_host_linker=$8
+    selftest_preloaded=$9
+    shift 9
+    selftest_fixed_ssh=$1
+    selftest_skip=$2
+    selftest_qemu_kernel=$3
+    selftest_isa_debug=$4
+    selftest_marker=$5
+    selftest_exec_source=$6
+    selftest_body="${selftest_output}.body"
+    {
+        printf '%s\n' \
+            'evidence_class=live-guest' \
+            "fixed_ssh_response_used=$selftest_fixed_ssh" \
+            "guest_exec_source=$selftest_exec_source" \
+            "host_compile_used=$selftest_host_compile" \
+            "host_linker_used=$selftest_host_linker" \
+            "isa_debug_exit_used=$selftest_isa_debug" \
+            'linker_target=x86_64-unknown-simpleos' \
+            "marker_app_used=$selftest_marker" \
+            "preloaded_command_used=$selftest_preloaded" \
+            'producer_path=scripts/check/check-simpleos-toolchain-desktop-boot.shs' \
+            'producer_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            "qemu_kernel_flag_used=$selftest_qemu_kernel" \
+            "run_id=$selftest_run" \
+            "rust_seed_used=$selftest_rust_seed" \
+            "schema=$selftest_schema" \
+            "skip_used=$selftest_skip" \
+            "source_revision=$selftest_source" \
+            "status=$selftest_status"
+    } | LC_ALL=C sort >"$selftest_body"
+    selftest_hash=$(sos_td_hash_file "$selftest_body")
+    { sed -n '1,$p' "$selftest_body"; printf '%s\n' "record_sha256=$selftest_hash"; } >"$selftest_output"
+}
+
+selftest_expect_block() {
+    selftest_reason=$1
+    shift
+    set +e
+    selftest_output=$("$@" 2>&1)
+    selftest_status=$?
+    set -e
+    [ "$selftest_status" -ne 0 ] || {
+        printf '%s\n' "self-test failure: expected blocked:$selftest_reason" >&2
+        exit 1
+    }
+    case "$selftest_output" in
+        *"blocked:$selftest_reason"*) ;;
+        *) printf '%s\n' "self-test failure: wanted blocked:$selftest_reason, got: $selftest_output" >&2; exit 1 ;;
+    esac
+    selftest_checked=$((selftest_checked + 1))
+}
+
+run_self_test() {
+    selftest_root=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-toolchain-desktop-contract.XXXXXX")
+    trap 'rm -rf "$selftest_root"' EXIT HUP INT TERM
+    selftest_checked=0
+    valid="$selftest_root/valid.sdn"
+    write_selftest_receipt "$valid" simpleos-toolchain-desktop-guest-v1 self-test-run self-test-source pass false false false false false false false false false mounted-filesystem
+
+    sos_td_validate_desktop_policy "$valid"
+    selftest_checked=$((selftest_checked + 1))
+    selftest_expect_block receipt-missing sos_td_validate_record "$selftest_root/missing.sdn"
+
+    wrong_schema="$selftest_root/wrong-schema.sdn"
+    write_selftest_receipt "$wrong_schema" wrong-schema self-test-run self-test-source pass false false false false false false false false false mounted-filesystem
+    selftest_expect_block schema-mismatch sos_td_validate_desktop_policy "$wrong_schema"
+
+    duplicate="$selftest_root/duplicate.sdn"
+    sed '$d' "$valid" >"$duplicate.body"
+    printf '%s\n' 'run_id=self-test-run' >>"$duplicate.body"
+    LC_ALL=C sort "$duplicate.body" >"$duplicate.sorted"
+    duplicate_hash=$(sos_td_hash_file "$duplicate.sorted")
+    { sed -n '1,$p' "$duplicate.sorted"; printf '%s\n' "record_sha256=$duplicate_hash"; } >"$duplicate"
+    selftest_expect_block record-keys-unsorted-or-duplicate sos_td_validate_record "$duplicate"
+
+    unsorted="$selftest_root/unsorted.sdn"
+    { printf '%s\n' 'status=pass'; sed '$d' "$valid" | grep -v '^status='; } >"$unsorted.body"
+    unsorted_hash=$(sos_td_hash_file "$unsorted.body")
+    { sed -n '1,$p' "$unsorted.body"; printf '%s\n' "record_sha256=$unsorted_hash"; } >"$unsorted"
+    selftest_expect_block record-keys-unsorted-or-duplicate sos_td_validate_record "$unsorted"
+
+    bad_hash="$selftest_root/bad-hash.sdn"
+    sed '$c\record_sha256=0000000000000000000000000000000000000000000000000000000000000000' "$valid" >"$bad_hash"
+    selftest_expect_block record-sha256-mismatch sos_td_validate_record "$bad_hash"
+
+    nonfinal="$selftest_root/nonfinal.sdn"
+    { sed -n '1,$p' "$valid"; printf '%s\n' 'trailing_key=forbidden'; } >"$nonfinal"
+    selftest_expect_block record-sha256-not-final sos_td_validate_record "$nonfinal"
+
+    other_run="$selftest_root/other-run.sdn"
+    write_selftest_receipt "$other_run" simpleos-toolchain-desktop-guest-v1 other-run self-test-source pass false false false false false false false false false mounted-filesystem
+    selftest_expect_block cross-bind-run_id-mismatch sos_td_require_same_field "$valid" "$other_run" run_id
+
+    other_source="$selftest_root/other-source.sdn"
+    write_selftest_receipt "$other_source" simpleos-toolchain-desktop-guest-v1 self-test-run other-source pass false false false false false false false false false mounted-filesystem
+    selftest_expect_block cross-bind-source_revision-mismatch sos_td_require_same_field "$valid" "$other_source" source_revision
+
+    blocked_status="$selftest_root/blocked-status.sdn"
+    write_selftest_receipt "$blocked_status" simpleos-toolchain-desktop-guest-v1 self-test-run self-test-source blocked false false false false false false false false false mounted-filesystem
+    selftest_expect_block status-mismatch sos_td_validate_desktop_policy "$blocked_status"
+
+    rust_seed="$selftest_root/rust-seed.sdn"
+    write_selftest_receipt "$rust_seed" simpleos-toolchain-desktop-guest-v1 self-test-run self-test-source pass true false false false false false false false false mounted-filesystem
+    selftest_expect_block rust_seed_used-mismatch sos_td_validate_desktop_policy "$rust_seed"
+
+    host_tools="$selftest_root/host-tools.sdn"
+    write_selftest_receipt "$host_tools" simpleos-toolchain-desktop-guest-v1 self-test-run self-test-source pass false true true false false false false false false mounted-filesystem
+    selftest_expect_block host_compile_used-mismatch sos_td_validate_desktop_policy "$host_tools"
+
+    preloaded="$selftest_root/preloaded.sdn"
+    write_selftest_receipt "$preloaded" simpleos-toolchain-desktop-guest-v1 self-test-run self-test-source pass false false false true true false false false false preloaded
+    selftest_expect_block preloaded_command_used-mismatch sos_td_validate_desktop_policy "$preloaded"
+
+    skipped="$selftest_root/skipped.sdn"
+    write_selftest_receipt "$skipped" simpleos-toolchain-desktop-guest-v1 self-test-run self-test-source pass false false false false false true false false true mounted-filesystem
+    selftest_expect_block skip_used-mismatch sos_td_validate_desktop_policy "$skipped"
+
+    forbidden_qemu="$selftest_root/forbidden-qemu.sdn"
+    write_selftest_receipt "$forbidden_qemu" simpleos-toolchain-desktop-guest-v1 self-test-run self-test-source pass false false false false false false true true false mounted-filesystem
+    selftest_expect_block qemu_kernel_flag_used-mismatch sos_td_validate_desktop_policy "$forbidden_qemu"
+
+    wrong_exec="$selftest_root/wrong-exec.sdn"
+    write_selftest_receipt "$wrong_exec" simpleos-toolchain-desktop-guest-v1 self-test-run self-test-source pass false false false false false false false false false host-fixture
+    selftest_expect_block guest_exec_source-mismatch sos_td_validate_desktop_policy "$wrong_exec"
+
+    [ "$selftest_checked" -eq 16 ] || {
+        printf '%s\n' "self-test failure: checked=$selftest_checked expected=16" >&2
+        exit 1
+    }
+    printf '%s\n' 'STATUS: PASS simpleos-toolchain-desktop-boot receipt-contract self-test checked=16 platform_acceptance_claimed=false'
+}
+
+case "${1:-}" in
+    --self-test)
+        [ "$#" -eq 1 ] || { printf '%s\n' 'usage: check-simpleos-toolchain-desktop-boot.shs [--self-test]' >&2; exit 2; }
+        run_self_test
+        exit 0
+        ;;
+    "") ;;
+    *) printf '%s\n' 'usage: check-simpleos-toolchain-desktop-boot.shs [--self-test]' >&2; exit 2 ;;
+esac
+
+SIMPLE_BIN=${SIMPLE_BIN:-}
+SIMPLEOS_TOOLCHAIN_IMAGE=${SIMPLEOS_TOOLCHAIN_IMAGE:-}
+EVIDENCE_DIR="$ROOT_DIR/build/os/evidence"
+MANIFEST="$EVIDENCE_DIR/SIMPLETOOL.SDN"
+IMAGE_RECEIPT="$EVIDENCE_DIR/simpleos-toolchain-image-admission-v1.sdn"
+DESKTOP_RECEIPT="$EVIDENCE_DIR/simpleos-toolchain-desktop-guest-v1.sdn"
+
+[ -n "$SIMPLE_BIN" ] || { sos_td_block simple-bin-not-set; exit 1; }
+[ -x "$SIMPLE_BIN" ] || { sos_td_block simple-bin-missing-or-not-executable; exit 1; }
+case "$SIMPLE_BIN" in
+    *compiler_rust*|*simple_seed*) sos_td_block rust-seed-simple-forbidden; exit 1 ;;
+esac
+[ -n "$SIMPLEOS_TOOLCHAIN_IMAGE" ] || { sos_td_block toolchain-image-not-set; exit 1; }
+[ -f "$SIMPLEOS_TOOLCHAIN_IMAGE" ] || { sos_td_block toolchain-image-missing; exit 1; }
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_BIN=$(bootstrap_stage3_canonical_file "$SIMPLE_BIN") || { sos_td_block stage4-cli-not-canonical; exit 1; }
+STAGE4_RECEIPT=${SIMPLEOS_STAGE4_ADMISSION_RECEIPT:-${SIMPLE_BIN}.provenance.env}
+STAGE4_RECEIPT=$(bootstrap_stage3_canonical_file "$STAGE4_RECEIPT") || { sos_td_block stage4-admission-receipt-missing-or-not-canonical; exit 1; }
+stage4_verify_candidate_provenance "$STAGE4_RECEIPT" "$SIMPLE_BIN" "$ROOT_DIR" || {
+    sos_td_block stage4-cli-provenance-not-admitted
+    exit 1
+}
+
+sos_td_validate_common_receipt "$MANIFEST" simpleos-toolchain-deployment-v1 image-manifest || exit 1
+sos_td_validate_common_receipt "$IMAGE_RECEIPT" simpleos-toolchain-image-admission-v1 image-admission || exit 1
+for required_identity in /usr/bin/simple /bin/simple /sys/apps/simple_compiler /sys/apps/simple_interpreter /sys/apps/simple_loader /usr/bin/ld.lld /usr/lib/CRT0.O /usr/lib/SIMAIN.O /usr/lib/SIMPRT.A /usr/lib/SOSLIB.A /sysrt/simpleos.ld /HELLO.SPL; do
+    grep -Fq "$required_identity" "$MANIFEST" || { sos_td_block "manifest-identity-missing:$required_identity"; exit 1; }
+done
+image_sha=$(sos_td_hash_file "$SIMPLEOS_TOOLCHAIN_IMAGE")
+sos_td_require_value "$IMAGE_RECEIPT" image_sha256 "$image_sha" || exit 1
+manifest_sha=$(sos_td_hash_file "$MANIFEST")
+sos_td_require_value "$IMAGE_RECEIPT" manifest_sha256 "$manifest_sha" || exit 1
+kernel_path=$(sos_td_value "$IMAGE_RECEIPT" kernel_path) || exit 1
+[ -f "$kernel_path" ] || { sos_td_block kernel-artifact-missing; exit 1; }
+kernel_sha=$(sos_td_hash_file "$kernel_path")
+sos_td_require_value "$IMAGE_RECEIPT" kernel_sha256 "$kernel_sha" || exit 1
+[ ! -e "$DESKTOP_RECEIPT" ] || { sos_td_block stale-desktop-guest-receipt-present; exit 1; }
+
+# The canonical framebuffer owner currently launches gui_entry_desktop.spl
+# with -net none, terminates QEMU after capture, and does not start SSHD.
+# A separate historical SSH boot would violate the frozen same-run contract.
+sos_td_block canonical-desktop-owner-lacks-same-run-guest-command-interface
+exit 1

@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-storage-link.XXXXXX")
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+
+for mode in qemu silicon; do
+    mode_dir="$build_dir/$mode"
+    profile=
+    if [ "$mode" = silicon ]; then
+        profile=openssd2-8ch8way-v3.0.0
+    fi
+    COSMOS_OUT="$mode_dir" COSMOS_BUILD_MODE="$mode" \
+        COSMOS_SILICON_PROFILE="$profile" \
+        sh "$root/src/os/kernel/arch/arm32/cosmos/build.shs"
+    if [ "$mode" = silicon ]; then
+        firmware="$mode_dir/simpleos_cosmos_openssd_silicon.elf"
+    else
+        firmware="$mode_dir/simpleos_cosmos_openssd.elf"
+    fi
+    if readelf -sW "$firmware" |
+            awk '$7 == "UND" && $8 != "" { found = 1 } END { exit found }'; then
+        :
+    else
+        echo "cosmos storage $mode link has unresolved symbols" >&2
+        exit 1
+    fi
+    nm "$firmware" | grep -Eq '[[:space:]]T[[:space:]]+cosmos_fsbl_validate_handoff$'
+    nm "$firmware" | grep -Eq '[[:space:]]T[[:space:]]+cosmos_fsbl_selftest$'
+    echo "cosmos storage $mode production link: PASS"
+done

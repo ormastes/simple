@@ -1,0 +1,77 @@
+"""
+# Clipboard API
+
+In-memory clipboard for the Simple browser engine.
+
+JS Equivalent → Simple Function:
+    navigator.clipboard.writeText() → clipboard_write_text()
+    navigator.clipboard.readText()  → clipboard_read_text()
+
+## Permission gate
+
+`clipboard_write_text` / `clipboard_read_text` are the raw buffer operations
+and stay ungated — they are what the gate calls once it has said yes. The
+script-facing entrypoints are `clipboard_read_for` / `clipboard_write_for`,
+which ask `permission_policy.PermissionSet` (via `PermissionSet.allows`) for
+`clipboard-read` / `clipboard-write` and refuse by default. `clipboard-read`
+additionally requires a secure context, which the policy layer enforces at
+grant time.
+"""
+
+#![allow(REQC001)]
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin}
+use std.gc_async_mut.gpu.browser_engine.security.permission_policy.{PermissionSet}
+
+# =========================================================================
+# BrowserClipboard
+# =========================================================================
+
+pub class BrowserClipboard:
+    """In-memory clipboard holding a single text value.
+
+    Fields:
+        _text - current clipboard text content
+    """
+    _text: text
+
+    static fn new() -> BrowserClipboard:
+        """Create an empty clipboard."""
+        BrowserClipboard(_text: "")
+
+# =========================================================================
+# Clipboard Operations
+# =========================================================================
+
+pub fn clipboard_write_text(mut clip: BrowserClipboard, txt: text):
+    """Write text to the clipboard."""
+    clip._text = txt
+
+pub fn clipboard_read_text(clip: BrowserClipboard) -> text:
+    """Read text from the clipboard."""
+    clip._text
+
+# =========================================================================
+# Permission-gated entrypoints — what script actually calls
+# =========================================================================
+
+pub fn clipboard_read_for(clip: BrowserClipboard, perms: PermissionSet, origin: Origin) -> text:
+    """`navigator.clipboard.readText()` for `origin`. Empty text when refused."""
+    if not perms.allows(origin, "clipboard-read"):
+        return ""
+    return clipboard_read_text(clip)
+
+pub fn clipboard_write_for(
+    mut clip: BrowserClipboard,
+    perms: PermissionSet,
+    origin: Origin,
+    txt: text
+) -> bool:
+    """`navigator.clipboard.writeText()` for `origin`. False when refused.
+
+    A refused write leaves the buffer untouched — it does not clear it.
+    """
+    if not perms.allows(origin, "clipboard-write"):
+        return false
+    clipboard_write_text(clip, txt)
+    return true

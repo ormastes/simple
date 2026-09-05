@@ -1,0 +1,85 @@
+# Focused REQ-001/REQ-007/REQ-008/REQ-010 built-in compile adapter evidence.
+
+use std.spec
+use std.spec.step
+use compiler.common.backend_plugin.model.*
+use compiler.common.backend_plugin.receipt.*
+use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.backend.backend_plugin.loader.{load_backend}
+use compiler.backend.backend_plugin.session.{BackendSession}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+
+fn builtin_compile_request(provider: text, target: text = "host") -> BackendPluginRequestV1:
+    BackendPluginRequestV1(
+        BackendRole.CompilerAot, provider, target, "generic", [], "debug",
+        BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit], "", false)
+
+fn representative_plugin_mir() -> MirModule:
+    val function = MirFunction(
+        symbol: SymbolId(id: 1),
+        name: "plugin_probe",
+        signature: MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [],
+        blocks: [MirBlock(
+            id: BlockId.entry(), label: Some("entry"), instructions: [],
+            terminator: MirTerminator.Ret(nil)
+        )],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule(
+        name: "backend_plugin_builtin_probe",
+        functions: functions,
+        statics: {},
+        constants: {},
+        types: {}
+    )
+
+fn load_error_code(result: Result<BackendSession, BackendPluginError>) -> text:
+    match result:
+        case Err(error): error.code()
+        case Ok(_): "ok"
+
+describe "built-in backend compile adapter":
+    it "compiles representative MIR through retained LLVM and Cranelift providers":
+        step("Load each explicit provider through the common admission boundary")
+        val module = representative_plugin_mir()
+        val llvm_session = load_backend(builtin_compile_request("llvm")).ok().unwrap()
+        val cranelift_session = load_backend(
+            builtin_compile_request("cranelift")
+        ).ok().unwrap()
+
+        step("Compile the same MIR through each retained session adapter")
+        val llvm_output = llvm_session.compile_module(module).ok().unwrap()
+        val cranelift_output = cranelift_session.compile_module(module).ok().unwrap()
+        expect(llvm_output.has_object_code).to_equal(true)
+        expect(llvm_output.object_code.len()).to_be_greater_than(0)
+        expect(cranelift_output.has_object_code).to_equal(true)
+        expect(cranelift_output.object_code.len()).to_be_greater_than(0)
+
+    it "rejects unknown target text before factory creation without fallback":
+        step("Request a target with no exact built-in target mapping")
+        expect(load_error_code(load_backend(
+            builtin_compile_request("llvm", "x86_64-unknown-linux-gnu")
+        ))).to_equal("BACKEND_PLUGIN_TARGET")

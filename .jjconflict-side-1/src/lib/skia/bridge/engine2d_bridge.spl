@@ -1,0 +1,140 @@
+# ============================================================================
+# Skia → Engine2D bridge
+#
+# Additive bridge that replays a recorded skia SkPicture onto the shared
+# Engine2D RenderBackend. This lets the skia 2D API (SkCanvas / SkPicture)
+# render through the SAME SIMD-CPU / GPU backend lanes as the rest of the 2D
+# stack — selectable via SIMPLE_2D_BACKEND or the explicit `backend_name`
+# argument.
+#
+# This module does NOT modify skia's SkCanvas / SkPicture API. It only WALKS
+# the already-recorded op list and issues equivalent Engine2D draw calls.
+#
+# Mapping:
+#   DrawRect  + Fill paint     -> Engine2D.draw_rect_filled  (mapped)
+#   DrawImage                  -> Engine2D.draw_image        (mapped)
+#   everything else            -> counted as skipped (TODO), never silently
+#                                 dropped (see BridgeReport.skipped)
+#
+# Color model: SkColor is a packed i64 ARGB (0xAARRGGBB); Engine2D pixels are
+# u32 ARGB in the same layout, so the conversion is a direct .to_u32() cast.
+#
+# IMPLEMENTATION NOTE: The entire op loop is kept INSIDE a single function
+# body. The Engine2D handle is a local `val` that is created, drawn onto,
+# presented, and read back without ever crossing a function-call boundary
+# inside this module — passing the engine into a helper fn here loses the
+# mutations (interpreter copies class params across a library-module call).
+# ============================================================================
+
+use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind}
+use std.skia.entity.enums.{SkPaintStyle}
+use std.skia.entity.image.{SkImage}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+# ----------------------------------------------------------------------------
+# Report describing how many ops were mapped vs skipped (left as TODO).
+# ----------------------------------------------------------------------------
+class BridgeReport:
+    mapped_rects: i32
+    mapped_images: i32
+    skipped: i32
+
+# ----------------------------------------------------------------------------
+# Result of a reported render: the framebuffer pixels plus the coverage report.
+# ----------------------------------------------------------------------------
+class BridgeRenderResult:
+    pixels: [u32]
+    report: BridgeReport
+
+# ----------------------------------------------------------------------------
+# Color: SkColor (packed i64 ARGB) -> Engine2D u32 ARGB. Direct cast.
+# ----------------------------------------------------------------------------
+fn sk_color_to_u32(c: i64) -> u32:
+    (c & 0xFFFFFFFF).to_u32()
+
+# ----------------------------------------------------------------------------
+# SkImage.pixels stores 4 i64 entries per pixel (one channel-byte each, in
+# A,R,G,B order). Pack them into a flat [u32] ARGB array for Engine2D.draw_image.
+# Pure function (no Engine2D), safe to call across a module boundary.
+# ----------------------------------------------------------------------------
+fn sk_image_to_u32_pixels(image: SkImage) -> [u32]:
+    val w = image.info.width
+    val h = image.info.height
+    val count = w * h
+    var out: [u32] = [0u32 for _ in 0..count]
+    val raw = image.pixels
+    var i = 0
+    while i < count:
+        val base = i * 4
+        var a = 0i64
+        var r = 0i64
+        var g = 0i64
+        var b = 0i64
+        if base + 3 < raw.len():
+            a = raw[base] & 0xFF
+            r = raw[base + 1] & 0xFF
+            g = raw[base + 2] & 0xFF
+            b = raw[base + 3] & 0xFF
+        val packed = (a << 24) | (r << 16) | (g << 8) | b
+        out[i] = packed.to_u32()
+        i = i + 1
+    out
+
+# ----------------------------------------------------------------------------
+# Primary reported entrypoint: render a recorded SkPicture through a shared
+# Engine2D backend lane (SIMD CPU / GPU, selected by `backend_name`) and read
+# back the resulting framebuffer plus the op-coverage report.
+#
+# The whole op loop is inlined here so the engine never crosses a function
+# boundary inside this module.
+# ----------------------------------------------------------------------------
+fn skia_render_picture_on_engine2d_reported(picture: SkPicture, width: i32, height: i32, backend_name: text) -> BridgeRenderResult:
+    val eng = Engine2D.create_with_backend(width, height, backend_name)
+    var mapped_rects = 0
+    var mapped_images = 0
+    var skipped = 0
+
+    for op in picture.ops:
+        if op.kind == SkPictureOpKind.DrawRect:
+            # draw_line is ALSO recorded as DrawRect (with a Stroke paint).
+            # Only Fill rects map cleanly to a filled rect; Stroke / lines
+            # fall through to the skipped (TODO) counter.
+            if op.paint.style == SkPaintStyle.Fill:
+                val rect = op.rect
+                val x = rect.left.to_i64() as i32
+                val y = rect.top.to_i64() as i32
+                val w = (rect.right - rect.left).to_i64() as i32
+                val h = (rect.bottom - rect.top).to_i64() as i32
+                val color = sk_color_to_u32(op.paint.color)
+                eng.draw_rect_filled(x, y, w, h, color)
+                mapped_rects = mapped_rects + 1
+            else:
+                skipped = skipped + 1
+        elif op.kind == SkPictureOpKind.DrawImage:
+            if val img = op.image:
+                val pixels = sk_image_to_u32_pixels(img)
+                val x = op.x.to_i64() as i32
+                val y = op.y.to_i64() as i32
+                val w = img.info.width as i32
+                val h = img.info.height as i32
+                eng.draw_image(x, y, w, h, pixels)
+                mapped_images = mapped_images + 1
+            else:
+                skipped = skipped + 1
+        else:
+            # TODO: map DrawRRect / DrawPath / DrawTextBlob / DrawLine(stroke) /
+            # DrawOval / DrawPoints to the closest Engine2D primitive. For now
+            # they are counted, not silently dropped, so callers see the gap.
+            skipped = skipped + 1
+
+    eng.present()
+    val pixels = eng.read_pixels()
+    val report = BridgeReport(mapped_rects: mapped_rects, mapped_images: mapped_images, skipped: skipped)
+    BridgeRenderResult(pixels: pixels, report: report)
+
+# ----------------------------------------------------------------------------
+# Convenience entrypoint: render a recorded SkPicture through a shared Engine2D
+# backend lane and return just the flat [u32] ARGB framebuffer.
+# ----------------------------------------------------------------------------
+fn skia_render_picture_on_engine2d(picture: SkPicture, width: i32, height: i32, backend_name: text) -> [u32]:
+    skia_render_picture_on_engine2d_reported(picture, width, height, backend_name).pixels

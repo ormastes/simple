@@ -1,0 +1,498 @@
+# Native Backend - ELF Format Emission
+#
+# ELF object file emission for x86_64, AArch64, and RISC-V 64.
+# Called by the main native backend dispatcher after ISel/RegAlloc/Encode.
+
+use compiler.mir.mir_data.{MirModule}
+use compiler.backend.native.mach_inst.{MachModule, EncodedFunction}
+use compiler.backend.native.elf_writer.{ElfWriter, ElfSection, ElfSectionKind, ElfSymbol, ElfSymbolBind, ElfSymbolType, ElfReloc, ElfRelocType, elf_writer_x86_64, elf_writer_aarch64, elf_writer_riscv64, elf_add_section, elf_add_symbol, new_text_section, new_data_section, new_data_section_aligned, new_rodata_section, new_rodata_section_aligned, section_add_reloc, new_func_symbol, new_extern_symbol, write_elf64}
+use compiler.backend.native.layout_solver.{solve_layout, LayoutPlan}
+use compiler.backend.native.native_layout.{reorder_by_layout}
+use compiler.backend.native.native_section_bytes.{collect_section_bytes, solve_native_data_layout}
+
+# ============================================================================
+# ELF Emission - x86_64
+# ============================================================================
+
+fn emit_elf_x86_64(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule
+) -> [i64]:
+    var writer = elf_writer_x86_64()
+
+    # Phase 4a: Generate layout plan and reorder functions
+    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
+
+    # Track phase boundaries for padding
+    var phase_boundaries: Dict<text, i64> = {}
+    for group in layout_plan.groups:
+        if group.functions.len() > 0:
+            phase_boundaries[group.functions[0].name] = 4096  # 4KB padding
+
+    # Combine all function code into a single .text section
+    var all_code: [i64] = []
+    var func_offsets: Dict<text, i64> = {}
+    var all_relocs: [ElfReloc] = []
+
+    # Build symbol name -> index mapping for relocations
+    # Symbols are ordered: data labels, extern symbols, function names
+    var sym_names: [text] = []
+    var sym_name_to_idx: Dict<text, i64> = {}
+    # Solve section presence once. Empty entries own no emitted section and
+    # therefore must not perturb section-symbol counts or ordinals.
+    val rodata_layout = solve_native_data_layout(module.data_sections, true)
+    val data_layout = solve_native_data_layout(module.data_sections, false)
+    val has_rodata = rodata_layout.bytes.len() > 0
+    val has_data = data_layout.bytes.len() > 0
+
+    # Serializer groups locals before globals, so build relocation indices in
+    # precisely that order rather than raw DataEntry encounter order.
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout.offsets else: data_layout.offsets
+        val section_emitted = if entry.is_readonly: has_rodata else: has_data
+        if section_emitted and offsets.contains(entry.name) and not entry.is_global and not sym_name_to_idx.contains(entry.name):
+            val idx = sym_names.len()
+            sym_names.push(entry.name)
+            sym_name_to_idx[entry.name] = idx
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout.offsets else: data_layout.offsets
+        val section_emitted = if entry.is_readonly: has_rodata else: has_data
+        if section_emitted and offsets.contains(entry.name) and entry.is_global and not sym_name_to_idx.contains(entry.name):
+            val idx = sym_names.len()
+            sym_names.push(entry.name)
+            sym_name_to_idx[entry.name] = idx
+
+    # Then collect extern symbols
+    for ext_sym in module.extern_symbols:
+        if not sym_name_to_idx.contains(ext_sym):
+            val idx = sym_names.len()
+            sym_names.push(ext_sym)
+            sym_name_to_idx[ext_sym] = idx
+
+    # Then collect function names (using ordered functions)
+    for func in ordered_funcs:
+        if not sym_name_to_idx.contains(func.name):
+            val idx = sym_names.len()
+            sym_names.push(func.name)
+            sym_name_to_idx[func.name] = idx
+
+    # Count content sections for symbol index offset
+    # ELF writer inserts section symbols: [0:null] [1..N:section syms] [N+1..:user syms]
+    var num_content_sections = 1  # .text always present
+    if has_rodata:
+        num_content_sections = num_content_sections + 1
+    if has_data:
+        num_content_sections = num_content_sections + 1
+    val sym_base = 1 + num_content_sections
+
+    # Concatenate function code and track offsets (using layout-ordered functions)
+    for func in ordered_funcs:
+        # Check if this function starts a new phase (needs 4KB alignment)
+        if phase_boundaries.has(func.name):
+            val page_size = 4096
+            val current_pos = all_code.len()
+            val remainder = current_pos % page_size
+            if remainder != 0:
+                val padding_needed = page_size - remainder
+                for i in 0..padding_needed:
+                    all_code.push(0xcc)  # int3 padding
+        else:
+            # Regular 16-byte alignment within phase
+            var padding = all_code.len() % 16
+            if padding != 0:
+                padding = 16 - padding
+            for i in 0..padding:
+                all_code.push(0xcc)  # int3 padding
+
+        func_offsets[func.name] = all_code.len()
+
+        val code_start = all_code.len()
+        all_code = all_code + func.code
+
+        # Adjust relocation offsets
+        for reloc in func.relocations:
+            var reloc_type = ElfRelocType.X86_64_PLT32
+            if reloc.reloc_type == 2:
+                reloc_type = ElfRelocType.X86_64_PC32
+            elif reloc.reloc_type == 1:
+                reloc_type = ElfRelocType.X86_64_64
+
+            # Look up the symbol index
+            if not sym_name_to_idx.contains(reloc.symbol_name):
+                panic("x86_64 ELF relocation references unknown symbol '{reloc.symbol_name}'")
+            val sym_idx = sym_name_to_idx[reloc.symbol_name]
+            val elf_reloc = ElfReloc(
+                offset: code_start + reloc.offset,
+                reloc_type: reloc_type,
+                symbol_index: sym_base + sym_idx,
+                addend: reloc.addend
+            )
+            all_relocs.push(elf_reloc)
+
+    # Create .text section
+    var text_section = new_text_section(all_code)
+    for reloc in all_relocs:
+        text_section = section_add_reloc(text_section, reloc)
+    writer = elf_add_section(writer, text_section)
+
+    # Create .rodata section for string constants
+    if rodata_layout.bytes.len() > 0:
+        writer = elf_add_section(writer, new_rodata_section_aligned(rodata_layout.bytes, rodata_layout.max_alignment))
+
+    # Create .data section for mutable data
+    if data_layout.bytes.len() > 0:
+        writer = elf_add_section(writer, new_data_section_aligned(data_layout.bytes, data_layout.max_alignment))
+
+    # Add object symbols with the section ordinal implied by actual presence of
+    # .rodata. Public MIR statics are global; literals/private statics are local.
+    val data_section_index = 2
+    val rodata_section_index = if has_data: 3 else: 2
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout.offsets else: data_layout.offsets
+        val section_emitted = if entry.is_readonly: has_rodata else: has_data
+        if section_emitted and offsets.contains(entry.name):
+            val bind = if entry.is_global: ElfSymbolBind.Global else: ElfSymbolBind.Local
+            val section_index = if entry.is_readonly: rodata_section_index else: data_section_index
+            val sym = ElfSymbol(
+                name: entry.name,
+                sym_bind: bind,
+                sym_type: ElfSymbolType.Object,
+                section_index: section_index,
+                value: offsets[entry.name],
+                size: entry.data.len()
+            )
+            writer = elf_add_symbol(writer, sym)
+
+    # Add extern symbols (undefined, global) — deduplicated
+    var added_extern_syms: Dict<text, bool> = {}
+    for ext_sym in module.extern_symbols:
+        if not added_extern_syms.contains(ext_sym):
+            added_extern_syms[ext_sym] = true
+            writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
+
+    # Add function symbols (defined, global) - use ordered functions
+    for func in ordered_funcs:
+        var offset = 0
+        if func_offsets.contains(func.name):
+            offset = func_offsets[func.name]
+        val sym = new_func_symbol(func.name, 1, offset, func.code.len())
+        writer = elf_add_symbol(writer, sym)
+
+    write_elf64(writer)
+
+# ============================================================================
+# ELF Emission - AArch64
+# ============================================================================
+
+fn emit_elf_aarch64(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule
+) -> [i64]:
+    var writer = elf_writer_aarch64()
+
+    # Phase 4a: Generate layout plan and reorder functions
+    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
+
+    # Track phase boundaries for padding
+    var phase_boundaries: Dict<text, i64> = {}
+    for group in layout_plan.groups:
+        if group.functions.len() > 0:
+            phase_boundaries[group.functions[0].name] = 4096  # 4KB padding
+
+    # Combine all function code into a single .text section
+    var all_code: [i64] = []
+    var func_offsets: Dict<text, i64> = {}
+    var all_relocs: [ElfReloc] = []
+    var sym_names: [text] = []
+    var sym_name_to_idx: Dict<text, i64> = {}
+
+    val rodata_layout_a = solve_native_data_layout(module.data_sections, true)
+    val data_layout_a = solve_native_data_layout(module.data_sections, false)
+    val has_rodata_a = rodata_layout_a.bytes.len() > 0
+    val has_data_a = data_layout_a.bytes.len() > 0
+    # Local object symbols precede global object symbols in the serializer.
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout_a.offsets else: data_layout_a.offsets
+        val local_section_emitted_a = if entry.is_readonly: has_rodata_a else: has_data_a
+        if local_section_emitted_a and offsets.contains(entry.name) and not entry.is_global and not sym_name_to_idx.contains(entry.name):
+            sym_name_to_idx[entry.name] = sym_names.len()
+            sym_names.push(entry.name)
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout_a.offsets else: data_layout_a.offsets
+        val global_section_emitted_a = if entry.is_readonly: has_rodata_a else: has_data_a
+        if global_section_emitted_a and offsets.contains(entry.name) and entry.is_global and not sym_name_to_idx.contains(entry.name):
+            sym_name_to_idx[entry.name] = sym_names.len()
+            sym_names.push(entry.name)
+
+    # Collect extern symbols
+    for ext_sym in module.extern_symbols:
+        if not sym_name_to_idx.contains(ext_sym):
+            val idx = sym_names.len()
+            sym_names.push(ext_sym)
+            sym_name_to_idx[ext_sym] = idx
+
+    # Collect function names (use ordered functions for correct layout)
+    for func in ordered_funcs:
+        if not sym_name_to_idx.contains(func.name):
+            val idx = sym_names.len()
+            sym_names.push(func.name)
+            sym_name_to_idx[func.name] = idx
+
+    # Count content sections for symbol index offset
+    var num_cs_a = 1
+    if has_rodata_a:
+        num_cs_a = num_cs_a + 1
+    if has_data_a:
+        num_cs_a = num_cs_a + 1
+    val sym_base_a = 1 + num_cs_a
+
+    # Concatenate function code (AArch64: 4-byte instruction alignment)
+    for func in ordered_funcs:
+        # Check for phase boundary (4KB page alignment)
+        if phase_boundaries.contains(func.name):
+            val page_size = phase_boundaries[func.name]
+            val current_offset = all_code.len()
+            val aligned_offset = ((current_offset + page_size - 1) / page_size) * page_size
+            val boundary_padding = aligned_offset - current_offset
+            for i in 0..boundary_padding:
+                all_code.push(0x00)
+
+        # Standard 4-byte instruction alignment
+        var padding = all_code.len() % 4
+        if padding != 0:
+            padding = 4 - padding
+        for i in 0..padding:
+            all_code.push(0x00)
+        func_offsets[func.name] = all_code.len()
+
+        val code_start = all_code.len()
+        all_code = all_code + func.code
+
+        # Adjust relocation offsets
+        for reloc in func.relocations:
+            var reloc_type = ElfRelocType.AArch64_Call26
+            if reloc.reloc_type == 275: reloc_type = ElfRelocType.AArch64_AdrPrelPgHi21
+            elif reloc.reloc_type == 277: reloc_type = ElfRelocType.AArch64_AddAbsLo12Nc
+            if not sym_name_to_idx.contains(reloc.symbol_name): panic("aarch64 ELF relocation references unknown symbol '{reloc.symbol_name}'")
+            val sym_idx = sym_name_to_idx[reloc.symbol_name]
+            val elf_reloc = ElfReloc(
+                offset: code_start + reloc.offset,
+                reloc_type: reloc_type,
+                symbol_index: sym_base_a + sym_idx,
+                addend: reloc.addend
+            )
+            all_relocs.push(elf_reloc)
+
+    # Create .text section
+    var text_section = new_text_section(all_code)
+    for reloc in all_relocs:
+        text_section = section_add_reloc(text_section, reloc)
+    writer = elf_add_section(writer, text_section)
+
+    # Create .rodata section
+    if has_rodata_a:
+        writer = elf_add_section(writer, new_rodata_section_aligned(rodata_layout_a.bytes, rodata_layout_a.max_alignment))
+
+    # Create .data section
+    if has_data_a:
+        writer = elf_add_section(writer, new_data_section_aligned(data_layout_a.bytes, data_layout_a.max_alignment))
+
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout_a.offsets else: data_layout_a.offsets
+        val section_emitted = if entry.is_readonly: has_rodata_a else: has_data_a
+        if section_emitted and offsets.contains(entry.name):
+            writer = elf_add_symbol(writer, ElfSymbol(name: entry.name,
+                sym_bind: if entry.is_global: ElfSymbolBind.Global else: ElfSymbolBind.Local,
+                sym_type: ElfSymbolType.Object,
+                section_index: native_object_section_index(entry.is_readonly, has_data_a),
+                value: offsets[entry.name], size: entry.data.len()))
+
+    # Add symbols
+    for ext_sym in module.extern_symbols:
+        writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
+
+    for func in ordered_funcs:
+        var offset = 0
+        if func_offsets.contains(func.name):
+            offset = func_offsets[func.name]
+        val sym = new_func_symbol(func.name, 1, offset, func.code.len())
+        writer = elf_add_symbol(writer, sym)
+
+    write_elf64(writer)
+
+# ============================================================================
+# ELF Emission - RISC-V 64
+# ============================================================================
+
+fn emit_elf_riscv64(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule
+) -> [i64]:
+    var writer = elf_writer_riscv64()
+
+    # Phase 4a: Generate layout plan and reorder functions
+    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
+
+    # Track phase boundaries for padding
+    var phase_boundaries: Dict<text, i64> = {}
+    for group in layout_plan.groups:
+        if group.functions.len() > 0:
+            phase_boundaries[group.functions[0].name] = 4096  # 4KB padding
+
+    # Combine all function code into a single .text section
+    var all_code: [i64] = []
+    var func_offsets: Dict<text, i64> = {}
+    var all_relocs: [ElfReloc] = []
+    var sym_names: [text] = []
+    var sym_name_to_idx: Dict<text, i64> = {}
+
+    val rodata_layout_r = solve_native_data_layout(module.data_sections, true)
+    val data_layout_r = solve_native_data_layout(module.data_sections, false)
+    val has_rodata_r = rodata_layout_r.bytes.len() > 0
+    val has_data_r = data_layout_r.bytes.len() > 0
+    var anchor_offsets_r: Dict<text, i64> = {}
+    var anchor_names_r: [text] = []
+    for func in ordered_funcs:
+        for reloc in func.relocations:
+            if reloc.reloc_type == 24:
+                if reloc.anchor_offset < 0 or not rv64_pcrel_low_anchor_valid(reloc.anchor_offset): panic("riscv64 PCREL_LO12_I relocation has no AUIPC anchor")
+                val anchor = ".Lrv64.pcrel.{func.name}.{reloc.anchor_offset}"
+                if not sym_name_to_idx.contains(anchor):
+                    sym_name_to_idx[anchor] = sym_names.len()
+                    sym_names.push(anchor)
+                    anchor_names_r.push(anchor)
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout_r.offsets else: data_layout_r.offsets
+        val local_section_emitted_r = if entry.is_readonly: has_rodata_r else: has_data_r
+        if local_section_emitted_r and offsets.contains(entry.name) and not entry.is_global and not sym_name_to_idx.contains(entry.name):
+            sym_name_to_idx[entry.name] = sym_names.len()
+            sym_names.push(entry.name)
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout_r.offsets else: data_layout_r.offsets
+        val global_section_emitted_r = if entry.is_readonly: has_rodata_r else: has_data_r
+        if global_section_emitted_r and offsets.contains(entry.name) and entry.is_global and not sym_name_to_idx.contains(entry.name):
+            sym_name_to_idx[entry.name] = sym_names.len()
+            sym_names.push(entry.name)
+
+    # Collect extern symbols
+    for ext_sym in module.extern_symbols:
+        if not sym_name_to_idx.contains(ext_sym):
+            val idx = sym_names.len()
+            sym_names.push(ext_sym)
+            sym_name_to_idx[ext_sym] = idx
+
+    # Collect function names (use ordered functions for correct layout)
+    for func in ordered_funcs:
+        if not sym_name_to_idx.contains(func.name):
+            val idx = sym_names.len()
+            sym_names.push(func.name)
+            sym_name_to_idx[func.name] = idx
+
+    # Count content sections
+    var num_cs_r = 1
+    if has_rodata_r:
+        num_cs_r = num_cs_r + 1
+    if has_data_r:
+        num_cs_r = num_cs_r + 1
+    val sym_base_r = 1 + num_cs_r
+
+    # Concatenate function code (RISC-V: 4-byte instruction alignment)
+    for func in ordered_funcs:
+        # Check for phase boundary (4KB page alignment)
+        if phase_boundaries.contains(func.name):
+            val page_size = phase_boundaries[func.name]
+            val current_offset = all_code.len()
+            val aligned_offset = ((current_offset + page_size - 1) / page_size) * page_size
+            val boundary_padding = aligned_offset - current_offset
+            for i in 0..boundary_padding:
+                all_code.push(0x00)
+
+        # Standard 4-byte instruction alignment
+        var padding = all_code.len() % 4
+        if padding != 0:
+            padding = 4 - padding
+        for i in 0..padding:
+            all_code.push(0x00)
+        func_offsets[func.name] = all_code.len()
+
+        val code_start = all_code.len()
+        all_code = all_code + func.code
+
+        # Adjust relocation offsets
+        for reloc in func.relocations:
+            var reloc_type = ElfRelocType.Riscv_CallPlt
+            if reloc.reloc_type == 23:
+                reloc_type = ElfRelocType.Riscv_PcrelHi20
+            elif reloc.reloc_type == 24:
+                reloc_type = ElfRelocType.Riscv_PcrelLo12I
+
+            var relocation_symbol = reloc.symbol_name
+            if reloc.reloc_type == 24:
+                relocation_symbol = ".Lrv64.pcrel.{func.name}.{reloc.anchor_offset}"
+                anchor_offsets_r[relocation_symbol] = code_start + reloc.anchor_offset
+            if not sym_name_to_idx.contains(relocation_symbol): panic("riscv64 ELF relocation references unknown symbol '{relocation_symbol}'")
+            val sym_idx = sym_name_to_idx[relocation_symbol]
+            val elf_reloc = ElfReloc(
+                offset: code_start + reloc.offset,
+                reloc_type: reloc_type,
+                symbol_index: sym_base_r + sym_idx,
+                addend: reloc.addend
+            )
+            all_relocs.push(elf_reloc)
+
+    # Create .text section
+    var text_section = new_text_section(all_code)
+    for reloc in all_relocs:
+        text_section = section_add_reloc(text_section, reloc)
+    writer = elf_add_section(writer, text_section)
+
+    # Create .rodata section
+    if has_rodata_r:
+        writer = elf_add_section(writer, new_rodata_section_aligned(rodata_layout_r.bytes, rodata_layout_r.max_alignment))
+
+    # Create .data section
+    if has_data_r:
+        writer = elf_add_section(writer, new_data_section_aligned(data_layout_r.bytes, data_layout_r.max_alignment))
+
+    for anchor in anchor_names_r:
+        writer = elf_add_symbol(writer, ElfSymbol(name: anchor, sym_bind: ElfSymbolBind.Local,
+            sym_type: ElfSymbolType.NoType, section_index: 1, value: anchor_offsets_r[anchor], size: 0))
+
+    for entry in module.data_sections:
+        val offsets = if entry.is_readonly: rodata_layout_r.offsets else: data_layout_r.offsets
+        val section_emitted = if entry.is_readonly: has_rodata_r else: has_data_r
+        if section_emitted and offsets.contains(entry.name):
+            writer = elf_add_symbol(writer, ElfSymbol(name: entry.name,
+                sym_bind: if entry.is_global: ElfSymbolBind.Global else: ElfSymbolBind.Local,
+                sym_type: ElfSymbolType.Object,
+                section_index: native_object_section_index(entry.is_readonly, has_data_r),
+                value: offsets[entry.name], size: entry.data.len()))
+
+    # Add symbols
+    for ext_sym in module.extern_symbols:
+        writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
+
+    for func in ordered_funcs:
+        var offset = 0
+        if func_offsets.contains(func.name):
+            offset = func_offsets[func.name]
+        val sym = new_func_symbol(func.name, 1, offset, func.code.len())
+        writer = elf_add_symbol(writer, sym)
+
+    write_elf64(writer)
+
+fn rv64_pcrel_low_anchor_valid(anchor_offset: i64) -> bool:
+    anchor_offset >= 0 and anchor_offset % 4 == 0
+
+fn native_object_section_index(is_readonly: bool, has_data: bool) -> i64:
+    if is_readonly and has_data: 3 else: 2
+
+# ============================================================================
+# Exports
+# ============================================================================

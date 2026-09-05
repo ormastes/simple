@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/sffi/system.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 39 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 47 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 32 ]
+[ "$(( $(grep -c '^@unsafe(' "$module") - 39 ))" -eq 15 ]
+
+symbols=$(sed -n 's/^extern fn \([A-Za-z0-9_]*\)(.*/\1/p' "$module")
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 12 ]
+[ "$one" -eq 6 ]
+[ "$none" -eq 21 ]
+
+# Optional absence and semantic statuses retain their declared types.
+grep -q '^fn env_get(key: text) -> text?:' "$module"
+grep -q '^fn env_set(key: text, value: text) -> bool:' "$module"
+grep -q '^fn process_kill(pid: i64) -> bool:' "$module"
+grep -q '^extern fn rt_env_home() -> text?' "$module"
+grep -q '^extern fn rt_env_vars() -> \[(text, text)\]?' "$module"
+grep -q '^extern fn rt_hostname() -> text?' "$module"
+grep -q '^fn env_home_checked() -> Result<text, text>:' "$module"
+grep -q '^fn env_vars_checked() -> Result<\[(text, text)\], text>:' "$module"
+grep -q '^fn getpid_checked() -> Result<i64, text>:' "$module"
+grep -q '^fn hostname_checked() -> Result<text, text>:' "$module"
+grep -q '^fn cpu_count_checked() -> Result<i64, text>:' "$module"
+grep -q 'if pid <= 0:' "$module"
+grep -q 'if count <= 0:' "$module"
+
+echo "system SFFI authority audit: PASS (39 declarations; 32 lexical owners; 15 legacy ambiguous facades unsafe; checked home/env-snapshot/PID/hostname/CPU contracts; 12 both/6 one/21 no-provider; direct paths mandatory-inline)"

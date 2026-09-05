@@ -1,0 +1,241 @@
+#!/bin/sh
+# Proves that WEBSRV.SMF and DBSRV.SMF are filesystem payloads launched by
+# SimpleOS. This is deliberately separate from check-simpleos-servers-qemu.shs,
+# whose web/DB implementations are linked into the kernel.
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+fail() { printf 'FAIL simpleos_server_fs_launch %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing_tool=$1"; }
+
+canonical_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || fail "not_regular_file=$1"
+    file_dir=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P) || fail "unresolvable_parent=$1"
+    printf '%s/%s\n' "$file_dir" "$(basename -- "$1")"
+}
+
+receipt_field() {
+    receipt=$1
+    key=$2
+    awk -F= -v wanted="$key" '$1 == wanted { sub(/^[^=]*=/, ""); print; found=1; exit } END { exit !found }' "$receipt"
+}
+
+validate_build_receipt() {
+    role=$1
+    artifact=$2
+    expected_path=$3
+    expected_entry=$4
+    receipt="$artifact.receipt"
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || fail "${role}_build_receipt_missing=$receipt"
+    [ "$(receipt_field "$receipt" schema)" = simpleos-server-artifact-v2 ] || fail "${role}_receipt_schema_rejected"
+    [ "$(receipt_field "$receipt" status)" = artifact-built ] || fail "${role}_receipt_status_rejected"
+    [ "$(receipt_field "$receipt" role)" = "$role" ] || fail "${role}_receipt_role_mismatch"
+    [ "$(receipt_field "$receipt" target)" = x86_64-unknown-simpleos ] || fail "${role}_receipt_target_mismatch"
+    [ "$(receipt_field "$receipt" entry)" = "$expected_entry" ] || fail "${role}_receipt_entry_mismatch"
+    [ "$(receipt_field "$receipt" entry_closure)" = true ] || fail "${role}_receipt_entry_closure_rejected"
+    [ "$(receipt_field "$receipt" format)" = elf64-et_exec-x86_64-static ] || fail "${role}_receipt_format_rejected"
+    [ "$(receipt_field "$receipt" loader_abi)" = simpleos-ring3-fs-exec-v1 ] || fail "${role}_receipt_loader_abi_rejected"
+    [ "$(receipt_field "$receipt" filesystem_path)" = "$expected_path" ] || fail "${role}_receipt_path_mismatch"
+    artifact_sha=$(receipt_field "$receipt" artifact_sha256) || fail "${role}_receipt_artifact_hash_missing"
+    case "$artifact_sha" in ''|*[!0-9a-f]*|?????????????????????????????????????????????????????????????????*) fail "${role}_receipt_artifact_hash_invalid" ;; esac
+    [ "${#artifact_sha}" -eq 64 ] || fail "${role}_receipt_artifact_hash_invalid"
+    [ "$artifact_sha" = "$(sha256sum "$artifact" | awk '{print $1}')" ] ||
+        fail "${role}_receipt_artifact_hash_mismatch"
+    [ "$(receipt_field "$receipt" artifact_bytes)" = "$(wc -c < "$artifact" | tr -d ' ')" ] ||
+        fail "${role}_receipt_artifact_size_mismatch"
+    [ "$(receipt_field "$receipt" launch_profile)" = simpleos-single-worker-v1 ] || fail "${role}_receipt_profile_mismatch"
+    [ "$(receipt_field "$receipt" launch_id_source)" = simpleos.server_launch_nonce ] || fail "${role}_receipt_launch_id_source_mismatch"
+    args=$(receipt_field "$receipt" launch_args) || fail "${role}_receipt_launch_args_missing"
+    case "$args" in *'--simpleos --launch-id ${simpleos.server_launch_nonce}'*'--workers 1'*) ;; *) fail "${role}_receipt_simpleos_args_rejected" ;; esac
+    if [ "$role" = db ]; then
+        case "$args" in '--serve '*) ;; *) fail db_receipt_serve_profile_missing ;; esac
+    fi
+    [ "$(receipt_field "$receipt" staged)" = false ] || fail "${role}_receipt_fabricated_staging"
+    [ "$(receipt_field "$receipt" runnable)" = false ] || fail "${role}_receipt_fabricated_runnable"
+    [ "$(receipt_field "$receipt" reason)" = live-staging-and-execution-not-observed ] ||
+        fail "${role}_receipt_prelaunch_reason_rejected"
+}
+
+validate_port() {
+    port_name=$1
+    port_value=$2
+    case "$port_value" in
+        ''|*[!0-9]*) fail "${port_name}_port_not_decimal=$port_value" ;;
+    esac
+    [ "$port_value" -ge 1024 ] && [ "$port_value" -le 65535 ] ||
+        fail "${port_name}_port_out_of_range=$port_value"
+}
+
+extract_png_body() {
+    response=$1
+    body=$2
+    perl -0777 -e '
+        use strict;
+        use warnings;
+        my ($path) = @ARGV;
+        open my $fh, "<:raw", $path or exit 2;
+        local $/;
+        my $wire = <$fh>;
+        my ($head, $payload) = split(/\r\n\r\n/, $wire, 2);
+        exit 3 unless defined $payload;
+        my ($length) = $head =~ /^Content-Length:[ \t]*(\d+)[ \t]*$/im;
+        exit 4 unless defined $length && length($payload) == $length;
+        exit 5 unless length($payload) >= 8 && substr($payload, 0, 8) eq "\x89PNG\r\n\x1a\n";
+        binmode STDOUT;
+        print $payload;
+    ' "$response" >"$body" || fail "web_png_body_invalid=$response"
+}
+
+WEB=""
+DB=""
+KERNEL=""
+IMAGE="build/os/server-fs-launch/simpleos-server-fs.img"
+PREPARE_ONLY=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --web) shift; [ "$#" -gt 0 ] || fail missing_web_value; WEB=$1 ;;
+        --db) shift; [ "$#" -gt 0 ] || fail missing_db_value; DB=$1 ;;
+        --kernel) shift; [ "$#" -gt 0 ] || fail missing_kernel_value; KERNEL=$1 ;;
+        --image) shift; [ "$#" -gt 0 ] || fail missing_image_value; IMAGE=$1 ;;
+        --prepare-only) PREPARE_ONLY=1 ;;
+        *) fail "unknown_arg=$1" ;;
+    esac
+    shift
+done
+
+[ -n "$WEB" ] || fail missing_web_artifact
+[ -n "$DB" ] || fail missing_db_artifact
+[ -s "$WEB" ] || fail "web_artifact_missing_or_empty=$WEB"
+[ -s "$DB" ] || fail "db_artifact_missing_or_empty=$DB"
+WEB=$(canonical_file "$WEB")
+DB=$(canonical_file "$DB")
+[ "$WEB" != "$DB" ] || fail web_and_db_artifacts_must_differ
+need readelf
+need sha256sum
+need mcopy
+need strings
+need cmp
+need perl
+if [ "$PREPARE_ONLY" -eq 0 ]; then
+    need qemu-system-x86_64
+    need nc
+    need psql
+fi
+for pair in "web:$WEB" "db:$DB"; do
+    role=${pair%%:*}
+    artifact=${pair#*:}
+    readelf -h "$artifact" 2>/dev/null | grep -q 'Machine:.*Advanced Micro Devices X86-64' ||
+        fail "${role}_artifact_not_x86_64_elf=$artifact"
+done
+validate_build_receipt web "$WEB" /SYS/APPS/WEBSRV.SMF "$ROOT/src/app/simple_web_server/main.spl"
+validate_build_receipt db "$DB" /SYS/APPS/DBSRV.SMF "$ROOT/src/app/postgres_mimic_server/main.spl"
+
+[ -n "$KERNEL" ] || fail missing_fs_launcher_kernel
+[ -s "$KERNEL" ] || fail "fs_launcher_kernel_missing_or_empty=$KERNEL"
+KERNEL=$(canonical_file "$KERNEL")
+[ "$KERNEL" != "$WEB" ] && [ "$KERNEL" != "$DB" ] || fail fs_launcher_kernel_aliases_server_artifact
+strings "$KERNEL" | grep -q 'SIMPLEOS_FS_SERVER_LAUNCHER_V1' ||
+    fail "kernel_lacks_fs_server_launcher_contract=$KERNEL"
+for forbidden in \
+    '=== SimpleOS Combined Servers Boot ===' \
+    'SIMPLEOS_SERVER_LAUNCH artifact=simple_web_server' \
+    'SIMPLEOS_SERVER_LAUNCH artifact=simple_db_server'
+do
+    if strings "$KERNEL" | grep -Fq "$forbidden"; then
+        fail "kernel_linked_server_substitute_rejected marker=$forbidden"
+    fi
+done
+
+mkdir -p "$(dirname "$IMAGE")"
+image_parent=$(CDPATH= cd -- "$(dirname -- "$IMAGE")" && pwd -P) ||
+    fail "image_parent_unresolvable=$IMAGE"
+case "$image_parent/" in
+    "$ROOT/build/"*) ;;
+    *) fail "image_outside_build_tree=$IMAGE" ;;
+esac
+[ ! -L "$IMAGE" ] || fail "image_symlink_rejected=$IMAGE"
+IMAGE="$image_parent/$(basename -- "$IMAGE")"
+SIMPLEOS_WEB_SERVER_BINARY="$WEB" SIMPLEOS_DB_SERVER_BINARY="$DB" \
+    sh scripts/os/make_os_disk.shs 256 "$IMAGE" "$KERNEL" x86_64 fs-exec
+
+check_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-server-stage.XXXXXX")
+trap 'rm -rf "$check_dir"' EXIT
+mcopy -n -i "$IMAGE" ::/SYS/APPS/WEBSRV.SMF "$check_dir/WEBSRV.SMF" >/dev/null
+mcopy -n -i "$IMAGE" ::/SYS/APPS/DBSRV.SMF "$check_dir/DBSRV.SMF" >/dev/null
+cmp -s "$WEB" "$check_dir/WEBSRV.SMF" || fail web_filesystem_bytes_mismatch
+cmp -s "$DB" "$check_dir/DBSRV.SMF" || fail db_filesystem_bytes_mismatch
+
+image_sha=$(sha256sum "$IMAGE" | awk '{print $1}')
+web_sha=$(sha256sum "$WEB" | awk '{print $1}')
+db_sha=$(sha256sum "$DB" | awk '{print $1}')
+image_id="simpleos-server-fs-$(basename -- "$IMAGE")"
+printf 'STAGED role=web path=/SYS/APPS/WEBSRV.SMF sha256=%s bytes=%s image_id=%s image_sha256=%s\n' \
+    "$web_sha" "$(wc -c < "$WEB" | tr -d ' ')" "$image_id" "$image_sha"
+printf 'STAGED role=db path=/SYS/APPS/DBSRV.SMF sha256=%s bytes=%s image_id=%s image_sha256=%s\n' \
+    "$db_sha" "$(wc -c < "$DB" | tr -d ' ')" "$image_id" "$image_sha"
+[ "$PREPARE_ONLY" -eq 0 ] || exit 0
+
+nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+serial="$(dirname "$IMAGE")/server-fs-launch-$nonce.serial.log"
+HTTP_PORT=${HTTP_PORT:-48081}
+DB_PORT=${DB_PORT:-45434}
+validate_port http "$HTTP_PORT"
+validate_port db "$DB_PORT"
+[ "$HTTP_PORT" -ne "$DB_PORT" ] || fail "forwarded_ports_must_differ=$HTTP_PORT"
+case "${BOOT_WAIT:-60}" in
+    ''|*[!0-9]*) fail "boot_wait_not_decimal=${BOOT_WAIT:-}" ;;
+esac
+[ "${BOOT_WAIT:-60}" -ge 1 ] && [ "${BOOT_WAIT:-60}" -le 600 ] ||
+    fail "boot_wait_out_of_range=${BOOT_WAIT:-60}"
+
+qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "${QEMU_MEM:-2G}" -kernel "$KERNEL" \
+    -append "simpleos.server_launch_nonce=$nonce" -serial "file:$serial" \
+    -drive "file=$IMAGE,if=none,id=nvm,format=raw" -device nvme,serial=serverfs,drive=nvm \
+    -netdev "user,id=n0,hostfwd=tcp::$HTTP_PORT-:8080,hostfwd=tcp::$DB_PORT-:5432" \
+    -device virtio-net-pci,netdev=n0 &
+qemu_pid=$!
+trap 'kill "$qemu_pid" 2>/dev/null || true; rm -rf "$check_dir"' EXIT
+
+deadline=${BOOT_WAIT:-60}
+i=0
+while [ "$i" -lt "$deadline" ]; do
+    web_marker="SIMPLEOS_SERVER_LAUNCH artifact=simple_web_server path=/SYS/APPS/WEBSRV.SMF launch_id=$nonce"
+    db_marker="SIMPLEOS_SERVER_LAUNCH artifact=simple_db_server path=/SYS/APPS/DBSRV.SMF launch_id=$nonce"
+    grep -Fxq "$web_marker" "$serial" 2>/dev/null && grep -Fxq "$db_marker" "$serial" 2>/dev/null && break
+    kill -0 "$qemu_pid" 2>/dev/null || fail qemu_exited_before_launch_markers
+    sleep 1
+    i=$((i + 1))
+done
+grep -Fxq "$web_marker" "$serial" || fail web_filesystem_launch_marker_missing
+grep -Fxq "$db_marker" "$serial" || fail db_filesystem_launch_marker_missing
+
+http_body="<main data-simpleos-launch-id=\"$nonce\"><h1>filesystem launch</h1></main>"
+http_body_bytes=$(printf '%s' "$http_body" | wc -c | tr -d ' ')
+http_response="$check_dir/http-response.bin"
+printf 'POST /render HTTP/1.1\r\nHost: simpleos-%s\r\nContent-Type: text/html\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' \
+    "$nonce" "$http_body_bytes" "$http_body" |
+    nc -w 5 127.0.0.1 "$HTTP_PORT" >"$http_response" 2>/dev/null || true
+grep -aFq 'HTTP/1.1 200' "$http_response" || fail web_socket_challenge_failed
+grep -aFiq 'Content-Type: image/png' "$http_response" || fail web_socket_png_missing
+http_png="$check_dir/http-response.png"
+extract_png_body "$http_response" "$http_png"
+http_body_2="<main data-simpleos-launch-id=\"$nonce-second\"><h1>filesystem launch second</h1></main>"
+http_body_2_bytes=$(printf '%s' "$http_body_2" | wc -c | tr -d ' ')
+http_response_2="$check_dir/http-response-second.bin"
+printf 'POST /render HTTP/1.1\r\nHost: simpleos-%s\r\nContent-Type: text/html\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' \
+    "$nonce" "$http_body_2_bytes" "$http_body_2" |
+    nc -w 5 127.0.0.1 "$HTTP_PORT" >"$http_response_2" 2>/dev/null || true
+grep -aFq 'HTTP/1.1 200' "$http_response_2" || fail web_second_socket_challenge_failed
+grep -aFiq 'Content-Type: image/png' "$http_response_2" || fail web_second_socket_png_missing
+http_png_2="$check_dir/http-response-second.png"
+extract_png_body "$http_response_2" "$http_png_2"
+cmp -s "$http_png" "$http_png_2" && fail web_fixed_render_body_detected
+PGCONNECT_TIMEOUT=5 psql -h 127.0.0.1 -p "$DB_PORT" -U simpleos -d simpleos \
+    -Atqc "SELECT '$nonce'" 2>/dev/null | grep -Fxq "$nonce" || fail db_socket_challenge_failed
+
+kill -0 "$qemu_pid" 2>/dev/null || fail qemu_exited_before_receipt_commit
+printf 'PASS simpleos_server_fs_launch nonce=%s image_id=%s image_sha256=%s web_sha256=%s db_sha256=%s serial=%s\n' \
+    "$nonce" "$image_id" "$image_sha" "$web_sha" "$db_sha" "$serial"

@@ -1,0 +1,159 @@
+"""Boot-sealed cross-architecture logical CPU identity table.
+
+One BSP-owned builder is the only mutable authority.  Registration is bounded
+and contiguous.  `seal` publishes an immutable value whose lookup methods do
+not lock, allocate, touch hardware, or mutate state, so a retained sealed
+snapshot is suitable for interrupt-context identity resolution after the boot
+owner has completed the platform's normal publication barrier.
+
+This module deliberately owns identity only.  CPU online state, interrupt
+routing, address-space switching, and quiescence lease issuance remain with
+their respective owners.
+"""
+
+pub val CPU_TOPOLOGY_IDENTITY_CAPACITY_V1: i32 = 32
+
+pub enum CpuHardwareIdentityKindV1:
+    X86Apic
+    ArmMpidr
+    RiscvHart
+
+pub struct CpuTopologyIdentityEntryV1:
+    logical_cpu_id: u32
+    kind: CpuHardwareIdentityKindV1
+    hardware_id: u64
+
+pub struct CpuTopologyIdentitySnapshotV1:
+    _sealed: bool
+    _kind: CpuHardwareIdentityKindV1
+    _entries: [CpuTopologyIdentityEntryV1]
+
+impl CpuTopologyIdentitySnapshotV1:
+    static fn empty(kind: CpuHardwareIdentityKindV1) -> CpuTopologyIdentitySnapshotV1:
+        CpuTopologyIdentitySnapshotV1(_sealed: false, _kind: kind, _entries: [])
+
+    pub fn is_sealed() -> bool:
+        self._sealed
+
+    pub fn architecture_kind() -> CpuHardwareIdentityKindV1:
+        self._kind
+
+    pub fn cpu_count() -> u32:
+        self._entries.len().to_u32()
+
+    pub fn entry_for_logical_cpu(logical_cpu_id: u32) -> CpuTopologyIdentityEntryV1?:
+        # Contiguous registration makes this O(1) and allocation-free.
+        if not self._sealed or logical_cpu_id >= self._entries.len().to_u32():
+            return nil
+        Some(self._entries[logical_cpu_id.to_i64()])
+
+    pub fn logical_cpu_for_hardware_id(hardware_id: u64) -> u32?:
+        # The table is capped at 32 entries.  This bounded scan avoids a second
+        # mutable index and has deterministic IRQ-time cost.
+        if not self._sealed:
+            return nil
+        if self._kind == CpuHardwareIdentityKindV1.X86Apic and hardware_id > 0xffffffffu64:
+            return nil
+        val canonical = cpu_hardware_identity_canonical_v1(self._kind, hardware_id)
+        var i: i32 = 0
+        while i < self._entries.len():
+            if self._entries[i].hardware_id == canonical:
+                return Some(self._entries[i].logical_cpu_id)
+            i = i + 1
+        nil
+
+    pub fn contains_exact(
+        logical_cpu_id: u32, kind: CpuHardwareIdentityKindV1, hardware_id: u64
+    ) -> bool:
+        if not self._sealed or kind != self._kind:
+            return false
+        if kind == CpuHardwareIdentityKindV1.X86Apic and hardware_id > 0xffffffffu64:
+            return false
+        val entry = self.entry_for_logical_cpu(logical_cpu_id)
+        if entry == nil:
+            return false
+        val observed = entry.unwrap()
+        observed.kind == kind and
+            observed.hardware_id == cpu_hardware_identity_canonical_v1(kind, hardware_id)
+
+pub struct CpuTopologySealReceiptV1:
+    accepted: bool
+    cpu_count: u32
+    reason: text
+    snapshot: CpuTopologyIdentitySnapshotV1
+
+pub fn cpu_hardware_identity_canonical_v1(
+    kind: CpuHardwareIdentityKindV1, hardware_id: u64
+) -> u64:
+    if kind == CpuHardwareIdentityKindV1.X86Apic:
+        # APIC/x2APIC identifiers are architecturally 32-bit.
+        return hardware_id & 0xffffffffu64
+    if kind == CpuHardwareIdentityKindV1.ArmMpidr:
+        # Retain Aff3:Aff2:Aff1:Aff0 only.  MT/U and reserved MPIDR bits do not
+        # identify a processing element and must not create distinct CPUs.
+        return (hardware_id & 0x00ffffffu64) | (hardware_id & 0xff00000000u64)
+    # RISC-V hart IDs are opaque boot-assigned unsigned identities.
+    hardware_id
+
+pub class CpuTopologyIdentityOwnerV1:
+    _kind: CpuHardwareIdentityKindV1
+    _entries: [CpuTopologyIdentityEntryV1]
+    _sealed: bool
+
+    pub static fn create(kind: CpuHardwareIdentityKindV1) -> CpuTopologyIdentityOwnerV1:
+        CpuTopologyIdentityOwnerV1(_kind: kind, _entries: [], _sealed: false)
+
+    pub fn is_sealed() -> bool:
+        self._sealed
+
+    pub fn cpu_count() -> u32:
+        self._entries.len().to_u32()
+
+    pub me register(
+        logical_cpu_id: u32, kind: CpuHardwareIdentityKindV1, hardware_id: u64
+    ) -> bool:
+        if self._sealed or kind != self._kind:
+            return false
+        if self._entries.len() >= CPU_TOPOLOGY_IDENTITY_CAPACITY_V1:
+            return false
+        # Canonical logical IDs are dense and boot-order assigned.  Rejecting
+        # gaps prevents a caller from manufacturing aliases or sparse indices.
+        if logical_cpu_id != self._entries.len().to_u32():
+            return false
+        if kind == CpuHardwareIdentityKindV1.X86Apic and hardware_id > 0xffffffffu64:
+            return false
+        val canonical = cpu_hardware_identity_canonical_v1(kind, hardware_id)
+        var i: i32 = 0
+        while i < self._entries.len():
+            if self._entries[i].hardware_id == canonical:
+                return false
+            i = i + 1
+        self._entries.push(CpuTopologyIdentityEntryV1(
+            logical_cpu_id: logical_cpu_id, kind: kind, hardware_id: canonical))
+        true
+
+    pub me register_x86_apic(logical_cpu_id: u32, apic_id: u32) -> bool:
+        self.register(logical_cpu_id, CpuHardwareIdentityKindV1.X86Apic, apic_id as u64)
+
+    pub me register_arm_mpidr(logical_cpu_id: u32, mpidr: u64) -> bool:
+        self.register(logical_cpu_id, CpuHardwareIdentityKindV1.ArmMpidr, mpidr)
+
+    pub me register_riscv_hart(logical_cpu_id: u32, hart_id: u64) -> bool:
+        self.register(logical_cpu_id, CpuHardwareIdentityKindV1.RiscvHart, hart_id)
+
+    pub me seal() -> CpuTopologySealReceiptV1:
+        if self._sealed:
+            return CpuTopologySealReceiptV1(
+                accepted: true, cpu_count: self._entries.len().to_u32(),
+                reason: "already-sealed",
+                snapshot: CpuTopologyIdentitySnapshotV1(
+                    _sealed: true, _kind: self._kind, _entries: self._entries))
+        if self._entries.len() == 0:
+            return CpuTopologySealReceiptV1(
+                accepted: false, cpu_count: 0u32, reason: "empty-topology",
+                snapshot: CpuTopologyIdentitySnapshotV1.empty(self._kind))
+        self._sealed = true
+        CpuTopologySealReceiptV1(
+            accepted: true, cpu_count: self._entries.len().to_u32(), reason: "sealed",
+            snapshot: CpuTopologyIdentitySnapshotV1(
+                _sealed: true, _kind: self._kind, _entries: self._entries))

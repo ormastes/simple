@@ -1,0 +1,1116 @@
+# codex-impl
+# Bounded expected-O(E*C) analyzer. Unique-cause is attempted first; masking
+# pairs are admitted only from compiler-supplied masked occurrence bits.
+
+use std.common.mcdc.model.{McdcEvaluation, McdcPairEvidence, McdcPairKind}
+use std.common.mcdc.masking_context.{
+    McdcMaskingContext, McdcMaskingContextEvidence,
+    mcdc_masking_context_error, mcdc_masking_pair_context_valid
+}
+
+pub const MCDC_DEFAULT_FORMAL_CLASSES_PER_TARGET = 64
+# Conservative peak accounting for one occupied class slot, including the
+# fixed evidence value, occupancy/combination arrays, and alignment.
+pub const MCDC_FORMAL_CLASS_SLOT_BYTES = 160
+
+pub fn mcdc_formal_class_storage_bytes(max_classes_per_target: i64) -> i64:
+    if max_classes_per_target <= 0: return 0
+    if max_classes_per_target > 0x7fffffffffffffff / MCDC_FORMAL_CLASS_SLOT_BYTES:
+        return 0x7fffffffffffffff
+    max_classes_per_target * MCDC_FORMAL_CLASS_SLOT_BYTES
+
+pub enum McdcCoverageClassification:
+    CoveredUniqueCause
+    CoveredMasking
+    StrongCoupling
+    InsufficientEvidence
+    EvidenceDropped
+    EvidenceOverwritten
+    MaskingMetadataMissing
+    InvalidPolicy
+    FormalClassCapacityExceeded
+
+# Compiler-produced, target-specific projection. A set bit identifies a
+# non-target occurrence formally proven unable to affect the decision while
+# the target condition demonstrates independence. Strong coupling is explicit
+# metadata, never guessed from an incomplete runtime sample.
+pub struct McdcConditionPolicy:
+    decision_id: i64
+    condition_ordinal: i64
+    projection_mask0: i64
+    projection_mask1: i64
+    projection_mask2: i64
+    projection_mask3: i64
+    strong_coupling: bool
+    reason: text
+
+pub struct McdcConditionAnalysis:
+    decision_id: i64
+    condition_ordinal: i64
+    covered: bool
+    classification: McdcCoverageClassification
+    applied_policy: text
+    pair: McdcPairEvidence
+
+pub struct McdcAnalysisResult:
+    decision_count: i64
+    condition_count: i64
+    covered_count: i64
+    saturated: bool
+    dropped_count: i64
+    overwritten_count: i64
+    evaluated_rows: i64
+    signature_count: i64
+    conditions: [McdcConditionAnalysis]
+
+class McdcDecisionBucket:
+    decision_id: i64
+    rows: [McdcEvaluation]
+
+class McdcDecisionBuckets:
+    capacity: i64
+    occupied: [i64]
+    decision_ids: [i64]
+    bucket_indices: [i64]
+    buckets: [McdcDecisionBucket]
+
+impl McdcDecisionBuckets:
+    static fn create(capacity: i64) -> McdcDecisionBuckets:
+        var occupied: [i64] = []
+        var decision_ids: [i64] = []
+        var bucket_indices: [i64] = []
+        var i = 0
+        while i < capacity:
+            occupied.push(0)
+            decision_ids.push(0)
+            bucket_indices.push(-1)
+            i = i + 1
+        McdcDecisionBuckets(
+            capacity: capacity, occupied: occupied,
+            decision_ids: decision_ids, bucket_indices: bucket_indices,
+            buckets: []
+        )
+
+    me add(evaluation: McdcEvaluation) -> bool:
+        var slot = (evaluation.decision_id * 1099511628211) & 0x7fffffffffffffff
+        slot = slot % self.capacity
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0:
+                self.occupied[slot] = 1
+                self.decision_ids[slot] = evaluation.decision_id
+                self.bucket_indices[slot] = self.buckets.len()
+                self.buckets.push(McdcDecisionBucket(
+                    decision_id: evaluation.decision_id, rows: []
+                ))
+            if self.decision_ids[slot] == evaluation.decision_id:
+                val bucket_index = self.bucket_indices[slot]
+                self.buckets[bucket_index].rows.push(evaluation)
+                return true
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            probes = probes + 1
+        false
+
+    fn get_index(decision_id: i64) -> i64:
+        var slot = (decision_id * 1099511628211) & 0x7fffffffffffffff
+        slot = slot % self.capacity
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0:
+                return -1
+            if self.decision_ids[slot] == decision_id:
+                return self.bucket_indices[slot]
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            probes = probes + 1
+        -1
+
+class McdcConditionPolicyTable:
+    capacity: i64
+    occupied: [i64]
+    policies: [McdcConditionPolicy]
+
+impl McdcConditionPolicyTable:
+    static fn create(capacity: i64) -> McdcConditionPolicyTable:
+        val empty = McdcConditionPolicy(
+            decision_id: 0, condition_ordinal: 0,
+            projection_mask0: 0, projection_mask1: 0,
+            projection_mask2: 0, projection_mask3: 0,
+            strong_coupling: false, reason: ""
+        )
+        var occupied: [i64] = []
+        var policies: [McdcConditionPolicy] = []
+        var i = 0
+        while i < capacity:
+            occupied.push(0)
+            policies.push(empty)
+            i = i + 1
+        McdcConditionPolicyTable(
+            capacity: capacity, occupied: occupied, policies: policies
+        )
+
+    fn slot_for(decision_id: i64, condition_ordinal: i64) -> i64:
+        val mixed = (decision_id * 1099511628211) ^ condition_ordinal
+        (mixed & 0x7fffffffffffffff) % self.capacity
+
+    me add(policy: McdcConditionPolicy) -> bool:
+        var slot = self.slot_for(policy.decision_id, policy.condition_ordinal)
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0:
+                self.occupied[slot] = 1
+                self.policies[slot] = policy
+                return true
+            val existing = self.policies[slot]
+            if (existing.decision_id == policy.decision_id and
+                existing.condition_ordinal == policy.condition_ordinal):
+                return false
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            probes = probes + 1
+        false
+
+    fn get(decision_id: i64, condition_ordinal: i64) -> McdcConditionPolicy?:
+        var slot = self.slot_for(decision_id, condition_ordinal)
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0:
+                return nil
+            val policy = self.policies[slot]
+            if (policy.decision_id == decision_id and
+                policy.condition_ordinal == condition_ordinal):
+                return Some(policy)
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            probes = probes + 1
+        nil
+
+class McdcFormalContextIndex:
+    capacity: i64
+    occupied: [i64]
+    contexts: [McdcMaskingContext]
+
+impl McdcFormalContextIndex:
+    static fn create(capacity: i64) -> McdcFormalContextIndex:
+        val empty = McdcMaskingContext(
+            decision_id: 0, target_ordinal: 0, proof_id: 0,
+            context_id: 0, requirement_count: 0, strong_coupling: false)
+        var occupied: [i64] = []
+        var contexts: [McdcMaskingContext] = []
+        var i = 0
+        while i < capacity:
+            occupied.push(0)
+            contexts.push(empty)
+            i = i + 1
+        McdcFormalContextIndex(capacity: capacity, occupied: occupied, contexts: contexts)
+
+    fn slot_for(decision_id: i64, target_ordinal: i64) -> i64:
+        (((decision_id * 1099511628211) ^ target_ordinal) &
+         0x7fffffffffffffff) % self.capacity
+
+    me add(context: McdcMaskingContext) -> bool:
+        if mcdc_masking_context_error(context) != "": return false
+        var slot = self.slot_for(context.decision_id, context.target_ordinal)
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0:
+                self.occupied[slot] = 1
+                self.contexts[slot] = context
+                return true
+            val current = self.contexts[slot]
+            if (current.decision_id == context.decision_id and
+                current.target_ordinal == context.target_ordinal):
+                return false
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        false
+
+    fn get(decision_id: i64, target_ordinal: i64) -> McdcMaskingContext?:
+        var slot = self.slot_for(decision_id, target_ordinal)
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0: return nil
+            val context = self.contexts[slot]
+            if (context.decision_id == decision_id and
+                context.target_ordinal == target_ordinal):
+                return Some(context)
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        nil
+
+class McdcFormalEvidenceIndex:
+    capacity: i64
+    occupied: [i64]
+    evidence: [McdcMaskingContextEvidence]
+
+impl McdcFormalEvidenceIndex:
+    static fn create(capacity: i64) -> McdcFormalEvidenceIndex:
+        val empty = McdcMaskingContextEvidence(
+            decision_id: 0, owner_id: 0, sequence: 0, target_ordinal: 0,
+            proof_id: 0, context_id: 0,
+            satisfied0: 0, satisfied1: 0, satisfied2: 0, satisfied3: 0,
+            masked0: 0, masked1: 0, masked2: 0, masked3: 0)
+        var occupied: [i64] = []
+        var evidence: [McdcMaskingContextEvidence] = []
+        var i = 0
+        while i < capacity:
+            occupied.push(0)
+            evidence.push(empty)
+            i = i + 1
+        McdcFormalEvidenceIndex(capacity: capacity, occupied: occupied, evidence: evidence)
+
+    fn slot_for(decision_id: i64, owner_id: i64, sequence: i64, target_ordinal: i64) -> i64:
+        var mixed = ((decision_id * 1099511628211) ^ owner_id) * 1099511628211
+        mixed = (mixed ^ sequence) * 1099511628211
+        ((mixed ^ target_ordinal) & 0x7fffffffffffffff) % self.capacity
+
+    me add(item: McdcMaskingContextEvidence) -> bool:
+        var slot = self.slot_for(item.decision_id, item.owner_id, item.sequence, item.target_ordinal)
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0:
+                self.occupied[slot] = 1
+                self.evidence[slot] = item
+                return true
+            val current = self.evidence[slot]
+            if (current.decision_id == item.decision_id and
+                current.owner_id == item.owner_id and
+                current.sequence == item.sequence and
+                current.target_ordinal == item.target_ordinal):
+                return false
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        false
+
+    fn get(
+        decision_id: i64, owner_id: i64, sequence: i64, target_ordinal: i64
+    ) -> McdcMaskingContextEvidence?:
+        var slot = self.slot_for(decision_id, owner_id, sequence, target_ordinal)
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0: return nil
+            val item = self.evidence[slot]
+            if (item.decision_id == decision_id and item.owner_id == owner_id and
+                item.sequence == sequence and
+                item.target_ordinal == target_ordinal):
+                return Some(item)
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        nil
+
+# Inline value key: decision identity followed by four evaluated/value/masked
+# triples. This removes per-evaluation key-array allocation and copying.
+struct McdcSignatureKey:
+    k0: i64
+    k1: i64
+    k2: i64
+    k3: i64
+    k4: i64
+    k5: i64
+    k6: i64
+    k7: i64
+    k8: i64
+    k9: i64
+    k10: i64
+    k11: i64
+    k12: i64
+
+class McdcSignatureTable:
+    capacity: i64
+    scanned_rows: i64
+    rejected_rows: i64
+    signature_count: i64
+    occupied: [i64]
+    keys: [McdcSignatureKey]
+    seq_ff: [i64]
+    seq_ft: [i64]
+    seq_tf: [i64]
+    seq_tt: [i64]
+    owner_ff: [i64]
+    owner_ft: [i64]
+    owner_tf: [i64]
+    owner_tt: [i64]
+
+impl McdcSignatureTable:
+    static fn create(capacity: i64) -> McdcSignatureTable:
+        val empty_key = McdcSignatureKey(
+            k0: 0, k1: 0, k2: 0, k3: 0, k4: 0, k5: 0, k6: 0,
+            k7: 0, k8: 0, k9: 0, k10: 0, k11: 0, k12: 0
+        )
+        var occupied: [i64] = []
+        var keys: [McdcSignatureKey] = []
+        var seq_ff: [i64] = []
+        var seq_ft: [i64] = []
+        var seq_tf: [i64] = []
+        var seq_tt: [i64] = []
+        var owner_ff: [i64] = []
+        var owner_ft: [i64] = []
+        var owner_tf: [i64] = []
+        var owner_tt: [i64] = []
+        var i = 0
+        while i < capacity:
+            occupied.push(0)
+            keys.push(empty_key)
+            seq_ff.push(-1)
+            seq_ft.push(-1)
+            seq_tf.push(-1)
+            seq_tt.push(-1)
+            owner_ff.push(-1)
+            owner_ft.push(-1)
+            owner_tf.push(-1)
+            owner_tt.push(-1)
+            i = i + 1
+        McdcSignatureTable(
+            capacity: capacity, scanned_rows: 0, rejected_rows: 0,
+            signature_count: 0,
+            occupied: occupied, keys: keys,
+            seq_ff: seq_ff, seq_ft: seq_ft, seq_tf: seq_tf, seq_tt: seq_tt,
+            owner_ff: owner_ff, owner_ft: owner_ft,
+            owner_tf: owner_tf, owner_tt: owner_tt
+        )
+
+    me clear():
+        self.scanned_rows = 0
+        self.rejected_rows = 0
+        self.signature_count = 0
+        var i = 0
+        while i < self.capacity:
+            self.occupied[i] = 0
+            self.seq_ff[i] = -1
+            self.seq_ft[i] = -1
+            self.seq_tf[i] = -1
+            self.seq_tt[i] = -1
+            self.owner_ff[i] = -1
+            self.owner_ft[i] = -1
+            self.owner_tf[i] = -1
+            self.owner_tt[i] = -1
+            i = i + 1
+
+fn mcdc_mask_word(evaluation: McdcEvaluation, word: i64, kind: i64) -> i64:
+    if kind == 1:
+        match word:
+            0 => evaluation.true_mask0
+            1 => evaluation.true_mask1
+            2 => evaluation.true_mask2
+            _ => evaluation.true_mask3
+    if kind == 2:
+        match word:
+            0 => evaluation.masked_mask0
+            1 => evaluation.masked_mask1
+            2 => evaluation.masked_mask2
+            _ => evaluation.masked_mask3
+    match word:
+        0 => evaluation.evaluated_mask0
+        1 => evaluation.evaluated_mask1
+        2 => evaluation.evaluated_mask2
+        _ => evaluation.evaluated_mask3
+
+fn mcdc_condition_bit(condition_ordinal: i64) -> i64:
+    1 << (condition_ordinal % 64)
+
+fn mcdc_condition_evaluated(evaluation: McdcEvaluation, condition_ordinal: i64) -> bool:
+    val word = condition_ordinal / 64
+    (mcdc_mask_word(evaluation, word, 0) & mcdc_condition_bit(condition_ordinal)) != 0
+
+fn mcdc_condition_value(evaluation: McdcEvaluation, condition_ordinal: i64) -> bool:
+    val word = condition_ordinal / 64
+    (mcdc_mask_word(evaluation, word, 1) & mcdc_condition_bit(condition_ordinal)) != 0
+
+fn mcdc_signature_word(
+    evaluation: McdcEvaluation, condition_ordinal: i64, word: i64,
+    part: i64, projection: i64
+) -> i64:
+    val target_word = condition_ordinal / 64
+    # This target-specific projection is a compiler proof, not a concrete-row
+    # mask. Keeping it fixed lets a condition masked in either member of a
+    # valid pair vary without creating asymmetric hash keys.
+    var evaluated = mcdc_mask_word(evaluation, word, 0)
+    var values = mcdc_mask_word(evaluation, word, 1) & evaluated
+    evaluated = evaluated & ~projection
+    values = values & ~projection
+    if word == target_word:
+        val clear_target = ~mcdc_condition_bit(condition_ordinal)
+        evaluated = evaluated & clear_target
+        values = values & clear_target
+    match part:
+        0 => evaluated
+        1 => values
+        _ => projection
+
+fn mcdc_signature_key(
+    evaluation: McdcEvaluation, condition_ordinal: i64,
+    policy: McdcConditionPolicy
+) -> McdcSignatureKey:
+    McdcSignatureKey(
+        k0: evaluation.decision_id,
+        k1: mcdc_signature_word(evaluation, condition_ordinal, 0, 0, policy.projection_mask0),
+        k2: mcdc_signature_word(evaluation, condition_ordinal, 0, 1, policy.projection_mask0),
+        k3: mcdc_signature_word(evaluation, condition_ordinal, 0, 2, policy.projection_mask0),
+        k4: mcdc_signature_word(evaluation, condition_ordinal, 1, 0, policy.projection_mask1),
+        k5: mcdc_signature_word(evaluation, condition_ordinal, 1, 1, policy.projection_mask1),
+        k6: mcdc_signature_word(evaluation, condition_ordinal, 1, 2, policy.projection_mask1),
+        k7: mcdc_signature_word(evaluation, condition_ordinal, 2, 0, policy.projection_mask2),
+        k8: mcdc_signature_word(evaluation, condition_ordinal, 2, 1, policy.projection_mask2),
+        k9: mcdc_signature_word(evaluation, condition_ordinal, 2, 2, policy.projection_mask2),
+        k10: mcdc_signature_word(evaluation, condition_ordinal, 3, 0, policy.projection_mask3),
+        k11: mcdc_signature_word(evaluation, condition_ordinal, 3, 1, policy.projection_mask3),
+        k12: mcdc_signature_word(evaluation, condition_ordinal, 3, 2, policy.projection_mask3)
+    )
+
+fn mcdc_signature_equal(left: McdcSignatureKey, right: McdcSignatureKey) -> bool:
+    (left.k0 == right.k0 and left.k1 == right.k1 and left.k2 == right.k2 and
+     left.k3 == right.k3 and left.k4 == right.k4 and left.k5 == right.k5 and
+     left.k6 == right.k6 and left.k7 == right.k7 and left.k8 == right.k8 and
+     left.k9 == right.k9 and left.k10 == right.k10 and
+     left.k11 == right.k11 and left.k12 == right.k12)
+
+fn mcdc_signature_hash(key: McdcSignatureKey) -> i64:
+    var hash = key.k0 * 1099511628211
+    hash = (hash ^ key.k1) * 1099511628211
+    hash = (hash ^ key.k2) * 1099511628211
+    hash = (hash ^ key.k3) * 1099511628211
+    hash = (hash ^ key.k4) * 1099511628211
+    hash = (hash ^ key.k5) * 1099511628211
+    hash = (hash ^ key.k6) * 1099511628211
+    hash = (hash ^ key.k7) * 1099511628211
+    hash = (hash ^ key.k8) * 1099511628211
+    hash = (hash ^ key.k9) * 1099511628211
+    hash = (hash ^ key.k10) * 1099511628211
+    hash = (hash ^ key.k11) * 1099511628211
+    hash = (hash ^ key.k12) * 1099511628211
+    hash & 0x7fffffffffffffff
+
+fn mcdc_table_capacity(evaluation_count: i64, max_table_entries: i64) -> i64:
+    if evaluation_count < 0 or max_table_entries < 2:
+        return -1
+    if evaluation_count > max_table_entries / 2:
+        return -1
+    var requested = evaluation_count * 2
+    if requested < 2:
+        requested = 2
+    var capacity = 2
+    while capacity < requested:
+        if capacity > max_table_entries / 2:
+            return -1
+        capacity = capacity * 2
+    if capacity > max_table_entries:
+        return -1
+    capacity
+
+fn mcdc_empty_policy(decision_id: i64, condition_ordinal: i64) -> McdcConditionPolicy:
+    McdcConditionPolicy(
+        decision_id: decision_id, condition_ordinal: condition_ordinal,
+        projection_mask0: 0, projection_mask1: 0,
+        projection_mask2: 0, projection_mask3: 0,
+        strong_coupling: false, reason: ""
+    )
+
+# Conservative current contract. A future compiler-emitted canonical context
+# key can represent sound one-sided masking without pairwise search. Until
+# then, admitting only rows that cover the complete projection fails closed.
+fn mcdc_projection_complete(
+    evaluation: McdcEvaluation, policy: McdcConditionPolicy
+) -> bool:
+    ((evaluation.masked_mask0 & policy.projection_mask0) == policy.projection_mask0 and
+     (evaluation.masked_mask1 & policy.projection_mask1) == policy.projection_mask1 and
+     (evaluation.masked_mask2 & policy.projection_mask2) == policy.projection_mask2 and
+     (evaluation.masked_mask3 & policy.projection_mask3) == policy.projection_mask3)
+
+fn mcdc_pair_evidence(
+    condition_ordinal: i64,
+    left_owner: i64, left_sequence: i64,
+    right_owner: i64, right_sequence: i64,
+    kind: McdcPairKind
+) -> McdcPairEvidence:
+    if (right_owner < left_owner or
+        (right_owner == left_owner and right_sequence < left_sequence)):
+        return McdcPairEvidence(
+            condition_ordinal: condition_ordinal,
+            owner_a: right_owner, left_sequence: right_sequence,
+            owner_b: left_owner, right_sequence: left_sequence, kind: kind)
+    McdcPairEvidence(
+        condition_ordinal: condition_ordinal,
+        owner_a: left_owner, left_sequence: left_sequence,
+        owner_b: right_owner, right_sequence: right_sequence, kind: kind)
+
+fn mcdc_pair_before(left: McdcPairEvidence, right: McdcPairEvidence) -> bool:
+    if right.left_sequence < 0: return left.left_sequence >= 0
+    if left.owner_a != right.owner_a: return left.owner_a < right.owner_a
+    if left.left_sequence != right.left_sequence:
+        return left.left_sequence < right.left_sequence
+    if left.owner_b != right.owner_b: return left.owner_b < right.owner_b
+    left.right_sequence < right.right_sequence
+
+fn mcdc_witness_before(
+    owner: i64, sequence: i64, prior_owner: i64, prior_sequence: i64
+) -> bool:
+    prior_sequence < 0 or owner < prior_owner or (
+        owner == prior_owner and sequence < prior_sequence)
+
+fn mcdc_find_pair(
+    table: McdcSignatureTable, evaluations: [McdcEvaluation],
+    condition_ordinal: i64, policy: McdcConditionPolicy, masking: bool
+) -> McdcPairEvidence:
+    val pair_kind = if masking: McdcPairKind.Masking else: McdcPairKind.UniqueCause
+    var best_pair = mcdc_pair_evidence(
+        condition_ordinal, -1, -1, -1, -1, pair_kind)
+    var eval_index = 0
+    while eval_index < evaluations.len():
+        val evaluation = evaluations[eval_index]
+        table.scanned_rows = table.scanned_rows + 1
+        val admitted = not masking or mcdc_projection_complete(evaluation, policy)
+        if masking and not admitted:
+            table.rejected_rows = table.rejected_rows + 1
+        if admitted and mcdc_condition_evaluated(evaluation, condition_ordinal):
+            val key = mcdc_signature_key(evaluation, condition_ordinal, policy)
+            var slot = mcdc_signature_hash(key) % table.capacity
+            var probes = 0
+            while probes < table.capacity:
+                if table.occupied[slot] == 0:
+                    table.occupied[slot] = 1
+                    table.keys[slot] = key
+                    table.signature_count = table.signature_count + 1
+                if mcdc_signature_equal(table.keys[slot], key):
+                    val target_code = if mcdc_condition_value(
+                        evaluation, condition_ordinal): 1 else: 0
+                    val outcome_code = if evaluation.outcome: 1 else: 0
+                    val combination = target_code * 2 + outcome_code
+                    var opposite_sequence = -1
+                    var opposite_owner = -1
+                    match combination:
+                        0:
+                            opposite_sequence = table.seq_tt[slot]
+                            opposite_owner = table.owner_tt[slot]
+                            if mcdc_witness_before(
+                                evaluation.owner_id, evaluation.sequence,
+                                table.owner_ff[slot], table.seq_ff[slot]):
+                                table.seq_ff[slot] = evaluation.sequence
+                                table.owner_ff[slot] = evaluation.owner_id
+                        1:
+                            opposite_sequence = table.seq_tf[slot]
+                            opposite_owner = table.owner_tf[slot]
+                            if mcdc_witness_before(
+                                evaluation.owner_id, evaluation.sequence,
+                                table.owner_ft[slot], table.seq_ft[slot]):
+                                table.seq_ft[slot] = evaluation.sequence
+                                table.owner_ft[slot] = evaluation.owner_id
+                        2:
+                            opposite_sequence = table.seq_ft[slot]
+                            opposite_owner = table.owner_ft[slot]
+                            if mcdc_witness_before(
+                                evaluation.owner_id, evaluation.sequence,
+                                table.owner_tf[slot], table.seq_tf[slot]):
+                                table.seq_tf[slot] = evaluation.sequence
+                                table.owner_tf[slot] = evaluation.owner_id
+                        _:
+                            opposite_sequence = table.seq_ff[slot]
+                            opposite_owner = table.owner_ff[slot]
+                            if mcdc_witness_before(
+                                evaluation.owner_id, evaluation.sequence,
+                                table.owner_tt[slot], table.seq_tt[slot]):
+                                table.seq_tt[slot] = evaluation.sequence
+                                table.owner_tt[slot] = evaluation.owner_id
+                    if opposite_sequence >= 0:
+                        val found_pair = mcdc_pair_evidence(
+                            condition_ordinal, opposite_owner, opposite_sequence,
+                            evaluation.owner_id, evaluation.sequence, pair_kind)
+                        if mcdc_pair_before(found_pair, best_pair):
+                            best_pair = found_pair
+                    probes = table.capacity
+                else:
+                    slot = slot + 1
+                    if slot >= table.capacity:
+                        slot = 0
+                    probes = probes + 1
+        eval_index = eval_index + 1
+    best_pair
+
+fn mcdc_empty_context_evidence() -> McdcMaskingContextEvidence:
+    McdcMaskingContextEvidence(
+        decision_id: 0, owner_id: 0, sequence: 0, target_ordinal: 0,
+        proof_id: 0, context_id: 0,
+        satisfied0: 0, satisfied1: 0, satisfied2: 0, satisfied3: 0,
+        masked0: 0, masked1: 0, masked2: 0, masked3: 0)
+
+struct McdcFormalPairSearch:
+    pair: McdcPairEvidence
+    candidate_cap_exceeded: bool
+
+fn mcdc_formal_evidence_class_equal(
+    left: McdcMaskingContextEvidence, right: McdcMaskingContextEvidence
+) -> bool:
+    # owner_id and sequence identify a witness, not its compatibility class.
+    (left.decision_id == right.decision_id and
+     left.target_ordinal == right.target_ordinal and
+     left.proof_id == right.proof_id and left.context_id == right.context_id and
+     left.satisfied0 == right.satisfied0 and left.satisfied1 == right.satisfied1 and
+     left.satisfied2 == right.satisfied2 and left.satisfied3 == right.satisfied3 and
+     left.masked0 == right.masked0 and left.masked1 == right.masked1 and
+     left.masked2 == right.masked2 and left.masked3 == right.masked3)
+
+fn mcdc_formal_evidence_class_hash(
+    evidence: McdcMaskingContextEvidence, combination: i64
+) -> i64:
+    var hash = evidence.decision_id * 1099511628211
+    hash = (hash ^ evidence.target_ordinal) * 1099511628211
+    hash = (hash ^ evidence.proof_id) * 1099511628211
+    hash = (hash ^ evidence.context_id) * 1099511628211
+    hash = (hash ^ evidence.satisfied0) * 1099511628211
+    hash = (hash ^ evidence.satisfied1) * 1099511628211
+    hash = (hash ^ evidence.satisfied2) * 1099511628211
+    hash = (hash ^ evidence.satisfied3) * 1099511628211
+    hash = (hash ^ evidence.masked0) * 1099511628211
+    hash = (hash ^ evidence.masked1) * 1099511628211
+    hash = (hash ^ evidence.masked2) * 1099511628211
+    hash = (hash ^ evidence.masked3) * 1099511628211
+    ((hash ^ combination) & 0x7fffffffffffffff)
+
+class McdcFormalCandidateTable:
+    capacity: i64
+    class_limit: i64
+    count: i64
+    occupied: [i64]
+    combinations: [i64]
+    candidates: [McdcMaskingContextEvidence]
+
+impl McdcFormalCandidateTable:
+    static fn create(capacity: i64, class_limit: i64) -> McdcFormalCandidateTable:
+        val empty = mcdc_empty_context_evidence()
+        var occupied: [i64] = []
+        var combinations: [i64] = []
+        var candidates: [McdcMaskingContextEvidence] = []
+        var i = 0
+        while i < capacity:
+            occupied.push(0)
+            combinations.push(-1)
+            candidates.push(empty)
+            i = i + 1
+        McdcFormalCandidateTable(
+            capacity: capacity, class_limit: class_limit, count: 0,
+            occupied: occupied,
+            combinations: combinations, candidates: candidates)
+
+    me add(combination: i64, current: McdcMaskingContextEvidence) -> bool:
+        var slot = mcdc_formal_evidence_class_hash(current, combination) % self.capacity
+        var probes = 0
+        while probes < self.capacity:
+            if self.occupied[slot] == 0:
+                if self.count >= self.class_limit: return false
+                self.occupied[slot] = 1
+                self.count = self.count + 1
+                self.combinations[slot] = combination
+                self.candidates[slot] = current
+                return true
+            if (self.combinations[slot] == combination and
+                mcdc_formal_evidence_class_equal(self.candidates[slot], current)):
+                val prior = self.candidates[slot]
+                if (current.owner_id < prior.owner_id or
+                    (current.owner_id == prior.owner_id and
+                     current.sequence < prior.sequence)):
+                    self.candidates[slot] = current
+                return true
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        false
+
+    fn earliest_compatible(
+        opposite: i64, context: McdcMaskingContext,
+        current: McdcMaskingContextEvidence
+    ) -> McdcMaskingContextEvidence?:
+        var found = false
+        var earliest = mcdc_empty_context_evidence()
+        var slot = 0
+        while slot < self.capacity:
+            if (self.occupied[slot] != 0 and self.combinations[slot] == opposite and
+                mcdc_masking_pair_context_valid(
+                    context, self.candidates[slot], current)):
+                val candidate = self.candidates[slot]
+                if (not found or candidate.owner_id < earliest.owner_id or
+                    (candidate.owner_id == earliest.owner_id and
+                     candidate.sequence < earliest.sequence)):
+                    found = true
+                    earliest = candidate
+            slot = slot + 1
+        if found: return Some(earliest)
+        nil
+
+fn mcdc_find_formal_masking_pair(
+    evaluations: [McdcEvaluation], condition_ordinal: i64,
+    context: McdcMaskingContext, evidence_index: McdcFormalEvidenceIndex,
+    max_table_entries: i64, max_formal_classes_per_target: i64
+) -> McdcFormalPairSearch:
+    # proof_id/context_id already canonicalize every sibling subtree on the
+    # target-to-root path. Do not mix legacy leaf projection into this key:
+    # differing leaves inside a proven-neutral sibling are semantically safe.
+    if (max_formal_classes_per_target <= 0 or
+        max_formal_classes_per_target > max_table_entries):
+        return McdcFormalPairSearch(
+            pair: mcdc_pair_evidence(
+                condition_ordinal, -1, -1, -1, -1, McdcPairKind.Masking),
+            candidate_cap_exceeded: true)
+    val candidate_capacity = max_formal_classes_per_target
+    val candidates = McdcFormalCandidateTable.create(
+        candidate_capacity, max_formal_classes_per_target)
+    var candidate_cap_exceeded = false
+    var pair = mcdc_pair_evidence(
+        condition_ordinal, -1, -1, -1, -1, McdcPairKind.Masking)
+    var eval_index = 0
+    while eval_index < evaluations.len():
+        val evaluation = evaluations[eval_index]
+        if mcdc_condition_evaluated(evaluation, condition_ordinal):
+            val found = evidence_index.get(
+                evaluation.decision_id, evaluation.owner_id,
+                evaluation.sequence, condition_ordinal)
+            if val current = found:
+                val target_code = if mcdc_condition_value(
+                    evaluation, condition_ordinal): 1 else: 0
+                val outcome_code = if evaluation.outcome: 1 else: 0
+                val combination = target_code * 2 + outcome_code
+                val opposite = 3 - combination
+                val compatible = candidates.earliest_compatible(
+                    opposite, context, current)
+                if val prior = compatible:
+                    val found_pair = mcdc_pair_evidence(
+                        condition_ordinal, prior.owner_id, prior.sequence,
+                        current.owner_id, current.sequence,
+                        McdcPairKind.Masking)
+                    if mcdc_pair_before(found_pair, pair):
+                        pair = found_pair
+                if not candidates.add(combination, current):
+                    candidate_cap_exceeded = true
+        eval_index = eval_index + 1
+    McdcFormalPairSearch(
+        pair: if candidate_cap_exceeded:
+            mcdc_pair_evidence(
+                condition_ordinal, -1, -1, -1, -1, McdcPairKind.Masking)
+        else:
+            pair,
+        candidate_cap_exceeded: candidate_cap_exceeded)
+
+fn analyze_mcdc_one_decision(
+    decision_id: i64, evaluations: [McdcEvaluation], condition_count: i64,
+    max_table_entries: i64, allow_masking: bool,
+    policy_table: McdcConditionPolicyTable,
+    dropped_count: i64, overwritten_count: i64
+) -> McdcAnalysisResult:
+    if condition_count < 0 or condition_count > 256:
+        return McdcAnalysisResult(
+            decision_count: 1, condition_count: condition_count, covered_count: 0,
+            saturated: true, dropped_count: dropped_count,
+            overwritten_count: overwritten_count,
+            evaluated_rows: 0, signature_count: 0,
+            conditions: []
+        )
+    val capacity = mcdc_table_capacity(evaluations.len(), max_table_entries)
+    if capacity < 0:
+        return McdcAnalysisResult(
+            decision_count: 1, condition_count: condition_count, covered_count: 0,
+            saturated: true, dropped_count: dropped_count,
+            overwritten_count: overwritten_count,
+            evaluated_rows: 0, signature_count: 0,
+            conditions: []
+        )
+    val table = McdcSignatureTable.create(capacity)
+    var conditions: [McdcConditionAnalysis] = []
+    var covered_count = 0
+    var evaluated_rows = 0
+    var signature_count = 0
+    var condition_ordinal = 0
+    while condition_ordinal < condition_count:
+        val unique_policy = mcdc_empty_policy(decision_id, condition_ordinal)
+        table.clear()
+        var pair = mcdc_find_pair(
+            table, evaluations, condition_ordinal, unique_policy, false)
+        evaluated_rows = evaluated_rows + table.scanned_rows
+        signature_count = signature_count + table.signature_count
+        var classification = McdcCoverageClassification.InsufficientEvidence
+        var applied_policy = "unique-cause"
+        if pair.left_sequence >= 0:
+            classification = McdcCoverageClassification.CoveredUniqueCause
+        else:
+            val configured = policy_table.get(decision_id, condition_ordinal)
+            if val policy = configured:
+                if policy.reason.trim() == "":
+                    classification = McdcCoverageClassification.InvalidPolicy
+                    applied_policy = "compiler-policy-requires-reason"
+                else if policy.strong_coupling:
+                    classification = McdcCoverageClassification.StrongCoupling
+                    applied_policy = policy.reason
+                else if allow_masking:
+                    table.clear()
+                    pair = mcdc_find_pair(
+                        table, evaluations, condition_ordinal, policy, true)
+                    evaluated_rows = evaluated_rows + table.scanned_rows
+                    signature_count = signature_count + table.signature_count
+                    applied_policy = policy.reason
+                    if pair.left_sequence >= 0:
+                        classification = McdcCoverageClassification.CoveredMasking
+                    else if table.rejected_rows > 0:
+                        classification = McdcCoverageClassification.InvalidPolicy
+                        applied_policy = "masking-context-key-unavailable"
+            else if allow_masking:
+                classification = McdcCoverageClassification.MaskingMetadataMissing
+                applied_policy = "compiler-projection-missing"
+        val evidence_dependent = (
+            classification == McdcCoverageClassification.InsufficientEvidence or
+            classification == McdcCoverageClassification.MaskingMetadataMissing)
+        if pair.left_sequence < 0 and evidence_dependent and dropped_count > 0:
+            classification = McdcCoverageClassification.EvidenceDropped
+        else if (pair.left_sequence < 0 and evidence_dependent and
+                 overwritten_count > 0):
+            classification = McdcCoverageClassification.EvidenceOverwritten
+        val covered = pair.left_sequence >= 0
+        if covered:
+            covered_count = covered_count + 1
+        conditions.push(McdcConditionAnalysis(
+            decision_id: decision_id, condition_ordinal: condition_ordinal,
+            covered: covered, classification: classification,
+            applied_policy: applied_policy, pair: pair
+        ))
+        condition_ordinal = condition_ordinal + 1
+    McdcAnalysisResult(
+        decision_count: 1, condition_count: condition_count,
+        covered_count: covered_count,
+        saturated: dropped_count > 0 or overwritten_count > 0,
+        dropped_count: dropped_count, overwritten_count: overwritten_count,
+        evaluated_rows: evaluated_rows,
+        signature_count: signature_count, conditions: conditions
+    )
+
+fn analyze_mcdc_internal(
+    evaluations: [McdcEvaluation], condition_count: i64,
+    max_table_entries: i64, allow_masking: bool,
+    policies: [McdcConditionPolicy], dropped_count: i64, overwritten_count: i64
+) -> McdcAnalysisResult:
+    if condition_count < 0 or condition_count > 256:
+        return McdcAnalysisResult(
+            decision_count: 0, condition_count: condition_count,
+            covered_count: 0, saturated: true,
+            dropped_count: dropped_count, overwritten_count: overwritten_count,
+            evaluated_rows: 0,
+            signature_count: 0, conditions: []
+        )
+    val bucket_capacity = mcdc_table_capacity(evaluations.len(), max_table_entries)
+    if bucket_capacity < 0:
+        return McdcAnalysisResult(
+            decision_count: 0, condition_count: 0, covered_count: 0,
+            saturated: true, dropped_count: dropped_count,
+            overwritten_count: overwritten_count,
+            evaluated_rows: 0, signature_count: 0,
+            conditions: []
+        )
+    val grouped = McdcDecisionBuckets.create(bucket_capacity)
+    var eval_index = 0
+    while eval_index < evaluations.len():
+        if not grouped.add(evaluations[eval_index]):
+            return McdcAnalysisResult(
+                decision_count: grouped.buckets.len(), condition_count: 0,
+                covered_count: 0, saturated: true,
+                dropped_count: dropped_count, overwritten_count: overwritten_count,
+                evaluated_rows: 0,
+                signature_count: 0, conditions: []
+            )
+        eval_index = eval_index + 1
+
+    val policy_capacity = mcdc_table_capacity(policies.len(), max_table_entries)
+    if policy_capacity < 0:
+        return McdcAnalysisResult(
+            decision_count: grouped.buckets.len(), condition_count: 0,
+            covered_count: 0, saturated: true,
+            dropped_count: dropped_count, overwritten_count: overwritten_count,
+            evaluated_rows: 0, signature_count: 0, conditions: []
+        )
+    val policy_table = McdcConditionPolicyTable.create(policy_capacity)
+    var policy_index = 0
+    while policy_index < policies.len():
+        if not policy_table.add(policies[policy_index]):
+            return McdcAnalysisResult(
+                decision_count: grouped.buckets.len(), condition_count: 0,
+                covered_count: 0, saturated: true,
+                dropped_count: dropped_count, overwritten_count: overwritten_count,
+                evaluated_rows: 0, signature_count: 0, conditions: []
+            )
+        policy_index = policy_index + 1
+
+    var conditions: [McdcConditionAnalysis] = []
+    var covered_count = 0
+    var evaluated_rows = 0
+    var signature_count = 0
+    var saturated = false
+    var bucket_index = 0
+    while bucket_index < grouped.buckets.len():
+        val bucket = grouped.buckets[bucket_index]
+        val decision_result = analyze_mcdc_one_decision(
+            bucket.decision_id, bucket.rows, condition_count,
+            max_table_entries, allow_masking, policy_table,
+            dropped_count, overwritten_count
+        )
+        if decision_result.saturated:
+            saturated = true
+        covered_count = covered_count + decision_result.covered_count
+        evaluated_rows = evaluated_rows + decision_result.evaluated_rows
+        signature_count = signature_count + decision_result.signature_count
+        var result_index = 0
+        while result_index < decision_result.conditions.len():
+            conditions.push(decision_result.conditions[result_index])
+            result_index = result_index + 1
+        bucket_index = bucket_index + 1
+    McdcAnalysisResult(
+        decision_count: grouped.buckets.len(),
+        condition_count: grouped.buckets.len() * condition_count,
+        covered_count: covered_count, saturated: saturated,
+        dropped_count: dropped_count, overwritten_count: overwritten_count,
+        evaluated_rows: evaluated_rows, signature_count: signature_count,
+        conditions: conditions
+    )
+
+pub fn analyze_mcdc_unique_cause(
+    evaluations: [McdcEvaluation], condition_count: i64, max_table_entries: i64
+) -> McdcAnalysisResult:
+    analyze_mcdc_internal(
+        evaluations, condition_count, max_table_entries, false, [], 0, 0)
+
+pub fn analyze_mcdc(
+    evaluations: [McdcEvaluation], condition_count: i64, max_table_entries: i64
+) -> McdcAnalysisResult:
+    analyze_mcdc_internal(
+        evaluations, condition_count, max_table_entries, true, [], 0, 0)
+
+pub fn analyze_mcdc_with_policy(
+    evaluations: [McdcEvaluation], condition_count: i64,
+    max_table_entries: i64, policies: [McdcConditionPolicy],
+    dropped_count: i64, overwritten_count: i64
+) -> McdcAnalysisResult:
+    analyze_mcdc_internal(
+        evaluations, condition_count, max_table_entries, true, policies,
+        dropped_count, overwritten_count)
+
+pub fn analyze_mcdc_with_context_bounded(
+    evaluations: [McdcEvaluation], condition_count: i64,
+    max_table_entries: i64, max_formal_classes_per_target: i64,
+    contexts: [McdcMaskingContext],
+    evidence: [McdcMaskingContextEvidence],
+    dropped_count: i64, overwritten_count: i64
+) -> McdcAnalysisResult:
+    var result = analyze_mcdc_internal(
+        evaluations, condition_count, max_table_entries, false, [],
+        dropped_count, overwritten_count)
+    if result.saturated and dropped_count == 0 and overwritten_count == 0:
+        return result
+
+    val context_capacity = mcdc_table_capacity(contexts.len(), max_table_entries)
+    val evidence_capacity = mcdc_table_capacity(evidence.len(), max_table_entries)
+    val bucket_capacity = mcdc_table_capacity(evaluations.len(), max_table_entries)
+    if context_capacity < 0 or evidence_capacity < 0 or bucket_capacity < 0:
+        result.saturated = true
+        var failed_index = 0
+        while failed_index < result.conditions.len():
+            val prior = result.conditions[failed_index]
+            if not prior.covered:
+                result.conditions[failed_index] = McdcConditionAnalysis(
+                    decision_id: prior.decision_id,
+                    condition_ordinal: prior.condition_ordinal,
+                    covered: false,
+                    classification: McdcCoverageClassification.FormalClassCapacityExceeded,
+                    applied_policy: "formal-evidence-capacity",
+                    pair: prior.pair)
+            failed_index = failed_index + 1
+        return result
+    val context_index = McdcFormalContextIndex.create(context_capacity)
+    var context_index_value = 0
+    while context_index_value < contexts.len():
+        if not context_index.add(contexts[context_index_value]):
+            result.saturated = true
+            return result
+        context_index_value = context_index_value + 1
+    val evidence_index = McdcFormalEvidenceIndex.create(evidence_capacity)
+    var evidence_index_value = 0
+    while evidence_index_value < evidence.len():
+        if not evidence_index.add(evidence[evidence_index_value]):
+            result.saturated = true
+            return result
+        evidence_index_value = evidence_index_value + 1
+    val grouped = McdcDecisionBuckets.create(bucket_capacity)
+    var evaluation_index = 0
+    while evaluation_index < evaluations.len():
+        if not grouped.add(evaluations[evaluation_index]):
+            result.saturated = true
+            return result
+        evaluation_index = evaluation_index + 1
+
+    var condition_index = 0
+    while condition_index < result.conditions.len():
+        val prior = result.conditions[condition_index]
+        if not prior.covered:
+            var classification = McdcCoverageClassification.MaskingMetadataMissing
+            var applied_policy = "formal-context-missing"
+            var pair = prior.pair
+            val configured = context_index.get(
+                prior.decision_id, prior.condition_ordinal)
+            if val context = configured:
+                applied_policy = "formal-proof:{context.proof_id}:{context.context_id}"
+                if context.strong_coupling:
+                    classification = McdcCoverageClassification.StrongCoupling
+                else:
+                    val bucket_index = grouped.get_index(prior.decision_id)
+                    if bucket_index >= 0:
+                        val rows = grouped.buckets[bucket_index].rows
+                        val formal_search = mcdc_find_formal_masking_pair(
+                            rows, prior.condition_ordinal, context,
+                            evidence_index, max_table_entries,
+                            max_formal_classes_per_target)
+                        pair = formal_search.pair
+                        result.evaluated_rows = result.evaluated_rows + rows.len()
+                        if formal_search.candidate_cap_exceeded:
+                            pair = mcdc_pair_evidence(
+                                prior.condition_ordinal,
+                                -1, -1, -1, -1, McdcPairKind.Masking)
+                            result.saturated = true
+                            classification = McdcCoverageClassification.FormalClassCapacityExceeded
+                            applied_policy = "formal-candidate-class-cap"
+                            result.saturated = true
+                        else if pair.left_sequence >= 0:
+                            classification = McdcCoverageClassification.CoveredMasking
+                            result.covered_count = result.covered_count + 1
+                        else:
+                            classification = McdcCoverageClassification.InsufficientEvidence
+                            applied_policy = "formal-context-no-valid-pair"
+            val evidence_dependent = (
+                classification == McdcCoverageClassification.InsufficientEvidence or
+                classification == McdcCoverageClassification.MaskingMetadataMissing)
+            if pair.left_sequence < 0 and dropped_count > 0 and evidence_dependent:
+                classification = McdcCoverageClassification.EvidenceDropped
+            else if (pair.left_sequence < 0 and overwritten_count > 0 and
+                     evidence_dependent):
+                classification = McdcCoverageClassification.EvidenceOverwritten
+            result.conditions[condition_index] = McdcConditionAnalysis(
+                decision_id: prior.decision_id,
+                condition_ordinal: prior.condition_ordinal,
+                covered: pair.left_sequence >= 0,
+                classification: classification,
+                applied_policy: applied_policy, pair: pair)
+        condition_index = condition_index + 1
+    result
+
+pub fn analyze_mcdc_with_context(
+    evaluations: [McdcEvaluation], condition_count: i64,
+    max_table_entries: i64, contexts: [McdcMaskingContext],
+    evidence: [McdcMaskingContextEvidence],
+    dropped_count: i64, overwritten_count: i64
+) -> McdcAnalysisResult:
+    var formal_cap = MCDC_DEFAULT_FORMAL_CLASSES_PER_TARGET
+    if max_table_entries < formal_cap:
+        formal_cap = max_table_entries
+    analyze_mcdc_with_context_bounded(
+        evaluations, condition_count, max_table_entries, formal_cap,
+        contexts, evidence, dropped_count, overwritten_count)

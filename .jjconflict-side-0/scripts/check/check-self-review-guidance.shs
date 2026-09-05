@@ -1,0 +1,138 @@
+#!/bin/sh
+# Focused parity gate for self-review status semantics, remediation, and LLM/plugin guidance.
+set -eu
+
+root=${1:-.}
+fail() { echo "self-review-guidance: FAIL — $*" >&2; exit 1; }
+
+require_token() {
+    file=$1
+    token=$2
+    test -f "$root/$file" || fail "missing surface: $file"
+    rg -Fq "$token" "$root/$file" || fail "$file misses: $token"
+}
+
+full_surfaces='
+doc/07_guide/infra/self_review_policy_db.md
+doc/07_guide/infra/software_release.md
+.agents/skills/software-release/SKILL.md
+.agents/skills/release/SKILL.md
+.codex/skills/software-release/SKILL.md
+.codex/skills/release/SKILL.md
+.claude/skills/software-release.md
+.claude/skills/release.md
+.gemini/commands/software-release.toml
+.gemini/commands/release.toml
+.codex/skills/sp_dev/SKILL.md
+.codex/commands/sp_dev.md
+.claude/agents/spipe/dev.md
+.claude/skills/spipe.md
+.claude/commands/spipe.md
+.gemini/commands/sp_dev.toml
+examples/05_stdlib/spipe/doc/00_llm_process/skill_command/command/release.md
+examples/05_stdlib/spipe/.claude/skills/spipe.md
+examples/05_stdlib/spipe/.codex/skills/sp_dev/SKILL.md
+examples/05_stdlib/spipe/.gemini/commands/sp_dev.toml
+examples/05_stdlib/spipe/plugin/skills/software-release/SKILL.md
+examples/05_stdlib/spipe/plugin/skills/release/SKILL.md'
+
+for file in $full_surfaces; do
+    require_token "$file" 'GitHub forbids'
+    require_token "$file" 'APPROVED'
+    require_token "$file" 'SPipe Self Review Admission'
+    require_token "$file" 'default'
+    require_token "$file" 'deny'
+    require_token "$file" 'constrain'
+    require_token "$file" 'file'
+    require_token "$file" 'directory_files'
+    require_token "$file" 'directory_recursive'
+    require_token "$file" 'expiry'
+done
+
+for file in \
+    .claude/commands/dev.md \
+    .gemini/commands/dev.toml \
+    examples/05_stdlib/spipe/.codex/skills/dev/SKILL.md \
+    examples/05_stdlib/spipe/.gemini/commands/dev.toml; do
+    require_token "$file" 'GitHub forbids'
+    require_token "$file" 'APPROVED'
+    require_token "$file" 'SPipe Self Review Admission'
+    require_token "$file" 'exact rejection/invalidation reason'
+done
+
+searchable_surfaces='
+doc/00_llm_process/llm_wiki.md
+doc/07_guide/app/devhub.md
+.codex/skills/sp_dev/SKILL.md
+.claude/agents/spipe/dev.md
+.claude/agents/spipe/ship.md
+.claude/skills/repo_and_pull_req.md
+.agents/skills/release/SKILL.md
+.codex/skills/release/SKILL.md
+.gemini/commands/sp_dev.toml
+tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md'
+
+for file in $searchable_surfaces; do
+    require_token "$file" 'self approve'
+    require_token "$file" 'approve PR'
+    require_token "$file" 'author cannot approve'
+    require_token "$file" 'spipe self-review-guide'
+done
+require_token tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md 'expected_head_sha="$HEAD_SHA"'
+require_token tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md 'only when `REPO == ormastes/simple`'
+
+for token in \
+    '_github_author_approval_rejected' \
+    '_self_review_steps' \
+    '_github_pr_repository' \
+    'high/xhigh/max/ultra' \
+    'pull_request_number={pr_number}' \
+    'expected_head_sha=\"$HEAD_SHA\"' \
+    "self_attestation='PASS:0:0'" \
+    'Poll SPipe Self Review Admission on that exact head' \
+    'not GitHub provider APPROVED'; do
+    require_token src/app/devhub/cmd_github.spl "$token"
+done
+
+cmp -s "$root/.agents/skills/software-release/SKILL.md" "$root/.codex/skills/software-release/SKILL.md" ||
+    fail 'software-release agent/Codex projections drifted'
+cmp -s "$root/.agents/skills/release/SKILL.md" "$root/.codex/skills/release/SKILL.md" ||
+    fail 'release agent/Codex projections drifted'
+cmp -s "$root/.codex/skills/sp_dev/SKILL.md" "$root/.codex/commands/sp_dev.md" ||
+    fail 'sp_dev Codex skill/command projections drifted'
+cmp -s "$root/.claude/skills/spipe.md" "$root/.claude/commands/spipe.md" ||
+    fail 'SPipe Claude skill/command projections drifted'
+
+for token in \
+    '_self_review_remediation' \
+    'required_check_not_github_author_approved_review' \
+    'github_author_approved_review_available' \
+    'ordinary_code_text_absent_operator_deny_or_constraint' \
+    'do not attempt an author APPROVED review'; do
+    require_token src/app/release/main.spl "$token"
+done
+
+for token in \
+    'Invalidation reason:' \
+    'Rejection reason:' \
+    'Remediation:' \
+    'failure_stage=' \
+    'trusted repository_dispatch' \
+    'protected-base push requires exact base/diff reevaluation' \
+    'ten-minute self-review decision expired' \
+    'GitHub forbids PR authors from submitting an APPROVED review' \
+    'A deny needs external policy-owner action' \
+    'EXPECTED_HEAD_SHA' \
+    'reviewed head SHA is no longer the live PR head' \
+    'unsafe material must be removed'; do
+    require_token .github/workflows/review-admission.yml "$token"
+done
+
+require_token examples/05_stdlib/spipe/plugin/manifest.sdn 'scoped_self_review_guidance: true'
+require_token examples/05_stdlib/spipe/src/release/contract.js 'scoped_self_review_guidance: true'
+require_token examples/05_stdlib/spipe/scripts/build.shs 'capability.scoped_self_review_guidance=true'
+for clause in self-review-status self-review-scopes self-review-invalidation self-review-remediation; do
+    require_token examples/05_stdlib/spipe/src/release/contract.js "[\"$clause\""
+done
+
+echo "self-review-guidance: PASS — human, LLM, workflow/CLI, and SPipe plugin surfaces agree"

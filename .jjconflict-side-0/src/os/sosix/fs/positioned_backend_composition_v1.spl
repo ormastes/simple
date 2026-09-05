@@ -1,0 +1,113 @@
+"""Typed production owner for SOSIX positioned filesystem backend routing.
+
+The selected enum is authoritative.  Dispatch never guesses a filesystem from
+an integer handle, so equal or reused raw driver handles cannot cross routes.
+The default remains FAT32 for compatibility with the live syscall shim.
+"""
+
+use os.sosix.fs.dbfs_positioned_vfs_backend.SosixDbfsPositionedVfsBackendV1
+use os.sosix.fs.fat32_positioned_vfs_backend.SosixFat32PositionedVfsBackendV1
+use os.sosix.fs.nvfs_positioned_vfs_backend.SosixNvfsPositionedVfsBackendV1
+use os.sosix.fs.service_vfs_backend_v1.SosixPositionedVfsBackendV1
+
+pub enum SosixPositionedBackendKindV1:
+    Fat32
+    Nvfs
+    Dbfs
+    Unavailable
+
+pub struct SosixPositionedBackendOwnerV1:
+    kind: SosixPositionedBackendKindV1
+    route_generation: u64
+
+pub struct SosixPositionedBackendInstallResultV1:
+    accepted: bool
+    reason: text
+    owner: SosixPositionedBackendOwnerV1
+
+export SosixPositionedBackendKindV1, SosixPositionedBackendOwnerV1
+export SosixPositionedBackendInstallResultV1
+
+pub fn sosix_positioned_backend_default_v1() -> SosixPositionedBackendOwnerV1:
+    """Retain the previously shipped FAT32 production route as the default."""
+    SosixPositionedBackendOwnerV1(
+        kind: SosixPositionedBackendKindV1.Fat32,
+        route_generation: 1u64)
+
+pub fn sosix_positioned_backend_unavailable_v1() -> SosixPositionedBackendOwnerV1:
+    SosixPositionedBackendOwnerV1(
+        kind: SosixPositionedBackendKindV1.Unavailable,
+        route_generation: 0u64)
+
+pub fn sosix_positioned_backend_route_name_v1(
+    owner: SosixPositionedBackendOwnerV1
+) -> text:
+    match owner.kind:
+        case Fat32: "fat32"
+        case Nvfs: "nvfs"
+        case Dbfs: "dbfs"
+        case Unavailable: "unavailable"
+
+pub fn sosix_positioned_backend_install_v1(
+    owner: SosixPositionedBackendOwnerV1,
+    kind: SosixPositionedBackendKindV1
+) -> SosixPositionedBackendInstallResultV1:
+    """Install one explicit route, returning the next owner value.
+
+    ``Unavailable`` is a fail-closed state, not an installable success route.
+    Generation exhaustion is rejected instead of wrapping an old receipt.
+    """
+    if kind == SosixPositionedBackendKindV1.Unavailable:
+        return SosixPositionedBackendInstallResultV1(
+            accepted: false, reason: "positioned-backend-route-unavailable",
+            owner: owner)
+    if owner.route_generation == 0xffffffffffffffffu64:
+        return SosixPositionedBackendInstallResultV1(
+            accepted: false, reason: "positioned-backend-route-generation-exhausted",
+            owner: owner)
+    SosixPositionedBackendInstallResultV1(
+        accepted: true, reason: "positioned-backend-route-installed",
+        owner: SosixPositionedBackendOwnerV1(
+            kind: kind, route_generation: owner.route_generation + 1u64))
+
+impl SosixPositionedVfsBackendV1 for SosixPositionedBackendOwnerV1:
+    fn positioned_io_available() -> bool:
+        self.kind != SosixPositionedBackendKindV1.Unavailable and
+            self.route_generation != 0u64
+
+    fn read_at(
+        file_object_id: u64, offset: u64, length: u64
+    ) -> Result<[u8], text>:
+        match self.kind:
+            case Fat32:
+                val backend = SosixFat32PositionedVfsBackendV1()
+                backend.read_at(file_object_id, offset, length)
+            case Nvfs:
+                val backend = SosixNvfsPositionedVfsBackendV1()
+                backend.read_at(file_object_id, offset, length)
+            case Dbfs:
+                val backend = SosixDbfsPositionedVfsBackendV1()
+                backend.read_at(file_object_id, offset, length)
+            case Unavailable:
+                Err("backend-positioned-io-unavailable")
+
+    me fn write_at(
+        file_object_id: u64, offset: u64, data: [u8]
+    ) -> Result<u64, text>:
+        match self.kind:
+            case Fat32:
+                var backend = SosixFat32PositionedVfsBackendV1()
+                backend.write_at(file_object_id, offset, data)
+            case Nvfs:
+                var backend = SosixNvfsPositionedVfsBackendV1()
+                backend.write_at(file_object_id, offset, data)
+            case Dbfs:
+                var backend = SosixDbfsPositionedVfsBackendV1()
+                backend.write_at(file_object_id, offset, data)
+            case Unavailable:
+                Err("backend-positioned-io-unavailable")
+
+export sosix_positioned_backend_default_v1
+export sosix_positioned_backend_unavailable_v1
+export sosix_positioned_backend_route_name_v1
+export sosix_positioned_backend_install_v1

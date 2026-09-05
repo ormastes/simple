@@ -1,0 +1,137 @@
+# common.ui.draw_ir_v3_backend_access — backend read accessors over canonical columns
+#
+# S2 accessor seam: DrawIR v3 columns store Vulkan-canonical values (S1,
+# `draw_ir_v3_backend_enums.spl`). Backends read through this seam:
+#   - `*_vk` accessors are IDENTITY. They exist only so every backend reads
+#     through the same uniform seam — the Vulkan lane pays zero conversion
+#     and may keep touching columns directly.
+#   - `*_mtl` / `*_dxgi` / `*_d3d12` accessors are static match tables that
+#     remap the canonical value on READ. No column is ever stored in a
+#     non-canonical encoding.
+# Format remaps return 0 for any value outside the named S1 set. For Metal
+# 0 is `MTLPixelFormatInvalid` and for DXGI it is `DXGI_FORMAT_UNKNOWN`, so
+# 0 doubles as the unsupported-format sentinel: callers MUST treat 0 as a
+# reject (emit a receipt), never submit it. Note the deliberate asymmetry:
+# canonical UNDEFINED (0) also maps to 0, which is correct — UNDEFINED is
+# not submittable either.
+# Blend remaps have no free sentinel on the Metal side (0 is a valid
+# MTLBlendFactor/MTLBlendOp), so callers MUST pre-validate with the S1
+# `draw_ir_blend_*_is_valid` fns; out-of-domain values collapse to 0. On
+# the D3D12 side 0 is outside `D3D12_BLEND`/`D3D12_BLEND_OP` (both start
+# at 1), so 0 is a genuine reject sentinel there.
+# Decision + rationale:
+#   doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md §2.4, §3
+#   doc/03_plan/ui/draw_ir/draw_ir_backend_native_refactor_plan.md (S2)
+#
+# Keep this file flat: pub fns + match tables only.
+
+use common.ui.draw_ir_v3.{DrawIrV3Paint}
+use common.ui.draw_ir_v3_backend_enums.{draw_ir_blend_unpack}
+
+# --- format remap (VkFormat -> MTLPixelFormat / DXGI_FORMAT) --------------
+
+pub fn draw_ir_format_vk(v: u32) -> u32:
+    v
+
+pub fn draw_ir_format_mtl(v: u32) -> u32:
+    val m = v.to_i64()
+    match m:
+        case 0: 0u32       # UNDEFINED        -> MTLPixelFormatInvalid
+        case 9: 10u32      # R8_UNORM         -> MTLPixelFormatR8Unorm
+        case 37: 70u32     # R8G8B8A8_UNORM   -> MTLPixelFormatRGBA8Unorm
+        case 43: 71u32     # R8G8B8A8_SRGB    -> MTLPixelFormatRGBA8Unorm_sRGB
+        case 44: 80u32     # B8G8R8A8_UNORM   -> MTLPixelFormatBGRA8Unorm
+        case 50: 81u32     # B8G8R8A8_SRGB    -> MTLPixelFormatBGRA8Unorm_sRGB
+        case 126: 252u32   # D32_SFLOAT       -> MTLPixelFormatDepth32Float
+        case _: 0u32       # unsupported-format sentinel — callers reject
+
+pub fn draw_ir_format_dxgi(v: u32) -> u32:
+    val m = v.to_i64()
+    match m:
+        case 0: 0u32       # UNDEFINED        -> DXGI_FORMAT_UNKNOWN
+        case 9: 61u32      # R8_UNORM         -> DXGI_FORMAT_R8_UNORM
+        case 37: 28u32     # R8G8B8A8_UNORM   -> DXGI_FORMAT_R8G8B8A8_UNORM
+        case 43: 29u32     # R8G8B8A8_SRGB    -> DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+        case 44: 87u32     # B8G8R8A8_UNORM   -> DXGI_FORMAT_B8G8R8A8_UNORM
+        case 50: 91u32     # B8G8R8A8_SRGB    -> DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+        case 126: 40u32    # D32_SFLOAT       -> DXGI_FORMAT_D32_FLOAT
+        case _: 0u32       # unsupported-format sentinel — callers reject
+
+# --- blend factor remap (VkBlendFactor -> MTLBlendFactor / D3D12_BLEND) ---
+
+pub fn draw_ir_blend_factor_mtl(v: u32) -> u32:
+    val m = v.to_i64()
+    match m:
+        case 0: 0u32       # ZERO                -> MTLBlendFactorZero
+        case 1: 1u32       # ONE                 -> MTLBlendFactorOne
+        case 6: 4u32       # SRC_ALPHA           -> MTLBlendFactorSourceAlpha
+        case 7: 5u32       # ONE_MINUS_SRC_ALPHA -> MTLBlendFactorOneMinusSourceAlpha
+        case 8: 6u32       # DST_ALPHA           -> MTLBlendFactorDestinationAlpha
+        case 9: 7u32       # ONE_MINUS_DST_ALPHA -> MTLBlendFactorOneMinusDestinationAlpha
+        case _: 0u32       # out-of-domain — pre-validate with S1 is_valid fns
+
+pub fn draw_ir_blend_factor_d3d12(v: u32) -> u32:
+    val m = v.to_i64()
+    match m:
+        case 0: 1u32       # ZERO                -> D3D12_BLEND_ZERO
+        case 1: 2u32       # ONE                 -> D3D12_BLEND_ONE
+        case 6: 5u32       # SRC_ALPHA           -> D3D12_BLEND_SRC_ALPHA
+        case 7: 6u32       # ONE_MINUS_SRC_ALPHA -> D3D12_BLEND_INV_SRC_ALPHA
+        case 8: 7u32       # DST_ALPHA           -> D3D12_BLEND_DEST_ALPHA
+        case 9: 8u32       # ONE_MINUS_DST_ALPHA -> D3D12_BLEND_INV_DEST_ALPHA
+        case _: 0u32       # reject sentinel (0 is outside D3D12_BLEND)
+
+# --- blend op remap (VkBlendOp -> MTLBlendOperation / D3D12_BLEND_OP) -----
+
+pub fn draw_ir_blend_op_mtl(v: u32) -> u32:
+    val m = v.to_i64()
+    match m:
+        case 0: 0u32       # ADD              -> MTLBlendOperationAdd
+        case 1: 1u32       # SUBTRACT         -> MTLBlendOperationSubtract
+        case 2: 2u32       # REVERSE_SUBTRACT -> MTLBlendOperationReverseSubtract
+        case 3: 3u32       # MIN              -> MTLBlendOperationMin
+        case 4: 4u32       # MAX              -> MTLBlendOperationMax
+        case _: 0u32       # out-of-domain — pre-validate with S1 is_valid fns
+
+pub fn draw_ir_blend_op_d3d12(v: u32) -> u32:
+    val m = v.to_i64()
+    match m:
+        case 0: 1u32       # ADD              -> D3D12_BLEND_OP_ADD
+        case 1: 2u32       # SUBTRACT         -> D3D12_BLEND_OP_SUBTRACT
+        case 2: 3u32       # REVERSE_SUBTRACT -> D3D12_BLEND_OP_REV_SUBTRACT
+        case 3: 4u32       # MIN              -> D3D12_BLEND_OP_MIN
+        case 4: 5u32       # MAX              -> D3D12_BLEND_OP_MAX
+        case _: 0u32       # reject sentinel (0 is outside D3D12_BLEND_OP)
+
+# --- paint-level helpers --------------------------------------------------
+# Read a DrawIrV3Paint view's packed blend_mode (S1 u16 layout:
+# src<<10 | dst<<5 | op) and return the per-backend (src, dst, op) triple.
+
+pub struct DrawIrV3BackendBlend:
+    src_factor: u32
+    dst_factor: u32
+    op: u32
+
+pub fn draw_ir_paint_blend_vk(paint: DrawIrV3Paint) -> DrawIrV3BackendBlend:
+    val parts = draw_ir_blend_unpack(paint.blend_mode)
+    DrawIrV3BackendBlend(
+        src_factor: parts.src_factor,
+        dst_factor: parts.dst_factor,
+        op: parts.op
+    )
+
+pub fn draw_ir_paint_blend_mtl(paint: DrawIrV3Paint) -> DrawIrV3BackendBlend:
+    val parts = draw_ir_blend_unpack(paint.blend_mode)
+    DrawIrV3BackendBlend(
+        src_factor: draw_ir_blend_factor_mtl(parts.src_factor),
+        dst_factor: draw_ir_blend_factor_mtl(parts.dst_factor),
+        op: draw_ir_blend_op_mtl(parts.op)
+    )
+
+pub fn draw_ir_paint_blend_d3d12(paint: DrawIrV3Paint) -> DrawIrV3BackendBlend:
+    val parts = draw_ir_blend_unpack(paint.blend_mode)
+    DrawIrV3BackendBlend(
+        src_factor: draw_ir_blend_factor_d3d12(parts.src_factor),
+        dst_factor: draw_ir_blend_factor_d3d12(parts.dst_factor),
+        op: draw_ir_blend_op_d3d12(parts.op)
+    )

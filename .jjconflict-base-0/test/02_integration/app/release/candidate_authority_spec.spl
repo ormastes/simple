@@ -1,0 +1,138 @@
+"""Candidate creation and promotion trust durable session-owned state."""
+# @req: REQ-012
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use app.io.mod.{process_run_bounded, dir_create_all, file_atomic_write, time_now_unix_micros, getpid}
+use app.release.policy.{ReleaseSession, CandidateManifest, ReleaseAdmission, candidate_identity}
+use app.release.session_authority.{register_release_session}
+use app.release.candidate_authority.{
+    create_candidate_plan, load_candidate_status, record_candidate_admission,
+    plan_persisted_candidate_promotion
+}
+
+fn run(command: text, arguments: [text]) -> text:
+    val (stdout, _stderr, code) = process_run_bounded(command, arguments, 5000, 262144)
+    if code != 0:
+        return ""
+    stdout.trim()
+
+fn git(root: text, arguments: [text]) -> text:
+    run("git", ["-C", root] + arguments)
+
+fn digest(letter: text) -> text:
+    letter.repeat(64)
+
+fn fixture() -> (text, ReleaseSession, CandidateManifest):
+    val fixture_root = "/tmp/simple-release-candidate-authority-" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    val primary = fixture_root + "/primary"
+    val workspace = fixture_root + "/candidate-work"
+    val _dirs = dir_create_all(primary + "/.spipe/policy")
+    val _policy = file_atomic_write(primary + "/.spipe/policy/vcs.sdn", "policy: fixture\n")
+    val _tracked = file_atomic_write(primary + "/tracked.txt", "base\n")
+    val _init = git(primary, ["init", "-b", "main"])
+    val _email = git(primary, ["config", "user.email", "candidate-authority@example.invalid"])
+    val _name = git(primary, ["config", "user.name", "Candidate Authority Spec"])
+    val _add = git(primary, ["add", "."])
+    val _commit = git(primary, ["commit", "-m", "fixture base"])
+    val base = git(primary, ["rev-parse", "HEAD"])
+    val _origin = git(primary, ["update-ref", "refs/remotes/origin/main", base])
+    val branch = "work/release/local-20260826-902-candidate-authority"
+    val _worktree = git(primary, ["worktree", "add", "-b", branch, workspace, base])
+    val canonical = run("realpath", [workspace])
+    val session = ReleaseSession(
+        session_id: "candidate-authority-" + getpid().to_text(),
+        workspace_path: canonical, main_workspace_path: run("realpath", [primary]),
+        work_branch: branch, target_ref: "main", base_sha: base,
+        expected_target_sha: base,
+        policy_sha256: file_hash_sha256(canonical + "/.spipe/policy/vcs.sdn")
+    )
+    val candidate = CandidateManifest(
+        version: "1.0.0-beta.2", attempt: 1,
+        candidate_ref: "candidate/v1.0.0-beta.2/a001", commit_sha: base,
+        source_tree_sha256: digest("a"), policy_sha256: session.policy_sha256,
+        version_manifest_sha256: digest("b"), toolchain_manifest_sha256: digest("c"),
+        support_manifest_sha256: digest("d"), build_graph_sha256: digest("e"),
+        creator_identity: session.session_id, evidence_manifest_sha256: digest("f")
+    )
+    (canonical, session, candidate)
+
+fn admission(candidate: CandidateManifest) -> ReleaseAdmission:
+    ReleaseAdmission(
+        candidate_version: candidate.version, candidate_attempt: candidate.attempt,
+        candidate_ref: candidate.candidate_ref,
+        candidate_identity: candidate_identity(candidate),
+        candidate_commit_sha: candidate.commit_sha,
+        source_tree_sha256: candidate.source_tree_sha256,
+        policy_sha256: candidate.policy_sha256,
+        version_manifest_sha256: candidate.version_manifest_sha256,
+        toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
+        support_manifest_sha256: candidate.support_manifest_sha256,
+        build_graph_sha256: candidate.build_graph_sha256,
+        creator_identity: candidate.creator_identity,
+        artifact_manifest_sha256: digest("1"),
+        evidence_manifest_sha256: candidate.evidence_manifest_sha256,
+        qualification_receipt_sha256: digest("2"),
+        admission_receipt_schema: "spipe-review-admission/1",
+        admission_receipt_sha256: digest("3")
+    )
+
+describe "Candidate authority":
+    it "persists one create-once candidate and emits only an external authority plan":
+        val (root, session, candidate) = fixture()
+        expect(register_release_session(root, session).valid).to_be(true)
+        val created = create_candidate_plan(root, session, candidate)
+        expect(created.valid).to_be(true)
+        expect(created.mutation).to_equal("candidate-state-only")
+        expect(created.authority_plan).to_contain("expected old ref: absent")
+        expect(created.authority_plan).to_contain("no mutation performed")
+
+        step("Repeat the exact state idempotently")
+        val repeated = create_candidate_plan(root, session, candidate)
+        expect(repeated.valid).to_be(true)
+        expect(repeated.state_sha256).to_equal(created.state_sha256)
+
+        step("Reject a different identity for the same protected candidate ref")
+        var changed = candidate
+        changed.evidence_manifest_sha256 = digest("9")
+        expect(create_candidate_plan(root, session, changed).reason).to_contain("create-once")
+
+    it "loads persisted admission and plans promotion without caller-supplied admission strings":
+        val (root, session, candidate) = fixture()
+        expect(register_release_session(root, session).valid).to_be(true)
+        val created = create_candidate_plan(root, session, candidate)
+        expect(created.valid).to_be(true)
+        val before = load_candidate_status(root, candidate.version, candidate.attempt)
+        expect(before.valid).to_be(true)
+        expect(before.admission_present).to_be(false)
+
+        val admitted = record_candidate_admission(root, session, created.state_sha256, admission(candidate))
+        expect(admitted.valid).to_be(true)
+        val status = load_candidate_status(root, candidate.version, candidate.attempt)
+        expect(status.valid).to_be(true)
+        expect(status.admission_present).to_be(true)
+        expect(status.candidate_identity).to_equal(candidate_identity(candidate))
+
+        step("Reject stale caller state and accept only the persisted candidate/admission digest")
+        expect(plan_persisted_candidate_promotion(root, candidate.version, candidate.attempt, digest("0")).reason).to_contain("stale")
+        val plan = plan_persisted_candidate_promotion(root, candidate.version, candidate.attempt, status.state_digest)
+        expect(plan.valid).to_be(true)
+        expect(plan.mutation).to_equal("none")
+        expect(plan.authority_plan).to_contain("no rebuild or fallback")
+        expect(plan.authority_plan).to_contain("no mutation performed")
+
+    it "rejects an unregistered caller and a candidate not bound to its observed session head":
+        val (root, session, candidate) = fixture()
+        expect(create_candidate_plan(root, session, candidate).reason).to_contain("mutation lease")
+        expect(register_release_session(root, session).valid).to_be(true)
+        var wrong = candidate
+        wrong.commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(create_candidate_plan(root, session, wrong).reason).to_contain("session HEAD")
+
+    it "rejects self-review decisions as candidate admission authority":
+        val (root, session, candidate) = fixture()
+        expect(register_release_session(root, session).valid).to_be(true)
+        val created = create_candidate_plan(root, session, candidate)
+        expect(created.valid).to_be(true)
+        var self_review_only = admission(candidate)
+        self_review_only.admission_receipt_schema = "spipe-self-review-decision/1"
+        expect(record_candidate_admission(root, session, created.state_sha256, self_review_only).reason).to_contain("self-review decisions cannot authorize")

@@ -1,0 +1,96 @@
+#!/bin/sh
+# cache-publish-main — Mode A publisher (design §15.2).
+#
+# MODE A ONLY: this script publishes mappings for actions THIS JOB REBUILT on
+# the exact main commit. It never relabels a pre-existing branch result — that
+# is Mode B and is deliberately not implemented.
+#
+# Ordering matters and is not negotiable:
+#   1. preflight (fail closed)
+#   2. collect git provenance — a REAL fetch, freshness BEFORE reachability
+#   3. publish, gated by the promotion gate
+#
+# BEST EFFORT: every failure after the preflight is reported and swallowed.
+# This script exits 0 unless its own arguments are wrong, because a cache
+# upload must never fail a build. The verdict line says what actually happened.
+#
+# Usage: sh scripts/ci/cache-publish-main.shs <mappings-file>
+#   mappings-file: one "<action_digest> <result_manifest_digest>" per line,
+#                  produced by the build that just ran.
+
+set -eu
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo '')"
+if [ -z "$REPO_ROOT" ]; then
+    echo "cache-publish-main: not a git repository; nothing can be published"
+    echo "VERDICT: skipped (no repository)"
+    exit 0
+fi
+
+MAPPINGS="${1:-}"
+if [ -z "$MAPPINGS" ]; then
+    echo "usage: cache-publish-main.shs <mappings-file>" >&2
+    exit 2
+fi
+
+PREFLIGHT="$(sh "$REPO_ROOT/scripts/ci/cache-preflight.shs" trusted_main_ci || true)"
+printf '%s\n' "$PREFLIGHT"
+VERDICT="$(printf '%s\n' "$PREFLIGHT" | tail -1)"
+if [ "$VERDICT" != "VERDICT: write-main" ]; then
+    echo "VERDICT: skipped (preflight did not grant main-write)"
+    exit 0
+fi
+
+if [ ! -f "$MAPPINGS" ]; then
+    echo "cache-publish-main: no mappings file at $MAPPINGS; the build published nothing"
+    echo "VERDICT: skipped (no mappings)"
+    exit 0
+fi
+
+# Provenance is collected AFTER the build, so the fetch freshness window is
+# measured against the publish, not against a stale pre-build fetch.
+PROV="$(mktemp)"
+trap 'rm -f "$PROV"' EXIT
+
+PROMOTION_BUILDER_ID="${CACHE_GATEWAY_TOKEN_ID}" \
+PROMOTION_BUILDER_TRUSTED=true \
+PROMOTION_WORKFLOW_DIGEST="${CACHE_WORKFLOW_DIGEST:-}" \
+PROMOTION_WORKFLOW_APPROVED=true \
+PROMOTION_MERGE_STRATEGY="${PROMOTION_MERGE_STRATEGY:-fast_forward}" \
+    sh "$REPO_ROOT/scripts/cache/promotion/collect-git-provenance.shs" "${GITHUB_SHA:-HEAD}" > "$PROV" 2>/dev/null || {
+        echo "cache-publish-main: provenance collection failed; publishing nothing"
+        echo "VERDICT: skipped (no provenance)"
+        exit 0
+    }
+
+# Reachability is only meaningful if the fetch was real and fresh. The gate in
+# src/compiler/80.driver/cache/promotion/promotion_gate.spl enforces both; this
+# is a cheap early-out so a doomed publish does not even start.
+if ! grep -q 'fetch_performed: true' "$PROV"; then
+    echo "cache-publish-main: no real fetch was performed; refusing to publish"
+    echo "VERDICT: skipped (stale provenance)"
+    exit 0
+fi
+
+PUBLISHED=0
+FAILED=0
+while read -r ACTION MANIFEST _rest; do
+    [ -n "${ACTION:-}" ] || continue
+    case "$ACTION" in \#*) continue ;; esac
+    if bin/simple run "$REPO_ROOT/src/app/cache_gateway/main.spl" publish-main \
+        --provenance "$PROV" \
+        --action "$ACTION" \
+        --manifest "$MANIFEST" >/dev/null 2>&1; then
+        PUBLISHED=$((PUBLISHED + 1))
+    else
+        FAILED=$((FAILED + 1))
+    fi
+done < "$MAPPINGS"
+
+echo "cache-publish-main: published=${PUBLISHED} failed=${FAILED}"
+if [ "$FAILED" -gt 0 ]; then
+    # Reported, not fatal.
+    echo "VERDICT: partial (${PUBLISHED} published, ${FAILED} failed — build unaffected)"
+    exit 0
+fi
+echo "VERDICT: published ${PUBLISHED} mapping(s)"

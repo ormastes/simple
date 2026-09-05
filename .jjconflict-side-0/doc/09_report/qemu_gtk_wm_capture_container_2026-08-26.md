@@ -1,0 +1,248 @@
+# QEMU GTK WM Capture Evidence
+
+- status: unavailable
+- reason: missing-qmp-socket
+- simple bin: /mnt/data/worktrees/lane-amb3/build/bootstrap/amb2/stage2/x86_64-unknown-linux-gnu/simple
+- simple bin source: explicit-env
+- simple bin status: pass
+- qemu bin: qemu-system-x86_64
+- qemu arch: x86_64
+- qemu display gtk supported: true
+- qemu display reason: pass
+- auto QMP launch: 1
+- host WM smoke enabled: 0
+- auto QMP status: unavailable
+- auto QMP reason: wm-simple-web-build-failed
+- auto QMP exit code: 1
+- auto QMP pid: 
+- auto QMP socket: 
+- auto QMP serial log: 
+- auto QMP serial log bytes: 0
+- auto QMP serial log cksum: 0
+- auto QMP stderr log: 
+- auto QMP stderr log bytes: 0
+- auto QMP stderr log cksum: 0
+- auto QMP missing marker: 
+- auto QMP marker timeout ms: 
+- auto QMP qemu running at failure: 
+- auto QMP serial bytes: 
+- auto QMP stderr bytes: 
+- auto QMP guest perf marker present: 
+- auto QMP guest perf sample origin: 
+- auto QMP guest perf simple frame cycles: 
+- auto QMP guest perf iterations: 
+- auto QMP guest perf timing unit: 
+- auto QMP guest perf pending marker: 
+- qmp socket: 
+- host WM smoke status: skipped
+- host WM smoke reason: QEMU_GTK_WM_HOST_SMOKE=0
+- host WM smoke report: /mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/wm-host-launch-capture.md
+- live capture status: unavailable
+- live capture reason: missing-qmp-socket
+- qemu live bitmap status: unavailable
+- qemu live bitmap reason: missing-qmp-socket
+- live capture pixels: 0
+- live capture non-black pixels: 0
+- live capture sample matches: 0
+- live capture sample mismatches: 0
+- live capture full-scene mismatches: 0
+- qemu-side perf status: unavailable
+- qemu-side perf reason: missing-qmp-socket
+- qemu-side perf simple frame cycles: 0
+- qemu-side perf host GTK frame us: 0
+- qemu-side perf iterations: 0
+- qemu-side perf timing unit: 
+- qemu-side perf comparison available: false
+- qemu-side perf scope: qemu-live-bitmap-plus-host-gtk-baseline
+- qemu-side perf release gate: guest-simple-frame-plus-host-gtk-baseline
+- qemu-side perf release blocker: missing-qmp-socket
+- qemu-side perf required for release: true
+- qemu-side perf harness status: unwired
+- qemu-side perf harness reason: qemu-side-simple-perf-harness-not-wired
+- qemu-side perf harness sample origin: none
+- qemu-side perf harness required sample origin: qemu-guest
+- qemu-side perf harness pending marker: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc
+- qemu-side perf harness marker line: 
+- host perf baseline status: unavailable
+- host perf baseline reason: simple-reference-failed
+- host perf baseline simple frame us: 0
+- host perf baseline GTK frame us: 0
+- host perf baseline iterations: 200
+- host perf baseline comparison available: false
+- host perf baseline scope: host-gtk-gl-exact-scene-baseline
+- host perf baseline promotes QEMU perf: false
+- fake QMP screendump status: fail
+- fake QMP screendump reason: fake-qmp-evidence-failed
+- fake QMP screendump report: /mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/fake-qmp-capture.md
+- fake QMP expected ARGB path: 
+- fake QMP expected ARGB bytes: 0
+- fake QMP expected ARGB cksum: 0
+- fake QMP captured ARGB path: 
+- fake QMP captured ARGB bytes: 0
+- fake QMP captured ARGB cksum: 0
+- fake QMP output bytes: 1072
+- fake QMP output cksum: 3139437293
+- host GTK GL WM scene status: unavailable
+- host GTK GL WM scene reason: simple-reference-failed
+- host GTK GL WM scene report: /mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/gtk-gl-wm-scene.md
+- host GTK GL WM scene simple frame us: 0
+- host GTK GL WM scene GTK frame us: 0
+- host GTK GL WM scene mismatch count: 
+- host GTK GL WM scene expected RGBA path: 
+- host GTK GL WM scene expected RGBA bytes: 0
+- host GTK GL WM scene expected RGBA cksum: 0
+- host GTK GL WM scene captured RGBA path: 
+- host GTK GL WM scene captured RGBA bytes: 0
+- host GTK GL WM scene captured RGBA cksum: 0
+- host GTK GL WM scene blur/tolerance used: 
+- host GTK GL WM scene output bytes: 285
+- host GTK GL WM scene output cksum: 1584915234
+- GUI SMF artifact contract status: missing
+- GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=missing artifact=build/gui/pure_gui_hot.smf sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
+- GUI SMF artifact contract scope: contract-only; does not promote live QEMU capture
+
+## Raw Evidence
+- qemu_gtk_wm_capture_status=unavailable
+- qemu_gtk_wm_capture_reason=missing-qmp-socket
+- qemu_gtk_wm_capture_simple_bin=/mnt/data/worktrees/lane-amb3/build/bootstrap/amb2/stage2/x86_64-unknown-linux-gnu/simple
+- qemu_gtk_wm_capture_simple_bin_source=explicit-env
+- qemu_gtk_wm_capture_simple_bin_status=pass
+- qemu_gtk_wm_capture_qemu_bin=qemu-system-x86_64
+- qemu_gtk_wm_capture_qemu_arch=x86_64
+- qemu_gtk_wm_capture_display_gtk_supported=true
+- qemu_gtk_wm_capture_display_reason=pass
+- qemu_gtk_wm_capture_auto_qmp_launch=1
+- qemu_gtk_wm_capture_auto_qmp_launcher=/mnt/data/worktrees/lane-amb3/build/render-qmp-launcher/simpleos_desktop_qmp_launch-5
+- qemu_gtk_wm_capture_host_wm_smoke=0
+- qemu_gtk_wm_capture_auto_qmp_status=unavailable
+- qemu_gtk_wm_capture_auto_qmp_reason=wm-simple-web-build-failed
+- qemu_gtk_wm_capture_auto_qmp_exit_code=1
+- qemu_gtk_wm_capture_auto_qmp_pid=
+- qemu_gtk_wm_capture_auto_qmp_socket=
+- qemu_gtk_wm_capture_auto_qmp_serial_log=
+- qemu_gtk_wm_capture_auto_qmp_serial_log_bytes=0
+- qemu_gtk_wm_capture_auto_qmp_serial_log_cksum=0
+- qemu_gtk_wm_capture_auto_qmp_stderr_log=
+- qemu_gtk_wm_capture_auto_qmp_stderr_log_bytes=0
+- qemu_gtk_wm_capture_auto_qmp_stderr_log_cksum=0
+- qemu_gtk_wm_capture_auto_qmp_missing_marker=
+- qemu_gtk_wm_capture_auto_qmp_marker_timeout_ms=
+- qemu_gtk_wm_capture_auto_qmp_qemu_running=
+- qemu_gtk_wm_capture_auto_qmp_serial_bytes=
+- qemu_gtk_wm_capture_auto_qmp_stderr_bytes=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_marker_present=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_sample_origin=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_simple_frame_cycles=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_iterations=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_timing_unit=
+- qemu_gtk_wm_capture_auto_qmp_guest_perf_pending_marker=
+- qemu_gtk_wm_capture_qmp_socket=
+- qemu_gtk_wm_capture_wm_exit_code=0
+- qemu_gtk_wm_capture_host_wm_status=skipped
+- qemu_gtk_wm_capture_host_wm_reason=QEMU_GTK_WM_HOST_SMOKE=0
+- qemu_gtk_wm_capture_host_wm_exit_code=0
+- qemu_gtk_wm_capture_host_wm_report_path=/mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/wm-host-launch-capture.md
+- qemu_gtk_wm_capture_live_capture_status=unavailable
+- qemu_gtk_wm_capture_live_capture_reason=missing-qmp-socket
+- qemu_gtk_wm_capture_qemu_live_status=unavailable
+- qemu_gtk_wm_capture_qemu_live_reason=missing-qmp-socket
+- qemu_gtk_wm_capture_qemu_live_pixels=0
+- qemu_gtk_wm_capture_qemu_live_non_black_pixels=0
+- qemu_gtk_wm_capture_qemu_live_sample_matches=0
+- qemu_gtk_wm_capture_qemu_live_sample_mismatches=0
+- qemu_gtk_wm_capture_qemu_live_scene_mismatches=0
+- qemu_gtk_wm_capture_perf_status=unavailable
+- qemu_gtk_wm_capture_perf_reason=missing-qmp-socket
+- qemu_gtk_wm_capture_perf_simple_frame_us=0
+- qemu_gtk_wm_capture_perf_simple_frame_cycles=0
+- qemu_gtk_wm_capture_perf_gtk_frame_us=0
+- qemu_gtk_wm_capture_perf_iterations=0
+- qemu_gtk_wm_capture_perf_timing_unit=
+- qemu_gtk_wm_capture_perf_comparison_available=false
+- qemu_gtk_wm_capture_perf_scope=qemu-live-bitmap-plus-host-gtk-baseline
+- qemu_gtk_wm_capture_perf_release_gate=guest-simple-frame-plus-host-gtk-baseline
+- qemu_gtk_wm_capture_perf_release_blocker=missing-qmp-socket
+- qemu_gtk_wm_capture_perf_required_for_release=true
+- qemu_gtk_wm_capture_qemu_perf_harness_status=unwired
+- qemu_gtk_wm_capture_qemu_perf_harness_reason=qemu-side-simple-perf-harness-not-wired
+- qemu_gtk_wm_capture_qemu_perf_harness_sample_origin=none
+- qemu_gtk_wm_capture_qemu_perf_harness_required_sample_origin=qemu-guest
+- qemu_gtk_wm_capture_qemu_perf_harness_pending_marker=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc
+- qemu_gtk_wm_capture_qemu_perf_harness_marker_line=
+- qemu_gtk_wm_capture_host_perf_status=unavailable
+- qemu_gtk_wm_capture_host_perf_reason=simple-reference-failed
+- qemu_gtk_wm_capture_host_perf_simple_frame_us=0
+- qemu_gtk_wm_capture_host_perf_gtk_frame_us=0
+- qemu_gtk_wm_capture_host_perf_iterations=200
+- qemu_gtk_wm_capture_host_perf_comparison_available=false
+- qemu_gtk_wm_capture_host_perf_scope=host-gtk-gl-exact-scene-baseline
+- qemu_gtk_wm_capture_host_perf_promotes_qemu_perf=false
+- qemu_gtk_wm_capture_fake_qmp_status=fail
+- qemu_gtk_wm_capture_fake_qmp_reason=fake-qmp-evidence-failed
+- qemu_gtk_wm_capture_fake_qmp_report_path=/mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/fake-qmp-capture.md
+- qemu_gtk_wm_capture_fake_qmp_expected_argb_path=
+- qemu_gtk_wm_capture_fake_qmp_expected_argb_bytes=0
+- qemu_gtk_wm_capture_fake_qmp_expected_argb_cksum=0
+- qemu_gtk_wm_capture_fake_qmp_captured_argb_path=
+- qemu_gtk_wm_capture_fake_qmp_captured_argb_bytes=0
+- qemu_gtk_wm_capture_fake_qmp_captured_argb_cksum=0
+- qemu_gtk_wm_capture_fake_qmp_output_bytes=1072
+- qemu_gtk_wm_capture_fake_qmp_output_cksum=3139437293
+- qemu_gtk_wm_capture_gtk_scene_status=unavailable
+- qemu_gtk_wm_capture_gtk_scene_reason=simple-reference-failed
+- qemu_gtk_wm_capture_gtk_scene_report_path=/mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/gtk-gl-wm-scene.md
+- qemu_gtk_wm_capture_gtk_scene_simple_frame_us=0
+- qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=0
+- qemu_gtk_wm_capture_gtk_scene_rgba_mismatch_count=
+- qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=
+- qemu_gtk_wm_capture_gtk_scene_expected_rgba_bytes=0
+- qemu_gtk_wm_capture_gtk_scene_expected_rgba_cksum=0
+- qemu_gtk_wm_capture_gtk_scene_captured_rgba_path=
+- qemu_gtk_wm_capture_gtk_scene_captured_rgba_bytes=0
+- qemu_gtk_wm_capture_gtk_scene_captured_rgba_cksum=0
+- qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=
+- qemu_gtk_wm_capture_gtk_scene_output_bytes=285
+- qemu_gtk_wm_capture_gtk_scene_output_cksum=1584915234
+- qemu_gtk_wm_capture_gui_smf_artifact_contract_status=missing
+- qemu_gtk_wm_capture_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=missing artifact=build/gui/pure_gui_hot.smf sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
+
+## Auto QMP Launch Output
+- [build][x86_64] phase=tooling FAILED: no runnable pure-Simple compiler
+- simpleos_desktop_qmp_status=unavailable
+- simpleos_desktop_qmp_reason=wm-simple-web-build-failed
+- simpleos_desktop_qmp_target=wm-simple-web
+- simpleos_desktop_qmp_entry=examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl
+
+## Fake QMP Capture Output
+- error: unknown command 'run'
+- fake_qmp_socket=/mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/fake-qmp/fake-qmp.sock
+- fake QMP timed out waiting for screendump
+- node:fs:560
+-   return binding.open(
+-                  ^
+- 
+- Error: ENOENT: no such file or directory, open '/mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/fake-qmp/fake-screendump.ppm'
+-     at Object.openSync (node:fs:560:18)
+-     at Object.readFileSync (node:fs:444:35)
+-     at [eval]:30:16
+-     at runScriptInThisContext (node:internal/vm:209:10)
+-     at node:internal/process/execution:446:12
+-     at [eval]-wrapper:6:24
+-     at runScriptInContext (node:internal/process/execution:444:60)
+-     at evalFunction (node:internal/process/execution:279:30)
+-     at evalTypeScript (node:internal/process/execution:291:3)
+-     at node:internal/main/eval_string:74:3 {
+-   errno: -2,
+-   code: 'ENOENT',
+-   syscall: 'open',
+-   path: '/mnt/data/worktrees/simple-main-sync-20260826/build/qemu-gtk-wm-compiled-launcher-5/fake-qmp/fake-screendump.ppm'
+- }
+- 
+- Node.js v22.23.1
+
+## Host GTK GL WM Scene Output
+- gtk_gl_wm_scene_status=unavailable
+- gtk_gl_wm_scene_reason=simple-reference-failed
+- gtk_gl_wm_scene_simple_bin=/mnt/data/worktrees/lane-amb3/build/bootstrap/amb2/stage2/x86_64-unknown-linux-gnu/simple
+- gtk_gl_wm_scene_simple_bin_source=explicit-env
+- gtk_gl_wm_scene_simple_bin_status=pass

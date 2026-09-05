@@ -1,0 +1,282 @@
+# Non-authorizing ARM32 process-image mapping readiness owner.
+#
+# This owner validates authenticated image-handle evidence against the exact
+# ELF32/EM_ARM bytes without reserving or consuming loader authority.
+# A positive result is immutable preparation evidence only.  It does not map
+# pages, construct a task, or make ARM32 globally executable.
+
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1,
+    executable_image_handle_validate
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_authenticated_layout_v1}
+use os.kernel.loader.process_image.{ARM32_USER_STACK_TOP}
+use os.kernel.loader.stack_builder.{compute_stack_size}
+use os.kernel.loader.executable_target_dispatch_v1.{
+    executable_target_dispatch_policy_v1,
+    executable_target_dispatch_matches_architecture_v1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityArmedIdentityV1
+}
+use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerV1, ExecutableLoadConsumerStateV1,
+    ExecutableLoadConsumerErrorV1,
+    executable_load_consumer_schema_version_v1
+}
+
+pub enum ExecutableArm32MappingReadinessErrorV1:
+    None
+    InvalidAuthenticatedHandle
+    InvalidArmedIdentity
+    IdentityMismatch
+    InvalidConsumer
+    TargetMismatch
+    SourceSizeInvalid
+    DigestMismatch
+    ElfRejected
+    LayoutMismatch
+    EntryPointInvalid
+    AddressOutOfRange
+    PageOverlap
+    PageLimitExceeded
+    StackCollision
+    MissingArm32ProcessImageOwner
+
+pub struct ExecutableArm32MappingReadinessV1:
+    candidate_ready: bool
+    process_image_ready: bool
+    authority_consumed: bool
+    error: ExecutableArm32MappingReadinessErrorV1
+    entry_point: u64
+    segment_count: i64
+    planned_pages: u64
+    admission_id: text
+    image_hash: text
+
+pub fn executable_arm32_mapping_max_source_bytes_v1() -> u64:
+    67108864u64
+
+pub fn executable_arm32_mapping_page_size_v1() -> u64:
+    4096u64
+
+pub fn executable_arm32_mapping_max_pages_v1() -> u64:
+    65536u64
+
+fn _arm32_reject(
+    error: ExecutableArm32MappingReadinessErrorV1
+) -> ExecutableArm32MappingReadinessV1:
+    ExecutableArm32MappingReadinessV1(
+        candidate_ready: false, process_image_ready: false,
+        authority_consumed: false, error: error, entry_point: 0u64,
+        segment_count: 0, planned_pages: 0u64,
+        admission_id: "", image_hash: "")
+
+fn _arm32_range_equal(
+    actual: ExecutableLoadRangeV1,
+    authenticated: ExecutableLoadRangeV1
+) -> bool:
+    actual.file_offset == authenticated.file_offset and
+        actual.file_size == authenticated.file_size and
+        actual.virtual_address == authenticated.virtual_address and
+        actual.memory_size == authenticated.memory_size and
+        actual.writable == authenticated.writable and
+        actual.executable == authenticated.executable
+
+fn _arm32_page_start(value: u64) -> u64:
+    value & 0xFFFFFFFFFFFFF000u64
+
+fn _arm32_page_end(value: u64) -> u64:
+    val page_size = executable_arm32_mapping_page_size_v1()
+    if value % page_size == 0u64:
+        return value
+    value + (page_size - value % page_size)
+
+fn _arm32_ranges_share_page(
+    a: ExecutableLoadRangeV1,
+    b: ExecutableLoadRangeV1
+) -> bool:
+    val a_start = _arm32_page_start(a.virtual_address)
+    val b_start = _arm32_page_start(b.virtual_address)
+    val a_end = _arm32_page_end(a.virtual_address + a.memory_size)
+    val b_end = _arm32_page_end(b.virtual_address + b.memory_size)
+    a_start < b_end and b_start < a_end
+
+pub(package) fn executable_arm32_mapping_readiness_v1(
+    handle: ExecutableImageHandleV1,
+    authenticated_source: [u8]
+) -> ExecutableArm32MappingReadinessV1:
+    """Validate copy-only ARM32 mapping evidence without touching authority."""
+    if not executable_image_handle_validate(handle).ok:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.InvalidAuthenticatedHandle)
+    val policy = executable_target_dispatch_policy_v1(handle.target)
+    if (not policy.? or
+        not executable_target_dispatch_matches_architecture_v1(
+            handle.target, Architecture.Arm32)):
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.TargetMismatch)
+    val selected = policy.unwrap()
+    if selected.pointer_bits != 32 or selected.stack_alignment != 8u64:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.TargetMismatch)
+
+    val source_size = authenticated_source.len() as u64
+    if (source_size == 0u64 or
+        source_size > executable_arm32_mapping_max_source_bytes_v1() or
+        source_size != handle.size_bytes):
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.SourceSizeInvalid)
+    if sha256_u8_hex(authenticated_source) != handle.image_hash:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.DigestMismatch)
+
+    val parsed = elf_authenticated_layout_v1(
+        authenticated_source, Architecture.Arm32)
+    if parsed.is_err():
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.ElfRejected)
+    val layout = parsed.unwrap()
+    if layout.load_ranges.len() != handle.verified_load_ranges.len():
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.LayoutMismatch)
+
+    val page_size = executable_arm32_mapping_page_size_v1()
+    # Derive the exact reservation from the canonical process-image/stack
+    # policy so this architecture owner cannot silently drift from it.
+    val stack_top = ARM32_USER_STACK_TOP
+    val stack_size = compute_stack_size(source_size)
+    if stack_size == 0u64 or stack_top < stack_size:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.StackCollision)
+    # Admission must reserve the same complete, page-rounded stack interval
+    # that the page-table owner will map.  Using the raw byte boundary here
+    # would permit a PT_LOAD in the low partial page and make the later stack
+    # map collide after authority had already been admitted.
+    val stack_start = _arm32_page_start(stack_top - stack_size)
+    val stack_pages = (stack_top - stack_start) / page_size
+    if stack_pages > executable_arm32_mapping_max_pages_v1():
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.PageLimitExceeded)
+    var planned_pages = 0u64
+    var entry_covered = false
+    var i = 0
+    while i < layout.load_ranges.len():
+        val actual = layout.load_ranges[i]
+        val authenticated = handle.verified_load_ranges[i]
+        if not _arm32_range_equal(actual, authenticated):
+            return _arm32_reject(
+                ExecutableArm32MappingReadinessErrorV1.LayoutMismatch)
+        val raw_end = actual.virtual_address + actual.memory_size
+        val page_start = _arm32_page_start(actual.virtual_address)
+        val page_end = _arm32_page_end(raw_end)
+        if (page_start < page_size or page_end == 0u64 or
+            page_end - 1u64 > selected.user_address_max):
+            return _arm32_reject(
+                ExecutableArm32MappingReadinessErrorV1.AddressOutOfRange)
+        if page_start < stack_top and stack_start < page_end:
+            return _arm32_reject(
+                ExecutableArm32MappingReadinessErrorV1.StackCollision)
+        # An authenticated e_entry is not sufficient by itself: the first PC
+        # must name bytes in an executable PT_LOAD.  Otherwise scheduler
+        # adoption could publish a task whose initial instruction fetch faults
+        # or starts in non-executable data despite a valid image digest.
+        if (actual.executable and layout.entry_point >= actual.virtual_address and
+            layout.entry_point < raw_end):
+            entry_covered = true
+        var earlier = 0
+        while earlier < i:
+            if _arm32_ranges_share_page(actual, layout.load_ranges[earlier]):
+                return _arm32_reject(
+                    ExecutableArm32MappingReadinessErrorV1.PageOverlap)
+            earlier = earlier + 1
+        val pages = (page_end - page_start) / page_size
+        if pages > executable_arm32_mapping_max_pages_v1() or
+            planned_pages > executable_arm32_mapping_max_pages_v1() - pages:
+            return _arm32_reject(
+                ExecutableArm32MappingReadinessErrorV1.PageLimitExceeded)
+        planned_pages = planned_pages + pages
+        i = i + 1
+
+    # The mapping owner accounts load pages through the consumer and stack
+    # pages separately, but both consume the same bounded physical/page-table
+    # budget.  Reject the combined image before allocation rather than failing
+    # part-way through stack construction.
+    if planned_pages > executable_arm32_mapping_max_pages_v1() - stack_pages:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.PageLimitExceeded)
+
+    if layout.entry_point == 0u64 or not entry_covered:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.EntryPointInvalid)
+
+    ExecutableArm32MappingReadinessV1(
+        candidate_ready: true,
+        process_image_ready: false,
+        authority_consumed: false,
+        error: ExecutableArm32MappingReadinessErrorV1.None,
+        entry_point: layout.entry_point,
+        segment_count: layout.load_ranges.len(),
+        planned_pages: planned_pages,
+        admission_id: handle.admission_id,
+        image_hash: handle.image_hash)
+
+fn _arm32_identity_matches_handle(
+    identity: ExecutableAuthorityArmedIdentityV1,
+    handle: ExecutableImageHandleV1,
+    entry_point: u64
+) -> bool:
+    identity.slot_index >= 0 and identity.token_generation != 0u64 and
+        identity.token_nonce != 0u64 and identity.has_entry_identity and
+        identity.entry_point == entry_point and
+        identity.canonical_source_path == handle.canonical_source_path and
+        identity.image_hash == handle.image_hash and
+        identity.admission_id == handle.admission_id and
+        identity.role == handle.role and
+        identity.target.os == handle.target.os and
+        identity.target.arch == handle.target.arch and
+        identity.target.abi == handle.target.abi
+
+pub(package) fn executable_arm32_process_image_ready_v1(
+    identity: ExecutableAuthorityArmedIdentityV1,
+    handle: ExecutableImageHandleV1,
+    consumer: ExecutableLoadConsumerV1,
+    authenticated_source: [u8],
+    entry_point: u64
+) -> ExecutableArm32MappingReadinessV1:
+    """Bind structural readiness before authority consumption; remain blocked."""
+    if (identity.slot_index < 0 or identity.token_generation == 0u64 or
+        identity.token_nonce == 0u64 or not identity.has_entry_identity):
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.InvalidArmedIdentity)
+    if not _arm32_identity_matches_handle(identity, handle, entry_point):
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.IdentityMismatch)
+    if (consumer.schema_version != executable_load_consumer_schema_version_v1() or
+        consumer.state != ExecutableLoadConsumerStateV1.Ready or
+        consumer.expected_os != "simpleos" or consumer.expected_arch != "arm" or
+        consumer.expected_abi != "simpleos" or consumer.segment_count != 0 or
+        consumer.planned_pages != 0u64 or consumer.mapped_pages != 0u64 or
+        consumer.pages_to_unmap != 0u64 or consumer.close_attempt != 0u64 or
+        consumer.entry_point != 0u64 or
+        consumer.failure != ExecutableLoadConsumerErrorV1.None):
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.InvalidConsumer)
+    var readiness = executable_arm32_mapping_readiness_v1(
+        handle, authenticated_source)
+    if not readiness.candidate_ready:
+        return readiness
+    if readiness.entry_point != entry_point:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.IdentityMismatch)
+    readiness.error =
+        ExecutableArm32MappingReadinessErrorV1.MissingArm32ProcessImageOwner
+    readiness
+
+export ExecutableArm32MappingReadinessErrorV1
+export ExecutableArm32MappingReadinessV1
+export executable_arm32_mapping_max_source_bytes_v1
+export executable_arm32_mapping_page_size_v1
+export executable_arm32_mapping_max_pages_v1

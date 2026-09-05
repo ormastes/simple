@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @req REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008
+"""# StarFive VisionFive 2 NVMe safety contract
+
+Keep read-only identification separate from explicitly authorized provisioning.
+Incomplete live paths must report BLOCKED and must never claim physical PASS.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use app.io.mod.{process_run_timeout}
+
+fn run_nvme_check(mode: text) -> (text, text, i64):
+    process_run_timeout(
+        "/bin/sh",
+        ["scripts/check/check-starfive-nvme-storage.shs", mode],
+        30000
+    )
+
+fn classify_nvme_check_result(out: text, code: i64) -> text:
+    if code == 0 and out.contains("starfive_nvme_status=pass"):
+        return "pass"
+    if code == 2 and out.contains("starfive_nvme_status=blocked"):
+        return "blocked"
+    "fail"
+
+fn require_nvme_pass(out: text, code: i64, phase: text):
+    val classification = classify_nvme_check_result(out, code)
+    if classification == "blocked":
+        pending("BLOCKED: StarFive live NVMe evidence unavailable ({phase})")
+    if classification != "pass":
+        fail("FAIL: StarFive NVMe safety evidence: {phase}")
+
+describe "StarFive VisionFive 2 NVMe storage safety":
+    # @manual scenario evidence
+    it "publishes distinct identify and provision contracts":
+        # @req REQ-SSPEC-SYSTEM
+        step("publishes distinct identify and provision contracts")
+        val (out, err, code) = run_nvme_check("--contract")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_nvme_contract_status=pass")
+        expect(out).to_contain("identify_mode=read-only")
+        expect(out).to_contain("identify_writes=0")
+        expect(out).to_contain("provision_mode=separately-authorized")
+
+    it "checks the fail-closed storage policy":
+        # @req REQ-SSPEC-SYSTEM
+        step("checks the fail-closed storage policy")
+        val (out, err, code) = run_nvme_check("--self-test")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_nvme_self_test_status=pass")
+        expect(out).to_contain("changed_identity=blocked")
+        expect(out).to_contain("mounted_device=blocked")
+        expect(out).to_contain("boot_source_device=blocked")
+
+    it "checks live identify is implemented and requires physical proof":
+        # @req REQ-SSPEC-SYSTEM
+        step("checks live identify is implemented and requires physical proof")
+        val (out, err, code) = run_nvme_check("--identify-live")
+        expect(err).to_equal("")
+        require_nvme_pass(out, code, "identify-live")
+
+    it "blocks provisioning without a live immutable identity receipt":
+        # @req REQ-SSPEC-SYSTEM
+        step("blocks provisioning without a live immutable identity receipt")
+        val (out, err, code) = run_nvme_check("--provision-live")
+        expect(code).to_equal(2)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_nvme_status=blocked")
+        expect(out).to_contain("starfive_nvme_reason=identify-receipt-missing")

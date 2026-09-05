@@ -1,0 +1,145 @@
+# Golden vectors for the frozen StageExecutionProfile / StageCapabilities
+# contract v1.
+#
+# Language-neutral mirror of execution_profile_golden_v1.spl, byte for byte.
+# This is the form a Rust or C++ bridge reads: no Simple parser required, no
+# encoder run required. Lowercase unseparated hex, exactly as the .spl vectors.
+#
+# Architecture section 21, 21.1, 21.4, 21.5, 20.2, 20.7 and 26 (artifact
+# group 9: "ExecutionProfile and capability vocabulary").
+# Contract document:
+#   doc/05_design/platform/structural_compute/execution_profile_contract_v1.md
+#
+# Envelope = magic(4 ASCII, LE) | version u16 | reserved u16.
+#   SXEP -> 5358455001000000   StageExecutionProfile
+#   SXSC -> 5358534301000000   StageCapabilities
+#
+# Imported, already-frozen discriminants:
+#   ExecutionMode       cpu_reference 0 | hybrid_vector_gpu 1 | resident_gpu 2
+#   VerificationPolicy  off 0 | deterministic_hash 1 | sampled 2 | full 3
+#                       | oracle_compare 4
+# Frozen by this group:
+#   StageFallbackPolicy forbid 0 | allow_hybrid 1 | allow_cpu 2
+#   StorageCapabilityTier staged 0 | direct 1 | device_initiated 2
+
+schema_version: 1
+
+device_mask_bits:
+  cpu_scalar: 1
+  cpu_simd: 2
+  gpu: 4
+  storage: 8
+  known: 15
+  note: "bits 4..63 reserved; a set reserved bit is a hard reject"
+
+mode_mask_bits:
+  cpu_reference: 1
+  hybrid_vector_gpu: 2
+  resident_gpu: 4
+  known: 7
+  note: "bit i means ExecutionMode discriminant i; no second ordering"
+
+storage_tier_bits:
+  staged: 1
+  direct: 2
+  device_initiated: 4
+  known: 7
+  note: "staged is mandatory whenever any tier is claimed (section 20.7)"
+
+stage_execution_profile:
+  len: 56
+  body_len: 48
+  layout: "contract_version u32 @0 | mode u8 @4 | deterministic u8 @5 | fallback u8 @6 | verification u8 @7 | host_memory_budget u64 @8 | device_memory_budget u64 @16 | latency_target_us u64 @24 | throughput_target u64 @32 | allowed_devices u64 @40"
+  vectors:
+    - name: cpu_reference
+      note: "the mode every domain must run; forbid, scalar cpu only"
+      mode: 0
+      deterministic: 1
+      fallback: 0
+      verification: 1
+      allowed_devices: 1
+      hex: "5358455001000000010000000001000100000000000000000000000000000000000000000000000000000000000000000100000000000000"
+    - name: resident_allow_cpu
+      note: "full ladder permitted; every numeric slot non-zero so a field-order swap cannot hide behind zeros"
+      mode: 2
+      deterministic: 0
+      fallback: 2
+      verification: 4
+      host_memory_budget: 1073741824
+      device_memory_budget: 2147483648
+      latency_target_us: 5000
+      throughput_target: 1000000
+      allowed_devices: 15
+      hex: "5358455001000000010000000200020400000040000000000000008000000000881300000000000040420f00000000000f00000000000000"
+    - name: resident_allow_hybrid
+      note: "middle rung of the resident -> hybrid -> cpu_reference ladder"
+      mode: 2
+      deterministic: 1
+      fallback: 1
+      verification: 0
+      allowed_devices: 5
+      hex: "5358455001000000010000000201010000000000000000000000000000000000000000000000000000000000000000000500000000000000"
+
+stage_capabilities:
+  head_len: 16
+  layout: "contract_version u32 @0 | supported_modes u8 @4 | storage_tiers u8 @5 | max_verification u8 @6 | deterministic u8 @7 | device_mask u64 @8 | backend text @16 (u32 len then ASCII bytes)"
+  vectors:
+    - name: gpu
+      note: "all three modes, staged+direct storage, can act as oracle"
+      backend: "gpu"
+      supported_modes: 7
+      storage_tiers: 3
+      max_verification: 4
+      deterministic: 1
+      device_mask: 15
+      len: 31
+      hex: "535853430100000001000000070304010f0000000000000003000000677075"
+    - name: cpu
+      note: "mandatory cpu reference backend; no storage tier claimed"
+      backend: "cpu"
+      supported_modes: 1
+      storage_tiers: 0
+      max_verification: 1
+      deterministic: 1
+      device_mask: 1
+      len: 31
+      hex: "53585343010000000100000001000101010000000000000003000000637075"
+
+# Invariants enforced on ENCODE as well as decode. Each names the sentence it
+# comes from; together they make an unsatisfiable profile unrepresentable,
+# which is what stops a silent fallback being the only way to honour a request.
+invariants:
+  - id: version_exact
+    rule: "contract_version and envelope version must both equal 1; a version mismatch is a rejection, not a negotiation"
+  - id: unknown_discriminant
+    rule: "mode, fallback, verification: an out-of-range discriminant is a hard reject, never a silent default"
+  - id: reserved_bits
+    rule: "device mask, mode mask and storage mask reject any set reserved bit"
+  - id: bool_is_zero_or_one
+    rule: "deterministic on the wire is exactly 0 or 1; any other byte is rejected rather than coerced to true"
+  - id: device_mask_nonempty
+    rule: "allowed_devices == 0 permits no executor at all and is malformed"
+  - id: mode_device_consistent
+    rule: "hybrid_vector_gpu or resident_gpu requires the gpu device bit; requesting a device mode while forbidding the device is unsatisfiable"
+  - id: fallback_reachable_cpu
+    rule: "allow_cpu requires the cpu_scalar device bit; a permitted rung must be a reachable one"
+  - id: fallback_hybrid_from_resident
+    rule: "allow_hybrid is legal only from resident_gpu; elsewhere it would be a second spelling of forbid"
+  - id: budgets_non_negative
+    rule: "budgets and targets must be >= 0, and the two memory budgets must not overflow when summed (checked by the sign of the i64 sum, never against a width-limited constant)"
+  - id: storage_staged_mandatory
+    rule: "a non-zero storage mask must include staged, the mandatory portable backend"
+  - id: capabilities_self_consistent
+    rule: "a gpu mode bit requires the gpu device bit; a cpu_reference mode bit requires the cpu_scalar device bit; backend name non-empty ASCII"
+  - id: exact_length
+    rule: "trailing bytes are rejected; the record is exactly its declared extent"
+
+# Compatibility and versioning policy.
+versioning:
+  current: 1
+  rule_unknown_version: "reject; never assume compatibility (section 12.6)"
+  rule_unknown_discriminant: "reject; never coerce to a default"
+  rule_reserved_bits: "must be zero; reserved bits are the additive extension point, so a later ratification can define one without a version bump ambiguity"
+  rule_additive_change: "a new device/mode/storage bit or a new enum discriminant is a MINOR change and requires a version bump only when a v1 reader would misinterpret rather than reject it; since v1 hard-rejects unknown values, a v1 reader always rejects, so additive changes ship as version 2 and v1 buffers remain readable by a v2 reader"
+  rule_field_change: "changing width, order, or meaning of any existing field is a MAJOR change and requires a new magic, not a version bump"
+  rule_golden_vectors: "vectors are append-only and never edited in place; a changed byte in an existing vector means the contract was broken, not updated"

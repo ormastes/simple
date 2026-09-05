@@ -1,0 +1,144 @@
+# Fast in-memory database backed by C runtime (rt_db_*).
+#
+# Provides O(1) hash-based GET/PUT and O(N) SCAN with ~5ns/row,
+# bypassing interpreter dispatch overhead entirely.
+
+# ── Extern declarations ──────────────────────────────────────────────────────
+
+@unsafe(reason: "raw owned table handle; -1 is validation, allocation, capacity, or provider failure", capabilities: [ffi])
+extern fn rt_db_table_create(name: text, num_cols: i64, pk_col: i64) -> i64
+@unsafe(reason: "raw table release; provider handle generation is not encoded", capabilities: [ffi])
+extern fn rt_db_table_destroy(handle: i64)
+@unsafe(reason: "raw row insertion; -1 conflates handle, allocation, and provider failure", capabilities: [ffi])
+extern fn rt_db_put(table: i64, pk_text: text, num_values: i64) -> i64
+@unsafe(reason: "raw unchecked row/column write with no status result", capabilities: [ffi])
+extern fn rt_db_put_value_int(table: i64, row: i64, col: i64, value: i64)
+@unsafe(reason: "raw unchecked row/column text write with allocation and no status result", capabilities: [ffi])
+extern fn rt_db_put_value_text(table: i64, row: i64, col: i64, value: text)
+@unsafe(reason: "raw PK lookup; -1 conflates absence, invalid handle, and provider failure", capabilities: [ffi])
+extern fn rt_db_get(table: i64, pk_text: text) -> i64
+@unsafe(reason: "raw row/column read; zero conflates data, invalid indices, type mismatch, and provider failure", capabilities: [ffi])
+extern fn rt_db_get_int(table: i64, row: i64, col: i64) -> i64
+@unsafe(reason: "raw nullable text read; empty/nil conflates data, invalid indices, type mismatch, allocation, and provider failure", capabilities: [ffi])
+extern fn rt_db_get_text(table: i64, row: i64, col: i64) -> text?
+@unsafe(reason: "raw bounded scan count; zero conflates no matches, invalid handle/column, and provider failure", capabilities: [ffi])
+extern fn rt_db_scan_range(table: i64, col: i64, low: i64, high: i64) -> i64
+@unsafe(reason: "raw scan-result index; -1 conflates range error, stale scan, and provider failure", capabilities: [ffi])
+extern fn rt_db_scan_result(table: i64, result_idx: i64) -> i64
+@unsafe(reason: "raw delete status; zero conflates absence, invalid handle, allocation, and provider failure", capabilities: [ffi])
+extern fn rt_db_delete(table: i64, pk_text: text) -> i64
+@unsafe(reason: "raw row count; zero conflates empty table, invalid handle, and provider failure", capabilities: [ffi])
+extern fn rt_db_row_count(table: i64) -> i64
+@unsafe(reason: "raw column count; zero conflates invalid handle and provider failure", capabilities: [ffi])
+extern fn rt_db_col_count(table: i64) -> i64
+@unsafe(reason: "raw three-integer row insertion; nonzero legacy text mask is rejected and -1 is failure", capabilities: [ffi])
+extern fn rt_db_put_row3(handle: i64, pk: text, type_mask: i64, v0: i64, v1: i64, v2: i64) -> i64
+@unsafe(reason: "raw fused lookup; caller-selected default conflates absence, invalid input, and provider failure", capabilities: [ffi])
+extern fn rt_db_get_int_by_pk(handle: i64, pk: text, col: i64, default_val: i64) -> i64
+@unsafe(reason: "raw update status; zero conflates absence, invalid input, and provider failure", capabilities: [ffi])
+extern fn rt_db_update_int(handle: i64, pk: text, col: i64, value: i64) -> i64
+@unsafe(reason: "raw allocating text update; zero conflates absence, invalid input, allocation, and provider failure", capabilities: [ffi])
+extern fn rt_db_update_text(handle: i64, pk: text, col: i64, value: text) -> i64
+@unsafe(reason: "raw integer-PK three-value insertion; -1 conflates handle, allocation, and provider failure", capabilities: [ffi])
+extern fn rt_db_iput3(handle: i64, pk_int: i64, v0: i64, v1: i64, v2: i64) -> i64
+@unsafe(reason: "raw fused integer-PK lookup; caller default conflates absence, invalid input, and provider failure", capabilities: [ffi])
+extern fn rt_db_iget_int(handle: i64, pk_int: i64, col: i64, default_val: i64) -> i64
+@unsafe(reason: "raw integer-PK update status; zero conflates absence, invalid input, and provider failure", capabilities: [ffi])
+extern fn rt_db_iupdate_int(handle: i64, pk_int: i64, col: i64, value: i64) -> i64
+@unsafe(reason: "raw integer-PK delete status; zero conflates absence, invalid handle, and provider failure", capabilities: [ffi])
+extern fn rt_db_idelete(handle: i64, pk_int: i64) -> i64
+
+# ── FastTable wrapper ────────────────────────────────────────────────────────
+
+@unsafe(reason: "legacy fast-database facade exposes ambiguous status, ownership, and generationless handles", capabilities: [ffi])
+class FastTable:
+    _handle: i64
+    _num_cols: i64
+
+    static fn create(name: text, num_cols: i64, pk_col: i64) -> FastTable:
+        var h: i64 = -1
+        unsafe(capabilities: [ffi]):
+            h = rt_db_table_create(name, num_cols, pk_col)
+        if h < 0:
+            panic("E-SFFI-DB-001: fast database table creation failed")
+        FastTable(_handle: h, _num_cols: num_cols)
+
+    fn destroy():
+        unsafe(capabilities: [ffi]):
+            rt_db_table_destroy(self._handle)
+
+    fn put(pk: text) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_put(self._handle, pk, self._num_cols)
+
+    fn put_int(row: i64, col: i64, value: i64):
+        unsafe(capabilities: [ffi]):
+            rt_db_put_value_int(self._handle, row, col, value)
+
+    fn put_text(row: i64, col: i64, value: text):
+        unsafe(capabilities: [ffi]):
+            rt_db_put_value_text(self._handle, row, col, value)
+
+    fn get(pk: text) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_get(self._handle, pk)
+
+    fn get_int(row: i64, col: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_get_int(self._handle, row, col)
+
+    fn get_text(row: i64, col: i64) -> text?:
+        unsafe(capabilities: [ffi]):
+            rt_db_get_text(self._handle, row, col)
+
+    fn scan_range(col: i64, low: i64, high: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_scan_range(self._handle, col, low, high)
+
+    fn scan_result(result_idx: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_scan_result(self._handle, result_idx)
+
+    fn delete(pk: text) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_delete(self._handle, pk)
+
+    fn row_count() -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_row_count(self._handle)
+
+    fn col_count() -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_col_count(self._handle)
+
+    fn put_row3(pk: text, type_mask: i64, v0: i64, v1: i64, v2: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_put_row3(self._handle, pk, type_mask, v0, v1, v2)
+
+    fn get_int_by_pk(pk: text, col: i64, default_val: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_get_int_by_pk(self._handle, pk, col, default_val)
+
+    fn update_int(pk: text, col: i64, value: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_update_int(self._handle, pk, col, value)
+
+    fn update_text(pk: text, col: i64, value: text) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_update_text(self._handle, pk, col, value)
+
+    fn iput3(pk_int: i64, v0: i64, v1: i64, v2: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_iput3(self._handle, pk_int, v0, v1, v2)
+
+    fn iget_int(pk_int: i64, col: i64, default_val: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_iget_int(self._handle, pk_int, col, default_val)
+
+    fn iupdate_int(pk_int: i64, col: i64, value: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_iupdate_int(self._handle, pk_int, col, value)
+
+    fn idelete(pk_int: i64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_db_idelete(self._handle, pk_int)

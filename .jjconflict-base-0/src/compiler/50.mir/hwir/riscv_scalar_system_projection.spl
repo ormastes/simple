@@ -1,0 +1,108 @@
+# Stateless ECALL/EBREAK projection for the Gen2 scalar completion path.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp,
+    HwSignal}
+use compiler.mir.hwir.riscv_scalar_core.{riscv_gen2_scalar_dispatch,
+    riscv_gen2_scalar_elaboration}
+
+fn system_ports(xlen: i32) -> [HwPort]:
+    [HwPort.input("in_valid", "Bits", 1), HwPort.input("in_order", "Bits", 64),
+        HwPort.input("in_privilege", "Bits", 2), HwPort.input("in_pc", "Bits", xlen),
+        HwPort.output("execute_exception", "Bits", 1),
+        HwPort.output("retire_valid", "Bits", 1), HwPort.output("retire_order", "Bits", 64),
+        HwPort.output("retire_xlen", "Bits", 7), HwPort.output("retire_privilege", "Bits", 2),
+        HwPort.output("retire_original_instruction", "Bits", 32),
+        HwPort.output("retire_canonical_instruction", "Bits", 32),
+        HwPort.output("retire_instruction_length_bytes", "Bits", 3),
+        HwPort.output("retire_pc_before", "Bits", xlen), HwPort.output("retire_pc_after", "Bits", xlen),
+        HwPort.output("retire_rd", "Bits", 5), HwPort.output("retire_rd_write", "Bits", 1),
+        HwPort.output("retire_rd_value", "Bits", xlen),
+        HwPort.output("retire_memory_address", "Bits", xlen),
+        HwPort.output("retire_memory_read_mask", "Bits", 32),
+        HwPort.output("retire_memory_write_mask", "Bits", 32),
+        HwPort.output("retire_memory_read_data", "Bits", xlen),
+        HwPort.output("retire_memory_write_data", "Bits", xlen),
+        HwPort.output("retire_trap", "Bits", 1), HwPort.output("retire_interrupt", "Bits", 1),
+        HwPort.output("retire_cause", "Bits", xlen), HwPort.output("retire_tval", "Bits", xlen)]
+
+pub fn strict_riscv_scalar_system_projection_hwir(module_name: text,
+    config: CoreConfig, instruction: u32) -> Result<HwModuleDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-SYSTEM-ID: system projection requires a module name")
+    val dispatch = riscv_gen2_scalar_dispatch(riscv_gen2_scalar_elaboration(config, "none")?, instruction)?
+    val is_ecall = dispatch.entry.id == "rv.i.ecall"
+    val is_ebreak = dispatch.entry.id == "rv.i.ebreak"
+    if (not is_ecall and not is_ebreak) or dispatch.entry.execution_class != "system":
+        return Err("HWIR-E-RISCV-SYSTEM-SCOPE: system projection admits only exact ECALL or EBREAK")
+    val x = config.xlen
+    val constants = [HwConstant.bits("instruction", 32, instruction as i64),
+        HwConstant.bits("four", x, 4), HwConstant.bits("length4", 3, 4),
+        HwConstant.bits("xlen_value", 7, x as i64),
+        HwConstant.bits("privilege_s", 2, 1), HwConstant.bits("privilege_m", 2, 3),
+        HwConstant.bits("privilege_reserved", 2, 2), HwConstant.bits("cause_illegal", x, 2),
+        HwConstant.bits("cause_breakpoint", x, 3), HwConstant.bits("cause_ecall_u", x, 8),
+        HwConstant.bits("cause_ecall_s", x, 9), HwConstant.bits("cause_ecall_m", x, 11),
+        HwConstant.bits("zero1", 1, 0), HwConstant.bits("zero2", 2, 0),
+        HwConstant.bits("zero3", 3, 0), HwConstant.bits("zero5", 5, 0),
+        HwConstant.bits("zero7", 7, 0), HwConstant.bits("zero32", 32, 0),
+        HwConstant.bits("zero64", 64, 0), HwConstant.bits("zero_xlen", x, 0)]
+    val signals = [HwSignal.comb("privilege_is_s", "Bits", 1),
+        HwSignal.comb("privilege_is_m", "Bits", 1),
+        HwSignal.comb("privilege_is_reserved", "Bits", 1),
+        HwSignal.comb("ecall_s_or_u_cause", "Bits", x),
+        HwSignal.comb("ecall_cause", "Bits", x),
+        HwSignal.comb("selected_cause", "Bits", x),
+        HwSignal.comb("architectural_cause", "Bits", x),
+        HwSignal.comb("architectural_tval", "Bits", x),
+        HwSignal.comb("instruction_xlen", "Bits", x),
+        HwSignal.comb("pc_after_value", "Bits", x)]
+    val ops = [HwCombOp.binary("eq", "privilege_is_s", "in_privilege", "privilege_s", 2),
+        HwCombOp.binary("eq", "privilege_is_m", "in_privilege", "privilege_m", 2),
+        HwCombOp.binary("eq", "privilege_is_reserved", "in_privilege", "privilege_reserved", 2),
+        HwCombOp.binary("add", "pc_after_value", "in_pc", "four", x),
+        HwCombOp.unary("zext", "instruction_xlen", "instruction", x),
+        HwCombOp.unary("passthrough", "execute_exception", "in_valid", 1),
+        HwCombOp.unary("passthrough", "retire_valid", "in_valid", 1),
+        HwCombOp.unary("passthrough", "retire_rd_write", "zero1", 1),
+        HwCombOp.unary("passthrough", "retire_memory_address", "zero_xlen", x),
+        HwCombOp.unary("passthrough", "retire_memory_read_mask", "zero32", 32),
+        HwCombOp.unary("passthrough", "retire_memory_write_mask", "zero32", 32),
+        HwCombOp.unary("passthrough", "retire_memory_read_data", "zero_xlen", x),
+        HwCombOp.unary("passthrough", "retire_memory_write_data", "zero_xlen", x),
+        HwCombOp.unary("passthrough", "retire_trap", "in_valid", 1),
+        HwCombOp.unary("passthrough", "retire_interrupt", "zero1", 1)]
+    val selects = [HwSelectOp.mux("ecall_s_or_u_cause", "privilege_is_s",
+            "cause_ecall_s", "cause_ecall_u", x),
+        HwSelectOp.mux("ecall_cause", "privilege_is_m",
+            "cause_ecall_m", "ecall_s_or_u_cause", x),
+        HwSelectOp.mux("selected_cause", "zero1",
+            "zero_xlen", if is_ecall: "ecall_cause" else: "cause_breakpoint", x),
+        HwSelectOp.mux("architectural_cause", "privilege_is_reserved",
+            "cause_illegal", "selected_cause", x),
+        HwSelectOp.mux("architectural_tval", "privilege_is_reserved",
+            "instruction_xlen", "zero_xlen", x),
+        HwSelectOp.mux("retire_order", "in_valid", "in_order", "zero64", 64),
+        HwSelectOp.mux("retire_xlen", "in_valid", "xlen_value", "zero7", 7),
+        HwSelectOp.mux("retire_privilege", "in_valid", "in_privilege", "zero2", 2),
+        HwSelectOp.mux("retire_original_instruction", "in_valid", "instruction", "zero32", 32),
+        HwSelectOp.mux("retire_canonical_instruction", "in_valid", "instruction", "zero32", 32),
+        HwSelectOp.mux("retire_instruction_length_bytes", "in_valid", "length4", "zero3", 3),
+        HwSelectOp.mux("retire_pc_before", "in_valid", "in_pc", "zero_xlen", x),
+        HwSelectOp.mux("retire_pc_after", "in_valid", "pc_after_value", "zero_xlen", x),
+        HwSelectOp.mux("retire_rd", "in_valid", "zero5", "zero5", 5),
+        HwSelectOp.mux("retire_rd_value", "in_valid", "zero_xlen", "zero_xlen", x),
+        HwSelectOp.mux("retire_cause", "in_valid", "architectural_cause", "zero_xlen", x),
+        HwSelectOp.mux("retire_tval", "in_valid", "architectural_tval", "zero_xlen", x)]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: system_ports(x).len(), signal_count: signals.len(), register_count: 0,
+        comb_op_count: ops.len() + selects.len(), memory_count: 0,
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), ports: system_ports(x), signals: signals,
+        constants: constants, comb_ops: ops, compare_ops: [], select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()], origins: [HwOrigin(
+            node_id: HwNodeId.child(module_name, "system-trap"),
+            source_name: "riscv.scalar.system." + (if is_ecall: "ecall" else: "ebreak"))])
+    val diagnostic = module.shape_diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

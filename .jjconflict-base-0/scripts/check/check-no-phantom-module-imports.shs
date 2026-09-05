@@ -1,0 +1,214 @@
+#!/bin/sh
+# check-no-phantom-module-imports.shs
+#
+# Fail closed when owned Simple source imports a SINGLE-SEGMENT module that
+# exists nowhere the importer could reach it.
+#
+# Why this exists: six stdlib files shipped `use string.{char_from_code}`.
+# `string` has never been a module anywhere in this repo. The seed reported it
+# as `[WARN] Failed to load imported types` and carried on, so the files
+# compiled clean and every call died at RUNTIME with `semantic: function
+# char_from_code not found` -- a message that never names the import. DNS label
+# and TXT rdata decoding, and SMTP base64/quoted-printable, were broken by it.
+#
+# `1478ca64460` makes that class a hard compile error in the Rust seed, but the
+# deployed `bin/simple` only picks that up on the next bootstrap redeploy. This
+# script is the source-level gate that does not wait for a redeploy, and stays
+# useful afterwards as a cheap pre-push check that needs no compiler at all.
+#
+# Deliberately narrow: only BARE single-segment import roots (`use foo.` or
+# `use foo.{`), the exact shape of the incident. A segment resolves if it is a
+# sibling/descendant module of the importing file (the common case -- `use
+# unique.{...}` inside `src/lib/*/ptr/` means `ptr/unique.spl`), a module at any
+# of the source roots, or one of the namespace roots the resolver owns. Dotted
+# paths (`use std.x.y`) are out of scope: the compiler's own resolver checks
+# them, and reimplementing that here would be a second source of truth.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> import(s) checked, 0 phantom            exit 0
+#   FAIL  — <n> import(s) checked, <k> phantom: <list>  exit 1
+#   ERROR — nothing was checked                         exit 2
+set -u
+
+ROOT="${1:-.}"
+case "$ROOT" in -*) ROOT="." ;; esac
+cd "$ROOT" 2>/dev/null || { echo "ERROR — nothing was checked"; exit 2; }
+
+# --selftest: prove the gate can actually FAIL before trusting a PASS. A scan
+# that cannot fail is not evidence. Fixture 1: a file importing a module that
+# exists nowhere must be reported as NEW. Fixture 2: with that file removed the
+# scan must return to PASS, so the failure came from the fixture and not from
+# ambient tree state.
+if [ "${1:-}" = "--selftest" ]; then
+    PROBE="src/lib/__phantom_selftest_probe.spl"
+    printf 'use definitely_not_a_module.thing\n\nfn f():\n    print "x"\n' > "$PROBE"
+    OUT=$(sh "$0" 2>&1)
+    RC=$?
+    rm -f "$PROBE"
+    if [ "$RC" -ne 1 ]; then
+        echo "$OUT"
+        echo "selftest fixture 1 FAILED: injected phantom import did not fail the gate (rc=$RC)"
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    case "$OUT" in
+        *definitely_not_a_module*"NEW phantom"*) ;;
+        *) echo "$OUT"
+           echo "selftest fixture 1 FAILED: verdict did not name the offending import"
+           echo "ERROR — nothing was checked"
+           exit 2 ;;
+    esac
+    OUT2=$(sh "$0" 2>&1)
+    RC2=$?
+    if [ "$RC2" -ne 0 ]; then
+        echo "$OUT2"
+        echo "selftest fixture 2 FAILED: clean tree did not return to PASS (rc=$RC2)"
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    echo "selftest: 2 fixture(s) passed"
+    echo "$OUT2" | tail -1
+    exit 0
+fi
+
+# Namespace roots owned by the module resolver, not by a file on disk.
+is_namespace_root() {
+    case "$1" in
+        std|lib|compiler|app|super|self|crate) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# True when `seg` resolves without reference to any particular importer.
+resolves_global() {
+    _seg="$1"
+    is_namespace_root "$_seg" && return 0
+    for _base in src src/lib src/std src/compiler src/app src/lib/* src/std/*; do
+        [ -d "$_base" ] || continue
+        [ -f "$_base/$_seg.spl" ] && return 0
+        [ -f "$_base/$_seg/__init__.spl" ] && return 0
+        [ -f "$_base/$_seg/mod.spl" ] && return 0
+        [ -d "$_base/$_seg" ] && return 0
+    done
+    return 1
+}
+
+# True when `seg` is reachable from the file `importer`.
+resolves() {
+    _seg="$1"
+    _dir=$(dirname "$2")
+
+    is_namespace_root "$_seg" && return 0
+
+    # Sibling / descendant of the importer, walking up to the source root.
+    _d="$_dir"
+    while [ "$_d" != "." ] && [ "$_d" != "/" ] && [ -n "$_d" ]; do
+        [ -f "$_d/$_seg.spl" ] && return 0
+        [ -f "$_d/$_seg/__init__.spl" ] && return 0
+        [ -f "$_d/$_seg/mod.spl" ] && return 0
+        # A package directory resolves even without an __init__.spl: several
+        # source packages (src/unit, src/verification, ...) are plain
+        # directories of modules. Requiring __init__.spl here reported 143
+        # false phantoms on a tree whose real phantom count is zero.
+        [ -d "$_d/$_seg" ] && return 0
+        case "$_d" in src) break ;; esac
+        _d=$(dirname "$_d")
+    done
+
+    # Any source root, and any immediate family subdirectory of the stdlib.
+    for _base in src src/lib src/std src/compiler src/app src/lib/* src/std/*; do
+        [ -d "$_base" ] || continue
+        [ -f "$_base/$_seg.spl" ] && return 0
+        [ -f "$_base/$_seg/__init__.spl" ] && return 0
+        [ -f "$_base/$_seg/mod.spl" ] && return 0
+        [ -d "$_base/$_seg" ] && return 0
+    done
+    return 1
+}
+
+# Owned code only, per CLAUDE.md Owned-Code Scope: no vendored trees.
+PAIRS=$(find src -name '*.spl' 2>/dev/null | grep -v '/vendor/' |
+    xargs grep -HoE '^[[:space:]]*use[[:space:]]+[a-z_][a-z0-9_]*[.]' 2>/dev/null |
+    sed -E 's/:[[:space:]]*use[[:space:]]+/ /; s/[.]$//' | sort -u)
+
+[ -n "$PAIRS" ] || { echo "ERROR — nothing was checked"; exit 2; }
+
+CHECKED=0
+NPHANTOM=0
+PHANTOM=""
+
+echo "$PAIRS" | while read -r importer seg; do
+    [ -n "$seg" ] || continue
+    echo "$importer $seg"
+done > /tmp/.phantom_pairs.$$
+
+# Memoise the importer-independent half of resolution. Without this the script
+# re-globs the source roots for all ~9,700 (importer, segment) pairs and takes
+# ~2 minutes; with it only the ~100 distinct segments are tested globally and
+# the per-importer walk runs solely for the ones that fail.
+GLOBAL_OK=" "
+for seg in $(awk '{print $2}' /tmp/.phantom_pairs.$$ | sort -u); do
+    if resolves_global "$seg"; then
+        GLOBAL_OK="$GLOBAL_OK$seg "
+    fi
+done
+
+while read -r importer seg; do
+    CHECKED=$((CHECKED + 1))
+    case "$GLOBAL_OK" in *" $seg "*) continue ;; esac
+    if ! resolves "$seg" "$importer"; then
+        NPHANTOM=$((NPHANTOM + 1))
+        case " $PHANTOM " in *" $seg "*) ;; *) PHANTOM="$PHANTOM $seg" ;; esac
+        echo "phantom module import: \`use $seg.\` in $importer (module exists nowhere reachable)"
+    fi
+done < /tmp/.phantom_pairs.$$ > /tmp/.phantom_out.$$
+
+# The loop above ran in this shell (redirect, not pipe), so the counters below
+# are the real ones -- recomputed here because the `while` body's redirect does
+# not fork but the earlier `echo | while` did.
+CHECKED=$(wc -l < /tmp/.phantom_pairs.$$)
+NPHANTOM=$(grep -c '^phantom module import:' /tmp/.phantom_out.$$ 2>/dev/null || echo 0)
+PHANTOM=$(sed -n 's/^phantom module import: `use \([a-z_0-9]*\)\..*/\1/p' /tmp/.phantom_out.$$ | sort -u | tr '\n' ' ')
+# Baseline: the findings that already existed when this gate landed. The gate
+# fails on anything NOT in it, so a new phantom import is blocked immediately
+# while the pre-existing set is worked down. `--generate-baseline` rewrites it;
+# do not reach for that to silence a genuine new finding.
+BASELINE="scripts/check/phantom_module_imports_baseline.txt"
+if [ "${1:-}" = "--generate-baseline" ] || [ "${2:-}" = "--generate-baseline" ]; then
+    sort -u /tmp/.phantom_out.$$ > "$BASELINE"
+    echo "wrote $BASELINE ($(wc -l < "$BASELINE") entr(ies))"
+    rm -f /tmp/.phantom_pairs.$$ /tmp/.phantom_out.$$
+    echo "PASS — $CHECKED import(s) checked, baseline regenerated"
+    exit 0
+fi
+
+if [ -f "$BASELINE" ]; then
+    sort -u /tmp/.phantom_out.$$ > /tmp/.phantom_now.$$
+    NEW=$(comm -23 /tmp/.phantom_now.$$ "$BASELINE")
+    FIXED=$(comm -13 /tmp/.phantom_now.$$ "$BASELINE")
+    rm -f /tmp/.phantom_now.$$
+else
+    NEW=$(cat /tmp/.phantom_out.$$)
+    FIXED=""
+fi
+NNEW=$(printf '%s\n' "$NEW" | grep -c '^phantom module import:')
+[ -n "$NNEW" ] || NNEW=0
+NBASE=$((NPHANTOM - NNEW))
+rm -f /tmp/.phantom_pairs.$$ /tmp/.phantom_out.$$
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$NNEW" -gt 0 ]; then
+    echo "$NEW"
+    echo "FAIL — $CHECKED import(s) checked, $NNEW NEW phantom import(s) (baselined: $NBASE)"
+    exit 1
+fi
+if [ -n "$FIXED" ]; then
+    echo "$FIXED" | sed 's/^/stale baseline entry (now resolves, drop it): /'
+    echo "FAIL — $CHECKED import(s) checked, baseline is stale"
+    exit 1
+fi
+echo "PASS — $CHECKED import(s) checked, 0 new phantom (baselined: $NBASE)"
+exit 0

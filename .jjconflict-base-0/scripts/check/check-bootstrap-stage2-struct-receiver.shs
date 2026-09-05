@@ -1,0 +1,180 @@
+#!/bin/sh
+# Fail-fast capability probe for a freshly built bootstrap-stage compiler.
+set -eu
+
+if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
+    echo "usage: $0 <stage2-compiler> <runtime-archive-or-directory> [target] [backend]" >&2
+    exit 2
+fi
+
+stage2_compiler=$1
+stage2_runtime=$2
+stage2_target=${3:-x86_64-unknown-linux-gnu}
+stage2_backend=${4:-cranelift}
+
+[ -x "$stage2_compiler" ] || {
+    echo "error: stage2 compiler is not executable: $stage2_compiler" >&2
+    exit 2
+}
+[ -e "$stage2_runtime" ] || {
+    echo "error: stage2 runtime is missing: $stage2_runtime" >&2
+    exit 2
+}
+if [ -d "$stage2_runtime" ]; then
+    stage2_runtime_dir=$stage2_runtime
+else
+    stage2_runtime_dir=$(dirname -- "$stage2_runtime")
+fi
+
+stage2_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage2-receiver.XXXXXX")
+trap 'rm -rf "$stage2_probe_dir"' EXIT HUP INT TERM
+
+stage2_probe_bin="$stage2_probe_dir/bootstrap-struct-receiver-guard"
+# SIMPLE_NO_STUB_FALLBACK=1 is required on the MSVC/clang-cl lane: without it,
+# linker.rs's stub-fallback path adds a bare `/WHOLEARCHIVE` (no `:lib`
+# qualifier -- whole-archives every input archive) plus
+# `/FORCE:MULTIPLE,UNRESOLVED` to the clang-cl link line. That combination
+# lets the MSVC linker silently resolve the CRT startup call into `wmain`
+# to address 0 (image base) instead of erroring on the real duplicate/
+# unresolved symbol, producing a binary that segfaults (rc=139) at CRT
+# startup before any user code -- including a two-line hello world -- ever
+# runs. Confirmed by hand: this exact fixture, unchanged, exits 0 and
+# prints its expected output once this flag is set. The second probe below
+# (positional Stage-3 route) already carries this flag unconditionally for
+# the same reason; this one was simply missed.
+#
+# Scoped to the windows-msvc target only (not applied unconditionally like
+# the second probe) so this change is byte-for-byte inert on the
+# Linux/macOS lanes this same script also runs under -- provable rather
+# than merely assumed, since only the Windows lane could be verified here.
+# See doc/08_tracking/bug/stage2_windows_msvc_struct_receiver_probe_segv_2026-09-01.md.
+case "$stage2_target" in
+    *windows-msvc*) stage2_no_stub_fallback=1 ;;
+    *) stage2_no_stub_fallback= ;;
+esac
+# Derive the Windows ABI/linker flavor from the REQUESTED target rather than
+# trusting the caller's ambient environment. Target::linker_flavor() (Rust)
+# and _is_mingw()/_is_mingw_env() (self-hosted Simple) both fall back to an
+# MSYSTEM heuristic when SIMPLE_WINDOWS_ABI/SIMPLE_LINKER_FLAVOR are unset --
+# MSYSTEM is always set under Git Bash/MSYS2, so an msvc-targeted invocation
+# of this script that does not itself export those two vars silently builds
+# GNU flavor: compile flags go GNU-style (clang-cl warns and ignores them)
+# and the link step pulls in windows-mingw-only libraries such as gcc_eh,
+# which do not exist for an MSVC/clang-cl link -- LNK1181 "cannot open input
+# file 'gcc_eh.lib'". This reproduced exactly by invoking this script
+# directly (as its own usage line invites) without pre-exporting
+# SIMPLE_WINDOWS_ABI/SIMPLE_LINKER_FLAVOR, even though the full bootstrap
+# caller (bootstrap-from-scratch.sh) already exports both ambiently. Setting
+# them here, keyed off $stage2_target, makes the probe self-sufficient
+# regardless of what the caller's shell happened to export. No effect on
+# non-Windows targets: both vars are exported empty, which every consumer
+# treats as "no override, auto-detect" (see target.rs linker_flavor() and
+# runtime_compiler.spl _is_mingw()).
+case "$stage2_target" in
+    *windows-msvc*) stage2_windows_abi=msvc; stage2_linker_flavor=msvc ;;
+    *windows-gnu*)  stage2_windows_abi=gnu;  stage2_linker_flavor=gnu ;;
+    *) stage2_windows_abi=; stage2_linker_flavor= ;;
+esac
+if ! env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_NO_STUB_FALLBACK="$stage2_no_stub_fallback" \
+    SIMPLE_WINDOWS_ABI="$stage2_windows_abi" \
+    SIMPLE_LINKER_FLAVOR="$stage2_linker_flavor" \
+    "$stage2_compiler" native-build \
+    --target "$stage2_target" \
+    --backend "$stage2_backend" \
+    --source src/compiler --source src/app --source src/lib \
+    --entry-closure \
+    --threads 1 \
+    --cache-dir "$stage2_probe_dir/cache" \
+    --entry test/04_smoke/bootstrap_struct_receiver_guard.spl \
+    --runtime-path "$stage2_runtime_dir" \
+    -o "$stage2_probe_bin"; then
+    echo "error: stage2 lacks the mutable receiver/runtime capability" >&2
+    exit 1
+fi
+
+[ -x "$stage2_probe_bin" ] || {
+    echo "error: stage2 receiver probe produced no executable" >&2
+    exit 1
+}
+
+set +e
+stage2_probe_output=$($stage2_probe_bin 2>&1)
+stage2_probe_status=$?
+set -e
+[ "$stage2_probe_status" -eq 0 ] || {
+    echo "error: stage2 receiver probe failed with status $stage2_probe_status: $stage2_probe_output" >&2
+    exit 1
+}
+[ "$stage2_probe_output" = "bootstrap struct receiver guard" ] || {
+    echo "error: stage2 receiver probe returned unexpected output: $stage2_probe_output" >&2
+    exit 1
+}
+
+echo "bootstrap_stage2_struct_receiver=PASS"
+
+# Phase-2 admission must exercise the route that Phase 3 actually uses.  The
+# receiver probe above names its entry with `--entry`; bootstrap_main routes
+# that shape through rt_native_build, so it proves seed/delegate compatibility
+# but not the admitted compiler's pure-Simple in-process driver.
+stage2_route_bin="$stage2_probe_dir/bootstrap-stage3-route-guard"
+stage2_route_log="$stage2_probe_dir/bootstrap-stage3-route-guard.log"
+stage2_route_fixture=scripts/check/cert/redeploy_gate/fixtures/stage2_module_path_naming.spl
+stage2_route_timeout=${STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS:-180}
+if command -v timeout >/dev/null 2>&1; then
+    stage2_route_timeout_bin=$(command -v timeout)
+elif command -v gtimeout >/dev/null 2>&1; then
+    stage2_route_timeout_bin=$(command -v gtimeout)
+else
+    echo "error: stage2 positional Stage-3 route requires timeout or gtimeout" >&2
+    exit 2
+fi
+
+set +e
+env SIMPLE_BINARY="$stage2_compiler" \
+    SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_STAGE3_STREAMING_SURFACES=1 \
+    SIMPLE_FRONTEND_CACHE=0 \
+    SIMPLE_NATIVE_ARENA_DECLS=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct \
+    SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=none \
+    SIMPLE_NATIVE_BUILD_TARGET="$stage2_target" \
+    SIMPLE_NATIVE_BUILD_THREADS=1 \
+    SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage2_probe_dir/stage3-route-cache" \
+    SIMPLE_RUNTIME_PATH="$stage2_runtime_dir" \
+    SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+    SIMPLE_WINDOWS_ABI="$stage2_windows_abi" \
+    SIMPLE_LINKER_FLAVOR="$stage2_linker_flavor" \
+    "$stage2_route_timeout_bin" -k 5s "${stage2_route_timeout}s" \
+    "$stage2_compiler" native-build \
+    --target "$stage2_target" \
+    --backend "$stage2_backend" \
+    --runtime-bundle core-c-bootstrap \
+    --threads 1 \
+    --cache-dir "$stage2_probe_dir/stage3-route-cache" \
+    --mode dynload \
+    --runtime-path "$stage2_runtime_dir" \
+    -o "$stage2_route_bin" \
+    "$stage2_route_fixture" >"$stage2_route_log" 2>&1
+stage2_route_status=$?
+set -e
+
+[ "$stage2_route_status" -eq 0 ] || {
+    echo "error: stage2 failed the positional pure-Simple Stage-3 route (status $stage2_route_status)" >&2
+    tail -c 65536 "$stage2_route_log" >&2
+    exit 1
+}
+[ -x "$stage2_route_bin" ] || {
+    echo "error: stage2 positional Stage-3 route reported success without an executable" >&2
+    exit 1
+}
+stage2_route_output=$($stage2_route_bin 2>&1)
+stage2_route_expected=$(printf 'app.cli.bootstrap_main\ncompiler.driver.driver\napp.cli.main')
+[ "$stage2_route_output" = "$stage2_route_expected" ] || {
+    echo "error: stage2 positional Stage-3 route returned unexpected output: $stage2_route_output" >&2
+    exit 1
+}
+
+echo "bootstrap_stage2_positional_stage3_route=PASS"

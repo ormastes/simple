@@ -1,0 +1,91 @@
+# CPU SIMD Engine2D Arch Matrix
+
+- cpu_simd_engine2d_arch_matrix_host_arch=x86_64
+- cpu_simd_engine2d_arch_matrix_strict=0
+- cpu_simd_engine2d_arch_matrix_target_build=1
+- cpu_simd_engine2d_arch_matrix_native_build_simple=src/compiler_rust/target/debug/simple
+- cpu_simd_engine2d_arch_matrix_runtime_source=src/runtime/runtime_simd_dispatch.c
+- cpu_simd_engine2d_arch_matrix_source_contract_status=pass
+- cpu_simd_engine2d_arch_matrix_source_contract_reason=public-simd-dispatch-routes-present
+- cpu_simd_engine2d_arch_matrix_x86_64_status=unavailable
+- cpu_simd_engine2d_arch_matrix_x86_64_reason=skip-run
+- cpu_simd_engine2d_arch_matrix_x86_64_simple_bin=bin/simple
+- cpu_simd_engine2d_arch_matrix_x86_64_evidence_arch=
+- cpu_simd_engine2d_arch_matrix_x86_64_execution_environment=
+- cpu_simd_engine2d_arch_matrix_x86_64_frame_checksum=
+- cpu_simd_engine2d_arch_matrix_x86_64_source_sha256=
+- cpu_simd_engine2d_arch_matrix_x86_64_simple_bin_sha256=
+- cpu_simd_engine2d_arch_matrix_x86_64_frame_receipt_sha256=
+- cpu_simd_engine2d_arch_matrix_x86_64_report=build/cpu-simd-engine2d-arch-matrix-20260813/x86_64/report.md
+- cpu_simd_engine2d_arch_matrix_aarch64_status=unavailable
+- cpu_simd_engine2d_arch_matrix_aarch64_reason=skip-run
+- cpu_simd_engine2d_arch_matrix_aarch64_simple_bin=
+- cpu_simd_engine2d_arch_matrix_aarch64_evidence_arch=
+- cpu_simd_engine2d_arch_matrix_aarch64_execution_environment=
+- cpu_simd_engine2d_arch_matrix_aarch64_frame_checksum=
+- cpu_simd_engine2d_arch_matrix_aarch64_source_sha256=
+- cpu_simd_engine2d_arch_matrix_aarch64_simple_bin_sha256=
+- cpu_simd_engine2d_arch_matrix_aarch64_frame_receipt_sha256=
+- cpu_simd_engine2d_arch_matrix_aarch64_report=build/cpu-simd-engine2d-arch-matrix-20260813/aarch64/report.md
+- cpu_simd_engine2d_arch_matrix_riscv64_status=unavailable
+- cpu_simd_engine2d_arch_matrix_riscv64_reason=skip-run
+- cpu_simd_engine2d_arch_matrix_riscv64_simple_bin=
+- cpu_simd_engine2d_arch_matrix_riscv64_evidence_arch=
+- cpu_simd_engine2d_arch_matrix_riscv64_execution_environment=
+- cpu_simd_engine2d_arch_matrix_riscv64_frame_checksum=
+- cpu_simd_engine2d_arch_matrix_riscv64_source_sha256=
+- cpu_simd_engine2d_arch_matrix_riscv64_simple_bin_sha256=
+- cpu_simd_engine2d_arch_matrix_riscv64_frame_receipt_sha256=
+- cpu_simd_engine2d_arch_matrix_riscv64_report=build/cpu-simd-engine2d-arch-matrix-20260813/riscv64/report.md
+- cpu_simd_engine2d_arch_matrix_x86_64_runtime_compile_status=pass
+- cpu_simd_engine2d_arch_matrix_x86_64_runtime_compile_reason=compiled
+- cpu_simd_engine2d_arch_matrix_x86_64_runtime_compile_cc=cc
+- cpu_simd_engine2d_arch_matrix_x86_64_runtime_compile_flags=
+- cpu_simd_engine2d_arch_matrix_aarch64_runtime_compile_status=pass
+- cpu_simd_engine2d_arch_matrix_aarch64_runtime_compile_reason=compiled
+- cpu_simd_engine2d_arch_matrix_aarch64_runtime_compile_cc=aarch64-linux-gnu-gcc
+- cpu_simd_engine2d_arch_matrix_aarch64_runtime_compile_flags=
+- cpu_simd_engine2d_arch_matrix_riscv64_runtime_compile_status=pass
+- cpu_simd_engine2d_arch_matrix_riscv64_runtime_compile_reason=compiled
+- cpu_simd_engine2d_arch_matrix_riscv64_runtime_compile_cc=riscv64-linux-gnu-gcc
+- cpu_simd_engine2d_arch_matrix_riscv64_runtime_compile_flags=
+- cpu_simd_engine2d_arch_matrix_riscv64_rvv_runtime_compile_status=pass
+- cpu_simd_engine2d_arch_matrix_riscv64_rvv_runtime_compile_reason=compiled
+- cpu_simd_engine2d_arch_matrix_riscv64_rvv_runtime_compile_cc=riscv64-linux-gnu-gcc
+- cpu_simd_engine2d_arch_matrix_riscv64_rvv_runtime_compile_flags=-march=rv64gcv -mabi=lp64d
+- cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status=pass
+- cpu_simd_engine2d_arch_matrix_x86_64_target_binary_reason=engine2d-simd-c-kernels-ran-with-row-scheduling
+- cpu_simd_engine2d_arch_matrix_x86_64_target_binary_triple=x86_64-unknown-linux-gnu
+- cpu_simd_engine2d_arch_matrix_x86_64_target_binary_path=build/cpu-simd-engine2d-arch-matrix-20260813/x86_64/engine2d-simd-c-kernels/engine2d_simd_c_test
+- cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status=pass
+- cpu_simd_engine2d_arch_matrix_aarch64_target_binary_reason=engine2d-simd-c-kernels-ran-with-row-scheduling
+- cpu_simd_engine2d_arch_matrix_aarch64_target_binary_triple=aarch64-unknown-linux-gnu
+- cpu_simd_engine2d_arch_matrix_aarch64_target_binary_path=build/cpu-simd-engine2d-arch-matrix-20260813/aarch64/engine2d-simd-c-kernels/engine2d_simd_c_test
+- cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status=pass
+- cpu_simd_engine2d_arch_matrix_riscv64_target_binary_reason=engine2d-simd-c-kernels-ran-with-row-scheduling
+- cpu_simd_engine2d_arch_matrix_riscv64_target_binary_triple=riscv64gc-unknown-linux-gnu
+- cpu_simd_engine2d_arch_matrix_riscv64_target_binary_path=build/cpu-simd-engine2d-arch-matrix-20260813/riscv64/engine2d-simd-c-kernels/engine2d_simd_c_test
+- cpu_simd_engine2d_arch_matrix_passed_count=0
+- cpu_simd_engine2d_arch_matrix_unavailable_count=3
+- cpu_simd_engine2d_arch_matrix_failed_count=0
+- cpu_simd_engine2d_arch_matrix_runtime_compile_unavailable_count=0
+- cpu_simd_engine2d_arch_matrix_runtime_compile_failed_count=0
+- cpu_simd_engine2d_arch_matrix_target_binary_unavailable_count=0
+- cpu_simd_engine2d_arch_matrix_target_binary_failed_count=0
+- cpu_simd_engine2d_arch_matrix_status=partial
+- cpu_simd_engine2d_arch_matrix_reason=arch-evidence-unavailable
+
+## Cross-QEMU C-kernel execution receipt
+
+The target-binary rows above are stronger than compile-only evidence: both
+cross-compiled correctness binaries executed through their configured QEMU
+runners. The AArch64 runner reported `NEON path active (aarch64)` and passed
+both `ENGINE2D_SIMD_C_TEST` and `ENGINE2D_SIMD_SPAN_TEST`. The RV64GCV runner
+reported `RVV path active (riscv)` and passed the same two tests. Both runs
+include the row-scheduling contract receipt.
+
+This proves the live C runtime kernels' bit-exact fill/copy/blend and in-place
+span behavior under emulation. QEMU timing is deliberately not used as an ARM
+or RISC-V hardware throughput claim. The overall matrix remains partial because
+there are no target-architecture pure-Simple binaries from which to collect the
+required full Engine2D frame receipts.

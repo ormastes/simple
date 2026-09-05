@@ -1,0 +1,391 @@
+# Formal artifact and evidence protocol for the bounded RV32 ADD RVFI product.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_interfaces.{HardwareProofReceiptV1}
+use compiler.backend.backend.riscv_scalar_rvfi_to_vhdl.{
+    RiscvScalarRvfiProductV1, compile_strict_rv32_add_rvfi_product}
+
+pub enum RiscvFormalJobStatusV1:
+    Proved
+    Covered
+    Counterexample
+    Unknown
+    Timeout
+    ToolFailure
+
+pub class RiscvFormalJobReceiptV1:
+    job_id: text
+    job_sha256: text
+    output_sha256: text
+    engine_version: text
+    status: RiscvFormalJobStatusV1
+
+    me hash() -> text:
+        sha256_text("RiscvFormalJobReceiptV1|job=" + self.job_id +
+            "|job_sha256=" + self.job_sha256 + "|output_sha256=" +
+            self.output_sha256 + "|engine=" + self.engine_version +
+            "|status=" + self.status_name())
+
+    me status_name() -> text:
+        match self.status:
+            RiscvFormalJobStatusV1.Proved: "proved"
+            RiscvFormalJobStatusV1.Covered: "covered"
+            RiscvFormalJobStatusV1.Counterexample: "counterexample"
+            RiscvFormalJobStatusV1.Unknown: "unknown"
+            RiscvFormalJobStatusV1.Timeout: "timeout"
+            RiscvFormalJobStatusV1.ToolFailure: "tool_failure"
+
+    me diagnostic(expected_id: text, expected_job: text,
+        expected_status: RiscvFormalJobStatusV1) -> text:
+        if self.job_id != expected_id:
+            return "FV2-E-RISCV-JOB-ID: formal result belongs to a different job"
+        if self.job_sha256 != sha256_text(expected_job):
+            return "FV2-E-RISCV-JOB-HASH: formal result does not bind the generated job"
+        if not sha256_lower_hex_valid(self.output_sha256):
+            return "FV2-E-RISCV-JOB-OUTPUT: formal tool output identity is required"
+        if self.engine_version == "":
+            return "FV2-E-RISCV-JOB-ENGINE: formal engine identity is required"
+        if self.status != expected_status:
+            return "FV2-E-RISCV-JOB-STATUS: formal job did not produce its required result class"
+        ""
+
+pub fn riscv_formal_job_receipt_v1(job_id: text, job: text, output: text,
+    engine_version: text, status: RiscvFormalJobStatusV1) -> RiscvFormalJobReceiptV1:
+    RiscvFormalJobReceiptV1(job_id, sha256_text(job), sha256_text(output),
+        engine_version, status)
+
+pub class RiscvScalarFormalArtifactsV1:
+    module_name: text
+    core_file: text
+    core_vhdl: text
+    harness_file: text
+    harness_vhdl: text
+    prove_sby_file: text
+    prove_sby: text
+    cover_sby_file: text
+    cover_sby: text
+    mutant_harness_file: text
+    mutant_harness_vhdl: text
+    mutant_sby_file: text
+    mutant_sby: text
+    manifest: text
+    hwir_hash: text
+    rtl_hash: text
+    rvfi_contract_hash: text
+    assumption_manifest_hash: text
+
+    me diagnostic() -> text:
+        if self.module_name == "":
+            return "FV2-E-RISCV-FORMAL-MODULE: exact generated module is required"
+        if self.core_file == "" or self.core_vhdl == "":
+            return "FV2-E-RISCV-FORMAL-CORE: generated RVFI core is required"
+        if self.harness_file == "" or self.harness_vhdl == "":
+            return "FV2-E-RISCV-FORMAL-HARNESS: proof harness is required"
+        if self.prove_sby_file == "" or not self.prove_sby.contains("mode prove"):
+            return "FV2-E-RISCV-FORMAL-PROVE: mode-prove job is required"
+        if self.cover_sby_file == "" or not self.cover_sby.contains("mode cover"):
+            return "FV2-E-RISCV-FORMAL-COVER: reachable cover job is required"
+        if self.mutant_sby_file == "" or not self.mutant_sby.contains("mode prove"):
+            return "FV2-E-RISCV-FORMAL-MUTATION: expected-failing mutant job is required"
+        if not sha256_lower_hex_valid(self.hwir_hash) or
+            not sha256_lower_hex_valid(self.rtl_hash) or
+            not sha256_lower_hex_valid(self.rvfi_contract_hash):
+            return "FV2-E-RISCV-FORMAL-IDENTITY: HWIR, RTL, and RVFI hashes are required"
+        if not sha256_lower_hex_valid(self.assumption_manifest_hash):
+            return "FV2-E-RISCV-FORMAL-ASSUMPTIONS: exact formal assumptions are required"
+        ""
+
+fn rv32_add_assumption_manifest() -> text:
+    "simple-riscv-formal-assumptions/v1|scope=rv32i.add" +
+        "|clock=rising-edge|reset=asserted-first-cycle-only" +
+        "|retire-ready=always|privilege=not-reserved-2" +
+        "|illegal=0|memory-trap=0|interrupt=0"
+
+fn rv32_add_harness(entity: text, core: text, instruction: u32,
+    mutant: bool) -> text:
+    val expected_op = if mutant: "-" else: "+"
+    val label = if mutant: "mutation_substitution_must_fail" else: "add_semantics"
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+    "entity " + entity + " is port(clk : in std_logic; rst : in std_logic; " +
+    "in_valid : in std_logic; in_order : in std_logic_vector(63 downto 0); " +
+    "in_privilege : in std_logic_vector(1 downto 0); in_pc : in std_logic_vector(31 downto 0); " +
+    "rs1_value : in std_logic_vector(31 downto 0); rs2_value : in std_logic_vector(31 downto 0)); end entity;\n" +
+    "architecture formal of " + entity + " is\n" +
+    " signal formal_started : std_logic := '0';\n" +
+    " signal rvfi_valid, rvfi_trap, rvfi_halt, rvfi_intr : std_logic;\n" +
+    " signal rvfi_order : std_logic_vector(63 downto 0); signal rvfi_insn : std_logic_vector(31 downto 0);\n" +
+    " signal rvfi_mode, rvfi_ixl : std_logic_vector(1 downto 0);\n" +
+    " signal rvfi_rs1_addr, rvfi_rs2_addr, rvfi_rd_addr : std_logic_vector(4 downto 0);\n" +
+    " signal rvfi_rs1_rdata, rvfi_rs2_rdata, rvfi_rd_wdata : std_logic_vector(31 downto 0);\n" +
+    " signal rvfi_pc_rdata, rvfi_pc_wdata, rvfi_mem_addr : std_logic_vector(31 downto 0);\n" +
+    " signal rvfi_mem_rmask, rvfi_mem_wmask : std_logic_vector(3 downto 0);\n" +
+    " signal rvfi_mem_rdata, rvfi_mem_wdata : std_logic_vector(31 downto 0);\n" +
+    "begin\n dut: entity work." + core + " port map(clk=>clk,rst=>rst,retire_ready=>'1'," +
+    "in_valid=>in_valid,in_order=>in_order,in_privilege=>in_privilege,in_pc=>in_pc," +
+    "rs1_value=>rs1_value,rs2_value=>rs2_value,illegal_valid=>'0',memory_trap_valid=>'0'," +
+    "memory_trap_cause=>(others=>'0'),memory_trap_tval=>(others=>'0'),interrupt_valid=>'0'," +
+    "interrupt_cause=>(others=>'0'),rvfi_valid=>rvfi_valid,rvfi_order=>rvfi_order," +
+    "rvfi_insn=>rvfi_insn,rvfi_trap=>rvfi_trap,rvfi_halt=>rvfi_halt,rvfi_intr=>rvfi_intr," +
+    "rvfi_mode=>rvfi_mode,rvfi_ixl=>rvfi_ixl,rvfi_rs1_addr=>rvfi_rs1_addr," +
+    "rvfi_rs2_addr=>rvfi_rs2_addr,rvfi_rs1_rdata=>rvfi_rs1_rdata," +
+    "rvfi_rs2_rdata=>rvfi_rs2_rdata,rvfi_rd_addr=>rvfi_rd_addr," +
+    "rvfi_rd_wdata=>rvfi_rd_wdata,rvfi_pc_rdata=>rvfi_pc_rdata," +
+    "rvfi_pc_wdata=>rvfi_pc_wdata,rvfi_mem_addr=>rvfi_mem_addr," +
+    "rvfi_mem_rmask=>rvfi_mem_rmask,rvfi_mem_wmask=>rvfi_mem_wmask," +
+    "rvfi_mem_rdata=>rvfi_mem_rdata,rvfi_mem_wdata=>rvfi_mem_wdata);\n" +
+    " process(clk) begin if rising_edge(clk) then formal_started <= '1'; end if; end process;\n" +
+    " assert rst='1' or rvfi_valid/='1' or rvfi_insn=std_logic_vector(to_unsigned(" +
+    instruction.to_text() + ",32)) report \"rvfi_insn_identity\" severity failure;\n" +
+    " assert rst='1' or rvfi_valid/='1' or rvfi_trap='0' report \"add_never_traps\" severity failure;\n" +
+    " assert rst='1' or rvfi_valid/='1' or rvfi_pc_wdata=std_logic_vector(unsigned(rvfi_pc_rdata)+4) " +
+    "report \"pc_plus_four\" severity failure;\n" +
+    " assert rst='1' or rvfi_valid/='1' or rvfi_rd_addr=\"00000\" or " +
+    "rvfi_rd_wdata=std_logic_vector(unsigned(rvfi_rs1_rdata)" + expected_op +
+    "unsigned(rvfi_rs2_rdata)) report \"" + label + "\" severity failure;\n" +
+    " assert rst='1' or rvfi_valid/='1' or (rvfi_mem_rmask=\"0000\" and rvfi_mem_wmask=\"0000\") " +
+    "report \"add_has_no_memory_effect\" severity failure;\n" +
+    " -- psl default clock is rising_edge(clk);\n" +
+    " -- psl reset_first: assume always (formal_started='0' -> rst='1');\n" +
+    " -- psl reset_released: assume always (formal_started='1' -> rst='0');\n" +
+    " -- psl legal_privilege: assume always (in_privilege/=\"10\");\n" +
+    " -- psl retirement_reachable: cover {rst='1'; rst='0' and in_valid='1'; rvfi_valid='1'};\n" +
+    "end architecture formal;\n"
+
+fn rv32_sby(core_file: text, harness_file: text, top: text,
+    mode: text) -> text:
+    "[options]\nmode " + mode + "\ndepth 6\n\n[engines]\nsmtbmc boolector\n\n" +
+    "[script]\nghdl --std=08 -fpsl " + core_file + " " + harness_file + " -e " + top +
+    "\nprep -top " + top + "\n\n[files]\n" + core_file + "\n" + harness_file + "\n"
+
+pub fn generate_rv32_add_formal_artifacts(module_name: text,
+    instruction: u32) -> Result<RiscvScalarFormalArtifactsV1, text>:
+    val product: RiscvScalarRvfiProductV1 =
+        compile_strict_rv32_add_rvfi_product(module_name, instruction)
+    val product_error = product.diagnostic()
+    if product_error != "": return Err(product_error)
+    val core_file = module_name + ".vhd"
+    val harness_file = module_name + "_formal.vhd"
+    val harness_top = module_name + "_formal"
+    val mutant_file = module_name + "_mutant_formal.vhd"
+    val mutant_top = module_name + "_mutant_formal"
+    val prove_file = module_name + "_prove.sby"
+    val cover_file = module_name + "_cover.sby"
+    val mutant_sby_file = module_name + "_mutant.sby"
+    val assumptions_hash = sha256_text(rv32_add_assumption_manifest())
+    val artifacts = RiscvScalarFormalArtifactsV1(module_name, core_file, product.emitted.vhdl,
+        harness_file, rv32_add_harness(harness_top, module_name + "_rvfi", instruction, false),
+        prove_file, rv32_sby(core_file, harness_file, harness_top, "prove"),
+        cover_file, rv32_sby(core_file, harness_file, harness_top, "cover"),
+        mutant_file, rv32_add_harness(mutant_top, module_name + "_rvfi", instruction, true),
+        mutant_sby_file, rv32_sby(core_file, mutant_file, mutant_top, "prove"),
+        "scope=rv32i.add\nstatus=model-proven-pending-external-jobs\n" +
+            "executor=scripts/rtl/run-fv2-rv32-add-formal.shs\n" +
+            "expected_results=prove:proved,cover:covered,mutant:counterexample\n" +
+            "hw_ir_sha256=" + product.emitted.hwir_graph_sha256 + "\n" +
+            "rtl_sha256=" + product.rtl_sha256 + "\n" +
+            "rvfi_contract_sha256=" + product.rvfi_contract_sha256 + "\n" +
+            "assumption_manifest_sha256=" + assumptions_hash + "\n",
+        product.emitted.hwir_graph_sha256, product.rtl_sha256,
+        product.rvfi_contract_sha256, assumptions_hash)
+    val diagnostic = artifacts.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(artifacts)
+
+pub fn reduce_rv32_add_formal_evidence(artifacts: RiscvScalarFormalArtifactsV1,
+    prove: RiscvFormalJobReceiptV1, cover: RiscvFormalJobReceiptV1,
+    mutant: RiscvFormalJobReceiptV1) -> HardwareProofReceiptV1:
+    val prove_error = prove.diagnostic("rv32i.add.prove", artifacts.prove_sby,
+        RiscvFormalJobStatusV1.Proved)
+    val cover_error = cover.diagnostic("rv32i.add.cover", artifacts.cover_sby,
+        RiscvFormalJobStatusV1.Covered)
+    val mutant_error = mutant.diagnostic("rv32i.add.mutant", artifacts.mutant_sby,
+        RiscvFormalJobStatusV1.Counterexample)
+    val closed = artifacts.diagnostic() == "" and prove_error == "" and
+        cover_error == "" and mutant_error == ""
+    HardwareProofReceiptV1(hwir_hash: artifacts.hwir_hash,
+        rtl_hash: artifacts.rtl_hash, netlist_hash: "",
+        rvfi_contract_hash: artifacts.rvfi_contract_hash,
+        property_ids: ["rv32i.add.result", "rv32i.add.pc", "rv32i.add.no-memory"],
+        cover_ids: ["rv32i.add.retirement-reachable"],
+        mutation_ids: ["rv32i.add.substitution-mutant"],
+        engine_versions: [prove.engine_version, cover.engine_version,
+            mutant.engine_version],
+        evidence_receipt_hashes: [prove.hash(), cover.hash(), mutant.hash()],
+        assumption_manifest_hash: artifacts.assumption_manifest_hash,
+        # Caller-constructed job receipts validate the protocol only. They are
+        # not evidence that an external engine executed these jobs.
+        status: if closed: FormalStatus.Specified else: FormalStatus.Failed)
+
+fn receipt_unique_field_v1(receipt: text, key: text) -> text:
+    var value = ""
+    var count = 0
+    for raw in receipt.split("\n"):
+        val parts = raw.trim().split(" ")
+        if parts.len() == 2 and parts[0] == key:
+            count = count + 1
+            value = parts[1]
+    if count == 1: value else: ""
+
+fn receipt_has_input_v1(receipt: text, file_name: text, content: text) -> bool:
+    val expected = "input_sha256 " + file_name + " " + sha256_text(content)
+    var count = 0
+    for raw in receipt.split("\n"):
+        if raw.trim() == expected: count = count + 1
+    count == 1
+
+fn receipt_sha256_v1(value: text) -> bool:
+    sha256_lower_hex_valid(value)
+
+pub fn reduce_rv32_add_external_receipt_v1(
+    artifacts: RiscvScalarFormalArtifactsV1, receipt: text) -> HardwareProofReceiptV1:
+    val prove_output = receipt_unique_field_v1(receipt, "prove_output_sha256")
+    val cover_output = receipt_unique_field_v1(receipt, "cover_output_sha256")
+    val mutant_output = receipt_unique_field_v1(receipt, "mutant_output_sha256")
+    val sby_version = receipt_unique_field_v1(receipt, "sby_version_sha256")
+    val yosys_version = receipt_unique_field_v1(receipt, "yosys_version_sha256")
+    val ghdl_version = receipt_unique_field_v1(receipt, "ghdl_version_sha256")
+    val boolector_version = receipt_unique_field_v1(receipt, "boolector_version_sha256")
+    val inputs_match =
+        receipt_has_input_v1(receipt, artifacts.core_file, artifacts.core_vhdl) and
+        receipt_has_input_v1(receipt, artifacts.harness_file, artifacts.harness_vhdl) and
+        receipt_has_input_v1(receipt, artifacts.mutant_harness_file,
+            artifacts.mutant_harness_vhdl) and
+        receipt_has_input_v1(receipt, artifacts.prove_sby_file, artifacts.prove_sby) and
+        receipt_has_input_v1(receipt, artifacts.cover_sby_file, artifacts.cover_sby) and
+        receipt_has_input_v1(receipt, artifacts.mutant_sby_file, artifacts.mutant_sby)
+    val results_match = receipt_unique_field_v1(receipt, "schema") ==
+        "fv2-rv32-add-formal-receipt-v1" and
+        receipt_unique_field_v1(receipt, "prove_status") == "proved" and
+        receipt_unique_field_v1(receipt, "cover_status") == "covered" and
+        receipt_unique_field_v1(receipt, "mutant_status") == "counterexample" and
+        receipt_sha256_v1(prove_output) and receipt_sha256_v1(cover_output) and
+        receipt_sha256_v1(mutant_output)
+    val tools_match = receipt_sha256_v1(sby_version) and
+        receipt_sha256_v1(yosys_version) and receipt_sha256_v1(ghdl_version) and
+        receipt_sha256_v1(boolector_version)
+    val identities_match =
+        receipt_unique_field_v1(receipt, "module") == artifacts.module_name and
+        receipt_unique_field_v1(receipt, "hwir_sha256") == artifacts.hwir_hash and
+        receipt_unique_field_v1(receipt, "rtl_sha256") == artifacts.rtl_hash and
+        receipt_unique_field_v1(receipt, "rvfi_contract_sha256") == artifacts.rvfi_contract_hash and
+        receipt_unique_field_v1(receipt, "assumption_manifest_sha256") == artifacts.assumption_manifest_hash
+    val closed = artifacts.diagnostic() == "" and inputs_match and
+        results_match and tools_match and identities_match
+    HardwareProofReceiptV1(hwir_hash: artifacts.hwir_hash,
+        rtl_hash: artifacts.rtl_hash, netlist_hash: "",
+        rvfi_contract_hash: artifacts.rvfi_contract_hash,
+        property_ids: ["rv32i.add.result", "rv32i.add.pc", "rv32i.add.no-memory"],
+        cover_ids: ["rv32i.add.retirement-reachable"],
+        mutation_ids: ["rv32i.add.substitution-mutant"],
+        engine_versions: if tools_match:
+            [sby_version, yosys_version, ghdl_version, boolector_version]
+        else: [],
+        evidence_receipt_hashes: if closed: [sha256_text(receipt)] else: [],
+        assumption_manifest_hash: artifacts.assumption_manifest_hash,
+        status: if closed: FormalStatus.ModelProven else: FormalStatus.Failed)
+
+pub fn reduce_rv32_add_external_equivalence_receipt_v1(
+    artifacts: RiscvScalarFormalArtifactsV1, receipt: text) -> HardwareProofReceiptV1:
+    # Revalidate the complete formal receipt here.  Equivalence is an
+    # additional refinement edge, never a replacement for ISA properties,
+    # reachability, or mutation evidence.
+    val model_receipt = reduce_rv32_add_external_receipt_v1(artifacts, receipt)
+    val netlist_hash = receipt_unique_field_v1(receipt, "netlist_sha256")
+    val equivalence_log_hash = receipt_unique_field_v1(
+        receipt, "equivalence_output_sha256")
+    val yosys_version = receipt_unique_field_v1(receipt, "yosys_version_sha256")
+    val ghdl_version = receipt_unique_field_v1(receipt, "ghdl_version_sha256")
+    val policy_hash = receipt_unique_field_v1(
+        receipt, "equivalence_policy_sha256")
+    val closed = model_receipt.status == FormalStatus.ModelProven and
+        receipt_unique_field_v1(receipt, "equivalence_schema") ==
+            "fv2-rtl-netlist-equivalence-receipt-v1" and
+        receipt_unique_field_v1(receipt, "equivalence_status") == "proved" and
+        receipt_unique_field_v1(receipt, "equivalence_module") ==
+            artifacts.module_name + "_rvfi" and
+        receipt_unique_field_v1(receipt, "equivalence_rtl_sha256") ==
+            artifacts.rtl_hash and
+        receipt_sha256_v1(netlist_hash) and
+        receipt_sha256_v1(equivalence_log_hash) and
+        receipt_sha256_v1(yosys_version) and receipt_sha256_v1(ghdl_version) and
+        policy_hash == sha256_text("ghdl-vhdl2008|prep-top|equiv-opt-assert-synth-top|synth-top|write-json")
+    HardwareProofReceiptV1(hwir_hash: artifacts.hwir_hash,
+        rtl_hash: artifacts.rtl_hash,
+        netlist_hash: if closed: netlist_hash else: "",
+        rvfi_contract_hash: artifacts.rvfi_contract_hash,
+        property_ids: model_receipt.property_ids,
+        cover_ids: model_receipt.cover_ids,
+        mutation_ids: model_receipt.mutation_ids,
+        engine_versions: if closed:
+            model_receipt.engine_versions + [yosys_version, ghdl_version]
+        else: [],
+        evidence_receipt_hashes: if closed:
+            model_receipt.evidence_receipt_hashes +
+                [equivalence_log_hash, sha256_text(receipt)]
+        else: [],
+        assumption_manifest_hash: artifacts.assumption_manifest_hash,
+        # This closes the generated RTL -> synthesized netlist edge.  Sail ISA
+        # comparison and deployed-artifact identity remain separate gates, so
+        # this status intentionally cannot authorize a verified release.
+        status: if closed: FormalStatus.BackendRefined else: FormalStatus.Failed)
+
+pub fn reduce_rv32_add_external_sail_receipt_v1(
+    artifacts: RiscvScalarFormalArtifactsV1, receipt: text) -> HardwareProofReceiptV1:
+    val simulator_hash = receipt_unique_field_v1(receipt, "simulator_sha256")
+    val lock_hash = receipt_unique_field_v1(receipt, "oracle_lock_sha256")
+    val config_hash = receipt_unique_field_v1(receipt, "config_sha256")
+    val sail_compiler_version_hash = receipt_unique_field_v1(receipt,
+        "sail_compiler_version_sha256")
+    val source_hash = receipt_unique_field_v1(receipt, "probe_source_sha256")
+    val elf_hash = receipt_unique_field_v1(receipt, "probe_elf_sha256")
+    val disassembly_hash = receipt_unique_field_v1(
+        receipt, "probe_disassembly_sha256")
+    val trace_hash = receipt_unique_field_v1(receipt, "trace_sha256")
+    val output_hash = receipt_unique_field_v1(receipt, "run_output_sha256")
+    val closed = artifacts.diagnostic() == "" and
+        receipt_unique_field_v1(receipt, "schema") ==
+            "fv2-rv32-add-sail-receipt-v1" and
+        receipt_unique_field_v1(receipt, "status") == "agreed" and
+        receipt_unique_field_v1(receipt, "module") == artifacts.module_name and
+        receipt_unique_field_v1(receipt, "oracle_repository") ==
+            "https://github.com/riscv/sail-riscv.git" and
+        receipt_unique_field_v1(receipt, "oracle_revision") ==
+            "a33475aeb80090127433b5a8b30e717edaa19e71" and
+        receipt_unique_field_v1(receipt, "hwir_sha256") == artifacts.hwir_hash and
+        receipt_unique_field_v1(receipt, "rtl_sha256") == artifacts.rtl_hash and
+        receipt_unique_field_v1(receipt, "rvfi_contract_sha256") ==
+            artifacts.rvfi_contract_hash and
+        receipt_unique_field_v1(receipt, "assumption_manifest_sha256") ==
+            artifacts.assumption_manifest_hash and
+        receipt_unique_field_v1(receipt, "instruction") == "002081b3" and
+        receipt_unique_field_v1(receipt, "rs1") == "00000005" and
+        receipt_unique_field_v1(receipt, "rs2") == "00000007" and
+        receipt_unique_field_v1(receipt, "rd") == "0000000c" and
+        receipt_sha256_v1(lock_hash) and receipt_sha256_v1(simulator_hash) and
+        receipt_sha256_v1(config_hash) and
+        receipt_sha256_v1(sail_compiler_version_hash) and
+        receipt_sha256_v1(source_hash) and receipt_sha256_v1(elf_hash) and
+        receipt_sha256_v1(disassembly_hash) and receipt_sha256_v1(trace_hash) and
+        receipt_sha256_v1(output_hash)
+    HardwareProofReceiptV1(hwir_hash: artifacts.hwir_hash,
+        rtl_hash: artifacts.rtl_hash, netlist_hash: "",
+        rvfi_contract_hash: artifacts.rvfi_contract_hash,
+        property_ids: ["rv32i.add.sail-result-agreement"],
+        cover_ids: ["rv32i.add.sail-retirement-witness"],
+        mutation_ids: ["rv32i.add.sail-independent-oracle"],
+        engine_versions: if closed:
+            [lock_hash, simulator_hash, config_hash, sail_compiler_version_hash]
+        else: [],
+        evidence_receipt_hashes: if closed:
+            # The pinned lock is a retained part of the external-evidence
+            # closure.  A receipt that merely *names* an unmaterialized lock
+            # cannot establish independent-oracle provenance.
+            [lock_hash, source_hash, elf_hash, disassembly_hash, trace_hash,
+                output_hash, sha256_text(receipt)]
+        else: [],
+        assumption_manifest_hash: artifacts.assumption_manifest_hash,
+        # One concrete independent oracle trace is model evidence, not a
+        # universal ISA theorem or an artifact-release authorization.
+        status: if closed: FormalStatus.ModelProven else: FormalStatus.Failed)

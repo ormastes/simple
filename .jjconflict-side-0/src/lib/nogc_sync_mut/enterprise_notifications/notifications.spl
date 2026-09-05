@@ -1,0 +1,192 @@
+"""
+# Notifications Vertical — insert-only durable notification outbox ledger
+
+An enterprise vertical of the Simple Enterprise Suite (lane
+`.spipe/simple_enterprise_suite`, W21-A) over the durable enterprise store:
+
+    enqueue (recipient, channel, template_key, payload) -> pending -> mark_sent -> sent
+
+Every write runs the FROZEN guarded sequence (foundation.spl):
+
+    session -> rbac -> domain validation -> idempotency -> effects in one UoW
+
+Effects committed together in the unit of work: the insert-only notification
+row, the insert-only status-change row, the outbox event, the sha256-chained
+audit record, and the idempotency key — so a replayed command produces exactly
+one effect and a rollback carries none (atomicity on ACID backends; see the
+store's backend-honesty docstring).
+
+Storage model is insert-only + derive (immutable-ledger rule): a
+notification's CURRENT status is a pure fold over its status-change stream
+(`notify_status`), never an UPDATE. The only legal transition is
+`pending -> sent`; a double-send (or any other move) is denied with the
+closed-set reason `invalid-transition` (foundation.reason_set). No reason is
+added to that closed 16-member set.
+
+## Cross-OS hashing rule
+
+This module NEVER imports `std.common.crypto.sha256`. All hashing goes through
+the store's `records.audit_append` facade (which itself routes to
+`audit_hash.audit_sha256_hex`), so the vertical compiles unchanged for
+`x86_64-unknown-simpleos`.
+
+## RBAC — reused 'sales' role, local gate (no frozen-table edit)
+
+`foundation.role_allows` is FROZEN and says nothing about `notify.*`. Rather
+than mutate the frozen table or the equivalence-fenced
+`enterprise_sale.rbac_registry`, this module REUSES the existing `sales` role
+through a local `notify_role_allows` gate for its two `notify.*` actions. The
+frozen session->rbac->validation->idempotency SEQUENCE is preserved exactly.
+
+Tenant isolation: the SESSION tenant is authority; every reader filters by
+tenant in pure Simple and a payload tenant is never trusted.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid
+}
+
+# =============================================================================
+# Schema
+# =============================================================================
+
+fn notify_setup(store: EnterpriseStore) -> bool:
+    var ok = store_migrate(store, "notify_001_ledger",
+        "CREATE TABLE IF NOT EXISTS notify_ledger (id INTEGER PRIMARY KEY, tenant_id TEXT, notification_id TEXT, recipient TEXT, channel TEXT, template_key TEXT, payload TEXT)")
+    ok = ok and store_migrate(store, "notify_002_status",
+        "CREATE TABLE IF NOT EXISTS notify_status (id INTEGER PRIMARY KEY, tenant_id TEXT, notification_id TEXT, status TEXT, detail TEXT)")
+    ok
+
+# =============================================================================
+# RBAC — reused 'sales' role via a local gate (see module docstring)
+# =============================================================================
+
+fn notify_role_allows(role: text, action: text) -> bool:
+    if role == "admin":
+        return true
+    if role == "sales":
+        return action == "notify.enqueue" or action == "notify.mark_sent"
+    false
+
+# =============================================================================
+# Validated allowed-transition set
+# =============================================================================
+
+# notify_transition_allowed: a PENDING notification may be marked sent; any
+# other move (e.g. sending an already-sent notification) is illegal.
+fn notify_transition_allowed(cur: text, nxt: text) -> bool:
+    cur == "pending" and nxt == "sent"
+
+# =============================================================================
+# Derived reads — current status is a pure fold over insert-only history
+# =============================================================================
+
+# notify_status_of folds a notification's status stream to its current status
+# ("" when the notification does not exist for this tenant).
+fn notify_status_of(store: EnterpriseStore, tenant_id: text, notification_id: text) -> text:
+    var status = ""
+    val rows = store_rows(store, "notify_status", "id, tenant_id, notification_id, status, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "notification_id") == notification_id:
+            status = sqlite_row_get(row, "status")
+    status
+
+# =============================================================================
+# Pure read — the pending outbox fold, tenant-scoped
+# =============================================================================
+
+# notify_pending folds every notification of a tenant to the list of ids whose
+# current status is still "pending". Pure read: no writes, tenant-scoped, a
+# payload tenant is never consulted.
+fn notify_pending(store: EnterpriseStore, tenant_id: text) -> [text]:
+    var out: [text] = []
+    val rows = store_rows(store, "notify_ledger", "id, tenant_id, notification_id, recipient, channel, template_key, payload")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val nid = sqlite_row_get(row, "notification_id")
+        if notify_status_of(store, tenant_id, nid) == "pending":
+            out.push(nid)
+    out
+
+# =============================================================================
+# Guarded commands — frozen sequence over the durable store
+# =============================================================================
+
+# notify_enqueue records a new notification at status "pending". Replaying the
+# same idempotency key returns the recorded result WITHOUT a second effect.
+fn notify_enqueue(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, notification_id: text, recipient: text, channel: text, template_key: text, payload: text) -> CommandResult:
+    # 1. session
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", notification_id)
+    # 2. rbac
+    if not notify_role_allows(who.role, "notify.enqueue"):
+        return denied("forbidden", notification_id)
+    # 3. domain validation (state-independent identity/shape checks)
+    if notification_id == "" or recipient == "" or channel == "" or template_key == "":
+        return denied("invalid-record", notification_id)
+    # 4. idempotency — a replay returns the recorded outcome, no new effect.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and notify_status_of(store, tenant.tenant_id, notification_id) != "":
+        return denied("invalid-record", notification_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # 5. effects — one unit of work
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO notify_ledger (tenant_id, notification_id, recipient, channel, template_key, payload) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, notification_id, recipient, channel, template_key, payload])
+    store_insert_row(store,
+        "INSERT INTO notify_status (tenant_id, notification_id, status, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, notification_id, "pending", template_key])
+    outbox_append(store, tenant.tenant_id, "notify.enqueued", notification_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "notify.enqueue", notification_id + ":" + channel)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, notification_id)
+    uow_commit(store)
+    accepted(notification_id)
+
+# notify_mark_sent transitions a PENDING notification to "sent" (an insert-only
+# status row, audited). An unknown notification is denied invalid-record; a
+# double-send — or any other illegal move — is denied invalid-transition from
+# the closed reason set.
+fn notify_mark_sent(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, notification_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", notification_id)
+    if not notify_role_allows(who.role, "notify.mark_sent"):
+        return denied("forbidden", notification_id)
+    val cur = notify_status_of(store, tenant.tenant_id, notification_id)
+    # Unknown notification is state-INDEPENDENT (this command never creates one).
+    if cur == "":
+        return denied("invalid-record", notification_id)
+    # The transition is state-DEPENDENT on this command's own effect, so it is
+    # asked only of a command not already recorded (else a replay of a valid
+    # mark_sent would be denied invalid-transition instead of duplicate-key).
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and not notify_transition_allowed(cur, "sent"):
+        return denied("invalid-transition", notification_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO notify_status (tenant_id, notification_id, status, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, notification_id, "sent", ""])
+    outbox_append(store, tenant.tenant_id, "notify.sent", notification_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "notify.mark_sent", notification_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, notification_id)
+    uow_commit(store)
+    accepted(notification_id)
+
+export notify_setup, notify_role_allows, notify_transition_allowed
+export notify_status_of, notify_pending
+export notify_enqueue, notify_mark_sent

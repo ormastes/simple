@@ -1,0 +1,520 @@
+# SFFI - System Operations
+# Centralized environment, process, and time SFFI wrappers
+
+# ============================================================================
+# Environment Operations
+# ============================================================================
+
+use std.io_runtime.{cwd as io_runtime_cwd}
+
+# The canonical wrapper maps getcwd failure to ".". Every caller here wants a
+# total path to join against, so both compatibility spellings preserve that
+# contract without exposing the raw nullable value.
+fn env_cwd() -> text:
+    io_runtime_cwd()
+
+fn cwd() -> text:
+    io_runtime_cwd()
+
+@unsafe(reason: "raw nullable runtime-owned home-directory text ABI", capabilities: [ffi])
+extern fn rt_env_home() -> text?
+
+@always_inline
+fn _env_home_raw() -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_home()
+
+@unsafe(reason: "empty runtime-owned home text does not distinguish failure", capabilities: [ffi])
+@always_inline
+fn env_home() -> text:
+    _env_home_raw() ?? ""
+
+@unsafe(reason: "empty runtime-owned home text does not distinguish failure", capabilities: [ffi])
+@always_inline
+fn home() -> text:
+    _env_home_raw() ?? ""
+
+fn env_home_checked() -> Result<text, text>:
+    val value = _env_home_raw()
+    if value == nil or value == "":
+        return Err("rt_env_home returned no home directory")
+    Ok(value)
+
+# Same defect class as `flat_bridge_env_get` in
+# src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl: `rt_env_get`
+# yields nil for an UNSET variable, so both it and this wrapper must be
+# declared optional or the SFFI return-contract validator rejects the nil.
+# Unlike that wrapper this one must stay OPTIONAL rather than collapse to "" —
+# callers such as `env_get("SIMPLE_TRACE_FONT_STYLE") != nil` distinguish
+# unset from empty, and returning "" would silently turn those flags on.
+@unsafe(reason: "raw environment text lookup ABI; nil means absent", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+
+@always_inline
+fn env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@unsafe(reason: "raw environment integer lookup uses the caller default as its failure sentinel", capabilities: [ffi])
+extern fn rt_env_get_i64(key: text, default: i64) -> i64
+
+@always_inline
+fn env_get_i64(key: text, default: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_env_get_i64(key, default)
+
+@unsafe(reason: "raw PRNG ABI; not cryptographically secure", capabilities: [ffi])
+extern fn rt_random_i64() -> i64
+
+@always_inline
+fn random_i64() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_random_i64()
+
+@unsafe(reason: "raw stderr write ABI", capabilities: [ffi])
+extern fn rt_stderr_write(msg: text)
+
+@always_inline
+fn stderr_write(msg: text):
+    unsafe(capabilities: [ffi]):
+        rt_stderr_write(msg)
+
+@unsafe(reason: "raw process-liveness-check ABI", capabilities: [ffi])
+extern fn rt_process_exists(pid: i64) -> bool
+
+@always_inline
+fn process_exists(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_exists(pid)
+
+@unsafe(reason: "raw environment key/value mutation-status ABI", capabilities: [ffi])
+extern fn rt_env_set(key: text, value: text) -> bool
+
+@always_inline
+fn env_set(key: text, value: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_env_set(key, value)
+
+@unsafe(reason: "raw environment key removal-status ABI", capabilities: [ffi])
+extern fn rt_env_remove(key: text) -> bool
+
+@always_inline
+fn env_remove(key: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_env_remove(key)
+
+@unsafe(reason: "raw nullable environment snapshot and owned tuple-array ABI", capabilities: [ffi])
+extern fn rt_env_vars() -> [(text, text)]?
+
+@always_inline
+fn _env_vars_raw() -> [(text, text)]?:
+    unsafe(capabilities: [ffi]):
+        rt_env_vars()
+
+@always_inline
+fn env_vars_nilable() -> [(text, text)]?:
+    _env_vars_raw()
+
+@unsafe(reason: "environment snapshot ownership is not represented by the facade type", capabilities: [ffi])
+@always_inline
+fn env_vars() -> [(text, text)]:
+    _env_vars_raw() ?? []
+
+fn env_vars_checked() -> Result<[(text, text)], text>:
+    val values = _env_vars_raw()
+    if values == nil:
+        return Err("rt_env_vars failed to allocate an environment snapshot")
+    Ok(values)
+
+# --- Program Arguments ---
+
+@unsafe(reason: "raw process argument-array ownership ABI", capabilities: [ffi])
+extern fn rt_get_args() -> [text]
+
+# `rt_get_args` yields nil only if the runtime argv array is unset; "no
+# arguments" is already an EMPTY array, not nil, so nil and [] carry the
+# same meaning to every caller. TOTAL with the documented default [].
+@always_inline
+fn args_get() -> [text]:
+    unsafe(capabilities: [ffi]):
+        rt_get_args() ?? []
+
+@always_inline
+fn args() -> [text]:
+    unsafe(capabilities: [ffi]):
+        rt_get_args() ?? []
+
+# ============================================================================
+# Process Operations
+# ============================================================================
+
+# --- Process Execution ---
+
+@unsafe(reason: "raw process capture; exit code -1 is the execution-failure sentinel", capabilities: [ffi])
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+@always_inline
+fn _sffi_system_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    unsafe(capabilities: [ffi]):
+        rt_process_run(cmd, args)
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    _sffi_system_process_run_raw(cmd, args)
+
+@unsafe(reason: "raw timed process capture; exit code -1 is failure or timeout", capabilities: [ffi])
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+@always_inline
+fn _sffi_system_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    unsafe(capabilities: [ffi]):
+        rt_process_run_timeout(cmd, args, timeout_ms)
+
+fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    _sffi_system_process_run_timeout_raw(cmd, args, timeout_ms)
+
+# ABI: env_process.rs:1269 takes EIGHT words --
+# (cmd_ptr, cmd_len, args, timeout_ms, memory_bytes, cpu_seconds, max_fds,
+# max_procs). Declaring only four Simple params left cpu_seconds/max_fds/
+# max_procs reading uninitialised registers, and those three go straight into
+# setrlimit(2) for the child. Note the unit is BYTES, not MB, despite the old
+# parameter name.
+@unsafe(reason: "raw limited process capture; exit code -1 is the execution-failure sentinel", capabilities: [ffi])
+extern fn rt_process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32)
+
+@always_inline
+fn _sffi_system_process_run_with_limits_raw(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32):
+    unsafe(capabilities: [ffi]):
+        rt_process_run_with_limits(cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs)
+
+fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64) -> (text, text, i32):
+    _sffi_system_process_run_with_limits_raw(cmd, args, timeout_ms, memory_bytes, 0, 0, 0)
+
+fn process_run_with_all_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32):
+    _sffi_system_process_run_with_limits_raw(cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs)
+
+@unsafe(reason: "raw native execution; exit code -1 is the execution-failure sentinel", capabilities: [ffi])
+extern fn rt_execute_native(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+@always_inline
+fn _sffi_system_execute_native_raw(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    unsafe(capabilities: [ffi]):
+        rt_execute_native(binary_path, args, timeout_ms)
+
+fn execute_native(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    _sffi_system_execute_native_raw(binary_path, args, timeout_ms)
+
+@unsafe(reason: "raw process output; empty text conflates empty output with execution failure", capabilities: [ffi])
+extern fn rt_process_output(cmd: text, args: [text]) -> text
+
+@always_inline
+fn _sffi_system_process_output_raw(cmd: text, args: [text]) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_process_output(cmd, args)
+
+@unsafe(reason: "empty process output does not distinguish success from execution failure", capabilities: [ffi])
+@always_inline
+fn process_output(cmd: text, args: [text]) -> text:
+    _sffi_system_process_output_raw(cmd, args)
+
+@unsafe(reason: "raw owned-child spawn; positive PID is success and -1 is failure", capabilities: [ffi])
+extern fn rt_process_spawn(cmd: text, args: [text]) -> i64
+
+@always_inline
+fn _sffi_system_process_spawn_raw(cmd: text, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn(cmd, args)
+
+fn process_spawn(cmd: text, args: [text]) -> i64:
+    _sffi_system_process_spawn_raw(cmd, args)
+
+@unsafe(reason: "raw owned-child wait; -1 is the invalid or wait-failure sentinel", capabilities: [ffi])
+extern fn rt_process_wait(pid: i64) -> i64
+
+@always_inline
+fn _sffi_system_process_wait_raw(pid: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_wait(pid)
+
+fn process_wait(pid: i64) -> i64:
+    if pid <= 0:
+        return -1
+    _sffi_system_process_wait_raw(pid)
+
+@unsafe(reason: "raw owned-child termination status; false is invalid, absent, or failure", capabilities: [ffi])
+extern fn rt_process_kill(pid: i64) -> bool
+
+@always_inline
+fn _sffi_system_process_kill_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_kill(pid)
+
+fn process_kill(pid: i64) -> bool:
+    if pid <= 1:
+        return false
+    _sffi_system_process_kill_raw(pid)
+
+# --- Process Information ---
+
+@unsafe(reason: "raw process-id ABI", capabilities: [ffi])
+extern fn rt_getpid() -> i64
+
+@always_inline
+fn _getpid_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_getpid()
+
+@unsafe(reason: "legacy process-id API exposes the raw non-positive failure sentinel", capabilities: [ffi])
+@always_inline
+fn getpid() -> i64:
+    _getpid_raw()
+
+fn getpid_checked() -> Result<i64, text>:
+    val pid = _getpid_raw()
+    if pid <= 0:
+        return Err("rt_getpid returned a non-positive process identifier")
+    Ok(pid)
+
+@unsafe(reason: "raw nullable runtime-owned hostname text ABI", capabilities: [ffi])
+extern fn rt_hostname() -> text?
+
+@always_inline
+fn _hostname_raw() -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_hostname()
+
+@unsafe(reason: "empty runtime-owned hostname text does not distinguish failure", capabilities: [ffi])
+@always_inline
+fn hostname() -> text:
+    _hostname_raw() ?? ""
+
+fn hostname_checked() -> Result<text, text>:
+    val value = _hostname_raw()
+    if value == nil or value == "":
+        return Err("rt_hostname returned no hostname")
+    Ok(value)
+
+@unsafe(reason: "raw host CPU-count ABI; nonpositive return is failure", capabilities: [ffi])
+extern fn rt_cpu_count() -> i64
+
+@always_inline
+fn _cpu_count_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_cpu_count()
+
+@unsafe(reason: "legacy CPU-count API exposes the raw non-positive failure sentinel", capabilities: [ffi])
+@always_inline
+fn cpu_count() -> i64:
+    _cpu_count_raw()
+
+fn cpu_count_checked() -> Result<i64, text>:
+    val count = _cpu_count_raw()
+    if count <= 0:
+        return Err("rt_cpu_count returned a non-positive count")
+    Ok(count)
+
+@unsafe(reason: "raw host-target discriminant ABI; failure sentinel is untyped", capabilities: [ffi])
+extern fn rt_get_host_target_code() -> i64
+
+@unsafe(reason: "host-target failure sentinel is not represented by the facade type", capabilities: [ffi])
+@always_inline
+fn get_host_target_code() -> i64:
+    rt_get_host_target_code()
+
+@unsafe(reason: "raw runtime-owned UUID text ABI; empty text is failure", capabilities: [ffi])
+extern fn rt_uuid_v4() -> text
+
+@unsafe(reason: "empty runtime-owned UUID text does not distinguish failure", capabilities: [ffi])
+@always_inline
+fn uuid_v4() -> text:
+    rt_uuid_v4()
+
+# --- Shell Execution ---
+
+@unsafe(reason: "raw shell command text and exit-status ABI", capabilities: [ffi])
+extern fn rt_shell(cmd: text) -> i64
+
+@always_inline
+fn shell(cmd: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_shell(cmd)
+
+@unsafe(reason: "raw shell command text and runtime-owned stdout ABI; empty text is ambiguous", capabilities: [ffi])
+extern fn rt_shell_output(cmd: text) -> text
+
+@unsafe(reason: "empty shell output does not distinguish success from execution failure", capabilities: [ffi])
+@always_inline
+fn shell_output(cmd: text) -> text:
+    rt_shell_output(cmd)
+
+@unsafe(reason: "raw command text execution-status ABI", capabilities: [ffi])
+extern fn rt_exec(cmd: text) -> i32
+
+@always_inline
+fn exec(cmd: text) -> i32:
+    unsafe(capabilities: [ffi]):
+        rt_exec(cmd)
+
+# ============================================================================
+# Time Operations
+# ============================================================================
+
+# --- Current Time ---
+
+@unsafe(reason: "raw wall-clock seconds ABI", capabilities: [ffi])
+extern fn rt_time_now() -> i64
+
+@always_inline
+fn time_now() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now()
+
+@unsafe(reason: "raw wall-clock microsecond ABI", capabilities: [ffi])
+extern fn rt_time_now_unix_micros() -> i64
+
+@always_inline
+fn time_now_unix_micros() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
+
+@unsafe(reason: "raw wall-clock millisecond ABI", capabilities: [ffi])
+extern fn rt_time_ms() -> i64
+
+@always_inline
+fn time_ms() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_ms()
+
+@unsafe(reason: "raw wall-clock millisecond ABI", capabilities: [ffi])
+extern fn rt_time_now_unix_millis() -> i64
+
+@always_inline
+fn time_now_unix_millis() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_unix_millis()
+
+@unsafe(reason: "raw runtime-owned current ISO timestamp text ABI", capabilities: [ffi])
+extern fn rt_time_now_iso() -> text
+
+@unsafe(reason: "empty runtime-owned timestamp text does not distinguish failure", capabilities: [ffi])
+@always_inline
+fn time_now_iso() -> text:
+    rt_time_now_iso()
+
+@unsafe(reason: "raw monotonic or wall-clock millisecond ABI", capabilities: [ffi])
+extern fn rt_time_millis() -> i64
+
+@always_inline
+fn time_millis() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_millis()
+
+# --- Time Components ---
+
+@unsafe(reason: "raw local-time year component ABI", capabilities: [ffi])
+extern fn rt_time_year() -> i64
+
+@always_inline
+fn time_year() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_year()
+
+@unsafe(reason: "raw local-time month component ABI", capabilities: [ffi])
+extern fn rt_time_month() -> i64
+
+@always_inline
+fn time_month() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_month()
+
+@unsafe(reason: "raw local-time day component ABI", capabilities: [ffi])
+extern fn rt_time_day() -> i64
+
+@always_inline
+fn time_day() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_day()
+
+@unsafe(reason: "raw local-time hour component ABI", capabilities: [ffi])
+extern fn rt_time_hour() -> i64
+
+@always_inline
+fn time_hour() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_hour()
+
+@unsafe(reason: "raw local-time minute component ABI", capabilities: [ffi])
+extern fn rt_time_minute() -> i64
+
+@always_inline
+fn time_minute() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_minute()
+
+@unsafe(reason: "raw local-time second component ABI", capabilities: [ffi])
+extern fn rt_time_second() -> i64
+
+@always_inline
+fn time_second() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_second()
+
+# --- Timestamp Operations ---
+
+@unsafe(reason: "raw timestamp and runtime-owned display text ABI", capabilities: [ffi])
+extern fn rt_timestamp_to_string(ts: i64) -> text
+
+@unsafe(reason: "runtime-owned timestamp text has no represented failure state", capabilities: [ffi])
+@always_inline
+fn timestamp_to_string(ts: i64) -> text:
+    rt_timestamp_to_string(ts)
+
+@unsafe(reason: "raw timestamp and runtime-owned ISO text ABI", capabilities: [ffi])
+extern fn rt_timestamp_to_iso(ts: i64) -> text
+
+@unsafe(reason: "runtime-owned timestamp text has no represented failure state", capabilities: [ffi])
+@always_inline
+fn timestamp_to_iso(ts: i64) -> text:
+    rt_timestamp_to_iso(ts)
+
+@unsafe(reason: "raw ISO text timestamp parser ABI; failure sentinel is untyped", capabilities: [ffi])
+extern fn rt_timestamp_from_iso(iso: text) -> i64
+
+@unsafe(reason: "timestamp parse failure sentinel is not represented by the facade type", capabilities: [ffi])
+@always_inline
+fn timestamp_from_iso(iso: text) -> i64:
+    rt_timestamp_from_iso(iso)
+
+@unsafe(reason: "raw timestamp text parser ABI; failure sentinel is untyped", capabilities: [ffi])
+extern fn rt_timestamp_parse(s: text) -> i64
+
+@unsafe(reason: "timestamp parse failure sentinel is not represented by the facade type", capabilities: [ffi])
+@always_inline
+fn timestamp_parse(s: text) -> i64:
+    rt_timestamp_parse(s)
+
+@unsafe(reason: "raw timestamp difference ABI; overflow contract is untyped", capabilities: [ffi])
+extern fn rt_timestamp_diff_seconds(a: i64, b: i64) -> i64
+
+@always_inline
+fn timestamp_diff_seconds(a: i64, b: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_timestamp_diff_seconds(a, b)
+
+# --- Sleep/Delay ---
+
+use std.io_runtime.{thread_sleep}
+
+fn sleep_ms(milliseconds: i64):
+    thread_sleep(milliseconds)
+
+@unsafe(reason: "raw blocking thread sleep ABI", capabilities: [ffi])
+extern fn rt_sleep_secs(seconds: i64)
+
+@always_inline
+fn sleep_secs(seconds: i64):
+    unsafe(capabilities: [ffi]):
+        rt_sleep_secs(seconds)
+
+# ============================================================================
+# Exports
+# ============================================================================

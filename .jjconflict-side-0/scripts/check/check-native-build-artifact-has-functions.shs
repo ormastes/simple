@@ -1,0 +1,145 @@
+#!/bin/sh
+# check-native-build-artifact-has-functions.shs
+#
+# A `native-build` that reports success while emitting an artifact with ZERO
+# defined function symbols has not built anything runnable. Exit code alone is
+# not an oracle for that lane (see
+# doc/08_tracking/bug/native_build_reports_success_for_functionless_artifact_2026-08-10.md),
+# so this gate reads the artifact itself.
+#
+# Usage:
+#   sh scripts/check/check-native-build-artifact-has-functions.shs <artifact>...
+#   sh scripts/check/check-native-build-artifact-has-functions.shs --selftest
+#
+# Verdict line is ALWAYS the last line of stdout:
+#   PASS  — <n> artifact(s) checked, ...     exit 0   (n is always > 0)
+#   FAIL  — ...                              exit 1
+#   ERROR — nothing was checked              exit 2
+#
+# Fail-closed by construction:
+#   * zero artifacts supplied            -> ERROR (never a vacuous PASS)
+#   * artifact missing / unreadable      -> FAIL
+#   * ELF with a .symtab and 0 FUNC      -> FAIL   (the defect this gate exists for)
+#   * ELF with NO symbol table (stripped)-> ERROR  ("cannot tell" is not "fine")
+#   * non-ELF (Mach-O / PE / archive)    -> ERROR  (out of scope, never silent PASS)
+# `--selftest` runs first and is fatal: it builds a real 1-FUNC ELF and a real
+# 0-FUNC ELF with `as`/`ld` and requires this script's own verdict to be PASS on
+# the former and FAIL on the latter. A gate that cannot fail its negative
+# control is not a gate.
+
+set -u
+
+self=$0
+tmp=
+cleanup() { [ -n "$tmp" ] && rm -rf "$tmp"; }
+trap cleanup EXIT INT TERM
+
+# Defined STT_FUNC count for one ELF. Echoes the count, or "-" if undeterminable.
+func_count() {
+    readelf -sW "$1" 2>/dev/null \
+        | awk '$4 == "FUNC" && $7 != "UND" { n++ } END { print n + 0 }'
+}
+has_symtab() {
+    readelf -SW "$1" 2>/dev/null | grep -q '\.symtab'
+}
+is_elf() {
+    head -c 4 "$1" 2>/dev/null | grep -q 'ELF'
+}
+
+check_one() {
+    art=$1
+    if [ ! -f "$art" ]; then
+        echo "  $art: MISSING"
+        return 1
+    fi
+    if ! is_elf "$art"; then
+        echo "  $art: not an ELF file — this gate cannot rule on it"
+        return 2
+    fi
+    if ! has_symtab "$art"; then
+        echo "  $art: no .symtab (stripped?) — this gate cannot rule on it"
+        return 2
+    fi
+    n=$(func_count "$art")
+    if [ "$n" -lt 1 ]; then
+        echo "  $art: 0 defined FUNC symbols — structurally empty artifact"
+        return 1
+    fi
+    echo "  $art: $n defined FUNC symbol(s)"
+    return 0
+}
+
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    printf '.text\n.globl sc_probe_fn\n.type sc_probe_fn, @function\nsc_probe_fn:\n  ret\n.size sc_probe_fn, .-sc_probe_fn\n' > "$tmp/pos.s"
+    printf '.data\n.globl sc_probe_data\nsc_probe_data:\n  .quad 0\n' > "$tmp/neg.s"
+    if ! as -o "$tmp/pos.o" "$tmp/pos.s" 2>/dev/null || ! as -o "$tmp/neg.o" "$tmp/neg.s" 2>/dev/null; then
+        echo "selftest: cannot assemble fixtures (no usable 'as')"
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    check_one "$tmp/pos.o" >/dev/null; rc_pos=$?
+    check_one "$tmp/neg.o" >/dev/null; rc_neg=$?
+    if [ "$rc_pos" -ne 0 ]; then
+        echo "selftest: POSITIVE control was rejected (rc=$rc_pos) — gate is broken"
+        echo "FAIL — selftest positive control failed"
+        exit 1
+    fi
+    if [ "$rc_neg" -ne 1 ]; then
+        echo "selftest: NEGATIVE control was NOT rejected (rc=$rc_neg) — gate fails open"
+        echo "FAIL — selftest negative control failed"
+        exit 1
+    fi
+    echo "selftest: 2/2 controls behaved (1-FUNC accepted, 0-FUNC rejected)"
+}
+
+# --selftest runs before every scan and is fatal.
+selftest_only=0
+artifacts=""
+count=0
+for a in "$@"; do
+    case $a in
+        --selftest) selftest_only=1 ;;
+        -h|--help)
+            sed -n '2,30p' "$self"
+            exit 0
+            ;;
+        *) artifacts="$artifacts $a"; count=$((count + 1)) ;;
+    esac
+done
+
+selftest
+
+if [ "$selftest_only" -eq 1 ] && [ "$count" -eq 0 ]; then
+    echo "PASS — 2 selftest control(s) checked, no artifacts requested"
+    exit 0
+fi
+
+if [ "$count" -eq 0 ]; then
+    echo "usage: $self <artifact>... | --selftest"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+fails=0
+undet=0
+ok=0
+for art in $artifacts; do
+    check_one "$art"
+    case $? in
+        0) ok=$((ok + 1)) ;;
+        1) fails=$((fails + 1)) ;;
+        2) undet=$((undet + 1)) ;;
+    esac
+done
+
+if [ "$fails" -gt 0 ]; then
+    echo "FAIL — $count artifact(s) checked, $fails with zero defined FUNC symbols or missing"
+    exit 1
+fi
+if [ "$undet" -gt 0 ]; then
+    echo "ERROR — nothing was checked conclusively ($undet of $count undeterminable)"
+    exit 2
+fi
+echo "PASS — $count artifact(s) checked, all carry at least one defined FUNC symbol"
+exit 0

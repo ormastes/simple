@@ -1,0 +1,465 @@
+# Resource Grant Types — Exokernel Lane 4
+# MDSOC: feature dimension, device layer
+#
+# Typed resource grant requests and tokens for PCI BAR, IRQ, DMA,
+# IOMMU isolation, and aggregated per-driver grant sets.
+#
+# Used by GrantBroker to allocate and revoke kernel-mediated access.
+# ============================================================================
+
+# ============================================================================
+# BarGrant — PCI BAR Mapping Grant
+# ============================================================================
+
+class BarGrant:
+    """Typed grant for a single PCI BAR mapping."""
+    pci_bus: i64
+    pci_device: i64
+    pci_function: i64
+    bar_index: i64
+    phys_addr: i64
+    size: i64
+    is_mmio: bool
+    is_prefetchable: bool
+    token: i64
+    granted: bool
+
+    me grant(tok: i64, addr: i64, sz: i64, mmio: bool, prefetch: bool) -> text:
+        """Apply a grant token and physical parameters to this request."""
+        if tok <= 0:
+            return "error: invalid token"
+        if sz <= 0:
+            return "error: invalid size"
+        self.token = tok
+        self.phys_addr = addr
+        self.size = sz
+        self.is_mmio = mmio
+        self.is_prefetchable = prefetch
+        self.granted = true
+        "ok"
+
+    me has_issued_token() -> bool:
+        self.granted and self.token > 0 and self.size > 0
+
+    me revoke() -> text:
+        """Revoke this BAR grant and clear token."""
+        self.granted = false
+        self.token = 0
+        self.phys_addr = 0
+        self.size = 0
+        "revoked"
+
+    me summary() -> text:
+        """Return a human-readable summary of this BAR grant."""
+        val state = if self.granted: "granted" else "pending"
+        "BarGrant[" + state + " bus=" + self.pci_bus.to_text() +
+            " dev=" + self.pci_device.to_text() +
+            " fn=" + self.pci_function.to_text() +
+            " bar=" + self.bar_index.to_text() +
+            " phys=0x" + self.phys_addr.to_text() +
+            " size=" + self.size.to_text() +
+            " tok=" + self.token.to_text() + "]"
+
+impl BarGrant:
+    static fn request(bus: i64, dev: i64, func: i64, bar: i64) -> BarGrant:
+        """Create a pending BAR grant request."""
+        BarGrant(
+            pci_bus: bus,
+            pci_device: dev,
+            pci_function: func,
+            bar_index: bar,
+            phys_addr: 0,
+            size: 0,
+            is_mmio: false,
+            is_prefetchable: false,
+            token: 0,
+            granted: false
+        )
+
+# ============================================================================
+# IrqGrant — Interrupt Grant
+# ============================================================================
+
+class IrqGrant:
+    """Typed grant for a legacy or MSI interrupt."""
+    irq_number: i64
+    is_msi: bool
+    msi_vector: i64
+    handler_pid: i64
+    token: i64
+    granted: bool
+
+    me grant(tok: i64) -> text:
+        """Apply a grant token to this IRQ request."""
+        if tok <= 0:
+            return "error: invalid token"
+        self.token = tok
+        self.granted = true
+        "ok"
+
+    me has_issued_token() -> bool:
+        self.granted and self.token > 0
+
+    me revoke() -> text:
+        """Revoke this IRQ grant and clear token."""
+        self.granted = false
+        self.token = 0
+        "revoked"
+
+    me summary() -> text:
+        """Return a human-readable summary of this IRQ grant."""
+        val state = if self.granted: "granted" else "pending"
+        val kind = if self.is_msi: "msi" else "legacy"
+        "IrqGrant[" + state + " " + kind +
+            " irq=" + self.irq_number.to_text() +
+            " vec=" + self.msi_vector.to_text() +
+            " pid=" + self.handler_pid.to_text() +
+            " tok=" + self.token.to_text() + "]"
+
+impl IrqGrant:
+    static fn request_legacy(irq: i64, pid: i64) -> IrqGrant:
+        """Create a pending legacy IRQ grant request."""
+        IrqGrant(
+            irq_number: irq,
+            is_msi: false,
+            msi_vector: 0,
+            handler_pid: pid,
+            token: 0,
+            granted: false
+        )
+
+    static fn request_msi(vector: i64, pid: i64) -> IrqGrant:
+        """Create a pending MSI IRQ grant request."""
+        IrqGrant(
+            irq_number: 0,
+            is_msi: true,
+            msi_vector: vector,
+            handler_pid: pid,
+            token: 0,
+            granted: false
+        )
+
+# ============================================================================
+# DmaGrant — DMA Buffer Grant
+# ============================================================================
+
+class DmaGrant:
+    """Typed grant for a DMA buffer allocation."""
+    phys_addr: i64
+    virt_addr: i64
+    size: i64
+    direction: text
+    iommu_domain: i64
+    token: i64
+    granted: bool
+
+    me grant(tok: i64, phys: i64, virt: i64) -> text:
+        """Apply grant token and resolved addresses to this DMA request."""
+        if tok <= 0:
+            return "error: invalid token"
+        if self.size <= 0:
+            return "error: invalid size"
+        self.token = tok
+        self.phys_addr = phys
+        self.virt_addr = virt
+        self.granted = true
+        "ok"
+
+    me has_issued_token() -> bool:
+        self.granted and self.token > 0 and self.size > 0
+
+    me revoke() -> text:
+        """Revoke this DMA grant and clear addresses."""
+        self.granted = false
+        self.token = 0
+        self.phys_addr = 0
+        self.virt_addr = 0
+        "revoked"
+
+    me summary() -> text:
+        """Return a human-readable summary of this DMA grant."""
+        val state = if self.granted: "granted" else "pending"
+        "DmaGrant[" + state +
+            " dir=" + self.direction +
+            " size=" + self.size.to_text() +
+            " phys=0x" + self.phys_addr.to_text() +
+            " virt=0x" + self.virt_addr.to_text() +
+            " domain=" + self.iommu_domain.to_text() +
+            " tok=" + self.token.to_text() + "]"
+
+impl DmaGrant:
+    static fn request(sz: i64, dir: text, domain: i64) -> DmaGrant:
+        """Create a pending DMA grant request."""
+        DmaGrant(
+            phys_addr: 0,
+            virt_addr: 0,
+            size: sz,
+            direction: dir,
+            iommu_domain: domain,
+            token: 0,
+            granted: false
+        )
+
+# ============================================================================
+# IommuDomain — IOMMU Isolation Domain
+# ============================================================================
+
+class IommuDomain:
+    """Tracks a single IOMMU isolation domain for DMA safety."""
+    domain_id: i64
+    owner_pid: i64
+    page_count: i64
+    mapping_count: i64
+    active: bool
+
+    me add_mapping(phys: i64, iova: i64, size: i64) -> text:
+        """Register a physical-to-IOVA mapping in this domain."""
+        if self.active == false:
+            return "error: domain inactive"
+        self.mapping_count = self.mapping_count + 1
+        self.page_count = self.page_count + (size / 4096)
+        "mapped phys=0x" + phys.to_text() + " iova=0x" + iova.to_text() + " size=" + size.to_text()
+
+    me remove_mapping(iova: i64) -> text:
+        """Remove a mapping by IOVA from this domain."""
+        if self.mapping_count > 0:
+            self.mapping_count = self.mapping_count - 1
+        "unmapped iova=0x" + iova.to_text()
+
+    me stats() -> text:
+        """Return a human-readable summary of this IOMMU domain."""
+        val state = if self.active: "active" else "inactive"
+        "IommuDomain[" + state +
+            " id=" + self.domain_id.to_text() +
+            " pid=" + self.owner_pid.to_text() +
+            " pages=" + self.page_count.to_text() +
+            " mappings=" + self.mapping_count.to_text() + "]"
+
+impl IommuDomain:
+    static fn create(id: i64, pid: i64) -> IommuDomain:
+        """Create an active IOMMU domain for the given owner PID."""
+        IommuDomain(
+            domain_id: id,
+            owner_pid: pid,
+            page_count: 0,
+            mapping_count: 0,
+            active: true
+        )
+
+# ============================================================================
+# ResourceGrantSet — Aggregated Grants for One Driver
+# Flat layout: max 4 BARs, 2 IRQs, 2 DMAs
+# ============================================================================
+
+class ResourceGrantSet:
+    """Aggregated resource grants for a single driver instance."""
+    driver_name: text
+    driver_pid: i64
+    bar_count: i64
+    irq_count: i64
+    dma_count: i64
+    # BAR slots
+    b0_bar: i64
+    b0_token: i64
+    b0_granted: bool
+    b1_bar: i64
+    b1_token: i64
+    b1_granted: bool
+    b2_bar: i64
+    b2_token: i64
+    b2_granted: bool
+    b3_bar: i64
+    b3_token: i64
+    b3_granted: bool
+    # IRQ slots
+    i0_irq: i64
+    i0_token: i64
+    i0_granted: bool
+    i1_irq: i64
+    i1_token: i64
+    i1_granted: bool
+    # DMA slots
+    d0_size: i64
+    d0_token: i64
+    d0_granted: bool
+    d1_size: i64
+    d1_token: i64
+    d1_granted: bool
+    # IOMMU domain ID
+    iommu_domain: i64
+
+    me add_bar(bar: i64) -> text:
+        """Register a BAR index in the next available BAR slot."""
+        if self.bar_count == 0:
+            self.b0_bar = bar
+            self.bar_count = 1
+            return "added bar slot 0"
+        if self.bar_count == 1:
+            self.b1_bar = bar
+            self.bar_count = 2
+            return "added bar slot 1"
+        if self.bar_count == 2:
+            self.b2_bar = bar
+            self.bar_count = 3
+            return "added bar slot 2"
+        if self.bar_count == 3:
+            self.b3_bar = bar
+            self.bar_count = 4
+            return "added bar slot 3"
+        "error: bar slots full"
+
+    me add_irq(irq: i64) -> text:
+        """Register an IRQ number in the next available IRQ slot."""
+        if self.irq_count == 0:
+            self.i0_irq = irq
+            self.irq_count = 1
+            return "added irq slot 0"
+        if self.irq_count == 1:
+            self.i1_irq = irq
+            self.irq_count = 2
+            return "added irq slot 1"
+        "error: irq slots full"
+
+    me add_dma(size: i64) -> text:
+        """Register a DMA buffer size in the next available DMA slot."""
+        if self.dma_count == 0:
+            self.d0_size = size
+            self.dma_count = 1
+            return "added dma slot 0"
+        if self.dma_count == 1:
+            self.d1_size = size
+            self.dma_count = 2
+            return "added dma slot 1"
+        "error: dma slots full"
+
+    me grant_all(base_token: i64) -> i64:
+        """Grant all pending resources using sequential tokens from base_token."""
+        if base_token <= 0:
+            return 0
+        var tok = base_token
+        var count: i64 = 0
+        if self.bar_count > 0 and self.b0_granted == false:
+            self.b0_token = tok
+            self.b0_granted = true
+            tok = tok + 1
+            count = count + 1
+        if self.bar_count > 1 and self.b1_granted == false:
+            self.b1_token = tok
+            self.b1_granted = true
+            tok = tok + 1
+            count = count + 1
+        if self.bar_count > 2 and self.b2_granted == false:
+            self.b2_token = tok
+            self.b2_granted = true
+            tok = tok + 1
+            count = count + 1
+        if self.bar_count > 3 and self.b3_granted == false:
+            self.b3_token = tok
+            self.b3_granted = true
+            tok = tok + 1
+            count = count + 1
+        if self.irq_count > 0 and self.i0_granted == false:
+            self.i0_token = tok
+            self.i0_granted = true
+            tok = tok + 1
+            count = count + 1
+        if self.irq_count > 1 and self.i1_granted == false:
+            self.i1_token = tok
+            self.i1_granted = true
+            tok = tok + 1
+            count = count + 1
+        if self.dma_count > 0 and self.d0_granted == false:
+            self.d0_token = tok
+            self.d0_granted = true
+            tok = tok + 1
+            count = count + 1
+        if self.dma_count > 1 and self.d1_granted == false:
+            self.d1_token = tok
+            self.d1_granted = true
+            count = count + 1
+        count
+
+    me all_granted_with_tokens() -> bool:
+        if self.bar_count > 0 and (not self.b0_granted or self.b0_token <= 0):
+            return false
+        if self.bar_count > 1 and (not self.b1_granted or self.b1_token <= 0):
+            return false
+        if self.bar_count > 2 and (not self.b2_granted or self.b2_token <= 0):
+            return false
+        if self.bar_count > 3 and (not self.b3_granted or self.b3_token <= 0):
+            return false
+        if self.irq_count > 0 and (not self.i0_granted or self.i0_token <= 0):
+            return false
+        if self.irq_count > 1 and (not self.i1_granted or self.i1_token <= 0):
+            return false
+        if self.dma_count > 0 and (not self.d0_granted or self.d0_token <= 0):
+            return false
+        if self.dma_count > 1 and (not self.d1_granted or self.d1_token <= 0):
+            return false
+        self.bar_count > 0 or self.irq_count > 0 or self.dma_count > 0
+
+    me revoke_all() -> i64:
+        """Revoke all active grants and clear tokens. Returns count revoked."""
+        var count: i64 = 0
+        if self.b0_granted:
+            self.b0_granted = false
+            self.b0_token = 0
+            count = count + 1
+        if self.b1_granted:
+            self.b1_granted = false
+            self.b1_token = 0
+            count = count + 1
+        if self.b2_granted:
+            self.b2_granted = false
+            self.b2_token = 0
+            count = count + 1
+        if self.b3_granted:
+            self.b3_granted = false
+            self.b3_token = 0
+            count = count + 1
+        if self.i0_granted:
+            self.i0_granted = false
+            self.i0_token = 0
+            count = count + 1
+        if self.i1_granted:
+            self.i1_granted = false
+            self.i1_token = 0
+            count = count + 1
+        if self.d0_granted:
+            self.d0_granted = false
+            self.d0_token = 0
+            count = count + 1
+        if self.d1_granted:
+            self.d1_granted = false
+            self.d1_token = 0
+            count = count + 1
+        count
+
+    me stats() -> text:
+        """Return a summary of all grant slots for this driver."""
+        "ResourceGrantSet[" + self.driver_name +
+            " pid=" + self.driver_pid.to_text() +
+            " bars=" + self.bar_count.to_text() +
+            " irqs=" + self.irq_count.to_text() +
+            " dmas=" + self.dma_count.to_text() +
+            " domain=" + self.iommu_domain.to_text() + "]"
+
+impl ResourceGrantSet:
+    static fn create(name: text, pid: i64) -> ResourceGrantSet:
+        """Create an empty grant set for a named driver."""
+        ResourceGrantSet(
+            driver_name: name,
+            driver_pid: pid,
+            bar_count: 0,
+            irq_count: 0,
+            dma_count: 0,
+            b0_bar: 0, b0_token: 0, b0_granted: false,
+            b1_bar: 0, b1_token: 0, b1_granted: false,
+            b2_bar: 0, b2_token: 0, b2_granted: false,
+            b3_bar: 0, b3_token: 0, b3_granted: false,
+            i0_irq: 0, i0_token: 0, i0_granted: false,
+            i1_irq: 0, i1_token: 0, i1_granted: false,
+            d0_size: 0, d0_token: 0, d0_granted: false,
+            d1_size: 0, d1_token: 0, d1_granted: false,
+            iommu_domain: 0
+        )

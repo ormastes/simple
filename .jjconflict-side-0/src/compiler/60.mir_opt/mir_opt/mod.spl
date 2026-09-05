@@ -1,0 +1,1937 @@
+# MIR Optimization Framework
+#
+# Mid-level IR optimization passes for the Simple compiler.
+#
+# Architecture:
+# - Pass trait for implementing optimization passes
+# - OptimizationPipeline for sequencing passes
+# - Support for different optimization levels
+#
+# Optimization Levels:
+# - nil: No optimizations (debug builds)
+# - Size: Optimize for binary size
+# - Speed: Optimize for execution speed
+# - Aggressive: Maximum optimization (may increase compile time)
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type}
+use compiler.mir.mir_data.*
+use compiler.mir_opt.mir_opt.dce (create_dce_pass, dce_run_on_function)
+use compiler.mir_opt.mir_opt.const_fold (create_const_fold_pass, cf_run_on_function)
+use compiler.mir_opt.mir_opt.collection_opt (create_collection_opt_pass, collection_optimization_provider, collection_opt_run_on_function)
+use compiler.mir_opt.mir_opt.copy_prop (create_copy_prop_pass, copypropagation_run_on_function)
+use compiler.mir_opt.mir_opt.cse (create_cse_pass, cse_run_on_function)
+use compiler.mir_opt.mir_opt.inline (create_inline_small_pass, create_inline_pass, create_inline_aggressive_pass, inline_run_on_function, inline_run_on_module)
+use compiler.mir_opt.mir_opt.loop_opt (create_loop_opt_conservative, create_loop_opt_pass, loop_opt_run_on_function)
+use compiler.mir_opt.mir_opt.bounds_check_elim (create_bounds_check_elim_pass, bounds_check_elim_run_on_function)
+use compiler.mir_opt.mir_opt.typed_byte_canon (create_typed_byte_canon_pass, typed_byte_canon_run_on_function)
+use compiler.mir_opt.mir_opt.loop_strength (create_strength_reduction_pass, strength_reduction_provider, strength_reduction_run_on_function)
+use compiler.mir_opt.mir_opt.string_builder_opt (create_string_builder_opt_pass, string_builder_opt_run_on_function)
+use compiler.mir_opt.mir_opt.outline (create_outline_pass, outline_run_on_function, outline_run_on_module)
+use compiler.mir_opt.mir_opt.generator_sm (create_generator_sm_pass, generator_sm_run_on_function)
+use compiler.mir_opt.mir_opt.tco (create_tco_pass, tco_run_on_function)
+use compiler.mir_opt.mir_opt.gvn (create_gvn_pass, gvn_run_on_function)
+use compiler.mir_opt.mir_opt.predicate_promote (run_predicate_promote)
+use compiler.mir_opt.mir_opt.auto_vectorize (run_auto_vectorize)
+use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic, run_narrow_form_pass)
+use compiler.mir_opt.mir_opt.perf_facts.{
+    PerfFactPreservation, perf_fact_preservation_all,
+    perf_fact_preservation_none, perf_fact_preservation_integrity_errors,
+    perf_instruction_access, perf_terminator_access,
+    perf_facts_build_for_verification, perf_facts_definitions,
+    perf_facts_uses, perf_facts_dominates
+}
+use std.io_runtime.{env_get_opt}
+
+# The canonical environment facade yields nil for an UNSET variable, so this
+# wrapper remains OPTIONAL — every call site below uses the optional-safe
+# `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
+# Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
+@always_inline
+fn mir_opt_env_get(key: text) -> text?:
+    env_get_opt(key)
+
+fn mir_opt_trace_enabled() -> bool:
+    (mir_opt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+var _mir_opt_verify_each_cached: i64 = -1
+
+fn mir_opt_verify_each_enabled() -> bool:
+    # Process configuration is immutable for compiler execution. Cache the
+    # environment lookup so disabled verification adds no per-pass allocation.
+    if _mir_opt_verify_each_cached >= 0:
+        return _mir_opt_verify_each_cached == 1
+    _mir_opt_verify_each_cached = if (mir_opt_env_get("SIMPLE_MIR_VERIFY_EACH") ?? "") == "1": 1 else: 0
+    _mir_opt_verify_each_cached == 1
+
+fn mir_opt_bootstrap_enabled() -> bool:
+    # Gate strictly on the seed-stage2 bootstrap env var. This used to also
+    # match any build whose entry file was named bootstrap_main.spl, which
+    # force-skipped inline/collection_opt/predicate_promote passes on the
+    # NORMAL native-build path too (independent of SIMPLE_BOOTSTRAP) — see
+    # doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-09.md
+    # (flat-bridge gate narrowing). Bootstrap-only behavior is unchanged.
+    (mir_opt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+
+fn mir_opt_is_inline_pass(pass_name: text) -> bool:
+    pass_name == "inline_small_functions" or pass_name == "inline_functions" or pass_name == "inline_aggressive"
+
+fn mir_opt_bootstrap_skip_pass(pass_name: text) -> bool:
+    mir_opt_is_inline_pass(pass_name) or pass_name == "collection_opt" or pass_name == "predicate_promote"
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
+    optimization_rule_provider_builtin_with_contract,
+    optimization_rule_provider_is_pipeline_pass,
+    optimization_rule_provider_with_backend_policy,
+    optimization_rule_provider_applies_to_backend_name,
+    optimization_backend_policy_skip,
+    optimization_backend_kind_from_text,
+    OptimizerBackendKind
+}
+use compiler.backend.feature_caps.{X86Caps, TargetCapsKind}
+use compiler.mir_opt.optimization_passes.{
+    OptimizationStats,
+    optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch,
+    count_write_coalesce, count_syscall_batch
+}
+use compiler.mir_opt._OptimizationPasses.io_passes.{elide_bulk_copy}
+
+# ============================================================================
+# Target Optimization Context
+# ============================================================================
+
+struct TargetOptContext:
+    x86_caps: X86Caps
+    cipher_remark: bool
+    caps_kind: TargetCapsKind
+
+fn target_opt_context_default() -> TargetOptContext:
+    val caps = X86Caps(false, false, false, false, false, false, false, false, false)
+    TargetOptContext(x86_caps: caps, cipher_remark: false, caps_kind: TargetCapsKind.None_)
+
+# ============================================================================
+# Optimization Level
+# ============================================================================
+
+enum OptLevel:
+    """Optimization level for compilation."""
+    NoOpt       # No optimization (fastest compile, slowest runtime)
+    Size        # Optimize for binary size
+    Speed       # Optimize for execution speed (default for release)
+    Aggressive  # Maximum optimization (slowest compile, fastest runtime)
+
+
+# ============================================================================
+# OptLevel Methods (was: impl OptLevel:)
+# ============================================================================
+
+# ============================================================================
+# Optimization Pass Trait
+# ============================================================================
+
+trait MirPass:
+    """
+    Optimization pass over MIR.
+
+    Each pass transforms a MirFunction and returns a modified version.
+    Passes should be idempotent when possible.
+    """
+
+    fn name() -> text:
+        """Human-readable pass name."""
+
+    fn description() -> text:
+        """Brief description of what this pass does."""
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        """
+        Run optimization pass on a single function.
+
+        Args:
+            func: Function to optimize
+
+        Returns:
+            Optimized function (may be same object if no changes)
+        """
+
+    fn is_analysis_pass() -> bool:
+        """Whether this pass only analyzes (doesn't modify IR)."""
+        false
+
+    fn dependencies() -> [text]:
+        """List of pass names this pass depends on."""
+        []
+
+# ============================================================================
+# PassKind — typed pass identity (replaces string matching in dispatch)
+# ============================================================================
+
+enum PassKind:
+    """Typed identity for each known optimization pass.
+
+    Replaces string-based dispatch in run_named_pass / run_pass_on_module.
+    Public pass names (stable_name + aliases) remain unchanged for callers.
+    """
+    DeadCodeElimination
+    ConstantFolding
+    CopyPropagation
+    CommonSubexprElim
+    InlineSmallFunctions
+    InlineFunctions
+    InlineAggressive
+    LoopInvariantMotion
+    LoopUnroll
+    BoundsCheckElimination
+    StrengthReduction
+    CollectionOpt
+    StringBuilderOpt
+    BodyOutlining
+    GeneratorStateMachine
+    TailCallOptimization
+    GlobalValueNumbering
+    PatternIdiom
+    AutoVectorize
+    PredicatePromote
+    TargetNarrowForm
+    WriteCoalesce
+    ReadAheadHoist
+    SyscallBatch
+    TypedByteCanon
+
+enum PassScope:
+    """Whether a pass operates per-function or on the whole module."""
+    Function   # pass runs independently on each MirFunction
+    Module     # pass needs the whole MirModule (may add/remove functions)
+    FsDriver   # pass targets filesystem-driver IO patterns
+
+enum PassStatus:
+    """Operational truth for a registered optimization pass."""
+    Active
+    AnalysisOnly
+    RemarkOnly
+    Skeleton
+    Disabled(reason: text)
+
+enum PassExpectation:
+    """Whether CI must observe a transformation on a positive sentinel."""
+    MayTransform
+    MustTransformSentinel
+    NeverTransforms
+
+enum MirPassBackendOutcome:
+    Selected
+    Delegated
+    Rejected
+    NotApplicable
+
+struct PassWitnessContract:
+    kind: PassKind
+    positive_id: text
+    negative_id: text
+
+enum PassRunDisposition:
+    Transformed
+    Unchanged
+    Skipped
+    Failed
+
+struct PassReasonCount:
+    code: text
+    count: i64
+
+struct PassRunRecord:
+    requested_name: text
+    effective_name: text
+    status: PassStatus
+    expectation: PassExpectation
+    scope: PassScope
+    disposition: PassRunDisposition
+    functions_seen: i64
+    candidates: i64
+    transformed: i64
+    rejected: i64
+    instructions_before: i64
+    instructions_after: i64
+    elapsed_ns: i64
+    elapsed_measured: bool
+    reasons: [PassReasonCount]
+
+struct MirStructuralVerificationReceipt:
+    valid: bool
+    errors: [text]
+    error_codes: [text]
+    block_count: i64
+    instruction_count: i64
+    type_checked_instruction_count: i64
+    type_unchecked_instruction_count: i64
+
+struct MirModuleStructuralVerificationReceipt:
+    valid: bool
+    errors: [text]
+    error_codes: [text]
+    function_count: i64
+    block_count: i64
+    instruction_count: i64
+    type_checked_instruction_count: i64
+    type_unchecked_instruction_count: i64
+
+struct PassFunctionOutcome:
+    function: MirFunction
+    record: PassRunRecord
+    verifier: MirStructuralVerificationReceipt
+
+struct TypedFunctionPassOutcome:
+    function: MirFunction
+    candidates: i64
+    transformed: i64
+    rejected: i64
+    reason_code: text
+
+struct MirPassDescriptor:
+    stable_name: text
+    aliases: [text]
+    provider: OptimizationRuleProvider
+    kind: PassKind
+    scope: PassScope
+    cost_class: text
+    status: PassStatus
+    expectation: PassExpectation
+
+struct MirPassBackendDecision:
+    pass_name: text
+    backend_name: text
+    max_cost_class: text
+    cost_class: text
+    applies: bool
+    outcome: MirPassBackendOutcome
+    reason: text
+
+struct MirPipelineBackendPlan:
+    passes: [text]
+    skipped_passes: [MirPassBackendDecision]
+
+fn mir_pipeline_provider(name: text, hot_path: bool) -> OptimizationRuleProvider:
+    optimization_rule_provider_builtin_with_contract(
+        "simple.opt.mir." + name,
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        hot_path,
+        ["typed_mir"],
+        ["canonical_mir"],
+        "pure"
+    )
+
+fn mir_pipeline_provider_skip_llvm(name: text, hot_path: bool, reason: text) -> OptimizationRuleProvider:
+    optimization_rule_provider_with_backend_policy(
+        mir_pipeline_provider(name, hot_path),
+        optimization_backend_policy_skip([OptimizerBackendKind.Llvm], reason)
+    )
+
+fn mir_pass_descriptor(stable_name: text, aliases: [text], provider: OptimizationRuleProvider, kind: PassKind, scope: PassScope) -> MirPassDescriptor:
+    mir_pass_descriptor_with_cost(stable_name, aliases, provider, kind, scope, "medium")
+
+fn mir_pass_descriptor_with_cost(stable_name: text, aliases: [text], provider: OptimizationRuleProvider, kind: PassKind, scope: PassScope, cost_class: text) -> MirPassDescriptor:
+    MirPassDescriptor(
+        stable_name: stable_name,
+        aliases: aliases,
+        provider: provider,
+        kind: kind,
+        scope: scope,
+        cost_class: cost_class,
+        status: pass_status(kind),
+        expectation: pass_expectation(kind)
+    )
+
+fn pass_status(kind: PassKind) -> PassStatus:
+    match kind:
+        case DeadCodeElimination | ConstantFolding | CopyPropagation | CommonSubexprElim:
+            PassStatus.Skeleton
+        case InlineSmallFunctions | InlineFunctions | InlineAggressive:
+            PassStatus.Skeleton
+        case LoopInvariantMotion | LoopUnroll | BoundsCheckElimination | StrengthReduction:
+            PassStatus.Disabled("legality proof incomplete")
+        case CollectionOpt:
+            PassStatus.Disabled("ownership, alias, effect, and semantic-equivalence proofs incomplete")
+        case StringBuilderOpt | GeneratorStateMachine | TailCallOptimization | GlobalValueNumbering | TypedByteCanon:
+            PassStatus.Skeleton
+        case BodyOutlining:
+            PassStatus.Skeleton
+        case AutoVectorize:
+            # The canonical pass currently discovers candidates and logs
+            # blockers; it performs no production MIR rewrite.
+            PassStatus.AnalysisOnly
+        case TargetNarrowForm:
+            PassStatus.Skeleton
+        case PatternIdiom:
+            PassStatus.Disabled("backend lowering and semantic parity proof incomplete")
+        case PredicatePromote:
+            PassStatus.Disabled("mask single-use, dominance, and span proof incomplete")
+        case ReadAheadHoist:
+            PassStatus.AnalysisOnly
+        case WriteCoalesce | SyscallBatch:
+            PassStatus.AnalysisOnly
+
+fn pass_expectation(kind: PassKind) -> PassExpectation:
+    match pass_status(kind):
+        case Active: PassExpectation.MustTransformSentinel
+        case AnalysisOnly | RemarkOnly: PassExpectation.NeverTransforms
+        case Skeleton | Disabled(_): PassExpectation.NeverTransforms
+
+fn pass_status_allows_transform(status: PassStatus) -> bool:
+    match status:
+        case Active: true
+        case _: false
+
+fn mir_pass_fact_preservation(kind: PassKind) -> PerfFactPreservation:
+    """Conservative fact contract for the current pass adapter.
+
+    Until a transforming adapter proves finer preservation, every changed MIR
+    result invalidates CFG, dominance, and def-use. Non-transforming statuses
+    preserve all immutable facts because they cannot replace MIR.
+    """
+    if pass_status_allows_transform(pass_status(kind)):
+        perf_fact_preservation_none()
+    else:
+        perf_fact_preservation_all()
+
+fn pass_status_name(status: PassStatus) -> text:
+    match status:
+        case Active: "active"
+        case AnalysisOnly: "analysis-only"
+        case RemarkOnly: "remark-only"
+        case Skeleton: "skeleton"
+        case Disabled(reason): "disabled: " + reason
+
+fn pass_status_kind_name(status: PassStatus) -> text:
+    match status:
+        case Active: "active"
+        case AnalysisOnly: "analysis-only"
+        case RemarkOnly: "remark-only"
+        case Skeleton: "skeleton"
+        case Disabled(_): "disabled"
+
+fn pass_status_reason(status: PassStatus) -> text:
+    match status:
+        case Disabled(reason): reason
+        case _: ""
+
+fn pass_expectation_name(expectation: PassExpectation) -> text:
+    match expectation:
+        case MayTransform: "may-transform"
+        case MustTransformSentinel: "must-transform-sentinel"
+        case NeverTransforms: "never-transforms"
+
+fn mir_pass_backend_outcome_name(outcome: MirPassBackendOutcome) -> text:
+    match outcome:
+        case Selected: "selected"
+        case Delegated: "delegated"
+        case Rejected: "rejected"
+        case NotApplicable: "not-applicable"
+
+fn pass_witness_contract(kind: PassKind) -> PassWitnessContract?:
+    match kind:
+        case _: nil
+
+fn pass_witness_registry_integrity_errors_for(
+    registry: [MirPassDescriptor]
+) -> [text]:
+    var errors: [text] = []
+    var seen_positive: {text: bool} = {}
+    var seen_negative: {text: bool} = {}
+    for descriptor in registry:
+        val witness = pass_witness_contract(descriptor.kind)
+        if pass_status_allows_transform(descriptor.status):
+            if not witness.?:
+                errors.push("active pass lacks witness contract: " + descriptor.stable_name)
+            else:
+                val found = witness.unwrap()
+                if found.positive_id == "" or found.negative_id == "":
+                    errors.push("active pass has empty witness identity: " + descriptor.stable_name)
+                if seen_positive.contains_key(found.positive_id):
+                    errors.push("duplicate positive witness identity: " + found.positive_id)
+                else:
+                    seen_positive[found.positive_id] = true
+                if seen_negative.contains_key(found.negative_id):
+                    errors.push("duplicate negative witness identity: " + found.negative_id)
+                else:
+                    seen_negative[found.negative_id] = true
+        elif witness.?:
+            errors.push("inactive pass must not advertise executable witnesses: " + descriptor.stable_name)
+    errors
+
+fn pass_witness_registry_integrity_errors() -> [text]:
+    """Compatibility entrypoint that owns one registry snapshot."""
+    pass_witness_registry_integrity_errors_for(mir_pass_descriptor_registry())
+
+fn pass_run_record_new(requested_name: text, effective_name: text,
+                       status: PassStatus, expectation: PassExpectation,
+                       scope: PassScope, disposition: PassRunDisposition) -> PassRunRecord:
+    PassRunRecord(
+        requested_name, effective_name, status, expectation, scope, disposition,
+        0, 0, 0, 0, 0, 0, -1, false, []
+    )
+
+fn pass_run_record_add_reason(record: PassRunRecord, code: text, count: i64) -> PassRunRecord:
+    var result = record
+    if code == "" or count <= 0:
+        return result
+    var updated: [PassReasonCount] = []
+    var found = false
+    for reason in result.reasons:
+        if reason.code == code:
+            updated.push(PassReasonCount(code, reason.count + count))
+            found = true
+        else:
+            updated.push(reason)
+    if not found:
+        updated.push(PassReasonCount(code, count))
+    result.reasons = updated
+    result
+
+fn pass_run_record_integrity_errors(record: PassRunRecord) -> [text]:
+    var errors: [text] = []
+    if record.requested_name == "":
+        errors.push("missing requested pass name")
+    if record.functions_seen < 0 or record.candidates < 0 or record.transformed < 0 or record.rejected < 0:
+        errors.push("negative pass counters")
+    if record.instructions_before < 0 or record.instructions_after < 0:
+        errors.push("negative instruction counters")
+    if record.transformed > record.candidates:
+        errors.push("transformed count exceeds candidates")
+    if record.rejected > record.candidates - record.transformed:
+        errors.push("rejected count exceeds remaining candidates")
+    match record.disposition:
+        case Transformed:
+            if record.transformed <= 0:
+                errors.push("transformed disposition requires a positive transformed count")
+            if not pass_status_allows_transform(record.status):
+                errors.push("inactive pass cannot report a transformation")
+        case Unchanged | Skipped | Failed:
+            if record.transformed != 0:
+                errors.push("non-transforming disposition has transformed candidates")
+    if record.elapsed_measured:
+        if record.elapsed_ns < 0:
+            errors.push("measured elapsed time is negative")
+    elif record.elapsed_ns != -1:
+        errors.push("unmeasured elapsed time must use the -1 sentinel")
+    errors
+
+fn pass_run_record_for_unavailable_request(pass_name: text) -> PassRunRecord:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        var unknown = pass_run_record_new(pass_name, "", PassStatus.Disabled("unknown pass"), PassExpectation.NeverTransforms, PassScope.Function, PassRunDisposition.Failed)
+        return pass_run_record_add_reason(unknown, "unknown_pass", 1)
+    val found = descriptor.unwrap()
+    var skipped = pass_run_record_new(pass_name, found.stable_name, found.status, found.expectation, found.scope, PassRunDisposition.Skipped)
+    match found.status:
+        case AnalysisOnly:
+            skipped = pass_run_record_add_reason(skipped, "analysis_only", 1)
+        case RemarkOnly:
+            skipped = pass_run_record_add_reason(skipped, "remark_only", 1)
+        case Skeleton | Disabled(_):
+            skipped = pass_run_record_add_reason(skipped, "inactive_status", 1)
+        case Active:
+            skipped = pass_run_record_add_reason(skipped, "not_run", 1)
+    skipped
+
+fn mir_structural_verification_error_code(message: text) -> text:
+    if message == "negative local identity": return "MIRV001"
+    if message.starts_with("duplicate local identity:"): return "MIRV002"
+    if message.starts_with("argument local index is outside"): return "MIRV003"
+    if message.starts_with("duplicate argument local index:"): return "MIRV004"
+    if (message.starts_with("argument local ") and
+        message.ends_with(" type does not match signature")):
+        return "MIRV005"
+    if message.starts_with("missing argument local index:"): return "MIRV006"
+    if message == "return local type does not match function signature": return "MIRV007"
+    if message == "multiple return locals": return "MIRV008"
+    if message == "negative block identity": return "MIRV009"
+    if message.starts_with("duplicate block identity:"): return "MIRV010"
+    if message == "function has no basic blocks": return "MIRV011"
+    if message == "entry block is outside the function": return "MIRV012"
+    if message.starts_with("uncovered MIR access in block "): return "MIRV013"
+    if message.contains(" instruction ") and message.contains(" uses missing local "): return "MIRV014"
+    if message.contains(" instruction ") and message.contains(" defines missing local "): return "MIRV015"
+    if message.starts_with("uncovered terminator access in block "): return "MIRV016"
+    if message.contains(" terminator uses missing local "): return "MIRV017"
+    if message.contains(" terminator defines missing local "): return "MIRV018"
+    if message.contains(" targets missing block "): return "MIRV019"
+    if message.starts_with("local ") and message.ends_with(" is used without a definition"): return "MIRV020"
+    if message.starts_with("local ") and message.contains(" has multiple definitions"): return "MIRV021"
+    if message.starts_with("local ") and message.contains(" is used before its definition in block "): return "MIRV022"
+    if message.starts_with("local ") and message.contains(" definition does not dominate use in block "): return "MIRV023"
+    if message.starts_with("local ") and message.contains(" dominance is unavailable for use in block "): return "MIRV024"
+    if message.contains(" const destination type does not match explicit type"): return "MIRV025"
+    if message.contains(" copy/move source and destination types differ"): return "MIRV026"
+    if message.contains(" cast destination type does not match target type"): return "MIRV027"
+    "MIRV999"
+
+fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerificationReceipt:
+    """Fail-closed minimum verifier for optimizer boundaries.
+
+    This receipt proves block/local identity, operand-local validity, canonical
+    access coverage, entry/CFG closure, and single-definition SSA dominance. It
+    deliberately does not claim full opcode typing, ownership, or loop proof.
+    """
+    var errors: [text] = []
+    var instruction_count = 0
+    var type_checked_instruction_count = 0
+    var type_unchecked_instruction_count = 0
+    var block_ids: Dict<i64, bool> = {}
+    var local_ids: Dict<i64, bool> = {}
+    var local_types: Dict<i64, MirType> = {}
+    var argument_indices: Dict<i64, bool> = {}
+    var return_local_count = 0
+    for local in func.locals:
+        if local.id.id < 0:
+            errors.push("negative local identity")
+        elif local_ids.has(local.id.id):
+            errors.push("duplicate local identity: " + local.id.id.to_string())
+        else:
+            local_ids[local.id.id] = true
+            local_types[local.id.id] = local.type_
+        match local.kind:
+            case Arg(index):
+                if index < 0 or index >= func.signature.params.len():
+                    errors.push("argument local index is outside the function signature: " + index.to_string())
+                elif argument_indices.has(index):
+                    errors.push("duplicate argument local index: " + index.to_string())
+                else:
+                    argument_indices[index] = true
+                    if serialize_mir_type(local.type_) != serialize_mir_type(func.signature.params[index]):
+                        errors.push("argument local " + index.to_string() + " type does not match signature")
+            case Return:
+                return_local_count = return_local_count + 1
+                if serialize_mir_type(local.type_) != serialize_mir_type(func.signature.return_type):
+                    errors.push("return local type does not match function signature")
+            case Var | Temp: pass_dn
+    var parameter_index = 0
+    while parameter_index < func.signature.params.len():
+        if not argument_indices.has(parameter_index):
+            errors.push("missing argument local index: " + parameter_index.to_string())
+        parameter_index = parameter_index + 1
+    if return_local_count > 1:
+        errors.push("multiple return locals")
+    for block in func.blocks:
+        instruction_count = instruction_count + block.instructions.len()
+        if block.id.id < 0:
+            errors.push("negative block identity")
+        elif block_ids.has(block.id.id):
+            errors.push("duplicate block identity: " + block.id.id.to_string())
+        else:
+            block_ids[block.id.id] = true
+    if func.blocks.is_empty():
+        errors.push("function has no basic blocks")
+    elif not block_ids.has(func.entry_block.id):
+        errors.push("entry block is outside the function")
+
+    for block in func.blocks:
+        var instruction_index = 0
+        for instruction in block.instructions:
+            val access = perf_instruction_access(instruction)
+            if not access.covered:
+                errors.push(
+                    "uncovered MIR access in block " + block.id.id.to_string() +
+                    " instruction " + instruction_index.to_string())
+            for local in access.uses:
+                if not local_ids.has(local.id):
+                    errors.push(
+                        "block " + block.id.id.to_string() + " instruction " +
+                        instruction_index.to_string() + " uses missing local " +
+                        local.id.to_string())
+            for local in access.defs:
+                if not local_ids.has(local.id):
+                    errors.push(
+                        "block " + block.id.id.to_string() + " instruction " +
+                        instruction_index.to_string() + " defines missing local " +
+                        local.id.to_string())
+            match instruction.kind:
+                case Const(dest, _, explicit_type):
+                    type_checked_instruction_count = type_checked_instruction_count + 1
+                    if local_types.has(dest.id) and local_types[dest.id].kind != explicit_type.kind:
+                        errors.push(
+                            "block " + block.id.id.to_string() + " instruction " +
+                            instruction_index.to_string() +
+                            " const destination type does not match explicit type")
+                case Copy(dest, source) | Move(dest, source):
+                    type_checked_instruction_count = type_checked_instruction_count + 1
+                    if (local_types.has(dest.id) and local_types.has(source.id) and
+                        local_types[dest.id].kind != local_types[source.id].kind):
+                        errors.push(
+                            "block " + block.id.id.to_string() + " instruction " +
+                            instruction_index.to_string() +
+                            " copy/move source and destination types differ")
+                case Cast(dest, _, target) | Bitcast(dest, _, target):
+                    type_checked_instruction_count = type_checked_instruction_count + 1
+                    if local_types.has(dest.id) and local_types[dest.id].kind != target.kind:
+                        errors.push(
+                            "block " + block.id.id.to_string() + " instruction " +
+                            instruction_index.to_string() +
+                            " cast destination type does not match target type")
+                case _:
+                    type_unchecked_instruction_count = type_unchecked_instruction_count + 1
+            instruction_index = instruction_index + 1
+        val terminator_access = perf_terminator_access(block.terminator)
+        if not terminator_access.covered:
+            errors.push("uncovered terminator access in block " + block.id.id.to_string())
+        for local in terminator_access.uses:
+            if not local_ids.has(local.id):
+                errors.push(
+                    "block " + block.id.id.to_string() + " terminator uses missing local " +
+                    local.id.to_string())
+        for local in terminator_access.defs:
+            if not local_ids.has(local.id):
+                errors.push(
+                    "block " + block.id.id.to_string() + " terminator defines missing local " +
+                    local.id.to_string())
+        match block.terminator:
+            case Goto(target):
+                if not block_ids.has(target.id):
+                    errors.push("block " + block.id.id.to_string() + " targets missing block " + target.id.to_string())
+            case If(_, then_, else_):
+                if not block_ids.has(then_.id):
+                    errors.push("block " + block.id.id.to_string() + " targets missing block " + then_.id.to_string())
+                if not block_ids.has(else_.id):
+                    errors.push("block " + block.id.id.to_string() + " targets missing block " + else_.id.to_string())
+            case Switch(_, cases, default):
+                if not block_ids.has(default.id):
+                    errors.push("block " + block.id.id.to_string() + " targets missing block " + default.id.to_string())
+                for switch_case in cases:
+                    if not block_ids.has(switch_case.target.id):
+                        errors.push("block " + block.id.id.to_string() + " targets missing block " + switch_case.target.id.to_string())
+            case CallTerminator(_, _, _, normal, unwind, _, _):
+                if not block_ids.has(normal.id):
+                    errors.push("block " + block.id.id.to_string() + " targets missing block " + normal.id.to_string())
+                if unwind.?:
+                    val unwind_target = unwind.unwrap()
+                    if not block_ids.has(unwind_target.id):
+                        errors.push("block " + block.id.id.to_string() + " targets missing block " + unwind_target.id.to_string())
+            case Ret(_) | Unreachable | Abort(_): pass_dn
+
+    # Only construct dominance/def-use after structural closure succeeds.
+    # The verifier-specific builder deliberately omits dense liveness matrices.
+    if errors.is_empty():
+        val facts = perf_facts_build_for_verification(func)
+        for local in func.locals:
+            val definitions = perf_facts_definitions(facts, local.id)
+            val uses = perf_facts_uses(facts, local.id)
+            var virtual_entry_definition = false
+            match local.kind:
+                case Arg(_): virtual_entry_definition = true
+                case Var | Temp | Return: pass_dn
+            if virtual_entry_definition and not definitions.is_empty():
+                errors.push(
+                    "local " + local.id.id.to_string() +
+                    " has multiple definitions including its argument definition")
+            elif not virtual_entry_definition and definitions.len() > 1:
+                errors.push(
+                    "local " + local.id.id.to_string() +
+                    " has multiple definitions")
+            elif not virtual_entry_definition and definitions.is_empty() and not uses.is_empty():
+                errors.push(
+                    "local " + local.id.id.to_string() +
+                    " is used without a definition")
+            elif definitions.len() == 1:
+                val definition = definitions[0]
+                var dominance_definition_block = definition.block
+                var edge_definition_known = true
+                if definition.is_terminator:
+                    val definition_block = func.blocks[facts.block_index[definition.block.id]]
+                    match definition_block.terminator:
+                        case CallTerminator(_, _, _, normal, _, _, _):
+                            # The result exists on the normal edge, not on unwind.
+                            dominance_definition_block = normal
+                        case _:
+                            edge_definition_known = false
+                for use_site in uses:
+                    if definition.block.id == use_site.block.id:
+                        if definition.is_terminator or (
+                            not use_site.is_terminator and
+                            use_site.instruction_index <= definition.instruction_index):
+                            errors.push(
+                                "local " + local.id.id.to_string() +
+                                " is used before its definition in block " +
+                                use_site.block.id.to_string())
+                    elif (not edge_definition_known or
+                          not facts.immediate_dominator.has(dominance_definition_block.id) or
+                          not facts.immediate_dominator.has(use_site.block.id)):
+                        errors.push(
+                            "local " + local.id.id.to_string() +
+                            " dominance is unavailable for use in block " +
+                            use_site.block.id.to_string())
+                    elif not perf_facts_dominates(facts, dominance_definition_block, use_site.block):
+                        errors.push(
+                            "local " + local.id.id.to_string() +
+                            " definition does not dominate use in block " +
+                            use_site.block.id.to_string())
+    var error_codes: [text] = []
+    for error in errors:
+        error_codes.push(mir_structural_verification_error_code(error))
+    MirStructuralVerificationReceipt(
+        errors.is_empty(), errors, error_codes,
+        func.blocks.len(), instruction_count,
+        type_checked_instruction_count, type_unchecked_instruction_count)
+
+fn mir_module_structural_verification_receipt(
+    module: MirModule
+) -> MirModuleStructuralVerificationReceipt:
+    """Aggregate deterministic structural proof for a MIR module."""
+    var symbol_ids: [i64] = []
+    for symbol in module.functions.keys(): symbol_ids.push(symbol.id)
+    symbol_ids.sort()
+    var errors: [text] = []
+    var error_codes: [text] = []
+    var block_count = 0
+    var instruction_count = 0
+    var type_checked_instruction_count = 0
+    var type_unchecked_instruction_count = 0
+    for symbol_id in symbol_ids:
+        val key = SymbolId(id: symbol_id)
+        val function = module.functions[key]
+        if function.symbol.id != symbol_id:
+            errors.push(
+                "function map key " + symbol_id.to_string() +
+                " does not match function symbol " + function.symbol.id.to_string())
+            error_codes.push("MIRVM001")
+        val receipt = mir_structural_verification_receipt(function)
+        block_count = block_count + receipt.block_count
+        instruction_count = instruction_count + receipt.instruction_count
+        type_checked_instruction_count = (
+            type_checked_instruction_count + receipt.type_checked_instruction_count)
+        type_unchecked_instruction_count = (
+            type_unchecked_instruction_count + receipt.type_unchecked_instruction_count)
+        var error_index = 0
+        while error_index < receipt.errors.len():
+            errors.push(
+                "function " + symbol_id.to_string() + ": " +
+                receipt.errors[error_index])
+            error_codes.push(receipt.error_codes[error_index])
+            error_index = error_index + 1
+    MirModuleStructuralVerificationReceipt(
+        errors.is_empty(), errors, error_codes, symbol_ids.len(),
+        block_count, instruction_count,
+        type_checked_instruction_count, type_unchecked_instruction_count)
+
+fn run_named_pass_with_record(pass_name: text, func: MirFunction) -> Result<PassFunctionOutcome, text>:
+    """Run one function-scoped pass with structural before/after receipts.
+
+    Active adapters must provide exact native candidate outcomes. Serialized
+    MIR is used only as an independent change cross-check; it never invents a
+    candidate count. Native rejected-reason statistics remain separately
+    tracked where an adapter has proof blockers.
+    """
+    val before_receipt = mir_structural_verification_receipt(func)
+    if not before_receipt.valid:
+        return Err("invalid MIR before pass " + pass_name + ": " + before_receipt.errors.join("; "))
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        val record = pass_run_record_for_unavailable_request(pass_name)
+        return Ok(PassFunctionOutcome(func, record, before_receipt))
+    val found = descriptor.unwrap()
+    if not pass_status_allows_transform(found.status):
+        val record = pass_run_record_for_unavailable_request(pass_name)
+        return Ok(PassFunctionOutcome(func, record, before_receipt))
+    match found.scope:
+        case Module:
+            var record = pass_run_record_new(pass_name, found.stable_name, found.status, found.expectation, found.scope, PassRunDisposition.Skipped)
+            record = pass_run_record_add_reason(record, "module_scope", 1)
+            return Ok(PassFunctionOutcome(func, record, before_receipt))
+        case Function | FsDriver: pass_dn
+
+    val before_text = serialize_mir_function(func)
+    val typed_result = run_active_typed_pass_with_outcome(found.kind, func)
+    if typed_result.is_err():
+        return Err(typed_result.err().unwrap())
+    val typed_outcome = typed_result.ok().unwrap()
+    val updated = typed_outcome.function
+    val after_receipt = mir_structural_verification_receipt(updated)
+    if not after_receipt.valid:
+        return Err("invalid MIR after pass " + found.stable_name + ": " + after_receipt.errors.join("; "))
+    var disposition = PassRunDisposition.Unchanged
+    val serialized_changed = serialize_mir_function(updated) != before_text
+    if serialized_changed:
+        disposition = PassRunDisposition.Transformed
+    if typed_outcome.transformed > 0 and not serialized_changed:
+        return Err("pass outcome mismatch for " + found.stable_name + ": transformed candidates produced unchanged MIR")
+    if typed_outcome.transformed == 0 and serialized_changed:
+        return Err("pass outcome mismatch for " + found.stable_name + ": MIR changed without a transformed candidate")
+    var record = pass_run_record_new(pass_name, found.stable_name, found.status, found.expectation, found.scope, disposition)
+    record.functions_seen = 1
+    record.candidates = typed_outcome.candidates
+    record.transformed = typed_outcome.transformed
+    record.rejected = typed_outcome.rejected
+    record.instructions_before = before_receipt.instruction_count
+    record.instructions_after = after_receipt.instruction_count
+    if typed_outcome.transformed > 0:
+        record = pass_run_record_add_reason(
+            record, typed_outcome.reason_code, typed_outcome.transformed)
+    else:
+        record = pass_run_record_add_reason(record, "no_change", 1)
+    val record_errors = pass_run_record_integrity_errors(record)
+    if not record_errors.is_empty():
+        return Err("invalid pass run record for " + found.stable_name + ": " + record_errors.join("; "))
+    Ok(PassFunctionOutcome(updated, record, after_receipt))
+
+fn mir_pass_descriptor_registry() -> [MirPassDescriptor]:
+    [
+        mir_pass_descriptor_with_cost("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false), PassKind.DeadCodeElimination, PassScope.Function, "low"),
+        mir_pass_descriptor_with_cost("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false), PassKind.ConstantFolding, PassScope.Function, "low"),
+        mir_pass_descriptor_with_cost("copy_propagation", [], mir_pipeline_provider("copy_propagation", false), PassKind.CopyPropagation, PassScope.Function, "low"),
+        mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider_skip_llvm("common_subexpr_elim", false, "llvm_runs_gvn_and_scalar_cleanup"), PassKind.CommonSubexprElim, PassScope.Function),
+        mir_pass_descriptor_with_cost("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false), PassKind.InlineSmallFunctions, PassScope.Module, "low"),
+        mir_pass_descriptor("inline_functions", [], mir_pipeline_provider_skip_llvm("inline_functions", false, "llvm_runs_inliner_pipeline"), PassKind.InlineFunctions, PassScope.Module),
+        mir_pass_descriptor_with_cost("inline_aggressive", [], mir_pipeline_provider_skip_llvm("inline_aggressive", false, "llvm_runs_inliner_pipeline"), PassKind.InlineAggressive, PassScope.Module, "high"),
+        mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false), PassKind.LoopInvariantMotion, PassScope.Function),
+        mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider_skip_llvm("loop_unroll", false, "llvm_runs_loop_unroll_pipeline"), PassKind.LoopUnroll, PassScope.Function),
+        mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false), PassKind.BoundsCheckElimination, PassScope.Function),
+        mir_pass_descriptor("strength_reduction", [], optimization_rule_provider_with_backend_policy(strength_reduction_provider(), optimization_backend_policy_skip([OptimizerBackendKind.Llvm], "llvm_runs_scalar_strength_reduction")), PassKind.StrengthReduction, PassScope.Function),
+        mir_pass_descriptor("collection_opt", ["collection_optimization"], collection_optimization_provider(), PassKind.CollectionOpt, PassScope.Function),
+        mir_pass_descriptor("string_builder_opt", [], mir_pipeline_provider("string_builder_opt", false), PassKind.StringBuilderOpt, PassScope.Function),
+        mir_pass_descriptor("body_outlining", [], mir_pipeline_provider("body_outlining", false), PassKind.BodyOutlining, PassScope.Module),
+        mir_pass_descriptor("generator_state_machine", [], mir_pipeline_provider("generator_state_machine", false), PassKind.GeneratorStateMachine, PassScope.Function),
+        mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false), PassKind.TailCallOptimization, PassScope.Function),
+        mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider_skip_llvm("global_value_numbering", false, "llvm_runs_gvn_and_scalar_cleanup"), PassKind.GlobalValueNumbering, PassScope.Function),
+        mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true), PassKind.PatternIdiom, PassScope.Module),
+        mir_pass_descriptor_with_cost("auto_vectorize", ["vectorization"], mir_pipeline_provider_skip_llvm("auto_vectorize", false, "llvm_runs_vectorizer_pipeline"), PassKind.AutoVectorize, PassScope.Module, "high"),
+        mir_pass_descriptor_with_cost("predicate_promote", [], mir_pipeline_provider_skip_llvm("predicate_promote", false, "llvm_runs_if_conversion_and_select_promotion"), PassKind.PredicatePromote, PassScope.Module, "high"),
+        mir_pass_descriptor("target_narrow_form", [], mir_pipeline_provider("target_narrow_form", false), PassKind.TargetNarrowForm, PassScope.Module),
+        mir_pass_descriptor("write_coalesce", [], mir_pipeline_provider("write_coalesce", false), PassKind.WriteCoalesce, PassScope.FsDriver),
+        mir_pass_descriptor("read_ahead_hoist", [], mir_pipeline_provider("read_ahead_hoist", false), PassKind.ReadAheadHoist, PassScope.FsDriver),
+        mir_pass_descriptor("syscall_batch", [], mir_pipeline_provider("syscall_batch", false), PassKind.SyscallBatch, PassScope.FsDriver),
+        mir_pass_descriptor("typed_byte_canon", [], mir_pipeline_provider("typed_byte_canon", false), PassKind.TypedByteCanon, PassScope.Function)
+    ]
+
+fn mir_pass_provider_registry() -> [OptimizationRuleProvider]:
+    var providers: [OptimizationRuleProvider] = []
+    for descriptor in mir_pass_descriptor_registry():
+        providers.push(descriptor.provider)
+    providers
+
+fn mir_pass_stable_name_integrity_error(
+    stable_name: text, expected_kind: PassKind
+) -> text:
+    val resolved = mir_pass_descriptor_for_name(stable_name)
+    if not resolved.?:
+        return "unresolved stable pass name: " + stable_name
+    if resolved.unwrap().kind != expected_kind:
+        return "stable pass name resolves to wrong kind: " + stable_name
+    ""
+
+fn mir_pass_registry_integrity_errors() -> [text]:
+    """Fail-closed structural audit for registered transformation claims."""
+    var errors: [text] = []
+    var seen_names: {text: bool} = {}
+    # Descriptor construction also creates provider metadata. Keep one
+    # immutable snapshot for every phase of this audit rather than rebuilding
+    # it for status, witness, and fact-preservation checks.
+    val registry = mir_pass_descriptor_registry()
+    for descriptor in registry:
+        if seen_names.contains_key(descriptor.stable_name):
+            errors.push("duplicate pass name: " + descriptor.stable_name)
+        else:
+            seen_names[descriptor.stable_name] = true
+
+        val stable_name_error = mir_pass_stable_name_integrity_error(
+            descriptor.stable_name, descriptor.kind)
+        if stable_name_error != "":
+            errors.push(stable_name_error)
+
+        val active = pass_status_allows_transform(descriptor.status)
+        match descriptor.expectation:
+            case NeverTransforms:
+                if active:
+                    errors.push("active pass cannot declare NeverTransforms: " + descriptor.stable_name)
+            case MayTransform | MustTransformSentinel:
+                if not active:
+                    errors.push("inactive pass cannot claim transformation: " + descriptor.stable_name)
+
+        for alias in descriptor.aliases:
+            val resolved = mir_pass_descriptor_for_name(alias)
+            if not resolved.? or resolved.unwrap().stable_name != descriptor.stable_name:
+                errors.push("broken pass alias: " + alias + " -> " + descriptor.stable_name)
+    for witness_error in pass_witness_registry_integrity_errors_for(registry):
+        errors.push(witness_error)
+    for descriptor in registry:
+        for fact_error in perf_fact_preservation_integrity_errors(mir_pass_fact_preservation(descriptor.kind)):
+            errors.push("invalid fact preservation for " + descriptor.stable_name + ": " + fact_error)
+    errors
+
+fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
+    if pass_name == "dead_code_elimination" or pass_name == "dce":
+        return Some(mir_pass_descriptor_with_cost("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false), PassKind.DeadCodeElimination, PassScope.Function, "low"))
+    if pass_name == "constant_folding" or pass_name == "const_fold":
+        return Some(mir_pass_descriptor_with_cost("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false), PassKind.ConstantFolding, PassScope.Function, "low"))
+    if pass_name == "copy_propagation":
+        return Some(mir_pass_descriptor_with_cost("copy_propagation", [], mir_pipeline_provider("copy_propagation", false), PassKind.CopyPropagation, PassScope.Function, "low"))
+    if pass_name == "common_subexpr_elim":
+        return Some(mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider_skip_llvm("common_subexpr_elim", false, "llvm_runs_gvn_and_scalar_cleanup"), PassKind.CommonSubexprElim, PassScope.Function))
+    if pass_name == "inline_small_functions":
+        return Some(mir_pass_descriptor_with_cost("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false), PassKind.InlineSmallFunctions, PassScope.Module, "low"))
+    if pass_name == "inline_functions":
+        return Some(mir_pass_descriptor("inline_functions", [], mir_pipeline_provider_skip_llvm("inline_functions", false, "llvm_runs_inliner_pipeline"), PassKind.InlineFunctions, PassScope.Module))
+    if pass_name == "inline_aggressive":
+        return Some(mir_pass_descriptor_with_cost("inline_aggressive", [], mir_pipeline_provider_skip_llvm("inline_aggressive", false, "llvm_runs_inliner_pipeline"), PassKind.InlineAggressive, PassScope.Module, "high"))
+    if pass_name == "loop_invariant_motion":
+        return Some(mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false), PassKind.LoopInvariantMotion, PassScope.Function))
+    if pass_name == "loop_unroll":
+        return Some(mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider_skip_llvm("loop_unroll", false, "llvm_runs_loop_unroll_pipeline"), PassKind.LoopUnroll, PassScope.Function))
+    if pass_name == "bounds_check_elimination":
+        return Some(mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false), PassKind.BoundsCheckElimination, PassScope.Function))
+    if pass_name == "strength_reduction":
+        return Some(mir_pass_descriptor("strength_reduction", [], optimization_rule_provider_with_backend_policy(strength_reduction_provider(), optimization_backend_policy_skip([OptimizerBackendKind.Llvm], "llvm_runs_scalar_strength_reduction")), PassKind.StrengthReduction, PassScope.Function))
+    if pass_name == "collection_opt" or pass_name == "collection_optimization":
+        return Some(mir_pass_descriptor("collection_opt", ["collection_optimization"], collection_optimization_provider(), PassKind.CollectionOpt, PassScope.Function))
+    if pass_name == "string_builder_opt":
+        return Some(mir_pass_descriptor("string_builder_opt", [], mir_pipeline_provider("string_builder_opt", false), PassKind.StringBuilderOpt, PassScope.Function))
+    if pass_name == "body_outlining":
+        return Some(mir_pass_descriptor("body_outlining", [], mir_pipeline_provider("body_outlining", false), PassKind.BodyOutlining, PassScope.Module))
+    if pass_name == "generator_state_machine":
+        return Some(mir_pass_descriptor("generator_state_machine", [], mir_pipeline_provider("generator_state_machine", false), PassKind.GeneratorStateMachine, PassScope.Function))
+    if pass_name == "tail_call_optimization":
+        return Some(mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false), PassKind.TailCallOptimization, PassScope.Function))
+    if pass_name == "global_value_numbering":
+        return Some(mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider_skip_llvm("global_value_numbering", false, "llvm_runs_gvn_and_scalar_cleanup"), PassKind.GlobalValueNumbering, PassScope.Function))
+    if pass_name == "pattern_idiom":
+        return Some(mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true), PassKind.PatternIdiom, PassScope.Module))
+    if pass_name == "auto_vectorize" or pass_name == "vectorization":
+        return Some(mir_pass_descriptor_with_cost("auto_vectorize", ["vectorization"], mir_pipeline_provider_skip_llvm("auto_vectorize", false, "llvm_runs_vectorizer_pipeline"), PassKind.AutoVectorize, PassScope.Module, "high"))
+    if pass_name == "predicate_promote":
+        return Some(mir_pass_descriptor_with_cost("predicate_promote", [], mir_pipeline_provider_skip_llvm("predicate_promote", false, "llvm_runs_if_conversion_and_select_promotion"), PassKind.PredicatePromote, PassScope.Module, "high"))
+    if pass_name == "target_narrow_form":
+        return Some(mir_pass_descriptor("target_narrow_form", [], mir_pipeline_provider("target_narrow_form", false), PassKind.TargetNarrowForm, PassScope.Module))
+    if pass_name == "write_coalesce":
+        return Some(mir_pass_descriptor("write_coalesce", [], mir_pipeline_provider("write_coalesce", false), PassKind.WriteCoalesce, PassScope.FsDriver))
+    if pass_name == "read_ahead_hoist":
+        return Some(mir_pass_descriptor("read_ahead_hoist", [], mir_pipeline_provider("read_ahead_hoist", false), PassKind.ReadAheadHoist, PassScope.FsDriver))
+    if pass_name == "syscall_batch":
+        return Some(mir_pass_descriptor("syscall_batch", [], mir_pipeline_provider("syscall_batch", false), PassKind.SyscallBatch, PassScope.FsDriver))
+    if pass_name == "typed_byte_canon":
+        return Some(mir_pass_descriptor("typed_byte_canon", [], mir_pipeline_provider("typed_byte_canon", false), PassKind.TypedByteCanon, PassScope.Function))
+    nil
+
+fn mir_pass_provider_name(pass_name: text) -> text:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if descriptor.?:
+        descriptor.unwrap().provider.name
+    else:
+        ""
+
+fn mir_pass_uses_pipeline_provider(pass_name: text) -> bool:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    descriptor.? and optimization_rule_provider_is_pipeline_pass(descriptor.unwrap().provider)
+
+# ============================================================================
+# Pass Manager
+# ============================================================================
+
+class PassManager:
+    """
+    Manages optimization passes and their execution order.
+
+    Handles:
+    - Pass dependencies
+    - Pass ordering
+    - Pass statistics
+    """
+    passes: [text]  # Pass instances (placeholder - should be [Box<dyn MirPass>])
+    stats: PassStatistics
+
+
+# ============================================================================
+# PassManager Methods (was: impl PassManager:)
+# ============================================================================
+
+fn passmanager_new() -> PassManager:
+        PassManager(
+            passes: [],
+            stats: passstatistics_new()
+        )
+
+
+me passmanager_run_on_module(self: PassManager, module: MirModule) -> MirModule:
+        """
+        Run all passes on a module.
+
+        Processes each function in the module through the pass pipeline.
+        Iterates passes in the outer loop to avoid repeated name-dispatch
+        overhead per function.
+        """
+        var optimized_module = module
+
+        # Run each pass across all functions (outer=pass, inner=function)
+        for pass_name in self.passes:
+            optimized_module = run_pass_on_module(pass_name, optimized_module)
+            self.stats = passstatistics_record_pass_run(self.stats, pass_name)
+
+        optimized_module
+
+
+class PassStatistics:
+    """Statistics about pass execution."""
+    pass_run_count: Dict<text, i64>
+    total_runs: i64
+
+
+# ============================================================================
+# PassStatistics Methods (was: impl PassStatistics:)
+# ============================================================================
+
+fn passstatistics_new() -> PassStatistics:
+        PassStatistics(
+            pass_run_count: {},
+            total_runs: 0
+        )
+
+
+fn passstatistics_record_pass_run(stats: PassStatistics, pass_name: text) -> PassStatistics:
+        var pass_run_count = stats.pass_run_count
+        var current_count = 0
+        if pass_run_count.has(pass_name):
+            current_count = pass_run_count[pass_name]
+        pass_run_count[pass_name] = current_count + 1
+        PassStatistics(
+            pass_run_count: pass_run_count,
+            total_runs: stats.total_runs + 1
+        )
+
+
+# ============================================================================
+# Optimization Pipeline
+# ============================================================================
+
+class OptimizationPipeline:
+    """
+    Standard optimization pipelines for different levels.
+
+    Provides pre-configured pass sequences for common optimization scenarios.
+    """
+    level: OptLevel
+    passes: [text]  # Pass names
+    target_ctx: TargetOptContext
+
+
+# ============================================================================
+# OptimizationPipeline Methods (was: impl OptimizationPipeline:)
+# ============================================================================
+
+fn optimizationpipeline_pass_names_for_level(level: OptLevel) -> [text]:
+    match level:
+        case NoOpt:
+            []
+        case Size:
+            [
+                "dead_code_elimination",
+                "constant_folding",
+                "copy_propagation",
+                "global_value_numbering",
+                "collection_optimization",
+                "string_builder_opt",
+                "inline_small_functions",
+                "body_outlining",
+                "dead_code_elimination"
+            ]
+        case Speed:
+            [
+                "generator_state_machine",
+                "dead_code_elimination",
+                "constant_folding",
+                "copy_propagation",
+                "global_value_numbering",
+                "common_subexpr_elim",
+                "tail_call_optimization",
+                "target_narrow_form",
+                "pattern_idiom",
+                "inline_functions",
+                "constant_folding",
+                "body_outlining",
+                "loop_invariant_motion",
+                "bounds_check_elimination",
+                "auto_vectorize",
+                "collection_opt",
+                "string_builder_opt",
+                "write_coalesce",
+                "syscall_batch",
+                "dead_code_elimination"
+            ]
+        case Aggressive:
+            [
+                "generator_state_machine",
+                "dead_code_elimination",
+                "constant_folding",
+                "copy_propagation",
+                "global_value_numbering",
+                "common_subexpr_elim",
+                "tail_call_optimization",
+                "target_narrow_form",
+                "pattern_idiom",
+                "inline_aggressive",
+                "body_outlining",
+                "loop_invariant_motion",
+                "bounds_check_elimination",
+                "auto_vectorize",
+                "predicate_promote",
+                "collection_opt",
+                "string_builder_opt",
+                "write_coalesce",
+                "syscall_batch",
+                "loop_unroll",
+                "strength_reduction",
+                "global_value_numbering",
+                "constant_folding",
+                "dead_code_elimination"
+            ]
+
+fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
+        """
+        Create pipeline for given optimization level.
+
+        Pass ordering matters! Passes are run in the order they appear.
+
+        General strategy:
+        1. Cleanup passes (DCE, simplify)
+        2. Analysis passes (alias analysis, escape analysis)
+        3. Transform passes (inline, unroll, vectorize)
+        4. Final cleanup (DCE again)
+        """
+        val ctx = target_opt_context_default()
+        OptimizationPipeline(level: level, passes: optimizationpipeline_effective_passes_for_level(level), target_ctx: ctx)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn optlevel_name(level: OptLevel) -> text:
+    match level:
+        case NoOpt: "none"
+        case Size: "basic"
+        case Speed: "standard"
+        case Aggressive: "aggressive"
+
+fn optimizationpipeline_passes_for_level(level: OptLevel) -> [text]:
+    optimizationpipeline_pass_names_for_level(level)
+
+fn optimizationpipeline_effective_passes_for_level(level: OptLevel) -> [text]:
+    """Return only operational transforms from the requested canonical plan."""
+    var effective: [text] = []
+    for pass_name in optimizationpipeline_pass_names_for_level(level):
+        val descriptor = mir_pass_descriptor_for_name(pass_name)
+        if descriptor.? and pass_status_allows_transform(descriptor.unwrap().status):
+            effective.push(descriptor.unwrap().stable_name)
+    effective
+
+fn mir_pass_cost_rank(cost_class: text) -> i64:
+    if cost_class == "free":
+        0
+    elif cost_class == "low":
+        1
+    elif cost_class == "medium":
+        2
+    elif cost_class == "high":
+        3
+    else:
+        99
+
+fn mir_pass_cost_allowed(cost_class: text, max_cost_class: text) -> bool:
+    mir_pass_cost_rank(cost_class) <= mir_pass_cost_rank(max_cost_class)
+
+fn mir_backend_is_llvm(backend_name: text) -> bool:
+    optimization_backend_kind_from_text(backend_name) == OptimizerBackendKind.Llvm
+
+fn mir_pass_known_fast(pass_name: text) -> bool:
+    if pass_name == "dead_code_elimination" or pass_name == "dce":
+        return true
+    if pass_name == "constant_folding" or pass_name == "const_fold":
+        return true
+    if pass_name == "copy_propagation":
+        return true
+    if pass_name == "common_subexpr_elim":
+        return true
+    if pass_name == "inline_small_functions":
+        return true
+    if pass_name == "inline_functions":
+        return true
+    if pass_name == "inline_aggressive":
+        return true
+    if pass_name == "loop_invariant_motion":
+        return true
+    if pass_name == "loop_unroll":
+        return true
+    if pass_name == "bounds_check_elimination":
+        return true
+    if pass_name == "strength_reduction":
+        return true
+    if pass_name == "collection_opt" or pass_name == "collection_optimization":
+        return true
+    if pass_name == "string_builder_opt":
+        return true
+    if pass_name == "body_outlining":
+        return true
+    if pass_name == "generator_state_machine":
+        return true
+    if pass_name == "tail_call_optimization":
+        return true
+    if pass_name == "global_value_numbering":
+        return true
+    if pass_name == "pattern_idiom":
+        return true
+    if pass_name == "auto_vectorize" or pass_name == "vectorization":
+        return true
+    if pass_name == "predicate_promote":
+        return true
+    if pass_name == "target_narrow_form":
+        return true
+    if pass_name == "write_coalesce":
+        return true
+    if pass_name == "read_ahead_hoist":
+        return true
+    if pass_name == "syscall_batch":
+        return true
+    pass_name == "typed_byte_canon"
+
+fn mir_pass_cost_class(pass_name: text) -> text:
+    if pass_name == "dead_code_elimination" or pass_name == "dce":
+        return "low"
+    if pass_name == "constant_folding" or pass_name == "const_fold":
+        return "low"
+    if pass_name == "copy_propagation":
+        return "low"
+    if pass_name == "inline_small_functions":
+        return "low"
+    if pass_name == "inline_aggressive":
+        return "high"
+    if pass_name == "auto_vectorize" or pass_name == "vectorization":
+        return "high"
+    if pass_name == "predicate_promote":
+        return "high"
+    if mir_pass_known_fast(pass_name):
+        return "medium"
+    "unknown"
+
+fn mir_pass_backend_skip_reason_fast(pass_name: text, backend_name: text) -> text?:
+    if not mir_backend_is_llvm(backend_name):
+        return nil
+    if pass_name == "common_subexpr_elim":
+        return Some("llvm_runs_gvn_and_scalar_cleanup")
+    if pass_name == "inline_functions" or pass_name == "inline_aggressive":
+        return Some("llvm_runs_inliner_pipeline")
+    if pass_name == "loop_unroll":
+        return Some("llvm_runs_loop_unroll_pipeline")
+    if pass_name == "strength_reduction":
+        return Some("llvm_runs_scalar_strength_reduction")
+    if pass_name == "global_value_numbering":
+        return Some("llvm_runs_gvn_and_scalar_cleanup")
+    if pass_name == "auto_vectorize" or pass_name == "vectorization":
+        return Some("llvm_runs_vectorizer_pipeline")
+    if pass_name == "predicate_promote":
+        return Some("llvm_runs_if_conversion_and_select_promotion")
+    nil
+
+fn mir_pass_applies_to_backend(pass_name: text, backend_name: text) -> bool:
+    # NOTE: explicit match, not `... .? == false`. Pinned via instrumentation
+    # while wiring optimize_mir to this (previously-dead, never-exercised)
+    # backend-aware pipeline: `Option.? ` chained directly into a `==`
+    # comparison universally evaluates to `false` in the bootstrap seed
+    # interpreter -- even for the `nil` (no skip reason) case where it
+    # should be `true` -- so every pass was reported as "does not apply"
+    # and the whole pipeline emptied out. Same landmine class already
+    # documented in _Inline/driver.spl (extract_func_symbol_id lookup):
+    # `.?` truthiness/chaining is unreliable here, use an explicit match.
+    # See doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
+    match mir_pass_backend_skip_reason_fast(pass_name, backend_name):
+        case Some(_): false
+        case nil: true
+
+fn mir_pass_applies_to_backend_budget(pass_name: text, backend_name: text, max_cost_class: text) -> bool:
+    mir_pass_applies_to_backend(pass_name, backend_name) and mir_pass_cost_allowed(mir_pass_cost_class(pass_name), max_cost_class)
+
+fn mir_pass_backend_decision_for_descriptor(
+    pass_name: text, backend_name: text, max_cost_class: text,
+    descriptor: MirPassDescriptor
+) -> MirPassBackendDecision:
+    val cost_class = mir_pass_cost_class(pass_name)
+    if not pass_status_allows_transform(descriptor.status):
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, pass_status_name(descriptor.status))
+    val backend_skip = mir_pass_backend_skip_reason_fast(pass_name, backend_name)
+    if backend_skip.?:
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Delegated, backend_skip.unwrap())
+    if not mir_pass_cost_allowed(cost_class, max_cost_class):
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, "cost budget exceeded")
+    MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, true, MirPassBackendOutcome.Selected, "ready")
+
+fn mir_pass_backend_decision(pass_name: text, backend_name: text, max_cost_class: text) -> MirPassBackendDecision:
+    if not mir_pass_known_fast(pass_name):
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, "unknown", false, MirPassBackendOutcome.Rejected, "unknown pass")
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        val cost_class = mir_pass_cost_class(pass_name)
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, "missing descriptor")
+    mir_pass_backend_decision_for_descriptor(
+        pass_name, backend_name, max_cost_class, descriptor.unwrap())
+
+fn optimizationpipeline_for_backend(level: OptLevel, backend_name: text) -> OptimizationPipeline:
+    val passes = optimizationpipeline_pass_names_for_level(level)
+    var filtered: [text] = []
+    var pass_i = 0
+    while pass_i < passes.len():
+        val pass_name: text = passes[pass_i]
+        val descriptor = mir_pass_descriptor_for_name(pass_name)
+        if descriptor.? and pass_status_allows_transform(descriptor.unwrap().status) and mir_pass_applies_to_backend(pass_name, backend_name):
+            filtered = filtered.push(descriptor.unwrap().stable_name)
+        pass_i = pass_i + 1
+    OptimizationPipeline(level: level, passes: filtered, target_ctx: target_opt_context_default())
+
+fn optimizationpipeline_passes_for_backend(level: OptLevel, backend_name: text) -> [text]:
+    optimizationpipeline_for_backend(level, backend_name).passes
+
+fn optimizationpipeline_for_backend_budget(level: OptLevel, backend_name: text, max_cost_class: text) -> OptimizationPipeline:
+    val passes = optimizationpipeline_pass_names_for_level(level)
+    var filtered: [text] = []
+    var pass_i = 0
+    while pass_i < passes.len():
+        val pass_name: text = passes[pass_i]
+        val descriptor = mir_pass_descriptor_for_name(pass_name)
+        val decision = if descriptor.?:
+            mir_pass_backend_decision_for_descriptor(
+                pass_name, backend_name, max_cost_class, descriptor.unwrap())
+        else:
+            mir_pass_backend_decision(pass_name, backend_name, max_cost_class)
+        if decision.applies:
+            filtered = filtered.push(descriptor.unwrap().stable_name)
+        pass_i = pass_i + 1
+    OptimizationPipeline(level: level, passes: filtered, target_ctx: target_opt_context_default())
+
+fn optimizationpipeline_passes_for_backend_budget(level: OptLevel, backend_name: text, max_cost_class: text) -> [text]:
+    optimizationpipeline_for_backend_budget(level, backend_name, max_cost_class).passes
+
+fn optimizationpipeline_backend_plan_for_budget(level: OptLevel, backend_name: text, max_cost_class: text) -> MirPipelineBackendPlan:
+    var passes: [text] = []
+    var skipped: [MirPassBackendDecision] = []
+    for pass_name in optimizationpipeline_pass_names_for_level(level):
+        val decision = mir_pass_backend_decision(pass_name, backend_name, max_cost_class)
+        if decision.applies:
+            passes = passes.push(pass_name)
+        else:
+            skipped = skipped.push(decision)
+    MirPipelineBackendPlan(passes, skipped)
+
+fn optimizationpipeline_decisions_for_backend_budget(level: OptLevel, backend_name: text, max_cost_class: text) -> [MirPassBackendDecision]:
+    var decisions: [MirPassBackendDecision] = []
+    for pass_name in optimizationpipeline_pass_names_for_level(level):
+        decisions = decisions.push(mir_pass_backend_decision(pass_name, backend_name, max_cost_class))
+    decisions
+
+fn optimizationpipeline_skipped_decisions_for_backend_budget(level: OptLevel, backend_name: text, max_cost_class: text) -> [MirPassBackendDecision]:
+    var skipped: [MirPassBackendDecision] = []
+    for decision in optimizationpipeline_decisions_for_backend_budget(level, backend_name, max_cost_class):
+        if not decision.applies:
+            skipped = skipped.push(decision)
+    skipped
+
+fn optimizationpipeline_inventory_lines() -> [text]:
+    var lines: [text] = []
+    val levels = [OptLevel.Size, OptLevel.Speed, OptLevel.Aggressive]
+    for level in levels:
+        val level_name = optlevel_name(level)
+        for pass_name in optimizationpipeline_passes_for_level(level):
+            val descriptor = mir_pass_descriptor_for_name(pass_name)
+            if descriptor.?:
+                lines.push("  - [mir] {descriptor.unwrap().stable_name} ({level_name}, requested, {pass_status_name(descriptor.unwrap().status)})")
+            else:
+                lines.push("  - [mir] {pass_name} ({level_name}, requested, unknown)")
+    lines
+
+fn mir_opt_json_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+fn optimizationpipeline_report_json(level: OptLevel, backend_name: text, max_cost_class: text) -> text:
+    """Deterministic planning report. Execution counters remain null until a
+    PassRunRecord is supplied by an outcome-reporting pass adapter."""
+    val header = "{\"schema\":\"simple.opt-pipeline-report/v1\",\"level\":\"" + mir_opt_json_escape(optlevel_name(level)) + "\",\"backend\":\"" + mir_opt_json_escape(backend_name) + "\",\"max_cost_class\":\"" + mir_opt_json_escape(max_cost_class) + "\",\"passes\":["
+    var entries: [text] = []
+    val requested = optimizationpipeline_pass_names_for_level(level)
+    var ordinal = 0
+    while ordinal < requested.len():
+        val requested_name = requested[ordinal]
+        val descriptor = mir_pass_descriptor_for_name(requested_name)
+        val decision = if descriptor.?:
+            mir_pass_backend_decision_for_descriptor(
+                requested_name, backend_name, max_cost_class,
+                descriptor.unwrap())
+        else:
+            mir_pass_backend_decision(
+                requested_name, backend_name, max_cost_class)
+        var stable_name = requested_name
+        var status_name = "unknown"
+        var status_reason = "unknown pass"
+        var expectation_name = "never-transforms"
+        if descriptor.?:
+            val found = descriptor.unwrap()
+            stable_name = found.stable_name
+            status_name = pass_status_kind_name(found.status)
+            status_reason = pass_status_reason(found.status)
+            expectation_name = pass_expectation_name(found.expectation)
+        val effective = if decision.applies: "true" else: "false"
+        entries.push("{\"ordinal\":" + ordinal.to_string() + ",\"requested_name\":\"" + mir_opt_json_escape(requested_name) + "\",\"stable_name\":\"" + mir_opt_json_escape(stable_name) + "\",\"requested\":true,\"effective\":" + effective + ",\"status\":\"" + status_name + "\",\"status_reason\":\"" + mir_opt_json_escape(status_reason) + "\",\"expectation\":\"" + expectation_name + "\",\"backend_outcome\":\"" + mir_pass_backend_outcome_name(decision.outcome) + "\",\"backend_reason\":\"" + mir_opt_json_escape(decision.reason) + "\",\"run_outcome\":\"not-run\",\"functions_seen\":null,\"candidates\":null,\"transformed\":null,\"rejected\":null,\"instructions_before\":null,\"instructions_after\":null,\"rejection_reasons\":[],\"verifier_outcome\":\"not-run\"}")
+        ordinal = ordinal + 1
+    header + entries.join(",") + "]}"
+
+fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
+    """
+    Convenience function to optimize a module.
+
+    Example:
+        val optimized = optimize_module(mir_module, OptLevel.Speed)
+    """
+    val pipeline = optimizationpipeline_for_level(level)
+    pipeline_optimize(pipeline, module)
+
+fn mir_bulk_ops_enabled() -> bool:
+    # Disabled even when the legacy flag is set: distinct base LocalIds are not
+    # a proof that their storage spans do not overlap.
+    false
+
+fn apply_bulk_recognizers(module: MirModule) -> MirModule:
+    # Quarantined with the direct adapter. Keep the module API stable while
+    # avoiding function-key snapshots and identity Dict rewrites.
+    module
+
+fn optimize_module_for_backend(module: MirModule, level: OptLevel, backend_name: text) -> MirModule:
+    # ponytail: VHDL skips optional MIR optimization until staged collection
+    # returns are reliable; re-enable when synthesis QoR needs it.
+    if backend_name == "vhdl":
+        return module
+    val pipeline = optimizationpipeline_for_backend(level, backend_name)
+    var optimized = pipeline_optimize(pipeline, module)
+    # SG-1.3 remains quarantined until region alias facts prove non-overlap.
+    if backend_name == "c" and mir_bulk_ops_enabled():
+        optimized = apply_bulk_recognizers(optimized)
+    optimized
+
+fn optimize_module_for_backend_budget(module: MirModule, level: OptLevel, backend_name: text, max_cost_class: text) -> MirModule:
+    val pipeline = optimizationpipeline_for_backend_budget(level, backend_name, max_cost_class)
+    pipeline_optimize(pipeline, module)
+
+fn optimize_module_with_caps(module: MirModule, level: OptLevel, caps: X86Caps, cipher_remark: bool) -> MirModule:
+    val ctx = TargetOptContext(x86_caps: caps, cipher_remark: cipher_remark, caps_kind: TargetCapsKind.X86(caps))
+    optimize_module_with_context(module, level, ctx)
+
+fn optimize_module_with_context(module: MirModule, level: OptLevel, ctx: TargetOptContext) -> MirModule:
+    """Optimize a module with an explicit TargetOptContext carrying target capabilities."""
+    var pipeline = optimizationpipeline_for_level(level)
+    pipeline.target_ctx = ctx
+    pipeline_optimize(pipeline, module)
+
+fn optimize_function(func: MirFunction, passes: [text]) -> MirFunction:
+    """
+    Run specific passes on a function.
+
+    Example:
+        val optimized = optimize_function(func, ["dead_code_elimination", "constant_folding"])
+    """
+    var result = func
+
+    for pass_name in passes:
+        result = run_named_pass(pass_name, result)
+
+    result
+
+# ============================================================================
+# Pass Dispatch
+# ============================================================================
+
+fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
+    """Dispatch optimization pass by name using typed PassKind."""
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        return func
+    if not pass_status_allows_transform(descriptor.unwrap().status):
+        return func
+    run_typed_pass_on_function(descriptor.unwrap().kind, func)
+
+fn run_typed_pass_on_function(kind: PassKind, func: MirFunction) -> MirFunction:
+    """Run a per-function pass identified by PassKind.
+    Module-scope passes (PatternIdiom, AutoVectorize, etc.) are no-ops here;
+    callers must use run_typed_pass_on_module for those.
+    """
+    if not pass_status_allows_transform(pass_status(kind)):
+        return func
+    match kind:
+        case DeadCodeElimination:
+            var dce = create_dce_pass()
+            dce_run_on_function(dce, func)
+        case ConstantFolding:
+            var cf = create_const_fold_pass()
+            cf_run_on_function(cf, func)
+        case CopyPropagation:
+            var cp = create_copy_prop_pass()
+            copypropagation_run_on_function(cp, func)
+        case CommonSubexprElim:
+            var cse = create_cse_pass()
+            cse_run_on_function(cse, func)
+        case InlineSmallFunctions:
+            var inl_s = create_inline_small_pass()
+            inline_run_on_function(inl_s, func)
+        case InlineFunctions:
+            var inl_f = create_inline_pass()
+            inline_run_on_function(inl_f, func)
+        case InlineAggressive:
+            var inl_a = create_inline_aggressive_pass()
+            inline_run_on_function(inl_a, func)
+        case LoopInvariantMotion:
+            var lo = create_loop_opt_conservative()
+            loop_opt_run_on_function(lo, func)
+        case LoopUnroll:
+            var lo = create_loop_opt_pass()
+            loop_opt_run_on_function(lo, func)
+        case BoundsCheckElimination:
+            var bce = create_bounds_check_elim_pass()
+            bounds_check_elim_run_on_function(bce, func)
+        case StrengthReduction:
+            var sr = create_strength_reduction_pass()
+            strength_reduction_run_on_function(sr, func)
+        case CollectionOpt:
+            var co = create_collection_opt_pass()
+            collection_opt_run_on_function(co, func)
+        case StringBuilderOpt:
+            var sb = create_string_builder_opt_pass()
+            string_builder_opt_run_on_function(sb, func)
+        case BodyOutlining:
+            var ol = create_outline_pass()
+            outline_run_on_function(ol, func)
+        case GeneratorStateMachine:
+            var gsm = create_generator_sm_pass()
+            generator_sm_run_on_function(gsm, func)
+        case TailCallOptimization:
+            var tco = create_tco_pass()
+            tco_run_on_function(tco, func)
+        case GlobalValueNumbering:
+            var gvn = create_gvn_pass()
+            gvn_run_on_function(gvn, func)
+        case PatternIdiom:
+            # Module-level pass — no-op per function
+            func
+        case AutoVectorize:
+            # Module-level pass — no-op per function
+            func
+        case PredicatePromote:
+            # Module-level pass — no-op per function
+            func
+        case TargetNarrowForm:
+            # Module-level pass — no-op per function
+            func
+        case WriteCoalesce:
+            var wc_stats = OptimizationStats.create()
+            optimize_write_coalesce(func, wc_stats)
+        case ReadAheadHoist:
+            var rah_stats = OptimizationStats.create()
+            optimize_read_ahead_hoist(func, rah_stats)
+        case SyscallBatch:
+            var sb_stats = OptimizationStats.create()
+            optimize_syscall_batch(func, sb_stats)
+        case TypedByteCanon:
+            var tbc = create_typed_byte_canon_pass()
+            typed_byte_canon_run_on_function(tbc, func)
+
+fn run_active_typed_pass_with_outcome(kind: PassKind, func: MirFunction) -> Result<TypedFunctionPassOutcome, text>:
+    """Run only active function/FsDriver adapters with native exact counters.
+
+    A newly activated pass must add an outcome adapter here. Falling back to a
+    serialized changed/not-changed Boolean would fabricate candidate counts.
+    """
+    match kind:
+        case WriteCoalesce:
+            var stats = OptimizationStats.create()
+            val updated = optimize_write_coalesce(func, stats)
+            Ok(TypedFunctionPassOutcome(
+                updated, stats.write_coalesce_count, stats.write_coalesce_count, 0,
+                "fs.two_stores_same_base"))
+        case SyscallBatch:
+            var stats = OptimizationStats.create()
+            val updated = optimize_syscall_batch(func, stats)
+            Ok(TypedFunctionPassOutcome(
+                updated, stats.syscall_batch_count, stats.syscall_batch_count, 0,
+                "fs.two_calls_same_callee"))
+        case _:
+            Err("active pass lacks an exact function outcome adapter")
+
+fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirModule:
+    """Run pipeline passes on all functions in a module.
+
+    Target-aware passes (vectorization) read pipeline.target_ctx for
+    capability gating.  All other passes are target-independent.
+    """
+    var optimized_module = module
+    val ctx = pipeline.target_ctx
+    for pass_name in pipeline.passes:
+        val descriptor = mir_pass_descriptor_for_name(pass_name)
+        if descriptor.? and not pass_status_allows_transform(descriptor.unwrap().status):
+            if mir_opt_trace_enabled():
+                print "[mir-opt] pass:inactive {pass_name}"
+            continue
+        if mir_opt_bootstrap_enabled() and mir_opt_bootstrap_skip_pass(pass_name):
+            if mir_opt_trace_enabled():
+                print "[mir-opt] pass:skip {pass_name}"
+            continue
+        if mir_opt_trace_enabled():
+            print "[mir-opt] pass:start {pass_name}"
+        if pass_name == "pattern_idiom":
+            val before_pattern = optimized_module
+            var pattern_input_valid = true
+            if mir_opt_verify_each_enabled():
+                val before_receipt = mir_module_structural_verification_receipt(before_pattern)
+                if not before_receipt.valid:
+                    pattern_input_valid = false
+                    if mir_opt_trace_enabled():
+                        print "[mir-opt] verifier:reject {pass_name} {before_receipt.error_codes.join(",")}"
+            if pattern_input_valid:
+                match ctx.caps_kind:
+                    case None_:
+                        optimized_module = run_pattern_idiom_pass_x86(optimized_module, ctx.x86_caps, ctx.cipher_remark)
+                    case _:
+                        optimized_module = run_pattern_idiom_pass_generic(optimized_module, ctx.caps_kind, ctx.cipher_remark)
+                if mir_opt_verify_each_enabled():
+                    val after_receipt = mir_module_structural_verification_receipt(optimized_module)
+                    if not after_receipt.valid:
+                        if mir_opt_trace_enabled():
+                            print "[mir-opt] verifier:reject {pass_name} {after_receipt.error_codes.join(",")}"
+                        optimized_module = before_pattern
+        elif pass_name == "target_narrow_form":
+            optimized_module = run_narrow_form_pass(optimized_module, ctx.caps_kind)
+        else:
+            optimized_module = run_pass_on_module(pass_name, optimized_module)
+        if mir_opt_trace_enabled():
+            print "[mir-opt] pass:done {pass_name}"
+    optimized_module
+
+
+fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
+    """Apply a single named pass to a module.
+
+    The pass name is resolved to a typed PassKind once, then run_typed_pass_on_module
+    handles dispatch.  Per-function passes create a fresh pass instance per function
+    (passes accumulate per-function analysis state via `me` methods).
+    """
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        return module
+    if not pass_status_allows_transform(descriptor.unwrap().status):
+        return module
+    if mir_opt_verify_each_enabled():
+        val checked = run_pass_on_module_checked(pass_name, module)
+        match checked:
+            case Ok(updated): return updated
+            case Err(message):
+                if mir_opt_trace_enabled():
+                    print "[mir-opt] verifier:reject {pass_name} {message}"
+                return module
+    run_typed_pass_on_module(descriptor.unwrap().kind, module)
+
+fn run_pass_on_module_checked(
+    pass_name: text, module: MirModule
+) -> Result<MirModule, text>:
+    """Fail-closed module boundary used by verify-each and focused tests."""
+    val before = mir_module_structural_verification_receipt(module)
+    if not before.valid:
+        return Err(
+            "invalid MIR module before pass " + pass_name + " [" +
+            before.error_codes.join(",") + "]: " + before.errors.join("; "))
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?: return Ok(module)
+    val found = descriptor.unwrap()
+    if not pass_status_allows_transform(found.status): return Ok(module)
+
+    var updated = module
+    match found.scope:
+        case Function | FsDriver:
+            var symbol_ids: [i64] = []
+            for symbol in module.functions.keys(): symbol_ids.push(symbol.id)
+            symbol_ids.sort()
+            for symbol_id in symbol_ids:
+                val symbol = SymbolId(id: symbol_id)
+                val outcome = run_named_pass_with_record(
+                    found.stable_name, updated.functions[symbol])
+                if outcome.is_err(): return Err(outcome.err().unwrap())
+                updated.functions[symbol] = outcome.ok().unwrap().function
+        case Module:
+            updated = run_typed_pass_on_module(found.kind, module)
+
+    val after = mir_module_structural_verification_receipt(updated)
+    if not after.valid:
+        return Err(
+            "invalid MIR module after pass " + found.stable_name + " [" +
+            after.error_codes.join(",") + "]: " + after.errors.join("; "))
+    Ok(updated)
+
+fn _mir_module_function_snapshot(module: MirModule) -> [MirFunction]:
+    """Stable pre-pass function snapshot for function-scoped module dispatch."""
+    val raw_functions = module.functions.values()
+    var functions: [MirFunction] = []
+    var function_index = 0
+    while function_index < raw_functions.len():
+        val typed_func: MirFunction = raw_functions[function_index]
+        functions.push(typed_func)
+        function_index = function_index + 1
+    functions
+
+fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
+    """Typed module-level pass runner.  Dispatches on PassKind, not strings."""
+    if not pass_status_allows_transform(pass_status(kind)):
+        return module
+    var result_module = module
+    match kind:
+        case DeadCodeElimination:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_dce_pass()
+                val updated = dce_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case ConstantFolding:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_const_fold_pass()
+                val updated = cf_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case CopyPropagation:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_copy_prop_pass()
+                val updated = copypropagation_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case CommonSubexprElim:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_cse_pass()
+                val updated = cse_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case InlineSmallFunctions:
+            var p = create_inline_small_pass()
+            result_module = inline_run_on_module(p, result_module)
+        case InlineFunctions:
+            var p = create_inline_pass()
+            result_module = inline_run_on_module(p, result_module)
+        case InlineAggressive:
+            var p = create_inline_aggressive_pass()
+            result_module = inline_run_on_module(p, result_module)
+        case LoopInvariantMotion:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_loop_opt_conservative()
+                val updated = loop_opt_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case LoopUnroll:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_loop_opt_pass()
+                val updated = loop_opt_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case BoundsCheckElimination:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_bounds_check_elim_pass()
+                val updated = bounds_check_elim_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case StrengthReduction:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_strength_reduction_pass()
+                val updated = strength_reduction_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case CollectionOpt:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_collection_opt_pass()
+                val updated = collection_opt_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case StringBuilderOpt:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_string_builder_opt_pass()
+                val updated = string_builder_opt_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case BodyOutlining:
+            # Module-level pass: outlining creates new functions
+            var ol = create_outline_pass()
+            result_module = outline_run_on_module(ol, result_module)
+        case GeneratorStateMachine:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_generator_sm_pass()
+                val updated = generator_sm_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case TailCallOptimization:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_tco_pass()
+                val updated = tco_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case GlobalValueNumbering:
+            for func in _mir_module_function_snapshot(module):
+                var p = create_gvn_pass()
+                val updated = gvn_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
+        case PredicatePromote:
+            result_module = run_predicate_promote(result_module)
+        case AutoVectorize:
+            # Module-level pass: pattern-match + log; no MIR rewrite in Wave K3.
+            # See: doc/05_design/simd_auto_vectorize_design.md §2, §10
+            result_module = run_auto_vectorize(result_module)
+        case PatternIdiom:
+            # Match the canonical pipeline's default target route.  A public
+            # active-pass dispatcher must not silently substitute an empty
+            # PatternRulePass that can never activate its positive witness.
+            val default_ctx = target_opt_context_default()
+            result_module = run_pattern_idiom_pass_x86(result_module, default_ctx.x86_caps, default_ctx.cipher_remark)
+        case TargetNarrowForm:
+            val default_ctx = target_opt_context_default()
+            result_module = run_narrow_form_pass(result_module, default_ctx.caps_kind)
+        case WriteCoalesce:
+            for func in _mir_module_function_snapshot(module):
+                var wc_stats = OptimizationStats.create()
+                val updated = optimize_write_coalesce(func, wc_stats)
+                result_module.functions[updated.symbol] = updated
+        case ReadAheadHoist:
+            for func in _mir_module_function_snapshot(module):
+                var rah_stats = OptimizationStats.create()
+                val updated = optimize_read_ahead_hoist(func, rah_stats)
+                result_module.functions[updated.symbol] = updated
+        case SyscallBatch:
+            for func in _mir_module_function_snapshot(module):
+                var sb_stats = OptimizationStats.create()
+                val updated = optimize_syscall_batch(func, sb_stats)
+                result_module.functions[updated.symbol] = updated
+        case TypedByteCanon:
+            for func in _mir_module_function_snapshot(module):
+                var tbc = create_typed_byte_canon_pass()
+                val updated = typed_byte_canon_run_on_function(tbc, func)
+                result_module.functions[updated.symbol] = updated
+    result_module
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export PassKind, PassScope, PassStatus, PassExpectation, MirPassBackendOutcome
+export PassWitnessContract, pass_witness_contract, pass_witness_registry_integrity_errors
+export PassRunDisposition, PassReasonCount, PassRunRecord
+export MirStructuralVerificationReceipt, MirModuleStructuralVerificationReceipt
+export PassFunctionOutcome
+export mir_structural_verification_error_code
+export mir_module_structural_verification_receipt
+export mir_opt_verify_each_enabled, run_pass_on_module_checked
+export pass_run_record_new, pass_run_record_add_reason, pass_run_record_integrity_errors
+export pass_run_record_for_unavailable_request
+export mir_structural_verification_receipt, run_named_pass_with_record
+export MirPass, MirPassDescriptor, MirPassBackendDecision, MirPipelineBackendPlan
+export TargetOptContext, target_opt_context_default
+export OptLevel, optlevel_name
+export PassManager, passmanager_new, passmanager_run_on_module
+export PassStatistics, passstatistics_new
+export OptimizationPipeline, optimizationpipeline_for_level, optimizationpipeline_pass_names_for_level, optimizationpipeline_passes_for_level, optimizationpipeline_effective_passes_for_level, optimizationpipeline_inventory_lines
+export optimizationpipeline_for_backend, optimizationpipeline_passes_for_backend, mir_pass_applies_to_backend
+export optimizationpipeline_for_backend_budget, optimizationpipeline_passes_for_backend_budget
+export optimizationpipeline_backend_plan_for_budget
+export optimizationpipeline_decisions_for_backend_budget, optimizationpipeline_skipped_decisions_for_backend_budget
+export mir_pass_cost_allowed, mir_pass_cost_class, mir_pass_applies_to_backend_budget, mir_pass_backend_decision
+export optimize_module, optimize_module_for_backend, optimize_module_for_backend_budget, optimize_module_with_caps, optimize_module_with_context
+export mir_bulk_ops_enabled, apply_bulk_recognizers
+export optimize_function
+export mir_pipeline_provider, mir_pass_descriptor, mir_pass_descriptor_with_cost, mir_pass_descriptor_registry, mir_pass_descriptor_for_name
+export pass_status, pass_expectation, pass_status_allows_transform, pass_status_name
+export mir_pass_fact_preservation
+export pass_status_kind_name, pass_status_reason, pass_expectation_name, mir_pass_backend_outcome_name
+export mir_pass_provider_registry, mir_pass_provider_name, mir_pass_uses_pipeline_provider
+export mir_pass_stable_name_integrity_error, mir_pass_registry_integrity_errors
+export run_named_pass, run_typed_pass_on_function
+export run_pass_on_module, run_typed_pass_on_module
+export pipeline_optimize
+export optimizationpipeline_report_json

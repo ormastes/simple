@@ -1,0 +1,254 @@
+# Pure lifecycle-persistence metadata model.
+#
+# This module deliberately uses existing Simple enums, structs, arrays, and
+# functions. It owns no source grammar, storage I/O, global registry, runtime
+# handle, or linker behavior.
+
+enum LifecycleValidationCode:
+    Valid
+    EmptyGraph
+    EmptyLevelName
+    DuplicateLevelId
+    UnknownEdgeEndpoint
+    SelfEdge
+    Cycle
+    UnknownBoundary
+    EmptyTransitionField
+    InvalidSchema
+    EmptyRecoveryField
+
+enum TransitionKind:
+    Planned
+    Crash
+    Reset
+    Suspend
+    FirmwareUpdate
+    FactoryReset
+
+struct LifecycleLevel:
+    id: i64
+    name: text
+
+struct LifecycleEdge:
+    shorter: i64
+    longer: i64
+
+struct LifecycleGraph:
+    levels: [LifecycleLevel]
+    edges: [LifecycleEdge]
+
+struct LifecycleTransition:
+    name: text
+    boundary: i64
+    kind: TransitionKind
+    volatile_policy: text
+    retained_policy: text
+    persistent_policy: text
+    environment_policy: text
+    restart_entry: text
+
+struct RecoveryRegistration:
+    name: text
+    state_type: text
+    lifecycle: i64
+    schema: i64
+    codec: text
+    validate: text
+    migrate: text
+    recover: text
+    clean_start: text
+    reconcile: text
+    activate: text
+
+struct LifecycleValidation:
+    valid: bool
+    code: LifecycleValidationCode
+    detail: text
+
+fn lifecycle_validation_ok() -> LifecycleValidation:
+    LifecycleValidation(
+        valid: true,
+        code: LifecycleValidationCode.Valid,
+        detail: ""
+    )
+
+fn lifecycle_validation_error(
+    code: LifecycleValidationCode,
+    detail: text
+) -> LifecycleValidation:
+    LifecycleValidation(valid: false, code: code, detail: detail)
+
+fn _lifecycle_text_present(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed.len() > 0
+
+fn _lifecycle_id_in(values: [i64], target: i64) -> bool:
+    for value in values:
+        if value == target:
+            return true
+    false
+
+fn lifecycle_level_known(graph: LifecycleGraph, id: i64) -> bool:
+    for level in graph.levels:
+        if level.id == id:
+            return true
+    false
+
+fn lifecycle_reaches(graph: LifecycleGraph, shorter: i64, longer: i64) -> bool:
+    if not lifecycle_level_known(graph, shorter):
+        return false
+    if not lifecycle_level_known(graph, longer):
+        return false
+    if shorter == longer:
+        return true
+
+    var pending: [i64] = [shorter]
+    var visited: [i64] = []
+    var cursor: i64 = 0
+    while cursor < pending.len():
+        val current = pending[cursor]
+        cursor = cursor + 1
+        if not _lifecycle_id_in(visited, current):
+            visited = visited.push(current)
+            for edge in graph.edges:
+                if edge.shorter == current:
+                    if edge.longer == longer:
+                        return true
+                    if not _lifecycle_id_in(visited, edge.longer):
+                        pending = pending.push(edge.longer)
+    false
+
+fn lifecycle_dependency_allowed(
+    graph: LifecycleGraph,
+    owner: i64,
+    dependency: i64
+) -> bool:
+    lifecycle_reaches(graph, owner, dependency)
+
+fn lifecycle_graph_validate(graph: LifecycleGraph) -> LifecycleValidation:
+    if graph.levels.len() == 0:
+        return lifecycle_validation_error(
+            LifecycleValidationCode.EmptyGraph,
+            "lifecycle graph has no levels"
+        )
+
+    var seen_ids: [i64] = []
+    for level in graph.levels:
+        if not _lifecycle_text_present(level.name):
+            return lifecycle_validation_error(
+                LifecycleValidationCode.EmptyLevelName,
+                "lifecycle level {level.id} has an empty name"
+            )
+        if _lifecycle_id_in(seen_ids, level.id):
+            return lifecycle_validation_error(
+                LifecycleValidationCode.DuplicateLevelId,
+                "duplicate lifecycle level id {level.id}"
+            )
+        seen_ids = seen_ids.push(level.id)
+
+    for edge in graph.edges:
+        if not lifecycle_level_known(graph, edge.shorter):
+            return lifecycle_validation_error(
+                LifecycleValidationCode.UnknownEdgeEndpoint,
+                "unknown shorter lifecycle level {edge.shorter}"
+            )
+        if not lifecycle_level_known(graph, edge.longer):
+            return lifecycle_validation_error(
+                LifecycleValidationCode.UnknownEdgeEndpoint,
+                "unknown longer lifecycle level {edge.longer}"
+            )
+        if edge.shorter == edge.longer:
+            return lifecycle_validation_error(
+                LifecycleValidationCode.SelfEdge,
+                "lifecycle level {edge.shorter} has a self edge"
+            )
+
+    for edge in graph.edges:
+        if lifecycle_reaches(graph, edge.longer, edge.shorter):
+            return lifecycle_validation_error(
+                LifecycleValidationCode.Cycle,
+                "lifecycle edge {edge.shorter}->{edge.longer} participates in a cycle"
+            )
+
+    lifecycle_validation_ok()
+
+fn lifecycle_transition_validate(
+    graph: LifecycleGraph,
+    transition: LifecycleTransition
+) -> LifecycleValidation:
+    val graph_result = lifecycle_graph_validate(graph)
+    if not graph_result.valid:
+        return graph_result
+    if not lifecycle_level_known(graph, transition.boundary):
+        return lifecycle_validation_error(
+            LifecycleValidationCode.UnknownBoundary,
+            "transition boundary {transition.boundary} is not in the lifecycle graph"
+        )
+    if not _lifecycle_text_present(transition.name):
+        return lifecycle_validation_error(
+            LifecycleValidationCode.EmptyTransitionField,
+            "transition name is empty"
+        )
+    if not _lifecycle_text_present(transition.volatile_policy):
+        return lifecycle_validation_error(
+            LifecycleValidationCode.EmptyTransitionField,
+            "transition volatile policy is empty"
+        )
+    if not _lifecycle_text_present(transition.retained_policy):
+        return lifecycle_validation_error(
+            LifecycleValidationCode.EmptyTransitionField,
+            "transition retained policy is empty"
+        )
+    if not _lifecycle_text_present(transition.persistent_policy):
+        return lifecycle_validation_error(
+            LifecycleValidationCode.EmptyTransitionField,
+            "transition persistent policy is empty"
+        )
+    if not _lifecycle_text_present(transition.environment_policy):
+        return lifecycle_validation_error(
+            LifecycleValidationCode.EmptyTransitionField,
+            "transition environment policy is empty"
+        )
+    if not _lifecycle_text_present(transition.restart_entry):
+        return lifecycle_validation_error(
+            LifecycleValidationCode.EmptyTransitionField,
+            "transition restart entry is empty"
+        )
+    lifecycle_validation_ok()
+
+fn recovery_registration_validate(
+    graph: LifecycleGraph,
+    registration: RecoveryRegistration
+) -> LifecycleValidation:
+    val graph_result = lifecycle_graph_validate(graph)
+    if not graph_result.valid:
+        return graph_result
+    if not lifecycle_level_known(graph, registration.lifecycle):
+        return lifecycle_validation_error(
+            LifecycleValidationCode.UnknownBoundary,
+            "recovery lifecycle {registration.lifecycle} is not in the graph"
+        )
+    if registration.schema <= 0:
+        return lifecycle_validation_error(
+            LifecycleValidationCode.InvalidSchema,
+            "recovery schema must be positive"
+        )
+    if not _lifecycle_text_present(registration.name):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "recovery name is empty")
+    if not _lifecycle_text_present(registration.state_type):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "recovery state type is empty")
+    if not _lifecycle_text_present(registration.codec):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "recovery codec is empty")
+    if not _lifecycle_text_present(registration.validate):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "recovery validator is empty")
+    if not _lifecycle_text_present(registration.migrate):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "recovery migration is empty")
+    if not _lifecycle_text_present(registration.recover):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "recovery function is empty")
+    if not _lifecycle_text_present(registration.clean_start):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "clean-start function is empty")
+    if not _lifecycle_text_present(registration.reconcile):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "reconciliation function is empty")
+    if not _lifecycle_text_present(registration.activate):
+        return lifecycle_validation_error(LifecycleValidationCode.EmptyRecoveryField, "activation function is empty")
+    lifecycle_validation_ok()

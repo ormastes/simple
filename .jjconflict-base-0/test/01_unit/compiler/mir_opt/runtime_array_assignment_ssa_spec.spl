@@ -1,0 +1,269 @@
+use std.spec
+use compiler.mir.mir_instructions.{
+    BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind,
+    MirTerminator, MirBinOp
+}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirType}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_alloca_transform_blocks}
+
+# Regression guard for bug:
+#   doc/08_tracking/bug/llvm_runtime_array_assignment_ssa_2026-07-10.md
+#
+# Assigning a returned runtime array back into an existing variable emitted a
+# SECOND definition of the same LLVM local (`%l5 = getelementptr ...` then
+# `%l5 = add ...`), which llc rejects. The alloca-per-reassigned-local transform
+# (ssa_alloca_transform_blocks) is the SIMPLE_BOOTSTRAP LLVM path's fix, but it
+# previously bailed out on ANY single-block function (`blocks.len() < 2`), so a
+# straight-line reassignment was never slotted and the duplicate def survived.
+# It also must keep working for the conditional / loop / zero-iteration shapes.
+
+fn local(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn int_operand(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
+fn copy_operand(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(local(id)))
+
+fn inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn i64_local(id: i64) -> MirLocal:
+    MirLocal(id: local(id), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false)
+
+fn typed_local(id: i64, type_: MirType, kind: LocalKind) -> MirLocal:
+    MirLocal(id: local(id), name: nil, type_: type_, kind: kind, is_ghost: false)
+
+# Count how many emitted instructions still WRITE `target_id` as their dest.
+# After the transform each reassigned def must become a Store into the stack
+# slot (dest rewritten to a fresh temp), so the original local must be written
+# zero times -- proving no duplicate `%lN` def can be emitted.
+fn writes_of(blocks: [MirBlock], target_id: i64) -> i64:
+    var count = 0
+    for block in blocks:
+        for i in block.instructions:
+            match i.kind:
+                case GetElementPtr(dest, _, _):
+                    if dest.id == target_id: count = count + 1
+                case BinOp(dest, _, _, _):
+                    if dest.id == target_id: count = count + 1
+                case Const(dest, _, _):
+                    if dest.id == target_id: count = count + 1
+                case Call(dest, _, _):
+                    if dest.?:
+                        if dest.unwrap().id == target_id: count = count + 1
+                case _: pass_do_nothing
+    count
+
+describe "runtime array assignment SSA (bug: duplicate %lN def)":
+
+    it "slots a straight-line single-block reassignment of a returned array":
+        # Mirrors the bug's span probe:
+        #   %l5 = getelementptr i8, ptr %l4, i64 0
+        #   %l5 = add i64 %l11, 0     <- second def of the SAME local
+        # local 5 is written twice, then returned (it ESCAPES), so the SSA-rename
+        # fallback cannot rescue it -- only the alloca slot can.
+        val blocks = [
+            MirBlock(
+                id: BlockId.new(0),
+                label: "entry",
+                instructions: [
+                    inst(MirInstKind.GetElementPtr(local(5), copy_operand(4), [int_operand(0)])),
+                    inst(MirInstKind.BinOp(local(5), MirBinOp.Add, copy_operand(11), int_operand(0)))
+                ],
+                terminator: MirTerminator.Ret(Some(copy_operand(5)))
+            )
+        ]
+        val locals = [i64_local(4), i64_local(5), i64_local(11)]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        # The two duplicate defs of local 5 must be gone (rewritten to stores).
+        expect(writes_of(result.blocks, 5)).to_equal(0)
+
+    it "slots a reassignment inside an if/else (multi-block)":
+        val blocks = [
+            MirBlock(id: BlockId.new(0), label: "entry", instructions: [],
+                terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))),
+            MirBlock(id: BlockId.new(1), label: "then",
+                instructions: [inst(MirInstKind.BinOp(local(5), MirBinOp.Add, copy_operand(11), int_operand(0)))],
+                terminator: MirTerminator.Goto(BlockId.new(3))),
+            MirBlock(id: BlockId.new(2), label: "else",
+                instructions: [inst(MirInstKind.GetElementPtr(local(5), copy_operand(4), [int_operand(0)]))],
+                terminator: MirTerminator.Goto(BlockId.new(3))),
+            MirBlock(id: BlockId.new(3), label: "join", instructions: [],
+                terminator: MirTerminator.Ret(Some(copy_operand(5))))
+        ]
+        val locals = [i64_local(4), i64_local(5), i64_local(9), i64_local(11)]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        expect(writes_of(result.blocks, 5)).to_equal(0)
+
+    it "slots a loop-carried reassignment (back-edge, multi-block)":
+        val blocks = [
+            MirBlock(id: BlockId.new(0), label: "entry",
+                instructions: [inst(MirInstKind.GetElementPtr(local(5), copy_operand(4), [int_operand(0)]))],
+                terminator: MirTerminator.Goto(BlockId.new(1))),
+            MirBlock(id: BlockId.new(1), label: "header", instructions: [],
+                terminator: MirTerminator.If(copy_operand(9), BlockId.new(2), BlockId.new(3))),
+            MirBlock(id: BlockId.new(2), label: "body",
+                instructions: [inst(MirInstKind.BinOp(local(5), MirBinOp.Add, copy_operand(5), int_operand(1)))],
+                terminator: MirTerminator.Goto(BlockId.new(1))),
+            MirBlock(id: BlockId.new(3), label: "exit", instructions: [],
+                terminator: MirTerminator.Ret(Some(copy_operand(5))))
+        ]
+        val locals = [i64_local(4), i64_local(5), i64_local(9)]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        expect(writes_of(result.blocks, 5)).to_equal(0)
+
+    it "keeps logical merge memory valid while slotting a loop-carried scalar":
+        val blocks = [
+            MirBlock(id: BlockId.new(0), label: "entry", instructions: [
+                    inst(MirInstKind.Const(local(5), MirConstValue.Int(0), MirType.i64())),
+                    inst(MirInstKind.Alloc(local(20), MirType.i64()))
+                ], terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))),
+            MirBlock(id: BlockId.new(1), label: "logic_rhs",
+                instructions: [inst(MirInstKind.Store(copy_operand(20), copy_operand(5)))],
+                terminator: MirTerminator.Goto(BlockId.new(3))),
+            MirBlock(id: BlockId.new(2), label: "logic_short",
+                instructions: [inst(MirInstKind.Store(copy_operand(20), int_operand(0)))],
+                terminator: MirTerminator.Goto(BlockId.new(3))),
+            MirBlock(id: BlockId.new(3), label: "logic_merge",
+                instructions: [inst(MirInstKind.Load(local(21), copy_operand(20)))],
+                terminator: MirTerminator.Goto(BlockId.new(4))),
+            MirBlock(id: BlockId.new(4), label: "loop_header", instructions: [],
+                terminator: MirTerminator.If(copy_operand(9), BlockId.new(5), BlockId.new(6))),
+            MirBlock(id: BlockId.new(5), label: "loop_body",
+                instructions: [inst(MirInstKind.BinOp(local(5), MirBinOp.Add, copy_operand(5), int_operand(1)))],
+                terminator: MirTerminator.Goto(BlockId.new(4))),
+            MirBlock(id: BlockId.new(6), label: "exit", instructions: [],
+                terminator: MirTerminator.Ret(Some(copy_operand(5))))
+        ]
+        val locals = [
+            i64_local(5),
+            typed_local(9, MirType.i64(), LocalKind.Arg(0)),
+            typed_local(20, MirType.ptr(MirType.i64(), true), LocalKind.Temp),
+            typed_local(21, MirType.i64(), LocalKind.Temp)
+        ]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        expect(writes_of(result.blocks, 5)).to_equal(0)
+
+        val rhs = result.blocks[1].instructions
+        expect(rhs.len()).to_equal(3)
+        var rhs_ptr_load_id = -1
+        match rhs[0].kind:
+            case Load(dest, _): rhs_ptr_load_id = dest.id
+            case _: fail("logical result pointer was not loaded before Store")
+        var rhs_value_load_id = -1
+        match rhs[1].kind:
+            case Load(dest, _): rhs_value_load_id = dest.id
+            case _: fail("loop-carried value was not loaded before Store")
+        match rhs[2].kind:
+            case Store(ptr, value):
+                match ptr.kind:
+                    case Copy(loaded): expect(loaded.id).to_equal(rhs_ptr_load_id)
+                    case _: fail("Store pointer still referenced the original cross-block local")
+                match value.kind:
+                    case Copy(loaded): expect(loaded.id).to_equal(rhs_value_load_id)
+                    case _: fail("Store value still referenced the original loop-carried local")
+            case _: fail("logical RHS Store was not preserved")
+
+        var kept_merge_load = false
+        for merge_inst in result.blocks[3].instructions:
+            match merge_inst.kind:
+                case Load(dest, _):
+                    if dest.id == 21:
+                        kept_merge_load = true
+                case _: pass_do_nothing
+        expect(kept_merge_load).to_equal(true)
+
+        val exit_insts = result.blocks[6].instructions
+        expect(exit_insts.len()).to_equal(1)
+        var exit_load_id = -1
+        match exit_insts[0].kind:
+            case Load(dest, _): exit_load_id = dest.id
+            case _: fail("exit did not load the loop-carried scalar")
+        match result.blocks[6].terminator:
+            case Ret(value):
+                expect(value.?).to_equal(true)
+                match value.unwrap().kind:
+                    case Copy(loaded): expect(loaded.id).to_equal(exit_load_id)
+                    case _: fail("exit still returned the original loop-carried local")
+            case _: fail("exit return was not preserved")
+
+    it "slots a possibly-zero-iteration loop (entry def dominates exit use)":
+        # Same CFG as a loop, but the body may run zero times; the exit still
+        # reads local 5. The entry-block alloca dominates the exit load, so the
+        # use is defined on the zero-trip path too (no `undef`).
+        val blocks = [
+            MirBlock(id: BlockId.new(0), label: "entry",
+                instructions: [inst(MirInstKind.GetElementPtr(local(5), copy_operand(4), [int_operand(0)]))],
+                terminator: MirTerminator.Goto(BlockId.new(1))),
+            MirBlock(id: BlockId.new(1), label: "header", instructions: [],
+                terminator: MirTerminator.If(copy_operand(9), BlockId.new(2), BlockId.new(3))),
+            MirBlock(id: BlockId.new(2), label: "body",
+                instructions: [inst(MirInstKind.BinOp(local(5), MirBinOp.Add, copy_operand(5), int_operand(1)))],
+                terminator: MirTerminator.Goto(BlockId.new(1))),
+            MirBlock(id: BlockId.new(3), label: "exit", instructions: [],
+                terminator: MirTerminator.Ret(Some(copy_operand(5))))
+        ]
+        val locals = [i64_local(4), i64_local(5), i64_local(9)]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        expect(writes_of(result.blocks, 5)).to_equal(0)
+
+    it "slots a cross-block-live single-def array pointer (array-index inttoptr shape)":
+        # Regression for the array-index pointer half of
+        #   doc/08_tracking/bug/llvm_aot_array_len_comparison_width_mismatch_2026-07-10.md
+        # `val fill = <returned [u32]>` is a SINGLE def (local 5, a GetElementPtr
+        # of the returned array data), but it is READ in later blocks -- the `or`
+        # short-circuit of `rt_array_len(fill) != 8 or ...` splits the CFG. A
+        # cross-block-live use is not dominated by its in-entry def once the CFG
+        # splits, so the textual `%lN` emitter could reference an undefined local
+        # in `... = call i64 @rt_array_len(i64 %lN)` (surfacing as the reported
+        # `inttoptr i64 %lN to ptr` / "use of undefined value"). The entry-block
+        # alloca slot dominates every use, so each read becomes a Load and no
+        # undefined use survives. Single def -> the SSA-rename fallback is
+        # inapplicable (the local escapes); only the cross-block-live slot rescues
+        # it. This is the cross-block-live extension, distinct from the
+        # single-block multi-def straight-line arm above.
+        val blocks = [
+            MirBlock(id: BlockId.new(0), label: "entry",
+                instructions: [inst(MirInstKind.GetElementPtr(local(5), copy_operand(4), [int_operand(0)]))],
+                terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))),
+            MirBlock(id: BlockId.new(1), label: "use_a", instructions: [],
+                terminator: MirTerminator.Ret(Some(copy_operand(5)))),
+            MirBlock(id: BlockId.new(2), label: "use_b", instructions: [],
+                terminator: MirTerminator.Ret(Some(copy_operand(5))))
+        ]
+        val locals = [i64_local(4), i64_local(5), i64_local(9)]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        # The single def of local 5 is rewritten to a Store; both cross-block
+        # reads become Loads, so local 5 is written zero times afterward.
+        expect(writes_of(result.blocks, 5)).to_equal(0)
+
+    it "stays a no-op for a single-block function with no reassignment":
+        val blocks = [
+            MirBlock(
+                id: BlockId.new(0),
+                label: "entry",
+                instructions: [
+                    inst(MirInstKind.Const(local(4), MirConstValue.Int(1), MirType.i64())),
+                    inst(MirInstKind.BinOp(local(5), MirBinOp.Add, copy_operand(4), int_operand(1)))
+                ],
+                terminator: MirTerminator.Ret(Some(copy_operand(5)))
+            )
+        ]
+        val locals = [i64_local(4), i64_local(5)]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(result.applied).to_equal(false)
+        expect(result.reason).to_equal("no slotted locals")

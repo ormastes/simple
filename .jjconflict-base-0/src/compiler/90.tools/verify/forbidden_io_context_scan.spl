@@ -1,0 +1,455 @@
+# Forbidden-I/O context scan — populates a real ForbiddenIoContextManifest
+# from source text and runs it through
+# forbidden_io_checker.check_all_forbidden_io_fns for real.
+#
+# Companion to `noalloc_manifest_scan.spl` (same file, same shape, same
+# honesty tier — see that file's header for the reasoning this one reuses
+# verbatim). Before this file, `check_forbidden_io_violations` and
+# `check_all_forbidden_io_fns` (src/compiler/35.semantics/forbidden_io_checker.spl)
+# had ZERO production callers — only their own spec, which hand-builds a
+# `ForbiddenIoContextManifest` in-memory rather than deriving one from real
+# source. This is the first genuinely-reachable driver for
+# `check_all_forbidden_io_fns`.
+#
+# SCOPE (stated plainly, do not overclaim):
+#   - TEXT-based fact extraction, not an AST/HIR/MIR pass — same constraint
+#     `noalloc_manifest_scan.spl` states, unchanged here: no self-hosted
+#     Simple binary in this tree to drive a real parse.
+#   - Context tags (@realtime / @interrupt / @noalloc) are read directly off
+#     source annotations immediately preceding a `fn`/`me`/`static fn`
+#     declaration — the same "pending annotation" scan
+#     `noalloc_manifest_scan._` uses for `@noalloc`, extended to the other
+#     two tags design §19 folds into the same deny rule (see
+#     `forbidden_io_checker.spl`'s `ForbiddenIoFnEntry` docstring).
+#   - The call graph is real: every direct callee identifier reachable from
+#     each scanned function's body (name-token immediately followed by `(`),
+#     scoped to `SCAN_ROOTS` below.
+#   - SCAN_ROOTS is the loader-facing surface named by
+#     `forbidden_io_checker.spl`'s own header as where the acquisition entry
+#     points it tracks (`FORBIDDEN_IO_ACQUIRE_FNS`) are actually called from
+#     today: `src/lib/nogc_async_mut_noalloc` (where `@noalloc` contexts
+#     live) and `src/compiler/99.loader` (where `ModuleLoader.aspect_facet`
+#     wraps `apk_load_facet`). As the design doc's own gap note says, there
+#     are zero `facet<T>()` call sites anywhere in the tree yet, so a clean
+#     scan run today reporting 0 tagged fns (or 0 violations among any that
+#     exist) is an honest, expected result — not evidence the pass is inert;
+#     see `run_forbidden_io_context_scan`'s two distinctly-reported outcomes.
+
+use compiler.semantics.forbidden_io_checker.{
+    ForbiddenIoContextManifest, check_all_forbidden_io_fns, format_forbidden_io_violations
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+pub val SCAN_ROOTS: [text] = ["src/lib/nogc_async_mut_noalloc", "src/compiler/99.loader"]
+
+pub struct ScannedIoFn:
+    """One function found by the text scan, with its raw context tags and
+    the direct callees found in its body (unfiltered — every callee, not
+    only acquisition entry points, so the checker can walk the real call
+    graph rather than a pre-filtered one)."""
+    identity: text
+    short_name: text
+    source_path: text
+    lexical_owner: text
+    module_name: text
+    is_realtime: bool
+    is_interrupt: bool
+    is_noalloc: bool
+    callees: [text]
+
+struct RawScannedIoFn:
+    source_path: text
+    module_name: text
+    lexical_owner: text
+    short_name: text
+    is_realtime: bool
+    is_interrupt: bool
+    is_noalloc: bool
+    callees: [text]
+
+struct RawScannedIoFile:
+    functions: [RawScannedIoFn]
+    imported_modules: {text: text}
+
+pub fn forbidden_io_function_identity(source_path: text, short_name: text) -> text:
+    """Stable scanner identity for one source-level function declaration.
+
+    The source path is load-bearing: short names are not unique across a
+    repository, and keying the manifest by a short name lets the last file
+    silently replace an unrelated function's adjacency list.
+    """
+    source_path + "::" + short_name
+
+pub fn forbidden_io_owned_function_identity(source_path: text, lexical_owner: text, short_name: text) -> text:
+    """Stable identity for a method or owner-scoped function."""
+    if lexical_owner == "":
+        return forbidden_io_function_identity(source_path, short_name)
+    source_path + "::" + lexical_owner + "::" + short_name
+
+fn _module_name_from_source_path(source_path: text) -> text:
+    var base = source_path
+    var prefix = ""
+    if base.starts_with("src/lib/"):
+        base = base[8:base.len()]
+        prefix = "std."
+    else if base.starts_with("src/compiler/99.loader/"):
+        base = base[23:base.len()]
+        prefix = "compiler.loader."
+    if base.ends_with(".spl"):
+        base = base[0:base.len() - 4]
+    if base.ends_with("/__init__"):
+        base = base[0:base.len() - 9]
+    else if base.ends_with("/mod"):
+        base = base[0:base.len() - 4]
+    prefix + base.replace("/", ".")
+
+fn _owner_decl_name(line: text) -> text:
+    var t = line.trim()
+    if t.starts_with("pub "):
+        t = t[4:t.len()]
+    var rest = ""
+    if t.starts_with("class "):
+        rest = t[6:t.len()]
+    else if t.starts_with("impl "):
+        rest = t[5:t.len()]
+    else if t.starts_with("trait "):
+        rest = t[6:t.len()]
+    else if t.starts_with("mixin "):
+        rest = t[6:t.len()]
+    if rest == "":
+        return ""
+    var end = 0
+    while end < rest.len() and rest[end:end + 1] != ":" and rest[end:end + 1] != "(":
+        end = end + 1
+    rest[0:end].trim()
+
+fn _module_symbol_key(module_name: text, short_name: text) -> text:
+    module_name + "::" + short_name
+
+fn _source_symbol_key(source_path: text, short_name: text) -> text:
+    source_path + "::" + short_name
+
+fn _record_import_symbols(mut imported_modules: {text: text}, module_name: text, segment: text):
+    var symbols = segment.replace("}", "")
+    for raw_symbol in symbols.split(","):
+        val short_name = raw_symbol.trim()
+        if short_name != "" and short_name != "*":
+            imported_modules[short_name] = module_name
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line[n:n + 1] == " ":
+        n = n + 1
+    n
+
+fn _is_fn_decl(line: text) -> bool:
+    var t = line.trim()
+    if t.starts_with("pub "):
+        t = t[4:t.len()]
+    t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+
+fn _fn_name(line: text) -> text:
+    var t = line.trim()
+    if t.starts_with("pub "):
+        t = t[4:t.len()]
+    var rest = t
+    if rest.starts_with("static fn "):
+        rest = rest[10:rest.len()]
+    else if rest.starts_with("fn "):
+        rest = rest[3:rest.len()]
+    else if rest.starts_with("me "):
+        rest = rest[3:rest.len()]
+    var idx = 0
+    while idx < rest.len() and rest[idx:idx + 1] != "(":
+        idx = idx + 1
+    rest[0:idx]
+
+fn _extract_callees(line: text) -> [text]:
+    var code = line
+    if code.contains("#"):
+        code = code.split("#")[0]
+    var callees: [text] = []
+    var symbol = ""
+    var i = 0
+    while i < code.len():
+        val ch = code[i:i + 1]
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        val is_digit = ch >= "0" and ch <= "9"
+        val is_qualifier = ch == "." or ch == ":"
+        if is_alpha or (is_digit and symbol != "") or (is_qualifier and symbol != ""):
+            symbol = symbol + ch
+        else:
+            if ch == "(" and symbol != "":
+                callees.push(symbol)
+            symbol = ""
+        i = i + 1
+    callees
+
+fn _scan_forbidden_io_file(source_path: text) -> RawScannedIoFile:
+    val content = file_read(source_path)
+    val lines = content.split("\n")
+    var raw_results: [RawScannedIoFn] = []
+    var imported_modules: {text: text} = {}
+    var import_group_module = ""
+    var i = 0
+    var pending_realtime = false
+    var pending_interrupt = false
+    var pending_noalloc = false
+    var lexical_owner = ""
+    var owner_indent = -1
+    val module_name = _module_name_from_source_path(source_path)
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if import_group_module != "":
+            _record_import_symbols(imported_modules, import_group_module, trimmed)
+            if trimmed.contains("}"):
+                import_group_module = ""
+            i = i + 1
+            continue
+        if trimmed.starts_with("use "):
+            val import_rest = trimmed[4:trimmed.len()]
+            if import_rest.contains(".{"):
+                val import_parts = import_rest.split(".{")
+                val imported_module = import_parts[0].trim()
+                val symbol_segment = import_parts[1]
+                _record_import_symbols(imported_modules, imported_module, symbol_segment)
+                if not symbol_segment.contains("}"):
+                    import_group_module = imported_module
+            else:
+                var last_dot = -1
+                var import_idx = 0
+                while import_idx < import_rest.len():
+                    if import_rest[import_idx:import_idx + 1] == ".":
+                        last_dot = import_idx
+                    import_idx = import_idx + 1
+                if last_dot > 0 and last_dot + 1 < import_rest.len():
+                    val imported_module = import_rest[0:last_dot]
+                    val short_name = import_rest[last_dot + 1:import_rest.len()].trim()
+                    if short_name != "" and short_name != "*":
+                        imported_modules[short_name] = imported_module
+            i = i + 1
+            continue
+
+        val line_indent = _indent_of(line)
+        if lexical_owner != "" and trimmed != "" and line_indent <= owner_indent:
+            lexical_owner = ""
+            owner_indent = -1
+        val declared_owner = _owner_decl_name(line)
+        if declared_owner != "":
+            lexical_owner = declared_owner
+            owner_indent = line_indent
+            pending_realtime = false
+            pending_interrupt = false
+            pending_noalloc = false
+            i = i + 1
+            continue
+        if trimmed.starts_with("@realtime"):
+            pending_realtime = true
+            i = i + 1
+            continue
+        if trimmed.starts_with("@interrupt"):
+            pending_interrupt = true
+            i = i + 1
+            continue
+        if trimmed.starts_with("@noalloc"):
+            pending_noalloc = true
+            i = i + 1
+            continue
+        if _is_fn_decl(line):
+            val is_realtime = pending_realtime
+            val is_interrupt = pending_interrupt
+            val is_noalloc = pending_noalloc
+            pending_realtime = false
+            pending_interrupt = false
+            pending_noalloc = false
+            val short_name = _fn_name(line)
+            val header_indent = _indent_of(line)
+            var callees: [text] = []
+            var j = i + 1
+            while j < lines.len():
+                val body_line = lines[j]
+                val body_trim = body_line.trim()
+                if body_trim != "" and _indent_of(body_line) <= header_indent:
+                    break
+                for callee in _extract_callees(body_line):
+                    callees.push(callee)
+                j = j + 1
+            raw_results.push(RawScannedIoFn(
+                source_path: source_path,
+                module_name: module_name,
+                lexical_owner: lexical_owner,
+                short_name: short_name,
+                is_realtime: is_realtime,
+                is_interrupt: is_interrupt,
+                is_noalloc: is_noalloc,
+                callees: callees
+            ))
+            i = j
+            continue
+        pending_realtime = false
+        pending_interrupt = false
+        pending_noalloc = false
+        i = i + 1
+    RawScannedIoFile(functions: raw_results, imported_modules: imported_modules)
+
+fn _index_module_symbol(
+    mut module_symbol_identity: {text: text},
+    mut module_symbol_count: {text: i64},
+    module_name: text,
+    short_name: text,
+    identity: text
+):
+    val key = _module_symbol_key(module_name, short_name)
+    if module_symbol_count.has(key):
+        module_symbol_count[key] = module_symbol_count[key] + 1
+    else:
+        module_symbol_count[key] = 1
+        module_symbol_identity[key] = identity
+
+pub fn scan_forbidden_io_functions() -> [ScannedIoFn]:
+    """Walk SCAN_ROOTS, recording every function together with whichever of
+    @realtime / @interrupt / @noalloc immediately precede its declaration
+    (order-independent, any subset, matching how `noalloc_manifest_scan`
+    reads a lone `@noalloc`). A first pass collects path + lexical-owner
+    declarations and imports; a second pass resolves owner-local, file-local,
+    imported, and globally-unambiguous callees to those full identities.
+    Duplicate short names therefore cannot overwrite another declaration's
+    tags or adjacency."""
+    var raw_functions: [RawScannedIoFn] = []
+    var imported_module_by_source_symbol: {text: text} = {}
+    for root in SCAN_ROOTS:
+        for path in dir_walk(root):
+            if not path.ends_with(".spl"):
+                continue
+            if path.ends_with("_spec.spl"):
+                continue
+            val facts = _scan_forbidden_io_file(path)
+            for raw in facts.functions:
+                raw_functions.push(raw)
+            for imported_name in facts.imported_modules.keys():
+                imported_module_by_source_symbol[_source_symbol_key(path, imported_name)] = facts.imported_modules[imported_name]
+
+    var identity_exists: {text: bool} = {}
+    var module_symbol_identity: {text: text} = {}
+    var module_symbol_count: {text: i64} = {}
+    var short_identity: {text: text} = {}
+    var short_count: {text: i64} = {}
+    for raw in raw_functions:
+        val identity = forbidden_io_owned_function_identity(raw.source_path, raw.lexical_owner, raw.short_name)
+        identity_exists[identity] = true
+        if short_count.has(raw.short_name):
+            short_count[raw.short_name] = short_count[raw.short_name] + 1
+        else:
+            short_count[raw.short_name] = 1
+            short_identity[raw.short_name] = identity
+        if raw.lexical_owner == "":
+            _index_module_symbol(module_symbol_identity, module_symbol_count, raw.module_name, raw.short_name, identity)
+            if raw.module_name.starts_with("std."):
+                val module_tail = raw.module_name[4:raw.module_name.len()]
+                _index_module_symbol(module_symbol_identity, module_symbol_count, "lib." + module_tail, raw.short_name, identity)
+                _index_module_symbol(module_symbol_identity, module_symbol_count, "src.lib." + module_tail, raw.short_name, identity)
+
+    var results: [ScannedIoFn] = []
+    for raw in raw_functions:
+        var resolved_callees: [text] = []
+        for callee in raw.callees:
+            var resolved = callee
+            var lookup_name = callee
+            var explicit_owner_call = false
+            if lookup_name.starts_with("self."):
+                lookup_name = lookup_name[5:lookup_name.len()]
+                explicit_owner_call = true
+            else if lookup_name.contains(".") or lookup_name.contains("::"):
+                resolved_callees.push(resolved)
+                continue
+
+            val owner_local = forbidden_io_owned_function_identity(raw.source_path, raw.lexical_owner, lookup_name)
+            val file_local = forbidden_io_function_identity(raw.source_path, lookup_name)
+            val import_key = _source_symbol_key(raw.source_path, lookup_name)
+            if raw.lexical_owner != "" and identity_exists.has(owner_local):
+                resolved = owner_local
+            else if not explicit_owner_call and identity_exists.has(file_local):
+                resolved = file_local
+            else if not explicit_owner_call and imported_module_by_source_symbol.has(import_key):
+                val imported_module = imported_module_by_source_symbol[import_key]
+                val module_key = _module_symbol_key(imported_module, lookup_name)
+                if module_symbol_count.has(module_key) and module_symbol_count[module_key] == 1:
+                    resolved = module_symbol_identity[module_key]
+                else:
+                    resolved = imported_module + "::" + lookup_name
+            else if not explicit_owner_call and short_count.has(lookup_name) and short_count[lookup_name] == 1:
+                resolved = short_identity[lookup_name]
+            resolved_callees.push(resolved)
+        results.push(ScannedIoFn(
+            identity: forbidden_io_owned_function_identity(raw.source_path, raw.lexical_owner, raw.short_name),
+            short_name: raw.short_name,
+            source_path: raw.source_path,
+            lexical_owner: raw.lexical_owner,
+            module_name: raw.module_name,
+            is_realtime: raw.is_realtime,
+            is_interrupt: raw.is_interrupt,
+            is_noalloc: raw.is_noalloc,
+            callees: resolved_callees
+        ))
+    results
+
+pub fn count_forbidden_io_context_functions(scanned: [ScannedIoFn]) -> i64:
+    var tagged_count = 0
+    for entry in scanned:
+        if entry.is_realtime or entry.is_interrupt or entry.is_noalloc:
+            tagged_count = tagged_count + 1
+    tagged_count
+
+pub fn check_scanned_forbidden_io_functions(scanned: [ScannedIoFn]) -> [text]:
+    """Build one manifest from an already-scanned snapshot and run the bulk
+    checker. Keeping the snapshot explicit prevents the CLI from walking and
+    reading the same source tree twice."""
+    val manifest = ForbiddenIoContextManifest.new()
+    for entry in scanned:
+        manifest.register(entry.identity, entry.is_realtime, entry.is_interrupt, entry.is_noalloc)
+        manifest.set_callees(entry.identity, entry.callees)
+
+    val violations = check_all_forbidden_io_fns(manifest)
+    format_forbidden_io_violations(violations)
+
+pub fn run_forbidden_io_context_scan() -> [text]:
+    """Build a real ForbiddenIoContextManifest from scanned source and check
+    it through the real checker. Returns formatted violation strings (empty
+    means clean or no tagged fns found at all — both reported distinctly by
+    `main`, same convention as `noalloc_manifest_scan`)."""
+    val scanned = scan_forbidden_io_functions()
+    check_scanned_forbidden_io_functions(scanned)
+
+pub fn forbidden_io_context_scan_exit_code(messages: [text]) -> i64:
+    """Canonical process status: both honest success states are zero;
+    one or more E-APACK008 diagnostics is one."""
+    if messages.len() == 0:
+        return 0
+    1
+
+pub fn format_forbidden_io_context_scan_output(
+    tagged_count: i64,
+    messages: [text],
+    scan_roots: [text]
+) -> [text]:
+    """Canonical CLI output for the two distinct success states and the
+    violation state. Violation diagnostics pass through unchanged."""
+    if tagged_count == 0:
+        return ["forbidden-io context scan: found 0 real-time/interrupt/noalloc-tagged functions under {scan_roots}"]
+    if messages.len() == 0:
+        return ["forbidden-io context scan: {tagged_count} tagged fn(s) checked, 0 violations"]
+    messages
+
+extern fn rt_exit(code: i64)
+
+fn main():
+    val scanned = scan_forbidden_io_functions()
+    val tagged_count = count_forbidden_io_context_functions(scanned)
+    val messages = check_scanned_forbidden_io_functions(scanned)
+    for line in format_forbidden_io_context_scan_output(tagged_count, messages, SCAN_ROOTS):
+        print line
+    val exit_code = forbidden_io_context_scan_exit_code(messages)
+    if exit_code != 0:
+        rt_exit(exit_code)

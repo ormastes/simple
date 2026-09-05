@@ -1,0 +1,192 @@
+use std.spec
+use std.common.contracts.execution.simpleos_server_v1.{
+    ServerLifecycleState, ServerLifecycleQuota, ServerResultFrame,
+    ServerLifecycleError, server_lifecycle_default_quota,
+    server_lifecycle_quota_valid, server_lifecycle_v1_default,
+    server_lifecycle_v1_fields_consistent,
+    MAX_SERVER_WORKERS, MAX_SERVER_RESULTS, MAX_SERVER_RESULT_BYTES,
+    MAX_SERVER_CONNECTIONS, MAX_SERVER_TASKS, MAX_SERVER_QUEUE_BYTES,
+    MAX_SERVER_TIMEOUT_MS
+}
+
+fn lifecycle_ok(result: Result<(), ServerLifecycleError>) -> bool:
+    match result:
+        Ok(_): true
+        Err(_): false
+
+describe "SimpleOS ServerLifecycleV1":
+    it "validates, binds, probes, and reaches Ready monotonically":
+        var server = server_lifecycle_v1_default("http")
+        expect(server.state).to_equal(ServerLifecycleState.Created)
+        expect(server.generation).to_equal(0)
+        expect(lifecycle_ok(server.validate(0))).to_equal(true)
+        expect(server.generation).to_equal(1)
+        expect(lifecycle_ok(server.bind("tcp:127.0.0.1:443", 1))).to_equal(true)
+        expect(server.generation).to_equal(2)
+        expect(lifecycle_ok(server.mark_ready("probe-1", "evidence-1", 2))).to_equal(true)
+        expect(server.state).to_equal(ServerLifecycleState.Ready)
+        expect(server.ready_for_advertisement()).to_equal(true)
+        expect(server.generation).to_equal(3)
+
+    it "rejects stale generations and illegal transitions without mutation":
+        var server = server_lifecycle_v1_default("db")
+        val stale = server.validate(9)
+        expect(lifecycle_ok(stale)).to_equal(false)
+        expect(server.state).to_equal(ServerLifecycleState.Created)
+        val illegal = server.begin_drain(0)
+        expect(lifecycle_ok(illegal)).to_equal(false)
+        expect(server.generation).to_equal(0)
+
+    it "bounds workers and rejects stale or duplicate result frames":
+        var quota = server_lifecycle_default_quota()
+        quota.max_workers = 1
+        quota.max_results = 2
+        var server = server_lifecycle_v1_default("ssh")
+        server.quota = quota
+        server.validate(0)
+        server.bind("tcp:127.0.0.1:22", 1)
+        server.mark_ready("probe-ssh", "evidence-ssh", 2)
+        val worker = server.admit_worker(3)
+        expect(worker.is_ok()).to_equal(true)
+        val overflow_worker = server.admit_worker(3)
+        expect(overflow_worker.is_ok()).to_equal(false)
+        val frame = ServerResultFrame(
+            generation: 3, worker_id: 0, sequence: 1,
+            payload_bytes: 12, result_kind: "exec"
+        )
+        expect(lifecycle_ok(server.accept_result(frame))).to_equal(true)
+        expect(lifecycle_ok(server.accept_result(frame))).to_equal(false)
+        val stale = ServerResultFrame(
+            generation: 2, worker_id: 0, sequence: 2,
+            payload_bytes: 1, result_kind: "exec"
+        )
+        expect(lifecycle_ok(server.accept_result(stale))).to_equal(false)
+
+    it "bounds total worker admissions and projects receipt counts":
+        var quota = server_lifecycle_default_quota()
+        quota.max_workers = 1
+        var server = server_lifecycle_v1_default("worker-accounting")
+        server.quota = quota
+        server.validate(0)
+        server.bind("tcp:127.0.0.1:23", 1)
+        server.mark_ready("probe", "evidence", 2)
+        val first = server.admit_worker(3)
+        expect(first.is_ok()).to_equal(true)
+        expect(lifecycle_ok(server.complete_worker(0, 3))).to_equal(true)
+        val second = server.admit_worker(3)
+        expect(second.is_ok()).to_equal(false)
+        val receipt = server.receipt()
+        expect(receipt.worker_count).to_equal(0)
+        expect(receipt.total_worker_admissions).to_equal(1)
+        expect(server_lifecycle_v1_fields_consistent(server)).to_equal(true)
+
+    it "refuses terminal cancellation until admitted workers are reclaimed":
+        var server = server_lifecycle_v1_default("cancel-reclaim")
+        server.validate(0)
+        server.bind("tcp:127.0.0.1:24", 1)
+        server.mark_ready("probe", "evidence", 2)
+        expect(server.admit_worker(3).is_ok()).to_equal(true)
+        expect(server.cancel(3).is_err()).to_equal(true)
+        expect(server.state).to_equal(ServerLifecycleState.Ready)
+        expect(server.complete_worker(0, 3).is_ok()).to_equal(true)
+        expect(server.cancel(3).is_ok()).to_equal(true)
+        expect(server.receipt().worker_count).to_equal(0)
+
+    it "requires drain before close and reaches a terminal state":
+        var server = server_lifecycle_v1_default("redis")
+        server.validate(0)
+        server.bind("tcp:127.0.0.1:6379", 1)
+        server.mark_ready("probe-redis", "evidence-redis", 2)
+        expect(lifecycle_ok(server.close(3))).to_equal(false)
+        expect(lifecycle_ok(server.begin_drain(3))).to_equal(true)
+        expect(lifecycle_ok(server.close(4))).to_equal(true)
+        expect(server.state).to_equal(ServerLifecycleState.Closed)
+        expect(server.begin_drain(5).is_ok()).to_equal(false)
+
+    it "rejects non-positive quotas":
+        var quota = server_lifecycle_default_quota()
+        quota.max_queue_bytes = 0
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+
+    it "rejects identity and result-kind values outside static bounds":
+        var empty_service = server_lifecycle_v1_default("")
+        expect(empty_service.validate(0).is_ok()).to_equal(false)
+        var long_service = ""
+        var i = 0
+        while i <= 128:
+            long_service = long_service + "x"
+            i = i + 1
+        var long_id_server = server_lifecycle_v1_default(long_service)
+        expect(long_id_server.validate(0).is_ok()).to_equal(false)
+        var server = server_lifecycle_v1_default("result-kind")
+        server.validate(0)
+        server.bind("tcp:127.0.0.1:1", 1)
+        server.mark_ready("probe", "evidence", 2)
+        server.admit_worker(3)
+        val bad_frame = ServerResultFrame(
+            generation: 3, worker_id: 0, sequence: 1,
+            payload_bytes: 1, result_kind: ""
+        )
+        expect(lifecycle_ok(server.accept_result(bad_frame))).to_equal(false)
+
+    it "enforces upper quota ceilings":
+        var quota = server_lifecycle_default_quota()
+        quota.max_workers = MAX_SERVER_WORKERS + 1
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+        quota = server_lifecycle_default_quota()
+        quota.max_results = MAX_SERVER_RESULTS + 1
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+        quota = server_lifecycle_default_quota()
+        quota.max_result_bytes = MAX_SERVER_RESULT_BYTES + 1
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+        quota = server_lifecycle_default_quota()
+        quota.max_connections = MAX_SERVER_CONNECTIONS + 1
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+        quota = server_lifecycle_default_quota()
+        quota.max_tasks = MAX_SERVER_TASKS + 1
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+        quota = server_lifecycle_default_quota()
+        quota.max_queue_bytes = MAX_SERVER_QUEUE_BYTES + 1
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+        quota = server_lifecycle_default_quota()
+        quota.startup_timeout_ms = MAX_SERVER_TIMEOUT_MS + 1
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+        quota = server_lifecycle_default_quota()
+        quota.drain_timeout_ms = MAX_SERVER_TIMEOUT_MS + 1
+        expect(server_lifecycle_quota_valid(quota)).to_equal(false)
+
+    it "drains admitted worker outcomes and refuses close while busy":
+        var server = server_lifecycle_v1_default("drain")
+        server.validate(0)
+        server.bind("tcp:127.0.0.1:9", 1)
+        server.mark_ready("probe", "evidence", 2)
+        server.admit_worker(3)
+        expect(server.set_active_connections(1)).to_equal(true)
+        expect(server.set_active_tasks(1)).to_equal(true)
+        server.begin_drain(3)
+        val draining_frame = ServerResultFrame(
+            generation: 3, worker_id: 0, sequence: 1,
+            payload_bytes: 4, result_kind: "shutdown"
+        )
+        expect(lifecycle_ok(server.accept_result(draining_frame))).to_equal(true)
+        expect(lifecycle_ok(server.close(4))).to_equal(false)
+        server.set_active_connections(0)
+        server.set_active_tasks(0)
+        expect(lifecycle_ok(server.complete_worker(0, 4))).to_equal(true)
+        expect(lifecycle_ok(server.close(4))).to_equal(false)
+        expect(server.commit_result_bytes(4)).to_equal(true)
+        expect(lifecycle_ok(server.close(4))).to_equal(true)
+
+    it "rejects queue arithmetic that would exceed the configured limit":
+        var quota = server_lifecycle_default_quota()
+        quota.max_queue_bytes = 8
+        var server = server_lifecycle_v1_default("queue")
+        server.quota = quota
+        server.validate(0)
+        server.bind("tcp:127.0.0.1:8", 1)
+        server.mark_ready("probe", "evidence", 2)
+        server.admit_worker(3)
+        val first = ServerResultFrame(generation: 3, worker_id: 0, sequence: 1, payload_bytes: 8, result_kind: "x")
+        val second = ServerResultFrame(generation: 3, worker_id: 0, sequence: 2, payload_bytes: 1, result_kind: "x")
+        expect(lifecycle_ok(server.accept_result(first))).to_equal(true)
+        expect(lifecycle_ok(server.accept_result(second))).to_equal(false)

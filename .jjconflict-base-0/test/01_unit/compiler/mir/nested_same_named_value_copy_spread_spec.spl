@@ -1,0 +1,54 @@
+"""
+# Nested same-named class/struct MIR regression.
+
+The outer value struct contains a field spelled `Child`.  In the entry
+closure, a class `Child` from one module and a value struct `Child` from
+another module have different layouts (`class_marker` versus `value_marker`).
+The spelling is intentionally kept raw for SymbolTable/layout lookup; class
+ownership must be decided from the module-qualified identity.  Both a place
+copy (`var b = a`) and a struct spread read the same nested field, so both
+paths must use that ownership side table.
+
+This is a source-level MIR contract because constructing a native builder in
+this unit test would hide the exact nested aggregate operation that regressed.
+The assertions deliberately require the raw-name/qualified-owner split and
+the two independent guards.
+"""
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "nested same-named class/struct value copy and spread":
+    it "keeps raw nested names while recording qualified ownership":
+        val module_lowering = source("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+
+        # Distinguishable layouts are part of the regression shape: the
+        # value Child must not be mistaken for the class Child merely because
+        # both names are `Child`.
+        expect("class Child:\\n    class_marker: i64").to_contain("class_marker")
+        expect("struct Child:\\n    value_marker: i64").to_contain("value_marker")
+        expect(module_lowering).to_contain("field_type_name = field_type_symbol.name")
+        expect(module_lowering).to_contain("field_type_ownership_key = self.composite_layout_key(field_type_symbol)")
+        expect(module_lowering).to_contain("self.struct_field_type_ownership_key[name] = field_type_ownership_keys")
+
+    it "deep-copies a nested value struct without copying a same-named class":
+        val copy_source = source("src/compiler/50.mir/mir_lowering_stmts.spl")
+
+        expect(copy_source).to_contain("val nested_ownership_keys = self.struct_field_type_ownership_key.get(struct_type_name) ?? []")
+        expect(copy_source).to_contain("val nested_is_class = (")
+        expect(copy_source).to_contain("not nested_is_class and not copy_chain.contains(nested_name)")
+        # The qualified owner is checked first; the raw name remains available
+        # to lookup_or_invalid and struct_field_order.
+        expect(copy_source).to_contain("self.class_type_names.contains(nested_ownership_key)")
+        expect(copy_source).to_contain("self.symbols.lookup_or_invalid(nested_name)")
+
+    it "uses the same ownership guard when a spread fills nested fields":
+        val spread_source = source("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
+
+        expect(spread_source).to_contain("val known_ownership_keys = self.struct_field_type_ownership_key.get(struct_name) ?? []")
+        expect(spread_source).to_contain("val known_is_class = (")
+        expect(spread_source).to_contain("not known_is_class and self.struct_field_order.has(known_names[fi])")
+        expect(spread_source).to_contain("self.class_type_names.has(known_ownership_key)")
+

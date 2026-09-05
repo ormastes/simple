@@ -1,0 +1,149 @@
+"""Authoritative x86-32 boot CPU identity publication.
+
+Multiboot 1 does not carry an ACPI RSDP pointer, so the BSP scans the legacy
+BIOS RSDP window, parses the 32-bit RSDT/MADT without Limine state, and
+publishes that exact census through the shared sealed identity owner. Failure
+is fail-closed: no synthetic CPU zero or CPUID-derived package shape is
+published as firmware topology.
+"""
+
+use os.kernel.boot.mmio.{mmio_disable_test_mode, mmio_read8, mmio_read32}
+use os.kernel.interrupts.apic.{apic_get_id}
+use os.kernel.smp.cpu_topology_identity_owner_v1.{
+    CpuHardwareIdentityKindV1, CpuTopologyIdentityOwnerV1,
+}
+use os.kernel.smp.cpu_identity_runtime_surface_v1.{
+    cpu_identity_runtime_is_published_v1, cpu_identity_runtime_publish_v1,
+}
+
+val X86_32_RSDP_SCAN_START_V1: u64 = 0x000e0000u64
+val X86_32_RSDP_SCAN_END_V1: u64 = 0x00100000u64
+val X86_32_RSDP_SIGNATURE_LO_V1: u32 = 0x20445352u32
+val X86_32_RSDP_SIGNATURE_HI_V1: u32 = 0x20525450u32
+val X86_32_ACPI_APIC_SIGNATURE_V1: u32 = 0x43495041u32
+val X86_32_ACPI_SDT_HEADER_BYTES_V1: u64 = 36u64
+val X86_32_MADT_FIXED_BYTES_V1: u64 = 44u64
+val X86_32_ACPI_TABLE_MAX_BYTES_V1: u64 = 1048576u64
+
+fn _x86_32_acpi_checksum_v1(address: u64, length: u64) -> bool:
+    var sum: u32 = 0u32
+    var offset: u64 = 0u64
+    while offset < length:
+        sum = sum + mmio_read8(address + offset) as u32
+        offset = offset + 1u64
+    (sum & 0xffu32) == 0u32
+
+fn _x86_32_find_rsdp_v1() -> u64?:
+    """Find a checksum-valid RSDP while physical memory is identity mapped."""
+    var address = X86_32_RSDP_SCAN_START_V1
+    while address < X86_32_RSDP_SCAN_END_V1:
+        if (mmio_read32(address) == X86_32_RSDP_SIGNATURE_LO_V1 and
+            mmio_read32(address + 4u64) == X86_32_RSDP_SIGNATURE_HI_V1 and
+            _x86_32_acpi_checksum_v1(address, 20u64)):
+            val revision = mmio_read8(address + 15u64)
+            if revision < 2u8:
+                return Some(address)
+            val length = mmio_read32(address + 20u64) as u64
+            # ACPI 2+ RSDP has a 36-byte minimum. Bound corrupt firmware so a
+            # checksum cannot turn into an unbounded early-boot memory walk.
+            if (length >= 36u64 and length <= 4096u64 and
+                _x86_32_acpi_checksum_v1(address, length)):
+                return Some(address)
+        address = address + 16u64
+    nil
+
+fn _x86_32_valid_sdt_v1(address: u64) -> bool:
+    val length = mmio_read32(address + 4u64) as u64
+    length >= X86_32_ACPI_SDT_HEADER_BYTES_V1 and
+        length <= X86_32_ACPI_TABLE_MAX_BYTES_V1 and
+        _x86_32_acpi_checksum_v1(address, length)
+
+fn _x86_32_find_madt_v1(rsdp: u64) -> u64?:
+    """Resolve MADT through the 32-bit RSDT without Limine/HHDM state."""
+    val rsdt = mmio_read32(rsdp + 16u64) as u64
+    if rsdt == 0u64 or not _x86_32_valid_sdt_v1(rsdt):
+        return nil
+    val length = mmio_read32(rsdt + 4u64) as u64
+    var offset = X86_32_ACPI_SDT_HEADER_BYTES_V1
+    while offset + 4u64 <= length:
+        val table = mmio_read32(rsdt + offset) as u64
+        if (table != 0u64 and
+            mmio_read32(table) == X86_32_ACPI_APIC_SIGNATURE_V1 and
+            _x86_32_valid_sdt_v1(table)):
+            return Some(table)
+        offset = offset + 4u64
+    nil
+
+fn _x86_32_madt_apic_ids_v1(madt: u64) -> [u32]:
+    var ids: [u32] = []
+    val length = mmio_read32(madt + 4u64) as u64
+    if length < X86_32_MADT_FIXED_BYTES_V1:
+        return ids
+    var offset = X86_32_MADT_FIXED_BYTES_V1
+    while offset + 2u64 <= length:
+        val entry_type = mmio_read8(madt + offset)
+        val entry_length = mmio_read8(madt + offset + 1u64) as u64
+        if entry_length < 2u64 or offset + entry_length > length:
+            return []
+        if entry_type == 0u8 and entry_length >= 8u64:
+            val flags = mmio_read32(madt + offset + 4u64)
+            if (flags & 1u32) != 0u32 or (flags & 8u32) != 0u32:
+                if ids.len() >= 32:
+                    return []
+                ids.push(mmio_read8(madt + offset + 3u64) as u32)
+        elif entry_type == 9u8 and entry_length >= 16u64:
+            val flags = mmio_read32(madt + offset + 8u64)
+            if (flags & 1u32) != 0u32 or (flags & 8u32) != 0u32:
+                if ids.len() >= 32:
+                    return []
+                ids.push(mmio_read32(madt + offset + 4u64))
+        offset = offset + entry_length
+    ids
+
+fn _x86_32_bsp_first_apic_ids_v1(firmware_ids: [u32], bsp_apic_id: u32) -> [u32]:
+    var found_bsp = false
+    var index = 0
+    while index < firmware_ids.len():
+        if firmware_ids[index] == bsp_apic_id:
+            found_bsp = true
+        index = index + 1
+    if not found_bsp:
+        return []
+
+    var ordered: [u32] = [bsp_apic_id]
+    index = 0
+    while index < firmware_ids.len():
+        if firmware_ids[index] != bsp_apic_id:
+            ordered.push(firmware_ids[index])
+        index = index + 1
+    ordered
+
+fn x86_32_publish_boot_cpu_identity_v1() -> bool:
+    """Publish the firmware MADT census once, with the executing BSP first."""
+    if cpu_identity_runtime_is_published_v1():
+        return true
+    # Freestanding images do not run module initializers reliably; force the
+    # shared MMIO owner onto its real-hardware path before firmware/APIC reads.
+    mmio_disable_test_mode()
+    val rsdp = _x86_32_find_rsdp_v1()
+    if rsdp == nil:
+        return false
+    val madt = _x86_32_find_madt_v1(rsdp.unwrap())
+    if madt == nil:
+        return false
+    val ordered = _x86_32_bsp_first_apic_ids_v1(
+        _x86_32_madt_apic_ids_v1(madt.unwrap()), apic_get_id())
+    if ordered.len() == 0:
+        return false
+
+    var owner = CpuTopologyIdentityOwnerV1.create(
+        CpuHardwareIdentityKindV1.X86Apic)
+    var logical = 0
+    while logical < ordered.len():
+        if not owner.register_x86_apic(logical.to_u32(), ordered[logical]):
+            return false
+        logical = logical + 1
+    val sealed = owner.seal()
+    if not sealed.accepted:
+        return false
+    cpu_identity_runtime_publish_v1(sealed.snapshot)

@@ -1,0 +1,555 @@
+# Changelog
+
+All notable changes to Simple Language will be documented in this file.
+
+## [Unreleased]
+
+### Added
+- **Exact-ref mandatory-check evidence** — retain bootstrap gate logs in a
+  commit-ready textual evidence tree, validate them from the exact pushed Git
+  revision, reject dirty bootstrap attribution, and allow receipt-backed TODO
+  rows to earn a durable hash-bound PASS without adding costly work to push.
+- **LLM Caret agent workspaces + `workspace` dev CLI** (2026-08-25) — give each agent
+  one detached `git worktree` (never a branch) plus one tmux window on a PRIVATE tmux
+  socket (`tmux -L caret_ws_<id>`), so the operator's own tmux server is never touched;
+  add `llm_caret workspace <id> <cmd>` (`status|attach|detach|add|remove|list|panes|
+  send|broadcast|capture|wait|suite|kill`, exit 0 ok / 1 failed / 2 usage) with
+  broadcast-to-every-pane and a `caret_suite` window that polls for the authoritative
+  `Results:` line; add two independent recursion protections
+  (`LLM_CARET_WORKSPACE_DEPTH` refusal at MAX_DEPTH, and own-pane skip via `TMUX_PANE`).
+- **LLM Caret infrastructure tools — mail, object storage, wiki** (2026-08-25) — reach
+  servers through first-class tools instead of shelling out to `curl`/`mc`: IMAP/SMTP
+  mail (`mail_list`/`mail_read`/`mail_send`), MinIO over the pure-Simple SigV4 adapter
+  (`storage_ls`/`get`/`put`), and a wiki surface with Confluence and local-markdown
+  backends (`wiki_search`/`read`/`write`). All credentials are env references only
+  (`secret_env`/`access_key_env`/`token_env`); the three mutating tools are denied by
+  default through the existing permission gate. FTP is refused honestly because
+  `rt_ftp_*` is unbacked.
+- **`caret_*` MCP tools for Claude Code / Codex** (2026-08-25) — expose all nine infra
+  tools from `bin/simple_mcp_server`, with `"confirm": true` required on the three
+  mutating calls. The server never imports the caret/devhub/imap module graph (measured
+  to double startup); each call is dispatched to a one-shot child CLI, so MCP startup
+  gains exactly one module.
+- **Live infrastructure evidence wrapper** (2026-08-25) —
+  `scripts/check/check-llm-caret-infra-live.shs` starts MinIO and greenmail in Docker on
+  free ports, runs the gated system spec, and tears its own containers down
+  (`PASS — 2 live row(s)`, ~10 s warm, `ERROR` exit 2 without Docker).
+- **Shell recursion guard** (2026-08-25) — `scripts/lib/recursion_guard.shs`, a sourced
+  POSIX-sh snippet refusing a guarded chain deeper than `SIMPLE_SHS_MAX_DEPTH`
+  (default 3) with exit **3** and an optional guard chain in the FAIL line; overhead is
+  shell builtins only (~56 us per source). Wired into `land.shs`,
+  `check-seed-builds-push.shs`, `check-stage-binaries-runnable.shs` and `lint-cached.shs`.
+- **Env-overridable bootstrap admission timeouts** (2026-08-25) — the bootstrap
+  admission waits take an environment override instead of a hardcoded bound.
+
+  Five caret specs (`cli_cached`, `cli_hidden_cached`, `native_closure`, `tui_pty`,
+  `messaging_phase_cli`) remain BLOCKED, not passing: they require a qualified cached
+  self-hosted caret artifact and `SIMPLE_STAGE3/4_BINARY` from a Stage 4 bootstrap CLI,
+  which does not yet exist. All caret evidence to date is on the Rust seed.
+- **GPU/CUDA programming hardening + tutorial** (2026-08-25) — repair the CUDA driver
+  surface (`std.io` cuda_sffi phantom ABI, `gpu_ops` typed-transfer SEGV, torch-gated
+  device probe, fake Vulkan context), mount `ormastes/simple_cuda_example` (the
+  `cuda_exercise` workbook in Simple) under `examples/08_gpu/` with per-module specs and
+  md-embedded sdoctests, add the same-code/three-config backend example
+  (`examples/08_gpu/backends/`, CUDA live, Metal honest skip, Vulkan defects filed), MDSOC
+  GPU layer/facet spec (+ `cross_query` import fix), practical guide
+  `doc/07_guide/lib/gpu_3d/cuda_gpu_programming.md`, and six new bug records.
+- **UP Squared resident RAM boot and storage evidence** — add a free GNU-EFI
+  PE32+ mailbox loader with strong per-boot nonce, commit-last SHA-256/ELF64
+  admission, final EFI-map/Multiboot2 construction, embedded ELF32 shim, and
+  x64-to-i386 handoff; add OVMF GDB admission/rejection, NVMe-only boot, and
+  flushed image-provision receipts while keeping physical Intel DCI separate.
+- **SimpleOS multiarchitecture authenticated filesystem execution** — split
+  FAT32, NVMe, VFS, and per-ISA runtime responsibilities into bounded owners;
+  route x86_64, AArch64, and RV64 server media through authenticated execute
+  bindings; stream bounded RV64 FAT ELF ranges while rejecting the legacy
+  unauthenticated path; converge target builders on `simpleos_tool`; and add
+  fail-closed LLVM/media construction gates without claiming absent live QEMU
+  execution.
+- **Fail-closed MIR coverage evidence** — represent typed decision and condition
+  probes explicitly, preserve their operand liveness through MIR optimization,
+  serialize them deterministically, and reject unlowered probes in interpreter
+  and LLVM paths instead of silently discarding formal evidence.
+- **Parent-authoritative process sessions** — bind bounded piped child-result
+  ingress to one generation, reject replay before retention, and expose an
+  idempotent parent-owned process close receipt.
+- **Project statistics quality reports** — inventory owned source and test LOC
+  by project, language, and test tier; retain provenance for coverage,
+  duplication, coupling, and cohesion; and emit Markdown, TLDR, and native
+  SimpleOS-themed PPTX-ready slide artifacts from one typed model.
+- **Pinned-corpus GSUB/GPOS shaping** — validate and apply the selected
+  Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic OpenType layout plans with
+  bounded work, feature-mask provenance, atomic failure, and canonical
+  font-unit-to-shaped-glyph integration.
+- **LLM Caret Electron and native Metal GUIs** — launch the semantic browser
+  chat in the canonical Electron shell or lower pure-Simple HTML/layout through
+  Draw IR to Engine2D Metal with keyboard, click, and fail-closed device-readback
+  provenance.
+- **Pinned multilingual font catalog** — bundle 16 unchanged Google Fonts
+  binaries plus notices for the CLDR 48.2 top-ten language scripts and ten
+  honest sparse categories, with immutable hashes and license/RFN metadata.
+- **Pinned CLDR ranking inputs** — bundle the three exact CLDR 48.2
+  supplemental inputs, Unicode-3.0 license, annotated-tag/source witnesses, and
+  deterministic top-eleven language/script ledger; correct stale rounded totals.
+- **Unicode cmap format 12** — the Pure Simple OpenType owner validates and
+  resolves full-repertoire Unicode groups with Windows 3/10 precedence,
+  covering bundled Noto Emoji `U+1F600`.
+- **Bound shaped-glyph rendering** — Engine2D can consume neutral material from
+  explicitly face-bound Pure Simple shaped runs through the existing indexed
+  runtime rasterizer, with live face-generation/glyph/size cache identity.
+- **Engine3D neutral glyph runs** — CPU HUD/world compatibility entrypoints now
+  consume the same generation-safe `FontGlyphRun`/atlas material as Engine2D.
+- **Shared font atlas material** — `FontRenderer.prepare_text` owns a bounded
+  persistent glyph atlas consumed by Engine2D and Engine3D CPU compatibility
+  paths; the compiler emits one versioned CUDA/HIP/OpenCL/Metal/WGSL subrect
+  compositor without claiming native execution. OpenCL compiler emission and
+  Engine2D runtime compilation reuse the same common Simple source owner.
+- **Engine2D font selection** — GUI/2D callers can switch between the zero-config bitmap font and a loaded TTF/OTF through `load_font`/`unload_font`; foreground and background text share the selected face.
+- **GPU font composition** — OpenCL now binds and submits the shared versioned
+  atlas-composite kernel through `Engine2D.draw_text`, with a persistent
+  generation-keyed atlas and suffix fallback; other backends retain their
+  existing rendered-payload routes.
+
+### Fixed
+- **Parser: `unsafe` / `danger` usable as identifiers** (2026-08-25) — the deployed seed
+  could not parse origin's stdlib because a value-bound `unsafe(...)` was lexed as a
+  keyword in expression position.
+- **`(module, name)`-keyed co-compiled function registry** (2026-08-25) — a registry
+  keyed by bare name let a same-named function in one module silently shadow another's
+  (`utf8.char_from_code` over `string_core`, `json_helpers` over `std.mcp.helpers`).
+  Keying by `(module, name)` in both frontends removes the silent shadowing.
+- **IMAP FETCH parsed, not line-scanned** (2026-08-25) — replace the lenient line scanner
+  with a literal-aware RFC 3501 parser and framer (`{N}` byte counts honoured on both
+  transports) plus a `UID FETCH` builder, so a message body containing `)`, CRLFs or a
+  tag-looking line can no longer truncate a reply or corrupt `mail_list` rows.
+- **Bounded reads on the mail path** (2026-08-25) — every server read carries a monotonic
+  deadline (default 15 s per reply); a server that accepts and then stalls now fails the
+  tool call with `mail server timed out after N ms` instead of hanging the caret turn.
+- **STARTTLS negotiation implemented, transport honestly refused** (2026-08-25) — the
+  RFC 3207 / RFC 3501 negotiation state machine ships and is transcript-proven, but the
+  runtime has no in-place TLS upgrade of a connected fd (`rt_tls_client_from_fd` does not
+  exist), so `smtp_port: 587` is refused before connecting with an error naming the
+  missing symbol rather than failing obscurely mid-session.
+- **Reproducible UP2 deployment image** — pin the build epoch, GPT identifiers,
+  FAT identity, and copied-file timestamps, validate them structurally, and
+  require two independent full images to compare byte-for-byte.
+- **Freestanding streaming SHA-256 and Multiboot pointer preservation** — use
+  fixed in-place SHA state across nonzero chunks and preserve the Multiboot
+  information pointer through early x86 serial output.
+- **Fail-closed SFFI returns and dynamic dispatch** — reject missing or null
+  non-optional returns, unresolved/null foreign symbols, and unsupported
+  generic ABI conversions instead of fabricating `nil` or integer zero.
+- **SPipe docgen nested string dispatch** — normalize paths and imports through
+  typed intermediate values so the self-hosted generator no longer fails on
+  chained `replace(...).split(...)` calls.
+- **Font/docgen bootstrap hardening** — filter the SPipe docgen entrypoint from
+  spec inputs and register interpreter byte-array pointers for runtime font
+  loading; a full self-hosted rebuild remains unverified.
+
+## [1.0.0-beta] - 2026-05-20
+
+### Added
+- **SPipe pipeline completion** — all 26 waves closed (200+ pipelines total); final closures: riscv64-fpga, interpreter-perf, markdown-editor-spec, network-protocol, vscode-extension
+- **Cryptography suite** — Tiger/192 hash, cSHAKE-128/256, KMAC-128/256, Serpent + OCB3 AEAD, Camellia KAT, ZUC-128/EEA3/EIA3, Streebog GOST R 34.11-2012, SCRAM-SHA-512, SLH-DSA hash param
+- **Zstd decompression** — FSE/Huffman decoders, predefined tables, XXH64 checksum, full spec tests
+- **MIR optimizer** — multi-arch pattern-idiom pass with cost model (Phases 1-4), cipher idiom layer with AArch64/RVV byte-emit
+- **Cipher backend** — Phase 3B backend encoders with golden byte tests, CLI `--target-features` and `--opt-remark` flags, LLVM IR intrinsic lowering for AES/SHA/CRC32/CLMUL
+- **WASM codegen adapter** — module, function, and type sections
+- **Kernel subsystems** — TLS shim (record framing + handshake), PCI manager (config space, enumeration, BAR mapping), DBFS superblock (read/write, validation, block allocation)
+- **SIMD** — 9 new SIMD externs, scalable-vector stubs filled with export adapter, SIMD bit-ISA backend gating with RV encoder fixes
+- **TLS 1.3 extensions** — KeyUpdate protocol support, NewSessionTicket handling, HRR P-256 connect helper
+- **Compositor/2D engine** — compositor stacking for engine2d, game2d feature-complete
+- **Skia** — glyph outline renderer
+- **Smux terminal multiplexer** — dashboard view, `close_pane` command, remote hosting, tmux backend
+- **Svim editor** — modal grammar implementation
+- **Database** — Phase 3 ML query planner and cost model, planner cast support
+- **FPGA/Baremetal** — noalloc-safe platform init with BoardConfig u64, direct UART extern, VHDL testbench specs, RV64 FPGA pipeline closed
+- **OS/Drivers** — MDSOC lane 5 added to driver platform pipeline, `dlopen`/`dlsym`/`dlclose` stubs
+- **PTY runtime externs** — terminal I/O support
+- **Feature capabilities registry** — stdlib feature discovery system
+- **Stdlib exports** — missing `pub` exports added for `std.common` (compress, math, easy_fix, drawing, sdn, image)
+
+### Fixed
+- **Interpreter: Break/Continue in block closures** — BDD `it` blocks now correctly handle Break/Continue control flow
+- **Interpreter: While/Loop in block closures** — `it` blocks execute while/loop constructs correctly
+- **Interpreter: index-receiver method write-back** — `Value::Array` arm clone fix (bug #28)
+- **Interpreter: `to_equal(false)` state pollution** — `set_api_parity_spec` repaired
+- **HIR field inference** — regression resolved with regression spec added; 8/15 bug docs confirmed already FIXED
+- **Cross-module ABI** — native call ABI fix verified with regression spec
+- **Bootstrap stage4 type inference** — eliminated 100+ type inference errors across ~50 files
+- **FFI to SFFI migration bugs** — `interpreter_calls`, `adapter_minio`, and 10+ identifier renames fixed
+- **BDD `expect(false)` eager fail** — no longer short-circuits incorrectly
+- **Crypto: ZUC-128** — correct S-boxes and u32 arithmetic-shift workarounds (all 8 KAT pass)
+- **Crypto: Streebog** — correct L-word byte order, round constants, padding, output extraction
+- **Crypto: SCRAM-SHA-1** — correct ServerSignature hex and client-first length
+- **Crypto: x25519** — replace named-arg calls with positional args in dispatcher
+- **FPGA platform init** — noalloc-safe BoardConfig with module-level `val` workaround for baremetal zero-init bug
+- **MIR optimizer** — MIR masked-store pattern closed, induction_update added to VectorRecipe spec helpers
+- **Linker** — `--gc-sections` added to mold/lld/system-ld paths
+- **AArch64 backend** — renamed `emit_aesimc`/`emit_aesmc` to `_aarch64` suffix to eliminate x86 symbol collision
+- **u64 range checksum** — resolved
+- **RISCV boot FS** — freestanding adapter for compress/image
+
+### Changed
+- **`std.ffi` renamed to `std.sffi`** — bulk rename across all TLS, image, and library modules
+- **SPipe harness** — test harness rewrite in Wave 16; spipe state management updated
+- **Module splits** — 16+ oversized files split under 800-line limit (TLS, editor shells, MCP tools, engine3d backend, module_loader, feature_caps)
+- **SIMD FP** — floating-point SIMD pipeline closed and verified
+- **Import warning audit** — cleaned across codebase
+- **Base64 migration** — completed as part of Wave 17
+
+## [0.9.8] - 2026-04-28
+
+### Added
+- **SimpleOS bootstrap lane** — `bootstrap-from-scratch.sh --target=simpleos-x86_64` end-to-end with kernel build, package mode, and `os_qemu_test.shs` harness wired to the platform catalog
+- **Driver framework rollout (A–E)** — pure-Simple `@driver` / `@native_lib` framework, manifest encoder, and DMA primitives across x86_64/x86/arm64/arm32/riscv64/riscv32 (FR-DRIVER-0001..0006)
+- **Rust stage1 sysroot** — `x86_64-unknown-simpleos` libstd lane with `${SDKROOT}` symlink shim
+- **MDSOC+** as default architecture for SimpleOS userland/apps (ECS business layer); kernel/drivers stay MDSOC-only
+- **Browser platform** progress — Blink/Skia/cc/viz-style naming, WebGPU compute-draw extern, WSS handshake + TLS hardening
+- **TTF font path** end-to-end via `font_renderer` with `SIMPLE_TTF_DYLIB` / `SIMPLE_TTF_PATH` env opt-ins
+- **t32_lsp_mcp cache opt-in** — `setup.sh` gates SMF compile + use behind `SIMPLE_MCP_USE_CACHE=1`; default is `.spl` interpret
+
+### Fixed
+- **Cranelift right-shift (`>>`)** — fixed in compiled mode (FR-DRIVER-0002b); driver-framework division workaround obsolete
+- **Submodule gitlink flips** under jj ↔ git — accept submodule files-as-tree + `.gitmodules` + separate inner-repo push
+- **Release-binary error reporting** — `bin/simple <script.spl>` (no `run`) now surfaces real errors on stderr (B1)
+- **Interpreter `[u8]` bulk allocation** — `rt_bytes_alloc(len) -> [u8]` extern (B2); 32 MiB allocates in ~1.5s
+- **Clippy** — `simple-parser`, `simple-common`, `simple-native-all` warnings eliminated; runtime `build.rs` (`Path` vs `PathBuf`) and `serial.rs` errno comparisons cleaned up
+- **VHDL backend** — switch return targets, goto-return chains, scalar source-facade width ops, tuple/enum aggregates
+- **x86_64 kernel build** — root-cause analysis for cross-arch riscv inline-asm leak (use `--entry-closure`)
+
+### Changed
+- **Native-build runtime lanes** — non-compiler host binaries now default to the narrow `core-c` lane (`libsimple_runtime.a`), while the broad Rust-hosted lane requires `--runtime-bundle hosted` (legacy alias: `all`) or a compiler-like entrypoint
+- **MCP wrapper default** — runs from `.spl` by default; SMF cache strictly opt-in via `SIMPLE_MCP_USE_CACHE=1`
+- **`bin/simple build`** — clarified that `build` falls through wrapper whitelist; new externs require `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`
+- **SPipe compile pipeline** — documented limitations; `--mode=smf` / `--compile` still produce false-greens; verify in interpreter mode until R2-broader lands
+- **Release prep workflow** — local `check_release_payload.shs`, `check-mcp-release-assets.shs`, `check-executable-size-budgets.shs`, and `check-loader-dependency-closure.shs` smoke checks before tag
+
+## [0.9.6] - 2026-04-22
+
+### Added
+- **VHDL backend** — full `source`-facade subset with process/aggregate/switch lowering, casts/shifts/rem/bitnot, if-else result mux, goto-return chains, `@vhdl` compile support, source-to-VHDL combinational subset
+- **Driver framework (FR-DRIVER-0001..0006)** — `@driver` / `@native_lib` attribute sugar, `DrvManifest` section + encoder, `rt_dma_*` primitives for x86_64/x86/arm64/arm32/riscv64/riscv32, GPU-adapter forwarding with tolerant `init_all`
+- **SimpleOS** — x86_64 GUI hello-world boot path, aarch64 fs-exec bootstrap spawn/scheduler, APIC topology, compiler-driver + SPM request wiring, `rt_memcpy` ELF loader
+- **Window manager (v31–v50)** — desktop, dock, PS/2 input, vector/procedural/pixel-level paint, PPM decoder, terminal, browser window, focus + 12/15 shared-module rollout
+- **Browser platform** — `ui.browser` / `ui.web` / `ui.tui_web` wired to shared modules, Blink/Skia/cc/viz-style naming, WebGPU compute-draw extern, WebKit-style completions, WSS handshake + TLS v1.1/v1.2 hardening
+- **Font rendering** — TTF path end-to-end, `fontrasterizer` into `font_renderer`, glyph coverage for measurement, `SIMPLE_TTF_DYLIB`/`_PATH` env opt-ins
+- **Declarative UI access**, **Cocoa + Win32 hosted** surfaces, **Rust stage1 sysroot** (`x86_64-unknown-simpleos`)
+- **MDSOC+** default for userland (ECS business layer), **spostgre phase 9**, **traceability + bug_review** tooling
+- **`--compile` / `run_test_file_native_mode`** wiring, **package registry** scaffolding
+
+### Fixed
+- **aarch64 bootstrap** — remove x86 inline asm from `interrupt.spl`
+- **VHDL lowering** — switch return targets, goto-return chains, unsupported-stateful MIR diagnostic, tuple/enum aggregates, scalar source-facade width ops
+- **Cross-module fieldget crash** workaround, **MIR method dispatch** widening, **vtable ABI** + static dispatch
+- **Windows MCP server loading**, **MCP startup** rename/stabilization, **simple mcp + lsp diagnostics**
+- **virtio-net** vendor check + RX queue, **WebSocket handshake**
+- **Host + SimpleOS renderer** validation, **qemu timeout output** preservation, **resident desktop launch**
+- **Wrapper sentinel cache** + triple-quoted string use, **glyph coverage** use for match-arm canonicalization
+- **Submodule gitlink flips** (jj ↔ git), **watchdog memory limit** disable for long bootstraps
+
+### Changed
+- **Module splits to ≤800L** — `vulkan_graphics_runtime.rs` (2221→9), `linker/native_binary.rs` (2177→submodules), `codegen_instr_tests.rs` (2277→7 by instruction), `checker.rs` (2502→7), `html_tree_builder.spl` (2784→6) + `css_parser.spl` (1090→4), `winit_ffi.rs` (1767→6), `collections.rs` (4), `error.rs` factory, plus coverage-spec splits (string_core, math_repr, cbor, color_coverage, parsers/date/serialization)
+- **SimpleOS QEMU targets** routed through platform catalog, **shared platform console** extracted
+- **Host adapter contract** extracted, **host surface kinds** + **native event marker** centralized
+- **ELF loader** — per-byte segment copy replaced with `rt_memcpy` bulk primitive
+- **Untracked auto-generated artifacts** — launcher symlinks, platform-specific mcp/t32 links, setup-generated entries, binaries/build carryover
+- **Replace string dict keys** with enum/id variants in hot paths
+- **Share query helper parsing** across host and QEMU renderers
+- **Split `wm_entry`** by init phase; **unify WM rendering**
+
+## [0.9.5] - 2026-03-29
+
+### Added
+
+### Fixed
+
+### Changed
+
+## [0.9.4] - 2026-03-28
+
+### Added
+
+### Fixed
+
+### Changed
+
+## [0.9.3] - 2026-03-28
+
+### Added
+- **Traceability module** — requirement-to-test tracking with SDN config
+- **Verify/Sync/Debug skills** for Claude Code workflow
+- **Release skill** with full GH Actions pipeline docs and `/release` invocation
+
+### Fixed
+- **~200 broken tests** — dict indexing, Slice.len(), interpreter chaining bugs
+- **codegen_parity** Future/Await/Generator/Actor hang in interpreter (skip_it)
+- **bin/simple_mcp_server** updated to use bin/simple or platform-specific release binaries
+- **bin/simple symlink** fixed via setup.sh for aarch64-apple-darwin-macho
+
+### Changed
+- Cleaned 10 orphan jj commits and 2 stale remote push branches
+- Test database lock cleanup
+
+## [0.9.2] - 2026-03-22
+
+### Added
+- **mLLVM_QEMU unified compiler backend** — guest decoders (AVR + 8086), x86_64 host backend, optimizer passes, binary format serialization, linker, emulation runtime
+- **mLLVM_QEMU IrTc backend integration** into Simple compiler with MDSOC transforms, width libraries, and test suite
+- **Full-feature async UI framework** — 21 widgets, 4 backends (Electron/Tauri), lifecycle hooks, 10 demo apps
+- **Headless UI system test infrastructure** with widget rendering verification
+- **Platform-aware bootstrap layout** with setup script, verified on macOS
+- **Windows LLVM-lib backend**, linker, test runner, MCP shell port
+- **SMF (Simple Module Format)** — manifest writer, cache loading, dependency validation
+
+### Fixed
+- **UI framework backends** — interpreter workarounds, SDN tree parser, IPC protocol rewrite
+- **Rust seed parser compatibility** — remove dotted exports and chained field access
+- **Tauri integration** — end-to-end widget rendering in Tauri window
+- **Cranelift Mach-O corruption** — `define_zeroinit` → `define` for data with relocations
+- **macOS** `_dot_` suffix in method resolution, Mach-O define_zeroinit fix
+- **FreeBSD cross-compile** shell syntax, deduplicate MSVC lib path discovery
+- **module_init** via constructor function instead of `.init_array`
+- **nil-guards** for parser/lexer module-level var arrays
+- **EffectSolver** free function wrappers, skip effect pass for bootstrap
+
+### Changed
+- Platform-aware binary layout with `bin/release/<triple>/simple` organization
+
+## [0.8.8c] - 2026-03-09
+
+### Added
+- **TRACE32 GUI-to-CLI converter** + MCP servers — 2 implementations, 1 converter, 2 MCP servers
+- **Resource safeguard monitor** — cross-platform `kill_simple_monitor` (Linux/macOS/FreeBSD/Windows/MinGW/MSVC), test runner integration
+- **Platform-specific MCP config** — auto-detect OS for `.mcp.json` install
+
+### Fixed
+- **Comprehensive CRLF→LF normalization** at all source file read points — resolves 1054 stage1→stage2 parse failures
+- **CRLF handling in Rust lexer** + stale jj conflict markers
+- **Rust parser** — handle `pass_do_nothing`/`pass_dn`/`pass_todo` as keywords
+- **FreeBSD bootstrap** — stub generation, library linking, main shim args, `rt_cli_get_args`
+- **Windows COFF object support** + atomic handle counters
+- **Windows Cranelift calling convention** + memory leak fixes
+- **Windows bootstrap** — rewrite `.bat` for Rust seed pipeline, fix `native_project.rs` for MSVC
+- **MCP server** — file URI parsing, getcwd crash, shape string interpolation, Windows compatibility
+- **Test runner** — resource check (25% free threshold), self-protection, sequential execution on non-Linux platforms
+- **49 test failures** resolved — macOS compat, QEMU guards, interpreter-mode skip patterns
+- **5 pre-existing test failures** — capability tests for bootstrap mode, env-dependent tests
+- **`native_project.rs`** — handle `--key=value` arg forms, differentiate clang-cl vs MinGW linker flags
+
+### Changed
+- **Unified DAP server** via `DebugAdapter` trait — eliminated 17 conditional branches
+- **Reorganized `doc/guide/`** — merged 175 files into 42, topical subdirectories
+- **Cleaned `test/` folder** — removed 3343 SMF build artifacts, 11 stale dirs
+- **Renamed `.ssh` → `.shs`** extension (Simple Shell) to avoid SSH protocol confusion
+- **Removed obsolete seed/C bootstrap** — CI now Rust-only
+- **Removed `.mcp.json`** files from tracking (gitignored)
+
+### Security
+- Removed server credentials file from repo
+
+## [0.8.1] - 2026-03-05
+
+### Added
+- **Windows native binary** in release workflow — Rust bootstrap builds `simple.exe` natively on `windows-latest`
+- **Windows cross-compile binaries** — MinGW cross-compilation for `windows-x86` (i686) from Linux
+- **Windows aarch64 binary** — MSVC cross-compilation for ARM64 Windows
+- **Cross-platform bootstrap doc** — updated `doc/guide/bootstrap.md` with macOS/Windows platform notes and backend summary table
+
+### Fixed
+- Release workflow now produces Windows `.exe` binaries instead of source-only packages
+- Distribution packages use correct `.exe` extension for Windows platforms
+- Bootstrap doc section renamed from "Linux Bootstrap Stages" to platform-agnostic title
+
+## [0.8.0] - 2026-03-02
+
+### Added
+- **Self-hosting Stage 3**: Simple compiles itself — full self-hosted bootstrap achieved
+- **Cranelift backend**: Multi-backend bootstrap support (LLVM + Cranelift)
+- **JIT default**: Changed default execution mode from Interpret to JIT
+- **`new` keyword** for explicit allocation (Phase 1)
+- **`#[alloc]` / `#[no_alloc]`** function attributes (Phase 2)
+- **Alloc inference pass** for automatic allocation tracking (Phase 3)
+- **Collection efficiency lint** + MIR optimizer passes (COLL001–COLL005)
+- **25+ new MCP tools**: CLI, query, analysis, LSP (34 → 66 tools total)
+- **AST pattern matching** + semantic queries (CodeQL-style `sem-query`)
+- **Multiplatform linker abstraction** for Windows, macOS, FreeBSD, multi-arch
+- **Tiered library structure** (alloc, sys, async, ext)
+- **Tiered runtime FFI classification** for target-aware symbol filtering
+- **Native-build command** with name mangling, re-export resolution
+- **SMF relocation metadata** for unified JIT + native loading
+- **Ruby-like lambda features**: placeholder transform (`_ * 2`), `&:method` refs, curry/partial
+- **WFFI dynamic loading** support
+- **LLVM cross workflow** for Linux/Win/FreeBSD/macOS
+- **Baremetal modules** and `rt_compile_to_llvm_ir` via CompilerDriver + MirToLlvm
+- Type system Wave 2: flow narrowing (M2), associated types (M3), effect system (M4)
+- Bitfield feature — hardware register definitions with zero-overhead bit manipulation
+- Pass keyword variants: `pass_do_nothing`, `pass_dn`
+- Rust parser extensions: asm, bitfield, newtype, extend, comptime, backtick atoms
+- `slow_it` test marker for filtered slow test runs
+
+### Changed
+- Default execution mode: Interpret → JIT
+- Migrated business logic from `app/` to `lib/` and `compiler/` (Phases 0–5)
+- Split all 800+ line files into smaller modules
+- Removed ~200 semantically duplicated files across `src/`
+- Renamed 39 adhoc `_ext` test files to descriptive names
+- Normalized `str` → `text` type annotations across codebase
+- Switched primary VCS documentation from git to jj
+- MCP server: lazy imports, proxy removal for faster startup
+- Multiplatform & multi-CPU support for Rust bootstrap compiler
+- Fully self-sufficient binary — eliminated all `bin/simple` subprocess calls
+- Release binary download fallback added to bootstrap and CI
+
+### Fixed
+- Deterministic Cranelift codegen for reproducible bootstrap
+- MCP server shell tools (interpreter tuple returns)
+- Cross-platform compilation for Windows, FreeBSD, and macOS bootstrap
+- 4 interpreter fixes to unskip 37 test files (+696 tests)
+- Recovered ~77 test files from skip + added specific skip reasons
+- Prevented test suite hangs and OOM with memory abort
+- Added missing timeouts to MCP tool subprocess calls
+- Cleared compiler-side static registries between test runs (OOM fix)
+- Resolved 220+ failing tests across multiple files
+- Database_sync and codegen_parity test failures
+- Cranelift codegen: reuse declared extern funcs, add diagnostics
+- Module loader crash bugs + memory efficiency improvements
+- Heap-allocation leaks in MIR C codegen
+- Lint false positives for True/False enum variants
+
+### Infrastructure
+- Self-hosted bootstrap: no fallback for JIT, SMF loader, native builder
+- Bootstrap binary updated for self-hosting
+- `build/bootstrap/c_simple/` as canonical bootstrap location
+- Interpreter optimizations for faster test runs
+
+## [0.7.0] - 2026-02-24 (unreleased)
+
+_Merged into 0.8.0 — see above._
+
+## [0.6.1] - 2026-02-23
+
+### Added
+- Async I/O driver infrastructure with platform backends (epoll, io_uring, kqueue, IOCP)
+- Sanitizer CI workflow (ASan builds)
+- Valgrind check script
+- Optimized build script
+
+### Changed
+- Mass test suite repair: +831 passing test cases across all suites
+- MIR codegen trait unification (C/LLVM shared trait)
+- All stale version references updated from 0.5.0 to 0.6.1
+
+### Fixed
+- Memory leak elimination across all 9 categories (slice, substr, lex args, program args, etc.)
+- C backend string escaping and C++ keyword safety
+- Runtime intrinsics for codegen
+- Test runner binary resolution
+- Parse errors in test files
+
+### Infrastructure
+- Bootstrap build updated to use v0.6.0 as base
+- 11-platform release matrix (added FreeBSD x86, Windows x86, Windows ARM64)
+
+## [0.6.0] - 2026-02-14
+
+### Added
+- Grammar documentation system with tier-based keyword tracking
+- Thread pool worker implementation complete (100% coverage)
+- Threading integration with startup/bootstrap systems
+- Windows build system with MinGW and ClangCL toolchains
+- Module loading investigation and fixes
+- File stat implementation for runtime (rt_file_stat)
+- Grammar specification files (core, full, seed, tier keywords)
+- Tree-sitter grammar status documentation
+- Comprehensive test coverage (4067/4067 tests passing - 100%)
+
+### Changed
+- Bootstrap workflow now uses v0.5.0 release for reproducible builds
+- Release workflow enhanced with automatic runtime building
+- Test coverage improved from 3916 to 4067 tests (+151 tests)
+- Platform library integration verified with zero regressions
+- Documentation coverage system marked production ready
+
+### Fixed
+- 8 timeout issues in test suite (all resolved)
+- Module-level import and closure issues
+- Bootstrap rebuild activating transitive imports
+- Package management Result→tuple conversion
+- Platform detection and newline handling
+
+### Documentation
+- 10+ comprehensive status reports added
+- Grammar reference documentation complete
+- Windows build guides (quick start + detailed)
+- Threading implementation documentation
+- Bootstrap status and progress tracking
+- Implementation completion report (92% core features)
+
+### Infrastructure
+- GitHub Actions workflow updated for 0.6.0 release
+- Multi-platform bootstrap packages (7 platforms)
+- Automated testing with downloaded v0.5.0 bootstrap
+- Release artifact creation and publishing to GHCR
+
+### Test Suite
+- **100% pass rate**: 4067/4067 tests passing
+- Platform abstraction: 80/80 tests (100%)
+- Package management: All tests fixed and passing
+- Effect system: Production ready
+- Parser error recovery: Comprehensive coverage
+- Zero test regressions
+
+## [0.5.1-rc.1] - 2026-02-11
+
+### Added
+- Async/await parser implementation (Phases 1-7 infrastructure complete)
+- VHDL backend with verification constraints and tests
+- VHDL examples, golden files, CI integration, and user guide
+- Test enablement progress tracking documentation
+- Expression slice evaluation support in interpreter (Phase 1.1 partial)
+
+### Changed
+- MCP server enhanced for production readiness with robustness improvements
+- Generic template tests enabled (5 tests - Phase 1.3 validation)
+- Deep learning config system improved for runtime compatibility
+
+### Fixed
+- MCP server crashes: prompts/get (enum match), bugdb, uri templates
+- Runtime compatibility issues with reserved keywords
+- DL config default function replaced with standalone for runtime compatibility
+- FFI skip test and SFFI wrapper verification
+
+### Documentation
+- Runtime parser bug root cause and rebuild limitations documented
+- Duplication analysis and intentional duplications documented
+- Test enablement progress tracking added
+
+## [0.5.1-alpha] - 2026-02-09
+
+### Added
+- macOS self-hosting test automation (Intel x86_64 and Apple Silicon ARM64)
+- Windows native compilation support with MSVC
+- Windows cross-compilation from Linux using MinGW-w64
+- FreeBSD bootstrap support via Linuxulator (experimental)
+- FreeBSD QEMU testing infrastructure
+- Comprehensive CI with 6 automated test jobs
+
+### Changed
+- GitHub Actions workflow expanded to 6 test jobs
+- Bootstrap testing now covers 5 platforms
+
+### Known Limitations
+- Windows: Interpreter mode limited (use for compilation only)
+- FreeBSD: Experimental support via Linuxulator
+
+### Documentation
+- 9 new documentation files for platform support and testing
+
+## [0.5.0] - 2026-02-06
+
+### Added
+- Pure-Simple source-first milestone for compiler/library work. Current
+  releases still retain Rust as the bootstrap seed and host substrate.
+- Self-hosting parser
+- Pre-built runtime

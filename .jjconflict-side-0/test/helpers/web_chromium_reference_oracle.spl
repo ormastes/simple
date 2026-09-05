@@ -1,0 +1,222 @@
+"""Test-only Chromium/Simple primitive trace normalization.
+
+This converter owns no renderer, display list, browser input parser, font
+cache, or GPU backend. It admits a bounded Chromium bridge JSON response only
+when it is representable by the existing differential trace schema.
+"""
+
+use std.json.{json_parse, json_object_get, json_to_array, json_to_number, json_to_string, json_serialize}
+use common.spec.differential_trace.{TraceEvent, NormalizedTrace, normalized_trace_valid}
+use std.nogc_sync_mut.test.differential_conformance.{GpuEnvironmentProfile, TraceComparison, compare_normalized_traces, trace_comparison_policy_semantic, trace_satisfies_environment_profile}
+use std.nogc_sync_mut.gpu.chromium_reference_oracle_sffi.{ChromiumOraclePrimitiveFixture, ChromiumOracleGpuReceipt, chromium_oracle_gpu_receipt_valid}
+
+class ChromiumPrimitiveTraceConverter:
+    profile: GpuEnvironmentProfile
+
+class SimplePrimitiveTraceConverter:
+    profile: GpuEnvironmentProfile
+
+struct ChromiumOracleNormalizedObservation:
+    fixture_id: text
+    trace: NormalizedTrace
+    cpu_pixel_digest: text
+    cpu_pixel_width: i64
+    cpu_pixel_height: i64
+    gpu_receipt: ChromiumOracleGpuReceipt?
+    artifact_path: text
+
+fn _text(obj: any, key: text) -> text:
+    val value = json_object_get(obj, key)
+    val text_value = json_to_string(value)
+    if text_value == nil: "" else: text_value
+
+fn _i64(obj: any, key: text) -> i64:
+    val value = json_object_get(obj, key)
+    val number = json_to_number(value)
+    if number == nil:
+        return -1
+    json_serialize(value).to_i64()
+
+fn _bool(obj: any, key: text) -> bool:
+    json_serialize(json_object_get(obj, key)) == "true"
+
+fn _text_array(obj: any, key: text) -> [text]:
+    val items = json_to_array(json_object_get(obj, key))
+    if items == nil:
+        return []
+    var values: [text] = []
+    for item in items:
+        val value = json_to_string(item)
+        if value == nil or value == "":
+            return []
+        values.push(value)
+    values
+
+fn _allowed_layer(layer: text) -> bool:
+    layer == "web_dom" or layer == "web_style" or layer == "web_layout" or
+        layer == "web_paint" or layer == "web_input" or layer == "web_gpu"
+
+fn _has_raw_native_value(value: text) -> bool:
+    value.contains("0x") or value.contains("ptr=") or value.contains("handle=") or
+        value.contains("address=") or value.contains("ptr%3D") or
+        value.contains("handle%3D") or value.contains("address%3D")
+
+fn _scalar_value_escaped(value: text) -> bool:
+    var index = 0
+    while index < value.len():
+        if value.char_at(index) == "%":
+            if index + 2 >= value.len():
+                return false
+            val escape = value.substring(index, index + 3)
+            if escape != "%25" and escape != "%3B" and escape != "%3D":
+                return false
+            index = index + 3
+        else:
+            index = index + 1
+    true
+
+pub fn chromium_oracle_scalar_fields_valid(fields: text) -> bool:
+    if fields == "":
+        return true
+    val entries = fields.split(";")
+    var previous = ""
+    for entry in entries:
+        val equals = entry.index_of("=")
+        if equals <= 0 or entry.index_of("=", equals + 1) >= 0:
+            return false
+        val key = entry.substring(0, equals)
+        val value = entry.substring(equals + 1)
+        if key <= previous or _has_raw_native_value(key) or _has_raw_native_value(value) or
+            not _scalar_value_escaped(value):
+            return false
+        previous = key
+    true
+
+fn _event_from_json(obj: any, expected_schema: i64, run_id: text, profile_id: text) -> TraceEvent?:
+    val event = TraceEvent(
+        schema_version: _i64(obj, "schema_version"), run_id: _text(obj, "run_id"),
+        sequence: _i64(obj, "sequence"), monotonic_ns: _i64(obj, "monotonic_ns"),
+        layer_id: _text(obj, "layer_id"), operation: _text(obj, "operation"),
+        object_id: _text(obj, "object_id"), parent_id: _text(obj, "parent_id"),
+        result_class: _text(obj, "result_class"), error_class: _text(obj, "error_class"),
+        payload_digest: _text(obj, "payload_digest"), scalar_fields: _text(obj, "scalar_fields"),
+        environment_profile_id: _text(obj, "environment_profile_id"),
+    )
+    if event.schema_version != expected_schema or event.run_id != run_id or
+        event.environment_profile_id != profile_id or not _allowed_layer(event.layer_id) or
+        event.operation == "" or _has_raw_native_value(event.object_id) or
+        _has_raw_native_value(event.parent_id) or _has_raw_native_value(event.payload_digest) or
+        not chromium_oracle_scalar_fields_valid(event.scalar_fields):
+        return nil
+    Some(event)
+
+fn _all_primitive_layers_present(events: [TraceEvent]) -> bool:
+    val required = ["web_dom", "web_style", "web_layout", "web_paint", "web_input", "web_gpu"]
+    for layer in required:
+        var found = false
+        for event in events:
+            if event.layer_id == layer:
+                found = true
+        if not found:
+            return false
+    true
+
+fn _event_payload(events: [TraceEvent], layer: text, operation: text) -> text:
+    for event in events:
+        if event.layer_id == layer and event.operation == operation:
+            return event.payload_digest
+    ""
+
+fn _gpu_receipt_from_trace(events: [TraceEvent]) -> ChromiumOracleGpuReceipt?:
+    val requested = _event_payload(events, "web_gpu", "requested")
+    val executed = _event_payload(events, "web_gpu", "executed")
+    val device = _event_payload(events, "web_gpu", "device_identity")
+    val fence = _event_payload(events, "web_gpu", "fence")
+    val readback = _event_payload(events, "web_gpu", "device_readback")
+    if requested == "" or executed == "" or device == "" or fence != "signaled" or readback == "":
+        return nil
+    Some(ChromiumOracleGpuReceipt(requested_api: requested, executed_api: executed,
+        device_identity: device, fence_signaled: true, readback_source: "device_readback",
+        readback_digest: readback, fallback_used: false))
+
+pub fn chromium_oracle_normalize_trace(fixture: ChromiumOraclePrimitiveFixture,
+                                        response_json: text,
+                                        profile: GpuEnvironmentProfile) -> ChromiumOracleNormalizedObservation?:
+    if response_json == "" or response_json.len() > 4194304:
+        return nil
+    val root = json_parse(response_json)
+    if root == nil:
+        return nil
+    val event_values = json_to_array(json_object_get(root, "events"))
+    if event_values == nil or event_values.len() == 0 or event_values.len() > 512:
+        return nil
+    val schema = _i64(root, "schema_version")
+    val run_id = _text(root, "run_id")
+    val profile_id = _text(root, "environment_profile_id")
+    if schema != 1 or run_id == "" or profile_id == "":
+        return nil
+    var events: [TraceEvent] = []
+    for value in event_values:
+        val event = _event_from_json(value, schema, run_id, profile_id)
+        if event == nil:
+            return nil
+        events.push(event.?)
+    val trace = NormalizedTrace(
+        schema_version: schema, run_id: run_id, environment_profile_id: profile_id,
+        ui_environment_profile_id: _text(root, "ui_environment_profile_id"),
+        arch: _text(root, "arch"), transport: _text(root, "transport"),
+        enabled_features: _text_array(root, "enabled_features"),
+        venus_version: _text(root, "venus_version"), device_identity: _text(root, "device_identity"),
+        oracle_identity: _text(root, "oracle_identity"),
+        device_origin_readback: _bool(root, "device_origin_readback"),
+        fallback_used: _bool(root, "fallback_used"), dropped_events: _i64(root, "dropped_events"),
+        complete: _bool(root, "complete"), events: events,
+    )
+    if not normalized_trace_valid(trace) or not _all_primitive_layers_present(events) or
+        trace_satisfies_environment_profile(trace, profile).matched == false:
+        return nil
+    val cpu_digest = _event_payload(events, "web_paint", "cpu_readback")
+    val gpu_receipt = _gpu_receipt_from_trace(events)
+    if cpu_digest == "":
+        return nil
+    if fixture.requires_gpu_receipt and (gpu_receipt == nil or not chromium_oracle_gpu_receipt_valid(gpu_receipt.?)):
+        return nil
+    ChromiumOracleNormalizedObservation(fixture_id: fixture.fixture_id, trace: trace,
+        cpu_pixel_digest: cpu_digest, cpu_pixel_width: fixture.viewport_width,
+        cpu_pixel_height: fixture.viewport_height, gpu_receipt: gpu_receipt, artifact_path: "")
+
+pub fn normalize_chromium_primitive_trace(fixture: ChromiumOraclePrimitiveFixture,
+                                           response_json: text,
+                                           profile: GpuEnvironmentProfile) -> ChromiumOracleNormalizedObservation?:
+    chromium_oracle_normalize_trace(fixture, response_json, profile)
+
+pub fn normalize_simple_primitive_trace(fixture: ChromiumOraclePrimitiveFixture,
+                                         trace: NormalizedTrace, cpu_pixel_digest: text,
+                                         cpu_pixel_width: i64, cpu_pixel_height: i64,
+                                         gpu_receipt: ChromiumOracleGpuReceipt?) -> ChromiumOracleNormalizedObservation:
+    ChromiumOracleNormalizedObservation(fixture_id: fixture.fixture_id, trace: trace,
+        cpu_pixel_digest: cpu_pixel_digest, cpu_pixel_width: cpu_pixel_width,
+        cpu_pixel_height: cpu_pixel_height, gpu_receipt: gpu_receipt, artifact_path: "")
+
+pub fn assert_chromium_primitive_trace(chromium: ChromiumOracleNormalizedObservation,
+                                        simple: ChromiumOracleNormalizedObservation) -> TraceComparison:
+    if not normalized_trace_valid(chromium.trace) or not normalized_trace_valid(simple.trace) or
+        chromium.trace.oracle_identity == "" or simple.trace.oracle_identity == "" or
+        chromium.trace.fallback_used or simple.trace.fallback_used:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "fallback-forbidden")
+    if chromium.fixture_id != simple.fixture_id or chromium.cpu_pixel_digest == "" or
+        chromium.cpu_pixel_digest != simple.cpu_pixel_digest or
+        chromium.cpu_pixel_width != simple.cpu_pixel_width or
+        chromium.cpu_pixel_height != simple.cpu_pixel_height:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "cpu-pixel-mismatch")
+    if (chromium.gpu_receipt != nil and not chromium_oracle_gpu_receipt_valid(chromium.gpu_receipt.?)) or
+        (simple.gpu_receipt != nil and not chromium_oracle_gpu_receipt_valid(simple.gpu_receipt.?)):
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "fallback-forbidden")
+    compare_normalized_traces(simple.trace, chromium.trace,
+        trace_comparison_policy_semantic(), [], [])
+
+pub fn assert_chromium_gpu_readback(simple: ChromiumOracleNormalizedObservation,
+                                    profile: GpuEnvironmentProfile) -> TraceComparison:
+    if simple.gpu_receipt == nil or not chromium_oracle_gpu_receipt_valid(simple.gpu_receipt.?):
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "device-readback-missing")
+    trace_satisfies_environment_profile(simple.trace, profile)

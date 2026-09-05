@@ -1,0 +1,190 @@
+# Persistent SPipe lexical provider entry point. Production launchers compile
+# and cache this entry; they must not spawn it once per query.
+use std.nogc_sync_mut.io.pipe.{Stdin, Stdout}
+use std.common.string_core.{bytes_to_text}
+use app.io.mod.{get_args, file_read_regular_no_follow_bounded}
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
+use app.spipe_knowledge_provider.wire.{ProviderHostBindingV1, provider_dispatch_payload_bound_owned}
+use app.spipe_knowledge_provider.lifecycle.{SystemEd25519ReceiptAuthorityV1, SystemCandidateTransitionAuthorityV1, FileDurableLifecycleV1}
+
+struct ProviderProductionConfigV1:
+    workspace: text
+    snapshot_id: text
+    scope_digest: text
+    receipt_seed: [u8]
+    authority_id: text
+    authority_generation: i64
+    candidate_seed: [u8]
+    candidate_authority_id: text
+    candidate_authority_generation: i64
+    lifecycle_directory: text
+
+fn _flag(args: [text], name: text) -> Result<text, text>:
+    var found = ""
+    var i = 0
+    while i < args.len():
+        if args[i] == name:
+            if i + 1 >= args.len() or found != "":
+                return Err("invalid_provider_configuration")
+            found = args[i + 1]
+            i = i + 1
+        elif args[i].starts_with(name + "="):
+            if found != "":
+                return Err("invalid_provider_configuration")
+            found = args[i].slice(name.len() + 1, args[i].len())
+        i = i + 1
+    if found == "": Err("missing_provider_configuration") else: Ok(found)
+
+fn _positive_i64(value: text) -> Result<i64, text>:
+    if value == "": return Err("invalid_provider_configuration")
+    var result = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        val digit = "0123456789".find(ch)
+        if digit < 0:
+            return Err("invalid_provider_configuration")
+        if result > (9007199254740991 - digit) / 10:
+            return Err("invalid_provider_configuration")
+        result = result * 10 + digit
+        i = i + 1
+    if result <= 0: Err("invalid_provider_configuration") else: Ok(result)
+
+fn _seed_hex(value: text) -> Result<[u8], text>:
+    if value.len() != 64:
+        return Err("invalid_provider_configuration")
+    val digits = "0123456789abcdef"
+    var seed: [u8] = []
+    var i = 0
+    while i < value.len():
+        val high = digits.find(value.slice(i, i + 1))
+        val low = digits.find(value.slice(i + 1, i + 2))
+        if high < 0 or low < 0:
+            return Err("invalid_provider_configuration")
+        seed.push((high * 16 + low) as u8)
+        i = i + 2
+    Ok(seed)
+
+fn provider_production_config(args: [text]) -> Result<ProviderProductionConfigV1, text>:
+    val workspace = _flag(args, "--workspace")?
+    val snapshot_id = _flag(args, "--snapshot")?
+    val scope_digest = _flag(args, "--scope-digest")?
+    val seed_path = _flag(args, "--receipt-seed-file")?
+    if not seed_path.starts_with("/") or seed_path.contains(".."):
+        return Err("invalid_provider_configuration")
+    val seed_text = file_read_regular_no_follow_bounded(seed_path, 1024)
+    if val Err(_) = seed_text:
+        return Err("invalid_provider_configuration")
+    val seed = _seed_hex(seed_text.unwrap().trim())?
+    val authority_id = _flag(args, "--authority-id")?
+    val generation = _positive_i64(_flag(args, "--authority-generation")?)?
+    val candidate_seed_path = _flag(args, "--candidate-seed-file")?
+    if not candidate_seed_path.starts_with("/") or
+            candidate_seed_path.contains(".."):
+        return Err("invalid_provider_configuration")
+    val candidate_seed_text = file_read_regular_no_follow_bounded(
+        candidate_seed_path, 1024)
+    if val Err(_) = candidate_seed_text:
+        return Err("invalid_provider_configuration")
+    val candidate_seed = _seed_hex(candidate_seed_text.unwrap().trim())?
+    val candidate_authority_id = _flag(args, "--candidate-authority-id")?
+    val candidate_generation = _positive_i64(
+        _flag(args, "--candidate-authority-generation")?)?
+    val lifecycle_directory = _flag(args, "--lifecycle-directory")?
+    # Validate authority-sensitive binding and storage before opening stdin.
+    ProviderHostBindingV1.create(workspace, snapshot_id, scope_digest)?
+    SystemEd25519ReceiptAuthorityV1.configured(seed, authority_id, generation)?
+    SystemEd25519ReceiptAuthorityV1.configured(candidate_seed,
+        candidate_authority_id, candidate_generation)?
+    FileDurableLifecycleV1.configured_absolute(lifecycle_directory)?
+    Ok(ProviderProductionConfigV1(workspace: workspace, snapshot_id: snapshot_id,
+        scope_digest: scope_digest, receipt_seed: seed, authority_id: authority_id,
+        authority_generation: generation, candidate_seed: candidate_seed,
+        candidate_authority_id: candidate_authority_id,
+        candidate_authority_generation: candidate_generation,
+        lifecycle_directory: lifecycle_directory))
+
+fn _payload_length(header: text) -> i64:
+    if header.len() != 8:
+        return 0 - 1
+    var value = 0
+    var i = 0
+    val digits = "0123456789abcdef"
+    while i < 8:
+        val ch = header.slice(i, i + 1)
+        var digit = 0 - 1
+        var d = 0
+        while d < 16:
+            if digits.slice(d, d + 1) == ch:
+                digit = d
+            d = d + 1
+        if digit < 0:
+            return 0 - 1
+        value = (value * 16) + digit
+        i = i + 1
+    value
+
+fn provider_host_entry(service: SpipeProviderServiceV1,
+                       host: ProviderHostBindingV1) -> i64:
+    # The service is the single mutable owner of handshake, snapshot, replay,
+    # and candidate lifecycle state for this transport session. Frames are
+    # dispatched synchronously (this loop fully answers one frame before
+    # reading the next), so `cancel`'s pending->cancelled CAS
+    # (SpipeProviderStateV1.cancel, wire_core.spl) is real but can never
+    # observe a target mid-flight: any request seen earlier in this
+    # generation is already "already_complete" by the time a cancel frame
+    # is decoded. `cancelled` is unreachable under this concurrency model;
+    # `already_complete` and `cancel_target_not_found` are both genuine.
+    var owned = service
+    val input = Stdin.new()
+    val output = Stdout.new()
+    var running = true
+    while running:
+        val header_read = input.read_exact(8)
+        if val Err(_) = header_read:
+            return 0
+        val header = bytes_to_text(header_read.unwrap())
+        val length = _payload_length(header)
+        if length < 0 or length > 1048576:
+            return 2
+        val payload_read = input.read_exact(length)
+        if val Err(_) = payload_read:
+            return 2
+        val payload = bytes_to_text(payload_read.unwrap())
+        val dispatched = provider_dispatch_payload_bound_owned(owned, host, payload)
+        owned = dispatched.service
+        val outcome = dispatched.outcome
+        if outcome.close_transport:
+            return 2
+        if outcome.write_response:
+            if val Err(_) = output.write_text(outcome.frame):
+                return 2
+            output.flush()
+        if outcome.stop_after_write:
+            running = false
+    0
+
+fn provider_production_entry(config: ProviderProductionConfigV1) -> i64:
+    val host = ProviderHostBindingV1.create_with_generation(config.workspace,
+        config.snapshot_id, config.scope_digest, config.authority_generation)
+    if val Err(_) = host: return 3
+    val authority = SystemEd25519ReceiptAuthorityV1.configured(config.receipt_seed,
+        config.authority_id, config.authority_generation)
+    if val Err(_) = authority: return 3
+    val candidate_authority = SystemEd25519ReceiptAuthorityV1.configured(
+        config.candidate_seed, config.candidate_authority_id,
+        config.candidate_authority_generation)
+    if val Err(_) = candidate_authority: return 3
+    val storage = FileDurableLifecycleV1.configured_absolute(config.lifecycle_directory)
+    if val Err(_) = storage: return 3
+    val service = SpipeProviderServiceV1.configured_with_authorities_and_transition(
+        authority.unwrap(),
+        candidate_authority.unwrap(), storage.unwrap(),
+        SystemCandidateTransitionAuthorityV1.configured())
+    if val Err(_) = service: return 3
+    provider_host_entry(service.unwrap(), host.unwrap())
+
+fn main() -> i64:
+    val config = provider_production_config(get_args())
+    if val Err(_) = config: return 3
+    provider_production_entry(config.unwrap())

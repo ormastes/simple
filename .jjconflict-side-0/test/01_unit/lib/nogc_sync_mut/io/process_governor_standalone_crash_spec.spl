@@ -1,0 +1,85 @@
+"""process_run standalone-crash regression spec
+
+**Bug:** doc/08_tracking/bug/std_process_run_standalone_crash_2026-07-17.md
+**Fix:** 7aea68b63df (src/lib/nogc_sync_mut/io/process_governor.spl)
+
+`process_run()` calls `proc_slot_acquire()`/`proc_slot_release()` in
+`process_governor.spl` on every invocation. Before the fix, the governor's
+module-level active-process counter was `val _active_procs: AtomicI64 =
+atomic_i64_new(0)` -- a class instance imported from a *different* module --
+which the seed interpreter resolves to a **nil receiver** when read from
+inside a function body of a plain standalone `fn main()` script. Crucially,
+this landmine does NOT reproduce from inside an SSpec `it` block (the SSpec
+harness happens to mask it), so a spec that only calls `process_run` directly
+would have passed both before and after the fix and cannot gate this
+regression on its own. The fix replaced the `AtomicI64` global with a
+lazily-created raw i64 atomic handle (`rt_atomic_int_new`/`_load`/
+`_compare_exchange`).
+
+This spec gates the regression two ways:
+  1. Writes a real standalone script to `build/tmp` and runs it via
+     `./bin/simple run <path>` (matching the exact crash trigger: a plain
+     `fn main()`, no test harness) and asserts it exits 0 with the expected
+     output instead of crashing (SIGILL / "field access on nil receiver").
+  2. Calls `process_run` directly from `it` blocks too, for defense-in-depth
+     against a regression in the wrapper API's own output/rc handling (this
+     part does NOT gate the original bug -- see note above -- but protects
+     against future regressions in `process_run` itself). Covers: two
+     sequential calls (governor active-count acquire/release reuse) and a
+     failing command (nonzero rc propagates, no crash).
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write, file_delete}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+fn _standalone_script_body() -> text:
+    # Raw (single-quoted) strings avoid Simple's default string
+    # interpolation, so `{process_run}` / `{code1}`-shaped text below is
+    # embedded literally instead of being (mis)interpreted as an
+    # interpolation expression against THIS file's own scope.
+    val l1 = 'use std.nogc_sync_mut.io.process_ops.{process_run}'
+    val l2 = ''
+    val l3 = 'fn main() -> i32:'
+    val l4 = '    val r1 = process_run("echo", ["hi"])'
+    val l5 = '    print("R1|" + r1.2.to_text() + "|" + r1.0)'
+    val l6 = '    val r2 = process_run("echo", ["again"])'
+    val l7 = '    print("R2|" + r2.2.to_text() + "|" + r2.0)'
+    val l8 = '    val r3 = process_run("sh", ["-c", "exit 7"])'
+    val l9 = '    print("R3|" + r3.2.to_text())'
+    val l10 = '    0'
+    l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7 + "\n" + l8 + "\n" + l9 + "\n" + l10 + "\n"
+
+describe "process_run standalone-crash regression (7aea68b63df)":
+
+    it "runs cleanly as a standalone script outside the SSpec harness":
+        val script_path = "build/tmp/t3_process_run_standalone_probe.spl"
+        val wrote = file_write(script_path, _standalone_script_body())
+        expect(wrote).to_equal(true)
+
+        val result = process_run("./bin/simple", ["run", script_path])
+        val stdout = result.0
+        val code = result.2
+        val _ = file_delete(script_path)
+
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("R1|0|hi")
+        expect(stdout).to_contain("R2|0|again")
+        expect(stdout).to_contain("R3|7")
+
+    it "in-spec: process_run returns output and rc (defense-in-depth)":
+        val result = process_run("echo", ["hello"])
+        expect(result.0).to_contain("hello")
+        expect(result.2).to_equal(0)
+
+    it "in-spec: two sequential calls reuse governor state without crash":
+        val a = process_run("echo", ["first"])
+        val b = process_run("echo", ["second"])
+        expect(a.2).to_equal(0)
+        expect(b.2).to_equal(0)
+        expect(a.0).to_contain("first")
+        expect(b.0).to_contain("second")
+
+    it "in-spec: failing command propagates nonzero rc without crash":
+        val result = process_run("sh", ["-c", "exit 7"])
+        expect(result.2).to_equal(7)

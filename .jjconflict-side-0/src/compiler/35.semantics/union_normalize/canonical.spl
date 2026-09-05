@@ -1,0 +1,292 @@
+# Canonical form for structural union types (Wave 2D lane S4).
+#
+# Plan: doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §10.1 (closed sum types), §10.3 (structural union syntax),
+#         §10.4, §8.4 (safe replacement priority: closed sum > Any).
+#
+# A structural union `i64 | f64 | bool | text` must become a CHECKED closed
+# sum -- a synthesized `@closed` enum with one variant per member -- and never
+# `Any`. Everything a checked sum needs downstream (a stable name, a stable
+# variant ORDER, a stable discriminant per member) is decided here, once, so
+# that two spellings of the same union are the same type:
+#
+#   text | i64        ->  __Union_i64_text
+#   i64 | text        ->  __Union_i64_text        (order-insensitive)
+#   i64 | i64 | text  ->  __Union_i64_text        (duplicates collapse)
+#   i64 | (f64|text)  ->  __Union_f64_i64_text    (nesting flattens)
+#   i64? | text       ->  __Union_i64_nil_text    (`T?` == `T | nil`)
+#
+# `T?` is expanded ONLY when it appears as a union MEMBER. A bare `T?` is
+# HirTypeKind.Optional and is not a Union, so this module never sees it and
+# the existing Option lowering (and Result, likewise untouched) is unchanged.
+#
+# Named types are keyed by symbol id plus structural generic arguments. Symbol
+# ids are stable within one compilation, which is the scope this canonical name
+# is used in; it is not claimed to be stable across builds.
+
+use compiler.hir.hir_types.{
+    HirType, HirTypeKind, DimExpr, DimExprKind, DeviceType
+}
+
+struct UnionNormalized:
+    members: [HirType]
+    keys: [text]
+    name: text
+
+fn _union_i64_key(value: i64) -> text:
+    val raw = value.to_text()
+    if raw.starts_with("-"):
+        return "m" + raw.substring(1)
+    "p" + raw
+
+fn _union_optional_i64_key(value: i64?) -> text:
+    if val present = value:
+        return "v" + _union_i64_key(present)
+    "z"
+
+fn _union_text_key(value: text) -> text:
+    # Numeric code points keep every identity token identifier-safe. This is
+    # also injective under union_variant_name's punctuation sanitization.
+    var parts: [text] = ["x"]
+    for character in value:
+        parts.push(_union_i64_key(character.to_int()))
+        parts.push("_")
+    parts.push("z")
+    parts.join("")
+
+fn _union_key_list(tag: text, keys: [text]) -> text:
+    var parts: [text] = [tag, "n", keys.len().to_text()]
+    for key in keys:
+        parts.push("_l")
+        parts.push(key.len().to_text())
+        parts.push("_")
+        parts.push(key)
+    parts.join("")
+
+fn _union_type_keys(types: [HirType]) -> [text]:
+    var keys: [text] = []
+    for type_ in types:
+        keys.push(union_member_key(type_))
+    keys
+
+fn _union_dim_key(dim: DimExpr) -> text:
+    match dim.kind:
+        case DimExprKind.Literal(value): "dl" + _union_i64_key(value)
+        case DimExprKind.Named(name, lo, hi):
+            "dn" + _union_text_key(name) + "_" +
+                _union_optional_i64_key(lo) + "_" +
+                _union_optional_i64_key(hi)
+        case DimExprKind.Var(id): "dv" + _union_i64_key(id)
+        case DimExprKind.Dynamic: "dd"
+        case DimExprKind.Broadcast: "db"
+        case DimExprKind.ConstParam(name): "dc" + _union_text_key(name)
+        case DimExprKind.Add(left, right):
+            _union_key_list("da", [_union_dim_key(left), _union_dim_key(right)])
+        case DimExprKind.Mul(left, right):
+            _union_key_list("dm", [_union_dim_key(left), _union_dim_key(right)])
+        case DimExprKind.Div(left, right):
+            _union_key_list("dq", [_union_dim_key(left), _union_dim_key(right)])
+
+fn _union_dim_keys(dims: [DimExpr]) -> [text]:
+    var keys: [text] = []
+    for dim in dims:
+        keys.push(_union_dim_key(dim))
+    keys
+
+fn _union_device_key(device: DeviceType?) -> text:
+    if val present = device:
+        return match present:
+            case DeviceType.CPU: "dcpu"
+            case DeviceType.CUDA(id): "dcuda" + _union_i64_key(id)
+            case DeviceType.Vulkan(id): "dvulkan" + _union_i64_key(id)
+    "dnone"
+
+fn union_member_key(t: HirType) -> text:
+    """Canonical token for one union member.
+
+    Exhaustive and aligned with hir_types_equal (spans, function effects, and
+    inference levels are deliberately not type identity). Length-framed lists
+    and numeric text atoms make the encoding unambiguous and identifier-safe."""
+    match t.kind:
+        case HirTypeKind.Int(bits, signed):
+            (if signed: "i" else: "u") + "{bits}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "nil"
+        case HirTypeKind.Named(symbol, args):
+            _union_key_list("named" + _union_i64_key(symbol.id),
+                _union_type_keys(args))
+        case HirTypeKind.TypeParam(name, bounds):
+            _union_key_list("param" + _union_text_key(name),
+                _union_type_keys(bounds))
+        case HirTypeKind.DynTrait(trait_): "dyn" + _union_i64_key(trait_.id)
+        case HirTypeKind.Tuple(elements):
+            _union_key_list("tuple", _union_type_keys(elements))
+        case HirTypeKind.Array(element, size):
+            _union_key_list("array" + _union_optional_i64_key(size),
+                [union_member_key(element)])
+        case HirTypeKind.Slice(element):
+            _union_key_list("slice", [union_member_key(element)])
+        case HirTypeKind.Dict(key, value):
+            _union_key_list("dict", [union_member_key(key), union_member_key(value)])
+        case HirTypeKind.Ref(inner, mutable):
+            _union_key_list(if mutable: "refmut" else: "refconst",
+                [union_member_key(inner)])
+        case HirTypeKind.Ptr(inner, mutable):
+            _union_key_list(if mutable: "ptrmut" else: "ptrconst",
+                [union_member_key(inner)])
+        case HirTypeKind.Optional(inner):
+            _union_key_list("optional", [union_member_key(inner)])
+        case HirTypeKind.Result(ok, err):
+            _union_key_list("result", [union_member_key(ok), union_member_key(err)])
+        case HirTypeKind.Isolated(inner):
+            _union_key_list("isolated", [union_member_key(inner)])
+        case HirTypeKind.Union(members):
+            # Nested union values inside another constructor follow the shared
+            # hir_types_equal list identity. Only top-level normalization
+            # flattens/order-normalizes union members.
+            _union_key_list("union", _union_type_keys(members))
+        case HirTypeKind.Function(params, ret, _effects):
+            # Effects are orthogonal annotations in hir_types_equal.
+            var function_keys = _union_type_keys(params)
+            function_keys.push(union_member_key(ret))
+            _union_key_list("function", function_keys)
+        case HirTypeKind.Projection(base, assoc_name):
+            _union_key_list("projection" + _union_text_key(assoc_name),
+                [union_member_key(base)])
+        case HirTypeKind.Infer(id, _level): "infer" + _union_i64_key(id)
+        case HirTypeKind.Error: "error"
+        case HirTypeKind.Never: "never"
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Tensor(element, dims, device):
+            var tensor_keys: [text] = [union_member_key(element)]
+            for dim_key in _union_dim_keys(dims):
+                tensor_keys.push(dim_key)
+            _union_key_list("tensor" + _union_device_key(device), tensor_keys)
+        case HirTypeKind.Layer(input, output):
+            _union_key_list("layer",
+                [_union_key_list("input", _union_dim_keys(input)),
+                 _union_key_list("output", _union_dim_keys(output))])
+
+fn _nil_type(span_from: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: span_from.span)
+
+fn union_flatten(members: [HirType]) -> [HirType]:
+    """Flatten nested unions and expand `T?` members into `T` plus `nil`.
+
+    Order is preserved here; canonical ordering is applied by
+    `union_normalize_members` afterwards, so the two concerns stay separable
+    and independently testable."""
+    var out: [HirType] = []
+    for m in members:
+        match m.kind:
+            case HirTypeKind.Union(inner):
+                for f in union_flatten(inner):
+                    out = out.push(f)
+            case HirTypeKind.Optional(inner):
+                for f in union_flatten([inner]):
+                    out = out.push(f)
+                out = out.push(_nil_type(m))
+            case _:
+                out = out.push(m)
+    out
+
+fn union_normalize(members: [HirType]) -> UnionNormalized:
+    """Flatten, structurally key once, deduplicate, and merge-sort by key."""
+    val flat = union_flatten(members)
+    var seen: Dict<text, bool> = {}
+    var keys: [text] = []
+    var vals: [HirType] = []
+    for m in flat:
+        val k = union_member_key(m)
+        if seen.contains_key(k):
+            continue
+        seen[k] = true
+        keys.push(k)
+        vals.push(m)
+
+    # Stable bottom-up merge sort. Equal keys were removed above, while
+    # left-first comparison retains the first flattened member by construction.
+    var width = 1
+    while width < keys.len():
+        var next_keys: [text] = []
+        var next_vals: [HirType] = []
+        var run = 0
+        while run < keys.len():
+            val middle = if run + width < keys.len(): run + width else: keys.len()
+            val end = if run + width + width < keys.len(): run + width + width else: keys.len()
+            var left = run
+            var right = middle
+            while left < middle and right < end:
+                if not (keys[right] < keys[left]):
+                    next_keys.push(keys[left])
+                    next_vals.push(vals[left])
+                    left = left + 1
+                else:
+                    next_keys.push(keys[right])
+                    next_vals.push(vals[right])
+                    right = right + 1
+            while left < middle:
+                next_keys.push(keys[left])
+                next_vals.push(vals[left])
+                left = left + 1
+            while right < end:
+                next_keys.push(keys[right])
+                next_vals.push(vals[right])
+                right = right + 1
+            run = end
+        keys = next_keys
+        vals = next_vals
+        width = width + width
+
+    var name_parts: [text] = ["__Union"]
+    for key in keys:
+        name_parts.push("_")
+        name_parts.push(key)
+    UnionNormalized(members: vals, keys: keys, name: name_parts.join(""))
+
+fn union_normalize_members(members: [HirType]) -> [HirType]:
+    union_normalize(members).members
+
+fn union_member_keys(members: [HirType]) -> [text]:
+    """Canonical keys of the normalized member list, in canonical order."""
+    union_normalize(members).keys
+
+fn union_canonical_name(members: [HirType]) -> text:
+    """Deterministic synthesized enum name: `__Union_<k1>_<k2>_...`."""
+    union_normalize(members).name
+
+fn _upper_first(c: text) -> text:
+    val lo = "abcdefghijklmnopqrstuvwxyz"
+    val hi = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    var i = 0
+    for ch in lo:
+        if ch == c:
+            return hi.substring(i, i + 1)
+        i = i + 1
+    c
+
+fn union_variant_name(key: text) -> text:
+    """Variant name for one canonical member key ("i64" -> "I64").
+
+    Non-alphanumeric characters become `_` so a key like `dict_i64_text` or a
+    fallback key is always a legal identifier."""
+    var parts: [text] = []
+    var first = true
+    for ch in key:
+        var c = ch
+        val ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
+        if not ok:
+            c = "_"
+        if first:
+            first = false
+            c = _upper_first(c)
+        parts.push(c)
+    parts.join("")
+
+export UnionNormalized, union_member_key, union_flatten, union_normalize
+export union_normalize_members
+export union_member_keys, union_canonical_name, union_variant_name

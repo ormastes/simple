@@ -1,0 +1,89 @@
+"""Typed SimpleOS Vulkan device boundary and fail-closed evidence policy."""
+
+use std.common.processing.processing_ir.{ProcessingIr}
+use std.common.processing.backend_contract.{ProcessingBackendArtifact}
+
+val VULKAN_EVIDENCE_BLOCKED: text = "blocked"
+val VULKAN_EVIDENCE_HOST_OFFLOAD: text = "host-offload"
+val VULKAN_EVIDENCE_GUEST_NATIVE: text = "guest-native"
+val VULKAN_EVIDENCE_BOARD_LINUX: text = "board-linux"
+val VULKAN_EVIDENCE_SIMPLEOS_NATIVE: text = "simpleos-native"
+
+struct VulkanDeviceCapability:
+    generation: i64
+    available: bool
+    evidence_class: text
+    backend: text
+    board_identity: text
+    device_identity: i64
+    supports_firmware: bool
+    supports_mmu: bool
+    supports_queue: bool
+    supports_fence: bool
+    supports_readback: bool
+    reason: text
+
+struct VulkanDeviceReceipt:
+    evidence_class: text
+    backend: text
+    generation: i64
+    submission_id: i64
+    fence_id: i64
+    backend_handle: i64
+    device_identity: i64
+    device_origin: bool
+    values: [u32]
+    checksum: i64
+    mismatch_count: i64
+    reason: text
+
+fn vulkan_device_capability_blocked(generation: i64, backend: text, board_identity: text, reason: text) -> VulkanDeviceCapability:
+    VulkanDeviceCapability(generation: generation, available: false,
+        evidence_class: VULKAN_EVIDENCE_BLOCKED, backend: backend,
+        board_identity: board_identity, device_identity: 0,
+        supports_firmware: false, supports_mmu: false, supports_queue: false,
+        supports_fence: false, supports_readback: false, reason: reason)
+
+fn vulkan_device_receipt_blocked(evidence_class: text, backend: text, generation: i64, reason: text) -> VulkanDeviceReceipt:
+    VulkanDeviceReceipt(evidence_class: evidence_class, backend: backend,
+        generation: generation, submission_id: 0, fence_id: 0,
+        backend_handle: 0, device_identity: 0, device_origin: false,
+        values: [], checksum: 0, mismatch_count: 0, reason: reason)
+
+fn vulkan_device_capability_native_ready(capability: VulkanDeviceCapability) -> bool:
+    capability.available and (capability.evidence_class == VULKAN_EVIDENCE_GUEST_NATIVE or
+        capability.evidence_class == VULKAN_EVIDENCE_SIMPLEOS_NATIVE) and
+        capability.backend == "vulkan" and capability.board_identity != "" and
+        capability.device_identity > 0 and capability.supports_firmware and
+        capability.supports_mmu and capability.supports_queue and
+        capability.supports_fence and capability.supports_readback and
+        capability.reason == "ok"
+
+fn vulkan_device_receipt_native_valid(receipt: VulkanDeviceReceipt, generation: i64, expected_values: [u32]) -> bool:
+    # @decision VD_CLASS
+    if (receipt.evidence_class != VULKAN_EVIDENCE_GUEST_NATIVE and
+        receipt.evidence_class != VULKAN_EVIDENCE_SIMPLEOS_NATIVE) or receipt.backend != "vulkan":
+        return false
+    # @decision VD_CORRELATION
+    if receipt.generation != generation or receipt.submission_id <= 0 or receipt.fence_id <= 0:
+        return false
+    # @decision VD_PROVENANCE
+    if receipt.backend_handle <= 0 or receipt.device_identity <= 0 or not receipt.device_origin:
+        return false
+    # @decision VD_INTEGRITY
+    if receipt.checksum <= 0 or receipt.mismatch_count != 0 or receipt.reason != "ok":
+        return false
+    receipt.values == expected_values
+
+trait VulkanDevicePort:
+    fn probe_environment(generation: i64) -> VulkanDeviceCapability
+    fn lower_processing_ir(ir: ProcessingIr) -> ProcessingBackendArtifact
+    fn submit_processing_ir(ir: ProcessingIr, generation: i64, submission_id: i64) -> VulkanDeviceReceipt
+    fn shutdown()
+
+export VULKAN_EVIDENCE_BLOCKED, VULKAN_EVIDENCE_HOST_OFFLOAD
+export VULKAN_EVIDENCE_GUEST_NATIVE, VULKAN_EVIDENCE_BOARD_LINUX
+export VULKAN_EVIDENCE_SIMPLEOS_NATIVE
+export VulkanDeviceCapability, VulkanDeviceReceipt, VulkanDevicePort
+export vulkan_device_capability_blocked, vulkan_device_receipt_blocked
+export vulkan_device_capability_native_ready, vulkan_device_receipt_native_valid

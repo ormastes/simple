@@ -1,0 +1,99 @@
+# Reproducing spec: E-APACK003 — §11.2 PackRef.content_hash/.index_hash and
+# SignatureTable verification (design
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md §11.2).
+#
+# Two DISJOINT checks, asserted separately so a hash-check pass can never be
+# read as a signature-check pass:
+#   - CONTENT-HASH: integrity only (sha256), APK_CONTENT_HASH_* codes.
+#   - SIGNATURE: authenticity, fail-closed with no shipped trust root,
+#     APK_SIGNATURE_* codes. See the key-custody doc for why signature
+#     checking defaults to disabled everywhere in this repo:
+#     doc/04_architecture/compiler/aspect_dynload/aspect_pack_key_custody_2026-08-19.md
+
+use std.common.aspect_pack.{apk_compute_content_hash_v1, apk_verify_content_hash_v1, ApkContentHashResultV1, apk_signature_policy_disabled, apk_signature_policy_with_trust_root, apk_verify_signature_v1, ApkSignaturePolicyV1}
+use std.common.string_core.{text_to_bytes}
+use lib.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+
+fn _pack_bytes() -> [u8]:
+    text_to_bytes("aspect-pack fixture bytes for §11.2 verification")
+
+fn _seed32() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 32:
+        out.push((i * 7 + 3) % 256)
+        i = i + 1
+    out
+
+describe "aspect-pack §11.2 content-hash verification (integrity, not authenticity)":
+    it "REQ-APACK003-01 passes when the pack bytes match the recorded content_hash":
+        val data = _pack_bytes()
+        val expected = apk_compute_content_hash_v1(data)
+        val result = apk_verify_content_hash_v1(data, expected)
+        expect(result.ok).to_equal(true)
+        expect(result.error_code).to_equal("")
+
+    it "REQ-APACK003-02 refuses with APK_CONTENT_HASH_MISMATCH — never a shared code — on corruption":
+        val data = _pack_bytes()
+        val expected = apk_compute_content_hash_v1(data)
+        var corrupted = _pack_bytes()
+        corrupted.push(0)
+        val result = apk_verify_content_hash_v1(corrupted, expected)
+        expect(result.ok).to_equal(false)
+        expect(result.error_code).to_equal("APK_CONTENT_HASH_MISMATCH")
+        # never mistakable for a signature verdict
+        expect(result.error_code).to_start_with("APK_CONTENT_HASH_")
+
+describe "aspect-pack §11.2 SignatureTable verification (fail-closed, off by default)":
+    it "REQ-APACK003-03 REFUSES a signed pack when no trust root is configured — never silently accepted":
+        val data = _pack_bytes()
+        val kp = pure_ed25519_keypair_from_seed(_seed32())
+        val signature = pure_ed25519_sign(private_seed: _seed32(), public_key: kp.1, message: data)
+        val policy = apk_signature_policy_disabled()
+        val result = apk_verify_signature_v1(data, signature, policy)
+        expect(result.ok).to_equal(false)
+        expect(result.error_code).to_equal("APK_SIGNATURE_NO_TRUST_ROOT")
+
+    it "REQ-APACK003-04 reports disabled (not passed) when there is no trust root and no signature claimed":
+        val data = _pack_bytes()
+        val policy = apk_signature_policy_disabled()
+        val result = apk_verify_signature_v1(data, [], policy)
+        expect(result.ok).to_equal(false)
+        expect(result.error_code).to_equal("APK_SIGNATURE_CHECK_DISABLED")
+
+    it "REQ-APACK003-05 REFUSES with APK_SIGNATURE_REQUIRED_MISSING when policy requires a signature and pack has none":
+        val data = _pack_bytes()
+        val kp = pure_ed25519_keypair_from_seed(_seed32())
+        val policy = apk_signature_policy_with_trust_root(kp.1, true)
+        val result = apk_verify_signature_v1(data, [], policy)
+        expect(result.ok).to_equal(false)
+        expect(result.error_code).to_equal("APK_SIGNATURE_REQUIRED_MISSING")
+
+    it "REQ-APACK003-06 verifies a valid ed25519 signature against a configured trust root":
+        val data = _pack_bytes()
+        val kp = pure_ed25519_keypair_from_seed(_seed32())
+        val signature = pure_ed25519_sign(private_seed: _seed32(), public_key: kp.1, message: data)
+        val policy = apk_signature_policy_with_trust_root(kp.1, true)
+        val result = apk_verify_signature_v1(data, signature, policy)
+        expect(result.ok).to_equal(true)
+        expect(result.error_code).to_equal("")
+
+    it "REQ-APACK003-07 rejects a tampered signature with APK_SIGNATURE_INVALID — never a shared code":
+        val data = _pack_bytes()
+        val kp = pure_ed25519_keypair_from_seed(_seed32())
+        var signature = pure_ed25519_sign(private_seed: _seed32(), public_key: kp.1, message: data)
+        signature[0] = signature[0] ^ 1
+        val policy = apk_signature_policy_with_trust_root(kp.1, true)
+        val result = apk_verify_signature_v1(data, signature, policy)
+        expect(result.ok).to_equal(false)
+        expect(result.error_code).to_equal("APK_SIGNATURE_INVALID")
+        expect(result.error_code).to_start_with("APK_SIGNATURE_")
+
+    it "REQ-APACK003-08 a content-hash pass and a signature refusal never share an error code":
+        val data = _pack_bytes()
+        val expected = apk_compute_content_hash_v1(data)
+        val hash_result = apk_verify_content_hash_v1(data, expected)
+        val sig_result = apk_verify_signature_v1(data, [], apk_signature_policy_disabled())
+        expect(hash_result.ok).to_equal(true)
+        expect(sig_result.ok).to_equal(false)
+        expect(hash_result.error_code == sig_result.error_code).to_equal(false)

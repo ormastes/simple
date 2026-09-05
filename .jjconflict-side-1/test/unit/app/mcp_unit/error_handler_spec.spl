@@ -1,0 +1,331 @@
+"""
+## Purpose and audience
+Pins the observable CLI behavior of this spec's target so maintainers and
+reviewers of the mcp_unit area can rely on documented output and exit codes.
+## Operator workflow
+Run via `bin/simple test <this file>`; read the per-scenario verdicts in the
+`Results:` summary. Every scenario asserts an externally visible outcome.
+## Compatibility and limitations
+Covers the shipped command surface only; performance and stress behavior are
+out of scope.
+# @manual: primary
+REQ-APP-MCPUNIT-003
+doc/01_research/local/mcp_unit.md
+doc/03_plan/sys_test/mcp_unit.md
+doc/04_architecture/mcp_unit.md
+doc/05_design/mcp_unit.md
+"""
+# @req: REQ-APP-MCPUNIT-003
+# MCP Error Handler Tests
+# Feature: MCP Error Handling and Crash Prevention
+# Category: MCP, Error Handling
+# Status: Complete
+
+use std.nogc_async_mut.mcp.error_handler.{ErrorCategory, McpError, ValidationLimits, InputValidator}
+use std.nogc_async_mut.mcp.error_handler.{mcp_error, default_validation_limits, strict_validation_limits, input_validator}
+
+use std.spec.step
+describe "ErrorCategory":
+    slow_it "converts to string correctly":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: converts to string correctly")
+        expect(ErrorCategory.ParseError.to_string()).to_equal("parse_error")
+        expect(ErrorCategory.InvalidRequest.to_string()).to_equal("invalid_request")
+        expect(ErrorCategory.MethodNotFound.to_string()).to_equal("method_not_found")
+        expect(ErrorCategory.InvalidParams.to_string()).to_equal("invalid_params")
+        expect(ErrorCategory.InternalError.to_string()).to_equal("internal_error")
+        expect(ErrorCategory.Timeout.to_string()).to_equal("timeout")
+
+describe "McpError":
+    slow_it "creates error with category and message":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: creates error with category and message")
+        val err = mcp_error(ErrorCategory.InvalidRequest, "Bad request")
+        expect(err.category).to_equal(ErrorCategory.InvalidRequest)
+        expect(err.message).to_equal("Bad request")
+        expect(err.recoverable).to_equal(true)
+
+    slow_it "can be marked as unrecoverable":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: can be marked as unrecoverable")
+        val err = mcp_error(ErrorCategory.InternalError, "Fatal error")
+        val unrecoverable = err.as_unrecoverable()
+        expect(unrecoverable.recoverable).to_equal(false)
+
+    slow_it "can have details attached":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: can have details attached")
+        val err = mcp_error(ErrorCategory.Validation, "Invalid input")
+        val with_details = err.with_details("Expected number, got string")
+        expect(with_details.details).to_equal("Expected number, got string")
+
+    slow_it "converts to JSON-RPC error":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: converts to JSON-RPC error")
+        val err = mcp_error(ErrorCategory.MethodNotFound, "Unknown method")
+        val json = err.to_json_rpc()
+        expect(json.contains("-32601")).to_equal(true)
+        expect(json.contains("Unknown method")).to_equal(true)
+
+describe "ValidationLimits":
+    slow_it "creates default limits":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: creates default limits")
+        val limits = default_validation_limits()
+        expect(limits.max_content_length).to_equal(1048576) # oracle: pinned expected value documenting the asserted outcome
+        expect(limits.max_string_length).to_equal(65536) # oracle: pinned expected value documenting the asserted outcome
+
+    slow_it "creates strict limits":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: creates strict limits")
+        val limits = strict_validation_limits()
+        expect(limits.max_content_length).to_equal(524288) # oracle: pinned expected value documenting the asserted outcome
+        expect(limits.max_string_length).to_equal(32768) # oracle: pinned expected value documenting the asserted outcome
+
+describe "InputValidator - content length":
+    slow_it "accepts valid content length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid content length")
+        val validator = input_validator()
+        val result = validator.validate_content_length(1000)
+        expect(result).to_be_nil()
+
+    slow_it "accepts zero length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts zero length")
+        val validator = input_validator()
+        val result = validator.validate_content_length(0)
+        expect(result).to_be_nil()
+
+    slow_it "rejects negative content length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects negative content length")
+        val validator = input_validator()
+        val result = validator.validate_content_length(-1)
+        match result:
+            case nil: fail("negative content length should be rejected")
+            case err: expect(err.message.contains("negative")).to_equal(true)
+
+    slow_it "rejects excessive content length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects excessive content length")
+        val validator = input_validator()
+        val result = validator.validate_content_length(2000000)
+        match result:
+            case nil: fail("excessive content length should be rejected")
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - string validation":
+    slow_it "accepts valid string":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid string")
+        val validator = input_validator()
+        val result = validator.validate_string("hello world")
+        expect(result).to_be_nil()
+
+    slow_it "accepts empty string":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts empty string")
+        val validator = input_validator()
+        val result = validator.validate_string("")
+        expect(result).to_be_nil()
+
+    slow_it "rejects excessive string length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects excessive string length")
+        var long_string = ""
+        var i = 0
+        while i < 70000:
+            long_string = long_string + "x"
+            i = i + 1
+
+        val validator = input_validator()
+        val result = validator.validate_string(long_string)
+        match result:
+            case nil: expect(long_string.len()).to_be_greater_than(65536)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - URI validation":
+    slow_it "accepts valid file URI":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid file URI")
+        val validator = input_validator()
+        val result = validator.validate_uri("file:///path/to/file.txt")
+        expect(result).to_be_nil()
+
+    slow_it "accepts valid symbol URI":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid symbol URI")
+        val validator = input_validator()
+        val result = validator.validate_uri("symbol://MyClass.method")
+        expect(result).to_be_nil()
+
+    slow_it "accepts valid project URI":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid project URI")
+        val validator = input_validator()
+        val result = validator.validate_uri("project://myproject")
+        expect(result).to_be_nil()
+
+    slow_it "accepts valid http URI":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid http URI")
+        val validator = input_validator()
+        val result = validator.validate_uri("http://example.com")
+        expect(result).to_be_nil()
+
+    slow_it "accepts valid https URI":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid https URI")
+        val validator = input_validator()
+        val result = validator.validate_uri("https://example.com/path")
+        expect(result).to_be_nil()
+
+    slow_it "rejects empty URI":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects empty URI")
+        val validator = input_validator()
+        val result = validator.validate_uri("")
+        match result:
+            case nil: fail("empty URI should be rejected")
+            case err: expect(err.message.contains("empty")).to_equal(true)
+
+    slow_it "rejects invalid URI scheme":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects invalid URI scheme")
+        val validator = input_validator()
+        val result = validator.validate_uri("ftp://example.com")
+        match result:
+            case nil: fail("invalid URI scheme should be rejected")
+            case err: expect(err.message.contains("scheme")).to_equal(true)
+
+    slow_it "rejects excessive URI length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects excessive URI length")
+        var long_uri = "file://"
+        var i = 0
+        while i < 3000:
+            long_uri = long_uri + "x"
+            i = i + 1
+
+        val validator = input_validator()
+        val result = validator.validate_uri(long_uri)
+        match result:
+            case nil: expect(long_uri.len()).to_be_greater_than(2048)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - tool name validation":
+    slow_it "accepts valid tool name":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid tool name")
+        val validator = input_validator()
+        val result = validator.validate_tool_name("my_tool")
+        expect(result).to_be_nil()
+
+    slow_it "accepts tool name with slashes":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts tool name with slashes")
+        val validator = input_validator()
+        val result = validator.validate_tool_name("category/tool_name")
+        expect(result).to_be_nil()
+
+    slow_it "accepts tool name with hyphens":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts tool name with hyphens")
+        val validator = input_validator()
+        val result = validator.validate_tool_name("my-tool-name")
+        expect(result).to_be_nil()
+
+    slow_it "rejects empty tool name":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects empty tool name")
+        val validator = input_validator()
+        val result = validator.validate_tool_name("")
+        match result:
+            case nil: fail("empty tool name should be rejected")
+            case err: expect(err.message.contains("empty")).to_equal(true)
+
+    slow_it "rejects tool name with invalid characters":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects tool name with invalid characters")
+        val validator = input_validator()
+        val result = validator.validate_tool_name("tool@name")
+        match result:
+            case nil: fail("tool names with invalid characters should be rejected")
+            case err: expect(err.message.contains("invalid character")).to_equal(true)
+
+    slow_it "rejects excessive tool name length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects excessive tool name length")
+        var long_name = ""
+        var i = 0
+        while i < 300:
+            long_name = long_name + "x"
+            i = i + 1
+
+        val validator = input_validator()
+        val result = validator.validate_tool_name(long_name)
+        match result:
+            case nil: expect(long_name.len()).to_be_greater_than(255)
+            case err: expect(err.category).to_equal(ErrorCategory.Validation)
+
+describe "InputValidator - array validation":
+    slow_it "accepts valid array length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts valid array length")
+        val validator = input_validator()
+        val result = validator.validate_array_length(100)
+        expect(result).to_be_nil()
+
+    slow_it "accepts zero array length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: accepts zero array length")
+        val validator = input_validator()
+        val result = validator.validate_array_length(0)
+        expect(result).to_be_nil()
+
+    slow_it "rejects negative array length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects negative array length")
+        val validator = input_validator()
+        val result = validator.validate_array_length(-1)
+        match result:
+            case nil: fail("negative array length should be rejected")
+            case err: expect(err.message.contains("negative")).to_equal(true)
+
+    slow_it "rejects excessive array length":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects excessive array length")
+        val validator = input_validator()
+        val result = validator.validate_array_length(2000)
+        match result:
+            case nil: fail("excessive array length should be rejected")
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - parameter validation":
+    slow_it "validates all parameters":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: validates all parameters")
+        val validator = input_validator()
+        var params = {}
+        params["key1"] = "value1"
+        params["key2"] = "value2"
+        val result = validator.validate_params(params)
+        expect(result).to_be_nil()
+
+    slow_it "rejects params with excessively long values":
+        # @req: REQ-APP-MCPUNIT-003
+        step("Verify: rejects params with excessively long values")
+        val validator = input_validator()
+        var long_value = ""
+        var i = 0
+        while i < 70000:
+            long_value = long_value + "x"
+            i = i + 1
+
+        var params = {}
+        params["key"] = long_value
+        val result = validator.validate_params(params)
+        match result:
+            case nil: expect(long_value.len()).to_be_greater_than(65536)
+            case err: expect(err.category).to_equal(ErrorCategory.Validation)

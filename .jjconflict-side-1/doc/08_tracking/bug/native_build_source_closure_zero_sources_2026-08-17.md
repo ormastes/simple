@@ -1,0 +1,363 @@
+# native-build discovers ZERO sources (`source_closure 0/0`), and the `object` receiver-erasure hypothesis is refuted
+
+- **Filed:** 2026-08-17
+- **Status:** **REFUTED / CLOSED as a compiler defect** 2026-08-17 (see the
+  REFUTED #3 section at the bottom). Source discovery is not broken. The `0/0`
+  measurement was taken with an `--entry` value the four guards never pass.
+  A fail-open that let the wrong `--entry` form look like a discovery defect is
+  fixed. Two further hypotheses are refuted below.
+
+## Binary identity for every measurement below
+
+`bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size **59537240**, mtime **2026-08-17 12:58:51 UTC**,
+md5 `78ffcbcd3f4cfaa11e3d9c1db37bf0b2`. Self-reported as the Rust bootstrap seed.
+
+Note this is **not** the binary a same-day lane note described (size 59617400,
+mtime 12:54:48). A *later* redeploy replaced it. Any measurement attributed to
+59617400 was taken against a binary that no longer exists at that path.
+
+## REFUTED #1 — the receiver is not type-erased
+
+The error that motivated this investigation:
+
+```
+error: semantic: method `compile` not found on type `object` (receiver value: CompilerDriver(...))
+```
+
+The `on type \`object\`` half was suspected to be a type-erasure defect — a
+`CompilerDriver` receiver whose static type had been lost. **It is not.**
+
+- The message is produced by the **Rust seed interpreter**, at
+  `src/compiler_rust/compiler/src/interpreter_method/mod.rs:1654` (and the
+  sibling arm at 1665, and the macro at `interpreter/error_macros.rs:82`). It
+  interpolates `recv_val.type_name()`.
+- `Value::type_name()` (`src/compiler_rust/runtime/src/value/core.rs:560-605`) is
+  a **coarse heap-tag** mapping: `Some(HeapObjectType::Object) => "object"` at
+  line 582. **Every** class instance reports `"object"` — there is no branch that
+  returns a class name.
+
+So `on type \`object\`` is the normal, expected rendering for any class instance
+in this diagnostic. It carries **zero** information about erasure. The class
+identity is in fact intact, which the same message proves in its own
+`(receiver value: CompilerDriver(...))` suffix.
+
+**Consequence for anyone reading that error:** it means "method lookup failed on
+a correctly-identified class instance", not "the receiver's type was erased".
+The diagnostic is misleading by construction and should print the class name.
+
+## REFUTED #2 — `compile` is not a missing method
+
+`me compile()` **is** defined, at `src/compiler/80.driver/driver_orchestration.spl:91`,
+and its file **is** glob-imported by `src/compiler/80.driver/driver.spl:47`
+(`use compiler.driver.driver_orchestration.*`) — precisely the pattern that
+`driver.spl:41-45` documents as necessary to register `impl CompilerDriver:`
+methods. Called from `driver.spl:59`, `driver.spl:143`,
+`src/app/compile/test_check_mode.spl:19`.
+
+(A `grep` for `fn compile` finds nothing on `CompilerDriver` and is a trap:
+instance methods here are declared `me compile()`, not `fn compile()`.)
+
+## The failure that actually reproduces now is different
+
+`method \`compile\` not found` did **not** reproduce at all. Measured:
+
+```
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+  <seed> native-build --source test/fixtures --entry-closure \
+  --entry native_trailing_default_param.main --cache-dir <d> --output <o>
+```
+
+rc=**1** (read from a variable on the line after the command, not through a pipe).
+Log shows:
+
+```
+[build] source_closure 0/0 step 0/6 pending
+[build] source_closure 0/0 step 1/6 complete
+[ERROR] phase 2 FAILED
+[build] parse unknown/0 step 1/6 failed
+error: native entry source not found: native_trailing_default_param.main
+```
+
+**`source_closure 0/0` — zero sources discovered.** The entry is then reported
+missing because nothing was ever loaded. This is upstream of any method
+resolution, which is why the `compile` error is no longer reached.
+
+Controls:
+
+| arm | result |
+|---|---|
+| original fixture `native_trailing_default_param.main`, from main worktree | rc=1, `source_closure 0/0` |
+| original fixture, from a fresh isolated `git worktree` | rc=1, `source_closure 0/0` |
+| a reduced 2-file fixture (`class Widget` + `me bump` + one `use`) | rc=1, `source_closure 0/0` |
+
+The reduced fixture fails **identically to the original**, and the original fails
+identically in two different worktrees. So this is not a fixture defect and not a
+worktree artifact — source discovery itself yields nothing.
+
+**This means the sibling row's shape can no longer be exercised at all.** The
+defect recorded in
+`native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17.md`
+(`unresolved method call: bump`, a MIR-lowering failure) is *masked* by this one:
+lowering is never reached. That row's diagnosis is not contradicted here — it is
+simply no longer reproducible until source discovery is fixed. Do not read its
+absence from current logs as evidence it was fixed.
+
+## A reporting defect fixed alongside this
+
+The `TMPDIR` parse error that also appeared in these logs was a genuine but
+*separate* defect on native-build's stderr-truncation path, and it was being
+emitted **instead of** the real diagnostic. Fixed at the call site; the
+underlying grammar defect is filed at
+`doc/08_tracking/bug/fstring_nested_quoted_literal_in_interpolation_misparsed_2026-08-17.md`.
+
+## Guard state after the reporting fix — new reason, and a confound in the method
+
+Three of the four native-build guards were re-run and all three FAIL with rc=1 and
+a **new** reason. Verdict lines verbatim:
+
+```
+FAIL — cold native-build of the 3-module fixture did not succeed
+FAIL — native-build of src/compiler/00.common failed
+FAIL — in-process native-build exited non-zero; log: /tmp/check-native-inprocess-positional.3148348/inprocess-positional.log
+```
+
+The fourth guard finished later with rc=**2**, which is neither a pass nor a fail:
+
+```
+ERROR — nothing was checked: native-build was killed by a signal (exit 255; log saved to /tmp/check-native-trailing-default-param.3148332.log)
+```
+
+`ERROR — nothing was checked` means the check could not determine anything, so
+`check-native-trailing-default-param` has **no verdict** here and must not be
+reported as either outcome.
+
+**This strongly corroborates caveat 2 below.** That guard's own source comments
+note that earlyoom on this host prefers `simple` by name, so a signal death is
+UNVERIFIED rather than a failure of the code under test. A worker killed by a
+signal under heavy concurrent load is the expected signature of resource
+contention — which is exactly the condition these runs were conducted under.
+
+What changed: all three logs contain **zero** compile errors. Counted per log —
+`TMPDIR`=0, `not found on type`=0, `source_closure 0/0`=0,
+`expected Fn, found Assign`=0. The single error in each is:
+
+```
+error: native-build worker timed out after 7200s before producing a binary.
+```
+
+So ``method `compile` not found on type `object` `` no longer appears in any guard
+log, consistent with the refutation above.
+
+**Two honest caveats, because this is weaker evidence than it looks:**
+
+1. **The `7200s` figure is not the elapsed time.** The guards were launched at
+   roughly 13:1x UTC and the log mtime is 13:28:31 UTC — about 15-20 minutes, not
+   two hours. `grep 7200` finds nothing in the guard script, so the number comes
+   from the worker's own message. Either the deadline is inherited from elsewhere
+   or the message reports a configured cap rather than measured elapsed time; a
+   timeout diagnostic that misstates how long it waited is worth fixing on its own.
+2. **The timeouts may be an artifact of how they were run.** All four guards were
+   launched **concurrently**, after an earlier concurrent batch, on a shared box
+   already carrying heavy load. Each spawns native-build workers, so the
+   contention plausibly caused the slowness. **These timeouts should not be read
+   as a property of the tree until reproduced by running the guards ONE AT A TIME
+   on an idle box.** Nothing here establishes that the guards would time out
+   serially.
+
+The `source_closure 0/0` measurement earlier in this row is *not* subject to that
+confound — it came from single, direct `native-build` invocations.
+
+## REFUTED #3 — source discovery is NOT broken; the `--entry` value form was wrong
+
+Measured 2026-08-17 against the **same** binary this row already pins
+(`bin/release/x86_64-unknown-linux-gnu/simple`, size **59537240**, mtime
+**2026-08-17 12:58:51 UTC**, md5 `78ffcbcd3f4cfaa11e3d9c1db37bf0b2`), from a
+fresh isolated `git worktree add --detach` at `98155fe41a55`. Every `rc` below
+was read from a variable on the line **after** the command, never through a
+pipe; nothing was run under a short timeout.
+
+Two arms differing **only** in the `--entry` value:
+
+| arm | `--entry` value | counters | rc |
+|---|---|---|---|
+| A — what the four guards actually pass | `test/fixtures/native_trailing_default_param/main.spl` (FILE path) | `source_closure 0/1` -> `source_closure 2/2 complete` -> `load_sources 3/3 complete` -> `parse 0/2` | reached lowering; **did not** report `0/0` |
+| B — what this row hand-ran | `native_trailing_default_param.main` (MODULE path) | `source_closure 0/0 pending` -> `source_closure 0/0 complete` -> `load_sources 0/0 complete` | **1**, `error: native entry source not found: native_trailing_default_param.main` |
+
+**Arm A discovers 2 physical / 3 logical sources.** So `source_closure 0/0` is
+not reproducible through the guards' invocation and is not a compiler defect.
+The guards read their entry from
+`FIXTURE="${FIXTURE:-test/fixtures/native_trailing_default_param/main.spl}"`
+(`scripts/check/check-native-trailing-default-param.shs:61`) and pass it
+verbatim at line 247 — a file path, i.e. arm A.
+
+### Mechanism, at file:line
+
+`src/compiler/80.driver/driver_source_pipeline_loading.spl:116-117` makes the
+entry the **sole** seed:
+
+```
+if native_entry_input != "" and not native_entry_closure_pre:
+    driver_inputs = [native_entry_input]
+```
+
+and line 141 feeds it to `_driver_collect_sources(input_path)` — a
+**filesystem** collector. `--entry` is therefore a path, by contract (cf.
+`--entry src/app/cli/bootstrap_main.spl` in
+`src/compiler_rust/driver/src/cli/commands/misc_commands.rs:520`). A
+module-path argument (`pkg.main`) names no file, collects zero sources, and the
+closure walk at line 189 then honestly reports `0/0` — of an empty seed set.
+
+### The genuine defect here was a fail-open, and it is fixed
+
+Zero collected sources fell through silently. The only surfaced diagnostic was
+the much later `native entry source not found`
+(`driver_source_pipeline_parsing.spl:447`), which reads as "resolution failed
+inside a loaded graph" rather than "nothing was ever loaded" — which is exactly
+how two separate investigations misread it. Fixed in
+`driver_source_pipeline_loading.spl` immediately after the input-seeding loop:
+an explicit native entry that collects zero sources is now a loud error naming
+the entry and stating the path-vs-module-path contract. It is gated on
+`not native_entry_closure_pre`, the same condition that made the entry the sole
+seed, so a re-entrant worker seeded from `--source` roots is unaffected.
+
+### What the four guards are ACTUALLY blocked on: `parse` makes no progress
+
+Arm A was allowed to run unwrapped to completion (no short timeout). It does not
+fail at discovery — **it never leaves `parse`**:
+
+```
+[build] load_sources 3/3 step 1/6 complete
+[build] parse 0/2 step 1/6 pending
+[build] parse 0/2 step 1/6 test/fixtures/native_trailing_default_param/main.spl
+error: native-build worker timed out after 7200s before producing a binary.
+```
+
+rc=**255**, read from a variable on the line after the command. The `parse`
+counter stayed at `0/2` for the whole two hours — zero of two files parsed. Host
+load average was 26-31 with 9 concurrent `simple native-build` processes from
+other lanes, so the absolute wall time is an envelope, not a clean number; but no
+amount of contention explains `0/2` progress on a 2-file fixture across 7200s.
+
+This is a **different, and the real, blocker** for
+`check-native-trailing-default-param` (and, by the same invocation shape, for
+`check-predicate-parser-native-build`,
+`check-native-object-cache-granularity` and
+`check-native-inprocess-positional-nonvacuous`): the worker's 7200s budget
+expires in `parse`, so those guards can only report FAIL/ERROR on a timeout, not
+on the property they exist to test. It is **not** fixed by this row's change and
+is not diagnosed here — it needs its own investigation, starting at the `parse`
+step emitter in `driver_source_pipeline_parsing.spl`.
+
+### Consequences for the four guards
+
+`check-predicate-parser-native-build`, `check-native-trailing-default-param`,
+`check-native-object-cache-granularity` and
+`check-native-inprocess-positional-nonvacuous` are **not** red because of
+source discovery. Arm A shows they get past discovery and into `parse`/lowering,
+so their real causes lie downstream — and the sibling row
+`native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17.md`
+becomes reproducible again, not masked. Note the trailing-default fixture is
+exactly that row's shape: `test/fixtures/native_trailing_default_param/main.spl`
+begins `use dep.{cross}` and then declares its own `class Widget` with
+`me bump(...)`.
+
+### Unrelated but confirmed while measuring
+
+The deployed binary above (mtime 12:58:51) **predates** the `Dict.clear()`
+runtime fix `8510a8368ca` (committed 13:20:01 the same day). That is a
+C/Rust runtime change, so the deployed seed does **not** contain it. Any
+hypothesis that an empty source-discovery Dict was caused by inert
+`Dict.clear()` is therefore untestable on this binary — and is in any case
+excluded by arm A, which populates the closure normally.
+
+## 2026-08-17 — the `parse` stall is an ALLOCATION ABORT, not a timeout (measured)
+
+The "What the four guards are ACTUALLY blocked on: `parse` makes no progress"
+section above is corrected here: `parse` is not stuck, and the run does not
+reach any deadline. The interpreted worker's RSS grows monotonically through
+`parse` until the allocator aborts, and the driver then **misreports that abort
+as a 7200s timeout** — which is exactly why the elapsed time never matched the
+number in the message (caveat 1 above).
+
+Same binary this row pins (size 59537240, mtime 2026-08-17 12:58:51 UTC).
+Fixture: a single module, no imports (`sret/user3.spl`, the struct-return
+reproducer). Bounded per the lane's hard limits:
+
+```
+$ (ulimit -v 12000000; SIMPLE_BOOTSTRAP=1 timeout 1800 bin/simple native-build \
+     --source $S/sret --entry $S/sret/user3.spl --entry-closure -o $S/sret/user3.bin \
+     > $S/sret/build.log 2>&1); echo "rc=$?"
+rc=255
+$ grep -n "memory allocation\|timed out after" $S/sret/build.log
+956:memory allocation of 2147483648 bytes failed
+1191:memory allocation of 2147483648 bytes failed
+1195:error: native-build worker timed out after 7200s before producing a binary.
+```
+
+Elapsed wall time was ~250s, not 7200s. RSS of the worker process
+(`bin/simple run src/app/cli/native_build_worker.spl ...`, i.e. the whole
+native-build compiler running INTERPRETED under the seed) sampled while it ran:
+
+```
+$ ps -o etimes=,rss=,pcpu= -p <worker>
+    224 3893748 70.0
+    244 4135828 70.9
+```
+
+3.7 GiB -> 3.9 GiB in 20s at ~70% CPU, on a ONE-module fixture. Concurrent
+workers from other lanes on the same host were observed at 15-17 GiB RSS
+(`native_trailing_default_param`, 599s elapsed). So the guards' `7200s` verdicts
+are memory blowups of the interpreted worker, wearing a timeout's clothes.
+
+### Fixed here: the misattribution
+
+`src/app/cli/native_build_main.spl` — `process_run_timeout_live` returns the
+same `-1` sentinel for a deadline expiry and for an abnormally-terminated child,
+and the `code == -1` arm unconditionally printed the timeout text. It now checks
+the captured output for an allocation-failure line first and prints
+`error: native-build worker ABORTED on a failed memory allocation (not a timeout).`
+The timeout text is unchanged for a genuine deadline expiry.
+
+Verification, same command as above after the change:
+
+```
+$ grep -n "ABORTED on a failed memory\|timed out after" $S/sret/build2.log
+rc=255
+1194:error: native-build worker ABORTED on a failed memory allocation (not a timeout).
+```
+
+(`rc` read from a variable on the line after the command. The misleading
+`timed out after 7200s` line is gone; the run still fails, honestly, for the
+real reason.)
+
+The blowup itself is NOT fixed here — it is a property of running the whole
+compiler interpreted, and it is the real blocker for
+`check-native-trailing-default-param`, `check-predicate-parser-native-build`,
+`check-native-object-cache-granularity` and
+`check-native-inprocess-positional-nonvacuous`. It needs its own row and its own
+owner.
+
+## Next step for whoever picks this up
+
+Find why the source-closure walk returns 0 for `--source test/fixtures
+--entry-closure`. Start at the `source_closure` / `load_sources` step emitters in
+`src/compiler/80.driver/driver_source_pipeline_loading.spl` and the
+`--entry-closure` argument handling in `src/app/cli/native_build_main.spl`. A
+walk that finds nothing and reports `0/0` without erroring on its own emptiness is
+also a fail-open worth closing on its own.
+
+## 2026-08-18 — the deferred blowup now has its own row and an owner
+
+The "needs its own row and its own owner" item above is taken up in
+`doc/08_tracking/bug/native_build_interpreted_worker_rss_blowup_2026-08-18.md`.
+Located, not fixed. Summary of what that row establishes by measurement on the
+2-file `native_trailing_default_param` fixture (seed 59581296, 2026-08-18
+00:21:41, load 54-69): the blowup is **two** terms, not one — a fixed ~2.74 GB
+paid loading the worker's import closure *before any `[build]` step is emitted*
+(proportional to the compiler, not to `--source`), plus an unbounded ~1.3 MB/s
+creep **inside `parse` while the counter stays at `0/2`**, which nothing in a
+2-file fixture can be proportional to and which extrapolates to the 15-17 GB
+workers observed here. A no-import control measures 20.5 MB, so the 2.74 GB is
+all import-closure load. No fix and no before/after: the host hit 14 earlyoom
+kills in 15 minutes and the lane was halted mid-measurement.

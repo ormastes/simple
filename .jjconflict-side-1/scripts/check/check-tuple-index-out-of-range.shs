@@ -1,0 +1,73 @@
+#!/bin/sh
+# Regression gate: a compile-time-constant tuple index that is out of range
+# must be a COMPILE ERROR, not a silent out-of-bounds heap read.
+#
+# WHY THIS EXISTS: `val t = (7, 9); t.5` used to build rc=0 under
+# `native-build` and read 24 bytes past the end of the tuple's 16-byte
+# allocation, printing 0 with no diagnostic. Tuple arity is statically known
+# and the index is a compile-time constant, so this is not a runtime concern.
+# `bin/simple test` hard-defaults to the tree-walk interpreter and has no AOT
+# mode, so a spec can only ever prove the interpreter lane -- only a script
+# that actually drives `native-build` can fence the AOT MIR-lowering fix.
+# Bug: doc/08_tracking/bug/tuple_constant_index_out_of_range_reads_oob_no_diagnostic_2026-08-08.md
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-tuple-index-out-of-range.$$}"
+BAD_FIXTURE="test/fixtures/tuple_index_out_of_range/bad/main.spl"
+GOOD_FIXTURE="test/fixtures/tuple_index_out_of_range/good/main.spl"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+bad_binary="$WORK_DIR/bad"
+bad_log="$WORK_DIR/bad.log"
+good_binary="$WORK_DIR/good"
+good_log="$WORK_DIR/good.log"
+
+bad_rc=0
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BINARY" native-build \
+    --source test/fixtures/tuple_index_out_of_range/bad --entry-closure --entry "$BAD_FIXTURE" \
+    --cache-dir "$WORK_DIR/bad-cache" --output "$bad_binary" >"$bad_log" 2>&1 || bad_rc=$?
+
+if [ "$bad_rc" -eq 0 ]; then
+    echo "FAIL — 'val t = (7, 9); t.5' built with rc=0; out-of-range tuple index must be a compile error"
+    tail -n 40 "$bad_log"
+    exit 1
+fi
+
+if ! grep -q "tuple index 5 is out of range for a 2-element tuple" "$bad_log"; then
+    echo "FAIL — build failed (rc=$bad_rc) but not with the expected diagnostic"
+    tail -n 40 "$bad_log"
+    exit 1
+fi
+
+good_rc=0
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BINARY" native-build \
+    --source test/fixtures/tuple_index_out_of_range/good --entry-closure --entry "$GOOD_FIXTURE" \
+    --cache-dir "$WORK_DIR/good-cache" --output "$good_binary" >"$good_log" 2>&1 || good_rc=$?
+
+if [ "$good_rc" -ne 0 ]; then
+    echo "FAIL — valid tuple indices (t.0, t.1) failed to build"
+    tail -n 40 "$good_log"
+    exit 1
+fi
+
+good_out="$(timeout 30 "$good_binary" 2>>"$good_log")"
+expected="t0=7 t1=9 sum=16
+whole=(7, 9)"
+
+if [ "$good_out" != "$expected" ]; then
+    echo "FAIL — valid tuple index build ran but produced wrong output"
+    echo "  expected: $expected"
+    echo "  actual:   $good_out"
+    exit 1
+fi
+
+echo "PASS — tuple index out-of-range gate: t.5 rejected at compile time, t.0/t.1 still work"

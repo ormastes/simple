@@ -1,0 +1,137 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
+"""
+Product dynload startup cutover specification.
+
+Proves checked config admission is fail-closed, raw-APK compatibility remains
+a separate deferred owner, checked libraries close in reverse order, and
+observational counters do not invent latency or max-RSS admission.
+"""
+# @req: REQ-SSPEC-APP REQ-SSPEC-APP
+# @cover src/app/startup/dynsmf_autoload.spl 80%
+# @cover src/os/smf/dynsmf_lifecycle.spl 80%
+
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use os.smf.dynsmf_session.{
+    DynSmfManifestEntry,
+    DynSmfLoadedLibrary,
+    DynSmfSession,
+    dynsmf_policy_default
+}
+use os.smf.dynsmf_lifecycle.{dynsmf_session_close}
+use app.startup.dynsmf_autoload.{
+    product_dynload_startup_from_values,
+    product_dynload_startup_metrics_line
+}
+
+fn startup_manifest() -> [DynSmfManifestEntry]:
+    [DynSmfManifestEntry(
+        id: "lib_a",
+        path: "build/dynsmf/product_startup_lib_a.smf",
+        source_module: "test.product.lib_a",
+        artifact_kind: "precompiled_smf",
+        abi_version: "1",
+        default_autoload: false,
+        exports: ["run"])]
+
+describe "product dynload startup config cutover":
+    # @manual scenario evidence
+    it "fails malformed config without touching deferred raw APK compatibility":
+        # @req REQ-SSPEC-APP
+        step("fails malformed config without touching deferred raw APK compatibility")
+        step("Verify: malformed checked config has no raw APK interaction")
+        val owner = product_dynload_startup_from_values(
+            [], "", "", "spec-config-fail", startup_manifest(),
+            "dynload:\n  lib_a: \"presence=maybe\"\n", "", 17, 1)
+        expect(owner.config_ok).to_equal(false)
+        expect(owner.exit_code).to_equal(1)
+        expect(owner.metrics.raw_pack_file_reads).to_equal(-1)
+        expect(owner.metrics.raw_apk_counter_state).to_equal(
+            "not-owned-deferred")
+        expect(owner.metrics.raw_apk_compat_path).to_equal(
+            "app.cli.startup_aspect_packs")
+        expect(owner.metrics.config_file_reads).to_equal(1)
+        expect(owner.close()).to_equal(true)
+
+    it "owns checked dynSMF lifecycle and closes it idempotently":
+        # @req REQ-SSPEC-APP
+        step("owns checked dynSMF lifecycle and closes it idempotently")
+        step("Verify: checked startup has exactly one lifecycle owner")
+        val owner = product_dynload_startup_from_values(
+            [], "", "", "spec-close", startup_manifest(), "", "", 19, 0)
+        expect(owner.config_ok).to_equal(true)
+        expect(owner.exit_code).to_equal(0)
+        expect(owner.closed).to_equal(false)
+        expect(owner.close()).to_equal(true)
+        expect(owner.closed).to_equal(true)
+        expect(owner.close()).to_equal(true)
+
+    it "fails valid config when checked artifact admission fails":
+        # @req REQ-SSPEC-APP
+        step("fails valid config when checked artifact admission fails")
+        step("Verify: checked load failure cannot return startup success")
+        val owner = product_dynload_startup_from_values(
+            [], "", "", "spec-artifact-fail", startup_manifest(),
+            "dynload:\n  lib_a: \"presence=on,placement=dynamic,activation=startup\"\n",
+            "", 23, 1)
+        expect(owner.config_ok).to_equal(true)
+        expect(owner.exit_code).to_equal(1)
+        expect(owner.error).to_contain("dynload startup rejected")
+        expect(owner.close()).to_equal(true)
+
+    it "closes checked handles in reverse load order":
+        # @req REQ-SSPEC-APP
+        step("closes checked handles in reverse load order")
+        step("Verify: one-pass close walks last-loaded first")
+        val session = DynSmfSession(
+            session_id: "spec-reverse-close",
+            generation: 2,
+            next_handle: 3,
+            policy: dynsmf_policy_default(),
+            loaded: [
+                DynSmfLoadedLibrary(id: "first", handle: 101, generation: 1,
+                    status: "loaded", symbol_registry: ""),
+                DynSmfLoadedLibrary(id: "second", handle: 102, generation: 2,
+                    status: "loaded", symbol_registry: "")
+            ],
+            evidence: [])
+        val closed = dynsmf_session_close(session)
+        expect(closed.evidence.len()).to_equal(2)
+        expect(closed.evidence[0].library_id).to_equal("second")
+        expect(closed.evidence[1].library_id).to_equal("first")
+        expect(closed.evidence[0].status).to_equal("unloaded")
+        expect(closed.evidence[1].status).to_equal("unloaded")
+        expect(closed.loaded[0].status).to_equal("unloaded")
+        expect(closed.loaded[1].status).to_equal("unloaded")
+        expect(closed.generation).to_equal(4)
+
+    it "reports latency targets while leaving RSS to outer-harness evidence":
+        # @req REQ-SSPEC-APP
+        step("reports latency targets while leaving RSS to outer-harness evidence")
+        step("Verify: counters distinguish targets from measured evidence")
+        val owner = product_dynload_startup_from_values(
+            [], "", "", "spec-metrics", startup_manifest(), "", "", 29, 0)
+        expect(owner.metrics.elapsed_us).to_equal(29)
+        expect(owner.metrics.latency_target_us).to_equal(0)
+        expect(owner.metrics.latency_target_configured).to_equal(false)
+        expect(owner.metrics.latency_target_source).to_equal(
+            "outer-harness-required")
+        expect(owner.metrics.measured_max_rss_kib).to_equal(0)
+        expect(owner.metrics.rss_target_configured).to_equal(false)
+        expect(owner.metrics.rss_evidence_source).to_equal(
+            "outer-harness-required")
+        expect(owner.metrics.full_tree_scans).to_equal(0)
+        expect(owner.metrics.child_processes).to_equal(0)
+        val line = product_dynload_startup_metrics_line(owner.metrics)
+        expect(line).to_contain("elapsed_us=29")
+        expect(line).to_contain("rss_evidence_source=outer-harness-required")
+        expect(line).to_contain("raw_apk_counter_state=not-owned-deferred")
+        expect(owner.close()).to_equal(true)

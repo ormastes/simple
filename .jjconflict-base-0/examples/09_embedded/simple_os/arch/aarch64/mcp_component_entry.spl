@@ -1,0 +1,105 @@
+# SimpleOS aarch64 in-guest MCP component sanity entry (EDK2/AAVMF lane).
+#
+# Sibling of devtool_component_entry.spl; see that file's header for the boot
+# chain, the forbidden-flag policy (NEVER -kernel, NEVER isa-debug-exit), the
+# per-component build rule, and the compiler statement (RUST SEED).
+#
+# Port of the riscv64 MCP row. On riscv64 this component NEVER LINKED: the
+# closure needs rt_closure_new / rt_closure_func_ptr for DispatchEntry.handler,
+# which the freestanding runtime does not provide. Adding new rt_* in C/Rust is
+# forbidden, so this entry is carried as-is and the gate reports the literal
+# undefined-symbol bill rather than a stub-backed false green.
+#
+# HONEST SCOPE: MCP is exercised at the tool-DISPATCH layer, not as a stdio
+# JSON-RPC server loop — the freestanding aarch64 runtime has no stdin. What is
+# proven, if it links, is request -> real privilege + output-gate code -> real
+# response envelope, rung in BOTH directions (a registered tool must echo the
+# payload AND an unregistered name must be refused), so a dispatcher that
+# always answered the same way fails this row.
+#
+# NEVER interpolate an integer into text — that emits rt_raw_i64_to_string,
+# which the freestanding aarch64 runtime does not provide, and the link dies.
+
+use os.kernel.log.klog_api.{log_init_serial, log_raw_println, LOG_INFO}
+use lib.nogc_async_mut.mcp.dispatch.{DispatchEntry, DispatchRegistry, dispatch_wrap}
+use std.common.privilege.id_path.{id_path_intern}
+use std.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
+use std.common.privilege.principal.{Principal, PrincipalKind}
+
+@unsafe(reason: "bare WFE park has no artifact-verified contract", capabilities: [ffi])
+extern fn rt_aarch64_wfe_spin()
+
+fn _contains(haystack: text, needle: text) -> bool:
+    """Substring test written locally on purpose: this is gate plumbing, not
+    component logic, so implementing it here cannot launder a component pass."""
+    val h = haystack.len()
+    val n = needle.len()
+    if n == 0:
+        return true
+    if n > h:
+        return false
+    var i = 0
+    while i + n <= h:
+        var j = 0
+        var same = true
+        while j < n:
+            if haystack[i + j] != needle[j]:
+                same = false
+                j = n
+            else:
+                j = j + 1
+        if same:
+            return true
+        i = i + 1
+    false
+
+fn mcp_component_row() -> i64:
+    """Dispatch a tool through the REAL MCP dispatcher and print its envelope."""
+    # `dispatch_wrap` checks id_path_prefix_match(token.id_path, entry.required),
+    # i.e. the ENTRY's required path must sit under the TOKEN's path. The token
+    # minted by AuthorityToken.root_for(p) carries "id." + p.id, so the entry's
+    # requirement is registered one segment below it.
+    val required = id_path_intern("id.mcp.echo")
+    val entry = DispatchEntry.echo(required, AuthorityLevel.Write)
+    var reg = DispatchRegistry.new_for_test()
+    reg.register(entry)
+
+    val token = AuthorityToken.root_for(
+        Principal(id: "mcp", kind: PrincipalKind.Anonymous))
+
+    val hit = dispatch_wrap(reg, "echo", ["MCP_RTT_PAYLOAD"], token)
+    log_raw_println("[mcp] request  tool=echo args=[MCP_RTT_PAYLOAD]")
+    log_raw_println("[mcp] response " + hit)
+
+    val miss = dispatch_wrap(reg, "no_such_tool_xyz", [], token)
+    log_raw_println("[mcp] request  tool=no_such_tool_xyz (must be refused)")
+    log_raw_println("[mcp] response " + miss)
+
+    var rc = 0
+    if not _contains(hit, "MCP_RTT_PAYLOAD"):
+        log_raw_println("[mcp] FAIL registered dispatch lost the payload")
+        rc = 1
+    if not _contains(miss, "unregistered_tool"):
+        log_raw_println("[mcp] FAIL unregistered dispatch was not refused")
+        rc = 1
+    if rc == 0:
+        log_raw_println("COMPONENT_MCP_SIMPLEOS_AARCH64_OK dispatch round-trip echoed the payload and refused the unknown tool")
+    rc
+
+@noreturn
+fn _start():
+    """aarch64 in-guest MCP sanity entry. Limine hands off at EL1 with the MMU
+    on and a valid stack; the name `_start` is load-bearing."""
+    log_init_serial(LOG_INFO)
+    log_raw_println("")
+    log_raw_println("[components] SimpleOS aarch64 in-guest toolchain components (EDK2/AAVMF -> BOOTAA64.EFI)")
+    log_raw_println("[components] serial up, exercising real product modules")
+    val rc = mcp_component_row()
+    if rc == 0:
+        log_raw_println("[components] all component rows exited rc=0")
+    else:
+        log_raw_println("[components] at least one component row exited rc=nonzero")
+    log_raw_println("[components] parking")
+    while true:
+        unsafe:
+            rt_aarch64_wfe_spin()

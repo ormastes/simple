@@ -1,0 +1,197 @@
+# codex-system-test
+#
+# Black-box clocked evidence for the plan-bound v1 MUL-low provider.  The
+# bench renders the provider directly through the strict sequential renderer:
+# no product/pipeline wrapper can mask its request, lineage, or completion ABI.
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_unique_workdir, ghdl_analyze_in,
+    ghdl_elaborate_in, ghdl_run_in, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_mul_low_provider.{strict_riscv_scalar_runtime_mul_low_provider}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan, riscv_scalar_semantic_opcode}
+
+fn mul_low_zmmul32() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "rv32-zmmul", isa_profile: "rv32i_zmmul", compressed_decode_profile: "none")
+
+fn mul_low_zmmul64() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "rv64-zmmul", isa_profile: "rv64i_zmmul", compressed_decode_profile: "none")
+
+fn mul_row(plan: RiscvScalarDecoderPlan, entry_id: text) -> i32:
+    var index = 0
+    for entry in plan.entries:
+        if entry.id == entry_id: return index + 1
+        index = index + 1
+    0
+
+fn mul_low_row_width(plan: RiscvScalarDecoderPlan) -> i32:
+    var width = 1
+    var capacity = 2
+    while capacity <= plan.entries.len():
+        width = width + 1
+        capacity = capacity * 2
+    width
+
+fn mul_low_tb(entity_name: text, xlen: i32, row_width: i32, row: i32, opcode: i32,
+    declared_width_is_32: i32, instruction: text, high_lhs: text, high_rhs: text,
+    high_product: text) -> text:
+    """
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.all;
+entity {entity_name}_tb is end entity;
+architecture sim of {entity_name}_tb is
+  signal clk, rst, request_valid, decode_legal, lineage_valid, illegal_valid, completion_ready : std_logic := '0';
+  signal request_provider_tag, decoded_execution_class, decoded_memory_effect : std_logic_vector(2 downto 0) := (others => '0');
+  signal decoded_row_index : std_logic_vector({row_width - 1} downto 0) := (others => '0');
+  signal decoded_semantic_opcode : std_logic_vector(5 downto 0) := (others => '0');
+  signal decoded_declared_operand_width_is_32 : std_logic := '0';
+  signal canonical_instruction, original_instruction : std_logic_vector(31 downto 0) := (others => '0');
+  signal instruction_length_bytes : std_logic_vector(2 downto 0) := "100";
+  signal instruction_rd_field, instruction_rs1_field, instruction_rs2_field : std_logic_vector(4 downto 0) := (others => '0');
+  signal rs1_value, rs2_value, pc_before, fallthrough_pc : std_logic_vector({xlen - 1} downto 0) := (others => '0');
+  signal privilege : std_logic_vector(1 downto 0) := "11";
+  signal provider_event_id, decode_event_id : std_logic_vector(63 downto 0) := (others => '0');
+  signal request_ready, request_accept, completion_valid, provider_protocol_fault : std_logic;
+  signal completion_provider_tag : std_logic_vector(2 downto 0);
+  signal completion_rd : std_logic_vector(4 downto 0);
+  signal completion_rd_write : std_logic;
+  signal completion_rd_value : std_logic_vector({xlen - 1} downto 0);
+  signal completion_provider_event_id, completion_decode_event_id : std_logic_vector(63 downto 0);
+begin
+  dut: entity work.{entity_name} port map(
+    clk=>clk, rst=>rst, request_valid=>request_valid, request_provider_tag=>request_provider_tag,
+    decode_legal=>decode_legal, decoded_row_index=>decoded_row_index,
+    decoded_execution_class=>decoded_execution_class, decoded_memory_effect=>decoded_memory_effect,
+    decoded_semantic_opcode=>decoded_semantic_opcode,
+    decoded_declared_operand_width_is_32=>decoded_declared_operand_width_is_32,
+    canonical_instruction=>canonical_instruction, original_instruction=>original_instruction,
+    instruction_length_bytes=>instruction_length_bytes, instruction_rd_field=>instruction_rd_field,
+    instruction_rs1_field=>instruction_rs1_field, instruction_rs2_field=>instruction_rs2_field,
+    rs1_value=>rs1_value, rs2_value=>rs2_value, pc_before=>pc_before,
+    fallthrough_pc=>fallthrough_pc, privilege=>privilege, provider_event_id=>provider_event_id,
+    decode_event_id=>decode_event_id, lineage_valid=>lineage_valid, illegal_valid=>illegal_valid,
+    completion_ready=>completion_ready, request_ready=>request_ready, request_accept=>request_accept,
+    completion_valid=>completion_valid, completion_provider_tag=>completion_provider_tag,
+    provider_protocol_fault=>provider_protocol_fault, completion_rd=>completion_rd,
+    completion_rd_write=>completion_rd_write, completion_rd_value=>completion_rd_value,
+    completion_provider_event_id=>completion_provider_event_id,
+    completion_decode_event_id=>completion_decode_event_id,
+    completion_privilege=>open, completion_original_instruction=>open,
+    completion_canonical_instruction=>open, completion_instruction_length_bytes=>open,
+    completion_pc_before=>open, completion_pc_after=>open, completion_memory_address=>open,
+    completion_memory_read_mask=>open, completion_memory_write_mask=>open,
+    completion_memory_read_data=>open, completion_memory_write_data=>open,
+    completion_execute_trap_valid=>open, completion_execute_trap_cause=>open,
+    completion_execute_trap_tval=>open, completion_memory_trap_valid=>open,
+    completion_memory_trap_cause=>open, completion_memory_trap_tval=>open,
+    completion_redirect_valid=>open, completion_redirect_target=>open,
+    completion_illegal_valid=>open);
+  process
+    procedure tick is begin wait for 1 ns; clk<='1'; wait for 1 ns; clk<='0'; wait for 1 ns; end procedure;
+    procedure reset_dut is begin
+      rst<='1'; tick; rst<='0'; wait for 1 ns;
+      assert provider_protocol_fault='0' and request_ready='1' and completion_valid='0'
+        report "reset did not recover the MUL provider" severity failure;
+    end procedure;
+    procedure drive(constant insn : std_logic_vector(31 downto 0);
+      constant lhs, rhs : std_logic_vector({xlen - 1} downto 0);
+      constant tag : natural; constant lineage : std_logic; constant semantic : natural) is begin
+      request_valid<='1'; request_provider_tag<=std_logic_vector(to_unsigned(tag,3));
+      decode_legal<='1'; decoded_row_index<=std_logic_vector(to_unsigned({row}, decoded_row_index'length));
+      decoded_execution_class<="100"; decoded_memory_effect<="000";
+      decoded_semantic_opcode<=std_logic_vector(to_unsigned(semantic,6));
+      decoded_declared_operand_width_is_32<='{declared_width_is_32}';
+      canonical_instruction<=insn; original_instruction<=insn;
+      instruction_rd_field<=insn(11 downto 7); instruction_rs1_field<=insn(19 downto 15); instruction_rs2_field<=insn(24 downto 20);
+      rs1_value<=lhs; rs2_value<=rhs; pc_before<=std_logic_vector(to_unsigned(16, {xlen}));
+      fallthrough_pc<=std_logic_vector(to_unsigned(20, {xlen})); privilege<="11";
+      provider_event_id<=x"000000000000005A"; decode_event_id<=x"000000000000005A";
+      lineage_valid<=lineage; illegal_valid<='0';
+    end procedure;
+    procedure await_completion(constant label_text : string) is begin
+      for n in 1 to {xlen + 4} loop if completion_valid='1' then return; end if; tick; end loop;
+      assert false report label_text severity failure;
+    end procedure;
+  begin
+    reset_dut;
+    -- The multiplier's top bit is included; an elaboration-time low-bit shortcut fails here.
+    drive(x"{instruction}", x"{high_lhs}", x"{high_rhs}", 2, '1', {opcode});
+    tick; request_valid<='0'; await_completion("MUL did not complete within its XLEN-bounded latency");
+    assert completion_provider_tag="010" and completion_rd="00101" and completion_rd_write='1' and
+      completion_rd_value=x"{high_product}" and completion_provider_event_id=x"000000000000005A" and
+      completion_decode_event_id=x"000000000000005A" report "MUL completion payload lost plan-bound data" severity failure;
+    tick; assert completion_valid='1' and completion_rd_value=x"{high_product}"
+      report "MUL completion was not held under backpressure" severity failure;
+    completion_ready<='1'; tick; completion_ready<='0';
+    assert completion_valid='0' and request_ready='1' report "MUL completion was not consumed exactly once" severity failure;
+
+    -- Hostile values presented for architectural x0 must be replaced by zero.
+    drive(x"{instruction}" and x"FFF07FFF", x"FFFFFFFFFFFFFFFF"({xlen - 1} downto 0), x"0000000000000009"({xlen - 1} downto 0), 2, '1', {opcode});
+    tick; request_valid<='0'; await_completion("x0 rs1 MUL did not complete");
+    assert completion_rd_value=std_logic_vector(to_unsigned(0,{xlen})) report "x0 rs1 did not suppress hostile operand" severity failure;
+    completion_ready<='1'; tick; completion_ready<='0';
+    drive(x"{instruction}" and x"FE0FFFFF", x"0000000000000009"({xlen - 1} downto 0), x"FFFFFFFFFFFFFFFF"({xlen - 1} downto 0), 2, '1', {opcode});
+    tick; request_valid<='0'; await_completion("x0 rs2 MUL did not complete");
+    assert completion_rd_value=std_logic_vector(to_unsigned(0,{xlen})) report "x0 rs2 did not suppress hostile operand" severity failure;
+    completion_ready<='1'; tick; completion_ready<='0';
+
+    -- Malformed tag-2 request and broken lineage fail-stop until reset.
+    drive(x"027302B3", x"0000000000000001"({xlen - 1} downto 0), x"0000000000000002"({xlen - 1} downto 0), 2, '1', 0);
+    tick; request_valid<='0'; assert provider_protocol_fault='1' and request_ready='0' and completion_valid='0'
+      report "malformed MUL tag/row was not sticky fail-stop" severity failure;
+    tick; assert provider_protocol_fault='1' report "malformed MUL fault was not sticky" severity failure;
+    reset_dut;
+    drive(x"027302B3", x"0000000000000001"({xlen - 1} downto 0), x"0000000000000002"({xlen - 1} downto 0), 2, '0', {opcode});
+    tick; request_valid<='0'; assert provider_protocol_fault='1' and request_ready='0' and completion_valid='0'
+      report "malformed MUL lineage was not sticky fail-stop" severity failure;
+    reset_dut;
+    finish;
+  end process;
+end architecture;
+"""
+
+fn simulate_mul_low(entity_name: text, config: CoreConfig, plan: RiscvScalarDecoderPlan,
+    entry_id: text, semantic_operation: text, declared_width_is_32: i32,
+    instruction: text, high_lhs: text, high_rhs: text, high_product: text) -> bool:
+    val module = strict_riscv_scalar_runtime_mul_low_provider(entity_name, config, plan)
+    if module.is_err(): return false
+    val emitted = render_strict_sequential_hwir(module.ok().unwrap(), "hwir-gen2-riscv-runtime-mul-low-provider-v1")
+    if not emitted.is_success(): return false
+    val workdir = ghdl_unique_workdir(entity_name)
+    if workdir.is_err(): return false
+    val isolated = workdir.ok().unwrap()
+    val path = isolated + "/" + entity_name + ".vhd"
+    val row = mul_row(plan, entry_id)
+    val opcode = riscv_scalar_semantic_opcode(semantic_operation)
+    if not vhdl_write_file(path, emitted.vhdl + "\n" + mul_low_tb(entity_name, config.xlen, mul_low_row_width(plan), row,
+        opcode, declared_width_is_32, instruction, high_lhs, high_rhs, high_product)): return false
+    if not ghdl_analyze_in(path, isolated).success: return false
+    if not ghdl_elaborate_in(entity_name + "_tb", isolated).success: return false
+    ghdl_run_in(entity_name + "_tb", Some("2us"), isolated).success
+
+describe "clocked runtime MUL provider GHDL integration":
+    slow_it "renders exact signed-high, unsigned-high, and RV64 MULW results with x0, held completion, and sticky malformed request recovery":
+        val available = ghdl_available()
+        expect(available).to_equal(true)
+        if not available: return
+        val rv32 = riscv_scalar_decoder_plan("rv32i_zmmul").unwrap()
+        expect(simulate_mul_low("runtime_mul_provider_ghdl_rv32_mulh", mul_low_zmmul32(), rv32,
+            "rv.m.mulh", "multiply_high_signed", 0, "027312B3", "FFFFFFFE", "80000003", "00000000")).to_equal(true)
+        expect(simulate_mul_low("runtime_mul_provider_ghdl_rv32_mulhsu", mul_low_zmmul32(), rv32,
+            "rv.m.mulhsu", "multiply_high_signed_unsigned", 0, "027322B3", "FFFFFFFE", "80000003", "FFFFFFFE")).to_equal(true)
+        expect(simulate_mul_low("runtime_mul_provider_ghdl_rv32_mulhu", mul_low_zmmul32(), rv32,
+            "rv.m.mulhu", "multiply_high_unsigned", 0, "027332B3", "FFFFFFFE", "80000003", "80000001")).to_equal(true)
+        val rv64 = riscv_scalar_decoder_plan("rv64i_zmmul").unwrap()
+        expect(simulate_mul_low("runtime_mul_provider_ghdl_rv64_mulh", mul_low_zmmul64(), rv64,
+            "rv.m.mulh", "multiply_high_signed", 0, "027312B3", "FFFFFFFFFFFFFFFE", "8000000000000003", "0000000000000000")).to_equal(true)
+        expect(simulate_mul_low("runtime_mul_provider_ghdl_rv64_mulhsu", mul_low_zmmul64(), rv64,
+            "rv.m.mulhsu", "multiply_high_signed_unsigned", 0, "027322B3", "FFFFFFFFFFFFFFFE", "8000000000000003", "FFFFFFFFFFFFFFFE")).to_equal(true)
+        expect(simulate_mul_low("runtime_mul_provider_ghdl_rv64_mulhu", mul_low_zmmul64(), rv64,
+            "rv.m.mulhu", "multiply_high_unsigned", 0, "027332B3", "FFFFFFFFFFFFFFFE", "8000000000000003", "8000000000000001")).to_equal(true)
+        expect(simulate_mul_low("runtime_mul_provider_ghdl_rv64_mulw", mul_low_zmmul64(), rv64,
+            "rv64.m.mulw", "multiply_low", 1, "027302BB", "FFFFFFFFFFFFFFFE", "8000000000000003", "FFFFFFFFFFFFFFFA")).to_equal(true)

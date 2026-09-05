@@ -1,0 +1,54 @@
+#!/bin/sh
+# Bind an existing /SERVERS.ELF to loader admission sidecars.
+set -eu
+fail() { echo "simpleos-server-signer: $*" >&2; exit 1; }
+[ "$#" -eq 6 ] || fail 'usage: ARCH SERVER_ELF KERNEL_ELF OUTPUT_DIR SIGNING_KEY PUBLIC_KEY'
+arch=$1 server=$2 kernel=$3 out=$4 private_key=$5 public_key=$6
+case "$arch" in
+    x86_64) prefix=X86_64; key_id=x86-64-qemu-acceptance-v1 ;;
+    riscv64) prefix=RV64; key_id=rv64-qemu-acceptance-v1 ;;
+    arm64) prefix=ARM64; key_id=arm64-qemu-acceptance-v1 ;;
+    *) fail 'ARCH must be x86_64, arm64, or riscv64' ;;
+esac
+[ -s "$server" ] && [ -s "$kernel" ] && [ -s "$private_key" ] && [ -s "$public_key" ] || fail 'missing input'
+eval "contract_tool=\${SIMPLEOS_${prefix}_AUTH_CONTRACT_TOOL:-}"
+[ -x "$contract_tool" ] || fail 'admitted Simple canonical-body producer required'
+eval "mount_id=\${SIMPLEOS_${prefix}_AUTH_MOUNT_ID:-}"
+eval "mount_generation=\${SIMPLEOS_${prefix}_AUTH_MOUNT_GENERATION:-}"
+eval "file_id=\${SIMPLEOS_${prefix}_AUTH_FILE_ID:-}"
+eval "file_generation=\${SIMPLEOS_${prefix}_AUTH_FILE_GENERATION:-}"
+for coordinate in "$mount_id" "$mount_generation" "$file_id" "$file_generation"; do
+    case "$coordinate" in ''|*[!0-9]*|0) fail 'explicit nonzero ExecuteOpenBinding coordinates required' ;; esac
+done
+work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-server-sign.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$out"
+image_hash=$(sha256sum "$server" | awk '{print $1}')
+kernel_hash=$(sha256sum "$kernel" | awk '{print $1}')
+openssl pkey -pubin -in "$public_key" -outform DER -out "$work/public.der" >/dev/null 2>&1 || fail 'invalid public key'
+pub_size=$(wc -c < "$work/public.der" | tr -d ' ')
+[ "$pub_size" -ge 32 ] || fail 'public key DER too short'
+dd if="$work/public.der" of="$work/public.raw" bs=1 skip=$((pub_size - 32)) count=32 2>/dev/null
+trust_hash=$(sha256sum "$work/public.raw" | awk '{print $1}')
+body=$work/signing.body
+"$contract_tool" "$body" "$image_hash" "$kernel_hash" "$trust_hash" \
+    "$mount_id" "$mount_generation" "$file_id" "$file_generation" || fail 'canonical body producer failed'
+[ "$(dd if="$body" bs=1 count=32 2>/dev/null)" = simpleos-executable-admission-v1 ] || fail 'canonical signing domain mismatch'
+if [ -n "${SIMPLEOS_SERVER_AUTH_BODY_OUTPUT:-}" ]; then
+    cp "$body" "$SIMPLEOS_SERVER_AUTH_BODY_OUTPUT"
+fi
+manifest_hash=$(sha256sum "$body" | awk '{print $1}')
+openssl pkeyutl -sign -rawin -inkey "$private_key" -in "$body" -out "$work/signature.raw" >/dev/null 2>&1 || fail 'Ed25519 signing failed'
+openssl pkeyutl -verify -rawin -pubin -inkey "$public_key" -sigfile "$work/signature.raw" -in "$body" >/dev/null 2>&1 || fail 'key mismatch'
+printf 'schema=simpleos-server-manifest-v1\nimage_hash=%s\n' "$image_hash" > "$work/SERVER.MAN"
+printf 'schema=simpleos-server-admission-v1\nmanifest_hash=%s\nkernel_hash=%s\ntrust_root_hash=%s\nmount_id=%s\nmount_generation=%s\nfile_id=%s\nfile_generation=%s\n' \
+    "$manifest_hash" "$kernel_hash" "$trust_hash" "$mount_id" "$mount_generation" "$file_id" "$file_generation" > "$work/SERVER.ADM"
+printf 'schema=simpleos-server-proof-v1\nsigner_key_id=%s\nsignature_hex=%s\n' "$key_id" \
+    "$(od -An -tx1 -v "$work/signature.raw" | tr -d ' \n')" > "$work/SERVER.SIG"
+printf 'schema=simpleos-server-trust-root-v1\nkey_id=%s\npublic_key_hex=%s\n' "$key_id" \
+    "$(od -An -tx1 -v "$work/public.raw" | tr -d ' \n')" > "$work/SERVER.PUB"
+for name in SERVER.MAN SERVER.ADM SERVER.SIG SERVER.PUB; do
+    cp "$work/$name" "$out/$name.tmp"
+    mv "$out/$name.tmp" "$out/$name"
+done
+printf 'simpleos_server_signed=pass arch=%s image_sha256=%s manifest_sha256=%s\n' "$arch" "$image_hash" "$manifest_hash"

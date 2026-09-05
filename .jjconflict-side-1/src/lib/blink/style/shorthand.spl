@@ -1,0 +1,85 @@
+# Shorthand expansion for the blink lane.
+#
+# The expansion logic itself lives in `std.common.css.shorthand`, shared with
+# every other lane that reads CSS, so the shorthand tables are extended in one
+# place instead of copied. This module is the blink-shaped adapter: it turns a
+# `[CssDeclaration]` block into an equivalent block containing only longhands.
+#
+# ORDER AND PRECEDENCE ARE THE WHOLE PROBLEM. Two rules, both easy to get
+# subtly wrong, and both invisible when wrong because the result is a plausible
+# style rather than an error:
+#
+#   1. A shorthand RESETS EVERY LONGHAND IT COVERS, including the ones the
+#      author did not mention. `margin: 0 auto` writes all four margins; a
+#      previous `margin-left: 40px` is GONE, not merged. This is why expansion
+#      emits the complete longhand set and never a partial one.
+#   2. EXPANSION HAPPENS IN PLACE. A shorthand is replaced by its longhands at
+#      its own position in the declaration list, so a longhand written after it
+#      still comes after and still wins, and a shorthand written after a
+#      longhand still clobbers it. Hoisting expansions to the front or the back
+#      inverts one of those two cases.
+#
+# `!important` rides along: every longhand inherits the shorthand's importance,
+# because that is what the shorthand declared.
+#
+# A shorthand whose value cannot be decomposed is DROPPED and RECORDED, not
+# partially applied. A partial expansion would reset some longhands off a value
+# we did not understand and leave the rest stale, which is a wrong style rather
+# than a missing one — and CSS already drops an invalid declaration.
+
+use std.blink.css_parser.parser.{CssDeclaration, CssStyleRule}
+use std.common.css.shorthand.{
+    CssLonghand, expand_shorthand, is_shorthand, longhands_of
+}
+
+# The outcome of expanding one declaration block: the longhand-only block plus
+# the shorthands that were dropped. An empty `dropped` is the only evidence
+# that nothing was silently lost.
+class ExpandedDeclarations:
+    declarations: [CssDeclaration]
+    dropped: [text]
+
+# Expand every shorthand in `declarations`, in place, in source order.
+fn expand_declarations(declarations: [CssDeclaration]) -> ExpandedDeclarations:
+    """Return `declarations` with every shorthand replaced by its longhands."""
+    var out: [CssDeclaration] = []
+    var dropped: [text] = []
+    var i = 0
+    while i < declarations.len():
+        val d = declarations[i as i32]
+        if is_shorthand(d.property):
+            if val longhands = expand_shorthand(d.property, d.value):
+                var j = 0
+                while j < longhands.len():
+                    val lh = longhands[j as i32]
+                    out.push(CssDeclaration(property: lh.property, value: lh.value,
+                        important: d.important))
+                    j = j + 1
+            else:
+                dropped.push(d.property + ": " + d.value)
+        else:
+            out.push(d)
+        i = i + 1
+    ExpandedDeclarations(declarations: out, dropped: dropped)
+
+# Expand every declaration block of a rule.
+fn expand_rule(rule: CssStyleRule) -> CssStyleRule:
+    """Return `rule` with its shorthands expanded into longhands."""
+    CssStyleRule(selector: rule.selector,
+        declarations: expand_declarations(rule.declarations).declarations)
+
+# Expand a whole rule list.
+fn expand_rules(rules: [CssStyleRule]) -> [CssStyleRule]:
+    """Return `rules` with every rule's shorthands expanded."""
+    var out: [CssStyleRule] = []
+    var i = 0
+    while i < rules.len():
+        out.push(expand_rule(rules[i as i32]))
+        i = i + 1
+    out
+
+# The longhand names a shorthand writes, for callers that need the reset set
+# without a value in hand (invalidation, diffing two declaration blocks).
+fn shorthand_longhands(property: text) -> [text]:
+    """Return the longhand names shorthand `property` writes."""
+    longhands_of(property)

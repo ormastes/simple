@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+canonical="$repo_root/test/03_system/infrastructure/app_io_mod_source_run_spec.spl"
+mirror="$repo_root/test/system/infrastructure/app_io_mod_source_run_spec.spl"
+
+check_spec() {
+    spec=$1
+    if grep -q '/home/ormastes/dev/pub/simple' "$spec"; then
+        return 1
+    fi
+    grep -Fq 'use std.nogc_sync_mut.io.env_ops.{cwd}' "$spec" || return 1
+    grep -Fq 'print {quote}CWD={quote} + here' "$spec" || return 1
+    grep -Fq 'expect(result.stdout).to_contain("CWD={cwd()}\n")' "$spec" || return 1
+}
+
+check_spec "$canonical"
+check_spec "$mirror"
+cmp -s "$canonical" "$mirror"
+
+fixture_root=$(mktemp -d)
+trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+relocated="$fixture_root/repo with owner's space"
+mkdir -p "$relocated/test/03_system/infrastructure" "$relocated/test/system/infrastructure"
+cp "$canonical" "$relocated/test/03_system/infrastructure/app_io_mod_source_run_spec.spl"
+cp "$mirror" "$relocated/test/system/infrastructure/app_io_mod_source_run_spec.spl"
+check_spec "$relocated/test/03_system/infrastructure/app_io_mod_source_run_spec.spl"
+check_spec "$relocated/test/system/infrastructure/app_io_mod_source_run_spec.spl"
+
+legacy_mutant="$fixture_root/legacy.spl"
+sed 's|"CWD={cwd()}\\n"|"/home/ormastes/dev/pub/simple\\n"|' "$canonical" > "$legacy_mutant"
+if check_spec "$legacy_mutant"; then
+    echo 'error: accepted legacy-path assertion mutant' >&2
+    exit 1
+fi
+
+unmarked_mutant="$fixture_root/unmarked.spl"
+sed 's/print {quote}CWD={quote} + here/print here/' "$canonical" > "$unmarked_mutant"
+if check_spec "$unmarked_mutant"; then
+    echo 'error: accepted unmarked cwd-output mutant' >&2
+    exit 1
+fi
+
+constant_mutant="$fixture_root/constant.spl"
+sed 's/CWD={cwd()}\\n/CWD=\/tmp\\n/' "$canonical" > "$constant_mutant"
+if check_spec "$constant_mutant"; then
+    echo 'error: accepted constant-cwd assertion mutant' >&2
+    exit 1
+fi
+
+echo 'app.io.mod source-run path contract: PASS'

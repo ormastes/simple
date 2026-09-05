@@ -1,0 +1,246 @@
+# Named literal paragraphs for the SimpleOS / WB-SoC testbench generators.
+#
+# ONLY irreducible text lives here: file-header prose (reflowed differently per
+# XLEN, so not derivable) and fixed VHDL control-flow glue that carries no
+# XLEN-, width-, or name-dependent token. Everything with a parameter in it —
+# entity names, signal declarations, port maps, memory-init functions, the
+# slave FSM, reports/asserts, widths and word addresses — is emitted
+# structurally from descriptors in tb_wb_types.spl / tb_simpleos_wb_gen.spl and
+# is NOT duplicated here.
+#
+# Sections shared by both XLEN siblings carry no rv32/rv64 prefix; `rv32_`/
+# `rv64_` sections are the per-variant prose paragraphs.
+#
+# Determinism: arrays only, no Dict iteration.
+
+# ---------------------------------------------------------------------------
+# tb_rv{32,64}_wb_soc_smoke — UART baud-decode testbench
+# ---------------------------------------------------------------------------
+
+# Falling-edge detector on uart_tx (shared byte-identically by both siblings).
+fn wb_edge_detect_process() -> [text]:
+    var l: [text] = []
+    l = l.push("  process(clk)")
+    l = l.push("  begin")
+    l = l.push("    if rising_edge(clk) then")
+    l = l.push("      if last_tx = '1' and uart_tx = '0' then")
+    l = l.push("        tx_seen <= '1';")
+    l = l.push("      end if;")
+    l = l.push("      last_tx <= uart_tx;")
+    l = l.push("    end if;")
+    l = l.push("  end process;")
+    l
+
+# Start-bit sync + 8-bit LSB-first sample loop, up to the byte_seen flag.
+fn wb_decode_sample_loop() -> [text]:
+    var l: [text] = []
+    l = l.push("  begin")
+    l = l.push("    wait until rst = '0';")
+    l = l.push("    loop")
+    l = l.push("      wait until uart_tx = '0';")
+    l = l.push("      wait for BIT_TIME + BIT_TIME / 2;")
+    l = l.push("      byte_value := 0;")
+    l = l.push("      for bit_idx in 0 to 7 loop")
+    l = l.push("        if uart_tx = '1' then")
+    l = l.push("          byte_value := byte_value + (2 ** bit_idx);")
+    l = l.push("        end if;")
+    l = l.push("        wait for BIT_TIME;")
+    l = l.push("      end loop;")
+    l = l.push("      byte_seen <= '1';")
+    l
+
+# Marker-run matcher: entering the "whole marker matched" branch.
+fn wb_marker_match_open() -> [text]:
+    var l: [text] = []
+    l = l.push("      if marker_idx <= MARKER'length and byte_value = character'pos(MARKER(marker_idx)) then")
+    l = l.push("        if marker_idx = MARKER'length then")
+    l = l.push("          marker_seen <= '1';")
+    l
+
+# Marker-run matcher: stop, advance, restart-on-first-char, reset.
+fn wb_marker_match_close() -> [text]:
+    var l: [text] = []
+    l = l.push("          stop;")
+    l = l.push("        else")
+    l = l.push("          marker_idx <= marker_idx + 1;")
+    l = l.push("        end if;")
+    l = l.push("      elsif byte_value = character'pos(MARKER(1)) then")
+    l = l.push("        marker_idx <= 2;")
+    l = l.push("      else")
+    l = l.push("        marker_idx <= 1;")
+    l = l.push("      end if;")
+    l
+
+# Stop-bit resync + loop close.
+fn wb_decode_loop_tail() -> [text]:
+    var l: [text] = []
+    l = l.push("")
+    l = l.push("      if uart_tx = '0' then")
+    l = l.push("        wait until uart_tx = '1';")
+    l = l.push("      end if;")
+    l = l.push("    end loop;")
+    l = l.push("  end process;")
+    l
+
+# ---------------------------------------------------------------------------
+# Shared scaffolding for the four SimpleOS-boot testbenches
+# ---------------------------------------------------------------------------
+
+# Deassert reset after 200 ns, then idle forever.
+fn tb_reset_release_process() -> [text]:
+    var l: [text] = []
+    l = l.push("  process")
+    l = l.push("  begin")
+    l = l.push("    wait for 200 ns;")
+    l = l.push("    rst <= '0';")
+    l = l.push("    wait;")
+    l = l.push("  end process;")
+    l
+
+fn uart_line_process_comment() -> [text]:
+    var l: [text] = []
+    l = l.push("  -- Accumulate UART bytes into lines; report each completed line and stop on a")
+    l = l.push("  -- terminal marker.")
+    l
+
+# Clocked byte intake, up to the LF test.
+fn uart_line_intake() -> [text]:
+    var l: [text] = []
+    l = l.push("  begin")
+    l = l.push("    if rising_edge(clk) then")
+    l = l.push("      if rst = '0' and debug_uart_valid = '1' then")
+    l = l.push("        ch := character'val(to_integer(unsigned(debug_uart_byte)));")
+    l = l.push("        if ch = LF then")
+    l
+
+# Line-buffer append / CR skip / process close.
+fn uart_line_buffer_tail() -> [text]:
+    var l: [text] = []
+    l = l.push("          llen := 0;")
+    l = l.push("        elsif ch /= CR then")
+    l = l.push("          if llen < 256 then")
+    l = l.push("            llen := llen + 1;")
+    l = l.push("            lbuf(llen) := ch;")
+    l = l.push("          end if;")
+    l = l.push("        end if;")
+    l = l.push("      end if;")
+    l = l.push("    end if;")
+    l = l.push("  end process;")
+    l
+
+fn boot_stuck_timeout_note() -> [text]:
+    var l: [text] = []
+    l = l.push("    -- Safety timeout only; a terminal marker (TEST PASSED/FAILED) stops earlier.")
+    l
+
+# Two-line note explaining why the AXI lanes need a much larger window.
+fn boot_stuck_axi_note() -> [text]:
+    var l: [text] = []
+    l = l.push("    -- Larger than the flat core's window: the stalled FSM plus injected")
+    l = l.push("    -- wait-states run several times more cycles per instruction.")
+    l
+
+fn boot_stuck_tail() -> [text]:
+    var l: [text] = []
+    l = l.push("      stop;")
+    l = l.push("    end if;")
+    l = l.push("    wait;")
+    l = l.push("  end process;")
+    l
+
+# Shared closing paragraph of every boot-testbench file header.
+fn boot_header_tap_note(reflow_wide: bool) -> [text]:
+    var l: [text] = []
+    l = l.push("--")
+    l = l.push("-- The core's parallel debug UART tap (debug_uart_valid/debug_uart_byte) is used")
+    if reflow_wide:
+        l = l.push("-- instead of serial baud-decoding: one byte per store to the UART THR. Bytes are")
+        l = l.push("-- accumulated into lines and reported so the boot transcript is visible.")
+    else:
+        l = l.push("-- instead of serial baud-decoding: one byte per store to the UART THR. Bytes")
+        l = l.push("-- are accumulated into lines and reported so the boot transcript is visible.")
+    l
+
+# Shared closing paragraph of the AXI-lane file headers (byte-identical in
+# both siblings).
+fn axi_header_tap_note() -> [text]:
+    var l: [text] = []
+    l = l.push("--")
+    l = l.push("-- The core's parallel debug UART tap (debug_uart_valid/debug_uart_byte) is used")
+    l = l.push("-- to reconstruct the boot transcript, one byte per store to the UART THR.")
+    l
+
+# Shared opening of the latency-slave process comment.
+fn axi_slave_process_comment_head() -> [text]:
+    var l: [text] = []
+    l = l.push("  -- Latency-injecting synchronous memory slave. One transaction at a time:")
+    l = l.push("  -- accept a request, wait N (1..4, varying) cycles, then pulse mem_rvalid for")
+    l = l.push("  -- one cycle with registered read data (or apply a wstrb write). Requires the")
+    l
+
+# ---------------------------------------------------------------------------
+# Per-variant file-header prose (reflowed per XLEN; irreducible)
+# ---------------------------------------------------------------------------
+
+fn rv32_boot_header_lead() -> [text]:
+    var l: [text] = []
+    l = l.push("-- GHDL SoC-sim testbench: boot the FULL rv32 SimpleOS kernel on the flat 16 MB")
+    l = l.push("-- rv32 soft-core (rv32_exec_core_flat). The kernel image is loaded through the")
+    l = l.push("-- core's init_ram path (\"rv32_flat.mem\", relative to the ghdl -r working dir);")
+    l = l.push("-- scripts/fpga/ghdl_rv32_simpleos_boot.shs flattens the prebuilt kernel ELF.")
+    l
+
+fn rv64_boot_header_lead() -> [text]:
+    var l: [text] = []
+    l = l.push("-- GHDL SoC-sim testbench: boot the FULL rv64 SimpleOS kernel on the flat ~80 MB")
+    l = l.push("-- rv64 soft-core (rv64_exec_core_flat). The kernel image is loaded through the")
+    l = l.push("-- core's init_ram path (\"rv64_flat.mem\", relative to the ghdl -r working dir);")
+    l = l.push("-- scripts/fpga/ghdl_rv64_simpleos_boot.shs flattens the prebuilt kernel ELF")
+    l = l.push("-- (padded so byte 0 = 0x80000000, entry lands at 0x80200000) and truncates the")
+    l = l.push("-- FAT image into \"rv64_ramdisk.mem\" for the 0x88000000 bank.")
+    l
+
+fn rv32_axi_header_lead() -> [text]:
+    var l: [text] = []
+    l = l.push("-- GHDL SoC-sim testbench: boot the FULL rv32 SimpleOS kernel on the")
+    l = l.push("-- SYNTHESIZABLE rv32 soft-core (rv32_exec_core_axi) driven through an EXTERNAL")
+    l = l.push("-- synchronous memory slave that INJECTS WAIT-STATES on every access.")
+    l = l.push("--")
+    l = l.push("-- The whole point of this lane: rv32_exec_core_flat proves the ISA behaviorally")
+    l = l.push("-- with single-cycle combinational RAM; rv32_exec_core_axi must still boot when")
+    l = l.push("-- memory is NOT single-cycle (as PS-DDR4 over an AXI master never is). The slave")
+    l = l.push("-- here backs the same 16 MB main RAM (rv32_flat.mem @ 0x80000000) and 1 MB")
+    l = l.push("-- ramdisk bank (rv32_ramdisk.mem @ 0x88000000) as the flat core's internal")
+    l = l.push("-- arrays, but answers each request only after N wait-states, with N VARYING")
+    l = l.push("-- per access (1..4). If the core ever used a load result before rvalid, or")
+    l = l.push("-- double-advanced pc across a stall, the boot would diverge/hang.")
+    l
+
+fn rv64_axi_header_lead() -> [text]:
+    var l: [text] = []
+    l = l.push("-- GHDL SoC-sim testbench: boot the FULL rv64 SimpleOS kernel on the")
+    l = l.push("-- SYNTHESIZABLE rv64 soft-core (rv64_exec_core_axi) driven through an EXTERNAL")
+    l = l.push("-- synchronous memory slave that INJECTS WAIT-STATES on every access.")
+    l = l.push("--")
+    l = l.push("-- The whole point of this lane: rv64_exec_core_flat proves the ISA behaviorally")
+    l = l.push("-- with single-cycle combinational RAM; rv64_exec_core_axi must still boot when")
+    l = l.push("-- memory is NOT single-cycle (as PS-DDR4 over an AXI master never is). The slave")
+    l = l.push("-- here backs the same ~80 MB main RAM (rv64_flat.mem @ 0x80000000) and 1 MB")
+    l = l.push("-- ramdisk bank (rv64_ramdisk.mem @ 0x88000000) as the flat core's internal")
+    l = l.push("-- arrays, but answers each request only after N wait-states, with N VARYING per")
+    l = l.push("-- access (1..4). If the core ever used a load result before rvalid, double-")
+    l = l.push("-- advanced pc across a stall, or dropped a second beat of a straddling LD/SD,")
+    l = l.push("-- the boot would diverge/hang.")
+    l = l.push("--")
+    l = l.push("-- The 80 MB backing store is a process VARIABLE (not a signal): a 10M x 64-bit")
+    l = l.push("-- signal would create ~640M scalar nets and overflow GHDL mcode's net indexing.")
+    l = l.push("-- The bus is 64-bit wide (the native rv64 word), 8-byte-aligned, with an 8-bit")
+    l = l.push("-- write-strobe applied read-modify-write inside the slave.")
+    l
+
+fn rv64_wb_dut_note() -> [text]:
+    var l: [text] = []
+    l = l.push("  -- soc_top_rv64_sim is the GHDL-elaboratable wrapper (clk/rst exposed); the")
+    l = l.push("  -- board top soc_top_rv64.vhd is Zynq-PS-clocked and cannot elaborate under")
+    l = l.push("  -- raw GHDL. Same board/sim split as tb_rv32_wb_soc_smoke -> soc_top_rv32_sim.")
+    l

@@ -1,0 +1,116 @@
+#!/bin/sh
+# Fail-closed regression gate for the pre-push dispatcher recursion bomb.
+#
+# Incident 2026-09-01: `.git/hooks/pre-push` is a thin launcher that execs the
+# tracked dispatcher `scripts/hooks/pre-push`, and the installer also leaves a
+# byte-identical copy of that launcher at `.git/hooks/pre-push.local`. The
+# dispatcher decided whether to run the local hook by comparing it against
+# `pre-push-conflict-tree-guard.shs` only, so the launcher looked like a
+# legitimate third-party hook and was invoked -- and it exec'd straight back
+# into the dispatcher. One `git push` forked without bound: 16,253 live `sh`
+# processes with a distinct parent each, still climbing, until concurrent
+# builds began dying with EAGAIN "failed to spawn thread" and a running test
+# suite started reporting failures that were pure resource exhaustion.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  -- exit 0, always states how many fixtures ran (never vacuous)
+#   FAIL  -- exit 1
+#   ERROR -- exit 2, nothing was checked
+set -u
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "check-prepush-no-recursion: ERROR — nothing was checked (not in a git repo)"
+    exit 2
+}
+DISPATCHER="$ROOT/scripts/hooks/pre-push"
+[ -f "$DISPATCHER" ] || {
+    echo "check-prepush-no-recursion: ERROR — nothing was checked (missing $DISPATCHER)"
+    exit 2
+}
+
+TMPROOT=$(mktemp -d) || exit 2
+trap 'rm -rf "$TMPROOT"' EXIT INT TERM
+CHECKED=0
+FAILED=''
+
+# Build a throwaway repo wired exactly like a real checkout.
+# $1 = fixture name, $2 = contents of .git/hooks/pre-push.local
+make_fixture() {
+    d="$TMPROOT/$1"
+    mkdir -p "$d" && cd "$d" || return 1
+    git init -q r && cd r || return 1
+    mkdir -p scripts/hooks scripts/check
+    cp "$DISPATCHER" scripts/hooks/pre-push
+    printf '#!/bin/sh\necho canonical-guard-ran\nexit 0\n' \
+        > scripts/check/pre-push-conflict-tree-guard.shs
+    printf '%s' "$2" > .git/hooks/pre-push.local
+    chmod +x .git/hooks/pre-push.local scripts/check/pre-push-conflict-tree-guard.shs \
+        scripts/hooks/pre-push
+    echo x > f
+    git add -A >/dev/null 2>&1
+    git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+    printf '%s' "$d/r"
+}
+
+# Fixture 1 (incident replay): a launcher-shaped local hook must NOT recurse.
+LAUNCHER='#!/bin/sh
+exec sh "$(git rev-parse --show-toplevel)/scripts/hooks/pre-push" "$@"
+'
+repo=$(make_fixture bomb "$LAUNCHER") || {
+    echo "check-prepush-no-recursion: ERROR — nothing was checked (fixture setup failed)"
+    exit 2
+}
+cd "$repo" || exit 2
+n_before=$(ps -e | wc -l)
+# NOTE: status is read directly on the next line, never through a pipe --
+# a pipeline's $? is the last stage's status and has produced false greens here.
+echo "" | timeout 25 sh scripts/hooks/pre-push origin https://example/r >out.txt 2>&1
+rc=$?
+n_after=$(ps -e | wc -l)
+CHECKED=$((CHECKED + 1))
+if [ "$rc" -eq 124 ]; then
+    FAILED="$FAILED recursion-bomb(timed-out)"
+elif [ "$rc" -ne 0 ]; then
+    FAILED="$FAILED recursion-bomb(rc=$rc)"
+elif [ $((n_after - n_before)) -gt 50 ]; then
+    FAILED="$FAILED recursion-bomb(leaked $((n_after - n_before)) procs)"
+fi
+
+# Fixture 2: a genuine third-party local hook must STILL run. The fuse must
+# not be implemented by simply never running local hooks.
+REAL='#!/bin/sh
+echo real-local-hook-ran
+exit 0
+'
+repo=$(make_fixture real "$REAL") || exit 2
+cd "$repo" || exit 2
+echo "" | timeout 25 sh scripts/hooks/pre-push origin https://example/r >out.txt 2>&1
+rc=$?
+CHECKED=$((CHECKED + 1))
+if [ "$rc" -ne 0 ]; then
+    FAILED="$FAILED legit-local-hook(rc=$rc)"
+elif ! grep -q 'real-local-hook-ran' out.txt; then
+    FAILED="$FAILED legit-local-hook(not-invoked)"
+fi
+
+# Fixture 3: a failing local hook must still block the push.
+BAD='#!/bin/sh
+exit 7
+'
+repo=$(make_fixture bad "$BAD") || exit 2
+cd "$repo" || exit 2
+echo "" | timeout 25 sh scripts/hooks/pre-push origin https://example/r >out.txt 2>&1
+rc=$?
+CHECKED=$((CHECKED + 1))
+[ "$rc" -eq 7 ] || FAILED="$FAILED failing-local-hook(rc=$rc,want 7)"
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "check-prepush-no-recursion: ERROR — nothing was checked"
+    exit 2
+fi
+if [ -n "$FAILED" ]; then
+    echo "check-prepush-no-recursion: FAIL — $CHECKED fixture(s) checked,${FAILED}"
+    exit 1
+fi
+echo "check-prepush-no-recursion: PASS — $CHECKED fixture(s) checked, 0 recursion, local hooks still dispatched"
+exit 0

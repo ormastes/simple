@@ -1,0 +1,761 @@
+# Ed25519 — Pure Simple Digital Signatures (RFC 8032)
+#
+# Public facade and point owner. Cohesive arithmetic modules:
+#   - ed25519_field.spl  — Fe25519 and 10-limb field operations
+#   - ed25519_scalar.spl — scalar arithmetic modulo L
+#   - ed25519.spl        — point operations and public key/sign/verify API
+#
+# No SFFI/Rust externs — pure Simple language, suitable for any tier.
+# SHA-512 via std.common.crypto.sha512 (sha512_bytes: [i64] -> [i64]).
+#
+# NOTE: std.common.crypto.sha512 exports sha512_bytes([i64])->[i64], not
+#       sha512([u8])->[u8]. The _pure_ed25519_sha512_u8 wrapper below bridges the types.
+#
+# Public API:
+#   pure_ed25519_keypair_from_seed(seed) -> ([u8], [u8])
+#   pure_ed25519_sign(private_seed, public_key, message) -> [u8]
+#   pure_ed25519_verify(public_key, message, signature) -> bool
+#   pure_ed25519_self_test() -> Result<bool, text>
+
+use std.common.crypto.sha512.{sha512_bytes}
+use std.common.crypto.ed25519_field.{
+    Fe25519, _fe_to_smalllimb, _smalllimb_to_fe,
+    fe_zero, fe_one, fe_add, fe_sub, fe_mul, fe_sq, fe_invert,
+    fe_reduce, fe_from_bytes, fe_to_bytes, fe_neg, fe_is_negative,
+    fe_pow2252m3, _fe_sqrt_m1, _ed25519_d, _ed25519_2d,
+    _x25519_fe_add, _x25519_fe_add_raw, _x25519_fe_sub,
+    _x25519_fe_sub_raw, _x25519_fe_neg, _x25519_fe_mul, _x25519_fe_sq
+}
+use std.common.crypto.ed25519_scalar.{
+    _sc_L, _bytes_to_limbs32, _limbs32_to_bytes, _sc_sub_L,
+    sc_reduce, sc_muladd
+}
+
+# ============================================================================
+# SHA-512 bridge: [u8] -> [u8]  (common/crypto uses [i64] internally)
+# ============================================================================
+
+fn _pure_ed25519_sha512_u8(data: [u8]) -> [u8]:
+    """SHA-512 over [u8] input, returning [u8].
+
+    Bridges the common/crypto sha512_bytes([i64])->[i64] API.
+    Each input byte is widened to i64; each output i64 is masked to u8.
+    """
+    var i64_data: [i64] = []
+    var i: u64 = 0
+    while i < data.len():
+        i64_data.push(data[i].to_i64())
+        i = i + 1
+    val result = sha512_bytes(i64_data)
+    var u8_result: [u8] = []
+    i = 0
+    while i < result.len():
+        u8_result.push((result[i] & 0xFF).to_u8())
+        i = i + 1
+    u8_result
+
+# ============================================================================
+# Extended Point Structs
+# ============================================================================
+
+struct EdPoint:
+    """Point on the Ed25519 Edwards curve in extended coordinates (X, Y, Z, T)."""
+    x: Fe25519
+    y: Fe25519
+    z: Fe25519
+    t: Fe25519
+
+struct SmallEdPoint:
+    x: [u64]
+    y: [u64]
+    z: [u64]
+    t: [u64]
+
+struct EdPointDecodeResult:
+    """Fail-closed result for decoding an attacker-controlled point."""
+    point: EdPoint
+    valid: bool
+
+# ============================================================================
+# Ed25519 Base Point
+# ============================================================================
+
+fn _ed25519_base_point() -> EdPoint:
+    val bx = Fe25519(
+        l0: 0x62d608f25d51a,
+        l1: 0x412a4b4f6592a,
+        l2: 0x75b7171a4b31d,
+        l3: 0x1ff60527118fe,
+        l4: 0x216936d3cd6e5
+    )
+    val by = Fe25519(
+        l0: 0x6666666666658,
+        l1: 0x4cccccccccccc,
+        l2: 0x1999999999999,
+        l3: 0x3333333333333,
+        l4: 0x6666666666666
+    )
+    EdPoint(x: bx, y: by, z: fe_one(), t: fe_mul(bx, by))
+
+# ============================================================================
+# Point Operations
+# ============================================================================
+
+fn ed_point_identity() -> EdPoint:
+    EdPoint(x: fe_zero(), y: fe_one(), z: fe_one(), t: fe_zero())
+
+fn _small_ed_point_identity() -> SmallEdPoint:
+    SmallEdPoint(
+        x: _fe_to_smalllimb(fe_zero()),
+        y: _fe_to_smalllimb(fe_one()),
+        z: _fe_to_smalllimb(fe_one()),
+        t: _fe_to_smalllimb(fe_zero())
+    )
+
+fn _ed_point_to_small(p: EdPoint) -> SmallEdPoint:
+    SmallEdPoint(
+        x: _fe_to_smalllimb(p.x),
+        y: _fe_to_smalllimb(p.y),
+        z: _fe_to_smalllimb(p.z),
+        t: _fe_to_smalllimb(p.t)
+    )
+
+fn _small_ed_point_to_ed(p: SmallEdPoint) -> EdPoint:
+    EdPoint(
+        x: _smalllimb_to_fe(p.x),
+        y: _smalllimb_to_fe(p.y),
+        z: _smalllimb_to_fe(p.z),
+        t: _smalllimb_to_fe(p.t)
+    )
+
+fn _ed_point_add_small_with_2d_small(p1: SmallEdPoint, p2: SmallEdPoint, two_d_small: [u64]) -> SmallEdPoint:
+    val x1 = p1.x
+    val y1 = p1.y
+    val z1 = p1.z
+    val t1 = p1.t
+    val x2 = p2.x
+    val y2 = p2.y
+    val z2 = p2.z
+    val t2 = p2.t
+    val a = _x25519_fe_mul(_x25519_fe_sub(y1, x1), _x25519_fe_sub(y2, x2))
+    val b = _x25519_fe_mul(_x25519_fe_add(y1, x1), _x25519_fe_add(y2, x2))
+    val c = _x25519_fe_mul(_x25519_fe_mul(t1, t2), two_d_small)
+    val z_prod = _x25519_fe_mul(z1, z2)
+    val dd = _x25519_fe_add(z_prod, z_prod)
+    val e = _x25519_fe_sub(b, a)
+    val f = _x25519_fe_sub(dd, c)
+    val g = _x25519_fe_add(dd, c)
+    val h = _x25519_fe_add(b, a)
+    SmallEdPoint(
+        x: _x25519_fe_mul(e, f),
+        y: _x25519_fe_mul(g, h),
+        z: _x25519_fe_mul(f, g),
+        t: _x25519_fe_mul(e, h)
+    )
+
+fn ed_point_add(p1: EdPoint, p2: EdPoint) -> EdPoint:
+    _small_ed_point_to_ed(
+        _ed_point_add_small_with_2d_small(
+            _ed_point_to_small(p1),
+            _ed_point_to_small(p2),
+            _fe_to_smalllimb(_ed25519_2d())
+        )
+    )
+
+fn ed_point_double(p1: EdPoint) -> EdPoint:
+    ed_point_add(p1, p1)
+
+fn _ed_point_double_small(p1: SmallEdPoint) -> SmallEdPoint:
+    val x = p1.x
+    val y = p1.y
+    val z = p1.z
+    val a = _x25519_fe_sq(x)
+    val b = _x25519_fe_sq(y)
+    val z_sq = _x25519_fe_sq(z)
+    val c = _x25519_fe_add_raw(z_sq, z_sq)
+    val d = _x25519_fe_neg(a)
+    val x_plus_y = _x25519_fe_add_raw(x, y)
+    val e = _x25519_fe_sub_raw(_x25519_fe_sub_raw(_x25519_fe_sq(x_plus_y), a), b)
+    val g = _x25519_fe_add_raw(d, b)
+    val f = _x25519_fe_sub_raw(g, c)
+    # RFC 8032 / EFD dbl-2008-hwcd: H = D - B.  Reversing these
+    # operands negates the projective Y coordinate on every doubling and
+    # corrupts scalar multiplication for scalar-dependent window patterns.
+    val h = _x25519_fe_sub_raw(d, b)
+    SmallEdPoint(
+        x: _x25519_fe_mul(e, f),
+        y: _x25519_fe_mul(g, h),
+        z: _x25519_fe_mul(f, g),
+        t: _x25519_fe_mul(e, h)
+    )
+
+fn ed_point_cselect(p0: EdPoint, p1: EdPoint, choose_p1: u64) -> EdPoint:
+    """Constant-time point select: returns p1 if choose_p1=1, else p0.
+
+    Uses XOR-mask pattern: out = a ^ (mask & (a ^ b))
+    where mask = 0 - choose_p1. No data-dependent branch on choose_p1.
+    """
+    val mask: u64 = 0 - choose_p1
+    EdPoint(
+        x: Fe25519(
+            l0: p0.x.l0 ^ (mask & (p0.x.l0 ^ p1.x.l0)),
+            l1: p0.x.l1 ^ (mask & (p0.x.l1 ^ p1.x.l1)),
+            l2: p0.x.l2 ^ (mask & (p0.x.l2 ^ p1.x.l2)),
+            l3: p0.x.l3 ^ (mask & (p0.x.l3 ^ p1.x.l3)),
+            l4: p0.x.l4 ^ (mask & (p0.x.l4 ^ p1.x.l4))
+        ),
+        y: Fe25519(
+            l0: p0.y.l0 ^ (mask & (p0.y.l0 ^ p1.y.l0)),
+            l1: p0.y.l1 ^ (mask & (p0.y.l1 ^ p1.y.l1)),
+            l2: p0.y.l2 ^ (mask & (p0.y.l2 ^ p1.y.l2)),
+            l3: p0.y.l3 ^ (mask & (p0.y.l3 ^ p1.y.l3)),
+            l4: p0.y.l4 ^ (mask & (p0.y.l4 ^ p1.y.l4))
+        ),
+        z: Fe25519(
+            l0: p0.z.l0 ^ (mask & (p0.z.l0 ^ p1.z.l0)),
+            l1: p0.z.l1 ^ (mask & (p0.z.l1 ^ p1.z.l1)),
+            l2: p0.z.l2 ^ (mask & (p0.z.l2 ^ p1.z.l2)),
+            l3: p0.z.l3 ^ (mask & (p0.z.l3 ^ p1.z.l3)),
+            l4: p0.z.l4 ^ (mask & (p0.z.l4 ^ p1.z.l4))
+        ),
+        t: Fe25519(
+            l0: p0.t.l0 ^ (mask & (p0.t.l0 ^ p1.t.l0)),
+            l1: p0.t.l1 ^ (mask & (p0.t.l1 ^ p1.t.l1)),
+            l2: p0.t.l2 ^ (mask & (p0.t.l2 ^ p1.t.l2)),
+            l3: p0.t.l3 ^ (mask & (p0.t.l3 ^ p1.t.l3)),
+            l4: p0.t.l4 ^ (mask & (p0.t.l4 ^ p1.t.l4))
+        )
+    )
+
+fn _small_ed_point_cselect(p0: SmallEdPoint, p1: SmallEdPoint, choose_p1: u64) -> SmallEdPoint:
+    val mask: u64 = 0 - choose_p1
+    SmallEdPoint(
+        x: [
+            p0.x[0]^(mask&(p0.x[0]^p1.x[0])), p0.x[1]^(mask&(p0.x[1]^p1.x[1])),
+            p0.x[2]^(mask&(p0.x[2]^p1.x[2])), p0.x[3]^(mask&(p0.x[3]^p1.x[3])),
+            p0.x[4]^(mask&(p0.x[4]^p1.x[4])), p0.x[5]^(mask&(p0.x[5]^p1.x[5])),
+            p0.x[6]^(mask&(p0.x[6]^p1.x[6])), p0.x[7]^(mask&(p0.x[7]^p1.x[7])),
+            p0.x[8]^(mask&(p0.x[8]^p1.x[8])), p0.x[9]^(mask&(p0.x[9]^p1.x[9]))
+        ],
+        y: [
+            p0.y[0]^(mask&(p0.y[0]^p1.y[0])), p0.y[1]^(mask&(p0.y[1]^p1.y[1])),
+            p0.y[2]^(mask&(p0.y[2]^p1.y[2])), p0.y[3]^(mask&(p0.y[3]^p1.y[3])),
+            p0.y[4]^(mask&(p0.y[4]^p1.y[4])), p0.y[5]^(mask&(p0.y[5]^p1.y[5])),
+            p0.y[6]^(mask&(p0.y[6]^p1.y[6])), p0.y[7]^(mask&(p0.y[7]^p1.y[7])),
+            p0.y[8]^(mask&(p0.y[8]^p1.y[8])), p0.y[9]^(mask&(p0.y[9]^p1.y[9]))
+        ],
+        z: [
+            p0.z[0]^(mask&(p0.z[0]^p1.z[0])), p0.z[1]^(mask&(p0.z[1]^p1.z[1])),
+            p0.z[2]^(mask&(p0.z[2]^p1.z[2])), p0.z[3]^(mask&(p0.z[3]^p1.z[3])),
+            p0.z[4]^(mask&(p0.z[4]^p1.z[4])), p0.z[5]^(mask&(p0.z[5]^p1.z[5])),
+            p0.z[6]^(mask&(p0.z[6]^p1.z[6])), p0.z[7]^(mask&(p0.z[7]^p1.z[7])),
+            p0.z[8]^(mask&(p0.z[8]^p1.z[8])), p0.z[9]^(mask&(p0.z[9]^p1.z[9]))
+        ],
+        t: [
+            p0.t[0]^(mask&(p0.t[0]^p1.t[0])), p0.t[1]^(mask&(p0.t[1]^p1.t[1])),
+            p0.t[2]^(mask&(p0.t[2]^p1.t[2])), p0.t[3]^(mask&(p0.t[3]^p1.t[3])),
+            p0.t[4]^(mask&(p0.t[4]^p1.t[4])), p0.t[5]^(mask&(p0.t[5]^p1.t[5])),
+            p0.t[6]^(mask&(p0.t[6]^p1.t[6])), p0.t[7]^(mask&(p0.t[7]^p1.t[7])),
+            p0.t[8]^(mask&(p0.t[8]^p1.t[8])), p0.t[9]^(mask&(p0.t[9]^p1.t[9]))
+        ]
+    )
+
+fn _small_ed_point_double4(p: SmallEdPoint) -> SmallEdPoint:
+    var out = _ed_point_double_small(p)
+    out = _ed_point_double_small(out)
+    out = _ed_point_double_small(out)
+    _ed_point_double_small(out)
+
+fn _ct_eq_u64_small(a: u64, b: u64) -> u64:
+    val diff = a ^ b
+    ((diff - 1u64) >> 63) & 1u64
+
+fn _small_ed_point_select_16_ct(table: [SmallEdPoint], digit: u64) -> SmallEdPoint:
+    """Select a fixed-window entry without indexing by secret material."""
+    var selected = table[0]
+    var idx: u64 = 1
+    while idx < 16:
+        val choose = _ct_eq_u64_small(digit, idx)
+        selected = _small_ed_point_cselect(selected, table[idx], choose)
+        idx = idx + 1
+    selected
+
+fn _small_ed_point_table_16(base: SmallEdPoint, two_d_small: [u64]) -> [SmallEdPoint]:
+    var table: [SmallEdPoint] = []
+    table.push(_small_ed_point_identity())
+    var current = base
+    table.push(current)
+    var idx: u64 = 2
+    while idx < 16:
+        current = _ed_point_add_small_with_2d_small(p1: current, p2: base, two_d_small: two_d_small)
+        table.push(current)
+        idx = idx + 1
+    table
+
+fn ed_scalar_mul(scalar: [u8], p: EdPoint) -> EdPoint:
+    """Constant-time four-bit-window scalar multiplication: scalar * P.
+
+    The loop count, doubling count, addition count, and table scan are
+    independent of the scalar value.  Each table selection visits all sixteen
+    entries and uses XOR-mask point selection rather than a secret index or
+    branch.
+    """
+    val p_small = _ed_point_to_small(p)
+    val two_d_small = _fe_to_smalllimb(_ed25519_2d())
+    val table = _small_ed_point_table_16(p_small, two_d_small)
+    var acc = _small_ed_point_identity()
+    var window: i64 = 63
+    while window >= 0:
+        acc = _small_ed_point_double4(acc)
+        val window_u = window.to_u64()
+        val byte_idx = window_u / 2
+        val bit_offset = (window_u & 1) * 4
+        val digit = (scalar[byte_idx].to_u64() >> bit_offset) & 0xF
+        val selected = _small_ed_point_select_16_ct(table, digit)
+        acc = _ed_point_add_small_with_2d_small(acc, selected, two_d_small)
+        window = window - 1
+    _small_ed_point_to_ed(acc)
+
+fn ed_scalar_mul_basepoint(scalar: [u8]) -> EdPoint:
+    ed_scalar_mul(scalar, _ed25519_base_point())
+
+# ============================================================================
+# Point Encoding / Decoding (RFC 8032 §5.1.2 / §5.1.3)
+# ============================================================================
+
+fn ed_point_encode(p: EdPoint) -> [u8]:
+    val z_inv = fe_invert(p.z)
+    val x = fe_mul(p.x, z_inv)
+    val y = fe_mul(p.y, z_inv)
+    var sign_bit: u8 = 0
+    if fe_is_negative(x):
+        sign_bit = (128).to_u8()
+    val y_bytes = fe_to_bytes(y)
+    var encoded: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        if i == 31:
+            encoded.push(y_bytes[i] | sign_bit)
+        else:
+            encoded.push(y_bytes[i])
+        i = i + 1
+    encoded
+
+fn _ed25519_y_encoding_is_canonical(bytes: [u8]) -> bool:
+    """Return true exactly when the encoded y-coordinate is less than p."""
+    if bytes.len() != 32:
+        return false
+    val high = bytes[31] & 0x7F
+    if high < 0x7F:
+        return true
+    var idx: i64 = 30
+    while idx >= 1:
+        if bytes[idx.to_u64()] < 0xFF:
+            return true
+        idx = idx - 1
+    bytes[0] < 0xED
+
+fn _fe_is_zero(a: Fe25519) -> bool:
+    val reduced = fe_reduce(a)
+    (reduced.l0 | reduced.l1 | reduced.l2 | reduced.l3 | reduced.l4) == 0
+
+fn _ed_point_decode_invalid() -> EdPointDecodeResult:
+    EdPointDecodeResult(point: ed_point_identity(), valid: false)
+
+fn ed_point_decode(bytes: [u8]) -> EdPointDecodeResult:
+    """Strict RFC 8032 point decoding.
+
+    Rejects wrong lengths, non-canonical y encodings, values for which the
+    curve equation has no square root, and the forbidden negative encoding
+    of x = 0.  Subgroup membership is checked separately by the verifier.
+    """
+    if not _ed25519_y_encoding_is_canonical(bytes):
+        return _ed_point_decode_invalid()
+    val x_sign: u64 = (bytes[31].to_u64() >> 7) & 1
+    var y_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        y_bytes.push(bytes[i])
+        i = i + 1
+    y_bytes[31] = y_bytes[31] & 0x7F
+    val y = fe_from_bytes(y_bytes)
+    val y_sq = fe_sq(y)
+    val d = _ed25519_d()
+    val u = fe_sub(y_sq, fe_one())
+    val v = fe_add(fe_mul(d, y_sq), fe_one())
+    val v_sq = fe_sq(v)
+    val v_cubed = fe_mul(v_sq, v)
+    val v4 = fe_sq(v_sq)
+    val v7 = fe_mul(v4, v_cubed)
+    val uv7 = fe_mul(u, v7)
+    val uv7_pow = fe_pow2252m3(uv7)
+    var x = fe_mul(fe_mul(u, v_cubed), uv7_pow)
+    var check = fe_sub(fe_mul(v, fe_sq(x)), u)
+    if not _fe_is_zero(check):
+        x = fe_mul(x, _fe_sqrt_m1())
+        check = fe_sub(fe_mul(v, fe_sq(x)), u)
+        if not _fe_is_zero(check):
+            return _ed_point_decode_invalid()
+    if _fe_is_zero(x) and x_sign == 1:
+        return _ed_point_decode_invalid()
+    if fe_is_negative(x) != (x_sign == 1):
+        x = fe_neg(x)
+    val t = fe_mul(x, y)
+    EdPointDecodeResult(
+        point: EdPoint(x: x, y: y, z: fe_one(), t: t),
+        valid: true
+    )
+
+# ============================================================================
+# SHA-512 mod L helper
+# ============================================================================
+
+fn _pure_ed25519_sha512_modl(data: [u8]) -> [u8]:
+    val hash = _pure_ed25519_sha512_u8(data)
+    sc_reduce(hash)
+
+# ============================================================================
+# Ed25519 Scalar Clamping
+# ============================================================================
+
+fn _pure_ed25519_clamp(h: [u8]) -> [u8]:
+    """Clamp the lower 32 bytes of SHA-512 output per Ed25519 spec."""
+    var clamped: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        var byte = h[i]
+        if i == 0:
+            byte = byte & 0xF8
+        if i == 31:
+            byte = (byte & 0x7F) | 0x40
+        clamped.push(byte)
+        i = i + 1
+    clamped
+
+fn _pure_ed25519_reduce_32_to_scalar(s: [u8]) -> [u8]:
+    var wide: [u8] = []
+    var i: u64 = 0
+    while i < 64:
+        if i < s.len():
+            wide.push(s[i])
+        else:
+            wide.push(0)
+        i = i + 1
+    sc_reduce(wide)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _pure_ed25519_sc_is_geq_L(s: [u8]) -> bool:
+    """Check if 32-byte scalar s >= L (used to reject non-canonical S in verify)."""
+    val limbs = _bytes_to_limbs32(s, 8)
+    val sub = _sc_sub_L(limbs)
+    sub[8] == 0
+
+fn _ed25519_bytes_equal(a: [u8], b: [u8]) -> bool:
+    """Constant-time byte array comparison."""
+    if a.len() != b.len():
+        return false
+    var diff: u8 = 0
+    var i: u64 = 0
+    while i < a.len():
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    diff == 0
+
+fn _ed_point_is_identity(p: EdPoint) -> bool:
+    """Compare a point to the canonical identity encoding in constant time."""
+    val encoded = ed_point_encode(p)
+    var diff: u8 = encoded[0] ^ 1
+    var i: u64 = 1
+    while i < 32:
+        diff = diff | encoded[i]
+        i = i + 1
+    diff == 0
+
+fn _ed_point_is_prime_order_nonidentity(p: EdPoint) -> bool:
+    """Reject identity, torsion, and mixed-subgroup points.
+
+    A point is in the prime-order subgroup exactly when multiplying it by the
+    prime group order L yields the identity.  The explicit non-identity gate
+    also rejects the trivial order-one point.
+    """
+    if _ed_point_is_identity(p):
+        return false
+    val order_l = _limbs32_to_bytes(_sc_L(), 32)
+    _ed_point_is_identity(ed_scalar_mul(order_l, p))
+
+# ============================================================================
+# Public API — RFC 8032 §5.1 conformant
+# ============================================================================
+
+fn pure_ed25519_keypair_from_seed(seed: [u8]) -> ([u8], [u8]):
+    """Derive (private_seed, public_key) from a 32-byte seed.
+
+    Per RFC 8032 §5.1.5:
+      h = SHA-512(seed)
+      a = clamp(h[0..32])
+      A = a * B
+      encode A as 32 bytes
+    """
+    val h = _pure_ed25519_sha512_u8(seed)
+    val a = _pure_ed25519_clamp(h)
+    val big_a = ed_scalar_mul_basepoint(_pure_ed25519_reduce_32_to_scalar(a))
+    val pk = ed_point_encode(big_a)
+    (seed, pk)
+
+fn ed25519_pubkey(seed: [u8]) -> [u8]:
+    """Derive the Ed25519 public key from a 32-byte seed.
+
+    Convenience wrapper: returns only the public key from
+    pure_ed25519_keypair_from_seed.
+    """
+    val h = _pure_ed25519_sha512_u8(seed)
+    val a = _pure_ed25519_clamp(h)
+    val big_a = ed_scalar_mul_basepoint(_pure_ed25519_reduce_32_to_scalar(a))
+    ed_point_encode(big_a)
+
+fn pure_ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    """Sign a message with Ed25519. Returns a 64-byte signature (R || S).
+
+    Per RFC 8032 §5.1.6:
+      h = SHA-512(seed)
+      a = clamp(h[0..32]); prefix = h[32..64]
+      r = SHA-512(prefix || M) mod L
+      R = r * B
+      k = SHA-512(encode(R) || A || M) mod L
+      S = (r + k * a) mod L
+      signature = encode(R) || S
+    """
+    val h = _pure_ed25519_sha512_u8(private_seed)
+    val a = _pure_ed25519_clamp(h)
+
+    var prefix: [u8] = []
+    var i: u64 = 32
+    while i < 64:
+        prefix.push(h[i])
+        i = i + 1
+
+    var prefix_msg: [u8] = []
+    i = 0
+    while i < prefix.len():
+        prefix_msg.push(prefix[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        prefix_msg.push(message[i])
+        i = i + 1
+    val r = _pure_ed25519_sha512_modl(prefix_msg)
+
+    val big_r = ed_scalar_mul_basepoint(r)
+    val r_enc = ed_point_encode(big_r)
+
+    var k_input: [u8] = []
+    i = 0
+    while i < r_enc.len():
+        k_input.push(r_enc[i])
+        i = i + 1
+    i = 0
+    while i < public_key.len():
+        k_input.push(public_key[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        k_input.push(message[i])
+        i = i + 1
+    val k = _pure_ed25519_sha512_modl(k_input)
+
+    val s = sc_muladd(k, a, r)
+
+    var sig: [u8] = []
+    i = 0
+    while i < 64:
+        if i < 32:
+            sig.push(r_enc[i])
+        else:
+            sig.push(s[i - 32])
+        i = i + 1
+    sig
+
+struct PureEd25519SeedSignatureV1:
+    """Public material produced by same-module seed derivation and signing."""
+    public_key: [u8]
+    signature: [u8]
+
+fn pure_ed25519_sign_from_seed_v1(
+    private_seed: [u8], message: [u8]
+) -> PureEd25519SeedSignatureV1:
+    """Avoid cross-module tuple projection of the derived keypair.
+
+    The seed is borrowed. Its authority owner remains responsible for secure
+    storage and zeroization; this pure arithmetic helper makes no wipe claim.
+    """
+    val pair = pure_ed25519_keypair_from_seed(private_seed)
+    val public_key = pair.1
+    PureEd25519SeedSignatureV1(
+        public_key: public_key,
+        signature: pure_ed25519_sign(private_seed, public_key, message))
+
+fn pure_ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
+    """Verify an Ed25519 signature. Returns true on success.
+
+    Per RFC 8032 §5.1.7:
+      parse R = signature[0..32], S = signature[32..64]
+      reject if S >= L
+      A = decode(public_key); R = decode(R_bytes)
+      k = SHA-512(R || A || M) mod L
+      check  S * B  ==  R + k * A
+    """
+    if signature.len() != 64:
+        return false
+    if public_key.len() != 32:
+        return false
+
+    var r_bytes: [u8] = []
+    var s_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        r_bytes.push(signature[i])
+        i = i + 1
+    while i < 64:
+        s_bytes.push(signature[i])
+        i = i + 1
+
+    if _pure_ed25519_sc_is_geq_L(s_bytes):
+        return false
+
+    val decoded_a = ed_point_decode(public_key)
+    if not decoded_a.valid:
+        return false
+    val decoded_r = ed_point_decode(r_bytes)
+    if not decoded_r.valid:
+        return false
+    val big_a = decoded_a.point
+    val big_r = decoded_r.point
+    if not _ed_point_is_prime_order_nonidentity(big_a):
+        return false
+    if not _ed_point_is_prime_order_nonidentity(big_r):
+        return false
+
+    var k_input: [u8] = []
+    i = 0
+    while i < r_bytes.len():
+        k_input.push(r_bytes[i])
+        i = i + 1
+    i = 0
+    while i < public_key.len():
+        k_input.push(public_key[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        k_input.push(message[i])
+        i = i + 1
+    val k = _pure_ed25519_sha512_modl(k_input)
+
+    val sb = ed_scalar_mul_basepoint(s_bytes)
+    val ka = ed_scalar_mul(k, big_a)
+    val rhs = ed_point_add(p1: big_r, p2: ka)
+
+    val sb_enc = ed_point_encode(sb)
+    val rhs_enc = ed_point_encode(rhs)
+    _ed25519_bytes_equal(a: sb_enc, b: rhs_enc)
+
+# ============================================================================
+# Self-Test — RFC 8032 Section 7.1 Test Vectors
+# ============================================================================
+
+fn pure_ed25519_self_test() -> Result<bool, text>:
+    """Run Ed25519 against RFC 8032 §7.1 test vectors."""
+    _ed25519_self_test_pure()
+
+fn _ed25519_self_test_pure() -> Result<bool, text>:
+    # --- Test Vector 1 (RFC 8032 §7.1, TEST 1) ---
+    val seed1: [u8] = [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+    val expected_pub1: [u8] = [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
+        0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
+        0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
+        0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a
+    ]
+    val expected_sig1: [u8] = [
+        0xe5, 0x56, 0x43, 0x00, 0xc3, 0x60, 0xac, 0x72,
+        0x90, 0x86, 0xe2, 0xcc, 0x80, 0x6e, 0x82, 0x8a,
+        0x84, 0x87, 0x7f, 0x1e, 0xb8, 0xe5, 0xd9, 0x74,
+        0xd8, 0x73, 0xe0, 0x65, 0x22, 0x49, 0x01, 0x55,
+        0x5f, 0xb8, 0x82, 0x15, 0x90, 0xa3, 0x3b, 0xac,
+        0xc6, 0x1e, 0x39, 0x70, 0x1c, 0xf9, 0xb4, 0x6b,
+        0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24,
+        0x65, 0x51, 0x41, 0x43, 0x8e, 0x7a, 0x10, 0x0b
+    ]
+    val msg1: [u8] = []
+
+    val kp1 = pure_ed25519_keypair_from_seed(seed1)
+    val pub1 = kp1.1
+    if not _ed25519_bytes_equal(a: pub1, b: expected_pub1):
+        return Err("Ed25519 self-test FAIL: test vector 1 public key mismatch")
+
+    val sig1 = pure_ed25519_sign(private_seed: seed1, public_key: pub1, message: msg1)
+    if not _ed25519_bytes_equal(a: sig1, b: expected_sig1):
+        return Err("Ed25519 self-test FAIL: test vector 1 signature mismatch")
+
+    if not pure_ed25519_verify(public_key: pub1, message: msg1, signature: sig1):
+        return Err("Ed25519 self-test FAIL: test vector 1 verify rejected valid signature")
+
+    var bad_sig1: [u8] = []
+    var bsi: u64 = 0
+    while bsi < sig1.len():
+        bad_sig1.push(sig1[bsi])
+        bsi = bsi + 1
+    bad_sig1[0] = bad_sig1[0] ^ 0x01
+    if pure_ed25519_verify(public_key: pub1, message: msg1, signature: bad_sig1):
+        return Err("Ed25519 self-test FAIL: verify accepted corrupted signature")
+
+    # --- Test Vector 2 (RFC 8032 §7.1, TEST 2) ---
+    val seed2: [u8] = [
+        0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda,
+        0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11, 0x4e, 0x0f,
+        0x5b, 0x8a, 0x31, 0x9f, 0x35, 0xab, 0xa6, 0x24,
+        0xda, 0x8c, 0xf6, 0xed, 0x4f, 0xb8, 0xa6, 0xfb
+    ]
+    val expected_pub2: [u8] = [
+        0x3d, 0x40, 0x17, 0xc3, 0xe8, 0x43, 0x89, 0x5a,
+        0x92, 0xb7, 0x0a, 0xa7, 0x4d, 0x1b, 0x7e, 0xbc,
+        0x9c, 0x98, 0x2c, 0xcf, 0x2e, 0xc4, 0x96, 0x8c,
+        0xc0, 0xcd, 0x55, 0xf1, 0x2a, 0xf4, 0x66, 0x0c
+    ]
+    val expected_sig2: [u8] = [
+        0x92, 0xa0, 0x09, 0xa9, 0xf0, 0xd4, 0xca, 0xb8,
+        0x72, 0x0e, 0x82, 0x0b, 0x5f, 0x64, 0x25, 0x40,
+        0xa2, 0xb2, 0x7b, 0x54, 0x16, 0x50, 0x3f, 0x8f,
+        0xb3, 0x76, 0x22, 0x23, 0xeb, 0xdb, 0x69, 0xda,
+        0x08, 0x5a, 0xc1, 0xe4, 0x3e, 0x15, 0x99, 0x6e,
+        0x45, 0x8f, 0x36, 0x13, 0xd0, 0xf1, 0x1d, 0x8c,
+        0x38, 0x7b, 0x2e, 0xae, 0xb4, 0x30, 0x2a, 0xee,
+        0xb0, 0x0d, 0x29, 0x16, 0x12, 0xbb, 0x0c, 0x00
+    ]
+    val msg2: [u8] = [0x72]
+
+    val kp2 = pure_ed25519_keypair_from_seed(seed2)
+    val pub2 = kp2.1
+    if not _ed25519_bytes_equal(a: pub2, b: expected_pub2):
+        return Err("Ed25519 self-test FAIL: test vector 2 public key mismatch")
+
+    val sig2 = pure_ed25519_sign(private_seed: seed2, public_key: pub2, message: msg2)
+    if not _ed25519_bytes_equal(a: sig2, b: expected_sig2):
+        return Err("Ed25519 self-test FAIL: test vector 2 signature mismatch")
+
+    if not pure_ed25519_verify(public_key: pub2, message: msg2, signature: sig2):
+        return Err("Ed25519 self-test FAIL: test vector 2 verify rejected valid signature")
+
+    Ok(true)
+
+# Stable public facade. Arithmetic helpers remain private to their modules.
+export pure_ed25519_keypair_from_seed, ed25519_pubkey
+export pure_ed25519_sign, pure_ed25519_verify, pure_ed25519_self_test
+export PureEd25519SeedSignatureV1, pure_ed25519_sign_from_seed_v1

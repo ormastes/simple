@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+thread_sffi=src/lib/nogc_async_mut/thread_sffi.spl
+thread_pool=src/lib/nogc_async_mut/thread_pool.spl
+
+for owner in "$thread_sffi" "$thread_pool"; do
+    test -f "$owner" || { echo "thread unsafe boundary: missing $owner" >&2; exit 1; }
+    if grep -Fq 'unsafe(capabilities: [ffi]):' "$owner"; then
+        echo "thread unsafe boundary: bootstrap-incompatible lexical scope in $owner" >&2
+        exit 1
+    fi
+done
+
+for leaf in _thread_join_raw _mutex_lock_raw _condvar_wait_raw; do
+    grep -Fq "fn $leaf(" "$thread_sffi" || {
+        echo "thread unsafe boundary: missing $leaf" >&2
+        exit 1
+    }
+done
+grep -Fq 'fn _thread_pool_spawn_worker_raw(' "$thread_pool" || {
+    echo "thread unsafe boundary: missing pool worker leaf" >&2
+    exit 1
+}
+
+# Raw leaves are scalar direct-call boundaries; prohibit common sources of
+# allocation, copying, looping, and conditional dispatch in their bounded block.
+raw_block=$(sed -n '/^# Bootstrap-compatible private FFI leaves/,/^# =/p' "$thread_sffi")
+if printf '%s\n' "$raw_block" | grep -Eq '\[\]|\.push\(|\.clone\(|\b(for|while|if|match)\b'; then
+    echo "thread unsafe boundary: raw leaf gained allocation/copy/control flow" >&2
+    exit 1
+fi
+
+echo "thread unsafe bootstrap boundaries: PASS"

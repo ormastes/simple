@@ -1,0 +1,31 @@
+# C-runtime Startup Bridge — the arch-independent half of HalCstart.
+#
+# Every `arch/<arch>/cstart.spl` handed the same body to the baremetal
+# runtime: call `baremetal_main(argc, argv)`, treat setjmp as a no-op
+# returning 0, and implement longjmp/exit as `__spl_exit`. The six copies
+# differed only in the header comment and in a `JmpBuf` match whose arms
+# all returned 0. That shared body lives here; the per-arch modules keep
+# the HalCstart-shaped entry points the trait surface requires.
+
+use os.kernel.arch.arch_context.{BootArgs, JmpBuf}
+use os.kernel.arch.hal.{CstartError}
+use os.runtime.baremetal.runtime_minimal.{main as baremetal_main, __spl_exit}
+
+fn cstart_init_common(boot_args: BootArgs) -> Result<i32, CstartError>:
+    """Hand the loader-supplied boot args to the baremetal runtime entry."""
+    Result.Ok(baremetal_main(boot_args.argc as i32, boot_args.argv_addr))
+
+fn setjmp_common(_buf: JmpBuf) -> i32:
+    """No saved context yet on any arch — always the first-return value."""
+    0
+
+fn longjmp_common(_buf: JmpBuf, value: i32) -> i32:
+    """Without a saved frame the only honest unwind is process exit."""
+    val normalized = if value == 0: 1 else: value
+    __spl_exit(normalized)
+    -1
+
+fn exit_common(code: i32) -> i32:
+    """Terminate via the baremetal runtime's exit path."""
+    __spl_exit(code)
+    -1

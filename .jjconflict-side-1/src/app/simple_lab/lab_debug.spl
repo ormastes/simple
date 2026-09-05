@@ -1,0 +1,413 @@
+# Simple Lab debug/profile endpoints + `%profile` cell magic — Stream P10.
+#
+# Design: doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md §9
+#         (plus §7 for the profile tiers this module renders honestly)
+# Plan:   doc/03_plan/agent_tasks/unified_debug_profile_capability_parallel_plan_2026-08-09.md (P10)
+#
+# This module owns the HTTP-shaped half of design §9: the per-lab-session
+# debug registry, the JSON encoders for `DebugState`/`ProfileReport`, and the
+# `%profile` cell magic. `lab_server.spl` only routes to the handlers here, so
+# the hot server file takes a minimal diff.
+#
+# ============================ VALUE-SEMANTICS RULES =========================
+# Classes and structs in this language are VALUE types (`val b = a` copies),
+# and nothing in the type system flags a lost mutation. Three consequences are
+# load-bearing here and are the reason this file looks the way it does:
+#
+#  1. **One trait over one value, acquired through a SINGLE accessor.** A
+#     capability group must never be assembled by PAIRING `session.debug()`
+#     with `session.profile()` — those are two independent copies that diverge
+#     the moment either is stepped (measured RED by P2; see
+#     doc/08_tracking/bug/capability_group_from_unsound_under_value_semantics_2026-08-09.md).
+#     A registry entry therefore holds exactly ONE `DebugProfiler`, acquired
+#     once at attach via `ref_debug_profiler(session)`, and every later
+#     operation mutates THAT value.
+#  2. **The acquisition must be a function's TAIL expression.** Measured on
+#     this exact shape: `ref_debug_profiler(session)` yields a live handle
+#     ONLY when it is the returned expression of a function; bind it to a
+#     local (or drop it straight into a constructor) in the SAME frame that
+#     built `session` and the stored handle silently stops aliasing the real
+#     target. The symptom is brutal because it is PARTIAL: `step`/`resume`
+#     keep working (they mutate through the target's class-typed `vm`
+#     sub-object, which still aliases) while `set_breakpoint` and
+#     `profile_begin` are discarded — breakpoints never arm and every profile
+#     window reports `profile_end-without-profile_begin`. No compiler
+#     complaint, and writing the copy back afterwards does NOT repair it.
+#     Hence `_lab_ref_acquire` below: one function whose whole body exists so
+#     that the acquisition is its tail. Attach diagnostics are obtained by a
+#     separate probe attach (`_lab_ref_attach_diag`) rather than by binding
+#     the handle first. Filed as
+#     doc/08_tracking/bug/ref_debug_profiler_handle_stops_aliasing_unless_tail_expression_2026-08-09.md.
+#     Once that defect is fixed the two helpers collapse back into one.
+#  3. **The registry is mutated through `me` methods, never through a
+#     by-value parameter.** A free function taking `registry: LabDebugRegistry`
+#     receives a COPY, so its mutations would be invisible to the caller. That
+#     is why `%profile`'s attached-lane path is a method on the registry while
+#     only its self-contained path (which owns its own scratch lane) is free.
+#
+# ============================ PROFILE LIFECYCLE =============================
+# `AttachOpts.profile` arms profiling AT ATTACH and it is NOT toggleable
+# afterwards — GPU PROF-1 step counting cannot be switched on once a program
+# is uploaded, so the shared contract makes attach the single arming point on
+# every lane, `ref` included. `POST .../debug/profile/begin` therefore opens a
+# measurement WINDOW on an already-armed target; it does not arm one. A target
+# attached with `profile:false` answers `end` with an `Unavailable` report
+# carrying `reason=profiling-disabled-at-attach`, which this module forwards
+# verbatim rather than papering over.
+#
+# ============================ ABSENCE, NOT ZERO =============================
+# `PROFILE_ABSENT` is -1 and means "not measured". It is rendered as JSON
+# `null`, never as `0` and never as `-1`: a `0` would chart as an
+# instantaneous measurement and a raw `-1` invites arithmetic. The paired
+# `*_present` booleans let a consumer branch without inspecting the sentinel.
+
+use std.common.debug.capability.{CapLevel, cap_level_name}
+use std.common.debug.debug_target.{DebugState}
+use std.common.debug.profile_target.{ProfileReport, PROFILE_ABSENT, profile_report_unavailable, profile_report_summary, profile_has_steps, profile_has_device_time}
+use std.common.debug.debug_profiler.{DebugProfiler}
+use std.common.debug.session_core.{AttachOpts, attach_is_ok, attach_is_skip}
+use std.common.debug.ref_debug_session.{RefDebugSession, ref_debug_profiler, REF_KIND}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string, json_to_number, json_to_boolean}
+use app.ui.web.ws_handler.{escape_json_string}
+
+pub val LAB_DEBUG_DEFAULT_BUDGET: i64 = 100000
+pub val LAB_DEBUG_DEFAULT_LOG_CAP: i64 = 256
+pub val LAB_PROFILE_MAGIC: text = "%profile"
+
+# ============================================================================
+# JSON request-field helpers.
+#
+# `lab_server.spl` already has a text-field reader; numbers and booleans need
+# their own, because `json_to_string` returns nil for a non-string node and a
+# caller that only had the text reader would silently read every numeric knob
+# as "" (i.e. as its default). Each helper takes an explicit fallback so an
+# ABSENT field and a malformed field behave identically and visibly.
+# ============================================================================
+
+pub fn lab_dbg_json_text(body: text, key: text, fallback: text) -> text:
+    val raw = json_to_string(json_object_get(json_parse(body), key))
+    if raw == nil:
+        return fallback
+    raw
+
+pub fn lab_dbg_json_i64(body: text, key: text, fallback: i64) -> i64:
+    val raw = json_to_number(json_object_get(json_parse(body), key))
+    if raw == nil:
+        return fallback
+    val n: f64 = raw
+    n as i64
+
+pub fn lab_dbg_json_bool(body: text, key: text, fallback: bool) -> bool:
+    val raw = json_to_boolean(json_object_get(json_parse(body), key))
+    if raw == nil:
+        return fallback
+    val b: bool = raw
+    b
+
+# ============================================================================
+# JSON encoders
+# ============================================================================
+
+fn _lab_i64_list_json(values: [i64]) -> text:
+    var parts: [text] = []
+    for v in values:
+        parts.push("{v}")
+    val joined = parts.join(",")
+    "[{joined}]"
+
+fn _lab_absent_or(value: i64) -> text:
+    """Render a possibly-absent measurement. `PROFILE_ABSENT` becomes JSON
+    `null` — never `0` (which reads as a real instantaneous measurement) and
+    never a bare `-1` (which invites a consumer to do arithmetic on it)."""
+    if value == PROFILE_ABSENT:
+        return "null"
+    "{value}"
+
+fn _lab_bool_json(b: bool) -> text:
+    if b:
+        return "true"
+    "false"
+
+pub fn lab_debug_state_json(state: DebugState) -> text:
+    """`DebugState` on the wire. `pc_kind` is carried because a rendering
+    client MUST know whether `pc` is a source line or an SVM-G bytecode
+    offset; a client that only round-trips locations can ignore it."""
+    val stack_json = _lab_i64_list_json(state.stack)
+    val calls_json = _lab_i64_list_json(state.call_stack)
+    val kind = escape_json_string(state.pc_kind)
+    val reason = escape_json_string(state.stop_reason)
+    "{\"pc\":{state.pc},\"pc_kind\":\"{kind}\",\"sp\":{state.sp},\"stack\":{stack_json},\"call_stack\":{calls_json},\"stop_reason\":\"{reason}\"}"
+
+pub fn lab_profile_report_json(report: ProfileReport) -> text:
+    """`ProfileReport` on the wire, tier-honest.
+
+    `level` is the stable lowercase wire name from `cap_level_name`. Absent
+    quantities are `null`. The `*_present` booleans exist so a consumer never
+    has to compare against the sentinel to know whether a number was
+    measured."""
+    val level = cap_level_name(report.level)
+    val wall = _lab_absent_or(report.wall_ns)
+    val device = _lab_absent_or(report.device_ns)
+    val steps = _lab_absent_or(report.steps)
+    val sp = _lab_bool_json(profile_has_steps(report))
+    val dp = _lab_bool_json(profile_has_device_time(report))
+    val detail = escape_json_string(report.detail)
+    val summary = escape_json_string(profile_report_summary(report))
+    "{\"level\":\"{level}\",\"wall_ns\":{wall},\"device_ns\":{device},\"steps\":{steps},\"steps_present\":{sp},\"device_time_present\":{dp},\"detail\":\"{detail}\",\"summary\":\"{summary}\"}"
+
+# ============================================================================
+# `%profile` cell magic (design §9: "begin/execute/end around one cell,
+# report appended to the cell's outputs").
+# ============================================================================
+
+struct LabProfileOutcome:
+    """`handled` false means the cell did not start with `%profile` and must
+    be executed by the ordinary path with `code` unchanged."""
+    handled: bool
+    code: text
+    report: ProfileReport
+    error: text
+
+pub fn lab_profile_magic_matches(source: text) -> bool:
+    """True when the cell's FIRST non-empty line is exactly the `%profile`
+    magic (bare, or with surrounding whitespace). Deliberately
+    first-line-only, matching `%%mode`'s rule in magics.spl — a `%profile`
+    buried mid-cell is not a magic and must not be silently stripped."""
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t != "":
+            return t == LAB_PROFILE_MAGIC
+    false
+
+fn _lab_profile_strip(source: text) -> text:
+    """Drop the magic line itself, keeping every later line verbatim."""
+    val lines = source.split("\n")
+    var out: [text] = []
+    var consumed = false
+    var i = 0
+    while i < lines.len():
+        if consumed:
+            out.push(lines[i])
+        elif lines[i].trim() != "":
+            consumed = true
+        i = i + 1
+    out.join("\n")
+
+fn _lab_attach_opts(budget: i64, profile: bool) -> AttachOpts:
+    AttachOpts(step_budget: budget, entry_pc: 0, log_cap: LAB_DEBUG_DEFAULT_LOG_CAP, profile: profile)
+
+# ============================================================================
+# The registry
+# ============================================================================
+
+# ============================================================================
+# Acquisition helpers — see value-semantics rule 2 at the top of this file.
+# `_lab_ref_acquire`'s tail expression IS the acquisition; that is the whole
+# reason it exists as a separate function, and inlining it back into
+# `attach_ref` silently breaks breakpoints and profile arming.
+# ============================================================================
+
+fn _lab_ref_attach_diag(source: text, budget: i64, profile: bool) -> text:
+    """Probe attach purely to obtain the three-way diagnostic ("" / "skip:" /
+    "error: "). The session it builds is deliberately discarded."""
+    var session = RefDebugSession.new()
+    session.attach(source, _lab_attach_opts(budget, profile))
+
+fn _lab_ref_acquire(source: text, budget: i64, profile: bool) -> DebugProfiler:
+    """Attach and hand back the ONE value carrying both capabilities. Only
+    call after `_lab_ref_attach_diag` returned "": on a failed attach the
+    accessor answers nil, which is a truthful absence but not a usable
+    target."""
+    var session = RefDebugSession.new()
+    val _d = session.attach(source, _lab_attach_opts(budget, profile))
+    ref_debug_profiler(session)
+
+struct LabDebugEntry:
+    """One attached debug/profile lane, keyed by lab session id.
+
+    `dp` is the SINGLE `DebugProfiler` value that carries BOTH capabilities
+    (see the value-semantics note at the top of this file) — it is not a pair,
+    and it is never re-acquired from the session after attach, because a
+    second acquisition would hand back a copy frozen at attach time.
+
+    `profile_armed_at_attach` records what `AttachOpts.profile` said, purely
+    so `GET .../debug/state` can report the lifecycle truthfully; the
+    authoritative answer still comes from the target's own `profile_level()`
+    and `profile_end()`."""
+    session_id: text
+    kind: text
+    dp: DebugProfiler
+    profile_armed_at_attach: bool
+
+class LabDebugRegistry:
+    entries: [LabDebugEntry]
+
+    static fn create() -> LabDebugRegistry:
+        LabDebugRegistry(entries: [])
+
+    me index_of(session_id: text) -> i64:
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].session_id == session_id:
+                return i
+            i = i + 1
+        -1
+
+    me attach_ref(session_id: text, source: text, budget: i64, profile: bool) -> text:
+        """Attach the host SVM-G reference lane. Returns "" on success, or the
+        session's own attach diagnostic ("skip:..." / "error: ...") unchanged
+        — the three-way prefix contract belongs to the caller, so it is never
+        flattened into a bool here.
+
+        The `ref` lane needs no GPU and no driver, which is what makes every
+        endpoint in this module exercisable on a bare host."""
+        val diag = _lab_ref_attach_diag(source, budget, profile)
+        if not attach_is_ok(diag):
+            return diag
+        val existing = self.index_of(session_id)
+        if existing >= 0:
+            self.entries[existing] = LabDebugEntry(
+                session_id: session_id,
+                kind: REF_KIND,
+                dp: _lab_ref_acquire(source, budget, profile),
+                profile_armed_at_attach: profile,
+            )
+        else:
+            self.entries.push(LabDebugEntry(
+                session_id: session_id,
+                kind: REF_KIND,
+                dp: _lab_ref_acquire(source, budget, profile),
+                profile_armed_at_attach: profile,
+            ))
+        ""
+
+    me detach(session_id: text) -> bool:
+        val idx = self.index_of(session_id)
+        if idx < 0:
+            return false
+        val _d = self.entries[idx].dp.detach()
+        var kept: [LabDebugEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            if i != idx:
+                kept.push(self.entries[i])
+            i = i + 1
+        self.entries = kept
+        true
+
+    # ---- operations.
+    #
+    # Each one calls STRAIGHT THROUGH `self.entries[idx].dp` with no local
+    # hoist. That is not a shortcut — it is the fix. Measured on the ref lane:
+    # `var target = entry.dp` produces a SHALLOW copy of the target, so
+    # mutations of the target's OWN fields (`breaks`, `profile_armed`) land on
+    # the copy and vanish, while mutations that go through its class-typed
+    # sub-object (`vm`) still appear to work because that sub-object aliases.
+    # The result is the worst kind of failure: stepping looks correct while
+    # breakpoints and profile arming are silently discarded, with no compiler
+    # complaint. Writing the copy back afterwards does NOT repair it. Only
+    # never copying does.
+
+    me step(session_id: text) -> DebugState:
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.step()
+
+    me resume(session_id: text) -> DebugState:
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.resume()
+
+    me state_of(session_id: text) -> DebugState:
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.state()
+
+    me set_break(session_id: text, loc: i64) -> bool:
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.set_breakpoint(loc)
+
+    me clear_break(session_id: text, loc: i64) -> bool:
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.clear_breakpoint(loc)
+
+    me breakpoints(session_id: text) -> [i64]:
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.breakpoints()
+
+    me profile_begin(session_id: text):
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.profile_begin()
+
+    me profile_end(session_id: text) -> ProfileReport:
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.profile_end()
+
+    me profile_level(session_id: text) -> CapLevel:
+        val idx = self.index_of(session_id)
+        self.entries[idx].dp.profile_level()
+
+    me armed_at_attach(session_id: text) -> bool:
+        val idx = self.index_of(session_id)
+        self.entries[idx].profile_armed_at_attach
+
+    me kind_of(session_id: text) -> text:
+        val idx = self.index_of(session_id)
+        self.entries[idx].kind
+
+    # ---- `%profile` over the session's ALREADY-ATTACHED lane.
+    #
+    # A method, not a free function, precisely because a by-value registry
+    # parameter would swallow the resume (rule 3 at the top of this file).
+    #
+    # If the lane was attached with `profile:false`, the target itself answers
+    # `Unavailable` with `reason=profiling-disabled-at-attach`; that answer is
+    # forwarded unchanged. Profiling is armed at attach and this magic does
+    # not (and must not) re-arm it.
+    me profile_attached(session_id: text) -> LabProfileOutcome:
+        if self.index_of(session_id) < 0:
+            return LabProfileOutcome(
+                handled: true,
+                code: "",
+                report: profile_report_unavailable("reason=no-debug-lane-attached"),
+                error: "",
+            )
+        self.profile_begin(session_id)
+        val _s = self.resume(session_id)
+        val report = self.profile_end(session_id)
+        LabProfileOutcome(handled: true, code: "", report: report, error: "")
+
+# ============================================================================
+# Self-contained `%profile`: the cell BODY is SVM-G assembly for the `ref`
+# lane. A fresh lane is attached with profiling armed, the program runs to
+# completion inside one begin/end window, and the report is `Emulated`
+# (`steps` exact, host wall clock, no device timer). This shape needs no prior
+# attach and no GPU, which is what makes the magic usable in a notebook on a
+# bare host.
+# ============================================================================
+
+pub fn lab_profile_cell(body: text, budget: i64) -> LabProfileOutcome:
+    var scratch = LabDebugRegistry.create()
+    val sid = "%profile-cell"
+    val diag = scratch.attach_ref(sid, body, budget, true)
+    if diag != "":
+        val why = if attach_is_skip(diag): "skip" else: "error"
+        return LabProfileOutcome(
+            handled: true,
+            code: "",
+            report: profile_report_unavailable("reason=attach-{why},detail={diag}"),
+            error: diag,
+        )
+    scratch.profile_begin(sid)
+    val _s = scratch.resume(sid)
+    val report = scratch.profile_end(sid)
+    val _d = scratch.detach(sid)
+    LabProfileOutcome(handled: true, code: "", report: report, error: "")
+
+pub fn lab_profile_body_of(source: text) -> text:
+    _lab_profile_strip(source).trim()
+
+export LabDebugRegistry, LabDebugEntry, LabProfileOutcome
+export lab_debug_state_json, lab_profile_report_json
+export lab_dbg_json_text, lab_dbg_json_i64, lab_dbg_json_bool
+export lab_profile_cell, lab_profile_body_of, lab_profile_magic_matches
+export LAB_PROFILE_MAGIC, LAB_DEBUG_DEFAULT_BUDGET, LAB_DEBUG_DEFAULT_LOG_CAP

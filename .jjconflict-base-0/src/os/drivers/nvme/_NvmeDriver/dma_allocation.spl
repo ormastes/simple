@@ -1,0 +1,50 @@
+# Stateless NVMe DMA allocation helper.
+#
+# NvmeDriver remains the sole owner of controller and queue state. This module
+# only creates and validates a fresh DmaAddrs result before the driver commits
+# it to a queue resource.
+use os.drivers.nvme._NvmeDriver.driver_class.{DMA_PAGE_SIZE, SYS_ALLOC_DMA}
+use os.drivers.nvme._NvmeDriver.dma_addrs.{DmaAddrs}
+use os.kernel.boot.mmio.{mmio_read64}
+
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
+extern fn rt_dma_virt_of(handle: i64) -> i64
+extern fn rt_dma_phys_of(handle: i64) -> i64
+extern fn unsafe_addr_of(ref: any) -> u64
+
+fn nvme_alloc_dma(size: u64) -> Result<DmaAddrs, text>:
+    """Allocate DMA memory and return a fully validated fresh address record."""
+    # Kernel protocol: arg0=size, arg1=pointer to 16-byte result buffer.
+    # Result layout is phys_addr followed by allocation_id; the syscall return
+    # value is the CPU virtual address.
+    var result_buf = DmaAddrs(virt: 0, phys: 0, handle: -1)
+    val result_ptr = unsafe_addr_of(result_buf)
+    val virt_result = syscall(SYS_ALLOC_DMA, size, result_ptr, 0, 0, 0)
+    if virt_result <= 0:
+        return nvme_alloc_dma_runtime_fallback(size, "DMA allocation failed")
+
+    val phys_addr = mmio_read64(result_ptr)
+    val virt_addr = virt_result as u64
+    if phys_addr == 0 or virt_addr == 0:
+        return nvme_alloc_dma_runtime_fallback(size, "DMA allocation returned zero address")
+    if size >= DMA_PAGE_SIZE:
+        if (phys_addr & (DMA_PAGE_SIZE - 1)) != 0:
+            return Result.Err("DMA physical address not page-aligned")
+        if (virt_addr & (DMA_PAGE_SIZE - 1)) != 0:
+            return Result.Err("DMA virtual address not page-aligned")
+
+    val allocation_id = mmio_read64(result_ptr + 8u64).to_i64()
+    Result.Ok(DmaAddrs(virt: virt_addr, phys: phys_addr, handle: allocation_id))
+
+fn nvme_alloc_dma_runtime_fallback(size: u64, failure: text) -> Result<DmaAddrs, text>:
+    val handle = rt_dma_alloc(size.to_i64(), 2)
+    if handle < 0:
+        return Result.Err(failure)
+    val virt_addr = rt_dma_virt_of(handle)
+    val phys_addr = rt_dma_phys_of(handle)
+    if virt_addr <= 0 or phys_addr <= 0:
+        return Result.Err("DMA allocation returned zero address")
+    Result.Ok(DmaAddrs(virt: virt_addr.to_u64(), phys: phys_addr.to_u64(), handle: handle))
+
+export nvme_alloc_dma

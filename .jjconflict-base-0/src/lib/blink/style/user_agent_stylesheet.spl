@@ -1,0 +1,154 @@
+# Blink user-agent default stylesheet — the "no author CSS at all" baseline.
+#
+# A real browser never renders an unstyled document as a blank page: `<div>`
+# lays out as a block, `<span>` as inline, `<p>`/`<h1>`-`<h6>` carry margins
+# and sizes, `<a>` is coloured. That is the browser's OWN default stylesheet,
+# applied before any author rule and overridden by the first author rule that
+# touches the same property — not a special case in the cascade, just the
+# lowest-priority sheet in it.
+#
+# This module supplies exactly that: a `CssStyleSheet`, produced by the SAME
+# `tokenize_css`/`parse_css` this lane already uses for the document's own
+# `<style>` blocks, so there is no parallel default-value representation to
+# keep in sync with the real parser. `blink_lane_stylesheet`
+# (`blink.lane.html_pixels`) merges it in front of the document's rules —
+# "in front of" matters: `blink.style.cascade.resolve_style_with_state`
+# breaks equal-specificity ties by insertion order, last-applied wins, so a
+# UA rule and an author rule of equal specificity (the common case: both are
+# a bare type selector, e.g. UA `div { display: block }` vs author
+# `div { display: inline }`) resolve to the AUTHOR's value only because the
+# UA rule was inserted first. There is no separate "cascade origin" concept
+# here — ordering alone does the job for the equal-specificity case, and any
+# author rule with a class/id/attribute selector already outranks a UA type
+# selector on specificity regardless of order.
+#
+# WHAT THIS COVERS, deliberately minimal (first step, not HTML5's full UA
+# sheet):
+#   - `display`: block for the common block-level elements
+#     (html, body, div, section, article, header, footer, nav, main, aside,
+#     figure, figcaption, blockquote, address, form, ul, ol, li, table, hr,
+#     p, h1-h6); inline for the common inline elements (span, a, b, strong,
+#     i, em, small, code, label, img, br, u).
+#   - `font-size` and vertical `margin` for `p` and `h1`-`h6`, in `px` —
+#     picked to be in the right ballpark of real browsers' UA sheets (which
+#     actually use `em`), NOT a byte-for-byte copy of any one browser's
+#     numbers. `px` is a deliberate choice, not an oversight: `Length.to_px`
+#     (`blink.entity.computed_style`) contributes 0 for any other unit, so an
+#     `em`-authored default would silently vanish under this lane exactly
+#     like an author `em` value already does (documented in
+#     `cascade.spl`'s "No unit resolution" non-goal) — matching this lane's
+#     existing unit-support ceiling rather than writing a default this lane
+#     cannot honour.
+#   - `a { color: blue }` — the one default colour every browser applies to
+#     an unvisited link.
+#
+# WHAT THIS DELIBERATELY DOES NOT COVER, and why it still cannot make a bare
+# `<div>` occupy visible area:
+#   - No default `width`/`height`, i.e. no "auto" box sizing. Real UA
+#     defaults do not need one: a block box's width auto-fills its
+#     container and its height auto-fits its content, but that is a LAYOUT
+#     ALGORITHM, not a stylesheet declaration — no UA stylesheet on the web
+#     carries `div { width: <number> }`. This lane's layout bridge
+#     (`blink.layout.style_bridge.geometry_from_style`) reads
+#     `style.width.to_px()` / `style.height.to_px()` directly with no "auto"
+#     concept at all (CSS initial value is `0px` via `Length.zero()`), so a
+#     block box with no explicit `width`/`height` declaration — author OR
+#     UA — still lays out at 0x0. That gap is a `style_bridge` /
+#     `layout` limitation, not a stylesheet-SOURCE gap, and is out of this
+#     module's scope; a document that sets explicit pixel sizes (as every
+#     existing blink-lane spec already does) is unaffected by it.
+#   - No `font-weight`/`text-decoration` defaults for `b`/`strong`/`a`'s
+#     underline: `ComputedStyle` has no such fields yet
+#     (`blink.entity.computed_style`), so there is nothing for a UA
+#     declaration to set.
+#   - No table layout, no list markers/bullets — `display: block`/`inline`
+#     is the only geometry-relevant signal this lane's layout bridge
+#     consumes; a real UA sheet's `list-style-type`/`table-*` values have no
+#     consumer here.
+
+use std.blink.css_parser.tokenizer.{tokenize_css}
+use std.blink.css_parser.parser.{parse_css, CssStyleSheet, CssStyleRule}
+
+# One selector per rule, deliberately, never a comma-separated group. This
+# module's own parser round-trips groups fine as opaque prelude TEXT
+# (`sel_text` in `css_parser.parser`), but `css_parser.selector.parse_selector`
+# — the piece that actually MATCHES a selector against an element — has no
+# comma/selector-list support at all (see that module's own "Out of scope"
+# header). A rule written as `"div, span { ... }"` would parse as one
+# `CssStyleRule` whose selector text is the whole group, which
+# `parse_selector` then fails to parse as any recognised simple/compound
+# selector — so the rule would silently match NOTHING. Every block-level and
+# every inline-level tag therefore gets its own one-selector rule below.
+pub val USER_AGENT_CSS: text =
+    "html { display: block; } " +
+    "body { display: block; } " +
+    "div { display: block; } " +
+    "section { display: block; } " +
+    "article { display: block; } " +
+    "header { display: block; } " +
+    "footer { display: block; } " +
+    "nav { display: block; } " +
+    "main { display: block; } " +
+    "aside { display: block; } " +
+    "figure { display: block; } " +
+    "figcaption { display: block; } " +
+    "blockquote { display: block; } " +
+    "address { display: block; } " +
+    "form { display: block; } " +
+    "ul { display: block; } " +
+    "ol { display: block; } " +
+    "li { display: block; } " +
+    "table { display: block; } " +
+    "hr { display: block; } " +
+    "span { display: inline; } " +
+    "a { display: inline; } " +
+    "b { display: inline; } " +
+    "strong { display: inline; } " +
+    "i { display: inline; } " +
+    "em { display: inline; } " +
+    "small { display: inline; } " +
+    "code { display: inline; } " +
+    "label { display: inline; } " +
+    "img { display: inline; } " +
+    "br { display: inline; } " +
+    "u { display: inline; } " +
+    "p { display: block; margin-top: 16px; margin-bottom: 16px; } " +
+    "h1 { display: block; font-size: 32px; margin-top: 21px; margin-bottom: 21px; } " +
+    "h2 { display: block; font-size: 24px; margin-top: 20px; margin-bottom: 20px; } " +
+    "h3 { display: block; font-size: 19px; margin-top: 19px; margin-bottom: 19px; } " +
+    "h4 { display: block; font-size: 16px; margin-top: 21px; margin-bottom: 21px; } " +
+    "h5 { display: block; font-size: 13px; margin-top: 22px; margin-bottom: 22px; } " +
+    "h6 { display: block; font-size: 11px; margin-top: 25px; margin-bottom: 25px; } " +
+    "a { color: blue; }"
+
+pub fn user_agent_stylesheet() -> CssStyleSheet:
+    """Parse and return the UA default stylesheet described above."""
+    parse_css(tokenize_css(USER_AGENT_CSS))
+
+# Merge `ua` and `document` into one sheet whose rule list is `ua` FOLLOWED BY
+# `document` — order that matters, see the module header on tie-breaking.
+# Only `.rules` is combined: `.errors`/`.at_rules`/`.keyframes` are not read
+# anywhere downstream of `blink_lane_stylesheet` (both callers only ever
+# consume `.rules`), so combining them would add machinery with no consumer;
+# the document's own values are kept rather than invented for the UA side,
+# which has none by construction (`USER_AGENT_CSS` has no `@`-rules).
+pub fn merge_stylesheets(ua: CssStyleSheet, document: CssStyleSheet) -> CssStyleSheet:
+    """Return a sheet whose rules are `ua`'s rules, then `document`'s rules."""
+    var rules: [CssStyleRule] = []
+    var i = 0
+    while i < ua.rules.len():
+        rules.push(ua.rules[i as i32])
+        i = i + 1
+    var j = 0
+    while j < document.rules.len():
+        rules.push(document.rules[j as i32])
+        j = j + 1
+    CssStyleSheet(
+        rules: rules,
+        errors: document.errors,
+        at_rules: document.at_rules,
+        keyframes: document.keyframes
+    )
+
+export USER_AGENT_CSS
+export user_agent_stylesheet, merge_stylesheets

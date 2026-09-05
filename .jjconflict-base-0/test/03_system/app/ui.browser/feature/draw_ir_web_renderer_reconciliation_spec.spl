@@ -1,0 +1,75 @@
+# codex-system-test
+# @req AC-1
+"""Production Browser Draw-IR composition submission.
+
+The browser session must submit the supplied composition to its retained
+Engine2D owner. It must not recreate HTML or a private pixel artifact on that
+path.
+"""
+
+use std.spec.*
+use common.ui.builder.{build_tree_with_title, panel, text_widget}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrComposition,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use common.ui.widget.{UITree, UIState}
+use common.ui.state.{init_state}
+use app.ui.browser.backend.{BrowserBackend}
+
+class DrawIrWebFixture:
+    tree: UITree
+    state: UIState
+    backend: BrowserBackend
+    composition: DrawIrComposition
+
+fn setup_draw_ir_web_fixture() -> DrawIrWebFixture:
+    val tree = build_tree_with_title(
+        panel("browser-root", "Browser", [text_widget("browser-copy", "ignored")]),
+        "Browser", "dark")
+    val state = init_state(tree)
+    val embedding = draw_ir_embedding_config(
+        "production-web", "submitted-frame", 0, 0, 32, 24, 0, 1000, false)
+    val batch = draw_ir_batch("submitted-frame", DRAW_IR_BACKEND_CPU, embedding, [
+        draw_ir_rect("submitted-frame", 0, 0, 32, 24, 0xff123456u32)
+    ])
+    val composition = draw_ir_composition(
+        "production-web-submitted", "production-web", DRAW_IR_BACKEND_CPU, [batch])
+    match BrowserBackend.create(32, 24, "software"):
+        Ok(backend): DrawIrWebFixture(
+            tree: tree, state: state, backend: backend, composition: composition)
+        Err(reason): fail("BrowserBackend fixture failed: {reason}")
+
+fn expect_composition_submission(fixture: DrawIrWebFixture):
+    expect(fixture.backend.last_draw_ir_composition_id).to_equal(
+        fixture.composition.composition_id)
+    expect(fixture.backend.draw_ir_submission_count).to_equal(2)
+    expect(fixture.backend.draw_ir_engine_generation).to_equal(1)
+    expect(fixture.backend.draw_ir_engine_init_count).to_equal(1)
+    expect(fixture.backend.last_render_html_us).to_equal(0)
+    expect(fixture.backend.last_render_pixel_artifact_us).to_equal(0)
+    expect(fixture.backend.last_artifact_html).to_equal("")
+    expect(fixture.backend.last_artifact_capabilities).to_equal("DrawIrComposition")
+    expect(fixture.backend.last_artifact_engine2d_status).to_equal("rendered")
+    expect(fixture.backend.last_artifact_readback_status).to_equal("readback")
+    expect(fixture.backend.last_artifact_gpu_readback_source).to_equal("cpu_mirror")
+    expect(fixture.backend.framebuffer.pixel_at(1, 1)).to_equal(0xff123456)
+
+describe "Draw IR Web renderer reconciliation":
+    it "submits the supplied production composition through one retained owner":
+        val fixture = setup_draw_ir_web_fixture()
+        step("Submit the production Web composition")
+        fixture.backend.render_frame_with_composition(
+            fixture.tree, fixture.state, fixture.composition)
+        fixture.backend.render_frame_with_composition(
+            fixture.tree, fixture.state, fixture.composition)
+        expect_composition_submission(fixture)
+
+        fixture.backend.shutdown()
+        expect(fixture.backend.draw_ir_engine_shutdown_count).to_equal(1)
+        fixture.backend.shutdown()
+        expect(fixture.backend.draw_ir_engine_shutdown_count).to_equal(1)

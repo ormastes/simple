@@ -1,0 +1,176 @@
+# Strict incremental UTF-8 decoder for protocol payload chunks.
+#
+# The decoder retains only the scalar accumulator and at most three bytes of
+# incomplete-sequence state. Each push owns only the scalars completed by the
+# supplied bounded chunk; it never retains a whole frame or a decoded prefix.
+use app.spipe_knowledge_provider.work_control.{ProviderBudgetPort, ProviderBudgetChargeV1, ProviderCheckpointPort, ProviderCheckpointProgressV1, provider_budget_category_raw_bytes, provider_budget_category_decoded_bytes, provider_budget_category_scalars, provider_budget_category_logical_allocations}
+
+class ProviderUtf8DecoderV1:
+    var pending_continuations: i64
+    var scalar_accumulator: i64
+    var minimum_scalar: i64
+    var sequence_bytes: i64
+    var first_continuation_min: i64
+    var first_continuation_max: i64
+    var failed: bool
+    var failure_reason: text
+    var finished: bool
+
+    static fn configured() -> ProviderUtf8DecoderV1:
+        ProviderUtf8DecoderV1(pending_continuations: 0,
+            scalar_accumulator: 0, minimum_scalar: 0,
+            sequence_bytes: 0, first_continuation_min: 128,
+            first_continuation_max: 191, failed: false,
+            failure_reason: "", finished: false)
+
+    # Number of source bytes retained as explicit incomplete-sequence state.
+    # A valid UTF-8 prefix can retain at most three bytes between pushes.
+    fn carry_bytes_count() -> i64:
+        self.sequence_bytes
+
+    me _discard(reason: text):
+        self.failed = true
+        self.failure_reason = reason
+        self.pending_continuations = 0
+        self.scalar_accumulator = 0
+        self.minimum_scalar = 0
+        self.sequence_bytes = 0
+        self.first_continuation_min = 128
+        self.first_continuation_max = 191
+
+    me _reject() -> Result<[i64], text>:
+        self._discard("invalid_utf8")
+        Err("invalid_utf8")
+
+    me _charge(budget: ProviderBudgetPort, category: text,
+               amount: i64) -> Result<(), text>:
+        val charged = budget.charge(ProviderBudgetChargeV1(
+            category: category, amount: amount))
+        if charged.is_err():
+            val reason = charged.unwrap_err()
+            self._discard(reason)
+            return Err(reason)
+        Ok(())
+
+    me _admit_scalar(decoded_bytes: i64,
+                     budget: ProviderBudgetPort) -> Result<(), text>:
+        self._charge(budget, provider_budget_category_decoded_bytes(),
+            decoded_bytes)?
+        self._charge(budget, provider_budget_category_scalars(), 1)?
+        self._charge(budget, provider_budget_category_logical_allocations(), 1)?
+        Ok(())
+
+    me push(bytes: [u8], offset: i64, count: i64, final_chunk: bool,
+            budget: ProviderBudgetPort,
+            checkpoint: ProviderCheckpointPort) -> Result<[i64], text>:
+        if self.failed: return Err(self.failure_reason)
+        if self.finished: return Err("decoder_complete")
+        if offset < 0 or count < 0 or offset > bytes.len():
+            self._discard("invalid_input")
+            return Err("invalid_input")
+        if count > bytes.len() - offset:
+            self._discard("invalid_input")
+            return Err("invalid_input")
+        # The signature has no consumed-count result, so accepting a wider
+        # range would force this leaf to retain an unbounded/whole-frame scalar
+        # result. The session owner must slice ingress at the frozen byte step.
+        if count > 4096:
+            self._discard("limit_exceeded")
+            return Err("limit_exceeded")
+
+        var output: [i64] = []
+        var consumed = 0
+        var checkpoint_bytes = 0
+        var checkpoint_scalars = 0
+        while consumed < count:
+            val byte = bytes[offset + consumed]
+            self._charge(budget, provider_budget_category_raw_bytes(), 1)?
+
+            if self.pending_continuations == 0:
+                if byte <= 127u8:
+                    self._admit_scalar(1, budget)?
+                    output.push(byte as i64)
+                    checkpoint_scalars = checkpoint_scalars + 1
+                elif byte >= 194u8 and byte <= 223u8:
+                    self.pending_continuations = 1
+                    self.scalar_accumulator = (byte & 31u8) as i64
+                    self.minimum_scalar = 128
+                    self.sequence_bytes = 1
+                    self.first_continuation_min = 128
+                    self.first_continuation_max = 191
+                elif byte >= 224u8 and byte <= 239u8:
+                    self.pending_continuations = 2
+                    self.scalar_accumulator = (byte & 15u8) as i64
+                    self.minimum_scalar = 2048
+                    self.sequence_bytes = 1
+                    self.first_continuation_min = if byte == 224u8: 160 else: 128
+                    self.first_continuation_max = if byte == 237u8: 159 else: 191
+                elif byte >= 240u8 and byte <= 244u8:
+                    self.pending_continuations = 3
+                    self.scalar_accumulator = (byte & 7u8) as i64
+                    self.minimum_scalar = 65536
+                    self.sequence_bytes = 1
+                    self.first_continuation_min = if byte == 240u8: 144 else: 128
+                    self.first_continuation_max = if byte == 244u8: 143 else: 191
+                else:
+                    return self._reject()
+            else:
+                if byte < 128u8 or byte > 191u8:
+                    return self._reject()
+                if (self.sequence_bytes == 1 and
+                    ((byte as i64) < self.first_continuation_min or
+                     (byte as i64) > self.first_continuation_max)):
+                    return self._reject()
+                val candidate = self.scalar_accumulator * 64 +
+                    ((byte & 63u8) as i64)
+                val remaining = self.pending_continuations - 1
+                val completed_bytes = self.sequence_bytes + 1
+                if remaining == 0:
+                    if candidate < self.minimum_scalar:
+                        return self._reject()
+                    if candidate >= 55296 and candidate <= 57343:
+                        return self._reject()
+                    if candidate > 1114111:
+                        return self._reject()
+                    self._admit_scalar(completed_bytes, budget)?
+                    output.push(candidate)
+                    checkpoint_scalars = checkpoint_scalars + 1
+                    self.pending_continuations = 0
+                    self.scalar_accumulator = 0
+                    self.minimum_scalar = 0
+                    self.sequence_bytes = 0
+                    self.first_continuation_min = 128
+                    self.first_continuation_max = 191
+                else:
+                    self.pending_continuations = remaining
+                    self.scalar_accumulator = candidate
+                    self.sequence_bytes = completed_bytes
+
+            consumed = consumed + 1
+            checkpoint_bytes = checkpoint_bytes + 1
+            if checkpoint_bytes == 4096 or checkpoint_scalars == 1024:
+                val checked = checkpoint.checkpoint(ProviderCheckpointProgressV1(
+                    stage: "utf8_decode", bytes: checkpoint_bytes,
+                    events: 0, scalars: checkpoint_scalars,
+                    hash_blocks: 0, comparisons: 0))
+                if checked.is_err():
+                    val reason = checked.unwrap_err()
+                    self._discard(reason)
+                    return Err(reason)
+                checkpoint_bytes = 0
+                checkpoint_scalars = 0
+
+        if checkpoint_bytes > 0:
+            val checked = checkpoint.checkpoint(ProviderCheckpointProgressV1(
+                stage: "utf8_decode", bytes: checkpoint_bytes,
+                events: 0, scalars: checkpoint_scalars,
+                hash_blocks: 0, comparisons: 0))
+            if checked.is_err():
+                val reason = checked.unwrap_err()
+                self._discard(reason)
+                return Err(reason)
+        if final_chunk:
+            if self.pending_continuations != 0:
+                return self._reject()
+            self.finished = true
+        Ok(output)

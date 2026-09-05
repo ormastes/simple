@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/services/vfs/vfs_boot_state.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 2 ]
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 2 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 2 ]
+
+call_count=$(perl -0ne '
+    s/""".*?"""//sg; s/#.*//mg; s/^\s*extern fn .*\n//mg;
+    while (/\b(?:serial_println|rt_bytes_u8_at)\s*\(/g) { $n++ }
+    END { print $n + 0 }
+' "$module")
+[ "$call_count" -eq 2 ]
+
+for unused in rt_text_to_bytes rt_time_now_unix_micros rt_array_new_with_cap rt_byte_array_new rt_typed_bytes_u8_push; do
+    ! grep -q "^extern fn $unused" "$module"
+done
+
+# Four ELF reads remain behind one precondition and one inline owner. No
+# per-byte loop or new allocation belongs in this readiness predicate.
+grep -q '^fn _bytes_have_elf_magic(bytes: \[u8\]) -> bool:' "$module"
+grep -q 'if bytes.len() < 4:' "$module"
+[ "$(grep -c '_vfs_state_elf_byte(bytes, [0-3])' "$module")" -eq 4 ]
+grep -q '^pub fn vfs_boot_init_virtio_fat32() -> bool:' "$module"
+
+! grep -q 'RuntimeFuncSpec::new("serial_println"' "$registry"
+grep -q 'insert_simple!("serial_println"' "$interpreter"
+grep -q 'RuntimeFuncSpec::new("rt_bytes_u8_at"' "$registry"
+grep -q 'insert_simple!("rt_bytes_u8_at"' "$interpreter"
+
+echo "VFS boot-state SFFI authority audit: PASS (26 former calls routed through 2 mandatory-inline owners; 5 unused declarations removed; one ELF extent guard/4 reads retained; semantic readiness bool retained; 1 both/1 interpreter-only providers)"

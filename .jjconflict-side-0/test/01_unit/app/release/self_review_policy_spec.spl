@@ -1,0 +1,257 @@
+"""Scoped self-review is exact-head, deny-precedence, and provider-plan only."""
+# @req: REQ-017, REQ-018, REQ-019, REQ-020, REQ-021
+use std.spec.{describe, it, expect, step}
+use app.release.self_review_policy.{
+    SelfReviewRequest, parse_self_review_policy_db,
+    parse_self_review_changed_manifest, evaluate_self_review,
+    self_review_decision_current
+}
+
+fn sha40() -> text: "0123456789abcdef0123456789abcdef01234567"
+fn hash_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn base40() -> text: "1123456789abcdef0123456789abcdef01234567"
+fn merge40() -> text: "2123456789abcdef0123456789abcdef01234567"
+fn hash_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn zeros() -> text: "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn empty_policy() -> text:
+    "{\"schema\":\"spipe-self-review-policy-db/2\",\"record_type\":\"header\",\"default_allow\":true,\"max_ttl_seconds\":86400,\"authority\":{\"type\":\"operator_owned_external\",\"id\":\"github:user:2378857\",\"key_id\":\"operator-key-1\"}}\n"
+
+fn ordinary_manifest(path: text, kind: text) -> text:
+    """changed_paths:
+  schema: spipe-changed-path-manifest/1
+  repository_provider: github
+  repository_id: 1175797696
+  repository_node_id: R_kgDORhU_wA
+  repository: ormastes/simple
+  pull_request_number: 28
+  head_sha: 0123456789abcdef0123456789abcdef01234567
+  base_repository_provider: github
+  base_repository_id: 1175797696
+  base_repository_node_id: R_kgDORhU_wA
+  base_repository: ormastes/simple
+  base_ref: refs/heads/main
+  base_sha: 1123456789abcdef0123456789abcdef01234567
+  merge_base_sha: 2123456789abcdef0123456789abcdef01234567
+  diff_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  changes:
+    - status: modified
+      path: """ + path + """
+      previous_path:
+      content_kind: """ + kind + """
+      previous_content_kind: """ + kind + """
+      semantic_class: ordinary
+      previous_semantic_class: ordinary
+      file_type: regular
+      previous_file_type: regular
+      encoding: utf8
+      previous_encoding: utf8
+"""
+
+fn request(policy_hash: text) -> SelfReviewRequest:
+    SelfReviewRequest(
+        repository_provider: "github", repository_id: 1175797696,
+        repository_node_id: "R_kgDORhU_wA", repository: "ormastes/simple",
+        pull_request_number: 28, head_sha: sha40(),
+        session_id: "feature/release-hardening",
+        author_provider: "github", author_identity: "2378857",
+        reviewer_provider: "github", reviewer_identity: "2378857",
+        reviewer_model: "codex/gpt-5.6-sol", reviewer_tier: "high_capability",
+        reviewer_effort: "xhigh", review_evidence_mode: "broker_signed",
+        now_unix: 1787846400,
+        decision_expires_at_unix: 1787847300,
+        higher_model_verdict: "PASS", higher_model_p0_count: 0,
+        higher_model_p1_count: 0,
+        review_evidence_sha256: hash_a(),
+        expected_policy_db_sha256: policy_hash,
+        policy_db_authenticated: true, changed_manifest_authenticated: true,
+        review_evidence_broker_authenticated: true,
+        self_attestation_authorized: false,
+        target_repository_id: 1175797696, target_ref: "refs/heads/main",
+        target_ruleset_id: "github:ruleset:123", target_ruleset_version: "spipe-vcs-v3-main",
+        target_ruleset_sha256: hash_b(),
+        base_sha: base40(),
+        merge_base_sha: merge40(), diff_sha256: hash_b(),
+        strict_up_to_date: true, protected_target: true,
+        provider_resolution_authenticated: true
+    )
+
+fn policy_record(effect: text, manifest_hash: text, allow_scopes: text, deny_scopes: text) -> text:
+    empty_policy() +
+    "{\"schema\":\"spipe-self-review-subject-policy/2\",\"record_type\":\"subject_policy\",\"policy_id\":\"record-1\",\"effect\":\"" + effect +
+    "\",\"subject\":{\"repository\":{\"provider\":\"github\",\"id\":1175797696,\"node_id\":\"R_kgDORhU_wA\",\"name\":\"ormastes/simple\"}," +
+    "\"pull_request_number\":28,\"head_sha\":\"" + sha40() + "\",\"session_id\":\"feature/release-hardening\"," +
+    "\"reviewer\":{\"provider\":\"github\",\"id\":\"2378857\",\"model\":\"codex/gpt-5.6-sol\"}}," +
+    "\"changed_paths_manifest_sha256\":\"" + manifest_hash + "\",\"higher_model_receipt_digest\":\"" + hash_a() + "\"," +
+    "\"allow_scopes\":" + allow_scopes + ",\"deny_scopes\":" + deny_scopes + "," +
+    "\"issued_by\":{\"type\":\"operator_owned_external\",\"id\":\"github:user:2378857\",\"key_id\":\"operator-key-1\"}," +
+    "\"issued_at\":\"2026-08-27T15:58:20.000Z\",\"not_before\":\"2026-08-27T15:58:20.000Z\",\"expires_at\":\"2026-08-27T16:30:00.000Z\",\"previous_record_sha256\":\"" + zeros() +
+    "\",\"signature\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n"
+
+describe "self-review privilege policy":
+    it "allows ordinary code/text by default but never claims provider approval":
+        step("Bind authenticated broker-signed higher-model evidence to the exact PR head/base/diff")
+        val policy = parse_self_review_policy_db(empty_policy())
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("doc/guide.md", "text"))
+        val decision = evaluate_self_review(policy, manifest, request(policy.sha256))
+        expect(decision.allowed).to_be(true)
+        expect(decision.schema).to_equal("spipe-self-review-decision/1")
+        expect(decision.provider_action).to_contain("separate_eligible_broker")
+        expect(decision.provider_approval_claimed).to_be(false)
+        expect(decision.head_sha).to_equal(sha40())
+        expect(decision.review_evidence_mode).to_equal("broker_signed")
+        expect(decision.changed_manifest_sha256).to_equal(manifest.sha256)
+
+    it "denies unauthenticated policy, manifest, or review evidence":
+        val policy = parse_self_review_policy_db(empty_policy())
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("src/app/tool.spl", "code"))
+        var untrusted = request(policy.sha256)
+        untrusted.provider_resolution_authenticated = false
+        val decision = evaluate_self_review(policy, manifest, untrusted)
+        expect(decision.allowed).to_be(false)
+        expect(decision.reason).to_contain("authentication evidence")
+
+    it "rejects caller self-attestation and requires authenticated broker evidence":
+        val policy = parse_self_review_policy_db(empty_policy())
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
+        var legacy = request(policy.sha256)
+        legacy.review_evidence_mode = "self_attested"
+        legacy.review_evidence_broker_authenticated = false
+        legacy.self_attestation_authorized = true
+        val decision = evaluate_self_review(policy, manifest, legacy)
+        expect(decision.allowed).to_be(false)
+        expect(decision.reason).to_contain("self_attested evidence is unsupported")
+        var forged = request(policy.sha256)
+        forged.self_attestation_authorized = true
+        expect(evaluate_self_review(policy, manifest, forged).allowed).to_be(false)
+
+    it "denies stale heads and later pushes":
+        val policy = parse_self_review_policy_db(empty_policy())
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
+        var stale = request(policy.sha256)
+        stale.head_sha = "1123456789abcdef0123456789abcdef01234567"
+        expect(evaluate_self_review(policy, manifest, stale).allowed).to_be(false)
+
+    it "denies base retarget, merge-base movement, diff drift, or ruleset weakening":
+        val policy = parse_self_review_policy_db(empty_policy())
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
+        for field in ["retarget", "base", "merge", "diff", "ruleset", "ruleset-version", "ruleset-digest", "strict", "protected"]:
+            var changed = request(policy.sha256)
+            if field == "retarget": changed.target_ref = "refs/heads/release/1.0"
+            elif field == "base": changed.base_sha = sha40()
+            elif field == "merge": changed.merge_base_sha = sha40()
+            elif field == "diff": changed.diff_sha256 = hash_a()
+            elif field == "ruleset": changed.target_ruleset_id = ""
+            elif field == "ruleset-version": changed.target_ruleset_version = ""
+            elif field == "ruleset-digest": changed.target_ruleset_sha256 = "invalid"
+            elif field == "strict": changed.strict_up_to_date = false
+            else: changed.protected_target = false
+            expect(evaluate_self_review(policy, manifest, changed).allowed).to_be(false)
+
+    it "requires exact self reviewer and PR author identity":
+        val policy = parse_self_review_policy_db(empty_policy())
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
+        var other = request(policy.sha256)
+        other.reviewer_identity = "999"
+        val decision = evaluate_self_review(policy, manifest, other)
+        expect(decision.allowed).to_be(false)
+        expect(decision.reason).to_contain("author and reviewer")
+
+    it "requires high-capability exact-head PASS with zero P0 and P1":
+        val policy = parse_self_review_policy_db(empty_policy())
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
+        var failed = request(policy.sha256)
+        failed.higher_model_p1_count = 1
+        expect(evaluate_self_review(policy, manifest, failed).allowed).to_be(false)
+
+    it "rejects credential/secret blobs by path and authenticated semantics":
+        val policy = parse_self_review_policy_db(empty_policy())
+        val named = parse_self_review_changed_manifest(ordinary_manifest("config/.env", "code"))
+        expect(evaluate_self_review(policy, named, request(policy.sha256)).reason).to_contain("restricted path")
+
+        val semantic_payload = ordinary_manifest("config/runtime.txt", "text").replace(
+            "semantic_class: ordinary", "semantic_class: credential_secret"
+        )
+        val semantic = parse_self_review_changed_manifest(semantic_payload)
+        expect(evaluate_self_review(policy, semantic, request(policy.sha256)).reason).to_contain("semantic restriction")
+
+    it "keeps policy, workflow, and gate source text reviewable":
+        val policy = parse_self_review_policy_db(empty_policy())
+        for path in [".github/workflows/review-admission.yml", ".spipe/policy/vcs.sdn", "src/app/release/self_review_policy.spl"]:
+            val manifest = parse_self_review_changed_manifest(ordinary_manifest(path, "code"))
+            expect(evaluate_self_review(policy, manifest, request(policy.sha256)).allowed).to_be(true)
+
+    it "gives an exact operator deny record precedence over default allow":
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
+        val policy = parse_self_review_policy_db(policy_record("deny", manifest.sha256, "[]", "[]"))
+        val decision = evaluate_self_review(policy, manifest, request(policy.sha256))
+        expect(decision.allowed).to_be(false)
+        expect(decision.reason).to_contain("explicitly denies")
+
+    it "intersects matching constrain allow scopes and applies deny scopes first":
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("doc/guide.md", "text"))
+        val allow_doc = "[{\"kind\":\"directory_recursive\",\"path\":\"doc\"}]"
+        val deny_file = "[{\"kind\":\"file\",\"path\":\"doc/guide.md\"}]"
+        val constrained = parse_self_review_policy_db(policy_record("constrain", manifest.sha256, allow_doc, "[]"))
+        val allowed = evaluate_self_review(constrained, manifest, request(constrained.sha256))
+        expect(allowed.allowed).to_be(true)
+        expect(allowed.matched_constraint_record_ids).to_equal(["record-1"])
+
+        val denied = parse_self_review_policy_db(policy_record("constrain", manifest.sha256, allow_doc, deny_file))
+        expect(evaluate_self_review(denied, manifest, request(denied.sha256)).allowed).to_be(false)
+
+    it "requires both old and new names of a rename to satisfy constraints":
+        val renamed_payload = ordinary_manifest("doc/new.md", "text")
+            .replace("- status: modified", "- status: renamed")
+            .replace("previous_path:", "previous_path: src/old.spl")
+            .replace("previous_content_kind: text", "previous_content_kind: code")
+        val manifest = parse_self_review_changed_manifest(renamed_payload)
+        val allow_doc = "[{\"kind\":\"directory_recursive\",\"path\":\"doc\"}]"
+        val policy = parse_self_review_policy_db(policy_record("constrain", manifest.sha256, allow_doc, "[]"))
+        expect(evaluate_self_review(policy, manifest, request(policy.sha256)).allowed).to_be(false)
+
+    it "fails closed on symlink, non-UTF8, traversal, quote aliases, and non-ASCII aliases":
+        val symlink = parse_self_review_changed_manifest(
+            ordinary_manifest("src/link.spl", "code").replace("file_type: regular", "file_type: symlink")
+        )
+        expect(symlink.valid).to_be(false)
+        val non_utf8 = parse_self_review_changed_manifest(
+            ordinary_manifest("src/blob.spl", "code").replace("encoding: utf8", "encoding: non_utf8")
+        )
+        expect(non_utf8.valid).to_be(false)
+        val traversal = parse_self_review_changed_manifest(ordinary_manifest("../outside.spl", "code"))
+        expect(traversal.valid).to_be(false)
+        val quote_alias = parse_self_review_changed_manifest(ordinary_manifest("d\"oc/guide.md", "text"))
+        expect(quote_alias.valid).to_be(false)
+        val unicode_alias = parse_self_review_changed_manifest(ordinary_manifest("doc/café.md", "text"))
+        expect(unicode_alias.valid).to_be(false)
+
+    it "requires consumers to revalidate expiry and exact live target identities":
+        val policy = parse_self_review_policy_db(empty_policy())
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
+        val decision = evaluate_self_review(policy, manifest, request(policy.sha256))
+        expect(self_review_decision_current(
+            decision, 1787847000, sha40(), base40(), merge40(), hash_b(),
+            "github:ruleset:123", "spipe-vcs-v3-main", hash_b()
+        )).to_be(true)
+        expect(self_review_decision_current(
+            decision, 1787847300, sha40(), base40(), merge40(), hash_b(),
+            "github:ruleset:123", "spipe-vcs-v3-main", hash_b()
+        )).to_be(false)
+        expect(self_review_decision_current(
+            decision, 1787847000, sha40(), base40(), merge40(), hash_b(),
+            "github:ruleset:123", "spipe-vcs-v3-main", hash_a()
+        )).to_be(false)
+        expect(self_review_decision_current(
+            decision, 1787847000, sha40(), base40(), merge40(), hash_b(),
+            "github:ruleset:123", "spipe-vcs-v4-main", hash_b()
+        )).to_be(false)
+
+    it "rejects malformed, non-default, and broken-chain external policy databases":
+        expect(parse_self_review_policy_db("").valid).to_be(false)
+        expect(parse_self_review_policy_db(empty_policy().replace("true", "false")).valid).to_be(false)
+        expect(parse_self_review_policy_db("{\"schema\":\"spipe-self-review-policy-db/1\",\"record_type\":\"header\",\"default_allow\":true}\n").valid).to_be(false)
+        expect(parse_self_review_policy_db("{\"schema\":\"spipe-self-review-policy-db/1\",\"default_allow\":true,\"max_ttl_seconds\":86400,\"authority\":\"operator_owned_external\"}\n").valid).to_be(false)
+        val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
+        val broken = policy_record("deny", manifest.sha256, "[]", "[]").replace(zeros(), hash_a())
+        expect(parse_self_review_policy_db(broken).error).to_contain("hash chain")

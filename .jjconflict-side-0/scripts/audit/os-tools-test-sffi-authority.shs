@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/tools_test.spl"
+native_provider="$root/src/runtime/runtime_native.c"
+target_provider="$root/src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+[ "$(grep -Ec '^extern fn serial_println\(' "$module")" -eq 1 ]
+[ "$(grep -Ec '^[[:space:]]+serial_println\(' "$module")" -eq 1 ]
+[ "$(grep -c '^@unsafe(' "$module")" -eq 1 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 1 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 1 ]
+[ "$(grep -o '_sffi_serial_println(' "$module" | wc -l)" -eq 61 ]
+
+test_run=$(sed -n '/^fn test_run/,/^# ===/p' "$module")
+printf '%s\n' "$test_run" | grep -q 'if code == 0:'
+printf '%s\n' "$test_run" | grep -q 'test_ok(name)'
+printf '%s\n' "$test_run" | grep -q 'test_fail("{name} exit={code}")'
+if printf '%s\n' "$test_run" | awk '
+    /fn test_run/ { in_fn=1 }
+    in_fn && /test_ok\(name\)/ && !seen_guard { exit 0 }
+    in_fn && /if code == 0:/ { seen_guard=1 }
+    END { if (seen_guard) exit 1 }
+'; then
+    echo "OS tools test regained unconditional pass" >&2
+    exit 1
+fi
+
+grep -Eq '^void serial_println\(' "$native_provider"
+grep -Eq '^void serial_println\(' "$target_provider"
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "OS tools-test SFFI authority audit: PASS (serial boundary confined; nonzero tool exit records failure)"

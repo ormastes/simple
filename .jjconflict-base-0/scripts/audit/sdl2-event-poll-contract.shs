@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+provider="$root/src/runtime/runtime_sdl2.c"
+binding="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+compositor="$root/src/os/compositor/hosted_input_sdl2.spl"
+web="$root/src/lib/nogc_sync_mut/web_ui/input.spl"
+failed=0
+
+poll_body=$(sed -n '/^int64_t rt_sdl2_poll_event/,/^}/p' "$provider")
+wait_body=$(sed -n '/^int64_t rt_sdl2_wait_event/,/^}/p' "$provider")
+if ! printf '%s\n' "$poll_body" | grep -q 'SDL2_REQUIRE(-1)' ||
+   ! printf '%s\n' "$wait_body" | grep -q 'SDL2_REQUIRE(-1)'; then
+    echo "SDL2 poll/wait must distinguish provider failure from no event" >&2
+    failed=1
+fi
+if printf '%s\n%s\n' "$poll_body" "$wait_body" |
+   grep -Eq 'malloc|calloc|realloc|pthread_|mutex|SDL_GetError'; then
+    echo "SDL2 poll/wait hot path must remain allocation-, lock-, and extra-call-free" >&2
+    failed=1
+fi
+
+batch=$(sed -n '/^struct EventBatch:/,/^# --- Window Configuration ---/p' "$binding")
+if ! printf '%s\n' "$batch" | grep -q '^    is_valid: bool' ||
+   [ "$(printf '%s\n' "$batch" | grep -c 'unsafe(capabilities: \[ffi\]):' || true)" -ne 2 ] ||
+   [ "$(printf '%s\n' "$batch" | grep -c 'is_valid: handle >= 0' || true)" -ne 2 ]; then
+    echo "EventBatch must lift negative provider status in two lexical FFI scopes" >&2
+    failed=1
+fi
+if grep -B1 '^fn window_\(poll\|wait\)_events' "$binding" | grep -q '^@unsafe'; then
+    echo "validated event-batch wrappers must not expose broad unsafe authority" >&2
+    failed=1
+fi
+
+if [ "$(grep -c 'if ev_type < 0:' "$compositor" || true)" -ne 2 ] ||
+   ! grep -q 'self._available = false' "$compositor" ||
+   ! grep -q 'if event_type < 0:' "$web" ||
+   ! grep -q 'self.is_available = false' "$web"; then
+    echo "direct SDL2 poll consumers must fail closed and stop retrying" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SDL2 event poll contract audit: PASS"

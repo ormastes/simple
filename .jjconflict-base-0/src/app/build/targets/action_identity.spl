@@ -1,0 +1,203 @@
+# codex-impl
+# Independent current-input identities for named native actions and canonical
+# aggregate identities. Historical action receipts never create these values.
+
+use app.build.targets.artifact_receipt.{
+    digest_is_sha256, declared_path_valid,
+    parse_dependency_manifest_v1, dependency_manifest_error_v1,
+    parse_imported_closure_receipt_v1, imported_closure_receipt_error_v1,
+    target_cache_namespace_v1, target_action_key_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_exists, file_read, file_hash_sha256}
+
+val NATIVE_ACTION_INPUT_SCHEMA_V1 = "simple-native-action-input-v1"
+val NATIVE_ACTION_INPUT_PRODUCER_V1 = "simple-compiler-action-evidence-v1"
+val AGGREGATE_ACTION_IDENTITY_SCHEMA_V1 = "simple-aggregate-action-identity-v1"
+
+struct NativeActionInputIdentityV1:
+    producer: text
+    target: text
+    action: text
+    entry: text
+    tool_path: text
+    tool_artifact_digest: text
+    tool_behavior_digest: text
+    producer_abi_digest: text
+    target_identity_digest: text
+    profile: text
+    dependency_manifest_digest: text
+    imported_closure_digest: text
+    action_key: text
+    errors: [text]
+
+fn _empty_native_action_input_v1(error: text) -> NativeActionInputIdentityV1:
+    NativeActionInputIdentityV1(
+        "", "", "", "", "", "", "", "", "", "", "", "", "", [error]
+    )
+
+fn native_action_input_receipt_text_v1(identity: NativeActionInputIdentityV1) -> text:
+    NATIVE_ACTION_INPUT_SCHEMA_V1 +
+        "\nproducer=" + identity.producer +
+        "\ntarget=" + identity.target +
+        "\naction=" + identity.action +
+        "\nentry=" + identity.entry +
+        "\ntool-path=" + identity.tool_path +
+        "\ntool-artifact=" + identity.tool_artifact_digest +
+        "\ntool-behavior=" + identity.tool_behavior_digest +
+        "\nproducer-abi=" + identity.producer_abi_digest +
+        "\ntarget-identity=" + identity.target_identity_digest +
+        "\nprofile=" + identity.profile +
+        "\ndependency-manifest=" + identity.dependency_manifest_digest +
+        "\nimported-closure=" + identity.imported_closure_digest +
+        "\naction-key=" + identity.action_key + "\n"
+
+fn parse_native_action_input_receipt_v1(value: text) -> NativeActionInputIdentityV1:
+    val lines = value.trim().split("\n")
+    val prefixes = [
+        "producer=", "target=", "action=", "entry=", "tool-path=",
+        "tool-artifact=", "tool-behavior=", "producer-abi=",
+        "target-identity=", "profile=", "dependency-manifest=",
+        "imported-closure=", "action-key="
+    ]
+    if lines.len() != 14 or lines[0] != NATIVE_ACTION_INPUT_SCHEMA_V1:
+        return _empty_native_action_input_v1(
+            "target-identity-error: malformed-native-action-input-receipt"
+        )
+    var i = 0
+    while i < prefixes.len():
+        if not lines[i + 1].starts_with(prefixes[i]):
+            return _empty_native_action_input_v1(
+                "target-identity-error: malformed-native-action-input-field: " + prefixes[i]
+            )
+        i = i + 1
+    var identity = NativeActionInputIdentityV1(
+        lines[1][9:], lines[2][7:], lines[3][7:], lines[4][6:], lines[5][10:],
+        lines[6][14:], lines[7][14:], lines[8][13:], lines[9][16:],
+        lines[10][8:], lines[11][20:], lines[12][17:], lines[13][11:], []
+    )
+    if value != native_action_input_receipt_text_v1(identity):
+        identity.errors.push("target-identity-error: non-canonical-native-action-input-receipt")
+    identity
+
+fn native_action_input_error_v1(
+    repo_root: text, cache_dir: text, expected_target: text,
+    expected_product: text, expected_producer: text,
+    expected_entry: text, expected_artifact_kind: text,
+    current_tool_digest: text, identity: NativeActionInputIdentityV1
+) -> text:
+    if identity.errors.len() > 0:
+        return identity.errors[0]
+    if identity.producer != NATIVE_ACTION_INPUT_PRODUCER_V1:
+        return "target-identity-error: untrusted-native-action-input-producer"
+    if identity.target != expected_target or identity.action != "native-build" or
+            identity.entry != expected_entry:
+        return "target-identity-error: native-action-input-subject-mismatch"
+    if not declared_path_valid(identity.tool_path) or
+            not digest_is_sha256(identity.tool_artifact_digest) or
+            not digest_is_sha256(identity.tool_behavior_digest) or
+            not digest_is_sha256(identity.producer_abi_digest) or
+            not digest_is_sha256(identity.target_identity_digest) or
+            not digest_is_sha256(identity.dependency_manifest_digest) or
+            not digest_is_sha256(identity.imported_closure_digest):
+        return "target-identity-error: invalid-native-action-input-identity"
+    val tool_absolute = repo_root + "/" + identity.tool_path
+    if not file_exists(tool_absolute) or
+            file_hash_sha256(tool_absolute) != identity.tool_artifact_digest or
+            current_tool_digest != identity.tool_artifact_digest:
+        return "target-identity-error: current-tool-artifact-mismatch"
+    val manifest_path = cache_dir + "/manifests/" +
+        identity.dependency_manifest_digest + ".manifest"
+    if not file_exists(manifest_path):
+        return "target-identity-error: current-dependency-manifest-missing"
+    val manifest_text = file_read(manifest_path)
+    if sha256_text(manifest_text) != identity.dependency_manifest_digest:
+        return "target-identity-error: current-dependency-manifest-digest-mismatch"
+    val manifest = parse_dependency_manifest_v1(manifest_text)
+    if manifest.errors.len() > 0 or manifest.consumer_target != expected_target:
+        return "target-identity-error: current-dependency-manifest-subject-mismatch"
+    val manifest_error = dependency_manifest_error_v1(
+        repo_root, expected_target, manifest.inputs
+    )
+    if manifest_error.len() > 0:
+        return manifest_error
+    val closure_path = cache_dir + "/closures/" +
+        identity.imported_closure_digest + ".receipt"
+    if not file_exists(closure_path):
+        return "target-identity-error: current-imported-closure-missing"
+    val closure_text = file_read(closure_path)
+    val closure = parse_imported_closure_receipt_v1(closure_text)
+    if closure.errors.len() > 0 or closure.target != expected_target or
+            closure.entry != expected_entry or
+            closure.tool_behavior_digest != identity.tool_behavior_digest or
+            closure.dependency_manifest_digest != identity.dependency_manifest_digest or
+            closure.closure_digest != identity.imported_closure_digest:
+        return "target-identity-error: current-imported-closure-subject-mismatch"
+    val closure_error = imported_closure_receipt_error_v1(
+        repo_root, expected_target, expected_entry, identity.tool_behavior_digest,
+        identity.dependency_manifest_digest, closure.inputs, closure_text
+    )
+    if closure_error.len() > 0:
+        return closure_error
+    val namespace = target_cache_namespace_v1(
+        identity.producer_abi_digest, identity.target_identity_digest,
+        identity.profile, expected_artifact_kind
+    )
+    val expected_key = target_action_key_v1(
+        identity.target, identity.action, expected_product, expected_producer, namespace,
+        identity.dependency_manifest_digest, identity.imported_closure_digest,
+        identity.tool_behavior_digest, expected_artifact_kind
+    )
+    if namespace.len() == 0 or expected_key.len() == 0 or identity.action_key != expected_key:
+        return "target-identity-error: current-action-key-mismatch"
+    ""
+
+fn load_current_native_action_input_v1(
+    repo_root: text, cache_dir: text, expected_target: text,
+    expected_product: text, expected_producer: text,
+    expected_entry: text, expected_artifact_kind: text,
+    current_tool_digest: text
+) -> NativeActionInputIdentityV1:
+    val path = cache_dir + "/inputs/current.receipt"
+    if not file_exists(path):
+        return _empty_native_action_input_v1(
+            "target-identity-error: current-native-action-input-receipt-missing"
+        )
+    var identity = parse_native_action_input_receipt_v1(file_read(path))
+    val error = native_action_input_error_v1(
+        repo_root, cache_dir, expected_target, expected_product, expected_producer,
+        expected_entry,
+        expected_artifact_kind, current_tool_digest, identity
+    )
+    if error.len() > 0:
+        identity.errors.push(error)
+    identity
+
+fn aggregate_action_identity_text_v1(
+    target: text, product: text, producer: text,
+    tool_behavior_digest: text, dependency_manifest_digest: text
+) -> text:
+    AGGREGATE_ACTION_IDENTITY_SCHEMA_V1 +
+        "\ntarget=" + target +
+        "\nproduct=" + product +
+        "\nproducer=" + producer +
+        "\ntool-behavior=" + tool_behavior_digest +
+        "\ndependency-manifest=" + dependency_manifest_digest + "\n"
+
+fn aggregate_action_identity_digest_v1(
+    target: text, product: text, producer: text,
+    tool_behavior_digest: text, dependency_manifest_digest: text
+) -> text:
+    if target.trim().len() == 0 or not digest_is_sha256(tool_behavior_digest) or
+            not digest_is_sha256(dependency_manifest_digest):
+        return ""
+    sha256_text(aggregate_action_identity_text_v1(
+        target, product, producer, tool_behavior_digest, dependency_manifest_digest
+    ))
+
+export NATIVE_ACTION_INPUT_SCHEMA_V1, NATIVE_ACTION_INPUT_PRODUCER_V1
+export AGGREGATE_ACTION_IDENTITY_SCHEMA_V1
+export NativeActionInputIdentityV1
+export native_action_input_receipt_text_v1, parse_native_action_input_receipt_v1
+export native_action_input_error_v1, load_current_native_action_input_v1
+export aggregate_action_identity_text_v1, aggregate_action_identity_digest_v1

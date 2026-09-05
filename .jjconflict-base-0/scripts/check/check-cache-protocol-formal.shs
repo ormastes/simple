@@ -1,0 +1,95 @@
+#!/bin/sh
+# check-cache-protocol-formal.shs — C6 formal gate for the cache protocol.
+#
+# Checks (all fail-closed):
+#   1. `lake build` of src/verification/cache_protocol succeeds.
+#   2. No `sorry` / `admit` / `native_decide` / unapproved `axiom` in the cache
+#      proof roots (cache_protocol AND the imported cache_identity).
+#   3. Coverage: schema KEY-field count + 1 (domain) == generated
+#      *_change_visible theorem count, and excluded_from_key count ==
+#      generated *_absent theorem count.
+#   4. Regeneration is clean: rerunning the generator reproduces the four
+#      generated artifacts byte-for-byte.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <what ran>        exit 0
+#   FAIL — <reason>          exit 1
+#   ERROR — nothing was checked (<reason>)   exit 2
+# Run from the repo root. Anywhere else must yield ERROR (exit 2), never PASS.
+
+set -u
+
+err() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+fail() { echo "FAIL — $1"; exit 1; }
+
+PROJ=src/verification/cache_protocol
+SCHEMA=src/compiler/80.driver/cache/schema/cache_protocol.sdn
+GEN=src/app/gen_cache_model/main.spl
+
+# ---- fail-closed on cwd ----------------------------------------------------
+[ -d "$PROJ" ] || err "no $PROJ under cwd $(pwd)"
+[ -f "$SCHEMA" ] || err "no schema at $SCHEMA"
+[ -f "$GEN" ] || err "no generator at $GEN"
+[ -d src/verification/cache_identity ] || err "no cache_identity project"
+command -v lake >/dev/null 2>&1 || err "lake not on PATH"
+
+# ---- 1. lake build ---------------------------------------------------------
+if ! (cd "$PROJ" && lake build >/tmp/cache_protocol_lake.log 2>&1); then
+  tail -20 /tmp/cache_protocol_lake.log
+  fail "lake build failed in $PROJ"
+fi
+
+# ---- 2. trust-bypass scan --------------------------------------------------
+# `axiom` has no approved instances in these roots today; any hit is a FAIL
+# until it is explicitly added to the allowlist below.
+BAD=$(grep -rnE "(^|[^A-Za-z_])(sorry|admit|native_decide)([^A-Za-z_]|$)|^[[:space:]]*axiom[[:space:]]" \
+        "$PROJ/src" src/verification/cache_identity/src --include='*.lean' \
+      | grep -v "allowed-axiom:" | grep -vE '`(sorry|admit|native_decide)`' || true)
+[ -z "$BAD" ] || { echo "$BAD"; fail "trust bypass (sorry/admit/native_decide/axiom) in cache proof roots"; }
+
+# ---- 3. coverage: fields == theorems --------------------------------------
+key_fields=$(awk '
+  /canonical_order:/ { f=1; next }
+  f && /^[[:space:]]*- \{/ { n++; next }
+  f && /^[[:space:]]*#/ { next }
+  f { f=0 }
+  END { print n+0 }' "$SCHEMA")
+excluded=$(awk '
+  /excluded_from_key:/ { f=1; next }
+  f && /^[[:space:]]*- \{/ { n++; next }
+  f && /^[[:space:]]*#/ { next }
+  f { f=0 }
+  END { print n+0 }' "$SCHEMA")
+[ "$key_fields" -gt 0 ] || err "schema parse found 0 canonical_order rows"
+[ "$excluded" -gt 0 ] || err "schema parse found 0 excluded_from_key rows"
+
+VIS="$PROJ/src/CacheProtocol/Generated/Visibility.lean"
+vis_count=$(grep -c '^theorem [a-z_0-9]*_change_visible (k1 k2 : ActionKey)' "$VIS" || true)
+abs_count=$(grep -c '^theorem [a-z_0-9]*_absent (r : FullRecord)' "$VIS" || true)
+
+want_vis=$((key_fields + 1))   # +1: domain (position 0, outer tag)
+[ "$vis_count" -eq "$want_vis" ] || \
+  fail "coverage: $key_fields KEY fields (+1 domain = $want_vis) but $vis_count *_change_visible theorems"
+[ "$abs_count" -eq "$excluded" ] || \
+  fail "coverage: $excluded excluded_from_key entries but $abs_count *_absent theorems"
+
+# ---- 4. regeneration is clean ---------------------------------------------
+[ -x bin/simple ] || [ -f bin/simple ] || err "bin/simple missing; cannot verify regeneration"
+TMP=$(mktemp -d) || err "mktemp failed"
+trap 'rm -rf "$TMP"' EXIT
+G1="$PROJ/src/CacheProtocol/Generated/Model.lean"
+G2="$PROJ/src/CacheProtocol/Generated/Visibility.lean"
+G3="$PROJ/src/CacheProtocol/Generated/Golden.lean"
+G4="$PROJ/golden/golden_vectors.sdn"
+for f in "$G1" "$G2" "$G3" "$G4"; do
+  [ -f "$f" ] || fail "generated artifact missing: $f"
+  cp "$f" "$TMP/$(basename "$f")"
+done
+OUT=$(SIMPLE_EXECUTION_MODE=interpreter bin/simple run "$GEN" 2>/dev/null | tail -1)
+[ "$OUT" = "GEN OK" ] || fail "generator did not report GEN OK (got: ${OUT:-<empty>})"
+for f in "$G1" "$G2" "$G3" "$G4"; do
+  cmp -s "$f" "$TMP/$(basename "$f")" || fail "regeneration changed $(basename "$f") — generated files are stale"
+done
+
+echo "PASS — lake build green; no trust bypass; $vis_count/$want_vis visibility + $abs_count/$excluded absence theorems; regeneration byte-clean"
+exit 0

@@ -1,0 +1,449 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.sha256_u8_hex
+use app.spipe_knowledge_provider.response_plan.*
+use app.spipe_knowledge_provider.canonical_json_emitter.{ProviderCanonicalJsonEmitterV1, ProviderEmitterFaultInjectionV1}
+use app.spipe_knowledge_provider.streaming_sha256.Sha256StreamV1
+use app.spipe_knowledge_provider.work_control.*
+
+fn emit_limits(bytes: i64, events: i64 = 256, blocks: i64 = 66,
+               output: i64 = -1) -> ProviderStepLimitsV1:
+    val output_limit = if output < 0: bytes else: output
+    ProviderStepLimitsV1(max_bytes: bytes, max_json_events: events,
+        max_unicode_scalars: 4096, max_sha_blocks: blocks,
+        max_comparisons: 4096, max_output_bytes: output_limit)
+
+fn emit_budget(output: i64 = 1048576, allocations: i64 = 1048576,
+               blocks: i64 = 100000) -> ProviderBoundedBudgetV1:
+    ProviderBoundedBudgetV1.configured([
+        ProviderBudgetLimitV1(category: provider_budget_category_output_bytes(), limit: output),
+        ProviderBudgetLimitV1(category: provider_budget_category_logical_allocations(), limit: allocations),
+        ProviderBudgetLimitV1(category: provider_budget_category_hash_blocks(), limit: blocks),
+    ]).unwrap()
+
+fn emit_checkpoint(fail_after: i64 = -1,
+                   reason: text = "") -> ProviderDeterministicCheckpointV1:
+    ProviderDeterministicCheckpointV1.configured(
+        ProviderRequestControlHandleV1(request_id: "REQ-EMIT",
+            registration_generation: 1),
+        ProviderCheckpointProgressV1(stage: "emit", bytes: 4096,
+            events: 256, scalars: 4096, hash_blocks: 66,
+            comparisons: 4096), fail_after, reason).unwrap()
+
+fn flatten(segments: [[u8]]) -> [u8]:
+    var result: [u8] = []
+    for segment in segments:
+        for byte in segment: result.push(byte)
+    result
+
+fn complex_plan(maximum: i64 = 1048576) -> ProviderResponsePlanV1:
+    provider_response_plan_v1([
+        provider_json_object_open_v1(),
+        provider_json_object_key_v1("a"), provider_json_array_open_v1(),
+        provider_json_integer_v1(-9007199254740991),
+        provider_json_boolean_v1(false), provider_json_null_v1(),
+        provider_json_array_close_v1(),
+        provider_json_object_key_v1("z"),
+        provider_json_string_v1("\"\\\b\t\n\f\r\u0000\u001f café"),
+        provider_json_object_close_v1(),
+    ], maximum).unwrap()
+
+fn text_plan(body_bytes: i64, maximum_extra: i64 = 0) -> ProviderResponsePlanV1:
+    val predicted = body_bytes + 2
+    provider_response_plan_v1([provider_json_string_v1("x".repeat(body_bytes))],
+        predicted + maximum_extra).unwrap()
+
+fn null_array_plan(members: i64) -> ProviderResponsePlanV1:
+    var instructions = [provider_json_array_open_v1()]
+    var i = 0
+    while i < members:
+        instructions.push(provider_json_null_v1())
+        i = i + 1
+    instructions.push(provider_json_array_close_v1())
+    provider_response_plan_v1(instructions, 1 + members * 5).unwrap()
+
+fn nested_array_plan(depth: i64) -> Result<ProviderResponsePlanV1, text>:
+    var instructions: [ProviderJsonEmitInstructionV1] = []
+    var i = 0
+    while i < depth:
+        instructions.push(provider_json_array_open_v1())
+        i = i + 1
+    while i > 0:
+        instructions.push(provider_json_array_close_v1())
+        i = i - 1
+    provider_response_plan_v1(instructions, depth * 2)
+
+fn over_member_nested_plan() -> Result<ProviderResponsePlanV1, text>:
+    var instructions = [provider_json_array_open_v1()]
+    var i = 0
+    while i < 65536:
+        instructions.push(provider_json_null_v1())
+        i = i + 1
+    instructions.push(provider_json_array_open_v1())
+    instructions.push(provider_json_array_close_v1())
+    instructions.push(provider_json_array_close_v1())
+    provider_response_plan_v1(instructions, 400000)
+
+fn emit_plan(plan: ProviderResponsePlanV1,
+             schedule: [i64]) -> ([u8], text, i64):
+    var sha = Sha256StreamV1.begin([]).unwrap()
+    var budget = emit_budget()
+    var checkpoint = emit_checkpoint()
+    var emitter = ProviderCanonicalJsonEmitterV1.configured(
+        plan, 7, sha, budget, checkpoint).unwrap()
+    var calls = 0
+    while not emitter.is_ready():
+        val quantum = schedule[calls % schedule.len()]
+        emitter.step(emit_limits(quantum)).unwrap()
+        calls = calls + 1
+    val owned = emitter.take().unwrap()
+    (flatten(owned.bytes.segments), owned.payload_sha256, calls)
+
+fn fresh_emitter(plan: ProviderResponsePlanV1, segment: i64,
+                 budget: ProviderBoundedBudgetV1,
+                 checkpoint: ProviderDeterministicCheckpointV1) \
+        -> ProviderCanonicalJsonEmitterV1:
+    var sha = Sha256StreamV1.begin([]).unwrap()
+    ProviderCanonicalJsonEmitterV1.configured(
+        plan, segment, sha, budget, checkpoint).unwrap()
+
+fn fault_emitter(plan: ProviderResponsePlanV1, stage: text,
+                 chunk_index: i64, reason: text) \
+        -> ProviderCanonicalJsonEmitterV1:
+    var sha = Sha256StreamV1.begin([]).unwrap()
+    var budget = emit_budget()
+    var checkpoint = emit_checkpoint()
+    ProviderCanonicalJsonEmitterV1.configured_with_fault(plan, 4,
+        sha, budget, checkpoint, ProviderEmitterFaultInjectionV1(
+            stage: stage, chunk_index: chunk_index, reason: reason)).unwrap()
+
+describe "SPipe provider atomic canonical JSON emitter":
+    # @manual scenario evidence
+    it "prevalidates grammar NFC order safe integers and exact predicted size":
+        # @req REQ-EMIT
+        # @req REQ-EMIT
+        # @req REQ-SSPEC-APP
+        step("prevalidates grammar NFC order safe integers and exact predicted size")
+        expect(provider_response_plan_v1([], 10)).to_equal(
+            Err("invalid_response_plan"))
+        expect(provider_response_plan_v1([
+            provider_json_integer_v1(9007199254740992)], 30)).to_equal(
+            Err("integer_out_of_range"))
+        expect(provider_response_plan_v1([
+            provider_json_object_open_v1(), provider_json_object_key_v1("z"),
+            provider_json_null_v1(), provider_json_object_key_v1("a"),
+            provider_json_null_v1(), provider_json_object_close_v1()], 30)).to_equal(
+            Err("noncanonical_json_key_order"))
+        expect(provider_response_plan_v1([
+            provider_json_object_open_v1(), provider_json_object_key_v1("é"),
+            provider_json_string_v1("e\u0301"), provider_json_object_close_v1()], 30)).to_equal(
+            Err("noncanonical_json_text"))
+
+        val valid = provider_response_plan_v1([provider_json_null_v1()], 5).unwrap()
+        expect(valid.predicted_encoded_bytes).to_equal(4)
+        val forged = ProviderResponsePlanV1(instructions: valid.instructions,
+            maximum_output_bytes: valid.maximum_output_bytes,
+            predicted_encoded_bytes: valid.predicted_encoded_bytes + 1)
+        var forged_sha = Sha256StreamV1.begin([]).unwrap()
+        var forged_budget = emit_budget()
+        var forged_checkpoint = emit_checkpoint()
+        expect(ProviderCanonicalJsonEmitterV1.configured(forged, 4,
+            forged_sha, forged_budget, forged_checkpoint)).to_equal(
+            Err("invalid_response_plan"))
+
+        expect(provider_response_plan_v1([provider_json_null_v1()], 3)).to_equal(
+            Err("limit_exceeded"))
+        expect(provider_response_plan_v1([provider_json_null_v1()], 4).unwrap().predicted_encoded_bytes).to_equal(4)
+        expect(provider_response_plan_v1([provider_json_null_v1()], 5).unwrap().predicted_encoded_bytes).to_equal(4)
+
+    it "enforces minus exact plus plan event byte segment output and SHA caps":
+        # @req REQ-SSPEC-APP
+        step("enforces minus exact plus plan event byte segment output and SHA caps")
+        expect(provider_response_plan_instruction_count_v1(262143)).to_equal(Ok(262143))
+        expect(provider_response_plan_instruction_count_v1(262144)).to_equal(Ok(262144))
+        expect(provider_response_plan_instruction_count_v1(262145)).to_equal(
+            Err("limit_exceeded"))
+
+        # Exercise the actual immutable tape at each count, not only the
+        # scalar guard. The below-cap tapes reach grammar validation; +1 is
+        # rejected by the instruction ceiling before inspecting element two.
+        var full_tape: [ProviderJsonEmitInstructionV1] = []
+        var tape_index = 0
+        while tape_index < 262145:
+            full_tape.push(provider_json_null_v1())
+            tape_index = tape_index + 1
+        expect(provider_response_plan_v1(full_tape, 1048576)).to_equal(
+            Err("limit_exceeded"))
+        full_tape.pop()
+        expect(provider_response_plan_v1(full_tape, 1048576)).to_equal(
+            Err("multiple_json_roots"))
+        full_tape.pop()
+        expect(provider_response_plan_v1(full_tape, 1048576)).to_equal(
+            Err("multiple_json_roots"))
+
+        expect(nested_array_plan(15).is_ok()).to_equal(true)
+        expect(nested_array_plan(16).is_ok()).to_equal(true)
+        expect(nested_array_plan(17)).to_equal(Err("limit_exceeded"))
+        expect(null_array_plan(65535).instructions.len()).to_equal(65537)
+        expect(null_array_plan(65536).instructions.len()).to_equal(65538)
+        expect(over_member_nested_plan()).to_equal(Err("limit_exceeded"))
+
+        val events_plan = null_array_plan(300)
+        for pair in [[255, 255], [256, 256], [257, 256]]:
+            var event_emitter = fresh_emitter(events_plan, 64,
+                emit_budget(), emit_checkpoint())
+            val result = event_emitter.step(emit_limits(4096, pair[0])).unwrap()
+            expect(result.produced_events).to_equal(pair[1])
+
+        val quantum_plan = text_plan(5000)
+        for pair in [[4095, 4095], [4096, 4096], [4097, 4096]]:
+            var byte_emitter = fresh_emitter(quantum_plan, 4096,
+                emit_budget(), emit_checkpoint())
+            val result = byte_emitter.step(emit_limits(pair[0])).unwrap()
+            expect(result.produced_bytes).to_equal(pair[1])
+
+        for segment in [4095, 4096]:
+            var segment_sha = Sha256StreamV1.begin([]).unwrap()
+            var segment_budget = emit_budget()
+            var segment_checkpoint = emit_checkpoint()
+            expect(ProviderCanonicalJsonEmitterV1.configured(quantum_plan,
+                segment, segment_sha, segment_budget,
+                segment_checkpoint).is_ok()).to_equal(true)
+        var excess_sha = Sha256StreamV1.begin([]).unwrap()
+        var excess_budget = emit_budget()
+        var excess_checkpoint = emit_checkpoint()
+        expect(ProviderCanonicalJsonEmitterV1.configured(quantum_plan, 4097,
+            excess_sha, excess_budget, excess_checkpoint)).to_equal(
+            Err("invalid_sink_limits"))
+
+        val two_block_finalize = text_plan(54)
+        var short_blocks = fresh_emitter(two_block_finalize, 56,
+            emit_budget(), emit_checkpoint())
+        expect(short_blocks.step(emit_limits(4096, 256, 1))).to_equal(
+            Err("limit_exceeded"))
+        for blocks in [2, 3]:
+            var enough_blocks = fresh_emitter(two_block_finalize, 56,
+                emit_budget(), emit_checkpoint())
+            expect(enough_blocks.step(
+                emit_limits(4096, 256, blocks)).unwrap().kind).to_equal("ready")
+
+    it "typed payload page and explanation builders enforce lower caps":
+        # @req REQ-SSPEC-APP
+        step("typed payload page and explanation builders enforce lower caps")
+        expect(provider_response_payload_plan_v1("xxx", 2, 20)).to_equal(
+            Err("limit_exceeded"))
+        expect(provider_response_payload_plan_v1("xxx", 3, 20).is_ok()).to_equal(true)
+        expect(provider_response_payload_plan_v1("xxx", 4, 20).is_ok()).to_equal(true)
+
+        val page = ["a", "b"]
+        expect(provider_response_page_plan_v1(page, 1, 20)).to_equal(
+            Err("limit_exceeded"))
+        expect(provider_response_page_plan_v1(page, 2, 20).is_ok()).to_equal(true)
+        expect(provider_response_page_plan_v1(page, 3, 20).is_ok()).to_equal(true)
+
+        val explanation = [
+            ProviderResponseTextEntryV1(key: "a", value: "one"),
+            ProviderResponseTextEntryV1(key: "b", value: "two")]
+        expect(provider_response_explanation_plan_v1(
+            explanation, 1, 40)).to_equal(Err("limit_exceeded"))
+        expect(provider_response_explanation_plan_v1(
+            explanation, 2, 40).is_ok()).to_equal(true)
+        expect(provider_response_explanation_plan_v1(
+            explanation, 3, 40).is_ok()).to_equal(true)
+
+    it "emits identical canonical bytes and hash for one-byte and irregular splits":
+        # @req REQ-SSPEC-APP
+        step("emits identical canonical bytes and hash for one-byte and irregular splits")
+        val expected = "{\"a\":[-9007199254740991,false,null],\"z\":\"\\\"\\\\\\b\\t\\n\\f\\r\\u0000\\u001f café\"}".bytes()
+        val one = emit_plan(complex_plan(), [1])
+        val irregular = emit_plan(complex_plan(), [17, 1, 63, 2, 31, 7])
+        val quantum = emit_plan(complex_plan(), [4096])
+        expect(one.0).to_equal(expected)
+        expect(irregular.0).to_equal(expected)
+        expect(quantum.0).to_equal(expected)
+        expect(one.1).to_equal(sha256_u8_hex(expected))
+        expect(irregular.1).to_equal(one.1)
+        expect(quantum.1).to_equal(one.1)
+
+    it "commits full trial cursor and child capabilities atomically":
+        # @req REQ-SSPEC-APP
+        step("commits full trial cursor and child capabilities atomically")
+        val plan = text_plan(100)
+        var source_sha = Sha256StreamV1.begin([]).unwrap()
+        var source_budget = emit_budget()
+        var source_checkpoint = emit_checkpoint()
+        var original = ProviderCanonicalJsonEmitterV1.configured(
+            plan, 8, source_sha, source_budget, source_checkpoint).unwrap()
+        var isolated = original
+        val first = isolated.step(emit_limits(17)).unwrap()
+        expect(first.produced_bytes).to_equal(17)
+        expect(isolated.total_bytes()).to_equal(17)
+        expect(original.total_bytes()).to_equal(0)
+        expect(original.cursor.instruction_cursor).to_equal(0)
+        expect(original.sink.total_bytes()).to_equal(0)
+        expect(original.sha.total_length).to_equal(0)
+        expect(source_sha.total_length).to_equal(0)
+        expect(source_budget.consumed(
+            provider_budget_category_output_bytes())).to_equal(0)
+        expect(source_checkpoint.checkpoint_count).to_equal(0)
+
+        val original_result = original.step(emit_limits(17)).unwrap()
+        expect(original_result.produced_bytes).to_equal(17)
+        expect(original.total_bytes()).to_equal(17)
+        expect(isolated.total_bytes()).to_equal(17)
+
+    it "directly injects sink SHA-update and checkpoint faults at every schedule position":
+        # @req REQ-SSPEC-APP
+        step("directly injects sink SHA-update and checkpoint faults at every schedule position")
+        val plan = text_plan(18)
+        for stage in ["sink", "sha_update", "checkpoint"]:
+            val reason = "direct_" + stage + "_fault"
+            for chunk_index in [0, 1, 10, 19]:
+                var emitter = fault_emitter(plan, stage, chunk_index, reason)
+                var result: Result<ProviderWorkStepKindV1, text> = Ok(
+                    ProviderWorkStepKindV1(kind: "continue",
+                        produced_bytes: 0, produced_events: 0))
+                while result.is_ok() and not emitter.is_ready():
+                    result = emitter.step(emit_limits(1))
+                expect(result).to_equal(Err(reason))
+                expect(emitter.total_bytes()).to_equal(chunk_index)
+                expect(emitter.sink.total_bytes()).to_equal(0)
+                expect(emitter.publishable()).to_equal(false)
+                expect(emitter.step(emit_limits(1))).to_equal(Err(reason))
+                expect(emitter.take()).to_equal(Err(reason))
+
+    it "directly injects SHA-finalize faults at zero first middle and final chunks":
+        # @req REQ-SSPEC-APP
+        step("directly injects SHA-finalize faults at zero first middle and final chunks")
+        val plan = text_plan(18)
+        for pair in [[20, 0], [10, 1], [2, 9], [1, 19]]:
+            val reason = "direct_sha_finalize_fault"
+            var emitter = fault_emitter(plan, "sha_finalize", pair[1], reason)
+            var result: Result<ProviderWorkStepKindV1, text> = Ok(
+                ProviderWorkStepKindV1(kind: "continue",
+                    produced_bytes: 0, produced_events: 0))
+            while result.is_ok() and not emitter.is_ready():
+                result = emitter.step(emit_limits(pair[0]))
+            expect(result).to_equal(Err(reason))
+            expect(emitter.sink.total_bytes()).to_equal(0)
+            expect(emitter.publishable()).to_equal(false)
+            val stable_total = emitter.total_bytes()
+            expect(emitter.step(emit_limits(pair[0]))).to_equal(Err(reason))
+            expect(emitter.total_bytes()).to_equal(stable_total)
+            expect(emitter.take()).to_equal(Err(reason))
+
+    it "fails sink budget at zero first middle and final without cursor commit":
+        # @req REQ-SSPEC-APP
+        step("fails sink budget at zero first middle and final without cursor commit")
+        val plan = text_plan(18)
+        # Byte-zero, immediately-after-first, middle, and final append.
+        for limit in [0, 1, 10, 19]:
+            var emitter = fresh_emitter(plan, 4,
+                emit_budget(limit, 100, 100), emit_checkpoint())
+            var result: Result<ProviderWorkStepKindV1, text> = Ok(
+                ProviderWorkStepKindV1(kind: "continue", produced_bytes: 0,
+                    produced_events: 0))
+            while result.is_ok() and not emitter.is_ready():
+                result = emitter.step(emit_limits(1))
+            expect(result).to_equal(Err("limit_exceeded"))
+            expect(emitter.publishable()).to_equal(false)
+            expect(emitter.sink.total_bytes()).to_equal(0)
+            val committed_cursor = emitter.cursor.instruction_cursor
+            val committed_total = emitter.total_bytes()
+            expect(emitter.step(emit_limits(1))).to_equal(Err("limit_exceeded"))
+            expect(emitter.cursor.instruction_cursor).to_equal(committed_cursor)
+            expect(emitter.total_bytes()).to_equal(committed_total)
+            expect(emitter.take()).to_equal(Err("limit_exceeded"))
+
+        var second_category = fresh_emitter(plan, 4,
+            emit_budget(100, 0, 100), emit_checkpoint())
+        expect(second_category.step(emit_limits(4))).to_equal(
+            Err("limit_exceeded"))
+        expect(second_category.budget.consumed(
+            provider_budget_category_output_bytes())).to_equal(0)
+        expect(second_category.budget.consumed(
+            provider_budget_category_logical_allocations())).to_equal(0)
+        expect(second_category.cursor.instruction_cursor).to_equal(0)
+
+    it "discards first middle final SHA update and finalize failures":
+        # @req REQ-SSPEC-APP
+        step("discards first middle final SHA update and finalize failures")
+        val three_blocks = text_plan(190)
+        for blocks in [0, 1, 2]:
+            var emitter = fresh_emitter(three_blocks, 64,
+                emit_budget(1000, 1000, blocks), emit_checkpoint())
+            var result: Result<ProviderWorkStepKindV1, text> = Ok(
+                ProviderWorkStepKindV1(kind: "continue", produced_bytes: 0,
+                    produced_events: 0))
+            while result.is_ok() and not emitter.is_ready():
+                result = emitter.step(emit_limits(64))
+            expect(result).to_equal(Err("limit_exceeded"))
+            expect(emitter.publishable()).to_equal(false)
+            expect(emitter.sink.total_bytes()).to_equal(0)
+
+        # Three data blocks fit; the separately budgeted finalize block does not.
+        var finalize_after_data = fresh_emitter(three_blocks, 64,
+            emit_budget(1000, 1000, 3), emit_checkpoint())
+        var finalize_result: Result<ProviderWorkStepKindV1, text> = Ok(
+            ProviderWorkStepKindV1(kind: "continue", produced_bytes: 0,
+                produced_events: 0))
+        while finalize_result.is_ok() and not finalize_after_data.is_ready():
+            finalize_result = finalize_after_data.step(emit_limits(64))
+        expect(finalize_result).to_equal(Err("limit_exceeded"))
+        expect(finalize_after_data.sink.total_bytes()).to_equal(0)
+
+        # A 56-byte payload needs two padding blocks: reject first and second.
+        val two_finalize = text_plan(54)
+        for blocks in [0, 1]:
+            var finalize = fresh_emitter(two_finalize, 56,
+                emit_budget(1000, 1000, blocks), emit_checkpoint())
+            expect(finalize.step(emit_limits(56, 256, 2))).to_equal(
+                Err("limit_exceeded"))
+            expect(finalize.publishable()).to_equal(false)
+            expect(finalize.sink.total_bytes()).to_equal(0)
+
+    it "latches first middle final emission and finalize checkpoints":
+        # @req REQ-SSPEC-APP
+        step("latches first middle final emission and finalize checkpoints")
+        val plan = text_plan(18)
+        # Zero, first fan-out, middle, final emission, and finalize checkpoint.
+        for fail_after in [0, 1, 3, 9, 10]:
+            var emitter = fresh_emitter(plan, 4, emit_budget(),
+                emit_checkpoint(fail_after, "cancelled"))
+            var result: Result<ProviderWorkStepKindV1, text> = Ok(
+                ProviderWorkStepKindV1(kind: "continue", produced_bytes: 0,
+                    produced_events: 0))
+            while result.is_ok() and not emitter.is_ready():
+                result = emitter.step(emit_limits(4))
+            expect(result).to_equal(Err("cancelled"))
+            expect(emitter.publishable()).to_equal(false)
+            expect(emitter.sink.total_bytes()).to_equal(0)
+            val committed_total = emitter.total_bytes()
+            expect(emitter.step(emit_limits(4))).to_equal(Err("cancelled"))
+            expect(emitter.total_bytes()).to_equal(committed_total)
+
+    it "requires exact sink predicted and emitted totals then permits one take":
+        # @req REQ-SSPEC-APP
+        step("requires exact sink predicted and emitted totals then permits one take")
+        val plan = provider_response_plan_v1([provider_json_null_v1()], 4).unwrap()
+        var emitter = fresh_emitter(plan, 4, emit_budget(), emit_checkpoint())
+        expect(emitter.take()).to_equal(Err("json_output_not_ready"))
+        expect(emitter.step(emit_limits(4)).unwrap().kind).to_equal("ready")
+        expect(emitter.total_bytes()).to_equal(plan.predicted_encoded_bytes)
+        expect(emitter.sink.total_bytes()).to_equal(plan.predicted_encoded_bytes)
+        expect(emitter.publishable()).to_equal(true)
+        expect(emitter.step(emit_limits(4)).unwrap().kind).to_equal("ready")
+        val first = emitter.take()
+        expect(first.is_ok()).to_equal(true)
+        expect(first.unwrap().bytes.total_bytes).to_equal(plan.predicted_encoded_bytes)
+        expect(emitter.take()).to_equal(Err("json_output_taken"))
+        expect(emitter.step(emit_limits(4))).to_equal(Err("json_output_taken"))

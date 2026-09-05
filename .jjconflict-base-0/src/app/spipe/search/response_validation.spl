@@ -1,0 +1,76 @@
+# Response distrust (P5, design §4.3, plan hazard 12): the provider is
+# untrusted after the handshake succeeds. Every search response is
+# re-validated before the adapter hands it to the caller -- rank uniqueness,
+# contiguity and ordering, and score/rank monotonicity are re-derived here,
+# never accepted on the provider's word. A response that fails any check is
+# rejected wholesale: partial trust (show the hits, drop the bad field) is
+# exactly the hazard 12 failure mode.
+
+use lib.common.search.provider.{ProviderErrorV1}
+use lib.common.search.top_k.{SearchPageV1}
+use lib.common.search.document.{SearchHit}
+
+fn poisoned(field: text) -> ProviderErrorV1:
+    ProviderErrorV1(code: "poisoned_response", message: field, retryable: false)
+
+# Ranks must be exactly 1..N, unique, and strictly increasing across `hits` in
+# array order (contiguous + ordered, design §4.3). A provider that skips a
+# rank, repeats one, or ships hits out of rank order is quarantined by the
+# caller -- this function only detects it.
+pub fn validate_rank_sequence(hits: [SearchHit]) -> Result<bool, ProviderErrorV1>:
+    var expected = 1
+    var i = 0
+    while i < hits.len():
+        if hits[i].rank != expected:
+            return Err(poisoned("rank_not_contiguous"))
+        expected = expected + 1
+        i = i + 1
+    Ok(true)
+
+# Scores must be non-increasing as rank increases: rank order IS the
+# provider's claimed relevance order, so a later (higher) rank must never
+# outscore an earlier one.
+pub fn validate_score_monotonic(hits: [SearchHit]) -> Result<bool, ProviderErrorV1>:
+    var i = 1
+    while i < hits.len():
+        if hits[i].score.is_greater_than(hits[i - 1].score):
+            return Err(poisoned("score_not_monotonic"))
+        i = i + 1
+    Ok(true)
+
+# Document IDs must be unique within one page -- a duplicated ID is a
+# poisoned response (the provider claiming the same document at two ranks).
+pub fn validate_unique_document_ids(hits: [SearchHit]) -> Result<bool, ProviderErrorV1>:
+    var seen: [text] = []
+    var i = 0
+    while i < hits.len():
+        val id = hits[i].document_id
+        var j = 0
+        var dup = false
+        while j < seen.len():
+            if seen[j] == id:
+                dup = true
+            j = j + 1
+        if dup:
+            return Err(poisoned("duplicate_document_id"))
+        seen.push(id)
+        i = i + 1
+    Ok(true)
+
+# The page's `logical_root` must match the logical root the adapter itself
+# resolved for this snapshot -- never the provider's unverified label for a
+# different (or forged) index generation.
+pub fn validate_logical_root(page: SearchPageV1, expected_logical_root: text) -> Result<bool, ProviderErrorV1>:
+    if page.logical_root != expected_logical_root:
+        return Err(poisoned("logical_root_mismatch"))
+    Ok(true)
+
+# Full response-distrust gate: run every independent check and reject on the
+# first violation. Order is deterministic so a mutation test can pin exactly
+# which check regressed.
+pub fn validate_search_page(page: SearchPageV1, expected_logical_root: text) -> Result<bool, ProviderErrorV1>:
+    validate_logical_root(page, expected_logical_root)?
+    validate_unique_document_ids(page.hits)?
+    validate_rank_sequence(page.hits)?
+    validate_score_monotonic(page.hits)?
+    Ok(true)

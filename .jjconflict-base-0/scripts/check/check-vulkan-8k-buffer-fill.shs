@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$ROOT/build/check/vulkan-8k-buffer-fill}"
+CC_BIN="${CC:-gcc}"
+ICD="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
+WIDTH="${VULKAN_BENCH_WIDTH:-7680}"
+HEIGHT="${VULKAN_BENCH_HEIGHT:-4320}"
+ITERATIONS="${VULKAN_BENCH_ITERATIONS:-31}"
+ACTIVE="${VULKAN_BENCH_ACTIVE_BASIS_POINTS:-10000}"
+
+if [ ! -f "$ICD" ]; then
+    echo "vulkan_8k_evidence_status=blocked reason=missing-icd" >&2
+    exit 2
+fi
+mkdir -p "$BUILD_DIR"
+BIN="$BUILD_DIR/vulkan_bench"
+RECEIPT="$BUILD_DIR/receipt.env"
+$CC_BIN -O2 -Wall -Wextra -Werror -o "$BIN" \
+    "$ROOT/test/05_perf/local_gpu_check/c_cuda/vulkan_bench.c" -ldl -lrt
+"$BIN" --self-test | grep -q '^vulkan_bench_self_test=pass$'
+VK_ICD_FILENAMES="$ICD" VULKAN_BENCH_WIDTH="$WIDTH" \
+    VULKAN_BENCH_HEIGHT="$HEIGHT" VULKAN_BENCH_ITERATIONS="$ITERATIONS" \
+    VULKAN_BENCH_ACTIVE_BASIS_POINTS="$ACTIVE" "$BIN" | \
+    grep '^vulkan_8k_' | tee "$RECEIPT"
+grep -q '^vulkan_8k_active_mismatch_count=0$' "$RECEIPT"
+grep -q '^vulkan_8k_timed_readback_bytes=0$' "$RECEIPT"
+grep -q '^vulkan_8k_swapchain_presented=false$' "$RECEIPT"
+grep -q '^vulkan_8k_dynamic_frame_80fps_proven=false$' "$RECEIPT"
+echo "vulkan_8k_evidence_status=pass"

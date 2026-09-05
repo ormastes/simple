@@ -1,0 +1,440 @@
+#!/bin/sh
+set -eu
+
+# One-process ARM64 SimpleOS primitive lane. The same QEMU invocation owns the
+# Vulkan/ivshmem DrawIR receipt, virtio keyboard+mouse delivery, and virtio-snd
+# completion. Evidence from separate guest launches is never merged.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+. scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs
+
+build=yes
+case "${1:-}" in
+    "") ;;
+    --no-build) build=no ;;
+    --self-test)
+        grep -Fq 'gui_entry_desktop_linux_qemu_unified.spl' "$0"
+        grep -Fq -- '-device ivshmem-plain,memdev=hostgpu' "$0"
+        grep -Fq -- '-device virtio-keyboard-device' "$0"
+        grep -Fq -- '-device virtio-mouse-device' "$0"
+        grep -Fq -- '-device virtio-sound-device,audiodev=audio0' "$0"
+        grep -Fq 'host-gpu-device-evidence' "$0"
+        grep -Fq 'showcase-device-frame.ppm' "$0"
+        grep -Fq 'showcase-device-sample-count' "$0"
+        grep -Fq 'transient-vulkan-font-receipt-missing' "$0"
+        grep -Fq 'showcase-animation-static' "$0"
+        grep -Fq 'source=guest-monotonic tick=20' "$0"
+        grep -Fq 'showcase_max_rss_kib' "$0"
+        grep -Fq 'showcase-device-p95-budget-exceeded' "$0"
+        grep -Fq 'showcase-combined-rss-budget-exceeded' "$0"
+        grep -Fq -- '-device virtio-blk-device,drive=fontdisk' "$0"
+        grep -Fq 'font_disk_sha256' "$0"
+        grep -Fq 'simpleos-arm64-unified-kernel-manifest-v1' "$0"
+        grep -Fq 'arm64_unified_validate_manifest' "$0"
+        grep -Fq 'elf_machine=aarch64' "$0"
+        grep -Fq 'fence_completed=true' "$0"
+        grep -Fq 'validate-simpleos-arm64-unified-live-receipt.spl' "$0"
+        echo simpleos_arm64_unified_live_self_test=pass
+        exit 0
+        ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+esac
+
+out_dir=${SIMPLEOS_ARM64_UNIFIED_EVIDENCE_DIR:-build/verify/simpleos-arm64-unified-live}
+simple=${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}
+compiler_manifest=${SIMPLE_COMPILER_PROVENANCE:-${simple}.provenance.env}
+# The host-GPU checker remains the build/runtime owner for this daemon. This
+# adapter consumes that canonical artifact and never forks its runtime bundle.
+daemon=${SIMPLEOS_GPU_HOST_BIN:-build/simpleos_host_gpu_2d/simpleos_gpu_host}
+kernel=$out_dir/simpleos_arm64_unified_primitive.elf
+kernel_manifest=$out_dir/simpleos_arm64_unified_primitive.build-manifest.env
+serial=$out_dir/serial.log
+daemon_log=$out_dir/daemon.log
+qemu_log=$out_dir/qemu.log
+qmp=$out_dir/qmp.sock
+shm=$out_dir/hostgpu.shm
+receipt=$out_dir/evidence.env
+capture=$out_dir/showcase-device-frame.ppm
+validator=scripts/check/validate-simpleos-arm64-unified-live-receipt.spl
+entry=examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu_unified.spl
+linker_script=examples/09_embedded/simple_os/arch/arm64/linker.ld
+font_disk=${SIMPLEOS_ARM64_FONT_DISK:-build/os/fat32-arm64-desktop.img}
+font_manifest=${SIMPLEOS_ARM64_FONT_DISK_MANIFEST:-$out_dir/font-disk.manifest.env}
+showcase_combined_rss_budget_kib=${SIMPLEOS_ARM64_COMBINED_RSS_BUDGET_KIB:-1048576}
+mkdir -p "$out_dir" build/os/generated/generated
+test -d "$out_dir" && test ! -L "$out_dir" || {
+    echo simpleos_arm64_unified_live_status=fail
+    echo simpleos_arm64_unified_live_reason=evidence-directory-symlink
+    exit 1
+}
+
+qemu_pid=
+daemon_pid=
+cleanup() {
+    test -z "$qemu_pid" || kill "$qemu_pid" 2>/dev/null || true
+    test -z "$daemon_pid" || kill "$daemon_pid" 2>/dev/null || true
+    test -z "$qemu_pid" || wait "$qemu_pid" 2>/dev/null || true
+    test -z "$daemon_pid" || wait "$daemon_pid" 2>/dev/null || true
+    rm -f "$qmp"
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+    reason=$1
+    {
+        echo schema=simpleos-arm64-unified-live-v1
+        echo status=fail
+        echo reason="$reason"
+        echo serial_log="$serial"
+        echo daemon_log="$daemon_log"
+        echo qemu_log="$qemu_log"
+    } >"$receipt"
+    cat "$receipt"
+    exit 1
+}
+
+command -v qemu-system-aarch64 >/dev/null 2>&1 || fail qemu-system-aarch64-missing
+command -v sha256sum >/dev/null 2>&1 || fail sha256sum-missing
+command -v truncate >/dev/null 2>&1 || fail truncate-missing
+command -v python3 >/dev/null 2>&1 || fail python3-missing
+command -v perl >/dev/null 2>&1 || fail perl-missing
+case "$showcase_combined_rss_budget_kib" in ''|0|*[!0-9]*) fail showcase-combined-rss-budget-invalid ;; esac
+test -x "$simple" || fail pure-simple-compiler-missing
+version=$($simple --version 2>&1 || true)
+case "$version" in
+    *'Rust-built'*|*'bootstrap seed only'*) fail compiler-is-bootstrap-seed ;;
+    *'simple-bootstrap'*)
+        test -s "$compiler_manifest" || fail compiler-provenance-missing
+        compiler_sha=$(sha256sum "$simple" | awk '{print $1}')
+        grep -Fqx status=pass "$compiler_manifest" || fail compiler-provenance-status
+        grep -Fqx artifact_kind=pure-simple-bootstrap-compiler "$compiler_manifest" || fail compiler-provenance-kind
+        grep -Fqx output_sha256="$compiler_sha" "$compiler_manifest" || fail compiler-provenance-sha
+        ;;
+esac
+
+if test "$build" = yes; then
+    rm -f "$kernel" "$kernel_manifest" || fail stale-kernel-attestation-invalidation-failed
+    /bin/sh scripts/os/make_os_disk.shs 128 "$font_disk" "" arm64 desktop-fonts \
+        >"$out_dir/font-disk-build.log" 2>&1 || fail deterministic-font-disk-build-failed
+    font_disk_sha=$(sha256sum "$font_disk" | awk '{print $1}')
+    font_bundle_sha=$(sha256sum scripts/os/simpleos_font_bundle_companion.sha256 | awk '{print $1}')
+    font_manifest_tmp=$(mktemp "${font_manifest}.tmp.XXXXXX") || fail font-manifest-temp-create-failed
+    {
+        echo schema=simpleos-arm64-unified-font-disk-v1
+        echo status=pass
+        echo disk_path="$font_disk"
+        echo disk_sha256="$font_disk_sha"
+        echo font_bundle_companion_sha256="$font_bundle_sha"
+        echo readonly=true
+    } >"$font_manifest_tmp"
+    mv "$font_manifest_tmp" "$font_manifest"
+    cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl
+    source_before=$out_dir/kernel-source-before.env
+    source_after=$out_dir/kernel-source-after.env
+    arm64_unified_source_snapshot "$source_before" \
+        build/os/generated src/os src/lib examples/09_embedded/simple_os \
+        scripts/check/check-simpleos-arm64-unified-live.shs \
+        scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail kernel-source-snapshot-failed
+    compiler_sha=$(arm64_unified_sha256 "$simple") || fail compiler-hash-failed
+    test -f "$compiler_manifest" && test ! -L "$compiler_manifest" || fail compiler-provenance-missing
+    test "$(arm64_unified_manifest_field status "$compiler_manifest")" = pass || fail compiler-provenance-status
+    test "$(arm64_unified_manifest_field artifact_kind "$compiler_manifest")" = pure-simple-bootstrap-compiler || fail compiler-provenance-kind
+    test "$(arm64_unified_manifest_field output_sha256 "$compiler_manifest")" = "$compiler_sha" || fail compiler-provenance-sha
+    compiler_manifest_sha=$(arm64_unified_sha256 "$compiler_manifest") || fail compiler-provenance-hash-failed
+    entry_sha=$(arm64_unified_sha256 "$entry") || fail entry-hash-failed
+    linker_sha=$(arm64_unified_sha256 "$linker_script") || fail linker-script-hash-failed
+    SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on SIMPLE_NO_STUB_FALLBACK=1 \
+        "$simple" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift \
+        --opt-level=aggressive --log on --entry-closure --entry "$entry" \
+        --target aarch64-unknown-none --output "$kernel" \
+        --linker-script "$linker_script" \
+        >"$out_dir/kernel-build.log" 2>&1 || fail guest-build-failed
+    arm64_unified_source_snapshot "$source_after" \
+        build/os/generated src/os src/lib examples/09_embedded/simple_os \
+        scripts/check/check-simpleos-arm64-unified-live.shs \
+        scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail kernel-source-resnapshot-failed
+    cmp -s "$source_before" "$source_after" || fail kernel-source-changed-during-build
+    arm64_unified_elf_identity "$kernel" || fail kernel-not-aarch64-executable-elf
+    kernel_sha=$(arm64_unified_sha256 "$kernel") || fail kernel-hash-failed
+    disk_sha=$(arm64_unified_sha256 "$font_disk") || fail disk-hash-failed
+    disk_manifest_sha=$(arm64_unified_sha256 "$font_manifest") || fail disk-manifest-hash-failed
+    source_revision=$(git rev-parse --verify HEAD) || fail source-revision-unavailable
+    source_fingerprint=$(sed -n 's/^source_fingerprint=//p' "$source_after")
+    source_file_count=$(sed -n 's/^source_file_count=//p' "$source_after")
+    kernel_manifest_tmp=$(mktemp "${kernel_manifest}.tmp.XXXXXX") || fail kernel-manifest-temp-create-failed
+    umask 077
+    {
+        echo schema=simpleos-arm64-unified-kernel-manifest-v1
+        echo status=pass
+        echo artifact_kind=simpleos-arm64-unified-qemu-kernel
+        echo source_revision="$source_revision"
+        echo source_fingerprint="$source_fingerprint"
+        echo source_file_count="$source_file_count"
+        echo entry_path="$entry"
+        echo entry_sha256="$entry_sha"
+        echo backend=cranelift
+        echo target=aarch64-unknown-none
+        echo linker_script_path="$linker_script"
+        echo linker_script_sha256="$linker_sha"
+        echo compiler_path="$simple"
+        echo compiler_sha256="$compiler_sha"
+        echo compiler_provenance_path="$compiler_manifest"
+        echo compiler_provenance_sha256="$compiler_manifest_sha"
+        echo kernel_path="$kernel"
+        echo kernel_sha256="$kernel_sha"
+        echo elf_class="$ARM64_UNIFIED_ELF_CLASS"
+        echo elf_endian="$ARM64_UNIFIED_ELF_ENDIAN"
+        echo elf_type="$ARM64_UNIFIED_ELF_TYPE"
+        echo elf_machine="$ARM64_UNIFIED_ELF_MACHINE"
+        echo elf_entry_hex="$ARM64_UNIFIED_ELF_ENTRY_HEX"
+        echo disk_path="$font_disk"
+        echo disk_sha256="$disk_sha"
+        echo disk_manifest_path="$font_manifest"
+        echo disk_manifest_sha256="$disk_manifest_sha"
+        echo disk_profile=desktop-fonts
+        echo disk_access=read-only
+    } >"$kernel_manifest_tmp"
+    mv "$kernel_manifest_tmp" "$kernel_manifest"
+fi
+test -s "$kernel" || fail unified-kernel-missing
+arm64_unified_validate_manifest "$kernel_manifest" "$kernel" "$font_disk" "$entry" \
+    "$linker_script" "$simple" "$compiler_manifest" "$font_manifest" \
+    build/os/generated src/os src/lib examples/09_embedded/simple_os \
+    scripts/check/check-simpleos-arm64-unified-live.shs \
+    scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail canonical-kernel-manifest-invalid
+test -x "$daemon" || fail canonical-gpu-host-daemon-missing
+test -f "$font_disk" && test ! -L "$font_disk" && test -s "$font_disk" || fail deterministic-font-disk-missing
+test -f "$font_manifest" && test ! -L "$font_manifest" && test -s "$font_manifest" || fail deterministic-font-manifest-missing
+font_disk_sha=$(sha256sum "$font_disk" | awk '{print $1}')
+manifest_disk_sha=$(sed -n 's/^disk_sha256=//p' "$font_manifest")
+test "$(grep -c '^disk_sha256=' "$font_manifest")" -eq 1 || fail deterministic-font-manifest-invalid
+test "$font_disk_sha" = "$manifest_disk_sha" || fail deterministic-font-disk-sha-mismatch
+
+rm -f "$serial" "$daemon_log" "$qemu_log" "$qmp" "$receipt" "$shm" "$capture"
+truncate -s 8M "$shm"
+"$daemon" --shm="$shm" --processing-backend=vulkan --processing-verify-cpu \
+    >"$daemon_log" 2>&1 &
+daemon_pid=$!
+attempt=0
+while test "$attempt" -lt 200; do
+    grep -Fq 'HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan' "$daemon_log" 2>/dev/null && break
+    kill -0 "$daemon_pid" 2>/dev/null || fail gpu-host-daemon-exited
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
+grep -Fq 'HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan' "$daemon_log" || fail gpu-host-daemon-not-ready
+grep -Fq 'HOST_GPU_DAEMON_FALLBACK processing_fallback=false' "$daemon_log" || fail gpu-host-fallback-enabled
+
+set -- -no-user-config -machine virt -accel tcg -cpu cortex-a72 -m 512M \
+    -serial "file:$serial" -display none -monitor none -net none -no-reboot \
+    -kernel "$kernel" -device ramfb \
+    -drive "file=$font_disk,if=none,id=fontdisk,format=raw,readonly=on" \
+    -device virtio-blk-device,drive=fontdisk \
+    -object "memory-backend-file,id=hostgpu,share=on,mem-path=$shm,size=8M" \
+    -device ivshmem-plain,memdev=hostgpu \
+    -global virtio-mmio.force-legacy=false \
+    -device virtio-keyboard-device -device virtio-mouse-device \
+    -audiodev driver=none,id=audio0 -device virtio-sound-device,audiodev=audio0 \
+    -qmp "unix:$qmp,server=on,wait=off"
+qemu_args=$(printf '%s\n' "$@" | sha256sum | awk '{print $1}')
+# Revalidate after daemon startup and immediately before QEMU consumes the
+# paths. This rejects mutation during readiness waits as well as --no-build
+# reuse of stale or substituted artifacts.
+arm64_unified_validate_manifest "$kernel_manifest" "$kernel" "$font_disk" "$entry" \
+    "$linker_script" "$simple" "$compiler_manifest" "$font_manifest" \
+    build/os/generated src/os src/lib examples/09_embedded/simple_os \
+    scripts/check/check-simpleos-arm64-unified-live.shs \
+    scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail prelaunch-kernel-manifest-invalid
+qemu-system-aarch64 "$@" >"$qemu_log" 2>&1 &
+qemu_pid=$!
+
+attempt=0
+while test "$attempt" -lt 1200; do
+    grep -Eq '^\[desktop-gui-arm64\] desktop-ready revision=[1-9][0-9]*' "$serial" 2>/dev/null && break
+    kill -0 "$qemu_pid" 2>/dev/null || fail qemu-exited-before-desktop
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
+grep -Eq '^\[desktop-gui-arm64\] desktop-ready revision=[1-9][0-9]*' "$serial" || fail desktop-ready-missing
+python3 scripts/check/qmp-send-virtio-input.py "$qmp" || fail qmp-input-injection-failed
+
+attempt=0
+while test "$attempt" -lt 300; do
+    if grep -Eq '^\[wm-key-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null &&
+       grep -Eq '^\[wm-pointer-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null &&
+       grep -Fq 'sequence=pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up delivered=true' "$serial" 2>/dev/null &&
+       grep -Eq '^\[showcase-animation-frame\] source=guest-monotonic tick=20 scene_revision=[1-9][0-9]* frame_id=[1-9][0-9]* editor_x=320$' "$serial" 2>/dev/null &&
+       test "$(grep -Ec '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" 2>/dev/null || true)" -ge 20; then
+        break
+    fi
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
+python3 scripts/check/qmp-send-virtio-input.py "$qmp" --capture-only "$capture" 1024 768 || fail qmp-capture-failed
+
+grep -Fq 'SIMPLEOS_VIRTIO_SND status=driver_ok arch=aarch64' "$serial" || fail audio-queue-proof-missing
+grep -Eq '^SIMPLEOS_AUDIO_PLAYBACK non_silent=1 frames=[1-9][0-9]* ' "$serial" || fail audio-playback-proof-missing
+grep -Eq '^SIMPLEOS_AUDIO_CAPTURE status=completed .* bounded=1$' "$serial" || fail audio-completion-proof-missing
+grep -Eq '^\[backend2d-event-blocker\].*keyboard=transport-ready pointer=transport-ready' "$serial" || fail input-queue-proof-missing
+grep -Eq '^\[wm-key-poll\].*input_seq=[1-9][0-9]*' "$serial" || fail keyboard-delivery-proof-missing
+grep -Eq '^\[wm-pointer-poll\].*input_seq=[1-9][0-9]*' "$serial" || fail pointer-delivery-proof-missing
+last_key_seq=$(sed -n 's/^\[wm-key-poll\].*input_seq=\([1-9][0-9]*\).*/\1/p' "$serial" | tail -n 1)
+last_pointer_seq=$(sed -n 's/^\[wm-pointer-poll\].*input_seq=\([1-9][0-9]*\).*/\1/p' "$serial" | tail -n 1)
+grep -Eq "^\[wm-key-frame\] input_seq=$last_key_seq rendered_revision=[1-9][0-9]* frame_id=[1-9][0-9]*$" "$serial" || fail keyboard-render-correlation-missing
+grep -Eq "^\[wm-pointer-frame\] input_seq=$last_pointer_seq rendered_revision=[1-9][0-9]* frame_id=[1-9][0-9]*$" "$serial" || fail pointer-render-correlation-missing
+grep -Fq '[backend2d-event-receipt] backend=simpleos-qemu-arm64 event_backend=virtio-mmio event_count=' "$serial" || fail input-semantic-receipt-missing
+grep -Fq 'sequence=pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up delivered=true' "$serial" || fail input-semantic-sequence-incomplete
+grep -Fq '[desktop-gui-arm64] font registered source=virtio-fat32' "$serial" || fail transient-font-source-missing
+if grep -Fq '[desktop-gui-arm64] font unavailable fallback=bitmap' "$serial"; then
+    fail bitmap-font-fallback-used
+fi
+font_line=$(grep -E '^HOST_GPU_DAEMON_DRAWIR backend=vulkan .*font_target=vulkan .*font_readback=device_readback .*font_device_executed=true .*font_promotion_ready=true .*font_atlas_upload_bytes=[1-9][0-9]*$' "$daemon_log" | tail -n 1 || true)
+test -n "$font_line" || fail transient-vulkan-font-receipt-missing
+font_batch=$(printf '%s\n' "$font_line" | tr ' ' '\n' | sed -n 's/^font_batch=//p')
+font_frame=$(printf '%s\n' "$font_line" | tr ' ' '\n' | sed -n 's/^frame=//p')
+test -n "$font_batch" || fail transient-font-batch-identity-missing
+printf '%s\n' "$font_frame" | grep -Eq '^[1-9][0-9]*$' || fail transient-font-frame-identity-missing
+test -s "$capture" || fail showcase-capture-missing
+capture_sha=$(sha256sum "$capture" | awk '{print $1}')
+printf '%s\n' "$capture_sha" | grep -Eq '^[0-9a-f]{64}$' || fail showcase-capture-sha-invalid
+device_line=$(grep -E '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" | tail -n 1 || true)
+test -n "$device_line" || fail vulkan-device-readback-proof-missing
+case "$device_line" in *' readback=device '*) ;; *) fail non-device-readback ;; esac
+if grep -Eq 'host-gpu-fallback|fallback=software|cpu_reference' "$serial" "$daemon_log"; then
+    fail fallback-used
+fi
+device_id=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^identity=//p')
+frame_id=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^frame=//p')
+printf '%s\n' "$device_id" | grep -Eq '^[1-9][0-9]*$' || fail device-identity-missing
+printf '%s\n' "$frame_id" | grep -Eq '^[1-9][0-9]*$' || fail frame-identity-missing
+device_checksum=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^checksum=//p')
+capture_probe=$(perl -e '
+    use strict;
+    my ($path) = @ARGV;
+    open my $file, "<:raw", $path or exit 1;
+    local $/; my $data = <$file>;
+    $data =~ /\AP6\r?\n(\d+) (\d+)\r?\n255\r?\n/s or exit 2;
+    my ($w, $h) = ($1, $2); my $pixels = substr($data, $+[0]);
+    ($w == 1024 && $h == 768 && length($pixels) == $w*$h*3) or exit 3;
+    my ($sum, %semantic, %font) = (0);
+    for (my $y=0; $y<$h; $y++) { for (my $x=0; $x<$w; $x++) {
+        my $o=($y*$w+$x)*3; my ($r,$g,$b)=unpack("C3",substr($pixels,$o,3));
+        my $argb=0xFF000000|($r<<16)|($g<<8)|$b;
+        $sum=($sum+($argb & 0x7FFFFFFF))%2147483647;
+        $semantic{substr($pixels,$o,3)}=1 if $x>=240 && $x<520 && $y>=180 && $y<520;
+        $font{substr($pixels,$o,3)}=1 if $x>=0 && $x<640 && $y>=0 && $y<120;
+    }}
+    scalar(keys %semantic)>=8 or exit 4;
+    scalar(keys %font)>=8 or exit 5;
+    $sum=1 if $sum==0;
+    print "$sum ".scalar(keys %semantic)." ".scalar(keys %font)."\n";
+' "$capture") || fail showcase-capture-region-oracle-failed
+capture_device_checksum=$(printf '%s\n' "$capture_probe" | awk '{print $1}')
+capture_semantic_colors=$(printf '%s\n' "$capture_probe" | awk '{print $2}')
+capture_font_colors=$(printf '%s\n' "$capture_probe" | awk '{print $3}')
+test "$capture_device_checksum" = "$device_checksum" || fail showcase-capture-device-checksum-mismatch
+
+# Use the last twenty completed device frames. The 95th percentile is the
+# 19th sorted sample for N=20 (nearest-rank), never a single best-case frame.
+sample_receipts=$out_dir/showcase-device-receipts.txt
+samples=$out_dir/showcase-device-elapsed-us.txt
+animation_receipts=$out_dir/showcase-animation-receipts.txt
+grep -E '^\[showcase-animation-frame\] source=guest-monotonic tick=[1-9][0-9]* scene_revision=[1-9][0-9]* frame_id=[1-9][0-9]* editor_x=[1-9][0-9]*$' "$serial" >"$animation_receipts"
+test "$(wc -l <"$animation_receipts" | tr -d ' ')" -eq 20 || fail showcase-animation-frame-count
+animation_ticks=$(tr ' ' '\n' <"$animation_receipts" | sed -n 's/^tick=//p')
+printf '%s\n' "$animation_ticks" | awk 'BEGIN { ok=1 } { if ($1 != NR) ok=0 } END { if (NR != 20 || !ok) exit 1 }' || fail showcase-animation-tick-sequence
+animation_revisions=$(tr ' ' '\n' <"$animation_receipts" | sed -n 's/^scene_revision=//p')
+test "$(printf '%s\n' "$animation_revisions" | sort -n -u | wc -l | tr -d ' ')" -eq 20 || fail showcase-animation-revisions-not-distinct
+: >"$sample_receipts"
+printf '%s\n' "$animation_revisions" | while IFS= read -r animation_revision; do
+    grep -E "^\[wm-frame\] host-gpu-device-evidence backend=vulkan .* frame=[1-9][0-9]* submit_id=[1-9][0-9]* fence_id=[1-9][0-9]* fence_completed=true device_frame_id=[1-9][0-9]* scene_revision=$animation_revision .* readback=device .* elapsed_us=[1-9][0-9]*$" "$serial" | tail -n 1 >>"$sample_receipts"
+done
+test "$(wc -l <"$sample_receipts" | tr -d ' ')" -eq 20 || fail showcase-animation-device-correlation
+tr ' ' '\n' <"$sample_receipts" | sed -n 's/^elapsed_us=//p' >"$samples"
+sample_count=$(wc -l <"$samples" | tr -d ' ')
+test "$sample_count" -eq 20 || fail showcase-device-sample-count
+if grep -Ev '^[1-9][0-9]*$' "$samples" | grep -q .; then
+    fail showcase-device-sample-invalid
+fi
+p95_us=$(sort -n "$samples" | sed -n '19p')
+test "$p95_us" -gt 0 || fail showcase-device-p95-invalid
+test "$p95_us" -le 16700 || fail showcase-device-p95-budget-exceeded
+sample_frames=$(tr ' ' '\n' <"$sample_receipts" | sed -n 's/^frame=//p')
+test "$(printf '%s\n' "$sample_frames" | wc -l | tr -d ' ')" -eq 20 || fail showcase-frame-identity-count
+test "$(printf '%s\n' "$sample_frames" | sort -n -u | wc -l | tr -d ' ')" -eq 20 || fail showcase-frame-identities-not-distinct
+sample_submit_ids=$out_dir/showcase-submit-ids.txt
+sample_fence_ids=$out_dir/showcase-fence-ids.txt
+sample_device_frames=$out_dir/showcase-device-frame-ids.txt
+tr ' ' '\n' <"$sample_receipts" | sed -n 's/^submit_id=//p' >"$sample_submit_ids"
+tr ' ' '\n' <"$sample_receipts" | sed -n 's/^fence_id=//p' >"$sample_fence_ids"
+tr ' ' '\n' <"$sample_receipts" | sed -n 's/^device_frame_id=//p' >"$sample_device_frames"
+test "$(sort -n -u "$sample_submit_ids" | wc -l | tr -d ' ')" -eq 20 || fail showcase-submit-identities-not-distinct
+test "$(sort -n -u "$sample_fence_ids" | wc -l | tr -d ' ')" -eq 20 || fail showcase-fence-identities-not-distinct
+test "$(sort -n -u "$sample_device_frames" | wc -l | tr -d ' ')" -eq 20 || fail showcase-device-frame-identities-not-distinct
+printf '%s\n' "$sample_frames" >"$out_dir/showcase-frame-ids.txt"
+paste "$out_dir/showcase-frame-ids.txt" "$sample_submit_ids" "$sample_fence_ids" "$sample_device_frames" |
+    awk '{ if ($1 != $2 || $1 != $3 || $1 != $4) exit 1 }' || fail showcase-submit-fence-device-frame-correlation
+printf '%s\n' "$sample_frames" | grep -Fxq "$font_frame" || fail transient-font-frame-not-sampled
+distinct_checksums=$(tr ' ' '\n' <"$sample_receipts" | sed -n 's/^checksum=//p' | sort -u | wc -l | tr -d ' ')
+test "$distinct_checksums" -ge 2 || fail showcase-animation-static
+
+qemu_rss_kib=$(sed -n 's/^VmHWM:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' "/proc/$qemu_pid/status" | head -n 1)
+daemon_rss_kib=$(sed -n 's/^VmHWM:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' "/proc/$daemon_pid/status" | head -n 1)
+printf '%s\n' "$qemu_rss_kib" | grep -Eq '^[1-9][0-9]*$' || fail showcase-qemu-rss-unavailable
+printf '%s\n' "$daemon_rss_kib" | grep -Eq '^[1-9][0-9]*$' || fail showcase-daemon-rss-unavailable
+max_rss_kib=$((qemu_rss_kib + daemon_rss_kib))
+test "$max_rss_kib" -le "$showcase_combined_rss_budget_kib" || fail showcase-combined-rss-budget-exceeded
+
+set +e
+admission=$($simple run "$validator" 1 1 1 1 1 0 1 1 1 1 "$device_id" "$frame_id" 2>&1)
+admission_rc=$?
+set -e
+test "$admission_rc" -eq 0 || fail environment-profile-admission-failed
+printf '%s\n' "$admission" | grep -Fq 'simpleos_arm64_unified_primitive_admission=pass reason=pass' || fail primitive-admission-not-pass
+printf '%s\n' "$admission" | grep -Fq 'simpleos_arm64_unified_environment_admission=pass reason=pass' || fail environment-admission-not-pass
+
+{
+    echo schema=simpleos-arm64-unified-live-v1
+    echo status=pass
+    echo evidence_class=live-guest
+    echo profile_id=simpleos-qemu-aarch64-vulkan-virtio
+    echo guest_process_count=1
+    echo qemu_argv_sha256="$qemu_args"
+    echo kernel_sha256=$(sha256sum "$kernel" | awk '{print $1}')
+    echo daemon_sha256=$(sha256sum "$daemon" | awk '{print $1}')
+    echo vulkan_device_identity="$device_id"
+    echo frame_identity="$frame_id"
+    echo drawir_device_readback=pass
+    echo virtio_keyboard_delivery=pass
+    echo virtio_pointer_delivery=pass
+    echo virtio_snd_completion=pass
+    echo fallback_used=false
+    echo showcase_animation_device_frames=20
+    echo showcase_animation_distinct_scene_revisions=20
+    echo showcase_animation_distinct_checksums="$distinct_checksums"
+    echo showcase_animation_clock=guest-monotonic
+    echo showcase_animation_status=pass
+    echo showcase_transient_font=pass
+    echo showcase_capture_path="$capture"
+    echo showcase_capture_sha256="$capture_sha"
+    echo showcase_capture_device_frame_id="$frame_id"
+    echo showcase_capture_device_checksum="$capture_device_checksum"
+    echo showcase_capture_semantic_marker=showcase-animation-frame
+    echo showcase_capture_semantic_region_distinct_colors="$capture_semantic_colors"
+    echo showcase_capture_font_region_source=virtio-fat32
+    echo showcase_capture_font_region_distinct_colors="$capture_font_colors"
+    echo font_disk_sha256="$font_disk_sha"
+    echo showcase_device_samples=20
+    echo showcase_device_p95_us="$p95_us"
+    echo showcase_qemu_rss_kib="$qemu_rss_kib"
+    echo showcase_daemon_rss_kib="$daemon_rss_kib"
+    echo showcase_max_rss_kib="$max_rss_kib"
+    echo showcase_combined_rss_budget_kib="$showcase_combined_rss_budget_kib"
+    echo serial_log="$serial"
+    echo daemon_log="$daemon_log"
+    printf '%s\n' "$admission"
+} >"$receipt"
+cat "$receipt"

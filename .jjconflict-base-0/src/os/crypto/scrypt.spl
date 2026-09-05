@@ -1,0 +1,605 @@
+# scrypt — Memory-Hard Password-Based Key Derivation Function (RFC 7914)
+#
+# Pure-Simple implementation of RFC 7914 scrypt (Percival, Josefsson 2016).
+# Composes Salsa20/8 core + BlockMix + ROMix on top of the existing
+# PBKDF2-HMAC-SHA-256 primitive at src/lib/common/crypto/pbkdf2.spl
+# (module `std.crypto.pbkdf2`). Suitable for baremetal SimpleOS (no SFFI).
+#
+# References:
+# - RFC 7914 §3 — Salsa20/8 core (8 rounds = 4 double-rounds)
+# - RFC 7914 §4 — scryptBlockMix
+# - RFC 7914 §5 — scryptROMix
+# - RFC 7914 §6 — scrypt KDF
+# - RFC 7914 §11 — Test vectors
+#
+# DESIGN NOTES
+# - Buffers are pure-Simple `list` of i64 byte values (0..=255). The bridge
+#   to PBKDF2 uses the same list-of-i64 convention as
+#   `std.crypto.pbkdf2.pbkdf2_sha256_bytes`.
+# - Salsa20/8 state is a 16-element list of u32-masked i64 words (lane k
+#   carries `state[k] & 0xFFFFFFFF`).
+# - Endianness: scrypt operates on Salsa20 little-endian word state. All
+#   bytes-↔-words conversions are LE.
+# - `_w32` masks intermediate adds/xors back to 32 bits — Simple's i64
+#   arithmetic must be wrapped explicitly per RFC.
+#
+# INTERPRETER PERFORMANCE
+# RFC 7914 §11 V1 (N=16, r=1, p=1, dkLen=64) is tractable in interpreter
+# mode (≈128 Salsa20/8 invocations). V2 (N=1024, r=8, p=16) requires the
+# native PBKDF2 fast-path AND ~524k Salsa calls; in interpreter mode it
+# exceeds the 60s test-runner watchdog. V2/V3/V4 are documented as
+# `pending` in scrypt_rfc7914_kat_spec.spl behind a perf FR.
+
+use std.crypto.pbkdf2.{pbkdf2_sha256_bytes}
+use std.simd.{Vec4i, simd_xor_i32x4, simd_shl_i32x4, simd_shr_i32x4, simd_or_i32x4}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _w32(x: i64) -> i64:
+    """Mask to unsigned 32 bits. All Salsa arithmetic is mod 2^32."""
+    x & 0xFFFFFFFF
+
+fn _rotl32(x: i64, n: i64) -> i64:
+    """32-bit rotate-left. `n` is in [0,32]."""
+    val v = x & 0xFFFFFFFF
+    val left = (v << n) & 0xFFFFFFFF
+    val right = v >> (32 - n)
+    left | right
+
+fn _list_zeros(n: i64) -> list:
+    """Allocate a list of `n` zero i64 entries."""
+    var out = []
+    var i = 0
+    while i < n:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _list_to_u8(buf: list) -> [u8]:
+    """Convert list-of-i64 (each in 0..=255) to a [u8] array."""
+    var out: [u8] = []
+    var i = 0
+    val n = buf.len()
+    while i < n:
+        val b = buf.get(i) & 0xFF
+        out.push(b.to_u8())
+        i = i + 1
+    out
+
+fn _u8_to_list(buf: [u8]) -> list:
+    """Convert a [u8] array to list-of-i64."""
+    var out = []
+    var i: u64 = 0
+    val n = buf.len().to_u64()
+    while i < n:
+        out.push(buf[i].to_i64())
+        i = i + 1
+    out
+
+# ============================================================================
+# Salsa20/8 core — RFC 7914 §3
+# ============================================================================
+#
+# salsa20_8_core(B) takes a 64-byte input, treats it as 16 little-endian
+# uint32 words, runs 4 Salsa20 double-rounds (=8 rounds) on a copy, then
+# adds the original word-by-word mod 2^32 and writes the result back as
+# 64 little-endian bytes.
+#
+# This is RFC 7914 §3 verbatim, NOT full Salsa20/20.
+
+fn _salsa_qr(state: list, ai: i64, bi: i64, ci: i64, di: i64) -> list:
+    """One Salsa20 quarterround on lanes (a,b,c,d) of `state` (16-word list).
+    Returns a new 16-word list with the four lanes updated.
+    """
+    var s = state
+    val a0 = s.get(ai)
+    val b0 = s.get(bi)
+    val c0 = s.get(ci)
+    val d0 = s.get(di)
+
+    val b1 = b0 ^ _rotl32(_w32(a0 + d0), 7)
+    val c1 = c0 ^ _rotl32(_w32(b1 + a0), 9)
+    val d1 = d0 ^ _rotl32(_w32(c1 + b1), 13)
+    val a1 = a0 ^ _rotl32(_w32(d1 + c1), 18)
+
+    s[ai] = a1
+    s[bi] = b1
+    s[ci] = c1
+    s[di] = d1
+    s
+
+fn _salsa_doubleround(state: list) -> list:
+    """One Salsa20 double-round (column round + row round)."""
+    var s = state
+    # Column rounds
+    s = _salsa_qr(s, 0, 4, 8, 12)
+    s = _salsa_qr(s, 5, 9, 13, 1)
+    s = _salsa_qr(s, 10, 14, 2, 6)
+    s = _salsa_qr(s, 15, 3, 7, 11)
+    # Row rounds
+    s = _salsa_qr(s, 0, 1, 2, 3)
+    s = _salsa_qr(s, 5, 6, 7, 4)
+    s = _salsa_qr(s, 10, 11, 8, 9)
+    s = _salsa_qr(s, 15, 12, 13, 14)
+    s
+
+fn _bytes64_to_words16_le(b: list, off: i64) -> list:
+    """Read 16 LE u32 words from bytes b[off..off+64]."""
+    var out = _list_zeros(16)
+    var i = 0
+    while i < 16:
+        val p = off + i * 4
+        val w = b.get(p)
+            | (b.get(p + 1) << 8)
+            | (b.get(p + 2) << 16)
+            | (b.get(p + 3) << 24)
+        out[i] = _w32(w)
+        i = i + 1
+    out
+
+fn _words16_to_bytes64_le(w: list) -> list:
+    """Write 16 LE u32 words as 64 bytes."""
+    var out = _list_zeros(64)
+    var i = 0
+    while i < 16:
+        val word = w.get(i)
+        val p = i * 4
+        out[p] = word & 0xFF
+        out[p + 1] = (word >> 8) & 0xFF
+        out[p + 2] = (word >> 16) & 0xFF
+        out[p + 3] = (word >> 24) & 0xFF
+        i = i + 1
+    out
+
+fn salsa20_8_core(input64: list) -> list:
+    """Salsa20/8 core function (RFC 7914 §3).
+
+    `input64` is a 64-byte list. Returns a new 64-byte list.
+
+    Algorithm:
+        x = T = input as 16 LE u32 words
+        repeat 4 times:
+            apply column-round + row-round (= one double-round)
+        output[i] = (x[i] + T[i]) mod 2^32 for i in 0..16
+    """
+    val orig = _bytes64_to_words16_le(input64, 0)
+    var x = _bytes64_to_words16_le(input64, 0)
+    var i = 0
+    while i < 4:
+        x = _salsa_doubleround(x)
+        i = i + 1
+    var out = _list_zeros(16)
+    i = 0
+    while i < 16:
+        out[i] = _w32(x.get(i) + orig.get(i))
+        i = i + 1
+    _words16_to_bytes64_le(out)
+
+# ============================================================================
+# Salsa20/8 SIMD core — vertical 4-block parallel (RFC 7914 §3)
+# ============================================================================
+#
+# SIMD strategy: vertical 4-block layout identical to K5 ChaCha20.
+# Each Vec4i lane holds the same word position from four independent 64-byte
+# input blocks. Column and row quarter-rounds apply identical operations to all
+# four lanes — no inter-lane shuffles needed.
+#
+# Rotation helpers: inline (x << n) | logical_shr(x, 32-n) using existing
+# simd_shl_i32x4 / simd_shr_i32x4 (simd_shr_i32x4 is LOGICAL zero-fill per
+# simd.spl doc). No new externs required.
+#
+# Public API:
+#   salsa20_8_core_x4(b0, b1, b2, b3) -> list  (256 bytes = 4 × 64-byte outputs)
+#
+# The 4-block function enables the BlockMix loop to amortise 4 Salsa20/8 calls
+# per SIMD invocation when r >= 2 (2*r >= 4 blocks per BlockMix call).
+
+fn _s_vadd(a: Vec4i, b: Vec4i) -> Vec4i:
+    """4-lane wrapping i32 add (mod 2^32 — Simple i32 overflows wrap)."""
+    Vec4i(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w)
+
+fn _s_vrotl7(v: Vec4i) -> Vec4i:
+    """Rotate-left 7 on all 4 i32 lanes."""
+    simd_or_i32x4(simd_shl_i32x4(v, 7), simd_shr_i32x4(v, 25))
+
+fn _s_vrotl9(v: Vec4i) -> Vec4i:
+    """Rotate-left 9 on all 4 i32 lanes."""
+    simd_or_i32x4(simd_shl_i32x4(v, 9), simd_shr_i32x4(v, 23))
+
+fn _s_vrotl13(v: Vec4i) -> Vec4i:
+    """Rotate-left 13 on all 4 i32 lanes."""
+    simd_or_i32x4(simd_shl_i32x4(v, 13), simd_shr_i32x4(v, 19))
+
+fn _s_vrotl18(v: Vec4i) -> Vec4i:
+    """Rotate-left 18 on all 4 i32 lanes."""
+    simd_or_i32x4(simd_shl_i32x4(v, 18), simd_shr_i32x4(v, 14))
+
+fn _i64_to_i32(x: i64) -> i32:
+    """Reinterpret low 32 bits of i64 as i32 (bit-exact, handles sign)."""
+    val v = x & 0xFFFFFFFF
+    if v >= 2147483648:
+        (v - 4294967296).to_i32()
+    else:
+        v.to_i32()
+
+fn _i32_to_i64(x: i32) -> i64:
+    """Reinterpret i32 bit pattern as unsigned i64 word (0..=0xFFFFFFFF)."""
+    val v = x.to_i64()
+    if v < 0:
+        v + 4294967296
+    else:
+        v
+
+fn _words16_to_vec4i_row(w0: list, w1: list, w2: list, w3: list, k: i64) -> Vec4i:
+    """Build Vec4i from word k of each of the 4 input word-lists."""
+    Vec4i(
+        x: _i64_to_i32(w0.get(k)),
+        y: _i64_to_i32(w1.get(k)),
+        z: _i64_to_i32(w2.get(k)),
+        w: _i64_to_i32(w3.get(k)))
+
+fn _vec4i_word_to_i64(v: Vec4i, lane: i64) -> i64:
+    """Extract i64 word from a Vec4i by lane index (0..3)."""
+    if lane == 0:
+        _i32_to_i64(v.x)
+    else:
+        if lane == 1:
+            _i32_to_i64(v.y)
+        else:
+            if lane == 2:
+                _i32_to_i64(v.z)
+            else:
+                _i32_to_i64(v.w)
+
+fn salsa20_8_core_x4(in0: list, in1: list, in2: list, in3: list) -> list:
+    """Salsa20/8 core on 4 independent 64-byte blocks via Vec4i SIMD.
+
+    Vertical 4-block layout: Vec4i lane k holds word k from block k.
+    Each of the 4 inputs is a 64-byte list (same format as salsa20_8_core).
+    Returns a flat 256-byte list: [out0(64B) | out1(64B) | out2(64B) | out3(64B)].
+
+    Example:
+        val out256 = salsa20_8_core_x4(b0, b1, b2, b3)
+        val out0   = out256[0..63]   # first 64 bytes
+    """
+    # Decode each input to 16 LE u32 words
+    val t0 = _bytes64_to_words16_le(in0, 0)
+    val t1 = _bytes64_to_words16_le(in1, 0)
+    val t2 = _bytes64_to_words16_le(in2, 0)
+    val t3 = _bytes64_to_words16_le(in3, 0)
+
+    # Load initial state into 16 Vec4i vectors (one per word position).
+    # s0..s15 hold the ORIGINAL values for the final add-back.
+    val s0  = _words16_to_vec4i_row(t0, t1, t2, t3, 0)
+    val s1  = _words16_to_vec4i_row(t0, t1, t2, t3, 1)
+    val s2  = _words16_to_vec4i_row(t0, t1, t2, t3, 2)
+    val s3  = _words16_to_vec4i_row(t0, t1, t2, t3, 3)
+    val s4  = _words16_to_vec4i_row(t0, t1, t2, t3, 4)
+    val s5  = _words16_to_vec4i_row(t0, t1, t2, t3, 5)
+    val s6  = _words16_to_vec4i_row(t0, t1, t2, t3, 6)
+    val s7  = _words16_to_vec4i_row(t0, t1, t2, t3, 7)
+    val s8  = _words16_to_vec4i_row(t0, t1, t2, t3, 8)
+    val s9  = _words16_to_vec4i_row(t0, t1, t2, t3, 9)
+    val s10 = _words16_to_vec4i_row(t0, t1, t2, t3, 10)
+    val s11 = _words16_to_vec4i_row(t0, t1, t2, t3, 11)
+    val s12 = _words16_to_vec4i_row(t0, t1, t2, t3, 12)
+    val s13 = _words16_to_vec4i_row(t0, t1, t2, t3, 13)
+    val s14 = _words16_to_vec4i_row(t0, t1, t2, t3, 14)
+    val s15 = _words16_to_vec4i_row(t0, t1, t2, t3, 15)
+
+    var w0  = s0
+    var w1  = s1
+    var w2  = s2
+    var w3  = s3
+    var w4  = s4
+    var w5  = s5
+    var w6  = s6
+    var w7  = s7
+    var w8  = s8
+    var w9  = s9
+    var w10 = s10
+    var w11 = s11
+    var w12 = s12
+    var w13 = s13
+    var w14 = s14
+    var w15 = s15
+
+    # 4 double-rounds (= 8 rounds = Salsa20/8)
+    # Salsa20 quarter-round(a, b, c, d):
+    #   b ^= rotl(a+d, 7)
+    #   c ^= rotl(b+a, 9)
+    #   d ^= rotl(c+b, 13)
+    #   a ^= rotl(d+c, 18)
+    var dr = 0
+    while dr < 4:
+        # Column rounds (RFC 7914 §3 odd rounds):
+        # QR(0,4,8,12)
+        w4  = simd_xor_i32x4(w4,  _s_vrotl7(_s_vadd(w0,  w12)))
+        w8  = simd_xor_i32x4(w8,  _s_vrotl9(_s_vadd(w4,  w0)))
+        w12 = simd_xor_i32x4(w12, _s_vrotl13(_s_vadd(w8,  w4)))
+        w0  = simd_xor_i32x4(w0,  _s_vrotl18(_s_vadd(w12, w8)))
+        # QR(5,9,13,1)
+        w9  = simd_xor_i32x4(w9,  _s_vrotl7(_s_vadd(w5,  w1)))
+        w13 = simd_xor_i32x4(w13, _s_vrotl9(_s_vadd(w9,  w5)))
+        w1  = simd_xor_i32x4(w1,  _s_vrotl13(_s_vadd(w13, w9)))
+        w5  = simd_xor_i32x4(w5,  _s_vrotl18(_s_vadd(w1,  w13)))
+        # QR(10,14,2,6)
+        w14 = simd_xor_i32x4(w14, _s_vrotl7(_s_vadd(w10, w6)))
+        w2  = simd_xor_i32x4(w2,  _s_vrotl9(_s_vadd(w14, w10)))
+        w6  = simd_xor_i32x4(w6,  _s_vrotl13(_s_vadd(w2,  w14)))
+        w10 = simd_xor_i32x4(w10, _s_vrotl18(_s_vadd(w6,  w2)))
+        # QR(15,3,7,11)
+        w3  = simd_xor_i32x4(w3,  _s_vrotl7(_s_vadd(w15, w11)))
+        w7  = simd_xor_i32x4(w7,  _s_vrotl9(_s_vadd(w3,  w15)))
+        w11 = simd_xor_i32x4(w11, _s_vrotl13(_s_vadd(w7,  w3)))
+        w15 = simd_xor_i32x4(w15, _s_vrotl18(_s_vadd(w11, w7)))
+
+        # Row rounds (even rounds):
+        # QR(0,1,2,3)
+        w1  = simd_xor_i32x4(w1,  _s_vrotl7(_s_vadd(w0,  w3)))
+        w2  = simd_xor_i32x4(w2,  _s_vrotl9(_s_vadd(w1,  w0)))
+        w3  = simd_xor_i32x4(w3,  _s_vrotl13(_s_vadd(w2,  w1)))
+        w0  = simd_xor_i32x4(w0,  _s_vrotl18(_s_vadd(w3,  w2)))
+        # QR(5,6,7,4)
+        w6  = simd_xor_i32x4(w6,  _s_vrotl7(_s_vadd(w5,  w4)))
+        w7  = simd_xor_i32x4(w7,  _s_vrotl9(_s_vadd(w6,  w5)))
+        w4  = simd_xor_i32x4(w4,  _s_vrotl13(_s_vadd(w7,  w6)))
+        w5  = simd_xor_i32x4(w5,  _s_vrotl18(_s_vadd(w4,  w7)))
+        # QR(10,11,8,9)
+        w11 = simd_xor_i32x4(w11, _s_vrotl7(_s_vadd(w10, w9)))
+        w8  = simd_xor_i32x4(w8,  _s_vrotl9(_s_vadd(w11, w10)))
+        w9  = simd_xor_i32x4(w9,  _s_vrotl13(_s_vadd(w8,  w11)))
+        w10 = simd_xor_i32x4(w10, _s_vrotl18(_s_vadd(w9,  w8)))
+        # QR(15,12,13,14)
+        w12 = simd_xor_i32x4(w12, _s_vrotl7(_s_vadd(w15, w14)))
+        w13 = simd_xor_i32x4(w13, _s_vrotl9(_s_vadd(w12, w15)))
+        w14 = simd_xor_i32x4(w14, _s_vrotl13(_s_vadd(w13, w12)))
+        w15 = simd_xor_i32x4(w15, _s_vrotl18(_s_vadd(w14, w13)))
+
+        dr = dr + 1
+
+    # Final add-back: out[i] = (w[i] + s[i]) mod 2^32
+    val o0  = _s_vadd(w0,  s0)
+    val o1  = _s_vadd(w1,  s1)
+    val o2  = _s_vadd(w2,  s2)
+    val o3  = _s_vadd(w3,  s3)
+    val o4  = _s_vadd(w4,  s4)
+    val o5  = _s_vadd(w5,  s5)
+    val o6  = _s_vadd(w6,  s6)
+    val o7  = _s_vadd(w7,  s7)
+    val o8  = _s_vadd(w8,  s8)
+    val o9  = _s_vadd(w9,  s9)
+    val o10 = _s_vadd(w10, s10)
+    val o11 = _s_vadd(w11, s11)
+    val o12 = _s_vadd(w12, s12)
+    val o13 = _s_vadd(w13, s13)
+    val o14 = _s_vadd(w14, s14)
+    val o15 = _s_vadd(w15, s15)
+
+    # Serialize: [block0(64B) | block1(64B) | block2(64B) | block3(64B)]
+    # Build a flat 256-byte list. For each lane (block), extract 16 words
+    # and encode little-endian.
+    var out = _list_zeros(256)
+    var lane = 0
+    while lane < 4:
+        var k = 0
+        while k < 16:
+            var word_i64: i64 = 0
+            if k == 0:  word_i64 = _vec4i_word_to_i64(o0,  lane)
+            if k == 1:  word_i64 = _vec4i_word_to_i64(o1,  lane)
+            if k == 2:  word_i64 = _vec4i_word_to_i64(o2,  lane)
+            if k == 3:  word_i64 = _vec4i_word_to_i64(o3,  lane)
+            if k == 4:  word_i64 = _vec4i_word_to_i64(o4,  lane)
+            if k == 5:  word_i64 = _vec4i_word_to_i64(o5,  lane)
+            if k == 6:  word_i64 = _vec4i_word_to_i64(o6,  lane)
+            if k == 7:  word_i64 = _vec4i_word_to_i64(o7,  lane)
+            if k == 8:  word_i64 = _vec4i_word_to_i64(o8,  lane)
+            if k == 9:  word_i64 = _vec4i_word_to_i64(o9,  lane)
+            if k == 10: word_i64 = _vec4i_word_to_i64(o10, lane)
+            if k == 11: word_i64 = _vec4i_word_to_i64(o11, lane)
+            if k == 12: word_i64 = _vec4i_word_to_i64(o12, lane)
+            if k == 13: word_i64 = _vec4i_word_to_i64(o13, lane)
+            if k == 14: word_i64 = _vec4i_word_to_i64(o14, lane)
+            if k == 15: word_i64 = _vec4i_word_to_i64(o15, lane)
+            val p = lane * 64 + k * 4
+            out[p]     = word_i64 & 0xFF
+            out[p + 1] = (word_i64 >> 8) & 0xFF
+            out[p + 2] = (word_i64 >> 16) & 0xFF
+            out[p + 3] = (word_i64 >> 24) & 0xFF
+            k = k + 1
+        lane = lane + 1
+    out
+
+# ============================================================================
+# scryptBlockMix — RFC 7914 §4
+# ============================================================================
+#
+# Input:  B  — 2*r 64-byte blocks (total 128*r bytes)
+# Output: B' — 2*r 64-byte blocks (total 128*r bytes), reordered.
+#
+# Algorithm:
+#   X = B[2r-1]                            (last 64-byte block)
+#   for i = 0 to 2r-1:
+#       X = Salsa20/8(X xor B[i])
+#       Y[i] = X
+#   B' = (Y[0], Y[2], ..., Y[2r-2], Y[1], Y[3], ..., Y[2r-1])
+
+fn _xor_block64(a: list, off_a: i64, b: list, off_b: i64) -> list:
+    """Return 64-byte XOR of a[off_a..+64] and b[off_b..+64]."""
+    var out = _list_zeros(64)
+    var i = 0
+    while i < 64:
+        out[i] = (a.get(off_a + i) ^ b.get(off_b + i)) & 0xFF
+        i = i + 1
+    out
+
+fn _copy_into(dst: list, dst_off: i64, src: list, src_off: i64, n: i64) -> list:
+    """Copy n bytes from src[src_off..] into dst[dst_off..]; returns dst."""
+    var d = dst
+    var i = 0
+    while i < n:
+        d[dst_off + i] = src.get(src_off + i)
+        i = i + 1
+    d
+
+fn block_mix(b_in: list, r: i64) -> list:
+    """scryptBlockMix (RFC 7914 §4). `b_in` is 128*r bytes."""
+    val two_r = 2 * r
+    val total = 128 * r
+
+    # X = B[2r-1]
+    var x = _list_zeros(64)
+    var i = 0
+    while i < 64:
+        x[i] = b_in.get((two_r - 1) * 64 + i)
+        i = i + 1
+
+    # Y holds the 2r intermediate 64-byte blocks in order.
+    var y = _list_zeros(total)
+
+    i = 0
+    while i < two_r:
+        # X = Salsa20/8(X xor B[i])
+        val mixed_in = _xor_block64(x, 0, b_in, i * 64)
+        x = salsa20_8_core(mixed_in)
+        # Y[i] = X
+        y = _copy_into(y, i * 64, x, 0, 64)
+        i = i + 1
+
+    # Output reorder: (Y[0], Y[2], ..., Y[2r-2], Y[1], Y[3], ..., Y[2r-1])
+    var out = _list_zeros(total)
+    var j = 0
+    # Even-indexed Y blocks first
+    i = 0
+    while i < r:
+        out = _copy_into(out, j * 64, y, (2 * i) * 64, 64)
+        j = j + 1
+        i = i + 1
+    # Then odd-indexed Y blocks
+    i = 0
+    while i < r:
+        out = _copy_into(out, j * 64, y, (2 * i + 1) * 64, 64)
+        j = j + 1
+        i = i + 1
+    out
+
+# ============================================================================
+# scryptROMix — RFC 7914 §5
+# ============================================================================
+#
+# Input:  B (128*r bytes), N (>= 1, power of 2)
+# Output: B' (128*r bytes)
+#
+# Algorithm:
+#   X = B
+#   for i = 0..N-1: V[i] = X; X = scryptBlockMix(X)
+#   for i = 0..N-1: j = Integerify(X) mod N
+#                   X = scryptBlockMix(X xor V[j])
+#   B' = X
+
+fn _integerify_mod_n(x: list, r: i64, n: i64) -> i64:
+    """Integerify(X) mod N (N is a power of 2, so we mask with N-1).
+
+    Per RFC 7914 §5: Integerify is the LSB 64 bits of the LAST 64-byte
+    block of X, interpreted little-endian. Since N <= 2^32 (and we only
+    need X mod N), reading the low 32 bits of that block is sufficient.
+    Mask with (N-1) is exact because N is a power of 2.
+    """
+    val off = (2 * r - 1) * 64
+    val w = x.get(off)
+        | (x.get(off + 1) << 8)
+        | (x.get(off + 2) << 16)
+        | (x.get(off + 3) << 24)
+    (w & 0xFFFFFFFF) & (n - 1)
+
+fn romix(b_in: list, r: i64, n: i64) -> list:
+    """scryptROMix (RFC 7914 §5).
+
+    `b_in`: 128*r bytes
+    `n`:    cost parameter; must be a power of 2 >= 1
+    """
+    val total = 128 * r
+
+    # First pass: V[i] = X; X = BlockMix(X)
+    # V is N copies of (128*r)-byte blocks, stored end-to-end.
+    var v = _list_zeros(n * total)
+    var x = _list_zeros(total)
+    var i = 0
+    while i < total:
+        x[i] = b_in.get(i)
+        i = i + 1
+
+    i = 0
+    while i < n:
+        v = _copy_into(v, i * total, x, 0, total)
+        x = block_mix(x, r)
+        i = i + 1
+
+    # Second pass: j = Integerify(X) mod N; X = BlockMix(X xor V[j])
+    i = 0
+    while i < n:
+        val j = _integerify_mod_n(x, r, n)
+        # X = X xor V[j]
+        var k = 0
+        while k < total:
+            x[k] = (x.get(k) ^ v.get(j * total + k)) & 0xFF
+            k = k + 1
+        x = block_mix(x, r)
+        i = i + 1
+    x
+
+# ============================================================================
+# scrypt KDF — RFC 7914 §6
+# ============================================================================
+
+fn scrypt(password: [u8], salt: [u8], n: i64, r: i64, p: i64, dk_len: i64) -> [u8]:
+    """scrypt key derivation function (RFC 7914 §6).
+
+    Parameters:
+      password: octet string
+      salt:     octet string
+      n:        CPU/memory cost; must be a power of 2 >= 2
+      r:        block size parameter (positive)
+      p:        parallelization parameter (positive)
+      dk_len:   intended derived-key length in octets
+
+    Returns: derived key as a [u8] of length dk_len.
+
+    Algorithm (RFC 7914 §6):
+      1. B = PBKDF2-HMAC-SHA-256(P, S, 1, p * 128 * r)
+      2. for i = 0..p-1:
+             B[i] = scryptROMix(r, B[i], N)
+      3. DK = PBKDF2-HMAC-SHA-256(P, B, 1, dk_len)
+    """
+    val block_size = 128 * r
+    val total = p * block_size
+
+    val pwd_list = _u8_to_list(password)
+    val salt_list = _u8_to_list(salt)
+
+    # Step 1
+    var b = pbkdf2_sha256_bytes(pwd_list, salt_list, 1, total)
+
+    # Step 2 — iterate independent ROMix blocks. RFC 7914 allows parallel
+    # execution, but a sequential loop is semantically equivalent.
+    var i = 0
+    while i < p:
+        # Slice B[i*bs .. (i+1)*bs]
+        var block = _list_zeros(block_size)
+        var k = 0
+        while k < block_size:
+            block[k] = b.get(i * block_size + k)
+            k = k + 1
+        val mixed = romix(block, r, n)
+        # Write back
+        k = 0
+        while k < block_size:
+            b[i * block_size + k] = mixed.get(k)
+            k = k + 1
+        i = i + 1
+
+    # Step 3 — final PBKDF2 with the mixed B as salt
+    val dk = pbkdf2_sha256_bytes(pwd_list, b, 1, dk_len)
+    _list_to_u8(dk)

@@ -1,0 +1,224 @@
+# Driver AOT VHDL output.
+
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.backend.backend.hwir_to_vhdl.{compile_strict_hwir_module}
+use compiler.common.config.{Logger}
+use compiler.mir.mir_aop_injection.{aop_advices_requested, aop_weave_count}
+use compiler.backend.backend.vhdl.vhdl_design_catalog.{
+    VhdlDesignCatalog,
+    vhdl_build_design_catalog_with_metadata
+}
+use compiler.backend.backend.vhdl_backend.{vhdl_compile_module_text}
+use compiler.driver.driver_vhdl_artifact_build.{
+    vhdl_artifact_input_from_catalog
+}
+use compiler.driver.driver_vhdl_artifacts.{
+    vhdl_render_production_artifacts,
+    vhdl_remove_production_artifacts,
+    vhdl_validate_production_artifact_input,
+    vhdl_write_production_artifacts
+}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.io_runtime.{env_get_opt}
+
+@unsafe(reason: "raw enum discriminant bridge", capabilities: [ffi])
+extern fn rt_enum_discriminant(value: Any) -> i64
+@unsafe(reason: "raw enum payload bridge; caller must validate discriminant first", capabilities: [ffi])
+extern fn rt_enum_payload(value: Any) -> i64
+
+@always_inline
+fn _driver_vhdl_enum_discriminant_raw(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+@always_inline
+fn _driver_vhdl_enum_payload_raw(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload(value)
+
+fn vhdl_log_debug(log: Logger, message: text):
+    if log.level >= 10:
+        print "[DEBUG] {message}"
+
+fn vhdl_log_trace(log: Logger, message: text):
+    if log.level >= 20:
+        print "[TRACE] {message}"
+
+fn vhdl_log_info(log: Logger, message: text):
+    if log.level >= 4:
+        print "[INFO] {message}"
+
+fn driver_vhdl_entry_module(ctx: CompileContext) -> Result<text, text>:
+    var selected = ""
+    var input_i = 0
+    while input_i < ctx.options.input_files.len():
+        val input_path = ctx.options.input_files[input_i]
+        var source_i = 0
+        while source_i < ctx.sources.len():
+            val source = ctx.sources[source_i]
+            if source.path == input_path:
+                if selected != "" and selected != source.module_name:
+                    return Err(
+                        "VHDL compilation entry is ambiguous: multiple explicit input files match loaded modules")
+                selected = source.module_name
+            source_i = source_i + 1
+        input_i = input_i + 1
+    if selected == "" and ctx.options.bootstrap_input_count == 1:
+        val input_path = ctx.options.bootstrap_input_0
+        var source_i = 0
+        while source_i < ctx.sources.len():
+            val source = ctx.sources[source_i]
+            if source.path == input_path:
+                selected = source.module_name
+            source_i = source_i + 1
+    if selected == "":
+        return Err(
+            "VHDL compilation requires one explicit entry file in compile options")
+    Ok(selected)
+
+impl CompilerDriver:
+    me compile_to_vhdl(output: text) -> CompileResult:
+        val ctx: CompileContext = self.ctx
+        val log = ctx.logger
+        vhdl_log_debug(log, "AOT VHDL: generating VHDL to {output}")
+        val ok_probe: Result<text, text> = Ok("")
+        val err_probe: Result<text, text> = Err("")
+        val ok_disc = _driver_vhdl_enum_discriminant_raw(ok_probe)
+        val err_disc = _driver_vhdl_enum_discriminant_raw(err_probe)
+        val entry_result = driver_vhdl_entry_module(ctx)
+        val entry_disc = _driver_vhdl_enum_discriminant_raw(entry_result)
+        if entry_disc == err_disc:
+            val entry_error: text = _driver_vhdl_enum_payload_raw(entry_result)
+            return CompileResult.CodegenError(entry_error)
+        if entry_disc != ok_disc:
+            return CompileResult.CodegenError(
+                "E-SFFI-017: corrupt VHDL entry-result discriminant {entry_disc}")
+        val entry_module: text = _driver_vhdl_enum_payload_raw(entry_result)
+        val trace_enabled = (env_get_opt("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+        if trace_enabled:
+            val root_mir = ctx.mir_modules[entry_module]
+            eprint(
+                "[vhdl-driver] root={entry_module} functions={root_mir.functions.len()}")
+            for root_fn in root_mir.functions.values():
+                eprint(
+                    "[vhdl-driver] root-fn={root_fn.name} hardware={root_fn.has_vhdl_metadata}")
+            eprint(
+                "[vhdl-driver] sidecar-metadata={ctx.vhdl_hardware_metadata_rows.len()}")
+        for metadata in ctx.vhdl_hardware_metadata_rows:
+            if trace_enabled and metadata.function_name.starts_with("core32_"):
+                eprint(
+                    "[vhdl-driver] metadata-row module={metadata.module_name} function={metadata.function_name} clocked={metadata.has_clocked} valid={metadata.clocked_is_valid} flatten={metadata.flatten_struct_output}")
+
+        val catalog_result = vhdl_build_design_catalog_with_metadata(
+            ctx.mir_modules,
+            ctx.hir_modules,
+            ctx.vhdl_hardware_metadata_rows,
+            [entry_module],
+            "simple_vhdl_design"
+        )
+        val catalog_disc = _driver_vhdl_enum_discriminant_raw(catalog_result)
+        if trace_enabled:
+            eprint(
+                "[vhdl-driver] catalog_disc={catalog_disc} err_disc={err_disc}")
+        if catalog_disc == err_disc:
+            val catalog_error: text = _driver_vhdl_enum_payload_raw(catalog_result)
+            return CompileResult.CodegenError(
+                "VHDL design catalog error: {catalog_error}")
+        if catalog_disc != ok_disc:
+            return CompileResult.CodegenError(
+                "E-SFFI-017: corrupt VHDL catalog-result discriminant {catalog_disc}")
+        val catalog: VhdlDesignCatalog = _driver_vhdl_enum_payload_raw(catalog_result)
+        if trace_enabled:
+            eprint("[vhdl-driver] catalog payload extracted")
+
+        vhdl_log_trace(
+            log,
+            "translating {catalog.source_module_count} MIR modules as one VHDL design")
+        var all_vhdl = ""
+        var strict_node_id = ""
+        var strict_profile = ""
+        var strict_xlen = 0
+        var strict_graph_sha256 = ""
+        val strict_target = ctx.options.riscv_gen2_target
+        if strict_target != "":
+            if not ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Critical):
+                return CompileResult.CodegenError("HWIR-E-CRITICAL-POLICY: strict RISC-V Gen2 VHDL requires SIMPLE_SAFETY_PROFILE=critical")
+            val config = match CoreConfig.from_critical_target(strict_target):
+                case Ok(value): value
+                case Err(error): return CompileResult.CodegenError(error)
+            if not ctx.mir_modules.has(entry_module):
+                return CompileResult.CodegenError("HWIR-E-CRITICAL-DESIGN: selected entry has no MIR module")
+            val strict = compile_strict_hwir_module(ctx.mir_modules[entry_module], config)
+            if not strict.is_success():
+                return CompileResult.CodegenError("HWIR-E-CRITICAL-LOWER: {strict.diagnostic}")
+            all_vhdl = strict.vhdl
+            strict_node_id = strict.module_node_id
+            strict_profile = strict.config_profile
+            strict_xlen = strict.config_xlen
+            strict_graph_sha256 = strict.hwir_graph_sha256
+        else:
+            if ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Critical) and
+                catalog.hardware_entity_count > 0:
+                return CompileResult.CodegenError("HWIR-E-CRITICAL-CONFIG: critical hardware VHDL requires explicit --riscv-gen2-target rv32 or rv64")
+            val compiled = vhdl_compile_module_text(catalog.design)
+            match compiled:
+                case Err(e):
+                    return CompileResult.CodegenError(
+                        "VHDL design compile error: {e.message}")
+                case Ok(vhdl):
+                    all_vhdl = vhdl
+                case _:
+                    return CompileResult.CodegenError(
+                        "VHDL design compile error: backend result not Ok")
+        if all_vhdl == "":
+            return CompileResult.CodegenError(
+                "VHDL design compile produced an empty artifact")
+
+        val aop_requested = aop_advices_requested()
+        val aop_woven = aop_weave_count()
+        if aop_requested > 0 and aop_woven == 0:
+            return CompileResult.CodegenError(
+                "VHDL generation error: {aop_requested} AOP advice declaration(s) were requested but 0 weaves were applied before VHDL emission — refusing to emit RTL with silently dropped aspects")
+
+        var artifact_input = match vhdl_artifact_input_from_catalog(
+            catalog,
+            ctx.sources,
+            output,
+            all_vhdl,
+            ctx.options.profile,
+            aop_requested,
+            aop_woven
+        ):
+            case Ok(value):
+                value
+            case Err(err):
+                return CompileResult.CodegenError(
+                    "VHDL artifact provenance error: {err}")
+        if strict_target != "":
+            artifact_input.generation_route = "hwir-strict"
+            artifact_input.hwir_module_node_id = strict_node_id
+            artifact_input.hwir_config_profile = strict_profile
+            artifact_input.hwir_graph_sha256 = strict_graph_sha256
+            artifact_input.target = "riscv" + strict_xlen.to_text()
+            artifact_input.xlen = strict_xlen
+            artifact_input.profile = strict_profile
+            val strict_artifact_error = vhdl_validate_production_artifact_input(artifact_input)
+            if strict_artifact_error.is_err():
+                return CompileResult.CodegenError("VHDL strict-HWIR provenance error: {strict_artifact_error.err().unwrap()}")
+        if not vhdl_remove_production_artifacts(output):
+            return CompileResult.CodegenError(
+                "Failed to remove stale VHDL artifacts for {output}")
+        val rendered = vhdl_render_production_artifacts(
+            artifact_input, all_vhdl)
+        match vhdl_write_production_artifacts(output, all_vhdl, rendered):
+            case Ok(_):
+                ()
+            case Err(err):
+                return CompileResult.CodegenError(err)
+        vhdl_log_info(log, "VHDL source written to {output}")
+        CompileResult.Success(output)
+use compiler.common.diagnostics.span.{Span}

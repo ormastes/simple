@@ -1,0 +1,148 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+use std.spec.step
+
+use std.spec.*
+use compiler.driver.driver_source_loading.{_driver_collect_sources, _driver_collect_sources_via_find, _driver_collect_entry_import_source}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_pipeline_loading.*
+use compiler.common.driver_core_types.{CompileOptions, CompileMode}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+val LOADING = "src/compiler/80.driver/driver_source_loading.spl"
+val HELPERS = "src/compiler/80.driver/driver_helpers.spl"
+
+describe "driver source collection has exactly one definition":
+    # @manual scenario evidence
+    """As a compiler engineer measuring what a build actually compiles, I need
+    `_driver_collect_sources` to have exactly ONE co-compiled definition, so
+    that when I call it to ask "is this directory in the build?" the answer
+    comes from the collector the driver really runs — not from whichever of two
+    same-named copies name resolution happened to pick.
+
+    Until 2026-08-11 there were two: `driver_source_loading.spl` (with four lane
+    exclusions — `/core/interpreter/`, `/10.frontend/parser/`,
+    `/10.frontend/treesitter`, `/hir_lowering/async`) and `driver_helpers.spl`
+    (with none of them). A sabotage probe established that the
+    `driver_source_loading.spl` copy wins and the `driver_helpers.spl` copy was
+    unreachable; it was deleted. This spec pins that resolution so a
+    reintroduced copy cannot silently make the measurement ambiguous again.
+
+    The exclusions are a BULK-COLLECT lane filter, not a build-wide retirement:
+    entry-import resolution does not apply them, which is why `core/interpreter`
+    remains live in-tree with real production importers and green specs."""
+
+    it "collapses driver_helpers.spl so only one collector definition remains":
+        # @req REQ-SSPEC-COMPILER
+        step("collapses driver_helpers.spl so only one collector definition remains")
+        step("Read both driver source-collection modules")
+        val loading = rt_file_read_text(LOADING) ?? ""
+        val helpers = rt_file_read_text(HELPERS) ?? ""
+        expect(loading).to_not_equal("")
+        expect(helpers).to_not_equal("")
+
+        step("The canonical collector lives in driver_source_loading.spl")
+        expect(loading).to_contain("pub fn _driver_collect_sources(p: text) -> [SourceFile]:")
+        expect(loading).to_contain("pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:")
+
+        step("driver_helpers.spl declares no competing definition")
+        expect(helpers).to_not_contain("fn _driver_collect_sources(p: text) -> [SourceFile]:")
+        expect(helpers).to_not_contain("fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:")
+
+    it "applies the four lane exclusions that only the winning copy carries":
+        # @req REQ-SSPEC-COMPILER
+        step("applies the four lane exclusions that only the winning copy carries")
+        step("Interpreter, parser, treesitter and async-lowering paths are dropped")
+        expect(_driver_collect_sources("src/compiler/10.frontend/core/interpreter/hashmap.spl").len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+        step("A positive control from the same layer is still collected")
+        val control = _driver_collect_sources("src/compiler/10.frontend/core/lexer.spl")
+        expect(control.len()).to_be_greater_than(0)
+
+    it "admits a canonical treesitter file only through explicit-entry collection":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Keep bulk filtering while admitting the same production file as an explicit entry")
+        val entry = "src/compiler/10.frontend/treesitter/outline_decls.spl"
+        expect(_driver_collect_sources(entry).len()).to_equal(0)
+        expect(_driver_collect_entry_import_source(entry).len()).to_be_greater_than(0)
+
+    it "routes a native explicit entry around bulk-only lane exclusions":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Load a canonical treesitter entry through CompilerDriver")
+        val entry = "src/compiler/10.frontend/treesitter/language_detect.spl"
+        val old_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        val old_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")).to_equal(true)
+
+        var options = CompileOptions.default()
+        options.mode = CompileMode.Aot
+        options.cli_mode_text = "aot"
+        options.input_files = [entry]
+        var driver = CompilerDriver.create(options)
+        val (loaded_ctx, loaded_ok) = driver.load_sources_impl()
+
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)).to_equal(true)
+        expect(loaded_ok).to_equal(true)
+        var found_entry = false
+        for source in loaded_ctx.sources:
+            if source.path == entry:
+                found_entry = true
+        expect(found_entry).to_equal(true)
+
+    it "keeps ordinary source loading on the bulk exclusion path":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Load the same treesitter file without native-entry authority")
+        val entry = "src/compiler/10.frontend/treesitter/language_detect.spl"
+        val old_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        val old_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", "")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")).to_equal(true)
+
+        var options = CompileOptions.default()
+        options.mode = CompileMode.Check
+        options.cli_mode_text = "check"
+        options.input_files = [entry]
+        var driver = CompilerDriver.create(options)
+        val (loaded_ctx, loaded_ok) = driver.load_sources_impl()
+
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)).to_equal(true)
+        expect(loaded_ok).to_equal(true)
+        expect(loaded_ctx.sources.len()).to_equal(0)
+
+    it "keeps repository documentation outside explicit-entry collection":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Reject a repository doc path before attempting to read it")
+        expect(_driver_collect_entry_import_source("doc/foo.spl").len()).to_equal(0)
+
+    it "keeps the exclusion list intact in the definition that actually answers":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the exclusion list intact in the definition that actually answers")
+        step("Both collector branches carry all four excluded path fragments")
+        val loading = rt_file_read_text(LOADING) ?? ""
+        expect(loading).to_contain("/core/interpreter/")
+        expect(loading).to_contain("/10.frontend/parser/")
+        expect(loading).to_contain("/10.frontend/treesitter")
+        expect(loading).to_contain("/hir_lowering/async")
+
+    it "routes the bulk find collector through the same single definition":
+        # @req REQ-SSPEC-COMPILER
+        step("routes the bulk find collector through the same single definition")
+        step("via_find delegates rather than re-implementing the filter")
+        val loading = rt_file_read_text(LOADING) ?? ""
+        expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
+
+        step("Delegation is observable: an excluded path yields nothing")
+        expect(_driver_collect_sources_via_find(["src/compiler/10.frontend/core/interpreter"]).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+# @req REQ-SSPEC-COMPILER

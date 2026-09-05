@@ -1,0 +1,72 @@
+# ============================================================================
+# LZ4 empty-payload frame round-trip — REPRODUCING spec
+#
+# Bug: doc/08_tracking/bug/compress_lz4_empty_payload_roundtrip_corruptstream_2026-07-20.md
+#
+# `lz4_compress_frame([], opts)` emitted a data block unconditionally, writing a
+# size word of 0x80000000 (uncompressed-flag set, length 0). The frame therefore
+# looked like:
+#
+#     04 22 4D 18 | 60 40 82 | 00 00 00 80 | 00 00 00 00
+#     magic       | FLG BD HC| empty block | EndMark
+#
+# `lz4_decompress_frame` rejects a zero-length block as CorruptStream (that guard
+# is correct — a zero-size block genuinely is a corrupt-stream signal, since the
+# zero size word is reserved for the EndMark). Result: the codec did not accept
+# its own output for empty input.
+#
+# Per the LZ4 frame spec an empty frame carries ZERO data blocks: header then
+# EndMark, 11 bytes. The fix is in the ENCODER (lz4.spl, `lz4_compress_frame`);
+# the decoder stays strict.
+#
+# Pure-library data transformation, so no subprocess is needed: the defect is in
+# `.spl` library code and reproduces on the interpreter that runs spec bodies.
+# (Verified: it did reproduce here before the fix.)
+# ============================================================================
+
+use std.spec.*
+use std.common.compress.lz4.{lz4_compress_frame, lz4_decompress_frame,
+    CompressionOptions, CompressionLevel}
+use std.common.compress.types.{CompressionCodec}
+
+fn _opts() -> CompressionOptions:
+    CompressionOptions(
+        codec: CompressionCodec.lz4,
+        level: CompressionLevel(value: 1),
+        checksum: false,
+        block_mode: "independent",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: nil)
+
+fn _empty() -> [u8]:
+    []
+
+# Decoded length, or -1 when the decoder rejected the frame.
+fn _rt_len(data: [u8], opts: CompressionOptions) -> i64:
+    match lz4_decompress_frame(lz4_compress_frame(data, opts)):
+        case Ok(b): b.len()
+        case Err(_): -1
+
+describe "LZ4 empty-payload frame round-trip":
+
+    it "accepts its own empty-payload frame (was CorruptStream: lz4 empty data block)":
+        expect(_rt_len(_empty(), _opts())).to_equal(0)
+
+    it "emits an empty frame of exactly header + EndMark (11 bytes, no data block)":
+        # 4 magic + 1 FLG + 1 BD + 1 HC + 4 EndMark = 11.
+        # The pre-fix encoder emitted 15 (an extra 4-byte empty block size word).
+        expect(lz4_compress_frame(_empty(), _opts()).len()).to_equal(11)
+
+    it "writes an EndMark, not an empty block size word, right after the header":
+        val f = lz4_compress_frame(_empty(), _opts())
+        # Bytes 7..10 are the size word following the 7-byte header. For an empty
+        # frame these must be the all-zero EndMark. Pre-fix they were
+        # 00 00 00 80 (0x80000000 = uncompressed block of length 0).
+        expect(f[7].to_i64()).to_equal(0)
+        expect(f[8].to_i64()).to_equal(0)
+        expect(f[9].to_i64()).to_equal(0)
+        expect(f[10].to_i64()).to_equal(0)
+
+    it "still round-trips a non-empty payload (fix must not regress the normal path)":
+        expect(_rt_len([65u8, 66u8, 67u8], _opts())).to_equal(3)

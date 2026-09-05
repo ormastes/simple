@@ -1,0 +1,23 @@
+# Regression: `file_read_bytes` had two co-compiled definitions with differing
+# signatures ((text)->[i64] in std.nogc_sync_mut.io.file_ops vs (text)->[u8] in
+# std.io_runtime), which emitted a compiler_cross_module_private_symbol_collision
+# warning on every test run and could mis-dispatch at JIT call sites.
+# Both are now (text)->[u8]; this spec pins that the file_ops variant yields
+# true u8 elements (0xFF stays 255, never sign-extended or widened).
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.io_runtime.{file_delete}
+use std.io_runtime.{file_read_bytes as rt_variant}
+
+describe "file_read_bytes unified signature":
+    it "file_ops variant returns [u8] identical to io_runtime variant":
+        val path = "/tmp/file_read_bytes_unified_spec.bin"
+        file_write_bytes(path, [0u8, 97u8, 115u8, 255u8])
+        val a = file_read_bytes(path)
+        val b = rt_variant(path)
+        file_delete(path)
+        expect(a.len()).to_equal(4)
+        expect(a[3]).to_equal(255u8)
+        expect(a[0]).to_equal(0u8)
+        expect(b.len()).to_equal(4)
+        expect(b[3]).to_equal(255u8)

@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+runtime=${SIMPLE_TEST_RUNTIME:-$root/bin/simple}
+validator=$root/scripts/check/validate-sosix-qemu-compiler-serial.spl
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sosix-fs-toolchain.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() { printf '%s\n' "sosix-qemu-fs-toolchain-contract: $*" >&2; exit 1; }
+digest_source=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+digest_exec=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+digest_stdout=1d4bd883c9d362010465de08cdf1cc5000a7d57d0bcaec524368e3475f99b496
+write_valid() {
+cat >"$1" <<EOF
+boot noise
+SOSIX_FS_TOOLCHAIN_BEGIN schema=1 host=linux arch=arm64 nonce=n-1
+SOSIX_FS_COMPILER_VERSION path=/usr/bin/simple version=4.0.0 nonce=n-1
+SOSIX_FS_SOURCE_READ role=interpreter path=/tmp/hello.spl sha256=$digest_source
+SOSIX_FS_INTERPRETER_HELLO nonce=n-1 source_sha256=$digest_source stdout=hello-n-1 stdout_sha256=$digest_stdout
+SOSIX_FS_SOURCE_READ role=compiler path=/tmp/hello.spl sha256=$digest_source
+SOSIX_FS_COMPILER_OUTPUT path=/tmp/hello source_sha256=$digest_source sha256=$digest_exec
+SOSIX_FS_EXEC_READ role=loader path=/tmp/hello sha256=$digest_exec
+SOSIX_FS_LOADER_HELLO nonce=n-1 executable_sha256=$digest_exec stdout=hello-n-1 stdout_sha256=$digest_stdout
+SOSIX_FS_COMPILED_HELLO nonce=n-1 executable_sha256=$digest_exec stdout=hello-n-1 stdout_sha256=$digest_stdout
+SOSIX_FS_TOOLCHAIN_END host=linux arch=arm64 nonce=n-1 source_sha256=$digest_source executable_sha256=$digest_exec status=pass
+EOF
+}
+run_validator() {
+    "$runtime" run "$validator" -- "$1" linux arm64 n-1 /usr/bin/simple 4.0.0 \
+        /tmp/hello.spl /tmp/hello hello-n-1 "$tmp/version.env" "$tmp/hello.env"
+}
+
+write_valid "$tmp/valid.log"
+run_validator "$tmp/valid.log" >"$tmp/valid.out"
+grep -Fq 'sosix_fs_toolchain_serial=pass' "$tmp/valid.out" || fail valid-rejected
+grep -Fxq "source_sha256=$digest_source" "$tmp/hello.env" || fail source-receipt-unbound
+grep -Fxq "executable_sha256=$digest_exec" "$tmp/hello.env" || fail executable-receipt-unbound
+
+sed "s/source_sha256=$digest_source stdout=hello-n-1/source_sha256=$digest_exec stdout=hello-n-1/" \
+    "$tmp/valid.log" >"$tmp/wrong-source.log"
+if run_validator "$tmp/wrong-source.log" >"$tmp/reject.out"; then fail wrong-source-accepted; fi
+grep -Fq 'reason=source-artifact-binding' "$tmp/reject.out" || fail wrong-source-diagnostic
+
+write_valid "$tmp/duplicate.log"
+duplicate_line=$(grep 'SOSIX_FS_COMPILED_HELLO' "$tmp/duplicate.log")
+printf '%s\n' "$duplicate_line" >>"$tmp/duplicate.log"
+if run_validator "$tmp/duplicate.log" >"$tmp/reject.out"; then fail duplicate-accepted; fi
+grep -Fq 'reason=required-marker-missing-or-duplicate' "$tmp/reject.out" || fail duplicate-diagnostic
+
+sed 's/SOSIX_FS_LOADER_HELLO nonce=n-1/SOSIX_FS_LOADER_HELLO nonce=stale/' \
+    "$tmp/valid.log" >"$tmp/stale.log"
+if run_validator "$tmp/stale.log" >"$tmp/reject.out"; then fail stale-nonce-accepted; fi
+grep -Fq 'reason=transaction-binding' "$tmp/reject.out" || fail stale-nonce-diagnostic
+
+write_valid "$tmp/duplicate-begin.log"
+begin_line=$(grep 'SOSIX_FS_TOOLCHAIN_BEGIN' "$tmp/duplicate-begin.log")
+printf '%s\n' "$begin_line" >>"$tmp/duplicate-begin.log"
+if run_validator "$tmp/duplicate-begin.log" >"$tmp/reject.out"; then fail duplicate-begin-accepted; fi
+grep -Fq 'reason=begin-or-version-missing-or-duplicate' "$tmp/reject.out" || fail duplicate-begin-diagnostic
+
+write_valid "$tmp/duplicate-version.log"
+version_line=$(grep 'SOSIX_FS_COMPILER_VERSION' "$tmp/duplicate-version.log")
+printf '%s\n' "$version_line" >>"$tmp/duplicate-version.log"
+if run_validator "$tmp/duplicate-version.log" >"$tmp/reject.out"; then fail duplicate-version-accepted; fi
+grep -Fq 'reason=begin-or-version-missing-or-duplicate' "$tmp/reject.out" || fail duplicate-version-diagnostic
+
+sed '/SOSIX_FS_SOURCE_READ role=compiler/{N;s/\(.*\)\n\(.*\)/\2\n\1/;}' \
+    "$tmp/valid.log" >"$tmp/reordered.log"
+if run_validator "$tmp/reordered.log" >"$tmp/reject.out"; then fail reordered-accepted; fi
+grep -Fq 'reason=marker-order' "$tmp/reject.out" || fail reordered-diagnostic
+
+printf '%s\n' 'sosix_qemu_fs_toolchain_serial_contract=pass cases=7'

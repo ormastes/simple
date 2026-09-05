@@ -1,0 +1,62 @@
+"""
+# std.gpu typed upload/download round-trips real element bytes
+
+Reproduce for the 12.First_Kernel SEGV (2026-08-25): gpu_upload_* /
+gpu_download_* in src/lib/gc_async_mut/gpu_ops.spl passed
+`array.data_ptr()` — the interpreter's tagged Value buffer — as raw element
+bytes, so uploads sent garbage and downloads memcpy'd over Value tags
+(SEGV at 2048 elements, silent corruption below). Hardware only.
+"""
+
+use std.spec
+use std.gc_async_mut.gpu_ops.{gpu_init, gpu_set_device, gpu_alloc, gpu_free, gpu_upload_f32, gpu_download_f32, gpu_upload_i32, gpu_download_i32, gpu_upload_i64, gpu_download_i64, gpu_upload_f64, gpu_download_f64}
+use std.common.test_env_gate.{test_env_cuda_available, test_env_gate_skip}
+
+describe "std.gpu typed transfers on hardware":
+    if not test_env_cuda_available():
+        it "env_skip: CUDA not available":
+            val reason = test_env_gate_skip("SIMPLE_CUDA_TEST")
+            expect(reason).to_contain("Skipped")
+        return
+
+    it "round-trips 2048 f32 values (the SEGV size)":
+        expect(gpu_init().is_ok()).to_equal(true)
+        expect(gpu_set_device(0).is_ok()).to_equal(true)
+        val n = 2048
+        val data = [for i in 0..n: (i as f32) * 0.5]
+        val buf = gpu_alloc(n * 4).unwrap()
+        expect(gpu_upload_f32(buf, data).is_ok()).to_equal(true)
+        val back = gpu_download_f32(buf, n).unwrap()
+        expect(back.len()).to_equal(n)
+        expect(back[0]).to_equal(0.0)
+        expect(back[1]).to_equal(0.5)
+        expect(back[2047]).to_equal(1023.5)
+        expect(gpu_free(buf).is_ok()).to_equal(true)
+
+    it "keeps the sign bit of negative f32 values":
+        val data = [-1.5, -0.25, 3.0, -1024.0] as [f32]
+        val buf = gpu_alloc(16).unwrap()
+        expect(gpu_upload_f32(buf, data).is_ok()).to_equal(true)
+        expect(gpu_download_f32(buf, 4).unwrap()).to_equal(data)
+        gpu_free(buf)
+
+    it "round-trips negative i32 values":
+        val data = [-1, -2147483648, 2147483647, 7] as [i32]
+        val buf = gpu_alloc(16).unwrap()
+        expect(gpu_upload_i32(buf, data).is_ok()).to_equal(true)
+        expect(gpu_download_i32(buf, 4).unwrap()).to_equal(data)
+        gpu_free(buf)
+
+    it "round-trips i64 values":
+        val data = [-1, 1 << 40, -(1 << 50), 0]
+        val buf = gpu_alloc(32).unwrap()
+        expect(gpu_upload_i64(buf, data).is_ok()).to_equal(true)
+        expect(gpu_download_i64(buf, 4).unwrap()).to_equal(data)
+        gpu_free(buf)
+
+    it "round-trips f64 values":
+        val data = [-2.5, 1.0e300, 3.141592653589793, -0.0]
+        val buf = gpu_alloc(32).unwrap()
+        expect(gpu_upload_f64(buf, data).is_ok()).to_equal(true)
+        expect(gpu_download_f64(buf, 4).unwrap()).to_equal(data)
+        gpu_free(buf)

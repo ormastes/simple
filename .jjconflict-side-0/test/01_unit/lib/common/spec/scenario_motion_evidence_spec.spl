@@ -1,0 +1,235 @@
+# codex-system-test
+
+use std.spec.*
+use std.common.spec.scenario_motion_evidence.{
+    ScenarioArtifactIntegrity,
+    ScenarioMotionEvent,
+    ScenarioMotionEvidence,
+    ScenarioMotionKeyframe,
+    scenario_artifact_integrity_validate,
+    scenario_motion_evidence_validate
+}
+
+fn valid_integrity() -> ScenarioArtifactIntegrity:
+    ScenarioArtifactIntegrity(
+        path: "03_system/os/wm/baseline.png",
+        format: "png",
+        mime: "image/png",
+        width: 1280,
+        height: 720,
+        byte_size: 1048576,
+        checksum: "sha256:still",
+        producer: "qemu-capture",
+        producer_version: "1",
+        source_revision: "abc123",
+        host: "linux-x86_64",
+        target: "simpleos-riscv64",
+        capture_ready: true,
+        baseline_identity: "wm-baseline-v1",
+        comparison_result: "pass",
+        required: true
+    )
+
+fn valid_motion() -> ScenarioMotionEvidence:
+    ScenarioMotionEvidence(
+        duration_ms: 2400,
+        events: [
+            ScenarioMotionEvent(
+                sequence: 0,
+                time_ms: 200,
+                kind: "focus",
+                target: "editor",
+                value: "active",
+                status: "pass"
+            ),
+            ScenarioMotionEvent(
+                sequence: 1,
+                time_ms: 900,
+                kind: "input",
+                target: "editor",
+                value: "hello",
+                status: "pass"
+            )
+        ],
+        keyframes: [
+            ScenarioMotionKeyframe(
+                time_ms: 0,
+                artifact_path: "baseline.png",
+                oracle: "draw-ir",
+                status: "pass"
+            ),
+            ScenarioMotionKeyframe(
+                time_ms: 1200,
+                artifact_path: "after-input.png",
+                oracle: "draw-ir",
+                status: "pass"
+            )
+        ],
+        transcript_path: "events.txt",
+        review_media_path: "review.webm"
+    )
+
+describe "Scenario artifact integrity":
+    it "should accept provenance-bound still evidence":
+        step("Capture")
+        val integrity = valid_integrity()
+        step("Verify")
+        val result = scenario_artifact_integrity_validate(integrity)
+        step("Render")
+        expect(integrity.baseline_identity).to_equal("wm-baseline-v1")
+        step("Publish")
+        expect(result).to_equal("ok")
+
+    it "should reject a required capture that is not ready":
+        step("Capture")
+        val base = valid_integrity()
+        val integrity = ScenarioArtifactIntegrity(
+            path: base.path,
+            format: base.format,
+            mime: base.mime,
+            width: base.width,
+            height: base.height,
+            byte_size: base.byte_size,
+            checksum: base.checksum,
+            producer: base.producer,
+            producer_version: base.producer_version,
+            source_revision: base.source_revision,
+            host: base.host,
+            target: base.target,
+            capture_ready: false,
+            baseline_identity: base.baseline_identity,
+            comparison_result: base.comparison_result,
+            required: true
+        )
+        step("Verify")
+        val result = scenario_artifact_integrity_validate(integrity)
+        step("Render")
+        expect(integrity.required).to_equal(true)
+        step("Publish")
+        expect(result).to_equal("required_capture_not_ready")
+
+    it "should reject unsafe artifact paths":
+        step("Capture")
+        val base = valid_integrity()
+        val integrity = ScenarioArtifactIntegrity(
+            path: "../outside.png",
+            format: base.format,
+            mime: base.mime,
+            width: base.width,
+            height: base.height,
+            byte_size: base.byte_size,
+            checksum: base.checksum,
+            producer: base.producer,
+            producer_version: base.producer_version,
+            source_revision: base.source_revision,
+            host: base.host,
+            target: base.target,
+            capture_ready: base.capture_ready,
+            baseline_identity: base.baseline_identity,
+            comparison_result: base.comparison_result,
+            required: base.required
+        )
+        step("Verify")
+        val result = scenario_artifact_integrity_validate(integrity)
+        step("Render")
+        expect(integrity.path).to_equal("../outside.png")
+        step("Publish")
+        expect(result).to_equal("unsafe_artifact_path")
+
+    it "should accept provenance-bound nonvisual evidence without fake dimensions":
+        step("Capture")
+        val base = valid_integrity()
+        val integrity = ScenarioArtifactIntegrity(
+            path: "03_system/os/qemu/serial.log",
+            format: "log",
+            mime: "text/plain",
+            width: 0,
+            height: 0,
+            byte_size: 4096,
+            checksum: "sha256:serial",
+            producer: base.producer,
+            producer_version: base.producer_version,
+            source_revision: base.source_revision,
+            host: base.host,
+            target: base.target,
+            capture_ready: true,
+            baseline_identity: "",
+            comparison_result: "not-compared",
+            required: true
+        )
+        step("Verify")
+        val result = scenario_artifact_integrity_validate(integrity)
+        step("Render")
+        expect(integrity.width).to_equal(0)
+        step("Publish")
+        expect(result).to_equal("ok")
+
+describe "Scenario motion evidence":
+    it "should accept ordered events and validated keyframes":
+        step("Capture")
+        val evidence = valid_motion()
+        step("Verify")
+        val result = scenario_motion_evidence_validate(
+            evidence,
+            true,
+            1048576,
+            ["baseline.png", "after-input.png"]
+        )
+        step("Render")
+        expect(evidence.keyframes.len()).to_equal(2)
+        step("Publish")
+        expect(result).to_equal("ok")
+
+    it "should reject out-of-order events":
+        step("Capture")
+        val base = valid_motion()
+        val evidence = ScenarioMotionEvidence(
+            duration_ms: base.duration_ms,
+            events: [
+                ScenarioMotionEvent(
+                    sequence: 1,
+                    time_ms: 900,
+                    kind: "input",
+                    target: "editor",
+                    value: "hello",
+                    status: "pass"
+                ),
+                ScenarioMotionEvent(
+                    sequence: 0,
+                    time_ms: 200,
+                    kind: "focus",
+                    target: "editor",
+                    value: "active",
+                    status: "pass"
+                )
+            ],
+            keyframes: base.keyframes,
+            transcript_path: base.transcript_path,
+            review_media_path: base.review_media_path
+        )
+        step("Verify")
+        val result = scenario_motion_evidence_validate(
+            evidence,
+            true,
+            1048576,
+            ["baseline.png", "after-input.png"]
+        )
+        step("Render")
+        expect(evidence.events.len()).to_equal(2)
+        step("Publish")
+        expect(result).to_equal("motion_event_order_invalid")
+
+    it "should reject missing or unvalidated keyframe evidence":
+        step("Capture")
+        val evidence = valid_motion()
+        step("Verify")
+        val result = scenario_motion_evidence_validate(
+            evidence,
+            true,
+            1048576,
+            ["baseline.png"]
+        )
+        step("Render")
+        expect(evidence.keyframes[1].artifact_path).to_equal("after-input.png")
+        step("Publish")
+        expect(result).to_equal("motion_keyframe_unvalidated")

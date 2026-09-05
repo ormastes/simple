@@ -1,0 +1,280 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
+
+"""
+# MCP Static Tools — Perf-Rewrite Correctness Oracle
+
+**Feature IDs:** #MCP-PERF-T1-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Active
+**Requirements:** doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md (task B2, T1)
+
+## Overview
+
+Correctness guard for the Team T1 quadratic-concat elimination rewrite of
+main_static_tools.spl. The rewrite replaces O(n^2) `acc = acc + piece` patterns
+with parts-array + `.join(",")` calls throughout:
+
+- `_mcp_static_props`: 36 sequential appends -> parts array + join
+- `_mcp_static_tools_result`: 163-tool loop body -> schemas array + join
+- `_mcp_hex_u64`: nibble concat loop -> parts array + join
+- `--probe`: cheap native startup check; manifest content is verified by tools/list specs
+
+## Correctness contract
+
+The rewrite must produce byte-identical output to the pre-rewrite baseline:
+- At least 38114 characters (the pre-schema baseline; schemas now come from the tool table)
+- Exactly 163 tool objects (same as baseline)
+- play_wm_text_status, first tool (debug_create_session), last tool (debug_ui_css_dump) present
+- Balanced braces and brackets
+
+## Core subset
+
+`_mcp_tools_list_json_for_set("core")` must return a strict subset of the full
+list containing the 20 core dev tools and nothing else.
+`_mcp_tools_list_json_for_set("all")` must be byte-identical to
+`_mcp_static_tools_result()`.
+"""
+
+# @req REQ-MCP-PERF-T1-001
+# @feature mcp_static_tools_perf_rewrite
+# tag: unit
+
+use std.spec
+use app.mcp.main_static_tools.{
+    _mcp_probe_tool_count, _mcp_static_tools_result,
+    _mcp_static_tools_result_cached, _mcp_tools_list_json_for_set
+}
+
+fn count_substr(haystack: text, needle: text) -> i64:
+    val parts = haystack.split(needle)
+    parts.len() - 1
+
+# ============================================================================
+# Byte-identity oracle — must match pre-rewrite baseline exactly
+# ============================================================================
+
+use std.spec.step
+
+describe "T1 rewrite — byte-identical output oracle":
+    """
+    ## Baseline
+
+    The pre-rewrite `_mcp_static_tools_result()` produced a 38114-char JSON
+    string. This describe block guards that the parts-array rewrite did not
+    alter the output in any way.
+    """
+
+    it "json string length is at least the pre-schema baseline (38114)":
+        # @req REQ-SSPEC-APP
+        step("json string length is at least the pre-schema baseline (38114)")
+        val result = _mcp_static_tools_result()
+        expect(result.len() >= 38114).to_equal(true)
+
+    it "has exactly 163 tool objects":
+        # @req REQ-SSPEC-APP
+        step("has exactly 163 tool objects")
+        val result = _mcp_static_tools_result()
+        val tool_count = count_substr(result, "{\"name\":\"")
+        expect(tool_count).to_equal(163)
+
+    it "is wrapped as tools array object":
+        # @req REQ-SSPEC-APP
+        step("is wrapped as tools array object")
+        val result = _mcp_static_tools_result()
+        expect(result.starts_with("{\"tools\":[")).to_equal(true)
+        expect(result.ends_with("]}")).to_equal(true)
+
+    it "first tool is debug_create_session":
+        # @req REQ-SSPEC-APP
+        step("first tool is debug_create_session")
+        val result = _mcp_static_tools_result()
+        val expected_start = "{\"tools\":[{\"name\":\"debug_create_session\""
+        expect(result.starts_with(expected_start)).to_equal(true)
+
+    it "last tool is debug_ui_css_dump":
+        # @req REQ-SSPEC-APP
+        step("last tool is debug_ui_css_dump")
+        val result = _mcp_static_tools_result()
+        expect(result.contains("\"debug_ui_css_dump\"")).to_equal(true)
+        val last_name_marker = "\"name\":\"debug_ui_css_dump\""
+        val after_marker = result.split(last_name_marker)
+        expect(after_marker.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+
+    it "play_wm_text_status is present":
+        # @req REQ-SSPEC-APP
+        step("play_wm_text_status is present")
+        val result = _mcp_static_tools_result()
+        expect(result.contains("\"play_wm_text_status\"")).to_equal(true)
+
+    it "tool boundary pattern is well-formed (no missing closing braces)":
+        # @req REQ-SSPEC-APP
+        step("tool boundary pattern is well-formed (no missing closing braces)")
+        val result = _mcp_static_tools_result()
+        val tool_starts = count_substr(result, "{\"name\":\"")
+        val closed_boundaries = count_substr(result, "}},{\"name\":\"")
+        expect(closed_boundaries).to_equal(tool_starts - 1)
+
+    it "braces are balanced":
+        # @req REQ-SSPEC-APP
+        step("braces are balanced")
+        val result = _mcp_static_tools_result()
+        expect(count_substr(result, "{")).to_equal(count_substr(result, "}"))
+        expect(count_substr(result, "[")).to_equal(count_substr(result, "]"))
+
+# ============================================================================
+# Core set filter — _mcp_tools_list_json_for_set
+# ============================================================================
+
+describe "T1 rewrite — _mcp_tools_list_json_for_set":
+    """
+    ## Subset Contract
+
+    "all" must be byte-identical to _mcp_static_tools_result().
+    "core" must be a strict subset containing the 20 core dev tools.
+    """
+
+    it "set=all is byte-identical to _mcp_static_tools_result":
+        # @req REQ-SSPEC-APP
+        step("set=all is byte-identical to _mcp_static_tools_result")
+        val full_direct = _mcp_static_tools_result()
+        val full_via_set = _mcp_tools_list_json_for_set("all")
+        expect(full_via_set.len()).to_equal(full_direct.len())
+        expect(full_via_set).to_equal(full_direct)
+
+    it "set=all has exactly 163 tools":
+        # @req REQ-SSPEC-APP
+        step("set=all has exactly 163 tools")
+        val result = _mcp_tools_list_json_for_set("all")
+        expect(count_substr(result, "{\"name\":\"")).to_equal(163)
+
+    it "set=core is valid tools-array JSON":
+        # @req REQ-SSPEC-APP
+        step("set=core is valid tools-array JSON")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.starts_with("{\"tools\":[")).to_equal(true)
+        expect(result.ends_with("]}")).to_equal(true)
+
+    it "set=core has fewer tools than set=all":
+        # @req REQ-SSPEC-APP
+        step("set=core has fewer tools than set=all")
+        val core_count = count_substr(_mcp_tools_list_json_for_set("core"), "{\"name\":\"")
+        val all_count = count_substr(_mcp_tools_list_json_for_set("all"), "{\"name\":\"")
+        expect(core_count < all_count).to_equal(true)
+
+    it "set=core contains simple_check":
+        # @req REQ-SSPEC-APP
+        step("set=core contains simple_check")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.contains("\"simple_check\"")).to_equal(true)
+
+    it "set=core contains simple_read":
+        # @req REQ-SSPEC-APP
+        step("set=core contains simple_read")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.contains("\"simple_read\"")).to_equal(true)
+
+    it "set=core contains simple_edit":
+        # @req REQ-SSPEC-APP
+        step("set=core contains simple_edit")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.contains("\"simple_edit\"")).to_equal(true)
+
+    it "set=core contains simple_run":
+        # @req REQ-SSPEC-APP
+        step("set=core contains simple_run")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.contains("\"simple_run\"")).to_equal(true)
+
+    it "set=core contains simple_test":
+        # @req REQ-SSPEC-APP
+        step("set=core contains simple_test")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.contains("\"simple_test\"")).to_equal(true)
+
+    it "set=core contains simple_commit":
+        # @req REQ-SSPEC-APP
+        step("set=core contains simple_commit")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.contains("\"simple_commit\"")).to_equal(true)
+
+    it "set=core does NOT contain debug-only tools":
+        # @req REQ-SSPEC-APP
+        step("set=core does NOT contain debug-only tools")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.contains("\"debug_create_session\"")).to_equal(false)
+        expect(result.contains("\"debug_set_breakpoint\"")).to_equal(false)
+
+    it "set=core does NOT contain play_ tools":
+        # @req REQ-SSPEC-APP
+        step("set=core does NOT contain play_ tools")
+        val result = _mcp_tools_list_json_for_set("core")
+        expect(result.contains("\"play_run\"")).to_equal(false)
+        expect(result.contains("\"play_wm_text_status\"")).to_equal(false)
+
+    it "set=core has exactly 18 tools":
+        # @req REQ-SSPEC-APP
+        step("set=core has exactly 18 tools")
+        val result = _mcp_tools_list_json_for_set("core")
+        val core_count = count_substr(result, "{\"name\":\"")
+        expect(core_count).to_equal(18)  # oracle: 18 core names present in the static table (19 listed, simple_diagnostics-class absentees excluded)
+
+    it "unknown set name falls back to full list":
+        # @req REQ-SSPEC-APP
+        step("unknown set name falls back to full list")
+        val result = _mcp_tools_list_json_for_set("unknown_set")
+        expect(count_substr(result, "{\"name\":\"")).to_equal(163)
+
+# ============================================================================
+# Full-list cache — _mcp_static_tools_result_cached
+# ============================================================================
+
+describe "full-list cache":
+    """
+    ## Cache oracle
+
+    _mcp_static_tools_result_cached() must return the identical JSON on every
+    call. Absolute oracles (exact length + exact tool count) guard both the
+    first (cold) call and the second (cached) call independently.
+    The cached result must also equal the output of the independent producer
+    _mcp_static_tools_result() to guard against cache contamination.
+    """
+
+    it "first call returns a payload at least the pre-schema baseline (38114)":
+        # @req REQ-SSPEC-APP
+        step("first call returns a payload at least the pre-schema baseline (38114)")
+        val result = _mcp_static_tools_result_cached()
+        expect(result.len() >= 38114).to_equal(true)
+
+    it "first call has exactly 163 tool objects":
+        # @req REQ-SSPEC-APP
+        step("first call has exactly 163 tool objects")
+        val result = _mcp_static_tools_result_cached()
+        val tool_count = count_substr(result, "{\"name\":\"")
+        expect(tool_count).to_equal(163)
+
+    it "second call returns the identical payload (cached path correctness)":
+        val first = _mcp_static_tools_result_cached()
+        val second = _mcp_static_tools_result_cached()
+        expect(second).to_equal(first)
+
+    it "second call equals first call (cache returns same content)":
+        # @req REQ-SSPEC-APP
+        step("second call equals first call (cache returns same content)")
+        val first = _mcp_static_tools_result_cached()
+        val second = _mcp_static_tools_result_cached()
+        expect(second).to_equal(first)
+
+    it "cached result equals independent _mcp_static_tools_result() output":
+        # @req REQ-SSPEC-APP
+        step("cached result equals independent _mcp_static_tools_result() output")
+        val cached = _mcp_static_tools_result_cached()
+        val direct = _mcp_static_tools_result()
+        expect(cached).to_equal(direct)

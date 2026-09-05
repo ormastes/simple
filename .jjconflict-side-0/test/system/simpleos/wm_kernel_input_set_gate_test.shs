@@ -1,0 +1,152 @@
+#!/bin/sh
+# Proves the SimpleOS WM evidence gate's kernel-input-set narrowing is both
+# NARROW (a write to a file the kernel does not link no longer aborts a run)
+# and FAIL-CLOSED (a write to a file it does link still aborts, and an
+# unresolvable/vacuous input set is an ERROR, never a pass).
+#
+# Target: scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+# Bug:    doc/08_tracking/bug/wm_lane_source_hash_gate_trips_on_foreign_session_bulk_write_2026-08-09.md
+#
+# This test never writes under src/** -- concurrent WM lane runs hash those
+# trees, and clobbering them is the very defect under repair. The "linked"
+# sabotage uses a generated source the gate itself rewrites every run; the
+# "unrelated" sabotage uses a scratch file in the x86_64 example dir, which the
+# OLD whole-tree scan hashed and the NEW input set correctly ignores.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+GATE=scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+FAILURES=0
+CHECKS=0
+
+check() {
+    CHECKS=$((CHECKS + 1))
+    if [ "$2" = "$3" ]; then
+        echo "  ok   $1 ($3)"
+    else
+        echo "  FAIL $1: expected '$3', got '$2'"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+echo "== 1. gate script parses"
+if sh -n "$GATE" 2>/dev/null; then check "sh -n $GATE" pass pass; else check "sh -n $GATE" fail pass; fi
+
+# Extract the hashing helpers plus the whole kernel-input-set block from the
+# gate, so this test exercises the SHIPPED code, not a copy of it.
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"; rm -f "$UNRELATED_PROBE" 2>/dev/null || true' EXIT INT TERM
+sed -n '/^file_byte_count() {/,/^regular_file_status() {/p' "$GATE" \
+    | sed '$d' >"$WORK/block.sh"
+if [ ! -s "$WORK/block.sh" ]; then
+    echo "  FAIL could not extract the kernel-input-set block from $GATE"
+    exit 1
+fi
+
+BUILD_DIR="$WORK/build"
+mkdir -p "$BUILD_DIR"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+KERNEL_OUTPUT="${SIMPLEOS_WM_KERNEL_ARTIFACT:-build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf}"
+KERNEL_CANDIDATE="$KERNEL_OUTPUT.candidate"
+KERNEL_SOURCE_REVISION=""
+KERNEL_INPUT_COUNT=0
+# shellcheck disable=SC1090
+. "$WORK/block.sh"
+
+UNRELATED_PROBE="examples/09_embedded/simple_os/arch/x86_64/.wm_gate_unrelated_probe.spl"
+
+echo "== 2. input set resolves, is narrow, and is not vacuous"
+sample_kernel_source_revision
+NEW_COUNT="$KERNEL_INPUT_COUNT"
+BASE_REVISION="$KERNEL_SOURCE_REVISION"
+OLD_COUNT="$(find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
+    -type f \( -name '*.spl' -o -name '*.c' -o -name '*.h' -o -name '*.s' -o -name '*.S' -o -name '*.ld' \) \
+    ! -path '*/arch/aarch64/*' ! -path '*/arch/arm64/*' ! -path '*/arch/arm/*' \
+    ! -path '*/arch/riscv/*' ! -path '*/arch/riscv32/*' ! -path '*/arch/riscv64/*' \
+    ! -path '*/arch/wasm/*' ! -path '*/arch/wasm32/*' ! -path '*/arch/wasm64/*' \
+    ! -name '*_aarch64.*' ! -name '*_arm64.*' ! -name '*_riscv.*' \
+    ! -name '*_riscv32.*' ! -name '*_riscv64.*' ! -name '*_wasm.*' -print | wc -l | tr -d ' ')"
+echo "  old whole-tree hashed set: $OLD_COUNT file(s)"
+echo "  new kernel input set:      $NEW_COUNT file(s) (set=$KERNEL_INPUT_SET_STATUS)"
+if [ "$NEW_COUNT" -ge "$KERNEL_INPUT_MIN_FILES" ]; then r=yes; else r=no; fi
+check "input set above the vacuity floor ($KERNEL_INPUT_MIN_FILES)" "$r" yes
+if [ "$NEW_COUNT" -lt "$OLD_COUNT" ]; then r=yes; else r=no; fi
+check "input set is narrower than the old whole-tree set" "$r" yes
+if is_sha256 "$BASE_REVISION"; then r=yes; else r=no; fi
+check "revision is a sha256" "$r" yes
+
+echo "== 3. membership: linked files in, unrelated files out"
+if grep -Fxq "$ENTRY" "$KERNEL_INPUT_LIST"; then r=yes; else r=no; fi
+check "entry file is in its own input set" "$r" yes
+if grep -Fxq "src/os/compositor/compositor.spl" "$KERNEL_INPUT_LIST"; then r=yes; else r=no; fi
+check "linked WM source src/os/compositor/compositor.spl is IN" "$r" yes
+if grep -Fxq "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_session.spl" "$KERNEL_INPUT_LIST"; then r=yes; else r=no; fi
+check "unrelated host-GPU source engine2d/backend_vulkan_session.spl is OUT" "$r" no
+
+echo "== 4. sabotage A: write an UNRELATED source -> revision must NOT change"
+cat >"$UNRELATED_PROBE" <<'PROBE'
+# Scratch probe written by test/system/simpleos/wm_kernel_input_set_gate_test.shs.
+# It lives in a directory the OLD whole-tree scan hashed, but nothing imports it.
+fn wm_gate_unrelated_probe() -> i64:
+    20260809
+PROBE
+sample_kernel_source_revision
+check "unrelated write leaves the revision unchanged" \
+    "$KERNEL_SOURCE_REVISION" "$BASE_REVISION"
+check "unrelated write leaves the input-set size unchanged" \
+    "$KERNEL_INPUT_COUNT" "$NEW_COUNT"
+rm -f "$UNRELATED_PROBE"
+
+echo "== 5. sabotage B: write a LINKED source -> revision MUST change (fail closed)"
+LINKED_TARGET="$(grep -m 1 -E '^build/os/generated/.*\.spl$' "$KERNEL_INPUT_LIST" || true)"
+if [ -z "$LINKED_TARGET" ] || [ ! -f "$LINKED_TARGET" ]; then
+    echo "  FAIL no writable linked source found in the input set"
+    FAILURES=$((FAILURES + 1))
+else
+    echo "  linked target: $LINKED_TARGET"
+    cp -p "$LINKED_TARGET" "$WORK/linked.bak"
+    printf '\n# wm gate sabotage probe %s\n' "$(date -u +%s)" >>"$LINKED_TARGET"
+    sample_kernel_source_revision
+    if [ "$KERNEL_SOURCE_REVISION" != "$BASE_REVISION" ]; then r=changed; else r=unchanged; fi
+    check "linked write CHANGES the revision (gate would refuse)" "$r" changed
+    cp -p "$WORK/linked.bak" "$LINKED_TARGET"
+    sample_kernel_source_revision
+    check "revision restored after undoing the linked write" \
+        "$KERNEL_SOURCE_REVISION" "$BASE_REVISION"
+fi
+
+echo "== 6. fail-closed: an unresolvable input set is an ERROR, never a pass"
+SAVED_ROOTS="$KERNEL_SOURCE_ROOTS"
+rm -f "$KERNEL_INPUT_LIST" "$KERNEL_INPUT_STATUS_FILE"
+KERNEL_SOURCE_ROOTS="src/os src/lib build/os/generated $WORK/no-such-root"
+sample_kernel_source_revision
+check "missing source root yields count 0" "$KERNEL_INPUT_COUNT" 0
+check "missing source root yields empty revision" "$KERNEL_SOURCE_REVISION" ""
+kernel_input_verdict error | grep -q '^simpleos_wm_kernel_input_verdict=ERROR — nothing was checked' && r=yes || r=no
+check "ERROR verdict emitted" "$r" yes
+KERNEL_SOURCE_ROOTS="$SAVED_ROOTS"
+
+rm -f "$KERNEL_INPUT_LIST" "$KERNEL_INPUT_STATUS_FILE"
+KERNEL_INPUT_MIN_FILES=1000000
+sample_kernel_source_revision
+check "an input set below the vacuity floor yields count 0" "$KERNEL_INPUT_COUNT" 0
+KERNEL_INPUT_MIN_FILES=200
+
+echo "== 7. verdict strings state how many files were hashed"
+rm -f "$KERNEL_INPUT_LIST" "$KERNEL_INPUT_STATUS_FILE"
+sample_kernel_source_revision
+kernel_input_verdict pass
+kernel_input_verdict changed
+kernel_input_verdict error
+kernel_input_verdict pass | grep -q "PASS — $KERNEL_INPUT_COUNT file(s) hashed" && r=yes || r=no
+check "PASS verdict states the hashed file count" "$r" yes
+
+echo
+if [ "$FAILURES" -eq 0 ]; then
+    echo "PASS — $CHECKS check(s) passed (kernel input set = $NEW_COUNT of $OLD_COUNT files)"
+    exit 0
+fi
+echo "FAIL — $FAILURES of $CHECKS check(s) failed"
+exit 1

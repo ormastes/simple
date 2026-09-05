@@ -1,0 +1,116 @@
+class LaneEntry:
+    entry_name: text
+    test_kind: text
+    passed: bool
+    duration_ms: int
+
+    me is_smoke() -> bool:
+        return self.test_kind == "smoke"
+
+    me is_boot() -> bool:
+        return self.test_kind == "boot"
+
+    me mark_passed(ms: int) -> LaneEntry:
+        return LaneEntry(entry_name: self.entry_name, test_kind: self.test_kind, passed: true, duration_ms: ms)
+
+    me mark_failed() -> LaneEntry:
+        return LaneEntry(entry_name: self.entry_name, test_kind: self.test_kind, passed: false, duration_ms: self.duration_ms)
+
+    me to_text() -> text:
+        if self.passed:
+            return "PASS " + self.entry_name
+        return "FAIL " + self.entry_name
+
+    static fn create(name: text, kind: text) -> LaneEntry:
+        return LaneEntry(entry_name: name, test_kind: kind, passed: false, duration_ms: 0)
+
+
+class SmokeLane:
+    lane_name: text
+    lane_type: text
+    f0_entry: LaneEntry
+    f1_entry: LaneEntry
+    f2_entry: LaneEntry
+    entry_count: int
+
+    me is_smf() -> bool:
+        return self.lane_type == "smf"
+
+    me is_native() -> bool:
+        return self.lane_type == "native"
+
+    me all_passed() -> bool:
+        if self.entry_count == 0:
+            return false
+        if self.entry_count >= 1:
+            if self.f0_entry.passed == false:
+                return false
+        if self.entry_count >= 2:
+            if self.f1_entry.passed == false:
+                return false
+        if self.entry_count >= 3:
+            if self.f2_entry.passed == false:
+                return false
+        return true
+
+    me add_entry(e: LaneEntry) -> SmokeLane:
+        if self.entry_count == 0:
+            return SmokeLane(lane_name: self.lane_name, lane_type: self.lane_type, f0_entry: e, f1_entry: self.f1_entry, f2_entry: self.f2_entry, entry_count: 1)
+        if self.entry_count == 1:
+            return SmokeLane(lane_name: self.lane_name, lane_type: self.lane_type, f0_entry: self.f0_entry, f1_entry: e, f2_entry: self.f2_entry, entry_count: 2)
+        return SmokeLane(lane_name: self.lane_name, lane_type: self.lane_type, f0_entry: self.f0_entry, f1_entry: self.f1_entry, f2_entry: e, entry_count: 3)
+
+    me to_text() -> text:
+        return "lane:" + self.lane_name + " type=" + self.lane_type + " entries=" + self.entry_count.to_text()
+
+    static fn smf_lane(name: text) -> SmokeLane:
+        val empty_slot = LaneEntry(entry_name: "", test_kind: "smoke", passed: false, duration_ms: 0)
+        return SmokeLane(lane_name: name, lane_type: "smf", f0_entry: empty_slot, f1_entry: empty_slot, f2_entry: empty_slot, entry_count: 0)
+
+    static fn native_lane(name: text) -> SmokeLane:
+        val empty_slot = LaneEntry(entry_name: "", test_kind: "smoke", passed: false, duration_ms: 0)
+        return SmokeLane(lane_name: name, lane_type: "native", f0_entry: empty_slot, f1_entry: empty_slot, f2_entry: empty_slot, entry_count: 0)
+
+
+class SmfLaneConfig:
+    config_name: text
+    is_smoke_only: bool
+    arch_filter: text
+    max_entries: int
+
+    me accepts_arch(arch: text) -> bool:
+        return self.arch_filter == "any" or self.arch_filter == arch
+
+    me is_restricted() -> bool:
+        return self.is_smoke_only
+
+    me to_text() -> text:
+        return "smf-config:" + self.config_name + " smoke_only=" + self.is_smoke_only.to_text() + " arch=" + self.arch_filter
+
+    static fn rv64_smoke() -> SmfLaneConfig:
+        return SmfLaneConfig(config_name: "rv64-smoke", is_smoke_only: true, arch_filter: "rv64", max_entries: 10)
+
+    static fn any_full() -> SmfLaneConfig:
+        return SmfLaneConfig(config_name: "full", is_smoke_only: false, arch_filter: "any", max_entries: 100)
+
+
+class LaneGate:
+    gate_name: text
+    required_pass: int
+    actual_pass: int
+    is_open: bool
+
+    me check() -> LaneGate:
+        return LaneGate(gate_name: self.gate_name, required_pass: self.required_pass, actual_pass: self.actual_pass, is_open: self.actual_pass >= self.required_pass)
+
+    me record_pass() -> LaneGate:
+        return LaneGate(gate_name: self.gate_name, required_pass: self.required_pass, actual_pass: self.actual_pass + 1, is_open: self.is_open)
+
+    me record_fail() -> LaneGate:
+        return LaneGate(gate_name: self.gate_name, required_pass: self.required_pass, actual_pass: self.actual_pass, is_open: self.is_open)
+
+    me to_text() -> text:
+        return "gate:" + self.gate_name + " " + self.actual_pass.to_text() + "/" + self.required_pass.to_text() + " open=" + self.is_open.to_text()
+
+    static fn create(name: text, required: int) -> LaneGate:
+        return LaneGate(gate_name: name, required_pass: required, actual_pass: 0, is_open: false)

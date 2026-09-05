@@ -1,0 +1,126 @@
+# Blink block-box paint walker with Skia recording and renderer display-list sinks.
+
+use std.blink.layout.block_flow.{LayoutContext, BlockFlowBox}
+use std.blink.entity.computed_style.{ComputedStyle}
+use std.blink.dom.interaction_state.{InteractionState, interaction_state_empty}
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.canvas.{SkCanvas, sk_canvas_make}
+use std.skia.entity.paint.{sk_paint_fill}
+use std.skia.entity.picture.{SkPicture}
+use std.common.color.types.{Color, from_rgba, from_rgb}
+use std.common.render_scene.paint_types.{PaintOp, DisplayList}
+
+struct StyledBox:
+    layout_id: i64
+    style: ComputedStyle
+
+struct ImageEntry:
+    layout_id: i64
+    src_url: text
+
+struct FormFieldPaintEntry:
+    layout_id: i64
+    value: text
+    placeholder: text
+    label: text
+    is_button: bool
+    node_id: i64
+
+class PaintContext:
+    layout: LayoutContext
+    styles: [StyledBox]
+    images: [ImageEntry]
+    form_fields: [FormFieldPaintEntry]
+    interaction: InteractionState
+    canvas: SkCanvas
+    display_list: DisplayList
+
+impl PaintContext:
+    fn find_style(layout_id: i64) -> ComputedStyle?:
+        for entry in self.styles:
+            if entry.layout_id == layout_id:
+                return Some(entry.style)
+        nil
+
+    fn find_image(layout_id: i64) -> ImageEntry?:
+        for entry in self.images:
+            if entry.layout_id == layout_id:
+                return Some(entry)
+        nil
+
+    fn find_form(layout_id: i64) -> FormFieldPaintEntry?:
+        for entry in self.form_fields:
+            if entry.layout_id == layout_id:
+                return Some(entry)
+        nil
+
+    me paint_box(layout_id: i64, offset_x: f64, offset_y: f64):
+        val box_opt = self.layout.get_box(layout_id)
+        if box_opt is None:
+            return
+        if val box = box_opt:
+            val rect = box.computed_rect
+            val x = rect.left + offset_x
+            val y = rect.top + offset_y
+            val w = rect.right - rect.left
+            val h = rect.bottom - rect.top
+
+            if val style = self.find_style(layout_id):
+                val bg = style.background_color
+                if bg.a > 0.0:
+                    val sk_rect = SkRect(left: x, top: y, right: x + w, bottom: y + h)
+                    self.canvas.draw_rect(sk_rect, sk_paint_fill(bg.to_sk_color()))
+                    self.display_list.ops.push(PaintOp.FillRect(x, y, w, h,
+                        from_rgba((bg.r * 255.0).to_i64(), (bg.g * 255.0).to_i64(),
+                            (bg.b * 255.0).to_i64(), (bg.a * 255.0).to_i64())))
+
+            if val image = self.find_image(layout_id):
+                self.display_list.ops.push(PaintOp.DrawImage(x, y, w, h, layout_id, image.src_url))
+
+            if val field = self.find_form(layout_id):
+                val fill = if field.is_button: from_rgb(225, 225, 225) else: from_rgb(255, 255, 255)
+                self.display_list.ops.push(PaintOp.FillRect(x, y, w, h, fill))
+                val focused = self.interaction.focused_id == field.node_id
+                val border_color = if focused: from_rgb(32, 110, 220) else: from_rgb(110, 110, 110)
+                val border_width = if focused: 2.0 else: 1.0
+                self.display_list.ops.push(PaintOp.DrawBorder(x, y, w, h,
+                    [border_width, border_width, border_width, border_width],
+                    [border_color, border_color, border_color, border_color]))
+                val content = if field.is_button: field.label else: (if field.value != "": field.value else: field.placeholder)
+                if content != "":
+                    self.display_list.ops.push(PaintOp.DrawText(x + 6.0, y + 20.0, content, 14.0, from_rgb(0, 0, 0)))
+
+fn _paint_context(layout: LayoutContext, styles: [StyledBox], images: [ImageEntry],
+        forms: [FormFieldPaintEntry], interaction: InteractionState) -> PaintContext:
+    val base_canvas = sk_canvas_make(layout.viewport_width.to_i64(), layout.viewport_height.to_i64())
+    val canvas = base_canvas.begin_recording(
+        SkRect(left: 0.0, top: 0.0, right: layout.viewport_width, bottom: layout.viewport_height))
+    PaintContext(layout: layout, styles: styles, images: images, form_fields: forms,
+        interaction: interaction, canvas: canvas, display_list: DisplayList(ops: []))
+
+fn paint_tree_new(layout: LayoutContext, styles: [StyledBox]) -> PaintContext:
+    _paint_context(layout, styles, [], [], interaction_state_empty())
+
+fn paint_tree_new_with_images(layout: LayoutContext, styles: [StyledBox], images: [ImageEntry]) -> PaintContext:
+    _paint_context(layout, styles, images, [], interaction_state_empty())
+
+fn paint_tree_new_with_forms(layout: LayoutContext, styles: [StyledBox], forms: [FormFieldPaintEntry], interaction: InteractionState) -> PaintContext:
+    _paint_context(layout, styles, [], forms, interaction)
+
+fn _walk(pc: PaintContext, box_id: i64):
+    pc.paint_box(box_id, 0.0, 0.0)
+    if val box = pc.layout.get_box(box_id):
+        for child_id in box.children_ids:
+            _walk(pc, child_id)
+
+fn paint_tree(layout: LayoutContext, styles: [StyledBox]) -> SkPicture:
+    val pc = paint_tree_new(layout, styles)
+    if layout.root_id >= 0:
+        _walk(pc, layout.root_id)
+    finalize_paint(pc)
+
+fn collect_display_list(pc: PaintContext) -> DisplayList:
+    pc.display_list
+
+fn finalize_paint(pc: PaintContext) -> SkPicture:
+    pc.canvas.end_recording()

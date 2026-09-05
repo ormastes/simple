@@ -1,0 +1,13 @@
+# M17: CSS3 Completeness
+
+## Status: CLOSED — 2026-05-20
+
+## Phases
+- [x] dev
+- [x] research
+- [x] arch
+- [x] spec
+- [x] implement
+- [x] refactor
+- [x] verify
+- [x] ship

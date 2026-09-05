@@ -1,0 +1,141 @@
+# EditorPanel — base struct for dockable editor panels
+#
+# Provides panel kinds, individual panel state, and a default
+# layout that arranges panels in a typical editor workspace.
+
+use std.common.drawing.vector.{SkRect}
+
+# ============================================================================
+# PanelKind — types of editor panels
+# ============================================================================
+
+enum PanelKind:
+    Hierarchy
+    Inspector
+    AssetBrowser
+    AudioMixer
+    Viewport
+    DrawingTool
+
+impl PanelKind:
+    fn to_text(self) -> text:
+        match self:
+            PanelKind.Hierarchy => "Hierarchy"
+            PanelKind.Inspector => "Inspector"
+            PanelKind.AssetBrowser => "AssetBrowser"
+            PanelKind.AudioMixer => "AudioMixer"
+            PanelKind.Viewport => "Viewport"
+            PanelKind.DrawingTool => "DrawingTool"
+
+    fn eq(self, other: PanelKind) -> bool:
+        self.to_text() == other.to_text()
+
+# ============================================================================
+# EditorPanel — one dockable panel
+# ============================================================================
+
+struct EditorPanel:
+    label: text
+    kind: PanelKind
+    rect: SkRect
+    visible: bool
+    focused: bool
+
+impl EditorPanel:
+    static fn new(label: text, kind: PanelKind, rect: SkRect) -> EditorPanel:
+        """Create a visible, unfocused panel."""
+        EditorPanel(
+            label: label,
+            kind: kind,
+            rect: rect,
+            visible: true,
+            focused: false
+        )
+
+    fn contains_point(self, px: f64, py: f64) -> bool:
+        """Delegate hit-test to the underlying rect."""
+        self.rect.contains_point(px, py)
+
+# ============================================================================
+# PanelLayout — manages the set of docked panels
+# ============================================================================
+
+class PanelLayout:
+    panels: [EditorPanel]
+
+impl PanelLayout:
+    static fn default_layout(window_width: f64, window_height: f64) -> PanelLayout:
+        """Create default editor layout.
+
+        Left column (200px wide):  Hierarchy top half, Asset Browser bottom half.
+        Center:                    Viewport (fills remaining width).
+        Right column (250px wide): Inspector top 60%, Audio Mixer bottom 40%.
+        """
+        val left_w = 200.0
+        val right_w = 250.0
+        val center_x = left_w
+        val center_w = window_width - left_w - right_w
+        val half_h = window_height / 2.0
+        val right_x = window_width - right_w
+        val inspector_h = window_height * 0.6
+        val mixer_h = window_height - inspector_h
+
+        val hierarchy = EditorPanel.new(
+            "Hierarchy",
+            PanelKind.Hierarchy,
+            SkRect.from_xywh(0.0, 0.0, left_w, half_h)
+        )
+        val asset_browser = EditorPanel.new(
+            "Asset Browser",
+            PanelKind.AssetBrowser,
+            SkRect.from_xywh(0.0, half_h, left_w, half_h)
+        )
+        val viewport = EditorPanel.new(
+            "Viewport",
+            PanelKind.Viewport,
+            SkRect.from_xywh(center_x, 0.0, center_w, window_height)
+        )
+        val inspector = EditorPanel.new(
+            "Inspector",
+            PanelKind.Inspector,
+            SkRect.from_xywh(right_x, 0.0, right_w, inspector_h)
+        )
+        val audio_mixer = EditorPanel.new(
+            "Audio Mixer",
+            PanelKind.AudioMixer,
+            SkRect.from_xywh(right_x, inspector_h, right_w, mixer_h)
+        )
+
+        PanelLayout(
+            panels: [hierarchy, asset_browser, viewport, inspector, audio_mixer]
+        )
+
+    me add_panel(panel: EditorPanel):
+        """Add a panel to the layout."""
+        self.panels = self.panels.push(panel)
+
+    me remove_panel(kind: PanelKind):
+        """Remove the first panel matching the given kind."""
+        var kept: [EditorPanel] = []
+        for p in self.panels:
+            if not p.kind.eq(kind):
+                kept = kept.push(p)
+        self.panels = kept
+
+    fn find_panel_at(self, px: f64, py: f64) -> PanelKind?:
+        """Return the kind of the first visible panel containing the point."""
+        for p in self.panels:
+            if p.visible and p.contains_point(px, py):
+                return p.kind
+        none
+
+    fn get_panel(self, kind: PanelKind) -> EditorPanel?:
+        """Find a panel by kind."""
+        for p in self.panels:
+            if p.kind.eq(kind):
+                return p
+        none
+
+    fn panel_count(self) -> i32:
+        """Return the number of panels."""
+        self.panels.len()

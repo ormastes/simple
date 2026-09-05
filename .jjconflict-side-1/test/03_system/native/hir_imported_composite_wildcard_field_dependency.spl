@@ -1,0 +1,57 @@
+# Native HIR regression: an imported composite may expose a field whose type
+# reaches its defining module through a wildcard import.
+
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurfacesByName,
+    module_surfaces_from_modules
+}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+extern fn rt_exit(code: i32)
+
+fn build_surfaces(
+    modules: Dict<text, Module>, sources: [SourceFile]
+) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(_error):
+            rt_exit(40)
+            ModuleSurfacesByName.empty()
+
+fn main() -> i64:
+    val log = Logger(level: 0)
+    val support_source = "pub struct ExternalType:\n    value: i64"
+    val owner_source = "use dep.support.*\npub struct Container:\n    value: ExternalType"
+    val consumer_source = "use owner.module.\{Container\}\nfn accept(value: Container) -> Container:\n    value"
+
+    val support = parse_full_frontend(
+        support_source, "dep/support.spl", "dep.support", log)
+    val owner = parse_full_frontend(
+        owner_source, "owner/module.spl", "owner.module", log)
+    val consumer = parse_full_frontend(
+        consumer_source, "consumer/main.spl", "consumer.main", log)
+
+    var modules: Dict<text, Module> = {}
+    modules["dep.support"] = support
+    modules["owner.module"] = owner
+    modules["consumer.main"] = consumer
+    val sources = [
+        SourceFile(path: "dep/support.spl", content: support_source,
+            module_name: "dep.support"),
+        SourceFile(path: "owner/module.spl", content: owner_source,
+            module_name: "owner.module"),
+        SourceFile(path: "consumer/main.spl", content: consumer_source,
+            module_name: "consumer.main")
+    ]
+    val surfaces = build_surfaces(modules, sources)
+    var lowering = hirlowering_for_module("consumer.main", surfaces)
+    val hir = lowering.lower_module(consumer)
+    if lowering.errors.len() != 0: rt_exit(41)
+    if hir.symbols.lookup("Container") == nil: rt_exit(42)
+    rt_exit(30)
+    0

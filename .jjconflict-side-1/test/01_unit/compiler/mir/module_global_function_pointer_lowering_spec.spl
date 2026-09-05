@@ -1,0 +1,131 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn lower_function_slot_source(src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "function_slot.spl", "function_slot.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("function_slot.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn bootstrap_static_module(local_symbol: SymbolId) -> MirModule:
+    val i64_type = MirType.i64()
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[local_symbol] = MirStatic(
+        symbol: local_symbol,
+        name: "shared",
+        type_: i64_type,
+        init: nil,
+        is_mutable: true
+    )
+    MirModule(name: "", functions: {}, statics: statics, constants: {}, types: {})
+
+fn bootstrap_global_access_function(local_symbol: SymbolId) -> MirFunction:
+    val i64_type = MirType.i64()
+    MirFunction(
+        symbol: SymbolId(id: 99),
+        name: "access_shared",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: nil, type_: i64_type, kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(
+            id: BlockId.entry(),
+            label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 0), local_symbol), span: nil),
+                MirInst(kind: MirInstKind.StoreGlobal(local_symbol, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0
+    )
+
+fn module_with_imports(name: text, import_paths: [text]) -> HirModule:
+    var imports: [HirImport] = []
+    for import_path in import_paths:
+        imports.push(HirImport(module_path: import_path, items: [], is_lazy: false, span: Span.empty()))
+    var module = bootstrap_empty_hir_module()
+    module.name = name
+    module.imports = imports
+    module
+
+describe "Module-global function pointer MIR lowering", tag: ["only-compiled"]:
+    it "remaps same-named module statics and their accesses independently":
+        bootstrap_mir_functions_reset()
+        val local_symbol = SymbolId(id: 7)
+        val first_remap = bootstrap_mir_static_remap_add(bootstrap_static_module(local_symbol), "alpha")
+        val second_remap = bootstrap_mir_static_remap_add(bootstrap_static_module(local_symbol), "beta")
+        val first_symbol = first_remap[local_symbol.id]
+        val second_symbol = second_remap[local_symbol.id]
+        val rewritten = bootstrap_mir_rewrite_global_references(bootstrap_global_access_function(local_symbol), second_remap)
+
+        expect(first_symbol.id == second_symbol.id).to_equal(false)
+        expect(bootstrap_mir_static_count()).to_equal(2)
+        expect(bootstrap_mir_static_at(0).name == bootstrap_mir_static_at(1).name).to_equal(false)
+        match rewritten.blocks[0].instructions[0].kind:
+            case MirInstKind.LoadGlobal(_, symbol): expect(symbol.id).to_equal(second_symbol.id)
+            case _: fail("expected rewritten LoadGlobal")
+        match rewritten.blocks[0].instructions[1].kind:
+            case MirInstKind.StoreGlobal(symbol, _): expect(symbol.id).to_equal(second_symbol.id)
+            case _: fail("expected rewritten StoreGlobal")
+        bootstrap_mir_functions_reset()
+        val repeated_first = bootstrap_mir_static_remap_add(bootstrap_static_module(local_symbol), "alpha")[local_symbol.id]
+        val repeated_second = bootstrap_mir_static_remap_add(bootstrap_static_module(local_symbol), "beta")[local_symbol.id]
+        expect(repeated_first.id).to_equal(first_symbol.id)
+        expect(repeated_second.id).to_equal(second_symbol.id)
+        bootstrap_mir_functions_reset()
+
+    it "loads the mutable slot and calls its current function indirectly":
+        val source = "fn default_cleanup():\n    ()\n\nfn replacement_cleanup():\n    ()\n\nvar cleanup: fn() = default_cleanup\n\nfn install():\n    cleanup = replacement_cleanup\n\nfn invoke():\n    cleanup()\n"
+        val mir = lower_function_slot_source(source)
+        var saw_store_global = false
+        var saw_load_global = false
+        var saw_indirect_call = false
+        var saw_direct_cleanup_call = false
+
+        for function in mir.functions.values():
+            if function.name == "install" or function.name == "invoke":
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case MirInstKind.StoreGlobal(_, _):
+                                saw_store_global = true
+                            case MirInstKind.LoadGlobal(_, _):
+                                saw_load_global = true
+                            case MirInstKind.CallIndirect(_, _, _, _):
+                                saw_indirect_call = true
+                            case MirInstKind.Call(_, operand, _):
+                                match operand.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                        if name == "cleanup":
+                                            saw_direct_cleanup_call = true
+                                    case _:
+                                        pass
+                            case _:
+                                pass
+
+        expect(saw_store_global).to_equal(true)
+        expect(saw_load_global).to_equal(true)
+        expect(saw_indirect_call).to_equal(true)
+        expect(saw_direct_cleanup_call).to_equal(false)

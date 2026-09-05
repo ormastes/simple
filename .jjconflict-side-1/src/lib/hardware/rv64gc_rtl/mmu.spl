@@ -1,0 +1,326 @@
+# ============================================================================
+# RV64GC RTL MMU — Sv39 Three-Level Page Table Walk (SoC integration)
+# ============================================================================
+#
+# Pure Sv39 virtual-address translation for the RV64 SoC memory-access layer.
+# All operations are side-effect-free functions returning a result struct —
+# suitable for synthesizable RTL and driven combinationally by soc_top_64.
+#
+# WALK INTERFACE DECISION
+# -----------------------
+# The walk takes the DRAM state (Ram64State) and the DRAM base address
+# DIRECTLY and reads the three PTEs itself via ram64_read.  This mirrors the
+# landed Sv32 walker (rv32i_rtl/mmu_sv32.spl `mmu_translate(..., ram)`), avoids
+# function pointers / closures entirely (VHDL-hostile), and keeps the whole
+# walk in one pure combinational function.  Page tables live in DRAM, so PTE
+# physical addresses are converted to RAM offsets (pa - ram_base) and
+# bounds-checked; a PTE address outside DRAM raises a page fault (ram64_read
+# does NOT guard negative offsets, so the bounds check is mandatory).
+#
+# Sv39 virtual address (39-bit, sign-extended to 64):
+#   VPN[2] = bits [38:30]  (9 bits)
+#   VPN[1] = bits [29:21]  (9 bits)
+#   VPN[0] = bits [20:12]  (9 bits)
+#   Offset = bits [11:0]   (12 bits)
+#
+# Sv39 PTE (64-bit):
+#   PPN[2] = bits [53:28]  (26 bits)
+#   PPN[1] = bits [27:19]  (9 bits)
+#   PPN[0] = bits [18:10]  (9 bits)
+#   Flags  = bits [9:0]    (V,R,W,X,U,G,A,D,RSW)
+#
+# Superpages: a leaf PTE at level 2 = 1 GiB page (PPN[1]=PPN[0]=0 required),
+# at level 1 = 2 MiB page (PPN[0]=0 required); a misaligned superpage faults.
+#
+# A/D policy: this model does NOT perform hardware A/D update (no Svadu).  A
+# leaf with A=0 faults; a store to a leaf with D=0 faults.  Software (the OS
+# trap handler) is expected to set A/D and retry, or pre-set them — matching a
+# RISC-V implementation without hardware A/D management.
+#
+# SUM: an S-mode load/store of a U=1 page faults unless sstatus.SUM (bit 18);
+# an S-mode instruction fetch of a U=1 page faults regardless of SUM.
+#
+# Callers translate only when satp.mode==Sv39 and privilege < M; privilege==M or
+# satp.mode==Bare stay identity (handled by soc_top_64, not here).
+#
+# VHDL synthesizable subset: i64, u32, bool, structs only.
+# ============================================================================
+
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_read}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SV39_PAGE_SIZE: i64        = 4096   # 4 KiB
+val SV39_PAGE_OFFSET_BITS: i64 = 12
+val SV39_PTE_SIZE: i64         = 8      # 8 bytes per PTE (64-bit)
+
+val SV39_SATP_MODE: i64 = 8             # satp.MODE value selecting Sv39
+
+# PTE flag masks (bits [9:0])
+val PTE_V: i64 = 1    # bit 0 — Valid
+val PTE_R: i64 = 2    # bit 1 — Readable
+val PTE_W: i64 = 4    # bit 2 — Writable
+val PTE_X: i64 = 8    # bit 3 — Executable
+val PTE_U: i64 = 16   # bit 4 — User accessible
+val PTE_A: i64 = 64   # bit 6 — Accessed
+val PTE_D: i64 = 128  # bit 7 — Dirty
+
+# sstatus.SUM — bit 18 (Supervisor User Memory access)
+val SSTATUS_SUM: i64 = 0x00040000
+
+# Access type codes
+val SV39_ACCESS_FETCH: u32 = 0
+val SV39_ACCESS_LOAD: u32  = 1
+val SV39_ACCESS_STORE: u32 = 2
+
+# Privilege levels
+val SV39_PRIV_U: u32 = 0
+val SV39_PRIV_S: u32 = 1
+val SV39_PRIV_M: u32 = 3
+
+# Page-fault exception cause codes
+val SV39_CAUSE_INSN_PAGE_FAULT: i64  = 12
+val SV39_CAUSE_LOAD_PAGE_FAULT: i64  = 13
+val SV39_CAUSE_STORE_PAGE_FAULT: i64 = 15
+
+# ============================================================================
+# Result structs
+# ============================================================================
+
+struct Sv39Result:
+    """Result of an Sv39 virtual-to-physical translation."""
+    pa: i64            # Translated physical address (valid when fault==false)
+    fault: bool        # True if a page fault occurred
+    fault_cause: i64   # 12=insn, 13=load, 15=store page fault
+
+struct Sv39PteRead:
+    """Result of reading a PTE from DRAM (with bounds check)."""
+    ok: bool           # True if the PTE physical address is inside DRAM
+    pte: i64           # 64-bit PTE value (valid when ok)
+
+# ============================================================================
+# Sv39 field extraction
+# ============================================================================
+
+fn sv39_vpn2(va: i64) -> i64:
+    """Extract VPN[2] (bits [38:30])."""
+    (va >> 30) & 0x1FF
+
+fn sv39_vpn1(va: i64) -> i64:
+    """Extract VPN[1] (bits [29:21])."""
+    (va >> 21) & 0x1FF
+
+fn sv39_vpn0(va: i64) -> i64:
+    """Extract VPN[0] (bits [20:12])."""
+    (va >> 12) & 0x1FF
+
+fn sv39_offset(va: i64) -> i64:
+    """Extract the 12-bit page offset (bits [11:0])."""
+    va & 0xFFF
+
+fn sv39_pte_ppn2(pte: i64) -> i64:
+    """Extract PPN[2] from a PTE (bits [53:28])."""
+    (pte >> 28) & 0x3FFFFFF
+
+fn sv39_pte_ppn1(pte: i64) -> i64:
+    """Extract PPN[1] from a PTE (bits [27:19])."""
+    (pte >> 19) & 0x1FF
+
+fn sv39_pte_ppn0(pte: i64) -> i64:
+    """Extract PPN[0] from a PTE (bits [18:10])."""
+    (pte >> 10) & 0x1FF
+
+fn sv39_pte_ppn_full(pte: i64) -> i64:
+    """Extract the full 44-bit PPN from a PTE (bits [53:10])."""
+    (pte >> 10) & 0x00000FFFFFFFFFFF
+
+fn sv39_pte_flags(pte: i64) -> i64:
+    """Extract the 10-bit flags from a PTE (bits [9:0])."""
+    pte & 0x3FF
+
+fn sv39_fault_cause_for(access_type: u32) -> i64:
+    """Page-fault cause code for the given access type."""
+    if access_type == SV39_ACCESS_FETCH:
+        return SV39_CAUSE_INSN_PAGE_FAULT
+    if access_type == SV39_ACCESS_STORE:
+        return SV39_CAUSE_STORE_PAGE_FAULT
+    SV39_CAUSE_LOAD_PAGE_FAULT
+
+# ============================================================================
+# Leaf permission check
+# ============================================================================
+
+fn sv39_leaf_ok(flags: i64, access_type: u32, privilege: u32, sstatus: i64) -> bool:
+    """Check leaf-PTE permissions.  Returns true if the access is ALLOWED,
+    false if it must page-fault.
+
+    Rules (RISC-V privileged spec, no MXR, no hardware A/D):
+    - V=1 and at least one of R/W/X (leaf)
+    - reserved encoding W=1,R=0 faults
+    - U-mode may access only U=1 pages
+    - S-mode fetch of a U=1 page always faults; S-mode load/store of a U=1
+      page faults unless sstatus.SUM
+    - A=0 faults; store with D=0 faults (software A/D)
+    - fetch needs X, load needs R, store needs W"""
+
+    if (flags & PTE_V) == 0:
+        return false
+
+    # Leaf must have at least one of R/W/X (a pointer here would be a bug)
+    if (flags & (PTE_R | PTE_W | PTE_X)) == 0:
+        return false
+
+    # Reserved: W without R
+    val w_set = (flags & PTE_W) != 0
+    val r_set = (flags & PTE_R) != 0
+    if w_set and r_set == false:
+        return false
+
+    val is_user = (flags & PTE_U) != 0
+    val sum_on = (sstatus & SSTATUS_SUM) != 0
+
+    if privilege == SV39_PRIV_U:
+        if is_user == false:
+            return false
+    else if privilege == SV39_PRIV_S:
+        if is_user:
+            # S-mode instruction fetch of a user page: never allowed
+            if access_type == SV39_ACCESS_FETCH:
+                return false
+            # S-mode data access of a user page: only with SUM
+            if sum_on == false:
+                return false
+
+    # Accessed bit: no hardware A/D in this model — A=0 faults
+    if (flags & PTE_A) == 0:
+        return false
+
+    # Access-type permission
+    if access_type == SV39_ACCESS_FETCH:
+        if (flags & PTE_X) == 0:
+            return false
+    else if access_type == SV39_ACCESS_LOAD:
+        if (flags & PTE_R) == 0:
+            return false
+    else if access_type == SV39_ACCESS_STORE:
+        if (flags & PTE_W) == 0:
+            return false
+        # Dirty bit: no hardware A/D — a store to a clean page faults
+        if (flags & PTE_D) == 0:
+            return false
+
+    true
+
+# ============================================================================
+# Bounds-checked PTE read from DRAM
+# ============================================================================
+
+fn sv39_read_pte(ram: Ram64State, ram_base: i64, pte_pa: i64) -> Sv39PteRead:
+    """Read a 64-bit PTE at physical address pte_pa from DRAM.
+    ram64_read does not guard negative offsets, so PTE addresses outside
+    [ram_base, ram_base + ram.size) are rejected (ok=false) — the caller
+    turns that into a page fault (page tables must live in DRAM)."""
+    if pte_pa < ram_base:
+        return Sv39PteRead(ok: false, pte: 0)
+    if pte_pa + SV39_PTE_SIZE > ram_base + ram.size:
+        return Sv39PteRead(ok: false, pte: 0)
+    val v = ram64_read(ram, pte_pa - ram_base, 8)
+    Sv39PteRead(ok: true, pte: v)
+
+# ============================================================================
+# Translate — main entry point
+# ============================================================================
+
+fn sv39_translate(root_ppn: i64, va: i64, access_type: u32, privilege: u32, sstatus: i64, ram: Ram64State, ram_base: i64) -> Sv39Result:
+    """Translate a virtual address through a three-level Sv39 page table walk.
+
+    root_ppn:    satp.PPN (root page-table physical page number)
+    va:          virtual address
+    access_type: 0=fetch, 1=load, 2=store
+    privilege:        current privilege (0=U, 1=S) — callers must NOT invoke this
+                 for M-mode / Bare (those are identity-mapped upstream)
+    sstatus:     current sstatus (for the SUM bit)
+    ram, ram_base: DRAM state and its base physical address (page tables live
+                 in DRAM; PTE reads are bounds-checked against it)
+
+    On any fault returns {pa:0, fault:true, fault_cause: 12/13/15}."""
+
+    val cause = sv39_fault_cause_for(access_type)
+    val vpn2 = sv39_vpn2(va)
+    val vpn1 = sv39_vpn1(va)
+    val vpn0 = sv39_vpn0(va)
+    val off  = sv39_offset(va)
+
+    # ── Level 2: root page table ────────────────────────────────────────
+    val l2_addr = (root_ppn << SV39_PAGE_OFFSET_BITS) + (vpn2 * SV39_PTE_SIZE)
+    val l2_rd = sv39_read_pte(ram, ram_base, l2_addr)
+    if l2_rd.ok == false:
+        return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+    val l2_pte = l2_rd.pte
+    if (l2_pte & PTE_V) == 0:
+        return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+
+    val l2_is_leaf = (l2_pte & (PTE_R | PTE_W | PTE_X)) != 0
+    if l2_is_leaf:
+        # 1 GiB superpage: PPN[1] and PPN[0] must be zero
+        if sv39_pte_ppn1(l2_pte) != 0 or sv39_pte_ppn0(l2_pte) != 0:
+            return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+        if sv39_leaf_ok(sv39_pte_flags(l2_pte), access_type, privilege, sstatus) == false:
+            return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+        val pa1g = (sv39_pte_ppn2(l2_pte) << 30) | (vpn1 << 21) | (vpn0 << 12) | off
+        return Sv39Result(pa: pa1g, fault: false, fault_cause: 0)
+
+    # ── Level 1 ─────────────────────────────────────────────────────────
+    val l1_addr = (sv39_pte_ppn_full(l2_pte) << SV39_PAGE_OFFSET_BITS) + (vpn1 * SV39_PTE_SIZE)
+    val l1_rd = sv39_read_pte(ram, ram_base, l1_addr)
+    if l1_rd.ok == false:
+        return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+    val l1_pte = l1_rd.pte
+    if (l1_pte & PTE_V) == 0:
+        return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+
+    val l1_is_leaf = (l1_pte & (PTE_R | PTE_W | PTE_X)) != 0
+    if l1_is_leaf:
+        # 2 MiB superpage: PPN[0] must be zero
+        if sv39_pte_ppn0(l1_pte) != 0:
+            return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+        if sv39_leaf_ok(sv39_pte_flags(l1_pte), access_type, privilege, sstatus) == false:
+            return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+        val pa2m = (sv39_pte_ppn2(l1_pte) << 30) | (sv39_pte_ppn1(l1_pte) << 21) | (vpn0 << 12) | off
+        return Sv39Result(pa: pa2m, fault: false, fault_cause: 0)
+
+    # ── Level 0: 4 KiB leaf ─────────────────────────────────────────────
+    val l0_addr = (sv39_pte_ppn_full(l1_pte) << SV39_PAGE_OFFSET_BITS) + (vpn0 * SV39_PTE_SIZE)
+    val l0_rd = sv39_read_pte(ram, ram_base, l0_addr)
+    if l0_rd.ok == false:
+        return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+    val l0_pte = l0_rd.pte
+    if (l0_pte & PTE_V) == 0:
+        return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+
+    # Level 0 must be a leaf
+    val l0_is_leaf = (l0_pte & (PTE_R | PTE_W | PTE_X)) != 0
+    if l0_is_leaf == false:
+        return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+    if sv39_leaf_ok(sv39_pte_flags(l0_pte), access_type, privilege, sstatus) == false:
+        return Sv39Result(pa: 0, fault: true, fault_cause: cause)
+
+    val pa4k = (sv39_pte_ppn_full(l0_pte) << SV39_PAGE_OFFSET_BITS) | off
+    Sv39Result(pa: pa4k, fault: false, fault_cause: 0)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Sv39Result, Sv39PteRead
+export sv39_translate, sv39_leaf_ok, sv39_read_pte
+export sv39_vpn2, sv39_vpn1, sv39_vpn0, sv39_offset
+export sv39_pte_ppn2, sv39_pte_ppn1, sv39_pte_ppn0, sv39_pte_ppn_full, sv39_pte_flags
+export sv39_fault_cause_for
+export SV39_SATP_MODE, SV39_PAGE_SIZE, SV39_PTE_SIZE
+export PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PTE_A, PTE_D, SSTATUS_SUM
+export SV39_ACCESS_FETCH, SV39_ACCESS_LOAD, SV39_ACCESS_STORE
+export SV39_PRIV_U, SV39_PRIV_S, SV39_PRIV_M
+export SV39_CAUSE_INSN_PAGE_FAULT, SV39_CAUSE_LOAD_PAGE_FAULT, SV39_CAUSE_STORE_PAGE_FAULT

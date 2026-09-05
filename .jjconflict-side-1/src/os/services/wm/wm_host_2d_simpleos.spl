@@ -1,0 +1,234 @@
+"""SimpleOS backing for the WM host seam.
+
+WHAT THIS IS
+  The `WmHost2d` implementation for SimpleOS, defined in the tier that owns the
+  real SimpleOS WM path (`src/os/services/wm/`). The seam itself lives in
+  `src/lib/nogc_async_mut/wm/host.spl` and stays free of any OS dependency;
+  this file is the direction the dependency is allowed to run (os -> lib).
+
+  It exists to discharge the seam's portability contract on the one platform
+  this repo can actually boot and observe:
+
+      if Simple 2D (surface + event delivery) runs on SimpleOS,
+      then the WM runs on SimpleOS.
+
+  `wm_host_2d_frame` — the portable WM frame step, with no platform branch in
+  it — runs unmodified over this implementation.
+
+WHAT BACKS IT
+  surface  — `os.drivers.framebuffer.fb_driver.FramebufferDriver`, the same
+             driver `src/os/compositor/fb_backend.spl` renders through. In MMIO
+             mode (`from_scanout_raw`, `front_addr != 0`) `put_pixel`/
+             `fill_rect` write the hardware linear framebuffer, and
+             `read_pixel` reads it back through `mmio_read32`. The readback is
+             what makes a present verifiable rather than merely un-errored.
+  events   — an explicit board-selected adapter. x86 selects the PS/2 adapter;
+             ARM/RISC-V may select the honest no-input adapter until their
+             device input owner is wired. The shared surface owner performs no
+             architecture I/O and never synthesizes a successful event.
+
+HONESTY RULE (host.spl's, applied here without softening)
+  A capability is backed by a real implementation or it reports FALSE. Naming a
+  struct after a platform backs nothing. So:
+
+  * `wm_host_2d_simpleos` refuses to claim a surface it does not have. With
+    `front_addr == 0` there is no hardware scanout, and every seam call returns
+    `ok: false` with `simpleos:no-scanout`. There is no in-memory fallback that
+    would let this class report a green frame off a real machine — that is the
+    exact artifact shape host.spl was rewritten to remove.
+  * `surface_present` returns `ok: true` only after reading the pixels back out
+    of the framebuffer and finding the value it just wrote. A write that does
+    not land reports `present-readback-mismatch`, not success.
+  * `backing_kind()` names what is actually under the object, and is `"none"`
+    whenever the object cannot draw.
+
+  There is deliberately no clock here. An earlier SimpleOS host carried a
+  `now_micros` frozen at 0, so its own health check passed on `0 >= 0`. The
+  seam has four methods and this file implements exactly those four.
+
+WHY PS/2 AND NOT CLIENT IPC
+  `wm_service.spl` speaks to client apps over kernel IPC
+  (`SYS_IPC_CREATE_PORT`/`SYS_IPC_RECV`). That is a real SimpleOS facility, but
+  host.spl already records why it is not in the seam: an inbound client request
+  is expressible as an event, its *reply* is not, so folding IPC in would make
+  a kernel port a second precondition and break the contract. The seam needs an
+  event source; on SimpleOS the hardware event source is the PS/2 controller,
+  which is available before any IPC port exists. Client IPC continues to be
+  driven by `wm_service.spl`, unchanged and beside this file.
+"""
+
+use nogc_async_mut.wm.host.{WmHost2d, WmHostSurface, WmHostStatus, WmHostEventPoll, wm_host_no_event}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color as FbColor}
+use os.services.wm.simpleos_wm_input_adapter.{
+    SimpleOsWmInputAdapter,
+    simpleos_wm_no_input_adapter
+}
+
+# ---------------------------------------------------------------------------
+# The SimpleOS host
+# ---------------------------------------------------------------------------
+
+class WmHost2dSimpleOs:
+    """`WmHost2d` over a hardware scanout and an injected input adapter.
+
+    `fb` is the shared framebuffer driver. When its `front_addr` is 0 there is
+    no hardware surface and every method refuses; see the honesty rule above.
+    """
+    fb: FramebufferDriver
+    surface_ctr: u64
+    live_surface: u64
+    live_width: u32
+    live_height: u32
+    present_count: i64
+    verified_pixel: u32
+    probe_argb: u32
+    input: SimpleOsWmInputAdapter
+
+pub fn wm_host_2d_simpleos(fb: FramebufferDriver) -> WmHost2dSimpleOs:
+    """Compatibility constructor: bind scanout with no claimed input source."""
+    wm_host_2d_simpleos_with_input(fb, simpleos_wm_no_input_adapter())
+
+pub fn wm_host_2d_simpleos_with_input(fb: FramebufferDriver, input: SimpleOsWmInputAdapter) -> WmHost2dSimpleOs:
+    WmHost2dSimpleOs(
+        fb: fb,
+        surface_ctr: 0,
+        live_surface: 0,
+        live_width: 0,
+        live_height: 0,
+        present_count: 0,
+        verified_pixel: 0,
+        probe_argb: 0xFF2D7DD2,
+        input: input
+    )
+
+impl WmHost2dSimpleOs:
+    fn backing_kind() -> text:
+        """What is actually under this object. `"none"` when it cannot draw."""
+        if self.fb.front_addr == 0:
+            return "none"
+        if self.fb.width == 0:
+            return "none"
+        if self.fb.height == 0:
+            return "none"
+        "mmio-scanout"
+
+    fn is_backed() -> bool:
+        self.backing_kind() != "none"
+
+    fn scanout_address() -> u64:
+        self.fb.front_addr
+
+    fn last_verified_pixel() -> u32:
+        """ARGB actually read back out of the framebuffer by the last present."""
+        self.verified_pixel
+
+    fn presents() -> i64:
+        self.present_count
+
+    fn input_backing_kind() -> text:
+        self.input.backing_kind()
+
+fn _no_scanout() -> text:
+    "simpleos:no-scanout"
+
+impl WmHost2d for WmHost2dSimpleOs:
+
+    me surface_acquire(width: u32, height: u32) -> WmHostSurface:
+        if not self.is_backed():
+            return WmHostSurface(ok: false, state: _no_scanout(), id: 0, width: 0, height: 0)
+        if width == 0:
+            return WmHostSurface(ok: false, state: "invalid-size", id: 0, width: 0, height: 0)
+        if height == 0:
+            return WmHostSurface(ok: false, state: "invalid-size", id: 0, width: 0, height: 0)
+        if self.live_surface != 0u64:
+            return WmHostSurface(ok: false, state: "surface-already-live", id: 0, width: 0, height: 0)
+        if self.surface_ctr == 18446744073709551615u64:
+            return WmHostSurface(ok: false, state: "surface-id-exhausted", id: 0, width: 0, height: 0)
+        self.surface_ctr = self.surface_ctr + (1 as u64)
+        self.live_surface = self.surface_ctr
+        var w = width
+        if w > self.fb.width:
+            w = self.fb.width
+        var h = height
+        if h > self.fb.height:
+            h = self.fb.height
+        self.live_width = w
+        self.live_height = h
+        WmHostSurface(ok: true, state: "acquired", id: self.live_surface, width: w, height: h)
+
+    me surface_present(surface_id: u64, byte_len: i64) -> WmHostStatus:
+        """Write the frame into the hardware framebuffer and read it back.
+
+        `ok: true` means pixels were observed in the framebuffer after the
+        write, not merely that no call returned an error.
+        """
+        if not self.is_backed():
+            return WmHostStatus(ok: false, state: _no_scanout())
+        if surface_id == 0:
+            return WmHostStatus(ok: false, state: "unknown-surface")
+        if surface_id != self.live_surface:
+            return WmHostStatus(ok: false, state: "unknown-surface")
+        if byte_len <= 0:
+            return WmHostStatus(ok: false, state: "empty-frame")
+        if byte_len % 4 != 0:
+            return WmHostStatus(ok: false, state: "unaligned-frame")
+        if self.live_width == 0u32 or self.live_height == 0u32:
+            return WmHostStatus(ok: false, state: "invalid-live-surface")
+
+        # A frame is 4 bytes per pixel; never write past the acquired surface.
+        var pixels = byte_len / 4
+        val capacity = self.live_width.to_i64() * self.live_height.to_i64()
+        if pixels > capacity:
+            pixels = capacity
+        if pixels <= 0:
+            return WmHostStatus(ok: false, state: "empty-frame")
+
+        val fill = framebuffer_argb_to_color_local(self.probe_argb)
+        val full_rows = pixels / self.live_width.to_i64()
+        val tail_pixels = pixels % self.live_width.to_i64()
+        if full_rows > 0:
+            self.fb.fill_rect(0, 0, self.live_width, full_rows.to_u32(), fill)
+        if tail_pixels > 0 and full_rows < self.live_height.to_i64():
+            self.fb.fill_rect(0, full_rows.to_u32(), tail_pixels.to_u32(), 1u32, fill)
+
+        # Readback is the proof. Sample both ends of the exact written span so
+        # a rounded-up row or a single stuck word cannot fake this present.
+        val first = self.fb.read_pixel(0, 0)
+        val last_pixel = pixels - 1
+        val last_y = (last_pixel / self.live_width.to_i64()).to_u32()
+        val last_x = (last_pixel % self.live_width.to_i64()).to_u32()
+        val last = self.fb.read_pixel(last_x, last_y)
+        self.verified_pixel = first
+
+        if first != self.probe_argb:
+            return WmHostStatus(ok: false, state: "present-readback-mismatch")
+        if last != self.probe_argb:
+            return WmHostStatus(ok: false, state: "present-readback-partial")
+        self.present_count = self.present_count + 1
+        WmHostStatus(ok: true, state: "presented")
+
+    me surface_release(surface_id: u64) -> WmHostStatus:
+        if not self.is_backed():
+            return WmHostStatus(ok: false, state: _no_scanout())
+        if surface_id == 0:
+            return WmHostStatus(ok: false, state: "unknown-surface")
+        if surface_id != self.live_surface:
+            return WmHostStatus(ok: false, state: "unknown-surface")
+        self.live_surface = 0
+        self.live_width = 0
+        self.live_height = 0
+        WmHostStatus(ok: true, state: "released")
+
+    me event_poll() -> WmHostEventPoll:
+        """Poll the board-selected input adapter without surface-layer I/O."""
+        if not self.is_backed():
+            return wm_host_no_event(_no_scanout())
+        self.input.poll()
+
+fn framebuffer_argb_to_color_local(argb: u32) -> FbColor:
+    FbColor(
+        r: ((argb >> 16) & 0xFF).to_u8(),
+        g: ((argb >> 8) & 0xFF).to_u8(),
+        b: (argb & 0xFF).to_u8(),
+        a: ((argb >> 24) & 0xFF).to_u8()
+    )

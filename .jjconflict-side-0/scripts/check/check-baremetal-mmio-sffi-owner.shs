@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+owner=src/lib/nogc_async_mut_noalloc/baremetal/mmio.spl
+consumers='src/lib/nogc_async_mut_noalloc/baremetal/interrupt.spl src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl src/lib/nogc_async_mut_noalloc/baremetal/riscv/sbi.spl'
+rust_provider=src/compiler_rust/compiler/src/interpreter_extern/memory.rs
+
+decls=$(grep -c '^extern fn rt_mmio_\(read\|write\)_u\(8\|16\|32\)' "$owner")
+test "$decls" -eq 6 || {
+    echo "FAIL: expected 6 canonical MMIO declarations, found $decls" >&2
+    exit 1
+}
+
+tags=$(grep -c '^@unsafe(reason: "volatile raw-address .*", capabilities: \[ffi, raw_ptr\])$' "$owner")
+test "$tags" -eq 6 || {
+    echo "FAIL: expected 6 canonical MMIO unsafe tags, found $tags" >&2
+    exit 1
+}
+
+inlines=$(grep -c '^@inline$' "$owner")
+lexical=$(grep -c '^    unsafe(capabilities: \[ffi, raw_ptr\]):$' "$owner")
+test "$inlines" -eq 6 && test "$lexical" -eq 6 || {
+    echo "FAIL: MMIO owner must retain 6 inline wrappers and 6 lexical raw calls" >&2
+    exit 1
+}
+
+duplicates=$(grep -R -l '^extern fn rt_mmio_\(read\|write\)_u\(8\|16\|32\)' \
+    src/lib/nogc_async_mut_noalloc/baremetal --include='*.spl' | grep -Fv "$owner" || true)
+test -z "$duplicates" || {
+    echo "FAIL: duplicate noalloc MMIO declarations: $duplicates" >&2
+    exit 1
+}
+
+for file in $consumers; do
+    if grep -Eq '(^extern fn rt_mmio_|\brt_mmio_(read|write)_u(8|16|32)\b)' "$file"; then
+        echo "FAIL: $file bypasses the canonical MMIO owner" >&2
+        exit 1
+    fi
+done
+
+if grep -Eiq '(malloc|calloc|realloc|dlsym|dlopen|mutex|sleep|retry|hash\(|signature)' "$owner"; then
+    echo 'FAIL: MMIO hot leaf gained allocation, lookup, lock, retry, or admission work' >&2
+    exit 1
+fi
+
+grep -Fq 'fn checked_mmio_addr(' "$rust_provider" || {
+    echo 'FAIL: Rust interpreter MMIO provider lacks checked address lift' >&2
+    exit 1
+}
+checked_calls=$(grep -c 'checked_mmio_addr(args,.*"rt_mmio_' "$rust_provider")
+test "$checked_calls" -eq 6 || {
+    echo "FAIL: expected 6 checked Rust MMIO address lifts, found $checked_calls" >&2
+    exit 1
+}
+grep -Fq 'mmio_rejects_null_and_misaligned_addresses_before_volatile_access' "$rust_provider" || {
+    echo 'FAIL: Rust MMIO null/alignment sabotage test is missing' >&2
+    exit 1
+}
+
+echo 'PASS: one canonical inline noalloc MMIO SFFI owner, zero consumer bypasses'

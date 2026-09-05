@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
+matrix="$root/scripts/check/check-render-8k80-matrix.shs"
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+receipt="$work_dir/receipt.txt"
+
+write_lane() {
+    local prefix="$1" kind="$2" scope checksum_kind
+    case "$kind" in
+        device) scope=swapchain; checksum_kind=pixel-device-readback ;;
+        cpu) scope=framebuffer-surface; checksum_kind=pixel-framebuffer-readback ;;
+        bare) scope=qemu-display-surface; checksum_kind=pixel-qmp-screendump ;;
+        *) exit 2 ;;
+    esac
+    {
+        echo "${prefix}_status=completed"
+        echo "${prefix}_resolution=7680x4320"
+        echo "${prefix}_p95_us=12500"
+        echo "${prefix}_fallback_used=false"
+        echo "${prefix}_completion_known=true"
+        echo "${prefix}_present_scope=$scope"
+        echo "${prefix}_checksum_kind=$checksum_kind"
+        echo "${prefix}_checksum=sum32:1234"
+    } >> "$receipt"
+}
+
+for lane in cpu_simd_x86_64 cpu_simd_aarch64 cpu_simd_riscv64 draw_ir_cpu web_draw_ir_cpu gui_draw_ir_cpu wm_draw_ir_cpu; do
+    write_lane "$lane" cpu
+done
+for lane in bare_x86_64 bare_aarch64 bare_riscv64; do
+    write_lane "$lane" bare
+done
+for lane in vulkan_engine2d draw_ir_vulkan web_draw_ir_vulkan gui_draw_ir_vulkan wm_draw_ir_vulkan; do
+    write_lane "$lane" device
+done
+
+bash "$matrix" "$receipt" >/dev/null
+echo "wm_draw_ir_vulkan_status=missing" >> "$receipt"
+if bash "$matrix" "$receipt" >/dev/null 2>&1; then
+    echo "expected sabotaged matrix receipt to fail" >&2
+    exit 1
+fi
+
+echo "render_8k80_matrix_gate_test=pass"

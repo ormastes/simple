@@ -1,0 +1,207 @@
+# Tests for Pure Simple Tensor Implementation
+#
+# UN-PARKED 2026-07-25.
+#
+# This whole file used to be:
+#     describe "Tensor":
+#         it "skipped":
+#             skip("pre-existing test failures - functions/imports not available")
+#     # ...entire real spec commented out below it...
+# and it did NOT even skip cleanly — it FAILED with
+# "semantic: function `skip` not found" (the file never imported std.spec), so
+# the suite was carrying a red test dressed up as a skip.
+#
+# Root cause of the original "functions/imports not available":
+#   `src/std` is a symlink to `lib`, so `use std.pure.tensor` resolved to the
+#   14-line STUB at `src/lib/pure/tensor.spl` (a `PureTensor` with only
+#   data/shape, no strides, no get/set/numel) instead of the real 166-line
+#   implementation at `src/lib/gc_async_mut/pure/tensor.spl`. Probe evidence:
+#   importing `std.pure.tensor.{compute_strides, tensor_zeros}` failed with
+#   "function `compute_strides` not found" / "method `get` not found on type
+#   `PureTensor`", while the identical probe against
+#   `std.gc_async_mut.pure.tensor` passed 4/4.
+#   Fixed by turning `src/lib/pure/tensor.spl` into a real re-export facade.
+#
+# Additionally, `reshape` / `transpose()` / `zeros_like` / `ones_like` /
+# `total_elements` / `broadcast_shapes` were asserted here but had never been
+# implemented; they are now implemented for real in
+# `src/lib/gc_async_mut/pure/tensor.spl`. No assertion below was weakened.
+
+use std.pure.tensor (PureTensor, compute_strides, broadcast_shapes, zeros_like, ones_like, total_elements, tensor_from_data)
+
+describe "Pure Simple Tensors":
+    describe "Creation":
+        it "creates tensor with zeros":
+            val t = PureTensor.zeros([2, 3])
+            assert_equal(t.shape, [2, 3])
+            assert_equal(t.numel(), 6)
+            assert_equal(t.data.len(), 6)
+            assert_true(t.data.all(\x: x == 0.0))
+
+        it "creates tensor with ones":
+            val t = PureTensor.ones([3, 2])
+            assert_equal(t.shape, [3, 2])
+            assert_equal(t.numel(), 6)
+            assert_true(t.data.all(\x: x == 1.0))
+
+        it "creates tensor from data":
+            # NOTE: written against the `tensor_from_data` factory rather than
+            # the `PureTensor.from_data` static. The static form is genuinely
+            # broken — see the pending it-block at the bottom of this file and
+            # doc/08_tracking/bug/generic_static_method_type_param_unresolved_2026-07-25.md
+            val data = [1.0, 2.0, 3.0, 4.0]
+            val t = tensor_from_data(data, [2, 2])
+            assert_equal(t.shape, [2, 2])
+            assert_equal(t.numel(), 4)
+            assert_equal(t.data, [1.0, 2.0, 3.0, 4.0])
+
+        it "creates 1D tensor":
+            val t = PureTensor.zeros([5])
+            assert_equal(t.shape, [5])
+            assert_equal(t.numel(), 5)
+
+        it "creates 3D tensor":
+            val t = PureTensor.zeros([2, 3, 4])
+            assert_equal(t.shape, [2, 3, 4])
+            assert_equal(t.numel(), 24)
+
+    describe "Indexing":
+        it "gets element from 1D tensor":
+            val t = tensor_from_data([1.0, 2.0, 3.0], [3])
+            assert_equal(t.get([0]), 1.0)
+            assert_equal(t.get([1]), 2.0)
+            assert_equal(t.get([2]), 3.0)
+
+        it "gets element from 2D tensor":
+            val t = tensor_from_data([1.0, 2.0, 3.0, 4.0], [2, 2])
+            assert_equal(t.get([0, 0]), 1.0)
+            assert_equal(t.get([0, 1]), 2.0)
+            assert_equal(t.get([1, 0]), 3.0)
+            assert_equal(t.get([1, 1]), 4.0)
+
+        it "sets element in 2D tensor":
+            val t = PureTensor.zeros([2, 2])
+            t.set([0, 0], 5.0)
+            t.set([1, 1], 7.0)
+            assert_equal(t.get([0, 0]), 5.0)
+            assert_equal(t.get([1, 1]), 7.0)
+            assert_equal(t.get([0, 1]), 0.0)
+
+        it "indexes 3D tensor":
+            val t = tensor_from_data([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [2, 2, 2])
+            assert_equal(t.get([0, 0, 0]), 1.0)
+            assert_equal(t.get([0, 0, 1]), 2.0)
+            assert_equal(t.get([0, 1, 0]), 3.0)
+            assert_equal(t.get([1, 1, 1]), 8.0)
+
+    describe "Shape Operations":
+        it "computes strides for 2D tensor":
+            assert_equal(compute_strides([3, 4]), [4, 1])
+
+        it "computes strides for 3D tensor":
+            assert_equal(compute_strides([2, 3, 4]), [12, 4, 1])
+
+        it "computes strides for 1D tensor":
+            assert_equal(compute_strides([5]), [1])
+
+        it "reshapes tensor":
+            val t = tensor_from_data([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+            val reshaped = t.reshape([3, 2])
+            assert_equal(reshaped.shape, [3, 2])
+            assert_equal(reshaped.numel(), 6)
+            assert_equal(reshaped.data, t.data)
+
+        it "reshapes to 1D":
+            val t = tensor_from_data([1.0, 2.0, 3.0, 4.0], [2, 2])
+            val flat = t.reshape([4])
+            assert_equal(flat.shape, [4])
+            assert_equal(flat.numel(), 4)
+
+        it "transposes 2D tensor":
+            # Original:   [[1, 2, 3], [4, 5, 6]]
+            # Transposed: [[1, 4], [2, 5], [3, 6]]
+            val t = tensor_from_data([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+            val transposed = t.transpose()
+            assert_equal(transposed.shape, [3, 2])
+            assert_equal(transposed.get([0, 0]), 1.0)
+            assert_equal(transposed.get([0, 1]), 4.0)
+            assert_equal(transposed.get([1, 0]), 2.0)
+            assert_equal(transposed.get([2, 1]), 6.0)
+
+    describe "Broadcasting":
+        it "broadcasts same shape":
+            assert_equal(broadcast_shapes([3, 4], [3, 4]), [3, 4])
+
+        it "broadcasts with trailing 1":
+            assert_equal(broadcast_shapes([3, 1], [3, 4]), [3, 4])
+
+        it "broadcasts with leading 1":
+            assert_equal(broadcast_shapes([1, 4], [3, 4]), [3, 4])
+
+        it "broadcasts different ranks":
+            assert_equal(broadcast_shapes([2, 3, 4], [4]), [2, 3, 4])
+
+        it "broadcasts scalar":
+            assert_equal(broadcast_shapes([1], [3, 4]), [3, 4])
+
+    describe "Utility Functions":
+        it "creates zeros_like":
+            val t = tensor_from_data([1.0, 2.0, 3.0, 4.0], [2, 2])
+            val z = zeros_like(t)
+            assert_equal(z.shape, [2, 2])
+            assert_true(z.data.all(\x: x == 0.0))
+
+        it "creates ones_like":
+            val t = tensor_from_data([1.0, 2.0, 3.0, 4.0], [2, 2])
+            val o = ones_like(t)
+            assert_equal(o.shape, [2, 2])
+            assert_true(o.data.all(\x: x == 1.0))
+
+        it "computes total elements":
+            assert_equal(total_elements([2, 3]), 6)
+            assert_equal(total_elements([2, 3, 4]), 24)
+            assert_equal(total_elements([5]), 5)
+
+    describe "String Representation":
+        it "shows the shape":
+            val t = PureTensor.zeros([2, 3, 4])
+            val s = t.to_string()
+            assert_true(s.contains("shape"))
+            assert_true(s.contains("[2, 3, 4]"))
+
+        it "shows 1D tensor elements":
+            val t = tensor_from_data([1.0, 2.0, 3.0], [3])
+            val s = t.to_string()
+            # `to_string` really does render every element, but an integral f64
+            # renders WITHOUT its fractional part, so 1.0 comes out as "1".
+            # The original assertions here were s.contains("1.0") /
+            # s.contains("2.0"); they are NOT weakened to s.contains("1") —
+            # that would be asserting the defect. Kept pending instead.
+            # Probe (2026-07-25): `val a = 1.5; val c = -3.0; print "{a} {c}"`
+            #   => "1.5 -3"   (non-integral fine, integral loses ".0")
+            # Filed: doc/08_tracking/bug/f64_integral_to_text_drops_fraction_2026-07-25.md
+            assert_true(s.contains("3"))
+            pending("f64_integral_to_text_drops_fraction_2026-07-25")
+
+        it "shows 2D tensor elements":
+            # Same f64->text defect as above; see the 1D case.
+            val t = tensor_from_data([1.0, 2.0, 3.0, 4.0], [2, 2])
+            val s = t.to_string()
+            assert_true(s.contains("4"))
+            pending("f64_integral_to_text_drops_fraction_2026-07-25")
+
+    describe "Static constructors on the generic class":
+        it "PureTensor.from_data":
+            # `PureTensor.zeros/.ones/.randn` resolve fine (they mention no T),
+            # but `static fn from_data(data: [T], shape: [i64]) -> PureTensor<T>`
+            # fails to resolve at all:
+            #   "semantic: unknown static method from_data on class PureTensor"
+            # i.e. a static method whose signature uses the CLASS type parameter
+            # cannot be resolved. Deliberately NOT worked around by narrowing the
+            # library signature to [f64] — that would silently normalise the
+            # workaround. The free factory `tensor_from_data` is used by the
+            # Creation/Indexing blocks above and covers the same behaviour.
+            # NOTE: src/lib/gc_async_mut/pure/demo.spl line 25/32/33 calls this
+            # broken form in PRODUCTION code.
+            # Filed: doc/08_tracking/bug/generic_static_method_type_param_unresolved_2026-07-25.md
+            pending("generic_static_method_type_param_unresolved_2026-07-25")

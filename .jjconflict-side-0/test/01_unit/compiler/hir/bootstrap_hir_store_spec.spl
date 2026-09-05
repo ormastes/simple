@@ -1,0 +1,157 @@
+use std.spec
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirSymbol, SymbolId, SymbolKind, ScopeId, Visibility}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirType, HirTypeKind}
+use compiler.common.attributes.{FunctionAttr, vhdl_hardware_metadata_default}
+use compiler.hir.hir_lowering.items.{
+    bootstrap_hir_modules_reset,
+    bootstrap_hir_modules_add,
+    bootstrap_hir_modules_promote_last,
+    bootstrap_hir_modules_rollback_last,
+    bootstrap_hir_module_count,
+    bootstrap_hir_entry_index,
+    bootstrap_hir_module_owner_at,
+    bootstrap_hir_module_name_at,
+    bootstrap_hir_module_symbol_count,
+    bootstrap_hir_module_symbol_at,
+    bootstrap_hir_module_function_count,
+    bootstrap_hir_module_constant_count
+}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+fn bootstrap_store_symbol(id: i64, name: text) -> HirSymbol:
+    HirSymbol(
+        id: SymbolId(id: id), name: name, kind: SymbolKind.Variable,
+        type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+        visibility: Visibility.Private, is_public: false, is_mutable: false,
+        defining_module: nil)
+
+fn bootstrap_store_function(name: text) -> HirFunction:
+    val span = Span.empty()
+    val value = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+    HirFunction(
+        symbol: SymbolId(id: 77), name: name, type_params: [], params: [],
+        return_type: HirType(kind: HirTypeKind.Int(64, true), span: span),
+        body: HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(value), span: span)],
+            has: true, value: value, span: span),
+        effects: [], visibility: Visibility.Private, is_async: false,
+        is_static: false, is_public: false, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false, doc_comment: "", span: span,
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil)
+
+describe "bootstrap HIR store publishes complete module rows":
+    it "commits distinct nonempty rows and the entry identity together":
+        bootstrap_hir_modules_reset()
+        val support_symbol = bootstrap_store_symbol(11, "support_value")
+        val entry_symbol = bootstrap_store_symbol(29, "entry_value")
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        bootstrap_hir_modules_add("support", false, [support_symbol], [], [], [], [], [])
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        bootstrap_hir_modules_add("entry", true, [entry_symbol], [], [], [], [], [])
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+
+        expect(bootstrap_hir_module_count()).to_equal(2)
+        expect(bootstrap_hir_entry_index()).to_equal(1)
+        expect(bootstrap_hir_module_name_at(0)).to_equal("support")
+        expect(bootstrap_hir_module_name_at(1)).to_equal("entry")
+        val entry_owner = bootstrap_hir_module_owner_at(1)
+        expect(entry_owner.name).to_equal("entry")
+        expect(entry_owner.is_entry).to_equal(true)
+        expect(entry_owner.symbols.len()).to_equal(1)
+        expect(bootstrap_hir_module_symbol_count(0)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(bootstrap_hir_module_symbol_count(1)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(bootstrap_hir_module_symbol_at(0, 0).id.id).to_equal(11)  # oracle: 11 — named expected value from the requirement
+        expect(bootstrap_hir_module_symbol_at(0, 0).name).to_equal("support_value")
+        expect(bootstrap_hir_module_symbol_at(1, 0).id.id).to_equal(29)
+        expect(bootstrap_hir_module_symbol_at(1, 0).name).to_equal("entry_value")
+        expect(bootstrap_hir_module_function_count(1)).to_equal(0)
+        expect(bootstrap_hir_module_constant_count(1)).to_equal(0)
+
+    it "reset revokes the prior generation and invalid reads fail closed":
+        bootstrap_hir_modules_reset()
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        bootstrap_hir_modules_add("old", true, [bootstrap_store_symbol(7, "old_value")], [], [], [], [], [])
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        bootstrap_hir_modules_reset()
+
+        expect(bootstrap_hir_module_count()).to_equal(0)
+        expect(bootstrap_hir_entry_index()).to_equal(-1)
+        expect(bootstrap_hir_module_name_at(-1)).to_equal("")
+        expect(bootstrap_hir_module_name_at(0)).to_equal("")
+        expect(bootstrap_hir_module_function_count(0)).to_equal(0)
+
+    it "fails closed without a committed row to promote":
+        bootstrap_hir_modules_reset()
+        expect(bootstrap_hir_modules_promote_last()).to_equal(false)
+
+    it "keeps the committed row readable after its transient scope ends":
+        bootstrap_hir_modules_reset()
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        bootstrap_hir_modules_add(
+            "scoped", true, [bootstrap_store_symbol(31, "scoped_value")],
+            [], [], [], [], [])
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        expect(bootstrap_hir_module_name_at(0)).to_equal("scoped")
+        expect(bootstrap_hir_module_symbol_at(0, 0).name).to_equal("scoped_value")
+        bootstrap_hir_modules_reset()
+
+    it "rolls back exactly the newly appended row":
+        bootstrap_hir_modules_reset()
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        bootstrap_hir_modules_add("body-owner", true, [],
+            [bootstrap_store_function("owned_body")], [], [], [], [])
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        val owner = bootstrap_hir_module_owner_at(0)
+        expect(owner.functions.len()).to_equal(1)
+        expect(owner.functions[0].name).to_equal("owned_body")
+        expect(owner.functions[0].body.has).to_equal(true)
+        expect(owner.functions[0].body.stmts.len()).to_equal(1)
+        expect(rt_enum_discriminant(owner.functions[0].body.value.kind)).to_equal(
+            rt_enum_discriminant(HirExprKind.IntLit(0, nil)))
+        bootstrap_hir_modules_reset()
+
+    it "rolls back exactly the newly appended row":
+        bootstrap_hir_modules_reset()
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        bootstrap_hir_modules_add(
+            "kept", true, [bootstrap_store_symbol(41, "kept_value")],
+            [], [], [], [], [])
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        bootstrap_hir_modules_add(
+            "discarded", false, [bootstrap_store_symbol(42, "discarded_value")],
+            [], [], [], [], [])
+        expect(bootstrap_hir_modules_rollback_last(1)).to_equal(true)
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        expect(bootstrap_hir_module_count()).to_equal(1)
+        expect(bootstrap_hir_entry_index()).to_equal(0)
+        expect(bootstrap_hir_module_name_at(0)).to_equal("kept")
+        expect(bootstrap_hir_modules_rollback_last(1)).to_equal(false)
+        bootstrap_hir_modules_reset()

@@ -1,0 +1,70 @@
+#!/bin/sh
+# Static contract for aggregate resume ownership, usage flags, and env mapping.
+set -eu
+LC_ALL=C; export LC_ALL
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+aggregate=$root/scripts/check/check-mci-v2-aggregate.shs
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+sed -n '/^resume_for()/,/^}/p' "$aggregate" |
+    sed -n "s/^.*echo '\(sh scripts\/check\/check-mci-v2-[^']*\)'.*/\1/p" > "$work/commands"
+[ "$(wc -l < "$work/commands" | tr -d ' ')" -eq 7 ] || {
+    echo 'FAIL: unexpected executable resume-command count' >&2; exit 1;
+}
+
+while IFS= read -r command; do
+    script=$(printf '%s\n' "$command" | awk '{print $2}')
+    owner=$root/$script
+    [ -f "$owner" ] && [ ! -L "$owner" ] && [ -x "$owner" ] || {
+        echo "FAIL: resume owner is not an executable regular file: $script" >&2; exit 1;
+    }
+    usage=$(sed -n '1,45p' "$owner" | grep 'usage:' | head -1)
+    [ -n "$usage" ] || { echo "FAIL: producer has no bounded usage contract: $script" >&2; exit 1; }
+    for flag in $(printf '%s\n' "$command" | grep -Eo -- '--[a-z0-9-]+' | sort -u); do
+        printf '%s\n' "$usage" | grep -F -- "$flag" >/dev/null || {
+            echo "FAIL: $script resume flag is absent from usage: $flag" >&2; exit 1;
+        }
+    done
+    [ "$(printf '%s\n' "$command" | grep -o -- '--evidence' | wc -l | tr -d ' ')" -eq 1 ] &&
+        printf '%s\n' "$command" | grep -F -- '--evidence "$MCI_EVIDENCE"' >/dev/null || {
+            echo "FAIL: $script does not use the common aggregate root" >&2; exit 1;
+        }
+    for variable in $(printf '%s\n' "$command" | grep -Eo '\$MCI_[A-Z0-9_]+' | tr -d '$' | sort -u); do
+        grep "^[[:space:]]*names='" "$aggregate" | grep -E "(^|[ ='])$variable([ ']|$)" >/dev/null || {
+            echo "FAIL: $script has no explicit prerequisite mapping for $variable" >&2; exit 1;
+        }
+    done
+done < "$work/commands"
+
+# Exact per-lane required environment and flag contracts. This prevents a
+# producer's optional-looking CLI surface from weakening a release resume.
+matrix=$work/matrix
+cat > "$matrix" <<'MATRIX'
+compiler|MCI_CAPTURED_AT_UTC_NS,MCI_COMPILER,MCI_COMPILER_MODE,MCI_COMPILER_PARENT_RECEIPT,MCI_COMPILER_PARENT_SIG,MCI_COMPILER_PARENT_TRUST_KEY,MCI_COMPILER_PROVENANCE,MCI_COMPILER_PROVENANCE_SIG,MCI_COMPILER_TRUST_KEY,MCI_EVIDENCE,MCI_NOW_UTC_NS,MCI_RUN_ID,MCI_VALID_UNTIL_UTC_NS|--captured-at-utc-ns,--compiler,--evidence,--mode,--now-utc-ns,--parent-receipt,--parent-signature,--parent-trust-key,--provenance,--provenance-signature,--run-id,--trust-key,--valid-until-utc-ns
+tooling|MCI_CAPTURED_AT_UTC_NS,MCI_CONFIGURATION_HASH,MCI_EVIDENCE,MCI_RUN_ID,MCI_SOURCE_HASH,MCI_VALID_UNTIL_UTC_NS|--captured-at-utc-ns,--configuration-hash,--evidence,--run-id,--source-hash,--valid-until-utc-ns
+simpleos|MCI_CAPTURED_AT_UTC_NS,MCI_COMPILER_RECEIPT_HASH,MCI_CONFIGURATION_HASH,MCI_EVIDENCE,MCI_NOW_UTC_NS,MCI_RUN_ID,MCI_SIMPLEOS_COLLECTOR_KEY_ID,MCI_SIMPLEOS_COLLECTOR_TRUST_KEY,MCI_SIMPLEOS_CONFIGURATION_MANIFEST,MCI_SIMPLEOS_MANIFEST,MCI_SOURCE_HASH,MCI_TRUSTED_KEY_ID,MCI_VALID_UNTIL_UTC_NS|--captured-at-utc-ns,--collector-key-id,--collector-trust-key,--compiler-receipt-hash,--configuration-hash,--configuration-manifest,--evidence,--manifest,--now-utc-ns,--run-id,--source-hash,--trusted-key-id,--valid-until-utc-ns
+rendering|MCI_CAPTURED_AT_UTC_NS,MCI_CONFIGURATION_HASH,MCI_EVIDENCE,MCI_NOW_UTC_NS,MCI_RENDERING_COLLECTOR_KEY,MCI_RENDERING_COLLECTOR_KEY_ID,MCI_RENDERING_MANIFEST,MCI_RENDERING_MANIFEST_SIG,MCI_RENDERING_TRUST_POLICY,MCI_RUN_ID,MCI_SOURCE_HASH,MCI_VALID_UNTIL_UTC_NS|--captured-at-utc-ns,--collector-key,--collector-key-id,--collector-trust-policy,--configuration-hash,--evidence,--manifest,--manifest-signature,--now-utc-ns,--run-id,--source-hash,--valid-until-utc-ns
+allocation|MCI_CAPTURED_AT_UTC_NS,MCI_COMPILER_LAUNCHER,MCI_COMPILER_LAUNCHER_RECEIPT,MCI_COMPILER_LAUNCHER_SIGNATURE,MCI_CONFIGURATION_HASH,MCI_EVIDENCE,MCI_RUN_ID,MCI_SOURCE_HASH,MCI_VALID_UNTIL_UTC_NS|--captured-at-utc-ns,--compiler-launcher,--compiler-launcher-receipt,--compiler-launcher-signature,--configuration-hash,--evidence,--run-id,--source-hash,--valid-until-utc-ns
+process-safety|MCI_CAPTURED_AT_UTC_NS,MCI_COMPILER_ADMISSION_TRUST_KEY,MCI_CONFIGURATION_HASH,MCI_EVIDENCE,MCI_NATIVE_EVIDENCE_KEY_ID,MCI_NATIVE_EVIDENCE_TRUST_KEY,MCI_NATIVE_FACADE_EXECUTABLE,MCI_NATIVE_FACADE_RECEIPT,MCI_NATIVE_FACADE_SIGNATURE,MCI_NOW_UTC_NS,MCI_RUNNER_ADMISSION,MCI_RUNNER_ADMISSION_SIGNATURE,MCI_RUN_ID,MCI_SIMPLE_RUNNER,MCI_SOURCE_HASH,MCI_TRUSTED_KEY_ID,MCI_VALID_UNTIL_UTC_NS|--captured-at-utc-ns,--compiler-admission-trust-key,--configuration-hash,--evidence,--native-evidence-key-id,--native-evidence-trust-key,--native-facade-executable,--native-facade-receipt,--native-facade-signature,--now-utc-ns,--run-id,--runner-admission,--runner-admission-signature,--simple-runner,--source-hash,--trusted-key-id,--valid-until-utc-ns
+traceability|MCI_CAPTURED_AT_UTC_NS,MCI_CONFIGURATION_HASH,MCI_EVIDENCE,MCI_RUN_ID,MCI_SOURCE_HASH,MCI_TRUSTED_KEY_ID,MCI_VALID_UNTIL_UTC_NS|--captured-at-utc-ns,--configuration-hash,--evidence,--run-id,--source-hash,--trusted-key-id,--valid-until-utc-ns
+MATRIX
+while IFS='|' read -r lane expected_env expected_flags; do
+    command=$(grep "check-mci-v2-$(case "$lane" in compiler) echo compiler-admission;; simpleos) echo simpleos-manifest;; allocation) echo allocation;; process-safety) echo process-safety;; traceability) echo traceability;; tooling) echo tooling-admission;; rendering) echo rendering;; esac).shs" "$work/commands")
+    actual_env=$(printf '%s\n' "$command" | grep -Eo '\$MCI_[A-Z0-9_]+' | tr -d '$' | sort -u | paste -sd, -)
+    actual_flags=$(printf '%s\n' "$command" | grep -Eo -- '--[a-z0-9-]+' | sort -u | paste -sd, -)
+    [ "$actual_env" = "$expected_env" ] || { echo "FAIL: $lane required env matrix drift" >&2; exit 1; }
+    [ "$actual_flags" = "$expected_flags" ] || { echo "FAIL: $lane required flag matrix drift" >&2; exit 1; }
+done < "$matrix"
+
+# With prerequisites absent, runnable lane commands must be suppressed.
+for lane in compiler tooling simpleos rendering allocation process-safety traceability; do
+    awk -v lane="$lane" '
+        $0 ~ "^[[:space:]]*" lane "(\\||\\))" { inside=1 }
+        inside && /missing_resume_env/ { gated=1 }
+        inside && /echo '\''sh scripts\/check\/check-mci-v2-/ { emitted=1; exit }
+        END { exit !(gated && emitted) }
+    ' "$aggregate" || { echo "FAIL: $lane can emit without a prerequisite gate" >&2; exit 1; }
+done
+
+echo 'PASS: MCI-v2 aggregate resume commands are executable, usage-compatible, root-consistent, and env-gated'

@@ -1,0 +1,146 @@
+# Module Loader Services — lazy service machinery for LazyModuleLoader.
+#
+# Split from module_loader.spl (cohesion refactor, 2026-08-18). Hosts the
+# Phase-D lazy service cells' ensure_* creators, created-state accessors, and
+# the exec-memory allocation helpers that sit directly on those services.
+# Public surface remains loader.module_loader via named re-exports.
+
+use ..loader.compiler_sffi.*
+use ..linker.obj_taker.*
+use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
+use .object_mapper.{LoaderMapper, LoaderMapperConfig}
+use .jit_instantiator.*
+use .resource_lifecycle.{ResourceLifecycleManager, LifecycleConfig, lifecycle_new}
+use .smf_cache_manager.{smfcachemanager_with_new_cache}
+use .module_loader.{LazyModuleLoader}
+
+# ============================================================================
+# Lazy service creation (Phase D) — ensure_* helpers
+# ============================================================================
+# Each heavy service lives at slot 0 of a single-entry Dict cell, created on
+# first use. Dict cells are used (not Option fields) because dict-element
+# writes through a `self` parameter alias correctly in the interpreter, while
+# scalar/Option field writes on a struct parameter are lost.
+
+fn moduleloader_ensure_compiler_ctx(self: LazyModuleLoader) -> CompilerContext:
+    """Create the shared compiler SFFI context on first use."""
+    if not self.compiler_ctx_cell.has(0):
+        self.compiler_ctx_cell[0] = CompilerContext.create()
+    self.compiler_ctx_cell[0]
+
+fn moduleloader_ensure_obj_taker(self: LazyModuleLoader) -> ObjTaker:
+    """Create the ObjTaker (and its compiler context) on first use."""
+    if not self.obj_taker_cell.has(0):
+        val obj_taker_config = ObjTakerConfig(
+            enable_caching: self.config.enable_cache,
+            max_cache_size: self.config.max_cache_size,
+            verbose: self.config.verbose,
+            allow_deferred: true
+        )
+        val compiler_ctx = moduleloader_ensure_compiler_ctx(self)
+        self.obj_taker_cell[0] = ObjTaker.with_compiler_context(compiler_ctx, obj_taker_config)
+    self.obj_taker_cell[0]
+
+fn moduleloader_ensure_provider(self: LazyModuleLoader) -> ObjectProvider:
+    """Create the shared object provider on first use."""
+    if not self.provider_cell.has(0):
+        self.provider_cell[0] = ObjectProvider.new(ObjectProviderConfig(
+            search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
+            libraries: [],
+            enable_cache: self.config.enable_cache,
+            verbose: self.config.verbose,
+            prefer_backend: ""
+        ))
+    self.provider_cell[0]
+
+fn moduleloader_ensure_jit(self: LazyModuleLoader) -> JitInstantiator:
+    """Create the JIT instantiator (exec-mapper host) on first use.
+
+    enable_jit is carried into JitInstantiatorConfig.enabled exactly as the
+    eager constructor did — a disabled config still hosts the exec mapper for
+    module loading but never JIT-compiles (fail-closed, no silent enable).
+    """
+    if not self.jit_cell.has(0):
+        self.jit_cell[0] = JitInstantiator.new(JitInstantiatorConfig(
+            update_smf: false,
+            max_depth: 50,
+            enabled: self.config.enable_jit,
+            verbose: self.config.verbose
+        ))
+    self.jit_cell[0]
+
+fn moduleloader_ensure_loader_mapper(self: LazyModuleLoader) -> LoaderMapper:
+    """Create the loader exec-mapper policy wrapper on first use."""
+    if not self.loader_mapper_cell.has(0):
+        self.loader_mapper_cell[0] = LoaderMapper.new(LoaderMapperConfig(
+            allow_replace_on_reload: self.config.hot_reload
+        ))
+    self.loader_mapper_cell[0]
+
+fn moduleloader_ensure_lifecycle(self: LazyModuleLoader) -> ResourceLifecycleManager:
+    """Create the lifecycle manager (owns the SMF cache manager) on first use."""
+    if not self.lifecycle_cell.has(0):
+        val smf_cache_mgr = smfcachemanager_with_new_cache()
+        self.lifecycle_cell[0] = lifecycle_new(LifecycleConfig(verbose: self.config.verbose), smf_cache_mgr)
+    self.lifecycle_cell[0]
+
+# ============================================================================
+# Created-state accessors
+# ============================================================================
+
+fn moduleloader_compiler_ctx_created(self: LazyModuleLoader) -> bool:
+    self.compiler_ctx_cell.has(0)
+
+fn moduleloader_obj_taker_created(self: LazyModuleLoader) -> bool:
+    self.obj_taker_cell.has(0)
+
+fn moduleloader_provider_created(self: LazyModuleLoader) -> bool:
+    self.provider_cell.has(0)
+
+fn moduleloader_jit_service_created(self: LazyModuleLoader) -> bool:
+    self.jit_cell.has(0)
+
+fn moduleloader_loader_mapper_created(self: LazyModuleLoader) -> bool:
+    self.loader_mapper_cell.has(0)
+
+fn moduleloader_lifecycle_created(self: LazyModuleLoader) -> bool:
+    """True once the lifecycle manager (and its SMF cache manager) exists."""
+    self.lifecycle_cell.has(0)
+
+fn moduleloader_any_heavy_service_created(self: LazyModuleLoader) -> bool:
+    moduleloader_compiler_ctx_created(self) or moduleloader_obj_taker_created(self) or moduleloader_provider_created(self) or moduleloader_jit_service_created(self) or moduleloader_loader_mapper_created(self) or moduleloader_lifecycle_created(self)
+
+# ============================================================================
+# Exec-memory allocation helpers (sit directly on the lazy services)
+# ============================================================================
+
+fn moduleloader_allocate_exec_module(self: LazyModuleLoader, owner_id: text, symbol: text, code: [u8], allow_replace: bool) -> i64:
+    """Allocate executable memory and copy code."""
+    val mapped = moduleloader_ensure_loader_mapper(self).map(moduleloader_ensure_jit(self).exec_mapper, owner_id, symbol, code, allow_replace)
+    match mapped:
+        case Ok(address):
+            address
+        case Err(map_error):
+            if self.config.verbose:
+                print "[loader] map_symbol failed for {symbol}: {map_error}"
+            0
+
+fn moduleloader_allocate_exec_jit(self: LazyModuleLoader, owner_id: text, symbol: text, code: [u8]) -> i64:
+    """Allocate executable memory for JIT fallback path via JIT mapper policy."""
+    val jit = moduleloader_ensure_jit(self)
+    val mapped = jit.jit_mapper.map(jit.exec_mapper, owner_id, symbol, code)
+    match mapped:
+        case Ok(address):
+            address
+        case Err(map_error):
+            if self.config.verbose:
+                print "[loader] jit map failed for {symbol}: {map_error}"
+            0
+
+fn moduleloader_unmap_internal_symbols(self: LazyModuleLoader, symbols: [text]):
+    """Best-effort cleanup for staged replacement symbols."""
+    if not moduleloader_jit_service_created(self):
+        return
+    val jit = moduleloader_ensure_jit(self)
+    for symbol in symbols:
+        _ = jit.exec_mapper.unmap_symbol(symbol)

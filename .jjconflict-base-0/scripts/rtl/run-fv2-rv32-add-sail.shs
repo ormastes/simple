@@ -1,0 +1,118 @@
+#!/usr/bin/env sh
+# Execute the pinned independent Sail RISC-V model on a concrete RV32 ADD
+# program and emit an identity-bound differential receipt.
+set -eu
+
+pin=a33475aeb80090127433b5a8b30e717edaa19e71
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+fixture="$repo_root/test/fixtures/hardware/fv2_rv32_add_sail/add_probe.S"
+
+if [ "${1:-}" = "--self-test" ]; then
+    grep -Eq '^[[:space:]]*add[[:space:]]+x3,[[:space:]]*x1,[[:space:]]*x2$' "$fixture"
+    command -v riscv64-unknown-elf-gcc >/dev/null 2>&1 || exit 1
+    command -v riscv64-unknown-elf-objdump >/dev/null 2>&1 || exit 1
+    echo "STATUS: PASS FV2 RV32 Sail wrapper self-test (execution requires pinned simulator)"
+    exit 0
+fi
+
+bundle_dir="${1:-}"
+module_name="${2:-fv2_rv32_add}"
+case "$module_name" in ""|*[!A-Za-z0-9_]*) echo "FAIL: invalid module name" >&2; exit 1 ;; esac
+[ -d "$bundle_dir" ] || { echo "FAIL: generated bundle directory is required" >&2; exit 1; }
+sim="${SAIL_RISCV_SIM:-}"
+config="${SAIL_RISCV_RV32_CONFIG:-}"
+lock="${SAIL_RISCV_LOCK:-}"
+if [ -z "$sim" ] || [ ! -x "$sim" ] || [ -z "$config" ] || [ ! -f "$config" ] ||
+   [ -z "$lock" ] || [ ! -f "$lock" ]; then
+    echo "STATUS: BLOCKED FV2 RV32 Sail ADD: set SAIL_RISCV_SIM, SAIL_RISCV_RV32_CONFIG, and SAIL_RISCV_LOCK to the pinned model build" >&2
+    exit 2
+fi
+for tool in riscv64-unknown-elf-gcc riscv64-unknown-elf-objdump sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: required Sail probe tool missing: $tool" >&2; exit 1; }
+done
+
+lock_value() {
+    key="$1"
+    count="$(grep -c "^${key}=" "$lock" || true)"
+    [ "$count" -eq 1 ] || { echo "FAIL: Sail lock key must occur exactly once: $key" >&2; exit 1; }
+    sed -n "s/^${key}=//p" "$lock" | sed -n '1p'
+}
+[ "$(lock_value oracle_repository)" = "https://github.com/riscv/sail-riscv.git" ] || { echo "FAIL: Sail lock repository is not approved" >&2; exit 1; }
+[ "$(lock_value schema)" = "fv2-sail-riscv-lock-v1" ] || { echo "FAIL: Sail lock schema is absent or unsupported" >&2; exit 1; }
+[ "$(lock_value oracle_revision)" = "$pin" ] || { echo "FAIL: Sail lock revision is absent or not pinned" >&2; exit 1; }
+[ "$(lock_value simulator_sha256)" = "$(sha256sum "$sim" | cut -d ' ' -f 1)" ] || { echo "FAIL: Sail simulator hash differs from lock" >&2; exit 1; }
+[ "$(lock_value rv32_config_sha256)" = "$(sha256sum "$config" | cut -d ' ' -f 1)" ] || { echo "FAIL: Sail RV32 config hash differs from lock" >&2; exit 1; }
+[ -n "$(lock_value sail_compiler_version_sha256)" ] || { echo "FAIL: Sail compiler version identity is absent from lock" >&2; exit 1; }
+
+formal_receipt="$bundle_dir/${module_name}_formal_manifest.sdn"
+[ -s "$formal_receipt" ] || { echo "FAIL: executed formal/equivalence receipt is required" >&2; exit 1; }
+field() {
+    key="$1"
+    count="$(grep -c "^${key} " "$formal_receipt" || true)"
+    [ "$count" -eq 1 ] || { echo "FAIL: formal receipt field must occur exactly once: $key" >&2; exit 1; }
+    sed -n "s/^${key} //p" "$formal_receipt" | sed -n '1p'
+}
+[ "$(field module)" = "$module_name" ] || { echo "FAIL: formal receipt module mismatch" >&2; exit 1; }
+hwir_hash="$(field hwir_sha256)"
+rtl_hash="$(field rtl_sha256)"
+rvfi_contract_hash="$(field rvfi_contract_sha256)"
+assumption_manifest_hash="$(field assumption_manifest_sha256)"
+sha256_identity() {
+    value="$1"
+    [ "${#value}" -eq 64 ] && printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{64}$'
+}
+for identity in "$hwir_hash" "$rtl_hash" "$rvfi_contract_hash" "$assumption_manifest_hash"; do
+    sha256_identity "$identity" || {
+        echo "FAIL: formal receipt contains malformed product identity" >&2
+        exit 1
+    }
+done
+
+elf="$bundle_dir/${module_name}_sail_add_probe.elf"
+disassembly="$bundle_dir/${module_name}_sail_add_probe.objdump"
+trace="$bundle_dir/${module_name}_sail_add_probe.trace"
+run_log="$bundle_dir/${module_name}_sail_add_probe.log"
+riscv64-unknown-elf-gcc -nostdlib -nostartfiles -march=rv32i -mabi=ilp32 \
+    -Wl,-Ttext=0x80000000 -Wl,-e,_start -o "$elf" "$fixture"
+riscv64-unknown-elf-objdump -d "$elf" >"$disassembly"
+grep -Eiq '002081b3[[:space:]]+add[[:space:]]+gp,ra,sp|002081b3[[:space:]]+add[[:space:]]+x3,x1,x2' "$disassembly" || {
+    echo "FAIL: RV32 probe does not contain the exact ADD encoding" >&2
+    exit 1
+}
+"$sim" --config "$config" --inst-limit 4 --trace-instr --trace-reg \
+    --trace-output "$trace" "$elf" >"$run_log" 2>&1
+grep -Eq '^x3 <- 0x0*C$|^gp <- 0x0*C$' "$trace" || {
+    echo "FAIL: pinned Sail model did not retire ADD result 12 into x3" >&2
+    exit 1
+}
+
+receipt="$bundle_dir/${module_name}_sail_receipt.sdn"
+receipt_tmp="$(mktemp "$bundle_dir/.${module_name}.sail-receipt.XXXXXX")"
+trap 'rm -f "$receipt_tmp"' EXIT
+{
+    echo "schema fv2-rv32-add-sail-receipt-v1"
+    echo "status agreed"
+    echo "module $module_name"
+    echo "oracle_repository https://github.com/riscv/sail-riscv.git"
+    echo "oracle_revision $pin"
+    echo "oracle_lock_sha256 $(sha256sum "$lock" | cut -d ' ' -f 1)"
+    echo "simulator_sha256 $(sha256sum "$sim" | cut -d ' ' -f 1)"
+    echo "config_sha256 $(sha256sum "$config" | cut -d ' ' -f 1)"
+    echo "sail_compiler_version_sha256 $(lock_value sail_compiler_version_sha256)"
+    echo "probe_source_sha256 $(sha256sum "$fixture" | cut -d ' ' -f 1)"
+    echo "probe_elf_sha256 $(sha256sum "$elf" | cut -d ' ' -f 1)"
+    echo "probe_disassembly_sha256 $(sha256sum "$disassembly" | cut -d ' ' -f 1)"
+    echo "trace_sha256 $(sha256sum "$trace" | cut -d ' ' -f 1)"
+    echo "run_output_sha256 $(sha256sum "$run_log" | cut -d ' ' -f 1)"
+    echo "hwir_sha256 $hwir_hash"
+    echo "rtl_sha256 $rtl_hash"
+    echo "rvfi_contract_sha256 $rvfi_contract_hash"
+    echo "assumption_manifest_sha256 $assumption_manifest_hash"
+    echo "instruction 002081b3"
+    echo "rs1 00000005"
+    echo "rs2 00000007"
+    echo "rd 0000000c"
+} >"$receipt_tmp"
+mv "$receipt_tmp" "$receipt"
+trap - EXIT
+echo "STATUS: PASS FV2 RV32 ADD Sail differential receipt=$receipt"

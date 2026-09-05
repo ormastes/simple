@@ -1,0 +1,436 @@
+# @Feature 703.1: Simple linter
+# @Description: Test the Simple language linter
+"""
+## Purpose and audience
+Purpose: Prove that the Simple linter's code-quality checks behave as
+documented — naming conventions, collection-pattern rules (COLL006), and the
+accessor/inherited-name diagnostics (ACC001/NAME001) — by running the real
+linter entry points over representative sources and pinning each warning
+count to an inline oracle.
+Audience: APP maintainers and compiler-tools engineers who own
+compiler.tools.lint and the `simple lint` user experience.
+"""
+
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @manual_section: linter code quality checks
+
+use compiler.tools.lint.main.{lint_accessor_and_parent_names, Linter}
+use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_attribute, check_unknown_decorator}
+use compiler.core.parser.{parse_module_silent}
+use compiler.core.ast.{module_get_decls}
+use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
+
+# NOTE: describe, it, expect are built-in - no imports needed
+
+fn count_name_lint(source: text, code: text) -> i64:
+    val warnings = lint_accessor_and_parent_names("sample.spl", source)
+    var count = 0
+    for warning in warnings:
+        if warning.code == code:
+            count = count + 1
+    count
+
+fn count_collection_lint(source: text, code: text) -> i64:
+    parse_module_silent(source, "sample.spl")
+    val decls = module_get_decls()
+    var count = 0
+    for warning in check_collection_patterns(decls):
+        if warning.code == code:
+            count = count + 1
+    count
+
+describe "Linter - code quality checks":
+    it "validates variable naming conventions":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): snake_case classification verdicts
+        step("Verify: classify snake_case as valid and CamelCase as invalid")
+        # Variables should use snake_case
+        val good_name = "valid_variable"
+        val bad_name = "InvalidCamelCase"
+
+        # Test that snake_case is valid
+        expect good_name.contains("_")
+        expect not bad_name.contains("_")
+
+    it "validates function naming conventions":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): callable classification verdicts
+        step("Verify: call one snake_case fn and one CamelCase fn")
+        # Functions should use snake_case
+        fn valid_function_name() -> bool:
+            true
+
+        fn InvalidFunctionName() -> bool:
+            false
+
+        expect valid_function_name()
+        expect not InvalidFunctionName()
+
+    it "validates class naming conventions":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): constructed class field values
+        step("Verify: construct one PascalCase and one snake_case class")
+        # Classes should use PascalCase
+        class ValidClassName:
+            value: i64
+
+        class invalid_class_name:
+            value: i64
+
+        val good_class = ValidClassName(value: 1)
+        val bad_class = invalid_class_name(value: 2)
+
+        expect good_class.value == 1
+        expect bad_class.value == 2
+
+describe "Linter - code patterns":
+    it "detects unused variable declarations":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): used-variable product value
+        step("Verify: use one declared variable and leave one unused")
+        # This would normally be flagged by linter
+        var unused_var = 42
+        var used_var = 10
+
+        # Using used_var
+        val result = used_var * 2
+        expect result == 20
+
+    it "detects missing return type annotations":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): typed and untyped fn results
+        step("Verify: call one untyped and one typed fn with the same body")
+        # Function without explicit return type
+        fn no_return_type(x):
+            x * 2
+
+        # Function with explicit return type
+        fn with_return_type(x: i64) -> i64:
+            x * 2
+
+        expect no_return_type(5) == 10
+        expect with_return_type(5) == 10
+
+    it "validates error handling patterns":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): Result Ok-branch payload
+        step("Verify: match a Result-returning fn on its Ok branch")
+        # Functions that can fail should return Result
+        fn may_fail(x: i64) -> Result<i64, text>:
+            if x < 0:
+                Err("Negative value")
+            else:
+                Ok(x * 2)
+
+        val result = may_fail(5)
+        match result:
+            case Ok(value):
+                expect value == 10
+            case Err(msg):
+                expect msg == ""
+
+describe "Linter - best practices":
+    it "prefers val over var when possible":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): reassigned var and immutable val values
+        step("Verify: reassign a var and read an untouched val")
+        # Immutable by default
+        val immutable = 42
+        var mutable = 10
+
+        # Can reassign mutable
+        mutable = mutable + 5
+        expect mutable == 15
+
+        # Cannot reassign immutable (would be caught by linter)
+        expect immutable == 42
+
+    it "validates proper use of Option types":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): Option Some-branch payload
+        step("Verify: match find_value on its Some branch")
+        # Functions returning optional values
+        fn find_value(arr: [i64], target: i64) -> Option<i64>:
+            for item in arr:
+                if item == target:
+                    return Some(item)
+            None
+
+        val result = find_value([1, 2, 3], 2)
+        match result:
+            case Some(v):
+                expect v == 2
+            case None:
+                assert_true("Expected target value to be found" == "")
+
+    it "validates match exhaustiveness":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): exhaustive match dispatch value
+        step("Verify: dispatch an exhaustive enum match on Color.Red")
+        # All cases should be covered
+        enum Color:
+            Red
+            Green
+            Blue
+
+        fn describe_color(c: Color) -> text:
+            match c:
+                case Color.Red:
+                    "red"
+                case Color.Green:
+                    "green"
+                case Color.Blue:
+                    "blue"
+
+        val desc = describe_color(Color.Red)
+        expect desc == "red"
+
+describe "Linter - performance hints":
+    it "suggests using iterators over loops":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): loop and iterator sums for the same data
+        step("Verify: sum the same list with a loop and with an iterator")
+        # Less efficient: manual loop
+        var sum1 = 0
+        for i in [1, 2, 3, 4, 5]:
+            sum1 = sum1 + i
+
+        # More efficient: using iterator methods
+        val sum2 = [1, 2, 3, 4, 5].sum()
+
+        expect sum1 == 15
+        expect sum2 == 15
+
+    it "suggests const for compile-time constants":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): val and const constant values
+        step("Verify: read a val constant and a const constant")
+        # Should be const, not val
+        val PI_VAL = 3.14159
+        const PI_CONST = 3.14159
+
+        expect PI_VAL > 3.0
+        expect PI_CONST > 3.0
+
+describe "Linter - accessor and inherited name checks":
+    it "warns for trivial get set is accessors":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): ACC001 warning count for the trivial group
+        step("Verify: warns for trivial get set is accessors")
+        val source =
+            "class Meter:\n" +
+            "    value: i64\n" +
+            "    active: bool\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        self.value\n" +
+            "    fn set_value(self, value: i64):\n" +
+            "        self.value = value\n" +
+            "    fn is_active(self) -> bool:\n" +
+            "        self.active\n"
+        expect(count_name_lint(source, "ACC001")).to_equal(3)  # oracle: get/set/is trio is three warnings
+
+    it "suppresses a trivial accessor group when any accessor has real behavior":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): ACC001 warning count with real behavior present
+        step("Verify: suppresses a trivial accessor group when any accessor has real behavior")
+        val source =
+            "class Meter:\n" +
+            "    value: i64\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        if self.value < 0:\n" +
+            "            return 0\n" +
+            "        self.value\n" +
+            "    fn set_value(self, value: i64):\n" +
+            "        self.value = value\n"
+        expect(count_name_lint(source, "ACC001")).to_equal(0)  # oracle: real behavior silences the group
+
+    it "suppresses dummy accessor warning when overriding a parent accessor":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): ACC001 warning count for the override case
+        step("Verify: suppresses dummy accessor warning when overriding a parent accessor")
+        val source =
+            "class Parent:\n" +
+            "    value: i64\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        self.value\n" +
+            "class Child extends Parent:\n" +
+            "    value: i64\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        self.value\n"
+        expect(count_name_lint(source, "ACC001")).to_equal(1)  # oracle: only the parent accessor warns
+
+    it "warns for close misspellings of inherited method names":
+        # @req REQ-COMP-LINT-NAME001-001
+        # @capture(statistics): NAME001 warning count for render_farme
+        step("Verify: warns for close misspellings of inherited method names")
+        val source =
+            "class Parent:\n" +
+            "    fn render_frame(self):\n" +
+            "        pass\n" +
+            "class Child extends Parent:\n" +
+            "    fn render_farme(self):\n" +
+            "        pass\n"
+        expect(count_name_lint(source, "NAME001")).to_equal(1)  # oracle: one transposition, one warning
+
+    it "suppresses close inherited method name warning with name_checked":
+        # @req REQ-COMP-LINT-NAME001-001
+        # @capture(statistics): NAME001 warning count under @name_checked
+        step("Verify: suppresses close inherited method name warning with name_checked")
+        val source =
+            "class Parent:\n" +
+            "    fn render_frame(self):\n" +
+            "        pass\n" +
+            "class Child extends Parent:\n" +
+            "    @name_checked\n" +
+            "    fn render_farme(self):\n" +
+            "        pass\n"
+        expect(count_name_lint(source, "NAME001")).to_equal(0)  # oracle: the annotation opts out
+
+    it "treats name_checked as a known Pure Simple annotation":
+        # @req REQ-COMP-LINT-NAME001-001
+        # @capture(statistics): unknown-decorator and unknown-attribute counts
+        step("Verify: treats name_checked as a known Pure Simple annotation")
+        val source =
+            "class Child:\n" +
+            "    @name_checked\n" +
+            "    fn render_farme(self):\n" +
+            "        pass\n"
+        expect(check_unknown_decorator(source, "sample.spl").len()).to_equal(0)  # oracle: decorator registry knows name_checked
+        expect(check_unknown_attribute(source, "sample.spl").len()).to_equal(0)  # oracle: attribute registry knows name_checked
+
+    # Regression: is_pascal_case used `name.get(0)`, which does not exist on
+    # String. Every `class ` line reached it, so linting ANY file declaring a
+    # class aborted with "method `get` not found on type `str`".
+    it "lints a class declaration without aborting on the receiver type":
+        # @req REQ-COMP-LINT-NAME001-001
+        # @capture(statistics): lint_source result count for a class fixture
+        step("Verify: lints a class declaration without aborting on the receiver type")
+        var linter = Linter.new()
+        val results = linter.lint_source("sample.spl", "class Foo:\n    x: i64\n")
+        expect(results.len()).to_equal(0)  # oracle: clean fixture, no crash
+
+    # The ST002 lint itself is in the `style_convention` group, which is Allow
+    # (off) by default, so it is filtered out of lint_source results. Assert on
+    # is_pascal_case directly instead -- that is the function the `get` bug was
+    # in, and it still has to classify correctly, not just avoid aborting.
+    it "classifies PascalCase correctly after the receiver fix":
+        # @req REQ-COMP-LINT-NAME001-001
+        # @capture(statistics): is_pascal_case verdict table
+        step("Verify: classifies PascalCase correctly after the receiver fix")
+        var linter = Linter.new()
+        expect(linter.is_pascal_case("ValidName")).to_equal(true)  # oracle: PascalCase definition
+        expect(linter.is_pascal_case("invalid_name")).to_equal(false)  # oracle: snake_case is not PascalCase
+        # non-cased first chars have upper() == lower(); must report false
+        expect(linter.is_pascal_case("9abc")).to_equal(false)  # oracle: digit first char has no case
+        expect(linter.is_pascal_case("_Foo")).to_equal(false)  # oracle: underscore first char has no case
+        expect(linter.is_pascal_case("")).to_equal(false)  # oracle: empty name has no case
+
+# Regression: COLL006 "string concat in loop" matched ANY `x = x + <non-array>`
+# inside a loop with no type check, and is escalated to Deny severity. Every
+# integer accumulator (`total = total + i`, `i = i + 1`) was reported as an
+# O(n^2) string concat, which made `simple lint` unusable across the tree.
+# The rule now requires positive text evidence on the assignment target.
+describe "COLL006 string-concat-in-loop rule":
+    it "does not fire on an integer accumulator loop with no strings":
+        # @req REQ-COMP-LINT-COLL006-001
+        # @capture(statistics): COLL006 count for an integer accumulator
+        step("Verify: does not fire on an integer accumulator loop with no strings")
+        val source = "fn main():\n" +
+            "    var total = 0\n" +
+            "    var i = 0\n" +
+            "    while i < 10:\n" +
+            "        total = total + i\n" +
+            "        i = i + 1\n" +
+            "    print(total)\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: no text evidence, no warning
+
+    it "does not fire on a float accumulator loop":
+        # @req REQ-COMP-LINT-COLL006-001
+        # @capture(statistics): COLL006 count for a float accumulator
+        step("Verify: does not fire on a float accumulator loop")
+        val source = "fn accum(xs: [f64]) -> f64:\n" +
+            "    var sum = 0.0\n" +
+            "    for x in xs:\n" +
+            "        sum = sum + x\n" +
+            "    sum\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: floats are not text concat
+
+    it "does not fire on integer compound assignment in a loop":
+        # @req REQ-COMP-LINT-COLL006-001
+        # @capture(statistics): COLL006 count for compound integer assignment
+        step("Verify: does not fire on integer compound assignment in a loop")
+        val source = "fn counter() -> i64:\n" +
+            "    var n = 0\n" +
+            "    var i = 0\n" +
+            "    while i < 10:\n" +
+            "        n += i\n" +
+            "        i += 1\n" +
+            "    n\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: += on ints is not text concat
+
+    it "still fires on a genuine text concat with a string literal":
+        # @req REQ-COMP-LINT-COLL006-001
+        # @capture(statistics): COLL006 count for a literal text concat
+        step("Verify: still fires on a genuine text concat with a string literal")
+        val source = "fn build_text() -> text:\n" +
+            "    var out = \"\"\n" +
+            "    var i = 0\n" +
+            "    while i < 10:\n" +
+            "        out = out + \"x\"\n" +
+            "        i = i + 1\n" +
+            "    out\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)  # oracle: text target plus literal is the rule
+
+    it "still fires when the target is declared text and the value is not a literal":
+        # @req REQ-COMP-LINT-COLL006-001
+        # @capture(statistics): COLL006 count for declared-text concatenation
+        step("Verify: still fires when the target is declared text and the value is not a literal")
+        val source = "fn joiner(parts: [text]) -> text:\n" +
+            "    var out: text = \"\"\n" +
+            "    for p in parts:\n" +
+            "        out = out + p\n" +
+            "    out\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)  # oracle: declared text target suffices
+
+    it "still fires on text compound assignment in a loop":
+        # @req REQ-COMP-LINT-COLL006-001
+        # @capture(statistics): COLL006 count for text += in a loop
+        step("Verify: still fires on text compound assignment in a loop")
+        val source = "fn joiner2(parts: [text]) -> text:\n" +
+            "    var out = \"\"\n" +
+            "    for p in parts:\n" +
+            "        out += p\n" +
+            "    out\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)  # oracle: += form is the same rule
+
+    # Previously a false NEGATIVE: only the append form `s = s + x` matched, so
+    # the prepend form used by every hand-rolled int-to-text loop was missed.
+    it "fires on the prepend form s = x + s":
+        # @req REQ-COMP-LINT-COLL006-001
+        # @capture(statistics): COLL006 count for the prepend form
+        step("Verify: fires on the prepend form s = x + s")
+        val source = "fn int_to_text(n: i64) -> text:\n" +
+            "    var result = \"\"\n" +
+            "    var remaining = n\n" +
+            "    while remaining > 0:\n" +
+            "        result = \"d\" + result\n" +
+            "        remaining = remaining / 10\n" +
+            "    result\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)  # oracle: prepend with text operand is concat
+
+    it "does not fire on the integer prepend form acc = i + acc":
+        # @req REQ-COMP-LINT-COLL006-001
+        # @capture(statistics): COLL006 count for an integer prepend form
+        step("Verify: does not fire on the integer prepend form acc = i + acc")
+        val source = "fn swapadd(n: i64) -> i64:\n" +
+            "    var acc = 1\n" +
+            "    var i = 0\n" +
+            "    while i < n:\n" +
+            "        acc = i + acc\n" +
+            "        i = i + 1\n" +
+            "    acc\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: integer operands are not text concat

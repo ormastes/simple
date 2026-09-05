@@ -1,0 +1,69 @@
+# DEFLATE inflate wrapper for image/PNG use.
+#
+# Provides deflate_inflate(data, skip_bytes) which skips a leading header
+# (e.g. 2-byte zlib CMF+FLG) then decompresses the raw DEFLATE stream.
+# Returns an empty array on any error or if input is too short.
+
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate, inflate_bounded}
+use std.common.hash.adler32.{adler32}
+
+fn _read_u32_be(data: [u8], offset: i64) -> u32:
+    (data[offset].to_u32() << 24) |
+        (data[offset + 1].to_u32() << 16) |
+        (data[offset + 2].to_u32() << 8) |
+        data[offset + 3].to_u32()
+
+pub fn deflate_inflate_zlib_bounded(data: [u8], max_output: i64) -> Result<[u8], text>:
+    """Strictly decode one zlib-wrapped DEFLATE stream within max_output bytes."""
+    if data.len() < 7:
+        return Err("zlib stream is truncated")
+    if max_output < 0:
+        return Err("zlib output limit is invalid")
+
+    val cmf = data[0].to_i64()
+    val flg = data[1].to_i64()
+    if (cmf & 15) != 8 or (cmf >> 4) > 7:
+        return Err("zlib compression method or window is unsupported")
+    if ((cmf << 8) + flg) % 31 != 0:
+        return Err("zlib header checksum is invalid")
+    if (flg & 32) != 0:
+        return Err("zlib preset dictionaries are unsupported")
+
+    val trailer = data.len() - 4
+    var payload: [u8] = []
+    var i: i64 = 2
+    while i < trailer:
+        payload.push(data[i])
+        i = i + 1
+
+    val maybe_output = inflate_bounded(payload, max_output)
+    if maybe_output == nil:
+        return Err("DEFLATE stream is invalid or exceeds its output limit")
+    val output = maybe_output ?? []
+    if output.len() > max_output:
+        return Err("DEFLATE stream exceeds its output limit")
+    if adler32(output).to_u32() != _read_u32_be(data, trailer):
+        return Err("zlib Adler-32 checksum is invalid")
+    Ok(output)
+
+pub fn deflate_inflate(data: [u8], skip_bytes: i32) -> [u8]:
+    """Decompress a DEFLATE stream, skipping `skip_bytes` header bytes.
+
+    skip_bytes=2 for zlib-wrapped streams (CMF+FLG header).
+    skip_bytes=0 for raw DEFLATE.
+    Returns empty array on error or if data is shorter than skip_bytes.
+    """
+    val n = data.len().to_i32()
+    if n <= skip_bytes:
+        var empty: [u8] = []
+        return empty
+    var payload: [u8] = []
+    var i = skip_bytes
+    while i < n:
+        payload.push(data[i])
+        i = i + 1
+    val result = inflate(payload)
+    if result == nil:
+        var empty: [u8] = []
+        return empty
+    result

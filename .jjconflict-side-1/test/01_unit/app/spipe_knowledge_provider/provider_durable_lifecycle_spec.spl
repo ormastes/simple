@@ -1,0 +1,673 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.protocol.{provider_encode_frame, provider_parse_frame}
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
+use app.spipe_knowledge_provider.wire.{ProviderHostBindingV1, ProviderWireOwnedDispatchV1, provider_operation_payload_hash, provider_expire_candidate, provider_dispatch_frame_bound_owned}
+use app.spipe_knowledge_provider.lifecycle.{ReceiptAuthorityPort, DurableLifecyclePort, PureEd25519ReceiptAuthorityV1, FileDurableLifecycleV1, validate_candidate_expiry_receipt}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string}
+use std.common.json.serializer.{json_escape_string}
+use std.common.crypto.sha256.{sha256_text}
+use app.spipe_knowledge_provider.durable_records.{response_hash, receipt_id, replay_binding_domain_bytes}
+use app.io.mod.{file_delete}
+
+fn durable_seed() -> [u8]:
+    var seed: [u8] = []
+    var i = 0
+    while i < 32:
+        seed.push(11u8)
+        i = i + 1
+    seed
+
+class RejectingReceiptAuthorityV1 with ReceiptAuthorityPort:
+    fn available() -> bool: true
+    fn key_id() -> text: "ed25519:rejecting-test-key"
+    fn authority_id() -> text: "AUTH-REJECTING"
+    fn authority_generation() -> i64: 1
+    fn now_ms() -> i64: 1
+    fn sign(message: [u8]) -> Result<text, text>: Err("signing_failed")
+    fn verify(message: [u8], signature_text: text) -> bool: false
+
+class RejectingDurableLifecycleV1 with DurableLifecyclePort:
+    fn available() -> bool: true
+    fn load() -> Result<text, text>:
+        Ok("{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}")
+    fn commit(canonical_state: text) -> Result<(), text>: Err("storage_error")
+    fn commit_if_unchanged(expected_sha256: text,
+                           canonical_state: text) -> Result<(), text>:
+        Err("storage_error")
+    fn load_generation_quarantine(provider_generation: i64) -> Result<text, text>: Ok("")
+    fn commit_generation_quarantine(provider_generation: i64,
+                                    canonical_record: text) -> Result<(), text>:
+        Err("storage_error")
+
+# Accept setup/apply state, force both publication attempts to miss, and permit
+# only the distinct quarantine terminal.  This proves the bounded publication
+# branch closes durably without shared mutable test counters.
+class DoubleConflictDurableLifecycleV1 with DurableLifecyclePort:
+    inner: FileDurableLifecycleV1
+    fn available() -> bool: true
+    fn load() -> Result<text, text>: self.inner.load()
+    fn commit(canonical_state: text) -> Result<(), text>:
+        self.inner.commit(canonical_state)
+    fn commit_if_unchanged(expected_sha256: text,
+                           canonical_state: text) -> Result<(), text>:
+        if canonical_state.contains("\"operation\":\"index_publish\""):
+            return Err("lifecycle_conflict")
+        self.inner.commit_if_unchanged(expected_sha256, canonical_state)
+    fn load_generation_quarantine(provider_generation: i64) -> Result<text, text>:
+        self.inner.load_generation_quarantine(provider_generation)
+    fn commit_generation_quarantine(provider_generation: i64,
+                                    canonical_record: text) -> Result<(), text>:
+        self.inner.commit_generation_quarantine(provider_generation,
+            canonical_record)
+
+# These stores never admit one selected semantic CAS. They prove dispatch work
+# is finite and that a later healthy owner can resume the untouched durable
+# candidate rather than inheriting a fabricated terminal result.
+class AlwaysPublishConflictLifecycleV1 with DurableLifecyclePort:
+    inner: FileDurableLifecycleV1
+    fn available() -> bool: true
+    fn load() -> Result<text, text>: self.inner.load()
+    fn commit(canonical_state: text) -> Result<(), text>:
+        self.inner.commit(canonical_state)
+    fn commit_if_unchanged(expected_sha256: text,
+                           canonical_state: text) -> Result<(), text>:
+        if canonical_state.contains("\"operation\":\"index_publish\""):
+            return Err("lifecycle_conflict")
+        self.inner.commit_if_unchanged(expected_sha256, canonical_state)
+    fn load_generation_quarantine(provider_generation: i64) -> Result<text, text>:
+        self.inner.load_generation_quarantine(provider_generation)
+    fn commit_generation_quarantine(provider_generation: i64,
+                                    canonical_record: text) -> Result<(), text>:
+        self.inner.commit_generation_quarantine(provider_generation,
+            canonical_record)
+
+class AlwaysTerminalJournalConflictLifecycleV1 with DurableLifecyclePort:
+    inner: FileDurableLifecycleV1
+    fn available() -> bool: true
+    fn load() -> Result<text, text>: self.inner.load()
+    fn commit(canonical_state: text) -> Result<(), text>:
+        self.inner.commit(canonical_state)
+    fn commit_if_unchanged(expected_sha256: text,
+                           canonical_state: text) -> Result<(), text>:
+        if canonical_state.contains("spipe-durable-terminal-error-v1"):
+            return Err("lifecycle_conflict")
+        self.inner.commit_if_unchanged(expected_sha256, canonical_state)
+    fn load_generation_quarantine(provider_generation: i64) -> Result<text, text>:
+        self.inner.load_generation_quarantine(provider_generation)
+    fn commit_generation_quarantine(provider_generation: i64,
+                                    canonical_record: text) -> Result<(), text>:
+        self.inner.commit_generation_quarantine(provider_generation,
+            canonical_record)
+
+fn clean_store(path: text) -> FileDurableLifecycleV1:
+    file_delete(path + "/provider-generation-quarantine-v1-pg-00000000000000000000000000000001.json")
+    val store = FileDurableLifecycleV1.configured_absolute(path).unwrap()
+    store.commit("{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}").unwrap()
+    store
+
+fn initialize_frame(request_id: text) -> text:
+    provider_encode_frame("{\"client\":\"spipe\",\"limits\":{\"max_frame_bytes\":1048576},\"operation\":\"initialize\",\"protocol\":{\"major\":1,\"minor\":0},\"request_id\":\"" + request_id + "\",\"required\":{\"analyzer\":\"spipe-unicode-lex-v1\",\"explanation\":\"bm25-explain-v1\",\"logical_index\":\"spipe-lexical-snapshot-v1\",\"provider\":\"spipe-search-provider/1.0\",\"score\":\"bm25-fixed-v1\"}" + "}").unwrap()
+
+fn durable_bound_frame(request_id: text, operation: text, payload: text) -> text:
+    provider_encode_frame("{\"deadline_ms\":30000,\"operation\":\"" + operation + "\",\"operation_receipt\":null,\"payload\":" + payload + ",\"protocol\":{\"major\":1,\"minor\":0},\"provider_generation\":\"pg-00000000000000000000000000000001\",\"query_receipt\":null,\"request_id\":\"" + request_id + "\",\"scope_digest\":\"sha256:" + "1" * 64 + "\",\"snapshot\":\"spks1-" + "0" * 64 + "\",\"workspace\":\"WS-PROVIDER\"}").unwrap()
+
+fn dispatch_bound(service: SpipeProviderServiceV1,
+                  frame: text) -> ProviderWireOwnedDispatchV1:
+    val host = ProviderHostBindingV1.create("WS-PROVIDER",
+        "spks1-" + "0" * 64, "sha256:" + "1" * 64).unwrap()
+    provider_dispatch_frame_bound_owned(service, host, frame)
+
+fn apply_empty(service: SpipeProviderServiceV1, operation_id: text) -> (SpipeProviderServiceV1, text):
+    val without_hash = "{\"base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"" + operation_id + "\",\"operations\":[]}"
+    val payload_hash = provider_operation_payload_hash(without_hash, "index_apply").unwrap()
+    val payload = "{\"base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"" + operation_id + "\",\"operations\":[],\"payload_hash\":\"" + payload_hash + "\"}"
+    val dispatched = dispatch_bound(service,
+        durable_bound_frame("request-" + operation_id, "index_apply", payload))
+    (dispatched.service, provider_parse_frame(dispatched.outcome.frame).payload)
+
+fn apply_one_document(service: SpipeProviderServiceV1,
+                      operation_id: text) -> (SpipeProviderServiceV1, text):
+    val fields = "[{\"name\":\"identifier\",\"value\":\"DOC-ONE\"},{\"name\":\"title\",\"value\":\"Document One\"},{\"name\":\"heading\",\"value\":\"One\"},{\"name\":\"classification\",\"value\":\"search\"},{\"name\":\"body\",\"value\":\"alpha\"}]"
+    val bound_fields = "[{\"name\":\"identifier\",\"value\":\"DOC-ONE\",\"weight_milli\":4000},{\"name\":\"title\",\"value\":\"Document One\",\"weight_milli\":4000},{\"name\":\"heading\",\"value\":\"One\",\"weight_milli\":2500},{\"name\":\"classification\",\"value\":\"search\",\"weight_milli\":2000},{\"name\":\"body\",\"value\":\"alpha\",\"weight_milli\":1000}]"
+    val facets = "[{\"name\":\"component\",\"value\":\"search\"},{\"name\":\"feature\",\"value\":\"knowledge\"}]"
+    val visibility = "sha256:" + "2" * 64
+    val scope = "sha256:" + "1" * 64
+    val document_preimage = "{\"document_id\":\"DOC-ONE\",\"facets\":" + facets +
+        ",\"fields\":" + bound_fields + ",\"revision\":\"REV-ONE\",\"scope_digest\":\"" +
+        scope + "\",\"visibility_digest\":\"" + visibility + "\"}"
+    val document_hash = "sha256:" + sha256_text(document_preimage)
+    val after = "{\"document_id\":\"DOC-ONE\",\"facets\":" + facets +
+        ",\"fields\":" + fields + ",\"revision\":\"REV-ONE\",\"scope_digest\":\"" +
+        scope + "\",\"scoped_content_hash\":\"" + document_hash +
+        "\",\"visibility_digest\":\"" + visibility + "\"}"
+    val operations = "[{\"after\":" + after +
+        ",\"before_hash\":null,\"before_revision\":null,\"document_id\":\"DOC-ONE\",\"kind\":\"add\"}]"
+    val without_hash = "{\"base_logical_root\":\"sha256:" + "0" * 64 +
+        "\",\"operation_id\":\"" + operation_id + "\",\"operations\":" + operations + "}"
+    val payload_hash = provider_operation_payload_hash(without_hash, "index_apply").unwrap()
+    val payload = "{\"base_logical_root\":\"sha256:" + "0" * 64 +
+        "\",\"operation_id\":\"" + operation_id + "\",\"operations\":" + operations +
+        ",\"payload_hash\":\"" + payload_hash + "\"}"
+    val dispatched = dispatch_bound(service,
+        durable_bound_frame("request-" + operation_id, "index_apply", payload))
+    (dispatched.service, provider_parse_frame(dispatched.outcome.frame).payload)
+
+fn candidate_value(response: text, key: text) -> text:
+    val parsed = json_parse_with_error(response).0
+    if val result = json_object_get(parsed, "result"):
+        return json_to_string(json_object_get(result, key)) ?? ""
+    ""
+
+fn expect_restore_mutations_rejected(service: SpipeProviderServiceV1,
+                                     canonical: text,
+                                     mutations: [(text, text)]):
+    var i = 0
+    while i < mutations.len():
+        val mutated = canonical.replace(mutations[i].0, mutations[i].1)
+        expect(mutated == canonical).to_equal(false)
+        expect(service.restore_lifecycle(mutated).is_err()).to_equal(true)
+        i = i + 1
+
+fn duplicate_single_row(canonical: text, prefix: text, suffix: text) -> text:
+    val before = canonical.split(prefix)
+    if before.len() != 2: return canonical
+    val after = before[1].split(suffix)
+    if after.len() != 2 or after[0] == "": return canonical
+    before[0] + prefix + after[0] + "," + after[0] + suffix + after[1]
+
+fn publish_payload(operation_id: text, candidate_uid: text,
+                   candidate_root: text) -> text:
+    val without_hash = "{\"action\":\"publish\",\"candidate_logical_root\":\"" + candidate_root + "\",\"candidate_uid\":\"" + candidate_uid + "\",\"expected_base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"" + operation_id + "\"}"
+    val payload_hash = provider_operation_payload_hash(without_hash, "index_publish").unwrap()
+    "{\"action\":\"publish\",\"candidate_logical_root\":\"" + candidate_root + "\",\"candidate_uid\":\"" + candidate_uid + "\",\"expected_base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"" + operation_id + "\",\"payload_hash\":\"" + payload_hash + "\"}"
+
+describe "SPipe provider durable candidate lifecycle":
+    it "rejects non-empty legacy object collections":
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.empty()
+        service.receipt_authority = authority
+        expect(service.restore_lifecycle("{\"candidates\":{\"smuggled\":{}},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}").is_err()).to_equal(true)
+
+    it "leaves no candidate or replay entry when signing fails":
+        val store = clean_store("/tmp/simple-spipe-provider-sign-fault-v1")
+        var service = SpipeProviderServiceV1.configured(
+            RejectingReceiptAuthorityV1(), store).unwrap()
+        service = dispatch_bound(service, initialize_frame("init-sign-fault")).service
+        service = dispatch_bound(service, durable_bound_frame(
+            "open-sign-fault", "index_open", "{\"logical_root\":null,\"mode\":\"create\"}")).service
+        val dispatched = apply_empty(service, "apply-sign-fault")
+        service = dispatched.0
+        expect(dispatched.1).to_contain("signing_failed")
+        expect(service.candidates.len()).to_equal(0)
+        expect(service.replay.len()).to_equal(0)
+
+    it "rolls back candidate and replay when the atomic durable commit fails":
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.configured(
+            authority, RejectingDurableLifecycleV1()).unwrap()
+        service = dispatch_bound(service, initialize_frame("init-store-fault")).service
+        service = dispatch_bound(service, durable_bound_frame(
+            "open-store-fault", "index_open", "{\"logical_root\":null,\"mode\":\"create\"}")).service
+        val dispatched = apply_empty(service, "apply-store-fault")
+        service = dispatched.0
+        expect(dispatched.1).to_contain("storage_error")
+        expect(service.candidates.len()).to_equal(0)
+        expect(service.replay.len()).to_equal(0)
+
+    it "reloads a staged candidate and replays the exact apply envelope":
+        val store = clean_store("/tmp/simple-spipe-provider-restart-v2")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var first = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        val initialize_dispatch = dispatch_bound(first, initialize_frame("init-first"))
+        first = initialize_dispatch.service
+        val initialized = initialize_dispatch.outcome
+        expect(initialized.write_response).to_equal(true)
+        val open_dispatch = dispatch_bound(first, durable_bound_frame("open-first", "index_open", "{\"logical_root\":null,\"mode\":\"create\"}"))
+        first = open_dispatch.service
+        val opened = open_dispatch.outcome
+        expect(opened.write_response).to_equal(true)
+        val original_dispatch = apply_empty(first, "apply-restart")
+        first = original_dispatch.0
+        val original = original_dispatch.1
+        val staged_store = first.lifecycle_json()
+        expect(staged_store).to_contain("\"publications\":[]")
+        expect(staged_store).to_contain("\"terminal_at_ms\":null")
+        expect(staged_store).to_contain("\"terminal_operation_id\":null")
+        val staged_uid = candidate_value(original, "candidate_uid")
+        val staged_root = candidate_value(original, "candidate_logical_root")
+        expect_restore_mutations_rejected(first, staged_store, [
+            ("\"terminal_at_ms\":null", "\"terminal_at_ms\":0"),
+            ("\"terminal_operation_id\":null", "\"terminal_operation_id\":\"\""),
+            ("\"terminal_receipt\":null", "\"terminal_receipt\":\"\""),
+            ("\"uid\":\"" + staged_uid + "\"", "\"uid\":\"cand-" + "f" * 64 + "\""),
+            ("\"candidate_root\":\"" + staged_root + "\"",
+             "\"candidate_root\":\"sha256:" + "e" * 64 + "\"")
+        ])
+        expect(first.restore_lifecycle(duplicate_single_row(staged_store,
+            "\"candidates\":[", "],\"current_logical_root\"")).is_err()).to_equal(true)
+        expect(first.restore_lifecycle(duplicate_single_row(staged_store,
+            "\"replay\":[", "],\"schema\"")).is_err()).to_equal(true)
+
+        var restarted = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        val reinitialize_dispatch = dispatch_bound(restarted, initialize_frame("init-restarted"))
+        restarted = reinitialize_dispatch.service
+        val reinitialized = reinitialize_dispatch.outcome
+        expect(reinitialized.write_response).to_equal(true)
+        expect(restarted.replay.len()).to_equal(1)
+        expect(restarted.replay[0].operation).to_equal("index_apply")
+        expect(restarted.replay[0].operation_id).to_equal("apply-restart")
+        val replay_preimage = "{\"base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"apply-restart\",\"operations\":[]}"
+        val replay_payload_hash = provider_operation_payload_hash(
+            replay_preimage, "index_apply").unwrap()
+        expect(restarted.replay[0].payload_hash).to_equal(replay_payload_hash)
+        expect(restarted.replay_response("index_apply", "apply-restart",
+            replay_payload_hash).unwrap().unwrap()).to_equal(original)
+        val replay_dispatch = apply_empty(restarted, "apply-restart")
+        restarted = replay_dispatch.0
+        val replayed = replay_dispatch.1
+        expect(replayed).to_equal(original)
+
+    it "binds replay envelopes and the exact restored candidate document set":
+        val store = clean_store("/tmp/simple-spipe-provider-candidate-binding-v1")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        service = dispatch_bound(service, initialize_frame("init-candidate-binding")).service
+        service = dispatch_bound(service, durable_bound_frame(
+            "open-candidate-binding", "index_open", "{\"logical_root\":null,\"mode\":\"create\"}")).service
+        val applied = apply_one_document(service, "apply-candidate-binding")
+        service = applied.0
+        expect(applied.1).to_contain("\"status\":\"applied\"")
+        val canonical = service.lifecycle_json()
+        expect(canonical).to_contain("\"replay_signature\":")
+        val response = service.replay[0].response
+        val altered_response = response.replace("\"request_id\":\"request-apply-candidate-binding\"",
+            "\"request_id\":\"request-altered\"")
+        val altered_envelope = canonical.replace(
+            "\"response\":\"" + json_escape_string(response) + "\",\"response_hash\":\"" + response_hash(response) + "\"",
+            "\"response\":\"" + json_escape_string(altered_response) + "\",\"response_hash\":\"" + response_hash(altered_response) + "\"")
+        expect(altered_envelope == canonical).to_equal(false)
+        expect(service.restore_lifecycle(altered_envelope).is_err()).to_equal(true)
+        val transplanted_request = altered_envelope.replace(
+            "\"request_id\":\"request-apply-candidate-binding\"",
+            "\"request_id\":\"request-altered\"")
+        expect(transplanted_request == altered_envelope).to_equal(false)
+        expect(service.restore_lifecycle(transplanted_request).is_err()).to_equal(true)
+        val receipt = service.replay[0].receipt
+        val altered_receipt = receipt.replace("\"outcome\":\"applied\"",
+            "\"outcome\":\"no_op\"")
+        val receipt_drift_response = response.replace(receipt, altered_receipt)
+        val receipt_drift = canonical.replace(
+            "\"response\":\"" + json_escape_string(response) + "\",\"response_hash\":\"" + response_hash(response) + "\"",
+            "\"response\":\"" + json_escape_string(receipt_drift_response) + "\",\"response_hash\":\"" + response_hash(receipt_drift_response) + "\"")
+        expect(receipt_drift == canonical).to_equal(false)
+        expect(service.restore_lifecycle(receipt_drift).is_err()).to_equal(true)
+        val altered_result = response.replace("\"added\":1", "\"added\":2")
+        val altered_result_hash = response_hash(altered_result)
+        val altered_result_signature = authority.sign(replay_binding_domain_bytes(
+            "WS-PROVIDER", "spks1-" + "0" * 64, "sha256:" + "1" * 64,
+            "index_apply", "apply-candidate-binding", service.replay[0].payload_hash,
+            "request-apply-candidate-binding", altered_result_hash,
+            receipt_id(receipt))).unwrap()
+        val result_drift = canonical.replace(
+            "\"response\":\"" + json_escape_string(response) + "\",\"response_hash\":\"" + response_hash(response) + "\"",
+            "\"response\":\"" + json_escape_string(altered_result) + "\",\"response_hash\":\"" + altered_result_hash + "\"").replace(
+            "\"replay_signature\":\"" + service.replay[0].replay_signature + "\"",
+            "\"replay_signature\":\"" + altered_result_signature + "\"")
+        expect(result_drift == canonical).to_equal(false)
+        expect(service.restore_lifecycle(result_drift).is_err()).to_equal(true)
+        val weight_drift = canonical.replace("\"weight_milli\":4000",
+            "\"weight_milli\":3999")
+        expect(weight_drift == canonical).to_equal(false)
+        expect(service.restore_lifecycle(weight_drift).is_err()).to_equal(true)
+        val duplicated_document = duplicate_single_row(canonical,
+            "\"documents\":[", "],\"expires_at_ms\"")
+        expect(duplicated_document == canonical).to_equal(false)
+        expect(service.restore_lifecycle(duplicated_document).is_err()).to_equal(true)
+        val duplicate_field = canonical.replace(
+            "\"fields\":[{\"name\":\"identifier\",\"value\":\"DOC-ONE\",\"weight_milli\":4000}",
+            "\"fields\":[{\"name\":\"identifier\",\"value\":\"DOC-ONE\",\"weight_milli\":4000},{\"name\":\"identifier\",\"value\":\"DOC-ONE\",\"weight_milli\":4000}")
+        expect(duplicate_field == canonical).to_equal(false)
+        expect(service.restore_lifecycle(duplicate_field).is_err()).to_equal(true)
+        val duplicate_facet = canonical.replace(
+            "{\"name\":\"feature\",\"value\":\"knowledge\"}",
+            "{\"name\":\"component\",\"value\":\"search\"}")
+        expect(duplicate_facet == canonical).to_equal(false)
+        expect(service.restore_lifecycle(duplicate_facet).is_err()).to_equal(true)
+        val control_id = canonical.replace("\"id\":\"DOC-ONE\"",
+            "\"id\":\"DOC-\\u0001\"")
+        expect(service.restore_lifecycle(control_id).is_err()).to_be(true)
+        val control_revision = canonical.replace("\"revision\":\"REV-ONE\"",
+            "\"revision\":\"REV-\\u0085\"")
+        expect(service.restore_lifecycle(control_revision).is_err()).to_be(true)
+        val uppercase_visibility = canonical.replace(
+            "sha256:" + "2" * 64, "sha256:" + "A" * 64)
+        expect(service.restore_lifecycle(uppercase_visibility).is_err()).to_be(true)
+        val noncanonical_lifecycle = canonical.replace(
+            "{\"candidates\":", "{ \"candidates\":")
+        expect(service.restore_lifecycle(noncanonical_lifecycle).is_err()).to_be(true)
+        var restarted = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        restarted = dispatch_bound(restarted, initialize_frame("init-binding-restart")).service
+        expect(restarted.candidates[0].snapshot.documents[0].id).to_equal("DOC-ONE")
+
+    it "rejects a valid receipt transplanted into a different candidate row":
+        val store = clean_store("/tmp/simple-spipe-provider-transplant-v1")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        service = dispatch_bound(service, initialize_frame("init-transplant")).service
+        service = dispatch_bound(service, durable_bound_frame(
+            "open-transplant", "index_open", "{\"logical_root\":null,\"mode\":\"create\"}")).service
+        val applied = apply_empty(service, "apply-transplant")
+        service = applied.0
+        val canonical = service.lifecycle_json()
+        val transplanted = canonical.replace("\"apply_operation_id\":\"apply-transplant\"",
+            "\"apply_operation_id\":\"apply-other\"")
+        expect(service.restore_lifecycle(transplanted).is_err()).to_equal(true)
+
+    it "rejects lifecycle transplant across every host identity dimension before initialize":
+        val store = clean_store("/tmp/simple-spipe-provider-scope-transplant-v1")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        service = dispatch_bound(service,
+            initialize_frame("init-scope-source")).service
+        val scope_applied = apply_one_document(service, "apply-scope-source")
+        service = scope_applied.0
+        val hosts = [
+            ProviderHostBindingV1.create_with_generation("WS-OTHER",
+                "spks1-" + "0" * 64, "sha256:" + "1" * 64, 1).unwrap(),
+            ProviderHostBindingV1.create_with_generation("WS-PROVIDER",
+                "spks1-" + "9" * 64, "sha256:" + "1" * 64, 1).unwrap(),
+            ProviderHostBindingV1.create_with_generation("WS-PROVIDER",
+                "spks1-" + "0" * 64, "sha256:" + "8" * 64, 1).unwrap(),
+            ProviderHostBindingV1.create_with_generation("WS-PROVIDER",
+                "spks1-" + "0" * 64, "sha256:" + "1" * 64, 2).unwrap(),
+        ]
+        var i = 0
+        while i < hosts.len():
+            val restarted = SpipeProviderServiceV1.configured(
+                authority, store).unwrap()
+            val rejected = provider_dispatch_frame_bound_owned(restarted,
+                hosts[i], initialize_frame("init-scope-rejected"))
+            expect(rejected.service.state.initialized).to_equal(false)
+            expect(rejected.service.state.workspace).to_equal("WS-PROVIDER")
+            expect(rejected.service.state.provider_generation).to_equal(1)
+            expect(rejected.service.candidates.len()).to_equal(1)
+            expect(provider_parse_frame(rejected.outcome.frame).payload).to_contain(
+                "\"code\":\"incompatible_contract\"")
+            i = i + 1
+        val accepted_restart = SpipeProviderServiceV1.configured(
+            authority, store).unwrap()
+        val accepted = dispatch_bound(accepted_restart,
+            initialize_frame("init-scope-accepted"))
+        expect(accepted.service.state.initialized).to_equal(true)
+        expect(accepted.service.candidates[0].snapshot.documents[0].id).to_equal(
+            "DOC-ONE")
+
+    it "keeps sibling candidates independent and terminalizes the stale loser":
+        val store = clean_store("/tmp/simple-spipe-provider-race-v2")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        val initialize_dispatch = dispatch_bound(service, initialize_frame("init-race"))
+        service = initialize_dispatch.service
+        val initialized = initialize_dispatch.outcome
+        expect(initialized.write_response).to_equal(true)
+        val open_dispatch = dispatch_bound(service, durable_bound_frame("open-race", "index_open", "{\"logical_root\":null,\"mode\":\"create\"}"))
+        service = open_dispatch.service
+        val opened = open_dispatch.outcome
+        expect(opened.write_response).to_equal(true)
+        val first_apply = apply_empty(service, "apply-first")
+        service = first_apply.0
+        val first = first_apply.1
+        val second_apply = apply_empty(service, "apply-second")
+        service = second_apply.0
+        val second = second_apply.1
+        val first_publish_dispatch = dispatch_bound(service,
+            durable_bound_frame("publish-first-request", "index_publish", publish_payload("publish-first", candidate_value(first, "candidate_uid"), candidate_value(first, "candidate_logical_root"))))
+        service = first_publish_dispatch.service
+        val first_publish = provider_parse_frame(first_publish_dispatch.outcome.frame).payload
+        val second_payload = publish_payload("publish-second",
+            candidate_value(second, "candidate_uid"),
+            candidate_value(second, "candidate_logical_root"))
+        val second_publish_dispatch = dispatch_bound(service,
+            durable_bound_frame("publish-second-request", "index_publish", second_payload))
+        service = second_publish_dispatch.service
+        val second_publish = provider_parse_frame(second_publish_dispatch.outcome.frame).payload
+        expect(first_publish).to_contain("\"status\":\"published\"")
+        expect(second_publish).to_contain("\"status\":\"stale_base\"")
+        val race_store = service.lifecycle_json()
+        expect(race_store).to_contain("\"schema\":\"spipe-publication-v1\"")
+        expect(race_store).to_contain("\"terminal_result_root\":\"" +
+            candidate_value(first, "candidate_logical_root") + "\"")
+        val restarted_authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var restarted = SpipeProviderServiceV1.configured(
+            restarted_authority, store).unwrap()
+        restarted = dispatch_bound(restarted,
+            initialize_frame("init-race-restart")).service
+        val replay_dispatch = dispatch_bound(restarted,
+            durable_bound_frame("publish-second-request", "index_publish", second_payload))
+        expect(provider_parse_frame(replay_dispatch.outcome.frame).payload).to_equal(second_publish)
+        expect(service.restore_lifecycle(duplicate_single_row(race_store,
+            "\"publications\":[", "],\"replay\"")).is_err()).to_equal(true)
+
+    it "durably closes and replays after two publication CAS misses":
+        val inner = clean_store("/tmp/simple-spipe-provider-double-cas-v1")
+        val store = DoubleConflictDurableLifecycleV1(inner: inner)
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        service = dispatch_bound(service, initialize_frame("init-double-cas")).service
+        service = dispatch_bound(service, durable_bound_frame(
+            "open-double-cas", "index_open",
+            "{\"logical_root\":null,\"mode\":\"create\"}")).service
+        val apply_dispatch = apply_empty(service, "apply-double-cas")
+        service = apply_dispatch.0
+        val candidate_uid = candidate_value(apply_dispatch.1, "candidate_uid")
+        val candidate_root = candidate_value(apply_dispatch.1,
+            "candidate_logical_root")
+        val payload = publish_payload("publish-double-cas", candidate_uid,
+            candidate_root)
+        val first_dispatch = dispatch_bound(service, durable_bound_frame(
+            "publish-double-cas-request", "index_publish", payload))
+        service = first_dispatch.service
+        val first = provider_parse_frame(first_dispatch.outcome.frame).payload
+        expect(first).to_contain("\"code\":\"fatal_provider_error\"")
+        expect(first).to_contain("provider generation closed")
+        expect(service.candidate_state(candidate_uid, candidate_root,
+            "sha256:" + "0" * 64).unwrap()).to_equal("staged")
+        val replay_dispatch = dispatch_bound(service, durable_bound_frame(
+            "publish-double-cas-request", "index_publish", payload))
+        service = replay_dispatch.service
+        expect(provider_parse_frame(replay_dispatch.outcome.frame).payload).to_equal(first)
+        val restarted_authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var restarted = SpipeProviderServiceV1.configured(
+            restarted_authority, store).unwrap()
+        restarted = dispatch_bound(restarted,
+            initialize_frame("init-double-cas-restart")).service
+        val restart_replay = dispatch_bound(restarted, durable_bound_frame(
+            "publish-double-cas-request", "index_publish", payload))
+        expect(provider_parse_frame(restart_replay.outcome.frame).payload).to_equal(first)
+
+    it "durably closes the generation when the main lifecycle CAS never converges":
+        val inner = clean_store("/tmp/simple-spipe-provider-bounded-publish-v1")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.configured(
+            authority, AlwaysPublishConflictLifecycleV1(inner: inner)).unwrap()
+        service = dispatch_bound(service,
+            initialize_frame("init-bounded-publish")).service
+        val applied = apply_empty(service, "apply-bounded-publish")
+        service = applied.0
+        val candidate_uid = candidate_value(applied.1, "candidate_uid")
+        val candidate_root = candidate_value(applied.1,
+            "candidate_logical_root")
+        val payload = publish_payload("publish-bounded-publish",
+            candidate_uid, candidate_root)
+        val contended = dispatch_bound(service, durable_bound_frame(
+            "request-bounded-publish", "index_publish", payload))
+        val durable_close = provider_parse_frame(contended.outcome.frame).payload
+        expect(durable_close).to_contain("\"code\":\"fatal_provider_error\"")
+        expect(contended.service.state.generation_quarantined).to_be(true)
+        expect(inner.load().unwrap()).to_contain("\"state\":\"staged\"")
+        expect(inner.load_generation_quarantine(1).unwrap()).to_contain(
+            "\"schema\":\"spipe-provider-generation-quarantine-v1\"")
+        var resumed = SpipeProviderServiceV1.configured(authority, inner).unwrap()
+        resumed = dispatch_bound(resumed,
+            initialize_frame("init-bounded-publish-resume")).service
+        expect(resumed.state.generation_quarantined).to_be(true)
+        val replayed = dispatch_bound(resumed, durable_bound_frame(
+            "request-bounded-publish", "index_publish", payload))
+        expect(provider_parse_frame(replayed.outcome.frame).payload).to_equal(
+            durable_close)
+        val denied = apply_empty(replayed.service,
+            "apply-after-bounded-quarantine")
+        expect(denied.1).to_contain("\"code\":\"fatal_provider_error\"")
+
+    it "bounds terminal-journal contention and later records the exact loser":
+        val inner = clean_store("/tmp/simple-spipe-provider-bounded-journal-v1")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var winner = SpipeProviderServiceV1.configured(authority, inner).unwrap()
+        winner = dispatch_bound(winner,
+            initialize_frame("init-bounded-journal-winner")).service
+        val applied = apply_empty(winner, "apply-bounded-journal")
+        winner = applied.0
+        val candidate_uid = candidate_value(applied.1, "candidate_uid")
+        val candidate_root = candidate_value(applied.1,
+            "candidate_logical_root")
+        val winning_payload = publish_payload("publish-bounded-journal-winner",
+            candidate_uid, candidate_root)
+        winner = dispatch_bound(winner, durable_bound_frame(
+            "request-bounded-journal-winner", "index_publish",
+            winning_payload)).service
+        val losing_payload = publish_payload("publish-bounded-journal-loser",
+            candidate_uid, candidate_root)
+        var contender = SpipeProviderServiceV1.configured(authority,
+            AlwaysTerminalJournalConflictLifecycleV1(inner: inner)).unwrap()
+        contender = dispatch_bound(contender,
+            initialize_frame("init-bounded-journal-contender")).service
+        val contended = dispatch_bound(contender, durable_bound_frame(
+            "request-bounded-journal-loser", "index_publish", losing_payload))
+        expect(provider_parse_frame(contended.outcome.frame).payload).to_contain(
+            "\"code\":\"internal_error\"")
+        var resumed = SpipeProviderServiceV1.configured(authority, inner).unwrap()
+        resumed = dispatch_bound(resumed,
+            initialize_frame("init-bounded-journal-resume")).service
+        val recorded = dispatch_bound(resumed, durable_bound_frame(
+            "request-bounded-journal-loser", "index_publish", losing_payload))
+        val durable = provider_parse_frame(recorded.outcome.frame).payload
+        expect(durable).to_contain("\"code\":\"stale_base\"")
+        val replayed = dispatch_bound(recorded.service, durable_bound_frame(
+            "request-bounded-journal-loser", "index_publish", losing_payload))
+        expect(provider_parse_frame(replayed.outcome.frame).payload).to_equal(durable)
+
+    it "keeps a restored published root when create is requested again":
+        val store = clean_store("/tmp/simple-spipe-provider-open-create-v1")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        var service = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        service = dispatch_bound(service,
+            initialize_frame("init-open-create")).service
+        val applied = apply_one_document(service, "apply-open-create")
+        service = applied.0
+        val candidate_uid = candidate_value(applied.1, "candidate_uid")
+        val candidate_root = candidate_value(applied.1,
+            "candidate_logical_root")
+        service = dispatch_bound(service, durable_bound_frame(
+            "request-publish-open-create", "index_publish",
+            publish_payload("publish-open-create", candidate_uid,
+                candidate_root))).service
+        var restarted = SpipeProviderServiceV1.configured(authority, store).unwrap()
+        restarted = dispatch_bound(restarted,
+            initialize_frame("init-open-create-restart")).service
+        expect(restarted.state.logical_root).to_equal(candidate_root)
+        expect(restarted.state.snapshot_value.documents.len()).to_equal(1)
+        val reopened = dispatch_bound(restarted, durable_bound_frame(
+            "open-create-restart", "index_open",
+            "{\"logical_root\":null,\"mode\":\"create\"}"))
+        expect(reopened.service.state.logical_root).to_equal(candidate_root)
+        expect(reopened.service.state.snapshot_value.documents.len()).to_equal(1)
+        val response = provider_parse_frame(reopened.outcome.frame).payload
+        expect(response).to_contain("\"logical_root\":\"" + candidate_root + "\"")
+        expect(response).to_contain("\"state\":\"opened\"")
+
+    it "persists expiry and byte-identically replays the losing publish error":
+        val store = clean_store("/tmp/simple-spipe-provider-expiry-v2")
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(durable_seed(), "AUTH-DURABLE", 1).unwrap()
+        val candidate_authority = PureEd25519ReceiptAuthorityV1.test_only(
+            durable_seed(), "CANDIDATE-AUTH-DURABLE", 7).unwrap()
+        var service = SpipeProviderServiceV1.configured_with_authorities(
+            authority, candidate_authority, store).unwrap()
+        val initialize_dispatch = dispatch_bound(service, initialize_frame("init-expiry"))
+        service = initialize_dispatch.service
+        val initialized = initialize_dispatch.outcome
+        expect(initialized.write_response).to_equal(true)
+        val open_dispatch = dispatch_bound(service, durable_bound_frame("open-expiry", "index_open", "{\"logical_root\":null,\"mode\":\"create\"}"))
+        service = open_dispatch.service
+        val opened = open_dispatch.outcome
+        expect(opened.write_response).to_equal(true)
+        val apply_dispatch = apply_empty(service, "apply-expiry")
+        service = apply_dispatch.0
+        val applied = apply_dispatch.1
+        val candidate_uid = candidate_value(applied, "candidate_uid")
+        val candidate_root = candidate_value(applied, "candidate_logical_root")
+        val expires_at_ms = service.candidate_expiry_binding(candidate_uid).unwrap().5
+        expect(provider_expire_candidate(service, candidate_uid,
+            expires_at_ms - 1).is_err()).to_be(true)
+        expect(provider_expire_candidate(service, candidate_uid,
+            300002).is_err()).to_be(true)
+        expect(provider_expire_candidate(service, candidate_uid,
+            0 - 1).is_err()).to_be(true)
+        val expired = provider_expire_candidate(service, candidate_uid, expires_at_ms).unwrap()
+        service = expired.service
+        expect(expired.receipt).to_contain("\"outcome\":\"expired\"")
+        expect(expired.receipt).to_contain(
+            "\"authority_id\":\"CANDIDATE-AUTH-DURABLE\"")
+        expect(expired.receipt).to_contain("\"authority_generation\":7")
+        expect(validate_candidate_expiry_receipt(
+            candidate_authority, expired.receipt)).to_be(true)
+        expect(validate_candidate_expiry_receipt(candidate_authority,
+            expired.receipt.replace("\"policy_version\":1",
+                "\"policy_version\":2"))).to_be(false)
+        expect(validate_candidate_expiry_receipt(candidate_authority,
+            expired.receipt.replace("\"revocation_generation\":0",
+                "\"revocation_generation\":1"))).to_be(false)
+        expect(validate_candidate_expiry_receipt(candidate_authority,
+            expired.receipt.replace("{", "{ "))).to_be(false)
+        expect(validate_candidate_expiry_receipt(candidate_authority,
+            expired.receipt.replace("\"workspace\":",
+                "\"unknown\":0,\"workspace\":"))).to_be(false)
+        val payload = publish_payload("publish-expired", candidate_uid, candidate_root)
+        val first_dispatch = dispatch_bound(service,
+            durable_bound_frame("publish-expired-request", "index_publish", payload))
+        service = first_dispatch.service
+        val first = provider_parse_frame(first_dispatch.outcome.frame).payload
+        val replay_dispatch = dispatch_bound(service,
+            durable_bound_frame("publish-expired-request", "index_publish", payload))
+        service = replay_dispatch.service
+        val replay = provider_parse_frame(replay_dispatch.outcome.frame).payload
+        expect(first).to_contain("\"code\":\"candidate_expired\"")
+        expect(replay).to_equal(first)
+        val durable = service.lifecycle_json()
+        expect(durable).to_contain("\"schema\":\"spipe-durable-terminal-error-v1\"")
+        expect(durable).to_contain("\"observed_terminal_state\":\"expired\"")
+        expect(durable).to_contain("\"observed_terminal_receipt_kind\":\"candidate_expiry\"")
+        expect_restore_mutations_rejected(service, durable, [
+            ("\\\"operation_receipt\\\":null", "\\\"operation_receipt\\\":{}"),
+            ("\\\"query_receipt\\\":null", "\\\"query_receipt\\\":{}"),
+            ("\\\"ok\\\":false", "\\\"ok\\\":true"),
+            ("\\\"code\\\":\\\"candidate_expired\\\"",
+             "\\\"code\\\":\\\"internal_error\\\""),
+            ("\\\"retryable\\\":false", "\\\"retryable\\\":true"),
+            ("\\\"provider_generation\\\":\\\"pg-00000000000000000000000000000001\\\"",
+             "\\\"provider_generation\\\":\\\"pg-00000000000000000000000000000002\\\""),
+            ("\"payload_hash\":\"sha256:", "\"payload_hash\":\"SHA256:"),
+            ("\"operation_id\":\"publish-expired\"",
+             "\"operation_id\":\"publish-expired\\u0001\""),
+            ("\"recorded_at_ms\":", "\"recorded_at_ms\":-")
+        ])

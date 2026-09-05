@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+# The old std.nogc_async_mut.async.sffi module declared an opaque byte-array
+# future/promise ABI with no C, Rust, or interpreter provider.  Native fallback
+# stubs could fabricate zero/empty results.  Canonical async is pure Simple;
+# keep the providerless ABI and its stub permissions deleted.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+legacy="$root/src/lib/nogc_async_mut/async/sffi.spl"
+stubs="$root/src/compiler_rust/compiler/src/linker/native_binary/stubs.rs"
+
+[ ! -e "$legacy" ]
+
+if rg -q --glob '*.spl' --glob '!**/vendor/**' \
+    'nogc_async_mut\.async\.sffi' "$root/src" "$root/test"; then
+    echo 'removed providerless async SFFI module is still imported' >&2
+    exit 1
+fi
+
+for symbol in future_alloc_ready future_map future_then; do
+    if rg -q "^[[:space:]]*\"$symbol\",$" "$stubs"; then
+        echo "providerless async SFFI zero-stub permission returned: $symbol" >&2
+        exit 1
+    fi
+done
+
+for owner in \
+    src/lib/nogc_async_mut/async/future.spl \
+    src/lib/nogc_async_mut/async/promise.spl \
+    src/lib/nogc_async_mut/async/io.spl
+do
+    [ -f "$root/$owner" ]
+    if rg -q 'extern fn (future_|promise_|async_)' "$root/$owner"; then
+        echo "canonical pure-Simple async owner gained a raw extern: $owner" >&2
+        exit 1
+    fi
+done
+
+rg -q 'class Future<T>:' "$root/src/lib/nogc_async_mut/async/future.spl"
+rg -q 'class Promise<T>:' "$root/src/lib/nogc_async_mut/async/promise.spl"
+rg -q 'class AsyncIO:' "$root/src/lib/nogc_async_mut/async/io.spl"
+
+echo 'providerless async SFFI authority: PASS (legacy module/imports and 3 zero-stub permissions absent; canonical async remains pure Simple)'

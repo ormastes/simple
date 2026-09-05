@@ -1,0 +1,102 @@
+# Environment Operations - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+# The environment snapshot is runtime-owned and may fail allocation. Preserve
+# its tuple-array representation; converting it to a Dict here would both lie
+# about the ABI and allocate on every snapshot.
+@unsafe(reason: "raw nullable environment snapshot returns a runtime-owned tuple array", capabilities: [ffi])
+extern fn rt_env_vars() -> [(text, text)]?
+use std.io_runtime.{process_run, env_set_process, env_get_opt}
+use std.io_runtime.{cwd_process}
+
+@always_inline
+fn _env_vars_raw() -> [(text, text)]?:
+    unsafe(capabilities: [ffi]):
+        rt_env_vars()
+
+# Platform detection - inlined to avoid bootstrap runtime limitations
+fn _is_windows_platform() -> bool:
+    val os_env = env_get_opt("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+# --- Shell helpers (local copies to avoid circular imports) ---
+
+fn _env_shell(command: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", command])
+
+# reason: positional io env_ops API
+fn _env_shell_output_trimmed(command: text, default: text) -> text:
+    val (out, err, code) = _env_shell(command)
+    if code == 0:
+        out.trim()
+    else:
+        default
+
+# ============================================================================
+# Environment Functions
+# ============================================================================
+
+# `rt_env_get` yields nil for an UNSET variable. TOTAL with the documented
+# default "": this symbol is re-exported as `std.io.env_get` across a very
+# wide surface whose call sites index/concatenate the result, so it follows
+# std.io_runtime.env_get's established ""-for-unset convention rather than
+# widening. Callers that must tell unset from explicitly-empty use
+# std.io_runtime.env_get_opt, which is nil-for-unset by construction.
+fn env_get(key: text) -> text:
+    env_get_opt(key) ?? ""
+
+# reason: positional io env_ops API
+fn env_set(key: text, value: text) -> bool:
+    env_set_process(key, value)
+
+fn cwd() -> text:
+    cwd_process()
+
+# TOTAL with the documented default "": HOME unset is reported as empty,
+# matching std.io_runtime.env_get's documented ""-for-unset convention.
+# Callers needing to distinguish unset use std.io_runtime.env_get_opt.
+fn home() -> text:
+    env_get_opt("HOME") ?? ""
+
+@unsafe(reason: "environment snapshot ownership and allocation failure remain visible to the caller", capabilities: [ffi])
+fn env_vars() -> [(text, text)]?:
+    _env_vars_raw()
+
+fn host_arch() -> text:
+    if _is_windows_platform():
+        val proc_arch = env_get("PROCESSOR_ARCHITECTURE")
+        if proc_arch != "":
+            match proc_arch.lower():
+                case "amd64" | "x64": "x86_64"
+                case "x86": "i686"
+                case "arm64": "aarch64"
+                case "arm": "arm"
+                case _: "x86_64"
+        else:
+            "x86_64"
+    else:
+        val arch = _env_shell_output_trimmed("uname -m", "x86_64")
+        match arch:
+            case "x86_64" | "amd64": "x86_64"
+            case "i686" | "i386" | "i586": "i686"
+            case "aarch64" | "arm64": "aarch64"
+            case "armv7l" | "armv7" | "arm": "armv7"
+            case "riscv64": "riscv64"
+            case "riscv32": "riscv32"
+            case _: arch
+
+fn host_os() -> text:
+    if _is_windows_platform():
+        "windows"
+    else:
+        val os = _env_shell_output_trimmed("uname -s", "linux")
+        match os:
+            case "Linux": "linux"
+            case "Darwin": "macos"
+            case "FreeBSD": "freebsd"
+            case "OpenBSD": "openbsd"
+            case "NetBSD": "netbsd"
+            case _: os.lower()

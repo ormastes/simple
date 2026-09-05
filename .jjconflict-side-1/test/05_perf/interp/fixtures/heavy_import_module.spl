@@ -1,0 +1,41 @@
+# Fixture for intra_module_call_env_cache_spec: a module that pulls in a big
+# slice of the compiler graph (driver_bootstrap) and then makes intra-module
+# calls. Nothing from the import is used; the import only makes the module's
+# global binding set large.
+use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
+
+fn count_char(s: text, code: i64) -> i64:
+    var count: i64 = 0
+    var i: i64 = 0
+    val n = s.len()
+    while i < n:
+        if s.char_code_at(i) == code:
+            count = count + 1
+        i = i + 1
+    count
+
+pub fn intra_module_calls(n: i64) -> i64:
+    var i = 0
+    var acc = 0
+    while i < n:
+        acc = acc + count_char("    fn hello(world: i64) -> i64:", 40)
+        i = i + 1
+    acc
+
+fn is_def_line(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ")
+
+pub fn push_and_call_loop(n: i64) -> i64:
+    # Each iteration grows a frame-local array AND calls a module fn. Pre-fix
+    # the method-call write-through took an unconditional write borrow on
+    # MODULE_GLOBALS, bumping the env-cache generation, so every call after a
+    # push rebuilt the callee env (~1.5 ms). n=2000 took ~3 s; post-fix ~50 ms.
+    var out: [text] = []
+    var hits = 0
+    var i = 0
+    while i < n:
+        out = out.push("line {i}")
+        if is_def_line("    fn hello(world: i64) -> i64:".trim()):
+            hits = hits + 1
+        i = i + 1
+    hits + out.len() - n

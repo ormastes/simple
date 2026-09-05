@@ -1,0 +1,221 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/qemu_systest_contract_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/qemu_systest_contract_spec.md
+# doc-path: doc/03_plan/sys_test/qemu_systest_contract_spec.md
+# doc-path: doc/04_architecture/qemu_systest_contract_spec.md
+# doc-path: doc/05_design/qemu_systest_contract_spec_oracles.md
+# @manual: primary
+
+"""
+QEMU Systest Contract — Pure Classifier Unit Tests.
+
+**Feature IDs:** #QEMU-SYSTEST-MULTIARCH-AC1
+**Category:** OS system test infrastructure
+
+Verifies classify_serial logic with no QEMU needed.
+Tests all four classification outcomes:
+  pass, boot-fail:fallback, boot-fail:<marker>, missing-media is not tested
+  here (that requires file system — tested in system specs).
+"""
+use std.spec.step
+
+use std.spec.*
+use os.qemu_systest_contract.{
+
+    classify_serial,
+    classify_serial_with_nonce,
+    qemu_args_with_accelerator,
+    qemu_args_with_run_image,
+    qemu_nonce_serial_marker,
+    SYSTEST_PASS,
+    SYSTEST_BOOT_FAIL_FALLBACK,
+    riscv64_markers,
+    arm32_markers,
+    x86_32_markers
+}
+
+describe "qemu runner controls":
+    it "appends the admitted accelerator to actual QEMU argv":
+        expect(qemu_args_with_accelerator(["-machine", "virt"], "tcg")).to_equal(["-machine", "virt", "-accel", "tcg"])
+
+    it "rejects unsupported accelerators before launch":
+        expect(qemu_args_with_accelerator(["-machine", "virt"], "metadata-only").len()).to_equal(0)
+
+    it "accepts only a transcript containing the requested nonce":
+        expect(qemu_nonce_serial_marker("nonce-123")).to_equal("SIMPLEOS_QEMU_NONCE=nonce-123")
+        expect(classify_serial_with_nonce("SIMPLEOS_QEMU_NONCE=nonce-123\nTEST PASSED\n", ["TEST PASSED"], "nonce-123")).to_equal(SYSTEST_PASS)
+        expect(classify_serial_with_nonce("TEST PASSED\n", ["TEST PASSED"], "nonce-123")).to_equal("boot-fail:nonce-unsupported")
+
+    it "rewrites exactly one descriptor image reference":
+        val args = qemu_args_with_run_image(["-drive", "file=base.img,if=none", "-kernel", "kernel.elf"], "base.img", "run.img")
+        expect(args).to_contain("file=run.img,if=none")
+        expect(qemu_args_with_run_image(["-kernel", "kernel.elf"], "base.img", "run.img").len()).to_equal(0)
+
+    it "reserves enough RAM for the x86_64 one-gibibyte baremetal heap":
+        expect(x86_64_qemu_args()).to_contain("2G")
+
+fn _clean_serial() -> text:
+    "SimpleOS RV64 boot OK\nFS_LS_BEGIN path=/SYS/APPS\nFS_LS_ENTRY name=FSEXEC.ELF\nFS_LS_END status=pass\nFS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=riscv64\nSIMPLEOS_FS_EXEC_OK arch=riscv64 nonce=fixture\nFS_PROGRAM_END rc=37 reaped=true\nTEST PASSED\n"
+
+fn _fallback_serial_resident_active() -> text:
+    "ELF_LOAD_OK\nSMF_CLI_LAUNCH_OK\n[desktop-e2e] resident-fallback:active\nTEST PASSED\n"
+
+fn _fallback_serial_launcher() -> text:
+    "ELF_LOAD_OK\n[launcher] fallback=resident-manifest\nSMF_WM_GUI_LAUNCH_OK\nTEST PASSED\n"
+
+fn _missing_marker_serial() -> text:
+    "ELF_LOAD_OK\nSMF_CLI_LAUNCH_OK\nSMF_WM_GUI_LAUNCH_OK\n"
+
+fn _x86_32_clean_serial() -> text:
+    "SimpleOS x86_32 boot OK\nFS_LS_BEGIN path=/SYS/APPS\nFS_LS_ENTRY name=HELLOSMF.SMF\nFS_LS_END status=pass\nFS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_32\nSIMPLEOS_FS_EXEC_OK arch=x86_32 nonce=unit\nFS_PROGRAM_END rc=37 reaped=true\nTEST PASSED\n"
+
+fn _x86_32_legacy_probe_serial() -> text:
+    "[x86_32 fs] initrd fat32 ok\n[x86_32 fs] hello_world smf ok\n[x86_32 fs] browser smf ok\n[x86_32 fs] x86_32 payload ok\n[x86_32 fs] app execution ok\nTEST PASSED\n"
+
+fn _arm32_nvfs_smf_probe_serial() -> text:
+    "SimpleOS ARM32 boot OK\n[arm32-nvfs] image read ok\nFS_MOUNT_OK\nSMF_DISCOVERY_OK\nELF_LOAD_OK arch=arm32 app=/sys/apps/hello_world.smf\nSMF_CLI_LAUNCH_OK app=/sys/apps/hello_world.smf\nSMF_WM_GUI_LAUNCH_OK app=/sys/apps/browser_demo.smf pid=1002\nNATIVE_GUI_PROCESS_RENDER_OK app=/sys/apps/browser_demo.smf pid=1002\nTEST PASSED\n"
+
+# ---------------------------------------------------------------------------
+# classify_serial — pass cases
+# ---------------------------------------------------------------------------
+
+describe "classify_serial — pass":
+    # @manual scenario evidence
+
+    it "returns pass when all riscv64 markers present and no fallback":
+        # @req REQ-SSPEC-UNIT
+        step("returns pass when all riscv64 markers present and no fallback")
+        val markers = riscv64_markers()
+        val result = classify_serial(_clean_serial(), markers)
+        expect(result).to_equal(SYSTEST_PASS)
+
+    it "returns pass when all x86_32 markers present and no fallback":
+        # @req REQ-SSPEC-UNIT
+        step("returns pass when all x86_32 markers present and no fallback")
+        val markers = x86_32_markers()
+        val result = classify_serial(_x86_32_clean_serial(), markers)
+        expect(result).to_equal(SYSTEST_PASS)
+
+    it "rejects the legacy same-CPL x86_32 initrd probe as fs-exec evidence":
+        val markers = x86_32_markers()
+        val result = classify_serial(_x86_32_legacy_probe_serial(), markers)
+        expect(result).to_equal("boot-fail:SimpleOS x86_32 boot OK")
+
+    it "rejects the ARM32 NVFS/SMF probe as filesystem-exec evidence":
+        val markers = arm32_markers()
+        val result = classify_serial(_arm32_nvfs_smf_probe_serial(), markers)
+        expect(result).to_equal("boot-fail:FS_LS_BEGIN path=/SYS/APPS")
+
+    it "returns pass for minimal one-marker list when marker present":
+        # @req REQ-SSPEC-UNIT
+        step("returns pass for minimal one-marker list when marker present")
+        val markers = ["ELF_LOAD_OK"]
+        val result = classify_serial("ELF_LOAD_OK\nTEST PASSED\n", markers)
+        expect(result).to_equal(SYSTEST_PASS)
+
+# ---------------------------------------------------------------------------
+# classify_serial — fallback detection
+# ---------------------------------------------------------------------------
+
+describe "classify_serial — fallback":
+
+    it "returns boot-fail:fallback when resident-fallback:active pattern present":
+        # @req REQ-SSPEC-UNIT
+        step("returns boot-fail:fallback when resident-fallback:active pattern present")
+        val markers = riscv64_markers()
+        val result = classify_serial(_fallback_serial_resident_active(), markers)
+        expect(result).to_equal(SYSTEST_BOOT_FAIL_FALLBACK)
+
+    it "returns boot-fail:fallback when launcher fallback=resident-manifest present":
+        # @req REQ-SSPEC-UNIT
+        step("returns boot-fail:fallback when launcher fallback=resident-manifest present")
+        val markers = riscv64_markers()
+        val result = classify_serial(_fallback_serial_launcher(), markers)
+        expect(result).to_equal(SYSTEST_BOOT_FAIL_FALLBACK)
+
+    it "fallback check precedes marker check":
+        # @req REQ-SSPEC-UNIT
+        step("fallback check precedes marker check")
+        # serial has fallback pattern but also missing markers
+        val markers = riscv64_markers()
+        val serial = "[desktop-e2e] resident-fallback:active\nELF_LOAD_OK\n"
+        val result = classify_serial(serial, markers)
+        expect(result).to_equal(SYSTEST_BOOT_FAIL_FALLBACK)
+
+# ---------------------------------------------------------------------------
+# classify_serial — missing marker
+# ---------------------------------------------------------------------------
+
+describe "classify_serial — missing marker":
+
+    it "returns boot-fail:<marker> for first missing riscv64 marker":
+        # @req REQ-SSPEC-UNIT
+        step("returns boot-fail:<marker> for first missing riscv64 marker")
+        val markers = riscv64_markers()
+        val result = classify_serial(_missing_marker_serial(), markers)
+        expect(result).to_equal("boot-fail:SimpleOS RV64 boot OK")
+
+    it "returns boot-fail:<marker> for first missing x86_32 marker":
+        # @req REQ-SSPEC-UNIT
+        step("returns boot-fail:<marker> for first missing x86_32 marker")
+        val markers = x86_32_markers()
+        val result = classify_serial("SimpleOS x86_32 boot OK\n", markers)
+        expect(result).to_equal("boot-fail:FS_LS_BEGIN path=/SYS/APPS")
+
+    it "returns boot-fail:<marker> when no markers present":
+        # @req REQ-SSPEC-UNIT
+        step("returns boot-fail:<marker> when no markers present")
+        val markers = ["MARKER_A", "MARKER_B"]
+        val result = classify_serial("", markers)
+        expect(result).to_equal("boot-fail:MARKER_A")
+
+    it "returns boot-fail:<marker> for empty serial with riscv64 markers":
+        # @req REQ-SSPEC-UNIT
+        step("returns boot-fail:<marker> for empty serial with riscv64 markers")
+        val markers = riscv64_markers()
+        val result = classify_serial("", markers)
+        expect(result).to_equal("boot-fail:SimpleOS RV64 boot OK")
+
+# ---------------------------------------------------------------------------
+# classify_serial — edge cases
+# ---------------------------------------------------------------------------
+
+describe "classify_serial — edge cases":
+
+    it "empty marker list with clean serial returns pass":
+        # @req REQ-SSPEC-UNIT
+        step("empty marker list with clean serial returns pass")
+        val markers: [text] = []
+        val result = classify_serial(_clean_serial(), markers)
+        expect(result).to_equal(SYSTEST_PASS)
+
+    it "empty marker list with fallback serial returns boot-fail:fallback":
+        # @req REQ-SSPEC-UNIT
+        step("empty marker list with fallback serial returns boot-fail:fallback")
+        val markers: [text] = []
+        val result = classify_serial(_fallback_serial_resident_active(), markers)
+        expect(result).to_equal(SYSTEST_BOOT_FAIL_FALLBACK)
+
+    it "partial marker match returns fail for first missing":
+        # @req REQ-SSPEC-UNIT
+        step("partial marker match returns fail for first missing")
+        val markers = ["A", "B", "C"]
+        val result = classify_serial("A\nB\n", markers)
+        expect(result).to_equal("boot-fail:C")

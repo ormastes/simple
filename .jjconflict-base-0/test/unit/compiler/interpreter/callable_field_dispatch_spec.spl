@@ -1,0 +1,79 @@
+"""
+## Purpose and audience
+Purpose: Prove that interpreter callable-field dispatch.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-INTERPRETER-001 — stable requirement identity for this spec.
+
+use std.spec
+
+# Generalization spec for the interpreter's callable-FIELD method-call syntax.
+#
+# Repro: test/01_unit/compiler/interpreter/fn_field_call_spec.spl
+#   "calls a function stored in an object field with method-call syntax" fails
+#   with "method `handler` not found on class `FnFieldRoute`".
+#
+# Fix: src/compiler_rust/compiler/src/interpreter_method/mod.rs
+#   The Value::Object arm of `evaluate_method_call` already fell back to a
+#   same-named callable field, but only for Value::Lambda and Value::Function.
+#   Every other callable shape fell through to the not-found error. The fallback
+#   now routes the remaining shapes through `call_value_as_callable`, the single
+#   place that knows which Value variants are invocable.
+#
+# The invariant this spec pins is the general one, not the one reported case:
+# `obj.f(args)` and `(obj.f)(args)` must agree whenever `f` is a field holding
+# something callable.
+
+class FnFieldRoute:
+    handler: fn(i32) -> i32
+
+class LambdaFieldRoute:
+    handler: fn(i32) -> i32
+
+class TwoArgRoute:
+    combine: fn(i32, i32) -> i32
+
+class ShadowingRoute:
+    # A field whose name also exists as a free function: the FIELD must win,
+    # because the receiver-qualified form names the field.
+    scale: fn(i32) -> i32
+
+fn plus_one(x: i32) -> i32:
+    x + 1
+
+fn add(a: i32, b: i32) -> i32:
+    a + b
+
+fn scale(x: i32) -> i32:
+    x * 100
+
+fn field_scale(x: i32) -> i32:
+    x * 2
+
+describe "interpreter callable-field dispatch":
+    it "agrees between method-call syntax and extract-then-call for a named fn":
+        step("Verify: agrees between method-call syntax and extract-then-call for a named fn")
+        # @req: REQ-COMPILER-INTERPRETER-001
+        val route = FnFieldRoute(handler: plus_one)
+        val extracted = route.handler
+        expect(route.handler(41)).to_equal(42)  # oracle: 42 — named expected value from the requirement
+        expect(extracted(41)).to_equal(42)  # oracle: 42 — named expected value from the requirement
+        expect(route.handler(41)).to_equal(extracted(41))
+
+    it "agrees for a lambda-valued field":
+        step("Verify: agrees for a lambda-valued field")
+        val route = LambdaFieldRoute(handler: fn(x: i32) -> i32: x + 1)
+        val extracted = route.handler
+        expect(route.handler(41)).to_equal(42)  # oracle: 42 — named expected value from the requirement
+        expect(extracted(41)).to_equal(42)  # oracle: 42 — named expected value from the requirement
+
+    it "passes every argument to a multi-argument callable field":
+        step("Verify: passes every argument to a multi-argument callable field")
+        val route = TwoArgRoute(combine: add)
+        expect(route.combine(40, 2)).to_equal(42)  # oracle: 42 — named expected value from the requirement
+
+    it "prefers the field over a same-named free function":
+        step("Verify: prefers the field over a same-named free function")
+        val route = ShadowingRoute(scale: field_scale)
+        expect(route.scale(21)).to_equal(42)  # oracle: 42 — named expected value from the requirement
+        expect(scale(21)).to_equal(2100)  # oracle: 2100 — named expected value from the requirement

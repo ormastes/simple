@@ -1,0 +1,119 @@
+#!/bin/sh
+# Guard: every ParserModule construction site must pass `friends:` and
+# `internal_exports:` EXPLICITLY.
+#
+# Why this exists (incident 2026-08-23,
+# doc/08_tracking/bug/stage3_module_surface_promote_nil_authority_arrays_2026-08-23.md):
+# `parser_module_new` declares `friends: [text] = []` / `internal_exports:
+# [text] = []` as TRAILING DEFAULT parameters, and `ParserModule` declares the
+# same two as defaulted FIELDS. Two call sites omitted both and relied on the
+# default. Under the Rust seed that works. Under the stage-2 self-hosted native
+# compiler the trailing-default pad
+# (src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl,
+# pad_trailing_default_args) did not fire for this cross-module callee, and both
+# slots arrived as NIL rather than []. That nil flowed into
+# module_surface_promote, whose rt_transient_heap_promote(nil) returns false,
+# and Stage 3 of the bootstrap aborted on the FIRST source file it parsed.
+#
+# This is a source-level guard, not a unit spec, deliberately: a spec runs
+# inside an already-deployed `simple` that carries its own compiled copy of
+# src/compiler, so it cannot observe an edit to compiler source. Only a check
+# that reads the source text can discriminate here.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  - <n> site(s) checked, 0 relying on defaults   (exit 0)
+#   FAIL  - ...                                          (exit 1)
+#   ERROR - nothing was checked                          (exit 2)
+# A run that inspected 0 sites is ERROR, never a pass.
+
+set -u
+ROOT=${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+
+scan() {
+    # $1 = tree root. Prints one "path:line:status" per construction site.
+    scan_root=$1
+    grep -rlE 'parser_module_new\(|ParserModule\(' "$scan_root/src" --include='*.spl' 2>/dev/null | sort | while read -r f; do
+        awk -v path="$f" '
+            /parser_module_new\(|ParserModule\(/ {
+                if ($0 ~ /^[[:space:]]*#/) next
+                open_line = FNR; buf = ""; depth = 0; started = 0
+            }
+            {
+                if (open_line != "" && FNR >= open_line) {
+                    buf = buf "\n" $0
+                    n = gsub(/\(/, "(") ; m = gsub(/\)/, ")")
+                    depth += n - m; started = 1
+                    if (started && depth <= 0) {
+                        has_f = (buf ~ /friends[[:space:]]*:/)
+                        has_i = (buf ~ /internal_exports[[:space:]]*:/)
+                        # A declaration (fn parser_module_new(...)) is not a site.
+                        is_decl = (buf ~ /fn[[:space:]]+parser_module_new/)
+                        if (!is_decl) {
+                            if (has_f && has_i)
+                                printf "%s:%d:OK\n", path, open_line
+                            else
+                                printf "%s:%d:DEFAULTED\n", path, open_line
+                        }
+                        open_line = ""
+                    }
+                }
+            }
+        ' "$f"
+    done
+}
+
+selftest() {
+    st=$(mktemp -d)
+    mkdir -p "$st/good/src" "$st/bad/src"
+    cat > "$st/good/src/a.spl" <<'EOF'
+fn f() -> ParserModule:
+    parser_module_new(
+        name: "x",
+        friends: [],
+        internal_exports: []
+    )
+EOF
+    cat > "$st/bad/src/a.spl" <<'EOF'
+fn f() -> ParserModule:
+    parser_module_new(
+        name: "x",
+        layer_dag_edges: ""
+    )
+EOF
+    g=$(scan "$st/good" | grep -c DEFAULTED)
+    b=$(scan "$st/bad" | grep -c DEFAULTED)
+    gok=$(scan "$st/good" | grep -c OK)
+    empty=$(mktemp -d); mkdir -p "$empty/src"
+    e=$(scan "$empty" | wc -l)
+    rm -rf "$st" "$empty"
+    if [ "$g" -ne 0 ]; then echo "selftest: explicit site wrongly flagged"; return 1; fi
+    if [ "$gok" -ne 1 ]; then echo "selftest: explicit site not counted"; return 1; fi
+    if [ "$b" -ne 1 ]; then echo "selftest: defaulted site not flagged"; return 1; fi
+    if [ "$e" -ne 0 ]; then echo "selftest: empty tree produced sites"; return 1; fi
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR - nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS - selftest only, 4 fixture(s) checked, 0 relying on defaults"
+    exit 0
+fi
+
+RESULTS=$(scan "$ROOT")
+TOTAL=$(printf '%s\n' "$RESULTS" | grep -c ':OK$\|:DEFAULTED$')
+BAD=$(printf '%s\n' "$RESULTS" | grep ':DEFAULTED$' | sed 's/:DEFAULTED$//' | tr '\n' ' ')
+BADN=$(printf '%s\n' "$RESULTS" | grep -c ':DEFAULTED$')
+
+if [ "$TOTAL" -eq 0 ]; then
+    echo "ERROR - nothing was checked (0 ParserModule construction sites found under $ROOT/src)"
+    exit 2
+fi
+if [ "$BADN" -ne 0 ]; then
+    echo "FAIL - $TOTAL site(s) checked, $BADN relying on friends/internal_exports defaults: $BAD"
+    exit 1
+fi
+echo "PASS - $TOTAL site(s) checked, 0 relying on defaults"
+exit 0

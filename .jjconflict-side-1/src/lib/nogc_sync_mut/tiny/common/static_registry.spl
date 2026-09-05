@@ -1,0 +1,68 @@
+# codex-impl
+
+use std.tiny.common.abi.{TinyClassDescriptorV1, TinyModuleV1, tiny_module_validate}
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_INVALID}
+
+const TINY_REGISTRY_DETAIL_MODULE_LIMIT: i32 = 1
+const TINY_REGISTRY_DETAIL_DUPLICATE_MODULE: i32 = 2
+const TINY_REGISTRY_DETAIL_MISSING_MODULE: i32 = 3
+const TINY_REGISTRY_DETAIL_MISSING_CLASS: i32 = 4
+const TINY_REGISTRY_DETAIL_DUPLICATE_CLASS: i32 = 5
+
+class TinyStaticRegistryV1:
+    modules: [TinyModuleV1]
+    capacity: i32
+    max_classes_per_module: i32
+    max_dependencies_per_module: i32
+
+    static fn bounded(capacity: i32, max_classes_per_module: i32, max_dependencies_per_module: i32) -> TinyStaticRegistryV1:
+        TinyStaticRegistryV1(modules: [], capacity: capacity, max_classes_per_module: max_classes_per_module, max_dependencies_per_module: max_dependencies_per_module)
+
+    me register(module: TinyModuleV1) -> TinyStatus:
+        if self.capacity < 0 or self.modules.len() >= self.capacity:
+            return TinyStatus.error(TINY_ERR_CAPACITY, TINY_REGISTRY_DETAIL_MODULE_LIMIT)
+        val valid = tiny_module_validate(module, self.max_classes_per_module, self.max_dependencies_per_module)
+        if not valid.is_ok():
+            return valid
+        var i = 0
+        while i < self.modules.len():
+            if self.modules[i].module_id == module.module_id:
+                return TinyStatus.error(TINY_ERR_INVALID, TINY_REGISTRY_DETAIL_DUPLICATE_MODULE)
+            i = i + 1
+        var class_index = 0
+        while class_index < module.classes.len():
+            if self.query_class(module.classes[class_index].class_id) != nil:
+                return TinyStatus.error(TINY_ERR_INVALID, TINY_REGISTRY_DETAIL_DUPLICATE_CLASS)
+            class_index = class_index + 1
+        self.modules.push(module)
+        TinyStatus.ok()
+
+    fn query_module(module_id: i64) -> TinyModuleV1?:
+        var i = 0
+        while i < self.modules.len():
+            if self.modules[i].module_id == module_id:
+                return self.modules[i]
+            i = i + 1
+        nil
+
+    fn query_class(class_id: i64) -> TinyClassDescriptorV1?:
+        var module_index = 0
+        while module_index < self.modules.len():
+            val classes = self.modules[module_index].classes
+            var class_index = 0
+            while class_index < classes.len():
+                if classes[class_index].class_id == class_id:
+                    return classes[class_index]
+                class_index = class_index + 1
+            module_index = module_index + 1
+        nil
+
+    fn require_module(module_id: i64) -> TinyStatus:
+        if self.query_module(module_id) == nil:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_REGISTRY_DETAIL_MISSING_MODULE)
+        TinyStatus.ok()
+
+    fn require_class(class_id: i64) -> TinyStatus:
+        if self.query_class(class_id) == nil:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_REGISTRY_DETAIL_MISSING_CLASS)
+        TinyStatus.ok()

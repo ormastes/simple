@@ -1,0 +1,189 @@
+# SCV editor IPC (SCV-IMPL-E-09).
+#
+# Protocol: buffer_open / edit / save_begin / save_end / path_rename /
+# refactor_begin / refactor_entity / refactor_end / flush. The server is a
+# deterministic state machine: open-buffer bytes OVERRIDE the disk read
+# (scv_editor_read returns editor bytes without touching disk), save
+# brackets mark paths whose fs events are editor-expected, path_rename
+# rebinds the buffer, and refactor entities group into one transaction
+# event delivered at refactor_end.
+#
+# Transport: filesystem-pipe spool — the client APPENDS newline-delimited
+# escaped messages to a spool file; the server reads lines past its offset
+# on each poll. Chosen because the UDS externs
+# (std.nogc_sync_mut.service.extern) are mis-declared against the Rust
+# runtime's (ptr,len) ABI and return EINVAL / core-dump under the seed test
+# path (probed 2026-08-26).
+# TODO(SCV-IMPL-E-09): swap the spool transport for UDS
+# (rt_unix_socket_listen/accept/send/recv) once the extern text-marshaling
+# shapes are fixed in the runtime; the message codec below is transport-
+# independent and moves unchanged.
+
+use app.io.mod (file_exists, file_read, file_write, file_append)
+
+struct ScvEditorEvent:
+    kind: text
+    path: text
+    path2: text          # rename target / secondary path
+    payload: text
+    entities: [text]     # refactor_txn only: grouped entity descriptors
+
+struct ScvEditorBuffer:
+    path: text
+    bytes: text
+
+struct EditorIpc:
+    spool_path: text
+    offset: i64          # spool lines already consumed
+    buffers: [ScvEditorBuffer]
+    expected_saves: [text]
+    refactor_active: bool
+    refactor_tag: text
+    refactor_entities: [text]
+
+# --- wire codec (transport-independent) ---
+
+fn _scv_ipc_escape(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+
+fn _scv_ipc_unescape(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val c = s[i:i+1]
+        if c == "\\" and i + 1 < s.len():
+            val n = s[i+1:i+2]
+            if n == "n":
+                out = out + "\n"
+            elif n == "t":
+                out = out + "\t"
+            else:
+                out = out + n
+            i = i + 2
+        else:
+            out = out + c
+            i = i + 1
+    out
+
+fn scv_editor_msg2(kind: text, path: text, path2: text, payload: text) -> text:
+    "{_scv_ipc_escape(kind)}\t{_scv_ipc_escape(path)}\t{_scv_ipc_escape(path2)}\t{_scv_ipc_escape(payload)}"
+
+fn scv_editor_msg(kind: text, path: text, payload: text) -> text:
+    scv_editor_msg2(kind, path, "", payload)
+
+# --- client side: append one message line to the spool (filesystem pipe) ---
+
+fn scv_editor_ipc_send(spool_path: text, line: text) -> bool:
+    if file_exists(spool_path):
+        file_append(spool_path, line + "\n")
+    else:
+        file_write(spool_path, line + "\n")
+    true
+
+# --- server side ---
+
+fn scv_editor_ipc_open(spool_path: text) -> EditorIpc:
+    EditorIpc(spool_path: spool_path, offset: 0, buffers: [], expected_saves: [],
+              refactor_active: false, refactor_tag: "", refactor_entities: [])
+
+fn _scv_ipc_buffer_index(ipc: EditorIpc, path: text) -> i64:
+    var i = 0
+    while i < ipc.buffers.len():
+        if ipc.buffers[i].path == path:
+            return i
+        i = i + 1
+    -1
+
+# Editor bytes skip the disk read: an open buffer answers from memory; only
+# a path with no open buffer falls through to the filesystem.
+fn scv_editor_read(ipc: EditorIpc, path: text) -> text:
+    val i = _scv_ipc_buffer_index(ipc, path)
+    if i >= 0:
+        return ipc.buffers[i].bytes
+    if file_exists(path):
+        return file_read(path)
+    ""
+
+fn _scv_ipc_apply(ipc: EditorIpc, kind: text, path: text, path2: text, payload: text) -> (EditorIpc, [ScvEditorEvent]):
+    var next = ipc
+    var out: [ScvEditorEvent] = []
+    if kind == "buffer_open" or kind == "edit":
+        val i = _scv_ipc_buffer_index(next, path)
+        if i >= 0:
+            next.buffers[i].bytes = payload
+        else:
+            next.buffers.push(ScvEditorBuffer(path: path, bytes: payload))
+        out.push(ScvEditorEvent(kind: kind, path: path, path2: "", payload: payload, entities: []))
+    elif kind == "save_begin":
+        next.expected_saves.push(path)
+        out.push(ScvEditorEvent(kind: kind, path: path, path2: "", payload: "", entities: []))
+    elif kind == "save_end":
+        var keep: [text] = []
+        for p in next.expected_saves:
+            if p != path:
+                keep.push(p)
+        next.expected_saves = keep
+        out.push(ScvEditorEvent(kind: kind, path: path, path2: "", payload: "", entities: []))
+    elif kind == "path_rename":
+        val i = _scv_ipc_buffer_index(next, path)
+        if i >= 0:
+            next.buffers[i].path = path2
+        out.push(ScvEditorEvent(kind: kind, path: path, path2: path2, payload: "", entities: []))
+    elif kind == "refactor_begin":
+        next.refactor_active = true
+        next.refactor_tag = path
+        next.refactor_entities = []
+    elif kind == "refactor_entity":
+        if next.refactor_active:
+            next.refactor_entities.push("{path}\t{payload}")
+    elif kind == "refactor_end":
+        if next.refactor_active:
+            out.push(ScvEditorEvent(kind: "refactor_txn", path: next.refactor_tag, path2: "",
+                                    payload: "", entities: next.refactor_entities))
+        next.refactor_active = false
+        next.refactor_tag = ""
+        next.refactor_entities = []
+    else:
+        out.push(ScvEditorEvent(kind: kind, path: path, path2: path2, payload: payload, entities: []))
+    (next, out)
+
+# Read spool lines past the consumed offset and run them through the state
+# machine. Deterministic: same spool + same offset ⇒ same events.
+fn scv_editor_ipc_poll(ipc: EditorIpc) -> (EditorIpc, [ScvEditorEvent]):
+    var next = ipc
+    var out: [ScvEditorEvent] = []
+    if not file_exists(next.spool_path):
+        return (next, out)
+    val lines = file_read(next.spool_path).split("\n")
+    var i = next.offset
+    while i < lines.len():
+        val line = lines[i]
+        if line != "":
+            val parts = line.split("\t")
+            if parts.len() >= 4:
+                val (applied, evs) = _scv_ipc_apply(next, _scv_ipc_unescape(parts[0]),
+                                                    _scv_ipc_unescape(parts[1]),
+                                                    _scv_ipc_unescape(parts[2]),
+                                                    _scv_ipc_unescape(parts[3]))
+                next = applied
+                for ev in evs:
+                    out.push(ev)
+        i = i + 1
+    # A spool always ends in "\n": split leaves one trailing "" element that
+    # is NOT a consumed message — do not count it into the offset, or the
+    # next appended line lands at that index and is silently skipped.
+    if lines.len() > 0 and lines[lines.len() - 1] == "":
+        next.offset = lines.len() - 1
+    else:
+        next.offset = lines.len()
+    (next, out)
+
+# Flush: close every open buffer deliberately, reporting what was drained.
+fn scv_editor_ipc_flush(ipc: EditorIpc) -> (EditorIpc, [ScvEditorEvent]):
+    var next = ipc
+    var out: [ScvEditorEvent] = []
+    for b in next.buffers:
+        out.push(ScvEditorEvent(kind: "buffer_close", path: b.path, path2: "", payload: "", entities: []))
+    next.buffers = []
+    next.expected_saves = []
+    (next, out)

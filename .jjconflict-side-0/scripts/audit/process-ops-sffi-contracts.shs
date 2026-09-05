@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+lib_owner="$root/src/lib/nogc_sync_mut/io/process_ops.spl"
+app_owner="$root/src/app/io/process_ops.spl"
+io_provider="$root/src/compiler_rust/runtime/src/value/sffi/io_print.rs"
+file_provider="$root/src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs"
+
+check_owner() {
+    owner=$1
+    expected=$2
+    declarations=$(grep -c '^[[:space:]]*extern fn rt_' "$owner")
+    if [ "$declarations" -ne "$expected" ]; then
+        echo "process extern inventory changed without contract review: $owner" >&2
+        exit 1
+    fi
+    tagged=$(awk '
+        /^@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ { previous_is_ffi = 1; next }
+        /^[[:space:]]*extern fn rt_/ { if (previous_is_ffi) tagged++ }
+        { previous_is_ffi = 0 }
+        END { print tagged + 0 }
+    ' "$owner")
+    if [ "$tagged" -ne "$declarations" ]; then
+        echo "every process declaration must be explicitly unsafe(ffi): $owner" >&2
+        exit 1
+    fi
+}
+
+check_owner "$lib_owner" 23
+check_owner "$app_owner" 15
+
+if rg -l --glob '!vendor/**' --glob '!**/vendor/**' --glob '*.{c,cc,cpp,h,rs}' \
+    'extern "C" fn rt_browser_renderer_(spawn_sandboxed|sandbox_enter)' \
+    "$root/src/runtime" "$root/src/compiler_rust" | grep -q .; then
+    echo "browser sandbox provider appeared; review spawn ownership and sandbox policy" >&2
+    exit 1
+fi
+
+grep -q 'fn rt_stderr_write(data: i64) -> i64' "$io_provider"
+grep -q 'fn rt_stdout_flush() -> i64' "$io_provider"
+grep -q 'fn rt_stderr_flush() -> i64' "$io_provider"
+grep -q 'fn rt_file_read_text(path_ptr: \*const u8, path_len: u64) -> RuntimeValue' "$file_provider"
+
+echo "process SFFI contract audit: PASS (38 unsafe declarations; canonical ABI/status work remains)"

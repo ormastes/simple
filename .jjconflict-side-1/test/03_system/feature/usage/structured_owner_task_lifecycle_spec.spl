@@ -1,0 +1,284 @@
+# @cover src/lib/common/structural/parallel_commit//__init__.spl 0%
+"""
+# Structured Owner/Task Lifecycle
+
+**Requirements:** REQ-PAR-005, REQ-PAR-006, REQ-PAR-008, REQ-PAR-009
+
+This focused specification exercises bounded task/actor result transport,
+logical cancellation, cooperative failure notification, deterministic owner
+ordering/conflicts, channel-slot reuse, and atomic commit/rollback.
+"""
+
+use std.spec.*
+use std.actor.mailbox.{ActorMailbox, ActorMessage}
+use std.actor.structured_task_group.{
+    ActorStructuredTaskGroupV1,
+    structured_actor_result_message
+}
+use std.common.structural.parallel_commit.{
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ParallelResultKind,
+    OwnerSnapshotV1,
+    StructuredOwnerV1,
+    StructuredTaskFailureV1,
+    StructuredTaskGroupV1,
+    StructuredTaskSpecV1,
+    result_envelope_v1,
+    structured_task_wire_success
+}
+use std.concurrent.structured_task_group.{
+    RuntimeStructuredTaskGroupV1,
+    StructuredScalarWorker
+}
+use std.nogc_async_mut.process_transport.structured_task_group.{
+    ProcessStructuredTaskGroupV1,
+    structured_process_result_frame,
+    structured_process_result_wire
+}
+
+describe "bounded structured owner/task lifecycle":
+    it "rejects capacity plus one atomically and accepts an exact bounded map":
+        step("Freeze one owner snapshot and preflight capacity before spawning")
+        var owner = StructuredOwnerV1.create(11, 4, [10, 20])
+        var tasks = RuntimeStructuredTaskGroupV1.create(owner.snapshot(), 2, true)
+        val overflow = tasks.map([101, 202, 303], [1, 2, 3],
+            ParallelResultKind.Patch, "overflow",
+            StructuredScalarWorker.ReturnInput)
+        expect(overflow.accepted).to_equal(false)
+        expect(overflow.reason).to_equal("task-group-capacity-exhausted")
+        expect(tasks.reserved_count()).to_equal(0)
+
+        step("An exact-capacity scalar map joins and commits both results")
+        val accepted = tasks.map([101, 202], [1, 2],
+            ParallelResultKind.Patch, "exact",
+            StructuredScalarWorker.ReturnInput)
+        expect(accepted.accepted).to_equal(true)
+        expect(accepted.spawns.len()).to_equal(2)
+        val waited = tasks.join_all()
+        expect(waited.ready).to_equal(true)
+        expect(waited.completed).to_equal(2)
+        expect(tasks.used_runtime_pool_count() + tasks.ran_inline_count()).to_equal(2)
+        val commit = owner.commit(tasks.lifecycle_state(),
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
+        expect(commit.committed).to_equal(true)
+        expect(owner.value_at(1)).to_equal(101)
+        expect(owner.value_at(2)).to_equal(202)
+
+    it "revokes a cancelled result while still joining and freeing its channel":
+        step("Spawn, revoke the publication lease, then join the child")
+        var owner = StructuredOwnerV1.create(12, 1, [5])
+        var tasks = RuntimeStructuredTaskGroupV1.create(owner.snapshot(), 1, true)
+        val spawned = tasks.spawn(91, 1, ParallelResultKind.Patch,
+            "cancelled", StructuredScalarWorker.ReturnInput)
+        expect(spawned.accepted).to_equal(true)
+        expect(tasks.cancel_task(spawned.task_id)).to_equal(true)
+        val waited = tasks.wait_all()
+        expect(waited.ready).to_equal(true)
+        expect(waited.cancelled).to_equal(1)
+        expect(waited.completed).to_equal(0)
+
+        step("Cancelled output cannot mutate canonical owner state")
+        val before = owner.state_digest()
+        val commit = owner.commit(tasks.lifecycle_state(),
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
+        expect(commit.committed).to_equal(false)
+        expect(commit.reason).to_equal("task-group-not-commit-ready")
+        expect(owner.state_digest()).to_equal(before)
+        expect(owner.value_at(1)).to_equal(5)
+
+    it "returns an explicit cooperative child failure notification":
+        step("A named failure operation returns a typed failure wire record")
+        val owner = StructuredOwnerV1.create(13, 2, [7])
+        var tasks = RuntimeStructuredTaskGroupV1.create(owner.snapshot(), 1, true)
+        val spawned = tasks.spawn(1, 1, ParallelResultKind.Patch,
+            "failure", StructuredScalarWorker.ReportFailure)
+        expect(spawned.accepted).to_equal(true)
+        val waited = tasks.join_all()
+        expect(waited.ready).to_equal(true)
+        expect(waited.failed).to_equal(1)
+        expect(waited.failure_notifications).to_equal(1)
+        val lifecycle = tasks.lifecycle_state()
+        val failure_value = lifecycle.failure_notification_at(0)
+        expect(failure_value != nil).to_equal(true)
+        val failure = failure_value as StructuredTaskFailureV1
+        expect(failure.task_id).to_equal(spawned.task_id)
+        expect(failure.reason).to_equal("worker-reported-failure")
+
+    it "releases and reuses hosted channel slots beyond the fixed registry size":
+        step("Create, join, close, and free eighty one-child task groups")
+        var iteration = 0
+        while iteration < 80:
+            val owner = StructuredOwnerV1.create(100 + iteration, 1, [1])
+            var tasks = RuntimeStructuredTaskGroupV1.create(
+                owner.snapshot(), 1, true)
+            val spawned = tasks.spawn(1000 + iteration, 1,
+                ParallelResultKind.Patch, "reuse-{iteration}",
+                StructuredScalarWorker.ReturnInput)
+            expect(spawned.accepted).to_equal(true)
+            val waited = tasks.join_all()
+            expect(waited.completed).to_equal(1)
+            iteration = iteration + 1
+        expect(iteration).to_equal(80)
+
+    it "adapts the same child-created wire record through a bounded actor mailbox":
+        step("Reserve an actor result and enqueue its scalar wire message")
+        var owner = StructuredOwnerV1.create(17, 6, [70])
+        val snapshot = owner.snapshot()
+        var actor_tasks = ActorStructuredTaskGroupV1.create(snapshot, 1, true)
+        val spawned = actor_tasks.reserve(1, ParallelResultKind.Patch, "actor")
+        val lifecycle_before = actor_tasks.lifecycle_state()
+        val spec_value = lifecycle_before.task_spec(spawned.task_id)
+        expect(spec_value != nil).to_equal(true)
+        val spec = spec_value as StructuredTaskSpecV1
+        val wire = structured_task_wire_success(snapshot.revision, spec.task_id,
+            spec.sequence, spec.write_region, spec.kind, 77,
+            spec.deterministic_key_token)
+        val message = structured_actor_result_message(wire)
+        var mailbox = ActorMailbox.new(1)
+        expect(mailbox.enqueue(message)).to_equal(true)
+        expect(mailbox.enqueue(message)).to_equal(false)
+
+        step("The owner dequeues, validates, and commits the actor result")
+        val delivered_value = mailbox.dequeue()
+        expect(delivered_value != nil).to_equal(true)
+        expect(actor_tasks.accept_result_message(spawned.task_id,
+            spawned.lease_token, delivered_value as ActorMessage)).to_equal(true)
+        expect(actor_tasks.wait_all().completed).to_equal(1)
+        val commit = owner.commit(actor_tasks.lifecycle_state(),
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
+        expect(commit.committed).to_equal(true)
+        expect(owner.value_at(1)).to_equal(77)
+
+        step("Malformed actor scalar text is rejected without a parse trap")
+        var reject_tasks = ActorStructuredTaskGroupV1.create(owner.snapshot(),
+            1, true)
+        val reject_spawn = reject_tasks.reserve(1,
+            ParallelResultKind.Patch, "malformed-actor")
+        val malformed = ActorMessage.fire_and_forget(
+            "structured-task-result-v1", ["not-an-integer"])
+        expect(reject_tasks.accept_result_message(reject_spawn.task_id,
+            reject_spawn.lease_token, malformed)).to_equal(true)
+        val rejected_wait = reject_tasks.wait_all()
+        expect(rejected_wait.failed).to_equal(1)
+        expect(rejected_wait.failure_notifications).to_equal(1)
+
+    it "decodes a bounded process frame and validates the owner publication lease":
+        step("Reserve a process result and encode only the fixed scalar wire")
+        var owner = StructuredOwnerV1.create(19, 4, [40])
+        val snapshot = owner.snapshot()
+        var process_tasks = ProcessStructuredTaskGroupV1.create(
+            snapshot, 1, true)
+        val spawned = process_tasks.reserve(1,
+            ParallelResultKind.Patch, "process")
+        val lifecycle_before = process_tasks.lifecycle_state()
+        val spec_value = lifecycle_before.task_spec(spawned.task_id)
+        expect(spec_value != nil).to_equal(true)
+        val spec = spec_value as StructuredTaskSpecV1
+        val wire = structured_task_wire_success(snapshot.revision, spec.task_id,
+            spec.sequence, spec.write_region, spec.kind, 44,
+            spec.deterministic_key_token)
+        val frame = structured_process_result_frame(wire)
+        expect(structured_process_result_wire(frame) != nil).to_equal(true)
+
+        step("The owner accepts once, commits once, and rejects replay")
+        expect(process_tasks.accept_result_frame(spawned.task_id,
+            spawned.lease_token, frame)).to_equal(true)
+        expect(process_tasks.accept_result_frame(spawned.task_id,
+            spawned.lease_token, frame)).to_equal(false)
+        expect(process_tasks.wait_all().completed).to_equal(1)
+        val commit = owner.commit(process_tasks.lifecycle_state(),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        expect(commit.committed).to_equal(true)
+        expect(owner.value_at(1)).to_equal(44)
+
+        step("Oversized and partial process frames fail closed")
+        var reject_tasks = ProcessStructuredTaskGroupV1.create(
+            owner.snapshot(), 1, true)
+        val reject_spawn = reject_tasks.reserve(1,
+            ParallelResultKind.Patch, "bad-process-frame")
+        expect(reject_tasks.accept_result_frame(reject_spawn.task_id,
+            reject_spawn.lease_token, "STP1|1|2")).to_equal(true)
+        expect(reject_tasks.wait_all().failed).to_equal(1)
+        expect(structured_process_result_wire("STP2|1|2") == nil).to_equal(true)
+
+    it "orders reverse completion deterministically and rejects replay":
+        step("Children create complete envelopes in reverse completion order")
+        var owner = StructuredOwnerV1.create(14, 8, [1, 2])
+        var tasks = StructuredTaskGroupV1.create(owner.snapshot(), 2, true)
+        val first = tasks.reserve(1, ParallelResultKind.Patch, "first")
+        val second = tasks.reserve(2, ParallelResultKind.Patch, "second")
+        val snapshot = owner.snapshot()
+        val second_result = result_envelope_v1(snapshot.revision,
+            second.task_id, 1, 2, ParallelResultKind.Patch, 22, "second")
+        val first_result = result_envelope_v1(snapshot.revision,
+            first.task_id, 0, 1, ParallelResultKind.Patch, 11, "first")
+        expect(tasks.publish_result(second.task_id, second.lease_token,
+            second_result)).to_equal(true)
+        expect(tasks.publish_result(first.task_id, first.lease_token,
+            first_result)).to_equal(true)
+        val commit = owner.commit(tasks, ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        expect(commit.committed).to_equal(true)
+        expect(commit.ordered_task_ids[0]).to_equal(first.task_id)
+        expect(commit.ordered_task_ids[1]).to_equal(second.task_id)
+        val replay = owner.commit(tasks, ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        expect(replay.committed).to_equal(false)
+        expect(replay.reason).to_equal("stale-owner-revision")
+
+    it "rejects conflicting results and rolls back an invalid staged apply":
+        step("A digest collision cannot substitute different snapshot values")
+        var exact_owner = StructuredOwnerV1.create(18, 2, [1, 2])
+        val authentic = exact_owner.snapshot()
+        val forged = OwnerSnapshotV1(owner_id: authentic.owner_id,
+            revision: authentic.revision, generation: authentic.generation,
+            frozen_input_token: authentic.frozen_input_token, values: [3, 1],
+            value_capacity: authentic.value_capacity,
+            state_digest: authentic.state_digest)
+        var forged_tasks = StructuredTaskGroupV1.create(forged, 1, true)
+        val forged_spawn = forged_tasks.reserve(1,
+            ParallelResultKind.Patch, "forged-snapshot")
+        expect(forged_tasks.publish_success(forged_spawn.task_id,
+            forged_spawn.lease_token, 9)).to_equal(true)
+        val forged_commit = exact_owner.commit(forged_tasks,
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
+        expect(forged_commit.committed).to_equal(false)
+        expect(forged_commit.reason).to_equal("snapshot-state-mismatch")
+
+        step("Conflicting child writes fail before owner publication")
+        var conflict_owner = StructuredOwnerV1.create(15, 3, [31, 32])
+        var conflict_tasks = StructuredTaskGroupV1.create(
+            conflict_owner.snapshot(), 2, true)
+        val left = conflict_tasks.reserve(1, ParallelResultKind.Patch, "left")
+        val right = conflict_tasks.reserve(1, ParallelResultKind.Patch, "right")
+        expect(conflict_tasks.publish_success(left.task_id,
+            left.lease_token, 41)).to_equal(true)
+        expect(conflict_tasks.publish_success(right.task_id,
+            right.lease_token, 42)).to_equal(true)
+        val before_conflict = conflict_owner.state_digest()
+        val rejected = conflict_owner.commit(conflict_tasks,
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
+        expect(rejected.committed).to_equal(false)
+        expect(rejected.reason).to_equal("overlapping-write-region")
+        expect(conflict_owner.state_digest()).to_equal(before_conflict)
+
+        step("A late apply validation failure leaves every staged value private")
+        var rollback_owner = StructuredOwnerV1.create(16, 5, [51, 52])
+        var rollback_tasks = StructuredTaskGroupV1.create(
+            rollback_owner.snapshot(), 2, true)
+        val valid = rollback_tasks.reserve(1, ParallelResultKind.Patch, "valid")
+        val invalid = rollback_tasks.reserve(9, ParallelResultKind.Patch, "invalid")
+        expect(rollback_tasks.publish_success(valid.task_id,
+            valid.lease_token, 61)).to_equal(true)
+        expect(rollback_tasks.publish_success(invalid.task_id,
+            invalid.lease_token, 69)).to_equal(true)
+        val before_rollback = rollback_owner.state_digest()
+        val rolled_back = rollback_owner.commit(rollback_tasks,
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
+        expect(rolled_back.committed).to_equal(false)
+        expect(rolled_back.reason).to_equal("invalid-write-region")
+        expect(rollback_owner.state_digest()).to_equal(before_rollback)
+        expect(rollback_owner.value_at(1)).to_equal(51)
+        expect(rollback_owner.value_at(2)).to_equal(52)

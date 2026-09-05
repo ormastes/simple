@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+acceptance_contract() {
+  source=$1
+  smoke=$(grep -n '^run_logged stage4-essential-tools-smoke ' "$source" | cut -d: -f1)
+  stage4=$(grep -n '^stage4_verify_candidate_provenance ' "$source" | cut -d: -f1)
+  sanity=$(grep -n '^bootstrap_stage3_verify_sanity_evidence_receipt ' "$source" | tail -1 | cut -d: -f1)
+  accept=$(grep -n '^stage3_current_acceptance_status=verified$' "$source" | cut -d: -f1)
+  receipt=$(grep -n 'echo "schema=simple-bootstrap-stage3-current-acceptance-v1"' "$source" | cut -d: -f1)
+  final=$(grep -n '^\[ "${stage3_current_acceptance_status}" = verified \] || {' "$source" | cut -d: -f1)
+  [ -n "$smoke" ] && [ -n "$stage4" ] && [ -n "$sanity" ] &&
+    [ -n "$accept" ] && [ -n "$receipt" ] && [ -n "$final" ] || return 1
+  [ "$smoke" -lt "$stage4" ] && [ "$stage4" -lt "$sanity" ] &&
+    [ "$sanity" -lt "$accept" ] && [ "$accept" -lt "$receipt" ] &&
+    [ "$receipt" -lt "$final" ] || return 1
+  grep -Fq 'stage3_current_acceptance_status=unverified' "$source" || return 1
+  grep -Fq 'stage3_sanity_sha256=$(bootstrap_stage3_hash_file "${stage3_acceptance_sanity}")' "$source" || return 1
+  grep -Fq 'stage4_candidate_sha256=$(bootstrap_stage3_hash_file "${full_bin}")' "$source" || return 1
+  grep -Fq 'stage4_provenance_sha256=$(bootstrap_stage3_hash_file "${stage4_provenance}")' "$source" || return 1
+  grep -Fq 'completed_gate=stage4-essential-tools-smoke' "$source" || return 1
+}
+
+sh -n "$wrapper" || fail "shell syntax"
+acceptance_contract "$wrapper" || fail "canonical acceptance chain is incomplete or misordered"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+# Exact regression: deleting Stage 4 provenance verification must make the
+# acceptance contract fail instead of allowing historical Stage 3 evidence to
+# close the current transaction.
+sed '/^stage4_verify_candidate_provenance /d' "$wrapper" >"$tmp/no-stage4-verify.sh"
+if acceptance_contract "$tmp/no-stage4-verify.sh"; then
+  fail "acceptance survived missing Stage 4 provenance verification"
+fi
+
+# Adjacent regression: a Stage 3 manifest without a replayed sanity receipt is
+# not current acceptance, even if the Stage 4 candidate and smoke log exist.
+sed '/^bootstrap_stage3_verify_sanity_evidence_receipt /d' "$wrapper" >"$tmp/no-sanity.sh"
+if acceptance_contract "$tmp/no-sanity.sh"; then
+  fail "acceptance survived missing Stage 3 sanity re-verification"
+fi
+
+# Adjacent regression: byte hashes without the essential-tools terminal gate
+# cannot be promoted to an acceptance receipt.
+sed '/echo "completed_gate=stage4-essential-tools-smoke"/d' "$wrapper" >"$tmp/no-terminal-gate.sh"
+if acceptance_contract "$tmp/no-terminal-gate.sh"; then
+  fail "acceptance survived missing essential-tools terminal gate"
+fi
+
+echo 'PASS: current Stage 3 acceptance is fail-closed on Stage 3 sanity, Stage 4 provenance, candidate hashes, and essential-tools evidence'

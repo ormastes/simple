@@ -1,0 +1,218 @@
+"""Authenticated boot owner for the installed-artifact catalog.
+
+The owner accepts one complete target-image bundle from authenticated boot
+policy.  It validates and verifies the entire bounded bundle before opening
+the catalog's irreversible bootstrap session.  It never accepts an installer
+digest receipt, a caller-provided verification boolean, or an unsigned
+manifest.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, SimpleArtifactManifest
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1,
+    executable_manifest_trust_owner_initialize,
+    executable_manifest_signature_verify
+}
+use os.kernel.loader.installed_artifact_catalog_v1.{
+    SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_TEXT_LIMIT_GLOBAL_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1,
+    installed_artifact_alias_text_bytes_bounded_v1,
+    installed_artifact_record_input_valid_v1,
+    installed_artifact_catalog_bootstrap_begin_v1,
+    installed_artifact_catalog_bootstrap_add_v1,
+    installed_artifact_catalog_bootstrap_seal_for_lease_v1,
+    installed_artifact_catalog_bootstrap_quarantine_v1
+}
+
+pub struct InstalledArtifactBootRecordV1:
+    canonical_path: text
+    aliases: [text]
+    content_sha256: text
+    detached_signature: text
+    expected_trust_root_sha256: text
+    manifest: SimpleArtifactManifest
+
+pub struct InstalledArtifactBootPolicyV1:
+    platform_target: ManifestTarget
+    required_canonical_paths: [text]
+    trust_roots: [ExecutableManifestTrustedSignerV1]
+
+pub enum InstalledArtifactBootPopulationErrorV1:
+    None
+    PolicyInvalid
+    RecordSetIncomplete
+    RecordInvalid
+    TrustInitializationFailed
+    SignatureVerificationFailed
+    CatalogSessionUnavailable
+    CatalogInsertionFailed
+    CatalogSealFailed
+
+pub struct InstalledArtifactBootPopulationResultV1:
+    ok: bool
+    error: InstalledArtifactBootPopulationErrorV1
+    accepted_records: i64
+
+fn _boot_catalog_target_supported_v1(target: ManifestTarget) -> bool:
+    target.os == "simpleos" and target.abi == "simpleos" and
+        (target.arch == "x86_64" or target.arch == "x86" or
+         target.arch == "aarch64" or target.arch == "arm" or
+         target.arch == "riscv64" or target.arch == "riscv32")
+
+fn _boot_catalog_path_valid_v1(path: text) -> bool:
+    path.len() > 1 and path.len() <= 4096 and path.starts_with("/") and
+        not path.contains("//") and not path.contains("/../") and
+        not path.ends_with("/..") and not path.contains("/./") and
+        not path.ends_with("/.")
+
+fn _boot_catalog_target_equal_v1(left: ManifestTarget, right: ManifestTarget) -> bool:
+    left.os == right.os and left.arch == right.arch and left.abi == right.abi
+
+fn _boot_catalog_fail_v1(
+    error: InstalledArtifactBootPopulationErrorV1,
+    accepted: i64 = 0
+) -> InstalledArtifactBootPopulationResultV1:
+    InstalledArtifactBootPopulationResultV1(
+        ok: false, error: error, accepted_records: accepted)
+
+pub fn installed_artifact_boot_policy_shape_valid_v1(
+    policy: InstalledArtifactBootPolicyV1,
+    records: [InstalledArtifactBootRecordV1]
+) -> bool:
+    """Pure complete-bundle gate; this performs no trust or catalog mutation."""
+    if not _boot_catalog_target_supported_v1(policy.platform_target) or
+        policy.required_canonical_paths.len() == 0 or
+        policy.required_canonical_paths.len() >
+            SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1 or
+        records.len() != policy.required_canonical_paths.len() or
+        policy.trust_roots.len() == 0:
+        return false
+    var required_index: i64 = 0
+    while required_index < policy.required_canonical_paths.len():
+        val required = policy.required_canonical_paths[required_index]
+        if not _boot_catalog_path_valid_v1(required): return false
+        var prior: i64 = 0
+        while prior < required_index:
+            if policy.required_canonical_paths[prior] == required: return false
+            prior = prior + 1
+        var matches: i64 = 0
+        for record in records:
+            if record.canonical_path == required: matches = matches + 1
+        if matches != 1: return false
+        required_index = required_index + 1
+    var bundle_key_count: i64 = 0
+    var bundle_alias_text_bytes: i64 = 0
+    for record in records:
+        val record_alias_text_bytes =
+            installed_artifact_alias_text_bytes_bounded_v1(record.aliases)
+        if not record_alias_text_bytes.?: return false
+        val required_keys = 1 + record.aliases.len()
+        if (bundle_key_count >
+                SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1 - required_keys or
+            bundle_alias_text_bytes >
+                SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_TEXT_LIMIT_GLOBAL_V1 -
+                    record_alias_text_bytes.unwrap()):
+            return false
+        bundle_key_count = bundle_key_count + required_keys
+        bundle_alias_text_bytes =
+            bundle_alias_text_bytes + record_alias_text_bytes.unwrap()
+        if not _boot_catalog_path_valid_v1(record.canonical_path) or
+            not _boot_catalog_target_equal_v1(
+                record.manifest.target, policy.platform_target) or
+            record.manifest.entrypoint != record.canonical_path or
+            record.detached_signature == "" or
+            record.detached_signature != record.manifest.signature or
+            record.expected_trust_root_sha256.len() != 64 or
+            record.aliases.len() > SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1:
+            return false
+        var alias_index: i64 = 0
+        while alias_index < record.aliases.len():
+            val alias = record.aliases[alias_index]
+            if not _boot_catalog_path_valid_v1(alias) or
+                alias == record.canonical_path:
+                return false
+            var other_index: i64 = 0
+            var alias_occurrences: i64 = 0
+            while other_index < records.len():
+                if alias == records[other_index].canonical_path: return false
+                var other_alias_index: i64 = 0
+                while other_alias_index < records[other_index].aliases.len():
+                    if alias == records[other_index].aliases[other_alias_index]:
+                        alias_occurrences = alias_occurrences + 1
+                    other_alias_index = other_alias_index + 1
+                other_index = other_index + 1
+            if alias_occurrences != 1: return false
+            var earlier: i64 = 0
+            while earlier < alias_index:
+                if record.aliases[earlier] == alias: return false
+                earlier = earlier + 1
+            alias_index = alias_index + 1
+        val envelope = record.detached_signature.split(":")
+        if envelope.len() != 3 or envelope[0] != "ed25519" or
+            not installed_artifact_record_input_valid_v1(
+                record.canonical_path, record.aliases, record.content_sha256,
+                "ed25519", envelope[1], record.detached_signature,
+                record.manifest):
+            return false
+    true
+
+pub(package) fn installed_artifact_catalog_populate_from_boot_policy_v1(
+    policy: InstalledArtifactBootPolicyV1,
+    records: [InstalledArtifactBootRecordV1]
+) -> InstalledArtifactBootPopulationResultV1:
+    """Verify a complete target bundle, populate once, and seal fail-closed."""
+    if not installed_artifact_boot_policy_shape_valid_v1(policy, records):
+        return _boot_catalog_fail_v1(
+            InstalledArtifactBootPopulationErrorV1.PolicyInvalid)
+    match executable_manifest_trust_owner_initialize(policy.trust_roots):
+        case Err(_):
+            return _boot_catalog_fail_v1(
+                InstalledArtifactBootPopulationErrorV1.TrustInitializationFailed)
+        case Ok(_): ()
+
+    # Verification is deliberately complete before the irreversible begin.
+    for record in records:
+        match executable_manifest_signature_verify(
+            record.manifest, record.content_sha256,
+            record.expected_trust_root_sha256):
+            case Err(_):
+                return _boot_catalog_fail_v1(
+                    InstalledArtifactBootPopulationErrorV1.SignatureVerificationFailed)
+            case Ok(receipt):
+                val envelope = record.detached_signature.split(":")
+                if envelope.len() != 3 or envelope[0] != "ed25519" or
+                    envelope[1] != receipt.key_id or
+                    receipt.image_hash != record.content_sha256 or
+                    receipt.trust_root_hash != record.expected_trust_root_sha256:
+                    return _boot_catalog_fail_v1(
+                        InstalledArtifactBootPopulationErrorV1.RecordInvalid)
+
+    val session = installed_artifact_catalog_bootstrap_begin_v1()
+    if not session.?:
+        return _boot_catalog_fail_v1(
+            InstalledArtifactBootPopulationErrorV1.CatalogSessionUnavailable)
+    var accepted: i64 = 0
+    for record in records:
+        val envelope = record.detached_signature.split(":")
+        if not installed_artifact_catalog_bootstrap_add_v1(
+            session.unwrap(), record.canonical_path, record.aliases,
+            record.content_sha256, "ed25519", envelope[1],
+            record.detached_signature, record.expected_trust_root_sha256,
+            record.manifest):
+            _ = installed_artifact_catalog_bootstrap_quarantine_v1(session.unwrap())
+            return _boot_catalog_fail_v1(
+                InstalledArtifactBootPopulationErrorV1.CatalogInsertionFailed,
+                accepted)
+        accepted = accepted + 1
+    if not installed_artifact_catalog_bootstrap_seal_for_lease_v1(
+        session.unwrap()):
+        _ = installed_artifact_catalog_bootstrap_quarantine_v1(session.unwrap())
+        return _boot_catalog_fail_v1(
+            InstalledArtifactBootPopulationErrorV1.CatalogSealFailed, accepted)
+    InstalledArtifactBootPopulationResultV1(
+        ok: true, error: InstalledArtifactBootPopulationErrorV1.None,
+        accepted_records: accepted)

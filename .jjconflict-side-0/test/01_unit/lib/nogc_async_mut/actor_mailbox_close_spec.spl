@@ -1,0 +1,110 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.actor.mailbox.{ActorMailbox, ActorMessage}
+use std.nogc_async_mut.actor.actor.{Actor, HandlerTable}
+use std.nogc_async_mut.actor.scheduler.{ActorScheduler}
+use std.nogc_async_mut.actor.spawn.{ActorRef}
+
+
+fn actor_close_echo(args: [text]) -> text:
+    if args.is_empty():
+        return ""
+    args[0]
+
+fn actor_ref_with_capacity(scheduler: ActorScheduler, capacity: i64) -> ActorRef:
+    var handlers = HandlerTable.new()
+    handlers.register("echo", actor_close_echo)
+    val actor = Actor.with_mailbox(handlers, ActorMailbox.new(capacity))
+    val actor_id = scheduler.register_actor(actor)
+    ActorRef(actor_id: actor_id, _scheduler: scheduler)
+
+describe "ActorMailbox shared close admission":
+    # @manual scenario evidence
+    it "rejects new sends after close but drains accepted FIFO work":
+        # @req REQ-SSPEC-UNIT
+        step("rejects new sends after close but drains accepted FIFO work")
+        val mailbox = ActorMailbox.new(2)
+        val first = ActorMessage.fire_and_forget("first", [])
+        val second = ActorMessage.fire_and_forget("second", [])
+        assert_true(mailbox.enqueue(first))
+        mailbox.close()
+        assert_true(mailbox.is_closed())
+        assert_false(mailbox.enqueue(second))
+        val drained = mailbox.dequeue()
+        if val message = drained:
+            assert_equal(message.method, "first")
+        else:
+            assert_true(false)
+        assert_true(mailbox.dequeue() == nil)
+
+    it "shares close state across copied mailbox handles":
+        # @req REQ-SSPEC-UNIT
+        step("shares close state across copied mailbox handles")
+        val original = ActorMailbox.new(1)
+        val copied = original
+        copied.close()
+        assert_true(original.is_closed())
+        assert_false(original.enqueue(ActorMessage.fire_and_forget("late", [])))
+
+    it "retains a bounded high-water mark after draining":
+        # @req REQ-SSPEC-UNIT
+        step("retains a bounded high-water mark after draining")
+        val mailbox = ActorMailbox.new(2)
+        assert_equal(mailbox.pending_high_water_count(), 0)
+        assert_true(mailbox.enqueue(ActorMessage.fire_and_forget("one", [])))
+        assert_true(mailbox.enqueue(ActorMessage.fire_and_forget("two", [])))
+        assert_false(mailbox.enqueue(ActorMessage.fire_and_forget("three", [])))
+        assert_equal(mailbox.len(), 2)
+        assert_true(mailbox.is_full())
+        assert_equal(mailbox.pending_high_water_count(), 2)
+        assert_true(mailbox.dequeue() != nil)
+        assert_equal(mailbox.len(), 1)
+        assert_equal(mailbox.pending_high_water_count(), 2)
+
+describe "ActorRef scheduler-owned admission and close":
+    it "routes copied references through one bounded scheduler authority":
+        # @req REQ-SSPEC-UNIT
+        step("routes copied references through one bounded scheduler authority")
+        val scheduler = ActorScheduler.new()
+        val original = actor_ref_with_capacity(scheduler, 1)
+        val copied = original
+        assert_true(original.send("echo", ["first"]))
+        assert_false(copied.send("echo", ["full"]))
+        assert_true(original.has_messages())
+        scheduler.run_until_idle()
+        assert_false(copied.has_messages())
+
+    it "rejects send and ask through every copied reference after stop":
+        # @req REQ-SSPEC-UNIT
+        step("rejects send and ask through every copied reference after stop")
+        val scheduler = ActorScheduler.new()
+        val original = actor_ref_with_capacity(scheduler, 2)
+        val copied = original
+        assert_true(original.send("echo", ["accepted-before-stop"]))
+        assert_true(copied.stop())
+        assert_false(original.send("echo", ["late"]))
+        assert_equal(copied.ask("echo", ["late-ask"]), -1)
+        assert_false(original.has_messages())
+        assert_equal(scheduler.outstanding_reply_count(), 0)
+        assert_false(original.stop())
+
+    it "retains an admission-time copy of caller arguments":
+        # @req REQ-SSPEC-UNIT
+        step("retains an admission-time copy of caller arguments")
+        val scheduler = ActorScheduler.new()
+        val actor_ref = actor_ref_with_capacity(scheduler, 1)
+        var args = ["before"]
+        val reply_id = actor_ref.ask("echo", args)
+        assert_true(reply_id > 0)
+        args[0] = "after"
+        scheduler.run_until_idle()
+        if val reply = scheduler.consume_reply(reply_id):
+            assert_equal(reply, "before")
+        else:
+            assert_true(false)

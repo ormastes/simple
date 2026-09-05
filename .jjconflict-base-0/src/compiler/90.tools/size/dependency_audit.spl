@@ -1,0 +1,362 @@
+# Dependency audit — AC-6, AC-7, AC-8
+# AC-6: loader dependency audit
+# AC-7: per-binary dependency audit
+# AC-8: architecture split scaffolding
+
+# One dependency relationship
+class DependencyEdge:
+    from_crate: text
+    to_crate: text
+    edge_kind: text
+    is_used: bool
+    size_contribution: i64
+
+    static fn direct(from_c: text, to_c: text, size: i64) -> DependencyEdge:
+        DependencyEdge(
+            from_crate: from_c,
+            to_crate: to_c,
+            edge_kind: "direct",
+            is_used: true,
+            size_contribution: size
+        )
+
+    static fn transitive(from_c: text, to_c: text, size: i64) -> DependencyEdge:
+        DependencyEdge(
+            from_crate: from_c,
+            to_crate: to_c,
+            edge_kind: "transitive",
+            is_used: true,
+            size_contribution: size
+        )
+
+    static fn unused(from_c: text, to_c: text) -> DependencyEdge:
+        DependencyEdge(
+            from_crate: from_c,
+            to_crate: to_c,
+            edge_kind: "dev",
+            is_used: false,
+            size_contribution: 0
+        )
+
+    me is_removable() -> bool:
+        if self.is_used == false:
+            return true
+        self.edge_kind == "dev"
+
+    me summary() -> text:
+        var used_label = "used"
+        if self.is_used == false:
+            used_label = "unused"
+        self.from_crate + " -> " + self.to_crate + " [" + self.edge_kind + ", " + used_label + ", " + self.size_contribution.to_text() + "b]"
+
+
+# All deps for one binary
+class DependencyClosure:
+    binary_name: text
+    direct_count: i32
+    transitive_count: i32
+    unused_count: i32
+    total_size: i64
+
+    static fn create(binary_name: text) -> DependencyClosure:
+        DependencyClosure(
+            binary_name: binary_name,
+            direct_count: 0,
+            transitive_count: 0,
+            unused_count: 0,
+            total_size: 0
+        )
+
+    me add_direct(size: i64):
+        self.direct_count = self.direct_count + 1
+        self.total_size = self.total_size + size
+
+    me add_transitive(size: i64):
+        self.transitive_count = self.transitive_count + 1
+        self.total_size = self.total_size + size
+
+    me add_unused():
+        self.unused_count = self.unused_count + 1
+
+    me waste_pct() -> i32:
+        var total_deps = self.direct_count + self.transitive_count
+        if total_deps == 0:
+            return 0
+        self.unused_count * 100 / total_deps
+
+    me summary() -> text:
+        var pct = self.waste_pct()
+        self.binary_name + ": direct=" + self.direct_count.to_text() + " transitive=" + self.transitive_count.to_text() + " unused=" + self.unused_count.to_text() + " waste=" + pct.to_text() + "% total=" + self.total_size.to_text() + "b"
+
+
+# Per-binary dependency map (AC-7)
+class BinaryDepMap:
+    binary_name: text
+    binary_kind: text
+    dep_count: i32
+    removable_count: i32
+    total_dep_size: i64
+    d0_name: text
+    d1_name: text
+    d2_name: text
+    d3_name: text
+    d4_name: text
+    d5_name: text
+    d6_name: text
+    d7_name: text
+    d8_name: text
+    d9_name: text
+    d10_name: text
+    d11_name: text
+    d12_name: text
+    d13_name: text
+    d14_name: text
+    d15_name: text
+    d0_used: bool
+    d1_used: bool
+    d2_used: bool
+    d3_used: bool
+    d4_used: bool
+    d5_used: bool
+    d6_used: bool
+    d7_used: bool
+    d8_used: bool
+    d9_used: bool
+    d10_used: bool
+    d11_used: bool
+    d12_used: bool
+    d13_used: bool
+    d14_used: bool
+    d15_used: bool
+    d0_size: i64
+    d1_size: i64
+    d2_size: i64
+    d3_size: i64
+    d4_size: i64
+    d5_size: i64
+    d6_size: i64
+    d7_size: i64
+    d8_size: i64
+    d9_size: i64
+    d10_size: i64
+    d11_size: i64
+    d12_size: i64
+    d13_size: i64
+    d14_size: i64
+    d15_size: i64
+
+    static fn create(binary_name: text, binary_kind: text) -> BinaryDepMap:
+        BinaryDepMap(
+            binary_name: binary_name,
+            binary_kind: binary_kind,
+            dep_count: 0,
+            removable_count: 0,
+            total_dep_size: 0,
+            d0_name: "", d1_name: "", d2_name: "", d3_name: "",
+            d4_name: "", d5_name: "", d6_name: "", d7_name: "",
+            d8_name: "", d9_name: "", d10_name: "", d11_name: "",
+            d12_name: "", d13_name: "", d14_name: "", d15_name: "",
+            d0_used: false, d1_used: false, d2_used: false, d3_used: false,
+            d4_used: false, d5_used: false, d6_used: false, d7_used: false,
+            d8_used: false, d9_used: false, d10_used: false, d11_used: false,
+            d12_used: false, d13_used: false, d14_used: false, d15_used: false,
+            d0_size: 0, d1_size: 0, d2_size: 0, d3_size: 0,
+            d4_size: 0, d5_size: 0, d6_size: 0, d7_size: 0,
+            d8_size: 0, d9_size: 0, d10_size: 0, d11_size: 0,
+            d12_size: 0, d13_size: 0, d14_size: 0, d15_size: 0
+        )
+
+    me add_dep(name: text, used: bool, size: i64) -> bool:
+        if self.dep_count >= 16:
+            return false
+        var slot = self.dep_count
+        if slot == 0:
+            self.d0_name = name
+            self.d0_used = used
+            self.d0_size = size
+        elif slot == 1:
+            self.d1_name = name
+            self.d1_used = used
+            self.d1_size = size
+        elif slot == 2:
+            self.d2_name = name
+            self.d2_used = used
+            self.d2_size = size
+        elif slot == 3:
+            self.d3_name = name
+            self.d3_used = used
+            self.d3_size = size
+        elif slot == 4:
+            self.d4_name = name
+            self.d4_used = used
+            self.d4_size = size
+        elif slot == 5:
+            self.d5_name = name
+            self.d5_used = used
+            self.d5_size = size
+        elif slot == 6:
+            self.d6_name = name
+            self.d6_used = used
+            self.d6_size = size
+        elif slot == 7:
+            self.d7_name = name
+            self.d7_used = used
+            self.d7_size = size
+        elif slot == 8:
+            self.d8_name = name
+            self.d8_used = used
+            self.d8_size = size
+        elif slot == 9:
+            self.d9_name = name
+            self.d9_used = used
+            self.d9_size = size
+        elif slot == 10:
+            self.d10_name = name
+            self.d10_used = used
+            self.d10_size = size
+        elif slot == 11:
+            self.d11_name = name
+            self.d11_used = used
+            self.d11_size = size
+        elif slot == 12:
+            self.d12_name = name
+            self.d12_used = used
+            self.d12_size = size
+        elif slot == 13:
+            self.d13_name = name
+            self.d13_used = used
+            self.d13_size = size
+        elif slot == 14:
+            self.d14_name = name
+            self.d14_used = used
+            self.d14_size = size
+        elif slot == 15:
+            self.d15_name = name
+            self.d15_used = used
+            self.d15_size = size
+        self.dep_count = self.dep_count + 1
+        self.total_dep_size = self.total_dep_size + size
+        if used == false:
+            self.removable_count = self.removable_count + 1
+        true
+
+    me trim_savings() -> i64:
+        var savings: i64 = 0
+        if self.d0_used == false:
+            savings = savings + self.d0_size
+        if self.d1_used == false:
+            savings = savings + self.d1_size
+        if self.d2_used == false:
+            savings = savings + self.d2_size
+        if self.d3_used == false:
+            savings = savings + self.d3_size
+        if self.d4_used == false:
+            savings = savings + self.d4_size
+        if self.d5_used == false:
+            savings = savings + self.d5_size
+        if self.d6_used == false:
+            savings = savings + self.d6_size
+        if self.d7_used == false:
+            savings = savings + self.d7_size
+        if self.d8_used == false:
+            savings = savings + self.d8_size
+        if self.d9_used == false:
+            savings = savings + self.d9_size
+        if self.d10_used == false:
+            savings = savings + self.d10_size
+        if self.d11_used == false:
+            savings = savings + self.d11_size
+        if self.d12_used == false:
+            savings = savings + self.d12_size
+        if self.d13_used == false:
+            savings = savings + self.d13_size
+        if self.d14_used == false:
+            savings = savings + self.d14_size
+        if self.d15_used == false:
+            savings = savings + self.d15_size
+        savings
+
+    me summary() -> text:
+        var savings = self.trim_savings()
+        self.binary_name + " [" + self.binary_kind + "]: deps=" + self.dep_count.to_text() + " removable=" + self.removable_count.to_text() + " trim_savings=" + savings.to_text() + "b total=" + self.total_dep_size.to_text() + "b"
+
+
+# Architecture split plan entry (AC-8)
+class ArchSplitPlan:
+    edge_name: text
+    classification: text
+    blocker_reason: text
+    estimated_savings: i64
+
+    static fn safe(edge_name: text, savings: i64) -> ArchSplitPlan:
+        ArchSplitPlan(
+            edge_name: edge_name,
+            classification: "safe_to_remove",
+            blocker_reason: "",
+            estimated_savings: savings
+        )
+
+    static fn blocked(edge_name: text, reason: text) -> ArchSplitPlan:
+        ArchSplitPlan(
+            edge_name: edge_name,
+            classification: "blocked",
+            blocker_reason: reason,
+            estimated_savings: 0
+        )
+
+    static fn needs_refactor(edge_name: text, reason: text, savings: i64) -> ArchSplitPlan:
+        ArchSplitPlan(
+            edge_name: edge_name,
+            classification: "needs_refactor",
+            blocker_reason: reason,
+            estimated_savings: savings
+        )
+
+    me can_remove() -> bool:
+        self.classification == "safe_to_remove"
+
+    me summary() -> text:
+        if self.classification == "safe_to_remove":
+            return self.edge_name + " [safe_to_remove, savings=" + self.estimated_savings.to_text() + "b]"
+        if self.classification == "blocked":
+            return self.edge_name + " [blocked: " + self.blocker_reason + "]"
+        self.edge_name + " [needs_refactor: " + self.blocker_reason + ", savings=" + self.estimated_savings.to_text() + "b]"
+
+
+# Collects split plan entries for a full architecture report
+class SplitPlanReport:
+    total: i32
+    safe_count: i32
+    blocked_count: i32
+    refactor_count: i32
+    total_savings: i64
+
+    static fn create() -> SplitPlanReport:
+        SplitPlanReport(
+            total: 0,
+            safe_count: 0,
+            blocked_count: 0,
+            refactor_count: 0,
+            total_savings: 0
+        )
+
+    me add(plan: ArchSplitPlan):
+        self.total = self.total + 1
+        self.total_savings = self.total_savings + plan.estimated_savings
+        if plan.classification == "safe_to_remove":
+            self.safe_count = self.safe_count + 1
+        elif plan.classification == "blocked":
+            self.blocked_count = self.blocked_count + 1
+        elif plan.classification == "needs_refactor":
+            self.refactor_count = self.refactor_count + 1
+
+    me readiness() -> text:
+        if self.blocked_count == 0:
+            return "ready"
+        if self.safe_count > 0:
+            return "partial"
+        "blocked"
+
+    me summary() -> text:
+        var status = self.readiness()
+        "split_plan: total=" + self.total.to_text() + " safe=" + self.safe_count.to_text() + " blocked=" + self.blocked_count.to_text() + " refactor=" + self.refactor_count.to_text() + " savings=" + self.total_savings.to_text() + "b status=" + status

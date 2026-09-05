@@ -1,0 +1,168 @@
+#!/bin/sh
+# check-test-verdict-not-silent.shs — fail-closed gate on `bin/simple test`
+#
+# Defect this exists for:
+#   doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md
+#   `bin/simple test <spec>` was measured emitting ~1897 lines (all warnings),
+#   ZERO pass/fail/Results lines, and exiting 0. Exit 0 with no verdict line is
+#   read as GREEN by every caller, so every "spec X passes" claim established
+#   that way is unsupported.
+#
+# Rule enforced here (repo verdict convention, see .claude/rules/vcs.md):
+#   exit 0 is NEVER by itself proof of a pass. A run must print an explicit
+#   verdict/counts line. No verdict line => not green.
+#
+# Classification of one target:
+#   rc == 0 AND a verdict line present            -> pass
+#   rc == 0 AND no verdict line                   -> FAIL  (silent green)
+#   rc >= 128 (killed by a signal, e.g. the 60s
+#     kill-monitor SIGTERM) or rc == 124 (timeout)-> ERROR (nothing was checked)
+#   any other rc != 0                             -> counted as a real failure,
+#                                                    which is a legitimate,
+#                                                    loud result -> pass here
+#     (this guard checks the runner's HONESTY, not whether specs are green)
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> target(s) checked, 0 silent green
+#   FAIL  — <n> target(s) checked, <k> silent green: <names>
+#   ERROR — nothing was checked
+# Exit: 0 / 1 / 2. A run that checked 0 targets is ERROR, never a pass.
+#
+# The command under test is overridable so --selftest can inject fixtures:
+#   SIMPLE_TEST_CMD="bin/simple test"   (default)
+#
+# Usage:
+#   sh scripts/check/check-test-verdict-not-silent.shs [--selftest] <spec>...
+
+set -u
+
+VERDICT_RE='Results:|Test Summary|examples\?,|Passed:|Failed:|total,.*passed|ERROR — nothing was checked'
+
+# Run one target, print its classification token on stdout: OK | SILENT | ERROR
+classify_target() {
+    _target=$1
+    _out=$(mktemp)
+    # Exit status is read on the very next line, NEVER through a pipe: a
+    # pipeline's $? is the LAST element's status and has produced false greens
+    # in this repo before (.claude/rules/testing.md, "a pipe launders the exit
+    # code").
+    ${SIMPLE_TEST_CMD:-bin/simple test} "$_target" >"$_out" 2>&1
+    _rc=$?
+
+    if grep -Eq "$VERDICT_RE" "$_out"; then
+        _has_verdict=1
+    else
+        _has_verdict=0
+    fi
+    rm -f "$_out"
+
+    if [ "$_rc" -ge 128 ] || [ "$_rc" -eq 124 ]; then
+        echo ERROR
+        return 0
+    fi
+    if [ "$_rc" -eq 0 ] && [ "$_has_verdict" -eq 0 ]; then
+        echo SILENT
+        return 0
+    fi
+    if [ "$_rc" -ne 0 ] && [ "$_has_verdict" -eq 0 ]; then
+        # Non-zero with no verdict is loud enough to not be a silent green, but
+        # it is still not evidence of anything having run.
+        echo ERROR
+        return 0
+    fi
+    echo OK
+}
+
+selftest() {
+    _d=$(mktemp -d)
+    _fail=0
+
+    # Fixture 1: verdict line present, exit 0 -> OK
+    cat >"$_d/ok.sh" <<'EOF'
+echo "warning: noise"
+echo "Results: 4 total, 4 passed, 0 failed"
+exit 0
+EOF
+    # Fixture 2: warnings only, exit 0 -> SILENT (the incident's exact shape)
+    cat >"$_d/silent.sh" <<'EOF'
+echo "warning: 'export use *' is deprecated"
+echo "warning: compiler_cross_module_private_symbol_collision"
+exit 0
+EOF
+    # Fixture 3: SIGTERM-killed mid-run (the 60s kill-monitor shape) -> ERROR
+    cat >"$_d/killed.sh" <<'EOF'
+echo "warning: noise"
+kill -TERM $$
+EOF
+    # Fixture 4: real failure, loud, exit 1 -> OK (honest runner)
+    cat >"$_d/red.sh" <<'EOF'
+echo "Results: 4 total, 3 passed, 1 failed"
+exit 1
+EOF
+
+    for _f in ok:OK silent:SILENT killed:ERROR red:OK; do
+        _name=${_f%%:*}
+        _want=${_f##*:}
+        _got=$(SIMPLE_TEST_CMD="sh $_d/$_name.sh" classify_target dummy)
+        if [ "$_got" != "$_want" ]; then
+            echo "selftest FAIL: fixture $_name expected $_want got $_got"
+            _fail=1
+        fi
+    done
+
+    rm -rf "$_d"
+    if [ "$_fail" -ne 0 ]; then
+        echo "ERROR — selftest failed; guard is not trustworthy"
+        exit 2
+    fi
+}
+
+TARGETS=""
+DO_SELFTEST=1
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) DO_SELFTEST=2 ;;
+        *) TARGETS="$TARGETS $arg" ;;
+    esac
+done
+
+[ "$DO_SELFTEST" -ge 1 ] && selftest
+if [ "$DO_SELFTEST" -eq 2 ] && [ -z "${TARGETS# }" ]; then
+    echo "PASS — selftest only, 4 fixture(s) checked"
+    exit 0
+fi
+
+if [ -z "${TARGETS# }" ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+checked=0
+silent=0
+errored=0
+silent_names=""
+error_names=""
+for t in $TARGETS; do
+    checked=$((checked + 1))
+    v=$(classify_target "$t")
+    case "$v" in
+        SILENT) silent=$((silent + 1)); silent_names="$silent_names $t" ;;
+        ERROR)  errored=$((errored + 1)); error_names="$error_names $t" ;;
+    esac
+    echo "  $v  $t"
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$silent" -gt 0 ]; then
+    echo "FAIL — $checked target(s) checked, $silent silent green:$silent_names"
+    exit 1
+fi
+if [ "$errored" -gt 0 ]; then
+    echo "ERROR — nothing was checked for $errored of $checked target(s):$error_names"
+    exit 2
+fi
+echo "PASS — $checked target(s) checked, 0 silent green"
+exit 0

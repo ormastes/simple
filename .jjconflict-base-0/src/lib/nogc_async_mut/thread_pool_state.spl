@@ -1,0 +1,141 @@
+# PoolStateV1 - compiler-private scalar task owner
+#
+# This is the narrow Simple wrapper for the runtime-owned PoolState v1 ABI.
+# It is intentionally not re-exported as the public ThreadPool API: input and
+# result are inline i64 only, and the runtime must provide native workers.
+
+extern fn rt_pool_state_create_v1(capacity: i64) -> i64
+extern fn rt_pool_state_try_submit_i64_v1(state_handle: i64, entry: Any, input: i64) -> i64
+extern fn rt_pool_task_status_i64_v1(task_handle: i64) -> i64
+extern fn rt_pool_task_join_i64_v1(task_handle: i64) -> i64
+extern fn rt_pool_task_release_i64_v1(task_handle: i64) -> i64
+extern fn rt_pool_state_close_v1(state_handle: i64) -> i64
+extern fn rt_pool_state_join_idle_v1(state_handle: i64) -> i64
+extern fn rt_pool_state_outstanding_v1(state_handle: i64) -> i64
+extern fn rt_pool_state_pending_v1(state_handle: i64) -> i64
+extern fn rt_pool_state_running_v1(state_handle: i64) -> i64
+extern fn rt_pool_state_completed_v1(state_handle: i64) -> i64
+extern fn rt_pool_state_destroy_v1(state_handle: i64) -> i64
+
+val POOL_SUBMIT_FULL_V1: i64 = -1
+val POOL_SUBMIT_CLOSED_V1: i64 = -2
+val POOL_SUBMIT_INVALID_V1: i64 = -3
+val POOL_TASK_INVALID_V1: i64 = -1
+
+class PoolJoinI64V1:
+    valid: bool
+    value: i64
+
+class PoolTaskI64V1:
+    native_handle: i64
+    joined: bool
+    released: bool
+    cached_result: i64
+
+    fn is_valid() -> bool:
+        self.native_handle > 0 and not self.released
+
+    fn status() -> i64:
+        if not self.is_valid():
+            return POOL_TASK_INVALID_V1
+        rt_pool_task_status_i64_v1(self.native_handle)
+
+    me join() -> PoolJoinI64V1:
+        if not self.is_valid():
+            return PoolJoinI64V1(valid: false, value: 0)
+        if self.joined:
+            return PoolJoinI64V1(valid: true, value: self.cached_result)
+        if self.status() == POOL_TASK_INVALID_V1:
+            return PoolJoinI64V1(valid: false, value: 0)
+        val result = rt_pool_task_join_i64_v1(self.native_handle)
+        self.cached_result = result
+        self.joined = true
+        PoolJoinI64V1(valid: true, value: result)
+
+    me release() -> bool:
+        if not self.is_valid():
+            return false
+        # The runtime releases credit only for a terminal task. Join first so
+        # a caller cannot discard a pending scalar result silently.
+        if not self.joined:
+            return false
+        if rt_pool_task_release_i64_v1(self.native_handle) != 1:
+            return false
+        self.released = true
+        true
+
+class PoolSubmitI64V1:
+    status: i64
+    task: PoolTaskI64V1
+
+    fn accepted() -> bool:
+        self.status > 0 and self.task.is_valid()
+
+class PoolStateV1:
+    native_handle: i64
+    closed: bool
+    destroyed: bool
+
+    static fn create(capacity: i64) -> PoolStateV1:
+        PoolStateV1(
+            native_handle: rt_pool_state_create_v1(capacity),
+            closed: false,
+            destroyed: false
+        )
+
+    fn is_valid() -> bool:
+        self.native_handle > 0 and not self.destroyed
+
+    me try_submit_i64(entry: fn(i64) -> i64, input: i64) -> PoolSubmitI64V1:
+        if not self.is_valid() or self.closed:
+            return PoolSubmitI64V1(
+                status: POOL_SUBMIT_CLOSED_V1,
+                task: PoolTaskI64V1(native_handle: 0, joined: false, released: false, cached_result: 0)
+            )
+        val status = rt_pool_state_try_submit_i64_v1(self.native_handle, entry, input)
+        PoolSubmitI64V1(
+            status: status,
+            task: PoolTaskI64V1(native_handle: if status > 0: status else: 0, joined: false, released: false, cached_result: 0)
+        )
+
+    me close() -> bool:
+        if not self.is_valid():
+            return false
+        if rt_pool_state_close_v1(self.native_handle) != 1:
+            return false
+        self.closed = true
+        true
+
+    fn join_idle() -> bool:
+        self.is_valid() and rt_pool_state_join_idle_v1(self.native_handle) == 1
+
+    fn outstanding_count() -> i64:
+        if not self.is_valid():
+            return POOL_TASK_INVALID_V1
+        rt_pool_state_outstanding_v1(self.native_handle)
+
+    fn pending_count() -> i64:
+        if not self.is_valid():
+            return POOL_TASK_INVALID_V1
+        rt_pool_state_pending_v1(self.native_handle)
+
+    fn running_count() -> i64:
+        if not self.is_valid():
+            return POOL_TASK_INVALID_V1
+        rt_pool_state_running_v1(self.native_handle)
+
+    fn completed_count() -> i64:
+        if not self.is_valid():
+            return POOL_TASK_INVALID_V1
+        rt_pool_state_completed_v1(self.native_handle)
+
+    me destroy() -> bool:
+        if not self.is_valid():
+            return false
+        if rt_pool_state_destroy_v1(self.native_handle) != 1:
+            return false
+        self.destroyed = true
+        true
+
+export PoolStateV1, PoolTaskI64V1, PoolSubmitI64V1, PoolJoinI64V1
+export POOL_SUBMIT_FULL_V1, POOL_SUBMIT_CLOSED_V1, POOL_SUBMIT_INVALID_V1, POOL_TASK_INVALID_V1

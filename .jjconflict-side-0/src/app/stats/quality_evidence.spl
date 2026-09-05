@@ -1,0 +1,143 @@
+# Truthful adapters for quality artifacts produced by their canonical owners.
+# This module only reads retained evidence.  It deliberately does not run or
+# reimplement coverage, duplicate, coupling, or cohesion analysis.
+
+use app.stats.types (StatsQualityEvidenceV2)
+use app.io.mod (file_exists, file_read, file_modified_time, current_time_unix)
+
+const DEFAULT_EVIDENCE_MAX_AGE_SECONDS: i64 = 604800
+
+fn joined(root: text, relative: text) -> text:
+    if root.len() == 0 or root == ".":
+        return relative
+    if root.ends_with("/"):
+        return root + relative
+    root + "/" + relative
+
+fn preferred_artifact(primary: text, retained: text) -> text:
+    if file_exists(primary):
+        return primary
+    retained
+
+fn unavailable(metric: text, source: text, reason: text) -> StatsQualityEvidenceV2:
+    StatsQualityEvidenceV2(
+        metric: metric,
+        status: "unavailable",
+        source: source,
+        measured_at: "",
+        summary: reason
+    )
+
+fn value_after(content: text, key: text) -> text:
+    for raw_line in content.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with(key):
+            return line.substring(key.len()).trim()
+    ""
+
+fn count_lines_containing(content: text, needle: text) -> i64:
+    var count = 0
+    for line in content.split("\n"):
+        if line.contains(needle):
+            count = count + 1
+    count
+
+fn coverage_summary(content: text) -> text:
+    if not content.contains("summary:") or not content.contains("total_decisions:") or not content.contains("total_conditions:"):
+        return ""
+    val decisions = value_after(content, "total_decisions:")
+    val covered_decisions = value_after(content, "covered_decisions:")
+    val conditions = value_after(content, "total_conditions:")
+    val covered_conditions = value_after(content, "covered_conditions:")
+    if decisions.len() == 0 or covered_decisions.len() == 0 or conditions.len() == 0 or covered_conditions.len() == 0:
+        return ""
+    "decisions {covered_decisions}/{decisions}; conditions {covered_conditions}/{conditions}"
+
+fn duplication_summary(content: text) -> text:
+    if not content.contains("metadata:") or not content.contains("duplicate_groups |"):
+        return ""
+    val groups = value_after(content, "total_groups:")
+    val lines = value_after(content, "total_lines:")
+    val occurrences = value_after(content, "total_occurrences:")
+    if groups.len() == 0 or lines.len() == 0 or occurrences.len() == 0:
+        return ""
+    "{groups} groups; {occurrences} occurrences; {lines} duplicated lines"
+
+fn coupling_summary(content: text) -> text:
+    if not content.contains("\"modules\"") or not content.contains("\"cycles\"") or not content.contains("\"layer_violations\""):
+        return ""
+    val modules = count_lines_containing(content, "\"name\":")
+    val violations = count_lines_containing(content, "\"from\":")
+    "{modules} modules; {violations} layer violations; see retained report for cycles and CBO"
+
+fn cohesion_summary(content: text) -> text:
+    if not content.contains("\"lcom\""):
+        return ""
+    val classes = count_lines_containing(content, "\"class\":")
+    "LCOM evidence for {classes} classes"
+
+fn artifact_summary(metric: text, content: text) -> text:
+    if metric == "coverage":
+        return coverage_summary(content)
+    if metric == "duplication":
+        return duplication_summary(content)
+    if metric == "coupling":
+        return coupling_summary(content)
+    if metric == "cohesion":
+        return cohesion_summary(content)
+    ""
+
+fn classify_quality_evidence(metric: text, source: text, content: text, measured_epoch: i64, now_epoch: i64, max_age_seconds: i64) -> StatsQualityEvidenceV2:
+    val summary = artifact_summary(metric, content)
+    if summary.len() == 0:
+        return unavailable(metric, source, "artifact missing required {metric} evidence fields")
+    if measured_epoch <= 0:
+        return unavailable(metric, source, "artifact timestamp is unavailable")
+
+    var status = "measured"
+    if now_epoch < measured_epoch:
+        status = "stale"
+    elif max_age_seconds >= 0 and now_epoch - measured_epoch > max_age_seconds:
+        status = "stale"
+
+    StatsQualityEvidenceV2(
+        metric: metric,
+        status: status,
+        source: source,
+        measured_at: measured_epoch.to_text(),
+        summary: summary
+    )
+
+fn read_quality_evidence(metric: text, source: text, now_epoch: i64, max_age_seconds: i64) -> StatsQualityEvidenceV2:
+    if not file_exists(source):
+        return unavailable(metric, source, "artifact not found")
+    val content = file_read(source)
+    if content.len() == 0:
+        return unavailable(metric, source, "artifact is empty or unreadable")
+    classify_quality_evidence(metric, source, content, file_modified_time(source), now_epoch, max_age_seconds)
+
+fn collect_quality_evidence_at(root: text, now_epoch: i64, max_age_seconds: i64) -> [StatsQualityEvidenceV2]:
+    val coverage_path = preferred_artifact(
+        joined(root, "build/coverage/coverage.sdn"),
+        joined(root, "doc/10_metrics/dashboard/tables/coverage.sdn")
+    )
+    val duplication_path = preferred_artifact(
+        joined(root, "doc/01_research/analysis/duplicate_db.sdn"),
+        joined(root, "doc/10_metrics/dashboard/tables/duplication.sdn")
+    )
+    val coupling_path = joined(root, "build/stats/coupling.json")
+    [
+        read_quality_evidence("coverage", coverage_path, now_epoch, max_age_seconds),
+        read_quality_evidence("duplication", duplication_path, now_epoch, max_age_seconds),
+        read_quality_evidence("coupling", coupling_path, now_epoch, max_age_seconds),
+        read_quality_evidence("cohesion", coupling_path, now_epoch, max_age_seconds)
+    ]
+
+fn collect_quality_evidence(root: text) -> [StatsQualityEvidenceV2]:
+    collect_quality_evidence_at(root, current_time_unix(), DEFAULT_EVIDENCE_MAX_AGE_SECONDS)
+
+export DEFAULT_EVIDENCE_MAX_AGE_SECONDS
+export classify_quality_evidence
+export read_quality_evidence
+export collect_quality_evidence_at
+export collect_quality_evidence

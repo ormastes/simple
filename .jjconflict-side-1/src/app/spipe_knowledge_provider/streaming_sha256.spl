@@ -1,0 +1,340 @@
+# Incremental provider SHA-256 over exact domain and payload bytes.
+#
+# The implementation retains the eight digest words, one partial 64-byte
+# block, and one reusable owner-local 64-word compression schedule. Domain
+# separation is fed through the same compression path as payload bytes; it is
+# never materialized as `domain + payload`.
+
+use std.common.crypto.types.{rotr32}
+use app.spipe_knowledge_provider.work_control.{ProviderBudgetChargeV1, ProviderBudgetPort, ProviderCheckpointProgressV1, ProviderCheckpointPort, provider_budget_category_hash_blocks}
+
+val SHA256_MAX_BYTES_V1: i64 = 2305843009213693951
+val SHA256_CHECKPOINT_BYTES_V1: i64 = 4096
+
+# Closed scalar lookup avoids constructing/copying a 64-entry K table for
+# every compressed block. The caller's round index is always in [0, 64).
+fn _sha256_stream_round_constant(index: i64) -> i64:
+    if index == 0: return 0x428a2f98
+    elif index == 1: return 0x71374491
+    elif index == 2: return 0xb5c0fbcf
+    elif index == 3: return 0xe9b5dba5
+    elif index == 4: return 0x3956c25b
+    elif index == 5: return 0x59f111f1
+    elif index == 6: return 0x923f82a4
+    elif index == 7: return 0xab1c5ed5
+    elif index == 8: return 0xd807aa98
+    elif index == 9: return 0x12835b01
+    elif index == 10: return 0x243185be
+    elif index == 11: return 0x550c7dc3
+    elif index == 12: return 0x72be5d74
+    elif index == 13: return 0x80deb1fe
+    elif index == 14: return 0x9bdc06a7
+    elif index == 15: return 0xc19bf174
+    elif index == 16: return 0xe49b69c1
+    elif index == 17: return 0xefbe4786
+    elif index == 18: return 0x0fc19dc6
+    elif index == 19: return 0x240ca1cc
+    elif index == 20: return 0x2de92c6f
+    elif index == 21: return 0x4a7484aa
+    elif index == 22: return 0x5cb0a9dc
+    elif index == 23: return 0x76f988da
+    elif index == 24: return 0x983e5152
+    elif index == 25: return 0xa831c66d
+    elif index == 26: return 0xb00327c8
+    elif index == 27: return 0xbf597fc7
+    elif index == 28: return 0xc6e00bf3
+    elif index == 29: return 0xd5a79147
+    elif index == 30: return 0x06ca6351
+    elif index == 31: return 0x14292967
+    elif index == 32: return 0x27b70a85
+    elif index == 33: return 0x2e1b2138
+    elif index == 34: return 0x4d2c6dfc
+    elif index == 35: return 0x53380d13
+    elif index == 36: return 0x650a7354
+    elif index == 37: return 0x766a0abb
+    elif index == 38: return 0x81c2c92e
+    elif index == 39: return 0x92722c85
+    elif index == 40: return 0xa2bfe8a1
+    elif index == 41: return 0xa81a664b
+    elif index == 42: return 0xc24b8b70
+    elif index == 43: return 0xc76c51a3
+    elif index == 44: return 0xd192e819
+    elif index == 45: return 0xd6990624
+    elif index == 46: return 0xf40e3585
+    elif index == 47: return 0x106aa070
+    elif index == 48: return 0x19a4c116
+    elif index == 49: return 0x1e376c08
+    elif index == 50: return 0x2748774c
+    elif index == 51: return 0x34b0bcb5
+    elif index == 52: return 0x391c0cb3
+    elif index == 53: return 0x4ed8aa4a
+    elif index == 54: return 0x5b9cca4f
+    elif index == 55: return 0x682e6ff3
+    elif index == 56: return 0x748f82ee
+    elif index == 57: return 0x78a5636f
+    elif index == 58: return 0x84c87814
+    elif index == 59: return 0x8cc70208
+    elif index == 60: return 0x90befffa
+    elif index == 61: return 0xa4506ceb
+    elif index == 62: return 0xbef9a3f7
+    0xc67178f2
+
+fn _sha256_stream_hex(h0: i64, h1: i64, h2: i64, h3: i64,
+                      h4: i64, h5: i64, h6: i64, h7: i64) -> text:
+    val digits = "0123456789abcdef"
+    var result = ""
+    val words = [h0, h1, h2, h3, h4, h5, h6, h7]
+    var wi = 0
+    while wi < 8:
+        val word = words[wi]
+        var shift = 28
+        while shift >= 0:
+            val nibble = (word >> shift) & 15
+            result = result + digits.substring(nibble, nibble + 1)
+            shift = shift - 4
+        wi = wi + 1
+    result
+
+fn _sha256_stream_length_byte(total_length: i64, byte_index: i64) -> u8:
+    val byte_from_lsb = 7 - byte_index
+    if byte_from_lsb == 0:
+        return ((total_length << 3) & 255).to_u8()
+    ((total_length >> (byte_from_lsb * 8 - 3)) & 255).to_u8()
+
+class Sha256StreamV1:
+    var h0: i64
+    var h1: i64
+    var h2: i64
+    var h3: i64
+    var h4: i64
+    var h5: i64
+    var h6: i64
+    var h7: i64
+    var partial: [u8]
+    var schedule: [i64]
+    var partial_length: i64
+    var total_length: i64
+    var finalized: bool
+    var terminal_reason: text
+
+    static fn begin(domain: [u8]) -> Result<Sha256StreamV1, text>:
+        # Provider domain separators are fixed protocol constants. Keeping the
+        # accepted domain below one block means begin performs no unbudgeted
+        # compression and still retains only the fixed partial block.
+        if domain.len() > 63:
+            return Err("invalid_hash_domain")
+        var stream = Sha256StreamV1(
+            h0: 0x6a09e667, h1: 0xbb67ae85,
+            h2: 0x3c6ef372, h3: 0xa54ff53a,
+            h4: 0x510e527f, h5: 0x9b05688c,
+            h6: 0x1f83d9ab, h7: 0x5be0cd19,
+            partial: [0u8; 64], schedule: [0; 64],
+            partial_length: 0, total_length: 0,
+            finalized: false, terminal_reason: "")
+        var i = 0
+        while i < domain.len():
+            stream.partial[i] = domain[i]
+            i = i + 1
+        stream.partial_length = domain.len()
+        stream.total_length = domain.len()
+        Ok(stream)
+
+    me _compress_partial():
+        # The stream owner reads its one fixed block directly.  No block or
+        # digest array crosses a value-semantic function boundary per block.
+        # The owner also reuses one fixed schedule workspace; compression
+        # allocates and returns no scale-sensitive arrays.
+        val mask32 = 4294967295
+        var wi = 0
+        while wi < 16:
+            val base = wi * 4
+            val b0 = self.partial[base] as i64
+            val b1 = self.partial[base + 1] as i64
+            val b2 = self.partial[base + 2] as i64
+            val b3 = self.partial[base + 3] as i64
+            self.schedule[wi] = (b0 * 16777216) + (b1 * 65536) +
+                (b2 * 256) + b3
+            wi = wi + 1
+        while wi < 64:
+            val w15 = self.schedule[wi - 15]
+            val w2 = self.schedule[wi - 2]
+            val s0 = (rotr32(w15, 7) ^ rotr32(w15, 18) ^ (w15 >> 3)) & mask32
+            val s1 = (rotr32(w2, 17) ^ rotr32(w2, 19) ^ (w2 >> 10)) & mask32
+            self.schedule[wi] = (self.schedule[wi - 16] + s0 +
+                self.schedule[wi - 7] + s1) & mask32
+            wi = wi + 1
+
+        var a = self.h0
+        var b = self.h1
+        var c = self.h2
+        var d = self.h3
+        var e = self.h4
+        var f = self.h5
+        var g = self.h6
+        var hh = self.h7
+        var ri = 0
+        while ri < 64:
+            val big_s1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) & mask32
+            val ch = ((e & f) ^ ((e ^ mask32) & g)) & mask32
+            val temp1 = (hh + big_s1 + ch +
+                _sha256_stream_round_constant(ri) + self.schedule[ri]) & mask32
+            val big_s0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) & mask32
+            val maj = ((a & b) ^ (a & c) ^ (b & c)) & mask32
+            val temp2 = (big_s0 + maj) & mask32
+            hh = g
+            g = f
+            f = e
+            e = (d + temp1) & mask32
+            d = c
+            c = b
+            b = a
+            a = (temp1 + temp2) & mask32
+            ri = ri + 1
+        self.h0 = (self.h0 + a) & mask32
+        self.h1 = (self.h1 + b) & mask32
+        self.h2 = (self.h2 + c) & mask32
+        self.h3 = (self.h3 + d) & mask32
+        self.h4 = (self.h4 + e) & mask32
+        self.h5 = (self.h5 + f) & mask32
+        self.h6 = (self.h6 + g) & mask32
+        self.h7 = (self.h7 + hh) & mask32
+        self.partial_length = 0
+
+    me update(bytes: [u8], offset: i64, count: i64,
+              budget: ProviderBudgetPort,
+              checkpoint: ProviderCheckpointPort) -> Result<(), text>:
+        if self.finalized:
+            if self.terminal_reason != "": return Err(self.terminal_reason)
+            return Err("sha256_finalized")
+        val byte_length = bytes.len()
+        if (offset < 0 or count < 0 or offset > byte_length or
+            count > byte_length - offset):
+            self.finalized = true
+            self.terminal_reason = "invalid_sha256_range"
+            return Err("invalid_sha256_range")
+        if count > SHA256_MAX_BYTES_V1 - self.total_length:
+            self.finalized = true
+            return Err("sha256_length_overflow")
+
+        var cursor = offset
+        val end = offset + count
+        var bytes_since_checkpoint = 0
+        while cursor < end:
+            var take = 64 - self.partial_length
+            val remaining = end - cursor
+            if take > remaining:
+                take = remaining
+            var copied = 0
+            while copied < take:
+                self.partial[self.partial_length + copied] = bytes[cursor + copied]
+                copied = copied + 1
+            self.partial_length = self.partial_length + take
+            self.total_length = self.total_length + take
+            cursor = cursor + take
+            bytes_since_checkpoint = bytes_since_checkpoint + take
+            if self.partial_length == 64:
+                val charged = budget.charge(ProviderBudgetChargeV1(
+                    category: provider_budget_category_hash_blocks(), amount: 1))
+                if charged.is_err():
+                    self.finalized = true
+                    return Err(charged.unwrap_err())
+                self._compress_partial()
+                val progress = ProviderCheckpointProgressV1(stage: "sha256",
+                    bytes: bytes_since_checkpoint, events: 0, scalars: 0,
+                    hash_blocks: 1, comparisons: 0)
+                val checked = checkpoint.checkpoint(progress)
+                if checked.is_err():
+                    self.finalized = true
+                    return Err(checked.unwrap_err())
+                bytes_since_checkpoint = 0
+            if bytes_since_checkpoint >= SHA256_CHECKPOINT_BYTES_V1:
+                val progress = ProviderCheckpointProgressV1(stage: "sha256",
+                    bytes: bytes_since_checkpoint, events: 0, scalars: 0,
+                    hash_blocks: 0, comparisons: 0)
+                val checked = checkpoint.checkpoint(progress)
+                if checked.is_err():
+                    self.finalized = true
+                    return Err(checked.unwrap_err())
+                bytes_since_checkpoint = 0
+        if bytes_since_checkpoint > 0:
+            val progress = ProviderCheckpointProgressV1(stage: "sha256",
+                bytes: bytes_since_checkpoint, events: 0, scalars: 0,
+                hash_blocks: 0, comparisons: 0)
+            val checked = checkpoint.checkpoint(progress)
+            if checked.is_err():
+                self.finalized = true
+                return Err(checked.unwrap_err())
+        Ok(())
+
+    me update_bounded(bytes: [u8], offset: i64, count: i64,
+                      budget: ProviderBudgetPort,
+                      checkpoint: ProviderCheckpointPort) -> Result<(), text>:
+        # Compatibility callers may still use update directly. Product paths
+        # that own a large value array use this adapter so every call crossing
+        # into update owns at most one checkpoint quantum (4096 bytes).
+        if self.finalized:
+            return self.update([], 0, 0, budget, checkpoint)
+        val byte_length = bytes.len()
+        if (offset < 0 or count < 0 or offset > byte_length or
+            count > byte_length - offset):
+            return self.update(bytes, offset, count, budget, checkpoint)
+        if count > SHA256_MAX_BYTES_V1 - self.total_length:
+            self.finalized = true
+            return Err("sha256_length_overflow")
+        if count == 0:
+            return self.update([], 0, 0, budget, checkpoint)
+        var cursor = offset
+        val end = offset + count
+        while cursor < end:
+            var take = SHA256_CHECKPOINT_BYTES_V1
+            if take > end - cursor:
+                take = end - cursor
+            var owned: [u8] = [0u8; take]
+            var copied = 0
+            while copied < take:
+                owned[copied] = bytes[cursor + copied]
+                copied = copied + 1
+            self.update(owned, 0, take, budget, checkpoint)?
+            cursor = cursor + take
+        Ok(())
+
+    me finish(budget: ProviderBudgetPort,
+              checkpoint: ProviderCheckpointPort) -> Result<text, text>:
+        if self.finalized:
+            if self.terminal_reason != "": return Err(self.terminal_reason)
+            return Err("sha256_finalized")
+        self.finalized = true
+
+        self.partial[self.partial_length] = 128u8
+        self.partial_length = self.partial_length + 1
+        if self.partial_length > 56:
+            while self.partial_length < 64:
+                self.partial[self.partial_length] = 0u8
+                self.partial_length = self.partial_length + 1
+            budget.charge(ProviderBudgetChargeV1(
+                category: provider_budget_category_hash_blocks(), amount: 1))?
+            self._compress_partial()
+            val first_progress = ProviderCheckpointProgressV1(stage: "sha256",
+                bytes: 0, events: 0, scalars: 0,
+                hash_blocks: 1, comparisons: 0)
+            checkpoint.checkpoint(first_progress)?
+        while self.partial_length < 56:
+            self.partial[self.partial_length] = 0u8
+            self.partial_length = self.partial_length + 1
+        var byte_index = 0
+        while byte_index < 8:
+            self.partial[56 + byte_index] = _sha256_stream_length_byte(
+                self.total_length, byte_index)
+            byte_index = byte_index + 1
+        self.partial_length = 64
+        budget.charge(ProviderBudgetChargeV1(
+            category: provider_budget_category_hash_blocks(), amount: 1))?
+        self._compress_partial()
+        val final_progress = ProviderCheckpointProgressV1(stage: "sha256",
+            bytes: 0, events: 0, scalars: 0,
+            hash_blocks: 1, comparisons: 0)
+        checkpoint.checkpoint(final_progress)?
+        Ok(_sha256_stream_hex(self.h0, self.h1, self.h2, self.h3,
+            self.h4, self.h5, self.h6, self.h7))
+
+export Sha256StreamV1

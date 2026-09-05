@@ -1,0 +1,69 @@
+# Divergence class: the `s = s + x` accumulation loop.
+#
+# The MIR pass `mir::string_accum` rewrites this shape onto the runtime string
+# builder (`rt_string_builder_new/push/finish`) for the compiled lanes, while
+# the tree-walk interpreter keeps doing real concatenations. That makes the two
+# engines structurally different code for the same source, which is exactly
+# what this corpus exists to fence.
+#
+# The cases below are the ones that broke while the pass was being written, and
+# every one of them produced a silently WRONG string rather than a crash:
+#   * zero iterations -- the accumulator must keep its entry value, so the
+#     builder has to be seeded and finished even when the body never runs;
+#   * a non-empty accumulator on entry -- dropping the seed loses the prefix;
+#   * the last iteration -- emitting the push before its own operand was
+#     defined lost exactly one append on every input;
+#   * a mid-loop read of the accumulator -- the pass must decline to rewrite,
+#     because the builder holds bytes the local does not.
+
+fn append_only(n: i64) -> str:
+    var s = ""
+    var i = 0
+    while i < n:
+        s = s + "ab"
+        i = i + 1
+    return s
+
+fn seeded(n: i64, pre: str) -> str:
+    var s = pre
+    var i = 0
+    while i < n:
+        s = s + "xy"
+        i = i + 1
+    return s
+
+fn read_mid_loop(n: i64) -> i64:
+    var s = ""
+    var total = 0
+    var i = 0
+    while i < n:
+        s = s + "abc"
+        total = total + s.len()
+        i = i + 1
+    return total
+
+fn prepend(n: i64) -> str:
+    var s = "."
+    var i = 0
+    while i < n:
+        s = "<" + s
+        i = i + 1
+    return s
+
+fn main() -> i64:
+    print("empty={append_only(0)}")
+    print("one={append_only(1)}")
+    print("many={append_only(5)}")
+    print("len_big={append_only(2000).len()}")
+
+    print("seed_zero={seeded(0, "P")}")
+    print("seed_some={seeded(3, "P")}")
+    print("seed_empty={seeded(2, "")}")
+
+    print("mid_read={read_mid_loop(4)}")
+    print("prepend={prepend(3)}")
+
+    val unicode = seeded(3, "é")
+    print("unicode={unicode}")
+    print("unicode_len={unicode.len()}")
+    0

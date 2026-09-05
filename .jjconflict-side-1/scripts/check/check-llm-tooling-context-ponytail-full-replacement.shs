@@ -1,0 +1,273 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_tooling_context_ponytail_full_replacement}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_tooling_context_ponytail_full_replacement_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+MIMIC_BUILD_DIR="$BUILD_DIR/mimic"
+MIMIC_REPORT="$BUILD_DIR/mimic_report.md"
+MIMIC_ENV="$MIMIC_BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$MIMIC_REPORT"
+
+status="pass"
+reason="repo_local_replacement_surfaces_verified"
+failures=""
+required_gates="mimic_evidence,execution_spec,execution_sql_dispatch,execution_public_absence_runtime,execution_live_tools_list,execution_lower_tools_list,execution_lower_context,execution_lower_ponytail,generated_execution_manual,generated_system_manual,wrapper_manifest,guide_replacement,guide_context,guide_ponytail,guide_sql,architecture_contract,architecture_no_parallel,requirements_sql,requirements_mcp,app_context_table,app_context_sql,app_context_filter,app_ponytail_table,app_context_dispatch,app_ponytail_dispatch,app_context_sourceless,app_ponytail_handler,lower_context_schema,lower_context_sql,lower_context_filter,lower_ponytail_schema,lower_context_dispatch,lower_ponytail_dispatch,lower_context_sourceless,lower_context_filter_handler,lower_ponytail_handler"
+surface_check_count=0
+failure_count=0
+
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+record_failure() {
+    failure_count=$((failure_count + 1))
+    if [ -z "$failures" ]; then
+        failures="$1"
+    else
+        failures="$failures,$1"
+    fi
+    status="fail"
+}
+
+require_contains() {
+    name="$1"
+    path="$2"
+    pattern="$3"
+    surface_check_count=$((surface_check_count + 1))
+    if [ ! -f "$path" ]; then
+        record_failure "$name:missing_file"
+        return
+    fi
+    if ! grep -F "$pattern" "$path" >/dev/null 2>&1; then
+        record_failure "$name:missing_pattern"
+    fi
+}
+
+if BUILD_DIR="$MIMIC_BUILD_DIR" REPORT_PATH="$MIMIC_REPORT" sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs >"$BUILD_DIR/mimic.log" 2>&1; then
+    mimic_status="pass"
+else
+    mimic_status="fail"
+    record_failure "mimic_evidence"
+fi
+
+EXECUTION_SPEC_LOG="$BUILD_DIR/mcp_context_ponytail_dispatch_spec.log"
+if "$SIMPLE_BIN" test test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl --mode=interpreter --clean >"$EXECUTION_SPEC_LOG" 2>&1; then
+    execution_spec_status="pass"
+else
+    execution_spec_status="fail"
+    record_failure "execution_spec"
+fi
+execution_sql_dispatch_status="pass"
+if [ "$execution_spec_status" != "pass" ] || ! grep -F "dispatch_sql_100%_exact" test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl >/dev/null 2>&1; then
+    execution_sql_dispatch_status="fail"
+    record_failure "execution_sql_dispatch"
+fi
+execution_public_absence_runtime_status="pass"
+if [ "$execution_spec_status" != "pass" ] || ! grep -F "renders MCP context and Ponytail absence without internal markers" test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl >/dev/null 2>&1 || ! grep -F "_expect_absence_marker_hidden" test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl >/dev/null 2>&1; then
+    execution_public_absence_runtime_status="fail"
+    record_failure "execution_public_absence_runtime"
+fi
+execution_lower_context_status="pass"
+if [ "$execution_spec_status" != "pass" ] || ! grep -F "executes simple_context through the lower MCP handler" test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl >/dev/null 2>&1; then
+    execution_lower_context_status="fail"
+    record_failure "execution_lower_context"
+fi
+execution_lower_ponytail_status="pass"
+if [ "$execution_spec_status" != "pass" ] || ! grep -F "executes simple_ponytail through the lower MCP handler" test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl >/dev/null 2>&1; then
+    execution_lower_ponytail_status="fail"
+    record_failure "execution_lower_ponytail"
+fi
+execution_live_tools_list_status="pass"
+if [ "$execution_spec_status" != "pass" ] || ! grep -F "advertise context and Ponytail through live app MCP tools list" test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl >/dev/null 2>&1 || ! grep -F "SIMPLE_MCP_TOOL_SET=all" test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl >/dev/null 2>&1; then
+    execution_live_tools_list_status="fail"
+    record_failure "execution_live_tools_list"
+fi
+execution_lower_tools_list_status="pass"
+if [ "$execution_spec_status" != "pass" ] || ! grep -F "advertises simple_context and simple_ponytail through the lower MCP tools list" test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl >/dev/null 2>&1 || ! grep -F "lower_make_tools_list" test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl >/dev/null 2>&1; then
+    execution_lower_tools_list_status="fail"
+    record_failure "execution_lower_tools_list"
+fi
+
+require_contains guide_replacement doc/07_guide/app/llm/llm_tooling_context_ponytail_mimic.md "replaces parallel external context-mode and"
+require_contains guide_context doc/07_guide/app/llm/llm_tooling_context_ponytail_mimic.md "simple_context"
+require_contains guide_ponytail doc/07_guide/app/llm/llm_tooling_context_ponytail_mimic.md "simple_ponytail"
+require_contains guide_sql doc/07_guide/app/llm/llm_tooling_context_ponytail_mimic.md "embedded-SQL"
+require_contains generated_execution_manual doc/06_spec/test/02_integration/app/mcp_context_ponytail_dispatch_spec.md "advertises simple_context and simple_ponytail through the lower MCP tools list"
+require_contains generated_system_manual doc/06_spec/03_system/app/tooling/feature/context_ponytail_mimic_spec.md "advertise context and Ponytail through live app MCP tools list"
+require_contains wrapper_manifest scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs "generated_execution_manual"
+require_contains architecture_contract doc/04_architecture/app/tools/llm_tooling_context_ponytail_mimic.md "The replacement contract is the shared"
+require_contains architecture_no_parallel doc/04_architecture/app/tools/llm_tooling_context_ponytail_mimic.md "instead of a parallel context-mode or ponytail plugin path"
+require_contains requirements_sql doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md "REQ-009"
+require_contains requirements_mcp doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md "REQ-015"
+
+require_contains app_context_table src/app/mcp/tool_table.spl "tool_entry(\"simple_context\""
+require_contains app_context_sql src/app/mcp/tool_table.spl "Use Simple embedded SQLite for index/query"
+require_contains app_context_filter src/app/mcp/tool_table.spl "source_filter"
+require_contains app_ponytail_table src/app/mcp/tool_table.spl "tool_entry(\"simple_ponytail\""
+require_contains app_context_dispatch src/app/mcp/main_dispatch.spl "return handle_simple_context(id, body)"
+require_contains app_ponytail_dispatch src/app/mcp/main_dispatch.spl "return handle_simple_ponytail(id, body)"
+require_contains app_context_sourceless src/app/mcp/main_lazy_query_tools.spl "sourceless_sql_query"
+require_contains app_ponytail_handler src/app/mcp/main_lazy_query_tools.spl "ponytail_simplification_report"
+
+require_contains lower_context_schema src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl "make_tool_schema(name: \"simple_context\""
+require_contains lower_context_sql src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl "Use Simple embedded SQLite for index/query"
+require_contains lower_context_filter src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl "source_filter"
+require_contains lower_ponytail_schema src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl "make_tool_schema(name: \"simple_ponytail\""
+require_contains lower_context_dispatch src/lib/nogc_async_mut/mcp/main_lazy.spl "return handle_simple_context(id, body)"
+require_contains lower_ponytail_dispatch src/lib/nogc_async_mut/mcp/main_lazy.spl "return handle_simple_ponytail(id, body)"
+require_contains lower_context_sourceless src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl "sourceless_sql_query"
+require_contains lower_context_filter_handler src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl "ctx_args.push(\"--source-filter=\" + source_filter)"
+require_contains lower_ponytail_handler src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl "ponytail_simplification_report_source"
+
+SURFACE_MANIFEST="$BUILD_DIR/replacement_surface_manifest.tsv"
+{
+    for path in \
+        scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs \
+        scripts/check/check-llm-tooling-context-ponytail-mimic.shs \
+        doc/07_guide/app/llm/llm_tooling_context_ponytail_mimic.md \
+        doc/06_spec/test/02_integration/app/mcp_context_ponytail_dispatch_spec.md \
+        doc/06_spec/03_system/app/tooling/feature/context_ponytail_mimic_spec.md \
+        doc/04_architecture/app/tools/llm_tooling_context_ponytail_mimic.md \
+        doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md \
+        src/app/mcp/tool_table.spl \
+        src/app/mcp/main_dispatch.spl \
+        src/app/mcp/main_lazy_query_tools.spl \
+        src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl \
+        src/lib/nogc_async_mut/mcp/main_lazy.spl \
+        src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl \
+        test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl \
+        test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+mimic_env_size="$(artifact_size "$MIMIC_ENV")"
+mimic_env_sha256="$(artifact_sha256 "$MIMIC_ENV")"
+mimic_log_size="$(artifact_size "$BUILD_DIR/mimic.log")"
+mimic_log_sha256="$(artifact_sha256 "$BUILD_DIR/mimic.log")"
+execution_spec_log_size="$(artifact_size "$EXECUTION_SPEC_LOG")"
+execution_spec_log_sha256="$(artifact_sha256 "$EXECUTION_SPEC_LOG")"
+
+if [ "$status" != "pass" ]; then
+    reason="repo_local_replacement_surface_gap"
+fi
+blocked_gates="$failures"
+next_action="strict context/Ponytail full-replacement evidence is ready"
+if [ -z "$blocked_gates" ]; then
+    blocked_gates="none"
+    primary_blocked_gate="none"
+else
+    primary_blocked_gate="$(printf '%s\n' "$blocked_gates" | cut -d ',' -f 1 | cut -d ':' -f 1)"
+    next_action="resolve context/Ponytail replacement failures: $blocked_gates"
+fi
+
+{
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_status=$status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_reason=$reason"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_scope=repo_local_simple_owned_surfaces"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_required_gates=$required_gates"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_blocked_gates=$blocked_gates"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_surface_check_count=$surface_check_count"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_failure_count=$failure_count"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_mimic_status=$mimic_status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_mimic_env=$MIMIC_ENV"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_mimic_env_size=$mimic_env_size"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_mimic_env_sha256=$mimic_env_sha256"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_mimic_log_size=$mimic_log_size"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_mimic_log_sha256=$mimic_log_sha256"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_spec_status=$execution_spec_status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_sql_dispatch_status=$execution_sql_dispatch_status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_public_absence_runtime_status=$execution_public_absence_runtime_status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_live_tools_list_status=$execution_live_tools_list_status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_lower_tools_list_status=$execution_lower_tools_list_status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_lower_context_status=$execution_lower_context_status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_lower_ponytail_status=$execution_lower_ponytail_status"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_spec_log=$EXECUTION_SPEC_LOG"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_spec_log_size=$execution_spec_log_size"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_execution_spec_log_sha256=$execution_spec_log_sha256"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_surface_manifest_sha256=$surface_manifest_sha256"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_failures=$failures"
+    printf '%s\n' "llm_tooling_context_ponytail_full_replacement_next_action=$next_action"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Tooling Context/Ponytail Full Replacement Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- scope: \`repo_local_simple_owned_surfaces\`"
+    printf '%s\n' "- required_gates: \`$required_gates\`"
+    printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
+    printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- surface_check_count: \`$surface_check_count\`"
+    printf '%s\n' "- failure_count: \`$failure_count\`"
+    printf '%s\n' "- mimic_status: \`$mimic_status\`"
+    printf '%s\n' "- mimic_env: \`$MIMIC_ENV\`"
+    printf '%s\n' "- mimic_env_size: \`$mimic_env_size\`"
+    printf '%s\n' "- mimic_env_sha256: \`$mimic_env_sha256\`"
+    printf '%s\n' "- mimic_log_size: \`$mimic_log_size\`"
+    printf '%s\n' "- mimic_log_sha256: \`$mimic_log_sha256\`"
+    printf '%s\n' "- execution_spec_status: \`$execution_spec_status\`"
+    printf '%s\n' "- execution_sql_dispatch_status: \`$execution_sql_dispatch_status\`"
+    printf '%s\n' "- execution_public_absence_runtime_status: \`$execution_public_absence_runtime_status\`"
+    printf '%s\n' "- execution_live_tools_list_status: \`$execution_live_tools_list_status\`"
+    printf '%s\n' "- execution_lower_tools_list_status: \`$execution_lower_tools_list_status\`"
+    printf '%s\n' "- execution_lower_context_status: \`$execution_lower_context_status\`"
+    printf '%s\n' "- execution_lower_ponytail_status: \`$execution_lower_ponytail_status\`"
+    printf '%s\n' "- execution_spec_log: \`$EXECUTION_SPEC_LOG\`"
+    printf '%s\n' "- execution_spec_log_size: \`$execution_spec_log_size\`"
+    printf '%s\n' "- execution_spec_log_sha256: \`$execution_spec_log_sha256\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
+    if [ -n "$failures" ]; then
+        printf '%s\n' "- failures: \`$failures\`"
+    else
+        printf '%s\n' "- failures: \`none\`"
+    fi
+    printf '%s\n' "- next_action: \`$next_action\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence proves the checked-in operator, CLI, app MCP, lower MCP, dashboard-adjacent, embedded-SQL, and Ponytail surfaces converge on Simple-owned `simple_context` and `simple_ponytail` contracts, and runs an execution spec that calls file context, source-less embedded-SQL context, and Ponytail through the app MCP dispatcher. It is repo-local replacement evidence; it does not claim internet fetch, external vector store, or third-party plugin parity.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-tooling-context-ponytail-full-replacement"
+else
+    echo "STATUS: FAIL llm-tooling-context-ponytail-full-replacement failures=$failures"
+    exit 1
+fi

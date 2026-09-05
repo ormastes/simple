@@ -1,0 +1,87 @@
+# Reproducer family for: a Dict/array-typed CLASS FIELD receiver does not reach
+# Dict/array dispatch on the SELF-HOSTED NATIVE backend.
+#
+# Mechanism (proven by stage-2 disassembly, see
+# src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:392 and
+# method_calls_literals.spl:1618): the field projection carries no HIR type, so
+# its MIR temp is typed i64, `receiver_is_dict` stays false, the
+# `local_is_runtime_dict` / `local_is_runtime_array` probe misses, and the
+# method call falls into the STRING arm. The failure is SILENT -- the call
+# appears to succeed and does nothing.
+#
+# ENGINE NOTE -- read before trusting a green run.
+#   bin/simple test  = tree-walk interpreter      (CANNOT exercise this defect)
+#   bin/simple run   = Cranelift JIT              (may or may not)
+#   native / AOT     = the affected backend       <-- the one that matters
+# This file is deliberately a plain runnable program, not an SSpec, so the SAME
+# source can be driven through all three engines and their output diffed. A
+# green interpreter run proves NOTHING here.
+#
+# Expected: every line prints "ok". Any "FAIL" line is a live misdispatch.
+
+class Holder:
+    d: {text: i64}
+    xs: [i64]
+    names: [text]
+
+class Outer:
+    inner: Holder
+
+struct SHolder:
+    d: {text: i64}
+    xs: [i64]
+
+fn check(label: text, cond: bool):
+    if cond:
+        print("ok   " + label)
+    else:
+        print("FAIL " + label)
+
+fn main():
+    # --- 1. Dict class field: .clear() (the original bootstrap blocker) ---
+    var h = Holder(d: {"a": 1, "b": 2}, xs: [1, 2, 3], names: ["p", "q"])
+    h.d.clear()
+    check("class dict field .clear() empties the dict", h.d.len() == 0)
+
+    # --- 2. Dict class field: the other methods, not just .clear() ---
+    var h2 = Holder(d: {"a": 1, "b": 2}, xs: [1, 2, 3], names: ["p", "q"])
+    check("class dict field .len()", h2.d.len() == 2)
+    check("class dict field .get() hit", h2.d.get("a") == 1)
+    check("class dict field .contains() hit", h2.d.contains("a"))
+    check("class dict field .contains() MISS is false", not h2.d.contains("zz"))
+    h2.d["c"] = 3
+    check("class dict field insert via index", h2.d.len() == 3)
+    h2.d.remove("a")
+    check("class dict field .remove()", h2.d.len() == 2 and not h2.d.contains("a"))
+
+    # --- 3. ARRAY class field, PRIMITIVE element type ---
+    # This is the half the landed Dict-only fix did not cover: the pre-existing
+    # array registration keys off struct_field_array_element_type_name, which
+    # only records a NAMED element type, so `[i64]` / `[text]` got nothing.
+    var h3 = Holder(d: {}, xs: [1, 2, 3], names: ["p", "q"])
+    check("class array<i64> field .len()", h3.xs.len() == 3)
+    check("class array<i64> field index read", h3.xs[0] == 1)
+    check("class array<text> field .len()", h3.names.len() == 2)
+    check("class array<text> field index read", h3.names[1] == "q")
+    h3.xs.clear()
+    check("class array field .clear() empties it", h3.xs.len() == 0)
+
+    # --- 4. Same dict reached through ANOTHER BINDING, not `me.`/field syntax ---
+    var h4 = Holder(d: {"a": 1}, xs: [], names: [])
+    var alias = h4.d
+    check("dict field via local alias .len()", alias.len() == 1)
+    check("dict field via local alias .contains()", alias.contains("a"))
+
+    # --- 5. STRUCT (not class) field receiver ---
+    var s = SHolder(d: {"a": 1, "b": 2}, xs: [7, 8])
+    check("struct dict field .len()", s.d.len() == 2)
+    s.d.clear()
+    check("struct dict field .clear()", s.d.len() == 0)
+    check("struct array field .len()", s.xs.len() == 2)
+
+    # --- 6. NESTED field: me.inner.dict ---
+    var o = Outer(inner: Holder(d: {"a": 1, "b": 2}, xs: [4, 5], names: []))
+    check("nested dict field .len()", o.inner.d.len() == 2)
+    o.inner.d.clear()
+    check("nested dict field .clear()", o.inner.d.len() == 0)
+    check("nested array field .len()", o.inner.xs.len() == 2)

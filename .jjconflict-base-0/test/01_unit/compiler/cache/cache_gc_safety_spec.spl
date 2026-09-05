@@ -1,0 +1,276 @@
+# Cache GC safety — the invariants that must hold or the cache is unsound
+#
+# """As a compiler engineer relying on the semantic build cache, I need garbage
+# collection to be allowed to lose me a cache HIT, but never allowed to hand me a
+# hit whose artifacts it has already deleted."""
+#
+# Design: doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md §18
+# Schema: src/compiler/80.driver/cache/schema/cache_protocol.sdn (gc.*)
+#
+# **Category:** Infrastructure
+
+use std.spec.*
+use compiler.driver.cache.gc.gc_index.{ManifestNode, BlobNode, GcIndex, GcRoots, gc_index_new, gc_roots_empty}
+use compiler.driver.cache.gc.gc_mark_sweep.{gc_mark, gc_mark_contains, gc_sweep_candidates, gc_repair_metadata, gc_repair_report, gc_true_refcount}
+use compiler.driver.cache.gc.gc_eviction.{EvictionCandidate, gc_rank_candidates, gc_select_evictions, gc_protected_bytes}
+use compiler.driver.cache.gc.gc_admission.{gc_pinned_overflow_check, gc_overflow_root_digests, PinnedOverflowReport}
+use compiler.driver.cache.metadata.gc_config.{gc_limits_default}
+use compiler.driver.cache.metadata.cache_metadata.{CacheMetadata, cache_metadata_new, cache_metadata_table_new, cache_metadata_table_put, cache_metadata_table_get, GC_CLASS_OLD_FEATURE_BRANCH, GC_CLASS_RELEASE_PIN, GC_CLASS_ACTIVE_LEASE}
+use compiler.driver.cache.lease.cache_lease.{lease_table_new, lease_acquire, lease_release, lease_referenced_digests, lease_protects, lease_heartbeat, lease_reclaim_stale, lease_active_count, CacheLease}
+
+val BLOB_A: text = "aaaa"
+val BLOB_B: text = "bbbb"
+val MANIFEST_M: text = "mmmm"
+
+fn one_manifest_index() -> GcIndex:
+    val m = ManifestNode(
+        digest: MANIFEST_M,
+        action_digest: "action-1",
+        artifact_digests: [BLOB_A],
+        dependency_manifests: [],
+        aop_group_roots: [],
+        block_manifest_roots: [],
+    )
+    gc_index_new([m], [BlobNode(digest: BLOB_A, size_bytes: 100),
+                       BlobNode(digest: BLOB_B, size_bytes: 40)])
+
+fn list_contains(items: [text], needle: text) -> bool:
+    for i in items:
+        if i == needle:
+            return true
+    false
+
+fn refcount_of(table_digest: text, index: GcIndex) -> i64:
+    gc_true_refcount(index, table_digest)
+
+fn overflow_protected_bytes(r: PinnedOverflowReport?) -> i64:
+    if val rep = r:
+        return rep.protected_bytes
+    -1
+
+fn overflow_root_count(r: PinnedOverflowReport?) -> i64:
+    if val rep = r:
+        return rep.largest_roots.len()
+    -1
+
+# Roots named by an overflow report that GC nevertheless selected for eviction.
+# Must always be empty: a reported root is never a deletion candidate.
+fn overflow_roots_wrongly_evicted(r: PinnedOverflowReport?, items: [EvictionCandidate]) -> i64:
+    if val rep = r:
+        val chosen = gc_select_evictions(gc_rank_candidates(items), 999999)
+        var bad: i64 = 0
+        for d in gc_overflow_root_digests(rep):
+            if list_contains(chosen, d):
+                bad = bad + 1
+        return bad
+    -1
+
+fn lease_generation(lease_id: text, table_leases: [CacheLease]) -> i64:
+    for l in table_leases:
+        if l.lease_id == lease_id:
+            return l.heartbeat_generation
+    -1
+
+describe "a leased artifact survives a concurrent GC":
+    """A consumer that has taken a lease before materializing an artifact keeps
+    that artifact for the whole life of the lease, no matter what GC runs
+    alongside it."""
+    it "marks every digest an active lease references, so the sweep cannot claim it":
+        val index = one_manifest_index()
+        var leases = lease_table_new()
+        leases = lease_acquire(leases, "lease-1", "host:123:boot", 1000, [MANIFEST_M], [BLOB_A])
+        var roots = gc_roots_empty()
+        roots = GcRoots(
+            active_lease_refs: lease_referenced_digests(leases),
+            in_flight_publications: [],
+            explicit_pins: [],
+            workspace_last_successful: [],
+            retained_main_generations: [],
+            bootstrap_catalogs: [],
+            release_tag_manifests: [],
+            retained_verification_evidence: [],
+            toolchain_and_schema_artifacts: [],
+        )
+        val marked = gc_mark(index, roots)
+        assert_true(gc_mark_contains(marked, MANIFEST_M))
+        assert_true(gc_mark_contains(marked, BLOB_A))
+        assert_false(list_contains(gc_sweep_candidates(marked), BLOB_A))
+
+    it "still sweeps the unleased blob, so the pass is not vacuously safe":
+        val index = one_manifest_index()
+        var leases = lease_table_new()
+        leases = lease_acquire(leases, "lease-1", "host:123:boot", 1000, [MANIFEST_M], [BLOB_A])
+        val roots = GcRoots(
+            active_lease_refs: lease_referenced_digests(leases),
+            in_flight_publications: [], explicit_pins: [], workspace_last_successful: [],
+            retained_main_generations: [], bootstrap_catalogs: [], release_tag_manifests: [],
+            retained_verification_evidence: [], toolchain_and_schema_artifacts: [],
+        )
+        val marked = gc_mark(index, roots)
+        assert_true(list_contains(gc_sweep_candidates(marked), BLOB_B))
+
+    it "drops protection only after the lease is released":
+        var leases = lease_table_new()
+        leases = lease_acquire(leases, "lease-1", "host:123:boot", 1000, [MANIFEST_M], [BLOB_A])
+        assert_true(lease_protects(leases, BLOB_A))
+        leases = lease_release(leases, "lease-1")
+        assert_false(lease_protects(leases, BLOB_A))
+        expect(lease_active_count(leases)).to_equal(0)
+
+describe "stale-lease reclamation is conservative":
+    """A lease is taken back only when its owner is proven dead, or when a long
+    timeout has passed AND the owner's heartbeat generation has not moved."""
+    it "keeps a live lease that is still inside the conservative timeout":
+        var leases = lease_table_new()
+        leases = lease_acquire(leases, "lease-1", "host:123:boot", 1000, [], [BLOB_A])
+        val kept = lease_reclaim_stale(leases, 1500, 900, [true], [1])
+        expect(lease_active_count(kept)).to_equal(1)
+
+    it "reclaims a silent lease only once the timeout AND the generation check both pass":
+        var leases = lease_table_new()
+        leases = lease_acquire(leases, "lease-1", "host:123:boot", 1000, [], [BLOB_A])
+        # Owner reports alive, but it has not heartbeat for the whole window and
+        # its generation is unchanged: design §18.3 rule (b) permits reclaim.
+        val swept = lease_reclaim_stale(leases, 999999, 900, [true], [1])
+        expect(lease_active_count(swept)).to_equal(0)
+
+    it "reclaims a lease whose owner is proven dead":
+        var leases = lease_table_new()
+        leases = lease_acquire(leases, "lease-1", "host:123:boot", 1000, [], [BLOB_A])
+        val swept = lease_reclaim_stale(leases, 1100, 900, [false], [1])
+        expect(lease_active_count(swept)).to_equal(0)
+
+    it "refuses to reclaim on timeout when the generation moved (a heartbeat happened)":
+        var leases = lease_table_new()
+        leases = lease_acquire(leases, "lease-1", "host:123:boot", 1000, [], [BLOB_A])
+        leases = lease_heartbeat(leases, "lease-1", 1500)
+        expect(lease_generation("lease-1", leases.leases)).to_equal(2)
+        # observed_generation 1 was recorded when the window opened; it no longer matches.
+        val kept = lease_reclaim_stale(leases, 999999, 900, [true], [1])
+        expect(lease_active_count(kept)).to_equal(1)
+
+    it "fails closed when no liveness probe result exists for the lease":
+        var leases = lease_table_new()
+        leases = lease_acquire(leases, "lease-1", "host:123:boot", 1000, [], [BLOB_A])
+        val kept = lease_reclaim_stale(leases, 999999, 900, [], [])
+        expect(lease_active_count(kept)).to_equal(1)
+
+describe "a pinned root survives GC":
+    """Pins, release tags, bootstrap catalogs and retained main generations are
+    protected: GC marks their whole closure and never ranks them into an
+    eviction, however badly it needs the bytes."""
+    it "marks a pinned manifest and its whole closure":
+        val index = one_manifest_index()
+        val roots = GcRoots(
+            active_lease_refs: [], in_flight_publications: [], explicit_pins: [MANIFEST_M],
+            workspace_last_successful: [], retained_main_generations: [],
+            bootstrap_catalogs: [], release_tag_manifests: [],
+            retained_verification_evidence: [], toolchain_and_schema_artifacts: [],
+        )
+        val marked = gc_mark(index, roots)
+        assert_true(gc_mark_contains(marked, BLOB_A))
+        assert_false(list_contains(gc_sweep_candidates(marked), MANIFEST_M))
+
+    it "never selects a protected candidate for eviction, even when short of the target":
+        val protected_entry = EvictionCandidate(
+            digest: "pinned-1", protection_class: GC_CLASS_RELEASE_PIN, ttl_expired: false,
+            last_access_time: 0, access_count: 0, recomputation_cost_ms: 0,
+            unique_retained_bytes: 900, artifact_size_bytes: 900, toolchain_relevant: false)
+        val evictable = EvictionCandidate(
+            digest: "cold-1", protection_class: GC_CLASS_OLD_FEATURE_BRANCH, ttl_expired: false,
+            last_access_time: 5, access_count: 1, recomputation_cost_ms: 1,
+            unique_retained_bytes: 10, artifact_size_bytes: 10, toolchain_relevant: false)
+        val ranked = gc_rank_candidates([protected_entry, evictable])
+        val chosen = gc_select_evictions(ranked, 5000)
+        assert_true(list_contains(chosen, "cold-1"))
+        assert_false(list_contains(chosen, "pinned-1"))
+
+    it "ranks an active lease above every other protection class":
+        val leased = EvictionCandidate(
+            digest: "leased-1", protection_class: GC_CLASS_ACTIVE_LEASE, ttl_expired: true,
+            last_access_time: 0, access_count: 0, recomputation_cost_ms: 0,
+            unique_retained_bytes: 1, artifact_size_bytes: 1, toolchain_relevant: false)
+        val cold = EvictionCandidate(
+            digest: "cold-1", protection_class: GC_CLASS_OLD_FEATURE_BRANCH, ttl_expired: false,
+            last_access_time: 99, access_count: 99, recomputation_cost_ms: 99,
+            unique_retained_bytes: 1, artifact_size_bytes: 1, toolchain_relevant: false)
+        val ranked = gc_rank_candidates([leased, cold])
+        expect(ranked[0].digest).to_equal("cold-1")
+        expect(gc_select_evictions(ranked, 1000).len()).to_equal(1)
+
+describe "mark-and-sweep repairs corrupted refcount metadata":
+    """Reference counts are an optimization that a crash can leave wrong.
+    Mark-and-sweep is the authority: it reports the drift and rewrites the
+    metadata to the truth it computed."""
+    it "reports the drift instead of silently correcting it":
+        val index = one_manifest_index()
+        var table = cache_metadata_table_new()
+        # DELIBERATE CORRUPTION: BLOB_A has one incoming manifest edge, but the
+        # metadata claims zero — the shape a crashed decrement leaves behind.
+        var corrupt = cache_metadata_new(BLOB_A, 100, GC_CLASS_OLD_FEATURE_BRANCH, 10)
+        corrupt = CacheMetadata(
+            digest: corrupt.digest, last_access_time: corrupt.last_access_time,
+            access_count: corrupt.access_count, artifact_size_bytes: 7,
+            unique_retained_bytes: corrupt.unique_retained_bytes,
+            recomputation_cost_ms: corrupt.recomputation_cost_ms,
+            ttl_deadline: corrupt.ttl_deadline, refcount_approx: 0,
+            namespace_protection_class: corrupt.namespace_protection_class,
+            toolchain_relevant: corrupt.toolchain_relevant)
+        table = cache_metadata_table_put(table, corrupt)
+        expect(refcount_of(BLOB_A, index)).to_equal(1)
+        val report = gc_repair_report(index, table)
+        assert_true(list_contains(report.repaired_refcounts, BLOB_A))
+        assert_true(list_contains(report.repaired_sizes, BLOB_A))
+
+    it "rewrites refcount and size to the mark-and-sweep truth":
+        val index = one_manifest_index()
+        var table = cache_metadata_table_new()
+        var corrupt = cache_metadata_new(BLOB_A, 7, GC_CLASS_OLD_FEATURE_BRANCH, 10)
+        corrupt = CacheMetadata(
+            digest: corrupt.digest, last_access_time: 10, access_count: 0,
+            artifact_size_bytes: 7, unique_retained_bytes: 7, recomputation_cost_ms: 0,
+            ttl_deadline: 0, refcount_approx: 0,
+            namespace_protection_class: GC_CLASS_OLD_FEATURE_BRANCH, toolchain_relevant: false)
+        table = cache_metadata_table_put(table, corrupt)
+        val roots = gc_roots_empty()
+        val marked = gc_mark(index, roots)
+        val repaired = gc_repair_metadata(index, table, marked)
+        val entry = cache_metadata_table_get(repaired, BLOB_A)
+        if val e = entry:
+            expect(e.refcount_approx).to_equal(1)
+            expect(e.artifact_size_bytes).to_equal(100)
+        else:
+            assert_true(false)
+
+describe "PinnedOverflow reports, it never deletes":
+    """When protected roots alone exceed the configured maximum the operator is
+    told which roots to unpin. Deleting a protected root to make the number fit
+    is never an option GC has."""
+    it "raises a report when protected roots alone exceed the maximum":
+        val limits = gc_limits_default(1000)
+        val big_pin = EvictionCandidate(
+            digest: "pin-big", protection_class: GC_CLASS_RELEASE_PIN, ttl_expired: false,
+            last_access_time: 0, access_count: 0, recomputation_cost_ms: 0,
+            unique_retained_bytes: 900, artifact_size_bytes: 900, toolchain_relevant: false)
+        val small_pin = EvictionCandidate(
+            digest: "pin-small", protection_class: GC_CLASS_ACTIVE_LEASE, ttl_expired: false,
+            last_access_time: 0, access_count: 0, recomputation_cost_ms: 0,
+            unique_retained_bytes: 400, artifact_size_bytes: 400, toolchain_relevant: false)
+        val items = [big_pin, small_pin]
+        expect(gc_protected_bytes(items)).to_equal(1300)
+        val report = gc_pinned_overflow_check(items, limits)
+        expect(overflow_protected_bytes(report)).to_equal(1300)
+        expect(overflow_root_count(report)).to_equal(2)
+        # The report names roots so an operator can unpin. Running the eviction
+        # selector over the same set with an unbounded target still picks none of
+        # them: reporting is the only outcome, deletion is never one.
+        expect(overflow_roots_wrongly_evicted(report, items)).to_equal(0)
+        expect(gc_select_evictions(gc_rank_candidates(items), 999999).len()).to_equal(0)
+
+    it "stays silent when protected roots fit inside the maximum":
+        val limits = gc_limits_default(10000)
+        val pin = EvictionCandidate(
+            digest: "pin-1", protection_class: GC_CLASS_RELEASE_PIN, ttl_expired: false,
+            last_access_time: 0, access_count: 0, recomputation_cost_ms: 0,
+            unique_retained_bytes: 100, artifact_size_bytes: 100, toolchain_relevant: false)
+        expect(overflow_protected_bytes(gc_pinned_overflow_check([pin], limits))).to_equal(-1)

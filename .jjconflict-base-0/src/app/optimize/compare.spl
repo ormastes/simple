@@ -1,0 +1,168 @@
+# Simple optimizer - perf-comparison harness
+# AC-6: Benchmark Simple codegen (no MIR) vs C codegen (MIR O2) to detect regressions.
+# Uses the compiler CLI + clang++, keeping the optimize app decoupled from
+# in-process compiler driver internals.
+
+use app.io.file_shell.{shell_output, file_delete, file_size}
+
+# ── Types ─────────────────────────────────────────────────────────────────────
+
+struct BenchResult:
+    label:       text   # "unoptimized" | "optimized"
+    wall_ms:     i64
+    binary_size: i64    # bytes; 0 if unavailable
+    binary_path: text
+
+struct CompareReport:
+    source_file:  text
+    unopt_result: BenchResult
+    opt_result:   BenchResult
+    regression:   bool  # true if optimized wall_ms > unoptimized * 1.05
+    speedup_pct:  i64   # (unopt - opt) / unopt * 100
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+fn _make_temp_path(label: text, ext: text) -> text:
+    val pid = shell_output("echo $$").trim()
+    "/tmp/simple_cmp_{label}_{pid}.{ext}"
+
+fn _aot_c_with_opt_level(source_file: text, cpp_out: text, opt_level: i64) -> bool:
+    val cmd = "bin/simple compile '{source_file}' --backend=c --output '{cpp_out}' --opt-level={opt_level} 2>&1"
+    val out = shell_output(cmd)
+    if out.contains("error:") or out.contains("Error:"):
+        return false
+    file_size(cpp_out) > 0
+
+fn _compile_cpp_to_binary(cpp_path: text, bin_path: text) -> bool:
+    val rt_src = "src/runtime/runtime.cpp"
+    val cmd = "clang++ -std=c++20 -O2 -I src/runtime/ '{cpp_path}' '{rt_src}' -o '{bin_path}' -lpthread -ldl -lm 2>&1"
+    val out = shell_output(cmd)
+    if out.contains("error:"):
+        error("optimize.compare", "clang++ error: {out}")
+        return false
+    true
+
+fn _time_binary_ms(bin_path: text, runs: i64) -> i64:
+    # Run `runs` times, parse "real" lines from bash time builtin, return minimum
+    val cmd = "for i in $(seq {runs}); do {{ time '{bin_path}' > /dev/null 2>&1; }} 2>&1; done 2>&1"
+    val out = shell_output(cmd)
+    val lines = out.split("\n")
+    var best: i64 = 999999
+    var i = 0
+    while i < lines.len():
+        val ln = lines[i].trim()
+        if ln.starts_with("real"):
+            val parts = ln.split("m")
+            if parts.len() >= 2:
+                val sec_str = parts[1].replace("s", "").trim()
+                val sec_f = sec_str.to_f64()
+                val mins_str = parts[0].replace("real", "").trim()
+                val mins = mins_str.to_i64()
+                val ms = (mins * 60000) + (sec_f * 1000.0).to_i64()
+                if ms < best:
+                    best = ms
+        i = i + 1
+    if best == 999999: 0 else: best
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+fn optimize_compare(file_path: text) -> i64:
+    print "=== Optimizer Comparison: {file_path} ==="
+    print ""
+
+    val check_out = shell_output("bin/simple check '{file_path}' 2>&1")
+    if not check_out.contains("All checks passed"):
+        print "Comparison unavailable: source file does not compile cleanly."
+        return 0
+
+    val unopt_cpp = _make_temp_path("unopt", "cpp")
+    val opt_cpp   = _make_temp_path("opt",   "cpp")
+    val unopt_bin = _make_temp_path("unopt", "bin")
+    val opt_bin   = _make_temp_path("opt",   "bin")
+
+    # Step 1: C codegen with no MIR passes (opt_level = 0)
+    print "[1/4] C codegen — no MIR passes..."
+    if not _aot_c_with_opt_level(file_path, unopt_cpp, 0):
+        print "Comparison unavailable: C codegen failed for {file_path}"
+        return 0
+
+    # Step 2: C codegen with MIR O2 passes (opt_level = 2)
+    print "[2/4] C codegen — O2 MIR passes..."
+    val opt_ok = _aot_c_with_opt_level(file_path, opt_cpp, 2)
+    val actual_opt_cpp = if opt_ok: opt_cpp else: unopt_cpp
+
+    # Step 3: compile both C++ blobs to native binaries
+    print "[3/4] Compiling to native binaries via clang++..."
+    if not _compile_cpp_to_binary(unopt_cpp, unopt_bin):
+        print "Comparison unavailable: clang++ failed for unoptimized binary."
+        return 0
+    if not _compile_cpp_to_binary(actual_opt_cpp, opt_bin):
+        print "Comparison unavailable: clang++ failed for optimized binary."
+        return 0
+
+    # Step 4: benchmark
+    print "[4/4] Benchmarking (5 runs each)..."
+    val unopt_ms   = _time_binary_ms(unopt_bin, 5)
+    val opt_ms     = _time_binary_ms(opt_bin, 5)
+    val unopt_size = file_size(unopt_bin)
+    val opt_size   = file_size(opt_bin)
+
+    val unopt_r = BenchResult(
+        label:       "unoptimized",
+        wall_ms:     unopt_ms,
+        binary_size: unopt_size,
+        binary_path: unopt_bin
+    )
+    val opt_r = BenchResult(
+        label:       "optimized",
+        wall_ms:     opt_ms,
+        binary_size: opt_size,
+        binary_path: opt_bin
+    )
+
+    val regression   = opt_ms > (unopt_ms + unopt_ms / 20)
+    val speedup_pct  = if unopt_ms > 0:
+        (unopt_ms - opt_ms) * 100 / unopt_ms
+    else:
+        0
+
+    val report = CompareReport(
+        source_file:  file_path,
+        unopt_result: unopt_r,
+        opt_result:   opt_r,
+        regression:   regression,
+        speedup_pct:  speedup_pct
+    )
+
+    _print_compare_report(report)
+
+    # Clean up temp files
+    file_delete(unopt_cpp)
+    file_delete(opt_cpp)
+
+    if regression: 1 else: 0
+
+fn _print_compare_report(report: CompareReport):
+    print ""
+    print "=== Comparison Report: {report.source_file} ==="
+    print ""
+    print "  Simple codegen (no MIR):  {report.unopt_result.wall_ms}ms  ({report.unopt_result.binary_size} bytes)"
+    print "  Simple codegen (O2 MIR):  {report.opt_result.wall_ms}ms  ({report.opt_result.binary_size} bytes)"
+    print ""
+    if report.regression:
+        val slower = 0 - report.speedup_pct
+        print "  REGRESSION: C codegen {slower}% SLOWER than unoptimized"
+        print "  Suggestion: investigate MIR passes introducing overhead"
+    elif report.speedup_pct > 0:
+        print "  Speedup: +{report.speedup_pct}% with O2 MIR passes"
+    else:
+        print "  Delta: no measurable difference"
+
+    val size_delta = report.opt_result.binary_size - report.unopt_result.binary_size
+    if size_delta > 0:
+        print "  Size delta: +{size_delta} bytes (optimized is larger)"
+    elif size_delta < 0:
+        print "  Size delta: {size_delta} bytes (optimized is smaller)"
+    else:
+        print "  Size delta: none"
+    print ""

@@ -1,0 +1,85 @@
+# Repro: class reference-semantics divergence — is a class instance stored in
+# another class's field / an array / an Option a REFERENCE or a VALUE COPY?
+#
+# Contract under test (language rule): `class` has identity/reference
+# semantics; assigning a class to a field, array slot or parameter copies the
+# REFERENCE, not the object. `struct` copies the value.
+#
+# Each case prints REF (mutation visible through the alias => reference
+# semantics honored) or COPY (mutation invisible => value-copy divergence).
+#
+# Run:
+#   bin/simple run test/fixtures/repro/compiler/class_identity/class_field_reference_semantics_repro.spl
+#   SIMPLE_EXECUTION_MODE=interpret bin/simple run <same>
+#
+# See doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md
+# for the measured truth table and binary identity.
+
+class Cell:
+    n: i64
+
+class Holder:
+    cell: Cell
+
+class Outer:
+    inner: Holder
+
+class OptHolder:
+    maybe: Cell?
+
+fn bump(c: Cell):
+    c.n = c.n + 1
+
+fn verdict(got: i64, want_ref: i64) -> text:
+    if got == want_ref:
+        return "REF"
+    "COPY(n={got})"
+
+fn main():
+    # 1. class stored as another class's field, mutate through ORIGINAL ref
+    val c1 = Cell(n: 10)
+    val h1 = Holder(cell: c1)
+    c1.n = 11
+    print "1 field<-original      = " + verdict(h1.cell.n, 11)
+
+    # 1b. same, mutate through the FIELD alias, read the original
+    val c1b = Cell(n: 20)
+    val h1b = Holder(cell: c1b)
+    h1b.cell.n = 21
+    print "1b original<-field     = " + verdict(c1b.n, 21)
+
+    # 2. nested fields: Outer.inner.cell
+    val c2 = Cell(n: 30)
+    val h2 = Holder(cell: c2)
+    val o2 = Outer(inner: h2)
+    o2.inner.cell.n = 31
+    print "2 nested               = " + verdict(c2.n, 31)
+
+    # 3. class refs in an array
+    val c3 = Cell(n: 40)
+    val arr = [c3]
+    arr[0].n = 41
+    print "3 array elem           = " + verdict(c3.n, 41)
+
+    # 4. class passed as fn parameter, mutated inside the callee
+    val c4 = Cell(n: 50)
+    bump(c4)
+    print "4 fn param             = " + verdict(c4.n, 51)
+
+    # 6. re-assignment of a field after construction (before 5: the optional
+    # case CRASHES the JIT, so it runs last to keep the table complete)
+    val h6 = Holder(cell: Cell(n: 70))
+    val c6 = Cell(n: 80)
+    h6.cell = c6
+    c6.n = 81
+    print "6 field reassign       = " + verdict(h6.cell.n, 81)
+
+    # 5. optional class field — under the JIT this dies with
+    # "runtime error: field access on nil receiver" + core dump: the Option
+    # class field reads back as nil. A second, separate defect.
+    val c5 = Cell(n: 60)
+    val oh = OptHolder(maybe: c5)
+    c5.n = 61
+    val m5 = oh.maybe
+    val got5 = if m5.? : m5!.n else: -1
+    print "5 optional field       = " + verdict(got5, 61)

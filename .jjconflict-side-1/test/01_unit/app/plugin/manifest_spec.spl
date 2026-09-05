@@ -1,0 +1,54 @@
+use app.plugin.registry.{
+    parse_plugin_manifest_text, plugin_manifest_to_text, plugin_entry_new,
+    merge_plugin_entries, remove_plugin_entry, validate_unique_symbols
+}
+
+describe "Plugin manifest registry":
+    it "parses a manifest with one plugin and two functions":
+        val entries = parse_plugin_manifest_text(
+            "plugins:\n" +
+            "    -\n" +
+            "        name: regex\n" +
+            "        library: /tmp/libsimple_regex_ffi.so\n" +
+            "        version: \"0.1.0\"\n" +
+            "        functions: [rt_regex_new, rt_regex_destroy]\n"
+        )
+        expect(entries.len()).to_equal(1)
+        expect(entries[0].name).to_equal("regex")
+        expect(entries[0].functions.len()).to_equal(2)
+        expect(entries[0].functions[1]).to_equal("rt_regex_destroy")
+
+    it "renders manifest text for plugin entries":
+        val rendered = plugin_manifest_to_text([
+            plugin_entry_new("http", "/tmp/libsimple_http_ffi.so", "0.2.0", ["rt_http_get"])
+        ])
+        expect(rendered).to_contain("plugins:")
+        expect(rendered).to_contain("name: http")
+        expect(rendered).to_contain("functions: [rt_http_get]")
+
+    it "merges by plugin name and replaces existing entries":
+        val merged = merge_plugin_entries(
+            [plugin_entry_new("regex", "/old/lib.so", "0.1.0", ["rt_regex_new"])],
+            [plugin_entry_new("regex", "/new/lib.so", "0.2.0", ["rt_regex_new", "rt_regex_destroy"])]
+        )
+        expect(merged.len()).to_equal(1)
+        expect(merged[0].library).to_equal("/new/lib.so")
+        expect(merged[0].functions.len()).to_equal(2)
+
+    it "removes a plugin by name":
+        val filtered = remove_plugin_entry(
+            [
+                plugin_entry_new("regex", "/tmp/regex.so", "0.1.0", ["rt_regex_new"]),
+                plugin_entry_new("http", "/tmp/http.so", "0.1.0", ["rt_http_get"])
+            ],
+            "regex"
+        )
+        expect(filtered.len()).to_equal(1)
+        expect(filtered[0].name).to_equal("http")
+
+    it "rejects duplicate extern symbols across plugins":
+        val error = validate_unique_symbols([
+            plugin_entry_new("regex", "/tmp/regex.so", "0.1.0", ["rt_shared"]),
+            plugin_entry_new("http", "/tmp/http.so", "0.1.0", ["rt_shared"])
+        ])
+        expect(error).to_contain("duplicate extern symbol")

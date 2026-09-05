@@ -1,0 +1,262 @@
+# rt_migrate driver.
+#
+# Usage:
+#   bin/simple run src/app/tools/rt_migrate/main.spl [options] <file-or-dir>...
+#
+# Options:
+#   --map <path>     alias map (default scripts/check/rt_alias_map.sdn)
+#   --dry-run        report what would change, write nothing
+#   --check          like --dry-run, but exit 1 when any file WOULD change
+#   --strict         rewrite a symbol only when the file declares its extern
+#                    and the declaration matches the alias signature
+#   --quiet          summary line only
+#
+# Output (stdout), one record per file that has direct rt_* call sites:
+#   FILE <path> rewritten=<n> imports=+<k> decls=-<d> nodecl=<m> residual=[sym:reason, ...]
+#   SUMMARY files=<n> changed=<c> rewritten=<r> imports=<k> decls=<d> residual_files=<f> residual_sites=<s>
+#
+# Exit code: 0 when every scanned file was fully migrated (no residual symbol),
+# 1 when any file still has an rt_* call the map could not migrate (the residual
+# symbols and reasons are listed per file), 2 on usage / map errors.
+# Allowlisted provider files (scripts/check/no_direct_rt_allowlist.txt) and
+# vendor/ trees are skipped: direct rt_* calls are their job. Files listed in
+# scripts/check/rt_migrate_skip.txt or carrying a `# rt-migrate: skip` comment are
+# reported as `SKIP <path> reason=skip-list|marker` and left untouched.
+
+use app.tools.rt_migrate.alias_map.{AliasEntry, parse_alias_map}
+use app.tools.rt_migrate.rewrite.{FileContext, MigrateResult, migrate_source, has_skip_marker}
+use std.nogc_sync_mut.cli.{get_cli_args}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable, file_write_text, file_exists, exit}
+use std.nogc_sync_mut.sffi.io.{dir_exists, dir_walk}
+
+struct Options:
+    map_path: text
+    dry_run: bool
+    check: bool
+    strict: bool
+    quiet: bool
+    map_verify: bool
+    paths: [text]
+
+fn _parse_options(args: [text]) -> Options:
+    var map_path = "scripts/check/rt_alias_map.sdn"
+    var dry_run = false
+    var check = false
+    var strict = false
+    var quiet = false
+    var map_verify = false
+    var paths: [text] = []
+    var i = 0
+    while i < args.len():
+        val a: text = args[i]
+        if a == "--map" and i + 1 < args.len():
+            map_path = args[i + 1]
+            i = i + 2
+            continue
+        if a == "--dry-run":
+            dry_run = true
+        elif a == "--check":
+            check = true
+            dry_run = true
+        elif a == "--strict":
+            strict = true
+        elif a == "--map-verify":
+            map_verify = true
+        elif a == "--quiet":
+            quiet = true
+        else:
+            paths.push(a)
+        i = i + 1
+    Options(map_path: map_path, dry_run: dry_run, check: check, strict: strict, quiet: quiet, map_verify: map_verify, paths: paths)
+
+# Allowlist semantics mirror scripts/check/check-no-direct-rt.shs: `dir/` prefix,
+# `suffix:` suffix match, otherwise exact relative path.
+fn _load_allowlist(path: text) -> [text]:
+    val src = file_read_nullable(path)
+    if src == nil:
+        return []
+    var out: [text] = []
+    for line in (src ?? "").split("\n"):
+        val t = line.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        out.push(t)
+    out
+
+fn _is_allowlisted(rel: text, allow_rules: [text]) -> bool:
+    for pat in allow_rules:
+        if pat.starts_with("suffix:"):
+            if rel.ends_with(pat.substring(7, pat.len())):
+                return true
+        elif pat.ends_with("/"):
+            if rel.starts_with(pat):
+                return true
+        elif rel == pat:
+            return true
+    false
+
+fn _relative(path: text) -> text:
+    var p = path
+    while p.starts_with("./"):
+        p = p.substring(2, p.len())
+    p
+
+fn _collect(paths: [text]) -> [text]:
+    var out: [text] = []
+    for p in paths:
+        if dir_exists(p):
+            for f in dir_walk(p):
+                if f.ends_with(".spl") and not f.contains("/vendor/"):
+                    out.push(f)
+        elif file_exists(p):
+            out.push(p)
+        else:
+            print "rt_migrate: no such file or directory: " + p
+    out
+
+fn _fmt_residuals(r: MigrateResult) -> text:
+    var parts: [text] = []
+    for res in r.residuals:
+        parts.push(res.sym + ":" + res.reason)
+    "[" + parts.join(", ") + "]"
+
+# --- map self-check (--map-verify) ---
+
+# std.a.b.c -> the file that module resolves to, or "" when none exists.
+fn _module_file(module: text) -> text:
+    if not module.starts_with("std."):
+        return ""
+    val rel = module.substring(4, module.len()).replace(".", "/")
+    if file_exists("src/lib/" + rel + ".spl"):
+        return "src/lib/" + rel + ".spl"
+    if file_exists("src/lib/" + rel + "/__init__.spl"):
+        return "src/lib/" + rel + "/__init__.spl"
+    ""
+
+# Does `file` define fn_name as a top-level function (or re-export it by name)?
+fn _defines_fn(source: text, fn_name: text) -> bool:
+    for line in source.split("\n"):
+        if line.starts_with("fn " + fn_name + "(") or line.starts_with("pub fn " + fn_name + "("):
+            return true
+        if (line.starts_with("export ") or line.starts_with("export use ") or line.starts_with("pub use ")) and line.contains(fn_name):
+            return true
+    false
+
+# Every `same` row (and every variant) must resolve to a real module + function.
+# Verdict is the last stdout line; exit 0 = all resolve, 1 = offenders, 2 = vacuous.
+fn _map_verify(map: Dict<text, AliasEntry>) -> i64:
+    var checked = 0
+    var bad = 0
+    var src_cache: Dict<text, text> = {}
+    for sym in map.keys():
+        val entry = map[sym]
+        if entry.cls != "same":
+            continue
+        var targets: [(text, text)] = [(entry.module, entry.fn_name)]
+        for v in entry.variants:
+            targets.push((v.module, v.fn_name))
+        for t in targets:
+            val (module, fn_name) = t
+            checked = checked + 1
+            val file = _module_file(module)
+            if file == "":
+                print "MAP-VERIFY unresolved module: " + sym + " -> " + module + "." + fn_name
+                bad = bad + 1
+                continue
+            if not src_cache.contains_key(file):
+                src_cache[file] = file_read_nullable(file) ?? ""
+            if not _defines_fn(src_cache[file], fn_name):
+                print "MAP-VERIFY unresolved fn: " + sym + " -> " + module + "." + fn_name + " (file " + file + ")"
+                bad = bad + 1
+    if checked == 0:
+        print "MAP-VERIFY ERROR — nothing was checked"
+        return 2
+    if bad > 0:
+        print "MAP-VERIFY FAIL — " + checked.to_text() + " alias target(s) checked, " + bad.to_text() + " unresolved"
+        return 1
+    print "MAP-VERIFY PASS — " + checked.to_text() + " alias target(s) checked, 0 unresolved"
+    0
+
+fn main():
+    val opts = _parse_options(get_cli_args())
+    if opts.paths.len() == 0 and not opts.map_verify:
+        print "usage: rt_migrate [--map <sdn>] [--map-verify] [--dry-run|--check] [--strict] [--quiet] <file-or-dir>..."
+        exit(2)
+        return
+    val map_src = file_read_nullable(opts.map_path)
+    if map_src == nil:
+        print "rt_migrate: cannot read alias map " + opts.map_path
+        exit(2)
+        return
+    val map = parse_alias_map(map_src ?? "")
+    if map.len() == 0:
+        print "rt_migrate: alias map has no entries: " + opts.map_path
+        exit(2)
+        return
+    if opts.map_verify:
+        exit(_map_verify(map))
+        return
+    val allow_rules = _load_allowlist("scripts/check/no_direct_rt_allowlist.txt")
+    val skip_rules = _load_allowlist("scripts/check/rt_migrate_skip.txt")
+    var skipped_listed = 0
+    var write_failures = 0
+    var files = 0
+    var changed = 0
+    var rewritten = 0
+    var imports = 0
+    var decls = 0
+    var residual_files = 0
+    var residual_sites = 0
+    var skipped = 0
+    for path in _collect(opts.paths):
+        val rel = _relative(path)
+        if _is_allowlisted(rel, allow_rules):
+            skipped = skipped + 1
+            continue
+        val src = file_read_nullable(path)
+        if src == nil:
+            print "rt_migrate: cannot read " + path
+            continue
+        val source: text = src ?? ""
+        if _is_allowlisted(rel, skip_rules):
+            skipped_listed = skipped_listed + 1
+            print "SKIP " + rel + " reason=skip-list"
+            continue
+        if has_skip_marker(source):
+            skipped_listed = skipped_listed + 1
+            print "SKIP " + rel + " reason=marker"
+            continue
+        val r = migrate_source(FileContext(path: rel, strict: opts.strict), source, map)
+        if r.rewritten == 0 and r.residuals.len() == 0 and not r.changed:
+            continue
+        files = files + 1
+        rewritten = rewritten + r.rewritten
+        imports = imports + r.imports_added.len()
+        decls = decls + r.decls_removed
+        if r.residuals.len() > 0:
+            residual_files = residual_files + 1
+            residual_sites = residual_sites + r.residuals.len()
+        # report BEFORE writing, so an aborted run still shows what was processed
+        if not opts.quiet:
+            print "FILE " + rel + " rewritten=" + r.rewritten.to_text() + " imports=+" + r.imports_added.len().to_text() + " decls=-" + r.decls_removed.to_text() + " nodecl=" + r.no_decl_rewrites.to_text() + " residual=" + _fmt_residuals(r)
+        if r.changed:
+            changed = changed + 1
+            if not opts.dry_run:
+                # Rebuild the content as a plain string: the joined/concatenated
+                # rope from migrate_source is not accepted as an extern string
+                # argument by the seed's file_io marshalling (verifier R3).
+                var out_text = ""
+                for piece in r.output.split("\n"):
+                    if out_text == "":
+                        out_text = piece
+                    else:
+                        out_text = out_text + "\n" + piece
+                if not file_write_text(path, out_text):
+                    print "rt_migrate: WRITE FAILED: " + path
+                    write_failures = write_failures + 1
+    print "SUMMARY files=" + files.to_text() + " changed=" + changed.to_text() + " rewritten=" + rewritten.to_text() + " imports=" + imports.to_text() + " decls=" + decls.to_text() + " residual_files=" + residual_files.to_text() + " residual_sites=" + residual_sites.to_text() + " provider_files_skipped=" + skipped.to_text() + " skipped_listed=" + skipped_listed.to_text() + " write_failures=" + write_failures.to_text() + (if opts.dry_run: " mode=dry-run" else: " mode=apply")
+    if opts.check and changed > 0:
+        exit(1)
+        return
+    if residual_files > 0:
+        exit(1)

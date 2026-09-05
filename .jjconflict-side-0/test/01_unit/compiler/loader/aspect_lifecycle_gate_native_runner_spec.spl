@@ -1,0 +1,38 @@
+"""Native OS-thread behavior evidence for aspect lifecycle single-flight."""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{dir_create_all, env_get, file_exists}
+
+extern fn rt_process_run_timeout(
+    cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+val GATE_NATIVE_FIXTURE: text =
+    "test/01_unit/compiler/loader/aspect_lifecycle_gate_native.spl"
+val GATE_NATIVE_BUILD_DIR: text = "build/test/aspect_lifecycle_gate_native"
+val GATE_NATIVE_EXECUTABLE: text =
+    GATE_NATIVE_BUILD_DIR + "/aspect_lifecycle_gate_native"
+
+fn current_simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN")
+    if configured != "" and file_exists(configured):
+        return configured
+    if file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    "bin/simple"
+
+describe "aspect lifecycle native single-flight":
+    it "admits one OS-thread owner at a time with CAS-only atomics":
+        step("Compile the checked-in Pure Simple contention fixture to native")
+        expect(dir_create_all(GATE_NATIVE_BUILD_DIR)).to_equal(true)
+        val (_compile_out, _compile_err, compile_code) = rt_process_run_timeout(
+            current_simple_binary(), [
+                "compile", GATE_NATIVE_FIXTURE, "--native",
+                "-o", GATE_NATIVE_EXECUTABLE
+            ], 120000)
+        expect(compile_code).to_equal(0)
+
+        step("Run eight real contenders under a fail-closed timeout")
+        val (native_out, native_err, native_code) = rt_process_run_timeout(
+            GATE_NATIVE_EXECUTABLE, [], 30000)
+        expect(native_code).to_equal(0)
+        expect(native_out + native_err).to_equal("")

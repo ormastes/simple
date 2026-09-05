@@ -1,0 +1,142 @@
+"""Bounded, target-bound proof for the mounted `/usr/include` tree."""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{bytes_to_text, text_to_bytes}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_file_exists}
+use os.services.vfs.vfs_immutable_include_tree_state_v1.{
+    VfsIncludeSealInfoV1, vfs_include_seal_info_v1,
+    vfs_include_proof_snapshot_begin_v1,
+    vfs_include_proof_snapshot_seal_v1
+}
+
+pub const VFS_INCLUDE_MANIFEST_MAX_BYTES_V1: i64 = 4194304
+pub const VFS_INCLUDE_MANIFEST_MAX_ENTRIES_V1: i64 = 4096
+pub const VFS_INCLUDE_FILE_MAX_BYTES_V1: i64 = 1048576
+pub const VFS_INCLUDE_TREE_MAX_BYTES_V1: i64 = 67108864
+pub val VFS_INCLUDE_MANIFEST_PATH_V1: text =
+    "/usr/include/.simpleos-sysroot.merkle"
+
+pub struct VfsIncludeTreeProofV1:
+    target_triple: text
+    manifest_sha256: text
+    root_sha256: text
+    entry_count: i64
+    total_bytes: i64
+    sealed: bool
+
+fn _path_valid_v1(path: text) -> bool:
+    path.starts_with("/usr/include/") and
+        path != VFS_INCLUDE_MANIFEST_PATH_V1 and path.len() <= 4096 and
+        not path.ends_with("/") and not path.contains("//") and
+        not path.contains("/./") and not path.contains("/../") and
+        not path.contains("\\") and not path.contains("\0") and
+        not path.contains("\n") and not path.contains("\r")
+
+fn _field_v1(line: text, prefix: text) -> text:
+    if not line.starts_with(prefix): return ""
+    line.slice(prefix.len(), line.len())
+
+pub(package) fn vfs_include_tree_prove_and_seal_v1(
+    target_triple: text,
+    expected_manifest_sha256: text,
+    expected_root_sha256: text,
+    exact_paths: [text], exact_sha256: [text]
+) -> Result<VfsIncludeTreeProofV1, text>:
+    if target_triple == "" or
+       not hash256_hex_valid(expected_manifest_sha256) or
+       hash256_is_zero(expected_manifest_sha256) or
+       not hash256_hex_valid(expected_root_sha256) or
+       hash256_is_zero(expected_root_sha256) or exact_paths.len() != 5 or
+       exact_sha256.len() != exact_paths.len():
+        return Err("include-tree-proof-request-invalid")
+    var exact_identity = ""
+    var identity_index: i64 = 0
+    while identity_index < exact_paths.len():
+        exact_identity = exact_identity + exact_paths[identity_index] + "=" +
+            exact_sha256[identity_index] + "\n"
+        identity_index = identity_index + 1
+    val exact_files_sha256 = sha256_u8_hex(text_to_bytes(exact_identity))
+    val existing = vfs_include_seal_info_v1(
+        target_triple, expected_manifest_sha256, expected_root_sha256,
+        exact_files_sha256)
+    if existing.?:
+        val info = existing.unwrap()
+        return Ok(VfsIncludeTreeProofV1(
+            target_triple: info.target_triple,
+            manifest_sha256: info.manifest_sha256,
+            root_sha256: info.root_sha256,
+            entry_count: info.entry_count, total_bytes: info.total_bytes,
+            sealed: true))
+    val snapshot = vfs_include_proof_snapshot_begin_v1()?
+    var exact_index: i64 = 0
+    while exact_index < exact_paths.len():
+        val path = exact_paths[exact_index]
+        val digest = exact_sha256[exact_index]
+        if (path != "/usr/share/simpleos/simpleos.ld" and
+            path != "/usr/lib/crt0.o" and
+            path != "/usr/lib/libsimpleos_c.a" and
+            path != "/usr/lib/libsimple_runtime.a" and
+            path != "/usr/lib/libm.a") or
+           not hash256_hex_valid(digest) or hash256_is_zero(digest):
+            return Err("sysroot-exact-proof-request-invalid")
+        val exact_bytes = g_vfs_read_file_bytes(path)
+        if exact_bytes.len() == 0 or
+           exact_bytes.len() > VFS_INCLUDE_TREE_MAX_BYTES_V1 or
+           sha256_u8_hex(exact_bytes) != digest:
+            return Err("sysroot-exact-content-proof-failed")
+        exact_index = exact_index + 1
+    val manifest_bytes = g_vfs_read_file_bytes(VFS_INCLUDE_MANIFEST_PATH_V1)
+    if manifest_bytes.len() == 0 or
+       manifest_bytes.len() > VFS_INCLUDE_MANIFEST_MAX_BYTES_V1 or
+       sha256_u8_hex(manifest_bytes) != expected_manifest_sha256:
+        return Err("include-tree-manifest-authentication-failed")
+    val lines = bytes_to_text(manifest_bytes).split("\n")
+    if lines.len() < 5 or lines[0] != "simpleos-include-tree-v1" or
+       _field_v1(lines[1], "target=") != target_triple or
+       _field_v1(lines[2], "root_sha256=") != expected_root_sha256:
+        return Err("include-tree-manifest-header-invalid")
+    val count_text = _field_v1(lines[3], "entry_count=")
+    if count_text == "": return Err("include-tree-manifest-count-invalid")
+    val count = count_text.to_int()
+    if count <= 0 or count > VFS_INCLUDE_MANIFEST_MAX_ENTRIES_V1 or
+       lines.len() != count + 5 or lines[lines.len() - 1] != "":
+        return Err("include-tree-manifest-count-invalid")
+    var canonical = "target={target_triple}\n"
+    var previous = ""
+    var total: i64 = 0
+    var index: i64 = 0
+    while index < count:
+        val line = lines[index + 4]
+        val split = line.split(" ")
+        if split.len() != 2 or not hash256_hex_valid(split[0]) or
+           hash256_is_zero(split[0]) or not _path_valid_v1(split[1]) or
+           (previous != "" and split[1] <= previous):
+            return Err("include-tree-manifest-entry-invalid")
+        val data = g_vfs_read_file_bytes(split[1])
+        if not g_vfs_file_exists(split[1]) or
+           data.len() > VFS_INCLUDE_FILE_MAX_BYTES_V1 or
+           sha256_u8_hex(data) != split[0] or
+           total > VFS_INCLUDE_TREE_MAX_BYTES_V1 - data.len():
+            return Err("include-tree-content-proof-failed")
+        total = total + data.len()
+        canonical = canonical + line + "\n"
+        if canonical.len() > VFS_INCLUDE_MANIFEST_MAX_BYTES_V1:
+            return Err("include-tree-root-input-too-large")
+        previous = split[1]
+        index = index + 1
+    if sha256_u8_hex(text_to_bytes(canonical)) != expected_root_sha256:
+        return Err("include-tree-root-mismatch")
+    if not vfs_include_proof_snapshot_seal_v1(
+        snapshot, VfsIncludeSealInfoV1(
+            target_triple: target_triple,
+            manifest_sha256: expected_manifest_sha256,
+            root_sha256: expected_root_sha256,
+            exact_files_sha256: exact_files_sha256,
+            entry_count: count, total_bytes: total)):
+        return Err("include-tree-changed-during-proof")
+    Ok(VfsIncludeTreeProofV1(
+        target_triple: target_triple,
+        manifest_sha256: expected_manifest_sha256,
+        root_sha256: expected_root_sha256,
+        entry_count: count, total_bytes: total, sealed: true))

@@ -1,0 +1,51 @@
+# Focused Wave-0 bridge. This is the only tracked entry the final bounded
+# admission runner may nominate. It embeds the current CompilerDriver and
+# builds only the focused reclaim probe.
+
+extern fn sys_get_args() -> [text]
+extern fn rt_string_free(value: text) -> i64
+
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.bootstrap_api.{bootstrap_low_memory_requested}
+use compiler.common.driver_core_types.{
+    CompileMode,
+    compile_result_errors,
+    compile_result_is_success,
+    driver_core_compile_options_default,
+    compileoptions_normalize_mir_optimization,
+    driver_output_format_native
+}
+
+fn main() -> i64:
+    val args = sys_get_args()
+    if args.len() == 2 and args[1] == "--version":
+        print "simple-wave0-low-memory-bridge 1"
+        return 0
+    if args.len() == 2 and args[1] == "--rt-string-free-proof":
+        val result = rt_string_free("")
+        print "bridge_rt_string_free_result={result}"
+        return 0
+    if args.len() != 4 or args[1] != "build-probe":
+        print "usage: bridge build-probe <source.spl> <output>"
+        return 2
+
+    val source = args[2]
+    val output = args[3]
+    var options = driver_core_compile_options_default()
+    options.input_files = [source]
+    options.bootstrap_input_count = 1
+    options.bootstrap_input_0 = source
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = driver_output_format_native()
+    options.backend = "cranelift"
+    options.release = true
+    options.opt_level = 3
+    options.low_memory = bootstrap_low_memory_requested()
+    options = compileoptions_normalize_mir_optimization(options)
+    val result = compiler_driver_run_compile(compiler_driver_create(options))
+    if compile_result_is_success(result):
+        return 0
+    for err in compile_result_errors(result):
+        print "bridge_compile_error={err}"
+    1

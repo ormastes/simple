@@ -1,0 +1,94 @@
+"""Matrix client-server adapter core with native rooms, threads, and receipts."""
+
+use app.llm_caret.messaging.port.contracts.{ChatTransportPort}
+use app.llm_caret.messaging.domain.capability.{TransportCapabilities}
+use app.llm_caret.messaging.domain.model.{RoomMessage}
+use app.llm_caret.messaging.adapter.chat.capability_registry.{chat_adapter_descriptor}
+use app.llm_caret.messaging.adapter.chat.rest_common.*
+
+class MatrixChatTransport with ChatTransportPort:
+    homeserver: text
+    access_token: text
+    bindings: [RestRoomBinding]
+    inbound_keys: [text]
+    outbound_keys: [text]
+
+    static fn new(homeserver: text, access_token: text) -> MatrixChatTransport:
+        MatrixChatTransport(homeserver: homeserver.trim().trim_end_matches("/"),
+            access_token: access_token, bindings: [], inbound_keys: [], outbound_keys: [])
+
+    fn capabilities() -> TransportCapabilities: chat_adapter_descriptor("matrix").capabilities
+
+    me bind_room(binding_id: text, canonical_room_id: text, external_room_id: text) -> text:
+        if binding_id == "" or canonical_room_id == "" or external_room_id == "": return "invalid_binding"
+        for binding in self.bindings:
+            if binding.binding_id == binding_id: return "binding_exists"
+        self.bindings.push(RestRoomBinding(binding_id: binding_id,
+            canonical_room_id: canonical_room_id, external_room_id: external_room_id))
+        "binding_attached"
+
+    me connect(binding_id: text) -> text:
+        if self.homeserver == "": return "homeserver_required"
+        if self.access_token == "": return "access_token_required"
+        for binding in self.bindings:
+            if binding.binding_id == binding_id: return "connected:matrix:" + binding_id
+        "binding_not_found"
+
+    fn binding(binding_id: text) -> RestRoomBinding?:
+        for value in self.bindings:
+            if value.binding_id == binding_id: return Some(value)
+        nil
+
+    fn prepare_send(binding_id: text, message: RoomMessage, idempotency_key: text) -> ChatHttpRequest:
+        val bound = self.binding(binding_id)
+        if not bound.?: return rejected_request("binding_not_connected")
+        if idempotency_key.len() < 8: return rejected_request("stable_idempotency_key_required")
+        val room = bound.external_room_id.replace("!", "%21").replace(":", "%3A")
+        val txn = idempotency_key.replace("/", "-")
+        var body = "{\"msgtype\":\"m.text\",\"body\":\"" + json_escape(message.body) + "\""
+        if message.thread_root_id != "":
+            body = body + ",\"m.relates_to\":{\"rel_type\":\"m.thread\",\"event_id\":\"" +
+                json_escape(message.thread_root_id) + "\",\"is_falling_back\":true}"
+        body = body + "}"
+        ChatHttpRequest(accepted: true, method: "PUT",
+            url: self.homeserver + "/_matrix/client/v3/rooms/" + room +
+                "/send/m.room.message/" + txn,
+            headers: ["Authorization: Bearer " + self.access_token, "Content-Type: application/json"],
+            body: body, idempotency_key: idempotency_key, error: "")
+
+    me send(binding_id: text, message: RoomMessage, idempotency_key: text) -> text:
+        for key in self.outbound_keys:
+            if key == idempotency_key: return "matrix_outbox_duplicate:" + message.message_id.value
+        val request = self.prepare_send(binding_id, message, idempotency_key)
+        if not request.accepted: return request.error
+        self.outbound_keys.push(idempotency_key)
+        "matrix_outbox:" + message.message_id.value
+
+    me normalize_event(binding_id: text, event: ExternalChatEvent) -> NormalizedChatEvent:
+        val bound = self.binding(binding_id)
+        if not bound.?:
+            return NormalizedChatEvent(accepted: false, duplicate: false, event_kind: "",
+                canonical_room_id: "", external_message_id: "", thread_root_id: "",
+                sender_external_id: "", body: "", error: "binding_not_connected")
+        val key = binding_id + ":" + event.event_id
+        for seen in self.inbound_keys:
+            if seen == key:
+                return NormalizedChatEvent(accepted: true, duplicate: true, event_kind: "message_created",
+                    canonical_room_id: bound.canonical_room_id, external_message_id: event.external_message_id,
+                    thread_root_id: event.external_thread_id, sender_external_id: event.sender_external_id,
+                    body: event.body, error: "")
+        self.inbound_keys.push(key)
+        NormalizedChatEvent(accepted: true, duplicate: false, event_kind: "message_created",
+            canonical_room_id: bound.canonical_room_id, external_message_id: event.external_message_id,
+            thread_root_id: event.external_thread_id, sender_external_id: event.sender_external_id,
+            body: event.body, error: "")
+
+    me mark_read(binding_id: text, external_message_id: text) -> text:
+        if not self.binding(binding_id).?: return "binding_not_connected"
+        "matrix_native_read_receipt:" + external_message_id
+
+    me open_private(binding_id: text, identity_ids: [text]) -> text:
+        if identity_ids.len() < 2: return "private_room_requires_two_identities"
+        "matrix_native_direct_room:create"
+
+export MatrixChatTransport

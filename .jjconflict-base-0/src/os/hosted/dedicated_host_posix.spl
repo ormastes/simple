@@ -1,0 +1,137 @@
+# Hosted POSIX/Linux implementation of the dedicated host contract.
+# All policy and validation stays in pure Simple; only the final syscalls cross
+# the runtime ABI.  This is the reusable mapping substrate for startup and
+# LLVM/Clang-style POSIX consumers.
+
+use common.platform.dedicated_host.{
+    DedicatedHost,
+    HOST_MAP_ANONYMOUS,
+    HOST_MAP_FAILED,
+    HostFilePreload,
+    HostMapRequest,
+    HostMappedRegion,
+    host_file_preload_error,
+    host_file_preload_success,
+    host_map_error,
+    host_mapped_region_releasable,
+    host_map_request_error,
+    host_map_success,
+    host_protection_error
+}
+
+use std.io_runtime.{ file_exists }
+
+extern fn rt_file_mmap_read_bytes(path: text) -> [i64]
+extern fn rt_file_size(path: text) -> i64
+@unsafe(reason: "raw mapped-address ABI; -1 is MAP_FAILED", capabilities: [ffi, raw_ptr])
+extern fn rt_mmap_raw(address: i64, length: i64, protection: i64, flags: i64, fd: i64, offset: i64) -> i64
+@unsafe(reason: "raw mapped-address protection status ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_mprotect(address: i64, length: i64, protection: i64) -> i64
+@unsafe(reason: "raw mapped-address release status ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_munmap_raw(address: i64, length: i64) -> i64
+
+@always_inline
+fn _sffi_file_mmap_read_bytes(path: text) -> [u8]?:
+    unsafe(capabilities: [ffi]):
+        rt_file_mmap_read_bytes(path)
+
+@always_inline
+fn _sffi_file_size(path: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_size(path)
+
+@always_inline
+fn _sffi_mmap_raw(
+    address: i64, length: i64, protection: i64, flags: i64, fd: i64, offset: i64
+) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_mmap_raw(address, length, protection, flags, fd, offset)
+
+@always_inline
+fn _sffi_mprotect(address: i64, length: i64, protection: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_mprotect(address, length, protection)
+
+@always_inline
+fn _sffi_munmap_raw(address: i64, length: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_munmap_raw(address, length)
+
+pub fn posix_native_map_flags(flags: i64, platform: text) -> i64:
+    if (flags & HOST_MAP_ANONYMOUS) == 0 or platform == "linux":
+        return flags
+    val without_canonical_anon = flags & ~HOST_MAP_ANONYMOUS
+    if platform == "macos" or platform == "freebsd":
+        return without_canonical_anon | 0x1000
+    if platform == "illumos" or platform == "solaris":
+        return without_canonical_anon | 0x100
+    flags
+
+pub class PosixDedicatedHost:
+    identity: text
+    page_bytes: i64
+
+    static fn create(page_size: i64 = 4096) -> PosixDedicatedHost:
+        val effective_page_size = if page_size > 0: page_size else: 4096
+        PosixDedicatedHost(identity: "posix", page_bytes: effective_page_size)
+
+fn _posix_mmap_bytes(path: text) -> Result<[u8], text>:
+    val raw = _sffi_file_mmap_read_bytes(path)
+    if raw == nil:
+        return Err("mmap-read-failed")
+    Ok(raw ?? [])
+
+impl DedicatedHost for PosixDedicatedHost:
+    fn host_name() -> text:
+        self.identity
+
+    fn page_size() -> i64:
+        self.page_bytes
+
+    fn supports_file_backed_mmap() -> bool:
+        true
+
+    fn supports_shared_writable_mmap() -> bool:
+        true
+
+    me mmap(request: HostMapRequest) -> HostMappedRegion:
+        val validation_error = host_map_request_error(request, self.page_size())
+        if validation_error != "":
+            return host_map_error(self.identity, -22, validation_error)
+        val address = _sffi_mmap_raw(
+            request.address_hint,
+            request.length,
+            request.protection,
+            posix_native_map_flags(request.flags, platform_name()),
+            request.fd,
+            request.offset
+        )
+        if address == HOST_MAP_FAILED:
+            return host_map_error(self.identity, -1, "posix-mmap-failed")
+        host_map_success(self.identity, "native-mmap", address, request.length)
+
+    me mprotect(region: HostMappedRegion, protection: i64) -> bool:
+        host_mapped_region_releasable(region) and host_protection_error(protection) == "" and
+            _sffi_mprotect(region.address, region.length, protection) == 0
+
+    me munmap(region: HostMappedRegion) -> bool:
+        host_mapped_region_releasable(region) and
+            _sffi_munmap_raw(region.address, region.length) == 0
+
+    me preload_readonly_file(path: text, page_size: i64) -> HostFilePreload:
+        if path == "":
+            return host_file_preload_error(path, self.identity, -22, "path-must-not-be-empty")
+        if page_size <= 0:
+            return host_file_preload_error(path, self.identity, -22, "page-size-must-be-positive")
+        if not file_exists(path):
+            return host_file_preload_error(path, self.identity, -2, "file-not-found")
+        val expected_size = _sffi_file_size(path)
+        if expected_size < 0:
+            return host_file_preload_error(path, self.identity, -2, "file-not-found")
+        match _posix_mmap_bytes(path):
+            case Err(error):
+                return host_file_preload_error(path, self.identity, -5, error)
+            case Ok(bytes):
+                if bytes.len() as i64 != expected_size:
+                    return host_file_preload_error(path, self.identity, -5, "mmap-read-size-mismatch")
+                host_file_preload_success(path, bytes, page_size, self.identity, "mmap", true)

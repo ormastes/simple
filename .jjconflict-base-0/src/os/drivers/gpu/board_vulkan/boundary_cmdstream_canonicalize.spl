@@ -1,0 +1,215 @@
+# Board Vulkan — command-stream boundary schema and canonicalizer.
+#
+# Boundary: `vulkan.submit.command_stream@1` (soc_profile.board_vulkan_boundary_cmdstream).
+# Lane: R4 / B3 (Intel Gen12 / Xe-LP, counterpart Mesa `anv`).
+#
+# REALITY CHECK (read before trusting anything below as a live capture):
+#
+#   1. `backend_intel_gen12.spl` declares spirv/submit/readback all `false`.
+#      `board_profile_false_claim` rejects any profile claiming `submit`
+#      without `spirv`, so this repo cannot honestly produce a candidate
+#      command stream today. No candidate encoder exists anywhere under
+#      `src/os/drivers/gpu/board_vulkan/`.
+#   2. This host has NO Intel GPU at all. `lspci -nn` shows two NVIDIA
+#      devices (GA102GL "RTX A6000" 10de:2230, TU102 "TITAN RTX" 10de:1e02)
+#      and zero Intel display controllers; `/dev/dri/card1`/`card2` are both
+#      vendor 0x10de. `vulkaninfo` against `intel_icd.json` fails with
+#      "Failed to detect any valid GPUs" — not a permissions problem, a
+#      hardware-absence problem. `intel_error_decode`/`aubinator`/
+#      `intel_dump_gpu` are not installed (`mesa-utils` is not installed
+#      either); only `mesa-vulkan-drivers` (25.2.8) ships `libvulkan_intel.so`
+#      and the ICD json, neither of which can attach to a device that is not
+#      present. `INTEL_DEBUG=bat` decodes batches Mesa itself submits, so
+#      without a live Intel device there is nothing for it to intercept.
+#   3. Consequence: it is IMPOSSIBLE to capture a real anv command stream on
+#      this host. This is filed as
+#      doc/08_tracking/bug/cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md
+#      rather than papered over with a hand-authored stream presented as
+#      real anv output.
+#
+# What this file gives the future encoder instead: the CANONICAL SCHEMA the
+# candidate must satisfy, expressed as an ordered packet sequence plus
+# explicit, named normalization rules — built from Intel's public PRM /
+# batch-buffer packet vocabulary (MI_* and 3DSTATE_*/3DPRIMITIVE opcodes),
+# not from a captured trace. Every fixture sequence built with
+# `synthetic_gen12_reference_stream` below is labelled SYNTHETIC in its own
+# name and docstring; nothing calls it "captured" or "real anv output".
+
+# === Packet model ===
+#
+# A command stream is an ORDERED list of packets. Each packet has:
+#   opcode  — the MI_*/3DSTATE_* instruction identifier (text, stable across
+#             runs of the SAME driver version — this is what two correct
+#             encoders of the same submission must agree on)
+#   length  — dword length of the packet, INCLUDING the header dword, exactly
+#             as Intel's packet-header encodes it (header bit-fields differ
+#             by generation, so length is carried as a decoded integer here,
+#             not as the raw header word)
+#   payload — ordered list of operand fields, each a (name, value) pair
+
+pub struct CmdField:
+    name: text
+    value: text
+
+pub fn cmd_field(name: text, value: text) -> CmdField:
+    CmdField(name: name, value: value)
+
+pub struct CmdPacket:
+    opcode: text
+    length: i64
+    payload: [CmdField]
+
+pub fn cmd_packet(opcode: text, length: i64, payload: [CmdField]) -> CmdPacket:
+    CmdPacket(opcode: opcode, length: length, payload: payload)
+
+# === Named dropped dimensions ===
+#
+# Everything NOT listed here must compare equal. In particular packet
+# ORDER and the OPCODE SEQUENCE are never normalized — reordering or
+# dropping a packet is always a real divergence, per lane L1's postmortem
+# (silently stripping "unreferenced" SPIR-V ids deleted a live OpLabel).
+#
+#   1. gpu_virtual_address  — fields named exactly "address" or ending in
+#      "_address" (e.g. surface_base_address, general_state_base_address).
+#      Two correct encoders of the identical submission place backing
+#      buffers at different GPU virtual addresses chosen by the kernel
+#      allocator; the field must be PRESENT in both streams (a missing
+#      address field is still a real divergence) but its VALUE is dropped.
+#   2. buffer_object_handle  — fields named exactly "bo_handle" or ending in
+#      "_handle". A DRM buffer-object handle is a per-process, per-open-fd
+#      integer assigned by the kernel; it carries no semantic content about
+#      what the GPU will do.
+#   3. timestamp             — fields named exactly "timestamp" or ending in
+#      "_timestamp" (e.g. mi_stamp, pipeline_timestamp). Wall-clock/HW-clock
+#      values, never part of submission semantics.
+#   4. padding_dword         — a payload field named exactly "pad" or
+#      "mbz" (must-be-zero reserved dword). VALUE is dropped only when it is
+#      already required to be zero by the packet's own definition; a
+#      non-zero MBZ field is a real divergence (RESERVED-must-be-zero is a
+#      hardware contract, not a free-form pad), so this rule strips the
+#      *comparison* of a zero-valued mbz/pad field, never a non-zero one.
+#
+# Anything else — opcode identity, packet length, packet order, and every
+# operand that does not match one of the four rules above (primitive
+# topology, vertex/index counts, shader entry offsets, pipeline state
+# values, render target formats, blend/depth-stencil state) is compared
+# exactly.
+
+fn _cmd_field_is_dropped_dimension(field: CmdField) -> bool:
+    if field.name == "address" or field.name.ends_with("_address"):
+        true
+    elif field.name == "bo_handle" or field.name.ends_with("_handle"):
+        true
+    elif field.name == "timestamp" or field.name.ends_with("_timestamp"):
+        true
+    elif (field.name == "pad" or field.name == "mbz") and field.value == "0":
+        true
+    else:
+        false
+
+# Canonicalize one packet: keep opcode/length/order of fields untouched,
+# blank out only the VALUE of a dropped-dimension field so its presence is
+# still checked but its per-run value is not.
+pub fn cmd_packet_canonical_fields(packet: CmdPacket) -> [CmdField]:
+    var out: [CmdField] = []
+    for field in packet.payload:
+        if _cmd_field_is_dropped_dimension(field):
+            out.push(cmd_field(field.name, "<normalized>"))
+        else:
+            out.push(field)
+    out
+
+pub fn cmd_packet_canonical(packet: CmdPacket) -> CmdPacket:
+    cmd_packet(packet.opcode, packet.length, cmd_packet_canonical_fields(packet))
+
+pub fn cmd_stream_canonical(stream: [CmdPacket]) -> [CmdPacket]:
+    var out: [CmdPacket] = []
+    for packet in stream:
+        out.push(cmd_packet_canonical(packet))
+    out
+
+fn _cmd_fields_equal(a: [CmdField], b: [CmdField]) -> bool:
+    if a.len() != b.len():
+        false
+    else:
+        var ok = true
+        var i: i64 = 0
+        while i < a.len():
+            if a[i].name != b[i].name or a[i].value != b[i].value:
+                ok = false
+            i = i + 1
+        ok
+
+fn _cmd_packets_equal(a: CmdPacket, b: CmdPacket) -> bool:
+    a.opcode == b.opcode and a.length == b.length and _cmd_fields_equal(a.payload, b.payload)
+
+# === Comparison relation ===
+#
+# The plan document declares `byte_exact` for this boundary at the level of
+# the CANONICAL packet sequence (mirroring the SPIR-V boundary's own
+# byte_exact-over-canonical-form choice) rather than raw encoded bytes,
+# because GPU addresses, BO handles and timestamps are per-run and would
+# make raw-byte comparison vacuously red on every correct submission. Once
+# those three named dimensions are normalized, everything else in a real
+# Gen12 batch buffer — opcode sequence, packet lengths, and every remaining
+# operand — has a single defined encoding for a given driver version, so
+# `structural_equal` over the canonical sequence is equivalent to
+# `byte_exact` over the re-encoded canonical bytes: no tolerance, no fuzzy
+# matching, first index of divergence is reported exactly. This is NOT a
+# weakening of byte_exact; it is byte_exact applied after the same three
+# named, spec-honest normalizations the SPIR-V boundary already uses.
+#
+# Returns the index of the first packet where the two canonical streams
+# diverge, or -1 when they match. -1 with equal lengths means fully equal;
+# a length mismatch is reported at the shorter stream's length (the first
+# packet the shorter side is missing).
+pub fn cmd_stream_first_divergence(reference: [CmdPacket], candidate: [CmdPacket]) -> i64:
+    val ref_canon = cmd_stream_canonical(reference)
+    val cand_canon = cmd_stream_canonical(candidate)
+    val n = if ref_canon.len() < cand_canon.len(): ref_canon.len() else: cand_canon.len()
+    var i: i64 = 0
+    while i < n:
+        if not _cmd_packets_equal(ref_canon[i], cand_canon[i]):
+            return i
+        i = i + 1
+    if ref_canon.len() != cand_canon.len():
+        n
+    else:
+        -1
+
+pub fn cmd_stream_structural_equal(reference: [CmdPacket], candidate: [CmdPacket]) -> bool:
+    cmd_stream_first_divergence(reference, candidate) == -1
+
+# === Synthetic Gen12 reference fixture (schema exemplar, NOT a capture) ===
+#
+# A minimal, well-formed batch for "clear + draw one triangle", built from
+# publicly documented Intel Gen12 opcode names. This exists to exercise the
+# comparator's packet-level diffing (order/opcode/field-identity) and is
+# explicitly SYNTHETIC — it is not, and must never be presented as, a real
+# anv batch dump. When a real capture becomes possible (Intel silicon on a
+# reachable host, or a board), replace this fixture's role as the spec's
+# "reference" input with the real dump; the schema and comparator do not
+# change.
+pub fn synthetic_gen12_reference_stream() -> [CmdPacket]:
+    [
+        cmd_packet("MI_BATCH_BUFFER_START", 2, [
+            cmd_field("address", "0xDEADBEEF000"),
+            cmd_field("mbz", "0")
+        ]),
+        cmd_packet("3DSTATE_VF_TOPOLOGY", 2, [
+            cmd_field("primitive_topology", "TRILIST")
+        ]),
+        cmd_packet("3DSTATE_VERTEX_BUFFERS", 5, [
+            cmd_field("buffer_index", "0"),
+            cmd_field("bo_handle", "17"),
+            cmd_field("buffer_pitch", "12"),
+            cmd_field("address", "0xCAFEF00D000")
+        ]),
+        cmd_packet("3DPRIMITIVE", 7, [
+            cmd_field("vertex_count", "3"),
+            cmd_field("start_vertex", "0"),
+            cmd_field("instance_count", "1"),
+            cmd_field("timestamp", "1723300000")
+        ]),
+        cmd_packet("MI_BATCH_BUFFER_END", 1, [])
+    ]

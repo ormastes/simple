@@ -1,0 +1,156 @@
+# Cancellation - Cooperative Cancellation Tokens
+#
+# CancellationToken: hierarchical cancel propagation (parent -> child).
+#
+# Design: Simple structs are value types — storing children in the parent
+# and pushing cancel() to them would mutate copies, not the caller's vars.
+# Instead we use a module-level flat registry (growable) as the shared
+# mutable cell. Each token has an integer id; cancel() writes to the
+# registry; is_cancelled() walks the parent chain in the registry.
+#
+# Pure Simple state, cooperative (no OS signals).
+
+use nogc_async_mut.async.poll.{Poll}
+use nogc_async_mut.async.future.{Future}
+
+# ============================================================
+# Global token registry (module-level mutable state)
+#
+# Grows on demand (push-based) rather than a fixed-size slot table:
+# the previous implementation was a hardcoded 64-element array with
+# no growth and no release, so the 65th token allocated in a process
+# (cumulative over its whole lifetime, since nothing ever freed a
+# slot) indexed out of bounds. Growable arrays remove the crash; the
+# "ids are never released/reused" leak itself is filed as a follow-up
+# (see doc/08_tracking/bug/ — reuse needs a generation counter to stay
+# safe against stale child() references, which is a design decision).
+#
+# `token_new()`/`child()` push the CORRECT final value directly and
+# inline, in the same statement, in the same function body that owns
+# the mutation — no placeholder-then-subscript-overwrite pattern (an
+# earlier version of this file had one; see the NOTE above
+# `is_cancelled` for why that mattered).
+# ============================================================
+
+var _registry_cancelled: [bool] = []
+var _registry_parent: [i64] = []
+var _next_token_id: i64 = 0
+
+# ============================================================
+# CancellationToken
+# ============================================================
+
+class CancellationToken:
+    """Cooperative cancellation token.
+
+    Create a root token with token_new(), then call child() to get a
+    child. Cancelling a parent is visible to all children because
+    is_cancelled() walks the registry parent chain.
+
+    Example:
+        var parent = token_new()
+        var child = parent.child()
+        parent.cancel()
+        val c = child.is_cancelled()   # true
+    """
+    token_id: i64
+    parent_id: i64   # -1 if root
+
+fn token_new() -> CancellationToken:
+    """Create a new root cancellation token (not cancelled)."""
+    CancellationToken.new()
+
+impl CancellationToken:
+    static fn new() -> CancellationToken:
+        """Create a new root cancellation token (not cancelled).
+
+        Several callers (async_host's HostTaskHandle/HostJoinSet)
+        already spell construction as `CancellationToken.new()`; that
+        call previously resolved to nothing (no static `new` existed on
+        this class) and was masked because those callers were only ever
+        exercised by specs that string-match the source text instead of
+        constructing the type.
+        """
+        val id = _next_token_id
+        _next_token_id = _next_token_id + 1
+        _registry_cancelled = _registry_cancelled.push(false)
+        _registry_parent = _registry_parent.push(-1)
+        CancellationToken(token_id: id, parent_id: -1)
+
+    me cancel():
+        """Cancel this token. All children see it via is_cancelled()."""
+        _registry_cancelled[self.token_id] = true
+
+    fn is_cancelled() -> bool:
+        """Return true if this token or any ancestor has been cancelled.
+
+        Walks the parent chain with an ITERATIVE loop, entirely inline
+        in this method body (no free-function indirection, no
+        method-to-method recursion through a freshly-constructed
+        instance either).
+
+        History (2026-07-29, both landed in this file):
+        1. An older version delegated the parent-chain walk to a
+           free-function helper. Under `bin/simple test` (the tree-walk
+           interpreter) that indirection silently read a STALE snapshot
+           of `_registry_cancelled`/`_registry_parent` taken before
+           `cancel()`'s write — see
+           doc/08_tracking/bug/interpreter_module_array_stale_read_via_free_fn_helper_2026-07-29.md.
+        2. Recursing method-to-method via a freshly constructed
+           `CancellationToken` wrapping the parent id repaired depth-1
+           (direct parent -> child) but a *second* interpreter defect
+           made a second recursive hop (depth-2, grandparent ->
+           grandchild) read stale state once a 3rd token had been
+           allocated after the queried token — see
+           doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md.
+           An inline `while` loop (this version) never recurses at all
+           (one call frame, one method body, re-reading the module
+           arrays fresh on every iteration) and was verified correct at
+           depth-2/3 with intervening allocations in isolated
+           scratch-script probes (see the 2026-07-29 update in bug doc
+           #2). It is bounded by the registry length as defensive
+           belt-and-suspenders against a corrupted/cyclic parent chain
+           ever causing a hang; hitting the bound is treated as
+           "cancelled" (fail toward stopping, not toward silently
+           running past a cancellation request).
+        """
+        val bound = _registry_cancelled.len() + 1
+        var cur_id = self.token_id
+        var result = false
+        var done = false
+        var steps = 0
+        while not done:
+            if steps >= bound:
+                result = true
+                done = true
+            else:
+                steps = steps + 1
+                if _registry_cancelled[cur_id]:
+                    result = true
+                    done = true
+                else:
+                    val pid = _registry_parent[cur_id]
+                    if pid < 0:
+                        result = false
+                        done = true
+                    else:
+                        cur_id = pid
+        result
+
+    fn child() -> CancellationToken:
+        """Create a child token whose is_cancelled() also reflects parent state."""
+        val cid = _next_token_id
+        _next_token_id = _next_token_id + 1
+        _registry_cancelled = _registry_cancelled.push(false)
+        _registry_parent = _registry_parent.push(self.token_id)
+        CancellationToken(token_id: cid, parent_id: self.token_id)
+
+    fn guard_future() -> Future<bool>:
+        """Poll-once future: Ready(true) when cancelled, Pending otherwise.
+
+        Use at suspension points to exit a cooperative async loop early.
+        """
+        if self.is_cancelled():
+            Future.from_value(true)
+        else:
+            Future.pending<bool>()

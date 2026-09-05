@@ -1,0 +1,236 @@
+# @tag: system, llm_caret, tmux, worktree, recovery
+"""Operator re-runs and mis-types workspace commands without breaking the team.
+
+Real operators repeat commands (a second `attach` for an agent that is already
+attached, `session_ensure` from two shells), leave stale directories behind, and
+address agents that do not exist. Each scenario here drives the real
+infrastructure -- a private tmux socket and a throwaway git repository -- and
+asserts what the operator can observe afterwards: how many windows and
+worktrees exist, whether the session survived, and what the CLI's exit status
+and message were.
+"""
+
+use std.spec.{describe, it, expect, step, pending}
+use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists,
+    file_write, file_exists, cwd, current_time_ms}
+use app.llm_caret.agent_workspace.{AgentWorkspace, agent_workspace, tmux_available,
+    session_alive, session_ensure, session_kill, list_panes, send_to_each_pane,
+    worktree_path, worktree_add, worktree_list, agent_attach, agent_detach}
+
+val CLI = "src/app/llm_caret/main.spl"
+
+fn _scratch(name: text) -> text:
+    cwd() + "/build/test-artifacts/llm_caret/workspace_recovery_" + name
+
+fn _fixture_repo(root: text) -> text:
+    val repo = root + "/repo"
+    dir_create_all(repo)
+    process_run("git", ["-C", repo, "init", "-q"])
+    process_run("git", ["-C", repo, "config", "user.email", "caret@test"])
+    process_run("git", ["-C", repo, "config", "user.name", "caret"])
+    file_write(repo + "/README.md", "fixture\n")
+    process_run("git", ["-C", repo, "add", "README.md"])
+    process_run("git", ["-C", repo, "commit", "-q", "-m", "init"])
+    repo
+
+fn _contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+# Windows in the session whose name is `name` (tmux allows duplicate names).
+fn _windows_named(ws: AgentWorkspace, name: text) -> i64:
+    val fmt = "#" + "{" + "window_name" + "}"
+    val (out, _e, _c) = process_run("tmux", ["-L", ws.socket, "list-windows", "-t", ws.session, "-F", fmt])
+    var n = 0
+    for line in out.split("\n"):
+        if line.trim() == name:
+            n = n + 1
+    n
+
+describe "LLM Caret workspace recovery and idempotency":
+    it "session_ensure twice yields one session and no second window":
+        if not tmux_available():
+            pending("BLOCKED: tmux not installed on this host")
+            return
+        val root = _scratch("ensure")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val ws = agent_workspace("rec-ensure-" + current_time_ms().to_text(), repo, root + "/trees")
+        session_kill(ws)
+
+        step("First ensure creates the session with a single bootstrap pane")
+        expect(session_ensure(ws, repo).status).to_equal("ok")
+        expect(session_alive(ws)).to_be(true)
+        expect(list_panes(ws).len()).to_equal(1)
+
+        step("Second ensure reports the existing session and adds nothing")
+        val again = session_ensure(ws, repo)
+        expect(again.status).to_equal("ok")
+        expect(again.output).to_equal("exists")
+        expect(list_panes(ws).len()).to_equal(1)
+
+        session_kill(ws)
+        expect(session_alive(ws)).to_be(false)
+        dir_remove_all(root)
+
+    it "attaching the same agent twice keeps one worktree and one window":
+        if not tmux_available():
+            pending("BLOCKED: tmux not installed on this host")
+            return
+        val root = _scratch("double")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val ws = agent_workspace("rec-double-" + current_time_ms().to_text(), repo, root + "/trees")
+        session_kill(ws)
+
+        step("First attach: one worktree registered, one agent window (+ bootstrap window 0)")
+        expect(agent_attach(ws, "agent-a", "").status).to_equal("ok")
+        expect(_contains(worktree_list(ws), worktree_path(ws, "agent-a"))).to_be(true)
+        expect(worktree_list(ws).len()).to_equal(2)
+        expect(_windows_named(ws, "agent-a")).to_equal(1)
+        expect(list_panes(ws).len()).to_equal(2)
+
+        step("Second attach of the same agent is idempotent: still one worktree, still one window")
+        val again = agent_attach(ws, "agent-a", "")
+        expect(again.status).to_equal("ok")
+        expect(again.output).to_equal("exists")
+        expect(worktree_list(ws).len()).to_equal(2)
+        expect(_windows_named(ws, "agent-a")).to_equal(1)
+        expect(list_panes(ws).len()).to_equal(2)
+
+        step("One detach after two attaches leaves zero windows and no worktree for that agent")
+        expect(agent_detach(ws, "agent-a").status).to_equal("ok")
+        expect(_windows_named(ws, "agent-a")).to_equal(0)
+        expect(list_panes(ws).len()).to_equal(1)
+        expect(_contains(worktree_list(ws), worktree_path(ws, "agent-a"))).to_be(false)
+        expect(dir_exists(worktree_path(ws, "agent-a"))).to_be(false)
+
+        step("A second detach is now the unknown-agent error, and the session survives")
+        expect(agent_detach(ws, "agent-a").reason).to_equal("kill_window_failed")
+        expect(session_alive(ws)).to_be(true)
+
+        session_kill(ws)
+        dir_remove_all(root)
+
+    it "reports a hand-made directory at the worktree path honestly: it is not a git worktree":
+        val root = _scratch("plaindir")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val ws = agent_workspace("rec-plaindir-" + current_time_ms().to_text(), repo, root + "/trees")
+
+        step("An operator (or a crashed run) left a plain directory where agent-p's worktree would go")
+        val path = worktree_path(ws, "agent-p")
+        dir_create_all(path)
+        file_write(path + "/stale.txt", "not a worktree\n")
+        expect(dir_exists(path)).to_be(true)
+        expect(_contains(worktree_list(ws), path)).to_be(false)
+
+        step("worktree_add refuses with error path_occupied: a directory git does not list is not a worktree")
+        val r = worktree_add(ws, "agent-p")
+        expect(r.status).to_equal("error")
+        expect(r.reason).to_equal("path_occupied")
+
+        step("git still does not know it, and the operator's directory was neither claimed nor deleted")
+        expect(_contains(worktree_list(ws), path)).to_be(false)
+        expect(worktree_list(ws).len()).to_equal(1)
+        expect(file_exists(path + "/README.md")).to_be(false)
+        expect(file_exists(path + "/stale.txt")).to_be(true)
+        dir_remove_all(root)
+
+    it "reports a plain file at the worktree path as path_occupied and leaves the file alone":
+        val root = _scratch("plainfile")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val ws = agent_workspace("rec-plainfile-" + current_time_ms().to_text(), repo, root + "/trees")
+
+        step("A regular file sits exactly where agent-f's worktree would be created")
+        val path = worktree_path(ws, "agent-f")
+        dir_create_all(root + "/trees")
+        file_write(path, "not a directory\n")
+        expect(file_exists(path)).to_be(true)
+
+        step("worktree_add refuses with error path_occupied instead of claiming or replacing it")
+        val r = worktree_add(ws, "agent-f")
+        expect(r.status).to_equal("error")
+        expect(r.reason).to_equal("path_occupied")
+        expect(file_exists(path)).to_be(true)
+        expect(_contains(worktree_list(ws), path)).to_be(false)
+        expect(worktree_list(ws).len()).to_equal(1)
+        dir_remove_all(root)
+
+    it "a second worktree_add for a REAL worktree is still reported as exists":
+        val root = _scratch("realtwice")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val ws = agent_workspace("rec-realtwice-" + current_time_ms().to_text(), repo, root + "/trees")
+
+        step("First add registers the worktree with git")
+        expect(worktree_add(ws, "agent-r").status).to_equal("ok")
+        expect(_contains(worktree_list(ws), worktree_path(ws, "agent-r"))).to_be(true)
+
+        step("Second add is idempotent: ok/'exists', still one registered worktree")
+        val again = worktree_add(ws, "agent-r")
+        expect(again.status).to_equal("ok")
+        expect(again.output).to_equal("exists")
+        expect(worktree_list(ws).len()).to_equal(2)
+        dir_remove_all(root)
+
+    it "detaching an unknown agent is an error and leaves the session and its agents intact":
+        if not tmux_available():
+            pending("BLOCKED: tmux not installed on this host")
+            return
+        val root = _scratch("unknown")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val ws = agent_workspace("rec-unknown-" + current_time_ms().to_text(), repo, root + "/trees")
+        session_kill(ws)
+
+        step("One real agent is attached")
+        expect(agent_attach(ws, "agent-real", "").status).to_equal("ok")
+        expect(list_panes(ws).len()).to_equal(2)
+
+        step("Detaching an agent that was never attached reports an error, not success")
+        val r = agent_detach(ws, "agent-ghost")
+        expect(r.status).to_equal("error")
+        expect(r.reason).to_equal("kill_window_failed")
+
+        step("A name that is only a PREFIX of the real agent is also unknown (tmux -t matches prefixes)")
+        expect(agent_detach(ws, "agent").status).to_equal("error")
+
+        step("The session and the real agent's window and worktree are untouched")
+        expect(session_alive(ws)).to_be(true)
+        expect(_windows_named(ws, "agent-real")).to_equal(1)
+        expect(list_panes(ws).len()).to_equal(2)
+        expect(_contains(worktree_list(ws), worktree_path(ws, "agent-real"))).to_be(true)
+        expect(dir_exists(worktree_path(ws, "agent-real"))).to_be(true)
+
+        agent_detach(ws, "agent-real")
+        session_kill(ws)
+        dir_remove_all(root)
+
+    it "broadcast on a dead session reaches no pane and the CLI exits 1 with error no_panes":
+        if not tmux_available():
+            pending("BLOCKED: tmux not installed on this host")
+            return
+        val root = _scratch("dead")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val id = "rec-dead-" + current_time_ms().to_text()
+        val ws = agent_workspace(id, repo, root + "/trees")
+        session_kill(ws)
+        expect(session_alive(ws)).to_be(false)
+
+        step("Library: send_to_each_pane on a session that does not exist reaches zero panes")
+        expect(send_to_each_pane(ws, "echo never").len()).to_equal(0)
+
+        step("CLI: `workspace <id> broadcast ...` exits 1 and prints `error no_panes`")
+        val (out, err, code) = process_run("bin/simple",
+            ["run", CLI, "workspace", id, "broadcast", "echo", "never", "--repo", repo])
+        expect(code).to_equal(1)
+        expect(out + err).to_contain("error no_panes")
+
+        step("The failed broadcast did not create a session as a side effect")
+        expect(session_alive(ws)).to_be(false)
+        dir_remove_all(root)

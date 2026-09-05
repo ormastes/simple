@@ -1,0 +1,35 @@
+#!/bin/sh
+# SCV-IMPL-P-04 — parser trust/lock hardening (v2 registry: grammar id/source/
+# artifact sha256/TS ABI/protocol/runtime kind/signature pins; no implicit
+# downloads; upgrades open new index generations). Mechanical: verifies the
+# module, its spec + mirror twin, exports, and the acceptance spec's green run.
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR 2.
+# Committed UNSIGNED: sign with
+#   sh scripts/trust/sign-script.shs --name scv-migration-root scripts/scv-migration/steps/SCV-IMPL-P-04.shs
+set -u
+checked=0
+missing=""
+for f in src/lib/scv/parser_lock.spl \
+         test/integration/app/scv_parser_lock_spec.spl \
+         test/02_integration/app/scv_parser_lock_spec.spl; do
+  checked=$((checked + 1))
+  [ -f "$f" ] || missing="$missing file($f)"
+done
+checked=$((checked + 1))
+grep -q '^export parser_lock\.\*' src/lib/scv/__init__.spl || missing="$missing export(parser_lock)"
+checked=$((checked + 1))
+grep -q 'no implicit downloads' src/lib/scv/parser_lock.spl || missing="$missing policy(no-implicit-downloads)"
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-P-04.$$.out"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test test/integration/app/scv_parser_lock_spec.spl > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RES=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+{ [ "$rc" -eq 0 ] && printf '%s' "$RES" | grep -q ', 0 failed'; } || missing="$missing spec-run(rc=$rc $RES)"
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$missing" ]; then
+  echo "PASS — $checked check(s) verified, parser trust/lock hardening green ($RES)"
+  exit 0
+fi
+echo "FAIL — $checked check(s) verified, missing:$missing"
+exit 1

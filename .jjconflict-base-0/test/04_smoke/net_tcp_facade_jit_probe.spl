@@ -1,0 +1,121 @@
+# JIT-side probe for the `std.net.tcp` live path.
+#
+# WHY A SEPARATE PROBE EXISTS
+# ---------------------------
+# `bin/simple test` hard-defaults to the tree-walk INTERPRETER, so
+# `test/01_unit/lib/nogc_async_mut/net/net_tcp_facade_spec.spl` cannot reach the
+# engine this defect actually lives on: an `@extern` that is not registered in
+# `src/compiler_rust/common/src/runtime_symbols.rs` returns nil **silently under
+# the JIT**. `bin/simple run` uses the JIT, so this file closes that gap.
+#
+# Run it:
+#     SIMPLE_TIMEOUT_SECONDS=0 bin/simple run test/04_smoke/net_tcp_facade_jit_probe.spl
+#
+# Score the VERDICT line, never the exit code -- an unresolved `use` is only a
+# WARN and still exits 0, so exit status is fail-open here.
+#
+# Expected on a healthy tree:
+#     Results: 3 total, 3 passed, 0 failed
+#
+# STATUS 2026-08-05: this probe currently prints NO verdict line. On the seed
+# binary (`bin/simple` prints the "bootstrap seed only" banner) it dies at the
+# first step with:
+#     Runtime error: Function 'nil.local_addr' not found
+# i.e. `TcpListener.bind(...)` matched `Ok(l)` but bound `l` to nil under the
+# JIT.
+#
+# This is NOT caused by the `std.net.tcp` facade. A control run of this exact
+# file with the single import line changed to
+#     use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+# -- bypassing the facade and hitting the live implementation directly --
+# fails with the byte-identical error. So the JIT cannot currently drive the
+# live TCP classes at all, independently of this module. Filed as a separate
+# defect; the interpreter path is green (see the companion spec, 4/4).
+#
+# Keep this probe: when the JIT Result-binding gap is fixed, it is the check
+# that proves `std.net.tcp` works on the engine ordinary programs run on.
+
+use std.net.tcp.{TcpListener, TcpStream}
+
+fn main():
+    var total = 0
+    var passed = 0
+
+    # --- 1. bind an ephemeral loopback port -------------------------------
+    total = total + 1
+    var listener = match TcpListener.bind("127.0.0.1:0"):
+        Err(e):
+            print "FAIL bind: {e.message}"
+            return
+        Ok(l): l
+
+    val addr = match listener.local_addr():
+        Err(e):
+            print "FAIL local_addr: {e.message}"
+            return
+        Ok(a): a
+
+    if addr.contains("127.0.0.1") and not addr.contains(":0"):
+        passed = passed + 1
+        print "PASS bind -> kernel-assigned {addr}"
+    else:
+        print "FAIL bind -> unexpected addr {addr}"
+
+    # --- 2. byte-exact client -> server -----------------------------------
+    total = total + 1
+    var client = match TcpStream.connect(addr):
+        Err(e):
+            print "FAIL connect: {e.message}"
+            return
+        Ok(c): c
+
+    val payload: [u8] = [72, 101, 108, 108, 111]   # "Hello"
+    match client.write_all(payload):
+        Err(e):
+            print "FAIL client write_all: {e.message}"
+            return
+        Ok(_): pass_dn
+    val _f = client.flush()
+
+    var server = match listener.accept():
+        Err(e):
+            print "FAIL accept: {e.message}"
+            return
+        Ok(s): s
+
+    val got = match server.read_exact(5):
+        Err(e):
+            print "FAIL server read_exact: {e.message}"
+            return
+        Ok(d): d
+
+    if got == payload:
+        passed = passed + 1
+        print "PASS client->server byte-exact {got}"
+    else:
+        print "FAIL client->server got {got} want {payload}"
+
+    # --- 3. the kernel brokered the pair ----------------------------------
+    total = total + 1
+    val client_local = match client.local_addr():
+        Err(e):
+            print "FAIL client local_addr: {e.message}"
+            return
+        Ok(a): a
+    val server_peer = match server.peer_addr():
+        Err(e):
+            print "FAIL server peer_addr: {e.message}"
+            return
+        Ok(a): a
+
+    if server_peer == client_local:
+        passed = passed + 1
+        print "PASS peer pairing {client_local} == {server_peer}"
+    else:
+        print "FAIL peer mismatch client_local={client_local} server_peer={server_peer}"
+
+    val _a = server.close()
+    val _b = client.close()
+    val _c = listener.close()
+
+    print "Results: {total} total, {passed} passed, {total - passed} failed"

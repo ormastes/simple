@@ -1,0 +1,157 @@
+"""Focused interpreter contract for allocation-free MIR exception edges."""
+
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter, InterpError}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+fn uw_local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn uw_typed_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: LocalKind.Temp, is_ghost: false)
+
+fn uw_block(id: i64, term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: [], terminator: term)
+
+fn uw_function(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId.new(-1), name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals, blocks: blocks, entry_block: BlockId.new(0), span: nil,
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "",
+        gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0,
+        verification_contract: nil)
+
+fn uw_named(name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), MirType.i64()))
+
+fn uw_thrower() -> MirFunction:
+    uw_function("thrower", [], [uw_block(0, MirTerminator.Throw(mir_operand_const_int(73), mir_operand_const_int(1001)))])
+
+fn uw_resumer() -> MirFunction:
+    uw_function("resumer", [], [uw_block(0, MirTerminator.Resume(mir_operand_const_int(91), mir_operand_const_int(1001)))])
+
+fn uw_normal_callee() -> MirFunction:
+    uw_function("normal_callee", [], [uw_block(0, MirTerminator.Ret(Some(mir_operand_const_int(777))))])
+
+fn uw_typed_normal_caller(result_type: MirType) -> MirFunction:
+    val normal_result = LocalId(id: 0)
+    val payload = LocalId(id: 1)
+    val type_tag = LocalId(id: 2)
+    val call = MirTerminator.CallTerminator(
+        Some(normal_result), uw_named("normal_callee"), [], BlockId.new(1), Some(BlockId.new(2)),
+        Some(payload), Some(type_tag))
+    uw_function("typed_normal_caller", [
+        uw_typed_local(0, result_type), uw_local(1, LocalKind.Temp), uw_local(2, LocalKind.Temp)
+    ], [
+        uw_block(0, call),
+        uw_block(1, MirTerminator.Ret(Some(mir_operand_copy(normal_result)))),
+        uw_block(2, MirTerminator.Ret(Some(mir_operand_const_int(-1))))
+    ])
+
+fn uw_catcher(callee: text) -> MirFunction:
+    val payload = LocalId(id: 0)
+    val type_tag = LocalId(id: 1)
+    val normal_result = LocalId(id: 2)
+    val call = MirTerminator.CallTerminator(
+        Some(normal_result), uw_named(callee), [], BlockId.new(1), Some(BlockId.new(2)),
+        Some(payload), Some(type_tag))
+    uw_function("catcher", [uw_local(0, LocalKind.Temp), uw_local(1, LocalKind.Temp),
+                             uw_local(2, LocalKind.Temp)], [
+        uw_block(0, call),
+        uw_block(1, MirTerminator.Ret(Some(mir_operand_const_int(-1)))),
+        uw_block(2, MirTerminator.Ret(Some(mir_operand_copy(payload))))
+    ])
+
+fn uw_type_tag_catcher() -> MirFunction:
+    val payload = LocalId(id: 0)
+    val type_tag = LocalId(id: 1)
+    val normal_result = LocalId(id: 2)
+    val call = MirTerminator.CallTerminator(
+        Some(normal_result), uw_named("thrower"), [], BlockId.new(1), Some(BlockId.new(2)),
+        Some(payload), Some(type_tag))
+    uw_function("type_tag_catcher", [uw_local(0, LocalKind.Temp), uw_local(1, LocalKind.Temp),
+                                      uw_local(2, LocalKind.Temp)], [
+        uw_block(0, call),
+        uw_block(1, MirTerminator.Ret(Some(mir_operand_const_int(-1)))),
+        MirBlock(id: BlockId.new(2), label: nil, instructions: [],
+                 terminator: MirTerminator.Ret(Some(mir_operand_copy(type_tag))))
+    ])
+
+describe "MIR recoverable unwind":
+    it "keeps f64 normal results separate from unwind payload storage":
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["normal_callee"] = uw_normal_callee()
+        interp.set_function_table(table)
+        val result = interp.execute_function(uw_typed_normal_caller(MirType.f64()))
+        expect(result[1]).to_be_nil()
+        expect(result[0] ?? -1).to_equal(777)
+
+    it "keeps text handles separate from unwind payload storage":
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["normal_callee"] = uw_normal_callee()
+        interp.set_function_table(table)
+        val text_type = MirType(kind: MirTypeKind.Opaque("text"))
+        val result = interp.execute_function(uw_typed_normal_caller(text_type))
+        expect(result[1]).to_be_nil()
+        expect(result[0] ?? -1).to_equal(777)
+
+    it "keeps aggregate handles separate from unwind payload storage":
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["normal_callee"] = uw_normal_callee()
+        interp.set_function_table(table)
+        val aggregate_type = MirType(kind: MirTypeKind.Tuple([MirType.i64(), MirType.i64()]))
+        val result = interp.execute_function(uw_typed_normal_caller(aggregate_type))
+        expect(result[1]).to_be_nil()
+        expect(result[0] ?? -1).to_equal(777)
+
+    it "delivers a thrown payload to the unwind-edge destination":
+        step("Execute a throwing callee through CallTerminator")
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["thrower"] = uw_thrower()
+        interp.set_function_table(table)
+        val result = interp.execute_function(uw_catcher("thrower"))
+        expect(result[1]).to_be_nil()
+        expect(result[0] ?? -1).to_equal(73)
+
+    it "resume preserves the original payload across another frame":
+        step("Execute a cleanup-pad resumer through CallTerminator")
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["resumer"] = uw_resumer()
+        interp.set_function_table(table)
+        val result = interp.execute_function(uw_catcher("resumer"))
+        expect(result[1]).to_be_nil()
+        expect(result[0] ?? -1).to_equal(91)
+
+    it "preserves the explicit exception type tag on the unwind edge":
+        step("Read the type tag from the active exception frame")
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["thrower"] = uw_thrower()
+        interp.set_function_table(table)
+        val result = interp.execute_function(uw_type_tag_catcher())
+        expect(result[1]).to_be_nil()
+        expect(result[0] ?? -1).to_equal(1001)
+
+    it "does not misclassify an uncaught exception as a normal return":
+        step("Execute a throwing function without an unwind edge")
+        var interp = MirInterpreter.create()
+        val result = interp.execute_function(uw_thrower())
+        expect(result[0]).to_be_nil()
+        match result[1]:
+            case Some(InterpError.Exception(payload, type_tag)):
+                expect(payload).to_equal(73)
+                expect(type_tag).to_equal(1001)
+            case _: expect(false).to_equal(true)

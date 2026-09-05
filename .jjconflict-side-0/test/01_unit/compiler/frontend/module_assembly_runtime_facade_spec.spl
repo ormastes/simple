@@ -1,0 +1,102 @@
+"""
+# Flat AST Module Assembly Runtime Facade Contract
+
+The parser bridge routes environment reads and writes through the canonical
+no-GC runtime facade while retaining its cached gates and scoped lexer-state
+save/restore behavior.
+"""
+
+use std.io_runtime.{read_file_text}
+use std.spec.*
+
+describe "flat AST module assembly runtime facade ownership":
+    it "routes environment access through one canonical facade pair":
+        step("Load the flat AST module assembly source")
+        val source = read_file_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+
+        step("Require the no-GC facade and the thin inline adapters")
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set}")
+        expect(source).to_contain("fn _sffi_env_get(key: text) -> text?:\n    env_get_opt(key)")
+        expect(source).to_contain("fn _sffi_env_set(key: text, value: text) -> bool:\n    env_set(key, value)")
+
+        step("Reject duplicate raw environment ownership")
+        expect(source).to_not_contain("extern fn rt_env_get")
+        expect(source).to_not_contain("extern fn rt_env_set")
+        expect(source).to_not_contain("rt_env_get(")
+        expect(source).to_not_contain("rt_env_set(")
+
+        step("Pin the adapter definitions plus every intended call site")
+        expect(source.split("_sffi_env_get(").len()).to_equal(9)
+        expect(source.split("_sffi_env_set(").len()).to_equal(8)
+
+    it "preserves gates and scoped lexer environment restoration":
+        step("Load the flat AST module assembly source")
+        val source = read_file_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+
+        step("Pin both cached opt-in gates")
+        expect(source).to_contain("_sffi_env_get(\"SIMPLE_PARSE_PHASE_PROFILE\") ?? \"\"")
+        expect(source).to_contain("_sffi_env_get(\"SIMPLE_FLAT_POOL_ROUNDTRIP\") ?? \"\"")
+
+        step("Pin lexer state capture and restoration order")
+        expect(source).to_contain("val saved_lex_source = _sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\") ?? \"\"\n    val saved_lex_path = _sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_PATH\") ?? \"\"")
+        expect(source).to_contain("_sffi_env_set(\n            \"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source)\n        val path_restored = _sffi_env_set(\n            \"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path)")
+        expect(source).to_contain("if not _sffi_env_set(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source):\n            panic(\"failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE for {path}\")\n        if not _sffi_env_set(\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path):")
+
+    it "bounds environment work in blob-hit failure and success paths":
+        step("Isolate the cache-hit build function")
+        val source = read_file_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+        val blob_parts = source.split("pub fn build_module_from_flat_pool_blob")
+        expect(blob_parts.len()).to_equal(2)
+        val blob_body = blob_parts[1].split("pub fn parse_and_build_module_scoped")[0]
+
+        step("Capture each lexer environment value exactly once")
+        expect(blob_body.split("_sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\")").len()).to_equal(2)
+        expect(blob_body.split("_sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_PATH\")").len()).to_equal(2)
+        expect(blob_body.split("_sffi_env_get(").len()).to_equal(3)
+
+        step("Restore source then path exactly once on decode failure")
+        val failure_arm = blob_body.split("if not flat_pools_restore_all(blob):")[1].split("val _hp_t2")[0]
+        expect(failure_arm.split("_sffi_env_set(").len()).to_equal(3)
+        expect(failure_arm.split("\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source").len()).to_equal(2)
+        expect(failure_arm.split("\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path").len()).to_equal(2)
+
+        step("Restore source then path exactly once after a successful build")
+        val success_arm = blob_body.split("val _hp_t2")[1]
+        expect(success_arm.split("_sffi_env_set(").len()).to_equal(3)
+        expect(success_arm.split("\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source").len()).to_equal(2)
+        expect(success_arm.split("\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path").len()).to_equal(2)
+
+    it "bounds environment work in scoped parser paths":
+        step("Isolate the scoped parser build function")
+        val source = read_file_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+        val scoped_parts = source.split("pub fn parse_and_build_module_scoped")
+        expect(scoped_parts.len()).to_equal(2)
+        val scoped_body = scoped_parts[1].split("fn parse_and_build_module(")[0]
+
+        step("Capture each lexer environment value exactly once")
+        expect(scoped_body.split("_sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\")").len()).to_equal(2)
+        expect(scoped_body.split("_sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_PATH\")").len()).to_equal(2)
+        expect(scoped_body.split("_sffi_env_get(").len()).to_equal(3)
+
+        step("Keep the transient path free of environment restoration")
+        val scoped_tail = scoped_body.split("if transient_scope:\n        if not _sffi_transient_heap_promote(built_module):")[1]
+        val scoped_branches = scoped_tail.split("    else:\n")
+        expect(scoped_branches.len()).to_equal(2)
+        expect(scoped_branches[0].split("_sffi_env_set(").len()).to_equal(1)
+
+        step("Restore source then path exactly once on the non-transient path")
+        val restore_arm = scoped_branches[1].split("    frontend_compiler_trace_scope_exit")[0]
+        expect(restore_arm.split("_sffi_env_set(").len()).to_equal(3)
+        expect(restore_arm.split("\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source").len()).to_equal(2)
+        expect(restore_arm.split("\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path").len()).to_equal(2)
+
+    it "retains unrelated low-level parser bridge owners":
+        step("Load the flat AST module assembly source")
+        val source = read_file_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+
+        step("Pin the SFFI owners outside this migration")
+        expect(source).to_contain("extern fn rt_time_now_unix_micros() -> i64")
+        expect(source).to_contain("extern fn rt_transient_array_scope_begin() -> bool")
+        expect(source).to_contain("extern fn rt_transient_array_scope_pause() -> bool")
+        expect(source).to_contain("extern fn rt_transient_array_scope_end() -> bool")
+        expect(source).to_contain("extern fn rt_transient_heap_promote(value: Any) -> bool")

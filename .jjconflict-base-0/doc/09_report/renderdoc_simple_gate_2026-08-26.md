@@ -1,0 +1,104 @@
+# RenderDoc Simple Gate
+
+- status: fail
+- reason: missing-rdc
+- source evidence: /mnt/data/worktrees/simple-main/build/gui-web-2d-vulkan-env/renderdoc/simple/evidence.env
+- backend: simple
+- scene: vulkan-engine2d
+- program: /mnt/data/worktrees/simple-main/src/app/test/renderdoc_vulkan_capture.spl
+- capture status: fail
+- capture reason: missing-rdc
+- capture file: 
+- capture magic: 
+- capture file magic: 
+- capture SHA-256: 
+- capture file SHA-256: 
+- capture hash status: fail
+- runtime backend: vulkan
+- RenderDoc available: 1
+- RenderDoc start: 1
+- RenderDoc end: 0
+- RenderDoc captures: 0
+- pixel count: 3072
+- runtime metadata status: fail
+- missing runtime metadata: 
+
+## Raw Evidence
+- rdoc_simple_gate_status=fail
+- rdoc_simple_gate_reason=missing-rdc
+- rdoc_simple_gate_source_env=/mnt/data/worktrees/simple-main/build/gui-web-2d-vulkan-env/renderdoc/simple/evidence.env
+- rdoc_simple_gate_source_duplicate_key=
+- rdoc_simple_gate_backend=simple
+- rdoc_simple_gate_scene=vulkan-engine2d
+- rdoc_simple_gate_program=/mnt/data/worktrees/simple-main/src/app/test/renderdoc_vulkan_capture.spl
+- rdoc_simple_gate_capture_status=fail
+- rdoc_simple_gate_capture_reason=missing-rdc
+- rdoc_simple_gate_capture_file=
+- rdoc_simple_gate_capture_file_status=missing
+- rdoc_simple_gate_capture_magic=
+- rdoc_simple_gate_capture_file_magic=
+- rdoc_simple_gate_capture_sha256=
+- rdoc_simple_gate_capture_file_sha256=
+- rdoc_simple_gate_capture_hash_status=fail
+- rdoc_simple_gate_runtime_backend=vulkan
+- rdoc_simple_gate_renderdoc_available=1
+- rdoc_simple_gate_renderdoc_start=1
+- rdoc_simple_gate_renderdoc_end=0
+- rdoc_simple_gate_renderdoc_capturing_before_end=0
+- rdoc_simple_gate_renderdoc_num_captures=0
+- rdoc_simple_gate_pixel_count=3072
+- rdoc_simple_gate_renderdoc_device=136508969904944
+- rdoc_simple_gate_record_valid=1
+- rdoc_simple_gate_semantic_hash=6f25a5f82aaf8da1cfc36a9fa9198b7c534c1922160bd55609b6e2049ac4ce61
+- rdoc_simple_gate_record_hash=adc12c95f25b18d626f61341bc96b34d9873cb069d7620eb4ae012303aba1e59
+- rdoc_simple_gate_pixel_hash=694777e154ed923198495c4f0060a87f0f593bf2dbbe6ae52c8a06793506c52f
+- rdoc_simple_gate_owner_frame_id=20260826T001737Z-1411880
+- rdoc_simple_gate_capture_frame_id=
+- rdoc_simple_gate_capture_template=/mnt/data/worktrees/simple-main/build/gui-web-2d-vulkan-env/renderdoc/simple/simple_gui_app-20260826T001737Z-1411880
+- rdoc_simple_gate_capture_template_set=1
+- rdoc_simple_gate_capture_identity_status=fail
+- rdoc_simple_gate_replay_status=fail
+- rdoc_simple_gate_replay_reason=producer-evidence-incomplete
+- rdoc_simple_gate_replay_duplicate_key=
+- rdoc_simple_gate_replay_driver=
+- rdoc_simple_gate_replay_capture_path=
+- rdoc_simple_gate_replay_xml_path=
+- rdoc_simple_gate_replay_xml_hash=
+- rdoc_simple_gate_replay_xml_bytes=0
+- rdoc_simple_gate_replay_xml_file_status=missing
+- rdoc_simple_gate_replay_xml_file_sha256=
+- rdoc_simple_gate_replay_xml_file_bytes=0
+- rdoc_simple_gate_replay_xml_hash_status=fail
+- rdoc_simple_gate_replay_chunk_count=0
+- rdoc_simple_gate_replay_relevant_action_count=0
+- rdoc_simple_gate_replay_pipeline_count=0
+- rdoc_simple_gate_replay_shader_count=0
+- rdoc_simple_gate_replay_resource_count=0
+- rdoc_simple_gate_replay_convert_exit_code=-1
+- rdoc_simple_gate_owner_agreement_status=fail
+- rdoc_simple_gate_owner_api=vulkan
+- rdoc_simple_gate_replay_command_exit=-1
+- rdoc_simple_gate_replay_timed_out=0
+- rdoc_simple_gate_replay_timeout_seconds=120
+- rdoc_simple_gate_widget_html_path=
+- rdoc_simple_gate_widget_html_bytes=
+- rdoc_simple_gate_widget_width=
+- rdoc_simple_gate_widget_height=
+- rdoc_simple_gate_runtime_metadata_status=fail
+- rdoc_simple_gate_missing_runtime_metadata=
+- rdoc_simple_gate_unavailable_marker=0
+- rdoc_simple_gate_required_backend=simple
+- rdoc_simple_gate_required_scene=vulkan-engine2d
+- rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl
+- rdoc_simple_gate_required_status=pass
+- rdoc_simple_gate_required_magic=RDOC
+- rdoc_simple_gate_required_capture_sha256=lower-hex-64-match
+- rdoc_simple_gate_required_runtime_backend=vulkan
+- rdoc_simple_gate_required_renderdoc_available=1
+- rdoc_simple_gate_required_renderdoc_start=1
+- rdoc_simple_gate_required_renderdoc_end_recorded=1
+- rdoc_simple_gate_required_num_captures_min=1
+- rdoc_simple_gate_required_pixel_count_min=1
+- rdoc_simple_gate_required_replay_status=pass
+- rdoc_simple_gate_required_replay_driver=vulkan
+- rdoc_simple_gate_required_owner_agreement_status=pass

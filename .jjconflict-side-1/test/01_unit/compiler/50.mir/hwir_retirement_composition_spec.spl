@@ -1,0 +1,101 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
+# Typed reset-coupled retirement-receipt composition tests.
+# codex-system-test
+# @manual_section RISC-V Gen2 retirement receipt composition
+
+use std.spec.step
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwPort}
+use compiler.mir.hwir.retirement_composition.{HwParcelRetirementComposition, HwRetireCompositionBinding, strict_riscv_retire_receipt_producer_interface, strict_zca_single_outstanding_retirement_composition}
+
+describe "strict Gen2 retirement receipt composition":
+        # @req REQ-SSPEC-COMPILER NFR-G2-011
+    it "should bind the one-entry frontend and receipt producer to one reset for RV32 and RV64":
+        # @req REQ-SSPEC-COMPILER
+        step("should bind the one-entry frontend and receipt producer to one reset for RV32 and RV64")
+        step("Construct the closed RV32 and RV64 retirement-receipt contracts")
+        val rv32 = strict_zca_single_outstanding_retirement_composition(
+            "rv32_retirement_composition", CoreConfig.rv32_zca_mission_critical(),
+            "riscv_gen2_rv32_architectural_retirement")
+        val rv64 = strict_zca_single_outstanding_retirement_composition(
+            "rv64_retirement_composition", CoreConfig.rv64_zca_mission_critical(),
+            "riscv_gen2_rv64_architectural_retirement")
+        if rv32.is_ok() and rv64.is_ok():
+            val composition32 = rv32.ok().unwrap()
+            val composition64 = rv64.ok().unwrap()
+            expect(composition32.shape_diagnostic()).to_equal("")
+            expect(composition64.shape_diagnostic()).to_equal("")
+            expect(composition32.bindings.len()).to_equal(15)  # oracle: 15 — named expected value from the requirement
+            expect(composition32.bindings[2].source_port).to_equal("rst")
+            expect(composition32.bindings[2].destination_owner).to_equal("frontend")
+            expect(composition32.bindings[3].source_port).to_equal("rst")
+            expect(composition32.bindings[3].destination_owner).to_equal("producer")
+            expect(composition32.producer.dispatch_lineage.bit_width).to_equal(64)  # oracle: 64 — named expected value from the requirement
+            expect(composition64.producer.dispatch_original_length_bytes.bit_width).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        else:
+            expect(false).to_equal(true)
+
+        # @req REQ-SSPEC-COMPILER NFR-G2-011
+    it "should reject a producer that loses the shared reset or receipt width":
+        # @req REQ-SSPEC-COMPILER
+        step("should reject a producer that loses the shared reset or receipt width")
+        step("Mutate the typed producer reset and receipt tuple independently")
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val producer = strict_riscv_retire_receipt_producer_interface(config)
+        if producer.is_ok():
+            val bad_reset = producer.ok().unwrap()
+            bad_reset.rst = HwPort.input("retire_rst", "Bits", 1)
+            expect(bad_reset.shape_diagnostic()).to_equal(
+                "HWIR-E-RETIRE-PRODUCER-CLOCK: retirement receipt producer requires shared one-bit clk and synchronous active-high rst inputs")
+            val bad_width = strict_riscv_retire_receipt_producer_interface(config).ok().unwrap()
+            bad_width.retire_lineage = HwPort.output("retire_lineage", "Bits", 63)
+            expect(bad_width.shape_diagnostic()).to_equal(
+                "HWIR-E-RETIRE-PRODUCER-RECEIPT-WIDTH: retirement producer must publish the exact receipt identity tuple")
+        else:
+            expect(false).to_equal(true)
+
+        # @req REQ-SSPEC-COMPILER NFR-G2-011
+    it "should reject omitted or rewired receipt bindings before composition":
+        # @req REQ-SSPEC-COMPILER
+        step("should reject omitted or rewired receipt bindings before composition")
+        step("Rewire one closed receipt binding before the composition boundary")
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "retirement_binding_contract", CoreConfig.rv32_zca_mission_critical(),
+            "riscv_gen2_rv32_architectural_retirement")
+        if built.is_ok():
+            val canonical = built.ok().unwrap()
+            var rewired = canonical.bindings
+            rewired[11] = HwRetireCompositionBinding(kind: "producer_to_frontend", source_owner: "producer",
+                source_port: "retire_lineage", destination_owner: "frontend",
+                destination_port: "retire_original_parcel", bit_width: 64)
+            val malformed = HwParcelRetirementComposition(node_id: canonical.node_id,
+                config: canonical.config, frontend: canonical.frontend, producer: canonical.producer,
+                producer_entity: canonical.producer_entity, bindings: rewired)
+            expect(malformed.shape_diagnostic()).to_equal(
+                "HWIR-E-RETIRE-COMPOSITION-BINDINGS: retirement composition requires the closed reset, dispatch, and receipt wiring set")
+        else:
+            expect(false).to_equal(true)
+
+        # @req REQ-SSPEC-COMPILER NFR-G2-006 NFR-G2-011
+    it "should reject a substituted child route before it can be bound":
+        # @req REQ-SSPEC-COMPILER
+        step("should reject a substituted child route before it can be bound")
+        step("Substitute an otherwise valid frontend route with a legacy route")
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "retirement_child_schema_contract", CoreConfig.rv64_zca_mission_critical(),
+            "riscv_gen2_rv64_architectural_retirement")
+        if built.is_ok():
+            val malformed = built.ok().unwrap()
+            malformed.frontend_route = "legacy-vhdl"
+            expect(malformed.shape_diagnostic()).to_equal(
+                "HWIR-E-RETIRE-COMPOSITION-CHILD-SCHEMA: retirement composition requires the admitted frontend and strict producer child schemas")
+        else:
+            expect(false).to_equal(true)

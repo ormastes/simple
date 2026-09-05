@@ -1,0 +1,82 @@
+# @req REQ-SPKC-039
+# S1-E acceptance spec: UID derivation parity + basic record construction.
+#
+# Parity oracle: test/fixture/spipe/uid_vectors.sdn, generated once from the
+# JS implementation (examples/05_stdlib/spipe/src/model/identity.js) per
+# doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md §3.2. The
+# JS `deriveCanonicalUid(prefix, domain, value)` hashes
+# `domain + "\0" + JSON.stringify(value)`; the Simple port takes the
+# already-canonicalized JSON text as `value`, so each vector is checked via
+# `derive_canonical_uid(prefix, domain, canonical_json(CText(value)))`.
+
+use std.spec.{describe, it, expect}
+use app.spipe.model.types.{
+    EdgeType, EdgeOrigin, EdgeStatus, EdgeRecord, SourceRange, LinkForm
+}
+use app.spipe.model.uid.{crockford_digest_payload, derive_canonical_uid}
+use app.spipe.model.canonical.{CanonicalValue, canonical_json}
+
+describe("spipe model identity"):
+    it("derives UID vector: artifact path doc/00_readme.md"):
+        val value = canonical_json(CanonicalValue.CText("doc/00_readme.md"))
+        val uid = derive_canonical_uid("A", "spipe-artifact", value)
+        expect(uid.is_ok()).to_equal(true)
+        expect(uid.unwrap()).to_equal("A-CWJ8CP34WYZHD1HJ2AFVQ44H06")
+
+    it("derives UID vector: artifact path doc/glossary.md"):
+        val value = canonical_json(CanonicalValue.CText("doc/glossary.md"))
+        val uid = derive_canonical_uid("A", "spipe-artifact", value)
+        expect(uid.unwrap()).to_equal("A-WY6BG6DCCYSCM9N63KWJS51549")
+
+    it("derives UID vector: section with heading fragment"):
+        val value = canonical_json(CanonicalValue.CText("doc/00_readme.md#introduction"))
+        val uid = derive_canonical_uid("S", "spipe-section", value)
+        expect(uid.unwrap()).to_equal("S-GJGQAXZ5EHVY5PQXAHJY55WHZW")
+
+    it("derives UID vector: edge occurrence key"):
+        val value = canonical_json(CanonicalValue.CText("links_to|doc/a.md|doc/b.md"))
+        val uid = derive_canonical_uid("E", "spipe-edge", value)
+        expect(uid.unwrap()).to_equal("E-RW11VPSEQ3MZN8T6TWKJC7CYSC")
+
+    it("derives UID vector: empty value"):
+        val value = canonical_json(CanonicalValue.CText(""))
+        val uid = derive_canonical_uid("A", "spipe-artifact", value)
+        expect(uid.unwrap()).to_equal("A-677N60PD96W6BJYA55PACQM8S0")
+
+    it("derives UID vector: multibyte text value"):
+        val value = canonical_json(CanonicalValue.CText("unicode: café → 日本語"))
+        val uid = derive_canonical_uid("A", "spipe-artifact", value)
+        expect(uid.unwrap()).to_equal("A-SRGTA25WG64E6MXEXH046C63ZK")
+
+    it("rejects the W prefix (Workspace is not a derivable UID)"):
+        val value = canonical_json(CanonicalValue.CText("x"))
+        val uid = derive_canonical_uid("W", "spipe-workspace", value)
+        expect(uid.is_err()).to_equal(true)
+
+    it("rejects an unknown prefix"):
+        val value = canonical_json(CanonicalValue.CText("x"))
+        val uid = derive_canonical_uid("ZZ", "spipe-artifact", value)
+        expect(uid.is_err()).to_equal(true)
+
+    it("crockford payload is always exactly 26 characters"):
+        val payload = crockford_digest_payload("hello".bytes())
+        expect(payload.len()).to_equal(26)
+
+    it("smoke: SourceRange constructs and reads back fields"):
+        val r = SourceRange(
+            path: "doc/x.md", start_offset: 0, end_offset: 10,
+            target_start: 2, target_end: 8, link_form: LinkForm.Inline,
+            raw_target: "y.md", fragment: None
+        )
+        expect(r.path).to_equal("doc/x.md")
+        expect(r.end_offset).to_equal(10)
+
+    it("smoke: EdgeRecord constructs with LinksTo"):
+        val e = EdgeRecord(
+            uid: "E-TESTTESTTESTTESTTESTTESTTE",
+            edge_type: EdgeType.LinksTo,
+            from_uid: "A-1", to_uid: "A-2",
+            origin: EdgeOrigin.Explicit, status: EdgeStatus.Accepted,
+            source_range: None
+        )
+        expect(e.uid).to_equal("E-TESTTESTTESTTESTTESTTESTTE")

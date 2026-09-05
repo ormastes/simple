@@ -1,0 +1,24 @@
+#!/bin/sh
+# Static unsafe-scope guard for interpreter-owned opaque error handles.
+# This is source containment only, not provider admission or signature proof.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+binding="$root/src/app/interpreter/ffi/error_ffi.spl"
+consumer="$root/src/app/interpreter/ffi/eval_slice.spl"
+provider="$root/src/compiler_rust/compiler/src/interpreter_extern/error_sffi.rs"
+
+test "$(grep -c '^@unsafe(' "$binding")" -eq 9
+test "$(grep -c '^extern fn rt_error_' "$binding")" -eq 9
+grep -q 'opaque error handle is consumed by throw' "$binding"
+grep -q 'invalid error handle' "$provider"
+
+raw_calls=$(awk '
+    /unsafe\(capabilities: \[ffi\]\):/ { pending=1; next }
+    pending && /^[[:space:]]+rt_error_/ { count++; pending=0; next }
+    pending { pending=0 }
+    END { print count + 0 }
+' "$consumer")
+test "$raw_calls" -eq 18
+
+echo 'Interpreter error SFFI authority: PASS raw_declarations=9 lexical_raw_calls=18 paths=error_only artifact_admission=absent'

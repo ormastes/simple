@@ -1,0 +1,567 @@
+# MCP Lazy Server - JSON helpers
+# Extracted from main_lazy.spl
+
+use std.io_runtime.{env_get, process_run, process_run_bounded, file_read, file_write}
+
+# --- Safe string helpers (workaround for 2-arg substring bug) ---
+
+fn _slice_text(s: text, start: i64, end: i64) -> text:
+    # Use native 2-arg substring (O(1) pointer math in Rust) instead of
+    # the previous O(n^2) per-char concat loop.
+    s.substring(start, end)
+
+fn strip_last(s: text) -> text:
+    val n = s.len()
+    if n <= 0:
+        return ""
+    _slice_text(s, 0, n - 1)
+
+fn strip_first_last(s: text) -> text:
+    strip_last(_slice_text(s, 1, s.len()))
+
+fn first_n_chars(s: text, n: i64) -> text:
+    val limit = if n < s.len(): n else: s.len()
+    s.substring(0, limit)
+
+fn char_at_index(s: text, target: i64) -> text:
+    var i = 0
+    for ch in s:
+        if i == target:
+            return ch
+        i = i + 1
+    ""
+
+# --- JSON helpers (inlined for zero-import startup) ---
+
+fn Q() -> text:
+    "\""
+
+fn LB() -> text:
+    "{"
+
+fn RB() -> text:
+    "}"
+
+fn SB_L() -> text:
+    "["
+
+fn SB_R() -> text:
+    "]"
+
+# The 32 C0 control characters, indexed by code point. JSON strings must not
+# carry any of them raw (RFC 8259 §7), so every one maps to an escape.
+fn _json_ctrl_chars() -> [text]:
+    ["\u0000", "\u0001", "\u0002", "\u0003", "\u0004", "\u0005", "\u0006", "\u0007", 
+     "\u0008", "\t", "\n", "\u000B", "\u000C", "\r", "\u000E", "\u000F", 
+     "\u0010", "\u0011", "\u0012", "\u0013", "\u0014", "\u0015", "\u0016", "\u0017", 
+     "\u0018", "\u0019", "\u001A", "\u001B", "\u001C", "\u001D", "\u001E", "\u001F"]
+
+fn _json_ctrl_escape(ch: text) -> text:
+    if ch == "\n":
+        return r"\n"
+    if ch == "\r":
+        return r"\r"
+    if ch == "\t":
+        return r"\t"
+    val table = _json_ctrl_chars()
+    val hex = "0123456789ABCDEF"
+    var i = 0
+    while i < table.len():
+        if table[i] == ch:
+            return r"\u00" + hex.substring(i / 16, i / 16 + 1) + hex.substring(i % 16, i % 16 + 1)
+        i = i + 1
+    # Not a C0 control char (multi-byte or >= 0x20): pass through.
+    ch
+
+fn _json_needs_escape(ch: text) -> bool:
+    ch == Q() or ch == "\\" or ch < " "
+
+# Single-pass JSON string escaper. Deliberately does NOT chain `.replace()`:
+# the chained form left raw control characters in the payload and, on the
+# deployed 2026-08-10 native server, shifted the `\n` escape two bytes
+# ("WARNING" -> "W\nRNING"). Every byte is copied or escaped exactly once.
+fn escape_json(s: text) -> text:
+    var plain = true
+    for ch in s:
+        if _json_needs_escape(ch):
+            plain = false
+            break
+    if plain:
+        return s
+    var parts: [text] = []
+    for ch in s:
+        if ch == Q():
+            parts.push("\\" + Q())
+        elif ch == "\\":
+            parts.push("\\\\")
+        elif ch < " ":
+            parts.push(_json_ctrl_escape(ch))
+        else:
+            parts.push(ch)
+    parts.join("")
+
+# Public alias: the escaper body without quotes (used by api_tools).
+fn escape_json_text(s: text) -> text:
+    escape_json(s)
+
+fn js(s: text) -> text:
+    Q() + escape_json(s) + Q()
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn jo1(p1: text) -> text:
+    LB() + p1 + RB()
+
+fn jo2(p1: text, p2: text) -> text:
+    LB() + p1 + "," + p2 + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + RB()
+
+fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
+
+# Manual JSON value scanner.
+#
+# NOTE: Avoid `match Some(i)` on `index_of()` results here; that pattern has
+# crashed native Cranelift binaries. Use `?? -1` instead.
+
+fn _char_at(s: text, i: i64) -> text:
+    if i < 0 or i >= s.len():
+        return ""
+    _slice_text(s, i, i + 1)
+
+fn _is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn _find_json_value_start(json: text, key: text) -> i64:
+    val search = Q() + key + Q()
+    var offset = 0
+    while offset < json.len():
+        val found = json.index_of(search, offset) ?? -1
+        if found < 0:
+            return -1
+        offset = found
+        var value_start = offset + search.len()
+        while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+            value_start = value_start + 1
+        if value_start < json.len() and _char_at(json, value_start) == ":":
+            value_start = value_start + 1
+            while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+                value_start = value_start + 1
+            return value_start
+        offset = offset + search.len()
+    return -1
+
+fn extract_field(json: text, key: text) -> text:
+    val start = _find_json_value_start(json: json, key: key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = _char_at(json, start)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = _char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return _slice_text(json, start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == SB_R() or _is_ws(ch):
+            break
+        end = end + 1
+    return _slice_text(json, start, end)
+
+fn extract_field_raw(json: text, key: text) -> text:
+    val start = _find_json_value_start(json: json, key: key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = _char_at(json, start)
+    if first == Q():
+        var i2 = start + 1
+        var escaped = false
+        while i2 < json.len():
+            val ch = _char_at(json, i2)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return _slice_text(json, start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    if first == LB() or first == SB_L():
+        var depth = 0
+        var i3 = start
+        var in_str = false
+        var esc = false
+        while i3 < json.len():
+            val ch = _char_at(json, i3)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == Q():
+                    in_str = false
+            else:
+                if ch == Q():
+                    in_str = true
+                elif ch == LB() or ch == SB_L():
+                    depth = depth + 1
+                elif ch == RB() or ch == SB_R():
+                    depth = depth - 1
+                    if depth == 0:
+                        return _slice_text(json, start, i3 + 1)
+            i3 = i3 + 1
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == SB_R() or _is_ws(ch):
+            break
+        end = end + 1
+    val raw = _slice_text(json, start, end)
+    if raw == "":
+        return "null"
+    return raw
+
+fn extract_id(json: text) -> text:
+    extract_field_raw(json: json, key: "id")
+
+fn extract_nested(json: text, key: text) -> text:
+    val params = extract_field_raw(json: json, key: "params")
+    if params == "null":
+        return ""
+    extract_field(json: params, key: key)
+
+fn make_json_result(id: text, result: text) -> text:
+    jo3(
+        p1: jp(key: "jsonrpc", value: js("2.0")),
+        p2: jp(key: "id", value: id),
+        p3: jp(key: "result", value: result)
+    )
+
+fn make_error(id: text, code: i64, message: text) -> text:
+    val err = jo2(p1: jp(key: "code", value: str(code)), p2: jp(key: "message", value: js(message)))
+    jo3(
+        p1: jp(key: "jsonrpc", value: js("2.0")),
+        p2: jp(key: "id", value: id),
+        p3: jp(key: "error", value: err)
+    )
+
+# --- MCP Tool Result helpers ---
+
+fn infer_json_value_type(raw: text) -> text:
+    val t = raw.trim()
+    if t == "":
+        return "empty"
+    if t.starts_with("{"):
+        return "object"
+    if t.starts_with("["):
+        return "array"
+    if t.starts_with(Q()):
+        return "string"
+    if t == "true" or t == "false":
+        return "boolean"
+    if t == "null":
+        return "null"
+    var has_digit = false
+    var all_num = true
+    for ch in t:
+        if ch >= "0" and ch <= "9":
+            has_digit = true
+        elif ch == "." or ch == "-" or ch == "+":
+            pass
+        else:
+            all_num = false
+            break
+    if has_digit and all_num:
+        return "number"
+    "text"
+
+fn top_level_item_count(raw: text) -> i64:
+    val t = raw.trim()
+    if t == "":
+        return 0
+    if not t.starts_with("[") and not t.starts_with("{"):
+        return 1
+    var depth = 0
+    var in_string = false
+    var escaped = false
+    var count = 0
+    var saw_value = false
+    for ch in t:
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                in_string = false
+            continue
+        if ch == Q():
+            in_string = true
+            if depth == 1:
+                saw_value = true
+        elif ch == "[" or ch == "{":
+            depth = depth + 1
+            if depth == 2:
+                saw_value = true
+        elif ch == "]" or ch == "}":
+            if depth == 1 and saw_value:
+                count = count + 1
+                saw_value = false
+            depth = depth - 1
+        elif ch == "," and depth == 1:
+            count = count + 1
+            saw_value = false
+        elif depth == 1 and ch != " " and ch != "\n" and ch != "\r" and ch != "\t":
+            saw_value = true
+    if t.starts_with("[") or t.starts_with("{"):
+        if count < 0:
+            return 0
+    count
+
+fn summarize_json_shape(raw: text, depth: i64) -> text:
+    val value_type = infer_json_value_type(raw)
+    if depth <= 0:
+        return value_type
+    if value_type == "array":
+        var inner = raw.trim()
+        if inner.len() >= 2:
+            inner = strip_first_last(inner).trim()
+        var first = ""
+        var d = 0
+        var in_s = false
+        var esc = false
+        var parts: [text] = []
+        for ch in inner:
+            if in_s:
+                parts.push(ch)
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == Q():
+                    in_s = false
+                continue
+            if ch == Q():
+                in_s = true
+                parts.push(ch)
+            elif ch == "[" or ch == "{":
+                d = d + 1
+                parts.push(ch)
+            elif ch == "]" or ch == "}":
+                d = d - 1
+                parts.push(ch)
+            elif ch == "," and d == 0:
+                first = parts.join("").trim()
+                break
+            else:
+                parts.push(ch)
+        if first == "":
+            first = parts.join("").trim()
+        var elem_shape = "unknown"
+        if first != "":
+            elem_shape = summarize_json_shape(first, depth - 1)
+        return "array<" + elem_shape + ">"
+    if value_type == "object":
+        var pair_count = 0
+        var in_s = false
+        var esc = false
+        for ch in raw:
+            if in_s:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == Q():
+                    in_s = false
+                continue
+            if ch == Q():
+                in_s = true
+            elif ch == ":":
+                pair_count = pair_count + 1
+        val lb = "{"
+        val rb = "}"
+        return "object" + lb + "pairs=" + str(pair_count) + rb
+    value_type
+
+fn make_tool_result(id: text, output: text) -> text:
+    make_tool_result_status(id, output, false)
+
+# Tool result with an explicit MCP `isError` flag. A failed tool call is still
+# a successful JSON-RPC response (the protocol reserves `error` for transport
+# faults), so the failure travels in `result.isError`, never as prose inside a
+# success payload.
+fn make_tool_result_status(id: text, output: text, is_error: bool) -> text:
+    val escaped = escape_json(output)
+    val quoted = Q() + escaped + Q()
+    val content = SB_L() + jo2(p1: jp(key: "type", value: js("text")), p2: jp(key: "text", value: quoted)) + SB_R()
+    val inferred = infer_json_value_type(output)
+    val shape = summarize_json_shape(output, 2)
+    val structured = jo2(
+        p1: jp(key: "inferredType", value: js(inferred)),
+        p2: jp(key: "shape", value: js(shape))
+    )
+    val err_flag = if is_error: "true" else: "false"
+    val result = jo3(
+        p1: jp(key: "content", value: content),
+        p2: jp(key: "isError", value: err_flag),
+        p3: jp(key: "structuredContent", value: structured)
+    )
+    make_json_result(id: id, result: result)
+
+fn make_tool_error(id: text, code: i64, msg: text) -> text:
+    val content = SB_L() + jo2(p1: jp(key: "type", value: js("text")), p2: jp(key: "text", value: js("ERROR " + str(code) + ": " + msg))) + SB_R()
+    val structured = jo2(p1: jp(key: "code", value: str(code)), p2: jp(key: "message", value: js(msg)))
+    val err_result = jo3(jp(key: "content", value: content), jp(key: "isError", value: "true"), jp(key: "structuredContent", value: structured))
+    make_json_result(id: id, result: err_result)
+
+# --- Public aliases (for cross-module import by specs and dependents) ---
+
+fn extract_json_string(json: text, key: text) -> text:
+    extract_field(json: json, key: key)
+
+fn extract_json_value(json: text, key: text) -> text:
+    extract_field_raw(json: json, key: key)
+
+fn make_error_response(id: text, code: i64, message: text) -> text:
+    make_error(id: id, code: code, message: message)
+
+fn log_level_to_int(level: text) -> i64:
+    if level == "debug": 0
+    elif level == "info": 1
+    elif level == "notice": 2
+    elif level == "warning": 3
+    elif level == "error": 4
+    elif level == "critical": 5
+    elif level == "alert": 6
+    elif level == "emergency": 7
+    else: -1
+
+export LB, RB, Q, jp, js, jo1, jo2, jo3, jo4, make_tool_result, make_tool_result_status, make_tool_error
+export escape_json_text
+export extract_json_string, extract_json_value, make_error_response, log_level_to_int
+export first_n_chars, strip_ansi, shell_cmd, mcp_run_argv
+
+# --- Shell helper ---
+# Uses process_run (returns tuple). Note: val (a,b) = expr is broken
+# in interpreter, so we use var + assignment destructuring instead.
+
+fn _mcp_detect_shell() -> text:
+    # On Windows, /bin/sh doesn't resolve for native PE binaries.
+    # Use "sh" (found on PATH via Git Bash/MSYS2) or fall back to "cmd".
+    val os_env = env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        # Check for sh on PATH (Git Bash / MSYS2)
+        var sh_out = ""
+        var sh_err = ""
+        var sh_rc: i64 = 0
+        (sh_out, sh_err, sh_rc) = process_run("sh", ["-c", "echo ok"])
+        if sh_rc == 0 and sh_out.trim() == "ok":
+            return "sh"
+        return "cmd"
+    "/bin/sh"
+
+fn _get_shell() -> text:
+    _mcp_detect_shell()
+
+# Remove ANSI CSI sequences (ESC '[' params final-byte) and bare ESC bytes.
+# No subprocess: the old version spawned `printf '\033'` on every tool call
+# and then only deleted the ESC byte, leaving `[33m` fragments in the text.
+fn strip_ansi(s: text) -> text:
+    val esc = "\u001B"
+    if not s.contains(esc):
+        return s
+    var parts: [text] = []
+    var in_csi = false
+    var after_esc = false
+    for ch in s:
+        if in_csi:
+            # CSI ends at the first byte in 0x40..0x7E
+            if ch >= "@" and ch <= "~":
+                in_csi = false
+            continue
+        if after_esc:
+            after_esc = false
+            if ch == "[":
+                in_csi = true
+            continue
+        if ch == esc:
+            after_esc = true
+            continue
+        parts.push(ch)
+    parts.join("")
+
+fn _strip_timeout_prefix(command: text) -> text:
+    """Strip Unix 'timeout N' prefix for cmd.exe compatibility.
+    Git Bash has coreutils timeout, so only strip for cmd."""
+    if not command.starts_with("timeout "):
+        return command
+    # Skip "timeout " then skip the number and trailing space
+    var i = 8
+    var found_digit = false
+    for ch in command[8:]:
+        if ch >= "0" and ch <= "9":
+            i = i + 1
+            found_digit = true
+        elif ch == " " and found_digit:
+            i = i + 1
+            return command[i:]
+        else:
+            return command
+    command
+
+fn shell_cmd(command: text) -> (text, i64):
+    var stdout = ""
+    var stderr = ""
+    var code: i64 = 0
+    val shell = _get_shell()
+    if shell == "cmd":
+        # Strip Unix timeout prefix — cmd.exe doesn't have coreutils timeout
+        val cmd = _strip_timeout_prefix(command)
+        (stdout, stderr, code) = process_run("cmd", ["/C", cmd])
+    elif shell == "sh":
+        # Windows Git Bash: < /dev/null breaks piped commands, so omit it
+        (stdout, stderr, code) = process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
+    else:
+        (stdout, stderr, code) = process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+    if stdout != "":
+        stdout = strip_ansi(stdout)
+    (stdout, code)
+
+# Execute literal argv with bounded time and captured output. Public MCP fields
+# must never be reconstructed into a shell command.
+fn mcp_run_argv(
+    binary: text, args: [text], timeout_ms: i64, max_output_bytes: i64
+) -> (text, i64):
+    val (stdout, stderr, code) = process_run_bounded(
+        binary, args, timeout_ms, max_output_bytes)
+    var output = stdout + stderr
+    if output != "":
+        output = strip_ansi(output)
+    (output, _mcp_normalize_process_exit(code, stderr))
+
+fn _mcp_normalize_process_exit(code: i64, stderr: text) -> i64:
+    if code == -1:
+        if stderr.ends_with("\nTIMEOUT\n"):
+            return 124
+        if stderr.ends_with("Process timed out"):
+            return 124
+        if stderr.ends_with("ms]") and stderr.contains(
+            "[TIMEOUT: Process killed after "):
+            return 124
+    code
+
+fn text_byte_len(s: text) -> i64:
+    s.len()

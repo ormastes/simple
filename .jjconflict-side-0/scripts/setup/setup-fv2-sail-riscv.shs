@@ -1,0 +1,67 @@
+#!/usr/bin/env sh
+# Build and lock the approved independent Sail RISC-V executable model used by
+# the FV2 RV32 ADD differential lane.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_dir="${FV2_SAIL_RISCV_SOURCE:-$root/build/oracles/sail-riscv-a33475a}"
+sim="$source_dir/build/c_emulator/sail_riscv_sim"
+config="$source_dir/build/config/rv32d_v128_e32.json"
+lock="$source_dir/build/fv2-rv32.lock"
+revision=a33475aeb80090127433b5a8b30e717edaa19e71
+
+lock_value() {
+    key="$1"
+    count="$(grep -c "^${key}=" "$lock" 2>/dev/null || true)"
+    [ "$count" -eq 1 ] || return 1
+    sed -n "s/^${key}=//p" "$lock" | sed -n '1p'
+}
+
+lock_ready() {
+    [ -x "$sim" ] && [ -f "$config" ] && [ -f "$lock" ] || return 1
+    [ "$(lock_value schema)" = "fv2-sail-riscv-lock-v1" ] || return 1
+    [ "$(lock_value oracle_repository)" = \
+        "https://github.com/riscv/sail-riscv.git" ] || return 1
+    [ "$(lock_value oracle_revision)" = "$revision" ] || return 1
+    for key in simulator_sha256 rv32_config_sha256 sail_compiler_version_sha256; do
+        value="$(lock_value "$key")" || return 1
+        case "$value" in ""|*[!0-9a-f]*) return 1;; esac
+        [ "${#value}" -eq 64 ] || return 1
+    done
+}
+
+if [ "${1:-}" = "--check" ]; then
+    if lock_ready; then
+        echo "STATUS: READY FV2 Sail RISC-V simulator=$sim config=$config lock=$lock"
+        exit 0
+    fi
+    echo "STATUS: BLOCKED FV2 Sail RISC-V: run scripts/setup/setup-fv2-sail-riscv.shs" >&2
+    exit 2
+fi
+
+for tool in git cmake sha256sum sail; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "STATUS: BLOCKED FV2 Sail RISC-V: required tool missing: $tool" >&2
+        exit 2
+    }
+done
+sh "$root/scripts/tool/acquire-riscv-gen2-zca-oracle.shs" "$source_dir"
+(cd "$source_dir" && env DOWNLOAD_GMP=FALSE ENABLE_RISCV_TESTS=FALSE ./build_simulator.sh)
+[ -x "$sim" ] || { echo "FAIL: pinned Sail simulator was not built" >&2; exit 1; }
+[ -f "$config" ] || { echo "FAIL: pinned RV32 configuration was not built" >&2; exit 1; }
+lock_tmp="$(mktemp "$source_dir/build/.fv2-rv32-lock.XXXXXX")"
+trap 'rm -f "$lock_tmp"' EXIT
+{
+    echo "schema=fv2-sail-riscv-lock-v1"
+    echo "oracle_repository=https://github.com/riscv/sail-riscv.git"
+    echo "oracle_revision=$revision"
+    echo "simulator_sha256=$(sha256sum "$sim" | cut -d ' ' -f 1)"
+    echo "rv32_config_sha256=$(sha256sum "$config" | cut -d ' ' -f 1)"
+    echo "sail_compiler_version_sha256=$(sail --version 2>&1 | sha256sum | cut -d ' ' -f 1)"
+} >"$lock_tmp"
+mv "$lock_tmp" "$lock"
+trap - EXIT
+echo "STATUS: PASS FV2 Sail RISC-V setup"
+echo "export SAIL_RISCV_SIM=$sim"
+echo "export SAIL_RISCV_RV32_CONFIG=$config"
+echo "export SAIL_RISCV_LOCK=$lock"

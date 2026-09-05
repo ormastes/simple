@@ -1,0 +1,144 @@
+# World unit expression engine.
+#
+# Parses a textual unit expression ("km/h", "kmph", "M", "mol/L") into the
+# exact-rational `UnitExpression` defined by `std.common.units.model.world_units`,
+# and renders one back to its canonical textual form.
+#
+# The model layer (ExactRatio / UnitFactor / UnitExpression and the
+# kilometre / hour / litre / mole-per-litre constructors) already existed; this
+# module and `units.generators.world_units_importers` were its two missing
+# consumers. See
+# doc/08_tracking/bug/world_units_engine_and_generators_modules_missing_2026-08-21.md
+#
+# Scope is deliberately the catalog's own surface (`catalog/world_units_v1.sdn`):
+# an expression naming a unit the catalog does not carry — a currency, say — is
+# reported as an error rather than guessed at. Silent guessing is what makes a
+# unit engine dangerous.
+
+use std.common.units.model.world_units.{
+    ExactRatio,
+    UnitExpression,
+    exact_ratio,
+    unit_expression,
+    unit_expression_from_base,
+    unit_expression_scaled,
+    unit_expression_div,
+    unit_expression_factor_exponent,
+    unit_expression_equivalent,
+    kilometre_expression,
+    hour_expression,
+    litre_expression,
+    kilometre_per_hour_expression,
+    mole_per_litre_expression
+}
+
+struct ParsedUnitExpression:
+    ok: bool
+    expression: UnitExpression
+    error: text
+
+fn empty_unit_expression() -> UnitExpression:
+    unit_expression(exact_ratio(1, 1), [])
+
+fn parse_failure(source: text) -> ParsedUnitExpression:
+    ParsedUnitExpression(
+        ok: false,
+        expression: empty_unit_expression(),
+        error: "unknown unit expression: {source}"
+    )
+
+fn parse_success(expression: UnitExpression) -> ParsedUnitExpression:
+    ParsedUnitExpression(ok: true, expression: expression, error: "")
+
+# Single atomic unit symbol -> expression. Returns ok=false for anything the
+# catalog does not define, so a compound parse can report the whole source.
+fn parse_unit_atom(symbol: text) -> ParsedUnitExpression:
+    match symbol:
+        case "m" | "metre" | "meter": parse_success(unit_expression_from_base("metre"))
+        case "km" | "kilometre" | "kilometer": parse_success(kilometre_expression())
+        case "kg" | "kilogram": parse_success(unit_expression_from_base("kilogram"))
+        case "s" | "second": parse_success(unit_expression_from_base("second"))
+        case "h" | "hour": parse_success(hour_expression())
+        case "mol" | "mole": parse_success(unit_expression_from_base("mole"))
+        case "L" | "l" | "litre" | "liter": parse_success(litre_expression())
+        case "B" | "byte": parse_success(unit_expression_from_base("byte"))
+        case "KiB" | "kibibyte": parse_success(unit_expression_scaled(exact_ratio(1024, 1), "byte"))
+        case _: parse_failure(symbol)
+
+# Whole-expression aliases from the catalog's `alias` rows. Checked before the
+# compound parse so `kmph` and `M` do not have to survive the "/" split.
+fn parse_unit_alias(source: text) -> ParsedUnitExpression:
+    match source:
+        case "kmph" | "km/h" | "kph": parse_success(kilometre_per_hour_expression())
+        case "M" | "molar" | "mol/L" | "mol/l": parse_success(mole_per_litre_expression())
+        case _: parse_failure(source)
+
+fn parse_unit_expression(source: text) -> ParsedUnitExpression:
+    """Parse a unit expression into an exact `UnitExpression`.
+
+    Handles a bare unit (`km`), a single quotient (`mol/L`), and the catalog's
+    whole-expression aliases (`kmph`, `M`). Anything else — including a
+    syntactically fine quotient over a unit the catalog does not define, such
+    as `USD/h` — reports ok=false with an `unknown unit expression` error
+    rather than inventing a scale."""
+    val trimmed = source.trim()
+    if trimmed == "":
+        return parse_failure(source)
+    val aliased = parse_unit_alias(trimmed)
+    if aliased.ok:
+        return aliased
+    if trimmed.contains("/"):
+        val parts = trimmed.split("/")
+        if parts.len() != 2:
+            return parse_failure(source)
+        val numerator = parse_unit_atom(parts[0].trim())
+        if not numerator.ok:
+            return parse_failure(source)
+        val denominator = parse_unit_atom(parts[1].trim())
+        if not denominator.ok:
+            return parse_failure(source)
+        return parse_success(unit_expression_div(numerator.expression, denominator.expression))
+    val atom = parse_unit_atom(trimmed)
+    if not atom.ok:
+        return parse_failure(source)
+    atom
+
+fn format_unit_expression(expression: UnitExpression) -> text:
+    """Canonical textual form of an expression.
+
+    Canonicalisation is by VALUE, not by the spelling that produced it: `kmph`
+    and `km/h` parse to the same expression and both render `km/h`; `M` and
+    `mol/L` both render `mol/L`. Anything without a catalog-canonical spelling
+    falls back to a factor listing, which is honest about what it holds instead
+    of pretending to a symbol the catalog does not define."""
+    if unit_expression_equivalent(expression, kilometre_per_hour_expression()):
+        return "km/h"
+    if unit_expression_equivalent(expression, mole_per_litre_expression()):
+        return "mol/L"
+    if unit_expression_equivalent(expression, kilometre_expression()):
+        return "km"
+    if unit_expression_equivalent(expression, hour_expression()):
+        return "h"
+    if unit_expression_equivalent(expression, litre_expression()):
+        return "L"
+    format_unit_expression_factors(expression)
+
+fn format_unit_expression_factors(expression: UnitExpression) -> text:
+    var parts: [text] = []
+    for factor in expression.factors:
+        if factor.exponent == 1:
+            parts.push(factor.unit_id)
+        else:
+            parts.push("{factor.unit_id}^{factor.exponent}")
+    var body = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            body = body + "*"
+        body = body + parts[i]
+        i = i + 1
+    if body == "":
+        body = "1"
+    if expression.scale.numerator == 1 and expression.scale.denominator == 1:
+        return body
+    "({expression.scale.numerator}/{expression.scale.denominator}) {body}"

@@ -1,0 +1,176 @@
+use std.common.aspect_pack.{
+    ApkModuleSourceV2,
+    AspectFacetDescriptor,
+    AspectPackBinding,
+    AspectCatalogEntry,
+    apk_build_pack_v2,
+    aspect_catalog_build
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{char_code}
+use os.smf.aspect_pack_directory.{
+    AspectPackArtifactIdentity,
+    AspectPackExportContract,
+    AspectPackLookupRequest,
+    aspect_pack_directory_parse_from_outer_smf_bytes
+}
+use os.smf.dynsmf_manifest_contract.{DynSmfManifestEntry}
+
+class DynSmfAdmittedStartupFixture:
+    artifact_bytes: [u8]
+    manifest: [DynSmfManifestEntry]
+    request: AspectPackLookupRequest
+
+fn _dynsmf_fixture_append_u32(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out.push((value & 0xff) as u8)
+    out.push(((value >> 8) & 0xff) as u8)
+    out.push(((value >> 16) & 0xff) as u8)
+    out.push(((value >> 24) & 0xff) as u8)
+    out
+
+fn _dynsmf_fixture_append_u64(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    var index = 0
+    while index < 8:
+        out.push(((value >> (index * 8)) & 0xff) as u8)
+        index = index + 1
+    out
+
+fn _dynsmf_fixture_append(bytes: [u8], suffix: [u8]) -> [u8]:
+    var out = bytes
+    for byte in suffix:
+        out.push(byte)
+    out
+
+fn _dynsmf_fixture_section(wire_type: i64, flags: i64, offset: i64, size: i64, alignment: i64) -> [u8]:
+    var out: [u8] = [wire_type as u8, 0 as u8, 0 as u8, 0 as u8]
+    out = _dynsmf_fixture_append_u32(out, flags)
+    out = _dynsmf_fixture_append_u64(out, offset)
+    out = _dynsmf_fixture_append_u64(out, size)
+    out = _dynsmf_fixture_append_u64(out, size)
+    out = _dynsmf_fixture_append_u64(out, alignment)
+    while out.len() < 64:
+        out.push(0 as u8)
+    out
+
+fn _dynsmf_fixture_symbol(code_size: i64) -> [u8]:
+    var out: [u8] = []
+    out = _dynsmf_fixture_append_u32(out, 1)
+    out = _dynsmf_fixture_append_u32(out, 0)
+    out.push(0 as u8)
+    out.push(1 as u8)
+    while out.len() < 16:
+        out.push(0 as u8)
+    out = _dynsmf_fixture_append_u64(out, 0)
+    out = _dynsmf_fixture_append_u64(out, code_size)
+    while out.len() < 56:
+        out.push(0 as u8)
+    out
+
+fn _dynsmf_fixture_header(section_table: i64, symbol_table: i64) -> [u8]:
+    var out: [u8] = [83 as u8, 77 as u8, 70 as u8, 0 as u8, 1 as u8, 1 as u8, 1 as u8, 0 as u8]
+    out = _dynsmf_fixture_append_u32(out, 0x21)
+    out = _dynsmf_fixture_append(out, [0 as u8, 0 as u8, 0 as u8, 0 as u8])
+    out = _dynsmf_fixture_append_u32(out, 2)
+    out = _dynsmf_fixture_append_u64(out, section_table)
+    out = _dynsmf_fixture_append_u64(out, symbol_table)
+    out = _dynsmf_fixture_append_u32(out, 1)
+    out = _dynsmf_fixture_append_u32(out, 1)
+    out = _dynsmf_fixture_append_u64(out, 0)
+    out = _dynsmf_fixture_append_u32(out, 0)
+    out = _dynsmf_fixture_append_u32(out, 0)
+    while out.len() < 128:
+        out.push(0 as u8)
+    out
+
+fn _dynsmf_fixture_outer_smf(pack_bytes: [u8], export_symbol: text) -> [u8]:
+    var out: [u8] = [195 as u8]
+    while out.len() % 8 != 0:
+        out.push(0 as u8)
+    val pack_offset = out.len()
+    out = _dynsmf_fixture_append(out, pack_bytes)
+    val section_table = out.len()
+    out = _dynsmf_fixture_append(out, _dynsmf_fixture_section(1, 5, 0, 1, 16))
+    out = _dynsmf_fixture_append(out, _dynsmf_fixture_section(16, 1, pack_offset, pack_bytes.len(), 8))
+    val symbol_table = out.len()
+    out = _dynsmf_fixture_append(out, _dynsmf_fixture_symbol(1))
+    out.push(0 as u8)
+    var char_index = 0
+    while char_index < export_symbol.len():
+        out.push(char_code(export_symbol.char_at(char_index)) as u8)
+        char_index = char_index + 1
+    out.push(0 as u8)
+    _dynsmf_fixture_append(out, _dynsmf_fixture_header(section_table, symbol_table))
+
+fn dynsmf_admitted_startup_fixture(library_id: text, path: text, source_module: text, abi_version: text, export_symbol: text, default_autoload: bool) -> DynSmfAdmittedStartupFixture:
+    val facet_id = "startup/" + library_id
+    val module_id = library_id + ".module"
+    val modules = [
+        ApkModuleSourceV2(
+            module_id: module_id,
+            aspect_id: "startup.aspect",
+            module_abi_hash: "startup-module-abi",
+            required_core_public_abi_hash: "startup-core-abi",
+            variant_fingerprint: "startup-test",
+            payload: [1 as u8, 2 as u8, 3 as u8]
+        )
+    ]
+    val pack_bytes = apk_build_pack_v2(modules).bytes
+    val artifact_bytes = _dynsmf_fixture_outer_smf(pack_bytes, export_symbol)
+    val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(artifact_bytes)
+    val manifest = [
+        DynSmfManifestEntry(
+            id: library_id,
+            path: path,
+            source_module: source_module,
+            artifact_kind: "precompiled_smf",
+            abi_version: abi_version,
+            default_autoload: default_autoload,
+            exports: [export_symbol]
+        )
+    ]
+    val entries = [
+        AspectCatalogEntry(
+            descriptor: AspectFacetDescriptor(
+                facet_id: facet_id,
+                export_symbol: export_symbol,
+                interface_abi_hash: "startup-facet-abi"
+            ),
+            binding: AspectPackBinding(
+                facet_id: facet_id,
+                aspect_id: "startup.aspect",
+                library_id: library_id,
+                library_path: path,
+                library_abi_version: abi_version,
+                module_id: module_id,
+                module_abi_hash: "startup-module-abi",
+                pack_content_hash: parsed.directory.content_hash,
+                placement: "dynamic"
+            )
+        )
+    ]
+    val built_catalog = aspect_catalog_build(entries)
+    val artifact = AspectPackArtifactIdentity(
+        library_id: library_id,
+        path: path,
+        content_hash: sha256_u8_hex(artifact_bytes)
+    )
+    val contracts = [
+        AspectPackExportContract(
+            library_id: library_id,
+            export_symbol: export_symbol,
+            interface_abi_hash: "startup-facet-abi"
+        )
+    ]
+    val request = AspectPackLookupRequest(
+        directory: parsed.directory,
+        catalog: built_catalog.catalog,
+        manifest: manifest,
+        artifact: artifact,
+        export_contracts: contracts,
+        facet_id: facet_id
+    )
+    DynSmfAdmittedStartupFixture(artifact_bytes: artifact_bytes, manifest: manifest, request: request)
+
+export DynSmfAdmittedStartupFixture, dynsmf_admitted_startup_fixture

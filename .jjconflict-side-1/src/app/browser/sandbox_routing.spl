@@ -1,0 +1,66 @@
+# Browser sandbox worker routing capability.
+#
+# Problem 3 of
+# doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md
+# is that the in-process browser evaluates page script in the HOST process. The
+# jailed path exists — hosted_browser_renderer_worker.spl calls
+# rt_browser_renderer_sandbox_enter — but reaching it needs a worker-capable
+# EXECUTABLE to re-exec, and this app's own binary is not one.
+#
+# Why not simply dispatch the worker from the CLI entry: the worker arg is
+# handled only at src/os/hosted/hosted_entry.spl:285, so adding it to the CLI
+# would import os.hosted.hosted_browser_renderer_worker into the closure of
+# EVERY `simple` invocation — the hub-import/startup-cost anti-pattern this
+# repo polices (doc/07_guide/app/mcp/startup_performance.md, `simple deps`
+# exclusive-column rule). That is a real design decision with startup
+# consequences, not a wiring detail, so it is left to its owner.
+#
+# Instead the worker executable is OPERATOR-SUPPLIED and the capability is
+# PROBED, never assumed:
+#
+#   SIMPLE_BROWSER_RENDERER_WORKER=/path/to/worker-capable-binary
+#
+# The probe is fail-closed at every step: unset -> unavailable; set but
+# missing on disk -> unavailable. Unavailable keeps the existing honest
+# refusal in main.spl (a sandbox request exits 1) rather than rendering
+# unjailed. There is no path here that turns a failed probe into a render.
+
+use std.io_runtime.{env_get, file_exists}
+
+pub val BROWSER_SANDBOX_WORKER_ENV: text = "SIMPLE_BROWSER_RENDERER_WORKER"
+
+pub val BROWSER_SANDBOX_ROUTING_UNSET: text = "worker-executable-not-configured"
+pub val BROWSER_SANDBOX_ROUTING_MISSING: text = "worker-executable-not-found"
+pub val BROWSER_SANDBOX_ROUTING_READY: text = "worker-executable-ready"
+
+pub fn browser_sandbox_worker_executable() -> text:
+    """Operator-supplied path to a binary that dispatches the sandboxed
+    renderer worker (i.e. one that handles BROWSER_RENDERER_WORKER_ARG, as
+    src/os/hosted/hosted_entry.spl does). Empty when unset."""
+    env_get(BROWSER_SANDBOX_WORKER_ENV)
+
+pub fn browser_sandbox_routing_reason() -> text:
+    """Why worker routing is or is not available, as a stable machine-readable
+    reason. Fail-closed: only an executable that is configured AND present on
+    disk yields READY. Nothing here infers capability from a name."""
+    val path = browser_sandbox_worker_executable()
+    if path.trim().len() == 0:
+        return BROWSER_SANDBOX_ROUTING_UNSET
+    if not file_exists(path):
+        return BROWSER_SANDBOX_ROUTING_MISSING
+    BROWSER_SANDBOX_ROUTING_READY
+
+pub fn browser_sandbox_routing_probe() -> bool:
+    """True only when a worker-capable executable is configured and present.
+
+    This is deliberately a PROBE rather than a compile-time constant: when the
+    worker executable is supplied the capability appears without editing code,
+    and when it is absent the caller falls back to refusing — never to an
+    unjailed render."""
+    browser_sandbox_routing_reason() == BROWSER_SANDBOX_ROUTING_READY
+
+export BROWSER_SANDBOX_WORKER_ENV
+export BROWSER_SANDBOX_ROUTING_UNSET, BROWSER_SANDBOX_ROUTING_MISSING
+export BROWSER_SANDBOX_ROUTING_READY
+export browser_sandbox_worker_executable, browser_sandbox_routing_reason
+export browser_sandbox_routing_probe

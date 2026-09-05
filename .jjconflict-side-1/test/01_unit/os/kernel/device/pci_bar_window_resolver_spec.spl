@@ -1,0 +1,95 @@
+# @req REQ-001 REQ-003 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/kernel/device/pci_bar_window_resolver.spl 80%
+# @tag: unit, simpleos, kernel, pci, bar, capability
+
+use std.spec.*
+use os.kernel.device.pci_bar_window_resolver.*
+
+fn bar(index: u8, base: u64, size: u64, memory: bool,
+        upper: bool) -> KernelPciBarWindow:
+    KernelPciBarWindow(index: index, physical_base: base, byte_len: size,
+        memory: memory, upper_half: upper)
+
+fn function(present: bool, bars: [KernelPciBarWindow]) -> KernelPciFunctionWindows:
+    KernelPciFunctionWindows(bdf: 0x000102u64, present: present, bars: bars)
+
+fn request(index: u8, offset: u64, size: u64) -> PciBarWindowRequest:
+    PciBarWindowRequest(bdf: 0x000102u64, bar_index: index,
+        byte_offset: offset, byte_len: size)
+
+fn resolve(bars: [KernelPciBarWindow], index: u8, offset: u64,
+        size: u64) -> PciBarWindowResolution:
+    resolve_pci_bar_window([function(true, bars)], request(index, offset, size))
+
+describe "kernel PCI BAR authority window resolver":
+    it "requires exactly one present BDF snapshot":
+        # @covers KBW_BDF:false
+        val missing = resolve_pci_bar_window([], request(0u8, 0u64, 1u64))
+        val absent = resolve_pci_bar_window([function(false, [])], request(0u8, 0u64, 1u64))
+        val duplicate = resolve_pci_bar_window([function(true, []), function(true, [])], request(0u8, 0u64, 1u64))
+        expect(missing.reason).to_equal("blocked:bdf-not-present")
+        expect(absent.reason).to_equal("blocked:bdf-not-present")
+        expect(duplicate.reason).to_equal("blocked:bdf-not-present")
+
+    it "rejects BAR indices outside the conventional header":
+        # @covers KBW_BDF:true KBW_INDEX:false
+        val result = resolve([], 6u8, 0u64, 1u64)
+        expect(result.ok).to_be(false)
+        expect(result.reason).to_equal("blocked:bar-index-out-of-range")
+
+    it "rejects missing and duplicate BAR aperture rows":
+        # @covers KBW_INDEX:true
+        val missing = resolve([], 2u8, 0u64, 1u64)
+        val row = bar(2u8, 0x10000000u64, 0x1000u64, true, false)
+        val duplicate = resolve([row, row], 2u8, 0u64, 1u64)
+        expect(missing.reason).to_equal("blocked:bar-not-implemented")
+        expect(duplicate.reason).to_equal("blocked:bar-not-implemented")
+
+    it "rejects the upper half of a 64-bit BAR":
+        # @covers KBW_KIND:false
+        val result = resolve([bar(3u8, 0u64, 0u64, true, true)], 3u8, 0u64, 1u64)
+        expect(result.reason).to_equal("blocked:bar-index-is-64-bit-upper")
+
+    it "rejects IO BARs":
+        val result = resolve([bar(0u8, 0x1000u64, 0x100u64, false, false)], 0u8, 0u64, 1u64)
+        expect(result.reason).to_equal("blocked:io-bar-unsupported")
+
+    it "rejects unassigned and zero-sized memory BARs":
+        # @covers KBW_KIND:true KBW_APERTURE:false
+        val unassigned = resolve([bar(0u8, 0u64, 0x100u64, true, false)], 0u8, 0u64, 1u64)
+        val zero = resolve([bar(0u8, 0x1000u64, 0u64, true, false)], 0u8, 0u64, 1u64)
+        expect(unassigned.reason).to_equal("blocked:bar-unassigned")
+        expect(zero.reason).to_equal("blocked:bar-size-zero")
+
+    it "rejects empty windows":
+        val result = resolve([bar(0u8, 0x1000u64, 0x100u64, true, false)], 0u8, 0u64, 0u64)
+        expect(result.reason).to_equal("blocked:empty-window")
+
+    it "resolves an exact interior 64-bit BAR subwindow":
+        # @covers KBW_APERTURE:true KBW_CONTAIN:true KBW_PHYS_ADD:true
+        val result = resolve([bar(2u8, 0x120000000u64, 0x2000u64, true, false),
+            bar(3u8, 0u64, 0u64, true, true)], 2u8, 0x800u64, 0x400u64)
+        expect(result.ok).to_be(true)
+        expect(result.reason).to_equal("ok:pci-bar-window")
+        expect(result.physical_base).to_equal(0x120000800u64)
+        expect(result.byte_len).to_equal(0x400u64)
+        expect(result.bar_base).to_equal(0x120000000u64)
+        expect(result.bar_size).to_equal(0x2000u64)
+
+    it "accepts the final byte and BAR indices zero and five":
+        val zero = resolve([bar(0u8, 0x1000u64, 0x100u64, true, false)], 0u8, 0xFFu64, 1u64)
+        val five = resolve([bar(5u8, 0x2000u64, 1u64, true, false)], 5u8, 0u64, 1u64)
+        expect(zero.ok).to_be(true)
+        expect(five.ok).to_be(true)
+
+    it "rejects one-byte escapes and offsets beyond the BAR without underflow":
+        # @covers KBW_CONTAIN:false
+        val escape = resolve([bar(0u8, 0x1000u64, 0x100u64, true, false)], 0u8, 0xFFu64, 2u64)
+        val beyond = resolve([bar(0u8, 0x1000u64, 0x100u64, true, false)], 0u8, 0x101u64, 1u64)
+        expect(escape.reason).to_equal("blocked:window-out-of-range")
+        expect(beyond.reason).to_equal("blocked:window-out-of-range")
+
+    it "rejects physical base plus offset overflow":
+        # @covers KBW_PHYS_ADD:false
+        val result = resolve([bar(0u8, 0xFFFFFFFFFFFFFFF0u64, 0x20u64, true, false)], 0u8, 0x10u64, 1u64)
+        expect(result.reason).to_equal("blocked:physical-range-overflow")

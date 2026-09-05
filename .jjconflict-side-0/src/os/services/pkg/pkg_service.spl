@@ -1,0 +1,186 @@
+# Package Manager IPC Service
+# MDSOC: feature dimension, services layer
+#
+# IPC service on port "pkg"
+# Methods:
+#   1: INSTALL          — install a package by name
+#   2: REMOVE           — remove a package by name
+#   3: UPDATE           — update a package by name
+#   4: LIST_INSTALLED   — list installed package names
+#   5: LIST_AVAILABLE   — list available package names
+#   6: SEARCH           — search packages by query
+#
+# Syscalls used:
+#   22 (IpcCreatePort) — create service IPC port
+#   21 (IpcRecv)       — receive IPC messages
+#   23 (IpcSend)       — send IPC reply
+
+use os.tools.pkg.pkg_manager.{PkgManager}
+use os.tools.pkg.pkg_repository.{fetch_index}
+use os.userlib.syscall_raw.{syscall}
+use os.kernel.log.klog_api.{log_raw_println}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# IPC Method IDs
+# ============================================================================
+
+val PKG_CMD_INSTALL: i32 = 1
+val PKG_CMD_REMOVE: i32 = 2
+val PKG_CMD_UPDATE: i32 = 3
+val PKG_CMD_LIST_INSTALLED: i32 = 4
+val PKG_CMD_LIST_AVAILABLE: i32 = 5
+val PKG_CMD_SEARCH: i32 = 6
+
+# ============================================================================
+# Syscall IDs (keep in sync with launcher.spl)
+# ============================================================================
+
+val SYS_IPC_SEND: u64 = 20
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+val SYS_IPC_CONNECT: u64 = 23
+
+# ============================================================================
+# Module-level PkgManager state
+# ============================================================================
+
+var g_pkg_mgr: PkgManager? = nil
+var g_pkg_initialized: bool = false
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn pkg_service_init():
+    """Initialize the package manager backend. Safe to call on first boot."""
+    var mgr = PkgManager.new()
+    val load_result = mgr.load()
+    match load_result:
+        case Err(e):
+            serial_println("[pkg_service] load warning (empty db ok on first boot): {e}")
+        case Ok(_):
+            serial_println("[pkg_service] package database loaded")
+    g_pkg_mgr = mgr
+    g_pkg_initialized = true
+    serial_println("[pkg_service] initialized")
+
+pub fn pkg_service_install(name: text) -> bool:
+    if g_pkg_initialized == false:
+        serial_println("[pkg_service] install called before init: {name}")
+        return false
+    var mgr = g_pkg_mgr.unwrap()
+    val result = mgr.install(name)
+    g_pkg_mgr = mgr
+    match result:
+        case Ok(_):
+            serial_println("[pkg_service] installed: {name}")
+            return true
+        case Err(e):
+            serial_println("[pkg_service] install failed ({name}): {e}")
+            return false
+
+pub fn pkg_service_remove(name: text) -> bool:
+    if g_pkg_initialized == false:
+        serial_println("[pkg_service] remove called before init: {name}")
+        return false
+    var mgr = g_pkg_mgr.unwrap()
+    val result = mgr.remove(name)
+    g_pkg_mgr = mgr
+    match result:
+        case Ok(_):
+            serial_println("[pkg_service] removed: {name}")
+            return true
+        case Err(e):
+            serial_println("[pkg_service] remove failed ({name}): {e}")
+            return false
+
+pub fn pkg_service_list_installed() -> [text]:
+    if g_pkg_initialized == false:
+        return []
+    val mgr = g_pkg_mgr.unwrap()
+    val manifests = mgr.list_installed()
+    var names: [text] = []
+    for pkg in manifests:
+        names = names.push(pkg.name)
+    names
+
+pub fn pkg_service_list_available() -> [text]:
+    if g_pkg_initialized == false:
+        return []
+    val mgr = g_pkg_mgr.unwrap()
+    var names: [text] = []
+    for repo in mgr.repositories:
+        val idx_result = fetch_index(repo)
+        match idx_result:
+            case Ok(idx):
+                for pkg in idx.packages:
+                    names = names.push(pkg.name)
+            case Err(e):
+                serial_println("[pkg_service] list_available fetch error: {e}")
+    names
+
+pub fn pkg_service_search(query: text) -> [text]:
+    if g_pkg_initialized == false:
+        return []
+    val mgr = g_pkg_mgr.unwrap()
+    val result = mgr.search_available(query)
+    match result:
+        case Ok(manifests):
+            var names: [text] = []
+            for pkg in manifests:
+                names = names.push(pkg.name)
+            return names
+        case Err(e):
+            serial_println("[pkg_service] search error: {e}")
+            return []
+
+# ============================================================================
+# IPC Service Entry Point
+# ============================================================================
+
+pub fn pkg_service_start():
+    """Start pkg IPC service: init backend, create port, enter loop."""
+    pkg_service_init()
+
+    val port_result = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+    if port_result < 0:
+        serial_println("[pkg_service] FATAL: Failed to create IPC port (error {port_result})")
+        return
+
+    val port_handle = port_result as u64
+    serial_println("[pkg_service] Service ready on IPC port (handle={port_handle})")
+
+    _pkg_service_loop(port_handle)
+
+fn _pkg_service_loop(port_handle: u64):
+    serial_println("[pkg_service] Entering service loop...")
+    while true:
+        val msg_result = syscall(SYS_IPC_RECV, port_handle, 0, 0, 0, 0)
+        if msg_result < 0:
+            serial_println("[pkg_service] IPC recv error: {msg_result}")
+            continue
+        val cmd = msg_result.to_i32()
+        if cmd == PKG_CMD_INSTALL:
+            serial_println("[pkg_service] dispatch: INSTALL")
+            pkg_service_install("pending")
+        elif cmd == PKG_CMD_REMOVE:
+            serial_println("[pkg_service] dispatch: REMOVE")
+            pkg_service_remove("pending")
+        elif cmd == PKG_CMD_LIST_INSTALLED:
+            serial_println("[pkg_service] dispatch: LIST_INSTALLED")
+            val items = pkg_service_list_installed()
+            serial_println("[pkg_service] installed count={items.len()}")
+        elif cmd == PKG_CMD_LIST_AVAILABLE:
+            serial_println("[pkg_service] dispatch: LIST_AVAILABLE")
+            val items = pkg_service_list_available()
+            serial_println("[pkg_service] available count={items.len()}")
+        elif cmd == PKG_CMD_SEARCH:
+            serial_println("[pkg_service] dispatch: SEARCH")
+            val items = pkg_service_search("")
+            serial_println("[pkg_service] search results={items.len()}")
+        elif cmd == PKG_CMD_UPDATE:
+            serial_println("[pkg_service] dispatch: UPDATE")
+        else:
+            serial_println("[pkg_service] unknown command: {cmd}")

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Static guard for the syscall-backed clock and progress TLS owner.
+# It proves source authority/call shape, not artifact verification.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source="$root/src/lib/common/time_utils.spl"
+runtime="$root/src/runtime/runtime_time.c"
+
+test "$(grep -Ec '^extern fn rt_(time_now_(unix_micros|nanos|micros|seconds_f64)|progress_)' "$source")" -eq 9
+test "$(grep -Ec '^@unsafe\(' "$source")" -eq 9
+
+raw_calls=$(awk '
+    /unsafe\(capabilities: \[ffi\]\):/ { pending=1; next }
+    pending && /^[[:space:]]+rt_(progress_|time_now_)/ { count++; pending=0; next }
+    pending { pending=0 }
+    END { print count + 0 }
+' "$source")
+test "$raw_calls" -eq 6
+
+grep -Fq 'if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;' "$runtime"
+grep -Fq 'if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;' "$runtime"
+grep -Fq 'return nanos < 0 ? -1 : nanos / 1000;' "$runtime"
+
+if grep -Eq 'rt_alloc|dlsym|CString|HashMap|mutex' "$source"; then
+    echo 'time utilities gained explicit allocation, lookup, or locking' >&2
+    exit 1
+fi
+
+echo 'Time utility SFFI authority: PASS raw_declarations=9 lexical_raw_calls=6 negative_sentinel=retained explicit_alloc_lookup_lock=none'

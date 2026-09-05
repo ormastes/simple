@@ -1,0 +1,109 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.common.gpu.font_atlas_composite.{
+    FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION,
+    font_atlas_composite_cache_identity
+}
+
+fn _identity(material: text, backend: text, device: text, artifact: text, dependency: text) -> text:
+    font_atlas_composite_cache_identity(material, backend, device, artifact, dependency)
+
+describe "font atlas composite cache identity":
+    # @manual scenario evidence
+    it "is stable, target-aware, collision-safe, and fail-closed":
+        # @req REQ-SSPEC-LIB
+        step("is stable, target-aware, collision-safe, and fail-closed")
+        val base = _identity("material", "vulkan", "device", "artifact", "dependency")
+        val semantics = FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION.to_string()
+        expect(FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION).to_equal(2)
+        expect(base).to_equal(_identity("material", "vulkan", "device", "artifact", "dependency"))
+        expect(base).to_contain("|semantics=" + semantics.len().to_string() + ":" + semantics)
+        expect(base == _identity("material-2", "vulkan", "device", "artifact", "dependency")).to_be(false)
+        expect(base == _identity("material", "metal", "device", "artifact", "dependency")).to_be(false)
+        expect(base == _identity("material", "vulkan", "device-2", "artifact", "dependency")).to_be(false)
+        expect(base == _identity("material", "vulkan", "device", "artifact-2", "dependency")).to_be(false)
+        expect(base == _identity("material", "vulkan", "device", "artifact", "dependency-2")).to_be(false)
+        expect(_identity("a|b", "c", "d", "e", "f") == _identity("a", "b|c", "d", "e", "f")).to_be(false)
+        expect(_identity("", "b", "c", "d", "e")).to_equal("")
+        expect(_identity("a", "", "c", "d", "e")).to_equal("")
+        expect(_identity("a", "b", "", "d", "e")).to_equal("")
+        expect(_identity("a", "b", "c", "", "e")).to_equal("")
+        expect(_identity("a", "b", "c", "d", "")).to_equal("")
+
+    it "keeps the six native font targets distinct":
+        # @req REQ-SSPEC-LIB
+        step("keeps the six native font targets distinct")
+        var keys: [text] = []
+        for backend in ["cuda", "metal", "opencl", "rocm", "vulkan2d", "vulkan3d"]:
+            val key = _identity("material", backend, "device", "artifact", "dependency")
+            expect(key).to_contain("|backend=" + backend.len().to_string() + ":" + backend)
+            for prior in keys:
+                expect(key == prior).to_be(false)
+            keys.push(key)
+
+describe "font atlas composite reference pixels":
+    it "rejects invalid dimensions, origins, extents, counts, and storage":
+        expect(font_atlas_subrect_pixels([], 0, 1, 0, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([], 1, 0, 0, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([], 1, 1, 0, 0, 0, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([], 1, 1, 0, 0, 1, 0, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 1, 1, -1, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 1, 1, 0, -1, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 1, 1, 2, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 1, 1, 0, 2, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 2, 2, 1, 0, 2, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 2, 2, 0, 1, 1, 2, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([], 50000, 50000, 0, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 2, 2, 0, 0, 1, 1, 0u32)).to_equal([])
+
+    it "extracts and tints a valid subrectangle with rounded alpha":
+        val atlas: [u32] = [0u32, 0x80000000u32, 0xFF000000u32, 0x40000000u32]
+        val pixels = font_atlas_subrect_pixels(atlas, 2, 2, 0, 0, 2, 2, 0x80A0B0C0u32)
+        expect(pixels.len()).to_equal(4)
+        expect(pixels[0]).to_equal(0u32)
+        expect(pixels[1]).to_equal(0x40A0B0C0u32)
+        expect(pixels[2]).to_equal(0x80A0B0C0u32)
+        expect(pixels[3]).to_equal(0x20A0B0C0u32)
+
+describe "font destination bounds":
+    it "accepts valid origins and rejects every overflow class":
+        expect(font_destination_origin(10, -3, 4)).to_equal(7)
+        expect(font_destination_origin(0, 0, 0)).to_be_nil()
+        expect(font_destination_origin(-2147483648, -1, 1)).to_be_nil()
+        expect(font_destination_origin(2147483647, 1, 1)).to_be_nil()
+        expect(font_destination_origin(2147483647, 0, 2)).to_be_nil()
+
+describe "font atlas backend source ownership":
+    it "pins the program version and entry point":
+        expect(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION).to_equal(1)
+        expect(font_atlas_composite_program_version_valid(1)).to_equal(true)
+        expect(font_atlas_composite_program_version_valid(0)).to_equal(false)
+        expect(FONT_ATLAS_COMPOSITE_ENTRY).to_equal("simple_font_atlas_composite_v1_u32")
+
+    it "emits all backend sources from the shared semantic owner":
+        val opencl = font_atlas_composite_opencl_source()
+        val hip = font_atlas_composite_hip_source()
+        val cuda = font_atlas_composite_cuda_source()
+        val metal = font_atlas_composite_metal_source()
+        val vulkan = font_atlas_composite_vulkan_glsl_source()
+        val legacy = font_atlas_composite_vulkan_legacy_glsl_source()
+        for source in [opencl, hip, cuda, metal, vulkan, legacy]:
+            expect(source.len()).to_be_greater_than(100)
+        for source in [opencl, hip, cuda, metal]:
+            expect(source).to_contain(FONT_ATLAS_COMPOSITE_ENTRY)
+        expect(hip).to_contain("hip/hip_runtime.h")
+        expect(cuda.contains("hip/hip_runtime.h")).to_equal(false)
+        expect(metal).to_contain("metal_stdlib")
+        expect(vulkan).to_contain("void main()")
+        expect(legacy).to_contain("void main()")
+        expect(vulkan).to_contain("gl_GlobalInvocationID.y")
+        expect(legacy).to_contain("gl_GlobalInvocationID.x")

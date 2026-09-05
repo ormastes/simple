@@ -1,0 +1,600 @@
+# SimpleOS evidence receipt v1 — bounded binary codec.
+#
+# The receipt type and validator are frozen in
+# `simpleos_evidence_receipt_v1.spl`; this file owns only their byte-level
+# representation.  Text fields use printable ASCII, length-prefixed by u32.
+# Hash256 fields use the shared 32-byte raw digest primitive.  Every list is
+# count-prefixed and checked against the frozen bound before any element array
+# is allocated.
+
+use std.common.structural.wire.{
+    WIRE_ENVELOPE_LEN,
+    wire_check_envelope,
+    wire_get_u8,
+    wire_get_u32,
+    wire_get_u64,
+    wire_has,
+    wire_magic,
+    wire_put_envelope,
+    wire_put_u8,
+    wire_put_u32,
+    wire_put_u64
+}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.structural.digest.hash256_codec.{
+    hash256_put,
+    hash256_read,
+    hash256_region_valid
+}
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment,
+    SimpleOsEvidenceStepV1,
+    SimpleOsPerformanceSampleV1,
+    SimpleOsEvidenceReceiptV1,
+    simpleos_evidence_receipt_schema_version,
+    simpleos_evidence_max_arguments,
+    simpleos_evidence_max_artifacts,
+    simpleos_evidence_max_steps,
+    simpleos_evidence_max_performance_samples,
+    simpleos_evidence_max_identity_chars,
+    simpleos_evidence_max_argument_chars,
+    simpleos_evidence_max_signature_chars,
+    simpleos_evidence_receipt_validate
+}
+
+val SIMPLEOS_EVIDENCE_RECEIPT_V1_ENVELOPE_LEN: i64 = WIRE_ENVELOPE_LEN
+val SIMPLEOS_EVIDENCE_RECEIPT_V1_HASH_LEN: i64 = 32
+val SIMPLEOS_EVIDENCE_RECEIPT_V1_MAX_WIRE_BYTES: i64 = 2 * 1024 * 1024
+val SIMPLEOS_EVIDENCE_RECEIPT_V1_ASCII: text =
+    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+struct SimpleOsEvidenceReceiptEncodeResult:
+    ok: bool
+    bytes: [u8]
+
+struct SimpleOsEvidenceReceiptDecodeResult:
+    ok: bool
+    value: SimpleOsEvidenceReceiptV1
+
+struct _TextRead:
+    ok: bool
+    value: text
+    next: i64
+
+struct _CountRead:
+    ok: bool
+    value: i64
+    next: i64
+
+struct _HashRead:
+    ok: bool
+    value: text
+    next: i64
+
+fn simpleos_evidence_receipt_v1_magic() -> i64:
+    wire_magic("SOER")
+
+fn _zero_receipt() -> SimpleOsEvidenceReceiptV1:
+    SimpleOsEvidenceReceiptV1(
+        schema_version: 0,
+        receipt_id: "",
+        nonce: "",
+        requirement_id: "",
+        capability: "",
+        target: "",
+        target_abi: "",
+        environment: SimpleOsEvidenceEnvironment.QemuSystem,
+        firmware_profile: "",
+        board_identity: "",
+        accelerator: "",
+        filesystem: "",
+        protocol_profile: "",
+        source_hash: "",
+        image_hash: "",
+        binary_hash: "",
+        config_hash: "",
+        exact_argv: [],
+        artifact_hashes: [],
+        steps: [],
+        performance_workload: "",
+        performance_unit: "",
+        performance_warmup_count: 0,
+        performance_cpu_identity: "",
+        performance_frequency_hz: 0,
+        performance_noise_profile: "",
+        performance_comparable: false,
+        performance_samples: [],
+        started_unix_us: 0,
+        finished_unix_us: 0,
+        owner: "",
+        reviewer: "",
+        signer_key_id: "",
+        signature: ""
+    )
+
+fn _encode_reject() -> SimpleOsEvidenceReceiptEncodeResult:
+    SimpleOsEvidenceReceiptEncodeResult(ok: false, bytes: [])
+
+fn _decode_reject() -> SimpleOsEvidenceReceiptDecodeResult:
+    SimpleOsEvidenceReceiptDecodeResult(ok: false, value: _zero_receipt())
+
+fn _environment_valid(v: SimpleOsEvidenceEnvironment) -> bool:
+    match v:
+        case SimpleOsEvidenceEnvironment.QemuSystem: true
+        case SimpleOsEvidenceEnvironment.NativeHost: true
+        case SimpleOsEvidenceEnvironment.PhysicalBoard: true
+
+fn _environment_to_wire(v: SimpleOsEvidenceEnvironment) -> i64:
+    match v:
+        case SimpleOsEvidenceEnvironment.QemuSystem: 0
+        case SimpleOsEvidenceEnvironment.NativeHost: 1
+        case SimpleOsEvidenceEnvironment.PhysicalBoard: 2
+
+fn _environment_from_wire(v: i64) -> SimpleOsEvidenceEnvironment:
+    if v == 1:
+        return SimpleOsEvidenceEnvironment.NativeHost
+    if v == 2:
+        return SimpleOsEvidenceEnvironment.PhysicalBoard
+    SimpleOsEvidenceEnvironment.QemuSystem
+
+fn _text_valid(s: text, max_bytes: i64) -> bool:
+    if s.len() > max_bytes:
+        return false
+    var i = 0
+    while i < s.len():
+        val c = s.char_code_at(i)
+        if c < 32 or c > 126:
+            return false
+        i = i + 1
+    true
+
+fn _text_put(out: [u8], s: text) -> [u8]:
+    var b = wire_put_u32(out, s.len())
+    var i = 0
+    while i < s.len():
+        b = wire_put_u8(b, s.char_code_at(i))
+        i = i + 1
+    b
+
+fn _text_from_code(c: i64) -> text:
+    if c < 32 or c > 126:
+        return ""
+    SIMPLEOS_EVIDENCE_RECEIPT_V1_ASCII.substring(c - 32, c - 31)
+
+fn _text_read(data: [u8], off: i64, max_bytes: i64) -> _TextRead:
+    if not wire_has(data, off, 4):
+        return _TextRead(ok: false, value: "", next: off)
+    val n = wire_get_u32(data, off)
+    if n < 0 or n > max_bytes:
+        return _TextRead(ok: false, value: "", next: off)
+    if not wire_has(data, off + 4, n):
+        return _TextRead(ok: false, value: "", next: off)
+    var i = 0
+    while i < n:
+        val c = data[off + 4 + i] & 0xFF
+        if c < 32 or c > 126:
+            return _TextRead(ok: false, value: "", next: off)
+        i = i + 1
+    var value = ""
+    i = 0
+    while i < n:
+        value = value + _text_from_code(data[off + 4 + i] & 0xFF)
+        i = i + 1
+    _TextRead(ok: true, value: value, next: off + 4 + n)
+
+fn _count_read(data: [u8], off: i64, max_count: i64, min_element_bytes: i64) -> _CountRead:
+    if not wire_has(data, off, 4):
+        return _CountRead(ok: false, value: 0, next: off)
+    val n = wire_get_u32(data, off)
+    if n < 0 or n > max_count:
+        return _CountRead(ok: false, value: 0, next: off)
+    val remain = data.len() - (off + 4)
+    if remain < 0:
+        return _CountRead(ok: false, value: 0, next: off)
+    if min_element_bytes > 0 and n > remain / min_element_bytes:
+        return _CountRead(ok: false, value: 0, next: off)
+    _CountRead(ok: true, value: n, next: off + 4)
+
+fn _hash_read(data: [u8], off: i64) -> _HashRead:
+    if not hash256_region_valid(data, off):
+        return _HashRead(ok: false, value: "", next: off)
+    _HashRead(ok: true, value: hash256_read(data, off), next: off + SIMPLEOS_EVIDENCE_RECEIPT_V1_HASH_LEN)
+
+fn _identity_texts_valid(r: SimpleOsEvidenceReceiptV1) -> bool:
+    (
+        _text_valid(r.receipt_id, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.nonce, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.requirement_id, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.capability, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.target, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.target_abi, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.firmware_profile, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.board_identity, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.accelerator, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.filesystem, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.protocol_profile, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.performance_workload, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.performance_unit, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.performance_cpu_identity, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.performance_noise_profile, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.owner, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.reviewer, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.signer_key_id, simpleos_evidence_max_identity_chars()) and
+        _text_valid(r.signature, simpleos_evidence_max_signature_chars())
+    )
+
+fn _arguments_valid(values: [text]) -> bool:
+    if values.len() > simpleos_evidence_max_arguments():
+        return false
+    var i = 0
+    while i < values.len():
+        if not _text_valid(values[i], simpleos_evidence_max_argument_chars()):
+            return false
+        i = i + 1
+    true
+
+fn _steps_text_valid(values: [SimpleOsEvidenceStepV1]) -> bool:
+    if values.len() > simpleos_evidence_max_steps():
+        return false
+    var i = 0
+    while i < values.len():
+        if not _text_valid(values[i].behavior_id, simpleos_evidence_max_identity_chars()):
+            return false
+        if not _text_valid(values[i].outcome, simpleos_evidence_max_identity_chars()):
+            return false
+        i = i + 1
+    true
+
+fn _receipt_codec_valid(r: SimpleOsEvidenceReceiptV1) -> bool:
+    val check = simpleos_evidence_receipt_validate(r)
+    if not check.ok:
+        return false
+    if not _environment_valid(r.environment):
+        return false
+    if not _identity_texts_valid(r):
+        return false
+    if not _arguments_valid(r.exact_argv):
+        return false
+    if r.artifact_hashes.len() > simpleos_evidence_max_artifacts():
+        return false
+    if not _steps_text_valid(r.steps):
+        return false
+    if r.performance_samples.len() > simpleos_evidence_max_performance_samples():
+        return false
+    var i = 0
+    while i < r.artifact_hashes.len():
+        if not hash256_hex_valid(r.artifact_hashes[i]):
+            return false
+        i = i + 1
+    true
+
+fn _put_hash(out: [u8], value: text) -> [u8]:
+    hash256_put(out, value)
+
+fn _put_steps(out: [u8], values: [SimpleOsEvidenceStepV1]) -> [u8]:
+    var b = wire_put_u32(out, values.len())
+    var i = 0
+    while i < values.len():
+        val value = values[i]
+        b = wire_put_u64(b, value.sequence)
+        b = _text_put(b, value.behavior_id)
+        b = _text_put(b, value.outcome)
+        b = wire_put_u64(b, value.exit_code)
+        b = _put_hash(b, value.artifact_hash)
+        i = i + 1
+    b
+
+fn _put_samples(out: [u8], values: [SimpleOsPerformanceSampleV1]) -> [u8]:
+    var b = wire_put_u32(out, values.len())
+    var i = 0
+    while i < values.len():
+        val value = values[i]
+        b = wire_put_u64(b, value.sequence)
+        b = wire_put_u64(b, value.metric_value_milli)
+        b = wire_put_u64(b, value.elapsed_us)
+        b = wire_put_u64(b, value.max_rss_bytes)
+        i = i + 1
+    b
+
+fn _encode_receipt_fields(r: SimpleOsEvidenceReceiptV1, include_signature: bool) -> [u8]:
+    var b: [u8] = []
+    b = wire_put_envelope(b, simpleos_evidence_receipt_v1_magic(),
+                          simpleos_evidence_receipt_schema_version())
+    b = _text_put(b, r.receipt_id)
+    b = _text_put(b, r.nonce)
+    b = _text_put(b, r.requirement_id)
+    b = _text_put(b, r.capability)
+    b = _text_put(b, r.target)
+    b = _text_put(b, r.target_abi)
+    b = wire_put_u8(b, _environment_to_wire(r.environment))
+    b = _text_put(b, r.firmware_profile)
+    b = _text_put(b, r.board_identity)
+    b = _text_put(b, r.accelerator)
+    b = _text_put(b, r.filesystem)
+    b = _text_put(b, r.protocol_profile)
+    b = _put_hash(b, r.source_hash)
+    b = _put_hash(b, r.image_hash)
+    b = _put_hash(b, r.binary_hash)
+    b = _put_hash(b, r.config_hash)
+    b = wire_put_u32(b, r.exact_argv.len())
+    var i = 0
+    while i < r.exact_argv.len():
+        b = _text_put(b, r.exact_argv[i])
+        i = i + 1
+    b = wire_put_u32(b, r.artifact_hashes.len())
+    i = 0
+    while i < r.artifact_hashes.len():
+        b = _put_hash(b, r.artifact_hashes[i])
+        i = i + 1
+    b = _put_steps(b, r.steps)
+    b = _text_put(b, r.performance_workload)
+    b = _text_put(b, r.performance_unit)
+    b = wire_put_u64(b, r.performance_warmup_count)
+    b = _text_put(b, r.performance_cpu_identity)
+    b = wire_put_u64(b, r.performance_frequency_hz)
+    b = _text_put(b, r.performance_noise_profile)
+    if r.performance_comparable:
+        b = wire_put_u8(b, 1)
+    else:
+        b = wire_put_u8(b, 0)
+    b = _put_samples(b, r.performance_samples)
+    b = wire_put_u64(b, r.started_unix_us)
+    b = wire_put_u64(b, r.finished_unix_us)
+    b = _text_put(b, r.owner)
+    b = _text_put(b, r.reviewer)
+    b = _text_put(b, r.signer_key_id)
+    if include_signature:
+        b = _text_put(b, r.signature)
+    b
+
+fn encode_simpleos_evidence_receipt_v1(r: SimpleOsEvidenceReceiptV1) -> SimpleOsEvidenceReceiptEncodeResult:
+    if not _receipt_codec_valid(r):
+        return _encode_reject()
+    val b = _encode_receipt_fields(r, true)
+    if b.len() > SIMPLEOS_EVIDENCE_RECEIPT_V1_MAX_WIRE_BYTES:
+        return _encode_reject()
+    SimpleOsEvidenceReceiptEncodeResult(ok: true, bytes: b)
+
+fn encode_simpleos_evidence_receipt_v1_signing_bytes(
+    r: SimpleOsEvidenceReceiptV1
+) -> SimpleOsEvidenceReceiptEncodeResult:
+    """Canonical signature input: the full v1 envelope and every bound field
+    through signer_key_id, with the signature field itself omitted."""
+    var signable = r
+    signable.signature = "unsigned"
+    if not _receipt_codec_valid(signable):
+        return _encode_reject()
+    val b = _encode_receipt_fields(r, false)
+    if b.len() > SIMPLEOS_EVIDENCE_RECEIPT_V1_MAX_WIRE_BYTES:
+        return _encode_reject()
+    SimpleOsEvidenceReceiptEncodeResult(ok: true, bytes: b)
+
+fn _read_steps(data: [u8], off: i64) -> (bool, [SimpleOsEvidenceStepV1], i64):
+    val count = _count_read(data, off, simpleos_evidence_max_steps(), 56)
+    if not count.ok:
+        return (false, [], off)
+    var values: [SimpleOsEvidenceStepV1] = []
+    var cursor = count.next
+    var i = 0
+    while i < count.value:
+        if not wire_has(data, cursor, 8):
+            return (false, [], off)
+        val sequence = wire_get_u64(data, cursor)
+        cursor = cursor + 8
+        val behavior = _text_read(data, cursor, simpleos_evidence_max_identity_chars())
+        if not behavior.ok:
+            return (false, [], off)
+        cursor = behavior.next
+        val outcome = _text_read(data, cursor, simpleos_evidence_max_identity_chars())
+        if not outcome.ok:
+            return (false, [], off)
+        cursor = outcome.next
+        if not wire_has(data, cursor, 8):
+            return (false, [], off)
+        val exit_code = wire_get_u64(data, cursor)
+        cursor = cursor + 8
+        val artifact = _hash_read(data, cursor)
+        if not artifact.ok:
+            return (false, [], off)
+        cursor = artifact.next
+        values.push(SimpleOsEvidenceStepV1(
+            sequence: sequence,
+            behavior_id: behavior.value,
+            outcome: outcome.value,
+            exit_code: exit_code,
+            artifact_hash: artifact.value))
+        i = i + 1
+    (true, values, cursor)
+
+fn _read_samples(data: [u8], off: i64) -> (bool, [SimpleOsPerformanceSampleV1], i64):
+    val count = _count_read(data, off, simpleos_evidence_max_performance_samples(), 32)
+    if not count.ok:
+        return (false, [], off)
+    var values: [SimpleOsPerformanceSampleV1] = []
+    var cursor = count.next
+    var i = 0
+    while i < count.value:
+        if not wire_has(data, cursor, 32):
+            return (false, [], off)
+        values.push(SimpleOsPerformanceSampleV1(
+            sequence: wire_get_u64(data, cursor),
+            metric_value_milli: wire_get_u64(data, cursor + 8),
+            elapsed_us: wire_get_u64(data, cursor + 16),
+            max_rss_bytes: wire_get_u64(data, cursor + 24)))
+        cursor = cursor + 32
+        i = i + 1
+    (true, values, cursor)
+
+fn decode_simpleos_evidence_receipt_v1(data: [u8]) -> SimpleOsEvidenceReceiptDecodeResult:
+    if data.len() > SIMPLEOS_EVIDENCE_RECEIPT_V1_MAX_WIRE_BYTES:
+        return _decode_reject()
+    if not wire_check_envelope(data, 0, simpleos_evidence_receipt_v1_magic(),
+                               simpleos_evidence_receipt_schema_version()):
+        return _decode_reject()
+    var off = WIRE_ENVELOPE_LEN
+    val receipt_id = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not receipt_id.ok: return _decode_reject()
+    off = receipt_id.next
+    val nonce = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not nonce.ok: return _decode_reject()
+    off = nonce.next
+    val requirement_id = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not requirement_id.ok: return _decode_reject()
+    off = requirement_id.next
+    val capability = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not capability.ok: return _decode_reject()
+    off = capability.next
+    val target = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not target.ok: return _decode_reject()
+    off = target.next
+    val target_abi = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not target_abi.ok: return _decode_reject()
+    off = target_abi.next
+    if not wire_has(data, off, 1): return _decode_reject()
+    val raw_environment = wire_get_u8(data, off)
+    if raw_environment < 0 or raw_environment > 2: return _decode_reject()
+    val environment = _environment_from_wire(raw_environment)
+    off = off + 1
+    val firmware = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not firmware.ok: return _decode_reject()
+    off = firmware.next
+    val board = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not board.ok: return _decode_reject()
+    off = board.next
+    val accelerator = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not accelerator.ok: return _decode_reject()
+    off = accelerator.next
+    val filesystem = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not filesystem.ok: return _decode_reject()
+    off = filesystem.next
+    val protocol = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not protocol.ok: return _decode_reject()
+    off = protocol.next
+    val source = _hash_read(data, off)
+    if not source.ok: return _decode_reject()
+    off = source.next
+    val image = _hash_read(data, off)
+    if not image.ok: return _decode_reject()
+    off = image.next
+    val binary = _hash_read(data, off)
+    if not binary.ok: return _decode_reject()
+    off = binary.next
+    val config = _hash_read(data, off)
+    if not config.ok: return _decode_reject()
+    off = config.next
+    val argv_count = _count_read(data, off, simpleos_evidence_max_arguments(), 4)
+    if not argv_count.ok: return _decode_reject()
+    off = argv_count.next
+    var exact_argv: [text] = []
+    var i = 0
+    while i < argv_count.value:
+        val arg = _text_read(data, off, simpleos_evidence_max_argument_chars())
+        if not arg.ok: return _decode_reject()
+        exact_argv.push(arg.value)
+        off = arg.next
+        i = i + 1
+    val artifact_count = _count_read(data, off, simpleos_evidence_max_artifacts(), SIMPLEOS_EVIDENCE_RECEIPT_V1_HASH_LEN)
+    if not artifact_count.ok: return _decode_reject()
+    off = artifact_count.next
+    var artifact_hashes: [text] = []
+    i = 0
+    while i < artifact_count.value:
+        val artifact = _hash_read(data, off)
+        if not artifact.ok: return _decode_reject()
+        artifact_hashes.push(artifact.value)
+        off = artifact.next
+        i = i + 1
+    val steps = _read_steps(data, off)
+    if not steps[0]: return _decode_reject()
+    off = steps[2]
+    val performance_workload = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not performance_workload.ok: return _decode_reject()
+    off = performance_workload.next
+    val performance_unit = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not performance_unit.ok: return _decode_reject()
+    off = performance_unit.next
+    if not wire_has(data, off, 8): return _decode_reject()
+    val performance_warmup_count = wire_get_u64(data, off)
+    off = off + 8
+    val performance_cpu_identity = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not performance_cpu_identity.ok: return _decode_reject()
+    off = performance_cpu_identity.next
+    if not wire_has(data, off, 8): return _decode_reject()
+    val performance_frequency_hz = wire_get_u64(data, off)
+    off = off + 8
+    val performance_noise_profile = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not performance_noise_profile.ok: return _decode_reject()
+    off = performance_noise_profile.next
+    if not wire_has(data, off, 1): return _decode_reject()
+    val raw_performance_comparable = wire_get_u8(data, off)
+    if raw_performance_comparable > 1: return _decode_reject()
+    val performance_comparable = raw_performance_comparable == 1
+    off = off + 1
+    val samples = _read_samples(data, off)
+    if not samples[0]: return _decode_reject()
+    off = samples[2]
+    if not wire_has(data, off, 16): return _decode_reject()
+    val started = wire_get_u64(data, off)
+    val finished = wire_get_u64(data, off + 8)
+    off = off + 16
+    val owner = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not owner.ok: return _decode_reject()
+    off = owner.next
+    val reviewer = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not reviewer.ok: return _decode_reject()
+    off = reviewer.next
+    val signer = _text_read(data, off, simpleos_evidence_max_identity_chars())
+    if not signer.ok: return _decode_reject()
+    off = signer.next
+    val signature = _text_read(data, off, simpleos_evidence_max_signature_chars())
+    if not signature.ok: return _decode_reject()
+    off = signature.next
+    if off != data.len(): return _decode_reject()
+    val receipt = SimpleOsEvidenceReceiptV1(
+        schema_version: simpleos_evidence_receipt_schema_version(),
+        receipt_id: receipt_id.value,
+        nonce: nonce.value,
+        requirement_id: requirement_id.value,
+        capability: capability.value,
+        target: target.value,
+        target_abi: target_abi.value,
+        environment: environment,
+        firmware_profile: firmware.value,
+        board_identity: board.value,
+        accelerator: accelerator.value,
+        filesystem: filesystem.value,
+        protocol_profile: protocol.value,
+        source_hash: source.value,
+        image_hash: image.value,
+        binary_hash: binary.value,
+        config_hash: config.value,
+        exact_argv: exact_argv,
+        artifact_hashes: artifact_hashes,
+        steps: steps[1],
+        performance_workload: performance_workload.value,
+        performance_unit: performance_unit.value,
+        performance_warmup_count: performance_warmup_count,
+        performance_cpu_identity: performance_cpu_identity.value,
+        performance_frequency_hz: performance_frequency_hz,
+        performance_noise_profile: performance_noise_profile.value,
+        performance_comparable: performance_comparable,
+        performance_samples: samples[1],
+        started_unix_us: started,
+        finished_unix_us: finished,
+        owner: owner.value,
+        reviewer: reviewer.value,
+        signer_key_id: signer.value,
+        signature: signature.value)
+    if not simpleos_evidence_receipt_validate(receipt).ok:
+        return _decode_reject()
+    SimpleOsEvidenceReceiptDecodeResult(ok: true, value: receipt)
+
+export SIMPLEOS_EVIDENCE_RECEIPT_V1_ENVELOPE_LEN,
+    SIMPLEOS_EVIDENCE_RECEIPT_V1_HASH_LEN,
+    SIMPLEOS_EVIDENCE_RECEIPT_V1_MAX_WIRE_BYTES,
+    SimpleOsEvidenceReceiptEncodeResult,
+    SimpleOsEvidenceReceiptDecodeResult,
+    simpleos_evidence_receipt_v1_magic,
+    encode_simpleos_evidence_receipt_v1,
+    encode_simpleos_evidence_receipt_v1_signing_bytes,
+    decode_simpleos_evidence_receipt_v1

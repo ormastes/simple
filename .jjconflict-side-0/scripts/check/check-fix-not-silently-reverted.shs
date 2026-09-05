@@ -1,0 +1,170 @@
+#!/bin/sh
+# check-fix-not-silently-reverted.shs
+#
+# CLASS DETECTOR for the defect found 2026-08-17 (triage shard A6):
+# a landed fix is wholesale REVERTED by a later commit that claims to do
+# something else, and every existing pre-push guard passes because the tree
+# stays structurally perfect — right file count, no conflict markers, no
+# rt_* symbol loss, and it still compiles.
+#
+# Real instance: `2a240d9b0b2` (fix(jit): i64 >= 2^60 ...) was undone in full by
+# `e14a2ffb4df` (fix(backend,mir): three fail-open sites ...), which also deleted
+# `src/compiler/35.semantics/lint/silent_default.spl` (341 lines) and gutted
+# `scripts/check/check-engine-differential.shs` (411 lines) — three separate
+# sessions' work, none of it mentioned in the commit message.
+#
+# MECHANISM (deliberately content-based, never SHA-ancestry — see
+# .claude/rules/vcs.md: rebasing rewrites SHAs, so ancestry proves nothing):
+# for each commit C in the range, and for each file C touches, compare C's blob
+# for that file against the blob at every EARLIER commit in the range. If C's
+# content for a file is byte-identical to a version that some intermediate
+# commit had already moved past, C rewound that file. That is the signature the
+# blob-vs-one-prior-commit revert guard misses, because it is a rewind to an
+# older state reached through an unrelated commit message.
+#
+# Verdict is the LAST line of stdout, per repo convention:
+#   PASS  — <n> commit(s) checked, 0 rewound file(s)          exit 0
+#   FAIL  — <n> commit(s) checked, <k> rewound file(s): ...   exit 1
+#   ERROR — nothing was checked                               exit 2
+# A range that resolves to 0 commits is ERROR, never a vacuous pass.
+#
+# Usage:
+#   sh scripts/check/check-fix-not-silently-reverted.shs [BASE..NEW]
+#   sh scripts/check/check-fix-not-silently-reverted.shs --selftest
+
+set -u
+
+SELFTEST=0
+RANGE=""
+for a in "$@"; do
+    case "$a" in
+        --selftest) SELFTEST=1 ;;
+        *..*) RANGE="$a" ;;
+        *) echo "FAIL — bare revision '$a' rejected; pass an explicit BASE..NEW range"; exit 1 ;;
+    esac
+done
+
+scan_range() {
+    _range="$1"
+    _root="$2"
+    _commits=$(git -C "$_root" rev-list --reverse "$_range" 2>/dev/null)
+    if [ -z "$_commits" ]; then
+        EV_CHECKED=0
+        return 0
+    fi
+    EV_CHECKED=0
+    REWOUND=""
+    for c in $_commits; do
+        EV_CHECKED=$((EV_CHECKED + 1))
+        files=$(git -C "$_root" diff-tree --no-commit-id --name-only -r "$c")
+        for f in $files; do
+            cur=$(git -C "$_root" rev-parse "$c:$f" 2>/dev/null) || continue
+            # every earlier commit in range that also touched this file
+            for p in $_commits; do
+                [ "$p" = "$c" ] && break
+                git -C "$_root" diff-tree --no-commit-id --name-only -r "$p" \
+                    | grep -qx "$f" || continue
+                # Line-level, NOT blob-equality: a stale-snapshot clobber is
+                # rarely byte-identical to the pre-fix blob (it carries the
+                # clobberer's own unrelated edits too), so an exact-blob test
+                # reports a false PASS on the real incident. Instead: of the
+                # lines p ADDED to f, how many does c DELETE? A revert removes
+                # essentially all of them.
+                _ta="${TMPDIR:-/tmp}/.fnsr_added.$$"
+                _tr="${TMPDIR:-/tmp}/.fnsr_removed.$$"
+                git -C "$_root" show -U0 --format= "$p" -- "$f" 2>/dev/null \
+                    | sed -n 's/^+//p' | grep -v '^++' | sed '/^[[:space:]]*$/d' | sort -u > "$_ta"
+                git -C "$_root" show -U0 --format= "$c" -- "$f" 2>/dev/null \
+                    | sed -n 's/^-//p' | grep -v '^--' | sed '/^[[:space:]]*$/d' | sort -u > "$_tr"
+                n_added=$(wc -l < "$_ta" | tr -d ' ')
+                n_gone=$(comm -12 "$_ta" "$_tr" | wc -l | tr -d ' ')
+                rm -f "$_ta" "$_tr"
+                [ "$n_added" -ge 5 ] || continue
+                # >=80% of the earlier commit's added lines deleted again
+                if [ $((n_gone * 100)) -ge $((n_added * 80)) ]; then
+                    case " $REWOUND " in
+                        *" $f "*) ;;
+                        *) REWOUND="$REWOUND $f" ;;
+                    esac
+                fi
+            done
+        done
+    done
+    return 0
+}
+
+if [ "$SELFTEST" = "1" ]; then
+    # Fixture 1: A adds a fix, B reverts it under an unrelated message -> must FAIL.
+    # Fixture 2: A adds a fix, B extends it -> must PASS.
+    # Fixture 3: empty range -> EV_CHECKED must be 0 so caller reports ERROR.
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    fails=0
+
+    mk() {
+        d="$1"
+        git -C "$d" init -q 2>/dev/null
+        git -C "$d" config user.email t@t; git -C "$d" config user.name t
+    }
+
+    d1="$tmp/revert"; mkdir -p "$d1"; mk "$d1"
+    printf 'fn from_int(i){\n  return i<<3\n}\n' > "$d1/core.rs"
+    git -C "$d1" add core.rs >/dev/null; git -C "$d1" commit -qm base
+    BASE1=$(git -C "$d1" rev-parse HEAD)
+    printf 'fn fits_inline(i){\n  return (i<<3)>>3 == i\n}\nfn from_wide(i){\n  return heap_box(i)\n}\nfn from_int(i){\n  if fits_inline(i) { return i<<3 }\n  return from_wide(i)\n}\n' > "$d1/core.rs"
+    git -C "$d1" add core.rs >/dev/null; git -C "$d1" commit -qm "fix(jit): wide ints"
+    # stale-snapshot clobber: pre-fix body PLUS an unrelated edit of its own,
+    # so it is NOT byte-identical to the pre-fix blob (the real incident's shape)
+    printf 'fn from_int(i){\n  return i<<3\n}\nfn unrelated_helper(){\n  return 0\n}\n' > "$d1/core.rs"
+    git -C "$d1" add core.rs >/dev/null; git -C "$d1" commit -qm "fix(backend): unrelated"
+    scan_range "$BASE1..HEAD" "$d1"
+    if [ "$EV_CHECKED" -eq 0 ] || [ -z "$REWOUND" ]; then
+        echo "selftest FAIL: revert fixture was not detected"; fails=$((fails+1))
+    fi
+
+    d2="$tmp/forward"; mkdir -p "$d2"; mk "$d2"
+    printf 'a\n' > "$d2/core.rs"
+    git -C "$d2" add core.rs >/dev/null; git -C "$d2" commit -qm base
+    BASE2=$(git -C "$d2" rev-parse HEAD)
+    printf 'a\nb1\nb2\nb3\nb4\nb5\nb6\n' > "$d2/core.rs"
+    git -C "$d2" add core.rs >/dev/null; git -C "$d2" commit -qm fix
+    printf 'a\nb1\nb2\nb3\nb4\nb5\nb6\nc1\nc2\n' > "$d2/core.rs"
+    git -C "$d2" add core.rs >/dev/null; git -C "$d2" commit -qm more
+    scan_range "$BASE2..HEAD" "$d2"
+    if [ -n "$REWOUND" ]; then
+        echo "selftest FAIL: forward-progress fixture flagged: $REWOUND"; fails=$((fails+1))
+    fi
+
+    scan_range "HEAD..HEAD" "$d2"
+    if [ "$EV_CHECKED" -ne 0 ]; then
+        echo "selftest FAIL: empty range did not yield 0 checked"; fails=$((fails+1))
+    fi
+
+    rm -rf "$tmp"
+    if [ "$fails" -ne 0 ]; then
+        echo "FAIL — selftest: $fails fixture(s) failed"
+        exit 1
+    fi
+    echo "selftest: 3/3 fixtures OK"
+fi
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "${ROOT:-}" ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+[ -n "$RANGE" ] || RANGE="main@origin..@-"
+git -C "$ROOT" rev-parse "$RANGE" >/dev/null 2>&1 || RANGE="origin/main..HEAD"
+
+scan_range "$RANGE" "$ROOT"
+
+if [ "${EV_CHECKED:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ -n "${REWOUND:-}" ]; then
+    n=$(echo "$REWOUND" | wc -w | tr -d ' ')
+    echo "FAIL — $EV_CHECKED commit(s) checked in $RANGE, $n rewound file(s):$REWOUND"
+    exit 1
+fi
+echo "PASS — $EV_CHECKED commit(s) checked in $RANGE, 0 rewound file(s)"
+exit 0

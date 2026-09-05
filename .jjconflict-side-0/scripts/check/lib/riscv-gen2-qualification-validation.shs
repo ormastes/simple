@@ -1,0 +1,105 @@
+#!/bin/sh
+# Sourceable, side-effect-free qualification path/manifest validators.
+
+riscv_gen2_validation_fail() {
+    printf '%s\n' "$1" >&2
+    return 1
+}
+
+riscv_gen2_validate_owned_manifest() {
+    validation_root=$1
+    validation_manifest=$2
+    [ -f "$validation_manifest" ] && [ ! -L "$validation_manifest" ] &&
+        [ -s "$validation_manifest" ] ||
+        riscv_gen2_validation_fail owned-file-set-empty || return 1
+    validation_paths=$(mktemp "${TMPDIR:-/tmp}/riscv-g2-owned.XXXXXX") ||
+        riscv_gen2_validation_fail owned-file-list-temp-failed || return 1
+    : >"$validation_paths"
+    while IFS= read -r validation_line; do
+        validation_hash=${validation_line%%  *}
+        validation_file=${validation_line#*  }
+        if [ "$validation_line" != "$validation_hash  $validation_file" ] ||
+                [ "${#validation_hash}" -ne 64 ] ||
+                [ -n "$(printf '%s' "$validation_hash" | tr -d '0123456789abcdef')" ]; then
+            rm -f -- "$validation_paths"
+            riscv_gen2_validation_fail owned-file-list-hash-invalid
+            return 1
+        fi
+        case "$validation_file" in
+            src/*.spl|test/*.spl) ;;
+            *) rm -f -- "$validation_paths"; riscv_gen2_validation_fail "owned-file-path-invalid:$validation_file"; return 1 ;;
+        esac
+        case "$validation_file" in
+            *'..'*|/*|*'//'*)
+                rm -f -- "$validation_paths"
+                riscv_gen2_validation_fail "owned-file-path-invalid:$validation_file"
+                return 1 ;;
+        esac
+        printf '%s\n' "$validation_file" >>"$validation_paths" || {
+            rm -f -- "$validation_paths"
+            riscv_gen2_validation_fail owned-file-list-temp-failed
+            return 1
+        }
+        [ -f "$validation_root/$validation_file" ] &&
+            [ ! -L "$validation_root/$validation_file" ] &&
+            [ -s "$validation_root/$validation_file" ] || {
+                rm -f -- "$validation_paths"
+                riscv_gen2_validation_fail "owned-file-missing-deleted-empty-or-symlinked:$validation_file"
+                return 1
+            }
+        validation_actual=$(sha256sum "$validation_root/$validation_file" | awk '{print $1}') || {
+            rm -f -- "$validation_paths"
+            riscv_gen2_validation_fail "owned-file-hash-read-failed:$validation_file"
+            return 1
+        }
+        if [ "$validation_actual" != "$validation_hash" ]; then
+            rm -f -- "$validation_paths"
+            riscv_gen2_validation_fail "owned-file-content-mutated:$validation_file"
+            return 1
+        fi
+    done <"$validation_manifest"
+    validation_sorted=$(mktemp "${TMPDIR:-/tmp}/riscv-g2-sorted.XXXXXX") || {
+        rm -f -- "$validation_paths"
+        riscv_gen2_validation_fail owned-file-list-temp-failed
+        return 1
+    }
+    LC_ALL=C sort -u "$validation_paths" >"$validation_sorted" || {
+        rm -f -- "$validation_paths" "$validation_sorted"
+        riscv_gen2_validation_fail owned-file-list-sort-failed
+        return 1
+    }
+    if ! cmp -s "$validation_paths" "$validation_sorted"; then
+        rm -f -- "$validation_paths" "$validation_sorted"
+        riscv_gen2_validation_fail owned-file-order-or-duplicate
+        return 1
+    fi
+    rm -f -- "$validation_paths" "$validation_sorted"
+}
+
+riscv_gen2_revalidate_owned_manifest() {
+    riscv_gen2_validate_owned_manifest "$1" "$2"
+}
+
+riscv_gen2_validate_output_path() {
+    validation_evidence_root=$1
+    validation_output=$2
+    [ -d "$validation_evidence_root" ] && [ ! -L "$validation_evidence_root" ] ||
+        riscv_gen2_validation_fail evidence-root-noncanonical || return 1
+    validation_root_physical=$(CDPATH= cd -- "$validation_evidence_root" 2>/dev/null && pwd -P) ||
+        riscv_gen2_validation_fail evidence-root-noncanonical || return 1
+    [ "$validation_root_physical" = "$validation_evidence_root" ] ||
+        riscv_gen2_validation_fail evidence-root-symlinked || return 1
+    [ ! -e "$validation_output" ] && [ ! -L "$validation_output" ] ||
+        riscv_gen2_validation_fail output-directory-preexists || return 1
+    validation_parent=$(dirname -- "$validation_output")
+    [ -d "$validation_parent" ] && [ ! -L "$validation_parent" ] ||
+        riscv_gen2_validation_fail output-directory-parent-missing-or-noncanonical || return 1
+    validation_parent_physical=$(CDPATH= cd -- "$validation_parent" 2>/dev/null && pwd -P) ||
+        riscv_gen2_validation_fail output-directory-parent-missing-or-noncanonical || return 1
+    [ "$validation_parent_physical" = "$validation_root_physical" ] ||
+        riscv_gen2_validation_fail output-directory-not-direct-evidence-child || return 1
+    validation_run_id=$(basename -- "$validation_output")
+    case "$validation_run_id" in
+        ''|*[!A-Za-z0-9_-]*) riscv_gen2_validation_fail output-directory-run-id-unsafe; return 1 ;;
+    esac
+}

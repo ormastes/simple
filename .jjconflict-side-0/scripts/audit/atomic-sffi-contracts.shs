@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/atomic.spl"
+compat="$root/src/lib/gc_async_mut/atomic.spl"
+provider="$root/src/compiler_rust/runtime/src/value/sffi/atomic.rs"
+registry="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+signatures="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+
+declarations=$(grep -c '^[[:space:]]*extern fn rt_atomic_' "$owner")
+if [ "$declarations" -ne 20 ]; then
+    echo "atomic extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_atomic_/ { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every atomic declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+if grep -q '^[[:space:]]*extern fn ' "$compat"; then
+    echo "GC async atomic family must delegate to the canonical no-GC owner" >&2
+    exit 1
+fi
+grep -q 'export use std.nogc_sync_mut.atomic' "$compat"
+
+for operation in compare_exchange fetch_and fetch_or fetch_not; do
+    symbol="rt_atomic_bool_$operation"
+    grep -q "fn $symbol" "$provider"
+    grep -q "insert_simple!(\"$symbol\"" "$registry"
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$signatures"
+done
+
+if grep -q 'Implemented via swap - not truly atomic CAS\|load+store is NOT truly atomic' "$owner"; then
+    echo "safe AtomicBool API still composes non-atomic operations" >&2
+    exit 1
+fi
+
+manual_free_tags=$(grep -c '@unsafe(reason: "manual release invalidates this handle' "$owner")
+if [ "$manual_free_tags" -ne 3 ]; then
+    echo "all legacy atomic manual-release methods must remain explicitly unsafe" >&2
+    exit 1
+fi
+allocation_guards=$(grep -c 'if handle <= 0:' "$owner")
+if [ "$allocation_guards" -ne 3 ]; then
+    echo "atomic factories must fail closed on invalid allocation handles" >&2
+    exit 1
+fi
+
+for operation in compare_exchange fetch_and fetch_or fetch_not; do
+    calls=$(grep -c "rt_atomic_bool_$operation(self._handle" "$owner")
+    if [ "$calls" -ne 1 ]; then
+        echo "AtomicBool $operation must remain exactly one direct provider call" >&2
+        exit 1
+    fi
+done
+
+# The current hosted provider still serializes every operation through global
+# registries and fabricates values for invalid handles. Keep those facts
+# visible until typed generation-checked direct slots replace the registry.
+grep -q 'ATOMIC_BOOL_MAP: Mutex<HashMap' "$provider"
+grep -q 'ATOMIC_INT_MAP: Mutex<HashMap' "$provider"
+invalid_fallbacks=$(grep -c 'unwrap_or(false)\|unwrap_or(0)' "$provider")
+if [ "$invalid_fallbacks" -lt 10 ]; then
+    echo "atomic invalid-handle behavior changed; review typed error contract" >&2
+    exit 1
+fi
+
+echo "atomic SFFI contract audit: PASS (20 unsafe declarations; bool RMW is one provider operation)"

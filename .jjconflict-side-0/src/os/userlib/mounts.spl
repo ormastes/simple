@@ -1,0 +1,46 @@
+# Filesystem mount operations via raw syscalls and VFS IPC.
+
+use os.userlib.syscall_raw
+use os.userlib.ipc_protocol(VFS_MOUNT_LIST)
+use os.userlib.fs.{vfs_ipc_request_bytes}
+
+extern fn unsafe_addr_of(ref: any) -> u64
+
+fn _vfs_mount_request(method: u32, payload: text) -> Result<text, text>:
+    var bytes: [u8] = []
+    var index: u64 = 0u64
+    while index < payload.len():
+        bytes.push(payload.byte_at(index))
+        index = index + 1u64
+    val response = vfs_ipc_request_bytes(method, bytes)?
+    var text_value = ""
+    for byte in response:
+        text_value = text_value + byte.to_char()
+    Ok(text_value)
+
+fn mount(device: text, mount_path: text, fs_type: text) -> Result<bool, text>:
+    val payload = "{device}\0{mount_path}\0{fs_type}"
+    val result = syscall(37, &payload as u64, payload.len() as u64, 0, 0, 0)
+    if result < 0:
+        return Err("mount failed with code {result}")
+    Ok(true)
+
+fn unmount(path: text) -> Result<bool, text>:
+    val result = syscall(38, &path as u64, path.len() as u64, 0, 0, 0)
+    if result < 0:
+        return Err("unmount failed with code {result}")
+    Ok(true)
+
+fn mount_list() -> Result<[text], text>:
+    val resp = _vfs_mount_request(VFS_MOUNT_LIST, "")?
+    if resp.len() == 0:
+        return Ok([])
+    val entries = resp.split("\n")
+    var result: [text] = []
+    var i: u64 = 0
+    while i < entries.len() as u64:
+        val entry = entries[i as i64]
+        if entry.len() > 0:
+            result.push(entry)
+        i = i + 1
+    Ok(result)

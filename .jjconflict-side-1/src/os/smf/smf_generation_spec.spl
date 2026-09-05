@@ -1,0 +1,209 @@
+# Phase 2: Hosted Atomic Replacement — Spec
+#
+# Covers GenerationState, CandidateMapping, SymbolSwap, RetiredMapping,
+# and LifecycleManager state transitions.
+# All tests use direct struct construction for interpreter compatibility.
+
+use std.spec.*
+use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, RetiredMapping, LifecycleManager}
+
+# ============================================================================
+# GenerationState specs
+# ============================================================================
+
+describe "GenerationState - lifecycle transitions":
+    it "loaded state is loaded":
+        val g = GenerationState(state: "loaded", module_name: "mod.smf", generation_id: 1, ref_count: 0)
+        expect(g.state).to_equal("loaded")
+
+    it "loaded state records module name":
+        val g = GenerationState(state: "loaded", module_name: "mod.smf", generation_id: 1, ref_count: 0)
+        expect(g.module_name).to_equal("mod.smf")
+
+    it "loaded state records generation_id":
+        val g = GenerationState(state: "loaded", module_name: "mod.smf", generation_id: 3, ref_count: 0)
+        expect(g.generation_id).to_equal(3)
+
+    it "loaded state has ref_count zero":
+        val g = GenerationState(state: "loaded", module_name: "mod.smf", generation_id: 1, ref_count: 0)
+        expect(g.ref_count).to_equal(0)
+
+    it "candidate state is not active":
+        val g = GenerationState(state: "candidate", module_name: "lib.smf", generation_id: 2, ref_count: 0)
+        expect(g.is_active()).to_equal(false)
+
+    it "promote transitions to active":
+        val g = GenerationState(state: "candidate", module_name: "lib.smf", generation_id: 2, ref_count: 0).promote()
+        expect(g.is_active()).to_equal(true)
+
+    it "promote preserves module_name":
+        val g = GenerationState(state: "candidate", module_name: "lib.smf", generation_id: 2, ref_count: 0).promote()
+        expect(g.module_name).to_equal("lib.smf")
+
+    it "promote preserves generation_id":
+        val g = GenerationState(state: "candidate", module_name: "lib.smf", generation_id: 5, ref_count: 0).promote()
+        expect(g.generation_id).to_equal(5)
+
+    it "retire transitions active to retiring":
+        val g = GenerationState(state: "active", module_name: "mod.smf", generation_id: 1, ref_count: 0).retire()
+        expect(g.is_retiring()).to_equal(true)
+
+    it "is_failed false for loaded state":
+        val g = GenerationState(state: "loaded", module_name: "mod.smf", generation_id: 1, ref_count: 0)
+        expect(g.is_failed()).to_equal(false)
+
+    it "to_text contains module_name":
+        val g = GenerationState(state: "loaded", module_name: "mymod.smf", generation_id: 7, ref_count: 0)
+        expect(g.to_text()).to_contain("mymod.smf")
+
+    it "to_text contains generation_id":
+        val g = GenerationState(state: "loaded", module_name: "mymod.smf", generation_id: 7, ref_count: 0)
+        expect(g.to_text()).to_contain("7")
+
+# ============================================================================
+# CandidateMapping specs
+# ============================================================================
+
+describe "CandidateMapping - readiness gating":
+    it "starts with all flags false":
+        val c = CandidateMapping(candidate_ref: "ref1", relocation_done: false, import_valid: false, ready_to_swap: false)
+        expect(c.relocation_done).to_equal(false)
+
+    it "is_ready false when freshly created":
+        val c = CandidateMapping(candidate_ref: "ref1", relocation_done: false, import_valid: false, ready_to_swap: false)
+        expect(c.is_ready()).to_equal(false)
+
+    it "complete_relocation alone does not make it ready":
+        val c = CandidateMapping(candidate_ref: "ref1", relocation_done: false, import_valid: false, ready_to_swap: false).complete_relocation()
+        expect(c.ready_to_swap).to_equal(false)
+
+    it "validate_imports alone does not make it ready":
+        val c = CandidateMapping(candidate_ref: "ref1", relocation_done: false, import_valid: false, ready_to_swap: false).validate_imports()
+        expect(c.ready_to_swap).to_equal(false)
+
+    it "relocation then imports makes it ready":
+        val c = CandidateMapping(candidate_ref: "ref1", relocation_done: false, import_valid: false, ready_to_swap: false).complete_relocation().validate_imports()
+        expect(c.is_ready()).to_equal(true)
+
+    it "imports then relocation makes it ready":
+        val c = CandidateMapping(candidate_ref: "ref1", relocation_done: false, import_valid: false, ready_to_swap: false).validate_imports().complete_relocation()
+        expect(c.is_ready()).to_equal(true)
+
+    it "to_text contains candidate_ref":
+        val c = CandidateMapping(candidate_ref: "ref-abc", relocation_done: false, import_valid: false, ready_to_swap: false)
+        expect(c.to_text()).to_contain("ref-abc")
+
+# ============================================================================
+# SymbolSwap specs
+# ============================================================================
+
+describe "SymbolSwap - atomic swap state":
+    it "starts in pending status":
+        val s = SymbolSwap(old_export: "old_fn", new_export: "new_fn", swap_status: "pending", drain_count: 0)
+        expect(s.swap_status).to_equal("pending")
+
+    it "complete transitions to complete":
+        val s = SymbolSwap(old_export: "old_fn", new_export: "new_fn", swap_status: "pending", drain_count: 0).complete()
+        expect(s.is_complete()).to_equal(true)
+
+    it "rollback transitions to rollback":
+        val s = SymbolSwap(old_export: "old_fn", new_export: "new_fn", swap_status: "pending", drain_count: 0).rollback()
+        expect(s.is_rollback()).to_equal(true)
+
+    it "old_export preserved":
+        val s = SymbolSwap(old_export: "old_fn", new_export: "new_fn", swap_status: "pending", drain_count: 0)
+        expect(s.old_export).to_equal("old_fn")
+
+    it "new_export preserved":
+        val s = SymbolSwap(old_export: "old_fn", new_export: "new_fn", swap_status: "pending", drain_count: 0)
+        expect(s.new_export).to_equal("new_fn")
+
+    it "drain_count starts at zero":
+        val s = SymbolSwap(old_export: "old_fn", new_export: "new_fn", swap_status: "pending", drain_count: 0)
+        expect(s.drain_count).to_equal(0)
+
+    it "to_text contains old and new names":
+        val s = SymbolSwap(old_export: "old_fn", new_export: "new_fn", swap_status: "pending", drain_count: 0)
+        expect(s.to_text()).to_contain("old_fn")
+
+# ============================================================================
+# RetiredMapping specs
+# ============================================================================
+
+describe "RetiredMapping - drain tracking":
+    it "records remaining_refs":
+        val r = RetiredMapping(module_name: "mod.smf", generation_id: 2, remaining_refs: 5, can_free: false)
+        expect(r.remaining_refs).to_equal(5)
+
+    it "starts with can_free false":
+        val r = RetiredMapping(module_name: "mod.smf", generation_id: 2, remaining_refs: 5, can_free: false)
+        expect(r.can_free).to_equal(false)
+
+    it "is_drained false when refs remain":
+        val r = RetiredMapping(module_name: "mod.smf", generation_id: 2, remaining_refs: 3, can_free: false)
+        expect(r.is_drained()).to_equal(false)
+
+    it "decrement reduces remaining_refs by one":
+        val r = RetiredMapping(module_name: "mod.smf", generation_id: 2, remaining_refs: 3, can_free: false).decrement()
+        expect(r.remaining_refs).to_equal(2)
+
+    it "decrement to zero sets can_free true":
+        val r = RetiredMapping(module_name: "mod.smf", generation_id: 2, remaining_refs: 1, can_free: false).decrement()
+        expect(r.can_free).to_equal(true)
+
+    it "is_drained true when remaining_refs reaches zero":
+        val r = RetiredMapping(module_name: "mod.smf", generation_id: 2, remaining_refs: 1, can_free: false).decrement()
+        expect(r.is_drained()).to_equal(true)
+
+    it "to_text contains module_name":
+        val r = RetiredMapping(module_name: "mymod.smf", generation_id: 3, remaining_refs: 2, can_free: false)
+        expect(r.to_text()).to_contain("mymod.smf")
+
+# ============================================================================
+# LifecycleManager specs
+# ============================================================================
+
+describe "LifecycleManager - generation orchestration":
+    it "new_manager starts at active_generation 0":
+        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0)
+        expect(lm.active_generation).to_equal(0)
+
+    it "new_manager has no candidate":
+        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0)
+        expect(lm.has_candidate).to_equal(false)
+
+    it "new_manager retired_count is 0":
+        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0)
+        expect(lm.retired_count).to_equal(0)
+
+    it "register_candidate sets has_candidate true":
+        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0).register_candidate("mod.smf", 1)
+        expect(lm.has_candidate).to_equal(true)
+
+    it "register_candidate records pending_candidate name":
+        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0).register_candidate("mod.smf", 1)
+        expect(lm.pending_candidate).to_equal("mod.smf")
+
+    it "promote_candidate increments active_generation":
+        val base = LifecycleManager(active_generation: 0, pending_candidate: "mod.smf", has_candidate: true, retired_count: 0)
+        val lm = base.promote_candidate()
+        expect(lm.active_generation).to_equal(1)
+
+    it "promote_candidate clears has_candidate":
+        val base = LifecycleManager(active_generation: 0, pending_candidate: "mod.smf", has_candidate: true, retired_count: 0)
+        val lm = base.promote_candidate()
+        expect(lm.has_candidate).to_equal(false)
+
+    it "retire increments retired_count":
+        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0).retire("mod.smf")
+        expect(lm.retired_count).to_equal(1)
+
+    it "successive retires accumulate count":
+        val base = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0)
+        val lm = base.retire("a.smf").retire("b.smf")
+        expect(lm.retired_count).to_equal(2)
+
+    it "to_text contains active_generation":
+        val base = LifecycleManager(active_generation: 0, pending_candidate: "m", has_candidate: true, retired_count: 0)
+        val lm = base.promote_candidate()
+        expect(lm.to_text()).to_contain("1")

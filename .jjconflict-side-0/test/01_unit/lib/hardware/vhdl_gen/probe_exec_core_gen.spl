@@ -1,0 +1,63 @@
+# Runnable probe mirror of exec_core_gen_spec.spl — prints per-stage PASS/FAIL
+# and a final ALL PASS marker. Run: bin/simple run test/01_unit/lib/hardware/vhdl_gen/probe_exec_core_gen.spl
+
+use std.hardware.riscv_common.xlen.XlenConfig
+use std.hardware.vhdl_gen.exec_core_gen.{generate_exec_core, generate_rv32_exec_core, generate_rv64_exec_core}
+use std.hardware.vhdl_gen.exec_core_variant_gen.{generate_exec_core_flat, generate_exec_core_axi}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS " + name)
+        0
+    else:
+        print("FAIL " + name)
+        1
+
+fn main():
+    var fails = 0
+    val g32 = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd")
+    val g64 = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/rv64_exec_core.vhd")
+    val a32 = generate_rv32_exec_core("")
+    val a64 = generate_rv64_exec_core("")
+    fails = fails + check("rv32 golden byte-match (len " + a32.len().to_text() + " vs " + g32.len().to_text() + ")", a32 == g32)
+    fails = fails + check("rv64 golden byte-match (len " + a64.len().to_text() + " vs " + g64.len().to_text() + ")", a64 == g64)
+    val b32 = generate_rv32_exec_core("")
+    val b64 = generate_rv64_exec_core("")
+    fails = fails + check("determinism rv32", a32 == b32)
+    fails = fails + check("determinism rv64", a64 == b64)
+    val off32 = generate_exec_core(XlenConfig.rv32(), "", false)
+    val off64 = generate_exec_core(XlenConfig.rv64(), "", false)
+    fails = fails + check("aspect-off drops dbg ports rv32", not off32.contains("dbg_reg_addr"))
+    fails = fails + check("aspect-off drops dbg ports rv64", not off64.contains("dbg_reg_addr"))
+    fails = fails + check("aspect-on keeps dbg ports", a32.contains("dbg_reg_addr") and a64.contains("dbg_reg_addr"))
+    val prefixed = generate_exec_core(XlenConfig.rv32(), "/tmp/fw/", true)
+    fails = fails + check("mem prefix applied", prefixed.contains("is \"/tmp/fw/rv32_payload.mem\";"))
+    # flat/axi variant cores
+    val gf32 = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/rv32_exec_core_flat.vhd")
+    val gf64 = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/rv64_exec_core_flat.vhd")
+    val gx32 = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/rv32_exec_core_axi.vhd")
+    val gx64 = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/rv64_exec_core_axi.vhd")
+    val f32 = generate_exec_core_flat(XlenConfig.rv32(), "")
+    val f64 = generate_exec_core_flat(XlenConfig.rv64(), "")
+    val x32 = generate_exec_core_axi(XlenConfig.rv32())
+    val x64 = generate_exec_core_axi(XlenConfig.rv64())
+    fails = fails + check("rv32 flat golden byte-match (len " + f32.len().to_text() + " vs " + gf32.len().to_text() + ")", f32 == gf32)
+    fails = fails + check("rv64 flat golden byte-match (len " + f64.len().to_text() + " vs " + gf64.len().to_text() + ")", f64 == gf64)
+    fails = fails + check("rv32 axi golden byte-match (len " + x32.len().to_text() + " vs " + gx32.len().to_text() + ")", x32 == gx32)
+    fails = fails + check("rv64 axi golden byte-match (len " + x64.len().to_text() + " vs " + gx64.len().to_text() + ")", x64 == gx64)
+    val f32b = generate_exec_core_flat(XlenConfig.rv32(), "")
+    val x64b = generate_exec_core_axi(XlenConfig.rv64())
+    fails = fails + check("determinism flat/axi variants", f32 == f32b and x64 == x64b)
+    val pf32 = generate_exec_core_flat(XlenConfig.rv32(), "/tmp/fw/")
+    val pf64 = generate_exec_core_flat(XlenConfig.rv64(), "/tmp/fw/")
+    fails = fails + check("flat mem prefix applied (ram + ramdisk)",
+        (pf32.contains("is \"/tmp/fw/rv32_flat.mem\";") and
+         pf32.contains("file_open(fstatus, f, \"/tmp/fw/rv32_ramdisk.mem\", read_mode);") and
+         pf64.contains("is \"/tmp/fw/rv64_flat.mem\";") and
+         pf64.contains("file_open(fstat, f, \"/tmp/fw/rv64_ramdisk.mem\", read_mode);")))
+    if fails == 0:
+        print("EXEC_CORE_GEN PROBE: ALL PASS")
+    else:
+        print("EXEC_CORE_GEN PROBE: " + fails.to_text() + " FAILURES")

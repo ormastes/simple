@@ -1,0 +1,119 @@
+# Simple-owned NVMe controller register and identify-data contracts.
+
+struct NvmeControllerRegs:
+    cap: u64
+    vs: u32
+    cc: u32
+    csts: u32
+
+struct NvmeControllerFacts:
+    mq_entries: u32
+    doorbell_stride_bytes: u32
+    timeout_ms: u32
+    supports_required_queue: bool
+    supports_nvm_command_set: bool
+    fatal: bool
+    ready: bool
+    valid: bool
+
+struct NvmeNamespaceFacts:
+    nsid: u32
+    lba_count: u64
+    formatted_lba_size: u32
+    usable: bool
+
+val NVME_CC_EN: u32 = 1u32
+val NVME_CC_IOSQES_64: u32 = 6u32 << 16
+val NVME_CC_IOCQES_16: u32 = 4u32 << 20
+
+fn nvme_cap_mq_entries(cap: u64) -> u32:
+    ((cap & 0xFFFFu64) + 1u64).to_u32()
+
+fn nvme_cap_timeout_ms(cap: u64) -> u32:
+    val units = ((cap >> 24) & 0xFFu64).to_u32()
+    units * 500u32
+
+fn nvme_cap_doorbell_stride_bytes(cap: u64) -> u32:
+    val dstrd = ((cap >> 32) & 0x0Fu64).to_u32()
+    4u32 << dstrd
+
+fn nvme_cap_dstrd(cap: u64) -> u32:
+    ((cap >> 32) & 0x0Fu64).to_u32()
+
+fn nvme_cap_supports_nvm(cap: u64) -> bool:
+    val css = (cap >> 37) & 0xFFu64
+    (css & 1u64) != 0u64
+
+fn nvme_version_major(vs: u32) -> u32:
+    (vs >> 16) & 0xFFFFu32
+
+fn nvme_csts_ready(csts: u32) -> bool:
+    (csts & 1u32) != 0u32
+
+fn nvme_csts_fatal(csts: u32) -> bool:
+    (csts & 2u32) != 0u32
+
+fn nvme_controller_enable_cc() -> u32:
+    NVME_CC_EN | NVME_CC_IOSQES_64 | NVME_CC_IOCQES_16
+
+fn nvme_controller_facts(regs: NvmeControllerRegs, required_queue_entries: u32) -> NvmeControllerFacts:
+    val mq = nvme_cap_mq_entries(regs.cap)
+    val stride = nvme_cap_doorbell_stride_bytes(regs.cap)
+    val fatal = nvme_csts_fatal(regs.csts)
+    val version_ok = nvme_version_major(regs.vs) >= 1u32
+    val cap_ok = regs.cap != 0u64 and regs.cap != 0xFFFFFFFFFFFFFFFFu64
+    val stride_ok = stride >= 4u32 and stride <= 512u32
+    val queue_ok = mq >= required_queue_entries
+    val nvm_ok = nvme_cap_supports_nvm(regs.cap)
+    NvmeControllerFacts(
+        mq_entries: mq,
+        doorbell_stride_bytes: stride,
+        timeout_ms: nvme_cap_timeout_ms(regs.cap),
+        supports_required_queue: queue_ok,
+        supports_nvm_command_set: nvm_ok,
+        fatal: fatal,
+        ready: nvme_csts_ready(regs.csts),
+        valid: cap_ok and version_ok and stride_ok and queue_ok and nvm_ok and not fatal
+    )
+
+fn nvme_lba_size_from_flbas_and_lbaf0(flbas: u8, lbaf0: u32) -> u32:
+    val active_format = flbas & 0x0Fu8
+    if active_format != 0u8:
+        return 0u32
+    val lbads = (lbaf0 >> 16) & 0xFFu32
+    if lbads < 9u32 or lbads > 16u32:
+        return 0u32
+    1u32 << lbads
+
+fn nvme_namespace_facts(nsid: u32, nsze: u64, flbas: u8, lbaf0: u32) -> NvmeNamespaceFacts:
+    val lba_size = nvme_lba_size_from_flbas_and_lbaf0(flbas, lbaf0)
+    NvmeNamespaceFacts(
+        nsid: nsid,
+        lba_count: nsze,
+        formatted_lba_size: lba_size,
+        usable: nsid != 0u32 and nsze > 0u64 and lba_size >= 512u32
+    )
+
+fn nvme_namespace_refusal_reason(facts: NvmeNamespaceFacts) -> text:
+    if facts.nsid == 0u32:
+        return "nvme-namespace-id-zero"
+    if facts.lba_count == 0u64:
+        return "nvme-namespace-empty"
+    if facts.formatted_lba_size < 512u32:
+        return "nvme-namespace-invalid-lba-size"
+    if not facts.usable:
+        return "nvme-namespace-unusable"
+    "ready"
+
+fn nvme_controller_refusal_reason(facts: NvmeControllerFacts) -> text:
+    if facts.fatal:
+        return "nvme-controller-fatal"
+    if not facts.supports_nvm_command_set:
+        return "nvme-missing-nvm-command-set"
+    if not facts.supports_required_queue:
+        return "nvme-queue-depth-too-small"
+    if facts.doorbell_stride_bytes < 4u32 or facts.doorbell_stride_bytes > 512u32:
+        return "nvme-invalid-doorbell-stride"
+    if not facts.valid:
+        return "nvme-invalid-controller-registers"
+    "ready"

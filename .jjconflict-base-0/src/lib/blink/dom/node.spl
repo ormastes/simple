@@ -1,0 +1,138 @@
+# Blink DOM node types — blink.dom.node
+#
+# Core DOM tree types: DomNode, DomTree, NodeType, Attribute.
+# Shape decision (2026-08-10): mirrors Chromium Blink's Node/ContainerNode —
+# linked-sibling pointers (parent / first_child / last_child / prev_sibling /
+# next_sibling), arena-allocated by id in DomTree.nodes, sentinel -1 for "none".
+# Consumers: blink/css_parser/selector.spl, blink/style/cascade.spl,
+# dom_node_spec, css_selector_spec, html_tree_builder_spec.
+
+enum NodeType:
+    """W3C DOM node type discriminants (Chromium kDocumentNode et al.)."""
+    Element
+    Text
+    Comment
+    Document
+    DocumentNode
+    DocumentType
+    ProcessingInstruction
+    CdataSection
+
+struct Attribute:
+    """A single XML/HTML attribute key-value pair."""
+    name: text
+    value: text
+
+struct DomNode:
+    """A single node in the DOM tree (Chromium-style linked pointers)."""
+    id: i64
+    node_type: NodeType
+    tag_name: text
+    attributes: [Attribute]
+    parent: i64
+    first_child: i64
+    last_child: i64
+    prev_sibling: i64
+    next_sibling: i64
+    text_content: text
+
+struct DomTree:
+    """An arena-allocated DOM tree; node ids index into `nodes`."""
+    nodes: [DomNode]
+    root_id: i64
+
+fn attribute_new(name: text, value: text) -> Attribute:
+    """Construct a single attribute key-value pair."""
+    Attribute(name: name, value: value)
+
+fn dom_node_new(id: i64, node_type: NodeType) -> DomNode:
+    """Construct a detached DomNode with the given id and type."""
+    var empty_attrs: [Attribute] = []
+    DomNode(
+        id: id,
+        node_type: node_type,
+        tag_name: "",
+        attributes: empty_attrs,
+        parent: -1,
+        first_child: -1,
+        last_child: -1,
+        prev_sibling: -1,
+        next_sibling: -1,
+        text_content: ""
+    )
+
+fn dom_tree_new() -> DomTree:
+    """Return a DomTree whose root DocumentNode lives at id 0."""
+    val root = dom_node_new(0, NodeType.DocumentNode)
+    DomTree(nodes: [root], root_id: 0)
+
+impl DomTree:
+    fn get_node(id: i64) -> DomNode?:
+        """Look up a node by id. Returns nil if id is out of range."""
+        if id < 0 or id >= self.nodes.len():
+            return nil
+        Some(self.nodes[id as i32])
+
+    me create_element(tag_name: text) -> i64:
+        """Allocate a detached Element node; returns its id."""
+        val id = self.nodes.len().to_i64()
+        var node = dom_node_new(id, NodeType.Element)
+        node.tag_name = tag_name
+        self.nodes.push(node)
+        id
+
+    me create_text(content: text) -> i64:
+        """Allocate a detached Text node; returns its id."""
+        val id = self.nodes.len().to_i64()
+        var node = dom_node_new(id, NodeType.Text)
+        node.text_content = content
+        self.nodes.push(node)
+        id
+
+    me append_child(parent_id: i64, child_id: i64):
+        """Link child as the last child of parent, updating sibling chain."""
+        if parent_id < 0 or parent_id >= self.nodes.len():
+            return
+        if child_id < 0 or child_id >= self.nodes.len():
+            return
+        var parent = self.nodes[parent_id as i32]
+        var child = self.nodes[child_id as i32]
+        child.parent = parent_id
+        val old_last = parent.last_child
+        if old_last == -1:
+            parent.first_child = child_id
+        else:
+            var prev = self.nodes[old_last as i32]
+            prev.next_sibling = child_id
+            self.nodes[old_last as i32] = prev
+            child.prev_sibling = old_last
+        parent.last_child = child_id
+        self.nodes[parent_id as i32] = parent
+        self.nodes[child_id as i32] = child
+
+    me set_attribute(id: i64, name: text, value: text):
+        """Set or replace an attribute on the node with the given id."""
+        if id < 0 or id >= self.nodes.len():
+            return
+        var node = self.nodes[id as i32]
+        var i = 0
+        while i < node.attributes.len():
+            if node.attributes[i].name == name:
+                node.attributes[i] = attribute_new(name, value)
+                self.nodes[id as i32] = node
+                return
+            i = i + 1
+        node.attributes.push(attribute_new(name, value))
+        self.nodes[id as i32] = node
+
+    fn get_attribute(id: i64, name: text) -> text?:
+        """Read an attribute value; nil when the node or attribute is absent."""
+        if id < 0 or id >= self.nodes.len():
+            return nil
+        val node = self.nodes[id as i32]
+        var i = 0
+        while i < node.attributes.len():
+            if node.attributes[i].name == name:
+                return Some(node.attributes[i].value)
+            i = i + 1
+        nil

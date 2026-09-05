@@ -1,0 +1,55 @@
+"""Baremetal font config literal init — regression for e86b7eca9d72.
+
+As a SimpleOS WM lane maintainer, I need `engine2d_default_font_config_for`
+to hand the baremetal (force_cpu_target) lane a font config whose `language`
+is "und" and whose every field matches the hosted default, so text Draw IR
+commands are never skipped as `[font-select] no-candidate ... language='normal'`.
+
+The old code rebuilt the config via an 11-field cross-struct copy off `base`;
+on the freestanding entry-closure lane that copy corrupted `language` to
+"normal" (the weight/style slot value), skipping all text rendering. The fix
+literal-initializes the config. This spec constructs the value in the host
+interpreter and asserts the exact fields the fix guarantees, plus a source
+guard that the cross-struct copy pattern stays gone.
+"""
+# @req REQ-ENGINE2D-FONTCFG-001
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.engine2d.engine.{engine2d_default_font_config_for}
+
+describe "engine2d baremetal font config":
+
+    it "delivers language 'und' (never 'normal') on the force-cpu lane":
+        step("Build the font config exactly as the baremetal WM lane does")
+        val cfg = engine2d_default_font_config_for(16, true)
+        step("Assert the corrupted-slot fields carry their literal values")
+        expect(cfg.language).to_equal("und")
+        expect(cfg.weight).to_equal("normal")
+        expect(cfg.style).to_equal("normal")
+
+    it "pins the cpu execution target with hosted-default field values":
+        step("Build the force-cpu config for size 24")
+        val cfg = engine2d_default_font_config_for(24, true)
+        step("Assert every literal-initialized field from the fix")
+        expect(cfg.family).to_equal("auto")
+        expect(cfg.category).to_equal("auto")
+        expect(cfg.script).to_equal("auto")
+        expect(cfg.size).to_equal(24)
+        expect(cfg.hinting).to_equal("none")
+        expect(cfg.antialiasing).to_equal("grayscale")
+        expect(cfg.atlas_policy).to_equal("shared-alpha-1024")
+        expect(cfg.execution_target).to_equal("cpu")
+
+    it "keeps the hosted (non-cpu) lane on the unmodified default":
+        step("Build the hosted-lane config")
+        val cfg = engine2d_default_font_config_for(16, false)
+        step("Assert language is still the default 'und'")
+        expect(cfg.language).to_equal("und")
+
+    it "keeps the cross-struct copy pattern out of engine.spl":
+        step("Read the engine source")
+        val src = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        step("Assert the literal init is present and the base-field copy absent")
+        expect(src).to_contain("family: \"auto\", category: \"auto\", language: \"und\", script: \"auto\",")
+        expect(src).to_not_contain("family: base.family")

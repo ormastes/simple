@@ -1,0 +1,84 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/bridge_drawing_compositor.spl 80%
+# @tag: unit, ui, engine2d, compositor, bridge
+"""
+# Drawing/Compositor -> Engine2D Bridge Specification
+
+## Overview
+
+Proves that the nogc_sync drawing/compositor output (a flat RGBA [i64] buffer
+produced by `pack_rgba`) renders faithfully through the SHARED Engine2D
+RenderBackend lanes (SIMD CPU + GPU), via the additive bridge in
+`bridge_drawing_compositor.spl`.
+
+The compositor packs pixels as RGBA (r<<24 | g<<16 | b<<8 | a) while Engine2D's
+framebuffer is ARGB (a<<24 | r<<16 | g<<8 | b). The bridge converts the channel
+order and paints through `draw_image` / `read_pixels`, so the same composited
+document can be displayed by whichever backend SIMPLE_2D_BACKEND selects.
+
+## Evidence Model
+
+A 4x2 buffer is built with `pack_rgba`: a known opaque-red region at index 0 and
+opaque-blue at the last index, with transparent (0) padding elsewhere. We bridge
+onto "cpu_simd" and "software" and read the framebuffer back, asserting:
+  - length == width*height
+  - the red region pixel == hand-computed Engine2D ARGB 0xFFFF0000
+  - the blue region pixel == hand-computed Engine2D ARGB 0xFF0000FF
+  - an untouched transparent pixel == 0 (the cleared/background color)
+
+Opaque colors (a=255) are used so blend_normal/draw_image hit the integer
+fast-path and the round-trip is deterministic (no f64 alpha math).
+
+**Requirements:** N/A — implementation evidence for the shared-2D-backend goal.
+"""
+
+use std.spec
+use std.nogc_sync_mut.drawing.compositor.{pack_rgba}
+use std.gc_async_mut.gpu.engine2d.bridge_drawing_compositor.{bridge_render_rgba_buffer, compositor_rgba_to_engine_argb}
+
+# Build a 4x2 compositor RGBA [i64] buffer: red at [0], blue at [7], rest clear.
+fn make_composited_buffer() -> [i64]:
+    var buf: [i64] = []
+    var i = 0
+    while i < 8:
+        if i == 0:
+            buf = buf.push(pack_rgba(255, 0, 0, 255))   # opaque red
+        elif i == 7:
+            buf = buf.push(pack_rgba(0, 0, 255, 255))    # opaque blue
+        else:
+            buf = buf.push(0)                            # transparent
+        i = i + 1
+    buf
+
+describe "drawing/compositor -> Engine2D bridge":
+
+    it "converts a compositor RGBA pixel to Engine2D ARGB":
+        # pack_rgba(255,0,0,255) = 0xFF0000FF (RGBA). Engine2D ARGB red = 0xFFFF0000.
+        val red_rgba = pack_rgba(255, 0, 0, 255)
+        expect(compositor_rgba_to_engine_argb(red_rgba)).to_equal(0xFFFF0000u32)
+        val blue_rgba = pack_rgba(0, 0, 255, 255)
+        expect(compositor_rgba_to_engine_argb(blue_rgba)).to_equal(0xFF0000FFu32)
+
+    it "paints composited output through the cpu_simd backend":
+        val buf = make_composited_buffer()
+        val out = bridge_render_rgba_buffer(4, 2, buf, 0u32, "cpu_simd", false)
+        expect(out.len()).to_equal(8)
+        expect(out[0]).to_equal(0xFFFF0000u32)   # known red region
+        expect(out[7]).to_equal(0xFF0000FFu32)   # known blue region
+        expect(out[3]).to_equal(0u32)            # untouched -> cleared background
+
+    it "paints composited output through the software backend":
+        val buf = make_composited_buffer()
+        val out = bridge_render_rgba_buffer(4, 2, buf, 0u32, "software", false)
+        expect(out.len()).to_equal(8)
+        expect(out[0]).to_equal(0xFFFF0000u32)
+        expect(out[7]).to_equal(0xFF0000FFu32)
+        expect(out[3]).to_equal(0u32)
+
+    it "preserves the cleared background where the buffer is transparent (blend path)":
+        # Opaque pixels (a=255) hit draw_image_blend's integer src-over fast-path,
+        # so red/blue still land while transparent (a=0) leaves the bg untouched.
+        val buf = make_composited_buffer()
+        val out = bridge_render_rgba_buffer(4, 2, buf, 0xFF202020u32, "cpu_simd", true)
+        expect(out.len()).to_equal(8)
+        expect(out[0]).to_equal(0xFFFF0000u32)   # opaque red over bg
+        expect(out[3]).to_equal(0xFF202020u32)   # transparent -> background kept

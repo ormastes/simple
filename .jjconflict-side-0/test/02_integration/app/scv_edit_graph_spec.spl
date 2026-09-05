@@ -1,0 +1,81 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-D-03 — the refactoring-aware edit graph:
+one diff report that links raw hunks <-> symbol entities <-> inferred
+refactoring operations (I-04 rows), built from the SAME status-index vs
+working-copy comparison the D-02 views render, and exposed as
+`scv diff --view graph`.
+Audience: Maintainers of the SCV diff layer.
+"""
+# @req: REQ-SCV-EDIT-GRAPH-001
+use std.spec.{describe, it, expect, step}
+use app.io.mod (dir_create, file_write)
+use std.scv.store.{scv_init_repo}
+use std.scv.file_history.{scv_snapshot_with_identity}
+use std.scv.edit_graph.{EditGraphFile, scv_edit_graph_from_files, scv_eg_hunks, scv_edit_graph, SCV_EDIT_GRAPH_MAX_ANCHORS, SCV_EDIT_GRAPH_MAX_LINES}
+use std.scv.three_view_diff.{scv_diff_views}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _repo(tag: text) -> text:
+    val root = "/tmp/scv-eg-{tag}-{current_time_ms()}"
+    dir_create(root, true)
+    scv_init_repo(root)
+    root
+
+fn _no_hints() -> [text]:
+    []
+
+describe "scv refactoring-aware edit graph (D-03)":
+    it "splits a change into anchored hunks with old/new ranges":
+        step("common suffix trimmed, unique line anchors the middle")
+        val hunks = scv_eg_hunks("a.spl", "fn alpha():\n    x = 1\n", "fn beta():\n    x = 1\n    y = 2\n")
+        expect(hunks.len()).to_equal(2)
+        expect(hunks[0].old_start).to_equal(1)
+        expect(hunks[0].old_len).to_equal(1)
+        expect(hunks[0].new_start).to_equal(1)
+        expect(hunks[0].new_len).to_equal(1)
+        expect(hunks[1].old_len).to_equal(0)
+        expect(hunks[1].new_start).to_equal(3)
+        expect(hunks[1].new_len).to_equal(1)
+        step("identical texts yield no hunk; bounds are named constants")
+        expect(scv_eg_hunks("a.spl", "same\n", "same\n").len()).to_equal(0)
+        expect(SCV_EDIT_GRAPH_MAX_ANCHORS > 0).to_be(true)
+        expect(SCV_EDIT_GRAPH_MAX_LINES > 0).to_be(true)
+
+    it "links hunks to entities and entities to the inferred refactoring op":
+        val out = scv_edit_graph_from_files([EditGraphFile(old_rel: "a.spl", new_rel: "a.spl", old_text: "fn alpha():\n    x = 1\n", new_text: "fn beta():\n    x = 1\n    y = 2\n")])
+        expect(out).to_contain("edit-graph files=1 hunks=2 entities=2 ops=1\n")
+        expect(out).to_contain("file a.spl modified\n")
+        expect(out).to_contain("hunk h1 a.spl -1,1 +1,1\n")
+        expect(out).to_contain("hunk h2 a.spl -2,0 +3,1\n")
+        expect(out).to_contain("entity e1 a.spl:fn:alpha old=1-2 new=-\n")
+        expect(out).to_contain("entity e2 a.spl:fn:beta old=- new=1-3\n")
+        expect(out).to_contain("op r1 rename a.spl:fn:alpha -> a.spl:fn:beta ")
+        expect(out).to_contain("link hunk h1 -> entity e1\n")
+        expect(out).to_contain("link hunk h1 -> entity e2\n")
+        expect(out).to_contain("link hunk h2 -> entity e2\n")
+        expect(out).to_contain("link entity e1 -> op r1\n")
+        expect(out).to_contain("link entity e2 -> op r1\n")
+
+    it "carries a cross-file move as a many-to-many op over both files":
+        var files: [EditGraphFile] = []
+        files.push(EditGraphFile(old_rel: "a.spl", new_rel: "a.spl", old_text: "fn alpha():\n    x = 1\n    y = 2\nfn keep():\n    pass\n", new_text: "fn keep():\n    pass\n"))
+        files.push(EditGraphFile(old_rel: "", new_rel: "b.spl", old_text: "", new_text: "fn alpha():\n    x = 1\n    y = 2\n"))
+        val out = scv_edit_graph_from_files(files)
+        expect(out).to_contain("file b.spl added\n")
+        expect(out).to_contain("op r1 move a.spl:fn:alpha -> b.spl:fn:alpha 1000 accepted\n")
+        expect(out).to_contain("link entity e1 -> op r1\n")
+        expect(out).to_contain("link entity e3 -> op r1\n")
+
+    it "is exposed as `diff --view graph` over the repository comparison":
+        val root = _repo("view")
+        file_write("{root}/a.spl", "fn alpha():\n    x = 1\n")
+        scv_snapshot_with_identity(root, _no_hints())
+        step("no working-copy change -> no changes")
+        expect(scv_edit_graph(root)).to_equal("no changes\n")
+        step("rename the fn -> graph view with the rename op")
+        file_write("{root}/a.spl", "fn beta():\n    x = 1\n    y = 2\n")
+        val out = scv_diff_views(root, "graph", false)
+        expect(out.starts_with("view=graph\nedit-graph files=1 ")).to_be(true)
+        expect(out).to_contain("op r1 rename a.spl:fn:alpha -> a.spl:fn:beta ")
+        expect(out).to_contain("link hunk h1 -> entity e1\n")

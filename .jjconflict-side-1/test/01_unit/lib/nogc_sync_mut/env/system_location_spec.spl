@@ -1,0 +1,105 @@
+use std.spec.*
+use std.nogc_sync_mut.env.system_location.{
+    SystemLocationKind, SystemLocationInputs, LazyPathTemplate,
+    system_location_resolve_from, resolve_system_path_template_from, system_path_native_for,
+}
+
+fn inputs(platform: text = "linux", home: text = "/home/alice") -> SystemLocationInputs:
+    SystemLocationInputs(
+        platform: platform,
+        home: home,
+        user_profile: "C:/Users/Alice",
+        local_app_data: "C:\\Users\\Alice\\AppData\\Local",
+        app_data: "C:\\Users\\Alice\\AppData\\Roaming",
+        xdg_cache: "",
+        xdg_config: "",
+        xdg_data: "",
+        xdg_state: "",
+        xdg_runtime: "",
+        temp_dir: if platform == "windows": "C:\\Temp" else: "/tmp",
+        simple_home: "",
+        simple_user_local: "",
+        simple_user_cache: "",
+        simple_user_config: "",
+        simple_user_data: "",
+        simple_user_state: "",
+        simple_runtime: "",
+        simple_temp: "",
+        simple_cache: "",
+    )
+
+fn with_cache_override(base: SystemLocationInputs, value: text) -> SystemLocationInputs:
+    SystemLocationInputs(
+        platform: base.platform,
+        home: base.home,
+        user_profile: base.user_profile,
+        local_app_data: base.local_app_data,
+        app_data: base.app_data,
+        xdg_cache: base.xdg_cache,
+        xdg_config: base.xdg_config,
+        xdg_data: base.xdg_data,
+        xdg_state: base.xdg_state,
+        xdg_runtime: base.xdg_runtime,
+        temp_dir: base.temp_dir,
+        simple_home: base.simple_home,
+        simple_user_local: base.simple_user_local,
+        simple_user_cache: base.simple_user_cache,
+        simple_user_config: base.simple_user_config,
+        simple_user_data: base.simple_user_data,
+        simple_user_state: base.simple_user_state,
+        simple_runtime: base.simple_runtime,
+        simple_temp: base.simple_temp,
+        simple_cache: value,
+    )
+
+describe "lazy system path variables":
+    it "uses Linux standards and the compiler cache namespace":
+        val value = system_location_resolve_from(SystemLocationKind.CompilerCache, inputs()).unwrap()
+        expect(value).to_equal("/home/alice/.cache/simple/cache-manager")
+
+    it "uses native Windows sources but emits canonical forward slashes":
+        val value = system_location_resolve_from(SystemLocationKind.UserCache,
+            inputs(platform: "windows")).unwrap()
+        expect(value).to_equal("C:/Users/Alice/AppData/Local")
+
+    it "converts portable paths at Windows file and executable boundaries":
+        expect(system_path_native_for("C:/tools/simple.exe", "windows")).to_equal("C:\\tools\\simple.exe")
+        expect(system_path_native_for("/d/cache/objects", "windows")).to_equal("D:\\cache\\objects")
+        expect(system_path_native_for("c/tools/simple.exe", "windows")).to_equal("C:\\tools\\simple.exe")
+        expect(system_path_native_for("/c/tools/simple.exe", "MINGW64_NT")).to_equal("C:\\tools\\simple.exe")
+        expect(system_path_native_for("//server/share/tool.exe", "windows"))
+            .to_equal("\\\\server\\share\\tool.exe")
+        expect(system_path_native_for("/var/cache/simple", "linux")).to_equal("/var/cache/simple")
+
+    it "gives SIMPLE_CACHE precedence and rejects relative overrides":
+        val absolute = with_cache_override(inputs(), "/mnt/data/simple-cache-manager")
+        expect(system_location_resolve_from(SystemLocationKind.CompilerCache, absolute).unwrap())
+            .to_equal("/mnt/data/simple-cache-manager")
+        val relative = with_cache_override(inputs(), "build/cache")
+        expect(system_location_resolve_from(SystemLocationKind.CompilerCache, relative).is_err())
+            .to_equal(true)
+
+    it "resolves registered references and escaped braces":
+        # Keep doubled braces split: the current bootstrap frontend incorrectly
+        # re-interpolates `{{name}}` even when it came from a raw literal.
+        val escaped_template = r"{sys:user_cache}/simple/" + "{" + "{" + "literal" + "}" + "}"
+        val value = resolve_system_path_template_from(
+            escaped_template, inputs()).unwrap()
+        expect(value).to_equal("/home/alice/.cache/simple/{literal}")
+
+    it "rejects unknown and malformed references":
+        expect(resolve_system_path_template_from('{sys:unknown}/x', inputs()).is_err())
+            .to_equal(true)
+        expect(resolve_system_path_template_from('{sys:user_cache', inputs()).is_err())
+            .to_equal(true)
+        expect(resolve_system_path_template_from('{ordinary}', inputs()).is_err())
+            .to_equal(true)
+
+    it "does no work until resolve and memoizes the first result":
+        var template = LazyPathTemplate.new('{sys:compiler_cache}/objects')
+        expect(template.resolved_once).to_equal(false)
+        val first = template.resolve_from(with_cache_override(inputs(), "/cache/one")).unwrap()
+        val second = template.resolve_from(with_cache_override(inputs(), "/cache/two")).unwrap()
+        expect(first).to_equal("/cache/one/objects")
+        expect(second).to_equal(first)
+        expect(template.resolved_once).to_equal(true)

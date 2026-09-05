@@ -1,0 +1,874 @@
+#[cfg(feature = "vulkan")]
+use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffer, STATE};
+#[cfg(feature = "vulkan")]
+use std::sync::Arc;
+use crate::value::{
+    byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_byte_array_new, rt_byte_array_new_len,
+    HeapObjectType, RuntimeArray, RuntimeValue,
+};
+
+// Raw-ABI transfer ceiling. Sized from the two DEFAULT render targets, not
+// from a small framebuffer with the large ones as an afterthought:
+//
+//   7680x4320 (8K screen) = 33,177,600 px = 132,710,400 bytes
+//   8192x8192 (square 8K) = 67,108,864 px = 268,435,456 bytes
+//
+// The previous value was exactly 268,435,456, so 8192x8192 passed only because
+// the check is `>` and not `>=` — it sat precisely ON the boundary, and any
+// larger target (or any transfer carrying one extra byte of padding) was
+// rejected outright. That is a resolution ceiling disguised as a safety cap.
+// 2 GiB keeps the ABI bounded against absurd requests while admitting
+// 16384x16384 (1 GiB) with headroom, so neither default target is near the
+// edge and there is no practical upper bound on supported resolutions.
+const MAX_RAW_TRANSFER_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+
+// ============================================================================
+// Buffer Management
+// ============================================================================
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64 {
+    let mut state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(d) => d,
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
+    };
+
+    // Decode usage flags from the Simple-side enum encoding:
+    //   0x80 = STORAGE_BUFFER, 0x10 = UNIFORM_BUFFER,
+    //   0x40 = VERTEX_BUFFER,  0x20 = INDEX_BUFFER,
+    //   0x1  = TRANSFER_SRC,   0x2  = TRANSFER_DST
+    let buf_usage = BufferUsage {
+        storage: (usage & 0x80) != 0,
+        uniform: (usage & 0x10) != 0,
+        vertex: (usage & 0x40) != 0,
+        index: (usage & 0x20) != 0,
+        transfer_src: (usage & 0x01) != 0,
+        transfer_dst: (usage & 0x02) != 0,
+    };
+
+    let buf_usage = if !buf_usage.storage && !buf_usage.uniform && !buf_usage.vertex && !buf_usage.index {
+        BufferUsage::storage()
+    } else {
+        buf_usage
+    };
+
+    match VulkanBuffer::new(device, size as u64, buf_usage) {
+        Ok(buf) => {
+            let h = alloc_handle();
+            state.buffers.insert(h, Arc::new(buf));
+            h
+        }
+        Err(e) => {
+            state.set_error(format!("alloc_buffer: {e}"));
+            0
+        }
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_alloc_buffer(_size: i64, _usage: i64) -> i64 {
+    0
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_free_buffer(handle: i64) -> i64 {
+    let mut state = STATE.lock();
+    if state.buffers.remove(&handle).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_free_buffer(_handle: i64) -> i64 {
+    0
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_map_memory(_handle: i64) -> i64 {
+    // VulkanBuffer uses gpu-allocator staged transfers; explicit map not exposed.
+    let state = STATE.lock();
+    if state.buffers.contains_key(&_handle) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_map_memory(_handle: i64) -> i64 {
+    0
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_unmap_memory(_handle: i64) -> i64 {
+    let state = STATE.lock();
+    if state.buffers.contains_key(&_handle) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_unmap_memory(_handle: i64) -> i64 {
+    0
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Upload raw bytes from `data_ptr` (host memory) into a Vulkan buffer.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data: RuntimeValue, offset: i64) -> i64 {
+    let Some(data) = byte_array_bytes(data) else {
+        return 0;
+    };
+    copy_to_buffer_bytes(handle, &data, offset)
+}
+
+#[cfg(feature = "vulkan")]
+fn copy_to_buffer_bytes(handle: i64, data: &[u8], offset: i64) -> i64 {
+    let Ok(offset) = u64::try_from(offset) else {
+        return 0;
+    };
+    let mut state = STATE.lock();
+    let buf = match state.buffers.get(&handle) {
+        Some(b) => b,
+        None => {
+            state.set_error(format!("copy_to_buffer: unknown handle {handle}"));
+            return 0;
+        }
+    };
+
+    match buf.upload_at(data, offset) {
+        Ok(()) => 1,
+        Err(e) => {
+            let err_msg = format!("copy_to_buffer: {e}");
+            state.set_error(err_msg.clone());
+            tracing::error!("{}", err_msg);
+            0
+        }
+    }
+}
+
+/// AOT/raw-array ABI for pure-Simple native executables.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64) -> i64 {
+    if byte_count < 0 || offset < 0 || byte_count > MAX_RAW_TRANSFER_BYTES {
+        return 0;
+    }
+    let Some(end) = offset.checked_add(byte_count) else {
+        return 0;
+    };
+    {
+        let state = STATE.lock();
+        let Some(buf) = state.buffers.get(&handle) else {
+            return 0;
+        };
+        if end as u64 > buf.size() {
+            return 0;
+        }
+    }
+    if byte_count == 0 {
+        return copy_to_buffer_bytes(handle, &[], offset);
+    }
+    if data_ptr <= 0 {
+        return 0;
+    }
+    let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, byte_count as usize) };
+    copy_to_buffer_bytes(handle, data, offset)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_to_buffer(_handle: i64, _data: i64, _offset: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_to_buffer_raw(_handle: i64, _data_ptr: i64, _byte_count: i64, _offset: i64) -> i64 {
+    0
+}
+
+/// Call-scoped packed-byte upload with an explicit bounded prefix.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_to_buffer_array(handle: i64, data: RuntimeValue, byte_count: i64, offset: i64) -> i64 {
+    let Some(bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Ok(byte_count) = usize::try_from(byte_count) else {
+        return 0;
+    };
+    if byte_count > bytes.len() {
+        return 0;
+    }
+    rt_vulkan_copy_to_buffer_raw(handle, bytes.as_ptr() as i64, byte_count as i64, offset)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Download bytes from a Vulkan buffer to `data_ptr` (host memory).
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_from_buffer(data: RuntimeValue, handle: i64, offset: i64) -> i64 {
+    let Some(current) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let len = current.len();
+    if offset != 0 {
+        return 0;
+    }
+    let state = STATE.lock();
+    let buf = match state.buffers.get(&handle) {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    if len > buf.size() as usize {
+        return 0;
+    }
+    match buf.download(len as u64) {
+        Ok(bytes) => byte_array_write(data, &bytes) as i64,
+        Err(e) => {
+            tracing::error!("copy_from_buffer: {e}");
+            0
+        }
+    }
+}
+
+/// AOT/raw-array ABI for downloading into core-C-owned byte storage.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64) -> i64 {
+    if data_ptr <= 0 || byte_count < 0 || offset < 0 || byte_count > MAX_RAW_TRANSFER_BYTES {
+        return 0;
+    }
+    let end = match offset.checked_add(byte_count) {
+        Some(end) => end,
+        None => return 0,
+    };
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return 0;
+    };
+    if end as u64 > buf.size() {
+        return 0;
+    }
+    let Ok(downloaded) = buf.download_range(offset as u64, byte_count as u64) else {
+        return 0;
+    };
+    unsafe {
+        std::ptr::copy_nonoverlapping(downloaded.as_ptr(), data_ptr as *mut u8, downloaded.len());
+    }
+    1
+}
+
+/// Download strided device rows into tightly packed core-C-owned storage.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
+    data_ptr: i64,
+    data_len: i64,
+    handle: i64,
+    src_offset: i64,
+    row_bytes: i64,
+    row_count: i64,
+    src_stride: i64,
+) -> i64 {
+    if data_len < 0
+        || src_offset < 0
+        || row_bytes < 0
+        || row_count < 0
+        || src_stride < 0
+        || (row_count > 0 && row_bytes > 0 && src_stride < row_bytes)
+        || data_len > MAX_RAW_TRANSFER_BYTES
+        || row_count > 16_384
+    {
+        return 0;
+    }
+    let Some(packed_len) = row_bytes.checked_mul(row_count) else {
+        return 0;
+    };
+    if packed_len != data_len || (data_len > 0 && data_ptr <= 0) {
+        return 0;
+    }
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return 0;
+    };
+    let Ok(downloaded) = buf.download_strided(src_offset as u64, row_bytes as u64, row_count as u64, src_stride as u64)
+    else {
+        return 0;
+    };
+    if downloaded.len() != data_len as usize {
+        return 0;
+    }
+    if !downloaded.is_empty() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(downloaded.as_ptr(), data_ptr as *mut u8, downloaded.len());
+        }
+    }
+    1
+}
+
+/// Download packed disjoint row regions with one Vulkan transfer submission.
+/// `regions_ptr` points to little-endian u64 tuples:
+/// (source_offset, row_bytes, row_count, source_stride).
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_from_buffer_regions_raw(
+    data_ptr: i64,
+    data_len: i64,
+    handle: i64,
+    regions_ptr: i64,
+    regions_len: i64,
+) -> i64 {
+    const RECORD_BYTES: i64 = 32;
+    if data_len <= 0
+        || data_len > MAX_RAW_TRANSFER_BYTES
+        || data_ptr <= 0
+        || regions_ptr <= 0
+        || regions_len <= 0
+        || regions_len > crate::vulkan::swapchain::MAX_PRESENT_DAMAGE_RECTS as i64 * RECORD_BYTES
+        || regions_len % RECORD_BYTES != 0
+    {
+        return 0;
+    }
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return 0;
+    };
+    let raw = unsafe { std::slice::from_raw_parts(regions_ptr as *const u8, regions_len as usize) };
+    let mut regions = Vec::with_capacity((regions_len / RECORD_BYTES) as usize);
+    for record in raw.chunks_exact(RECORD_BYTES as usize) {
+        let field = |offset: usize| u64::from_le_bytes(record[offset..offset + 8].try_into().unwrap());
+        regions.push((field(0), field(8), field(16), field(24)));
+    }
+    let Ok(downloaded) = buf.download_regions(&regions) else {
+        return 0;
+    };
+    if downloaded.len() != data_len as usize {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(downloaded.as_ptr(), data_ptr as *mut u8, downloaded.len());
+    }
+    1
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_from_buffer(_data: i64, _handle: i64, _offset: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_from_buffer_raw(_data_ptr: i64, _byte_count: i64, _handle: i64, _offset: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
+    _data_ptr: i64,
+    _data_len: i64,
+    _handle: i64,
+    _src_offset: i64,
+    _row_bytes: i64,
+    _row_count: i64,
+    _src_stride: i64,
+) -> i64 {
+    0
+}
+
+fn runtime_i64_array_bytes(values: RuntimeValue, fields_per_record: usize) -> Option<Vec<u8>> {
+    let len = usize::try_from(rt_array_len(values)).ok()?;
+    if len == 0 || len % fields_per_record != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(len.checked_mul(8)?);
+    for index in 0..len {
+        bytes.extend_from_slice(&rt_array_get(values, index as i64).as_int().to_le_bytes());
+    }
+    Some(bytes)
+}
+
+/// Call-scoped packed-byte download. Results are committed only after success.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_from_buffer_array(
+    data: RuntimeValue,
+    byte_count: i64,
+    handle: i64,
+    offset: i64,
+) -> i64 {
+    let Some(mut bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Ok(byte_count) = usize::try_from(byte_count) else {
+        return 0;
+    };
+    if byte_count > bytes.len() {
+        return 0;
+    }
+    let status = rt_vulkan_copy_from_buffer_raw(bytes.as_mut_ptr() as i64, byte_count as i64, handle, offset);
+    if status == 0 || !byte_array_write(data, &bytes) {
+        return 0;
+    }
+    status
+}
+
+/// One-call pixel readback: download a device buffer straight into a Simple
+/// `[u32]` array AND compute the readback identity checksum in the same pass.
+///
+/// Replaces the per-pixel Simple marshalling chain this used to pay per frame
+/// (`vulkan_sffi_read_buffer_bytes` → `_bytes_to_pixel_array` 4-byte-extract
+/// loop → `engine2d_readback_with_identity` modulo-checksum loop): measured at
+/// 800×600 under JIT those loops cost ~20.3 ms + ~8.1 ms per frame (see
+/// doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md). The checksum algorithm
+/// is byte-identical to `engine2d_readback_with_identity`
+/// ((acc + px) % 2147483647, in order), so receipts see the same values.
+///
+/// Returns the checksum on success, -1 on ANY failure. It must NOT be 0:
+/// the destination is caller-allocated and reused across frames, so the
+/// caller cannot detect failure by inspecting the array (the old tuple
+/// variant returned an empty array and callers checked its length; that
+/// signal no longer exists). A 0 sentinel would be indistinguishable from a
+/// legitimately-0 checksum, and a fail-open here silently redisplays the
+/// PREVIOUS frame's pixels while marking the host mirror valid. A real
+/// checksum is always in [0, 2^31-2], so -1 is unambiguous.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_readback_u32_checksum(
+    data: RuntimeValue,
+    pixel_count: i64,
+    handle: i64,
+    offset: i64,
+) -> i64 {
+    if pixel_count <= 0 || offset < 0 {
+        return -1;
+    }
+    let Some(arr) =
+        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(data, HeapObjectType::Array)
+    else {
+        return -1;
+    };
+    let (len, data_ptr) = unsafe { ((*arr).len, (*arr).data) };
+    let Ok(pixel_count_u64) = u64::try_from(pixel_count) else {
+        return -1;
+    };
+    if len < pixel_count_u64 || data_ptr.is_null() {
+        return -1;
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return -1;
+    };
+    if byte_count > MAX_RAW_TRANSFER_BYTES {
+        return -1;
+    }
+    let t_dl_start = std::time::Instant::now();
+    let slots = unsafe { std::slice::from_raw_parts_mut(data_ptr, pixel_count as usize) };
+    let trace = std::env::var("SIMPLE_VK_DL_TRACE").as_deref() == Ok("1");
+    let mut t_slot_us: u128 = 0;
+    // Fill the caller's slots straight out of the MAPPED staging memory. The
+    // previous shape called `download_range`, which allocated a Vec the full
+    // size of the framebuffer and memcpy'd the mapping into it before this
+    // loop ever ran. At 8K that intermediate is 132MB allocated + 132MB copied
+    // per frame (measured 5-10ms + 29-88ms on Apple/MoltenVK), for bytes that
+    // are read exactly once. `download_range_with` borrows the mapping so the
+    // per-frame host traffic is one pass, not three. 8K is the sizing target:
+    // the saving is proportional to pixel count and no threshold gates it, so
+    // smaller framebuffers take the same path and simply save less.
+    let filled = {
+        let state = STATE.lock();
+        let Some(buf) = state.buffers.get(&handle) else {
+            return -1;
+        };
+        if offset + byte_count > buf.size() as i64 {
+            return -1;
+        }
+        match buf.download_range_with(offset as u64, byte_count as u64, |bytes| {
+            // A short download would leave the tail of the caller's reused
+            // buffer holding the PREVIOUS frame while the loop silently
+            // stopped early and the checksum still looked plausible. Fail
+            // closed instead.
+            if bytes.len() as i64 != byte_count {
+                return -1i64;
+            }
+            let t_slot = std::time::Instant::now();
+            // The checksum is defined as the sequential fold
+            // `acc = (acc + px) % 2147483647`. Every `px` is non-negative, and
+            // addition modulo M is a ring homomorphism, so that fold is
+            // exactly `(sum of px) % M`. Summing first and reducing ONCE is
+            // therefore byte-identical to the old result while removing a
+            // 64-bit integer division from the per-pixel dependency chain —
+            // the division, not the memory traffic, dominated this loop.
+            // A u128 accumulator cannot overflow for any transfer this runtime
+            // admits: MAX_RAW_TRANSFER_BYTES caps the count at 2^26 pixels and
+            // each px is below 2^32.
+            let mut sum: u128 = 0;
+            for (slot, chunk) in slots.iter_mut().zip(bytes.chunks_exact(4)) {
+                let px = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as i64;
+                *slot = RuntimeValue::from_int(px);
+                sum += px as u128;
+            }
+            t_slot_us = t_slot.elapsed().as_micros();
+            (sum % 2_147_483_647u128) as i64
+        }) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        }
+    };
+    if filled < 0 {
+        return -1;
+    }
+    if trace {
+        eprintln!(
+            "rb_trace download_us={} slotloop_us={}",
+            t_dl_start.elapsed().as_micros() - t_slot_us,
+            t_slot_us
+        );
+    }
+    filled
+}
+
+/// Copy `count` u32 pixel slots from `src` into `dst`, both Simple `[u32]`
+/// arrays, and return `count` (or -1 on any validation failure).
+///
+/// This exists because the Vulkan readback facade must hand the caller an
+/// array it does not retain, and the pure-Simple element loop that did so cost
+/// ~482ms per 8K frame under JIT — by itself more than half the frame. Both
+/// sides are RuntimeValue slot arrays with identical representation, so the
+/// copy is a single `copy_nonoverlapping` over slots (never over raw u32
+/// bytes: the destination must keep the slot tagging the source already has).
+///
+/// Fails closed rather than copying a partial prefix: a short copy would leave
+/// the tail of the destination holding an earlier frame, which is exactly the
+/// silent-stale-pixels failure this whole path is written to avoid.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_u32_slots(
+    dst: RuntimeValue,
+    src: RuntimeValue,
+    count: i64,
+) -> i64 {
+    if count < 0 {
+        return -1;
+    }
+    if count == 0 {
+        return 0;
+    }
+    let Some(dst_arr) =
+        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(dst, HeapObjectType::Array)
+    else {
+        return -1;
+    };
+    let Some(src_arr) =
+        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(src, HeapObjectType::Array)
+    else {
+        return -1;
+    };
+    let (dst_len, dst_ptr) = unsafe { ((*dst_arr).len, (*dst_arr).data) };
+    let (src_len, src_ptr) = unsafe { ((*src_arr).len, (*src_arr).data) };
+    let Ok(count_u64) = u64::try_from(count) else {
+        return -1;
+    };
+    if dst_len < count_u64 || src_len < count_u64 || dst_ptr.is_null() || src_ptr.is_null() {
+        return -1;
+    }
+    if std::ptr::eq(dst_ptr as *const RuntimeValue, src_ptr as *const RuntimeValue) {
+        return count;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, count as usize);
+    }
+    count
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_readback_u32_checksum(
+    _data: RuntimeValue,
+    _pixel_count: i64,
+    _handle: i64,
+    _offset: i64,
+) -> i64 {
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_from_buffer_strided(
+    data: RuntimeValue,
+    handle: i64,
+    src_offset: i64,
+    row_bytes: i64,
+    row_count: i64,
+    src_stride: i64,
+) -> i64 {
+    let Some(mut bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Ok(data_len) = i64::try_from(bytes.len()) else {
+        return 0;
+    };
+    let status = rt_vulkan_copy_from_buffer_strided_raw(
+        bytes.as_mut_ptr() as i64,
+        data_len,
+        handle,
+        src_offset,
+        row_bytes,
+        row_count,
+        src_stride,
+    );
+    if status == 0 || !byte_array_write(data, &bytes) {
+        return 0;
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_from_buffer_regions(data: RuntimeValue, handle: i64, regions: RuntimeValue) -> i64 {
+    let Some(mut bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Some(region_bytes) = runtime_i64_array_bytes(regions, 4) else {
+        return 0;
+    };
+    let Ok(data_len) = i64::try_from(bytes.len()) else {
+        return 0;
+    };
+    let Ok(regions_len) = i64::try_from(region_bytes.len()) else {
+        return 0;
+    };
+    let status = rt_vulkan_copy_from_buffer_regions_raw(
+        bytes.as_mut_ptr() as i64,
+        data_len,
+        handle,
+        region_bytes.as_ptr() as i64,
+        regions_len,
+    );
+    if status == 0 || !byte_array_write(data, &bytes) {
+        return 0;
+    }
+    status
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_from_buffer_regions_raw(
+    _data_ptr: i64,
+    _data_len: i64,
+    _handle: i64,
+    _regions_ptr: i64,
+    _regions_len: i64,
+) -> i64 {
+    0
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod raw_guard_tests {
+    use super::rt_vulkan_copy_to_buffer_raw;
+
+    #[test]
+    fn vulkan_raw_guard_rejects_unknown_upload_handle_before_pointer_access() {
+        assert_eq!(rt_vulkan_copy_to_buffer_raw(0, 1, 4, 0), 0);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Return a new byte array containing a bounded Vulkan buffer range.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> RuntimeValue {
+    if handle <= 0 || byte_count < 0 || offset < 0 {
+        return rt_byte_array_new(0);
+    }
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return rt_byte_array_new(0);
+    };
+    let end = match offset.checked_add(byte_count) {
+        Some(end) if end as u64 <= buf.size() => end,
+        _ => return rt_byte_array_new(0),
+    };
+    let Ok(downloaded) = buf.download_range(offset as u64, byte_count as u64) else {
+        return rt_byte_array_new(0);
+    };
+    let result = rt_byte_array_new_len(downloaded.len() as u64);
+    if byte_array_write(result, &downloaded) {
+        result
+    } else {
+        rt_byte_array_new(0)
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_read_buffer_bytes(_handle: i64, _byte_count: i64, _offset: i64) -> RuntimeValue {
+    rt_byte_array_new(0)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Device-to-device buffer copy via staging download + upload.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_buffer(dst: i64, src: i64, size: i64) -> i64 {
+    let state = STATE.lock();
+    let src_buf = match state.buffers.get(&src) {
+        Some(b) => b,
+        None => return 0,
+    };
+    let copy_size = if size > 0 { size as u64 } else { src_buf.size() };
+    let bytes = match src_buf.download(copy_size) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("copy_buffer download: {e}");
+            return 0;
+        }
+    };
+
+    let dst_buf = match state.buffers.get(&dst) {
+        Some(b) => b,
+        None => return 0,
+    };
+    match dst_buf.upload(&bytes) {
+        Ok(()) => 1,
+        Err(e) => {
+            tracing::error!("copy_buffer upload: {e}");
+            0
+        }
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_buffer(_dst: i64, _src: i64, _size: i64) -> i64 {
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        rt_vulkan_copy_from_buffer_regions_raw, rt_vulkan_copy_from_buffer_strided_raw, rt_vulkan_copy_to_buffer_raw,
+        rt_vulkan_read_buffer_bytes, MAX_RAW_TRANSFER_BYTES,
+    };
+    use crate::value::{byte_array_bytes, rt_array_len};
+
+    #[test]
+    fn read_buffer_bytes_rejects_invalid_ranges_with_empty_bytes() {
+        assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(0, 1, 0)), 0);
+        assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(1, -1, 0)), 0);
+        assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(1, 1, -1)), 0);
+    }
+
+    #[test]
+    fn raw_transfer_cap_covers_both_default_8k_targets_with_headroom() {
+        // 8K screen.
+        assert!(MAX_RAW_TRANSFER_BYTES >= 7_680i64 * 4_320 * 4);
+        // Square 8K — the old 256MiB cap admitted this ONLY because the guard
+        // is `>` and 8192*8192*4 is exactly 256MiB. Pin real headroom so a
+        // default target is never one byte from rejection.
+        assert!(MAX_RAW_TRANSFER_BYTES > 8_192i64 * 8_192 * 4);
+        assert!(MAX_RAW_TRANSFER_BYTES >= 2 * 8_192i64 * 8_192 * 4);
+        // And no practical ceiling below 16K square.
+        assert!(MAX_RAW_TRANSFER_BYTES >= 16_384i64 * 16_384 * 4);
+        assert_eq!(MAX_RAW_TRANSFER_BYTES, 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn strided_raw_guard_rejects_invalid_shape_before_pointer_access() {
+        assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 8, 0, 0, 4, 3, 8), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 12, 0, 0, 4, 3, 2), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 0, 0, 0, 0, 16_385, 0), 0);
+    }
+
+    #[test]
+    fn region_raw_guard_rejects_invalid_shape_before_pointer_access() {
+        assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(0, 8, 0, 0, 0), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(1, 8, 0, 1, 31), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(1, 8, 0, 1, 32 * 1025), 0);
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a live Vulkan device"]
+    fn native_vulkan_upload_honors_nonzero_offset() {
+        use super::{rt_vulkan_alloc_buffer, rt_vulkan_free_buffer};
+        use super::super::vulkan_graphics_runtime_core::{rt_vulkan_init, rt_vulkan_shutdown};
+
+        struct VulkanShutdown;
+        impl Drop for VulkanShutdown {
+            fn drop(&mut self) {
+                rt_vulkan_shutdown();
+            }
+        }
+
+        assert_eq!(rt_vulkan_init(), 1);
+        let _shutdown = VulkanShutdown;
+        let buffer = rt_vulkan_alloc_buffer(16, 0x80);
+        assert!(buffer > 0);
+        let payload = [0u8, 1, 127, 128, 254, 255];
+        assert_eq!(
+            rt_vulkan_copy_to_buffer_raw(buffer, payload.as_ptr() as i64, payload.len() as i64, 5),
+            1
+        );
+        assert_eq!(
+            byte_array_bytes(rt_vulkan_read_buffer_bytes(buffer, payload.len() as i64, 5)).unwrap(),
+            payload
+        );
+        assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(buffer, 4, 14)), 0);
+        let rows = [10u8, 11, 12, 13, 20, 21, 22, 23, 30, 31, 32, 33];
+        assert_eq!(
+            rt_vulkan_copy_to_buffer_raw(buffer, rows.as_ptr() as i64, rows.len() as i64, 0),
+            1
+        );
+        let mut packed = [0u8; 6];
+        assert_eq!(
+            rt_vulkan_copy_from_buffer_strided_raw(packed.as_mut_ptr() as i64, packed.len() as i64, buffer, 1, 2, 3, 4,),
+            1
+        );
+        assert_eq!(packed, [11, 12, 21, 22, 31, 32]);
+        let mut descriptors = Vec::new();
+        for value in [0u64, 2, 2, 4, 10, 2, 1, 2] {
+            descriptors.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut regions_packed = [0u8; 6];
+        assert_eq!(
+            rt_vulkan_copy_from_buffer_regions_raw(
+                regions_packed.as_mut_ptr() as i64,
+                regions_packed.len() as i64,
+                buffer,
+                descriptors.as_ptr() as i64,
+                descriptors.len() as i64,
+            ),
+            1
+        );
+        assert_eq!(regions_packed, [10, 11, 20, 21, 32, 33]);
+        assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, 0, 0, 16), 1);
+        assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, 0, 0, 17), 0);
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
+    }
+}

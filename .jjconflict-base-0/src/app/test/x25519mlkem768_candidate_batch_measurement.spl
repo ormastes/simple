@@ -1,0 +1,610 @@
+# Paired scalar/candidate full-exchange timing with ABBA ordering.
+mod app.test.x25519mlkem768_candidate_batch_measurement
+
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768Config,
+    X25519MlKem768SelectionMode, X25519MlKem768SimdAdmission,
+    X25519MlKem768Evidence}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend}
+use os.crypto.x25519_mlkem768.hybrid.{
+    X25519MlKem768PairedExchangeObservation,
+    x25519_mlkem768_keygen, x25519_mlkem768_encapsulate,
+    x25519_mlkem768_decapsulate,
+    x25519_mlkem768_keygen_simd_candidate,
+    x25519_mlkem768_encapsulate_simd_candidate,
+    x25519_mlkem768_decapsulate_simd_candidate,
+    x25519_mlkem768_paired_exchange_observation}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768MeasurementQualification,
+    x25519_mlkem768_measurement_qualification_sha256,
+    x25519_mlkem768_measurement_qualification_valid,
+    x25519_mlkem768_qualified_simd_measurement_reason}
+use lib.common.crypto.x25519_mlkem768.qualified_timing.{
+    X25519_MLKEM768_WARM_SETUP_SCHEMA,
+    X25519_MLKEM768_TIMED_OPERATION_SCHEMA,
+    X25519_MLKEM768_PAIRED_SCHEDULE_SCHEMA,
+    X25519MlKem768TimingRole,
+    X25519MlKem768WarmSetupReceipt,
+    X25519MlKem768TimedOperationReceipt,
+    X25519MlKem768PairedScheduleReceipt,
+    x25519_mlkem768_warm_setup_receipt_sha256,
+    x25519_mlkem768_sample_set_sha256,
+    x25519_mlkem768_timed_operation_receipt_sha256,
+    x25519_mlkem768_paired_schedule_receipt_sha256,
+    x25519_mlkem768_admit_warm_setup,
+    x25519_mlkem768_admit_timed_operations,
+    x25519_mlkem768_admit_paired_schedule}
+use std.nogc_sync_mut.platform_measurement_observer.{
+    platform_measurement_refresh_process_rss}
+use os.crypto.x25519_mlkem768.hybrid_support.{
+    x25519_mlkem768_wipe_owned, x25519_mlkem768_wipe_owned_bytes,
+    x25519_mlkem768_lists_equal, x25519_mlkem768_digest,
+    x25519_mlkem768_buffer_error_text}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+struct X25519MlKem768PairedTimingResult:
+    qualification: X25519MlKem768MeasurementQualification
+    scalar_warm: X25519MlKem768WarmSetupReceipt
+    candidate_warm: X25519MlKem768WarmSetupReceipt
+    scalar_timed: X25519MlKem768TimedOperationReceipt
+    candidate_timed: X25519MlKem768TimedOperationReceipt
+    schedule: X25519MlKem768PairedScheduleReceipt
+
+struct _X25519MlKem768Oracle:
+    client_share_digest: text
+    server_share_digest: text
+    shared_secret: list
+
+struct _X25519MlKem768ExchangeObservation:
+    started_ns: i64
+    finished_ns: i64
+    simd_chunk_hits: i64
+    observed_rvv_vlen_bits: i64
+    executor_identity: text
+    artifact_digest: text
+
+struct _X25519MlKem768PairedSamples:
+    scalar_samples_ns: [i64]
+    candidate_samples_ns: [i64]
+    scalar_started_ns: [i64]
+    scalar_finished_ns: [i64]
+    candidate_started_ns: [i64]
+    candidate_finished_ns: [i64]
+    candidate_simd_chunk_hits: i64
+    candidate_observed_rvv_vlen_bits: i64
+    candidate_executor_identity: text
+    candidate_artifact_digest: text
+
+fn _copy_list(values: list) -> list:
+    var out: list = []
+    var index = 0
+    while index < values.len():
+        out.push(values.get(index))
+        index = index + 1
+    out
+
+fn _copy_bytes(values: [u8]) -> [u8]:
+    var out: [u8] = []
+    var index = 0
+    while index < values.len():
+        out.push(values[index])
+        index = index + 1
+    out
+
+fn _digest(values: list) -> Result<text, text>:
+    match x25519_mlkem768_digest(values):
+        case Ok(digest): Ok(digest)
+        case Err(error): Err(x25519_mlkem768_buffer_error_text(error))
+
+fn x25519_mlkem768_paired_elapsed_ns(
+        started_ns: i64, finished_ns: i64) -> Result<i64, text>:
+    if started_ns <= 0 or finished_ns <= started_ns:
+        return Err("X25519MLKEM768 paired monotonic timing unavailable")
+    Ok(finished_ns - started_ns)
+
+fn _scalar_config(config: X25519MlKem768Config) -> X25519MlKem768Config:
+    var scalar = config
+    scalar.requested_backend = X25519MlKem768Backend.ScalarCpu
+    scalar.selection_mode = X25519MlKem768SelectionMode.Require
+    scalar
+
+fn _candidate_evidence_valid(
+        qualification: X25519MlKem768MeasurementQualification,
+        client_evidence: X25519MlKem768Evidence,
+        server_evidence: X25519MlKem768Evidence,
+        recovered_evidence: X25519MlKem768Evidence) -> bool:
+    val identity = qualification.target.executor_identity
+    val artifact = qualification.target.backend_artifact_sha256
+    val common =
+        client_evidence.executor_identity == identity and
+        server_evidence.executor_identity == identity and
+        recovered_evidence.executor_identity == identity and
+        client_evidence.artifact_digest == artifact and
+        server_evidence.artifact_digest == artifact and
+        recovered_evidence.artifact_digest == artifact and
+        not client_evidence.fallback_used and
+        not server_evidence.fallback_used and
+        not recovered_evidence.fallback_used and
+        client_evidence.simd_chunk_hits > 0 and
+        client_evidence.simd_chunk_hits <= 1000000000 and
+        server_evidence.simd_chunk_hits > 0 and
+        server_evidence.simd_chunk_hits <= 1000000000 and
+        recovered_evidence.simd_chunk_hits > 0 and
+        recovered_evidence.simd_chunk_hits <= 1000000000 and
+        client_evidence.observed_rvv_vlen_bits ==
+            server_evidence.observed_rvv_vlen_bits and
+        client_evidence.observed_rvv_vlen_bits ==
+            recovered_evidence.observed_rvv_vlen_bits
+    if not common: return false
+    if qualification.target.backend == X25519MlKem768EvidenceBackend.Rvv:
+        return recovered_evidence.observed_rvv_vlen_bits > 0
+    recovered_evidence.observed_rvv_vlen_bits == 0
+
+fn _scalar_evidence_valid(
+        qualification: X25519MlKem768MeasurementQualification,
+        client_evidence: X25519MlKem768Evidence,
+        server_evidence: X25519MlKem768Evidence,
+        recovered_evidence: X25519MlKem768Evidence) -> bool:
+    # Scalar execution is linked to the measured runner artifact because the
+    # in-process scalar evidence intentionally has no separate binary digest.
+    qualification.target.scalar_backend_identity == "pure-simple-scalar" and
+    qualification.target.scalar_backend_artifact_sha256 ==
+        qualification.target.runner_artifact_sha256 and
+    client_evidence.selected_backend == X25519MlKem768Backend.ScalarCpu and
+    server_evidence.selected_backend == X25519MlKem768Backend.ScalarCpu and
+    recovered_evidence.selected_backend == X25519MlKem768Backend.ScalarCpu and
+    client_evidence.executor_identity == "pure-simple-scalar" and
+    server_evidence.executor_identity == "pure-simple-scalar" and
+    recovered_evidence.executor_identity == "pure-simple-scalar" and
+    client_evidence.artifact_digest == "" and
+    server_evidence.artifact_digest == "" and
+    recovered_evidence.artifact_digest == "" and
+    not client_evidence.fallback_used and
+    not server_evidence.fallback_used and
+    not recovered_evidence.fallback_used and
+    client_evidence.simd_chunk_hits == 0 and
+    server_evidence.simd_chunk_hits == 0 and
+    recovered_evidence.simd_chunk_hits == 0 and
+    client_evidence.observed_rvv_vlen_bits == 0 and
+    server_evidence.observed_rvv_vlen_bits == 0 and
+    recovered_evidence.observed_rvv_vlen_bits == 0
+
+fn _qualify_oracle(
+        qualification: X25519MlKem768MeasurementQualification,
+        config: X25519MlKem768Config,
+        admission: X25519MlKem768SimdAdmission,
+        client_private: [u8], d: list, z: list,
+        server_private: [u8], m: list) -> Result<_X25519MlKem768Oracle, text>:
+    val candidate_private = _copy_bytes(client_private)
+    val candidate_server_private = _copy_bytes(server_private)
+    val candidate_d = _copy_list(d)
+    val candidate_z = _copy_list(z)
+    val candidate_m = _copy_list(m)
+    defer x25519_mlkem768_wipe_owned_bytes(candidate_private)
+    defer x25519_mlkem768_wipe_owned_bytes(candidate_server_private)
+    defer x25519_mlkem768_wipe_owned(candidate_d)
+    defer x25519_mlkem768_wipe_owned(candidate_z)
+    defer x25519_mlkem768_wipe_owned(candidate_m)
+    val candidate_client = x25519_mlkem768_keygen_simd_candidate(
+        config, admission, candidate_private,
+        candidate_d, candidate_z)?
+    defer x25519_mlkem768_wipe_owned(candidate_client.decapsulation_key)
+    defer x25519_mlkem768_wipe_owned_bytes(candidate_client.x25519_private_key)
+    val candidate_server =
+        x25519_mlkem768_encapsulate_simd_candidate(
+            config, admission,
+            candidate_client.client_key_share, candidate_server_private,
+            candidate_m)?
+    defer x25519_mlkem768_wipe_owned(candidate_server.shared_secret)
+    val candidate_recovered =
+        x25519_mlkem768_decapsulate_simd_candidate(
+            config, admission,
+            candidate_server.server_key_share,
+            candidate_client.x25519_private_key,
+            candidate_client.decapsulation_key)?
+    defer x25519_mlkem768_wipe_owned(candidate_recovered.shared_secret)
+
+    val scalar_private = _copy_bytes(client_private)
+    val scalar_server_private = _copy_bytes(server_private)
+    val scalar_d = _copy_list(d)
+    val scalar_z = _copy_list(z)
+    val scalar_m = _copy_list(m)
+    defer x25519_mlkem768_wipe_owned_bytes(scalar_private)
+    defer x25519_mlkem768_wipe_owned_bytes(scalar_server_private)
+    defer x25519_mlkem768_wipe_owned(scalar_d)
+    defer x25519_mlkem768_wipe_owned(scalar_z)
+    defer x25519_mlkem768_wipe_owned(scalar_m)
+    val scalar_config = _scalar_config(config)
+    val scalar_client = x25519_mlkem768_keygen(
+        scalar_config, scalar_private, scalar_d, scalar_z)?
+    defer x25519_mlkem768_wipe_owned(scalar_client.decapsulation_key)
+    defer x25519_mlkem768_wipe_owned_bytes(scalar_client.x25519_private_key)
+    val scalar_server = x25519_mlkem768_encapsulate(
+        scalar_config, scalar_client.client_key_share,
+        scalar_server_private, scalar_m)?
+    defer x25519_mlkem768_wipe_owned(scalar_server.shared_secret)
+    val scalar_recovered = x25519_mlkem768_decapsulate(
+        scalar_config, scalar_server.server_key_share,
+        scalar_client.x25519_private_key, scalar_client.decapsulation_key)?
+    defer x25519_mlkem768_wipe_owned(scalar_recovered.shared_secret)
+
+    val exact_outputs = x25519_mlkem768_lists_equal(
+            candidate_client.client_key_share, scalar_client.client_key_share) and
+        x25519_mlkem768_lists_equal(
+            candidate_server.server_key_share, scalar_server.server_key_share) and
+        x25519_mlkem768_lists_equal(
+            candidate_server.shared_secret, candidate_recovered.shared_secret) and
+        x25519_mlkem768_lists_equal(
+            scalar_server.shared_secret, scalar_recovered.shared_secret) and
+        x25519_mlkem768_lists_equal(
+            candidate_server.shared_secret, scalar_server.shared_secret)
+    if not exact_outputs or not _candidate_evidence_valid(
+            qualification, candidate_client.evidence,
+            candidate_server.evidence, candidate_recovered.evidence) or
+            not _scalar_evidence_valid(
+                qualification, scalar_client.evidence,
+                scalar_server.evidence, scalar_recovered.evidence):
+        return Err("X25519MLKEM768 paired scalar qualification failed")
+    Ok(_X25519MlKem768Oracle(
+        client_share_digest: _digest(candidate_client.client_key_share)?,
+        server_share_digest: _digest(candidate_server.server_key_share)?,
+        shared_secret: _copy_list(candidate_server.shared_secret)))
+
+fn _run_exchange(
+        qualification: X25519MlKem768MeasurementQualification,
+        config: X25519MlKem768Config,
+        admission: X25519MlKem768SimdAdmission,
+        oracle: _X25519MlKem768Oracle,
+        candidate: bool,
+        client_private: [u8], d: list, z: list,
+        server_private: [u8], m: list,
+        timed: bool) -> Result<_X25519MlKem768ExchangeObservation, text>:
+    # Copies are owned by this one exchange; its defers run before the peer span.
+    defer x25519_mlkem768_wipe_owned_bytes(client_private)
+    defer x25519_mlkem768_wipe_owned_bytes(server_private)
+    defer x25519_mlkem768_wipe_owned(d)
+    defer x25519_mlkem768_wipe_owned(z)
+    defer x25519_mlkem768_wipe_owned(m)
+    val selected_config = if candidate: config else: _scalar_config(config)
+    val started_ns = if timed: time_now_nanos() else: 0
+    val client = if candidate:
+        x25519_mlkem768_keygen_simd_candidate(
+            selected_config, admission, client_private, d, z)?
+    else:
+        x25519_mlkem768_keygen(selected_config, client_private, d, z)?
+    defer x25519_mlkem768_wipe_owned(client.decapsulation_key)
+    defer x25519_mlkem768_wipe_owned_bytes(client.x25519_private_key)
+    val server = if candidate:
+        x25519_mlkem768_encapsulate_simd_candidate(
+            selected_config, admission,
+            client.client_key_share, server_private, m)?
+    else:
+        x25519_mlkem768_encapsulate(
+            selected_config, client.client_key_share, server_private, m)?
+    defer x25519_mlkem768_wipe_owned(server.shared_secret)
+    val recovered = if candidate:
+        x25519_mlkem768_decapsulate_simd_candidate(
+            selected_config, admission,
+            server.server_key_share, client.x25519_private_key,
+            client.decapsulation_key)?
+    else:
+        x25519_mlkem768_decapsulate(
+            selected_config, server.server_key_share,
+            client.x25519_private_key, client.decapsulation_key)?
+    defer x25519_mlkem768_wipe_owned(recovered.shared_secret)
+    val finished_ns = if timed: time_now_nanos() else: 1
+
+    val output_valid =
+        x25519_mlkem768_lists_equal(
+            server.shared_secret, recovered.shared_secret) and
+        x25519_mlkem768_lists_equal(
+            server.shared_secret, oracle.shared_secret) and
+        x25519_mlkem768_lists_equal(
+            recovered.shared_secret, oracle.shared_secret) and
+        _digest(client.client_key_share)? == oracle.client_share_digest and
+        _digest(server.server_key_share)? == oracle.server_share_digest
+    val evidence_valid = if candidate:
+        _candidate_evidence_valid(
+            qualification, client.evidence, server.evidence, recovered.evidence)
+    else:
+        _scalar_evidence_valid(
+            qualification, client.evidence, server.evidence, recovered.evidence)
+    if not output_valid or not evidence_valid:
+        return Err("X25519MLKEM768 paired exchange failed oracle or evidence admission")
+    if timed:
+        match x25519_mlkem768_paired_elapsed_ns(started_ns, finished_ns):
+            case Err(reason): return Err(reason)
+            case Ok(_): ()
+    val hits = client.evidence.simd_chunk_hits +
+        server.evidence.simd_chunk_hits + recovered.evidence.simd_chunk_hits
+    Ok(_X25519MlKem768ExchangeObservation(
+        started_ns: started_ns, finished_ns: finished_ns,
+        simd_chunk_hits: hits,
+        observed_rvv_vlen_bits: recovered.evidence.observed_rvv_vlen_bits,
+        executor_identity: recovered.evidence.executor_identity,
+        artifact_digest: recovered.evidence.artifact_digest))
+
+fn _fresh_exchange(
+        qualification: X25519MlKem768MeasurementQualification,
+        config: X25519MlKem768Config,
+        admission: X25519MlKem768SimdAdmission,
+        oracle: _X25519MlKem768Oracle, candidate: bool,
+        client_private: [u8], d: list, z: list,
+        server_private: [u8], m: list,
+        timed: bool) -> Result<_X25519MlKem768ExchangeObservation, text>:
+    # All five mutable inputs are copied before the timing span begins.
+    _run_exchange(
+        qualification, config, admission, oracle, candidate,
+        _copy_bytes(client_private), _copy_list(d), _copy_list(z),
+        _copy_bytes(server_private), _copy_list(m), timed)
+
+fn _paired_observation_valid(
+        qualification: X25519MlKem768MeasurementQualification,
+        oracle: _X25519MlKem768Oracle,
+        observation: X25519MlKem768PairedExchangeObservation) -> bool:
+    val common =
+        observation.client_share_digest == oracle.client_share_digest and
+        observation.server_share_digest == oracle.server_share_digest and
+        observation.candidate_simd_chunk_hits > 0 and
+        observation.candidate_simd_chunk_hits <= 3000000000 and
+        observation.candidate_executor_identity ==
+            qualification.target.executor_identity and
+        observation.candidate_artifact_digest ==
+            qualification.target.backend_artifact_sha256
+    if not common: return false
+    if qualification.target.backend == X25519MlKem768EvidenceBackend.Rvv:
+        return observation.candidate_observed_rvv_vlen_bits > 0
+    observation.candidate_observed_rvv_vlen_bits == 0
+
+fn _collect_paired_samples(
+        qualification: X25519MlKem768MeasurementQualification,
+        config: X25519MlKem768Config,
+        admission: X25519MlKem768SimdAdmission,
+        oracle: _X25519MlKem768Oracle,
+        client_private: [u8], d: list, z: list,
+        server_private: [u8], m: list,
+        pair_count: i64) -> Result<_X25519MlKem768PairedSamples, text>:
+    var scalar_samples: [i64] = []
+    var candidate_samples: [i64] = []
+    var scalar_started: [i64] = []
+    var scalar_finished: [i64] = []
+    var candidate_started: [i64] = []
+    var candidate_finished: [i64] = []
+    var total_hits = 0
+    var stable_vlen = 0
+    var stable_identity = ""
+    var stable_artifact = ""
+    var index = 0
+    while index < pair_count:
+        val candidate_first = if index % 2 == 0: false else: true
+        val paired = x25519_mlkem768_paired_exchange_observation(
+            config, admission, client_private, d, z,
+            server_private, m, candidate_first)?
+        if not _paired_observation_valid(qualification, oracle, paired):
+            return Err("X25519MLKEM768 paired owner observation failed admission")
+        val scalar_elapsed = x25519_mlkem768_paired_elapsed_ns(
+            paired.scalar_started_ns, paired.scalar_finished_ns)?
+        val candidate_elapsed = x25519_mlkem768_paired_elapsed_ns(
+            paired.candidate_started_ns, paired.candidate_finished_ns)?
+        if index > 0 and (
+                stable_vlen != paired.candidate_observed_rvv_vlen_bits or
+                stable_identity != paired.candidate_executor_identity or
+                stable_artifact != paired.candidate_artifact_digest):
+            return Err("X25519MLKEM768 paired candidate evidence changed during collection")
+        if total_hits > 9223372036854775807 - paired.candidate_simd_chunk_hits:
+            return Err("X25519MLKEM768 SIMD chunk-hit counter overflow")
+        scalar_samples.push(scalar_elapsed)
+        candidate_samples.push(candidate_elapsed)
+        scalar_started.push(paired.scalar_started_ns)
+        scalar_finished.push(paired.scalar_finished_ns)
+        candidate_started.push(paired.candidate_started_ns)
+        candidate_finished.push(paired.candidate_finished_ns)
+        total_hits = total_hits + paired.candidate_simd_chunk_hits
+        stable_vlen = paired.candidate_observed_rvv_vlen_bits
+        stable_identity = paired.candidate_executor_identity
+        stable_artifact = paired.candidate_artifact_digest
+        index = index + 1
+    Ok(_X25519MlKem768PairedSamples(
+        scalar_samples_ns: scalar_samples,
+        candidate_samples_ns: candidate_samples,
+        scalar_started_ns: scalar_started,
+        scalar_finished_ns: scalar_finished,
+        candidate_started_ns: candidate_started,
+        candidate_finished_ns: candidate_finished,
+        candidate_simd_chunk_hits: total_hits,
+        candidate_observed_rvv_vlen_bits: stable_vlen,
+        candidate_executor_identity: stable_identity,
+        candidate_artifact_digest: stable_artifact))
+
+fn _warm_receipt(
+        qualification: X25519MlKem768MeasurementQualification,
+        role: X25519MlKem768TimingRole) -> X25519MlKem768WarmSetupReceipt:
+    val scalar = role == X25519MlKem768TimingRole.ScalarReference
+    var receipt = X25519MlKem768WarmSetupReceipt(
+        schema: X25519_MLKEM768_WARM_SETUP_SCHEMA, receipt_sha256: "",
+        role: role,
+        backend: if scalar: X25519MlKem768EvidenceBackend.ScalarCpu
+            else: qualification.target.backend,
+        qualification_sha256: qualification.qualification_sha256,
+        matrix_row_set_sha256: qualification.target.matrix_row_set_sha256,
+        scalar_source_receipt_sha256:
+            qualification.scalar_source_receipt_sha256,
+        candidate_source_receipt_sha256:
+            qualification.candidate_source_receipt_sha256,
+        host_os: qualification.target.host_os,
+        host_arch: qualification.target.host_arch,
+        session_id: qualification.target.session_id,
+        monotonic_clock_id: qualification.target.monotonic_clock_id,
+        workload_configuration_sha256:
+            qualification.target.workload_configuration_sha256,
+        backend_configuration_sha256: if scalar:
+            qualification.target.scalar_configuration_sha256
+        else: qualification.target.candidate_configuration_sha256,
+        runner_artifact_sha256: qualification.target.runner_artifact_sha256,
+        backend_artifact_sha256: if scalar:
+            qualification.target.scalar_backend_artifact_sha256
+        else: qualification.target.backend_artifact_sha256,
+        backend_identity: if scalar:
+            qualification.target.scalar_backend_identity
+        else: qualification.target.executor_identity,
+        completed_full_exchanges: if scalar: 2 else: 3,
+        scalar_qualification_count: if scalar: 2 else: 1,
+        candidate_warmup_count: if scalar: 0 else: 2,
+        setup_operations_timed: 0, oracle_match: true,
+        fallback_used: false)
+    receipt.receipt_sha256 = x25519_mlkem768_warm_setup_receipt_sha256(receipt)
+    receipt
+
+fn _timed_receipt(
+        qualification: X25519MlKem768MeasurementQualification,
+        warm: X25519MlKem768WarmSetupReceipt,
+        samples: [i64], candidate_hits: i64,
+        candidate_vlen: i64, max_rss_kb: i64
+        ) -> X25519MlKem768TimedOperationReceipt:
+    val scalar = warm.role == X25519MlKem768TimingRole.ScalarReference
+    var receipt = X25519MlKem768TimedOperationReceipt(
+        schema: X25519_MLKEM768_TIMED_OPERATION_SCHEMA,
+        receipt_sha256: "", warm_setup_receipt_sha256: warm.receipt_sha256,
+        role: warm.role, backend: warm.backend,
+        qualification_sha256: warm.qualification_sha256,
+        matrix_row_set_sha256: warm.matrix_row_set_sha256,
+        scalar_source_receipt_sha256: warm.scalar_source_receipt_sha256,
+        candidate_source_receipt_sha256: warm.candidate_source_receipt_sha256,
+        host_os: warm.host_os, host_arch: warm.host_arch,
+        session_id: warm.session_id, monotonic_clock_id: warm.monotonic_clock_id,
+        workload_configuration_sha256: warm.workload_configuration_sha256,
+        backend_configuration_sha256: warm.backend_configuration_sha256,
+        runner_artifact_sha256: warm.runner_artifact_sha256,
+        backend_artifact_sha256: warm.backend_artifact_sha256,
+        backend_identity: warm.backend_identity,
+        samples_ns: samples,
+        sample_set_sha256: x25519_mlkem768_sample_set_sha256(samples),
+        full_exchange_count: samples.len(),
+        hybrid_operation_count: samples.len() * 3,
+        setup_operations_during_timing: 0, kernel_only_operations: 0,
+        fallback_operations: 0, public_mismatch_operations: 0,
+        secret_mismatch_operations: 0,
+        accelerated_operation_count: if scalar: 0 else: samples.len() * 3,
+        simd_chunk_hits: if scalar: 0 else: candidate_hits,
+        observed_rvv_vlen_bits: if scalar: 0 else: candidate_vlen,
+        gpu_transfer_count: 0, gpu_launch_count: 0,
+        gpu_synchronization_count: 0, gpu_readback_count: 0,
+        gpu_kernel_count: 0,
+        max_rss_kb: max_rss_kb)
+    receipt.receipt_sha256 =
+        x25519_mlkem768_timed_operation_receipt_sha256(receipt)
+    receipt
+
+fn x25519_mlkem768_measure_simd_paired_timing(
+        qualification: X25519MlKem768MeasurementQualification,
+        config: X25519MlKem768Config,
+        admission: X25519MlKem768SimdAdmission,
+        client_private: [u8], d: list, z: list,
+        server_private: [u8], m: list,
+        pair_count: i64) -> Result<X25519MlKem768PairedTimingResult, text>:
+    if not x25519_mlkem768_measurement_qualification_valid(qualification):
+        return Err("X25519MLKEM768 measurement qualification is invalid")
+    if pair_count < 30 or pair_count > 1024 or pair_count % 2 != 0:
+        return Err("X25519MLKEM768 paired sample count must be even in 30..1024")
+    val qualification_reason = x25519_mlkem768_qualified_simd_measurement_reason(
+        qualification, config, admission)
+    if qualification_reason != "": return Err(qualification_reason)
+    # Bind a single observed session before any oracle, warm-up, or timed
+    # operation.  Receipts must attest the qualification that actually ran the
+    # samples, not a post-hoc process observation with a new session nonce.
+    val refreshed_observation =
+        platform_measurement_refresh_process_rss(
+            qualification.platform_observation)?
+    var final_qualification = qualification
+    final_qualification.platform_observation = refreshed_observation
+    final_qualification.target.session_id =
+        refreshed_observation.session_nonce_sha256
+    final_qualification.qualification_sha256 =
+        x25519_mlkem768_measurement_qualification_sha256(
+            final_qualification)
+    if not x25519_mlkem768_measurement_qualification_valid(
+            final_qualification):
+        return Err("X25519MLKEM768 refreshed measurement qualification is invalid")
+    # Re-run the SIMD admission predicate against the exact qualification that
+    # will bind every subsequent oracle, warm-up, sample, and receipt.  The
+    # initial check above avoids observing a process for malformed requests;
+    # this check prevents the refreshed platform snapshot from being treated
+    # as a merely cosmetic, post-validation update.
+    val final_qualification_reason =
+        x25519_mlkem768_qualified_simd_measurement_reason(
+            final_qualification, config, admission)
+    if final_qualification_reason != "": return Err(final_qualification_reason)
+    val oracle = _qualify_oracle(
+        final_qualification, config, admission, client_private, d, z,
+        server_private, m)?
+    defer x25519_mlkem768_wipe_owned(oracle.shared_secret)
+    # Differential qualification ran one exchange per role. Scalar needs one
+    # additional warm-up; candidate needs two, matching the retained receipt.
+    _fresh_exchange(final_qualification, config, admission, oracle, false,
+        client_private, d, z, server_private, m, false)?
+    _fresh_exchange(final_qualification, config, admission, oracle, true,
+        client_private, d, z, server_private, m, false)?
+    _fresh_exchange(final_qualification, config, admission, oracle, true,
+        client_private, d, z, server_private, m, false)?
+    val samples = _collect_paired_samples(
+        final_qualification, config, admission, oracle,
+        client_private, d, z, server_private, m, pair_count)?
+    # This is an honest pre-measurement RSS observation.  It is deliberately
+    # not refreshed after collection because that would mint a different
+    # session identity for receipts whose samples already completed.
+    val max_rss_kb = refreshed_observation.peak_memory_kib
+    val scalar_warm = _warm_receipt(
+        final_qualification, X25519MlKem768TimingRole.ScalarReference)
+    val candidate_warm = _warm_receipt(
+        final_qualification, X25519MlKem768TimingRole.Candidate)
+    val scalar_timed = _timed_receipt(
+        final_qualification, scalar_warm, samples.scalar_samples_ns,
+        0, 0, max_rss_kb)
+    val candidate_timed = _timed_receipt(
+        final_qualification, candidate_warm, samples.candidate_samples_ns,
+        samples.candidate_simd_chunk_hits,
+        samples.candidate_observed_rvv_vlen_bits, max_rss_kb)
+    var schedule = X25519MlKem768PairedScheduleReceipt(
+        schema: X25519_MLKEM768_PAIRED_SCHEDULE_SCHEMA,
+        receipt_sha256: "",
+        qualification_sha256: final_qualification.qualification_sha256,
+        scalar_timed_receipt_sha256: scalar_timed.receipt_sha256,
+        candidate_timed_receipt_sha256: candidate_timed.receipt_sha256,
+        session_id: final_qualification.target.session_id,
+        monotonic_clock_id: final_qualification.target.monotonic_clock_id,
+        ordinal_base: 0, pair_count: pair_count,
+        scalar_started_ns: samples.scalar_started_ns,
+        scalar_finished_ns: samples.scalar_finished_ns,
+        candidate_started_ns: samples.candidate_started_ns,
+        candidate_finished_ns: samples.candidate_finished_ns)
+    schedule.receipt_sha256 =
+        x25519_mlkem768_paired_schedule_receipt_sha256(schedule)
+    match x25519_mlkem768_admit_warm_setup(final_qualification, scalar_warm):
+        case Err(reason): return Err(reason)
+        case Ok(_): ()
+    match x25519_mlkem768_admit_warm_setup(final_qualification, candidate_warm):
+        case Err(reason): return Err(reason)
+        case Ok(_): ()
+    match x25519_mlkem768_admit_timed_operations(
+            final_qualification, scalar_warm, scalar_timed):
+        case Err(reason): return Err(reason)
+        case Ok(_): ()
+    match x25519_mlkem768_admit_timed_operations(
+            final_qualification, candidate_warm, candidate_timed):
+        case Err(reason): return Err(reason)
+        case Ok(_): ()
+    match x25519_mlkem768_admit_paired_schedule(
+            final_qualification, scalar_warm, candidate_warm,
+            scalar_timed, candidate_timed, schedule):
+        case Err(reason): return Err(reason)
+        case Ok(_): ()
+    Ok(X25519MlKem768PairedTimingResult(
+        qualification: final_qualification,
+        scalar_warm: scalar_warm, candidate_warm: candidate_warm,
+        scalar_timed: scalar_timed, candidate_timed: candidate_timed,
+        schedule: schedule))
+
+export X25519MlKem768PairedTimingResult
+export x25519_mlkem768_paired_elapsed_ns
+export x25519_mlkem768_measure_simd_paired_timing

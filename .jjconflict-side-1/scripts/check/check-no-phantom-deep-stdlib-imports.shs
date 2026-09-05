@@ -1,0 +1,167 @@
+#!/bin/sh
+# check-no-phantom-deep-stdlib-imports.shs
+#
+# Similar-problem detection gate for
+# doc/08_tracking/bug/lsp_emitter_never_implemented_cli_query_2026-07-28.md
+#
+# `src/app/cli/query_check.spl`, `query_navigation.spl` and `query_commands.spl`
+# all carried `use std.report.emitter.lsp.{LspEmitter}`. No `report` directory
+# has ever existed under `src/lib`, so every `--format json` path in those three
+# modules died at module resolution with
+#
+#     error: semantic: Cannot resolve module: std.report.emitter.lsp
+#
+# `check-no-phantom-module-imports.shs` did NOT catch this and was never going
+# to: it is deliberately narrow to BARE single-segment roots (`use foo.`) and
+# says so at its own line 19-24 -- `use std.x.y` is explicitly out of scope
+# there, delegated to "the compiler's own resolver". That delegation is exactly
+# what failed: the resolver only complains when the module is LOADED, so an
+# unimported or rarely-exercised module ships broken and looks green. This gate
+# closes that half: MULTI-segment `std.` paths, resolved statically on disk.
+#
+# Resolution model (mirrors the compiler's stdlib roots): `use std.A.B.C`
+# resolves if any of `<base>/A/B/C.spl` or `<base>/A/B/C/__init__.spl` exists,
+# for base in `src/lib`, `src/std`, and any immediate family subdirectory of
+# either (`src/lib/common`, `src/lib/nogc_sync_mut`, ...). That family-directory
+# hop is why `std.common.json` and `std.fs` both resolve.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> deep import path(s) checked, 0 new phantom (baselined: <k>)   exit 0
+#   FAIL  — ...                                                               exit 1
+#   ERROR — nothing was checked                                               exit 2
+# A run that checked 0 paths is ERROR, never a vacuous PASS.
+#
+# `--selftest` runs before every scan and is fatal.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+BASELINE="$REPO_ROOT/scripts/check/phantom_deep_stdlib_imports_baseline.txt"
+SCAN_ROOTS="src/app src/compiler src/lib"
+
+# Emit every distinct multi-segment `std.` import path under $1 that resolves to
+# no file on disk. $2 is the tree root to resolve against.
+scan_tree() {
+    _scan_root=$1
+    _tree=$2
+    ( cd "$_tree" 2>/dev/null || return 0
+      grep -rh -o '^[[:space:]]*\(pub \)\?\(export \)\?use std\.[a-z_0-9.]*' \
+          $_scan_root --include='*.spl' 2>/dev/null |
+      sed 's/.*use std\.//' | sed 's/\.$//' | sort -u |
+      while IFS= read -r path; do
+          [ -z "$path" ] && continue
+          # single-segment paths are the OTHER guard's job
+          case "$path" in *.*) : ;; *) continue ;; esac
+          rel=$(printf '%s' "$path" | tr '.' '/')
+          found=0
+          for base in src/lib src/std src/lib/*/ src/std/*/; do
+              if [ -f "$base/$rel.spl" ] || [ -f "$base/$rel/__init__.spl" ]; then
+                  found=1
+                  break
+              fi
+          done
+          [ "$found" -eq 0 ] && echo "$path"
+          :
+      done )
+}
+
+# Count of distinct multi-segment std. paths examined (the non-vacuity witness).
+count_checked() {
+    _scan_root=$1
+    _tree=$2
+    ( cd "$_tree" 2>/dev/null || return 0
+      grep -rh -o '^[[:space:]]*\(pub \)\?\(export \)\?use std\.[a-z_0-9.]*' \
+          $_scan_root --include='*.spl' 2>/dev/null |
+      sed 's/.*use std\.//' | sed 's/\.$//' | sort -u |
+      grep '\.' | wc -l | tr -d ' ' ) 2>/dev/null
+}
+
+selftest() {
+    _t=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    mkdir -p "$_t/src/lib/common/report/emitter" "$_t/src/lib/common/json" \
+             "$_t/src/lib/nogc_sync_mut" "$_t/src/app"
+    : > "$_t/src/lib/common/report/emitter/lsp.spl"
+    : > "$_t/src/lib/common/json/__init__.spl"
+    : > "$_t/src/lib/nogc_sync_mut/path.spl"
+
+    # Fixture 1 (must FAIL): the exact incident shape -- a deep path with no file.
+    printf 'use std.report.emitter.missing.{X}\n' > "$_t/src/app/a.spl"
+    _got=$(scan_tree src/app "$_t")
+    if [ "$_got" != "report.emitter.missing" ]; then
+        echo "selftest FAIL: phantom deep path not detected (got '$_got')"
+        rm -rf "$_t"; exit 1
+    fi
+
+    # Fixture 2 (must PASS): a deep path that DOES resolve through a family dir.
+    printf 'use std.report.emitter.lsp.{LspEmitter}\nuse std.common.json.{j}\n' \
+        > "$_t/src/app/a.spl"
+    _got=$(scan_tree src/app "$_t")
+    if [ -n "$_got" ]; then
+        echo "selftest FAIL: resolvable deep paths reported as phantom: $_got"
+        rm -rf "$_t"; exit 1
+    fi
+
+    # Fixture 3 (must be IGNORED): a bare single-segment root is the other
+    # guard's territory; reporting it here would double-fail every repo.
+    printf 'use std.path.{p}\nuse std.nowhere.{q}\n' > "$_t/src/app/a.spl"
+    _got=$(scan_tree src/app "$_t")
+    if [ -n "$_got" ]; then
+        echo "selftest FAIL: single-segment roots must be out of scope (got '$_got')"
+        rm -rf "$_t"; exit 1
+    fi
+
+    # Fixture 4 (non-vacuity): an empty tree must count 0, forcing the caller to
+    # ERROR rather than print a PASS that examined nothing.
+    rm -f "$_t/src/app/a.spl"
+    _n=$(count_checked src/app "$_t")
+    if [ "${_n:-0}" -ne 0 ]; then
+        echo "selftest FAIL: empty tree counted $_n paths"
+        rm -rf "$_t"; exit 1
+    fi
+
+    rm -rf "$_t"
+}
+
+selftest || exit 1
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 4 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+if [ "${1:-}" = "--generate-baseline" ]; then
+    scan_tree "$SCAN_ROOTS" "$REPO_ROOT" > "$BASELINE"
+    echo "wrote $BASELINE"
+    echo "PASS — baseline regenerated ($(wc -l < "$BASELINE" | tr -d ' ') entries)"
+    exit 0
+fi
+
+CHECKED=$(count_checked "$SCAN_ROOTS" "$REPO_ROOT")
+CHECKED=${CHECKED:-0}
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+OFFENDERS=$(scan_tree "$SCAN_ROOTS" "$REPO_ROOT")
+BASE_N=0
+if [ -f "$BASELINE" ]; then
+    BASE_N=$(grep -v "^$" "$BASELINE" | wc -l | tr -d " ")
+    _now=$(mktemp); _base=$(mktemp)
+    printf '%s\n' "$OFFENDERS" | grep -v '^$' | sort -u > "$_now"
+    grep -v '^$' "$BASELINE" | sort -u > "$_base"
+    NEW=$(comm -23 "$_now" "$_base")
+    rm -f "$_now" "$_base"
+else
+    NEW=$(printf '%s\n' "$OFFENDERS" | grep -v '^$' | sort -u)
+fi
+
+NEW_N=$(printf '%s\n' "$NEW" | grep -v '^$' | wc -l | tr -d ' ')
+if [ "${NEW_N:-0}" -gt 0 ]; then
+    printf '%s\n' "$NEW" | grep -v '^$' | sed 's/^/phantom deep stdlib import: use std./'
+    echo "FAIL — $CHECKED deep import path(s) checked, $NEW_N new phantom (baselined: $BASE_N)"
+    exit 1
+fi
+
+echo "PASS — $CHECKED deep import path(s) checked, 0 new phantom (baselined: $BASE_N)"
+exit 0

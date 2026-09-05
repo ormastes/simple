@@ -1,0 +1,92 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: Prove that native-build --timeout is accounted in the seconds the user asked for.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-CLI-001 — stable requirement identity for this spec.
+
+use std.spec.step
+
+use std.spec
+use std.spec.step
+use app.cli.native_build_main.{native_build_parse_secs, native_build_timeout_ms}
+
+# Reproducing spec for
+# doc/08_tracking/bug/native_build_worker_timeout_misaccounted_2026-08-09.md
+#
+# Root cause: native_build_main.spl's digit accumulator did
+#   n = n * 10 + int(ch)
+# but `int(ch)` on a ONE-CHARACTER text returns the CHARACTER CODE, not the
+# digit value (measured: int("0") == 48, int("7") == 55, int("9") == 57).
+# So `--timeout 7` parsed as 55 seconds and `--timeout 600` parsed as 5928
+# seconds. The parse succeeds, no error is printed, exit code is 0 -- the
+# worker is simply killed at a budget nobody asked for. A silent wrong result.
+
+describe "native-build --timeout is accounted in the seconds the user asked for":
+    # @manual scenario evidence
+    it "parses a single digit as its VALUE, not its character code":
+        # @req REQ-SSPEC-APP
+        step("parses a single digit as its VALUE, not its character code")
+        step("Verify: parses a single digit as its VALUE, not its character code")
+        # @req: REQ-APP-CLI-001
+        # Pre-fix this returned 55 (the ASCII code of "7").
+        expect(native_build_parse_secs("7")).to_equal(7)
+
+    it "parses a multi-digit budget without character-code contamination":
+        # @req REQ-SSPEC-APP
+        step("parses a multi-digit budget without character-code contamination")
+        step("Verify: parses a multi-digit budget without character-code contamination")
+        # Pre-fix "600" accumulated to 5928.
+        expect(native_build_parse_secs("600")).to_equal(600)
+        expect(native_build_parse_secs("7200")).to_equal(7200)
+
+    it "still rejects a non-numeric budget":
+        # @req REQ-SSPEC-APP
+        step("still rejects a non-numeric budget")
+        step("Verify: still rejects a non-numeric budget")
+        expect(native_build_parse_secs("nope")).to_equal(-1)
+        expect(native_build_parse_secs("-1")).to_equal(-1)
+        expect(native_build_parse_secs("12x")).to_equal(-1)
+
+    it "converts the separated --timeout form to the right millisecond budget":
+        # @req REQ-SSPEC-APP
+        step("converts the separated --timeout form to the right millisecond budget")
+        step("Verify: converts the separated --timeout form to the right millisecond budget")
+        expect(native_build_timeout_ms(["--timeout", "7"])).to_equal(7000)
+        expect(native_build_timeout_ms(["--timeout", "600"])).to_equal(600000)
+        expect(native_build_timeout_ms(["--timeout", "7200"])).to_equal(7200000)
+
+    it "converts the inline --timeout= form to the right millisecond budget":
+        # @req REQ-SSPEC-APP
+        step("converts the inline --timeout= form to the right millisecond budget")
+        step("Verify: converts the inline --timeout= form to the right millisecond budget")
+        expect(native_build_timeout_ms(["--timeout=7"])).to_equal(7000)
+        expect(native_build_timeout_ms(["--timeout=600"])).to_equal(600000)
+
+    it "keeps the budget correct when --timeout follows other flags":
+        # @req REQ-SSPEC-APP
+        step("keeps the budget correct when --timeout follows other flags")
+        step("Verify: keeps the budget correct when --timeout follows other flags")
+        expect(native_build_timeout_ms(["--entry", "a.spl", "-o", "out", "--timeout", "90"])).to_equal(90000)
+
+    it "accounts a bootstrap-sized budget exactly (run6 2026-08-21 regression)":
+        # @req REQ-SSPEC-APP
+        step("accounts a bootstrap-sized budget exactly (run6 2026-08-21 regression)")
+        step("Verify: accounts a bootstrap-sized budget exactly (run6 2026-08-21 regression)")
+        # doc/08_tracking/bug/native_build_timeout_not_forwarded_to_worker_2026-08-21.md
+        # Pre-fix `--timeout 36000` accumulated to 569328 (6.6 days), which is
+        # the number the driver then printed as "timed out after 569328s".
+        expect(native_build_parse_secs("36000")).to_equal(36000)
+        expect(native_build_timeout_ms(["--timeout", "36000"])).to_equal(36000000)

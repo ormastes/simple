@@ -1,0 +1,185 @@
+#!/bin/sh
+# check-no-fabricated-success-markers.shs
+#
+# Fail-closed guard against FABRICATED GUEST EVIDENCE — a guest boot transcript
+# that reads green because a constant said so, not because a capability ran.
+#
+# Incident 2026-08-24: five `rt_riscv_*` probes in
+# `examples/09_embedded/simple_os/arch/riscv64/boot/full_networking_runtime.c`
+# were bodyless `return 1;` — unconditional SUCCESS. Their callers therefore
+# printed `[riscv-nvfs] image read ok`, `FS_MOUNT_OK`, `SMF_DISCOVERY_OK`,
+# `ELF_LOAD_OK`, `SMF_CLI_LAUNCH_OK`, `SMF_GUI_LAUNCH_OK` and
+# `NATIVE_GUI_RENDER_OK` on every boot, and those markers were cited in bug
+# records and in the hardening plan as proof the capabilities worked. They
+# proved nothing. No existing gate could see it: the fabricated-rt baseline
+# ratchet classifies by objdump body shape at LINK time and had these five
+# BASELINED as accepted debt, `-fsyntax-only` compiles them happily, and the
+# `rt_*` symbol-set guard only counts definitions.
+#
+# TWO CHECKS, both over source, neither needing a VM:
+#
+#   A. UNCONDITIONAL-SUCCESS STUB. An `rt_*` C function in guest boot code
+#      whose entire body is `return 1;`. A stub is allowed to exist — the ELF
+#      must link — but it must announce itself, so the check passes only when
+#      the body ALSO calls a `*_stub_announce*` helper (which writes `STUBBED
+#      <name>` to the serial console) and returns a NON-success value.
+#      `return 0;` is deliberately NOT flagged: a zero-returning stub takes the
+#      caller's failure branch and cannot launder a green transcript.
+#
+#   B. FAILURE PATH THAT EXITS SUCCESS. `TEST FAILED` printed on the serial
+#      console and then, within 3 lines, `rt_qemu_exit_success()`. Any lane
+#      grading on the guest's exit code reads that as a pass. (Lanes that grade
+#      on the transcript are unaffected — which is exactly why this sat
+#      unnoticed; it is a latent hazard, not a currently-firing one.)
+#      Sites on arches with no `rt_qemu_exit_failure` definition cannot be
+#      fixed without implementing it first, so they are frozen in a
+#      SHRINK-ONLY baseline rather than being ignored: the guard fails on any
+#      NEW site and on any baselined site that is gone (stale baseline).
+#
+# VERDICT is the last line of stdout:
+#   PASS  — <n> file(s) scanned, 0 fabricated-success site(s)   exit 0
+#   FAIL  — ... naming every offender                            exit 1
+#   ERROR — nothing was checked                                  exit 2
+# A run that scanned 0 files is ERROR, never a pass.
+#
+# --selftest runs first, unconditionally, and is fatal.
+
+set -u
+
+ROOT=${ROOT:-.}
+BASELINE=${BASELINE:-scripts/check/fabricated_success_exit_baseline.txt}
+
+scan_dir() {
+    _dir=$1
+    _files=0
+    _off_a=''
+    _off_b=''
+
+    for _f in $(find "$_dir" -name '*.c' 2>/dev/null); do
+        _files=$((_files + 1))
+        _hits=$(awk '
+            /^[A-Za-z_][A-Za-z0-9_ *]*[ *]rt_[A-Za-z0-9_]*\(/ {
+                name = $0; ln = NR
+                if (getline nx <= 0) next
+                if (nx ~ /^ *return 1; *$/) {
+                    if (getline nx2 <= 0) nx2 = ""
+                    if (nx2 ~ /^ *} *$/) printf "%d\n", ln
+                }
+            }
+        ' "$_f")
+        for _h in $_hits; do
+            _off_a="$_off_a $_f:$_h"
+        done
+    done
+
+    for _f in $(find "$_dir" -name '*.spl' 2>/dev/null); do
+        _files=$((_files + 1))
+        _hits=$(awk '
+            /TEST FAILED/ { pend = NR; next }
+            /rt_qemu_exit_success\(\)/ { if (pend > 0 && NR - pend <= 3) print pend }
+            { if (pend > 0 && NR - pend > 3) pend = 0 }
+        ' "$_f")
+        for _h in $_hits; do
+            _off_b="$_off_b $_f:$_h"
+        done
+    done
+
+    SCAN_FILES=$_files
+    SCAN_A=$_off_a
+    SCAN_B=$_off_b
+}
+
+selftest() {
+    _t=$(mktemp -d) || return 1
+    mkdir -p "$_t/boot"
+    cat > "$_t/boot/bad.c" <<'EOF'
+spl_i64 rt_fake_probe(void) {
+    return 1;
+}
+EOF
+    cat > "$_t/boot/good.c" <<'EOF'
+spl_i64 rt_honest_probe(void) {
+    rt_stub_announce("rt_honest_probe");
+    return 0;
+}
+EOF
+    cat > "$_t/bad_entry.spl" <<'EOF'
+        serial_println("TEST FAILED")
+        rt_qemu_exit_success()
+EOF
+    cat > "$_t/good_entry.spl" <<'EOF'
+        serial_println("TEST FAILED")
+        rt_qemu_exit_failure()
+EOF
+    scan_dir "$_t"
+    rm -rf "$_t"
+
+    # fixture 1: 4 files must have been scanned (non-vacuity of the selftest)
+    [ "$SCAN_FILES" -eq 4 ] || { echo "selftest: expected 4 files, got $SCAN_FILES"; return 1; }
+    # fixture 2: the `return 1;` stub must be caught
+    case "$SCAN_A" in *bad.c:1*) ;; *) echo "selftest: unconditional-success stub not caught"; return 1 ;; esac
+    # fixture 3: the announcing, zero-returning stub must NOT be caught
+    case "$SCAN_A" in *good.c*) echo "selftest: honest stub false-positived"; return 1 ;; esac
+    # fixture 4: TEST FAILED -> exit_success must be caught
+    case "$SCAN_B" in *bad_entry.spl:1*) ;; *) echo "selftest: exit_success launder not caught"; return 1 ;; esac
+    # fixture 5: TEST FAILED -> exit_failure must NOT be caught
+    case "$SCAN_B" in *good_entry.spl*) echo "selftest: honest failure path false-positived"; return 1 ;; esac
+    # fixture 6: an empty tree must scan 0 files, forcing the caller to ERROR
+    _e=$(mktemp -d) || return 1
+    scan_dir "$_e"
+    rm -rf "$_e"
+    [ "$SCAN_FILES" -eq 0 ] || { echo "selftest: empty tree scanned $SCAN_FILES files"; return 1; }
+    return 0
+}
+
+selftest
+st=$?
+if [ "$st" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 6 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+scan_dir "$ROOT/examples/09_embedded/simple_os"
+files_ex=$SCAN_FILES; a_ex=$SCAN_A; b_ex=$SCAN_B
+scan_dir "$ROOT/src/os/kernel/arch"
+files=$((files_ex + SCAN_FILES))
+off_a="$a_ex $SCAN_A"
+off_b="$b_ex $SCAN_B"
+
+if [ "$files" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 files found under $ROOT)"
+    exit 2
+fi
+
+# Baseline is SHRINK-ONLY: new sites FAIL, and a baselined site that no longer
+# exists FAILs as a stale baseline. A missing baseline file means maximum
+# strictness (empty), so deleting it can never weaken this gate.
+base=''
+[ -f "$BASELINE" ] && base=$(grep -v '^[[:space:]]*#' "$BASELINE" | grep -v '^[[:space:]]*$')
+
+new_b=''
+for s in $off_b; do
+    case " $(echo $base) " in *" $s "*) ;; *) new_b="$new_b $s" ;; esac
+done
+stale=''
+for s in $base; do
+    case " $(echo $off_b) " in *" $s "*) ;; *) stale="$stale $s" ;; esac
+done
+
+fail=''
+[ -n "$(echo $off_a)" ] && fail="$fail unconditional-success-stub:$(echo $off_a)"
+[ -n "$(echo $new_b)" ] && fail="$fail new-failure-exits-success:$(echo $new_b)"
+[ -n "$(echo $stale)" ] && fail="$fail stale-baseline:$(echo $stale)"
+
+nb=$(echo $base | wc -w)
+if [ -n "$(echo $fail)" ]; then
+    echo "FAIL — $files file(s) scanned,$fail"
+    exit 1
+fi
+echo "PASS — $files file(s) scanned, 0 fabricated-success site(s) (0 unconditional-success rt_* stubs; $nb failure-exits-success site(s) frozen in $BASELINE, 0 new, 0 stale)"
+exit 0

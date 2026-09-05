@@ -1,0 +1,272 @@
+#!/bin/sh
+# check-phantom-log-reference.shs
+#
+# Defect class: a diagnostic message tells the reader to "see <something>.log",
+# but that log is only ever written inside a NARROWER branch than the branch the
+# message lives in. When the writing branch is skipped, the message points at a
+# file that does not exist — the reader is sent to a phantom path and the real
+# reason for the failure is never stated.
+#
+# Reported instance (doc/08_tracking/bug/bootstrap_stage2_capability_log_phantom_2026-08-17.md):
+#   scripts/bootstrap/bootstrap-from-scratch.sh — the stage2 capability probe
+#   writes `${log_dir}/stage2-capability.log` only inside
+#   `if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then ... fi`,
+#   while the `warning: see ${log_dir}/stage2-capability.log` message sits in the
+#   outer `if [ "${stage2_capability_ok}" -ne 1 ]` block, which is reached
+#   precisely when that inner branch was skipped.
+#
+# Rule (mechanical, no judgement):
+#   For every `<name>.log` that a script both WRITES (via a `>` / `>>`
+#   redirection) and REFERENCES in a message, FAIL when the shallowest reference
+#   is at a strictly shallower `if` nesting depth than the shallowest write, AND
+#   the script contains no existence test (`[ -f`, `[ -s`, `[ -e`, `test -f`) on
+#   that same log name. An existence test is the accepted, explicit guard.
+#
+# Verdict convention (repo standard): the LAST line of stdout is the verdict.
+#   PASS  — <n> reference(s) checked, 0 phantom      exit 0
+#   FAIL  — ...                                       exit 1
+#   ERROR — nothing was checked                       exit 2
+# A run that checked 0 references is ERROR, never a pass.
+#
+# Usage:
+#   sh scripts/check/check-phantom-log-reference.shs [--selftest] [file ...]
+# With no file arguments the default scan set is the bootstrap shell scripts.
+
+set -u
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+REPO_ROOT=$(CDPATH= cd -- "${SELF_DIR}/.." && pwd -P)
+
+# ---------------------------------------------------------------------------
+# Core analyser. Prints one line per offending reference on stdout, prefixed
+# "OFFENDER ". Prints "CHECKED <n>" as its last line. Exit status is not used
+# for the verdict (never read a status through a pipe).
+# ---------------------------------------------------------------------------
+phantom_scan_file() {
+    awk -v FNAME="$1" '
+    function logname(s,   n) {
+        # extract the last <word>.log token from s
+        n = ""
+        while (match(s, /[A-Za-z0-9_.:${}\/-]*\.log/)) {
+            n = substr(s, RSTART, RLENGTH)
+            s = substr(s, RSTART + RLENGTH)
+        }
+        if (n == "") return ""
+        sub(/.*\//, "", n)          # basename only; ${log_dir} etc. is noise
+        return n
+    }
+    {
+        line = $0
+        stripped = line
+        sub(/^[ \t]*/, "", stripped)
+
+        # --- nesting depth bookkeeping (if/fi, case/esac) -------------------
+        # Count openers on this line BEFORE attributing the line, so that the
+        # `if` keyword itself belongs to the enclosing depth.
+        opens = 0; closes = 0
+        tmp = line
+        while (match(tmp, /(^|[ \t;])(if|case)([ \t]|$)/)) {
+            opens++; tmp = substr(tmp, RSTART + RLENGTH)
+        }
+        tmp = line
+        while (match(tmp, /(^|[ \t;])(fi|esac)([ \t;]|$)/)) {
+            closes++; tmp = substr(tmp, RSTART + RLENGTH)
+        }
+        depth -= closes
+        if (depth < 0) depth = 0
+        here = depth
+        depth += opens
+        # once control leaves the writing block, the log is no longer
+        # guaranteed to have been written on the path we are now on.
+        for (k in wdepth) if (here < wdepth[k]) closed[k] = 1
+
+        if (line ~ /\.log/) {
+            nm = logname(line)
+            if (nm != "") {
+                seen[nm] = 1
+                # existence test on this log name anywhere disarms the rule
+                if (line ~ /\[[ \t]+-[fse][ \t]/ || line ~ /test[ \t]+-[fse][ \t]/) {
+                    guarded[nm] = 1
+                }
+                # a write: a redirection into the log
+                if (line ~ />>?[ \t]*"?[A-Za-z0-9_.:${}\/-]*\.log/) {
+                    if (!(nm in wdepth) || here < wdepth[nm]) wdepth[nm] = here
+                    wline[nm] = NR
+                    closed[nm] = 0
+                } else if (line ~ /(echo|printf)[ \t]/) {
+                    # a user-facing reference
+                    nref++
+                    if (!(nm in wdepth)) {
+                        # referenced but never written in this file: not this
+                        # defect class (may be written by a caller).
+                    } else if (wdepth[nm] == 0) {
+                        # unconditionally written: it always exists.
+                    } else if (here < wdepth[nm] || closed[nm]) {
+                        cand[++ncand] = nm SUBSEP NR SUBSEP stripped SUBSEP wline[nm] SUBSEP wdepth[nm]
+                    }
+                }
+            }
+        }
+    }
+    END {
+        for (i = 1; i <= ncand; i++) {
+            split(cand[i], p, SUBSEP)
+            if (p[1] in guarded) continue
+            printf "OFFENDER %s:%d: message references %s, which is written only inside a conditional branch that control has already left (writer line %d, depth %d), and is never existence-tested -- %s\n", \
+                FNAME, p[2], p[1], p[4], p[5], p[3]
+        }
+        printf "CHECKED %d\n", nref
+    }
+    ' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — FATAL, runs before every real scan.
+# ---------------------------------------------------------------------------
+phantom_selftest() {
+    st_dir=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    st_fail=0
+
+    # Fixture 1 (MUST-FAIL): exact replay of the reported bootstrap defect.
+    cat >"${st_dir}/repro.sh" <<'EOF'
+#!/bin/sh
+ok=0
+if [ "${status}" -eq 0 ] && [ -x "${bin}" ]; then
+  "${bin}" build >"${log_dir}/stage2-capability.log" 2>&1
+  if [ $? -eq 0 ]; then
+    ok=1
+  fi
+fi
+if [ "${ok}" -ne 1 ]; then
+  echo "  warning: see ${log_dir}/stage2-capability.log" >&2
+fi
+EOF
+
+    # Fixture 2 (MUST-PASS): the fixed shape — the reference is guarded by an
+    # existence test and a not-run reason is stated instead.
+    cat >"${st_dir}/fixed.sh" <<'EOF'
+#!/bin/sh
+ok=0
+ran=0
+if [ "${status}" -eq 0 ] && [ -x "${bin}" ]; then
+  ran=1
+  "${bin}" build >"${log_dir}/stage2-capability.log" 2>&1
+  if [ $? -eq 0 ]; then
+    ok=1
+  fi
+fi
+if [ "${ok}" -ne 1 ]; then
+  if [ "${ran}" -ne 1 ]; then
+    echo "  warning: probe was NOT RUN; no stage2-capability.log exists" >&2
+  elif [ -f "${log_dir}/stage2-capability.log" ]; then
+    echo "  warning: see ${log_dir}/stage2-capability.log" >&2
+  fi
+fi
+EOF
+
+    # Fixture 3 (MUST-PASS): same-depth write and reference is fine.
+    cat >"${st_dir}/samedepth.sh" <<'EOF'
+#!/bin/sh
+cmd >"${log_dir}/build.log" 2>&1
+echo "see ${log_dir}/build.log" >&2
+EOF
+
+    # Fixture 4 (MUST-FAIL): a different phantom — nested-case writer, outer
+    # reference. Generalises the class beyond if/fi.
+    cat >"${st_dir}/casephantom.sh" <<'EOF'
+#!/bin/sh
+case "${mode}" in
+  full)
+    run_it >"${d}/verify.log" 2>&1
+    ;;
+esac
+echo "diagnostics in ${d}/verify.log" >&2
+EOF
+
+    # Fixture 5 (MUST-PASS, non-vacuity): a file with no .log at all must
+    # report CHECKED 0 so the caller is forced to ERROR rather than pass.
+    printf '#!/bin/sh\necho hi\n' >"${st_dir}/nologs.sh"
+
+    for st_case in repro:FAIL fixed:PASS samedepth:PASS casephantom:FAIL; do
+        st_name=${st_case%%:*}
+        st_want=${st_case##*:}
+        st_out=$(phantom_scan_file "${st_dir}/${st_name}.sh")
+        st_hits=$(printf '%s\n' "${st_out}" | grep -c '^OFFENDER ')
+        if [ "${st_want}" = "FAIL" ]; then
+            [ "${st_hits}" -ge 1 ] || { echo "selftest: fixture ${st_name} must FAIL but found 0 offenders"; st_fail=1; }
+        else
+            [ "${st_hits}" -eq 0 ] || { echo "selftest: fixture ${st_name} must PASS but found ${st_hits} offender(s)"; st_fail=1; }
+        fi
+    done
+
+    st_out=$(phantom_scan_file "${st_dir}/nologs.sh")
+    st_n=$(printf '%s\n' "${st_out}" | sed -n 's/^CHECKED //p')
+    [ "${st_n}" = "0" ] || { echo "selftest: nologs fixture must report CHECKED 0, got '${st_n}'"; st_fail=1; }
+
+    rm -rf "${st_dir}"
+    return "${st_fail}"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+selftest_only=0
+files=""
+for arg in "$@"; do
+    case "${arg}" in
+        --selftest) selftest_only=1 ;;
+        -*) echo "unknown option: ${arg}" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
+        *) files="${files} ${arg}" ;;
+    esac
+done
+
+phantom_selftest
+selftest_rc=$?
+if [ "${selftest_rc}" -ne 0 ]; then
+    echo "FAIL — selftest failed; guard is not trustworthy"
+    exit 1
+fi
+if [ "${selftest_only}" -eq 1 ]; then
+    echo "PASS — 5 selftest fixture(s) checked, 0 unexpected"
+    exit 0
+fi
+
+if [ -z "${files}" ]; then
+    files="${REPO_ROOT}/scripts/bootstrap/bootstrap-from-scratch.sh"
+    for f in "${REPO_ROOT}"/scripts/bootstrap/*.sh "${REPO_ROOT}"/scripts/bootstrap/*.shs; do
+        [ -f "${f}" ] || continue
+        case " ${files} " in *" ${f} "*) continue ;; esac
+        files="${files} ${f}"
+    done
+fi
+
+total=0
+offenders=""
+nfiles=0
+for f in ${files}; do
+    [ -f "${f}" ] || continue
+    nfiles=$((nfiles + 1))
+    out=$(phantom_scan_file "${f}")
+    n=$(printf '%s\n' "${out}" | sed -n 's/^CHECKED //p')
+    [ -n "${n}" ] || n=0
+    total=$((total + n))
+    hits=$(printf '%s\n' "${out}" | grep '^OFFENDER ' || true)
+    if [ -n "${hits}" ]; then
+        printf '%s\n' "${hits}"
+        offenders="${offenders}${hits}
+"
+    fi
+done
+
+if [ "${nfiles}" -eq 0 ] || [ "${total}" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+nbad=$(printf '%s' "${offenders}" | grep -c '^OFFENDER ' || true)
+if [ "${nbad}" -gt 0 ]; then
+    echo "FAIL — ${total} reference(s) checked in ${nfiles} file(s), ${nbad} phantom log reference(s)"
+    exit 1
+fi
+echo "PASS — ${total} reference(s) checked in ${nfiles} file(s), 0 phantom"
+exit 0

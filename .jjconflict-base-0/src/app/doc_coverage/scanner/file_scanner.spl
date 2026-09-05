@@ -1,0 +1,140 @@
+# File Discovery and Filtering for Doc Coverage
+
+use app.io.mod (dir_walk)
+
+# ============================================================================
+# File Discovery
+# ============================================================================
+
+# Discover all source files matching patterns
+fn discover_source_files(root: text, patterns: [text]) -> [text]:
+    var results: [text] = []
+
+    # Default scan directories (public API only)
+    val scan_dirs = ["src/std", "src/core", "src/app", "src/lib"]
+
+    for scan_dir in scan_dirs:
+        val full_path = "{root}/{scan_dir}"
+
+        # No `is_dir` pre-check. `dir_walk` already returns [] for a directory
+        # that does not exist (measured: 0 entries for both `src/core`, absent
+        # here, and a nonexistent path), so the guard bought nothing — and it
+        # cost everything: measured inside `doc_coverage_command.spl`, which
+        # drops to the interpreter, `is_dir` answered FALSE for every form of
+        # every real path, the repo root included, while `dir_walk` on the same
+        # string walked 8,116 entries. Every scan dir was skipped and
+        # `doc-coverage` reported "No source files found" (exit 1) on a tree
+        # `simple stats` counts 16,220 sources in. `is_dir` is also false for a
+        # backslash-separated path even on the JIT path.
+        # Skipping the guard makes discovery depend only on the call that has
+        # to work anyway, identically on every platform and engine.
+        val walked = dir_walk(full_path)
+        for f in walked:
+            if should_include_file(f, patterns):
+                results.push(f)
+
+    results
+
+# Normalize a discovered path for the `/segment/` substring tests below.
+#
+# `dir_walk` returns native separators, so on Windows every discovered file
+# reads `C:\...\src\lib\foo.spl` and NONE of the forward-slash segment tests can
+# ever match. That made `is_public_api_file` reject every file and
+# `doc-coverage` report "No source files found in <repo>" (exit 1) on a repo
+# where `simple stats` counts 16,220 sources. It also made every EXCLUSION here
+# fail open, so tests and build artifacts were scanned.
+#
+# Matching-only: the caller keeps the original path. On POSIX a path component
+# containing a literal backslash is legal but vanishingly rare, and rewriting it
+# only widens these segment tests, never narrows them — so POSIX behaviour is
+# unchanged for every real tree.
+fn doc_coverage_match_path(path: text) -> text:
+    path.replace("\\", "/")
+
+# Check if file matches any pattern
+fn should_include_file(raw_path: text, patterns: [text]) -> bool:
+    val path = doc_coverage_match_path(raw_path)
+    # Must be .spl file
+    if not path.ends_with(".spl"):
+        return false
+
+    # Skip test files
+    if path.contains("/test/"):
+        return false
+    if path.ends_with("_spec.spl"):
+        return false
+
+    # Skip build artifacts
+    if path.contains("/target/"):
+        return false
+    if path.contains("/build/"):
+        return false
+    if path.contains("/.git/"):
+        return false
+
+    # Skip archived/deprecated code
+    if path.contains("/archive/"):
+        return false
+    if path.contains("/deprecated/"):
+        return false
+
+    # If patterns provided, must match at least one
+    if patterns.len() > 0:
+        var matched = false
+        for pattern in patterns:
+            if path.contains(pattern):
+                matched = true
+        if not matched:
+            return false
+
+    true
+
+# ============================================================================
+# Public API Filtering
+# ============================================================================
+
+# Filter to only public API files
+fn filter_public_only(files: [text]) -> [text]:
+    var results: [text] = []
+
+    for f in files:
+        if is_public_api_file(f):
+            results.push(f)
+
+    results
+
+# Check if file is part of public API
+fn is_public_api_file(raw_path: text) -> bool:
+    val path = doc_coverage_match_path(raw_path)
+    # Public API directories
+    if path.contains("/src/std/"):
+        return true
+    if path.contains("/src/core/"):
+        return true
+    if path.contains("/src/lib/"):
+        return true
+
+    # Select app modules (public CLI tools)
+    if path.contains("/src/app/cli/"):
+        return true
+    if path.contains("/src/app/io/"):
+        return true
+
+    # Exclude internal implementation details
+    if path.contains("/src/app/interpreter/"):
+        return false
+    if path.contains("/src/app/desugar/"):
+        return false
+    if path.contains("/src/compiler/"):
+        return false
+
+    false
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export discover_source_files
+export filter_public_only
+export should_include_file
+export is_public_api_file

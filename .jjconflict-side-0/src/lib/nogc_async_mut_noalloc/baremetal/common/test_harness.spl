@@ -1,0 +1,151 @@
+# Bare-Metal Test Harness
+#
+# SPipe-compatible test framework for bare-metal environments.
+# Outputs results via serial port for host parsing.
+#
+# Usage in bare-metal tests:
+#   test_harness_init()
+#   test_start("my test")
+#   if condition:
+#       test_pass("my test")
+#   else:
+#       test_fail("my test", "error message")
+#   test_end()
+
+use std.baremetal.x86.io.{outb}
+use lib.nogc_async_mut_noalloc.log.{log_init_serial, log_raw, log_raw_println, LOG_INFO}
+
+# Test result tracking
+var g_stats_total: i32 = 0
+var g_stats_passed: i32 = 0
+var g_stats_failed: i32 = 0
+var g_current_test: text = ""
+var g_initialized: bool = false
+
+# Print an i32 to COM1 serial port without heap allocation.
+# Writes decimal digits directly via outb(0x3F8, byte).
+fn log_raw_i32(n: i32):
+    if n < 0:
+        outb(0x3F8, 45)  # '-'
+        log_raw_i32(0 - n)
+        return
+    if n >= 10:
+        log_raw_i32(n / 10)
+    outb(0x3F8, (n % 10) + 48)  # '0'..'9'
+
+# Output a line via serial port (routed through the log library)
+fn output(s: text):
+    log_raw_println(s)
+
+# Initialize test harness
+fn test_harness_init():
+    if g_initialized:
+        return
+    log_init_serial(LOG_INFO)
+    g_initialized = true
+    output("[TEST START]")
+
+# Start a test
+fn test_start(name: text):
+    g_current_test = name
+    g_stats_total = g_stats_total + 1
+
+# Mark current test as passed
+fn test_pass(name: text):
+    g_stats_passed = g_stats_passed + 1
+    log_raw("[PASS] ")
+    log_raw_println(name)
+
+# Mark current test as failed
+# reason: positional baremetal test_harness API
+fn test_fail(name: text, message: text):
+    g_stats_failed = g_stats_failed + 1
+    log_raw("[FAIL] ")
+    log_raw(name)
+    log_raw(": ")
+    log_raw_println(message)
+
+# End test run and output summary
+fn test_end():
+    log_raw("[TEST END] passed=")
+    log_raw_i32(g_stats_passed)
+    log_raw(" failed=")
+    log_raw_i32(g_stats_failed)
+    log_raw_println("")
+
+    # Exit QEMU with appropriate exit code
+    # isa-debug-exit: writing to port 0xF4 exits QEMU
+    # Exit code = (value << 1) | 1
+    # So writing 0 gives exit code 1 (success), 1 gives exit code 3 (failure)
+    val exit_value = if g_stats_failed > 0: 1 else: 0
+    outb(0xF4, exit_value)
+
+# Assert that a condition is true
+fn assert_true(condition: bool, message: text) -> bool:
+    if not condition:
+        log_raw("assertion failed: ")
+        test_fail(g_current_test, message)
+        false
+    else:
+        true
+
+# Assert that a condition is false
+fn assert_false(condition: bool, message: text) -> bool:
+    if condition:
+        log_raw("expected false: ")
+        test_fail(g_current_test, message)
+        false
+    else:
+        true
+
+# Assert equality for i32
+# reason: positional baremetal test_harness API
+fn assert_eq_i32(actual: i32, expected: i32, message: text) -> bool:
+    if actual != expected:
+        log_raw("[FAIL] ")
+        log_raw(g_current_test)
+        log_raw(": ")
+        log_raw(message)
+        log_raw(": expected ")
+        log_raw_i32(expected)
+        log_raw(", got ")
+        log_raw_i32(actual)
+        log_raw_println("")
+        g_stats_failed = g_stats_failed + 1
+        false
+    else:
+        true
+
+# Assert inequality for i32
+# reason: positional baremetal test_harness API
+fn assert_ne_i32(actual: i32, expected: i32, message: text) -> bool:
+    if actual == expected:
+        log_raw("[FAIL] ")
+        log_raw(g_current_test)
+        log_raw(": ")
+        log_raw(message)
+        log_raw(": expected not equal to ")
+        log_raw_i32(expected)
+        log_raw_println("")
+        g_stats_failed = g_stats_failed + 1
+        false
+    else:
+        true
+
+# Run a simple test
+fn run_test(name: text, test_passed: bool):
+    test_start(name)
+    if test_passed:
+        test_pass(name)
+    else:
+        test_fail(name, "test returned false")
+
+# Example test runner
+fn run_all_tests():
+    test_harness_init()
+
+    # Example tests would go here
+    run_test("example_pass", true)
+    run_test("example_fail", false)
+
+    test_end()

@@ -1,0 +1,67 @@
+#!/bin/sh
+# Qualified FAT32/NVFS/DBFS positioned-I/O and SimpleOS NVFS QEMU matrix gate.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+fat32_gate=$root/scripts/check/check-sosix-fat32-positioned-io.shs
+nvfs_qemu_gate=$root/scripts/check/check-simpleos-nvfs-root-qemu.shs
+runtime_gate=$root/scripts/check/check-sosix-qemu-runtime-admission.shs
+
+fail() { printf '%s\n' "sosix-positioned-filesystem-matrix: $*" >&2; exit 1; }
+
+run_spec() {
+    runtime=$1 spec=$2 marker=$3
+    log=${TMPDIR:-/tmp}/sosix-positioned-filesystem-matrix.$$.log
+    if ! SIMPLE_LIB="$root/src" "$runtime" test "$root/$spec" --mode=interpreter >"$log" 2>&1; then
+        sed -n '1,100p' "$log" >&2
+        rm -f "$log"
+        fail "focused-spec-failed:${spec}"
+    fi
+    grep -Eq '([1-9][0-9]* examples?, 0 failures|test result: ok\. [1-9][0-9]* passed; 0 failed;)' "$log" || {
+        sed -n '1,100p' "$log" >&2
+        rm -f "$log"
+        fail "focused-spec-missing-pass-summary:${spec}"
+    }
+    rm -f "$log"
+    printf '%s=pass\n' "$marker"
+}
+
+source_contract() {
+    "$fat32_gate" --self-test >/dev/null
+    "$nvfs_qemu_gate" --self-test
+    grep -Fq 'positioned_read_bytes' "$root/src/lib/nogc_async_mut/fs_driver/mount_table.spl" || fail missing-mount-table-object-owner
+    grep -Fq 'pread_bytes_handle' "$root/src/lib/nogc_sync_mut/db/dbfs_driver/dbfs_driver.spl" || fail missing-dbfs-positioned-primitive
+    grep -Fq 'pwrite_bytes_handle' "$root/src/lib/nogc_sync_mut/fs_driver/nvfs_driver.spl" || fail missing-nvfs-positioned-primitive
+}
+
+self_test() {
+    source_contract
+    if "$0" --admit '' '' '' '' '' '' >/dev/null 2>&1; then fail unqualified-environment-accepted; fi
+    printf '%s\n' sosix_positioned_filesystem_source_contract=pass
+    printf '%s\n' sosix_positioned_filesystem_unqualified_rejection=pass
+    printf '%s\n' sosix_positioned_filesystem_matrix_self_test=pass
+}
+
+admit() {
+    [ "$#" -eq 6 ] || fail 'usage: --admit RUNTIME STAGE4_PROVENANCE RUNTIME_RECEIPT KERNEL_ELF NVFS_IMAGE NVFS_IMAGE_MANIFEST'
+    runtime=$1 provenance=$2 receipt=$3 kernel=$4 image=$5 manifest=$6
+    source_contract
+    identity=$($runtime_gate --verify "$runtime" "$receipt") || fail runtime-admission-failed
+    runtime_path=$(printf '%s\n' "$identity" | sed -n 's/^runtime_path=//p')
+    [ -n "$runtime_path" ] || fail runtime-path-missing
+    "$fat32_gate" --admit "$runtime_path" "$receipt" "$kernel"
+    run_spec "$runtime_path" test/02_integration/storage/dbfs/dbfs_positioned_bytes_spec.spl sosix_dbfs_positioned_primitives
+    run_spec "$runtime_path" test/02_integration/storage/nvfs/nvfs_positioned_bytes_spec.spl sosix_nvfs_positioned_primitives
+    run_spec "$runtime_path" test/01_unit/os/sosix/positioned_filesystem_backends_spec.spl sosix_positioned_mount_object_backends
+    run_spec "$runtime_path" test/01_unit/os/sosix/positioned_backend_composition_v1_spec.spl sosix_positioned_production_composition
+    run_spec "$runtime_path" test/02_integration/storage/nvfs/nvfs_image_builder_spec.spl simpleos_nvfs_image_builder
+    run_spec "$runtime_path" test/01_unit/os/kernel/boot/nvfs_dbfs_backed_root_source_spec.spl simpleos_nvfs_boot_contract
+    "$nvfs_qemu_gate" --admit "$runtime_path" "$provenance" "$receipt" "$kernel" "$image" "$manifest"
+    printf '%s\n' sosix_positioned_filesystem_matrix_acceptance=pass
+}
+
+case "${1:-}" in
+    --admit) [ "$#" -eq 7 ] || fail 'usage: --admit RUNTIME STAGE4_PROVENANCE RUNTIME_RECEIPT KERNEL_ELF NVFS_IMAGE NVFS_IMAGE_MANIFEST'; admit "$2" "$3" "$4" "$5" "$6" "$7" ;;
+    --self-test) [ "$#" -eq 1 ] || fail 'usage: --self-test'; self_test ;;
+    *) fail 'usage: --admit RUNTIME STAGE4_PROVENANCE RUNTIME_RECEIPT KERNEL_ELF NVFS_IMAGE NVFS_IMAGE_MANIFEST | --self-test' ;;
+esac

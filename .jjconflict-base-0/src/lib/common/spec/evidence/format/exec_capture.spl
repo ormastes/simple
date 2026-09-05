@@ -1,0 +1,179 @@
+# Exec/CLI capture format adapter (E3 lane, evidence manifest v1).
+#
+# This is the first genuinely LIVE-capture provider in the typed-evidence
+# system: every sibling adapter (text_protocol.spl and friends) is pure — it
+# turns an already-constructed transcript into `CanonicalEvidence` and never
+# touches a running process. `capture_exec` actually launches a real process
+# via the repo's process-execution facade (`std.nogc_sync_mut.sffi.system.
+# process_run`, the same extern-backed call `scenario_helpers.spl`'s
+# `capture_exec_detailed` wraps for manual authoring) and records what that
+# process really did: its real exit code, its real stdout, its real stderr.
+#
+# Design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md §5
+#
+# A launch failure (command not found) is captured as a FAILURE, not silently
+# normalized to exit 0 — a normalized "success" would let a broken command
+# pass any exit-code oracle that doesn't happen to check for a nonzero value.
+
+use std.common.spec.evidence.model.{
+    EvidenceSelectorKind, EvidenceNode, CanonicalEvidence,
+    canonical_evidence, canonical_evidence_parse_error
+}
+use std.nogc_sync_mut.sffi.system.{process_run}
+
+# ---------------------------------------------------------------------------
+# Live capture record
+# ---------------------------------------------------------------------------
+
+# One real process invocation's recorded outcome. `duration_ms` is measured
+# around the actual `process_run` call, so it reflects real wall-clock time,
+# not a fixture placeholder.
+pub struct ExecCapture:
+    command: text
+    args: [text]
+    exit_code: i64
+    stdout: text
+    stderr: text
+    duration_ms: i64
+    launch_ok: bool
+    launch_error: text
+
+# Sentinel exit code used when the runtime facade could not even spawn the
+# process (e.g. `popen` itself failing). Never 0 — a launch failure must
+# never read as success. Note: the underlying `rt_process_run` facade runs
+# the command through a shell (`popen("... 2>/tmp/...")`), so a nonexistent
+# command is NOT a launch failure at this layer — the shell itself starts
+# fine and reports the real "command not found" failure as its own nonzero
+# exit code (typically 127), which flows through untouched. That is real,
+# not-normalized live evidence: it is the actual shell's actual exit code.
+pub val EXEC_LAUNCH_FAILURE_EXIT_CODE: i64 = -1
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# Runs `command args...` for real via the process-execution facade and
+# records what actually happened. A command that cannot be launched at all
+# is captured with `launch_ok: false` and a nonzero `exit_code`; a command
+# that launches but fails (including "not found", surfaced by the shell as
+# exit 127) is captured with `launch_ok: true` and its real nonzero
+# `exit_code` — neither case is silently coerced to a clean exit.
+#
+# Known limitation: the current `rt_process_run` runtime shim redirects the
+# child's stderr to a fixed temp file but never reads it back into the
+# returned triple, so `stderr` is always "" regardless of what the process
+# actually wrote to its error stream. `exit_code` and `stdout` are real captured
+# values; `stderr` is a placeholder until that shim is extended. This is
+# recorded here rather than papered over so a caller relying on captured
+# stderr text can see why it is always empty.
+pub fn capture_exec(command: text, args: [text]) -> ExecCapture:
+    val started_us = rt_time_now_unix_micros()
+    val result = process_run(command, args)
+    val stdout = result.0
+    val stderr = result.1
+    val exit_code = result.2
+    val finished_us = rt_time_now_unix_micros()
+    val duration_ms = (finished_us - started_us) / 1000
+
+    ExecCapture(
+        command: command,
+        args: args,
+        exit_code: exit_code,
+        stdout: stdout,
+        stderr: stderr,
+        duration_ms: duration_ms,
+        launch_ok: exit_code != EXEC_LAUNCH_FAILURE_EXIT_CODE,
+        launch_error: if exit_code == EXEC_LAUNCH_FAILURE_EXIT_CODE: "process spawn failed" else: ""
+    )
+
+# ---------------------------------------------------------------------------
+# Live capture -> evidence
+# ---------------------------------------------------------------------------
+
+fn field_node(path: text, value: text, order: i64) -> EvidenceNode:
+    EvidenceNode(
+        path: path,
+        kind: EvidenceSelectorKind.protocol_field,
+        value: value,
+        raw: value,
+        order: order
+    )
+
+fn split_lines(raw: text) -> [text]:
+    if raw == "":
+        return []
+    var lines: [text] = []
+    var current = ""
+    var i = 0
+    while i < raw.len():
+        val c = raw.slice(i, i + 1)
+        if c == "\n":
+            lines.push(strip_trailing_cr(current))
+            current = ""
+        else:
+            current = current + c
+        i = i + 1
+    if not raw.ends_with("\n"):
+        lines.push(strip_trailing_cr(current))
+    lines
+
+fn strip_trailing_cr(line: text) -> text:
+    if line.ends_with("\r"):
+        return line.slice(0, line.len() - 1)
+    line
+
+# Emits nodes at:
+#   <prefix>.command
+#   <prefix>.args.<n>            (one per argument, in order)
+#   <prefix>.exit_code
+#   <prefix>.duration_ms
+#   <prefix>.launch_ok
+#   <prefix>.stdout               (whole stream, verbatim)
+#   <prefix>.stdout.lines         (repeated per line, in order, for oracle granularity)
+#   <prefix>.stderr               (whole stream, verbatim)
+#   <prefix>.stderr.lines         (repeated per line, in order)
+#
+# Following text_protocol.spl's line-based pattern: whole-stream nodes let an
+# oracle assert a substring across the entire capture, while `.lines` nodes
+# let an oracle pin a specific line without over-fitting to exact byte
+# layout. This adapter never returns a parse error — a completed real process
+# run always has a definite exit code, stdout, and stderr, so there is no
+# "malformed transcript" state analogous to `text_protocol`'s missing
+# separator.
+pub fn exec_to_evidence(capture: ExecCapture, profile_id: text) -> CanonicalEvidence:
+    var nodes: [EvidenceNode] = []
+    var order = 0
+
+    nodes.push(field_node(profile_id + ".command", capture.command, order))
+    order = order + 1
+
+    var a = 0
+    while a < capture.args.len():
+        nodes.push(field_node(profile_id + ".args." + "{a}", capture.args[a], order))
+        order = order + 1
+        a = a + 1
+
+    nodes.push(field_node(profile_id + ".exit_code", "{capture.exit_code}", order))
+    order = order + 1
+
+    nodes.push(field_node(profile_id + ".duration_ms", "{capture.duration_ms}", order))
+    order = order + 1
+
+    val launch_ok_text = if capture.launch_ok: "true" else: "false"
+    nodes.push(field_node(profile_id + ".launch_ok", launch_ok_text, order))
+    order = order + 1
+
+    nodes.push(field_node(profile_id + ".stdout", capture.stdout, order))
+    order = order + 1
+
+    for line in split_lines(capture.stdout):
+        nodes.push(field_node(profile_id + ".stdout.lines", line, order))
+        order = order + 1
+
+    nodes.push(field_node(profile_id + ".stderr", capture.stderr, order))
+    order = order + 1
+
+    for line in split_lines(capture.stderr):
+        nodes.push(field_node(profile_id + ".stderr.lines", line, order))
+        order = order + 1
+
+    canonical_evidence("exec_capture", profile_id, nodes)

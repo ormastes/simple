@@ -1,0 +1,74 @@
+# Repro: trait `impl` blocks whose Self type is a PRIMITIVE are only honoured by
+# the interpreter. Under JIT they are silently bypassed; under native MIR
+# lowering they fail closed with "unresolved method call".
+#
+# See doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md
+#
+# Run three ways and compare — divergence IS the bug:
+#   SIMPLE_EXECUTION_MODE=interpret bin/simple run <this file>   # sentinels visible
+#   bin/simple run <this file>                                   # JIT: hard error
+#   bin/simple native-build <this file> -o /tmp/x                # MIR: unresolved
+#
+# This file deliberately uses a NON-builtin method name (`marker_probe`). The
+# companion defect uses the builtin-shadowed name `hash`, which fails OPEN
+# instead of closed — see the bug doc's matrix.
+
+trait MarkerProbe:
+    fn marker_probe() -> i64
+
+impl MarkerProbe for text:
+    fn marker_probe() -> i64:
+        1001
+
+impl MarkerProbe for i64:
+    fn marker_probe() -> i64:
+        1002
+
+impl MarkerProbe for i32:
+    fn marker_probe() -> i64:
+        1003
+
+impl MarkerProbe for bool:
+    fn marker_probe() -> i64:
+        1004
+
+impl MarkerProbe for f32:
+    fn marker_probe() -> i64:
+        1006
+
+impl MarkerProbe for f64:
+    fn marker_probe() -> i64:
+        1007
+
+# Control: a struct receiver. This one dispatches correctly in every engine,
+# which is what proves the defect is specific to primitive Self types and not
+# to trait dispatch in general.
+struct ControlPoint:
+    x: i64
+
+impl MarkerProbe for ControlPoint:
+    fn marker_probe() -> i64:
+        self.x + 5000
+
+fn check(label: text, got: i64, want: i64) -> i64:
+    if got == want:
+        print("PASS " + label + " = " + got.to_text())
+        return 0
+    print("FAIL " + label + " = " + got.to_text() + " want " + want.to_text())
+    1
+
+fn main():
+    var bad = 0
+    bad = bad + check("struct(control)", ControlPoint(x: 1).marker_probe(), 5001)
+    bad = bad + check("text", "x".marker_probe(), 1001)
+    bad = bad + check("i64", (7 as i64).marker_probe(), 1002)
+    # Known-divergent row: i32 currently reaches the i64 impl (returns 1002).
+    # Left asserting the CORRECT value so the row stays red until fixed.
+    bad = bad + check("i32", (7 as i32).marker_probe(), 1003)
+    bad = bad + check("bool", true.marker_probe(), 1004)
+    bad = bad + check("f32", (1.5 as f32).marker_probe(), 1006)
+    bad = bad + check("f64", (1.5 as f64).marker_probe(), 1007)
+    if bad == 0:
+        print("ALL PASS")
+    else:
+        print("FAILURES=" + bad.to_text())

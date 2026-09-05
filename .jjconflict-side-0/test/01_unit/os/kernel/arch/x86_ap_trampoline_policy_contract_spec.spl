@@ -1,0 +1,51 @@
+"""
+Pins the branchless Pure Simple x86 AP trampoline address policy and its exact
+agreement with the C startup owner and assembly template.
+"""
+# @manual: primary
+
+use std.spec
+use app.io.mod.{file_read_text}
+
+val SIMPLE_OWNER_PATH = "src/os/kernel/arch/x86_64/cpu.spl"
+val C_OWNER_PATH = "examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+val ASM_TEMPLATE_PATH = "examples/09_embedded/simple_os/arch/x86_64/boot/ap_trampoline.s"
+val RAW_BASELINE_PATH = "scripts/check/raw_sffi_unsafe_baseline.tsv"
+val UNBACKED_PATH = "scripts/check/unbacked_extern_baseline.txt"
+val FABRICATED_BASELINE_PATH = "config/simpleos_fabricated_rt_baseline.sdn"
+
+describe "x86 AP trampoline scalar policy ownership":
+    it "keeps address and SIPI vector exact across all three owners":
+        step("Inspect Simple policy, C startup policy, and assembly template")
+        val simple_owner = file_read_text(SIMPLE_OWNER_PATH)
+        val c_owner = file_read_text(C_OWNER_PATH)
+        val asm_template = file_read_text(ASM_TEMPLATE_PATH)
+        expect(simple_owner).to_contain("fn x86_ap_trampoline_vector() -> u32:")
+        expect(simple_owner).to_contain("0x08u32")
+        expect(simple_owner).to_contain("fn x86_ap_trampoline_phys() -> u64:")
+        expect(simple_owner).to_contain("0x8000u64")
+        expect(c_owner).to_contain("#define SIMPLEOS_AP_TRAMPOLINE_PHYS   0x8000ULL")
+        expect(c_owner).to_contain("#define SIMPLEOS_AP_TRAMPOLINE_VECTOR 0x08U")
+        expect(c_owner).to_contain("vector != SIMPLEOS_AP_TRAMPOLINE_VECTOR")
+        expect(asm_template).to_contain(".set SIMPLEOS_AP_TRAMPOLINE_PHYS, 0x8000")
+
+    it "preserves fail-closed startup decisions through the Pure Simple values":
+        step("Inspect the AP preparation and startup decision branches")
+        val simple_owner = file_read_text(SIMPLE_OWNER_PATH)
+        expect(simple_owner).to_contain("if rt_x86_prepare_ap_startup(cpu_id, sipi_vector) == 0:")
+        expect(simple_owner).to_contain("val vector = x86_ap_trampoline_vector()")
+        expect(simple_owner).to_contain("if x86_send_startup_to_cpu(cpu_id, vector):")
+
+    it "removes both foreign scalar providers and active inventory debt":
+        step("Inspect source and active policy inventories")
+        val simple_owner = file_read_text(SIMPLE_OWNER_PATH)
+        val c_owner = file_read_text(C_OWNER_PATH)
+        val raw_baseline = file_read_text(RAW_BASELINE_PATH)
+        val unbacked = file_read_text(UNBACKED_PATH)
+        val fabricated = file_read_text(FABRICATED_BASELINE_PATH)
+        expect(simple_owner.contains("rt_x86_ap_trampoline_phys")).to_be(false)
+        expect(c_owner.contains("rt_x86_ap_trampoline_phys")).to_be(false)
+        expect(c_owner.contains("rt_x86_ap_trampoline_vector")).to_be(false)
+        expect(raw_baseline.contains("rt_x86_ap_trampoline_phys")).to_be(false)
+        expect(unbacked.contains("rt_x86_ap_trampoline_phys")).to_be(false)
+        expect(fabricated.contains("rt_x86_ap_trampoline_phys")).to_be(false)

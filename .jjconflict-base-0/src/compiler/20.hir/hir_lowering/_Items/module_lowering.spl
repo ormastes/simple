@@ -1,0 +1,510 @@
+# HIR item lowering - module, import, and bootstrap-flat lowering.
+# HIR Lowering - Item Lowering
+#
+# This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}  # explicit: a glob is not an import-origin for surface projection
+# Same reason as the line above, for the four surface types used in DECLARATION
+# position in this module's own signatures: hir_surface_param_to_param(param:
+# ModuleSurfaceParam) :293, hir_surface_callable_to_header(callable:
+# ModuleSurfaceCallable) :298, hir_surface_trait_to_trait(surface_trait:
+# ModuleSurfaceTrait, ...) :313, hir_surface_enum_to_enum(surface_enum:
+# ModuleSurfaceEnum, ...) :327.
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum, ModuleSurfaceCallable, ModuleSurfaceParam, ModuleSurfaceTrait}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_route_arrays_aligned}
+use compiler.hir.hir_lowering.expressions.*
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: StmtKind) -> Expr
+use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
+use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
+use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
+use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
+use compiler.core.{int_to_str}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_string_len(value: text) -> i64
+
+# `rt_env_get` yields nil for an UNSET variable, so both the extern and this
+# wrapper are OPTIONAL — every call site below already uses the optional-safe
+# `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
+# Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
+fn hir_module_env_get(key: text) -> text?:
+    rt_env_get(key)
+
+fn hir_module_phase_probe(msg: text):
+    if hir_module_diag_enabled():
+        eprint("[BOOTSTRAP-PHASE] " + msg)
+
+fn hir_module_diag_enabled() -> bool:
+    val phase = hir_module_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
+    val trace = hir_module_env_get("SIMPLE_COMPILER_TRACE") ?? ""
+    val diag = hir_module_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
+    if phase == "1":
+        return true
+    if trace == "1":
+        return true
+    diag == "1"
+
+fn hir_module_verbose_diag_enabled() -> bool:
+    val trace = hir_module_env_get("SIMPLE_COMPILER_TRACE") ?? ""
+    val diag = hir_module_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
+    trace == "1" or diag == "1"
+
+fn hir_module_sibling_trace_enabled() -> bool:
+    """Dedicated, default-OFF switch for directory-package (sibling) symbol
+    registration. Kept in tree: `resolve_package_sibling_symbols` silently
+    registering NOTHING is indistinguishable from it running and finding no
+    siblings, and that ambiguity is exactly what hid the package-prefix
+    spelling mismatch behind ~260 stage-3 "unresolved name" errors."""
+    (hir_module_env_get("SIMPLE_HIR_SIBLING_TRACE") ?? "") == "1"
+
+fn hir_pkg_segment_is_tier(seg: text) -> bool:
+    """True for an all-digit layer segment ("70" in compiler.70.backend.*).
+    Mirrors `_driver_module_name_segment_is_tier` in
+    80.driver/driver_source_loading.spl; duplicated instead of imported
+    because 20.hir must not depend on 80.driver."""
+    if seg == "":
+        return false
+    val seg_len = rt_string_len(seg)
+    var i = 0
+    while i < seg_len:
+        val code = seg.char_code_at(i)
+        if code < 48 or code > 57:
+            return false
+        i = i + 1
+    true
+
+fn hir_pkg_canonical_module_name(name: text) -> text:
+    """Fold every spelling of ONE physical module onto a single dotted name.
+    Accepts both spellings that reach HIR lowering: a repo-relative PATH
+    (`src/compiler/70.backend/backend/vulkan_backend.spl`, what the
+    bare-positional native-build lane uses for `SourceFile.module_name`) and a
+    dotted import name (`compiler.backend.backend.vulkan_backend`). Applies the
+    same two rules as `_driver_canonical_module_name`: drop all-digit tier
+    segments (`src/compiler/frontend -> 10.frontend` and friends) and fold a
+    leading `std.` to `lib.` (`src/std -> src/lib`)."""
+    var dotted = name
+    if dotted.ends_with(".spl"):
+        dotted = dotted[0:dotted.len() - 4]
+    dotted = dotted.replace("/", ".")
+    if dotted.starts_with("src."):
+        dotted = dotted.substring(4)
+    var segs: [text] = []
+    for seg in dotted.split("."):
+        if hir_pkg_segment_is_tier(seg):
+            continue
+        segs = segs.push(seg)
+    val canonical = segs.join(".")
+    if canonical == "std":
+        return "lib"
+    if canonical.starts_with("std."):
+        return "lib." + canonical.substring(4)
+    canonical
+
+struct HirReexportSource:
+    """Result of chasing a re-export facade chain (find_reexport_source).
+    A struct (not an anonymous tuple) on purpose: multi-value tuple returns
+    are unreliable on the seed interpreter."""
+    found: bool
+    module_index: i64
+    module_name: text
+    item_name: text
+
+class HirReexportWalkState:
+    """Per-root cycle state; never shared across nested re-export queries.
+
+    Keep one owner-mutated dictionary keyed by surface and wanted name. The
+    former three-array representation performed a linear scan and three COW
+    array copies per visited node, making one re-export chase quadratic in
+    both work and transient allocation."""
+    visited_depth: {text: i64}
+    complete: bool
+    valid: bool
+
+    static fn fresh() -> HirReexportWalkState:
+        val empty_visited: {text: i64} = {}
+        HirReexportWalkState(
+            visited_depth: empty_visited,
+            complete: true, valid: true)
+
+struct HirMaterializedPayloadOrigin:
+    """Terminal declaration behind one enum-payload lexical spelling."""
+    found: bool
+    module_name: text
+    item_name: text
+    item_kind: text
+    # Registry key used to retrieve the surface. This is routing state only;
+    # collision/cycle identity always uses physical module_name above.
+    module_key: text
+
+fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
+    # Native optional class returns and Dict bracket reads can preserve the
+    # success discriminator while dropping the ModuleSurface payload. Resolve
+    # through the builder-owned aligned arrays and let callers bounds-check
+    # explicitly.  Do not materialize Dict keys/values in this hot path.
+    val names = surfaces.ordered_names
+    val indices = surfaces.ordered_indices
+    var position = 0
+    while position < names.len() and position < indices.len():
+        if names[position] == name:
+            val index = indices[position]
+            if index >= 0 and index < surfaces.surfaces.len():
+                return index
+            return -1
+        position = position + 1
+    -1
+
+fn hir_export_origin_surface_index(
+    surfaces: ModuleSurfacesByName, owner_name: text
+) -> i64:
+    """Resolve one frozen logical owner through its construction-time alias.
+
+    ModuleSurfaceBuilder registers the tier-free/std-folded canonical identity
+    once and rejects collisions there. Keep the repeated import path on the
+    registry's O(1) index instead of rescanning every surface per origin.
+    """
+    val indexed = module_surface_registry_index(surfaces, owner_name)
+    if indexed >= 0:
+        return indexed
+
+    # A retained Stage-2 registry can predate canonical-alias publication even
+    # while its newly compiled HIR code consumes canonical frozen origins.
+    # Recover from that mixed-generation shape through the retained scalar
+    # alias arrays. Do not copy ModuleSurface aggregates here: native teardown
+    # can preserve the aligned scalar authority while dropping class payloads.
+    # Multiple spellings may name one index; two different physical indices
+    # remain ambiguous and fail closed.
+    val wanted = hir_pkg_canonical_module_name(owner_name)
+    var matched = -1
+    var alias_index = 0
+    while alias_index < surfaces.ordered_names.len() and
+          alias_index < surfaces.ordered_indices.len():
+        if hir_pkg_canonical_module_name(
+            surfaces.ordered_names[alias_index]) == wanted:
+            val physical_index = surfaces.ordered_indices[alias_index]
+            if physical_index < 0 or physical_index >= surfaces.surfaces.len():
+                return -1
+            if matched >= 0 and matched != physical_index:
+                return -1
+            matched = physical_index
+        alias_index = alias_index + 1
+    matched
+
+fn hir_module_declares_item(m: ModuleSurface, name: text) -> bool:
+    """True when module `m` itself declares `name` as any importable decl
+    kind register_imported_symbol knows how to register (functions covers
+    `extern fn` too — the parser stores externs in ParserModule.functions with
+    is_extern=true)."""
+    if module_surface_name_position(m.callable_names, name) >= 0:
+        return true
+    if module_surface_name_position(m.composite_names, name) >= 0:
+        return true
+    if module_surface_name_position(m.enum_names, name) >= 0:
+        return true
+    if module_surface_name_position(m.trait_names, name) >= 0:
+        return true
+    if module_surface_name_position(m.type_alias_names, name) >= 0:
+        return true
+    module_surface_name_position(m.constant_names, name) >= 0
+
+fn hir_module_item_terminal_kind(m: ModuleSurface, name: text) -> text:
+    val composite_position = module_surface_name_position(m.composite_names, name)
+    if composite_position >= 0: return m.composite_values[composite_position].kind
+    if module_surface_name_position(m.enum_names, name) >= 0: return "enum"
+    if module_surface_name_position(m.trait_names, name) >= 0: return "trait"
+    val alias_position = module_surface_name_position(m.type_alias_names, name)
+    if alias_position >= 0:
+        # Follow the alias with EXACTLY the predicate register_imported_symbol
+        # uses (see the TAL3 comment beside `alias_targets`): no type params, a
+        # single named target, and that target declared as a NON-alias by this
+        # same module. The two sides MUST agree, because
+        # claim_materialized_payload_binding compares this answer against
+        # hir_symbol_terminal_kind. TAL3 binds `type Symbol = HirSymbol` under
+        # the TARGET's kind (`struct`) while this function used to report
+        # `type_alias` unconditionally, so the same entity got two identities
+        # and Stage 3 died on a phantom `Symbol` conflict against itself.
+        # Fixing the comparison instead of the rule would only hide it.
+        #
+        # Terminates for the same reason TAL3 does: the target is known not to
+        # be an alias, so the re-entry can only reach a composite / enum /
+        # trait / callable / const branch, never back here. `type A = B` /
+        # `type B = A` fails the non-alias test and stays "type_alias".
+        val alias_decl = m.type_alias_values[alias_position]
+        val alias_targets = parser_type_named_dependencies(alias_decl.type_)
+        if alias_decl.type_params.len() == 0 and alias_targets.len() == 1:
+            val alias_target = alias_targets[0]
+            if alias_target != name and module_surface_name_position(m.type_alias_names, alias_target) < 0 and hir_module_declares_item(m, alias_target):
+                return hir_module_item_terminal_kind(m, alias_target)
+        return "type_alias"
+    if module_surface_name_position(m.callable_names, name) >= 0: return "callable"
+    if module_surface_name_position(m.constant_names, name) >= 0: return "const"
+    ""
+
+fn hir_symbol_terminal_kind(kind: SymbolKind) -> text:
+    match kind:
+        case SymbolKind.Class: "class"
+        case SymbolKind.Struct: "struct"
+        case SymbolKind.Enum: "enum"
+        case SymbolKind.Trait: "trait"
+        case SymbolKind.TypeAlias: "type_alias"
+        case SymbolKind.Function: "callable"
+        case SymbolKind.Method: "callable"
+        case SymbolKind.Const: "const"
+        case _: ""
+
+fn hir_payload_kind_is_type(kind: text) -> bool:
+    """True only for terminal kinds that actually name a TYPE.
+
+    `hir_symbol_terminal_kind` maps functions/methods to "callable" and
+    constants to "const" -- both non-empty -- so an emptiness test cannot
+    separate types from non-types. Enumerate the type kinds positively so a
+    new non-type kind defaults to "not a type" rather than silently being
+    treated as a competing type owner.
+    """
+    kind == "class" or kind == "struct" or kind == "enum" or kind == "trait" or kind == "type_alias"
+
+fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
+    val canonical_module = hir_pkg_canonical_module_name(module_name)
+    val canonical_item_owner = if canonical_module == "compiler.tools.lint._LintMain.config_and_model" and (item_name == "LintLevel" or item_name == "LintCategory"):
+        # Keep these two lint contract enums logically canonical across
+        # config-and-model façade boundaries. `_LintMain.config_and_model` is part
+        # of the tooling contract surface and should stay compatible with
+        # `std.tooling.easy_fix.types` for wildcard consumers like
+        # `compiler.tools.lint.main`, including through direct contract enum
+        # names that can appear in local and imported enum payload positions.
+        "lib.nogc_sync_mut.tooling.easy_fix.types"
+    else:
+        canonical_module
+    "{canonical_item_owner}::{item_name}::{item_kind}"
+
+fn hir_surface_param_to_param(param: ModuleSurfaceParam) -> Param:
+    Param(name: param.name, has_type_: param.has_type_, type_: param.type_,
+        has_default: false, default: Expr(kind: ExprKind.NilLit, span: param.span),
+        span: param.span, is_mutable: param.is_mutable)
+
+fn hir_surface_callable_to_header(callable: ModuleSurfaceCallable) -> ParserFunction:
+    var params: [Param] = []
+    for param in callable.params:
+        params = params.push(hir_surface_param_to_param(param))
+    ParserFunction(
+        name: callable.name, type_params: callable.type_params, params: params,
+        has_return_type: callable.has_return_type, return_type: callable.return_type,
+        body: Block(stmts: [], span: callable.span), visibility: callable.visibility,
+        is_async: callable.is_async, is_static: callable.is_static,
+        is_public: callable.is_public, is_method: callable.is_method,
+        is_mutable: callable.is_mutable, is_const: callable.is_const,
+        is_kernel: callable.is_kernel, is_extern: callable.is_extern,
+        attributes: [], has_doc_comment: false, doc_comment: "",
+        contract: contract_block_empty(), span: callable.span)
+
+fn hir_surface_trait_to_trait(surface_trait: ModuleSurfaceTrait, local_name: text) -> ParserTrait:
+    var methods: [ParserFunction] = []
+    for callable in surface_trait.methods:
+        var method = hir_surface_callable_to_header(callable)
+        for default_method in surface_trait.default_methods:
+            if default_method.span.start == callable.span.start and default_method.span.end == callable.span.end and default_method.span.file == callable.span.file:
+                method = default_method
+        methods = methods.push(method)
+    ParserTrait(name: local_name, type_params: surface_trait.type_params,
+        super_traits: surface_trait.super_traits, where_clause: surface_trait.where_clause,
+        methods: methods, assoc_types: surface_trait.assoc_types,
+        visibility: surface_trait.visibility, is_public: surface_trait.is_public,
+        has_doc_comment: false, doc_comment: "", span: surface_trait.span)
+
+fn hir_surface_enum_to_enum(surface_enum: ModuleSurfaceEnum, local_name: text) -> ParserEnum:
+    ParserEnum(name: local_name, type_params: surface_enum.type_params,
+        variants: surface_enum.variants, visibility: surface_enum.visibility,
+        is_public: surface_enum.is_public, has_doc_comment: false,
+        doc_comment: "", span: surface_enum.span, attributes: [])
+
+fn _hir_text_index_of(value: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    if not value.contains(needle):
+        return -1
+    rt_string_len(value.split(needle)[0])
+
+fn hir_module_logical_name_from_path(path: text) -> text:
+    # Delegates to the single shared derivation in 00.common — see
+    # module_path_naming.spl for history (this used to be one of four
+    # hand-duplicated copies; a 70a29867bc2 drift between copies broke the
+    # whole native-smoke-matrix 0/19).
+    module_logical_name_from_path(path)
+
+fn hir_module_package_name(module_name: text) -> text:
+    val logical_name = hir_module_logical_name_from_path(module_name)
+    if logical_name.ends_with(".__init__"):
+        return logical_name[0:logical_name.len() - 9]
+    val last_dot = logical_name.last_index_of(".")
+    if last_dot >= 0:
+        return logical_name[0:last_dot]
+    ""
+
+fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
+    """Whether `module_name` (a raw parsed-module path, e.g.
+    `src/_wallB_entry.spl`) is the --entry-closure entry module. Used to
+    keep the entry module's own same-module function-name qualification OFF
+    (bootstrap_lower_hir_globals_to_mir_module, the entry's flat MIR
+    accumulator, never qualifies names -- see bootstrap_globals.spl) while
+    turning it ON for closure helper modules (whose flat accumulator,
+    bootstrap_lower_extra_hir_module_to_mir, always qualifies by
+    module.function to avoid same-name collisions across modules, bug
+    bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
+    val entry_path = hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    if entry_path == "":
+        return false
+    hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
+
+# PKGIDX (2026-08-21): inverted indices over the FROZEN module-surface
+# registry, shared by every resolver that used to answer a per-item question
+# with a full-registry sweep. See
+# doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md. Placed here
+# because module_import_registration, module_import_resolution and
+# module_reexport_materialization all import this module, and each of them
+# owned a copy of the same sweep.
+impl HirLowering:
+    me build_surface_decl_index():
+        """One pass over the registry: declaration name -> owning surface
+        indices (ascending, one entry per surface even when the same name is
+        declared in several of that surface's decl kinds)."""
+        self.surface_decl_index_build_count = self.surface_decl_index_build_count + 1
+        var owners: {text: [i64]} = {}
+        var surface_index = 0
+        while surface_index < self.module_surfaces.surfaces.len():
+            val surface = self.module_surfaces.surfaces[surface_index]
+            var kind_index = 0
+            while kind_index < 6:
+                val names: [text] = match kind_index:
+                    case 0: surface.callables.keys()
+                    case 1: surface.composites.keys()
+                    case 2: surface.enums.keys()
+                    case 3: surface.traits.keys()
+                    case 4: surface.type_aliases.keys()
+                    case _: surface.constants.keys()
+                var name_index = 0
+                while name_index < names.len():
+                    val decl_name = names[name_index]
+                    if owners.contains_key(decl_name):
+                        val existing: [i64] = owners[decl_name]
+                        # Ascending insertion order makes the duplicate check a
+                        # single tail comparison rather than a membership scan.
+                        if existing.len() == 0 or existing[existing.len() - 1] != surface_index:
+                            owners[decl_name] = existing.push(surface_index)
+                    else:
+                        owners[decl_name] = [surface_index]
+                    name_index = name_index + 1
+                kind_index = kind_index + 1
+            surface_index = surface_index + 1
+        self.surface_decl_owners = owners
+        self.surface_decl_index_built = true
+
+    me surface_decl_owner_indices(name: text) -> [i64]:
+        """Surfaces declaring `name`, as `hir_module_declares_item` defines
+        declaring. Replaces the full-registry sweeps that asked the same
+        question once per consumer."""
+        if not self.surface_decl_index_built:
+            self.build_surface_decl_index()
+        if self.surface_decl_owners.contains_key(name):
+            return self.surface_decl_owners[name]
+        val empty: [i64] = []
+        empty
+
+    me build_package_sibling_index():
+        """One pass over the registry KEYS: canonical package name -> the
+        registry keys of its direct member modules, deduplicated by canonical
+        module name (one physical sibling can hold several spellings)."""
+        self.package_sibling_index_build_count = self.package_sibling_index_build_count + 1
+        var members: {text: [text]} = {}
+        var canons: {text: [text]} = {}
+        var seen: {text: bool} = {}
+        var key_index = 0
+        while key_index < self.module_surfaces.ordered_names.len():
+            val registry_name = self.module_surfaces.ordered_names[key_index]
+            val canon = hir_pkg_canonical_module_name(registry_name)
+            if seen.contains_key(canon):
+                key_index = key_index + 1
+                continue
+            seen[canon] = true
+            val segs = canon.split(".")
+            if segs.len() >= 2:
+                val pkg = segs[0:segs.len() - 1].join(".")
+                if members.contains_key(pkg):
+                    members[pkg] = members[pkg].push(registry_name)
+                    canons[pkg] = canons[pkg].push(canon)
+                else:
+                    members[pkg] = [registry_name]
+                    canons[pkg] = [canon]
+            key_index = key_index + 1
+        self.package_sibling_names = members
+        self.package_sibling_canons = canons
+        self.package_sibling_index_built = true
+
+    me package_sibling_registry_names(package_name: text) -> [text]:
+        if not self.package_sibling_index_built:
+            self.build_package_sibling_index()
+        if self.package_sibling_names.contains_key(package_name):
+            return self.package_sibling_names[package_name]
+        val empty: [text] = []
+        empty
+
+    me package_sibling_canonical_names(package_name: text) -> [text]:
+        if not self.package_sibling_index_built:
+            self.build_package_sibling_index()
+        if self.package_sibling_canons.contains_key(package_name):
+            return self.package_sibling_canons[package_name]
+        val empty: [text] = []
+        empty
+
+    me build_surface_index_by_name():
+        """One pass over the aligned registry arrays: registry KEY -> surface
+        index, with the same bounds check hir_module_surface_index applies.
+
+        Built FROM ordered_names/ordered_indices, which stay the truth (see the
+        note on hir_module_surface_index about ModuleSurface payloads dropping
+        through native Dict reads -- the values cached here are i64, not
+        surfaces)."""
+        self.surface_index_by_name_build_count = self.surface_index_by_name_build_count + 1
+        var by_name: {text: i64} = {}
+        val names = self.module_surfaces.ordered_names
+        val indices = self.module_surfaces.ordered_indices
+        var position = 0
+        while position < names.len() and position < indices.len():
+            val key = names[position]
+            if not by_name.contains_key(key):
+                # First alias wins, exactly like the linear scan's first hit.
+                val index = indices[position]
+                if index >= 0 and index < self.module_surfaces.surfaces.len():
+                    by_name[key] = index
+                else:
+                    by_name[key] = -1
+            position = position + 1
+        self.surface_index_by_name = by_name
+        self.surface_index_by_name_built = true
+
+    me surface_index_for_name(name: text) -> i64:
+        """Resolve against retained registry authority.
+
+        The per-lowerer Dict can false-negative or false-positive after native
+        module-scope transitions. The registry helper rejects its invalid
+        construction Dict and scans promoted ordered scalar arrays."""
+        module_surface_registry_index(self.module_surfaces, name)

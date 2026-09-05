@@ -1,0 +1,110 @@
+"""
+## Purpose and audience
+Purpose: This spec proves the SCV-MIG-24 dual-write comparison gate: after an
+explicit commit/snapshot, `scv_dual_write_verify(root, dest)` shadow-syncs and
+then INDEPENDENTLY compares primary vs shadow — recomputed hash equality for
+immutable object kinds, byte agreement for refs/heads, field-wise comparison
+for the in-place-mutable change objects, and commit parent-DAG agreement —
+reporting counts per kind; and `scv_dual_write_fsck(dest)` runs object-level
+integrity checks against the shadow store itself. Fails closed: a corrupted
+shadow object is named. Idempotent on re-verify.
+Note: the month plan row names `scv_dual_write_compare_spec.spl`; this lane
+was directed to `scv_dual_write_spec.spl` — SCV-MIG-24.shs maps to this file.
+Audience: Maintainers of the SCV dual-write/native-shadow path.
+"""
+# @req: REQ-SCV-DUAL-WRITE-001
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _prelude(tag: text) -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-dw-{tag}.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "mkdir work && cd work",
+        "printf 'alpha\\n' > a.txt",
+        "mkdir -p sub && printf 'beta\\n' > sub/b.txt",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null",
+        # Driver: unquoted heredoc bakes $TMP in as literal paths before Simple
+        # sees the source (main.spl takes no argv; library funcs take roots).
+        "cat > \"$TMP/drv.spl\" <<EOF",
+        "use std.scv.native_shadow.{scv_dual_write_verify, scv_dual_write_fsck}",
+        "fn main() -> i64:",
+        "    print(scv_dual_write_verify(\"$TMP/work\", \"$TMP/shadow\"))",
+        "    print(scv_dual_write_fsck(\"$TMP/shadow\"))",
+        "    0",
+        "EOF",
+        # cwd must be the Simple project root: std.* resolves from the
+        # project stdlib roots, derived from cwd/importing file — a /tmp
+        # driver run from inside the temp repo cannot resolve std.scv.*.
+        "drv() { (cd \"$REPO\" && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$TMP/drv.spl\"); }"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    expect(out == "" and err == "").to_equal(false)
+    combined
+
+describe "scv dual-write verify (SCV-MIG-24)":
+    it "agrees after an explicit snapshot: 0 mismatches, per-kind counts > 0":
+        step("Snapshot, then dual-write verify + shadow fsck via the driver")
+        var lines = _prelude("green")
+        lines.push("drv")
+        val out = _run(lines)
+        step("Verify sync ran, independent compare agrees, and shadow fsck is clean")
+        expect(out).to_contain("sync: PASS")
+        expect(out).to_contain("compared:")
+        expect(out).to_contain("chunks=2")
+        expect(out).to_contain("commits=1")
+        expect(out).to_contain("changes=1")
+        expect(out).to_contain("PASS — dual-write verified:")
+        expect(out).to_contain("0 mismatch(es)")
+        expect(out).to_contain("PASS — shadow fsck:")
+        expect(out).to_contain("0 error(s)")
+        expect(out).to_contain("exit=0")
+
+    it "fails closed naming a corrupted shadow object via independent recomputed hashes":
+        step("Verify once, corrupt a shadow chunk, verify again")
+        var lines = _prelude("corrupt")
+        lines.push("drv >/dev/null")
+        lines.push("CHUNK=$(find \"$TMP/shadow/objects/chunks\" -type f | head -1)")
+        lines.push("printf 'CORRUPTED' > \"$CHUNK\"")
+        lines.push("drv")
+        val out = _run(lines)
+        step("Verify both the compare and the shadow fsck name the corrupt object")
+        expect(out).to_contain("FAIL — dual-write verified:")
+        expect(out).to_contain("objects/chunks/")
+        expect(out).to_contain("FAIL — shadow fsck:")
+        expect(out).to_contain("exit=0")
+
+    it "still agrees after a change object evolves in place across snapshots":
+        step("Verify, then snapshot again (change mutates in place), verify again")
+        var lines = _prelude("evolve")
+        lines.push("drv >/dev/null")
+        lines.push("printf 'gamma\\n' > c.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("drv")
+        val out = _run(lines)
+        step("Verify the mutable change kind is compared field-wise and agrees")
+        expect(out).to_contain("sync: PASS")
+        expect(out).to_contain("changes=")
+        expect(out).to_contain("PASS — dual-write verified:")
+        expect(out).to_contain("0 mismatch(es)")
+        expect(out).to_contain("exit=0")
+
+    it "is idempotent: an immediate re-verify copies nothing and still agrees":
+        step("Run the driver twice back to back")
+        var lines = _prelude("idem")
+        lines.push("drv >/dev/null")
+        lines.push("drv")
+        val out = _run(lines)
+        step("Verify the second run syncs 0 objects and the compare still passes")
+        expect(out).to_contain("sync: PASS — 0 object(s) replicated")
+        expect(out).to_contain("PASS — dual-write verified:")
+        expect(out).to_contain("0 mismatch(es)")
+        expect(out).to_contain("exit=0")

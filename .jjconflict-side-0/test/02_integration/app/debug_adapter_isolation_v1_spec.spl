@@ -1,0 +1,56 @@
+# @req NFR-004 NFR-006 NFR-009 NFR-011
+use std.spec.{describe, it, expect}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1,
+    DebugTargetNodeV1, debug_policy_development_v1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_add_target,
+    central_debug_service_v1_graph, central_debug_service_v1_session,
+    central_debug_service_v1_receipts, central_debug_service_v1_close,
+}
+use app.debug_adapter_host_v1.{
+    DebugAdapterLimitsV1, run_debug_adapter_isolated_v1,
+}
+
+fn isolation_limits(timeout_ms: i64) -> DebugAdapterLimitsV1:
+    DebugAdapterLimitsV1(timeout_ms, 134217728, 2, 32, 4, 4096)
+
+fn add_adapter_target(session_id, target_id: text) -> Result<Nil, text>:
+    central_debug_service_v1_add_target(
+        session_id,
+        DebugTargetNodeV1(target_id, "", "adapter.process", target_id),
+        DebugCapabilityV1(target_id, CapLevel.Native, DebugVerificationV1.LiveVerified, DebugPerturbationV1.Cooperative, "live subprocess fixture"),
+    )
+
+describe "out-of-process DebugServiceV1 adapter isolation":
+    it "contains a real adapter crash and leaves another session usable":
+        val failed = central_debug_service_v1_open("sha256:crash-fixture", debug_policy_development_v1())?
+        val healthy = central_debug_service_v1_open("sha256:healthy-fixture", debug_policy_development_v1())?
+        add_adapter_target(failed, "adapter-crash")?
+        val result = run_debug_adapter_isolated_v1(failed, "adapter-crash", "/bin/sh", ["-c", "exit 7"], isolation_limits(2000))
+        expect(result.succeeded).to_equal(false)
+        expect(result.crashed).to_equal(true)
+        expect(result.cleanup_recorded).to_equal(true)
+        expect(central_debug_service_v1_session(healthy)?.open).to_equal(true)
+        val graph = central_debug_service_v1_graph(failed)?
+        expect(graph.capabilities[0].verification).to_equal(DebugVerificationV1.Blocked)
+        expect(graph.capabilities[0].support).to_equal(CapLevel.Unavailable)
+        expect(central_debug_service_v1_receipts(failed).last().action).to_equal("adapter.cleanup")
+        central_debug_service_v1_close(failed)?
+        central_debug_service_v1_close(healthy)?
+
+    it "terminates a real deadline overrun and records truthful timeout evidence":
+        val session = central_debug_service_v1_open("sha256:timeout-fixture", debug_policy_development_v1())?
+        add_adapter_target(session, "adapter-timeout")?
+        # GNU timeout is itself the isolated adapter process here. It kills
+        # its hung child and returns the canonical deadline code (124), while
+        # the outer host still has its independent five-second hard bound.
+        val result = run_debug_adapter_isolated_v1(session, "adapter-timeout", "/usr/bin/timeout", ["1", "/bin/sh", "-c", "sleep 5"], isolation_limits(5000))
+        expect(result.succeeded).to_equal(false)
+        expect(result.timed_out).to_equal(true)
+        expect(result.reason).to_contain("timed out")
+        expect(result.cleanup_recorded).to_equal(true)
+        expect(central_debug_service_v1_session(session)?.open).to_equal(true)
+        central_debug_service_v1_close(session)?

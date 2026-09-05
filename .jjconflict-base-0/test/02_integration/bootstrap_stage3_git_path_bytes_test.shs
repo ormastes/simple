@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+repo=$tmp/repo
+git init -q "$repo"
+git -C "$repo" config user.name bootstrap-test
+git -C "$repo" config user.email bootstrap-test@example.invalid
+
+tab_path=$(printf 'tab\tname.spl')
+backslash_path='back\slash.spl'
+quote_path='quote"name.spl'
+newline_path=$(printf 'line\nbreak.spl')
+
+for path in "$tab_path" "$backslash_path" "$quote_path" "$newline_path"; do
+    printf 'tracked-before\n' >"$repo/tracked-$path"
+done
+git -C "$repo" add -- .
+git -C "$repo" commit -qm 'weird tracked paths'
+
+for path in "$tab_path" "$backslash_path" "$quote_path" "$newline_path"; do
+    printf 'tracked-after:%s\n' "$path" >"$repo/tracked-$path"
+    printf 'untracked:%s\n' "$path" >"$repo/untracked-$path"
+done
+
+bootstrap_stage3_git_state "$repo" "$tmp/state-1"
+bootstrap_stage3_git_state "$repo" "$tmp/state-2"
+cmp -s "$tmp/state-1" "$tmp/state-2"
+grep -Eq '^head=[0-9a-f]{40}$' "$tmp/state-1"
+grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/state-1"
+
+# Replacing an untracked pathname with a same-byte, same-mode inode between
+# the two complete snapshots must fail closed. Content-only comparison would
+# otherwise accept a TOCTOU replacement as an unchanged view.
+mutation_path="untracked-$newline_path"
+chmod 0644 "$repo/$mutation_path"
+reached_fifo=$tmp/reached.fifo
+release_fifo=$tmp/release.fifo
+ack_fifo=$tmp/ack.fifo
+mkfifo "$reached_fifo" "$release_fifo" "$ack_fifo"
+token=git-path-replacement
+(
+    BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_POINT=after-first-snapshot
+    BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_REACHED=$reached_fifo
+    BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_RELEASE=$release_fifo
+    BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_ACK=$ack_fifo
+    BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_TOKEN=$token
+    export BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_POINT
+    export BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_REACHED
+    export BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_RELEASE
+    export BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_ACK
+    export BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_TOKEN
+    bootstrap_stage3_git_state "$repo" "$tmp/state-replaced"
+) >"$tmp/replaced.stdout" 2>"$tmp/replaced.stderr" &
+snapshot_pid=$!
+
+IFS= read -r reached <"$reached_fifo"
+[ "$reached" = "after-first-snapshot:$token" ]
+mv "$repo/$mutation_path" "$tmp/held-original"
+printf 'untracked:%s\n' "$newline_path" >"$repo/$mutation_path"
+chmod 0644 "$repo/$mutation_path"
+printf 'continue:%s\n' "$token" >"$release_fifo"
+IFS= read -r accepted <"$ack_fifo"
+[ "$accepted" = "accepted:$token" ]
+if wait "$snapshot_pid"; then
+    echo 'same-byte between-snapshot replacement was accepted' >&2
+    exit 1
+fi
+[ ! -e "$tmp/state-replaced" ]
+
+echo "bootstrap_stage3_git_path_bytes=true"

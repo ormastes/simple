@@ -1,0 +1,75 @@
+"""
+# Parser bug: identifier named `out` hijacked by the contract-block parser
+
+**Bug:** doc/08_tracking/bug/identifier_named_out_param_hijacked_by_modifier_keyword_2026-08-11.md
+**Category:** Syntax / contextual-keyword disambiguation
+**Status:** Fixed 2026-08-11
+
+## Overview
+
+`out` and `out_err` are intentionally-non-reserved parameter names (used
+throughout the codebase for output-buffer conventions, e.g. `fn f(out: [u8])`).
+The function-body-open dispatcher used to treat a bare `out`/`out_err` token as
+sufficient evidence of `out(ret):` / `out_err(err):` contract syntax, without
+checking for the `(` that actually distinguishes a contract clause from a
+parameter named `out` used as an ordinary statement-leading expression.
+
+Same family as the `grid`-identifier hijack
+(doc/08_tracking/bug/identifier_named_grid_hijacked_by_grid_literal_parser_2026-08-09.md):
+a contextual keyword's disambiguation test fired on a single lookahead token
+instead of the real disambiguating syntax (`(` here, `|` there).
+
+## Syntax
+
+```simple
+fn f(out: [u8]) -> i64:
+    out.push(1)
+    out.len()
+```
+
+If this module parses at all, the fix holds (the pre-fix parser rejected it
+with "Unexpected token: expected LParen, found Dot", pointing at the body's
+`.` rather than the real trigger).
+"""
+
+use std.spec
+
+# ============================================================================
+# Exact failing shape: statement-leading call on a param literally named `out`.
+# ============================================================================
+fn out_param_push_and_len(out: [i64]) -> i64:
+    out.push(9)
+    out.len()
+
+# ============================================================================
+# Negative control: differently-named param, statement-leading call — must
+# still work (this always worked; guards against a fix that breaks the
+# ordinary case while "fixing" the `out` case).
+# ============================================================================
+fn xs_param_push_and_len(xs: [i64]) -> i64:
+    xs.push(9)
+    xs.len()
+
+# ============================================================================
+# Genuine out(ret): contract clause must still parse and be enforced —
+# guards against over-widening the fix so real contract syntax stops working.
+# ============================================================================
+fn add_positive(a: i64, b: i64) -> i64:
+    out(ret):
+        ret > 0
+    a + b
+
+describe "parser bug: identifier named out hijacked by contract-block parser":
+    context "statement-leading call on a param named out":
+        it "parses and evaluates a push+len call on an out-named param":
+            var buf: [i64] = [1, 2]
+            assert_equal(out_param_push_and_len(buf), 3)
+
+    context "negative control: differently-named param":
+        it "parses and evaluates a push+len call on an xs-named param":
+            var buf: [i64] = [1, 2]
+            assert_equal(xs_param_push_and_len(buf), 3)
+
+    context "genuine out(ret): contract clause still parses":
+        it "still accepts and satisfies a real postcondition block":
+            assert_equal(add_positive(2, 3), 5)

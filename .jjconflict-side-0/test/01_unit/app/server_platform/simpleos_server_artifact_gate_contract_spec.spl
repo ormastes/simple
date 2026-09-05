@@ -1,0 +1,41 @@
+"""Static contract for the target-native SimpleOS server artifact gate."""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "SimpleOS server artifact admission gate":
+    it "pins explicit single-worker SimpleOS launch profiles":
+        val gate = file_read("scripts/check/build-simpleos-server-artifacts.shs")
+        expect(gate).to_contain("launch_profile=simpleos-single-worker-v1")
+        expect(gate).to_contain("--simpleos --launch-id ${simpleos.server_launch_nonce}")
+        expect(gate).to_contain("--serve --simpleos --launch-id ${simpleos.server_launch_nonce}")
+        expect(gate).to_contain("--workers 1 --backend cpu")
+        expect(gate).to_contain("--workers 1 --allow-user simpleos --allow-database simpleos")
+
+    it "requires target TCP providers in the emitted executable":
+        val gate = file_read("scripts/check/build-simpleos-server-artifacts.shs")
+        expect(gate).to_contain("elf_missing_simpleos_tcp_bridge_symbol")
+        expect(gate).to_contain("$7 != \"UND\" && $8 == wanted")
+        expect(gate).to_contain("rt_io_tcp_accept rt_io_tcp_read rt_io_tcp_write_bytes rt_io_tcp_close")
+        expect(gate).to_contain("tcp_adapter_sha256=")
+        expect(gate).to_contain("tcp_owner_sha256=")
+
+    it "requires the DB entry to use the scalar status bridge in its SimpleOS profile":
+        val gate = file_read("scripts/check/build-simpleos-server-artifacts.shs")
+        expect(gate).to_contain("server.serve_inline_bounded_status(max_connections)")
+
+    it "rejects hosted dynamic dependencies and imports":
+        val gate = file_read("scripts/check/build-simpleos-server-artifacts.shs")
+        expect(gate).to_contain("host_dynamic_dependency_forbidden")
+        expect(gate).to_contain("hosted_import_forbidden")
+        expect(gate).to_contain("NEEDED")
+        expect(gate).to_contain("RUNPATH")
+
+    it "compares validated PNG bodies for the live SSR challenge":
+        val gate = file_read("scripts/check/check-simpleos-server-fs-launch-qemu.shs")
+        expect(gate).to_contain("extract_png_body")
+        expect(gate).to_contain("Content-Length:")
+        expect(gate).to_contain("\\x89PNG\\r\\n\\x1a\\n")
+        expect(gate).to_contain("cmp -s \"$http_png\" \"$http_png_2\"")
+        expect(gate).to_contain("web_fixed_render_body_detected")
+        expect(gate.contains("cmp -s \"$http_response\" \"$http_response_2\"")).to_equal(false)

@@ -1,0 +1,48 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_retirement_owner.{strict_riscv_scalar_retirement_owner}
+use compiler.backend.backend.riscv_scalar_retirement_owner_to_vhdl.{compile_strict_riscv_scalar_retirement_owner}
+
+fn expect_owner_shape(config: CoreConfig):
+    val built = strict_riscv_scalar_retirement_owner(
+        "scalar_retire_owner_rv" + config.xlen.to_text(), config)
+    expect(built.is_ok()).to_equal(true)
+    if built.is_ok():
+        val module = built.ok().unwrap()
+        expect(module.diagnostic()).to_equal("")
+        expect(module.child_entity).to_equal("")
+        expect(module.plan.decoder_pins.len()).to_equal(0)
+        expect(module.plan.named_width(module.ports, "retire_pc_before")).to_equal(config.xlen)
+        expect(module.plan.named_width(module.ports, "retire_order")).to_equal(64)
+        expect(module.plan.named_width(module.ports, "retire_xlen")).to_equal(7)
+        expect(module.plan.port_direction(module.ports, "dispatch_xlen")).to_equal("")
+        expect(module.plan.rules[0].name).to_equal("consume")
+        expect(module.plan.rules[1].name).to_equal("capture_terminal_order")
+        expect(module.plan.rules[2].name).to_equal("capture")
+
+describe "typed scalar retirement owner":
+    it "specializes one normalized record owner for RV32 and RV64":
+        expect_owner_shape(CoreConfig.rv32())
+        expect_owner_shape(CoreConfig.rv64())
+
+    it "emits conservative ready, one-entry valid, reset, and guarded payload":
+        val emitted = compile_strict_riscv_scalar_retirement_owner(
+            "scalar_retirement_owner", CoreConfig.rv64())
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.route).to_equal("hwir-gen2-scalar-retirement-owner-v1")
+        expect(emitted.vhdl).to_contain("dispatch_ready <= '1' when")
+        expect(emitted.vhdl).to_contain("fault_reg='0' else '0';")
+        expect(emitted.vhdl).to_contain("dispatch_accept <= '1' when")
+        expect(emitted.vhdl).to_contain("retire_valid <= full_reg;")
+        expect(emitted.vhdl).to_contain("retire_order <= order_reg when full_reg='1' else (others=>'0');")
+        expect(emitted.vhdl).to_contain("retire_rd_value <= rd_value_reg when full_reg='1' else (others=>'0');")
+        expect(emitted.vhdl).to_contain("if rst='1' then")
+        expect(emitted.vhdl).to_contain("retire_ready='1' and full_reg='1' then")
+        expect(emitted.vhdl).to_contain("next_order_reg=(others=>'1') then")
+        expect(emitted.vhdl.contains("entity work.")).to_equal(false)
+
+    it "rejects an empty module identity":
+        val rejected = strict_riscv_scalar_retirement_owner("", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.err().unwrap()).to_equal(
+            "HWIR-E-RISCV-RETIRE-OWNER-ID: scalar retirement owner requires a module name")

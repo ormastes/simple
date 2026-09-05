@@ -1,0 +1,56 @@
+# @cover src/app/test/chrome_component_renderer_parity/orchestration.spl
+use std.spec.*
+use app.test.chrome_component_renderer_parity.*
+
+fn execution(backend: text, run_id: text, suffix: text,
+        input_hash: text = "input-sha", production: bool = true,
+        fallback: bool = false) -> ParityExecutionReceipt:
+    ParityExecutionReceipt(fixture_id: "fixture", backend: backend, run_id: run_id,
+        semantic_input_hash: input_hash, stage_artifact_path: "artifacts/" + suffix + "/stages.sdn",
+        stage_artifact_hash: "stage-" + suffix, pixel_artifact_path: "artifacts/" + suffix + "/pixels.rgba",
+        pixel_artifact_hash: "pixels-" + suffix, producer: "production-" + backend,
+        fresh: true, production_path: production, fallback: fallback)
+
+fn independent_rows() -> [ParityExecutionReceipt]:
+    [execution("chrome", "run-chrome", "chrome"),
+     execution("simple_cpu", "run-cpu", "cpu"),
+     execution("simple_simd", "run-simd", "simd"),
+     execution("simple_gpu", "run-gpu", "gpu")]
+
+describe "Chrome component renderer parity orchestration":
+    it "plans a pinned bounded Chrome capture through the canonical tool":
+        val manifest = load_parity_manifest(DEFAULT_PARITY_MANIFEST)
+        val plan = chrome_capture_plan(manifest.cases[0], "/opt/chrome/chrome",
+            "chrome-123.0-sha256", "build/test-artifacts/chrome-parity")
+        expect(plan.valid).to_equal(true)
+        expect(plan.executable).to_equal("node")
+        expect(plan.args[0]).to_equal("tools/chrome-live-bitmap/capture_html_argb.js")
+        expect(plan.env_values).to_contain("/opt/chrome/chrome")
+        expect(plan.env_values).to_contain("true")
+        expect(plan.stdout_limit_bytes).to_equal(4194304)
+        expect(plan.stderr_limit_bytes).to_equal(4194304)
+
+    it "admits exactly four independent production executions of one semantic input":
+        val admitted = validate_independent_receipts("fixture", "input-sha", independent_rows())
+        expect(admitted.valid()).to_equal(true)
+        expect(admitted.receipts.len()).to_equal(4)
+
+    it "rejects reused outputs fallback and semantic-input drift":
+        val reused = [execution("chrome", "same-run", "same"),
+            execution("simple_cpu", "same-run", "same"),
+            execution("simple_simd", "run-simd", "simd", input_hash: "other"),
+            execution("simple_gpu", "run-gpu", "gpu", fallback: true)]
+        val admitted = validate_independent_receipts("fixture", "input-sha", reused)
+        expect(admitted.valid()).to_equal(false)
+        expect(admitted.issues.len()).to_be_greater_than(3)
+
+    it "constructs all Chrome and pairwise Simple comparisons":
+        val matrix = parity_comparison_matrix("fixture")
+        expect(matrix.len()).to_equal(6)
+        var chrome_pairs: i64 = 0
+        var exact_pairs: i64 = 0
+        for pair in matrix:
+            if pair.left_backend == "chrome": chrome_pairs = chrome_pairs + 1
+            if pair.exact_required: exact_pairs = exact_pairs + 1
+        expect(chrome_pairs).to_equal(3)
+        expect(exact_pairs).to_equal(3)

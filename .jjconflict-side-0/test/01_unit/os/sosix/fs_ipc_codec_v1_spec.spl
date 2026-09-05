@@ -1,0 +1,206 @@
+"""SOSIX filesystem IPC v1 packed-wire contract."""
+
+use std.spec.*
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.fs.ipc_codec_v1.*
+
+fn _request_v1(api_id: u32) -> SosixFsIpcRequestV1:
+    SosixFsIpcRequestV1(
+        api_id: api_id,
+        flags: SOSIX_FS_IPC_REQUEST_FLAG_CANCELLABLE + SOSIX_FS_IPC_REQUEST_FLAG_REGISTERED_BUFFER,
+        operation_slot: 0x11223344,
+        operation_generation: 0x55667788,
+        reply_endpoint: 0x0102030405060708,
+        request_token: 0x1112131415161718,
+        deadline_ns: 0x2122232425262728,
+        capability: SosixCapabilityRef(slot: 0x31323334, generation: 0x41424344),
+        resource_offset: 0x5152535455565758,
+        length: 0x100,
+        buffer: SosixBufferRef(slot: 0x61626364, generation: 0x71727374),
+        buffer_offset: 0x8182838485868788
+    )
+
+fn _completion_v1() -> SosixFsIpcCompletionV1:
+    SosixFsIpcCompletionV1(
+        api_id: SOSIX_FS_READ_AT,
+        flags: SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL,
+        operation_slot: 0x11223344,
+        operation_generation: 0x55667788,
+        request_token: 0x1112131415161718,
+        status: -5,
+        transferred: 3,
+        payload: [0xaa, 0xbb, 0xcc]
+    )
+
+describe "SOSIX filesystem IPC v1 wire codec":
+    it "freezes the exact request layout and little-endian field order":
+        step("Encode one complete read-at request")
+        val encoded = sosix_fs_ipc_encode_request_v1(_request_v1(SOSIX_FS_READ_AT))
+        expect(encoded.accepted).to_be(true)
+        expect(encoded.bytes.len()).to_equal(88)
+
+        step("Check version, sizes, API, and representative multibyte fields")
+        expect(encoded.bytes[0]).to_equal(1)
+        expect(encoded.bytes[1]).to_equal(0)
+        expect(encoded.bytes[2]).to_equal(48)
+        expect(encoded.bytes[3]).to_equal(0)
+        expect(encoded.bytes[4]).to_equal(1)
+        expect(encoded.bytes[5]).to_equal(1)
+        expect(encoded.bytes[12]).to_equal(0x44)
+        expect(encoded.bytes[15]).to_equal(0x11)
+        expect(encoded.bytes[20]).to_equal(0x08)
+        expect(encoded.bytes[27]).to_equal(0x01)
+        expect(encoded.bytes[44]).to_equal(0)
+        expect(encoded.bytes[47]).to_equal(0)
+        expect(encoded.bytes[80]).to_equal(0x88)
+        expect(encoded.bytes[87]).to_equal(0x81)
+
+        step("Decode every descriptor identity and range field")
+        val decoded = sosix_fs_ipc_decode_request_v1(encoded.bytes, SOSIX_FS_READ_AT)
+        expect(decoded.accepted).to_be(true)
+        expect(decoded.request.flags).to_equal(SOSIX_FS_IPC_REQUEST_FLAGS_V1)
+        expect(decoded.request.operation_slot).to_equal(0x11223344)
+        expect(decoded.request.operation_generation).to_equal(0x55667788)
+        expect(decoded.request.reply_endpoint).to_equal(0x0102030405060708)
+        expect(decoded.request.request_token).to_equal(0x1112131415161718)
+        expect(decoded.request.deadline_ns).to_equal(0x2122232425262728)
+        expect(decoded.request.capability.slot).to_equal(0x31323334)
+        expect(decoded.request.capability.generation).to_equal(0x41424344)
+        expect(decoded.request.resource_offset).to_equal(0x5152535455565758)
+        expect(decoded.request.length).to_equal(0x100)
+        expect(decoded.request.buffer.slot).to_equal(0x61626364)
+        expect(decoded.request.buffer.generation).to_equal(0x71727374)
+        expect(decoded.request.buffer_offset).to_equal(0x8182838485868788)
+
+    it "supports write-at but rejects an API mismatch at the decode boundary":
+        val encoded = sosix_fs_ipc_encode_request_v1(_request_v1(SOSIX_FS_WRITE_AT))
+        expect(encoded.accepted).to_be(true)
+        val wrong_api = sosix_fs_ipc_decode_request_v1(encoded.bytes, SOSIX_FS_READ_AT)
+        expect(wrong_api.accepted).to_be(false)
+        expect(wrong_api.reason).to_equal("api-mismatch")
+        val correct_api = sosix_fs_ipc_decode_request_v1(encoded.bytes, SOSIX_FS_WRITE_AT)
+        expect(correct_api.accepted).to_be(true)
+
+    it "rejects short, long, wrong-version, wrong-header, and reserved request bytes":
+        val encoded = sosix_fs_ipc_encode_request_v1(_request_v1(SOSIX_FS_READ_AT))
+        var short = encoded.bytes
+        short.pop()
+        expect(sosix_fs_ipc_decode_request_v1(short, SOSIX_FS_READ_AT).reason).to_equal("request-size-mismatch")
+        var long = encoded.bytes
+        long.push(0)
+        expect(sosix_fs_ipc_decode_request_v1(long, SOSIX_FS_READ_AT).reason).to_equal("request-size-mismatch")
+        var wrong_version = encoded.bytes
+        wrong_version[0] = 2
+        expect(sosix_fs_ipc_decode_request_v1(wrong_version, SOSIX_FS_READ_AT).reason).to_equal("abi-major-mismatch")
+        var wrong_header = encoded.bytes
+        wrong_header[2] = 44
+        expect(sosix_fs_ipc_decode_request_v1(wrong_header, SOSIX_FS_READ_AT).reason).to_equal("request-header-size-mismatch")
+        var reserved = encoded.bytes
+        reserved[44] = 1
+        expect(sosix_fs_ipc_decode_request_v1(reserved, SOSIX_FS_READ_AT).reason).to_equal("nonzero-reserved")
+
+    it "rejects unknown flags and both descriptor range overflows":
+        var unknown_flags = _request_v1(SOSIX_FS_READ_AT)
+        unknown_flags.flags = 0x80000000
+        expect(sosix_fs_ipc_encode_request_v1(unknown_flags).reason).to_equal("unknown-request-flags")
+
+        var unregistered = _request_v1(SOSIX_FS_READ_AT)
+        unregistered.flags = SOSIX_FS_IPC_REQUEST_FLAG_CANCELLABLE
+        expect(sosix_fs_ipc_encode_request_v1(unregistered).reason).to_equal(
+            "registered-buffer-required")
+
+        var resource_overflow = _request_v1(SOSIX_FS_READ_AT)
+        resource_overflow.resource_offset = 0xfffffffffffffff0
+        resource_overflow.length = 0x20
+        expect(sosix_fs_ipc_encode_request_v1(resource_overflow).reason).to_equal("resource-range-overflow")
+
+        var buffer_overflow = _request_v1(SOSIX_FS_READ_AT)
+        buffer_overflow.buffer_offset = 0xfffffffffffffff0
+        buffer_overflow.length = 0x20
+        expect(sosix_fs_ipc_encode_request_v1(buffer_overflow).reason).to_equal("buffer-range-overflow")
+
+        step("Apply the same overflow checks to untrusted decoded bytes")
+        val encoded = sosix_fs_ipc_encode_request_v1(_request_v1(SOSIX_FS_READ_AT))
+        var malformed = encoded.bytes
+        malformed[56] = 0xf0
+        malformed[57] = 0xff
+        malformed[58] = 0xff
+        malformed[59] = 0xff
+        malformed[60] = 0xff
+        malformed[61] = 0xff
+        malformed[62] = 0xff
+        malformed[63] = 0xff
+        malformed[64] = 0x20
+        malformed[65] = 0
+        malformed[66] = 0
+        malformed[67] = 0
+        malformed[68] = 0
+        malformed[69] = 0
+        malformed[70] = 0
+        malformed[71] = 0
+        expect(sosix_fs_ipc_decode_request_v1(
+            malformed, SOSIX_FS_READ_AT
+        ).reason).to_equal("resource-range-overflow")
+
+    it "round-trips a correlated completion with exact payload length":
+        val encoded = sosix_fs_ipc_encode_completion_v1(_completion_v1())
+        expect(encoded.accepted).to_be(true)
+        expect(encoded.bytes.len()).to_equal(51)
+        expect(encoded.bytes[0]).to_equal(1)
+        expect(encoded.bytes[2]).to_equal(48)
+        expect(encoded.bytes[12]).to_equal(0x44)
+        expect(encoded.bytes[16]).to_equal(0x88)
+        expect(encoded.bytes[20]).to_equal(0xfb)
+        expect(encoded.bytes[23]).to_equal(0xff)
+        expect(encoded.bytes[24]).to_equal(0x18)
+        expect(encoded.bytes[31]).to_equal(0x11)
+        expect(encoded.bytes[40]).to_equal(3)
+        expect(encoded.bytes[48]).to_equal(0xaa)
+
+        val decoded = sosix_fs_ipc_decode_completion_v1(
+            encoded.bytes, SOSIX_FS_READ_AT, 0x11223344, 0x55667788,
+            0x1112131415161718
+        )
+        expect(decoded.accepted).to_be(true)
+        expect(decoded.completion.status).to_equal(-5)
+        expect(decoded.completion.transferred).to_equal(3)
+        expect(decoded.completion.payload.len()).to_equal(3)
+        expect(decoded.completion.payload[2]).to_equal(0xcc)
+
+    it "rejects uncorrelated and malformed completion messages":
+        val encoded = sosix_fs_ipc_encode_completion_v1(_completion_v1())
+        expect(sosix_fs_ipc_decode_completion_v1(
+            [0], SOSIX_FS_READ_AT, 0x1112131415161718
+        ).reason).to_equal("completion-too-short")
+        expect(sosix_fs_ipc_decode_completion_v1(
+            encoded.bytes, SOSIX_FS_WRITE_AT, 0x11223344, 0x55667788,
+            0x1112131415161718
+        ).reason).to_equal("api-mismatch")
+        expect(sosix_fs_ipc_decode_completion_v1(
+            encoded.bytes, SOSIX_FS_READ_AT, 0x11223344, 0x55667788, 99
+        ).reason).to_equal("request-token-mismatch")
+
+        expect(sosix_fs_ipc_decode_completion_v1(
+            encoded.bytes, SOSIX_FS_READ_AT, 99, 0x55667788,
+            0x1112131415161718
+        ).reason).to_equal("operation-mismatch")
+
+        var short = encoded.bytes
+        short.pop()
+        expect(sosix_fs_ipc_decode_completion_v1(
+            short, SOSIX_FS_READ_AT, 0x11223344, 0x55667788,
+            0x1112131415161718
+        ).reason).to_equal("completion-size-mismatch")
+        var extra = encoded.bytes
+        extra.push(0)
+        expect(sosix_fs_ipc_decode_completion_v1(
+            extra, SOSIX_FS_READ_AT, 0x11223344, 0x55667788,
+            0x1112131415161718
+        ).reason).to_equal("completion-size-mismatch")
+        var reserved = encoded.bytes
+        reserved[44] = 1
+        expect(sosix_fs_ipc_decode_completion_v1(
+            reserved, SOSIX_FS_READ_AT, 0x11223344, 0x55667788,
+            0x1112131415161718
+        ).reason).to_equal("nonzero-reserved")

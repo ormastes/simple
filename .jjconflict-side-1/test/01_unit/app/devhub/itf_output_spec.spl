@@ -1,0 +1,326 @@
+# @cover src/app/devhub/output.spl 60%
+#
+# output.spl helpers that don't need a tty/network: size formatting and the
+# dynamic-width table column-sizing used by `itf github` listings.
+#
+# should_page() is pure by design specifically so it can be unit-tested here
+# without ever spawning a real pager subprocess (see _emit_lines()'s
+# docstring in output.spl for the hang risk that would come with testing
+# the side-effecting path directly).
+# ============================================================================
+# Purpose and audience: unit evidence for the devhub team over the pure itf
+# output surface — size formatting, table sizing, relative dates, transfer
+# summaries, and the pager decision — each scenario observes one function's
+# returned value, never a tty or subprocess.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# ITF Output Helpers
+
+## Purpose and audience
+
+For engineers touching src/app/devhub/output.spl: this spec pins every pure
+helper's observable output — formatting boundaries, ANSI-aware widths, leap-year
+date bucketing, pager decisions — so a regression lands on a named scenario.
+
+## Compatibility and limitations
+
+Covers only the tty-free surface. The pager side-effecting path is never
+spawned here (hang risk, see _emit_lines()'s docstring); the architectural
+"DevHub owns no direct process-runtime leaf call" guard belongs to the source
+lint layer, not to a runtime scenario, so this spec asserts the observable
+pager decision (should_page/resolve_pager_cmd) instead of grepping source.
+"""
+
+use app.devhub.output.{format_size, _table_col_widths, _visible_len, _pad_visible, relative_time_at, format_transfer_summary, should_page, resolve_pager_cmd, _split_pager_cmd}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+
+
+use std.spec.step
+
+# @manual_section: pager process ownership
+describe "pager process ownership":
+    it "does not page when content exactly fits the terminal height":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): exact-fit pager decision row retained
+        step("ask should_page about content equal to the terminal height")
+        # Boundary of the spawn gate: content == rows must decline the pager,
+        # so the side-effecting process path is never entered from this spec.
+        expect(should_page(24, 24, false, true)).to_equal(false)
+
+# @manual_section: format_size
+describe "format_size":
+
+    it "shows byte counts under 1 KiB as-is":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): sub-KiB formatting rows retained
+        step("format byte counts below the 1 KiB boundary")
+        expect(format_size(0)).to_equal("0 B")
+        expect(format_size(512)).to_equal("512 B")
+        expect(format_size(1023)).to_equal("1023 B")
+
+    it "formats KiB with one decimal":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): KiB formatting rows retained
+        step("format sizes at and above 1 KiB")
+        expect(format_size(1024)).to_equal("1.0 KiB")
+        expect(format_size(1536)).to_equal("1.5 KiB")
+
+    it "formats MiB with one decimal":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): MiB formatting rows retained
+        step("format sizes in the MiB range")
+        expect(format_size(1048576)).to_equal("1.0 MiB")
+        expect(format_size(134217728)).to_equal("128.0 MiB")
+
+    it "formats GiB with one decimal":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): GiB formatting row retained
+        step("format a 1 GiB size")
+        expect(format_size(1073741824)).to_equal("1.0 GiB")
+
+    it "formats TiB with one decimal":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): TiB formatting row retained
+        step("format a 1 TiB size")
+        expect(format_size(1099511627776)).to_equal("1.0 TiB")
+
+    it "passes through a negative (unknown) size unchanged":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): negative-size passthrough row retained
+        step("format an unknown negative size")
+        expect(format_size(-1)).to_equal("-1")
+
+
+# @manual_section: dynamic-width table sizing
+describe "_table_col_widths (dynamic-width table sizing)":
+
+    it "seeds each column width from the header when rows are shorter":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): header-seeded width row retained
+        step("size a table whose cells are narrower than the header")
+        val widths = _table_col_widths(["NUMBER", "TITLE"], [["#1", "x"]])
+        expect(widths[0]).to_equal(6)  # oracle: the header NUMBER is 6 chars
+        expect(widths[1]).to_equal(5)  # oracle: the header TITLE is 5 chars
+
+    it "grows a column width to fit the longest cell":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): cell-grown width row retained
+        step("size a table whose cell exceeds the header width")
+        val widths = _table_col_widths(["NUMBER", "TITLE"], [["#1", "a very long title indeed"]])
+        expect(widths[0]).to_equal(6)  # oracle: the header NUMBER is 6 chars
+        expect(widths[1]).to_equal(24)  # oracle: the cell "a very long title indeed" is 24 chars
+
+    it "takes the max across multiple rows":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): multi-row max width row retained
+        step("size one column across two rows of different lengths")
+        val widths = _table_col_widths(["K"], [["short"], ["a much longer value"]])
+        expect(widths[0]).to_equal(19)  # oracle: the longest cell "a much longer value" is 19 chars
+
+
+# @manual_section: ANSI-aware alignment
+describe "_visible_len / _pad_visible (ANSI-aware table alignment)":
+    # Regression coverage for a real bug found in review: colorize_state()
+    # wraps a word in `\x1b[32m...\x1b[0m`, and feeding that straight into
+    # _table_col_widths/pad_right (both byte-length-based) inflated the
+    # measured width by the escape-code bytes — misaligning STATE/AUTHOR/
+    # UPDATED columns in `itf github issue list` whenever color was on.
+
+    it "counts an ANSI-colored word by its visible characters, not its byte length":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): colored-vs-byte width row retained
+        step("measure a color-wrapped word")
+        val colored = "\u{001b}[32mOPEN\u{001b}[0m"
+        expect(_visible_len(colored)).to_equal(4)  # oracle: OPEN contributes 4 visible characters
+
+    it "matches plain-text length when there is no escape code":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): plain-text width row retained
+        step("measure a word with no escape codes")
+        expect(_visible_len("CLOSED")).to_equal(6)  # oracle: CLOSED is 6 characters
+
+    it "_table_col_widths measures colored cells by visible width, not byte length":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): colored-cell column width row retained
+        step("size a column of color-wrapped cells")
+        val colored_open = "\u{001b}[32mOPEN\u{001b}[0m"
+        val colored_closed = "\u{001b}[2mCLOSED\u{001b}[0m"
+        val widths = _table_col_widths(["STATE"], [[colored_open], [colored_closed]])
+        # Visible widths are 4 ("OPEN") and 6 ("CLOSED"); header "STATE" is 5.
+        # Max visible width must be 6 — not the byte-inflated 13/14 that
+        # `.len()` would have measured before this fix.
+        expect(widths[0]).to_equal(6)  # oracle: CLOSED is 6 visible characters — the column max
+
+    it "_pad_visible pads a colored cell to the same visible width as a plain one":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): padded colored vs plain width rows retained
+        step("pad a colored cell and a plain cell to the same width")
+        val colored = "\u{001b}[32mOPEN\u{001b}[0m"
+        val padded_colored = _pad_visible(colored, 6)
+        val padded_plain = _pad_visible("AB", 6)
+        # Both should have 4 trailing spaces after their visible content —
+        # i.e. same total visible width once the escape codes are stripped.
+        expect(_visible_len(padded_colored)).to_equal(6)  # oracle: target width 6
+        expect(_visible_len(padded_plain)).to_equal(6)  # oracle: target width 6
+
+
+# @manual_section: relative dates
+describe "relative_time_at (J4 relative dates, deterministic — 'now' is a param)":
+
+    it "buckets under a minute as 'just now'":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): sub-minute bucket rows retained
+        step("bucket elapsed times under one minute")
+        expect(relative_time_at("1970-01-01T00:00:00Z", 0)).to_equal("just now")
+        expect(relative_time_at("1970-01-01T00:00:00Z", 30)).to_equal("just now")
+
+    it "buckets minutes":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): minute bucket row retained
+        step("bucket a two-minute elapsed time")
+        expect(relative_time_at("1970-01-01T00:00:00Z", 120)).to_equal("2m ago")
+
+    it "buckets hours":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): hour bucket row retained
+        step("bucket a two-hour elapsed time")
+        expect(relative_time_at("1970-01-01T00:00:00Z", 7200)).to_equal("2h ago")
+
+    it "buckets days":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): day bucket row retained
+        step("bucket a two-day elapsed time")
+        expect(relative_time_at("1970-01-01T00:00:00Z", 172800)).to_equal("2d ago")
+
+    it "handles the Feb-29 leap-year boundary correctly (1972 is a leap year)":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): leap-year boundary bucket row retained
+        step("bucket a timestamp just past the 1972 leap day")
+        # Days from 1970-01-01 to 1972-03-01 = 365 + 365 + 31 (Jan '72) +
+        # 29 (Feb '72, leap) = 790 days = 68,256,000s. If _days_in_month's
+        # leap branch were wrong (treating Feb as always 28 days), this
+        # would compute one day short and show "1d ago" instead.
+        expect(relative_time_at("1972-03-01T00:00:00Z", 68256000)).to_equal("just now")  # oracle: 1970-01-01 to 1972-03-01 is exactly 790 leap-corrected days
+
+    it "returns the input unchanged when it doesn't parse as a timestamp":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): unparsed-input passthrough row retained
+        step("bucket an input that is not a timestamp")
+        expect(relative_time_at("not-a-date", 100)).to_equal("not-a-date")
+
+
+# @manual_section: transfer summaries
+describe "format_transfer_summary (J4 minio get/put elapsed+throughput)":
+
+    it "builds a full summary with clean-dividing numbers":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): full transfer summary row retained
+        step("summarize a transfer with clean-dividing numbers")
+        expect(format_transfer_summary("uploaded", 10240, 1000)).to_equal("uploaded 10.0 KiB in 1.0s, 10.0 KiB/s")
+
+    it "omits the throughput clause when elapsed_ms is zero":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): zero-elapsed summary row retained
+        step("summarize a transfer with zero elapsed time")
+        expect(format_transfer_summary("downloaded", 500, 0)).to_equal("downloaded 500 B in 0.0s")
+
+
+# @manual_section: pager decision
+describe "should_page (J4 pager decision — pure, no subprocess/env access)":
+
+    it "pages when the terminal looks interactive and content overflows it":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): overflow-page decision row retained
+        step("ask should_page about overflowing interactive content")
+        expect(should_page(30, 24, false, true)).to_equal(true)
+
+    it "does not page when content fits within the terminal":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): fits-no-page decision row retained
+        step("ask should_page about content smaller than the terminal")
+        expect(should_page(10, 24, false, true)).to_equal(false)
+
+    it "never pages when --no-pager is set, even if content overflows":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): no-pager-flag decision row retained
+        step("ask should_page with the no-pager flag set")
+        expect(should_page(30, 24, true, true)).to_equal(false)
+
+    it "never pages when the terminal doesn't look interactive":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): non-interactive decision row retained
+        step("ask should_page about a non-interactive terminal")
+        expect(should_page(30, 24, false, false)).to_equal(false)
+
+
+# @manual_section: pager command parsing
+describe "_split_pager_cmd":
+
+    it "splits a pager command with flags":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): flag-split pager command row retained
+        step("split a pager command carrying a flag")
+        val (bin, args) = _split_pager_cmd("less -R")
+        expect(bin).to_equal("less")
+        expect(args.len()).to_equal(1)  # oracle: "less -R" carries exactly one flag
+        expect(args[0]).to_equal("-R")
+
+    it "handles a bare command with no flags":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): bare pager command row retained
+        step("split a pager command with no flags")
+        val (bin, args) = _split_pager_cmd("cat")
+        expect(bin).to_equal("cat")
+        expect(args.len()).to_equal(0)  # oracle: "cat" carries no flags
+
+    it "falls back to less -R for an empty command":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): empty-command fallback row retained
+        step("split an empty pager command")
+        val (bin, args) = _split_pager_cmd("")
+        expect(bin).to_equal("less")
+        expect(args[0]).to_equal("-R")
+
+
+# @manual_section: pager resolution
+describe "resolve_pager_cmd (${ITF_PAGER:-${PAGER:-less -R}})":
+
+    it "prefers ITF_PAGER over PAGER and the less -R default":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): ITF_PAGER precedence row retained
+        step("resolve the pager with both env vars set")
+        val orig_itf = rt_env_get("ITF_PAGER") ?? ""
+        val orig_pager = rt_env_get("PAGER") ?? ""
+        val _s1 = rt_env_set("ITF_PAGER", "most")
+        val _s2 = rt_env_set("PAGER", "cat")
+        expect(resolve_pager_cmd()).to_equal("most")
+        val _r1 = rt_env_set("ITF_PAGER", orig_itf)
+        val _r2 = rt_env_set("PAGER", orig_pager)
+
+    it "falls back to PAGER when ITF_PAGER is unset":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): PAGER fallback row retained
+        step("resolve the pager with only PAGER set")
+        val orig_itf = rt_env_get("ITF_PAGER") ?? ""
+        val orig_pager = rt_env_get("PAGER") ?? ""
+        val _s1 = rt_env_set("ITF_PAGER", "")
+        val _s2 = rt_env_set("PAGER", "cat")
+        expect(resolve_pager_cmd()).to_equal("cat")
+        val _r1 = rt_env_set("ITF_PAGER", orig_itf)
+        val _r2 = rt_env_set("PAGER", orig_pager)
+
+    it "falls back to less -R when neither is set":
+        # @req REQ-SSPEC-UNIT
+        # @capture(statistics): default fallback row retained
+        step("resolve the pager with neither env var set")
+        val orig_itf = rt_env_get("ITF_PAGER") ?? ""
+        val orig_pager = rt_env_get("PAGER") ?? ""
+        val _s1 = rt_env_set("ITF_PAGER", "")
+        val _s2 = rt_env_set("PAGER", "")
+        expect(resolve_pager_cmd()).to_equal("less -R")
+        val _r1 = rt_env_set("ITF_PAGER", orig_itf)
+        val _r2 = rt_env_set("PAGER", orig_pager)

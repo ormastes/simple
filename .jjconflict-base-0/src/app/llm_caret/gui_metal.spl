@@ -1,0 +1,205 @@
+# LLM Caret pure-Simple GUI over Simple Web -> Draw IR -> Engine2D Metal.
+
+use std.io_runtime.{env_get, file_append_text}
+use std.cli.cli_util.{get_cli_args}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_readback_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name}
+use std.io.window_winit.{WinitWindow, winit_loop_new, winit_loop_free,
+    winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+
+use app.llm_caret.gui.{caret_gui_native_html}
+use app.llm_caret.gui_native_model.{CaretNativeState, caret_native_state_with_prompt,
+    caret_native_key, caret_native_apply_response}
+use app.llm_caret.provider.{dispatch_send}
+
+val CARET_METAL_W: i32 = 480
+val CARET_METAL_H: i32 = 320
+val CARET_METAL_SEND_X: i32 = 372
+val CARET_METAL_SEND_Y: i32 = 252
+val CARET_METAL_SEND_W: i32 = 92
+val CARET_METAL_SEND_H: i32 = 56
+
+struct CaretMetalFrame:
+    pixels: [u32]
+    resolved_backend: text
+    readback_source: text
+    backend_handle: i64
+    device_identity: i64
+    checksum: i64
+    draw_ir_batches: i32
+    draw_ir_commands: i32
+    valid: bool
+    error: text
+
+var CARET_METAL_EVENT_LOG = ""
+
+fn _caret_metal_emit(line: text):
+    print line
+    if CARET_METAL_EVENT_LOG != "":
+        file_append_text(CARET_METAL_EVENT_LOG, line + "\n")
+
+fn _caret_metal_prompt_arg(args: [text]) -> text:
+    var prompt = ""
+    var i = 0
+    while i < args.len():
+        if args[i] == "--prompt" and i + 1 < args.len():
+            prompt = args[i + 1]
+            i = i + 1
+        elif args[i].starts_with("--prompt="):
+            prompt = args[i].substring(9)
+        i = i + 1
+    prompt
+
+fn _caret_metal_dispatch(prompt: text) -> text:
+    val response = dispatch_send("dummy", prompt, "dummy-hello", "", "", "", "", "", 0, 0, "[]")
+    if response.is_error:
+        return "ERROR: " + response.error
+    return response.content
+
+fn _caret_metal_command_count(composition) -> i32:
+    var count = 0
+    for batch in composition.batches:
+        count = count + batch.commands.len()
+    return count
+
+fn caret_metal_render_frame(state: CaretNativeState) -> CaretMetalFrame:
+    _caret_metal_emit("CARET_FRAME_STAGE html-start")
+    val html = caret_gui_native_html(state.prompt, state.user, state.assistant, "metal", state.status)
+    _caret_metal_emit("CARET_FRAME_STAGE html-ready bytes={html.len()}")
+    _caret_metal_emit("CARET_FRAME_STAGE layout-start")
+    val composition = simple_web_layout_render_html_draw_ir(html, CARET_METAL_W, CARET_METAL_H)
+    val command_count = _caret_metal_command_count(composition)
+    _caret_metal_emit(
+        "CARET_FRAME_STAGE layout-ready batches={composition.batches.len()} commands={command_count}")
+    val resolved = simple_web_resolved_engine2d_backend_name(CARET_METAL_W, CARET_METAL_H, "metal")
+    _caret_metal_emit("CARET_FRAME_STAGE backend-ready backend={resolved}")
+    val readback = simple_web_render_html_to_readback_with_engine2d_backend(
+        html, CARET_METAL_W, CARET_METAL_H, "metal")
+    _caret_metal_emit(
+        "CARET_FRAME_STAGE readback-ready source={readback.source} pixels={readback.pixels.len()}")
+    var error = ""
+    if composition.batches.len() == 0 or command_count == 0:
+        error = "empty-draw-ir"
+    elif resolved != "metal":
+        error = "metal-backend-unavailable:{resolved}"
+    elif readback.source != "device_readback":
+        error = "non-device-readback:{readback.source}"
+    elif readback.backend_handle <= 0 or readback.device_identity <= 0:
+        error = "missing-metal-identity"
+    elif readback.pixel_count != CARET_METAL_W.to_i64() * CARET_METAL_H.to_i64():
+        error = "pixel-count-mismatch:{readback.pixel_count}"
+    elif readback.checksum <= 0:
+        error = "blank-metal-frame"
+    return CaretMetalFrame(
+        pixels: readback.pixels,
+        resolved_backend: resolved,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        device_identity: readback.device_identity,
+        checksum: readback.checksum,
+        draw_ir_batches: composition.batches.len(),
+        draw_ir_commands: command_count,
+        valid: error == "",
+        error: error)
+
+fn _caret_metal_pack(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    return out
+
+fn _caret_metal_submit(state: CaretNativeState, prompt: text) -> CaretNativeState:
+    if prompt.trim() == "":
+        return state
+    val response = _caret_metal_dispatch(prompt)
+    _caret_metal_emit("CARET_SUBMIT prompt=\"{prompt}\" response=\"{response}\"")
+    val next_state = caret_native_apply_response(state, prompt, response)
+    return next_state
+
+fn _caret_metal_present(win: WinitWindow, has_window: bool, state: CaretNativeState) -> bool:
+    val frame = caret_metal_render_frame(state)
+    _caret_metal_emit(
+        "CARET_FRAME backend={frame.resolved_backend} source={frame.readback_source} " +
+        "handle={frame.backend_handle} device={frame.device_identity} pixels={frame.pixels.len()} " +
+        "checksum={frame.checksum} batches={frame.draw_ir_batches} commands={frame.draw_ir_commands}")
+    if not frame.valid:
+        _caret_metal_emit("CARET_METAL_ERROR " + frame.error)
+        return false
+    if has_window:
+        winit_present_rgba(win, CARET_METAL_W.to_i64(), CARET_METAL_H.to_i64(), _caret_metal_pack(frame.pixels))
+    return true
+
+fn _caret_metal_point_in_send(x: i32, y: i32) -> bool:
+    return x >= CARET_METAL_SEND_X and x < CARET_METAL_SEND_X + CARET_METAL_SEND_W and
+        y >= CARET_METAL_SEND_Y and y < CARET_METAL_SEND_Y + CARET_METAL_SEND_H
+
+fn run_caret_metal_gui(initial_prompt: text) -> i64:
+    var state = caret_native_state_with_prompt(initial_prompt)
+    CARET_METAL_EVENT_LOG = env_get("SIMPLE_EVT_LOG") ?? ""
+    val want_gui = (env_get("SIMPLE_GUI") ?? "") == "1"
+
+    if not want_gui:
+        if initial_prompt != "":
+            state = _caret_metal_submit(state, initial_prompt)
+        if not _caret_metal_present(WinitWindow(handle: 0, is_valid: false), false, state):
+            return 1
+        _caret_metal_emit("CARET_METAL_HEADLESS_OK assistant=\"{state.assistant}\"")
+        return 0
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        _caret_metal_emit("CARET_METAL_ERROR no-winit-loop")
+        return 1
+    val win = winit_window_new(lp, CARET_METAL_W.to_i64(), CARET_METAL_H.to_i64(), "LLM Caret — Simple Web / Metal")
+    if not win.is_valid:
+        winit_loop_free(lp)
+        _caret_metal_emit("CARET_METAL_ERROR no-winit-window")
+        return 1
+    if not _caret_metal_present(win, true, state):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        return 1
+
+    var running = true
+    while running:
+        val input = winit_poll_input(lp)
+        if input.close:
+            running = false
+        var dirty = false
+        for key in input.keys:
+            if key == 27:
+                running = false
+            else:
+                val step = caret_native_key(state, key)
+                state = step.state
+                if step.submit_prompt != "":
+                    state = _caret_metal_submit(state, step.submit_prompt)
+                _caret_metal_emit("CARET_KEY code={key} prompt=\"{state.prompt}\" turn={state.turn}")
+                dirty = true
+        var ci = 0
+        while ci < input.click_buttons.len():
+            if input.click_buttons[ci] == 0 and input.click_pressed[ci]:
+                val x = input.click_x[ci].to_i32()
+                val y = input.click_y[ci].to_i32()
+                if _caret_metal_point_in_send(x, y) and state.prompt.trim() != "":
+                    state = _caret_metal_submit(state, state.prompt.trim())
+                    _caret_metal_emit("CARET_CLICK target=send x={x} y={y} turn={state.turn}")
+                    dirty = true
+            ci = ci + 1
+        if dirty and not _caret_metal_present(win, true, state):
+            running = false
+        thread_sleep(16)
+
+    winit_window_free(win)
+    winit_loop_free(lp)
+    _caret_metal_emit("CARET_METAL_EXIT turn={state.turn}")
+    return 0
+
+fn main() -> i64:
+    return run_caret_metal_gui(_caret_metal_prompt_arg(get_cli_args()))

@@ -1,0 +1,47 @@
+"""
+# Claude Full Bridge and Brief Commands
+
+Checks modern SSpec parity for remote-control, bridge-kick, and brief commands.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.commands.bridge.index.*
+use app.llm_caret.claude_full.commands.bridge_kick.*
+use app.llm_caret.claude_full.commands.brief.*
+
+describe "Claude full bridge and brief commands":
+    it "should expose remote-control command visibility":
+        val enabled = RemoteControlCommand.new(true, true)
+        expect(enabled.name).to_equal("remote-control")
+        expect(enabled.alias).to_equal("rc")
+        expect(enabled.hidden).to_equal(false)
+        expect(RemoteControlCommand.new(false, true).enabled).to_equal(false)
+
+    it "should model bridge-kick debug actions":
+        val missing = callBridgeKick("status", false, BridgeDebugHandle.new())
+        expect(missing.message).to_contain("No bridge debug handle")
+        val closed = callBridgeKick("close 1002", true, BridgeDebugHandle.new())
+        expect(closed.handle.firedCloseCode).to_equal(1002)
+        val poll = callBridgeKick("poll 404", true, BridgeDebugHandle.new())
+        expect(poll.handle.faultMethod).to_equal("pollForWork")
+        expect(poll.handle.faultErrorType).to_equal("not_found_error")
+        val heartbeat = callBridgeKick("heartbeat 401", true, BridgeDebugHandle.new())
+        expect(heartbeat.handle.faultMethod).to_equal("heartbeatWork")
+        expect(BridgeKickCommand.new("ant").enabled).to_equal(true)
+
+    it "should model brief command gating and toggle":
+        expect(BriefCommand.new(true, false, BriefConfig.new(true)).enabled).to_equal(true)
+        expect(BriefCommand.new(false, false, BriefConfig.new(true)).enabled).to_equal(false)
+        val gated = toggleBriefCommand(BriefAppState.new(false, false, false), false)
+        expect(gated.gated).to_equal(true)
+        val enabled = toggleBriefCommand(BriefAppState.new(false, false, false), true)
+        expect(enabled.state.isBriefOnly).to_equal(true)
+        expect(enabled.state.userMsgOptIn).to_equal(true)
+        expect(enabled.metaMessage).to_contain("system-reminder")
+        val disabled = toggleBriefCommand(enabled.state, true)
+        expect(disabled.state.isBriefOnly).to_equal(false)
+
+    it "should expose source sizes":
+        expect(remoteControlCommandSourceLinesModeled()).to_equal(26)
+        expect(bridgeKickSourceLinesModeled()).to_equal(200)
+        expect(briefSourceLinesModeled()).to_equal(130)

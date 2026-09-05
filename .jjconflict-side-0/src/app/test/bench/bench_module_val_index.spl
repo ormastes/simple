@@ -1,0 +1,91 @@
+# bench_module_val_index.spl — reproduce for
+# doc/08_tracking/bug/jit_module_val_array_indexing_15x_slow_2026-08-18.md
+#
+# An UNANNOTATED module-level `val` array registers as ANY, which forces every
+# indexed read through the boxed dispatch path (~10-16x slower than the
+# identical array held in a local) AND makes the elements be consumed as raw
+# i64 without unboxing — so the reads return tagged GARBAGE, not just slow
+# values. Both symptoms are one defect. Annotated (`: [i64]`) module vals were
+# already on the fast path and are kept here as the control.
+#
+# Prints machine-parseable lines:
+#     RESULT|<name>|<elapsed_us>|<checksum>
+# EVERY checksum must equal 27500000. A differing checksum is the wrong-value
+# half of this bug, not a benchmark artifact.
+#
+# Run: SIMPLE_JIT_STRICT=1 bin/simple run src/app/test/bench/bench_module_val_index.spl
+
+use std.io_runtime.{time_now_unix_micros}
+
+val T_ANNOTATED: [i64] = [11, 22, 33, 44]
+val T_UNANNOTATED = [11, 22, 33, 44]
+
+fn make_table() -> [i64]:
+    var t: [i64] = []
+    t.push(11)
+    t.push(22)
+    t.push(33)
+    t.push(44)
+    t
+
+val T_FROM_TYPED_FN: [i64] = make_table()
+
+fn read_local(n: i64) -> i64:
+    val t = make_table()
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        s = s + t[i & 3]
+        i = i + 1
+    s
+
+fn read_annotated(n: i64) -> i64:
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        s = s + T_ANNOTATED[i & 3]
+        i = i + 1
+    s
+
+fn read_unannotated(n: i64) -> i64:
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        s = s + T_UNANNOTATED[i & 3]
+        i = i + 1
+    s
+
+fn read_from_typed_fn(n: i64) -> i64:
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        s = s + T_FROM_TYPED_FN[i & 3]
+        i = i + 1
+    s
+
+fn main():
+    val n: i64 = 1000000
+    read_local(1000)
+    read_annotated(1000)
+    read_unannotated(1000)
+    read_from_typed_fn(1000)
+
+    var t0 = time_now_unix_micros()
+    var v = read_local(n)
+    var dt = time_now_unix_micros() - t0
+    print("RESULT|local_control|{dt}|{v}")
+
+    t0 = time_now_unix_micros()
+    v = read_annotated(n)
+    dt = time_now_unix_micros() - t0
+    print("RESULT|module_val_annotated|{dt}|{v}")
+
+    t0 = time_now_unix_micros()
+    v = read_unannotated(n)
+    dt = time_now_unix_micros() - t0
+    print("RESULT|module_val_unannotated|{dt}|{v}")
+
+    t0 = time_now_unix_micros()
+    v = read_from_typed_fn(n)
+    dt = time_now_unix_micros() - t0
+    print("RESULT|module_val_typed_fn_init|{dt}|{v}")

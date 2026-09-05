@@ -1,0 +1,31 @@
+"""
+# HIR Phase Profile Runtime Facade Contract
+
+The HIR phase profiler caches one canonical environment lookup while retaining
+the existing enabled/disabled state encoding and disabled hot-path shortcut.
+"""
+
+use std.io_runtime.{read_file_text}
+use std.spec.step
+
+describe "HIR phase profile runtime facade ownership":
+    it "uses one canonical optional environment lookup":
+        step("Load the production HIR phase profiler source")
+        val source = read_file_text("src/compiler/20.hir/hir_lowering/hir_phase_profile.spl")
+
+        step("Require the canonical facade and exact profile key")
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{env_get_opt}")
+        expect(source).to_contain("env_get_opt(\"SIMPLE_HIR_PHASE_PROFILE\") ?? \"\"")
+        expect(source.split("env_get_opt(\"SIMPLE_HIR_PHASE_PROFILE\")").len()).to_equal(2)
+
+        step("Reject duplicate direct runtime ownership")
+        expect(source).to_not_contain("extern fn rt_env_get")
+        expect(source).to_not_contain("rt_env_get(")
+
+    it "preserves one-time caching and the disabled fast path":
+        step("Load the production HIR phase profiler source")
+        val source = read_file_text("src/compiler/20.hir/hir_lowering/hir_phase_profile.spl")
+
+        step("Pin the unprobed enabled and disabled states")
+        expect(source).to_contain("if _hir_prof_state == 0:\n        _hir_prof_state = if (env_get_opt(\"SIMPLE_HIR_PHASE_PROFILE\") ?? \"\") == \"1\": 1 else: 2\n    _hir_prof_state == 1")
+        expect(source).to_contain("if _hir_prof_state == 2:\n        return 0")

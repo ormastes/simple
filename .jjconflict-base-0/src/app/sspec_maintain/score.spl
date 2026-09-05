@@ -1,0 +1,54 @@
+# Explainable weighted scoring with an effective blocker cap.
+# Dimensions/weights/blocker-cap are data (dimensions.spl) — this file loops
+# over the table instead of hardcoding a per-dimension if/elif chain.
+use app.sspec_maintain.model.*
+use app.sspec_maintain.dimensions.*
+
+fn _score_clamp(value: i64) -> i64:
+    if value < 0: return 0
+    if value > 100: return 100
+    value
+
+fn _dimension_index(dims: [SspecDimensionWeight], dimension: text) -> i64:
+    var i: i64 = 0
+    while i < dims.len():
+        if dims[i].dimension == dimension: return i
+        i = i + 1
+    -1
+
+fn _dimension_score(scores: [i64], dims: [SspecDimensionWeight], dimension: text) -> i64:
+    val index = _dimension_index(dims, dimension)
+    if index < 0: 100 else: scores[index]
+
+fn score_sspec_findings(findings: [SspecDocumentizationFinding]) -> SspecDocumentizationScore:
+    val dims = sspec_dimension_weights()
+    var scores: [i64] = []
+    for dim in dims: scores.push(100)
+    var blockers: i64 = 0
+    for finding in findings:
+        val index = _dimension_index(dims, finding.dimension)
+        if index >= 0: scores[index] = scores[index] - finding.score_deduction
+        if finding.blocker: blockers = blockers + 1
+    var i: i64 = 0
+    while i < dims.len():
+        scores[i] = _score_clamp(scores[i])
+        i = i + 1
+    var weighted_sum: i64 = 0
+    i = 0
+    while i < dims.len():
+        weighted_sum = weighted_sum + scores[i] * dims[i].weight
+        i = i + 1
+    val raw = weighted_sum / 100
+    val cap = sspec_blocker_cap()
+    val effective = if blockers > 0 and raw > cap: cap else: raw
+    SspecDocumentizationScore(
+        narrative: _dimension_score(scores, dims, "narrative"),
+        structure: _dimension_score(scores, dims, "structure"),
+        oracle: _dimension_score(scores, dims, "oracle"),
+        traceability: _dimension_score(scores, dims, "traceability"),
+        evidence: _dimension_score(scores, dims, "evidence"),
+        coverage: _dimension_score(scores, dims, "coverage"),
+        maintainability: _dimension_score(scores, dims, "maintainability"),
+        raw_aggregate: raw, effective_aggregate: effective, aggregate: effective,
+        blocker_count: blockers, blockers: blockers,
+        release_ready: blockers == 0)

@@ -1,0 +1,52 @@
+# VisionFive 2 / JH7110 PCIe1 host provider.
+# Platform initialization stays here; PCI enumeration and NVMe stay common.
+
+use os.drivers.pci.pci_provider.{PciAddressWindow, PciHostDescriptor, PciWindowKind, pci_host_descriptor_reason}
+
+val JH7110_PCIE1_ECAM_BASE: u64 = 0x9C0000000u64
+val JH7110_PCIE1_ECAM_SIZE: u64 = 0x01000000u64
+val JH7110_PCIE1_MEM_BASE: u64 = 0x38000000u64
+val JH7110_PCIE1_MEM_SIZE: u64 = 0x08000000u64
+val JH7110_PCIE1_PREF64_BASE: u64 = 0x980000000u64
+val JH7110_PCIE1_PREF64_SIZE: u64 = 0x40000000u64
+
+fn starfive_jh7110_pcie1_host_from_validated_dtb(
+    ecam_base: u64,
+    ecam_size: u64,
+    mem_base: u64,
+    mem_size: u64,
+    pref64_base: u64,
+    pref64_size: u64,
+    dma_base: u64,
+    dma_size: u64
+) -> Result<PciHostDescriptor, text>:
+    """Normalize DT-derived PCIe1 resources after the board parser validates compatible/status/ranges."""
+    val host = PciHostDescriptor(
+        provider: "starfive-jh7110-pcie1-dtb",
+        domain: 1u32,
+        bus_start: 0u8,
+        # The 16 MiB ECAM aperture exposes buses 0..15 even if firmware says 0..255.
+        bus_end: 15u8,
+        ecam_base: ecam_base,
+        ecam_size: ecam_size,
+        windows: [
+            PciAddressWindow(kind: PciWindowKind.NonPrefetchable, pci_base: mem_base, cpu_base: mem_base, size: mem_size),
+            PciAddressWindow(kind: PciWindowKind.Prefetchable64, pci_base: pref64_base, cpu_base: pref64_base, size: pref64_size)
+        ],
+        dma_base: dma_base,
+        dma_size: dma_size,
+        coherent: false
+    )
+    val reason = pci_host_descriptor_reason(host)
+    if reason != "ready":
+        return Err(reason)
+    Ok(host)
+
+fn starfive_jh7110_pcie1_firmware_defaults() -> Result<PciHostDescriptor, text>:
+    """Known VF2 resources for contract tests; live boot must compare them with the preserved DTB."""
+    starfive_jh7110_pcie1_host_from_validated_dtb(
+        JH7110_PCIE1_ECAM_BASE, JH7110_PCIE1_ECAM_SIZE,
+        JH7110_PCIE1_MEM_BASE, JH7110_PCIE1_MEM_SIZE,
+        JH7110_PCIE1_PREF64_BASE, JH7110_PCIE1_PREF64_SIZE,
+        0u64, 0u64
+    )

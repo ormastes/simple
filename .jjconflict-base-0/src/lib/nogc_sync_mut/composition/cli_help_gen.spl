@@ -1,0 +1,174 @@
+# SCI-driven help index + shell-completion generator (Phase C / WP-19c-s, C4).
+#
+# Single source of truth: everything here is DERIVED from option-route data
+# (`cli_option_route.spl` records / the SCI option-route section). No
+# hand-written help text lives in this module — help that could drift from the
+# registered options is exactly the defect this generator removes.
+#
+# The working representation is a plain `struct` row (`CliHelpRouteV1`) rather
+# than the class record, for two reasons: (1) the generator needs only the
+# help-relevant fields, and (2) struct rows stay usable under the test runner
+# (see doc/08_tracking/bug/class_field_access_erased_under_test_runner_2026-08-18.md).
+# Run-mode callers adapt class records via `cli_help_route_of_record_v1`.
+
+use std.nogc_sync_mut.composition.cli_option_route.{
+    SimpleCliOptionRouteRecordV1,
+    SimpleCliOptionRouteTableV1,
+    CLI_VALUE_MODE_FLAG, CLI_VALUE_MODE_REQUIRED, CLI_VALUE_MODE_OPTIONAL,
+    CLI_SCOPE_GLOBAL, CLI_SCOPE_COMMAND,
+}
+
+# Help-relevant projection of one option route. `aliases` is a space-separated
+# list (may be empty) so the row stays a flat struct of primitives.
+struct CliHelpRouteV1:
+    spelling: text
+    aliases: text
+    value_mode: i64
+    scope_kind: i64
+    help_summary: text
+
+fn cli_help_route_v1(spelling: text, aliases: text, value_mode: i64, scope_kind: i64, help_summary: text) -> CliHelpRouteV1:
+    CliHelpRouteV1(spelling: spelling, aliases: aliases, value_mode: value_mode, scope_kind: scope_kind, help_summary: help_summary)
+
+# Adapter: project a registered route record into a help row. This is the ONLY
+# bridge from the route data layer, so the generator can never invent options.
+fn cli_help_route_of_record_v1(record: SimpleCliOptionRouteRecordV1) -> CliHelpRouteV1:
+    var aliases = ""
+    var i = 0
+    while i < record.aliases.len():
+        if i > 0: aliases = aliases + " "
+        aliases = aliases + record.aliases[i]
+        i = i + 1
+    cli_help_route_v1(record.spelling, aliases, record.value_mode, record.scope_kind, record.help_summary)
+
+fn cli_help_routes_of_table_v1(table: SimpleCliOptionRouteTableV1) -> [CliHelpRouteV1]:
+    var out: [CliHelpRouteV1] = []
+    var i = 0
+    while i < table.routes.len():
+        out.push(cli_help_route_of_record_v1(table.routes[i]))
+        i = i + 1
+    out
+
+# --foo / --foo=<value> / --foo[=<value>] usage form, derived from value_mode.
+fn cli_help_usage_form_v1(spelling: text, value_mode: i64) -> text:
+    if value_mode == CLI_VALUE_MODE_REQUIRED: return spelling + "=<value>"
+    if value_mode == CLI_VALUE_MODE_OPTIONAL: return spelling + "[=<value>]"
+    spelling
+
+fn _scope_label(scope_kind: i64) -> text:
+    if scope_kind == CLI_SCOPE_COMMAND: return "command"
+    "global"
+
+fn _split_ws(s: text) -> [text]:
+    var out: [text] = []
+    var cur = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == " ":
+            if cur.len() > 0:
+                out.push(cur)
+                cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur.len() > 0: out.push(cur)
+    out
+
+# One rendered help line per route: usage form, alias list, scope, summary —
+# every character derived from the route row.
+fn cli_help_line_v1(route: CliHelpRouteV1) -> text:
+    var line = "  " + cli_help_usage_form_v1(route.spelling, route.value_mode)
+    if route.aliases.len() > 0:
+        line = line + " (" + route.aliases + ")"
+    line = line + "  [" + _scope_label(route.scope_kind) + "]"
+    if route.help_summary.len() > 0:
+        line = line + "  " + route.help_summary
+    line
+
+fn _sorted_routes(routes: [CliHelpRouteV1]) -> [CliHelpRouteV1]:
+    # selection sort by spelling; route counts are small and bounded.
+    var pending: [CliHelpRouteV1] = []
+    var i = 0
+    while i < routes.len():
+        pending.push(routes[i])
+        i = i + 1
+    var out: [CliHelpRouteV1] = []
+    while pending.len() > 0:
+        var best = 0
+        var j = 1
+        while j < pending.len():
+            if pending[j].spelling < pending[best].spelling: best = j
+            j = j + 1
+        out.push(pending[best])
+        var rest: [CliHelpRouteV1] = []
+        var k = 0
+        while k < pending.len():
+            if k != best: rest.push(pending[k])
+            k = k + 1
+        pending = rest
+    out
+
+# Full help index text: deterministic (sorted by spelling), I/O-free, and
+# containing exactly one line per registered route. Empty input renders the
+# header only — never fabricated option lines.
+fn cli_help_index_render_v1(routes: [CliHelpRouteV1]) -> text:
+    var out = "Options (generated from option-route data):\n"
+    val sorted = _sorted_routes(routes)
+    var i = 0
+    while i < sorted.len():
+        out = out + cli_help_line_v1(sorted[i]) + "\n"
+        i = i + 1
+    out
+
+# Shell-completion candidates: every spelling and every alias whose text
+# starts with `prefix`, sorted and de-duplicated. `prefix` == "" lists all.
+fn cli_completion_candidates_v1(routes: [CliHelpRouteV1], prefix: text) -> [text]:
+    var cands: [text] = []
+    var i = 0
+    while i < routes.len():
+        var words: [text] = [routes[i].spelling]
+        val aliases = _split_ws(routes[i].aliases)
+        var a = 0
+        while a < aliases.len():
+            words.push(aliases[a])
+            a = a + 1
+        var w = 0
+        while w < words.len():
+            val word = words[w]
+            if word.starts_with(prefix):
+                var seen = false
+                var s = 0
+                while s < cands.len():
+                    if cands[s] == word: seen = true
+                    s = s + 1
+                if not seen: cands.push(word)
+            w = w + 1
+        i = i + 1
+    # selection sort for deterministic completion scripts
+    var sorted: [text] = []
+    while cands.len() > 0:
+        var best = 0
+        var j = 1
+        while j < cands.len():
+            if cands[j] < cands[best]: best = j
+            j = j + 1
+        sorted.push(cands[best])
+        var rest: [text] = []
+        var k = 0
+        while k < cands.len():
+            if k != best: rest.push(cands[k])
+            k = k + 1
+        cands = rest
+    sorted
+
+# Rendered completion word list (one candidate per line) for `complete -W` /
+# compgen consumption — same derivation as the help index, by construction.
+fn cli_completion_render_v1(routes: [CliHelpRouteV1], prefix: text) -> text:
+    val cands = cli_completion_candidates_v1(routes, prefix)
+    var out = ""
+    var i = 0
+    while i < cands.len():
+        out = out + cands[i] + "\n"
+        i = i + 1
+    out

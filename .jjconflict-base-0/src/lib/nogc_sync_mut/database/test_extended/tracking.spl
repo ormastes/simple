@@ -1,0 +1,333 @@
+# Test Database Extended - Test Result Tracking
+#
+# Methods for tracking test results, counters, timing, and timing runs
+
+use std.database.core.{SdnRow, SdnTable}
+use std.database.stats.{stats_from_values}
+use std.database.test_extended.database.{TestDatabaseExtended, trim_to_last_f64, ensure_timing_baseline_schema, TIMING_RUNS_PER_TEST_CAP}
+use std.database.test_extended.stubs.{timestamp_now}
+
+# Extension methods for TestDatabaseExtended
+impl TestDatabaseExtended:
+    # Main method: Update test result and statistics
+    me update_test_result(
+        file_path: text,
+        suite_name: text,
+        test_name: text,
+        status: text,
+        duration_ms: f64,
+        run_id: text,
+        cohort_id: text = ""
+    ):
+        # 1. Get or create hierarchy
+        val test_id = self.get_or_create_test(
+            self.get_or_create_suite(file_path, suite_name),
+            test_name
+        )
+
+        # 2. Record the verdict on the test row itself.
+        #    Without this every `tests` row keeps the `unknown` status written
+        #    by get_or_create_test, so test_count_by_status() reports
+        #    total=N / passed=0 / failed=0 — a vacuous green.
+        self.update_test_status(test_id, status)
+
+        # 3. Update counter
+        self.update_counter(test_id, status)
+
+        # 4. Update timing
+        self.update_timing(test_id, duration_ms)
+
+        # 5. Add timing run
+        self.add_timing_run(test_id, duration_ms, run_id, cohort_id, status == "passed")
+
+    # Write the latest verdict onto the `tests` row
+    me update_test_status(test_id: i64, status: text):
+        var tests_table = match self.db.get_table_mut("tests"):
+            case Some(table): table
+            case nil: return
+        val status_id = self.interner.intern(status)
+        for row in tests_table.rows:
+            val row_test_id = row.get_i64("test_id") ?? -1
+            if row_test_id != -1 and row_test_id == test_id:
+                var updated = row
+                updated.set("status_str", "{status_id}")
+                match tests_table.update_row_checked("{test_id}", updated):
+                    case Ok(_): ()
+                    case Err(reason): print "[db] complete/update lost: {reason}"
+                break
+        self.db.set_table("tests", tests_table)
+
+    # Update counter for test
+    me update_counter(test_id: i64, status: text):
+        var counters_table_opt = self.db.get_table_mut("counters")
+        if not counters_table_opt.?:
+            return
+
+        var counters_table = match counters_table_opt:
+            case Some(table):
+                table
+            case None:
+                return
+
+        # Find existing counter
+        var found = false
+        var counter_row = SdnRow.empty()
+        for row in counters_table.rows:
+            # BUG-044: Use ?? instead of ? to avoid "try: early return"
+            val row_test_id = row.get_i64("test_id") ?? -1
+            if row_test_id != -1 and row_test_id == test_id:
+                counter_row = row
+                found = true
+                break
+
+        if not found:
+            # Create new counter
+            counter_row.set("test_id", "{test_id}")
+            counter_row.set("total_runs", "1")
+            counter_row.set("passed", if status == "passed": "1" else: "0")
+            counter_row.set("failed", if status == "failed": "1" else: "0")
+            counter_row.set("crashed", if status == "crashed": "1" else: "0")
+            counter_row.set("timed_out", if status == "timed_out": "1" else: "0")
+            counter_row.set("flaky_count", "0")
+            counter_row.set("consecutive_passes", if status == "passed": "1" else: "0")
+            counters_table.add_row(counter_row)
+        else:
+            # Update existing counter
+            val total = (counter_row.get_i64("total_runs") ?? 0) + 1
+            counter_row.set("total_runs", "{total}")
+
+            if status == "passed":
+                val passed = (counter_row.get_i64("passed") ?? 0) + 1
+                val consec = (counter_row.get_i64("consecutive_passes") ?? 0) + 1
+                counter_row.set("passed", "{passed}")
+                counter_row.set("consecutive_passes", "{consec}")
+            else:
+                counter_row.set("consecutive_passes", "0")
+
+                if status == "failed":
+                    val failed = (counter_row.get_i64("failed") ?? 0) + 1
+                    counter_row.set("failed", "{failed}")
+                elif status == "crashed":
+                    val crashed = (counter_row.get_i64("crashed") ?? 0) + 1
+                    counter_row.set("crashed", "{crashed}")
+                elif status == "timed_out":
+                    val timed = (counter_row.get_i64("timed_out") ?? 0) + 1
+                    counter_row.set("timed_out", "{timed}")
+
+            match counters_table.update_row_checked("{test_id}", counter_row):
+                case Ok(_): ()
+                case Err(reason): print "[db] complete/update lost: {reason}"
+
+        self.db.set_table("counters", counters_table)
+
+    # Update timing statistics for test
+    me update_timing(test_id: i64, duration_ms: f64):
+        self.ensure_indexes()
+        # Collect recent timing runs
+        val recent_runs = self.collect_timing_runs(test_id, 100)  # Last 100 runs
+
+        if recent_runs.len() == 0:
+            return
+
+        # Compute statistics
+        val stats = stats_from_values(recent_runs)
+
+        # Get or create timing record
+        var timing_table_opt = self.db.get_table_mut("timing")
+        if not timing_table_opt.?:
+            return
+        var timing_table = match timing_table_opt:
+            case Some(table):
+                ensure_timing_baseline_schema(table)
+            case None:
+                return
+        var found = false
+        var timing_row = SdnRow.empty()
+
+        for row in timing_table.rows:
+            # BUG-044: Use ?? instead of ? to avoid "try: early return"
+            val row_test_id = row.get_i64("test_id") ?? -1
+            if row_test_id != -1 and row_test_id == test_id:
+                timing_row = row
+                found = true
+                break
+
+        # Update statistics
+        timing_row.set("test_id", "{test_id}")
+        timing_row.set("mean", "{stats.mean}")
+        timing_row.set("p50", "{stats.p50}")
+        timing_row.set("p90", "{stats.p90}")
+        timing_row.set("p95", "{stats.p95}")
+        timing_row.set("p99", "{stats.p99}")
+        timing_row.set("iqr", "{stats.iqr}")
+        timing_row.set("provisional_p50", "{stats.p50}")
+
+        # Store last 10 runs as JSON-like string
+        val last_10 = if recent_runs.len() > 10:
+            recent_runs[recent_runs.len() - 10:]
+        else:
+            recent_runs
+        val last_10_str = "[{last_10.join(",")}]"
+        timing_row.set("last_10_runs", last_10_str)
+
+        # Recording a run never approves or moves a baseline.
+        if (timing_row.get("has_baseline") ?? "") != "true":
+            timing_row.set("has_baseline", "false")
+            timing_row.set("baseline_p50", "0")
+            timing_row.set("baseline_updated_at", "")
+            timing_row.set("baseline_state", "provisional")
+            timing_row.set("baseline_generation", "0")
+            timing_row.set("baseline_samples", "")
+            timing_row.set("baseline_cohort_id", "")
+
+        if found:
+            match timing_table.update_row_checked("{test_id}", timing_row):
+                case Ok(_): ()
+                case Err(reason): print "[db] complete/update lost: {reason}"
+        else:
+            timing_table.add_row(timing_row)
+
+        self.db.set_table("timing", timing_table)
+
+    me record_baseline_generation(test_id: i64, cohort_id: text, generation: i64, p50: f64, samples: text, promoted_at: i64):
+        var history_opt = self.db.get_table_mut("baseline_history")
+        if not history_opt.?:
+            self.db.set_table("baseline_history", SdnTable.new("baseline_history", [
+                "baseline_id", "test_id", "cohort_id", "state", "generation",
+                "p50", "samples", "promoted_at", "superseded_at"]))
+            history_opt = self.db.get_table_mut("baseline_history")
+        var history = match history_opt:
+            case Some(table): table
+            case None: return
+        for row in history.rows:
+            if (row.get_i64("test_id") ?? -1) == test_id and (row.get("state") ?? "") == "approved":
+                var prior = row
+                prior.set("state", "superseded")
+                prior.set("superseded_at", "{promoted_at}")
+                match history.update_row_checked(prior.get("baseline_id") ?? "", prior):
+                    case Ok(_): ()
+                    case Err(reason): print "[db] baseline-history supersede lost: {reason}"
+        val current = SdnRow.empty()
+        current.set("baseline_id", "{test_id}:{generation}")
+        current.set("test_id", "{test_id}")
+        current.set("cohort_id", cohort_id)
+        current.set("state", "approved")
+        current.set("generation", "{generation}")
+        current.set("p50", "{p50}")
+        current.set("samples", samples)
+        current.set("promoted_at", "{promoted_at}")
+        current.set("superseded_at", "")
+        history.add_row(current)
+        self.db.set_table("baseline_history", history)
+
+    fn baseline_history_states(test_id: i64) -> [text]:
+        var states: [text] = []
+        val history = match self.db.get_table("baseline_history"):
+            case Some(table): table
+            case nil: return states
+        for row in history.valid_rows():
+            if (row.get_i64("test_id") ?? -1) == test_id:
+                states.push(row.get("state") ?? "")
+        states
+
+    me promote_timing_baseline(test_id: i64, cohort_id: text = "") -> bool:
+        val cohort_samples = self.collect_timing_runs_for_cohort(test_id, cohort_id, 10)
+        if cohort_id == "" or cohort_samples.len() == 0:
+            return false
+        val cohort_stats = stats_from_values(cohort_samples)
+        val frozen_samples = "[" + cohort_samples.join(",") + "]"
+        var timing_table = match self.db.get_table_mut("timing"):
+            case Some(table): ensure_timing_baseline_schema(table)
+            case None: return false
+        var i = 0
+        while i < timing_table.rows.len():
+            var row = timing_table.rows[i]
+            if (row.get_i64("test_id") ?? -1) == test_id:
+                val candidate = "{cohort_stats.p50}"
+                row.set("baseline_p50", candidate)
+                row.set("has_baseline", "true")
+                val promoted_at = timestamp_now()
+                row.set("baseline_updated_at", "{promoted_at}")
+                row.set("baseline_state", "approved")
+                row.set("baseline_samples", frozen_samples)
+                row.set("baseline_cohort_id", cohort_id)
+                val generation = row.get_i64("baseline_generation") ?? 0
+                val next_generation = generation + 1
+                row.set("baseline_generation", "{next_generation}")
+                match timing_table.update_row_checked("{test_id}", row):
+                    case Ok(_):
+                        self.db.set_table("timing", timing_table)
+                        self.record_baseline_generation(test_id, cohort_id, next_generation, cohort_stats.p50, frozen_samples, promoted_at)
+                        return true
+                    case Err(_): return false
+            i = i + 1
+        false
+
+    # Add timing run record
+    me add_timing_run(test_id: i64, duration_ms: f64, run_id: text, cohort_id: text = "", baseline_eligible: bool = true):
+        var timing_runs_table_opt = self.db.get_table_mut("timing_runs")
+        if not timing_runs_table_opt.?:
+            return
+        var timing_runs_table = match timing_runs_table_opt:
+            case Some(table):
+                table
+            case None:
+                return
+        if not timing_runs_table.columns.contains("cohort_id"):
+            var timing_columns = timing_runs_table.columns
+            timing_columns.push("cohort_id")
+            timing_runs_table.columns = timing_columns
+        if not timing_runs_table.columns.contains("baseline_eligible"):
+            var eligible_columns = timing_runs_table.columns
+            eligible_columns.push("baseline_eligible")
+            timing_runs_table.columns = eligible_columns
+
+        val timing_run_id = self.next_timing_run_id
+        self.next_timing_run_id = self.next_timing_run_id + 1
+
+        val row = SdnRow.empty()
+        row.set("timing_run_id", "{timing_run_id}")
+        row.set("test_id", "{test_id}")
+        row.set("duration_ms", "{duration_ms}")
+        row.set("run_id", run_id)
+        row.set("timestamp", "{timestamp_now()}")
+        row.set("cohort_id", cohort_id)
+        row.set("baseline_eligible", if baseline_eligible: "true" else: "false")
+
+        timing_runs_table.add_row(row)
+        self.db.set_table("timing_runs", timing_runs_table)
+
+        self.ensure_indexes()
+        if baseline_eligible:
+            var lst = if self._runs_by_test.has(test_id): self._runs_by_test[test_id] else: []
+            lst.push(duration_ms)
+            self._runs_by_test[test_id] = trim_to_last_f64(lst, TIMING_RUNS_PER_TEST_CAP)
+
+    fn collect_timing_runs_for_cohort(test_id: i64, cohort_id: text, max_count: i64) -> [f64]:
+        val table = match self.db.get_table("timing_runs"):
+            case Some(value): value
+            case None: return []
+        var values: [f64] = []
+        for row in table.valid_rows():
+            if (row.get_i64("test_id") ?? -1) == test_id and
+                    (row.get("cohort_id") ?? "") == cohort_id and
+                    (row.get("baseline_eligible") ?? "true") == "true":
+                values.push((row.get("duration_ms") ?? "0").to_float())
+        trim_to_last_f64(values, max_count)
+
+    # Collect timing runs for a test (most recent N) — O(cap) from the index.
+    # This used to walk EVERY row of the never-capped `timing_runs` table on
+    # every update. NOTE: duplicate impl of database.spl's method; both copies
+    # must carry the fix because dispatch between them is ambiguous.
+    fn collect_timing_runs(test_id: i64, max_count: i64) -> [f64]:
+        if not self._runs_by_test.has(test_id):
+            return []
+        trim_to_last_f64(self._runs_by_test[test_id], max_count)
+
+    # Check if test is flaky
+    fn is_flaky_test(test_id: i64) -> bool:
+        val recent_runs = self.collect_timing_runs(test_id, 10)
+        if recent_runs.len() < 3:
+            return false  # Need at least 3 runs
+
+        is_flaky(recent_runs, 0.5)  # 50% CV threshold

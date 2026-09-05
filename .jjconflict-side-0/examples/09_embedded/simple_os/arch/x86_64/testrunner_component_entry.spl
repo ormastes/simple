@@ -1,0 +1,68 @@
+# SimpleOS x86_64 in-guest TEST RUNNER component sanity entry (OVMF/GRUB-EFI).
+#
+# Sibling of devtool_component_entry.spl; see that file's header for the boot
+# chain (OVMF pflash -> GRUB-EFI -> multiboot; NEVER `-kernel`, NEVER
+# isa-debug-exit), the per-component build rule, and the compiler statement
+# (RUST SEED).
+#
+# Port of the aarch64 test-runner entry, kept identical in shape so an identical
+# stall inside the real parse_test_output is recognisable as the known in-guest
+# text defect owned by another lane, not a new x86_64 one.
+#
+# HONEST SCOPE: this runs the runner's result-EVALUATION core over a real spec
+# transcript. The guest does not fork a child `simple test` process, because a
+# freestanding image has no process model. Within that scope the round-trip is
+# real: a transcript in, the REAL parser's counts out, rung on BOTH the passed
+# and the failed count so a parser that answered a constant fails this row.
+#
+# NEVER interpolate an integer into text — that emits rt_raw_i64_to_string,
+# which the freestanding x86_64 runtime does not provide, and the link dies.
+# No module-level `val` globals: on this native-build config they have been
+# observed treated as unresolved extern symbols (see abi_probe_entry.spl).
+
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{parse_test_output}
+
+@unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
+extern fn serial_println(msg: text)
+
+fn testrunner_component_row() -> i64:
+    """Feed a real spec transcript to the REAL test-runner output parser."""
+    val transcript =
+        "running 3 tests\n" +
+        "test arithmetic adds ... ok\n" +
+        "test arithmetic subtracts ... ok\n" +
+        "test arithmetic divides by zero ... FAILED\n" +
+        "\n" +
+        "test result: FAILED. 2 passed; 1 failed; 0 ignored\n"
+    serial_println("[testrun] feeding a 3-example spec transcript to the real parser")
+    val counts = parse_test_output(transcript)
+    val passed = counts.0
+    val failed = counts.1
+
+    var rc = 0
+    if passed == 2:
+        serial_println("[testrun] parser reported passed=2")
+    else:
+        serial_println("[testrun] FAIL parser did not report passed=2")
+        rc = 1
+    if failed == 1:
+        serial_println("[testrun] parser reported failed=1")
+    else:
+        serial_println("[testrun] FAIL parser did not report failed=1")
+        rc = 1
+    if rc == 0:
+        serial_println("COMPONENT_TESTRUN_SIMPLEOS_X86_64_OK real runner parser summarised the spec as 2 passed / 1 failed")
+    rc
+
+fn _start():
+    """x86_64 in-guest test-runner sanity entry, reached from crt0.s after the
+    multiboot handover performed by GRUB-EFI under OVMF."""
+    serial_println("")
+    serial_println("[components] SimpleOS x86_64 in-guest toolchain components (OVMF -> GRUB-EFI)")
+    serial_println("[components] serial up, exercising real product modules")
+    val rc = testrunner_component_row()
+    if rc == 0:
+        serial_println("[components] all component rows exited rc=0")
+    else:
+        serial_println("[components] at least one component row exited rc=nonzero")
+    serial_println("[components] parking")

@@ -1,0 +1,61 @@
+# Access summaries shared by parent commit, borrow analysis, and storage-layout
+# planning. Projection names are descriptive only: they do not prove
+# disjointness. Only region identity plus a known non-overlapping range does.
+
+enum ParallelAccessMode:
+    Read
+    Write
+    Reduce
+    Create
+
+val PARALLEL_ACCESS_MODE_COUNT: i64 = 4
+
+fn parallel_access_mode_to_u8(value: ParallelAccessMode) -> i64:
+    match value:
+        case ParallelAccessMode.Read: 0
+        case ParallelAccessMode.Write: 1
+        case ParallelAccessMode.Reduce: 2
+        case ParallelAccessMode.Create: 3
+
+struct ParallelAccessPathV1:
+    region_id: i64
+    start: i64
+    end: i64
+    known_range: bool
+    projection: text
+    mode: ParallelAccessMode
+
+fn parallel_access_path_v1(region_id: i64, start: i64, end: i64,
+                           known_range: bool, projection: text,
+                           mode: ParallelAccessMode) -> ParallelAccessPathV1:
+    ParallelAccessPathV1(region_id: region_id, start: start, end: end,
+                         known_range: known_range, projection: projection,
+                         mode: mode)
+
+fn parallel_access_path_v1_well_formed(value: ParallelAccessPathV1) -> bool:
+    if value.region_id <= 0 or value.projection.len() == 0:
+        return false
+    if value.known_range:
+        return value.start >= 0 and value.end > value.start
+    true
+
+fn parallel_access_paths_overlap(a: ParallelAccessPathV1,
+                                 b: ParallelAccessPathV1) -> bool:
+    if a.region_id != b.region_id:
+        return false
+    if not a.known_range or not b.known_range:
+        return true
+    a.start < b.end and b.start < a.end
+
+fn parallel_access_mode_mutates(mode: ParallelAccessMode) -> bool:
+    val raw = parallel_access_mode_to_u8(mode)
+    raw == 1 or raw == 3
+
+fn parallel_access_paths_conflict(a: ParallelAccessPathV1,
+                                  b: ParallelAccessPathV1) -> bool:
+    if not parallel_access_paths_overlap(a, b):
+        return false
+    if parallel_access_mode_to_u8(a.mode) == 2
+        and parallel_access_mode_to_u8(b.mode) == 2:
+        return false
+    parallel_access_mode_mutates(a.mode) or parallel_access_mode_mutates(b.mode)

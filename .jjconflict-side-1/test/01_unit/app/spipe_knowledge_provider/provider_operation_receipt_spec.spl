@@ -1,0 +1,112 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.lifecycle.{PureEd25519ReceiptAuthorityV1, OperationReceiptBindingV1, operation_receipt_unsigned, operation_receipt_domain_bytes, operation_receipt_id, operation_receipt_validation_error, operation_receipt_binding_error, provider_generation_id}
+use std.common.json.serializer.{json_escape_string}
+
+fn quoted(value: text) -> text: "\"" + json_escape_string(value) + "\""
+
+fn signed_receipt(authority: PureEd25519ReceiptAuthorityV1,
+                  unsigned: text) -> text:
+    val receipt_id = operation_receipt_id(unsigned)
+    val signature = authority.sign(operation_receipt_domain_bytes(unsigned)).unwrap()
+    val with_id = unsigned.replace("\"result_logical_root\":",
+        "\"receipt_id\":" + quoted(receipt_id) + ",\"result_logical_root\":")
+    with_id.replace("\"snapshot\":",
+        "\"signature\":" + quoted(signature) + ",\"snapshot\":")
+
+fn receipt_with_policy_time(authority: PureEd25519ReceiptAuthorityV1,
+                            issued_at_ms: i64, expires_at_ms: i64,
+                            policy_version: i64,
+                            revocation_generation: i64) -> text:
+    val unsigned = operation_receipt_unsigned(1, "AUTH-TEST",
+        "sha256:" + "0" * 64, quoted("cand-1"), expires_at_ms,
+        issued_at_ms, authority.key_id(), "index_apply", "apply-1", "applied",
+        "sha256:" + "2" * 64, "sha256:" + "1" * 64, policy_version,
+        provider_generation_id(1), "sha256:" + "3" * 64,
+        revocation_generation, "sha256:" + "1" * 64,
+        "spks1-" + "0" * 64, "WS-PROVIDER")
+    signed_receipt(authority, unsigned)
+
+describe "SPipe operation receipt canonical bytes":
+    it "validates the exact bytes produced by the canonical signer path":
+        var seed: [u8] = []
+        var i = 0
+        while i < 32:
+            seed.push(7u8)
+            i = i + 1
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(seed, "AUTH-TEST", 1).unwrap()
+        val unsigned = operation_receipt_unsigned(1, "AUTH-TEST", "sha256:" + "0" * 64,
+            quoted("cand-1"), 86400001, 1, authority.key_id(), "index_apply", "apply-1",
+            "applied", "sha256:" + "2" * 64, "sha256:" + "1" * 64, 1, provider_generation_id(1),
+            "sha256:" + "3" * 64, 0, "sha256:" + "1" * 64,
+            "spks1-" + "0" * 64, "WS-PROVIDER")
+        val signature = authority.sign(operation_receipt_domain_bytes(unsigned)).unwrap()
+        expect(authority.key_id()).to_equal("ed25519:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889")
+        expect(unsigned.bytes().len()).to_equal(986)
+        expect(operation_receipt_domain_bytes(unsigned).len()).to_equal(1020)
+        expect(operation_receipt_id(unsigned)).to_equal("or-036f3ef41c8762b1758b5237415d9594764e226e1883f7a185400e20fa28926b")
+        expect(signature).to_equal("lNNrKPoK_MDZ0IC8hV5VjQl-wbDfDwQLyyQx8vCKjCUIyFx91WyZaghEHeg1KXG5Gj9Qw-xmi2sACcNK0RvCDg")
+        val with_id = unsigned.replace("\"result_logical_root\":",
+            "\"receipt_id\":" + quoted(operation_receipt_id(unsigned)) + ",\"result_logical_root\":")
+        val receipt = with_id.replace("\"snapshot\":",
+            "\"signature\":" + quoted(signature) + ",\"snapshot\":")
+        expect(operation_receipt_validation_error(authority, receipt)).to_equal("")
+        val binding = OperationReceiptBindingV1(
+            operation: "index_apply", outcome: "applied",
+            provider_generation: "pg-00000000000000000000000000000001",
+            workspace: "WS-PROVIDER", snapshot: "spks1-" + "0" * 64,
+            scope_digest: "sha256:" + "1" * 64,
+            base_logical_root: "sha256:" + "0" * 64,
+            result_logical_root: "sha256:" + "3" * 64,
+            payload_hash: "sha256:" + "2" * 64, policy_version: 1,
+            policy_digest: "sha256:" + "1" * 64, revocation_generation: 0)
+        expect(operation_receipt_binding_error(receipt, binding)).to_equal("")
+        expect(operation_receipt_validation_error(authority,
+            receipt.replace("pg-00000000000000000000000000000001", "1"))).to_equal("provider_generation")
+        expect(operation_receipt_validation_error(authority,
+            receipt.replace("\"outcome\":\"applied\"", "\"outcome\":\"stale_base\""))).to_equal("outcome")
+        expect(operation_receipt_validation_error(authority,
+            receipt.replace("sha256:" + "3" * 64, "SHA256:" + "3" * 64))).to_equal("result_logical_root")
+        expect(operation_receipt_validation_error(authority,
+            receipt.replace("\"workspace\":", "\"unknown\":0,\"workspace\":"))).to_equal("key_count")
+        val drift = OperationReceiptBindingV1(
+            operation: "index_apply", outcome: "applied",
+            provider_generation: "pg-00000000000000000000000000000001",
+            workspace: "WS-PROVIDER", snapshot: "spks1-" + "0" * 64,
+            scope_digest: "sha256:" + "4" * 64,
+            base_logical_root: "sha256:" + "0" * 64,
+            result_logical_root: "sha256:" + "3" * 64,
+            payload_hash: "sha256:" + "2" * 64, policy_version: 1,
+            policy_digest: "sha256:" + "1" * 64, revocation_generation: 0)
+        expect(operation_receipt_binding_error(receipt, drift)).to_equal("binding_scope_digest")
+
+    it "rejects noncanonical generations outcomes roots and binding drift":
+        expect(provider_generation_id(1)).to_equal("pg-00000000000000000000000000000001")
+        expect(provider_generation_id(0)).to_equal("pg-00000000000000000000000000000000")
+
+    it "rejects policy revocation time and authority schema drift before signature admission":
+        var seed: [u8] = []
+        var i = 0
+        while i < 32:
+            seed.push(7u8)
+            i = i + 1
+        val authority = PureEd25519ReceiptAuthorityV1.test_only(
+            seed, "AUTH-TEST", 1).unwrap()
+        expect(operation_receipt_validation_error(authority,
+            receipt_with_policy_time(authority, 1, 86400001, 2, 0))).to_equal(
+                "policy_version")
+        expect(operation_receipt_validation_error(authority,
+            receipt_with_policy_time(authority, 1, 86400001, 1, 1))).to_equal(
+                "revocation_generation")
+        expect(operation_receipt_validation_error(authority,
+            receipt_with_policy_time(authority, 300002, 400002, 1, 0))).to_equal(
+                "future_issued")
+        expect(operation_receipt_validation_error(authority,
+            receipt_with_policy_time(authority, 1, 86400002, 1, 0))).to_equal(
+                "duration")
+        expect(operation_receipt_validation_error(authority,
+            receipt_with_policy_time(authority, 2, 1, 1, 0))).to_equal(
+                "time_range")
+        expect(PureEd25519ReceiptAuthorityV1.test_only(
+            seed, "AUTH-\u0001", 1).is_err()).to_be(true)
+        expect(PureEd25519ReceiptAuthorityV1.test_only(
+            seed, "AUTH-TEST", 9007199254740992).is_err()).to_be(true)

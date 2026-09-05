@@ -1,0 +1,71 @@
+# Fail-closed scalar gates for the hosted WM's Vulkan presentation owner.
+# These helpers perform no device work: the compositor owner calls them before
+# asking VulkanEngine2dPresenter to acquire a swapchain image.
+
+use common.ui.render_opt.damage_plan.{DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL}
+
+val HOSTED_VULKAN_PRESENT_MAX_RECTS: i64 = 256
+
+fn hosted_vulkan_present_rects_valid(
+    width: i32, height: i32, mode: i64, rects: [i64]
+) -> bool:
+    if width <= 0 or height <= 0:
+        return false
+    if mode != DAMAGE_PLAN_LOCAL and mode != DAMAGE_PLAN_FULL:
+        return false
+    if (rects.len() == 0 or rects.len() % 4 != 0 or
+        rects.len() / 4 > HOSTED_VULKAN_PRESENT_MAX_RECTS):
+        return false
+    if mode == DAMAGE_PLAN_FULL:
+        return (rects.len() == 4 and rects[0] == 0 and rects[1] == 0 and
+            rects[2] == width.to_i64() and rects[3] == height.to_i64())
+    var index: i64 = 0
+    while index < rects.len():
+        val x = rects[index]
+        val y = rects[index + 1]
+        val rect_width = rects[index + 2]
+        val rect_height = rects[index + 3]
+        if (x < 0 or y < 0 or rect_width <= 0 or rect_height <= 0 or
+            x >= width.to_i64() or y >= height.to_i64() or
+            rect_width > width.to_i64() - x or
+            rect_height > height.to_i64() - y):
+            return false
+        # The presenter receipt reports exact copied bytes. Overlapping LOCAL
+        # rectangles would copy the shared pixels twice, so reject rather than
+        # let a caller overstate a damage-byte reduction. Half-open edges may
+        # touch without overlap.
+        var prior: i64 = 0
+        while prior < index:
+            val prior_x = rects[prior]
+            val prior_y = rects[prior + 1]
+            val prior_width = rects[prior + 2]
+            val prior_height = rects[prior + 3]
+            if (x < prior_x + prior_width and prior_x < x + rect_width and
+                y < prior_y + prior_height and prior_y < y + rect_height):
+                return false
+            prior = prior + 4
+        index = index + 4
+    true
+
+fn hosted_vulkan_present_revision_valid(
+    candidate_serial: i64, last_presented_serial: i64,
+    frame_revision: i64, last_presented_revision: i64
+) -> bool:
+    candidate_serial > last_presented_serial and
+        frame_revision > last_presented_revision
+
+fn hosted_vulkan_present_identity_valid(
+    framebuffer: i64, device_identity: i64, adapter_identity: i64,
+    bound_framebuffer: i64, bound_device_identity: i64,
+    bound_adapter_identity: i64
+) -> bool:
+    if framebuffer <= 0 or device_identity <= 0 or adapter_identity <= 0:
+        return false
+    (bound_framebuffer == 0 or bound_framebuffer == framebuffer) and
+        (bound_device_identity == 0 or bound_device_identity == device_identity) and
+        (bound_adapter_identity == 0 or bound_adapter_identity == adapter_identity)
+
+export hosted_vulkan_present_rects_valid
+export hosted_vulkan_present_revision_valid
+export hosted_vulkan_present_identity_valid
+export HOSTED_VULKAN_PRESENT_MAX_RECTS

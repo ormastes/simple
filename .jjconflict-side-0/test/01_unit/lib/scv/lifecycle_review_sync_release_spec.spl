@@ -1,0 +1,77 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+"""
+## Purpose and audience
+Proves exact-review, sync-conflict, and immutable-release rules for lifecycle maintainers.
+"""
+# @req: REQ-SSPEC-LIB
+# @req: REQ-SSPEC-LIB
+# @req: REQ-SSPEC-LIB
+# @ac: AC-3
+# @ac: AC-8
+# @ac: AC-10
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use std.scv.lifecycle.model.{GateRun, RemoteBinding, ReleaseIdentity}
+use std.scv.lifecycle.review.{ApprovalEvidence, lifecycle_open_review, lifecycle_approval, lifecycle_revalidate_approval, lifecycle_gate_bundle, lifecycle_gate_bundle_admits}
+use std.scv.lifecycle.sync.{lifecycle_sync_field, lifecycle_outbox_id, lifecycle_outbox_event, lifecycle_outbox_event_at, lifecycle_sync_conflict_record}
+use std.scv.lifecycle.codec.{lifecycle_record_encode, lifecycle_record_decode}
+use std.scv.lifecycle.release.{lifecycle_release_transition}
+
+describe "Unified lifecycle admission rules":
+    # @manual scenario evidence
+    it "invalidates approval when the reviewed revision changes":
+        # @req REQ-SSPEC-LIB
+        step("invalidates approval when the reviewed revision changes")
+        val review = lifecycle_open_review("REV-1", "chg_1", "rev_base", "rev_head", "integration/main", "standard")
+        val approval = lifecycle_approval(review, ApprovalEvidence(revision_id: "rev_head", tree_digest: "tree-digest", reviewer: "reviewer", authority: "maintainer", policy_digest: "policy-1", evidence_digest: "evidence-1", created_at: "2026-08-25T00:00:00Z"))
+        val stale = lifecycle_revalidate_approval(approval, "rev_new", "policy-1", "evidence-1")
+        expect(stale.state).to_equal("stale_revision")
+        val wrong_head = lifecycle_approval(review, ApprovalEvidence(revision_id: "rev_other", tree_digest: "tree-digest", reviewer: "reviewer", authority: "maintainer", policy_digest: "policy-1", evidence_digest: "evidence-1", created_at: "2026-08-25T00:00:00Z"))
+        expect(wrong_head.state).to_equal("rejected_revision")
+
+    it "rejects vacuous gate evidence and admits exact evidence":
+        # @req REQ-SSPEC-LIB
+        step("rejects vacuous gate evidence and admits exact evidence")
+        val review = lifecycle_open_review("REV-2", "chg_2", "rev_base", "rev_head", "integration/main", "standard")
+        val approval = lifecycle_approval(review, ApprovalEvidence(revision_id: "rev_head", tree_digest: "tree-digest", reviewer: "reviewer", authority: "maintainer", policy_digest: "policy-1", evidence_digest: "evidence-1", created_at: "2026-08-25T00:00:00Z"))
+        val empty_run = GateRun(gate_run_id: "gate-1", revision_id: "rev_head", gate_id: "tests", policy_digest: "policy-1", tool_digest: "tool-1", environment_digest: "env-1", verdict: "pass", evidence_objects: [])
+        val rejected = lifecycle_gate_bundle("bundle-1", "rev_head", [empty_run], [approval], "policy-1")
+        expect(lifecycle_gate_bundle_admits(rejected, "rev_head").code).to_equal("LIFECYCLE_GATE_INCOMPLETE")
+        val real_run = GateRun(gate_run_id: "gate-2", revision_id: "rev_head", gate_id: "tests", policy_digest: "policy-1", tool_digest: "tool-1", environment_digest: "env-1", verdict: "pass", evidence_objects: ["obj-log"])
+        val admitted = lifecycle_gate_bundle("bundle-2", "rev_head", [real_run], [approval], "policy-1")
+        expect(lifecycle_gate_bundle_admits(admitted, "rev_head").status).to_equal("admitted")
+
+    it "creates an explicit conflict for concurrent field edits":
+        # @req REQ-SSPEC-LIB
+        step("creates an explicit conflict for concurrent field edits")
+        val binding = RemoteBinding(binding_id: "bind-1", entity_type: "task", entity_id: "TASK-1", provider_instance: "jira-prod", remote_kind: "issue", remote_id: "ABC-1", remote_revision: "etag-2", authority_policy_id: "field-split", sync_base_digest: "base-digest", state: "bound")
+        val plan = lifecycle_sync_field(binding, "status", "open", "implementing", "blocked", "field_split")
+        expect(plan.action).to_equal("conflict")
+        expect(lifecycle_record_decode(lifecycle_record_encode(lifecycle_sync_conflict_record(plan.conflict.?))).ok).to_be(true)
+        expect(lifecycle_outbox_id("devhub", "task.updated", "TASK-1", "key-1", "payload-1")).to_start_with("evt_")
+        val event = lifecycle_outbox_event("devhub", "task.updated", "TASK-1", "corr-1", "cause-1", "key-1", "payload-1")
+        expect(event.event_id).to_equal(lifecycle_outbox_id("devhub", "task.updated", "TASK-1", "key-1", "payload-1"))
+        expect(event.idempotency_key).to_equal("key-1")
+        expect(event.specversion).to_equal("1.0")
+        val timed = lifecycle_outbox_event_at("devhub", "task.updated", "TASK-1", "2026-08-25T00:00:00Z", "https://schemas.example/devhub/v1", "corr-1", "cause-1", "key-1", "payload-1")
+        expect(timed.time).to_equal("2026-08-25T00:00:00Z")
+        expect(timed.data_schema).to_equal("https://schemas.example/devhub/v1")
+
+    it "allows withdrawal but rejects rewriting an immutable publication":
+        # @req REQ-SSPEC-LIB
+        step("allows withdrawal but rejects rewriting an immutable publication")
+        val release = ReleaseIdentity(release_id: "REL-1", version: "1.4.2", line_id: "simple/1.4", source_revision_id: "rev_head", source_tree_hash: "tree", git_commit_oid: "commit", git_tag_object_oid: "tag-object", gate_bundle_id: "bundle", artifact_set_id: "artifacts", sbom_ids: ["sbom"], provenance_ids: ["prov"], publication_ids: ["github:1"], state: "published", immutable: true)
+        expect(lifecycle_release_transition(release, "withdrawn").status).to_equal("withdrawn")
+        expect(lifecycle_release_transition(release, "published").code).to_equal("LIFECYCLE_RELEASE_IMMUTABLE")
+
+    it "rejects publication without the complete immutable identity mapping":
+        # @req REQ-SSPEC-LIB
+        step("rejects publication without the complete immutable identity mapping")
+        val incomplete = ReleaseIdentity(release_id: "REL-2", version: "1.4.3", line_id: "simple/1.4", source_revision_id: "rev_head", source_tree_hash: "", git_commit_oid: "", git_tag_object_oid: "tag-object", gate_bundle_id: "bundle", artifact_set_id: "", sbom_ids: [], provenance_ids: [], publication_ids: [], state: "publication_ready", immutable: true)
+        expect(lifecycle_release_transition(incomplete, "published").code).to_equal("LIFECYCLE_RELEASE_IDENTITY")

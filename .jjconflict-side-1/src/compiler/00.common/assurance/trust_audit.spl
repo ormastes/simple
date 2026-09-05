@@ -1,0 +1,174 @@
+# Common typed Lean trust-closure audit for Formal Verification 2.0.
+#
+# Input is the retained output of generated `#print axioms <root>` commands.
+# This parser is deliberately fail-closed: an empty/malformed report, sorryAx,
+# Lean.trustCompiler, or an undeclared project axiom blocks closure.
+
+use std.common.crypto.sha256.{sha256_text}
+
+fn _trust_audit_frame(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _trust_audit_frames(values: [text]) -> text:
+    var sorted = values
+    sorted.sort()
+    var framed: [text] = []
+    for value in sorted: framed.push(_trust_audit_frame(value))
+    sorted.len().to_string() + ":[" + framed.join("") + "]"
+
+enum TrustAuditStatus:
+    Closed
+    BoundedTcb
+    Rejected
+    Missing
+
+impl TrustAuditStatus:
+    fn name() -> text:
+        match self:
+            TrustAuditStatus.Closed: "closed"
+            TrustAuditStatus.BoundedTcb: "bounded_tcb"
+            TrustAuditStatus.Rejected: "rejected"
+            TrustAuditStatus.Missing: "missing"
+
+struct TrustAuditResult:
+    status: TrustAuditStatus
+    root_count: i64
+    audited_root_count: i64
+    project_axioms: [text]
+    approved_axioms: [text]
+    rejected_axioms: [text]
+    reason: text
+
+impl TrustAuditResult:
+    fn permits_closed_verification() -> bool:
+        self.status == TrustAuditStatus.Closed and
+            self.root_count > 0 and
+            self.audited_root_count == self.root_count and
+            self.rejected_axioms.is_empty()
+
+fn canonical_trust_audit_hash_v1(
+    audit: TrustAuditResult,
+    artifact_hash: text
+) -> text:
+    sha256_text("TrustAuditResult-v1" +
+        _trust_audit_frame(audit.status.name()) +
+        _trust_audit_frame(audit.root_count.to_string()) +
+        _trust_audit_frame(audit.audited_root_count.to_string()) +
+        _trust_audit_frames(audit.project_axioms) +
+        _trust_audit_frames(audit.approved_axioms) +
+        _trust_audit_frames(audit.rejected_axioms) +
+        _trust_audit_frame(audit.reason) + _trust_audit_frame(artifact_hash))
+
+fn _audit_push_unique(items: [text], item: text) -> [text]:
+    if item == "" or items.contains(item):
+        return items
+    items.push(item)
+
+fn _audit_extract_axiom(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed.starts_with("axiom "):
+        val rest = trimmed.substring(6).trim()
+        val colon = rest.index_of(":")
+        if colon >= 0:
+            return rest.substring(0, colon).trim()
+        val space = rest.index_of(" ")
+        if space >= 0:
+            return rest.substring(0, space).trim()
+        return rest
+    ""
+
+fn _audit_is_logic_axiom(name: text) -> bool:
+    # Lean's logical quotient/extensionality/choice primitives are disclosed
+    # in the manifest but are not project-defined escape hatches.
+    name == "propext" or name == "Quot.sound" or name == "Classical.choice"
+
+fn _audit_line_reports_exact_root(line: text, root: text) -> bool:
+    val trimmed = line.trim()
+    if not (trimmed.contains("axioms") or trimmed.contains("depends on")):
+        return false
+    # Lean 4.33 emits `'Root.name' depends on axioms: [...]`; retained test
+    # fixtures and older wrappers may prefix the exact name with `declaration`.
+    # Never use substring matching here: `Safe.rootForged` must not satisfy a
+    # manifest entry for `Safe.root`.
+    trimmed.starts_with("'" + root + "' depends on axioms:") or
+        trimmed.starts_with("declaration '" + root + "' depends on axioms:") or
+        trimmed == "'" + root + "' does not depend on any axioms" or
+        trimmed == "declaration '" + root + "' does not depend on any axioms" or
+        trimmed.starts_with("declaration " + root + " depends on axioms:") or
+        trimmed == "declaration " + root + " does not depend on any axioms" or
+        trimmed.starts_with(root + " depends on axioms:")
+
+fn audit_lean_axiom_report(report: text, expected_roots: [text], allowed_axioms: [text]) -> TrustAuditResult:
+    if expected_roots.is_empty():
+        return TrustAuditResult(
+            status: TrustAuditStatus.Missing, root_count: 0, audited_root_count: 0,
+            project_axioms: [], approved_axioms: [], rejected_axioms: [],
+            reason: "no exported proof roots declared"
+        )
+    if report.trim() == "":
+        return TrustAuditResult(
+            status: TrustAuditStatus.Missing, root_count: expected_roots.len(), audited_root_count: 0,
+            project_axioms: [], approved_axioms: [], rejected_axioms: [],
+            reason: "transitive axiom report is empty"
+        )
+
+    var audited: [text] = []
+    var project: [text] = []
+    var approved: [text] = []
+    var rejected: [text] = []
+    for line in report.lines():
+        val trimmed = line.trim()
+        for root in expected_roots:
+            if _audit_line_reports_exact_root(trimmed, root):
+                audited = _audit_push_unique(audited, root)
+        val axiom = _audit_extract_axiom(trimmed)
+        if axiom != "":
+            project = _audit_push_unique(project, axiom)
+            if axiom == "sorryAx" or axiom == "Lean.trustCompiler":
+                rejected = _audit_push_unique(rejected, axiom)
+            elif allowed_axioms.contains(axiom):
+                approved = _audit_push_unique(approved, axiom)
+            else:
+                rejected = _audit_push_unique(rejected, axiom)
+        val axioms_pos = trimmed.index_of("axioms:")
+        if axioms_pos >= 0:
+            var inline_axioms = trimmed.substring(axioms_pos + 7).trim()
+            inline_axioms = inline_axioms.replace("[", "").replace("]", "")
+            for inline_axiom_raw in inline_axioms.split(","):
+                val inline_axiom = inline_axiom_raw.trim()
+                if inline_axiom == "" or _audit_is_logic_axiom(inline_axiom):
+                    continue
+                project = _audit_push_unique(project, inline_axiom)
+                if inline_axiom == "sorryAx" or inline_axiom == "Lean.trustCompiler":
+                    rejected = _audit_push_unique(rejected, inline_axiom)
+                elif allowed_axioms.contains(inline_axiom):
+                    approved = _audit_push_unique(approved, inline_axiom)
+                else:
+                    rejected = _audit_push_unique(rejected, inline_axiom)
+        if trimmed.contains("sorryAx"):
+            rejected = _audit_push_unique(rejected, "sorryAx")
+        if trimmed.contains("Lean.trustCompiler"):
+            rejected = _audit_push_unique(rejected, "Lean.trustCompiler")
+
+    if audited.len() != expected_roots.len():
+        return TrustAuditResult(
+            status: TrustAuditStatus.Missing, root_count: expected_roots.len(), audited_root_count: audited.len(),
+            project_axioms: project, approved_axioms: approved, rejected_axioms: rejected,
+            reason: "one or more exported roots lack a transitive axiom report"
+        )
+    if not rejected.is_empty():
+        return TrustAuditResult(
+            status: TrustAuditStatus.Rejected, root_count: expected_roots.len(), audited_root_count: audited.len(),
+            project_axioms: project, approved_axioms: approved, rejected_axioms: rejected,
+            reason: "transitive proof closure contains an undeclared or forbidden axiom"
+        )
+    if not approved.is_empty():
+        return TrustAuditResult(
+            status: TrustAuditStatus.BoundedTcb, root_count: expected_roots.len(), audited_root_count: audited.len(),
+            project_axioms: project, approved_axioms: approved, rejected_axioms: [],
+            reason: "proof closure depends on approved bounded-TCB axioms"
+        )
+    TrustAuditResult(
+        status: TrustAuditStatus.Closed, root_count: expected_roots.len(), audited_root_count: audited.len(),
+        project_axioms: [], approved_axioms: [], rejected_axioms: [], reason: ""
+    )

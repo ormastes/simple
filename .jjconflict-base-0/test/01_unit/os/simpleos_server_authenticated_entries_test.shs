@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+cd "$root"
+fail() { echo "simpleos-server-authenticated-entries-test: $*" >&2; exit 1; }
+x86=examples/09_embedded/simple_os/arch/x86_64/filesystem_servers_entry.spl
+arm=examples/09_embedded/simple_os/arch/arm64/servers_entry.spl
+rv=examples/09_embedded/simple_os/arch/riscv64/servers_entry.spl
+grep -Fq 'x86_64_authenticated_media_execute_path_v1' "$x86" || fail 'x86 authenticated adapter missing'
+! grep -Fq 'x86_64_fs_exec_spawn_scheduler_owned' "$x86" || fail 'x86 legacy path-only facade present'
+grep -Fq 'riscv64_authenticated_media_execute_server_v1' "$rv" || fail 'RV64 authenticated adapter missing'
+! grep -Fq 'riscv64_fs_exec_spawn_capture' "$rv" || fail 'RV64 legacy unauthenticated capture present'
+grep -Fq 'arm64_authenticated_media_execute_server_v1' "$arm" || fail 'ARM64 authenticated adapter missing'
+! grep -Fq 'arm64_fs_exec_spawn_ring3' "$arm" || fail 'ARM64 legacy path-only launch present'
+grep -Fq 'open_for_execute("/SERVERS.ELF", ExecuteTrust.Trusted)' \
+    src/os/kernel/loader/arm64_authenticated_media_fixture.spl || fail 'ARM64 execute-open authority missing'
+grep -Fq 'arm64_fs_exec_spawn_authenticated_v1' \
+    src/os/kernel/loader/arm64_authenticated_media_fixture.spl || fail 'ARM64 loader-issued adoption missing'
+grep -Fq 'wait_for_collect' src/os/kernel/loader/arm64_fs_exec_spawn.spl \
+    || fail 'ARM64 scheduler reap missing'
+grep -Fq 'SIMPLEOS_SERVERS_MANIFEST="$SERVER_SIDECARS/SERVER.MAN"' \
+    scripts/check/check-simpleos-arm64-servers-qemu.shs || fail 'ARM64 signed manifest staging missing'
+grep -Fq 'arm64_auth_trust_config.spl' scripts/check/check-simpleos-arm64-servers-qemu.shs \
+    || fail 'ARM64 pinned kernel trust config missing'
+grep -Fq 'auth_contract_entry=src/app/arm64_auth_contract/main.spl' \
+    scripts/check/rebuild-sosix-qemu-media.shs || fail 'ARM64 trusted producer selector missing'
+grep -Fq 'auth_contract_entry=src/app/rv64_auth_contract/main.spl' \
+    scripts/check/rebuild-sosix-qemu-media.shs || fail 'RV64 trusted producer selector missing'
+grep -Fq 'cross_arch=rejected' \
+    test/02_integration/os/simpleos_server_auth_contract_multiarch_roundtrip_test.shs \
+    || fail 'multiarch cross-target substitution oracle missing'
+grep -Fq 'open_for_execute("/SERVERS.ELF", ExecuteTrust.Trusted)' \
+    src/os/kernel/loader/riscv64_authenticated_media_fixture.spl || fail 'RV64 execute-open authority missing'
+grep -Fq 'fs_exec_spawn_authenticated_v1' \
+    src/os/kernel/loader/x86_64_authenticated_media_fixture.spl || fail 'x86 authenticated adoption missing'
+plan=$(SOSIX_QEMU_SERVERS=1 sh scripts/check/rebuild-sosix-qemu-media.shs --plan --rows x86_64,arm64,riscv64)
+printf '%s\n' "$plan" | grep -Fq 'x86_64/filesystem_servers_entry.spl' || fail 'x86 rebuild selection missing'
+printf '%s\n' "$plan" | grep -Fq 'arm64/servers_entry.spl' || fail 'ARM64 rebuild selection missing'
+printf '%s\n' "$plan" | grep -Fq 'riscv64/servers_entry.spl' || fail 'RV64 rebuild selection missing'
+printf 'PASS simpleos-server-authenticated-entries architectures=x86_64,arm64,riscv64\n'

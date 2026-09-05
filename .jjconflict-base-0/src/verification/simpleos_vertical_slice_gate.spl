@@ -1,0 +1,244 @@
+# Product adapter for the FV2 SimpleOS vertical-slice delivery gate.
+#
+# This layer consumes the seven implementation-linked refinement receipts.  It
+# does not promote model evidence and it does not accept caller-supplied pass
+# flags: every item must already be SourceRefined and must bind the exact proof,
+# cache, trust, axiom-audit, and independent-replay closure supplied here.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1, TrustManifestV1,
+    VerificationCacheKeyV1}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.tools.verify.formal_gate_collectors.{FormalGateCollectionV1}
+use compiler.tools.verify.formal_os_hardware_gate_collectors.{
+    SimpleOsSubsystemKindV1, SimpleOsSubsystemEvidenceV1,
+    collect_simpleos_vertical_slice_gate_v1}
+use verification.simpleos_capability_rights_refinement.{
+    SimpleOsCapabilityRefinementReceiptV1}
+use verification.simpleos_green_task_complete_refinement.{
+    SimpleOsGreenTaskCompleteReceiptV1}
+use verification.simpleos_green_channel_close_refinement.{
+    SimpleOsGreenChannelCloseReceiptV1}
+use verification.simpleos_shared_unmap_refinement.{
+    SimpleOsSharedUnmapReceiptV1}
+use verification.simpleos_process_wait_refinement.{
+    SimpleOsProcessWaitReceiptV1}
+use verification.simpleos_process_queue_refinement.{
+    SimpleOsProcessQueueReceiptV1}
+use verification.simpleos_dbfs_commit_refinement.{
+    SimpleOsDbfsCommitReceiptV1}
+
+pub struct SimpleOsProofClosureInputV1:
+    proof: ProofReceiptV1
+    cache_key: VerificationCacheKeyV1
+    retained_axiom_report: text
+    axiom_report_artifact_hash: text
+    trust_manifest: TrustManifestV1
+    replay: IndependentReplayClosureV1
+
+fn frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn frames_v1(values: [text]) -> text:
+    var framed: [text] = []
+    for value in values: framed.push(frame_v1(value))
+    values.len().to_string() + ":[" + framed.join("") + "]"
+
+fn common_content_v1(
+    schema: text,
+    symbol_id: text,
+    source_hash: text,
+    model_hash: text,
+    theorem_roots: [text],
+    axiom_hash: text,
+    cache_hash: text,
+    trust_hash: text,
+    proof_hash: text,
+    replay_hash: text,
+    counters: [i64],
+    status: FormalStatus,
+    diagnostic: text
+) -> text:
+    var counter_text: [text] = []
+    for counter in counters: counter_text.push(counter.to_string())
+    schema + frame_v1(symbol_id) + frame_v1(source_hash) +
+        frame_v1(model_hash) + frames_v1(theorem_roots) +
+        frame_v1(axiom_hash) + frame_v1(cache_hash) +
+        frame_v1(trust_hash) + frame_v1(proof_hash) +
+        frame_v1(replay_hash) + frames_v1(counter_text) +
+        frame_v1(status.name()) + frame_v1(diagnostic)
+
+fn evidence_v1(
+    kind: SimpleOsSubsystemKindV1,
+    symbol_id: text,
+    source_hash: text,
+    model_hash: text,
+    source_content: text,
+    expected_axiom_hash: text,
+    expected_cache_hash: text,
+    expected_trust_hash: text,
+    expected_proof_hash: text,
+    expected_replay_hash: text,
+    receipt_ready: bool,
+    receipt_status: FormalStatus,
+    receipt_diagnostic: text,
+    closure: SimpleOsProofClosureInputV1
+) -> SimpleOsSubsystemEvidenceV1:
+    var diagnostic = receipt_diagnostic
+    if diagnostic == "" and not receipt_ready:
+        diagnostic = "FV2-E-SIMPLEOS-ADAPTER: product receipt is not source-refinement ready"
+    if diagnostic == "" and expected_cache_hash != closure.cache_key.hash():
+        diagnostic = "FV2-E-SIMPLEOS-ADAPTER-CACHE: product receipt targets another cache key"
+    if diagnostic == "" and expected_axiom_hash != closure.proof.axiom_audit_hash:
+        diagnostic = "FV2-E-SIMPLEOS-ADAPTER-AXIOM: product receipt targets another axiom audit"
+    if diagnostic == "" and expected_trust_hash !=
+            sha256_text(closure.trust_manifest.canonical_text()):
+        diagnostic = "FV2-E-SIMPLEOS-ADAPTER-TRUST: product receipt targets another trust manifest"
+    if diagnostic == "" and expected_proof_hash != closure.proof.hash():
+        diagnostic = "FV2-E-SIMPLEOS-ADAPTER-PROOF: product receipt targets another proof"
+    if diagnostic == "" and expected_replay_hash != closure.replay.hash():
+        diagnostic = "FV2-E-SIMPLEOS-ADAPTER-REPLAY: product receipt targets another replay closure"
+    SimpleOsSubsystemEvidenceV1("SimpleOsSubsystemEvidence-v1", kind,
+        symbol_id, source_hash, model_hash, source_content,
+        sha256_text(source_content), closure.proof, closure.cache_key,
+        closure.retained_axiom_report, closure.axiom_report_artifact_hash,
+        closure.trust_manifest, closure.replay, receipt_status, diagnostic)
+
+pub fn collect_simpleos_product_vertical_slice_v1(
+    capability: SimpleOsCapabilityRefinementReceiptV1,
+    scheduler: SimpleOsGreenTaskCompleteReceiptV1,
+    ipc: SimpleOsGreenChannelCloseReceiptV1,
+    memory: SimpleOsSharedUnmapReceiptV1,
+    process_wait: SimpleOsProcessWaitReceiptV1,
+    process_queue: SimpleOsProcessQueueReceiptV1,
+    storage: SimpleOsDbfsCommitReceiptV1,
+    closures: [SimpleOsProofClosureInputV1]
+) -> FormalGateCollectionV1:
+    if closures.len() != 7:
+        return collect_simpleos_vertical_slice_gate_v1([])
+    var evidence: [SimpleOsSubsystemEvidenceV1] = []
+
+    val capability_content = common_content_v1(
+        "SimpleOsCapabilityRefinementReceipt-v1", capability.symbol_id,
+        capability.source_semantics_hash, capability.model_semantics_hash,
+        [capability.model_theorem_root], capability.axiom_audit_hash,
+        capability.cache_key_hash, capability.trust_manifest_hash,
+        capability.proof_receipt_hash, capability.replay_closure_hash,
+        [capability.checked_case_count, capability.counterexample_count,
+            capability.mutant_counterexample_count], capability.status,
+        capability.diagnostic)
+    evidence.push(evidence_v1(SimpleOsSubsystemKindV1.CapabilityAuthority,
+        capability.symbol_id, capability.source_semantics_hash,
+        capability.model_semantics_hash, capability_content,
+        capability.axiom_audit_hash, capability.cache_key_hash,
+        capability.trust_manifest_hash,
+        capability.proof_receipt_hash, capability.replay_closure_hash,
+        capability.permits_source_refinement(closures[0].cache_key),
+        capability.status, capability.diagnostic, closures[0]))
+
+    val scheduler_content = common_content_v1(
+        "SimpleOsGreenTaskCompleteReceipt-v1", scheduler.symbol_id,
+        scheduler.source_semantics_hash, scheduler.model_semantics_hash,
+        scheduler.theorem_roots, scheduler.axiom_audit_hash,
+        scheduler.cache_key_hash, scheduler.trust_manifest_hash,
+        scheduler.proof_receipt_hash, scheduler.replay_closure_hash,
+        [scheduler.checked_case_count, scheduler.counterexample_count,
+            scheduler.preserve_reason_mutant_counterexamples,
+            scheduler.overwrite_done_mutant_counterexamples], scheduler.status,
+        scheduler.diagnostic)
+    evidence.push(evidence_v1(SimpleOsSubsystemKindV1.SchedulerLifecycle,
+        scheduler.symbol_id, scheduler.source_semantics_hash,
+        scheduler.model_semantics_hash, scheduler_content,
+        scheduler.axiom_audit_hash, scheduler.cache_key_hash,
+        scheduler.trust_manifest_hash,
+        scheduler.proof_receipt_hash, scheduler.replay_closure_hash,
+        scheduler.permits_source_refinement(closures[1].cache_key),
+        scheduler.status, scheduler.diagnostic, closures[1]))
+
+    val ipc_content = common_content_v1(
+        "SimpleOsGreenChannelCloseReceipt-v1", ipc.symbol_id,
+        ipc.semantic_hash, ipc.model_semantics_hash, ipc.theorem_roots,
+        ipc.axiom_audit_hash, ipc.cache_key_hash, ipc.trust_manifest_hash,
+        ipc.proof_receipt_hash, ipc.replay_closure_hash,
+        [ipc.checked_case_count, ipc.counterexample_count,
+            ipc.dropped_buffer_mutant_counterexamples,
+            ipc.dropped_waiter_mutant_counterexamples,
+            ipc.idempotence_counterexamples], ipc.status, ipc.diagnostic)
+    evidence.push(evidence_v1(SimpleOsSubsystemKindV1.BoundedIpc,
+        ipc.symbol_id, ipc.semantic_hash, ipc.model_semantics_hash, ipc_content,
+        ipc.axiom_audit_hash, ipc.cache_key_hash, ipc.trust_manifest_hash,
+        ipc.proof_receipt_hash,
+        ipc.replay_closure_hash,
+        ipc.permits_source_refinement(closures[2].cache_key), ipc.status,
+        ipc.diagnostic, closures[2]))
+
+    val memory_content = common_content_v1(
+        "SimpleOsSharedUnmapReceipt-v1", memory.symbol_id,
+        memory.semantic_hash, memory.model_semantics_hash, memory.theorem_roots,
+        memory.axiom_audit_hash, memory.cache_key_hash,
+        memory.trust_manifest_hash, memory.proof_receipt_hash,
+        memory.replay_closure_hash,
+        [memory.checked_case_count, memory.counterexample_count,
+            memory.killed_mutant_count], memory.status, memory.diagnostic)
+    evidence.push(evidence_v1(SimpleOsSubsystemKindV1.SharedMemory,
+        memory.symbol_id, memory.semantic_hash, memory.model_semantics_hash,
+        memory_content, memory.axiom_audit_hash, memory.cache_key_hash,
+        memory.trust_manifest_hash,
+        memory.proof_receipt_hash, memory.replay_closure_hash,
+        memory.permits_source_refinement(closures[3].cache_key), memory.status,
+        memory.diagnostic, closures[3]))
+
+    val wait_content = common_content_v1(
+        "SimpleOsProcessWaitReceipt-v1", process_wait.symbol_id,
+        process_wait.source_semantics_hash, process_wait.model_semantics_hash,
+        [process_wait.theorem_root], process_wait.axiom_audit_hash,
+        process_wait.cache_key_hash, process_wait.trust_manifest_hash,
+        process_wait.proof_receipt_hash, process_wait.replay_closure_hash,
+        [process_wait.checked_case_count, process_wait.counterexample_count,
+            process_wait.killed_mutant_count], process_wait.status,
+        process_wait.diagnostic)
+    evidence.push(evidence_v1(SimpleOsSubsystemKindV1.ProcessWait,
+        process_wait.symbol_id, process_wait.source_semantics_hash,
+        process_wait.model_semantics_hash, wait_content,
+        process_wait.axiom_audit_hash, process_wait.cache_key_hash,
+        process_wait.trust_manifest_hash,
+        process_wait.proof_receipt_hash, process_wait.replay_closure_hash,
+        process_wait.permits_source_refinement(closures[4].cache_key),
+        process_wait.status, process_wait.diagnostic, closures[4]))
+
+    val queue_content = common_content_v1(
+        "SimpleOsProcessQueueReceipt-v1", process_queue.symbol_id,
+        process_queue.source_semantics_hash, process_queue.model_semantics_hash,
+        [process_queue.theorem_root], process_queue.axiom_audit_hash,
+        process_queue.cache_key_hash, process_queue.trust_manifest_hash,
+        process_queue.proof_receipt_hash, process_queue.replay_closure_hash,
+        [process_queue.checked_case_count, process_queue.counterexample_count,
+            process_queue.killed_mutant_count], process_queue.status,
+        process_queue.diagnostic)
+    evidence.push(evidence_v1(SimpleOsSubsystemKindV1.ProcessQueue,
+        process_queue.symbol_id, process_queue.source_semantics_hash,
+        process_queue.model_semantics_hash, queue_content,
+        process_queue.axiom_audit_hash, process_queue.cache_key_hash,
+        process_queue.trust_manifest_hash,
+        process_queue.proof_receipt_hash, process_queue.replay_closure_hash,
+        process_queue.permits_source_refinement(closures[5].cache_key),
+        process_queue.status, process_queue.diagnostic, closures[5]))
+
+    val storage_content = common_content_v1(
+        "SimpleOsDbfsCommitReceipt-v1", storage.symbol_id,
+        storage.semantic_hash, storage.model_semantics_hash,
+        storage.theorem_roots, storage.axiom_audit_hash, storage.cache_key_hash,
+        storage.trust_manifest_hash, storage.proof_receipt_hash,
+        storage.replay_closure_hash,
+        [storage.checked_case_count, storage.counterexample_count,
+            storage.early_commit_mutant_counterexamples], storage.status,
+        storage.diagnostic)
+    evidence.push(evidence_v1(SimpleOsSubsystemKindV1.CrashSafeStorage,
+        storage.symbol_id, storage.semantic_hash, storage.model_semantics_hash,
+        storage_content, storage.axiom_audit_hash, storage.cache_key_hash,
+        storage.trust_manifest_hash,
+        storage.proof_receipt_hash, storage.replay_closure_hash,
+        storage.permits_source_refinement(closures[6].cache_key), storage.status,
+        storage.diagnostic, closures[6]))
+    collect_simpleos_vertical_slice_gate_v1(evidence)

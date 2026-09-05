@@ -1,0 +1,63 @@
+# @Feature G9: Async runtime completed-result retention is bounded
+# @Description: REPRODUCING spec for
+# doc/08_tracking/bug/async_runtime_detached_completed_results_unbounded_2026-08-13.md
+#
+# `Runtime.completed` has exactly ONE reader: `block_on`, which removes its own
+# entry. A DETACHED task (plain `spawn` + `run`, never awaited) therefore left a
+# `TaskResult` in `completed` that no API could ever read or drain, growing
+# without bound for the life of the runtime.
+#
+# Measured before the fix, with 5 detached spawns followed by run():
+#   completed.len() == 5   (tasks.len() == 0 -- the tasks themselves drained fine)
+# After the fix: completed.len() == 0, while block_on still returns its value.
+#
+# These assertions run in the INTERPRETER, which is the correct engine here:
+# the defect is in pure-Simple stdlib bookkeeping (src/lib/nogc_async_mut/
+# async/runtime.spl), not in codegen, so no subprocess/engine comparison is
+# needed for this row.
+
+use std.async.runtime.{Runtime}
+use std.async.future.{Future}
+
+describe "Runtime.completed retention (detached vs awaited)":
+
+    it "drains every detached task result -- the exact 5-spawn reproducer":
+        val rt = Runtime.new()
+        var i = 0
+        while i < 5:
+            rt.spawn(Future.from_value(i))
+            i = i + 1
+        rt.run()
+        # Before the fix this was 5 and could never be drained.
+        expect(rt.completed.len()).to_equal(0)
+        # The task table itself always drained correctly; asserting it keeps the
+        # reproducer honest about WHICH map was leaking.
+        expect(rt.tasks.len()).to_equal(0)
+
+    it "block_on still collects its own result, then releases it":
+        val rt = Runtime.new()
+        val out = rt.block_on(Future.from_value(7))
+        expect(out).to_equal("7")
+        expect(rt.completed.len()).to_equal(0)
+        expect(rt.awaited.len()).to_equal(0)
+
+    it "repeated block_on calls do not accumulate entries":
+        val rt = Runtime.new()
+        var j = 0
+        while j < 5:
+            rt.block_on(Future.from_value(j))
+            j = j + 1
+        expect(rt.completed.len()).to_equal(0)
+        expect(rt.awaited.len()).to_equal(0)
+
+    it "detached and awaited tasks on the SAME runtime stay bounded together":
+        val rt = Runtime.new()
+        var k = 0
+        while k < 3:
+            rt.spawn(Future.from_value(k))
+            k = k + 1
+        val out = rt.block_on(Future.from_value(99))
+        expect(out).to_equal("99")
+        # The 3 detached results must not survive alongside the awaited one.
+        expect(rt.completed.len()).to_equal(0)
+        expect(rt.tasks.len()).to_equal(0)

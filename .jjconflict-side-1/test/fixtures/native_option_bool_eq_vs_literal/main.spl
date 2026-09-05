@@ -1,0 +1,82 @@
+# Minimal repro for the native `Option<bool>`-vs-raw-literal equality defect:
+# doc/08_tracking/bug/native_option_bool_eq_against_raw_literal_2026-08-08.md
+#
+# `make(flag)` returns `bool?` via implicit true/false coercion. Comparing
+# the result against a raw `true`/`false`/`nil` literal exercises
+# expr_dispatch.spl's `bin_is_enum_eq` gate, which requires BOTH operands to
+# resolve to the same enum id -- a raw bool literal never does, so the
+# comparison falls through to a representation-blind raw compare between the
+# boxed Option and the raw scalar.
+#
+# hit1/hit2/hit3 are rows whose correct answer is "match" (boxed Some(true)
+# == true, boxed Some(false) == false, boxed nil == nil). miss1..miss4 are
+# the rows that already agree across all three engines (interp/jit/native)
+# and are hard-asserted as a regression fence.
+fn make(flag: bool) -> bool?:
+    if flag:
+        return true
+    return false
+
+fn make_nil() -> bool?:
+    return nil
+
+fn main():
+    val t = make(true)
+    val f = make(false)
+    val n = make_nil()
+
+    # Correct answer is "match" (boxed Some(true) == true,
+    # boxed Some(false) == false, boxed nil == nil).
+    val hit1 = if t == true: "match" else: "no-match"
+    val hit2 = if f == false: "match" else: "no-match"
+    val hit3 = if n == nil: "match" else: "no-match"
+
+    # Already correct on all three engines -- hard-asserted regression fence.
+    val miss1 = if n == true: "match" else: "no-match"
+    val miss2 = if n == false: "match" else: "no-match"
+    val miss3 = if t == false: "match" else: "no-match"
+    val miss4 = if f == true: "match" else: "no-match"
+
+    print("hit1={hit1} hit2={hit2} hit3={hit3} miss1={miss1} miss2={miss2} miss3={miss3} miss4={miss4}")
+    main_implicit_tail_rows()
+
+# ---------------------------------------------------------------------------
+# Implicit-tail-return arm (added 2026-09-02 with the
+# function_lowering.spl fix). Everything above returns through an EXPLICIT
+# `return`, which lower_return_expr already boxed into the canonical Option
+# handle. A function whose body ends in a bare tail EXPRESSION took a
+# different path and handed back the raw scalar, so `imp_bool(true) == true`
+# still answered "no-match" long after the explicit form was fixed. These
+# rows are the class: the same omission applies to every scalar payload, and
+# the f64 row did not merely answer wrongly -- it failed the BUILD with
+# "unsupported LLVM value conversion from double to ptr".
+#
+# cond_tail is the over-broad-fix fence: an `if flag: 7 else: nil` tail
+# merges into a local with no recorded HIR type and is NOT in nil_locals, so
+# boxing it blind turns the None word 3 into `Some(3)` and `?? -1` prints 3.
+fn imp_bool(v: bool) -> bool?:
+    v
+
+fn imp_int(v: i64) -> i64?:
+    v
+
+fn imp_text(v: text) -> text?:
+    v
+
+fn imp_float(v: f64) -> f64?:
+    v
+
+fn cond_tail(flag: bool) -> i64?:
+    if flag:
+        7
+    else:
+        nil
+
+fn main_implicit_tail_rows():
+    val itail_bool = if imp_bool(true) == true: "match" else: "no-match"
+    val itail_int = if (imp_int(5) ?? -1) == 5: "match" else: "no-match"
+    val itail_text = if (imp_text("hi") ?? "none") == "hi": "match" else: "no-match"
+    val itail_float = if (imp_float(2.5) ?? -1.0) == 2.5: "match" else: "no-match"
+    val itail_cond_nil = if (cond_tail(false) ?? -1) == -1: "match" else: "no-match"
+    val itail_cond_some = if (cond_tail(true) ?? -1) == 7: "match" else: "no-match"
+    print("itail_bool={itail_bool} itail_int={itail_int} itail_text={itail_text} itail_float={itail_float} itail_cond_nil={itail_cond_nil} itail_cond_some={itail_cond_some}")

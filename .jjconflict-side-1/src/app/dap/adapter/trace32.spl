@@ -1,0 +1,443 @@
+# Trace32 Debug Adapter
+# Wraps Trace32Client to implement the DebugAdapter trait
+# Provides unified interface for Trace32-based debugging (Lauterbach hardware probes)
+
+use std.nogc_async_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use std.nogc_sync_mut.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
+use std.nogc_sync_mut.debug.remote.protocol.trace32.Trace32Client
+use std.nogc_sync_mut.debug.remote.types.DebugConfig
+use std.common.debug.contracts_v1.{DebugSessionId, debug_policy_development_v1}
+use std.nogc_sync_mut.debug.remote.protocol.t32_session_registry.{
+    t32_register_session, t32_close_session,
+}
+use std.nogc_sync_mut.debug.remote.protocol.t32_debug_service_adapter_v1.{
+    t32_debug_bind_session_v1, t32_debug_unbind_session_v1,
+    t32_debug_flash_v1, t32_debug_reset_v1,
+    t32_debug_authorize_dap_action_v1, t32_debug_record_dap_outcome_v1,
+}
+use std.common.types.{DurationMs}
+
+# Trace32 adapter implementing DebugAdapter trait
+class Trace32Adapter:
+    client: Option<Trace32Client>
+    config: AdapterConfig
+    attached: bool
+    capabilities: AdapterCapabilities
+    t32_session_id: text
+    resource_uri: text
+    debug_session_id: Option<DebugSessionId>
+
+impl Trace32Adapter:
+    fn _authorize_dap_action(action: text) -> Result<Nil, text>:
+        match self.debug_session_id:
+            case Some(session_id):
+                val receipt = t32_debug_authorize_dap_action_v1(session_id, action)
+                if not receipt.allowed:
+                    return Err(receipt.reason)
+            case nil: ()
+        Ok(nil)
+
+    fn _record_dap_outcome(action: text, succeeded: bool, reason: text):
+        match self.debug_session_id:
+            case Some(session_id):
+                t32_debug_record_dap_outcome_v1(session_id, action, succeeded, reason)
+            case nil: ()
+
+    fn _finish_text(action: text, result: Result<text, text>) -> Result<text, text>:
+        match result:
+            case Ok(value):
+                self._record_dap_outcome(action, true, "")
+                Ok(value)
+            case Err(reason):
+                self._record_dap_outcome(action, false, reason)
+                Err(reason)
+
+    fn _finish_i32(action: text, result: Result<i32, text>) -> Result<i32, text>:
+        match result:
+            case Ok(value):
+                self._record_dap_outcome(action, true, "")
+                Ok(value)
+            case Err(reason):
+                self._record_dap_outcome(action, false, reason)
+                Err(reason)
+
+    fn _finish_i64(action: text, result: Result<i64, text>) -> Result<i64, text>:
+        match result:
+            case Ok(value):
+                self._record_dap_outcome(action, true, "")
+                Ok(value)
+            case Err(reason):
+                self._record_dap_outcome(action, false, reason)
+                Err(reason)
+
+    fn _finish_vars(action: text, result: Result<[VarInfo], text>) -> Result<[VarInfo], text>:
+        match result:
+            case Ok(value):
+                self._record_dap_outcome(action, true, "")
+                Ok(value)
+            case Err(reason):
+                self._record_dap_outcome(action, false, reason)
+                Err(reason)
+
+    fn _finish_frames(action: text, result: Result<[FrameInfo], text>) -> Result<[FrameInfo], text>:
+        match result:
+            case Ok(value):
+                self._record_dap_outcome(action, true, "")
+                Ok(value)
+            case Err(reason):
+                self._record_dap_outcome(action, false, reason)
+                Err(reason)
+
+    fn _finish_location(action: text, result: Result<LocationInfo, text>) -> Result<LocationInfo, text>:
+        match result:
+            case Ok(value):
+                self._record_dap_outcome(action, true, "")
+                Ok(value)
+            case Err(reason):
+                self._record_dap_outcome(action, false, reason)
+                Err(reason)
+
+    fn _finish_bytes(action: text, result: Result<[i32], text>) -> Result<[i32], text>:
+        match result:
+            case Ok(value):
+                self._record_dap_outcome(action, true, "")
+                Ok(value)
+            case Err(reason):
+                self._record_dap_outcome(action, false, reason)
+                Err(reason)
+
+    fn _finish_registers(action: text, result: Result<Dict<text, i64>, text>) -> Result<Dict<text, i64>, text>:
+        match result:
+            case Ok(value):
+                self._record_dap_outcome(action, true, "")
+                Ok(value)
+            case Err(reason):
+                self._record_dap_outcome(action, false, reason)
+                Err(reason)
+
+    # Create adapter from config
+    static fn connect(config: AdapterConfig) -> Result<Trace32Adapter, text>:
+        val debug_config = DebugConfig(
+            host: config.host,
+            port: config.port,
+            target: Architecture.Arm32,
+            program: config.program,
+            options: {"backend": "trace32"}
+        )
+
+        val client = Trace32Client.connect(debug_config)?
+
+        Trace32Adapter.from_client_bound(client, config)
+
+    # Create adapter wrapping existing Trace32Client
+    static fn from_client(client: Trace32Client, config: AdapterConfig) -> Trace32Adapter:
+        Trace32Adapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers(),
+            t32_session_id: "",
+            resource_uri: "",
+            debug_session_id: nil,
+        )
+
+    # Production factory: the existing registry remains the private TRACE32
+    # handle owner while DebugServiceV1 owns the public session and policy.
+    static fn from_client_bound(client: Trace32Client, config: AdapterConfig) -> Result<Trace32Adapter, text>:
+        val t32_session_id = "dap-trace32-{config.host}-{config.port}"
+        val resource_uri = "t32://{config.host}:{config.port}/target"
+        t32_register_session(t32_session_id, config.host, config.port, "", "riscv32", client)
+        val binding = t32_debug_bind_session_v1(
+            t32_session_id,
+            resource_uri,
+            config.program,
+            debug_policy_development_v1(),
+        )
+        val debug_session_id = match binding:
+            case Ok(value): value
+            case Err(reason):
+                t32_close_session(t32_session_id)
+                return Err(reason)
+        Ok(Trace32Adapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers(),
+            t32_session_id: t32_session_id,
+            resource_uri: resource_uri,
+            debug_session_id: Some(debug_session_id),
+        ))
+
+    # Get capabilities
+    fn get_capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- DebugAdapter trait implementation ---
+
+    fn name() -> text:
+        "trace32"
+
+    fn is_attached() -> bool:
+        self.attached
+
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        self._authorize_dap_action("attach")?
+        val result: Result<text, text> = match self.client:
+            Some(client):
+                if program.len() > 0:
+                    match self.debug_session_id:
+                        case Some(_): t32_debug_flash_v1(self.t32_session_id, self.resource_uri, program)?
+                        case nil: client.flash_program(program)?
+                self.attached = true
+                Ok("attached via Trace32")
+            nil:
+                Err("Trace32 client not connected")
+        self._finish_text("attach", result)
+
+    fn detach() -> Result<text, text>:
+        if self.debug_session_id != nil:
+            t32_debug_unbind_session_v1(self.t32_session_id, self.resource_uri)?
+            t32_close_session(self.t32_session_id)?
+            self.attached = false
+            return Ok("detached from Trace32")
+        match self.client:
+            Some(client):
+                client.disconnect()
+                self.attached = false
+                Ok("detached from Trace32")
+            nil:
+                Err("Trace32 client not connected")
+
+    # --- Execution Control ---
+
+    fn halt() -> Result<text, text>:
+        self._authorize_dap_action("halt")?
+        self._finish_text("halt", match self.client:
+            Some(client): client.halt()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn resume() -> Result<text, text>:
+        self._authorize_dap_action("resume")?
+        self._finish_text("resume", match self.client:
+            Some(client): client.resume()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn single_step() -> Result<text, text>:
+        self._authorize_dap_action("single_step")?
+        self._finish_text("single_step", match self.client:
+            Some(client): client.single_step()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn step_over() -> Result<text, text>:
+        self._authorize_dap_action("step_over")?
+        self._finish_text("step_over", match self.client:
+            Some(client): client.step_over()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn step_out() -> Result<text, text>:
+        self._authorize_dap_action("step_out")?
+        self._finish_text("step_out", match self.client:
+            Some(client): client.step_out()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn reverse_step() -> Result<text, text>:
+        Err("reverse step not supported by this adapter")
+
+    fn reverse_continue() -> Result<text, text>:
+        Err("reverse continue not supported by this adapter")
+
+    fn reset() -> Result<text, text>:
+        if self.debug_session_id != nil:
+            return t32_debug_reset_v1(self.t32_session_id, self.resource_uri)
+        match self.client:
+            Some(client): client.system_reset()
+            nil: Err("Trace32 client not connected")
+
+    # --- Breakpoints ---
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        self._authorize_dap_action("breakpoint.set")?
+        self._finish_i32("breakpoint.set", match self.client:
+            Some(client):
+                val location = "{file}\\{line}"
+                client.set_breakpoint(location)
+            nil:
+                Err("Trace32 client not connected")
+        )
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        self._authorize_dap_action("breakpoint.set_address")?
+        self._finish_i32("breakpoint.set_address", match self.client:
+            Some(client): client.set_breakpoint_at_addr(addr)
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        self._authorize_dap_action("breakpoint.delete")?
+        self._finish_text("breakpoint.delete", match self.client:
+            Some(client): client.delete_breakpoint(id)
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        self._authorize_dap_action("watchpoint.set")?
+        self._finish_i32("watchpoint.set", match self.client:
+            Some(client): client.set_watchpoint(expr, access)
+            nil: Err("Trace32 client not connected")
+        )
+
+    # --- Variable Inspection (returns same VarInfo as GDB) ---
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        self._authorize_dap_action("locals.read")?
+        self._finish_vars("locals.read", match self.client:
+            Some(client): client.read_locals()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        self._authorize_dap_action("arguments.read")?
+        self._finish_vars("arguments.read", match self.client:
+            Some(client): client.read_arguments()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        self._authorize_dap_action("globals.read")?
+        self._finish_vars("globals.read", match self.client:
+            Some(client): client.read_globals()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        self._authorize_dap_action("evaluate")?
+        self._finish_text("evaluate", match self.client:
+            Some(client): client.evaluate(expr)
+            nil: Err("Trace32 client not connected")
+        )
+
+    # --- Stack Inspection (returns same FrameInfo as GDB) ---
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        self._authorize_dap_action("stack.trace")?
+        self._finish_frames("stack.trace", match self.client:
+            Some(client): client.stack_trace()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn stack_depth() -> Result<i32, text>:
+        self._authorize_dap_action("stack.depth")?
+        self._finish_i32("stack.depth", match self.client:
+            Some(client): client.stack_depth()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        self._authorize_dap_action("frame.select")?
+        self._finish_text("frame.select", match self.client:
+            Some(client): client.select_frame(level)
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn current_location() -> Result<LocationInfo, text>:
+        self._authorize_dap_action("location.current")?
+        self._finish_location("location.current", match self.client:
+            Some(client): client.current_location()
+            nil: Err("Trace32 client not connected")
+        )
+
+    # --- Memory Access (returns same [i32] as GDB) ---
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        self._authorize_dap_action("memory.read")?
+        self._finish_bytes("memory.read", match self.client:
+            Some(client): client.read_memory(addr, size)
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        self._authorize_dap_action("memory.write")?
+        self._finish_text("memory.write", match self.client:
+            Some(client): client.write_memory(addr, data)
+            nil: Err("Trace32 client not connected")
+        )
+
+    # --- Register Access (returns same types as GDB) ---
+
+    fn read_register(name: text) -> Result<i64, text>:
+        self._authorize_dap_action("register.read")?
+        self._finish_i64("register.read", match self.client:
+            Some(client): client.read_register(name)
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        self._authorize_dap_action("register.read_all")?
+        self._finish_registers("register.read_all", match self.client:
+            Some(client): client.read_all_registers()
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        self._authorize_dap_action("register.write")?
+        self._finish_text("register.write", match self.client:
+            Some(client): client.write_register(name, value)
+            nil: Err("Trace32 client not connected")
+        )
+
+    # --- Context Management ---
+
+    fn clear_context() -> Result<text, text>:
+        # Hardware target - no interpreter context to clear
+        Ok("context clearing not supported (hardware target)")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        if self.debug_session_id != nil:
+            t32_debug_flash_v1(self.t32_session_id, self.resource_uri, program)?
+            t32_debug_reset_v1(self.t32_session_id, self.resource_uri)?
+            return Ok("program reloaded via Trace32")
+        match self.client:
+            Some(client):
+                client.flash_program(program)?
+                client.system_reset()?
+                Ok("program reloaded via Trace32")
+            nil:
+                Err("Trace32 client not connected")
+
+    # Rich breakpoint — delegates to basic set_breakpoint
+    fn set_breakpoint_rich(file: text, line: i32, condition: Option<text>,
+                           hit_condition: Option<text>, log_message: Option<text>) -> Result<i32, text>:
+        self.set_breakpoint(file, line)
+
+    fn list_children(var_ref: text) -> Result<[VarInfo], text>:
+        Err("nested variable expansion not supported")
+
+    fn capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- Trace32-Unique Operations ---
+
+    fn trace_capture(duration_ms: i32) -> Result<text, text>:
+        self._authorize_dap_action("trace.capture")?
+        self._finish_text("trace.capture", match self.client:
+            Some(client): client.trace_capture(DurationMs(value: duration_ms))
+            nil: Err("Trace32 client not connected")
+        )
+
+    fn coverage_collect(module: text) -> Result<text, text>:
+        self._authorize_dap_action("coverage.collect")?
+        self._finish_text("coverage.collect", match self.client:
+            Some(client): client.coverage_collect(module)
+            nil: Err("Trace32 client not connected")
+        )

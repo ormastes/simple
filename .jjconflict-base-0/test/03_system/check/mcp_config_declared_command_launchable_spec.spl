@@ -1,0 +1,157 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: verify that every path-form stdio server declared in the project MCP
+configs actually launches on this platform and answers a real `initialize`.
+Audience: maintainers of `.mcp.json` and of the `bin/*_mcp_server` wrappers.
+
+# Declared MCP Command Must Actually Launch
+
+`.mcp.json` declares `"command": "bin/simple_mcp_server"` — a forward-slash,
+extensionless, repo-relative path. Whether that string launches on Windows
+depends entirely on HOW the client spawns it, and the mechanisms disagree
+(measured 2026-09-01, Windows 11, node v20.12.1 `spawnSync`):
+
+- Claude Code resolves the launcher itself and connects; the PATHEXT sibling
+  `bin\\simple_mcp_server.cmd` is what actually answers.
+- A cmd.exe-mediated spawn (`shell: true`, or node spawning a `.cmd`) rejects
+  ANY forward-slash relative path with rc=1 and
+  `'bin' is not recognized as an internal or external command`.
+
+No single string satisfies every mechanism: only `bin\\simple_mcp_server.cmd`
+works under both node spawn modes, and that spelling is ENOENT on POSIX. So
+`.mcp.json` keeps the forward-slash form (valid for Claude Code and for POSIX)
+and `config/mcp/win/.mcp.json` carries the backslash form for cmd.exe-spawning
+clients.
+
+Liveness proves nothing here: this exact server was previously a perfect silent
+green (rc=0, 0 bytes stdout, 0 bytes stderr) for two independent reasons. The
+guard therefore asserts CONTENT — a `serverInfo` object carrying a non-empty
+`name` — not an exit status.
+
+## Overview
+
+`scripts/check/check-mcp-config-launchable.shs` parses an MCP config's
+`mcpServers` block, resolves each path-form `command` the way a client must
+(Windows: PATHEXT `.cmd`/`.bat`/`.exe` sibling, else the literal; POSIX: the
+literal, which must be executable), spawns it, writes one real `initialize`
+request, and requires a well-formed `serverInfo` back. Commands with no path
+separator (e.g. `bash`) are SKIPped as external PATH launchers and do not count
+toward the checked total, so a config of only those is ERROR, not a vacuous
+pass.
+
+## Requirements
+
+**Requirements:** N/A
+
+- REQ-MCP-LAUNCH-001: The guard's embedded selftest passes on its own fixtures,
+  including a silent-green launcher that must FAIL despite exiting 0.
+- REQ-MCP-LAUNCH-002: Every path-form server declared in `.mcp.json` resolves
+  and answers `initialize` with a `serverInfo` on this platform.
+- REQ-MCP-LAUNCH-003: The same holds for `config/mcp/win/.mcp.json`, which
+  declares the cmd.exe-safe backslash form.
+- REQ-MCP-LAUNCH-004: `.mcp.json` still declares the cross-platform
+  forward-slash form, and the LSP entry still carries the load-bearing
+  `SIMPLE_EXECUTION_MODE=interpreter` env (dropping it regressed the
+  `lsp_symbols` call from 3.68s to 7.96s).
+
+## Plan
+
+**Plan:** N/A — see the `_info` string in `.mcp.json`, which records the measured per-client spawn matrix this spec pins.
+
+1. Run the guard's `--selftest` and confirm all fixtures agree.
+2. Run the guard over `.mcp.json` and require a PASS verdict naming a non-zero
+   count of servers that answered `initialize`.
+3. Run the guard over `config/mcp/win/.mcp.json` and require the same.
+4. Read both configs as text and assert the declared command spellings and the
+   load-bearing env have not drifted.
+
+## Design
+
+**Design:** doc/04_architecture/compiler/misc/file_class_structure.md
+
+The guard is POSIX `sh` invoked as an external process via `process_run`,
+exactly like every other `scripts/check/*.shs` contract spec in this directory
+— this spec asserts on real process exit codes and real stdout, never on
+source text alone for the launch claims.
+
+## Examples
+
+```sh
+bin/simple test test/03_system/check/mcp_config_declared_command_launchable_spec.spl --clean
+```
+"""
+
+# @tag: system, check, mcp, config, windows, launch
+
+use std.spec.step
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+describe "check-mcp-config-launchable guard":
+
+    it "passes its own embedded selftest, including the silent-green fixture":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-MCP-LAUNCH-001
+        step("passes its own embedded selftest, including the silent-green fixture")
+        val (stdout, _stderr, code) = process_run("sh", ["scripts/check/check-mcp-config-launchable.shs", "--selftest"])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("selftest 5/5 fixtures correct")
+        expect(stdout).to_contain("selftest OK   silent-green launcher (expected FAIL)")
+        expect(stdout).to_contain("selftest OK   unresolvable command (expected FAIL)")
+        expect(stdout).to_contain("selftest OK   empty config (expected ERROR)")
+
+    it "launches every path-form server declared in .mcp.json and gets serverInfo":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-MCP-LAUNCH-002
+        step("launches every path-form server declared in .mcp.json and gets serverInfo")
+        val (stdout, _stderr, code) = process_run("sh", ["scripts/check/check-mcp-config-launchable.shs", ".mcp.json"])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("answered initialize with serverInfo")
+        expect(stdout).to_contain("serverInfo.name=simple-mcp-full")
+        expect(stdout).to_contain("serverInfo.name=simple-lsp-mcp")
+        step("a vacuous run reports ERROR, so a PASS necessarily checked servers")
+        expect(stdout).to_not_contain("nothing was checked")
+
+    it "launches every path-form server declared in the Windows config":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-MCP-LAUNCH-003
+        step("launches every path-form server declared in the Windows config")
+        val (stdout, _stderr, code) = process_run("sh", ["scripts/check/check-mcp-config-launchable.shs", "config/mcp/win/.mcp.json"])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("answered initialize with serverInfo")
+        expect(stdout).to_not_contain("nothing was checked")
+
+describe "declared MCP command spellings":
+
+    it "keeps the cross-platform forward-slash form in .mcp.json":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-MCP-LAUNCH-004
+        step("keeps the cross-platform forward-slash form in .mcp.json")
+        val config = file_read(".mcp.json")
+        expect(config).to_contain("\"command\": \"bin/simple_mcp_server\"")
+        expect(config).to_contain("\"command\": \"bin/simple_lsp_mcp_server\"")
+
+    it "keeps SIMPLE_EXECUTION_MODE=interpreter on the LSP entry":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-MCP-LAUNCH-004
+        step("keeps SIMPLE_EXECUTION_MODE=interpreter on the LSP entry")
+        val config = file_read(".mcp.json")
+        expect(config).to_contain("\"SIMPLE_EXECUTION_MODE\": \"interpreter\"")
+        step("the Windows wrapper defaults the same value, so the two agree")
+        val wrapper = file_read("bin/simple_lsp_mcp_server.cmd")
+        expect(wrapper).to_contain("set \"SIMPLE_EXECUTION_MODE=interpreter\"")
+
+    it "keeps the cmd.exe-safe backslash form in the Windows config":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-MCP-LAUNCH-003
+        step("keeps the cmd.exe-safe backslash form in the Windows config")
+        val config = file_read("config/mcp/win/.mcp.json")
+        expect(config).to_contain("bin\\\\simple_mcp_server.cmd")
+        expect(config).to_contain("bin\\\\simple_lsp_mcp_server.cmd")
+        step("a forward-slash relative path is rc=1 under cmd.exe, so it must not appear here")
+        expect(config).to_not_contain("\"command\": \"bin/")

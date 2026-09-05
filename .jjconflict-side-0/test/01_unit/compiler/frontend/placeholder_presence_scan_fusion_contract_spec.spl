@@ -1,0 +1,46 @@
+"""
+Placeholder-presence scan fusion contract.
+
+The string-interpolation pass already walks every expression node, including
+nodes appended by interpolation fragment parsing. It owns the exact boolean
+needed by the following placeholder pass, so the driver must not immediately
+repeat a whole-arena discovery scan.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "placeholder presence scan fusion":
+    it "returns the placeholder receipt from the interpolation arena walk":
+        val source = file_read("src/compiler/10.frontend/core/string_interpolation_expand.spl")
+        val begin = source.index_of("fn expand_string_interpolations_with_placeholder_receipt")
+        val finish = source.index_of("fn expand_string_interpolations(start_expr:")
+        expect(begin >= 0 and finish > begin).to_equal(true)
+        val body = source.substring(begin, finish)
+        expect(body).to_contain("-> bool")
+        expect(body).to_contain("not has_placeholder_ident and tag == EXPR_IDENT and placeholder_ident_name(expr_get_str(idx))")
+        expect(body).to_contain("has_placeholder_ident = true")
+        expect(body).to_contain("has_placeholder_ident")
+
+    it "uses the receipt without a second module-wide discovery scan":
+        val source = file_read("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+        val begin = source.index_of("pub fn parse_and_build_module_scoped")
+        val finish = source.index_of("fn parse_and_build_module(source:")
+        expect(begin >= 0 and finish > begin).to_equal(true)
+        val body = source.substring(begin, finish)
+        expect(body.count("expand_string_interpolations_with_placeholder_receipt(0)")).to_equal(1)
+        expect(body.count("transform_placeholder_call_args_after_interpolation_known_present()")).to_equal(1)
+        expect(body.count("transform_placeholder_call_args_after_interpolation()")).to_equal(0)
+
+    it "keeps the compatibility entry point and exact name predicate":
+        val source = file_read("src/compiler/10.frontend/desugar/placeholder_lambda.spl")
+        expect(source).to_contain("fn placeholder_ident_name(name: text) -> bool:")
+        expect(source).to_contain("name == \"_\" or is_numbered_placeholder(name)")
+        expect(source).to_contain("fn transform_placeholder_call_args_after_interpolation():")
+        expect(source).to_contain("transform_placeholder_call_args_after_interpolation_known_present()")
+        val begin = source.index_of("fn transform_placeholder_call_args_after_interpolation_known_present():")
+        val finish = source.index_of("# Build the marks array", begin)
+        expect(begin >= 0 and finish > begin).to_equal(true)
+        val owner_body = source.substring(begin, finish)
+        expect(owner_body.count("val initial_expr_count = expr_tag.len()")).to_equal(1)
+        expect(owner_body.count("expr_count()")).to_equal(0)

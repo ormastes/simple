@@ -1,0 +1,55 @@
+#![allow(primitive_api, unnamed_duplicate_typed_args)]
+@allow(primitive_api, unnamed_duplicate_typed_args)
+"""Agent profile lookup and structured room-entry announcements."""
+
+use app.llm_caret.messaging.domain.model.{AgentProfile, AgentStatus, MessageOrigin, RoomMessage, messaging_id}
+
+struct ProfileLookup:
+    found: bool
+    error: text
+    profile: AgentProfile
+
+fn _empty_profile() -> AgentProfile:
+    AgentProfile(agent_id: messaging_id("agent", "invalid"), display_name: "", aliases: [], provider: "",
+        role_summary: "", capabilities: [], current_task_id: "", status: AgentStatus.Offline,
+        owner_identity_id: "", room_ids: [], last_activity_at: 0)
+
+fn _status_text(status: AgentStatus) -> text:
+    match status:
+        case AgentStatus.Offline: "offline"
+        case AgentStatus.Idle: "idle"
+        case AgentStatus.Queued: "queued"
+        case AgentStatus.Running: "running"
+        case AgentStatus.WaitingInput: "waiting_input"
+        case AgentStatus.Blocked: "blocked"
+        case AgentStatus.Completed: "completed"
+        case AgentStatus.Failed: "failed"
+        case AgentStatus.Stopped: "stopped"
+
+pub fn find_agent_profile(profiles: [AgentProfile], agent_or_alias: text) -> ProfileLookup:
+    val needle = agent_or_alias.trim().lower()
+    for profile in profiles:
+        if profile.agent_id.value.lower() == needle or profile.display_name.lower() == needle:
+            return ProfileLookup(found: true, error: "", profile: profile)
+        for alias in profile.aliases:
+            if alias.lower() == needle:
+                return ProfileLookup(found: true, error: "", profile: profile)
+    ProfileLookup(found: false, error: "profile_not_found", profile: _empty_profile())
+
+pub fn profile_summary(profile: AgentProfile) -> text:
+    val task = if profile.current_task_id == "": "none" else: profile.current_task_id
+    "{profile.display_name}\nRole: {profile.role_summary}\nProvider: {profile.provider}\nState: {_status_text(profile.status)}\nCurrent task: {task}"
+
+pub fn agent_join_announcement(profile: AgentProfile, workspace_id: text, room_id: text,
+        message_id: text, room_seq: i64, created_at: i64) -> RoomMessage:
+    val capabilities = if profile.capabilities.len() == 0: "none" else: profile.capabilities.join(", ")
+    val task = if profile.current_task_id == "": "none" else: profile.current_task_id
+    val body = "{profile.display_name} joined\nRole: {profile.role_summary}\nCapabilities: {capabilities}\nHandler: agent\nCurrent task: {task}"
+    RoomMessage(message_id: messaging_id("message", message_id), workspace_id: messaging_id("workspace", workspace_id),
+        room_id: messaging_id("room", room_id), room_seq: room_seq, thread_root_id: "", reply_to_id: "",
+        sender_identity_id: messaging_id("identity", profile.owner_identity_id), sender_agent_id: profile.agent_id.value,
+        origin: MessageOrigin.System, body: body, mentions: [], command: "", audience: [], external_ref: "",
+        correlation_id: "join:" + profile.agent_id.value, causation_id: "", hop_count: 0,
+        created_at: created_at, edited_at: 0)
+
+export ProfileLookup, find_agent_profile, profile_summary, agent_join_announcement

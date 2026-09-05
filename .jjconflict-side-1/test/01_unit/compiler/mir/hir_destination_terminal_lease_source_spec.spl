@@ -1,0 +1,48 @@
+use std.spec.*
+use std.io.*
+
+describe "destination HIR terminal lease source contract":
+    it "retains READ authority after MIR and releases only on terminal success":
+        val lifetime = read_file(
+            "src/compiler/50.mir/_MirLowering/hir_destination_module_lifetime.spl")
+        val lowering = read_file(
+            "src/compiler/50.mir/_MirLowering/bootstrap_globals.spl")
+        val driver = read_file(
+            "src/compiler/80.driver/driver_orchestration.spl")
+
+        expect(lifetime).to_contain("var _mir_destination_compile_lease_slot: i64 = -1")
+        expect(lifetime).to_contain("fn mir_destination_compile_lease_begin() -> bool")
+        expect(lifetime).to_contain("fn mir_destination_compile_lease_release_terminal_success() -> bool")
+        expect(lifetime).to_contain("hir_destination_registry_release_terminal(slot, generation")
+        expect(lowering).to_contain("mir_destination_compile_lease_begin()")
+        expect(lowering).not_to_contain("mir_destination_module_release_after_success")
+        expect(driver).to_contain("if not result.is_success(): return result")
+        expect(driver).to_contain("mir_destination_compile_lease_release_terminal_success()")
+        expect(driver).to_contain("destination HIR terminal lease release failed")
+        expect(driver.index_of("if not result.is_success(): return result")).to_be_less_than(
+            driver.index_of("mir_destination_compile_lease_release_terminal_success()"))
+        expect(driver).to_contain("_driver_finish_destination_graph_compile(self.process_sdn())")
+        expect(driver).to_contain("_driver_finish_destination_graph_compile(self.interpret())")
+        expect(driver).to_contain("self.jit_compile_and_run())")
+        expect(driver).to_contain("_driver_finish_destination_graph_compile(self.aot_compile())")
+        expect(driver).to_contain("_driver_finish_destination_graph_compile(self.execute_smf())")
+        expect(driver).to_contain("self.compile_to_vhdl(self.ctx.options.output_file ?? \"a.out\"))")
+
+    it "uses scalar lease state without transporting a graph aggregate":
+        val lifetime = read_file(
+            "src/compiler/50.mir/_MirLowering/hir_destination_module_lifetime.spl")
+        expect(lifetime).to_contain("_mir_destination_compile_lease_generation")
+        expect(lifetime).to_contain("_mir_destination_compile_lease_module_count")
+        expect(lifetime).to_contain("_mir_destination_compile_lease_function_count")
+        expect(lifetime).not_to_contain("var _mir_destination_compile_graph")
+
+    it "uses a failure-atomic registry commit rather than a token prefix walk":
+        val graph = read_file(
+            "src/compiler/20.hir/hir_lowering/hir_destination_graph.spl")
+        val registry = read_file(
+            "src/compiler/20.hir/hir_lowering/hir_destination_registry.spl")
+        expect(graph).to_contain("me release_all_functions_terminal(generation: i64")
+        expect(graph).to_contain("self.function_token[function_index] != token")
+        expect(graph).to_contain("self.active_function_count = 0")
+        expect(registry).to_contain("pub fn hir_destination_registry_release_terminal")
+        expect(registry).to_contain("release_all_functions_terminal(")

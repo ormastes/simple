@@ -1,0 +1,55 @@
+# Focused Milestone 4 evidence for the checked dynamic provider lease.
+
+use std.spec
+use std.spec.step
+use std.fs.{read_file}
+use compiler.backend_plugin.dynamic_loader.*
+
+val DYNAMIC_LOADER_SOURCE =
+    "src/compiler/70.backend/backend_plugin/dynamic_loader.spl"
+
+describe "dynamic backend provider library lease":
+    it "resolves only the exact v1 entry symbol through canonical DynLib":
+        step("inspect the checked load and symbol-resolution boundary")
+        val source = read_file(DYNAMIC_LOADER_SOURCE)
+        expect(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1).to_equal(
+            "simple_backend_plugin_v1"
+        )
+        expect(source).to_contain("use std.sffi.dynamic.")
+        expect(source).to_contain("DynLib")
+        expect(source).to_contain("DynLib.load_checked(provider_path)")
+        expect(source).to_contain(
+            "library.sym_checked(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)"
+        )
+        expect(source.contains("extern fn")).to_be(false)
+        expect(source.contains(".call0(")).to_be(false)
+        expect(source.contains(".call_n(")).to_be(false)
+        expect(source.contains("spl_wffi_call")).to_be(false)
+
+    it "fails closed and closes the library when the entry symbol is missing":
+        step("inspect missing-symbol cleanup before returning the typed error")
+        val source = read_file(DYNAMIC_LOADER_SOURCE)
+        val missing_branch = source.split("case Err(detail):")[2]
+        expect(missing_branch).to_contain("library.close()")
+        expect(missing_branch).to_contain(
+            "DynamicBackendPluginLoadError.MissingSymbol"
+        )
+
+    it "retains the raw address only as a lease for the typed bridge":
+        step("keep raw invocation out of the Simple lease owner")
+        val source = read_file(DYNAMIC_LOADER_SOURCE)
+        val empty_path = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease("")
+        val empty_path_code = match empty_path:
+            case Err(error): error.code()
+            case Ok(_): "ok"
+        expect(empty_path_code).to_equal("BACKEND_PLUGIN_LOAD_FAILED")
+        expect(source).to_contain("Ok(true)")
+        expect(source).to_contain("typed boxed-byte runtime bridge")
+        val unsupported = DynamicBackendPluginLoadError.Unsupported(
+            "typed descriptor ABI is unavailable"
+        )
+        expect(unsupported.code()).to_equal(
+            "BACKEND_PLUGIN_DYNAMIC_ABI_UNSUPPORTED"
+        )
+        expect(source.contains("admit_backend_plugin_descriptor(")).to_be(false)

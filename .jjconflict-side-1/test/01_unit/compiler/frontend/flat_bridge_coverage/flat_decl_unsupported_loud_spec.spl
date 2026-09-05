@@ -1,0 +1,48 @@
+"""
+# Unsupported flat DECL kinds must be reported loudly, never dropped silently
+
+Lane C2 (flat-AST bridge transition census), extending
+`doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md`.
+
+The census of `module_assembly.spl :: flat_ast_to_module`'s declaration loop
+found 13 dispatch arms against 17 `DECL_*` tags -- and, unlike
+`convert_flat_expr` / `convert_flat_stmt`, **no `else:` branch at all**. Any
+tag with no arm made the chain simply run off the end: the whole declaration
+was dropped from the resulting `ParserModule` with no diagnostic anywhere.
+That is strictly worse than the `NilLit` catch-all this bug record is about,
+because a dropped declaration leaves no node behind to notice.
+
+Three tags reach that hole from ORDINARY source text:
+`DECL_CE` (11), `DECL_LAZY_VAL` (12) and `DECL_CLI` (13). This spec pins that
+each now raises the bridge's `unhandled decl node kind` diagnostic through the
+parser's real error channel. It deliberately asserts the DIAGNOSTIC, not a
+successful conversion -- these tags are honestly `Unsupported` in
+`spec/compiler_schema/transitions/flat_decl_to_ast_decl.sdn`; the property
+being pinned is loud-not-silent.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_get_errors}
+
+fn bridge_decl_diag(src: text, name: text) -> bool:
+    val parsed = parse_full_frontend(src, "testdata/" + name + ".spl", name, Logger(level: 0))
+    val errs = parser_get_errors()
+    var found = false
+    var i = 0
+    while i < errs.len():
+        if errs[i].contains("flat AST bridge: unhandled decl node kind"):
+            found = true
+        i = i + 1
+    found
+
+describe "unsupported flat decl kinds raise a loud bridge diagnostic":
+    it "reports `lazy val` (DECL_LAZY_VAL, tag 12) instead of dropping it":
+        assert_true(bridge_decl_diag("lazy val g = 1\n", "fixture_decl_lazy_val"))
+
+    it "reports a `cli` declaration (DECL_CLI, tag 13) instead of dropping it":
+        assert_true(bridge_decl_diag("cli app:\n    flag verbose: bool\n", "fixture_decl_cli"))
+
+    it "does NOT fire on an ordinary fn declaration -- control, so the spec is not vacuous":
+        assert_false(bridge_decl_diag("fn boot(w: i64) -> i64:\n    w\n", "fixture_decl_control"))

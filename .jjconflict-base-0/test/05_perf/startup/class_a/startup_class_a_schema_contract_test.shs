@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)"
+cd "$ROOT_DIR"
+
+HARNESS="scripts/check/check-startup-class-a-matrix.shs"
+FIXTURE_DIR="test/05_perf/startup/class_a/fixtures"
+
+for fixture in \
+    class_a_simple.spl class_a.c class_a.rs class_a.go class_a.py class_a.js ClassAStartupFixture.java
+do
+    test -f "$FIXTURE_DIR/$fixture" || {
+        echo "schema_contract=false"
+        echo "error=missing-fixture-$fixture"
+        exit 1
+    }
+done
+
+output="$(sh "$HARNESS" --schema-selftest)"
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_valid=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_fallback_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_sample_floor_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_budget_policy_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_budget_p50_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_budget_p95_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_budget_rss_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_order_seed_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_order_position_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_missing_raw_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_percentile_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_max_rss_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_hash_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_selfhost_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_startup_class_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_ratio_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_rustup_identity_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_rust_host_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_selftest_tool_version_negative_control=true'
+printf '%s\n' "$output" | grep -Fqx 'schema_languages=simple_native,c,rust,go,python,bun,java'
+printf '%s\n' "$output" | grep -Fqx 'schema_budget_policy=simple-vs-c-v2-p50-2000-p95-2000-rss-4000'
+printf '%s\n' "$output" | grep -Fqx 'schema_budgets_milli=2000,2000,4000'
+printf '%s\n' "$output" | grep -Fqx 'schema_bound_tools=time,timeout,date,sha256sum,sort,awk'
+printf '%s\n' "$output" | grep -Fqx 'schema_rust_identity=toolchain,host,rustc-vV'
+printf '%s\n' "$output" | grep -Fqx 'PASS — Class A v2 schema selftest: 1 positive and 18 biting negative controls'
+
+grep -Fq 'SCHEMA="simple-startup-class-a-v2"' "$HARNESS"
+grep -Fq '[ "$SAMPLES" -ge 7 ]' "$HARNESS"
+grep -Fq 'actual != requested' "$HARNESS"
+grep -Fq 'fallback != "false"' "$HARNESS"
+grep -Fq 'receipt ~ /^unavailable:/' "$HARNESS"
+grep -Fq 'receipt ~ /^rejected:/' "$HARNESS"
+grep -Fq 'if (NF != 30' "$HARNESS"
+grep -Fq 'fixed_p50=2000; fixed_p95=2000; fixed_rss=4000' "$HARNESS"
+grep -Fq 'seed_mod(meta["order_seed"], measured_count)' "$HARNESS"
+grep -Fq 'BOOTSTRAP_STAGE3_FACADE_PATH="$STAGE3_FACADE"' "$HARNESS"
+grep -Fq '. "$BOOTSTRAP_STAGE3_FACADE_PATH"' "$HARNESS"
+grep -Fq 'rustc_vv_path=%s' "$HARNESS"
+grep -Fq 'rustup_toolchain=%s' "$HARNESS"
+grep -Fq 'rustup_host=%s' "$HARNESS"
+grep -Fq 'tool_time_path=%s' "$HARNESS"
+grep -Fq 'tool_awk_version=%s' "$HARNESS"
+
+set +e
+mutation_output="$(CLASS_A_P50_BUDGET_MILLI=2001 sh "$HARNESS" --schema-selftest 2>&1)"
+mutation_rc=$?
+set -e
+test "$mutation_rc" -eq 2
+printf '%s\n' "$mutation_output" | grep -Fqx \
+    'ERROR — nothing was checked: Class A v2 budgets are schema-pinned and immutable'
+
+echo "schema_contract=true"
+echo "languages=simple_native,c,rust,go,python,bun,java"
+echo "samples_minimum=7"
+echo "checksum=20260819"

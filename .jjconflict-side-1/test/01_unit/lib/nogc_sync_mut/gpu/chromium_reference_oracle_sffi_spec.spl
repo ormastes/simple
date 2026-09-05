@@ -1,0 +1,61 @@
+use std.spec
+use std.nogc_sync_mut.gpu.chromium_reference_oracle_sffi.{
+    ChromiumOracleAbi, ChromiumOracleLoadRequest, ChromiumOracleResolvedSymbols,
+    ChromiumOracleLibraryProbe, ChromiumOracleGpuReceipt,
+    chromium_oracle_validate_library_probe, chromium_oracle_gpu_receipt_valid,
+}
+
+fn request() -> ChromiumOracleLoadRequest:
+    ChromiumOracleLoadRequest(
+        library_path: "/test/libsimple_chromium_primitive_oracle.so",
+        manifest_sha256: "sha256-fixture", expected_abi_version: 1,
+        required_symbols: ["simple_chromium_oracle_abi_version", "simple_chromium_oracle_create",
+            "simple_chromium_oracle_run_json_into", "simple_chromium_oracle_last_error_into",
+            "simple_chromium_oracle_destroy"],
+        max_request_bytes: 1048576, max_response_bytes: 4194304, test_only: true,
+    )
+
+fn probe() -> ChromiumOracleLibraryProbe:
+    ChromiumOracleLibraryProbe(
+        library_handle: 41, manifest_sha256: "sha256-fixture",
+        abi: ChromiumOracleAbi(version: 1, bridge_id: "libsimple_chromium_primitive_oracle", chromium_revision: "pinned"),
+        symbols: ChromiumOracleResolvedSymbols(abi_version: 1, create: 2, run_json_into: 3, last_error_into: 4, destroy: 5),
+    )
+
+describe "Chromium primitive oracle SFFI boundary":
+    it "accepts only the complete pinned ABI v1 probe":
+        val result = chromium_oracle_validate_library_probe(request(), probe())
+        expect(result.ok).to_equal(true)
+        expect(result.status).to_equal("ok")
+
+    it "classifies a missing symbol before creating a session":
+        var missing = probe()
+        missing.symbols.run_json_into = 0
+        val result = chromium_oracle_validate_library_probe(request(), missing)
+        expect(result.ok).to_equal(false)
+        expect(result.status).to_equal("symbol-missing")
+
+    it "rejects ABI manifest and production-use mismatches":
+        var wrong_abi = probe()
+        wrong_abi.abi.version = 2
+        expect(chromium_oracle_validate_library_probe(request(), wrong_abi).status).to_equal("abi-mismatch")
+        var wrong_manifest = probe()
+        wrong_manifest.manifest_sha256 = "other"
+        expect(chromium_oracle_validate_library_probe(request(), wrong_manifest).status).to_equal("invalid-request")
+        var production = request()
+        production.test_only = false
+        expect(chromium_oracle_validate_library_probe(production, probe()).status).to_equal("invalid-request")
+
+    it "requires device identity fence readback digest and no fallback":
+        val receipt = ChromiumOracleGpuReceipt(
+            requested_api: "vulkan", executed_api: "vulkan", device_identity: "gpu-0",
+            fence_signaled: true, readback_source: "device_readback", readback_digest: "sha256-pixels",
+            fallback_used: false,
+        )
+        expect(chromium_oracle_gpu_receipt_valid(receipt)).to_equal(true)
+        var fallback = receipt
+        fallback.fallback_used = true
+        expect(chromium_oracle_gpu_receipt_valid(fallback)).to_equal(false)
+        var host_copy = receipt
+        host_copy.readback_source = "host_synthetic"
+        expect(chromium_oracle_gpu_receipt_valid(host_copy)).to_equal(false)

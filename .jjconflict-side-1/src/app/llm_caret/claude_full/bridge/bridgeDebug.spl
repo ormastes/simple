@@ -1,0 +1,198 @@
+class BridgeFault:
+    method: text
+    kind: text
+    status: i64
+    errorType: text
+    count: i64
+
+impl BridgeFault:
+    static fn new(method: text, kind: text, status: i64, errorType: text, count: i64) -> BridgeFault:
+        BridgeFault(
+            method: normalizeBridgeFaultMethod(method),
+            kind: normalizeBridgeFaultKind(kind),
+            status: status,
+            errorType: errorType,
+            count: count
+        )
+
+    me isFatal() -> bool:
+        me.kind == "fatal"
+
+    me isTransient() -> bool:
+        me.kind == "transient"
+
+    me hasErrorType() -> bool:
+        me.errorType != ""
+
+    me label() -> text:
+        val suffix = if me.hasErrorType(): "/" + me.errorType else: ""
+        me.method + " " + me.kind + "/" + me.status.to_text() + suffix + " x" + me.count.to_text()
+
+class BridgeDebugHandle:
+    close_code: i64
+    reconnect_count: i64
+    wake_count: i64
+    env_id: text
+    session_id: text
+
+impl BridgeDebugHandle:
+    static fn new(env_id: text, session_id: text) -> BridgeDebugHandle:
+        BridgeDebugHandle(close_code: 0, reconnect_count: 0, wake_count: 0, env_id: env_id, session_id: session_id)
+
+    me fireClose(code: i64) -> ():
+        me.close_code = code
+
+    me forceReconnect() -> ():
+        me.reconnect_count = me.reconnect_count + 1
+
+    me wakePollLoop() -> ():
+        me.wake_count = me.wake_count + 1
+
+    me describe() -> text:
+        "env=" + me.env_id + " session=" + me.session_id
+
+class BridgeFaultResult:
+    matched: bool
+    fatal: bool
+    message: text
+    status: i64
+    errorType: text
+
+impl BridgeFaultResult:
+    static fn none(method: text) -> BridgeFaultResult:
+        BridgeFaultResult(matched: false, fatal: false, message: "delegate:" + method, status: 0, errorType: "")
+
+    static fn injected(fault: BridgeFault, context: text) -> BridgeFaultResult:
+        val fatal = fault.isFatal()
+        val prefix = if fatal: "[injected] " else: "[injected transient] "
+        BridgeFaultResult(
+            matched: true,
+            fatal: fatal,
+            message: prefix + context + " " + fault.status.to_text(),
+            status: fault.status,
+            errorType: fault.errorType
+        )
+
+class BridgeDebugState:
+    has_handle: bool
+    handle: BridgeDebugHandle
+    faults: [BridgeFault]
+    log: [text]
+
+impl BridgeDebugState:
+    static fn new() -> BridgeDebugState:
+        BridgeDebugState(has_handle: false, handle: BridgeDebugHandle.new("", ""), faults: [], log: [])
+
+    me registerBridgeDebugHandle(handle: BridgeDebugHandle) -> ():
+        me.handle = handle
+        me.has_handle = true
+
+    me clearBridgeDebugHandle() -> ():
+        me.has_handle = false
+        me.handle = BridgeDebugHandle.new("", "")
+        me.faults = []
+
+    me getBridgeDebugHandle() -> BridgeDebugHandle:
+        me.handle
+
+    me hasBridgeDebugHandle() -> bool:
+        me.has_handle
+
+    me injectBridgeFault(fault: BridgeFault) -> ():
+        if fault.count <= 0:
+            return
+        me.faults = me.faults + [fault]
+        me.log = me.log + ["[bridge:debug] Queued fault: " + fault.label()]
+
+    me faultCount() -> i64:
+        me.faults.len()
+
+    me logCount() -> i64:
+        me.log.len()
+
+    me latestLog() -> text:
+        if me.log.len() == 0:
+            return ""
+        me.log[me.log.len() - 1]
+
+    me consume(method: text) -> BridgeFaultResult:
+        val normalized = normalizeBridgeFaultMethod(method)
+        var kept: [BridgeFault] = []
+        var consumed = BridgeFault.new("", "transient", 0, "", 0)
+        var found = false
+        for fault in me.faults:
+            if not found and fault.method == normalized:
+                consumed = BridgeFault.new(fault.method, fault.kind, fault.status, fault.errorType, fault.count - 1)
+                found = true
+                if consumed.count > 0:
+                    kept = kept + [consumed]
+            else:
+                kept = kept + [fault]
+        me.faults = kept
+        if not found:
+            return BridgeFaultResult.none(normalized)
+        val context = bridgeFaultContext(normalized)
+        me.log = me.log + ["[bridge:debug] Injecting " + consumed.kind + " fault into " + context]
+        BridgeFaultResult.injected(consumed, context)
+
+    me wrapApiForFaultInjection(method: text) -> BridgeFaultResult:
+        me.consume(method)
+
+    me pollForWork() -> BridgeFaultResult:
+        me.wrapApiForFaultInjection("pollForWork")
+
+    me registerBridgeEnvironment() -> BridgeFaultResult:
+        me.wrapApiForFaultInjection("registerBridgeEnvironment")
+
+    me reconnectSession() -> BridgeFaultResult:
+        me.wrapApiForFaultInjection("reconnectSession")
+
+    me heartbeatWork() -> BridgeFaultResult:
+        me.wrapApiForFaultInjection("heartbeatWork")
+
+fn normalizeBridgeFaultKind(kind: text) -> text:
+    if kind == "fatal":
+        return "fatal"
+    "transient"
+
+fn normalizeBridgeFaultMethod(method: text) -> text:
+    if method == "registerBridgeEnvironment":
+        return method
+    if method == "reconnectSession":
+        return method
+    if method == "heartbeatWork":
+        return method
+    "pollForWork"
+
+fn bridgeFaultContext(method: text) -> text:
+    if method == "registerBridgeEnvironment":
+        return "Registration"
+    if method == "reconnectSession":
+        return "ReconnectSession"
+    if method == "heartbeatWork":
+        return "Heartbeat"
+    "Poll"
+
+fn bridgeFaultNew(method: text, kind: text, status: i64, errorType: text, count: i64) -> BridgeFault:
+    BridgeFault.new(method, kind, status, errorType, count)
+
+fn bridgeDebugHandleNew(env_id: text, session_id: text) -> BridgeDebugHandle:
+    BridgeDebugHandle.new(env_id, session_id)
+
+fn bridgeDebugStateNew() -> BridgeDebugState:
+    BridgeDebugState.new()
+
+fn registerBridgeDebugHandle(state: BridgeDebugState, handle: BridgeDebugHandle) -> ():
+    state.registerBridgeDebugHandle(handle)
+
+fn clearBridgeDebugHandle(state: BridgeDebugState) -> ():
+    state.clearBridgeDebugHandle()
+
+fn getBridgeDebugHandle(state: BridgeDebugState) -> BridgeDebugHandle:
+    state.getBridgeDebugHandle()
+
+fn injectBridgeFault(state: BridgeDebugState, fault: BridgeFault) -> ():
+    state.injectBridgeFault(fault)
+
+fn wrapApiForFaultInjection(state: BridgeDebugState, method: text) -> BridgeFaultResult:
+    state.wrapApiForFaultInjection(method)

@@ -1,0 +1,75 @@
+# Managed workload launch — the typed PID1-to-kernel execution seam.
+#
+# A service manager may compile declarative policy in userspace, but it cannot
+# mint authority. This adapter rechecks the compiled image binding and routes
+# the policy through the sole live SpawnSpec/CSpace path. It deliberately takes
+# executable bytes from the trusted image loader boundary, not from manifest
+# text or a caller-provided capability pouch.
+
+use os.services.workload.workload_manifest.{CompiledExecutionPolicy}
+use os.kernel.loader.workload_image_hash.{workload_image_hash_is_canonical}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult, fs_exec_register_image_with_spawn_spec}
+use os.kernel.security.execution_context.{KernelCallContext}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskId, TaskPriority}
+use os.kernel.arch.arch_context.{Architecture}
+
+fn _policy_is_self_consistent(policy: CompiledExecutionPolicy) -> bool:
+    if policy.image.executable_path == "" or not policy.image.executable_path.starts_with("/"):
+        return false
+    if policy.image.content_hash == "" or
+        policy.identity.image_hash != policy.image.content_hash or
+        policy.spawn_spec.image_hash != policy.image.content_hash:
+        return false
+    workload_image_hash_is_canonical(policy.image.content_hash)
+
+pub fn launch_compiled_workload_into_scheduler(
+    context: KernelCallContext,
+    policy: CompiledExecutionPolicy,
+    bytes: [u8],
+    arch: Architecture,
+    argv: [text],
+    envp: [text],
+    priority: TaskPriority,
+    scheduler: Scheduler
+) -> FsExecPrepareResult:
+    """Launch one verified policy through the sole managed CSpace path.
+
+    This is intentionally not a generic role/path syscall. A malformed or
+    internally inconsistent policy fails before image parsing and CSpace
+    minting; the downstream launch then independently matches the exact image
+    bytes against `spawn_spec.image_hash` before it creates a child TCB.
+    """
+    if not _policy_is_self_consistent(policy):
+        return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
+    val image_result = build_user_process_image(
+        policy.image.executable_path, bytes, arch, argv, envp)
+    if image_result.is_err():
+        return FsExecPrepareResult(scheduler: scheduler, pid: -8, entry: 0)
+    val prepared = fs_exec_register_image_with_spawn_spec(
+        context, policy.spawn_spec, policy.image.executable_path,
+        image_result.unwrap(), priority, scheduler)
+    if prepared.pid <= 0:
+        return prepared
+    var live_scheduler = prepared.scheduler
+    val child = TaskId(id: prepared.pid as u64)
+    if not live_scheduler.bind_managed_child_resource_limits(
+        child, policy.resource_spec.process_limit,
+        policy.resource_spec.memory_pages
+    ):
+        live_scheduler.exit_task_by_id(child, -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    if not live_scheduler.bind_managed_child_cpu_weight(
+        child, policy.resource_spec.cpu_weight
+    ):
+        live_scheduler.exit_task_by_id(child, -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    if policy.syscall_filter.len() > 0 and
+        not live_scheduler.bind_managed_child_syscall_filter(child, policy.syscall_filter):
+        live_scheduler.exit_task_by_id(child, -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    if not live_scheduler.bind_filesystem_view(child, policy.isolation_spec.filesystem_view):
+        live_scheduler.exit_task_by_id(child, -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    FsExecPrepareResult(scheduler: live_scheduler, pid: prepared.pid, entry: prepared.entry)

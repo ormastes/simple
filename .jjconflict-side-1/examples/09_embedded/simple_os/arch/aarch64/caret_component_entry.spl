@@ -1,0 +1,104 @@
+# SimpleOS aarch64 in-guest CARET component sanity entry (EDK2/AAVMF lane).
+#
+# Sibling of devtool_component_entry.spl; see that file's header for the boot
+# chain, the forbidden-flag policy (NEVER -kernel, NEVER isa-debug-exit), the
+# per-component build rule, and the compiler statement (RUST SEED).
+#
+# Port of the riscv64 caret entry. On riscv64 this row emitted the real
+# product line
+#   [caret] built message: {"role":"user","content":"CARET_RTT_CONTENT"}
+# from the genuine json_helpers and then STALLED inside extract_json_string —
+# a known in-guest text.len() defect being fixed by a separate lane. This entry
+# is deliberately identical in shape so an identical stall is recognisable as
+# the same defect and not a new one.
+#
+# WHAT THIS PROVES (to the extent it gets): a caret message is built by the
+# REAL json_helpers, read back by the REAL extractor, and a secret-bearing
+# string is passed through the REAL redactor — with the pass condition rung on
+# CONTENT in both directions (the secret must be gone AND the non-secret text
+# must survive), so a redactor that erased everything fails this row.
+#
+# NEVER interpolate an integer into text — that emits rt_raw_i64_to_string,
+# which the freestanding aarch64 runtime does not provide, and the link dies.
+
+use os.kernel.log.klog_api.{log_init_serial, log_raw_println, LOG_INFO}
+use app.llm_caret.redact.{redact}
+use app.llm_caret.json_helpers.{jo2, jp, js, extract_json_string}
+
+@unsafe(reason: "bare WFE park has no artifact-verified contract", capabilities: [ffi])
+extern fn rt_aarch64_wfe_spin()
+
+fn _contains(haystack: text, needle: text) -> bool:
+    """Substring test written locally on purpose: this is gate plumbing, not
+    component logic, so implementing it here cannot launder a component pass."""
+    val h = haystack.len()
+    val n = needle.len()
+    if n == 0:
+        return true
+    if n > h:
+        return false
+    var i = 0
+    while i + n <= h:
+        var j = 0
+        var same = true
+        while j < n:
+            if haystack[i + j] != needle[j]:
+                same = false
+                j = n
+            else:
+                j = j + 1
+        if same:
+            return true
+        i = i + 1
+    false
+
+fn caret_component_row() -> i64:
+    """Build a caret message with the real JSON helpers, read it back with the
+    real extractor, and run the real redactor over a secret-bearing string."""
+    val msg = jo2(jp("role", js("user")), jp("content", js("CARET_RTT_CONTENT")))
+    log_raw_println("[caret] built message: " + msg)
+
+    val role = extract_json_string(msg, "role")
+    val content = extract_json_string(msg, "content")
+    log_raw_println("[caret] extracted role=" + role)
+    log_raw_println("[caret] extracted content=" + content)
+
+    val secret_bearing = "key AKIAIOSFODNN7EXAMPLE trails CARET_KEEPME"
+    val redacted = redact(secret_bearing)
+    log_raw_println("[caret] redacted: " + redacted)
+
+    var rc = 0
+    if role != "user":
+        log_raw_println("[caret] FAIL role did not round-trip")
+        rc = 1
+    if content != "CARET_RTT_CONTENT":
+        log_raw_println("[caret] FAIL content did not round-trip")
+        rc = 1
+    if _contains(redacted, "AKIAIOSFODNN7EXAMPLE"):
+        log_raw_println("[caret] FAIL the secret survived redaction")
+        rc = 1
+    if not _contains(redacted, "CARET_KEEPME"):
+        log_raw_println("[caret] FAIL redaction destroyed non-secret text")
+        rc = 1
+    if rc == 0:
+        log_raw_println("COMPONENT_CARET_SIMPLEOS_AARCH64_OK message round-tripped through the real helpers and the real redactor removed the secret")
+    rc
+
+@noreturn
+fn _start():
+    """aarch64 in-guest caret sanity entry. Limine hands off at EL1 with the
+    MMU on and a valid stack; the name `_start` is load-bearing (native-build
+    only aliases a top-level function of that exact name)."""
+    log_init_serial(LOG_INFO)
+    log_raw_println("")
+    log_raw_println("[components] SimpleOS aarch64 in-guest toolchain components (EDK2/AAVMF -> BOOTAA64.EFI)")
+    log_raw_println("[components] serial up, exercising real product modules")
+    val rc = caret_component_row()
+    if rc == 0:
+        log_raw_println("[components] all component rows exited rc=0")
+    else:
+        log_raw_println("[components] at least one component row exited rc=nonzero")
+    log_raw_println("[components] parking")
+    while true:
+        unsafe:
+            rt_aarch64_wfe_spin()

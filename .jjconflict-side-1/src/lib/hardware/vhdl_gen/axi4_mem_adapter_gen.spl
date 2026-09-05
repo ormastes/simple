@@ -1,0 +1,328 @@
+# Structured generator for the AXI4 memory-adapter XLEN PAIR — emits BOTH
+# examples/09_embedded/fpga_riscv/rtl/rv32_axi4_mem_adapter.vhd and
+# rv64_axi4_mem_adapter.vhd byte-identical to the silicon-proven goldens from
+# ONE templated source parameterized by XlenConfig (the same 64/32 template
+# mechanism exec_core_gen.spl uses: a runtime descriptor value, since Simple
+# has no const generics).
+#
+# Structurally generated: entity generics/ports (the AW and AR channels come
+# from ONE shared channel-shape function instantiated twice), architecture
+# signal declarations with group-local column widths, the remap function, the
+# static AXI qualifier block (AxSIZE derived from XlenConfig.bytes_per_reg),
+# the wiring assigns, the reset assign block, and the FSM case scaffolding.
+# Named literal sections (axi4_mem_adapter_sections.spl) carry only the two
+# per-XLEN header rationale paragraphs and the six FSM arm bodies — the arm
+# bodies are XLEN-independent, so both files get them from the SAME source.
+#
+# Determinism: arrays only, no Dict iteration; two runs are byte-identical.
+
+use std.hardware.riscv_common.xlen.XlenConfig
+use std.hardware.vhdl_gen.gen_types.{VgGenericSpec, VgPortSpec, VgAssign, emit_entity_spec, vg_append, no_lines}
+use std.hardware.vhdl_gen.bus_infra_types.*
+use std.hardware.vhdl_gen.axi4_mem_adapter_sections.*
+
+fn ad_push_ports(dst: [VgPortSpec], src: [VgPortSpec]) -> [VgPortSpec]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i])
+        i = i + 1
+    out
+
+fn ad_push_assigns(dst: [VgAssign], src: [VgAssign]) -> [VgAssign]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i])
+        i = i + 1
+    out
+
+# 3-bit AxSIZE encoding = log2(bytes per beat): 4 bytes -> "010", 8 -> "011".
+fn ad_axsize(bytes_per_beat: i64) -> text:
+    var lg = 0
+    var v = bytes_per_beat
+    while v > 1:
+        v = v / 2
+        lg = lg + 1
+    var out = ""
+    var i = 2
+    while i >= 0:
+        if (lg >> i) & 1 == 1:
+            out = out + "1"
+        else:
+            out = out + "0"
+        i = i - 1
+    out
+
+fn ad_entity_name(cfg: XlenConfig) -> text:
+    "rv" + cfg.xlen.to_text() + "_axi4_mem_adapter"
+
+fn ad_core_name(cfg: XlenConfig) -> text:
+    "rv" + cfg.xlen.to_text() + "_exec_core_axi"
+
+fn ad_library_header() -> [text]:
+    var l: [text] = []
+    l = l.push("library ieee;")
+    l = l.push("use ieee.std_logic_1164.all;")
+    l = l.push("use ieee.numeric_std.all;")
+    l
+
+# ---------------------------------------------------------------------------
+# Entity
+# ---------------------------------------------------------------------------
+
+fn ad_generics() -> [VgGenericSpec]:
+    var g: [VgGenericSpec] = []
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "G_CORE_BASE", name_w: 12,
+                             ty: "unsigned(31 downto 0)", default_val: "x\"80000000\""))
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "G_DDR_BASE", name_w: 12,
+                             ty: "unsigned(31 downto 0)", default_val: "x\"10000000\""))
+    g
+
+# AW and AR are the SAME AXI address-channel shape; one function, two calls.
+fn ad_addr_channel_ports(pre: [text], px: text) -> [VgPortSpec]:
+    val nw = 14
+    var l: [VgPortSpec] = []
+    l = l.push(bi_port(pre, "m_axi_" + px + "addr", nw, "out", 3, bi_slv(31)))
+    l = l.push(bi_port(bi_no_lines(), "m_axi_" + px + "len", nw, "out", 3, bi_slv(7)))
+    l = l.push(bi_port(bi_no_lines(), "m_axi_" + px + "size", nw, "out", 3, bi_slv(2)))
+    l = l.push(bi_port(bi_no_lines(), "m_axi_" + px + "burst", nw, "out", 3, bi_slv(1)))
+    l = l.push(bi_port(bi_no_lines(), "m_axi_" + px + "cache", nw, "out", 3, bi_slv(3)))
+    l = l.push(bi_port(bi_no_lines(), "m_axi_" + px + "prot", nw, "out", 3, bi_slv(2)))
+    l = l.push(bi_port(bi_no_lines(), "m_axi_" + px + "valid", nw, "out", 3, "std_logic"))
+    l = l.push(bi_port(bi_no_lines(), "m_axi_" + px + "ready", nw, "in", 3, "std_logic"))
+    l
+
+fn ad_ports(cfg: XlenConfig) -> [VgPortSpec]:
+    val dh = cfg.xlen - 1
+    val sh = cfg.bytes_per_reg - 1
+    var p: [VgPortSpec] = []
+    # Clock / reset
+    p = p.push(bi_port(bi_no_lines(), "clk", 7, "in", 2, "std_logic"))
+    p = p.push(bi_port(bi_no_lines(), "resetn", 7, "in", 2, "std_logic"))
+    # Core-side simple memory port (XLEN-widened)
+    val core_pre = bi_two("", "    -- Core-side simple memory port (from " + ad_core_name(cfg) + ")")
+    p = p.push(bi_port(core_pre, "mem_req", 11, "in", 3, "std_logic"))
+    p = p.push(bi_port(bi_no_lines(), "mem_we", 11, "in", 3, "std_logic"))
+    p = p.push(bi_port(bi_no_lines(), "mem_addr", 11, "in", 3, bi_slv(dh)))
+    p = p.push(bi_port(bi_no_lines(), "mem_wdata", 11, "in", 3, bi_slv(dh)))
+    p = p.push(bi_port(bi_no_lines(), "mem_wstrb", 11, "in", 3, bi_slv(sh)))
+    p = p.push(bi_port(bi_no_lines(), "mem_rdata", 11, "out", 3, bi_slv(dh)))
+    p = p.push(bi_port(bi_no_lines(), "mem_rvalid", 11, "out", 3, "std_logic"))
+    # Liveness counters (always 32-bit)
+    val stat_pre = bi_two("", "    -- Transaction counter, exposed for JTAG-visible liveness proof")
+    p = p.push(bi_port(stat_pre, "stat_reads", 12, "out", 3, bi_slv(31)))
+    p = p.push(bi_port(bi_no_lines(), "stat_writes", 12, "out", 3, bi_slv(31)))
+    # AXI4 master: AW / W / B / AR / R
+    val aw_pre = bi_two("", "    -- AXI4 master (" + cfg.xlen.to_text() + "-bit data). Write address channel")
+    p = ad_push_ports(p, ad_addr_channel_ports(aw_pre, "aw"))
+    p = p.push(bi_port(bi_one("    -- Write data channel"), "m_axi_wdata", 13, "out", 3, bi_slv(dh)))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_wstrb", 13, "out", 3, bi_slv(sh)))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_wlast", 13, "out", 3, "std_logic"))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_wvalid", 13, "out", 3, "std_logic"))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_wready", 13, "in", 3, "std_logic"))
+    p = p.push(bi_port(bi_one("    -- Write response channel"), "m_axi_bresp", 13, "in", 3, bi_slv(1)))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_bvalid", 13, "in", 3, "std_logic"))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_bready", 13, "out", 3, "std_logic"))
+    p = ad_push_ports(p, ad_addr_channel_ports(bi_one("    -- Read address channel"), "ar"))
+    p = p.push(bi_port(bi_one("    -- Read data channel"), "m_axi_rdata", 13, "in", 3, bi_slv(dh)))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_rresp", 13, "in", 3, bi_slv(1)))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_rlast", 13, "in", 3, "std_logic"))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_rvalid", 13, "in", 3, "std_logic"))
+    p = p.push(bi_port(bi_no_lines(), "m_axi_rready", 13, "out", 3, "std_logic"))
+    p
+
+# ---------------------------------------------------------------------------
+# Architecture declarations
+# ---------------------------------------------------------------------------
+
+fn ad_state_sigs() -> [VgSignalSpec]:
+    var s: [VgSignalSpec] = []
+    s = s.push(bi_sig("state_q", 8, "state_t", 8, "S_IDLE"))
+    s
+
+fn ad_handshake_sigs() -> [VgSignalSpec]:
+    var s: [VgSignalSpec] = []
+    s = s.push(bi_sig("awvalid_q", 10, "std_logic", 10, "'0'"))
+    s = s.push(bi_sig("wvalid_q", 10, "std_logic", 10, "'0'"))
+    s = s.push(bi_sig("arvalid_q", 10, "std_logic", 10, "'0'"))
+    s = s.push(bi_sig("rready_q", 10, "std_logic", 10, "'0'"))
+    s = s.push(bi_sig("bready_q", 10, "std_logic", 10, "'0'"))
+    s
+
+fn ad_datapath_sigs(cfg: XlenConfig) -> [VgSignalSpec]:
+    val dh = cfg.xlen - 1
+    val sh = cfg.bytes_per_reg - 1
+    val zero = "(others => '0')"
+    var s: [VgSignalSpec] = []
+    s = s.push(bi_sig("axaddr_q", 9, bi_slv(31), 30, zero))
+    s = s.push(bi_sig("wdata_q", 9, bi_slv(dh), 30, zero))
+    s = s.push(bi_sig("wstrb_q", 9, bi_slv(sh), 30, zero))
+    s = s.push(bi_sig("rdata_q", 9, bi_slv(dh), 30, zero))
+    s = s.push(bi_sig("rvalid_q", 9, "std_logic", 10, "'0'"))
+    s
+
+fn ad_counter_sigs() -> [VgSignalSpec]:
+    val zero = "(others => '0')"
+    var s: [VgSignalSpec] = []
+    s = s.push(bi_sig("reads_q", 9, bi_unsigned(31), 22, zero))
+    s = s.push(bi_sig("writes_q", 9, bi_unsigned(31), 22, zero))
+    s
+
+# The address remap function: XLEN-wide argument, low-32-bit arithmetic. On
+# rv64 the argument is sliced down (documented truncation).
+fn ad_remap_fn(cfg: XlenConfig) -> [text]:
+    var arg = "a"
+    var l: [text] = []
+    if cfg.is_rv32():
+        l = vg_append(l, axi_adapter_remap_comment_rv32())
+    else:
+        l = vg_append(l, axi_adapter_remap_comment_rv64())
+        arg = "a(31 downto 0)"
+    l = l.push("  function remap(a : " + bi_slv(cfg.xlen - 1) + ") return std_logic_vector is")
+    l = l.push("  begin")
+    l = l.push("    return std_logic_vector((unsigned(" + arg + ") - G_CORE_BASE) + G_DDR_BASE);")
+    l = l.push("  end function;")
+    l
+
+# ---------------------------------------------------------------------------
+# Concurrent assign blocks
+# ---------------------------------------------------------------------------
+
+fn ad_channel_quals(pre: [text], px: text, size_code: text) -> [VgAssign]:
+    var a: [VgAssign] = []
+    a = a.push(bi_assign_pre(pre, "m_axi_" + px + "len", "(others => '0')"))
+    a = a.push(bi_assign("m_axi_" + px + "size", "\"" + size_code + "\""))
+    a = a.push(bi_assign("m_axi_" + px + "burst", "\"01\""))
+    a = a.push(bi_assign("m_axi_" + px + "cache", "\"0011\""))
+    a = a.push(bi_assign("m_axi_" + px + "prot", "\"000\""))
+    a
+
+fn ad_static_quals(cfg: XlenConfig) -> [VgAssign]:
+    val code = ad_axsize(cfg.bytes_per_reg)
+    val head = bi_one("  -- Static AXI qualifiers: single-beat, " + cfg.bytes_per_reg.to_text()
+                      + "-byte, INCR, bufferable+cacheable.")
+    var a = ad_channel_quals(head, "aw", code)
+    a = ad_push_assigns(a, ad_channel_quals(bi_no_lines(), "ar", code))
+    a = a.push(bi_assign("m_axi_wlast", "'1'"))
+    a
+
+fn ad_wiring() -> [VgAssign]:
+    var a: [VgAssign] = []
+    a = a.push(bi_assign("m_axi_awaddr", "axaddr_q"))
+    a = a.push(bi_assign("m_axi_araddr", "axaddr_q"))
+    a = a.push(bi_assign("m_axi_awvalid", "awvalid_q"))
+    a = a.push(bi_assign("m_axi_wvalid", "wvalid_q"))
+    a = a.push(bi_assign("m_axi_wdata", "wdata_q"))
+    a = a.push(bi_assign("m_axi_wstrb", "wstrb_q"))
+    a = a.push(bi_assign("m_axi_arvalid", "arvalid_q"))
+    a = a.push(bi_assign("m_axi_rready", "rready_q"))
+    a = a.push(bi_assign("m_axi_bready", "bready_q"))
+    a
+
+fn ad_core_side() -> [VgAssign]:
+    var a: [VgAssign] = []
+    a = a.push(bi_assign("mem_rdata", "rdata_q"))
+    a = a.push(bi_assign("mem_rvalid", "rvalid_q"))
+    a = a.push(bi_assign("stat_reads", "std_logic_vector(reads_q)"))
+    a = a.push(bi_assign("stat_writes", "std_logic_vector(writes_q)"))
+    a
+
+# ---------------------------------------------------------------------------
+# FSM process
+# ---------------------------------------------------------------------------
+
+fn ad_reset_assigns() -> [VgAssign]:
+    val zero = "(others => '0')"
+    var a: [VgAssign] = []
+    a = a.push(bi_assign("state_q", "S_IDLE"))
+    a = a.push(bi_assign("awvalid_q", "'0'"))
+    a = a.push(bi_assign("wvalid_q", "'0'"))
+    a = a.push(bi_assign("arvalid_q", "'0'"))
+    a = a.push(bi_assign("rready_q", "'0'"))
+    a = a.push(bi_assign("bready_q", "'0'"))
+    a = a.push(bi_assign("rvalid_q", "'0'"))
+    a = a.push(bi_assign("rdata_q", zero))
+    a = a.push(bi_assign("axaddr_q", zero))
+    a = a.push(bi_assign("wdata_q", zero))
+    a = a.push(bi_assign("wstrb_q", zero))
+    a = a.push(bi_assign("reads_q", zero))
+    a = a.push(bi_assign("writes_q", zero))
+    a
+
+fn ad_fsm_arms() -> [VgCaseArm]:
+    var arms: [VgCaseArm] = []
+    arms = arms.push(bi_arm("S_IDLE", axi_adapter_arm_idle()))
+    arms = arms.push(bi_arm_pre(
+        bi_two("", "          -- Read: hold ARVALID until accepted, then take one R beat."),
+        "S_RD_ADDR", axi_adapter_arm_rd_addr()))
+    arms = arms.push(bi_arm_pre(bi_one(""), "S_RD_DATA", axi_adapter_arm_rd_data()))
+    arms = arms.push(bi_arm_pre(
+        bi_two("", "          -- Write: AW and W run concurrently; either may be accepted first."),
+        "S_WR_ADDR", axi_adapter_arm_wr_addr()))
+    arms = arms.push(bi_arm_pre(bi_one(""), "S_WR_RESP", axi_adapter_arm_wr_resp()))
+    arms = arms.push(bi_arm_pre(
+        bi_three("",
+                 "          -- Wait for the core to drop mem_req before accepting a new request,",
+                 "          -- so the one-cycle rvalid pulse is never mistaken for a second retire."),
+        "S_DONE", axi_adapter_arm_done()))
+    arms
+
+fn ad_fsm_process() -> [text]:
+    var body: [text] = []
+    body = body.push("    if rising_edge(clk) then")
+    body = body.push("      if resetn = '0' then")
+    body = vg_append(body, emit_assigns_at(8, 9, ad_reset_assigns()))
+    body = body.push("      else")
+    body = body.push("        -- mem_rvalid is a strict ONE-cycle pulse.")
+    body = body.push("        rvalid_q <= '0';")
+    body = body.push("")
+    body = vg_append(body, emit_case(8, "state_q", ad_fsm_arms()))
+    body = body.push("      end if;")
+    body = body.push("    end if;")
+    emit_process(2, "", "clk", bi_no_lines(), body)
+
+# ---------------------------------------------------------------------------
+# Whole-file assembly
+# ---------------------------------------------------------------------------
+
+# Public entry: ONE templated source for both XLEN members of the pair.
+fn generate_axi4_mem_adapter(cfg: XlenConfig) -> text:
+    val name = ad_entity_name(cfg)
+    var parts: [text] = []
+    parts = parts.push(bi_jl(ad_library_header()))
+    parts = parts.push("")
+    if cfg.is_rv32():
+        parts = parts.push(bi_jl(axi_adapter_head_rv32()))
+    else:
+        parts = parts.push(bi_jl(axi_adapter_head_rv64()))
+    parts = parts.push("")
+    parts = parts.push(bi_jl(emit_entity_spec(name, ad_generics(), ad_ports(cfg))))
+    parts = parts.push("")
+    parts = parts.push("architecture rtl of " + name + " is")
+    parts = parts.push("  type state_t is (S_IDLE, S_RD_ADDR, S_RD_DATA, S_WR_ADDR, S_WR_RESP, S_DONE);")
+    parts = parts.push(bi_jl(emit_signal_decls(ad_state_sigs())))
+    parts = parts.push("")
+    parts = parts.push(bi_jl(emit_signal_decls(ad_handshake_sigs())))
+    parts = parts.push("")
+    parts = parts.push(bi_jl(emit_signal_decls(ad_datapath_sigs(cfg))))
+    parts = parts.push("")
+    parts = parts.push(bi_jl(emit_signal_decls(ad_counter_sigs())))
+    parts = parts.push("")
+    parts = parts.push(bi_jl(ad_remap_fn(cfg)))
+    parts = parts.push("begin")
+    parts = parts.push(bi_jl(emit_assigns_at(2, 13, ad_static_quals(cfg))))
+    parts = parts.push("")
+    parts = parts.push(bi_jl(emit_assigns_at(2, 13, ad_wiring())))
+    parts = parts.push("")
+    parts = parts.push(bi_jl(emit_assigns_at(2, 11, ad_core_side())))
+    parts = parts.push("")
+    parts = parts.push(bi_jl(ad_fsm_process()))
+    parts = parts.push("end architecture rtl;")
+    parts.join("\n") + "\n"
+
+fn generate_rv32_axi4_mem_adapter() -> text:
+    generate_axi4_mem_adapter(XlenConfig.rv32())
+
+fn generate_rv64_axi4_mem_adapter() -> text:
+    generate_axi4_mem_adapter(XlenConfig.rv64())

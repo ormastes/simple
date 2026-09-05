@@ -1,0 +1,129 @@
+"""
+## Purpose and audience
+Purpose: Verify sanitize_path rejects dangerous characters.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-CLI-001
+doc/01_research/local/REQ-APP-CLI-001.md
+doc/03_plan/sys_test/REQ-APP-CLI-001.md
+doc/04_architecture/REQ-APP-CLI-001.md
+doc/05_design/REQ-APP-CLI-001.md
+"""
+# @req: REQ-APP-CLI-001
+
+# Query Sanitize Specification
+#
+# **Feature IDs:** #SEC-001
+# **Category:** Tooling
+# **Difficulty:** 2/5
+# **Status:** Implemented
+#
+# ## Overview
+# Tests for shell injection prevention in query subcommands.
+# Validates sanitize_path, sanitize_symbol, and safe_grep wrappers.
+
+
+# ============================================================================
+# Test Group 1: sanitize_path validation
+# ============================================================================
+
+use std.spec.step
+
+use std.spec.step
+use app.cli.query_sanitize.{sanitize_path, sanitize_symbol, safe_grep_file}
+
+
+# ============================================================================
+# Test Group 2: sanitize_symbol validation
+# ============================================================================
+
+describe "sanitize_symbol validation":
+    it "round-trips lowercase identifier":
+        # @req: REQ-APP-CLI-001
+        step("Verify: sanitize_symbol returns a word-char identifier unchanged")
+        expect(sanitize_symbol("query_main")).to_equal("query_main")
+        # @capture: safe symbol returned unchanged
+
+    it "round-trips mixed case and digits":
+        # @req: REQ-APP-CLI-001
+        step("Verify: sanitize_symbol round-trips mixed-case and numeric suffixes")
+        expect(sanitize_symbol("LazySession42")).to_equal("LazySession42")
+        # @capture: safe symbol returned unchanged
+
+    it "returns empty for hyphenated name":
+        # @req: REQ-APP-CLI-001
+        step("Verify: sanitize_symbol rejects hyphen")
+        expect(sanitize_symbol("my-function")).to_equal("")
+        # @capture: hyphenated symbol sanitized to ""
+
+    it "returns empty for dotted name":
+        # @req: REQ-APP-CLI-001
+        step("Verify: sanitize_symbol rejects module.func form")
+        expect(sanitize_symbol("module.func")).to_equal("")
+        # @capture: dotted symbol sanitized to ""
+
+    it "returns empty for shell metacharacters":
+        # @req: REQ-APP-CLI-001
+        step("Verify: sanitize_symbol rejects embedded shell metacharacters")
+        expect(sanitize_symbol("foo;rm")).to_equal("")
+        expect(sanitize_symbol("foo$(whoami)")).to_equal("")
+        # @capture: metacharacter symbols sanitized to ""
+
+    it "returns empty for empty name":
+        # @req: REQ-APP-CLI-001
+        step("Verify: sanitize_symbol rejects empty input")
+        expect(sanitize_symbol("")).to_equal("")
+        # @capture: empty symbol stays empty
+
+# ============================================================================
+# Test Group 3: safe_grep command construction
+# ============================================================================
+
+describe "safe_grep executes grep with array args":
+    it "finds a known symbol in a real repo file":
+        # @req: REQ-APP-CLI-001
+        step("Verify: safe_grep_file locates sanitize_path in its own source")
+        val (out, code) = safe_grep_file("fn sanitize_path", "src/app/cli/query_sanitize.spl")
+        expect(code).to_equal(0)  # oracle: 0 — grep exit status on a hit
+        expect(out.contains("fn sanitize_path")).to_equal(true)
+        # @capture: grep exit 0 and matched line captured from real execution
+
+    it "reports miss with non-zero exit for absent pattern":
+        # @req: REQ-APP-CLI-001
+        step("Verify: safe_grep_file exits non-zero when the pattern is absent")
+        val (out, code) = safe_grep_file("zz_no_such_symbol_zz", "src/app/cli/query_sanitize.spl")
+        expect(code != 0).to_equal(true)
+        # @capture: grep exit non-zero on miss
+
+# ============================================================================
+# Test Group 4: Integration with query pipeline
+# ============================================================================
+
+describe "sanitize integration with query":
+    it "injection in file arg is neutralized end to end":
+        # @req: REQ-APP-CLI-001
+        step("Verify: a hostile file argument sanitizes to empty before engine use")
+        val clean = sanitize_path("src/test; cat /etc/passwd")
+        expect(clean).to_equal("")
+        # @capture: hostile file argument sanitized to ""
+
+    it "injection in symbol arg is neutralized end to end":
+        # @req: REQ-APP-CLI-001
+        step("Verify: a hostile symbol argument sanitizes to empty before engine use")
+        val clean = sanitize_symbol("foo$(whoami)")
+        expect(clean).to_equal("")
+        # @capture: hostile symbol argument sanitized to ""
+
+    it "hostile grep pattern is passed as a literal argv element":
+        # @req: REQ-APP-CLI-001
+        step("Verify: safe_grep_file with a metacharacter pattern finds nothing instead of executing a shell")
+        val (out, code) = safe_grep_file("x; touch /tmp/w8_pwned_marker", "src/app/cli/query_sanitize.spl")
+        expect(code != 0).to_equal(true)
+        # @capture: metacharacter pattern treated as literal, miss exit code

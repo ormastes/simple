@@ -1,0 +1,302 @@
+#!/bin/sh
+# check-erased-receiver-unwrap-oracle.shs
+#
+# FAST ORACLE for the self-hosting blocker tracked in
+#   doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
+#
+# THE DEFECT. `.unwrap()` on a receiver whose type is erased at codegen time is
+# resolved by a receiver-type-BLIND name-suffix scan in
+#   src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:845-890
+# which collects every `ctx.func_ids` key ending in `".unwrap"` / `"_dot_unwrap"`,
+# prefers one containing the type qualifier, and otherwise PICKS THE SHORTEST.
+# In a Stage-2-sized link that winner is `Poll.unwrap`, which matches neither
+# `Some` tag, falls through its `match`, and returns 0 -- surfacing as
+# `E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED ... (heap-typed payload word is 0 or
+# in the zero page)` and rc=139. That same block ALREADY carries explicit
+# early-return guards for bare `has` and bare `len`/`length` (lines ~836-843),
+# added after the same class of miscompile; `unwrap` has no such guard.
+#
+# WHY THIS SCRIPT EXISTS. Testing a candidate fix used to cost a ~40 minute
+# Stage-2 bootstrap, and three bind-site theories were refuted at that price.
+# This oracle exercises the same codegen path through the Rust seed directly:
+# a warm incremental `cargo build --release --bin simple` (~1-3 min) plus a
+# per-fixture `native-build --backend=cranelift` (~20-55 s). See the RUNTIME
+# section below for measured numbers.
+#
+# THE `refusing Rust fallback` GUARD IS NOT AN OBSTACLE AND IS NOT WEAKENED.
+# `native-build` is a `command_is_pure_simple_tool` name
+# (driver/src/main.rs:287), so when the Simple app dispatch returns None the
+# driver refuses to fall back to Rust (driver/src/main.rs:228-233). That
+# dispatch resolves `src/app/...` RELATIVE TO THE CURRENT WORKING DIRECTORY, so
+# the refusal fires only when the seed is invoked from somewhere other than the
+# repo root. Measured 2026-08-25: identical command, same binary --
+#   from a fixture subdir : `error: pure-Simple tool 'native-build' unavailable;
+#                            refusing Rust fallback`, rc=1
+#   from the repo root    : builds, rc=0
+# The sanctioned way to exercise this path is therefore simply to `cd` to the
+# repo root. This script does that and asserts it, and changes no guard, no
+# allowlist and no default.
+#
+# GATE POLARITY -- READ BEFORE "FIXING" A FAIL.
+# PASS here means the defect is GONE. This gate is ADVISORY and is honestly RED
+# on origin/main; that is the CORRECT state, not a broken gate. Same convention
+# as scripts/check/check-stage2-option-unwrap-not-stolen.shs. Promote it to
+# mandatory when it goes green -- do not weaken a case to make it pass.
+#
+# SCOPE LIMIT -- the RED probe (`hijack_probe`) is a CONCRETE-receiver `.unwrap()`
+# hijack, filed separately as
+#   doc/08_tracking/bug/concrete_receiver_unwrap_returns_receiver_word_2026-08-25.md
+# It lives in the same `.unwrap()` resolution chain but is NOT proven to share a
+# root cause with the Stage-2 erased-receiver -> Poll.unwrap theft. The three
+# `ERASED_UNWRAP` cases still bind correctly in a small link, because that theft
+# needs >= 2 `*_dot_unwrap` keys in func_ids at once and a small program supplies
+# at most one. If you accept a candidate fix on this gate, state which of the two
+# defects it moved.
+#
+# USAGE
+#   sh scripts/check/check-erased-receiver-unwrap-oracle.shs [--selftest] [--seed PATH]
+#                                                            [--keep] [--build-timeout N]
+#
+# VERDICT (always the LAST line on stdout)
+#   PASS  — <n> case(s) checked, ...        exit 0
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked (<reason>)  exit 2
+# A build that hits the timeout is reported as a distinct HANG failure (rc=124).
+# A missing verdict line, exit 2, or a HANG is UNKNOWN -- never a pass.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+FIXTURE_DIR="test/fixture/erased_unwrap_oracle"
+SEED="${SIMPLE_ORACLE_SEED:-}"
+BUILD_TIMEOUT="${SIMPLE_ORACLE_BUILD_TIMEOUT:-900}"
+RUN_TIMEOUT=60
+KEEP=0
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --seed) SEED="$2"; shift ;;
+        --keep) KEEP=1 ;;
+        --build-timeout) BUILD_TIMEOUT="$2"; shift ;;
+        *) echo "unknown argument: $1" >&2
+           echo "ERROR — nothing was checked (unknown argument: $1)"
+           exit 2 ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------------------
+# CLASSIFIER (pure; the selftest exercises exactly this function)
+#
+# Inputs : build rc, run rc, run stdout, expected sentinel
+# Outputs: one token on stdout
+#   OK          correct bind: expected sentinel present, clean exit
+#   THEFT       bound to a foreign `*_dot_unwrap`: sentinel present but WRONG
+#               value (0, or any other), i.e. the fall-through-returns-0 shape
+#   CRASH       rc >= 128 (139 = SEGV) -- the zero-page dereference
+#   HANG        rc 124 -- timeout, reported distinctly, never a pass
+#   BUILDFAIL   the compiler itself refused the fixture
+#   UNKNOWN     no sentinel line at all -- absence of evidence
+# ---------------------------------------------------------------------------
+classify() {
+    _brc="$1"; _rrc="$2"; _out="$3"; _expect="$4"; _key="${5:-ERASED_UNWRAP}"
+
+    if [ "$_brc" = "124" ]; then echo "HANG"; return; fi
+    if [ "$_brc" != "0" ]; then echo "BUILDFAIL"; return; fi
+    if [ "$_rrc" = "124" ]; then echo "HANG"; return; fi
+    if [ "$_rrc" -ge 128 ] 2>/dev/null; then echo "CRASH"; return; fi
+
+    # Capture ANY sentinel value, not just digits: an observed mis-bind returned
+    # a text value (`ERASED_UNWRAP=dl`), and a digits-only capture would have
+    # reported it as a missing sentinel (UNKNOWN) instead of the THEFT it is.
+    _line=$(printf '%s' "$_out" | tr -d '\r' | sed -n "s/.*\\($_key=[^[:space:]]*\\).*/\\1/p" | head -1)
+    if [ -z "$_line" ]; then echo "UNKNOWN"; return; fi
+    if [ "$_line" = "$_key=$_expect" ] && [ "$_rrc" = "0" ]; then echo "OK"; return; fi
+    echo "THEFT"
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST -- runs FIRST, unconditionally, and is FATAL.
+# ---------------------------------------------------------------------------
+selftest() {
+    _fail=0
+    _n=0
+    st_case() {
+        _n=$((_n + 1))
+        _got=$(classify "$1" "$2" "$3" "$4")
+        if [ "$_got" != "$5" ]; then
+            echo "selftest FAIL: case $_n expected $5 got $_got (brc=$1 rrc=$2 out='$3')" >&2
+            _fail=1
+        fi
+    }
+    st_case2() {
+        _n=$((_n + 1))
+        _got=$(classify "$1" "$2" "$3" "$4" "$5")
+        if [ "$_got" != "$6" ]; then
+            echo "selftest FAIL: case $_n expected $6 got $_got (key=$5 brc=$1 rrc=$2 out='$3')" >&2
+            _fail=1
+        fi
+    }
+
+    # 1. correct bind
+    st_case 0 0 "DECOY=7
+ERASED_UNWRAP=4242" 4242 OK
+    # 2. the incident's exact shape: fall-through returns 0
+    st_case 0 0 "ERASED_UNWRAP=0" 4242 THEFT
+    # 3. bound to a foreign unwrap returning some other wrong value
+    st_case 0 0 "ERASED_UNWRAP=7" 4242 THEFT
+    # 4. zero-page dereference
+    st_case 0 139 "" 4242 CRASH
+    # 5. build hang must be its own class, never a pass
+    st_case 124 0 "" 4242 HANG
+    # 6. run hang likewise
+    st_case 0 124 "" 4242 HANG
+    # 7. compiler refused the fixture
+    st_case 1 0 "" 4242 BUILDFAIL
+    # 8. clean exit with NO sentinel is UNKNOWN, not a pass -- the single most
+    #    important row: six false greens were caught today, four of them from
+    #    exit codes swallowed by a pipe and read as success.
+    st_case 0 0 "some unrelated output" 4242 UNKNOWN
+    # 9. an observed mis-bind returned a TEXT value, not a number
+    st_case 0 0 "ERASED_UNWRAP=dl" 4242 THEFT
+    # 10. parameterised sentinel: correct concrete-receiver value
+    st_case2 0 0 "CONTROL_PING=1
+CONCRETE_UNWRAP=111" 111 CONCRETE_UNWRAP OK
+    # 11. parameterised sentinel: the observed hijack (pointer-shaped word)
+    st_case2 0 0 "CONTROL_PING=1
+CONCRETE_UNWRAP=98936014172833" 111 CONCRETE_UNWRAP THEFT
+    # 12. the CONTROL itself must be checkable and must read OK today
+    st_case2 0 0 "CONTROL_PING=1" 1 CONTROL_PING OK
+    # 13. a broken control is its own failure, not a pass
+    st_case2 0 0 "CONTROL_PING=9" 1 CONTROL_PING THEFT
+    # 14. a correct value but a non-zero exit is not OK
+    st_case 0 3 "ERASED_UNWRAP=4242" 4242 THEFT
+
+    if [ "$_n" -eq 0 ]; then
+        echo "selftest ERROR: 0 cases executed" >&2
+        return 2
+    fi
+    if [ "$_fail" -ne 0 ]; then
+        echo "selftest FAILED ($_n cases executed)" >&2
+        return 1
+    fi
+    echo "selftest OK ($_n classifier cases)" >&2
+    return 0
+}
+
+selftest
+ST_RC=$?
+if [ "$ST_RC" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed, rc=$ST_RC)"
+    exit 2
+fi
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 14 case(s) checked, classifier selftest only (no fixtures built)"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Locate the seed. Absence of a compiler is absence of evidence -> ERROR.
+# ---------------------------------------------------------------------------
+if [ -z "$SEED" ]; then
+    for _c in \
+        "/mnt/data/cargo-target-fast-oracle/release/simple" \
+        "$REPO_ROOT/src/compiler_rust/target/release/simple"
+    do
+        [ -x "$_c" ] && { SEED="$_c"; break; }
+    done
+fi
+if [ -z "$SEED" ] || [ ! -x "$SEED" ]; then
+    echo "ERROR — nothing was checked (no seed binary; build one with: cd src/compiler_rust && cargo build --release --bin simple, or pass --seed PATH)"
+    exit 2
+fi
+
+OUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/erased-unwrap-oracle.XXXXXX") || {
+    echo "ERROR — nothing was checked (could not create temp dir)"; exit 2; }
+cleanup() { [ "$KEEP" -eq 0 ] && rm -rf "$OUT_DIR"; }
+trap cleanup EXIT
+
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# CASES. Each row: <name> <fixture> <expected-sentinel> <role>
+#   reference  -- must bind correctly; validates the oracle's GREEN detection
+#   probe      -- the discriminator; RED on a tree carrying the defect
+# ---------------------------------------------------------------------------
+# Each row: <name>:<fixture>:<expected>:<role>:<sentinel-key>
+#   reference -- binds correctly on origin/main; validates GREEN detection
+#   control   -- an ordinary user method; proves user methods work at all here
+#   probe     -- the discriminator; RED on a tree carrying the defect
+CASES="poll_absent:$FIXTURE_DIR/poll_absent.spl:4242:reference:ERASED_UNWRAP
+xmod_main:$FIXTURE_DIR/xmod_main.spl:4242:reference:ERASED_UNWRAP
+hijack_control:$FIXTURE_DIR/concrete_unwrap_hijack.spl:1:control:CONTROL_PING
+hijack_name_control:$FIXTURE_DIR/concrete_unwrap_hijack.spl:111:control:NAME_CONTROL
+hijack_erased:$FIXTURE_DIR/concrete_unwrap_hijack.spl:4242:reference:ERASED_UNWRAP
+hijack_probe:$FIXTURE_DIR/concrete_unwrap_hijack.spl:111:probe:CONCRETE_UNWRAP"
+
+CHECKED=0
+OFFENDERS=""
+HANGS=""
+
+for _row in $CASES; do
+    _name=$(printf '%s' "$_row" | cut -d: -f1)
+    _fx=$(printf '%s' "$_row"   | cut -d: -f2)
+    _exp=$(printf '%s' "$_row"  | cut -d: -f3)
+    _role=$(printf '%s' "$_row" | cut -d: -f4)
+    _key=$(printf '%s' "$_row"  | cut -d: -f5)
+
+    if [ ! -f "$_fx" ]; then
+        echo "ERROR — nothing was checked (missing fixture $_fx)"
+        exit 2
+    fi
+
+    _bin="$OUT_DIR/$(basename "$_fx" .spl)"
+    # Build once per distinct fixture; several cases may probe different
+    # sentinels inside the same binary.
+    BRC=0
+    if [ ! -x "$_bin" ]; then
+        timeout "$BUILD_TIMEOUT" "$SEED" native-build --backend=cranelift "$_fx" -o "$_bin" \
+            > "$OUT_DIR/$_name.build.log" 2>&1
+        BRC=$?
+    fi
+
+    RRC=0
+    ROUT=""
+    if [ "$BRC" -eq 0 ] && [ -x "$_bin" ]; then
+        ROUT=$(timeout "$RUN_TIMEOUT" "$_bin" 2>"$OUT_DIR/$_name.run.err")
+        RRC=$?
+    fi
+
+    VERD=$(classify "$BRC" "$RRC" "$ROUT" "$_exp" "$_key")
+    SEEN=$(printf '%s' "$ROUT" | tr -d '\r' | sed -n "s/.*\\($_key=[^[:space:]]*\\).*/\\1/p" | head -1)
+    [ -z "$SEEN" ] && SEEN="$_key=<absent>"
+    CHECKED=$((CHECKED + 1))
+    echo "case $_name ($_role): build_rc=$BRC run_rc=$RRC observed=$SEEN expected=$_key=$_exp verdict=$VERD"
+
+    case "$VERD" in
+        OK) ;;
+        HANG)  HANGS="$HANGS $_name" ;;
+        *)     OFFENDERS="$OFFENDERS $_name=$VERD" ;;
+    esac
+done
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 fixtures executed)"
+    exit 2
+fi
+
+if [ -n "$HANGS" ]; then
+    echo "FAIL — $CHECKED case(s) checked, HANG (rc=124) in:$HANGS"
+    exit 1
+fi
+
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL — $CHECKED case(s) checked, .unwrap() mis-bound in:$OFFENDERS"
+    exit 1
+fi
+
+echo "PASS — $CHECKED case(s) checked, every .unwrap() bound to the correct callee"
+exit 0

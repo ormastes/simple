@@ -1,0 +1,113 @@
+#!/bin/sh
+# Fail-closed gate: no TUPLE-shaped `return (a, b)` inside an `unsafe` block.
+#
+# Why: a tuple return written inside an `unsafe(capabilities: [...])` block is
+# LOST under native codegen -- the caller receives the SUCCESS verdict and
+# execution falls through past the return. Measured 2026-08-24: phase 3's
+# retained-surfaces guard (driver_hir_pipeline_lowering.spl:586) ran
+# `add_error` and `return (self.ctx, false)`; the error message survived and
+# resurfaced three phases later as `[ERROR] MIR error: ...`, but
+# `phase3:hir_typecheck:done` still printed -- i.e. the boolean was lost. The
+# empty program then SEGV'd in MIR lowering (NATIVE_BUILD_RC=139).
+#
+# Those two guards were the ONLY two tuple-returns-inside-unsafe in the whole
+# owned tree; the other 87 unsafe-block returns are scalar/enum shaped and
+# demonstrably work (string_core et al). The fix is to keep the probe inside
+# the unsafe block and hoist the verdict return to function-body level.
+#
+# KNOWN LIMIT (stated, not papered over): the scan matches a tuple return only
+# in its single-line form `return (a, b)`. A tuple return WRAPPED across lines
+# slips through, as does one built via an intermediate local. This gate pins the
+# shape that actually occurred and regressed; it is not a proof of absence.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> unsafe block(s) checked, 0 tuple return(s)   exit 0  (n > 0)
+#   FAIL — ... naming each offending site                   exit 1
+#   ERROR — nothing was checked                             exit 2
+# Scanning 0 unsafe blocks is ERROR, never a pass.
+# See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
+
+ROOT="${1:-$(dirname "$0")/../..}"
+
+scan() {
+  python3 - "$1" <<'PY'
+import re,os,sys
+root=sys.argv[1]
+blocks=0; bad=[]
+for dirpath,_,fs in os.walk(os.path.join(root,'src')):
+    if 'vendor' in dirpath: continue
+    for f in fs:
+        if not f.endswith('.spl'): continue
+        p=os.path.join(dirpath,f)
+        try: L=open(p,encoding='utf8',errors='replace').read().split('\n')
+        except Exception: continue
+        for i,l in enumerate(L):
+            m=re.match(r'^(\s*)unsafe\s*[\(:]',l)
+            if not m: continue
+            blocks+=1
+            ind=len(m.group(1))
+            for j in range(i+1,len(L)):
+                s=L[j]
+                if s.strip()=='': continue
+                ci=len(s)-len(s.lstrip())
+                if ci<=ind: break
+                r=re.match(r'\s*return\s+(\(.*\))\s*$',s)
+                if r and ',' in r.group(1):
+                    bad.append("%s:%d: %s"%(os.path.relpath(p,root),j+1,s.strip()))
+print("BLOCKS=%d"%blocks)
+for b in bad: print("BAD=%s"%b)
+PY
+}
+
+# ---- selftest: runs FIRST and is FATAL --------------------------------------
+selftest() {
+  T=$(mktemp -d); mkdir -p "$T/src"
+  # fixture 1: offending tuple return inside unsafe -> must be detected
+  printf 'fn f() -> (i64, bool):\n    unsafe(capabilities: [ffi]):\n        if g():\n            return (1, false)\n    (2, true)\n' > "$T/src/bad.spl"
+  OUT=$(scan "$T"); RC=$?
+  if [ $RC -ne 0 ]; then echo "SELFTEST FAIL: scanner errored"; return 1; fi
+  echo "$OUT" | grep -q '^BAD=.*bad.spl:4' || { echo "SELFTEST FAIL: offending tuple return not detected"; return 1; }
+  # fixture 2: hoisted form (the fix) -> must be clean, and scalar return inside unsafe stays clean
+  printf 'fn f() -> (i64, bool):\n    var ok = true\n    unsafe(capabilities: [ffi]):\n        ok = g()\n    if not ok:\n        return (1, false)\n    (2, true)\n\nfn h() -> i64:\n    unsafe(capabilities: [ffi]):\n        return 0\n' > "$T/src/good.spl"
+  rm -f "$T/src/bad.spl"
+  OUT=$(scan "$T")
+  echo "$OUT" | grep -q '^BAD=' && { echo "SELFTEST FAIL: false positive on hoisted/scalar form"; return 1; }
+  echo "$OUT" | grep -q '^BLOCKS=[1-9]' || { echo "SELFTEST FAIL: clean fixture scanned 0 blocks"; return 1; }
+  # fixture 3: empty tree -> 0 blocks, so caller must ERROR
+  rm -f "$T/src/good.spl"
+  OUT=$(scan "$T")
+  echo "$OUT" | grep -q '^BLOCKS=0' || { echo "SELFTEST FAIL: empty tree did not scan 0 blocks"; return 1; }
+  rm -rf "$T"; return 0
+}
+
+selftest
+ST_RC=$?
+if [ $ST_RC -ne 0 ]; then
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+
+OUT=$(scan "$ROOT")
+SCAN_RC=$?
+if [ $SCAN_RC -ne 0 ]; then
+  echo "ERROR — nothing was checked (scan failed rc=$SCAN_RC)"
+  exit 2
+fi
+
+BLOCKS=$(echo "$OUT" | sed -n 's/^BLOCKS=//p')
+[ -n "$BLOCKS" ] || BLOCKS=0
+if [ "$BLOCKS" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 unsafe blocks found under $ROOT/src)"
+  exit 2
+fi
+
+BAD=$(echo "$OUT" | sed -n 's/^BAD=//p')
+if [ -n "$BAD" ]; then
+  echo "$BAD" | while IFS= read -r b; do [ -n "$b" ] && echo "  offending: $b"; done
+  N=$(echo "$BAD" | grep -c .)
+  echo "FAIL — $BLOCKS unsafe block(s) checked, $N tuple return(s) inside an unsafe block (lost under native codegen; hoist the return out of the block)"
+  exit 1
+fi
+
+echo "PASS — $BLOCKS unsafe block(s) checked, 0 tuple return(s)"
+exit 0

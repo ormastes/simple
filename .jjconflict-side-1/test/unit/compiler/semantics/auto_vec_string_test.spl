@@ -1,0 +1,47 @@
+# SIMD UTF-8 Auto-Vectorization Lint Regression Tests
+#
+# Locks the T0.4 plan artifact for string/byte loop detection: ASCII
+# validation, UTF-8 leading-byte counting, and delimiter scanning.
+
+use std.spec.{describe, it, expect}
+use compiler.semantics.lint.simd_opportunity_lint.{
+    SimdOpportunityWarning,
+    lint_simd_ascii_validate,
+    lint_simd_byte_count,
+    lint_simd_delimiter_scan,
+    lint_simd_opportunities
+}
+
+fn has_code(warnings: [SimdOpportunityWarning], code: text) -> bool:
+    var i = 0
+    while i < warnings.len():
+        if warnings[i].code == code:
+            return true
+        i = i + 1
+    false
+
+describe "SIMD UTF-8 auto-vectorization lint rules":
+    it "detects ASCII validation loops as L-SIMD-012":
+        val source = "fn is_ascii(bytes: [u8], n: i64) -> bool:\n    for i in 0..n:\n        if bytes[i] >= 0x80:\n            return false\n    true\n"
+        val warnings = lint_simd_ascii_validate(source, "ascii.spl")
+        expect has_code(warnings, "L-SIMD-012") == true
+        expect warnings[0].fix.contains("rt_text_is_ascii") == true
+
+    it "detects UTF-8 leading-byte count loops as L-SIMD-013":
+        val source = "fn count_utf8(bytes: [u8], n: i64) -> i64:\n    var count = 0\n    for i in 0..n:\n        if (bytes[i] & 0xC0) != 0x80:\n            count = count + 1\n    count\n"
+        val warnings = lint_simd_byte_count(source, "count.spl")
+        expect has_code(warnings, "L-SIMD-013") == true
+        expect warnings[0].fix.contains("popcount") == true
+
+    it "detects delimiter scans as L-SIMD-014":
+        val source = "fn find_newlines(bytes: [u8], n: i64) -> [i64]:\n    var positions: [i64] = []\n    for i in 0..n:\n        if bytes[i] == 10:\n            positions.push(i)\n    positions\n"
+        val warnings = lint_simd_delimiter_scan(source, "delim.spl")
+        expect has_code(warnings, "L-SIMD-014") == true
+        expect warnings[0].fix.contains("cmp_eq") == true
+
+    it "composite runner includes all UTF-8 string SIMD loop rules":
+        val source = "fn scan(bytes: [u8], n: i64) -> i64:\n    var count = 0\n    for i in 0..n:\n        if bytes[i] >= 0x80:\n            return 0\n    for j in 0..n:\n        if (bytes[j] & 0xC0) != 0x80:\n            count = count + 1\n    var positions: [i64] = []\n    for k in 0..n:\n        if bytes[k] == 10:\n            positions.push(k)\n    count\n"
+        val warnings = lint_simd_opportunities(source, "scan.spl")
+        expect has_code(warnings, "L-SIMD-012") == true
+        expect has_code(warnings, "L-SIMD-013") == true
+        expect has_code(warnings, "L-SIMD-014") == true

@@ -1,0 +1,100 @@
+"""
+## Purpose
+Prove flat-AST string conversion preserves brace semantics while avoiding
+quadratic character-by-character text construction.
+"""
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{
+    flat_bridge_build_string_interps, flat_bridge_decode_brace_escapes,
+    parse_and_build_module}
+use compiler.frontend.parser_types_expr.{ExprKind}
+use std.io_runtime.file_read
+use std.spec.step
+
+describe "flat bridge string scan":
+    it "decodes doubled braces exactly and preserves unmatched text":
+        step("Pin empty ordinary escaped mixed and unmatched values")
+        expect(flat_bridge_decode_brace_escapes("")).to_equal("")
+        expect(flat_bridge_decode_brace_escapes("ordinary")).to_equal("ordinary")
+        expect(flat_bridge_decode_brace_escapes("{{")).to_equal("{")
+        expect(flat_bridge_decode_brace_escapes("}}")).to_equal("}")
+        expect(flat_bridge_decode_brace_escapes("a{{b}}c")).to_equal("a{b}c")
+        expect(flat_bridge_decode_brace_escapes("{{{{")).to_equal("{{")
+        expect(flat_bridge_decode_brace_escapes("{{{")).to_equal("{{")
+        expect(flat_bridge_decode_brace_escapes("}}}")).to_equal("}}")
+        expect(flat_bridge_decode_brace_escapes("{")).to_equal("{")
+        expect(flat_bridge_decode_brace_escapes("}")).to_equal("}")
+        expect(flat_bridge_decode_brace_escapes("}{")).to_equal("}{")
+        expect(flat_bridge_decode_brace_escapes("{x}")).to_equal("{x}")
+        expect(flat_bridge_decode_brace_escapes("a{b}}c")).to_equal("a{b}c")
+
+    it "preserves interpolation payload content order and fallback":
+        step("Warm fragment parser state and inspect returned expression order")
+        val warm = parse_and_build_module("fn warm() -> i64:\n    1\n", "warm.spl")
+        expect(warm.functions.contains("warm")).to_equal(true)
+        val span = Span.empty()
+        val left = "{"
+        val right = "}"
+        val ordered = flat_bridge_build_string_interps(
+            left + "alpha" + right + "-" + left + "beta" + right, span)
+        expect(ordered.len()).to_equal(2)
+        var first_name = ""
+        var second_name = ""
+        match ordered[0].expr.kind:
+            case Ident(name): first_name = name
+            case _: ()
+        match ordered[1].expr.kind:
+            case Ident(name): second_name = name
+            case _: ()
+        expect(first_name).to_equal("alpha")
+        expect(second_name).to_equal("beta")
+
+        step("Keep braces inside one valid nested string expression region")
+        val nested_value = left + " \"" + left + "\" + \"" + right + "\" " + right
+        val nested = flat_bridge_build_string_interps(nested_value, span)
+        expect(nested.len()).to_equal(1)
+        var nested_is_binary = false
+        match nested[0].expr.kind:
+            case Binary(_, _, _): nested_is_binary = true
+            case _: ()
+        expect(nested_is_binary).to_equal(true)
+
+        expect(flat_bridge_build_string_interps(
+            left + "," + right, span).len()).to_equal(0)
+        expect(flat_bridge_build_string_interps(
+            left + "alpha", span).len()).to_equal(0)
+
+    it "keeps ordinary literals on the allocation-free fast path":
+        step("Pin no-brace identity and selective decoder admission")
+        val source = file_read(
+            "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
+        val convert_start = source.index_of("fn convert_flat_expr(idx: i64)")
+        val string_start = source.index_of("if tag == EXPR_STRING_LIT:", convert_start)
+        val string_end = source.index_of("if tag == EXPR_BOOL_LIT:", string_start)
+        val body = source.slice(string_start, string_end)
+        expect(body).to_contain(
+            "if not str_val.contains(\"{\") and not str_val.contains(\"}\"):")
+        expect(body).to_contain(
+            "if not str_val.contains(\"{{\") and not str_val.contains(\"}}\"):")
+        expect(body.index_of("if not str_val.contains(\"{\")")).to_be_less_than(
+            body.index_of("flat_bridge_build_string_interps(str_val, span)"))
+        expect(body.index_of("if str_interps.len() > 0:")).to_be_less_than(
+            body.index_of("if not str_val.contains(\"{{\")"))
+        expect(body.index_of("if not str_val.contains(\"{{\")")).to_be_less_than(
+            body.index_of("flat_bridge_decode_brace_escapes(str_val)"))
+
+    it "assembles interpolation and decoded content with bounded joins":
+        step("Reject growing immutable prefixes in both bridge scanners")
+        val source = file_read(
+            "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
+        val build = source.slice(
+            source.index_of("fn flat_bridge_build_string_interps("),
+            source.index_of("fn flat_bridge_decode_brace_escapes("))
+        val decode = source.slice(
+            source.index_of("fn flat_bridge_decode_brace_escapes("),
+            source.index_of("fn convert_flat_expr(idx: i64)"))
+        expect(build.split("inner_parts.join(\"\")").len()).to_equal(2)
+        expect(build).not.to_contain("inner = inner +")
+        expect(decode.split("parts.join(\"\")").len()).to_equal(2)
+        expect(decode).not.to_contain("result = result +")

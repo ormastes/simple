@@ -1,0 +1,152 @@
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl 40%
+"""
+# Every previously-silent HIR->MIR lowering fallback is now loud
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (lane C6)
+**Design:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md sections 11.3-11.6
+
+## Purpose
+
+Lane C6 closed a set of silent fallbacks on the HIR-expression and
+HIR-statement boundaries of MIR lowering. Each one compiled clean, tested clean,
+and miscompiled — which is precisely why a behavioural test alone is a weak
+guard here: the defect's signature is the ABSENCE of any signal, so a passing
+run proves nothing about a path that was never taken.
+
+This spec therefore pins the SOURCE. For each site it asserts two things
+together: that the named diagnostic is present, and that the silent shape it
+replaced is gone. Either half alone is defeatable — a diagnostic can be added
+next to a surviving `pass`, and a `pass` can be deleted without anything taking
+its place.
+
+## Why this is a source-level spec
+
+MIR lowering is compiler code. Exercising these paths end to end requires a
+bootstrap that deploys a compiler built from this source, which is a separate,
+much heavier lane; a `bin/simple test` run executes the ALREADY-DEPLOYED binary
+and would happily pass against source that had been reverted. Reading the source
+is the assertion that actually tracks the change. When the bootstrap lane is
+green, the behavioural half belongs beside it as an execution test that compiles
+each construct and asserts the code appears on stderr.
+
+## Sites covered
+
+1. `lower_expr_impl`'s eleven missing HirExprKind arms — were reported through a
+   shared terminal wildcard that renders the kind as an opaque `<enum@0x..>`
+   handle, i.e. unsupported AND unnameable. Now `E-MIR-EXPR-<Variant>`.
+2. The six discriminant-guarded destructure wildcards in `expr_dispatch.spl` and
+   two more in `switch_operators_calls.spl` — were `pass`, so a payload decode
+   that disagreed with the discriminant fell through and was indistinguishable
+   from an unhandled kind. Now `E-MIR-EXPR-PAYLOAD`.
+3. The nine discriminant-guarded type destructure wildcards in
+   `function_lowering.spl` — same shape on the type side. Now
+   `E-MIR-TYPE-PAYLOAD`.
+4. The statement dispatch's terminal wildcard — was `case _: ()`, which DROPPED
+   the statement from the function body entirely. Now `E-MIR-STMT-Unknown`.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+
+val EXPR_DISPATCH = "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
+val SWITCH_CALLS = "src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
+val FUNCTION_LOWERING = "src/compiler/50.mir/_MirLowering/function_lowering.spl"
+val STMTS = "src/compiler/50.mir/mir_lowering_stmts.spl"
+
+fn source_of(path: text) -> text:
+    if not file_exists(path):
+        fail("source not found at {path}; run from the repo root")
+        return ""
+    return file_read(path)
+
+describe "MIR lowering has no silent HIR-expression fallback":
+    it "raises a NAMED, spanned diagnostic for each of the eleven unlowerable expression kinds":
+        step("Before C6 these had no arm and reported as an opaque <enum@0x..> handle")
+        val src = source_of(EXPR_DISPATCH)
+        expect(src).to_contain("E-MIR-EXPR-As")
+        expect(src).to_contain("E-MIR-EXPR-CharLit")
+        expect(src).to_contain("E-MIR-EXPR-Comprehension")
+        expect(src).to_contain("E-MIR-EXPR-Error")
+        expect(src).to_contain("E-MIR-EXPR-Lambda")
+        expect(src).to_contain("E-MIR-EXPR-OptionalChain")
+        expect(src).to_contain("E-MIR-EXPR-StaticCall")
+        expect(src).to_contain("E-MIR-EXPR-StructLit")
+        expect(src).to_contain("E-MIR-EXPR-Throw")
+        expect(src).to_contain("E-MIR-EXPR-TupleIndex")
+        expect(src).to_contain("E-MIR-EXPR-With")
+
+    it "reaches each of those codes through a real dispatch arm, not a shared wildcard":
+        step("A code that is only mentioned in a comment is not a dispatch arm")
+        val src = source_of(EXPR_DISPATCH)
+        expect(src).to_contain("case As(_, _):")
+        expect(src).to_contain("case CharLit(_):")
+        expect(src).to_contain("case Comprehension(_, _, _):")
+        expect(src).to_contain("case Error:")
+        expect(src).to_contain("case Lambda(_, _, _):")
+        expect(src).to_contain("case OptionalChain(_, _):")
+        expect(src).to_contain("case StaticCall(_, _, _, _):")
+        expect(src).to_contain("case StructLit(_, _):")
+        expect(src).to_contain("case Throw(_):")
+        expect(src).to_contain("case TupleIndex(_, _):")
+        expect(src).to_contain("case With(_, _):")
+
+    it "hands back a real unit temp rather than nil from the unsupported path":
+        step("A nil LocalId traps as `field access on nil receiver` BEFORE diagnostics flush, hiding the real cause")
+        val src = source_of(EXPR_DISPATCH)
+        expect(src).to_contain("me unsupported_expr_kind(code: text, description: text, span: Span) -> LocalId:")
+        expect(src).to_contain("t_unsupported_named")
+
+describe "MIR lowering has no silent payload-decode fallback":
+    it "names the variant when a discriminant-guarded expression destructure fails to bind":
+        step("These wildcards were `pass`, so a misbinding was indistinguishable from an unhandled kind")
+        val src = source_of(EXPR_DISPATCH)
+        expect(src).to_contain("me payload_decode_failed(variant: text, span: Span):")
+        expect(src).to_contain("E-MIR-EXPR-PAYLOAD")
+        expect(src).to_contain("self.payload_decode_failed(\"HirExprKind.Field\", expr_value.span)")
+        expect(src).to_contain("self.payload_decode_failed(\"HirExprKind.Call\", expr_value.span)")
+        expect(src).to_contain("self.payload_decode_failed(\"HirExprKind.Block\", expr_value.span)")
+        expect(src).to_contain("self.payload_decode_failed(\"HirExprKind.Return\", expr_value.span)")
+        expect(src).to_contain("self.payload_decode_failed(\"HirExprKind.Var\", expr_value.span)")
+        expect(src).to_contain("self.payload_decode_failed(\"HirExprKind.NamedVar\", expr_value.span)")
+
+    it "covers the call-callee guards in the operator/call file too":
+        step("lower_call has its own Var/NamedVar discriminant guards")
+        val src = source_of(SWITCH_CALLS)
+        expect(src).to_contain("self.payload_decode_failed(\"HirExprKind.Var\", callee.span)")
+        expect(src).to_contain("self.payload_decode_failed(\"HirExprKind.NamedVar\", callee.span)")
+
+    it "names the variant when a discriminant-guarded TYPE destructure fails to bind":
+        step("Same defect class on the type side: the parameter silently lowered to i64/ptr")
+        val src = source_of(FUNCTION_LOWERING)
+        expect(src).to_contain("me type_payload_decode_failed(variant: text, span: Span):")
+        expect(src).to_contain("E-MIR-TYPE-PAYLOAD")
+        expect(src).to_contain("self.type_payload_decode_failed(\"HirTypeKind.Dict\", type_.span)")
+        expect(src).to_contain("self.type_payload_decode_failed(\"HirTypeKind.Named\", type_.span)")
+        expect(src).to_contain("self.type_payload_decode_failed(\"HirTypeKind.Optional\", type_.span)")
+        expect(src).to_contain("self.type_payload_decode_failed(\"HirTypeKind.Array\", param.span)")
+        expect(src).to_contain("self.type_payload_decode_failed(\"HirTypeKind.Slice\", param.span)")
+        expect(src).to_contain("self.type_payload_decode_failed(\"HirTypeKind.Int\", param.span)")
+
+    it "leaves the genuine one-variant PROBE alone":
+        step("The Isolated check asks a question over the open type universe; its wildcard is the answer `no`, not a defect")
+        val src = source_of(FUNCTION_LOWERING)
+        expect(src).to_contain("case HirTypeKind.Isolated(_):")
+        expect(src).to_contain("is NOT converted")
+
+describe "MIR lowering has no silent HIR-statement fallback":
+    it "reports E-MIR-STMT-Unknown instead of dropping the statement":
+        step("`case _: ()` deleted the statement from the function body with no signal at all")
+        val src = source_of(STMTS)
+        expect(src).to_contain("E-MIR-STMT-Unknown")
+        expect(src).to_contain("would otherwise be silently dropped")
+        expect(src).to_contain("unknown_stmt_disc")
+
+    it "still lowers all five statement kinds through explicit arms":
+        step("The wildcard is a staleness canary, not a dispatch path")
+        val src = source_of(STMTS)
+        expect(src).to_contain("case HirStmtKind.Expr(extracted_expr):")
+        expect(src).to_contain("case Let(symbol, type_, init):")
+        expect(src).to_contain("case Assign(target, op, value):")
+        expect(src).to_contain("case Block(block):")
+        expect(src).to_contain("case AsmAssert(spec):")

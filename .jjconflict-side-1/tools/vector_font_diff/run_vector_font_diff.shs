@@ -1,0 +1,95 @@
+#!/bin/sh
+# Chrome <-> Simple vector-font (outline) rasterization differential driver.
+#
+# Both sides rasterize the SAME TTF (a repo-independent shared file) at the
+# same px size: Chrome via @font-face + headless screenshot ink extraction,
+# Simple via the spl_fonts outline rasterizer (rt_fonts_* cdylib — the exact
+# provider FontRasterizer drives in production). Compares per-glyph ink
+# metrics and writes retained evidence to tools/vector_font_diff/out/.
+#
+# Usage: sh tools/vector_font_diff/run_vector_font_diff.shs [--chrome <path>]
+# Env: VECTOR_FONT_CHROME, VECTOR_FONT_TTF (default DejaVuSans).
+#
+# Verdict (last stdout line):
+#   vector-font-diff verdict: PASS — <n> glyph(s) compared, ...   exit 0
+#   vector-font-diff verdict: FAIL — ...                          exit 1
+#   vector-font-diff verdict: ERROR — nothing was compared        exit 4
+
+set -u
+DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$DIR/../.." && pwd)
+CHROME="${VECTOR_FONT_CHROME:-}"
+TTF="${VECTOR_FONT_TTF:-/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --chrome) CHROME="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$CHROME" ]; then
+  for c in \
+    "$ROOT/../simple-webrender-gpu-offload-wt/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome" \
+    "$HOME/dev/pub/simple-webrender-gpu-offload-wt/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome" \
+    "$HOME/.cache/ms-playwright/chromium-*/chrome-linux64/chrome" \
+    /usr/bin/google-chrome /usr/bin/chromium /usr/bin/chromium-browser
+  do
+    for e in $c; do [ -x "$e" ] && CHROME="$e" && break; done
+    [ -n "$CHROME" ] && break
+  done
+fi
+if [ -z "$CHROME" ] || [ ! -x "$CHROME" ]; then
+  echo "UNAVAILABLE: no chrome executable found; pass --chrome <path> or set VECTOR_FONT_CHROME" >&2
+  echo "vector-font-diff verdict: ERROR — nothing was compared"
+  exit 4
+fi
+if [ ! -f "$TTF" ]; then
+  echo "UNAVAILABLE: shared TTF not found: $TTF" >&2
+  echo "vector-font-diff verdict: ERROR — nothing was compared"
+  exit 4
+fi
+
+# Build the spl_fonts outline-rasterizer cdylib if absent.
+DYLIB="$ROOT/build/lib/libspl_fonts.so"
+if [ ! -f "$DYLIB" ]; then
+  echo "== building libspl_fonts.so =="
+  mkdir -p "$ROOT/build/lib"
+  ( cd "$ROOT/src/compiler_rust" && \
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/mnt/data/tmp/cargo-spl-fonts}" \
+    cargo build -p spl_fonts --release ) || {
+      echo "vector-font-diff verdict: ERROR — nothing was compared"
+      exit 4
+    }
+  cp "${CARGO_TARGET_DIR:-/mnt/data/tmp/cargo-spl-fonts}/release/libspl_fonts.so" "$DYLIB"
+fi
+
+mkdir -p "$DIR/out"
+rm -f "$DIR/out/chrome.json" "$DIR/out/simple.json" "$DIR/out/summary.txt"
+
+echo "== chrome extraction =="
+node "$DIR/chrome_vector_font_dump.js" --chrome "$CHROME" --ttf "$TTF" \
+     --out "$DIR/out/chrome.json" || {
+  echo "vector-font-diff verdict: ERROR — nothing was compared"
+  exit 4
+}
+
+echo "== simple extraction =="
+VECTOR_FONT_DYLIB="$DYLIB" VECTOR_FONT_TTF="$TTF" \
+  timeout 900 "$ROOT/bin/simple" run "$DIR/simple_vector_font_dump.spl" 2>/dev/null \
+  | sed -n '/VECTOR_FONT_DUMP_JSON_BEGIN/,/VECTOR_FONT_DUMP_JSON_END/p' \
+  | sed '1d;$d' > "$DIR/out/simple.json"
+if [ ! -s "$DIR/out/simple.json" ]; then
+  echo "FAIL simple extraction produced no JSON" >&2
+  echo "vector-font-diff verdict: ERROR — nothing was compared"
+  exit 4
+fi
+
+echo "== compare =="
+node "$DIR/vector_font_diff.js" "$DIR/out/chrome.json" "$DIR/out/simple.json" \
+     "$TTF" > "$DIR/out/summary.txt"
+rc=$?
+cat "$DIR/out/summary.txt"
+tail -1 "$DIR/out/summary.txt" | grep -q "verdict: PASS" && exit 0
+[ $rc -ne 0 ] && exit 1
+exit 1

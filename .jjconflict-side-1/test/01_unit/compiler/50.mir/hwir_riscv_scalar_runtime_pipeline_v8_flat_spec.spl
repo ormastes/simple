@@ -1,0 +1,98 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_pipeline_v8_flat.{strict_riscv_scalar_runtime_pipeline_v8_flat_direct}
+
+fn rv32_zmmul_zicsr() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "riscv-gen2-rv32-zmmul-zicsr", isa_profile: "rv32i_zmmul_zicsr_zifencei",
+        compressed_decode_profile: "none")
+
+fn rv64_zmmul_zicsr() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "riscv-gen2-rv64-zmmul-zicsr", isa_profile: "rv64i_zmmul_zicsr_zifencei",
+        compressed_decode_profile: "none")
+
+describe "flattened runtime scalar pipeline v8":
+    it "owns the tag-three CSR provider and exposes its service boundary":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+            "runtime_v8_flat", rv32_zmmul_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        expect(pipeline.local_diagnostic()).to_equal("")
+        expect(pipeline.csr.entity_name).to_equal("runtime_v8_flat_csr")
+        expect(pipeline.top_ports.any(_.name == "csr_present" and _.direction == "in")).to_equal(true)
+        expect(pipeline.top_ports.any(_.name == "csr_commit_value" and _.direction == "out")).to_equal(true)
+
+    it "constructs the combined profiles with an exact closed direct-child graph":
+        for row in [(rv32_zmmul_zicsr(), LsuConfig.rv32_product_default()),
+                (rv64_zmmul_zicsr(), LsuConfig.rv64_product_default())]:
+            val pipeline = strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+                "runtime_v8_flat_closed_" + row[0].xlen.to_text(), row[0], row[1]).unwrap()
+            expect(pipeline.local_diagnostic()).to_equal("")
+            expect(pipeline.binding_prefix_diagnostic()).to_equal("")
+            expect(pipeline.diagnostic()).to_equal("")
+            expect(pipeline.csr.entity_name).to_equal(
+                "runtime_v8_flat_closed_" + row[0].xlen.to_text() + "_csr")
+
+    it "freezes every CSR service top-port direction and XLEN-aware width":
+        for row in [(rv32_zmmul_zicsr(), LsuConfig.rv32_product_default()),
+                (rv64_zmmul_zicsr(), LsuConfig.rv64_product_default())]:
+            val pipeline = strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+                "runtime_v8_flat_csr_abi_" + row[0].xlen.to_text(), row[0], row[1]).unwrap()
+            for port in [("csr_present", "in", 1), ("csr_read_value", "in", row[0].xlen),
+                    ("csr_lookup_valid", "out", 1), ("csr_lookup_address", "out", 12),
+                    ("csr_lookup_read_enable", "out", 1), ("csr_commit_valid", "out", 1),
+                    ("csr_commit_address", "out", 12), ("csr_commit_value", "out", row[0].xlen)]:
+                expect(pipeline.top_ports.any(_.name == port[0] and _.direction == port[1] and
+                    _.bit_width == port[2])).to_equal(true)
+
+    it "routes class six through pending tag three and retains the CSR child":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+            "runtime_v8_flat_csr_route", rv64_zmmul_zicsr(), LsuConfig.rv64_product_default()).unwrap()
+        expect(pipeline.router.entity_name).to_equal("runtime_v8_flat_csr_route_router")
+        expect(pipeline.router.constants.any(_.name == "class6" and _.bit_width == 3 and _.value == 6)).to_equal(true)
+        expect(pipeline.router.constants.any(_.name == "tag_csr" and _.bit_width == 3 and _.value == 3)).to_equal(true)
+        expect(pipeline.bindings.any(_.source_owner == "router" and _.source_port == "pending_dispatch_tag" and
+            _.destination_owner == "pending" and _.destination_port == "dispatch_tag" and _.bit_width == 3)).to_equal(true)
+        expect(pipeline.csr.entity_name).to_equal("runtime_v8_flat_csr_route_csr")
+
+    it "does not preserve the V5 disabled CSR zero bindings and gates the CSR fault row":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+            "runtime_v8_flat_csr_live", rv32_zmmul_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        expect(pipeline.bindings.any(_.source_owner == "zero_defaults" and _.destination_owner == "csr")).to_equal(false)
+        expect(pipeline.bindings.any(_.source_owner == "csr" and _.source_port == "provider_protocol_fault" and
+            _.destination_owner == "global_fault_gate" and _.destination_port == "csr_fault" and
+            _.bit_width == 1)).to_equal(true)
+
+    it "rejects malformed direct edges and reordered otherwise-closed canonical graphs":
+        val malformed = strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+            "runtime_v8_flat_malformed", rv32_zmmul_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        malformed.bindings[0].source_port = "missing_port"
+        expect(malformed.local_diagnostic()).to_equal(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V8-ENDPOINT: binding endpoint must exist")
+        val reordered = strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+            "runtime_v8_flat_reordered", rv32_zmmul_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        val first = reordered.bindings[0]
+        reordered.bindings[0] = reordered.bindings[1]
+        reordered.bindings[1] = first
+        expect(reordered.local_diagnostic()).to_equal("")
+        expect(reordered.diagnostic()).to_equal(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V8-CANONICAL: pipeline requires exact direct compiler-owned children")
+
+    it "rejects IM and standalone CSR profiles at the V8 product boundary":
+        expect(strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+            "runtime_v8_flat_im_rejected", CoreConfig.rv32im(), LsuConfig.rv32_product_default()).is_err()).to_equal(true)
+        expect(strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+            "runtime_v8_flat_zicsr_rejected", CoreConfig.rv32_zicsr_zifencei(),
+            LsuConfig.rv32_product_default()).is_err()).to_equal(true)
+
+    it "binds pending tag-three service, completion, and fail-closed paths directly":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v8_flat_direct(
+            "runtime_v8_flat_edges", rv32_zmmul_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        for edge in [("pending", "csr_request_valid", "csr", "request_valid", 1),
+                ("pending", "csr_request_provider_tag", "csr", "request_provider_tag", 3),
+                ("csr", "completion_valid", "pending", "csr_completion_valid", 1),
+                ("pending", "csr_completion_ready", "csr", "completion_ready", 1),
+                ("csr", "provider_protocol_fault", "global_fault_gate", "csr_fault", 1),
+                ("csr", "csr_commit_valid", "global_fault_gate", "raw_csr_commit_valid", 1)]:
+            expect(pipeline.bindings.any(_.source_owner == edge[0] and _.source_port == edge[1] and
+                _.destination_owner == edge[2] and _.destination_port == edge[3] and _.bit_width == edge[4])).to_equal(true)

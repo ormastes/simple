@@ -1,0 +1,71 @@
+# Build an RV64 production scene from the live compositor surface registry.
+# This adapter never invents windows, geometry, ownership, or revisions.
+
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WM_CHROME_KIND_TITLED, shared_wm_background_color}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.compositor.{Compositor}
+
+pub struct Rv64ProcessOwnedScene:
+    scene: SharedWmScene
+    scene_revision: i64
+    process_id: u64
+    process_surface_count: i64
+
+fn _rv64_scene_mix_i64(seed: i64, value: i64) -> i64:
+    ((seed * 131 + value) % 2147483647) + 1
+
+fn _rv64_scene_mix_text(seed: i64, value: text) -> i64:
+    var revision = seed
+    var index = 0
+    while index < value.len():
+        revision = _rv64_scene_mix_i64(revision, value.char_at(index).ord().to_i64())
+        index = index + 1
+    revision
+
+pub fn rv64_process_owned_scene(compositor: Compositor, process_id: u64) -> Rv64ProcessOwnedScene:
+    var windows: [SharedWmWindow] = []
+    var revision: i64 = 17
+    var process_surface_count: i64 = 0
+    var z_index = 0
+    for surface in compositor.surfaces:
+        val owner_pid = if surface.process_id > 0: surface.process_id.to_u64() else: 0u64
+        if owner_pid == process_id and surface.visible:
+            process_surface_count = process_surface_count + 1
+        windows.push(SharedWmWindow(
+            surface_id: surface.id.to_text(),
+            window_id: surface.id.to_text(),
+            surface_kind: "simpleos-compositor",
+            process_id: owner_pid,
+            app_id: surface.app_id,
+            title: surface.title,
+            language: "und",
+            x: surface.x,
+            y: surface.y,
+            width: surface.width,
+            height: surface.height,
+            tree: nil,
+            html: "",
+            minimized: not surface.visible,
+            focused: z_index == compositor.focused_idx,
+            z_index: z_index,
+            chrome_kind: WM_CHROME_KIND_TITLED
+        ))
+        revision = _rv64_scene_mix_i64(revision, surface.id.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.x.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.y.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.width.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.height.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.content_revision)
+        revision = _rv64_scene_mix_i64(revision, surface.process_id)
+        revision = _rv64_scene_mix_text(revision, surface.app_id)
+        revision = _rv64_scene_mix_text(revision, surface.title)
+        revision = _rv64_scene_mix_i64(revision, if surface.visible: 1 else: 0)
+        z_index = z_index + 1
+    val scene = SharedWmScene(
+        width: compositor.screen_width,
+        height: compositor.screen_height,
+        backend: "simpleos-compositor",
+        windows: windows,
+        background: shared_wm_background_color(wm_chrome_theme().compositor_bg)
+    )
+    Rv64ProcessOwnedScene(scene: scene, scene_revision: revision, process_id: process_id, process_surface_count: process_surface_count)

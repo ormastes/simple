@@ -1,0 +1,102 @@
+#!/usr/bin/env sh
+# check-kv260-simpleos-boot-release.shs -- release lane: load SimpleOS rv32
+# onto the REAL KV260 (xck26) and check booting, via the system spec
+#   test/03_system/app/hardware/feature/kv260_simpleos_boot_silicon_spec.spl
+#
+# Verdict contract (release semantics):
+#   STATUS: PASS  -- board present, silicon liveness AND full boot green
+#   STATUS: BLOCKED -- board/toolchain absent on this host; lane NOT executed
+#                    and NOTHING was checked. exit 2, never 0: a vacuous exit 0
+#                    is indistinguishable from a real pass to any caller (see
+#                    .claude/rules/vcs.md on pre-push guards, and
+#                    check-native-option-bool-llvm-verify.shs "exit 2, NOT 0").
+#                    A release host without the board is still not *failed* --
+#                    the aggregator (check-simpleos-mission-critical-release.shs)
+#                    decides that boardless is acceptable, explicitly, instead
+#                    of this gate lying about it.
+#   STATUS: FAIL  -- board present and either the silicon-liveness tier
+#                    regressed (program/psu_init/DDR/AXI path) or the full
+#                    boot chain (.bss zero-fill, boot OK, FS mount, SMF FS
+#                    pass, TEST PASSED) did not complete -- honest red,
+#                    never silently skipped.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SPEC="test/03_system/app/hardware/feature/kv260_simpleos_boot_silicon_spec.spl"
+BOOT_LOG="build/fpga/systest/kv260_boot_latest.log"
+LANE_LOG="${LANE_LOG:-build/fpga/systest/kv260_release_lane.log}"
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
+BITSTREAM="build/fpga/k26_rv32_ddr/k26_rv32_ddr.bit"
+KERNEL_ELF="build/os/simpleos_riscv32_smf_fs.elf"
+FAT32_IMG="build/os/fat32-riscv32.img"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+
+blocked_lane() {
+    echo "STATUS: BLOCKED kv260-simpleos-boot-release reason=$1 (board lane not executed on this host; NOTHING was checked)" >&2
+    exit 2
+}
+
+# ---- precondition probe (mirrors spec tier 1; cheap, no Vivado launch) ----
+[ -f "$VIVADO_SETTINGS" ] || blocked_lane "vivado-settings-missing:$VIVADO_SETTINGS"
+[ -f "$BITSTREAM" ]       || blocked_lane "bitstream-missing:$BITSTREAM"
+[ -f "$KERNEL_ELF" ]      || blocked_lane "kernel-elf-missing:$KERNEL_ELF"
+[ -f "$FAT32_IMG" ]       || blocked_lane "fat32-image-missing:$FAT32_IMG"
+lsusb -d 0403:6011 >/dev/null 2>&1 || blocked_lane "kv260-jtag-usb-absent"
+
+# ---- board present: fresh bring-up OUTSIDE the test runner ---------------
+# A real board run takes ~5-7 min, longer than test-runner child timeouts
+# across deployed binary generations. Run it here (plain shell, bounded),
+# then the spec's tiers reuse the fresh evidence log (<30 min) and finish in
+# seconds. --timeout is still passed for runners that forward it.
+mkdir -p "$(dirname "$LANE_LOG")"
+set +e
+timeout 1800 sh scripts/fpga/systest_kv260_bringup.shs >"$LANE_LOG.bringup" 2>&1
+bringup_rc=$?
+timeout 600 "$SIMPLE_BIN" test "$SPEC" --timeout 540 >"$LANE_LOG" 2>&1
+spec_rc=$?
+set -e
+echo "kv260_bringup_exit=$bringup_rc bringup_log=$LANE_LOG.bringup"
+
+marker() { grep -Fq -- "$1" "$BOOT_LOG" 2>/dev/null; }
+
+# Silicon-liveness tier (must hold on any connected board)
+liveness_ok=true
+for m in "PROGRAM_HW_DEVICES_DONE" "CTRL_MAGIC=0x52563332" \
+         "SYSTEST_PRERUN_AXI_READS_ZERO=true" "DDR_BANNER_WORD=0x203D3D3D" \
+         "SYSTEST_AXI_READS_GT_1M=true" "SYSTEST_UART_BYTE_COUNT_POSITIVE=true" \
+         "[harden] canary arch=riscv32"; do
+    if ! marker "$m"; then
+        liveness_ok=false
+        echo "kv260_liveness_missing_marker=$m"
+    fi
+done
+
+# Full-boot tier
+fullboot_ok=true
+for m in "BSS_HEAPOFF_POST=0x00000000" "SimpleOS RV32 boot OK" "FS_MOUNT_OK" \
+         "SIMPLEOS_RISCV_SMF_FS_PASS" "TEST PASSED" \
+         "PASS: rv32 SimpleOS reached TEST PASSED on KV260 silicon"; do
+    if ! marker "$m"; then
+        fullboot_ok=false
+        echo "kv260_fullboot_missing_marker=$m"
+    fi
+done
+
+echo "kv260_spec_exit=$spec_rc spec_log=$LANE_LOG boot_log=$BOOT_LOG"
+
+if [ "$liveness_ok" != true ]; then
+    echo "STATUS: FAIL kv260-simpleos-boot-release reason=silicon-liveness-regressed (program/psu_init/DDR-load/AXI path) boot_log=$BOOT_LOG" >&2
+    exit 1
+fi
+if [ "$fullboot_ok" != true ]; then
+    echo "STATUS: FAIL kv260-simpleos-boot-release reason=full-boot-not-reached boot_log=$BOOT_LOG" >&2
+    exit 1
+fi
+if [ "$spec_rc" -ne 0 ]; then
+    echo "STATUS: FAIL kv260-simpleos-boot-release reason=spec-run-failed spec_exit=$spec_rc spec_log=$LANE_LOG" >&2
+    exit 1
+fi
+echo "STATUS: PASS kv260-simpleos-boot-release silicon_liveness=pass full_boot=pass boot_log=$BOOT_LOG"
+exit 0

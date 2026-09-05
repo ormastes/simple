@@ -1,0 +1,80 @@
+# Blink PaintChunk — a grouped drawing unit.
+#
+# A PaintChunk batches a consecutive run of DisplayItems that share the same
+# PropertyTreeState (transform id + clip id + effect id + scroll id). The
+# compositor consumes chunks rather than individual display items so that a
+# property-state change is the only thing that forces a new drawing group.
+#
+# Provides: PropertyTreeState, PaintChunkId, PaintChunk,
+#           property_tree_state_root, paint_chunk_new.
+
+use std.skia.entity.geometry.{SkRect}
+
+# Identifies the position in each of the four property trees that a chunk is
+# drawn under. `-1` is the sentinel for "the root node of that tree".
+struct PropertyTreeState:
+    transform_id: i64
+    clip_id: i64
+    effect_id: i64
+    scroll_id: i64
+
+# The root state: every id points at its tree's root node.
+fn property_tree_state_root() -> PropertyTreeState:
+    PropertyTreeState(transform_id: -1, clip_id: -1, effect_id: -1, scroll_id: -1)
+
+impl PropertyTreeState:
+    # Structural equality across all four tree ids.
+    fn equals(other: PropertyTreeState) -> bool:
+        self.transform_id == other.transform_id and
+        self.clip_id == other.clip_id and
+        self.effect_id == other.effect_id and
+        self.scroll_id == other.scroll_id
+
+# Stable identity of a chunk: the layout node that owns it plus the index of
+# the display item that started it.
+struct PaintChunkId:
+    owner_node_id: i64
+    display_item_index: i64
+
+impl PaintChunkId:
+    fn equals(other: PaintChunkId) -> bool:
+        self.owner_node_id == other.owner_node_id and
+        self.display_item_index == other.display_item_index
+
+# A half-open range [begin_index, end_index) into the owning PaintArtifact's
+# display item list, together with the state and bounds it draws under.
+class PaintChunk:
+    begin_index: i64
+    end_index: i64
+    id: PaintChunkId
+    property_state: PropertyTreeState
+    bounds: SkRect
+    is_cacheable: bool
+
+# Factory. Chunks are cacheable by default; a chunk is opted out only when the
+# producer knows its contents change every frame.
+fn paint_chunk_new(begin_index: i64, end_index: i64, id: PaintChunkId,
+                   property_state: PropertyTreeState, bounds: SkRect) -> PaintChunk:
+    PaintChunk(begin_index: begin_index, end_index: end_index, id: id,
+               property_state: property_state, bounds: bounds, is_cacheable: true)
+
+impl PaintChunk:
+    # Number of display items covered by this chunk.
+    fn size() -> i64:
+        self.end_index - self.begin_index
+
+    # A chunk that covers no display items.
+    fn is_empty() -> bool:
+        self.begin_index == self.end_index
+
+    # True when `other` can be merged into this chunk without changing the
+    # property state the items are drawn under.
+    fn has_same_property_state(other: PaintChunk) -> bool:
+        self.property_state.equals(other.property_state)
+
+    # True when the two chunks' bounds intersect, so their draw order matters.
+    fn overlaps(other: PaintChunk) -> bool:
+        self.bounds.intersects(other.bounds)
+
+    fn to_string() -> text:
+        "PaintChunk([{self.begin_index}, {self.end_index}))"

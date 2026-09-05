@@ -1,0 +1,114 @@
+#!/bin/sh
+# Production native-build gate for the hosted pure-Simple PostgreSQL mimic.
+#
+# Usage:
+#   sh scripts/check/build-postgres-mimic-server-native.shs <simple> [output] [cache]
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SIMPLE_BIN=${1:-"$ROOT_DIR/bin/simple"}
+OUTPUT=${2:-"$ROOT_DIR/build/postgres-mimic-server-production/postgres_mimic_server"}
+CACHE_DIR=${3:-"$ROOT_DIR/build/postgres-mimic-server-production/cache"}
+OUTPUT_DIR=$(dirname -- "$OUTPUT")
+LOG="$OUTPUT_DIR/build.log"
+PROVENANCE_RECEIPT="$OUTPUT_DIR/runtime-provenance.env"
+RUNTIME_CAPSULE=${SIMPLE_DB_RUNTIME_CAPSULE:-${SIMPLE_RUNTIME_PATH:-}}
+
+mkdir -p "$OUTPUT_DIR" "$CACHE_DIR"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "FAIL: Simple compiler is not executable: $SIMPLE_BIN" >&2
+    exit 2
+fi
+if [ ! -f "$ROOT_DIR/src/app/postgres_mimic_server/main.spl" ]; then
+    echo "FAIL: PostgreSQL-mimic entry source is missing" >&2
+    exit 2
+fi
+
+if [ -z "$RUNTIME_CAPSULE" ]; then
+    echo "FAIL: strict PostgreSQL-mimic build requires SIMPLE_DB_RUNTIME_CAPSULE (or SIMPLE_RUNTIME_PATH) naming an admitted core-C capsule" >&2
+    exit 7
+fi
+if ! "$ROOT_DIR/scripts/check/check-db-runtime-capsule-provenance.shs" "$RUNTIME_CAPSULE" >"$PROVENANCE_RECEIPT.tmp"; then
+    rm -f "$PROVENANCE_RECEIPT.tmp"
+    echo "FAIL: selected DB runtime capsule did not pass provenance admission" >&2
+    exit 7
+fi
+mv "$PROVENANCE_RECEIPT.tmp" "$PROVENANCE_RECEIPT"
+RUNTIME_CAPSULE=$(awk -F= '$1 == "db_runtime_capsule_dir" { print substr($0, index($0, "=") + 1) }' "$PROVENANCE_RECEIPT")
+RUNTIME_ARCHIVE=$(awk -F= '$1 == "db_runtime_archive" { print substr($0, index($0, "=") + 1) }' "$PROVENANCE_RECEIPT")
+
+. "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
+
+# Reject bootstrap seeds and stale staged binaries before walking the large
+# PureDatabase closure. This is a real native-build capability probe, not a
+# banner/version assertion.
+if ! simple_compiler_usable "$SIMPLE_BIN"; then
+    echo "FAIL: production build requires a usable pure-Simple self-hosted compiler; authority probe rejected: $SIMPLE_BIN" >&2
+    exit 6
+fi
+
+set +e
+env -u SIMPLE_BOOTSTRAP \
+    SIMPLE_RUNTIME_PATH="$RUNTIME_CAPSULE" \
+    SIMPLE_CORE_RUNTIME_PATH="$RUNTIME_CAPSULE" \
+    SIMPLE_LIB="$ROOT_DIR/src" \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BIN" native-build \
+    --backend cranelift \
+    --source "$ROOT_DIR/src/app" \
+    --source "$ROOT_DIR/src/lib" \
+    --entry-closure \
+    --cache-dir "$CACHE_DIR" \
+    --runtime-bundle core-c-bootstrap \
+    --runtime-path "$RUNTIME_CAPSULE" \
+    --entry "$ROOT_DIR/src/app/postgres_mimic_server/main.spl" \
+    --verbose \
+    --strip \
+    --output "$OUTPUT" >"$LOG" 2>&1
+BUILD_STATUS=$?
+set -e
+
+sed -n '1,200p' "$LOG"
+if [ "$BUILD_STATUS" -ne 0 ]; then
+    echo "FAIL: strict PostgreSQL-mimic native-build exited $BUILD_STATUS" >&2
+    exit "$BUILD_STATUS"
+fi
+if [ ! -x "$OUTPUT" ]; then
+    echo "FAIL: native-build reported success without an executable: $OUTPUT" >&2
+    exit 3
+fi
+if grep -q 'stub functions for unresolved symbols' "$LOG"; then
+    echo "FAIL: production build fabricated unresolved-symbol stubs" >&2
+    exit 4
+fi
+if grep -Eqi 'falling back|fallback runtime|runtime archive is STALE|selected .*simple-core|build/simple-core/libsimple_runtime' "$LOG"; then
+    echo "FAIL: native-build attempted a stale or fallback runtime instead of selected archive: $RUNTIME_ARCHIVE" >&2
+    exit 8
+fi
+
+UNRESOLVED=$(nm -u "$OUTPUT" 2>/dev/null || true)
+for SYMBOL in \
+    lib__nogc_async_mut__database__postgres_mimic__parallel_linux_server \
+    lib__nogc_sync_mut__database__postgres_mimic__PgDatabaseOwner \
+    lib__nogc_sync_mut__database__postgres_mimic__PgDispatchGate \
+    thread_spawn_with_args \
+    rt_struct_receiver_valid
+do
+    if printf '%s\n' "$UNRESOLVED" | awk '{print $NF}' | grep -Fxq "$SYMBOL"; then
+        echo "FAIL: production artifact retains unresolved symbol: $SYMBOL" >&2
+        exit 5
+    fi
+done
+
+{
+    printf '%s\n' \
+        "db_native_compiler=$SIMPLE_BIN" \
+        "db_native_compiler_sha256=$(sha256sum "$SIMPLE_BIN" | awk '{print $1}')" \
+        "db_native_output=$OUTPUT" \
+        "db_native_output_sha256=$(sha256sum "$OUTPUT" | awk '{print $1}')" \
+        "db_native_runtime_bundle=core-c-bootstrap" \
+        "db_native_runtime_archive=$RUNTIME_ARCHIVE"
+} >>"$PROVENANCE_RECEIPT"
+
+echo "PASS: strict PostgreSQL-mimic server artifact: $OUTPUT (runtime receipt: $PROVENANCE_RECEIPT)"

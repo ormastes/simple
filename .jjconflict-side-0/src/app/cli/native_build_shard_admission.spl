@@ -1,0 +1,36 @@
+# Memory admission for parse/HIR cache-warming processes.
+#
+# This is deliberately a pure O(1) calculation.  Shard children remain
+# independent processes and retain their existing deterministic path ownership;
+# only the number admitted by the orchestrator changes.
+
+val DEFAULT_SHARD_RSS_BUDGET_MB: i64 = 5120
+val DEFAULT_SHARD_ESTIMATED_RSS_MB: i64 = 2560
+
+pub fn native_build_shard_worker_limit(requested: i64, rss_budget_mb: i64,
+                                       estimated_worker_rss_mb: i64,
+                                       max_workers: i64) -> i64:
+    if requested <= 1:
+        return requested
+
+    # An explicit zero budget opts out of RSS admission.  This preserves the
+    # old opt-in parallel behavior for controlled hosts and benchmark lanes.
+    var admitted = requested
+    var effective_budget = rss_budget_mb
+    if effective_budget < 0:
+        effective_budget = DEFAULT_SHARD_RSS_BUDGET_MB
+    if effective_budget > 0:
+        var estimate = estimated_worker_rss_mb
+        if estimate <= 0:
+            estimate = DEFAULT_SHARD_ESTIMATED_RSS_MB
+        var budget_slots = effective_budget / estimate
+        if budget_slots < 1:
+            budget_slots = 1
+        if budget_slots < admitted:
+            admitted = budget_slots
+
+    if max_workers > 0 and max_workers < admitted:
+        admitted = max_workers
+    if admitted < 1:
+        return 1
+    admitted

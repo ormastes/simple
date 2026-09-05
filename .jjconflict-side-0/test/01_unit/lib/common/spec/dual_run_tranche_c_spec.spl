@@ -1,0 +1,108 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Tranche C: runtime_native.c class-(a) symbols wired as dual-run pairs.
+#
+# SELECTION METHOD (all three conditions required, same filter the tranche B
+# header describes as having shrunk an earlier tranche from 31 to 7):
+#   1. the C symbol is DEFINED in src/runtime/runtime_native.c and has no
+#      pure-Simple twin in src/runtime/simple_core/*.spl;
+#   2. class (a) -- pure computation, no syscall, no pointer/tagging ABI;
+#   3. the oracle is REGISTERED in the tree-walk interpreter's extern dispatch
+#      (src/compiler_rust/compiler/src/interpreter_extern/mod.rs), so the
+#      comparison actually calls C rather than silently returning nil.
+# Of 621 C-only symbols in runtime_native.c, 142 are class (a) and only 23 of
+# those are registered; after removing non-deterministic, side-effecting and
+# memory-ABI members, this tranche is what remains that can be value-compared.
+#
+# HONEST LIMITATION (same as the sibling shadow specs): this dual-runs both
+# sides only inside test specs, not on live traffic. Engine is the TREE-WALK
+# interpreter (`simple test`), not the Cranelift JIT (`simple run`); the two
+# are known to disagree on some builtins, so a JIT result is not implied.
+#
+# @dual_pair: to_lower_ascii_vs_rt_text_to_lower_ascii mode=value-legacy ref=rt_text_to_lower_ascii cand=std.common.text_ascii.to_lower_ascii
+# @dual_pair: pow_int_exp_f64_vs_rt_math_pow mode=value-legacy ref=rt_math_pow cand=std.common.pow_pure.pow_int_exp_f64
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.common.spec.dual_run.{dual_check_text, dual_check_f64, dual_summarize}
+use std.common.text_ascii.{to_lower_ascii}
+use std.common.pow_pure.{pow_int_exp_f64}
+
+extern fn rt_text_to_lower_ascii(s: text) -> text
+extern fn rt_math_pow(base: f64, exp: f64) -> f64
+
+describe "dual_run tranche C — runtime_native.c class-(a) twins":
+    # @manual scenario evidence
+    it "to_lower_ascii vs rt_text_to_lower_ascii agrees on ASCII, empty, and non-ASCII input":
+        # @req REQ-SSPEC-LIB
+        step("to_lower_ascii vs rt_text_to_lower_ascii agrees on ASCII, empty, and non-ASCII input")
+        # Edge cases on purpose: empty text, the boundary letters A and Z, the
+        # characters immediately outside 'A'..'Z' in ASCII order (@ and [), text
+        # that is already lowercase, digits and punctuation, and multi-byte
+        # codepoints that must pass through untouched.
+        val cases = [
+            "",
+            "A",
+            "Z",
+            "@",
+            "[",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "abcdefghijklmnopqrstuvwxyz",
+            "Hello, World!",
+            "MiXeD 123 CaSe",
+            "0123456789",
+            "~!@#$%^&*()_+",
+            "日本語",
+            "Aa日Zz"
+        ]
+        var verdicts = [dual_check_text(
+            "text_to_lower_ascii", to_lower_ascii(cases[0]), rt_text_to_lower_ascii(cases[0]))]
+        var i = 1
+        while i < cases.len():
+            verdicts = verdicts.push(dual_check_text(
+                "text_to_lower_ascii", to_lower_ascii(cases[i]), rt_text_to_lower_ascii(cases[i])))
+            i = i + 1
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.total, 13)
+        assert_equal(summary.divergent, 0)
+        # Non-vacuity: the case set must actually exercise a transformation and
+        # a pass-through, otherwise 0 divergences would be meaningless.
+        assert_equal(to_lower_ascii("A"), "a")
+        assert_equal(to_lower_ascii("["), "[")
+        assert_true(to_lower_ascii("日本語") == "日本語")
+
+    # @manual scenario evidence
+    it "pow_int_exp_f64 vs rt_math_pow agrees bit-exactly on integer exponents":
+        # @req REQ-SSPEC-LIB
+        step("pow_int_exp_f64 vs rt_math_pow agrees bit-exactly on integer exponents")
+        # Scope is INTEGER exponents only -- see the note in std.common.pow_pure
+        # for why a non-integer exponent is deliberately out of contract.
+        # Edge cases: exponent 0 (must be 1.0 for every base, 0.0 included),
+        # exponent 1 (identity), base 0.0 and 1.0, a fractional base where
+        # repeated multiplication and libm could plausibly part company, and a
+        # negative exponent driving the reciprocal path.
+        val bases = [2.0, 3.0, 0.5, 0.0, 1.0, 10.0]
+        val exps = [0, 1, 2, 3, 10, 0 - 2]
+        var verdicts = [dual_check_f64(
+            "math_pow", pow_int_exp_f64(bases[0], exps[0]),
+            rt_math_pow(bases[0], exps[0].to_f64()), true)]
+        var i = 0
+        while i < bases.len():
+            var j = 0
+            while j < exps.len():
+                if not (i == 0 and j == 0):
+                    verdicts = verdicts.push(dual_check_f64(
+                        "math_pow", pow_int_exp_f64(bases[i], exps[j]),
+                        rt_math_pow(bases[i], exps[j].to_f64()), true))
+                j = j + 1
+            i = i + 1
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.total, 36)
+        assert_equal(summary.divergent, 0)
+        # Non-vacuity: the case set must exercise real arithmetic, not just 1.0.
+        assert_true(pow_int_exp_f64(2.0, 10) == 1024.0)
+        assert_true(pow_int_exp_f64(7.0, 0) == 1.0)
+        assert_true(pow_int_exp_f64(2.0, 0 - 2) == 0.25)

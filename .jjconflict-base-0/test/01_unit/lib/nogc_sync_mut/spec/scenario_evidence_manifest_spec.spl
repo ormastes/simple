@@ -1,0 +1,243 @@
+use std.spec.*
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, ScenarioEvidenceArtifact
+}
+use std.common.spec.scenario_text_evidence.{ScenarioTextMatchResult}
+use std.common.spec.scenario_motion_evidence.{ScenarioArtifactIntegrity}
+use std.spec.scenario_evidence_manifest.{
+    ScenarioEvidenceManifest, scenario_evidence_manifest_to_sdn,
+    scenario_evidence_manifest_from_sdn, validate_scenario_evidence_manifest
+}
+
+fn manifest_artifact(path: text, mime: text = "text/plain") -> ScenarioEvidenceArtifact:
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.text,
+        title: "boot transcript",
+        mime: mime,
+        path: path,
+        body: "SimpleOS login",
+        scenario_id: "boot-login",
+        step_id: "login",
+        redacted: false
+    )
+
+fn manifest_integrity(path: text) -> ScenarioArtifactIntegrity:
+    ScenarioArtifactIntegrity(
+        path: path,
+        format: "txt",
+        mime: "text/plain",
+        width: 0,
+        height: 0,
+        byte_size: 14,
+        checksum: "sha256:boot-transcript",
+        producer: "simple-test",
+        producer_version: "1",
+        source_revision: "abc123",
+        host: "linux-x86_64",
+        target: "qemu-riscv64",
+        capture_ready: true,
+        baseline_identity: "",
+        comparison_result: "not-compared",
+        required: true
+    )
+
+fn passing_text_result() -> ScenarioTextMatchResult:
+    ScenarioTextMatchResult(
+        passed: true,
+        first_expected_index: -1,
+        first_actual_index: -1,
+        diagnostic: "ok",
+        raw_transcript: "SimpleOS login",
+        normalized_transcript: "SimpleOS login"
+    )
+
+fn live_manifest() -> ScenarioEvidenceManifest:
+    ScenarioEvidenceManifest(
+        schema_major: 1,
+        schema_minor: 0,
+        feature_id: "simpleos.boot.login",
+        requirement_ids: ["REQ-EVS-007"],
+        spec_path: "test/03_system/os/simpleos_boot_login_spec.spl",
+        generated_manual_path: "doc/06_spec/03_system/os/simpleos_boot_login_spec.md",
+        scenario_id: "boot-login",
+        step_id: "login",
+        required: true,
+        result: "PASS",
+        showcase_status: "live-pass",
+        reason: "",
+        source_revision: "abc123",
+        source_digest: "sha256:source",
+        command: "bin/simple test test/03_system/os/simpleos_boot_login_spec.spl",
+        producer: "simple-test",
+        producer_version: "1",
+        host: "linux-x86_64",
+        target: "qemu-riscv64",
+        backend: "qemu",
+        start_time: 1000,
+        duration_ms: 250,
+        artifacts: [manifest_artifact(
+            "build/test-artifacts/03_system/os/simpleos_boot_login/transcript.txt"
+        )],
+        artifact_integrity: [manifest_integrity(
+            "build/test-artifacts/03_system/os/simpleos_boot_login/transcript.txt"
+        )],
+        text_results: [passing_text_result()],
+        motion_evidence: [],
+        protocol_fields: [],
+        html_checks: [],
+        blocker_prerequisite: "",
+        resume_command: "bin/simple test test/03_system/os/simpleos_boot_login_spec.spl",
+        owner: "simpleos",
+        final_reviewer: "verification"
+    )
+
+fn with_path(base: ScenarioEvidenceManifest, path: text) -> ScenarioEvidenceManifest:
+    ScenarioEvidenceManifest(
+        schema_major: base.schema_major, schema_minor: base.schema_minor,
+        feature_id: base.feature_id, requirement_ids: base.requirement_ids,
+        spec_path: base.spec_path, generated_manual_path: base.generated_manual_path,
+        scenario_id: base.scenario_id, step_id: base.step_id, required: base.required,
+        result: base.result, showcase_status: base.showcase_status, reason: base.reason,
+        source_revision: base.source_revision, source_digest: base.source_digest,
+        command: base.command, producer: base.producer,
+        producer_version: base.producer_version, host: base.host, target: base.target,
+        backend: base.backend, start_time: base.start_time, duration_ms: base.duration_ms,
+        artifacts: [manifest_artifact(path)],
+        artifact_integrity: [manifest_integrity(path)],
+        text_results: base.text_results,
+        motion_evidence: base.motion_evidence,
+        protocol_fields: base.protocol_fields,
+        html_checks: base.html_checks,
+        blocker_prerequisite: base.blocker_prerequisite,
+        resume_command: base.resume_command, owner: base.owner,
+        final_reviewer: base.final_reviewer
+    )
+
+fn validation_error(manifest: ScenarioEvidenceManifest) -> text:
+    match validate_scenario_evidence_manifest(manifest):
+        case Ok(_): ""
+        case Err(error): error
+
+fn parse_error(source: text) -> text:
+    match scenario_evidence_manifest_from_sdn(source):
+        case Ok(_): ""
+        case Err(error): error
+
+describe "Scenario evidence manifest versioned SDN":
+    it "round-trips a current provenance-bound live receipt":
+        step("Encode and parse a valid manifest through canonical SDN")
+        val parsed = scenario_evidence_manifest_from_sdn(
+            scenario_evidence_manifest_to_sdn(live_manifest())
+        )
+        match parsed:
+            case Ok(manifest):
+                expect(manifest.feature_id).to_equal("simpleos.boot.login")
+                expect(manifest.showcase_status).to_equal("live-pass")
+                expect(manifest.artifacts.len()).to_equal(1)
+            case Err(error):
+                expect(error).to_equal("")
+
+    it "tolerates unknown fields on a newer minor schema":
+        step("Add an unknown minor field without changing the supported major")
+        val source = scenario_evidence_manifest_to_sdn(live_manifest())
+            .replace("schema_minor: 0", "future_hint: ignored, schema_minor: 7")
+        val parsed = scenario_evidence_manifest_from_sdn(source)
+        match parsed:
+            case Ok(manifest):
+                expect(manifest.schema_minor).to_equal(7)
+                expect(manifest.showcase_status).to_equal("live-pass")
+            case Err(error):
+                expect(error).to_equal("")
+
+describe "Scenario evidence manifest fail-closed validation":
+    it "rejects unsupported major versions and missing required fields":
+        step("Change the major and remove the required feature identifier")
+        val source = scenario_evidence_manifest_to_sdn(live_manifest())
+        expect(parse_error(source.replace("schema_major: 1", "schema_major: 2")))
+            .to_contain("unsupported schema major")
+        expect(parse_error(source.replace("feature_id: simpleos.boot.login, ", "")))
+            .to_contain("missing required field: feature_id")
+
+    it "rejects duplicate artifacts":
+        step("Declare the same retained artifact twice")
+        val base = live_manifest()
+        val duplicate = ScenarioEvidenceManifest(
+            schema_major: base.schema_major, schema_minor: base.schema_minor,
+            feature_id: base.feature_id, requirement_ids: base.requirement_ids,
+            spec_path: base.spec_path, generated_manual_path: base.generated_manual_path,
+            scenario_id: base.scenario_id, step_id: base.step_id, required: base.required,
+            result: base.result, showcase_status: base.showcase_status, reason: base.reason,
+            source_revision: base.source_revision, source_digest: base.source_digest,
+            command: base.command, producer: base.producer,
+            producer_version: base.producer_version, host: base.host, target: base.target,
+            backend: base.backend, start_time: base.start_time, duration_ms: base.duration_ms,
+            artifacts: [base.artifacts[0], base.artifacts[0]],
+            artifact_integrity: base.artifact_integrity,
+            text_results: base.text_results,
+            motion_evidence: base.motion_evidence,
+            protocol_fields: base.protocol_fields,
+            html_checks: base.html_checks,
+            blocker_prerequisite: base.blocker_prerequisite,
+            resume_command: base.resume_command, owner: base.owner,
+            final_reviewer: base.final_reviewer
+        )
+        expect(validation_error(duplicate)).to_contain("duplicate artifact")
+
+    it "rejects absolute and traversal artifact paths":
+        step("Validate paths outside the two canonical evidence roots")
+        expect(validation_error(with_path(live_manifest(), "/tmp/transcript.txt")))
+            .to_contain("invalid artifact path")
+        expect(validation_error(with_path(
+            live_manifest(), "build/test-artifacts/../secret.txt"
+        ))).to_contain("invalid artifact path")
+
+    it "rejects kind MIME and suffix disagreement":
+        step("Declare text evidence with an image MIME and text suffix")
+        val base = live_manifest()
+        val bad = ScenarioEvidenceManifest(
+            schema_major: base.schema_major, schema_minor: base.schema_minor,
+            feature_id: base.feature_id, requirement_ids: base.requirement_ids,
+            spec_path: base.spec_path, generated_manual_path: base.generated_manual_path,
+            scenario_id: base.scenario_id, step_id: base.step_id, required: base.required,
+            result: base.result, showcase_status: base.showcase_status, reason: base.reason,
+            source_revision: base.source_revision, source_digest: base.source_digest,
+            command: base.command, producer: base.producer,
+            producer_version: base.producer_version, host: base.host, target: base.target,
+            backend: base.backend, start_time: base.start_time, duration_ms: base.duration_ms,
+            artifacts: [manifest_artifact(
+                "build/test-artifacts/boot/transcript.txt", "image/png"
+            )],
+            artifact_integrity: [manifest_integrity(
+                "build/test-artifacts/boot/transcript.txt"
+            )],
+            text_results: base.text_results,
+            motion_evidence: base.motion_evidence,
+            protocol_fields: base.protocol_fields,
+            html_checks: base.html_checks,
+            blocker_prerequisite: base.blocker_prerequisite,
+            resume_command: base.resume_command, owner: base.owner,
+            final_reviewer: base.final_reviewer
+        )
+        expect(validation_error(bad)).to_contain("kind/MIME/suffix mismatch")
+
+    it "rejects live-pass without current complete provenance":
+        step("Remove the source binding from an otherwise passing manifest")
+        val base = live_manifest()
+        val stale = ScenarioEvidenceManifest(
+            schema_major: base.schema_major, schema_minor: base.schema_minor,
+            feature_id: base.feature_id, requirement_ids: base.requirement_ids,
+            spec_path: base.spec_path, generated_manual_path: base.generated_manual_path,
+            scenario_id: base.scenario_id, step_id: base.step_id, required: base.required,
+            result: base.result, showcase_status: base.showcase_status, reason: base.reason,
+            source_revision: "", source_digest: base.source_digest,
+            command: base.command, producer: base.producer,
+            producer_version: base.producer_version, host: base.host, target: base.target,
+            backend: base.backend, start_time: base.start_time, duration_ms: base.duration_ms,
+            artifacts: base.artifacts, artifact_integrity: base.artifact_integrity,
+            text_results: base.text_results, motion_evidence: base.motion_evidence,
+            protocol_fields: base.protocol_fields, html_checks: base.html_checks,
+            blocker_prerequisite: base.blocker_prerequisite,
+            resume_command: base.resume_command, owner: base.owner,
+            final_reviewer: base.final_reviewer
+        )
+        expect(validation_error(stale)).to_contain("showcase status mismatch")

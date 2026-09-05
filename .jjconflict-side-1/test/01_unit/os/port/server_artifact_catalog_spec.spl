@@ -1,0 +1,185 @@
+use std.spec
+use os.kernel.loader.fs_exec_receipt.{
+    fs_exec_receipt_exited, fs_exec_receipt_exited_registered,
+    fs_exec_receipt_failed
+}
+use os.port.server_artifact_catalog.*
+
+fn _hash() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn _socket(artifact: SimpleOsServerArtifact, pid: i64) -> SimpleOsServerSocketReceipt:
+    SimpleOsServerSocketReceipt(
+        artifact_id: artifact.id, filesystem_path: artifact.filesystem_path,
+        pid: pid, image_id: "simpleos-server-test-image", launch_id: "boot-4-launch-7",
+        bind_address: "0.0.0.0", port: 8080,
+        challenge: "server-gate-7f1a", response: "server-gate-7f1a",
+        successful_exchanges: 1)
+
+fn _staged(artifact: SimpleOsServerArtifact) -> SimpleOsServerArtifactReceipt:
+    simpleos_server_artifact_observed_staging_receipt(
+        artifact,
+        SimpleOsServerStagingEvidence(
+            filesystem_path: artifact.filesystem_path,
+            host_sha256: artifact.sha256,
+            filesystem_sha256: artifact.sha256,
+            byte_size: 4096,
+            image_id: "simpleos-server-test-image",
+            image_sha256: _hash()))
+
+fn _launch(artifact: SimpleOsServerArtifact, pid: i64) -> SimpleOsServerLaunchEvidence:
+    SimpleOsServerLaunchEvidence(
+        filesystem_path: artifact.filesystem_path, artifact_sha256: artifact.sha256,
+        image_id: "simpleos-server-test-image", image_sha256: _hash(),
+        launch_id: "boot-4-launch-7", pid: pid,
+        process_registered: true, start_observed: true)
+
+describe "SimpleOS server artifact catalog":
+    it "pins both server identities to canonical filesystem paths":
+        val web = simpleos_web_server_artifact("1.2.3", _hash(), "build/server/web")
+        val db = simpleos_db_server_artifact("1.2.3", _hash(), "build/server/db")
+        expect(simpleos_server_artifact_validate(web).ok).to_be(true)
+        expect(simpleos_server_artifact_validate(db).ok).to_be(true)
+        expect(web.filesystem_path).to_equal("/SYS/APPS/WEBSRV.SMF")
+        expect(db.filesystem_path).to_equal("/SYS/APPS/DBSRV.SMF")
+
+    it "fails closed on unpinned metadata and forged paths":
+        val latest = simpleos_web_server_artifact("latest", _hash(), "build/server/web")
+        expect(simpleos_server_artifact_validate(latest).reason).to_equal("unpinned-version")
+        var wrong_hash = simpleos_db_server_artifact("1.2.3", "ABC", "build/server/db")
+        expect(simpleos_server_artifact_validate(wrong_hash).reason).to_equal("invalid-sha256")
+        wrong_hash.sha256 = _hash()
+        wrong_hash.filesystem_path = "/SYS/APPS/OTHER.SMF"
+        expect(simpleos_server_artifact_validate(wrong_hash).reason).to_equal("noncanonical-filesystem-path")
+
+    it "never treats staging as execution proof":
+        val artifact = simpleos_web_server_artifact("1.2.3", _hash(), "build/server/web")
+        val receipt = simpleos_server_artifact_staged_receipt(artifact)
+        expect(receipt.staged).to_be(false)
+        expect(receipt.runnable).to_be(false)
+        expect(receipt.reason).to_equal("staging-not-observed")
+
+        val observed = _staged(artifact)
+        expect(observed.staged).to_be(true)
+        expect(observed.runnable).to_be(false)
+        expect(observed.reason).to_equal("staged-not-execution-proof")
+
+    it "rejects filesystem staging without matching bytes and pinned image identity":
+        val artifact = simpleos_web_server_artifact("1.2.3", _hash(), "build/server/web")
+        var evidence = SimpleOsServerStagingEvidence(
+            filesystem_path: artifact.filesystem_path,
+            host_sha256: artifact.sha256,
+            filesystem_sha256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            byte_size: 4096,
+            image_id: "simpleos-image",
+            image_sha256: _hash())
+        val wrong_bytes = simpleos_server_artifact_observed_staging_receipt(artifact, evidence)
+        expect(wrong_bytes.staged).to_be(false)
+        expect(wrong_bytes.reason).to_equal("staging-content-hash-mismatch")
+
+        evidence.filesystem_sha256 = artifact.sha256
+        evidence.image_sha256 = "unpinned"
+        val unpinned_image = simpleos_server_artifact_observed_staging_receipt(artifact, evidence)
+        expect(unpinned_image.staged).to_be(false)
+        expect(unpinned_image.reason).to_equal("staging-image-unpinned")
+
+    it "requires matching successful execution and socket capability":
+        val artifact = simpleos_db_server_artifact("1.2.3", _hash(), "build/server/db")
+        val staged = _staged(artifact)
+        val failure = simpleos_server_artifact_execution_receipt(
+            artifact, staged, fs_exec_receipt_failed(artifact.filesystem_path, -2), _socket(artifact, -2))
+        expect(failure.runnable).to_be(false)
+        expect(failure.reason).to_equal("filesystem-execution-not-proven")
+
+        val unregistered = simpleos_server_artifact_execution_receipt(
+            artifact, staged,
+            fs_exec_receipt_exited(artifact.filesystem_path, 77, 0), _socket(artifact, 77))
+        expect(unregistered.runnable).to_be(false)
+        expect(unregistered.reason).to_equal("filesystem-execution-not-proven")
+
+        val executed = fs_exec_receipt_exited_registered(
+            artifact.filesystem_path, 77, 0)
+        val no_process = simpleos_server_artifact_execution_receipt(
+            artifact, staged,
+            fs_exec_receipt_exited(artifact.filesystem_path, 0, 0), _socket(artifact, 0))
+        expect(no_process.runnable).to_be(false)
+        expect(no_process.reason).to_equal("filesystem-execution-not-proven")
+
+        var absent_socket = _socket(artifact, 77)
+        absent_socket.successful_exchanges = 0
+        val no_socket = simpleos_server_artifact_execution_receipt(artifact, staged, executed, absent_socket)
+        expect(no_socket.runnable).to_be(false)
+        expect(no_socket.reason).to_equal("socket-capability-not-proven")
+
+        val completed = simpleos_server_artifact_execution_receipt(artifact, staged, executed, _socket(artifact, 77))
+        expect(completed.runnable).to_be(false)
+        expect(completed.pid).to_equal(77)
+        expect(completed.exit_code).to_equal(0)
+        expect(completed.reason).to_equal("completed-not-live")
+
+    it "clears forged positive flags on a mismatched staging receipt":
+        val artifact = simpleos_web_server_artifact("1.2.3", _hash(), "build/server/web")
+        var forged = _staged(artifact)
+        forged.id = "simple_db_server"
+        forged.runnable = true
+        forged.pid = 444
+        forged.launch_id = "replayed-launch"
+        val rejected = simpleos_server_artifact_live_receipt(
+            artifact, forged, _launch(artifact, 444), _socket(artifact, 444))
+        expect(rejected.staged).to_be(false)
+        expect(rejected.runnable).to_be(false)
+        expect(rejected.pid).to_equal(0)
+        expect(rejected.launch_id).to_equal("")
+        expect(rejected.reason).to_equal("staging-receipt-mismatch")
+
+    it "rejects an execution receipt for another filesystem path":
+        val artifact = simpleos_web_server_artifact("1.2.3", _hash(), "build/server/web")
+        val staged = _staged(artifact)
+        val execution = fs_exec_receipt_exited("/SYS/APPS/OTHER.SMF", 8, 0)
+        val receipt = simpleos_server_artifact_execution_receipt(artifact, staged, execution, _socket(artifact, 8))
+        expect(receipt.runnable).to_be(false)
+        expect(receipt.reason).to_equal("execution-path-mismatch")
+
+    it "rejects uncorrelated and replayable socket evidence":
+        val artifact = simpleos_web_server_artifact("1.2.3", _hash(), "build/server/web")
+        val staged = _staged(artifact)
+        val executed = fs_exec_receipt_exited_registered(artifact.filesystem_path, 77, 0)
+        var wrong_pid = _socket(artifact, 76)
+        val mismatched = simpleos_server_artifact_execution_receipt(
+            artifact, staged, executed, wrong_pid)
+        expect(mismatched.runnable).to_be(false)
+        expect(mismatched.reason).to_equal("socket-receipt-mismatch")
+
+        var replay = _socket(artifact, 77)
+        replay.response = "stale-response"
+        val rejected = simpleos_server_artifact_execution_receipt(
+            artifact, staged, executed, replay)
+        expect(rejected.runnable).to_be(false)
+        expect(rejected.reason).to_equal("socket-capability-not-proven")
+
+    it "promotes a live listener only when image launch process and socket correlate":
+        val artifact = simpleos_web_server_artifact("1.2.3", _hash(), "build/server/web")
+        val staged = _staged(artifact)
+        val ready = simpleos_server_artifact_live_receipt(
+            artifact, staged, _launch(artifact, 81), _socket(artifact, 81))
+        expect(ready.runnable).to_be(true)
+        expect(ready.pid).to_equal(81)
+        expect(ready.launch_id).to_equal("boot-4-launch-7")
+        expect(ready.reason).to_equal("live-listener-proven")
+
+    it "rejects stale-boot socket evidence and a launch not observed running":
+        val artifact = simpleos_db_server_artifact("1.2.3", _hash(), "build/server/db")
+        val staged = _staged(artifact)
+        var stale = _socket(artifact, 91)
+        stale.image_id = "previous-boot-image"
+        val cross_boot = simpleos_server_artifact_live_receipt(
+            artifact, staged, _launch(artifact, 91), stale)
+        expect(cross_boot.runnable).to_be(false)
+        expect(cross_boot.reason).to_equal("socket-launch-correlation-mismatch")
+
+        var not_started = _launch(artifact, 91)
+        not_started.start_observed = false
+        val absent = simpleos_server_artifact_live_receipt(
+            artifact, staged, not_started, _socket(artifact, 91))
+        expect(absent.runnable).to_be(false)
+        expect(absent.reason).to_equal("filesystem-live-start-not-proven")

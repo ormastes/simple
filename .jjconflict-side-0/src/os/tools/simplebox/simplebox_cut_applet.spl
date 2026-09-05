@@ -1,0 +1,246 @@
+# Bounded byte/field selection for filesystem-launched SimpleOS Simplebox.
+
+use os.userlib.fs.{file_open_direct, file_read_direct, file_close_direct}
+use os.tools.simplebox.simplebox_fs_applets.{
+    SIMPLEBOX_FILE_BYTES_LIMIT, SIMPLEBOX_READ_CHUNK_BYTES,
+    SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT
+}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_CUT_POSITION_LIMIT: u64 = 4096u64
+pub const SIMPLEBOX_CUT_LIST_BYTES_LIMIT: u64 = 4096u64
+pub const SIMPLEBOX_CUT_LINE_LIMIT: u64 = 1000000u64
+pub const SIMPLEBOX_CUT_OUTPUT_BYTES_LIMIT: u64 = 67108864u64
+
+struct SimpleboxCutSelection:
+    keep: [bool]
+    accepted: bool
+    error: text
+
+struct SimpleboxCutPlan:
+    mode: text
+    selection: SimpleboxCutSelection
+    delimiter: u8
+    path: text
+    accepted: bool
+    error: text
+
+struct SimpleboxCutState:
+    parts: [text]
+    pending: [u8]
+    input_bytes: u64
+    output_bytes: u64
+    line_count: u64
+    failure: text
+
+fn _cut_selection_error(reason: text) -> SimpleboxCutSelection:
+    SimpleboxCutSelection(keep: [], accepted: false, error: reason)
+
+fn _cut_parse_positive(bytes: [u8], start: u64) -> (u64, u64, bool):
+    var index = start
+    var value: u64 = 0u64
+    var found = false
+    while index < bytes.len() and bytes[index] >= 48u8 and bytes[index] <= 57u8:
+        val digit = (bytes[index] - 48u8).to_u64()
+        if value > (SIMPLEBOX_CUT_POSITION_LIMIT - digit) / 10u64:
+            return (0u64, index, false)
+        value = value * 10u64 + digit
+        found = true
+        index = index + 1u64
+    (value, index, found and value > 0u64)
+
+fn _cut_parse_selection(spec: text) -> SimpleboxCutSelection:
+    if spec.len() == 0u64 or spec.len() > SIMPLEBOX_CUT_LIST_BYTES_LIMIT:
+        return _cut_selection_error("invalid selection list length")
+    val bytes = spec.bytes()
+    var keep: [bool] = [false; SIMPLEBOX_CUT_POSITION_LIMIT + 1u64]
+    var index: u64 = 0u64
+    while index < bytes.len():
+        val first_result = _cut_parse_positive(bytes, index)
+        val first = first_result.0
+        index = first_result.1
+        if not first_result.2:
+            return _cut_selection_error("selection positions must be 1..4096")
+        var last = first
+        if index < bytes.len() and bytes[index] == 45u8:
+            index = index + 1u64
+            val last_result = _cut_parse_positive(bytes, index)
+            last = last_result.0
+            index = last_result.1
+            if not last_result.2 or last < first:
+                return _cut_selection_error("invalid selection range")
+        var position = first
+        while position <= last:
+            keep[position] = true
+            position = position + 1u64
+        if index == bytes.len():
+            break
+        if bytes[index] != 44u8:
+            return _cut_selection_error("selection entries must be comma-separated")
+        index = index + 1u64
+        if index == bytes.len():
+            return _cut_selection_error("selection list has a trailing comma")
+    SimpleboxCutSelection(keep: keep, accepted: true, error: "")
+
+fn _cut_plan(args: [text]) -> SimpleboxCutPlan:
+    var mode = ""
+    var list = ""
+    var delimiter: u8 = 9u8
+    var delimiter_set = false
+    var path = ""
+    var options = true
+    var index: u64 = 0u64
+    while index < args.len():
+        val arg = args[index]
+        if options and arg == "--":
+            options = false
+        elif options and (arg == "-c" or arg == "-f" or arg == "-d"):
+            if index + 1u64 >= args.len():
+                return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "missing operand for " + arg)
+            val value = args[index + 1u64]
+            if arg == "-d":
+                val delimiter_bytes = value.bytes()
+                if delimiter_set or delimiter_bytes.len() != 1u64:
+                    return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "delimiter must be exactly one byte")
+                delimiter = delimiter_bytes[0]
+                delimiter_set = true
+            else:
+                val next_mode = if arg == "-c": "characters" else: "fields"
+                if mode != "":
+                    return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "exactly one of -c or -f is required")
+                mode = next_mode
+                list = value
+            index = index + 1u64
+        elif options and arg.starts_with("-"):
+            return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "unsupported option: " + arg)
+        elif path != "":
+            return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "expected exactly one FILE operand")
+        else:
+            path = arg
+            options = false
+        index = index + 1u64
+    if mode == "":
+        return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "exactly one of -c or -f is required")
+    if delimiter_set and mode != "fields":
+        return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "-d requires -f")
+    if path == "":
+        return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "missing FILE operand")
+    if path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+        return SimpleboxCutPlan(mode: "", selection: _cut_selection_error(""), delimiter: delimiter, path: "", accepted: false, error: "invalid path length")
+    val selection = _cut_parse_selection(list)
+    if not selection.accepted:
+        return SimpleboxCutPlan(mode: "", selection: selection, delimiter: delimiter, path: "", accepted: false, error: selection.error)
+    SimpleboxCutPlan(mode: mode, selection: selection, delimiter: delimiter, path: path, accepted: true, error: "")
+
+fn _cut_select_characters(line: [u8], selection: SimpleboxCutSelection) -> [u8]:
+    var selected: [u8] = []
+    var index: u64 = 0u64
+    while index < line.len() and index < SIMPLEBOX_CUT_POSITION_LIMIT:
+        if selection.keep[index + 1u64]:
+            selected.push(line[index])
+        index = index + 1u64
+    selected
+
+fn _cut_select_fields(line: [u8], selection: SimpleboxCutSelection, delimiter: u8) -> [u8]:
+    var has_delimiter = false
+    for byte in line:
+        if byte == delimiter:
+            has_delimiter = true
+    if not has_delimiter:
+        return line
+    var selected: [u8] = []
+    var field: u64 = 1u64
+    var start: u64 = 0u64
+    var index: u64 = 0u64
+    var emitted = false
+    while index <= line.len():
+        if index == line.len() or line[index] == delimiter:
+            if field <= SIMPLEBOX_CUT_POSITION_LIMIT and selection.keep[field]:
+                if emitted:
+                    selected.push(delimiter)
+                var cursor = start
+                while cursor < index:
+                    selected.push(line[cursor])
+                    cursor = cursor + 1u64
+                emitted = true
+            field = field + 1u64
+            start = index + 1u64
+        index = index + 1u64
+    selected
+
+fn _cut_finish_line(prior: SimpleboxCutState, plan: SimpleboxCutPlan, newline: bool) -> SimpleboxCutState:
+    var state = prior
+    if state.line_count >= SIMPLEBOX_CUT_LINE_LIMIT:
+        state.failure = "input exceeds simplebox line limit"
+        return state
+    state.line_count = state.line_count + 1u64
+    val selected = if plan.mode == "characters":
+        _cut_select_characters(state.pending, plan.selection)
+    else:
+        _cut_select_fields(state.pending, plan.selection, plan.delimiter)
+    val newline_bytes: u64 = if newline: 1u64 else: 0u64
+    if selected.len() > SIMPLEBOX_CUT_OUTPUT_BYTES_LIMIT - state.output_bytes or
+        newline_bytes > SIMPLEBOX_CUT_OUTPUT_BYTES_LIMIT - state.output_bytes - selected.len():
+        state.failure = "output exceeds simplebox byte limit"
+        return state
+    var part = bytes_to_string(selected)
+    if newline:
+        part = part + "\n"
+    state.parts.push(part)
+    state.output_bytes = state.output_bytes + selected.len() + newline_bytes
+    state.pending = []
+    state
+
+fn _cut_read(plan: SimpleboxCutPlan) -> SimpleboxCutState:
+    var state = SimpleboxCutState(parts: [], pending: [], input_bytes: 0u64, output_bytes: 0u64, line_count: 0u64, failure: "")
+    val opened = file_open_direct(plan.path, 0u32)
+    match opened:
+        case Err(reason):
+            state.failure = plan.path + ": " + reason
+            state
+        case Ok(fd):
+            var complete = false
+            while not complete and state.failure == "":
+                match file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES):
+                    case Err(reason): state.failure = plan.path + ": " + reason
+                    case Ok(chunk):
+                        if chunk.len() == 0u64:
+                            complete = true
+                        elif chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT - state.input_bytes:
+                            state.failure = plan.path + ": file exceeds simplebox byte limit"
+                        else:
+                            state.input_bytes = state.input_bytes + chunk.len()
+                            var index: u64 = 0u64
+                            while index < chunk.len() and state.failure == "":
+                                if chunk[index] == 10u8:
+                                    state = _cut_finish_line(state, plan, true)
+                                else:
+                                    state.pending.push(chunk[index])
+                                index = index + 1u64
+            if state.failure == "" and state.pending.len() > 0u64:
+                state = _cut_finish_line(state, plan, false)
+            if not file_close_direct(fd) and state.failure == "":
+                state.failure = plan.path + ": close failed"
+            state
+
+pub fn simplebox_cut(args: [text]) -> i32:
+    """Select bounded byte positions or delimiter-separated fields from a file.
+
+    Safe forms are `cut -c LIST [--] FILE` and
+    `cut [-d BYTE] -f LIST [--] FILE`. LIST accepts positive positions and
+    closed ranges up to 4096. Stdin, open-ended ranges, multibyte delimiters,
+    and multiple files are rejected. Input is fully admitted before output.
+    """
+    val plan = _cut_plan(args)
+    if not plan.accepted:
+        stdout_write("cut: " + plan.error + "\n")
+        return 2
+    val state = _cut_read(plan)
+    if state.failure != "":
+        stdout_write("cut: " + state.failure + "\n")
+        return 2
+    for part in state.parts:
+        stdout_write(part)
+    0

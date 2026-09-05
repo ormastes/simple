@@ -1,0 +1,243 @@
+# Pure HTTP worker wire and response helpers.
+#
+# This module contains no worker lifecycle or mutable connection owner. It is
+# imported by the canonical Worker owner for bounded protocol transformations.
+
+use std.io.net_backend.{NetBackendCapabilities, net_backend_static_file_route}
+use std.http_server.types.{HttpResponseData}
+use std.nogc_async_mut.io.file_ops.{file_read_text}
+use std.nogc_async_mut.io.tls_common.{
+    TlsSessionKeys,
+    tls_wire_to_hex, tls_hex_to_wire,
+    tls_aes_gcm_encrypt_hex, tls_aes_gcm_decrypt_hex
+}
+use std.common.string_core.{bytes_to_text, text_to_bytes}
+use std.common.net.tls_application_record_stream_v1.{
+    TLS_RECORD_HEADER_LENGTH_V1,
+    TLS_APPLICATION_DATA_TYPE_V1,
+    TLS_VERSION_MAJOR_V1,
+    TLS_VERSION_MINOR_V1,
+    TLS_AEAD_TAG_LENGTH_V1,
+    TLS_MAX_RECORD_PAYLOAD_LENGTH_V1,
+    TLS_MAX_FRAGMENT_LENGTH_V1
+}
+use std.tls.types.{
+    CONTENT_TYPE_APPLICATION_DATA,
+    TLS_VERSION_1_2
+}
+
+pub(package) struct TlsSessionState:
+    """Per-connection TLS session keys and sequence counters.
+
+    Stored in Worker.tls_sessions keyed by fd. Enables decryption of
+    incoming TLS records and encryption of outgoing application data
+    after the TLS handshake completes.
+    """
+    pub(package) keys: TlsSessionKeys
+    pub(package) cipher_suite: i64
+    pub(package) client_seq: i64
+    pub(package) server_seq: i64
+
+# is_dynamic_handler decides whether a matched location dispatches through the
+# handler registry (under a server-established security context) or the inline
+# static fast path. Pure — unit-tested by async_dynamic_dispatch_spec (AC-4).
+pub(package) fn is_dynamic_handler(handler_type: text) -> bool:
+    handler_type != "static" and handler_type != ""
+
+pub(package) fn worker_static_file_route(caps: NetBackendCapabilities, resp: HttpResponseData) -> text:
+    """Return the worker route for a response body."""
+    net_backend_static_file_route(caps, resp.body_file.len() > 0)
+
+pub(package) fn worker_static_file_fallback_response(resp: HttpResponseData) -> HttpResponseData:
+    """Convert a body_file hint into a portable in-memory response."""
+    val body = file_read_text(resp.body_file)
+    HttpResponseData(
+        status: resp.status,
+        reason: resp.reason,
+        headers: resp.headers,
+        body: body,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: resp.chunked
+    )
+
+pub(package) fn worker_sendfile_open_path_for_pending(pending: Dict<i64, (text, i64, i64)>, fd: i64) -> text:
+    """Return the path to open after headers are sent without consuming state."""
+    # Native codegen: Dict.get() on tuple values is unsafe. Index-read instead.
+    if pending.contains_key(fd):
+        val entry = pending[fd]
+        entry.0
+    else:
+        ""
+
+pub(package) fn tls_bytes_to_wire(bytes: [u8]) -> text:
+    """Convert response bytes to the byte-preserving TLS wire text form."""
+    bytes_to_text(bytes)
+
+pub(package) fn tls_wire_to_bytes(wire: text) -> [u8]:
+    """Convert byte-preserving TLS wire text back to transport bytes."""
+    text_to_bytes(wire)
+
+pub(package) fn tls_decrypt_record(raw_bytes: [u8], session: TlsSessionState) -> text?:
+    """Decrypt a TLS application data record from raw wire bytes.
+
+    Parses the 5-byte TLS record header, validates the content type is
+    application data, then decrypts the payload with AES-128-GCM using
+    the client write key and current sequence number.
+
+    Args:
+        raw_bytes: Raw bytes received from the socket (header + encrypted payload)
+        session: Current TLS session state with keys and sequence counters
+
+    Returns:
+        Decrypted plaintext on success, nil on failure
+    """
+    if raw_bytes.len() < TLS_RECORD_HEADER_LENGTH_V1:
+        return nil
+
+    val content_type = raw_bytes[0].to_i64()
+    if content_type != TLS_APPLICATION_DATA_TYPE_V1:
+        return nil
+    if raw_bytes[1].to_i64() != TLS_VERSION_MAJOR_V1 or raw_bytes[2].to_i64() != TLS_VERSION_MINOR_V1:
+        return nil
+
+    val record_len = (raw_bytes[3].to_i64() * 256) + raw_bytes[4].to_i64()
+    if record_len < TLS_AEAD_TAG_LENGTH_V1 or record_len > TLS_MAX_RECORD_PAYLOAD_LENGTH_V1:
+        return nil
+    if raw_bytes.len() != TLS_RECORD_HEADER_LENGTH_V1 + record_len:
+        return nil
+
+    # Extract payload wire text (after the 5-byte header) in one linear copy.
+    val payload_wire = bytes_to_text(raw_bytes.slice(
+        TLS_RECORD_HEADER_LENGTH_V1,
+        TLS_RECORD_HEADER_LENGTH_V1 + record_len
+    ))
+
+    val key_hex = tls_wire_to_hex(session.keys.client_write_key, 16)
+    val iv_hex = tls_wire_to_hex(session.keys.client_write_iv, 4)
+    val payload_hex = tls_wire_to_hex(payload_wire, record_len)
+    val nonce_hex = build_gcm_nonce_hex(iv_hex, session.client_seq)
+    val aad_hex = build_aead_aad_hex(session.client_seq, content_type, TLS_VERSION_1_2, record_len)
+    val pt_hex = tls_aes_gcm_decrypt_hex(key_hex, nonce_hex, payload_hex, aad_hex)
+    if pt_hex == nil:
+        return nil
+    val plaintext = tls_hex_to_wire(pt_hex)
+    if plaintext.len() > TLS_MAX_FRAGMENT_LENGTH_V1 or plaintext.len() != record_len - TLS_AEAD_TAG_LENGTH_V1:
+        return nil
+    plaintext
+
+pub(package) fn tls_encrypt_record(plaintext: text, session: TlsSessionState) -> [u8]:
+    """Encrypt plaintext into a TLS application data record.
+
+    Builds a TLS 1.2 record with AES-128-GCM encryption using the server
+    write key and current sequence number.
+
+    Args:
+        plaintext: Response data to encrypt
+        session: Current TLS session state with keys and sequence counters
+
+    Returns:
+        Complete TLS record bytes (header + encrypted payload) ready for wire
+    """
+    val data_len = len(plaintext)
+    if data_len > TLS_MAX_FRAGMENT_LENGTH_V1:
+        return []
+    val key_hex = tls_wire_to_hex(session.keys.server_write_key, 16)
+    val iv_hex = tls_wire_to_hex(session.keys.server_write_iv, 4)
+    val nonce_hex = build_gcm_nonce_hex(iv_hex, session.server_seq)
+    # The nonce is implicit from fixed IV + sequence; AES-GCM appends a 16-byte tag.
+    val encrypted_len = data_len + TLS_AEAD_TAG_LENGTH_V1
+    val aad_hex = build_aead_aad_hex(session.server_seq, CONTENT_TYPE_APPLICATION_DATA, TLS_VERSION_1_2, encrypted_len)
+    val data_hex = tls_wire_to_hex(plaintext, data_len)
+    val ct_hex = tls_aes_gcm_encrypt_hex(key_hex, nonce_hex, data_hex, aad_hex)
+
+    # Build TLS record: 1-byte type + 2-byte version + 2-byte length + ciphertext
+    var record: [u8] = []
+    record.push(TLS_APPLICATION_DATA_TYPE_V1.to_u8())
+    record.push(TLS_VERSION_MAJOR_V1.to_u8())
+    record.push(TLS_VERSION_MINOR_V1.to_u8())
+    record.push((encrypted_len / 256).to_u8())
+    record.push((encrypted_len % 256).to_u8())
+
+    # Append encrypted payload
+    val ct_wire = tls_hex_to_wire(ct_hex)
+    val ciphertext_bytes = text_to_bytes(ct_wire)
+    if ciphertext_bytes.len() != encrypted_len:
+        return []
+    for b in ciphertext_bytes:
+        record.push(b)
+    record
+
+fn build_gcm_nonce_hex(iv_hex: text, seq: i64) -> text:
+    """Build 12-byte GCM nonce = 4-byte IV + 8-byte sequence (big-endian)."""
+    var nonce = iv_hex
+    var s = seq
+    var seq_bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+    var k = 7
+    while k >= 0:
+        seq_bytes[k] = s % 256
+        s = s / 256
+        k = k - 1
+    var idx = 0
+    while idx < 8:
+        val b = seq_bytes[idx]
+        val hi = b / 16
+        val lo = b % 16
+        nonce = nonce + hex_digit(hi) + hex_digit(lo)
+        idx = idx + 1
+    nonce
+
+fn build_aead_aad_hex(seq: i64, content_type: i64, version: i64, length: i64) -> text:
+    """Build AEAD additional authenticated data (13 bytes) as hex.
+
+    Format: 8-byte seq + 1-byte content_type + 2-byte version + 2-byte length.
+    """
+    var aad = ""
+    # 8-byte sequence number
+    var s = seq
+    var seq_bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+    var k = 7
+    while k >= 0:
+        seq_bytes[k] = s % 256
+        s = s / 256
+        k = k - 1
+    var idx = 0
+    while idx < 8:
+        val b = seq_bytes[idx]
+        aad = aad + hex_digit(b / 16) + hex_digit(b % 16)
+        idx = idx + 1
+    # 1-byte content type
+    aad = aad + hex_digit(content_type / 16) + hex_digit(content_type % 16)
+    # 2-byte version
+    aad = aad + hex_digit(3 / 16) + hex_digit(3 % 16)
+    aad = aad + hex_digit(3 / 16) + hex_digit(3 % 16)
+    # 2-byte length
+    val len_hi = length / 256
+    val len_lo = length % 256
+    aad = aad + hex_digit(len_hi / 16) + hex_digit(len_hi % 16)
+    aad = aad + hex_digit(len_lo / 16) + hex_digit(len_lo % 16)
+    aad
+
+fn hex_digit(n: i64) -> text:
+    """Convert 0-15 to hex character."""
+    if n < 10:
+        return "{n}"
+    if n == 10:
+        return "a"
+    if n == 11:
+        return "b"
+    if n == 12:
+        return "c"
+    if n == 13:
+        return "d"
+    if n == 14:
+        return "e"
+    "f"
+
+# Strict same-package surface consumed by worker_owner and its extension.
+export TlsSessionState
+export is_dynamic_handler, worker_static_file_route
+export worker_static_file_fallback_response, worker_sendfile_open_path_for_pending
+export tls_bytes_to_wire, tls_wire_to_bytes, tls_decrypt_record, tls_encrypt_record

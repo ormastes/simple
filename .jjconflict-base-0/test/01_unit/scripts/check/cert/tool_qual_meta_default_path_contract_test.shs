@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+subject="$repo_root/scripts/check/cert/tool-qual-meta.shs"
+
+check_source() {
+    file=$1
+    if grep -q '/home/ormastes/dev/pub/simple' "$file"; then
+        return 1
+    fi
+    grep -Fxq 'SIMPLE_BIN="${SIMPLE_BIN:-$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple}"' "$file" || return 1
+}
+
+fixture_root=$(mktemp -d)
+trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+relocated="$fixture_root/repo with owner's space"
+mkdir -p "$relocated/scripts/check/cert" "$relocated/bin/release/x86_64-unknown-linux-gnu" "$fixture_root/corpus"
+cp "$subject" "$relocated/scripts/check/cert/tool-qual-meta.shs"
+printf 'fn main():\n    print 42\n' > "$fixture_root/corpus/probe.spl"
+
+cat > "$relocated/bin/release/x86_64-unknown-linux-gnu/simple" <<'FAKE_BIN'
+#!/bin/sh
+printf 'x\n' >> "$0.invoked"
+printf '42\n'
+FAKE_BIN
+chmod 755 "$relocated/bin/release/x86_64-unknown-linux-gnu/simple"
+
+output=$(env -u SIMPLE_BIN CORPUS="$fixture_root/corpus" META_K=2 sh "$relocated/scripts/check/cert/tool-qual-meta.shs")
+printf '%s\n' "$output" | grep -Fxq "binary : $relocated/bin/release/x86_64-unknown-linux-gnu/simple"
+printf '%s\n' "$output" | grep -Fxq 'RESULT: PASS (every case byte-identical across 2 runs in both modes)'
+default_count=$(wc -l < "$relocated/bin/release/x86_64-unknown-linux-gnu/simple.invoked")
+test "$default_count" -eq 4
+
+override="$fixture_root/override simple"
+cat > "$override" <<'OVERRIDE_BIN'
+#!/bin/sh
+printf 'x\n' >> "$0.invoked"
+printf '99\n'
+OVERRIDE_BIN
+chmod 755 "$override"
+override_output=$(SIMPLE_BIN="$override" CORPUS="$fixture_root/corpus" META_K=2 sh "$relocated/scripts/check/cert/tool-qual-meta.shs")
+printf '%s\n' "$override_output" | grep -Fxq "binary : $override"
+printf '%s\n' "$override_output" | grep -Fxq 'RESULT: PASS (every case byte-identical across 2 runs in both modes)'
+override_count=$(wc -l < "$override.invoked")
+test "$override_count" -eq 4
+
+check_source "$subject"
+legacy_mutant="$relocated/scripts/check/cert/legacy.shs"
+sed 's|$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple|/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple|' "$subject" > "$legacy_mutant"
+if check_source "$legacy_mutant"; then
+    echo 'error: accepted legacy-root mutant' >&2
+    exit 1
+fi
+before=$(wc -l < "$relocated/bin/release/x86_64-unknown-linux-gnu/simple.invoked")
+legacy_output=$(env -u SIMPLE_BIN CORPUS="$fixture_root/corpus" META_K=2 sh "$legacy_mutant")
+printf '%s\n' "$legacy_output" | grep -Fxq 'binary : /home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple'
+after=$(wc -l < "$relocated/bin/release/x86_64-unknown-linux-gnu/simple.invoked")
+test "$after" -eq "$before"
+
+echo 'tool-qualification meta default-path contract: PASS'

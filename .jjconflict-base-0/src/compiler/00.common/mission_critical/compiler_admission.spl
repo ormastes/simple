@@ -1,0 +1,356 @@
+# codex-impl: pure fail-closed compiler receipt admission.
+#
+# Collection is deliberately outside this module.  A privileged collector
+# hashes inputs and captures executions; this policy only validates the frozen
+# receipt against independently supplied release expectations.
+
+use std.common.crypto.sha256.{sha256_text}
+
+enum MciCompilerLineageV1:
+    PureSimple
+    RustSeed
+    Hybrid
+    Stale
+    Unknown
+
+enum MciRejectionCodeV1:
+    None
+    InvalidRunIdentity
+    InvalidArtifactIdentity
+    InvalidCollectorReceipt
+    InvalidHash
+    RunCorrelationMismatch
+    InputIdentityMismatch
+    RustSeedLineage
+    HybridLineage
+    StaleLineage
+    UnknownLineage
+    InvalidParentLineage
+    IncompleteFixtureSet
+    FixtureIdentityMismatch
+    NonExecutableFixture
+    FixtureNotExecuted
+    NonDiscriminatingFixture
+    FixtureFailed
+    MissingFunctionEvidence
+    SourceHashMismatch
+    ExecutableHashMismatch
+
+impl MciRejectionCodeV1:
+    fn name() -> text:
+        match self:
+            MciRejectionCodeV1.None: "none"
+            MciRejectionCodeV1.InvalidRunIdentity: "invalid_run_identity"
+            MciRejectionCodeV1.InvalidArtifactIdentity: "invalid_artifact_identity"
+            MciRejectionCodeV1.InvalidCollectorReceipt: "invalid_collector_receipt"
+            MciRejectionCodeV1.InvalidHash: "invalid_hash"
+            MciRejectionCodeV1.RunCorrelationMismatch: "run_correlation_mismatch"
+            MciRejectionCodeV1.InputIdentityMismatch: "input_identity_mismatch"
+            MciRejectionCodeV1.RustSeedLineage: "rust_seed_lineage"
+            MciRejectionCodeV1.HybridLineage: "hybrid_lineage"
+            MciRejectionCodeV1.StaleLineage: "stale_lineage"
+            MciRejectionCodeV1.UnknownLineage: "unknown_lineage"
+            MciRejectionCodeV1.InvalidParentLineage: "invalid_parent_lineage"
+            MciRejectionCodeV1.IncompleteFixtureSet: "incomplete_fixture_set"
+            MciRejectionCodeV1.FixtureIdentityMismatch: "fixture_identity_mismatch"
+            MciRejectionCodeV1.NonExecutableFixture: "non_executable_fixture"
+            MciRejectionCodeV1.FixtureNotExecuted: "fixture_not_executed"
+            MciRejectionCodeV1.NonDiscriminatingFixture: "non_discriminating_fixture"
+            MciRejectionCodeV1.FixtureFailed: "fixture_failed"
+            MciRejectionCodeV1.MissingFunctionEvidence: "missing_function_evidence"
+            MciRejectionCodeV1.SourceHashMismatch: "source_hash_mismatch"
+            MciRejectionCodeV1.ExecutableHashMismatch: "executable_hash_mismatch"
+
+fn mci_is_hash256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+    true
+
+struct MciExpectedFixtureV2:
+    fixture_id: text
+    command_hash: text
+    timeout_ms: i64
+    expected_exit_code: i64
+    expected_capture_hash: text
+    expected_artifact_hash: text
+    expected_emitted_function_count: i64
+
+struct MciRunIdentityV1:
+    schema_version: text
+    run_id: text
+    source_hash: text
+    config_hash: text
+    toolchain_hash: text
+    dependency_hash: text
+    environment_hash: text
+    input_bundle_hash: text
+    expected_receipt_hash: text
+    expected_parent_artifact_id: text
+    expected_parent_source_hash: text
+    expected_parent_executable_hash: text
+    expected_parent_receipt_hash: text
+    expected_fixtures: [MciExpectedFixtureV2]
+
+impl MciRunIdentityV1:
+    fn is_valid() -> bool:
+        (self.schema_version == "mci-compiler-admission-run-v2"
+            and self.run_id.len() > 0
+            and mci_is_hash256(self.source_hash)
+            and mci_is_hash256(self.config_hash)
+            and mci_is_hash256(self.toolchain_hash)
+            and mci_is_hash256(self.dependency_hash)
+            and mci_is_hash256(self.environment_hash)
+            and mci_is_hash256(self.input_bundle_hash)
+            and mci_is_hash256(self.expected_receipt_hash)
+            and self.expected_parent_artifact_id.len() > 0
+            and mci_is_hash256(self.expected_parent_source_hash)
+            and mci_is_hash256(self.expected_parent_executable_hash)
+            and mci_is_hash256(self.expected_parent_receipt_hash)
+            and self.expected_fixtures.len() > 0)
+
+struct MciParentLineageEvidenceV2:
+    lineage: MciCompilerLineageV1
+    parent_artifact_id: text
+    parent_source_hash: text
+    parent_executable_hash: text
+    parent_receipt_hash: text
+
+struct MciArtifactIdentityV1:
+    schema_version: text
+    artifact_id: text
+    lineage: MciCompilerLineageV1
+    compiler_source_hash: text
+    executable_path_hash: text
+    executable_hash: text
+    input_bundle_hash: text
+    parent: MciParentLineageEvidenceV2
+
+impl MciArtifactIdentityV1:
+    fn is_valid() -> bool:
+        (self.schema_version == "mci-compiler-artifact-v2"
+            and self.artifact_id.len() > 0
+            and mci_is_hash256(self.compiler_source_hash)
+            and mci_is_hash256(self.executable_path_hash)
+            and mci_is_hash256(self.executable_hash)
+            and mci_is_hash256(self.input_bundle_hash))
+
+struct MciFixtureReceiptV2:
+    fixture_id: text
+    command_hash: text
+    timeout_ms: i64
+    exit_code: i64
+    capture_hash: text
+    emitted_artifact_hash: text
+    resolved_executable_path_hash: text
+    compiler_executable_hash: text
+    emitted_function_count: i64
+
+struct MciGateReceiptV1:
+    schema_version: text
+    collector_id: text
+    run_id: text
+    receipt_hash: text
+    input_bundle_hash: text
+    source_hash: text
+    config_hash: text
+    toolchain_hash: text
+    dependency_hash: text
+    environment_hash: text
+    resolved_executable_path_hash: text
+    compiler_executable_hash: text
+    parent_receipt_hash: text
+    fixtures: [MciFixtureReceiptV2]
+
+fn mci_canonical_frame(name: text, value: text) -> text:
+    name.len().to_text() + ":" + name + value.len().to_text() + ":" + value
+
+fn mci_compiler_receipt_canonical(receipt: MciGateReceiptV1) -> text:
+    # receipt_hash is the digest of this material and is intentionally omitted
+    # to avoid a recursive fixed-point definition. Every evidence field is bound.
+    var parts: [text] = []
+    parts.push(mci_canonical_frame("schema_version", receipt.schema_version))
+    parts.push(mci_canonical_frame("collector_id", receipt.collector_id))
+    parts.push(mci_canonical_frame("run_id", receipt.run_id))
+    parts.push(mci_canonical_frame("input_bundle_hash", receipt.input_bundle_hash))
+    parts.push(mci_canonical_frame("source_hash", receipt.source_hash))
+    parts.push(mci_canonical_frame("config_hash", receipt.config_hash))
+    parts.push(mci_canonical_frame("toolchain_hash", receipt.toolchain_hash))
+    parts.push(mci_canonical_frame("dependency_hash", receipt.dependency_hash))
+    parts.push(mci_canonical_frame("environment_hash", receipt.environment_hash))
+    parts.push(mci_canonical_frame("resolved_executable_path_hash", receipt.resolved_executable_path_hash))
+    parts.push(mci_canonical_frame("compiler_executable_hash", receipt.compiler_executable_hash))
+    parts.push(mci_canonical_frame("parent_receipt_hash", receipt.parent_receipt_hash))
+    parts.push(mci_canonical_frame("fixture_count", receipt.fixtures.len().to_text()))
+    var index = 0
+    for fixture in receipt.fixtures:
+        val prefix = "fixture[" + index.to_text() + "]."
+        parts.push(mci_canonical_frame(prefix + "fixture_id", fixture.fixture_id))
+        parts.push(mci_canonical_frame(prefix + "command_hash", fixture.command_hash))
+        parts.push(mci_canonical_frame(prefix + "timeout_ms", fixture.timeout_ms.to_text()))
+        parts.push(mci_canonical_frame(prefix + "exit_code", fixture.exit_code.to_text()))
+        parts.push(mci_canonical_frame(prefix + "capture_hash", fixture.capture_hash))
+        parts.push(mci_canonical_frame(prefix + "emitted_artifact_hash", fixture.emitted_artifact_hash))
+        parts.push(mci_canonical_frame(prefix + "resolved_executable_path_hash", fixture.resolved_executable_path_hash))
+        parts.push(mci_canonical_frame(prefix + "compiler_executable_hash", fixture.compiler_executable_hash))
+        parts.push(mci_canonical_frame(prefix + "emitted_function_count", fixture.emitted_function_count.to_text()))
+        index = index + 1
+    parts.join("")
+
+fn mci_compiler_receipt_hash(receipt: MciGateReceiptV1) -> text:
+    sha256_text(mci_compiler_receipt_canonical(receipt))
+
+struct MciTypedResultV1:
+    admitted: bool
+    rejection: MciRejectionCodeV1
+    detail: text
+    run: MciRunIdentityV1
+    artifact: MciArtifactIdentityV1
+    receipt: MciGateReceiptV1
+
+impl MciTypedResultV1:
+    fn is_admitted() -> bool:
+        self.admitted and self.rejection == MciRejectionCodeV1.None
+
+class CompilerAdmissionV1:
+    static fn evaluate(run: MciRunIdentityV1, artifact: MciArtifactIdentityV1,
+                       receipt: MciGateReceiptV1) -> MciTypedResultV1:
+        run_compiler_admission(run, artifact, receipt)
+
+fn rejected_compiler_admission(code: MciRejectionCodeV1, detail: text,
+        run: MciRunIdentityV1, artifact: MciArtifactIdentityV1,
+        receipt: MciGateReceiptV1) -> MciTypedResultV1:
+    MciTypedResultV1(admitted: false, rejection: code, detail: detail,
+        run: run, artifact: artifact, receipt: receipt)
+
+fn reject_lineage(run: MciRunIdentityV1, artifact: MciArtifactIdentityV1,
+        receipt: MciGateReceiptV1) -> MciTypedResultV1:
+    match artifact.lineage:
+        MciCompilerLineageV1.RustSeed:
+            rejected_compiler_admission(MciRejectionCodeV1.RustSeedLineage,
+                "Rust seed compilers are bootstrap-only", run, artifact, receipt)
+        MciCompilerLineageV1.Hybrid:
+            rejected_compiler_admission(MciRejectionCodeV1.HybridLineage,
+                "hybrid compiler lineage is not admissible", run, artifact, receipt)
+        MciCompilerLineageV1.Stale:
+            rejected_compiler_admission(MciRejectionCodeV1.StaleLineage,
+                "stale compiler lineage is not exact-current", run, artifact, receipt)
+        MciCompilerLineageV1.Unknown | MciCompilerLineageV1.PureSimple:
+            rejected_compiler_admission(MciRejectionCodeV1.UnknownLineage,
+                "unknown compiler lineage is not admissible", run, artifact, receipt)
+
+fn run_compiler_admission(run: MciRunIdentityV1, artifact: MciArtifactIdentityV1,
+        receipt: MciGateReceiptV1) -> MciTypedResultV1:
+    if not run.is_valid():
+        return rejected_compiler_admission(MciRejectionCodeV1.InvalidRunIdentity,
+            "run requires v2 identity, hash256 inputs, and fixtures", run, artifact, receipt)
+    if not artifact.is_valid():
+        return rejected_compiler_admission(MciRejectionCodeV1.InvalidArtifactIdentity,
+            "artifact identity is incomplete or contains a malformed hash", run, artifact, receipt)
+    if (receipt.schema_version != "mci-compiler-collector-receipt-v2"
+            or receipt.collector_id.len() == 0 or receipt.fixtures.len() == 0):
+        return rejected_compiler_admission(MciRejectionCodeV1.InvalidCollectorReceipt,
+            "collector receipt requires the exact v2 schema and collector identity", run, artifact, receipt)
+    if not (mci_is_hash256(receipt.receipt_hash)
+            and mci_is_hash256(receipt.input_bundle_hash)
+            and mci_is_hash256(receipt.source_hash)
+            and mci_is_hash256(receipt.config_hash)
+            and mci_is_hash256(receipt.toolchain_hash)
+            and mci_is_hash256(receipt.dependency_hash)
+            and mci_is_hash256(receipt.environment_hash)
+            and mci_is_hash256(receipt.resolved_executable_path_hash)
+            and mci_is_hash256(receipt.compiler_executable_hash)
+            and mci_is_hash256(receipt.parent_receipt_hash)):
+        return rejected_compiler_admission(MciRejectionCodeV1.InvalidHash,
+            "collector evidence must use 64-character lowercase hash256 values", run, artifact, receipt)
+    if (receipt.run_id != run.run_id or receipt.receipt_hash != run.expected_receipt_hash
+            or receipt.receipt_hash != mci_compiler_receipt_hash(receipt)):
+        return rejected_compiler_admission(MciRejectionCodeV1.RunCorrelationMismatch,
+            "collector receipt is not correlated to this release run", run, artifact, receipt)
+    if (receipt.input_bundle_hash != run.input_bundle_hash
+            or artifact.input_bundle_hash != run.input_bundle_hash
+            or receipt.source_hash != run.source_hash
+            or receipt.config_hash != run.config_hash
+            or receipt.toolchain_hash != run.toolchain_hash
+            or receipt.dependency_hash != run.dependency_hash
+            or receipt.environment_hash != run.environment_hash):
+        return rejected_compiler_admission(MciRejectionCodeV1.InputIdentityMismatch,
+            "source/config/toolchain/dependency/environment identity differs", run, artifact, receipt)
+    if artifact.lineage != MciCompilerLineageV1.PureSimple:
+        return reject_lineage(run, artifact, receipt)
+    if (artifact.parent.lineage != MciCompilerLineageV1.PureSimple
+            or artifact.parent.parent_artifact_id.len() == 0
+            or not mci_is_hash256(artifact.parent.parent_source_hash)
+            or not mci_is_hash256(artifact.parent.parent_executable_hash)
+            or not mci_is_hash256(artifact.parent.parent_receipt_hash)
+            or artifact.parent.parent_receipt_hash != receipt.parent_receipt_hash):
+        return rejected_compiler_admission(MciRejectionCodeV1.InvalidParentLineage,
+            "pure-Simple parent lineage evidence is incomplete or unbound", run, artifact, receipt)
+    if (artifact.parent.parent_artifact_id != run.expected_parent_artifact_id
+            or artifact.parent.parent_source_hash != run.expected_parent_source_hash
+            or artifact.parent.parent_executable_hash != run.expected_parent_executable_hash
+            or artifact.parent.parent_receipt_hash != run.expected_parent_receipt_hash):
+        return rejected_compiler_admission(MciRejectionCodeV1.InvalidParentLineage,
+            "parent artifact/source/executable/receipt identity differs from run policy", run, artifact, receipt)
+    if artifact.compiler_source_hash != run.source_hash:
+        return rejected_compiler_admission(MciRejectionCodeV1.SourceHashMismatch,
+            "compiler source hash is not exact-current", run, artifact, receipt)
+    if (receipt.compiler_executable_hash != artifact.executable_hash
+            or receipt.resolved_executable_path_hash != artifact.executable_path_hash):
+        return rejected_compiler_admission(MciRejectionCodeV1.ExecutableHashMismatch,
+            "resolved executable identity differs from the admitted artifact", run, artifact, receipt)
+    if receipt.fixtures.len() != run.expected_fixtures.len():
+        return rejected_compiler_admission(MciRejectionCodeV1.IncompleteFixtureSet,
+            "collector fixture set is not complete", run, artifact, receipt)
+
+    for index in 0..run.expected_fixtures.len():
+        val expected = run.expected_fixtures[index]
+        val observed = receipt.fixtures[index]
+        if expected.fixture_id.len() == 0 or observed.fixture_id != expected.fixture_id:
+            return rejected_compiler_admission(MciRejectionCodeV1.FixtureIdentityMismatch,
+                "fixture identity/order differs from the frozen manifest", run, artifact, receipt)
+        for prior in 0..index:
+            if (run.expected_fixtures[prior].fixture_id == expected.fixture_id
+                    or receipt.fixtures[prior].fixture_id == observed.fixture_id):
+                return rejected_compiler_admission(MciRejectionCodeV1.IncompleteFixtureSet,
+                    "fixture manifests must not contain duplicate identities", run, artifact, receipt)
+        if (not mci_is_hash256(expected.command_hash)
+                or not mci_is_hash256(expected.expected_capture_hash)
+                or not mci_is_hash256(expected.expected_artifact_hash)
+                or not mci_is_hash256(observed.command_hash)
+                or not mci_is_hash256(observed.capture_hash)
+                or not mci_is_hash256(observed.emitted_artifact_hash)
+                or not mci_is_hash256(observed.resolved_executable_path_hash)
+                or not mci_is_hash256(observed.compiler_executable_hash)):
+            return rejected_compiler_admission(MciRejectionCodeV1.InvalidHash,
+                "fixture evidence contains a malformed hash256", run, artifact, receipt)
+        if expected.timeout_ms <= 0 or observed.timeout_ms != expected.timeout_ms:
+            return rejected_compiler_admission(MciRejectionCodeV1.FixtureNotExecuted,
+                "fixture timeout evidence is absent or differs", run, artifact, receipt)
+        if (observed.command_hash != expected.command_hash
+                or observed.capture_hash != expected.expected_capture_hash
+                or observed.emitted_artifact_hash != expected.expected_artifact_hash):
+            return rejected_compiler_admission(MciRejectionCodeV1.NonDiscriminatingFixture,
+                "fixture command, capture, or emitted artifact differs", run, artifact, receipt)
+        if observed.exit_code != expected.expected_exit_code:
+            return rejected_compiler_admission(MciRejectionCodeV1.FixtureFailed,
+                "fixture exit code differs from the manifest", run, artifact, receipt)
+        if (observed.compiler_executable_hash != artifact.executable_hash
+                or observed.resolved_executable_path_hash != artifact.executable_path_hash):
+            return rejected_compiler_admission(MciRejectionCodeV1.NonExecutableFixture,
+                "fixture did not use the resolved admitted executable", run, artifact, receipt)
+        if (expected.expected_emitted_function_count <= 0
+                or observed.emitted_function_count != expected.expected_emitted_function_count):
+            return rejected_compiler_admission(MciRejectionCodeV1.MissingFunctionEvidence,
+                "fixture emitted-function evidence is absent or differs", run, artifact, receipt)
+
+    MciTypedResultV1(admitted: true, rejection: MciRejectionCodeV1.None,
+        detail: "hash-bound pure-Simple exact-current compiler admitted",
+        run: run, artifact: artifact, receipt: receipt)
+
+export MciCompilerLineageV1, MciRejectionCodeV1, MciExpectedFixtureV2,
+    MciRunIdentityV1, MciParentLineageEvidenceV2, MciArtifactIdentityV1,
+    MciFixtureReceiptV2, MciGateReceiptV1, MciTypedResultV1,
+    CompilerAdmissionV1, run_compiler_admission, mci_compiler_receipt_hash

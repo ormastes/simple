@@ -1,0 +1,166 @@
+# Authenticated, replay-bounded admission receipt for one primary SimpleOS tool.
+# The producer supplies the exact canonical payload bytes it signed.  This
+# contract never reconstructs or guesses signing bytes and never grants loader
+# authority; successful verification is only an input to the loader owner.
+
+use lib.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.string_core.{text_to_bytes}
+use common.contracts.execution.simpleos_target_v1.{
+    simpleos_target_v1_is_userland_triple
+}
+
+pub const SIMPLEOS_PRIMARY_TOOL_RECEIPT_V1: i64 = 1
+pub const SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_PAYLOAD: i64 = 4096
+pub const SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_LIFETIME_US: i64 = 86400000000
+pub const SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_CONSUMED: i64 = 256
+
+pub struct SimpleOsPrimaryToolReceiptV1:
+    schema_version: i64
+    tool_name: text
+    canonical_path: text
+    artifact_digest: text
+    target_triple: text
+    filesystem: text
+    behavior_id: text
+    receipt_id: text
+    key_id: text
+    issued_unix_us: i64
+    expires_unix_us: i64
+    nonce: text
+    payload: [u8]
+    signature: [u8]
+
+pub enum SimpleOsPrimaryToolReceiptError:
+    None
+    InvalidSchema
+    InvalidIdentity
+    InvalidDigest
+    InvalidTarget
+    InvalidTimeWindow
+    InvalidPayload
+    InvalidKey
+    InvalidSignature
+    Replayed
+    ReplayStoreFull
+
+pub struct SimpleOsPrimaryToolReceiptOwnerV1:
+    consumed_keys: [text]
+
+pub struct SimpleOsPrimaryToolReceiptAdmissionV1:
+    ok: bool
+    error: SimpleOsPrimaryToolReceiptError
+    owner: SimpleOsPrimaryToolReceiptOwnerV1
+
+fn _safe(value: text) -> bool:
+    value.trim() != "" and value.len() <= 256 and not value.contains("\0") and
+        not value.contains("\n") and not value.contains("\r")
+
+fn _push_u64(out: [u8], value: i64):
+    var i = 0
+    while i < 8:
+        out.push(((value >> (i * 8)) & 255) as u8)
+        i = i + 1
+
+fn _push_field(out: [u8], value: text):
+    val bytes = text_to_bytes(value)
+    _push_u64(out, bytes.len())
+    for byte in bytes:
+        out.push(byte)
+
+pub fn simpleos_primary_tool_receipt_canonical_body_v1(
+    receipt: SimpleOsPrimaryToolReceiptV1
+) -> [u8]:
+    var out: [u8] = []
+    _push_field(out, "simpleos-primary-tool-receipt-v1")
+    _push_u64(out, receipt.schema_version)
+    _push_field(out, receipt.tool_name)
+    _push_field(out, receipt.canonical_path)
+    _push_field(out, receipt.artifact_digest)
+    _push_field(out, receipt.target_triple)
+    _push_field(out, receipt.filesystem)
+    _push_field(out, receipt.behavior_id)
+    _push_field(out, receipt.receipt_id)
+    _push_field(out, receipt.key_id)
+    _push_u64(out, receipt.issued_unix_us)
+    _push_u64(out, receipt.expires_unix_us)
+    _push_field(out, receipt.nonce)
+    out
+
+pub fn simpleos_primary_tool_receipt_verify_v1(
+    receipt: SimpleOsPrimaryToolReceiptV1,
+    trusted_key_id: text,
+    trusted_public_key: [u8],
+    now_unix_us: i64
+) -> Result<(), SimpleOsPrimaryToolReceiptError>:
+    if receipt.schema_version != SIMPLEOS_PRIMARY_TOOL_RECEIPT_V1:
+        return Err(SimpleOsPrimaryToolReceiptError.InvalidSchema)
+    if not _safe(receipt.tool_name) or not _safe(receipt.canonical_path) or
+       not receipt.canonical_path.starts_with("/") or not _safe(receipt.filesystem) or
+       not _safe(receipt.behavior_id) or not _safe(receipt.receipt_id) or
+       not _safe(receipt.nonce):
+        return Err(SimpleOsPrimaryToolReceiptError.InvalidIdentity)
+    if not hash256_hex_valid(receipt.artifact_digest):
+        return Err(SimpleOsPrimaryToolReceiptError.InvalidDigest)
+    if not simpleos_target_v1_is_userland_triple(receipt.target_triple):
+        return Err(SimpleOsPrimaryToolReceiptError.InvalidTarget)
+    if receipt.issued_unix_us < 0 or now_unix_us < receipt.issued_unix_us or
+       receipt.expires_unix_us < now_unix_us or
+       receipt.expires_unix_us - receipt.issued_unix_us > SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_LIFETIME_US:
+        return Err(SimpleOsPrimaryToolReceiptError.InvalidTimeWindow)
+    val canonical = simpleos_primary_tool_receipt_canonical_body_v1(receipt)
+    if canonical.len() == 0 or canonical.len() > SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_PAYLOAD or
+       receipt.payload != canonical:
+        return Err(SimpleOsPrimaryToolReceiptError.InvalidPayload)
+    if receipt.key_id != trusted_key_id or not _safe(receipt.key_id) or trusted_public_key.len() != 32:
+        return Err(SimpleOsPrimaryToolReceiptError.InvalidKey)
+    if receipt.signature.len() != 64 or not pure_ed25519_verify(
+        public_key: trusted_public_key, message: receipt.payload,
+        signature: receipt.signature):
+        return Err(SimpleOsPrimaryToolReceiptError.InvalidSignature)
+    Ok(())
+
+fn _replay_key(receipt: SimpleOsPrimaryToolReceiptV1) -> text:
+    "{receipt.receipt_id.len()}:{receipt.receipt_id}{receipt.nonce.len()}:{receipt.nonce}"
+
+pub fn simpleos_primary_tool_receipt_owner_v1() -> SimpleOsPrimaryToolReceiptOwnerV1:
+    SimpleOsPrimaryToolReceiptOwnerV1(consumed_keys: [])
+
+pub fn simpleos_primary_tool_receipt_admit_v1(
+    owner: SimpleOsPrimaryToolReceiptOwnerV1,
+    receipt: SimpleOsPrimaryToolReceiptV1,
+    trusted_key_id: text,
+    trusted_public_key: [u8],
+    now_unix_us: i64
+) -> SimpleOsPrimaryToolReceiptAdmissionV1:
+    val replay_key = _replay_key(receipt)
+    for consumed in owner.consumed_keys:
+        if consumed == replay_key:
+            return SimpleOsPrimaryToolReceiptAdmissionV1(
+                ok: false, error: SimpleOsPrimaryToolReceiptError.Replayed,
+                owner: owner)
+    if owner.consumed_keys.len() >= SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_CONSUMED:
+        return SimpleOsPrimaryToolReceiptAdmissionV1(
+            ok: false, error: SimpleOsPrimaryToolReceiptError.ReplayStoreFull,
+            owner: owner)
+    val verified = simpleos_primary_tool_receipt_verify_v1(
+        receipt, trusted_key_id, trusted_public_key, now_unix_us)
+    match verified:
+        case Err(reason):
+            SimpleOsPrimaryToolReceiptAdmissionV1(
+                ok: false, error: reason, owner: owner)
+        case Ok(_):
+            var consumed = owner.consumed_keys
+            consumed.push(replay_key)
+            SimpleOsPrimaryToolReceiptAdmissionV1(
+                ok: true, error: SimpleOsPrimaryToolReceiptError.None,
+                owner: SimpleOsPrimaryToolReceiptOwnerV1(consumed_keys: consumed))
+
+export SimpleOsPrimaryToolReceiptV1, SimpleOsPrimaryToolReceiptError
+export simpleos_primary_tool_receipt_verify_v1
+export simpleos_primary_tool_receipt_canonical_body_v1
+export SimpleOsPrimaryToolReceiptOwnerV1, SimpleOsPrimaryToolReceiptAdmissionV1
+export simpleos_primary_tool_receipt_owner_v1, simpleos_primary_tool_receipt_admit_v1
+export SIMPLEOS_PRIMARY_TOOL_RECEIPT_V1, SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_PAYLOAD
+export SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_LIFETIME_US
+export SIMPLEOS_PRIMARY_TOOL_RECEIPT_MAX_CONSUMED

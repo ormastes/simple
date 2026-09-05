@@ -1,0 +1,544 @@
+# Core Simple — Lexer Types (struct-based)
+#
+# Struct-based types for the lexer: LexSpan, Token, Lexer.
+# Used by core lexer and extended by compiler lexer.
+#
+# Compiled by seed (Core Simple subset).
+
+use compiler.core.tokens.{tok_kind_name}
+
+
+# ===== LexSpan — source location range =====
+struct LexSpan:
+    start: i64    # Byte offset (inclusive)
+    end_pos: i64  # Byte offset (exclusive) - named end_pos to avoid C++ keyword
+    line: i64     # 1-based line number
+    col: i64      # 1-based column number
+
+fn lex_span_new(start: i64, end_pos: i64, line: i64, col: i64) -> LexSpan:
+    return LexSpan(start: start, end_pos: end_pos, line: line, col: col)
+
+fn lex_span_empty() -> LexSpan:
+    return LexSpan(start: 0, end_pos: 0, line: 0, col: 0)
+
+fn span_merge(a: LexSpan, b: LexSpan) -> LexSpan:
+    var s = a.start
+    if b.start < s: s = b.start
+    var e = a.end_pos
+    if b.end_pos > e: e = b.end_pos
+    return LexSpan(start: s, end_pos: e, line: a.line, col: a.col)
+
+fn span_len(s: LexSpan) -> i64:
+    return s.end_pos - s.start
+
+# ===== TokenKind — enum view of the tokens.spl wire codes =====
+#
+# AUTHORITATIVE SOURCE OF ORDINALS: compiler/core/tokens.spl. Every variant
+# below carries the exact TOK_* integer the live lexer (CoreLexer -> lex_next)
+# emits, so `token_kind_from_code` is a pure relabelling and can never drift
+# into a renumbering.
+#
+# This deliberately does NOT reuse `compiler.frontend.lexer_types.TokenKind`:
+# that enum is a separate taxonomy whose ordinals are positional (KwFn = 7)
+# and do NOT match the wire codes (TOK_KW_FN = 20). `core/lexer.spl` used to
+# re-export it while `Token.kind` held a raw wire i64, which is why every
+# `token.kind == TokenKind.X` comparison in the treesitter outline layer was
+# silently false. See doc/08_tracking/bug/ item D21.
+#
+# Note: tokens.spl assigns 61 to BOTH TOK_MINUS and TOK_KW_IMPLEMENTS. 61 is
+# what the lexer emits for `-`, so 61 is named Minus here; the `implements`
+# keyword has no distinct wire code (pre-existing tokens.spl defect).
+enum TokenKind:
+    Integer = 1
+    Float = 2
+    StringLit = 3
+    BoolLit = 4
+    NilLit = 5
+    Ident = 6
+    SuffixedInt = 7
+    SuffixedFloat = 8
+    KwFn = 20
+    KwVal = 21
+    KwVar = 22
+    KwStruct = 23
+    KwEnum = 24
+    KwExtern = 25
+    KwExport = 26
+    KwUse = 27
+    KwImport = 28
+    KwPub = 29
+    KwStatic = 30
+    KwClass = 31
+    KwImpl = 32
+    KwTrait = 33
+    KwMe = 34
+    KwType = 35
+    KwAsm = 36
+    KwYield = 37
+    KwSelf = 38
+    KwIs = 39
+    KwIf = 40
+    KwElse = 41
+    KwElif = 42
+    KwMatch = 43
+    KwCase = 44
+    KwFor = 45
+    KwWhile = 46
+    KwBreak = 47
+    KwContinue = 48
+    KwReturn = 49
+    KwIn = 50
+    KwLoop = 51
+    KwPass = 52
+    KwAsync = 53
+    KwAwait = 54
+    KwAnd = 55
+    KwOr = 56
+    KwNot = 57
+    KwTrue = 58
+    KwFalse = 59
+    Plus = 60
+    Minus = 61
+    Star = 62
+    Slash = 63
+    Percent = 64
+    StarStar = 65
+    Shl = 66
+    Shr = 67
+    Eq = 80
+    NotEq = 81
+    Lt = 82
+    Gt = 83
+    LtEq = 84
+    GtEq = 85
+    LtGeneric = 86
+    Assign = 100
+    PlusEq = 101
+    MinusEq = 102
+    StarEq = 103
+    SlashEq = 104
+    PercentEq = 105
+    Walrus = 106
+    Ampersand = 120
+    Pipe = 121
+    Caret = 122
+    Tilde = 123
+    Question = 130
+    QuestionDot = 131
+    QuestionQuestion = 132
+    DotQuestion = 133
+    Bang = 134
+    LParen = 140
+    RParen = 141
+    LBrace = 142
+    RBrace = 143
+    LBracket = 144
+    RBracket = 145
+    Comma = 160
+    Colon = 161
+    ColonColon = 162
+    Semicolon = 163
+    Dot = 164
+    DotDot = 165
+    DotDotEq = 166
+    Arrow = 167
+    FatArrow = 168
+    Underscore = 169
+    Hash = 170
+    At = 171
+    HashLBracket = 172
+    Ellipsis = 173
+    PipeForward = 175
+    Compose = 176
+    Newline = 180
+    Indent = 181
+    Dedent = 182
+    KwPassTodo = 183
+    KwPassDoNothing = 184
+    KwPassDn = 185
+    KwDefer = 186
+    KwErrdefer = 187
+    KwConst = 188
+    KwWhere = 189
+    Eof = 190
+    Error = 191
+    Label = 192
+    BacktickIdent = 193
+    KwLazy = 194
+    KwDo = 195
+    KwExtend = 196
+    KwSpawn = 197
+    KwNewtype = 198
+    KwDyn = 199
+    KwKeyof = 200
+    KwStaticFor = 201
+    KwComptime = 202
+    KwMixin = 203
+    KwBind = 204
+    KwCe = 205
+    KwReceive = 206
+    KwAfter = 207
+    KwInterface = 208
+    KwBitfield = 209
+    AmpColon = 210
+    KwNew = 211
+    KwCli = 212
+    KwGeneric = 213
+    KwLimits = 214
+    KwCandidates = 215
+    KwOn = 216
+    KwForbid = 217
+    KwAllow = 218
+    KwNewunit = 219
+    Backslash = 220
+    KwAs = 221
+    # Not emitted by the core lexer (no TOK_ constant): produced/expected by the
+    # treesitter outline layer only. Values sit above the tokens.spl range so
+    # they can never alias a real lexer code.
+    BlockStart = 240
+    BlockPayload = 241
+    BlockEnd = 242
+    KwPri = 243
+
+fn token_kind_from_code(code: i64) -> TokenKind:
+    """Relabel a raw tokens.spl wire code as a TokenKind.
+
+    Total over every code the lexer can emit; an unrecognised code becomes
+    TokenKind.Error rather than silently aliasing a valid kind.
+    """
+    match code:
+        case 1: TokenKind.Integer
+        case 2: TokenKind.Float
+        case 3: TokenKind.StringLit
+        case 4: TokenKind.BoolLit
+        case 5: TokenKind.NilLit
+        case 6: TokenKind.Ident
+        case 7: TokenKind.SuffixedInt
+        case 8: TokenKind.SuffixedFloat
+        case 20: TokenKind.KwFn
+        case 21: TokenKind.KwVal
+        case 22: TokenKind.KwVar
+        case 23: TokenKind.KwStruct
+        case 24: TokenKind.KwEnum
+        case 25: TokenKind.KwExtern
+        case 26: TokenKind.KwExport
+        case 27: TokenKind.KwUse
+        case 28: TokenKind.KwImport
+        case 29: TokenKind.KwPub
+        case 30: TokenKind.KwStatic
+        case 31: TokenKind.KwClass
+        case 32: TokenKind.KwImpl
+        case 33: TokenKind.KwTrait
+        case 34: TokenKind.KwMe
+        case 35: TokenKind.KwType
+        case 36: TokenKind.KwAsm
+        case 37: TokenKind.KwYield
+        case 38: TokenKind.KwSelf
+        case 39: TokenKind.KwIs
+        case 40: TokenKind.KwIf
+        case 41: TokenKind.KwElse
+        case 42: TokenKind.KwElif
+        case 43: TokenKind.KwMatch
+        case 44: TokenKind.KwCase
+        case 45: TokenKind.KwFor
+        case 46: TokenKind.KwWhile
+        case 47: TokenKind.KwBreak
+        case 48: TokenKind.KwContinue
+        case 49: TokenKind.KwReturn
+        case 50: TokenKind.KwIn
+        case 51: TokenKind.KwLoop
+        case 52: TokenKind.KwPass
+        case 53: TokenKind.KwAsync
+        case 54: TokenKind.KwAwait
+        case 55: TokenKind.KwAnd
+        case 56: TokenKind.KwOr
+        case 57: TokenKind.KwNot
+        case 58: TokenKind.KwTrue
+        case 59: TokenKind.KwFalse
+        case 60: TokenKind.Plus
+        case 61: TokenKind.Minus
+        case 62: TokenKind.Star
+        case 63: TokenKind.Slash
+        case 64: TokenKind.Percent
+        case 65: TokenKind.StarStar
+        case 66: TokenKind.Shl
+        case 67: TokenKind.Shr
+        case 80: TokenKind.Eq
+        case 81: TokenKind.NotEq
+        case 82: TokenKind.Lt
+        case 83: TokenKind.Gt
+        case 84: TokenKind.LtEq
+        case 85: TokenKind.GtEq
+        case 86: TokenKind.LtGeneric
+        case 100: TokenKind.Assign
+        case 101: TokenKind.PlusEq
+        case 102: TokenKind.MinusEq
+        case 103: TokenKind.StarEq
+        case 104: TokenKind.SlashEq
+        case 105: TokenKind.PercentEq
+        case 106: TokenKind.Walrus
+        case 120: TokenKind.Ampersand
+        case 121: TokenKind.Pipe
+        case 122: TokenKind.Caret
+        case 123: TokenKind.Tilde
+        case 130: TokenKind.Question
+        case 131: TokenKind.QuestionDot
+        case 132: TokenKind.QuestionQuestion
+        case 133: TokenKind.DotQuestion
+        case 134: TokenKind.Bang
+        case 140: TokenKind.LParen
+        case 141: TokenKind.RParen
+        case 142: TokenKind.LBrace
+        case 143: TokenKind.RBrace
+        case 144: TokenKind.LBracket
+        case 145: TokenKind.RBracket
+        case 160: TokenKind.Comma
+        case 161: TokenKind.Colon
+        case 162: TokenKind.ColonColon
+        case 163: TokenKind.Semicolon
+        case 164: TokenKind.Dot
+        case 165: TokenKind.DotDot
+        case 166: TokenKind.DotDotEq
+        case 167: TokenKind.Arrow
+        case 168: TokenKind.FatArrow
+        case 169: TokenKind.Underscore
+        case 170: TokenKind.Hash
+        case 171: TokenKind.At
+        case 172: TokenKind.HashLBracket
+        case 173: TokenKind.Ellipsis
+        case 175: TokenKind.PipeForward
+        case 176: TokenKind.Compose
+        case 180: TokenKind.Newline
+        case 181: TokenKind.Indent
+        case 182: TokenKind.Dedent
+        case 183: TokenKind.KwPassTodo
+        case 184: TokenKind.KwPassDoNothing
+        case 185: TokenKind.KwPassDn
+        case 186: TokenKind.KwDefer
+        case 187: TokenKind.KwErrdefer
+        case 188: TokenKind.KwConst
+        case 189: TokenKind.KwWhere
+        case 190: TokenKind.Eof
+        case 191: TokenKind.Error
+        case 192: TokenKind.Label
+        case 193: TokenKind.BacktickIdent
+        case 194: TokenKind.KwLazy
+        case 195: TokenKind.KwDo
+        case 196: TokenKind.KwExtend
+        case 197: TokenKind.KwSpawn
+        case 198: TokenKind.KwNewtype
+        case 199: TokenKind.KwDyn
+        case 200: TokenKind.KwKeyof
+        case 201: TokenKind.KwStaticFor
+        case 202: TokenKind.KwComptime
+        case 203: TokenKind.KwMixin
+        case 204: TokenKind.KwBind
+        case 205: TokenKind.KwCe
+        case 206: TokenKind.KwReceive
+        case 207: TokenKind.KwAfter
+        case 208: TokenKind.KwInterface
+        case 209: TokenKind.KwBitfield
+        case 210: TokenKind.AmpColon
+        case 211: TokenKind.KwNew
+        case 212: TokenKind.KwCli
+        case 213: TokenKind.KwGeneric
+        case 214: TokenKind.KwLimits
+        case 215: TokenKind.KwCandidates
+        case 216: TokenKind.KwOn
+        case 217: TokenKind.KwForbid
+        case 218: TokenKind.KwAllow
+        case 219: TokenKind.KwNewunit
+        case 220: TokenKind.Backslash
+        case 221: TokenKind.KwAs
+        case 240: TokenKind.BlockStart
+        case 241: TokenKind.BlockPayload
+        case 242: TokenKind.BlockEnd
+        case 243: TokenKind.KwPri
+        case _: TokenKind.Error
+
+fn token_kind_code(k: TokenKind) -> i64:
+    """Inverse of token_kind_from_code: the tokens.spl wire code for a kind.
+
+    The language has no enum->int cast, so the mapping is spelled out; it is
+    generated from the same tokens.spl table as token_kind_from_code.
+    """
+    match k:
+        case TokenKind.Integer: 1
+        case TokenKind.Float: 2
+        case TokenKind.StringLit: 3
+        case TokenKind.BoolLit: 4
+        case TokenKind.NilLit: 5
+        case TokenKind.Ident: 6
+        case TokenKind.SuffixedInt: 7
+        case TokenKind.SuffixedFloat: 8
+        case TokenKind.KwFn: 20
+        case TokenKind.KwVal: 21
+        case TokenKind.KwVar: 22
+        case TokenKind.KwStruct: 23
+        case TokenKind.KwEnum: 24
+        case TokenKind.KwExtern: 25
+        case TokenKind.KwExport: 26
+        case TokenKind.KwUse: 27
+        case TokenKind.KwImport: 28
+        case TokenKind.KwPub: 29
+        case TokenKind.KwStatic: 30
+        case TokenKind.KwClass: 31
+        case TokenKind.KwImpl: 32
+        case TokenKind.KwTrait: 33
+        case TokenKind.KwMe: 34
+        case TokenKind.KwType: 35
+        case TokenKind.KwAsm: 36
+        case TokenKind.KwYield: 37
+        case TokenKind.KwSelf: 38
+        case TokenKind.KwIs: 39
+        case TokenKind.KwIf: 40
+        case TokenKind.KwElse: 41
+        case TokenKind.KwElif: 42
+        case TokenKind.KwMatch: 43
+        case TokenKind.KwCase: 44
+        case TokenKind.KwFor: 45
+        case TokenKind.KwWhile: 46
+        case TokenKind.KwBreak: 47
+        case TokenKind.KwContinue: 48
+        case TokenKind.KwReturn: 49
+        case TokenKind.KwIn: 50
+        case TokenKind.KwLoop: 51
+        case TokenKind.KwPass: 52
+        case TokenKind.KwAsync: 53
+        case TokenKind.KwAwait: 54
+        case TokenKind.KwAnd: 55
+        case TokenKind.KwOr: 56
+        case TokenKind.KwNot: 57
+        case TokenKind.KwTrue: 58
+        case TokenKind.KwFalse: 59
+        case TokenKind.Plus: 60
+        case TokenKind.Minus: 61
+        case TokenKind.Star: 62
+        case TokenKind.Slash: 63
+        case TokenKind.Percent: 64
+        case TokenKind.StarStar: 65
+        case TokenKind.Shl: 66
+        case TokenKind.Shr: 67
+        case TokenKind.Eq: 80
+        case TokenKind.NotEq: 81
+        case TokenKind.Lt: 82
+        case TokenKind.Gt: 83
+        case TokenKind.LtEq: 84
+        case TokenKind.GtEq: 85
+        case TokenKind.LtGeneric: 86
+        case TokenKind.Assign: 100
+        case TokenKind.PlusEq: 101
+        case TokenKind.MinusEq: 102
+        case TokenKind.StarEq: 103
+        case TokenKind.SlashEq: 104
+        case TokenKind.PercentEq: 105
+        case TokenKind.Walrus: 106
+        case TokenKind.Ampersand: 120
+        case TokenKind.Pipe: 121
+        case TokenKind.Caret: 122
+        case TokenKind.Tilde: 123
+        case TokenKind.Question: 130
+        case TokenKind.QuestionDot: 131
+        case TokenKind.QuestionQuestion: 132
+        case TokenKind.DotQuestion: 133
+        case TokenKind.Bang: 134
+        case TokenKind.LParen: 140
+        case TokenKind.RParen: 141
+        case TokenKind.LBrace: 142
+        case TokenKind.RBrace: 143
+        case TokenKind.LBracket: 144
+        case TokenKind.RBracket: 145
+        case TokenKind.Comma: 160
+        case TokenKind.Colon: 161
+        case TokenKind.ColonColon: 162
+        case TokenKind.Semicolon: 163
+        case TokenKind.Dot: 164
+        case TokenKind.DotDot: 165
+        case TokenKind.DotDotEq: 166
+        case TokenKind.Arrow: 167
+        case TokenKind.FatArrow: 168
+        case TokenKind.Underscore: 169
+        case TokenKind.Hash: 170
+        case TokenKind.At: 171
+        case TokenKind.HashLBracket: 172
+        case TokenKind.Ellipsis: 173
+        case TokenKind.PipeForward: 175
+        case TokenKind.Compose: 176
+        case TokenKind.Newline: 180
+        case TokenKind.Indent: 181
+        case TokenKind.Dedent: 182
+        case TokenKind.KwPassTodo: 183
+        case TokenKind.KwPassDoNothing: 184
+        case TokenKind.KwPassDn: 185
+        case TokenKind.KwDefer: 186
+        case TokenKind.KwErrdefer: 187
+        case TokenKind.KwConst: 188
+        case TokenKind.KwWhere: 189
+        case TokenKind.Eof: 190
+        case TokenKind.Error: 191
+        case TokenKind.Label: 192
+        case TokenKind.BacktickIdent: 193
+        case TokenKind.KwLazy: 194
+        case TokenKind.KwDo: 195
+        case TokenKind.KwExtend: 196
+        case TokenKind.KwSpawn: 197
+        case TokenKind.KwNewtype: 198
+        case TokenKind.KwDyn: 199
+        case TokenKind.KwKeyof: 200
+        case TokenKind.KwStaticFor: 201
+        case TokenKind.KwComptime: 202
+        case TokenKind.KwMixin: 203
+        case TokenKind.KwBind: 204
+        case TokenKind.KwCe: 205
+        case TokenKind.KwReceive: 206
+        case TokenKind.KwAfter: 207
+        case TokenKind.KwInterface: 208
+        case TokenKind.KwBitfield: 209
+        case TokenKind.AmpColon: 210
+        case TokenKind.KwNew: 211
+        case TokenKind.KwCli: 212
+        case TokenKind.KwGeneric: 213
+        case TokenKind.KwLimits: 214
+        case TokenKind.KwCandidates: 215
+        case TokenKind.KwOn: 216
+        case TokenKind.KwForbid: 217
+        case TokenKind.KwAllow: 218
+        case TokenKind.KwNewunit: 219
+        case TokenKind.Backslash: 220
+        case TokenKind.KwAs: 221
+        case TokenKind.BlockStart: 240
+        case TokenKind.BlockPayload: 241
+        case TokenKind.BlockEnd: 242
+        case TokenKind.KwPri: 243
+        case _: 191
+
+# ===== Token — lexed token with kind + span + text =====
+struct Token:
+    kind: TokenKind   # Relabelled tokens.spl wire code (see token_kind_from_code)
+    span: LexSpan
+    text: text    # Literal text of the token
+
+fn lex_token_new(kind: i64, text: text, line: i64, col: i64) -> Token:
+    # `kind` stays the raw tokens.spl wire code so every existing producer is
+    # unchanged; the relabelling happens here, in one place.
+    val s = LexSpan(start: 0, end_pos: 0, line: line, col: col)
+    return Token(kind: token_kind_from_code(kind), span: s, text: text)
+
+fn lex_token_eof(line: i64) -> Token:
+    return lex_token_new(190, "", line, 0)
+
+fn lex_token_error(msg: text, line: i64, col: i64) -> Token:
+    return lex_token_new(191, msg, line, col)
+
+fn token_is_keyword(t: Token) -> bool:
+    val c = token_kind_code(t.kind)
+    return c >= 20 and c <= 59
+
+fn token_is_operator(t: Token) -> bool:
+    val c = token_kind_code(t.kind)
+    return c >= 60 and c <= 139
+
+fn token_is_literal(t: Token) -> bool:
+    val c = token_kind_code(t.kind)
+    return c >= 1 and c <= 6
+    return t.kind >= 1 and t.kind <= 6

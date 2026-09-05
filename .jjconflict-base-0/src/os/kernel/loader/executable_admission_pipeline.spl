@@ -1,0 +1,588 @@
+# Authenticated filesystem executable admission.
+#
+# This is the loader-owned bridge between MountTable's already-open execute
+# binding and the frozen common execution contracts. It is intentionally an
+# adapter, not a second filesystem or manifest owner: all verification facts
+# arrive as explicit inputs, and this module never derives authority from a
+# pathname, PATH search, or a fabricated success marker.
+
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
+use std.fs_driver.types.{FileHandle}
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, SimpleArtifactManifest,
+    simple_artifact_manifest_canonical_hash_input_v1
+}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableAdmissionV1, ExecutableImageHandleV1, ExecutableLoadRangeV1,
+    ExecutableContractErrorV1,
+    executable_admission_validate,
+    executable_image_handle_validate, executable_image_handle_matches_admission
+}
+use os.kernel.loader.artifact_manifest.{
+    manifest_validate_for_target, manifest_kind_is_known
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestSignatureErrorV1,
+    executable_manifest_signature_verify
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityErrorV1, ExecutableAuthorityRegistryV1,
+    ExecutableAuthorityTokenV1, ExecutableAuthorityCloseLeaseV1,
+    ExecutableAuthorityJointLeaseV1, ExecutableAuthorityJointReservationV1,
+    executable_authority_loader_owner_initialize,
+    executable_authority_loader_owner,
+    executable_authority_issue_verified,
+    executable_authority_commit, executable_authority_retrieve_once,
+    executable_authority_begin_release_or_retry,
+    executable_authority_begin_revoke_or_retry,
+    executable_authority_close_succeeded,
+    executable_authority_close_failed_retryable,
+    executable_authority_begin_joint_reservation_v1,
+    executable_authority_abort_joint_reservation_v1,
+    executable_authority_commit_joint_reservation_v1,
+    executable_authority_begin_joint_revoke_v1,
+    executable_authority_issue_verified,
+    executable_authority_owner_valid
+}
+use os.kernel.loader.executable_crypto_authority.{
+    executable_loader_signature_verify_trusted_v1,
+    executable_manifest_hash_v1
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.executable_target_dispatch_v1.{
+    executable_target_dispatch_policy_v1
+}
+use os.kernel.loader.elf_loader.{elf_authenticated_layout_v1}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{
+    installed_artifact_catalog_elf_load_plan_v1,
+    installed_artifact_trust_binding_check_v1
+}
+
+pub enum ExecutableLoaderAdmissionErrorV1:
+    StaleBinding
+    MissingManifestVerification
+    SignatureInvalid
+    TrustRootInvalid
+    TargetInvalid
+    FormatInvalid
+    RangeInvalid
+    DigestInvalid
+    CapabilityMismatch
+    ManifestPolicyDenied
+    HandleInvalid
+    AdmissionMismatch
+    CryptographicVerifierUnavailable
+    AuthoritySerializationUnavailable
+    AuthorityTokenInvalid
+    AuthorityCloseStateInvalid
+    CloseFailed
+
+pub struct ExecutableLoaderVerificationInputsV1:
+    manifest: SimpleArtifactManifest
+    manifest_hash: text
+    image_hash: text
+    trust_root_hash: text
+    target: ManifestTarget
+    format: text
+    role: text
+    verified_load_ranges: [ExecutableLoadRangeV1]
+    manifest_verified: bool
+    signature_verified: bool
+    trust_root_verified: bool
+    target_verified: bool
+    format_verified: bool
+    ranges_verified: bool
+    image_digest_verified: bool
+
+pub struct ExecutableLoaderAdmissionResultV1:
+    authority_token: ExecutableAuthorityTokenV1
+    namespace_generation: u64
+    entry_point: u64
+
+pub struct InstalledArtifactLoaderAdmissionResultV1:
+    admission: ExecutableLoaderAdmissionResultV1
+    consumer: ExecutableLoadConsumerV1
+
+pub struct ExecutableLoaderImageRetrievalV1:
+    # Diagnostic retrieval only. This value is not mapping/load authority.
+    image_handle: ExecutableImageHandleV1
+    execution_authorized: bool
+    blocked_reason: text
+
+pub struct ExecutableLoaderCryptographicProofV1:
+    signer_key_id: text
+    signature: [u8]
+
+fn _loader_target_equal(a: ManifestTarget, b: ManifestTarget) -> bool:
+    a.os == b.os and a.arch == b.arch and a.abi == b.abi
+
+fn _loader_target_exact(target: ManifestTarget) -> bool:
+    target.os != "" and target.arch != "" and target.abi != "" and
+        target.os != "any" and target.arch != "any" and target.abi != "any"
+
+pub fn executable_loader_architecture_for_target_v1(
+    target: ManifestTarget
+) -> Architecture?:
+    """Map an exact SimpleOS manifest target to the canonical ELF parser.
+
+    This pure projection grants no execution authority.  It deliberately
+    accepts only the six architecture spellings emitted by the canonical
+    SimpleOS userland target contract; aliases and non-SimpleOS targets fail
+    closed before executable bytes reach the ELF layout owner.
+    """
+    if not _loader_target_exact(target):
+        return nil
+    val policy = executable_target_dispatch_policy_v1(target)
+    if not policy.?: return nil
+    Some(policy.unwrap().architecture)
+
+fn _loader_binding_matches_admission(
+    binding: ExecuteOpenBinding,
+    admission: ExecutableAdmissionV1
+) -> bool:
+    # This gate precedes all producer verification booleans. An attestation
+    # for a different open object can never turn the current binding into an
+    # admitted image, even when every other assertion is true.
+    admission.mount_id == binding.mount_id.id as u64 and
+        admission.mount_generation == binding.mount_generation and
+        admission.file_id == binding.file_handle.id and
+        admission.file_generation == binding.content_generation
+
+fn _loader_close_rejection(
+    mut table: MountTable,
+    binding: ExecuteOpenBinding,
+    error: ExecutableLoaderAdmissionErrorV1
+) -> Result<ExecutableLoaderAdmissionResultV1, ExecutableLoaderAdmissionErrorV1>:
+    val closed = table.close(binding.file_handle)
+    if closed.is_err():
+        return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+    Err(error)
+
+fn _loader_handle_from_binding(
+    binding: ExecuteOpenBinding,
+    inputs: ExecutableLoaderVerificationInputsV1,
+    admission: ExecutableAdmissionV1
+) -> ExecutableImageHandleV1:
+    # ExecuteOpenBinding exposes no separate backend inode identity. The
+    # exact virtual FileHandle is therefore retained as the opaque file
+    # identity; it is never reconstructed from the pathname.
+    ExecutableImageHandleV1(
+        schema_version: admission.schema_version,
+        open_handle_id: binding.file_handle.id,
+        mount_id: binding.mount_id.id as u64,
+        filesystem_name: binding.backend_kind,
+        canonical_source_path: binding.canonical_source_path,
+        mount_generation: binding.mount_generation,
+        file_id: binding.file_handle.id,
+        file_generation: binding.content_generation,
+        size_bytes: binding.size as u64,
+        role: inputs.role,
+        target: inputs.target,
+        verified_load_ranges: inputs.verified_load_ranges,
+        image_hash: admission.image_hash,
+        admission_id: admission.admission_id,
+        trust_epoch: admission.trust_epoch,
+        read_count: 0u64,
+        read_bytes: 0u64,
+        consumed: false
+    )
+
+pub fn executable_loader_admit_open_binding(
+    mut table: MountTable,
+    binding: ExecuteOpenBinding,
+    inputs: ExecutableLoaderVerificationInputsV1,
+    admission: ExecutableAdmissionV1
+) -> Result<ExecutableLoaderAdmissionResultV1, ExecutableLoaderAdmissionErrorV1>:
+    # Check all three generations before and after validation. Namespace is
+    # retained in the loader result because the common image value intentionally
+    # carries only the portable mount/file generation vocabulary.
+    if not table.execute_binding_is_current(binding):
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.StaleBinding)
+    if not _loader_binding_matches_admission(binding, admission):
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.AdmissionMismatch)
+    if not inputs.manifest_verified:
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.MissingManifestVerification)
+    if not inputs.signature_verified or inputs.manifest.signature == "":
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+    if not inputs.trust_root_verified or
+        inputs.trust_root_hash != admission.trust_root_hash:
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+    if not inputs.target_verified or not _loader_target_exact(inputs.target) or
+        not _loader_target_equal(inputs.target, admission.target) or
+        not _loader_target_exact(admission.target) or
+        not _loader_target_exact(inputs.manifest.target) or
+        not _loader_target_equal(inputs.target, inputs.manifest.target):
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.TargetInvalid)
+    if not inputs.format_verified or inputs.format != inputs.manifest.artifact_kind or
+        not manifest_kind_is_known(inputs.format):
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.FormatInvalid)
+    val manifest_check = manifest_validate_for_target(inputs.manifest, inputs.target)
+    if not manifest_check.ok:
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.FormatInvalid)
+    if not inputs.ranges_verified:
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.RangeInvalid)
+    if not inputs.image_digest_verified or inputs.image_hash != admission.image_hash or
+        inputs.manifest_hash != admission.manifest_hash:
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.DigestInvalid)
+    # Caller-supplied booleans above are rejection hints only. The loader now
+    # verifies the canonical manifest/image payload against its one-time private
+    # trust-root capsule before constructing an executable handle.
+    match executable_manifest_signature_verify(
+        inputs.manifest, admission.image_hash, admission.trust_root_hash):
+        case Err(ExecutableManifestSignatureErrorV1.SerializationUnavailable):
+            return _loader_close_rejection(
+                table, binding,
+                ExecutableLoaderAdmissionErrorV1.CryptographicVerifierUnavailable)
+        case Err(ExecutableManifestSignatureErrorV1.TrustRootsUnavailable):
+            return _loader_close_rejection(
+                table, binding,
+                ExecutableLoaderAdmissionErrorV1.CryptographicVerifierUnavailable)
+        case Err(ExecutableManifestSignatureErrorV1.TrustRootsInvalid):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+        case Err(ExecutableManifestSignatureErrorV1.TrustRootsAlreadyInitialized):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+        case Err(ExecutableManifestSignatureErrorV1.SignerUnknown):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+        case Err(ExecutableManifestSignatureErrorV1.TrustRootMismatch):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+        case Err(_):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+        case Ok(_): ()
+    if (inputs.manifest.required_capabilities & admission.effective_capabilities) !=
+        inputs.manifest.required_capabilities:
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.CapabilityMismatch)
+    if binding.size < 1:
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.HandleInvalid)
+    val candidate = _loader_handle_from_binding(binding, inputs, admission)
+    val handle_check = executable_image_handle_validate(candidate)
+    if not handle_check.ok:
+        match handle_check.error:
+            case ExecutableContractErrorV1.InvalidRangeCount:
+                return _loader_close_rejection(
+                    table, binding, ExecutableLoaderAdmissionErrorV1.RangeInvalid)
+            case ExecutableContractErrorV1.InvalidRange:
+                return _loader_close_rejection(
+                    table, binding, ExecutableLoaderAdmissionErrorV1.RangeInvalid)
+            case ExecutableContractErrorV1.InvalidRangeOverlap:
+                return _loader_close_rejection(
+                    table, binding, ExecutableLoaderAdmissionErrorV1.RangeInvalid)
+            case _:
+                return _loader_close_rejection(
+                    table, binding, ExecutableLoaderAdmissionErrorV1.HandleInvalid)
+    val admission_check = executable_image_handle_matches_admission(candidate, admission)
+    if not admission_check.ok:
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.AdmissionMismatch)
+    if not table.execute_binding_is_current(binding):
+        return _loader_close_rejection(
+            table, binding, ExecutableLoaderAdmissionErrorV1.StaleBinding)
+    val owner = executable_authority_loader_owner()
+    if owner.is_err():
+        return _loader_close_rejection(
+            table, binding,
+            ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+    val issued = executable_authority_issue_verified(
+        owner.unwrap(), candidate, false, 0u64)
+    match issued:
+        case Err(ExecutableAuthorityErrorV1.SerializationUnavailable):
+            _loader_close_rejection(
+                table, binding,
+                ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+        case Err(_):
+            _loader_close_rejection(
+                table, binding,
+                ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
+        case Ok(token):
+            Ok(ExecutableLoaderAdmissionResultV1(
+                authority_token: token,
+                namespace_generation: binding.namespace_generation))
+
+fn _loader_read_binding_exact(mut table: MountTable, binding: ExecuteOpenBinding) -> [u8]?:
+    if binding.size < 1 or binding.size > 67108864:
+        return nil
+    val read = table.pread(binding.file_handle, 0, binding.size)
+    if read.is_err():
+        return nil
+    val bytes = text_to_bytes_pure(read.unwrap())
+    if bytes.len() != binding.size:
+        return nil
+    Some(bytes)
+
+pub fn executable_loader_admit_authenticated_open_binding_v1(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    binding: ExecuteOpenBinding,
+    inputs: ExecutableLoaderVerificationInputsV1,
+    admission: ExecutableAdmissionV1,
+    proof: ExecutableLoaderCryptographicProofV1
+) -> Result<ExecutableLoaderAdmissionResultV1, ExecutableLoaderAdmissionErrorV1>:
+    if not executable_authority_owner_valid(authorities):
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
+    if not executable_admission_validate(admission).ok:
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.AdmissionMismatch)
+    if not table.execute_binding_is_current(binding) or
+        not _loader_binding_matches_admission(binding, admission):
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.StaleBinding)
+    val source = _loader_read_binding_exact(table, binding)
+    if not source.?:
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.HandleInvalid)
+    val actual_hash = sha256_u8_hex(source.unwrap())
+    if actual_hash != admission.image_hash or
+        actual_hash != inputs.image_hash or
+        not inputs.manifest.content_hashes.contains(actual_hash):
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.DigestInvalid)
+    val manifest_hash = executable_manifest_hash_v1(inputs.manifest, admission, actual_hash)
+    if manifest_hash != admission.manifest_hash or manifest_hash != inputs.manifest_hash:
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.DigestInvalid)
+    if not executable_loader_signature_verify_trusted_v1(
+        proof.signer_key_id, inputs.manifest, admission, actual_hash, proof.signature):
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+    val layout_arch = executable_loader_architecture_for_target_v1(inputs.target)
+    if not layout_arch.?:
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.TargetInvalid)
+    val layout = elf_authenticated_layout_v1(source.unwrap(), layout_arch.unwrap())
+    if layout.is_err():
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.RangeInvalid)
+    var authoritative_inputs = inputs
+    authoritative_inputs.verified_load_ranges = layout.unwrap().load_ranges
+    # Caller diagnostic booleans are deliberately ignored on this production
+    # path. Authorization derives only from bytes, canonical values, the
+    # configured trust root, and the loader-owned registry.
+    if inputs.manifest.signature == "" or
+        not _loader_target_exact(inputs.target) or
+        not _loader_target_equal(inputs.target, admission.target) or
+        not _loader_target_equal(inputs.target, inputs.manifest.target):
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.TargetInvalid)
+    if inputs.format != inputs.manifest.artifact_kind or
+        not manifest_kind_is_known(inputs.format) or
+        not manifest_validate_for_target(inputs.manifest, inputs.target).ok:
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.FormatInvalid)
+    if (inputs.manifest.required_capabilities & admission.effective_capabilities) !=
+        inputs.manifest.required_capabilities:
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.CapabilityMismatch)
+    val candidate = _loader_handle_from_binding(binding, authoritative_inputs, admission)
+    if not executable_image_handle_validate(candidate).ok or
+        not executable_image_handle_matches_admission(candidate, admission).ok:
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.AdmissionMismatch)
+    if not table.execute_binding_is_current(binding):
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.StaleBinding)
+    val issued = executable_authority_issue_verified(
+        authorities, candidate, true, layout.unwrap().entry_point)
+    match issued:
+        case Err(ExecutableAuthorityErrorV1.SerializationUnavailable):
+            _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+        case Err(_):
+            _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
+        case Ok(token):
+            Ok(ExecutableLoaderAdmissionResultV1(
+                authority_token: token,
+                namespace_generation: binding.namespace_generation,
+                entry_point: layout.unwrap().entry_point))
+
+pub fn executable_loader_admit_installed_artifact_open_binding_v1(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    binding: ExecuteOpenBinding,
+    inputs: ExecutableLoaderVerificationInputsV1,
+    admission: ExecutableAdmissionV1,
+    proof: ExecutableLoaderCryptographicProofV1
+) -> Result<InstalledArtifactLoaderAdmissionResultV1, ExecutableLoaderAdmissionErrorV1>:
+    """Catalog-bound filesystem admission; no path-only compatibility mode.
+
+    The sealed catalog lookup and manifest policy complete before the delegated
+    authenticated path performs its first VFS read.  Canonical manifest and
+    content identities must agree with the admission inputs, so callers cannot
+    pair a trusted catalog path with different signed metadata.
+    """
+    if not table.execute_binding_is_current(binding) or
+        not _loader_binding_matches_admission(binding, admission):
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.StaleBinding)
+    val planned = installed_artifact_catalog_elf_load_plan_v1(
+        binding.canonical_source_path, admission.effective_capabilities)
+    if planned.is_err():
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.ManifestPolicyDenied)
+    val policy_plan = planned.unwrap()
+    if not installed_artifact_trust_binding_check_v1(
+        policy_plan.record, inputs.manifest.signature,
+        proof.signer_key_id, admission.trust_root_hash):
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+    # The catalog signature and per-open admission signature use distinct
+    # canonical domains. They need not be byte-equal. Exact signer
+    # identity binds the already boot-verified catalog row to the trusted key
+    # that the delegated admission verifier checks against trust_root_hash.
+    val canonical = simple_artifact_manifest_canonical_hash_input_v1(inputs.manifest)
+    if not canonical.?:
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.ManifestPolicyDenied)
+    val input_identity = sha256_u8_hex(canonical.unwrap())
+    if input_identity != policy_plan.record.manifest_identity_sha256 or
+        policy_plan.record.content_sha256 != admission.image_hash or
+        policy_plan.record.content_sha256 != inputs.image_hash:
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.DigestInvalid)
+    val admitted = executable_loader_admit_authenticated_open_binding_v1(
+        table, authorities, binding, inputs, admission, proof)
+    match admitted:
+        case Err(error): Err(error)
+        case Ok(result): Ok(InstalledArtifactLoaderAdmissionResultV1(
+            admission: result, consumer: policy_plan.consumer))
+
+pub fn executable_loader_authority_owner_initialize(
+    slot_limit: i64,
+    nonce_seed: u64
+) -> Result<ExecutableAuthorityRegistryV1, ExecutableAuthorityErrorV1>:
+    # This initializes or reopens the one loader capsule; it is not admission
+    # proof. Conflicting singleton configuration fails, the admission API
+    # accepts no caller-supplied owner, and minting is package-private to the
+    # future loader cryptographic verifier.
+    executable_authority_loader_owner_initialize(slot_limit, nonce_seed)
+
+pub fn executable_loader_commit(
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    executable_authority_commit(authorities, token)
+
+pub(package) fn executable_loader_begin_joint_reservation_v1(
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    canonical_path: text
+) -> Result<ExecutableAuthorityJointReservationV1, ExecutableAuthorityErrorV1>:
+    executable_authority_begin_joint_reservation_v1(
+        authorities, token, consumer, entry_point, canonical_path)
+
+pub(package) fn executable_loader_abort_joint_reservation_v1(
+    authorities: ExecutableAuthorityRegistryV1,
+    lease: ExecutableAuthorityJointLeaseV1
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    executable_authority_abort_joint_reservation_v1(authorities, lease)
+
+pub fn executable_loader_commit_joint_reservation_v1(
+    authorities: ExecutableAuthorityRegistryV1,
+    expected_token: ExecutableAuthorityTokenV1,
+    lease: ExecutableAuthorityJointLeaseV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    canonical_path: text
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    # The lease is opaque and can only be minted by the loader package. Repeat
+    # every bound input under the registry mutex before the Committed handoff.
+    executable_authority_commit_joint_reservation_v1(
+        authorities, expected_token, lease, consumer, entry_point, canonical_path)
+
+pub fn executable_loader_retrieve_once(
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1
+) -> Result<ExecutableLoaderImageRetrievalV1, ExecutableAuthorityErrorV1>:
+    # Mapping/execution remains blocked until a bounded privileged load consumer
+    # is wired. The copyable image value is diagnostic metadata, never proof.
+    val retrieved = executable_authority_retrieve_once(authorities, token)
+    match retrieved:
+        case Err(error): Err(error)
+        case Ok(image_handle):
+            Ok(ExecutableLoaderImageRetrievalV1(
+                image_handle: image_handle,
+                execution_authorized: false,
+                blocked_reason: "scheduler-owner-adoption-required"
+            ))
+
+fn _loader_finish_close(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    lease: ExecutableAuthorityCloseLeaseV1
+) -> Result<(), ExecutableLoaderAdmissionErrorV1>:
+    val closed = table.close(FileHandle(id: lease.image_handle.open_handle_id))
+    if closed.is_err():
+        val quarantined = executable_authority_close_failed_retryable(
+            authorities, lease)
+        if quarantined.is_err():
+            return Err(ExecutableLoaderAdmissionErrorV1.AuthorityCloseStateInvalid)
+        return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+    val released = executable_authority_close_succeeded(authorities, lease)
+    if released.is_err():
+        return Err(ExecutableLoaderAdmissionErrorV1.AuthorityCloseStateInvalid)
+    Ok(())
+
+pub fn executable_loader_release_retrieved(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1
+) -> Result<(), ExecutableLoaderAdmissionErrorV1>:
+    # Close ownership is leased atomically. A failed close returns the slot to
+    # CloseRetryable quarantine, so it cannot be reused and can be retried.
+    val begun = executable_authority_begin_release_or_retry(authorities, token)
+    match begun:
+        case Err(ExecutableAuthorityErrorV1.SerializationUnavailable):
+            Err(ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+        case Err(_): Err(ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
+        case Ok(lease): _loader_finish_close(table, authorities, lease)
+
+pub fn executable_loader_revoke(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1
+) -> Result<(), ExecutableLoaderAdmissionErrorV1>:
+    val begun = executable_authority_begin_revoke_or_retry(authorities, token)
+    match begun:
+        case Err(ExecutableAuthorityErrorV1.SerializationUnavailable):
+            Err(ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+        case Err(_): Err(ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
+        case Ok(lease): _loader_finish_close(table, authorities, lease)
+
+pub(package) fn executable_loader_revoke_joint_reservation_v1(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    lease: ExecutableAuthorityJointLeaseV1
+) -> Result<(), ExecutableLoaderAdmissionErrorV1>:
+    val begun = executable_authority_begin_joint_revoke_v1(authorities, lease)
+    match begun:
+        case Err(ExecutableAuthorityErrorV1.SerializationUnavailable):
+            Err(ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+        case Err(_): Err(ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
+        case Ok(close_lease): _loader_finish_close(table, authorities, close_lease)
+
+export ExecutableLoaderAdmissionErrorV1
+export InstalledArtifactLoaderAdmissionResultV1
+export ExecutableLoaderVerificationInputsV1
+export ExecutableLoaderAdmissionResultV1
+export ExecutableLoaderImageRetrievalV1
+export ExecutableLoaderCryptographicProofV1
+export executable_loader_admit_open_binding
+export executable_loader_admit_authenticated_open_binding_v1
+export executable_loader_admit_installed_artifact_open_binding_v1
+export executable_loader_architecture_for_target_v1
+export executable_loader_authority_owner_initialize
+export executable_loader_commit, executable_loader_retrieve_once
+export executable_loader_commit_joint_reservation_v1
+export executable_loader_release_retrieved
+export executable_loader_revoke

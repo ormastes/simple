@@ -1,0 +1,73 @@
+# Shared HTML Window Content Helpers
+#
+# Builds backend-neutral HTML fragments for MDI window bodies. Electron,
+# Tauri, Simple Web, and pure Simple compositor paths can all embed these
+# fragments inside their own window chrome.
+
+use common.ui.window.{WindowInfo, window_info}
+use common.web.html_escape.{html_escape_core}
+
+fn html_escape(value: text) -> text:
+    html_escape_core(value)
+
+fn html_attr_escape(value: text) -> text:
+    html_escape_core(value)
+
+# Titlebar rules below are hardened for cross-engine parity: verified to render
+# identically in Chromium (Electron backend) and WebKit/WKWebView (Tauri backend
+# on macOS) via scripts/check/check-titlebar-cross-engine-parity.shs. The widget
+# button forces `appearance:none` so WebKit cannot fall back to native form-control
+# chrome, and the titlebar sets `user-select:none` (WebKit otherwise defaults to
+# selectable text on drag chrome). Only measured divergences are pinned here; the
+# label's ~1px height difference (`line-height:normal`) is a benign sub-pixel
+# residual left as-is to avoid clipping descenders under `overflow:hidden`.
+# A `@media (pointer:coarse)` rule bumps the titlebar widget to a 44px touch
+# target (and the bar to 48px) on touch devices — verified in the iOS Simulator
+# (iPhone 17, WebKit) and Android emulator (Chromium); desktop keeps the compact
+# 24px size. NOTE: the pure-Simple software browser engine renders this button
+# narrower and wraps the label vertically (intrinsic shrink-to-fit /
+# `white-space:nowrap` not honored) — tracked separately; it does not affect the
+# Electron/Tauri/mobile-WebView backends.
+fn html_window_base_css() -> text:
+    ".simple-app-window{display:flex;flex-direction:column;width:100%;height:100%;min-height:0;background:#0b0d10;color:#e5e7eb;font-family:Inter,system-ui,sans-serif;}" +
+    ".simple-app-title{display:flex;align-items:center;gap:8px;min-height:34px;padding:0 14px;border-bottom:1px solid rgba(255,255,255,.12);font:600 12px system-ui,sans-serif;letter-spacing:0;box-sizing:border-box;flex-shrink:0;user-select:none;-webkit-user-select:none;}" +
+    ".simple-titlebar-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
+    ".simple-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto;}" +
+    ".simple-titlebar-widget{min-height:24px;padding:2px 9px;border:1px solid rgba(148,163,184,.36);border-radius:5px;background:#111827;color:#e5e7eb;font:600 12px system-ui,sans-serif;box-sizing:border-box;white-space:nowrap;margin:0;cursor:pointer;appearance:none;-webkit-appearance:none;}" +
+    ".simple-titlebar-input{width:116px;min-width:96px;font-weight:500;cursor:text;}" +
+    ".simple-app-body{flex:1;min-height:0;overflow:auto;}" +
+    ".simple-app-pre{margin:0;padding:16px;overflow:auto;white-space:pre-wrap;font-family:'Fira Code','Cascadia Code','SF Mono',monospace;font-size:13px;line-height:1.6;}" +
+    ".simple-picture{display:block;max-width:100%;height:auto;border-radius:6px;background:#111827;}" +
+    ".simple-picture-frame{display:block;padding:12px;}" +
+    "@media (hover:none),(pointer:coarse){.simple-app-title{min-height:48px;}.simple-titlebar-widget{min-height:44px;min-width:44px;padding:8px 14px;}}"
+
+fn html_embedded_image_data_uri(mime: text, base64: text) -> text:
+    "data:" + mime + ";base64," + base64
+
+fn html_picture(src: text, alt: text) -> text:
+    "<picture class=\"simple-picture-frame\"><img class=\"simple-picture\" src=\"" + html_attr_escape(src) + "\" alt=\"" + html_attr_escape(alt) + "\" /></picture>"
+
+fn html_pre_block(text_content: text) -> text:
+    "<pre class=\"simple-app-pre\">" + html_escape(text_content) + "</pre>"
+
+fn html_css_block(css: text) -> text:
+    "<style>" + css + "</style>"
+
+pub fn html_titlebar_button(action: text, label: text) -> text:
+    "<button class=\"simple-titlebar-widget\" data-simple-titlebar-widget=\"button\" data-action=\"" + html_attr_escape(action) + "\" type=\"button\">" + html_escape(label) + "</button>"
+
+pub fn html_titlebar_text_input(target_id: text, value: text) -> text:
+    "<input class=\"simple-titlebar-widget simple-titlebar-input\" data-simple-titlebar-widget=\"input\" data-target-id=\"" + html_attr_escape(target_id) + "\" type=\"text\" value=\"" + html_attr_escape(value) + "\">"
+
+pub fn html_window_content_with_titlebar_widgets(title: text, body_html: text, titlebar_widgets: text, extra_css: text) -> text:
+    val css = html_window_base_css() + extra_css
+    "<div class=\"simple-app-window\">" + html_css_block(css) + "<div class=\"simple-app-title\"><span class=\"simple-titlebar-label\">" + html_escape(title) + "</span><div class=\"simple-titlebar-widgets\">" + titlebar_widgets + "</div></div><div class=\"simple-app-body\">" + body_html + "</div></div>"
+
+fn html_window_content(title: text, body_html: text, extra_css: text) -> text:
+    html_window_content_with_titlebar_widgets(title, body_html, "", extra_css)
+
+fn html_window_info(id: text, title: text, body_html: text, extra_css: text, x: i32, y: i32, width: i32, height: i32) -> WindowInfo:
+    window_info(id, title, html_window_content(title, body_html, extra_css), x, y, width, height)
+
+pub fn html_window_info_with_titlebar_widgets(id: text, title: text, body_html: text, titlebar_widgets: text, extra_css: text, x: i32, y: i32, width: i32, height: i32) -> WindowInfo:
+    window_info(id, title, html_window_content_with_titlebar_widgets(title, body_html, titlebar_widgets, extra_css), x, y, width, height)

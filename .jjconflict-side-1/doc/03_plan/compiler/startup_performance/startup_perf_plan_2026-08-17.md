@@ -1,0 +1,434 @@
+# Startup Performance Implementation Plan (2026-08-17)
+
+**Source research:** `doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md`
+(sections 0, 5, 6, 14, 15). This plan phases the five requested tracks:
+(a) `load_policy` replaces public mmap policy, (b) config-driven dynamic-lib
+loading on presence/placement/activation axes, (c) dynamic CLI arg addition
+without a core rebuild, (d) compiler/loader/interpreter optimization with
+profiling, (e) coupling/cohesion measurement gates.
+
+**Global rules (apply to every phase):**
+- Evidence: acceptance is met only by an explicit `Results:` line with a
+  non-zero checked/scenario count in test output (SPipe convention). Exit 0
+  alone is NEVER a pass; a run with no result line is `INCONCLUSIVE` and
+  requires a direct `bin/simple run` reproduction.
+- Verification tiers: **T0** = targeted probe (`bin/simple run` a focused
+  fixture or one `*_spec.spl`, seconds-to-minutes); **T1** = affected spec
+  subtree via `bin/simple test <dir>`; **T2** = full `bin/simple test`;
+  **T3** = `bin/simple build bootstrap`. Always start at T0; escalate only
+  when a phase touches the compiler binary or codec files. Never default to
+  full bootstrap.
+- Record binary identity with every timing:
+  `readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"`.
+- No new cache root; extend the existing CAS/semantic cache per research §10.
+- All new code in `.spl`/`.shs`; no inheritance; generics use `<>`.
+
+---
+
+## Phase A — `load_policy` enum replaces public mmap policy
+
+**Goal.** Public launch metadata and startup plan express *intent*
+(`load_policy: normal | index_only | map_selected_segments |
+read_ahead_selected | direct_exec | auto`), and `mmap` / `pread` / read /
+VFS-prewarm / cached-image mapping become loader *provider strategies*
+(research §1.3, §6.10). Back-compat: `mmap_hint`, `include_mmap_cache`, and
+cache strategy `mmap` remain readable aliases mapped to
+`map_selected_segments` with a deprecation receipt; no existing artifact or
+config breaks.
+
+**Owned files.**
+- `src/app/startup/launch_metadata.spl` — add `load_policy` field + alias
+  decoding (single owner; hot file).
+- `src/compiler/80.driver/driver_aot_smf_output.spl`,
+  `driver_aot_native_output.spl` — emit `load_policy`, keep alias emission
+  behind a compat flag for one release.
+- New `src/app/startup/load_policy.spl` — enum, alias mapping, strategy
+  selection port (provider chooses mmap/pread/read per policy + size
+  threshold).
+- Specs: new `test/01_unit/app/startup/load_policy_spec.spl`.
+
+**Steps.**
+1. A1: define enum + codec with golden vectors (old images with only
+   `mmap_hint` decode to `auto`/`map_selected_segments`; new images
+   round-trip; unknown value fails closed).
+2. A2: thread `load_policy` through `StartupPlanV1`-equivalent structs in
+   the current launch path; providers translate policy → mechanism.
+3. A3: deprecation receipt when an alias is used; no removal this phase.
+
+**Acceptance.**
+- T0 probe: `bin/simple run` a fixture that loads one SMF under each policy
+  and prints the chosen mechanism; output must contain
+  `Results: N policies checked, N mapped` with N ≥ 5.
+- `load_policy_spec.spl` passes with explicit scenario count (`Results:` line).
+- Alias back-compat: decoding a pre-change metadata blob yields identical
+  load behavior; spec asserts byte-equal plan hash for the alias vs the
+  mapped policy.
+- Grep gate: no NEW public field named `mmap*` outside the alias shim
+  (`/usr/bin/grep -rn "mmap_hint\|include_mmap_cache" src/ | wc -l` does not
+  grow; count recorded in handoff).
+
+**Verification tier.** T0 → T1 (`test/01_unit/app/startup/`). T2 only if
+codec structs shared with the driver change shape. No bootstrap needed —
+stdlib/app source is read fresh every run.
+
+**Rollback.** Enum decoding is additive; revert = drop `load_policy.spl` and
+the new field reads (aliases were never removed). Single-commit revert, no
+artifact migration.
+
+---
+
+## Phase B — Config-driven dynamic-lib loading (presence/placement/activation)
+
+**Goal.** SCI/SDN configuration selects which modules load dynamically —
+aspect dynload, loader dynload, optimizer dynload — via three independent
+axes (research §0, §5.1–5.4):
+
+```text
+capability: off | auto | on          # does it exist
+placement:  auto | static | dynamic  # static or external artifact
+activation: startup | command | first_use | hotspot | manual
+```
+
+`placement=auto` folds static on full rebuild when embedded impl hash ==
+configured hash; `placement=dynamic` stays external forever (§5.2–5.3).
+
+**Owned files.**
+- New `src/lib/common/structural/component/` — `ComponentDescriptorV1`,
+  resolution enums, `resolve_component` (research §5.1/§5.3), goldens.
+- `src/lib/nogc_sync_mut/composition/codec.spl` + `cli_registry.spl` —
+  descriptor section in SCI (ONE owner; see parallel plan WP-19s).
+- New `src/app/startup/component_resolver.spl` — static-table lookup +
+  dynamic admission (path, digest, ABI, interface hash, capability policy).
+- Config surface: `simple.sdn`-style `components:` block compiled by the SCI
+  generator; stage-0/startup never parses SDN on the hot path.
+- Wiring targets, one adapter each: optimizer plugin registry
+  (dynload optimizer), loader capability modules (dynload loader
+  capabilities), aspect pack activation (dynload aspects).
+
+**Steps.**
+1. B1: contract + resolver with golden vectors (stale-static picks dynamic;
+   matching hash picks static; `dynamic` never folds; `off` = ABSENT with no
+   registration residue).
+2. B2: SCI descriptor section + generator; config-only edit compiles 0
+   modules, links 0 objects.
+3. B3: wire optimizer dynload first (existing plugin registry is closest to
+   working), then loader capabilities, then one aspect pack (log.debug).
+
+**Acceptance.**
+- Resolver spec: `Results: 12 resolution scenarios, 12 passed` (or actual
+  count) covering the §5.3 decision table.
+- Optimizer proof (from WP-55): modify optimizer source, rebuild ONLY
+  `optimizer.smf`, run compile — transformed output proves the dynamic body
+  executed, with `Results:` naming the artifact digest; then full rebuild
+  and the same run shows `resolution=STATIC` with no `.smf` open (strace or
+  load receipt as evidence).
+- Absence proof: `capability=off` build's binary/link map contains no
+  symbol/string for the disabled component (grep on `nm`/map output,
+  count printed in a `Results:` line).
+- Sabotage: corrupt the dynamic artifact digest in SCI → admission must
+  FAIL with an explicit error, never silently fall back to static.
+
+**Verification tier.** T0 per resolver scenario; T1 on
+`test/01_unit/lib/composition/` (or created equivalent); T3 (bootstrap) only
+for B3's fold-on-full-rebuild proof — that claim is *about* rebuild, so one
+bootstrap run is the probe, not the default loop.
+
+**Rollback.** Adapters are additive behind descriptor lookup; default SCI
+ships every current component as `on/static/command`, byte-identical
+behavior. Revert = regenerate SCI without the descriptor section (old reader
+ignores unknown sections until the feature bit is set; do not set the bit
+until B3 lands).
+
+---
+
+## Phase C — Dynamic CLI arg addition without core rebuild
+
+**Goal.** Adding/renaming a command, exact option, alias, help line, value
+map, or `--x<ns>-<key>[=<val>]` extension namespace regenerates SCI only —
+zero compiled modules, zero links, `simple-core` digest unchanged
+(research §5.7–5.13, §14 WP-19/19a/19b/19c).
+
+**Owned files.**
+- `src/lib/nogc_sync_mut/composition/{codec.spl, cli_registry.spl,
+  cli_command_wire.spl}` — `SCI_SECTION_CLI_OPTION_ROUTE_V1`,
+  `SimpleCliOptionRouteRecordV1`, `SimpleCliExtensionNamespaceRecordV1`,
+  `StartupPlanPatchV1` (ONE owner, serialized with Phase B's codec work).
+- New `src/app/startup/option_router.spl` — bounded exact-option lookup,
+  plan-patch application, `--x` lexical split
+  (`--x[a-z][a-z0-9_]{0,31}-key[=value]`, `=`-only values, hard `--`
+  boundary, `after_entry` windows). No provider load during argv parsing.
+- New `src/lib/nogc_sync_mut/composition/cli_extension_wire.spl` —
+  `SimpleCliExtensionV1` (describe/validate/apply/complete), pointer-free
+  bounded batches.
+- Help/completion generator (new, no codec edits): SCI option/help index;
+  root help stays I/O-free.
+- `src/app/cli/_CliMain/*` untouched except by the designated integration
+  owner at cutover (parallel plan).
+
+**Steps.** C1 records+codec (fail-closed feature bit: old reader rejects an
+option-requiring image rather than ignoring options) → C2 router → C3 wire +
+one real provider namespace (`--xlog-level=debug` binding to the Phase B
+aspect pack) → C4 help/completion + migration report of currently hardcoded
+options.
+
+**Acceptance.**
+- Zero-rebuild proof: edit a `cli_options:` config record, regenerate SCI,
+  and show `compiled modules: 0, linked objects: 0` in generator output
+  plus unchanged `sha256sum` of the core binary — both echoed in a
+  `Results:` line.
+- Grammar corpus spec: namespace/key/value shapes, malformed forms,
+  `--` boundary, unknown namespace = error, missing optional provider
+  honors `warn_skip`; `Results: N tokens classified` with the corpus size.
+- Sabotage (WP-19a): place a marker artifact as an unrelated provider; parse
+  argv containing only exact options — the marker file must remain unopened
+  (probe checks open() evidence).
+- Router purity: no heap allocation / provider activation during parsing on
+  the probe path (link-map/receipt evidence, counts in `Results:`).
+
+**Verification tier.** T0 grammar probes; T1 composition + startup unit
+specs; T2 once before declaring the phase done (codec files are shared with
+every provider). Bootstrap only at cutover (integration owner's gate).
+
+**Rollback.** Feature bit gating: until the bit is set in shipped SCI, the
+old router path is authoritative. Revert = regenerate SCI without the
+option section. Codec additions are append-only sections; never edit
+existing record layouts in place.
+
+---
+
+## Phase D — Compiler / loader / interpreter optimization with profiling
+
+**Goal.** Measured wins on the research lanes: startup route cost, loader
+segment path, interpreter steady state, compiler warm/incremental — each
+change admitted only with before/after profiles (research §8–§10, §12).
+
+**Owned files.**
+- New `test/05_perf/startup/` harness lanes: root help/version, source
+  cold/warm, SMF load, one-body-change compile. Immutable manifest per run
+  (binary digest, host, load, sample count, p50/p95, RSS, opens, maps).
+- Loader: segment-oriented load path modules (per research §8) behind the
+  Phase B loader-capability descriptors; per-symbol executable-buffer
+  allocation removed from the normal path.
+- Interpreter: profiling first — instrument the existing MIR interpreter
+  dispatch (level-gated logs, default off) to find top opcodes; only then
+  targeted fixes (dispatch, frame layout). ExecIR itself is OUT of scope for
+  this plan (research Phase 5); do not mutate the reference interpreter
+  semantics.
+- Compiler: warm no-op and one-body-change lanes over the existing CAS;
+  wire `interface_digest_of` (`action_key.spl:197-204`, currently ZERO
+  callers) into the cache key as the first concrete incremental step, and
+  verify `SmfManifest` on load.
+
+**Acceptance.**
+- Every optimization lands with a perf report: ≥ 5 samples, p50/p95, binary
+  identity, and a `Results: lane=<x> before_p50=<a> after_p50=<b>` line.
+  One-run timings are historical notes, never admission evidence.
+- No regression: touched lanes within ±5% or the change carries a filed
+  bug/todo per CLAUDE.md's perf rule.
+- Loader: O(segments) mappings on the probe fixture, zero RWX, evidence =
+  `/proc/self/maps` dump counted in the spec.
+- Interface-digest wiring: body-only edit of an imported module hits cache
+  for importers; interface edit invalidates them — both proven by cache
+  hit/miss receipts with counts.
+
+**Verification tier.** T0 perf probes (single fixture, strace/maps); T1 for
+correctness parity of touched interpreter/loader paths; T3 once for the
+compiler-lane claims (they are about rebuild behavior).
+
+**Rollback.** Each optimization is descriptor-gated (Phase B placement) or
+flag-gated; the reference interpreter path is never modified, so parity
+revert = select reference provider.
+
+---
+
+## Phase E — Coupling/cohesion measurement as before/after gates
+
+**Goal.** `bin/simple deps fast` / `bin/simple deps normal` (closure
+metrics) run before Phase A and after each phase; import-closure size,
+fan-in/fan-out, and root-closure module count are the objective
+coupling/cohesion measure that the stripping phases must move.
+
+**Owned files.**
+- `src/app/cli/dispatch/table.spl` + new `src/app/deps/` command module if
+  `deps` is not yet a command (verify first; if an equivalent exists under
+  `simple_dependencies`/info tooling, extend it instead of adding a
+  duplicate — never build a second metrics root).
+- Baseline snapshots under `doc/10_metrics/startup_perf/` (auto-generated
+  dir rules apply).
+
+**Metrics.** per root route: modules in closure, edges, max fan-out,
+aspect-implementation imports from core (target 0 after Phase B/C),
+`_CliMain` fan-in.
+
+**Acceptance.**
+- `bin/simple deps fast` completes < 5 s warm and prints
+  `Results: N modules, E edges` (non-vacuous: N > 0 mandatory).
+- Recorded before/after table per phase; Phase B/C must show the root
+  closure shrinking or hold steady with a filed explanation.
+- Spec compares two committed snapshots and fails on unexplained growth
+  beyond a configured band.
+
+**Verification tier.** T0 (the tool run IS the probe); T1 for its spec.
+
+**Rollback.** Pure tooling; revert freely. Snapshots are append-only.
+
+---
+
+## Phase ordering and gates
+
+```text
+E(baseline) -> A -> B -> C -> D -> E(re-measure, per phase)
+```
+
+A is independent and lands first (small, alias-safe). B blocks C's provider
+binding and D's descriptor gating. E brackets everything. Each phase exits
+through its acceptance list; the parallel-agent breakdown and higher-model
+review gate live in
+`doc/03_plan/agent_tasks/startup_perf_parallel_plan_2026-08-17.md`.
+
+---
+
+## Status 2026-08-18 (audit against origin/main tree + git log)
+
+Legend: DONE = landed with commit evidence; IN-FLIGHT = active work, not
+complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
+--oneline` shas on main.
+
+### Phase A — load_policy
+- [x] DONE — A1/A2 enum + alias decode + launch-metadata field:
+  `e5b58f7efc3` (public load_policy axis replaces mmap-named policy);
+  `src/app/startup/launch_metadata.spl` carries `load_policy_is_valid` /
+  `load_policy_from_mmap_hint`.
+- [x] DONE — wiring adapter for loading decisions: `63f19a30473`
+  (`src/app/startup/load_policy_wiring.spl`). Note: landed as
+  `load_policy_wiring.spl`, not the planned standalone `load_policy.spl`.
+
+### Phase B — config-driven dynload axes
+- [x] DONE — presence/placement/activation axes with fail-closed resolution:
+  `a663c1145b1` (dynsmf); SDN + env config loading: `281d8adde3b`.
+- [x] DONE — optimizer dynload hardening: nil PassKind fails closed
+  `25a48297651`; entry_symbol registry routing `e985aceeacf`.
+- [x] DONE-DIFFERENTLY — component-descriptor contract now exists at
+  `src/lib/common/structural/component/descriptor.spl` (`ComponentDescriptorV1`
+  :184, `resolve_component` :276, re-exported from `component/__init__.spl:16,20`)
+  and is consumed by the dynsmf path (`src/app/startup/component_resolver.spl:7`,
+  `component_dynsmf_wiring.spl:10`, `dynsmf_component_bridge.spl:15`); spec
+  `test/01_unit/lib/structural/component_resolver_kernel_spec.spl` — verified
+  src/lib/common/structural/component/descriptor.spl:276 `resolve_component`
+  - divergence: planned as a standalone contract module; shipped as the contract
+    module PLUS dynsmf consumers under `src/app/startup/`. Fold-static-on-full-
+    rebuild (placement=auto) bootstrap proof still not asserted by any
+    `scripts/check/*.shs` gate (see remaining item 4).
+
+### Phase C — dynamic CLI args without core rebuild
+- [x] DONE — SCI option-route records + `--x<ns>-<key>[=<val>]` grammar:
+  `131721fb924` (`composition/cli_option_route.spl`).
+- [x] DONE — SDN config-driven `--x` extension-namespace registry:
+  `0927c2e6ec7` (`cli_extension_config.spl`).
+- [x] DONE-DIFFERENTLY — C4 help/completion generator + migration report live in
+  `src/app/cli/help_surface_report.spl` over the `CliSurfaceSnapshotV1` registry
+  snapshot (`cli_surface_generated_help_text_v1` :93,
+  `cli_surface_completion_candidates_v1` :143,
+  `cli_surface_migration_report_markdown_v1` :51); spec
+  `test/01_unit/app/cli/help_surface_report_spec.spl` — verified
+  src/app/cli/help_surface_report.spl:93 `cli_surface_generated_help_text_v1`
+  - divergence: planned to generate from SCI option-route records; shipped over
+    the `CliSurfaceSnapshotV1` snapshot (`src/app/cli/help_surface_inventory.spl:35`).
+    Generator + spec exist but are not yet called from the `--help`/completion
+    dispatch path (only caller outside its spec: `src/app/test_audit/aspect_dynload_plan.spl`).
+    Zero-rebuild sha256 proof still not recorded (remaining item 5).
+
+### Phase D — compiler/loader/interpreter optimization
+- [x] DONE — lazy JIT engine creation `9840ded67e5`; lazy loader services /
+  module_loader split `a9352c55a79`, compat rename `38ba78d9287`, dead
+  extension-module deletion `7f2b6dbee21`; mir_interpreter split
+  `decf0f12387`.
+- [x] DONE — interpreter hot path: debug-facade gating, dict-lookup hoist,
+  callee cache `d0dbcccb116`; real complex-constant execution `a51a86220cd`
+  (+ coverage `c1ce06f647c`).
+- [x] DONE — Go-style cooperative sleep `4116381bb51`; runtime timer
+  integration `6f4857487bc`.
+- [x] DONE — lint text-tier perf `ea444740e9b`; parse-cost root cause via
+  PARSEPROF `3b14c394d92` (verdict: interpreted frontend, `ed091c23d44`);
+  brace-escape fix `685b42f53a3` / deployed `1f9c3650f91`.
+- [x] DONE — Phase-D startup check: seed `cleanup_old_logs` dominates, no
+  .spl-side cost `606b2b7f08c` (`doc/10_metrics/startup/startup_perf_check_2026-08-17.md`).
+- [x] DONE (2026-08-18) — `interface_digest_of` first callers landed at
+  `1310d879046` (also `22563ab581b`): `smf_manifest.spl` imports
+  `interface_digest_of_source`, additive `iface_digest` manifest column,
+  level-gated verify (`SIMPLE_IFACE_DIGEST_LOG`). Verified present in
+  origin/main committed content (`smf_manifest.spl:19,178`).
+- [~] PARTIAL — `test/05_perf/startup/` now exists (`budgets.sdn`,
+  `hello_fixture.spl`, `README.md`); per-lane >=5-sample p50/p95 admission
+  reports still not institutionalized — see
+  `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+- [x] DONE — seed env-cache landed and deployed (2026-08-18 06:12 seed
+  redeploy, see `.claude/rules/commands.md` dated note); ExecIR slice
+  adopted (tier-0.5, arena). Remaining IN-FLIGHT: parser hop reduction;
+  segment-loader O(segments) proof; seed log tests — tracked in
+  `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+
+### Phase E — coupling/cohesion gates
+- [x] DONE — `deps` command exists (`src/app/deps/{main,scanner,deep_report}.spl`,
+  dispatch `table.spl:504`); baseline recorded at
+  `doc/10_metrics/startup/coupling_cohesion_baseline_2026-08-17.md`
+  (note: `startup/`, not the planned `startup_perf/` dir).
+- [x] DONE — SCC breaks measured by it: cross-layer mega-SCC 36 -> 13
+  `5f37845f640`; backend_api SCC 45 -> 24 `b3e53994db4` -> 8 `0fa9744d4f4`.
+- [ ] REMAINING — per-phase before/after snapshot spec with growth band not
+  found; snapshots are one baseline, not a bracketing series. Tracked:
+  `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+  Interface landed 2026-09-05, box deliberately NOT ticked: the gate function
+  `deps_growth_band_verdict(baseline_edges: i64, current_edges: i64,
+  band_pct: f64) -> text` now exists at `src/app/deps/growth_band.spl` and
+  answers `within_band` / `growth_beyond_band` / fail-closed `error:*` (a
+  non-positive baseline can never return a pass). Verdict table verified by a
+  direct driver under `bin/release/aarch64-apple-darwin/simple_seed`
+  (20,392,352 bytes, 2026-07-25 13:12): `(1298,1298,0.15)->within_band`,
+  `(1298,1200,0.15)->within_band`, `(1298,1400,0.15)->within_band` (7.9%),
+  `(1298,1600,0.15)->growth_beyond_band` (23.3%), `(0,1298,0.15)->
+  error:invalid_baseline`, `(1298,-1,0.15)->error:invalid_current`,
+  `(1298,1298,-0.1)->error:invalid_band`; 0.25s wall.
+  The acceptance `it` in
+  `test/03_system/plan_acceptance/startup_perf_plan_spec.spl` is still
+  UNEXECUTED: this spec's own import chain is poisoned for every deployed
+  binary here — `src/app/cli/help_surface_inventory.spl` (unparenthesized
+  multi-line boolean continuation) and `use std.spec.{expect}`, which reaches
+  `src/lib/nogc_sync_mut/io_runtime.spl:178,180` (`@always_inline`,
+  `unsafe(capabilities:)`) via `spec.spl:351-353`. This is NOT "no spec can
+  run here": specs whose imports avoid the poisoned modules do run, and a bare
+  `use std.spec` runs on the interpreter's built-in shims (which silently lack
+  the real module's vacuous-expect guard, so such a green is not a verdict) —
+  see `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`
+  § "Second manifestation". The current CLI-dir-aggregate closure count was
+  likewise NOT re-measured (`deps fast` needs a binary that can parse current
+  source), so no live within-band claim is made for the present tree.
+  Budget, stated for the pending measurement: baseline = **1298** files
+  (CLI-dir-aggregate closure, `doc/10_metrics/startup/coupling_cohesion_baseline_2026-08-17.md`),
+  band = **0.15** (15%), so the admission ceiling is **1492** files; the
+  measurement command is `bin/simple deps fast src/app/cli/__init__.spl`
+  (timeout 120s), pending a binary that can parse current source.
+
+### Honest remaining list
+1. **Self-hosted deploy as default tooling** — `bin/simple` is still the
+   Rust seed (CLAUDE.md rule unmet); the dominant startup cost found in
+   Phase D lives in the seed. Blocked on bootstrap succeeding (stage-1 RSS
+   blowup, see `66125e94a6b`). Tracked:
+   `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+2. ~~`interface_digest_of` + SmfManifest verification wiring~~ — DONE,
+   first callers landed at `1310d879046` (see Phase D row above).
+3. `test/05_perf/startup/` perf-lane harness + admission discipline
+   (dir now seeded; admission reports open — same tracking doc).
+4. Phase B fold-on-full-rebuild bootstrap proof (the component-descriptor
+   contract itself now exists — see the Phase B row above).
+   Tracked: `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+5. Phase C zero-rebuild sha256 proof (help/completion generation + migration
+   report now exist — see the Phase C row above).
+   Tracked: `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+6. Per-phase E re-measure snapshots with a growth-band spec.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/startup_perf_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

@@ -1,0 +1,109 @@
+"""Source-level unit coverage for the non-executing server-launch admission seam."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.loader.artifact_manifest.{manifest_sha256_hex}
+use os.kernel.loader.x86_64_server_admission.{
+    X86_64_SERVER_WEB_PATH, X86_64_SERVER_DB_PATH, X86_64_SERVER_PROFILE
+}
+use os.kernel.loader.x86_64_fs_server_launcher.{
+    X86_64FsServerImmutableNonceMetadata,
+    x86_64_fs_server_launcher_mint_admission_input,
+    x86_64_fs_server_launcher_admit_injected
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+
+fn _push_u16(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff).to_u8())
+    bytes.push(((value >> 8) & 0xff).to_u8())
+    bytes
+
+fn _push_u32(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out = _push_u16(out, value)
+    out = _push_u16(out, value >> 16)
+    out
+
+fn _push_u64(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out = _push_u32(out, value)
+    out = _push_u32(out, value >> 32)
+    out
+
+fn _minimal_x86_64_elf(marker: u8) -> [u8]:
+    var out: [u8] = [0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]
+    while out.len() < 16: out.push(0)
+    out = _push_u16(out, 2)
+    out = _push_u16(out, 62)
+    out = _push_u32(out, 1)
+    out = _push_u64(out, 0x400000)
+    out = _push_u64(out, 64)
+    out = _push_u64(out, 0)
+    out = _push_u32(out, 0)
+    out = _push_u16(out, 64)
+    out = _push_u16(out, 56)
+    out = _push_u16(out, 1)
+    out = _push_u16(out, 0)
+    out = _push_u16(out, 0)
+    out = _push_u16(out, 0)
+    out = _push_u32(out, 1)
+    out = _push_u32(out, 5)
+    out = _push_u64(out, 0x80)
+    out = _push_u64(out, 0x400000)
+    out = _push_u64(out, 0x400000)
+    out = _push_u64(out, 4)
+    out = _push_u64(out, 4)
+    out = _push_u64(out, 0x1000)
+    while out.len() < 0x80: out.push(0)
+    out.push(marker)
+    out.push(0x90.to_u8())
+    out.push(0x90.to_u8())
+    out.push(0x90.to_u8())
+    out
+
+fn _metadata(web: [u8], db: [u8]) -> X86_64FsServerImmutableNonceMetadata:
+    X86_64FsServerImmutableNonceMetadata(
+        web_version: "1.0.0",
+        db_version: "1.0.0",
+        web_sha256: manifest_sha256_hex(web),
+        db_sha256: manifest_sha256_hex(db),
+        image_id: "unit-injected-image",
+        image_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        launch_id: "boot-12-launch-3"
+    )
+
+describe "x86_64 injected filesystem server launcher seam":
+    it "mints only canonical paths and deterministic single-worker profiles":
+        val web = _minimal_x86_64_elf(0x90.to_u8())
+        val db = _minimal_x86_64_elf(0xc3.to_u8())
+        val input = x86_64_fs_server_launcher_mint_admission_input(
+            web, db, _metadata(web, db)
+        )
+        expect(input.web_path).to_equal(X86_64_SERVER_WEB_PATH)
+        expect(input.db_path).to_equal(X86_64_SERVER_DB_PATH)
+        expect(input.runtime_profile).to_equal(X86_64_SERVER_PROFILE)
+        expect(input.web_profile).to_contain("--workers 1")
+        expect(input.db_profile).to_contain("--workers 1")
+
+    it "returns handoff readiness without claiming either process is running":
+        val web = _minimal_x86_64_elf(0x90.to_u8())
+        val db = _minimal_x86_64_elf(0xc3.to_u8())
+        val receipt = x86_64_fs_server_launcher_admit_injected(
+            web, db, _metadata(web, db), Scheduler.new(), IpcManager.new()
+        )
+        expect(receipt.handoff_ready).to_be(true)
+        expect(receipt.running).to_be(false)
+        expect(receipt.reason).to_equal("first-dispatch-ready")
+        expect(receipt.preparation.first_pid).to_be_greater_than(0u64)
+
+    it "fails closed on metadata that does not bind the injected artifact bytes":
+        val web = _minimal_x86_64_elf(0x90.to_u8())
+        val db = _minimal_x86_64_elf(0xc3.to_u8())
+        var metadata = _metadata(web, db)
+        metadata.web_sha256 = metadata.db_sha256
+        val receipt = x86_64_fs_server_launcher_admit_injected(
+            web, db, metadata, Scheduler.new(), IpcManager.new()
+        )
+        expect(receipt.handoff_ready).to_be(false)
+        expect(receipt.running).to_be(false)
+        expect(receipt.reason).to_equal("bridge-not-accepted:admission-rejected:web-content-hash-mismatch")

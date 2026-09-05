@@ -1,0 +1,78 @@
+#!/bin/sh
+# Run one native diagnostic under gdb without confusing gdb's successful
+# batch exit with the inferior's success.  Promotion callers may additionally
+# require an artifact produced by the inferior.
+set -eu
+
+usage() {
+    echo "usage: $0 --log <path> [--artifact <path>] -- <program> [args...]" >&2
+    exit 2
+}
+
+log_path=
+artifact_path=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --log)
+            [ "$#" -ge 2 ] || usage
+            log_path=$2
+            shift 2
+            ;;
+        --artifact)
+            [ "$#" -ge 2 ] || usage
+            artifact_path=$2
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *) usage ;;
+    esac
+done
+
+[ -n "$log_path" ] || usage
+[ "$#" -gt 0 ] || usage
+command -v gdb >/dev/null 2>&1 || {
+    echo "error: gdb is unavailable" >&2
+    exit 127
+}
+
+mkdir -p "$(dirname -- "$log_path")"
+rm -f -- "$log_path"
+set +e
+gdb --quiet --batch \
+    -ex 'set pagination off' \
+    -ex run \
+    -ex 'thread apply all bt' \
+    --args "$@" >"$log_path" 2>&1
+gdb_status=$?
+set -e
+
+if [ "$gdb_status" -ne 0 ]; then
+    echo "error: gdb failed with status $gdb_status; see $log_path" >&2
+    exit "$gdb_status"
+fi
+
+# In batch mode gdb normally exits zero after reporting an inferior signal.
+# Treat every signal-stop spelling as failure before looking at artifacts.
+if grep -Eq 'Program (received|terminated with) signal|exited with code 0*[1-9][0-9]*' "$log_path"; then
+    echo "error: inferior failed under gdb; see $log_path" >&2
+    exit 125
+fi
+
+if ! grep -Eq 'exited normally|exited with code 0+[^0-9]' "$log_path"; then
+    echo "error: gdb did not record a successful inferior exit; see $log_path" >&2
+    exit 125
+fi
+
+if [ -n "$artifact_path" ] && [ ! -x "$artifact_path" ]; then
+    echo "error: inferior produced no executable artifact: $artifact_path" >&2
+    exit 126
+fi
+
+echo "gdb_inferior_status=pass"
+echo "gdb_log=$log_path"
+if [ -n "$artifact_path" ]; then
+    echo "artifact=$artifact_path"
+fi

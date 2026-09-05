@@ -1,0 +1,120 @@
+"""Authenticated provider bridge for pointer-free positioned syscalls 134/135.
+
+The live syscall dispatcher may call this boundary once it owns persistent
+service registry state.  The caller identity is kernel-authenticated; file and
+buffer identities are resolved uniquely in that caller's registry before the
+canonical service dispatch transaction can reach a true positioned backend.
+"""
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.fs.positioned_syscall_v1.{
+    SOSIX_FS_PREAD_REGISTERED_V1, SOSIX_FS_PWRITE_REGISTERED_V1,
+    SOSIX_FS_POSITIONED_SYSCALL_INVALID_V1,
+    sosix_fs_positioned_syscall_envelope_valid_v1
+}
+use os.sosix.fs.service_adapter_v1.{
+    SOSIX_FS_SERVICE_RIGHT_READ_V1, SOSIX_FS_SERVICE_RIGHT_WRITE_V1,
+    SOSIX_FS_SERVICE_BUFFER_READ_V1, SOSIX_FS_SERVICE_BUFFER_WRITE_V1,
+    SosixFsServiceDispatchPlanV1, SosixFsServicePrepareResultV1,
+    SosixFsServiceRegistryV1
+}
+use os.sosix.fs.service_dispatch_transaction_v1.{
+    SosixFsServiceDispatchTransactionV1,
+    sosix_fs_service_dispatch_transaction_v1
+}
+use os.sosix.fs.service_vfs_backend_v1.SosixPositionedVfsBackendV1
+
+pub struct SosixFsPositionedProviderFactsV1:
+    caller_authenticated: bool
+    caller_process_id: u64
+    operation_slot: u32
+    operation_generation: u32
+    request_token: u64
+
+pub struct SosixFsPositionedProviderResultV1:
+    accepted: bool
+    reason: text
+    syscall_result: SyscallResult
+    registry: SosixFsServiceRegistryV1
+
+export SosixFsPositionedProviderFactsV1, SosixFsPositionedProviderResultV1
+
+fn _positioned_provider_reject_v1(
+    reason: text, status: i64, registry: SosixFsServiceRegistryV1
+) -> SosixFsPositionedProviderResultV1:
+    SosixFsPositionedProviderResultV1(
+        accepted: false, reason: reason,
+        syscall_result: SyscallResult(value: status), registry: registry)
+
+pub fn sosix_fs_dispatch_positioned_registered_v1(
+    args: SyscallArgs, facts: SosixFsPositionedProviderFactsV1,
+    registry: SosixFsServiceRegistryV1, backend: SosixPositionedVfsBackendV1
+) -> SosixFsPositionedProviderResultV1:
+    """Authenticate registry identities and execute the canonical transaction."""
+    if not sosix_fs_positioned_syscall_envelope_valid_v1(args):
+        return _positioned_provider_reject_v1(
+            "invalid-positioned-envelope", SOSIX_FS_POSITIONED_SYSCALL_INVALID_V1, registry)
+    if (not facts.caller_authenticated or facts.caller_process_id == 0 or
+        facts.operation_generation == 0 or facts.request_token == 0):
+        return _positioned_provider_reject_v1("unauthenticated-positioned-caller", -13, registry)
+
+    val api_id = if args.id == SOSIX_FS_PREAD_REGISTERED_V1:
+        SOSIX_FS_READ_AT
+    else:
+        SOSIX_FS_WRITE_AT
+    val required_right = if api_id == SOSIX_FS_READ_AT:
+        SOSIX_FS_SERVICE_RIGHT_READ_V1
+    else:
+        SOSIX_FS_SERVICE_RIGHT_WRITE_V1
+    val required_access = if api_id == SOSIX_FS_READ_AT:
+        SOSIX_FS_SERVICE_BUFFER_WRITE_V1
+    else:
+        SOSIX_FS_SERVICE_BUFFER_READ_V1
+
+    var capability_matches = 0u32
+    for entry in registry.capabilities:
+        if (entry.active and entry.owner_process_id == facts.caller_process_id and
+            entry.file_object_id == args.arg0 and (entry.rights & required_right) != 0):
+            capability_matches = capability_matches + 1
+    if capability_matches != 1:
+        val reason = if capability_matches == 0: "positioned-capability-not-authorized" else: "ambiguous-positioned-capability"
+        return _positioned_provider_reject_v1(reason, -13, registry)
+
+    val buffer_slot = (args.arg2 & 0xffffffff) as u32
+    val buffer_generation = (args.arg2 >> 32) as u32
+    var buffer_matches = 0u32
+    var buffer_length = 0u64
+    for entry in registry.buffers:
+        if (entry.active and entry.owner_process_id == facts.caller_process_id and
+            entry.registration_id == args.arg1 and entry.ref_.slot == buffer_slot and
+            entry.ref_.generation == buffer_generation and
+            (entry.access & required_access) != 0):
+            buffer_matches = buffer_matches + 1
+            buffer_length = entry.byte_length
+    if buffer_matches != 1:
+        val reason = if buffer_matches == 0: "positioned-buffer-not-authorized" else: "ambiguous-positioned-buffer"
+        return _positioned_provider_reject_v1(reason, -13, registry)
+    if args.arg4 > buffer_length or args.arg5 > buffer_length - args.arg4:
+        return _positioned_provider_reject_v1("positioned-buffer-range-out-of-bounds", -22, registry)
+
+    val prepared = SosixFsServicePrepareResultV1(
+        accepted: true, reason: "kernel-provider-dispatch-ready", status: 0,
+        plan: SosixFsServiceDispatchPlanV1(
+            ready: true, api_id: api_id, source_process_id: facts.caller_process_id,
+            reply_endpoint: 0, operation_slot: facts.operation_slot,
+            operation_generation: facts.operation_generation,
+            request_token: facts.request_token, deadline_ns: 0,
+            file_object_id: args.arg0, buffer_registration_id: args.arg1,
+            buffer_slot: buffer_slot, buffer_generation: buffer_generation,
+            resource_offset: args.arg3, buffer_offset: args.arg4, length: args.arg5))
+    val transaction = sosix_fs_service_dispatch_transaction_v1(prepared, registry, backend)
+    if not transaction.accepted:
+        return _positioned_provider_reject_v1(
+            transaction.reason, transaction.status as i64, transaction.registry)
+    SosixFsPositionedProviderResultV1(
+        accepted: true, reason: transaction.reason,
+        syscall_result: SyscallResult(value: transaction.transferred as i64),
+        registry: transaction.registry)
+
+export sosix_fs_dispatch_positioned_registered_v1

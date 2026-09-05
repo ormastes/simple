@@ -1,0 +1,70 @@
+#!/bin/sh
+# Static source/ABI/performance-shape ratchet. It is not artifact verification.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/compiler_rust/lib/std/src/infra/atomic.spl"
+consumer="$root/src/compiler_rust/lib/std/src/infra/synchronization.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+interpreter_impl="$root/src/compiler_rust/compiler/src/interpreter_extern/atomic.rs"
+rust_provider="$root/src/compiler_rust/runtime/src/value/sffi/atomic.rs"
+rust_sync_provider="$root/src/compiler_rust/runtime/src/value/sffi/sync.rs"
+c_provider="$root/src/runtime/runtime.c"
+c_header="$root/src/runtime/runtime.h"
+
+test "$(grep -Ec '^extern fn rt_(atomic_|spin_loop_hint)' "$owner")" -eq 23
+awk '
+    /^@unsafe\(.*capabilities: \[[^]]*ffi/ { tagged = 1; next }
+    /^extern fn rt_(atomic_|spin_loop_hint)/ {
+        total++
+        if (tagged) safe++
+        tagged = 0
+        next
+    }
+    /^[^#[:space:]@]/ { tagged = 0 }
+    END { exit !(total == 23 && safe == total) }
+' "$owner"
+
+# The source ABI is the provider-owned SeqCst compatibility ABI. Ordering is
+# retained only in the public source API and must never reach raw declarations.
+! grep -E '^extern fn rt_atomic_.*ordering' "$owner"
+grep -q '^extern fn rt_atomic_int_compare_exchange(ptr: i64, expected: i64, desired: i64) -> bool$' "$owner"
+grep -q '^extern fn rt_atomic_bool_compare_exchange(ptr: i64, expected: bool, desired: bool) -> bool$' "$owner"
+grep -q '^extern fn rt_atomic_flag_load(ptr: i64) -> bool$' "$owner"
+! grep -q 'ordering_to_int' "$owner"
+! grep -q 'Result encoding\|0x7FFFFFFFFFFFFFFF\|result >> 63' "$owner"
+
+# One-call hot paths: CAS is not followed by a reconstructing load, boolean
+# CAS is not implemented as swap, and flag inspection is non-mutating.
+test "$(grep -Ec '^[[:space:]]+rt_atomic_int_compare_exchange\(' "$owner")" -eq 1
+test "$(grep -Ec '^[[:space:]]+rt_atomic_bool_compare_exchange\(' "$owner")" -eq 1
+test "$(grep -Ec '^[[:space:]]+rt_atomic_flag_load\(' "$owner")" -eq 3
+! sed -n '/fn compare_and_swap(self, expected: bool/,/^    fn free/p' "$owner" | \
+    grep -q 'rt_atomic_bool_swap'
+! sed -n '/fn is_set(self, ordering: Ordering = Ordering.Acquire)/,/^    fn summary/p' "$owner" | \
+    grep -q 'rt_atomic_flag_test_and_set'
+! grep -q 'result\.0' "$consumer"
+
+for symbol in rt_atomic_bool_compare_exchange rt_atomic_flag_load rt_spin_loop_hint; do
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry"
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter"
+    grep -q "fn $symbol" "$interpreter_impl"
+done
+
+for symbol in rt_atomic_bool_compare_exchange rt_atomic_flag_load; do
+    grep -q "fn $symbol" "$rust_provider"
+    grep -q "$symbol" "$c_provider"
+    grep -q "$symbol" "$c_header"
+done
+grep -q 'fn rt_spin_loop_hint' "$interpreter_impl"
+grep -q '^pub extern "C" fn rt_spin_loop_hint()' "$rust_sync_provider"
+grep -q '^void rt_spin_loop_hint(void)' "$c_provider"
+grep -Eq '^void[[:space:]]+rt_spin_loop_hint\(void\);' "$c_header"
+
+# Provider identity is still unsigned and the Rust compatibility provider is
+# mutex/map-backed, so no safe/verified promotion is implied by this PASS.
+grep -q 'Mutex<HashMap<i64, Box<AtomicI64>>>' "$rust_provider"
+grep -q 'does not claim universal lock-free' "$owner"
+
+echo 'bootstrap atomic SFFI authority: PASS (23/23 declarations tagged; exact bool/scalar ABI; one-call CAS/flag inspection; C/Rust/interpreter/native closure; provider remains unsigned/unverified and Rust compatibility remains mutex-backed)'

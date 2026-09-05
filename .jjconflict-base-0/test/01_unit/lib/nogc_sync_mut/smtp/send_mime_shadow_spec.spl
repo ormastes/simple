@@ -1,0 +1,69 @@
+"""
+## Purpose and audience
+Purpose: Prove that importing from smtp/send.spl no longer shadows the real
+MIME helpers in smtp/mime.spl (bodyless "forward declarations" regression).
+Audience: stdlib maintainers of the smtp tier.
+"""
+# @req: REQ-LIB-NOGC-SYNC-MUT-001 — stable requirement identity for this spec.
+
+"""Reproduces doc/08_tracking/bug/smtp_send_bodyless_forward_declarations_shadow_mime_2026-08-25.md
+
+Before the fix, `send.spl` carried `fn mime_type_text_plain() -> text` with no
+body.  Under the flat function namespace, any module importing from `send.spl`
+resolved `mime_type_text_plain()` to that bodyless definition and failed with
+`missing return in non-unit function 'mime_type_text_plain'`.
+"""
+
+use std.nogc_sync_mut.smtp.send.{
+    header_from, header_content_type,
+    message_build_simple, message_build_html,
+    smtp_dot_stuff, message_terminate
+}
+use std.nogc_sync_mut.smtp.mime.{mime_type_text_plain, mime_type_text_html}
+
+use std.spec.step
+
+fn count_occurrences(haystack: text, needle: text) -> i64:
+    var count = 0
+    var i = 0
+    val n = needle.length()
+    while i + n <= haystack.length():
+        if haystack.substring(i, i + n) == needle:
+            count = count + 1
+            i = i + n
+        else:
+            i = i + 1
+    return count
+
+describe "smtp send.spl import does not shadow smtp/mime.spl helpers":
+
+    it "mime_type_text_plain resolves to the real helper when header_from is imported":
+        step("Import header_from from send.spl and call mime_type_text_plain()")
+        # @req: REQ-LIB-NOGC-SYNC-MUT-001
+        expect(header_from("a@example.com")).to_equal("From: a@example.com\r\n")
+        expect(mime_type_text_plain()).to_equal("text/plain; charset=utf-8")
+
+    it "mime_type_text_html resolves to the real helper too":
+        step("Call mime_type_text_html() alongside a send.spl import")
+        expect(mime_type_text_html()).to_equal("text/html; charset=utf-8")
+
+    it "message_build_simple produces a text/plain body with exactly one dot-stuffed terminator":
+        step("Build a simple message and dot-stuff it for DATA")
+        val msg = message_build_simple("a@example.com", "b@example.com", "Hi", "line one\r\n.starts with dot\r\n")
+        expect(msg).to_start_with("From: a@example.com\r\n")
+        expect(msg).to_contain("Content-Type: text/plain; charset=utf-8\r\n")
+        val wire = smtp_dot_stuff(msg)
+        expect(wire).to_contain("\r\n..starts with dot\r\n")
+        expect(wire).to_end_with(message_terminate())
+        expect(count_occurrences(wire, "\r\n.\r\n")).to_equal(1)
+
+    it "message_build_html sets the html content type":
+        step("Build an html message")
+        val msg = message_build_html("a@example.com", "b@example.com", "Hi", "<p>hi</p>")
+        expect(msg).to_contain("Content-Type: text/html; charset=utf-8\r\n")
+        expect(msg).to_contain("\r\n\r\n<p>hi</p>\r\n")
+
+    it "header_from and header_content_type format RFC 5322 header lines":
+        step("Format headers")
+        expect(header_from("Alice <alice@example.com>")).to_equal("From: Alice <alice@example.com>\r\n")
+        expect(header_content_type(mime_type_text_plain())).to_equal("Content-Type: text/plain; charset=utf-8\r\n")

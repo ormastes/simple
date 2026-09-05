@@ -1,0 +1,165 @@
+"""Service-side SOSIX filesystem IPC v1 validation and planning."""
+
+use std.spec.*
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.fs.ipc_codec_v1.*
+use os.sosix.fs.service_adapter_v1.*
+
+fn _facts() -> SosixFsIpcReceiveFactsV1:
+    SosixFsIpcReceiveFactsV1(
+        source_authenticated: true, source_process_id: 42,
+        received_service_endpoint: 700, expected_service_endpoint: 700,
+        reply_endpoint_authenticated: true, authenticated_reply_endpoint: 900,
+        reply_endpoint_owner_process_id: 42
+    )
+
+fn _registry() -> SosixFsServiceRegistryV1:
+    SosixFsServiceRegistryV1(
+        capabilities: [SosixFsCapabilityEntryV1(
+            active: true, ref_: SosixCapabilityRef(slot: 3, generation: 8),
+            owner_process_id: 42, file_object_id: 1200,
+            rights: SOSIX_FS_SERVICE_RIGHT_READ_V1 + SOSIX_FS_SERVICE_RIGHT_WRITE_V1
+        )],
+        buffers: [SosixFsBufferEntryV1(
+            active: true, ref_: SosixBufferRef(slot: 4, generation: 9),
+            owner_process_id: 42, registration_id: 1300, byte_length: 4096,
+            access: SOSIX_FS_SERVICE_BUFFER_READ_V1 + SOSIX_FS_SERVICE_BUFFER_WRITE_V1,
+            service_endpoint: 700, memory_mode: 1, bytes: []
+        )]
+    )
+
+fn _wire(api_id: u32, buffer_offset: u64, length: u64) -> [u8]:
+    sosix_fs_ipc_encode_request_v1(SosixFsIpcRequestV1(
+        api_id: api_id,
+        flags: SOSIX_FS_IPC_REQUEST_FLAG_CANCELLABLE + SOSIX_FS_IPC_REQUEST_FLAG_REGISTERED_BUFFER,
+        operation_slot: 11, operation_generation: 12,
+        reply_endpoint: 900, request_token: 99, deadline_ns: 123456,
+        capability: SosixCapabilityRef(slot: 3, generation: 8),
+        resource_offset: 77, length: length,
+        buffer: SosixBufferRef(slot: 4, generation: 9),
+        buffer_offset: buffer_offset
+    )).bytes
+
+describe "SOSIX filesystem service adapter v1":
+    it "authenticates owned IPC facts before decoding an untrusted request":
+        var facts = _facts()
+        facts.source_authenticated = false
+        val rejected = sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 0, 64), SOSIX_FS_READ_AT, facts, _registry()
+        )
+        expect(rejected.accepted).to_be(false)
+        expect(rejected.reason).to_equal("unauthenticated-source")
+        expect(rejected.plan.ready).to_be(false)
+
+        facts = _facts()
+        facts.authenticated_reply_endpoint = 901
+        val forged_reply = sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 0, 64), SOSIX_FS_READ_AT, facts, _registry()
+        )
+        expect(forged_reply.reason).to_equal("reply-endpoint-mismatch")
+
+        facts = _facts()
+        facts.reply_endpoint_owner_process_id = 41
+        val foreign_reply = sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 0, 64), SOSIX_FS_READ_AT, facts, _registry()
+        )
+        expect(foreign_reply.reason).to_equal("reply-endpoint-owner-mismatch")
+
+    it "builds a pointer-free read-at dispatch plan from registered identities":
+        val prepared = sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 32, 64), SOSIX_FS_READ_AT,
+            _facts(), _registry()
+        )
+        expect(prepared.accepted).to_be(true)
+        expect(prepared.reason).to_equal("dispatch-ready")
+        expect(prepared.plan.file_object_id).to_equal(1200)
+        expect(prepared.plan.buffer_registration_id).to_equal(1300)
+        expect(prepared.plan.buffer_slot).to_equal(4)
+        expect(prepared.plan.buffer_generation).to_equal(9)
+        expect(prepared.plan.resource_offset).to_equal(77)
+        expect(prepared.plan.buffer_offset).to_equal(32)
+        expect(prepared.plan.length).to_equal(64)
+        expect(prepared.plan.source_process_id).to_equal(42)
+
+    it "enforces operation-specific capability and registered-buffer access":
+        var registry = _registry()
+        registry.capabilities[0].rights = SOSIX_FS_SERVICE_RIGHT_READ_V1
+        val denied_write = sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_WRITE_AT, 0, 64), SOSIX_FS_WRITE_AT,
+            _facts(), registry
+        )
+        expect(denied_write.reason).to_equal("capability-right-denied")
+
+        registry = _registry()
+        registry.buffers[0].access = SOSIX_FS_SERVICE_BUFFER_READ_V1
+        val denied_read_target = sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 0, 64), SOSIX_FS_READ_AT,
+            _facts(), registry
+        )
+        expect(denied_read_target.reason).to_equal("buffer-access-denied")
+
+    it "rejects stale generations, cross-owner use, and out-of-bounds ranges":
+        var registry = _registry()
+        registry.capabilities[0].ref_.generation = 7
+        expect(sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 0, 64), SOSIX_FS_READ_AT,
+            _facts(), registry
+        ).reason).to_equal("stale-capability")
+
+        registry = _registry()
+        registry.buffers[0].owner_process_id = 41
+        expect(sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 0, 64), SOSIX_FS_READ_AT,
+            _facts(), registry
+        ).reason).to_equal("buffer-owner-mismatch")
+
+        expect(sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 4080, 32), SOSIX_FS_READ_AT,
+            _facts(), _registry()
+        ).reason).to_equal("buffer-range-out-of-bounds")
+
+    it "fails closed on ambiguous registry identities":
+        var registry = _registry()
+        registry.capabilities.push(registry.capabilities[0])
+        expect(sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 0, 64), SOSIX_FS_READ_AT,
+            _facts(), registry
+        ).reason).to_equal("ambiguous-capability")
+
+        registry = _registry()
+        registry.buffers.push(registry.buffers[0])
+        expect(sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 0, 64), SOSIX_FS_READ_AT,
+            _facts(), registry
+        ).reason).to_equal("ambiguous-buffer")
+
+    it "encodes a completion correlated only through the validated plan":
+        val prepared = sosix_fs_service_prepare_v1(
+            _wire(SOSIX_FS_READ_AT, 32, 64), SOSIX_FS_READ_AT,
+            _facts(), _registry()
+        )
+        val encoded = sosix_fs_service_encode_completion_v1(
+            prepared.plan, 0, 48, true
+        )
+        expect(encoded.accepted).to_be(true)
+        val decoded = sosix_fs_ipc_decode_completion_v1(
+            encoded.bytes, SOSIX_FS_READ_AT, 11, 12, 99
+        )
+        expect(decoded.accepted).to_be(true)
+        expect(decoded.completion.transferred).to_equal(48)
+        expect(decoded.completion.flags).to_equal(SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL)
+        expect(decoded.completion.payload.len()).to_equal(0)
+
+        expect(sosix_fs_service_encode_completion_v1(
+            prepared.plan, 0, 65, false
+        ).reason).to_equal("transferred-exceeds-request")
+        expect(sosix_fs_service_encode_completion_v1(
+            SosixFsServiceDispatchPlanV1(
+                ready: false, api_id: 0, source_process_id: 0, reply_endpoint: 0,
+                operation_slot: 0, operation_generation: 0, request_token: 0,
+                deadline_ns: 0, file_object_id: 0, buffer_registration_id: 0,
+                buffer_slot: 0, buffer_generation: 0,
+                resource_offset: 0, buffer_offset: 0, length: 0
+            ), 0, 0, false
+        ).reason).to_equal("dispatch-plan-not-ready")

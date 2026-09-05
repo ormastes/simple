@@ -1,0 +1,81 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-APP-MCP-VISIBILITY-REQUESTER
+# design: doc/05_design/app/mcp/mdsoc_visibility_requester_design.md ; guide: doc/07_guide/app/mcp/mcp_visibility.md
+"""
+`simple_visibility` over the real `dispatch_tool` path (no stdio framing):
+- explicit `requester` wins,
+- omitted `requester` defaults to the LAST file read via `simple_read` in this
+  server session (in-process state, not the /tmp editor file),
+- with nothing read and nothing given the result carries `source: none` plus
+  an explicit note — never the target file itself.
+
+Run: `bin/simple test test/01_unit/app/mcp/mcp_visibility_requester_spec.spl`
+"""
+
+use std.spec
+use std.spec.step
+use app.mcp.main_dispatch.{dispatch_tool}
+use app.mcp.main_session_state.{mcp_reset_last_read, mcp_last_read_path, mcp_record_last_read, mcp_resolve_requester}
+
+val PARSE_ERROR = "src/compiler/85.mdsoc/feature/parsing/app/parse_error.spl"
+val PARSING_PORTS = "src/compiler/85.mdsoc/feature/parsing/app/ports.spl"
+
+describe "simple_visibility requester resolution":
+    it "falls back to no requester with an explicit note when nothing was read":
+        step("reset session, call with file only")
+        mcp_reset_last_read()
+        val r = dispatch_tool("1", "simple_visibility", "{\"file\":\"" + PARSE_ERROR + "\"}")
+        expect(r).to_contain("source")
+        expect(r).to_contain("none given and no file was read/opened in this session")
+        # never silently self: the requester file is empty, not the target
+        expect(r.contains("\\\"file\\\":\\\"" + PARSE_ERROR + "\\\",\\\"line\\\":0,\\\"source\\\":\\\"none")).to_equal(false)
+        expect(r).to_contain("ParseError")
+
+    it "uses an explicit requester location and echoes its line":
+        step("requester=parsing/app/ports.spl:3 -> explicit")
+        mcp_reset_last_read()
+        val r = dispatch_tool("2", "simple_visibility", "{\"file\":\"" + PARSE_ERROR + "\",\"requester\":\"" + PARSING_PORTS + ":3\"}")
+        expect(r).to_contain("explicit")
+        expect(r).to_contain("line\\\":3")
+        expect(r).to_contain("compiler.85.mdsoc.feature.parsing")
+        expect(r).to_contain("named in an export line")
+
+    it "defaults to the last file read through simple_read":
+        step("simple_read records the session's last-read file")
+        mcp_reset_last_read()
+        val read = dispatch_tool("3", "simple_read", "{\"path\":\"" + PARSING_PORTS + "\"}")
+        expect(read).to_contain(PARSING_PORTS)
+        expect(mcp_last_read_path()).to_equal(PARSING_PORTS)
+        val r = dispatch_tool("4", "simple_visibility", "{\"file\":\"" + PARSE_ERROR + "\"}")
+        expect(r).to_contain("last_read")
+        expect(r).to_contain(PARSING_PORTS)
+        expect(r).to_contain("ParseError")
+
+    it "uses the last-read file as the target when file is omitted":
+        step("file omitted -> target = requester file")
+        mcp_reset_last_read()
+        mcp_record_last_read(PARSE_ERROR)
+        val r = dispatch_tool("5", "simple_visibility", "{}")
+        expect(r).to_contain("target\\\":\\\"" + PARSE_ERROR)
+        expect(r).to_contain("last_read")
+
+    it "errors when neither a requester nor a file is available":
+        step("no read, no args")
+        mcp_reset_last_read()
+        val r = dispatch_tool("6", "simple_visibility", "{}")
+        expect(r).to_contain("no requester")
+
+    it "resolves explicit over last-read over none":
+        step("mcp_resolve_requester precedence")
+        mcp_reset_last_read()
+        val (none_req, none_src) = mcp_resolve_requester("")
+        expect(none_req).to_equal("")
+        expect(none_src).to_equal("none")
+        mcp_record_last_read(PARSE_ERROR)
+        val (last_req, last_src) = mcp_resolve_requester("")
+        expect(last_req).to_equal(PARSE_ERROR)
+        expect(last_src).to_equal("last_read")
+        val (exp_req, exp_src) = mcp_resolve_requester("x.spl:9")
+        expect(exp_req).to_equal("x.spl:9")
+        expect(exp_src).to_equal("explicit")
+        mcp_reset_last_read()

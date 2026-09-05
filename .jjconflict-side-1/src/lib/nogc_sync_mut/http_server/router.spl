@@ -1,0 +1,116 @@
+# HTTP Router — Lightweight Embedded Web Server
+#
+# Part of std.nogc_sync_mut.http_server
+# Full standalone example: examples/06_io/simple_web_server/
+# Design: doc/05_design/simple_web_server_lib_api.md
+
+use std.nogc_sync_mut.http_server.types.{
+    HttpRequest, HttpResponse, HttpMethod, HttpStatus, http_method_to_text
+}
+# Shared protocol core — path safety and route pattern matching are common
+# to the sync and async servers.
+export use std.common.net.http_core.{path_is_safe, match_route_pattern, extract_route_params}
+
+# =============================================================================
+# Route Definition
+# =============================================================================
+
+class Route:
+    method: HttpMethod
+    pattern: text
+    is_prefix: bool
+    handler: fn(HttpRequest) -> HttpResponse
+
+# =============================================================================
+# Router
+# =============================================================================
+
+class Router:
+    routes: [Route]
+    prefix_routes: [Route]
+    not_found_handler: fn(HttpRequest) -> HttpResponse
+
+    static fn new() -> Router:
+        Router(
+            routes: [],
+            prefix_routes: [],
+            not_found_handler: default_not_found
+        )
+
+    me get(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Get, path, handler)
+
+    me post(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Post, path, handler)
+
+    me put(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Put, path, handler)
+
+    me delete(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Delete, path, handler)
+
+    me head(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Head, path, handler)
+
+    me options(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Options, path, handler)
+
+    me route(method: HttpMethod, path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.routes.push(Route(
+            method: method,
+            pattern: path,
+            is_prefix: false,
+            handler: handler
+        ))
+
+    me mount(prefix: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.prefix_routes.push(Route(
+            method: HttpMethod.Get,
+            pattern: prefix,
+            is_prefix: true,
+            handler: handler
+        ))
+
+    me set_not_found(handler: fn(HttpRequest) -> HttpResponse):
+        self.not_found_handler = handler
+
+    fn dispatch(req: HttpRequest) -> HttpResponse:
+        # AC-3: reject path traversal before any handler sees the request.
+        if not path_is_safe(req.path):
+            return HttpResponse.error(HttpStatus.BadRequest, "400 Bad Request: unsafe path")
+
+        # NOTE: bind fn-typed fields to a local before calling — the
+        # interpreter resolves `r.handler(req)` as a method lookup on Route
+        # ("method `handler` not found"), while a local fn value calls fine.
+        for r in self.routes:
+            if method_matches(r.method, req.method) and match_route_pattern(r.pattern, req.path):
+                val h = r.handler
+                return h(req)
+
+        for r in self.prefix_routes:
+            if req.path.starts_with(r.pattern):
+                val h = r.handler
+                return h(req)
+
+        val nf = self.not_found_handler
+        return nf(req)
+
+# =============================================================================
+# Route Pattern Matching
+# =============================================================================
+
+fn method_matches(route_method: HttpMethod, req_method: HttpMethod) -> bool:
+    return http_method_to_text(route_method) == http_method_to_text(req_method)
+
+# match_route_pattern / extract_route_params now live in the shared protocol
+# core (src/lib/common/net/http_core.spl) and are re-exported above.
+
+fn default_not_found(req: HttpRequest) -> HttpResponse:
+    HttpResponse.not_found()
+
+# =============================================================================
+# Path Safety (AC-3)
+# =============================================================================
+# path_is_safe now lives in the shared protocol core
+# (src/lib/common/net/http_core.spl) and is re-exported above so existing
+# importers of this module keep working.

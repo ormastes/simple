@@ -1,0 +1,85 @@
+# Run-path probe for `impl Trait for <primitive>` dispatch.
+#
+# Executed as a SUBPROCESS under both SIMPLE_EXECUTION_MODE=interpreter and
+# =jit by primitive_receiver_trait_impl_dispatch_class_spec.spl. A spec body
+# always runs interpreted, so an in-process example can never go red on the
+# JIT-only half of this defect (Defect A in
+# doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md).
+#
+# Every oracle is an ABSOLUTE literal this probe did not compute — never
+# "the two engines agree", which would pass while both are wrong alike.
+#
+# Two families are probed:
+#   marker_probe() — a method name with NO seed builtin of the same name.
+#                    Expected to fail CLOSED if broken (hard runtime error).
+#   probe_hash()   — DELIBERATELY not named `hash`; a second arm named `hash`
+#                    would trip the seed JIT's unconditional
+#                    `"hash" => "rt_hash_text"` builtin-name shadow
+#                    (src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:1790),
+#                    which is the silent-wrong half of the class.
+
+trait MarkerProbe:
+    fn marker_probe() -> i64
+
+impl MarkerProbe for text:
+    fn marker_probe() -> i64:
+        1001
+
+impl MarkerProbe for i64:
+    fn marker_probe() -> i64:
+        1002
+
+impl MarkerProbe for bool:
+    fn marker_probe() -> i64:
+        1004
+
+impl MarkerProbe for f64:
+    fn marker_probe() -> i64:
+        1007
+
+impl MarkerProbe for i32:
+    fn marker_probe() -> i64:
+        1003
+
+impl MarkerProbe for f32:
+    fn marker_probe() -> i64:
+        1006
+
+impl MarkerProbe for u64:
+    fn marker_probe() -> i64:
+        1008
+
+struct ControlPoint:
+    x: i64
+
+impl MarkerProbe for ControlPoint:
+    fn marker_probe() -> i64:
+        self.x + 5000
+
+var failures: i64 = 0
+
+fn check(name: text, actual: i64, expected: i64):
+    if actual == expected:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " expected=" + expected.to_string() + " actual=" + actual.to_string())
+        failures = failures + 1
+
+fn main():
+    print("PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: begin")
+
+    check("text_receiver", "x".marker_probe(), 1001)
+    check("i64_receiver", (7 as i64).marker_probe(), 1002)
+    check("bool_receiver", true.marker_probe(), 1004)
+    check("f64_receiver", (1.5 as f64).marker_probe(), 1007)
+    check("i32_receiver", (7 as i32).marker_probe(), 1003)
+    check("f32_receiver", (1.5 as f32).marker_probe(), 1006)
+    check("u64_receiver", (7 as u64).marker_probe(), 1008)
+    check("struct_control", ControlPoint(x: 1).marker_probe(), 5001)
+
+    if failures == 0:
+        print("PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: ALL PASS")
+    else:
+        print("PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: " + failures.to_string() + " FAILURES")
+
+main()

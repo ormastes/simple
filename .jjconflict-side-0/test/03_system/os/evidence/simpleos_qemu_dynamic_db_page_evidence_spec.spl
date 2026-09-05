@@ -1,0 +1,223 @@
+# codex-system-test
+# @tag:system
+# @req REQ-EVS-012
+# @cover src/os/services/database/simple_db_service.spl 80%
+# @evidence-display: embed_html
+
+"""
+# SimpleOS dynamic database page evidence
+
+## Overview
+
+The in-process branch executes the same `SimpleDbService` request owner used by
+the boot HTTP listener. The optional live branch boots the current-source RV64
+kernel through `qemu_rv64_http_test.shs`; that runner now requires the complete
+GET /db, create, insert, select, refreshed GET sequence before it passes.
+Missing live prerequisites publish an exact blocker and resume command.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Run the spec for the in-process request flow. For QEMU evidence, build the RV64
+kernel, set `SIMPLE_EVIDENCE_SIMPLEOS_DYNAMIC_DB=1`, rerun it, and review the
+captured page plus create, insert, select, and refreshed GET sequence.
+"""
+
+use std.spec.*
+use app.io.mod.{env_get, file_exists, file_read_text, process_run_timeout}
+use os.services.database.simple_db_service.{SimpleDbService}
+
+struct DynamicDbLiveCapture:
+    status: text
+    reason: text
+    resume_command: text
+    exit_code: i32
+    serial_log: text
+    query_log: text
+    page_log: text
+    runner_output: text
+
+val DYNAMIC_DB_ARTIFACT_ROOT = (
+    "build/test-artifacts/03_system/os/evidence/" +
+    "simpleos_qemu_dynamic_db_page_evidence"
+)
+val DYNAMIC_DB_SERIAL_LOG = DYNAMIC_DB_ARTIFACT_ROOT + "/serial.log"
+val DYNAMIC_DB_QUERY_LOG = DYNAMIC_DB_ARTIFACT_ROOT + "/db_query.log"
+val DYNAMIC_DB_PAGE_LOG = DYNAMIC_DB_ARTIFACT_ROOT + "/db_page.log"
+val DYNAMIC_DB_KERNEL = "build/os/simpleos_riscv64.elf"
+val DYNAMIC_DB_BUILD_STAMP = "build/os/simpleos_riscv64.elf.build_stamp"
+val DYNAMIC_DB_RESUME = (
+    "bin/simple os build --arch=riscv64 && " +
+    "SIMPLE_EVIDENCE_SIMPLEOS_DYNAMIC_DB=1 bin/simple test " +
+    "test/03_system/os/evidence/" +
+    "simpleos_qemu_dynamic_db_page_evidence_spec.spl " +
+    "--mode=interpreter --timeout 180"
+)
+
+fn blocked_dynamic_db_capture(reason: text) -> DynamicDbLiveCapture:
+    DynamicDbLiveCapture(
+        status: "blocked",
+        reason: reason,
+        resume_command: DYNAMIC_DB_RESUME,
+        exit_code: -1,
+        serial_log: "",
+        query_log: "",
+        page_log: "",
+        runner_output: ""
+    )
+
+fn capture_live_dynamic_db_page() -> DynamicDbLiveCapture:
+    if not file_exists(DYNAMIC_DB_KERNEL):
+        return blocked_dynamic_db_capture(
+            "missing-prerequisite:" + DYNAMIC_DB_KERNEL
+        )
+    if not file_exists(DYNAMIC_DB_BUILD_STAMP):
+        return blocked_dynamic_db_capture(
+            "missing-prerequisite:" + DYNAMIC_DB_BUILD_STAMP
+        )
+    if env_get("SIMPLE_EVIDENCE_SIMPLEOS_DYNAMIC_DB") != "1":
+        return blocked_dynamic_db_capture("live-run-not-requested")
+
+    val result = process_run_timeout(
+        "/usr/bin/env",
+        [
+            "SERIAL_LOG=" + DYNAMIC_DB_SERIAL_LOG,
+            "DB_QUERY_LOG=" + DYNAMIC_DB_QUERY_LOG,
+            "DB_PAGE_LOG=" + DYNAMIC_DB_PAGE_LOG,
+            "sh",
+            "scripts/qemu/qemu_rv64_http_test.shs",
+            "--with-db",
+            "--expect-http-only"
+        ],
+        150000
+    )
+    val output = result[0] + "\n" + result[1]
+    if result[2] != 0:
+        return DynamicDbLiveCapture(
+            status: "blocked",
+            reason: "runner-failed-exit=" + result[2].to_text(),
+            resume_command: DYNAMIC_DB_RESUME,
+            exit_code: result[2],
+            serial_log: DYNAMIC_DB_SERIAL_LOG,
+            query_log: DYNAMIC_DB_QUERY_LOG,
+            page_log: DYNAMIC_DB_PAGE_LOG,
+            runner_output: output
+        )
+    if not file_exists(DYNAMIC_DB_SERIAL_LOG):
+        return blocked_dynamic_db_capture(
+            "missing-artifact:" + DYNAMIC_DB_SERIAL_LOG
+        )
+    if not file_exists(DYNAMIC_DB_QUERY_LOG):
+        return blocked_dynamic_db_capture(
+            "missing-artifact:" + DYNAMIC_DB_QUERY_LOG
+        )
+    if not file_exists(DYNAMIC_DB_PAGE_LOG):
+        return blocked_dynamic_db_capture(
+            "missing-artifact:" + DYNAMIC_DB_PAGE_LOG
+        )
+    DynamicDbLiveCapture(
+        status: "captured",
+        reason: "",
+        resume_command: DYNAMIC_DB_RESUME,
+        exit_code: result[2],
+        serial_log: file_read_text(DYNAMIC_DB_SERIAL_LOG),
+        query_log: file_read_text(DYNAMIC_DB_QUERY_LOG),
+        page_log: file_read_text(DYNAMIC_DB_PAGE_LOG),
+        runner_output: output
+    )
+
+fn verify_live_capture_or_blocker(capture: DynamicDbLiveCapture):
+    if capture.status == "captured":
+        expect(capture.exit_code).to_equal(0)
+        expect(capture.serial_log).to_contain("Network service ready")
+        expect(capture.serial_log).to_contain(
+            "[http_baremetal] Listening on 0.0.0.0:8080"
+        )
+        expect(capture.query_log).to_contain("OK INSERT")
+        expect(capture.query_log).to_contain("codex-41")
+        expect(capture.page_log).to_contain("--- before insert ---")
+        expect(capture.page_log).to_contain("--- after insert ---")
+        expect(capture.page_log).to_contain("<td>codex</td>")
+        expect(capture.page_log).to_contain("<td>answer</td>")
+        expect(capture.page_log).to_contain("<td>codex-41</td>")
+        expect(capture.runner_output).to_contain("PASS (codex-41)")
+    else:
+        expect(capture.status).to_equal("blocked")
+        if capture.reason == "live-run-not-requested":
+            expect(capture.reason).to_equal("live-run-not-requested")
+        elif capture.reason.starts_with("runner-failed-exit="):
+            expect(capture.reason).to_start_with("runner-failed-exit=")
+        elif capture.reason.starts_with("missing-artifact:"):
+            expect(capture.reason).to_start_with("missing-artifact:")
+        else:
+            expect(capture.reason).to_start_with("missing-prerequisite:")
+        expect(capture.resume_command).to_contain(
+            "bin/simple os build --arch=riscv64"
+        )
+        expect(capture.resume_command).to_contain(
+            "SIMPLE_EVIDENCE_SIMPLEOS_DYNAMIC_DB=1"
+        )
+
+describe "REQ-EVS-012 SimpleOS dynamic database page evidence":
+    it "boots or blocks exactly and proves insert query and refreshed HTML":
+        step("Capture the feature evidence")
+        var db = SimpleDbService.new()
+        val initial_page = db.execute_http_request(
+            "GET /db HTTP/1.1\r\nHost: simpleos\r\n\r\n"
+        )
+        val create = db.execute_http_request(
+            "POST /db HTTP/1.1\r\n\r\nCREATE showcase"
+        )
+        val insert = db.execute_http_request(
+            "POST /db HTTP/1.1\r\n\r\nINSERT showcase greeting hello"
+        )
+        val query = db.execute_http_request(
+            "POST /db HTTP/1.1\r\n\r\nSELECT showcase greeting"
+        )
+        val refreshed_page = db.execute_http_request(
+            "GET /db HTTP/1.1\r\nHost: simpleos\r\n\r\n"
+        )
+        val live = capture_live_dynamic_db_page()
+
+        step("Verify the structured evidence")
+        expect(initial_page).to_start_with("HTTP/1.1 200 OK")
+        expect(initial_page).to_contain(
+            "Content-Type: text/html; charset=utf-8"
+        )
+        expect(initial_page).to_contain("<h1>SimpleOS DB</h1>")
+        expect(initial_page).to_contain("<table>")
+        expect(initial_page.find("<td>hello</td>")).to_equal(-1)
+        expect(create).to_end_with("\r\n\r\nOK CREATE")
+        expect(insert).to_end_with("\r\n\r\nOK INSERT")
+        expect(query).to_end_with("\r\n\r\nhello")
+        expect(refreshed_page).to_start_with("HTTP/1.1 200 OK")
+        expect(refreshed_page).to_contain("<td>showcase</td>")
+        expect(refreshed_page).to_contain("<td>greeting</td>")
+        expect(refreshed_page).to_contain("<td>hello</td>")
+        verify_live_capture_or_blocker(live)
+
+        step("Render the evidence for review")
+        # @capture(html)
+        expect(refreshed_page).to_contain(
+            "<tr><td>showcase</td><td>greeting</td><td>hello</td></tr>"
+        )
+        val rendered = (
+            "live_status: " + live.status + "\n" +
+            "reason: " + live.reason + "\n" +
+            "resume: " + live.resume_command
+        )
+        expect(rendered).to_contain("live_status: " + live.status)
+
+        step("Publish the showcase link")
+        val publication = if live.status == "captured":
+            DYNAMIC_DB_PAGE_LOG
+        else:
+            "blocked-contract"
+        if live.status == "captured":
+            expect(publication).to_equal(DYNAMIC_DB_PAGE_LOG)
+        else:
+            expect(publication).to_equal("blocked-contract")

@@ -1,0 +1,154 @@
+#!/bin/sh
+# Guard: the treesitter outline-authority parse path must TERMINATE.
+#
+# Incident 2026-08-23
+# (doc/08_tracking/bug/outline_authority_parse_spin_treesitter_2026-08-23.md):
+# `treesitter_is_at_end()` compared `Token.kind` -- which carries the RAW
+# CoreLexer numeric kind (lex_token_eof -> 190, lex_token_error -> 191,
+# token_is_keyword tests 20..59) -- against `TokenKind.Eof`, an ordinal of a
+# bare positional enum with 142 variants. 190 is unreachable by ANY ordinal, so
+# the comparison could never be true and outline.spl's top-level
+# `while not self.treesitter_is_at_end()` loop had an exit condition that could
+# never be reached. stage1 runs 21/23 hung forever at `parse 144/688`.
+#
+# Why no existing guard caught it, and why this one is not redundant: every
+# pre-push guard checks trees, ranges, or source TEXT (conflict entries, marker
+# text, file counts, test-tree diffs, blob history, rt_* symbol sets), and the
+# two that run a compiler run it over source (`-fsyntax-only`) or check that a
+# binary does not crash. A parser that spins forever is well-formed as bytes,
+# compiles cleanly, crashes nothing, and returns no wrong answer -- it simply
+# never returns. Only executing the parse under a clock can see it.
+#
+# Scope: a TREE property (like the C-runtime and stage-binary guards), not a
+# BASE..NEW delta -- an edit to the lexer's kind space can break a parser file
+# it never touched, so a changed-files-only scan would be fail-open.
+#
+# Usage: sh scripts/check/check-outline-parse-terminates.shs [--selftest-only]
+#   SIMPLE_BIN     seed/compiler binary to drive (default: bin/simple)
+#   OUTLINE_LIMIT  per-fixture timeout in seconds (default: 240)
+set -u
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+LIMIT="${OUTLINE_LIMIT:-240}"
+
+# ---------------------------------------------------------------------------
+# Classification, factored out so --selftest can exercise the decision logic
+# against crafted logs without paying for a real compile.
+#
+# The discriminator is POSITIONAL and fail-closed. `phase2:parse:file:start`
+# means the parse was entered; `phase2:parse:file:done` means it came back out.
+# Entering without leaving is exactly the spin, and is the shape the incident
+# had. Anything that never entered is ERROR (nothing was measured), never PASS
+# -- absence of evidence is not evidence.
+#   0 = terminated, 1 = spun, 2 = never entered
+# ---------------------------------------------------------------------------
+classify_log() {
+    _log="$1"; _fixture="$2"
+    [ -f "$_log" ] || return 2
+    if ! grep -aq "phase2:parse:file:start .*${_fixture}" "$_log" 2>/dev/null; then
+        return 2
+    fi
+    if grep -aq "phase2:parse:file:done .*${_fixture}" "$_log" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+selftest() {
+    _d="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    _fail=0
+
+    # 1. terminated -> 0
+    printf 'phase2:parse:file:start x/fix.spl\nphase2:parse:file:done x/fix.spl\n' > "$_d/a"
+    classify_log "$_d/a" "fix.spl"; [ $? -eq 0 ] || { echo "selftest: terminated log misclassified"; _fail=1; }
+
+    # 2. incident shape: entered, never returned -> 1
+    printf 'phase2:parse:file:start x/fix.spl\n' > "$_d/b"
+    classify_log "$_d/b" "fix.spl"; [ $? -eq 1 ] || { echo "selftest: spin log misclassified"; _fail=1; }
+
+    # 3. never entered -> 2 (must be ERROR, never a pass)
+    printf 'some unrelated output\n' > "$_d/c"
+    classify_log "$_d/c" "fix.spl"; [ $? -eq 2 ] || { echo "selftest: never-entered log misclassified"; _fail=1; }
+
+    # 4. missing log -> 2
+    classify_log "$_d/nope" "fix.spl"; [ $? -eq 2 ] || { echo "selftest: missing log misclassified"; _fail=1; }
+
+    # 5. a DIFFERENT file completing must not launder our fixture's spin
+    printf 'phase2:parse:file:start x/fix.spl\nphase2:parse:file:done x/other.spl\n' > "$_d/e"
+    classify_log "$_d/e" "fix.spl"; [ $? -eq 1 ] || { echo "selftest: cross-file done laundered a spin"; _fail=1; }
+
+    rm -rf "$_d"
+    [ "$_fail" -eq 0 ] || { echo "ERROR — nothing was checked (selftest FAILED)"; exit 2; }
+}
+
+# Selftest runs before every scan and is fatal.
+selftest
+if [ "${1:-}" = "--selftest-only" ]; then
+    echo "PASS — 5 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+command -v timeout >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no timeout(1))"; exit 2; }
+[ -x "$SIMPLE_BIN" ] || command -v "$SIMPLE_BIN" >/dev/null 2>&1 || {
+    echo "ERROR — nothing was checked (compiler '$SIMPLE_BIN' not executable)"; exit 2; }
+[ -f src/app/cli/parse_shard_main.spl ] || {
+    echo "ERROR — nothing was checked (not at repo root)"; exit 2; }
+
+# Fixtures: files that take the outline-authority path. Routing is decided by
+# frontend_has_outline_authority(), an UNANCHORED substring test over the whole
+# file -- `contains("friend ") or contains("internal_export")` -- so membership
+# is a property of the text, not of any declaration. Derive the list rather
+# than hardcoding it, so a file that starts or stops matching is covered
+# automatically.
+CANDIDATES="src/compiler/10.frontend/treesitter_types.spl src/compiler/10.frontend/treesitter/outline.spl"
+FIXTURES=""
+for c in $CANDIDATES; do
+    [ -f "$c" ] || continue
+    grep -qE 'friend |internal_export' "$c" 2>/dev/null && FIXTURES="$FIXTURES $c"
+done
+
+[ -n "$FIXTURES" ] && [ -n "$(echo $FIXTURES)" ] || {
+    echo "ERROR — nothing was checked (no outline-authority fixture found)"; exit 2; }
+
+WORK="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+CHECKED=0
+OFFENDERS=""
+NOT_ENTERED=""
+
+for fx in $FIXTURES; do
+    base="$(basename "$fx")"
+    mkdir -p "$WORK/src"
+    rm -f "$WORK/src"/*.spl
+    cp "$fx" "$WORK/src/$base" || continue
+    log="$WORK/$base.log"
+
+    # Exit status is read DIRECTLY into a variable on the line after the
+    # invocation -- never through a pipe, whose $? is the last stage's status
+    # and has produced false greens in this repo before.
+    SIMPLE_COMPILER_TRACE=1 SIMPLE_NATIVE_BUILD_WORKER=1 \
+        timeout "$LIMIT" "$SIMPLE_BIN" run src/app/cli/parse_shard_main.spl \
+        --source "$WORK/src" --entry "$WORK/src/$base" \
+        --parse-shard=0/1 > "$log" 2>&1
+    rc=$?
+
+    classify_log "$log" "$base"
+    verdict=$?
+    case "$verdict" in
+        0) CHECKED=$((CHECKED + 1)) ;;
+        1) CHECKED=$((CHECKED + 1)); OFFENDERS="$OFFENDERS $base(rc=$rc)" ;;
+        2) NOT_ENTERED="$NOT_ENTERED $base" ;;
+    esac
+done
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no fixture reached the parser;${NOT_ENTERED:- none})"
+    exit 2
+fi
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL — $CHECKED fixture(s) parsed, outline-authority path did not terminate for:$OFFENDERS"
+    exit 1
+fi
+echo "PASS — $CHECKED fixture(s) parsed, outline-authority path terminated for all"
+exit 0

@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+provider="$root/src/runtime/runtime_sdl2.c"
+header="$root/src/runtime/runtime.h"
+binding="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+dispatcher="$root/src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs"
+failed=0
+
+for symbol in set_cursor_visible set_cursor_grab warp_mouse; do
+    body=$(sed -n "/^bool rt_sdl2_$symbol/,/^}/p" "$provider")
+    if [ -z "$body" ] || ! printf '%s\n' "$body" | grep -q 'return false' ||
+       ! grep -q "^bool     rt_sdl2_$symbol" "$header" ||
+       ! grep -q "^extern fn rt_sdl2_$symbol.*-> bool" "$binding" ||
+       ! grep -q "(\"rt_sdl2_$symbol\", Ret::B" "$dispatcher"; then
+        echo "rt_sdl2_$symbol must retain consistent status ABI and failure paths" >&2
+        failed=1
+    fi
+    if printf '%s\n' "$body" | grep -Eq 'malloc|calloc|realloc|pthread_|mutex|SDL_GetError'; then
+        echo "rt_sdl2_$symbol must remain allocation-, lock-, and extra-query-free" >&2
+        failed=1
+    fi
+done
+
+for symbol in set_cursor_visible set_cursor_grab warp_mouse; do
+    if ! grep -B1 "^extern fn rt_sdl2_$symbol" "$binding" |
+         grep -q '^@unsafe(reason: "raw SDL2 .*false sentinel'; then
+        echo "rt_sdl2_$symbol must retain its exact unsafe contract" >&2
+        failed=1
+    fi
+done
+cursor_wrappers=$(sed -n '/^fn window_set_cursor_visible/,/^# --- Events ---/p' "$binding")
+if [ "$(printf '%s\n' "$cursor_wrappers" | grep -c 'unsafe(capabilities: \[ffi\]):' || true)" -ne 3 ]; then
+    echo "cursor declarations and wrappers must retain three exact lexical contracts" >&2
+    failed=1
+fi
+for wrapper in window_set_cursor_visible window_set_cursor_grab window_set_cursor_position; do
+    if grep -B1 "^fn $wrapper(" "$binding" | grep -q '^@unsafe'; then
+        echo "$wrapper must propagate status without broad unsafe authority" >&2
+        failed=1
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SDL2 cursor contract audit: PASS"

@@ -1,0 +1,139 @@
+"""Typed facet semantic resolution and authenticated identity specification."""
+
+use std.spec.{describe, it, expect}
+use common.facet_abi.{FacetInterfaceId, FacetBindingId, ConcreteTypeId}
+use compiler.semantics.facet_resolution.{
+    FacetCandidate, FacetResolveError,
+    facet_resolve_binding, facet_validate_static_type_hint,
+    facet_normalize_type_pointcut, facet_acquire_result_type,
+    facet_substitute_type,
+}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirTypePointcut, HirFacetAcquireMode}
+use compiler.common.diagnostics.span.{Span}
+
+fn candidate(provider: text, profile: bool, concrete: bool, priority: i64,
+        complete: bool) -> FacetCandidate:
+    FacetCandidate(
+        interface_id: FacetInterfaceId(value: "debug/Debuggable"),
+        concrete_type_id: ConcreteTypeId(value: "core/Cache"),
+        binding_id: FacetBindingId(value: "binding/" + provider),
+        provider_id: provider,
+        profile_selected: profile,
+        concrete_base_match: concrete,
+        priority: priority,
+        type_rule_matches: true,
+        base_constraint_satisfied: true,
+        methods_complete: complete,
+        access_permitted: true,
+        abi_compatible: true,
+        layout_compatible: true,
+    )
+
+describe "typed facet semantic binding resolution":
+    it "ranks profile selection, concrete match, then priority":
+        val resolved = facet_resolve_binding(
+            [candidate("generic", false, false, 100, true),
+             candidate("concrete", false, true, 1, true),
+             candidate("profile", true, false, 0, true)],
+            FacetInterfaceId(value: "debug/Debuggable"),
+            ConcreteTypeId(value: "core/Cache"),
+        )
+        match resolved:
+            case Ok(found): expect found.provider_id == "profile"
+            case Err(_): expect false == true
+
+    it "rejects equal-rank ambiguity with sorted provider ids":
+        val resolved = facet_resolve_binding(
+            [candidate("z-provider", false, true, 7, true),
+             candidate("a-provider", false, true, 7, true)],
+            FacetInterfaceId(value: "debug/Debuggable"),
+            ConcreteTypeId(value: "core/Cache"),
+        )
+        match resolved:
+            case Err(FacetResolveError.AmbiguousBinding(_, _, providers)):
+                expect providers == ["a-provider", "z-provider"]
+            case _: expect false == true
+
+    it "filters incomplete providers before ranking":
+        val resolved = facet_resolve_binding(
+            [candidate("incomplete", true, true, 99, false),
+             candidate("complete", false, false, 0, true)],
+            FacetInterfaceId(value: "debug/Debuggable"),
+            ConcreteTypeId(value: "core/Cache"),
+        )
+        match resolved:
+            case Ok(found): expect found.provider_id == "complete"
+            case Err(_): expect false == true
+
+describe "authenticated concrete type identity":
+    it "accepts an equal static optimization hint":
+        expect facet_validate_static_type_hint(
+            ConcreteTypeId(value: "core/Cache"),
+            Some(ConcreteTypeId(value: "core/Cache")),
+        ).is_ok() == true
+
+    it "rejects a spoofed static hint instead of selecting by it":
+        val checked = facet_validate_static_type_hint(
+            ConcreteTypeId(value: "core/Cache"),
+            Some(ConcreteTypeId(value: "core/Admin")),
+        )
+        match checked:
+            case Err(FacetResolveError.StaticTypeHintMismatch(authenticated, hinted)):
+                expect authenticated.value == "core/Cache"
+                expect hinted.value == "core/Admin"
+            case _: expect false == true
+
+describe "facet pointcut and public result typing":
+    it "rejects malformed not cardinality":
+        val checked = facet_normalize_type_pointcut(HirTypePointcut.Not([]))
+        match checked:
+            case Err(FacetResolveError.MalformedTypePointcut(detail)):
+                expect detail.contains("exactly one") == true
+            case _: expect false == true
+
+    it "keeps resident, optional-load, and required-load result types distinct":
+        val iface = HirType(
+            kind: HirTypeKind.Named(SymbolId(id: 10), []), span: Span.empty())
+        val resident = facet_acquire_result_type(
+            HirFacetAcquireMode.TryResident, iface, SymbolId(id: 20), SymbolId(id: 30))
+        val optional = facet_acquire_result_type(
+            HirFacetAcquireMode.LoadOptional, iface, SymbolId(id: 20), SymbolId(id: 30))
+        val required = facet_acquire_result_type(
+            HirFacetAcquireMode.LoadRequired, iface, SymbolId(id: 20), SymbolId(id: 30))
+        match resident.kind:
+            case HirTypeKind.Optional(inner):
+                match inner.kind:
+                    case HirTypeKind.Named(symbol, _): expect symbol.id == 20
+                    case _: expect false == true
+            case _: expect false == true
+        match optional.kind:
+            case HirTypeKind.Result(ok, _):
+                match ok.kind:
+                    case HirTypeKind.Optional(inner):
+                        match inner.kind:
+                            case HirTypeKind.Named(symbol, _): expect symbol.id == 20
+                            case _: expect false == true
+                    case _: expect false == true
+            case _: expect false == true
+        match required.kind:
+            case HirTypeKind.Result(ok, _):
+                match ok.kind:
+                    case HirTypeKind.Named(symbol, _): expect symbol.id == 20
+                    case _: expect false == true
+            case _: expect false == true
+
+    it "substitutes generic element types through tensor and nested bounds":
+        val t = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+        val concrete = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val tensor = HirType(
+            kind: HirTypeKind.Tensor(t, [], nil), span: Span.empty())
+        val substituted = facet_substitute_type(tensor, {"T": concrete})
+        match substituted.kind:
+            case HirTypeKind.Tensor(element, _, _):
+                match element.kind:
+                    case HirTypeKind.Int(bits, signed):
+                        expect bits == 64
+                        expect signed == true
+                    case _: expect false == true
+            case _: expect false == true

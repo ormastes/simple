@@ -1,0 +1,75 @@
+# codex-system-test
+# @req REQ-012
+"""Fail-closed contract for temporary read-only debug AOP aspects."""
+
+use std.spec.*
+use std.common.debug.aop_aspect_v1.{
+    DebugAopAspectV1, DebugAopFieldV1, DebugAopScopeV1,
+    debug_aop_aspect_v1, validate_debug_aop_aspect_v1,
+}
+
+fn fixture_aspect() -> DebugAopAspectV1:
+    debug_aop_aspect_v1(
+        "request-latency",
+        "server.request.enter:v1",
+        [DebugAopFieldV1(name: "elapsed_ns", type_name: "i64")],
+        DebugAopScopeV1(
+            scope_id: "server-observe",
+            owner_capsule: "app.server",
+            joinpoint: "request.enter",
+        ),
+    )
+
+fn rejection(aspect: DebugAopAspectV1, mission_critical: bool) -> text:
+    match validate_debug_aop_aspect_v1(aspect, mission_critical):
+        case Ok(_): fail("unsafe debug AOP aspect was accepted")
+        case Err(reason): reason
+
+describe "DebugAopAspectV1 validation":
+    it "should create a bounded read-only receipted aspect by default":
+        val aspect = fixture_aspect()
+        expect(aspect.read_only).to_equal(true)
+        expect(aspect.contains_business_logic).to_equal(false)
+        expect(aspect.mutates_program).to_equal(false)
+        expect(aspect.receipt_required).to_equal(true)
+        match validate_debug_aop_aspect_v1(aspect, true):
+            case Ok(valid): expect(valid).to_equal(true)
+            case Err(reason): fail("safe aspect rejected: {reason}")
+
+    it "should reject untyped fields and unstable callsites":
+        var aspect = fixture_aspect()
+        aspect.stable_callsite_id = ""
+        expect(rejection(aspect, false)).to_equal("debug AOP aspect requires a stable callsite id")
+        aspect = fixture_aspect()
+        aspect.fields = [DebugAopFieldV1(name: "elapsed", type_name: "")]
+        expect(rejection(aspect, false)).to_equal("debug AOP fields require name and type")
+
+    it "should reject business logic and mutation":
+        var aspect = fixture_aspect()
+        aspect.contains_business_logic = true
+        expect(rejection(aspect, false)).to_equal("debug AOP aspect must not contain business logic")
+        aspect = fixture_aspect()
+        aspect.mutates_program = true
+        expect(rejection(aspect, false)).to_equal("debug AOP aspect must be read-only")
+
+    it "should reject mutation distinctly under mission-critical policy":
+        var aspect = fixture_aspect()
+        aspect.read_only = false
+        expect(rejection(aspect, true)).to_equal("mission-critical debug AOP aspect must be read-only")
+
+    it "should require explicit scope and bounded sampling rate and lifetime":
+        var aspect = fixture_aspect()
+        aspect.scope.scope_id = "*"
+        expect(rejection(aspect, false)).to_equal("debug AOP aspect forbids wildcard MDSOC scope")
+        aspect = fixture_aspect()
+        aspect.sample_per_million = 1000001
+        expect(rejection(aspect, false)).to_equal("debug AOP sampling must be between 1 and 1000000 per million")
+        aspect = fixture_aspect()
+        aspect.rate_limit_per_minute = 0
+        expect(rejection(aspect, false)).to_equal("debug AOP aspect requires a positive rate limit")
+        aspect = fixture_aspect()
+        aspect.ttl_ms = 0
+        expect(rejection(aspect, false)).to_equal("debug AOP aspect requires a positive TTL")
+        aspect = fixture_aspect()
+        aspect.receipt_required = false
+        expect(rejection(aspect, false)).to_equal("debug AOP aspect requires receipts")

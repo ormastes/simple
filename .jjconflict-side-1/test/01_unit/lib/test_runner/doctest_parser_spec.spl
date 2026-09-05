@@ -1,0 +1,66 @@
+# Unit hardening for std.common.doctest.parser, complementing (not replacing)
+# test/01_unit/doctest/parser_spec.spl. That existing spec already exercises
+# parse_docstring/parse_doctests/build_expected happy paths (multi-line output,
+# exceptions with/without a message, section headers, "..." continuation lines
+# treated as expected-output text). This file adds the Expected enum predicate
+# methods (untested elsewhere), a doc-comment prefix with no separating space,
+# and fail-closed / malformed-input coverage.
+
+use std.spec.{describe, it, expect}
+use std.common.doctest.parser
+
+describe "doctest parser (hardening)":
+    context "Expected enum predicates and summary":
+        it "flags Output as output-only and formats its summary":
+            val exp = Expected.Output(value: "42")
+            expect(exp.is_output()).to_equal(true)
+            expect(exp.is_empty()).to_equal(false)
+            expect(exp.is_exception()).to_equal(false)
+            expect(exp.summary()).to_equal("Output(42)")
+
+        it "flags Empty as empty-only and formats its summary":
+            val exp = Expected.Empty
+            expect(exp.is_empty()).to_equal(true)
+            expect(exp.is_output()).to_equal(false)
+            expect(exp.summary()).to_equal("Empty")
+
+        it "exposes the exception type via get_exception_type and formats it with a message":
+            val exp = Expected.Exception(exc_type: "ValueError", msg: "bad input")
+            expect(exp.is_exception()).to_equal(true)
+            expect(exp.get_exception_type() ?? "").to_equal("ValueError")
+            expect(exp.summary()).to_equal("Exception(ValueError: bad input)")
+
+        it "formats an exception with no message using the short form":
+            val exp = Expected.Exception(exc_type: "Boom", msg: nil)
+            expect(exp.get_exception_type() ?? "").to_equal("Boom")
+            expect(exp.summary()).to_equal("Exception(Boom)")
+
+    context "parse_doctests: doc-comment prefix variants":
+        it "recognizes a /// prefix with no separating space before >>>":
+            val source = "///>>> 1 + 1\n///2\nfn foo(): pass\n"
+            val items = parse_doctests(source, "test.spl")
+            expect(items.len()).to_equal(1)
+            expect(items[0].commands).to_equal(["1 + 1"])
+
+    context "deliberate-red: fail-closed / malformed input":
+        it "returns an empty list for parse_docstring on prose with no >>> markers at all":
+            val items = parse_docstring("just a plain paragraph with no examples\nsecond line\n")
+            expect(items.len()).to_equal(0)
+
+        it "returns an empty list for parse_docstring on an empty string":
+            val items = parse_docstring("")
+            expect(items.len()).to_equal(0)
+
+        it "returns an empty list for parse_doctests when the source has only non-doc comments":
+            val source = "# a regular comment\n# another one\nfn foo(): pass\n"
+            val items = parse_doctests(source, "test.spl")
+            expect(items.len()).to_equal(0)
+
+        it "build_expected treats a bare 'Error: ' line (no type after it) as an exception with an empty type":
+            val expected = build_expected(["Error: "])
+            match expected:
+                case Expected.Exception(exc_type, msg):
+                    expect(exc_type).to_equal("")
+                    expect(msg).to_be_nil()
+                case _:
+                    fail "expected an Exception variant"

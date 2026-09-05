@@ -1,0 +1,325 @@
+# snb_sdn — native Simple Notebook format (`.snb.sdn`), consistent with the
+# repo's SDN-backed databases (doc/05_design/app/tools/notebook_lanes_architecture.md
+# §7.2).
+#
+# `.snb.sdn` is a dict-shaped SDN document:
+#
+#   {
+#     snb_version: 1,
+#     nbformat_minor: <int>,
+#     metadata_json: "<compact JSON of the notebook metadata>",
+#     cells: [
+#       {
+#         cell_type: "code" | "markdown",
+#         metadata_json: "<compact JSON of the cell metadata>",
+#         source: "<cell source, real newlines>",
+#         has_execution_count: true | false,
+#         execution_count: <int, -1 = null>,
+#         outputs: [
+#           {
+#             output_type: "stream" | "display_data" | "error",
+#             stream_name: "<stdout|stderr, stream only>",
+#             text: "<stream/display_data text, real newlines>",
+#             metadata_json: "<compact JSON, display_data only>",
+#             ename: "<error only>",
+#             evalue: "<error only>",
+#             traceback: "<error only, real newlines>"
+#           }, ...
+#         ]
+#       }, ...
+#     ]
+#   }
+#
+# Cell/output metadata is carried as opaque compact-JSON text (the same
+# representation `ipynb.spl` uses) rather than decomposed into nested SDN
+# values — this keeps the ipynb <-> snb conversion lossless without a
+# separate JSON<->SDN structural mapping, and is the reason the top-level
+# shape is a plain dict of dicts/arrays rather than an `SdnValue.Table`: SDN
+# tables round-trip only at the top level of a document (see
+# src/lib/common/sdn/encode.spl), and this document nests cells under a
+# top-level dict alongside notebook metadata.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse as sdn_parse_value}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.nogc_sync_mut.notebook.ipynb.{NbNotebook, NbCell, NbOutput}
+
+# ============================================================================
+# NbNotebook <-> SdnValue
+# ============================================================================
+
+pub fn nb_to_sdn(nb: NbNotebook) -> SdnValue:
+    var cell_values: [SdnValue] = []
+    for cell in nb.cells:
+        cell_values.push(_nb_cell_to_sdn(cell))
+
+    val root: Dict<text, SdnValue> = {
+        "snb_version": SdnValue.Int(1),
+        "nbformat_minor": SdnValue.Int(nb.nbformat_minor),
+        "metadata_json": SdnValue.String(nb.metadata_json),
+        "cells": SdnValue.Array(cell_values)
+    }
+    SdnValue.Dict(root)
+
+fn _nb_cell_to_sdn(cell: NbCell) -> SdnValue:
+    var output_values: [SdnValue] = []
+    for out in cell.outputs:
+        output_values.push(_nb_output_to_sdn(out))
+
+    val d: Dict<text, SdnValue> = {
+        "cell_type": SdnValue.String(cell.cell_type),
+        "metadata_json": SdnValue.String(cell.metadata_json),
+        "source": SdnValue.String(cell.source),
+        "has_execution_count": SdnValue.Bool(cell.has_execution_count),
+        "execution_count": SdnValue.Int(cell.execution_count),
+        "outputs": SdnValue.Array(output_values)
+    }
+    SdnValue.Dict(d)
+
+fn _nb_output_to_sdn(out: NbOutput) -> SdnValue:
+    val d: Dict<text, SdnValue> = {
+        "output_type": SdnValue.String(out.output_type),
+        "stream_name": SdnValue.String(out.stream_name),
+        "text": SdnValue.String(out.text),
+        "metadata_json": SdnValue.String(out.metadata_json),
+        "ename": SdnValue.String(out.ename),
+        "evalue": SdnValue.String(out.evalue),
+        "traceback": SdnValue.String(out.traceback)
+    }
+    SdnValue.Dict(d)
+
+# Convert a parsed SDN document back into an NbNotebook. Fails fast on any
+# shape that does not match the schema documented above (never a silent
+# best-effort read).
+pub fn sdn_to_nb(v: SdnValue) -> Result<NbNotebook, text>:
+    if not v.is_dict():
+        return Err("snb.sdn: top-level value must be a dict")
+
+    var nbformat_minor: i64 = 0
+    match _sdn_get_int(v, "nbformat_minor", "nbformat_minor"):
+        case Ok(i):
+            nbformat_minor = i
+        case Err(msg):
+            return Err(msg)
+
+    var metadata_json = "{}"
+    match _sdn_get_str(v, "metadata_json", "metadata_json"):
+        case Ok(s):
+            metadata_json = s
+        case Err(msg):
+            return Err(msg)
+
+    val cells_opt = v.get("cells")
+    var cells_sdn: [SdnValue] = []
+    match cells_opt:
+        case Some(cv):
+            val arr = cv.as_array()
+            match arr:
+                case Some(a):
+                    cells_sdn = a
+                case None:
+                    return Err("snb.sdn: 'cells' must be an array")
+        case None:
+            return Err("snb.sdn: missing required field 'cells'")
+
+    var cells: [NbCell] = []
+    for cell_v in cells_sdn:
+        val cell_result = _nb_cell_from_sdn(cell_v)
+        match cell_result:
+            case Ok(cell):
+                cells.push(cell)
+            case Err(msg):
+                return Err(msg)
+
+    Ok(NbNotebook(nbformat_minor: nbformat_minor, metadata_json: metadata_json, cells: cells))
+
+fn _sdn_get_str(v: SdnValue, key: text, field_name: text) -> Result<text, text>:
+    val field = v.get(key)
+    match field:
+        case None:
+            return Err("snb.sdn: missing required field '{field_name}'")
+        case Some(fv):
+            val s = fv.as_str()
+            match s:
+                case Some(text_v):
+                    return Ok(text_v)
+                case None:
+                    return Err("snb.sdn: '{field_name}' must be a string")
+
+fn _sdn_get_bool(v: SdnValue, key: text, field_name: text) -> Result<bool, text>:
+    val field = v.get(key)
+    match field:
+        case None:
+            return Err("snb.sdn: missing required field '{field_name}'")
+        case Some(fv):
+            val b = fv.as_bool()
+            match b:
+                case Some(bool_v):
+                    return Ok(bool_v)
+                case None:
+                    return Err("snb.sdn: '{field_name}' must be a bool")
+
+fn _sdn_get_int(v: SdnValue, key: text, field_name: text) -> Result<i64, text>:
+    val field = v.get(key)
+    match field:
+        case None:
+            return Err("snb.sdn: missing required field '{field_name}'")
+        case Some(fv):
+            val i = fv.as_i64()
+            match i:
+                case Some(int_v):
+                    return Ok(int_v)
+                case None:
+                    return Err("snb.sdn: '{field_name}' must be an int")
+
+fn _nb_cell_from_sdn(v: SdnValue) -> Result<NbCell, text>:
+    if not v.is_dict():
+        return Err("snb.sdn: each cell must be a dict")
+
+    var cell_type = ""
+    match _sdn_get_str(v, "cell_type", "cell.cell_type"):
+        case Ok(s):
+            cell_type = s
+        case Err(msg):
+            return Err(msg)
+    if cell_type != "code" and cell_type != "markdown":
+        return Err("snb.sdn: unsupported cell_type '{cell_type}' (supported subset: code, markdown)")
+
+    var metadata_json = ""
+    match _sdn_get_str(v, "metadata_json", "cell.metadata_json"):
+        case Ok(s):
+            metadata_json = s
+        case Err(msg):
+            return Err(msg)
+
+    var source = ""
+    match _sdn_get_str(v, "source", "cell.source"):
+        case Ok(s):
+            source = s
+        case Err(msg):
+            return Err(msg)
+
+    var has_execution_count = false
+    match _sdn_get_bool(v, "has_execution_count", "cell.has_execution_count"):
+        case Ok(b):
+            has_execution_count = b
+        case Err(msg):
+            return Err(msg)
+
+    var execution_count: i64 = -1
+    match _sdn_get_int(v, "execution_count", "cell.execution_count"):
+        case Ok(i):
+            execution_count = i
+        case Err(msg):
+            return Err(msg)
+
+    val outputs_field = v.get("outputs")
+    var outputs_sdn: [SdnValue] = []
+    match outputs_field:
+        case None:
+            return Err("snb.sdn: cell missing required field 'outputs'")
+        case Some(ov):
+            val arr = ov.as_array()
+            match arr:
+                case Some(a):
+                    outputs_sdn = a
+                case None:
+                    return Err("snb.sdn: cell 'outputs' must be an array")
+
+    var outputs: [NbOutput] = []
+    for out_v in outputs_sdn:
+        val out_result = _nb_output_from_sdn(out_v)
+        match out_result:
+            case Ok(out):
+                outputs.push(out)
+            case Err(msg):
+                return Err(msg)
+
+    Ok(NbCell(
+        cell_type: cell_type,
+        metadata_json: metadata_json,
+        source: source,
+        has_execution_count: has_execution_count,
+        execution_count: execution_count,
+        outputs: outputs
+    ))
+
+fn _nb_output_from_sdn(v: SdnValue) -> Result<NbOutput, text>:
+    if not v.is_dict():
+        return Err("snb.sdn: each output must be a dict")
+
+    var output_type = ""
+    match _sdn_get_str(v, "output_type", "output.output_type"):
+        case Ok(s):
+            output_type = s
+        case Err(msg):
+            return Err(msg)
+    if output_type != "stream" and output_type != "display_data" and output_type != "error":
+        return Err("snb.sdn: unsupported output_type '{output_type}' (supported subset: stream, display_data, error)")
+
+    var stream_name = ""
+    match _sdn_get_str(v, "stream_name", "output.stream_name"):
+        case Ok(s):
+            stream_name = s
+        case Err(msg):
+            return Err(msg)
+
+    var out_text = ""
+    match _sdn_get_str(v, "text", "output.text"):
+        case Ok(s):
+            out_text = s
+        case Err(msg):
+            return Err(msg)
+
+    var metadata_json = ""
+    match _sdn_get_str(v, "metadata_json", "output.metadata_json"):
+        case Ok(s):
+            metadata_json = s
+        case Err(msg):
+            return Err(msg)
+
+    var ename = ""
+    match _sdn_get_str(v, "ename", "output.ename"):
+        case Ok(s):
+            ename = s
+        case Err(msg):
+            return Err(msg)
+
+    var evalue = ""
+    match _sdn_get_str(v, "evalue", "output.evalue"):
+        case Ok(s):
+            evalue = s
+        case Err(msg):
+            return Err(msg)
+
+    var traceback = ""
+    match _sdn_get_str(v, "traceback", "output.traceback"):
+        case Ok(s):
+            traceback = s
+        case Err(msg):
+            return Err(msg)
+
+    Ok(NbOutput(
+        output_type: output_type,
+        stream_name: stream_name,
+        text: out_text,
+        metadata_json: metadata_json,
+        ename: ename,
+        evalue: evalue,
+        traceback: traceback
+    ))
+
+# ============================================================================
+# Text-level converters
+# ============================================================================
+
+pub fn snb_serialize(nb: NbNotebook) -> text:
+    sdn_encode_canonical(nb_to_sdn(nb))
+
+pub fn snb_parse(src: text) -> Result<NbNotebook, text>:
+    val parsed = sdn_parse_value(src)
+    match parsed:
+        case Ok(v):
+            return sdn_to_nb(v)
+        case Err(msg):
+            return Err("snb.sdn: SDN parse error: {msg}")

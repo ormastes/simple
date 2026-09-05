@@ -1,0 +1,51 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+#
+# CONTRACT spec for `simple check` on a minimal VALID file: it must exit 0 and
+# say so — and must NOT die on its own stdlib before ever reading the input.
+#
+# Incident pinned here (2026-09-01, Windows): the deployed seed predated the
+# 2026-08-26 `is_directive_decorator` whitelist fix (compiler/src/decorator_apply.rs),
+# so EVERY `simple check <anything>` exited 1 with
+#   error: semantic: unknown decorator `@always_inline` on function `file_read_nullable`
+# raised while interpreting check_entry.spl's own import closure
+# (src/lib/nogc_sync_mut/io_runtime.spl) — before the user's file was ever
+# consulted. `--version` answered cleanly, which is exactly why it looked
+# healthy. Record: doc/08_tracking/bug/check_broken_on_windows_stale_seed_decorator_2026-09-01.md
+#
+# The "unknown decorator" NOT-contains assertion below is the regression pin
+# for that incident class (a stale seed rejecting current stdlib annotations).
+
+use std.spec.step
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_write_text(path: text, contents: text) -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+
+fn checker_binary() -> text:
+    if rt_file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    return "bin/simple"
+
+describe "simple check on a minimal valid file":
+    # @manual scenario evidence
+    it "exits 0 and reports all checks passed, without dying on its own stdlib":
+        # @req REQ-SSPEC-APP
+        step("run `simple check` on a three-line hello world")
+        val work = "build/sspec_check_contract"
+        val _m = rt_mkdir_p(work)
+        val entry = work + "/clean_hello.spl"
+        val _w = rt_file_write_text(entry, "fn main():\n    print(\"hello\")\nmain()\n")
+        val (out, err, code) = rt_process_run_timeout(checker_binary(), ["check", entry], 300000)
+        val combined = "{out}{err}"
+        # Evidence line: makes a failure attributable from the runner log alone.
+        print "check-clean evidence: code={code} outlen={out.len()} errlen={err.len()} out={out} err={err}"
+        # Non-vacuity: the checker must have said something.
+        expect(combined.len() > 0).to_equal(true)
+        # The 2026-09-01 incident signature: check failing on the STDLIB, not
+        # the input. A stale seed must never look like a broken user file.
+        expect(combined.contains("unknown decorator")).to_equal(false)
+        # The contract: a valid file passes, and the checker says so.
+        expect(code).to_equal(0)
+        expect(combined.contains("All checks passed")).to_equal(true)

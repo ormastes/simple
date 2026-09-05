@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/sffi/ast.spl"
+facade="$root/src/lib/nogc_sync_mut/ffi/ast.spl"
+app_facade="$root/src/app/interpreter/ffi/ast_ffi.spl"
+
+declarations=$(grep -c '^[[:space:]]*extern fn ' "$owner")
+if [ "$declarations" -ne 29 ]; then
+    echo "AST SFFI inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn / {
+        if (previous_is_ffi) tagged++
+    }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every canonical AST declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+if grep -q '^[[:space:]]*extern fn ' "$facade"; then
+    echo "AST compatibility facade must not redeclare foreign symbols" >&2
+    exit 1
+fi
+if ! grep -q 'export use std.nogc_sync_mut.sffi.ast' "$facade"; then
+    echo "AST compatibility facade must re-export the canonical owner" >&2
+    exit 1
+fi
+app_declarations=$(grep -c '^[[:space:]]*extern fn ' "$app_facade")
+if [ "$app_declarations" -ne 29 ]; then
+    echo "interpreter AST SFFI inventory changed without contract review" >&2
+    exit 1
+fi
+app_tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn / {
+        if (previous_is_ffi) tagged++
+    }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$app_facade")
+if [ "$app_tagged" -ne "$app_declarations" ]; then
+    echo "every interpreter AST declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+
+echo "AST SFFI owner audit: PASS"

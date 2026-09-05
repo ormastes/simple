@@ -1,0 +1,55 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @tag:system
+# @req REQ-SSPEC-SYSTEM
+
+extern fn rt_env_get(key: text) -> text
+
+fn simpleos_runtime() -> text:
+    val sr = rt_env_get("SIMPLEOS_RUNTIME")
+    if sr == nil:
+        ""
+    else:
+        sr
+
+describe "clang_static in-guest QEMU e2e contract":
+    """
+    Lint-only: validates symbol resolution + IF-08 marker conventions for
+    Phase 3 clang_static smoke. Disk paths and markers referenced without
+    invocation. Behavioural body env-gated until Team A static binary lands.
+    Markers: [phase-2-clang-version] [phase-2-clang-compile-ok]
+    """
+
+    it "runs Clang from FAT32 through guest object link and execution":
+        # @req REQ-SSPEC-SYSTEM
+        step("runs Clang from FAT32 through guest object link and execution")
+        step("Require SIMPLEOS_CLANG_FS_E2E=1")
+        expect(env_get("SIMPLEOS_CLANG_FS_E2E")).to_equal("1")
+        step("Require the guest-native Clang payload and QEMU wrapper")
+        expect(file_exists(CLANG_GUEST_BINARY)).to_be(true)
+        expect(file_exists(CLANG_DISK_SCRIPT)).to_be(true)
+
+        step("Run the Clang filesystem QEMU wrapper")
+        val (stdout, stderr, exit_code) = process_run("/bin/sh", [CLANG_DISK_SCRIPT])
+        val output = stdout + stderr
+        expect(exit_code).to_equal(0)
+
+        step("Require hashed kernel and filesystem artifacts")
+        expect(output).to_contain("[clang-disk] artifact kernel=")
+        expect(output).to_contain("sha256=")
+        expect(output).to_contain("[clang-disk] artifact image=")
+
+        step("Require a guest-produced x86-64 ELF object")
+        expect(output).to_contain("[clang-disk] PASS guest_exit=0")
+        expect(output).to_contain("format=ELF64 type=REL machine=x86-64 symbol=main")
+
+        step("Require in-guest linking of the hello executable")
+        expect(output).to_contain("[clang-disk] PASS guest_link=/hello.elf")
+
+        step("Require filesystem loading and independent hello execution")
+        expect(output).to_contain("hello-from-simpleos-clang")
+        expect(output).to_contain("[syscall] exit status=42")
+        expect(output).to_contain("[prod-ring3] PASS filesystem Simple ELF executed")
+        expect(output).to_contain("[clang-disk] PASS guest_exec=/hello.elf output=hello-from-simpleos-clang")

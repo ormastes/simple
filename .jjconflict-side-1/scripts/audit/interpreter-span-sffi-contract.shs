@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+provider=src/compiler_rust/compiler/src/interpreter_extern/span_sffi.rs
+decl=src/app/interpreter/ffi/span_ffi.spl
+registration=src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+registry=src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+
+test "$(rg -c '^@unsafe\(' "$decl")" -eq 6
+for spec in create:4 start:1 end:1 line:1 column:1 free:1; do
+    suffix=${spec%%:*}
+    arity=${spec##*:}
+    name="rt_span_${suffix}"
+    body="$(sed -n "/^pub fn ${name}/,/^}/p" "$provider")"
+    printf '%s\n' "$body" | rg -q "require_arity\(args, ${arity}, \"${name}\"\)\?;"
+    rg -q "\"${name}\"" "$registration"
+    ! rg -q "RuntimeFuncSpec::new\(\"${name}\"" "$registry"
+done
+
+create="$(sed -n '/^pub fn rt_span_create/,/^}/p' "$provider")"
+test "$(printf '%s\n' "$create" | rg -c 'usize::try_from')" -eq 4
+printf '%s\n' "$create" | rg -q 'if end < start'
+
+free="$(sed -n '/^pub fn rt_span_free/,/^}/p' "$provider")"
+printf '%s\n' "$free" | rg -q 'if removed.is_none\(\)'
+rg -q 'checked_add\(1\)' "$provider"
+
+echo "interpreter span SFFI contract audit: PASS (strict arity/ranges/ownership; raw API unsafe; native registry absent)"

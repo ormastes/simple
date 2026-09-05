@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/posix/dynlib_sffi.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 14 ]
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 23 ]
+[ "$(grep -c 'generic integer-only dynamic call has no typed ABI proof' "$module")" -eq 7 ]
+[ "$(grep -c 'per-call symbol lookup feeds an untyped integer-only dynamic ABI' "$module")" -eq 7 ]
+[ "$(grep -c '^@always_inline$' "$module" || true)" -eq 0 ]
+
+call_count=$(perl -0ne '
+    s/""".*?"""//sg; s/#.*//mg; s/^\s*extern fn .*\n//mg;
+    while (/\brt_[a-zA-Z0-9_]+\s*\(/g) { $n++ }
+    END { print $n + 0 }
+' "$module")
+[ "$call_count" -eq 25 ]
+
+# Null is never a callable address. Preserve upstream negative loader errors,
+# but map an impossible null address to a negative failure sentinel.
+[ "$(grep -c 'if ptr <= 0:' "$module")" -eq 7 ]
+[ "$(grep -c 'return if ptr < 0: ptr else: -1' "$module")" -eq 7 ]
+
+# Exact provider/CLI bridges retain bounded allocation, full cleanup, and
+# result-status agreement checks. Generic calls remain explicitly unsafe.
+[ "$(grep -c 'rt_free(result_ptr)' "$module")" -eq 2 ]
+[ "$(grep -c 'rt_free(request_ptr)' "$module")" -eq 4 ]
+grep -q 'output_capacity > 16777216' "$module"
+grep -q 'provider-query-status-mismatch' "$module"
+grep -q 'cli-command-status-mismatch' "$module"
+
+symbols=$(awk '/^extern fn /{name=$3; sub(/\(.*/, "", name); print name}' "$module")
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 6 ]
+[ "$one" -eq 1 ]
+[ "$none" -eq 7 ]
+
+echo "POSIX dynlib SFFI authority audit: PASS (25 calls/14 symbols; 14 unsafe declarations + 9 unsafe owners; null addresses fail negative; exact bridge bounds/cleanup retained; generic per-call lookup remains visible; 6 both/1 one/7 no-provider)"

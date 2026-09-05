@@ -1,0 +1,39 @@
+use std.spec.{describe, it}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "canonical loader ownership":
+    it "keeps the root compatibility module export-only":
+        val compat = rt_file_read_text("src/compiler/99.loader/module_loader_compat.spl")
+        expect(compat).to_contain("export use compiler.loader.loader.module_loader.{{")
+        expect(compat.contains("struct ModuleLoader:")).to_equal(false)
+        expect(compat.contains("fn moduleloader_load(")).to_equal(false)
+        expect(compat.contains("me load(")).to_equal(false)
+        expect(compat.contains("fn moduleloader_unload(")).to_equal(false)
+        expect(compat.contains("me unload(")).to_equal(false)
+
+    it "owns aspect registration and unload in the canonical loader":
+        val canonical = rt_file_read_text("src/compiler/99.loader/loader/module_loader.spl")
+        expect(canonical).to_contain("type ModuleLoader = LazyModuleLoader")
+        expect(canonical).to_contain("aspect_loader: i64")
+        expect(canonical).to_contain("loader_aspect_register_smf(")
+        expect(canonical).to_contain("loader_aspect_unload(self.aspect_loader, path)")
+        expect(canonical).to_contain("loader_aspect_replace_smf(")
+        expect(canonical.contains("os.smf.smf_generation")).to_equal(false)
+        expect(canonical.contains("LifecycleManager.new_manager()")).to_equal(false)
+
+    it "exports the canonical segment mapper through both public packages":
+        val root = rt_file_read_text("src/compiler/99.loader/__init__.spl")
+        val runtime = rt_file_read_text("src/compiler/99.loader/runtime/__init__.spl")
+        expect(root).to_contain("export use compiler.loader.segment_mapper.{{")
+        expect(runtime).to_contain("export use compiler.loader.segment_mapper.{{")
+        expect(root).to_contain("SegmentMapper")
+        expect(runtime).to_contain("SegmentMapper")
+
+    it "keeps acquisition results behind scalar handles":
+        val bridge = rt_file_read_text("src/compiler/99.loader/aspect_acquisition.spl")
+        expect(bridge).to_contain("fn loader_aspect_acquire(state: i64, catalog: [u8], facet_key: text) -> i64:")
+        expect(bridge).to_contain("fn loader_aspect_try_resident(state: i64, facet_key: text) -> i64:")
+        expect(bridge).to_contain("fn loader_aspect_invalidate(state: i64, path: text) -> bool:")
+        expect(bridge).to_contain("fn loader_aspect_unload(state: i64, path: text) -> i64:")
+        expect(bridge.contains("fn loader_aspect_acquire(state: i64, catalog: [u8], facet_key: text) -> ApkFacetLoadV1:")).to_equal(false)

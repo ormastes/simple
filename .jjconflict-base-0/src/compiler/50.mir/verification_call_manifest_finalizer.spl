@@ -1,0 +1,107 @@
+# Finalizes resolver-captured direct-call identities against completed MIR.
+#
+# The semantic resolver knows a direct callee SymbolId while HIR/MIR lowering is
+# in progress, but a Verification 2.0 manifest must bind the final module and
+# serialized call-site/signature/body identities.  Lowering therefore records
+# only this compact positional capture.  This owner materializes the immutable
+# manifest after the complete module has been assembled and before VIR is
+# allowed to consume it.  It never resolves a callee from a textual MIR name.
+
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.mir.mir_instructions.{MirInstKind}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature}
+use compiler.mir.verification_call_identity.{ResolvedDirectCallBindingV1,
+    ResolvedDirectCallManifestV1, resolved_direct_call_module_hash_v1,
+    resolved_direct_call_site_hash_v1, validate_resolved_direct_call_manifest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub struct ResolvedDirectCallCaptureV1:
+    owner_symbol_id: text
+    block_id: i64
+    instruction_index: i64
+    callee_symbol_id: text
+
+    fn site_key() -> text:
+        self.owner_symbol_id + "|" + self.block_id.to_string() + "|" +
+            self.instruction_index.to_string()
+
+fn finalizer_function_by_symbol_v1(module: MirModule,
+    symbol_id: text
+) -> MirFunction?:
+    var found: MirFunction? = nil
+    for symbol in module.functions.keys():
+        val function = module.functions[symbol]
+        if function.symbol.id.to_string() == symbol_id:
+            if found != nil: return nil
+            found = Some(function)
+    found
+
+fn finalizer_block_index_v1(function: MirFunction, block_id: i64) -> i64:
+    var found = -1
+    var index = 0
+    while index < function.blocks.len():
+        if function.blocks[index].id.id == block_id:
+            if found >= 0: return -2
+            found = index
+        index = index + 1
+    found
+
+fn finalizer_capture_diagnostic_v1(capture: ResolvedDirectCallCaptureV1) -> text:
+    if capture.owner_symbol_id == "" or capture.callee_symbol_id == "":
+        return "FV2-E-CALL-FINALIZER-SYMBOL: capture requires owner and callee SymbolIds"
+    if capture.block_id < 0 or capture.instruction_index < 0:
+        return "FV2-E-CALL-FINALIZER-SITE: capture block and instruction indexes must be nonnegative"
+    ""
+
+# Produces the only direct-call manifest accepted by the resolved V2 closure.
+# Every ordinary `MirInstKind.Call` in this module must have exactly one
+# resolver capture. Calls to a runtime/extern target cannot be converted into a
+# fake internal binding: the caller must model that boundary before verified
+# closure is attempted.
+pub fn finalize_resolved_direct_call_manifest_v1(
+    module: MirModule,
+    resolver_receipt_hash: text,
+    captures: [ResolvedDirectCallCaptureV1]
+) -> Result<ResolvedDirectCallManifestV1, text>:
+    if not sha256_lower_hex_valid(resolver_receipt_hash):
+        return Err("FV2-E-CALL-FINALIZER-RECEIPT: resolver receipt must be lowercase SHA-256")
+    var seen: [text] = []
+    var bindings: [ResolvedDirectCallBindingV1] = []
+    for capture in captures:
+        val capture_error = finalizer_capture_diagnostic_v1(capture)
+        if capture_error != "": return Err(capture_error)
+        val key = capture.site_key()
+        if seen.contains(key):
+            return Err("FV2-E-CALL-FINALIZER-DUPLICATE: resolver captured one direct call site more than once")
+        seen.push(key)
+        val owner = match finalizer_function_by_symbol_v1(module,
+                capture.owner_symbol_id):
+            case Some(value): value
+            case _: return Err("FV2-E-CALL-FINALIZER-OWNER: captured owner SymbolId is absent or ambiguous in finalized MIR")
+        val block_index = finalizer_block_index_v1(owner, capture.block_id)
+        if block_index == -2:
+            return Err("FV2-E-CALL-FINALIZER-BLOCK: finalized MIR owner has duplicate block identities")
+        if block_index < 0 or (capture.instruction_index >=
+                owner.blocks[block_index].instructions.len()):
+            return Err("FV2-E-CALL-FINALIZER-SITE: captured direct call site is absent from finalized MIR")
+        match owner.blocks[block_index].instructions[capture.instruction_index].kind:
+            case MirInstKind.Call(_, _, _): ()
+            case _: return Err("FV2-E-CALL-FINALIZER-KIND: captured site is not a direct MIR call")
+        val callee = match finalizer_function_by_symbol_v1(module,
+                capture.callee_symbol_id):
+            case Some(value): value
+            case _: return Err("FV2-E-CALL-FINALIZER-BOUNDARY: captured target is not one unique internal MIR function")
+        bindings.push(ResolvedDirectCallBindingV1(
+            capture.owner_symbol_id,
+            resolved_direct_call_site_hash_v1(owner, block_index,
+                capture.instruction_index),
+            capture.callee_symbol_id,
+            sha256_text(serialize_mir_signature(callee.signature)),
+            sha256_text(serialize_mir_function(callee))))
+    val manifest = ResolvedDirectCallManifestV1(
+        resolved_direct_call_module_hash_v1(module), resolver_receipt_hash,
+        bindings)
+    val closure = validate_resolved_direct_call_manifest_v1(module, manifest)
+    if not closure.closed(): return Err(closure.diagnostic)
+    Ok(manifest)

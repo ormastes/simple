@@ -1,0 +1,104 @@
+use std.gc_async_mut.svllm.model_executor.model_loader.loader.{LoaderError, load_tensor_stream_plan_from_pack}
+
+fn stream_plan_status(root: text, name: text) -> text:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(_) => "ok"
+        Err(e) =>
+            match e:
+                LoaderError.PackRootNotFound => "missing_root"
+                LoaderError.ManifestInvalid => "invalid_manifest"
+                LoaderError.ChunkOpenFailed => "chunk_error"
+                LoaderError.TensorNotFound => "tensor_not_found"
+                LoaderError.TensorRangeInvalid => "tensor_range_invalid"
+                LoaderError.NvfsUnavailable => "nvfs_unavailable"
+                LoaderError.Unimplemented => "unimplemented"
+
+fn stream_plan_segment_count(root: text, name: text) -> i64:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) => plan.segment_count
+        Err(_) => -1
+
+fn stream_plan_execution_status(root: text, name: text) -> text:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) => plan.execution_status
+        Err(_) => "error"
+
+fn stream_plan_total_bytes(root: text, name: text) -> i64:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) => plan.total_byte_len
+        Err(_) => -1
+
+fn stream_plan_segment_path(root: text, name: text, index: i64) -> text:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) =>
+            if index < 0 or index >= plan.segments.len():
+                return ""
+            plan.segments[index].relative_path
+        Err(_) => ""
+
+fn stream_plan_segment_offset(root: text, name: text, index: i64) -> i64:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) =>
+            if index < 0 or index >= plan.segments.len():
+                return -1
+            plan.segments[index].offset_in_chunk
+        Err(_) => -1
+
+fn stream_plan_segment_bytes(root: text, name: text, index: i64) -> i64:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) =>
+            if index < 0 or index >= plan.segments.len():
+                return -1
+            plan.segments[index].byte_len
+        Err(_) => -1
+
+fn stream_plan_segment_tensor_offset(root: text, name: text, index: i64) -> i64:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) =>
+            if index < 0 or index >= plan.segments.len():
+                return -1
+            plan.segments[index].tensor_offset
+        Err(_) => -1
+
+fn stream_plan_pin_requested(root: text, name: text) -> bool:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) => plan.pin_extents_requested
+        Err(_) => false
+
+fn stream_plan_device_staging_requested(root: text, name: text) -> bool:
+    match load_tensor_stream_plan_from_pack(root, name, true, true):
+        Ok(plan) => plan.device_staging_requested
+        Err(_) => false
+
+describe "svLLM tensor stream plan":
+    it "builds a plan-only single-segment read plan for one chunk":
+        val root = "test/fixtures/svllm/valid_pack"
+        val name = "tok_embeddings.weight"
+        expect(stream_plan_status(root, name)).to_equal("ok")
+        expect(stream_plan_execution_status(root, name)).to_equal("plan_only_not_scheduled")
+        expect(stream_plan_total_bytes(root, name)).to_equal(16)
+        expect(stream_plan_segment_count(root, name)).to_equal(1)
+        expect(stream_plan_segment_path(root, name, 0)).to_equal("data-000.bin")
+        expect(stream_plan_segment_offset(root, name, 0)).to_equal(0)
+        expect(stream_plan_segment_bytes(root, name, 0)).to_equal(16)
+        expect(stream_plan_segment_tensor_offset(root, name, 0)).to_equal(0)
+        expect(stream_plan_pin_requested(root, name)).to_equal(true)
+        expect(stream_plan_device_staging_requested(root, name)).to_equal(true)
+
+    it "splits a cross-chunk tensor span into ordered read segments":
+        val root = "test/fixtures/svllm/cross_chunk_pack"
+        val name = "split.weight"
+        expect(stream_plan_status(root, name)).to_equal("ok")
+        expect(stream_plan_total_bytes(root, name)).to_equal(7)
+        expect(stream_plan_segment_count(root, name)).to_equal(2)
+        expect(stream_plan_segment_path(root, name, 0)).to_equal("data-000.bin")
+        expect(stream_plan_segment_offset(root, name, 0)).to_equal(1)
+        expect(stream_plan_segment_bytes(root, name, 0)).to_equal(4)
+        expect(stream_plan_segment_tensor_offset(root, name, 0)).to_equal(0)
+        expect(stream_plan_segment_path(root, name, 1)).to_equal("data-001.bin")
+        expect(stream_plan_segment_offset(root, name, 1)).to_equal(0)
+        expect(stream_plan_segment_bytes(root, name, 1)).to_equal(3)
+        expect(stream_plan_segment_tensor_offset(root, name, 1)).to_equal(4)
+
+    it "reports missing tensor names without returning a plan":
+        expect(stream_plan_status("test/fixtures/svllm/valid_pack", "missing.weight")).to_equal("tensor_not_found")

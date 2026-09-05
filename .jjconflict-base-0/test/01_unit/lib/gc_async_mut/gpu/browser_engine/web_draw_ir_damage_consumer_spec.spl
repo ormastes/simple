@@ -1,0 +1,36 @@
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.{
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect
+}
+use common.ui.render_opt.damage_plan.{DAMAGE_PLAN_LOCAL}
+use std.gc_async_mut.gpu.browser_engine.web_draw_ir_damage_consumer.{
+    web_draw_ir_consume_damage
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+fn consumer_composition(color: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition("web-local", "web-local", "software", [
+        draw_ir_batch("body", "software", embedding, [
+            draw_ir_rect("paint", 1, 1, 1, 1, color)
+        ])
+    ])
+
+describe "canonical Web DrawIR local damage consumer":
+    it "replays a paint-only change through the shared local plan":
+        val prior = consumer_composition(0xFF2563EBu32)
+        val current = consumer_composition(0xFFDC2626u32)
+        var engine = Engine2D.create_with_backend(4, 4, "software")
+        val seeded = web_draw_ir_consume_damage(
+            engine, prior, prior, [], true, true)
+        engine = seeded.engine
+        val changed = web_draw_ir_consume_damage(
+            engine, prior, current, [], true, true)
+        engine = changed.engine
+        expect(changed.effective_plan_mode).to_equal(DAMAGE_PLAN_LOCAL)
+        # Color-only change contributes old/new bounds, which the canonical
+        # composition classifier deduplicates into one exact rectangle.
+        expect(changed.effective_plan_rects.len()).to_equal(4)
+        expect(changed.result.pixels[1 * 4 + 1]).to_equal(0xFFDC2626u32)
+        engine.shutdown()

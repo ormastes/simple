@@ -1,0 +1,155 @@
+# Canonical Simple Web CPU execution port for structural layout islands.
+
+use std.common.structural.layout.{
+    LayoutBox, LayoutExecutionPort, LayoutExecutionRequest,
+    LayoutExecutionProof, LayoutFragment, LayoutIterationResult,
+    LayoutLineBox, LayoutOverflow, LayoutSnapshot,
+    layout_box, layout_fragment, layout_line_box, layout_overflow
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    LayoutResult, SimpleWebRetainedLayoutPreparation, empty_i32_lists,
+    layout_selected
+}
+
+class BrowserCpuLayoutExecutionPort:
+    prepared: SimpleWebRetainedLayoutPreparation
+    retained: LayoutResult
+
+fn _browser_cpu_selected(request: LayoutExecutionRequest, node_id: i64) -> bool:
+    for island in request.islands:
+        var selected = false
+        for selected_id in request.selected_island_ids:
+            if selected_id == island.root_id:
+                selected = true
+        if selected:
+            for member_id in island.node_ids:
+                if member_id == node_id:
+                    return true
+    false
+
+fn _browser_cpu_box(result: LayoutResult, structural_id: i64) -> LayoutBox:
+    val index = structural_id - 1
+    layout_box(
+        structural_id, result.bx[index] as i64, result.by[index] as i64,
+        result.bw[index] as i64, result.bh[index] as i64
+    )
+
+impl LayoutExecutionPort for BrowserCpuLayoutExecutionPort:
+    fn backend_name() -> text:
+        "serial_cpu"
+
+    fn execute(request: LayoutExecutionRequest) -> LayoutIterationResult:
+        val selected = layout_selected(
+            self.prepared.nodes, self.prepared.styles,
+            self.prepared.child_index, request.selected_island_ids,
+            self.prepared.width, self.prepared.height, self.retained
+        )
+        if selected.fault != "":
+            return LayoutIterationResult(
+                boxes: [], fragments: [], line_boxes: [], overflows: [],
+                proof: LayoutExecutionProof(
+                    candidate_backend: request.candidate_backend,
+                    executed_backend: "serial_cpu", executed: false,
+                    submitted: false, synchronized: false,
+                    device_readback: false, oracle_verified: false,
+                    reason: selected.fault
+                ),
+                fault: selected.fault
+            )
+        var boxes: [LayoutBox] = []
+        var fragments: [LayoutFragment] = []
+        var line_boxes: [LayoutLineBox] = []
+        var overflows: [LayoutOverflow] = []
+        var structural_id: i64 = 1
+        while structural_id <= self.prepared.nodes.len():
+            if _browser_cpu_selected(request, structural_id):
+                val index = structural_id - 1
+                val box = _browser_cpu_box(selected.layout, structural_id)
+                boxes.push(box)
+                fragments.push(layout_fragment(
+                    structural_id, structural_id, box, "principal", 0
+                ))
+                val line_count = selected.layout.wrap_starts[index].len()
+                var line_index: i64 = 0
+                while line_index < line_count:
+                    val line_height = self.prepared.styles[index].resolved_font_line_height
+                    val line_box = layout_box(
+                        structural_id,
+                        box.x,
+                        box.y + line_index * (line_height as i64),
+                        box.width,
+                        line_height as i64
+                    )
+                    line_boxes.push(layout_line_box(
+                        structural_id, line_index, line_box,
+                        selected.layout.wrap_starts[index][line_index] as i64,
+                        selected.layout.wrap_ends[index][line_index] as i64
+                    ))
+                    line_index = line_index + 1
+                overflows.push(layout_overflow(
+                    structural_id, box, box.width, box.height
+                ))
+            structural_id = structural_id + 1
+        LayoutIterationResult(
+            boxes: boxes, fragments: fragments, line_boxes: line_boxes,
+            overflows: overflows,
+            proof: LayoutExecutionProof(
+                candidate_backend: request.candidate_backend,
+                executed_backend: "serial_cpu", executed: true,
+                submitted: false, synchronized: true,
+                device_readback: false, oracle_verified: false, reason: ""
+            ),
+            fault: ""
+        )
+
+fn browser_cpu_layout_execution_port(
+    prepared: SimpleWebRetainedLayoutPreparation,
+    retained: LayoutResult
+) -> BrowserCpuLayoutExecutionPort:
+    BrowserCpuLayoutExecutionPort(prepared: prepared, retained: retained)
+
+fn browser_cpu_layout_full(
+    prepared: SimpleWebRetainedLayoutPreparation,
+    retained: LayoutResult
+) -> LayoutResult:
+    layout_selected(
+        prepared.nodes, prepared.styles, prepared.child_index, [1],
+        prepared.width, prepared.height, retained
+    ).layout
+
+fn browser_cpu_layout_reconstruct(
+    prepared: SimpleWebRetainedLayoutPreparation,
+    retained: LayoutResult,
+    snapshot: LayoutSnapshot
+) -> LayoutResult:
+    val node_count = prepared.nodes.len() as i32
+    var bx = if retained.bx.len() == prepared.nodes.len(): retained.bx else: [0; node_count]
+    var by = if retained.by.len() == prepared.nodes.len(): retained.by else: [0; node_count]
+    var bw = if retained.bw.len() == prepared.nodes.len(): retained.bw else: [0; node_count]
+    var bh = if retained.bh.len() == prepared.nodes.len(): retained.bh else: [0; node_count]
+    var starts = if retained.wrap_starts.len() == prepared.nodes.len(): retained.wrap_starts else: empty_i32_lists(node_count)
+    var ends = if retained.wrap_ends.len() == prepared.nodes.len(): retained.wrap_ends else: empty_i32_lists(node_count)
+    val intrinsic = if retained.intrinsic_widths.len() == prepared.nodes.len(): retained.intrinsic_widths else: [-1; node_count]
+    for box in snapshot.boxes:
+        val index = box.id - 1
+        if index >= 0 and index < prepared.nodes.len():
+            bx[index] = box.x as i32
+            by[index] = box.y as i32
+            bw[index] = box.width as i32
+            bh[index] = box.height as i32
+            starts[index] = []
+            ends[index] = []
+    for line in snapshot.line_boxes:
+        val index = line.node_id - 1
+        if index >= 0 and index < prepared.nodes.len():
+            starts[index].push(line.text_start as i32)
+            ends[index].push(line.text_end as i32)
+    LayoutResult(
+        bx: bx, by: by, bw: bw, bh: bh,
+        wrap_starts: starts, wrap_ends: ends,
+        intrinsic_widths: intrinsic,
+        height: if bh.len() > 0: bh[0] else: 0
+    )
+
+export BrowserCpuLayoutExecutionPort, browser_cpu_layout_execution_port
+export browser_cpu_layout_full, browser_cpu_layout_reconstruct

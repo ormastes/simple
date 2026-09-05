@@ -1,0 +1,76 @@
+# RISC-V 64 Syscall Dispatch
+#
+# RV64 currently needs the small syscall surface used by the proof userspace
+# path. Keeping it arch-local avoids linking the x86/desktop POSIX syscall
+# stack into the RISC-V kernel image.
+
+use os.kernel.arch.riscv64.console.{serial_write_byte}
+use os.kernel.scheduler.process_stdout_capture.{rv64_process_stdout_write_byte}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.ipc.syscall_process.{dispatch_spawn_binary_direct_state}
+use os.kernel.ipc.syscall_ipc.{_handle_ipc_send_state, _handle_ipc_recv_state, _handle_ipc_create_port_state, _handle_ipc_destroy_port_state, _handle_ipc_connect_state}
+use os.kernel.ipc.syscall_server_startup_evidence.{_handle_server_startup_evidence_consume}
+
+struct Rv64SyscallState:
+    result: SyscallResult
+    scheduler: Scheduler
+    ipc: IpcManager
+
+fn rv64_syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> SyscallResult:
+    rv64_syscall_handler_state(args, scheduler, ipc, klog).result
+
+fn rv64_syscall_handler_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> Rv64SyscallState:
+    var sched = scheduler
+    var ipc_mgr = ipc
+    if args.id == 0u64:
+        sched.exit_task(args.arg0.to_i32())
+        return Rv64SyscallState(result: SyscallResult(value: 0), scheduler: sched, ipc: ipc_mgr)
+    if args.id == 4u64:
+        val current = sched.get_current()
+        return Rv64SyscallState(result: SyscallResult(value: current.id as i64), scheduler: sched, ipc: ipc_mgr)
+    if args.id == 13u64:
+        # SpawnBinary mutates the scheduler. Adopt the canonical owner's
+        # returned state; a result-only call would report a PID whose task was
+        # discarded by value semantics.
+        val spawned = dispatch_spawn_binary_direct_state(
+            args.arg0, args.arg1, args.arg2, sched, klog
+        )
+        sched = spawned.scheduler
+        return Rv64SyscallState(
+            result: SyscallResult(value: spawned.pid),
+            scheduler: sched,
+            ipc: ipc_mgr
+        )
+    if args.id == 18u64:
+        val state = _handle_ipc_destroy_port_state(args, sched, ipc_mgr)
+        return Rv64SyscallState(result: state.result, scheduler: state.scheduler, ipc: state.ipc)
+    if args.id == 20u64:
+        val state = _handle_ipc_send_state(args, sched, ipc_mgr)
+        return Rv64SyscallState(result: state.result, scheduler: state.scheduler, ipc: state.ipc)
+    if args.id == 21u64:
+        val state = _handle_ipc_recv_state(args, sched, ipc_mgr)
+        return Rv64SyscallState(result: state.result, scheduler: state.scheduler, ipc: state.ipc)
+    if args.id == 22u64:
+        val state = _handle_ipc_create_port_state(args, sched, ipc_mgr)
+        return Rv64SyscallState(result: state.result, scheduler: state.scheduler, ipc: state.ipc)
+    if args.id == 23u64:
+        val state = _handle_ipc_connect_state(args, sched, ipc_mgr)
+        return Rv64SyscallState(result: state.result, scheduler: state.scheduler, ipc: state.ipc)
+    if args.id == 19u64:
+        val owner = ipc_mgr.port_owner_task_id(args.arg0)
+        if owner == 0:
+            return Rv64SyscallState(result: SyscallResult(value: -1), scheduler: sched, ipc: ipc_mgr)
+        return Rv64SyscallState(result: SyscallResult(value: owner.to_i64()), scheduler: sched, ipc: ipc_mgr)
+    if args.id == 60u64:
+        val byte = (args.arg0 & 0xFF).to_u8()
+        rv64_process_stdout_write_byte(byte)
+        serial_write_byte(byte)
+        return Rv64SyscallState(result: SyscallResult(value: 0), scheduler: sched, ipc: ipc_mgr)
+    if args.id == 116u64:
+        return Rv64SyscallState(
+            result: _handle_server_startup_evidence_consume(sched),
+            scheduler: sched, ipc: ipc_mgr)
+    Rv64SyscallState(result: SyscallResult(value: -38), scheduler: sched, ipc: ipc_mgr)

@@ -1,0 +1,218 @@
+# Completeness-seal admission census (Phase 5 gate, 2026-08-21).
+#
+# Plan: doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §5, §7, §13.1, §13.2
+#
+# Freezes a universe from the BASE manifests, then runs D4 loader admission
+# (`compiler.loader.completeness_seal.admission`) over every CANDIDATE
+# manifest and prints a machine-readable census. Driven by
+# `scripts/check/check-completeness-seal.shs`, which turns the census into a
+# verdict.
+#
+# Every decision here comes from the real sealer and the real admission gate.
+# Nothing is decided by inspecting manifest text in this file.
+#
+# Usage:
+#   bin/simple run src/app/check/completeness_seal_census.spl \
+#       --core-abi <hash> [--critical] \
+#       --base <path.sdn> ... --candidate <path.sdn> ...
+#
+# Output contract (stdout, one record per line):
+#   SEAL <seal-hash> constructors=<n>
+#   SEAL-FAIL <code> <path-or-provider>
+#   PARSE-FAIL <path>
+#   ADMIT <module-id> <path>
+#   REJECT <code> <module-id> <path>
+#   PUBLISH generation=<n> entries=<k>
+#   PUBLISH-FAIL <code> <detail>
+#   SUMMARY constructors=<n> selected=<sel> candidates=<c> admitted=<a> \
+#           missing_capabilities=<m> id_collisions=<i> dyn_in_critical=<d> \
+#           seal_mismatch=<s> other=<o> parse_fail=<p>
+
+use std.io_runtime.{read_file}
+use std.nogc_sync_mut.cli.{get_cli_args}
+use compiler.loader.completeness_seal.manifest.{
+    ExtensionManifest,
+    ModuleManifest,
+    parse_manifest_text
+}
+use compiler.loader.completeness_seal.seal.{
+    SealConfig,
+    CompletenessSeal,
+    seal,
+    default_capacity,
+    seal_error_code
+}
+use compiler.loader.completeness_seal.admission.{
+    AdmissionCandidate,
+    AdmissionProfile,
+    AdmissionReason,
+    admit_module,
+    admission_reason_code
+}
+use compiler.loader.completeness_seal.admission.{AdmittedModule}
+use compiler.loader.completeness_seal.registry.{
+    Registry,
+    empty_registry,
+    publish,
+    registry_error_code
+}
+
+class Loaded:
+    ok: bool
+    extensions: [ExtensionManifest]
+    modules: [ModuleManifest]
+
+fn load(path: text) -> Loaded:
+    val source = read_file(path)
+    match parse_manifest_text(source, path):
+        case Ok(doc):
+            Loaded(ok: true, extensions: doc.extensions, modules: doc.modules)
+        case Err(_):
+            Loaded(ok: false, extensions: [], modules: [])
+
+fn module_id_of(l: Loaded, path: text) -> text:
+    if l.modules.len() > 0:
+        return l.modules[0].id
+    if l.extensions.len() > 0:
+        return l.extensions[0].provider_module
+    path
+
+fn main():
+    val args = get_cli_args()
+    var core_abi = "core-abi-v1"
+    var critical = false
+    var base_paths: [text] = []
+    var cand_paths: [text] = []
+    var mode = ""
+    for a in args:
+        if a == "--critical":
+            critical = true
+        elif a == "--core-abi":
+            mode = "core-abi"
+        elif a == "--base":
+            mode = "base"
+        elif a == "--candidate":
+            mode = "candidate"
+        elif mode == "core-abi":
+            core_abi = a
+        elif mode == "base":
+            base_paths = base_paths + [a]
+        elif mode == "candidate":
+            cand_paths = cand_paths + [a]
+
+    var parse_fail = 0
+    var base_exts: [ExtensionManifest] = []
+    var base_mods: [ModuleManifest] = []
+    var verified: [text] = []
+    for p in base_paths:
+        val l = load(p)
+        if not l.ok:
+            parse_fail = parse_fail + 1
+            print("PARSE-FAIL " + p)
+        else:
+            for e in l.extensions:
+                base_exts = base_exts + [e]
+            for m in l.modules:
+                base_mods = base_mods + [m]
+                verified = verified + [m.id]
+
+    val config = SealConfig(
+        critical: critical,
+        core_abi_hash: core_abi,
+        extensions: base_exts,
+        modules: base_mods,
+        verified_sealed_modules: verified,
+        capacity: default_capacity()
+    )
+
+    var frozen: CompletenessSeal? = None
+    match seal(config):
+        case Err(errs):
+            for e in errs:
+                print("SEAL-FAIL " + seal_error_code(e) + " <base>")
+            print("SUMMARY constructors=0 selected=0 candidates=0 admitted=0 missing_capabilities=0"
+                + " id_collisions=0 dyn_in_critical=0 seal_mismatch=0 other=0 parse_fail="
+                + parse_fail.to_text())
+            return
+        case Ok(s):
+            frozen = Some(s)
+
+    match frozen:
+        case None:
+            print("SEAL-FAIL E-INTERNAL <base>")
+            return
+        case Some(s):
+            print("SEAL " + s.seal_hash + " constructors=" + s.tags.sealed_count.to_text())
+            val profile = AdmissionProfile(critical: critical)
+            var admitted: [AdmittedModule] = []
+            var n_admitted = 0
+            var missing_caps = 0
+            var collisions = 0
+            var dyn_crit = 0
+            var mismatch = 0
+            var other = 0
+            var candidates = 0
+            for p in cand_paths:
+                val l = load(p)
+                if not l.ok:
+                    parse_fail = parse_fail + 1
+                    print("PARSE-FAIL " + p)
+                else:
+                    candidates = candidates + 1
+                    val mid = module_id_of(l, p)
+                    val cand = AdmissionCandidate(
+                        module_id: mid,
+                        expects_seal_hash: s.seal_hash,
+                        extensions: l.extensions,
+                        modules: l.modules
+                    )
+                    match admit_module(s, cand, profile):
+                        case Ok(am):
+                            n_admitted = n_admitted + 1
+                            admitted = admitted + [am]
+                            print("ADMIT " + mid + " " + p)
+                        case Err(reasons):
+                            for r in reasons:
+                                val code = admission_reason_code(r)
+                                print("REJECT " + code + " " + mid + " " + p)
+                                match r:
+                                    case MissingRequiredOperation(_, _, _):
+                                        missing_caps = missing_caps + 1
+                                    case MissingRequiredInterface(_, _, _):
+                                        missing_caps = missing_caps + 1
+                                    case IdCollision(_, _, _):
+                                        collisions = collisions + 1
+                                    case OpenDynInCritical(_, _):
+                                        dyn_crit = dyn_crit + 1
+                                    case SealHashMismatch(_, _, _):
+                                        mismatch = mismatch + 1
+                                    case BadAxisValue(_, _, _):
+                                        other = other + 1
+
+            if admitted.len() > 0:
+                match publish(empty_registry(s.seal_hash), admitted):
+                    case Ok(reg):
+                        print("PUBLISH generation=" + reg.generation.to_text()
+                            + " entries=" + reg.entries.len().to_text())
+                    case Err(errs):
+                        for e in errs:
+                            print("PUBLISH-FAIL " + registry_error_code(e) + " publish")
+                            other = other + 1
+
+            var admitted_ctors = 0
+            for a in admitted:
+                admitted_ctors = admitted_ctors + a.identities.len()
+            print("SUMMARY constructors=" + s.tags.sealed_count.to_text()
+                + " selected=" + (s.tags.sealed_count + admitted_ctors).to_text()
+                + " candidates=" + candidates.to_text()
+                + " admitted=" + n_admitted.to_text()
+                + " missing_capabilities=" + missing_caps.to_text()
+                + " id_collisions=" + collisions.to_text()
+                + " dyn_in_critical=" + dyn_crit.to_text()
+                + " seal_mismatch=" + mismatch.to_text()
+                + " other=" + other.to_text()
+                + " parse_fail=" + parse_fail.to_text())
+
+main()

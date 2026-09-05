@@ -1,0 +1,170 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# codex-system-test
+#
+# SimpleOS startup prefetch system spec.
+
+use std.spec.*
+use os.services.launcher.launcher.{
+    launcher_init,
+    launcher_get_running_app_count,
+    launcher_hover_executable_icon,
+    launcher_prefetch_app_index,
+    launcher_prefetch_count,
+    launcher_prefetch_last_path,
+    launcher_prefetch_last_cache_hit
+}
+use os.kernel.loader.app_registry.{
+    app_registry_load_hardcoded_fallback,
+    app_registry_cache_bytes,
+    app_registry_cached_bytes
+}
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test,
+    _mount_hosted_rootfs_for_test,
+    g_vfs_write_file_text
+}
+use std.fs_driver.instance.{DriverInstance}
+use std.db.dbfs_driver.{DbFsDriver}
+use app.startup.launch_metadata.{launch_metadata_for_simpleos_path, startup_plan_from_metadata}
+
+fn _dbfs_root() -> DriverInstance:
+    DriverInstance.DbFs(DbFsDriver.new_hosted())
+
+describe "SimpleOS app startup prefetch":
+    describe "REQ-100: SimpleOS launch metadata":
+        it "keeps hosted executable launch filesystem-backed and bare-metal GOT explicit":
+            # @req REQ-100
+            # @req REQ-101
+            # @req REQ-102
+            # @req REQ-SSPEC-SYSTEM
+            step("keeps hosted executable launch filesystem-backed and bare-metal GOT explicit")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            step("Plan a hosted SimpleOS executable launch")
+            val hosted = startup_plan_from_metadata(
+                "/sys/apps/simple.smf", [],
+                launch_metadata_for_simpleos_path("/sys/apps/simple.smf"),
+                true, false
+            )
+            expect(hosted.executable_source).to_equal("filesystem")
+            expect(hosted.cache_strategy).to_equal("mmap")
+
+            step("Plan the explicit SimpleOS bare-metal fallback")
+            val baremetal = startup_plan_from_metadata(
+                "/sys/apps/simple.smf", [],
+                launch_metadata_for_simpleos_baremetal_path("/sys/apps/simple.smf"),
+                false, true
+            )
+            expect(baremetal.executable_source).to_equal("baremetal_got")
+            expect(baremetal.cache_strategy).to_equal("simpleos_vfs_prewarm")
+
+        it "plan SMF launch through SimpleOS VFS prewarm":
+            # @req REQ-SSPEC-SYSTEM
+            step("plan SMF launch through SimpleOS VFS prewarm")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            val metadata = launch_metadata_for_simpleos_path("/sys/apps/simple.smf")
+            val plan = startup_plan_from_metadata("/sys/apps/simple.smf", [], metadata, false, true)
+            expect(plan.target_os).to_equal("simpleos")
+            expect(plan.entry_kind).to_equal("smf")
+            expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
+            expect(plan.include_mmap_cache).to_equal(true)
+
+        it "plan native SimpleOS app launch without app arg parser":
+            # @req REQ-SSPEC-SYSTEM
+            step("plan native SimpleOS app launch without app arg parser")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            val metadata = launch_metadata_for_simpleos_path("/sys/apps/native_tool")
+            val plan = startup_plan_from_metadata("/sys/apps/native_tool", [], metadata, false, true)
+            expect(plan.target_os).to_equal("simpleos")
+            expect(plan.entry_kind).to_equal("native")
+            expect(plan.include_arg_parser).to_equal(false)
+
+    describe "REQ-101: WM hover prefetch":
+        it "prefetch cached executable bytes on hover without launching":
+            # @req REQ-SSPEC-SYSTEM
+            step("prefetch cached executable bytes on hover without launching")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            launcher_init()
+            app_registry_load_hardcoded_fallback()
+            app_registry_cache_bytes("/sys/apps/simple", [1u8, 2u8, 3u8])
+
+            val hit = launcher_hover_executable_icon("/sys/apps/simple.smf")
+
+            expect(hit).to_equal(true)
+            expect(launcher_prefetch_count()).to_equal(1)  # oracle: launcher_prefetch_count() must equal 1 — authoritative contract constant
+            expect(launcher_prefetch_last_path()).to_equal("/sys/apps/simple.smf")
+            expect(launcher_prefetch_last_cache_hit()).to_equal(true)
+            expect(launcher_get_running_app_count()).to_equal(0)  # oracle: launcher_get_running_app_count() must equal 0 — authoritative contract constant
+            expect(app_registry_cached_bytes("/sys/apps/simple").len()).to_equal(3)  # oracle: app_registry_cached_bytes("/sys/apps/simple").len() must equal 3 — authoritative contract constant
+
+        it "record a miss for an executable that is not warmed yet":
+            # @req REQ-SSPEC-SYSTEM
+            step("record a miss for an executable that is not warmed yet")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            _clear_vfs_rootfs_for_test()
+            launcher_init()
+            app_registry_load_hardcoded_fallback()
+
+            val hit = launcher_hover_executable_icon("/sys/apps/editor.smf")
+
+            expect(hit).to_equal(false)
+            expect(launcher_prefetch_count()).to_equal(1)  # oracle: launcher_prefetch_count() must equal 1 — authoritative contract constant
+            expect(launcher_prefetch_last_path()).to_equal("/sys/apps/editor.smf")
+            expect(launcher_prefetch_last_cache_hit()).to_equal(false)
+            expect(launcher_get_running_app_count()).to_equal(0)  # oracle: launcher_get_running_app_count() must equal 0 — authoritative contract constant
+
+        it "warm executable bytes through VFS when hover finds an app file":
+            # @req REQ-SSPEC-SYSTEM
+            step("warm executable bytes through VFS when hover finds an app file")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            _clear_vfs_rootfs_for_test()
+            expect(_mount_hosted_rootfs_for_test(_dbfs_root())).to_equal(true)
+            expect(g_vfs_write_file_text("/sys/apps/editor.smf", "SMF!!")).to_equal(true)
+            launcher_init()
+            app_registry_load_hardcoded_fallback()
+
+            val hit = launcher_hover_executable_icon("/sys/apps/editor.smf")
+
+            expect(hit).to_equal(true)
+            expect(launcher_prefetch_count()).to_equal(1)  # oracle: launcher_prefetch_count() must equal 1 — authoritative contract constant
+            expect(launcher_prefetch_last_path()).to_equal("/sys/apps/editor.smf")
+            expect(launcher_prefetch_last_cache_hit()).to_equal(true)
+            expect(launcher_get_running_app_count()).to_equal(0)  # oracle: launcher_get_running_app_count() must equal 0 — authoritative contract constant
+            expect(app_registry_cached_bytes("/sys/apps/editor").len()).to_equal(5)  # oracle: app_registry_cached_bytes("/sys/apps/editor").len() must equal 5 — authoritative contract constant
+
+        it "reject empty hover paths without recording a prefetch":
+            # @req REQ-SSPEC-SYSTEM
+            step("reject empty hover paths without recording a prefetch")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            launcher_init()
+            val hit = launcher_hover_executable_icon("")
+            expect(hit).to_equal(false)
+            expect(launcher_prefetch_count()).to_equal(0)  # oracle: launcher_prefetch_count() must equal 0 — authoritative contract constant
+            expect(launcher_prefetch_last_path()).to_equal("")
+
+    describe "REQ-102: launcher icon index prefetch":
+        it "prefetch the executable path for a seeded launcher icon":
+            # @req REQ-SSPEC-SYSTEM
+            step("prefetch the executable path for a seeded launcher icon")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            launcher_init()
+            app_registry_load_hardcoded_fallback()
+            app_registry_cache_bytes("/sys/apps/simple", [9u8])
+
+            val hit = launcher_prefetch_app_index(11)
+
+            expect(hit).to_equal(true)
+            expect(launcher_prefetch_count()).to_equal(1)  # oracle: launcher_prefetch_count() must equal 1 — authoritative contract constant
+            expect(launcher_prefetch_last_path()).to_equal("/sys/apps/simple.smf")
+            expect(launcher_get_running_app_count()).to_equal(0)  # oracle: launcher_get_running_app_count() must equal 0 — authoritative contract constant
+
+        it "reject out-of-range icon indexes":
+            # @req REQ-SSPEC-SYSTEM
+            step("reject out-of-range icon indexes")
+            # evidence(protocol_json): asserted result fields below are the complete typed oracle
+            launcher_init()
+            val hit = launcher_prefetch_app_index(999u64)
+            expect(hit).to_equal(false)
+            expect(launcher_prefetch_count()).to_equal(0)  # oracle: launcher_prefetch_count() must equal 0 — authoritative contract constant

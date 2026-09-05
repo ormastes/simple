@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+backend=src/os/compositor/hosted_backend_winit.spl
+compare=src/os/compositor/dual_backend.spl
+provider=src/runtime/spl_winit/src/lib.rs
+window_dispatch=src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_window.rs
+buffer_dispatch=src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_buffer.rs
+
+for symbol in rt_winit_window_staging_ptr rt_winit_window_stage_clear \
+    rt_winit_window_present_staged; do
+    grep -B1 -F "extern fn $symbol" "$backend" | grep -q 'sentinel'
+done
+grep -B1 -F 'extern fn rt_winit_save_pixels_bmp' "$compare" | grep -q 'sentinel'
+
+grep -q 'checked_mul(staging_h as usize)' "$provider"
+grep -q 'checked_mul(want_h as usize)' "$provider"
+grep -q 'actual_len != expected_len' "$provider"
+grep -q 'checked_mul(height as usize)' "$window_dispatch"
+grep -q 'pixels.len() != expected_len' "$buffer_dispatch"
+
+# Preserve one staging acquisition, one write per pixel, and one present call
+# in each presentation path. No lookup, retry, sleep, or extra buffer exists.
+test "$(grep -c 'ptr = rt_winit_window_staging_ptr' "$backend")" -eq 2
+test "$(grep -c 'rt_ptr_write_i32(' "$backend")" -eq 3
+test "$(grep -c 'present_status = rt_winit_window_present_staged' "$backend")" -eq 2
+if grep -E 'dlsym|HashMap|Mutex|sleep\(|retry' "$backend" >/dev/null; then
+    echo 'Winit staging owner contains forbidden hot-path machinery' >&2
+    exit 1
+fi
+
+echo 'winit staging/BMP contract audit: PASS'

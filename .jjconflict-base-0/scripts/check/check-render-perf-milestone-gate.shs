@@ -1,0 +1,194 @@
+#!/bin/sh
+# check-render-perf-milestone-gate.shs — F0 fence for the render-perf plan.
+#
+# WHY THIS EXISTS
+# ---------------
+# `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §0 makes the
+# whole plan turn on one claim: a warm frame where
+#
+#     allocations = scene copy bytes = full readback bytes
+#               = unchanged raster pixels = physical forward hops = 0
+#
+# Five zeros. This repo has produced false zeros before — a guard reporting
+# "0 mismatches" after comparing 0 items, in-language benchmarks with numbers
+# nobody measured, "native" results that were the Rust seed or a silent
+# interpreted fallback. So the milestone is only claimable behind two proofs:
+#
+#   RECEIPT  — every one of the five counters was actually WRITTEN by a probe.
+#              `src/lib/common/perf/render_perf_receipt_v2.spl` tracks a
+#              `measured` bit per counter; an unwritten counter reads 0 but
+#              gates as `blocked:unmeasured:<name>`, never as a zero.
+#   IDENTITY — the receipt carries an engine id from a closed set and a
+#              caller-attested binary md5. `SIMPLE_EXECUTION_MODE=native` is
+#              not an engine (everything but `interpret` is the JIT), and
+#              "native" is refused as an engine id outright.
+#
+# WHAT THIS SCRIPT GATES
+# ----------------------
+# It runs the sabotage-bearing spec for that module and refuses to call the
+# run green unless the spec ACTUALLY EXECUTED at least $EXPECTED_MIN examples.
+# Without that floor, deleting the sabotage examples would leave a smaller,
+# still-"green" suite — the same vacuous pass this fence exists to prevent.
+#
+# It also records the identity of the binary that produced the result, because
+# a green spec on a stale or seed binary is evidence about that binary only.
+#
+# EXIT CODES (repo pre-push guard convention)
+#   0  PASS  — spec ran, >= floor examples, 0 failures. Verdict states counts.
+#   1  FAIL  — spec ran and reported failures.
+#   2  ERROR — nothing was actually measured (no binary, no Results line,
+#              fewer examples than the floor, timeout). NOT a pass.
+#
+# Usage:
+#   sh scripts/check/check-render-perf-milestone-gate.shs
+#   sh scripts/check/check-render-perf-milestone-gate.shs --selftest
+#
+# Env:
+#   RENDER_PERF_GATE_TIMEOUT   seconds, default 1200
+set -u
+
+SELF="check-render-perf-milestone-gate"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+
+SPEC="test/01_unit/lib/common/perf/render_perf_receipt_v2_spec.spl"
+MODULE="src/lib/common/perf/render_perf_receipt_v2.spl"
+
+# Floor = the example count the sabotage-bearing suite is known to run. Raise
+# it when examples are added; NEVER lower it to make a run pass.
+EXPECTED_MIN=28
+
+TIMEOUT_S="${RENDER_PERF_GATE_TIMEOUT:-1200}"
+
+pass()  { echo "$SELF: PASS — $1";  exit 0; }
+fail()  { echo "$SELF: FAIL — $1";  exit 1; }
+error() { echo "$SELF: ERROR — $1"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# parse_results <logfile>
+# Echoes "<total> <passed> <failed>" from the authoritative final Results line.
+# Prints nothing (and returns 1) when no such line exists — an absent verdict
+# is an ERROR upstream, never an implied zero.
+# ---------------------------------------------------------------------------
+parse_results() {
+    _line=$(grep -a 'Results: [0-9][0-9]* total' "$1" 2>/dev/null | tail -1)
+    [ -n "$_line" ] || return 1
+    echo "$_line" | sed -n \
+      's/.*Results: \([0-9]*\) total, \([0-9]*\) passed, \([0-9]*\) failed.*/\1 \2 \3/p' \
+      | grep -q '[0-9]' || return 1
+    echo "$_line" | sed -n \
+      's/.*Results: \([0-9]*\) total, \([0-9]*\) passed, \([0-9]*\) failed.*/\1 \2 \3/p'
+}
+
+# ---------------------------------------------------------------------------
+# --selftest: prove the parser and the floor actually bite, on fixtures, before
+# any real run. A gate that cannot be made to go red has proven nothing.
+# ---------------------------------------------------------------------------
+selftest() {
+    _tmp="${TMPDIR:-/tmp}/$SELF-selftest.$$"
+    mkdir -p "$_tmp" || return 1
+    _rc=0
+
+    # 1. A log with no Results line must not parse.
+    printf 'lint warning blah\nsome noise\n' > "$_tmp/a.log"
+    if parse_results "$_tmp/a.log" >/dev/null 2>&1; then
+        echo "$SELF: selftest FAILED — parser accepted a log with no Results line"
+        _rc=1
+    fi
+
+    # 2. A log quoting the word "passed" in prose must not parse as a verdict.
+    printf 'note: the runner prints passed/failed tokens in source quotes\n' > "$_tmp/b.log"
+    if parse_results "$_tmp/b.log" >/dev/null 2>&1; then
+        echo "$SELF: selftest FAILED — parser accepted prose containing 'passed'"
+        _rc=1
+    fi
+
+    # 3. A real Results line must parse to exactly its three numbers.
+    printf 'Results: 27 total, 26 passed, 1 failed\n' > "$_tmp/c.log"
+    _got=$(parse_results "$_tmp/c.log" 2>/dev/null)
+    if [ "$_got" != "27 26 1" ]; then
+        echo "$SELF: selftest FAILED — parsed '$_got', expected '27 26 1'"
+        _rc=1
+    fi
+
+    # 4. The last Results line wins (a stale earlier one must not be believed).
+    printf 'Results: 99 total, 99 passed, 0 failed\nResults: 3 total, 3 passed, 0 failed\n' > "$_tmp/d.log"
+    _got=$(parse_results "$_tmp/d.log" 2>/dev/null)
+    if [ "$_got" != "3 3 0" ]; then
+        echo "$SELF: selftest FAILED — took a stale Results line ('$_got')"
+        _rc=1
+    fi
+
+    rm -rf "$_tmp"
+    [ "$_rc" -eq 0 ] || return 1
+    echo "$SELF: selftest ok — 4 fixtures"
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    selftest || error "selftest failed; the gate itself is not trustworthy"
+    exit 0
+fi
+
+selftest >/dev/null 2>&1 || error "selftest failed; the gate itself is not trustworthy (run --selftest)"
+
+cd "$REPO_ROOT" || error "cannot enter repo root $REPO_ROOT"
+
+[ -f "$MODULE" ] || error "receipt module missing: $MODULE"
+[ -f "$SPEC" ]   || error "milestone spec missing: $SPEC"
+
+# --- the five milestone counters must still be the ones being gated ----------
+# A rename or deletion upstream would otherwise silently shrink the milestone.
+missing=""
+for name in allocations scene_copy_bytes full_readback_bytes \
+            unchanged_raster_pixels forward_physical_hops; do
+    grep -q "\"$name\"" "$MODULE" || missing="$missing $name"
+done
+[ -z "$missing" ] || error "receipt module no longer names milestone counter(s):$missing"
+
+grep -q 'blocked:unmeasured:' "$MODULE" \
+  || error "receipt module lost its unmeasured-counter refusal; an unwritten 0 would read as a measured 0"
+
+# --- binary identity ---------------------------------------------------------
+BIN="bin/simple"
+[ -x "$BIN" ] || error "no runnable $BIN; nothing could have been measured"
+BIN_REAL=$(readlink -f "$BIN" 2>/dev/null || echo "$BIN")
+[ -f "$BIN_REAL" ] || error "$BIN resolves to $BIN_REAL which does not exist"
+BIN_MD5=$(md5sum "$BIN_REAL" 2>/dev/null | cut -d' ' -f1)
+[ -n "$BIN_MD5" ] || error "cannot md5 $BIN_REAL; identity unattestable"
+BIN_KIND="unknown"
+if "$BIN" --version 2>&1 | grep -qi 'seed'; then
+    BIN_KIND="seed"
+else
+    BIN_KIND="non-seed"
+fi
+echo "$SELF: binary $BIN -> $BIN_REAL md5=$BIN_MD5 kind=$BIN_KIND"
+
+# --- run the spec ------------------------------------------------------------
+LOG="${TMPDIR:-/tmp}/$SELF.$$.log"
+SIMPLE_MODULE_LIMIT=4000 timeout "$TIMEOUT_S" "$BIN" test "$SPEC" > "$LOG" 2>&1
+run_rc=$?
+
+nums=$(parse_results "$LOG") || {
+    tail_snip=$(tail -3 "$LOG" 2>/dev/null | tr '\n' ' ')
+    rm -f "$LOG"
+    error "no Results line from $SPEC (runner rc=$run_rc); nothing was measured. tail: $tail_snip"
+}
+rm -f "$LOG"
+
+total=$(echo "$nums" | cut -d' ' -f1)
+passed=$(echo "$nums" | cut -d' ' -f2)
+failed=$(echo "$nums" | cut -d' ' -f3)
+
+[ "$total" -gt 0 ] 2>/dev/null \
+  || error "spec reported 0 examples; a suite that ran nothing cannot be green"
+
+if [ "$failed" -gt 0 ]; then
+    fail "$failed of $total milestone/identity example(s) failed on md5=$BIN_MD5 ($BIN_KIND)"
+fi
+
+if [ "$total" -lt "$EXPECTED_MIN" ]; then
+    error "only $total example(s) ran, floor is $EXPECTED_MIN — the sabotage cases are missing, so this green proves nothing"
+fi
+
+pass "$total example(s) executed, $passed passed, 0 failed; 5 milestone counters + engine-identity refusals all exercised on md5=$BIN_MD5 ($BIN_KIND)"

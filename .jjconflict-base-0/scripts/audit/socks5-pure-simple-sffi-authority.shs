@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/proxy/socks5.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+spec_primary="$root/test/01_unit/os/proxy/socks5_spec.spl"
+spec_mirror="$root/test/unit/os/proxy/socks5_spec.spl"
+
+# Byte reads and text encoding stay in Pure Simple. Only the byte-to-text lift
+# remains foreign until the compiler provides an allocation-efficient owner.
+[ "$(grep -c '^extern fn ' "$module")" -eq 1 ]
+grep -q '^extern fn rt_bytes_to_text' "$module"
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 1 ]
+! grep -q 'rt_bytes_u8_at' "$module"
+! grep -q 'rt_text_to_bytes' "$module"
+grep -q '^use std.common.string_core.{text_to_bytes}' "$module"
+[ "$(grep -c '^[[:space:]]*name = rt_bytes_to_text(name_bytes)' "$module")" -eq 1 ]
+grep -q 'if name.len() == 0u64:' "$module"
+
+# One-octet wire lengths must fail closed rather than truncate modulo 256.
+grep -q 'if name_bytes.len() == 0u64 or name_bytes.len() > 255u64:' "$module"
+grep -q 'if bytes.len() > 255u64:' "$module"
+grep -q 'if dlen <= 0:' "$module"
+
+# Guarded native indexing removes foreign dispatch without adding a new copy.
+grep -q 'val b0 = data\[offset\].to_i64()' "$module"
+grep -q 'val b1 = data\[offset + 1\].to_i64()' "$module"
+grep -q 'if data.len() < next + 2:' "$module"
+grep -q 'while i < nmethods:' "$module"
+
+grep -q 'RuntimeFuncSpec::new("rt_bytes_to_text"' "$registry"
+grep -q 'insert_simple!("rt_bytes_to_text"' "$interpreter"
+
+for spec in "$spec_primary" "$spec_mirror"; do
+    grep -q 'it "parse_request rejects a zero-length domain":' "$spec"
+    grep -q '0x03i64, 0x00i64, 0x00i64, 0x50i64' "$spec"
+done
+
+echo "SOCKS5 Pure Simple SFFI authority audit: PASS (23 raw calls reduced to 1 lexical text lift; guarded native indexing/canonical encoding; domain/credential lengths bounded to one octet; semantic auth bool retained; 1 both-registry provider)"

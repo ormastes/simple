@@ -1,0 +1,115 @@
+# @cover src/compiler/70.backend/backend/native/native_elf.spl
+# @req REQ-NATIVE-ELF-RELOC-001
+"""
+# Native ELF Relocation Symbol Resolution
+
+**Category:** Compiler Backend
+**Status:** Implemented
+
+## Purpose and Audience
+
+Regression guard for commit 0e55819640f: the three native ELF emitters
+(x86_64, aarch64, riscv64) must still emit valid ELF objects when every
+relocation references a REGISTERED symbol (extern symbol or function name).
+Before that commit, a relocation whose `symbol_name` was missing from
+`sym_name_to_idx` silently defaulted to `sym_idx = 0`, aliasing the
+relocation to an arbitrary already-registered symbol — the root mechanism
+behind the native-build SIGSEGV documented in
+doc/08_tracking/bug/stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11.md.
+The fix makes that case `panic(...)` naming the missing symbol.
+
+## Scope and Preconditions
+
+Positive path only. The negative path (a relocation naming an UNREGISTERED
+symbol) is intentionally not exercised in-process: the hardening is a
+`panic(...)`, which aborts the whole test-runner process — the SSpec matcher
+library has no expect-panic / subprocess-isolation matcher (verified by
+sweep of src/lib/nogc_sync_mut/spec/ on 2026-08-12). The panic text and the
+three guarded sites are asserted structurally by reading the emitter source
+instead, so a silent revert to the `sym_idx = 0` default cannot pass unseen.
+
+## Primary Workflow
+
+Build a minimal MachModule + EncodedFunction fixture whose relocations name
+one extern symbol and one sibling function, run each emitter, and assert a
+well-formed ELF64 header comes back.
+"""
+
+use std.spec.*
+
+use compiler.backend.native.native_elf.{emit_elf_x86_64, emit_elf_aarch64, emit_elf_riscv64}
+use compiler.backend.native.mach_inst.{MachModule, EncodedFunction, EncodedReloc}
+use compiler.mir.mir_data.{MirModule}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn empty_mir_module(name: text) -> MirModule:
+    MirModule(name: name, functions: {}, statics: {}, constants: {}, types: {})
+
+fn known_symbol_fixture(name: text) -> ([EncodedFunction], MachModule):
+    # main carries two relocations, both to REGISTERED symbols:
+    #  - "ext_helper" registered via module.extern_symbols
+    #  - "sibling"    registered via its own EncodedFunction name
+    val reloc_ext = EncodedReloc(offset: 1, symbol_name: "ext_helper", reloc_type: 0, addend: -4)
+    val reloc_fn = EncodedReloc(offset: 6, symbol_name: "sibling", reloc_type: 0, addend: -4)
+    val main_fn = EncodedFunction(
+        name: "main",
+        code: [0xe8, 0x00, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00, 0x00, 0x00, 0xc3],
+        relocations: [reloc_ext, reloc_fn]
+    )
+    val sibling = EncodedFunction(name: "sibling", code: [0xc3], relocations: [])
+    val module = MachModule(
+        name: name,
+        functions: [],
+        data_sections: [],
+        extern_symbols: ["ext_helper"]
+    )
+    ([main_fn, sibling], module)
+
+fn expect_valid_elf64(bytes: [i64]):
+    expect(bytes.len() > 64).to_be_true()
+    expect(bytes[0]).to_equal(0x7f)
+    expect(bytes[1]).to_equal(0x45)  # 'E'
+    expect(bytes[2]).to_equal(0x4c)  # 'L'
+    expect(bytes[3]).to_equal(0x46)  # 'F'
+    expect(bytes[4]).to_equal(2)     # ELFCLASS64
+
+describe "Native ELF relocation symbol resolution":
+    it "x86_64 emitter resolves registered extern and function relocation symbols":
+        step("Build fixture with relocations to registered symbols only")
+        val (funcs, module) = known_symbol_fixture("elf_x86_64_known_syms")
+        step("Emit ELF and verify a well-formed ELF64 header (no panic, no alias)")
+        val bytes = emit_elf_x86_64(funcs, module, empty_mir_module("elf_x86_64_known_syms"))
+        expect_valid_elf64(bytes)
+
+    it "aarch64 emitter resolves registered extern and function relocation symbols":
+        step("Build fixture with relocations to registered symbols only")
+        val (funcs, module) = known_symbol_fixture("elf_aarch64_known_syms")
+        step("Emit ELF and verify a well-formed ELF64 header (no panic, no alias)")
+        val bytes = emit_elf_aarch64(funcs, module, empty_mir_module("elf_aarch64_known_syms"))
+        expect_valid_elf64(bytes)
+
+    it "riscv64 emitter resolves registered extern and function relocation symbols":
+        step("Build fixture with relocations to registered symbols only")
+        val (funcs, module) = known_symbol_fixture("elf_riscv64_known_syms")
+        step("Emit ELF and verify a well-formed ELF64 header (no panic, no alias)")
+        val bytes = emit_elf_riscv64(funcs, module, empty_mir_module("elf_riscv64_known_syms"))
+        expect_valid_elf64(bytes)
+
+
+describe "Native ELF unresolved-relocation hardening (structural)":
+    # The panic path cannot run in-process (panic aborts the runner; no
+    # expect-panic matcher exists). Guard it structurally: all three emitters
+    # must keep the contains() check + panic naming the missing symbol, and
+    # the old silent `sym_idx = 0` default must not return.
+    it "all three emitters panic on an unregistered relocation symbol instead of defaulting to index 0":
+        step("Read the emitter source")
+        val src = rt_file_read_text("src/compiler/70.backend/backend/native/native_elf.spl") ?? ""
+        step("Each arch guard is present and names the missing symbol")
+        for arch in ["x86_64", "aarch64", "riscv64"]:
+            val marker = "native ELF ({arch}): relocation references unknown symbol"
+            expect(src.contains(marker)).to_be_true()
+        step("Every guard checks sym_name_to_idx membership before indexing")
+        expect(src.split("if not sym_name_to_idx.contains(reloc.symbol_name):").len()).to_equal(4)
+        step("The silent default 'var sym_idx = 0' pattern is gone")
+        expect(src.contains("var sym_idx = 0")).to_be_false()

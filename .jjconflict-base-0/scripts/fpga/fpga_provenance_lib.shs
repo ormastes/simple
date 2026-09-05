@@ -1,0 +1,124 @@
+#!/bin/bash
+# fpga_provenance_lib.shs — Library functions for FPGA artifact provenance tracking
+#
+# This library provides functions to generate and validate provenance manifests
+# for FPGA artifacts (CPU RTL, bitstreams, etc.)
+#
+# Usage:
+#   source scripts/fpga/fpga_provenance_lib.shs
+#   fpga_generate_manifest <artifact_type> <artifact_name> <output_dir> [extra_fields]
+
+# Function to generate a provenance manifest
+fpga_generate_manifest() {
+    local artifact_type="$1"
+    local artifact_name="$2"
+    local output_dir="$3"
+    shift 3
+    local extra_fields="$*"
+
+    local manifest_file="$output_dir/${artifact_name}.manifest.json"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Get source commit
+    local source_commit
+    source_commit=$(jj log -r '@' --no-graph -T 'commit_id' 2>/dev/null || echo "unknown")
+
+    # Get compiler binary hash
+    local compiler_binary_hash="none"
+    if [ -f "bin/release/simple" ]; then
+        compiler_binary_hash=$(sha256sum bin/release/simple | awk '{print $1}')
+    fi
+
+    # For now, use placeholder values for hashes that would require full pipeline integration
+    # These would be computed during actual artifact generation
+    local config_hash="none"
+    local aop_aspect_hash="none"
+    local hardware_mir_hash="none"
+
+    # Compute actual artifact hash if it exists
+    local rtl_hash="none"
+    local artifact_path="$output_dir/$artifact_name"
+    if [ -f "$artifact_path" ]; then
+        rtl_hash=$(sha256sum "$artifact_path" | awk '{print $1}')
+    fi
+
+    # Other hashes start as "none" and get filled in during later stages
+    local simulation_hash="none"
+    local synthesis_hash="none"
+    local bitstream_hash="none"
+
+    # Get generation command
+    local generation_command="bash $0 $@"
+
+    # Create JSON manifest
+    cat > "$manifest_file" << EOF
+{
+  "artifact_type": "$artifact_type",
+  "artifact_name": "$artifact_name",
+  "provenance": {
+    "source_commit": "$source_commit",
+    "compiler_commit": "unknown",
+    "compiler_binary_hash": "$compiler_binary_hash",
+    "config_hash": "$config_hash",
+    "aop_aspect_hash": "$aop_aspect_hash",
+    "hardware_mir_hash": "$hardware_mir_hash",
+    "rtl_hash": "$rtl_hash",
+    "simulation_hash": "$simulation_hash",
+    "synthesis_hash": "$synthesis_hash",
+    "bitstream_hash": "$bitstream_hash"
+  },
+  "generation_timestamp": "$timestamp",
+  "generation_command": "$generation_command"
+}
+EOF
+
+    echo "$manifest_file"
+}
+
+# Function to update a specific hash field in an existing manifest
+fpga_update_manifest_hash() {
+    local manifest_file="$1"
+    local hash_field="$2"
+    local hash_value="$3"
+
+    if [ ! -f "$manifest_file" ]; then
+        echo "ERROR: Manifest file not found: $manifest_file" >&2
+        return 1
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "ERROR: jq required for manifest updates" >&2
+        return 1
+    fi
+
+    # Update the specific hash field
+    jq ".provenance.$hash_field = \"$hash_value\"" "$manifest_file" > "${manifest_file}.tmp"
+    mv "${manifest_file}.tmp" "$manifest_file"
+
+    echo "Updated $manifest_file: $hash_field = $hash_value"
+}
+
+# Function to get the current source commit
+fpga_get_source_commit() {
+    jj log -r '@' --no-graph -T 'commit_id' 2>/dev/null || echo "unknown"
+}
+
+# Function to get the current compiler binary hash
+fpga_get_compiler_hash() {
+    if [ -f "bin/release/simple" ]; then
+        sha256sum bin/release/simple | awk '{print $1}'
+    else
+        echo "none"
+    fi
+}
+
+# Function to compute hash of a file
+fpga_compute_hash() {
+    local file_path="$1"
+    if [ -f "$file_path" ]; then
+        sha256sum "$file_path" | awk '{print $1}'
+    else
+        echo "none"
+    fi
+}

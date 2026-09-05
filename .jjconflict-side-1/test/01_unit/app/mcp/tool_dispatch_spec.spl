@@ -1,0 +1,68 @@
+"""
+# MCP Tool Dispatch Specification
+
+**Requirements:** N/A
+
+## Overview
+
+Regression guard for the MCP tool-dispatch layer (`app.mcp.main_dispatch`).
+Exercises `dispatch_tool` directly through the interpreter (no server
+process, no stdio framing) so the dispatch/tool-table routing is verified
+independent of the seed's stdio transport path.
+
+## Behavior
+
+- A known, registered tool name (`debug_list_sessions`, a fast in-process
+  tool with no shell/side effects) resolves to a real JSON-RPC result, not
+  the "Unknown tool" fallback.
+- An unknown tool name yields a proper JSON-RPC *result* carrying
+  `isError:true` and an "Unknown tool" message (the MCP tool-error
+  convention — errors are reported as a normal result payload, not a
+  protocol-level JSON-RPC error), never a crash, a nil, or an empty string.
+"""
+
+# @feature mcp_tool_dispatch
+# tag: unit
+
+use std.spec
+use app.mcp.main_dispatch.{dispatch_tool}
+
+describe "MCP tool dispatch — main_dispatch.dispatch_tool":
+    """
+    ## Known tool resolution
+
+    A registered tool name must route to its real handler instead of
+    falling through to the "Unknown tool" error path.
+    """
+
+    it "resolves a known in-process tool name to a real result":
+        # NOTE: dispatch_tool's `id` param is a raw JSON-literal, spliced
+        # unescaped into the response (mirrors _mcp_extract_id's contract) —
+        # passing the bare digits "1" yields an unquoted JSON number `"id":1`,
+        # not a quoted string.
+        val response = dispatch_tool("1", "debug_list_sessions", "{}")
+        assert_not_equal(response, "")
+        assert_contains(response, "\"jsonrpc\":\"2.0\"")
+        assert_contains(response, "\"id\":1")
+        assert_false(response.contains("Unknown tool"))
+
+    """
+    ## Unknown tool fail-closed behavior
+
+    An unrecognized tool name must never crash or return nil — it must come
+    back as a well-formed JSON-RPC result with `isError:true`.
+    """
+
+    it "returns a well-formed isError result for an unknown tool, not a crash or nil":
+        val response = dispatch_tool("2", "no_such_tool_xyz", "{}")
+        assert_not_equal(response, "")
+        assert_contains(response, "\"jsonrpc\":\"2.0\"")
+        assert_contains(response, "\"id\":2")
+        assert_contains(response, "\"isError\":true")
+        assert_contains(response, "Unknown tool: no_such_tool_xyz")
+
+    it "reports a missing tool name as a structured JSON-RPC error, not a crash":
+        val response = dispatch_tool("3", "", "{}")
+        assert_not_equal(response, "")
+        assert_contains(response, "\"isError\":true")
+        assert_contains(response, "Missing tool name")

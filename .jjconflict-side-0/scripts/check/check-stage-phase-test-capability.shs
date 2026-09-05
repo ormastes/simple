@@ -1,0 +1,150 @@
+#!/bin/sh
+# check-stage-phase-test-capability.shs
+#
+# Pins the DESIGNED two-mechanism split that makes bootstrap phases 2/3 able to
+# run tests, and proves the stage-binary half actually works.
+#
+# The split (authoritative, derived from source -- do not re-derive):
+#
+#   * `src/app/cli/bootstrap_main.spl` is deliberately a COMPILER ONLY. Its
+#     dispatch exposes `compile --format=smf` and `native-build`, plus
+#     `--version`/`--help`. Its function names are hardcoded "known bootstrap
+#     builtins" in the Stage3/4 self-hosting capsule lowering (see the header
+#     comment on `bootstrap_output_from_args`), so adding a `test` subcommand
+#     would drag the whole test-runner closure into the capsule -- exactly the
+#     enlargement `bootstrap-from-scratch.sh`'s COMPANION RULE forbids ("the
+#     bootstrap path contains exactly what the next step requires").
+#
+#   * A stage2/stage3 binary therefore runs a spec the way it runs any program:
+#       <stage-binary> native-build <spec>.spl -o <bin> && <bin>
+#     A `*_spec.spl` is a self-executing program; this is the phase-gate harness.
+#
+#   * The full `test` subcommand arrives at STAGE 4 via `--full-cli`, which
+#     compiles `src/app/cli/main.spl` (~60 commands, incl. `test`) with the
+#     provenance-verified stage3 compiler. `--full-cli` is implied by `--deploy`
+#     and by `--mode=one-binary`.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> check(s) ...            exit 0
+#   FAIL  — ...                          exit 1
+#   ERROR — nothing was checked (<why>)  exit 2
+# Zero checks executed is ERROR, never PASS.
+#
+# TODO(stage-phase-test-capability): the dynamic half currently has no
+# stage-built artifact to exercise on origin/main -- no `bootstrap/**/simple` is
+# tracked and no `build/bootstrap/full/**` exists. Until a bootstrap deposits
+# one, the dynamic half reports ERROR (blocked), never PASS. Do not weaken this
+# to a skip-and-pass.
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+checked=0
+fails=""
+SIMPLE_TIMEOUT_SECONDS=0
+export SIMPLE_TIMEOUT_SECONDS
+
+BOOTSTRAP_MAIN="${repo_root}/src/app/cli/bootstrap_main.spl"
+FULL_TABLE="${repo_root}/src/app/cli/dispatch/table.spl"
+SCRIPT="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
+
+selftest() {
+  st_tmp=$(mktemp -d) || return 1
+  # A fake bootstrap_main that DOES carry a test dispatch must be detected.
+  printf 'val cmd = "test"\n' > "${st_tmp}/bad.spl"
+  if ! grep -q '"test"' "${st_tmp}/bad.spl"; then
+    echo "selftest: detector failed to see a planted test dispatch" >&2
+    rm -rf "${st_tmp}"; return 1
+  fi
+  # A clean file must NOT trip it.
+  printf 'val cmd = "compile"\n' > "${st_tmp}/ok.spl"
+  if grep -q '"test"' "${st_tmp}/ok.spl"; then
+    echo "selftest: detector false-positived on a clean file" >&2
+    rm -rf "${st_tmp}"; return 1
+  fi
+  rm -rf "${st_tmp}"
+  return 0
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+[ -f "${BOOTSTRAP_MAIN}" ] || { echo "ERROR — nothing was checked (missing ${BOOTSTRAP_MAIN})"; exit 2; }
+[ -f "${FULL_TABLE}" ]     || { echo "ERROR — nothing was checked (missing ${FULL_TABLE})"; exit 2; }
+[ -f "${SCRIPT}" ]         || { echo "ERROR — nothing was checked (missing ${SCRIPT})"; exit 2; }
+
+# Check 1: the full CLI dispatch table really carries `test`.
+checked=$((checked + 1))
+grep -q '"test"' "${FULL_TABLE}" || fails="${fails} full-cli-table-has-no-test"
+
+# Check 2: the bootstrap CLI must NOT carry a `test` dispatch (architecture pin).
+checked=$((checked + 1))
+if grep -n 'cmd == "test"\|command == "test"' "${BOOTSTRAP_MAIN}" >/dev/null 2>&1; then
+  fails="${fails} bootstrap-cli-grew-a-test-subcommand"
+fi
+
+# Check 3: the bootstrap CLI still exposes native-build (the phase harness).
+checked=$((checked + 1))
+grep -q 'native-build' "${BOOTSTRAP_MAIN}" || fails="${fails} bootstrap-cli-lost-native-build"
+
+# Check 4: --full-cli is still the Stage-4 relink switch, implied by --deploy
+#          and one-binary mode.
+checked=$((checked + 1))
+grep -q -- '--full-cli' "${SCRIPT}" || fails="${fails} bootstrap-script-lost-full-cli"
+checked=$((checked + 1))
+grep -q 'bootstrap_mode. = .one-binary. \]; then' "${SCRIPT}" ||
+  grep -q 'one-binary' "${SCRIPT}" || fails="${fails} bootstrap-script-lost-one-binary-mode"
+
+# Check 5 (dynamic): exercise a stage binary on a real spec, if one exists.
+stage_bin=""
+for cand in \
+  "${repo_root}/bootstrap/stage3/${SIMPLE_TRIPLE:-x86_64-unknown-linux-gnu}/simple" \
+  "${repo_root}/bootstrap/stage3/simple" \
+  "${repo_root}/bootstrap/stage2/simple" \
+  "${repo_root}/build/bootstrap/stage3/${SIMPLE_TRIPLE:-x86_64-unknown-linux-gnu}/simple" \
+  "${repo_root}/build/bootstrap/stage2/${SIMPLE_TRIPLE:-x86_64-unknown-linux-gnu}/simple"
+do
+  [ -x "${cand}" ] && { stage_bin="${cand}"; break; }
+done
+
+full_cli_bin=""
+for cand in "${repo_root}/build/bootstrap/full/${SIMPLE_TRIPLE:-x86_64-unknown-linux-gnu}/simple"; do
+  [ -x "${cand}" ] && { full_cli_bin="${cand}"; break; }
+done
+
+spec="${SPEC_UNDER_TEST:-test/01_unit/std/condition_spec.spl}"
+
+if [ -n "${full_cli_bin}" ]; then
+  checked=$((checked + 1))
+  ( cd "${repo_root}" && timeout 2400 "${full_cli_bin}" test "${spec}" ) >/dev/null 2>&1
+  rc=$?
+  [ "${rc}" -eq 0 ] || fails="${fails} stage4-full-cli-test-rc=${rc}"
+elif [ -n "${stage_bin}" ]; then
+  checked=$((checked + 1))
+  out=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+  ( cd "${repo_root}" && timeout 2400 "${stage_bin}" native-build "${spec}" -o "${out}/spec" ) >"${out}/build.log" 2>&1
+  brc=$?
+  if [ "${brc}" -ne 0 ] || [ ! -x "${out}/spec" ]; then
+    fails="${fails} stage-native-build-of-spec-failed(rc=${brc},$(basename "${stage_bin}"))"
+  else
+    ( cd "${repo_root}" && timeout 900 "${out}/spec" ) >/dev/null 2>&1
+    rrc=$?
+    [ "${rrc}" -eq 0 ] || fails="${fails} stage-built-spec-exited-${rrc}"
+  fi
+  rm -rf "${out}"
+else
+  echo "ERROR — nothing was checked (no stage2/stage3/full-cli artifact present; run scripts/bootstrap/bootstrap-from-scratch.sh --full-cli first)"
+  exit 2
+fi
+
+if [ "${checked}" -eq 0 ]; then
+  echo "ERROR — nothing was checked (no checks executed)"
+  exit 2
+fi
+
+if [ -n "${fails}" ]; then
+  echo "FAIL — ${checked} check(s) executed, offender(s):${fails}"
+  exit 1
+fi
+
+echo "PASS — ${checked} check(s) executed, 0 failed (bootstrap CLI compiler-only; \`test\` reached via --full-cli Stage 4)"
+exit 0

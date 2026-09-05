@@ -1,0 +1,105 @@
+# Test Daemon Client — Client API for submitting test requests
+#
+# Wraps daemon_sdk.client with test-specific convenience functions.
+# Auto-starts daemon on first request.
+
+
+use std.daemon_sdk.client.{
+    daemon_ensure_running, daemon_submit, daemon_poll_result,
+    daemon_submit_and_wait, daemon_stop, daemon_ensure_responsive
+}
+use std.daemon_sdk.types.{DaemonResponse, DaemonState}
+use std.daemon_sdk.lock.{is_daemon_running}
+use app.test_daemon.types.{
+    TestDaemonConfig, test_daemon_config_default,
+    test_request_to_daemon, daemon_response_to_test_result, TestResult
+}
+use app.test_daemon.{
+    TREQ_RUN_SINGLE, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
+    TRESP_COMPLETED
+}
+use app.io.mod.{process_spawn_async, process_wait}
+
+# ============================================================================
+# Ensure Running
+# ============================================================================
+
+fn test_daemon_ensure_running(config: TestDaemonConfig) -> bool:
+    daemon_ensure_running(config.daemon, fn() -> bool: start_test_daemon_process(config))
+
+fn test_daemon_ensure_responsive(config: TestDaemonConfig) -> bool:
+    daemon_ensure_responsive(
+        config.daemon,
+        fn() -> bool: start_test_daemon_process(config),
+        fn() -> bool: test_daemon_ping(config, 1500)
+    )
+
+fn test_daemon_ping(config: TestDaemonConfig, timeout_ms: i64) -> bool:
+    val req = test_request_to_daemon(TREQ_STATUS, "", "", false)
+    val resp = daemon_submit_and_wait(req, config.daemon, timeout_ms)
+    resp.request_id != "" and resp.status == TRESP_COMPLETED
+
+fn start_test_daemon_process(config: TestDaemonConfig) -> bool:
+    # Spawn the launcher shell async so we don't block on the daemon's own
+    # startup handshake. The launcher ("bin/simple test-daemon start") exits
+    # on its own once the light daemon's lock file appears (or after its
+    # internal ~2s give-up window) — it does not stay alive. If we never
+    # reap it, it sits as a zombie for the lifetime of this process; with
+    # the process runtime's shared child-reap/poll path, that leaked zombie
+    # can starve a later synchronous process-run call (e.g. the
+    # per-spec `timeout` subprocess in the directory-mode test loop),
+    # hanging the whole run. Reap it here with a bounded wait — the
+    # launcher is expected to exit in ~2s, so this adds negligible latency
+    # and never masks a real daemon-start failure (the caller's own
+    # is_daemon_running() poll loop still decides success/failure).
+    val pid = process_spawn_async("/bin/sh", ["-c", "bin/simple test-daemon start"])
+    if pid > 0:
+        process_wait(pid, 4000)
+    pid > 0
+
+# ============================================================================
+# Submit Test
+# ============================================================================
+
+fn test_submit(path: text, config: TestDaemonConfig, clean: bool) -> text:
+    if not test_daemon_ensure_responsive(config):
+        return ""
+    val kind = if clean: TREQ_CLEAN_RUN else: TREQ_RUN_SINGLE
+    val req = test_request_to_daemon(kind, path, "", clean)
+    daemon_submit(req, config.daemon)
+
+# ============================================================================
+# Poll Result
+# ============================================================================
+
+fn test_poll_result(request_id: text, config: TestDaemonConfig, timeout_ms: i64) -> TestResult:
+    val resp = daemon_poll_result(request_id, config.daemon, timeout_ms)
+    daemon_response_to_test_result(resp)
+
+# ============================================================================
+# Submit and Wait
+# ============================================================================
+
+fn test_submit_and_wait(path: text, config: TestDaemonConfig, clean: bool, timeout_ms: i64) -> TestResult:
+    if not test_daemon_ensure_responsive(config):
+        return TestResult(test_path: path, status: -1, passed: 0, failed: 1, skipped: 0, duration_ms: 0, output: "test daemon unavailable", cached: false)
+    val kind = if clean: TREQ_CLEAN_RUN else: TREQ_RUN_SINGLE
+    val req = test_request_to_daemon(kind, path, "", clean)
+    val resp = daemon_submit_and_wait(req, config.daemon, timeout_ms)
+    daemon_response_to_test_result(resp)
+
+# ============================================================================
+# Status
+# ============================================================================
+
+fn test_daemon_status(config: TestDaemonConfig) -> TestResult:
+    val req = test_request_to_daemon(TREQ_STATUS, "", "", false)
+    val resp = daemon_submit_and_wait(req, config.daemon, 5000)
+    daemon_response_to_test_result(resp)
+
+# ============================================================================
+# Stop
+# ============================================================================
+
+fn test_daemon_stop(config: TestDaemonConfig) -> bool:
+    daemon_stop(config.daemon)

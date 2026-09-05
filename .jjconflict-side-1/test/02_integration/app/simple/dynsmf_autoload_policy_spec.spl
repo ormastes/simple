@@ -1,0 +1,272 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @tag: spec, startup, dynsmf, low_dependency_ui_dynsmf
+"""
+# dynSMF Startup Autoload Policy Integration Specification
+
+## Overview
+
+Verifies that app startup can construct a dynSMF session from command-line
+arguments and environment values, load an explicitly admitted startup
+artifact, and honor the root entrypoint's
+`--dynsmf-status`, `--no-dynsmf`, and `--disable-dynsmf=<ids>` controls.
+
+## Examples
+
+Plain startup is demand-only. An enabled startup entry loads only when an
+OS-owned request binds its exact manifest identity, digest, aspect catalog,
+export contract, and retained bytes. Compatibility entry points without that
+request fail closed. The app-root status command reports the registry as
+unconfigured and never claims that a dynamic library was loaded.
+
+**Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
+**Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
+**Traceability:** REQ-005, REQ-006, REQ-007, REQ-009, REQ-010, NFR-003, NFR-004, NFR-006
+**Plan:** doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md
+**Design:** doc/05_design/low_dependency_ui_dynsmf.md
+**Research:** doc/01_research/local/low_dependency_ui_dynsmf.md
+"""
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use os.smf.dynsmf_session.{DynSmfManifestEntry, dynsmf_session_unload}
+use app.startup.dynsmf_autoload.{
+    dynsmf_startup_session_from_values,
+    dynsmf_startup_session_for_manifest_from_values,
+    dynsmf_startup_session_for_manifest_from_admitted_values,
+    dynsmf_startup_session_with_registry_dynload_config_values
+}
+use os.smf.dynsmf_trust_registry.{
+    DynSmfTrustArtifactImage,
+    dynsmf_admitted_registry_from_values
+}
+use app.io.mod.{file_write, file_write_bytes, file_delete, file_read_text}
+use test.helpers.dynsmf_admitted_startup_fixture.{dynsmf_admitted_startup_fixture}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_getpid() -> i64
+
+fn simple_bin() -> text:
+    rt_env_get("SIMPLE_BIN") ?? "bin/simple"
+
+fn run_app_root_dynsmf(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); SIMPLE_BIN=\"" + simple_bin() + "\"; SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE_BIN\" run \"$REPO/src/app/main.spl\" " + joined
+    ])
+
+fn run_app_root_dynsmf_from(args: [text], work_dir: text) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); SIMPLE_BIN=\"" + simple_bin() + "\"; case \"$SIMPLE_BIN\" in /*) ;; *) SIMPLE_BIN=\"$REPO/$SIMPLE_BIN\" ;; esac; cd \"" + work_dir + "\" && SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE_BIN\" run \"$REPO/src/app/main.spl\" " + joined
+    ])
+
+fn ordinary_registry_trust_source(fixture) -> text:
+    "trust_artifact:\n" +
+        "  id: trace_pack\n" +
+        "  path: " + fixture.manifest[0].path + "\n" +
+        "  abi_version: 7\n" +
+        "  artifact_kind: precompiled_smf\n" +
+        "  content_hash: " + fixture.request.artifact.content_hash + "\n" +
+        "  binding:\n" +
+        "    facet_id: startup/trace_pack\n" +
+        "    aspect_id: startup.aspect\n" +
+        "    module_id: trace_pack.module\n" +
+        "    module_abi_hash: startup-module-abi\n" +
+        "    export_symbol: trace_facet_v1\n" +
+        "    interface_abi_hash: startup-facet-abi\n"
+
+describe "dynSMF startup autoload policy":
+    # @manual scenario evidence
+    it "queues background compile evidence before checked autoload for missing artifacts":
+        # @req REQ-SSPEC-INTEGRATION
+        # @req REQ-010
+        step("queues background compile evidence before checked autoload for missing artifacts")
+        val manifest = [
+            DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/startup_missing_file_io.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"]),
+            DynSmfManifestEntry(id: "gui_renderer", path: "build/dynsmf/startup_missing_gui_renderer.smf", source_module: "app.ui.web.backend", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_gui"])
+        ]
+        val session = dynsmf_startup_session_for_manifest_from_values([], "", "", "integration-background", manifest)
+        expect(session.loaded.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(session.evidence.len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+        expect(session.evidence[0].library_id).to_equal("file_io")
+        expect(session.evidence[0].action).to_equal("compile_background")
+        expect(session.evidence[0].status).to_equal("queued")
+        expect(session.evidence[0].reason).to_contain("bin/simple compile src/lib/nogc_sync_mut/io/file.spl")
+        expect(session.evidence[1].library_id).to_equal("gui_renderer")
+        expect(session.evidence[1].action).to_equal("compile_background")
+        expect(session.evidence[1].status).to_equal("queued")
+        expect(session.evidence[1].reason).to_contain("src/app/ui.web/backend.spl")
+        expect(session.evidence[1].status == "dispatched").to_equal(false)
+        expect(session.evidence[1].reason.contains("spawned_pid:")).to_equal(false)
+        expect(session.evidence[2].status).to_equal("failed")
+        expect(session.evidence[2].reason).to_equal("trusted_admission_missing")
+
+    it "demand-load policy: default startup loads nothing and queues nothing":
+        # @req REQ-005
+        # @req REQ-SSPEC-INTEGRATION
+        step("demand-load policy: default startup loads nothing and queues nothing")
+        # Perf program 2026-08-10: the seven stdlib-like entries are
+        # demand-loaded, so a plain startup session performs zero loads,
+        # zero background-compile queueing, and zero spawns.
+        val session = dynsmf_startup_session_from_values([], "", "", "integration-default")
+        expect(session.loaded.len()).to_equal(0)
+        expect(session.evidence.len()).to_equal(0)
+
+        # @req REQ-009
+    it "skip-all startup policy still yields an empty demand-load startup session":
+        # @req REQ-SSPEC-INTEGRATION
+        step("skip-all startup policy still yields an empty demand-load startup session")
+        val by_arg = dynsmf_startup_session_from_values(["--no-dynsmf"], "", "", "integration-no-arg")
+        expect(by_arg.loaded.len()).to_equal(0)
+        expect(by_arg.policy.source).to_equal("arg:--no-dynsmf")
+        expect(by_arg.evidence.len()).to_equal(0)
+
+        val by_env = dynsmf_startup_session_from_values([], "0", "", "integration-no-env")
+        expect(by_env.loaded.len()).to_equal(0)
+        expect(by_env.policy.source).to_equal("env:SIMPLE_DYNSMF")
+        expect(by_env.evidence.len()).to_equal(0)
+
+    it "honors per-id disable policy on an explicit autoload manifest":
+        # @req REQ-SSPEC-INTEGRATION
+        step("honors per-id disable policy on an explicit autoload manifest")
+        val manifest = [
+            DynSmfManifestEntry(id: "tui_renderer", path: "build/dynsmf/policy_tui_renderer.smf", source_module: "app.ui.render.tui_widgets", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_tui_tree"])
+        ]
+        val session = dynsmf_startup_session_for_manifest_from_values(["--disable-dynsmf=tui_renderer"], "", "", "integration-disable", manifest)
+        expect(session.loaded.len()).to_equal(0)
+        var saw_skip = false
+        for row in session.evidence:
+            if row.library_id == "tui_renderer" and row.action == "skip":
+                saw_skip = true
+        expect(saw_skip).to_equal(true)
+
+    it "exposes app root dynSMF status evidence without noisy plain startup":
+        # @req REQ-SSPEC-INTEGRATION
+        # @req REQ-006
+        step("exposes app root dynSMF status evidence without noisy plain startup")
+        val (plain_out, plain_err, plain_code) = run_app_root_dynsmf([])
+        expect(plain_code).to_equal(0)
+        expect(plain_out).to_equal("")
+
+        val (out, err, code) = run_app_root_dynsmf(["--dynsmf-status"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("dynsmf session=app-root")
+        expect(out).to_contain("loaded=0")
+        expect(out).to_contain("dynsmf admission=unconfigured status=fail_closed")
+
+    it "exposes app root dynSMF opt-out evidence":
+        # @req REQ-SSPEC-INTEGRATION
+        # @req REQ-007
+        step("exposes app root dynSMF opt-out evidence")
+        val (out, err, code) = run_app_root_dynsmf(["--no-dynsmf", "--dynsmf-status"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("policy=arg:--no-dynsmf")
+        expect(out).to_contain("loaded=0")
+
+    it "consumes simple_dynload.sdn only on the explicit status path":
+        val work_dir = "/tmp/simple_dynload_status_cutover_" + rt_getpid().to_text()
+        val (_, _, mkdir_code) = rt_process_run("mkdir", ["-p", work_dir])
+        val config_path = work_dir + "/simple_dynload.sdn"
+        file_write(config_path, "dynload:\n  file_io: \"presence=on,placement=dynamic,activation=startup\"\n")
+        val (out, err, code) = run_app_root_dynsmf_from(["--dynsmf-status"], work_dir)
+        file_delete(config_path)
+        # Source-run logging may create a nested .simple/logs tree in the
+        # isolated working directory. Remove only this PID-scoped fixture.
+        val (_, _, cleanup_code) = rt_process_run("rm", ["-rf", work_dir])
+        expect(mkdir_code).to_equal(0)
+        expect(cleanup_code).to_equal(0)
+        expect(code).to_equal(0)
+        expect(out).to_contain("file_io:load")
+        expect(out).to_contain("trusted_admission_missing")
+        expect(out.contains("spawned_pid:")).to_equal(false)
+
+    it "keeps direct root meta commands ahead of config and registry startup owners":
+        val manifest = [
+            DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/meta_guard_missing_file_io.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"])
+        ]
+        val invalid_registry = dynsmf_admitted_registry_from_values(manifest, "", [])
+        val missing_config = "build/definitely_missing_meta_guard_dynload.sdn"
+        val help = dynsmf_startup_session_with_registry_dynload_config(
+            ["--help", "--disable-dynsmf=file_io"], "meta-help", manifest, missing_config, invalid_registry)
+        val version = dynsmf_startup_session_with_registry_dynload_config(
+            ["--version", "--no-dynsmf"], "meta-version", manifest, missing_config, invalid_registry)
+        expect(help.session_id).to_equal("meta-help")
+        expect(help.policy.source).to_equal("arg:--disable-dynsmf")
+        expect(help.policy.disabled_ids.len()).to_equal(1)
+        expect(help.policy.disabled_ids[0]).to_equal("file_io")
+        expect(help.loaded.len()).to_equal(0)
+        expect(help.evidence.len()).to_equal(0)
+        expect(version.session_id).to_equal("meta-version")
+        expect(version.policy.source).to_equal("arg:--no-dynsmf")
+        expect(version.policy.disabled_all).to_equal(true)
+        expect(version.loaded.len()).to_equal(0)
+        expect(version.evidence.len()).to_equal(0)
+
+        # The hard terminator makes the following token a program argument.
+        # It must not trigger the root meta-command short circuit.
+        val after_boundary = dynsmf_startup_session_with_registry_dynload_config(
+            ["--", "--help"], "meta-boundary", manifest, missing_config, invalid_registry)
+        expect(after_boundary.session_id).to_equal("meta-boundary")
+        expect(after_boundary.evidence.len()).to_be_greater_than(0)
+
+    it "orders the meta guard before trace environment file config and registry owners":
+        val source = file_read_text("src/app/startup/dynsmf_autoload.spl")
+        val entry_start = source.index_of("pub fn dynsmf_startup_session_with_registry_dynload_config(")
+        val entry = source.substring(entry_start, source.len())
+        val guard = entry.index_of("if _dynsmf_startup_is_root_meta_command(args):")
+        expect(entry_start).to_be_greater_than(0)
+        expect(guard).to_be_greater_than(0)
+        expect(guard).to_be_less_than(entry.index_of("dynsmf_trace_startup_session(session_id)"))
+        expect(guard).to_be_less_than(entry.index_of("file_exists(config_path)"))
+        expect(guard).to_be_less_than(entry.index_of("env_get(\"SIMPLE_DYNSMF\")"))
+        expect(guard).to_be_less_than(entry.index_of("dynsmf_startup_session_with_registry_dynload_config_values("))
+
+        val component = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
+        val production_start = component.index_of("pub fn component_dynsmf_startup_from_registry_config_path(")
+        val production_end = component.index_of("pub fn component_dynsmf_result_render(")
+        val production = component.substring(production_start, production_end)
+        expect(production_start).to_be_greater_than(0)
+        expect(production).to_contain("if not registry.ok:")
+        expect(production.index_of("if not registry.ok:")).to_be_less_than(production.index_of("file_exists(config_path)"))
+        expect(production).to_contain("component_dynsmf_startup_from_registry_values(")
+        expect(production.contains("component_dynsmf_startup_from_admitted_values(")).to_equal(false)
+
+        val trust_start = component.index_of("fn _component_dynsmf_startup_from_trust_values(")
+        val trust_end = component.index_of("pub fn component_dynsmf_startup_from_config_path(")
+        val trust_path = component.substring(trust_start, trust_end)
+        expect(trust_path).to_contain("request_candidates = [registry_artifact!.request]")
+        expect(trust_path).to_contain("retained_registry_bytes = registry_artifact!.artifact_bytes")
+        expect(trust_path).to_contain("else:\n                request_candidates = trusted_requests")
+        expect(trust_path.index_of("retained_registry_bytes = registry_artifact!.artifact_bytes")).to_be_less_than(trust_path.index_of("if registry == nil:"))
+        expect(trust_path.index_of("if registry == nil:")).to_be_less_than(trust_path.index_of("file_exists(admitted.artifact_path)"))
+
+        # The resolver admission adapter used before byte selection validates
+        # only already-resolved values. It cannot reopen or inspect a path.
+        val admission_source = file_read_text("src/os/smf/component_admission.spl")
+        val admission_start = admission_source.index_of("fn smf_component_admit(")
+        val admission_end = admission_source.index_of("fn smf_component_admission_verdict(")
+        val admission_body = admission_source.substring(admission_start, admission_end)
+        expect(admission_start).to_be_greater_than(0)
+        expect(admission_body.contains("file_exists(")).to_equal(false)
+        expect(admission_body.contains("file_read_bytes(")).to_equal(false)
+        expect(admission_body.contains("file_read_text(")).to_equal(false)
+        expect(admission_body.contains("rt_file_")).to_equal(false)
+
+    it "uses one retained digest-verified byte image for admitted autoload":
+        val source = file_read_text("src/app/startup/dynsmf_autoload.spl")
+        expect(source).to_contain("val exact_bytes = file_read_bytes(request.artifact.path)")
+        expect(source).to_contain("sha256_u8_hex(exact_bytes) != request.artifact.content_hash")
+        expect(source).to_contain("trusted_entry.artifact_kind == artifact_kind")
+        expect(source).to_contain("dynsmf_session_load_admitted(session, id, request, exact_bytes)")
+        expect(source).to_contain("dynsmf_session_load_admitted(session, id, admitted!.request, admitted!.artifact_bytes)")
+        expect(source).to_contain("_dynsmf_startup_queue_missing_without_artifact_read")
+        expect(source.contains("dynsmf_session_queue_missing_background_compiles(")).to_equal(false)
+        expect(source.contains("dynsmf_session_load_checked(")).to_equal(false)
+        expect(source.contains("dynsmf_session_autoload_checked(")).to_equal(false)

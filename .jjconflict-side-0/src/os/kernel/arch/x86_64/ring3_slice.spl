@@ -1,0 +1,182 @@
+# x86_64 Cooperative Ring-3 Run-Slice
+#
+# Lets the SimpleOS desktop WM actually RUN a ring-3 GUI client on a lane that
+# has no preemption at all (no APIC timer, PIT is a one-shot TSC calibration,
+# every IDT vector is the fault handler, and the WM event loop never yields).
+#
+# Model: run-slice with a bounce at the client's blocking IPC recv.
+#
+#   1. The WM arms a slice and enters ring 3 (syscall 14 the first time,
+#      rt_x86_ring3_retry_user afterwards).
+#   2. The client runs until it blocks on an empty port (or exits). The boot
+#      syscall dispatcher longjmps back into the kernel through the savepoint
+#      rt_x86_enter_user_first / rt_x86_ring3_retry_user established — the same
+#      machinery the SSH multi-command lane already relies on.
+#   3. The WM services the compositor mailbox (poll_once / apply_wm_action /
+#      reply) and takes another slice; the client resumes by RE-EXECUTING its
+#      recv, so no syscall return value is ever fabricated and the client
+#      binary (examples/09_embedded/simpleos_remote_gui/remote_window_runtime.c)
+#      needs no change.
+#
+# Why not run-to-exit: the client blocks for the compositor's create_window
+# reply before it ever sends its content update, and the compositor can only
+# produce that reply after the client's send — so a single uninterrupted
+# ring-3 run can never reach [remote-browser-ready]. Why not a full task
+# switch: rt_x86_64_context_switch only preserves the callee-saved kernel
+# register set, so resuming CPL3 through it would still need an iret frame —
+# which is exactly what retry_user does, without a scheduler run queue.
+#
+# Everything crossing a module boundary here is a flat scalar (freestanding
+# cranelift lane: no Option extraction into a val, no aggregates, no multi-
+# operand text concatenation).
+
+use os.kernel.arch.x86_64.interrupt.{x86_dispatch_installed_syscall_abi, x86_installed_scheduler}
+use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_handoff}
+use os.kernel.memory.vmm.{vmm_kernel_pml4_phys, vmm_kernel_low_identity_mapped_in}
+
+extern fn serial_println(msg: text)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_x86_tss_init() -> i64
+extern fn rt_x86_ring3_slice_arm()
+extern fn rt_x86_ring3_slice_disarm()
+extern fn rt_x86_ring3_user_ctx_valid() -> i64
+extern fn rt_x86_ring3_user_ctx_clear()
+extern fn rt_x86_ring3_user_ctx_rip() -> i64
+extern fn rt_x86_ring3_retry_user()
+extern fn rt_x86_ring3_bounce_reason() -> i64
+extern fn rt_x86_ring3_bounce_reason_clear()
+extern fn rt_x86_ring3_exit_rc() -> i64
+extern fn rt_x86_ring3_slice_set_pid(pid: u64)
+extern fn rt_x86_ring3_slice_pid() -> u64
+
+# Slice outcome codes reported by rt_ring3_slice_tick. Written as literals at
+# every use site, NOT module-level vals: module-global initializers are
+# unreliable on this freestanding lane (module-init gap).
+#    0 idle     — no client armed for slicing
+#   -1 failed   — handoff refused; the client will never run
+#    2 yielded  — client blocked on recv, resumable next slice
+#    3 exited   — client called exit; slice retired
+
+pub fn ring3_slice_prepare(pid: u64) -> bool:
+    """Validate the ring-3 handoff for `pid` and arm it for WM slicing.
+
+    Fails CLOSED and loudly: every rejection prints the specific reason, so a
+    boot that never reaches [remote-browser-ready] says why on serial instead
+    of silently rendering an empty window."""
+    if pid == 0u64:
+        serial_println("[ring3-slice] unavailable reason=no-client-pid")
+        return false
+    # TSS.RSP0 must be live before ANY CPL3 execution: a fault or interrupt
+    # taken in ring 3 without it triple-faults instead of printing a frame.
+    val tss_status = rt_x86_tss_init()
+    if tss_status != 0:
+        serial_println("[ring3-slice] unavailable reason=tss-init-failed status={tss_status}")
+        return false
+    val validation = validate_enter_user_blocking_handoff(pid, x86_installed_scheduler())
+    val handoff_ok = validation.ok
+    val cr3 = validation.cr3
+    var handoff_code: i64 = 0
+    if handoff_ok:
+        handoff_code = 1
+    serial_println("[ring3-slice] prepare pid={pid} tss=ok handoff_ok={handoff_code} cr3={cr3}")
+    if not handoff_ok:
+        serial_println("[ring3-slice] unavailable reason=handoff-invalid pid={pid}")
+        return false
+    if cr3 == 0u64:
+        serial_println("[ring3-slice] unavailable reason=no-address-space pid={pid}")
+        return false
+    # Kernel-mapped-in-client check. `mov %rax,%cr3` inside
+    # rt_x86_enter_user_first switches to the client PML4 while still executing
+    # kernel code on a kernel stack, so the kernel's LOW identity map (PML4[0]:
+    # kernel image at 1MiB, GDT, TSS, syscall trampoline, syscall stack, the
+    # bump heap) must be present in the client address space or the very next
+    # instruction triple-faults with no diagnosis at all.
+    #
+    # The scheduler spawn path now applies the proven recipe from
+    # src/os/kernel/loader/x86_64_fs_exec_ring3.spl: vmm_clone_kernel_low_private
+    # right after the AS is staged and BEFORE PT_LOAD mapping, plus the
+    # privatizing vmm_map_user_low_page for low-half user pages. This guard
+    # stays and proves it held.
+    #
+    # The test compares TRANSLATIONS, not the raw PML4[0] entry: a correctly
+    # prepared AS carries a PRIVATE PML4[0] PDPT (different physical address,
+    # US bit set) whose entries still resolve the kernel identity window, and
+    # vmm_map_user_low_page splits/clones deeper levels copy-on-map. Raw entry
+    # equality would reject exactly the configuration that is correct.
+    val kernel_root = vmm_kernel_pml4_phys()
+    val kernel_pml4e0 = rt_ptr_read_i64(kernel_root as i64, 0)
+    val client_pml4e0 = rt_ptr_read_i64(cr3 as i64, 0)
+    if not vmm_kernel_low_identity_mapped_in(cr3):
+        serial_println("[ring3-slice] unavailable reason=kernel-low-identity-unmapped-in-client-as pid={pid} cr3={cr3} client_pml4e0={client_pml4e0} kernel_pml4e0={kernel_pml4e0}")
+        serial_println("[ring3-slice] remedy=clone-kernel-low-private-before-pt_load-map owner=scheduler-spawn-address-space")
+        return false
+    rt_x86_ring3_slice_set_pid(pid)
+    rt_x86_ring3_user_ctx_clear()
+    rt_x86_ring3_bounce_reason_clear()
+    serial_println("[ring3-slice] armed pid={pid}")
+    true
+
+@export("C")
+pub fn rt_ring3_slice_tick() -> i64:
+    """Give the armed ring-3 client ONE run slice and return its outcome.
+
+    Named exactly as its C symbol so the arch-neutral desktop shell
+    (src/os/desktop/shell.spl) can call it as a flat scalar extern without
+    importing x86-only modules.
+
+    `@export("C")` alone is NOT enough to make that work. On the cranelift
+    freestanding lane the attribute is a no-op for symbol naming — only the LLVM
+    mangler reads it — so this body ships solely as
+    `os__kernel__arch__x86_64__ring3_slice__rt_ring3_slice_tick` and the shell's
+    bare reference is left undefined. A warm link used to hide that behind the
+    linker's bare->qualified `--defsym` alias bridge, but on a COLD link the
+    fabricated-stub ratchet aborts first and reports
+    `FABRICATED-NEW rt_ring3_slice_tick`. The bare name is therefore anchored by
+    a strong C forwarder in
+    examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c, which is how
+    every other bare `rt_*` on this lane is made to exist; see the comment there.
+
+    MUST also be called directly by the x86_64 entry (gui_entry_desktop.spl
+    takes a priming slice): under `--entry-closure` a function reachable only
+    through a C extern is pruned from the closure, and the forwarder's weak
+    target then falls back to 0 = IDLE — silently no ring-3 client at all.
+    Verify with `llvm-nm kernel.elf | grep rt_ring3_slice_tick`: it must be `T`,
+    never `W`."""
+    val pid = rt_x86_ring3_slice_pid()
+    if pid == 0u64:
+        return 0
+
+    rt_x86_ring3_bounce_reason_clear()
+    rt_x86_ring3_slice_arm()
+    val resumable = rt_x86_ring3_user_ctx_valid()
+    var enter_status: i64 = 0
+    if resumable == 1:
+        # Returns here only when the client bounces back through the fresh
+        # savepoint retry_user installs.
+        rt_x86_ring3_retry_user()
+    else:
+        serial_println("[ring3-slice] entering-ring3 pid={pid}")
+        # Syscall 14 (EnterUserBlocking) is documented "never returns"; it
+        # returns here through the enter_user_first savepoint on a bounce, and
+        # by a plain error return when the TCB lookup fails.
+        enter_status = x86_dispatch_installed_syscall_abi(14u64, pid, 0u64, 0u64, 0u64, 0u64, 0u64)
+    rt_x86_ring3_slice_disarm()
+
+    val reason = rt_x86_ring3_bounce_reason()
+    if reason == 2:
+        return 2
+    if reason == 3:
+        val exit_rc = rt_x86_ring3_exit_rc()
+        serial_println("[ring3-slice] client-exited pid={pid} rc={exit_rc}")
+        rt_x86_ring3_slice_set_pid(0u64)
+        rt_x86_ring3_user_ctx_clear()
+        return 3
+
+    # No bounce happened: the handoff itself was refused (or a resumed client
+    # returned without ever trapping). Retire the slice so the WM stops paying
+    # for it, and say exactly what came back.
+    val user_rip = rt_x86_ring3_user_ctx_rip()
+    serial_println("[ring3-slice] handoff-failed pid={pid} enter_status={enter_status} resumable={resumable} user_rip={user_rip}")
+    rt_x86_ring3_slice_set_pid(0u64)
+    rt_x86_ring3_user_ctx_clear()
+    return -1

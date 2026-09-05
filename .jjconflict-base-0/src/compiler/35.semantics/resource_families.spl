@@ -1,0 +1,232 @@
+# Resource Family Convention Inference Engine
+# Pure logic for classifying SFFI family naming conventions
+# Fail-closed: ambiguous cases return explicit diagnostics, never guess
+
+use std.{text, collections}
+
+# Verb category constants (wrapped in functions to avoid module-level initializer warnings)
+fn acquire_verbs() -> [text]:
+    ["open", "create", "new", "alloc", "acquire", "copy", "clone", "load"]
+
+fn release_verbs() -> [text]:
+    ["close", "destroy", "free", "release", "unref", "dispose"]
+
+fn retain_verbs() -> [text]:
+    ["retain", "ref", "add_ref"]
+
+fn validity_verbs() -> [text]:
+    ["is_valid", "valid"]
+
+# Represents a single classified extern function in a family
+pub struct ClassifiedExtern:
+    name: text
+    verb: text
+    category: text  # "acquire", "release", "retain", "validity", "method", "unknown"
+
+# Result of classifying an entire family
+pub struct FamilyClassificationResult:
+    acquire_verb: text?
+    release_verb: text?
+    retain_verb: text?
+    release_verbs_found: [text]  # all found release candidates (for ambiguity detection)
+    functions: [ClassifiedExtern]
+    error: text?  # If non-nil, classification failed; this is the fail-closed diagnostic
+
+    fn is_success(self) -> bool:
+        # error is nil when classification succeeds
+        match self.error:
+            case nil:
+                true
+            case _("catch-all for failure case"):
+                false
+
+# Predicate functions for verb classification
+fn is_acquire_verb(verb: text) -> bool:
+    for v in acquire_verbs():
+        if v == verb:
+            return true
+    false
+
+fn is_release_verb(verb: text) -> bool:
+    for v in release_verbs():
+        if v == verb:
+            return true
+    false
+
+fn is_retain_verb(verb: text) -> bool:
+    for v in retain_verbs():
+        if v == verb:
+            return true
+    false
+
+fn is_validity_verb(verb: text) -> bool:
+    for v in validity_verbs():
+        if v == verb:
+            return true
+    false
+
+# Main inference function: classify a family by its prefix and extern names
+pub fn infer_family_conventions(prefix: text, extern_names: [text]) -> FamilyClassificationResult:
+    var funcs: [ClassifiedExtern] = []
+    var acquire_verbs: [text] = []
+    var release_verbs: [text] = []
+    var retain_verbs: [text] = []
+
+    # Classify each function
+    for extern_name in extern_names:
+        val result = classify_single_extern(prefix, extern_name)
+        val classified = result.classified
+        funcs.push(classified)
+
+        val category = classified.category
+        if category == "acquire":
+            val verb = classified.verb
+            acquire_verbs.push(verb)
+        else if category == "release":
+            val verb = classified.verb
+            release_verbs.push(verb)
+        else if category == "retain":
+            val verb = classified.verb
+            retain_verbs.push(verb)
+
+    # Validate classification: fail-closed rules
+    if release_verbs.len() > 1:
+        val unique_releases = release_verbs.clone()
+        # Deduplicate
+        var dedup: [text] = []
+        for rv in unique_releases:
+            var found = false
+            for dv in dedup:
+                if dv == rv:
+                    found = true
+            if !found:
+                dedup.push(rv)
+        if dedup.len() > 1:
+            var acq_verb: text? = nil
+            if acquire_verbs.len() > 0:
+                acq_verb = acquire_verbs[0]
+            return FamilyClassificationResult(
+                acquire_verb: acq_verb,
+                release_verb: nil,
+                retain_verb: nil,
+                release_verbs_found: dedup,
+                functions: funcs,
+                error: "ambiguous_destructor: multiple release verbs found: " + dedup.join(", ")
+            )
+
+    if release_verbs.len() == 0:
+        var acq_verb: text? = nil
+        if acquire_verbs.len() > 0:
+            acq_verb = acquire_verbs[0]
+        return FamilyClassificationResult(
+            acquire_verb: acq_verb,
+            release_verb: nil,
+            retain_verb: nil,
+            release_verbs_found: [],
+            functions: funcs,
+            error: "no_release_verb: no recognized release function found; require explicit release: or sharing: none"
+        )
+
+    var first_acquire: text? = nil
+    var first_release: text? = nil
+    var first_retain: text? = nil
+
+    if acquire_verbs.len() > 0:
+        first_acquire = acquire_verbs[0]
+    if release_verbs.len() > 0:
+        first_release = release_verbs[0]
+    if retain_verbs.len() > 0:
+        first_retain = retain_verbs[0]
+
+    FamilyClassificationResult(
+        acquire_verb: first_acquire,
+        release_verb: first_release,
+        retain_verb: first_retain,
+        release_verbs_found: release_verbs,
+        functions: funcs,
+        error: nil
+    )
+
+# Internal helper: classify a single extern function
+struct ClassifyResult:
+    classified: ClassifiedExtern
+
+fn classify_single_extern(prefix: text, extern_name: text) -> ClassifyResult:
+    val verb = strip_family_prefix(prefix, extern_name)
+    var category = "unknown"
+
+    if is_acquire_verb(verb):
+        category = "acquire"
+    else if is_release_verb(verb):
+        category = "release"
+    else if is_retain_verb(verb):
+        category = "retain"
+    else if is_validity_verb(verb):
+        category = "validity"
+    else:
+        category = "method"
+
+    ClassifyResult(
+        classified: ClassifiedExtern(
+            name: extern_name,
+            verb: verb,
+            category: category
+        )
+    )
+
+# Helper: strip the family prefix from a function name
+# e.g., strip_family_prefix("rt_file", "rt_file_open") -> "open"
+fn strip_family_prefix(prefix: text, name: text) -> text:
+    if name.starts_with(prefix + "_"):
+        val stripped = name.substring(prefix.len() + 1, name.len())
+        stripped
+    else:
+        name
+
+# Query helpers for the classification result
+
+pub fn get_acquire_method_name(family_name: text, result: FamilyClassificationResult) -> text:
+    match result.acquire_verb:
+        case nil:
+            ""
+        case verb:
+            verb  # In future, this might be titleCase or similar transformation
+
+pub fn get_release_method_name(family_name: text, result: FamilyClassificationResult) -> text:
+    match result.release_verb:
+        case nil:
+            ""
+        case _("standard method name"):
+            "close"
+
+pub struct RCCandidate:
+    """Result of checking if a family is a foreign RC candidate."""
+    is_candidate: bool
+    reason: text
+
+pub fn classify_rc_strategy(result: FamilyClassificationResult) -> RCCandidate:
+    """Classify whether a family requires reference-counting for sharing.
+
+    A family with retain/release/acquire is a candidate for foreign RC.
+    Returns RCCandidate with is_candidate=true if all three are present.
+    """
+    val has_acq = match result.acquire_verb:
+        case nil: false
+        case _("has acquire"): true
+    val has_rel = match result.release_verb:
+        case nil: false
+        case _("has release"): true
+    val has_ret = match result.retain_verb:
+        case nil: false
+        case _("has retain"): true
+
+    if has_acq && has_rel && has_ret:
+        RCCandidate(
+            is_candidate: true,
+            reason: "foreign RC: has acquire, release, and retain"
+        )
+    else:
+        RCCandidate(
+            is_candidate: false,
+            reason: "unique ownership: no full retain/release pair"
+        )

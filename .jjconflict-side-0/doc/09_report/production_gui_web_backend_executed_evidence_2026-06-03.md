@@ -1,0 +1,240 @@
+# Production GUI Web Backend-Executed Evidence
+
+- status: pass
+- reason: pass
+- scene: backend-executed Engine2D clear/fill primitive proof
+- dimensions: 16x16
+- CPU SIMD resolved: cpu_simd
+- CPU SIMD total hits: 5
+- CPU SIMD different pixels: 0
+- Metal resolved: metal
+- Metal gpu frame complete: true
+- Metal gpu readback pixel count: 256
+- Metal different pixels: 0
+- First pixels (software/cpu_simd/metal/gpu): 4279246896 / 4279246896 / 4279246896 / 4279246896
+- Rect pixels (software/cpu_simd/metal/gpu): 4278256132 / 4278256132 / 4278256132 / 4278256132
+- blur/tolerance used: false
+
+This evidence intentionally exercises the currently proven Metal GPU
+readback subset (clear + filled rectangle) through Engine2D. It proves
+backend execution separately from the HTML layout fast path, which
+currently renders through a pure framebuffer renderer. Larger generated
+GUI scenes remain tracked as open Metal coverage.
+
+## Raw Evidence
+- production_gui_backend_status=pass
+- production_gui_backend_reason=pass
+- production_gui_backend_width=16
+- production_gui_backend_height=16
+- production_gui_backend_software_resolved=software
+- production_gui_backend_cpu_simd_resolved=cpu_simd
+- production_gui_backend_metal_resolved=metal
+- production_gui_backend_software_pixel_count=256
+- production_gui_backend_cpu_simd_pixel_count=256
+- production_gui_backend_metal_pixel_count=256
+- production_gui_backend_cpu_simd_different_pixels=0
+- production_gui_backend_cpu_simd_max_channel_diff=0
+- production_gui_backend_cpu_simd_total_hits=5
+- production_gui_backend_cpu_simd_fill_hits=5
+- production_gui_backend_cpu_simd_copy_hits=0
+- production_gui_backend_cpu_simd_alpha_hits=0
+- production_gui_backend_cpu_simd_blit_hits=0
+- production_gui_backend_cpu_simd_scroll_hits=0
+- production_gui_backend_metal_different_pixels=0
+- production_gui_backend_metal_max_channel_diff=0
+- production_gui_backend_metal_gpu_frame_complete=true
+- production_gui_backend_metal_gpu_readback_pixel_count=256
+- production_gui_backend_metal_gpu_readback_checksum=140768607855648
+- production_gui_backend_software_first_pixel=4279246896
+- production_gui_backend_cpu_simd_first_pixel=4279246896
+- production_gui_backend_metal_first_pixel=4279246896
+- production_gui_backend_metal_gpu_first_pixel=4279246896
+- production_gui_backend_software_rect_pixel=4278256132
+- production_gui_backend_cpu_simd_rect_pixel=4278256132
+- production_gui_backend_metal_rect_pixel=4278256132
+- production_gui_backend_metal_gpu_rect_pixel=4278256132
+- production_gui_backend_tolerance_used=false
+- production_gui_backend_exact_backend_parity=true
+- production_gui_backend_blur_or_tolerance_used=false
+- production_gui_backend_evidence_log=build/production_gui_web_backend_executed_evidence/evidence.log
+
+## Evidence Log
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/app/ui.render/tui_widgets.spl:7:1
+-    |
+-   7 | export use app.ui.render.tui_widgets_part1.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/app/ui.render/tui_widgets.spl:8:1
+-    |
+-   8 | export use app.ui.render.tui_widgets_part2.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/app/ui.render/table.spl:167:40
+-    |
+- 167 |                 val a = if col < sorted[i].len(): sorted[i][col] else: ""
+-    |                                        ^
+- 
+- Use angle brackets: sorted<...> instead of sorted[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/app/ui.render/table.spl:168:40
+-    |
+- 168 |                 val b = if col < sorted[i + 1].len(): sorted[i + 1][col] else: ""
+-    |                                        ^
+- 
+- Use angle brackets: sorted<...> instead of sorted[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/app/ui.render/tui_widgets.spl:7:1
+-    |
+-   7 | export use app.ui.render.tui_widgets_part1.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/app/ui.render/tui_widgets.spl:8:1
+-    |
+-   8 | export use app.ui.render.tui_widgets_part2.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/app/ui.render/table.spl:167:40
+-    |
+- 167 |                 val a = if col < sorted[i].len(): sorted[i][col] else: ""
+-    |                                        ^
+- 
+- Use angle brackets: sorted<...> instead of sorted[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/app/ui.render/table.spl:168:40
+-    |
+- 168 |                 val b = if col < sorted[i + 1].len(): sorted[i + 1][col] else: ""
+-    |                                        ^
+- 
+- Use angle brackets: sorted<...> instead of sorted[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- production_gui_backend_status=pass
+- production_gui_backend_width=16
+- production_gui_backend_height=16
+- production_gui_backend_software_resolved=software
+- production_gui_backend_cpu_simd_resolved=cpu_simd
+- production_gui_backend_metal_resolved=metal
+- production_gui_backend_software_pixel_count=256
+- production_gui_backend_cpu_simd_pixel_count=256
+- production_gui_backend_metal_pixel_count=256
+- production_gui_backend_cpu_simd_different_pixels=0
+- production_gui_backend_cpu_simd_max_channel_diff=0
+- production_gui_backend_cpu_simd_total_hits=5
+- production_gui_backend_cpu_simd_fill_hits=5
+- production_gui_backend_cpu_simd_copy_hits=0
+- production_gui_backend_cpu_simd_alpha_hits=0
+- production_gui_backend_cpu_simd_blit_hits=0
+- production_gui_backend_cpu_simd_scroll_hits=0
+- production_gui_backend_metal_different_pixels=0
+- production_gui_backend_metal_max_channel_diff=0
+- production_gui_backend_metal_gpu_frame_complete=true
+- production_gui_backend_metal_gpu_readback_pixel_count=256
+- production_gui_backend_metal_gpu_readback_checksum=140768607855648
+- production_gui_backend_software_first_pixel=4279246896
+- production_gui_backend_cpu_simd_first_pixel=4279246896
+- production_gui_backend_metal_first_pixel=4279246896
+- production_gui_backend_metal_gpu_first_pixel=4279246896
+- production_gui_backend_software_rect_pixel=4278256132
+- production_gui_backend_cpu_simd_rect_pixel=4278256132
+- production_gui_backend_metal_rect_pixel=4278256132
+- production_gui_backend_metal_gpu_rect_pixel=4278256132
+- production_gui_backend_tolerance_used=false
+- production_gui_backend_exact_backend_parity=true

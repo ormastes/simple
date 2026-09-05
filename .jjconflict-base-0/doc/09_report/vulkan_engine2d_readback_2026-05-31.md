@@ -1,0 +1,117 @@
+# Vulkan Engine2D Readback Evidence
+
+- status: pass
+- reason: pass
+- spec status: pass
+- probe status: Initialized
+- available: true
+- backend: vulkan
+- present exercised: true
+- readback exercised: true
+- clear status: pass
+- clear pixels: 256
+- clear expected checksum: 140735349260160
+- clear actual checksum: 140735349260160
+- clear mismatches: 0
+- clear expected pixels: build/vulkan-engine2d-readback/clear-expected-u32.json
+- clear actual pixels: build/vulkan-engine2d-readback/clear-actual-u32.json
+- rect status: pass
+- rect pixels: 256
+- rect expected checksum: 140781974135910
+- rect actual checksum: 140781974135910
+- rect mismatches: 0
+- rect expected pixels: build/vulkan-engine2d-readback/rect-expected-u32.json
+- rect actual pixels: build/vulkan-engine2d-readback/rect-actual-u32.json
+- blur/tolerance used: false
+- vulkan strict exit code: 0
+- cpu/vulkan parity exit code: 0
+
+## Raw Evidence
+- vulkan_engine2d_readback_status=pass
+- vulkan_engine2d_readback_reason=pass
+- vulkan_engine2d_readback_spec_status=pass
+- vulkan_engine2d_readback_probe_status=Initialized
+- vulkan_engine2d_readback_available=true
+- vulkan_engine2d_readback_backend_name=vulkan
+- vulkan_engine2d_readback_present_exercised=true
+- vulkan_engine2d_readback_readback_exercised=true
+- vulkan_engine2d_readback_clear_status=pass
+- vulkan_engine2d_readback_clear_pixels=256
+- vulkan_engine2d_readback_clear_expected_checksum=140735349260160
+- vulkan_engine2d_readback_clear_actual_checksum=140735349260160
+- vulkan_engine2d_readback_clear_mismatches=0
+- vulkan_engine2d_readback_clear_expected_pixels_path=build/vulkan-engine2d-readback/clear-expected-u32.json
+- vulkan_engine2d_readback_clear_actual_pixels_path=build/vulkan-engine2d-readback/clear-actual-u32.json
+- vulkan_engine2d_readback_rect_status=pass
+- vulkan_engine2d_readback_rect_pixels=256
+- vulkan_engine2d_readback_rect_expected_checksum=140781974135910
+- vulkan_engine2d_readback_rect_actual_checksum=140781974135910
+- vulkan_engine2d_readback_rect_mismatches=0
+- vulkan_engine2d_readback_rect_expected_pixels_path=build/vulkan-engine2d-readback/rect-expected-u32.json
+- vulkan_engine2d_readback_rect_actual_pixels_path=build/vulkan-engine2d-readback/rect-actual-u32.json
+- vulkan_engine2d_readback_blur_or_tolerance_used=false
+- vulkan_engine2d_readback_vulkan_strict_exit_code=0
+- vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=0
+- vulkan_engine2d_readback_evidence_log=build/vulkan-engine2d-readback/evidence.log
+- vulkan_engine2d_readback_vulkan_strict_log=build/vulkan-engine2d-readback/vulkan_strict.json
+- vulkan_engine2d_readback_cpu_vulkan_parity_log=build/vulkan-engine2d-readback/engine2d_cpu_vulkan_parity.json
+
+## Evidence Log
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- evidence_program=engine2d_vulkan_readback
+- vulkan_probe_status=Initialized
+- vulkan_probe_available=true
+- vulkan_probe_diagnostic=requested=vulkan;selected=vulkan;status=Initialized;api=vulkan;gate=;shader=none;reason=Vulkan initialized
+- vulkan_available=true
+- strict_create_status=pass
+- backend_name=vulkan
+- clear_readback_pixels=256
+- clear_expected_checksum=140735349260160
+- clear_actual_checksum=140735349260160
+- clear_expected_pixels_path=build/vulkan-engine2d-readback/clear-expected-u32.json
+- clear_actual_pixels_path=build/vulkan-engine2d-readback/clear-actual-u32.json
+- clear_expected_pixels_written=true
+- clear_actual_pixels_written=true
+- clear_mismatches=0
+- rect_readback_pixels=256
+- rect_expected_checksum=140781974135910
+- rect_actual_checksum=140781974135910
+- rect_mismatches=0
+- rect_expected_pixels_path=build/vulkan-engine2d-readback/rect-expected-u32.json
+- rect_actual_pixels_path=build/vulkan-engine2d-readback/rect-actual-u32.json
+- rect_expected_pixels_written=true
+- rect_actual_pixels_written=true
+- present_exercised=true
+- readback_exercised=true
+- clear_status=pass
+- rect_status=pass
+- evidence_status=pass
+- overall=pass

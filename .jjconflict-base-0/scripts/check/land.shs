@@ -1,0 +1,101 @@
+#!/bin/sh
+# land.shs — gate committed content, then optionally submit one owned work branch.
+#
+# Why this exists (doc/08_tracking/bug/jj_push_bypasses_rules_sdl_gates_2026-08-11.md):
+# `.git/hooks/pre-push` fans out to ~57 guards, including the rules.sdl shrink
+# gates (check-rules-sdl.shs, check-rules-sdl-integrity.shs). That hook only
+# fires on a REAL `git push`. This repo's documented VCS is jj
+# (.claude/rules/vcs.md), and jj's push path — `jj git push`, and the `sj`
+# wrapper around it (bin/sj -> src/app/sj/main.spl) — is a thin passthrough to
+# jj/git subcommands with NO push-specific hook point. jj does not support
+# pre-push hooks at all. Confirmed by adversarial review 2026-08-11: on the
+# former direct-protected-ref landing flow, the quick-group rules.sdl gates
+# never ran. The only real enforcement
+# left was `bin/simple build bootstrap` (full group), which nobody runs on
+# every landing.
+#
+# This script closes the gap at the WRAPPER SEAM: it runs the same two guards
+# the git pre-push hook would have run, in --ref mode against COMMITTED
+# content (never the shared working copy — see reference_measurement_requires
+# _a_pinned_worktree.md), and refuses to push if either verdict is not PASS.
+# Only on a clean gate does it perform the actual push.
+#
+# Usage: sh scripts/check/land.shs [--dry-run|--submit]
+#   --dry-run   run the gates and print the verdicts; this is the default.
+#   --submit    push only the current work/* branch for protected integration.
+#
+# Verdict discipline mirrors the other pre-push guards: read the LAST line of
+# each guard's stdout, not just its exit code (a piped exit status lies).
+# Recursion guard: refuse to run at SIMPLE_SHS_DEPTH >= SIMPLE_SHS_MAX_DEPTH (exit 3).
+case "$0" in */*) . "${0%/*}/../lib/recursion_guard.shs" ;; *) . ./scripts/lib/recursion_guard.shs ;; esac
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "land.shs: cannot cd to repo root $REPO_ROOT" >&2; exit 2; }
+
+SUBMIT=0
+case "${1:-}" in
+    --dry-run|"") ;;
+    --submit) SUBMIT=1 ;;
+    *) echo "usage: $0 [--dry-run|--submit]" >&2; exit 2 ;;
+esac
+
+WORK_BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+case "$WORK_BRANCH" in
+    work/*) ;;
+    *) echo "land.shs: current branch must be an owned work/* branch" >&2; exit 2 ;;
+esac
+TARGET_REF=${LAND_TARGET_REF:-main}
+case "$TARGET_REF" in
+    main|release/*) ;;
+    *) echo "land.shs: LAND_TARGET_REF must be main or release/X.Y" >&2; exit 2 ;;
+esac
+
+# Resolve the exact commit owned by the current work branch. Never infer a
+# protected target or an unbookmarked JJ working-copy parent.
+TIP=$(git rev-parse "refs/heads/$WORK_BRANCH" 2>/dev/null || true)
+if [ -z "$TIP" ]; then
+    echo "land.shs: could not resolve TIP commit via jj or git — refusing to push blind" >&2
+    exit 2
+fi
+
+# Resolve the exact protected target snapshot used by the admission gates.
+BASE=$(git rev-parse "origin/$TARGET_REF" 2>/dev/null) \
+    || BASE=""
+if [ -z "$BASE" ]; then
+    echo "land.shs: could not resolve BASE (origin/$TARGET_REF) — refusing to submit blind" >&2
+    exit 2
+fi
+
+echo "land.shs: gating BASE=$BASE TIP=$TIP" >&2
+
+RULES_OUT=$(sh scripts/check/check-rules-sdl.shs --group quick --ref "$TIP" 2>&1)
+RULES_CODE=$?
+RULES_VERDICT=$(printf '%s\n' "$RULES_OUT" | tail -1)
+printf '%s\n' "$RULES_OUT" >&2
+
+INTEGRITY_OUT=$(sh scripts/check/check-rules-sdl-integrity.shs "$BASE" "$TIP" 2>&1)
+INTEGRITY_CODE=$?
+INTEGRITY_VERDICT=$(printf '%s\n' "$INTEGRITY_OUT" | tail -1)
+printf '%s\n' "$INTEGRITY_OUT" >&2
+
+case "$RULES_VERDICT" in
+    PASS*) ;;
+    *) echo "land.shs: REFUSING TO PUSH — check-rules-sdl.shs verdict: $RULES_VERDICT" >&2; exit 1 ;;
+esac
+case "$INTEGRITY_VERDICT" in
+    PASS*) ;;
+    *) echo "land.shs: REFUSING TO PUSH — check-rules-sdl-integrity.shs verdict: $INTEGRITY_VERDICT" >&2; exit 1 ;;
+esac
+[ "$RULES_CODE" -eq 0 ] || { echo "land.shs: REFUSING TO PUSH — check-rules-sdl.shs exited $RULES_CODE despite PASS text" >&2; exit 1; }
+[ "$INTEGRITY_CODE" -eq 0 ] || { echo "land.shs: REFUSING TO PUSH — check-rules-sdl-integrity.shs exited $INTEGRITY_CODE despite PASS text" >&2; exit 1; }
+
+echo "land.shs: both gates PASS for owned branch $WORK_BRANCH" >&2
+
+if [ "$SUBMIT" -ne 1 ]; then
+    echo "land.shs: dry-run complete; use --submit to push only $WORK_BRANCH" >&2
+    exit 0
+fi
+
+git push origin "refs/heads/$WORK_BRANCH:refs/heads/$WORK_BRANCH"
+echo "land.shs: submitted $WORK_BRANCH; protected integration remains a separate reviewed CAS operation" >&2

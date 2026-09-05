@@ -1,0 +1,89 @@
+"""Pure fallback, routing, context-selection, and loop-policy helpers."""
+
+use app.llm_caret.messaging.domain.capability.{CapabilityLevel}
+use app.llm_caret.messaging.domain.model.{AgentBinding, AgentHandler, MessageOrigin, RoomMessage}
+
+struct FallbackPlan:
+    action: text
+    error: text
+
+struct RouteCandidate:
+    agent_id: text
+    handler: AgentHandler
+    mentioned: bool
+    replied_to: bool
+    assigned: bool
+    capability_match: bool
+    room_owner: bool
+
+struct RouteDecision:
+    agent_id: text
+    reason: text
+
+struct LoopDecision:
+    allowed: bool
+    reason: text
+
+pub fn plan_capability_fallback(level: CapabilityLevel, operation: text) -> FallbackPlan:
+    match level:
+        case CapabilityLevel.Native: FallbackPlan(action: "native:" + operation, error: "")
+        case CapabilityLevel.Emulated: FallbackPlan(action: "emulated:" + operation, error: "")
+        case CapabilityLevel.PrimitiveSidecar: FallbackPlan(action: "primitive_sidecar:" + operation, error: "")
+        case CapabilityLevel.Unsupported: FallbackPlan(action: "", error: "capability_not_supported:" + operation)
+
+fn _unique_match(candidates: [RouteCandidate], field: text) -> text:
+    var result = ""
+    var count = 0
+    for candidate in candidates:
+        val matches = if field == "mentioned": candidate.mentioned elif field == "replied": candidate.replied_to elif field == "assigned": candidate.assigned elif field == "capability": candidate.capability_match else: candidate.room_owner
+        if matches:
+            result = candidate.agent_id
+            count = count + 1
+    if count == 1: result else: ""
+
+pub fn route_message(candidates: [RouteCandidate]) -> RouteDecision:
+    for field in ["mentioned", "replied", "assigned", "capability", "owner"]:
+        val agent_id = _unique_match(candidates, field)
+        if agent_id != "":
+            return RouteDecision(agent_id: agent_id, reason: field)
+    for candidate in candidates:
+        if candidate.handler == AgentHandler.Main:
+            return RouteDecision(agent_id: candidate.agent_id, reason: "main_fallback")
+    RouteDecision(agent_id: "", reason: "agent_unavailable")
+
+fn _contains_message(messages: [RoomMessage], message_id: text) -> bool:
+    for message in messages:
+        if message.message_id.value == message_id:
+            return true
+    false
+
+fn _append_unique(messages: [RoomMessage], message: RoomMessage) -> [RoomMessage]:
+    if _contains_message(messages, message.message_id.value): messages else: messages + [message]
+
+pub fn select_previous_context(history: [RoomMessage], trigger: RoomMessage, previous_count: i64) -> [RoomMessage]:
+    var selected: [RoomMessage] = []
+    var i = history.len() - 1
+    var remaining = previous_count
+    while i >= 0 and remaining > 0:
+        val message = history[i]
+        val same_thread = trigger.thread_root_id != "" and message.thread_root_id == trigger.thread_root_id
+        val eligible_room = trigger.thread_root_id == "" and message.origin != MessageOrigin.AgentUpdate
+        if message.room_seq < trigger.room_seq and (same_thread or eligible_room):
+            selected = [message] + selected
+            remaining = remaining - 1
+        i = i - 1
+    _append_unique(selected, trigger)
+
+pub fn loop_guard(message: RoomMessage, target_agent_id: text, already_handled: bool, max_hops: i64, explicit_reply: bool) -> LoopDecision:
+    if already_handled:
+        return LoopDecision(allowed: false, reason: "duplicate_event")
+    if message.sender_agent_id != "" and message.sender_agent_id == target_agent_id:
+        return LoopDecision(allowed: false, reason: "self_mirror")
+    if message.hop_count >= max_hops:
+        return LoopDecision(allowed: false, reason: "handoff_limit")
+    if message.origin == MessageOrigin.AgentUpdate and not explicit_reply:
+        return LoopDecision(allowed: false, reason: "progress_non_triggering")
+    LoopDecision(allowed: true, reason: "ok")
+
+export FallbackPlan, RouteCandidate, RouteDecision, LoopDecision
+export plan_capability_fallback, route_message, select_previous_context, loop_guard

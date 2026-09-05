@@ -1,0 +1,31 @@
+# codex-system-test
+# Isolated backend evidence: each target width receives a fresh GHDL workdir.
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_unique_workdir, ghdl_analyze_in,
+    ghdl_elaborate_in, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v5_to_vhdl.{
+    compile_strict_riscv_scalar_runtime_pipeline_v5}
+
+fn check_runtime_pipeline_v5_ghdl(entity_name: text, config: CoreConfig,
+    bus: LsuConfig) -> bool:
+    val emitted = compile_strict_riscv_scalar_runtime_pipeline_v5(entity_name, config, bus)
+    if not emitted.is_success(): return false
+    val workdir = ghdl_unique_workdir(entity_name)
+    if workdir.is_err(): return false
+    val isolated = workdir.ok().unwrap()
+    val path = isolated + "/" + entity_name + ".vhd"
+    if not vhdl_write_file(path, emitted.vhdl): return false
+    if not ghdl_analyze_in(path, isolated).success: return false
+    ghdl_elaborate_in(entity_name, isolated).success
+
+describe "runtime scalar pipeline v5 strict VHDL GHDL integration":
+    slow_it "hard-fails without GHDL and analyzes and elaborates isolated RV32 and RV64 tops":
+        val available = ghdl_available()
+        expect(available).to_equal(true)
+        if not available: return
+        expect(check_runtime_pipeline_v5_ghdl("runtime_pipeline_v5_ghdl_rv32",
+            CoreConfig.rv32(), LsuConfig.rv32_product_default())).to_equal(true)
+        expect(check_runtime_pipeline_v5_ghdl("runtime_pipeline_v5_ghdl_rv64",
+            CoreConfig.rv64(), LsuConfig.rv64_product_default())).to_equal(true)

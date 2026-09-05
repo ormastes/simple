@@ -1,0 +1,246 @@
+#!/bin/sh
+
+# Shared parser for the SimpleOS compiler-filesystem QEMU serial contract.
+# This file is sourced by the checker and its hermetic adversarial tests.
+
+simpleos_compiler_fs_fail() {
+    printf '%s\n' "simpleos_compiler_filesystem_qemu_status=fail" >&2
+    printf '%s\n' "simpleos_compiler_filesystem_qemu_reason=$1" >&2
+    return 1
+}
+
+simpleos_compiler_fs_valid_sha256() {
+    case "$1" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    [ "${#1}" -eq 64 ]
+}
+
+simpleos_compiler_fs_valid_hex_bytes() {
+    case "$1" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    [ $((${#1} % 2)) -eq 0 ]
+}
+
+simpleos_compiler_fs_hex_sha256() {
+    simpleos_compiler_fs_valid_hex_bytes "$1" || return 1
+    printf '%s' "$1" | xxd -r -p | sha256sum | awk '{print $1}'
+}
+
+simpleos_compiler_fs_field_once() {
+    line=$1
+    key=$2
+    count=0
+    value=
+    old_ifs=$IFS
+    IFS=' '
+    for word in $line; do
+        case "$word" in
+            "$key"=*) count=$((count + 1)); value=${word#*=} ;;
+        esac
+    done
+    IFS=$old_ifs
+    [ "$count" -eq 1 ] || return 1
+    printf '%s\n' "$value"
+}
+
+simpleos_compiler_fs_unique_line() {
+    prefix=$1
+    log=$2
+    count=$(grep -a -c "^${prefix}" "$log" || true)
+    [ "$count" -eq 1 ] || return 1
+    grep -a "^${prefix}" "$log"
+}
+
+simpleos_compiler_fs_validate_log() {
+    log=$1
+    expected_arch=$2
+    expected_image=$3
+    expected_image_sha=$4
+    expected_nonce=$5
+
+    [ -s "$log" ] || simpleos_compiler_fs_fail empty-serial-log || return 1
+    if LC_ALL=C grep -a -E '(_FAIL|_SKIP|(^|[[:space:]])(FAIL|SKIP)([[:space:]:]|$)|status=(fail|skip))' "$log" >/dev/null 2>&1; then
+        simpleos_compiler_fs_fail guest-reported-fail-or-skip
+        return 1
+    fi
+
+    begin=$(simpleos_compiler_fs_unique_line 'SIMPLEOS_COMPILER_FS_BEGIN ' "$log") || {
+        simpleos_compiler_fs_fail begin-marker-count; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$begin" arch || true)" = "$expected_arch" ] || {
+        simpleos_compiler_fs_fail begin-arch-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$begin" nonce || true)" = "$expected_nonce" ] || {
+        simpleos_compiler_fs_fail begin-nonce-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$begin" protocol || true)" = 2 ] || {
+        simpleos_compiler_fs_fail protocol-version; return 1;
+    }
+
+    fwcfg=$(simpleos_compiler_fs_unique_line 'SIMPLEOS_COMPILER_FS_FWCFG ' "$log") || {
+        simpleos_compiler_fs_fail fwcfg-marker-count; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$fwcfg" name || true)" = opt/simpleos.cfs.nonce ] || {
+        simpleos_compiler_fs_fail fwcfg-name; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$fwcfg" nonce || true)" = "$expected_nonce" ] || {
+        simpleos_compiler_fs_fail fwcfg-nonce-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$fwcfg" status || true)" = pass ] || {
+        simpleos_compiler_fs_fail fwcfg-status; return 1;
+    }
+
+    qemu_image=$(simpleos_compiler_fs_unique_line 'SIMPLEOS_COMPILER_FS_QEMU_IMAGE ' "$log") || {
+        simpleos_compiler_fs_fail qemu-image-marker-count; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$qemu_image" path || true)" = "$expected_image" ] || {
+        simpleos_compiler_fs_fail qemu-image-path-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$qemu_image" sha256 || true)" = "$expected_image_sha" ] || {
+        simpleos_compiler_fs_fail qemu-image-sha256-mismatch; return 1;
+    }
+    expected_drive_arg="file=$expected_image,if=none,id=cfsexecns1,format=raw"
+    [ "$(simpleos_compiler_fs_field_once "$qemu_image" drive_arg || true)" = "$expected_drive_arg" ] || {
+        simpleos_compiler_fs_fail qemu-image-drive-arg-mismatch; return 1;
+    }
+
+    required_roles='/usr/bin/simple /usr/bin/simple.smf /bin/simple /bin/simple.smf /sys/apps/simple /sys/apps/simple.smf /sys/apps/simple_compiler /sys/apps/simple_compiler.smf /sys/apps/simple_interpreter /sys/apps/simple_interpreter.smf /sys/apps/simple_loader /sys/apps/simple_loader.smf /SYS/SIMPLETOOL.SDN'
+    [ "$(grep -a -c '^SIMPLEOS_COMPILER_FS_ROLE ' "$log" || true)" -eq 13 ] || {
+        simpleos_compiler_fs_fail role-total-count; return 1;
+    }
+    for path in $required_roles; do
+        line=$(simpleos_compiler_fs_unique_line "SIMPLEOS_COMPILER_FS_ROLE path=$path " "$log") || {
+            simpleos_compiler_fs_fail role-marker-count
+            return 1
+        }
+        digest=$(simpleos_compiler_fs_field_once "$line" sha256 || true)
+        simpleos_compiler_fs_valid_sha256 "$digest" || {
+            simpleos_compiler_fs_fail role-sha256-invalid
+            return 1
+        }
+        kind=$(simpleos_compiler_fs_field_once "$line" kind || true)
+        canonical=$(simpleos_compiler_fs_field_once "$line" canonical || true)
+        if [ "$path" = /SYS/SIMPLETOOL.SDN ]; then
+            [ "$kind" = manifest ] && [ "$canonical" = /SYS/SIMPLETOOL.SDN ] || {
+                simpleos_compiler_fs_fail manifest-role-binding; return 1;
+            }
+            role_manifest_sha=$digest
+        else
+            [ "$kind" = exec_alias ] && [ "$canonical" = /usr/bin/simple ] || {
+                simpleos_compiler_fs_fail executable-role-binding; return 1;
+            }
+            if [ "$path" = /usr/bin/simple ]; then role_simple_sha=$digest; fi
+        fi
+    done
+
+    version=$(simpleos_compiler_fs_unique_line 'SIMPLEOS_COMPILER_FS_VERSION ' "$log") || {
+        simpleos_compiler_fs_fail version-marker-count; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$version" path || true)" = /usr/bin/simple ] || {
+        simpleos_compiler_fs_fail version-path-not-filesystem; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$version" status || true)" = pass ] || {
+        simpleos_compiler_fs_fail version-status; return 1;
+    }
+    simple_sha=$(simpleos_compiler_fs_field_once "$version" simple_sha256 || true)
+    version_sha=$(simpleos_compiler_fs_field_once "$version" version_output_sha256 || true)
+    version_stdout_hex=$(simpleos_compiler_fs_field_once "$version" stdout_hex || true)
+    version_manifest_sha=$(simpleos_compiler_fs_field_once "$version" manifest_sha256 || true)
+    version_nonce=$(simpleos_compiler_fs_field_once "$version" nonce || true)
+    version_exit=$(simpleos_compiler_fs_field_once "$version" exit || true)
+    simpleos_compiler_fs_valid_sha256 "$simple_sha" && simpleos_compiler_fs_valid_sha256 "$version_sha" && simpleos_compiler_fs_valid_sha256 "$version_manifest_sha" || {
+        simpleos_compiler_fs_fail version-sha256-invalid; return 1;
+    }
+    simpleos_compiler_fs_valid_hex_bytes "$version_stdout_hex" || {
+        simpleos_compiler_fs_fail version-stdout-hex-invalid; return 1;
+    }
+    [ "$(simpleos_compiler_fs_hex_sha256 "$version_stdout_hex" || true)" = "$version_sha" ] || {
+        simpleos_compiler_fs_fail version-observed-output-hash-mismatch; return 1;
+    }
+    case "$version_stdout_hex" in
+        53696d706c652076*0a) ;;
+        *) simpleos_compiler_fs_fail version-observed-output-invalid; return 1 ;;
+    esac
+    [ "$version_nonce" = "$expected_nonce" ] && [ "$version_exit" = 0 ] || {
+        simpleos_compiler_fs_fail version-exit-binding; return 1;
+    }
+    [ "$role_simple_sha" = "$simple_sha" ] || {
+        simpleos_compiler_fs_fail role-version-hash-mismatch; return 1;
+    }
+    [ "$role_manifest_sha" = "$version_manifest_sha" ] || {
+        simpleos_compiler_fs_fail role-manifest-hash-mismatch; return 1;
+    }
+
+    compile=$(simpleos_compiler_fs_unique_line 'SIMPLEOS_COMPILER_FS_COMPILE ' "$log") || {
+        simpleos_compiler_fs_fail compile-marker-count; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$compile" compiler || true)" = /usr/bin/simple ] || {
+        simpleos_compiler_fs_fail compile-compiler-not-filesystem; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$compile" source || true)" = /HELLO.SPL ] || {
+        simpleos_compiler_fs_fail compile-source-not-guest; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$compile" artifact || true)" = /TMP/HELLO ] || {
+        simpleos_compiler_fs_fail compile-artifact-not-filesystem; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$compile" nonce || true)" = "$expected_nonce" ] || {
+        simpleos_compiler_fs_fail compile-nonce-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$compile" status || true)" = pass ] || {
+        simpleos_compiler_fs_fail compile-status; return 1;
+    }
+    compile_artifact_sha=$(simpleos_compiler_fs_field_once "$compile" artifact_sha256 || true)
+    compile_source_sha=$(simpleos_compiler_fs_field_once "$compile" source_sha256 || true)
+    simpleos_compiler_fs_valid_sha256 "$compile_artifact_sha" && simpleos_compiler_fs_valid_sha256 "$compile_source_sha" || {
+        simpleos_compiler_fs_fail compile-sha256-invalid; return 1;
+    }
+
+    exec_line=$(simpleos_compiler_fs_unique_line 'SIMPLEOS_COMPILER_FS_EXEC ' "$log") || {
+        simpleos_compiler_fs_fail exec-marker-count; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$exec_line" path || true)" = /TMP/HELLO ] || {
+        simpleos_compiler_fs_fail exec-path-not-filesystem; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$exec_line" artifact_sha256 || true)" = "$compile_artifact_sha" ] || {
+        simpleos_compiler_fs_fail exec-artifact-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$exec_line" nonce || true)" = "$expected_nonce" ] || {
+        simpleos_compiler_fs_fail exec-nonce-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$exec_line" exit || true)" = 0 ] || {
+        simpleos_compiler_fs_fail exec-status; return 1;
+    }
+    for key in stdout_sha256; do
+        digest=$(simpleos_compiler_fs_field_once "$exec_line" "$key" || true)
+        simpleos_compiler_fs_valid_sha256 "$digest" || {
+            simpleos_compiler_fs_fail "exec-$key-invalid"; return 1;
+        }
+    done
+    exec_stdout_hex=$(simpleos_compiler_fs_field_once "$exec_line" stdout_hex || true)
+    simpleos_compiler_fs_valid_hex_bytes "$exec_stdout_hex" || {
+        simpleos_compiler_fs_fail exec-stdout-hex-invalid; return 1;
+    }
+    [ "$exec_stdout_hex" = 48656c6c6f2066726f6d2053696d706c654f530a ] || {
+        simpleos_compiler_fs_fail exec-observed-output-invalid; return 1;
+    }
+    exec_stdout_sha=$(simpleos_compiler_fs_field_once "$exec_line" stdout_sha256 || true)
+    [ "$(simpleos_compiler_fs_hex_sha256 "$exec_stdout_hex" || true)" = "$exec_stdout_sha" ] || {
+        simpleos_compiler_fs_fail exec-observed-output-hash-mismatch; return 1;
+    }
+
+    pass=$(simpleos_compiler_fs_unique_line 'SIMPLEOS_COMPILER_FS_PASS ' "$log") || {
+        simpleos_compiler_fs_fail pass-marker-count; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$pass" arch || true)" = "$expected_arch" ] || {
+        simpleos_compiler_fs_fail pass-arch-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$pass" nonce || true)" = "$expected_nonce" ] || {
+        simpleos_compiler_fs_fail pass-nonce-mismatch; return 1;
+    }
+    [ "$(simpleos_compiler_fs_field_once "$pass" status || true)" = pass ] || {
+        simpleos_compiler_fs_fail pass-status; return 1;
+    }
+    printf '%s\n' "$simple_sha"
+}

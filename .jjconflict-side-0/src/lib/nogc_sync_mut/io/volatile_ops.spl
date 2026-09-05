@@ -1,0 +1,180 @@
+# Volatile Memory Operations - SFFI Wrappers
+#
+# Provides volatile read/write primitives for memory-mapped I/O (MMIO).
+# Essential for embedded systems where compiler optimizations must not
+# reorder or eliminate hardware register accesses.
+#
+# SFFI pattern:
+#   - extern fn rt_volatile_* : raw runtime bindings
+#   - fn volatile_* : Simple API wrappers
+#
+# Usage:
+#   val gpio_in = volatile_read_u32(0x40020010)
+#   volatile_write_u32(0x40020014, 0x0001)
+#   memory_barrier()
+#
+# Memory Barriers:
+#   memory_barrier()  - full fence (prevents reordering across barrier)
+#   load_barrier()    - acquire fence (loads before barrier are visible)
+#   store_barrier()   - release fence (stores before barrier are committed)
+
+# ============================================================================
+# Extern Declarations - Volatile Reads
+# ============================================================================
+
+@unsafe(reason: "raw volatile u8 address dereference ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_read_u8(addr: i64) -> i64
+@unsafe(reason: "raw volatile u16 address dereference ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_read_u16(addr: i64) -> i64
+@unsafe(reason: "raw volatile u32 address dereference ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_read_u32(addr: i64) -> i64
+@unsafe(reason: "raw volatile u64 address dereference ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_read_u64(addr: i64) -> i64
+
+# ============================================================================
+# Extern Declarations - Volatile Writes
+# ============================================================================
+
+@unsafe(reason: "raw volatile u8 address write ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_write_u8(addr: i64, value: i64)
+@unsafe(reason: "raw volatile u16 address write ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_write_u16(addr: i64, value: i64)
+@unsafe(reason: "raw volatile u32 address write ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_write_u32(addr: i64, value: i64)
+@unsafe(reason: "raw volatile u64 address write ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_write_u64(addr: i64, value: i64)
+
+# ============================================================================
+# Extern Declarations - Memory Barriers
+# ============================================================================
+
+@unsafe(reason: "raw native full-memory-fence ABI", capabilities: [ffi])
+extern fn rt_memory_barrier()
+@unsafe(reason: "raw native acquire-fence ABI", capabilities: [ffi])
+extern fn rt_load_barrier()
+@unsafe(reason: "raw native release-fence ABI", capabilities: [ffi])
+extern fn rt_store_barrier()
+
+# ============================================================================
+# Simple API - Volatile Reads
+# ============================================================================
+
+fn volatile_read_u8(addr: i64) -> i64:
+    # Read a single byte from a volatile memory address.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_read_u8(addr)
+
+fn volatile_read_u16(addr: i64) -> i64:
+    # Read a 16-bit value from a volatile memory address.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_read_u16(addr)
+
+fn volatile_read_u32(addr: i64) -> i64:
+    # Read a 32-bit value from a volatile memory address.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_read_u32(addr)
+
+fn volatile_read_u64(addr: i64) -> i64:
+    # Read a 64-bit value from a volatile memory address.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_read_u64(addr)
+
+# ============================================================================
+# Simple API - Volatile Writes
+# ============================================================================
+
+# reason positional io volatile_ops API
+fn volatile_write_u8(addr: i64, value: i64):
+    # Write a single byte to a volatile memory address.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_write_u8(addr, value)
+
+# reason positional io volatile_ops API
+fn volatile_write_u16(addr: i64, value: i64):
+    # Write a 16-bit value to a volatile memory address.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_write_u16(addr, value)
+
+# reason positional io volatile_ops API
+fn volatile_write_u32(addr: i64, value: i64):
+    # Write a 32-bit value to a volatile memory address.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_write_u32(addr, value)
+
+# reason positional io volatile_ops API
+fn volatile_write_u64(addr: i64, value: i64):
+    # Write a 64-bit value to a volatile memory address.
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_write_u64(addr, value)
+
+# ============================================================================
+# Simple API - Memory Barriers
+# ============================================================================
+
+fn memory_barrier():
+    # Full memory barrier. Prevents reordering of loads and stores.
+    unsafe(capabilities: [ffi]):
+        rt_memory_barrier()
+
+fn load_barrier():
+    # Acquire barrier. All loads after this point see stores from before.
+    unsafe(capabilities: [ffi]):
+        rt_load_barrier()
+
+fn store_barrier():
+    # Release barrier. All stores before this point are visible after.
+    unsafe(capabilities: [ffi]):
+        rt_store_barrier()
+
+fn has_runtime_volatiles() -> bool:
+    # Every supported lane owns the complete provider family. Missing symbols
+    # fail during interpreter resolution or native link/admission.
+    true
+
+fn volatile_read_u64_required(addr: i64) -> i64:
+    """Native-only volatile read; callers require the runtime binding."""
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_read_u64(addr)
+
+fn volatile_write_u64_required(addr: i64, value: i64):
+    """Native-only volatile write; callers require the runtime binding."""
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_write_u64(addr, value)
+
+fn memory_barrier_required():
+    """Native-only full barrier; callers require the runtime binding."""
+    unsafe(capabilities: [ffi]):
+        rt_memory_barrier()
+
+# ============================================================================
+# Utility
+# ============================================================================
+
+# reason positional io volatile_ops API
+fn volatile_read_modify_write_u32(addr: i64, mask: i64, value: i64):
+    # Atomic read-modify-write on a 32-bit volatile register.
+    # Clears the bits in mask, then sets the bits in value.
+    val current = volatile_read_u32(addr)
+    val mask_inv = mask_invert_u32(mask)
+    val cleared = bitand_u32(current, mask_inv)
+    val updated = bitor_u32(cleared, bitand_u32(value, mask))
+    volatile_write_u32(addr, updated)
+
+# reason positional io volatile_ops API
+fn bitand_u32(a: i64, b: i64) -> i64:
+    # Bitwise AND for 32-bit values, masked to u32 range.
+    (a & b) & 4294967295
+
+# reason positional io volatile_ops API
+fn bitor_u32(a: i64, b: i64) -> i64:
+    # Bitwise OR for 32-bit values, masked to u32 range.
+    (a | b) & 4294967295
+
+fn mask_invert_u32(mask: i64) -> i64:
+    # Invert a 32-bit mask (ones complement within 32 bits).
+    val max_u32: i64 = 4294967295
+    max_u32 - mask
+
+# ============================================================================
+# Exports
+# ============================================================================

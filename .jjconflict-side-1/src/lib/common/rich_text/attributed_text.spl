@@ -1,0 +1,148 @@
+# Attributed Text — rich document model with inline styles.
+#
+# Provides: InlineStyle, TextSpan, DocBlock, CommentDef, RevisionDef,
+#           RichDocument, empty_document, comment_def_for, revision_def_for,
+#           document_word_count, document_headings, block_to_plain_text,
+#           spans_to_plain_text.
+#
+# Track-changes note: revision OPERATIONS (tracked_insert/tracked_delete/
+# accept/reject/summary) live in track_changes.spl — this file only carries
+# the data model (TextSpan.revision_id + RichDocument.revisions), mirroring
+# how CommentDef sits here while comment-producing logic lives elsewhere.
+
+enum InlineStyle:
+    Normal
+    Bold
+    Italic
+    Underline
+    Code
+    Strike
+
+enum BlockKind:
+    Paragraph
+    Heading1
+    Heading2
+    Heading3
+    BulletItem
+    OrderedItem
+    CodeBlock
+    Quote
+    FootnoteDef   # a `[^id]: note text` definition, collected document-level
+
+struct TextSpan:
+    text: text
+    style: InlineStyle
+    link_url: text   # "" = plain span; non-empty = hyperlink target (markdown [text](url))
+    footnote_id: text   # "" = plain span; non-empty = footnote reference marker
+                        # (markdown `[^id]`, docx <w:footnoteReference w:id="id"/>).
+                        # A FootnoteDef block's first span reuses this field to
+                        # carry ITS OWN id (the definition's `[^id]:` label),
+                        # not a reference — see file_formats.spl/odf_ooxml.spl.
+    comment_id: text   # "" = uncommented; non-empty = this span is the target
+                        # of a word comment (markdown `[>>author: text<<]`
+                        # attached right after it, docx <w:commentRangeStart/
+                        # End w:id="id"/> + <w:commentReference w:id="id"/>).
+                        # Unlike footnote_id, the id here is always a REFERENCE:
+                        # the author/text payload lives in the document-level
+                        # `RichDocument.comments` list (see `CommentDef` below),
+                        # not reused on the span itself — a comment's markdown
+                        # form carries author+text inline at the point of use
+                        # (no separate `[^id]:`-style definition line elsewhere
+                        # in the source), so a FootnoteDef-shaped BlockKind
+                        # would misplace it; a parallel doc-level list keeps
+                        # the span model to this one field. See file_formats.spl
+                        # / odf_ooxml.spl / word/html_render.spl.
+    revision_id: text   # "" = untouched by track-changes; non-empty = this
+                        # span is part of an insertion or deletion recorded in
+                        # `RichDocument.revisions` (Word track-changes). Same
+                        # reference-only shape as `comment_id`: the payload
+                        # (author/kind/timestamp) lives doc-level in a
+                        # `RevisionDef`, looked up by id — see `revision_def_for`
+                        # below and src/lib/common/rich_text/track_changes.spl,
+                        # which owns all revision-producing operations
+                        # (tracked_insert/tracked_delete/accept/reject).
+                        # Office semantics: a delete-revision span's text
+                        # STAYS in the document (not removed) until the
+                        # revision is accepted — see track_changes.spl.
+
+struct CommentDef:
+    """One word comment's payload, looked up by `TextSpan.comment_id`. Plain
+    text only (no inline styling) — comments are metadata about a span, not
+    renderable document content in their own right."""
+    id: text
+    author: text
+    text: text
+
+struct RevisionDef:
+    """One track-changes revision's payload, looked up by `TextSpan.revision_id`.
+    `kind` is "insert" or "delete" (a span's revision_id always points at
+    exactly one RevisionDef, so a span cannot be both — a delete-over-an-
+    insert boundary splits into separate spans, each with its own id, same
+    as any other span split in this model)."""
+    id: text
+    author: text
+    kind: text          # "insert" | "delete"
+    timestamp_text: text
+
+struct DocBlock:
+    kind: BlockKind
+    spans: [TextSpan]
+
+class RichDocument:
+    title: text
+    blocks: [DocBlock]
+    comments: [CommentDef]   # doc-level list; see `TextSpan.comment_id`
+    revisions: [RevisionDef]   # doc-level list; see `TextSpan.revision_id`
+
+    static fn new(title: text) -> RichDocument:
+        RichDocument(title: title, blocks: [], comments: [], revisions: [])
+
+fn empty_document(title: text) -> RichDocument:
+    RichDocument.new(title)
+
+fn comment_def_for(comments: [CommentDef], id: text) -> CommentDef:
+    """Linear lookup of a CommentDef by id; an empty CommentDef (all fields
+    "") if not found — callers treat that as "no comment" defensively rather
+    than crashing on a dangling comment_id."""
+    for c in comments:
+        if c.id == id:
+            return c
+    CommentDef(id: "", author: "", text: "")
+
+fn revision_def_for(revisions: [RevisionDef], id: text) -> RevisionDef:
+    """Linear lookup of a RevisionDef by id; an empty RevisionDef (all fields
+    "") if not found — mirrors `comment_def_for`'s defensive-empty-value
+    contract for a dangling revision_id."""
+    for r in revisions:
+        if r.id == id:
+            return r
+    RevisionDef(id: "", author: "", kind: "", timestamp_text: "")
+
+fn spans_to_plain_text(spans: [TextSpan]) -> text:
+    var out = ""
+    for s in spans:
+        out = out + s.text
+    out
+
+fn block_to_plain_text(block: DocBlock) -> text:
+    spans_to_plain_text(block.spans)
+
+fn document_word_count(doc: RichDocument) -> i64:
+    var count: i64 = 0
+    for block in doc.blocks:
+        val plain = block_to_plain_text(block)
+        val words = plain.split(" ")
+        for w in words:
+            if w.trim().len() > 0:
+                count = count + 1
+    count
+
+fn document_headings(doc: RichDocument) -> [DocBlock]:
+    var headings: [DocBlock] = []
+    for block in doc.blocks:
+        match block.kind:
+            case Heading1: headings.push(block)
+            case Heading2: headings.push(block)
+            case Heading3: headings.push(block)
+            case _: pass_do_nothing
+    headings

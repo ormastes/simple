@@ -1,0 +1,105 @@
+"""Cortex-M33 Serial Console — CMSDK APB UART via MMIO.
+
+Implements early serial I/O over CMSDK APB UART.
+QEMU mps2-an505 (SSE-200 IoT Kit) maps UART0 at 0x40200000 (-serial stdio).
+
+CMSDK APB UART register map:
+  DATA      (+0x000): Data register (read/write single byte)
+  STATE     (+0x004): Status — bit 0 = TX full, bit 1 = RX full
+  CTRL      (+0x008): Control — bit 0 = TX en, bit 1 = RX en
+  INTCLEAR  (+0x00C): Interrupt clear
+  BAUDDIV   (+0x010): Baud rate divider (sysclk / baud)
+"""
+
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
+
+fn cmsdk_uart_data(base: u32) -> u64:
+    (base as u64) + 0x000
+
+fn cmsdk_uart_state(base: u32) -> u64:
+    (base as u64) + 0x004
+
+fn cmsdk_uart_ctrl(base: u32) -> u64:
+    (base as u64) + 0x008
+
+fn cmsdk_uart_bauddiv(base: u32) -> u64:
+    (base as u64) + 0x010
+
+fn cmsdk_uart_init(base: u32) -> bool:
+    mmio_write32(cmsdk_uart_bauddiv(base), 16)
+    mmio_write32(cmsdk_uart_ctrl(base), 0x03)
+    true
+
+fn cmsdk_uart_write_byte(base: u32, byte: u8):
+    while (mmio_read32(cmsdk_uart_state(base)) & 0x01) != 0:
+        pass_do_nothing
+    mmio_write32(cmsdk_uart_data(base), byte as u32)
+
+fn cmsdk_uart_read_byte(base: u32) -> i32:
+    val state = mmio_read32(cmsdk_uart_state(base))
+    if (state & 0x02) != 0:
+        return mmio_read32(cmsdk_uart_data(base)) as i32
+    return -1
+
+fn cmsdk_uart_write(base: u32, msg: text):
+    for i in 0..msg.len():
+        val ch = msg.char_at(i)
+        cmsdk_uart_write_byte(base, ch as u8)
+
+fn cmsdk_uart_writeln(base: u32, msg: text):
+    cmsdk_uart_write(base, msg)
+    cmsdk_uart_write_byte(base, 0x0D)
+    cmsdk_uart_write_byte(base, 0x0A)
+
+struct Cm33Console:
+    pass_dn
+
+var g_uart_ready: bool = false
+
+fn uart_base() -> u32:
+    0x40200000
+
+impl Cm33Console:
+    fn init():
+        if g_uart_ready:
+            return
+        g_uart_ready = cmsdk_uart_init(uart_base())
+
+    fn write_byte(byte: u8):
+        cmsdk_uart_write_byte(uart_base(), byte)
+
+    fn read_byte() -> i32:
+        cmsdk_uart_read_byte(uart_base())
+
+    fn write(msg: text):
+        if not g_uart_ready:
+            self.init()
+        cmsdk_uart_write(uart_base(), msg)
+
+    fn writeln(msg: text):
+        if not g_uart_ready:
+            self.init()
+        cmsdk_uart_writeln(uart_base(), msg)
+
+    fn base_addr() -> u32:
+        uart_base()
+
+fn uart_init():
+    var console = Cm33Console()
+    console.init()
+
+fn uart_write_byte(byte: u8):
+    val console = Cm33Console()
+    console.write_byte(byte)
+
+fn uart_write(msg: text):
+    val console = Cm33Console()
+    console.write(msg)
+
+fn uart_writeln(msg: text):
+    val console = Cm33Console()
+    console.writeln(msg)
+
+fn uart_read_byte() -> i32:
+    val console = Cm33Console()
+    console.read_byte()

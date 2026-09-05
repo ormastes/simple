@@ -1,0 +1,136 @@
+"""BLAS Level 1 specification tests — dot, axpy, nrm2, scal, copy, swap.
+
+Self-contained: inline sqrt helper; no external math lib required.
+All tests run under interpreter mode (SIMPLE_BLAS_BACKEND=mock).
+12 it-blocks; no skip() calls.
+
+Import path: use std.common.science_math.blas.*
+"""
+
+use std.spipe.*
+use std.common.science_math.blas_provider.{BlasProviderError, SwapResult}
+use std.common.science_math.blas.{
+    blas_axpy_f64,
+    blas_scal_f64,
+    blas_dot_f64,
+    blas_nrm2_f64,
+    blas_copy_f64,
+    blas_swap_f64,
+}
+
+# ---------------------------------------------------------------------------
+# Inline helper — approximate equality for f64
+# ---------------------------------------------------------------------------
+
+fn approx_eq(a: f64, b: f64, eps: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+    abs_diff < eps
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+describe "BLAS Level 1 — dot":
+    it "dot product of two vectors":
+        # [1,2,3] · [4,5,6] = 4+10+18 = 32
+        val x: [f64] = [1.0, 2.0, 3.0]
+        val y: [f64] = [4.0, 5.0, 6.0]
+        val result = blas_dot_f64(x, y)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(32.0)
+
+    it "dot product of orthogonal vectors is zero":
+        val x: [f64] = [1.0, 0.0]
+        val y: [f64] = [0.0, 1.0]
+        val result = blas_dot_f64(x, y)
+        expect(result.unwrap()).to_equal(0.0)
+
+    it "dot dimension mismatch returns error":
+        val x: [f64] = [1.0, 2.0]
+        val y: [f64] = [1.0, 2.0, 3.0]
+        val result = blas_dot_f64(x, y)
+        expect(result.is_err()).to_equal(true)
+
+describe "BLAS Level 1 — axpy":
+    it "axpy: alpha*x + y":
+        # 2*[1,2] + [3,4] = [5,8]
+        val x: [f64] = [1.0, 2.0]
+        val y: [f64] = [3.0, 4.0]
+        val result = blas_axpy_f64(2.0, x, y)
+        expect(result.is_ok()).to_equal(true)
+        val out = result.unwrap()
+        expect(out[0]).to_equal(5.0)
+        expect(out[1]).to_equal(8.0)
+
+    it "axpy dimension mismatch returns error":
+        val x: [f64] = [1.0, 2.0, 3.0]
+        val y: [f64] = [1.0, 2.0]
+        val result = blas_axpy_f64(1.0, x, y)
+        expect(result.is_err()).to_equal(true)
+
+describe "BLAS Level 1 — nrm2":
+    it "nrm2 of [3, 4] is 5 (Pythagorean triple)":
+        val x: [f64] = [3.0, 4.0]
+        val result = blas_nrm2_f64(x)
+        # approx_eq because nrm2 uses Newton-Raphson sqrt
+        expect(approx_eq(result, 5.0, 0.0001)).to_equal(true)
+
+    it "nrm2 of zero vector is 0":
+        val x: [f64] = [0.0, 0.0, 0.0]
+        val result = blas_nrm2_f64(x)
+        expect(result).to_equal(0.0)
+
+describe "BLAS Level 1 — scal":
+    it "scal: alpha*x":
+        # 3*[1,2,3] = [3,6,9]
+        val x: [f64] = [1.0, 2.0, 3.0]
+        val result = blas_scal_f64(3.0, x)
+        expect(result.is_ok()).to_equal(true)
+        val out = result.unwrap()
+        expect(out[0]).to_equal(3.0)
+        expect(out[1]).to_equal(6.0)
+        expect(out[2]).to_equal(9.0)
+
+    it "scal with zero alpha returns all-zeros":
+        val x: [f64] = [5.0, 10.0]
+        val result = blas_scal_f64(0.0, x)
+        expect(result.is_ok()).to_equal(true)
+        val out = result.unwrap()
+        expect(out[0]).to_equal(0.0)
+        expect(out[1]).to_equal(0.0)
+
+describe "BLAS Level 1 — copy":
+    it "copy produces equal buffer":
+        val x: [f64] = [1.0, 2.0, 3.0]
+        val result = blas_copy_f64(x)
+        expect(result.is_ok()).to_equal(true)
+        val out = result.unwrap()
+        expect(out[0]).to_equal(1.0)
+        expect(out[1]).to_equal(2.0)
+        expect(out[2]).to_equal(3.0)
+
+    it "copy of empty vector returns empty":
+        val x: [f64] = []
+        val result = blas_copy_f64(x)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().len()).to_equal(0)
+
+describe "BLAS Level 1 — swap":
+    it "swap exchanges elements of x and y":
+        val x: [f64] = [1.0, 2.0]
+        val y: [f64] = [9.0, 8.0]
+        val result = blas_swap_f64(x, y)
+        expect(result.is_ok()).to_equal(true)
+        val sr = result.unwrap()
+        # new_x should equal old y; new_y should equal old x
+        expect(sr.new_x[0]).to_equal(9.0)
+        expect(sr.new_x[1]).to_equal(8.0)
+        expect(sr.new_y[0]).to_equal(1.0)
+        expect(sr.new_y[1]).to_equal(2.0)
+
+    it "swap dimension mismatch returns error":
+        val x: [f64] = [1.0, 2.0]
+        val y: [f64] = [1.0]
+        val result = blas_swap_f64(x, y)
+        expect(result.is_err()).to_equal(true)

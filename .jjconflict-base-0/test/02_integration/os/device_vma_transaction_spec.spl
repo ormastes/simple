@@ -1,0 +1,156 @@
+# @req REQ-001 REQ-003 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/kernel/memory/vmm_device_mapping.spl 80%
+# @tag: integration, simpleos, kernel, vmm, device, mmio
+
+use std.spec.*
+use os.kernel.boot.mmio.{mmio_reset_for_test}
+use os.kernel.memory.pmm.{pmm_init_identity_range, pmm_get_manager, pmm_free_pages}
+use os.kernel.memory.vmm.{vmm_init_sparse_for_test, create_user_address_space,
+    destroy_user_address_space, vmm_read_pte_in, vmm_map_page_in,
+    vmm_unmap_page_in, vmm_replace_pte_in, vmm_set_map_failure_after_for_test,
+    vmm_clear_map_failure_for_test, vmm_map_device_result,
+    vmm_unmap_device_result}
+use os.kernel.memory.vmm_core.{PTE_ADDR_MASK, PTE_PRESENT, PTE_WRITABLE,
+    PTE_USER, PTE_WRITE_THROUGH, PTE_CACHE_DISABLE, PTE_NO_EXECUTE}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT,
+    VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
+use os.kernel.types.task_types.{AddressSpace}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_DEVICE}
+
+fn fresh_space() -> ProcessVmSpace:
+    mmio_reset_for_test()
+    expect(pmm_init_identity_range(64u64 * 1024u64 * 1024u64,
+        1024u64 * 1024u64, 2u64 * 1024u64 * 1024u64)).to_be(true)
+    expect(vmm_init_sparse_for_test(pmm_get_manager(), 0u64)).to_be(true)
+    val handle = create_user_address_space()
+    expect(handle.phys_root == 0u64 or handle.phys_root == 1u64).to_be(false)
+    ProcessVmSpace(pml4: handle.phys_root, id: handle.id,
+        vma_count: 0u64, areas: [])
+
+fn handle(space: ProcessVmSpace) -> AddressSpace:
+    AddressSpace(phys_root: space.pml4, id: space.id)
+
+describe "explicit device VMA transaction":
+    it "maps an unaligned MMIO window with exact USER UC NX PTEs":
+        # @covers DVM_MAP_ROOT:true DVM_MAP_VMA:true
+        val original = fresh_space()
+        val result = vmm_map_device_result(original, 0x90000001u64,
+            0x1000u64, 0x70000000u64)
+        expect(result.code).to_equal(0)
+        expect(result.user_addr).to_equal(0x70000001u64)
+        expect(result.map_len).to_equal(0x2000u64)
+        expect(result.space.vma_count).to_equal(1u64)
+        expect(result.space.areas[0].kind).to_equal(VMA_DEVICE)
+        expect(result.space.areas[0].backing).to_equal(0x90000000u64)
+        val first = vmm_read_pte_in(handle(result.space), VirtAddr(addr: result.map_start))
+        val second = vmm_read_pte_in(handle(result.space), VirtAddr(addr: result.map_start + 4096u64))
+        expect(first & PTE_ADDR_MASK).to_equal(0x90000000u64)
+        expect(second & PTE_ADDR_MASK).to_equal(0x90001000u64)
+        expect(first & (PTE_PRESENT | PTE_WRITABLE | PTE_USER |
+            PTE_CACHE_DISABLE | PTE_NO_EXECUTE)).to_equal(PTE_PRESENT |
+            PTE_WRITABLE | PTE_USER | PTE_CACHE_DISABLE | PTE_NO_EXECUTE)
+        expect(first & PTE_WRITE_THROUGH).to_equal(0u64)
+        val unmapped = vmm_unmap_device_result(result.space, result.map_start,
+            result.map_len, result.physical_page)
+        expect(unmapped.code).to_equal(0)
+    destroy_user_address_space(handle(unmapped.space))
+
+    it "rejects a replaced device leaf without mutating the VMA or PTE":
+        val original = fresh_space()
+        val mapped = vmm_map_device_result(original, 0x91000000u64,
+            4096u64, 0x70500000u64)
+        expect(mapped.code).to_equal(0)
+        val as_handle = handle(mapped.space)
+        val virt = VirtAddr(addr: mapped.map_start)
+        val old_pte = vmm_read_pte_in(as_handle, virt)
+        val replacement = (0x92000000u64 & PTE_ADDR_MASK) |
+            (old_pte & ~PTE_ADDR_MASK)
+        expect(vmm_replace_pte_in(as_handle, virt, old_pte,
+            replacement)).to_be(true)
+        val denied = vmm_unmap_device_result(mapped.space, mapped.map_start,
+            mapped.map_len, mapped.physical_page)
+        expect(denied.code).to_equal(-14)
+        expect(denied.reason).to_equal("blocked:device-pte-provenance-mismatch")
+        expect(denied.space.vma_count).to_equal(1u64)
+        expect(vmm_read_pte_in(as_handle, virt)).to_equal(replacement)
+        expect(vmm_replace_pte_in(as_handle, virt, replacement,
+            old_pte)).to_be(true)
+        val unmapped = vmm_unmap_device_result(mapped.space, mapped.map_start,
+            mapped.map_len, mapped.physical_page)
+        expect(unmapped.code).to_equal(0)
+        destroy_user_address_space(handle(unmapped.space))
+
+    it "preserves a stale PTE collision without overwriting it":
+        val original = fresh_space()
+        val as_handle = handle(original)
+        val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+        expect(vmm_map_page_in(as_handle, VirtAddr(addr: 0x71000000u64),
+            PhysAddr(addr: 0xA0000000u64), flags)).to_be(true)
+        val before = vmm_read_pte_in(as_handle, VirtAddr(addr: 0x71000000u64))
+        val result = vmm_map_device_result(original, 0xB0000000u64,
+            4096u64, 0x71000000u64)
+        expect(result.code).to_equal(-17)
+        expect(result.reason).to_equal("blocked:pte-collision")
+        expect(result.space.vma_count).to_equal(0u64)
+        expect(vmm_read_pte_in(as_handle,
+            VirtAddr(addr: 0x71000000u64))).to_equal(before)
+        expect(vmm_unmap_page_in(as_handle, VirtAddr(addr: 0x71000000u64))).to_be(true)
+        destroy_user_address_space(as_handle)
+
+    it "rolls mapped leaves and metadata back after an injected middle failure":
+        val original = fresh_space()
+        vmm_set_map_failure_after_for_test(1)
+        val result = vmm_map_device_result(original, 0xC0000000u64,
+            8192u64, 0x72000000u64)
+        vmm_clear_map_failure_for_test()
+        expect(result.code).to_equal(-12)
+        expect(result.reason).to_equal("blocked:page-map-failed")
+        expect(result.space.vma_count).to_equal(0u64)
+        expect(vmm_read_pte_in(handle(result.space),
+            VirtAddr(addr: 0x72000000u64))).to_equal(0u64)
+        expect(vmm_read_pte_in(handle(result.space),
+            VirtAddr(addr: 0x72001000u64))).to_equal(0u64)
+        destroy_user_address_space(handle(result.space))
+
+    it "requires exact device provenance and never frees MMIO leaves":
+        val original = fresh_space()
+        val mapped = vmm_map_device_result(original, 0xD0000000u64,
+            8192u64, 0x73000000u64)
+        expect(mapped.code).to_equal(0)
+        val before_unmap = pmm_free_pages()
+        val wrong_phys = vmm_unmap_device_result(mapped.space,
+            mapped.map_start, mapped.map_len, mapped.physical_page + 4096u64)
+        val partial = vmm_unmap_device_result(mapped.space,
+            mapped.map_start, 4096u64, mapped.physical_page)
+        expect(wrong_phys.code).to_equal(-22)
+        expect(partial.code).to_equal(-22)
+        expect(vmm_read_pte_in(handle(mapped.space),
+            VirtAddr(addr: mapped.map_start)) & PTE_PRESENT).to_equal(PTE_PRESENT)
+        val unmapped = vmm_unmap_device_result(mapped.space,
+            mapped.map_start, mapped.map_len, mapped.physical_page)
+        expect(unmapped.code).to_equal(0)
+        expect(unmapped.space.vma_count).to_equal(0u64)
+        expect(pmm_free_pages()).to_equal(before_unmap)
+        destroy_user_address_space(handle(unmapped.space))
+
+    it "isolates identical virtual addresses in two process spaces":
+        val first_space = fresh_space()
+        val first = vmm_map_device_result(first_space, 0xE0000000u64,
+            4096u64, 0x74000000u64)
+        val second_handle = create_user_address_space()
+        var second_space = ProcessVmSpace(pml4: second_handle.phys_root,
+            id: second_handle.id, vma_count: 0u64, areas: [])
+        val second = vmm_map_device_result(second_space, 0xF0000000u64,
+            4096u64, 0x74000000u64)
+        expect(first.code).to_equal(0)
+        expect(second.code).to_equal(0)
+        val first_unmapped = vmm_unmap_device_result(first.space,
+            first.map_start, first.map_len, first.physical_page)
+        expect(first_unmapped.code).to_equal(0)
+        expect(vmm_read_pte_in(handle(second.space),
+            VirtAddr(addr: second.map_start)) & PTE_ADDR_MASK).to_equal(0xF0000000u64)
+        val second_unmapped = vmm_unmap_device_result(second.space,
+            second.map_start, second.map_len, second.physical_page)
+        expect(second_unmapped.code).to_equal(0)
+        destroy_user_address_space(handle(first_unmapped.space))
+        destroy_user_address_space(handle(second_unmapped.space))

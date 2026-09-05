@@ -1,0 +1,480 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
+RUNNER="$ROOT/test/perf/io_parity/run_io_parity_benchmarks.shs"
+ADMISSION="$ROOT/test/perf/io_parity/check_io_parity_admission.shs"
+
+for literal in \
+    'schema=simple.io-parity/v3' \
+    'SIMPLE_NO_STUB_FALLBACK=1' \
+    'simple_native_compile=stub_evidence fallback=forbidden' \
+    'compiler.simple.build=native-build-entry-closure-cranelift-core-c-bootstrap-v1' \
+    'error.contract=invalid_iterations-and-unknown_case-exit-2-v1' \
+    'checksum.selftest.cases=144' \
+    'engine.simple.checksum_selftest.sha256=' \
+    'output.manifest.sha256=' \
+    'compiler.simple.compile_log.sha256=' \
+    'case.read_text.mode=excluded' \
+    'case.$case_name.$cache_class.$lang.p50_micros=' \
+    'case.$case_name.$cache_class.$lang.p50_mib_per_second=' \
+    'case.$case_name.$cache_class.performance_admission=PASS'; do
+    grep -qF "$literal" "$RUNNER" || {
+        echo "FAIL: receipt emitter is missing '$literal'" >&2
+        exit 1
+    }
+done
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+run="$work/run"
+mkdir -p "$run/outputs"
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+bound_file() {
+    local prefix="$1"
+    local path="$2"
+    echo "$prefix.path=$path"
+    echo "$prefix.sha256=$(hash_file "$path")"
+}
+
+first_line() {
+    "$@" 2>&1 | sed -n '1p' | tr '\t\r\n' '   '
+}
+
+cc_bin="$(readlink -f -- "$(command -v "${CC:-gcc}")")"
+rustup_bin="$(readlink -f -- "$(command -v rustup)")"
+rustc_bin="$(readlink -f -- "$("$rustup_bin" which rustc)")"
+time_bin="$(readlink -f -- /usr/bin/time)"
+ldd_bin="$(readlink -f -- "$(command -v ldd)")"
+
+simple_compiler="$run/stage4-simple"
+simple_engine_source="$run/simple_engine_fixture.c"
+simple_selftest_source="$run/simple_selftest_fixture.c"
+printf '%s\n' \
+    '#include <stdio.h>' \
+    '#include <stdlib.h>' \
+    '#include <string.h>' \
+    'int main(void) {' \
+    '    const char *iters = getenv("IO_PARITY_ITERS");' \
+    '    const char *case_name = getenv("IO_PARITY_CASE");' \
+    '    if (iters && atoll(iters) <= 0) {' \
+    '        fputs("[iobench-error] lang=simple reason=invalid_iterations\n", stderr);' \
+    '        return 2;' \
+    '    }' \
+    '    if (!case_name || (strcmp(case_name, "mmap_direct") != 0 && strcmp(case_name, "append_at") != 0)) {' \
+    '        fputs("[iobench-error] lang=simple reason=unknown_case\n", stderr);' \
+    '        return 2;' \
+    '    }' \
+    '    puts("simple-engine-fixture");' \
+    '    return 0;' \
+    '}' \
+    >"$simple_engine_source"
+printf '%s\n' \
+    '#include <stdio.h>' \
+    'int main(void) {' \
+    '    puts("[iobench-selftest] cases=144 scalar_calls=1073741824 packed_calls=134217728 ratio=8");' \
+    '    return 0;' \
+    '}' \
+    >"$simple_selftest_source"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'if [[ "${1:-}" == --version ]]; then echo simple-selftest-compiler-v4; exit 0; fi' \
+    '[[ "${1:-}" == native-build ]] || exit 64' \
+    'output=' \
+    'entry=' \
+    'while [[ $# -gt 0 ]]; do if [[ "$1" == --output ]]; then output="$2"; shift 2; elif [[ "$1" == --output=* ]]; then output="${1#--output=}"; shift; elif [[ "$1" == --entry ]]; then entry="$2"; shift 2; elif [[ "$1" == --entry=* ]]; then entry="${1#--entry=}"; shift; else shift; fi; done' \
+    '[[ -n "$output" ]] || exit 64' \
+    'source="$(dirname "$0")/simple_engine_fixture.c"' \
+    'if [[ "$entry" == */mapped_checksum_selftest.spl ]]; then source="$(dirname "$0")/simple_selftest_fixture.c"; fi' \
+    'exec gcc -O3 -march=native -std=c11 "$source" -o "$output"' \
+    >"$simple_compiler"
+chmod +x "$simple_compiler"
+simple_provenance="$simple_compiler.provenance.env"
+{
+    echo schema=simple-bootstrap-stage4-provenance-v1
+    echo source_revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+} >"$simple_provenance"
+simple_compiler_version="$("$simple_compiler" --version 2>&1)"
+simple_compiler_version="$(printf '%s' "$simple_compiler_version" | tr '\t\r\n' '   ')"
+
+fixture="$run/fixture.txt"
+printf '%01024d' 0 >"$fixture"
+raw="$run/io_parity_raw_rows.tsv"
+outputs="$run/io_parity_outputs.tsv"
+compile_log="$run/simple_compile.log"
+echo 'strict native compile completed' >"$compile_log"
+selftest_compile_log="$run/mapped_checksum_selftest_compile.log"
+echo 'strict native self-test compile completed' >"$selftest_compile_log"
+selftest_output="$run/mapped_checksum_selftest.out"
+cache_tool="$run/io_parity_cache_control"
+"$cc_bin" -O3 -march=native -std=c11 "$ROOT/test/perf/io_parity/io_parity_cache_control.c" -o "$cache_tool"
+
+"$cc_bin" -O3 -march=native -std=c11 "$ROOT/test/perf/io_parity/io_parity_ref.c" -o "$run/io_parity_c"
+"$rustc_bin" -C opt-level=3 -C target-cpu=native "$ROOT/test/perf/io_parity/io_parity_ref.rs" -o "$run/io_parity_rust"
+env SIMPLE_NO_STUB_FALLBACK=1 "$simple_compiler" native-build \
+    --source "$ROOT/src/lib" --source "$ROOT/test/perf/io_parity" \
+    --entry-closure --entry "$ROOT/test/perf/io_parity/io_parity_simple.spl" \
+    --runtime-bundle core-c-bootstrap --backend cranelift --cpu native \
+    --opt-level=aggressive --cache-dir "$run/simple-native-cache" \
+    --output "$run/io_parity_simple"
+env SIMPLE_NO_STUB_FALLBACK=1 "$simple_compiler" native-build \
+    --source "$ROOT/src/lib" --source "$ROOT/test/perf/io_parity" \
+    --entry-closure --entry "$ROOT/test/perf/io_parity/mapped_checksum_selftest.spl" \
+    --runtime-bundle core-c-bootstrap --backend cranelift --cpu native \
+    --opt-level=aggressive --cache-dir "$run/simple-native-cache" \
+    --output "$run/mapped_checksum_selftest"
+"$run/mapped_checksum_selftest" >"$selftest_output"
+
+emit_runtime_manifest() {
+    local engine="$1"
+    local manifest="$engine.runtime.tsv"
+    local dependencies="$manifest.dependencies"
+    "$ldd_bin" "$engine" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }' | LC_ALL=C sort -u >"$dependencies"
+    {
+        echo "engine_path=$engine engine_sha256=$(hash_file "$engine")"
+        while IFS= read -r dependency; do
+            dependency="$(readlink -f -- "$dependency")"
+            echo "runtime_path=$dependency runtime_sha256=$(hash_file "$dependency")"
+        done <"$dependencies"
+    } >"$manifest"
+    rm -f "$dependencies"
+}
+
+for lang in c rust simple; do
+    emit_runtime_manifest "$run/io_parity_$lang"
+done
+
+selftest_stage4_verifier="$work/selftest-stage4-verifier.shs"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'provenance="$1"; binary="$2"; root="$3"' \
+    '[[ "$provenance" == "$binary.provenance.env" ]]' \
+    '[[ "$root" == /* && -f "$binary" && -x "$binary" ]]' \
+    'grep -qxF schema=simple-bootstrap-stage4-provenance-v1 "$provenance"' \
+    'grep -qxE "source_revision=[0-9a-f]{64}" "$provenance"' \
+    >"$selftest_stage4_verifier"
+chmod +x "$selftest_stage4_verifier"
+
+runtime_source="$ROOT/src/runtime/runtime.h"
+runtime_source_manifest="$run/simple_runtime_sources.tsv"
+echo "source_path=$runtime_source source_sha256=$(hash_file "$runtime_source")" >"$runtime_source_manifest"
+
+engines=(c rust simple)
+cases=(mmap_direct append_at)
+classes=(cold warm)
+printf 'sequence\tsample\tcache_class\tlang\tcase\tbytes\titers\tmicros\tchecksum\tmax_rss_kib\n' >"$raw"
+printf 'sequence\tsample\tcache_class\tlang\tcase\tpath\tbytes\tchecksum\tsha256\n' >"$outputs"
+sequence=0
+for sample in 0 1 2 3 4 5 6; do
+    for class_index in 0 1; do
+        cache_class="${classes[$class_index]}"
+        for case_index in 0 1; do
+            case_name="${cases[$case_index]}"
+            rotation=$(((sample + class_index + case_index) % 3))
+            for position in 0 1 2; do
+                lang="${engines[$(((rotation + position) % 3))]}"
+                case "$lang" in
+                    c) micros=$((100 + sample)); rss=$((1000 + sample)) ;;
+                    rust) micros=$((120 + sample)); rss=$((1100 + sample)) ;;
+                    simple) micros=$((200 + sample)); rss=$((1200 + sample)) ;;
+                esac
+                if [[ "$case_name" == append_at ]]; then
+                    bytes=8192
+                    checksum=393216
+                    output="$run/outputs/sequence_${sequence}_sample_${sample}_${cache_class}_${lang}_append_at.bin"
+                    printf '%08192d' 0 >"$output"
+                    printf '%s\t%s\t%s\t%s\tappend_at\t%s\t8192\t393216\t%s\n' \
+                        "$sequence" "$sample" "$cache_class" "$lang" "$output" "$(hash_file "$output")" >>"$outputs"
+                else
+                    bytes=2048
+                    checksum=1234
+                fi
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t2\t%s\t%s\t%s\n' \
+                    "$sequence" "$sample" "$cache_class" "$lang" "$case_name" \
+                    "$bytes" "$micros" "$checksum" "$rss" >>"$raw"
+                sequence=$((sequence + 1))
+            done
+        done
+    done
+done
+
+receipt="$run/io_parity_receipt.txt"
+{
+    echo schema=simple.io-parity/v3
+    echo verdict=PASS
+    echo receipt.write=same-directory-temp-rename-v1
+    echo timing.model=interleaved-process-monotonic-internal-v2
+    echo timing.clock=monotonic
+    echo timing.unit=micros
+    echo throughput.unit=mib_per_second
+    echo timing.samples_per_class=7
+    echo timing.interleave=sample-cache-case-rotating-engine-v1
+    echo rss.unit=kib
+    echo cache.classes=cold,warm
+    echo cache.cold.precondition=posix-fadvise-dontneed-requested-before-each-measurement
+    echo cache.warm.precondition=direct-byte-touch-prime-before-each-measurement
+    echo cache.target.mmap_direct=fixture
+    echo cache.target.append_at=precreated-output-artifact
+    echo post_timing.append_verify=common-cache-control-read-size-checksum-then-sha256-rss-read-v1
+    echo error.contract=invalid_iterations-and-unknown_case-exit-2-v1
+    echo error.invalid_iterations=checked
+    echo error.unknown_case=checked
+    echo checksum.selftest=PASS
+    echo checksum.selftest.cases=144
+    echo checksum.selftest.scalar_calls=1073741824
+    echo checksum.selftest.packed_calls=134217728
+    echo checksum.selftest.ratio=8
+    echo ratio.model=reference_p50_micros/simple_p50_micros
+    echo budget.mmap_direct.simple_vs_c.minimum=0.50
+    echo budget.mmap_direct.simple_vs_rust.minimum=0.50
+    echo budget.append_at.simple_vs_c.minimum=0.50
+    echo budget.append_at.simple_vs_rust.minimum=0.50
+    echo budget.max_rss_kib=524288
+    bound_file raw.rows "$raw"
+    echo raw.rows.count=84
+    bound_file output.manifest "$outputs"
+    echo output.manifest.count=42
+    bound_file fixture "$fixture"
+    echo fixture.bytes=1024
+    echo host.hostname=fixture-host
+    echo host.kernel=fixture-kernel
+    echo host.arch=x86_64
+    echo host.uname=fixture-uname
+    echo host.cpu_model=fixture-cpu
+    echo host.cpu_logical=8
+    echo host.mem_total_kib=1024000
+    echo host.load_start=0.1,0.2,0.3,1/2,3
+    echo host.load_end=0.2,0.3,0.4,1/2,4
+    bound_file compiler.c "$cc_bin"
+    echo "compiler.c.version=$(first_line "$cc_bin" --version)"
+    bound_file compiler.rust "$rustc_bin"
+    echo "compiler.rust.version=$(first_line "$rustc_bin" --version)"
+    bound_file compiler.simple "$simple_compiler"
+    echo "compiler.simple.version=$simple_compiler_version"
+    echo compiler.simple.admission=admitted-stage4-pure-simple
+    bound_file compiler.simple.provenance "$simple_provenance"
+    echo compiler.simple.provenance_schema=simple-bootstrap-stage4-provenance-v1
+    echo compiler.simple.source_revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    echo compiler.simple.stub_fallback=forbidden
+    echo compiler.simple.build=native-build-entry-closure-cranelift-core-c-bootstrap-v1
+    echo compiler.simple.cache_scope=build-perf-io-parity-simple-native-cache
+    bound_file compiler.simple.compile_log "$compile_log"
+    bound_file compiler.simple.checksum_selftest_compile_log "$selftest_compile_log"
+    bound_file tool.time "$time_bin"
+    echo "tool.time.version=$(first_line "$time_bin" --version)"
+    bound_file tool.ldd "$ldd_bin"
+    bound_file tool.cache_control "$cache_tool"
+    bound_file harness.runner "$RUNNER"
+    bound_file harness.admission "$ADMISSION"
+    bound_file source.c "$ROOT/test/perf/io_parity/io_parity_ref.c"
+    bound_file source.rust "$ROOT/test/perf/io_parity/io_parity_ref.rs"
+    bound_file source.simple "$ROOT/test/perf/io_parity/io_parity_simple.spl"
+    bound_file source.mapped_checksum "$ROOT/test/perf/io_parity/mapped_checksum.spl"
+    bound_file source.mapped_checksum_selftest "$ROOT/test/perf/io_parity/mapped_checksum_selftest.spl"
+    bound_file source.ptr_raw "$ROOT/src/lib/nogc_sync_mut/ptr/raw.spl"
+    bound_file source.cache_control "$ROOT/test/perf/io_parity/io_parity_cache_control.c"
+    bound_file source.simple_runtime_manifest "$runtime_source_manifest"
+    bound_file engine.simple.checksum_selftest "$run/mapped_checksum_selftest"
+    bound_file checksum.selftest.output "$selftest_output"
+    for lang in c rust simple; do
+        echo engine.$lang.identity=$lang-native
+        bound_file engine.$lang "$run/io_parity_$lang"
+        bound_file engine.$lang.runtime_manifest "$run/io_parity_$lang.runtime.tsv"
+    done
+    echo case.read_text.mode=excluded
+    echo case.read_text.exclusion=non-equivalent-runtime-cache-semantics-no-performance-claim
+    echo case.mmap_direct.mode=strict
+    echo case.mmap_direct.semantic=open-map-shared-readonly-close-fd-touch-every-byte-unmap-per-iteration
+    echo case.append_at.mode=strict
+    echo case.append_at.semantic=precreated-sized-target-open-explicit-offset-4096-byte-write-all-close-per-iteration
+    for case_name in mmap_direct append_at; do
+        for cache_class in cold warm; do
+            for lang in c rust simple; do
+                case "$lang" in
+                    c) p50=103; p95=106; max_rss=1006 ;;
+                    rust) p50=123; p95=126; max_rss=1106 ;;
+                    simple) p50=203; p95=206; max_rss=1206 ;;
+                esac
+                echo case.$case_name.$cache_class.$lang.samples=7
+                echo case.$case_name.$cache_class.$lang.p50_micros=$p50
+                echo case.$case_name.$cache_class.$lang.p95_micros=$p95
+                if [[ "$case_name" == mmap_direct ]]; then sample_bytes=2048; else sample_bytes=8192; fi
+                p50_throughput="$(awk -v bytes="$sample_bytes" -v micros="$p50" \
+                    'BEGIN { printf "%.6f", bytes * 1000000 / (1024 * 1024 * micros) }')"
+                echo case.$case_name.$cache_class.$lang.p50_mib_per_second=$p50_throughput
+                echo case.$case_name.$cache_class.$lang.max_rss_kib=$max_rss
+            done
+            echo case.$case_name.$cache_class.simple_vs_c.p50_ratio=0.507389
+            echo case.$case_name.$cache_class.simple_vs_rust.p50_ratio=0.605911
+            echo case.$case_name.$cache_class.performance_admission=PASS
+        done
+    done
+} >"$receipt"
+
+publish_receipt() {
+    {
+        echo schema=simple.io-parity-publication/v1
+        echo method=same-directory-temp-rename-v1
+        echo "receipt.path=$receipt"
+        echo "receipt.sha256=$(hash_file "$receipt")"
+    } >"$run/io_parity_receipt.publish"
+}
+
+expect_blocked() {
+    local name="$1"
+    local output="$work/$name.out"
+    if IO_PARITY_ADMISSION_SELFTEST=1 \
+        IO_PARITY_SELFTEST_STAGE4_VERIFIER="$selftest_stage4_verifier" \
+        SIMPLE_BIN=/bin/false bash "$ADMISSION" "$receipt" >"$output" 2>&1; then
+        echo "FAIL: dishonest receipt was admitted: $name" >&2
+        exit 1
+    fi
+    grep -qF 'STATUS: BLOCKED I/O parity admission:' "$output" || {
+        echo "FAIL: dishonest receipt did not report BLOCKED: $name" >&2
+        sed -n '1,8p' "$output" >&2
+        exit 1
+    }
+}
+
+publish_receipt
+set +e
+IO_PARITY_ADMISSION_SELFTEST=1 \
+    IO_PARITY_SELFTEST_STAGE4_VERIFIER="$selftest_stage4_verifier" \
+    SIMPLE_BIN=/bin/false bash "$ADMISSION" "$receipt" >"$work/valid.out" 2>&1
+valid_rc=$?
+set -e
+[[ "$valid_rc" -eq 77 ]] || {
+    echo "FAIL: structurally valid selftest receipt exit=$valid_rc expected=77" >&2
+    sed -n '1,12p' "$work/valid.out" >&2
+    exit 1
+}
+grep -qF 'STATUS: SELFTEST VERIFIED I/O parity admission' "$work/valid.out"
+cp "$receipt" "$work/valid.receipt"
+
+if IO_PARITY_SELFTEST_STAGE4_VERIFIER="$selftest_stage4_verifier" \
+    bash "$ADMISSION" "$receipt" >"$work/production-injection.out" 2>&1; then
+    echo "FAIL: production mode admitted a test-only verifier injection" >&2
+    exit 1
+fi
+grep -qF 'test-only Stage 4 verifier injection is forbidden in production mode' \
+    "$work/production-injection.out"
+
+if SIMPLE_BIN="$simple_compiler" bash "$ADMISSION" "$receipt" \
+    >"$work/fake-production-provenance.out" 2>&1; then
+    echo "FAIL: production mode admitted fake Stage 4 provenance" >&2
+    exit 1
+fi
+grep -qF 'STATUS: BLOCKED I/O parity admission:' "$work/fake-production-provenance.out"
+
+sed '/^case.mmap_direct.cold.simple.p95_micros=/d' "$work/valid.receipt" >"$receipt"
+publish_receipt
+expect_blocked missing-p95
+
+sed 's/^budget.mmap_direct.simple_vs_c.minimum=.*/budget.mmap_direct.simple_vs_c.minimum=0/' "$work/valid.receipt" >"$receipt"
+publish_receipt
+expect_blocked zero-budget
+
+sed 's/^compiler.simple.admission=.*/compiler.simple.admission=admitted-stage3-pure-simple/' "$work/valid.receipt" >"$receipt"
+publish_receipt
+expect_blocked stage3-is-not-stage4
+
+sed -e "s|^engine.rust.path=.*|engine.rust.path=$run/io_parity_c|" \
+    -e "s/^engine.rust.sha256=.*/engine.rust.sha256=$(hash_file "$run/io_parity_c")/" \
+    "$work/valid.receipt" >"$receipt"
+publish_receipt
+expect_blocked duplicate-engine-substitution
+
+mkdir -p "$work/authentic-engines"
+for lang in c rust simple; do
+    cp "$run/io_parity_$lang" "$work/authentic-engines/io_parity_$lang"
+    cp "$run/io_parity_$lang.runtime.tsv" "$work/authentic-engines/io_parity_$lang.runtime.tsv"
+    printf '%s\n' '#!/usr/bin/env bash' "echo coordinated-$lang-substitute" >"$run/io_parity_$lang"
+    chmod +x "$run/io_parity_$lang"
+    {
+        echo "engine_path=$run/io_parity_$lang engine_sha256=$(hash_file "$run/io_parity_$lang")"
+        echo runtime_linkage=static-in-engine
+    } >"$run/io_parity_$lang.runtime.tsv"
+done
+cp "$work/valid.receipt" "$receipt"
+for lang in c rust simple; do
+    sed -i \
+        -e "s/^engine.$lang.sha256=.*/engine.$lang.sha256=$(hash_file "$run/io_parity_$lang")/" \
+        -e "s/^engine.$lang.runtime_manifest.sha256=.*/engine.$lang.runtime_manifest.sha256=$(hash_file "$run/io_parity_$lang.runtime.tsv")/" \
+        "$receipt"
+done
+publish_receipt
+expect_blocked coherent-distinct-engine-substitutes
+for lang in c rust simple; do
+    cp "$work/authentic-engines/io_parity_$lang" "$run/io_parity_$lang"
+    cp "$work/authentic-engines/io_parity_$lang.runtime.tsv" "$run/io_parity_$lang.runtime.tsv"
+done
+
+cp "$work/valid.receipt" "$receipt"
+echo case.read_text.cold.simple.p50_micros=1 >>"$receipt"
+publish_receipt
+expect_blocked forbidden-read-performance-claim
+
+cp "$work/valid.receipt" "$receipt"
+publish_receipt
+rm -f "$run/io_parity_receipt.publish"
+expect_blocked forged-atomicity
+
+cp "$work/valid.receipt" "$receipt"
+publish_receipt
+cp "$receipt" "$work/committed.receipt"
+rm -f "$receipt"
+expect_blocked marker-before-receipt
+cp "$work/committed.receipt" "$receipt"
+
+publish_receipt
+printf '\n' >>"$receipt"
+expect_blocked stale-publication-marker
+
+cp "$compile_log" "$work/compile-log.clean"
+echo 'Generating 7 stub functions' >>"$compile_log"
+sed "s/^compiler.simple.compile_log.sha256=.*/compiler.simple.compile_log.sha256=$(hash_file "$compile_log")/" \
+    "$work/valid.receipt" >"$receipt"
+publish_receipt
+expect_blocked stub-fallback
+cp "$work/compile-log.clean" "$compile_log"
+
+cp "$work/valid.receipt" "$receipt"
+publish_receipt
+first_output="$(sed -n '2s/^[^\t]*\t[^\t]*\t[^\t]*\t[^\t]*\t[^\t]*\t\([^\t]*\).*/\1/p' "$outputs")"
+cp "$first_output" "$work/output.clean"
+printf X >>"$first_output"
+expect_blocked output-corruption
+cp "$work/output.clean" "$first_output"
+
+cp "$work/valid.receipt" "$receipt"
+publish_receipt
+set +e
+IO_PARITY_ADMISSION_SELFTEST=1 \
+    IO_PARITY_SELFTEST_STAGE4_VERIFIER="$selftest_stage4_verifier" \
+    bash "$ADMISSION" "$receipt" >"$work/final-valid.out" 2>&1
+final_valid_rc=$?
+set -e
+[[ "$final_valid_rc" -eq 77 ]] || {
+    echo "FAIL: final structurally valid selftest receipt exit=$final_valid_rc expected=77" >&2
+    sed -n '1,12p' "$work/final-valid.out" >&2
+    exit 1
+}
+
+missing_output="$work/missing.out"
+set +e
+bash "$ADMISSION" "$work/does-not-exist.receipt" >"$missing_output" 2>&1
+missing_rc=$?
+set -e
+[[ "$missing_rc" -eq 125 ]] || {
+    echo "FAIL: missing receipt exit=$missing_rc expected=125" >&2
+    exit 1
+}
+grep -qF 'STATUS: UNAVAILABLE I/O parity admission:' "$missing_output"
+
+echo "PASS: I/O parity admission authenticates rebuilt engines and Stage 4 provenance, commits marker-last, and rejects coordinated substitution/corruption"

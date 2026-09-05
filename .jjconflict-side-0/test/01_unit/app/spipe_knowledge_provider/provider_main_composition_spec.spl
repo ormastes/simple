@@ -1,0 +1,73 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.main.{provider_production_config}
+use app.io.mod.{file_atomic_write}
+
+fn receipt_seed_path() -> text:
+    val path = "/tmp/simple-spipe-provider-test-receipt-seed.hex"
+    file_atomic_write(path, "17" * 32 + "\n")
+    path
+
+fn candidate_seed_path() -> text:
+    val path = "/tmp/simple-spipe-provider-test-candidate-seed.hex"
+    file_atomic_write(path, "23" * 32 + "\n")
+    path
+
+fn valid_args() -> [text]:
+    ["spipe-provider", "--workspace", "WS-PRODUCTION",
+     "--snapshot", "spks1-" + "0" * 64,
+     "--scope-digest", "sha256:" + "1" * 64,
+     "--receipt-seed-file", receipt_seed_path(),
+     "--authority-id", "AUTH-PRODUCTION",
+     "--authority-generation", "1",
+     "--candidate-seed-file", candidate_seed_path(),
+     "--candidate-authority-id", "CANDIDATE-AUTH-PRODUCTION",
+     "--candidate-authority-generation", "7",
+     "--lifecycle-directory", "/tmp/simple-spipe-provider-production"]
+
+describe "SPipe provider production composition":
+    it "accepts a complete validated host configuration":
+        val configured = provider_production_config(valid_args())
+        expect(configured.is_ok()).to_equal(true)
+        expect(configured.unwrap().workspace).to_equal("WS-PRODUCTION")
+        expect(configured.unwrap().authority_generation).to_equal(1)
+        expect(configured.unwrap().candidate_authority_generation).to_equal(7)
+        expect(valid_args().contains("17" * 32)).to_be(false)
+
+    it "fails closed when authority key storage or binding is absent":
+        expect(provider_production_config([]).is_err()).to_equal(true)
+        var missing_key = valid_args()
+        missing_key[8] = ""
+        expect(provider_production_config(missing_key).is_err()).to_equal(true)
+        var relative_storage = valid_args()
+        relative_storage[20] = "relative/provider-state"
+        expect(provider_production_config(relative_storage).is_err()).to_equal(true)
+        var invalid_binding = valid_args()
+        invalid_binding[4] = "not-a-digest"
+        expect(provider_production_config(invalid_binding).is_err()).to_equal(true)
+        var hash_as_snapshot = valid_args()
+        hash_as_snapshot[4] = "sha256:" + "0" * 64
+        expect(provider_production_config(hash_as_snapshot).is_err()).to_be(true)
+        var invalid_authority = valid_args()
+        invalid_authority[10] = "AUTH-\u0001"
+        expect(provider_production_config(invalid_authority).is_err()).to_be(true)
+        var unsafe_generation = valid_args()
+        unsafe_generation[12] = "9007199254740992"
+        expect(provider_production_config(unsafe_generation).is_err()).to_be(true)
+        var relative_secret = valid_args()
+        relative_secret[8] = "relative/receipt-seed.hex"
+        expect(provider_production_config(relative_secret).is_err()).to_equal(true)
+        var relative_candidate_secret = valid_args()
+        relative_candidate_secret[14] = "relative/candidate-seed.hex"
+        expect(provider_production_config(relative_candidate_secret).is_err()).to_equal(true)
+
+    it "rejects duplicate authority-sensitive options":
+        var duplicate = valid_args()
+        duplicate.push("--workspace=SECOND")
+        expect(provider_production_config(duplicate).is_err()).to_equal(true)
+
+    it "rejects an authority seed file beyond the bounded admission limit":
+        val path = "/tmp/simple-spipe-provider-test-oversize-seed.hex"
+        file_atomic_write(path, "1" * 1025)
+        var oversized = valid_args()
+        oversized[8] = path
+        expect(provider_production_config(oversized).is_err()).to_equal(true)

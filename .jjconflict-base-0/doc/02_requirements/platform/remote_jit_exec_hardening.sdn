@@ -1,0 +1,206 @@
+# Remote JIT Exec Module Hardening
+# Feature Request: Harden the remote JIT execution module for reliability and testability
+# Date: 2026-03-24
+
+feature:
+  title: "Remote JIT Exec Module Hardening"
+  status: proposed
+  priority: high
+  category: Infrastructure
+  date: 2026-03-24
+  author: "Bootstrap hardening initiative"
+
+problem:
+  summary: "The remote JIT exec module has fragile internals that allow silent failures and lack consistent testing interfaces"
+  incident: """
+    During bootstrap testing, 12 bugs were discovered in the remote JIT exec module:
+    diff markers left in source files, missing class definitions, wrong imports
+    (app.io instead of std.io_runtime), and zero-capacity memory maps. These bugs
+    were invisible because (a) the compiler bridge used return-zero stubs instead of
+    real compilation, (b) wait_halt used sleep-based polling instead of timeouts,
+    (c) each adapter had its own incompatible API, and (d) there was no way to test
+    without real hardware.
+  """
+  root_causes:
+    - "Compiler bridge returns zero instead of performing real compilation"
+    - "Sleep-based polling in wait_halt masks timing bugs and wastes time"
+    - "No common adapter interface — each target adapter has ad-hoc API"
+    - "No host-side simulation mode — all testing requires hardware or QEMU"
+
+  bugs_found |id, category, description|
+    BUG-01, source_corruption, "Diff markers (<<<<<<) left in .spl source files"
+    BUG-02, source_corruption, "Leading space corruption in indentation"
+    BUG-03, missing_definition, "Missing class definitions referenced by other modules"
+    BUG-04, missing_definition, "Missing trait implementations for required interfaces"
+    BUG-05, wrong_import, "app.io imported in library code (causes 120s timeout)"
+    BUG-06, wrong_import, "Shell-specific imports in platform-independent code"
+    BUG-07, memory, "Zero-capacity MemoryMap allocations (always a bug)"
+    BUG-08, memory, "Memory map permissions not validated before use"
+    BUG-09, compiler_bridge, "Compiler bridge returns 0 for all compilations (stub)"
+    BUG-10, compiler_bridge, "No error propagation from compiler bridge failures"
+    BUG-11, timing, "Sleep-based polling in wait_halt (unreliable, slow)"
+    BUG-12, api_design, "Inconsistent adapter APIs across targets"
+
+requirements:
+  - id: "REQ-001"
+    title: "Real compiler bridge replacing return-zero stubs"
+    priority: critical
+    description: """
+      Replace the current return-zero stub compiler bridge with a real implementation
+      that performs actual compilation, reports errors, and validates output artifacts.
+      The bridge must invoke the Simple compiler pipeline (lexer, parser, type check,
+      codegen) and return structured results including success/failure status, error
+      diagnostics, and the path to the compiled artifact.
+    """
+    acceptance_criteria:
+      - "Compiler bridge invokes real compilation pipeline for each workload"
+      - "Compilation errors are captured and returned as structured diagnostics"
+      - "Compiled artifacts are validated (file exists, non-zero size, correct format)"
+      - "Bridge reports compilation time for performance tracking"
+      - "No return-zero stubs remain in the compiler bridge"
+      - "Bridge supports all target backends (native, C, LLVM, Cranelift)"
+    current_state: "All compile() calls return 0 without performing any work"
+    target_state: "All compile() calls perform real compilation and return Result<Artifact, CompileError>"
+
+  - id: "REQ-002"
+    title: "Timeout-based wait_halt replacing sleep-based polling"
+    priority: high
+    description: """
+      Replace all sleep-based polling loops in wait_halt and similar synchronization
+      points with proper timeout-based waiting. The current approach uses fixed sleep
+      durations (e.g., sleep(100ms) in a loop), which is both unreliable (may miss
+      fast completions) and slow (wastes time on the common case). The new approach
+      uses a monotonic clock with a configurable deadline.
+    """
+    acceptance_criteria:
+      - "wait_halt accepts a timeout parameter (default: 5 seconds)"
+      - "Polling interval starts at 1ms and backs off exponentially (max 100ms)"
+      - "Returns immediately when halt condition is detected"
+      - "Returns TimeoutError if deadline is exceeded"
+      - "No fixed sleep() calls remain in synchronization code"
+      - "Total wait time is logged for performance analysis"
+    current_pattern: """
+      fn wait_halt():
+          var i = 0
+          while i < 100:
+              sleep(100)  # Fixed 100ms sleep, up to 10 seconds total
+              if check_halted():
+                  return
+              i = i + 1
+          # Silent failure if not halted after 10 seconds
+    """
+    target_pattern: """
+      fn wait_halt(timeout_ms: Int = 5000) -> Result<HaltStatus, TimeoutError>:
+          val deadline = monotonic_clock() + timeout_ms
+          var interval = 1
+          while monotonic_clock() < deadline:
+              if check_halted():
+                  return Ok(HaltStatus(elapsed: monotonic_clock() - start))
+              sleep(interval)
+              interval = min(interval * 2, 100)
+          return Err(TimeoutError(timeout: timeout_ms))
+    """
+
+  - id: "REQ-003"
+    title: "Adapter interface trait for consistent API across all adapters"
+    priority: high
+    description: """
+      Define a common ExecAdapter trait that all target adapters must implement.
+      Currently each adapter (QEMU, JTAG, host-sim, etc.) has its own ad-hoc API
+      with different method names, parameter conventions, and error handling. A
+      unified trait ensures consistent behavior and enables generic test harnesses.
+    """
+    acceptance_criteria:
+      - "ExecAdapter trait defines: connect, load, run, halt, read_memory, write_memory, disconnect"
+      - "All existing adapters implement ExecAdapter"
+      - "Generic test harness can run against any adapter via trait dispatch"
+      - "Adapter-specific extensions are exposed through optional sub-traits"
+      - "Error types are unified across all adapters (ExecError enum)"
+      - "Adapter capabilities are queryable (supports_breakpoints, supports_single_step, etc.)"
+    trait_definition: """
+      trait ExecAdapter:
+          fn connect(config: AdapterConfig) -> Result<Self, ExecError>
+          fn load(binary: BinaryArtifact) -> Result<LoadResult, ExecError>
+          fn run() -> Result<RunHandle, ExecError>
+          fn halt() -> Result<HaltStatus, ExecError>
+          fn wait_halt(timeout_ms: Int) -> Result<HaltStatus, TimeoutError>
+          fn read_memory(addr: UInt64, size: Int) -> Result<Bytes, ExecError>
+          fn write_memory(addr: UInt64, data: Bytes) -> Result<Int, ExecError>
+          fn disconnect() -> Result<Nil, ExecError>
+          fn capabilities() -> AdapterCapabilities
+    """
+    adapters_to_implement:
+      - name: "QemuAdapter"
+        target: "QEMU system emulation"
+        status: "existing, needs trait conformance"
+      - name: "JtagAdapter"
+        target: "JTAG/SWD hardware probes"
+        status: "existing, needs trait conformance"
+      - name: "HostSimAdapter"
+        target: "Host-side simulation (new)"
+        status: "to be implemented (REQ-004)"
+      - name: "T32Adapter"
+        target: "TRACE32 debugger"
+        status: "existing, needs trait conformance"
+
+  - id: "REQ-004"
+    title: "Host-side simulation mode for testing without hardware"
+    priority: high
+    description: """
+      Implement a HostSimAdapter that simulates the exec module behavior entirely
+      on the host machine, without requiring any hardware, QEMU, or special
+      permissions. This adapter uses the host CPU to execute compiled workloads
+      and simulates memory-mapped I/O through software emulation. It enables
+      full test coverage of the exec module logic in CI environments.
+    """
+    acceptance_criteria:
+      - "HostSimAdapter implements the full ExecAdapter trait"
+      - "Workloads compiled for host target run natively"
+      - "Memory map operations use host virtual memory (mmap/VirtualAlloc)"
+      - "Simulated halt/resume via signal handling (SIGSTOP/SIGCONT or equivalent)"
+      - "Register read/write through ptrace or equivalent host mechanism"
+      - "All exec module tests pass with HostSimAdapter in CI"
+      - "No hardware, QEMU, or elevated permissions required"
+      - "Performance: test suite completes in under 30 seconds"
+    simulation_scope:
+      supported:
+        - "Memory allocation and read/write"
+        - "Binary loading and execution"
+        - "Halt and resume"
+        - "Exit code capture"
+        - "stdout/stderr capture"
+      not_supported:
+        - "Hardware-specific peripherals (use mock)"
+        - "Real-time timing guarantees"
+        - "Multi-core execution (single-threaded simulation)"
+
+implementation_notes:
+  approach: """
+    Implement as a library module (src/lib/nogc_sync_mut/exec/adapter/) with one
+    file per adapter. The ExecAdapter trait goes in the adapter base module. The
+    HostSimAdapter is the first adapter implemented against the trait, followed
+    by refactoring existing adapters to conform.
+  """
+  key_files:
+    - "src/lib/nogc_sync_mut/exec/adapter/mod.spl — ExecAdapter trait definition"
+    - "src/lib/nogc_sync_mut/exec/adapter/host_sim.spl — HostSimAdapter"
+    - "src/lib/nogc_sync_mut/exec/adapter/qemu.spl — QemuAdapter (refactored)"
+    - "src/lib/nogc_sync_mut/exec/adapter/jtag.spl — JtagAdapter (refactored)"
+    - "src/lib/nogc_sync_mut/exec/compiler_bridge.spl — real compiler bridge"
+    - "test/feature/exec/adapter_conformance_spec.spl — trait conformance tests"
+    - "test/feature/exec/host_sim_spec.spl — host simulation tests"
+  migration_strategy: """
+    Phase 1: Define ExecAdapter trait and implement HostSimAdapter (new code only).
+    Phase 2: Refactor QemuAdapter to implement ExecAdapter (preserve behavior).
+    Phase 3: Refactor remaining adapters (JTAG, T32) to implement ExecAdapter.
+    Phase 4: Replace compiler bridge stubs with real implementation.
+    Phase 5: Convert wait_halt to timeout-based across all adapters.
+    Each phase is independently testable and deployable.
+  """
+  estimated_effort: "1 week for Phase 1-2, 1 week for Phase 3-5"
+
+related_documents:
+  - "doc/feature/bootstrap_test_gate.sdn — pipeline gates that consume these improvements"
+  - "src/lib/nogc_async_mut_noalloc/execution/ — current exec module location"
+  - "test/feature/baremetal/ — existing baremetal tests"
+  - ".claude/skills/t32.md — TRACE32 adapter reference"

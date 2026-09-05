@@ -1,0 +1,100 @@
+#!/usr/bin/env sh
+# Prove the generated RVFI RTL equivalent to the exact Yosys synthesis
+# transformation and append a hash-bound refinement receipt.
+set -eu
+
+is_sha256() {
+    case "${1:-}" in ""|*[!0-9a-fA-F]*) return 1 ;; esac
+    [ "${#1}" -eq 64 ]
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+    fixture_dir="$repo_root/test/fixtures/riscv_truth"
+    fixture="fake_step_counter_core.vhd"
+    for tool in yosys ghdl sha256sum; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "STATUS: FAIL FV2 RV32 equivalence self-test missing $tool" >&2
+            exit 1
+        }
+    done
+    is_sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    if is_sha256 short; then
+        echo "STATUS: FAIL FV2 RV32 equivalence self-test accepted malformed hash" >&2
+        exit 1
+    fi
+    policy='ghdl-vhdl2008|prep-top|equiv-opt-assert-synth-top|synth-top|write-json'
+    [ "$(printf '%s' "$policy" | sha256sum | cut -d ' ' -f 1)" = \
+      "$(printf '%s' "$policy" | sha256sum | cut -d ' ' -f 1)" ]
+    self_dir="$(mktemp -d)"
+    trap 'rm -rf "$self_dir"' EXIT
+    (cd "$fixture_dir" && yosys -m ghdl -p \
+      "ghdl --std=08 $fixture -e fake_step_counter_core; prep -top fake_step_counter_core; equiv_opt -assert synth -top fake_step_counter_core; synth -top fake_step_counter_core; write_json $self_dir/netlist.json" \
+      >"$self_dir/equivalence.log" 2>&1)
+    grep -q 'Equivalence successfully proven!' "$self_dir/equivalence.log" || {
+        echo "STATUS: FAIL FV2 RV32 equivalence self-test missing proof witness" >&2
+        exit 1
+    }
+    [ -s "$self_dir/netlist.json" ] || {
+        echo "STATUS: FAIL FV2 RV32 equivalence self-test missing netlist" >&2
+        exit 1
+    }
+    echo "STATUS: PASS FV2 RV32 equivalence self-test"
+    exit 0
+fi
+
+bundle_dir="${1:-}"
+module_name="${2:-fv2_rv32_add}"
+case "$module_name" in ""|*[!A-Za-z0-9_]*) echo "FAIL: invalid module name" >&2; exit 1 ;; esac
+[ -d "$bundle_dir" ] || { echo "FAIL: generated bundle directory is required" >&2; exit 1; }
+for tool in yosys ghdl sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: required equivalence tool missing: $tool" >&2; exit 1; }
+done
+
+core_name="$module_name.vhd"
+core="$bundle_dir/$core_name"
+receipt="$bundle_dir/${module_name}_formal_manifest.sdn"
+top="${module_name}_rvfi"
+netlist_name="${module_name}_rvfi_netlist.json"
+log_name="${module_name}_rtl_netlist_equivalence.log"
+netlist="$bundle_dir/$netlist_name"
+log="$bundle_dir/$log_name"
+[ -s "$core" ] || { echo "FAIL: generated RVFI RTL is required" >&2; exit 1; }
+[ -s "$receipt" ] || { echo "FAIL: executed formal receipt is required before equivalence" >&2; exit 1; }
+
+unique_field() {
+    key="$1"
+    count="$(grep -c "^${key} " "$receipt" || true)"
+    [ "$count" -eq 1 ] || { echo "FAIL: receipt field must occur exactly once: $key" >&2; exit 1; }
+    sed -n "s/^${key} //p" "$receipt" | sed -n '1p'
+}
+[ "$(unique_field schema)" = "fv2-rv32-add-formal-receipt-v1" ] || { echo "FAIL: formal receipt schema mismatch" >&2; exit 1; }
+[ "$(unique_field module)" = "$module_name" ] || { echo "FAIL: formal receipt module mismatch" >&2; exit 1; }
+rtl_hash="$(unique_field rtl_sha256)"
+is_sha256 "$rtl_hash" || { echo "FAIL: malformed RTL identity" >&2; exit 1; }
+[ "$(sha256sum "$core" | cut -d ' ' -f 1)" = "$rtl_hash" ] || { echo "FAIL: receipt RTL identity is stale" >&2; exit 1; }
+if grep -q '^equivalence_schema ' "$receipt"; then
+    echo "FAIL: equivalence receipt already exists" >&2
+    exit 1
+fi
+
+policy='ghdl-vhdl2008|prep-top|equiv-opt-assert-synth-top|synth-top|write-json'
+(cd "$bundle_dir" && yosys -m ghdl -p "ghdl --std=08 $core_name -e $top; prep -top $top; equiv_opt -assert synth -top $top; synth -top $top; write_json $netlist_name" >"$log_name" 2>&1)
+grep -q 'Equivalence successfully proven!' "$log" || { echo "FAIL: equivalence success witness missing" >&2; exit 1; }
+[ -s "$netlist" ] || { echo "FAIL: synthesized netlist was not emitted" >&2; exit 1; }
+
+receipt_tmp="$(mktemp "$bundle_dir/.${module_name}.equiv-receipt.XXXXXX")"
+trap 'rm -f "$receipt_tmp"' EXIT
+cp "$receipt" "$receipt_tmp"
+{
+    echo "equivalence_schema fv2-rtl-netlist-equivalence-receipt-v1"
+    echo "equivalence_status proved"
+    echo "equivalence_module $top"
+    echo "equivalence_rtl_sha256 $rtl_hash"
+    echo "netlist_sha256 $(sha256sum "$netlist" | cut -d ' ' -f 1)"
+    echo "equivalence_output_sha256 $(sha256sum "$log" | cut -d ' ' -f 1)"
+    echo "equivalence_policy_sha256 $(printf '%s' "$policy" | sha256sum | cut -d ' ' -f 1)"
+} >>"$receipt_tmp"
+mv "$receipt_tmp" "$receipt"
+trap - EXIT
+echo "STATUS: PASS FV2 RV32 RTL-to-netlist equivalence receipt=$receipt netlist=$netlist"

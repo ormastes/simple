@@ -1,0 +1,51 @@
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_mcdc_formal_context.spl 85%
+use std.spec.*
+use std.common.mcdc.model.{McdcEvaluation}
+use std.common.mcdc.masking_context.{mcdc_masking_pair_context_valid}
+use std.nogc_sync_mut.test_runner.test_runner_mcdc_formal_context.*
+
+fn row(sequence: i64, evaluated: i64, values: i64, outcome: bool) -> McdcEvaluation:
+    McdcEvaluation(
+        decision_id: 10, owner_id: 7, sequence: sequence, outcome: outcome,
+        evaluated_mask0: evaluated, evaluated_mask1: 0,
+        evaluated_mask2: 0, evaluated_mask3: 0,
+        true_mask0: values, true_mask1: 0, true_mask2: 0, true_mask3: 0,
+        masked_mask0: 0, masked_mask1: 0, masked_mask2: 0, masked_mask3: 0)
+
+describe "cold formal masking context derivation":
+    it "derives a sound complementary one-sided witness":
+        # Target a in (a and b) or c requires b=true and c=false.
+        val manifest = "schema: simple-mcdc-obligations-v1\n" +
+            "context|10|0|20|30|2|false|formal|0:true:c1|1:false:c2\n"
+        val plans = runner_mcdc_parse_contexts(manifest)
+        expect(plans == nil).to_equal(false)
+        val parsed = plans.unwrap()
+        val evidence = runner_mcdc_derive_context_evidence(parsed, [
+            row(1, 5, 0, false),  # b unknown, c=false
+            row(2, 3, 3, true)    # b=true, c unknown
+        ])
+        expect(evidence.len()).to_equal(2)
+        expect(evidence[0].masked0).to_equal(1)
+        expect(evidence[0].satisfied0).to_equal(2)
+        expect(evidence[1].satisfied0).to_equal(1)
+        expect(evidence[1].masked0).to_equal(2)
+        expect(mcdc_masking_pair_context_valid(
+            parsed[0].context, evidence[0], evidence[1])).to_equal(true)
+
+    it "rejects malformed opcodes and excessive proof depth":
+        expect(runner_mcdc_parse_contexts(
+            "context|10|0|20|30|1|false|formal|0:true:c0,x") == nil).to_equal(true)
+        var row_text = "context|10|0|20|30|65|false|formal"
+        var index = 0
+        while index < 65:
+            row_text = row_text + "|{index}:true:c0"
+            index = index + 1
+        expect(runner_mcdc_parse_contexts(row_text) == nil).to_equal(true)
+
+    it "keeps owner identity in the wire receipt":
+        val plans = runner_mcdc_parse_contexts(
+            "context|10|0|20|30|1|false|formal|0:true:c1").unwrap()
+        val evidence = runner_mcdc_derive_context_evidence(
+            plans, [row(1, 3, 2, false)])[0]
+        expect(runner_mcdc_context_evidence_wire(evidence)).to_start_with(
+            "context-evidence|10|7|1|0|20|30|")

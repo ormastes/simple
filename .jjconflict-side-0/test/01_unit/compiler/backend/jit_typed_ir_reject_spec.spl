@@ -1,0 +1,154 @@
+# Typed JIT IR contract — defect class: type-erasing / malformed IR is
+# REJECTED fail-closed (audit gap #17).
+#
+# POSITIVE CONTROL: the first example is a well-formed typed function that
+# MUST be accepted AND must evaluate. Every rejection case below is that same
+# function with exactly one defect injected, so the verifier cannot pass this
+# spec by rejecting everything (or by accepting everything).
+#
+# Contract: src/compiler/70.backend/jit_typed_ir.spl
+
+use std.spec
+use compiler.backend.jit_typed_ir.*
+
+# Well-formed base program:
+#   r0:i64 r1:i64 r2:i1   const r3:i64 = 10, r4:i64 = 32
+#   0: LOADK r0, 7
+#   1: MOV   r1, r0
+#   2: LT    r2, r1, r3
+#   3: JIF   r2 -> 16 else 20
+#   4(16): ADD r0, r1, r4 ; 5(20): RET r0
+fn rj_base() -> JitTypedFunction:
+    JitTypedFunction(
+        name: "base",
+        params: [],
+        ret: JitType.I64,
+        reg_types: [JitType.I64, JitType.I64, JitType.I1, JitType.I64, JitType.I64],
+        code: [
+            1, 0, 7, 0,
+            2, 1, 0, 0,
+            17, 2, 1, 3,
+            4, 2, 16, 20,
+            10, 0, 1, 4,
+            5, 0, 0, 0
+        ],
+        const_regs: [3, 4],
+        const_vals: [10, 32],
+        entry_pc: 0
+    )
+
+fn rj_with_reg_types(t: [JitType]) -> JitTypedFunction:
+    val b = rj_base()
+    JitTypedFunction(name: b.name, params: b.params, ret: b.ret, reg_types: t,
+                     code: b.code, const_regs: b.const_regs, const_vals: b.const_vals,
+                     entry_pc: b.entry_pc)
+
+fn rj_with_code(c: [i64]) -> JitTypedFunction:
+    val b = rj_base()
+    JitTypedFunction(name: b.name, params: b.params, ret: b.ret, reg_types: b.reg_types,
+                     code: c, const_regs: b.const_regs, const_vals: b.const_vals,
+                     entry_pc: b.entry_pc)
+
+fn rj_rejected(f: JitTypedFunction) -> bool:
+    not jit_verdict_ok(jit_typed_verify(f))
+
+describe "Typed JIT IR verifier — fail-closed rejection with a positive control":
+    it "POSITIVE CONTROL: the well-formed program is ACCEPTED and evaluates":
+        val v = jit_typed_verify(rj_base())
+        expect(jit_verdict_ok(v)).to_equal(true)
+        expect(jit_verdict_reason(v)).to_equal("")
+        # r1 = 7, 7 < 10 -> r0 = 7 + 32 = 39
+        expect(jit_typed_eval(rj_base()) ?? -1).to_equal(39)
+
+    it "type ERASURE: an empty type vector is rejected":
+        expect(rj_rejected(rj_with_reg_types([]))).to_equal(true)
+
+    it "type ERASURE: a type vector shorter than the register set is rejected":
+        # r3/r4 lose their declared types.
+        expect(rj_rejected(rj_with_reg_types([JitType.I64, JitType.I64, JitType.I1]))).to_equal(true)
+
+    it "type MISREPRESENTATION: f64 operands into an integer shift are rejected":
+        val t = [JitType.F64, JitType.F64, JitType.I1, JitType.F64, JitType.F64]
+        val c = [
+            1, 0, 7, 0,
+            2, 1, 0, 0,
+            24, 0, 1, 3,
+            5, 0, 0, 0
+        ]
+        val b = rj_base()
+        val f = JitTypedFunction(name: "shl_f64", params: [], ret: JitType.F64, reg_types: t,
+                                 code: c, const_regs: b.const_regs, const_vals: b.const_vals, entry_pc: 0)
+        expect(rj_rejected(f)).to_equal(true)
+
+    it "type MISREPRESENTATION: mixed-type addition (i64 + f64) is rejected":
+        expect(rj_rejected(rj_with_reg_types([JitType.I64, JitType.I64, JitType.I1, JitType.I64, JitType.F64]))).to_equal(true)
+
+    it "type MISREPRESENTATION: MOV between differently-typed registers is rejected":
+        # r1 becomes i1 while r0 stays i64, so `MOV r1, r0` is unsound.
+        expect(rj_rejected(rj_with_reg_types([JitType.I64, JitType.I1, JitType.I1, JitType.I64, JitType.I64]))).to_equal(true)
+
+    it "type MISREPRESENTATION: a non-0/1 immediate into an i1 register is rejected":
+        expect(rj_rejected(rj_with_reg_types([JitType.I1, JitType.I1, JitType.I1, JitType.I64, JitType.I64]))).to_equal(true)
+
+    it "type MISREPRESENTATION: returning an f64 from an i64 function is rejected":
+        val b = rj_base()
+        val f = JitTypedFunction(name: "badret", params: [], ret: JitType.F64, reg_types: b.reg_types,
+                                 code: b.code, const_regs: b.const_regs, const_vals: b.const_vals, entry_pc: 0)
+        expect(rj_rejected(f)).to_equal(true)
+
+    it "MALFORMED: unknown opcode is rejected":
+        expect(rj_rejected(rj_with_code([99, 0, 0, 0]))).to_equal(true)
+
+    it "MALFORMED: out-of-range register index is rejected":
+        expect(rj_rejected(rj_with_code([1, 0, 7, 0, 5, 99, 0, 0]))).to_equal(true)
+
+    it "MALFORMED: unaligned / out-of-range jump target is rejected":
+        expect(rj_rejected(rj_with_code([3, 2, 0, 0, 5, 0, 0, 0]))).to_equal(true)
+        expect(rj_rejected(rj_with_code([3, 4000, 0, 0, 5, 0, 0, 0]))).to_equal(true)
+
+    it "MALFORMED: a non-4-slot-aligned code stream is rejected":
+        expect(rj_rejected(rj_with_code([1, 0, 7]))).to_equal(true)
+
+    it "MALFORMED: a const register with no declared type is rejected":
+        val b = rj_base()
+        val f = JitTypedFunction(name: "badconst", params: [], ret: b.ret, reg_types: b.reg_types,
+                                 code: b.code, const_regs: [3, 77], const_vals: [10, 32], entry_pc: 0)
+        expect(rj_rejected(f)).to_equal(true)
+
+    it "the evaluator refuses anything the verifier rejects — no unverified execution":
+        expect(jit_typed_eval(rj_with_reg_types([])) == nil).to_equal(true)
+        expect(jit_typed_eval(rj_with_code([99, 0, 0, 0])) == nil).to_equal(true)
+
+    it "word stream: bad magic, bad version and truncation all decode to nil":
+        val w = jit_typed_to_words(rj_base())
+        expect(jit_typed_from_words("base", w) != nil).to_equal(true)
+        var bad_magic: [i64] = []
+        var i = 0
+        while i < w.len():
+            bad_magic.push(if i == 0: 12345 else: w[i])
+            i = i + 1
+        expect(jit_typed_from_words("base", bad_magic) == nil).to_equal(true)
+        var bad_ver: [i64] = []
+        i = 0
+        while i < w.len():
+            bad_ver.push(if i == 1: 999 else: w[i])
+            i = i + 1
+        expect(jit_typed_from_words("base", bad_ver) == nil).to_equal(true)
+        var truncated: [i64] = []
+        i = 0
+        while i < w.len() - 3:
+            truncated.push(w[i])
+            i = i + 1
+        expect(jit_typed_from_words("base", truncated) == nil).to_equal(true)
+
+    it "word stream: an unknown type code is rejected, never defaulted to i64":
+        val w = jit_typed_to_words(rj_base())
+        var corrupt: [i64] = []
+        var i = 0
+        while i < w.len():
+            corrupt.push(if i == 2: 42 else: w[i])
+            i = i + 1
+        expect(jit_typed_from_words("base", corrupt) == nil).to_equal(true)
+
+    it "POSITIVE CONTROL (again): after all rejections the base still verifies":
+        expect(jit_verdict_ok(jit_typed_verify(rj_base()))).to_equal(true)

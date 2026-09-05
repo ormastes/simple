@@ -1,0 +1,162 @@
+# Physics2 — 3D Narrow-Phase Collision Detection
+#
+# Sphere-sphere, sphere-AABB, and AABB-AABB collision for 3D bodies.
+
+use std.common.math.{math_sqrt, math_abs}
+
+struct NarrowContact3D:
+    point_x: f64
+    point_y: f64
+    point_z: f64
+    normal_x: f64
+    normal_y: f64
+    normal_z: f64
+    penetration: f64
+    feature_id_a: i64
+    feature_id_b: i64
+    has_contact: bool
+
+fn no_contact_3d() -> NarrowContact3D:
+    NarrowContact3D(
+        point_x: 0.0, point_y: 0.0, point_z: 0.0,
+        normal_x: 0.0, normal_y: 1.0, normal_z: 0.0,
+        penetration: 0.0,
+        feature_id_a: 0, feature_id_b: 0,
+        has_contact: false
+    )
+
+fn collide_sphere_sphere(ax: f64, ay: f64, az: f64, ar: f64, bx: f64, by: f64, bz: f64, br: f64) -> NarrowContact3D:
+    val dx = bx - ax
+    val dy = by - ay
+    val dz = bz - az
+    val dist_sq = dx * dx + dy * dy + dz * dz
+    val sum_r = ar + br
+    if dist_sq >= sum_r * sum_r:
+        return no_contact_3d()
+    val dist = math_sqrt(dist_sq)
+    if dist < 0.0001:
+        return NarrowContact3D(
+            point_x: ax, point_y: ay, point_z: az,
+            normal_x: 0.0, normal_y: 1.0, normal_z: 0.0,
+            penetration: sum_r,
+            feature_id_a: 0, feature_id_b: 0,
+            has_contact: true
+        )
+    val nx = dx / dist
+    val ny = dy / dist
+    val nz = dz / dist
+    val pen = sum_r - dist
+    NarrowContact3D(
+        point_x: ax + nx * ar, point_y: ay + ny * ar, point_z: az + nz * ar,
+        normal_x: nx, normal_y: ny, normal_z: nz,
+        penetration: pen,
+        feature_id_a: 0, feature_id_b: 0,
+        has_contact: true
+    )
+
+fn collide_aabb_aabb_3d(ax: f64, ay: f64, az: f64, ahx: f64, ahy: f64, ahz: f64, bx: f64, by: f64, bz: f64, bhx: f64, bhy: f64, bhz: f64) -> NarrowContact3D:
+    val dx = bx - ax
+    val dy = by - ay
+    val dz = bz - az
+    val overlap_x = (ahx + bhx) - math_abs(dx)
+    if overlap_x <= 0.0:
+        return no_contact_3d()
+    val overlap_y = (ahy + bhy) - math_abs(dy)
+    if overlap_y <= 0.0:
+        return no_contact_3d()
+    val overlap_z = (ahz + bhz) - math_abs(dz)
+    if overlap_z <= 0.0:
+        return no_contact_3d()
+    if overlap_x <= overlap_y and overlap_x <= overlap_z:
+        val sign = if dx < 0.0: -1.0 else: 1.0
+        return NarrowContact3D(
+            point_x: ax + sign * ahx, point_y: ay, point_z: az,
+            normal_x: sign, normal_y: 0.0, normal_z: 0.0,
+            penetration: overlap_x,
+            feature_id_a: 1, feature_id_b: 2,
+            has_contact: true
+        )
+    if overlap_y <= overlap_x and overlap_y <= overlap_z:
+        val sign = if dy < 0.0: -1.0 else: 1.0
+        return NarrowContact3D(
+            point_x: ax, point_y: ay + sign * ahy, point_z: az,
+            normal_x: 0.0, normal_y: sign, normal_z: 0.0,
+            penetration: overlap_y,
+            feature_id_a: 3, feature_id_b: 4,
+            has_contact: true
+        )
+    val sign = if dz < 0.0: -1.0 else: 1.0
+    NarrowContact3D(
+        point_x: ax, point_y: ay, point_z: az + sign * ahz,
+        normal_x: 0.0, normal_y: 0.0, normal_z: sign,
+        penetration: overlap_z,
+        feature_id_a: 5, feature_id_b: 6,
+        has_contact: true
+    )
+
+fn collide_sphere_aabb_3d(sx: f64, sy: f64, sz: f64, sr: f64, bx: f64, by: f64, bz: f64, bhx: f64, bhy: f64, bhz: f64) -> NarrowContact3D:
+    val dx = sx - bx
+    val dy = sy - by
+    val dz = sz - bz
+    var cx = dx
+    var cy = dy
+    var cz = dz
+    if cx > bhx:
+        cx = bhx
+    if cx < -bhx:
+        cx = -bhx
+    if cy > bhy:
+        cy = bhy
+    if cy < -bhy:
+        cy = -bhy
+    if cz > bhz:
+        cz = bhz
+    if cz < -bhz:
+        cz = -bhz
+    val diff_x = dx - cx
+    val diff_y = dy - cy
+    val diff_z = dz - cz
+    val dist_sq = diff_x * diff_x + diff_y * diff_y + diff_z * diff_z
+    if dist_sq >= sr * sr:
+        return no_contact_3d()
+    val dist = math_sqrt(dist_sq)
+    if dist < 0.0001:
+        val pen_x = bhx - math_abs(dx)
+        val pen_y = bhy - math_abs(dy)
+        val pen_z = bhz - math_abs(dz)
+        if pen_x <= pen_y and pen_x <= pen_z:
+            val nx = if dx < 0.0: -1.0 else: 1.0
+            return NarrowContact3D(
+                point_x: bx + nx * bhx, point_y: sy, point_z: sz,
+                normal_x: nx, normal_y: 0.0, normal_z: 0.0,
+                penetration: pen_x + sr,
+                feature_id_a: 0, feature_id_b: 1,
+                has_contact: true
+            )
+        if pen_y <= pen_x and pen_y <= pen_z:
+            val ny = if dy < 0.0: -1.0 else: 1.0
+            return NarrowContact3D(
+                point_x: sx, point_y: by + ny * bhy, point_z: sz,
+                normal_x: 0.0, normal_y: ny, normal_z: 0.0,
+                penetration: pen_y + sr,
+                feature_id_a: 0, feature_id_b: 3,
+                has_contact: true
+            )
+        val nz = if dz < 0.0: -1.0 else: 1.0
+        return NarrowContact3D(
+            point_x: sx, point_y: sy, point_z: bz + nz * bhz,
+            normal_x: 0.0, normal_y: 0.0, normal_z: nz,
+            penetration: pen_z + sr,
+            feature_id_a: 0, feature_id_b: 5,
+            has_contact: true
+        )
+    val nx = diff_x / dist
+    val ny = diff_y / dist
+    val nz = diff_z / dist
+    NarrowContact3D(
+        point_x: sx - nx * sr, point_y: sy - ny * sr, point_z: sz - nz * sr,
+        normal_x: nx, normal_y: ny, normal_z: nz,
+        penetration: sr - dist,
+        feature_id_a: 0, feature_id_b: 7,
+        has_contact: true
+    )

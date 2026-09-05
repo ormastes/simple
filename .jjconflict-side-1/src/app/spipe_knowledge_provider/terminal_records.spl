@@ -1,0 +1,130 @@
+# Closed validation for request-bound durable terminal loser records.
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get, json_object_keys}
+use std.common.json.types.{json_get_type, json_to_string, json_to_number, json_to_boolean}
+use app.spipe_knowledge_provider.wire_json.{wire_json_string, wire_valid_id, wire_valid_hash, wire_valid_snapshot_id, wire_valid_workspace_id}
+use app.spipe_knowledge_provider.protocol.{provider_error_retryable}
+
+fn _terminal_text(value: any, key: text) -> text:
+    val item = json_to_string(json_object_get(value, key))
+    if item == nil: "" else: item
+
+fn _terminal_int(value: any, key: text, missing: i64) -> i64:
+    val item = json_to_number(json_object_get(value, key))
+    if item == nil: missing else: item as i64
+
+fn _terminal_closed_object(value: any, expected: [text]) -> bool:
+    if json_get_type(value) != "object": return false
+    val keys = json_object_keys(value)
+    if keys.len() != expected.len(): return false
+    var i = 0
+    while i < expected.len():
+        if not keys.contains(expected[i]): return false
+        i = i + 1
+    true
+
+fn terminal_state_error_code(observed_terminal_state: text) -> text:
+    if observed_terminal_state == "expired": return "candidate_expired"
+    if observed_terminal_state == "aborted": return "candidate_aborted"
+    if observed_terminal_state == "published" or
+            observed_terminal_state == "stale_base": return "stale_base"
+    ""
+
+fn _terminal_provider_generation_valid(value: text) -> bool:
+    if value.len() != 35 or not value.starts_with("pg-"): return false
+    val suffix = value.slice(3, value.len())
+    var i = 0
+    while i < suffix.len():
+        if not "0123456789abcdef".contains(suffix.slice(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn terminal_error_response_bound(response: text, request_id: text,
+                                 operation: text, provider_generation: text,
+                                 workspace: text, snapshot: text,
+                                 scope_digest: text,
+                                 observed_terminal_state: text) -> bool:
+    val parsed = json_parse_with_error(response)
+    if parsed.1 != "" or not _terminal_closed_object(parsed.0,
+            ["error", "ok", "operation", "operation_receipt", "protocol",
+             "provider_generation", "query_receipt", "request_id",
+             "scope_digest", "snapshot", "workspace"]): return false
+    val value = parsed.0
+    val error_value = json_object_get(value, "error")
+    val protocol_value = json_object_get(value, "protocol")
+    if not _terminal_closed_object(error_value,
+            ["code", "message", "retryable"]) or
+            not _terminal_closed_object(protocol_value, ["major", "minor"]):
+        return false
+    val code = _terminal_text(error_value, "code")
+    val message = _terminal_text(error_value, "message")
+    val expected_code = terminal_state_error_code(observed_terminal_state)
+    val retryable = provider_error_retryable(code)
+    val canonical = "{\"error\":{\"code\":" + wire_json_string(code) +
+        ",\"message\":" + wire_json_string(message) +
+        ",\"retryable\":" + (if retryable: "true" else: "false") +
+        "},\"ok\":false,\"operation\":" + wire_json_string(operation) +
+        ",\"operation_receipt\":null,\"protocol\":{\"major\":1,\"minor\":0},\"provider_generation\":" +
+        wire_json_string(provider_generation) +
+        ",\"query_receipt\":null,\"request_id\":" + wire_json_string(request_id) +
+        ",\"scope_digest\":" + wire_json_string(scope_digest) +
+        ",\"snapshot\":" + wire_json_string(snapshot) +
+        ",\"workspace\":" + wire_json_string(workspace) + "}"
+    response == canonical and expected_code != "" and code == expected_code and
+        wire_valid_id(request_id) and wire_valid_id(operation) and
+        operation == "index_publish" and wire_valid_hash(scope_digest) and
+        _terminal_provider_generation_valid(provider_generation) and
+        wire_valid_workspace_id(workspace) and wire_valid_snapshot_id(snapshot) and
+        json_get_type(json_object_get(value, "ok")) == "boolean" and
+        not json_to_boolean(json_object_get(value, "ok")) and
+        json_get_type(json_object_get(error_value, "retryable")) == "boolean" and
+        json_to_boolean(json_object_get(error_value, "retryable")) == retryable and
+        message != "" and _terminal_text(value, "operation") == operation and
+        json_get_type(json_object_get(value, "operation_receipt")) == "null" and
+        json_get_type(json_object_get(value, "query_receipt")) == "null" and
+        _terminal_int(protocol_value, "major", -1) == 1 and
+        _terminal_int(protocol_value, "minor", -1) == 0 and
+        _terminal_text(value, "provider_generation") == provider_generation and
+        _terminal_text(value, "request_id") == request_id and
+        _terminal_text(value, "workspace") == workspace and
+        _terminal_text(value, "snapshot") == snapshot and
+        _terminal_text(value, "scope_digest") == scope_digest
+
+fn _terminal_receipt_id_valid(value: text, prefix: text) -> bool:
+    if value.len() != prefix.len() + 64 or not value.starts_with(prefix):
+        return false
+    val suffix = value.slice(prefix.len(), value.len())
+    var i = 0
+    while i < suffix.len():
+        if not "0123456789abcdef".contains(suffix.slice(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn durable_terminal_record_bound(request_id: text, operation: text,
+                                 operation_id: text, payload_hash: text,
+                                 candidate_uid: text,
+                                 observed_terminal_state: text,
+                                 observed_terminal_receipt_kind: text,
+                                 observed_terminal_receipt_id: text,
+                                 recorded_at_ms: i64, response: text,
+                                 provider_generation: text, workspace: text,
+                                 snapshot: text, scope_digest: text) -> bool:
+    if not wire_valid_id(request_id) or operation != "index_publish" or
+            not wire_valid_id(operation_id) or not wire_valid_hash(payload_hash) or
+            not wire_valid_id(candidate_uid) or recorded_at_ms < 0 or
+            recorded_at_ms > 9007199254740991: return false
+    val receipt_bound = if observed_terminal_state == "expired":
+        observed_terminal_receipt_kind == "candidate_expiry" and
+            _terminal_receipt_id_valid(observed_terminal_receipt_id, "cer-")
+    elif observed_terminal_state == "published" or
+            observed_terminal_state == "aborted" or
+            observed_terminal_state == "stale_base":
+        observed_terminal_receipt_kind == "operation" and
+            _terminal_receipt_id_valid(observed_terminal_receipt_id, "or-")
+    else:
+        false
+    receipt_bound and terminal_error_response_bound(response, request_id,
+        operation, provider_generation, workspace, snapshot, scope_digest,
+        observed_terminal_state)

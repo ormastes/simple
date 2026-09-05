@@ -1,0 +1,345 @@
+# @cover src/os/tls13/application_record_session_v1.spl 90%
+"""Transport-neutral TLS 1.3 application-record ownership."""
+
+use std.spec
+use os.tls13.application_record_session_v1.{
+    Tls13ApplicationRecordSessionV1,
+    Tls13ApplicationSessionStatusV1,
+    Tls13ApplicationIngressStatusV1
+}
+use os.tls13.handshake13.{CIPHER_AES_128_GCM_SHA256, CIPHER_CHACHA20_POLY1305_SHA256}
+use os.tls13.record13.{RecordKey, RecordResult, record13_decrypt_for_suite, record13_encrypt_for_suite}
+use os.tls13.server_types.{Tls13ServerContext}
+use std.common.net.tls_application_record_stream_v1.{
+    TLS_APPLICATION_DATA_TYPE_V1, TLS_MAX_FRAGMENT_LENGTH_V1,
+    TLS_MAX_SEQUENCE_V1
+}
+
+fn _fill(value: u8, count: i64) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        out.push(value)
+        index = index + 1
+    out
+
+fn _context(client_sequence: u64 = 0u64, server_sequence: u64 = 0u64, cipher_suite: u16 = CIPHER_AES_128_GCM_SHA256) -> Tls13ServerContext:
+    val key_length = if cipher_suite == CIPHER_CHACHA20_POLY1305_SHA256: 32 else: 16
+    Tls13ServerContext(
+        cipher_suite: cipher_suite,
+        named_group: 29u16,
+        server_random: _fill(1u8, 32),
+        server_keyshare_pub: _fill(2u8, 32),
+        client_app_key: _fill(3u8, key_length),
+        client_app_iv: _fill(4u8, 12),
+        server_app_key: _fill(5u8, key_length),
+        server_app_iv: _fill(6u8, 12),
+        client_seq: client_sequence,
+        server_seq: server_sequence
+    )
+
+fn _client_record(sequence: u64, content_type: u8, plaintext: [u8]) -> [u8]:
+    record13_encrypt_for_suite(
+        CIPHER_AES_128_GCM_SHA256,
+        RecordKey(key: _fill(3u8, 16), iv: _fill(4u8, 12)),
+        sequence, content_type, plaintext)
+
+fn _client_record_for_suite(cipher_suite: u16, sequence: u64, content_type: u8, plaintext: [u8]) -> [u8]:
+    val key_length = if cipher_suite == CIPHER_CHACHA20_POLY1305_SHA256: 32 else: 16
+    record13_encrypt_for_suite(cipher_suite, RecordKey(key: _fill(3u8, key_length), iv: _fill(4u8, 12)), sequence, content_type, plaintext)
+
+fn _nonzero(bytes: [u8]) -> i64:
+    var count: i64 = 0
+    for byte in bytes:
+        if byte != 0u8: count = count + 1
+    count
+
+describe "shared TLS application record stream":
+    it "reassembles fragments and authenticates coalesced records in order":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val first_record = _client_record(0u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [1u8, 2u8])
+        val split = first_record.len() / 2u64
+        val partial = session.ingest(first_record.slice(0u64, split))
+        expect(partial.status).to_equal(Tls13ApplicationIngressStatusV1.NeedMore)
+        expect(partial.plaintext_frames.len()).to_equal(0u64)
+        val complete = session.ingest(
+            first_record.slice(split, first_record.len()) +
+            _client_record(1u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [3u8]))
+        expect(complete.status).to_equal(Tls13ApplicationIngressStatusV1.Authenticated)
+        expect(complete.plaintext_frames).to_equal([[1u8, 2u8], [3u8]])
+        expect(complete.authenticated_record_count).to_equal(2i64)
+
+    it "fragments a large application write into independently authenticated records":
+        var sender = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val plaintext = _fill(42u8, TLS_MAX_FRAGMENT_LENGTH_V1 + 1)
+        val records = sender.seal_application_records(plaintext)
+        expect(records.len()).to_equal(2u64)
+        expect(sender.server_sequence).to_equal(2i64)
+        val first = record13_decrypt_for_suite(
+            CIPHER_AES_128_GCM_SHA256,
+            RecordKey(key: _fill(5u8, 16), iv: _fill(6u8, 12)),
+            0u64, records[0])
+        val second = record13_decrypt_for_suite(
+            CIPHER_AES_128_GCM_SHA256,
+            RecordKey(key: _fill(5u8, 16), iv: _fill(6u8, 12)),
+            1u64, records[1])
+        match first:
+            case RecordResult.Err(_): fail("first fragment did not authenticate")
+            case RecordResult.Ok(_, fragment):
+                expect(fragment.len().to_i64()).to_equal(TLS_MAX_FRAGMENT_LENGTH_V1)
+        match second:
+            case RecordResult.Err(_): fail("second fragment did not authenticate")
+            case RecordResult.Ok(_, fragment): expect(fragment).to_equal([42u8])
+
+    it "fails terminally on tamper without advancing the receive sequence":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        var record = _client_record(0u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [9u8])
+        val last = record.len() - 1u64
+        record[last] = record[last] ^ 1u8
+        val failed = session.ingest(record)
+        expect(failed.status).to_equal(Tls13ApplicationIngressStatusV1.AuthenticationFailed)
+        expect(session.stream.sequence()).to_equal(0i64)
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Failed)
+        expect(session.client_key.key.len()).to_equal(0u64)
+        expect(session.ingest([]).status).to_equal(Tls13ApplicationIngressStatusV1.SessionClosed)
+        val failed_attempted = session.last_secret_zeroization_attempted_slots
+        val failed_residual = session.last_secret_zeroization_residual_slots
+        session.close()
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Failed)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(failed_attempted)
+        expect(session.last_secret_zeroization_residual_slots).to_equal(failed_residual)
+
+        var coalesced = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        var forged_second = _client_record(1u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [7u8])
+        val forged_last = forged_second.len() - 1u64
+        forged_second[forged_last] = forged_second[forged_last] ^ 1u8
+        val rejected = coalesced.ingest(
+            _client_record(0u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [6u8]) + forged_second)
+        expect(rejected.status).to_equal(Tls13ApplicationIngressStatusV1.AuthenticationFailed)
+        expect(coalesced.last_rejected_plaintext_nonzero_byte_count).to_equal(0i64)
+
+    it "rejects replay after committing the original sequence":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val record = _client_record(0u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [8u8])
+        expect(session.ingest(record).status).to_equal(Tls13ApplicationIngressStatusV1.Authenticated)
+        expect(session.ingest(record).status).to_equal(Tls13ApplicationIngressStatusV1.AuthenticationFailed)
+
+    it "authenticates ChaCha20-Poly1305 application records":
+        var session = Tls13ApplicationRecordSessionV1.from_context(
+            _context(cipher_suite: CIPHER_CHACHA20_POLY1305_SHA256)).unwrap()
+        val record = _client_record_for_suite(CIPHER_CHACHA20_POLY1305_SHA256, 0u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [4u8, 5u8])
+        expect(session.ingest(record).plaintext_frames).to_equal([[4u8, 5u8]])
+
+    it "fails terminally when either record sequence is exhausted":
+        var receive = Tls13ApplicationRecordSessionV1.from_context(
+            _context(TLS_MAX_SEQUENCE_V1.to_u64())).unwrap()
+        val exhausted = receive.ingest(
+            _client_record(TLS_MAX_SEQUENCE_V1.to_u64(), TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [1u8]))
+        expect(exhausted.status).to_equal(Tls13ApplicationIngressStatusV1.SequenceExhausted)
+        var send = Tls13ApplicationRecordSessionV1.from_context(
+            _context(0u64, TLS_MAX_SEQUENCE_V1.to_u64())).unwrap()
+        expect(send.seal_application([1u8]).len()).to_equal(0u64)
+        expect(send.status).to_equal(Tls13ApplicationSessionStatusV1.Failed)
+
+        var boundary = Tls13ApplicationRecordSessionV1.from_context(
+            _context(server_sequence: (TLS_MAX_SEQUENCE_V1 - 1).to_u64())).unwrap()
+        expect(boundary.seal_application([1u8]).len() > 0).to_be(true)
+        expect(boundary.server_sequence).to_equal(TLS_MAX_SEQUENCE_V1)
+        expect(boundary.seal_application([2u8]).len()).to_equal(0u64)
+
+    it "rejects an outbound aggregate above its strict two-record ceiling":
+        var sender = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val oversized = _fill(1u8, (TLS_MAX_FRAGMENT_LENGTH_V1 * 2) + 1)
+        expect(sender.seal_application_records(oversized).len()).to_equal(0u64)
+        expect(sender.server_sequence).to_equal(0i64)
+
+    it "keeps directional keys until peer and local close are independently committed":
+        var receiver = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val closed = receiver.ingest(_client_record(0u64, 21u8, [1u8, 0u8]))
+        expect(closed.status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(receiver.status).to_equal(Tls13ApplicationSessionStatusV1.PeerCloseReceived)
+        expect(receiver.client_key.key.len()).to_equal(0u64)
+        expect(receiver.server_key.key.len()).to_equal(16u64)
+        expect(receiver.last_secret_zeroization_attempted_slots).to_equal(28i64)
+        expect(receiver.seal_application([9u8]).len() > 0).to_be(true)
+
+        var sender = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val close_record = sender.seal_close_notify()
+        expect(sender.status).to_equal(
+            Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerOpen)
+        expect(sender.server_key.key.len()).to_equal(16u64)
+        expect(sender.seal_close_notify().len()).to_equal(0u64)
+        expect(sender.seal_application([1u8]).len()).to_equal(0u64)
+        val opened = record13_decrypt_for_suite(
+            CIPHER_AES_128_GCM_SHA256,
+            RecordKey(key: _fill(5u8, 16), iv: _fill(6u8, 12)),
+            0u64, close_record)
+        match opened:
+            case RecordResult.Err(_):
+                fail("close_notify did not authenticate")
+            case RecordResult.Ok(content_type, plaintext):
+                expect(content_type).to_equal(21u8)
+                expect(plaintext).to_equal([1u8, 0u8])
+        expect(sender.commit_close_notify_sent()).to_be(true)
+        expect(sender.status).to_equal(Tls13ApplicationSessionStatusV1.LocalCloseSent)
+        expect(sender.server_key.key.len()).to_equal(0u64)
+        expect(sender.client_key.key.len()).to_equal(16u64)
+        expect(sender.commit_close_notify_sent()).to_be(false)
+
+    it "returns application frames before a final peer close and completes peer-first close":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val ingress = session.ingest(
+            _client_record(0u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [7u8, 8u8]) +
+            _client_record(1u64, 21u8, [1u8, 0u8]))
+        expect(ingress.status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(ingress.plaintext_frames).to_equal([[7u8, 8u8]])
+        expect(ingress.authenticated_record_count).to_equal(2i64)
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.PeerCloseReceived)
+        val close_record = session.seal_close_notify()
+        expect(session.status).to_equal(
+            Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerClosed)
+        expect(session.commit_close_notify_sent()).to_be(true)
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Closed)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(56i64)
+        expect(close_record.len() > 0).to_be(true)
+
+    it "keeps reading after local close and closes when the peer close arrives":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(session.seal_close_notify().len() > 0).to_be(true)
+        expect(session.commit_close_notify_sent()).to_be(true)
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.LocalCloseSent)
+        val application = session.ingest(
+            _client_record(0u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [4u8]))
+        expect(application.plaintext_frames).to_equal([[4u8]])
+        val closed = session.ingest(_client_record(1u64, 21u8, [2u8, 0u8]))
+        expect(closed.status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Closed)
+
+    it "accepts simultaneous peer close while the local close send is pending":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(session.seal_close_notify().len() > 0).to_be(true)
+        val peer = session.ingest(_client_record(0u64, 21u8, [1u8, 0u8]))
+        expect(peer.status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(session.status).to_equal(
+            Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerClosed)
+        expect(session.stream.sequence()).to_equal(1i64)
+        expect(session.client_key.key.len()).to_equal(0u64)
+        expect(session.server_key.key.len()).to_equal(16u64)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(28i64)
+        expect(session.commit_close_notify_sent()).to_be(true)
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Closed)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(56i64)
+
+    it "fails fully when a simultaneous pending close send is aborted":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(session.seal_close_notify().len() > 0).to_be(true)
+        expect(session.ingest(_client_record(
+            0u64, 21u8, [2u8, 0u8])).status).to_equal(
+                Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(session.status).to_equal(
+            Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerClosed)
+        expect(session.stream.sequence()).to_equal(1i64)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(28i64)
+        expect(session.abort_close_notify_send()).to_be(true)
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Failed)
+        expect(session.client_key.key.len()).to_equal(0u64)
+        expect(session.server_key.key.len()).to_equal(0u64)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(56i64)
+
+    it "aborts an uncommitted close terminally and wipes both directions":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(session.seal_close_notify().len() > 0).to_be(true)
+        expect(session.abort_close_notify_send()).to_be(true)
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Failed)
+        expect(session.client_key.key.len()).to_equal(0u64)
+        expect(session.server_key.key.len()).to_equal(0u64)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(56i64)
+        expect(session.abort_close_notify_send()).to_be(false)
+
+    it "accepts fatal-level close_notify and rejects malformed or trailing alerts":
+        var fatal_level = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(fatal_level.ingest(_client_record(0u64, 21u8, [2u8, 0u8])).status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        var malformed = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(malformed.ingest(_client_record(0u64, 21u8, [0u8])).status).to_equal(Tls13ApplicationIngressStatusV1.UnexpectedContentType)
+        var zero_level = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(zero_level.ingest(_client_record(0u64, 21u8, [0u8, 0u8])).status).to_equal(Tls13ApplicationIngressStatusV1.UnexpectedContentType)
+        var invalid_level = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(invalid_level.ingest(_client_record(0u64, 21u8, [255u8, 0u8])).status).to_equal(Tls13ApplicationIngressStatusV1.UnexpectedContentType)
+        var trailing = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val coalesced = _client_record(0u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [11u8, 12u8]) + _client_record(1u64, 21u8, [1u8, 0u8]) + _client_record(2u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [13u8])
+        expect(trailing.ingest(coalesced).status).to_equal(Tls13ApplicationIngressStatusV1.Malformed)
+        expect(trailing.last_rejected_plaintext_nonzero_byte_count).to_equal(0i64)
+        var partial_trailing = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        val next_record = _client_record(1u64, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), [14u8])
+        val close_plus_partial = (
+            _client_record(0u64, 21u8, [1u8, 0u8]) + next_record.slice(0u64, 3u64))
+        expect(partial_trailing.ingest(close_plus_partial).status).to_equal(
+            Tls13ApplicationIngressStatusV1.Malformed)
+        expect(partial_trailing.status).to_equal(Tls13ApplicationSessionStatusV1.Failed)
+
+    it "deep-copies context secrets and zeroizes every owned key and IV slot":
+        val context = _context()
+        var session = Tls13ApplicationRecordSessionV1.from_context(context).unwrap()
+        val owned_client_key = session.client_key.key
+        val owned_client_iv = session.client_key.iv
+        val owned_server_key = session.server_key.key
+        val owned_server_iv = session.server_key.iv
+        session.close()
+        expect(_nonzero(owned_client_key)).to_equal(0i64)
+        expect(_nonzero(owned_client_iv)).to_equal(0i64)
+        expect(_nonzero(owned_server_key)).to_equal(0i64)
+        expect(_nonzero(owned_server_iv)).to_equal(0i64)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(56i64)
+        expect(session.last_secret_zeroization_overwritten_slots).to_equal(56i64)
+        expect(session.last_secret_zeroization_residual_slots).to_equal(0i64)
+        expect(session.last_secret_zeroization_verified).to_be(true)
+        expect(_nonzero(context.client_app_key)).to_be_greater_than(0i64)
+        expect(_nonzero(context.server_app_key)).to_be_greater_than(0i64)
+
+    it "preserves the first zeroization receipt across repeated close":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        session.close()
+        val attempted = session.last_secret_zeroization_attempted_slots
+        val overwritten = session.last_secret_zeroization_overwritten_slots
+        val residual = session.last_secret_zeroization_residual_slots
+        val verified = session.last_secret_zeroization_verified
+        session.close()
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Closed)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(attempted)
+        expect(session.last_secret_zeroization_overwritten_slots).to_equal(overwritten)
+        expect(session.last_secret_zeroization_residual_slots).to_equal(residual)
+        expect(session.last_secret_zeroization_verified).to_equal(verified)
+
+    it "abortively closes and preserves the first cumulative receipt after peer close_notify":
+        var session = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(session.ingest(_client_record(0u64, 21u8, [1u8, 0u8])).status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        val attempted = session.last_secret_zeroization_attempted_slots
+        val overwritten = session.last_secret_zeroization_overwritten_slots
+        val residual = session.last_secret_zeroization_residual_slots
+        session.close()
+        expect(session.status).to_equal(Tls13ApplicationSessionStatusV1.Closed)
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(attempted + 28i64)
+        expect(session.last_secret_zeroization_overwritten_slots).to_equal(overwritten + 28i64)
+        expect(session.last_secret_zeroization_residual_slots).to_equal(residual)
+        expect(session.last_secret_zeroization_verified).to_be(true)
+        val terminal_attempted = session.last_secret_zeroization_attempted_slots
+        session.close()
+        expect(session.last_secret_zeroization_attempted_slots).to_equal(terminal_attempted)
+
+    it "records directional AES and ChaCha zeroization totals":
+        var aes = Tls13ApplicationRecordSessionV1.from_context(_context()).unwrap()
+        expect(aes.ingest(_client_record(0u64, 21u8, [1u8, 0u8])).status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(aes.last_secret_zeroization_attempted_slots).to_equal(28i64)
+        expect(aes.seal_close_notify().len() > 0).to_be(true)
+        expect(aes.commit_close_notify_sent()).to_be(true)
+        expect(aes.last_secret_zeroization_attempted_slots).to_equal(56i64)
+
+        var chacha = Tls13ApplicationRecordSessionV1.from_context(
+            _context(cipher_suite: CIPHER_CHACHA20_POLY1305_SHA256)).unwrap()
+        val peer_close = _client_record_for_suite(
+            CIPHER_CHACHA20_POLY1305_SHA256, 0u64, 21u8, [1u8, 0u8])
+        expect(chacha.ingest(peer_close).status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(chacha.last_secret_zeroization_attempted_slots).to_equal(44i64)
+        expect(chacha.seal_close_notify().len() > 0).to_be(true)
+        expect(chacha.commit_close_notify_sent()).to_be(true)
+        expect(chacha.last_secret_zeroization_attempted_slots).to_equal(88i64)

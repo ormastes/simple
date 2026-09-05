@@ -1,0 +1,32 @@
+# Trusted ARM64 TTBR0 write/barrier/readback adapter.
+
+use os.kernel.arch.arm64.cpu.{Arm64Cpu}
+use os.kernel.scheduler.architecture_switch_completion_owner_v1.{
+    ArchitectureSwitchTicketV1, ArchitectureSwitchReadbackReceiptV1,
+    architecture_switch_mark_write_started_v1,
+    architecture_switch_arm_ttbr0_receipt_v1
+}
+
+pub(package) fn arm64_switch_root_with_receipt_v1(
+    ticket: ArchitectureSwitchTicketV1,
+    root_phys: u64
+) -> ArchitectureSwitchReadbackReceiptV1:
+    val preflight = architecture_switch_arm_ttbr0_receipt_v1(
+        ticket, root_phys, root_phys, 64u64, true)
+    if not preflight.readback_matches: return preflight
+    var cpu = Arm64Cpu()
+    if cpu.cpu_id() != ticket.cpu_id:
+        return architecture_switch_arm_ttbr0_receipt_v1(
+            ticket, root_phys, 0u64, 64u64, false)
+    cpu.cpu_disable_interrupts()
+    if cpu.cpu_id() != ticket.cpu_id:
+        return architecture_switch_arm_ttbr0_receipt_v1(
+            ticket, root_phys, 0u64, 64u64, false)
+    if not architecture_switch_mark_write_started_v1(ticket):
+        return architecture_switch_arm_ttbr0_receipt_v1(
+            ticket, root_phys, 0u64, 64u64, false)
+    cpu.cpu_write_page_table_base(root_phys)
+    cpu.cpu_flush_tlb_all()
+    val observed = cpu.cpu_read_page_table_base()
+    architecture_switch_arm_ttbr0_receipt_v1(
+        ticket, root_phys, observed, 64u64, true)

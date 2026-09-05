@@ -1,0 +1,118 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV's MCI-v2 allocation bounds reject oversize
+objects, trees, over-depth deltas and oversize parser input with a named error
+while leaving the store byte-for-byte unchanged and integrity-clean.
+Audience: Maintainers of SCV and of the mission-critical hardening v2 lanes.
+"""
+# @tag: integration, scv, mission_critical, memory
+use std.spec.{describe, it, expect, step}
+use app.io.mod (process_run, file_write)
+use std.scv.alloc_bounds.{SCV_MAX_OBJECT_BYTES, SCV_MAX_TREE_ENTRIES, SCV_MAX_DELTA_TARGET_BYTES, SCV_MAX_PARSER_INPUT_BYTES}
+use std.scv.alloc_bounds.{scv_bound_object_bytes, scv_bound_tree_entries, scv_bound_delta_target_bytes, scv_bound_parser_input_bytes}
+use std.scv.delta.{scv_delta_decode, SCV_DELTA_MAX_DEPTH}
+use std.scv.pack_v2.{scv_pack_resolve_object, scv_pack_v2_verify_payload}
+use std.scv.parser.{scv_parse_file}
+use std.scv.store.{scv_init_repo}
+use std.scv.working_copy.{scv_snapshot}
+use std.scv.integrity.{scv_fsck}
+
+val BOUND_ERROR = "ERROR scv allocation bound exceeded:"
+
+fn _sh(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    expect(code).to_equal(0)
+    expect(err).to_equal("")
+    out.trim()
+
+# A fresh initialised repository with one snapshotted file.
+fn _fresh_repo(label: text) -> text:
+    val root = _sh("mktemp -d /tmp/scv-alloc-bounds-{label}.XXXXXX")
+    file_write("{root}/a.txt", "payload\n")
+    expect(scv_init_repo(root)).to_not_contain("ERROR")
+    expect(scv_snapshot(root)).to_not_contain("ERROR")
+    root
+
+# Content fingerprint of every file under .scv — the "store unchanged" oracle.
+fn _store_fingerprint(root: text) -> text:
+    _sh("cd '{root}' && find .scv -type f | LC_ALL=C sort | xargs sha256sum | sha256sum")
+
+# Store unchanged AND the integrity verdict unchanged from its baseline.
+# (A freshly library-inited repo has a pre-existing fsck complaint about
+# parser lock entry format — unrelated to allocation bounds — so the oracle
+# is "no NEW integrity finding", not an absolute OK.)
+fn _expect_store_intact(root: text, before: text, fsck_before: text):
+    expect(_store_fingerprint(root)).to_equal(before)
+    expect(scv_fsck(root)).to_equal(fsck_before)
+
+fn _u32_le(v: i64) -> [u8]:
+    [(v % 256) as u8, ((v / 256) % 256) as u8, ((v / 65536) % 256) as u8, ((v / 16777216) % 256) as u8]
+
+describe "scv allocation bounds":
+    it "rejects an oversize pack object before materialising it":
+        step("declare a v2 pack entry one byte over SCV_MAX_OBJECT_BYTES")
+        val root = _fresh_repo("object")
+        val before = _store_fingerprint(root)
+        val fsck_before = scv_fsck(root)
+        val oversize = SCV_MAX_OBJECT_BYTES + 1
+        val payload = "format: scv-pack-payload-v2\nentry chunks chunk_big {oversize}\n".bytes()
+        step("resolve the entry: named bound error, no bytes copied")
+        val (data, err) = scv_pack_resolve_object(payload, "chunk_big")
+        expect(err).to_contain(BOUND_ERROR)
+        expect(err).to_contain("object bytes requested {oversize}, bound {SCV_MAX_OBJECT_BYTES}")
+        expect(data.len()).to_equal(0)
+        expect(scv_bound_object_bytes(SCV_MAX_OBJECT_BYTES)).to_equal("")
+        step("store is unchanged and fsck stays clean")
+        _expect_store_intact(root, before, fsck_before)
+
+    it "rejects an oversize tree entry count":
+        step("charge one entry over SCV_MAX_TREE_ENTRIES against the arena")
+        val root = _fresh_repo("tree")
+        val before = _store_fingerprint(root)
+        val fsck_before = scv_fsck(root)
+        val err = scv_bound_tree_entries(SCV_MAX_TREE_ENTRIES + 1)
+        expect(err).to_contain(BOUND_ERROR)
+        expect(err).to_contain("tree entries requested {SCV_MAX_TREE_ENTRIES + 1}, bound {SCV_MAX_TREE_ENTRIES}")
+        expect(scv_bound_tree_entries(SCV_MAX_TREE_ENTRIES)).to_equal("")
+        step("store is unchanged and fsck stays clean")
+        _expect_store_intact(root, before, fsck_before)
+
+    it "rejects an over-depth delta chain and an oversize delta target":
+        step("verify a v2 payload whose chain depth exceeds SCV_DELTA_MAX_DEPTH")
+        val root = _fresh_repo("delta")
+        val before = _store_fingerprint(root)
+        val fsck_before = scv_fsck(root)
+        val depth = SCV_DELTA_MAX_DEPTH + 1
+        val chain = "format: scv-pack-payload-v2\nentry chunks base_1 4\nbase\nendentry\nentry-delta chunks d_1 base_1 {depth} 4\nxxxx\nendentry\n".bytes()
+        expect(scv_pack_v2_verify_payload(chain)).to_contain("ERROR chain depth {depth} exceeds maximum {SCV_DELTA_MAX_DEPTH}")
+        step("decode a delta whose declared target size exceeds SCV_MAX_DELTA_TARGET_BYTES")
+        val oversize = SCV_MAX_DELTA_TARGET_BYTES + 1
+        var delta: [u8] = [68u8, 69u8, 76u8, 84u8]
+        for b in _u32_le(0):
+            delta.push(b)
+        for b in _u32_le(oversize):
+            delta.push(b)
+        for b in _u32_le(0):
+            delta.push(b)
+        val (out, err) = scv_delta_decode([], delta)
+        expect(err).to_contain(BOUND_ERROR)
+        expect(err).to_contain("delta target bytes requested {oversize}, bound {SCV_MAX_DELTA_TARGET_BYTES}")
+        expect(out.len()).to_equal(0)
+        expect(scv_bound_delta_target_bytes(SCV_MAX_DELTA_TARGET_BYTES)).to_equal("")
+        step("store is unchanged and fsck stays clean")
+        _expect_store_intact(root, before, fsck_before)
+
+    it "rejects oversize parser input before reading it":
+        step("create a sparse file one byte over SCV_MAX_PARSER_INPUT_BYTES")
+        val root = _fresh_repo("parser")
+        val before = _store_fingerprint(root)
+        val fsck_before = scv_fsck(root)
+        val oversize = SCV_MAX_PARSER_INPUT_BYTES + 1
+        _sh("truncate -s {oversize} '{root}/big.txt'")
+        step("parse it: named bound error, no parser artifacts written")
+        val err = scv_parse_file(root, "{root}/big.txt")
+        expect(err).to_contain(BOUND_ERROR)
+        expect(err).to_contain("parser input bytes requested {oversize}, bound {SCV_MAX_PARSER_INPUT_BYTES}")
+        expect(scv_bound_parser_input_bytes(SCV_MAX_PARSER_INPUT_BYTES)).to_equal("")
+        step("store is unchanged and fsck stays clean")
+        _expect_store_intact(root, before, fsck_before)

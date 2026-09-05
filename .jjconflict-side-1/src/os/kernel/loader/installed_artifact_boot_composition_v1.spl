@@ -1,0 +1,264 @@
+"""Sole one-shot composition owner for authenticated boot catalog records."""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SimpleboxSignedCatalogProvisionResultV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootPolicyV1, InstalledArtifactBootRecordV1,
+    InstalledArtifactBootPopulationErrorV1,
+    installed_artifact_boot_policy_shape_valid_v1,
+    installed_artifact_catalog_populate_from_boot_policy_v1
+}
+use os.kernel.loader.installed_artifact_catalog_v1.{
+    SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1
+}
+use os.kernel.loader.simplebox_primary_tool_catalog_bundle_v1.{
+    simplebox_primary_tool_catalog_bundle_plan_valid_v1
+}
+use os.kernel.loader.primary_linux_tool_catalog_bundle_v1.{
+    PrimaryLinuxToolCatalogPlanV1,
+    primary_linux_tool_catalog_plan_valid_v1
+}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    SIMPLEBOX_CANONICAL_PATH_V1
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{
+    ClangSysrootCatalogBundleV1, CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1
+}
+use os.kernel.loader.server_catalog_signing_media_v1.{
+    ServerCatalogSigningMediaV1, server_catalog_signing_media_valid_v1
+}
+
+pub enum InstalledArtifactBootCompositionErrorV1:
+    None
+    Empty
+    SimpleboxRejected
+    ClangRejected
+    PrimaryRejected
+    ServerRejected
+    TargetMismatch
+    TrustRootsMismatch
+    DuplicatePath
+    DuplicateRecordConflict
+    CombinedPolicyRejected
+    PopulationRejected
+
+pub struct InstalledArtifactBootCompositionResultV1:
+    ok: bool
+    error: InstalledArtifactBootCompositionErrorV1
+    population_error: InstalledArtifactBootPopulationErrorV1
+    accepted_records: i64
+
+fn _fail_v1(
+    error: InstalledArtifactBootCompositionErrorV1,
+    population_error: InstalledArtifactBootPopulationErrorV1 =
+        InstalledArtifactBootPopulationErrorV1.None
+) -> InstalledArtifactBootCompositionResultV1:
+    InstalledArtifactBootCompositionResultV1(
+        ok: false, error: error, population_error: population_error,
+        accepted_records: 0)
+
+fn _target_equal_v1(left: ManifestTarget, right: ManifestTarget) -> bool:
+    left.os == right.os and left.arch == right.arch and left.abi == right.abi
+
+pub(package) fn installed_artifact_boot_records_identical_v1(
+    left: InstalledArtifactBootRecordV1,
+    right: InstalledArtifactBootRecordV1
+) -> bool:
+    """Exact value equality for the sole permitted legacy/primary overlap."""
+    left == right
+
+pub(package) fn installed_artifact_boot_composition_count_within_bound_v1(
+    record_count: i64, required_count: i64
+) -> bool:
+    record_count >= 0 and required_count >= 0 and
+        record_count <= SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1 and
+        required_count <= SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1
+
+pub(package) fn installed_artifact_boot_composition_records_conflict_v1(
+    records: [InstalledArtifactBootRecordV1]
+) -> bool:
+    """Detect canonical and alias key collisions in one bounded merge."""
+    var index: i64 = 0
+    while index < records.len():
+        var prior: i64 = 0
+        while prior < index:
+            if records[prior].canonical_path == records[index].canonical_path:
+                return true
+            prior = prior + 1
+        var alias_index: i64 = 0
+        while alias_index < records[index].aliases.len():
+            val alias = records[index].aliases[alias_index]
+            var prior_alias: i64 = 0
+            while prior_alias < alias_index:
+                if records[index].aliases[prior_alias] == alias: return true
+                prior_alias = prior_alias + 1
+            var other: i64 = 0
+            while other < records.len():
+                if alias == records[other].canonical_path: return true
+                if other != index:
+                    for other_alias in records[other].aliases:
+                        if alias == other_alias: return true
+                other = other + 1
+            alias_index = alias_index + 1
+        index = index + 1
+    false
+
+fn _installed_artifact_boot_compose_v1(
+    simplebox: SimpleboxSignedCatalogProvisionResultV1?,
+    clang: ClangSysrootCatalogBundleV1?,
+    primary: PrimaryLinuxToolCatalogPlanV1?,
+    server: ServerCatalogSigningMediaV1?,
+    populate: bool
+) -> InstalledArtifactBootCompositionResultV1:
+    """Validate bundle shapes and merge; optionally authenticate and populate.
+
+    Primary-tool and server inputs are already authenticated signing-media
+    projections. Production reachability remains with the boot-media owner
+    that supplies those projections.
+    """
+    if not simplebox.? and not clang.? and not primary.? and not server.?:
+        return _fail_v1(InstalledArtifactBootCompositionErrorV1.Empty)
+    var records: [InstalledArtifactBootRecordV1] = []
+    var required: [text] = []
+    var target = ManifestTarget(os: "", arch: "", abi: "")
+    var roots: [ExecutableManifestTrustedSignerV1] = []
+    if simplebox.?:
+        val provisioned = simplebox.unwrap()
+        if not provisioned.ok or
+           not simplebox_primary_tool_catalog_bundle_plan_valid_v1(
+               provisioned.plan):
+            return _fail_v1(
+                InstalledArtifactBootCompositionErrorV1.SimpleboxRejected)
+        target = provisioned.plan.policy.platform_target
+        roots = provisioned.plan.policy.trust_roots
+        for path in provisioned.plan.policy.required_canonical_paths:
+            required.push(path)
+        for record in provisioned.plan.records: records.push(record)
+    if clang.?:
+        val bundle = clang.unwrap()
+        if not bundle.ok or bundle.records.len() !=
+           CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1 or
+           not installed_artifact_boot_policy_shape_valid_v1(
+               bundle.policy, bundle.records):
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.ClangRejected)
+        if target.os != "" and
+           not _target_equal_v1(target, bundle.policy.platform_target):
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.TargetMismatch)
+        if target.os != "" and roots != bundle.policy.trust_roots:
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.TrustRootsMismatch)
+        if target.os == "":
+            target = bundle.policy.platform_target
+            roots = bundle.policy.trust_roots
+        for path in bundle.policy.required_canonical_paths:
+            required.push(path)
+        for record in bundle.records: records.push(record)
+    if primary.?:
+        val plan = primary.unwrap()
+        if not primary_linux_tool_catalog_plan_valid_v1(plan):
+            return _fail_v1(
+                InstalledArtifactBootCompositionErrorV1.PrimaryRejected)
+        if target.os != "" and
+           not _target_equal_v1(target, plan.policy.platform_target):
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.TargetMismatch)
+        if target.os != "" and roots != plan.policy.trust_roots:
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.TrustRootsMismatch)
+        if target.os == "":
+            target = plan.policy.platform_target
+            roots = plan.policy.trust_roots
+        for path in plan.policy.required_canonical_paths:
+            if path != SIMPLEBOX_CANONICAL_PATH_V1 or not simplebox.?:
+                required.push(path)
+        for record in plan.records:
+            if record.canonical_path == SIMPLEBOX_CANONICAL_PATH_V1 and simplebox.?:
+                val legacy = simplebox.unwrap().plan.records
+                var identical: bool = false
+                for legacy_record in legacy:
+                    if legacy_record.canonical_path == SIMPLEBOX_CANONICAL_PATH_V1:
+                        identical = installed_artifact_boot_records_identical_v1(
+                            legacy_record, record)
+                if not identical:
+                    return _fail_v1(
+                        InstalledArtifactBootCompositionErrorV1.DuplicateRecordConflict)
+            else:
+                records.push(record)
+    if server.?:
+        val media = server.unwrap()
+        if not server_catalog_signing_media_valid_v1(media):
+            return _fail_v1(
+                InstalledArtifactBootCompositionErrorV1.ServerRejected)
+        if target.os != "" and
+           not _target_equal_v1(target, media.policy.platform_target):
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.TargetMismatch)
+        if target.os != "" and roots != media.policy.trust_roots:
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.TrustRootsMismatch)
+        if target.os == "":
+            target = media.policy.platform_target
+            roots = media.policy.trust_roots
+        for path in media.policy.required_canonical_paths: required.push(path)
+        for record in media.records: records.push(record)
+    if not installed_artifact_boot_composition_count_within_bound_v1(
+        records.len() as i64, required.len() as i64):
+        return _fail_v1(
+            InstalledArtifactBootCompositionErrorV1.CombinedPolicyRejected)
+    var index: i64 = 0
+    while index < required.len():
+        var prior: i64 = 0
+        while prior < index:
+            if required[prior] == required[index]:
+                return _fail_v1(InstalledArtifactBootCompositionErrorV1.DuplicatePath)
+            prior = prior + 1
+        index = index + 1
+    if installed_artifact_boot_composition_records_conflict_v1(records):
+        return _fail_v1(
+            InstalledArtifactBootCompositionErrorV1.DuplicateRecordConflict)
+    val policy = InstalledArtifactBootPolicyV1(
+        platform_target: target, required_canonical_paths: required,
+        trust_roots: roots)
+    if not installed_artifact_boot_policy_shape_valid_v1(policy, records):
+        return _fail_v1(
+            InstalledArtifactBootCompositionErrorV1.CombinedPolicyRejected)
+    if not populate:
+        return InstalledArtifactBootCompositionResultV1(
+            ok: true, error: InstalledArtifactBootCompositionErrorV1.None,
+            population_error: InstalledArtifactBootPopulationErrorV1.None,
+            accepted_records: records.len() as i64)
+    val populated = installed_artifact_catalog_populate_from_boot_policy_v1(
+        policy, records)
+    if not populated.ok:
+        return _fail_v1(
+            InstalledArtifactBootCompositionErrorV1.PopulationRejected,
+            populated.error)
+    InstalledArtifactBootCompositionResultV1(
+        ok: true, error: InstalledArtifactBootCompositionErrorV1.None,
+        population_error: InstalledArtifactBootPopulationErrorV1.None,
+        accepted_records: populated.accepted_records)
+
+pub(package) fn installed_artifact_boot_composition_validate_v1(
+    simplebox: SimpleboxSignedCatalogProvisionResultV1?,
+    clang: ClangSysrootCatalogBundleV1?,
+    primary: PrimaryLinuxToolCatalogPlanV1? = nil,
+    server: ServerCatalogSigningMediaV1? = nil,
+) -> InstalledArtifactBootCompositionResultV1:
+    """Pure shape and merge validation; never authenticates or mutates state."""
+    _installed_artifact_boot_compose_v1(
+        simplebox, clang, primary, server, false)
+
+pub(package) fn installed_artifact_boot_compose_and_populate_v1(
+    simplebox: SimpleboxSignedCatalogProvisionResultV1?,
+    clang: ClangSysrootCatalogBundleV1?,
+    primary: PrimaryLinuxToolCatalogPlanV1? = nil,
+    server: ServerCatalogSigningMediaV1? = nil,
+) -> InstalledArtifactBootCompositionResultV1:
+    """Validate once, populate once, and seal once for the staged boot image.
+
+    Primary-tool and server inputs are already authenticated signing-media
+    projections. Production reachability remains with the boot-media owner
+    that supplies those projections.
+    """
+    _installed_artifact_boot_compose_v1(
+        simplebox, clang, primary, server, true)

@@ -1,0 +1,294 @@
+#!/bin/sh
+# check-paren-less-length-classify.shs — classify paren-less `.length` sites into
+# GENUINE METHOD CALLS (the silent whole-module de-JIT defect fenced by
+# check-no-jit-module-drop.shs) vs LEGITIMATE STRUCT FIELDS vs NON-CODE text.
+#
+# WHY THIS EXISTS
+# ---------------
+# `check-no-jit-module-drop.shs` cannot measure every module it selects (the
+# single-file `simple compile` oracle fails to resolve symbols for ~44% of them).
+# For those, a grep for paren-less `.length` was used as an UPPER BOUND — and it
+# was reported as "52 modules / 137 sites" in
+# doc/09_report/jit_module_drop_guard_coverage_gap_2026-08-18.md. That figure is
+# ~96% false positive: `.length` is ALSO a perfectly legitimate field name on 69
+# structs in this tree (SvimPiece, RefcBinary, H2FrameHeader, DerLength, ...),
+# and it also occurs inside string literals (JS/HTML snippets, Test262 fixtures)
+# and docstrings, where it is not Simple code at all.
+#
+# THE DISCRIMINATOR is the RECEIVER'S TYPE:
+#   receiver type declares a `length` field  -> FIELD      (legitimate, not a defect)
+#   receiver type is a builtin container/text -> METHOD    (the defect)
+#   inside a string literal / docstring / comment / a `0..length` range -> NON_CODE
+#   type not resolvable from the file        -> UNDETERMINED (its own bucket,
+#                                               NEVER silently folded into either side)
+#
+# EXIT CODES (repo pre-push guard convention; verdict is the LAST stdout line)
+#   0  PASS  — sites were classified and none is a genuine paren-less method call
+#   1  FAIL  — at least one genuine method-call site; each is NAMED
+#   2  ERROR — nothing was checked. This is NOT a pass.
+#
+# LIMITS, stated rather than papered over: type resolution is textual and
+# intra-file. It resolves `x: T` annotations, `x = T(...)` constructions,
+# `x: [T]` array annotations and `x = <expr>.split(...)`. Anything else lands in
+# UNDETERMINED by design; UNDETERMINED is never counted as clean.
+
+set -u
+ROOT="."
+FILES=""
+SELFTEST_ONLY=0
+LIST_FROM=""
+
+usage() {
+    echo "usage: $0 [--root DIR] [--files LIST_FILE] [--selftest] [FILE...]"
+}
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/lenclassify.XXXXXX") || { echo "ERROR — nothing was checked"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# ---------------------------------------------------------------- type index
+# Emits "TYPE<TAB>FIELD<TAB>FIELDTYPE" for every struct/class field.
+build_index() {
+    idx_root=$1
+    find "$idx_root" -name '*.spl' -not -path '*/vendor/*' -print0 2>/dev/null \
+    | xargs -0 awk '
+        FNR==1 { cur="" }
+        /^[[:space:]]*(pub[[:space:]]+)?(struct|class)[[:space:]]+[A-Za-z_]/ {
+            line=$0
+            sub(/^[[:space:]]*(pub[[:space:]]+)?(struct|class)[[:space:]]+/, "", line)
+            sub(/[^A-Za-z0-9_].*$/, "", line)
+            cur=line; next
+        }
+        cur != "" {
+            if ($0 ~ /^[^[:space:]]/) { cur=""; next }
+            if ($0 ~ /[[:space:]]fn[[:space:]]/) next
+            if (match($0, /^[[:space:]]+(pub[[:space:]]+)?(var[[:space:]]+|val[[:space:]]+|let[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*[A-Za-z_\[]/)) {
+                fld=$0
+                sub(/^[[:space:]]+(pub[[:space:]]+)?(var[[:space:]]+|val[[:space:]]+|let[[:space:]]+)?/, "", fld)
+                ty=fld
+                sub(/[[:space:]]*:.*$/, "", fld)
+                sub(/^[^:]*:[[:space:]]*/, "", ty)
+                if (ty ~ /^\[/) ty="Array"
+                sub(/[^A-Za-z0-9_].*$/, "", ty)
+                if (ty != "") print cur "\t" fld "\t" ty
+            }
+        }
+    ' 2>/dev/null | sort -u
+}
+
+# ---------------------------------------------------------------- classifier
+classify() {
+    idx_file=$1; shift
+    awk -v IDXF="$idx_file" '
+    BEGIN {
+        while ((getline t < IDXF) > 0) {
+            if (t == "") continue
+            nf=split(t, F, "\t")
+            if (nf < 3) continue
+            FLD[F[1] "." F[2]]=F[3]
+            if (F[2] == "length") HASLEN[F[1]]=1
+        }
+        close(IDXF)
+        split("Array String Dict List Set Bytes text str string", B, " ")
+        for (i in B) BUILTIN[B[i]]=1
+    }
+    FNR==1 { delete TY; indoc=0; enc="" }
+    {
+        raw=$0
+        if ($0 ~ /^[[:space:]]*(pub[[:space:]]+)?(struct|class|impl)[[:space:]]+[A-Za-z_]/) {
+            e=$0
+            sub(/^[[:space:]]*(pub[[:space:]]+)?(struct|class|impl)[[:space:]]+/, "", e)
+            sub(/[^A-Za-z0-9_].*$/, "", e)
+            enc=e
+        }
+        # --- docstring tracking (""" ... """) -------------------------------
+        n=gsub(/"""/, "\"\"\"", raw)   # count occurrences without altering
+        cnt=0; tmp=raw
+        while (match(tmp, /"""/)) { cnt++; tmp=substr(tmp, RSTART+3) }
+        if (indoc) { if (cnt % 2 == 1) indoc=0; next }
+        if (cnt % 2 == 1) { indoc=1; line=substr($0, 1, index($0, "\"\"\"")-1) }
+        else line=$0
+
+        # --- strip comments and string literals ----------------------------
+        out=""; q=""; i=1; L=length(line)
+        while (i <= L) {
+            c=substr(line,i,1)
+            if (q != "") {
+                if (c == "\\") { i+=2; continue }
+                if (c == q) q=""
+                out=out " "
+            } else {
+                if (c == "\"" || c == "'"'"'") { q=c; out=out " " }
+                else if (c == "#") break
+                else if (c == "/" && substr(line,i+1,1) == "/") break
+                else out=out c
+            }
+            i++
+        }
+        line=out
+
+        # --- record type bindings ------------------------------------------
+        rec=line
+        while (match(rec, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*[A-Za-z_\[][A-Za-z0-9_]*/)) {
+            piece=substr(rec, RSTART, RLENGTH)
+            rec=substr(rec, RSTART+RLENGTH)
+            nm=piece; sub(/[[:space:]]*:.*$/, "", nm)
+            ty=piece; sub(/^[^:]*:[[:space:]]*/, "", ty)
+            if (ty ~ /^\[/) ty="Array"
+            TY[nm]=ty
+        }
+        rec=line
+        while (match(rec, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[A-Z][A-Za-z0-9_]*[[:space:]]*\(/)) {
+            piece=substr(rec, RSTART, RLENGTH); rec=substr(rec, RSTART+RLENGTH)
+            nm=piece; sub(/[[:space:]]*=.*$/, "", nm)
+            ty=piece; sub(/^[^=]*=[[:space:]]*/, "", ty); sub(/[[:space:]]*\($/, "", ty)
+            TY[nm]=ty
+        }
+        if (match(line, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=].*\.split[[:space:]]*\(/)) {
+            piece=substr(line, RSTART, RLENGTH); nm=piece; sub(/[[:space:]]*=.*$/, "", nm)
+            TY[nm]="Array"
+        }
+
+        # --- find paren-less .length ---------------------------------------
+        rest=line
+        while (match(rest, /\.length/)) {
+            pre=substr(rest, 1, RSTART-1)
+            post=substr(rest, RSTART+7)
+            rest=post
+            if (post ~ /^[(A-Za-z0-9_]/) continue        # .length(...) or .lengthX
+            if (pre ~ /\.$/) continue                     # `0..length` range
+            recv=pre
+            sub(/^.*[^A-Za-z0-9_\.\)\]]/, "", recv)
+            if (recv == "") continue
+            if (recv ~ /[\)\]]$/) { emit("UNDETERMINED", recv, "call/index result"); continue }
+            base=recv; sub(/\..*$/, "", base)
+            if (base == "document" || base == "process" || base == "window") {
+                emit("NON_CODE", recv, "embedded JS/DOM"); continue
+            }
+            if (recv ~ /\./) {
+                fldnm=recv; sub(/^[^.]*\./, "", fldnm)
+                if (base == "self" && enc != "" && ((enc "." fldnm) in FLD)) {
+                    sty=FLD[enc "." fldnm]
+                    if (sty in HASLEN)      { emit("FIELD", recv, sty); continue }
+                    else if (sty in BUILTIN){ emit("METHOD", recv, sty); continue }
+                    else { emit("UNDETERMINED", recv, "self." fldnm " type " sty); continue }
+                }
+                emit("UNDETERMINED", recv, "dotted receiver"); continue
+            }
+            ty = (base == "self") ? enc : ((base in TY) ? TY[base] : "")
+            if (ty == "") { emit("UNDETERMINED", recv, "type not resolvable in file") }
+            else if (ty in HASLEN) { emit("FIELD", recv, ty) }
+            else if (ty in BUILTIN) { emit("METHOD", recv, ty) }
+            else { emit("UNDETERMINED", recv, "type " ty " not indexed") }
+        }
+    }
+    function emit(v, r, w) { printf "%s\t%s\t%d\t%s\t%s\n", v, FILENAME, FNR, r, w }
+    ' "$@"
+}
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+    d="$TMP/st"; mkdir -p "$d"
+    # must-DETECT fixture: two genuine builtin receivers
+    cat > "$d/detect.spl" <<'EOF'
+fn a(condition: text) -> i64:
+    val parts = condition.split("==")
+    if parts.length == 2:
+        return 1
+    val s: text = "abc"
+    if s.length == 3:
+        return 2
+    return 0
+EOF
+    # must-NOT-DETECT fixture: a struct with a real `length` field
+    cat > "$d/nodetect.spl" <<'EOF'
+struct SvimPiece:
+    offset: i64
+    length: i64
+
+fn b(p: SvimPiece) -> i64:
+    p.length
+
+fn c() -> text:
+    val js = "document.querySelectorAll('x').length"
+    js
+EOF
+    build_index "$d" > "$TMP/st.idx"
+    grep -q '^SvimPiece	length	' "$TMP/st.idx" || { echo "SELFTEST FAIL: index missed SvimPiece.length"; return 1; }
+    classify "$TMP/st.idx" "$d/detect.spl" > "$TMP/st.detect"
+    classify "$TMP/st.idx" "$d/nodetect.spl" > "$TMP/st.nodetect"
+    dm=$(awk -F'\t' '$1=="METHOD"' "$TMP/st.detect" | wc -l)
+    nm=$(awk -F'\t' '$1=="METHOD"' "$TMP/st.nodetect" | wc -l)
+    nf=$(awk -F'\t' '$1=="FIELD"' "$TMP/st.nodetect" | wc -l)
+    [ "$dm" -eq 2 ] || { echo "SELFTEST FAIL: must-detect fixture yielded $dm METHOD, want 2"; return 1; }
+    [ "$nm" -eq 0 ] || { echo "SELFTEST FAIL: must-NOT-detect fixture yielded $nm METHOD, want 0"; return 1; }
+    [ "$nf" -eq 1 ] || { echo "SELFTEST FAIL: must-NOT-detect fixture yielded $nf FIELD, want 1"; return 1; }
+    : > "$d/empty.spl"
+    e=$(classify "$TMP/st.idx" "$d/empty.spl" | wc -l)
+    [ "$e" -eq 0 ] || { echo "SELFTEST FAIL: empty file yielded $e sites, want 0"; return 1; }
+    echo "selftest: 4 fixture assertion(s) OK"
+    return 0
+}
+
+# ---------------------------------------------------------------- args
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=$2; shift 2 ;;
+        --files) LIST_FROM=$2; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) usage; echo "ERROR — nothing was checked"; exit 2 ;;
+        *) FILES="$FILES $1"; shift ;;
+    esac
+done
+
+selftest || { echo "FAIL — selftest did not pass; classification is not trustworthy"; exit 1; }
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — 4 selftest fixture assertion(s) checked"; exit 0; }
+
+# ---------------------------------------------------------------- targets
+: > "$TMP/targets"
+if [ -n "$LIST_FROM" ]; then
+    [ -f "$LIST_FROM" ] || { echo "ERROR — nothing was checked"; exit 2; }
+    cut -f1 "$LIST_FROM" | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done >> "$TMP/targets"
+fi
+for f in $FILES; do [ -f "$f" ] && printf '%s\n' "$f" >> "$TMP/targets"; done
+if [ ! -s "$TMP/targets" ]; then
+    find "$ROOT" -name '*.spl' -not -path '*/vendor/*' -print >> "$TMP/targets" 2>/dev/null
+fi
+sort -u "$TMP/targets" -o "$TMP/targets"
+NTARGET=$(wc -l < "$TMP/targets")
+[ "$NTARGET" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+
+build_index "$ROOT" > "$TMP/idx"
+NIDX=$(wc -l < "$TMP/idx")
+NHAS=$(awk -F'\t' '$2=="length"' "$TMP/idx" | cut -f1 | sort -u | wc -l)
+[ "$NIDX" -gt 0 ] || { echo "ERROR — nothing was checked (empty struct-field index)"; exit 2; }
+
+: > "$TMP/out"
+while IFS= read -r f; do
+    classify "$TMP/idx" "$f" >> "$TMP/out"
+done < "$TMP/targets"
+
+NSITE=$(wc -l < "$TMP/out")
+[ "$NSITE" -gt 0 ] || { echo "ERROR — nothing was checked (0 paren-less .length sites in $NTARGET file(s))"; exit 2; }
+
+NM=$(awk -F'\t' '$1=="METHOD"'        "$TMP/out" | wc -l)
+NF=$(awk -F'\t' '$1=="FIELD"'         "$TMP/out" | wc -l)
+NN=$(awk -F'\t' '$1=="NON_CODE"'      "$TMP/out" | wc -l)
+NU=$(awk -F'\t' '$1=="UNDETERMINED"'  "$TMP/out" | wc -l)
+
+echo "files scanned:        $NTARGET"
+echo "struct/class fields indexed: $NIDX (types with a genuine 'length' field: $NHAS)"
+echo "paren-less .length sites: $NSITE"
+echo "  METHOD (defect):    $NM"
+echo "  FIELD (legitimate): $NF"
+echo "  NON_CODE:           $NN"
+echo "  UNDETERMINED:       $NU"
+if [ "$NM" -gt 0 ]; then
+    echo "--- genuine paren-less method-call sites ---"
+    awk -F'\t' '$1=="METHOD" { printf "  %s:%s  %s.length  (receiver type %s)\n", $2, $3, $4, $5 }' "$TMP/out"
+    echo "FAIL — $NSITE site(s) classified in $NTARGET file(s), $NM genuine paren-less method call(s)"
+    exit 1
+fi
+echo "PASS — $NSITE paren-less .length site(s) checked in $NTARGET file(s), 0 genuine method calls ($NF field, $NN non-code, $NU undetermined)"
+exit 0

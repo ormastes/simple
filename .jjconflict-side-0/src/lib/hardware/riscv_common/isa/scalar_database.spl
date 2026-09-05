@@ -1,0 +1,440 @@
+# Shared declarative scalar RISC-V ISA seed for Gen2.
+#
+# This table is compiler-host/elaboration metadata. It deliberately describes
+# instruction semantics once for concrete RV32/RV64 products, but it is never
+# emitted as a runtime decoder table or XLEN multiplexer. A product selects a
+# concrete entry set before HWIR lowering.
+
+use std.common.crypto.sha256.{sha256_text}
+
+pub class RiscvScalarIsaEntry:
+    id: text
+    extension: text
+    encoding_mask: u32
+    encoding_value: u32
+    xlen_scope: text
+    semantic_operation: text
+    execution_class: text
+    operand_width_bits: i32
+    writeback_rule: text
+    memory_effect: text
+    trap_behavior: text
+
+    me diagnostic() -> text:
+        if self.id == "" or self.extension == "" or self.semantic_operation == "":
+            return "RISCV-ISA-E-IDENTITY: scalar ISA entries require IDs, extensions, and semantic operations"
+        if self.encoding_mask == 0 or (self.encoding_value & self.encoding_mask) != self.encoding_value:
+            return "RISCV-ISA-E-ENCODING: scalar ISA entry encoding value must fit its nonzero mask"
+        if self.xlen_scope != "rv32" and self.xlen_scope != "rv32-rv64" and self.xlen_scope != "rv64":
+            return "RISCV-ISA-E-XLEN: scalar ISA entry requires rv32, rv32-rv64, or rv64 scope"
+        if self.operand_width_bits != 0 and self.operand_width_bits != 32:
+            return "RISCV-ISA-E-WIDTH: scalar ISA operand width must be XLEN (0) or 32"
+        if self.writeback_rule == "" or self.memory_effect == "" or self.trap_behavior == "":
+            return "RISCV-ISA-E-SEMANTICS: scalar ISA entry requires explicit effect metadata"
+        ""
+
+    me applies_to_xlen(xlen: u32) -> bool:
+        if self.xlen_scope == "rv32-rv64":
+            return xlen == 32 or xlen == 64
+        if self.xlen_scope == "rv32":
+            return xlen == 32
+        self.xlen_scope == "rv64" and xlen == 64
+
+    me matches(instruction: u32, xlen: u32) -> bool:
+        self.diagnostic() == "" and self.applies_to_xlen(xlen) and
+            (instruction & self.encoding_mask) == self.encoding_value
+
+fn scalar_entry(id: text, extension: text, mask: u32, value: u32,
+    xlen_scope: text, operation: text, execution_class: text,
+    operand_width_bits: i32, writeback: text, memory: text, trap: text) -> RiscvScalarIsaEntry:
+    RiscvScalarIsaEntry(id: id, extension: extension, encoding_mask: mask,
+        encoding_value: value, xlen_scope: xlen_scope,
+        semantic_operation: operation, execution_class: execution_class,
+        operand_width_bits: operand_width_bits, writeback_rule: writeback,
+        memory_effect: memory, trap_behavior: trap)
+
+pub fn riscv_scalar_i_entries() -> [RiscvScalarIsaEntry]:
+    """Base scalar I rows shared by RV32 and RV64 Gen2 products.
+
+    Rows with the same opcode use funct3/funct7 masks so legality remains
+    explicit. XLEN-specific word operations live in their own rv64 table.
+    """
+    [
+        scalar_entry("rv.i.lui", "I", 0x0000007F, 0x00000037, "rv32-rv64", "lui", "integer", 0, "rd=immediate", "none", "precise"),
+        scalar_entry("rv.i.auipc", "I", 0x0000007F, 0x00000017, "rv32-rv64", "auipc", "integer", 0, "rd=pc_plus_immediate", "none", "precise"),
+        scalar_entry("rv.i.jal", "I", 0x0000007F, 0x0000006F, "rv32-rv64", "jal", "control-flow", 0, "rd=link", "none", "instruction_address_misaligned"),
+        scalar_entry("rv.i.jalr", "I", 0x0000707F, 0x00000067, "rv32-rv64", "jalr", "control-flow", 0, "rd=link", "none", "instruction_address_misaligned"),
+        scalar_entry("rv.i.beq", "I", 0x0000707F, 0x00000063, "rv32-rv64", "branch_equal", "control-flow", 0, "none", "none", "instruction_address_misaligned"),
+        scalar_entry("rv.i.bne", "I", 0x0000707F, 0x00001063, "rv32-rv64", "branch_not_equal", "control-flow", 0, "none", "none", "instruction_address_misaligned"),
+        scalar_entry("rv.i.blt", "I", 0x0000707F, 0x00004063, "rv32-rv64", "branch_less_than_signed", "control-flow", 0, "none", "none", "instruction_address_misaligned"),
+        scalar_entry("rv.i.bge", "I", 0x0000707F, 0x00005063, "rv32-rv64", "branch_greater_equal_signed", "control-flow", 0, "none", "none", "instruction_address_misaligned"),
+        scalar_entry("rv.i.bltu", "I", 0x0000707F, 0x00006063, "rv32-rv64", "branch_less_than_unsigned", "control-flow", 0, "none", "none", "instruction_address_misaligned"),
+        scalar_entry("rv.i.bgeu", "I", 0x0000707F, 0x00007063, "rv32-rv64", "branch_greater_equal_unsigned", "control-flow", 0, "none", "none", "instruction_address_misaligned"),
+        scalar_entry("rv.i.lb", "I", 0x0000707F, 0x00000003, "rv32-rv64", "load_byte_signed", "load-store", 0, "rd=sign_extend", "load", "load_address_or_access_fault"),
+        scalar_entry("rv.i.lh", "I", 0x0000707F, 0x00001003, "rv32-rv64", "load_half_signed", "load-store", 0, "rd=sign_extend", "load", "load_address_or_access_fault"),
+        scalar_entry("rv.i.lw", "I", 0x0000707F, 0x00002003, "rv32-rv64", "load_word_signed", "load-store", 32, "rd=sign_extend_to_xlen", "load", "load_address_or_access_fault"),
+        scalar_entry("rv.i.lbu", "I", 0x0000707F, 0x00004003, "rv32-rv64", "load_byte_unsigned", "load-store", 0, "rd=zero_extend", "load", "load_address_or_access_fault"),
+        scalar_entry("rv.i.lhu", "I", 0x0000707F, 0x00005003, "rv32-rv64", "load_half_unsigned", "load-store", 0, "rd=zero_extend", "load", "load_address_or_access_fault"),
+        scalar_entry("rv.i.sb", "I", 0x0000707F, 0x00000023, "rv32-rv64", "store_byte", "load-store", 0, "none", "store", "store_address_or_access_fault"),
+        scalar_entry("rv.i.sh", "I", 0x0000707F, 0x00001023, "rv32-rv64", "store_half", "load-store", 0, "none", "store", "store_address_or_access_fault"),
+        scalar_entry("rv.i.sw", "I", 0x0000707F, 0x00002023, "rv32-rv64", "store_word", "load-store", 32, "none", "store", "store_address_or_access_fault"),
+        scalar_entry("rv.i.addi", "I", 0x0000707F, 0x00000013, "rv32-rv64", "add", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.slti", "I", 0x0000707F, 0x00002013, "rv32-rv64", "set_less_than_signed", "integer", 0, "rd=boolean", "none", "precise"),
+        scalar_entry("rv.i.sltiu", "I", 0x0000707F, 0x00003013, "rv32-rv64", "set_less_than_unsigned", "integer", 0, "rd=boolean", "none", "precise"),
+        scalar_entry("rv.i.xori", "I", 0x0000707F, 0x00004013, "rv32-rv64", "xor", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.ori", "I", 0x0000707F, 0x00006013, "rv32-rv64", "or", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.andi", "I", 0x0000707F, 0x00007013, "rv32-rv64", "and", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv32.i.slli", "I", 0xFE00707F, 0x00001013, "rv32", "shift_left_logical_immediate", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv32.i.srli", "I", 0xFE00707F, 0x00005013, "rv32", "shift_right_logical_immediate", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv32.i.srai", "I", 0xFE00707F, 0x40005013, "rv32", "shift_right_arithmetic_immediate", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.add", "I", 0xFE00707F, 0x00000033, "rv32-rv64", "add", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.sub", "I", 0xFE00707F, 0x40000033, "rv32-rv64", "subtract", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.sll", "I", 0xFE00707F, 0x00001033, "rv32-rv64", "shift_left_logical", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.slt", "I", 0xFE00707F, 0x00002033, "rv32-rv64", "set_less_than_signed", "integer", 0, "rd=boolean", "none", "precise"),
+        scalar_entry("rv.i.sltu", "I", 0xFE00707F, 0x00003033, "rv32-rv64", "set_less_than_unsigned", "integer", 0, "rd=boolean", "none", "precise"),
+        scalar_entry("rv.i.xor", "I", 0xFE00707F, 0x00004033, "rv32-rv64", "xor", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.srl", "I", 0xFE00707F, 0x00005033, "rv32-rv64", "shift_right_logical", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.sra", "I", 0xFE00707F, 0x40005033, "rv32-rv64", "shift_right_arithmetic", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.or", "I", 0xFE00707F, 0x00006033, "rv32-rv64", "or", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.and", "I", 0xFE00707F, 0x00007033, "rv32-rv64", "and", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.i.fence", "I", 0x0000707F, 0x0000000F, "rv32-rv64", "fence", "memory-order", 0, "none", "fence", "precise"),
+        scalar_entry("rv.i.fence_i", "Zifencei", 0x0000707F, 0x0000100F, "rv32-rv64", "fence_instruction", "memory-order", 0, "none", "fence", "precise"),
+        scalar_entry("rv.i.ecall", "I", 0xFFFFFFFF, 0x00000073, "rv32-rv64", "environment_call", "system", 0, "none", "none", "environment_call"),
+        scalar_entry("rv.i.ebreak", "I", 0xFFFFFFFF, 0x00100073, "rv32-rv64", "breakpoint", "system", 0, "none", "none", "breakpoint"),
+        scalar_entry("rv.zicsr.csrrw", "Zicsr", 0x0000707F, 0x00001073, "rv32-rv64", "csr_read_write", "csr", 0, "rd=old_csr", "csr", "illegal_or_csr_fault"),
+        scalar_entry("rv.zicsr.csrrs", "Zicsr", 0x0000707F, 0x00002073, "rv32-rv64", "csr_read_set", "csr", 0, "rd=old_csr", "csr", "illegal_or_csr_fault"),
+        scalar_entry("rv.zicsr.csrrc", "Zicsr", 0x0000707F, 0x00003073, "rv32-rv64", "csr_read_clear", "csr", 0, "rd=old_csr", "csr", "illegal_or_csr_fault"),
+        scalar_entry("rv.zicsr.csrrwi", "Zicsr", 0x0000707F, 0x00005073, "rv32-rv64", "csr_write_immediate", "csr", 0, "rd=old_csr", "csr", "illegal_or_csr_fault"),
+        scalar_entry("rv.zicsr.csrrsi", "Zicsr", 0x0000707F, 0x00006073, "rv32-rv64", "csr_set_immediate", "csr", 0, "rd=old_csr", "csr", "illegal_or_csr_fault"),
+        scalar_entry("rv.zicsr.csrrci", "Zicsr", 0x0000707F, 0x00007073, "rv32-rv64", "csr_clear_immediate", "csr", 0, "rd=old_csr", "csr", "illegal_or_csr_fault")
+    ]
+
+pub fn riscv_scalar_m_entries() -> [RiscvScalarIsaEntry]:
+    """M-extension integer rows, selected statically by a product provider."""
+    [
+        scalar_entry("rv.m.mul", "M", 0xFE00707F, 0x02000033, "rv32-rv64", "multiply_low", "multiply-divide", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.m.mulh", "M", 0xFE00707F, 0x02001033, "rv32-rv64", "multiply_high_signed", "multiply-divide", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.m.mulhsu", "M", 0xFE00707F, 0x02002033, "rv32-rv64", "multiply_high_signed_unsigned", "multiply-divide", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.m.mulhu", "M", 0xFE00707F, 0x02003033, "rv32-rv64", "multiply_high_unsigned", "multiply-divide", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.m.div", "M", 0xFE00707F, 0x02004033, "rv32-rv64", "divide_signed", "multiply-divide", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.m.divu", "M", 0xFE00707F, 0x02005033, "rv32-rv64", "divide_unsigned", "multiply-divide", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.m.rem", "M", 0xFE00707F, 0x02006033, "rv32-rv64", "remainder_signed", "multiply-divide", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv.m.remu", "M", 0xFE00707F, 0x02007033, "rv32-rv64", "remainder_unsigned", "multiply-divide", 0, "rd=result", "none", "precise")
+    ]
+
+pub fn riscv_scalar_zmmul_entries() -> [RiscvScalarIsaEntry]:
+    """The Zmmul subset reuses the declared M multiply semantics only.
+
+    This is an elaboration-time subset, not a duplicated decode table and not
+    a run-time `has_divider` condition.  Divide and remainder rows are absent
+    from the resulting concrete product profile.
+    """
+    var entries: [RiscvScalarIsaEntry] = []
+    for entry in riscv_scalar_m_entries():
+        if entry.id == "rv.m.mul" or entry.id == "rv.m.mulh" or
+            entry.id == "rv.m.mulhsu" or entry.id == "rv.m.mulhu":
+            entries.push(entry)
+    for entry in riscv_scalar_m_rv64_word_entries():
+        if entry.id == "rv64.m.mulw": entries.push(entry)
+    entries
+
+pub fn riscv_scalar_m_rv64_word_entries() -> [RiscvScalarIsaEntry]:
+    """RV64-only M word operations with shared 32-bit result semantics.
+
+    Every result is sign-extended exactly once at architectural writeback. The
+    provider remains the one selected M execution provider; this table does
+    not create a second RV64 implementation path.
+    """
+    [
+        scalar_entry("rv64.m.mulw", "M", 0xFE00707F, 0x0200003B, "rv64", "multiply_low", "multiply-divide", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.m.divw", "M", 0xFE00707F, 0x0200403B, "rv64", "divide_signed", "multiply-divide", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.m.divuw", "M", 0xFE00707F, 0x0200503B, "rv64", "divide_unsigned", "multiply-divide", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.m.remw", "M", 0xFE00707F, 0x0200603B, "rv64", "remainder_signed", "multiply-divide", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.m.remuw", "M", 0xFE00707F, 0x0200703B, "rv64", "remainder_unsigned", "multiply-divide", 32, "rd=sign_extend_to_xlen", "none", "precise")
+    ]
+
+pub fn riscv_scalar_rv64_specialized_entries() -> [RiscvScalarIsaEntry]:
+    """RV64-only memory, shift and word rules; word results sign-extend once.
+
+    The W shifts are entries in the shared declarative table, not an RV64-only
+    ALU implementation. Their 32-bit operation/result width and one explicit
+    sign-extension writeback rule are sufficient for later provider lowering.
+    """
+    [
+        scalar_entry("rv64.i.ld", "I", 0x0000707F, 0x00003003, "rv64", "load_doubleword", "load-store", 0, "rd=result", "load", "load_address_or_access_fault"),
+        scalar_entry("rv64.i.lwu", "I", 0x0000707F, 0x00006003, "rv64", "load_word_unsigned", "load-store", 32, "rd=zero_extend_to_xlen", "load", "load_address_or_access_fault"),
+        scalar_entry("rv64.i.sd", "I", 0x0000707F, 0x00003023, "rv64", "store_doubleword", "load-store", 0, "none", "store", "store_address_or_access_fault"),
+        scalar_entry("rv64.i.slli", "I", 0xFC00707F, 0x00001013, "rv64", "shift_left_logical_immediate", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv64.i.srli", "I", 0xFC00707F, 0x00005013, "rv64", "shift_right_logical_immediate", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv64.i.srai", "I", 0xFC00707F, 0x40005013, "rv64", "shift_right_arithmetic_immediate", "integer", 0, "rd=result", "none", "precise"),
+        scalar_entry("rv64.i.addiw", "I", 0x0000707F, 0x0000001B, "rv64", "add", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.i.slliw", "I", 0xFE00707F, 0x0000101B, "rv64", "shift_left_logical_immediate", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.i.srliw", "I", 0xFE00707F, 0x0000501B, "rv64", "shift_right_logical_immediate", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.i.sraiw", "I", 0xFE00707F, 0x4000501B, "rv64", "shift_right_arithmetic_immediate", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.i.addw", "I", 0xFE00707F, 0x0000003B, "rv64", "add", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.i.subw", "I", 0xFE00707F, 0x4000003B, "rv64", "subtract", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.i.sllw", "I", 0xFE00707F, 0x0000103B, "rv64", "shift_left_logical", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.i.srlw", "I", 0xFE00707F, 0x0000503B, "rv64", "shift_right_logical", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise"),
+        scalar_entry("rv64.i.sraw", "I", 0xFE00707F, 0x4000503B, "rv64", "shift_right_arithmetic", "integer-word", 32, "rd=sign_extend_to_xlen", "none", "precise")
+    ]
+
+pub fn riscv_scalar_gen2_seed_entries() -> [RiscvScalarIsaEntry]:
+    """All currently declared scalar Gen2 seed rows, not a profile claim."""
+    var entries = riscv_scalar_i_entries()
+    for entry in riscv_scalar_m_entries(): entries.push(entry)
+    for entry in riscv_scalar_m_rv64_word_entries(): entries.push(entry)
+    for entry in riscv_scalar_rv64_specialized_entries(): entries.push(entry)
+    entries
+
+pub fn riscv_scalar_entries_for_xlen(xlen: u32) -> [RiscvScalarIsaEntry]:
+    """Elaborate the seed database into one concrete XLEN product view."""
+    if xlen != 32 and xlen != 64:
+        return []
+    var entries: [RiscvScalarIsaEntry] = []
+    for entry in riscv_scalar_gen2_seed_entries():
+        if entry.applies_to_xlen(xlen): entries.push(entry)
+    entries
+
+pub fn riscv_scalar_entries_for_isa_profile(isa_profile: text) -> Result<[RiscvScalarIsaEntry], text>:
+    """Elaborate an explicit scalar ISA profile without hardware dispatch.
+
+    `rv32i_zca`/`rv64i_zca` select the same scalar rows as I; compressed rows
+    remain owned by the compressed database. `Zicsr` and `Zifencei` rows are
+    selected only by an explicitly named combined profile; a bare I profile
+    must not over-advertise those separate extensions. M rows appear only for
+    an explicit `im` profile, which lets a future multiplier/divider provider
+    be selected at elaboration rather than at instruction-execution time.
+    """
+    var xlen: u32 = 0
+    var include_m = false
+    var include_zicsr = false
+    var include_zifencei = false
+    if isa_profile == "rv32i" or isa_profile == "rv32i_zca":
+        xlen = 32
+    elif isa_profile == "rv64i" or isa_profile == "rv64i_zca":
+        xlen = 64
+    elif isa_profile == "rv32i_zicsr_zifencei":
+        xlen = 32
+        include_zicsr = true
+        include_zifencei = true
+    elif isa_profile == "rv64i_zicsr_zifencei":
+        xlen = 64
+        include_zicsr = true
+        include_zifencei = true
+    elif isa_profile == "rv32im":
+        xlen = 32
+        include_m = true
+    elif isa_profile == "rv64im":
+        xlen = 64
+        include_m = true
+    elif isa_profile == "rv32i_zmmul":
+        xlen = 32
+    elif isa_profile == "rv64i_zmmul":
+        xlen = 64
+    else:
+        return Err("RISCV-ISA-E-PROFILE: unsupported scalar ISA profile")
+    var entries: [RiscvScalarIsaEntry] = []
+    for entry in riscv_scalar_i_entries():
+        if entry.applies_to_xlen(xlen) and (entry.extension == "I" or
+            (entry.extension == "Zicsr" and include_zicsr) or
+            (entry.extension == "Zifencei" and include_zifencei)):
+            entries.push(entry)
+    if xlen == 64:
+        for entry in riscv_scalar_rv64_specialized_entries(): entries.push(entry)
+    if include_m:
+        for entry in riscv_scalar_m_entries(): entries.push(entry)
+        if xlen == 64:
+            for entry in riscv_scalar_m_rv64_word_entries(): entries.push(entry)
+    elif isa_profile == "rv32i_zmmul" or isa_profile == "rv64i_zmmul":
+        for entry in riscv_scalar_zmmul_entries():
+            if entry.applies_to_xlen(xlen): entries.push(entry)
+    val diagnostic = riscv_scalar_database_diagnostic(entries)
+    if diagnostic != "": return Err(diagnostic)
+    Ok(entries)
+
+pub fn riscv_scalar_lookup_profile(instruction: u32, isa_profile: text) -> Result<RiscvScalarIsaEntry, text>:
+    """Resolve metadata only from the scalar extensions a product declares."""
+    val entries = riscv_scalar_entries_for_isa_profile(isa_profile)?
+    val xlen: u32 = if isa_profile.starts_with("rv32"): 32 else: 64
+    for entry in entries:
+        if entry.matches(instruction, xlen): return Ok(entry)
+    Err("RISCV-ISA-E-PROFILE-ILLEGAL: instruction is not declared by the scalar ISA profile")
+
+pub fn riscv_scalar_lookup(instruction: u32, xlen: u32) -> Result<RiscvScalarIsaEntry, text>:
+    """Resolve one scalar instruction to its concrete elaboration metadata.
+
+    This is intentionally a compiler-host/tooling lookup, not an RTL decoder.
+    The table is checked for ambiguity before matching, so callers never gain
+    an implicit first-row-wins rule.
+    """
+    if xlen != 32 and xlen != 64:
+        return Err("RISCV-ISA-E-LOOKUP-XLEN: scalar lookup requires XLEN=32 or XLEN=64")
+    val entries = riscv_scalar_entries_for_xlen(xlen)
+    val diagnostic = riscv_scalar_database_diagnostic(entries)
+    if diagnostic != "": return Err(diagnostic)
+    for entry in entries:
+        if entry.matches(instruction, xlen): return Ok(entry)
+    Err("RISCV-ISA-E-LOOKUP-ILLEGAL: instruction is not declared by the scalar Gen2 seed")
+
+pub class RiscvScalarProviderSelection:
+    """Concrete compiler-host execution-provider selection for one ISA product.
+
+    This record is constructed during elaboration and consumed by future HWIR
+    resource binding. It is intentionally not a hardware interface: all calls
+    resolve to a fixed provider identity before any RTL graph is emitted.
+    """
+    isa_profile: text
+    xlen: u32
+    muldiv_provider: text
+    entries: [RiscvScalarIsaEntry]
+
+    me diagnostic() -> text:
+        if self.xlen != 32 and self.xlen != 64:
+            return "RISCV-PROVIDER-E-XLEN: scalar provider selection requires XLEN=32 or XLEN=64"
+        val expected_xlen: u32 = if self.isa_profile.starts_with("rv32"): 32 else: 64
+        if not self.isa_profile.starts_with("rv32") and not self.isa_profile.starts_with("rv64"):
+            return "RISCV-PROVIDER-E-PROFILE: scalar provider selection requires a supported ISA profile"
+        if self.xlen != expected_xlen:
+            return "RISCV-PROVIDER-E-XLEN: scalar provider selection must match its ISA profile XLEN"
+        val includes_multiply = self.isa_profile == "rv32im" or self.isa_profile == "rv64im" or
+            self.isa_profile == "rv32i_zmmul" or self.isa_profile == "rv64i_zmmul"
+        if self.muldiv_provider != "none" and self.muldiv_provider != "iterative" and
+            self.muldiv_provider != "pipelined" and self.muldiv_provider != "dsp":
+            return "RISCV-PROVIDER-E-MULDIV: scalar provider selection is unsupported"
+        if not includes_multiply and self.muldiv_provider != "none":
+            return "RISCV-PROVIDER-E-MULDIV: an ISA profile without M or Zmmul must select no multiply/divide provider"
+        if includes_multiply and self.muldiv_provider == "none":
+            return "RISCV-PROVIDER-E-MULDIV: an ISA profile with M or Zmmul requires one concrete multiply provider"
+        val expected_entries_result = riscv_scalar_entries_for_isa_profile(self.isa_profile)
+        if expected_entries_result.is_err():
+            return "RISCV-PROVIDER-E-PROFILE: scalar provider selection requires a supported ISA profile"
+        val expected_entries = expected_entries_result.ok().unwrap()
+        if self.entries.len() != expected_entries.len():
+            return "RISCV-PROVIDER-E-ENTRIES: scalar provider selection must retain the exact elaborated ISA entries"
+        var index = 0
+        while index < self.entries.len():
+            # Binding selection is a security boundary: an equal ID alone is
+            # not enough because a forged row could alter its encoding,
+            # execution class, width, or architectural effect before resource
+            # planning. Preserve the exact declarative entry at every index.
+            if not riscv_scalar_entry_equal(self.entries[index], expected_entries[index]):
+                return "RISCV-PROVIDER-E-ENTRIES: scalar provider selection must retain the exact elaborated ISA entries"
+            index = index + 1
+        ""
+
+    me provider_for(entry: RiscvScalarIsaEntry) -> Result<text, text>:
+        val diagnostic = self.diagnostic()
+        if diagnostic != "": return Err(diagnostic)
+        var declared = false
+        for selected in self.entries:
+            if riscv_scalar_entry_equal(selected, entry):
+                declared = true
+        if not declared:
+            return Err("RISCV-PROVIDER-E-ENTRY: provider lookup requires an entry owned by the elaborated selection")
+        if entry.execution_class == "multiply-divide":
+            if self.muldiv_provider == "none":
+                return Err("RISCV-PROVIDER-E-MULDIV: multiply/divide entry has no selected concrete provider")
+            return Ok(self.muldiv_provider)
+        Ok("scalar-integer")
+
+pub fn riscv_scalar_elaborate_provider(isa_profile: text, muldiv_provider: text) -> Result<RiscvScalarProviderSelection, text>:
+    """Freeze a scalar ISA table and selected M provider before HWIR lowering."""
+    val entries = riscv_scalar_entries_for_isa_profile(isa_profile)?
+    val xlen: u32 = if isa_profile.starts_with("rv32"): 32 else: 64
+    val selection = RiscvScalarProviderSelection(isa_profile: isa_profile, xlen: xlen,
+        muldiv_provider: muldiv_provider, entries: entries)
+    val diagnostic = selection.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(selection)
+
+fn riscv_scalar_entry_equal(left: RiscvScalarIsaEntry, right: RiscvScalarIsaEntry) -> bool:
+    left.id == right.id and left.extension == right.extension and
+        left.encoding_mask == right.encoding_mask and left.encoding_value == right.encoding_value and
+        left.xlen_scope == right.xlen_scope and left.semantic_operation == right.semantic_operation and
+        left.execution_class == right.execution_class and left.operand_width_bits == right.operand_width_bits and
+        left.writeback_rule == right.writeback_rule and left.memory_effect == right.memory_effect and
+        left.trap_behavior == right.trap_behavior
+
+fn riscv_scalar_entry_canonical_text(entry: RiscvScalarIsaEntry) -> text:
+    entry.id + ":" + entry.extension + ":" + entry.encoding_mask.to_text() + ":" +
+        entry.encoding_value.to_text() + ":" + entry.xlen_scope + ":" +
+        entry.semantic_operation + ":" + entry.execution_class + ":" +
+        entry.operand_width_bits.to_text() + ":" + entry.writeback_rule + ":" +
+        entry.memory_effect + ":" + entry.trap_behavior
+
+pub class RiscvScalarDecoderPlan:
+    """One frozen scalar decode-table view for a concrete ISA product.
+
+    The plan is compiler-host metadata for decoder generation, disassembly and
+    coverage consumers. Its fixed XLEN and entry order are resolved before
+    HWIR lowering; it must never be emitted as a runtime extension selector.
+    """
+    isa_profile: text
+    xlen: u32
+    entries: [RiscvScalarIsaEntry]
+
+    me diagnostic() -> text:
+        val expected = riscv_scalar_entries_for_isa_profile(self.isa_profile)
+        if expected.is_err():
+            return "RISCV-DECODER-E-PROFILE: scalar decoder plan requires a supported ISA profile"
+        val expected_xlen: u32 = if self.isa_profile.starts_with("rv32"): 32 else: 64
+        if self.xlen != expected_xlen:
+            return "RISCV-DECODER-E-XLEN: scalar decoder plan XLEN must match its ISA profile"
+        val expected_entries = expected.ok().unwrap()
+        if self.entries.len() != expected_entries.len():
+            return "RISCV-DECODER-E-ENTRIES: scalar decoder plan must retain the exact elaborated ISA entries"
+        var index = 0
+        while index < self.entries.len():
+            if not riscv_scalar_entry_equal(self.entries[index], expected_entries[index]):
+                return "RISCV-DECODER-E-ENTRIES: scalar decoder plan must retain the exact elaborated ISA entries"
+            index = index + 1
+        ""
+
+    me lookup(instruction: u32) -> Result<RiscvScalarIsaEntry, text>:
+        val error = self.diagnostic()
+        if error != "": return Err(error)
+        for entry in self.entries:
+            if entry.matches(instruction, self.xlen): return Ok(entry)
+        Err("RISCV-DECODER-E-ILLEGAL: instruction is not declared by the scalar decoder plan")
+
+    me canonical_text() -> text:
+        var text = "scalar-decoder-v1;profile:" + self.isa_profile + ";xlen:" + self.xlen.to_text() + ";"
+        for entry in self.entries:
+            text = text + riscv_scalar_entry_canonical_text(entry) + ";"
+        text
+
+    me structural_sha256() -> text:
+        sha256_text(self.canonical_text())
+
+pub fn riscv_scalar_decoder_plan(isa_profile: text) -> Result<RiscvScalarDecoderPlan, text>:
+    """Freeze the exact scalar rows that a future decoder generator may lower."""
+    val entries = riscv_scalar_entries_for_isa_profile(isa_profile)?
+    val xlen: u32 = if isa_profile.starts_with("rv32"): 32 else: 64
+    val plan = RiscvScalarDecoderPlan(isa_profile: isa_profile, xlen: xlen, entries: entries)
+    val error = plan.diagnostic()
+    if error != "": return Err(error)
+    Ok(plan)
+
+pub fn riscv_scalar_database_diagnostic(entries: [RiscvScalarIsaEntry]) -> text:
+    """Fail closed for malformed, duplicate, or ambiguous scalar rows."""
+    var ids: [text] = []
+    var prior: [RiscvScalarIsaEntry] = []
+    for entry in entries:
+        val diagnostic = entry.diagnostic()
+        if diagnostic != "": return diagnostic
+        if ids.contains(entry.id): return "RISCV-ISA-E-DUPLICATE: scalar ISA entry IDs must be unique"
+        for existing in prior:
+            # Two masked patterns overlap iff each value agrees with every bit
+            # constrained by the other mask. Reject that ambiguity for either
+            # concrete XLEN product before a decoder generator can choose an
+            # arbitrary table order.
+            val overlaps = (entry.encoding_value & existing.encoding_mask) ==
+                    (existing.encoding_value & existing.encoding_mask) and
+                (existing.encoding_value & entry.encoding_mask) ==
+                    (entry.encoding_value & entry.encoding_mask)
+            if overlaps and ((entry.applies_to_xlen(32) and existing.applies_to_xlen(32)) or
+                (entry.applies_to_xlen(64) and existing.applies_to_xlen(64))):
+                return "RISCV-ISA-E-OVERLAP: scalar ISA encodings must be unambiguous per concrete XLEN"
+        ids.push(entry.id)
+        prior.push(entry)
+    ""

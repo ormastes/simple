@@ -1,0 +1,238 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use compiler.mir.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module_with_avx2_capability, x86_plan_avx2_f32x8}
+use compiler.backend.native.native_avx2_capability.{native_avx2_capability_v1, native_avx2_receipt_key}
+use compiler.backend.native.regalloc.{regalloc_module}
+use compiler.backend.native.encode_x86_64.{encode_module}
+use compiler.backend.native.mach_inst.{
+    X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM, X86_OP_VADDPS_YMM,
+    X86_YMM0, X86_YMM7, reg_id
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+
+fn avx2_test_module() -> MirModule:
+    val f32_type = MirType(kind: MirTypeKind.F32)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: f32_type, mutable: true))
+    val vec_type = MirType(kind: MirTypeKind.Vec8f)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("left"), type_: ptr_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("right"), type_: ptr_type, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("output"), type_: ptr_type, kind: LocalKind.Arg(2)),
+        MirLocal(id: LocalId(id: 3), name: Some("left_vec"), type_: vec_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("right_vec"), type_: vec_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 5), name: Some("sum"), type_: vec_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0), label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), true, vec_type), span: nil),
+            MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), true, vec_type), span: nil),
+            MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 5), MirOperand.copy(LocalId(id: 3)), MirOperand.copy(LocalId(id: 4)), "Add"), span: nil),
+            MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 5)), MirOperand.copy(LocalId(id: 2)), true), span: nil)
+        ],
+        terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "add_f32x8",
+        signature: MirSignature(params: [ptr_type, ptr_type, ptr_type], return_type: unit_type, is_variadic: false),
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "avx2_route", functions: functions, statics: {}, constants: {}, types: {})
+
+fn avx2_reuse_module() -> MirModule:
+    val f32_type = MirType(kind: MirTypeKind.F32)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: f32_type, mutable: true))
+    val vec_type = MirType(kind: MirTypeKind.Vec8f)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    var locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("left"), type_: ptr_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("right"), type_: ptr_type, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("output"), type_: ptr_type, kind: LocalKind.Arg(2)),
+        MirLocal(id: LocalId(id: 3), name: Some("left_vec"), type_: vec_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("right_vec"), type_: vec_type, kind: LocalKind.Temp)
+    ]
+    var instructions = [
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), true, vec_type), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), true, vec_type), span: nil)
+    ]
+    var previous = 3
+    for index in 0..10:
+        val dest = 5 + index
+        locals.push(MirLocal(
+            id: LocalId(id: dest), name: Some("chain_{index}"),
+            type_: vec_type, kind: LocalKind.Temp))
+        instructions.push(MirInst(
+            kind: MirInstKind.MirSimdBinop(
+                LocalId(id: dest), MirOperand.copy(LocalId(id: previous)),
+                MirOperand.copy(LocalId(id: 4)), "Add"), span: nil))
+        previous = dest
+    instructions.push(MirInst(
+        kind: MirInstKind.MirSimdStore(
+            MirOperand.copy(LocalId(id: previous)), MirOperand.copy(LocalId(id: 2)), true),
+        span: nil))
+    val entry = MirBlock(
+        id: BlockId.new(0), label: Some("entry"), instructions: instructions,
+        terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "reuse_f32x8",
+        signature: MirSignature(params: [ptr_type, ptr_type, ptr_type], return_type: unit_type, is_variadic: false),
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "avx2_reuse", functions: functions, statics: {}, constants: {}, types: {})
+
+fn avx2_pressure_function() -> MirFunction:
+    val f32_type = MirType(kind: MirTypeKind.F32)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: f32_type, mutable: true))
+    val vec_type = MirType(kind: MirTypeKind.Vec8f)
+    var locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("input"), type_: ptr_type, kind: LocalKind.Arg(0))
+    ]
+    var instructions: [MirInst] = []
+    for index in 0..9:
+        val local_id = 1 + index
+        locals.push(MirLocal(
+            id: LocalId(id: local_id), name: Some("live_{index}"),
+            type_: vec_type, kind: LocalKind.Temp))
+        instructions.push(MirInst(
+            kind: MirInstKind.MirSimdLoad(
+                LocalId(id: local_id), MirOperand.copy(LocalId(id: 0)), true, vec_type),
+            span: nil))
+    var previous = 1
+    for index in 0..8:
+        val dest = 10 + index
+        locals.push(MirLocal(
+            id: LocalId(id: dest), name: Some("reduce_{index}"),
+            type_: vec_type, kind: LocalKind.Temp))
+        instructions.push(MirInst(
+            kind: MirInstKind.MirSimdBinop(
+                LocalId(id: dest), MirOperand.copy(LocalId(id: previous)),
+                MirOperand.copy(LocalId(id: index + 2)), "Add"), span: nil))
+        previous = dest
+    val entry = MirBlock(
+        id: BlockId.new(0), label: Some("entry"), instructions: instructions,
+        terminator: MirTerminator.Ret(nil))
+    MirFunction(
+        symbol: SymbolId.new(0), name: "pressure_f32x8",
+        signature: MirSignature(params: [ptr_type], return_type: MirType.unit(), is_variadic: false),
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+
+fn avx2_multiblock_function() -> MirFunction:
+    val base = avx2_test_module().functions[0]
+    val second = MirBlock(
+        id: BlockId.new(1), label: Some("second"), instructions: [],
+        terminator: MirTerminator.Ret(nil))
+    MirFunction(
+        symbol: base.symbol, name: base.name, signature: base.signature,
+        locals: base.locals, blocks: [base.blocks[0], second],
+        entry_block: base.entry_block, span: base.span,
+        generic_params: base.generic_params,
+        is_generic_template: base.is_generic_template,
+        specialization_of: base.specialization_of, type_bindings: base.type_bindings)
+
+fn contains_bytes(haystack: [i64], needle: [i64]) -> bool:
+    if needle.len() == 0 or haystack.len() < needle.len(): return false
+    for start in 0..(haystack.len() - needle.len() + 1):
+        var matches = true
+        for index in 0..needle.len():
+            if haystack[start + index] != needle[index]: matches = false
+        if matches: return true
+    false
+
+fn avx2_capability():
+    native_avx2_capability_v1(
+        "x86_64-unknown-linux-gnu", "unit-injected", "fixture-avx2-v1", true)
+
+fn selected_module():
+    isel_module_with_avx2_capability(avx2_test_module(), avx2_capability())
+
+describe "x86 AVX2 typed MIR route":
+    # @manual scenario evidence
+    it "reuses YMM registers for more than eight sequential destinations":
+        # @req REQ-SSPEC-UNIT
+        step("reuses YMM registers for more than eight sequential destinations")
+        val module = isel_module_with_avx2_capability(avx2_reuse_module(), avx2_capability())
+        val block = module.functions[0].blocks[1]
+        var used: Dict<i64, bool> = {}
+        var vector_ops = 0
+        for inst in block.insts:
+            if inst.opcode == X86_OP_VADDPS_YMM:
+                vector_ops = vector_ops + 1
+                for operand in inst.operands:
+                    match operand.kind:
+                        case Reg(reg): used[reg_id(reg)] = true
+                        case _: ()
+        assert_equal(vector_ops, 10)
+        assert_true(used.keys().len() <= 3)
+
+    it "keeps nine simultaneously live vectors fail closed":
+        # @req REQ-SSPEC-UNIT
+        step("keeps nine simultaneously live vectors fail closed")
+        val plan = x86_plan_avx2_f32x8(avx2_pressure_function())
+        assert_equal(plan.ok, false)
+        assert_equal(plan.reason, "simd-register-pressure")
+
+    it "rejects multi-block SIMD until CFG liveness is authoritative":
+        # @req REQ-SSPEC-UNIT
+        step("rejects multi-block SIMD until CFG liveness is authoritative")
+        val plan = x86_plan_avx2_f32x8(avx2_multiblock_function())
+        assert_equal(plan.ok, false)
+        assert_equal(plan.reason, "simd-cfg-liveness-unavailable")
+
+    it "selects aligned f32x8 MIR without scalar NOP substitution":
+        # @req REQ-SSPEC-UNIT
+        step("selects aligned f32x8 MIR without scalar NOP substitution")
+        val module = selected_module()
+        val block = module.functions[0].blocks[1]
+        assert_equal(block.insts.len(), 4)
+        assert_equal(block.insts[0].opcode, X86_OP_VMOVAPS_LOAD_YMM)
+        assert_equal(block.insts[1].opcode, X86_OP_VMOVAPS_LOAD_YMM)
+        assert_equal(block.insts[2].opcode, X86_OP_VADDPS_YMM)
+        assert_equal(block.insts[3].opcode, X86_OP_VMOVAPS_STORE_YMM)
+
+    it "preserves YMM classes through scalar pointer allocation":
+        # @req REQ-SSPEC-UNIT
+        step("preserves YMM classes through scalar pointer allocation")
+        val module = regalloc_module(selected_module())
+        val block = module.functions[0].blocks[1]
+        for inst in block.insts:
+            if inst.opcode == X86_OP_VADDPS_YMM:
+                for operand in inst.operands:
+                    match operand.kind:
+                        case Reg(reg):
+                            val id = reg_id(reg)
+                            assert_true(id >= X86_YMM0 and id <= X86_YMM7)
+                        case _: assert_true(false)
+
+    it "encodes the selected load add store route as AVX2 bytes":
+        # @req REQ-SSPEC-UNIT
+        step("encodes the selected load add store route as AVX2 bytes")
+        val allocated = regalloc_module(selected_module())
+        val encoded = encode_module(allocated)[0].code
+        assert_true(contains_bytes(encoded, [0xC4, 0xE1, 0x7C, 0x28, 0x83, 0, 0, 0, 0]))
+        assert_true(contains_bytes(encoded, [0xC4, 0xC1, 0x7C, 0x28, 0x8C, 0x24, 0, 0, 0, 0]))
+        assert_true(contains_bytes(encoded, [0xC4, 0xE1, 0x7C, 0x58, 0xD1]))
+        assert_true(contains_bytes(encoded, [0xC4, 0xC1, 0x7C, 0x29, 0x95, 0, 0, 0, 0]))
+
+    it "carries a deterministic target capability receipt":
+        # @req REQ-SSPEC-UNIT
+        step("carries a deterministic target capability receipt")
+        assert_equal(native_avx2_receipt_key(avx2_capability()),
+            "native-avx2/v1|target=x86_64-unknown-linux-gnu|source=unit-injected|hash=fixture-avx2-v1|admitted=true|reason=avx2-capability-admitted")

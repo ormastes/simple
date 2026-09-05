@@ -1,0 +1,358 @@
+# Structured generator for the two ONE-OFF VHDL harnesses, byte-identical to
+# the versions on disk (those files are the acceptance oracle and are never
+# edited by this generator):
+#
+#   examples/09_embedded/fpga_riscv/payload/tb_rv32_payload.vhd
+#   test/riscv_isa_gate/tb_gate.vhd
+#
+# "One-off" is stronger than the "single-lane" label next door: these two are
+# not members of any lane at all. There is no XLEN sibling and no sibling of
+# any other kind, so NO pairing is invented here. XlenConfig still earns its
+# keep, though — rv32's sign_bit drives the debug_ins tap width in both files,
+# which is the one width that actually follows XLEN rather than the core's
+# truncated 16/8/4-bit debug exports.
+#
+# The real sharing runs sideways, into the single-lane vocabulary:
+#
+#   both   library header (vgtb_library_header_sel), arch head, clk/rst/uart_tx
+#          signal group (tbsl_clk_rst_uart_signals), clock driver
+#          (vgtb_clock_driver), generic/port map layout (vgtb_map_block_at),
+#          declaration rendering (vgtb_decls / vgtb_decl_text), the
+#          rising_edge+guard process scaffold (vgtb_clocked_process)
+#   payload  entity shell (vgtb_entity), reset-release process
+#            (vgtb_reset_process), report emission (vgtb_report),
+#            architecture foot (vgtb_arch_foot)
+#
+# Two dialect forms had no equivalent next door and are added as siblings in
+# tb_oneoff_types.spl: the compact one-line entity and the anonymous
+# architecture foot the ISA gate uses. The instantiation head line is also
+# emitted locally because the gate writes `dut:` where every single-lane
+# golden writes `dut : ` — the map blocks themselves are still shared.
+#
+# NOT generated here: examples/09_embedded/vhdl/simulation/bounded_loop_example.vhd.
+# That file is a hand-written REFERENCE fixture of the compiler `--backend=vhdl`
+# lane (its README classifies simulation/ as "hand-written ... shows the style
+# of VHDL the backend is expected to emit"), it has no consumer, and it does not
+# even analyse (it calls ceil/log2/real without `use ieee.math_real.all`).
+# Emitting it from this silicon-lane generator would cross two unrelated lanes
+# and dress an aspirational target up as proven generator output. See the probe
+# for the recorded rationale.
+#
+# Determinism: arrays only, never a Dict; the file-name list is a fixed array,
+# so repeated generation is byte-identical within and across processes.
+
+use std.hardware.riscv_common.xlen.XlenConfig
+use std.hardware.vhdl_gen.gen_types.*
+use std.hardware.vhdl_gen.tb_single_lane_types.*
+use std.hardware.vhdl_gen.tb_single_lane_gen.tbsl_clk_rst_uart_signals
+use std.hardware.vhdl_gen.tb_oneoff_types.*
+use std.hardware.vhdl_gen.tb_oneoff_sections.*
+
+fn oo_no_generics() -> [VgGenericSpec]:
+    var g: [VgGenericSpec] = []
+    g
+
+# ---------------------------------------------------------------------------
+# Shared descriptor groups
+# ---------------------------------------------------------------------------
+
+# The core's debug register taps, under the short local signal names both
+# harnesses use. `names` are the local signal names; `hi` the MSB index of
+# each tap vector. Only debug_ins follows XLEN; the rest are the core's
+# truncated exports (pc/ra/sp 16-bit, a0 8-bit, phase 4-bit).
+fn oo_tap_signals(names: [text], hi: [i64]) -> [VgTbDecl]:
+    var d: [VgTbDecl] = []
+    var i = 0
+    while i < names.len():
+        d = d.push(oo_decl(names[i], oo_vec(hi[i]), ""))
+        i = i + 1
+    d
+
+# MSB indices of the six debug register taps, in golden order.
+fn oo_tap_his(cfg: XlenConfig) -> [i64]:
+    var h: [i64] = []
+    h = h.push(15)              # pc
+    h = h.push(cfg.sign_bit)    # ins — the one tap that follows XLEN
+    h = h.push(7)               # a0
+    h = h.push(15)              # ra
+    h = h.push(15)              # sp
+    h = h.push(3)               # phase
+    h
+
+# Formal names of the six debug register ports on the core, in golden order.
+fn oo_debug_formals() -> [text]:
+    var f: [text] = []
+    f = f.push("debug_pc")
+    f = f.push("debug_ins")
+    f = f.push("debug_a0")
+    f = f.push("debug_ra")
+    f = f.push("debug_sp")
+    f = f.push("debug_phase")
+    f
+
+# Associate each debug formal with the local signal that carries it.
+fn oo_debug_assocs(actuals: [text]) -> [VgTbAssoc]:
+    val formals = oo_debug_formals()
+    var a: [VgTbAssoc] = []
+    var i = 0
+    while i < formals.len():
+        a = a.push(vgtb_assoc(formals[i], actuals[i]))
+        i = i + 1
+    a
+
+# clk / rst / uart_tx port associations (formal == actual on all three).
+fn oo_core_port_assocs() -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a = a.push(vgtb_wire("clk"))
+    a = a.push(vgtb_wire("rst"))
+    a = a.push(vgtb_wire("uart_tx"))
+    a
+
+# The parallel UART tap pair, under caller-chosen local signal names.
+fn oo_tap_port_assocs(valid_sig: text, byte_sig: text) -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a = a.push(vgtb_assoc("debug_uart_valid", valid_sig))
+    a = a.push(vgtb_assoc("debug_uart_byte", byte_sig))
+    a
+
+# CLK_FREQ / BAUD_RATE at the core's real 100 MHz / 115200 rates. `name_w`
+# column-aligns the formals (0 = no alignment, the single-line dialect).
+fn oo_board_clock_generics(name_w: i64) -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a = a.push(vgtb_assoc(vg_pad("CLK_FREQ", name_w), "100000000"))
+    a = a.push(vgtb_assoc("BAUD_RATE", "115200"))
+    a
+
+# ---------------------------------------------------------------------------
+# tb_rv32_payload
+# ---------------------------------------------------------------------------
+
+# Local signal names for the payload harness's taps.
+fn oo_payload_tap_names() -> [text]:
+    var n: [text] = []
+    n = n.push("dpc")
+    n = n.push("dins")
+    n = n.push("da0")
+    n = n.push("dra")
+    n = n.push("dsp")
+    n = n.push("dph")
+    n
+
+# Declarations of the capture process: `l`/`b` variables, the output `file`,
+# then the status and first-write flag. The keyword alternates mid-group,
+# which is why this goes through oo_decls_mixed.
+fn oo_capture_decls() -> [text]:
+    var kw: [text] = []
+    kw = kw.push("variable")
+    kw = kw.push("variable")
+    kw = kw.push("file")
+    kw = kw.push("variable")
+    kw = kw.push("variable")
+    var d: [VgTbDecl] = []
+    d = d.push(oo_decl("l", "line", ""))
+    d = d.push(oo_decl("b", "integer", ""))
+    d = d.push(oo_decl("fout", "text", ""))
+    d = d.push(oo_decl("fstat", "file_open_status", ""))
+    d = d.push(oo_decl("first", "boolean", "true"))
+    oo_decls_mixed(4, kw, d)
+
+# Body of the capture process: latch the byte, open the capture file (truncate
+# on the first byte, append thereafter), write one character per line, and on
+# the sentinel report the cycle count and stop.
+fn oo_capture_body(byte_sig: text, out_file: text, sentinel: i64, tag: text) -> [text]:
+    var l: [text] = []
+    l = l.push("        b := to_integer(unsigned(" + byte_sig + "));")
+    l = l.push("        if first then")
+    l = l.push(oo_file_open(10, out_file, "write_mode"))
+    l = l.push("          first := false;")
+    l = l.push("        else")
+    l = l.push(oo_file_open(10, out_file, "append_mode"))
+    l = l.push("        end if;")
+    l = l.push("        write(l, character'val(b));")
+    l = l.push("        writeline(fout, l);")
+    l = l.push("        file_close(fout);")
+    l = l.push("        if b = " + sentinel.to_text() + " then" + oo_payload_sentinel_comment())
+    l = vg_append(l, vgtb_report(10, "\"" + tag + "_CYCLES=\" & integer'image(cyc)", no_lines(), "note"))
+    l = vg_append(l, vgtb_report(10, "\"" + tag + "_SENTINEL_SEEN\"", no_lines(), "note"))
+    l = l.push("          stop;")
+    l = l.push("        end if;")
+    l
+
+fn generate_tb_rv32_payload() -> text:
+    val cfg = XlenConfig.rv32()
+    val name = "tb_rv32_payload"
+    val arch = "sim"
+    val tag = "PAYLOAD"
+    val valid_sig = "duv"
+    val byte_sig = "dub"
+    val tap_names = oo_payload_tap_names()
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(oo_payload_head_comment()))
+    parts = parts.push(vgtb_join(vgtb_library_header_sel(true, true)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_entity(name, oo_no_generics())))
+    parts = parts.push("")
+    parts = parts.push(vgtb_arch_head(arch, name))
+
+    # Signals: the shared clk/rst/uart_tx group, the tap pair, the six debug
+    # register taps, then the free-running cycle counter.
+    var sigs = tbsl_clk_rst_uart_signals()
+    sigs = sigs.push(oo_decl(valid_sig, "std_logic", ""))
+    sigs = sigs.push(oo_decl(byte_sig, oo_vec(7), ""))
+    sigs = vgtb_append_decls(sigs, oo_tap_signals(tap_names, oo_tap_his(cfg)))
+    sigs = sigs.push(oo_decl("cyc", "natural", "0"))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", sigs)))
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_clock_driver(5) + oo_payload_clock_comment())
+    parts = parts.push("")
+
+    # DUT: generics on their own aligned rows, ports grouped 3/2/3/3, each map
+    # closed on its own line.
+    var inst: [text] = []
+    inst = inst.push(oo_inst_head("dut", " : ", "rv" + cfg.xlen.to_text() + "_exec_core"))
+    var grows: [i64] = []
+    grows = vgtb_append_i64(grows, [1, 1])
+    inst = vg_append(inst, vgtb_map_block_at("generic", oo_board_clock_generics(9),
+        grows, "", " => ", 4, 6, false))
+    inst = inst.push("    )")
+    var ports = oo_core_port_assocs()
+    ports = vgtb_append_assocs(ports, oo_tap_port_assocs(valid_sig, byte_sig))
+    ports = vgtb_append_assocs(ports, oo_debug_assocs(tap_names))
+    var prows: [i64] = []
+    prows = vgtb_append_i64(prows, [3, 2, 3, 3])
+    inst = vg_append(inst, vgtb_map_block_at("port", ports, prows, "", " => ", 4, 6, false))
+    inst = inst.push("    );")
+    parts = parts.push(vgtb_join(inst))
+    parts = parts.push("")
+
+    parts = parts.push(oo_payload_reset_comment())
+    parts = parts.push(vgtb_join(vgtb_reset_process(no_lines(), "200 ns")))
+    parts = parts.push("")
+
+    parts = parts.push(oo_payload_cycle_comment())
+    var cyc_body: [text] = []
+    cyc_body = cyc_body.push("        cyc <= cyc + 1;")
+    parts = parts.push(vgtb_join(vgtb_clocked_process(no_lines(), "rst = '0'", cyc_body)))
+    parts = parts.push("")
+
+    parts = parts.push(oo_payload_capture_comment())
+    parts = parts.push(vgtb_join(vgtb_clocked_process(oo_capture_decls(),
+        "rst = '0' and " + valid_sig + " = '1'",
+        oo_capture_body(byte_sig, "uart_capture.txt", 126, tag))))
+    parts = parts.push(vgtb_arch_foot(arch))
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# tb_gate
+# ---------------------------------------------------------------------------
+
+# Local signal names for the ISA gate's taps.
+fn oo_gate_tap_names() -> [text]:
+    var n: [text] = []
+    n = n.push("dpc")
+    n = n.push("dins")
+    n = n.push("da0")
+    n = n.push("dra")
+    n = n.push("dsp")
+    n = n.push("dph")
+    n
+
+# The gate's verdict arms: 'P' passes, 'F' fails.
+fn oo_gate_verdict_arms() -> [VgGateArm]:
+    var a: [VgGateArm] = []
+    a = a.push(vg_gate_arm("50", "PASS"))
+    a = a.push(vg_gate_arm("46", "FAIL"))
+    a
+
+# Body of the sampler process: rising-edge-detect the tap strobe, run the
+# verdict chain, then update the edge-detect register.
+fn oo_gate_body(valid_sig: text, prev_sig: text) -> [text]:
+    var l: [text] = []
+    l = l.push(oo_gate_sample_comment())
+    l = l.push("        if " + valid_sig + "='1' and " + prev_sig + "='0' then")
+    l = l.push(oo_gate_arms_comment())
+    l = vg_append(l, oo_gate_arms(10, oo_gate_verdict_arms()))
+    l = l.push("        end if;")
+    l = l.push("        " + prev_sig + " <= " + valid_sig + ";")
+    l
+
+fn generate_tb_gate() -> text:
+    val cfg = XlenConfig.rv32()
+    val name = "tb_gate"
+    val arch = "sim"
+    val valid_sig = "dv"
+    val byte_sig = "dbyte"
+    val tap_names = oo_gate_tap_names()
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(oo_gate_head_comment()))
+    parts = parts.push(vgtb_join(vgtb_library_header_sel(true, false)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_entity_compact(name))
+    parts = parts.push("")
+    parts = parts.push(vgtb_arch_head(arch, name))
+
+    # Wire signals, then a blank line, then the two sampler state registers.
+    var sigs = tbsl_clk_rst_uart_signals()
+    sigs = sigs.push(oo_decl(valid_sig, "std_logic", ""))
+    sigs = sigs.push(oo_decl(byte_sig, oo_vec(7), ""))
+    sigs = vgtb_append_decls(sigs, oo_tap_signals(tap_names, oo_tap_his(cfg)))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", sigs)))
+    parts = parts.push("")
+    var state: [VgTbDecl] = []
+    state = state.push(oo_decl("prev_" + valid_sig, "std_logic", "'0'"))
+    state = state.push(oo_decl("result_seen", "std_logic", "'0'"))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", state)))
+    parts = parts.push("begin")
+
+    # DUT: generics collapsed onto the open line, ports hung under `port map (`
+    # with the compact no-space arrow.
+    var inst: [text] = []
+    inst = inst.push(oo_inst_head("dut", ": ", "rv" + cfg.xlen.to_text() + "_exec_core"))
+    var grows: [i64] = []
+    grows = grows.push(2)
+    inst = vg_append(inst, vgtb_map_block_at("generic", oo_board_clock_generics(0),
+        grows, ")", " => ", 4, 0, false))
+    var ports = oo_core_port_assocs()
+    ports = vgtb_append_assocs(ports, oo_tap_port_assocs(valid_sig, byte_sig))
+    ports = vgtb_append_assocs(ports, oo_debug_assocs(tap_names))
+    var prows: [i64] = []
+    prows = vgtb_append_i64(prows, [3, 3, 5])
+    inst = vg_append(inst, vgtb_map_block_at("port", ports, prows, ");", "=>", 4, 14, true))
+    parts = parts.push(vgtb_join(inst))
+    parts = parts.push("")
+
+    parts = parts.push(vgtb_clock_driver(5))
+    parts = parts.push("")
+
+    var svars: [VgTbDecl] = []
+    svars = svars.push(oo_decl("l", "line", ""))
+    parts = parts.push(vgtb_join(vgtb_clocked_process(vgtb_decls(4, "variable", svars),
+        "rst='0' and result_seen='0'", oo_gate_body(valid_sig, "prev_" + valid_sig))))
+    parts = parts.push("")
+
+    parts = parts.push("  rst <= '1', '0' after 20 ns;")
+    parts = parts.push(vgtb_arch_foot_anon())
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# Public entry
+# ---------------------------------------------------------------------------
+
+# Repo-relative paths of the generated one-offs, in a fixed order. Unlike the
+# single-lane set these do not share a directory, so the full path is the key.
+fn oneoff_tb_paths() -> [text]:
+    var p: [text] = []
+    p = p.push("examples/09_embedded/fpga_riscv/payload/tb_rv32_payload.vhd")
+    p = p.push("test/riscv_isa_gate/tb_gate.vhd")
+    p
+
+# Generate one harness by the repo-relative path returned by oneoff_tb_paths().
+fn generate_oneoff_tb(path: text) -> text:
+    if path == "examples/09_embedded/fpga_riscv/payload/tb_rv32_payload.vhd":
+        generate_tb_rv32_payload()
+    elif path == "test/riscv_isa_gate/tb_gate.vhd":
+        generate_tb_gate()
+    else:
+        ""

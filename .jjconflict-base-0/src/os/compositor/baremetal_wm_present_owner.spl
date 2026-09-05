@@ -1,0 +1,148 @@
+# Architecture-neutral ownership boundary for baremetal WM presentation.
+#
+# Architecture adapters keep ownership of their MMIO/firmware present call.
+# This owner admits the resulting scalar receipt only when it names the exact
+# boot scanout, advances frame identity, and prevents output-epoch rollback. It never owns
+# or transports framebuffer pointers.
+
+pub val WM_PRESENT_ARCH_X86_64: u32 = 1u32
+pub val WM_PRESENT_ARCH_AARCH64: u32 = 2u32
+pub val WM_PRESENT_ARCH_RISCV64: u32 = 3u32
+pub val WM_PRESENT_MAX_DIMENSION: u32 = 16384u32
+
+pub struct BaremetalWmScanoutIdentityV1:
+    architecture: u32
+    scanout_id: u64
+    width: u32
+    height: u32
+    stride: u32
+    bpp: u32
+
+pub struct BaremetalWmPresentReceiptV1:
+    accepted: bool
+    scene_revision: u64
+    frame_id: u64
+    output_generation: u64
+    reason: text
+
+pub fn baremetal_wm_scanout_identity_valid_v1(identity: BaremetalWmScanoutIdentityV1) -> bool:
+    if (identity.architecture != WM_PRESENT_ARCH_X86_64 and
+        identity.architecture != WM_PRESENT_ARCH_AARCH64 and
+        identity.architecture != WM_PRESENT_ARCH_RISCV64):
+        return false
+    if identity.scanout_id == 0u64:
+        return false
+    if identity.width == 0u32 or identity.height == 0u32:
+        return false
+    if identity.width > WM_PRESENT_MAX_DIMENSION or identity.height > WM_PRESENT_MAX_DIMENSION:
+        return false
+    if identity.bpp != 32u32:
+        return false
+    # The bounded width makes this multiplication non-overflowing in u32.
+    identity.stride == identity.width * 4u32
+
+fn baremetal_wm_scanout_identity_matches_v1(
+    observed: BaremetalWmScanoutIdentityV1,
+    expected: BaremetalWmScanoutIdentityV1
+) -> bool:
+    (observed.architecture == expected.architecture and
+     observed.scanout_id == expected.scanout_id and
+     observed.width == expected.width and
+     observed.height == expected.height and
+     observed.stride == expected.stride and
+     observed.bpp == expected.bpp)
+
+pub class BaremetalWmPresentOwnerV1:
+    scanout: BaremetalWmScanoutIdentityV1
+    configured: bool
+    last_scene_revision: u64
+    last_frame_id: u64
+    last_output_generation: u64
+    accepted_count: u64
+    last_reason: text
+
+    pub static fn create(scanout: BaremetalWmScanoutIdentityV1) -> BaremetalWmPresentOwnerV1:
+        val valid = baremetal_wm_scanout_identity_valid_v1(scanout)
+        BaremetalWmPresentOwnerV1(
+            scanout: scanout,
+            configured: valid,
+            last_scene_revision: 0,
+            last_frame_id: 0u64,
+            last_output_generation: 0u64,
+            accepted_count: 0u64,
+            last_reason: if valid: "" else: "invalid-scanout-identity"
+        )
+
+    me reject(
+        scene_revision: u64,
+        frame_id: u64,
+        output_generation: u64,
+        reason: text
+    ) -> BaremetalWmPresentReceiptV1:
+        self.last_reason = reason
+        BaremetalWmPresentReceiptV1(
+            accepted: false,
+            scene_revision: scene_revision,
+            frame_id: frame_id,
+            output_generation: output_generation,
+            reason: reason
+        )
+
+    pub me commit_present(
+        observed_scanout: BaremetalWmScanoutIdentityV1,
+        scene_revision: u64,
+        frame_id: u64,
+        output_generation: u64,
+        platform_presented: bool
+    ) -> BaremetalWmPresentReceiptV1:
+        if not self.configured:
+            return self.reject(scene_revision, frame_id, output_generation, "owner-not-configured")
+        if not baremetal_wm_scanout_identity_matches_v1(observed_scanout, self.scanout):
+            return self.reject(scene_revision, frame_id, output_generation, "scanout-identity-mismatch")
+        if not platform_presented:
+            return self.reject(scene_revision, frame_id, output_generation, "platform-present-failed")
+        if scene_revision == 0u64:
+            return self.reject(scene_revision, frame_id, output_generation, "scene-revision-invalid")
+        if frame_id == 0u64:
+            return self.reject(scene_revision, frame_id, output_generation, "frame-id-invalid")
+        if output_generation == 0u64:
+            return self.reject(scene_revision, frame_id, output_generation, "output-generation-invalid")
+        if scene_revision < self.last_scene_revision:
+            return self.reject(scene_revision, frame_id, output_generation, "stale-scene-revision")
+        if frame_id <= self.last_frame_id:
+            return self.reject(scene_revision, frame_id, output_generation, "stale-frame-id")
+        # A platform output generation is an output-lifecycle epoch, not a
+        # per-frame counter. x86 may retain one boot generation across many
+        # frames; RV64 may advance it after each flush. Only rollback is stale.
+        if output_generation < self.last_output_generation:
+            return self.reject(scene_revision, frame_id, output_generation, "stale-output-generation")
+        if self.accepted_count == 18446744073709551615u64:
+            return self.reject(scene_revision, frame_id, output_generation, "present-count-exhausted")
+
+        self.last_scene_revision = scene_revision
+        self.last_frame_id = frame_id
+        self.last_output_generation = output_generation
+        self.accepted_count = self.accepted_count + 1u64
+        self.last_reason = "presented"
+        BaremetalWmPresentReceiptV1(
+            accepted: true,
+            scene_revision: scene_revision,
+            frame_id: frame_id,
+            output_generation: output_generation,
+            reason: "presented"
+        )
+
+    pub fn snapshot() -> BaremetalWmPresentReceiptV1:
+        BaremetalWmPresentReceiptV1(
+            accepted: self.accepted_count > 0u64,
+            scene_revision: self.last_scene_revision,
+            frame_id: self.last_frame_id,
+            output_generation: self.last_output_generation,
+            reason: self.last_reason
+        )
+
+    pub fn is_configured() -> bool:
+        self.configured
+
+    pub fn accepted_present_count() -> u64:
+        self.accepted_count

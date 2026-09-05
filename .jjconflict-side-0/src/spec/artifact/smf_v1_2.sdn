@@ -1,0 +1,80 @@
+# SMF v1.2 normative wire schema (Simple Module Format)
+# Status: NORMATIVE for the pure-Simple toolchain. AUDIT 2026-08-10 found the
+# Rust seed (src/compiler_rust/common/src/smf/header.rs) is NOT wire-identical
+# to this layout — see divergence section. Do NOT change either side silently;
+# migration follows the dual-write policy (targeted-build plan section 13.5).
+smf:
+  magic: "SMF\0"          # bytes 0..4
+  endianness: little
+  header:
+    # v1.0: header at file offset 0. v1.1: same 128-byte block written as a
+    # TRAILER at EOF-128 (leading offset-0 header still accepted for legacy
+    # files / archive slices). Locator: magic at 0, else magic at len-128.
+    size_bytes: 128       # fixed; NEVER extended — new metadata goes in the
+                          # .simple_meta SECTION, never in new header bytes
+    fields:               # packed, no alignment padding (offset, size)
+      magic:                 {offset: 0,  size: 4}
+      version_major:         {offset: 4,  size: 1}   # = 1
+      version_minor:         {offset: 5,  size: 1}   # 0|1|2
+      platform:              {offset: 6,  size: 1}
+      arch:                  {offset: 7,  size: 1}
+      flags:                 {offset: 8,  size: 4, type: u32}
+      compression:           {offset: 12, size: 1}
+      compression_level:     {offset: 13, size: 1}
+      reserved_compression:  {offset: 14, size: 2}
+      section_count:         {offset: 16, size: 4, type: u32}
+      section_table_offset:  {offset: 20, size: 8, type: u64}
+      symbol_table_offset:   {offset: 28, size: 8, type: u64}
+      symbol_count:          {offset: 36, size: 4, type: u32}
+      exported_count:        {offset: 40, size: 4, type: u32}
+      entry_point:           {offset: 44, size: 8, type: u64}
+      stub_size:             {offset: 52, size: 4, type: u32}
+      smf_data_offset:       {offset: 56, size: 4, type: u32}
+      module_hash:           {offset: 60, size: 8, type: u64}
+      source_hash:           {offset: 68, size: 8, type: u64}
+      app_type:              {offset: 76, size: 1}
+      window_width:          {offset: 77, size: 2, type: u16}
+      window_height:         {offset: 79, size: 2, type: u16}
+      prefetch_hint:         {offset: 81, size: 1}
+      prefetch_file_count:   {offset: 82, size: 1}
+      reserved_hints:        {offset: 83, size: 5}
+      reserved:              {offset: 88, size: 40}
+  v1_1:
+    trailer_location: "EOF-128"
+    compile_options_hash: {offset: 88, size: 16}   # reserved[0..16]; all-zero = absent
+  v1_2:
+    # Metadata SECTION, not header bytes. A section named ".simple_meta"
+    # listed in the ordinary section table; payload is a TLV stream.
+    meta_section:
+      name: ".simple_meta"
+      tlv_record:           # each record, packed little-endian
+        kind:           {offset: 0, size: 2, type: u16}
+        version:        {offset: 2, size: 1, type: u8}
+        flags:          {offset: 3, size: 1, type: u8}
+        payload_length: {offset: 4, size: 4, type: u32}
+        payload:        {offset: 8, size: payload_length}
+      reader_rules:
+        unknown_kind: skip                 # tolerance: skip via payload_length
+        truncated_record: reject           # payload_length past section end = error
+    records:
+      interface_compatibility_v1:
+        kind: 1
+        payload_size: 72
+        fields:
+          exact_digest:    {offset: 0,  size: 32}
+          lineage_digest:  {offset: 32, size: 32}
+          generation:      {offset: 64, size: 4, type: u32}
+          compatible_from: {offset: 68, size: 4, type: u32}
+  divergence_audit_2026_08_10:
+    # Rust seed SmfHeader is #[repr(C)] with natural alignment: measured via
+    # compiled offset_of probe -> SIZE=96, section_table_offset@24,
+    # symbol_table_offset@32, symbol_count@40, exported_count@44,
+    # entry_point@48, stub_size@56, smf_data_offset@60, module_hash@64,
+    # source_hash@72, app_type@80, window_width@82, window_height@84,
+    # prefetch_hint@86, prefetch_file_count@87, reserved[5]@88.
+    # Trailer sought at EOF-96 (SmfHeader::SIZE), raw struct memcpy on
+    # read AND write. Every field from offset 20 onward disagrees with the
+    # packed 128-byte layout above; the compile-options-hash bytes (88..104)
+    # do not exist in the Rust struct at all.
+    rust_seed_header_size: 96
+    wire_identical: false

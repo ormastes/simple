@@ -1,0 +1,270 @@
+"""
+# Cranelift-backend feature validation under a NAMED engine — executable probe
+
+**Feature IDs:** #100 Cranelift Backend, #95 Buffer Pool, #96 Generator Codegen
+**Category:** Codegen
+**Status:** Implemented
+
+## Why this is a runnable program and not an sspec `describe`
+
+`test/01_unit/lib/common/feature_validation/codegen_spec.spl` (and its three
+sibling copies) is titled *"Feature #100 - Cranelift Backend"* and every one of
+its examples is named `"compiles <something>"` — integer arithmetic, string
+interpolation, array indexing, a recursive `factorial`. None of it ever reached
+a compiler. An sspec body physically cannot execute under the Cranelift JIT:
+`describe` / `it` / `expect` are Rust interpreter intrinsics with no codegen
+lowering, and a spec file has no `fn main`, so the driver routes it to
+`evaluate_module` regardless of `SIMPLE_EXECUTION_MODE`. The four stacked
+layers are documented in
+`scripts/check/check-engine-claiming-specs-use-probe.shs`; the retrofit pattern
+is `doc/07_guide/infra/testing/spec_engine_reach.md`.
+
+So the whole file asserted that the TREE-WALKING INTERPRETER can add two
+integers, under a heading claiming it validated the Cranelift backend. This
+program is the gate that heading was asking for: it re-executes the same
+contracts as a runnable program with `fn main`, so it is not de-JITed, and
+self-scores a verdict line.
+
+Run directly, once per engine:
+
+    SIMPLE_EXECUTION_MODE=interpret <simple> run <this file>
+    SIMPLE_EXECUTION_MODE=jit       <simple> run <this file>
+
+Score the `PROBE VERDICT:` LINE, never the exit code — a codegen panic and a
+clean failure both exit non-zero, and some failure shapes still exit 0.
+
+## Scope note
+
+This pins the *language-level* contracts the spec named: integer and
+comparison ops, direct/recursive/nested calls, if-else / while / for control
+flow, text creation / interpolation / concatenation, array creation / indexing
+/ length, incremental accumulation, and the explicit-state and dispatcher
+patterns that stand in for generator lowering. It deliberately does NOT use
+`arr.first()`, `filter`, `any`, `all` or `to_upper`: those are known to diverge
+or SIGSEGV between the two engines
+(`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`), and
+folding a known-open defect into the pass count would make this probe RED for a
+reason that has nothing to do with the contracts it is named for.
+"""
+
+var failures = 0
+
+fn check_i64(name: text, got: i64, want: i64) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + got.to_text() + ", want " + want.to_text() + ")")
+        failures = failures + 1
+
+fn check_text(name: text, got: text, want: text) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + got + ", want " + want + ")")
+        failures = failures + 1
+
+fn check_bool(name: text, got: bool, want: bool) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + got.to_text() + ", want " + want.to_text() + ")")
+        failures = failures + 1
+
+fn factorial(n: i64) -> i64:
+    if n <= 1:
+        1
+    else:
+        n * factorial(n - 1)
+
+fn add(a: i64, b: i64) -> i64:
+    a + b
+
+fn double(x: i64) -> i64:
+    x * 2
+
+fn add_one(x: i64) -> i64:
+    x + 1
+
+fn while_sum() -> i64:
+    var sum = 0
+    var i = 1
+    while i <= 10:
+        sum = sum + i
+        i = i + 1
+    sum
+
+fn gen_sequence() -> [i64]:
+    var current = 0
+    val max_val = 5
+    var generated: [i64] = []
+    while current < max_val:
+        generated = generated + [current]
+        current = current + 1
+    generated
+
+fn dispatch(state: i64) -> text:
+    if state == 0:
+        return "init"
+    elif state == 1:
+        return "process"
+    elif state == 2:
+        return "finalize"
+    else:
+        return "done"
+
+fn main() -> void:
+    print("codegen feature-validation probe (#100 / #95 / #96)")
+
+    # --- Feature #100: integer operations -----------------------------------
+    val a = 10
+    val b = 20
+    check_i64("integer addition", a + b, 30)
+    check_i64("integer multiplication", 7 * 6, 42)
+    check_i64("integer division", 100 / 4, 25)
+    check_i64("integer modulo", 17 % 5, 2)
+    val neg = -42
+    check_i64("negative literal", neg + 42, 0)
+
+    # --- Feature #100: comparison operations --------------------------------
+    check_bool("equality", 1 == 1, true)
+    check_bool("inequality", 1 == 2, false)
+    check_bool("less than", 1 < 2, true)
+    check_bool("greater than", 2 > 1, true)
+    check_bool("less or equal", 5 <= 5, true)
+    check_bool("greater or equal", 5 >= 5, true)
+
+    # --- Feature #100: function calls ---------------------------------------
+    check_i64("direct call", add(3, 4), 7)
+    check_i64("recursive call factorial(5)", factorial(5), 120)
+    check_i64("nested call add_one(double(5))", add_one(double(5)), 11)
+
+    # --- Feature #100: control flow -----------------------------------------
+    val x = 10
+    val branch = if x > 5: "big" else: "small"
+    check_text("if/else expression value", branch, "big")
+    check_i64("while loop accumulation", while_sum(), 55)
+    var total = 0
+    for n in [1, 2, 3, 4, 5]:
+        total = total + n
+    check_i64("for-in accumulation", total, 15)
+
+    # --- Feature #100: string operations ------------------------------------
+    val s = "hello"
+    check_text("text literal", s, "hello")
+    val interp_n = 42
+    check_text("text interpolation", "value is {interp_n}", "value is 42")
+    check_text("text concatenation", "foo" + "bar", "foobar")
+
+    # --- Feature #100: collection operations --------------------------------
+    val arr = [10, 20, 30]
+    check_i64("array index 0", arr[0], 10)
+    check_i64("array index 2", arr[2], 30)
+    val arr5 = [1, 2, 3, 4, 5]
+    check_i64("array length", arr5.len(), 5)
+
+    # --- Feature #95: buffer reuse / accumulation patterns ------------------
+    var buffer: [i64] = []
+    for i in [1, 2, 3, 4, 5]:
+        buffer = buffer + [i]
+    check_i64("filled buffer length", buffer.len(), 5)
+    buffer = []
+    for i in [10, 20, 30]:
+        buffer = buffer + [i]
+    check_i64("recycled buffer length", buffer.len(), 3)
+    check_i64("recycled buffer head", buffer[0], 10)
+
+    var buf1: [i64] = []
+    var buf2: [i64] = []
+    buf1 = buf1 + [1, 2, 3]
+    buf2 = buf2 + [4, 5, 6]
+    check_i64("independent buffer 1 length", buf1.len(), 3)
+    check_i64("independent buffer 2 length", buf2.len(), 3)
+    check_i64("independent buffer 1 head", buf1[0], 1)
+    check_i64("independent buffer 2 head", buf2[0], 4)
+
+    var grow: [i64] = []
+    for i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
+        grow = grow + [i]
+    check_i64("grown buffer length", grow.len(), 10)
+    check_i64("grown buffer tail", grow[9], 10)
+
+    var joined = ""
+    for word in ["hello", " ", "world"]:
+        joined = joined + word
+    check_text("incremental text build", joined, "hello world")
+
+    # --- Feature #96: explicit state machine / generator patterns -----------
+    var state = 0
+    var values: [i64] = []
+    if state == 0:
+        values = values + [1]
+        state = 1
+    if state == 1:
+        values = values + [2]
+        state = 2
+    if state == 2:
+        values = values + [3]
+        state = 3
+    check_i64("state machine emitted count", values.len(), 3)
+    check_i64("state machine value 0", values[0], 1)
+    check_i64("state machine value 2", values[2], 3)
+    check_i64("state machine terminal state", state, 3)
+
+    val generated = gen_sequence()
+    check_i64("generated sequence length", generated.len(), 5)
+    check_i64("generated sequence head", generated[0], 0)
+    check_i64("generated sequence tail", generated[4], 4)
+
+    var fa = 0
+    var fb = 1
+    var sequence = [fa, fb]
+    for i in [0, 1, 2, 3, 4]:
+        val next = fa + fb
+        sequence = sequence + [next]
+        fa = fb
+        fb = next
+    check_i64("fibonacci[2]", sequence[2], 1)
+    check_i64("fibonacci[4]", sequence[4], 3)
+    check_i64("fibonacci[6]", sequence[6], 8)
+
+    var running = 0
+    var partial: [i64] = []
+    for n in [1, 2, 3, 4, 5]:
+        running = running + n
+        partial = partial + [running]
+    check_i64("partial sums length", partial.len(), 5)
+    check_i64("partial sums last", partial[4], 15)
+
+    check_text("dispatch 0", dispatch(0), "init")
+    check_text("dispatch 1", dispatch(1), "process")
+    check_text("dispatch 2", dispatch(2), "finalize")
+    check_text("dispatch 3", dispatch(3), "done")
+
+    if failures == 0:
+        print("PROBE VERDICT: PASS")
+    else:
+        print("PROBE VERDICT: FAIL (" + failures.to_text() + " checks wrong)")
+
+    # --- engine-reach canary (reported OUTSIDE the pass/fail count) ---------
+    # A probe that prints the same verdict on both engines cannot, on its own,
+    # prove the "jit" arm reached the JIT: one unsupported operation silently
+    # demotes a whole program back to the interpreter, and an unrecognised
+    # SIMPLE_EXECUTION_MODE value silently selects the JIT. Either way an A/B
+    # would look like agreement between two identical interpreter runs.
+    #
+    # `Dict<text, f64>.get()` on a MISS is a documented, still-OPEN divergence:
+    # `rt_value_as_float` cannot round-trip the flat-Option nil sentinel
+    # (RT_NIL == 3) through a float bit pattern, so `dict_get_preserve_flat_nil`
+    # (src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:991) deliberately
+    # does NOT guard the F64 decode arm. Measured 2026-08-09 on this binary:
+    #
+    #     interpret -> PROBE ENGINE CANARY: true    (correct)
+    #     jit       -> PROBE ENGINE CANARY: false   (the open gap)
+    #
+    # The calling spec asserts BOTH answers, so if either arm silently ran on
+    # the other engine this goes RED rather than quietly vacuous. When that f64
+    # gap is fixed, this canary must be replaced with another live divergence —
+    # never simply deleted, or the probe loses its reach proof.
+    var canary: Dict<text, f64> = {}
+    canary["pi"] = 3.5
+    print("PROBE ENGINE CANARY: " + (canary.get("zz") == nil).to_text())

@@ -1,0 +1,87 @@
+# Regression for owner-result handoff of a mutable class.
+#
+# This deliberately contains no provider types.  It isolates the language
+# shape used by persistent services: mutate a class value, return that value
+# inside a struct result, bind the returned owner, and pass it into the next
+# call.  A class is an identity/reference type, so each hop must observe the
+# prior mutation.  The struct control proves the wrapper itself still has
+# ordinary value semantics.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+
+class OwnerResultCounter:
+    value: i64
+
+struct OwnerResultEnvelope:
+    owner: OwnerResultCounter
+    observed: i64
+
+struct OwnerResultValueCounter:
+    value: i64
+
+struct OwnerResultValueEnvelope:
+    owner: OwnerResultValueCounter
+    observed: i64
+
+class OwnerResultNestedState:
+    value: i64
+
+class OwnerResultNestedOwner:
+    state: OwnerResultNestedState
+
+struct OwnerResultNestedEnvelope:
+    owner: OwnerResultNestedOwner
+    observed: i64
+
+fn advance_owner(owner: OwnerResultCounter) -> OwnerResultEnvelope:
+    var next = owner
+    next.value = next.value + 1
+    OwnerResultEnvelope(owner: next, observed: next.value)
+
+fn advance_value(owner: OwnerResultValueCounter) -> OwnerResultValueEnvelope:
+    var next = owner
+    next.value = next.value + 1
+    OwnerResultValueEnvelope(owner: next, observed: next.value)
+
+fn advance_nested_owner(owner: OwnerResultNestedOwner) -> OwnerResultNestedEnvelope:
+    var next = owner
+    next.state.value = next.state.value + 1
+    OwnerResultNestedEnvelope(owner: next, observed: next.state.value)
+
+describe "class owner returned inside a struct survives the next call":
+    it "preserves class mutation through two owner-result handoffs":
+        step("Mutate and return the class owner in a result struct")
+        var owner = OwnerResultCounter(value: 0)
+        val first = advance_owner(owner)
+        expect(first.observed).to_equal(1)
+        expect(first.owner.value).to_equal(1)
+
+        step("Bind the returned owner and pass it through the same boundary")
+        owner = first.owner
+        val second = advance_owner(owner)
+        expect(second.observed).to_equal(2)
+        expect(second.owner.value).to_equal(2)
+
+    it "keeps the wrapper value semantics independent of class identity":
+        step("A struct owner is copied, advanced, and returned explicitly")
+        val original = OwnerResultValueCounter(value: 0)
+        val advanced = advance_value(original)
+        expect(original.value).to_equal(0)
+        expect(advanced.observed).to_equal(1)
+        expect(advanced.owner.value).to_equal(1)
+
+    it "preserves mutation of a nested class state through both handoffs":
+        step("Use the service/state shape: a class owner contains class state")
+        var owner = OwnerResultNestedOwner(
+            state: OwnerResultNestedState(value: 0),
+        )
+        val first = advance_nested_owner(owner)
+        expect(first.observed).to_equal(1)
+        expect(first.owner.state.value).to_equal(1)
+
+        step("Pass the returned owner into a second dispatch-like call")
+        owner = first.owner
+        val second = advance_nested_owner(owner)
+        expect(second.observed).to_equal(2)
+        expect(second.owner.state.value).to_equal(2)

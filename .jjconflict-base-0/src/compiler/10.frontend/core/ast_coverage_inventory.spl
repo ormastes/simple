@@ -1,0 +1,250 @@
+# Reachable, zero-count compiler coverage manifest over canonical flat-AST
+# ownership. Rows follow deterministic source/module/constructor order.
+use compiler.core.ast.*
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_traversal.*
+use compiler.core.mcdc_masking_context.{
+    compiler_mcdc_context_manifest_row, compiler_mcdc_formal_contexts
+}
+use compiler.core.types.{span_is_valid, span_line, span_col, span_start}
+use std.common.mcdc.model.{
+    mcdc_authored_path_v1, mcdc_runtime_decision_id_v1,
+    mcdc_semantic_decision_id_v1, mcdc_path_in_instrumentation_scope
+}
+
+const COMPILER_COVERAGE_ROW_CAP = 1000000
+var inventory_decisions: [text] = []
+var inventory_conditions: [text] = []
+var inventory_mcdc_obligations: [text] = []
+var inventory_mcdc_contexts: [text] = []
+var inventory_mcdc_context_fingerprint_by_id: Dict<text, text> = {}
+var inventory_mcdc_semantic_by_runtime_id: Dict<i64, text> = {}
+var inventory_decision_location_by_key: Dict<text, text> = {}
+var inventory_condition_location_by_key: Dict<text, text> = {}
+var inventory_seen_decl: Dict<i64, bool> = {}
+var inventory_seen_stmt: Dict<i64, bool> = {}
+var inventory_seen_expr: Dict<i64, bool> = {}
+var inventory_seen_arm: Dict<i64, bool> = {}
+var inventory_error = ""
+var inventory_enabled = false
+var inventory_mcdc_include_csv = ""
+var inventory_mcdc_exclude_csv = ""
+
+fn compiler_coverage_inventory_reset(enabled: bool, mcdc_include_csv: text = "", mcdc_exclude_csv: text = ""):
+    inventory_enabled = enabled
+    inventory_decisions = []
+    inventory_conditions = []
+    inventory_mcdc_obligations = []
+    inventory_mcdc_contexts = []
+    inventory_mcdc_context_fingerprint_by_id = {}
+    inventory_mcdc_semantic_by_runtime_id = {}
+    inventory_decision_location_by_key = {}
+    inventory_condition_location_by_key = {}
+    inventory_seen_decl = {}
+    inventory_seen_stmt = {}
+    inventory_seen_expr = {}
+    inventory_seen_arm = {}
+    inventory_error = ""
+    inventory_mcdc_include_csv = mcdc_include_csv
+    inventory_mcdc_exclude_csv = mcdc_exclude_csv
+
+fn inventory_row_available() -> bool:
+    if inventory_decisions.len() + inventory_conditions.len() >= COMPILER_COVERAGE_ROW_CAP:
+        inventory_error = "compiler coverage inventory exceeds bounded row cap"
+        return false
+    true
+
+fn inventory_escape_path(path: text) -> text:
+    var escaped = path.replace("%", "%25")
+    escaped = escaped.replace(",", "%2C")
+    escaped = escaped.replace("\r", "%0A")
+    escaped.replace("\n", "%0A")
+
+fn inventory_add_decision(path: text, span_id: i64):
+    if inventory_error != "" or not span_is_valid(span_id): return
+    val id = span_start(span_id) + 1
+    val escaped_path = inventory_escape_path(path)
+    val key = escaped_path + "|" + "{id}"
+    val location = "{span_line(span_id)}|{span_col(span_id)}"
+    if inventory_decision_location_by_key.contains_key(key):
+        if (inventory_decision_location_by_key[key] ?? "") != location:
+            inventory_error = "compiler coverage decision key has conflicting locations: " + key
+        return
+    if not inventory_row_available(): return
+    inventory_decision_location_by_key[key] = location
+    inventory_decisions.push("{id}, {escaped_path}, {span_line(span_id)}, {span_col(span_id)}, 0, 0")
+
+fn inventory_add_condition(path: text, decision_span: i64, condition_expr: i64, ordinal: i64, projection0: i64 = 0, projection1: i64 = 0, projection2: i64 = 0, projection3: i64 = 0, strong_coupling: bool = false, policy_reason: text = "compiler-boolean-projection-v1"):
+    if inventory_error != "" or not span_is_valid(decision_span): return
+    val condition_span = expr_get_span(condition_expr)
+    if not span_is_valid(condition_span): return
+    val decision_id = span_start(decision_span) + 1
+    val condition_id = span_start(condition_span) + 1
+    val escaped_path = inventory_escape_path(path)
+    val key = escaped_path + "|{decision_id}|{condition_id}"
+    val location = "{span_line(condition_span)}|{span_col(condition_span)}"
+    if inventory_condition_location_by_key.contains_key(key):
+        if (inventory_condition_location_by_key[key] ?? "") != location:
+            inventory_error = "compiler coverage condition key has conflicting locations: " + key
+        return
+    if not inventory_row_available(): return
+    inventory_condition_location_by_key[key] = location
+    inventory_conditions.push("{decision_id}, {condition_id}, {escaped_path}, {span_line(condition_span)}, {span_col(condition_span)}, 0, 0")
+    if not mcdc_path_in_instrumentation_scope(path, inventory_mcdc_include_csv, inventory_mcdc_exclude_csv): return
+    val canonical_path = mcdc_authored_path_v1(path)
+    val runtime_id = mcdc_runtime_decision_id_v1(canonical_path, span_start(decision_span))
+    val semantic_id = mcdc_semantic_decision_id_v1(canonical_path, span_start(decision_span))
+    if inventory_mcdc_semantic_by_runtime_id.contains_key(runtime_id):
+        if (inventory_mcdc_semantic_by_runtime_id[runtime_id] ?? "") != semantic_id:
+            inventory_error = "MC/DC runtime decision ID collision: {runtime_id}"
+            return
+    else:
+        inventory_mcdc_semantic_by_runtime_id[runtime_id] = semantic_id
+    inventory_mcdc_obligations.push(
+        "condition|{runtime_id}|{semantic_id}|source-offset-v1|{ordinal}|{projection0}|{projection1}|{projection2}|{projection3}|" +
+        (if strong_coupling: "true" else: "false") + "|{policy_reason}"
+    )
+
+fn inventory_condition_leaves(expr_id: i64) -> [i64]:
+    if expr_id < 0: return []
+    if expr_get_tag(expr_id) == EXPR_BINARY and (expr_get_int(expr_id) == 55 or expr_get_int(expr_id) == 56):
+        var leaves = inventory_condition_leaves(expr_get_left(expr_id))
+        for leaf in inventory_condition_leaves(expr_get_right(expr_id)): leaves.push(leaf)
+        return leaves
+    [expr_id]
+
+fn inventory_condition_fingerprint(expr_id: i64) -> text:
+    if expr_id < 0: return "nil"
+    val tag = expr_get_tag(expr_id)
+    "{tag}:{expr_get_int(expr_id)}:{expr_get_str(expr_id)}:" +
+        inventory_condition_fingerprint(expr_get_left(expr_id)) + ":" +
+        inventory_condition_fingerprint(expr_get_right(expr_id))
+
+fn inventory_condition_tree(path: text, decision_span: i64, expr_id: i64, ordinal: i64 = 0) -> i64:
+    val leaves = inventory_condition_leaves(expr_id)
+    var fingerprints: [text] = []
+    for leaf in leaves: fingerprints.push(inventory_condition_fingerprint(leaf))
+    var index = 0
+    while index < leaves.len():
+        var projection: [i64] = [0, 0, 0, 0]
+        var coupled = false
+        var other = 0
+        while other < leaves.len():
+            if other != index:
+                projection[other / 64] = projection[other / 64] | (1 << (other % 64))
+                if fingerprints[other] == fingerprints[index]: coupled = true
+            other = other + 1
+        val reason = if coupled: "compiler-identical-condition-occurrence" else: "compiler-boolean-projection-v1"
+        inventory_add_condition(path, decision_span, leaves[index], ordinal + index,
+            projection[0], projection[1], projection[2], projection[3], coupled, reason)
+        index = index + 1
+    if mcdc_path_in_instrumentation_scope(path, inventory_mcdc_include_csv, inventory_mcdc_exclude_csv):
+        val canonical_path = mcdc_authored_path_v1(path)
+        val runtime_id = mcdc_runtime_decision_id_v1(
+            canonical_path, span_start(decision_span))
+        for context in compiler_mcdc_formal_contexts(runtime_id, expr_id):
+            val identity = "{context.context.proof_id}|{context.context.context_id}"
+            val fingerprint = context.proof_fingerprint + "|" + context.context_fingerprint
+            if inventory_mcdc_context_fingerprint_by_id.contains_key(identity):
+                if (inventory_mcdc_context_fingerprint_by_id[identity] ?? "") != fingerprint:
+                    inventory_error = "MC/DC masking context ID collision: {identity}"
+                    return ordinal + leaves.len()
+            else:
+                inventory_mcdc_context_fingerprint_by_id[identity] = fingerprint
+            inventory_mcdc_contexts.push(compiler_mcdc_context_manifest_row(context))
+    ordinal + leaves.len()
+
+fn inventory_walk_expr(path: text, id: i64):
+    if id < 0 or inventory_seen_expr.contains_key(id): return
+    inventory_seen_expr[id] = true
+    val tag = expr_get_tag(id)
+    if tag == EXPR_IF or tag == EXPR_WHILE:
+        val condition = expr_get_left(id)
+        val span = expr_get_span(condition); inventory_add_decision(path, span)
+        inventory_condition_tree(path, span, condition)
+    for x in flat_expr_child_exprs(id): inventory_walk_expr(path, x)
+    for x in flat_expr_child_stmts(id): inventory_walk_stmt(path, x)
+    for x in flat_expr_child_arms(id): inventory_walk_arm(path, x)
+
+fn inventory_walk_arm(path: text, id: i64):
+    if id < 0 or inventory_seen_arm.contains_key(id): return
+    inventory_seen_arm[id] = true
+    val guard = arm_get_guard(id)
+    if guard >= 0:
+        val span = expr_get_span(guard); inventory_add_decision(path, span)
+        inventory_condition_tree(path, span, guard)
+    for x in flat_arm_child_exprs(id): inventory_walk_expr(path, x)
+    for x in flat_arm_child_stmts(id): inventory_walk_stmt(path, x)
+
+fn inventory_walk_stmt(path: text, id: i64):
+    if id < 0 or inventory_seen_stmt.contains_key(id): return
+    inventory_seen_stmt[id] = true
+    val tag = stmt_get_tag(id)
+    if tag == STMT_IF or tag == STMT_WHILE:
+        val exprs = flat_stmt_child_exprs(id)
+        if exprs.len() > 0:
+            val span = expr_get_span(exprs[0]); inventory_add_decision(path, span)
+            inventory_condition_tree(path, span, exprs[0])
+    for x in flat_stmt_child_exprs(id): inventory_walk_expr(path, x)
+    for x in flat_stmt_child_stmts(id): inventory_walk_stmt(path, x)
+    for x in flat_stmt_child_arms(id): inventory_walk_arm(path, x)
+
+fn inventory_walk_decl(path: text, id: i64):
+    if id < 0 or inventory_seen_decl.contains_key(id): return
+    inventory_seen_decl[id] = true
+    for x in flat_decl_child_exprs(id): inventory_walk_expr(path, x)
+    for x in flat_decl_child_stmts(id): inventory_walk_stmt(path, x)
+    for x in flat_decl_child_decls(id): inventory_walk_decl(path, x)
+
+fn compiler_coverage_inventory_record_module(path: text):
+    if not inventory_enabled: return
+    inventory_seen_decl = {}; inventory_seen_stmt = {}
+    inventory_seen_expr = {}; inventory_seen_arm = {}
+    for id in module_get_decls(): inventory_walk_decl(path, id)
+
+fn compiler_coverage_inventory_valid() -> bool: inventory_error == ""
+fn compiler_coverage_inventory_error() -> text: inventory_error
+fn compiler_coverage_inventory_sdn() -> text:
+    var out = "version: 1.0\ndecisions |id, file, line, column, true_count, false_count|\n"
+    for row in inventory_decisions: out = out + row + "\n"
+    out = out + "conditions |decision_id, condition_id, file, line, column, true_count, false_count|\n"
+    for row in inventory_conditions: out = out + row + "\n"
+    out
+fn compiler_coverage_inventory_marked() -> text:
+    "__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__\n" +
+        compiler_coverage_inventory_sdn() +
+        "__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__"
+fn compiler_coverage_inventory_emit():
+    print compiler_coverage_inventory_marked()
+
+fn compiler_mcdc_obligation_manifest_sdn() -> text:
+    # Obligations are not runtime independence evidence. The explicit state
+    # prevents a zero-count compiler inventory from being mistaken for PASS.
+    var out = "schema: simple-mcdc-obligations-v1\n" +
+        "evidence_state: obligations-only\n" +
+        "identity_scheme: escaped-path+source-byte-offset-v1\n" +
+        "exclusion_identity_version: source-offset-v1\n"
+    for obligation in inventory_mcdc_obligations:
+        out = out + obligation + "\n"
+    # Context rows are additive in v1: legacy consumers ignore unknown row
+    # kinds, while masking-aware consumers require and validate them.
+    for context in inventory_mcdc_contexts:
+        out = out + context + "\n"
+    out
+
+fn compiler_mcdc_obligation_manifest_marked() -> text:
+    "__SIMPLE_MCDC_OBLIGATION_MANIFEST_BEGIN__\n" +
+        compiler_mcdc_obligation_manifest_sdn() +
+        "__SIMPLE_MCDC_OBLIGATION_MANIFEST_END__"
+
+fn compiler_mcdc_obligation_manifest_emit():
+    print compiler_mcdc_obligation_manifest_marked()
+
+export compiler_coverage_inventory_reset, compiler_coverage_inventory_record_module
+export compiler_coverage_inventory_valid, compiler_coverage_inventory_error
+export compiler_coverage_inventory_sdn, compiler_coverage_inventory_marked
+export compiler_coverage_inventory_emit
+export compiler_mcdc_obligation_manifest_sdn
+export compiler_mcdc_obligation_manifest_marked
+export compiler_mcdc_obligation_manifest_emit

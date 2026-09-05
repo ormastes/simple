@@ -1,0 +1,48 @@
+# SDN reader multibyte-UTF8 quoted-field tests.
+#
+# Regression guard for bug `sdn_reader_utf8_byte_indexing`: the SDN row reader
+# used `text.len()` (a byte count) as the bound for a char-indexed scan loop, so
+# a quoted field containing a multibyte character (e.g. an em-dash `—`, 3 bytes)
+# walked past the last char and crashed with "string index out of bounds", and
+# `strip_quotes` mis-sliced (silently returning "") the same multibyte field.
+#
+# These tests exercise the real bug_db.sdn reader path: split_sdn_row -> trim ->
+# strip_quotes, and the full parse_sdn_table loader.
+
+use std.database.core.{split_sdn_row, strip_quotes, parse_sdn_table}
+
+describe "split_sdn_row with multibyte UTF-8":
+    it "splits a row whose quoted field holds an em-dash without crashing":
+        val line = "1, \"em—dash title\", true"
+        val parts = split_sdn_row(line)
+        expect(parts.len()).to_equal(3)
+
+    it "round-trips the em-dash field content through strip_quotes":
+        val line = "1, \"em—dash title\", true"
+        val parts = split_sdn_row(line)
+        val title = strip_quotes(parts[1].trim())
+        expect(title).to_equal("em—dash title")
+
+    it "keeps a quoted field with both a comma and an em-dash intact":
+        val line = "id1, \"a, b — c\", open"
+        val parts = split_sdn_row(line)
+        expect(parts.len()).to_equal(3)
+        val title = strip_quotes(parts[1].trim())
+        expect(title).to_equal("a, b — c")
+
+describe "strip_quotes with multibyte UTF-8":
+    it "strips surrounding quotes from an em-dash value by char count":
+        expect(strip_quotes("\"em—dash\"")).to_equal("em—dash")
+
+    it "leaves an unquoted multibyte value unchanged":
+        expect(strip_quotes("em—dash")).to_equal("em—dash")
+
+describe "parse_sdn_table with multibyte UTF-8 quoted title":
+    it "loads a table whose row has a multibyte quoted field":
+        val content = "bugs |id, title, status|\n    b1, \"em—dash bug—title\", open\n    b2, plain, closed\n"
+        val parsed = parse_sdn_table(content)
+        expect(parsed.?).to_equal(true)
+        val tbl = parsed?
+        expect(tbl.rows.len()).to_equal(2)
+        val title = tbl.rows[0].get("title") ?? "NIL"
+        expect(title).to_equal("em—dash bug—title")

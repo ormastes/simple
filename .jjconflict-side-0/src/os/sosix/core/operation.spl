@@ -1,0 +1,203 @@
+"""Typed SOSIX operation identity and monotonic lifecycle state machine.
+
+This owner is pure: it allocates no global table, performs no I/O, and blocks
+nowhere. Queue/table owners store `SosixOperationSlot` values and apply these
+transitions. A slot generation changes on release so stale completions and
+cancellation requests cannot affect a reused slot.
+"""
+
+pub val SOSIX_OPERATION_FREE: u8 = 0
+pub val SOSIX_OPERATION_PENDING: u8 = 1
+pub val SOSIX_OPERATION_COMPLETED: u8 = 2
+pub val SOSIX_OPERATION_FAILED: u8 = 3
+pub val SOSIX_OPERATION_CANCELED: u8 = 4
+pub val SOSIX_OPERATION_TIMED_OUT: u8 = 5
+
+export SOSIX_OPERATION_FREE, SOSIX_OPERATION_PENDING, SOSIX_OPERATION_COMPLETED
+export SOSIX_OPERATION_FAILED, SOSIX_OPERATION_CANCELED, SOSIX_OPERATION_TIMED_OUT
+
+pub struct SosixOperationId:
+    slot: u32
+    generation: u32
+
+pub struct SosixOperationSlot:
+    generation: u32
+    state: u8
+    status: i32
+    transferred: u64
+    partial_progress: bool
+    cancellation_requested: bool
+    deadline_ns: u64
+
+pub struct SosixOperationBeginResult:
+    accepted: bool
+    reason: text
+    operation: SosixOperationId
+    slot: SosixOperationSlot
+
+pub struct SosixOperationTransition:
+    accepted: bool
+    reason: text
+    slot: SosixOperationSlot
+
+export SosixOperationId, SosixOperationSlot, SosixOperationBeginResult, SosixOperationTransition
+
+pub fn sosix_operation_slot_new() -> SosixOperationSlot:
+    SosixOperationSlot(
+        generation: 1,
+        state: SOSIX_OPERATION_FREE,
+        status: 0,
+        transferred: 0,
+        partial_progress: false,
+        cancellation_requested: false,
+        deadline_ns: 0
+    )
+
+pub fn sosix_operation_begin(
+    slot_index: u32, slot: SosixOperationSlot, deadline_ns: u64
+) -> SosixOperationBeginResult:
+    if slot.state != SOSIX_OPERATION_FREE:
+        return SosixOperationBeginResult(
+            accepted: false,
+            reason: "slot-not-free",
+            operation: SosixOperationId(slot: slot_index, generation: slot.generation),
+            slot: slot
+        )
+    val pending = SosixOperationSlot(
+        generation: slot.generation,
+        state: SOSIX_OPERATION_PENDING,
+        status: 0,
+        transferred: 0,
+        partial_progress: false,
+        cancellation_requested: false,
+        deadline_ns: deadline_ns
+    )
+    SosixOperationBeginResult(
+        accepted: true,
+        reason: "accepted",
+        operation: SosixOperationId(slot: slot_index, generation: slot.generation),
+        slot: pending
+    )
+
+fn _sosix_operation_matches(slot: SosixOperationSlot, operation: SosixOperationId) -> bool:
+    slot.generation == operation.generation
+
+pub fn sosix_operation_complete(
+    slot: SosixOperationSlot,
+    operation: SosixOperationId,
+    status: i32,
+    transferred: u64,
+    requested_length: u64
+) -> SosixOperationTransition:
+    if not _sosix_operation_matches(slot, operation):
+        return SosixOperationTransition(accepted: false, reason: "stale-generation", slot: slot)
+    if slot.state != SOSIX_OPERATION_PENDING:
+        return SosixOperationTransition(accepted: false, reason: "operation-not-pending", slot: slot)
+    if transferred < slot.transferred:
+        return SosixOperationTransition(accepted: false, reason: "progress-regressed", slot: slot)
+    if transferred > requested_length:
+        return SosixOperationTransition(accepted: false, reason: "transferred-exceeds-request", slot: slot)
+    val terminal_state = if status < 0: SOSIX_OPERATION_FAILED else: SOSIX_OPERATION_COMPLETED
+    val terminal = SosixOperationSlot(
+        generation: slot.generation,
+        state: terminal_state,
+        status: status,
+        transferred: transferred,
+        partial_progress: transferred > 0 and transferred < requested_length,
+        cancellation_requested: slot.cancellation_requested,
+        deadline_ns: slot.deadline_ns
+    )
+    SosixOperationTransition(accepted: true, reason: "completed", slot: terminal)
+
+pub fn sosix_operation_record_progress(
+    slot: SosixOperationSlot,
+    operation: SosixOperationId,
+    transferred: u64
+) -> SosixOperationTransition:
+    """Mirror validated monotonic transport progress into a pending operation."""
+    if not _sosix_operation_matches(slot, operation):
+        return SosixOperationTransition(accepted: false, reason: "stale-generation", slot: slot)
+    if slot.state != SOSIX_OPERATION_PENDING:
+        return SosixOperationTransition(accepted: false, reason: "operation-not-pending", slot: slot)
+    if transferred < slot.transferred:
+        return SosixOperationTransition(accepted: false, reason: "progress-regressed", slot: slot)
+    val progressed = SosixOperationSlot(
+        generation: slot.generation,
+        state: slot.state,
+        status: slot.status,
+        transferred: transferred,
+        partial_progress: transferred > 0,
+        cancellation_requested: slot.cancellation_requested,
+        deadline_ns: slot.deadline_ns
+    )
+    SosixOperationTransition(accepted: true, reason: "progress-recorded", slot: progressed)
+
+pub fn sosix_operation_cancel(
+    slot: SosixOperationSlot, operation: SosixOperationId
+) -> SosixOperationTransition:
+    if not _sosix_operation_matches(slot, operation):
+        return SosixOperationTransition(accepted: false, reason: "stale-generation", slot: slot)
+    if slot.state != SOSIX_OPERATION_PENDING:
+        return SosixOperationTransition(accepted: false, reason: "operation-not-pending", slot: slot)
+    val canceled = SosixOperationSlot(
+        generation: slot.generation,
+        state: SOSIX_OPERATION_CANCELED,
+        status: -125,
+        transferred: slot.transferred,
+        partial_progress: slot.transferred > 0,
+        cancellation_requested: true,
+        deadline_ns: slot.deadline_ns
+    )
+    SosixOperationTransition(accepted: true, reason: "canceled", slot: canceled)
+
+pub fn sosix_operation_expire_deadline(
+    slot: SosixOperationSlot, operation: SosixOperationId, now_ns: u64
+) -> SosixOperationTransition:
+    if not _sosix_operation_matches(slot, operation):
+        return SosixOperationTransition(accepted: false, reason: "stale-generation", slot: slot)
+    if slot.state != SOSIX_OPERATION_PENDING:
+        return SosixOperationTransition(accepted: false, reason: "operation-not-pending", slot: slot)
+    if slot.deadline_ns == 0 or now_ns < slot.deadline_ns:
+        return SosixOperationTransition(accepted: false, reason: "deadline-not-reached", slot: slot)
+    val timed_out = SosixOperationSlot(
+        generation: slot.generation,
+        state: SOSIX_OPERATION_TIMED_OUT,
+        status: -110,
+        transferred: slot.transferred,
+        partial_progress: slot.transferred > 0,
+        cancellation_requested: slot.cancellation_requested,
+        deadline_ns: slot.deadline_ns
+    )
+    SosixOperationTransition(accepted: true, reason: "timed-out", slot: timed_out)
+
+pub fn sosix_operation_release(
+    slot: SosixOperationSlot, operation: SosixOperationId
+) -> SosixOperationTransition:
+    if not _sosix_operation_matches(slot, operation):
+        return SosixOperationTransition(accepted: false, reason: "stale-generation", slot: slot)
+    if slot.state == SOSIX_OPERATION_FREE or slot.state == SOSIX_OPERATION_PENDING:
+        return SosixOperationTransition(accepted: false, reason: "operation-not-terminal", slot: slot)
+    var next_generation = slot.generation + 1
+    if next_generation == 0:
+        next_generation = 1
+    val free_slot = SosixOperationSlot(
+        generation: next_generation,
+        state: SOSIX_OPERATION_FREE,
+        status: 0,
+        transferred: 0,
+        partial_progress: false,
+        cancellation_requested: false,
+        deadline_ns: 0
+    )
+    SosixOperationTransition(accepted: true, reason: "released", slot: free_slot)
+
+pub fn sosix_operation_is_terminal(slot: SosixOperationSlot) -> bool:
+    slot.state == SOSIX_OPERATION_COMPLETED or
+        slot.state == SOSIX_OPERATION_FAILED or
+        slot.state == SOSIX_OPERATION_CANCELED or
+        slot.state == SOSIX_OPERATION_TIMED_OUT
+
+export sosix_operation_slot_new, sosix_operation_begin, sosix_operation_complete
+export sosix_operation_record_progress
+export sosix_operation_cancel, sosix_operation_expire_deadline, sosix_operation_release
+export sosix_operation_is_terminal

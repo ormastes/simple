@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+module=src/compiler/80.driver/driver_aot_pipeline.spl
+facade=src/lib/nogc_sync_mut/io_runtime.spl
+
+if rg -q '^extern fn rt_' "$module"; then
+    echo "AOT pipeline must use canonical runtime facades" >&2
+    exit 1
+fi
+
+rg -q '^use std\.io_runtime\.\{env_get_opt, file_read_result, hash_text\}$' "$module"
+test "$(rg -o 'env_get_opt\(' "$module" | wc -l)" -eq 9
+test "$(rg -c 'file_read_result\(source_path\)' "$module")" -eq 1
+test "$(rg -c 'hash_text\(src\)' "$module")" -eq 1
+rg -q 'val src = match source_result:' "$module"
+rg -q 'case Err\(error\): return CompileResult.CodegenError\(error\)' "$module"
+if rg -q 'unsafe\(capabilities: \[ffi\]\)' "$module"; then
+    echo "AOT pipeline must not regain local FFI authority" >&2
+    exit 1
+fi
+rg -Uq '@always_inline\npub fn hash_text\(s: text\) -> i64:' "$facade"

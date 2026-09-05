@@ -1,0 +1,328 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+PREFIX=simpleos_qemu_guest_gpu_passthrough
+QEMU_PROBE_TIMEOUT_SECONDS=${QEMU_PROBE_TIMEOUT_SECONDS:-5}
+case "$QEMU_PROBE_TIMEOUT_SECONDS" in ''|0|*[!0-9]*) echo "invalid QEMU_PROBE_TIMEOUT_SECONDS" >&2; exit 2 ;; esac
+
+classify_passthrough() {
+    host=$1
+    iommu=$2
+    qemu_vfio=$3
+    guest_driver=$4
+    selected_device=$5
+
+    if [ "$host" != linux ]; then
+        CLASS_STATUS=unavailable
+        CLASS_REASON=linux-host-required
+    elif [ "$guest_driver" != validated ]; then
+        CLASS_STATUS=unavailable
+        CLASS_REASON=simpleos-guest-vulkan-cuda-evidence-missing
+    elif [ "$iommu" != available ]; then
+        CLASS_STATUS=unavailable
+        CLASS_REASON=iommu-groups-missing
+    elif [ "$qemu_vfio" != available ]; then
+        CLASS_STATUS=unavailable
+        CLASS_REASON=qemu-vfio-pci-missing
+    elif [ "$selected_device" != vfio-ready ]; then
+        CLASS_STATUS=blocked
+        CLASS_REASON=selected-device-not-vfio-ready
+    else
+        CLASS_STATUS=ready
+        CLASS_REASON=none
+    fi
+}
+
+self_test() {
+    classify_passthrough linux available available missing vfio-ready
+    [ "$CLASS_STATUS:$CLASS_REASON" = "unavailable:simpleos-guest-vulkan-cuda-evidence-missing" ]
+    classify_passthrough linux available available validated host-bound
+    [ "$CLASS_STATUS:$CLASS_REASON" = "blocked:selected-device-not-vfio-ready" ]
+    classify_passthrough linux available available validated vfio-ready
+    [ "$CLASS_STATUS:$CLASS_REASON" = "ready:none" ]
+    classify_passthrough macos available available validated vfio-ready
+    [ "$CLASS_STATUS:$CLASS_REASON" = "unavailable:linux-host-required" ]
+
+    classify_qemu_probe vfio-pci \
+        'QEMU emulator version 8.2.2' \
+        'vfio-pci options:\n  host=<str>' 0
+    [ "$QEMU_PROBE_STATUS" = available ]
+    classify_qemu_probe vfio-pci '' '' 0
+    [ "$QEMU_PROBE_STATUS" = invalid-qemu ]
+    classify_qemu_probe virtio-gpu-gl \
+        'QEMU emulator version 8.2.2' \
+        'symbol lookup error: undefined symbol: qemu_egl_display' 1
+    [ "$QEMU_PROBE_STATUS" = broken-module ]
+
+    qemu_path_metadata_is_trusted /usr/bin/qemu-system-x86_64 0 755
+    ! qemu_path_metadata_is_trusted /tmp/qemu-system-x86_64 0 755
+    ! qemu_path_metadata_is_trusted /usr/bin/qemu-system-x86_64 1000 755
+    ! qemu_path_metadata_is_trusted /usr/bin/qemu-system-x86_64 0 775
+    root_nonwritable_metadata_is_trusted 0 755
+    ! root_nonwritable_metadata_is_trusted 0 777
+    echo "${PREFIX}_self_test=pass"
+}
+
+guest_driver_evidence_status() {
+    # No canonical SimpleOS guest Vulkan/CUDA receipt producer exists yet.
+    # Never promote caller-authored text or hashes into passthrough readiness.
+    echo producer-missing
+}
+
+qemu_path_metadata_is_trusted() {
+    path=$1
+    owner=$2
+    mode=$3
+    case "$path" in /usr/bin/qemu-system-*|/usr/local/bin/qemu-system-*) ;; *) return 1 ;; esac
+    [ "$owner" = 0 ] || return 1
+    case "$mode" in *[2367][0-9]|*[0-9][2367]) return 1 ;; *) return 0 ;; esac
+}
+
+root_nonwritable_metadata_is_trusted() {
+    owner=$1
+    mode=$2
+    [ "$owner" = 0 ] || return 1
+    case "$mode" in *[2367][0-9]|*[0-9][2367]) return 1 ;; *) return 0 ;; esac
+}
+
+trusted_directory() {
+    directory=$1
+    owner=$(stat -c %u "$directory" 2>/dev/null) || return 1
+    mode=$(stat -c %a "$directory" 2>/dev/null) || return 1
+    root_nonwritable_metadata_is_trusted "$owner" "$mode"
+}
+
+trusted_qemu_path() {
+    candidate=$1
+    [ -n "$candidate" ] && [ -x "$candidate" ] || return 1
+    resolved=$(readlink -f "$candidate" 2>/dev/null) || return 1
+    owner=$(stat -c %u "$resolved" 2>/dev/null) || return 1
+    mode=$(stat -c %a "$resolved" 2>/dev/null) || return 1
+    qemu_path_metadata_is_trusted "$resolved" "$owner" "$mode" || return 1
+    trusted_directory /usr || return 1
+    case "$resolved" in
+        /usr/bin/*) trusted_directory /usr/bin || return 1 ;;
+        /usr/local/bin/*)
+            trusted_directory /usr/local || return 1
+            trusted_directory /usr/local/bin || return 1
+            ;;
+    esac
+    echo "$resolved"
+}
+
+classify_qemu_probe() {
+    device=$1
+    version=$2
+    output=$3
+    code=$4
+    case "$version" in 'QEMU emulator version '*) ;; *) QEMU_PROBE_STATUS=invalid-qemu; return ;; esac
+    case "$output" in
+        *'undefined symbol'*|*'symbol lookup error'*) QEMU_PROBE_STATUS=broken-module; return ;;
+    esac
+    [ "$code" -eq 0 ] || { QEMU_PROBE_STATUS=missing; return; }
+    case "$output" in *"$device options:"*) ;; *) QEMU_PROBE_STATUS=missing; return ;; esac
+    if [ "$device" = vfio-pci ]; then
+        case "$output" in *'host=<str>'*) ;; *) QEMU_PROBE_STATUS=missing; return ;; esac
+    fi
+    QEMU_PROBE_STATUS=available
+}
+
+qemu_device_status() {
+    qemu=$1
+    version=$2
+    device=$3
+    [ -n "$qemu" ] && [ -x "$qemu" ] || { echo missing; return; }
+    output=$(/usr/bin/timeout "$QEMU_PROBE_TIMEOUT_SECONDS" "$qemu" -device "$device,help" 2>&1) && code=0 || code=$?
+    classify_qemu_probe "$device" "$version" "$output" "$code"
+    echo "$QEMU_PROBE_STATUS"
+}
+
+selected_device_bdf() {
+    selected=${SIMPLEOS_QEMU_PASSTHROUGH_PCI:-}
+    [ -n "$selected" ] || return 1
+    case "$selected" in
+        ????\:??\:??.?) echo "$selected" ;;
+        ??\:??.?) echo "0000:$selected" ;;
+        *) return 1 ;;
+    esac
+}
+
+selected_device_status() {
+    [ -n "${SIMPLEOS_QEMU_PASSTHROUGH_PCI:-}" ] || { echo not-selected; return; }
+    bdf=$(selected_device_bdf || true)
+    [ -n "$bdf" ] || { echo invalid; return; }
+    device=/sys/bus/pci/devices/$bdf
+    [ -d "$device" ] || { echo missing; return; }
+    [ -r "$device/class" ] || { echo not-gpu; return; }
+    case "$(cat "$device/class")" in 0x030000|0x030200|0x038000) ;; *) echo not-gpu; return ;; esac
+    if [ -r "$device/boot_vga" ] && [ "$(cat "$device/boot_vga")" = 1 ]; then
+        echo boot-display
+        return
+    fi
+    [ -e "$device/reset" ] || { echo reset-unavailable; return; }
+    [ -L "$device/iommu_group" ] || { echo iommu-group-missing; return; }
+    if [ -L "$device/driver" ]; then
+        driver=$(basename "$(readlink "$device/driver")")
+    else
+        driver=unbound
+    fi
+    [ "$driver" = vfio-pci ] || { echo host-bound; return; }
+    group_path=$(readlink -f "$device/iommu_group")
+    group=$(basename "$group_path")
+    for member in "$group_path"/devices/*; do
+        [ -L "$member/driver" ] || { echo iommu-group-not-vfio; return; }
+        [ "$(basename "$(readlink "$member/driver")")" = vfio-pci ] || { echo iommu-group-not-vfio; return; }
+    done
+    [ -r "/dev/vfio/$group" ] && [ -w "/dev/vfio/$group" ] || { echo vfio-group-inaccessible; return; }
+    [ "${SIMPLEOS_QEMU_PASSTHROUGH_DEVICE_APPROVED:-0}" = 1 ] || { echo approval-missing; return; }
+    echo vfio-ready
+}
+
+emit_selected_group_inventory() {
+    bdf=$(selected_device_bdf || true)
+    [ -n "$bdf" ] || {
+        echo "${PREFIX}_selected_iommu_group=none"
+        echo "${PREFIX}_selected_iommu_group_inventory=none"
+        return
+    }
+    device=/sys/bus/pci/devices/$bdf
+    [ -L "$device/iommu_group" ] || {
+        echo "${PREFIX}_selected_iommu_group=none"
+        echo "${PREFIX}_selected_iommu_group_inventory=none"
+        return
+    }
+    group_path=$(readlink -f "$device/iommu_group")
+    group=$(basename "$group_path")
+    inventory=
+    for member in "$group_path"/devices/*; do
+        member_bdf=$(basename "$member")
+        if [ -L "$member/driver" ]; then
+            driver=$(basename "$(readlink "$member/driver")")
+        else
+            driver=unbound
+        fi
+        inventory="${inventory}${inventory:+,}${member_bdf}:${driver}"
+    done
+    echo "${PREFIX}_selected_iommu_group=$group"
+    echo "${PREFIX}_selected_iommu_group_inventory=${inventory:-none}"
+}
+
+emit_gpu_inventory() {
+    count=0
+    inventory=
+    for device in /sys/bus/pci/devices/*; do
+        [ -r "$device/class" ] || continue
+        class=$(cat "$device/class")
+        case "$class" in 0x030000|0x030200|0x038000) ;; *) continue ;; esac
+        bdf=$(basename "$device")
+        if [ -L "$device/driver" ]; then
+            driver=$(basename "$(readlink "$device/driver")")
+        else
+            driver=unbound
+        fi
+        if [ -L "$device/iommu_group" ]; then
+            group=$(basename "$(readlink "$device/iommu_group")")
+        else
+            group=none
+        fi
+        inventory="${inventory}${inventory:+,}${bdf}:${driver}:${group}"
+        count=$((count + 1))
+    done
+    echo "${PREFIX}_gpu_count=$count"
+    echo "${PREFIX}_gpu_inventory=${inventory:-none}"
+}
+
+preflight() {
+    case "$(uname -s)" in Linux) host=linux ;; *) host=unsupported ;; esac
+
+    set -- /sys/kernel/iommu_groups/*
+    if [ -e "$1" ]; then
+        iommu=available
+        iommu_count=$#
+    else
+        iommu=missing
+        iommu_count=0
+    fi
+
+    case "${SIMPLEOS_QEMU_PASSTHROUGH_GUEST_ISA:-$(uname -m)}" in
+        x86_64|amd64)
+            guest_isa=x86_64
+            qemu=${QEMU_SYSTEM_X86_64:-}
+            qemu_name=qemu-system-x86_64
+            ;;
+        aarch64|arm64)
+            guest_isa=aarch64
+            qemu=${QEMU_SYSTEM_AARCH64:-}
+            qemu_name=qemu-system-aarch64
+            ;;
+        riscv64)
+            guest_isa=riscv64
+            qemu=${QEMU_SYSTEM_RISCV64:-}
+            qemu_name=qemu-system-riscv64
+            ;;
+        *)
+            guest_isa=unsupported
+            qemu=
+            qemu_name=
+            ;;
+    esac
+    if [ -z "$qemu" ]; then
+        qemu=$(command -v "$qemu_name" 2>/dev/null || true)
+    fi
+    requested_qemu=$qemu
+    qemu=$(trusted_qemu_path "$requested_qemu" || true)
+    if [ -n "$qemu" ]; then
+        qemu_trust=trusted
+        qemu_version=$(/usr/bin/timeout "$QEMU_PROBE_TIMEOUT_SECONDS" "$qemu" --version 2>&1 | sed -n '1p')
+        vfio_status=$(qemu_device_status "$qemu" "$qemu_version" vfio-pci)
+        virtio_gl_status=$(qemu_device_status "$qemu" "$qemu_version" virtio-gpu-gl)
+    elif [ -n "$requested_qemu" ]; then
+        qemu_trust=untrusted
+        qemu_version=untrusted
+        vfio_status=untrusted-qemu
+        virtio_gl_status=untrusted-qemu
+    else
+        qemu_trust=missing
+        qemu_version=missing
+        vfio_status=missing
+        virtio_gl_status=missing
+    fi
+    selected_bdf=$(selected_device_bdf || true)
+    guest_driver=$(guest_driver_evidence_status)
+    selected_status=$(selected_device_status)
+    classify_passthrough "$host" "$iommu" "$vfio_status" "$guest_driver" "$selected_status"
+
+    echo "${PREFIX}_status=$CLASS_STATUS"
+    echo "${PREFIX}_reason=$CLASS_REASON"
+    echo "${PREFIX}_host=$host"
+    echo "${PREFIX}_guest_isa=$guest_isa"
+    echo "${PREFIX}_iommu_status=$iommu"
+    echo "${PREFIX}_iommu_group_count=$iommu_count"
+    echo "${PREFIX}_qemu_vfio_pci_status=$vfio_status"
+    echo "${PREFIX}_qemu_virtio_gpu_gl_status=$virtio_gl_status"
+    echo "${PREFIX}_qemu_trust_status=$qemu_trust"
+    echo "${PREFIX}_qemu_version=$qemu_version"
+    echo "${PREFIX}_simpleos_guest_vulkan_cuda_evidence_status=$guest_driver"
+    echo "${PREFIX}_selected_device_status=$selected_status"
+    emit_selected_group_inventory
+    if [ -f src/os/lib/gpu_bridge/host_gpu_ivshmem.spl ] \
+        && [ -f scripts/check/check-simpleos-qemu-host-gpu-2d.shs ]; then
+        echo "${PREFIX}_ivshmem_offload_status=checker-present-separate-path"
+    else
+        echo "${PREFIX}_ivshmem_offload_status=missing"
+    fi
+    echo "${PREFIX}_mutation_attempted=false"
+    emit_gpu_inventory
+}
+
+case "${1:---preflight}" in
+    --self-test) self_test ;;
+    --preflight) preflight ;;
+    *)
+        echo "usage: $0 [--self-test|--preflight]" >&2
+        exit 2
+        ;;
+esac

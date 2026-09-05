@@ -1,0 +1,94 @@
+"""Deterministic boot-bundle plan for the Simplebox payload identity.
+
+The primary-tool paths are aliases of one compiled `/bin/simplebox`
+artifact.  This owner never expands aliases into fabricated payload records and
+never treats a signature-shaped value as authenticated.  It freezes the exact
+one-record policy and delegates authentication plus catalog mutation to the
+loader-owned boot population transaction.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootPolicyV1, InstalledArtifactBootRecordV1,
+    installed_artifact_boot_policy_shape_valid_v1
+}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    SIMPLEBOX_CANONICAL_PATH_V1, SIMPLEBOX_CANONICAL_ALIAS_COUNT_V1,
+    simplebox_canonical_aliases_v1
+}
+
+pub const SIMPLEBOX_PRIMARY_TOOL_PAYLOAD_RECORDS_V1: i64 = 1
+pub const SIMPLEBOX_PRIMARY_TOOL_ALIAS_COUNT_V1: i64 =
+    SIMPLEBOX_CANONICAL_ALIAS_COUNT_V1
+
+pub enum SimpleboxPrimaryToolBundlePlanErrorV1:
+    None
+    RecordCountMismatch
+    CanonicalIdentityMismatch
+    SignedRecordShapeInvalid
+
+pub struct SimpleboxPrimaryToolBundlePlanV1:
+    ok: bool
+    error: SimpleboxPrimaryToolBundlePlanErrorV1
+    policy: InstalledArtifactBootPolicyV1
+    records: [InstalledArtifactBootRecordV1]
+
+fn _simplebox_empty_policy_v1(target: ManifestTarget) -> InstalledArtifactBootPolicyV1:
+    InstalledArtifactBootPolicyV1(
+        platform_target: target, required_canonical_paths: [], trust_roots: [])
+
+fn _simplebox_bundle_fail_v1(
+    target: ManifestTarget, error: SimpleboxPrimaryToolBundlePlanErrorV1
+) -> SimpleboxPrimaryToolBundlePlanV1:
+    SimpleboxPrimaryToolBundlePlanV1(
+        ok: false, error: error,
+        policy: _simplebox_empty_policy_v1(target), records: [])
+
+pub fn simplebox_primary_tool_catalog_bundle_plan_v1(
+    target: ManifestTarget,
+    trust_roots: [ExecutableManifestTrustedSignerV1],
+    signed_records: [InstalledArtifactBootRecordV1],
+) -> SimpleboxPrimaryToolBundlePlanV1:
+    """Plan exactly one signed candidate; this does not authenticate it."""
+    if signed_records.len() != SIMPLEBOX_PRIMARY_TOOL_PAYLOAD_RECORDS_V1:
+        return _simplebox_bundle_fail_v1(
+            target, SimpleboxPrimaryToolBundlePlanErrorV1.RecordCountMismatch)
+    val record = signed_records[0]
+    val aliases = simplebox_canonical_aliases_v1()
+    if (aliases.len() != SIMPLEBOX_PRIMARY_TOOL_ALIAS_COUNT_V1 or
+        record.canonical_path != SIMPLEBOX_CANONICAL_PATH_V1 or
+        record.aliases != aliases or
+        record.manifest.entrypoint != SIMPLEBOX_CANONICAL_PATH_V1):
+        return _simplebox_bundle_fail_v1(
+            target, SimpleboxPrimaryToolBundlePlanErrorV1.CanonicalIdentityMismatch)
+    val policy = InstalledArtifactBootPolicyV1(
+        platform_target: target,
+        required_canonical_paths: [SIMPLEBOX_CANONICAL_PATH_V1],
+        trust_roots: trust_roots)
+    if not installed_artifact_boot_policy_shape_valid_v1(policy, signed_records):
+        return _simplebox_bundle_fail_v1(
+            target, SimpleboxPrimaryToolBundlePlanErrorV1.SignedRecordShapeInvalid)
+    SimpleboxPrimaryToolBundlePlanV1(
+        ok: true, error: SimpleboxPrimaryToolBundlePlanErrorV1.None,
+        policy: policy, records: [record])
+
+pub fn simplebox_primary_tool_catalog_bundle_plan_valid_v1(
+    plan: SimpleboxPrimaryToolBundlePlanV1
+) -> bool:
+    """Revalidate every exact invariant at the consume boundary."""
+    if (not plan.ok or
+        plan.error != SimpleboxPrimaryToolBundlePlanErrorV1.None or
+        plan.policy.required_canonical_paths != [SIMPLEBOX_CANONICAL_PATH_V1] or
+        plan.records.len() != SIMPLEBOX_PRIMARY_TOOL_PAYLOAD_RECORDS_V1):
+        return false
+    val record = plan.records[0]
+    val aliases = simplebox_canonical_aliases_v1()
+    if (aliases.len() != SIMPLEBOX_PRIMARY_TOOL_ALIAS_COUNT_V1 or
+        record.canonical_path != SIMPLEBOX_CANONICAL_PATH_V1 or
+        record.aliases != aliases or
+        record.manifest.entrypoint != SIMPLEBOX_CANONICAL_PATH_V1):
+        return false
+    installed_artifact_boot_policy_shape_valid_v1(plan.policy, plan.records)

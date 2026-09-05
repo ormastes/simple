@@ -1,0 +1,284 @@
+# codex-impl
+
+use std.tiny.common.types.{TinyHandle, TinyPoint, TinyRect, tiny_contains, tiny_intersect}
+use std.tiny.common.event.{TinyEvent, TINY_EVENT_POINTER_MOVE, TINY_EVENT_POINTER_DOWN, TINY_EVENT_POINTER_UP, TINY_EVENT_WHEEL, TINY_EVENT_KEY, TINY_EVENT_TEXT}
+use std.tiny.common.generational_pool.{TinyGenerationalPool}
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_INVALID}
+use std.tiny.pane.model.{TinyResolvedPane}
+use std.tiny.wm_contract.ports.{TinyWmPortV1}
+
+const TINY_WM_SURFACE_VISIBLE: i32 = 1
+const TINY_WM_SURFACE_OPAQUE: i32 = 2
+const TINY_WM_SURFACE_INPUT: i32 = 4
+const TINY_WM_SURFACE_POPUP: i32 = 8
+const TINY_WM_MAX_DAMAGE: i32 = 8
+
+class TinyWmSurface:
+    id: TinyHandle
+    parent: TinyHandle
+    local: TinyRect
+    resolved: TinyRect
+    clip: TinyRect
+    content_id: i32
+    z: i32
+    flags: i32
+
+fn tiny_empty_wm_surface() -> TinyWmSurface:
+    TinyWmSurface(
+        id: TinyHandle.invalid(), parent: TinyHandle.invalid(),
+        local: TinyRect.empty(), resolved: TinyRect.empty(), clip: TinyRect.empty(),
+        content_id: -1, z: 0, flags: 0,
+    )
+
+class TinyWmFrameReceipt:
+    status: TinyStatus
+    damage: [TinyRect]
+    damage_count: i32
+    direct_present: bool
+    visible_surfaces: i32
+    focused_content_id: i32
+    captured_content_id: i32
+    routed_content_id: i32
+
+class TinyWmKiosk:
+    output: TinyRect
+    max_surfaces: i32
+    surfaces: [TinyWmSurface]
+    surface_count: i32
+    damage: [TinyRect]
+    damage_count: i32
+    surface_slots: TinyGenerationalPool
+    focused_content_id: i32
+    pointer_content_id: i32
+    captured_content_id: i32
+    routed_content_id: i32
+
+    static fn create(width: i32, height: i32, max_surfaces: i32) -> TinyWmKiosk:
+        var surfaces: [TinyWmSurface] = []
+        var surface_index = 0
+        while surface_index < max_surfaces:
+            surfaces.push(tiny_empty_wm_surface())
+            surface_index = surface_index + 1
+        var damage: [TinyRect] = []
+        var damage_index = 0
+        while damage_index < TINY_WM_MAX_DAMAGE:
+            damage.push(TinyRect.empty())
+            damage_index = damage_index + 1
+        TinyWmKiosk(
+            output: TinyRect(x: 0, y: 0, width: width, height: height),
+            max_surfaces: max_surfaces,
+            surfaces: surfaces,
+            surface_count: 0,
+            damage: damage,
+            damage_count: 0,
+            surface_slots: TinyGenerationalPool.with_capacity(max_surfaces),
+            focused_content_id: -1,
+            pointer_content_id: -1,
+            captured_content_id: -1,
+            routed_content_id: -1,
+        )
+
+    me set_root_impl(content_id: i32) -> TinyStatus:
+        if self.output.is_empty() or content_id < 0:
+            return TinyStatus.error(TINY_ERR_INVALID, content_id)
+        if self.max_surfaces <= 0:
+            return TinyStatus.error(TINY_ERR_CAPACITY, self.max_surfaces)
+        var root_id = TinyHandle.invalid()
+        if self.surface_count == 0:
+            val acquired = self.surface_slots.acquire()
+            if not acquired.status.is_ok(): return acquired.status
+            root_id = acquired.handle
+        else:
+            root_id = self.surfaces[0].id
+            var surface_index = 1
+            while surface_index < self.surface_count:
+                val released = self.surface_slots.release(self.surfaces[surface_index].id)
+                if not released.is_ok(): return released
+                self.surfaces[surface_index] = tiny_empty_wm_surface()
+                surface_index = surface_index + 1
+        val root = TinyWmSurface(
+            id: root_id,
+            parent: TinyHandle.invalid(),
+            local: self.output,
+            resolved: self.output,
+            clip: self.output,
+            content_id: content_id,
+            z: 0,
+            flags: TINY_WM_SURFACE_VISIBLE + TINY_WM_SURFACE_OPAQUE + TINY_WM_SURFACE_INPUT,
+        )
+        self.surfaces[0] = root
+        self.surface_count = 1
+        self.focused_content_id = content_id
+        self.pointer_content_id = -1
+        self.captured_content_id = -1
+        self.routed_content_id = -1
+        self.add_damage(self.output)
+        TinyStatus.ok()
+
+    me open_popup_impl(content_id: i32, bounds: TinyRect) -> TinyStatus:
+        if self.surface_count == 0 or content_id < 0 or bounds.is_empty():
+            return TinyStatus.error(TINY_ERR_INVALID, content_id)
+        if self.surface_count >= self.max_surfaces:
+            return TinyStatus.error(TINY_ERR_CAPACITY, self.surface_count)
+        var existing_index = 0
+        while existing_index < self.surface_count:
+            val surface = self.surfaces[existing_index]
+            if surface.content_id == content_id:
+                return TinyStatus.error(TINY_ERR_INVALID, content_id)
+            existing_index = existing_index + 1
+        val parent = TinyResolvedPane.root(
+            self.surfaces[0].id, self.surfaces[0].resolved, self.surfaces[0].clip,
+            self.surfaces[0].z, self.surfaces[0].flags, self.surfaces[0].content_id
+        )
+        val resolved_pane = parent.resolve_child(
+            TinyHandle.invalid(),
+            bounds, TinyRect.empty(), 0, 0, self.surface_count,
+            TINY_WM_SURFACE_VISIBLE + TINY_WM_SURFACE_INPUT + TINY_WM_SURFACE_POPUP,
+            content_id
+        )
+        val clipped = resolved_pane.effective_clip
+        if clipped.is_empty():
+            return TinyStatus.error(TINY_ERR_INVALID, content_id)
+        val acquired = self.surface_slots.acquire()
+        if not acquired.status.is_ok(): return acquired.status
+        val popup = TinyWmSurface(
+            id: acquired.handle,
+            parent: self.surfaces[0].id,
+            local: bounds,
+            resolved: resolved_pane.absolute,
+            clip: clipped,
+            content_id: content_id,
+            z: self.surface_count,
+            flags: TINY_WM_SURFACE_VISIBLE + TINY_WM_SURFACE_INPUT + TINY_WM_SURFACE_POPUP,
+        )
+        self.surfaces[self.surface_count] = popup
+        self.surface_count = self.surface_count + 1
+        self.focused_content_id = content_id
+        self.add_damage(clipped)
+        TinyStatus.ok()
+
+    me close_popup_impl(content_id: i32) -> TinyStatus:
+        var removed = TinyRect.empty()
+        var removed_id = TinyHandle.invalid()
+        var removed_index = -1
+        var surface_index = 0
+        while surface_index < self.surface_count:
+            val surface = self.surfaces[surface_index]
+            if surface.content_id == content_id and (surface.flags & TINY_WM_SURFACE_POPUP) != 0:
+                removed = surface.clip
+                removed_id = surface.id
+                removed_index = surface_index
+            surface_index = surface_index + 1
+        if removed.is_empty():
+            return TinyStatus.error(TINY_ERR_INVALID, content_id)
+        val released = self.surface_slots.release(removed_id)
+        if not released.is_ok(): return released
+        surface_index = removed_index
+        while surface_index + 1 < self.surface_count:
+            self.surfaces[surface_index] = self.surfaces[surface_index + 1]
+            surface_index = surface_index + 1
+        self.surface_count = self.surface_count - 1
+        self.surfaces[self.surface_count] = tiny_empty_wm_surface()
+        if self.focused_content_id == content_id:
+            self.focused_content_id = self.topmost_focus_content_id()
+        if self.pointer_content_id == content_id:
+            self.pointer_content_id = -1
+        if self.captured_content_id == content_id:
+            self.captured_content_id = -1
+        if self.routed_content_id == content_id:
+            self.routed_content_id = -1
+        self.add_damage(removed)
+        TinyStatus.ok()
+
+    fn topmost_focus_content_id() -> i32:
+        var i = self.surface_count - 1
+        while i >= 0:
+            val surface = self.surfaces[i]
+            if (surface.flags & TINY_WM_SURFACE_VISIBLE) != 0 and (surface.flags & TINY_WM_SURFACE_INPUT) != 0:
+                return surface.content_id
+            i = i - 1
+        -1
+
+    me dispatch_impl(event: TinyEvent) -> TinyStatus:
+        if event.kind == TINY_EVENT_POINTER_MOVE or event.kind == TINY_EVENT_POINTER_DOWN or event.kind == TINY_EVENT_POINTER_UP or event.kind == TINY_EVENT_WHEEL:
+            var target = -1
+            if self.captured_content_id >= 0 and (event.kind == TINY_EVENT_POINTER_MOVE or event.kind == TINY_EVENT_POINTER_UP):
+                target = self.captured_content_id
+            else:
+                var i = self.surface_count - 1
+                while i >= 0:
+                    val surface = self.surfaces[i]
+                    if (surface.flags & TINY_WM_SURFACE_VISIBLE) != 0 and (surface.flags & TINY_WM_SURFACE_INPUT) != 0 and tiny_contains(surface.clip, event.point):
+                        target = surface.content_id
+                        i = -1
+                    else:
+                        i = i - 1
+            self.pointer_content_id = target
+            self.routed_content_id = target
+            if event.kind == TINY_EVENT_POINTER_DOWN:
+                self.captured_content_id = target
+                if target >= 0: self.focused_content_id = target
+            if event.kind == TINY_EVENT_POINTER_UP:
+                self.captured_content_id = -1
+            return TinyStatus.ok()
+        if event.kind == TINY_EVENT_KEY or event.kind == TINY_EVENT_TEXT:
+            if self.focused_content_id < 0:
+                return TinyStatus.error(TINY_ERR_INVALID, event.kind)
+            self.routed_content_id = self.focused_content_id
+            return TinyStatus.ok()
+        TinyStatus.ok()
+
+    me add_damage(rect: TinyRect):
+        val clipped = tiny_intersect(self.output, rect)
+        if clipped.is_empty(): return
+        var merged = clipped
+        var kept_count = 0
+        var damage_index = 0
+        while damage_index < self.damage_count:
+            val existing = self.damage[damage_index]
+            val overlap = tiny_intersect(existing, merged)
+            if not overlap.is_empty():
+                val left = if existing.x < merged.x: existing.x else: merged.x
+                val top = if existing.y < merged.y: existing.y else: merged.y
+                val right = if existing.right() > merged.right(): existing.right() else: merged.right()
+                val bottom = if existing.bottom() > merged.bottom(): existing.bottom() else: merged.bottom()
+                merged = TinyRect(x: left, y: top, width: right - left, height: bottom - top)
+            else:
+                self.damage[kept_count] = existing
+                kept_count = kept_count + 1
+            damage_index = damage_index + 1
+        if kept_count >= TINY_WM_MAX_DAMAGE:
+            self.damage[0] = self.output
+            self.damage_count = 1
+            return
+        self.damage[kept_count] = merged
+        self.damage_count = kept_count + 1
+
+    me frame_receipt() -> TinyWmFrameReceipt:
+        var visible = 0
+        var surface_index = 0
+        while surface_index < self.surface_count:
+            val surface = self.surfaces[surface_index]
+            if (surface.flags & TINY_WM_SURFACE_VISIBLE) != 0:
+                visible = visible + 1
+            surface_index = surface_index + 1
+        var direct = false
+        if visible == 1 and self.surface_count == 1:
+            val root = self.surfaces[0]
+            direct = (root.flags & TINY_WM_SURFACE_OPAQUE) != 0 and root.resolved.x == self.output.x and root.resolved.y == self.output.y and root.resolved.width == self.output.width and root.resolved.height == self.output.height
+        val receipt = TinyWmFrameReceipt(
+            status: TinyStatus.ok(), damage: self.damage, damage_count: self.damage_count,
+            direct_present: direct,
+            visible_surfaces: visible, focused_content_id: self.focused_content_id,
+            captured_content_id: self.captured_content_id,
+            routed_content_id: self.routed_content_id,
+        )
+        self.damage_count = 0
+        receipt
+
+impl TinyWmPortV1 for TinyWmKiosk:
+    me set_root(content_id: i32) -> TinyStatus: self.set_root_impl(content_id)
+    me open_popup(content_id: i32, bounds: TinyRect) -> TinyStatus: self.open_popup_impl(content_id, bounds)
+    me close_popup(content_id: i32) -> TinyStatus: self.close_popup_impl(content_id)
+    me dispatch(event: TinyEvent) -> TinyStatus: self.dispatch_impl(event)
+    me frame() -> TinyStatus: self.frame_receipt().status

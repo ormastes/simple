@@ -1,0 +1,280 @@
+# @cover src/compiler/00.common/dynamic_identity/closure.spl 80%
+# @cover src/compiler/00.common/dynamic_identity/persistent_id.spl 80%
+# @cover src/compiler/00.common/dynamic_identity/identity_error.spl 80%
+# @cover src/compiler/00.common/dynamic_identity/dense_tag_map.spl 80%
+#
+# Pins the §19.6 properties of the hardening plan for work package A4:
+#   persistent_id -> dense_tag -> persistent_id is bijective within seal
+#   static/complete/dyn domains never overlap
+#   deserialize(serialize(x)) = x
+# plus load-order independence (§7.1), every named §7.5 seal rejection, and the
+# §5.3 critical restriction table.
+#
+# The load-bearing cases are the NEGATIVE ones. A map that assigns tags and
+# reads them back passes trivially; what this module exists to prevent is a
+# load-order-dependent tag, a dense tag on the wire, and a seal that admits a
+# colliding or over-capacity universe.
+
+use compiler.common.dynamic_identity.closure.{
+    Closure, Linkage, Activation, critical_admits, critical_precondition
+}
+use compiler.common.dynamic_identity.persistent_id.{PersistentExtensionId}
+use compiler.common.dynamic_identity.identity_error.{IdentityError}
+use compiler.common.dynamic_identity.dense_tag_map.{
+    TagCapacity, ClaimedVariant, DenseTagMap, claim_of, freeze_universe, dyn_marker,
+    dyn_tag, serialized_field_keys, serialize_variant, deserialize_to_dense
+}
+
+fn vid(provider: text, name: text, ordinal: i64) -> PersistentExtensionId:
+    PersistentExtensionId(owner_enum: "hir.HirExpr", provider_module: provider,
+        constructor_name: name, local_ordinal: ordinal, schema_abi_version: 1)
+
+fn static_claims() -> [ClaimedVariant]:
+    [claim_of(vid("compiler.hir", "Literal", 0)),
+     claim_of(vid("compiler.hir", "Binary", 1)),
+     claim_of(vid("compiler.hir", "Call", 2))]
+
+fn complete_claims() -> [ClaimedVariant]:
+    [claim_of(vid("ext.gpu", "GpuLaunch", 0)),
+     claim_of(vid("ext.simd", "SimdSplat", 0))]
+
+fn cap() -> TagCapacity:
+    TagCapacity(static_capacity: 8, dense_capacity: 32)
+
+fn sealed() -> DenseTagMap:
+    match freeze_universe(static_claims(), complete_claims(), cap()):
+        case Ok(m): m
+        case Err(e): DenseTagMap(entries: [], static_count: -1, sealed_count: -1,
+            seal_hash: "FREEZE-FAILED:" + e.describe())
+
+fn freeze_error_code(statics: [ClaimedVariant], completes: [ClaimedVariant],
+        capacity: TagCapacity) -> text:
+    match freeze_universe(statics, completes, capacity):
+        case Ok(m): "UNEXPECTED-OK:" + m.sealed_count.to_text()
+        case Err(e): e.code()
+
+fn dense_of(map: DenseTagMap, id: PersistentExtensionId) -> i64:
+    match map.to_dense(id):
+        case Ok(t): t
+        case Err(e): -1
+
+fn record_of(map: DenseTagMap, tag: i64) -> text:
+    match serialize_variant(map, tag, 3, "payload-abcdef"):
+        case Ok(r): r
+        case Err(e): "SERIALIZE-FAILED:" + e
+
+fn dense_of_record(map: DenseTagMap, record: text) -> i64:
+    match deserialize_to_dense(map, record):
+        case Ok(t): t
+        case Err(e): -1
+
+fn admits_verdict(closure: Closure, activation: Activation) -> text:
+    match critical_admits(closure, activation):
+        case Ok(u): "allowed"
+        case Err(e): "rejected"
+
+describe "critical_admits — the §5.3 restriction table":
+    it "admits static at every activation except hotspot":
+        expect(admits_verdict(Closure.Static, Activation.Startup)).to_equal("allowed")
+        expect(admits_verdict(Closure.Static, Activation.FirstUse)).to_equal("allowed")
+        expect(admits_verdict(Closure.Static, Activation.Command)).to_equal("allowed")
+        expect(admits_verdict(Closure.Static, Activation.Manual)).to_equal("allowed")
+        expect(admits_verdict(Closure.Static, Activation.Hotspot)).to_equal("rejected")
+
+    it "admits complete at every activation except hotspot":
+        expect(admits_verdict(Closure.Complete, Activation.Startup)).to_equal("allowed")
+        expect(admits_verdict(Closure.Complete, Activation.FirstUse)).to_equal("allowed")
+        expect(admits_verdict(Closure.Complete, Activation.Command)).to_equal("allowed")
+        expect(admits_verdict(Closure.Complete, Activation.Manual)).to_equal("allowed")
+        expect(admits_verdict(Closure.Complete, Activation.Hotspot)).to_equal("rejected")
+
+    it "rejects dyn at every activation":
+        expect(admits_verdict(Closure.Dyn, Activation.Startup)).to_equal("rejected")
+        expect(admits_verdict(Closure.Dyn, Activation.FirstUse)).to_equal("rejected")
+        expect(admits_verdict(Closure.Dyn, Activation.Command)).to_equal("rejected")
+        expect(admits_verdict(Closure.Dyn, Activation.Manual)).to_equal("rejected")
+        expect(admits_verdict(Closure.Dyn, Activation.Hotspot)).to_equal("rejected")
+
+    it "names the residual condition on conditionally-allowed rows":
+        expect(critical_precondition(Closure.Static, Activation.Startup)).to_equal("")
+        expect(critical_precondition(Closure.Complete, Activation.Startup))
+            .to_contain("after the universe seal")
+        expect(critical_precondition(Closure.Static, Activation.FirstUse))
+            .to_contain("verified and sealed")
+        expect(critical_precondition(Closure.Static, Activation.Command))
+            .to_contain("before entering critical execution")
+        expect(critical_precondition(Closure.Static, Activation.Manual))
+            .to_contain("before entering critical execution")
+
+    it "keeps linkage independent of the semantic state":
+        expect(Linkage.StaticLink.name()).to_equal("static_link")
+        expect(Linkage.Dynload.name()).to_equal("dynload")
+        expect(Closure.Complete.name()).to_equal("complete")
+
+describe "PersistentExtensionId":
+    it "hashes the whole tuple, so any field change moves the hash":
+        val base = vid("ext.gpu", "GpuLaunch", 0)
+        val other_ordinal = vid("ext.gpu", "GpuLaunch", 1)
+        val other_provider = vid("ext.simd", "GpuLaunch", 0)
+        assert_not_equal(base.identity_hash(), other_ordinal.identity_hash())
+        assert_not_equal(base.identity_hash(), other_provider.identity_hash())
+
+    it "treats the tuple, not the hash, as the equality authority":
+        assert_true(vid("ext.gpu", "GpuLaunch", 0).equals(vid("ext.gpu", "GpuLaunch", 0)))
+        assert_false(vid("ext.gpu", "GpuLaunch", 0).equals(vid("ext.gpu", "GpuLaunch", 1)))
+
+    it "cannot be spoofed by moving a separator between fields":
+        val a = PersistentExtensionId(owner_enum: "A|B", provider_module: "C",
+            constructor_name: "N", local_ordinal: 0, schema_abi_version: 1)
+        val b = PersistentExtensionId(owner_enum: "A", provider_module: "B|C",
+            constructor_name: "N", local_ordinal: 0, schema_abi_version: 1)
+        assert_not_equal(a.canonical_text(), b.canonical_text())
+
+describe "DenseTagMap freeze":
+    it "assigns the static band first and the complete band after it":
+        val m = sealed()
+        expect(m.static_count).to_equal(3)
+        expect(m.sealed_count).to_equal(5)
+        assert_true(m.is_static_tag(0))
+        assert_true(m.is_static_tag(2))
+        assert_true(m.is_complete_tag(3))
+        assert_true(m.is_complete_tag(4))
+
+    it "orders each band by persistent tuple, not by insertion order":
+        val m = sealed()
+        # Insertion order was Literal, Binary, Call; tuple order is
+        # Binary < Call < Literal on constructor_name.
+        expect(m.entries[0].constructor_name).to_equal("Binary")
+        expect(m.entries[1].constructor_name).to_equal("Call")
+        expect(m.entries[2].constructor_name).to_equal("Literal")
+
+    it "produces an identical map and seal hash for a different load order":
+        val forward = sealed()
+        val reversed_statics = [claim_of(vid("compiler.hir", "Call", 2)),
+            claim_of(vid("compiler.hir", "Literal", 0)),
+            claim_of(vid("compiler.hir", "Binary", 1))]
+        val reversed_completes = [claim_of(vid("ext.simd", "SimdSplat", 0)),
+            claim_of(vid("ext.gpu", "GpuLaunch", 0))]
+        val backward = match freeze_universe(reversed_statics, reversed_completes, cap()):
+            case Ok(m): m
+            case Err(e): DenseTagMap(entries: [], static_count: -1, sealed_count: -1,
+                seal_hash: "FREEZE-FAILED")
+        expect(backward.seal_hash).to_equal(forward.seal_hash)
+        expect(backward.static_count).to_equal(forward.static_count)
+        expect(backward.sealed_count).to_equal(forward.sealed_count)
+        var i = 0
+        while i < forward.sealed_count:
+            assert_true(backward.entries[i].equals(forward.entries[i]))
+            i = i + 1
+
+describe "bijection within a seal (§19.6)":
+    it "roundtrips every dense tag through its persistent identity":
+        val m = sealed()
+        var tag = 0
+        while tag < m.sealed_count:
+            val id = match m.to_persistent(tag):
+                case Ok(v): v
+                case Err(e): vid("BROKEN", "BROKEN", -1)
+            expect(dense_of(m, id)).to_equal(tag)
+            tag = tag + 1
+
+    it "maps distinct identities to distinct tags":
+        val m = sealed()
+        expect(dense_of(m, vid("ext.gpu", "GpuLaunch", 0)))
+            .to_equal(dense_of(m, vid("ext.gpu", "GpuLaunch", 0)))
+        assert_not_equal(dense_of(m, vid("ext.gpu", "GpuLaunch", 0)),
+            dense_of(m, vid("ext.simd", "SimdSplat", 0)))
+
+    it "rejects an identity that is not in the seal instead of inventing a tag":
+        expect(dense_of(sealed(), vid("ext.rogue", "Unsealed", 7))).to_equal(-1)
+
+describe "domains never overlap (§19.6)":
+    it "keeps every sealed tag strictly below the dyn marker":
+        val m = sealed()
+        assert_true(m.sealed_count < dyn_marker())
+        var tag = 0
+        while tag < m.sealed_count:
+            assert_false(m.is_dyn_tag(tag))
+            tag = tag + 1
+
+    it "keeps static and complete bands disjoint":
+        val m = sealed()
+        var tag = 0
+        while tag < m.sealed_count:
+            assert_false(m.is_static_tag(tag) and m.is_complete_tag(tag))
+            tag = tag + 1
+
+    it "never resolves a dyn tag to a sealed identity":
+        val m = sealed()
+        assert_true(m.is_dyn_tag(dyn_tag(0)))
+        assert_true(m.is_dyn_tag(dyn_tag(9999)))
+        match m.to_persistent(dyn_tag(0)):
+            case Ok(v): assert_true(false)
+            case Err(e): assert_contains(e, "open dyn tag")
+
+describe "serialization writes persistent identity only (§7.4)":
+    it "never writes the dense tag":
+        val m = sealed()
+        val record = record_of(m, 4)
+        assert_false(record.contains("dense_tag"))
+        assert_true(record.contains("owner_enum: hir.HirExpr"))
+        assert_true(record.contains("constructor_name: SimdSplat"))
+        assert_true(record.contains("identity_hash: SVIDV1-"))
+        assert_true(record.contains("seal_hash: SEALV1-"))
+
+    it "roundtrips the record back to the same dense tag":
+        val m = sealed()
+        var tag = 0
+        while tag < m.sealed_count:
+            expect(dense_of_record(m, record_of(m, tag))).to_equal(tag)
+            tag = tag + 1
+
+    it "has no dense-tag field in its allowed key set at all":
+        val keys = serialized_field_keys()
+        var i = 0
+        while i < keys.len():
+            assert_false(keys[i].contains("dense"))
+            assert_false(keys[i].contains("tag"))
+            i = i + 1
+        assert_contains(keys, "identity_hash")
+        assert_contains(keys, "seal_hash")
+
+    it "refuses to serialize a dyn tag":
+        match serialize_variant(sealed(), dyn_tag(3), 1, "p"):
+            case Ok(r): assert_true(false)
+            case Err(e): assert_contains(e, "open dyn tag")
+
+describe "seal-time checks (§7.5)":
+    it "rejects a static count outside tag capacity":
+        expect(freeze_error_code(static_claims(), [],
+            TagCapacity(static_capacity: 2, dense_capacity: 32)))
+            .to_equal("ID-OVF-STATIC")
+
+    it "rejects a sealed count outside dense-tag capacity":
+        expect(freeze_error_code(static_claims(), complete_claims(),
+            TagCapacity(static_capacity: 8, dense_capacity: 4)))
+            .to_equal("ID-OVF-COMPLETE")
+
+    it "rejects provider-local ordinal reuse":
+        val dup_ordinal = [claim_of(vid("ext.gpu", "GpuLaunch", 0)),
+            claim_of(vid("ext.gpu", "GpuBarrier", 0))]
+        expect(freeze_error_code(static_claims(), dup_ordinal, cap()))
+            .to_equal("ID-REUSE-ORDINAL")
+
+    it "rejects a persistent identity collision":
+        val dup = [claim_of(vid("ext.gpu", "GpuLaunch", 0)),
+            claim_of(vid("ext.gpu", "GpuLaunch", 0))]
+        expect(freeze_error_code(static_claims(), dup, cap()))
+            .to_equal("ID-COLLISION")
+
+    it "rejects a claimed hash that does not match its tuple":
+        val forged = [ClaimedVariant(id: vid("ext.gpu", "GpuLaunch", 0),
+            claimed_hash: "SVIDV1-deadbeef")]
+        expect(freeze_error_code(static_claims(), forged, cap()))
+            .to_equal("ID-HASH-MISMATCH")
+
+    it "reports each rejection with its own named variant, not a text blob":
+        expect(IdentityError.StaticCountOverflow(9, 8).describe())
+            .to_contain("static constructor count 9")
+        expect(IdentityError.ProviderLocalOrdinalReuse("E", "ext.gpu", 3).describe())
+            .to_contain("reuses local ordinal 3")

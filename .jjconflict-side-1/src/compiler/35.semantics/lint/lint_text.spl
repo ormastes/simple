@@ -1,0 +1,64 @@
+"""Shared text-walking helpers for lint passes.
+
+Centralises the docstring-tracking loop that 8 lint files (mcp_perf_lint,
+remote_exec_lint, security_*) had copy-pasted. Behaviour matches the original
+per-file loop exactly: in_docstring is updated BEFORE the in_docstring check,
+so a line that ENDS a docstring is yielded as code, and a line that STARTS
+one is skipped."""
+
+
+class CodeLine:
+    line_num: i64
+    raw: text
+    trimmed: text
+
+pub class CodeLineSnapshot:
+    """Request-local read-only code-line projection with explicit release."""
+    lines: [CodeLine]
+
+    me release():
+        self.lines = []
+
+
+fn count_triple_quotes(line: text) -> i64:
+    """Count `\"\"\"` sequences in a line. Odd count toggles in_docstring."""
+    # Fast reject: the walk below can only count occurrences of `\"\"\"`, so a line
+    # with no such substring is always 0. `index_of` is a native scan; the walk
+    # is one interpreted `slice` per character. Semantics identical.
+    if line.index_of("\"\"\"") < 0: return 0
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        val chunk = line.slice(i, i + 3)
+        if chunk == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+
+pub fn code_line_snapshot_from_lines(lines: [text]) -> CodeLineSnapshot:
+    """Project canonical raw lines with the legacy docstring state machine."""
+    var result: [CodeLine] = []
+    var in_docstring = false
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        if count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+        if not in_docstring:
+            result.push(CodeLine(line_num: li + 1, raw: line, trimmed: line.trim()))
+        li = li + 1
+    CodeLineSnapshot(lines: result)
+
+pub fn code_line_snapshot(source: text) -> CodeLineSnapshot:
+    code_line_snapshot_from_lines(source.split("\n"))
+
+fn iter_code_lines(source: text) -> [CodeLine]:
+    """Return every non-docstring line as `CodeLine(line_num, raw, trimmed)`.
+
+    Tracks triple-quoted blocks via `count_triple_quotes`. A line that toggles
+    in_docstring from false→true is skipped (it opens the docstring); a line
+    that toggles from true→false is yielded as code (matches original loop)."""
+    code_line_snapshot(source).lines

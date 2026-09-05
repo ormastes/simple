@@ -1,0 +1,116 @@
+# SimpleOS projection of the immutable shared font distribution.
+#
+# Runtime faces keep their existing readable VFAT long paths and 8.3 aliases.
+# Provenance and legal files use collision-free 8.3 sibling names so the
+# direct C image builder can carry the same projection without another tree.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.font_registry.{selected_font_asset_candidates,
+    selected_font_bundle_asset_pins, simpleos_font_asset_guest_path,
+    simpleos_font_asset_short_name, selected_font_bundle_asset_physical_path,
+    load_selected_font_file}
+use std.io_runtime.{file_exists}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+class SimpleOsFontBundleEntry:
+    source_path: text
+    guest_long_path: text
+    guest_short_name: text
+
+class SimpleOsFontBundleLoad:
+    data: [u8]
+    valid: bool
+    reason: text
+
+fn _simpleos_font_guest_path(name: text) -> text:
+    "/SYS/FONTS/" + name
+
+fn _simpleos_font_bundle_pin_sha256(path: text) -> text:
+    for pin in selected_font_bundle_asset_pins():
+        if pin.path == path: return pin.sha256
+    ""
+
+fn simpleos_font_bundle_entries() -> [SimpleOsFontBundleEntry]:
+    """Return the closed 53-file runtime/legal image projection.
+
+    CLDR XML and derived ranking inputs stay build-time-only. The guest keeps
+    their license, while all Google Fonts payload, provenance, licenses, and
+    the shared corpus remain adjacent under /SYS/FONTS.
+    """
+    val google_root = "assets/fonts/google-fonts/"
+    var entries: [SimpleOsFontBundleEntry] = []
+    for font in selected_font_asset_candidates():
+        val base = simpleos_font_asset_short_name(font)
+        entries.push(SimpleOsFontBundleEntry(
+            source_path: font.local_path,
+            guest_long_path: simpleos_font_asset_guest_path(font),
+            guest_short_name: base,
+        ))
+        val metadata_name = base + ".PB"
+        entries.push(SimpleOsFontBundleEntry(
+            source_path: google_root + font.metadata_path,
+            guest_long_path: _simpleos_font_guest_path(metadata_name),
+            guest_short_name: metadata_name,
+        ))
+        val license_extension = if font.license == "OFL-1.1": "OFL" else: "LIC"
+        val license_name = base + "." + license_extension
+        entries.push(SimpleOsFontBundleEntry(
+            source_path: google_root + font.license_path,
+            guest_long_path: _simpleos_font_guest_path(license_name),
+            guest_short_name: license_name,
+        ))
+        if font.notice_path != "":
+            val notice_name = base + ".CPY"
+            entries.push(SimpleOsFontBundleEntry(
+                source_path: google_root + font.notice_path,
+                guest_long_path: _simpleos_font_guest_path(notice_name),
+                guest_short_name: notice_name,
+            ))
+
+    for entry in [
+        SimpleOsFontBundleEntry(
+            source_path: google_root + "CORPUS.sdn",
+            guest_long_path: "/SYS/FONTS/CORPUS.SDN",
+            guest_short_name: "CORPUS.SDN",
+        ),
+        SimpleOsFontBundleEntry(
+            source_path: "assets/fonts/cldr/release-48-2/LICENSE",
+            guest_long_path: "/SYS/FONTS/CLDR.LIC",
+            guest_short_name: "CLDR.LIC",
+        ),
+        SimpleOsFontBundleEntry(
+            source_path: "LICENSE",
+            guest_long_path: "/SYS/FONTS/SIMPLE.LIC",
+            guest_short_name: "SIMPLE.LIC",
+        ),
+        SimpleOsFontBundleEntry(
+            source_path: "THIRD_PARTY_NOTICES.md",
+            guest_long_path: "/SYS/FONTS/NOTICES.MD",
+            guest_short_name: "NOTICES.MD",
+        ),
+    ]:
+        entries.push(entry)
+    entries
+
+fn load_simpleos_font_bundle_entry(entry: SimpleOsFontBundleEntry) -> SimpleOsFontBundleLoad:
+    """Read one projection entry and fail closed on pinned-byte drift."""
+    for font in selected_font_asset_candidates():
+        if font.local_path == entry.source_path:
+            val loaded = load_selected_font_file(font.local_path)
+            return SimpleOsFontBundleLoad(
+                data: loaded.0, valid: loaded.1.valid, reason: loaded.1.reason,
+            )
+
+    val physical_path = selected_font_bundle_asset_physical_path(entry.source_path)
+    if not file_exists(physical_path):
+        return SimpleOsFontBundleLoad(data: [], valid: false, reason: "missing")
+    val data = rt_file_read_bytes(physical_path)
+    if data.len() == 0:
+        return SimpleOsFontBundleLoad(data: [], valid: false, reason: "empty")
+    val expected_sha256 = _simpleos_font_bundle_pin_sha256(entry.source_path)
+    if expected_sha256 != "" and sha256_u8_hex(data) != expected_sha256:
+        return SimpleOsFontBundleLoad(data: data, valid: false, reason: "sha256")
+    if expected_sha256 == "" and entry.source_path != "LICENSE" and entry.source_path != "THIRD_PARTY_NOTICES.md":
+        return SimpleOsFontBundleLoad(data: data, valid: false, reason: "unpinned")
+    SimpleOsFontBundleLoad(data: data, valid: true, reason: "valid")

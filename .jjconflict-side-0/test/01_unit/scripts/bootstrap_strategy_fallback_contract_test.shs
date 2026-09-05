@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-strategy.XXXXXX")
+trap 'rm -rf "${scratch}"' EXIT HUP INT TERM
+
+. "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
+
+bootstrap_strategy_validate adhoc
+bootstrap_strategy_validate normal
+bootstrap_strategy_validate full
+if bootstrap_strategy_validate unknown; then
+  echo 'FAIL: unknown strategy admitted' >&2
+  exit 1
+fi
+[ "$(bootstrap_strategy_failure_policy adhoc)" = fail-fast ]
+[ "$(bootstrap_strategy_failure_policy normal)" = phase-isolated ]
+[ "$(bootstrap_strategy_failure_policy full)" = inventory-to-end ]
+
+set +e
+SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=0 \
+  sh "${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --strategy=adhoc --output="${scratch}/out" \
+    >"${scratch}/stdout" 2>"${scratch}/stderr"
+rc=$?
+set -e
+
+[ "${rc}" -eq 64 ] || {
+  echo "FAIL: expected receipt preflight rc=64, got ${rc}" >&2
+  exit 1
+}
+grep -F 'bootstrap-policy-error: reason-receipt-required' "${scratch}/stderr" >/dev/null
+if grep -F 'bootstrap-strategy.sh' "${scratch}/stderr" >/dev/null; then
+  echo 'FAIL: missing optional supervisor escaped as a shell error' >&2
+  exit 1
+fi
+
+echo 'bootstrap strategy fallback contract: PASS'

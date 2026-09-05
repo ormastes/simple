@@ -1,0 +1,179 @@
+# Generation-safe provider activation for the composition runtime.
+# Admission is supplied by the platform loader. This owner validates all
+# evidence before mutation and retains retired generations while pinned.
+
+val SIMPLE_GENERATION_OK: i32 = 0
+val SIMPLE_GENERATION_CANDIDATE_INVALID: i32 = 1
+val SIMPLE_GENERATION_ADMISSION_REQUIRED: i32 = 2
+val SIMPLE_GENERATION_DIGEST_MISMATCH: i32 = 3
+val SIMPLE_GENERATION_NOT_ACTIVE: i32 = 4
+val SIMPLE_GENERATION_PIN_UNKNOWN: i32 = 5
+
+class ProviderActivationCandidateV1:
+    provider_handle: u64
+    provider_identity_digest: u64
+    implementation_digest: u64
+    abi_digest: u64
+    expected_artifact_digest: text
+    artifact_digest: text
+    query_symbol_address: i64
+    admitted: bool
+    process_callable: bool
+
+class ProviderGenerationV1:
+    provider_handle: u64
+    generation: u64
+    provider_identity_digest: u64
+    implementation_digest: u64
+    abi_digest: u64
+    artifact_digest: text
+    query_symbol_address: i64
+    pin_count: u64
+    active: bool
+    retired: bool
+
+class ProviderActivationReceiptV1:
+    status: i32
+    provider_handle: u64
+    generation: u64
+    previous_generation: u64
+    reason: text
+
+class ProviderGenerationPinV1:
+    status: i32
+    pin_id: u64
+    provider_handle: u64
+    generation: u64
+    reason: text
+
+class _ProviderPinRecordV1:
+    pin_id: u64
+    provider_handle: u64
+    generation: u64
+
+class ProviderGenerationManagerV1:
+    var generations: [ProviderGenerationV1]
+    var next_generation: u64
+    var pins: [_ProviderPinRecordV1]
+    var next_pin_id: u64
+
+    static fn create() -> ProviderGenerationManagerV1:
+        ProviderGenerationManagerV1(generations: [], next_generation: 1, pins: [], next_pin_id: 1)
+
+fn _activation_receipt(status: i32, handle: u64, generation: u64, previous: u64, reason: text) -> ProviderActivationReceiptV1:
+    ProviderActivationReceiptV1(status: status, provider_handle: handle, generation: generation, previous_generation: previous, reason: reason)
+
+fn _candidate_error(candidate: ProviderActivationCandidateV1) -> ProviderActivationReceiptV1:
+    if candidate.provider_handle == 0 or candidate.provider_identity_digest == 0 or candidate.abi_digest == 0:
+        return _activation_receipt(SIMPLE_GENERATION_CANDIDATE_INVALID, candidate.provider_handle, 0, 0, "candidate-identity-invalid")
+    if not candidate.admitted or not candidate.process_callable or candidate.query_symbol_address <= 0:
+        return _activation_receipt(SIMPLE_GENERATION_ADMISSION_REQUIRED, candidate.provider_handle, 0, 0, "process-callable-admission-required")
+    if candidate.expected_artifact_digest.len() != 64 or candidate.artifact_digest != candidate.expected_artifact_digest:
+        return _activation_receipt(SIMPLE_GENERATION_DIGEST_MISMATCH, candidate.provider_handle, 0, 0, "artifact-digest-mismatch")
+    _activation_receipt(SIMPLE_GENERATION_OK, candidate.provider_handle, 0, 0, "validated")
+
+fn _active_index(manager: ProviderGenerationManagerV1, handle: u64) -> i64:
+    var i = 0
+    while i < manager.generations.len():
+        if manager.generations[i].provider_handle == handle and manager.generations[i].active:
+            return i
+        i = i + 1
+    -1
+
+fn _generation_index(manager: ProviderGenerationManagerV1, handle: u64, generation: u64) -> i64:
+    var i = 0
+    while i < manager.generations.len():
+        if manager.generations[i].provider_handle == handle and manager.generations[i].generation == generation:
+            return i
+        i = i + 1
+    -1
+
+fn provider_generation_activate_v1(manager: ProviderGenerationManagerV1, candidate: ProviderActivationCandidateV1) -> ProviderActivationReceiptV1:
+    """Validate completely, then replace the active generation in one owner turn."""
+    val validation = _candidate_error(candidate)
+    if validation.status != SIMPLE_GENERATION_OK:
+        return validation
+    val old_index = _active_index(manager, candidate.provider_handle)
+    val previous = if old_index >= 0: manager.generations[old_index].generation else: 0
+    val generation = manager.next_generation
+    val replacement = ProviderGenerationV1(
+        provider_handle: candidate.provider_handle,
+        generation: generation,
+        provider_identity_digest: candidate.provider_identity_digest,
+        implementation_digest: candidate.implementation_digest,
+        abi_digest: candidate.abi_digest,
+        artifact_digest: candidate.artifact_digest,
+        query_symbol_address: candidate.query_symbol_address,
+        pin_count: 0,
+        active: true,
+        retired: false
+    )
+    # Append is the only allocation-bearing operation. Complete it before
+    # retiring the current generation so allocation failure cannot erase the
+    # admitted active provider. The owner does not expose intermediate state.
+    manager.generations.push(replacement)
+    if old_index >= 0:
+        manager.generations[old_index].active = false
+        manager.generations[old_index].retired = true
+    manager.next_generation = generation + 1
+    _activation_receipt(SIMPLE_GENERATION_OK, candidate.provider_handle, generation, previous, "activated")
+
+fn provider_generation_pin_active_v1(manager: ProviderGenerationManagerV1, handle: u64) -> ProviderGenerationPinV1:
+    val index = _active_index(manager, handle)
+    if index < 0:
+        return ProviderGenerationPinV1(status: SIMPLE_GENERATION_NOT_ACTIVE, pin_id: 0, provider_handle: handle, generation: 0, reason: "provider-not-active")
+    val pin_id = manager.next_pin_id
+    manager.next_pin_id = pin_id + 1
+    manager.generations[index].pin_count = manager.generations[index].pin_count + 1
+    manager.pins.push(_ProviderPinRecordV1(pin_id: pin_id, provider_handle: handle, generation: manager.generations[index].generation))
+    ProviderGenerationPinV1(status: SIMPLE_GENERATION_OK, pin_id: pin_id, provider_handle: handle, generation: manager.generations[index].generation, reason: "pinned")
+
+fn provider_generation_release_v1(manager: ProviderGenerationManagerV1, pin: ProviderGenerationPinV1) -> i32:
+    if pin.status != SIMPLE_GENERATION_OK:
+        return SIMPLE_GENERATION_PIN_UNKNOWN
+    var pin_index: i64 = -1
+    var p = 0
+    while p < manager.pins.len():
+        if manager.pins[p].pin_id == pin.pin_id and manager.pins[p].provider_handle == pin.provider_handle and manager.pins[p].generation == pin.generation:
+            pin_index = p
+            break
+        p = p + 1
+    val index = _generation_index(manager, pin.provider_handle, pin.generation)
+    if pin_index < 0 or index < 0 or manager.generations[index].pin_count == 0:
+        return SIMPLE_GENERATION_PIN_UNKNOWN
+    var retained_pins: [_ProviderPinRecordV1] = []
+    p = 0
+    while p < manager.pins.len():
+        if p != pin_index:
+            retained_pins.push(manager.pins[p])
+        p = p + 1
+    manager.pins = retained_pins
+    manager.generations[index].pin_count = manager.generations[index].pin_count - 1
+    SIMPLE_GENERATION_OK
+
+fn provider_generation_available_v1(manager: ProviderGenerationManagerV1, handle: u64, generation: u64) -> bool:
+    val index = _generation_index(manager, handle, generation)
+    index >= 0 and (manager.generations[index].active or manager.generations[index].pin_count > 0)
+
+fn provider_generation_sweep_v1(manager: ProviderGenerationManagerV1) -> i64:
+    var retained: [ProviderGenerationV1] = []
+    var removed: i64 = 0
+    var i = 0
+    while i < manager.generations.len():
+        val generation = manager.generations[i]
+        if generation.retired and generation.pin_count == 0:
+            removed = removed + 1
+        else:
+            retained.push(generation)
+        i = i + 1
+    manager.generations = retained
+    removed
+
+export SIMPLE_GENERATION_OK, SIMPLE_GENERATION_CANDIDATE_INVALID
+export SIMPLE_GENERATION_ADMISSION_REQUIRED, SIMPLE_GENERATION_DIGEST_MISMATCH
+export SIMPLE_GENERATION_NOT_ACTIVE, SIMPLE_GENERATION_PIN_UNKNOWN
+export ProviderActivationCandidateV1, ProviderGenerationV1
+export ProviderActivationReceiptV1, ProviderGenerationPinV1, ProviderGenerationManagerV1
+export provider_generation_activate_v1, provider_generation_pin_active_v1
+export provider_generation_release_v1, provider_generation_available_v1
+export provider_generation_sweep_v1

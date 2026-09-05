@@ -1,0 +1,98 @@
+# @cover src/app/browser/page_loader.spl 80%
+# @req REQ-WEB-BROWSER-015
+"""
+# Browser Page Loader: Scheme Gate and Honest Load Failures
+
+**Category:** Browser / Security
+**Status:** Active
+
+## Purpose and Audience
+
+Until 2026-08-16 nothing in `src/app/browser` enforced REQ-WEB-BROWSER-015 —
+any URL string was accepted and answered with a placeholder. This spec pins
+the gate that now exists: top-level http/https and the internal
+`simple://home` page are allowed, every other scheme is refused with a
+stable reason, and a failed load is REPORTED rather than replaced with a
+fabricated page.
+
+The deliberately absent behaviour matters as much as the present one: there
+is no path from "load failed" to "rendered something that looks like the
+origin". A fabricated fallback page would be a lie about what the server
+sent.
+
+## Scope
+
+Pure gate logic only — nothing here touches the network. Deny decisions are
+computed before any socket exists, which is exactly why they are unit-testable
+on any host. Live-fetch evidence lives with the lane docs
+(doc/07_guide/app/browser.md), not in this spec.
+Tracking: doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md
+"""
+
+use std.spec.*
+use app.browser.page_loader.{
+    BROWSER_PAGE_HOME_URL,
+    browser_url_scheme_allowed,
+    browser_scheme_denial_reason,
+    browser_load_page_html
+}
+
+describe "browser page loader scheme gate":
+    it "allows exactly http, https and the internal home page":
+        """
+        The allow-list is the REQ-WEB-BROWSER-015 shape: top-level web
+        navigation plus the one audited internal page. Anything added here
+        must arrive with its own audit, which is why the check is an
+        explicit list and not a prefix heuristic.
+        """
+        step("The three permitted forms pass the gate")
+        expect(browser_url_scheme_allowed(BROWSER_PAGE_HOME_URL)).to_equal(true)
+        expect(browser_url_scheme_allowed("http://example.com")).to_equal(true)
+        expect(browser_url_scheme_allowed("https://example.com/a?b=c")).to_equal(true)
+
+        step("File, data, javascript and custom schemes are denied")
+        expect(browser_url_scheme_allowed("file:///etc/passwd")).to_equal(false)
+        expect(browser_url_scheme_allowed("data:text/html,<b>x</b>")).to_equal(false)
+        expect(browser_url_scheme_allowed("javascript:alert(1)")).to_equal(false)
+        expect(browser_url_scheme_allowed("simple://other")).to_equal(false)
+
+        step("A scheme-less or malformed URL is a denial, not a guess")
+        expect(browser_url_scheme_allowed("example.com")).to_equal(false)
+        expect(browser_url_scheme_allowed("")).to_equal(false)
+
+    it "explains a denial and stays silent on an allow":
+        """
+        An operator staring at a refused page needs the reason to name the
+        rule, not restate the refusal. The reason is stable text so specs and
+        docs cannot drift from what the browser actually prints.
+        """
+        step("Denied schemes carry the REQ reference")
+        val reason = browser_scheme_denial_reason("file:///etc/passwd")
+        expect(reason.contains("REQ-WEB-BROWSER-015")).to_equal(true)
+        expect(reason.contains("http")).to_equal(true)
+
+        step("Allowed URLs produce an empty reason")
+        expect(browser_scheme_denial_reason("http://example.com")).to_equal("")
+
+    it "refuses to fetch what the gate denies, without touching the network":
+        """
+        The load path must consult the gate before any socket work. A denied
+        scheme therefore fails identically on every host — connected or
+        air-gapped — which is also what makes this assertion runnable in a
+        unit tier with no network access.
+        """
+        step("A denied scheme loads as Err carrying the denial reason")
+        match browser_load_page_html("file:///etc/passwd"):
+            Ok(_):
+                step("A file: URL must never produce page content")
+                expect(false).to_equal(true)
+            Err(reason):
+                expect(reason.contains("REQ-WEB-BROWSER-015")).to_equal(true)
+
+        step("The home page is built-in markup, not a fetch")
+        match browser_load_page_html(BROWSER_PAGE_HOME_URL):
+            Ok(_):
+                step("Home must not be served through the network engine")
+                expect(false).to_equal(true)
+            Err(reason):
+                expect(reason.contains("built-in")).to_equal(true)

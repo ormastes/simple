@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+src=examples/09_embedded/simple_os/arch/arm64/boot/crt0.S
+body=$(awk '/^_lower_el_aarch64_sync_handler:/{inside=1} inside{print} /^\.Llower_el_user_exit:/{exit}' "$src")
+
+line() { printf '%s\n' "$body" | grep -n -m1 -F "$1" | cut -d: -f1; }
+save=$(line 'str     x10, [sp, #248]')
+disable=$(line 'msr     sctlr_el1, x11')
+call=$(line 'bl      rt_arm64_handle_user_svc')
+exit_branch=$(line 'cbz     x9, .Llower_el_user_exit')
+restore=$(line 'msr     sctlr_el1, x10')
+case "$save:$disable:$call:$exit_branch:$restore" in *::*|:*:) echo 'FAIL: incomplete SVC translation window' >&2; exit 1;; esac
+[ "$save" -lt "$disable" ] && [ "$disable" -lt "$call" ] &&
+[ "$call" -lt "$exit_branch" ] && [ "$exit_branch" -lt "$restore" ] || {
+    echo 'FAIL: SVC M-off/save/call/exit/restore order is unsafe' >&2; exit 1;
+}
+printf '%s\n' "$body" | grep -Fq 'bic     x11, x10, #1' || { echo 'FAIL: SCTLR.M is not cleared' >&2; exit 1; }
+if printf '%s\n' "$body" | grep -Eq 'msr[[:space:]]+elr_el1|add[[:space:]]+x[0-9]+,[[:space:]]*x[0-9]+,[[:space:]]*#4'; then
+    echo 'FAIL: recognized AArch64 SVC return rewrites architectural next-PC' >&2
+    exit 1
+fi
+
+if [ "$#" -gt 0 ]; then
+    elf=$1
+    [ -f "$elf" ] || { echo "FAIL: missing ELF: $elf" >&2; exit 1; }
+    linked=$(llvm-objdump -d "$elf" | awk '/<_lower_el_aarch64_sync_handler>:/ {inside=1} inside{print} /<arm64_user_exit_resume>/{if (inside) exit}')
+    printf '%s\n' "$linked" | grep -Eq 'str[[:space:]]+x10, \[sp, #0xf8\]' || { echo 'FAIL: linked handler lacks SCTLR frame save' >&2; exit 1; }
+    [ "$(printf '%s\n' "$linked" | grep -Ec 'msr[[:space:]]+SCTLR_EL1')" -ge 2 ] || { echo 'FAIL: linked handler lacks disable/restore pair' >&2; exit 1; }
+    if printf '%s\n' "$linked" | grep -Eq 'msr[[:space:]]+ELR_EL1'; then
+        echo 'FAIL: linked recognized SVC path rewrites ELR_EL1' >&2
+        exit 1
+    fi
+fi
+
+echo 'PASS: ARM64 lower-EL SVC uses an ordered identity translation window'

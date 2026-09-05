@@ -1,0 +1,93 @@
+# Doppler — Doppler pitch calculation
+#
+# Computes a pitch multiplier based on the classic Doppler formula:
+#   pitch = (speed_of_sound + listener_vel_toward) / (speed_of_sound + source_vel_away)
+#
+# Uses dot product with the unit direction vector from source to listener.
+# Result is clamped to [0.5, 2.0] to avoid extreme values.
+#
+# Usage:
+#   val config = default_doppler_config()
+#   val pitch = compute_doppler_pitch(l_pos, l_vel, s_pos, s_vel, config)
+
+use std.common.engine.math3d.{Vec3}
+
+# ============================================================================
+# DopplerConfig
+# ============================================================================
+
+struct DopplerConfig:
+    """Configuration for Doppler pitch calculations.
+
+    speed_of_sound is in world units per second (default 343.0 for air).
+    factor scales the effect (1.0 = realistic, 0.0 = disabled).
+    """
+    enabled: bool
+    speed_of_sound: f64
+    factor: f64
+
+fn default_doppler_config() -> DopplerConfig:
+    """Create default Doppler config: enabled, 343.0 m/s speed of sound, factor 1.0."""
+    DopplerConfig(
+        enabled: true,
+        speed_of_sound: 343.0,
+        factor: 1.0
+    )
+
+# ============================================================================
+# Doppler computation
+# ============================================================================
+
+fn compute_doppler_pitch(
+    listener_pos: Vec3, listener_vel: Vec3,
+    source_pos: Vec3, source_vel: Vec3,
+    config: DopplerConfig
+) -> f64:
+    """Compute Doppler pitch multiplier.
+
+    Returns 1.0 if disabled or source and listener are at same position.
+    Formula: (speed + listener_vel_toward) / (speed + source_vel_away)
+    Clamped to [0.5, 2.0].
+    """
+    if not config.enabled:
+        return 1.0
+    if config.factor <= 0.0:
+        return 1.0
+
+    # Direction from source to listener
+    val dx = listener_pos.x - source_pos.x
+    val dy = listener_pos.y - source_pos.y
+    val dz = listener_pos.z - source_pos.z
+    val dist_sq = dx * dx + dy * dy + dz * dz
+
+    # Avoid division by zero when source and listener overlap
+    if dist_sq < 0.0001:
+        return 1.0
+
+    val dist = dist_sq ** 0.5
+    # Unit direction from source toward listener
+    val dir_x = dx / dist
+    val dir_y = dy / dist
+    val dir_z = dz / dist
+
+    # Listener velocity toward source (dot with direction from source to listener)
+    val listener_toward = (listener_vel.x * dir_x + listener_vel.y * dir_y + listener_vel.z * dir_z) * config.factor
+
+    # Source velocity away from listener (dot with direction from source to listener, negated)
+    val source_away = -(source_vel.x * dir_x + source_vel.y * dir_y + source_vel.z * dir_z) * config.factor
+
+    val speed = config.speed_of_sound
+    val denominator = speed + source_away
+
+    # Avoid division by zero or negative denominator
+    if denominator <= 0.01:
+        return 2.0
+
+    var pitch = (speed + listener_toward) / denominator
+
+    # Clamp to [0.5, 2.0]
+    if pitch < 0.5:
+        pitch = 0.5
+    if pitch > 2.0:
+        pitch = 2.0
+    pitch

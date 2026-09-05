@@ -1,0 +1,113 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.work_control.{ProviderRequestControlHandleV1, ProviderBudgetChargeV1, ProviderBudgetLimitV1, ProviderCheckpointProgressV1, ProviderBoundedBudgetV1, ProviderDeterministicCheckpointV1, provider_budget_category_raw_bytes, provider_budget_category_output_bytes, provider_budget_category_hash_blocks, provider_budget_category_valid_v1}
+
+fn request_handle() -> ProviderRequestControlHandleV1:
+    ProviderRequestControlHandleV1(request_id: "req-work-1",
+        registration_generation: 7)
+
+fn progress(bytes: i64, blocks: i64) -> ProviderCheckpointProgressV1:
+    ProviderCheckpointProgressV1(stage: "sha256", bytes: bytes, events: 0,
+        scalars: 0, hash_blocks: blocks, comparisons: 0)
+
+describe "SPipe provider bounded work control":
+    it "charges a closed category before reaching its exact limit":
+        val raw = provider_budget_category_raw_bytes()
+        var budget = ProviderBoundedBudgetV1.configured([
+            ProviderBudgetLimitV1(category: raw, limit: 4)
+        ])?
+        budget.charge(ProviderBudgetChargeV1(category: raw, amount: 3))?
+        expect(budget.consumed(raw)).to_equal(3)
+        expect(budget.limit(raw)).to_equal(4)
+        budget.charge(ProviderBudgetChargeV1(category: raw, amount: 1))?
+        expect(budget.consumed(raw)).to_equal(4)
+
+    it "rejects overflow unknown and duplicate categories without mutation":
+        val blocks = provider_budget_category_hash_blocks()
+        var budget = ProviderBoundedBudgetV1.configured([
+            ProviderBudgetLimitV1(category: blocks, limit: 2)
+        ])?
+        expect(budget.charge(ProviderBudgetChargeV1(category: blocks,
+            amount: 3)).is_err()).to_equal(true)
+        expect(budget.consumed(blocks)).to_equal(0)
+        expect(budget.charge(ProviderBudgetChargeV1(category: "invented",
+            amount: 1)).is_err()).to_equal(true)
+        expect(ProviderBoundedBudgetV1.configured([
+            ProviderBudgetLimitV1(category: blocks, limit: 1),
+            ProviderBudgetLimitV1(category: blocks, limit: 2)
+        ]).is_err()).to_equal(true)
+
+    it "admits a multi-category charge atomically after duplicate aggregation":
+        val raw = provider_budget_category_raw_bytes()
+        val output = provider_budget_category_output_bytes()
+        var budget = ProviderBoundedBudgetV1.configured([
+            ProviderBudgetLimitV1(category: raw, limit: 8),
+            ProviderBudgetLimitV1(category: output, limit: 8)
+        ])?
+        budget.charge_all([
+            ProviderBudgetChargeV1(category: raw, amount: 2),
+            ProviderBudgetChargeV1(category: output, amount: 3),
+            ProviderBudgetChargeV1(category: raw, amount: 4)
+        ])?
+        expect(budget.consumed(raw)).to_equal(6)
+        expect(budget.consumed(output)).to_equal(3)
+
+    it "rejects a failing second category without charging the first":
+        val raw = provider_budget_category_raw_bytes()
+        val output = provider_budget_category_output_bytes()
+        var budget = ProviderBoundedBudgetV1.configured([
+            ProviderBudgetLimitV1(category: raw, limit: 8),
+            ProviderBudgetLimitV1(category: output, limit: 2)
+        ])?
+        expect(budget.charge_all([
+            ProviderBudgetChargeV1(category: raw, amount: 5),
+            ProviderBudgetChargeV1(category: output, amount: 3)
+        ]).is_err()).to_equal(true)
+        expect(budget.consumed(raw)).to_equal(0)
+        expect(budget.consumed(output)).to_equal(0)
+
+    it "fails closed for duplicate overflow invalid amounts and empty batches":
+        val raw = provider_budget_category_raw_bytes()
+        var budget = ProviderBoundedBudgetV1.configured([
+            ProviderBudgetLimitV1(category: raw, limit: 9223372036854775807)
+        ])?
+        expect(budget.charge_all([
+            ProviderBudgetChargeV1(category: raw,
+                amount: 9223372036854775807),
+            ProviderBudgetChargeV1(category: raw, amount: 1)
+        ]).is_err()).to_equal(true)
+        expect(budget.consumed(raw)).to_equal(0)
+        expect(budget.charge_all([
+            ProviderBudgetChargeV1(category: raw, amount: 0)
+        ]).is_err()).to_equal(true)
+        expect(budget.charge_all([]).is_err()).to_equal(true)
+        expect(budget.consumed(raw)).to_equal(0)
+
+    it "fails budget and checkpoint operations closed after close":
+        val raw = provider_budget_category_raw_bytes()
+        var budget = ProviderBoundedBudgetV1.configured([
+            ProviderBudgetLimitV1(category: raw, limit: 8)
+        ])?
+        budget.close()
+        expect(budget.charge(ProviderBudgetChargeV1(category: raw,
+            amount: 1)).is_err()).to_equal(true)
+        expect(budget.consumed(raw)).to_equal(0)
+
+        var checkpoint = ProviderDeterministicCheckpointV1.configured(
+            request_handle(), progress(16, 1), -1, "")?
+        checkpoint.close()
+        expect(checkpoint.checkpoint(progress(1, 0)).is_err()).to_equal(true)
+
+    it "binds request identity once and enforces progress bounds":
+        var checkpoint = ProviderDeterministicCheckpointV1.configured(
+            request_handle(), progress(64, 2), -1, "")?
+        checkpoint.checkpoint(progress(64, 2))?
+        expect(checkpoint.bound_request().request_id).to_equal("req-work-1")
+        expect(checkpoint.checkpoint(progress(65, 2)).is_err()).to_equal(true)
+        expect(checkpoint.checkpoint(progress(64, 3)).is_err()).to_equal(true)
+
+    it "injects deterministic cancellation at an exact checkpoint boundary":
+        var checkpoint = ProviderDeterministicCheckpointV1.configured(
+            request_handle(), progress(4096, 64), 1, "cancelled")?
+        checkpoint.checkpoint(progress(4096, 64))?
+        expect(checkpoint.checkpoint(progress(1, 0)).is_err()).to_equal(true)
+        expect(provider_budget_category_valid_v1("invented")).to_equal(false)

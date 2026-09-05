@@ -1,0 +1,45 @@
+# Pure Simple — bridge between the autograd `Tensor` and the raw `PureTensor`
+#
+# `std.pure.nn` layers own their parameters as raw `PureTensor<f64>` (they need
+# direct flat-buffer indexing: Conv2d, pooling and the norm layers are written
+# as index math, not as autograd op graphs). `std.pure.autograd` owns `Tensor`,
+# which wraps a `TensorF64` plus a gradient and a tape node.
+#
+# Before this module the two surfaces silently mixed: callers holding an
+# autograd `Tensor` passed it straight into `Linear.forward`, which expects a
+# `PureTensor`, and there was no conversion in either direction. That is the
+# defect recorded in
+# doc/08_tracking/bug/pure_nn_layers_mix_autograd_tensor_and_puretensor_2026-07-25.md
+#
+# The conversions are lossless in the value axis: `TensorF64` and
+# `PureTensor<f64>` are structurally identical (data / shape / strides).
+# They are NOT lossless in the gradient axis — `to_pure` drops the tape, so a
+# value that round-trips through a layer is detached. That is stated here
+# rather than hidden, because a `PureTensor` layer cannot produce gradients at
+# all; wiring layers onto the autograd tape is separate, larger work.
+
+use std.pure.tensor (PureTensor)
+use std.pure.tensor_f64 (TensorF64)
+use std.pure.autograd (Tensor, tensor_from_value)
+
+fn to_pure(t: Tensor) -> PureTensor<f64>:
+    """Read an autograd `Tensor`'s value out as a raw `PureTensor<f64>`.
+
+    Drops the gradient and the autograd tape — the result is detached.
+    """
+    PureTensor(data: t.value.data, shape: t.value.shape, strides: t.value.strides)
+
+fn to_autograd(p: PureTensor<f64>, requires_grad: bool = false) -> Tensor:
+    """Lift a raw `PureTensor<f64>` into an autograd `Tensor` leaf."""
+    val v = TensorF64(data: p.data, shape: p.shape, strides: p.strides)
+    tensor_from_value(v, requires_grad)
+
+fn pure_from_f64(v: TensorF64) -> PureTensor<f64>:
+    """Reinterpret a `TensorF64` as the structurally identical `PureTensor<f64>`."""
+    PureTensor(data: v.data, shape: v.shape, strides: v.strides)
+
+fn f64_from_pure(p: PureTensor<f64>) -> TensorF64:
+    """Reinterpret a `PureTensor<f64>` as the structurally identical `TensorF64`."""
+    TensorF64(data: p.data, shape: p.shape, strides: p.strides)
+
+export to_pure, to_autograd, pure_from_f64, f64_from_pure

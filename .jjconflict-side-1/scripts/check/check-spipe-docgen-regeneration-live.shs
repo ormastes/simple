@@ -1,0 +1,67 @@
+#!/bin/sh
+# CI-style wiring for the LIVE spipe_docgen byte-identical regeneration gate.
+#
+# Unlike scripts/check/check-sspec-evidence-regeneration.shs (which drives the
+# regeneration_gate.spl library directly against CanonicalEvidence/OracleSpec
+# fixtures), this script drives the REAL, deployed spipe_docgen entry point
+# (`generate_feature_doc` in src/app/spipe_docgen/spipe_docgen/generator.spl,
+# exported via spipe_docgen/__init__.spl) end to end: parse a real spec file,
+# render it twice with an identical evidence sidecar present, and again twice
+# with the sidecar absent, and require byte-identical output in both cases.
+#
+# TARGET: test/02_integration/app/spipe_docgen_regeneration_live_spec.spl
+# (fail-closed if the target spec is missing).
+#
+# Verdict line is always the LAST line of stdout:
+#   check-spipe-docgen-regeneration-live: PASS — <n> example(s) checked, 0 failed   exit 0
+#   check-spipe-docgen-regeneration-live: FAIL — <n> example(s) failed of <m>       exit 1
+#   check-spipe-docgen-regeneration-live: ERROR — nothing was checked               exit 2
+#
+# Exit codes match .claude/rules/vcs.md: PASS=0, FAIL=1, ERROR=2.
+
+set -u
+
+SELF=check-spipe-docgen-regeneration-live
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_RUST_SEED_WARNING=0
+export SIMPLE_RUST_SEED_WARNING
+
+die() {
+    code=$1
+    shift
+    echo "$SELF: ERROR — $*" >&2
+    echo "$SELF: ERROR — nothing was checked"
+    exit "$code"
+}
+
+[ -x "$SIMPLE_BIN" ] || command -v "$SIMPLE_BIN" >/dev/null 2>&1 \
+    || die 2 "compiler not executable at '$SIMPLE_BIN' (set SIMPLE_BIN to override)"
+
+target="test/02_integration/app/spipe_docgen_regeneration_live_spec.spl"
+[ -f "$target" ] || die 2 "target spec not found: $target"
+
+out="$(mktemp)" || die 2 "mktemp failed"
+trap 'rm -f "$out"' EXIT INT TERM
+
+SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-900}" "$SIMPLE_BIN" run "$target" > "$out" 2>&1
+rc=$?
+[ -s "$out" ] || die 2 "spec run produced no output"
+
+verdict_line=$(/usr/bin/grep -a '^SPEC FILE VERDICT:' "$out" | tail -1)
+[ -n "$verdict_line" ] || die 2 "spec run did not print a SPEC FILE VERDICT line (rc=$rc): $(tr '\n' '|' < "$out")"
+
+executed=$(printf '%s\n' "$verdict_line" | sed -n 's/.*executed=\([0-9][0-9]*\).*/\1/p')
+passed=$(printf '%s\n' "$verdict_line" | sed -n 's/.*passed=\([0-9][0-9]*\).*/\1/p')
+failed=$(printf '%s\n' "$verdict_line" | sed -n 's/.*failed=\([0-9][0-9]*\).*/\1/p')
+
+[ -n "$executed" ] && [ -n "$passed" ] && [ -n "$failed" ] \
+    || die 2 "could not parse SPEC FILE VERDICT line: $verdict_line"
+[ "$executed" -gt 0 ] || die 2 "SPEC FILE VERDICT reports 0 executed examples — verdict would be vacuous"
+
+if [ "$rc" -ne 0 ] || [ "$failed" -gt 0 ]; then
+    echo "$SELF: FAIL — $failed example(s) failed of $executed"
+    exit 1
+fi
+
+echo "$SELF: PASS — $passed example(s) checked, 0 failed"
+exit 0

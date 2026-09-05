@@ -1,0 +1,60 @@
+# codex-system-test
+# @manual_section Arbitrary-width sequential HWIR constants
+
+use std.spec.*
+use compiler.mir.hwir.bit_vector_constant.{HwBitVectorConstant}
+use compiler.mir.hwir.types.{CoreConfig, HwConstant, HwNodeId, HwOrigin, HwPort}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard, HwSeqOutputBinding,
+    HwSeqRule, HwSeqValue, HwSequentialModuleDef, HwSequentialPlan, HwStateRegister}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+
+fn wide_constant_module(name: text, constants: [HwBitVectorConstant]) -> HwSequentialModuleDef:
+    HwSequentialModuleDef(node_id: HwNodeId.module_root(name), entity_name: name,
+        config: CoreConfig.rv64(), origins: [HwOrigin(
+            node_id: HwNodeId.child(name, "wide_constant"),
+            source_name: "hwir.sequential.wide-constant")],
+        ports: [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+            HwPort.input("enable", "Bits", 1), HwPort.output("active", "Bits", 1)],
+        datapath_signals: [], datapath_constants: [HwConstant.bits("legacy_one", 1, 1)],
+        datapath_bit_vector_constants: constants, datapath_comb_ops: [],
+        datapath_compare_ops: [], datapath_select_ops: [],
+        datapath_bit_extract_ops: [], datapath_fixed_slice_ops: [],
+        plan: HwSequentialPlan(owner_id: HwNodeId.child(name, "sequential"),
+            registers: [HwStateRegister(name: "active_reg", bit_width: 1,
+                clock_domain: "default", reset_value: 0)],
+            rules: [HwSeqRule(name: "enable", guards: [HwSeqGuard.high("enable")],
+                assignments: [HwSeqAssignment(destination: "active_reg",
+                    value: HwSeqValue.copy("enable", 1))])],
+            outputs: [HwSeqOutputBinding.direct("active", "active_reg", 1)], decoder_pins: []),
+        child_entity: "", child_graph_sha256: "")
+
+describe "typed arbitrary-width sequential HWIR constants":
+    it "should validate hash and render exact 65-bit and 128-bit values":
+        val bits65 = "10000000000000000000000000000000000000000000000000000000000000001"
+        val bits128 = "1010101010101010101010101010101010101010101010101010101010101010" +
+            "1010101010101010101010101010101010101010101010101010101010101010"
+        val module = wide_constant_module("wide_constants", [
+            HwBitVectorConstant.binary("wide65", 65, bits65),
+            HwBitVectorConstant.binary("wide128", 128, bits128)])
+        expect(module.diagnostic()).to_equal("")
+        val emitted = render_strict_sequential_hwir(module, "hwir-wide-constant-v1")
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl).to_contain("constant wide65 : std_logic_vector(64 downto 0) := \"" + bits65 + "\"")
+        expect(emitted.vhdl).to_contain("constant wide128 : std_logic_vector(127 downto 0) := \"" + bits128 + "\"")
+        expect(emitted.vhdl).to_contain("constant legacy_one : std_logic := '1'")
+        val changed = wide_constant_module("wide_constants", [
+            HwBitVectorConstant.binary("wide65", 65,
+                "00000000000000000000000000000000000000000000000000000000000000001"),
+            HwBitVectorConstant.binary("wide128", 128, bits128)])
+        expect(module.structural_sha256() == changed.structural_sha256()).to_equal(false)
+
+    it "should reject malformed values and case-folded name collisions":
+        val short = wide_constant_module("wide_short", [
+            HwBitVectorConstant.binary("wide65", 65, "101")])
+        expect(short.diagnostic()).to_start_with("HWIR-E-SEQUENTIAL-DATAPATH-BIT-CONSTANT")
+        val nonbinary = wide_constant_module("wide_nonbinary", [
+            HwBitVectorConstant.binary("wide65", 5, "10x01")])
+        expect(nonbinary.diagnostic()).to_start_with("HWIR-E-SEQUENTIAL-DATAPATH-BIT-CONSTANT")
+        val collision = wide_constant_module("wide_collision", [
+            HwBitVectorConstant.binary("LEGACY_ONE", 1, "1")])
+        expect(collision.diagnostic()).to_start_with("HWIR-E-SEQUENTIAL-DATAPATH-BIT-CONSTANT")

@@ -1,0 +1,178 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/sys_test/cuda_host_validation_2026-07-11.md, for the plan-acceptance
+lane defined in doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md.
+Audience: the GPU-lane implementer who picks up the CUDA readback wrapper TODO
+list, and the reviewer who verifies each TODO against a real interface before
+closing it.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/cuda_host_validation_spec.spl
+Each `it` below reproduces one exact resume step: run it standalone to see
+which promised interface is still unresolved.
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented. Several `it`s import a
+`cuda_host_validation` wrapper module that does not exist yet -- the plan
+promises it (a typed PASS/SKIP/FAIL "CUDA readback wrapper") but nowhere
+names its module path, so this file anchors it next to the existing FFI at
+src/lib/nogc_sync_mut/io/cuda_sffi.spl. An unresolved import is a load
+failure, which the in-development tag neutralises per the lane contract.
+## Lifecycle
+Research doc/01_research/, plan doc/03_plan/sys_test/cuda_host_validation_2026-07-11.md,
+architecture doc/04_architecture/, and design doc/05_design/ records for this
+GPU-lane surface are the umbrella lifecycle folders this spec traces back to.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/sys_test/cuda_host_validation_2026-07-11.md
+# @cover src/lib/nogc_sync_mut/io/cuda_sffi.spl
+# @cover .github/workflows/gpu-lane-tests.yml
+# @manual_section "CUDA host validation — PASS/SKIP/FAIL contract"
+
+use std.spec.{step}
+use std.spec.*
+use std.fs.{read_file}
+use std.nogc_sync_mut.io.cuda_host_validation.{
+    cuda_readback_validate, CudaValidationOutcome,
+    cuda_readback_error_detail, CudaFailureDetail,
+    cuda_module_load_data_ex, CudaJitLoadResult,
+    cuda_api_failure_report, CudaApiFailure,
+    cuda_shared_memory_kernel_validate, SharedMemoryKernelResult,
+    cuda_negative_case_matrix, CudaNegativeCaseResult,
+    cuda_provenance_report, CudaProvenanceReport
+}
+
+describe "CUDA-enabled host validation plan (doc/03_plan/sys_test/cuda_host_validation_2026-07-11.md)":
+
+    it "Implement explicit PASS/SKIP/FAIL in the CUDA readback wrapper.":
+        # @req REQ-CUDA-VALIDATION-01
+        step("Call the promised readback wrapper with no live CUDA device present")
+        # Contract §Contract: exactly one of PASS/SKIP/FAIL. On a host with
+        # no live CUDA device (this sandbox), the wrapper must report SKIP,
+        # never silently FAIL and never silently PASS.
+        val outcome: CudaValidationOutcome = cuda_readback_validate()
+        step("Assert the tri-state verdict matches the documented no-device case")
+        # @capture the returned CudaValidationOutcome.status field is the
+        # retained evidence for this scenario -- a typed tri-state verdict,
+        # not a screenshot or log excerpt.
+        expect(outcome.status).to_equal("SKIP")  # oracle: §Contract SKIP row -- "no device on optional host"
+
+    it "Distinguish missing library, init failure, zero devices, inaccessible assignment, and required-runner provisioning failure.":
+        # @req REQ-CUDA-VALIDATION-02
+        step("Read the failure-detail record from the readback wrapper")
+        # §Required negative cases names five distinct SKIP/FAIL categories;
+        # the detail record must carry the DOCUMENTED category name, not a
+        # generic "no device" string.
+        val detail: CudaFailureDetail = cuda_readback_error_detail()
+        val known_categories: [text] = [
+            "missing_library", "init_failure", "zero_devices",
+            "inaccessible_assignment", "provisioning_error"
+        ]
+        step("Assert the category is one of the five names the plan itself enumerates")
+        # @capture detail.category is the retained evidence: a named member
+        # of the plan's own five-row negative-case table.
+        expect(known_categories.contains(detail.category)).to_equal(true)  # oracle: plan §Required negative cases, 5 named rows
+
+    it "Use cuModuleLoadDataEx; archive bounded JIT logs.":
+        # @req REQ-CUDA-VALIDATION-03
+        step("JIT-load a trivial PTX payload through the promised wrapper")
+        val ptx: [u8] = "ok".to_bytes()
+        val result: CudaJitLoadResult = cuda_module_load_data_ex(ptx, 4096)
+        step("Assert the exact driver API used and that the archived log is bounded")
+        # @capture result.api_used names the exact driver entry point the
+        # plan requires; result.jit_log is the archived, size-bounded log.
+        expect(result.api_used).to_equal("cuModuleLoadDataEx")  # oracle: plan §Exact positive sequence step 3
+        expect(result.jit_log.len() <= 4096).to_equal(true)  # oracle: bound passed to cuda_module_load_data_ex above
+
+    it "Emit CUDA numeric code plus name/string for every API failure.":
+        # @req REQ-CUDA-VALIDATION-04
+        step("Report a driver-API failure for the well-known invalid-value code")
+        # CUDA_ERROR_INVALID_VALUE is driver-API code 1 per the CUDA header --
+        # a fixed, documented constant, not a guessed value.
+        val failure: CudaApiFailure = cuda_api_failure_report(1)
+        step("Assert both the numeric code and its documented name/string are emitted")
+        # @capture failure.code/failure.name together are the retained
+        # evidence: the numeric code alone is not readable evidence.
+        expect(failure.code).to_equal(1)  # oracle: CUDA driver API header, CUDA_ERROR_INVALID_VALUE = 1
+        expect(failure.name).to_equal("CUDA_ERROR_INVALID_VALUE")  # oracle: CUDA driver API header, same constant
+
+    it "Add generated shared-memory/barrier PTX and exact CPU oracle.":
+        # @req REQ-CUDA-VALIDATION-05
+        step("Run the generated shared-memory/barrier kernel against its CPU oracle")
+        # §Exact positive sequence step 7: >= 2 blocks, zero-tolerance
+        # comparison against the CPU oracle.
+        val result: SharedMemoryKernelResult = cuda_shared_memory_kernel_validate()
+        step("Assert at least two blocks ran and every element matched the oracle exactly")
+        # @capture result.block_count/result.mismatch_count are the retained
+        # evidence: a zero-mismatch count against a real CPU reference.
+        expect(result.block_count >= 2).to_equal(true)  # oracle: plan §Exact positive sequence step 7, "at least two blocks"
+        expect(result.mismatch_count).to_equal(0)  # oracle: plan's "Tolerance is zero" rule
+
+    it "Add malformed PTX, missing symbol, launch-limit, async-fault, and guard negative tests.":
+        # @req REQ-CUDA-VALIDATION-06
+        step("Run the promised negative-case matrix")
+        val matrix: [CudaNegativeCaseResult] = cuda_negative_case_matrix()
+        step("Assert all five named negative cases from the checkbox text are present, in order")
+        # @capture matrix is the retained evidence: five named rows matching
+        # the checkbox text verbatim.
+        expect(matrix.len()).to_equal(5)  # oracle: 5 cases named in the checkbox text
+        expect(matrix[0].name).to_equal("malformed_ptx")  # oracle: checkbox text, case 1
+        expect(matrix[1].name).to_equal("missing_symbol")  # oracle: checkbox text, case 2
+        expect(matrix[2].name).to_equal("launch_limit")  # oracle: checkbox text, case 3
+        expect(matrix[3].name).to_equal("async_fault")  # oracle: checkbox text, case 4
+        expect(matrix[4].name).to_equal("guard")  # oracle: checkbox text, case 5
+
+    it "Add the labelled live CUDA job with CUDA_LIVE_REQUIRED=1.":
+        # @req REQ-CUDA-VALIDATION-07
+        step("Read the real gpu-lane-tests.yml workflow committed in this tree")
+        # Measured 2026-09-05: .github/workflows/gpu-lane-tests.yml already
+        # has a `[self-hosted, cuda-live]` job, but it never sets
+        # CUDA_LIVE_REQUIRED=1 -- so a live run that finds no device today
+        # would SKIP rather than FAIL, exactly the gap this checkbox names.
+        val workflow_config = read_file(".github/workflows/gpu-lane-tests.yml")
+        step("Assert the labelled job exists AND sets the required-live env var")
+        # @capture the workflow YAML content is the retained evidence for
+        # CI wiring -- there is no runtime function to call for "does this
+        # job set this env var", so the committed config file is the only
+        # observable artifact.
+        expect(workflow_config.contains("[self-hosted, cuda-live]")).to_equal(true)  # oracle: plan §CI, "dedicated runner label such as cuda-live"
+        val sets_required = workflow_config.contains("CUDA_LIVE_REQUIRED=1") or workflow_config.contains("CUDA_LIVE_REQUIRED: \"1\"") or workflow_config.contains("CUDA_LIVE_REQUIRED: 1")
+        expect(sets_required).to_equal(true)  # oracle: plan §CI, "Set CUDA_LIVE_REQUIRED=1 only on the dedicated lane"
+
+    it "Keep portable intensive CUDA tests on every platform.":
+        # @req REQ-CUDA-VALIDATION-08
+        step("Read the real gpu-lane-tests.yml portable-gates job matrix")
+        val workflow_config = read_file(".github/workflows/gpu-lane-tests.yml")
+        val runs_ubuntu = workflow_config.contains("os: ubuntu-latest")
+        val runs_macos = workflow_config.contains("os: macos-latest")
+        val runs_windows = workflow_config.contains("os: windows-latest")
+        step("Assert the portable-gates matrix covers all three named platforms")
+        # @capture the three boolean platform checks together are the
+        # retained evidence for "every platform".
+        expect(runs_ubuntu and runs_macos and runs_windows).to_equal(true)  # oracle: plan §CI "Portable PTX/backend gates remain mandatory" on every platform
+
+    it "Record device/JIT/artifact provenance in the report schema.":
+        # @req REQ-CUDA-VALIDATION-09
+        step("Request the promised provenance report")
+        val report: CudaProvenanceReport = cuda_provenance_report()
+        val required_fields: [text] = ["device_uuid", "driver_version", "ptx_sha256", "jit_log_path"]
+        var i = 0
+        var all_present = true
+        while i < required_fields.len():
+            if not report.fields.contains(required_fields[i]):
+                all_present = false
+            i = i + 1
+        step("Assert every named provenance field is present in the report schema")
+        # @capture report.fields is the retained evidence: the four
+        # provenance facts §CI requires archived.
+        expect(all_present).to_equal(true)  # oracle: plan §CI "Archive PTX, build output, JIT logs, device metadata"
+
+    it "Require highest-capability review of the first fresh live report.":
+        # @req REQ-CUDA-VALIDATION-10
+        step("Request the promised provenance report before any review has happened")
+        val report: CudaProvenanceReport = cuda_provenance_report()
+        step("Assert the report names the required reviewer tier and starts unreviewed")
+        # @capture report.reviewer_tier/report.reviewed together are the
+        # retained evidence for the review gate this checkbox names.
+        expect(report.reviewer_tier).to_equal("highest-capability")  # oracle: checkbox text, "highest-capability review"
+        expect(report.reviewed).to_equal(false)  # oracle: a fresh report has not yet been reviewed

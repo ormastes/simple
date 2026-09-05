@@ -1,0 +1,44 @@
+# @tag: unit, gpu, macos, contract
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read, process_run}
+
+val HARNESS = "scripts/check/check-macos-gpu-2d-live-evidence.shs"
+
+describe "macOS GPU 2D runtime rpath contract":
+    it "compares runtime provider directories by canonical identity":
+        val harness = file_read(HARNESS)
+        expect(harness).to_contain("canonical_directory()")
+        expect(harness).to_contain("driver_has_runtime_provider_rpath()")
+        expect(harness).to_contain("pwd -P")
+        expect(harness).to_contain(
+            "$1 == \"cmd\" && $2 == \"LC_RPATH\""
+        )
+        expect(harness).to_contain(
+            "[ \"$canonical_runtime_dir\" = \"$expected_runtime_dir\" ]"
+        )
+        expect(harness).to_contain("[ -n \"$runtime_rpaths\" ] || return 1")
+        expect(harness).to_contain("done <<EOF")
+        expect(harness).to_contain("    return 1")
+        expect(harness.contains(
+            "grep -Fq \"$(dirname -- \"$SIMPLE_RUNTIME_DYLIB\")\""
+        )).to_equal(false)
+
+        val (same_stdout, same_stderr, same_code) = process_run(
+            "/bin/sh",
+            ["-c", "left=$(mktemp -d)/runtime; mkdir -p \"$left\"; " +
+             "right=$(dirname \"$left\")/alias; ln -s \"$left\" \"$right\"; " +
+             "[ \"$(CDPATH= cd -- \"$left\" && pwd -P)\" = " +
+             "\"$(CDPATH= cd -- \"$right\" && pwd -P)\" ]"]
+        )
+        expect(same_code).to_equal(0)
+        expect(same_stdout).to_equal("")
+        expect(same_stderr).to_equal("")
+
+        val (_different_stdout, _different_stderr, different_code) = process_run(
+            "/bin/sh",
+            ["-c", "left=$(mktemp -d); right=$(mktemp -d); " +
+             "[ \"$(CDPATH= cd -- \"$left\" && pwd -P)\" = " +
+             "\"$(CDPATH= cd -- \"$right\" && pwd -P)\" ]"]
+        )
+        expect(different_code).to_be_greater_than(0)

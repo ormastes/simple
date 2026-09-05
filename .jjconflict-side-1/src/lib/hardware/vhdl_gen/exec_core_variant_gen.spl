@@ -1,0 +1,417 @@
+# Variant exec-core assembly — emits the four flat/axi sibling cores
+# (rv32/rv64 x flat/axi) byte-identical to the goldens in
+# examples/09_embedded/fpga_riscv/rtl/:
+#   *_flat: full-RAM behavioral siblings (SimpleOS boot-tiny / NVMe-fw GHDL
+#           testbenches) — internal RAM + ramdisk preloaded from .mem files.
+#   *_axi:  synthesizable siblings with an AXI-master-shaped external memory
+#           handshake (SoC tops) — no textio, no internal memory arrays.
+#
+# Factoring (one template source, no whole-core forks):
+#   - library header / entity+ports+generics: shared structured emitters
+#     (emit_library_header, emit_entity_spec descriptor tables below).
+#   - decode arms identical to the base cores are REUSED from
+#     rv32_sections/rv64_sections (rv64 via vg_reindent, arms sit 2 deeper).
+#   - flat/axi-common paragraphs live once in rv32_variant_sections /
+#     rv64_variant_sections (fa## sections); fl##/ax## are variant-only.
+#   - .mem file references are emitted here so --mem-prefix applies.
+#
+# Determinism: arrays only, no Dict iteration; two runs are byte-identical.
+
+use std.hardware.riscv_common.xlen.XlenConfig
+use std.hardware.vhdl_gen.gen_types.*
+use std.hardware.vhdl_gen.rv32_sections.{rv32_arm_op_imm, rv32_arm_auipc, rv32_arm_lui, rv32_arm_jal, rv32_arm_jalr, rv32_arm_branch}
+use std.hardware.vhdl_gen.rv64_sections.{rv64_arm_auipc, rv64_arm_lui, rv64_arm_jal, rv64_arm_branch, rv64_sys_glue_b}
+use std.hardware.vhdl_gen.rv32_variant_sections.*
+use std.hardware.vhdl_gen.rv64_variant_sections.*
+
+fn vjl(lines: [text]) -> text:
+    lines.join("\n")
+
+# Synthesizable cores use no textio: 3-line library header.
+fn synth_library_header() -> [text]:
+    var l: [text] = []
+    l = l.push("library ieee;")
+    l = l.push("use ieee.std_logic_1164.all;")
+    l = l.push("use ieee.numeric_std.all;")
+    l
+
+# ---------------------------------------------------------------------------
+# Flat-core memory geometry (drives the RAM_WORDS / RDISK_WORDS generics)
+# ---------------------------------------------------------------------------
+
+# rv32 flat: 16 MB DDR stand-in RAM + 1 MiB ramdisk bank, in 32-bit words.
+struct VgFlatGeometry:
+    ram_words: i64
+    rdisk_words: i64
+
+fn rv32_flat_geometry() -> VgFlatGeometry:
+    VgFlatGeometry(ram_words: 4194304, rdisk_words: 262144)
+
+# ---------------------------------------------------------------------------
+# Entity descriptor tables (parsed shape of the golden entities)
+# ---------------------------------------------------------------------------
+
+fn rv32_flat_generics(geo: VgFlatGeometry) -> [VgGenericSpec]:
+    var g: [VgGenericSpec] = []
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "CLK_FREQ", name_w: 9, ty: "natural", default_val: "100000000"))
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "BAUD_RATE", name_w: 10, ty: "natural", default_val: "115200"))
+    var gp1: [text] = []
+    gp1 = gp1.push("    -- Main RAM depth in 32-bit words. Default 4,194,304 = 16 MB, the historical")
+    gp1 = gp1.push("    -- hardcoded size (DDR stand-in). A BRAM-only build overrides this with a")
+    gp1 = gp1.push("    -- much smaller depth; see tb_rv32_simpleos_boot_tiny.vhd. Addresses at or")
+    gp1 = gp1.push("    -- above BASE_ADDR + RAM_WORDS*4 simply fall outside is_ram(), so an image")
+    gp1 = gp1.push("    -- that overflows the configured budget faults visibly instead of aliasing.")
+    g = g.push(VgGenericSpec(pre_comments: gp1, name: "RAM_WORDS", name_w: 10, ty: "natural", default_val: geo.ram_words.to_text()))
+    var gp2: [text] = []
+    gp2 = gp2.push("    -- Ramdisk bank depth in 32-bit words. Default 262,144 = 1 MiB.")
+    g = g.push(VgGenericSpec(pre_comments: gp2, name: "RDISK_WORDS", name_w: 12, ty: "natural", default_val: geo.rdisk_words.to_text()))
+    g
+
+fn rv32_flat_ports() -> [VgPortSpec]:
+    var p: [VgPortSpec] = []
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "clk", name_w: 4, dir: "in", dir_w: 2, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "rst", name_w: 4, dir: "in", dir_w: 2, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "uart_tx", name_w: 8, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_uart_valid", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_uart_byte", name_w: 16, dir: "out", dir_w: 3, ty: "std_logic_vector(7 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_pc", name_w: 9, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_ins", name_w: 10, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_a0", name_w: 9, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_ra", name_w: 9, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_sp", name_w: 9, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p
+
+fn rv32_axi_generics() -> [VgGenericSpec]:
+    var g: [VgGenericSpec] = []
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "CLK_FREQ", name_w: 9, ty: "natural", default_val: "100000000"))
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "BAUD_RATE", name_w: 10, ty: "natural", default_val: "115200"))
+    g
+
+fn rv32_axi_ports() -> [VgPortSpec]:
+    var p: [VgPortSpec] = []
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "clk", name_w: 4, dir: "in", dir_w: 2, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "rst", name_w: 4, dir: "in", dir_w: 2, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "uart_tx", name_w: 8, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    var pp1: [text] = []
+    pp1 = pp1.push("    -- External synchronous memory interface (AXI-master-shaped).")
+    pp1 = pp1.push("    -- Handshake: core holds mem_req='1' with a stable word-aligned mem_addr")
+    pp1 = pp1.push("    -- until the slave pulses mem_rvalid='1' for one cycle (read data on")
+    pp1 = pp1.push("    -- mem_rdata, or write accepted). mem_req drops the cycle after rvalid, so")
+    pp1 = pp1.push("    -- the slave sees a >=1-cycle idle gap between transactions.")
+    p = p.push(VgPortSpec(pre_comments: pp1, name: "mem_req", name_w: 10, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_we", name_w: 10, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_addr", name_w: 10, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_wdata", name_w: 10, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_wstrb", name_w: 10, dir: "out", dir_w: 3, ty: "std_logic_vector(3 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_rdata", name_w: 10, dir: "in", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_rvalid", name_w: 10, dir: "in", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_uart_valid", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_uart_byte", name_w: 16, dir: "out", dir_w: 3, ty: "std_logic_vector(7 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_pc", name_w: 9, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_ins", name_w: 10, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_a0", name_w: 9, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_ra", name_w: 9, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_sp", name_w: 9, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p
+
+fn rv64_flat_generics() -> [VgGenericSpec]:
+    var g: [VgGenericSpec] = []
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "CLK_FREQ", name_w: 10, ty: "natural", default_val: "100000000"))
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "BAUD_RATE", name_w: 10, ty: "natural", default_val: "115200"))
+    g
+
+fn rv64_flat_ports() -> [VgPortSpec]:
+    var p: [VgPortSpec] = []
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "clk", name_w: 17, dir: "in", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "rst", name_w: 17, dir: "in", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "uart_tx", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_uart_valid", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_uart_byte", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(7 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_pc", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_ins", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_a0", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_ra", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_sp", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p
+
+fn rv64_axi_generics() -> [VgGenericSpec]:
+    var g: [VgGenericSpec] = []
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "CLK_FREQ", name_w: 10, ty: "natural", default_val: "100000000"))
+    g = g.push(VgGenericSpec(pre_comments: no_lines(), name: "BAUD_RATE", name_w: 10, ty: "natural", default_val: "115200"))
+    g
+
+fn rv64_axi_ports() -> [VgPortSpec]:
+    var p: [VgPortSpec] = []
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "clk", name_w: 17, dir: "in", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "rst", name_w: 17, dir: "in", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "uart_tx", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    var pp1: [text] = []
+    pp1 = pp1.push("    -- External synchronous memory interface (AXI-master-shaped, 64-bit).")
+    pp1 = pp1.push("    -- Handshake: core holds mem_req='1' with a stable 8-byte-aligned mem_addr")
+    pp1 = pp1.push("    -- until the slave pulses mem_rvalid='1' for one cycle (read data on")
+    pp1 = pp1.push("    -- mem_rdata, or write accepted). mem_req drops the cycle after rvalid, so")
+    pp1 = pp1.push("    -- the slave sees a >=1-cycle idle gap between transactions.")
+    p = p.push(VgPortSpec(pre_comments: pp1, name: "mem_req", name_w: 11, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_we", name_w: 11, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_addr", name_w: 11, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_wdata", name_w: 11, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_wstrb", name_w: 11, dir: "out", dir_w: 3, ty: "std_logic_vector(7 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_rdata", name_w: 11, dir: "in", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "mem_rvalid", name_w: 11, dir: "in", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_uart_valid", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_uart_byte", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(7 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_pc", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_ins", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(31 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_a0", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_ra", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p = p.push(VgPortSpec(pre_comments: no_lines(), name: "debug_sp", name_w: 17, dir: "out", dir_w: 3, ty: "std_logic_vector(63 downto 0)", default_val: ""))
+    p
+
+# ---------------------------------------------------------------------------
+# Whole-core assembly
+# ---------------------------------------------------------------------------
+
+fn generate_rv32_flat(mem_prefix: text) -> text:
+    val ent = "rv32_exec_core_flat"
+    var parts: [text] = []
+    parts = parts.push(vjl(emit_library_header()))
+    parts = parts.push(vjl(rv32_flat_head()))
+    parts = parts.push(vjl(emit_entity_spec(ent, rv32_flat_generics(rv32_flat_geometry()), rv32_flat_ports())))
+    parts = parts.push("")
+    parts = parts.push("architecture rtl of " + ent + " is")
+    parts = parts.push(vjl(rv32_fl01()))
+    parts = parts.push("    file f : text open read_mode is \"" + mem_prefix + "rv32_flat.mem" + "\";")
+    parts = parts.push(vjl(rv32_fl02()))
+    parts = parts.push("    file_open(fstatus, f, \"" + mem_prefix + "rv32_ramdisk.mem" + "\", read_mode);")
+    parts = parts.push(vjl(rv32_fl03()))
+    parts = parts.push(vjl(rv32_fa01()))
+    parts = parts.push(vjl(rv32_fl04()))
+    parts = parts.push(vjl(rv32_fa02()))
+    parts = parts.push(vjl(rv32_fa03()))
+    parts = parts.push(vjl(rv32_fl05()))
+    parts = parts.push(vjl(rv32_fa04()))
+    parts = parts.push(vjl(rv32_fl06()))
+    parts = parts.push(vjl(rv32_fa05()))
+    parts = parts.push(vjl(rv32_fl07()))
+    parts = parts.push(vjl(rv32_fa06()))
+    parts = parts.push(vjl(rv32_fa07()))
+    parts = parts.push(vjl(rv32_fl08()))
+    parts = parts.push(vjl(rv32_fa08()))
+    parts = parts.push(vjl(rv32_fl09()))
+    parts = parts.push(vjl(rv32_fa09()))
+    parts = parts.push(vjl(rv32_fl10()))
+    parts = parts.push(vjl(rv32_fa10()))
+    parts = parts.push(vjl(rv32_fl11()))
+    parts = parts.push(vjl(rv32_fa11()))
+    parts = parts.push(vjl(rv32_fl12()))
+    parts = parts.push(vjl(rv32_fa12()))
+    parts = parts.push(vjl(rv32_fl13()))
+    parts = parts.push(vjl(rv32_fa13()))
+    parts = parts.push(vjl(rv32_fl14()))
+    parts = parts.push(vjl(rv32_fa14()))
+    parts = parts.push(vjl(rv32_fl15()))
+    parts = parts.push(vjl(rv32_fa15()))
+    parts = parts.push(vjl(rv32_arm_op_imm()))
+    parts = parts.push(vjl(rv32_fa16()))
+    parts = parts.push(vjl(rv32_fl16()))
+    parts = parts.push(vjl(rv32_fa17()))
+    parts = parts.push(vjl(rv32_fl17()))
+    parts = parts.push(vjl(rv32_fa18()))
+    parts = parts.push(vjl(rv32_fl18()))
+    parts = parts.push(vjl(rv32_fa19()))
+    parts = parts.push(vjl(rv32_fl19()))
+    parts = parts.push(vjl(rv32_fa20()))
+    parts = parts.push(vjl(rv32_arm_auipc()))
+    parts = parts.push(vjl(rv32_fa21()))
+    parts = parts.push(vjl(rv32_arm_lui()))
+    parts = parts.push(vjl(rv32_fa22()))
+    parts = parts.push(vjl(rv32_arm_jal()))
+    parts = parts.push(vjl(rv32_fa23()))
+    parts = parts.push(vjl(rv32_arm_jalr()))
+    parts = parts.push(vjl(rv32_fa24()))
+    parts = parts.push(vjl(rv32_arm_branch()))
+    parts = parts.push(vjl(rv32_fa25()))
+    parts = parts.push(vjl(rv32_fl20()))
+    parts = parts.push(vjl(rv32_fa26()))
+    parts = parts.push(vjl(rv32_fl21()))
+    parts = parts.push(vjl(rv32_fa27()))
+    parts = parts.push(vjl(rv32_fl22()))
+    parts = parts.push(vjl(rv32_fa28()))
+    parts.join("\n") + "\n"
+
+fn generate_rv32_axi() -> text:
+    val ent = "rv32_exec_core_axi"
+    var parts: [text] = []
+    parts = parts.push(vjl(synth_library_header()))
+    parts = parts.push(vjl(rv32_axi_head()))
+    parts = parts.push(vjl(emit_entity_spec(ent, rv32_axi_generics(), rv32_axi_ports())))
+    parts = parts.push("")
+    parts = parts.push("architecture rtl of " + ent + " is")
+    parts = parts.push(vjl(rv32_ax01()))
+    parts = parts.push(vjl(rv32_fa01()))
+    parts = parts.push(vjl(rv32_ax02()))
+    parts = parts.push(vjl(rv32_fa02()))
+    parts = parts.push(vjl(rv32_ax03()))
+    parts = parts.push(vjl(rv32_fa03()))
+    parts = parts.push(vjl(rv32_ax04()))
+    parts = parts.push(vjl(rv32_fa04()))
+    parts = parts.push(vjl(rv32_fa05()))
+    parts = parts.push(vjl(rv32_ax05()))
+    parts = parts.push(vjl(rv32_fa06()))
+    parts = parts.push(vjl(rv32_ax06()))
+    parts = parts.push(vjl(rv32_fa07()))
+    parts = parts.push(vjl(rv32_ax07()))
+    parts = parts.push(vjl(rv32_fa08()))
+    parts = parts.push(vjl(rv32_ax08()))
+    parts = parts.push(vjl(rv32_fa09()))
+    parts = parts.push(vjl(rv32_ax09()))
+    parts = parts.push(vjl(rv32_fa10()))
+    parts = parts.push(vjl(rv32_ax10()))
+    parts = parts.push(vjl(rv32_fa11()))
+    parts = parts.push(vjl(rv32_fa12()))
+    parts = parts.push(vjl(rv32_ax11()))
+    parts = parts.push(vjl(rv32_fa13()))
+    parts = parts.push(vjl(rv32_ax12()))
+    parts = parts.push(vjl(rv32_fa14()))
+    parts = parts.push(vjl(rv32_ax13()))
+    parts = parts.push(vjl(rv32_fa15()))
+    parts = parts.push(vjl(rv32_arm_op_imm()))
+    parts = parts.push(vjl(rv32_fa16()))
+    parts = parts.push(vjl(rv32_ax14()))
+    parts = parts.push(vjl(rv32_fa17()))
+    parts = parts.push(vjl(rv32_ax15()))
+    parts = parts.push(vjl(rv32_fa18()))
+    parts = parts.push(vjl(rv32_ax16()))
+    parts = parts.push(vjl(rv32_fa19()))
+    parts = parts.push(vjl(rv32_ax17()))
+    parts = parts.push(vjl(rv32_fa20()))
+    parts = parts.push(vjl(rv32_arm_auipc()))
+    parts = parts.push(vjl(rv32_fa21()))
+    parts = parts.push(vjl(rv32_arm_lui()))
+    parts = parts.push(vjl(rv32_fa22()))
+    parts = parts.push(vjl(rv32_arm_jal()))
+    parts = parts.push(vjl(rv32_fa23()))
+    parts = parts.push(vjl(rv32_arm_jalr()))
+    parts = parts.push(vjl(rv32_fa24()))
+    parts = parts.push(vjl(rv32_arm_branch()))
+    parts = parts.push(vjl(rv32_fa25()))
+    parts = parts.push(vjl(rv32_ax18()))
+    parts = parts.push(vjl(rv32_fa26()))
+    parts = parts.push(vjl(rv32_ax19()))
+    parts = parts.push(vjl(rv32_fa27()))
+    parts = parts.push(vjl(rv32_ax20()))
+    parts = parts.push(vjl(rv32_fa28()))
+    parts.join("\n") + "\n"
+
+fn generate_rv64_flat(mem_prefix: text) -> text:
+    val ent = "rv64_exec_core_flat"
+    var parts: [text] = []
+    parts = parts.push(vjl(emit_library_header()))
+    parts = parts.push(vjl(rv64_flat_head()))
+    parts = parts.push(vjl(emit_entity_spec(ent, rv64_flat_generics(), rv64_flat_ports())))
+    parts = parts.push("")
+    parts = parts.push("architecture rtl of " + ent + " is")
+    parts = parts.push(vjl(rv64_fl01()))
+    parts = parts.push("    file f        : text open read_mode is \"" + mem_prefix + "rv64_flat.mem" + "\";")
+    parts = parts.push(vjl(rv64_fl02()))
+    parts = parts.push("    file_open(fstat, f, \"" + mem_prefix + "rv64_ramdisk.mem" + "\", read_mode);")
+    parts = parts.push(vjl(rv64_fl03()))
+    parts = parts.push(vjl(rv64_fa01()))
+    parts = parts.push(vjl(rv64_fl04()))
+    parts = parts.push(vjl(rv64_fa02()))
+    parts = parts.push(vjl(rv64_fa03()))
+    parts = parts.push(vjl(rv64_fa04()))
+    parts = parts.push(vjl(rv64_fl05()))
+    parts = parts.push(vjl(rv64_fa05()))
+    parts = parts.push(vjl(rv64_fl06()))
+    parts = parts.push(vjl(rv64_fa06()))
+    parts = parts.push(vjl(rv64_fl07()))
+    parts = parts.push(vjl(rv64_fa07()))
+    parts = parts.push(vjl(rv64_fl08()))
+    parts = parts.push(vjl(rv64_fa08()))
+    parts = parts.push(vjl(rv64_fl09()))
+    parts = parts.push(vjl(rv64_fa09()))
+    parts = parts.push(vjl(rv64_fl10()))
+    parts = parts.push(vjl(rv64_fa10()))
+    parts = parts.push(vjl(rv64_fl11()))
+    parts = parts.push(vjl(rv64_fa11()))
+    parts = parts.push(vjl(rv64_fl12()))
+    parts = parts.push(vjl(rv64_fa12()))
+    parts = parts.push(vjl(rv64_fa13()))
+    parts = parts.push(vjl(vg_reindent(rv64_arm_auipc(), 2)))
+    parts = parts.push(vjl(rv64_fa14()))
+    parts = parts.push(vjl(vg_reindent(rv64_arm_lui(), 2)))
+    parts = parts.push(vjl(rv64_fa15()))
+    parts = parts.push(vjl(vg_reindent(rv64_arm_jal(), 2)))
+    parts = parts.push(vjl(rv64_fa16()))
+    parts = parts.push(vjl(vg_reindent(rv64_arm_branch(), 2)))
+    parts = parts.push(vjl(rv64_fa17()))
+    parts = parts.push(vjl(vg_reindent(rv64_sys_glue_b(), 2)))
+    parts = parts.push(vjl(rv64_fa18()))
+    parts = parts.push(vjl(rv64_fl13()))
+    parts = parts.push(vjl(rv64_fa19()))
+    parts = parts.push(vjl(rv64_fl14()))
+    parts = parts.push(vjl(rv64_fa20()))
+    parts.join("\n") + "\n"
+
+fn generate_rv64_axi() -> text:
+    val ent = "rv64_exec_core_axi"
+    var parts: [text] = []
+    parts = parts.push(vjl(synth_library_header()))
+    parts = parts.push(vjl(rv64_axi_head()))
+    parts = parts.push(vjl(emit_entity_spec(ent, rv64_axi_generics(), rv64_axi_ports())))
+    parts = parts.push("")
+    parts = parts.push("architecture rtl of " + ent + " is")
+    parts = parts.push(vjl(rv64_ax01()))
+    parts = parts.push(vjl(rv64_fa01()))
+    parts = parts.push(vjl(rv64_ax02()))
+    parts = parts.push(vjl(rv64_fa02()))
+    parts = parts.push(vjl(rv64_ax03()))
+    parts = parts.push(vjl(rv64_fa03()))
+    parts = parts.push(vjl(rv64_ax04()))
+    parts = parts.push(vjl(rv64_fa04()))
+    parts = parts.push(vjl(rv64_ax05()))
+    parts = parts.push(vjl(rv64_fa05()))
+    parts = parts.push(vjl(rv64_ax06()))
+    parts = parts.push(vjl(rv64_fa06()))
+    parts = parts.push(vjl(rv64_ax07()))
+    parts = parts.push(vjl(rv64_fa07()))
+    parts = parts.push(vjl(rv64_ax08()))
+    parts = parts.push(vjl(rv64_fa08()))
+    parts = parts.push(vjl(rv64_ax09()))
+    parts = parts.push(vjl(rv64_fa09()))
+    parts = parts.push(vjl(rv64_ax10()))
+    parts = parts.push(vjl(rv64_fa10()))
+    parts = parts.push(vjl(rv64_ax11()))
+    parts = parts.push(vjl(rv64_fa11()))
+    parts = parts.push(vjl(rv64_ax12()))
+    parts = parts.push(vjl(rv64_fa12()))
+    parts = parts.push(vjl(rv64_fa13()))
+    parts = parts.push(vjl(vg_reindent(rv64_arm_auipc(), 2)))
+    parts = parts.push(vjl(rv64_fa14()))
+    parts = parts.push(vjl(vg_reindent(rv64_arm_lui(), 2)))
+    parts = parts.push(vjl(rv64_fa15()))
+    parts = parts.push(vjl(vg_reindent(rv64_arm_jal(), 2)))
+    parts = parts.push(vjl(rv64_fa16()))
+    parts = parts.push(vjl(vg_reindent(rv64_arm_branch(), 2)))
+    parts = parts.push(vjl(rv64_fa17()))
+    parts = parts.push(vjl(vg_reindent(rv64_sys_glue_b(), 2)))
+    parts = parts.push(vjl(rv64_fa18()))
+    parts = parts.push(vjl(rv64_ax13()))
+    parts = parts.push(vjl(rv64_fa19()))
+    parts = parts.push(vjl(rv64_ax14()))
+    parts = parts.push(vjl(rv64_fa20()))
+    parts.join("\n") + "\n"
+
+# Public entries: one shared template source, parameterized by XlenConfig.
+fn generate_exec_core_flat(cfg: XlenConfig, mem_prefix: text) -> text:
+    if cfg.is_rv32():
+        generate_rv32_flat(mem_prefix)
+    else:
+        generate_rv64_flat(mem_prefix)
+
+fn generate_exec_core_axi(cfg: XlenConfig) -> text:
+    if cfg.is_rv32():
+        generate_rv32_axi()
+    else:
+        generate_rv64_axi()

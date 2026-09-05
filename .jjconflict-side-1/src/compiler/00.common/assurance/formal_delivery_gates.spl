@@ -1,0 +1,221 @@
+# Ordered delivery gates for Simple Formal Verification 2.0.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.verified_release_gate.{
+    SignedVerifiedReleaseBundleDecisionV1, SignedVerifiedReleaseBundleDecisionV2}
+
+pub enum FormalDeliveryGateV1:
+    VerificationTruthfulness
+    ExactCoreSemantics
+    VirCompilerRelation
+    AopMacroClosure
+    SimpleOsVerticalSlice
+    GeneratedRv32iEndToEnd
+    Rv64PrivilegeMmuLinux
+    VerifiedRelease
+
+    fn name() -> text:
+        match self:
+            case VerificationTruthfulness: "verification_truthfulness"
+            case ExactCoreSemantics: "exact_core_semantics"
+            case VirCompilerRelation: "vir_compiler_relation"
+            case AopMacroClosure: "aop_macro_closure"
+            case SimpleOsVerticalSlice: "simpleos_vertical_slice"
+            case GeneratedRv32iEndToEnd: "generated_rv32i_end_to_end"
+            case Rv64PrivilegeMmuLinux: "rv64_privilege_mmu_linux"
+            case VerifiedRelease: "verified_release"
+
+pub enum FormalDeliveryGateStatusV1:
+    Passed
+    Failed
+    Blocked
+
+    fn name() -> text:
+        match self:
+            case Passed: "passed"
+            case Failed: "failed"
+            case Blocked: "blocked"
+
+pub struct FormalDeliveryGateEvidenceV1:
+    gate: FormalDeliveryGateV1
+    status: FormalDeliveryGateStatusV1
+    receipt_hashes: [text]
+    evidence_hash: text
+    diagnostic: text
+
+    fn canonical_text() -> text:
+        var receipts: [text] = []
+        for receipt in self.receipt_hashes:
+            receipts.push(receipt.len().to_string() + ":" + receipt)
+        self.gate.name().len().to_string() + ":" + self.gate.name() +
+            self.status.name().len().to_string() + ":" + self.status.name() +
+            self.receipt_hashes.len().to_string() + ":[" + receipts.join("") +
+            "]" + self.evidence_hash.len().to_string() + ":" +
+            self.evidence_hash + self.diagnostic.len().to_string() + ":" +
+            self.diagnostic
+
+pub struct FormalDeliveryReceiptFileV1:
+    receipt_hash: text
+    content: text
+
+pub struct FormalDeliveryDecisionV1:
+    accepted_state: bool
+    release_ready: bool
+    highest_passed_gate: text
+    plan_hash: text
+    diagnostic: text
+
+# V2 keeps the frozen gate rows but binds the terminal release decision to the
+# V2 policy-aware signed bundle.  It is intentionally a new decision record:
+# a V1 plan hash never stands in for V2 release closure.
+pub struct FormalDeliveryDecisionV2:
+    accepted_state: bool
+    release_ready: bool
+    highest_passed_gate: text
+    plan_hash: text
+    diagnostic: text
+
+pub fn formal_delivery_manifest_hash_v1(
+    evidence: [FormalDeliveryGateEvidenceV1]
+) -> text:
+    var rows: [text] = []
+    for item in evidence: rows.push(item.canonical_text())
+    var framed: [text] = []
+    for row in rows: framed.push(row.len().to_string() + ":" + row)
+    sha256_text("FormalDeliveryGateManifest-v1" +
+        rows.len().to_string() + ":[" + framed.join("") + "]")
+
+fn expected_formal_delivery_gates_v1() -> [FormalDeliveryGateV1]:
+    [FormalDeliveryGateV1.VerificationTruthfulness,
+        FormalDeliveryGateV1.ExactCoreSemantics,
+        FormalDeliveryGateV1.VirCompilerRelation,
+        FormalDeliveryGateV1.AopMacroClosure,
+        FormalDeliveryGateV1.SimpleOsVerticalSlice,
+        FormalDeliveryGateV1.GeneratedRv32iEndToEnd,
+        FormalDeliveryGateV1.Rv64PrivilegeMmuLinux,
+        FormalDeliveryGateV1.VerifiedRelease]
+
+fn delivery_hashes_closed_v1(values: [text]) -> bool:
+    if values.is_empty(): return false
+    var seen: [text] = []
+    for value in values:
+        if not sha256_lower_hex_valid(value) or seen.contains(value): return false
+        seen.push(value)
+    true
+
+pub fn evaluate_formal_delivery_gates_v1(
+    evidence: [FormalDeliveryGateEvidenceV1],
+    verified_release_bundle: SignedVerifiedReleaseBundleDecisionV1?
+) -> FormalDeliveryDecisionV1:
+    val expected = expected_formal_delivery_gates_v1()
+    if evidence.len() != expected.len(): return FormalDeliveryDecisionV1(
+        false, false, "", "",
+        "FV2-E-DELIVERY-COUNT: all eight delivery gates are required")
+    var rows: [text] = []
+    var highest = ""
+    var prior_passed = true
+    for index in 0..expected.len():
+        val item = evidence[index]
+        if item.gate != expected[index]: return FormalDeliveryDecisionV1(
+            false, false, highest, "",
+            "FV2-E-DELIVERY-ORDER: delivery gates must use the frozen order")
+        if item.status == FormalDeliveryGateStatusV1.Passed:
+            if not prior_passed: return FormalDeliveryDecisionV1(
+                false, false, highest, "",
+                "FV2-E-DELIVERY-PREMATURE: a gate passed before every predecessor")
+            if not delivery_hashes_closed_v1(item.receipt_hashes) or
+                    not sha256_lower_hex_valid(item.evidence_hash) or
+                    item.diagnostic != "":
+                return FormalDeliveryDecisionV1(false, false, highest, "",
+                    "FV2-E-DELIVERY-EVIDENCE: passed gate lacks exact clean evidence")
+            highest = item.gate.name()
+        else:
+            prior_passed = false
+            if item.diagnostic == "": return FormalDeliveryDecisionV1(
+                false, false, highest, "",
+                "FV2-E-DELIVERY-DIAGNOSTIC: failed or blocked gate requires a reason")
+            if not item.receipt_hashes.is_empty() or item.evidence_hash != "":
+                return FormalDeliveryDecisionV1(false, false, highest, "",
+                    "FV2-E-DELIVERY-NONPASS-EVIDENCE: blocked/failed gate cannot publish passing evidence")
+        rows.push(item.canonical_text())
+    val all_passed = prior_passed
+    var release_hash = ""
+    if all_passed:
+        val release = match verified_release_bundle:
+            case Some(value): value
+            case _: return FormalDeliveryDecisionV1(false, false, highest, "",
+                "FV2-E-DELIVERY-RELEASE-DECISION: final gate requires the typed verified release decision")
+        if not release.admitted or not release.release_decision.passed() or
+                release.bundle_hash == "": return FormalDeliveryDecisionV1(
+            false, false, highest, "",
+            "FV2-E-DELIVERY-RELEASE-REJECTED: signed release bundle is not admitted")
+        release_hash = release.bundle_hash
+    elif verified_release_bundle != nil:
+        return FormalDeliveryDecisionV1(false, false, highest, "",
+            "FV2-E-DELIVERY-RELEASE-PREMATURE: release decision cannot precede all gates")
+    var framed_rows: [text] = []
+    for row in rows:
+        framed_rows.push(row.len().to_string() + ":" + row)
+    val plan_hash = sha256_text("FormalDeliveryGates-v1" +
+        rows.len().to_string() + ":[" + framed_rows.join("") + "]" +
+        release_hash.len().to_string() + ":" + release_hash)
+    return FormalDeliveryDecisionV1(true, all_passed, highest, plan_hash, "")
+
+pub fn evaluate_formal_delivery_gates_v2(
+    evidence: [FormalDeliveryGateEvidenceV1],
+    verified_release_bundle: SignedVerifiedReleaseBundleDecisionV2?
+) -> FormalDeliveryDecisionV2:
+    val expected = expected_formal_delivery_gates_v1()
+    if evidence.len() != expected.len(): return FormalDeliveryDecisionV2(
+        false, false, "", "",
+        "FV2-E-DELIVERY-COUNT-V2: all eight delivery gates are required")
+    var rows: [text] = []
+    var highest = ""
+    var prior_passed = true
+    for index in 0..expected.len():
+        val item = evidence[index]
+        if item.gate != expected[index]: return FormalDeliveryDecisionV2(
+            false, false, highest, "",
+            "FV2-E-DELIVERY-ORDER-V2: delivery gates must use the frozen order")
+        if item.status == FormalDeliveryGateStatusV1.Passed:
+            if not prior_passed: return FormalDeliveryDecisionV2(
+                false, false, highest, "",
+                "FV2-E-DELIVERY-PREMATURE-V2: a gate passed before every predecessor")
+            if not delivery_hashes_closed_v1(item.receipt_hashes) or
+                    not sha256_lower_hex_valid(item.evidence_hash) or
+                    item.diagnostic != "":
+                return FormalDeliveryDecisionV2(false, false, highest, "",
+                    "FV2-E-DELIVERY-EVIDENCE-V2: passed gate lacks exact clean evidence")
+            highest = item.gate.name()
+        else:
+            prior_passed = false
+            if item.diagnostic == "": return FormalDeliveryDecisionV2(
+                false, false, highest, "",
+                "FV2-E-DELIVERY-DIAGNOSTIC-V2: failed or blocked gate requires a reason")
+            if not item.receipt_hashes.is_empty() or item.evidence_hash != "":
+                return FormalDeliveryDecisionV2(false, false, highest, "",
+                    "FV2-E-DELIVERY-NONPASS-EVIDENCE-V2: blocked/failed gate cannot publish passing evidence")
+        rows.push(item.canonical_text())
+    val all_passed = prior_passed
+    var release_hash = ""
+    if all_passed:
+        val release = match verified_release_bundle:
+            case Some(value): value
+            case _: return FormalDeliveryDecisionV2(false, false, highest, "",
+                "FV2-E-DELIVERY-RELEASE-DECISION-V2: final gate requires the typed V2 release decision")
+        if not release.admitted or not release.release_decision.passed() or
+                release.bundle_hash == "": return FormalDeliveryDecisionV2(
+            false, false, highest, "",
+            "FV2-E-DELIVERY-RELEASE-REJECTED-V2: signed V2 release bundle is not admitted")
+        release_hash = release.bundle_hash
+    elif verified_release_bundle != nil:
+        return FormalDeliveryDecisionV2(false, false, highest, "",
+            "FV2-E-DELIVERY-RELEASE-PREMATURE-V2: release decision cannot precede all gates")
+    var framed_rows: [text] = []
+    for row in rows:
+        framed_rows.push(row.len().to_string() + ":" + row)
+    val plan_hash = sha256_text("FormalDeliveryGates-v2" +
+        rows.len().to_string() + ":[" + framed_rows.join("") + "]" +
+        release_hash.len().to_string() + ":" + release_hash)
+    FormalDeliveryDecisionV2(true, all_passed, highest, plan_hash, "")

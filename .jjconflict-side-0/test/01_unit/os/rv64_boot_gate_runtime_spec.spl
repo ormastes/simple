@@ -1,0 +1,111 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""Runtime-result adapter for the RV64 lifecycle gate."""
+use std.spec.step
+
+use std.spec.step
+
+use std.spec.*
+use os.rv64_boot_gate_runtime.{Rv64BootGateRuntime}
+use os.kernel.arch.riscv64.paging.{Rv64Sv39ActivationResult}
+use os.kernel.boot.rv64_pid1_boot.{Rv64Pid1BootResult}
+use os.kernel.boot.riscv_services.{RiscvNetworkBootFacts}
+use os.apps.sshd.sshd.{SshDaemonAcceptResult}
+use os.services.wm.rv64_production_wm_adapter.{Rv64ProductionWmVerdict}
+
+
+fn runtime_through_first_ssh_resume() -> Rv64BootGateRuntime:
+    var gate = Rv64BootGateRuntime.create()
+    gate.observe_sv39(Rv64Sv39ActivationResult(root_phys: 0x81000000, satp_value: 0x8000000000081000, satp_mode: 8, satp_root_ppn: 0x81000, active: true))
+    gate.observe_pid1(Rv64Pid1BootResult(created: true, live: true, pid: 1))
+    gate.observe_network(RiscvNetworkBootFacts(tx_ready: true, rx_ready: true, service_ready: true))
+    gate.observe_sshd_ready(true)
+    gate.observe_ssh_progress(SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: true))
+    gate
+
+describe "RV64 runtime boot-gate adapter":
+    # @manual scenario evidence
+    it "rejects SATP PPN bits that disagree with the separately decoded PPN":
+        # @req REQ-SSPEC-UNIT
+        step("rejects SATP PPN bits that disagree with the separately decoded PPN")
+        var gate = Rv64BootGateRuntime.create()
+        gate.observe_sv39(Rv64Sv39ActivationResult(root_phys: 0x81000000, satp_value: 0x8000000000082000, satp_mode: 8, satp_root_ppn: 0x81000, active: true))
+        expect(gate.verdict()).to_equal("FAIL:sv39-readback-unproven")
+
+    it "rejects a decoded Sv39 mode that disagrees with the SATP mode bits":
+        # @req REQ-SSPEC-UNIT
+        step("rejects a decoded Sv39 mode that disagrees with the SATP mode bits")
+        var gate = Rv64BootGateRuntime.create()
+        gate.observe_sv39(Rv64Sv39ActivationResult(root_phys: 0x81000000, satp_value: 0x9000000000081000, satp_mode: 8, satp_root_ppn: 0x81000, active: true))
+        expect(gate.verdict()).to_equal("FAIL:sv39-readback-unproven")
+
+    it "rejects an unaligned root even when its truncated PPN matches SATP":
+        # @req REQ-SSPEC-UNIT
+        step("rejects an unaligned root even when its truncated PPN matches SATP")
+        var gate = Rv64BootGateRuntime.create()
+        gate.observe_sv39(Rv64Sv39ActivationResult(root_phys: 0x81000001, satp_value: 0x8000000000081000, satp_mode: 8, satp_root_ppn: 0x81000, active: true))
+        expect(gate.verdict()).to_equal("FAIL:sv39-readback-unproven")
+
+    it "remains incomplete without a production WM process/present verdict":
+        # @req REQ-SSPEC-UNIT
+        step("remains incomplete without a production WM process/present verdict")
+        val gate = runtime_through_first_ssh_resume()
+        expect(gate.verdict()).to_equal("INCOMPLETE:missing=wm-process-owned-frame-ready")
+
+    it "fails closed when the production WM producer is unavailable":
+        # @req REQ-SSPEC-UNIT
+        step("fails closed when the production WM producer is unavailable")
+        var gate = runtime_through_first_ssh_resume()
+        gate.block_missing_wm_producer()
+        expect(gate.verdict()).to_equal("FAIL:wm-production-launch-and-engine2d-present-producer-missing")
+
+    it "rejects an SSH accept without completed session recovery":
+        # @req REQ-SSPEC-UNIT
+        step("rejects an SSH accept without completed session recovery")
+        var gate = Rv64BootGateRuntime.create()
+        gate.observe_sv39(Rv64Sv39ActivationResult(root_phys: 0x81000000, satp_value: 0x8000000000081000, satp_mode: 8, satp_root_ppn: 0x81000, active: true))
+        gate.observe_pid1(Rv64Pid1BootResult(created: true, live: true, pid: 1))
+        gate.observe_network(RiscvNetworkBootFacts(tx_ready: true, rx_ready: true, service_ready: true))
+        gate.observe_sshd_ready(true)
+        gate.observe_ssh_progress(SshDaemonAcceptResult(accepted: true, session_complete: false, accept_resumed: false))
+        expect(gate.verdict()).to_equal("FAIL:sshd-session-incomplete")
+
+    it "keeps validating accept recovery after the ordered SSH receipt":
+        # @req REQ-SSPEC-UNIT
+        step("keeps validating accept recovery after the ordered SSH receipt")
+        var gate = runtime_through_first_ssh_resume()
+        val broken = SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: false)
+        expect(gate.observe_ssh_progress(broken)).to_be(false)
+        expect(gate.verdict()).to_equal("FAIL:sshd-later-accept-not-resumed")
+        val recovered = SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: true)
+        expect(gate.observe_ssh_progress(recovered)).to_be(false)
+        expect(gate.verdict()).to_equal("FAIL:sshd-later-accept-not-resumed")
+
+    it "fails closed when a later accepted session does not complete":
+        # @req REQ-SSPEC-UNIT
+        step("fails closed when a later accepted session does not complete")
+        var gate = runtime_through_first_ssh_resume()
+        val incomplete = SshDaemonAcceptResult(accepted: true, session_complete: false, accept_resumed: false)
+        expect(gate.observe_ssh_progress(incomplete)).to_be(false)
+        expect(gate.verdict()).to_equal("FAIL:sshd-later-session-incomplete")
+
+    it "keeps a completed later auth attempt in the accept loop":
+        # @req REQ-SSPEC-UNIT
+        step("keeps a completed later auth attempt in the accept loop")
+        var gate = runtime_through_first_ssh_resume()
+        val completed = SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: true)
+        expect(gate.observe_ssh_progress(completed)).to_be(true)
+        expect(gate.verdict()).to_equal("INCOMPLETE:missing=wm-process-owned-frame-ready")
+
+    it "reaches terminal PASS only from the one production WM receipt":
+        # @req REQ-SSPEC-UNIT
+        step("reaches terminal PASS only from the one production WM receipt")
+        var gate = runtime_through_first_ssh_resume()
+        val wm = Rv64ProductionWmVerdict(ready: true, failed: false, process_id: 41u64, first_present_revision: 7, reason: "ready")
+        expect(gate.observe_wm(wm)).to_be(true)
+        expect(gate.verdict()).to_equal("PASS")
+        val later = SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: true)
+        expect(gate.observe_ssh_progress(later)).to_be(true)
+        expect(gate.verdict()).to_equal("PASS")

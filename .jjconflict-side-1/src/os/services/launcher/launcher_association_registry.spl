@@ -1,0 +1,81 @@
+# SCI-owned launcher association projection.
+#
+# This module owns the immutable-at-commit association index. The general
+# launcher registry delegates to it only after a successful SCI projection.
+
+val MAX_ASSOCIATIONS_V1: u64 = 64
+
+var association_key_v1: [text; 64] = [""; 64]
+var association_app_path_v1: [text; 64] = [""; 64]
+var association_count_v1: u64 = 0
+var associations_authoritative_v1: bool = false
+
+pub fn launcher_associations_authoritative_v1() -> bool:
+    associations_authoritative_v1
+
+pub fn launcher_associated_app_projected_v1(path: text) -> text:
+    var best_path = ""
+    var best_key_length = 0
+    var i: u64 = 0
+    while i < association_count_v1:
+        val key = association_key_v1[i]
+        if path.ends_with(key) and key.len() > best_key_length:
+            best_path = association_app_path_v1[i]
+            best_key_length = key.len()
+        i = i + 1
+    best_path
+
+pub fn launcher_reset_association_projection_v1():
+    var i: u64 = 0
+    while i < MAX_ASSOCIATIONS_V1:
+        association_key_v1[i] = ""
+        association_app_path_v1[i] = ""
+        i = i + 1
+    association_count_v1 = 0
+    associations_authoritative_v1 = false
+
+fn _association_key_valid_v1(key: text) -> bool:
+    key != "" and key.len() <= 128 and not key.contains(" ") and not key.contains("\t") and not key.contains("\n") and not key.contains("\r") and not key.contains("\\")
+
+fn _catalog_path_present_v1(catalog_paths: [text], path: text) -> bool:
+    var i = 0
+    while i < catalog_paths.len():
+        if catalog_paths[i] == path:
+            return true
+        i = i + 1
+    false
+
+pub fn launcher_validate_association_projection_v1(
+    keys: [text],
+    paths: [text],
+    catalog_paths: [text]
+) -> text:
+    if keys.len() != paths.len() or keys.len().to_u64() > MAX_ASSOCIATIONS_V1:
+        return "SCI_LAUNCHER_ASSOCIATION_INVALID"
+    var i = 0
+    while i < keys.len():
+        if not _association_key_valid_v1(keys[i]) or not _catalog_path_present_v1(catalog_paths, paths[i]):
+            return "SCI_LAUNCHER_ASSOCIATION_INVALID"
+        var earlier = 0
+        while earlier < i:
+            if keys[earlier] == keys[i]:
+                return "SCI_LAUNCHER_ASSOCIATION_DUPLICATE"
+            earlier = earlier + 1
+        i = i + 1
+    "SCI_LAUNCHER_OK"
+
+pub fn launcher_commit_association_projection_v1(keys: [text], paths: [text]):
+    # The catalog owner calls this only after validate returned OK. Every write
+    # is bounded and therefore cannot fail partway through the catalog commit.
+    var clear_index: u64 = 0
+    while clear_index < MAX_ASSOCIATIONS_V1:
+        association_key_v1[clear_index] = ""
+        association_app_path_v1[clear_index] = ""
+        clear_index = clear_index + 1
+    var i = 0
+    while i < keys.len():
+        association_key_v1[i.to_u64()] = keys[i]
+        association_app_path_v1[i.to_u64()] = paths[i]
+        i = i + 1
+    association_count_v1 = keys.len().to_u64()
+    associations_authoritative_v1 = true

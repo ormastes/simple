@@ -1,0 +1,56 @@
+# TLS 1.3 X25519MLKEM768 selection-boundary policy.
+#
+# This module admits an already-selected named group. It does not implement or
+# emulate wire crypto. A required hybrid configuration rejects every classical
+# selection, and a failure after hybrid selection is terminal for the attempt.
+
+mod os.tls13.hybrid_negotiation_policy
+
+use lib.common.crypto.x25519_mlkem768.protocol_profile.{
+    X25519MlKem768ProtocolProfile,
+    X25519MlKem768ProtocolPolicy,
+    x25519_mlkem768_validate_protocol_profile,
+    x25519_mlkem768_validate_protocol_policy}
+use os.tls13.server_types.{Tls13HybridMode}
+
+val _TLS13_HYBRID_GROUP: u16 = 0x11EC
+
+fn tls13_hybrid_offer_enabled(mode: Tls13HybridMode) -> bool:
+    mode != Tls13HybridMode.Disabled
+
+fn tls13_hybrid_mode_admit_selection(mode: Tls13HybridMode,
+        selected_group: u16) -> Result<bool, text>:
+    if mode == Tls13HybridMode.Disabled:
+        if selected_group == _TLS13_HYBRID_GROUP:
+            return Err("TLS 1.3 hybrid selection was disabled")
+        return Ok(true)
+    if mode == Tls13HybridMode.Required and
+            selected_group != _TLS13_HYBRID_GROUP:
+        return Err(
+            "TLS 1.3 required X25519MLKEM768 but selected a classical group")
+    Ok(true)
+
+fn tls13_admit_x25519_mlkem768_selection(
+        profile: X25519MlKem768ProtocolProfile,
+        policy: X25519MlKem768ProtocolPolicy,
+        selected_group: u16) -> Result<bool, text>:
+    x25519_mlkem768_validate_protocol_profile(profile)?
+    x25519_mlkem768_validate_protocol_policy(policy)?
+    if selected_group.to_i64() != profile.named_group:
+        return Err("TLS 1.3 required X25519MLKEM768 but selected a different named group")
+    Ok(true)
+
+fn tls13_reject_retry_after_x25519_mlkem768_failure(
+        profile: X25519MlKem768ProtocolProfile,
+        policy: X25519MlKem768ProtocolPolicy,
+        failure_reason: text) -> Result<bool, text>:
+    x25519_mlkem768_validate_protocol_profile(profile)?
+    x25519_mlkem768_validate_protocol_policy(policy)?
+    if failure_reason == "":
+        return Err("TLS 1.3 X25519MLKEM768 failed; classical retry is forbidden")
+    Err("TLS 1.3 X25519MLKEM768 failed: " + failure_reason +
+        "; classical retry is forbidden")
+
+export tls13_admit_x25519_mlkem768_selection
+export tls13_reject_retry_after_x25519_mlkem768_failure
+export tls13_hybrid_offer_enabled, tls13_hybrid_mode_admit_selection

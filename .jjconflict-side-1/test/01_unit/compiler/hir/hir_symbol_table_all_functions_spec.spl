@@ -1,0 +1,62 @@
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl 5%
+# @cover src/compiler/20.hir/hir_types.spl 5%
+"""
+# HIR symbol table records every top-level function (lane SYM1 hir-symbol-table)
+
+**Category:** Compiler / HIR
+**Lane:** SYM1 hir-symbol-table
+
+## Overview
+
+After lowering a module through the real `parse_full_frontend -> HirLowering.lower_module`
+pipeline, `hir.symbols.lookup(name)` used to return nil for every top-level
+function EXCEPT the first one declared in the module. Programs still ran
+correctly (call resolution goes through a different path), so this was
+invisible to normal test/run coverage -- only a query against the module
+symbol table itself (the surface planned tooling like LSP go-to-definition
+and semantic `.md` links will use) exposes it.
+
+This spec drives real source text containing THREE top-level functions
+through the real frontend + HIR lowering pipeline and asserts all three
+resolve by name via `hir.symbols.lookup(...)`.
+
+Note: `Option.?` yields the PAYLOAD in this interpreter, not a bool -- never
+`expect(x.?)...`. Use `match`/`if val` instead, mirroring
+`hir_function_span_populate_spec.spl`.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+describe "HIR module symbol table resolves every top-level function, not just the first":
+    it "three top-level functions in one module all resolve by name via hir.symbols.lookup":
+        val src = "fn first_fn() -> i64:\n    1\nfn second_fn() -> i64:\n    2\nfn third_fn() -> i64:\n    3\n"
+        val path = "src/hir_symbol_table_fixture.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "hir_symbol_table_fixture", log)
+        var lowering = HirLowering.with_filename(path)
+        val hir = lowering.lower_module(module)
+
+        match hir.symbols.lookup("first_fn"):
+            case Some(first_id):
+                expect(hir.functions.contains_key(first_id)).to_equal(true)
+            case nil:
+                expect(false).to_equal(true)
+
+        match hir.symbols.lookup("second_fn"):
+            case Some(second_id):
+                expect(hir.functions.contains_key(second_id)).to_equal(true)
+            case nil:
+                expect(false).to_equal(true)
+
+        match hir.symbols.lookup("third_fn"):
+            case Some(third_id):
+                expect(hir.functions.contains_key(third_id)).to_equal(true)
+            case nil:
+                expect(false).to_equal(true)

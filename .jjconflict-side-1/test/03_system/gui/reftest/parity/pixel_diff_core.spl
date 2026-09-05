@@ -1,0 +1,161 @@
+# pixel_diff_core — pure-math RGBA pixel comparison primitives
+
+use std.skia.entity.geometry.{SkIRect}
+
+# ============================================================================
+# BitmapRef — lightweight view into an RGBA buffer (no copy)
+# ============================================================================
+
+class BitmapRef:
+    width: i64
+    height: i64
+    pixels: [u8]
+
+    static fn of(width: i64, height: i64, pixels: [u8]) -> BitmapRef:
+        BitmapRef(width: width, height: height, pixels: pixels)
+
+# ============================================================================
+# PixelSample — one RGBA pixel read from a BitmapRef
+# ============================================================================
+
+class PixelSample:
+    r: u8
+    g: u8
+    b: u8
+    a: u8
+
+    static fn at(bm: BitmapRef, x: i64, y: i64) -> PixelSample:
+        val idx = (y * bm.width + x) * 4
+        val rv = bm.pixels[idx]
+        val gv = bm.pixels[idx + 1]
+        val bv = bm.pixels[idx + 2]
+        val av = bm.pixels[idx + 3]
+        PixelSample(r: rv, g: gv, b: bv, a: av)
+
+# ============================================================================
+# per_channel_delta — max absolute per-channel difference (0..255)
+# ============================================================================
+
+fn per_channel_delta(a: PixelSample, b: PixelSample) -> i32:
+    val dr = (a.r as i32) - (b.r as i32)
+    val dg = (a.g as i32) - (b.g as i32)
+    val db = (a.b as i32) - (b.b as i32)
+    val da = (a.a as i32) - (b.a as i32)
+    val absr = if dr < 0: -dr else: dr
+    val absg = if dg < 0: -dg else: dg
+    val absb = if db < 0: -db else: db
+    val absa = if da < 0: -da else: da
+    var mx = absr
+    if absg > mx:
+        mx = absg
+    if absb > mx:
+        mx = absb
+    if absa > mx:
+        mx = absa
+    mx
+
+# ============================================================================
+# pixel_matches — true if per_channel_delta <= tolerance
+# ============================================================================
+
+fn pixel_matches(a: PixelSample, b: PixelSample, tolerance: i32) -> bool:
+    val d = per_channel_delta(a, b)
+    d <= tolerance
+
+# ============================================================================
+# mismatch_ratio — fraction of pixels that differ beyond tolerance
+# ============================================================================
+
+fn mismatch_ratio(a: BitmapRef, b: BitmapRef, tolerance: i32) -> f64:
+    if (a.width != b.width) or (a.height != b.height):
+        1.0
+    else:
+        val total = a.width * a.height
+        var count: i64 = 0
+        var y: i64 = 0
+        while y < a.height:
+            var x: i64 = 0
+            while x < a.width:
+                val pa = PixelSample.at(a, x, y)
+                val pb = PixelSample.at(b, x, y)
+                val matches = pixel_matches(pa, pb, tolerance)
+                if not matches:
+                    count = count + 1
+                x = x + 1
+            y = y + 1
+        (count as f64) / (total as f64)
+
+# ============================================================================
+# max_channel_delta — worst-case per_channel_delta across all pixels
+# ============================================================================
+
+fn max_channel_delta(a: BitmapRef, b: BitmapRef) -> i32:
+    if (a.width != b.width) or (a.height != b.height):
+        255
+    else:
+        var mx: i32 = 0
+        var y: i64 = 0
+        while y < a.height:
+            var x: i64 = 0
+            while x < a.width:
+                val pa = PixelSample.at(a, x, y)
+                val pb = PixelSample.at(b, x, y)
+                val d = per_channel_delta(pa, pb)
+                if d > mx:
+                    mx = d
+                x = x + 1
+            y = y + 1
+        mx
+
+# ============================================================================
+# bitmap_diff_rect — smallest SkIRect enclosing all mismatched pixels
+# ============================================================================
+
+fn bitmap_diff_rect(a: BitmapRef, b: BitmapRef, tolerance: i32) -> SkIRect:
+    if (a.width != b.width) or (a.height != b.height):
+        SkIRect(left: 0, top: 0, right: 0, bottom: 0)
+    else:
+        var min_x: i64 = a.width
+        var min_y: i64 = a.height
+        var max_x: i64 = -1
+        var max_y: i64 = -1
+        var y: i64 = 0
+        while y < a.height:
+            var x: i64 = 0
+            while x < a.width:
+                val pa = PixelSample.at(a, x, y)
+                val pb = PixelSample.at(b, x, y)
+                val matches = pixel_matches(pa, pb, tolerance)
+                if not matches:
+                    if x < min_x:
+                        min_x = x
+                    if y < min_y:
+                        min_y = y
+                    if x > max_x:
+                        max_x = x
+                    if y > max_y:
+                        max_y = y
+                x = x + 1
+            y = y + 1
+        if max_x < 0:
+            SkIRect(left: 0, top: 0, right: 0, bottom: 0)
+        else:
+            SkIRect(left: min_x, top: min_y, right: max_x + 1, bottom: max_y + 1)
+
+# ============================================================================
+# PixelDiffSummary — aggregated result of comparing two bitmaps
+# ============================================================================
+
+class PixelDiffSummary:
+    ratio: f64
+    max_channel_delta: i32
+    mismatched_pixels: i64
+    diff_rect: SkIRect
+
+fn summarize(a: BitmapRef, b: BitmapRef, tolerance: i32) -> PixelDiffSummary:
+    val r = mismatch_ratio(a, b, tolerance)
+    val mx = max_channel_delta(a, b)
+    val dr = bitmap_diff_rect(a, b, tolerance)
+    val total = a.width * a.height
+    val mp = (r * (total as f64)) as i64
+    PixelDiffSummary(ratio: r, max_channel_delta: mx, mismatched_pixels: mp, diff_rect: dr)

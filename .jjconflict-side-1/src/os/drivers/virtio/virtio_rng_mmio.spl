@@ -1,0 +1,191 @@
+# Bounded single-owner modern VirtIO RNG MMIO transport for RV32 boot.
+
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read16, mmio_write16, mmio_read32, mmio_write32}
+use os.kernel.arch.riscv32.secure_entropy.{Rv32SecureEntropyCandidate, Rv32SecureEntropyProvenance, Rv32SecureEntropyReceipt, rv32_admit_secure_entropy_candidate}
+
+extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
+extern fn rt_dma_free(handle: i64)
+extern fn rt_dma_virt_of(handle: i64) -> i64
+extern fn rt_dma_phys_of(handle: i64) -> i64
+extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
+extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
+extern fn rt_memory_barrier()
+
+val VIRTIO_RNG_DEVICE_ID: u32 = 4u32
+val VIRTIO_RNG_VERSION_1: u32 = 1u32
+val VIRTIO_RNG_DMA_BYTES: i64 = 4096
+val VIRTIO_RNG_DESC_OFFSET: u64 = 0u64
+val VIRTIO_RNG_AVAIL_OFFSET: u64 = 64u64
+val VIRTIO_RNG_USED_OFFSET: u64 = 128u64
+val VIRTIO_RNG_DATA_OFFSET: u64 = 256u64
+val VIRTIO_RNG_REQUIRED_BYTES: u32 = 16u32
+val VIRTIO_RNG_MAX_COMPLETIONS: u32 = 16u32
+val VIRTIO_RNG_MAX_POLLS_PER_COMPLETION: u32 = 100000u32
+val RV32_QEMU_VIRTIO_MMIO_START: u64 = 0x10001000u64
+val RV32_QEMU_VIRTIO_MMIO_SLOTS: u32 = 8u32
+val RV32_QEMU_VIRTIO_MMIO_STRIDE: u64 = 0x1000u64
+
+val RNG_MAGIC: u64 = 0x000u64
+val RNG_VERSION: u64 = 0x004u64
+val RNG_DEVICE_ID: u64 = 0x008u64
+val RNG_DEVICE_FEATURES: u64 = 0x010u64
+val RNG_DEVICE_FEATURES_SEL: u64 = 0x014u64
+val RNG_DRIVER_FEATURES: u64 = 0x020u64
+val RNG_DRIVER_FEATURES_SEL: u64 = 0x024u64
+val RNG_QUEUE_SEL: u64 = 0x030u64
+val RNG_QUEUE_NUM_MAX: u64 = 0x034u64
+val RNG_QUEUE_NUM: u64 = 0x038u64
+val RNG_QUEUE_READY: u64 = 0x044u64
+val RNG_QUEUE_NOTIFY: u64 = 0x050u64
+val RNG_STATUS: u64 = 0x070u64
+val RNG_QUEUE_DESC: u64 = 0x080u64
+val RNG_QUEUE_AVAIL: u64 = 0x090u64
+val RNG_QUEUE_USED: u64 = 0x0a0u64
+val RNG_ACK_DRIVER: u32 = 3u32
+val RNG_FEATURES_OK: u32 = 8u32
+val RNG_DRIVER_OK: u32 = 4u32
+val RNG_DESC_F_WRITE: u16 = 2u16
+
+class VirtioRngMmioOwner:
+    base: u64
+    hart_id: u32
+    dma_handle: i64
+    cpu: u64
+    device: u64
+    avail_index: u16
+    used_index: u16
+    ready: bool
+    busy: bool
+
+impl VirtioRngMmioOwner:
+    static fn unavailable() -> VirtioRngMmioOwner:
+        VirtioRngMmioOwner(base: 0u64, hart_id: 0u32, dma_handle: -1, cpu: 0u64, device: 0u64, avail_index: 0u16, used_index: 0u16, ready: false, busy: false)
+
+    static fn start(base: u64, hart_id: u32) -> VirtioRngMmioOwner:
+        var out = VirtioRngMmioOwner.unavailable()
+        if base == 0u64 or mmio_read32(base + RNG_MAGIC) != 0x74726976u32 or mmio_read32(base + RNG_VERSION) != 2u32 or mmio_read32(base + RNG_DEVICE_ID) != VIRTIO_RNG_DEVICE_ID:
+            return out
+        val handle = rt_dma_alloc(VIRTIO_RNG_DMA_BYTES, 2)
+        if handle < 0: return out
+        val cpu = rt_dma_virt_of(handle).to_u64()
+        val device = rt_dma_phys_of(handle).to_u64()
+        if cpu == 0u64 or device == 0u64 or (cpu & 15u64) != 0u64 or (device & 15u64) != 0u64:
+            rt_dma_free(handle)
+            return out
+        var clear_offset: u64 = 0u64
+        while clear_offset < VIRTIO_RNG_DMA_BYTES.to_u64():
+            mmio_write32(cpu + clear_offset, 0u32)
+            clear_offset = clear_offset + 4u64
+        out = VirtioRngMmioOwner(base: base, hart_id: hart_id, dma_handle: handle, cpu: cpu, device: device, avail_index: 0u16, used_index: 0u16, ready: false, busy: false)
+        mmio_write32(base + RNG_STATUS, 0u32)
+        rt_memory_barrier()
+        mmio_write32(base + RNG_STATUS, RNG_ACK_DRIVER)
+        mmio_write32(base + RNG_DEVICE_FEATURES_SEL, 1u32)
+        if (mmio_read32(base + RNG_DEVICE_FEATURES) & VIRTIO_RNG_VERSION_1) == 0u32:
+            out.shutdown()
+            return out
+        mmio_write32(base + RNG_DRIVER_FEATURES_SEL, 0u32)
+        mmio_write32(base + RNG_DRIVER_FEATURES, 0u32)
+        mmio_write32(base + RNG_DRIVER_FEATURES_SEL, 1u32)
+        mmio_write32(base + RNG_DRIVER_FEATURES, VIRTIO_RNG_VERSION_1)
+        mmio_write32(base + RNG_STATUS, RNG_ACK_DRIVER | RNG_FEATURES_OK)
+        if (mmio_read32(base + RNG_STATUS) & RNG_FEATURES_OK) == 0u32:
+            out.shutdown()
+            return out
+        mmio_write32(base + RNG_QUEUE_SEL, 0u32)
+        if mmio_read32(base + RNG_QUEUE_READY) != 0u32 or mmio_read32(base + RNG_QUEUE_NUM_MAX) < 1u32:
+            out.shutdown()
+            return out
+        mmio_write32(base + RNG_QUEUE_NUM, 1u32)
+        out._queue_address(RNG_QUEUE_DESC, device + VIRTIO_RNG_DESC_OFFSET)
+        out._queue_address(RNG_QUEUE_AVAIL, device + VIRTIO_RNG_AVAIL_OFFSET)
+        out._queue_address(RNG_QUEUE_USED, device + VIRTIO_RNG_USED_OFFSET)
+        mmio_write32(base + RNG_QUEUE_READY, 1u32)
+        mmio_write32(base + RNG_STATUS, RNG_ACK_DRIVER | RNG_FEATURES_OK | RNG_DRIVER_OK)
+        out.ready = mmio_read32(base + RNG_QUEUE_READY) == 1u32
+        out
+
+    fn _queue_address(offset: u64, address: u64):
+        mmio_write32(self.base + offset, address.to_u32())
+        mmio_write32(self.base + offset + 4u64, (address >> 32u64).to_u32())
+
+    fn _submit(offset: u32, length: u32):
+        val desc = self.cpu + VIRTIO_RNG_DESC_OFFSET
+        val buffer = self.device + VIRTIO_RNG_DATA_OFFSET + offset.to_u64()
+        mmio_write32(desc, buffer.to_u32())
+        mmio_write32(desc + 4u64, (buffer >> 32u64).to_u32())
+        mmio_write32(desc + 8u64, length)
+        mmio_write16(desc + 12u64, RNG_DESC_F_WRITE)
+        mmio_write16(desc + 14u64, 0u16)
+        mmio_write16(self.cpu + VIRTIO_RNG_AVAIL_OFFSET + 4u64, 0u16)
+        self.avail_index = self.avail_index + 1u16
+        rt_dma_sync_for_device(self.dma_handle, 2)
+        mmio_write16(self.cpu + VIRTIO_RNG_AVAIL_OFFSET + 2u64, self.avail_index)
+        rt_memory_barrier()
+        mmio_write32(self.base + RNG_QUEUE_NOTIFY, 0u32)
+
+    me read_key16() -> Result<Rv32SecureEntropyReceipt, text>:
+        if not self.ready or self.busy: return Err("rv32 virtio-rng owner unavailable or occupied")
+        self.busy = true
+        var received: u32 = 0u32
+        var completions: u32 = 0u32
+        while received < VIRTIO_RNG_REQUIRED_BYTES and completions < VIRTIO_RNG_MAX_COMPLETIONS:
+            self._submit(received, VIRTIO_RNG_REQUIRED_BYTES - received)
+            var polls: u32 = 0u32
+            while polls < VIRTIO_RNG_MAX_POLLS_PER_COMPLETION:
+                rt_dma_sync_for_cpu(self.dma_handle, 2)
+                if mmio_read16(self.cpu + VIRTIO_RNG_USED_OFFSET + 2u64) != self.used_index: break
+                polls = polls + 1u32
+            if polls == VIRTIO_RNG_MAX_POLLS_PER_COMPLETION:
+                self.shutdown()
+                return Err("rv32 virtio-rng completion timeout")
+            val used_len = mmio_read32(self.cpu + VIRTIO_RNG_USED_OFFSET + 8u64)
+            self.used_index = self.used_index + 1u16
+            if used_len == 0u32 or used_len > VIRTIO_RNG_REQUIRED_BYTES - received:
+                self.shutdown()
+                return Err("rv32 virtio-rng invalid completion length")
+            received = received + used_len
+            completions = completions + 1u32
+        if received != VIRTIO_RNG_REQUIRED_BYTES:
+            self.shutdown()
+            return Err("rv32 virtio-rng bounded accumulation exhausted")
+        var bytes: [u8] = []
+        var i: u32 = 0u32
+        while i < VIRTIO_RNG_REQUIRED_BYTES:
+            bytes.push(mmio_read8(self.cpu + VIRTIO_RNG_DATA_OFFSET + i.to_u64()))
+            mmio_write8(self.cpu + VIRTIO_RNG_DATA_OFFSET + i.to_u64(), 0u8)
+            i = i + 1u32
+        self.busy = false
+        rv32_admit_secure_entropy_candidate(Rv32SecureEntropyCandidate(provenance: Rv32SecureEntropyProvenance.VirtioRngMmio, capability_present: true, provider_ready: true, authenticated_handoff: false, bytes: bytes))
+
+    me shutdown():
+        if self.base != 0u64:
+            mmio_write32(self.base + RNG_STATUS, 0u32)
+            rt_memory_barrier()
+        if self.dma_handle >= 0: rt_dma_free(self.dma_handle)
+        self.dma_handle = -1
+        self.ready = false
+        self.busy = false
+
+fn rv32_virtio_rng_discover(hart_id: u32) -> VirtioRngMmioOwner:
+    """Bounded QEMU-virt MMIO discovery; capability exists only after start."""
+    var slot: u32 = 0u32
+    while slot < RV32_QEMU_VIRTIO_MMIO_SLOTS:
+        val base = RV32_QEMU_VIRTIO_MMIO_START + slot.to_u64() * RV32_QEMU_VIRTIO_MMIO_STRIDE
+        if mmio_read32(base + RNG_MAGIC) == 0x74726976u32 and
+                mmio_read32(base + RNG_VERSION) == 2u32 and
+                mmio_read32(base + RNG_DEVICE_ID) == VIRTIO_RNG_DEVICE_ID:
+            val owner = VirtioRngMmioOwner.start(base, hart_id)
+            if owner.ready: return owner
+        slot = slot + 1u32
+    VirtioRngMmioOwner.unavailable()
+
+fn rv32_virtio_rng_boot_key16(hart_id: u32) -> Result<Rv32SecureEntropyReceipt, text>:
+    """Acquire the transition-registry key before token publication."""
+    var owner = rv32_virtio_rng_discover(hart_id)
+    if not owner.ready: return Err("rv32 virtio-rng capability unavailable")
+    val result = owner.read_key16()
+    owner.shutdown()
+    result
+
+export VirtioRngMmioOwner, rv32_virtio_rng_discover, rv32_virtio_rng_boot_key16

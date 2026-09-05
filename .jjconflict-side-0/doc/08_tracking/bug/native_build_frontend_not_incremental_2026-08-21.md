@@ -1,0 +1,538 @@
+# native-build front end is neither incremental nor parallel (2026-08-21)
+
+## Symptom
+A self-hosted `native-build --entry-closure` stage build spends the bulk of its
+wall clock in phase 1/6 (`parse`), single-threaded, and **repeats all of it on
+every rerun even when not one source byte changed**. Stage 1 over `src/app`
+parses 662 files serially. A one-file edit costs a full reparse of all 662.
+
+Observed live during this investigation (stage-1 lane,
+`/mnt/data/seedperf/simple.v2 native-build`): `[build] parse 220/662 step 1/6`
+still climbing after the run had been going for a long stretch.
+
+## Root cause (three separate facts, all verified)
+
+### 1. `--threads` never reaches the front end
+`--threads N` is parsed at `src/app/io/_CliCompile/compile_targets.spl:891-907`,
+exported as `SIMPLE_NATIVE_BUILD_THREADS` (`:1131`), and read back by
+`driver_native_build_threads()` at
+`src/compiler/80.driver/driver_aot_native_output.spl:129-135`. Its **sole**
+consumer is `ParallelBuildConfig(num_threads: ...)` at `:860`, i.e. the native
+CODEGEN/LINK job (`driver_build/parallel.spl:83,128-130`). Nothing in parse or
+HIR reads it. The parse loop
+(`driver_source_pipeline_parsing.spl:361`, `for source in unique_entry_sources:`
+-> `parse_full_frontend(...)` at `:379`) is serial by construction.
+
+### 2. No parse or HIR output is cached at all
+Only OBJECT files are cached. There is no per-module cache of parse or HIR
+output anywhere on this path. `driver_build/incremental.spl` is fingerprint +
+object-path bookkeeping (`BuildCache`, `FileFingerprint`).
+`80.driver/incremental_builder.spl` is a standalone prototype
+(`IncrementalState` / `CachedArtifact`) that the native-build driver never
+references. `.smf` artifacts (`driver_aot_smf_output.spl`,
+`watcher/smf_manifest.spl`) are the daemon/interpret path, not native-build.
+`hydration_manifest.spl` is unrelated (WASM/DOM hydration manifests).
+
+### 3. An object-cache HIT still pays full parse + HIR + MIR
+This is the headline, and it caps what the existing cache can ever buy. The
+object-cache lookup (`build_cache.get_cached_outputs` at
+`driver_aot_native_output.spl:782`, scope-filtered at `:420`/`:784`, hit at
+`:795`) runs in step **5/6**, iterating `module_names` drawn from
+`ctx.mir_modules`. Everything upstream — parse (1/6), HIR (2/6), MIR (4/6) —
+has already run for every module by then. A 100%-hit rebuild therefore still
+pays the entire front end and only skips codegen. That is why the object-cache
+persistence fix landed earlier today did not make a rerun fast.
+
+## What blocks the obvious fix, and what does not
+
+A prior note,
+`doc/05_design/compiler/incremental_build/parse_phase_process_sharding_blocked_2026-08-21.md`,
+concluded that sharding/caching was blocked because there is no serialized form
+for a parsed module: `ParserModule` is ~25 collections over 72 struct/enum/class
+types with 148+ expr variants, and `smf_serialization.spl` is signature-level
+only. **That conclusion is correct about `ParserModule` and is hereby refined,
+not overturned: a `ParserModule` codec is still not the right boundary.**
+
+The boundary that IS viable is one layer lower — the core parser's **flat AST**:
+
+- `parse_and_build_module_scoped`
+  (`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:1038`) is two
+  halves: `parse_module_body()` + interpolation/placeholder/collection desugars,
+  which fill global flat pools, then `flat_ast_to_module(path)` (`:1080`), the
+  3382-line bridge that materialises the rich `ParserModule`.
+- The flat pools are **scalar-only and therefore dumpable**: ~120 module-level
+  `var` arrays of `i64` / `text` / `bool` / `[[i64]]` / `[[text]]` (one
+  `[[[text]]]`, `decl_type_param_constraints`), across
+  `core/_Ast/decl_nodes.spl:245-321,1239-1250,1309-1311,1349-1351` (~60 vars),
+  `core/_AstExpr/nodes.spl:85-102,805-814` (34), `core/ast_stmt.spl:43-57,532-533`
+  (18), and `core/types.spl` (50, enumerated exactly by `reset_all_pools()` at
+  `core/types.spl:1455-1503`). Every cross-reference is an integer index into a
+  sibling pool. No structs, classes, or enums appear in a pool.
+- The pools are reset per file (`reset_all_pools()` at `module_assembly.spl:1041`,
+  `ast_reset()` at `:1082`), so indices are self-consistent within one module.
+  A cache hit means: reset, refill pools verbatim, call `flat_ast_to_module(path)`.
+
+So the missing piece is a flat-pool dump/restore (~700-1000 lines, plus ~200 if
+restore goes through the existing `*_set` helpers), **not** a `ParserModule`
+codec of several thousand.
+
+### Two caveats that must not be skipped
+- **The bridge half is not cacheable by this design.** A flat-AST cache hit
+  still runs `flat_ast_to_module`. This was the gate on the whole design and it
+  is now **ANSWERED**: the bridge is only 1-4% of per-file cost, so the ceiling
+  is ~96%. See Measurement below.
+- **Dual store under `SIMPLE_BOOTSTRAP`.** decl/stmt/expr pools mirror into env
+  vars (`decl_nodes.spl:154-200`, `ast_decl_prefer_arena` /
+  `ast_decl_env_mirror_enabled`). A restore must either run arena-preferred or
+  replay through the setters, or the mirror goes stale.
+- Risk to respect: with ~120 pools, **every omitted pool is a silent miscompile
+  of the bootstrap compiler**, not a loud failure. Any codec must land behind a
+  round-trip equality gate over the whole `src/app` closure before it is trusted.
+
+## Hook sites (for whoever implements this)
+- Skip-parse on hit: immediately before `parse_full_frontend` at
+  `src/compiler/80.driver/driver_source_pipeline_parsing.spl:379`. A hit must
+  supply both the `ParserModule` box pushed at `:415` and the module surface
+  built at `:505-510` — HIR needs surfaces for **all** modules simultaneously
+  (`driver_hir_pipeline_lowering.spl:94`), though it does not need all full ASTs.
+- Streaming lane equivalent: `parse_all_streaming_surfaces_in_place_impl`,
+  `driver_source_pipeline_parsing.spl:175-287`.
+- Cache scope: reuse `native_build_cache_scope_key` /
+  `native_build_cache_lane()` (`driver_build/incremental.spl:197,192`), which
+  already honour `SIMPLE_CACHE_SCOPE`.
+- Sharding: `src/app/cli/native_build_worker.spl` is a 29-line passthrough
+  (guards `SIMPLE_NATIVE_BUILD_WORKER==1`, forwards argv to `cli_native_build`),
+  spawned by `run_native_build_worker` (`src/app/cli/native_build_main.spl:266-287`).
+  It accepts the whole CLI arg set; there is **no** module-subset/shard flag yet.
+
+## Measurement
+
+### Instrumentation landed (commit `146d987b1c0`)
+Before this, the parse phase emitted one `[build]` receipt per file with **no
+timestamps**, so per-file cost could only be recovered by sampling the stage log
+from outside with `date(1)`. Every `[build]` line now carries
+`+<total>ms dt=<since-previous>ms`, and the `SIMPLE_BUILD_PROGRESS_EVENTS` sink
+carries `elapsed_ms=` / `dt_ms=`. `current=` remains the last field and nothing
+parses this line, so positional consumers are unaffected.
+
+Example (3-module fixture, per-file parse cost now self-reporting):
+```
+[build] parse 1/3 step 1/6 +85ms  dt=56ms .../main.spl
+[build] parse 2/3 step 1/6 +112ms dt=27ms .../util_a.spl
+[build] parse 3/3 step 1/6 +151ms dt=38ms .../util_b.spl
+```
+
+### Parse-vs-bridge split
+**RESULT (2026-08-21): the bridge is only 1-4% of per-file cost. The flat-AST
+cache design has a ~96% ceiling and is worth building.**
+
+Measured with `SIMPLE_PARSE_PHASE_PROFILE=1`, the six-phase profile the
+parser-perf lane landed in `module_assembly.spl:1058-1088` (which already
+supersedes the two markers this record originally asked for). All values are
+microseconds, as emitted:
+
+| file | lines | parse_module_body | interp | placeholder | desugar_coll | bridge | total | bridge % |
+|---|---|---|---|---|---|---|---|---|
+| `driver_types.spl` | 1199 | 66.06 s | 16.07 s | 12.07 s | 0.27 s | **3.90 s** | 98.4 s | **4.0%** |
+| `compiler/hir/hir.spl` | — | 0.95 s | ~0 | ~0 | ~0 | **0.025 s** | 0.98 s | **2.5%** |
+| `common/driver_core_types.spl` | — | 0.69 s | ~0 | ~0 | ~0 | **0.010 s** | 0.70 s | **1.4%** |
+
+`coverage_inv` is negligible everywhere (tens of microseconds).
+
+Consequences:
+- **A flat-AST cache would eliminate ~96% of per-file front-end cost.** The
+  non-cacheable half (`flat_ast_to_module`, which still runs on every hit) is the
+  small half after all. This removes the doubt that previously gated the design.
+- **It is also sound by construction**, which the alternatives are not: a hit
+  reproduces the identical `ParserModule`, so surfaces, HIR, and type checking
+  all still run normally. It needs no dependency-invalidation prerequisite and
+  silences no diagnostics — unlike skipping HIR/MIR on an object-cache hit.
+- Secondary finding for the parser-perf lane: on `driver_types.spl`,
+  `expand_string_interpolations` (16.1 s) + the placeholder passes (12.1 s) are
+  **29%** of the file's cost, versus 67% for `parse_module_body`. Those two
+  passes are worth profiling in their own right.
+- Also visible via the new `dt=` instrumentation: that 279-file closure spent
+  **57.6 s before parse even began** (source load + closure + lint), which is not
+  nothing and is not currently attributed to any phase.
+
+### Earlier failed attempts (kept so they are not repeated)
+**These external-timestamping routes do NOT work. Use `SIMPLE_PARSE_PHASE_PROFILE=1`
+instead — it computes deltas inside the process, so output buffering is irrelevant.**
+Three attempts failed, each for a different reason, and the last one is
+fundamental:
+
+1. `bin/simple compile <file>` emits no frontend traces at all — `bin/simple` is
+   the **Rust seed**, and the interpreted self-hosted frontend only runs under
+   `native-build`. Do not use `compile` to probe this path.
+2. Piping the run through `awk`/`date` to timestamp lines produced an ordering
+   that is physically impossible (every `[flat-bridge]` line apparently preceding
+   every `[frontend]` line). That was a stdout-block-buffered / stderr-unbuffered
+   interleaving artifact, not real ordering. `stdbuf -oL -eL` fixes the ordering.
+3. But `stdbuf` does **not** fix the timestamps, and this is the blocker:
+   Simple's `print` goes through the runtime's own internally-buffered writer,
+   which `stdbuf`'s libc interposition cannot reach. Only lines explicitly
+   followed by `rt_stdout_flush()` — i.e. the `[build]` progress receipts, and
+   nothing else — escape promptly. Every `SIMPLE_COMPILER_TRACE` marker sits in
+   that buffer until process exit and then arrives in a burst, so an external
+   timestamp on it measures the flush, not the work. (This also explains why
+   `[build]` receipts stream in a stage log while traces do not.)
+
+Consequence: the split can only be measured from **inside** the process. That is
+exactly what `SIMPLE_PARSE_PHASE_PROFILE=1` does, and the numbers above come
+from it.
+
+## Moving the object-cache lookup earlier (the highest-value change)
+
+For a cache HIT the step-5 loop consumes almost nothing:
+`driver_native_module_cache_source` (`driver_aot_native_output.spl:175-193`)
+scans only `ctx.sources` for a path — **available before parse** — and the hit
+branch (`:795-806`) just pushes the cached object paths. The only parsed state it
+touches is `driver_native_module_is_export_facade(ctx.mir_modules[name],
+ctx.modules[name])` (`:390-430`), a "does this module have any code" predicate
+that is moot for a module the cache says produced objects.
+
+So the lookup itself can move to right after the source closure. What stops the
+front end from being skipped is **dependents**, not the lookup:
+
+- HIR lowering resolves imports against `HirLowering.module_surfaces`
+  (`20.hir/hir_lowering/types.spl:65`, read in `_Items/module_import_resolution.spl:238-295`
+  and `_Items/module_import_registration.spl:268-477`). A module missing from
+  `module_surfaces.index_by_name` fails import resolution in its dependents.
+- **No surface can be reloaded from disk.** `ModuleSurface`
+  (`20.hir/hir_lowering/module_surface_types.spl:220-285`) is ~30 fields over 8
+  nested types and embeds parser `Type`/`Span`/`Variant`/`ParserImport`/`Export`,
+  plus real AST bodies in `ModuleSurfaceTrait.default_methods: [ParserFunction]`
+  (`:77`, the deliberate "sole executable-body exception") and enum struct-variant
+  field defaults. `smf_serialization.spl:212-367` writes bodyless HIR *placeholder*
+  records and has no reader, no impls, and no export routes.
+  `interface_digest_of` (`cache/action_key.spl:197-204`) and
+  `smf_manifest_entry_iface_verdict` (`watcher/smf_manifest.spl:173`) **hash** an
+  interface; nothing **reloads** one.
+
+### Ranked options
+- **(c) Parse-only for cached deps — ~100-200 lines, recommended first.** Keep
+  parse + `ModuleSurfaceBuilder.add_parsed/add_alias`
+  (`driver_source_pipeline_parsing.spl:~495-540`) so dependents still resolve,
+  but skip **HIR + MIR lowering and codegen** for object-cached modules. Needs a
+  skip flag threaded through the HIR/MIR loops plus a synthesized
+  `ctx.mir_modules[name]` placeholder for the `:776` dereference. No
+  serialization at all. Does **not** reach "parse=0 files" — it reaches
+  "HIR/MIR=0 modules".
+- **(a) Persist + reload the surface — ~1200-2000 lines.** The only route to
+  "parse=0 files". Needs a canon-v1 writer+reader over the nested types above,
+  registry re-freeze (`registry_index.spl:200`), and a version/digest guard.
+- **(b) Reuse SMF placeholder records — ~600-1000 lines. Not recommended:**
+  wrong shape (no impls, no export routes/origins) and write-only today.
+
+### Blocking correctness prerequisite for ALL of the above
+`BuildCache.has_cached_object` (`driver_build/incremental.spl:530-545`) compares
+**only that one file's own `content_hash`** plus output existence. There is **no
+dependency tracking of any kind** — which matches CLAUDE.md's note that
+`interface_digest_of` has zero call sites.
+
+Today that is merely wasteful: if `util_a.spl` changes and `main.spl` does not,
+`main.spl` hits the cache and its stale object is linked either way. But
+`main.spl` is still re-parsed, re-HIR'd and re-MIR'd, so a type error introduced
+by the changed interface **is still caught**. Skipping the front end for cache
+hits removes exactly that check, turning a wasteful-but-loud build into a fast
+and **silent** one. Therefore:
+
+> Moving the lookup earlier MUST land together with dependency-aware
+> invalidation, not before it. The cheap sound version is to fold the transitive
+> import closure's content hashes into each module's cache key (the fingerprints
+> already exist in `BuildCache`), so editing `util_a.spl` changes `main.spl`'s
+> key and re-front-ends exactly the affected modules — which is also precisely
+> the acceptance criterion for the reproduce spec.
+
+## Progress (2026-08-21)
+
+Landed, in dependency order:
+- `58b6bc45e65` codec primitives + round-trip spec (12/12 green). Six element
+  types cover all 151 pools. Fails closed on truncated/negative/absurd length
+  headers. The spec caught a real defect on its first run (`to_i64()` parses,
+  it does not return a character code).
+- `6c29dccc915` `scripts/check/check-flat-ast-codec-complete.shs` — derives the
+  pool list from source on every run so a pool added tomorrow is covered the day
+  it lands. 5 fatal selftest fixtures; 0 pools is ERROR. It caught its own
+  author's stale exclusions immediately.
+- `98af874928a` dump/restore for all **151/151** pools. Guard green. A full
+  dump -> restore -> dump cycle returns `ok=true stable=true`; the fixture
+  native-build still exits 0.
+
+**Measured cost of the codec source itself: +18.1s (+19.6%)** on the 3-module
+fixture build (92.3s -> 110.3s, same tree, same binary, only the change
+toggled). ~500 added lines in four files the compiler re-parses on every process
+start. This is a transitional cost of source-read compiler layers, not of the
+design, and it is repaid many times over once the cache is wired — but until
+then it is a real regression for short one-off invocations and must not be
+cited as free.
+
+**CORRECTION (same day, `16821906d78`): the 151/151 green was FALSE.** The
+guard defined per-parse state as "every array-typed var in four files". Two
+independent holes: the name regex was lowercase-only, so the uppercase
+`EXTEND_*` registry was invisible, and the file list was hand-scoped to four
+files while `parser_reset_extend_enums` lives in `_ParserDecls/`, three files
+away from what it clears. The guard now derives state from the per-parse RESET
+functions across every file under `frontend/core` — the compiler's own
+definition of the set — and is honestly **RED: 166 items, 32 uncovered**: the 7
+`EXTEND_*` vars, `ENUM_ATTRIBUTES` / `ENUM_OPEN_REGIONS` / `UNSAFE_ANNOTATIONS`,
+11 `PENDING_*` (sffi/unsafe/hardware/vhdl/clocked/decl-attrs), and the `par_*`
+diagnostic and token slots. Several are dict-typed and need encoders the codec
+does not have.
+
+The lesson generalises beyond this codec: a completeness guard is only as good
+as its oracle, and "every declaration matching a regex in a hand-picked file
+list" is not one. Deriving from the reset functions is, because the compiler
+maintains them for its own correctness.
+
+**The front-end cache MUST NOT be wired until that guard is green.** Wiring it
+now would lose the `extend` registry and pending-annotation state on every cache
+hit, silently.
+
+### Step 1 done (2026-08-21): guard is GREEN, 0 uncovered
+`PASS — 165 pool(s) checked, all encoded and decoded` (was `166 state items, 32
+uncovered`). What closed the gap:
+- **No dict encoders were needed after all.** The record predicted `text->i64` /
+  `text->[i64]` dicts; reading the actual declarations, all 32 items are
+  `i64` / `bool` / `text` / `[text]` / `[i64]`. The only genuinely new codec
+  shapes were **scalars**, so `flat_pool_codec.spl` gained
+  `flat_pool_{enc,dec}_scalar_{i64,bool,text}` (a scalar text is escaped
+  exactly like a pool element -- `PENDING_UNSAFE_REASON` carries author prose).
+- Three new dump/restore units beside their state, same fixed-sorted-order
+  contract as the four existing ones:
+  `flat_extend_pools_dump/restore` (`_ParserDecls/extend_decls.spl`, the 7
+  `EXTEND_*`), `flat_pending_pools_dump/restore`
+  (`_ParserDecls/enum_module_body.spl`, the 11 `PENDING_*` plus
+  `ENUM_ATTRIBUTES` / `ENUM_OPEN_REGIONS` / `UNSAFE_ANNOTATIONS`), and
+  `flat_parser_state_dump/restore` (`parser.spl`, the 10 `par_*`).
+- **`par_*` decision: restore all ten, exclude none.** `par_had_error` is
+  unambiguously an OUTPUT -- `par_had_error_get()` is read AFTER
+  `parse_module_body` returns at `driver_source_pipeline_parsing.spl:385,592,686,760`
+  and `driver_hir_pipeline_lowering.spl:57`, so a hit that left it false would
+  turn a file that failed to parse into a silently-accepted one. The other nine
+  (diagnostic lists, counters, token slots) are consumed only during the parse
+  and could be excluded, but they are a handful of short lists; restoring the
+  whole reset set is the version of the contract that cannot rot.
+- **One exclusion, `ast_reset_seq`.** It is a MONOTONIC diagnostic counter of
+  `ast_reset()` calls; it appears in the derived set only because `ast_reset`
+  *increments* it, which the guard's body scan cannot tell from a clear.
+  Restoring it would REWIND a process-lifetime counter -- i.e. wrong, not merely
+  unnecessary, which is the stated bar for an entry in that allowlist. The
+  guard's stale-exclusion check accepts it (the name still exists).
+- Round-trip spec extended by 5 examples for the scalar shapes (including
+  interleaved scalars-and-pools in one blob, the real
+  `flat_pending_pools_dump` shape): **17/17 green**, up from 12.
+
+Pre-existing failure noted, NOT caused by this change: the 3-module fixture spec
+`test/02_integration/compiler/driver/native_build_cache_second_build_hits_spec.spl`
+fails with `semantic: method 'replace' not found on type 'function' (function
+'hash_text' was not called)`, which comes from
+`src/lib/nogc_sync_mut/websocket/handshake.spl:265` shadowing the global
+`hash_text` with a local `val`. It is in the spec's transitive import graph and
+is unrelated to the codec.
+
+### Step 2 done (2026-08-21): full-closure round-trip gate
+`scripts/check/check-flat-ast-roundtrip.shs` — a FIDELITY gate, distinct in
+kind from the completeness guard. The completeness guard asks a static
+question ("is every piece of per-parse state mentioned by the codec?") and is
+structurally blind to the three defects that actually corrupt a restore:
+ORDER (dump and restore must walk the same sequence), ESCAPING (a newline
+inside a string literal splitting a line), and LENGTH FRAMING (an off-by-one
+in one pool shifting every later pool). Those are silent miscompiles, and only
+running a real parse finds them.
+
+The per-module work runs INSIDE the compiler
+(`flat_pools_roundtrip_selfcheck`, `_FlatAstBridge/module_assembly.spl`, gated
+by `SIMPLE_FLAT_POOL_ROUNDTRIP=1`, DEFAULT OFF) because the pools are
+module-private state of a running parse and unreachable from a shell. One line
+per module: `FLATROUNDTRIP reset= ok= stable= bytes= path=`.
+- `reset=` is load-bearing, not decoration: without it `stable=` would be
+  VACUOUS, since B could equal A merely because nothing was cleared between the
+  two dumps. It asserts that restoring the pristine pre-parse snapshot really
+  does empty the pools. A selftest fixture pins exactly this
+  (`reset=false stable=true` must FAIL).
+- The self-check leaves the RESTORED pools in place, so the build that follows
+  is built from restored state: a lossy codec breaks the build loudly too, and
+  the gate FAILs a clean-round-trip run whose build exited non-zero.
+- Composition lives in `flat_pools_dump_all` / `flat_pools_restore_all`
+  (version line first, seven units in one fixed order, every unit invoked and
+  its verdict AND-ed at the end rather than short-circuited so a torn restore
+  cannot hide). These are also the unit the cache will store in step 3.
+- `--selftest` fatal, 6 fixtures; 0 modules is ERROR; verdict line last.
+
+**IMPORTANT ENVIRONMENT NOTE for anyone continuing this lane.** The repo
+working copy is shared with other concurrent sessions that edit `src/` live.
+Two different build failures observed while smoke-testing this gate
+(`semantic: method 'replace' not found on type 'function' (function
+'hash_text' ...)`, then `error[E1002]: function 'dependency_interface_fold'
+not found`) were BOTH other sessions' in-flight edits, not this lane's --
+proven by running the same build from a clean `git worktree` at this lane's
+own commits, where it exits 0. Do not chase such an error in the shared tree:
+commit your work and re-probe from a private worktree, or you will "fix"
+phantoms (this session renamed three innocent `val hash_text` locals before
+catching it, and reverted them).
+
+### Step 3 done (2026-08-21): the cache is WIRED and an unchanged module is not parsed
+Measured live on the 3-module fixture, consecutive builds, same tree:
+
+```
+[frontend-cache] hits=0 misses=3 parses=3     <- cold
+[frontend-cache] hits=3 misses=0 parses=0     <- warm
+```
+
+`parses=` is the load-bearing number and is why the summary carries it: a hit
+COUNT alone only proves the lookup said "hit". `parses=` is incremented at the
+`parse_module_body()` call site itself, so `parses=0` is direct evidence the
+parser did not run.
+
+Shape of the wiring:
+- Hook is `frontend_parse_or_restore` in `src/compiler/10.frontend/frontend.spl`,
+  around the `parse_and_build_module_scoped` call — one level below the
+  driver's `:379` site named earlier in this record, which is strictly better:
+  it also covers `parse_full_frontend_stage4_streaming`, and it sits INSIDE the
+  point where `parse_source` (post-`@cfg`, post-domain-block-strip) exists.
+  Everything after it — domain blocks, async desugar, surfaces, HIR, type
+  checking — runs unchanged on a hit.
+- `build_module_from_flat_pool_blob` (`module_assembly.spl`) is the hit path:
+  `reset_all_pools` -> `parser_init_with_path` (installs the lexer globals the
+  bridge reads) -> `flat_pools_restore_all` -> the same `flat_ast_to_module`.
+  Any decode failure re-resets and returns nil, so a torn blob leaves nothing
+  half-restored for the reparse that follows.
+- Capture is armed per-parse and `flat_pool_capture_take()` DISARMS as it
+  reads, so a blob can never be attributed to a later module.
+- **A parse that reported errors is never stored.** Otherwise it would come
+  back as a hit with `par_had_error` restored true and no parser diagnostics
+  re-emitted: a build that fails with no message.
+- Keying: `sha256(source file)` for the entry name, and a header line carrying
+  `FRONTEND_CACHE_ENTRY_VERSION`, `FLAT_POOL_CODEC_VERSION` and the scope the
+  DRIVER publishes in `SIMPLE_FRONTEND_CACHE_SCOPE`. No scope published => the
+  cache is OFF, because a front end that cannot see the driver's scope cannot
+  know what it would share entries with.
+- **The compiler SOURCE fingerprint in that scope is not optional**, and this
+  was observed live rather than reasoned about: mid-session another agent
+  edited `src/compiler` in the shared working copy, and the very next build
+  correctly went back to `hits=0 misses=3` — because under native-build the
+  front end runs INTERPRETED from `src/compiler/**`, so the executable hash
+  does not move when a parser edit changes what a parse produces.
+  `native_build_compiler_identity()` already folds it, and fails closed to
+  `uncacheable-<pid>-<time>` (unique per process, reuses nothing) when the
+  compiler identity is unknown.
+- Entries are written to a pid-unique temp and renamed, so the parallel shard
+  workers of step 4 cannot observe a half-written entry. A failed write is a
+  silent no-op: a cache that cannot store is a slow build, not a wrong one.
+- Directory: `build/bootstrap/native_cache/<lane>/frontend/`, lane from
+  `SIMPLE_CACHE_SCOPE`; `SIMPLE_FRONTEND_CACHE_DIR` overrides,
+  `SIMPLE_FRONTEND_CACHE=0` disables.
+
+Spec: `test/02_integration/compiler/driver/native_build_frontend_cache_second_build_hits_spec.spl`
+(+ mirror), five `slow_it` cases: cold misses=3 and three entries stored; warm
+hits=3 misses=0 parses=0; output bytes identical hit-vs-miss (fresh object-cache
+dir on the second build so it really re-codegens from the restored parse); edit
+one file -> exactly misses=1 hits=2 parses=1; a truncated entry -> misses=1
+hits=2, not a crash. It shells out rather than calling `cli_native_build`
+in-process because native-build forks a worker and the counters live in the
+child, whose stdout is the only place they are observable.
+
+### Step 4 done (2026-08-21): parse sharding across `--threads` worker processes
+Measured live on the 3-module fixture, cold cache, `--threads 2`:
+
+```
+[frontend-cache] hits=0 misses=1 parses=1     <- shard 0/2
+[parse-shard] done shard=0/2 parses=1
+[frontend-cache] hits=0 misses=2 parses=2     <- shard 1/2
+[parse-shard] done shard=1/2 parses=2
+[parse-shard] 2/2 shard(s) completed
+[frontend-cache] hits=3 misses=0 parses=0     <- the real build
+```
+
+Disjoint (1 + 2 = 3, no module parsed twice) and the real build then parsed
+nothing. The sharded binary is **byte-identical** to an unsharded, uncached
+build (`SIMPLE_PARSE_SHARDING=0 SIMPLE_FRONTEND_CACHE=0`), verified with
+`cmp` — 29,496 bytes both ways.
+
+- **Processes, not threads.** The flat AST pools are module-level globals, so
+  no shared mutable parser state may cross a boundary. Each shard is an
+  ordinary `native_build_worker.spl` child carrying `--parse-shard=<i>/<n>`.
+- **Ownership is a pure function of the module PATH** (djb2 over the path,
+  spelled out in `driver_source_pipeline_parsing.spl` rather than reusing
+  `rt_hash_text`, because the split must agree ACROSS PROCESSES and a seeded
+  or implementation-defined runtime hash would silently give two shards
+  different answers). Not the position in the discovered source list: the
+  closure walk can legitimately yield the same set in a different order
+  between processes, and a position split would then have two shards parse one
+  file and none parse another.
+- **A malformed shard spec owns EVERYTHING, not nothing.** A shard that
+  silently parsed no files would look like a fast success and leave the cache
+  empty — the hardest failure to notice.
+- **A failed shard is not fatal.** Its modules simply have no cache entry and
+  the real build parses them itself. Observed for real: before
+  `--parse-shard=` was added to the CLI validator, both shards died with
+  `unknown option` and the build still completed correctly at
+  `hits=0 misses=3 parses=3`. Sharding is a pure optimisation and must never
+  turn a working build into a broken one.
+- Spec: `test/02_integration/compiler/driver/native_build_parse_sharding_spec.spl`
+  (+ mirror): cold split then `parses=0`; byte-identical to unsharded; and the
+  same shard owns the same modules across two independent runs.
+
+### OPEN: two measurements this session did NOT finish
+Stated plainly rather than left implied, because an unrun probe is not a green
+one:
+
+1. **The full-closure round-trip run is still in flight.**
+   `check-flat-ast-roundtrip.shs` over the real `src/app --entry-closure`
+   (662 modules) was launched from a private worktree at `00ecd3367c1` and had
+   round-tripped **150 modules with 0 mismatches** (`reset=true ok=true
+   stable=true` on every line) when this session ended. Throughput on this
+   shared, heavily-loaded box is ~3 modules/min, so the run needs ~3.7h. Its
+   verdict line is the acceptance evidence for step 2; treat the codec as
+   round-trip-verified over 150 real modules and 4 fixture modules, NOT over
+   the whole closure, until that verdict lands. Rerun with:
+   `sh scripts/check/check-flat-ast-roundtrip.shs`
+2. **The real-closure run-1-vs-run-2 parse-phase wall was not measured.** It is
+   a second heavy probe and the rule on this box is one at a time. The numbers
+   quoted above (`hits=3 misses=0 parses=0`, byte-identical sharded output) are
+   all from the 3-module fixture, which proves the mechanism but says nothing
+   about the speedup on 662 modules. The `+<ms> dt=<ms>` stamps that
+   `146d987b1c0` added to every `[build] parse i/n` line are how to recover it:
+   compare the last parse stamp of run 1 against run 2 under
+   `SIMPLE_CACHE_SCOPE=fecache`. Also still unattributed: the 57.6s the closure
+   spends BEFORE `parse 1/662` (source load + closure + lint), which the
+   front-end cache does not touch at all and which now bounds any warm-build
+   win.
+
+Still to do:  (incl. dict encoders), then the full-closure round-trip gate (parse a real module, dump, reset,
+restore, rebuild through the bridge, compare), the cache wiring at the `:379`
+hook, and parse sharding across `--threads` worker processes.
+
+## NEXT STEP (deferred, do not start before the prerequisite)
+
+Moving the object-cache lookup earlier — so an unchanged module skips
+parse/HIR/MIR entirely — is **deferred until transitive dep-hash keying
+exists**, per the correctness prerequisite above. `BuildCache.has_cached_object`
+today compares only the module's own content hash, so skipping the front end
+would silence type errors that a changed dependency interface currently still
+surfaces. The cheap sound version is to fold the transitive import closure's
+content hashes into each module's cache key using the fingerprints `BuildCache`
+already holds; that is also exactly what makes "edit one file -> re-front-end
+that module and its affected dependents" true rather than approximate.
+
+## Status
+**Not fixed.** Instrumentation only (`146d987b1c0`). The front-end cache and the
+parse sharding are designed and sited above but not implemented: the codec must
+live in `src/compiler/10.frontend/core/**`, which was out of scope for this
+session, and the parse-vs-bridge split that gates the design's value was still
+being measured when the session ended. **Recommended order, REVISED by the 1-4% bridge measurement.** The flat-AST
+cache should come FIRST, ahead of moving the object-cache lookup earlier:
+
+1. **Flat-AST per-module cache** (~700-1000 lines + round-trip gate). Highest
+   value and *lowest risk* of the three: ~96% of per-file front-end cost, and
+   sound by construction because a hit rebuilds the identical `ParserModule`, so
+   HIR and type checking still run and no diagnostic is silenced. Land the codec
+   alone first, gated by round-trip equality over the whole `src/app` closure,
+   before wiring any cache or shard mode.
+2. **Then** the per-module cache wiring at the `:379` hook, and sharding.
+3. **Only then** skipping HIR/MIR on an object-cache hit — and only together
+   with dependency-aware invalidation, per the prerequisite above. It is the
+   riskiest of the three and, now that parse can be made ~25x cheaper, no longer
+   the biggest win.
+

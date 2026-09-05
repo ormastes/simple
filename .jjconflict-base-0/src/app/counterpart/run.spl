@@ -1,0 +1,65 @@
+@allow(primitive_api)
+# `simple counterpart run` — the gate a conformance run passes through before
+# any adapter is loaded.
+#
+# Lane F2 owns the resolution half only: this command answers "may this run
+# load these providers, and does it have enough independent references to prove
+# anything?" It deliberately does NOT execute a plan — the provider registry
+# (F4) and relation engine (F6) own that. What it does own is the refusal: an
+# unresolved provider stops the run here rather than being skipped quietly
+# somewhere further in.
+
+use std.nogc_sync_mut.spec.evidence.counterpart.package_registry.{
+    COUNTERPART_LOCK_PATH,
+    ProviderDescriptor,
+    load_lock_file,
+    resolve_provider_from_disk,
+    resolved_provider_is_usable,
+    resolved_provider_summary
+}
+use app.counterpart.inspect.{descriptors_for}
+
+fn independence_groups_of(descriptors: [ProviderDescriptor]) -> [text]:
+    var groups: [text] = []
+    for descriptor in descriptors:
+        if descriptor.independence_group == "":
+            continue
+        var seen = false
+        for existing in groups:
+            if existing == descriptor.independence_group:
+                seen = true
+        if not seen:
+            groups.push(descriptor.independence_group)
+    groups
+
+pub fn run_run(provider_id: text) -> i64:
+    val descriptors = descriptors_for(provider_id)
+    if descriptors.len() == 0:
+        print "counterpart run: no descriptor for '{provider_id}'"
+        return 1
+    val records = load_lock_file(COUNTERPART_LOCK_PATH)
+    var usable: [ProviderDescriptor] = []
+    var blocked: i64 = 0
+    for descriptor in descriptors:
+        val resolved = resolve_provider_from_disk(descriptor, records)
+        print resolved_provider_summary(resolved)
+        for reason in resolved.reasons:
+            print "  reason: {reason}"
+        if resolved_provider_is_usable(resolved):
+            usable.push(descriptor)
+        else:
+            blocked = blocked + 1
+
+    if blocked > 0:
+        print "counterpart run: BLOCKED — {blocked} provider(s) unresolved. An unavailable provider is never a pass."
+        return 1
+    # Vacuity: one usable provider cannot be differentially compared with
+    # anything, and two wrappers over one engine are one reference, not two.
+    if usable.len() < 2:
+        print "counterpart run: BLOCKED — fewer than two usable providers; nothing can be differentially compared."
+        return 1
+    if independence_groups_of(usable).len() < 2:
+        print "counterpart run: BLOCKED — all usable providers share one independence group."
+        return 1
+    print "counterpart run: {usable.len()} provider(s) resolved and verified; hand off to the provider registry."
+    0

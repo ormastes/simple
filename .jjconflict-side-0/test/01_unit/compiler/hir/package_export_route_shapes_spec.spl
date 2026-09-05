@@ -1,0 +1,457 @@
+
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/hir/package_export_route_shapes_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/package_export_route_shapes_spec.md
+# doc-path: doc/03_plan/sys_test/package_export_route_shapes_spec.md
+# doc-path: doc/04_architecture/package_export_route_shapes_spec.md
+# doc-path: doc/05_design/package_export_route_shapes_spec_oracles.md
+# @manual: primary
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+
+fn bare_export_logger() -> Logger:
+    Logger(level: 0)
+
+fn bare_export_module(source: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, name, name, log)
+
+fn lower_bare_export_graph(package_source: text, alias_source: text) -> text:
+    val log = bare_export_logger()
+    val terminal_source = "enum CodegenTarget:\n    NativeExecutable\n    WasmModule"
+    val consumer_source = "use pkg.core.\{CodegenTarget\}\nfn aot(target: CodegenTarget) -> i64:\n    1"
+
+    var modules: Dict<text, Module> = {}
+    modules["pkg.backend.backend_types"] = bare_export_module(terminal_source, "pkg.backend.backend_types", log)
+    modules["pkg.core.backend_types"] = bare_export_module(alias_source, "pkg.core.backend_types", log)
+    modules["pkg.core.__init__"] = bare_export_module(package_source, "pkg.core.__init__", log)
+    modules["pkg.consumer"] = bare_export_module(consumer_source, "pkg.consumer", log)
+
+    val sources = [
+        SourceFile(path: "pkg/backend/backend_types.spl", content: terminal_source, module_name: "pkg.backend.backend_types"),
+        SourceFile(path: "pkg/core/backend_types.spl", content: alias_source, module_name: "pkg.core.backend_types"),
+        SourceFile(path: "pkg/core/__init__.spl", content: package_source, module_name: "pkg.core.__init__"),
+        SourceFile(path: "pkg/consumer.spl", content: consumer_source, module_name: "pkg.consumer")
+    ]
+
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+    val consumer = bare_export_module(consumer_source, "pkg.consumer", log)
+    var lowering = hirlowering_for_module("pkg.consumer", surfaces)
+    val hir = lowering.lower_module(consumer)
+    var joined = ""
+    for message in lowering.diagnostic_messages:
+        joined = joined + message + "|"
+    joined
+
+describe("package export route shapes resolve to their terminal declaration", fn():
+    it("resolves through a sibling that declares the type", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: resolves through a sibling that declares the type"")
+        val diagnostics = lower_bare_export_graph(
+            "export CodegenTarget",
+            "enum CodegenTarget:\n    NativeExecutable\n    WasmModule")
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves through a sibling that re-exports the type", fn():
+        step("Verify: resolves through a sibling that re-exports the type"")
+        val diagnostics = lower_bare_export_graph(
+            "export CodegenTarget",
+            "export use pkg.backend.backend_types.\{CodegenTarget\}")
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves a qualified bare export naming its sibling", fn():
+        step("Verify: resolves a qualified bare export naming its sibling"")
+        val diagnostics = lower_bare_export_graph(
+            "export backend_types.CodegenTarget",
+            "enum CodegenTarget:\n    NativeExecutable\n    WasmModule")
+        expect(diagnostics).to_equal("")
+    )
+)
+
+# --- multi-hop shapes -------------------------------------------------------
+# driver.spl never names CodegenTarget; it reaches it as a payload of an
+# imported item whose declaring module imports the type through a chain of
+# facades. Each module is `name|source`; the LAST module is the consumer.
+fn lower_route_chain(specs: Array<text>) -> text:
+    val log = bare_export_logger()
+    var modules: Dict<text, Module> = {}
+    var sources: Array<SourceFile> = []
+    var consumer_name = ""
+    var consumer_source = ""
+    for spec in specs:
+        val bar = spec.index_of("|")
+        val name = spec.substring(0, bar)
+        val source = spec.substring(bar + 1, spec.len())
+        modules[name] = bare_export_module(source, name, log)
+        sources.push(SourceFile(path: name.replace(".", "/") + ".spl", content: source, module_name: name))
+        consumer_name = name
+        consumer_source = source
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+    val consumer = bare_export_module(consumer_source, consumer_name, log)
+    var lowering = hirlowering_for_module(consumer_name, surfaces)
+    val hir = lowering.lower_module(consumer)
+    var joined = ""
+    for message in lowering.diagnostic_messages:
+        joined = joined + message + "|"
+    joined
+
+describe("qualified bare exports resolve through further re-export hops", fn():
+    val terminal = "pkg.backend.backend_types|enum CodegenTarget:\n    NativeExecutable\n    WasmModule"
+    val qualified_init = "pkg.backend.__init__|export backend_types.CodegenTarget"
+
+    it("resolves a named re-export of a qualified bare export", fn():
+        step("Verify: resolves a named re-export of a qualified bare export"")
+        val diagnostics = lower_route_chain([
+            terminal, qualified_init,
+            "pkg.mid|export use pkg.backend.\{CodegenTarget\}",
+            "pkg.facade|export use pkg.mid.\{CodegenTarget\}",
+            "pkg.consumer|use pkg.facade.\{CodegenTarget\}\nfn aot(target: CodegenTarget) -> i64:\n    1"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves a payload type reached through a glob facade of a qualified bare export", fn():
+        step("Verify: resolves a payload type reached through a glob facade of a qualified bare export"")
+        val diagnostics = lower_route_chain([
+            terminal, qualified_init,
+            "pkg.types_facade|export use pkg.backend.*",
+            "pkg.opts|use pkg.types_facade.*\nstruct AotOptions:\n    target: CodegenTarget",
+            "pkg.consumer|use pkg.opts.\{AotOptions\}\nfn aot(options: AotOptions) -> i64:\n    1"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves a payload type reached through a named import of a qualified bare export", fn():
+        step("Verify: resolves a payload type reached through a named import of a qualified bare export"")
+        val diagnostics = lower_route_chain([
+            terminal, qualified_init,
+            "pkg.opts|use pkg.backend.\{CodegenTarget\}\nstruct AotOptions:\n    target: CodegenTarget",
+            "pkg.consumer|use pkg.opts.\{AotOptions\}\nfn aot(options: AotOptions) -> i64:\n    1"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves a payload type two re-export hops from the consumer", fn():
+        step("Verify: resolves a payload type two re-export hops from the consumer"")
+        val diagnostics = lower_route_chain([
+            terminal, qualified_init,
+            "pkg.opts|use pkg.backend.\{CodegenTarget\}\nstruct AotOptions:\n    target: CodegenTarget\nfn aot_impl(options: AotOptions) -> i64:\n    1",
+            "pkg.public_compile|pub use pkg.opts.\{aot_impl\}",
+            "pkg.consumer|pub use pkg.public_compile.\{aot_impl\}\nfn run() -> i64:\n    1"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("real backend facade shape: bare and qualified export of one name", fn():
+    it("resolves when the package init carries both a bare and a qualified export", fn():
+        step("Verify: resolves when the package init carries both a bare and a qualified export"")
+        val diagnostics = lower_route_chain([
+            "pkg.backend.backend_types|enum CodegenTarget:\n    NativeExecutable\n    WasmModule",
+            "pkg.backend.backend_api|use pkg.backend.backend_types.\{CodegenTarget\}\nstruct Backend:\n    target: CodegenTarget",
+            "pkg.backend.__init__|export BackendKind, CodegenTarget\nexport backend_api.Backend\nexport backend_api.CodegenTarget",
+            "pkg.backend_types|export use pkg.backend.backend_types.*",
+            "pkg.backend.interp|use pkg.backend_types.*\nclass Interp:\n    fn run(self, target: CodegenTarget) -> i64:\n        1",
+            "pkg.consumer|use pkg.backend.interp.\{Interp\}\nuse lazy pkg.backend_types.\{CodegenTarget\}\nfn run(i: Interp) -> i64:\n    1"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+# --- one lowerer, many modules (the stage-1 streaming shape) ----------------
+# The driver reuses ONE HirLowering across every module (begin_module between
+# them), and the re-export root memo (REXMEMO, f8681a7afa6) deliberately
+# survives begin_module. A miss recorded while lowering an EARLIER module is
+# therefore served to every later module asking the same (facade, name).
+# Each `spec` is `name|source`; `consumers` are lowered in that order and the
+# LAST consumer's diagnostics are returned.
+fn lower_route_chain_sequence(specs: Array<text>, consumers: Array<text>) -> text:
+    val log = bare_export_logger()
+    var modules: Dict<text, Module> = {}
+    var sources: Array<SourceFile> = []
+    var source_by_name: Dict<text, text> = {}
+    for spec in specs:
+        val bar = spec.index_of("|")
+        val name = spec.substring(0, bar)
+        val source = spec.substring(bar + 1, spec.len())
+        modules[name] = bare_export_module(source, name, log)
+        sources.push(SourceFile(path: name.replace(".", "/") + ".spl", content: source, module_name: name))
+        source_by_name[name] = source
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+    var lowering = hirlowering_for_module(consumers[0], surfaces)
+    var joined = ""
+    for consumer_name in consumers:
+        lowering.begin_module(consumer_name)
+        val consumer = bare_export_module(source_by_name[consumer_name], consumer_name, log)
+        val hir = lowering.lower_module(consumer)
+        joined = ""
+        for message in lowering.diagnostic_messages:
+            joined = joined + message + "|"
+    joined
+
+describe("re-export root memo across modules lowered by one lowerer", fn():
+    val mir_types = "pkg.mir.mir_types|struct MirType:\n    kind: i64\nstruct MirModule:\n    name: text"
+    val mir_data = "pkg.mir.mir_data|use pkg.mir.mir_types.*\nfn data_of(m: MirModule) -> i64:\n    1"
+    val interp = "pkg.backend.interp|use pkg.mir.mir_data.*\nfn run(t: MirType) -> i64:\n    1"
+
+    it("resolves MirType through a plain glob import of a plain glob importer", fn():
+        step("Verify: resolves MirType through a plain glob import of a plain glob importer"")
+        val diagnostics = lower_route_chain_sequence([mir_types, mir_data, interp], ["pkg.backend.interp"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves MirType for a second module after a first module used the same facade", fn():
+        step("Verify: resolves MirType for a second module after a first module used the same facade"")
+        val first = "pkg.backend.first|use pkg.mir.mir_data.\{MirModule\}\nfn go(m: MirModule) -> i64:\n    1"
+        val diagnostics = lower_route_chain_sequence([mir_types, mir_data, first, interp], ["pkg.backend.first", "pkg.backend.interp"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves MirType for a second module after a first module named it through the facade", fn():
+        step("Verify: resolves MirType for a second module after a first module named it through the facade"")
+        val first = "pkg.backend.first|use pkg.mir.mir_data.*\nfn go(t: MirType) -> i64:\n    1"
+        val diagnostics = lower_route_chain_sequence([mir_types, mir_data, first, interp], ["pkg.backend.first", "pkg.backend.interp"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves CodegenTarget in a second-hop facade consumer after the owner module was lowered first", fn():
+        step("Verify: resolves CodegenTarget in a second-hop facade consumer after the owner module was lowered first"")
+        val diagnostics = lower_route_chain_sequence([
+            "pkg.backend.backend_types|enum CodegenTarget:\n    NativeExecutable\n    WasmModule",
+            "pkg.backend.backend_api|use pkg.backend.backend_types.\{CodegenTarget\}\nfn api_target() -> CodegenTarget:\n    CodegenTarget.NativeExecutable",
+            "pkg.backend.__init__|export backend_api.CodegenTarget\nexport backend_api.api_target",
+            "pkg.opts|use pkg.backend.\{CodegenTarget\}\nstruct AotOptions:\n    target: CodegenTarget\nfn aot_impl(options: AotOptions) -> i64:\n    1",
+            "pkg.public_compile|pub use pkg.opts.\{aot_impl\}",
+            "pkg.driver|pub use pkg.public_compile.\{aot_impl\}\nfn run() -> i64:\n    1"],
+            ["pkg.backend.backend_api", "pkg.opts", "pkg.public_compile", "pkg.driver"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("package-sibling registration reaches a sibling's facade-imported type", fn():
+    # backend_port.spl names NOTHING and imports nothing; it is blamed for
+    # `unresolved type: GpuIntrinsicKind` because its package sibling
+    # gpu_intrinsics.spl imports that enum, which the frontend facade also
+    # `export use`s. The sibling's signatures are registered into every
+    # directory sibling's scope.
+    val owner = "pkg.frontend.parser_types_expr|enum GpuIntrinsicKind:\n    ThreadId\n    BlockId"
+    val facade = "pkg.frontend.__init__|export use pkg.frontend.parser_types_expr.\{GpuIntrinsicKind\}"
+    val sibling = "pkg.backend.gpu_intrinsics|use pkg.frontend.\{GpuIntrinsicKind\}\nfn intrinsic_kind(name: text) -> GpuIntrinsicKind:\n    GpuIntrinsicKind.ThreadId"
+    val port = "pkg.backend.backend_port|struct BackendPort:\n    name: text"
+
+    it("resolves the sibling's facade-imported type for a consumer that names nothing", fn():
+        step("Verify: resolves the sibling's facade-imported type for a consumer that names nothing"")
+        val diagnostics = lower_route_chain_sequence([owner, facade, sibling, port], ["pkg.backend.backend_port"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves it after another module already chased the same facade name", fn():
+        step("Verify: resolves it after another module already chased the same facade name"")
+        val first = "pkg.other|use pkg.frontend.\{GpuIntrinsicKind\}\nfn first(k: GpuIntrinsicKind) -> i64:\n    1"
+        val diagnostics = lower_route_chain_sequence([owner, facade, sibling, port, first], ["pkg.other", "pkg.backend.gpu_intrinsics", "pkg.backend.backend_port"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("package-sibling field types", fn():
+    # hir_types.spl declares HirModule with a field typed [HirImpl]; HirImpl
+    # lives in the directory sibling hir_definitions.spl with no import edge.
+    it("resolves a sibling-declared field type of an imported struct", fn():
+        step("Verify: resolves a sibling-declared field type of an imported struct"")
+        val diagnostics = lower_route_chain_sequence([
+            "pkg.hir.hir_definitions|struct HirImpl:\n    id: i64",
+            "pkg.hir.hir_types|struct HirModule:\n    impls: [HirImpl]",
+            "pkg.backend.consumer|use pkg.hir.hir_types.\{HirModule\}\nfn run(m: HirModule) -> i64:\n    1"],
+            ["pkg.backend.consumer"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("value route through a second-level plain glob", fn():
+    # module_surface_declarations.spl: `use compiler.frontend.parser_types.*`
+    # where parser_types only plain-`use`s parser_types_expr.* (and carries
+    # its own `export` list, so it is not a pure facade). Same class as
+    # MirType via mir_data, for a FUNCTION rather than a type.
+    it("resolves a function reached only through the glob target's own glob", fn():
+        step("Verify: resolves a function reached only through the glob target's own glob"")
+        val diagnostics = lower_route_chain_sequence([
+            "pkg.frontend.parser_types_expr|struct TypeKind:\n    id: i64\nfn parser_type_kind_named_name(kind: TypeKind) -> text:\n    \"x\"",
+            "pkg.frontend.parser_types|use pkg.frontend.parser_types_expr.*\nstruct Param:\n    name: text\nexport Param",
+            "pkg.hir.module_surface_declarations|use pkg.frontend.parser_types.*\nfn named(kind: TypeKind) -> text:\n    parser_type_kind_named_name(kind)"],
+            ["pkg.hir.module_surface_declarations"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("has_ optional sugar in a sibling callable signature", fn():
+    # gpu_intrinsics.spl: `fn recognize(name: text) -> has_GpuIntrinsicKind`
+    # with `use compiler.frontend.parser_types_expr.{GpuIntrinsicKind}`. The
+    # surface records the sugar verbatim, so the dependency materializer
+    # must strip it to find the real declaration.
+    it("resolves the sugared return type for a consumer that names nothing", fn():
+        step("Verify: resolves the sugared return type for a consumer that names nothing"")
+        val diagnostics = lower_route_chain_sequence([
+            "pkg.frontend.parser_types_expr|enum GpuIntrinsicKind:\n    ThreadId\n    BlockId",
+            "pkg.backend.gpu_intrinsics|use pkg.frontend.parser_types_expr.\{GpuIntrinsicKind\}\nfn recognize(name: text) -> has_GpuIntrinsicKind:\n    nil",
+            "pkg.backend.feature_caps_types|struct FeatureCaps:\n    name: text"],
+            ["pkg.backend.feature_caps_types"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("bare export facade with no imports beside its declaring sibling", fn():
+    # 15.blocks/blocks.spl is module compiler.blocks.blocks: a facade with NO
+    # `use` lines that bare-exports `Completion`, declared by its directory
+    # sibling compiler.blocks.definition (the driver maps compiler.blocks.X
+    # to 15.blocks/blocks/X). Zero-import siblings sugar_registry.spl and
+    # context.spl were blamed with `unresolved type: Completion`.
+    val definition = "pkg.blocks.definition|struct Completion:\n    label: text\nstruct BlockDefinition:\n    name: text"
+    val facade = "pkg.blocks.blocks|export BlockDefinition\nexport Completion"
+    val pkg_init = "pkg.blocks.__init__|export use pkg.blocks.definition.\{BlockDefinition\}"
+    val context = "pkg.blocks.context|use pkg.common.span.\{Span\}\nstruct BlockContext:\n    span: Span"
+    val span = "pkg.common.span|struct Span:\n    line: i64"
+    val sibling = "pkg.blocks.sugar_registry|struct SugarRule:\n    name: text"
+
+    it("resolves for a zero-import sibling lowered first", fn():
+        step("Verify: resolves for a zero-import sibling lowered first"")
+        val diagnostics = lower_route_chain_sequence([span, definition, facade, pkg_init, context, sibling], ["pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves for a zero-import sibling lowered after the facade", fn():
+        step("Verify: resolves for a zero-import sibling lowered after the facade"")
+        val diagnostics = lower_route_chain_sequence([span, definition, facade, pkg_init, context, sibling], ["pkg.blocks.blocks", "pkg.blocks.sugar_registry", "pkg.blocks.context"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves for a consumer importing through the facade", fn():
+        step("Verify: resolves for a consumer importing through the facade"")
+        val consumer = "pkg.consumer|use pkg.blocks.blocks.\{Completion\}\nfn pick(c: Completion) -> text:\n    c.label"
+        val diagnostics = lower_route_chain_sequence([span, definition, facade, pkg_init, context, sibling, consumer], ["pkg.consumer"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("owner-local types in a sibling trait's method signatures", fn():
+    val definition = "pkg.blocks.definition|trait BlockDefinition:\n    fn name() -> text\n    fn completions(payload: text, cursor: i64) -> [Completion]:\n        []\nstruct Completion:\n    label: text"
+    val sibling = "pkg.blocks.sugar_registry|struct SugarRule:\n    name: text"
+
+    it("array-of-owner-local default trait method return, zero-import sibling", fn():
+        step("Verify: array-of-owner-local default trait method return, zero-import sibling"")
+        val diagnostics = lower_route_chain_sequence([definition, sibling], ["pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+    it("same, after the owner was lowered first", fn():
+        step("Verify: same, after the owner was lowered first"")
+        val diagnostics = lower_route_chain_sequence([definition, sibling], ["pkg.blocks.definition", "pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("sibling impl method whose return type is a directory-sibling type", fn():
+    # 15.blocks/blocks/builtin_blocks_data.spl: `struct SqlBlockDef(BlockDefinition)`
+    # + `impl SqlBlockDef: fn completions(...) -> [Completion]` with Completion
+    # reached by directory-sibling visibility only (no `use`). Zero-import
+    # package member sugar_registry.spl registers that sibling's methods and
+    # was blamed with `unresolved type: Completion` (stage1 closure 2026-08-22).
+    val definition = "pkg.blocks.definition|trait BlockDefinition:\n    fn name() -> text\nstruct Completion:\n    label: text\nexport BlockDefinition, Completion"
+    val data = "pkg.blocks.builtin_blocks_data|use pkg.blocks.definition.\{BlockDefinition\}\nstruct SqlBlockDef(BlockDefinition):\n    tag: text\nimpl SqlBlockDef:\n    fn name() -> text:\n        \"sql\"\n    fn completions(payload: text, cursor: i64) -> [Completion]:\n        []"
+    val sibling = "pkg.blocks.sugar_registry|struct SugarRule:\n    name: text"
+
+    it("zero-import sibling lowered first", fn():
+        step("Verify: zero-import sibling lowered first"")
+        val diagnostics = lower_route_chain_sequence([data, definition, sibling], ["pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+    it("zero-import sibling lowered after the impl owner", fn():
+        step("Verify: zero-import sibling lowered after the impl owner"")
+        val diagnostics = lower_route_chain_sequence([definition, data, sibling], ["pkg.blocks.builtin_blocks_data", "pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+fn lower_aliased_chain(entries: Array<Array<text>>, consumers: Array<text>) -> text:
+    # entries: [registry name, physical path, source]. Several names may share
+    # one path -- that is how the driver registers `compiler.blocks.value`
+    # as an alias of physical `compiler.15.blocks.blocks.value`.
+    val log = bare_export_logger()
+    var modules: Dict<text, Module> = {}
+    var sources: Array<SourceFile> = []
+    var source_by_name: Dict<text, text> = {}
+    for entry in entries:
+        val name = entry[0]
+        val path = entry[1]
+        val source = entry[2]
+        modules[name] = bare_export_module(source, path, log)
+        sources.push(SourceFile(path: path, content: source, module_name: name))
+        source_by_name[name] = source
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    if surfaces_result.is_err():
+        return "surfaces: " + surfaces_result.unwrap_err()
+    val surfaces = surfaces_result.unwrap()
+    var lowering = hirlowering_for_module(consumers[0], surfaces)
+    var joined = ""
+    for consumer_name in consumers:
+        lowering.begin_module(consumer_name)
+        val consumer = bare_export_module(source_by_name[consumer_name], consumer_name, log)
+        val hir = lowering.lower_module(consumer)
+        joined = ""
+        for message in lowering.diagnostic_messages:
+            joined = joined + message + "|"
+    joined
+
+describe("tier-aliased package: sibling impl method returning a directory-sibling type", fn():
+    # Real layout: src/compiler/15.blocks/blocks/{definition,builtin_blocks_data}.spl
+    # are registered under the physical name compiler.15.blocks.blocks.X AND the
+    # import spelling compiler.blocks.X; src/compiler/blocks/sugar_registry.spl is
+    # compiler.blocks.sugar_registry with NO imports. Through the alias the
+    # blocks/ files become package siblings of sugar_registry, and registering
+    # builtin_blocks_data's `fn completions(...) -> [Completion]` (Completion
+    # reached only by directory-sibling visibility) produced
+    # `unresolved type: Completion` blamed on sugar_registry.
+    val def_src = "trait BlockDefinition:\n    fn name() -> text\nstruct Completion:\n    label: text\nexport BlockDefinition, Completion"
+    val data_src = "use pkg.blocks.definition.\{BlockDefinition\}\nstruct SqlBlockDef(BlockDefinition):\n    tag: text\nimpl SqlBlockDef:\n    fn name() -> text:\n        \"sql\"\n    fn completions(payload: text, cursor: i64) -> [Completion]:\n        []"
+    val sugar_src = "struct SugarRule:\n    name: text"
+    # Registry order matters: the impl owner is registered BEFORE the type
+    # owner, as the driver's closure order does for builtin_blocks_data.
+    val entries = [
+        ["pkg.15.blocks.blocks.builtin_blocks_data", "src/pkg/15.blocks/blocks/builtin_blocks_data.spl", data_src],
+        ["pkg.blocks.builtin_blocks_data", "src/pkg/15.blocks/blocks/builtin_blocks_data.spl", data_src],
+        ["pkg.15.blocks.blocks.definition", "src/pkg/15.blocks/blocks/definition.spl", def_src],
+        ["pkg.blocks.definition", "src/pkg/15.blocks/blocks/definition.spl", def_src],
+        ["pkg.blocks.sugar_registry", "src/pkg/blocks/sugar_registry.spl", sugar_src]]
+
+    it("zero-import sibling lowered first", fn():
+        step("Verify: zero-import sibling lowered first"")
+        expect(lower_aliased_chain(entries, ["pkg.blocks.sugar_registry"])).to_equal("")
+    )
+    it("zero-import sibling lowered after the impl owner", fn():
+        step("Verify: zero-import sibling lowered after the impl owner"")
+        expect(lower_aliased_chain(entries, ["pkg.blocks.builtin_blocks_data", "pkg.blocks.sugar_registry"])).to_equal("")
+    )
+)

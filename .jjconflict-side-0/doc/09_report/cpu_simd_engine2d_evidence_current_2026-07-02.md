@@ -1,0 +1,149 @@
+# CPU SIMD Engine2D Evidence
+
+- status: pass
+- reason: runtime-evidence-verified
+- simple_bin: release/x86_64-unknown-linux-gnu/simple
+- simple_bin_source: repo-self-hosted-engine2d-simd
+- simple_bin_status: pass
+- arch: x86_64
+- feature: avx2
+- level: AVX2
+- checksum: 5096
+- native_simd_executed: true
+- native_simd_bit_exact: true
+- native_simd_hits: 2
+- provider_hits: 17
+- provider_changes: 0
+- fill expected checksum: 581977577856
+- fill actual checksum: 581977577856
+- fill mismatch count: 0
+- copy expected checksum: 290916925924
+- copy actual checksum: 290916925924
+- copy mismatch count: 0
+- alpha expected checksum: 582193168320
+- alpha actual checksum: 582193168320
+- alpha mismatch count: 0
+- scroll expected checksum: 581833852104
+- scroll actual checksum: 581833852104
+- scroll mismatch count: 0
+- diagram pixel count: 192
+- diagram expected checksum: 79321896458941
+- diagram actual checksum: 79321896458941
+- diagram mismatch count: 0
+- diagram fill hits: 5
+- diagram copy hits: 3
+- diagram alpha hits: 5
+- diagram blit hits: 1
+- diagram scroll hits: 3
+- facade draw_image clip/mask spec: test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl
+- facade draw_image clip/mask status: pass
+- facade draw_image clip/mask examples: 8
+- facade draw_image clip/mask failures: 0
+- cpu_simd facade draw_image clip/mask status: pass
+- policy: exact bitmap, no blur, no tolerance
+- blur/tolerance used: false
+- x86_status: Initialized
+- arm_status: Unavailable
+- riscv_status: Unavailable
+- evidence_log: build/cpu-simd-engine2d-evidence-current/evidence.log
+- evidence_log_bytes: 2734
+- evidence_log_cksum: 1033994295
+
+## Raw Evidence
+- cpu_simd_evidence_status=pass
+- cpu_simd_evidence_reason=runtime-evidence-verified
+- cpu_simd_evidence_simple_bin=release/x86_64-unknown-linux-gnu/simple
+- cpu_simd_evidence_simple_bin_source=repo-self-hosted-engine2d-simd
+- cpu_simd_evidence_simple_bin_status=pass
+- cpu_simd_evidence_arch=x86_64
+- cpu_simd_evidence_feature=avx2
+- cpu_simd_evidence_level=AVX2
+- cpu_simd_evidence_checksum=5096
+- cpu_simd_evidence_native_simd_executed=true
+- cpu_simd_evidence_native_simd_bit_exact=true
+- cpu_simd_evidence_native_simd_hits=2
+- cpu_simd_evidence_provider_hits=17
+- cpu_simd_evidence_provider_changes=0
+- cpu_simd_evidence_fill_expected_checksum=581977577856
+- cpu_simd_evidence_fill_actual_checksum=581977577856
+- cpu_simd_evidence_fill_mismatch_count=0
+- cpu_simd_evidence_copy_expected_checksum=290916925924
+- cpu_simd_evidence_copy_actual_checksum=290916925924
+- cpu_simd_evidence_copy_mismatch_count=0
+- cpu_simd_evidence_alpha_expected_checksum=582193168320
+- cpu_simd_evidence_alpha_actual_checksum=582193168320
+- cpu_simd_evidence_alpha_mismatch_count=0
+- cpu_simd_evidence_scroll_expected_checksum=581833852104
+- cpu_simd_evidence_scroll_actual_checksum=581833852104
+- cpu_simd_evidence_scroll_mismatch_count=0
+- cpu_simd_evidence_diagram_pixel_count=192
+- cpu_simd_evidence_diagram_expected_checksum=79321896458941
+- cpu_simd_evidence_diagram_actual_checksum=79321896458941
+- cpu_simd_evidence_diagram_mismatch_count=0
+- cpu_simd_evidence_diagram_fill_hits=5
+- cpu_simd_evidence_diagram_copy_hits=3
+- cpu_simd_evidence_diagram_alpha_hits=5
+- cpu_simd_evidence_diagram_blit_hits=1
+- cpu_simd_evidence_diagram_scroll_hits=3
+- cpu_simd_evidence_facade_draw_image_clip_mask_spec=test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl
+- cpu_simd_evidence_facade_draw_image_clip_mask_status=pass
+- cpu_simd_evidence_facade_draw_image_clip_mask_examples=8
+- cpu_simd_evidence_facade_draw_image_clip_mask_failures=0
+- cpu_simd_evidence_cpu_simd_facade_draw_image_clip_mask_status=pass
+- cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance
+- cpu_simd_evidence_blur_or_tolerance_used=false
+- cpu_simd_evidence_x86_status=Initialized
+- cpu_simd_evidence_arm_status=Unavailable
+- cpu_simd_evidence_riscv_status=Unavailable
+- cpu_simd_evidence_log=build/cpu-simd-engine2d-evidence-current/evidence.log
+- cpu_simd_evidence_log_bytes=2734
+- cpu_simd_evidence_log_cksum=1033994295
+
+## Evidence Log
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- cpu_simd_arch=x86_64
+- cpu_simd_feature=avx2
+- cpu_simd_level=AVX2
+- cpu_simd_executed_all=true
+- cpu_simd_checksum=5096
+- cpu_simd_hit_summary=fill_delta=1,copy_delta=1,alpha_delta=1,scroll_delta=1
+- cpu_simd_native_simd_executed=true
+- cpu_simd_native_simd_bit_exact=true
+- cpu_simd_native_simd_hits=2
+- cpu_simd_native_simd_reason=native SIMD kernels executed (hits=2) and matched scalar bit-for-bit
+- cpu_simd_provider_hits=17
+- cpu_simd_provider_changes=0
+- cpu_simd_fill_expected_checksum=581977577856
+- cpu_simd_fill_actual_checksum=581977577856
+- cpu_simd_fill_mismatch_count=0
+- cpu_simd_copy_expected_checksum=290916925924
+- cpu_simd_copy_actual_checksum=290916925924
+- cpu_simd_copy_mismatch_count=0
+- cpu_simd_alpha_expected_checksum=582193168320
+- cpu_simd_alpha_actual_checksum=582193168320
+- cpu_simd_alpha_mismatch_count=0
+- cpu_simd_scroll_expected_checksum=581833852104
+- cpu_simd_scroll_actual_checksum=581833852104
+- cpu_simd_scroll_mismatch_count=0
+- cpu_simd_diagram_pixel_count=192
+- cpu_simd_diagram_expected_checksum=79321896458941
+- cpu_simd_diagram_actual_checksum=79321896458941
+- cpu_simd_diagram_mismatch_count=0
+- cpu_simd_diagram_mismatch_summary=
+- cpu_simd_diagram_fill_hits=5
+- cpu_simd_diagram_copy_hits=3
+- cpu_simd_diagram_alpha_hits=5
+- cpu_simd_diagram_blit_hits=1
+- cpu_simd_diagram_scroll_hits=3
+- cpu_simd_policy=exact-bitmap-no-blur-no-tolerance
+- cpu_simd_blur_or_tolerance_used=false
+- cpu_simd_probe_status=Initialized
+- cpu_simd_x86_status=Initialized
+- cpu_simd_arm_status=Unavailable
+- cpu_simd_riscv_status=Unavailable
+- cpu_simd_x86_diag=requested=cpu_simd_x86;selected=cpu_simd_x86;status=Initialized;api=cpu_simd_x86;gate=cpu_simd_x86_runtime;shader=none;compute=true;graphics=true;present=true;reason=x86_64 SSE/AVX runtime kernels confirmed
+- cpu_simd_arm_diag=requested=cpu_simd_arm;selected=cpu_simd_arm;status=Unavailable;api=cpu_simd_arm;gate=cpu_simd_arm_runtime;shader=none;compute=false;graphics=false;present=false;reason=cpu_simd_arm not available: runtime NEON not detected on this host
+- cpu_simd_riscv_diag=requested=cpu_simd_riscv;selected=cpu_simd_riscv;status=Unavailable;api=cpu_simd_riscv;gate=cpu_simd_riscv_runtime;shader=none;compute=false;graphics=false;present=false;reason=cpu_simd_riscv not available: runtime RVV not detected on this host
+- overall=pass

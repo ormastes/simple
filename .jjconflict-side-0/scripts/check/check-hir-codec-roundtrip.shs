@@ -1,0 +1,131 @@
+#!/bin/sh
+# check-hir-codec-roundtrip.shs — every HirModule of a real closure must
+# survive encode -> decode -> encode BYTE-for-BYTE, and a build that continues
+# from the DECODED modules must produce the same binary as a build that never
+# touched the codec.
+#
+# WHY TWO HALVES: the first half (HIRROUNDTRIP receipts emitted in-process by
+# driver_hir_pipeline_lowering under SIMPLE_HIR_CODEC_ROUNDTRIP=1) proves the
+# blob is self-consistent; the second half proves the DECODED aggregate is what
+# MIR lowering, mono and codegen actually need — a field that encodes stably
+# but is read by MIR through a path the codec mis-shapes would pass the first
+# half and fail the second. The binary is the sum of every MIR/object the build
+# produced, so comparing it is comparing "MIR from decoded" against "MIR from
+# in-process" for the whole closure at once.
+#
+# Receipt line (tab separated):
+#   HIRROUNDTRIP<TAB>ok=<bool><TAB>stable=<bool><TAB>bytes=<n><TAB>path=<p>[<TAB>reason=<r>]
+#
+# Verdict (always the LAST line of stdout):
+#   PASS — <n> module(s) round-tripped, 0 mismatches, binary identical   exit 0
+#   FAIL — ...naming every offending module / the binary mismatch        exit 1
+#   ERROR — nothing was checked                                          exit 2
+# A run that round-tripped 0 modules is ERROR, never a pass. --selftest runs
+# before every scan and is fatal.
+#
+# Default closure: the 3-module driver fixture (~2 min per build under load).
+# BUILD_SOURCE / BUILD_ENTRY (relative to the repo root) select a bigger one.
+
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+# Paths are RELATIVE TO $ROOT: native-build resolves --entry against the cwd
+# and rejects an absolute entry ("collected zero source files").
+BUILD_SOURCE="${BUILD_SOURCE:-test/02_integration/compiler/driver/fixtures/native_build_cache}"
+BUILD_ENTRY="${BUILD_ENTRY:-$BUILD_SOURCE/main.spl}"
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-14400}"
+WORK="${WORK:-${TMPDIR:-/tmp}/hir-codec-roundtrip-$$}"
+mkdir -p "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+
+classify() {
+    _log="$1"
+    SCAN_CHECKED=$(grep -c '^HIRROUNDTRIP	' "$_log" 2>/dev/null || true)
+    [ -n "$SCAN_CHECKED" ] || SCAN_CHECKED=0
+    SCAN_OFFENDERS=$(awk -F'\t' '
+        $1 == "HIRROUNDTRIP" {
+            ok = ""; stable = ""; path = "?"; reason = ""
+            for (i = 2; i <= NF; i++) {
+                split($i, kv, "=")
+                k = kv[1]
+                v = substr($i, length(k) + 2)
+                if (k == "ok")     ok = v
+                if (k == "stable") stable = v
+                if (k == "path")   path = v
+                if (k == "reason") reason = v
+            }
+            if (ok != "true" || stable != "true") {
+                why = ""
+                if (ok     != "true") why = "encode/decode"
+                if (stable != "true") why = (why == "" ? "" : why ",") "unstable"
+                if (reason != "")     why = why ":" reason
+                printf " %s(%s)", path, why
+            }
+        }' "$_log")
+}
+
+selftest() {
+    _d="$WORK/selftest"; mkdir -p "$_d"
+    printf 'HIRROUNDTRIP\tok=true\tstable=true\tbytes=10\tpath=a.spl\nHIRROUNDTRIP\tok=true\tstable=true\tbytes=12\tpath=b.spl\n' > "$_d/good.log"
+    classify "$_d/good.log"
+    [ "$SCAN_CHECKED" = 2 ] && [ -z "$SCAN_OFFENDERS" ] || { echo "selftest: clean log misclassified"; return 1; }
+    printf 'HIRROUNDTRIP\tok=true\tstable=false\tbytes=10\tpath=a.spl\treason=reencode\nHIRROUNDTRIP\tok=false\tstable=false\tbytes=0\tpath=b.spl\treason=BlockValue\n' > "$_d/bad.log"
+    classify "$_d/bad.log"
+    [ "$SCAN_CHECKED" = 2 ] && [ "$SCAN_OFFENDERS" = " a.spl(unstable:reencode) b.spl(encode/decode,unstable:BlockValue)" ] || { echo "selftest: offender log misclassified: [$SCAN_OFFENDERS]"; return 1; }
+    printf 'nothing here\n' > "$_d/empty.log"
+    classify "$_d/empty.log"
+    [ "$SCAN_CHECKED" = 0 ] || { echo "selftest: empty log counted modules"; return 1; }
+    echo "selftest: 3 fixture(s) ok"
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 3 selftest fixture(s) checked"
+    exit 0
+fi
+
+build() {
+    _tag="$1"; _env="$2"
+    mkdir -p "$WORK/$_tag"
+    ( cd "$ROOT" && env $_env SIMPLE_FRONTEND_CACHE_DIR="$WORK/$_tag/fe" SIMPLE_HIR_CACHE=0 \
+        "$SIMPLE_BIN" native-build --source "$BUILD_SOURCE" --entry-closure --threads 1 \
+        --timeout "$BUILD_TIMEOUT" --cache-dir "$WORK/$_tag/cache" \
+        --entry "$BUILD_ENTRY" --output "$WORK/$_tag/out" ) > "$WORK/$_tag/log" 2>&1
+    echo $?
+}
+
+RC_PLAIN=$(build plain "SIMPLE_HIR_CODEC_ROUNDTRIP=0")
+RC_CHECK=$(build check "SIMPLE_HIR_CODEC_ROUNDTRIP=1")
+if [ "$RC_PLAIN" != 0 ] || [ ! -f "$WORK/plain/out" ]; then
+    tail -5 "$WORK/plain/log"
+    echo "ERROR — nothing was checked (reference build failed rc=$RC_PLAIN)"
+    exit 2
+fi
+classify "$WORK/check/log"
+if [ "$SCAN_CHECKED" -le 0 ]; then
+    tail -5 "$WORK/check/log"
+    echo "ERROR — nothing was checked (0 HIRROUNDTRIP receipts; self-check build rc=$RC_CHECK)"
+    exit 2
+fi
+if [ -n "$SCAN_OFFENDERS" ]; then
+    echo "FAIL — $SCAN_CHECKED module(s) round-tripped, offenders:$SCAN_OFFENDERS"
+    exit 1
+fi
+if [ "$RC_CHECK" != 0 ] || [ ! -f "$WORK/check/out" ]; then
+    tail -5 "$WORK/check/log"
+    echo "FAIL — $SCAN_CHECKED module(s) round-tripped cleanly but the build from DECODED modules failed (rc=$RC_CHECK)"
+    exit 1
+fi
+A=$(sha256sum "$WORK/plain/out" | cut -d' ' -f1)
+B=$(sha256sum "$WORK/check/out" | cut -d' ' -f1)
+if [ "$A" != "$B" ]; then
+    echo "FAIL — $SCAN_CHECKED module(s) round-tripped cleanly but the binary built from DECODED modules differs: $A vs $B"
+    exit 1
+fi
+echo "PASS — $SCAN_CHECKED module(s) round-tripped, 0 mismatches, binary identical ($(echo "$A" | cut -c1-16))"
+exit 0

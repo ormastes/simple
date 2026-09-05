@@ -1,0 +1,129 @@
+# H3 Server capability facade — blocked until authenticated QUIC-TLS is live
+#
+# Combines:
+#   - QuicConnection (quic_connection.spl) for transport
+#   - H3Frame types (nogc_sync_mut.http.h3.h3_frame) for framing
+#   - UDP socket fd for sending/receiving datagrams
+#
+# The public shape is retained for compatibility, but every lifecycle entry
+# fails closed. Framing and a zero native handle are not service readiness.
+
+use nogc_async_mut.quic.quic_connection.{
+    QuicConfig,
+    QuicConnection
+}
+
+# ============================================================================
+# Server lifecycle state
+# ============================================================================
+
+enum H3ServerState:
+    """Lifecycle state of an H3Server instance."""
+    # Bound to UDP port; no QUIC connection yet.
+    Listening
+    # QUIC handshake complete; SETTINGS exchanged.
+    Connected
+    # GOAWAY sent; draining in-flight streams.
+    Draining
+    # QUIC connection closed; server should be dropped.
+    Closed
+
+# ============================================================================
+# Events produced by h3_server_process
+# ============================================================================
+
+class H3RequestEvent:
+    """A complete HEADERS frame received on a new request stream."""
+    stream_id: i64
+    headers: [(text, text)]
+
+class H3DataEvent:
+    """A DATA frame received on an existing stream."""
+    stream_id: i64
+    data: text
+
+class H3FinishedEvent:
+    """Remote side closed a stream (FIN received)."""
+    stream_id: i64
+
+enum H3ServerEvent:
+    """Events emitted by h3_server_process for the application to handle."""
+    Request(H3RequestEvent)
+    Data(H3DataEvent)
+    Finished(H3FinishedEvent)
+
+# ============================================================================
+# Server
+# ============================================================================
+
+class H3Server:
+    """HTTP/3 server: QUIC connection + raw UDP fd + lifecycle state."""
+    quic: QuicConnection
+    udp_fd: i64
+    state: H3ServerState
+    bind_addr: text
+    port: i64
+
+# ============================================================================
+# Constructor
+# ============================================================================
+
+pub fn h3_server_new(bind_addr: text, port: i64, _config: QuicConfig) -> H3Server:
+    """Create an H3Server bound to bind_addr:port.
+
+    The current provider cannot create authenticated QUIC-TLS state, so the
+    returned compatibility value is terminally Closed and owns no UDP socket.
+    """
+    # Placeholder connection — replaced on first accept.
+    val placeholder = QuicConnection {
+        handle: 0,
+        is_server: true,
+        established: false,
+        closed: false
+    }
+    H3Server {
+        quic: placeholder,
+        udp_fd: -1,
+        state: H3ServerState.Closed,
+        bind_addr: bind_addr,
+        port: port
+    }
+
+# ============================================================================
+# Accept
+# ============================================================================
+
+pub fn h3_server_accept(server: H3Server) -> H3Server:
+    """Fail closed; no accept occurs without authenticated provider authority."""
+    server
+
+# ============================================================================
+# Process loop
+# ============================================================================
+
+pub fn h3_server_process(server: H3Server) -> (H3Server, [H3ServerEvent]):
+    """Return terminal Closed with no fabricated request/data events."""
+    val events: [H3ServerEvent] = []
+    val updated = H3Server {
+        quic: server.quic,
+        udp_fd: server.udp_fd,
+        state: H3ServerState.Closed,
+        bind_addr: server.bind_addr,
+        port: server.port
+    }
+    (updated, events)
+
+# ============================================================================
+# Respond
+# ============================================================================
+
+pub fn h3_server_respond(
+    server: H3Server,
+    _stream_id: i64,
+    _status: i64,
+    _headers: [(text, text)],
+    _body: text
+) -> H3Server:
+    """Fail closed without writing while authenticated QUIC-TLS is blocked."""
+    # No write occurs while authenticated QUIC-TLS is unavailable.
+    server

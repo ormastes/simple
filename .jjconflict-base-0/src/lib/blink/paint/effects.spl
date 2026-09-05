@@ -1,0 +1,588 @@
+# Blink visual-effect VALUE PARSING — blink.paint.effects
+#
+# Closes the parsing half of blocker 9 of
+# `doc/03_plan/ui/rendering/blink_wiring_plan.md` ("visual effects": box-shadow,
+# transforms, gradients). This module turns a raw CSS declaration VALUE string
+# into a typed effect description. Lowering those descriptions to paint rects is
+# `blink.paint.effect_paint`; the two are split so the parse can be specified
+# with no geometry in the picture.
+#
+# ## Explicit failure, never a wrong pixel
+#
+# Every entry point returns `Result<T, text>`. An unsupported or malformed value
+# is an `Err` carrying the offending token — NOT a substituted default. This is
+# deliberate: blink used to answer opaque black for any colour it did not
+# understand, a wrong value that no smoke test could see (blink_wiring_plan §2,
+# blocker 2). That pattern is not repeated here.
+#
+# ## Colour is NOT parsed here
+#
+# Colours go through `std.common.color.css.parse_css_color`, the single shared
+# CSS colour parser. This module must never grow its own — the repo already had
+# eight copies of colour parsing and one was deleted for exactly that reason.
+#
+# ## Deliberate non-goals
+#   - No `radial-gradient`/`conic-gradient`, no colour-interpolation hints
+#     (`red 20%, 40%, blue`), no `repeating-*`.
+#   - No 3D transforms (`translate3d`, `perspective`, `rotateX`), no `skew`.
+#   - Lengths are `px` only (and unitless zero). `em`/`%`/`rem` need the
+#     font/viewport context this leaf does not carry, so they are an `Err`
+#     rather than a silent 0 — see the note on `_parse_px`.
+#   - No `!important`, no shorthand expansion, no cascade integration:
+#     `ComputedStyle` does not yet carry these properties (that wiring is a
+#     separate stage, and `entity/computed_style.spl` is owned elsewhere), so
+#     callers pass the raw declaration value in directly.
+
+use std.common.color.types.{Color, from_rgba}
+use std.common.color.css.{parse_css_color}
+
+# ============================================================================
+# Typed effect descriptions
+# ============================================================================
+
+# One `box-shadow` layer, all lengths already in CSS pixels.
+pub struct BoxShadow:
+    offset_x: f64
+    offset_y: f64
+    blur: f64
+    spread: f64
+    color: Color
+    inset: bool
+
+# A 2D affine transform in the CSS `matrix(a, b, c, d, e, f)` order, i.e.
+#
+#     | x' |   | a  c  e |   | x |
+#     | y' | = | b  d  f | * | y |
+#     | 1  |   | 0  0  1 |   | 1 |
+pub struct Transform2D:
+    a: f64
+    b: f64
+    c: f64
+    d: f64
+    e: f64
+    f: f64
+
+impl Transform2D:
+    # The transform that changes nothing.
+    static fn identity() -> Transform2D:
+        Transform2D(a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0)
+
+    # `self` applied AFTER `other`, matching how CSS composes a transform list
+    # left-to-right: `transform: A B` maps a point as A(B(p)).
+    fn multiply(other: Transform2D) -> Transform2D:
+        Transform2D(
+            a: self.a * other.a + self.c * other.b,
+            b: self.b * other.a + self.d * other.b,
+            c: self.a * other.c + self.c * other.d,
+            d: self.b * other.c + self.d * other.d,
+            e: self.a * other.e + self.c * other.f + self.e,
+            f: self.b * other.e + self.d * other.f + self.f
+        )
+
+    # Map one point through the matrix.
+    fn apply(x: f64, y: f64) -> (f64, f64):
+        (self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f)
+
+    # True when a transformed axis-aligned rect is STILL an axis-aligned rect
+    # (not merely its bounding box). Two matrix families satisfy that:
+    #
+    #   - b = c = 0: translation and scale. x' depends only on x, y' only on y,
+    #     so edges keep their orientation.
+    #   - a = d = 0: a quarter turn (rotate(90deg) is a=0, b=1, c=-1, d=0;
+    #     rotate(270deg) is a=0, b=-1, c=1, d=0). x' depends only on y and y'
+    #     only on x, so the edges SWAP orientation — still axis-aligned.
+    #
+    # Both tests use `_near_zero`, because `rotate(90deg)` reaches this via
+    # cos(pi/2) computed as a Taylor series, which lands at ~4.3e-17 rather
+    # than exactly 0.0. A strict `== 0.0` here would reject every quarter turn.
+    fn is_axis_aligned() -> bool:
+        if _near_zero(self.b) and _near_zero(self.c):
+            return true
+        _near_zero(self.a) and _near_zero(self.d)
+
+# One colour stop of a gradient. `position` is a fraction of the gradient line,
+# 0.0 at the start and 1.0 at the end.
+pub struct GradientStop:
+    color: Color
+    position: f64
+
+# A `linear-gradient(...)`. `angle_deg` is the CSS gradient angle: 0deg points
+# up (to top), 90deg points right, and it increases clockwise. `to bottom`,
+# CSS's default direction, is 180deg.
+pub struct LinearGradient:
+    angle_deg: f64
+    stops: [GradientStop]
+
+# ============================================================================
+# Small shared scanning helpers
+# ============================================================================
+
+fn _near_zero(v: f64) -> bool:
+    if v < 0.0:
+        return v > -0.000001
+    v < 0.000001
+
+# True when `s` is a plain decimal number. `to_f64()` answers 0.0 for garbage,
+# so shape is checked BEFORE conversion — otherwise `box-shadow: red 0 0` would
+# read `red` as the number 0.
+fn _is_number(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var digits = 0
+    var dots = 0
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c == "+" or c == "-":
+            if i != 0:
+                return false
+        elif c == ".":
+            dots = dots + 1
+            if dots > 1:
+                return false
+        else:
+            val code = s.char_code_at(i)
+            if code < 48 or code > 57:
+                return false
+            digits = digits + 1
+        i = i + 1
+    digits > 0
+
+# Split on `sep`, but only at PAREN DEPTH ZERO, so `rgb(1, 2, 3)` survives a
+# comma split intact. Empty segments are kept — the callers reject them, and
+# dropping them here would make `red,,blue` silently legal.
+fn _split_top_level(s: text, sep: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+            current = current + c
+        elif c == ")":
+            depth = depth - 1
+            current = current + c
+        elif c == sep and depth == 0:
+            parts.push(current.trim())
+            current = ""
+        else:
+            current = current + c
+        i = i + 1
+    parts.push(current.trim())
+    parts
+
+# Split on runs of whitespace at paren depth zero, discarding the whitespace.
+fn _split_words(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+            current = current + c
+        elif c == ")":
+            depth = depth - 1
+            current = current + c
+        elif depth == 0 and (c == " " or c == "\t" or c == "\n"):
+            if current.len() > 0:
+                parts.push(current)
+                current = ""
+        else:
+            current = current + c
+        i = i + 1
+    if current.len() > 0:
+        parts.push(current)
+    parts
+
+# Return the text between the first `(` and the final `)` of `s` when `s` is
+# exactly `name(...)`, else nil.
+fn _fn_inner(s: text, name: text) -> text?:
+    val prefix = name + "("
+    if not s.starts_with(prefix):
+        return nil
+    if not s.ends_with(")"):
+        return nil
+    s.slice(prefix.len(), s.len() - 1)
+
+# A `px` length. Unitless `0` is accepted (CSS allows a bare zero length); any
+# other unit is nil, NOT 0.0 — this leaf has no font or viewport context, so a
+# silent zero would be a wrong number rather than an unsupported one.
+fn _parse_px(raw: text) -> f64?:
+    val s = raw.trim().to_lower()
+    if s.ends_with("px"):
+        val body = s.slice(0, s.len() - 2)
+        if not _is_number(body):
+            return nil
+        return Some(body.to_f64())
+    if _is_number(s) and s.to_f64() == 0.0:
+        return Some(0.0)
+    nil
+
+# A plain number argument (transform scale factors, matrix entries).
+fn _parse_number(raw: text) -> f64?:
+    val s = raw.trim()
+    if not _is_number(s):
+        return nil
+    Some(s.to_f64())
+
+# An angle. `deg` only — `rad`/`turn`/`grad` are unsupported rather than
+# silently mis-scaled.
+fn _parse_deg(raw: text) -> f64?:
+    val s = raw.trim().to_lower()
+    if s.ends_with("deg"):
+        val body = s.slice(0, s.len() - 3)
+        if not _is_number(body):
+            return nil
+        return Some(body.to_f64())
+    if _is_number(s) and s.to_f64() == 0.0:
+        return Some(0.0)
+    nil
+
+# A percentage, returned as a 0.0..1.0 fraction.
+fn _parse_percent(raw: text) -> f64?:
+    val s = raw.trim()
+    if not s.ends_with("%"):
+        return nil
+    val body = s.slice(0, s.len() - 1)
+    if not _is_number(body):
+        return nil
+    Some(body.to_f64() / 100.0)
+
+# ============================================================================
+# box-shadow
+# ============================================================================
+
+# Grammar accepted, per layer (CSS `<shadow>`):
+#
+#     [ inset? && <length>{2,4} && <color>? ]
+#
+# i.e. two to four px lengths (offset-x, offset-y, blur, spread) in that order,
+# with an optional `inset` keyword and an optional colour in any position
+# relative to them. Layers are comma separated and paint front-to-back in
+# source order, which is the order of the returned array.
+#
+# Omitted colour defaults to the element's `currentColor`; this leaf has no
+# access to the cascade's resolved `color`, so it substitutes fully-opaque
+# black and the caller that DOES know `currentColor` may override it. That is
+# the CSS-specified initial for `color`, not a made-up stand-in for a parse
+# failure.
+fn _parse_one_shadow(raw: text) -> Result<BoxShadow, text>:
+    val words = _split_words(raw)
+    if words.len() == 0:
+        return Err("box-shadow: empty layer")
+    var inset = false
+    var lengths: [f64] = []
+    var color: Color? = nil
+    var i = 0
+    while i < words.len():
+        val w = words[i as i32]
+        val lower = w.to_lower()
+        if lower == "inset":
+            if inset:
+                return Err("box-shadow: duplicate `inset` in `{raw}`")
+            inset = true
+        elif val px = _parse_px(w):
+            if color != nil:
+                # `<color>` may precede or follow the lengths, but the lengths
+                # must be contiguous; `red 1px blue 2px` is not a shadow.
+                return Err("box-shadow: length `{w}` after the colour in `{raw}`")
+            if lengths.len() == 4:
+                return Err("box-shadow: more than four lengths in `{raw}`")
+            lengths.push(px)
+        elif val c = parse_css_color(w):
+            if color != nil:
+                return Err("box-shadow: two colours in `{raw}`")
+            color = Some(c)
+        else:
+            return Err("box-shadow: unsupported token `{w}` in `{raw}`")
+        i = i + 1
+    if lengths.len() < 2:
+        return Err("box-shadow: needs at least offset-x and offset-y, got {lengths.len()} length(s) in `{raw}`")
+    var blur = 0.0
+    if lengths.len() >= 3:
+        blur = lengths[2 as i32]
+    if blur < 0.0:
+        return Err("box-shadow: negative blur radius in `{raw}`")
+    var spread = 0.0
+    if lengths.len() == 4:
+        spread = lengths[3 as i32]
+    var resolved = from_rgba(0, 0, 0, 255)
+    if val c = color:
+        resolved = c
+    Ok(BoxShadow(offset_x: lengths[0 as i32], offset_y: lengths[1 as i32],
+                 blur: blur, spread: spread, color: resolved, inset: inset))
+
+pub fn parse_box_shadow(raw: text) -> Result<[BoxShadow], text>:
+    """Parse a `box-shadow` value into its layers, front-to-back."""
+    val trimmed = raw.trim()
+    if trimmed.len() == 0:
+        return Err("box-shadow: empty value")
+    if trimmed.to_lower() == "none":
+        var empty: [BoxShadow] = []
+        return Ok(empty)
+    var out: [BoxShadow] = []
+    val layers = _split_top_level(trimmed, ",")
+    var i = 0
+    while i < layers.len():
+        match _parse_one_shadow(layers[i as i32]):
+            Ok(s):
+                out.push(s)
+            Err(m):
+                return Err(m)
+        i = i + 1
+    Ok(out)
+
+# ============================================================================
+# transform
+# ============================================================================
+
+fn _translate_fn(inner: text) -> Result<Transform2D, text>:
+    val args = _split_top_level(inner, ",")
+    if args.len() < 1 or args.len() > 2:
+        return Err("transform: translate() takes 1 or 2 arguments, got {args.len()}")
+    var tx = 0.0
+    var ty = 0.0
+    if val x = _parse_px(args[0 as i32]):
+        tx = x
+    else:
+        return Err("transform: unsupported translate length `{args[0 as i32]}`")
+    if args.len() == 2:
+        if val y = _parse_px(args[1 as i32]):
+            ty = y
+        else:
+            return Err("transform: unsupported translate length `{args[1 as i32]}`")
+    Ok(Transform2D(a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: tx, f: ty))
+
+fn _scale_fn(inner: text) -> Result<Transform2D, text>:
+    val args = _split_top_level(inner, ",")
+    if args.len() < 1 or args.len() > 2:
+        return Err("transform: scale() takes 1 or 2 arguments, got {args.len()}")
+    var sx = 1.0
+    if val x = _parse_number(args[0 as i32]):
+        sx = x
+    else:
+        return Err("transform: non-numeric scale factor `{args[0 as i32]}`")
+    # `scale(s)` is uniform: the single argument sets BOTH axes.
+    var sy = sx
+    if args.len() == 2:
+        if val y = _parse_number(args[1 as i32]):
+            sy = y
+        else:
+            return Err("transform: non-numeric scale factor `{args[1 as i32]}`")
+    Ok(Transform2D(a: sx, b: 0.0, c: 0.0, d: sy, e: 0.0, f: 0.0))
+
+fn _rotate_fn(inner: text) -> Result<Transform2D, text>:
+    if val deg = _parse_deg(inner):
+        val rad = deg * 3.141592653589793 / 180.0
+        val cs = _cos(rad)
+        val sn = _sin(rad)
+        # CSS rotates clockwise in a y-down coordinate space, which is what the
+        # standard [cos, sin; -sin, cos] column-major matrix gives.
+        return Ok(Transform2D(a: cs, b: sn, c: 0.0 - sn, d: cs, e: 0.0, f: 0.0))
+    Err("transform: unsupported rotate angle `{inner}`")
+
+fn _matrix_fn(inner: text) -> Result<Transform2D, text>:
+    val args = _split_top_level(inner, ",")
+    if args.len() != 6:
+        return Err("transform: matrix() takes 6 arguments, got {args.len()}")
+    var vals: [f64] = []
+    var i = 0
+    while i < 6:
+        if val v = _parse_number(args[i as i32]):
+            vals.push(v)
+        else:
+            return Err("transform: non-numeric matrix entry `{args[i as i32]}`")
+        i = i + 1
+    Ok(Transform2D(a: vals[0 as i32], b: vals[1 as i32], c: vals[2 as i32],
+                   d: vals[3 as i32], e: vals[4 as i32], f: vals[5 as i32]))
+
+fn _one_transform_fn(raw: text) -> Result<Transform2D, text>:
+    val s = raw.trim()
+    val lower = s.to_lower()
+    if val inner = _fn_inner(lower, "translatex"):
+        return _translate_fn(inner)
+    if val inner = _fn_inner(lower, "translatey"):
+        # `translateY(v)` is `translate(0, v)`.
+        return _translate_fn("0px, " + inner)
+    if val inner = _fn_inner(lower, "translate"):
+        return _translate_fn(inner)
+    if val inner = _fn_inner(lower, "scalex"):
+        return _scale_fn(inner + ", 1")
+    if val inner = _fn_inner(lower, "scaley"):
+        return _scale_fn("1, " + inner)
+    if val inner = _fn_inner(lower, "scale"):
+        return _scale_fn(inner)
+    if val inner = _fn_inner(lower, "rotate"):
+        return _rotate_fn(inner)
+    if val inner = _fn_inner(lower, "matrix"):
+        return _matrix_fn(inner)
+    Err("transform: unsupported function `{s}`")
+
+pub fn parse_transform(raw: text) -> Result<Transform2D, text>:
+    """Parse a `transform` list into the single affine matrix it composes to."""
+    val trimmed = raw.trim()
+    if trimmed.len() == 0:
+        return Err("transform: empty value")
+    if trimmed.to_lower() == "none":
+        return Ok(Transform2D.identity())
+    var acc = Transform2D.identity()
+    val fns = _split_words(trimmed)
+    if fns.len() == 0:
+        return Err("transform: empty value")
+    var i = 0
+    while i < fns.len():
+        match _one_transform_fn(fns[i as i32]):
+            Ok(m):
+                # Left-to-right composition: the accumulated prefix applies
+                # AFTER nothing yet and BEFORE nothing later, so the new
+                # function multiplies on the right.
+                acc = acc.multiply(m)
+            Err(msg):
+                return Err(msg)
+        i = i + 1
+    Ok(acc)
+
+# ============================================================================
+# linear-gradient
+# ============================================================================
+
+# `to <side>` keywords, as their CSS gradient-line angles.
+fn _side_angle(raw: text) -> f64?:
+    val s = raw.trim().to_lower()
+    if s == "to top":
+        return Some(0.0)
+    if s == "to right":
+        return Some(90.0)
+    if s == "to bottom":
+        return Some(180.0)
+    if s == "to left":
+        return Some(270.0)
+    nil
+
+fn _parse_stop(raw: text) -> Result<GradientStop, text>:
+    val words = _split_words(raw)
+    if words.len() == 0:
+        return Err("linear-gradient: empty colour stop")
+    if words.len() > 2:
+        return Err("linear-gradient: unsupported colour stop `{raw}`")
+    var color: Color? = nil
+    if val c = parse_css_color(words[0 as i32]):
+        color = Some(c)
+    else:
+        return Err("linear-gradient: unsupported colour `{words[0 as i32]}`")
+    # A stop with no explicit position gets -1.0 as a "not authored" marker,
+    # replaced by even distribution in `parse_linear_gradient` once the total
+    # count is known. -1.0 can never collide with a real position, which CSS
+    # clamps into 0.0..1.0.
+    var pos = 0.0 - 1.0
+    if words.len() == 2:
+        if val p = _parse_percent(words[1 as i32]):
+            pos = p
+        else:
+            return Err("linear-gradient: unsupported stop position `{words[1 as i32]}` (percentages only)")
+    var resolved = from_rgba(0, 0, 0, 0)
+    if val c = color:
+        resolved = c
+    Ok(GradientStop(color: resolved, position: pos))
+
+pub fn parse_linear_gradient(raw: text) -> Result<LinearGradient, text>:
+    """Parse a `linear-gradient(...)` into its angle and colour stops."""
+    val s = raw.trim()
+    val lower = s.to_lower()
+    var inner = ""
+    if val got = _fn_inner(lower, "linear-gradient"):
+        inner = got
+    else:
+        return Err("linear-gradient: not a linear-gradient() value: `{s}`")
+    val parts = _split_top_level(inner, ",")
+    if parts.len() == 0:
+        return Err("linear-gradient: no arguments")
+
+    # CSS default direction when no angle/side is given is `to bottom` = 180deg.
+    var angle = 180.0
+    var first_stop = 0
+    val head = parts[0 as i32]
+    if val a = _parse_deg(head):
+        angle = a
+        first_stop = 1
+    elif val sa = _side_angle(head):
+        angle = sa
+        first_stop = 1
+    elif head.to_lower().starts_with("to "):
+        return Err("linear-gradient: unsupported direction `{head}` (single sides only)")
+
+    var stops: [GradientStop] = []
+    var i = first_stop
+    while i < parts.len():
+        match _parse_stop(parts[i as i32]):
+            Ok(st):
+                stops.push(st)
+            Err(m):
+                return Err(m)
+        i = i + 1
+    if stops.len() < 2:
+        return Err("linear-gradient: needs at least two colour stops, got {stops.len()}")
+
+    # Even distribution for unpositioned stops: with n stops, stop k that
+    # authored no position sits at k/(n-1) — so the first is 0.0 and the last
+    # is 1.0, exactly as CSS specifies for the simple `a, b, c` form.
+    var out: [GradientStop] = []
+    val n = stops.len()
+    var k = 0
+    while k < n:
+        val st = stops[k as i32]
+        var p = st.position
+        if p < 0.0:
+            p = (k as f64) / ((n - 1) as f64)
+        out.push(GradientStop(color: st.color, position: p))
+        k = k + 1
+    Ok(LinearGradient(angle_deg: angle, stops: out))
+
+# ============================================================================
+# Trigonometry
+# ============================================================================
+#
+# `rotate()` needs sin/cos and this leaf must not reach outside `blink`/`skia`/
+# `common`; these are the Taylor series after argument reduction to [-pi, pi],
+# where the series converges quickly enough that 12 terms are exact to well
+# beyond f64 display precision.
+
+fn _wrap_pi(x: f64) -> f64:
+    val two_pi = 6.283185307179586
+    var v = x
+    while v > 3.141592653589793:
+        v = v - two_pi
+    while v < 0.0 - 3.141592653589793:
+        v = v + two_pi
+    v
+
+fn _sin(x: f64) -> f64:
+    val v = _wrap_pi(x)
+    var term = v
+    var sum = v
+    var i = 1
+    while i < 12:
+        val k = (2 * i) as f64
+        term = 0.0 - term * v * v / (k * (k + 1.0))
+        sum = sum + term
+        i = i + 1
+    sum
+
+fn _cos(x: f64) -> f64:
+    val v = _wrap_pi(x)
+    var term = 1.0
+    var sum = 1.0
+    var i = 1
+    while i < 12:
+        val k = (2 * i) as f64
+        term = 0.0 - term * v * v / ((k - 1.0) * k)
+        sum = sum + term
+        i = i + 1
+    sum
+
+export BoxShadow, Transform2D, GradientStop, LinearGradient
+export parse_box_shadow, parse_transform, parse_linear_gradient

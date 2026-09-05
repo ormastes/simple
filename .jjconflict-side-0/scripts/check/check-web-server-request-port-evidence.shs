@@ -1,0 +1,74 @@
+#!/bin/sh
+# Validate captured evidence from a real loopback HTTP server lifecycle.
+set -u
+
+fail() { echo "web-server-request-port evidence: FAIL — $*" >&2; exit 1; }
+field() {
+    [ "$(grep -c "^$2=" "$1" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^$2=//p" "$1"
+}
+eq() { _v=$(field "$1" "$2") || fail "missing-or-duplicate-$2"; [ "$_v" = "$3" ] || fail "$2-mismatch"; }
+sha() { sha256sum "$1" | awk '{print $1}'; }
+token() { _v=$(field "$1" "$2") || fail "missing-or-duplicate-$2"; case "$_v" in ''|*[!A-Za-z0-9._:@+/-]*) fail "invalid-$2";; esac; printf '%s' "$_v"; }
+number() { _v=$(field "$1" "$2") || fail "missing-or-duplicate-$2"; case "$_v" in ''|*[!0-9]*) fail "invalid-$2";; esac; printf '%s' "$_v"; }
+
+fingerprint= run_id= request= response= lifecycle= executable= source= toolchain= target=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --fingerprint) fingerprint=$2; shift 2;; --run-id) run_id=$2; shift 2;;
+        --request) request=$2; shift 2;; --response) response=$2; shift 2;;
+        --lifecycle) lifecycle=$2; shift 2;; --executable) executable=$2; shift 2;;
+        --source) source=$2; shift 2;; --toolchain) toolchain=$2; shift 2;;
+        --target) target=$2; shift 2;; *) fail "unknown-argument-$1";;
+    esac
+done
+for _f in "$request" "$response" "$lifecycle" "$executable" "$source" "$toolchain" "$target"; do
+    [ -f "$_f" ] && [ ! -L "$_f" ] || fail missing-artifact
+done
+
+eq "$lifecycle" evidence_schema simple.web-server-request-port/v1
+eq "$lifecycle" source_fingerprint "$fingerprint"
+eq "$lifecycle" run_id "$run_id"
+eq "$lifecycle" bind_address 127.0.0.1
+port=$(number "$lifecycle" configured_port); [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || fail invalid-configured-port
+eq "$lifecycle" observed_listener_address "127.0.0.1:$port"
+server_pid=$(number "$lifecycle" server_pid); listener_pid=$(number "$lifecycle" listener_pid)
+[ "$server_pid" -gt 1 ] && [ "$listener_pid" = "$server_pid" ] || fail listener-process-ownership
+eq "$lifecycle" readiness_status ready
+eq "$lifecycle" request_sha256 "$(sha "$request")"
+eq "$lifecycle" response_sha256 "$(sha "$response")"
+eq "$lifecycle" executable_sha256 "$(sha "$executable")"
+eq "$lifecycle" source_sha256 "$(sha "$source")"
+eq "$lifecycle" toolchain_sha256 "$(sha "$toolchain")"
+eq "$lifecycle" target_sha256 "$(sha "$target")"
+started=$(number "$lifecycle" started_at_unix_ms); ready=$(number "$lifecycle" ready_at_unix_ms)
+requested=$(number "$lifecycle" request_at_unix_ms); responded=$(number "$lifecycle" response_at_unix_ms); stopped=$(number "$lifecycle" stopped_at_unix_ms)
+[ "$started" -le "$ready" ] && [ "$ready" -le "$requested" ] && [ "$requested" -le "$responded" ] && [ "$responded" -le "$stopped" ] || fail timestamp-order
+timeout=$(number "$lifecycle" stop_timeout_ms); [ "$timeout" -gt 0 ] && [ "$timeout" -le 30000 ] || fail unbounded-stop
+eq "$lifecycle" stop_status exited
+eq "$lifecycle" post_stop_listener_count 0
+eq "$lifecycle" post_stop_process_count 0
+eq "$lifecycle" final_verdict PASS
+
+expected_request=$(field "$lifecycle" expected_request_hex) || fail missing-exact-request
+actual_request=$(od -An -v -tx1 "$request" | tr -d ' \n')
+[ "$actual_request" = "$expected_request" ] || fail exact-request-bytes-mismatch
+expected_response=$(field "$lifecycle" expected_response_hex) || fail missing-exact-response
+actual_response=$(od -An -v -tx1 "$response" | tr -d ' \n')
+[ "$actual_response" = "$expected_response" ] || fail exact-response-bytes-mismatch
+status=$(field "$lifecycle" response_status) || fail missing-response-status
+case "$status" in 100|101|2??|3??|4??|5??) ;; *) fail invalid-response-status;; esac
+prefix=$(printf 'HTTP/1.1 %s ' "$status" | od -An -v -tx1 | tr -d ' \n')
+case "$actual_response" in "$prefix"*) ;; *) fail response-status-bytes-mismatch;; esac
+
+eq "$toolchain" evidence_schema simple.web-server-toolchain-identity/v1
+eq "$toolchain" run_id "$run_id"
+token "$toolchain" toolchain_id >/dev/null
+[ -s "$source" ] || fail empty-source
+[ -x "$executable" ] || fail executable-not-executable
+eq "$target" evidence_schema simple.web-server-target-identity/v1
+eq "$target" run_id "$run_id"
+eq "$target" host "$(token "$lifecycle" target_host)"
+token "$target" os >/dev/null; token "$target" arch >/dev/null
+
+echo "web-server-request-port evidence: PASS"

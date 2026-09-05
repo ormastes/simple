@@ -1,0 +1,90 @@
+"""Word Citations & Bibliography spec.
+
+Ground truth (hand-computed):
+- Sources: Smith2020(author "Smith, John", title "Systems", year "2020",
+  publisher "ACME"); Adams2019(author "Adams, Beth", title "Design",
+  year "2019", publisher "Wiley").
+- in_text_citation(Smith2020) == "(Smith, 2020)" (last name = text before
+  first comma in author); unknown tag "Nope" == "(??)".
+- bibliography_entries_apa sorts ascending by author last name: "Adams" <
+  "Smith", so Adams2019's entry comes first:
+  ["Adams, Beth (2019). Design. Wiley.", "Smith, John (2020). Systems. ACME."]
+- bibliography_render_html wraps the sorted APA entries in
+  <ol class="bibliography"> with one <li> per entry, and escapes "<" in
+  titles to "&lt;".
+- source_count == 2.
+"""
+
+use std.spec
+use app.office.word.bibliography.{
+    Source, source_new, Bibliography, bibliography_new, bibliography_add,
+    in_text_citation, bibliography_entries_apa, bibliography_render_html,
+    source_count
+}
+
+fn _sample_bib() -> Bibliography:
+    val smith = source_new("Smith2020", "Smith, John", "Systems", "2020", "ACME")
+    val adams = source_new("Adams2019", "Adams, Beth", "Design", "2019", "Wiley")
+    var bib = bibliography_new()
+    bib = bibliography_add(bib, smith)
+    bib = bibliography_add(bib, adams)
+    bib
+
+describe "in_text_citation: parenthetical citation by tag":
+    it "renders (LastName, year) for a known tag":
+        val bib = _sample_bib()
+        expect(in_text_citation(bib, "Smith2020")).to_equal("(Smith, 2020)")
+
+    it "renders the other known source's citation too":
+        val bib = _sample_bib()
+        expect(in_text_citation(bib, "Adams2019")).to_equal("(Adams, 2019)")
+
+    it "renders (??) for an unknown tag":
+        val bib = _sample_bib()
+        expect(in_text_citation(bib, "Nope")).to_equal("(??)")
+
+describe "bibliography_entries_apa: sorted APA-ish reference lines":
+    it "sorts entries ascending by author last name":
+        val bib = _sample_bib()
+        val entries = bibliography_entries_apa(bib)
+        expect(entries.len()).to_equal(2)
+        expect(entries[0]).to_equal("Adams, Beth (2019). Design. Wiley.")
+        expect(entries[1]).to_equal("Smith, John (2020). Systems. ACME.")
+
+describe "bibliography_render_html: HTML ordered list":
+    it "contains the <ol> wrapper and two <li> items":
+        val bib = _sample_bib()
+        val html = bibliography_render_html(bib)
+        expect(html).to_contain("<ol")
+        expect(html).to_contain("<li>Adams, Beth (2019). Design. Wiley.</li>")
+        expect(html).to_contain("<li>Smith, John (2020). Systems. ACME.</li>")
+
+    it "contains both titles":
+        val bib = _sample_bib()
+        val html = bibliography_render_html(bib)
+        expect(html).to_contain("Systems")
+        expect(html).to_contain("Design")
+
+    it "escapes < in a title to &lt;":
+        val unsafe_source = source_new("X2021", "Xu, Amy", "A <script> Tag", "2021", "Foo")
+        var bib = bibliography_new()
+        bib = bibliography_add(bib, unsafe_source)
+        val html = bibliography_render_html(bib)
+        expect(html).to_contain("A &lt;script&gt; Tag")
+
+describe "source_count: number of sources in the bibliography":
+    it "counts both added sources":
+        val bib = _sample_bib()
+        expect(source_count(bib)).to_equal(2)
+
+    it "counts zero for an empty bibliography":
+        val bib = bibliography_new()
+        expect(source_count(bib)).to_equal(0)
+
+    describe "deliberate-fail probe (must be fixed to green before landing)":
+        it "confirms Adams sorts before Smith in APA entries":
+            val bib = _sample_bib()
+            val entries = bibliography_entries_apa(bib)
+            # ground truth: "Adams" < "Smith" lexicographically, so Adams'
+            # entry must be first.
+            expect(entries[0]).to_contain("Adams")

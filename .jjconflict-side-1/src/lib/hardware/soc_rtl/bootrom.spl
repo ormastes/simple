@@ -1,0 +1,231 @@
+# ============================================================================
+# SoC RTL Boot ROM — Fixed Startup Code
+# ============================================================================
+#
+# Minimal boot ROM mapped at 0x00001000 (4 KB).  Contains a handful of
+# hard-coded RV32I instructions that:
+#   1. Set the stack pointer to top of RAM (0x80100000)
+#   2. Jump to the RAM entry point (0x80000000)
+#
+# The ROM is implemented as a combinational address-to-data lookup — no
+# sequential state.  Addresses outside the ROM range return NOP (addi x0,x0,0).
+#
+# Boot instruction lookup stays pure u32/combinational. DTB compatibility
+# accessors use the shared image builder and are not part of that RTL path.
+# ============================================================================
+
+use std.hardware.soc_rtl.dtb_asset.{soc_rv64_linux_dtb, soc_dtb_byte}
+
+# ============================================================================
+# Boot ROM Constants
+# ============================================================================
+
+val BOOTROM_BASE: u32 = 0x00001000
+val BOOTROM_SIZE: u32 = 0x00001000   # 4 KB
+
+# NOP instruction (addi x0, x0, 0)
+val NOP_INSN: u32 = 0x00000013
+
+# ============================================================================
+# Pre-encoded RV32I Instructions
+# ============================================================================
+#
+# Instruction encodings derived from the RV32I base ISA:
+#
+# LUI rd, imm[31:12]:  imm[31:12] | rd[4:0] | 0110111
+# JALR rd, rs1, imm:   imm[11:0] | rs1[4:0] | 000 | rd[4:0] | 1100111
+# ADDI rd, rs1, imm:   imm[11:0] | rs1[4:0] | 000 | rd[4:0] | 0010011
+#
+# Register numbers: x0=0, x2(sp)=2, x5(t0)=5, x10(a0)=10, x11(a1)=11
+# ============================================================================
+
+# Instruction 0: lui sp, 0x80100
+#   SP = 0x80100000 (top of 1MB RAM region)
+val BOOT_INSN_0: u32 = 0x80100137
+
+# Instruction 1: addi a0, zero, 0
+#   a0 = 0 (hart_id for boot_main)
+val BOOT_INSN_1: u32 = 0x00000513
+
+# Instruction 2: lui a1, 0x88000
+#   a1 = 0x88000000 (DTB base address in RAM)
+val BOOT_INSN_2: u32 = 0x880005B7
+
+# Instruction 3: lui t0, 0x80000
+#   t0 = 0x80000000 (kernel entry point)
+val BOOT_INSN_3: u32 = 0x800002B7
+
+# Instruction 4: jalr zero, t0, 0
+#   Jump to kernel entry, no link (rd=x0)
+val BOOT_INSN_4: u32 = 0x00028067
+
+val DTB_BASE: u32 = 0x88000000
+
+# ============================================================================
+# Boot ABI (LOCKED — OpenSBI/Linux RISC-V boot convention)
+# ============================================================================
+#
+# At the jump to the kernel entry point, the bootrom guarantees:
+#
+#   | Register | Value        | Meaning                                   |
+#   |----------|--------------|-------------------------------------------|
+#   | a0 (x10) | 0            | hartid of the booting hart                |
+#   | a1 (x11) | 0x8800_0000  | physical address of the DTB (zero-ext.)   |
+#   | sp (x2)  | 0x8010_0000  | top of RAM stack (zero-extended on RV64)  |
+#   | pc       | 0x8000_0000  | kernel/OpenSBI entry point                |
+#
+# RV64 zero-extension proof (see BOOT64_INSN_* + boot64_probe):
+#   lui a1, 0x88000  -> a1 = 0xFFFFFFFF_88000000 (LUI sign-extends bit 31)
+#   slli a1, a1, 32  -> a1 = 0x88000000_00000000
+#   srli a1, a1, 32  -> a1 = 0x00000000_88000000  (zero-extended, as required)
+# The same slli/srli-by-32 pair zero-extends sp and t0 (jump target).
+#
+# A reader at a1 must find a valid Flattened Device Tree. The bootrom carries
+# the full shared FDT asset served read-only by the SoC DTB overlay.
+
+# ============================================================================
+# RV64 Boot Sequence
+# ============================================================================
+#
+# On RV64, LUI sign-extends bit 31: `lui t0, 0x80000` yields
+# 0xFFFFFFFF80000000, not 0x80000000, so the RV32 sequence above misjumps
+# (bug: soc64_bootrom_rv32_encoded_sext_misjump_2026-07-22). The RV64
+# sequence zero-extends each LUI result with a slli/srli-by-32 pair.
+#
+# SLLI rd, rs1, 32 (RV64I): 000000 100000 | rs1 | 001 | rd | 0010011
+# SRLI rd, rs1, 32 (RV64I): 000000 100000 | rs1 | 101 | rd | 0010011
+
+# 0x1000: lui  sp, 0x80100
+val BOOT64_INSN_0: u32 = 0x80100137
+# 0x1004: slli sp, sp, 32
+val BOOT64_INSN_1: u32 = 0x02011113
+# 0x1008: srli sp, sp, 32     # sp = 0x0000000080100000
+val BOOT64_INSN_2: u32 = 0x02015113
+# 0x100C: addi a0, zero, 0    # hart_id
+val BOOT64_INSN_3: u32 = 0x00000513
+# 0x1010: lui  a1, 0x88000
+val BOOT64_INSN_4: u32 = 0x880005B7
+# 0x1014: slli a1, a1, 32
+val BOOT64_INSN_5: u32 = 0x02059593
+# 0x1018: srli a1, a1, 32     # a1 = 0x0000000088000000 (DTB base)
+val BOOT64_INSN_6: u32 = 0x0205D593
+# 0x101C: lui  t0, 0x80000
+val BOOT64_INSN_7: u32 = 0x800002B7
+# 0x1020: slli t0, t0, 32
+val BOOT64_INSN_8: u32 = 0x02029293
+# 0x1024: srli t0, t0, 32     # t0 = 0x0000000080000000 (kernel entry)
+val BOOT64_INSN_9: u32 = 0x0202D293
+# 0x1028: jalr zero, t0, 0    # Jump to kernel, don't link
+val BOOT64_INSN_10: u32 = 0x00028067
+
+# ============================================================================
+# Shared full DTB compatibility accessors
+# ============================================================================
+
+val DTB_MAGIC: u32 = 0xD00DFEED
+val DTB_HEADER_SIZE: u32 = 40
+
+fn bootrom_dtb_word(word_idx: u32) -> u32:
+    """Big-endian u32 view retained for old boot probes."""
+    val blob = soc_rv64_linux_dtb(0, 0)
+    val off = (word_idx as u64) << 2
+    (soc_dtb_byte(blob, off) << 24) |
+        (soc_dtb_byte(blob, off + 1) << 16) |
+        (soc_dtb_byte(blob, off + 2) << 8) |
+        soc_dtb_byte(blob, off + 3)
+
+fn bootrom_dtb_byte(offset: u32) -> u32:
+    """Serve the complete default RV64 FDT byte-wise for legacy callers."""
+    soc_dtb_byte(soc_rv64_linux_dtb(0, 0), offset as u64)
+
+fn bootrom_dtb_size() -> u32:
+    soc_rv64_linux_dtb(0, 0).len() as u32
+
+export BOOTROM_BASE
+export BOOTROM_SIZE
+export NOP_INSN
+export BOOT_INSN_0
+export BOOT_INSN_1
+export BOOT_INSN_2
+export BOOT_INSN_3
+export BOOT_INSN_4
+export DTB_BASE
+export DTB_MAGIC
+export DTB_HEADER_SIZE
+export bootrom_dtb_word
+export bootrom_dtb_byte
+export bootrom_dtb_size
+export bootrom_read64
+
+# ============================================================================
+# Boot ROM Read
+# ============================================================================
+
+fn bootrom_read(addr: u32) -> u32:
+    """Read a 32-bit word from the boot ROM.
+    addr is the absolute memory address (not offset).
+    Returns NOP for addresses outside the ROM or uninitialized slots.
+
+    Boot sequence (SimpleOS compatible):
+      0x1000: lui  sp, 0x80100     # SP = 0x80100000 (top of 1MB RAM region)
+      0x1004: addi a0, zero, 0     # a0 = 0 (hart_id for boot_main)
+      0x1008: lui  a1, 0x88000     # a1 = 0x88000000 (DTB base in RAM)
+      0x100C: lui  t0, 0x80000     # t0 = 0x80000000 (kernel entry)
+      0x1010: jalr zero, t0, 0     # Jump to kernel, don't link
+    """
+    if addr < BOOTROM_BASE:
+        return NOP_INSN
+    val offset = addr - BOOTROM_BASE
+    if offset >= BOOTROM_SIZE:
+        return NOP_INSN
+
+    val word_idx = offset >> 2
+
+    if word_idx == 0:
+        return BOOT_INSN_0
+    if word_idx == 1:
+        return BOOT_INSN_1
+    if word_idx == 2:
+        return BOOT_INSN_2
+    if word_idx == 3:
+        return BOOT_INSN_3
+    if word_idx == 4:
+        return BOOT_INSN_4
+
+    NOP_INSN
+
+fn bootrom_read64(addr: u64) -> u32:
+    """RV64 boot ROM read — zero-extending boot sequence (see BOOT64_INSN_*).
+    Same 4 KB window at 0x1000; addresses outside return NOP."""
+    if addr < 0x00001000:
+        return NOP_INSN
+    val offset = addr - 0x00001000
+    if offset >= 0x00001000:
+        return NOP_INSN
+
+    val word_idx = offset >> 2
+
+    if word_idx == 0:
+        return BOOT64_INSN_0
+    if word_idx == 1:
+        return BOOT64_INSN_1
+    if word_idx == 2:
+        return BOOT64_INSN_2
+    if word_idx == 3:
+        return BOOT64_INSN_3
+    if word_idx == 4:
+        return BOOT64_INSN_4
+    if word_idx == 5:
+        return BOOT64_INSN_5
+    if word_idx == 6:
+        return BOOT64_INSN_6
+    if word_idx == 7:
+        return BOOT64_INSN_7
+    if word_idx == 8:
+        return BOOT64_INSN_8
+    if word_idx == 9:
+        return BOOT64_INSN_9
+    if word_idx == 10:
+        return BOOT64_INSN_10
+
+    NOP_INSN

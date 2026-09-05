@@ -1,0 +1,158 @@
+# Portable checked socket syscall core.
+#
+# Architecture dispatchers retain their own scheduler/IPC state, but socket
+# policy and socket-owner calls must not fork by architecture.  This owner
+# resolves the current task from the supplied scheduler and checks the exact
+# endpoint recorded in user memory or in socket_compat before mutating a
+# socket.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.capability_types.{CapabilityKind}
+use os.kernel.socket_compat.{
+    SockaddrIn, posix_socket, posix_bind, posix_listen, posix_connect,
+    posix_accept, posix_send_bytes, posix_recv_bytes, posix_close_socket,
+    posix_bound_port_for_fd, posix_server_port_for_fd
+}
+use os.kernel.memory.vmm.{vmm_copy_bytes_result_ok}
+use os.kernel.memory.user_copy.{user_copyin_bytes, user_copyout_bytes}
+
+val PORTABLE_NET_SOCKADDR_IN_LEN_V1: u64 = 16u64
+val PORTABLE_NET_AF_INET_V1: u16 = 2u16
+val PORTABLE_NET_MAX_IO_V1: u64 = 1048576u64
+val PORTABLE_NET_EFAULT_V1: i64 = -14
+val PORTABLE_NET_EINVAL_V1: i64 = -22
+val PORTABLE_NET_EOPNOTSUPP_V1: i64 = -95
+val PORTABLE_NET_EPERM_V1: i64 = -1
+
+pub fn portable_net_copy_sockaddr_in_v1(ptr: u64, len: u64) -> Result<SockaddrIn, i64>:
+    if len < PORTABLE_NET_SOCKADDR_IN_LEN_V1:
+        return Err(PORTABLE_NET_EFAULT_V1)
+    val copied = user_copyin_bytes(ptr, PORTABLE_NET_SOCKADDR_IN_LEN_V1)
+    if not vmm_copy_bytes_result_ok(copied):
+        return Err(PORTABLE_NET_EFAULT_V1)
+    val bytes = copied.bytes
+    val family = (bytes[0] as u16) | ((bytes[1] as u16) << 8)
+    if family != PORTABLE_NET_AF_INET_V1:
+        return Err(PORTABLE_NET_EINVAL_V1)
+    val port = ((bytes[2] as u16) << 8) | (bytes[3] as u16)
+    val addr = (bytes[4] as u32) |
+        ((bytes[5] as u32) << 8) |
+        ((bytes[6] as u32) << 16) |
+        ((bytes[7] as u32) << 24)
+    Ok(SockaddrIn(family: PORTABLE_NET_AF_INET_V1 as i32, port: port, addr: addr))
+
+pub fn portable_net_dispatch_bind_checked_v1(
+    fd: i32, addr: SockaddrIn, scheduler: Scheduler, ipc: IpcManager
+) -> SyscallResult:
+    """Authorize and bind from one already-owned sockaddr snapshot."""
+    val caller = scheduler.get_current()
+    if not ipc.cap_check(caller, CapabilityKind.NetBindIpv4(
+        address: addr.addr, port: addr.port)) or
+       not ipc.cap_check(caller, CapabilityKind.NetListen(port: addr.port)):
+        return SyscallResult(value: PORTABLE_NET_EPERM_V1)
+    SyscallResult(value: posix_bind(fd, addr))
+
+pub fn portable_net_bind_args_checked_v1(
+    args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
+) -> SyscallResult:
+    """Copy bind input once, preserving copy errors before authorization."""
+    match portable_net_copy_sockaddr_in_v1(args.arg1, args.arg2):
+        Err(errno): SyscallResult(value: errno)
+        Ok(addr): portable_net_dispatch_bind_checked_v1(
+            args.arg0 as i32, addr, scheduler, ipc)
+
+pub fn portable_net_capability_allowed_v1(
+    args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
+) -> bool:
+    """Check one socket operation against its current task's exact authority.
+
+    Bind is deliberately excluded because it must use the atomic checked-bind
+    helper above. Listen and accept recover the port from the already-bound
+    descriptor. There is deliberately no wildcard `NetListen(0)` fallback.
+    """
+    val caller = scheduler.get_current()
+    match args.id:
+        case 70u64:
+            # Allocating a descriptor is neither an outbound connection nor a
+            # listener bind.  Listener pouches need this explicit capability
+            # but must not acquire any `NetConnect` authority as a side effect.
+            ipc.cap_check(caller, CapabilityKind.NetSocketCreate)
+        case 71u64:
+            # Bind cannot be split into check then dispatch without reopening
+            # caller memory. Use portable_net_bind_args_checked_v1 instead.
+            false
+        case 72u64:
+            match posix_bound_port_for_fd(args.arg0 as i32):
+                Some(port): ipc.cap_check(caller, CapabilityKind.NetListen(port: port))
+                nil: false
+        case 73u64:
+            ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))
+        case 74u64:
+            match posix_bound_port_for_fd(args.arg0 as i32):
+                Some(port): ipc.cap_check(caller, CapabilityKind.NetListen(port: port))
+                nil: false
+        case 75u64:
+            match posix_server_port_for_fd(args.arg0 as i32):
+                Some(port): ipc.cap_check(caller, CapabilityKind.NetListen(port: port))
+                nil: ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))
+        case 76u64:
+            match posix_server_port_for_fd(args.arg0 as i32):
+                Some(port): ipc.cap_check(caller, CapabilityKind.NetListen(port: port))
+                nil: ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))
+        case _: false
+
+pub fn portable_net_dispatch_v1(args: SyscallArgs) -> SyscallResult:
+    """Perform a pre-authorized socket operation through socket_compat."""
+    match args.id:
+        case 70u64:
+            SyscallResult(value: posix_socket(args.arg0 as i32, args.arg1 as i32, args.arg2 as i32))
+        case 71u64:
+            # Bind must authorize and mutate from one owned snapshot through
+            # portable_net_bind_args_checked_v1; bare dispatch is forbidden.
+            SyscallResult(value: PORTABLE_NET_EPERM_V1)
+        case 72u64:
+            SyscallResult(value: posix_listen(args.arg0 as i32, args.arg1 as i32))
+        case 73u64:
+            match portable_net_copy_sockaddr_in_v1(args.arg1, args.arg2):
+                Ok(addr): SyscallResult(value: posix_connect(args.arg0 as i32, addr))
+                Err(errno): SyscallResult(value: errno)
+        case 74u64:
+            if args.arg1 != 0u64 or args.arg2 != 0u64:
+                return SyscallResult(value: PORTABLE_NET_EOPNOTSUPP_V1)
+            SyscallResult(value: posix_accept(args.arg0 as i32))
+        case 75u64:
+            if args.arg2 > PORTABLE_NET_MAX_IO_V1:
+                return SyscallResult(value: PORTABLE_NET_EINVAL_V1)
+            if args.arg3 != 0u64 or args.arg4 != 0u64:
+                return SyscallResult(value: PORTABLE_NET_EOPNOTSUPP_V1)
+            if args.arg2 == 0u64:
+                val empty: [u8] = []
+                return SyscallResult(value: posix_send_bytes(args.arg0 as i32, empty, args.arg5 as i32))
+            val copied = user_copyin_bytes(args.arg1, args.arg2)
+            if not vmm_copy_bytes_result_ok(copied):
+                return SyscallResult(value: PORTABLE_NET_EFAULT_V1)
+            SyscallResult(value: posix_send_bytes(args.arg0 as i32, copied.bytes, args.arg5 as i32))
+        case 76u64:
+            if args.arg2 > PORTABLE_NET_MAX_IO_V1:
+                return SyscallResult(value: PORTABLE_NET_EINVAL_V1)
+            if args.arg3 != 0u64 or args.arg4 != 0u64:
+                return SyscallResult(value: PORTABLE_NET_EOPNOTSUPP_V1)
+            match posix_recv_bytes(args.arg0 as i32, args.arg2, args.arg5 as i32):
+                Ok(reply):
+                    val copied = user_copyout_bytes(args.arg1, reply)
+                    if copied < 0:
+                        return SyscallResult(value: PORTABLE_NET_EFAULT_V1)
+                    SyscallResult(value: copied as i64)
+                Err(_): SyscallResult(value: -5)
+        case _:
+            SyscallResult(value: -38)
+
+pub fn portable_net_close_v1(fd: i64) -> SyscallResult:
+    """Close a socket descriptor through the same portable owner."""
+    SyscallResult(value: posix_close_socket(fd as i32))
+
+export portable_net_copy_sockaddr_in_v1, portable_net_capability_allowed_v1
+export portable_net_dispatch_bind_checked_v1, portable_net_bind_args_checked_v1
+export portable_net_dispatch_v1, portable_net_close_v1

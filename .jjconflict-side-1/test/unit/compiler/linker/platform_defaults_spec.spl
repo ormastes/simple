@@ -1,0 +1,206 @@
+# Tests for platform_defaults.spl - Single source of truth for link data
+# No imports - uses module-level helper functions to replicate logic.
+
+# ============================================================================
+# Module-level helpers (replicate platform_defaults.spl logic)
+# ============================================================================
+
+fn helper_default_libraries(os: text) -> [text]:
+    if os == "linux":
+        return ["c", "pthread", "dl", "m"]
+    elif os == "macos" or os == "Darwin":
+        return ["c", "pthread", "m", "System"]
+    elif os == "freebsd" or os == "FreeBSD":
+        return ["c", "pthread", "m"]
+    elif os == "windows":
+        return ["kernel32", "user32"]
+    []
+
+fn helper_default_library_dirs(os: text) -> [text]:
+    if os == "windows":
+        return []
+    ["/usr/lib/simple", "/usr/local/lib/simple"]
+
+fn helper_default_crt_search_dirs(os: text, arch: text) -> [text]:
+    if os != "linux":
+        return []
+    if arch == "x86_64":
+        return ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/lib/x86_64-linux-gnu", "/lib64"]
+    elif arch == "aarch64":
+        return ["/usr/lib/aarch64-linux-gnu", "/usr/aarch64-linux-gnu/lib", "/lib/aarch64-linux-gnu"]
+    elif arch == "riscv64":
+        return ["/usr/lib/riscv64-linux-gnu", "/usr/riscv64-linux-gnu/lib", "/lib/riscv64-linux-gnu"]
+    ["/usr/lib"]
+
+fn helper_default_dynamic_linker_candidates(os: text, arch: text) -> [text]:
+    if os == "linux":
+        if arch == "x86_64":
+            return [
+                "/lib64/ld-linux-x86-64.so.2",
+                "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+                "/lib/ld-linux-x86-64.so.2"
+            ]
+        elif arch == "aarch64":
+            return [
+                "/lib/ld-linux-aarch64.so.1",
+                "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+            ]
+        elif arch == "riscv64":
+            return [
+                "/lib/ld-linux-riscv64-lp64d.so.1",
+                "/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1"
+            ]
+        return []
+    elif os == "freebsd":
+        return ["/libexec/ld-elf.so.1"]
+    []
+
+fn helper_elf_emulation(arch: text) -> text:
+    if arch == "x86_64":
+        return "elf_x86_64"
+    elif arch == "aarch64":
+        return "aarch64linux"
+    elif arch == "i686" or arch == "i386":
+        return "elf_i386"
+    elif arch == "riscv64":
+        return "elf64lriscv"
+    elif arch == "riscv32":
+        return "elf32lriscv"
+    ""
+
+fn helper_gcc_triplet(arch: text) -> text:
+    if arch == "x86_64":
+        return "x86_64-linux-gnu"
+    elif arch == "aarch64":
+        return "aarch64-linux-gnu"
+    elif arch == "riscv64":
+        return "riscv64-linux-gnu"
+    "x86_64-linux-gnu"
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "platform_defaults":
+
+    describe "default_libraries":
+        it "linux_libs: Linux has c, pthread, dl, m":
+            val libs = helper_default_libraries("linux")
+            expect(libs.len()).to_equal(4)
+            expect(libs[0]).to_equal("c")
+            expect(libs[1]).to_equal("pthread")
+            expect(libs[2]).to_equal("dl")
+            expect(libs[3]).to_equal("m")
+
+        it "macos_libs: macOS has c, pthread, m, System":
+            val libs = helper_default_libraries("macos")
+            expect(libs.len()).to_equal(4)
+            expect(libs[0]).to_equal("c")
+            expect(libs[3]).to_equal("System")
+
+        it "darwin_libs: Darwin alias works like macos":
+            val libs = helper_default_libraries("Darwin")
+            expect(libs.len()).to_equal(4)
+            expect(libs[3]).to_equal("System")
+
+        it "freebsd_libs: FreeBSD has c, pthread, m":
+            val libs = helper_default_libraries("freebsd")
+            expect(libs.len()).to_equal(3)
+            expect(libs[0]).to_equal("c")
+
+        it "windows_libs: Windows has kernel32, user32":
+            val libs = helper_default_libraries("windows")
+            expect(libs.len()).to_equal(2)
+            expect(libs[0]).to_equal("kernel32")
+            expect(libs[1]).to_equal("user32")
+
+        it "unknown_os_libs: unknown OS returns empty":
+            val libs = helper_default_libraries("haiku")
+            expect(libs.len()).to_equal(0)
+
+    describe "default_library_dirs":
+        it "unix_lib_dirs: Unix OSes get simple lib dirs":
+            val dirs = helper_default_library_dirs("linux")
+            expect(dirs.len()).to_equal(2)
+            expect(dirs[0]).to_equal("/usr/lib/simple")
+            expect(dirs[1]).to_equal("/usr/local/lib/simple")
+
+        it "windows_lib_dirs: Windows gets empty lib dirs":
+            val dirs = helper_default_library_dirs("windows")
+            expect(dirs.len()).to_equal(0)
+
+    describe "crt_search_dirs":
+        it "x86_64_crt: x86_64 has 4 search dirs":
+            val dirs = helper_default_crt_search_dirs("linux", "x86_64")
+            expect(dirs.len()).to_equal(4)
+            expect(dirs[0]).to_equal("/usr/lib/x86_64-linux-gnu")
+
+        it "aarch64_crt: aarch64 has 3 search dirs":
+            val dirs = helper_default_crt_search_dirs("linux", "aarch64")
+            expect(dirs.len()).to_equal(3)
+            expect(dirs[0]).to_equal("/usr/lib/aarch64-linux-gnu")
+
+        it "riscv64_crt: riscv64 has 3 search dirs":
+            val dirs = helper_default_crt_search_dirs("linux", "riscv64")
+            expect(dirs.len()).to_equal(3)
+
+        it "unknown_arch_crt: unknown arch falls back to /usr/lib":
+            val dirs = helper_default_crt_search_dirs("linux", "mips")
+            expect(dirs.len()).to_equal(1)
+            expect(dirs[0]).to_equal("/usr/lib")
+
+        it "non_linux_crt: non-Linux gets empty CRT dirs":
+            val dirs = helper_default_crt_search_dirs("macos", "x86_64")
+            expect(dirs.len()).to_equal(0)
+
+    describe "dynamic_linker_candidates":
+        it "linux_x86_64_dynlinker: x86_64 has 3 candidates":
+            val candidates = helper_default_dynamic_linker_candidates("linux", "x86_64")
+            expect(candidates.len()).to_equal(3)
+            expect(candidates[0]).to_equal("/lib64/ld-linux-x86-64.so.2")
+
+        it "linux_aarch64_dynlinker: aarch64 has 2 candidates":
+            val candidates = helper_default_dynamic_linker_candidates("linux", "aarch64")
+            expect(candidates.len()).to_equal(2)
+
+        it "linux_riscv64_dynlinker: riscv64 has 2 candidates":
+            val candidates = helper_default_dynamic_linker_candidates("linux", "riscv64")
+            expect(candidates.len()).to_equal(2)
+
+        it "freebsd_dynlinker: FreeBSD has 1 candidate":
+            val candidates = helper_default_dynamic_linker_candidates("freebsd", "x86_64")
+            expect(candidates.len()).to_equal(1)
+            expect(candidates[0]).to_equal("/libexec/ld-elf.so.1")
+
+        it "unknown_os_dynlinker: unknown OS returns empty":
+            val candidates = helper_default_dynamic_linker_candidates("windows", "x86_64")
+            expect(candidates.len()).to_equal(0)
+
+    describe "elf_emulation":
+        it "x86_64_emulation: x86_64 returns elf_x86_64":
+            expect(helper_elf_emulation("x86_64")).to_equal("elf_x86_64")
+
+        it "aarch64_emulation: aarch64 returns aarch64linux":
+            expect(helper_elf_emulation("aarch64")).to_equal("aarch64linux")
+
+        it "riscv64_emulation: riscv64 returns elf64lriscv":
+            expect(helper_elf_emulation("riscv64")).to_equal("elf64lriscv")
+
+        it "i686_emulation: i686 returns elf_i386":
+            expect(helper_elf_emulation("i686")).to_equal("elf_i386")
+
+        it "unknown_emulation: unknown arch returns empty":
+            expect(helper_elf_emulation("mips")).to_equal("")
+
+    describe "gcc_triplet":
+        it "x86_64_triplet: x86_64 returns x86_64-linux-gnu":
+            expect(helper_gcc_triplet("x86_64")).to_equal("x86_64-linux-gnu")
+
+        it "aarch64_triplet: aarch64 returns aarch64-linux-gnu":
+            expect(helper_gcc_triplet("aarch64")).to_equal("aarch64-linux-gnu")
+
+        it "riscv64_triplet: riscv64 returns riscv64-linux-gnu":
+            expect(helper_gcc_triplet("riscv64")).to_equal("riscv64-linux-gnu")
+
+        it "unknown_triplet: unknown arch defaults to x86_64-linux-gnu":
+            expect(helper_gcc_triplet("mips")).to_equal("x86_64-linux-gnu")

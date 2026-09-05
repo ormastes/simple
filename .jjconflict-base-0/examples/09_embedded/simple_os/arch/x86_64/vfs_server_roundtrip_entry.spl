@@ -1,0 +1,148 @@
+# x86_64 VFS filesystem-server round-trip entry.
+#
+# Proves that the SimpleOS VFS FILESYSTEM SERVER is actually RUNNING inside the
+# guest by pushing DATA through it and reading that same data back — not by
+# printing a banner and not by observing that a path exists.
+#
+# Boot is OVMF pflash -> GRUB-EFI (a real EFI application) -> multiboot1 kernel.
+# NEVER QEMU `-kernel`, NEVER isa-debug-exit: the point of the lane is that the
+# same artifact could boot on hardware.
+#
+# WHAT IS THE SERVER: `vfs_boot_init_production()` brings up the PURE-SIMPLE
+# storage stack — PCI enumeration -> NVMe device grant -> NVMe block device ->
+# FAT32 filesystem -> the VFS hub that every `g_vfs_*` request is served by.
+# That hub is the filesystem service. Each `g_vfs_write_file_text` /
+# `g_vfs_read_file_text` below is a REQUEST SERVED BY IT against a real NVMe
+# device; nothing here touches a host file. The same hub is what the http file
+# routes read through (src/os/kernel/boot/http_baremetal.spl:102-104), so this
+# is the live service, not a probe-private copy.
+#
+# DELIBERATELY MINIMAL IMPORT SET — this is load-bearing, not tidiness.
+# The obvious move is to copy servers_entry.spl wholesale (sshd + http + dbd).
+# Measured on this base branch, that does not build, for two independent
+# reasons, and both are worth stating so the next person does not retry it:
+#
+#   1. `src/os/apps/dbd/dbd.spl` and `dbd_provisioning.spl` FAIL CODEGEN under
+#      strict mode (SIMPLE_ALLOW_STUB_FALLBACK unset): bodies
+#      [DbdLiveClientSessionV1.create] and [DbdProvisioningOwnerV1.ready].
+#      native-build aborts. Setting SIMPLE_ALLOW_STUB_FALLBACK to get past it
+#      is NOT an option here: it emits empty stubs, and a filesystem
+#      round-trip "proved" by a silently-stubbed binary is exactly the
+#      fabricated evidence this lane exists to rule out.
+#
+#   2. Pulling in the ring-3 syscall shim (via dbd, or via an explicit
+#      `shim_init` import) makes the link fail with ~19 "symbol not found:
+#      kernel__abi__syscall_shim__spl_handle_*" errors from linker.ld's hard
+#      assignments. Verified by nm on the emitted objects: the functions ARE
+#      compiled, but under `src__os__kernel__abi__syscall_shim_ipc__spl_handle_
+#      ipc_connect` / `...syscall_shim_process__spl_handle_debug_write` — the
+#      `src__` prefix and the sub-module split, neither of which linker.ld's
+#      names carry. That is a pre-existing linker-script/mangling mismatch on
+#      this branch, NOT something this entry introduced, and NOT something to
+#      paper over by editing a shared linker script from this lane.
+#
+# The round-trip is kernel-resident and needs no ring-3 syscall at all, so the
+# correct response is to not pull the shim in.
+#
+# WHAT MAKES THE ROUND-TRIP HONEST:
+#   * The NVMe volume is a raw SimpleOS SYSTEM FAT32 volume (no partition
+#     table) carrying exactly the payloads vfs_boot_init_production() requires
+#     — and asserted, before boot, to contain neither this run's nonce nor any
+#     /VFSRT.TXT entry. Every nonce byte read back is a byte this guest wrote.
+#   * The payload is a PER-RUN NONCE generated into
+#     build/os/generated/vfs_roundtrip_nonce.spl at build time. A stale kernel
+#     or a stale disk image carries a stale nonce and CANNOT satisfy the gate,
+#     which greps for the exact nonce of the current run.
+#   * After the guest halts, the gate additionally searches the raw NVMe image
+#     ON THE HOST for the nonce bytes. That is an independent FILESYSTEM CHECK
+#     outside the guest: the data really reached the disk through the server.
+#
+# HONEST SCOPE: the service runs kernel-resident/cooperative. The named `vfs`
+# IPC port rung is ADVISORY — `VfsService.init_port()` goes through a `syscall`
+# extern with no freestanding backing, and per reason (2) above the ring-3 shim
+# is not linked in either, so the port half is expected RED. It never turns the
+# lane green. The REQUIRED rungs are the ones that carry data.
+
+use build.os.generated.vfs_roundtrip_nonce.{vfs_roundtrip_nonce}
+use os.services.vfs.vfs_boot_init.{
+    vfs_boot_init_production, g_root_fat32, g_adapter,
+    vfs_service_init_port, vfs_service_poll, vfs_is_ready
+}
+use os.services.vfs.vfs_init.{g_vfs_read_file_text, g_vfs_write_file_text, g_vfs_file_exists}
+use os.services.fat32.shared_fat32_driver.{SharedFat32Driver as Fat32Core}
+
+extern fn serial_println(msg: text)
+
+val VFSRT_PATH: text = "/VFSRT.TXT"
+
+fn _vfsrt_ensure_generic_root_fat32():
+    """Mount an arbitrary-filename-capable FAT32 driver onto the VFS hub's
+    g_root_fat32 slot when the pure-Simple boot path left it nil (that path
+    favors a fixed-registry reader for known files instead). Verbatim in
+    approach from servers_entry.spl's _servers_ensure_generic_root_fat32.
+    """
+    if g_root_fat32 != nil:
+        serial_println("[vfsrt] generic FAT32 already mounted")
+        return
+    var root = Fat32Core.new(g_adapter)
+    val mount_result = root.mount("", "")
+    if mount_result.is_err():
+        serial_println("[vfsrt] generic FAT32 mount FAILED: {mount_result.unwrap_err()}")
+        return
+    g_root_fat32 = Some(root)
+    serial_println("[vfsrt] generic FAT32 mount ok (arbitrary paths writable)")
+
+fn _start():
+    serial_println("")
+    serial_println("=== SimpleOS VFS filesystem-server round-trip probe ===")
+    val nonce = vfs_roundtrip_nonce()
+    serial_println("[vfsrt] probe begin nonce={nonce}")
+
+    # --- bring the filesystem SERVER up ------------------------------------
+    serial_println("[vfsrt] initializing storage stack (VFS/NVMe/FAT32)")
+    val storage_ok = vfs_boot_init_production()
+    # Render the bool EXPLICITLY. `"{storage_ok}"` renders a Simple bool as
+    # `1`/`0`, not `true`/`false`, so the interpolated form silently missed the
+    # gate's L3 needle even on a fully successful production bring-up (measured
+    # 2026-08-31: the transcript said `ok=1` while every prerequisite passed).
+    # Do NOT "fix" that by relaxing the needle — the gate's own selftest
+    # fixtures are written in true/false and must stay that way.
+    serial_println("[vfsrt] vfs_boot_init_production ok=" + (if storage_ok: "true" else: "false"))
+    if not storage_ok:
+        serial_println("[vfsrt] PROBE FAILED: storage stack did not come up")
+        return
+    _vfsrt_ensure_generic_root_fat32()
+    if not vfs_is_ready():
+        serial_println("[vfsrt] PROBE FAILED: vfs not ready after init")
+        return
+    serial_println("[vfsrt] fs-server up ready=true")
+
+    # Named `vfs` IPC endpoint — ADVISORY rung (see module docstring).
+    vfs_service_init_port()
+    vfs_service_poll()
+    serial_println("[vfsrt] ipc-port attempted (advisory)")
+
+    # --- the round-trip: DATA through the server ---------------------------
+    val payload = "vfsrt-nonce:{nonce}"
+    serial_println("[vfsrt] server write begin path={VFSRT_PATH} bytes={payload.len()}")
+    val wrote = g_vfs_write_file_text(VFSRT_PATH, payload)
+    serial_println("[vfsrt] server write path=" + VFSRT_PATH + " ok=" + (if wrote: "true" else: "false"))
+    if not wrote:
+        serial_println("[vfsrt] PROBE FAILED: server refused the write")
+        return
+
+    val exists = g_vfs_file_exists(VFSRT_PATH)
+    serial_println("[vfsrt] server stat exists=" + (if exists: "true" else: "false"))
+
+    val got = g_vfs_read_file_text(VFSRT_PATH)
+    serial_println("[vfsrt] server read-back={got}")
+    if got != payload:
+        serial_println("[vfsrt] PROBE FAILED: read-back differs from write")
+        return
+    serial_println("[vfsrt] ROUNDTRIP_OK nonce={nonce}")
+    serial_println("[vfsrt] probe complete")
+
+    while true:
+        vfs_service_poll()
+
+export _start

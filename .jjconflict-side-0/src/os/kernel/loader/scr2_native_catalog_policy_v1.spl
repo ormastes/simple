@@ -1,0 +1,155 @@
+"""Root-authenticated SCR2 native catalog owner.
+
+This is deliberately only policy authentication and projection. It neither
+opens an executable nor grants loader authority. A future boot consumer must
+join its retained VFS observation to this value; it must not reconstruct a
+SAM1 manifest or supplement this policy from command-line/config input.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.scr2_native_catalog_policy_v1_codec.{
+    Scr2NativeCatalogRecordV1, Scr2NativeCatalogSubjectV1,
+    scr2_native_catalog_policy_envelope_decode_v1
+}
+use std.common.structural.execution.simple_artifact_receipt_v2_codec.{
+    SimpleArtifactReceiptSubjectV2, simple_artifact_receipt_scr2_decode_v2
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.signed_artifact_receipt_verifier_v2.{
+    SignedArtifactReceiptGuestExpectationV2, SignedArtifactReceiptTrustPolicyV2,
+    signed_artifact_receipt_guest_check_v2
+}
+
+pub enum Scr2NativeCatalogPolicyErrorV1:
+    None
+    RootRejected
+    CatalogRejected
+    CatalogSignatureRejected
+    LocalTargetRejected
+    ReceiptRejected
+    RecordRejected
+
+pub struct Scr2NativeExecutionPolicyV1:
+    """Complete launch policy; every member originates in SCR2 or SNC2/SNE2."""
+    policy_identity: text
+    receipt_subject: SimpleArtifactReceiptSubjectV2
+    catalog_record: Scr2NativeCatalogRecordV1
+
+pub struct Scr2NativeCatalogLocalAdmissionV1:
+    ok: bool
+    error: Scr2NativeCatalogPolicyErrorV1
+    exact_local_target: ManifestTarget
+    execution_policy: Scr2NativeExecutionPolicyV1?
+
+fn _nfail(error: Scr2NativeCatalogPolicyErrorV1,
+    target: ManifestTarget) -> Scr2NativeCatalogLocalAdmissionV1:
+    Scr2NativeCatalogLocalAdmissionV1(ok: false, error: error,
+        exact_local_target: target, execution_policy: nil)
+
+fn _ntarget_equal(left: ManifestTarget, right: ManifestTarget) -> bool:
+    left.os == right.os and left.arch == right.arch and left.abi == right.abi
+
+fn _nroot_valid(root: ExecutableManifestTrustedSignerV1) -> bool:
+    if root.key_id.len() == 0 or root.key_id.len() > 128 or
+        root.key_id.contains(":") or root.public_key.len() != 32: return false
+    var index: i64 = 0
+    while index < root.key_id.len():
+        val code = root.key_id.char_code_at(index)
+        if code < 33 or code > 126: return false
+        index = index + 1
+    true
+
+fn _nfind_local_record(subject: Scr2NativeCatalogSubjectV1,
+    receipt: SimpleArtifactReceiptSubjectV2,
+    local_target: ManifestTarget) -> Scr2NativeCatalogRecordV1?:
+    var selected: Scr2NativeCatalogRecordV1? = nil
+    for record in subject.records:
+        if record.role == receipt.role and
+            record.authority_identity == receipt.authority_identity and
+            _ntarget_equal(record.target, local_target):
+            if selected.?: return nil
+            selected = Some(record)
+    selected
+
+fn _nrecord_matches_receipt(record: Scr2NativeCatalogRecordV1,
+    receipt: SimpleArtifactReceiptSubjectV2, local_target: ManifestTarget) -> bool:
+    record.role == receipt.role and
+        record.authority_identity == receipt.authority_identity and
+        _ntarget_equal(record.target, local_target) and
+        _ntarget_equal(receipt.target, local_target) and
+        record.canonical_path == receipt.canonical_path and
+        record.aliases == receipt.aliases and record.entrypoint == receipt.entrypoint
+
+fn _nauthenticate_for_local_target(catalog_bytes: [u8], receipt_bytes: [u8],
+    root: ExecutableManifestTrustedSignerV1,
+    local_target: ManifestTarget) -> Scr2NativeCatalogLocalAdmissionV1:
+    if not _nroot_valid(root):
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.RootRejected, local_target)
+    val decoded = scr2_native_catalog_policy_envelope_decode_v1(catalog_bytes)
+    if not decoded.?:
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.CatalogRejected, local_target)
+    val envelope = decoded.unwrap()
+    if envelope.boot_signer_key_id != root.key_id or
+        envelope.expected_boot_root_sha256 != sha256_u8_hex(root.public_key):
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.RootRejected, local_target)
+    if not pure_ed25519_verify(root.public_key, envelope.signing_bytes,
+        envelope.detached_signature):
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.CatalogSignatureRejected,
+            local_target)
+    val subject = envelope.subject
+    if sha256_u8_hex(subject.delegated_public_key) !=
+        subject.delegated_public_key_sha256:
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.CatalogRejected, local_target)
+    val decoded_receipt = simple_artifact_receipt_scr2_decode_v2(receipt_bytes)
+    if not decoded_receipt.?:
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.ReceiptRejected, local_target)
+    val receipt = decoded_receipt.unwrap().subject
+    val selected = _nfind_local_record(subject, receipt, local_target)
+    if not selected.?:
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.RecordRejected, local_target)
+    val record = selected.unwrap()
+    if not _nrecord_matches_receipt(record, receipt, local_target):
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.RecordRejected, local_target)
+    val check = signed_artifact_receipt_guest_check_v2(receipt_bytes,
+        [SignedArtifactReceiptTrustPolicyV2(
+            signer: ExecutableManifestTrustedSignerV1(
+                key_id: subject.delegated_signer_key_id,
+                public_key: subject.delegated_public_key),
+            allowed_authority_identities: [record.authority_identity],
+            allowed_roles: [record.role], allowed_targets: [local_target])],
+        SignedArtifactReceiptGuestExpectationV2(
+            artifact_sha256: receipt.artifact_sha256,
+            artifact_byte_count: receipt.artifact_byte_count,
+            role: record.role, authority_identity: record.authority_identity,
+            target: local_target, canonical_path: record.canonical_path,
+            aliases: record.aliases, entrypoint: record.entrypoint))
+    if not check.ok:
+        return _nfail(Scr2NativeCatalogPolicyErrorV1.ReceiptRejected, local_target)
+    Scr2NativeCatalogLocalAdmissionV1(ok: true,
+        error: Scr2NativeCatalogPolicyErrorV1.None,
+        exact_local_target: local_target,
+        execution_policy: Some(Scr2NativeExecutionPolicyV1(
+            policy_identity: subject.policy_identity, receipt_subject: receipt,
+            catalog_record: record)))
+
+pub(package) fn scr2_native_catalog_authenticate_x86_64_v1(
+    catalog_bytes: [u8], receipt_bytes: [u8], root: ExecutableManifestTrustedSignerV1,
+) -> Scr2NativeCatalogLocalAdmissionV1:
+    _nauthenticate_for_local_target(catalog_bytes, receipt_bytes, root,
+        ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"))
+
+pub(package) fn scr2_native_catalog_authenticate_arm64_v1(
+    catalog_bytes: [u8], receipt_bytes: [u8], root: ExecutableManifestTrustedSignerV1,
+) -> Scr2NativeCatalogLocalAdmissionV1:
+    _nauthenticate_for_local_target(catalog_bytes, receipt_bytes, root,
+        ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos"))
+
+pub(package) fn scr2_native_catalog_authenticate_riscv64_v1(
+    catalog_bytes: [u8], receipt_bytes: [u8], root: ExecutableManifestTrustedSignerV1,
+) -> Scr2NativeCatalogLocalAdmissionV1:
+    _nauthenticate_for_local_target(catalog_bytes, receipt_bytes, root,
+        ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos"))

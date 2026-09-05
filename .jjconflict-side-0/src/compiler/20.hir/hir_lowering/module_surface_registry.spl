@@ -1,0 +1,378 @@
+# Module-surface registry construction and compatibility lookup.
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
+use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error, module_surfaces_validate_index_alignment}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_canonical_module_name, module_surface_declaration_matches}
+
+extern fn rt_hash_text(content: text) -> i64
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+impl ModuleSurfacesByName:
+    static fn empty() -> ModuleSurfacesByName:
+        ModuleSurfacesByName(
+            surfaces: [], index_by_name: {},
+            ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+
+    static fn from_parts(
+        surfaces: [ModuleSurface],
+        index_by_name: Dict<text, i64>,
+        ordered_names: [text],
+        ordered_indices: [i64]
+    ) -> Result<ModuleSurfacesByName, text>:
+        module_surfaces_by_name_from_parts(
+            surfaces, index_by_name, ordered_names, ordered_indices)
+
+impl ModuleSurfaceBuilder:
+    static fn new() -> ModuleSurfaceBuilder:
+        ModuleSurfaceBuilder(
+            surfaces: [], index_by_name: {}, index_by_path: {},
+            ordered_names: [], ordered_indices: [], frozen: false)
+
+    me add_indexed_name(name: text, surface_index: i64) -> Result<(), text>:
+        if self.frozen:
+            return Err("module surface builder is frozen")
+        # Preserve the compatibility dictionary and its existing conflict
+        # behavior, while recording each newly discovered alias exactly once
+        # in the stable scalar representation.
+        if self.ordered_names.len() != self.ordered_indices.len():
+            return Err("module surface builder name/index arrays have different lengths")
+        var existing_position = 0
+        while existing_position < self.ordered_names.len():
+            if self.ordered_names[existing_position] == name:
+                if self.ordered_indices[existing_position] != surface_index:
+                    return Err("module surface name maps to conflicting indices: {name}")
+            existing_position = existing_position + 1
+
+        val name_result = module_surfaces_add_name(
+            self.index_by_name, name, surface_index)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        self.index_by_name = name_result.unwrap()
+
+        var position = 0
+        while position < self.ordered_names.len():
+            if self.ordered_names[position] == name:
+                return Ok(())
+            position = position + 1
+        self.ordered_names = self.ordered_names.push(name)
+        self.ordered_indices = self.ordered_indices.push(surface_index)
+        Ok(())
+
+    me add_indexed_canonical_identity(
+        name: text, surface_index: i64
+    ) -> Result<(), text>:
+        """Register one resolver spelling and its logical identity once.
+
+        The first spelling for a physical source is not guaranteed to be the
+        path-derived layered spelling. Later aliases must therefore publish
+        their tier-free/std-folded identity too. add_indexed_name remains the
+        single conflict authority, so two physical surfaces can never claim
+        the same logical key.
+        """
+        val name_result = self.add_indexed_name(name, surface_index)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        val canonical_name = module_surface_canonical_module_name(name)
+        if canonical_name != name:
+            val canonical_result = self.add_indexed_name(
+                canonical_name, surface_index)
+            if canonical_result.is_err():
+                return Err(canonical_result.unwrap_err())
+        Ok(())
+
+    me has_path(path: text) -> bool:
+        self.index_by_path.contains_key(module_surface_canonical_path(path))
+
+    me has_canonical_path(canonical_path: text) -> bool:
+        self.index_by_path.contains_key(canonical_path)
+
+    me add_parsed(module: ParserModule, source: SourceFile, source_index: i64) -> Result<(), text>:
+        val canonical_path = module_surface_canonical_path(source.path)
+        self.add_parsed_canonical(module, source, source_index, canonical_path)
+
+    me add_parsed_canonical(module: ParserModule, source: SourceFile, source_index: i64, canonical_path: text) -> Result<(), text>:
+        if self.frozen:
+            return Err("module surface builder is frozen")
+        if self.index_by_path.contains_key(canonical_path):
+            return Err("module surface already exists for physical source: {canonical_path}")
+        val surface_result = module_surface_from_module(module, source, source_index)
+        if surface_result.is_err():
+            return Err(surface_result.unwrap_err())
+        self.add_surface_canonical(
+            surface_result.unwrap(), source, canonical_path)
+
+    # Commit an already-built surface to the persistent registry.  Streaming
+    # parsing builds the compact surface while the parse arena is still
+    # transient, promotes that surface, and only then calls this method.  This
+    # keeps construction temporaries out of the process-lifetime heap.
+    me add_surface_canonical(
+        surface: ModuleSurface, source: SourceFile, canonical_path: text
+    ) -> Result<(), text>:
+        self.add_surface_canonical_identity(
+            surface, source.module_name, canonical_path)
+
+    # Streaming commit accepts only retained scalar owners. A SourceFile value
+    # created in the parser scope must never cross this persistent boundary.
+    me add_surface_canonical_identity(
+        surface: ModuleSurface, module_name: text, canonical_path: text
+    ) -> Result<(), text>:
+        if self.frozen:
+            return Err("module surface builder is frozen")
+        if self.index_by_path.contains_key(canonical_path):
+            return Err("module surface already exists for physical source: {canonical_path}")
+        val surface_index = self.surfaces.len()
+        val name_result = self.add_indexed_canonical_identity(
+            module_name, surface_index)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        self.surfaces = self.surfaces.push(surface)
+        self.index_by_path[canonical_path] = surface_index
+        Ok(())
+
+    me add_alias(source: SourceFile) -> Result<(), text>:
+        val canonical_path = module_surface_canonical_path(source.path)
+        self.add_alias_canonical(source, canonical_path)
+
+    me add_alias_canonical(source: SourceFile, canonical_path: text) -> Result<(), text>:
+        self.add_alias_canonical_identity(
+            source.module_name, source.content, canonical_path)
+
+    me add_alias_canonical_identity(
+        module_name: text, content: text, canonical_path: text
+    ) -> Result<(), text>:
+        if self.frozen:
+            return Err("module surface builder is frozen")
+        if not self.index_by_path.contains_key(canonical_path):
+            return Err("missing physical module surface for alias: {canonical_path}")
+        val surface_index = self.index_by_path[canonical_path]
+        if surface_index < 0 or surface_index >= self.surfaces.len():
+            return Err("invalid physical module surface index for alias: path={canonical_path} index={surface_index} len={self.surfaces.len()}")
+        val surface = self.surfaces[surface_index]
+        if (surface.canonical_path != canonical_path or
+            surface.content_length != content.len() or
+            surface.content_hash != rt_hash_text(content)):
+            return Err("conflicting physical source: {canonical_path}")
+        val name_result = self.add_indexed_canonical_identity(
+            module_name, surface_index)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        Ok(())
+
+    me finish() -> Result<ModuleSurfacesByName, text>:
+        if self.frozen:
+            return Err("module surface builder is frozen")
+        val result = module_surfaces_by_name_from_parts(
+            self.surfaces, self.index_by_name,
+            self.ordered_names, self.ordered_indices)
+        if result.is_ok():
+            self.frozen = true
+        result
+
+    # Native bootstrap must keep the registry owner in the caller. Returning a
+    # class through Result can preserve the Ok tag while losing its payload.
+    # Populate and freeze the caller-created owner, and return scalar status.
+    me finish_into(registry: ModuleSurfacesByName) -> text:
+        if self.frozen:
+            return "module surface builder is frozen"
+        if registry == nil:
+            return "module surface destination is missing"
+        val validation = module_surfaces_validate_index_alignment(
+            self.surfaces, self.index_by_name,
+            self.ordered_names, self.ordered_indices)
+        if validation.is_err():
+            return validation.unwrap_err()
+        registry.surfaces = self.surfaces
+        registry.index_by_name = self.index_by_name
+        registry.ordered_names = self.ordered_names
+        registry.ordered_indices = self.ordered_indices
+        val freeze_result = module_surfaces_freeze(registry)
+        if freeze_result.is_err():
+            return freeze_result.unwrap_err()
+        self.frozen = true
+        ""
+
+pub(package) fn module_surfaces_by_name_from_parts(
+    surfaces: [ModuleSurface],
+    index_by_name: Dict<text, i64>,
+    ordered_names: [text],
+    ordered_indices: [i64]
+) -> Result<ModuleSurfacesByName, text>:
+    val validation = module_surfaces_validate_index_alignment(
+        surfaces, index_by_name, ordered_names, ordered_indices)
+    if validation.is_err():
+        return Err(validation.unwrap_err())
+    var registry = ModuleSurfacesByName(
+        surfaces: surfaces,
+        index_by_name: index_by_name,
+        ordered_names: ordered_names,
+        ordered_indices: ordered_indices,
+        generation: 0,
+        frozen: false)
+    val freeze_result = module_surfaces_freeze(registry)
+    if freeze_result.is_err():
+        return Err(freeze_result.unwrap_err())
+    # module_surfaces_freeze mutates this class owner in place. Do not unwrap
+    # and rewrap its class-valued Result payload: the staged native ABI can
+    # preserve Ok while losing that nested payload to nil. The original owner
+    # remains authoritative and now contains the frozen fields.
+    Ok(registry)
+
+pub(package) fn module_surfaces_add_name(index_by_name: Dict<text, i64>, name: text, surface_index: i64) -> Result<Dict<text, i64>, text>:
+    # contains_key + index read, never `.get()`: a native `Dict.get()` HIT
+    # returns a still-boxed i64 (7 reads back as 56).
+    # See doc/07_guide/language/dict_native_pitfalls.md
+    if index_by_name.contains_key(name) and index_by_name[name] != surface_index:
+        return Err("module surface name conflict: {name}")
+    index_by_name[name] = surface_index
+    Ok(index_by_name)
+
+pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
+    if modules == nil:
+        return Err("missing parsed module dictionary")
+    var builder = ModuleSurfaceBuilder.new()
+    if builder == nil:
+        return Err("unable to allocate module surface builder")
+    var source_index = 0
+    while source_index < sources.len():
+        val source = sources[source_index]
+        # Source-map entries cross the parser/driver ownership boundary.  A
+        # native nil must be reported with its stable position, never consumed
+        # by the first `source.module_name` field access below.
+        if source == nil:
+            return Err("invalid source entry at index: {source_index}")
+        if not modules.contains_key(source.module_name):
+            return Err("missing parsed module for source: {source.module_name}")
+        val module = modules[source.module_name]
+        # A parser-map entry is transport data at this boundary.  Never let an
+        # invalid entry become an anonymous native nil-receiver trap during a
+        # self-hosted build: preserve the source identity for the driver error.
+        if module == nil:
+            return Err("invalid parsed module for source: {source.module_name}")
+        val canonical_path = module_surface_canonical_path(source.path)
+        if builder.has_canonical_path(canonical_path):
+            val surface = builder.surfaces[builder.index_by_path[canonical_path]]
+            if not module_surface_declaration_matches(surface, module):
+                return Err("conflicting declaration metadata for physical source: {canonical_path}")
+            val alias_result = builder.add_alias_canonical(source, canonical_path)
+            if alias_result.is_err():
+                return Err(alias_result.unwrap_err())
+        else:
+            val add_result = builder.add_parsed_canonical(
+                module, source, source_index, canonical_path)
+            if add_result.is_err():
+                return Err(add_result.unwrap_err())
+        source_index = source_index + 1
+    for alias in modules.keys():
+        if builder.index_by_name.contains_key(alias):
+            continue
+        val module = modules[alias]
+        if module == nil:
+            return Err("invalid parsed module alias: {alias}")
+        # Parsed aliases retain the physical source path in ParserModule.name.
+        # Resolve that identity before declaration-shape matching: unrelated
+        # physical modules may expose the same API.
+        val parsed_path = module_surface_canonical_path(module.name)
+        if builder.index_by_path.contains_key(parsed_path):
+            val canonical_result = builder.add_indexed_canonical_identity(
+                alias, builder.index_by_path[parsed_path])
+            if canonical_result.is_err():
+                return Err(canonical_result.unwrap_err())
+            continue
+        var matching_index: i64 = -1
+        var surface_index = 0
+        while surface_index < builder.surfaces.len():
+            if module_surface_declaration_matches(builder.surfaces[surface_index], module):
+                if matching_index >= 0:
+                    return Err("ambiguous parsed module alias: {alias}")
+                matching_index = surface_index
+            surface_index = surface_index + 1
+        if matching_index < 0:
+            return Err("parsed module has no source surface: {alias}")
+        val alias_result = builder.add_indexed_canonical_identity(
+            alias, matching_index)
+        if alias_result.is_err():
+            return Err(alias_result.unwrap_err())
+    val origin_result = builder.resolve_export_origins()
+    if origin_result.is_err():
+        return Err(origin_result.unwrap_err())
+    builder.finish()
+
+pub fn module_surface_promote(surface: ModuleSurface) -> bool:
+    # A class/raw carrier may already outlive the current scope and therefore
+    # cannot be relied on as the traversal root for children allocated in this
+    # per-file scope. Promote the retained scalar/array owners explicitly.
+    # Dict<text, aggregate> is construction-only; retained declaration payload
+    # arrays are the required follow-up owner before Stage 3 can be admitted.
+    val origin_index = surface.export_origin_index
+    if not rt_transient_heap_promote(surface.imports) or
+       not rt_transient_heap_promote(surface.exports) or
+       not rt_transient_heap_promote(surface.composite_names) or
+       not rt_transient_heap_promote(surface.enum_names) or
+       not rt_transient_heap_promote(surface.trait_names) or
+       not rt_transient_heap_promote(surface.callable_names) or
+       not rt_transient_heap_promote(surface.type_alias_names) or
+       not rt_transient_heap_promote(surface.constant_names) or
+       not rt_transient_heap_promote(surface.import_item_offsets) or
+       not rt_transient_heap_promote(surface.import_item_names) or
+       not rt_transient_heap_promote(surface.import_item_aliases) or
+       not rt_transient_heap_promote(surface.import_item_has_alias) or
+       not rt_transient_heap_promote(surface.callable_values) or
+       not rt_transient_heap_promote(surface.composite_values) or
+       not rt_transient_heap_promote(surface.enum_values) or
+       not rt_transient_heap_promote(surface.trait_values) or
+       not rt_transient_heap_promote(surface.type_alias_values) or
+       not rt_transient_heap_promote(surface.constant_values) or
+       not rt_transient_heap_promote(surface.impls) or
+       not rt_transient_heap_promote(origin_index.names) or
+       not rt_transient_heap_promote(origin_index.owner_modules) or
+       not rt_transient_heap_promote(origin_index.source_names) or
+       not rt_transient_heap_promote(origin_index.resolution_kinds):
+        return false
+    rt_transient_heap_promote(surface)
+
+pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
+    # Each surface raw object was already promoted in its per-file scope.
+    # Freeze attaches these route arrays later, in the registry scope; a graph
+    # walk cannot traverse an old raw allocation that is no longer registered
+    # in the current transient scope. Promote the new children explicitly
+    # while their owning scope is paused, then retain the registry carriers.
+    var surface_index = 0
+    while surface_index < registry.surfaces.len():
+        val surface = registry.surfaces[surface_index]
+        if not rt_transient_heap_promote(surface.composite_names) or
+           not rt_transient_heap_promote(surface.enum_names) or
+           not rt_transient_heap_promote(surface.trait_names) or
+           not rt_transient_heap_promote(surface.callable_names) or
+           not rt_transient_heap_promote(surface.type_alias_names) or
+           not rt_transient_heap_promote(surface.constant_names) or
+           not rt_transient_heap_promote(surface.composite_values) or
+           not rt_transient_heap_promote(surface.enum_values) or
+           not rt_transient_heap_promote(surface.trait_values) or
+           not rt_transient_heap_promote(surface.callable_values) or
+           not rt_transient_heap_promote(surface.type_alias_values) or
+           not rt_transient_heap_promote(surface.constant_values) or
+           not rt_transient_heap_promote(surface.import_target_indices) or
+           not rt_transient_heap_promote(surface.import_target_names) or
+           not rt_transient_heap_promote(surface.import_resolution_traces) or
+           not rt_transient_heap_promote(surface.import_item_offsets) or
+           not rt_transient_heap_promote(surface.import_item_names) or
+           not rt_transient_heap_promote(surface.import_item_aliases) or
+           not rt_transient_heap_promote(surface.import_item_has_alias) or
+           not rt_transient_heap_promote(surface.export_route_sources) or
+           not rt_transient_heap_promote(surface.export_route_locals) or
+           not rt_transient_heap_promote(surface.export_route_target_indices) or
+           not rt_transient_heap_promote(surface.export_route_target_names) or
+           not rt_transient_heap_promote(surface.export_route_is_glob):
+            return false
+        surface_index = surface_index + 1
+    rt_transient_heap_promote(registry)
+
+pub fn module_surfaces_retained_alignment(registry: ModuleSurfacesByName) -> bool:
+    module_surfaces_frozen_alignment(registry)
+
+pub fn module_surfaces_retained_alignment_error(registry: ModuleSurfacesByName) -> text:
+    module_surfaces_frozen_alignment_error(registry)

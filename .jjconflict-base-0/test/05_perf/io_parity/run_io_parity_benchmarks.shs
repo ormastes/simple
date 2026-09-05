@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+BENCH_DIR="$ROOT/test/05_perf/io_parity"
+BUILD_DIR="${IO_PARITY_BUILD_DIR:-$ROOT/build/perf/io_parity}"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+IO_PARITY_MIB="${IO_PARITY_MIB:-16}"
+IO_PARITY_ITERS="${IO_PARITY_ITERS:-64}"
+IO_PARITY_SAMPLES="${IO_PARITY_SAMPLES:-7}"
+
+fail() {
+    echo "[iobench-error] $*" >&2
+    exit 1
+}
+
+for tool in cc gcov sha256sum /usr/bin/time; do
+    command -v "$tool" >/dev/null 2>&1 || fail "missing-tool=$tool"
+done
+[[ -x "$SIMPLE_BIN" ]] || fail "missing-simple-binary=$SIMPLE_BIN"
+[[ "$IO_PARITY_MIB" =~ ^[1-9][0-9]*$ ]] || fail "IO_PARITY_MIB must be positive"
+[[ "$IO_PARITY_ITERS" =~ ^[1-9][0-9]*$ ]] || fail "IO_PARITY_ITERS must be positive"
+[[ "$IO_PARITY_SAMPLES" =~ ^[1-9][0-9]*$ ]] || fail "IO_PARITY_SAMPLES must be positive"
+(( IO_PARITY_SAMPLES >= 5 )) || fail "IO_PARITY_SAMPLES must be at least 5"
+
+mkdir -p "$BUILD_DIR"
+if rg -n '\brt_[A-Za-z0-9_]+' "$BENCH_DIR/io_parity_simple.spl" "$BENCH_DIR/io_contract_policy.spl" >"$BUILD_DIR/raw-runtime-scan.txt"; then
+    fail "Pure-Simple benchmark bypasses the typed I/O owner; see $BUILD_DIR/raw-runtime-scan.txt"
+fi
+
+rm -f "$BUILD_DIR/missing.bin"
+printf 'abcdefghijk' >"$BUILD_DIR/contract.bin"
+set +o pipefail
+yes 'simple-io-parity-0123456789abcdef' | head -c "$((IO_PARITY_MIB * 1024 * 1024))" >"$BUILD_DIR/payload.bin"
+set -o pipefail
+
+echo "[iobench-config] fixture_mib=$IO_PARITY_MIB iters=$IO_PARITY_ITERS samples=$IO_PARITY_SAMPLES"
+echo "[iobench-config] simple=$SIMPLE_BIN build=$BUILD_DIR"
+
+cc -O3 -march=native -std=c11 -Wall -Wextra -Werror \
+    "$BENCH_DIR/io_parity_ref.c" "$BENCH_DIR/io_contract_policy.c" \
+    -o "$BUILD_DIR/io_parity_c"
+
+simple_compile_log="$BUILD_DIR/simple_compile.log"
+if ! SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+    "$SIMPLE_BIN" compile "$BENCH_DIR/io_parity_simple.spl" \
+        --native --cpu native --opt-level aggressive \
+        -o "$BUILD_DIR/io_parity_simple" \
+        >"$simple_compile_log" 2>&1; then
+    fail "simple-native-build-failed log=$simple_compile_log"
+fi
+[[ -x "$BUILD_DIR/io_parity_simple" ]] || fail "simple-native-build-produced-no-executable"
+
+normalize_contract() {
+    sed -E 's/^\[iobench-contract\] lang=[^ ]+ //'
+}
+
+field() {
+    local name="$1"
+    sed -n -E "s/.*(^| )${name}=([^ ]+).*/\2/p"
+}
+
+observation_equal() {
+    local left="$1"
+    local right="$2"
+    local left_facts right_facts
+    left_facts="$(printf '%s\n' "$left" | sed -E 's/^\[iobench-observation\] lang=[^ ]+ //')"
+    right_facts="$(printf '%s\n' "$right" | sed -E 's/^\[iobench-observation\] lang=[^ ]+ //')"
+    [[ -n "$left_facts" && "$left_facts" == "$right_facts" ]]
+}
+
+c_contract="$(IO_PARITY_ROOT="$BUILD_DIR" IO_PARITY_MODE=contract "$BUILD_DIR/io_parity_c")"
+simple_contract="$(IO_PARITY_ROOT="$BUILD_DIR" IO_PARITY_MODE=contract SIMPLE_NO_STUB_FALLBACK=1 "$BUILD_DIR/io_parity_simple")"
+[[ "$(printf '%s\n' "$c_contract" | rg -c '^\[iobench-contract\] ')" == 1 ]] || fail "malformed-C-contract"
+[[ "$(printf '%s\n' "$simple_contract" | rg -c '^\[iobench-contract\] ')" == 1 ]] || fail "malformed-Simple-contract"
+[[ "$(printf '%s\n' "$c_contract" | normalize_contract)" == "$(printf '%s\n' "$simple_contract" | normalize_contract)" ]] ||
+    fail "contract-mismatch c={$c_contract} simple={$simple_contract}"
+printf '%s\n%s\n' "$c_contract" "$simple_contract"
+
+if observation_equal "" ""; then fail "negative-control-empty-observations-accepted"; fi
+if observation_equal \
+    "[iobench-observation] lang=c case=read_text bytes=1 iters=1 checksum=1" \
+    "[iobench-observation] lang=simple case=read_text bytes=1 iters=1 checksum=2"; then
+    fail "negative-control-checksum-mismatch-accepted"
+fi
+echo "[iobench-negative-control] observation_oracle=biting"
+
+run_sample() {
+    local lang="$1" case_name="$2" sample="$3" binary="$4"
+    local output="$BUILD_DIR/${lang}_${case_name}_${sample}.append"
+    local stdout="$BUILD_DIR/${lang}_${case_name}_${sample}.out"
+    local rss_file="$BUILD_DIR/${lang}_${case_name}_${sample}.rss"
+    local start_ns end_ns micros observation
+    start_ns="$(date +%s%N)"
+    if ! /usr/bin/time -f '%M' -o "$rss_file" \
+        env IO_PARITY_ROOT="$BUILD_DIR" IO_PARITY_MODE="$case_name" \
+            IO_PARITY_OUTPUT="$output" IO_PARITY_ITERS="$IO_PARITY_ITERS" \
+            SIMPLE_NO_STUB_FALLBACK=1 "$binary" >"$stdout"; then
+        fail "sample-failed lang=$lang case=$case_name sample=$sample"
+    fi
+    end_ns="$(date +%s%N)"
+    micros="$(((end_ns - start_ns) / 1000))"
+    observation="$(rg '^\[iobench-observation\] ' "$stdout" || true)"
+    [[ "$(printf '%s\n' "$observation" | rg -c '^\[iobench-observation\] ')" == 1 ]] ||
+        fail "malformed-observation lang=$lang case=$case_name sample=$sample"
+    printf '%s\t%s\t%s\t%s\n' "$micros" "$(cat "$rss_file")" "$sample" "$observation" \
+        >>"$BUILD_DIR/${lang}_${case_name}.samples"
+}
+
+summarize() {
+    local file="$1" count p50_rank p95_rank p50 p95 rss
+    count="$(wc -l <"$file")"
+    p50_rank="$(((count + 1) / 2))"
+    p95_rank="$(((95 * count + 99) / 100))"
+    p50="$(sort -n -k1,1 "$file" | sed -n "${p50_rank}p" | cut -f1)"
+    p95="$(sort -n -k1,1 "$file" | sed -n "${p95_rank}p" | cut -f1)"
+    rss="$(sort -n -k2,2 "$file" | tail -n1 | cut -f2)"
+    printf '%s %s %s\n' "$p50" "$p95" "$rss"
+}
+
+for case_name in read_text mmap_text append_at; do
+    : >"$BUILD_DIR/c_${case_name}.samples"
+    : >"$BUILD_DIR/simple_${case_name}.samples"
+    IO_PARITY_ROOT="$BUILD_DIR" IO_PARITY_MODE="$case_name" IO_PARITY_OUTPUT="$BUILD_DIR/warm_c.append" IO_PARITY_ITERS=1 "$BUILD_DIR/io_parity_c" >/dev/null
+    IO_PARITY_ROOT="$BUILD_DIR" IO_PARITY_MODE="$case_name" IO_PARITY_OUTPUT="$BUILD_DIR/warm_simple.append" IO_PARITY_ITERS=1 SIMPLE_NO_STUB_FALLBACK=1 "$BUILD_DIR/io_parity_simple" >/dev/null
+    for ((sample = 1; sample <= IO_PARITY_SAMPLES; sample++)); do
+        if (( sample % 2 == 1 )); then
+            run_sample c "$case_name" "$sample" "$BUILD_DIR/io_parity_c"
+            run_sample simple "$case_name" "$sample" "$BUILD_DIR/io_parity_simple"
+        else
+            run_sample simple "$case_name" "$sample" "$BUILD_DIR/io_parity_simple"
+            run_sample c "$case_name" "$sample" "$BUILD_DIR/io_parity_c"
+        fi
+        c_observation="$(cut -f4- "$BUILD_DIR/c_${case_name}.samples" | sed -n "${sample}p")"
+        simple_observation="$(cut -f4- "$BUILD_DIR/simple_${case_name}.samples" | sed -n "${sample}p")"
+        observation_equal "$c_observation" "$simple_observation" ||
+            fail "observation-mismatch case=$case_name sample=$sample c={$c_observation} simple={$simple_observation}"
+        if [[ "$case_name" == append_at ]]; then
+            c_hash="$(sha256sum "$BUILD_DIR/c_${case_name}_${sample}.append" | cut -d' ' -f1)"
+            simple_hash="$(sha256sum "$BUILD_DIR/simple_${case_name}_${sample}.append" | cut -d' ' -f1)"
+            [[ "$c_hash" == "$simple_hash" ]] || fail "append-file-hash-mismatch sample=$sample"
+        fi
+    done
+    read -r c_p50 c_p95 c_rss < <(summarize "$BUILD_DIR/c_${case_name}.samples")
+    read -r simple_p50 simple_p95 simple_rss < <(summarize "$BUILD_DIR/simple_${case_name}.samples")
+    checksum="$(cut -f4- "$BUILD_DIR/simple_${case_name}.samples" | sed -n '1p' | field checksum)"
+    bytes="$(cut -f4- "$BUILD_DIR/simple_${case_name}.samples" | sed -n '1p' | field bytes)"
+    echo "[iobench] lang=c case=$case_name samples=$IO_PARITY_SAMPLES p50_us=$c_p50 p95_us=$c_p95 max_rss_kib=$c_rss bytes=$bytes checksum=$checksum"
+    echo "[iobench] lang=simple case=$case_name samples=$IO_PARITY_SAMPLES p50_us=$simple_p50 p95_us=$simple_p95 max_rss_kib=$simple_rss bytes=$bytes checksum=$checksum"
+done
+
+COV_DIR="$BUILD_DIR/c-coverage"
+mkdir -p "$COV_DIR"
+rm -f "$COV_DIR"/*.gcda "$COV_DIR"/*.gcno "$COV_DIR"/*.gcov
+cc -O0 --coverage -std=c11 -c "$BENCH_DIR/io_contract_policy.c" -o "$COV_DIR/io_contract_policy.o"
+cc -O0 --coverage -std=c11 "$BENCH_DIR/io_contract_policy_driver.c" "$COV_DIR/io_contract_policy.o" -o "$COV_DIR/io_contract_policy_driver"
+"$COV_DIR/io_contract_policy_driver" >"$COV_DIR/driver.out"
+(cd "$COV_DIR" && gcov -b -c io_contract_policy.gcno >gcov-summary.txt)
+grep -Eq '^Branches executed:100\.00% of 12$' "$COV_DIR/gcov-summary.txt" || fail "C-policy-branch-coverage-not-100"
+grep -Eq '^Taken at least once:100\.00% of 12$' "$COV_DIR/gcov-summary.txt" || fail "C-policy-condition-edges-not-100"
+echo "[iobench-coverage] lang=c decisions=1 conditions=6 branches=12 covered=12"
+
+simple_coverage="$BUILD_DIR/simple-coverage.sdn"
+rm -f "$simple_coverage"
+IO_PARITY_ROOT="$BUILD_DIR" SIMPLE_LIB="$ROOT/src" SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT="$simple_coverage" \
+    SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BIN" test "$BENCH_DIR/io_parity_coverage_spec.spl" --coverage --no-cache \
+    >"$BUILD_DIR/simple-coverage.log" 2>&1 || fail "Simple-coverage-spec-failed"
+grep -q '^coverage_extension: decision-condition-v1$' "$simple_coverage" || fail "Simple-coverage-extension-missing"
+echo "[iobench-coverage] lang=simple decisions=1/1 conditions=6/6"
+
+SABOTAGE_DIR="$BUILD_DIR/sabotage"
+mkdir -p "$SABOTAGE_DIR"
+cp "$BENCH_DIR/io_contract_policy_sabotage_fixture.spl" "$SABOTAGE_DIR/"
+sed 's/partial_len == 11/partial_len == 12/' "$BENCH_DIR/io_contract_policy.spl" >"$SABOTAGE_DIR/io_contract_policy.spl"
+if SIMPLE_LIB="$SABOTAGE_DIR:$ROOT/src" SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BIN" test "$SABOTAGE_DIR/io_contract_policy_sabotage_fixture.spl" --no-cache \
+    >"$SABOTAGE_DIR/run.log" 2>&1; then
+    fail "Simple-policy-sabotage-did-not-fail"
+fi
+grep -q 'IO_PARITY_MUTATION_SENTINEL' "$SABOTAGE_DIR/run.log" || fail "Simple-policy-sabotage-did-not-run"
+grep -q 'IO_PARITY_MUTATION_MUST_FAIL' "$SABOTAGE_DIR/run.log" || fail "Simple-policy-sabotage-wrong-failure"
+echo "[iobench-negative-control] policy_mutation=rejected"
+
+source_hash="$(sha256sum "$BENCH_DIR/io_parity_simple.spl" "$BENCH_DIR/io_contract_policy.spl" "$BENCH_DIR/io_parity_ref.c" "$BENCH_DIR/io_contract_policy.c" | sha256sum | cut -d' ' -f1)"
+echo "[iobench-provenance] revision=$(git -C "$ROOT" rev-parse HEAD) source_hash=$source_hash"
+echo "[iobench-provenance] c_compiler=$(cc --version | sed -n '1p')"
+echo "[iobench-provenance] simple_version=$($SIMPLE_BIN --version 2>/dev/null | sed -n '1p') binary_sha256=$(sha256sum "$SIMPLE_BIN" | cut -d' ' -f1)"
+echo "[iobench-ok] file I/O parity benchmark completed"

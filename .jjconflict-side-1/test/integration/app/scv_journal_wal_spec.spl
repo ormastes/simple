@@ -1,0 +1,117 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves the SCV append-only operation/event journal + WAL
+(MIG-10, v2 final report §16.1, stabilization §7): every repo mutation appends
+one line-framed event record to `.scv/journal/events.log`; the mutable
+head/meta publication is bracketed by `BEGIN op=`/`COMMIT op=` in
+`.scv/journal/wal.log`; a crash injected at the `wal` fault point leaves an
+incomplete trailing transaction that the next open rolls back — old or new,
+never half — and `scv doctor` stays PASS.
+Audience: Maintainers of the SCV storage layer.
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, step, assert_false}
+use app.io.mod (process_run)
+
+
+fn _harness() -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-journal.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "printf 'base\\n' > a.txt",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    assert_false(out == "" and err == "")
+    combined
+
+describe "scv journal and WAL":
+    # @manual scenario evidence
+    it "appends one framed event record per snapshot mutation":
+        # @req REQ-SSPEC-INTEGRATION
+        step("appends one framed event record per snapshot mutation")
+        step("Snapshot twice and inspect the append-only event journal")
+        var lines = _harness()
+        lines.push("printf 'two\\n' > a.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("printf 'events=%s\\n' \"$(grep -c '^op=' .scv/journal/events.log)\"")
+        lines.push("grep -Ec '^op=op_[0-9a-f]+ kind=snapshot refs=commit_[0-9a-f]+ sha=tree_[0-9a-f]+ utc=[0-9]+$' .scv/journal/events.log")
+        val out = _run(lines)
+        expect(out).to_contain("events=2")
+        expect(out).to_contain("exit=0")
+
+    it "brackets every head publication in a committed WAL transaction":
+        # @req REQ-SSPEC-INTEGRATION
+        step("brackets every head publication in a committed WAL transaction")
+        step("Verify BEGIN/SET/NEW/COMMIT framing for the snapshot's WAL entry")
+        var lines = _harness()
+        lines.push("grep -c '^BEGIN op=' .scv/journal/wal.log")
+        lines.push("grep -c '^SET path=HEAD_OP old=' .scv/journal/wal.log")
+        lines.push("grep -c '^SET path=meta/workspaces.sdn old=' .scv/journal/wal.log")
+        lines.push("grep -c '^COMMIT op=' .scv/journal/wal.log")
+        lines.push("printf 'framed=ok\\n'")
+        val out = _run(lines)
+        expect(out).to_contain("framed=ok")
+        expect(out).to_contain("exit=0")
+
+    it "rolls back an incomplete trailing WAL transaction on restart, old-or-new never half":
+        # @req REQ-SSPEC-INTEGRATION
+        step("rolls back an incomplete trailing WAL transaction on restart, old-or-new never half")
+        step("Inject SCV_FAULT_AFTER=wal, restart, verify rollback + doctor PASS")
+        var lines = _harness()
+        lines.push("OLD_OP=$(cat .scv/HEAD_OP)")
+        lines.push("OLD_COMMIT=$(sed -n 's/default: //p' .scv/meta/workspaces.sdn)")
+        lines.push("printf 'edited\\n' > a.txt")
+        lines.push("set +e")
+        lines.push("SCV_FAULT_AFTER=wal scv snapshot")
+        lines.push("printf 'fault_code=%s\\n' \"$?\"")
+        lines.push("set -e")
+        lines.push("scv doctor")
+        lines.push("grep -c 'recovered=rollback' .scv/journal/wal.log")
+        lines.push("NEW_OP=$(cat .scv/HEAD_OP)")
+        lines.push("NEW_COMMIT=$(sed -n 's/default: //p' .scv/meta/workspaces.sdn)")
+        lines.push("test \"$NEW_OP\" = \"$OLD_OP\" && test \"$NEW_COMMIT\" = \"$OLD_COMMIT\" && printf 'state=old\\n'")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("scv fsck | tail -1")
+        val out = _run(lines)
+        expect(out).to_contain("FAULT injected after wal")
+        expect(out).to_contain("fault_code=3")
+        expect(out).to_contain("state=old")
+        expect(out).to_contain("PASS")
+        expect(out).to_contain("exit=0")
+
+    it "rolls a published head forward so head and workspace never disagree":
+        # @req REQ-SSPEC-INTEGRATION
+        step("rolls a published head forward so head and workspace never disagree")
+        step("Inject SCV_FAULT_AFTER=head, reopen, verify forward recovery")
+        var lines = _harness()
+        lines.push("OLD_OP=$(cat .scv/HEAD_OP)")
+        lines.push("printf 'edited\\n' > a.txt")
+        lines.push("set +e")
+        lines.push("SCV_FAULT_AFTER=head scv snapshot >/dev/null 2>&1")
+        lines.push("printf 'fault_code=%s\\n' \"$?\"")
+        lines.push("set -e")
+        lines.push("scv doctor")
+        lines.push("grep -c 'recovered=forward' .scv/journal/wal.log")
+        lines.push("NEW_OP=$(cat .scv/HEAD_OP)")
+        lines.push("NEW_COMMIT=$(sed -n 's/default: //p' .scv/meta/workspaces.sdn)")
+        lines.push("test \"$NEW_OP\" != \"$OLD_OP\" && printf 'state=new\\n'")
+        lines.push("scv fsck | tail -1")
+        val out = _run(lines)
+        expect(out).to_contain("fault_code=3")
+        expect(out).to_contain("state=new")
+        expect(out).to_contain("PASS")
+        expect(out).to_contain("exit=0")

@@ -1,0 +1,483 @@
+# Unified Packed UI Scene — table ids, counts/ranges, capacity sidecar and
+# the count -> scan -> verify state machine (design §2.1, §2.7, §5).
+#
+# Design authority: `doc/05_design/ui/unified_packed_ui_scene.md` §2, §5.
+# Lane: L1 (`doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md`).
+#
+# Pure value vocabulary only. NO arena, NO backend implementation, NO I/O —
+# those are later lanes (L4/L5/L6/L7) built on top of this file.
+#
+# Fixed-size array fields (`[u32; 16]` / `[UiSceneRange; 16]`) are not yet
+# expressible as struct field types in this tier, so `UiSceneCounts`,
+# `UiSceneRanges` and `UiSceneCapacityExtensionV1` use the documented
+# fallback form: 16 named fields, one per `UiSceneTableId`, in the same
+# order as the id numbering below (design §2.1 note).
+
+# =========================================================================
+# UiSceneTableId — sixteen destination tables (u16, stable, append-only).
+# This numbering is a cross-module ABI (design §2.1). Pinned literally.
+# =========================================================================
+pub val UI_SCENE_TABLE_COMMANDS: u16 = 0u16
+pub val UI_SCENE_TABLE_GEOMETRY: u16 = 1u16
+pub val UI_SCENE_TABLE_PAINT: u16 = 2u16
+pub val UI_SCENE_TABLE_TEXT_RUNS: u16 = 3u16
+pub val UI_SCENE_TABLE_GLYPHS: u16 = 4u16
+pub val UI_SCENE_TABLE_RESOURCES: u16 = 5u16
+pub val UI_SCENE_TABLE_PATH_SPANS: u16 = 6u16
+pub val UI_SCENE_TABLE_PATH_POINTS: u16 = 7u16
+pub val UI_SCENE_TABLE_CLIPS: u16 = 8u16
+pub val UI_SCENE_TABLE_TRANSFORMS: u16 = 9u16
+pub val UI_SCENE_TABLE_HIT_SHAPES: u16 = 10u16
+pub val UI_SCENE_TABLE_PROVENANCE_EDGES: u16 = 11u16
+pub val UI_SCENE_TABLE_OWNER_RECORDS: u16 = 12u16
+pub val UI_SCENE_TABLE_ACTION_BINDINGS: u16 = 13u16
+pub val UI_SCENE_TABLE_PREPARED_BATCHES: u16 = 14u16
+pub val UI_SCENE_TABLE_DIRTY_RANGES: u16 = 15u16
+
+# Total table count, for callers that need to iterate all 16.
+pub val UI_SCENE_TABLE_ID_COUNT: u16 = 16u16
+
+# --- producer kinds (u16) --------------------------------------------------
+# Shared by `UiOwnerRecord.producer_kind` (ui_scene_owner_table.spl) and
+# `UiPackedProducer.producer_kind()` (ui_scene_slice.spl). Defined here so
+# neither of those files has to depend on the other.
+pub val UI_PRODUCER_WM: u16 = 0u16
+pub val UI_PRODUCER_GUI: u16 = 1u16
+pub val UI_PRODUCER_WEB: u16 = 2u16
+pub val UI_PRODUCER_EXTERNAL: u16 = 3u16
+
+# --- overflow receipt kinds (u16) ------------------------------------------
+pub val UI_SCENE_OVERFLOW_CAPACITY: u16 = 0u16
+pub val UI_SCENE_OVERFLOW_DEFICIT: u16 = 1u16
+pub val UI_SCENE_OVERFLOW_SURPLUS: u16 = 2u16
+pub val UI_SCENE_OVERFLOW_RANGE_VIOLATION: u16 = 3u16
+pub val UI_SCENE_OVERFLOW_STRUCTURE: u16 = 4u16
+
+# =========================================================================
+# Counts / ranges (design §2.1)
+# =========================================================================
+
+struct UiSceneCounts:
+    # One producer's exact required row count per table, same order as
+    # UiSceneTableId.
+    commands: u32
+    geometry: u32
+    paint: u32
+    text_runs: u32
+    glyphs: u32
+    resources: u32
+    path_spans: u32
+    path_points: u32
+    clips: u32
+    transforms: u32
+    hit_shapes: u32
+    provenance_edges: u32
+    owner_records: u32
+    action_bindings: u32
+    prepared_batches: u32
+    dirty_ranges: u32
+
+struct UiSceneRange:
+    start: u32
+    count: u32
+
+struct UiSceneRanges:
+    # One assigned range per table, same order as UiSceneTableId.
+    commands: UiSceneRange
+    geometry: UiSceneRange
+    paint: UiSceneRange
+    text_runs: UiSceneRange
+    glyphs: UiSceneRange
+    resources: UiSceneRange
+    path_spans: UiSceneRange
+    path_points: UiSceneRange
+    clips: UiSceneRange
+    transforms: UiSceneRange
+    hit_shapes: UiSceneRange
+    provenance_edges: UiSceneRange
+    owner_records: UiSceneRange
+    action_bindings: UiSceneRange
+    prepared_batches: UiSceneRange
+    dirty_ranges: UiSceneRange
+
+fn ui_scene_counts_zero() -> UiSceneCounts:
+    UiSceneCounts(
+        commands: 0u32, geometry: 0u32, paint: 0u32, text_runs: 0u32,
+        glyphs: 0u32, resources: 0u32, path_spans: 0u32, path_points: 0u32,
+        clips: 0u32, transforms: 0u32, hit_shapes: 0u32, provenance_edges: 0u32,
+        owner_records: 0u32, action_bindings: 0u32, prepared_batches: 0u32,
+        dirty_ranges: 0u32
+    )
+
+fn ui_scene_counts_at(counts: UiSceneCounts, table_id: u16) -> u32:
+    if table_id == UI_SCENE_TABLE_COMMANDS:
+        return counts.commands
+    if table_id == UI_SCENE_TABLE_GEOMETRY:
+        return counts.geometry
+    if table_id == UI_SCENE_TABLE_PAINT:
+        return counts.paint
+    if table_id == UI_SCENE_TABLE_TEXT_RUNS:
+        return counts.text_runs
+    if table_id == UI_SCENE_TABLE_GLYPHS:
+        return counts.glyphs
+    if table_id == UI_SCENE_TABLE_RESOURCES:
+        return counts.resources
+    if table_id == UI_SCENE_TABLE_PATH_SPANS:
+        return counts.path_spans
+    if table_id == UI_SCENE_TABLE_PATH_POINTS:
+        return counts.path_points
+    if table_id == UI_SCENE_TABLE_CLIPS:
+        return counts.clips
+    if table_id == UI_SCENE_TABLE_TRANSFORMS:
+        return counts.transforms
+    if table_id == UI_SCENE_TABLE_HIT_SHAPES:
+        return counts.hit_shapes
+    if table_id == UI_SCENE_TABLE_PROVENANCE_EDGES:
+        return counts.provenance_edges
+    if table_id == UI_SCENE_TABLE_OWNER_RECORDS:
+        return counts.owner_records
+    if table_id == UI_SCENE_TABLE_ACTION_BINDINGS:
+        return counts.action_bindings
+    if table_id == UI_SCENE_TABLE_PREPARED_BATCHES:
+        return counts.prepared_batches
+    if table_id == UI_SCENE_TABLE_DIRTY_RANGES:
+        return counts.dirty_ranges
+    0u32
+
+fn ui_scene_counts_set(counts: UiSceneCounts, table_id: u16, value: u32) -> UiSceneCounts:
+    var out = counts
+    if table_id == UI_SCENE_TABLE_COMMANDS:
+        out.commands = value
+    if table_id == UI_SCENE_TABLE_GEOMETRY:
+        out.geometry = value
+    if table_id == UI_SCENE_TABLE_PAINT:
+        out.paint = value
+    if table_id == UI_SCENE_TABLE_TEXT_RUNS:
+        out.text_runs = value
+    if table_id == UI_SCENE_TABLE_GLYPHS:
+        out.glyphs = value
+    if table_id == UI_SCENE_TABLE_RESOURCES:
+        out.resources = value
+    if table_id == UI_SCENE_TABLE_PATH_SPANS:
+        out.path_spans = value
+    if table_id == UI_SCENE_TABLE_PATH_POINTS:
+        out.path_points = value
+    if table_id == UI_SCENE_TABLE_CLIPS:
+        out.clips = value
+    if table_id == UI_SCENE_TABLE_TRANSFORMS:
+        out.transforms = value
+    if table_id == UI_SCENE_TABLE_HIT_SHAPES:
+        out.hit_shapes = value
+    if table_id == UI_SCENE_TABLE_PROVENANCE_EDGES:
+        out.provenance_edges = value
+    if table_id == UI_SCENE_TABLE_OWNER_RECORDS:
+        out.owner_records = value
+    if table_id == UI_SCENE_TABLE_ACTION_BINDINGS:
+        out.action_bindings = value
+    if table_id == UI_SCENE_TABLE_PREPARED_BATCHES:
+        out.prepared_batches = value
+    if table_id == UI_SCENE_TABLE_DIRTY_RANGES:
+        out.dirty_ranges = value
+    out
+
+fn ui_scene_ranges_zero() -> UiSceneRanges:
+    val z = UiSceneRange(start: 0u32, count: 0u32)
+    UiSceneRanges(
+        commands: z, geometry: z, paint: z, text_runs: z, glyphs: z,
+        resources: z, path_spans: z, path_points: z, clips: z, transforms: z,
+        hit_shapes: z, provenance_edges: z, owner_records: z,
+        action_bindings: z, prepared_batches: z, dirty_ranges: z
+    )
+
+fn ui_scene_ranges_at(ranges: UiSceneRanges, table_id: u16) -> UiSceneRange:
+    if table_id == UI_SCENE_TABLE_COMMANDS:
+        return ranges.commands
+    if table_id == UI_SCENE_TABLE_GEOMETRY:
+        return ranges.geometry
+    if table_id == UI_SCENE_TABLE_PAINT:
+        return ranges.paint
+    if table_id == UI_SCENE_TABLE_TEXT_RUNS:
+        return ranges.text_runs
+    if table_id == UI_SCENE_TABLE_GLYPHS:
+        return ranges.glyphs
+    if table_id == UI_SCENE_TABLE_RESOURCES:
+        return ranges.resources
+    if table_id == UI_SCENE_TABLE_PATH_SPANS:
+        return ranges.path_spans
+    if table_id == UI_SCENE_TABLE_PATH_POINTS:
+        return ranges.path_points
+    if table_id == UI_SCENE_TABLE_CLIPS:
+        return ranges.clips
+    if table_id == UI_SCENE_TABLE_TRANSFORMS:
+        return ranges.transforms
+    if table_id == UI_SCENE_TABLE_HIT_SHAPES:
+        return ranges.hit_shapes
+    if table_id == UI_SCENE_TABLE_PROVENANCE_EDGES:
+        return ranges.provenance_edges
+    if table_id == UI_SCENE_TABLE_OWNER_RECORDS:
+        return ranges.owner_records
+    if table_id == UI_SCENE_TABLE_ACTION_BINDINGS:
+        return ranges.action_bindings
+    if table_id == UI_SCENE_TABLE_PREPARED_BATCHES:
+        return ranges.prepared_batches
+    if table_id == UI_SCENE_TABLE_DIRTY_RANGES:
+        return ranges.dirty_ranges
+    UiSceneRange(start: 0u32, count: 0u32)
+
+fn ui_scene_ranges_set(ranges: UiSceneRanges, table_id: u16, value: UiSceneRange) -> UiSceneRanges:
+    var out = ranges
+    if table_id == UI_SCENE_TABLE_COMMANDS:
+        out.commands = value
+    if table_id == UI_SCENE_TABLE_GEOMETRY:
+        out.geometry = value
+    if table_id == UI_SCENE_TABLE_PAINT:
+        out.paint = value
+    if table_id == UI_SCENE_TABLE_TEXT_RUNS:
+        out.text_runs = value
+    if table_id == UI_SCENE_TABLE_GLYPHS:
+        out.glyphs = value
+    if table_id == UI_SCENE_TABLE_RESOURCES:
+        out.resources = value
+    if table_id == UI_SCENE_TABLE_PATH_SPANS:
+        out.path_spans = value
+    if table_id == UI_SCENE_TABLE_PATH_POINTS:
+        out.path_points = value
+    if table_id == UI_SCENE_TABLE_CLIPS:
+        out.clips = value
+    if table_id == UI_SCENE_TABLE_TRANSFORMS:
+        out.transforms = value
+    if table_id == UI_SCENE_TABLE_HIT_SHAPES:
+        out.hit_shapes = value
+    if table_id == UI_SCENE_TABLE_PROVENANCE_EDGES:
+        out.provenance_edges = value
+    if table_id == UI_SCENE_TABLE_OWNER_RECORDS:
+        out.owner_records = value
+    if table_id == UI_SCENE_TABLE_ACTION_BINDINGS:
+        out.action_bindings = value
+    if table_id == UI_SCENE_TABLE_PREPARED_BATCHES:
+        out.prepared_batches = value
+    if table_id == UI_SCENE_TABLE_DIRTY_RANGES:
+        out.dirty_ranges = value
+    out
+
+# =========================================================================
+# Capacity sidecar (design §2.7). Frozen `gpu_web_capacity_manifest.spl` /
+# `_strides.spl` are never edited; this is purely additive.
+# =========================================================================
+
+struct UiSceneCapacityExtensionV1:
+    max_rows_commands: u32
+    max_rows_geometry: u32
+    max_rows_paint: u32
+    max_rows_text_runs: u32
+    max_rows_glyphs: u32
+    max_rows_resources: u32
+    max_rows_path_spans: u32
+    max_rows_path_points: u32
+    max_rows_clips: u32
+    max_rows_transforms: u32
+    max_rows_hit_shapes: u32
+    max_rows_provenance_edges: u32
+    max_rows_owner_records: u32
+    max_rows_action_bindings: u32
+    max_rows_prepared_batches: u32
+    max_rows_dirty_ranges: u32
+    scan_scratch_rows: u32
+    backend_scratch_bytes: u32
+
+fn ui_scene_capacity_zero() -> UiSceneCapacityExtensionV1:
+    UiSceneCapacityExtensionV1(
+        max_rows_commands: 0u32, max_rows_geometry: 0u32, max_rows_paint: 0u32,
+        max_rows_text_runs: 0u32, max_rows_glyphs: 0u32, max_rows_resources: 0u32,
+        max_rows_path_spans: 0u32, max_rows_path_points: 0u32, max_rows_clips: 0u32,
+        max_rows_transforms: 0u32, max_rows_hit_shapes: 0u32,
+        max_rows_provenance_edges: 0u32, max_rows_owner_records: 0u32,
+        max_rows_action_bindings: 0u32, max_rows_prepared_batches: 0u32,
+        max_rows_dirty_ranges: 0u32, scan_scratch_rows: 0u32,
+        backend_scratch_bytes: 0u32
+    )
+
+fn ui_scene_capacity_max_rows_at(capacity: UiSceneCapacityExtensionV1, table_id: u16) -> u32:
+    if table_id == UI_SCENE_TABLE_COMMANDS:
+        return capacity.max_rows_commands
+    if table_id == UI_SCENE_TABLE_GEOMETRY:
+        return capacity.max_rows_geometry
+    if table_id == UI_SCENE_TABLE_PAINT:
+        return capacity.max_rows_paint
+    if table_id == UI_SCENE_TABLE_TEXT_RUNS:
+        return capacity.max_rows_text_runs
+    if table_id == UI_SCENE_TABLE_GLYPHS:
+        return capacity.max_rows_glyphs
+    if table_id == UI_SCENE_TABLE_RESOURCES:
+        return capacity.max_rows_resources
+    if table_id == UI_SCENE_TABLE_PATH_SPANS:
+        return capacity.max_rows_path_spans
+    if table_id == UI_SCENE_TABLE_PATH_POINTS:
+        return capacity.max_rows_path_points
+    if table_id == UI_SCENE_TABLE_CLIPS:
+        return capacity.max_rows_clips
+    if table_id == UI_SCENE_TABLE_TRANSFORMS:
+        return capacity.max_rows_transforms
+    if table_id == UI_SCENE_TABLE_HIT_SHAPES:
+        return capacity.max_rows_hit_shapes
+    if table_id == UI_SCENE_TABLE_PROVENANCE_EDGES:
+        return capacity.max_rows_provenance_edges
+    if table_id == UI_SCENE_TABLE_OWNER_RECORDS:
+        return capacity.max_rows_owner_records
+    if table_id == UI_SCENE_TABLE_ACTION_BINDINGS:
+        return capacity.max_rows_action_bindings
+    if table_id == UI_SCENE_TABLE_PREPARED_BATCHES:
+        return capacity.max_rows_prepared_batches
+    if table_id == UI_SCENE_TABLE_DIRTY_RANGES:
+        return capacity.max_rows_dirty_ranges
+    0u32
+
+fn ui_scene_capacity_set(capacity: UiSceneCapacityExtensionV1, table_id: u16, value: u32) -> UiSceneCapacityExtensionV1:
+    var out = capacity
+    if table_id == UI_SCENE_TABLE_COMMANDS:
+        out.max_rows_commands = value
+    if table_id == UI_SCENE_TABLE_GEOMETRY:
+        out.max_rows_geometry = value
+    if table_id == UI_SCENE_TABLE_PAINT:
+        out.max_rows_paint = value
+    if table_id == UI_SCENE_TABLE_TEXT_RUNS:
+        out.max_rows_text_runs = value
+    if table_id == UI_SCENE_TABLE_GLYPHS:
+        out.max_rows_glyphs = value
+    if table_id == UI_SCENE_TABLE_RESOURCES:
+        out.max_rows_resources = value
+    if table_id == UI_SCENE_TABLE_PATH_SPANS:
+        out.max_rows_path_spans = value
+    if table_id == UI_SCENE_TABLE_PATH_POINTS:
+        out.max_rows_path_points = value
+    if table_id == UI_SCENE_TABLE_CLIPS:
+        out.max_rows_clips = value
+    if table_id == UI_SCENE_TABLE_TRANSFORMS:
+        out.max_rows_transforms = value
+    if table_id == UI_SCENE_TABLE_HIT_SHAPES:
+        out.max_rows_hit_shapes = value
+    if table_id == UI_SCENE_TABLE_PROVENANCE_EDGES:
+        out.max_rows_provenance_edges = value
+    if table_id == UI_SCENE_TABLE_OWNER_RECORDS:
+        out.max_rows_owner_records = value
+    if table_id == UI_SCENE_TABLE_ACTION_BINDINGS:
+        out.max_rows_action_bindings = value
+    if table_id == UI_SCENE_TABLE_PREPARED_BATCHES:
+        out.max_rows_prepared_batches = value
+    if table_id == UI_SCENE_TABLE_DIRTY_RANGES:
+        out.max_rows_dirty_ranges = value
+    out
+
+# =========================================================================
+# Overflow receipt (design §5)
+# =========================================================================
+
+struct UiSceneOverflowReceipt:
+    table_id: u16
+    kind: u16
+    required: u32
+    capacity: u32
+    producer_kind: u16
+    producer_id: u32
+    snapshot_id: u64
+
+# =========================================================================
+# COUNT -> SCAN -> VERIFY state machine (design §5). EMIT is bounds-checked
+# writers, defined as trait vocabulary in ui_scene_slice.spl; no emit-side
+# implementation lives here.
+# =========================================================================
+
+# One table's exclusive prefix scan across a sequence of per-producer
+# counts. Disjoint, gapless: producer i's range starts exactly where
+# producer i-1's range ends. A zero count still gets a valid (non-advancing)
+# range rather than being skipped.
+fn ui_scene_scan_table(counts: [u32]) -> [UiSceneRange]:
+    var out: [UiSceneRange] = []
+    var cursor = 0u32
+    var i = 0
+    while i < counts.len():
+        val n = counts[i]
+        out.push(UiSceneRange(start: cursor, count: n))
+        cursor = cursor + n
+        i = i + 1
+    out
+
+# Full 16-table scan across producers: table-by-table exclusive prefix scan,
+# reassembled per producer. Order of producers in `all_counts` is the order
+# ranges are assigned in.
+fn ui_scene_scan(all_counts: [UiSceneCounts]) -> [UiSceneRanges]:
+    var result: [UiSceneRanges] = []
+    var p = 0
+    while p < all_counts.len():
+        result.push(ui_scene_ranges_zero())
+        p = p + 1
+
+    for t in 0..16:
+        val table_id = t as u16
+        var column: [u32] = []
+        p = 0
+        while p < all_counts.len():
+            column.push(ui_scene_counts_at(all_counts[p], table_id))
+            p = p + 1
+        val table_ranges = ui_scene_scan_table(column)
+        p = 0
+        while p < all_counts.len():
+            result[p] = ui_scene_ranges_set(result[p], table_id, table_ranges[p])
+            p = p + 1
+    result
+
+# Sum of every producer's exact count, per table — the VERIFY input.
+fn ui_scene_counts_total(all_counts: [UiSceneCounts]) -> UiSceneCounts:
+    var total = ui_scene_counts_zero()
+    for t in 0..16:
+        val table_id = t as u16
+        var sum = 0u32
+        var p = 0
+        while p < all_counts.len():
+            sum = sum + ui_scene_counts_at(all_counts[p], table_id)
+            p = p + 1
+        total = ui_scene_counts_set(total, table_id, sum)
+    total
+
+# VERIFY: for each table, total <= capacity.max_rows[t]. PASS -> nil
+# (caller proceeds to EMIT); FAIL -> the receipt for the first breaching
+# table (fail-closed; nothing is emitted, front generation untouched). This
+# function performs no emission itself — it is the gate a caller checks
+# before invoking any writer.
+fn ui_scene_verify(
+    totals: UiSceneCounts, capacity: UiSceneCapacityExtensionV1,
+    producer_kind: u16, producer_id: u32, snapshot_id: u64
+) -> UiSceneOverflowReceipt?:
+    for t in 0..16:
+        val table_id = t as u16
+        val required = ui_scene_counts_at(totals, table_id)
+        val cap = ui_scene_capacity_max_rows_at(capacity, table_id)
+        if required > cap:
+            return UiSceneOverflowReceipt(
+                table_id: table_id,
+                kind: UI_SCENE_OVERFLOW_CAPACITY,
+                required: required,
+                capacity: cap,
+                producer_kind: producer_kind,
+                producer_id: producer_id,
+                snapshot_id: snapshot_id
+            )
+    return nil
+
+export UI_SCENE_TABLE_COMMANDS, UI_SCENE_TABLE_GEOMETRY, UI_SCENE_TABLE_PAINT,
+    UI_SCENE_TABLE_TEXT_RUNS, UI_SCENE_TABLE_GLYPHS, UI_SCENE_TABLE_RESOURCES,
+    UI_SCENE_TABLE_PATH_SPANS, UI_SCENE_TABLE_PATH_POINTS, UI_SCENE_TABLE_CLIPS,
+    UI_SCENE_TABLE_TRANSFORMS, UI_SCENE_TABLE_HIT_SHAPES,
+    UI_SCENE_TABLE_PROVENANCE_EDGES, UI_SCENE_TABLE_OWNER_RECORDS,
+    UI_SCENE_TABLE_ACTION_BINDINGS, UI_SCENE_TABLE_PREPARED_BATCHES,
+    UI_SCENE_TABLE_DIRTY_RANGES, UI_SCENE_TABLE_ID_COUNT,
+    UI_PRODUCER_WM, UI_PRODUCER_GUI, UI_PRODUCER_WEB, UI_PRODUCER_EXTERNAL,
+    UI_SCENE_OVERFLOW_CAPACITY, UI_SCENE_OVERFLOW_DEFICIT,
+    UI_SCENE_OVERFLOW_SURPLUS, UI_SCENE_OVERFLOW_RANGE_VIOLATION,
+    UI_SCENE_OVERFLOW_STRUCTURE,
+    UiSceneCounts, UiSceneRange, UiSceneRanges, UiSceneCapacityExtensionV1,
+    UiSceneOverflowReceipt,
+    ui_scene_counts_zero, ui_scene_counts_at, ui_scene_counts_set,
+    ui_scene_ranges_zero, ui_scene_ranges_at, ui_scene_ranges_set,
+    ui_scene_capacity_zero, ui_scene_capacity_max_rows_at, ui_scene_capacity_set,
+    ui_scene_scan_table, ui_scene_scan, ui_scene_counts_total, ui_scene_verify

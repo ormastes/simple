@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple="$root/src/os/compositor/hosted_backend_cocoa.spl"
+rust="$root/src/runtime/hosted/cocoa.rs"
+c_provider="$root/src/runtime/hosted_cocoa.c"
+failed=0
+
+externs=$(grep -c '^extern fn rt_cocoa_' "$simple" || true)
+tags=$(grep -c '^@unsafe(reason: "Cocoa' "$simple" || true)
+calls=$(grep 'rt_cocoa_' "$simple" | grep -v -E 'extern fn|#' | wc -l | tr -d ' ')
+scopes=$(grep -c 'unsafe(capabilities: \[ffi\]):' "$simple" || true)
+if [ "$externs" -ne 12 ] || [ "$tags" -ne "$externs" ]; then
+    echo "every Cocoa extern must carry its FFI-unsafe sentinel/ownership contract" >&2
+    failed=1
+fi
+if [ "$calls" -ne "$scopes" ]; then
+    echo "every raw Cocoa call must have one minimal lexical unsafe(ffi) scope" >&2
+    failed=1
+fi
+
+if ! grep -q '^unsafe extern "C" {' "$rust" ||
+   ! grep -q 'checked_pixel_len' "$rust" ||
+   ! grep -q 'try_reserve_exact' "$rust" ||
+   ! grep -q 'This provider does not implement blur yet' "$rust"; then
+    echo "Rust Cocoa provider lost its unsafe/null/size/fail-closed guards" >&2
+    failed=1
+fi
+if grep -A4 'pub fn layer_blur' "$rust" | grep -q '^[[:space:]]*true$'; then
+    echo "unimplemented Rust Cocoa blur must not fabricate success" >&2
+    failed=1
+fi
+
+if ! grep -q 'memchr(ptr' "$c_provider" ||
+   ! grep -q 'malloc((size_t)len + 1)' "$c_provider" ||
+   ! grep -q 'SIZE_MAX / sizeof(uint32_t)' "$c_provider" ||
+   ! grep -q 'pixel_count > SIZE_MAX / 4' "$c_provider" ||
+   ! grep -q 'if (!bmp || !\[bmp bitmapData\])' "$c_provider"; then
+    echo "C Cocoa provider lost its string/overflow/presentation guards" >&2
+    failed=1
+fi
+if grep -qE '\(x\+w\)|\(y\+h\)' "$c_provider"; then
+    echo "C Cocoa clipping must not use overflowing signed coordinate addition" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "Cocoa SFFI contract audit: PASS"

@@ -1,0 +1,106 @@
+"""
+# Existence Check Bool-Comparison Trap (`x.? == false` never fires)
+
+**Feature IDs:** #2100-VALUE-RETURN
+**Category:** Syntax
+**Difficulty:** 2/5
+**Status:** Implemented
+**Tracking:** doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+
+## Overview
+
+`.?` returns `T?` — the value if present, `nil` if absent (see
+`exists_check_value_return_spec.spl`). A legacy idiom from before the
+return-type change, `x.? == false` / `x.? == true`, therefore NEVER fires on a
+non-bool receiver: the left side is a value of type T or nil, never a bool.
+On 2026-08-16 a tree-wide census found 43 such dead guards — one of them
+silently skipped the browser's TLS handshake. This spec pins the trap under
+BOTH compilers so the census fixes can't regress, and documents the correct
+idioms: `x.? == nil` (absent/empty) and `x.? != nil` (present).
+
+## Related
+
+- `exists_check_value_return_spec.spl` — value-return semantics
+- Rust-side pin: `src/compiler_rust/compiler/tests/seed_semantic_divergences.rs`
+"""
+
+fn opt_none() -> i64?:
+    return nil
+
+fn opt_some() -> i64?:
+    return 5
+
+fn opt_text_empty() -> text:
+    return ""
+
+fn flag_none() -> bool?:
+    return nil
+
+fn flag_false() -> bool?:
+    return false
+
+describe "Bool-comparison trap on non-bool receivers":
+    """
+    ### The trap
+
+    For a non-bool optional, `.? == false` and `.? == true` are dead code:
+    `.?` yields the value (or nil), and a non-bool value never equals a bool.
+    """
+
+    it "never fires .? == false on a nil optional":
+        var fired = false
+        if opt_none().? == false:
+            fired = true
+        expect fired == false
+
+    it "never fires .? == false on a filled optional":
+        var fired = false
+        if opt_some().? == false:
+            fired = true
+        expect fired == false
+
+    it "never fires .? == true on a filled optional":
+        var fired = false
+        if opt_some().? == true:
+            fired = true
+        expect fired == false
+
+describe "Correct presence idioms":
+    """
+    ### The fix
+
+    `x.? == nil` means absent-or-empty; `x.? != nil` means present. These keep
+    `.?`'s emptiness handling (empty text/array/dict count as absent), which a
+    bare `x == nil` would lose.
+    """
+
+    it "detects absence with .? == nil":
+        expect (opt_none().? == nil) == true
+        expect (opt_some().? == nil) == false
+
+    it "detects presence with .? != nil":
+        expect (opt_some().? != nil) == true
+        expect (opt_none().? != nil) == false
+
+    it "treats an empty string as absent via .? == nil":
+        expect (opt_text_empty().? == nil) == true
+
+describe "bool? receivers pass the bool through":
+    """
+    ### The exception
+
+    On a `bool?` receiver `.?` yields the wrapped bool, so `== false` fires
+    exactly on a present false — live code, exempt from the census conversion.
+    """
+
+    it "fires .? == false exactly on a present false":
+        var fired = false
+        if flag_false().? == false:
+            fired = true
+        expect fired == true
+
+    it "does not fire .? == false on a nil bool?":
+        var fired = false
+        if flag_none().? == false:
+            fired = true
+        expect fired == false

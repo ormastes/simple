@@ -1,0 +1,91 @@
+#!/bin/sh
+# Fail-closed contract checks for the independent Sail adapter envelope.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+adapter="$root/scripts/tool/riscv-gen2-zca-sail-batch-adapter.shs"
+checkout="$root/build/oracles/sail-riscv-a33475a"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-sail-adapter-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+[ -d "$checkout/.git" ] || { echo "FAIL: acquire the pinned Sail checkout before this integration contract" >&2; exit 1; }
+
+unset SAIL_ZCA_BATCH_EXECUTABLE SAIL_ZCA_BATCH_RECEIPT
+
+if "$adapter" --model-root "$checkout" --xlen 64 </dev/null >"$tmp/no-binary.out" 2>&1; then
+    echo "FAIL: adapter accepted an absent Sail executable" >&2
+    exit 1
+fi
+grep -q 'SAIL_ZCA_BATCH_EXECUTABLE is required; local decoder fallback is forbidden' "$tmp/no-binary.out"
+
+printf '#!/bin/sh\nexit 0\n' > "$tmp/not-sail"
+chmod +x "$tmp/not-sail"
+if SAIL_ZCA_BATCH_EXECUTABLE="$tmp/not-sail" "$adapter" --model-root "$checkout" --xlen 64 </dev/null >"$tmp/no-receipt.out" 2>&1; then
+    echo "FAIL: adapter accepted an executable without a Sail receipt" >&2
+    exit 1
+fi
+grep -q 'missing Sail build receipt' "$tmp/no-receipt.out"
+
+binary_sha=$(sha256sum "$tmp/not-sail" | awk '{print $1}')
+cat > "$tmp/not-sail.receipt" <<EOF
+schema=simple-riscv-zca-sail-batch-v1
+execution_source=sail-generated
+oracle_revision=a33475aeb80090127433b5a8b30e717edaa19e71
+oracle_archive_sha256=665822b80f1f0ad2dd33709673a5fb92980ea051d9f977d50c70d587d2f0cdc8
+oracle_zca_source_sha256=b6dee98f5fa917dfcf37452f3f475eefd59215f949c21dda541c54f14a5de039
+sail_compiler_version=0.20.1
+sail_compiler_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+overlay_source_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+build_script_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+binary_sha256=$binary_sha
+EOF
+if SAIL_ZCA_BATCH_EXECUTABLE="$tmp/not-sail" "$adapter" --model-root "$checkout" --xlen 64 </dev/null >"$tmp/unapproved.out" 2>&1; then
+    echo "FAIL: adapter accepted a self-asserted unreviewed receipt" >&2
+    exit 1
+fi
+grep -q 'build receipt is not independently reviewed and admitted' "$tmp/unapproved.out"
+
+# Copy the unchanged production envelope under a temporary trust root so this
+# test can admit one deliberately malformed executor without changing the
+# checked-in production allowlist.
+mkdir -p "$tmp/trust/scripts/tool"
+cp "$adapter" "$tmp/trust/scripts/tool/riscv-gen2-zca-sail-batch-adapter.shs"
+printf '#!/bin/sh\nawk '\''{ printf "%%s\\tlegal\\t--------\\t2\\tzca.test\\n", $0 }'\''\n' > "$tmp/malformed-output"
+chmod +x "$tmp/malformed-output"
+malformed_sha=$(sha256sum "$tmp/malformed-output" | awk '{print $1}')
+cat > "$tmp/malformed-output.receipt" <<EOF
+schema=simple-riscv-zca-sail-batch-v1
+execution_source=sail-generated
+oracle_revision=a33475aeb80090127433b5a8b30e717edaa19e71
+oracle_archive_sha256=665822b80f1f0ad2dd33709673a5fb92980ea051d9f977d50c70d587d2f0cdc8
+oracle_zca_source_sha256=b6dee98f5fa917dfcf37452f3f475eefd59215f949c21dda541c54f14a5de039
+sail_compiler_version=0.20.1
+sail_compiler_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+overlay_source_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+build_script_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+binary_sha256=$malformed_sha
+EOF
+receipt_sha=$(sha256sum "$tmp/malformed-output.receipt" | awk '{print $1}')
+printf '%s\n' "$receipt_sha" > "$tmp/trust/scripts/tool/riscv-gen2-zca-sail-approved-receipts.txt"
+trusted_adapter="$tmp/trust/scripts/tool/riscv-gen2-zca-sail-batch-adapter.shs"
+
+if SAIL_ZCA_BATCH_EXECUTABLE="$tmp/malformed-output" "$trusted_adapter" --model-root "$checkout" --xlen 64 </dev/null >"$tmp/input.out" 2>&1; then
+    echo "FAIL: adapter accepted incomplete parcel input" >&2
+    exit 1
+fi
+grep -q 'stdin must contain exactly ordered uppercase parcels 0000 through FFFF' "$tmp/input.out"
+
+awk 'BEGIN { for (i = 0; i < 65536; i++) printf "%04X\n", i }' > "$tmp/parcels"
+if SAIL_ZCA_BATCH_EXECUTABLE="$tmp/malformed-output" "$trusted_adapter" --model-root "$checkout" --xlen 64 <"$tmp/parcels" >"$tmp/output.out" 2>&1; then
+    echo "FAIL: adapter accepted legal rows without canonical instructions" >&2
+    exit 1
+fi
+grep -q 'Sail-generated output violates the exhaustive TSV v1 contract' "$tmp/output.out"
+
+if "$adapter" --model-root "$checkout" --xlen 128 </dev/null >"$tmp/xlen.out" 2>&1; then
+    echo "FAIL: adapter accepted an unsupported XLEN" >&2
+    exit 1
+fi
+grep -q -- '--xlen must be exactly 32 or 64' "$tmp/xlen.out"
+
+echo "PASS: Sail adapter rejects absent provenance, malformed exhaustive input/output, and unsupported XLEN"

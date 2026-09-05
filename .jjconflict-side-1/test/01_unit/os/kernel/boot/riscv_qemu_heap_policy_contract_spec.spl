@@ -1,0 +1,84 @@
+"""
+Pins the branchless Pure Simple owner for the RISC-V QEMU memory layout.
+
+This is static source-contract evidence. It proves ownership and routing, not
+runtime allocation behavior on RISC-V hardware or QEMU.
+"""
+# @manual: primary
+
+use std.spec
+use app.io.mod.{file_read_text}
+
+val OWNER_PATH = "src/os/kernel/boot/riscv_noalloc_heap.spl"
+val RUNTIME_PATH = "src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+val RAW_BASELINE_PATH = "scripts/check/raw_sffi_unsafe_baseline.tsv"
+val UNBACKED_PATH = "scripts/check/unbacked_extern_baseline.txt"
+val FABRICATED_BASELINE_PATH = "config/simpleos_fabricated_rt_baseline.sdn"
+val CONSUMER_PATHS = [
+    "src/os/kernel/arch/riscv32/boot.spl",
+    "src/os/kernel/arch/riscv32/fpga_boot.spl",
+    "src/os/kernel/arch/riscv64/boot.spl",
+    "examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl",
+    "examples/09_embedded/simple_os/arch/riscv64/x25519_probe_entry.spl"
+]
+val RAM_CONSUMER_PATHS = [
+    "src/os/kernel/arch/riscv64/boot.spl",
+    "examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl",
+    "examples/09_embedded/simple_os/arch/riscv64/x25519_probe_entry.spl"
+]
+
+describe "RISC-V QEMU memory-layout policy ownership":
+    it "owns the exact branchless QEMU RAM and heap layout as immutable Pure Simple scalars":
+        step("Inspect the canonical noalloc heap owner")
+        val owner = file_read_text(OWNER_PATH)
+        expect(owner).to_contain("pub val RISCV_QEMU_RAM_BASE: u64 = 0x80000000")
+        expect(owner).to_contain("pub val RISCV_QEMU_RAM_SIZE: u64 = 134217728")
+        expect(owner).to_contain("pub val RISCV_QEMU_RESERVED_END: u64 = 0x80400000")
+        expect(owner).to_contain("pub val RISCV_QEMU_HEAP_START: u64 = 0x87000000")
+        expect(owner).to_contain("pub val RISCV_QEMU_HEAP_SIZE: u64 = 16777216")
+
+    it "routes exactly three PMM consumers through direct scalar imports":
+        step("Inspect the three migrated PMM consumers")
+        for path in RAM_CONSUMER_PATHS:
+            val source = file_read_text(path)
+            expect(source).to_contain("RISCV_QEMU_RAM_BASE, RISCV_QEMU_RAM_SIZE, RISCV_QEMU_RESERVED_END")
+            expect(source).to_contain("RISCV_QEMU_RAM_BASE,")
+            expect(source).to_contain("RISCV_QEMU_RAM_SIZE,")
+            expect(source).to_contain("RISCV_QEMU_RESERVED_END,")
+            expect(source.contains("rt_riscv_qemu_ram_base")).to_be(false)
+            expect(source.contains("rt_riscv_qemu_ram_size")).to_be(false)
+            expect(source.contains("rt_riscv_qemu_reserved_end")).to_be(false)
+
+    it "routes exactly five boot consumers through direct scalar imports":
+        step("Inspect the five migrated boot consumers")
+        for path in CONSUMER_PATHS:
+            val source = file_read_text(path)
+            expect(source).to_contain("RISCV_QEMU_HEAP_START, RISCV_QEMU_HEAP_SIZE")
+            expect(source).to_contain("riscv_noalloc_heap_init(RISCV_QEMU_HEAP_START, RISCV_QEMU_HEAP_SIZE)")
+            expect(source.contains("rt_riscv_qemu_heap_start")).to_be(false)
+            expect(source.contains("rt_riscv_qemu_heap_size")).to_be(false)
+
+    it "removes all five C providers and their runtime-policy inventory debt":
+        step("Inspect the provider and inventory baselines")
+        val runtime = file_read_text(RUNTIME_PATH)
+        val raw_baseline = file_read_text(RAW_BASELINE_PATH)
+        val unbacked = file_read_text(UNBACKED_PATH)
+        val fabricated = file_read_text(FABRICATED_BASELINE_PATH)
+        expect(runtime.contains("spl_u64 rt_riscv_qemu_heap_start(void)")).to_be(false)
+        expect(runtime.contains("spl_u64 rt_riscv_qemu_heap_size(void)")).to_be(false)
+        expect(runtime.contains("spl_u64 rt_riscv_qemu_ram_base(void)")).to_be(false)
+        expect(runtime.contains("spl_u64 rt_riscv_qemu_ram_size(void)")).to_be(false)
+        expect(runtime.contains("spl_u64 rt_riscv_qemu_reserved_end(void)")).to_be(false)
+        expect(raw_baseline.contains("rt_riscv_qemu_heap_start")).to_be(false)
+        expect(raw_baseline.contains("rt_riscv_qemu_heap_size")).to_be(false)
+        expect(raw_baseline.contains("rt_riscv_qemu_ram_base")).to_be(false)
+        expect(raw_baseline.contains("rt_riscv_qemu_ram_size")).to_be(false)
+        expect(raw_baseline.contains("rt_riscv_qemu_reserved_end")).to_be(false)
+        expect(unbacked.contains("rt_riscv_qemu_heap_start")).to_be(false)
+        expect(unbacked.contains("rt_riscv_qemu_heap_size")).to_be(false)
+        expect(unbacked.contains("rt_riscv_qemu_ram_base")).to_be(false)
+        expect(unbacked.contains("rt_riscv_qemu_ram_size")).to_be(false)
+        expect(unbacked.contains("rt_riscv_qemu_reserved_end")).to_be(false)
+        expect(fabricated.contains("rt_riscv_qemu_ram_base")).to_be(false)
+        expect(fabricated.contains("rt_riscv_qemu_ram_size")).to_be(false)
+        expect(fabricated.contains("rt_riscv_qemu_reserved_end")).to_be(false)

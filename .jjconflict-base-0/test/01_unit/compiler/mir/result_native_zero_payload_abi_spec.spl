@@ -1,0 +1,170 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.*
+use compiler.backend.backend.lean_mir_translate.{translate_mir_body}
+use compiler.backend.backend.backend_types.{CompileError}
+
+struct ResultCallProbe:
+    found: bool
+    enum_id_is_i32: bool
+    discriminant_is_i32: bool
+    discriminant: i64
+    callee_widths_are_i32_i32_i64: bool
+    payload_is_i64_zero: bool
+    payload_is_array_aggregate: bool
+
+fn ok_text(result: Result<text, CompileError>) -> text:
+    match result:
+        case Ok(value): value
+        case Err(error): "ERROR: {error.message}"
+
+fn lower_result_function(source: text, target: text) -> (MirFunction?, text):
+    val parsed = parse_full_frontend(source, "result_native_abi.spl", "result_native_abi", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("result_native_abi.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with(".{target}"):
+            return (Some(function), errors)
+    (nil, errors)
+
+fn result_call_probe(function: MirFunction) -> ResultCallProbe:
+    var payload_local = -1
+    var found = false
+    var enum_id_is_i32 = false
+    var discriminant_is_i32 = false
+    var discriminant = -1
+    var callee_widths_are_i32_i32_i64 = false
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, args):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == "rt_enum_new" and args.len() == 3:
+                                found = true
+                                match callee.kind:
+                                    case MirOperandKind.Const(_, callee_type):
+                                        match callee_type.kind:
+                                            case MirTypeKind.FuncPtr(signature):
+                                                if signature.params.len() == 3:
+                                                    callee_widths_are_i32_i32_i64 = signature.params[0].kind == MirTypeKind.I32 and signature.params[1].kind == MirTypeKind.I32 and signature.params[2].kind == MirTypeKind.I64
+                                            case _:
+                                                ()
+                                    case _:
+                                        ()
+                                match args[0].kind:
+                                    case MirOperandKind.Const(_, type_):
+                                        enum_id_is_i32 = type_.kind == MirTypeKind.I32
+                                    case _:
+                                        ()
+                                match args[1].kind:
+                                    case MirOperandKind.Const(MirConstValue.Int(value), type_):
+                                        discriminant = value
+                                        discriminant_is_i32 = type_.kind == MirTypeKind.I32
+                                    case _:
+                                        ()
+                                match args[2].kind:
+                                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                        payload_local = local.id
+                                    case _:
+                                        ()
+                        case _:
+                            ()
+                case _:
+                    ()
+
+    var payload_is_i64_zero = false
+    var payload_is_array_aggregate = false
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Const(dest, MirConstValue.Int(value), type_):
+                    if dest.id == payload_local and value == 0 and type_.kind == MirTypeKind.I64:
+                        payload_is_i64_zero = true
+                case MirInstKind.Aggregate(dest, AggregateKind.Array(_), _):
+                    if dest.id == payload_local:
+                        payload_is_array_aggregate = true
+                case _:
+                    ()
+    ResultCallProbe(
+        found: found,
+        enum_id_is_i32: enum_id_is_i32,
+        discriminant_is_i32: discriminant_is_i32,
+        discriminant: discriminant,
+        callee_widths_are_i32_i32_i64: callee_widths_are_i32_i32_i64,
+        payload_is_i64_zero: payload_is_i64_zero,
+        payload_is_array_aggregate: payload_is_array_aggregate
+    )
+
+describe "native Result payload ABI", tag: ["only-compiled"]:
+    it "projects semantic Unit to an explicit zero runtime word":
+        val source = "fn close_ok() -> Result<(), text>:\n    Ok(())\n"
+        val (maybe_function, errors) = lower_result_function(source, "close_ok")
+
+        expect(errors).to_equal("")
+        expect(maybe_function != nil).to_equal(true)
+        val function = maybe_function ?? panic("missing close_ok MIR")
+        match function.signature.return_type.kind:
+            case MirTypeKind.Result(ok_type, _):
+                expect(ok_type.kind == MirTypeKind.Unit).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+        val probe = result_call_probe(function)
+        expect(probe.found).to_equal(true)
+        expect(probe.enum_id_is_i32).to_equal(true)
+        expect(probe.discriminant_is_i32).to_equal(true)
+        expect(probe.discriminant).to_equal(0)
+        expect(probe.callee_widths_are_i32_i32_i64).to_equal(true)
+        expect(probe.payload_is_i64_zero).to_equal(true)
+        expect(probe.payload_is_array_aggregate).to_equal(false)
+        expect(ok_text(translate_mir_body(MirBody.from_function(function)))).to_contain("Except.ok ()")
+
+    it "uses discriminant one and semantic Unit for Err(())":
+        val source = "fn close_err() -> Result<text, ()>:\n    Err(())\n"
+        val (maybe_function, errors) = lower_result_function(source, "close_err")
+
+        expect(errors).to_equal("")
+        expect(maybe_function != nil).to_equal(true)
+        val function = maybe_function ?? panic("missing close_err MIR")
+        val probe = result_call_probe(function)
+        expect(probe.found).to_equal(true)
+        expect(probe.enum_id_is_i32).to_equal(true)
+        expect(probe.discriminant_is_i32).to_equal(true)
+        expect(probe.discriminant).to_equal(1)
+        expect(probe.callee_widths_are_i32_i32_i64).to_equal(true)
+        expect(probe.payload_is_i64_zero).to_equal(true)
+        expect(ok_text(translate_mir_body(MirBody.from_function(function)))).to_contain("Except.error ()")
+
+    it "preserves a dynamic empty-array handle as the Ok payload":
+        val source = "struct Event:\n    fd: i64\n    token: i64\n\nfn poll_ok() -> Result<[Event], text>:\n    val events: [Event] = []\n    Ok(events)\n"
+        val (maybe_function, errors) = lower_result_function(source, "poll_ok")
+
+        expect(errors).to_equal("")
+        expect(maybe_function != nil).to_equal(true)
+        val function = maybe_function ?? panic("missing poll_ok MIR")
+        match function.signature.return_type.kind:
+            case MirTypeKind.Result(ok_type, _):
+                match ok_type.kind:
+                    case MirTypeKind.Array(element_type, _):
+                        match element_type.kind:
+                            case MirTypeKind.Struct(_): expect(true).to_equal(true)
+                            case _: expect(false).to_equal(true)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        val probe = result_call_probe(function)
+        expect(probe.found).to_equal(true)
+        expect(probe.enum_id_is_i32).to_equal(true)
+        expect(probe.discriminant_is_i32).to_equal(true)
+        expect(probe.discriminant).to_equal(0)
+        expect(probe.callee_widths_are_i32_i32_i64).to_equal(true)
+        expect(probe.payload_is_i64_zero).to_equal(false)
+        expect(probe.payload_is_array_aggregate).to_equal(true)

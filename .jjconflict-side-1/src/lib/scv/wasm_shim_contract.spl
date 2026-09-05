@@ -1,0 +1,149 @@
+# SCV hardened WASM shim contract — SCV-IMPL-P-02.
+#
+# The Simple-side half of the shim contract in src/runtime/scv_wasm_shim.c.
+# Everything here is pure and enforced in-process, regardless of whether the
+# C shim / wasmtime are present on the machine:
+#   - input byte bounds (scv_wasm_input_within_bounds)
+#   - instruction-fuel budget constant (mirrors the shim's per-parse fuel)
+#   - tree-sitter ABI version bounds (scv_wasm_abi_supported)
+#   - grammar artifact signature verification against the locked sha256
+#     (scv_wasm_grammar_signature_ok)
+#   - node-blob validation (scv_wasm_blob_validate): a malformed blob is
+#     rejected wholesale, never turned into a half-built tree
+#   - deterministic re-serialization (scv_wasm_blob_normalize): validated
+#     blobs re-serialize byte-identically (idempotence check for the fuzz
+#     corpus)
+#
+# C-side enforcement (fuel, store memory limiter, ABI probe) is documented in
+# the shim, which remains a design artifact until wasmtime headers exist on
+# the build host — the functions here are the contract that IS enforced today.
+
+use std.scv.store.{scv_hash_text}
+
+# ---------------------------------------------------------------------------
+# Contract constants
+# ---------------------------------------------------------------------------
+
+# Maximum source bytes accepted by a single parse call (16 MiB).
+fn scv_wasm_max_input_bytes() -> i64:
+    16777216
+
+# Per-parse instruction fuel budget (mirrors the shim: 1e9 units).
+fn scv_wasm_fuel_budget() -> i64:
+    1000000000
+
+# Maximum linear-memory pages the shim store may grant a grammar (64 MiB).
+fn scv_wasm_max_memory_pages() -> i64:
+    1024
+
+# Supported tree-sitter language ABI version range (inclusive).
+fn scv_wasm_abi_min() -> i64:
+    13
+
+fn scv_wasm_abi_max() -> i64:
+    15
+
+# Maximum node nesting depth accepted from a blob (guards stack blowups).
+fn scv_wasm_max_node_depth() -> i64:
+    512
+
+# ---------------------------------------------------------------------------
+# Input bounds / ABI / signature checks
+# ---------------------------------------------------------------------------
+
+fn scv_wasm_input_within_bounds(source_len: i64) -> bool:
+    source_len >= 0 and source_len <= scv_wasm_max_input_bytes()
+
+fn scv_wasm_abi_supported(abi_version: i64) -> bool:
+    abi_version >= scv_wasm_abi_min() and abi_version <= scv_wasm_abi_max()
+
+# Verify a grammar artifact's content hash against the locked parser hash.
+# locked_hash is the registry's "sha256_<hex>" pin; artifact_hash is the
+# freshly computed hash of the bytes about to be loaded.  Empty pins never
+# verify — absence of a lock is a failure, not a pass.
+fn scv_wasm_grammar_signature_ok(locked_hash: text, artifact_hash: text) -> bool:
+    if locked_hash == "" or artifact_hash == "":
+        return false
+    if not locked_hash.starts_with("sha256_"):
+        return false
+    locked_hash == artifact_hash
+
+# ---------------------------------------------------------------------------
+# Node-blob validation
+# ---------------------------------------------------------------------------
+
+# Validate a single already-split blob line's fields.
+# Returns "" when valid, otherwise a short reason.
+fn _scv_wasm_blob_line_error(parts: [text], source_len: i64,
+                             prev_depth: i64, is_first: bool) -> text:
+    if parts.len() < 6:
+        return "field_count"
+    val nstart = parts[2].to_i64() ?? -1
+    val nend = parts[3].to_i64() ?? -1
+    val nleaf = parts[4]
+    val ndepth = parts[5].to_i64() ?? -1
+    if parts[0] == "":
+        return "empty_kind"
+    if nstart < 0 or nend < 0:
+        return "negative_offset"
+    if nend < nstart:
+        return "end_before_start"
+    if nend > source_len:
+        return "out_of_bounds"
+    if nleaf != "0" and nleaf != "1":
+        return "bad_leaf_flag"
+    if ndepth < 0:
+        return "negative_depth"
+    if ndepth > scv_wasm_max_node_depth():
+        return "depth_overflow"
+    if is_first and ndepth != 0:
+        return "root_not_depth_zero"
+    if (not is_first) and ndepth == 0:
+        return "multiple_roots"
+    if (not is_first) and ndepth > prev_depth + 1:
+        return "depth_jump"
+    ""
+
+# Validate a whole shim blob against the source length.
+# Returns "" when the blob is well-formed, otherwise "line=<n> reason=<r>".
+# An empty blob is malformed ("empty_blob") — the shim signals errors with "".
+fn scv_wasm_blob_validate(blob: text, source_len: i64) -> text:
+    if blob == "":
+        return "line=0 reason=empty_blob"
+    val lines = blob.split("\n")
+    var prev_depth = 0
+    var seen: i64 = 0
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        li = li + 1
+        if line == "":
+            continue
+        val parts = line.split("|")
+        val err = _scv_wasm_blob_line_error(parts, source_len, prev_depth, seen == 0)
+        if err != "":
+            return "line={li} reason={err}"
+        prev_depth = parts[5].to_i64() ?? 0
+        seen = seen + 1
+    if seen == 0:
+        return "line=0 reason=empty_blob"
+    ""
+
+# Deterministic re-serialization of a VALID blob: canonical 6 fields per
+# line, single trailing newline.  For any blob accepted by
+# scv_wasm_blob_validate, normalize(normalize(b)) == normalize(b), and a
+# canonical blob normalizes to itself.
+fn scv_wasm_blob_normalize(blob: text) -> text:
+    var out = ""
+    for line in blob.split("\n"):
+        if line == "":
+            continue
+        val parts = line.split("|")
+        if parts.len() < 6:
+            continue
+        out = out + "{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}|{parts[4]}|{parts[5]}\n"
+    out
+
+# Content hash of a canonical blob — deterministic across identical parses.
+fn scv_wasm_blob_digest(blob: text) -> text:
+    scv_hash_text("wasm_blob", scv_wasm_blob_normalize(blob))

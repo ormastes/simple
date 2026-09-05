@@ -1,0 +1,451 @@
+@allow(primitive_api)
+# Counterpart Conformance — provider registry (Wave 1, lane F4).
+#
+# primitive_api is allowed here deliberately: counts, schema versions and gate
+# predicates are the frozen Wave-0 wire types. Wrapping them in newtypes here
+# would fork the contract this module only indexes.
+#
+# Holds the provider descriptors a run may draw on, indexes their components by
+# `component_id` and by `counterpart_boundary_id`, and selects a concrete
+# component for a `PlanSource`.
+#
+# Registration is fail-closed. A descriptor is REFUSED and the reason recorded
+# when it:
+#
+#   * repeats an already-registered `provider_id`
+#   * declares a component whose `counterpart_boundary_id` is malformed
+#   * declares an `abi_version` other than the frozen COUNTERPART_ABI_VERSION
+#   * declares no `independence_group`
+#   * declares the same `component_id` twice
+#
+# (the last four via the frozen `provider_manifest_rejections`, which is the
+# single place those clauses live).
+#
+# Selection is fail-closed too: a plan naming a provider that is not registered
+# resolves to ProviderStatus.unavailable. It never resolves to "executed with
+# nothing", and it is never silently dropped from the plan — dropping it would
+# shrink the comparison matrix into vacuous agreement.
+#
+# Design: doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md §3.2, §5
+# Contracts: src/lib/common/spec/evidence/counterpart/model.spl (frozen, do not edit)
+
+use std.common.spec.evidence.counterpart.model.{
+    ComponentManifest,
+    ExecutionMode,
+    ExecutionReceipt,
+    LogicalArtifact,
+    PlanSource,
+    ProviderKind,
+    ProviderManifest,
+    ProviderStatus,
+    logical_artifact,
+    provider_kind_name,
+    provider_manifest_rejections
+}
+
+# ---------------------------------------------------------------------------
+# Descriptor construction
+# ---------------------------------------------------------------------------
+
+# One adapter as the registry holds it. `adapter_path` is the pinned shared
+# library (native kinds) or the pinned executable (bridge kinds); an empty path
+# is not an error at registration, it is an error at execution — the difference
+# lets a plan be validated on a machine where the adapter is not built.
+pub struct RegisteredProvider:
+    manifest: ProviderManifest
+    adapter_path: text
+    config: text
+
+# The component index. Built once at registration so lookups by component or by
+# boundary do not re-walk every manifest, and so the two indexes can never
+# disagree with the manifests they were built from.
+pub struct ComponentIndexEntry:
+    provider_id: text
+    component_id: text
+    counterpart_boundary_id: text
+    provider_kind: ProviderKind
+    independence_group: text
+
+pub struct ProviderRegistry:
+    providers: [RegisteredProvider]
+    components: [ComponentIndexEntry]
+    rejections: [text]
+
+pub fn provider_registry() -> ProviderRegistry:
+    ProviderRegistry(providers: [], components: [], rejections: [])
+
+pub fn component_manifest(
+    component_id: text,
+    counterpart_boundary_id: text,
+    input_schema_id: text,
+    output_schema_id: text,
+    deterministic_claim: text,
+    supported_relations: [text],
+    supported_execution_modes: [text]
+) -> ComponentManifest:
+    ComponentManifest(
+        component_id: component_id,
+        counterpart_boundary_id: counterpart_boundary_id,
+        input_schema_id: input_schema_id,
+        output_schema_id: output_schema_id,
+        stateful: false,
+        reset_supported: true,
+        deterministic_claim: deterministic_claim,
+        supported_relations: supported_relations,
+        supported_execution_modes: supported_execution_modes,
+        capability_requirements: []
+    )
+
+pub fn provider_manifest(
+    provider_id: text,
+    provider_kind: ProviderKind,
+    independence_group: text,
+    abi_version: i64,
+    version: text,
+    artifact_hash: text,
+    license_spdx: text,
+    components: [ComponentManifest]
+) -> ProviderManifest:
+    ProviderManifest(
+        provider_id: provider_id,
+        provider_kind: provider_kind,
+        independence_group: independence_group,
+        abi_version: abi_version,
+        version: version,
+        artifact_hash: artifact_hash,
+        license_spdx: license_spdx,
+        components: components
+    )
+
+# ---------------------------------------------------------------------------
+# Lookup
+# ---------------------------------------------------------------------------
+
+# Index lookups rather than `T?`: `if val` on an Option is a known miscompile
+# surface (it reports Some even for nil under AOT), and this module is a gate —
+# it must not fail open.
+pub fn provider_registry_index_of(registry: ProviderRegistry, provider_id: text) -> i64:
+    var index: i64 = 0
+    while index < registry.providers.len():
+        if registry.providers[index].manifest.provider_id == provider_id:
+            return index
+        index = index + 1
+    0 - 1
+
+pub fn provider_registry_has(registry: ProviderRegistry, provider_id: text) -> bool:
+    provider_registry_index_of(registry, provider_id) >= 0
+
+pub fn provider_registry_component_index(
+    registry: ProviderRegistry,
+    provider_id: text,
+    component_id: text
+) -> i64:
+    var index: i64 = 0
+    while index < registry.components.len():
+        val entry = registry.components[index]
+        if entry.provider_id == provider_id and entry.component_id == component_id:
+            return index
+        index = index + 1
+    0 - 1
+
+# Index #1: every registered component carrying this `component_id`, across all
+# providers. Two providers legitimately expose the same component name.
+pub fn provider_registry_components_by_id(
+    registry: ProviderRegistry,
+    component_id: text
+) -> [ComponentIndexEntry]:
+    var found: [ComponentIndexEntry] = []
+    for entry in registry.components:
+        if entry.component_id == component_id:
+            found.push(entry)
+    found
+
+# Index #2: every registered component serving this counterpart boundary. This
+# is what a domain lane asks: "who can answer web.resolve.computed_style@1?"
+pub fn provider_registry_components_by_boundary(
+    registry: ProviderRegistry,
+    counterpart_boundary_id: text
+) -> [ComponentIndexEntry]:
+    var found: [ComponentIndexEntry] = []
+    for entry in registry.components:
+        if entry.counterpart_boundary_id == counterpart_boundary_id:
+            found.push(entry)
+    found
+
+# The independence groups that can serve a boundary. Fewer than two means the
+# boundary cannot be differentially tested however many providers are listed.
+pub fn provider_registry_independence_groups_for_boundary(
+    registry: ProviderRegistry,
+    counterpart_boundary_id: text
+) -> [text]:
+    var groups: [text] = []
+    for entry in provider_registry_components_by_boundary(registry, counterpart_boundary_id):
+        if entry.independence_group != "":
+            var seen = false
+            for existing in groups:
+                if existing == entry.independence_group:
+                    seen = true
+            if not seen:
+                groups.push(entry.independence_group)
+    groups
+
+pub fn provider_registry_provider_count(registry: ProviderRegistry) -> i64:
+    registry.providers.len()
+
+pub fn provider_registry_component_count(registry: ProviderRegistry) -> i64:
+    registry.components.len()
+
+pub fn provider_registry_is_clean(registry: ProviderRegistry) -> bool:
+    registry.rejections.len() == 0
+
+pub fn provider_registry_has_rejection_containing(
+    registry: ProviderRegistry,
+    needle: text
+) -> bool:
+    for reason in registry.rejections:
+        if reason.contains(needle):
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+# Every reason this descriptor may not enter the registry. Empty list = it may.
+# The manifest-shape clauses are delegated to the frozen model so this module
+# cannot drift from the contract.
+pub fn provider_registration_rejections(
+    registry: ProviderRegistry,
+    manifest: ProviderManifest,
+    adapter_path: text
+) -> [text]:
+    var failures: [text] = []
+    for reason in provider_manifest_rejections(manifest):
+        failures.push("provider " + manifest.provider_id + ": " + reason)
+    if provider_registry_has(registry, manifest.provider_id):
+        failures.push("duplicate provider registration '" + manifest.provider_id + "'")
+    var seen: [text] = []
+    for component in manifest.components:
+        for existing in seen:
+            if existing == component.component_id:
+                failures.push("provider " + manifest.provider_id
+                    + " declares component '" + component.component_id + "' twice")
+        seen.push(component.component_id)
+    # An adapter path is optional at registration; recorded only so a later
+    # execution failure names the descriptor rather than a blank path.
+    if adapter_path == "":
+        failures.push("provider " + manifest.provider_id + ": adapter_path is empty")
+    failures
+
+# Registers one provider. Returns the updated registry; a refused registration
+# is recorded in `rejections` so a caller cannot mistake it for a success, and
+# neither the provider nor any of its components enters the indexes.
+pub fn provider_registry_register(
+    registry: ProviderRegistry,
+    manifest: ProviderManifest,
+    adapter_path: text,
+    config: text
+) -> ProviderRegistry:
+    var providers = registry.providers
+    var components = registry.components
+    var rejections = registry.rejections
+
+    var refused = false
+    for reason in provider_registration_rejections(registry, manifest, adapter_path):
+        rejections.push(reason)
+        refused = true
+
+    if not refused:
+        providers.push(RegisteredProvider(
+            manifest: manifest,
+            adapter_path: adapter_path,
+            config: config
+        ))
+        for component in manifest.components:
+            components.push(ComponentIndexEntry(
+                provider_id: manifest.provider_id,
+                component_id: component.component_id,
+                counterpart_boundary_id: component.counterpart_boundary_id,
+                provider_kind: manifest.provider_kind,
+                independence_group: manifest.independence_group
+            ))
+
+    ProviderRegistry(providers: providers, components: components, rejections: rejections)
+
+# ---------------------------------------------------------------------------
+# Selection
+# ---------------------------------------------------------------------------
+
+# The concrete component a PlanSource resolved to. `resolved == false` means
+# nothing may be executed for this source; `unresolved_status` is the status the
+# runner must then record, and it is never `executed`.
+pub struct ProviderSelection:
+    source_id: text
+    provider_id: text
+    component_id: text
+    counterpart_boundary_id: text
+    provider_kind: ProviderKind
+    independence_group: text
+    provider_version: text
+    artifact_hash: text
+    adapter_path: text
+    config: text
+    resolved: bool
+    unresolved_status: ProviderStatus
+    diagnostics: [text]
+
+fn unresolved_selection(source: PlanSource, detail: text) -> ProviderSelection:
+    ProviderSelection(
+        source_id: source.source_id,
+        provider_id: source.provider_id,
+        component_id: source.component_id,
+        counterpart_boundary_id: "",
+        provider_kind: ProviderKind.native_in_process,
+        independence_group: "",
+        provider_version: "",
+        artifact_hash: "",
+        adapter_path: "",
+        config: "",
+        resolved: false,
+        unresolved_status: ProviderStatus.unavailable,
+        diagnostics: [detail]
+    )
+
+# Resolve a plan source against the registry. `boundary_id` is the plan's
+# boundary; a component that serves some OTHER boundary is refused rather than
+# quietly compared across boundaries. Pass "" to skip that check.
+pub fn provider_registry_select(
+    registry: ProviderRegistry,
+    source: PlanSource,
+    boundary_id: text
+) -> ProviderSelection:
+    val provider_index = provider_registry_index_of(registry, source.provider_id)
+    if provider_index < 0:
+        return unresolved_selection(source,
+            "provider '" + source.provider_id + "' is not registered")
+
+    val entry_index = provider_registry_component_index(
+        registry, source.provider_id, source.component_id)
+    if entry_index < 0:
+        return unresolved_selection(source,
+            "provider '" + source.provider_id + "' declares no component '"
+                + source.component_id + "'")
+
+    val entry = registry.components[entry_index]
+    val registered = registry.providers[provider_index]
+
+    if boundary_id != "" and entry.counterpart_boundary_id != boundary_id:
+        return unresolved_selection(source,
+            "component '" + source.component_id + "' serves boundary '"
+                + entry.counterpart_boundary_id + "' but the plan names '"
+                + boundary_id + "'")
+
+    ProviderSelection(
+        source_id: source.source_id,
+        provider_id: source.provider_id,
+        component_id: source.component_id,
+        counterpart_boundary_id: entry.counterpart_boundary_id,
+        provider_kind: entry.provider_kind,
+        independence_group: entry.independence_group,
+        provider_version: registered.manifest.version,
+        artifact_hash: registered.manifest.artifact_hash,
+        adapter_path: registered.adapter_path,
+        config: registered.config,
+        resolved: true,
+        unresolved_status: ProviderStatus.unavailable,
+        diagnostics: []
+    )
+
+pub fn provider_selection_label(selection: ProviderSelection) -> text:
+    (selection.provider_id + "/" + selection.component_id
+        + "(" + provider_kind_name(selection.provider_kind) + ")")
+
+# ---------------------------------------------------------------------------
+# Provider outcome — the uniform result of invoking one component
+# ---------------------------------------------------------------------------
+
+# Shared by every ProviderKind implementation so the runner dispatches without
+# knowing which transport ran. Lives here rather than in the runner so the
+# concrete providers do not have to import the runner that calls them.
+pub struct ProviderOutcome:
+    status: ProviderStatus
+    artifact: LogicalArtifact
+    execution: ExecutionReceipt
+    raw_response: text
+    raw_stderr: text
+    exit_code: i64
+    diagnostics: [text]
+
+# The artifact of an outcome that produced nothing. Deliberately vacuous:
+# `logical_artifact_is_vacuous` reports true for it, so the vacuity gate fails
+# any run that tries to compare it.
+pub fn provider_empty_artifact() -> LogicalArtifact:
+    logical_artifact("", "", 0, 0, "", "")
+
+pub fn provider_outcome_failed(
+    provider_id: text,
+    status: ProviderStatus,
+    detail: text,
+    raw_stderr: text,
+    exit_code: i64
+) -> ProviderOutcome:
+    ProviderOutcome(
+        status: status,
+        artifact: provider_empty_artifact(),
+        execution: ExecutionReceipt(
+            provider_id: provider_id,
+            execution_mode: ExecutionMode.unknown,
+            device_identity: "",
+            queue_identity: "",
+            submission_count: 0,
+            fence_completed: false,
+            device_origin_readback: false,
+            fallback_used: false,
+            dropped_events: 0,
+            completed: false
+        ),
+        raw_response: "",
+        raw_stderr: raw_stderr,
+        exit_code: exit_code,
+        diagnostics: [detail]
+    )
+
+# ---------------------------------------------------------------------------
+# Response envelope reading
+# ---------------------------------------------------------------------------
+#
+# Providers answer with an SDN response envelope. These readers are pure text
+# and live here so both the native and the process transport share exactly one
+# parse, and so the process path does not have to import the native ABI module.
+
+pub fn counterpart_response_field(response: text, key: text) -> text:
+    val prefix = key + ":"
+    for line in response.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            return trimmed.slice(prefix.len(), trimmed.len()).trim()
+    ""
+
+# Fail-closed integer read: anything that is not an exact decimal yields -1,
+# which every downstream vacuity gate rejects. Never guesses a default.
+pub fn counterpart_response_i64(response: text, key: text) -> i64:
+    val raw = counterpart_response_field(response, key)
+    if raw == "":
+        return 0 - 1
+    val parsed = raw.to_i64()
+    if parsed.to_text() != raw:
+        return 0 - 1
+    parsed
+
+# Project an SDN response envelope onto a LogicalArtifact. A field the provider
+# omitted stays empty or -1 rather than being defaulted, so an incomplete
+# response reads as vacuous instead of as agreement.
+pub fn counterpart_response_artifact(response: text, boundary_id: text) -> LogicalArtifact:
+    logical_artifact(
+        boundary_id,
+        counterpart_response_field(response, "schema_id"),
+        counterpart_response_i64(response, "schema_version"),
+        counterpart_response_i64(response, "item_count"),
+        counterpart_response_field(response, "canonical_hash"),
+        counterpart_response_field(response, "artifact_ref")
+    )

@@ -1,0 +1,111 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+artifact_dir=${LLM_CARET_PHASE4_EVIDENCE_DIR:-"$repo_root/build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_messaging_phase_cli"}
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: sh $0 <phase3-simple> <phase4-simple>" >&2
+    exit 2
+fi
+
+absolute_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s\n' "$repo_root/$1" ;;
+    esac
+}
+
+phase3=$(absolute_path "$1")
+phase4=$(absolute_path "$2")
+provenance="${phase4}.provenance.env"
+
+mkdir -p "$artifact_dir"
+
+fail() {
+    reason=$1
+    printf 'status=FAIL\nreason=%s\n' "$reason" | tee "$artifact_dir/result.env"
+    exit 1
+}
+
+run_bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k 5s 180s "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout -k 5s 180s "$@"
+    else
+        fail timeout-command-missing
+    fi
+}
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        fail sha256-command-missing
+    fi
+}
+
+[ -x "$phase3" ] || fail phase3-binary-missing
+[ -x "$phase4" ] || fail phase4-binary-missing
+[ -f "$provenance" ] || fail phase4-provenance-missing
+
+run_bounded "$phase3" --version >"$artifact_dir/phase3-version.out" 2>"$artifact_dir/phase3-version.err" ||
+    fail phase3-version-failed
+grep -Fq 'simple-bootstrap' "$artifact_dir/phase3-version.out" ||
+    grep -Fq 'simple-bootstrap' "$artifact_dir/phase3-version.err" ||
+    fail phase3-not-bootstrap-only
+
+for command in run test caret; do
+    set +e
+    run_bounded "$phase3" "$command" --help >"$artifact_dir/phase3-${command}.out" 2>"$artifact_dir/phase3-${command}.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 1 ] || fail "phase3-${command}-unexpected-exit"
+    grep -Fq "unknown command '$command'" "$artifact_dir/phase3-${command}.out" ||
+        grep -Fq "unknown command '$command'" "$artifact_dir/phase3-${command}.err" ||
+        fail "phase3-${command}-boundary-missing"
+done
+
+# The canonical helper binds the full CLI to its source tree, producing Phase 3,
+# and Stage 3 manifest. A copied or manually relinked executable is not admitted.
+. "$repo_root/scripts/check/lib/stage4-candidate-provenance.shs"
+stage4_verify_candidate_provenance "$provenance" "$phase4" "$repo_root" ||
+    fail phase4-provenance-invalid
+
+run_bounded "$phase4" --version >"$artifact_dir/phase4-version.out" 2>"$artifact_dir/phase4-version.err" ||
+    fail phase4-version-failed
+if grep -Eq 'bootstrap seed only|Rust-built|simple-bootstrap' "$artifact_dir/phase4-version.out" "$artifact_dir/phase4-version.err"; then
+    fail phase4-forbidden-identity
+fi
+
+set +e
+(
+    cd "$repo_root"
+    export SIMPLE_NO_STUB_FALLBACK=1
+    export SIMPLE_STAGE3_BINARY="$phase3"
+    export SIMPLE_STAGE4_BINARY="$phase4"
+    run_bounded "$phase4" test \
+        test/03_system/app/llm_caret/feature/llm_caret_messaging_phase_cli_spec.spl \
+        --mode=interpreter --clean --fail-fast
+) >"$artifact_dir/system-test.out" 2>"$artifact_dir/system-test.err"
+test_rc=$?
+set -e
+[ "$test_rc" -eq 0 ] || fail phase4-system-test-failed
+grep -Fq '0 failed' "$artifact_dir/system-test.out" ||
+    grep -Fq '0 failed' "$artifact_dir/system-test.err" ||
+    fail phase4-system-test-summary-missing
+
+{
+    echo 'status=PASS'
+    echo "phase3_path=$phase3"
+    echo "phase3_sha256=$(hash_file "$phase3")"
+    echo "phase4_path=$phase4"
+    echo "phase4_sha256=$(hash_file "$phase4")"
+    echo "phase4_provenance=$provenance"
+    echo "source_revision=$(git -C "$repo_root" rev-parse HEAD)"
+} >"$artifact_dir/result.env"
+
+cat "$artifact_dir/result.env"

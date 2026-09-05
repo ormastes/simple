@@ -1,0 +1,90 @@
+# Async TCP echo client example using monoio
+# Demonstrates high-performance async TCP client with io_uring
+# Feature: #1753 (Simple Language TCP API)
+
+import net::{init_runtime, shutdown_runtime, block_on}
+import net.tcp::{TcpStream}
+import core.io
+
+# Send a message and receive the echo
+async fn send_and_receive(stream: &TcpStream, message: text):
+    println("Sending: " + message)
+
+    # Convert string to bytes and send
+    val data = message.as_bytes()
+    await stream.write_all(data)?
+
+    # Receive the echo
+    var buffer = Bytes::with_capacity(4096)
+    val n = await stream.read(&mut buffer, 4096)?
+
+    if n == 0:
+        println("Server closed connection")
+        return
+
+    # Convert bytes back to string
+    val response = text::from_bytes(buffer.slice(0, n))
+    println("Received: " + response)
+
+# Main client function
+async fn run_client():
+    # Connect to the echo server
+    println("Connecting to echo server at 127.0.0.1:8080...")
+    val stream = await TcpStream::connect("127.0.0.1:8080")?
+
+    println("Connected! Local address: " + stream.local_addr().unwrap_or("unknown"))
+    println("Peer address: " + stream.peer_addr().unwrap_or("unknown"))
+
+    # Disable Nagle's algorithm for lower latency
+    stream.set_nodelay(true)?
+
+    # Send several messages
+    await send_and_receive(&stream, "Hello, server!")
+    await send_and_receive(&stream, "How are you?")
+    await send_and_receive(&stream, "Goodbye!")
+
+    # Shutdown write half (tells server we're done sending)
+    stream.shutdown(1)?  # 1 = Write
+
+    # Close the connection
+    stream.close()?
+    println("Connection closed")
+
+fn main():
+    println("Starting async TCP echo client...")
+
+    # Initialize monoio runtime
+    val runtime = init_runtime()?
+    println("Runtime initialized")
+
+    # Run the client (blocks until completion)
+    block_on(async {
+        await run_client()
+    })
+
+    # Shutdown runtime
+    shutdown_runtime(runtime)
+    println("Client shutdown complete")
+
+# To test this client:
+#
+# 1. First, start the server in another terminal:
+#    $ ./simple async_tcp_echo_server.spl
+#
+# 2. Run this client:
+#    $ ./simple async_tcp_echo_client.spl
+#
+# Expected output:
+#   Starting async TCP echo client...
+#   Runtime initialized
+#   Connecting to echo server at 127.0.0.1:8080...
+#   Connected! Local address: 127.0.0.1:XXXXX
+#   Peer address: 127.0.0.1:8080
+#   Sending: Hello, server!
+#   Received: Hello, server!
+#   Sending: How are you?
+#   Received: How are you?
+#   Sending: Goodbye!
+#   Received: Goodbye!
+#   Connection closed
+#   Client shutdown complete

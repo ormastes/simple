@@ -1,0 +1,121 @@
+# SearchProviderAdapter (P5) -- the boundary between SPipe's KnowledgeCompiler
+# and any concrete `SearchProvider` implementation (in-process index engine or
+# an out-of-process wire provider). KnowledgeCompiler talks only to the
+# `SearchProviderAdapter` trait declared here; it never imports a provider
+# implementation type. That is the whole job of this file.
+#
+# State machine (design §14.5, plan §4 P5):
+#   new -> initializing -> healthy -> quarantined | unavailable -> closed
+# Exactly one fallback is permitted, and only after logical-root parity has
+# been proven between the failed provider and the fallback candidate.
+#
+# Handshake (plan §4.1/hazard 12): every one of the five contract ids the
+# design freezes (analyzer, score, explanation, logical index, provider
+# version) must match exactly. Any mismatch is a hard rejection -- fail
+# closed, never "tolerate and warn".
+
+use lib.common.search.contract_ids.{
+    ANALYZER_CONTRACT_ID, SCORE_CONTRACT_ID, EXPLANATION_CONTRACT_ID,
+    LOGICAL_INDEX_CONTRACT_ID,
+}
+use lib.common.search.provider.{ProviderErrorV1}
+use lib.common.search.query.{SearchQuery}
+use lib.common.search.top_k.{SearchPageV1}
+
+pub val ADAPTER_PROVIDER_VERSION_V1: text = "1.0"
+
+pub enum AdapterStateV1:
+    New
+    Initializing
+    Healthy
+    Quarantined
+    Unavailable
+    Closed
+
+impl AdapterStateV1:
+    fn name() -> text:
+        match self:
+            AdapterStateV1.New: "new"
+            AdapterStateV1.Initializing: "initializing"
+            AdapterStateV1.Healthy: "healthy"
+            AdapterStateV1.Quarantined: "quarantined"
+            AdapterStateV1.Unavailable: "unavailable"
+            AdapterStateV1.Closed: "closed"
+
+    fn can_transition_to(next: AdapterStateV1) -> bool:
+        match self:
+            AdapterStateV1.New:
+                match next:
+                    AdapterStateV1.Initializing: true
+                    _: false
+            AdapterStateV1.Initializing:
+                match next:
+                    AdapterStateV1.Healthy: true
+                    AdapterStateV1.Unavailable: true
+                    _: false
+            AdapterStateV1.Healthy:
+                match next:
+                    AdapterStateV1.Quarantined: true
+                    AdapterStateV1.Unavailable: true
+                    AdapterStateV1.Closed: true
+                    _: false
+            AdapterStateV1.Quarantined:
+                match next:
+                    AdapterStateV1.Closed: true
+                    _: false
+            AdapterStateV1.Unavailable:
+                match next:
+                    AdapterStateV1.Closed: true
+                    _: false
+            AdapterStateV1.Closed: false
+
+# The five contract ids negotiated at handshake time (design §14.1/§14.5).
+# `provider_version` is the provider implementation's own version string, not
+# one of the frozen contract-identity constants -- P5 accepts exactly the
+# adapter's declared version.
+pub struct ProviderHandshakeV1:
+    analyzer_contract_id: text
+    score_contract_id: text
+    explanation_contract_id: text
+    logical_index_contract_id: text
+    provider_version: text
+
+impl ProviderHandshakeV1:
+    static fn of(analyzer_contract_id: text, score_contract_id: text, explanation_contract_id: text, logical_index_contract_id: text, provider_version: text) -> ProviderHandshakeV1:
+        ProviderHandshakeV1(
+            analyzer_contract_id: analyzer_contract_id,
+            score_contract_id: score_contract_id,
+            explanation_contract_id: explanation_contract_id,
+            logical_index_contract_id: logical_index_contract_id,
+            provider_version: provider_version,
+        )
+
+# The handshake the adapter requires. Every implementer of `SearchProvider`
+# it will ever wrap must offer exactly this.
+pub fn required_handshake_v1() -> ProviderHandshakeV1:
+    ProviderHandshakeV1.of(ANALYZER_CONTRACT_ID, SCORE_CONTRACT_ID, EXPLANATION_CONTRACT_ID, LOGICAL_INDEX_CONTRACT_ID, ADAPTER_PROVIDER_VERSION_V1)
+
+# Fail-closed handshake validation: any single mismatched contract id is a
+# rejection, named precisely so a caller can log which contract disagreed.
+pub fn validate_handshake_v1(offered: ProviderHandshakeV1, required: ProviderHandshakeV1) -> Result<bool, ProviderErrorV1>:
+    if offered.analyzer_contract_id != required.analyzer_contract_id:
+        return Err(ProviderErrorV1(code: "handshake_contract_mismatch", message: "analyzer_contract_id", retryable: false))
+    if offered.score_contract_id != required.score_contract_id:
+        return Err(ProviderErrorV1(code: "handshake_contract_mismatch", message: "score_contract_id", retryable: false))
+    if offered.explanation_contract_id != required.explanation_contract_id:
+        return Err(ProviderErrorV1(code: "handshake_contract_mismatch", message: "explanation_contract_id", retryable: false))
+    if offered.logical_index_contract_id != required.logical_index_contract_id:
+        return Err(ProviderErrorV1(code: "handshake_contract_mismatch", message: "logical_index_contract_id", retryable: false))
+    if offered.provider_version != required.provider_version:
+        return Err(ProviderErrorV1(code: "handshake_contract_mismatch", message: "provider_version", retryable: false))
+    Ok(true)
+
+# The single port KnowledgeCompiler is allowed to depend on. Neither
+# `InProcessSearchProviderAdapter` nor `ProcessSearchProviderAdapter` may be
+# imported by KnowledgeCompiler -- only this trait.
+trait SearchProviderAdapter:
+    fn state(self) -> AdapterStateV1
+    fn handshake(self, offered: ProviderHandshakeV1) -> Result<bool, ProviderErrorV1>
+    fn search(self, snapshot_id: text, scope_digest: text, query: SearchQuery) -> Result<SearchPageV1, ProviderErrorV1>
+    fn quarantine(self, reason: text) -> Result<bool, ProviderErrorV1>
+    fn close(self) -> Result<bool, ProviderErrorV1>

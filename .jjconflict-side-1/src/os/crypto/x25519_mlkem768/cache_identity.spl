@@ -1,0 +1,178 @@
+# Typed, public-data-only cache identity for persistent accelerator executors.
+# A configuration or device mismatch requires a fresh executor; it never falls
+# back to a stale compiled artifact.
+
+mod os.crypto.x25519_mlkem768.cache_identity
+
+use std.common.crypto.sha256.{sha256_text}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+
+struct X25519MlKem768CacheIdentity:
+    backend: text
+    implementation_version: text
+    profile_version: text
+    configuration_digest: text
+    source_digest: text
+    artifact_digest: text
+    build_binding_digest: text
+    device_capability_digest: text
+    device_identity: i64
+    admission_digest: text
+    key_digest: text
+    bound: bool
+
+fn x25519_mlkem768_cache_identity(backend: text,
+        source_digest: text, artifact_digest: text,
+        build_binding_digest: text = "",
+        device_capability_digest: text = ""
+) -> X25519MlKem768CacheIdentity:
+    X25519MlKem768CacheIdentity(
+        backend: backend, implementation_version: "", profile_version: "",
+        configuration_digest: "", source_digest: source_digest,
+        artifact_digest: artifact_digest,
+        build_binding_digest: build_binding_digest,
+        device_capability_digest: device_capability_digest,
+        device_identity: 0,
+        admission_digest: "", key_digest: "", bound: false)
+
+fn _cache_key_digest(identity: X25519MlKem768CacheIdentity,
+        device_identity: i64) -> text:
+    sha256_text(
+        "x25519mlkem768-cache-v1|" + identity.backend + "|" +
+        identity.implementation_version + "|" + identity.profile_version +
+        "|" + identity.configuration_digest + "|" +
+        identity.source_digest + "|" + identity.artifact_digest + "|" +
+        identity.build_binding_digest + "|" +
+        identity.device_capability_digest + "|" +
+        device_identity.to_text())
+
+fn _cache_sha256_digest_valid(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    var i: i64 = 0
+    while i < digest.len():
+        val digit = digest.slice(i, i + 1)
+        if not "0123456789abcdef".contains(digit):
+            return false
+        i = i + 1
+    true
+
+fn x25519_mlkem768_cache_bind(
+        current: X25519MlKem768CacheIdentity,
+        implementation_version: text, profile_version: text,
+        configuration_digest: text) -> Result<X25519MlKem768CacheIdentity, text>:
+    if implementation_version != X25519_MLKEM768_IMPLEMENTATION_VERSION:
+        return Err("x25519mlkem768-cache-implementation-version-mismatch")
+    if profile_version != X25519_MLKEM768_PROFILE_VERSION:
+        return Err("x25519mlkem768-cache-profile-version-mismatch")
+    if not _cache_sha256_digest_valid(configuration_digest):
+        return Err("x25519mlkem768-cache-configuration-digest-invalid")
+    val backend_valid = current.backend == "cuda" or
+        current.backend == "metal" or current.backend == "vulkan"
+    if not backend_valid:
+        return Err("x25519mlkem768-cache-backend-invalid")
+    val source_present = current.source_digest != ""
+    val artifact_present = current.artifact_digest != ""
+    if not source_present and not artifact_present:
+        return Err("x25519mlkem768-cache-artifact-identity-invalid")
+    if (source_present and
+            not _cache_sha256_digest_valid(current.source_digest)) or
+            (artifact_present and
+            not _cache_sha256_digest_valid(current.artifact_digest)):
+        return Err("x25519mlkem768-cache-provenance-digest-invalid")
+    if source_present and artifact_present:
+        if (not _cache_sha256_digest_valid(current.build_binding_digest) or
+                not _cache_sha256_digest_valid(
+                    current.device_capability_digest)):
+            return Err("x25519mlkem768-cache-build-binding-invalid")
+    elif current.build_binding_digest != "" or
+            current.device_capability_digest != "":
+        return Err("x25519mlkem768-cache-build-binding-partial")
+    if current.bound:
+        if (current.implementation_version != implementation_version or
+                current.profile_version != profile_version or
+                current.configuration_digest != configuration_digest):
+            return Err("x25519mlkem768-cache-key-mismatch")
+        val expected_admission_digest = _cache_key_digest(current, 0)
+        if current.admission_digest != expected_admission_digest:
+            return Err("x25519mlkem768-cache-identity-integrity-mismatch")
+        val expected_key_digest = _cache_key_digest(
+            current, current.device_identity)
+        if current.key_digest != expected_key_digest:
+            return Err("x25519mlkem768-cache-identity-integrity-mismatch")
+        return Ok(current)
+    val stale_unbound_state = (
+        current.implementation_version != "" or
+        current.profile_version != "" or
+        current.configuration_digest != "" or
+        current.device_identity != 0 or current.admission_digest != "" or
+        current.key_digest != "")
+    if stale_unbound_state:
+        return Err("x25519mlkem768-cache-unbound-state-invalid")
+    var bound = current
+    bound.implementation_version = implementation_version
+    bound.profile_version = profile_version
+    bound.configuration_digest = configuration_digest
+    bound.admission_digest = _cache_key_digest(bound, 0)
+    bound.key_digest = bound.admission_digest
+    bound.bound = true
+    Ok(bound)
+
+fn x25519_mlkem768_cache_bind_device(
+        current: X25519MlKem768CacheIdentity,
+        device_identity: i64) -> Result<X25519MlKem768CacheIdentity, text>:
+    if not current.bound:
+        return Err("x25519mlkem768-cache-unbound")
+    if current.source_digest != "" and current.artifact_digest != "":
+        return Err("x25519mlkem768-cache-device-capability-required")
+    val expected_admission_digest = _cache_key_digest(current, 0)
+    if current.admission_digest != expected_admission_digest:
+        return Err("x25519mlkem768-cache-identity-integrity-mismatch")
+    val expected_key_digest = _cache_key_digest(
+        current, current.device_identity)
+    if current.key_digest != expected_key_digest:
+        return Err("x25519mlkem768-cache-identity-integrity-mismatch")
+    if device_identity <= 0:
+        return Err("x25519mlkem768-cache-device-invalid")
+    if current.device_identity != 0 and current.device_identity != device_identity:
+        return Err("x25519mlkem768-cache-device-mismatch")
+    var bound = current
+    bound.device_identity = device_identity
+    bound.key_digest = _cache_key_digest(bound, device_identity)
+    Ok(bound)
+
+fn x25519_mlkem768_cache_bind_device_capability(
+        current: X25519MlKem768CacheIdentity,
+        device_identity: i64,
+        actual_device_capability_digest: text
+) -> Result<X25519MlKem768CacheIdentity, text>:
+    if (current.source_digest == "" or current.artifact_digest == "" or
+            not _cache_sha256_digest_valid(
+                actual_device_capability_digest)):
+        return Err("x25519mlkem768-cache-device-capability-invalid")
+    if current.device_capability_digest != actual_device_capability_digest:
+        return Err("x25519mlkem768-cache-device-capability-mismatch")
+    if not current.bound:
+        return Err("x25519mlkem768-cache-unbound")
+    val expected_admission_digest = _cache_key_digest(current, 0)
+    if current.admission_digest != expected_admission_digest:
+        return Err("x25519mlkem768-cache-identity-integrity-mismatch")
+    val expected_key_digest = _cache_key_digest(
+        current, current.device_identity)
+    if current.key_digest != expected_key_digest:
+        return Err("x25519mlkem768-cache-identity-integrity-mismatch")
+    if device_identity <= 0:
+        return Err("x25519mlkem768-cache-device-invalid")
+    if current.device_identity != 0 and current.device_identity != device_identity:
+        return Err("x25519mlkem768-cache-device-mismatch")
+    var bound = current
+    bound.device_identity = device_identity
+    bound.key_digest = _cache_key_digest(bound, device_identity)
+    Ok(bound)
+
+export X25519MlKem768CacheIdentity
+export x25519_mlkem768_cache_identity, x25519_mlkem768_cache_bind
+export x25519_mlkem768_cache_bind_device
+export x25519_mlkem768_cache_bind_device_capability

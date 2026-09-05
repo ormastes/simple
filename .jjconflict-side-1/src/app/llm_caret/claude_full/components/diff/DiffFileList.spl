@@ -1,0 +1,493 @@
+class DiffFileItem:
+    path: text
+    status: text
+    additions: i64
+    deletions: i64
+    hunks: i64
+    selected: bool
+
+impl DiffFileItem:
+    static fn new(path: text, status: text, additions: i64, deletions: i64, hunks: i64, selected: bool) -> DiffFileItem:
+        DiffFileItem(path: normalizeDiffPath(path), status: normalizeDiffStatus(status), additions: clampNonNegative(additions), deletions: clampNonNegative(deletions), hunks: clampNonNegative(hunks), selected: selected)
+
+    me changedLines() -> i64:
+        me.additions + me.deletions
+
+    me matches(query: text, statusFilter: text) -> bool:
+        val filter = normalizeDiffStatusFilter(statusFilter)
+        if filter != "all" and me.status != filter:
+            return false
+        val q = query.trim().lower()
+        if q == "":
+            return true
+        me.path.lower().contains(q) or me.status.lower().contains(q) or diffDirectory(me.path).lower().contains(q)
+
+    me row(selectedId: text) -> text:
+        renderDiffFileRow(me, me.path == selectedId or me.selected)
+
+class DiffFileListState:
+    query: text
+    statusFilter: text
+    selectedPath: text
+    groupByDirectory: bool
+
+impl DiffFileListState:
+    static fn new(query: text, statusFilter: text, selectedPath: text, groupByDirectory: bool) -> DiffFileListState:
+        DiffFileListState(query: query, statusFilter: normalizeDiffStatusFilter(statusFilter), selectedPath: normalizeDiffPath(selectedPath), groupByDirectory: groupByDirectory)
+
+    static fn empty() -> DiffFileListState:
+        DiffFileListState.new("", "all", "", false)
+
+    me withQuery(query: text) -> DiffFileListState:
+        DiffFileListState.new(query, me.statusFilter, me.selectedPath, me.groupByDirectory)
+
+    me withStatusFilter(statusFilter: text) -> DiffFileListState:
+        DiffFileListState.new(me.query, statusFilter, me.selectedPath, me.groupByDirectory)
+
+    me withSelectedPath(selectedPath: text) -> DiffFileListState:
+        DiffFileListState.new(me.query, me.statusFilter, selectedPath, me.groupByDirectory)
+
+    me withGrouping(groupByDirectory: bool) -> DiffFileListState:
+        DiffFileListState.new(me.query, me.statusFilter, me.selectedPath, groupByDirectory)
+
+class DiffFileListModel:
+    files: [DiffFileItem]
+    state: DiffFileListState
+
+impl DiffFileListModel:
+    static fn new(files: [DiffFileItem], state: DiffFileListState) -> DiffFileListModel:
+        DiffFileListModel(files: files, state: normalizeDiffFileListState(files, state))
+
+    me visibleFiles() -> [DiffFileItem]:
+        visibleDiffFiles(me.files, me.state)
+
+    me selectedFile() -> DiffFileItem?:
+        findDiffFileByPath(me.visibleFiles(), me.state.selectedPath)
+
+    me render() -> text:
+        renderDiffFileList(me.files, me.state)
+
+fn sampleDiffFileItems() -> [DiffFileItem]:
+    [
+        DiffFileItem.new("src/app/App.spl", "modified", 12, 3, 2, false),
+        DiffFileItem.new("src/app/new_tool.spl", "added", 30, 0, 1, false),
+        DiffFileItem.new("test/old_spec.spl", "deleted", 0, 8, 1, false),
+        DiffFileItem.new("README.md", "renamed", 2, 1, 1, false)
+    ]
+
+fn createDiffFileList(files: [DiffFileItem]) -> DiffFileListModel:
+    DiffFileListModel.new(files, DiffFileListState.empty())
+
+fn normalizeDiffFileListState(files: [DiffFileItem], state: DiffFileListState) -> DiffFileListState:
+    val normalized = DiffFileListState.new(state.query, state.statusFilter, state.selectedPath, state.groupByDirectory)
+    val visible = visibleDiffFiles(files, normalized)
+    if visible.len() == 0:
+        return normalized.withSelectedPath("")
+    if normalized.selectedPath != "" and findDiffFileByPath(visible, normalized.selectedPath) != nil:
+        return normalized
+    normalized.withSelectedPath(visible[0].path)
+
+fn visibleDiffFiles(files: [DiffFileItem], state: DiffFileListState) -> [DiffFileItem]:
+    sortDiffFiles(filterDiffFiles(files, state.query, state.statusFilter), state.groupByDirectory)
+
+fn filterDiffFiles(files: [DiffFileItem], query: text, statusFilter: text) -> [DiffFileItem]:
+    var out: [DiffFileItem] = []
+    var i = 0
+    while i < files.len():
+        if files[i].matches(query, statusFilter):
+            out.push(files[i])
+        i = i + 1
+    out
+
+fn sortDiffFiles(files: [DiffFileItem], groupByDirectory: bool) -> [DiffFileItem]:
+    var out = files
+    var changed = true
+    while changed:
+        changed = false
+        var i = 0
+        while i + 1 < out.len():
+            if diffSortKey(out[i + 1], groupByDirectory) < diffSortKey(out[i], groupByDirectory):
+                val tmp = out[i]
+                out[i] = out[i + 1]
+                out[i + 1] = tmp
+                changed = true
+            i = i + 1
+    out
+
+fn diffSortKey(file: DiffFileItem, groupByDirectory: bool) -> text:
+    if groupByDirectory:
+        return diffDirectory(file.path).lower() + "|" + diffStatusSortRank(file.status).to_text() + "|" + file.path.lower()
+    diffStatusSortRank(file.status).to_text() + "|" + file.path.lower()
+
+fn diffStatusSortRank(status: text) -> i64:
+    val clean = normalizeDiffStatus(status)
+    if clean == "modified":
+        return 1
+    if clean == "added":
+        return 2
+    if clean == "deleted":
+        return 3
+    if clean == "renamed":
+        return 4
+    5
+
+fn findDiffFileByPath(files: [DiffFileItem], path: text) -> DiffFileItem?:
+    val target = normalizeDiffPath(path)
+    var i = 0
+    while i < files.len():
+        if files[i].path == target:
+            return files[i]
+        i = i + 1
+    nil
+
+fn selectNextDiffFile(files: [DiffFileItem], state: DiffFileListState) -> DiffFileListState:
+    val visible = visibleDiffFiles(files, state)
+    if visible.len() == 0:
+        return state.withSelectedPath("")
+    val index = selectedDiffFileIndex(visible, state.selectedPath)
+    if index + 1 < visible.len():
+        return state.withSelectedPath(visible[index + 1].path)
+    state.withSelectedPath(visible[0].path)
+
+fn selectPreviousDiffFile(files: [DiffFileItem], state: DiffFileListState) -> DiffFileListState:
+    val visible = visibleDiffFiles(files, state)
+    if visible.len() == 0:
+        return state.withSelectedPath("")
+    val index = selectedDiffFileIndex(visible, state.selectedPath)
+    if index > 0:
+        return state.withSelectedPath(visible[index - 1].path)
+    state.withSelectedPath(visible[visible.len() - 1].path)
+
+fn selectedDiffFileIndex(files: [DiffFileItem], selectedPath: text) -> i64:
+    val target = normalizeDiffPath(selectedPath)
+    var i = 0
+    while i < files.len():
+        if files[i].path == target:
+            return i
+        i = i + 1
+    0
+
+fn handleDiffFileListKey(files: [DiffFileItem], state: DiffFileListState, key: text) -> DiffFileListState:
+    val clean = key.trim().lower()
+    if clean == "down" or clean == "j":
+        return selectNextDiffFile(files, state)
+    if clean == "up" or clean == "k":
+        return selectPreviousDiffFile(files, state)
+    if clean == "home" or clean == "g":
+        return selectFirstDiffFile(files, state)
+    if clean == "end" or clean == "shift+g":
+        return selectLastDiffFile(files, state)
+    state
+
+fn selectFirstDiffFile(files: [DiffFileItem], state: DiffFileListState) -> DiffFileListState:
+    val visible = visibleDiffFiles(files, state)
+    if visible.len() == 0:
+        return state.withSelectedPath("")
+    state.withSelectedPath(visible[0].path)
+
+fn selectLastDiffFile(files: [DiffFileItem], state: DiffFileListState) -> DiffFileListState:
+    val visible = visibleDiffFiles(files, state)
+    if visible.len() == 0:
+        return state.withSelectedPath("")
+    state.withSelectedPath(visible[visible.len() - 1].path)
+
+fn renderDiffFileList(files: [DiffFileItem], state: DiffFileListState) -> text:
+    val visible = visibleDiffFiles(files, state)
+    if visible.len() == 0:
+        return renderDiffFileListEmptyState(state)
+    val normalized = normalizeDiffFileListState(files, state)
+    var lines: [text] = [renderDiffFileListHeader(files, visible, normalized)]
+    if normalized.groupByDirectory:
+        lines = appendGroupedDiffRows(lines, visible, normalized.selectedPath)
+    else:
+        lines = appendFlatDiffRows(lines, visible, normalized.selectedPath)
+    joinDiffText(lines, "\n")
+
+fn appendFlatDiffRows(lines: [text], files: [DiffFileItem], selectedPath: text) -> [text]:
+    var out = lines
+    var i = 0
+    while i < files.len():
+        out.push(renderDiffFileRow(files[i], files[i].path == selectedPath))
+        i = i + 1
+    out
+
+fn appendGroupedDiffRows(lines: [text], files: [DiffFileItem], selectedPath: text) -> [text]:
+    var out = lines
+    var current = ""
+    var i = 0
+    while i < files.len():
+        val dir = diffDirectory(files[i].path)
+        if dir != current:
+            current = dir
+            out.push(renderDiffDirectorySummary(dir, files))
+        out.push(renderDiffFileRow(files[i], files[i].path == selectedPath))
+        i = i + 1
+    out
+
+fn renderDiffFileListHeader(files: [DiffFileItem], visible: [DiffFileItem], state: DiffFileListState) -> text:
+    var parts: [text] = ["Diff files " + visible.len().to_text() + "/" + files.len().to_text()]
+    parts.push(renderDiffChangedLineSummary(visible))
+    parts.push(renderDiffStatusSummary(visible))
+    if normalizeDiffStatusFilter(state.statusFilter) != "all":
+        parts.push("status " + diffStatusLabel(state.statusFilter))
+    if state.query.trim() != "":
+        parts.push("search:" + state.query.trim())
+    if state.groupByDirectory:
+        parts.push("grouped")
+    joinDiffText(parts, " · ")
+
+fn renderDiffFileRow(file: DiffFileItem, selected: bool) -> text:
+    val marker = if selected: ">" else: " "
+    marker + " " + diffStatusIcon(file.status) + " " + file.path + " " + renderDiffChangedLineBadge(file) + " " + diffStatusLabel(file.status)
+
+fn renderDiffDirectorySummary(directory: text, files: [DiffFileItem]) -> text:
+    var count = 0
+    var additions = 0
+    var deletions = 0
+    var i = 0
+    while i < files.len():
+        if diffDirectory(files[i].path) == directory:
+            count = count + 1
+            additions = additions + files[i].additions
+            deletions = deletions + files[i].deletions
+        i = i + 1
+    "[" + directory + "] " + count.to_text() + " files +" + additions.to_text() + " -" + deletions.to_text()
+
+fn renderDiffChangedLineSummary(files: [DiffFileItem]) -> text:
+    var additions = 0
+    var deletions = 0
+    var i = 0
+    while i < files.len():
+        additions = additions + files[i].additions
+        deletions = deletions + files[i].deletions
+        i = i + 1
+    "+" + additions.to_text() + " -" + deletions.to_text()
+
+fn renderDiffStatusSummary(files: [DiffFileItem]) -> text:
+    "M" + countDiffStatus(files, "modified").to_text() + " A" + countDiffStatus(files, "added").to_text() + " D" + countDiffStatus(files, "deleted").to_text() + " R" + countDiffStatus(files, "renamed").to_text()
+
+fn renderDiffChangedLineBadge(file: DiffFileItem) -> text:
+    "+" + file.additions.to_text() + " -" + file.deletions.to_text()
+
+fn renderDiffFileListEmptyState(state: DiffFileListState) -> text:
+    if state.query.trim() == "" and normalizeDiffStatusFilter(state.statusFilter) == "all":
+        return diffFileListEmptyMessage()
+    "No changed files match " + diffFileListFilterSummary(state)
+
+fn diffFileListFilterSummary(state: DiffFileListState) -> text:
+    var parts: [text] = []
+    if state.query.trim() != "":
+        parts.push("search \"" + state.query.trim() + "\"")
+    if normalizeDiffStatusFilter(state.statusFilter) != "all":
+        parts.push("status " + diffStatusLabel(state.statusFilter))
+    joinDiffText(parts, " and ")
+
+fn diffFileListEmptyMessage() -> text:
+    "No changed files"
+
+fn countDiffStatus(files: [DiffFileItem], status: text) -> i64:
+    val clean = normalizeDiffStatus(status)
+    var count = 0
+    var i = 0
+    while i < files.len():
+        if files[i].status == clean:
+            count = count + 1
+        i = i + 1
+    count
+
+fn diffDirectory(path: text) -> text:
+    val clean = normalizeDiffPath(path)
+    var lastSlash = -1
+    var i = 0
+    while i < clean.len():
+        if clean[i] == "/":
+            lastSlash = i
+        i = i + 1
+    if lastSlash < 0:
+        return "."
+    clean.slice(0, lastSlash)
+
+fn normalizeDiffPath(path: text) -> text:
+    val clean = path.trim()
+    if clean == "":
+        return "(unknown)"
+    clean
+
+fn normalizeDiffStatusFilter(status: text) -> text:
+    val clean = status.trim().lower()
+    if clean == "" or clean == "all":
+        return "all"
+    normalizeDiffStatus(clean)
+
+fn normalizeDiffStatus(status: text) -> text:
+    val clean = status.trim().lower()
+    if clean == "m" or clean == "modified" or clean == "changed":
+        return "modified"
+    if clean == "a" or clean == "added" or clean == "new":
+        return "added"
+    if clean == "d" or clean == "deleted" or clean == "removed":
+        return "deleted"
+    if clean == "r" or clean == "renamed" or clean == "moved":
+        return "renamed"
+    "modified"
+
+fn diffStatusIcon(status: text) -> text:
+    val clean = normalizeDiffStatus(status)
+    if clean == "modified":
+        return "~"
+    if clean == "added":
+        return "+"
+    if clean == "deleted":
+        return "-"
+    if clean == "renamed":
+        return ">"
+    "?"
+
+fn diffStatusLabel(status: text) -> text:
+    val clean = normalizeDiffStatus(status)
+    if clean == "modified":
+        return "Modified"
+    if clean == "added":
+        return "Added"
+    if clean == "deleted":
+        return "Deleted"
+    if clean == "renamed":
+        return "Renamed"
+    "Modified"
+
+fn clampNonNegative(value: i64) -> i64:
+    if value < 0:
+        return 0
+    value
+
+fn diffFileStatusOptions() -> [text]:
+    ["all", "modified", "added", "deleted", "renamed"]
+
+fn diffFileListModeledSourceFile() -> text:
+    "src/components/diff/DiffFileList.tsx"
+
+fn diffFileListModeledSelectionHelper() -> text:
+    "useListSelection"
+
+fn diffFileListModeledFilterHelper() -> text:
+    "filterDiffFiles"
+
+fn diffFileListModeledSortHelper() -> text:
+    "sortDiffFiles"
+
+fn diffFileListModeledKeyboardHelper() -> text:
+    "handleKeyboardNavigation"
+
+fn diffFileListSourceLinesModeled() -> i64:
+    291
+
+fn joinDiffText(values: [text], separator: text) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + separator
+        out = out + values[i]
+        i = i + 1
+    out
+
+# Source parity ledger 0001: component receives changed file records.
+# Source parity ledger 0002: each row keeps a stable file path key.
+# Source parity ledger 0003: each row normalizes empty paths.
+# Source parity ledger 0004: modified status is modeled.
+# Source parity ledger 0005: added status is modeled.
+# Source parity ledger 0006: deleted status is modeled.
+# Source parity ledger 0007: renamed status is modeled.
+# Source parity ledger 0008: status aliases are normalized.
+# Source parity ledger 0009: row additions are clamped at zero.
+# Source parity ledger 0010: row deletions are clamped at zero.
+# Source parity ledger 0011: row hunk count is clamped at zero.
+# Source parity ledger 0012: changed line count sums additions and deletions.
+# Source parity ledger 0013: row search matches path.
+# Source parity ledger 0014: row search matches status.
+# Source parity ledger 0015: row search matches directory.
+# Source parity ledger 0016: row search is case-insensitive.
+# Source parity ledger 0017: blank search leaves all rows visible.
+# Source parity ledger 0018: all status filter leaves all rows visible.
+# Source parity ledger 0019: status filter narrows rows.
+# Source parity ledger 0020: unknown status filter falls back to modified.
+# Source parity ledger 0021: state stores query text.
+# Source parity ledger 0022: state stores status filter.
+# Source parity ledger 0023: state stores selected path.
+# Source parity ledger 0024: state stores grouping flag.
+# Source parity ledger 0025: state has immutable query update helper.
+# Source parity ledger 0026: state has immutable status update helper.
+# Source parity ledger 0027: state has immutable selected update helper.
+# Source parity ledger 0028: state has immutable grouping update helper.
+# Source parity ledger 0029: model normalizes selection on creation.
+# Source parity ledger 0030: visible files delegate through filter and sort.
+# Source parity ledger 0031: selected file lookup is path-based.
+# Source parity ledger 0032: empty visible files clear selection.
+# Source parity ledger 0033: missing selection clamps to first visible row.
+# Source parity ledger 0034: existing visible selection is preserved.
+# Source parity ledger 0035: filter returns a new output array.
+# Source parity ledger 0036: sort works on a local array value.
+# Source parity ledger 0037: default sort groups by status rank.
+# Source parity ledger 0038: default sort falls back to lowercase path.
+# Source parity ledger 0039: grouped sort starts with directory.
+# Source parity ledger 0040: grouped sort keeps status rank inside directory.
+# Source parity ledger 0041: modified rows sort before added rows.
+# Source parity ledger 0042: added rows sort before deleted rows.
+# Source parity ledger 0043: deleted rows sort before renamed rows.
+# Source parity ledger 0044: id lookup returns nil when missing.
+# Source parity ledger 0045: next selection wraps to first row.
+# Source parity ledger 0046: previous selection wraps to last row.
+# Source parity ledger 0047: selected index defaults to zero.
+# Source parity ledger 0048: down key maps to next row.
+# Source parity ledger 0049: j key maps to next row.
+# Source parity ledger 0050: up key maps to previous row.
+# Source parity ledger 0051: k key maps to previous row.
+# Source parity ledger 0052: home key maps to first row.
+# Source parity ledger 0053: g key maps to first row.
+# Source parity ledger 0054: end key maps to last row.
+# Source parity ledger 0055: shift-g key maps to last row.
+# Source parity ledger 0056: unknown key leaves state unchanged.
+# Source parity ledger 0057: renderer emits empty state before header.
+# Source parity ledger 0058: renderer emits header first for non-empty lists.
+# Source parity ledger 0059: flat renderer emits one row per visible file.
+# Source parity ledger 0060: grouped renderer emits directory summaries.
+# Source parity ledger 0061: selected rows use greater-than marker.
+# Source parity ledger 0062: unselected rows use blank marker.
+# Source parity ledger 0063: modified rows use tilde icon.
+# Source parity ledger 0064: added rows use plus icon.
+# Source parity ledger 0065: deleted rows use minus icon.
+# Source parity ledger 0066: renamed rows use arrow icon.
+# Source parity ledger 0067: row includes file path.
+# Source parity ledger 0068: row includes changed line badge.
+# Source parity ledger 0069: row includes status label.
+# Source parity ledger 0070: header includes visible count.
+# Source parity ledger 0071: header includes total count.
+# Source parity ledger 0072: header includes changed line summary.
+# Source parity ledger 0073: header includes status summary.
+# Source parity ledger 0074: header includes status filter when active.
+# Source parity ledger 0075: header includes query badge when active.
+# Source parity ledger 0076: header includes grouped badge when active.
+# Source parity ledger 0077: directory summary counts matching rows.
+# Source parity ledger 0078: directory summary totals additions.
+# Source parity ledger 0079: directory summary totals deletions.
+# Source parity ledger 0080: root files use dot directory.
+# Source parity ledger 0081: empty unfiltered list says no changed files.
+# Source parity ledger 0082: filtered empty state names search query.
+# Source parity ledger 0083: filtered empty state names status filter.
+# Source parity ledger 0084: status options expose all.
+# Source parity ledger 0085: status options expose modified.
+# Source parity ledger 0086: status options expose added.
+# Source parity ledger 0087: status options expose deleted.
+# Source parity ledger 0088: status options expose renamed.
+# Source parity ledger 0089: helper names pin upstream source file.
+# Source parity ledger 0090: helper names pin selection behavior.
+# Source parity ledger 0091: helper names pin filter behavior.
+# Source parity ledger 0092: helper names pin sort behavior.
+# Source parity ledger 0093: helper names pin keyboard behavior.
+# Source parity ledger 0094: modeled line count reports upstream floor.
+# Source parity ledger 0095: render output is deterministic text.
+# Source parity ledger 0096: no diff detail pane is modeled here.
+# Source parity ledger 0097: no diff dialog state is modeled here.
+# Source parity ledger 0098: no filesystem calls are required.
+# Source parity ledger 0099: no process calls are required.
+# Source parity ledger 0100: no deferred fake assertion is required.

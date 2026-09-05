@@ -1,0 +1,128 @@
+fn rv32_band_block_valid(blk: i64) -> bool:
+    blk >= 0 and blk < 4
+
+fn rv32_band_ppn_valid(ppn: i64) -> bool:
+    ppn >= 0 and ppn < 16
+
+fn rv32_band_block_of(ppn: i64) -> i64:
+    if not rv32_band_ppn_valid(ppn):
+        return -1
+    ppn / 4
+
+fn rv32_band_valid_count(count: i64) -> i64:
+    if count < 0:
+        return 0
+    if count > 4:
+        return 4
+    count
+
+fn rv32_band_selftest() -> i64:
+    # Four blocks × four pages mirror the host BandAlloc lifecycle without arrays.
+    val BLK_FREE = 0
+    val BLK_OPEN = 1
+    val BLK_CLOSED = 2
+    val BLK_BAD = 3
+    var fail = 0
+    var active_blk = -1
+    var active_wp = 0
+    var free_count = 4
+
+    var state0 = BLK_FREE
+    var state1 = BLK_FREE
+    var state2 = BLK_FREE
+    var state3 = BLK_FREE
+    var valid0 = 0
+    var valid1 = 0
+    var valid2 = 0
+    var valid3 = 0
+    var page0_live = 0
+
+    if rv32_band_valid_count(-3) != 0:
+        fail = fail + 1
+    if rv32_band_valid_count(7) != 4:
+        fail = fail + 1
+    if rv32_band_block_valid(4):
+        fail = fail + 1
+    if rv32_band_block_of(16) != -1:
+        fail = fail + 1
+
+    # First allocation opens block 0 and returns PPN 0.
+    if active_blk == -1:
+        active_blk = 0
+        state0 = BLK_OPEN
+        active_wp = 0
+        free_count = free_count - 1
+    val p0 = active_blk * 4 + active_wp
+    active_wp = active_wp + 1
+    if p0 != 0 or free_count != 3 or state0 != BLK_OPEN:
+        fail = fail + 1
+
+    # Finish block 0, then next allocation closes it and opens block 1.
+    active_wp = 4
+    if active_wp == 4:
+        state0 = BLK_CLOSED
+        active_blk = 1
+        state1 = BLK_OPEN
+        active_wp = 0
+        free_count = free_count - 1
+    val p4 = active_blk * 4 + active_wp
+    active_wp = active_wp + 1
+    if p4 != 4 or state0 != BLK_CLOSED or state1 != BLK_OPEN or free_count != 2:
+        fail = fail + 1
+
+    # mark_valid is idempotent and ignores bad blocks.
+    if rv32_band_ppn_valid(p0) and state0 != BLK_FREE and state0 != BLK_BAD and page0_live == 0:
+        page0_live = 1
+        valid0 = valid0 + 1
+    if rv32_band_ppn_valid(p0) and state0 != BLK_FREE and state0 != BLK_BAD and page0_live == 0:
+        page0_live = 1
+        valid0 = valid0 + 1
+    if valid0 != 1 or page0_live != 1:
+        fail = fail + 1
+    state2 = BLK_BAD
+    if state2 != BLK_BAD:
+        valid2 = valid2 + 1
+    if valid2 != 0:
+        fail = fail + 1
+
+    # mark_invalid and corrupted counters fail closed.
+    if page0_live == 1:
+        page0_live = 0
+        valid0 = valid0 - 1
+    if page0_live != 0 or valid0 != 0:
+        fail = fail + 1
+    valid1 = -9
+    if rv32_band_valid_count(valid1) != 0:
+        fail = fail + 1
+    valid1 = 9
+    if rv32_band_valid_count(valid1) != 4:
+        fail = fail + 1
+
+    # free_block clears active state and live-page accounting.
+    page0_live = 1
+    valid0 = 1
+    state0 = BLK_CLOSED
+    val fc_before = free_count
+    state0 = BLK_FREE
+    valid0 = 0
+    page0_live = 0
+    free_count = free_count + 1
+    if state0 != BLK_FREE or valid0 != 0 or page0_live != 0 or free_count != fc_before + 1:
+        fail = fail + 1
+    state1 = BLK_FREE
+    valid1 = 0
+    if active_blk == 1:
+        active_blk = -1
+        active_wp = 0
+    if active_blk != -1 or active_wp != 0:
+        fail = fail + 1
+    if state3 != BLK_FREE or valid3 != 0:
+        fail = fail + 1
+    state2 = BLK_BAD
+    val free_before_bad = free_count
+    if state2 != BLK_BAD:
+        state2 = BLK_FREE
+        free_count = free_count + 1
+    if state2 != BLK_BAD or free_count != free_before_bad:
+        fail = fail + 1
+    fail

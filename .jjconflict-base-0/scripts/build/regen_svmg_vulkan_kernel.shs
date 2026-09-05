@@ -1,0 +1,58 @@
+#!/bin/sh
+# Regenerate / verify src/lib/gc_async_mut/gpu_lane/svmg_vulkan_kernel.spv
+# (Task C3, doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md).
+#
+# There is no .glsl/.comp source: there is no glslangValidator/glslc/dxc on
+# this repo's build hosts (verified empirically), and the byte-addressable
+# arena buffer this interpreter needs has no natural GLSL expression anyway
+# -- so the checked-in svmg_vulkan_kernel.spvasm (hand-written SPIR-V
+# assembly text) IS the source, mirroring the existing precedent of the
+# checked-in CUDA PTX kernel (svmg_cuda_kernel.ptx, hand-written, no .cu)
+# and the x25519_mlkem768 CUDA kernel (ml_kem_ntt_forward.ptx).
+# "Regenerate" means: re-assemble the .spvasm with spirv-as, re-validate
+# with spirv-val, and recompute the .spv's SHA-256 sidecar -- run this after
+# every hand-edit of the .spvasm file.
+#
+# Usage: sh scripts/build/regen_svmg_vulkan_kernel.shs
+# Requires: spirv-as + spirv-val (spirv-tools) on PATH. Prints SKIP (not a
+# failure) if they are unavailable -- this is a verification aid, not a
+# build-blocking step, since the .spv artifact is already checked in and the
+# Vulkan lane itself degrades to `skip:vulkan-loader-unavailable` on a host
+# with no ICD (see VulkanLaneSession.probe()).
+
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ASM_PATH="$REPO_ROOT/src/lib/gc_async_mut/gpu_lane/svmg_vulkan_kernel.spvasm"
+SPV_PATH="$REPO_ROOT/src/lib/gc_async_mut/gpu_lane/svmg_vulkan_kernel.spv"
+SHA_PATH="$SPV_PATH.sha256"
+
+if [ ! -f "$ASM_PATH" ]; then
+    echo "ERROR: $ASM_PATH not found" >&2
+    exit 1
+fi
+
+SPIRV_AS="$(command -v spirv-as || true)"
+SPIRV_VAL="$(command -v spirv-val || true)"
+
+if [ -z "$SPIRV_AS" ]; then
+    echo "SKIP: spirv-as not found on PATH -- cannot re-verify assembly on this host."
+    echo "      (the checked-in .spv and its .sha256 sidecar are unaffected; this is a verification-only skip)"
+    exit 0
+fi
+
+echo "==> spirv-as --target-env vulkan1.0"
+"$SPIRV_AS" --target-env vulkan1.0 -o "$SPV_PATH" "$ASM_PATH"
+echo "    OK"
+
+if [ -z "$SPIRV_VAL" ]; then
+    echo "SKIP: spirv-val not found on PATH -- assembled but not re-validated."
+else
+    echo "==> spirv-val --target-env vulkan1.0"
+    "$SPIRV_VAL" --target-env vulkan1.0 "$SPV_PATH"
+    echo "    OK"
+fi
+
+NEW_SHA="$(sha256sum "$SPV_PATH" | awk '{print $1}')"
+echo "$NEW_SHA  svmg_vulkan_kernel.spv" > "$SHA_PATH"
+echo "==> wrote $SHA_PATH: $NEW_SHA"

@@ -1,0 +1,177 @@
+"""Hosted pure-Simple first-dispatch preparation contract."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.loader.x86_64_server_admission.{
+    X86_64_SERVER_WEB_PATH, X86_64_SERVER_DB_PATH, X86_64_SERVER_PROFILE,
+    X86_64ServerAdmissionInput,
+    x86_64_server_web_profile, x86_64_server_db_profile
+}
+use os.kernel.loader.artifact_manifest.{manifest_sha256_hex}
+use os.kernel.loader.x86_64_server_scheduler_bridge.{
+    X86_64ServerSchedulerBridgeResult,
+    x86_64_server_schedule_admitted_input
+}
+use os.kernel.loader.x86_64_server_first_dispatch.{
+    x86_64_server_prepare_first_dispatch
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskId}
+
+fn _push_u16(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff).to_u8())
+    bytes.push(((value >> 8) & 0xff).to_u8())
+    bytes
+
+fn _push_u32(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out = _push_u16(out, value)
+    out = _push_u16(out, value >> 16)
+    out
+
+fn _push_u64(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out = _push_u32(out, value)
+    out = _push_u32(out, value >> 32)
+    out
+
+fn _minimal_x86_64_elf(marker: u8) -> [u8]:
+    var out: [u8] = [0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]
+    while out.len() < 16: out.push(0)
+    out = _push_u16(out, 2)
+    out = _push_u16(out, 62)
+    out = _push_u32(out, 1)
+    out = _push_u64(out, 0x400000)
+    out = _push_u64(out, 64)
+    out = _push_u64(out, 0)
+    out = _push_u32(out, 0)
+    out = _push_u16(out, 64)
+    out = _push_u16(out, 56)
+    out = _push_u16(out, 1)
+    out = _push_u16(out, 0)
+    out = _push_u16(out, 0)
+    out = _push_u16(out, 0)
+    out = _push_u32(out, 1)
+    out = _push_u32(out, 5)
+    out = _push_u64(out, 0x80)
+    out = _push_u64(out, 0x400000)
+    out = _push_u64(out, 0x400000)
+    out = _push_u64(out, 4)
+    out = _push_u64(out, 4)
+    out = _push_u64(out, 0x1000)
+    while out.len() < 0x80: out.push(0)
+    out.push(marker)
+    out.push(0x90.to_u8())
+    out.push(0x90.to_u8())
+    out.push(0x90.to_u8())
+    out
+
+fn _input(web: [u8], db: [u8]) -> X86_64ServerAdmissionInput:
+    X86_64ServerAdmissionInput(
+        web_path: X86_64_SERVER_WEB_PATH,
+        db_path: X86_64_SERVER_DB_PATH,
+        web_bytes: web,
+        db_bytes: db,
+        web_version: "1.0.0",
+        db_version: "1.0.0",
+        web_sha256: manifest_sha256_hex(web),
+        db_sha256: manifest_sha256_hex(db),
+        image_id: "unit-fat32-image",
+        image_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        launch_id: "first-dispatch-test",
+        runtime_profile: X86_64_SERVER_PROFILE,
+        web_profile: x86_64_server_web_profile("first-dispatch-test"),
+        db_profile: x86_64_server_db_profile("first-dispatch-test")
+    )
+
+describe "x86_64 server first-dispatch preparation":
+    it "returns deterministic first PID and scalar handoff metadata":
+        val bridge = x86_64_server_schedule_admitted_input(
+            _input(_minimal_x86_64_elf(0x90.to_u8()), _minimal_x86_64_elf(0xc3.to_u8())),
+            Scheduler.new(), IpcManager.new()
+        )
+        val prepared = x86_64_server_prepare_first_dispatch(bridge)
+        expect(prepared.accepted).to_be(true)
+        expect(prepared.reason).to_equal("first-dispatch-ready")
+        expect(prepared.first_pid).to_equal(prepared.web_pid)
+        expect(prepared.first_pid).to_be_less_than(prepared.db_pid)
+        expect(prepared.web_address_space).to_be_greater_than(0u64)
+        expect(prepared.db_address_space).to_be_greater_than(0u64)
+        expect(prepared.web_address_space).to_be_less_than(prepared.db_address_space)
+        expect(prepared.first_address_space).to_equal(prepared.web_address_space)
+        expect(prepared.web_generation).to_be_greater_than(0u64)
+        expect(prepared.db_generation).to_be_greater_than(0u64)
+
+    it "rejects an unaccepted bridge and clears all dispatch metadata":
+        val bridge = X86_64ServerSchedulerBridgeResult(
+            scheduler: Scheduler.new(),
+            ipc: IpcManager.new(),
+            web_pid: 9u64,
+            db_pid: 10u64,
+            reason: "db-create-failed",
+            accepted: false,
+            rolled_back_web_pid: 9u64
+        )
+        val prepared = x86_64_server_prepare_first_dispatch(bridge)
+        expect(prepared.accepted).to_be(false)
+        expect(prepared.reason).to_equal("bridge-not-accepted:db-create-failed")
+        expect(prepared.first_pid).to_equal(0u64)
+        expect(prepared.first_address_space).to_equal(0u64)
+
+    it "rejects a forged accepted receipt without authoritative capabilities":
+        val forged = X86_64ServerSchedulerBridgeResult(
+            scheduler: Scheduler.new(),
+            ipc: IpcManager.new(),
+            web_pid: 9u64,
+            db_pid: 10u64,
+            reason: "ok",
+            accepted: true,
+            rolled_back_web_pid: 0u64
+        )
+        val prepared = x86_64_server_prepare_first_dispatch(forged)
+        expect(prepared.accepted).to_be(false)
+        expect(prepared.reason).to_equal("web-task-not-ready")
+
+    it "rejects duplicate address spaces before any architecture action":
+        val bridge = x86_64_server_schedule_admitted_input(
+            _input(_minimal_x86_64_elf(0x90.to_u8()), _minimal_x86_64_elf(0xc3.to_u8())),
+            Scheduler.new(), IpcManager.new()
+        )
+        var scheduler = bridge.scheduler
+        val web_task = scheduler.get_user_handoff_task(bridge.web_pid).unwrap()
+        val changed = scheduler.set_user_task_address_space_for_probe(
+            bridge.db_pid, web_task.address_space
+        )
+        expect(changed).to_be(true)
+        val forged = X86_64ServerSchedulerBridgeResult(
+            scheduler: scheduler,
+            ipc: bridge.ipc,
+            web_pid: bridge.web_pid,
+            db_pid: bridge.db_pid,
+            reason: bridge.reason,
+            accepted: true,
+            rolled_back_web_pid: 0u64
+        )
+        val prepared = x86_64_server_prepare_first_dispatch(forged)
+        expect(prepared.accepted).to_be(false)
+        expect(prepared.reason).to_equal("duplicate-address-space")
+
+    it "rejects a service task that already exited":
+        val bridge = x86_64_server_schedule_admitted_input(
+            _input(_minimal_x86_64_elf(0x90.to_u8()), _minimal_x86_64_elf(0xc3.to_u8())),
+            Scheduler.new(), IpcManager.new()
+        )
+        var scheduler = bridge.scheduler
+        scheduler.exit_task_by_id(TaskId(id: bridge.web_pid), -1)
+        val forged = X86_64ServerSchedulerBridgeResult(
+            scheduler: scheduler,
+            ipc: bridge.ipc,
+            web_pid: bridge.web_pid,
+            db_pid: bridge.db_pid,
+            reason: bridge.reason,
+            accepted: true,
+            rolled_back_web_pid: 0u64
+        )
+        val prepared = x86_64_server_prepare_first_dispatch(forged)
+        expect(prepared.accepted).to_be(false)
+        expect(prepared.reason).to_equal("web-task-not-ready")

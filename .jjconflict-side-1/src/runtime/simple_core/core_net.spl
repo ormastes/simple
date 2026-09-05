@@ -1,0 +1,182 @@
+# Pure-Simple `simple-core` minimal socket ABI.
+#
+# These probes intentionally avoid the hosted runtime network stack. They exist
+# so startup-size audits can compare Simple TCP/UDP/plain-HTTP binaries against
+# equivalent C socket counters without pulling in TLS, HTTP clients, or async
+# runtimes.
+
+@unsafe(reason: "raw libc heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn malloc(size: i64) -> i64
+@unsafe(reason: "raw libc owned allocation release ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+@unsafe(reason: "raw socket descriptor allocation ABI; negative means failure", capabilities: [ffi])
+extern fn socket(domain: i64, type_: i64, protocol: i64) -> i64
+@unsafe(reason: "raw descriptor and sockaddr pointer/extent connect ABI", capabilities: [ffi, raw_ptr])
+extern fn connect(fd: i64, addr: i64, addr_len: i64) -> i64
+@unsafe(reason: "raw descriptor, buffer, and sockaddr pointer/extent send ABI", capabilities: [ffi, raw_ptr])
+extern fn sendto(fd: i64, buf: i64, len: i64, flags: i64, addr: i64, addr_len: i64) -> i64
+@unsafe(reason: "raw descriptor and buffer pointer/extent write ABI", capabilities: [ffi, raw_ptr])
+extern fn write(fd: i64, ptr: i64, count: i64) -> i64
+@unsafe(reason: "raw descriptor close status ABI", capabilities: [ffi])
+extern fn close(fd: i64) -> i64
+@unsafe(reason: "raw pointer/offset byte store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+@always_inline
+fn _sffi_core_net_malloc(size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        malloc(size)
+
+@always_inline
+fn _sffi_core_net_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_core_net_socket(domain: i64, type_: i64, protocol: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        socket(domain, type_, protocol)
+
+@always_inline
+fn _sffi_core_net_connect(fd: i64, addr: i64, addr_len: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        connect(fd, addr, addr_len)
+
+@always_inline
+fn _sffi_core_net_sendto(fd: i64, buf: i64, len: i64, flags: i64, addr: i64, addr_len: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        sendto(fd, buf, len, flags, addr, addr_len)
+
+@always_inline
+fn _sffi_core_net_write(fd: i64, ptr: i64, count: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        write(fd, ptr, count)
+
+@always_inline
+fn _sffi_core_net_close(fd: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        close(fd)
+
+@always_inline
+fn _sffi_core_net_store_u8(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(ptr, offset, value)
+
+fn sockaddr_loopback(port: i64) -> i64:
+    val addr = _sffi_core_net_malloc(16)
+    if addr < 1:
+        return 0
+    var i = 0
+    while i < 16:
+        _sffi_core_net_store_u8(addr, i, 0)
+        i = i + 1
+    # struct sockaddr_in { sa_family_t, in_port_t, in_addr, zero[8] }.
+    # Linux stores AF_INET little-endian in memory; port/address are network byte order.
+    _sffi_core_net_store_u8(addr, 0, 2)
+    _sffi_core_net_store_u8(addr, 1, 0)
+    _sffi_core_net_store_u8(addr, 2, (port >> 8) & 255)
+    _sffi_core_net_store_u8(addr, 3, port & 255)
+    _sffi_core_net_store_u8(addr, 4, 127)
+    _sffi_core_net_store_u8(addr, 5, 0)
+    _sffi_core_net_store_u8(addr, 6, 0)
+    _sffi_core_net_store_u8(addr, 7, 1)
+    return addr
+
+pub fn rt_net_tcp_connect_local_discard() -> i64:
+    # AF_INET=2, SOCK_STREAM=1.
+    val fd = _sffi_core_net_socket(2, 1, 0)
+    if fd < 0:
+        return -1
+    val addr = sockaddr_loopback(9)
+    if addr < 1:
+        _sffi_core_net_close(fd)
+        return -2
+    val connected = _sffi_core_net_connect(fd, addr, 16)
+    _sffi_core_net_free(addr)
+    val closed = _sffi_core_net_close(fd)
+    if connected < 0:
+        return connected
+    if closed < 0:
+        return closed
+    return 0
+
+pub fn rt_net_udp_send_local_discard() -> i64:
+    # AF_INET=2, SOCK_DGRAM=2.
+    val fd = _sffi_core_net_socket(2, 2, 0)
+    if fd < 0:
+        return -1
+    val addr = sockaddr_loopback(9)
+    if addr < 1:
+        _sffi_core_net_close(fd)
+        return -2
+    val msg = _sffi_core_net_malloc(1)
+    if msg < 1:
+        _sffi_core_net_free(addr)
+        _sffi_core_net_close(fd)
+        return -3
+    _sffi_core_net_store_u8(msg, 0, 120)
+    val sent = _sffi_core_net_sendto(fd, msg, 1, 0, addr, 16)
+    _sffi_core_net_free(msg)
+    _sffi_core_net_free(addr)
+    val closed = _sffi_core_net_close(fd)
+    if sent < 0:
+        return sent
+    if sent != 1:
+        return -4
+    if closed < 0:
+        return closed
+    return 0
+
+fn http_request_bytes() -> i64:
+    val msg = _sffi_core_net_malloc(18)
+    if msg < 1:
+        return 0
+    # "GET / HTTP/1.0\r\n\r\n"
+    _sffi_core_net_store_u8(msg, 0, 71)
+    _sffi_core_net_store_u8(msg, 1, 69)
+    _sffi_core_net_store_u8(msg, 2, 84)
+    _sffi_core_net_store_u8(msg, 3, 32)
+    _sffi_core_net_store_u8(msg, 4, 47)
+    _sffi_core_net_store_u8(msg, 5, 32)
+    _sffi_core_net_store_u8(msg, 6, 72)
+    _sffi_core_net_store_u8(msg, 7, 84)
+    _sffi_core_net_store_u8(msg, 8, 84)
+    _sffi_core_net_store_u8(msg, 9, 80)
+    _sffi_core_net_store_u8(msg, 10, 47)
+    _sffi_core_net_store_u8(msg, 11, 49)
+    _sffi_core_net_store_u8(msg, 12, 46)
+    _sffi_core_net_store_u8(msg, 13, 48)
+    _sffi_core_net_store_u8(msg, 14, 13)
+    _sffi_core_net_store_u8(msg, 15, 10)
+    _sffi_core_net_store_u8(msg, 16, 13)
+    _sffi_core_net_store_u8(msg, 17, 10)
+    return msg
+
+pub fn rt_net_http_plain_local_probe() -> i64:
+    # Plain HTTP only. TLS/HTTPS must stay behind an explicit runtime capsule.
+    val fd = _sffi_core_net_socket(2, 1, 0)
+    if fd < 0:
+        return -1
+    val addr = sockaddr_loopback(80)
+    if addr < 1:
+        _sffi_core_net_close(fd)
+        return -2
+    val ok = _sffi_core_net_connect(fd, addr, 16)
+    _sffi_core_net_free(addr)
+    if ok < 0:
+        _sffi_core_net_close(fd)
+        return ok
+    val msg = http_request_bytes()
+    if msg < 1:
+        _sffi_core_net_close(fd)
+        return -3
+    val written = _sffi_core_net_write(fd, msg, 18)
+    _sffi_core_net_free(msg)
+    val closed = _sffi_core_net_close(fd)
+    if written < 0:
+        return written
+    if written != 18:
+        return -4
+    if closed < 0:
+        return closed
+    return 0

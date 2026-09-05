@@ -1,0 +1,393 @@
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.diagnostics.span.{Span}
+use compiler.driver.driver_types.{CompileContext}
+
+# Formation probe, NOT a liveness proof. `== nil` cannot be used to validate a
+# context here: the nil sentinel is raw 3, so a ZEROED value is not the nil
+# representation and every `!= nil` guard reports "present" on it. That is the
+# documented defect class rt_heap_ref_wellformed was written for -- see
+# doc/08_tracking/bug/rt_heap_ref_wellformed_lost_in_stale_snapshot_clobber_2026-08-31.md
+# and the same extern in driver_hir_pipeline_lowering.spl.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
+use compiler.driver.driver_pipeline.*
+use compiler.driver.driver_aot_pipeline.*
+use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
+use compiler.driver.driver_log_helpers.{
+    log_debug,
+    log_trace,
+    log_warn,
+    log_error,
+    log_phase,
+    log_build_progress
+}
+use compiler.common.driver_core_types.{CompileMode, CompileResult}
+use compiler.common.attributes.{
+    VhdlHardwareMetadataFlatRow,
+    VhdlResetPolarity,
+    VhdlResetSynchrony,
+    parse_vhdl_hardware_attrs
+}
+use compiler.frontend.parser_types.{ParserModule, ParserFunction}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit, compiler_mcdc_obligation_manifest_emit}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+
+impl CompilerDriver:
+    me capture_vhdl_metadata():
+        var metadata_rows: [VhdlHardwareMetadataFlatRow] = []
+        for module_name in self.ctx.modules.keys():
+            val source_module: ParserModule = self.ctx.modules[module_name]
+            for function_name in source_module.functions.keys():
+                val source_function: ParserFunction = source_module.functions[function_name]
+                val metadata = parse_vhdl_hardware_attrs(source_function.attributes)
+                if metadata.is_hardware:
+                    var generic_names: [text] = []
+                    var generic_type_texts: [text] = []
+                    var generic_default_texts: [text] = []
+                    for generic in metadata.generics:
+                        generic_names = generic_names.push(generic.name)
+                        generic_type_texts = generic_type_texts.push(generic.type_text)
+                        generic_default_texts = generic_default_texts.push(
+                            generic.default_text)
+                    var return_field_labels: [text] = []
+                    var return_field_type_texts: [text] = []
+                    for field in metadata.return_fields:
+                        return_field_labels = return_field_labels.push(field.label)
+                        return_field_type_texts = return_field_type_texts.push(
+                            field.type_text)
+                    metadata_rows = metadata_rows.push(VhdlHardwareMetadataFlatRow(
+                        module_name: module_name,
+                        function_name: source_function.name,
+                        generic_names: generic_names,
+                        generic_type_texts: generic_type_texts,
+                        generic_default_texts: generic_default_texts,
+                        has_clocked: if metadata.has_clocked: 1 else: 0,
+                        clock_signal: metadata.clocked.clock_signal,
+                        reset_signal: metadata.clocked.reset_signal,
+                        has_reset: if metadata.clocked.has_reset: 1 else: 0,
+                        reset_polarity: if metadata.clocked.reset_polarity ==
+                            VhdlResetPolarity.ActiveHigh: 1 else: 0,
+                        reset_synchrony: if metadata.clocked.reset_synchrony ==
+                            VhdlResetSynchrony.Sync: 1 else:
+                            if metadata.clocked.reset_synchrony ==
+                                VhdlResetSynchrony.None_: 2 else: 0,
+                        domain: metadata.clocked.domain,
+                        clocked_is_valid: if metadata.clocked.is_valid: 1 else: 0,
+                        clocked_validation_errors: metadata.clocked.validation_errors,
+                        return_field_labels: return_field_labels,
+                        return_field_type_texts: return_field_type_texts,
+                        flatten_struct_output: if metadata.flatten_struct_output:
+                            1
+                        else:
+                            0
+                    ))
+        self.ctx.vhdl_hardware_metadata_rows = metadata_rows
+        if env_get("SIMPLE_COMPILER_TRACE") == "1":
+            eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
+
+    me compile() -> CompileResult:
+        val log = self.ctx.logger
+        if self.ctx.config.contains_key("mcdc_config_error"):
+            val mcdc_config_error = self.ctx.config["mcdc_config_error"] ?? "invalid MC/DC configuration"
+            self.ctx.add_error(mcdc_config_error)
+            return CompileResult.CodegenError(mcdc_config_error)
+        var compile_mode_text = self.ctx.options.mode.to_text()
+        if self.ctx.options.cli_mode_text != "":
+            compile_mode_text = self.ctx.options.cli_mode_text
+
+        log_phase("compile:start")
+        log_build_progress("load_sources", "files", -1, -1,
+            "starting", 0, 6, 0, 0, "running")
+        log_phase("phase1:load_sources:start")
+        val sources_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
+        val (loaded_ctx, load_ok) = self.load_sources_impl()
+        # `load_sources_impl` commits directly for the streaming owner. A
+        # second aggregate assignment at this exact boundary corrupted the
+        # returned context under Stage-3 native value semantics, before the
+        # first phase-2 receipt. Legacy non-streaming users retain the returned
+        # context installation.
+        if not sources_streaming_in_place:
+            self.ctx = loaded_ctx
+        if not load_ok:
+            log_error("phase 1 FAILED")
+            log_build_progress("load_sources", "files", -1, -1,
+                "failed", 0, 6, 1, 0, "failed")
+            return CompileResult.ParseError(self.ctx.errors)
+        if compile_mode_text == "aot":
+            log_phase("phase1:load_sources:fingerprint:start")
+            self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
+        log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
+        log_build_progress("load_sources", "files", self.ctx.sources.len(),
+            self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
+
+        log_phase("phase2:parse:start")
+        log_debug("phase 2: parsing...")
+        val mcdc_mode_text = self.ctx.config["mcdc_mode"] ?? "off"
+        val mcdc_enabled = mcdc_mode_text == "on" or mcdc_mode_text == "dynamic"
+        compiler_coverage_inventory_reset(
+            self.ctx.config.contains_key("coverage") or mcdc_enabled,
+            self.ctx.config["mcdc_include"] ?? "",
+            self.ctx.config["mcdc_exclude"] ?? "")
+        val parse_ok = self.parse_all_committing_impl()
+        if not parse_ok:
+            # Name the recorded diagnostics. A phase-2 verdict of false with an
+            # EMPTY error list used to print this bare line and nothing else,
+            # which is indistinguishable from a real parse error and cost a
+            # whole investigation. Say which of the two it is.
+            log_error("phase 2 FAILED ({self.ctx.error_count_value} recorded error(s))")
+            if self.ctx.error_count_value == 0:
+                log_error("  phase 2 returned a failing verdict with ZERO recorded errors -- internal invariant break in the parse lane (stale CompileContext snapshot under native value semantics), not a source error")
+            var phase2_err_idx = 0
+            while phase2_err_idx < self.ctx.error_count_value:
+                log_error("  {self.ctx.error_message_at(phase2_err_idx)}")
+                phase2_err_idx = phase2_err_idx + 1
+            log_build_progress("parse", "files", -1, self.ctx.sources.len(),
+                "failed", 1, 6, 1, 0, "failed")
+            return CompileResult.ParseError(self.ctx.errors)
+        if self.ctx.config.contains_key("coverage") or mcdc_enabled:
+            if not compiler_coverage_inventory_valid():
+                self.ctx.add_error(compiler_coverage_inventory_error())
+                return CompileResult.ParseError(self.ctx.errors)
+        if self.ctx.config.contains_key("coverage"):
+            compiler_coverage_inventory_emit()
+        if mcdc_enabled:
+            compiler_mcdc_obligation_manifest_emit()
+        if self.ctx.options.backend == "vhdl":
+            self.capture_vhdl_metadata()
+        log_debug("phase 2 done")
+        # On the streaming path the SURFACES are the module set -- phase 2
+        # empties ctx.modules by design -- so reporting ctx.modules there
+        # prints a bare `n_modules=0` on a fully successful 692-module parse.
+        # That line cost a whole investigation (it reads as catastrophic loss).
+        # Name the carrier that is actually authoritative for the mode.
+        # NAME the carrier only -- do NOT dereference the retained surface
+        # owner here. An earlier version of this line unwrapped
+        # `streaming_module_surfaces_owner` to print a surface count and
+        # SEGV'd at exactly this point (the log then ended at
+        # `surface:file:released seq=692` with no `parse:done` line at all):
+        # the Option compares non-nil while its payload is not safely
+        # dereferenceable at this boundary. A diagnostic must never be able to
+        # crash the compile it is describing.
+        val parse_streaming_carrier = driver_streaming_surface_enabled(self.ctx)
+        val parsed_module_count = self.ctx.modules.keys().len()
+        val parsed_module_carrier = if parse_streaming_carrier: "surfaces" else: "modules"
+        log_phase("phase2:parse:done n_modules={parsed_module_count} carrier={parsed_module_carrier}")
+        log_build_progress("parse", "modules", parsed_module_count,
+            parsed_module_count, "complete", 2, 6, 0, 0, "running")
+
+        if self.ctx.source_contents_reclaimable() and not driver_streaming_surface_enabled(self.ctx):
+            log_phase("phase2:source_reclaim:start low_memory=true")
+            log_debug("low-memory: evicting source text")
+            lexer_release_parse_source_globals()
+            val reclaimed_sources = self.ctx.reclaim_source_contents()
+            log_debug("low-memory: reclaimed source buffers={reclaimed_sources}")
+            self.ctx.evict_sources()
+            log_phase("phase2:source_reclaim:done reclaimed={reclaimed_sources}")
+
+        log_phase("phase3:hir_typecheck:start")
+        log_trace("BEFORE phase 3")
+        # Derive routing from stable configuration, not the adjacent mutable
+        # readiness boolean that native value semantics can lose between phase
+        # methods. lower_and_check_streaming_surfaces_impl validates/rebuilds
+        # the frozen owner before doing any work.
+        val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
+        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        # The streaming path is a canonical `me` owner operation and has
+        # already committed every field directly to self.ctx. Reassigning its
+        # returned whole-context snapshot corrupts adjacent scalar fields under
+        # Stage-3 native value semantics (observed error_count 0 before return,
+        # nonzero at phase 4). Legacy non-streaming paths still return their
+        # newly assembled context and therefore retain the assignment.
+        # Fail-closed on the tuple's first element. `lower_and_check_impl` returns
+        # (CompileContext, bool), and on the FAILURE path -- including the
+        # restored formation guard's `return (self.ctx, false)` -- the context
+        # can arrive as a raw 0 through the staged native tuple transport.
+        # Assigning that straight into self.ctx replaced a live context with
+        # null, and the very next thing the failure branch does is call
+        # self.ctx.has_errors(), which then SEGVs at address 0xc0.
+        # Keeping the previous context is strictly better than adopting a null
+        # one: it is the context every subsequent error read wants, and the
+        # streaming path already declines this assignment for a related
+        # transport reason.
+        if not hir_streaming_in_place and rt_heap_ref_wellformed(analyzed_ctx):
+            self.ctx = analyzed_ctx
+        log_trace("AFTER phase 3")
+        if not analyze_ok:
+            log_error("phase 3 FAILED")
+            if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
+                val phase3_error_count = self.ctx.errors.len()
+                eprint("[bootstrap-phase3-errors] count={phase3_error_count}")
+                var phase3_error_index = 0
+                while phase3_error_index < phase3_error_count and phase3_error_index < 20:
+                    val phase3_error = self.ctx.error_message_at(phase3_error_index)
+                    eprint("[bootstrap-phase3-error] index={phase3_error_index} len={phase3_error.len()} text={phase3_error}")
+                    phase3_error_index = phase3_error_index + 1
+            log_build_progress("hir", "modules", -1, -1,
+                "failed", 2, 6, 1, 0, "failed")
+            # A diagnostic path must never be the thing that crashes. If the
+            # context did not survive phase 3 there are no errors to read, but
+            # the failure is still real, so report it instead of dereferencing.
+            if not rt_heap_ref_wellformed(self.ctx):
+                log_error("phase 3 FAILED with no surviving compile context")
+                return CompileResult.TypeError([])
+            # The historical refusal to read the diagnostics here is RETIRED,
+            # and the reason is that the hazard it was avoiding was fixed in the
+            # accessor rather than at this call site.
+            #
+            # The measured defect was real: `errors` and `error_count_value` are
+            # transported SEPARATELY out of `lower_and_check_impl`'s staged
+            # native tuple, so has_errors() could read the intact SCALAR while
+            # `self.errors` arrived as a zeroed reference, faulting at offset
+            # 0xb8. The response at the time was to make no call at all.
+            #
+            # But `error_message_at` / `errors_safe`
+            # (driver_types.spl:1115-1134) now probe formation with
+            # `rt_heap_ref_wellformed(self.errors)` FIRST and return ""/[]
+            # instead of dereferencing a zeroed reference. The crash this
+            # branch was dodging can no longer happen, while the cost of
+            # dodging it was total: an unconditional "unreadable" line was
+            # printed WITHOUT EVER ATTEMPTING A READ, so every phase-3 failure
+            # lost its diagnostics -- including the overwhelmingly common case
+            # where the array survived perfectly well. The non-native sibling
+            # path in this same file (`:335-337`) has always read them.
+            #
+            # So: attempt the guarded read, report whatever survived, and emit
+            # the "no readable diagnostics" line only when nothing came back -- with
+            # the surviving scalar count in it, so an operator can tell "N
+            # diagnostics were lost in transport" apart from "there were none".
+            # Read through the TEXT projection `error_message_at`, not the
+            # aggregate-returning `errors_safe`. Both are guarded identically,
+            # but driver_hir_pipeline_lowering.spl:806-808 records that owner
+            # methods returning only scalar/text projections are the shape that
+            # survives this ABI, and `error_message_at` already has proven call
+            # sites in this file (`:335`, `:356`) whereas `errors_safe` has
+            # none. The reporting list is assembled locally from those reads.
+            val phase3_recorded_count: i64 = self.ctx.error_count()
+            val phase3_show_cap = if phase3_recorded_count < 20: phase3_recorded_count else: 20
+            var phase3_surviving_errors: [text] = []
+            var phase3_report_idx = 0
+            while phase3_report_idx < phase3_show_cap:
+                val phase3_message: text = self.ctx.error_message_at(phase3_report_idx)
+                if phase3_message.len() > 0:
+                    log_error("  {phase3_message}")
+                    phase3_surviving_errors.push(phase3_message)
+                phase3_report_idx = phase3_report_idx + 1
+            if phase3_surviving_errors.len() > 0:
+                if phase3_recorded_count > phase3_show_cap:
+                    val phase3_hidden = phase3_recorded_count - phase3_show_cap
+                    log_error("  ... and {phase3_hidden} further phase 3 error(s)")
+                # Restores the ResolveError/TypeError distinction that the
+                # no-read branch had to give up.
+                if phase3_surviving_errors[0].contains("Method resolution"):
+                    return CompileResult.ResolveError(phase3_surviving_errors)
+                return CompileResult.TypeError(phase3_surviving_errors)
+            # Reached only when nothing readable came back. The recorded scalar
+            # count is included deliberately: count>0 here means N diagnostics
+            # were lost in transport, count==0 means the phase failed without
+            # recording any -- two very different bugs that the old fixed
+            # string conflated.
+            log_error("phase 3 FAILED (no readable diagnostics; recorded error_count={phase3_recorded_count}; per-module root causes were emitted above as [hir-fatal])")
+            return CompileResult.TypeError([])
+        log_debug("phase 3 done")
+        # SIMPLE_RESOLVE_METHODS=1 (default OFF): quiet method-resolution
+        # experiment over the assembled HIR modules. Placed HERE — after
+        # phase 3 on both the streaming and non-streaming branches, before
+        # monomorphization — so both lowering paths are covered and the HIR
+        # cache (written inside the lowering loops) stays flag-agnostic.
+        if (rt_env_get("SIMPLE_RESOLVE_METHODS") ?? "") == "1":
+            self.run_resolve_methods_quiet_gated()
+        log_phase("phase3:hir_typecheck:done")
+        log_build_progress("hir", "modules", -1, -1,
+            "complete", 3, 6, 0, 0, "running")
+
+        if self.ctx.options.low_memory:
+            log_debug("low-memory: evicting AST modules")
+            self.ctx.evict_ast()
+
+        if compile_mode_text == "check":
+            log_debug("check mode")
+            return CompileResult.Success(nil)
+
+        log_phase("phase4:monomorphize:start")
+        log_debug("phase 4: monomorphization...")
+        val mono_ok = self.monomorphize_impl(analyze_ok)
+        if not mono_ok:
+            log_error("phase 4 FAILED")
+            log_build_progress("monomorphize", "modules", -1, -1,
+                "failed", 3, 6, 1, 0, "failed")
+            return CompileResult.TypeError(self.ctx.errors)
+        log_debug("phase 4 done")
+        log_phase("phase4:monomorphize:done")
+        log_build_progress("monomorphize", "modules", -1, -1,
+            "complete", 4, 6, 0, 0, "running")
+
+        log_phase("phase5:mode_dispatch:start")
+        log_debug("phase 5: mode-specific processing...")
+        if compile_mode_text == "check":
+            log_debug("check mode")
+            return CompileResult.Success(nil)
+        if compile_mode_text == "sdn":
+            log_debug("sdn mode")
+            return self.process_sdn()
+        if compile_mode_text == "interpret":
+            log_debug("interpret mode")
+            return self.interpret()
+        if compile_mode_text == "jit":
+            log_debug("jit mode")
+            return self.jit_compile_and_run()
+        if compile_mode_text == "aot":
+            log_debug("aot mode")
+            return self.aot_compile()
+        if compile_mode_text == "smf_exec":
+            log_debug("smf_exec mode")
+            return self.execute_smf()
+
+        log_warn("no mode matched, falling through")
+        CompileResult.Success(nil)
+
+    me compile_vhdl_only() -> CompileResult:
+        if self.ctx.options.backend != "vhdl" or self.ctx.options.mode != CompileMode.Aot:
+            return CompileResult.CodegenError(
+                "fixed VHDL runner requires AOT mode with backend=vhdl")
+
+        val (loaded_ctx, load_ok) = self.load_sources_impl()
+        self.ctx = loaded_ctx
+        if not load_ok:
+            return CompileResult.ParseError(self.ctx.errors)
+
+        val parse_ok = self.parse_all_committing_impl()
+        if not parse_ok:
+            return CompileResult.ParseError(self.ctx.errors)
+        self.capture_vhdl_metadata()
+        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        self.ctx = analyzed_ctx
+        if not analyze_ok:
+            if self.ctx.has_errors() and self.ctx.error_message_at(0).contains("Method resolution"):
+                return CompileResult.ResolveError(self.ctx.errors)
+            return CompileResult.TypeError(self.ctx.errors)
+        if self.ctx.options.low_memory:
+            self.ctx.evict_ast()
+
+        if not self.monomorphize_impl(analyze_ok):
+            return CompileResult.TypeError(self.ctx.errors)
+        if not self.lower_to_mir():
+            # See driver_aot_pipeline.spl's aot_compile() for the full
+            # writeup: builtin `Array.first()` has no MIR method symbol
+            # under native codegen and lowers to a `call 0` placeholder --
+            # a genuine SIGSEGV baked into stage3's own binary, confirmed
+            # via gdb/objdump. Avoid it with a length-guarded index read.
+            val message = if self.ctx.has_errors():
+                self.ctx.error_message_at(0)
+            else:
+                "MIR lowering failed"
+            return CompileResult.CodegenError(message)
+        if not self.borrow_check():
+            return CompileResult.BorrowError(self.ctx.errors)
+
+        val _ = self.process_async()
+        self.weave_aop()
+        self.apply_debug_trace()
+        self.compile_to_vhdl(self.ctx.options.output_file ?? "a.out")

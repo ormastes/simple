@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd -P)"
+PURE_REGISTRY="$ROOT/src/compiler/50.mir/text_extern_abi.spl"
+RUST_REGISTRY="$ROOT/src/compiler_rust/compiler/src/codegen/instr/calls.rs"
+RUST_SFFI="$ROOT/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+RUNTIME_C="$ROOT/src/runtime/runtime.c"
+RUNTIME_H="$ROOT/src/runtime/runtime.h"
+UNIX_PLATFORM="$ROOT/src/runtime/platform/unix_common.h"
+WINDOWS_PLATFORM="$ROOT/src/runtime/platform/platform_win.h"
+BENCHMARK="$ROOT/test/perf/io_parity/io_parity_simple.spl"
+MAPPED_CHECKSUM="$ROOT/test/perf/io_parity/mapped_checksum.spl"
+RAW_POINTER_OWNER="$ROOT/src/lib/nogc_sync_mut/ptr/raw.spl"
+
+require_literal() {
+    local file="$1"
+    local literal="$2"
+    grep -qF "$literal" "$file" || {
+        echo "FAIL: mmap text-ABI contract missing '$literal' in $file" >&2
+        exit 1
+    }
+}
+
+require_literal "$PURE_REGISTRY" '"rt_file_mmap_read_bytes" | "rt_mmap"'
+require_literal "$RUST_REGISTRY" '| "rt_mmap" => Some(&[0])'
+require_literal "$RUST_SFFI" 'RuntimeFuncSpec::new("rt_mmap", &[I64, I64, I64, I64, I64], &[I64])'
+require_literal "$RUNTIME_H" 'rt_mmap(const uint8_t* path_ptr, uint64_t path_len, int64_t size, int64_t offset, int64_t readonly)'
+require_literal "$RUNTIME_C" 'void* rt_mmap(const uint8_t* path_ptr, uint64_t path_len, int64_t size, int64_t offset, int64_t readonly)'
+require_literal "$RUNTIME_C" 'rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))'
+require_literal "$RUNTIME_C" 'return rt_mmap_cpath(path, size, offset, readonly);'
+require_literal "$UNIX_PLATFORM" 'void* rt_mmap_cpath(const char* path, int64_t size, int64_t offset, int64_t readonly)'
+require_literal "$WINDOWS_PLATFORM" 'void* rt_mmap_cpath(const char* path, int64_t size, int64_t offset, int64_t readonly)'
+
+# Equal-work guard: the Simple benchmark maps through the canonical file owner,
+# touches every mapped byte through the test-local checksum policy, and unmaps
+# every iteration. Runtime declarations remain in the raw-pointer owner.
+require_literal "$BENCHMARK" 'val address = file_mmap(path, size, 0, true)'
+require_literal "$BENCHMARK" 'mapped_byte_checksum(address, size)'
+require_literal "$BENCHMARK" 'file_munmap(address, size)'
+require_literal "$MAPPED_CHECKSUM" 'checksum_word_bytes(raw_read_i64(address, offset))'
+require_literal "$MAPPED_CHECKSUM" 'checksum = checksum + raw_read_u8(address, offset)'
+require_literal "$RAW_POINTER_OWNER" 'pub extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64'
+require_literal "$RAW_POINTER_OWNER" 'pub fn raw_read_u8(addr: i64, offset: i64) -> i64:'
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+cc_bin="$(command -v gcc)"
+nm_bin="$(command -v nm)"
+
+"$cc_bin" -std=c11 -O0 -ffunction-sections -fdata-sections -I"$ROOT/src/runtime" \
+    -c "$RUNTIME_C" -o "$work/runtime.o"
+printf '%s\n' \
+    '#include "runtime.h"' \
+    'void* mmap_text_abi_link_probe(const uint8_t* path, uint64_t len, int64_t size) {' \
+    '    return rt_mmap(path, len, size, 0, 1);' \
+    '}' >"$work/probe.c"
+"$cc_bin" -std=c11 -O0 -I"$ROOT/src/runtime" -c "$work/probe.c" -o "$work/probe.o"
+"$cc_bin" -r "$work/probe.o" "$work/runtime.o" -o "$work/combined.o"
+
+"$nm_bin" -g --defined-only "$work/combined.o" | grep -Eq '[[:space:]]T[[:space:]]rt_mmap$' || {
+    echo "FAIL: native relocatable link does not define canonical rt_mmap" >&2
+    exit 1
+}
+if "$nm_bin" -u "$work/combined.o" | grep -Eq '[[:space:]]rt_mmap$'; then
+    echo "FAIL: native relocatable link leaves rt_mmap unresolved" >&2
+    exit 1
+fi
+
+echo "PASS: rt_mmap is ptr/len-registered, runtime-owned, native-linkable, and preserves map/touch/unmap work"

@@ -1,0 +1,281 @@
+# @cover src/lib/nogc_sync_mut/spec/evidence/counterpart/worker_provider.spl 80%
+"""
+# Counterpart Conformance — worker receipt framing and status mapping
+
+**Category:** Infrastructure
+**Status:** In Progress
+**Design:** doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md
+
+## Purpose and Audience
+
+The isolated-worker provider talks to its worker over length-framed ASCII
+requests and receipt frames on stdout. This scenario is for the engineer
+extending the worker protocol, and it pins the pure protocol layer: request
+framing refusals, receipt parsing refusals, escape decoding, and the frozen
+provider-status → comparison/artifact projection table.
+
+## Scope and Preconditions
+
+No real worker binary is required: receipts are crafted text, and the one
+end-to-end invocation uses a shell stand-in that prints a well-formed receipt.
+Real worker isolation is covered by
+`test/02_integration/infra/counterpart/worker_isolation_spec.spl`.
+
+## Evidence and Provenance
+
+Every refusal below is produced by the parser at run time. The status table is
+asserted row by row against the frozen mapping in the module header.
+"""
+
+use std.spec.*
+use std.common.spec.evidence.counterpart.model.{ProviderStatus}
+use std.nogc_sync_mut.spec.evidence.counterpart.worker_provider.{
+    WORKER_RECEIPT_MAGIC,
+    WORKER_RECEIPT_SCHEMA,
+    WorkerOutcome,
+    frame_request,
+    frame_requests,
+    invoke_isolated,
+    outcome_is_pass,
+    outcome_status_name,
+    parse_receipt,
+    worker_config
+}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# A complete receipt frame as the worker prints it, with a caller-chosen
+# provider_status token.
+fn a_receipt_with_status(status_token: text) -> text:
+    (WORKER_RECEIPT_MAGIC + "\n"
+        + "schema: " + WORKER_RECEIPT_SCHEMA + "\n"
+        + "provider_status: " + status_token + "\n"
+        + "component_id: \"demo.component\"\n"
+        + "invocation: 1\n"
+        + "call_status: 0\n"
+        + "exit_signal: 0\n"
+        + "exit_code: 0\n"
+        + "duration_ms: 12\n"
+        + "response: \"schema_id: x\\x0aitem_count: 2\"\n"
+        + "trace: \"execution_mode: cpu_reference\"\n"
+        + "diagnostic: \"\"\n")
+
+fn parsed(status_token: text) -> WorkerOutcome:
+    match parse_receipt(a_receipt_with_status(status_token)):
+        Ok(outcome): outcome
+        Err(message):
+            fail("receipt with status '{status_token}' failed to parse: {message}")
+            parsed("executed")
+
+# ============================================================================
+# Request framing
+# ============================================================================
+# @manual_section: Framing requests for the worker
+
+describe "Counterpart worker request framing":
+    it "frames an ASCII request with greppable decimal lengths":
+        step("Frame one component request")
+        match frame_request("demo.component", "request: run"):
+            Ok(frame):
+                assert_true(frame.starts_with("SCFQ1 14 12\n"))
+                assert_true(frame.contains("demo.componentrequest: run"))
+            Err(message): assert_true(false)
+        step("Concatenate frames without a separator")
+        expect(frame_requests(["a", "b"])).to_equal("ab")
+
+    it "refuses non-ASCII payloads rather than mis-measuring their length":
+        step("Frame a component id carrying a non-ASCII character")
+        match frame_request("démo", "request"):
+            Ok(frame): assert_true(false)
+            Err(message): assert_true(message.contains("component_id must be ASCII"))
+        step("Frame a request payload carrying a non-ASCII character")
+        match frame_request("demo", "réquest"):
+            Ok(frame): assert_true(false)
+            Err(message): assert_true(message.contains("request payload must be ASCII"))
+
+# ============================================================================
+# Receipt parsing refusals
+# ============================================================================
+# @manual_section: What the receipt parser refuses
+
+describe "Counterpart worker receipt refusals":
+    it "refuses stdout that carries no receipt frame":
+        step("Parse plain stdout with no magic")
+        match parse_receipt("hello world"):
+            Ok(outcome): assert_true(false)
+            Err(message): assert_true(message.contains("no SCFR1 receipt frame"))
+
+    it "refuses a frame that does not declare the receipt schema":
+        step("Parse a frame with magic but no schema declaration")
+        match parse_receipt(WORKER_RECEIPT_MAGIC + "\nprovider_status: executed\n"):
+            Ok(outcome): assert_true(false)
+            Err(message): assert_true(message.contains("does not declare schema"))
+
+    it "refuses a receipt that declares no provider status":
+        step("Parse a schema-complete frame missing provider_status")
+        match parse_receipt(WORKER_RECEIPT_MAGIC + "\nschema: "
+                + WORKER_RECEIPT_SCHEMA + "\ncomponent_id: \"x\"\n"):
+            Ok(outcome): assert_true(false)
+            Err(message): assert_true(message.contains("declares no provider_status"))
+
+    it "refuses an unrecognised status token rather than downgrading it":
+        step("Parse a receipt claiming a status outside the frozen vocabulary")
+        match parse_receipt(a_receipt_with_status("mostly_fine")):
+            Ok(outcome): assert_true(false)
+            Err(message): assert_true(message.contains("unrecognised provider_status"))
+
+# ============================================================================
+# Receipt decoding and the frozen status table
+# ============================================================================
+# @manual_section: Decoding receipts and projecting statuses
+
+describe "Counterpart worker receipt decoding":
+    it "decodes every field of an executed receipt including escaped newlines":
+        step("Parse the complete executed receipt")
+        val outcome = parsed("executed")
+        expect(outcome_status_name(outcome)).to_equal("executed")
+        expect(outcome.component_id).to_equal("demo.component")
+        expect(outcome.invocation).to_equal(1)
+        expect(outcome.duration_ms).to_equal(12)
+        step("Confirm the \\x0a escape decoded to a newline in the response")
+        assert_true(outcome.response.contains("schema_id: x\nitem_count: 2"))
+        step("Confirm an executed uncontested outcome is a pass")
+        assert_true(outcome_is_pass(outcome))
+
+    it "flattens escapes it cannot represent instead of guessing bytes":
+        step("Parse a response carrying \\x41 and a backslash escape")
+        match parse_receipt(WORKER_RECEIPT_MAGIC + "\nschema: "
+                + WORKER_RECEIPT_SCHEMA + "\nprovider_status: executed\n"
+                + "response: \"a\\x41b\\\"c\"\n"):
+            Ok(outcome):
+                expect(outcome.response).to_equal("a?b\"c")
+            Err(message): assert_true(false)
+
+    it "keeps a malformed number a sentinel, never a zero":
+        step("Parse a receipt whose duration is not a decimal")
+        match parse_receipt(WORKER_RECEIPT_MAGIC + "\nschema: "
+                + WORKER_RECEIPT_SCHEMA + "\nprovider_status: executed\n"
+                + "duration_ms: 12x\n"):
+            Ok(outcome): expect(outcome.duration_ms).to_equal(-1)
+            Err(message): assert_true(false)
+
+    it "projects each provider status onto the frozen comparison/artifact table":
+        step("executed → not_compared / complete")
+        val executed = parsed("executed")
+        expect(executed.comparison_status).to_equal("not_compared")
+        expect(executed.artifact_status).to_equal("complete")
+        step("crashed → failed / partial, and never a pass")
+        val crashed = parsed("crashed")
+        expect(crashed.comparison_status).to_equal("failed")
+        expect(crashed.artifact_status).to_equal("partial")
+        assert_false(outcome_is_pass(crashed))
+        step("timed_out → failed / partial")
+        val timed_out = parsed("timed_out")
+        expect(timed_out.comparison_status).to_equal("failed")
+        expect(timed_out.artifact_status).to_equal("partial")
+        step("unavailable → not_compared / absent")
+        val unavailable = parsed("unavailable")
+        expect(unavailable.comparison_status).to_equal("not_compared")
+        expect(unavailable.artifact_status).to_equal("absent")
+        step("rejected_manifest → failed / absent")
+        val rejected = parsed("rejected_manifest")
+        expect(rejected.comparison_status).to_equal("failed")
+        expect(rejected.artifact_status).to_equal("absent")
+
+# ============================================================================
+# Invocation plumbing
+# ============================================================================
+# @manual_section: Spawning the worker
+
+describe "Counterpart worker invocation plumbing":
+    it "runs a stand-in worker end to end and carries its exit code":
+        step("Install a shell stand-in that prints a well-formed receipt")
+        val worker = "build/counterpart/receipt_echo_worker.sh"
+        val (mk_out, mk_err, mk_code) = rt_process_run("/bin/mkdir", ["-p", "build/counterpart"])
+        expect(mk_code).to_equal(0)
+        assert_true(rt_file_write_text(worker,
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '" + WORKER_RECEIPT_MAGIC
+                + "' 'schema: " + WORKER_RECEIPT_SCHEMA
+                + "' 'provider_status: executed' 'component_id: \"demo.component\"'\n"))
+        val (ch_out, ch_err, ch_code) = rt_process_run("/bin/chmod", ["+x", worker])
+        expect(ch_code).to_equal(0)
+        step("Invoke it through the isolated transport")
+        val config = worker_config(worker, "build/counterpart/no_adapter.so",
+            "build/counterpart/receipt_echo_request.bin")
+        match invoke_isolated(config, "demo.component", "request: run"):
+            Ok(outcome):
+                expect(outcome_status_name(outcome)).to_equal("executed")
+                expect(outcome.worker_exit_code).to_equal(0)
+            Err(message): assert_true(false)
+
+    it "refuses a worker path containing a shell quote rather than mis-quoting it":
+        step("Invoke with a worker path that cannot be safely single-quoted")
+        val config = worker_config("build/counterpart/o'worker",
+            "adapter.so", "build/counterpart/quote_request.bin")
+        match invoke_isolated(config, "demo.component", "request"):
+            Ok(outcome): assert_true(false)
+            Err(message): assert_true(message.contains("single quote"))
+
+    it "reports a request file it could not write instead of running anyway":
+        step("Invoke with a request file inside a directory that does not exist")
+        val config = worker_config("/bin/true", "adapter.so",
+            "build/counterpart/no-such-dir/req.bin")
+        match invoke_isolated(config, "demo.component", "request"):
+            Ok(outcome): assert_true(false)
+            Err(message): assert_true(message.contains("could not write request frame"))
+
+
+# ============================================================================
+# Residual decode branches
+# ============================================================================
+# @manual_section: Residual decode branches
+
+describe "Counterpart worker residual decode branches":
+    it "flattens an invalid hex escape instead of decoding garbage":
+        step("Parse a response carrying \\xZZ — not hex digits at all")
+        match parse_receipt(WORKER_RECEIPT_MAGIC + "\nschema: "
+                + WORKER_RECEIPT_SCHEMA + "\nprovider_status: executed\n"
+                + "response: \"a\\xZZb\"\n"):
+            Ok(outcome): expect(outcome.response).to_equal("a?b")
+            Err(message): assert_true(false)
+
+    it "keeps an empty numeric field a sentinel, never a zero":
+        step("Parse a receipt whose invocation field is empty")
+        match parse_receipt(WORKER_RECEIPT_MAGIC + "\nschema: "
+                + WORKER_RECEIPT_SCHEMA + "\nprovider_status: executed\n"
+                + "invocation: \"\"\n"):
+            Ok(outcome): expect(outcome.invocation).to_equal(-1)
+            Err(message): assert_true(false)
+
+    it "keeps a blank numeric field (no value at all) a sentinel, never a zero":
+        step("Parse a receipt whose invocation field has nothing after the colon")
+        match parse_receipt(WORKER_RECEIPT_MAGIC + "\nschema: "
+                + WORKER_RECEIPT_SCHEMA + "\nprovider_status: executed\n"
+                + "invocation: \n"):
+            Ok(outcome): expect(outcome.invocation).to_equal(-1)
+            Err(message): assert_true(false)
+
+    it "reports a non-executed outcome as not a pass":
+        step("Project a crashed receipt through outcome_is_pass")
+        assert_false(outcome_is_pass(parsed("crashed")))
+        assert_true(outcome_is_pass(parsed("executed")))
+
+    it "prefixes the stall knob onto the worker command when configured":
+        step("Reuse the receipt-echo stand-in with stall_ms set")
+        val worker = "build/counterpart/receipt_echo_worker.sh"
+        val (mk_out, mk_err, mk_code) = rt_process_run("/bin/mkdir", ["-p", "build/counterpart"])
+        expect(mk_code).to_equal(0)
+        assert_true(rt_file_write_text(worker,
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '" + WORKER_RECEIPT_MAGIC
+                + "' 'schema: " + WORKER_RECEIPT_SCHEMA
+                + "' 'provider_status: executed' 'component_id: \"demo.component\"'\n"))
+        val (ch_out, ch_err, ch_code) = rt_process_run("/bin/chmod", ["+x", worker])
+        expect(ch_code).to_equal(0)
+        var config = worker_config(worker, "build/counterpart/no_adapter.so",
+            "build/counterpart/receipt_echo_request.bin")
+        config.stall_ms = 5
+        step("Invoke and confirm the stalled invocation still succeeds")
+        match invoke_isolated(config, "demo.component", "request: run"):
+            Ok(outcome): expect(outcome_status_name(outcome)).to_equal("executed")
+            Err(message): assert_true(false)

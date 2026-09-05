@@ -1,0 +1,150 @@
+#!/bin/sh
+# check-log-error-visible-by-default.shs
+#
+# Fences the defect class "errors are silently suppressed by default":
+# a logging module whose level gate defaults to OFF, so error()/fatal()
+# produce NO output unless the operator happens to have set SIMPLE_LOG.
+# That shape produces a silent non-zero exit, which is how three fork bombs
+# and several other failures stayed invisible for days.
+#
+# History:
+#   c5fee72e5b4  src/lib/log.spl        -- log_dispatch_text wrote only to a
+#                                          ring buffer nothing drains.
+#   this check   src/lib/nogc_sync_mut/log.spl
+#                                       -- _parse_log_level() returned 0
+#                                          (LOG_OFF) when SIMPLE_LOG was unset.
+#
+# The check is deliberately TWO-SIDED. A positive-only probe ("does ERROR
+# appear?") passes trivially on a module that logs absolutely everything, which
+# would let a fix that simply removed the gate look correct. So it also asserts
+# the NEGATIVE CONTROL: a sub-ERROR level (INFO) must STILL be filtered when
+# SIMPLE_LOG is unset. Both sides must hold, in both execution lanes.
+#
+# Verdict line is the last line of stdout:
+#   PASS -- <n> assertion(s) checked ...   exit 0
+#   FAIL -- ...                            exit 1
+#   ERROR -- nothing was checked           exit 2
+#
+# Usage: sh scripts/check/check-log-error-visible-by-default.shs
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR -- nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="./bin/simple"
+if [ ! -e "$SIMPLE_BIN" ]; then
+    echo "ERROR -- nothing was checked (no $SIMPLE_BIN in $REPO_ROOT)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+FIXTURE="$WORK/log_default_visibility_probe.spl"
+cat > "$FIXTURE" <<'SPL'
+# Fixture for check-log-error-visible-by-default.shs.
+# ERROR/FATAL must reach stderr with SIMPLE_LOG unset; INFO must not.
+use std.nogc_sync_mut.log as L
+
+fn main():
+    L.error(scope: "logvis", msg: "LOGVIS_ERROR_MARK")
+    L.fatal(scope: "logvis", msg: "LOGVIS_FATAL_MARK")
+    L.info(scope: "logvis", msg: "LOGVIS_INFO_MARK")
+SPL
+
+FAILURES=0
+ASSERTIONS=0
+
+fail() {
+    echo "  FAIL: $1"
+    FAILURES=$((FAILURES + 1))
+}
+
+# count_mark <mode> <mark> ; echoes the number of lines containing <mark>
+count_mark() {
+    _mode=$1
+    _mark=$2
+    env -u SIMPLE_LOG SIMPLE_EXECUTION_MODE="$_mode" \
+        timeout 300 "$SIMPLE_BIN" run "$FIXTURE" 2>&1 \
+        | grep -c "$_mark"
+}
+
+# Engines diverge in this repo: a log path that works interpreted can be
+# dead-code-eliminated or left unresolved in a compiled lane, so check both.
+for MODE in interpreter jit; do
+    echo "== lane: $MODE (SIMPLE_LOG unset) =="
+
+    OUT=$(env -u SIMPLE_LOG SIMPLE_EXECUTION_MODE="$MODE" \
+          timeout 300 "$SIMPLE_BIN" run "$FIXTURE" 2>&1)
+    RC=$?
+    if [ $RC -ne 0 ]; then
+        fail "$MODE: fixture exited $RC (expected 0)"
+        ASSERTIONS=$((ASSERTIONS + 1))
+        continue
+    fi
+
+    N_ERROR=$(printf '%s\n' "$OUT" | grep -c 'LOGVIS_ERROR_MARK')
+    N_FATAL=$(printf '%s\n' "$OUT" | grep -c 'LOGVIS_FATAL_MARK')
+    N_INFO=$(printf '%s\n' "$OUT" | grep -c 'LOGVIS_INFO_MARK')
+
+    # --- POSITIVE: error/fatal must be visible AND labelled --------------
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if [ "$N_ERROR" -lt 1 ]; then
+        fail "$MODE: error() emitted 0 lines with SIMPLE_LOG unset -- errors are silently suppressed by default"
+    fi
+
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if [ "$N_FATAL" -lt 1 ]; then
+        fail "$MODE: fatal() emitted 0 lines with SIMPLE_LOG unset -- errors are silently suppressed by default"
+    fi
+
+    # A bare unlabelled copy of the message is not an operator-legible
+    # diagnostic; the tier module's own "[ERROR] [scope] msg" line is what
+    # tells a human WHAT level and WHICH subsystem failed.
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! printf '%s\n' "$OUT" | grep -q '\[ERROR\] \[logvis\] LOGVIS_ERROR_MARK'; then
+        fail "$MODE: error() produced no labelled '[ERROR] [logvis] ...' line with SIMPLE_LOG unset"
+    fi
+
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! printf '%s\n' "$OUT" | grep -q '\[FATAL\] \[logvis\] LOGVIS_FATAL_MARK'; then
+        fail "$MODE: fatal() produced no labelled '[FATAL] [logvis] ...' line with SIMPLE_LOG unset"
+    fi
+
+    # --- NEGATIVE CONTROL -------------------------------------------------
+    # Without this the whole check passes trivially on a module that has had
+    # its level gate removed entirely and logs everything unconditionally.
+    # SIMPLE_LOG governs verbosity BELOW the error threshold; it must still
+    # govern it. INFO is below ERROR, so it must stay filtered by default.
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if [ "$N_INFO" -ne 0 ]; then
+        fail "$MODE: negative control -- info() emitted $N_INFO line(s) with SIMPLE_LOG unset (sub-ERROR levels must stay filtered; the level gate looks removed rather than floored)"
+    fi
+
+    echo "  error=$N_ERROR fatal=$N_FATAL info=$N_INFO (expect error>=1 fatal>=1 info==0)"
+done
+
+# --- Explicit opt-out must still work ------------------------------------
+# Raising the default floor must not take away the operator's ability to
+# silence the module deliberately.
+echo "== opt-out: SIMPLE_LOG=off =="
+OUT_OFF=$(SIMPLE_EXECUTION_MODE=interpreter SIMPLE_LOG=off \
+          timeout 300 "$SIMPLE_BIN" run "$FIXTURE" 2>&1)
+ASSERTIONS=$((ASSERTIONS + 1))
+if printf '%s\n' "$OUT_OFF" | grep -q '\[ERROR\] \[logvis\]'; then
+    fail "SIMPLE_LOG=off still emitted a labelled [ERROR] line -- explicit opt-out is broken"
+fi
+
+if [ "$ASSERTIONS" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+
+if [ "$FAILURES" -ne 0 ]; then
+    echo "FAIL -- $FAILURES of $ASSERTIONS assertion(s) failed across 2 execution lanes"
+    exit 1
+fi
+
+echo "PASS -- $ASSERTIONS assertion(s) checked across 2 execution lanes (interpreter, jit), including the sub-ERROR negative control and the SIMPLE_LOG=off opt-out"
+exit 0

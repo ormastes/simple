@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/kernel/boot/riscv_services.spl"
+unbacked="$root/scripts/check/unbacked_extern_baseline.txt"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+raw_symbols="log_raw_println rt_pci_device_count rt_pci_get_field rt_net_init rt_net_tx_test rt_net_rx_ready rt_net_stats rt_storage_init rt_storage_read_probe rt_storage_capacity_sectors rt_storage_nvfs_ready rt_storage_nvfs_arena_ready"
+for raw in $raw_symbols; do
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+done
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 12 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 12 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 12 ]
+for expected in _sffi_log_raw_println:52 _sffi_pci_device_count:2 \
+    _sffi_pci_get_field:5 _sffi_net_init:2 _sffi_net_tx_test:2 \
+    _sffi_net_rx_ready:2 _sffi_net_stats:2 _sffi_storage_init:2 \
+    _sffi_storage_read_probe:2 _sffi_storage_capacity_sectors:2 \
+    _sffi_storage_nvfs_ready:2 _sffi_storage_nvfs_arena_ready:2; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+for raw in rt_pci_device_count rt_pci_get_field rt_net_init rt_net_tx_test \
+    rt_net_rx_ready rt_net_stats rt_storage_init rt_storage_read_probe \
+    rt_storage_capacity_sectors rt_storage_nvfs_ready \
+    rt_storage_nvfs_arena_ready; do
+    grep -qx "$raw" "$unbacked"
+done
+
+grep -q 'if count < 0 or count > 256:' "$module"
+[ "$(grep -c '_decode_riscv_status(_sffi_storage_' "$module")" -eq 4 ]
+grep -q 'if not boot_tcp_probe_close(tcp_probe_fd):' "$module"
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "RISC-V services SFFI authority audit: PASS (raw calls confined; status/count/close failures reject; unbacked providers explicit)"

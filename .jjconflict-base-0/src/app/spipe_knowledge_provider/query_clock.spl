@@ -1,0 +1,68 @@
+# Parent-owned monotonic clock port for request deadlines. Query algorithms take
+# this port explicitly so tests and alternate hosts can supply deterministic
+# time without hiding wall-clock reads inside scoring loops.
+use std.io_runtime.{time_now_monotonic_ms}
+
+trait QueryClockPort:
+    me now_ms() -> i64
+    fn request_cancelled(request_id: text) -> bool
+
+class SystemQueryClockV1 with QueryClockPort:
+    marker: i64
+    static fn configured() -> SystemQueryClockV1:
+        SystemQueryClockV1(marker: 1)
+    me now_ms() -> i64: time_now_monotonic_ms()
+    fn request_cancelled(request_id: text) -> bool: false
+
+class FixedQueryClockV1 with QueryClockPort:
+    observed_at_ms: i64
+    static fn at(observed_at_ms: i64) -> FixedQueryClockV1:
+        FixedQueryClockV1(observed_at_ms: observed_at_ms)
+    me now_ms() -> i64: self.observed_at_ms
+    fn request_cancelled(request_id: text) -> bool: false
+
+# Deterministic cooperative-work oracle. Every clock observation returns the
+# current value and then advances by `step_ms`; cancellation becomes visible
+# after `cancel_after_observations` observations. A negative cancellation
+# threshold disables cancellation. The request binding prevents a test double
+# from cancelling an unrelated request accidentally.
+class SteppingQueryClockV1 with QueryClockPort:
+    var observed_at_ms: i64
+    step_ms: i64
+    var observations: i64
+    cancel_after_observations: i64
+    cancel_request_id: text
+
+    static fn configured(observed_at_ms: i64, step_ms: i64,
+                         cancel_after_observations: i64,
+                         cancel_request_id: text) -> SteppingQueryClockV1:
+        SteppingQueryClockV1(observed_at_ms: observed_at_ms,
+            step_ms: step_ms, observations: 0,
+            cancel_after_observations: cancel_after_observations,
+            cancel_request_id: cancel_request_id)
+
+    me now_ms() -> i64:
+        val observed = self.observed_at_ms
+        self.observed_at_ms = self.observed_at_ms + self.step_ms
+        self.observations = self.observations + 1
+        observed
+
+    fn request_cancelled(request_id: text) -> bool:
+        self.cancel_after_observations >= 0 and
+            self.observations >= self.cancel_after_observations and
+            self.cancel_request_id == request_id
+
+fn query_deadline_exceeded(clock: QueryClockPort, admitted_at_ms: i64,
+                           deadline_ms: i64) -> bool:
+    if deadline_ms <= 0: return false
+    val observed_at_ms = clock.now_ms()
+    admitted_at_ms < 0 or observed_at_ms < admitted_at_ms or
+        observed_at_ms - admitted_at_ms >= deadline_ms
+
+fn query_stop_reason(clock: QueryClockPort, request_id: text,
+                     admitted_at_ms: i64, deadline_ms: i64) -> text:
+    if request_id != "" and clock.request_cancelled(request_id):
+        return "cancelled"
+    if query_deadline_exceeded(clock, admitted_at_ms, deadline_ms):
+        return "deadline_exceeded"
+    ""

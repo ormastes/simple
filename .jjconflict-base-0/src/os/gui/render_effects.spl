@@ -1,0 +1,119 @@
+# Rendering Effects — Shadow, Noise Blend, Border
+#
+# Companion to render.spl. Depends on px_read/px_write/alpha_blend/blend_fill
+# from render.spl, and _blur_h/_blur_v from render_shapes.spl.
+
+use os.gui.render.{px_read, px_write, alpha_blend, blend_fill, render_width, render_height}
+use os.gui.render_shapes.{_blur_h, _blur_v}
+
+# ============================================================================
+# Shadow (Blur + Offset)
+# ============================================================================
+
+fn shadow(x: u64, y: u64, w: u64, h: u64, blur_radius: u64, alpha: u64, offset: u64):
+    """Draw a drop shadow below/right of a rectangle.
+
+    Renders a dark rectangle offset from the given position, then blurs it.
+    Matches the glass_render.c shadow implementation.
+    """
+    if w == 0 or h == 0:
+        return
+
+    val gw = render_width()
+    val gh = render_height()
+
+    var sa = alpha * 3 / 2
+    if sa > 255:
+        sa = 255
+    var br = blur_radius
+    if br > 45:
+        br = 45
+    var off = offset
+    if off == 0:
+        off = 6
+
+    val sx = x + off
+    val sy = y + off
+    var sw = w + off
+    var sh = h + off
+
+    if sx >= gw or sy >= gh:
+        return
+    if sx + sw > gw:
+        sw = gw - sx
+    if sy + sh > gh:
+        sh = gh - sy
+
+    blend_fill(sx, sy, sw, sh, 0x000000, sa)
+
+    if br > 0:
+        _blur_h(sx, sy, sw, sh, br)
+        _blur_v(sx, sy, sw, sh, br)
+
+    if br > 4:
+        var ex = sx
+        if ex >= 2:
+            ex = sx - 2
+        else:
+            ex = 0
+        var ey = sy
+        if ey >= 2:
+            ey = sy - 2
+        else:
+            ey = 0
+        val ew = sw + 4
+        val eh = sh + 4
+        val glow_alpha = sa / 4
+        if ex + ew <= gw and ey + eh <= gh:
+            blend_fill(ex, ey, ew, 1, 0x000000, glow_alpha)
+            val bot = ey + eh - 1
+            if bot < gh:
+                blend_fill(ex, bot, ew, 1, 0x000000, glow_alpha)
+
+# ============================================================================
+# Noise Texture Blend
+# ============================================================================
+
+fn noise_blend(x: u64, y: u64, w: u64, h: u64, intensity: u64):
+    """Add subtle noise pattern to glass surfaces (frosted glass grain).
+
+    Uses a pseudo-random hash function applied to ~30% of pixels for
+    a subtle effect matching macOS frosted glass.
+    """
+    if w == 0 or h == 0 or intensity == 0:
+        return
+    val gw = render_width()
+    val gh = render_height()
+    var row: u64 = 0
+    while row < h:
+        val py = y + row
+        if py >= gh:
+            return
+        var col: u64 = 0
+        while col < w:
+            val px = x + col
+            if px >= gw:
+                col = col + 1
+                continue
+            var hash = (px * 2654435761) ^ (py * 2246822519)
+            hash = ((hash >> 16) ^ hash) * 0x45d9f3b
+            hash = (hash >> 16) ^ hash
+            if (hash & 7) < 3:
+                val dst = px_read(px, py)
+                val noise_color = if (hash >> 8) & 1 == 1: 0x00FFFFFF else: 0x00000000
+                px_write(px, py, alpha_blend(dst, noise_color, intensity))
+            col = col + 1
+        row = row + 1
+
+# ============================================================================
+# Border Drawing
+# ============================================================================
+
+fn draw_border(x: u64, y: u64, w: u64, h: u64, color: u64, alpha: u64):
+    """Draw a 1px semi-transparent border around a rectangle."""
+    blend_fill(x, y, w, 1, color, alpha)
+    if h > 1:
+        blend_fill(x, y + h - 1, w, 1, color, alpha)
+    blend_fill(x, y, 1, h, color, alpha)
+    if w > 1:
+        blend_fill(x + w - 1, y, 1, h, color, alpha)

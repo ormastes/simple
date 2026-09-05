@@ -1,0 +1,151 @@
+# @covers src/lib/common/sdn/schema.spl 80%
+"""
+# SDN Schema Decode Specification
+
+**Feature IDs:** #LIB-SDN
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** doc/03_plan/app/ide_extension_kernel/parallel_agent_shared_foundation_plan.md (S1)
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for the typed decode helpers in `src/lib/common/sdn/schema.spl`:
+all issues are collected in one pass (no fail-fast), optional getters stay
+silent on missing paths, require_* getters report missing paths, and
+`sdn_locate_issues` attaches line/col from a `parse_with_spans` span map.
+"""
+
+import std.spec
+
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.parser.{parse, parse_with_spans}
+use std.common.sdn.schema.{SdnDecodeIssue, SdnDecodeIssues, sdn_get_text, sdn_get_int, sdn_get_bool, sdn_get_array, sdn_get_text_array, sdn_get_dict, sdn_require_text, sdn_require_int, sdn_locate_issues}
+
+describe "sdn schema decode":
+    """
+    ## Issue-collecting typed decode
+    """
+
+    it "collects multiple issues in one pass":
+        val src = "id: 42\nname: ok\nflags: [1, two, 3]"
+        match parse(src):
+            case Ok(v):
+                val issues = SdnDecodeIssues.new()
+                val id = sdn_get_text(v, "id", issues)
+                expect(id == nil).to_equal(true)
+                val missing = sdn_require_text(v, "publisher", issues)
+                expect(missing == nil).to_equal(true)
+                val name = sdn_require_text(v, "name", issues)
+                match name:
+                    case Some(n):
+                        expect(n).to_equal("ok")
+                    case None:
+                        expect("name").to_equal("decoded")
+                match sdn_get_text_array(v, "flags", issues):
+                    case Some(fl):
+                        expect(fl.len()).to_equal(1)
+                        expect(fl[0]).to_equal("two")
+                    case None:
+                        expect("flags").to_equal("decoded")
+                expect(issues.count()).to_equal(4)
+                expect(issues.items[0].path).to_equal("id")
+                expect(issues.items[0].message).to_contain("expected text")
+                expect(issues.items[1].path).to_equal("publisher")
+                expect(issues.items[1].message).to_equal("missing required field")
+                expect(issues.items[2].path).to_equal("flags.0")
+                expect(issues.items[3].path).to_equal("flags.2")
+            case Err(_):
+                expect("parse failed").to_equal("should not fail")
+
+    it "does not report missing optional fields":
+        match parse("a: 1"):
+            case Ok(v):
+                val issues = SdnDecodeIssues.new()
+                val t = sdn_get_text(v, "nope", issues)
+                expect(t == nil).to_equal(true)
+                expect(issues.count()).to_equal(0)
+                expect(issues.is_empty()).to_equal(true)
+            case Err(_):
+                expect("parse failed").to_equal("should not fail")
+
+    it "decodes well-typed fields without issues":
+        val src = "n: 7\nok: true\nd: " + '{x: 1}' + "\narr: [1, 2]\nnames: [a, b]"
+        match parse(src):
+            case Ok(v):
+                val issues = SdnDecodeIssues.new()
+                match sdn_get_int(v, "n", issues):
+                    case Some(n):
+                        expect(n).to_equal(7)
+                    case None:
+                        expect("n").to_equal("decoded")
+                match sdn_get_bool(v, "ok", issues):
+                    case Some(b):
+                        expect(b).to_equal(true)
+                    case None:
+                        expect("ok").to_equal("decoded")
+                match sdn_get_dict(v, "d", issues):
+                    case Some(d):
+                        expect(d.contains_key("x")).to_equal(true)
+                    case None:
+                        expect("d").to_equal("decoded")
+                match sdn_get_array(v, "arr", issues):
+                    case Some(a):
+                        expect(a.len()).to_equal(2)
+                    case None:
+                        expect("arr").to_equal("decoded")
+                match sdn_get_text_array(v, "names", issues):
+                    case Some(ns):
+                        expect(ns.len()).to_equal(2)
+                        expect(ns[1]).to_equal("b")
+                    case None:
+                        expect("names").to_equal("decoded")
+                expect(issues.count()).to_equal(0)
+            case Err(_):
+                expect("parse failed").to_equal("should not fail")
+
+    it "reports type mismatches on nested dotted paths":
+        val src = "extension:\n  id: 42"
+        match parse(src):
+            case Ok(v):
+                val issues = SdnDecodeIssues.new()
+                val id = sdn_get_text(v, "extension.id", issues)
+                expect(id == nil).to_equal(true)
+                expect(issues.count()).to_equal(1)
+                expect(issues.items[0].path).to_equal("extension.id")
+            case Err(_):
+                expect("parse failed").to_equal("should not fail")
+
+    it "requires ints and reports both missing and mistyped":
+        match parse("a: text_value"):
+            case Ok(v):
+                val issues = SdnDecodeIssues.new()
+                val a = sdn_require_int(v, "a", issues)
+                expect(a == nil).to_equal(true)
+                val b = sdn_require_int(v, "b", issues)
+                expect(b == nil).to_equal(true)
+                expect(issues.count()).to_equal(2)
+                expect(issues.items[0].message).to_contain("expected int")
+                expect(issues.items[1].message).to_equal("missing required field")
+            case Err(_):
+                expect("parse failed").to_equal("should not fail")
+
+    it "locates issues via a parse_with_spans span map":
+        val src = "extension:\n  id: 42"
+        match parse_with_spans(src):
+            case Ok(r):
+                val v = r.0
+                val spans = r.1
+                val issues = SdnDecodeIssues.new()
+                val id = sdn_get_text(v, "extension.id", issues)
+                expect(id == nil).to_equal(true)
+                val located = sdn_locate_issues(issues, spans)
+                expect(located.len()).to_equal(1)
+                expect(located[0].path).to_equal("extension.id")
+                expect(located[0].line).to_equal(2)
+                expect(located[0].col).to_equal(3)
+            case Err(_):
+                expect("parse failed").to_equal("should not fail")

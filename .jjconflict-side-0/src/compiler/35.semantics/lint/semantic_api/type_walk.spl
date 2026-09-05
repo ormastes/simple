@@ -1,0 +1,237 @@
+# semantic_api type walker — recursive primitive-leaf discovery (lane A1)
+#
+# Recursively walks a declaration's type TEXT and returns every bare-primitive
+# leaf reachable anywhere in the type graph:
+#   - generics unwrap: Option<T>, Result<T,E>, List<T>, Dict<K,V>, arbitrary Name<...>
+#   - arrays: [T]
+#   - dict shorthand: {K: V}
+#   - tuples: (A, B, ...)
+#   - suffix optional: T?
+#   - unions: A | B
+#   - fn types: fn(A, B) -> R
+# nested to any depth. `Option<i32>` IS a violation; `Option<RetryCount>` is not.
+#
+# Why TEXT and not arena type tags: the arena tag model is lossy for exactly
+# the cases this checker exists for — the parser collapses `Option<i32>` (and
+# any Option of a non-{i64,f64,text,bool} element) to the bare TYPE_OPTION
+# sentinel (parser.spl parser_parse_type_impl Option handling), so
+# `Dict<text, Option<i32>>` registers as Dict(text, Option-erased) and the i32
+# is unrecoverable from tags. The flat AST (compiler.frontend.ast FunctionDef /
+# StructDef) carries full type text, which preserves the whole graph.
+#
+# Canonical primitive table: compiler.semantics.lint.primitive_types (11 types
+# INCLUDING bool) — consumed, never redeclared here.
+#
+# newunit awareness: a leaf that names a parser-registered `newunit` is a
+# domain type, never a violation (compiler.core.types newunit registry, which
+# unit_registry_collect_newunits() also reads).
+
+use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
+use compiler.core.types.{newunit_find}
+use compiler.semantics.lint.semantic_api.alias_registry.{alias_registry_resolve}
+
+fn semantic_api_is_newunit(name: text) -> bool:
+    """True when `name` is a parser-registered `newunit` domain type."""
+    newunit_find(name) >= 0
+
+# ---------------------------------------------------------------------------
+# ALIAS RESOLUTION HOOK (lane ALS1 — closed; was FAIL-OPEN)
+# ---------------------------------------------------------------------------
+# Was: "no alias registry exists" — `type Fd = i64` used as `fn read(fd:
+# Fd)` was never flagged, always returning "" here. Lane TAL1 (commit
+# 5df3b3f5b40, bug type_alias_declarations_discarded_at_parse_2026-07-29)
+# fixed the upstream gap that made this unbuildable: `type X = Y` is now
+# captured into module.type_aliases: Dict<text, TypeAlias>. Lane ALS1 built
+# the registry that answers this hook — see alias_registry.spl for the Type
+# -> text rendering, the registry's populate/resolve API, and the cycle
+# guard (a mutual or self alias cycle bails instead of hanging; this
+# recursive walk's own `resolved != name` check below only ever catches the
+# trivial immediate-self-alias case, not longer cycles).
+fn semantic_api_resolve_alias(name: text) -> text:
+    """Resolve `name` to its (fully-chased, one-hop-per-call-here) aliased
+    type text, or "" when `name` is not a known alias or a cycle was
+    detected. Backed by alias_registry (lane ALS1); "" is genuinely
+    fail-open only for names the registry never saw.
+    """
+    alias_registry_resolve(name)
+
+# ---------------------------------------------------------------------------
+# top-level text splitting (nesting-aware)
+# ---------------------------------------------------------------------------
+
+fn _sa_is_open(c: text) -> bool:
+    c == "<" or c == "[" or c == "(" or c == "{"
+
+fn _sa_is_close(c: text) -> bool:
+    c == ">" or c == "]" or c == ")" or c == "}"
+
+fn sa_split_top(s: text, sep: text) -> [text]:
+    """Split `s` on `sep` occurring at bracket depth 0 (wrt <> [] () {}).
+
+    `->` arrows are not treated as generic closers."""
+    var parts: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if _sa_is_open(c):
+            depth = depth + 1
+        elif _sa_is_close(c):
+            if c == ">" and i > 0 and s.slice(i - 1, i) == "-":
+                pass  # '->' arrow, not a generic close
+            else:
+                depth = depth - 1
+        elif c == sep and depth == 0:
+            parts.push(s.slice(start, i))
+            start = i + 1
+        i = i + 1
+    parts.push(s.slice(start))
+    parts
+
+fn _sa_top_lt_index(s: text) -> i64:
+    """Index of the first '<' at depth 0, or -1."""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c == "<":
+            if depth == 0:
+                return i
+            depth = depth + 1
+        elif _sa_is_open(c):
+            depth = depth + 1
+        elif _sa_is_close(c):
+            if c == ">" and i > 0 and s.slice(i - 1, i) == "-":
+                pass
+            else:
+                depth = depth - 1
+        i = i + 1
+    -1
+
+fn _sa_wrapped_by_outer_pair(s: text, open_c: text, close_c: text) -> bool:
+    """True when s starts with open_c and that bracket closes at the LAST char
+    (so '(A) -> B' is not treated as a tuple)."""
+    if not s.starts_with(open_c):
+        return false
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if _sa_is_open(c):
+            depth = depth + 1
+        elif _sa_is_close(c):
+            if c == ">" and i > 0 and s.slice(i - 1, i) == "-":
+                pass
+            else:
+                depth = depth - 1
+                if depth == 0:
+                    return i == s.len() - 1 and c == close_c
+        i = i + 1
+    false
+
+# ---------------------------------------------------------------------------
+# recursive walk
+# ---------------------------------------------------------------------------
+
+fn _sa_leaves_of_all(parts: [text]) -> [text]:
+    var out: [text] = []
+    for p in parts:
+        val sub = semantic_api_primitive_leaves(p)
+        for leaf in sub:
+            out.push(leaf)
+    out
+
+fn _sa_classify_leaf(name0: text) -> [text]:
+    val name = name0.trim()
+    if name.len() == 0:
+        return []
+    if is_bare_primitive_name(name):
+        return [name]
+    if semantic_api_is_newunit(name):
+        return []
+    # Alias hook (fail-open — see block comment above).
+    val resolved = semantic_api_resolve_alias(name)
+    if resolved != "" and resolved != name:
+        return semantic_api_primitive_leaves(resolved)
+    []
+
+fn semantic_api_primitive_leaves(ty0: text) -> [text]:
+    """All bare-primitive leaves reachable in the type graph of `ty0`.
+
+    Empty result = clean. Recursive; NO pure-math exemption at this level."""
+    val ty = ty0.trim()
+    if ty.len() == 0:
+        return []
+    # suffix optional: T?  (still must check T)
+    if ty.ends_with("?"):
+        return semantic_api_primitive_leaves(ty.slice(0, ty.len() - 1))
+    # union: A | B
+    val uparts = sa_split_top(s: ty, sep: "|")
+    if uparts.len() > 1:
+        return _sa_leaves_of_all(uparts)
+    # array: [T]
+    if _sa_wrapped_by_outer_pair(s: ty, open_c: "[", close_c: "]"):
+        return semantic_api_primitive_leaves(ty.slice(1, ty.len() - 1))
+    # dict shorthand: {K: V}
+    if _sa_wrapped_by_outer_pair(s: ty, open_c: "{", close_c: "}"):
+        val inner = ty.slice(1, ty.len() - 1)
+        return _sa_leaves_of_all(sa_split_top(s: inner, sep: ":"))
+    # fn type: fn(A, B) -> R
+    if ty.starts_with("fn(") or ty.starts_with("fn ("):
+        return _sa_fn_type_leaves(ty)
+    # tuple / parenthesized: (A, B) or (T)
+    if _sa_wrapped_by_outer_pair(s: ty, open_c: "(", close_c: ")"):
+        val inner = ty.slice(1, ty.len() - 1)
+        return _sa_leaves_of_all(sa_split_top(s: inner, sep: ","))
+    # generic: Name<A, B, ...> — the base Name is a wrapper, never a leaf;
+    # every argument is walked (Option<i32> => i32 leaf).
+    if ty.ends_with(">"):
+        val lt = _sa_top_lt_index(ty)
+        if lt >= 0:
+            val args = ty.slice(lt + 1, ty.len() - 1)
+            return _sa_leaves_of_all(sa_split_top(s: args, sep: ","))
+    # plain leaf name
+    _sa_classify_leaf(ty)
+
+fn _sa_fn_type_leaves(ty: text) -> [text]:
+    """Leaves of `fn(A, B) -> R`: walk every param type and the return type."""
+    # find the opening paren
+    var lp = 2
+    while lp < ty.len() and ty.slice(lp, lp + 1) != "(":
+        lp = lp + 1
+    if lp >= ty.len():
+        return []
+    # find matching close paren
+    var depth = 0
+    var rp = -1
+    var i = lp
+    while i < ty.len():
+        val c = ty.slice(i, i + 1)
+        if _sa_is_open(c):
+            depth = depth + 1
+        elif _sa_is_close(c):
+            if c == ">" and i > 0 and ty.slice(i - 1, i) == "-":
+                pass
+            else:
+                depth = depth - 1
+                if depth == 0:
+                    rp = i
+                    break
+        i = i + 1
+    if rp < 0:
+        return []
+    var out: [text] = []
+    val args_leaves = _sa_leaves_of_all(sa_split_top(s: ty.slice(lp + 1, rp), sep: ","))
+    for leaf in args_leaves:
+        out.push(leaf)
+    # return type after '->'
+    val rest = ty.slice(rp + 1).trim()
+    if rest.starts_with("->"):
+        val ret_leaves = semantic_api_primitive_leaves(rest.slice(2))
+        for leaf in ret_leaves:
+            out.push(leaf)
+    out
+
+export semantic_api_primitive_leaves, semantic_api_is_newunit
+export semantic_api_resolve_alias, sa_split_top

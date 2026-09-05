@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+sh -n "$wrapper" || fail "shell syntax"
+grep -Fq -- '--stop-after-stage3' "$wrapper" || fail "help/parser option missing"
+grep -Fq '[ "${stop_after_stage3}" -eq 1 ]' "$wrapper" || fail "stop guard missing"
+grep -Fq "bootstrap_receipt_target='//bootstrap:stage3'" "$wrapper" ||
+  fail "Stage 3 receipt target selection missing"
+grep -Fq '"$(absolute_path "${stage3_provenance_manifest}")" "${repo_root}"' "$wrapper" ||
+  fail "terminal Stage 3 provenance verification missing"
+stop_line=$(grep -n 'Stage 3 stop complete: provenance-verified compiler' "$wrapper" | cut -d: -f1)
+capability_line=$(grep -n '^  stage2_capability_ok=0' "$wrapper" | cut -d: -f1)
+selection_line=$(grep -n '^# Decide which compiler to use for stage 4' "$wrapper" | cut -d: -f1)
+[ -n "$stop_line" ] && [ -n "$capability_line" ] && [ -n "$selection_line" ] ||
+  fail "could not locate Stage 3 terminal ordering boundaries"
+[ "$stop_line" -lt "$capability_line" ] && [ "$stop_line" -lt "$selection_line" ] ||
+  fail "Stage 3 stop does not exit before capability or Stage 4 selection"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+stage3_receipt="$tmp/stage3.receipt"
+printf '%s\n' 'simple-bootstrap-receipt-v1|producer=simple-build-planner-v1|target=//bootstrap:stage3|reason=self-host-convergence-check' >"$stage3_receipt"
+
+validation_log="$tmp/validation.log"
+if sh "$wrapper" --stop-after-stage3 --bootstrap-receipt="$stage3_receipt" \
+    --validate-bootstrap-receipt --output="$tmp/out" >"$validation_log" 2>&1; then
+  fail "retired v1 receipt bypassed admission v2"
+fi
+grep -Fq 'bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2' "$validation_log" ||
+  fail "retired receipt did not fail through admission v2"
+[ ! -e "$tmp/out" ] || fail "rejected receipt started bootstrap work"
+
+for forbidden in --full-cli --deploy --release --diagnostics --diagnostic-sweep \
+    --mode=one-binary --resume-stage3-from-admitted="$tmp/out" \
+    --resume-stage4-from-admitted="$tmp/out"; do
+  combination_log="$tmp/combination.log"
+  if sh "$wrapper" --stop-after-stage3 "$forbidden" \
+      --bootstrap-receipt="$stage3_receipt" --output="$tmp/out" \
+      >"$combination_log" 2>&1; then
+    fail "forbidden combination accepted: $forbidden"
+  fi
+  grep -Fq 'error: --stop-after-stage3 excludes' "$combination_log" ||
+    fail "forbidden combination did not use canonical guard: $forbidden"
+  [ ! -e "$tmp/out" ] || fail "forbidden combination started bootstrap work: $forbidden"
+done
+
+if sh "$wrapper" --stop-after-stage3 --full-cli \
+    --bootstrap-receipt="$stage3_receipt" --validate-bootstrap-receipt \
+    --output="$tmp/out" >"$tmp/validate-combination.log" 2>&1; then
+  fail "receipt-validation mode bypassed the combination guard"
+fi
+grep -Fq 'error: --stop-after-stage3 excludes' "$tmp/validate-combination.log" ||
+  fail "validation-mode combination did not fail at the canonical guard"
+
+printf '%s\n' 'PASS: Stage 3 stop is structurally receipt-bound, rejects retired receipts, is combination-guarded, and cannot enter Stage 4'

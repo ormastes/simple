@@ -1,0 +1,57 @@
+# Diagnostic reproducer: provider_admit_dynamic_v1 hashes the declared path,
+# then independently opens that path with dynlib_open. The digest is therefore
+# not bound to the image that was made process-callable.
+#
+# A post-open pathname re-read does not close this race: an attacker can swap
+# the path between either operation, including an A->B->A replacement. Exact
+# admission requires an immutable opened handle that is both hashed and loaded
+# (or a platform-equivalent identity-preserving primitive). That primitive is
+# not available in the current dynlib facade, so this file is diagnostic
+# developing evidence only, never an admission acceptance result.
+
+extern fn rt_file_read_text(path: text) -> text
+
+val LOADER_SOURCE_PATH: text = "src/os/smf/provider_loader.spl"
+
+fn loader_source() -> text:
+    rt_file_read_text(LOADER_SOURCE_PATH) ?? ""
+
+fn fn_body(src: text, name: text) -> text:
+    val parts = src.split("\nfn " + name)
+    if parts.len() < 2:
+        return ""
+    val tail = parts[1].split("\nfn ")
+    tail[0]
+
+fn segment_after(body: text, marker: text) -> text:
+    val parts = body.split(marker)
+    if parts.len() < 2:
+        return ""
+    parts[1]
+
+describe "provider_admit_dynamic_v1 immutable-handle identity blocker":
+    it "reads the loader source used by this repository":
+        # @req REQ-SSPEC-UNIT
+        step("reads the loader source used by this repository")
+        val src = loader_source()
+        expect(src.len() > 0).to_be(true)
+        expect(src.contains("fn provider_admit_dynamic_v1")).to_be(true)
+
+    it "diagnoses path hashing before a separate path open":
+        val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
+        expect(body.len() > 0).to_be(true)
+        val before_open = body.split("dynlib_open(")[0]
+        expect(before_open.contains("provider_artifact_digest_v1(")).to_be(true)
+
+    it "does not mistake a pathname re-read for immutable image identity":
+        val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
+        val after_open = segment_after(body, "dynlib_open(")
+        expect(after_open.contains("provider_artifact_digest_v1(")).to_be(false)
+        expect(after_open.contains("PROVIDER_ADMISSION_DIGEST_UNSTABLE")).to_be(false)
+
+    it "retains a valid library when close reports failure":
+        val body = fn_body(loader_source(), "provider_session_close_v1")
+        val after_close = segment_after(body, "dynlib_close(session.library)")
+        expect(after_close.contains("if status != 0:")).to_be(true)
+        expect(after_close.contains("return PROVIDER_SESSION_CLOSE_FAILED")).to_be(true)
+        expect(after_close.split("return PROVIDER_SESSION_CLOSE_FAILED")[0].contains("session.open = false")).to_be(false)

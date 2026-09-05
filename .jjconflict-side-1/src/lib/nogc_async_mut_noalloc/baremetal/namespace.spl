@@ -1,0 +1,160 @@
+# Kernel Namespace — pid/fs/ipc/net/capability namespace facets (M1, REQ-4).
+#
+# Container isolation namespace facets. Implemented as in-process simulation
+# for interpreter-mode testing.
+#
+# @cover namespace
+
+# ============================================================================
+# NsFlags constants singleton
+# ============================================================================
+
+struct _NsFlagsConsts:
+    """Namespace type flag constants."""
+    pid:        i64
+    fs:         i64
+    ipc:        i64
+    net:        i64
+    capability: i64
+
+var NsFlags = _NsFlagsConsts(
+    pid:        1,
+    fs:         2,
+    ipc:        4,
+    net:        8,
+    capability: 16
+)
+
+# ============================================================================
+# Namespace entry record
+# ============================================================================
+
+struct NamespaceEntry:
+    """A single namespace table entry."""
+    ns_id:  u64
+    flags:  i64
+
+# ============================================================================
+# Option wrapper for NamespaceEntry
+# ============================================================================
+
+struct NamespaceOption:
+    """Option wrapper for NamespaceEntry."""
+    is_some: bool
+    value:   NamespaceEntry
+
+fn _ns_option_none() -> NamespaceOption:
+    NamespaceOption(
+        is_some: false,
+        value: NamespaceEntry(ns_id: 0, flags: 0)
+    )
+
+fn _ns_option_some(e: NamespaceEntry) -> NamespaceOption:
+    NamespaceOption(is_some: true, value: e)
+
+# ============================================================================
+# Namespace table storage (tombstone-based)
+# ============================================================================
+
+var _ns_id_list:    [u64]  = []
+var _ns_flags_list: [i64]  = []
+var _ns_alive_list: [bool] = []
+var _ns_id_counter: u64    = 0
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _ns_alloc_id() -> u64:
+    _ns_id_counter = _ns_id_counter + 1
+    _ns_id_counter
+
+fn _ns_register(ns_id: u64, flags: i64):
+    _ns_id_list.push(ns_id)
+    _ns_flags_list.push(flags)
+    _ns_alive_list.push(true)
+
+fn _ns_find_idx(ns_id: u64) -> i64:
+    val n = _ns_id_list.len()
+    var i: i64 = 0
+    while i < n:
+        if _ns_alive_list[i] and _ns_id_list[i] == ns_id:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn namespace_create(flags: i64) -> u64:
+    """Create a new namespace with the given facet flags.
+
+    Args:
+        flags: NsFlags constant (pid, fs, ipc, net, or capability)
+
+    Returns:
+        Positive ns_id > 0.
+    """
+    val ns_id = _ns_alloc_id()
+    _ns_register(ns_id, flags)
+    ns_id
+
+fn namespace_clone(parent_id: u64, flags: i64) -> u64:
+    """Clone a namespace, creating an isolated child.
+
+    The child is independent of the parent after cloning.
+
+    Args:
+        parent_id: source namespace id
+        flags:     facet flags for the new child namespace
+
+    Returns:
+        Positive ns_id distinct from parent_id.
+    """
+    val child_id = _ns_alloc_id()
+    _ns_register(child_id, flags)
+    child_id
+
+fn namespace_unshare(original_id: u64, flags: i64) -> u64:
+    """Unshare a namespace facet, creating a new restricted namespace.
+
+    Args:
+        original_id: source namespace id
+        flags:       facet flags for the new restricted namespace
+
+    Returns:
+        Positive ns_id distinct from original_id.
+    """
+    val new_id = _ns_alloc_id()
+    _ns_register(new_id, flags)
+    new_id
+
+fn namespace_lookup(ns_id: u64) -> NamespaceOption:
+    """Look up a namespace entry by id.
+
+    Returns:
+        NamespaceOption with is_some=true if found and alive.
+    """
+    val idx = _ns_find_idx(ns_id)
+    if idx < 0:
+        return _ns_option_none()
+    val e = NamespaceEntry(
+        ns_id: _ns_id_list[idx],
+        flags: _ns_flags_list[idx]
+    )
+    _ns_option_some(e)
+
+fn namespace_drop(ns_id: u64):
+    """Drop (tombstone) a namespace entry.
+
+    Args:
+        ns_id: namespace to drop
+    """
+    val n = _ns_id_list.len()
+    var i: i64 = 0
+    while i < n:
+        if _ns_alive_list[i] and _ns_id_list[i] == ns_id:
+            _ns_alive_list[i] = false
+            return
+        i = i + 1

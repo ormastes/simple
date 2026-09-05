@@ -1,0 +1,1093 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+runner_source=$repo/scripts/check/lib/bootstrap-stage3-shared-runner.pl
+runner_contract_source=$repo/scripts/check/lib/bootstrap-stage3/runner.shs
+supervisor_source=$repo/scripts/check/lib/bootstrap-stage3-unit-supervisor.pl
+gate_source=$repo/scripts/check/lib/bootstrap-stage3-preexec-gate.pl
+facade_source=$repo/scripts/check/lib/bootstrap-stage3-provenance.shs
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/stage3-shared-runner.XXXXXX")
+mutation_pid=
+cleanup() {
+    if [ -n "$mutation_pid" ]; then
+        kill "$mutation_pid" 2>/dev/null || true
+        wait "$mutation_pid" 2>/dev/null || true
+    fi
+    rm -rf -- "$fixture"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+runner_under_test=$runner_source
+if [ "${STAGE3_TEST_POST_ANALYZER_SIGNAL:-}" = TERM ]; then
+    runner_under_test=$fixture/shared-runner-post-analyzer-signal.pl
+    cp -- "$runner_source" "$runner_under_test"
+    SIGNAL_ACK=$fixture/post-analyzer-signal.ack /usr/bin/perl -0pi -e '
+        my $needle = q{my $analyzer_status = run_bound_child($analyzer_exec_fh, 120_000, @analyzer_argv);};
+        my $replacement = $needle . qq{\nkill SIGTERM, \$\$;\nfor (1 .. 1000) { last if length(\$interrupted); select(undef, undef, undef, 0.001); }\nopen(my \$signal_ack, q{>}, q{$ENV{SIGNAL_ACK}}) or die qq{signal ack: \$!\\n};\nprint {\$signal_ack} \$interrupted, qq{\\n};\nclose(\$signal_ack) or die qq{signal ack close: \$!\\n};};
+        index($_, $needle) >= 0 or die "analyzer boundary absent\n";
+        s/\Q$needle\E/$replacement/ or die "analyzer boundary mutation failed\n";
+    ' "$runner_under_test"
+    chmod 0500 "$runner_under_test"
+fi
+
+sha() { sha256sum -- "$1" | awk '{print $1}'; }
+tool_path=$(dirname -- "$(command -v cargo)"):/usr/bin
+copy_role() {
+    local name=$1 source=$2
+    cp -- "$source" "$roles/$name"
+    chmod 0500 "$roles/$name"
+}
+
+root=$fixture/root
+unit=$fixture/unit
+roles=$fixture/role-source
+input=$fixture/input
+output_rel=build/fake-stage3-output
+output=$root/$output_rel
+architecture=x86_64-unknown-linux-gnu
+stage3=$output/stage3/$architecture
+admitted=$stage3/stage2-admitted/simple
+candidate=$stage3/simple
+candidate_provenance=$stage3/provenance.env
+raw=$unit/process-rss.events
+memory=$unit/memory.events
+phase=$unit/phase.events
+descriptor=$input/descriptor.events
+parent_provenance=$input/admitted-provenance.env
+parent_verify=$input/admitted-provenance-verification.env
+source_snapshot=$input/source-snapshot.txt
+git_receipt=$input/git-receipt.env
+runtime_snapshot=$input/runtime-snapshot.txt
+tool_snapshot=$input/tool-snapshot.txt
+stage2_admission=$input/stage2-admission.env
+planner_receipt=$input/planner.env
+cache=$stage3/stage3-native-cache
+runtime=$stage3/stage2-runtime-authority
+home=$stage3/stage3-home
+tmpdir=$stage3/stage3-tmp
+progress=$output/bootstrap-build-progress.events
+compatibility_marker=$output.lock
+run_id=runner_contract_001
+heavy_lock=$fixture/authority/heavy.lock
+owner_journal=$fixture/authority/owner.env
+quarantine=$fixture/authority/quarantine.env
+cgroup_root=$fixture/fake-cgroup
+fake_state=$fixture/fake-systemd
+admitted_marker=$fixture/admitted-compiler-executed
+
+mkdir -p "$roles" "$stage3/stage2-admitted" "$cache" "$runtime" \
+    "$home" "$tmpdir" "$(dirname -- "$progress")" "$fixture/authority" \
+    "$cgroup_root" "$fake_state/units" "$input" \
+    "$root/scripts/bootstrap" "$root/scripts/check/lib/bootstrap-stage3" \
+    "$root/scripts/check/cert/redeploy_gate" "$root/src/compiler" \
+    "$root/src/app" "$root/src/lib" "$root/examples/10_tooling" \
+    "$root/src/compiler_rust" "$root/src/runtime"
+cat >"$admitted" <<ADMITTED
+#!/bin/sh
+printf 'executed\n' >'$admitted_marker'
+case "\${1-}" in
+    --version) printf '%s\n' 'simple-bootstrap 1.0.0-RC'; exit 0 ;;
+    run) printf "%s\n" "unknown command 'run'" >&2; exit 1 ;;
+    native-build)
+        output=
+        previous=
+        for argument in "\$@"; do
+            if [ "\$previous" = -o ] || [ "\$previous" = --output ]; then
+                output=\$argument
+                break
+            fi
+            previous=\$argument
+        done
+        [ -n "\$output" ] || exit 64
+        cp -- "\$0" "\$output"
+        chmod 0500 "\$output"
+        exit 0
+        ;;
+    '') printf '%s\n' 5; exit 0 ;;
+    *) exit 64 ;;
+esac
+ADMITTED
+chmod 0500 "$admitted"
+for helper_relative in \
+    scripts/bootstrap/bootstrap-build-jobs-policy.shs \
+    scripts/check/lib/bootstrap-stage3-provenance.shs \
+    scripts/check/lib/bootstrap-stage3/authority.shs \
+    scripts/check/lib/bootstrap-stage3/command-snapshot.shs \
+    scripts/check/lib/bootstrap-stage3/sanity.shs \
+    scripts/check/lib/bootstrap-stage3/manifest-write.shs \
+    scripts/check/lib/bootstrap-stage3/manifest-verify.shs \
+    scripts/check/lib/bootstrap-stage3/self-test.shs \
+    scripts/check/lib/bootstrap-stage3/runner.shs \
+    scripts/check/lib/bootstrap-planner-admission-bound.shs \
+    scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs; do
+    cp -- "$repo/$helper_relative" "$root/$helper_relative"
+done
+printf '%s\n' 'fixture source' >"$root/src/compiler/main.spl"
+printf '%s\n' 'fixture app' >"$root/src/app/main.spl"
+printf '%s\n' 'fixture lib' >"$root/src/lib/main.spl"
+printf '%s\n' 'fixture tooling' >"$root/examples/10_tooling/main.spl"
+printf '%s\n' '[workspace]' >"$root/src/compiler_rust/Cargo.toml"
+printf '%s\n' '# fixture lock' >"$root/src/compiler_rust/Cargo.lock"
+printf '%s\n' '[toolchain]' 'channel = "stable"' \
+    >"$root/src/compiler_rust/rust-toolchain.toml"
+printf '%s\n' '1.0.0-RC' >"$root/VERSION"
+printf '%s\n' 'build/' '.stage3-verifier-scratch-*' >"$root/.gitignore"
+git -C "$root" init -q
+git -C "$root" config user.name 'Stage3 Contract Fixture'
+git -C "$root" config user.email 'stage3-contract@example.invalid'
+git -C "$root" add .
+GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' \
+GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
+    git -C "$root" commit -q -m fixture
+# The first sourced helper deterministically replaces both a later helper leaf
+# and a later helper-module ancestor. The body succeeds only with held FDs.
+cat >>"$root/scripts/bootstrap/bootstrap-build-jobs-policy.shs" <<MUTATE
+mv '$unit/roles/facade' '$unit/roles/facade.captured'
+printf '%s\n' 'mutable facade replacement must not be sourced' \
+  >'$unit/roles/facade'
+mv '$root/scripts/check/lib/bootstrap-stage3' \
+  '$root/scripts/check/lib/bootstrap-stage3.captured'
+mkdir '$root/scripts/check/lib/bootstrap-stage3'
+printf '%s\n' 'mutable module replacement must not be sourced' \
+  >'$root/scripts/check/lib/bootstrap-stage3/authority.shs'
+MUTATE
+for artifact in "$descriptor" "$parent_provenance" "$source_snapshot" \
+    "$git_receipt" "$runtime_snapshot" "$tool_snapshot" \
+    "$stage2_admission" "$planner_receipt"; do
+    printf 'fixture=%s\n' "$(basename -- "$artifact")" >"$artifact"
+    chmod 0400 "$artifact"
+done
+
+cat >"$fixture/fake-sampler.sh" <<'SAMPLER'
+#!/bin/sh
+set -eu
+raw=
+run_id=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --raw) raw=$2; shift 2 ;;
+        --run-id) run_id=$2; shift 2 ;;
+        --self-sha256|--sha256|--interval-ms|--max-gap-ms|--max-rss-kb|--term-grace-ms|--kill-grace-ms|--max-runtime-ms|--max-batches|--max-records|--max-raw-bytes|--max-tracked-per-batch|--closure-reserve-bytes|--closure-reserve-records)
+            shift 2 ;;
+        --) shift; break ;;
+        run) shift ;;
+        *) exit 64 ;;
+    esac
+done
+candidate=
+previous=
+for argument in "$@"; do
+    if [ "$previous" = -o ]; then candidate=$argument; break; fi
+    previous=$argument
+done
+[ -n "$raw" ] && [ -n "$run_id" ] && [ -n "$candidate" ]
+"$@"
+( set -C; printf 'raw=%s\n' "$run_id" >"$raw" )
+( set -C; printf 'memory=%s\n' "$run_id" >"$SIMPLE_MEM_SNAPSHOT_FILE" )
+( set -C; printf 'phase=%s\n' "$run_id" >"$SIMPLE_COMPILER_PHASE_PROFILE_FILE" )
+SAMPLER
+chmod 0500 "$fixture/fake-sampler.sh"
+
+cat >"$fixture/fake-candidate-builder.sh" <<'CANDIDATE_BUILDER'
+#!/bin/sh
+set -eu
+backfill_mode=STAGE3_BACKFILL_MODE_PLACEHOLDER
+source_output=$1
+shift
+root=
+run_id=
+raw=
+sampler=
+sampler_sha=
+admitted=
+admitted_sha=
+for option in "$@"; do
+    case "$option" in
+        --repository-root=*) root=${option#*=} ;;
+        --evidence-run-id=*) run_id=${option#*=} ;;
+        --rss-raw=*) raw=${option#*=} ;;
+        --rss-sampler=*) sampler=${option#*=} ;;
+        --rss-sampler-sha256=*) sampler_sha=${option#*=} ;;
+        --admitted-compiler=*) admitted=${option#*=} ;;
+        --admitted-compiler-sha256=*) admitted_sha=${option#*=} ;;
+    esac
+done
+candidate=$root/$source_output/stage3/$SIMPLE_NATIVE_BUILD_TARGET/simple
+"$sampler" run --raw "$raw" --self-sha256 "$sampler_sha" \
+    --sha256 "$admitted_sha" --run-id "$run_id" --interval-ms 5 \
+    --max-gap-ms 50 --max-rss-kb 8388608 --term-grace-ms 5000 \
+    --kill-grace-ms 10000 --max-runtime-ms 3600000 --max-batches 1000000 \
+    --max-records 16000000 --max-raw-bytes 1073741824 \
+    --max-tracked-per-batch 4096 --closure-reserve-bytes 65536 \
+    --closure-reserve-records 256 -- "$admitted" native-build --target \
+    "$SIMPLE_NATIVE_BUILD_TARGET" --backend cranelift --runtime-bundle \
+    core-c-bootstrap --threads 1 --cache-dir "$SIMPLE_NATIVE_BUILD_CACHE_DIR" \
+    --mode dynload --runtime-path "$SIMPLE_RUNTIME_PATH" -o "$candidate" \
+    src/app/cli/bootstrap_main.spl
+
+manifest_dir=$(dirname -- "$candidate")
+output_root=${manifest_dir%/stage3/$SIMPLE_NATIVE_BUILD_TARGET}
+stage2="$output_root/stage2/$SIMPLE_NATIVE_BUILD_TARGET/simple"
+stage2_admitted="$manifest_dir/stage2-admitted/simple"
+stage2_admission="$manifest_dir/stage2-admitted/admission.env"
+stage2_cache="$manifest_dir/stage2-native-cache"
+stage3_cache="$manifest_dir/stage3-native-cache"
+seed="$SIMPLE_RUNTIME_PATH/simple"
+native_all="$SIMPLE_RUNTIME_PATH/libsimple_native_all.a"
+backfill="$SIMPLE_RUNTIME_PATH/libsimple_compiler_backfill.a"
+seed_stamp="$seed.inputs.sha256"
+stage2_log="$manifest_dir/stage2-build.log"
+stage3_log="$manifest_dir/stage3-build.log"
+stage2_transcript="$manifest_dir/stage2-command.transcript"
+stage3_transcript="$manifest_dir/stage3-command.transcript"
+stage2_sanity="$manifest_dir/stage2-sanity.env"
+stage2_receiver="$manifest_dir/stage2-receiver.env"
+stage2_receiver_log="$manifest_dir/stage2-receiver.log"
+stage3_sanity="$manifest_dir/stage3-sanity.env"
+source_before="$manifest_dir/source-inputs-before.txt"
+source_after="$manifest_dir/source-inputs-after.txt"
+git_before="$manifest_dir/git-state-before.env"
+git_after="$manifest_dir/git-state-after.env"
+runtime_before="$manifest_dir/runtime-origin-before.txt"
+runtime_after="$manifest_dir/runtime-origin.txt"
+runtime_admitted="$manifest_dir/runtime-admitted.txt"
+tool_before="$manifest_dir/tool-authority-before.txt"
+tool_after="$manifest_dir/tool-authority.txt"
+jobs_receipt="$manifest_dir/effective-build-jobs.env"
+provenance="$manifest_dir/provenance.env"
+lock="$output_root.lock"
+mkdir -p "$(dirname -- "$stage2")" "$stage2_cache" "$stage3_cache" \
+    "$SIMPLE_RUNTIME_PATH" "$lock"
+cp -- "$stage2_admitted" "$stage2"
+cp -- "$stage2_admitted" "$seed"
+chmod 0500 "$stage2" "$seed"
+printf '%s\n' 'fixture native archive' >"$native_all"
+case "$backfill_mode" in
+    present) printf '%s\n' 'fixture compiler backfill' >"$backfill" ;;
+    absent) : ;;
+    *) exit 64 ;;
+esac
+printf '%s\n' "$$" >"$lock/pid"
+printf '%s\n' 'stage2 build log' >"$stage2_log"
+printf '%s\n' 'stage3 build log' >"$stage3_log"
+printf '%s\n' 'receiver PASS' >"$stage2_receiver_log"
+printf '%s\n' \
+    'schema=simple-bootstrap-effective-build-jobs-v1' \
+    'owner=resume-stage3-from-admitted' 'requested=1' 'effective=1' \
+    'cache_writer_policy=single-native-build-owner' \
+    'parallel_cache_writers=false' >"$jobs_receipt"
+
+bootstrap_stage3_source_snapshot "$source_before" "$root"
+cp -- "$source_before" "$source_after"
+bootstrap_stage3_git_state "$root" "$git_before"
+cp -- "$git_before" "$git_after"
+bootstrap_stage3_tool_authority_snapshot "$tool_before" "$PATH" "$root"
+cp -- "$tool_before" "$tool_after"
+seed_features=none
+seed_fingerprint=$(bootstrap_stage3_seed_inputs_fingerprint "$root" cranelift \
+    "$seed_features" "$PATH" "$SIMPLE_NATIVE_BUILD_TARGET")
+bootstrap_stage3_write_seed_stamp "$seed_stamp" "$seed_fingerprint" \
+    "$seed" "$native_all" "$backfill"
+bootstrap_stage3_directory_snapshot "$runtime_before" "$SIMPLE_RUNTIME_PATH"
+cp -- "$runtime_before" "$runtime_after"
+cp -- "$runtime_before" "$runtime_admitted"
+
+stage2_args_sha=$(bootstrap_stage3_args_sha256 \
+    'RUST_LOG=error' 'LIBRARY_PATH=' \
+    'SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent' 'SIMPLE_BOOTSTRAP=1' \
+    'SIMPLE_NO_DEPRECATED_WARNINGS=1' 'SIMPLE_NATIVE_BUILD_RUST=1' \
+    'SIMPLE_NO_STUB_FALLBACK=1' \
+    "SIMPLE_BUILD_PROGRESS_EVENTS=$SIMPLE_BUILD_PROGRESS_EVENTS" \
+    "SIMPLE_BINARY=$seed" native-build --target "$SIMPLE_NATIVE_BUILD_TARGET" \
+    --backend cranelift --runtime-bundle core-c-bootstrap \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --threads 1 --compile-stack-mib 64 --cache-dir "$stage2_cache" \
+    --mode dynload --entry src/app/cli/bootstrap_main.spl \
+    --runtime-path "$SIMPLE_RUNTIME_PATH" -o "$stage2")
+stage3_args_sha=$(bootstrap_stage3_args_sha256 \
+    'RUST_LOG=error' 'LIBRARY_PATH=' \
+    'SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent' 'SIMPLE_BOOTSTRAP=1' \
+    'SIMPLE_NO_DEPRECATED_WARNINGS=1' \
+    'SIMPLE_STAGE3_STREAMING_SURFACES=1' 'MALLOC_ARENA_MAX=2' \
+    'MALLOC_TRIM_THRESHOLD_=0' 'SIMPLE_NATIVE_ARENA_DECLS=1' \
+    'SIMPLE_NO_STUB_FALLBACK=1' \
+    "SIMPLE_BUILD_PROGRESS_EVENTS=$SIMPLE_BUILD_PROGRESS_EVENTS" \
+    'SIMPLE_COMPILER_PHASE_PROFILE=1' \
+    "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$SIMPLE_COMPILER_PHASE_PROFILE_FILE" \
+    "SIMPLE_MEM_SNAPSHOT_FILE=$SIMPLE_MEM_SNAPSHOT_FILE" \
+    "SIMPLE_EVIDENCE_RUN_ID=$run_id" \
+    'LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1' \
+    "SIMPLE_NATIVE_BUILD_TARGET=$SIMPLE_NATIVE_BUILD_TARGET" \
+    'SIMPLE_NATIVE_BUILD_THREADS=1' \
+    "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" \
+    "SIMPLE_RUNTIME_PATH=$SIMPLE_RUNTIME_PATH" \
+    'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' \
+    "SIMPLE_BINARY=$stage2_admitted" native-build \
+    --target "$SIMPLE_NATIVE_BUILD_TARGET" --backend cranelift \
+    --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
+    --mode dynload --runtime-path "$SIMPLE_RUNTIME_PATH" -o "$candidate" \
+    src/app/cli/bootstrap_main.spl)
+
+bootstrap_stage3_write_command_transcript "$stage2_transcript" "$root" \
+    "$HOME" "$TMPDIR" "$PATH" 'RUST_LOG=error' 'LIBRARY_PATH=' \
+    'SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent' 'SIMPLE_BOOTSTRAP=1' \
+    'SIMPLE_NO_DEPRECATED_WARNINGS=1' 'SIMPLE_NATIVE_BUILD_RUST=1' \
+    'SIMPLE_NO_STUB_FALLBACK=1' \
+    "SIMPLE_BUILD_PROGRESS_EVENTS=$SIMPLE_BUILD_PROGRESS_EVENTS" \
+    "SIMPLE_BINARY=$seed" -- "$seed" native-build \
+    --target "$SIMPLE_NATIVE_BUILD_TARGET" --backend cranelift \
+    --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
+    --source src/lib --entry-closure --threads 1 --compile-stack-mib 64 \
+    --cache-dir "$stage2_cache" --mode dynload \
+    --entry src/app/cli/bootstrap_main.spl --runtime-path "$SIMPLE_RUNTIME_PATH" \
+    -o "$stage2"
+bootstrap_stage3_write_command_transcript "$stage3_transcript" "$root" \
+    "$HOME" "$TMPDIR" "$PATH" 'RUST_LOG=error' 'LIBRARY_PATH=' \
+    'SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent' 'SIMPLE_BOOTSTRAP=1' \
+    'SIMPLE_NO_DEPRECATED_WARNINGS=1' \
+    'SIMPLE_STAGE3_STREAMING_SURFACES=1' 'MALLOC_ARENA_MAX=2' \
+    'MALLOC_TRIM_THRESHOLD_=0' 'SIMPLE_NATIVE_ARENA_DECLS=1' \
+    'SIMPLE_NO_STUB_FALLBACK=1' \
+    "SIMPLE_BUILD_PROGRESS_EVENTS=$SIMPLE_BUILD_PROGRESS_EVENTS" \
+    'SIMPLE_COMPILER_PHASE_PROFILE=1' \
+    "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$SIMPLE_COMPILER_PHASE_PROFILE_FILE" \
+    "SIMPLE_MEM_SNAPSHOT_FILE=$SIMPLE_MEM_SNAPSHOT_FILE" \
+    "SIMPLE_EVIDENCE_RUN_ID=$run_id" \
+    'LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1' \
+    "SIMPLE_NATIVE_BUILD_TARGET=$SIMPLE_NATIVE_BUILD_TARGET" \
+    'SIMPLE_NATIVE_BUILD_THREADS=1' \
+    "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" \
+    "SIMPLE_RUNTIME_PATH=$SIMPLE_RUNTIME_PATH" \
+    'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' \
+    "SIMPLE_BINARY=$stage2_admitted" -- "$stage2_admitted" native-build \
+    --target "$SIMPLE_NATIVE_BUILD_TARGET" --backend cranelift \
+    --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
+    --mode dynload --runtime-path "$SIMPLE_RUNTIME_PATH" -o "$candidate" \
+    src/app/cli/bootstrap_main.spl
+
+write_sanity_receipt() {
+    sanity_path=$1
+    sanity_candidate=$2
+    frontend_log="$sanity_path.frontend"
+    CANDIDATE_FRONTEND_ROOT="$root" CANDIDATE_FRONTEND_BACKEND=cranelift \
+        candidate_frontend_smoke "$sanity_candidate" >"$frontend_log" 2>&1
+    frontend_sha=$(bootstrap_stage3_hash_file "$frontend_log")
+    rm -f -- "$frontend_log"
+    unsupported_status=0
+    unsupported_output=$("$sanity_candidate" run \
+        scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1) || \
+        unsupported_status=$?
+    [ "$unsupported_status" = 1 ]
+    candidate_sha=$(bootstrap_stage3_hash_file "$sanity_candidate")
+    printf '%s\n' 'schema=simple-bootstrap-sanity-evidence-v1' 'status=pass' \
+        "candidate_sha256_before=$candidate_sha" 'version_status=0' \
+        'version_output=simple-bootstrap 1.0.0-RC' \
+        'unsupported_status=1' \
+        "unsupported_output_sha256=$(printf '%s' "$unsupported_output" | bootstrap_stage3_hash_stream)" \
+        'frontend_smoke_status=0' 'frontend_smoke_bootstrap_mode_status=0' \
+        "frontend_smoke_output_sha256=$frontend_sha" \
+        "candidate_sha256_after=$candidate_sha" >"$sanity_path"
+}
+write_sanity_receipt "$stage2_sanity" "$stage2_admitted"
+write_sanity_receipt "$stage3_sanity" "$candidate"
+stage2_sha=$(bootstrap_stage3_hash_file "$stage2_admitted")
+printf '%s\n' 'schema=simple-bootstrap-stage2-receiver-evidence-v1' \
+    'status=pass' 'probe_exit=0' "candidate_sha256_before=$stage2_sha" \
+    "candidate_sha256_after=$stage2_sha" \
+    "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "$runtime_admitted")" \
+    "probe_log=$stage2_receiver_log" \
+    "probe_log_sha256=$(bootstrap_stage3_hash_file "$stage2_receiver_log")" \
+    >"$stage2_receiver"
+bootstrap_stage3_write_stage2_admission_receipt "$stage2_admission" \
+    "$stage2_admitted" "$source_before" "$runtime_admitted" "$tool_before" \
+    "$stage2_args_sha" "$stage2_sanity" "$stage2_receiver"
+
+BSTAGE3_ROOT=$root BSTAGE3_MANIFEST=$provenance \
+BSTAGE3_PLATFORM=$SIMPLE_NATIVE_BUILD_TARGET BSTAGE3_BACKEND=cranelift \
+BSTAGE3_MODE=dynload BSTAGE3_RUST_LOG=error BSTAGE3_SEED=$seed \
+BSTAGE3_NATIVE_ALL=$native_all BSTAGE3_BACKFILL=$backfill \
+BSTAGE3_SEED_STAMP=$seed_stamp \
+BSTAGE3_HELPER=$BOOTSTRAP_STAGE3_FACADE_PATH \
+BSTAGE3_HELPER_DISPLAY=$root/scripts/check/lib/bootstrap-stage3-provenance.shs \
+BSTAGE3_HELPER_SHA256_BEFORE=$(bootstrap_stage3_hash_file \
+    "$BOOTSTRAP_STAGE3_FACADE_PATH") \
+BSTAGE3_HELPER_BUNDLE_FINGERPRINT_BEFORE=$(bootstrap_stage3_helper_bundle_fingerprint) \
+BSTAGE3_STAGE2=$stage2 BSTAGE3_STAGE2_ADMITTED=$stage2_admitted \
+BSTAGE3_STAGE2_ADMISSION=$stage2_admission BSTAGE3_STAGE3=$candidate \
+BSTAGE3_SOURCE_BEFORE=$source_before BSTAGE3_SOURCE_AFTER=$source_after \
+BSTAGE3_STAGE2_LOG=$stage2_log BSTAGE3_STAGE3_LOG=$stage3_log \
+BSTAGE3_STAGE2_ARGS_SHA256=$stage2_args_sha \
+BSTAGE3_STAGE3_ARGS_SHA256=$stage3_args_sha \
+BSTAGE3_BOOTSTRAP_SCRIPT=$BOOTSTRAP_STAGE3_BOOTSTRAP_SCRIPT_DESCRIPTOR \
+BSTAGE3_BOOTSTRAP_SCRIPT_DISPLAY=$root/scripts/bootstrap/bootstrap-from-scratch.sh \
+BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE=$(bootstrap_stage3_hash_file \
+    "$BOOTSTRAP_STAGE3_BOOTSTRAP_SCRIPT_DESCRIPTOR") \
+BSTAGE3_STAGE2_THREADS=1 BSTAGE3_STAGE3_THREADS=1 \
+BSTAGE3_STAGE2_CACHE_DIR=$stage2_cache BSTAGE3_STAGE3_CACHE_DIR=$stage3_cache \
+BSTAGE3_RUNTIME_PATH=$SIMPLE_RUNTIME_PATH BSTAGE3_STAGE2_COMMAND_OUTPUT=$stage2 \
+BSTAGE3_STAGE3_COMMAND_OUTPUT=$candidate \
+BSTAGE3_SEED_INPUTS_FINGERPRINT=$seed_fingerprint \
+BSTAGE3_SEED_FEATURES=$seed_features BSTAGE3_GIT_BEFORE=$git_before \
+BSTAGE3_GIT_AFTER=$git_after BSTAGE3_STAGE2_TRANSCRIPT=$stage2_transcript \
+BSTAGE3_STAGE3_TRANSCRIPT=$stage3_transcript BSTAGE3_STAGE2_SANITY=$stage2_sanity \
+BSTAGE3_STAGE2_RECEIVER=$stage2_receiver BSTAGE3_STAGE3_SANITY=$stage3_sanity \
+BSTAGE3_RUNTIME_ORIGIN_BEFORE=$runtime_before \
+BSTAGE3_RUNTIME_ORIGIN_AFTER=$runtime_after \
+BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT=$runtime_admitted \
+BSTAGE3_TOOL_AUTHORITY=$tool_after BSTAGE3_TOOL_AUTHORITY_BEFORE=$tool_before \
+BSTAGE3_JOBS_RECEIPT=$jobs_receipt \
+BSTAGE3_JOBS_RECEIPT_SHA256_BEFORE=$(bootstrap_stage3_hash_file "$jobs_receipt") \
+BSTAGE3_JOBS_EFFECTIVE=1 BSTAGE3_LOCK=$lock \
+    bootstrap_stage3_write_manifest
+CANDIDATE_BUILDER
+STAGE3_BACKFILL_MODE=${STAGE3_COMPILER_BACKFILL:-absent} \
+    /usr/bin/perl -0pi -e '
+        s/STAGE3_BACKFILL_MODE_PLACEHOLDER/$ENV{STAGE3_BACKFILL_MODE}/
+            or die "backfill mode placeholder absent\n";
+    ' "$fixture/fake-candidate-builder.sh"
+chmod 0500 "$fixture/fake-candidate-builder.sh"
+
+verifier_under_test=$fixture/production-verifier-with-barrier.sh
+cp -- "$repo/scripts/check/lib/bootstrap-stage3-provenance-verifier.shs" \
+    "$verifier_under_test"
+case "${STAGE3_POST_CAPTURE_MUTATION:-}" in
+    leaf|ancestor)
+        barrier_before=$fixture/verifier-before.fifo
+        barrier_release=$fixture/verifier-release.fifo
+        barrier_after=$fixture/verifier-after.fifo
+        barrier_restore=$fixture/verifier-restore.fifo
+        scratch_display_file=$fixture/verifier-scratch-display
+        mkfifo "$barrier_before" "$barrier_release" "$barrier_after" \
+            "$barrier_restore"
+        BARRIER_BEFORE=$barrier_before BARRIER_RELEASE=$barrier_release \
+        BARRIER_AFTER=$barrier_after BARRIER_RESTORE=$barrier_restore \
+        SCRATCH_DISPLAY_FILE=$scratch_display_file /usr/bin/perl -0pi -e '
+            my $pre = q{BOOTSTRAP_STAGE3_FACADE_PATH=$facade};
+            my $pre_insert =
+                qq{readlink -- \"\$scratch_root\" >\"$ENV{SCRATCH_DISPLAY_FILE}\"\n} .
+                qq{echo reached >\"$ENV{BARRIER_BEFORE}\"\n} .
+                qq{IFS= read -r barrier_release <\"$ENV{BARRIER_RELEASE}\"\n} .
+                q{[ "$barrier_release" = continue ] || exit 70} . "\n" . $pre;
+            index($_, $pre) >= 0 or die "verifier pre-read boundary absent\n";
+            s/\Q$pre\E/$pre_insert/ or die "verifier pre-read injection failed\n";
+            my $post = q{    '\''status=pass'\''};
+            my $post_insert = $post . "\n" .
+                qq{echo verified >\"$ENV{BARRIER_AFTER}\"\n} .
+                qq{IFS= read -r barrier_restore <\"$ENV{BARRIER_RESTORE}\"\n} .
+                q{[ "$barrier_restore" = restored ] || exit 70};
+            s/\Q$post\E\n\z/$post_insert\n/
+                or die "verifier post-read injection failed\n";
+        ' "$verifier_under_test"
+        (
+            IFS= read -r barrier_marker <"$barrier_before"
+            [ "$barrier_marker" = reached ]
+            scratch_display=$(sed -n '1p' "$scratch_display_file")
+            case "$scratch_display" in
+                "$root"/.stage3-verifier-scratch-*/root) ;;
+                *) exit 70 ;;
+            esac
+            manifest_dir=$stage3
+            role_dir=$unit/roles
+            case "$STAGE3_POST_CAPTURE_MUTATION" in
+                leaf)
+                    for path in "$manifest_dir"/*; do
+                        [ -f "$path" ] || continue
+                        mv -- "$path" "$path.captured"
+                        printf '%s\n' 'post-capture leaf replacement' >"$path"
+                    done
+                    for name in shared_runner candidate_builder dash; do
+                        path=$role_dir/$name
+                        mv -- "$path" "$path.captured"
+                        printf '%s\n' 'post-capture role leaf replacement' >"$path"
+                    done
+                    mv -- "$scratch_display" "$scratch_display.captured"
+                    mkdir -- "$scratch_display"
+                    printf '%s\n' 'scratch leaf attacker' \
+                        >"$scratch_display/attacker-sentinel"
+                    ;;
+                ancestor)
+                    mv -- "$manifest_dir" "$manifest_dir.captured"
+                    mkdir -- "$manifest_dir"
+                    printf '%s\n' 'post-capture ancestor replacement' \
+                        >"$manifest_dir/attacker-sentinel"
+                    mv -- "$role_dir" "$role_dir.captured"
+                    mkdir -- "$role_dir"
+                    printf '%s\n' 'role ancestor attacker' \
+                        >"$role_dir/attacker-sentinel"
+                    scratch_parent=$(dirname -- "$scratch_display")
+                    mv -- "$scratch_parent" "$scratch_parent.captured"
+                    mkdir -- "$scratch_parent"
+                    mkdir -- "$scratch_display"
+                    printf '%s\n' 'scratch ancestor attacker' \
+                        >"$scratch_parent/attacker-sentinel"
+                    ;;
+            esac
+            printf '%s\n' continue >"$barrier_release"
+            IFS= read -r barrier_marker <"$barrier_after"
+            [ "$barrier_marker" = verified ]
+            case "$STAGE3_POST_CAPTURE_MUTATION" in
+                leaf)
+                    for path in "$manifest_dir"/*; do
+                        case "$path" in *.captured|*.attack) continue ;; esac
+                        [ -f "$path.captured" ] || continue
+                        mv -- "$path" "$path.attack"
+                        mv -- "$path.captured" "$path"
+                    done
+                    for name in shared_runner candidate_builder dash; do
+                        path=$role_dir/$name
+                        mv -- "$path" "$path.attack"
+                        mv -- "$path.captured" "$path"
+                    done
+                    mv -- "$scratch_display/attacker-sentinel" \
+                        "$fixture/scratch-leaf-attacker"
+                    rmdir -- "$scratch_display"
+                    mv -- "$scratch_display.captured" "$scratch_display"
+                    ;;
+                ancestor)
+                    mv -- "$manifest_dir" "$manifest_dir.attack"
+                    mv -- "$manifest_dir.captured" "$manifest_dir"
+                    mv -- "$role_dir" "$role_dir.attack"
+                    mv -- "$role_dir.captured" "$role_dir"
+                    scratch_parent=$(dirname -- "$scratch_display")
+                    mv -- "$scratch_parent" "$scratch_parent.attack"
+                    mv -- "$scratch_parent.captured" "$scratch_parent"
+                    ;;
+            esac
+            printf '%s\n' restored >"$barrier_restore"
+        ) &
+        mutation_pid=$!
+        ;;
+    '') ;;
+    *) exit 64 ;;
+esac
+chmod 0500 "$verifier_under_test"
+
+cat >"$fixture/fake-analyzer.pl" <<'ANALYZER'
+use strict;
+use warnings;
+use Digest::SHA qw(sha256_hex);
+use Fcntl qw(:DEFAULT);
+my $analyzer_path = shift @ARGV;
+shift(@ARGV) eq 'analyze' or die "subcommand\n";
+my %o;
+while (@ARGV) {
+    my $key = shift @ARGV;
+    $key =~ s/^--// or die "option\n";
+    @ARGV or die "value\n";
+    $o{$key} = shift @ARGV;
+}
+sub hash_file {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or die "open $path: $!\n";
+    binmode($fh);
+    return Digest::SHA->new(256)->addfile($fh)->hexdigest;
+}
+sub identity {
+    my ($path) = @_;
+    my @st = stat($path);
+    @st or die "stat $path: $!\n";
+    return ($st[0], $st[1], hash_file($path));
+}
+sub semantic_hash {
+    my (@value) = @_;
+    my $sha = Digest::SHA->new(256);
+    $sha->add(pack('Q>', length($_)), $_) for @value;
+    return $sha->hexdigest;
+}
+sub parse_pairs {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or die "open $path: $!\n";
+    my %v;
+    while (<$fh>) { chomp; my ($k, $x) = split(/=/, $_, 2); $v{$k} = $x; }
+    return %v;
+}
+sub role_map {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or die "open identities: $!\n";
+    my %role;
+    while (<$fh>) {
+        if (/ event=identity role=([^ ]+) path_kind=recorded path=([^ ]+) /) {
+            $role{$1} = $2;
+        }
+    }
+    return %role;
+}
+my %plan = parse_pairs($o{'launch-plan'});
+my %role = role_map($plan{identity_manifest_path});
+mkdir($o{'output-dir'}, 0700) or die "mkdir output: $!\n";
+for my $name (qw(boundary.tsv delta.tsv summary.env)) {
+    open(my $fh, '>', "$o{'output-dir'}/$name") or die "create $name: $!\n";
+    print {$fh} "$name\n";
+    close($fh) or die "close $name: $!\n";
+}
+my %v = (receipt_schema => 'simple-stage3-memory-evidence-v2',
+    run_id => $o{'run-id'}, result => 'complete');
+for my $entry ([raw => $o{samples}], [memory => $o{memory}], [phase => $o{phase}],
+        [provenance => $o{provenance}], [descriptor => $o{descriptor}],
+        [launch_plan => $o{'launch-plan'}],
+        [identity_manifest => $plan{identity_manifest_path}],
+        [provenance_verify_receipt => $plan{provenance_verify_receipt_path}]) {
+    my ($name, $path) = @$entry;
+    @v{"${name}_dev", "${name}_ino", "${name}_sha256"} = identity($path);
+}
+my $candidate = $plan{candidate_output_path};
+for my $entry ([candidate_provenance => $o{'candidate-provenance'}],
+        [candidate_provenance_verify_receipt =>
+            $o{'candidate-provenance-verify-receipt'}],
+        [admitted_compiler => $role{admitted_compiler}],
+        [produced_candidate => $candidate]) {
+    my ($name, $path) = @$entry;
+    $v{"${name}_path"} = $path;
+    @v{"${name}_dev", "${name}_ino", "${name}_sha256"} = identity($path);
+}
+for my $entry ([sampler => $role{sampler}], [analyzer => $analyzer_path],
+        [measured_command => $role{admitted_compiler}], [runner => $o{runner}],
+        [candidate_builder => $o{'candidate-builder'}],
+        [orchestration_shell => $o{shell}]) {
+    my ($name, $path) = @$entry;
+    @v{"${name}_dev", "${name}_ino", "${name}_sha256"} = identity($path);
+}
+@v{qw(measured_script_dev measured_script_ino measured_script_sha256)} = (0, 0, 'none');
+my @env_keys = qw(HOME TMPDIR PATH LC_ALL LANG RUST_LOG LIBRARY_PATH
+    SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP
+    SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_STAGE3_STREAMING_SURFACES
+    MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ SIMPLE_NATIVE_ARENA_DECLS
+    SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS
+    SIMPLE_COMPILER_PHASE_PROFILE SIMPLE_COMPILER_PHASE_PROFILE_FILE
+    SIMPLE_MEM_SNAPSHOT_FILE SIMPLE_EVIDENCE_RUN_ID
+    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING SIMPLE_NATIVE_BUILD_TARGET
+    SIMPLE_NATIVE_BUILD_THREADS SIMPLE_NATIVE_BUILD_CACHE_DIR
+    SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_BINARY);
+my @env_semantic;
+push @env_semantic, $_, $ENV{$_} for @env_keys;
+$v{environment_sha256} = semantic_hash(@env_semantic);
+$v{environment_semantic_sha256} = $v{environment_sha256};
+my @compiler = ($role{admitted_compiler}, 'native-build', '--target',
+    $plan{platform}, '--backend', 'cranelift', '--runtime-bundle',
+    'core-c-bootstrap', '--threads', '1', '--cache-dir', $plan{cache_path},
+    '--mode', 'dynload', '--runtime-path', $plan{runtime_path}, '-o',
+    $candidate, 'src/app/cli/bootstrap_main.spl');
+$v{argv_semantic_sha256} = semantic_hash(@compiler);
+for my $name (qw(boundary delta summary)) {
+    $v{"${name}_sha256"} = hash_file("$o{'output-dir'}/$name" .
+        ($name eq 'summary' ? '.env' : '.tsv'));
+}
+@v{qw(sample_interval_ms max_gap_ms max_summed_rss_kib compiler_wall_ms
+    max_sample_batches max_process_records max_tracked_processes
+    raw_evidence_max_bytes term_grace_ms kill_reap_deadline_ms
+    closure_reserve_bytes closure_reserve_records)} =
+    qw(5 50 8388608 3600000 1000000 16000000 4096 1073741824 5000 10000 65536 256);
+@v{qw(physical_sources phase_mode observed_max_start_gap_ns
+    observed_max_batch_duration_ns)} = (1, 'streaming', 1, 1);
+for my $entry ([memory_bytes => $o{memory}], [phase_bytes => $o{phase}]) {
+    $v{$entry->[0]} = -s $entry->[1];
+}
+@v{qw(memory_records phase_records descriptor_records identity_records
+    plan_records provenance_verify_records)} = (1, 1, 1, 17, 60, 10);
+my @order = qw(receipt_schema run_id result raw_dev raw_ino raw_sha256
+    memory_dev memory_ino memory_sha256 phase_dev phase_ino phase_sha256
+    provenance_dev provenance_ino provenance_sha256 descriptor_dev descriptor_ino
+    descriptor_sha256 launch_plan_dev launch_plan_ino launch_plan_sha256
+    identity_manifest_dev identity_manifest_ino identity_manifest_sha256
+    provenance_verify_receipt_dev provenance_verify_receipt_ino
+    provenance_verify_receipt_sha256 candidate_provenance_path
+    candidate_provenance_dev candidate_provenance_ino candidate_provenance_sha256
+    candidate_provenance_verify_receipt_path candidate_provenance_verify_receipt_dev
+    candidate_provenance_verify_receipt_ino candidate_provenance_verify_receipt_sha256
+    admitted_compiler_path admitted_compiler_dev admitted_compiler_ino
+    admitted_compiler_sha256 produced_candidate_path produced_candidate_dev
+    produced_candidate_ino produced_candidate_sha256 sampler_dev sampler_ino
+    sampler_sha256 analyzer_dev analyzer_ino analyzer_sha256 measured_command_dev
+    measured_command_ino measured_command_sha256 measured_script_dev
+    measured_script_ino measured_script_sha256 runner_dev runner_ino runner_sha256
+    candidate_builder_dev candidate_builder_ino candidate_builder_sha256 orchestration_shell_dev
+    orchestration_shell_ino orchestration_shell_sha256 environment_sha256
+    argv_semantic_sha256 environment_semantic_sha256 boundary_sha256 delta_sha256
+    summary_sha256 sample_interval_ms max_gap_ms max_summed_rss_kib compiler_wall_ms
+    max_sample_batches max_process_records max_tracked_processes
+    raw_evidence_max_bytes term_grace_ms kill_reap_deadline_ms closure_reserve_bytes
+    closure_reserve_records physical_sources phase_mode observed_max_start_gap_ns
+    observed_max_batch_duration_ns memory_bytes memory_records phase_bytes
+    phase_records descriptor_records identity_records plan_records
+    provenance_verify_records);
+open(my $receipt, '>', "$o{'output-dir'}/receipt.env") or die "receipt: $!\n";
+for my $key (@order) { defined($v{$key}) or die "missing $key\n"; print {$receipt} "$key=$v{$key}\n"; }
+close($receipt) or die "close receipt: $!\n";
+ANALYZER
+
+cat >"$fixture/analyzer-wrapper.c" <<EOF
+#include <stdlib.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    char **next = calloc((size_t)argc + 3u, sizeof(char *));
+    if (!next) return 125;
+    next[0] = "/usr/bin/perl";
+    next[1] = "$fixture/fake-analyzer.pl";
+    for (int i = 0; i < argc; ++i) next[i + 2] = argv[i];
+    execv(next[0], next);
+    return 126;
+}
+EOF
+cc -std=c11 -O0 -o "$fixture/fake-analyzer" "$fixture/analyzer-wrapper.c"
+
+cat >"$fixture/fake-systemd-run.sh" <<'FAKE_RUN'
+#!/bin/sh
+set -eu
+unit=
+memory=
+runtime=
+working=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --unit=*) unit=${1#*=}; shift ;;
+        MemoryMax=*) memory=${1#*=}; shift ;;
+        RuntimeMaxSec=*) runtime=${1#*=}; shift ;;
+        WorkingDirectory=*) working=${1#*=}; shift ;;
+        --) shift; break ;;
+        *) shift ;;
+    esac
+done
+[ -n "$unit" ] && [ "$memory" = 8589934592 ] && [ "$runtime" = 3900 ]
+[ -n "$working" ] && [ "$#" -gt 0 ]
+state=${STAGE3_FAKE_SYSTEMD_STATE:?}
+unit_dir=$state/units/$unit
+cgroup=$STAGE3_FAKE_CGROUP_ROOT/fake/$unit
+mkdir -p "$unit_dir" "$cgroup"
+printf '/fake/%s\n' "$unit" >"$unit_dir/ControlGroup"
+printf 'active\n' >"$unit_dir/ActiveState"
+printf 'populated 1\nfrozen 0\n' >"$cgroup/cgroup.events"
+printf 'max 0\noom 0\noom_kill 0\noom_group_kill 0\n' >"$cgroup/memory.events"
+printf '1024\n' >"$cgroup/memory.current"
+printf '1024\n' >"$cgroup/memory.peak"
+printf '%s\n' "$memory" >"$cgroup/memory.max"
+printf '0\n' >"$cgroup/memory.swap.current"
+printf '0\n' >"$cgroup/memory.swap.max"
+printf '1\n' >"$cgroup/memory.oom.group"
+cleanup() {
+    if [ -f "$unit_dir/child.pid" ]; then
+        child=$(sed -n '1p' "$unit_dir/child.pid")
+        kill -TERM "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+    fi
+    if [ -f "$state/survivor.pid" ]; then
+        survivor=$(sed -n '1p' "$state/survivor.pid")
+        kill -KILL "$survivor" 2>/dev/null || true
+    fi
+    printf 'inactive\n' >"$unit_dir/ActiveState"
+    printf 'populated 0\nfrozen 0\n' >"$cgroup/cgroup.events"
+}
+trap 'cleanup; exit 143' TERM HUP INT
+exec 9<&0
+(cd "$working" && exec "$@" <&9) &
+child=$!
+exec 9<&-
+printf '%s\n' "$child" >"$unit_dir/child.pid"
+if wait "$child"; then status=0; else status=$?; fi
+printf 'inactive\n' >"$unit_dir/ActiveState"
+if [ -f "$state/survivor.pid" ] &&
+        kill -0 "$(sed -n '1p' "$state/survivor.pid")" 2>/dev/null; then
+    printf 'populated 1\nfrozen 0\n' >"$cgroup/cgroup.events"
+else
+    printf 'populated 0\nfrozen 0\n' >"$cgroup/cgroup.events"
+fi
+exit "$status"
+FAKE_RUN
+
+cat >"$fixture/fake-systemctl.sh" <<'FAKE_CTL'
+#!/bin/sh
+set -eu
+[ "$1" = --user ] && shift
+command=$1
+shift
+state=${STAGE3_FAKE_SYSTEMD_STATE:?}
+case "$command" in
+    show)
+        unit=${1%.service}
+        property=${2#--property=}
+        sed -n '1p' "$state/units/$unit/$property"
+        ;;
+    stop|kill)
+        unit=
+        for value in "$@"; do case "$value" in *.service) unit=${value%.service} ;; esac; done
+        [ -n "$unit" ]
+        unit_dir=$state/units/$unit
+        if [ -f "$unit_dir/child.pid" ]; then
+            kill -TERM "$(sed -n '1p' "$unit_dir/child.pid")" 2>/dev/null || true
+        fi
+        if [ -f "$state/survivor.pid" ]; then
+            kill -KILL "$(sed -n '1p' "$state/survivor.pid")" 2>/dev/null || true
+        fi
+        printf 'inactive\n' >"$unit_dir/ActiveState"
+        printf 'populated 0\nfrozen 0\n' \
+            >"$STAGE3_FAKE_CGROUP_ROOT/fake/$unit/cgroup.events"
+        ;;
+    *) exit 64 ;;
+esac
+FAKE_CTL
+chmod 0500 "$fixture/fake-systemd-run.sh" "$fixture/fake-systemctl.sh" \
+    "$supervisor_source"
+
+copy_role sampler "$fixture/fake-sampler.sh"
+copy_role analyzer "$fixture/fake-analyzer"
+copy_role transaction_supervisor "$supervisor_source"
+copy_role shared_runner "$runner_under_test"
+copy_role gate_helper "$gate_source"
+copy_role dash /usr/bin/dash
+copy_role payload /usr/bin/perl
+copy_role gate_interpreter /usr/bin/perl
+copy_role session_helper /usr/bin/true
+copy_role bootstrap_script "$repo/scripts/bootstrap/bootstrap-from-scratch.sh"
+copy_role candidate_builder "$fixture/fake-candidate-builder.sh"
+copy_role planner /usr/bin/true
+copy_role provenance_verifier "$verifier_under_test"
+copy_role env /usr/bin/env
+copy_role facade "$facade_source"
+
+sampler_sha=$(sha "$roles/sampler")
+analyzer_sha=$(sha "$roles/analyzer")
+admitted_sha=$(sha "$admitted")
+dash_sha=$(sha "$roles/dash")
+candidate_builder_sha=$(sha "$roles/candidate_builder")
+runner_sha=$(sha "$roles/shared_runner")
+verifier_sha=$(sha "$roles/provenance_verifier")
+
+printf '%s\n' \
+    'schema=simple-stage3-provenance-verification-v1' "run_id=$run_id" \
+    "provenance_sha256=$(sha "$parent_provenance")" \
+    "candidate_sha256=$admitted_sha" \
+    "source_snapshot_sha256=$(sha "$source_snapshot")" \
+    "runtime_snapshot_sha256=$(sha "$runtime_snapshot")" \
+    "tool_snapshot_sha256=$(sha "$tool_snapshot")" \
+    "git_receipt_sha256=$(sha "$git_receipt")" \
+    "verifier_sha256=$verifier_sha" 'status=pass' >"$parent_verify"
+chmod 0400 "$parent_verify"
+
+envv=(
+    "HOME=$home" "TMPDIR=$tmpdir" "PATH=$tool_path" 'LC_ALL=C' 'LANG=C'
+    'RUST_LOG=error' 'LIBRARY_PATH=' 'SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent'
+    'SIMPLE_BOOTSTRAP=1' 'SIMPLE_NO_DEPRECATED_WARNINGS=1'
+    'SIMPLE_STAGE3_STREAMING_SURFACES=1' 'MALLOC_ARENA_MAX=2'
+    'MALLOC_TRIM_THRESHOLD_=0' 'SIMPLE_NATIVE_ARENA_DECLS=1'
+    'SIMPLE_NO_STUB_FALLBACK=1' "SIMPLE_BUILD_PROGRESS_EVENTS=$progress"
+    'SIMPLE_COMPILER_PHASE_PROFILE=1' "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$phase"
+    "SIMPLE_MEM_SNAPSHOT_FILE=$memory" "SIMPLE_EVIDENCE_RUN_ID=$run_id"
+    'LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1'
+    "SIMPLE_NATIVE_BUILD_TARGET=$architecture" 'SIMPLE_NATIVE_BUILD_THREADS=1'
+    "SIMPLE_NATIVE_BUILD_CACHE_DIR=$cache" "SIMPLE_RUNTIME_PATH=$runtime"
+    'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' "SIMPLE_BINARY=$admitted"
+)
+environment_sha=$(env -i "${envv[@]}" /usr/bin/perl -MDigest::SHA=sha256_hex -e '
+    my @key = qw(HOME TMPDIR PATH LC_ALL LANG RUST_LOG LIBRARY_PATH
+      SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP
+      SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_STAGE3_STREAMING_SURFACES
+      MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ SIMPLE_NATIVE_ARENA_DECLS
+      SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS
+      SIMPLE_COMPILER_PHASE_PROFILE SIMPLE_COMPILER_PHASE_PROFILE_FILE
+      SIMPLE_MEM_SNAPSHOT_FILE SIMPLE_EVIDENCE_RUN_ID
+      LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING SIMPLE_NATIVE_BUILD_TARGET
+      SIMPLE_NATIVE_BUILD_THREADS SIMPLE_NATIVE_BUILD_CACHE_DIR
+      SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_BINARY);
+    my $bytes=""; for (@key) { my $v=$ENV{$_}; my $e="$_=$v";
+      $bytes .= pack("Q>",length($e)).$e; } print sha256_hex($bytes);')
+
+. "$runner_contract_source"
+bootstrap_stage3_hash_file() { sha "$1"; }
+BSTAGE3_RUN_ROOT=$root
+BSTAGE3_RUN_EVIDENCE=$unit
+BSTAGE3_RUN_ID=$run_id
+BSTAGE3_RUN_ARCHITECTURE=$architecture
+BSTAGE3_RUN_HEAVY_LOCK=$heavy_lock
+BSTAGE3_RUN_OWNER_JOURNAL=$owner_journal
+BSTAGE3_RUN_QUARANTINE=$quarantine
+BSTAGE3_RUN_SYSTEMD_RUN=$fixture/fake-systemd-run.sh
+BSTAGE3_RUN_SYSTEMCTL=$fixture/fake-systemctl.sh
+BSTAGE3_RUN_CGROUP_ROOT=$cgroup_root
+BSTAGE3_RUN_HOME=$home
+BSTAGE3_RUN_TMPDIR=$tmpdir
+BSTAGE3_RUN_PATH=$tool_path
+BSTAGE3_RUN_SOURCE_OUTPUT=$output_rel
+BSTAGE3_RUN_COMPATIBILITY_MARKER=$compatibility_marker
+BSTAGE3_RUN_RAW=$raw
+BSTAGE3_RUN_MEMORY=$memory
+BSTAGE3_RUN_PHASE=$phase
+BSTAGE3_RUN_DESCRIPTOR=$descriptor
+BSTAGE3_RUN_PARENT_PROVENANCE=$parent_provenance
+BSTAGE3_RUN_PARENT_PROVENANCE_VERIFY=$parent_verify
+BSTAGE3_RUN_SOURCE_SNAPSHOT=$source_snapshot
+BSTAGE3_RUN_GIT_RECEIPT=$git_receipt
+BSTAGE3_RUN_RUNTIME_SNAPSHOT=$runtime_snapshot
+BSTAGE3_RUN_TOOL_SNAPSHOT=$tool_snapshot
+BSTAGE3_RUN_STAGE2_ADMISSION=$stage2_admission
+BSTAGE3_RUN_PLANNER_RECEIPT=$planner_receipt
+BSTAGE3_RUN_CACHE=$cache
+BSTAGE3_RUN_RUNTIME=$runtime
+BSTAGE3_RUN_CANDIDATE=$candidate
+BSTAGE3_RUN_CANDIDATE_PROVENANCE=$candidate_provenance
+BSTAGE3_RUN_PROGRESS=$progress
+BSTAGE3_RUN_SUPERVISOR=$supervisor_source
+BSTAGE3_RUN_GATE=$gate_source
+BSTAGE3_RUN_RUNNER=$runner_under_test
+BSTAGE3_RUN_SAMPLER=$roles/sampler
+BSTAGE3_RUN_ANALYZER=$roles/analyzer
+BSTAGE3_RUN_ADMITTED_COMPILER=$admitted
+BSTAGE3_RUN_DASH=/usr/bin/dash
+BSTAGE3_RUN_PERL=/usr/bin/perl
+BSTAGE3_RUN_ENV_TOOL=/usr/bin/env
+BSTAGE3_RUN_SESSION_HELPER=/usr/bin/true
+BSTAGE3_RUN_BOOTSTRAP_SCRIPT=$repo/scripts/bootstrap/bootstrap-from-scratch.sh
+BSTAGE3_RUN_CANDIDATE_BUILDER=$roles/candidate_builder
+BSTAGE3_RUN_PLANNER=/usr/bin/true
+BSTAGE3_RUN_PROVENANCE_VERIFIER=$roles/provenance_verifier
+BSTAGE3_RUN_FACADE=$facade_source
+BSTAGE3_RUN_SAMPLER_SHA256=$sampler_sha
+BSTAGE3_RUN_ANALYZER_SHA256=$analyzer_sha
+BSTAGE3_RUN_ADMITTED_COMPILER_SHA256=$admitted_sha
+BSTAGE3_RUN_DASH_SHA256=$(sha /usr/bin/dash)
+BSTAGE3_RUN_CANDIDATE_BUILDER_SHA256=$candidate_builder_sha
+BSTAGE3_RUN_RUNNER_SHA256=$runner_sha
+BSTAGE3_RUN_PROVENANCE_VERIFIER_SHA256=$verifier_sha
+export STAGE3_FAKE_SYSTEMD_STATE=$fake_state
+export STAGE3_FAKE_CGROUP_ROOT=$cgroup_root
+if [ "${STAGE3_TEST_POST_ANALYZER_SIGNAL:-}" = TERM ]; then
+        if bootstrap_stage3_run_evidenced; then
+            echo 'post-analyzer signal mutation unexpectedly passed' >&2
+            exit 1
+        fi
+        grep -qx TERM "$fixture/post-analyzer-signal.ack"
+        [ ! -e "$unit/runner-receipt.env" ]
+        [ ! -e "$unit/.runner-receipt.commit.$run_id" ]
+        grep -qx 'schema=simple-stage3-unit-launch-plan-v2' \
+            "$unit/launch-plan.env"
+        grep -qx 'status=ready' "$unit/launch-plan.env"
+        [ ! -e "$unit/terminal.env" ]
+        [ ! -e "$unit/.terminal.env.commit.$run_id" ]
+        echo 'bootstrap Stage3 shared runner post-analyzer signal mutation: PASS'
+        exit 0
+else
+    bootstrap_stage3_run_evidenced
+fi
+if [ -n "$mutation_pid" ]; then
+    wait "$mutation_pid"
+    mutation_pid=
+fi
+
+grep -qx 'status=component-pass' "$unit/runner-receipt.env"
+grep -qx 'authority=false' "$unit/runner-receipt.env"
+grep -qx 'transaction_admission=false' "$unit/runner-receipt.env"
+grep -qx 'unit_zero_authority=false' "$unit/runner-receipt.env"
+grep -qx 'authority=false' "$compatibility_marker/compatibility.env"
+grep -qx "run_id=$run_id" "$unit/analysis/receipt.env"
+grep -qx 'receipt_schema=simple-stage3-memory-evidence-v2' \
+    "$unit/analysis/receipt.env"
+[ -f "$unit/.runner-receipt.commit.$run_id" ]
+[ -d "$compatibility_marker" ]
+[ -f "$admitted_marker" ]
+observed_unit_roles=$unit/roles
+[ -f "$observed_unit_roles/facade.captured" ]
+[ -d "$root/scripts/check/lib/bootstrap-stage3.captured" ]
+grep -qx 'mutable facade replacement must not be sourced' \
+    "$observed_unit_roles/facade"
+grep -qx 'mutable module replacement must not be sourced' \
+    "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+case "${STAGE3_POST_CAPTURE_MUTATION:-}" in
+    leaf)
+        [ -f "$candidate.attack" ]
+        [ -f "$candidate_provenance.attack" ]
+        [ -f "$unit/roles/shared_runner.attack" ]
+        [ -f "$unit/roles/candidate_builder.attack" ]
+        [ -f "$unit/roles/dash.attack" ]
+        grep -qx 'post-capture leaf replacement' "$candidate.attack"
+        grep -qx 'post-capture role leaf replacement' \
+            "$unit/roles/shared_runner.attack"
+        scratch_display=$(sed -n '1p' "$scratch_display_file")
+        grep -qx 'scratch leaf attacker' \
+            "$fixture/scratch-leaf-attacker"
+        ;;
+    ancestor)
+        [ -d "$stage3.attack" ]
+        [ -d "$unit/roles.attack" ]
+        grep -qx 'post-capture ancestor replacement' \
+            "$stage3.attack/attacker-sentinel"
+        grep -qx 'role ancestor attacker' \
+            "$unit/roles.attack/attacker-sentinel"
+        scratch_display=$(sed -n '1p' "$scratch_display_file")
+        scratch_parent=$(dirname -- "$scratch_display")
+        grep -qx 'scratch ancestor attacker' \
+            "$scratch_parent.attack/attacker-sentinel"
+        ;;
+esac
+grep -qx "compiler_backfill_status=${STAGE3_COMPILER_BACKFILL:-absent}" \
+    "$candidate_provenance"
+
+inventory=$unit/stage3-helper-capsule-inventory.env
+capsule=$unit/stage3-helper-capsule.shs
+INVENTORY=$inventory CAPSULE=$capsule RECEIPT=$unit/runner-receipt.env \
+    /usr/bin/perl -MDigest::SHA=sha256_hex -e '
+sub hash_file {
+    my ($path) = @_;
+    open(my $fh, "<", $path) or die "open $path: $!\n";
+    binmode($fh);
+    return Digest::SHA->new(256)->addfile($fh)->hexdigest;
+}
+sub vector_hash {
+    my $bytes = "";
+    for my $value (@_) { $bytes .= pack("Q>", length($value)) . $value; }
+    return sha256_hex($bytes);
+}
+sub pairs {
+    my ($path) = @_;
+    open(my $fh, "<", $path) or die "open $path: $!\n";
+    my %value;
+    while (<$fh>) {
+        chomp;
+        /\A([a-z][a-z0-9_]*)=(.*)\z/ or die "malformed row\n";
+        !exists($value{$1}) or die "duplicate key\n";
+        $value{$1} = $2;
+    }
+    return \%value;
+}
+my $v = pairs($ENV{INVENTORY});
+my @names = qw(bootstrap_script candidate_builder jobs_policy facade authority
+    command_snapshot sanity manifest_write manifest_verify self_test
+    runner_module planner_admission candidate_frontend);
+$v->{schema} eq "simple-stage3-helper-capsule-v1" or die "schema\n";
+$v->{status} eq "ready" or die "status\n";
+$v->{entry} eq "stage3" && $v->{full_entry} eq "stage3" &&
+    $v->{resume_entry} eq "stage3" or die "entry parity\n";
+$v->{helper_count} eq "13" or die "count\n";
+my @inventory;
+for my $index (1 .. 13) {
+    my $name = $names[$index - 1];
+    $v->{"helper_${index}_name"} eq $name or die "helper order $index\n";
+    my $descriptor = $v->{"helper_${index}_descriptor_path"};
+    $descriptor =~ m{\A/proc/[1-9][0-9]*/fd/[1-9][0-9]*\z}
+        or die "noncanonical descriptor $index\n";
+    push @inventory, $name, $v->{"helper_${index}_display_path"},
+        $descriptor, $v->{"helper_${index}_dev"},
+        $v->{"helper_${index}_ino"}, $v->{"helper_${index}_sha256"};
+}
+my $inventory_sha = vector_hash(@inventory);
+$inventory_sha eq $v->{inventory_sha256} or die "inventory hash\n";
+hash_file($ENV{CAPSULE}) eq $v->{capsule_sha256} or die "capsule hash\n";
+my $parity = vector_hash("simple-stage3-helper-capsule-entry-parity-v1",
+    "entry", "stage3", "full_entry", "stage3", "resume_entry", "stage3",
+    "helper_count", "13", "inventory_sha256", $inventory_sha,
+    "capsule_sha256", $v->{capsule_sha256}, "full_caller_sha256",
+    $v->{full_caller_sha256}, "candidate_builder_caller_sha256",
+    $v->{candidate_builder_caller_sha256});
+$parity eq $v->{entry_parity_sha256} or die "entry parity hash\n";
+my $receipt = pairs($ENV{RECEIPT});
+hash_file($ENV{INVENTORY}) eq $receipt->{helper_capsule_inventory_sha256}
+    or die "receipt inventory binding\n";
+$v->{capsule_sha256} eq $receipt->{helper_capsule_sha256}
+    or die "receipt capsule binding\n";
+$parity eq $receipt->{helper_capsule_entry_parity_sha256}
+    or die "receipt parity binding\n";
+'
+
+echo 'bootstrap Stage3 shared runner focused contract: PASS'
+

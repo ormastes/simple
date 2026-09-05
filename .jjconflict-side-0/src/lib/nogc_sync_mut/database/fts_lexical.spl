@@ -1,0 +1,260 @@
+# BM25 lexical side-index for the textual database (P9).
+#
+# `fts.spl` owns the pre-existing trigram `FtsIndex` (`fts_build`/`fts_search`/
+# `fts_update`) used for approximate/fuzzy substring matching. This module adds
+# a SEPARATE side-index, `FtsLexicalIndex`, that scores whole-word term
+# matches with the shared checked BM25 scorer from `std.common.search.ranking`
+# (P0-owned; not reimplemented here). Trigram and BM25 are different retrieval
+# modes and stay explicitly distinct: `fts_search` keeps its existing meaning,
+# and lexical scoring is reached only through `search_lexical`.
+#
+# Row/WAL mutation and the lexical delta are meant to be applied as one
+# logical transaction by the caller (build the row change, then call
+# `fts_lexical_update` for the same row). The side-index itself holds no
+# durable state of its own: it is always derivable from the table's rows, so
+# recovery can validate an existing side-index generation against the row log
+# or simply rebuild it from `fts_lexical_build`. This module never becomes a
+# source of truth for row data.
+
+use nogc_sync_mut.database.core (SdnTable, SdnRow)
+use std.common.search.ranking.{Bm25FieldV1, bm25_fixed_v1_score_checked}
+
+# Single closed field name used for a single-column textual side-index. This
+# matches one of the frozen `BM25_FIELD_NAMES` ordinals in `ranking.spl`.
+val LEXICAL_FIELD_NAME: text = "body"
+
+fn _is_token_char(c: text) -> bool:
+    if c.len() == 0:
+        return false
+    val b = c.bytes()[0]
+    (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57)
+
+fn lexical_tokenize(s: text) -> [text]:
+    """Lowercase ASCII-alphanumeric-run tokenizer over the character array
+    (never a byte slice, since `text.len()` is bytes and `[]` on a byte
+    offset can split a multibyte codepoint). Non-ASCII codepoints act as
+    separators, same as any other non-alphanumeric character."""
+    val lowered = s.to_lower()
+    var tokens: [text] = []
+    var current: text = ""
+    for c in lowered.chars():
+        if _is_token_char(c):
+            current = current + c
+        else:
+            if current.len() > 0:
+                tokens.push(current)
+                current = ""
+    if current.len() > 0:
+        tokens.push(current)
+    tokens
+
+fn _norm_i64(x: i64) -> i64:
+    """Round-trip an `i64` through text. A raw `i64` pulled out of a `Dict`
+    iteration tuple (`for (k, v) in dict:`) has been observed to fail plain
+    `==`/`!=`/`<` comparisons against an otherwise-equal literal or field
+    value under this interpreter, even though it prints identically and
+    works fine as a dict key. Round-tripping through text produces a plain
+    comparable `i64`. Apply this at the point such a value is extracted,
+    before it is compared, sorted, or stored into a result record."""
+    x.to_text().to_i64()
+
+fn _i64_list_contains(xs: [i64], target: i64) -> bool:
+    val target_key = target.to_text()
+    for x in xs:
+        if x.to_text() == target_key:
+            return true
+    false
+
+fn _row_term_counts(value: text) -> Dict<text, i64>:
+    var counts: Dict<text, i64> = {}
+    for tok in lexical_tokenize(value):
+        if counts.contains_key(tok):
+            counts[tok] = counts[tok] + 1
+        else:
+            counts[tok] = 1
+    counts
+
+struct FtsLexicalResult:
+    row_idx: i64
+    score_milli: i64  # fixed-point BM25 score (Score.raw_value()); never f64
+
+struct FtsLexicalIndex:
+    column: text
+    # term -> (row_idx -> term frequency in that row's column value)
+    postings: Dict<text, Dict<i64, i64>>
+    # row_idx -> token count of that row's column value
+    doc_lengths: Dict<i64, i64>
+    total_length: i64
+    num_docs: i64
+
+impl FtsLexicalIndex:
+    static fn empty(column: text) -> FtsLexicalIndex:
+        FtsLexicalIndex(column: column, postings: {}, doc_lengths: {},
+                         total_length: 0, num_docs: 0)
+
+    me fn _add_row(row_idx: i64, value: text):
+        val counts = _row_term_counts(value)
+        var row_len: i64 = 0
+        for (term, tf) in counts:
+            row_len = row_len + tf
+            if self.postings.contains_key(term):
+                var rowmap = self.postings[term]
+                rowmap[row_idx] = tf
+                self.postings[term] = rowmap
+            else:
+                var rowmap: Dict<i64, i64> = {}
+                rowmap[row_idx] = tf
+                self.postings[term] = rowmap
+        self.doc_lengths[row_idx] = row_len
+        self.total_length = self.total_length + row_len
+        self.num_docs = self.num_docs + 1
+
+    me fn update_row(row_idx: i64, old_value: text, new_value: text):
+        """Apply a single-row delta in place: remove the row's old term
+        contributions, then add its new ones. Caller is responsible for
+        pairing this with the corresponding row/WAL mutation as one logical
+        unit. Inlined rather than delegating to a nested `me fn` self-call
+        (a nested mutator's writes were not observed to propagate back into
+        the caller's `self` under this interpreter). Row-key comparisons use
+        `.to_text()` equality because raw `i64 == i64`/`!=` comparisons on a
+        `Dict` iteration-tuple key were observed to always evaluate false
+        under this interpreter, even for equal values (see module header)."""
+        val had_old = self.doc_lengths.contains_key(row_idx)
+        if had_old:
+            val row_key = row_idx.to_text()
+            val old_counts = _row_term_counts(old_value)
+            for (term, _tf) in old_counts:
+                if self.postings.contains_key(term):
+                    val rowmap = self.postings[term]
+                    if rowmap.contains_key(row_idx):
+                        var next_rowmap: Dict<i64, i64> = {}
+                        for (r, tf) in rowmap:
+                            if r.to_text() != row_key:
+                                next_rowmap[r] = tf
+                        self.postings[term] = next_rowmap
+            val old_len = self.doc_lengths[row_idx]
+            self.total_length = self.total_length - old_len
+            self.num_docs = self.num_docs - 1
+
+        val new_counts = _row_term_counts(new_value)
+        var new_len: i64 = 0
+        for (term, tf) in new_counts:
+            new_len = new_len + tf
+            if self.postings.contains_key(term):
+                var rowmap = self.postings[term]
+                rowmap[row_idx] = tf
+                self.postings[term] = rowmap
+            else:
+                var rowmap: Dict<i64, i64> = {}
+                rowmap[row_idx] = tf
+                self.postings[term] = rowmap
+        self.doc_lengths[row_idx] = new_len
+        self.total_length = self.total_length + new_len
+        self.num_docs = self.num_docs + 1
+
+    me fn _doc_freq(term: text) -> i64:
+        if self.postings.contains_key(term):
+            return self.postings[term].len()
+        0
+
+    me fn _term_freq(term: text, row_idx: i64) -> i64:
+        if self.postings.contains_key(term):
+            val rowmap = self.postings[term]
+            if rowmap.contains_key(row_idx):
+                return rowmap[row_idx]
+        0
+
+    me fn _candidate_rows(terms: [text]) -> [i64]:
+        var rows: [i64] = []
+        for term in terms:
+            if self.postings.contains_key(term):
+                for (r, _tf) in self.postings[term]:
+                    val normalized = _norm_i64(r)
+                    if not _i64_list_contains(rows, normalized):
+                        rows.push(normalized)
+        rows
+
+    me fn search(query: text, limit: i64) -> Result<[FtsLexicalResult], text>:
+        """Whole-word BM25 lexical search over the side-index. Distinct from
+        `fts_search` (trigram/fuzzy): a query only matches rows sharing
+        tokenized terms, scored by the shared checked BM25 scorer at
+        `std.common.search.ranking`. Never silently falls back to trigram
+        behavior."""
+        var terms: [text] = []
+        for t in lexical_tokenize(query):
+            if not terms.contains(t):
+                terms.push(t)
+        if terms.len() == 0:
+            return Ok([])
+        if self.num_docs == 0:
+            return Ok([])
+
+        var doc_freqs: [i64] = []
+        for term in terms:
+            doc_freqs.push(self._doc_freq(term))
+
+        val candidates = self._candidate_rows(terms)
+        var scored: [FtsLexicalResult] = []
+        for row_idx in candidates:
+            var tfs: [i64] = []
+            for term in terms:
+                tfs.push(self._term_freq(term, row_idx))
+            var doc_len: i64 = 0
+            if self.doc_lengths.contains_key(row_idx):
+                doc_len = self.doc_lengths[row_idx]
+            val field = Bm25FieldV1.of(LEXICAL_FIELD_NAME, terms, tfs, doc_freqs,
+                                        doc_len, self.total_length, self.num_docs)
+            val score = bm25_fixed_v1_score_checked([field])?
+            scored.push(FtsLexicalResult(row_idx: row_idx, score_milli: score.raw_value()))
+
+        # Deterministic ordering: score descending, then row_idx ascending.
+        var sorted: [FtsLexicalResult] = []
+        for item in scored:
+            var inserted = false
+            var out: [FtsLexicalResult] = []
+            for existing in sorted:
+                if not inserted:
+                    if item.score_milli > existing.score_milli:
+                        out.push(item)
+                        inserted = true
+                    elif item.score_milli == existing.score_milli and _norm_i64(item.row_idx) < _norm_i64(existing.row_idx):
+                        out.push(item)
+                        inserted = true
+                out.push(existing)
+            if not inserted:
+                out.push(item)
+            sorted = out
+
+        var final_results: [FtsLexicalResult] = []
+        var taken: i64 = 0
+        for r in sorted:
+            if taken >= limit:
+                break
+            final_results.push(r)
+            taken = taken + 1
+        Ok(final_results)
+
+fn fts_lexical_build(table: SdnTable, column: text) -> FtsLexicalIndex:
+    var index = FtsLexicalIndex.empty(column)
+    var row_idx: i64 = 0
+    for row in table.rows:
+        val val_opt = row.get(column)
+        match val_opt:
+            Some(s):
+                index._add_row(row_idx, s)
+            nil:
+                pass
+        row_idx = row_idx + 1
+    index
+
+fn fts_lexical_update(index: FtsLexicalIndex, row_idx: i64, old_value: text, new_value: text) -> FtsLexicalIndex:
+    """Free-function convenience wrapper over `FtsLexicalIndex.update_row` for
+    call sites that hold the index as a `val`. Returns the updated index;
+    callers must reassign it (`index = fts_lexical_update(index, ...)`)."""
+    var mutable_index = index
+    mutable_index.update_row(row_idx, old_value, new_value)
+    mutable_index
+
+fn search_lexical(index: FtsLexicalIndex, query: text, limit: i64) -> Result<[FtsLexicalResult], text>:
+    """Free-function convenience wrapper over `FtsLexicalIndex.search`."""
+    index.search(query, limit)

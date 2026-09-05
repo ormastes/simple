@@ -1,0 +1,607 @@
+# ============================================================================
+# TLS 1.3 Server-side handshake crypto preparation — RFC 8446
+# ============================================================================
+#
+# Extracted from server.spl. Contains:
+#   - process_client_hello (RFC 8446 §4.1.2 CH body parser)
+#   - select_cipher_suite / select_named_group
+#   - prepare_server_handshake_from_client_hello_record (core crypto pipeline)
+#   - tls13_prepare_server_handshake_from_record_for_test
+#   - tls13_accept_client_hello_record_with_server_material_for_test
+#   - tls13_accept_client_finished_record_for_test
+#   - verify_client_finished_record_sh
+#   - validate_client_hello_record_sh
+#
+# Reference: RFC 8446 §4.1–§4.4.
+
+use os.tls13.handshake13.{
+    parse_handshake_header, parse_finished_body,
+    HS_CLIENT_HELLO, GROUP_X25519, GROUP_SECP256R1
+}
+use os.tls13.key_schedule.{
+    tls13_compute_handshake_secrets, tls13_compute_app_secrets,
+    tls13_finished_key, tls13_traffic_keys, tls13_verify_data
+}
+use os.tls13.transcript.{Transcript, transcript_new, transcript_add, transcript_hash}
+use os.tls13.record13.{RecordKey, RecordResult, record13_encrypt_for_suite, record13_decrypt_for_suite}
+use os.tls13.server_types.{
+    ClientHello13, Tls13ClientHelloRecord, Tls13ServerConfig, Tls13ServerContext,
+    Tls13ServerHandshakeMaterial, Tls13AcceptResult, Tls13ServerHandshakeResult
+}
+use os.tls13.server_builders.{
+    build_server_hello, build_encrypted_extensions_server_side,
+    build_certificate, build_certificate_verify, build_server_finished
+}
+use os.crypto.curve25519.{x25519, x25519_base}
+use os.crypto.ecdh_p256.{p256_ecdh_shared_x, p256_keypair_pub}
+
+val TLS_CONTENT_HANDSHAKE_SH: u8   = 0x16
+val TLS_MAX_RECORD_PAYLOAD_SH: u64 = 18432
+
+val CIPHER_AES_128_GCM_SHA256_SH: u16       = 0x1301
+val CIPHER_AES_256_GCM_SHA384_SH: u16       = 0x1302
+val CIPHER_CHACHA20_POLY1305_SHA256_SH: u16 = 0x1303
+
+# ============================================================================
+# Local byte helpers (self-contained — no import from server.spl)
+# ============================================================================
+
+fn _h_u8_at(data: [u8], offset: u64) -> u8:
+    if offset >= data.len():
+        return 0u8
+    data[offset]
+
+fn _h_u16_be_at(data: [u8], offset: u64) -> u16:
+    if offset + 2 > data.len():
+        return 0u16
+    ((_h_u8_at(data, offset).to_u16() << 8) | _h_u8_at(data, offset + 1).to_u16()).to_u16()
+
+fn _h_u24_be_at(data: [u8], offset: u64) -> u64:
+    if offset + 3 > data.len():
+        return 0u64
+    (_h_u8_at(data, offset).to_u64() << 16) |
+        (_h_u8_at(data, offset + 1u64).to_u64() << 8) |
+        _h_u8_at(data, offset + 2u64).to_u64()
+
+fn _h_slice(data: [u8], offset: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length and offset + i < data.len():
+        out.push(data[offset + i])
+        i = i + 1
+    out
+
+fn _h_ct_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var acc: u8 = 0u8
+    var i: u64 = 0
+    while i < a.len():
+        acc = acc | (_h_u8_at(a, i) ^ _h_u8_at(b, i))
+        i = i + 1
+    acc == 0u8
+
+fn _h_u16_list_contains(xs: [u16], v: u16) -> bool:
+    var i: u64 = 0
+    while i < xs.len():
+        if xs[i] == v:
+            return true
+        i = i + 1
+    false
+
+fn _h_append(dst: [u8], src: [u8]) -> [u8]:
+    var i: u64 = 0
+    while i < src.len():
+        dst.push(src[i])
+        i = i + 1
+    dst
+
+fn _h_put_u16_be(value: u16) -> [u8]:
+    var out: [u8] = []
+    out.push(((value.to_u32() >> 8) & 0xFF).to_u8())
+    out.push((value.to_u32() & 0xFF).to_u8())
+    out
+
+fn _h_put_u24_be(value: u64) -> [u8]:
+    var out: [u8] = []
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push((value & 0xFF).to_u8())
+    out
+
+# ============================================================================
+# Public: process_client_hello — RFC 8446 §4.1.2
+# ============================================================================
+
+fn _empty_ch() -> ClientHello13:
+    ClientHello13(
+        random: [],
+        cipher_suites: [],
+        named_groups: [],
+        key_share_groups: [],
+        x25519_key_share: [],
+        p256_key_share: [],
+        sni_host: "",
+        has_supported_versions_tls13: false
+    )
+
+fn process_client_hello(body: [u8]) -> ClientHello13:
+    """Parse a ClientHello body (i.e. `parse_handshake_header(...).body`).
+
+    Wire format (RFC 8446 §4.1.2):
+      legacy_version(2) + random(32) +
+      legacy_session_id_len(1) + legacy_session_id(<=32) +
+      cipher_suites_len(2) + cipher_suites +
+      legacy_compression_methods_len(1) + legacy_compression_methods +
+      extensions_len(2) + extensions
+
+    Returns an empty ClientHello13 if the body is malformed; the caller
+    is expected to detect this via `random.len() == 0`.
+    """
+    if body.len() < 39:
+        return _empty_ch()
+
+    # legacy_version (2 bytes) is at offset 0; we accept 0x0303 only.
+    if _h_u8_at(body, 0) != 0x03u8 or _h_u8_at(body, 1) != 0x03u8:
+        return _empty_ch()
+
+    # random (32 bytes) at offset 2..34
+    var random: [u8] = _h_slice(body, 2u64, 32u64)
+
+    # legacy_session_id at offset 34
+    val sid_len = _h_u8_at(body, 34u64).to_u64()
+    if sid_len > 32u64:
+        return _empty_ch()
+    var off: u64 = 35u64 + sid_len
+
+    # cipher_suites
+    if off + 2 > body.len():
+        return _empty_ch()
+    val cs_len = _h_u16_be_at(body, off).to_u64()
+    off = off + 2u64
+    if off + cs_len > body.len() or (cs_len & 1u64) != 0u64:
+        return _empty_ch()
+    var cipher_suites: [u16] = []
+    var ci: u64 = 0
+    while ci < cs_len:
+        cipher_suites.push(_h_u16_be_at(body, off + ci))
+        ci = ci + 2u64
+    off = off + cs_len
+
+    # legacy_compression_methods
+    if off + 1 > body.len():
+        return _empty_ch()
+    val cm_len = _h_u8_at(body, off).to_u64()
+    off = off + 1u64 + cm_len
+    if off > body.len():
+        return _empty_ch()
+
+    # extensions
+    if off + 2 > body.len():
+        return _empty_ch()
+    val ext_total = _h_u16_be_at(body, off).to_u64()
+    off = off + 2u64
+    val ext_end = off + ext_total
+    if ext_end > body.len():
+        return _empty_ch()
+
+    var named_groups: [u16] = []
+    var ks_groups: [u16] = []
+    var x25519_share: [u8] = []
+    var p256_share: [u8] = []
+    var sni: text = ""
+    var has_tls13 = false
+
+    while off + 4 <= ext_end:
+        val ext_type = _h_u16_be_at(body, off)
+        off = off + 2u64
+        val ext_len = _h_u16_be_at(body, off).to_u64()
+        off = off + 2u64
+        if off + ext_len > ext_end:
+            return _empty_ch()
+        val ext_end_inner = off + ext_len
+
+        if ext_type == 10u16:
+            # supported_groups: 2-byte list_len + u16 entries
+            if ext_len >= 2u64:
+                val gl = _h_u16_be_at(body, off).to_u64()
+                var gp = off + 2u64
+                while gp + 2 <= off + 2u64 + gl and gp + 2 <= ext_end_inner:
+                    named_groups.push(_h_u16_be_at(body, gp))
+                    gp = gp + 2u64
+
+        if ext_type == 43u16:
+            # supported_versions: 1-byte list_len + u16 entries
+            if ext_len >= 1u64:
+                val vl = _h_u8_at(body, off).to_u64()
+                var vp = off + 1u64
+                while vp + 2 <= off + 1u64 + vl and vp + 2 <= ext_end_inner:
+                    if _h_u16_be_at(body, vp) == 0x0304u16:
+                        has_tls13 = true
+                    vp = vp + 2u64
+
+        if ext_type == 51u16:
+            # key_share (CH): 2-byte client_shares_len + entries of {group(2), key_len(2), key}
+            if ext_len >= 2u64:
+                val ksl = _h_u16_be_at(body, off).to_u64()
+                var kp = off + 2u64
+                val ks_end = kp + ksl
+                while kp + 4 <= ks_end and kp + 4 <= ext_end_inner:
+                    val grp = _h_u16_be_at(body, kp)
+                    val klen = _h_u16_be_at(body, kp + 2u64).to_u64()
+                    val key_start = kp + 4u64
+                    if key_start + klen > ks_end:
+                        return _empty_ch()
+                    # Only register a group as "key_share-offered" when the
+                    # advertised key length matches the named-group spec
+                    # (RFC 8446 §4.2.8). Otherwise select_named_group could
+                    # later return a group whose share is empty/invalid.
+                    if grp == GROUP_X25519 and klen == 32u64:
+                        x25519_share = _h_slice(body, key_start, klen)
+                        ks_groups.push(grp)
+                    elif grp == GROUP_SECP256R1 and klen == 65u64:
+                        p256_share = _h_slice(body, key_start, klen)
+                        ks_groups.push(grp)
+                    kp = key_start + klen
+
+        if ext_type == 0u16:
+            # server_name: list_len(2) + (name_type(1) + name_len(2) + name)*
+            if ext_len >= 5u64:
+                var sp = off + 2u64
+                if _h_u8_at(body, sp) == 0u8:
+                    val nl = _h_u16_be_at(body, sp + 1u64).to_u64()
+                    val name_start = sp + 3u64
+                    if name_start + nl <= ext_end_inner:
+                        var name_bytes: [u8] = _h_slice(body, name_start, nl)
+                        # SNI is ASCII per RFC 6066; build a text accumulator.
+                        var bi: u64 = 0
+                        while bi < name_bytes.len():
+                            sni = sni + name_bytes[bi].to_text()
+                            bi = bi + 1u64
+
+        off = ext_end_inner
+
+    ClientHello13(
+        random: random,
+        cipher_suites: cipher_suites,
+        named_groups: named_groups,
+        key_share_groups: ks_groups,
+        x25519_key_share: x25519_share,
+        p256_key_share: p256_share,
+        sni_host: sni,
+        has_supported_versions_tls13: has_tls13
+    )
+
+# ============================================================================
+# Public: select_cipher_suite — RFC 8446 §4.1.1 server preference
+# ============================================================================
+
+fn select_cipher_suite(client_suites: [u16], supported: [u16]) -> u16:
+    """Pick the server's most-preferred suite that the client offered.
+
+    Match-key on the three TLS 1.3 mandatory cipher suites:
+      0x1301 TLS_AES_128_GCM_SHA256
+      0x1302 TLS_AES_256_GCM_SHA384
+      0x1303 TLS_CHACHA20_POLY1305_SHA256
+    Returns 0u16 if no match.
+    """
+    var i: u64 = 0
+    while i < supported.len():
+        val s = supported[i]
+        var j: u64 = 0
+        while j < client_suites.len():
+            if client_suites[j] == s:
+                if (s == CIPHER_AES_128_GCM_SHA256_SH or
+                    s == CIPHER_AES_256_GCM_SHA384_SH or
+                    s == CIPHER_CHACHA20_POLY1305_SHA256_SH):
+                    return s
+            j = j + 1u64
+        i = i + 1u64
+    0u16
+
+# ============================================================================
+# Public: select_named_group — RFC 8446 §4.2.7 / §4.2.8 server preference
+# ============================================================================
+
+fn select_named_group(client_key_share_groups: [u16], supported: [u16]) -> u16:
+    """Pick the server's most-preferred group present in CH key_shares.
+
+    `client_key_share_groups` is the list of groups for which the CH
+    actually carried a key_share entry — only those allow a single-flight
+    ServerHello (no HRR). Returns 0u16 if no overlap exists; the caller
+    should treat that as "HRR-needed", which we don't yet implement.
+    """
+    var i: u64 = 0
+    while i < supported.len():
+        val g = supported[i]
+        if g == GROUP_X25519 or g == GROUP_SECP256R1:
+            if _h_u16_list_contains(client_key_share_groups, g):
+                return g
+        i = i + 1u64
+    0u16
+
+# ============================================================================
+# Validation helpers
+# ============================================================================
+
+fn _h_validate_server_config(server_config: Tls13ServerConfig) -> text:
+    if server_config.cert_chain.len() == 0:
+        return "missing_certificate_chain"
+    if server_config.server_pkcs8.len() == 0:
+        return "missing_server_private_key"
+    if server_config.server_sig_scheme == 0u16:
+        return "missing_signature_scheme"
+    ""
+
+fn _h_record_payload(raw_record: [u8]) -> Result<[u8], text>:
+    if raw_record.len() < 5u64:
+        return Err("no_client_hello_record")
+    if _h_u8_at(raw_record, 0u64) != TLS_CONTENT_HANDSHAKE_SH:
+        return Err("expected_handshake_record")
+    if _h_u8_at(raw_record, 1u64) != 0x03u8:
+        return Err("unsupported_record_version")
+    val payload_len = (_h_u8_at(raw_record, 3u64).to_u64() << 8) |
+        _h_u8_at(raw_record, 4u64).to_u64()
+    if payload_len == 0u64 or payload_len > TLS_MAX_RECORD_PAYLOAD_SH:
+        return Err("invalid_record_length")
+    if raw_record.len() != 5u64 + payload_len:
+        return Err("incomplete_client_hello_record")
+    Ok(_h_slice(raw_record, 5u64, payload_len))
+
+fn _h_build_tls13_plaintext_record(content_type: u8, payload: [u8]) -> [u8]:
+    var rec: [u8] = []
+    rec.push(content_type)
+    rec.push(0x03u8)
+    rec.push(0x03u8)
+    rec.push(((payload.len().to_u64() >> 8) & 0xFF).to_u8())
+    rec.push((payload.len().to_u64() & 0xFF).to_u8())
+    var i: u64 = 0
+    while i < payload.len():
+        rec.push(_h_u8_at(payload, i))
+        i = i + 1u64
+    rec
+
+fn validate_client_hello_record_sh(raw_record: [u8]) -> Result<Tls13ClientHelloRecord, text>:
+    val payload_result = _h_record_payload(raw_record)
+    if payload_result.is_err():
+        return Err(payload_result.err().unwrap())
+    val payload = payload_result.unwrap()
+
+    if payload.len() < 4u64:
+        return Err("malformed_client_hello")
+    val declared_len = _h_u24_be_at(payload, 1u64)
+    if declared_len != payload.len() - 4u64:
+        return Err("malformed_client_hello")
+
+    val parsed = parse_handshake_header(payload)
+    if parsed.msg_type != HS_CLIENT_HELLO:
+        return Err("expected_client_hello")
+
+    val ch = process_client_hello(parsed.body)
+    if ch.random.len() == 0:
+        return Err("malformed_client_hello")
+    if not ch.has_supported_versions_tls13:
+        return Err("not_tls13")
+    Ok(Tls13ClientHelloRecord(ch: ch, handshake_msg: payload))
+
+# ============================================================================
+# Accepted context + verify client finished
+# ============================================================================
+
+fn _h_accepted_context(material: Tls13ServerHandshakeMaterial) -> Tls13ServerContext:
+    Tls13ServerContext(
+        cipher_suite: material.cipher_suite,
+        named_group: material.named_group,
+        server_random: material.server_random,
+        server_keyshare_pub: material.server_keyshare_pub,
+        client_app_key: material.client_app_key,
+        client_app_iv: material.client_app_iv,
+        server_app_key: material.server_app_key,
+        server_app_iv: material.server_app_iv,
+        client_seq: 0u64,
+        server_seq: 0u64
+    )
+
+fn verify_client_finished_record_sh(material: Tls13ServerHandshakeMaterial, raw_record: [u8]) -> Tls13AcceptResult:
+    if raw_record.len() == 0u64:
+        return Tls13AcceptResult.Failed("missing_client_finished")
+    val client_rk = RecordKey(key: material.client_hs_key, iv: material.client_hs_iv)
+    match record13_decrypt_for_suite(material.cipher_suite, client_rk, 0u64, raw_record):
+        case RecordResult.Err(msg):
+            Tls13AcceptResult.Failed("client_finished_decrypt_failed")
+        case RecordResult.Ok(content_type, data):
+            if content_type != TLS_CONTENT_HANDSHAKE_SH.to_i64():
+                return Tls13AcceptResult.Failed("client_finished_not_handshake")
+            val parsed = parse_handshake_header(data)
+            if parsed.msg_type != 20u8:
+                return Tls13AcceptResult.Failed("client_finished_unexpected_message")
+            val verify_data = parse_finished_body(parsed.body)
+            if not _h_ct_bytes_equal(verify_data, material.expected_client_finished):
+                return Tls13AcceptResult.Failed("client_finished_verify_failed")
+            Tls13AcceptResult.Accepted(_h_accepted_context(material))
+
+# ============================================================================
+# Core: prepare_server_handshake_from_client_hello_record
+# ============================================================================
+
+fn prepare_server_handshake_from_client_hello_record(
+    ch_pair: Tls13ClientHelloRecord,
+    server_config: Tls13ServerConfig,
+    server_random: [u8],
+    server_scalar: [u8]
+) -> Tls13ServerHandshakeResult:
+    val config_error = _h_validate_server_config(server_config)
+    if config_error != "":
+        return Tls13ServerHandshakeResult.Failed(config_error)
+    if server_random.len() != 32u64:
+        return Tls13ServerHandshakeResult.Failed("invalid_server_random")
+    if server_scalar.len() != 32u64:
+        return Tls13ServerHandshakeResult.Failed("invalid_server_scalar")
+
+    val ch = ch_pair.ch
+    val ch_msg = ch_pair.handshake_msg
+
+    val cipher = select_cipher_suite(ch.cipher_suites, [
+        CIPHER_AES_128_GCM_SHA256_SH,
+        CIPHER_AES_256_GCM_SHA384_SH,
+        CIPHER_CHACHA20_POLY1305_SHA256_SH
+    ])
+    if cipher == 0u16:
+        return Tls13ServerHandshakeResult.Failed("no_shared_cipher_suite")
+
+    val group = select_named_group(ch.key_share_groups, [GROUP_X25519, GROUP_SECP256R1])
+    if group == 0u16:
+        return Tls13ServerHandshakeResult.Failed("hrr_not_implemented_server_side")
+
+    var server_pub: [u8] = []
+    var shared_secret: [u8] = []
+    if group == GROUP_X25519:
+        server_pub = x25519_base(server_scalar)
+        shared_secret = x25519(server_scalar, ch.x25519_key_share)
+    elif group == GROUP_SECP256R1:
+        server_pub = p256_keypair_pub(server_scalar)
+        shared_secret = p256_ecdh_shared_x(server_scalar, ch.p256_key_share)
+    else:
+        return Tls13ServerHandshakeResult.Failed("unsupported_named_group")
+
+    if server_pub.len() == 0u64 or shared_secret.len() != 32u64:
+        return Tls13ServerHandshakeResult.Failed("server_key_exchange_failed")
+
+    val sh = build_server_hello(server_random, cipher, group, server_pub)
+    var t = transcript_new()
+    t = transcript_add(t, ch_msg)
+    t = transcript_add(t, sh)
+
+    val secrets = tls13_compute_handshake_secrets(shared_secret, t)
+    val client_tk = tls13_traffic_keys(secrets.client_hs_traffic)
+    val server_tk = tls13_traffic_keys(secrets.server_hs_traffic)
+    val server_rk = RecordKey(key: server_tk.key, iv: server_tk.iv)
+
+    val ee = build_encrypted_extensions_server_side(server_config)
+    t = transcript_add(t, ee)
+
+    val cert = build_certificate(server_config.cert_chain)
+    t = transcript_add(t, cert)
+
+    val cv_hash = transcript_hash(t)
+    val cv = build_certificate_verify(
+        cv_hash,
+        server_config.server_pkcs8,
+        server_config.server_sig_scheme
+    )
+    if cv.len() == 0u64:
+        return Tls13ServerHandshakeResult.Failed("certificate_verify_failed")
+    t = transcript_add(t, cv)
+
+    val fin_hash = transcript_hash(t)
+    val fin = build_server_finished(tls13_finished_key(secrets.server_hs_traffic), fin_hash)
+    if fin.len() == 0u64:
+        return Tls13ServerHandshakeResult.Failed("server_finished_failed")
+    t = transcript_add(t, fin)
+
+    val client_finished_key = tls13_finished_key(secrets.client_hs_traffic)
+    val expected_client_finished = tls13_verify_data(client_finished_key, t)
+    val app_secrets = tls13_compute_app_secrets(secrets, t)
+    val client_app_tk = tls13_traffic_keys(app_secrets.client_app_traffic)
+    val server_app_tk = tls13_traffic_keys(app_secrets.server_app_traffic)
+    if (expected_client_finished.len() != 32u64 or
+        client_app_tk.key.len() == 0u64 or
+        server_app_tk.key.len() == 0u64):
+        return Tls13ServerHandshakeResult.Failed("application_secret_derivation_failed")
+
+    val sh_record = _h_build_tls13_plaintext_record(TLS_CONTENT_HANDSHAKE_SH, sh)
+    val ee_record = record13_encrypt_for_suite(cipher, server_rk, 0u64, TLS_CONTENT_HANDSHAKE_SH, ee)
+    val cert_record = record13_encrypt_for_suite(cipher, server_rk, 1u64, TLS_CONTENT_HANDSHAKE_SH, cert)
+    val cv_record = record13_encrypt_for_suite(cipher, server_rk, 2u64, TLS_CONTENT_HANDSHAKE_SH, cv)
+    val fin_record = record13_encrypt_for_suite(cipher, server_rk, 3u64, TLS_CONTENT_HANDSHAKE_SH, fin)
+    if (sh_record.len() == 0u64 or ee_record.len() == 0u64 or
+        cert_record.len() == 0u64 or cv_record.len() == 0u64 or fin_record.len() == 0u64):
+        return Tls13ServerHandshakeResult.Failed("server_flight_record_failed")
+
+    Tls13ServerHandshakeResult.Prepared(Tls13ServerHandshakeMaterial(
+        cipher_suite: cipher,
+        named_group: group,
+        server_random: server_random,
+        server_hello: sh,
+        server_keyshare_pub: server_pub,
+        shared_secret: shared_secret,
+        handshake_secret: secrets.handshake_secret,
+        client_hs_traffic: secrets.client_hs_traffic,
+        server_hs_traffic: secrets.server_hs_traffic,
+        client_hs_key: client_tk.key,
+        client_hs_iv: client_tk.iv,
+        server_hs_key: server_tk.key,
+        server_hs_iv: server_tk.iv,
+        client_app_traffic: app_secrets.client_app_traffic,
+        server_app_traffic: app_secrets.server_app_traffic,
+        client_app_key: client_app_tk.key,
+        client_app_iv: client_app_tk.iv,
+        server_app_key: server_app_tk.key,
+        server_app_iv: server_app_tk.iv,
+        expected_client_finished: expected_client_finished,
+        encrypted_extensions: ee,
+        certificate: cert,
+        certificate_verify: cv,
+        server_finished: fin,
+        server_hello_record: sh_record,
+        encrypted_extensions_record: ee_record,
+        certificate_record: cert_record,
+        certificate_verify_record: cv_record,
+        server_finished_record: fin_record
+    ))
+
+# ============================================================================
+# Public test-helper entry points
+# ============================================================================
+
+fn _server_random_from_client_random_sh(ch: ClientHello13) -> [u8]:
+    """Deterministic test-only random surrogate (XOR with 0xA5)."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32u64:
+        out.push(_h_u8_at(ch.random, i) ^ 0xA5u8)
+        i = i + 1u64
+    out
+
+fn tls13_prepare_server_handshake_from_record_for_test(
+    raw_record: [u8],
+    server_config: Tls13ServerConfig,
+    server_scalar: [u8]
+) -> Tls13ServerHandshakeResult:
+    """Prepare deterministic test-only server handshake material."""
+    val ch_result = validate_client_hello_record_sh(raw_record)
+    if ch_result.is_err():
+        return Tls13ServerHandshakeResult.Failed(ch_result.err().unwrap())
+    val ch_pair = ch_result.unwrap()
+    prepare_server_handshake_from_client_hello_record(
+        ch_pair,
+        server_config,
+        _server_random_from_client_random_sh(ch_pair.ch),
+        server_scalar
+    )
+
+fn tls13_accept_client_hello_record_with_server_material_for_test(
+    raw_record: [u8],
+    server_config: Tls13ServerConfig,
+    server_random: [u8],
+    server_scalar: [u8]
+) -> Tls13AcceptResult:
+    """Run the accept path through server crypto prep with explicit material."""
+    val ch_result = validate_client_hello_record_sh(raw_record)
+    if ch_result.is_err():
+        return Tls13AcceptResult.Failed(ch_result.err().unwrap())
+    val prep = prepare_server_handshake_from_client_hello_record(
+        ch_result.unwrap(), server_config, server_random, server_scalar
+    )
+    match prep:
+        case Tls13ServerHandshakeResult.Failed(reason):
+            Tls13AcceptResult.Failed(reason)
+        case Tls13ServerHandshakeResult.Prepared(_material):
+            Tls13AcceptResult.Failed("client_finished_pending")
+
+fn tls13_accept_client_finished_record_for_test(
+    material: Tls13ServerHandshakeMaterial,
+    client_finished_record: [u8]
+) -> Tls13AcceptResult:
+    """Verify an encrypted client Finished record against prepared material."""
+    verify_client_finished_record_sh(material, client_finished_record)

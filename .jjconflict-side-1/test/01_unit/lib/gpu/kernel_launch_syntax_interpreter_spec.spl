@@ -1,0 +1,76 @@
+"""
+# `<<<grid, block>>>` has a host meaning in interpreter mode (plan E3)
+
+Reproduce for the 2026-08-25 finding that the interpreter evaluated
+`Expr::KernelLaunch` to Nil: a `k<<<grid: (2,1,1), block: (4,1,1)>>>()` launch
+ran nothing, so every kernel test was green while doing no work. The launch
+now desugars to `gpu_launch_emulated(grid, block, \ -> k())` from
+std.gc_async_mut.gpu_ops. Expected RED on the deployed seed (Nil, 0 ids);
+GREEN on a seed carrying the E3 interpreter change.
+
+Plan: doc/03_plan/lib/gpu/gpu_cuda_hardening_plan_2026-08-25.md row E3.
+"""
+
+use std.spec
+use std.gc_async_mut.gpu_ops.{gpu_launch_emulated, gpu_global_id_x, gpu_global_id_y, gpu_block_id_x, gpu_local_id_x}
+
+var _ids: [i64] = []
+var _sum = 0
+
+fn record_global_id():
+    _ids.push(gpu_global_id_x())
+
+fn record_block_local():
+    _ids.push(gpu_block_id_x() * 100 + gpu_local_id_x())
+
+fn add_arg(v: i64):
+    _sum = _sum + v + gpu_global_id_x()
+
+fn record_2d():
+    _ids.push(gpu_global_id_y() * 10 + gpu_global_id_x())
+
+fn distinct_count(xs: [i64]) -> i64:
+    var seen: [i64] = []
+    for x in xs:
+        if not seen.contains(x):
+            seen.push(x)
+    seen.len()
+
+describe "kernel launch <<<>>> in interpreter mode":
+    it "runs the kernel once per work-item: grid (2,1,1) x block (4,1,1) = 8 distinct global ids":
+        _ids = []
+        val r = record_global_id<<<grid: (2, 1, 1), block: (4, 1, 1)>>>()
+        expect(r).to_equal(8)
+        expect(_ids.len()).to_equal(8)
+        expect(distinct_count(_ids)).to_equal(8)
+        var covered = true
+        for i in 0..8:
+            if not _ids.contains(i):
+                covered = false
+        expect(covered).to_equal(true)
+
+    it "accepts a bare int as (n, 1, 1) for grid and block":
+        _ids = []
+        val r = record_block_local<<<grid: 3, block: 2>>>()
+        expect(r).to_equal(6)
+        expect(_ids).to_equal([0, 1, 100, 101, 200, 201])
+
+    it "passes launch arguments to the kernel on every work-item":
+        _sum = 0
+        val r = add_arg<<<grid: 1, block: 4>>>(10)
+        expect(r).to_equal(4)
+        # 4 x 10 + (0 + 1 + 2 + 3)
+        expect(_sum).to_equal(46)
+
+    it "covers a 2-D grid x block row-major":
+        _ids = []
+        val r = record_2d<<<grid: (2, 2, 1), block: (2, 1, 1)>>>()
+        expect(r).to_equal(8)
+        expect(distinct_count(_ids)).to_equal(8)
+        expect(_ids.contains(13)).to_equal(true)
+
+    it "never yields nil for a launch (the pre-E3 behaviour)":
+        _ids = []
+        val r = record_global_id<<<grid: 1, block: 1>>>()
+        expect(r == nil).to_equal(false)
+        expect(_ids).to_equal([0])

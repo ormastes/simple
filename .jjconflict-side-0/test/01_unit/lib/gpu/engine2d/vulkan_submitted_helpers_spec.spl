@@ -1,0 +1,108 @@
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
+
+# REPRODUCER for engine2d_vulkan_submitted_helpers_never_defined_2026-08-17.
+#
+# Defect CLASS: engine.spl:41 `use`d five free functions that existed NOWHERE in
+# the tree. The seed only warned and still exited rc=0; the JIT dropped the whole
+# module with `unresolved external symbol vulkan_submitted_framebuffer_handle`.
+# The import line above is itself the red-first half of this spec: before the fix
+# it does not resolve, so this file cannot run at all.
+#
+# The behavioural half pins WHY they were implemented rather than deleted: they
+# are fail-closed gates. A helper that returned the handle unconditionally would
+# satisfy the linker and still be wrong -- it would let a caller present a
+# framebuffer whose GPU work is still in flight.
+
+fn proven_backend() -> VulkanBackend:
+    """A backend whose last batch is proven complete on the device."""
+    var b = VulkanBackend.create()
+    b.initialized = true
+    b.d_framebuffer = 4242
+    b.observed_device_submit_count = 3
+    b.observed_device_fence_count = 3
+    b
+
+describe "vulkan_submitted_* helpers exist and are fail-closed":
+
+    it "reports nothing on a freshly created backend":
+        # Nothing has been submitted, so every proven-submission query is 0.
+        val b = VulkanBackend.create()
+        expect(vulkan_submitted_framebuffer_handle(b)).to_equal(0)
+        expect(vulkan_submitted_device_identity(b)).to_equal(0)
+        expect(vulkan_submitted_generation(b)).to_equal(0)
+
+    it "reports the handle once a submission is proven":
+        val b = proven_backend()
+        expect(vulkan_submitted_framebuffer_handle(b)).to_equal(4242)
+        expect(vulkan_submitted_generation(b)).to_equal(3)
+
+    it "withholds the handle while a fence has not caught up":
+        # Submitted 3, waited on 2 -- work is still in flight.
+        var b = proven_backend()
+        b.observed_device_fence_count = 2
+        expect(vulkan_submitted_framebuffer_handle(b)).to_equal(0)
+        expect(vulkan_submitted_generation(b)).to_equal(0)
+
+    it "withholds the handle on sticky CPU fallback":
+        var b = proven_backend()
+        b.cpu_fallback_used = true
+        expect(vulkan_submitted_framebuffer_handle(b)).to_equal(0)
+
+    it "withholds the handle when completion is unknown":
+        var b = proven_backend()
+        b.completion_unknown = true
+        expect(vulkan_submitted_framebuffer_handle(b)).to_equal(0)
+
+    it "never names work still in flight in the generation":
+        # The generation is the FENCE count, not the submit count: it may lag
+        # the submit count but must never exceed it.
+        val b = proven_backend()
+        expect(vulkan_submitted_generation(b) <= b.observed_device_submit_count).to_equal(true)
+
+describe "ownership is a weaker claim than proven submission":
+
+    it "reports ownership without a proven submission":
+        # Ownership exists as soon as the device allocation does -- this is the
+        # one helper that deliberately does NOT require a proven batch.
+        var b = VulkanBackend.create()
+        b.initialized = true
+        b.d_framebuffer = 77
+        expect(vulkan_framebuffer_ownership_handle(b)).to_equal(77)
+        expect(vulkan_submitted_framebuffer_handle(b)).to_equal(0)
+
+    it "reports no ownership on CPU fallback or before init":
+        var b = VulkanBackend.create()
+        b.d_framebuffer = 77
+        expect(vulkan_framebuffer_ownership_handle(b)).to_equal(0)
+        b.initialized = true
+        b.cpu_fallback_used = true
+        expect(vulkan_framebuffer_ownership_handle(b)).to_equal(0)
+
+describe "cancel is exact-match on both handle and generation":
+
+    it "cancels a present source named exactly":
+        var b = proven_backend()
+        b.frame_present_attempted = true
+        b.presentation_swapchain = 9
+        expect(vulkan_cancel_submitted_present_source(b, 4242, 3)).to_equal(true)
+        expect(b.presentation_swapchain).to_equal(0)
+        expect(b.frame_present_attempted).to_equal(false)
+
+    it "refuses a stale generation":
+        # The load-bearing case: a late cancel must not tear down a NEWER frame.
+        var b = proven_backend()
+        b.presentation_swapchain = 9
+        expect(vulkan_cancel_submitted_present_source(b, 4242, 2)).to_equal(false)
+        expect(b.presentation_swapchain).to_equal(9)
+
+    it "refuses a mismatched framebuffer handle":
+        var b = proven_backend()
+        b.presentation_swapchain = 9
+        expect(vulkan_cancel_submitted_present_source(b, 1111, 3)).to_equal(false)
+        expect(b.presentation_swapchain).to_equal(9)
+
+    it "cancels nothing on an unproven backend":
+        var b = VulkanBackend.create()
+        b.presentation_swapchain = 9
+        expect(vulkan_cancel_submitted_present_source(b, 0, 0)).to_equal(false)
+        expect(b.presentation_swapchain).to_equal(9)

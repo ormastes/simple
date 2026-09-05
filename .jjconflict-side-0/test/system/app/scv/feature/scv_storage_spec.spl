@@ -1,0 +1,29 @@
+use app.io.mod (process_run)
+
+fn _scv_storage_doc_script(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    "{out}{err}\nexit={code}\n"
+
+describe "Storage chunking":
+    it "records chunk lists for large files while preserving export bytes":
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-cdc.XXXXXX)\nhead -c 2300 /dev/zero | tr '\\000' A > \"$TMP/big.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nFILE=$(sed -n 's/.*|\\(file_[^|]*\\).*/\\1/p' .scv/meta/status_index.sdn | head -1)\nsed -n '1,16p' \".scv/objects/files/$FILE.sdn\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck\n"
+        val out = _scv_storage_doc_script(script)
+        expect(out).to_contain("chunks:")
+        expect(out).to_contain("OK checked=1")
+
+describe "Pack and private sync":
+    it "writes, verifies, and privately syncs pack artifacts":
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-private-sync.XXXXXX)\nBACKUP=$(mktemp -d /tmp/scv-doc-private-backup.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" pack-write\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" pack-verify\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" private-sync \"$BACKUP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" private-sync-verify \"$BACKUP\"\nprintf 'backup_packs=%s\\n' \"$(find \"$BACKUP/packs\" -type f | wc -l | tr -d ' ')\"\n"
+        val out = _scv_storage_doc_script(script)
+        expect(out).to_contain("pack-verify packs=1")
+        expect(out).to_contain("private-sync /tmp/scv-doc-private-backup.")
+        expect(out).to_contain("private-sync-verify /tmp/scv-doc-private-backup.")
+        expect(out).to_contain("backup_packs=2")
+
+describe "Git interoperability planning":
+    it "exports and imports manifests and fast-import streams":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-doc-import-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-doc-import-dst.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest \"$SRC/export.sdn\" >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-git-fast-import \"$SRC/export.fi\" main >/dev/null\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" import-manifest \"$SRC/export.sdn\" \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" import-git-fast-import \"$SRC/export.fi\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\ncmp \"$SRC/a.txt\" out/a.txt\nprintf 'imported=%s\\n' \"$(cat out/a.txt | tr '\\n' '|')\"\n"
+        val out = _scv_storage_doc_script(script)
+        expect(out).to_contain("import-manifest files=1")
+        expect(out).to_contain("import-git-fast-import files=1")
+        expect(out).to_contain("imported=payload|")

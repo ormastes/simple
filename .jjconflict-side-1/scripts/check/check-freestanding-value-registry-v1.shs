@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cc=${CC:-clang}
+nm_tool=${NM:-nm}
+command -v "$cc" >/dev/null 2>&1 || { echo "missing compiler: $cc" >&2; exit 1; }
+command -v "$nm_tool" >/dev/null 2>&1 || { echo "missing nm: $nm_tool" >&2; exit 1; }
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-fv-v1.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+"$cc" -std=c11 -Wall -Wextra -Werror -I"$root" \
+    "$root/src/runtime/test/freestanding_value_registry_v1_selfcheck.c" \
+    -o "$tmp/host-selfcheck"
+"$tmp/host-selfcheck"
+
+"$cc" --target=x86_64-unknown-none-elf -ffreestanding -nostdlib -fno-pie \
+    -mno-red-zone -I"$root" -c \
+    "$root/examples/09_embedded/simple_os/arch/x86_64/boot/freestanding_value_registry.c" \
+    -o "$tmp/x86_64-provider.o"
+for symbol in rt_value_unbox_int rt_value_as_u64 rt_value_u64 rt_struct_alloc \
+              rt_struct_receiver_valid rt_unwrap_or_trap; do
+    count=$($nm_tool -g --defined-only "$tmp/x86_64-provider.o" | awk -v wanted="$symbol" '$2 == "T" && $3 == wanted { n++ } END { print n + 0 }')
+    [ "$count" -eq 1 ] || { echo "strong-symbol gate failed: $symbol count=$count" >&2; exit 1; }
+done
+echo "freestanding_value_registry_v1_host_selfcheck=pass"
+echo "freestanding_value_registry_v1_x86_64_strong_symbols=pass"

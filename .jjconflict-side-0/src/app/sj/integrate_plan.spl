@@ -1,0 +1,108 @@
+# codex-impl
+# Pure typed integration planning. This module never mutates refs or invokes a backend.
+
+use std.scv.lifecycle.model.{Approval, GateRun, GateBundle, LifecycleResult, lifecycle_ok, lifecycle_error}
+use app.sj.gate_manifest.{GateManifestPlan}
+use app.sj.lifecycle_policy.{parse_canonical_lifecycle_vcs_policy, lifecycle_policy_ref}
+
+struct IntegrateRequest:
+    change_id: text
+    revision_id: text
+    base_revision_id: text
+    expected_remote_revision: text
+    observed_remote_revision: text
+    target_ref: text
+    policy_digest: text
+    gate_profile: text
+    actor: text
+    authority: text
+    dry_run: bool
+
+struct IntegratePlan:
+    admitted: bool
+    code: text
+    message: text
+    steps: [text]
+    gate_invocation_ids: [text]
+    request: IntegrateRequest
+
+fn _rejected(request: IntegrateRequest, code: text, message: text) -> IntegratePlan:
+    IntegratePlan(admitted: false, code: code, message: message, steps: [], gate_invocation_ids: [], request: request)
+
+fn plan_integration(request: IntegrateRequest, approvals: [Approval], gate_bundle: GateBundle, protected_target: bool) -> IntegratePlan:
+    if not request.dry_run:
+        return _rejected(request, "SJ_OBSERVE_ONLY", "protected integration execution is disabled until authority promotion")
+    if not protected_target:
+        return _rejected(request, "SJ_POLICY_TARGET", "target ref is not declared by protected-ref policy")
+    if request.change_id == "" or request.revision_id == "" or request.base_revision_id == "":
+        return _rejected(request, "SJ_IDENTITY_MISSING", "change, revision, and base identities are required")
+    if request.expected_remote_revision == "" or request.observed_remote_revision != request.expected_remote_revision:
+        return _rejected(request, "SJ_REMOTE_STALE", "remote compare-and-swap precondition changed")
+    if request.policy_digest == "" or request.gate_profile == "":
+        return _rejected(request, "SJ_POLICY_MISSING", "policy digest and gate profile are required")
+    if request.actor == "" or request.authority == "":
+        return _rejected(request, "SJ_AUTHORITY_MISSING", "actor and authority are required")
+    if gate_bundle.revision_id != request.revision_id or gate_bundle.policy_digest != request.policy_digest or not gate_bundle.complete:
+        return _rejected(request, "SJ_GATE_BUNDLE", "complete exact-revision gate evidence is required")
+    var exact_approval = false
+    for approval in approvals:
+        if approval.revision_id == request.revision_id and approval.policy_digest == request.policy_digest and approval.state == "approved" and gate_bundle.approval_ids.contains(approval.approval_id):
+            exact_approval = true
+    if not exact_approval:
+        return _rejected(request, "SJ_APPROVAL_STALE", "no current exact-revision approval exists")
+    val steps = [
+        "acquire_repository_integration_lease",
+        "fetch_and_compare_remote_revision",
+        "refresh_candidate_and_revalidate_revision",
+        "execute_pinned_gate_manifest",
+        "verify_scv_jj_git_tree_equivalence",
+        "compare_and_swap_integration_ref",
+        "export_and_publish_exact_ref",
+        "verify_remote_revision",
+        "record_durable_audit_operation"
+    ]
+    IntegratePlan(admitted: true, code: "", message: if request.dry_run: "dry-run only; no refs mutated" else: "typed plan admitted", steps: steps, gate_invocation_ids: [], request: request)
+
+fn plan_integration_with_manifest(request: IntegrateRequest, approvals: [Approval], gate_bundle: GateBundle, protected_target: bool, manifest_plan: GateManifestPlan) -> IntegratePlan:
+    val base = plan_integration(request, approvals, gate_bundle, protected_target)
+    if not base.admitted:
+        return base
+    if not manifest_plan.valid or manifest_plan.invocations.len() == 0:
+        return _rejected(request, "SJ_GATE_MANIFEST", "authoritative protected gate manifest is invalid or empty")
+    var ids: [text] = []
+    for invocation in manifest_plan.invocations:
+        if invocation.base_revision != request.base_revision_id or invocation.head_revision != request.revision_id:
+            return _rejected(request, "SJ_GATE_PIN_MISMATCH", "gate invocation is not pinned to integration BASE and HEAD")
+        ids.push(invocation.gate_id)
+    IntegratePlan(admitted: true, code: "", message: base.message, steps: base.steps, gate_invocation_ids: ids, request: request)
+
+fn plan_integration_with_policy(request: IntegrateRequest, approvals: [Approval], gate_runs: [GateRun], gate_bundle: GateBundle, policy_payload: text, manifest_plan: GateManifestPlan) -> IntegratePlan:
+    val policy = parse_canonical_lifecycle_vcs_policy(policy_payload)
+    if not policy.valid or policy.digest != request.policy_digest:
+        return _rejected(request, "SJ_POLICY_UNKNOWN", "request is not bound to the validated protected-ref policy")
+    val required_refs = ["main", "integration/main", "release/*", "refs/tags/v*"]
+    for required_ref in required_refs:
+        var found = false
+        for candidate in policy.refs:
+            if candidate.ref_pattern == required_ref:
+                found = true
+        if not found:
+            return _rejected(request, "SJ_POLICY_INCOMPLETE", "validated policy is missing required protected ref class: " + required_ref)
+    val ref_policy = lifecycle_policy_ref(policy, request.target_ref)
+    if ref_policy == nil:
+        return _rejected(request, "SJ_POLICY_TARGET", "target ref is not declared by protected-ref policy")
+    if ref_policy.?.gate_profile != request.gate_profile:
+        return _rejected(request, "SJ_GATE_PROFILE", "request gate profile does not match protected-ref policy")
+    val base = plan_integration_with_manifest(request, approvals, gate_bundle, true, manifest_plan)
+    if not base.admitted:
+        return base
+    for invocation in manifest_plan.invocations:
+        var evidenced = false
+        for run in gate_runs:
+            if run.gate_id == invocation.gate_id and gate_bundle.gate_run_ids.contains(run.gate_run_id) and run.revision_id == request.revision_id and run.policy_digest == request.policy_digest and run.verdict == "pass" and run.evidence_objects.len() > 0:
+                evidenced = true
+        if not evidenced:
+            return _rejected(request, "SJ_GATE_EVIDENCE_MISSING", "required manifest gate lacks exact retained evidence: " + invocation.gate_id)
+    base
+
+export IntegrateRequest, IntegratePlan, plan_integration, plan_integration_with_manifest, plan_integration_with_policy

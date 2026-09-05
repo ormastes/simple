@@ -1,0 +1,553 @@
+# CSS media query evaluation — shared leaf.
+#
+# The contract that matters here is the FAILURE contract. A media query engine
+# that cannot evaluate a feature has three choices: pretend it matched, pretend
+# it did not, or say so. The first two are indistinguishable from a correct
+# answer at the call site, which is how an unimplemented feature turns into a
+# silently wrong page instead of a findable bug.
+#
+# So every entry point returns `bool?`:
+#
+#   Some(true)  — evaluated, and it matches
+#   Some(false) — evaluated, and it does not match
+#   nil         — NOT EVALUATED. The caller must not apply the block, and
+#                 should record it. `nil` is never "false" in disguise.
+#
+# `not` over an unevaluated operand stays `nil` — negating an unknown does not
+# make it known.
+
+# ============================================================================
+# MediaEnvironment — everything a query can be asked about.
+# ============================================================================
+
+class MediaEnvironment:
+    media_type: text        # "screen" | "print" | ...
+    width_px: f64
+    height_px: f64
+    font_size_px: f64       # root font size, for em/rem in queries
+    resolution_dppx: f64
+    color_bits: i64         # bits per colour component; 0 = monochrome
+    prefers_dark: bool
+    prefers_reduced_motion: bool
+
+fn media_environment_screen(width_px: f64, height_px: f64) -> MediaEnvironment:
+    """Return a plain screen environment of the given size, 16px root font."""
+    MediaEnvironment(
+        media_type: "screen",
+        width_px: width_px,
+        height_px: height_px,
+        font_size_px: 16.0,
+        resolution_dppx: 1.0,
+        color_bits: 8,
+        prefers_dark: false,
+        prefers_reduced_motion: false,
+    )
+
+# ============================================================================
+# Lexical helpers
+# ============================================================================
+
+fn _lower_trim(s: text) -> text:
+    """Return `s` trimmed and lowercased."""
+    val t: text = s.trim()
+    t.to_lower()
+
+# Split on a top-level separator word (`and` / `or`), respecting parens.
+fn _split_top_level(source: text, keyword: text) -> [text]:
+    """Split `source` on the top-level `keyword`, keeping parenthesised runs."""
+    var out: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    val klen = keyword.len()
+    while i < source.len():
+        val c = source.slice(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            if depth > 0:
+                depth = depth - 1
+        val fits = i + klen <= source.len()
+        if depth == 0 and fits and source.slice(i, i + klen) == keyword:
+            val before_ok = i == 0 or _is_ws(source.slice(i - 1, i))
+            val after_at = i + klen
+            val after_ok = after_at >= source.len() or _is_ws(source.slice(after_at, after_at + 1))
+            if before_ok and after_ok:
+                val part: text = source.slice(start, i)
+                out.push(part.trim())
+                i = i + klen
+                start = i
+                continue
+        i = i + 1
+    val tail: text = source.slice(start, source.len())
+    out.push(tail.trim())
+    out
+
+fn _is_ws(c: text) -> bool:
+    """Return true when `c` is an ASCII whitespace character."""
+    c == " " or c == "\t" or c == "\n" or c == "\r"
+
+fn _split_commas(source: text) -> [text]:
+    """Split `source` on top-level commas."""
+    var out: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < source.len():
+        val c = source.slice(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            if depth > 0:
+                depth = depth - 1
+        elif c == "," and depth == 0:
+            val part: text = source.slice(start, i)
+            out.push(part.trim())
+            start = i + 1
+        i = i + 1
+    val tail: text = source.slice(start, source.len())
+    out.push(tail.trim())
+    out
+
+# ============================================================================
+# Length resolution
+# ============================================================================
+
+# Resolve a query length to px. Only units whose px value this environment
+# actually determines are resolvable; anything else is nil, because a query
+# comparing against a unit we cannot convert has no truth value here.
+fn _length_px(raw: text, env: MediaEnvironment) -> f64?:
+    """Return the px value of length `raw`, or nil when the unit is unknown."""
+    val s = _lower_trim(raw)
+    if s.len() == 0:
+        return nil
+    var i = 0
+    var digits = 0
+    if s.slice(0, 1) == "-" or s.slice(0, 1) == "+":
+        i = 1
+    var seen_dot = false
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        val numeric = (ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4"
+            or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9")
+        if numeric:
+            digits = digits + 1
+            i = i + 1
+        elif ch == "." and not seen_dot:
+            seen_dot = true
+            i = i + 1
+        else:
+            break
+    if digits == 0:
+        return nil
+    val num_text: text = s.slice(0, i)
+    val magnitude = num_text.to_f64()
+    val unit: text = s.slice(i, s.len())
+    if unit.len() == 0:
+        # A unitless non-zero length is invalid in a media query.
+        if magnitude == 0.0:
+            return 0.0
+        return nil
+    if unit == "px":
+        return magnitude
+    if unit == "em" or unit == "rem":
+        return magnitude * env.font_size_px
+    if unit == "pt":
+        return magnitude * (96.0 / 72.0)
+    if unit == "pc":
+        return magnitude * 16.0
+    if unit == "in":
+        return magnitude * 96.0
+    if unit == "cm":
+        return magnitude * (96.0 / 2.54)
+    if unit == "mm":
+        return magnitude * (96.0 / 25.4)
+    if unit == "vw":
+        return magnitude * env.width_px / 100.0
+    if unit == "vh":
+        return magnitude * env.height_px / 100.0
+    nil
+
+fn _resolution_dppx(raw: text) -> f64?:
+    """Return the dppx value of resolution `raw`, or nil when unknown."""
+    val s = _lower_trim(raw)
+    var i = 0
+    var digits = 0
+    var seen_dot = false
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        val numeric = (ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4"
+            or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9")
+        if numeric:
+            digits = digits + 1
+            i = i + 1
+        elif ch == "." and not seen_dot:
+            seen_dot = true
+            i = i + 1
+        else:
+            break
+    if digits == 0:
+        return nil
+    val num_text: text = s.slice(0, i)
+    val magnitude = num_text.to_f64()
+    val unit: text = s.slice(i, s.len())
+    if unit == "dppx" or unit == "x":
+        return magnitude
+    if unit == "dpi":
+        return magnitude / 96.0
+    if unit == "dpcm":
+        return magnitude / (96.0 / 2.54)
+    nil
+
+# ============================================================================
+# Feature evaluation
+# ============================================================================
+
+# The features this module can answer. Anything outside this list evaluates to
+# nil — the caller learns that the query was not understood rather than being
+# handed a fabricated match.
+fn supported_media_features() -> [text]:
+    """Return every media feature name this module can evaluate."""
+    [
+        "width", "height", "orientation", "resolution", "color",
+        "prefers-color-scheme", "prefers-reduced-motion", "aspect-ratio",
+    ]
+
+fn _compare(actual: f64, op: text, expected: f64) -> bool?:
+    """Return the result of `actual op expected`, or nil for an unknown op."""
+    if op == "=":
+        val d = actual - expected
+        return d > -0.0001 and d < 0.0001
+    if op == "<":
+        return actual < expected
+    if op == "<=":
+        return actual <= expected
+    if op == ">":
+        return actual > expected
+    if op == ">=":
+        return actual >= expected
+    nil
+
+# Evaluate `feature op value` where `feature` has already had any
+# `min-`/`max-` prefix folded into `op`.
+fn _eval_feature(name: text, op: text, raw_value: text, env: MediaEnvironment) -> bool?:
+    """Return whether media feature `name op raw_value` holds, or nil."""
+    val value = _lower_trim(raw_value)
+
+    if name == "width" or name == "height":
+        if value.len() == 0:
+            # Boolean form `(width)`: true when the dimension is non-zero.
+            if name == "width":
+                return env.width_px != 0.0
+            return env.height_px != 0.0
+        if val px = _length_px(value, env):
+            var actual = env.width_px
+            if name == "height":
+                actual = env.height_px
+            return _compare(actual, op, px)
+        return nil
+
+    if name == "orientation":
+        if op != "=":
+            return nil
+        if value == "portrait":
+            return env.height_px >= env.width_px
+        if value == "landscape":
+            return env.width_px > env.height_px
+        return nil
+
+    if name == "prefers-color-scheme":
+        if op != "=":
+            return nil
+        if value == "dark":
+            return env.prefers_dark
+        if value == "light":
+            return not env.prefers_dark
+        return nil
+
+    if name == "prefers-reduced-motion":
+        if op != "=":
+            return nil
+        if value == "reduce":
+            return env.prefers_reduced_motion
+        if value == "no-preference":
+            return not env.prefers_reduced_motion
+        return nil
+
+    if name == "resolution":
+        if value.len() == 0:
+            return env.resolution_dppx > 0.0
+        if val dppx = _resolution_dppx(value):
+            return _compare(env.resolution_dppx, op, dppx)
+        return nil
+
+    if name == "color":
+        if value.len() == 0:
+            return env.color_bits > 0
+        val bits = value.to_i64()
+        return _compare(env.color_bits as f64, op, bits as f64)
+
+    if name == "aspect-ratio":
+        val slash = value.index_of("/")
+        if slash < 0:
+            return nil
+        val w_text: text = value.slice(0, slash)
+        val h_text: text = value.slice(slash + 1, value.len())
+        val w = w_text.trim().to_f64()
+        val h = h_text.trim().to_f64()
+        if h == 0.0 or env.height_px == 0.0:
+            return nil
+        return _compare(env.width_px / env.height_px, op, w / h)
+
+    # Unknown feature. Not false — unevaluated.
+    nil
+
+# Evaluate one parenthesised media condition, e.g. `(min-width: 600px)` or
+# `(width >= 600px)`.
+fn _eval_paren(source: text, env: MediaEnvironment) -> bool?:
+    """Evaluate a single parenthesised media feature test, or nil."""
+    var inner: text = source.trim()
+    if not inner.starts_with("("):
+        return nil
+    if not inner.ends_with(")"):
+        return nil
+    val stripped: text = inner.slice(1, inner.len() - 1)
+    inner = stripped.trim()
+
+    # A nested condition inside the parens is a full condition again.
+    if inner.starts_with("("):
+        return _eval_condition(inner, env)
+    val lowered_head = _lower_trim(inner)
+    if lowered_head.starts_with("not ") or _split_top_level(inner, "and").len() > 1:
+        return _eval_condition(inner, env)
+
+    val colon = inner.index_of(":")
+    if colon >= 0:
+        val name_raw: text = inner.slice(0, colon)
+        var name = _lower_trim(name_raw)
+        val value: text = inner.slice(colon + 1, inner.len())
+        var op: text = "="
+        if name.starts_with("min-"):
+            op = ">="
+            val rest: text = name.slice(4, name.len())
+            name = rest
+        elif name.starts_with("max-"):
+            op = "<="
+            val rest: text = name.slice(4, name.len())
+            name = rest
+        return _eval_feature(name, op, value, env)
+
+    # Range syntax: `width >= 600px`. The two-sided form
+    # `400px < width < 700px` is deliberately NOT supported and returns nil.
+    val ops = [">=", "<=", ">", "<", "="]
+    var oi = 0
+    while oi < ops.len():
+        val op = ops[oi as i32]
+        val at = inner.index_of(op)
+        if at >= 0:
+            val lhs_raw: text = inner.slice(0, at)
+            val rhs: text = inner.slice(at + op.len(), inner.len())
+            # A second operator means the two-sided form.
+            if rhs.index_of(">") >= 0 or rhs.index_of("<") >= 0:
+                return nil
+            val name = _lower_trim(lhs_raw)
+            if not _known_feature(name):
+                return nil
+            return _eval_feature(name, op, rhs, env)
+        oi = oi + 1
+
+    # Boolean form: `(color)`, `(width)`.
+    val name = _lower_trim(inner)
+    if not _known_feature(name):
+        return nil
+    _eval_feature(name, "=", "", env)
+
+fn _known_feature(name: text) -> bool:
+    """Return true when `name` is a feature this module evaluates."""
+    val list = supported_media_features()
+    var i = 0
+    while i < list.len():
+        if list[i as i32] == name:
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Condition / query evaluation
+# ============================================================================
+
+# A media condition: `not`, `and`-chains, and parenthesised feature tests.
+# `or` is accepted at condition level (Media Queries Level 4).
+fn _eval_condition(source: text, env: MediaEnvironment) -> bool?:
+    """Evaluate a media condition, or nil when any part is unevaluatable."""
+    val s: text = source.trim()
+    if s.len() == 0:
+        return nil
+
+    val or_parts = _split_top_level(s, "or")
+    if or_parts.len() > 1:
+        var any_unknown = false
+        var result = false
+        var i = 0
+        while i < or_parts.len():
+            if val part = _eval_condition(or_parts[i as i32], env):
+                if part:
+                    result = true
+            else:
+                any_unknown = true
+            i = i + 1
+        # A true operand settles an `or` even if a sibling is unknown; an
+        # unknown operand with no true sibling leaves the whole thing unknown.
+        if result:
+            return true
+        if any_unknown:
+            return nil
+        return false
+
+    val and_parts = _split_top_level(s, "and")
+    if and_parts.len() > 1:
+        var any_unknown = false
+        var i = 0
+        while i < and_parts.len():
+            if val part = _eval_condition(and_parts[i as i32], env):
+                if not part:
+                    # A false operand settles an `and` regardless of unknowns.
+                    return false
+            else:
+                any_unknown = true
+            i = i + 1
+        if any_unknown:
+            return nil
+        return true
+
+    val lowered = _lower_trim(s)
+    if lowered.starts_with("not "):
+        val rest: text = s.slice(4, s.len())
+        if val inner = _eval_condition(rest, env):
+            return not inner
+        # Negating an unknown does not make it known.
+        return nil
+
+    if s.starts_with("("):
+        return _eval_paren(s, env)
+
+    nil
+
+# Evaluate one media query: an optional `only`/`not`, an optional media type,
+# and an optional `and`-chained condition.
+fn evaluate_media_query(query: text, env: MediaEnvironment) -> bool?:
+    """Return whether one media query matches `env`, or nil if unevaluatable."""
+    var s: text = query.trim()
+    if s.len() == 0:
+        # An empty query is `all`.
+        return true
+    var negated = false
+    val lowered = _lower_trim(s)
+    if lowered.starts_with("only "):
+        val rest: text = s.slice(5, s.len())
+        s = rest.trim()
+    elif lowered.starts_with("not "):
+        negated = true
+        val rest: text = s.slice(4, s.len())
+        s = rest.trim()
+
+    # No media type: the whole thing is a condition.
+    if s.starts_with("("):
+        if val cond = _eval_condition(s, env):
+            if negated:
+                return not cond
+            return cond
+        return nil
+
+    # Leading media type, optionally followed by `and <condition>`.
+    var media_type: text = ""
+    var rest_condition: text = ""
+    val and_at = _first_and(s)
+    if and_at >= 0:
+        val head: text = s.slice(0, and_at)
+        media_type = _lower_trim(head)
+        val tail: text = s.slice(and_at + 3, s.len())
+        rest_condition = tail.trim()
+    else:
+        media_type = _lower_trim(s)
+
+    var type_ok = false
+    if media_type == "all":
+        type_ok = true
+    elif media_type == env.media_type:
+        type_ok = true
+    elif _known_media_type(media_type):
+        type_ok = false
+    else:
+        # An unknown media TYPE is a syntax error, and Media Queries says a
+        # malformed query never matches. That is a decided answer, not an
+        # unevaluated one, so it is `false` and not `nil`.
+        type_ok = false
+
+    if not type_ok:
+        if negated:
+            return true
+        return false
+
+    if rest_condition.len() == 0:
+        if negated:
+            return false
+        return true
+
+    if val cond = _eval_condition(rest_condition, env):
+        if negated:
+            return not cond
+        return cond
+    nil
+
+fn _known_media_type(name: text) -> bool:
+    """Return true when `name` is a CSS media type."""
+    var list = ["all", "screen", "print", "speech"]
+    var i = 0
+    while i < list.len():
+        if list[i as i32] == name:
+            return true
+        i = i + 1
+    false
+
+fn _first_and(s: text) -> i64:
+    """Return the index of the first top-level `and ` in `s`, or -1."""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            if depth > 0:
+                depth = depth - 1
+        val fits = i + 3 <= s.len()
+        if depth == 0 and fits:
+            val lowered: text = s.slice(i, i + 3).to_lower()
+            if lowered == "and":
+                val before_ok = i == 0 or _is_ws(s.slice(i - 1, i))
+                val after_ok = i + 3 >= s.len() or _is_ws(s.slice(i + 3, i + 4))
+                if before_ok and after_ok:
+                    return i
+        i = i + 1
+    -1
+
+# A media query LIST is comma separated and matches when any query matches.
+# One unevaluatable query does not poison a list that already matched — but a
+# list that would otherwise be false and contains an unevaluatable query is
+# reported as unevaluatable, never as a clean `false`.
+fn evaluate_media_query_list(list: text, env: MediaEnvironment) -> bool?:
+    """Return whether a comma-separated media query list matches `env`."""
+    val queries = _split_commas(list)
+    var any_unknown = false
+    var i = 0
+    while i < queries.len():
+        if val q = evaluate_media_query(queries[i as i32], env):
+            if q:
+                return true
+        else:
+            any_unknown = true
+        i = i + 1
+    if any_unknown:
+        return nil
+    false

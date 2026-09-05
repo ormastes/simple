@@ -1,0 +1,91 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-015 REQ-016 REQ-017
+
+use std.spec.*
+use app.test.hal_environment_file_executor.*
+use std.common.structural.environment_instruction.*
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+extern fn rt_getpid() -> i64
+
+fn confined_policy(capability_id: i64) -> EnvExecutorPolicyV1:
+    val mask = env_opcode_mask_v1(EnvOpcodeV1.FileOpen)
+        | env_opcode_mask_v1(EnvOpcodeV1.FileRead)
+        | env_opcode_mask_v1(EnvOpcodeV1.FileWrite)
+        | env_opcode_mask_v1(EnvOpcodeV1.FileClose)
+    env_executor_policy_v1(mask, 1 << capability_id, 0, mask,
+        false, true, true)
+
+fn confined_instruction(sequence: i64, opcode: EnvOpcodeV1,
+        argument_length: i64, result_capacity: i64) -> EnvInstructionV1:
+    env_instruction_v1(881, sequence, opcode, 15, 0,
+        0, argument_length, argument_length,
+        0, result_capacity, result_capacity)
+
+describe "hosted descriptor-relative file environment executor":
+    it "pins root authority and performs bounded open read write close":
+        val root = "/tmp/simple-hal-confined-{rt_getpid()}"
+        val file = "{root}/fixture.bin"
+        val original: [u8] = [111u8, 114u8, 105u8, 103u8, 105u8, 110u8, 97u8, 108u8]
+        val updated: [u8] = [117u8, 112u8, 100u8, 97u8, 116u8, 101u8, 100u8, 33u8]
+        val _old = dir_remove_all(root)
+        expect(dir_create_all(root)).to_be(true)
+        expect(file_write_bytes(file, original)).to_be(true)
+        val authority = hosted_confined_file_authority_v1(root, 881, 15, 64, 32)
+        var cursor = hosted_confined_file_cursor_v1(authority)
+        val policy = confined_policy(15)
+        val path: [u8] = [102u8, 105u8, 120u8, 116u8, 117u8, 114u8, 101u8, 46u8, 98u8, 105u8, 110u8]
+        var open_result: [u8] = [0u8; 1]
+        val opened = hosted_confined_file_execute_v1(authority, cursor, policy,
+            confined_instruction(0, EnvOpcodeV1.FileOpen, path.len(), 1),
+            path, open_result)
+        cursor = opened.cursor
+        var read_result: [u8] = [0u8; 32]
+        val read_instruction = confined_instruction(
+            1, EnvOpcodeV1.FileRead, 0, 32)
+        val read = hosted_confined_file_execute_v1(authority, cursor, policy,
+            read_instruction, [], read_result)
+        var replay_result: [u8] = [0u8; 32]
+        val replay = env_replay_exact_v1(read_instruction, read_instruction,
+            read.receipt.observation, [], read_result, replay_result)
+        cursor = read.cursor
+        var write_result: [u8] = [0u8; 8]
+        val wrote = hosted_confined_file_execute_v1(authority, cursor, policy,
+            confined_instruction(2, EnvOpcodeV1.FileWrite, updated.len(), 8),
+            updated, write_result)
+        cursor = wrote.cursor
+        var close_result: [u8] = [0u8; 1]
+        val closed = hosted_confined_file_execute_v1(authority, cursor, policy,
+            confined_instruction(3, EnvOpcodeV1.FileClose, 0, 1),
+            [], close_result)
+
+        expect(opened.receipt.applied).to_be(true)
+        expect(read.receipt.observation.bytes_length).to_equal(8)
+        expect(read_result[0]).to_equal(111u8)
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
+        expect(replay_result[0]).to_equal(111u8)
+        expect(wrote.receipt.applied).to_be(true)
+        expect(closed.receipt.applied).to_be(true)
+        expect(closed.receipt.allocation_count_after_seal).to_equal(0)
+        expect(hosted_confined_file_complete_v1(closed.cursor)).to_be(true)
+        expect(hosted_confined_file_authority_close_v1(authority)).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "fails closed before any effect for traversal syntax":
+        val root = "/tmp/simple-hal-confined-reject-{rt_getpid()}"
+        val _old = dir_remove_all(root)
+        expect(dir_create_all(root)).to_be(true)
+        val authority = hosted_confined_file_authority_v1(root, 881, 15, 64, 32)
+        val traversal: [u8] = [46u8, 46u8, 47u8, 101u8, 116u8, 99u8, 47u8, 112u8, 97u8, 115u8, 115u8, 119u8, 100u8]
+        var result: [u8] = [77u8; 1]
+        val step = hosted_confined_file_execute_v1(authority,
+            hosted_confined_file_cursor_v1(authority), confined_policy(15),
+            confined_instruction(0, EnvOpcodeV1.FileOpen, traversal.len(), 1),
+            traversal, result)
+        expect(step.receipt.applied).to_be(false)
+        expect(env_instruction_status_to_i64(step.receipt.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.UnsafeInstruction))
+        expect(result[0]).to_equal(77u8)
+        expect(hosted_confined_file_authority_close_v1(authority)).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)

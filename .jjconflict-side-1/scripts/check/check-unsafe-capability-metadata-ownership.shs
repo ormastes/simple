@@ -1,0 +1,134 @@
+#!/bin/sh
+set -eu
+
+# Fail-fast bootstrap/source-closure gate for scoped unsafe capabilities.
+# Read only the five semantic owners; do not parse the full source tree or
+# invoke a compiler. This keeps I/O and memory bounded and the gate below 15s.
+decl_fn=src/compiler/10.frontend/core/parser_decls_fn.spl
+decl_use=src/compiler/10.frontend/core/parser_decls_use.spl
+stmt=src/compiler/10.frontend/core/parser_stmts.spl
+flat=src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+hir=src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl
+cocoa=src/os/compositor/hosted_backend_cocoa.spl
+sdl2=src/os/compositor/hosted_backend_sdl2.spl
+sffi_io=src/lib/nogc_sync_mut/sffi/io.spl
+sffi_system=src/lib/nogc_sync_mut/sffi/system.spl
+cuda_args=src/lib/gc_async_mut/gpu/engine2d/backend_cuda_launch_args.spl
+metal_backend=src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl
+opencl_backend=src/lib/gc_async_mut/gpu/engine2d/backend_opencl.spl
+cuda_lane=src/lib/gc_async_mut/gpu_lane/cuda_lane_session.spl
+dom_color=src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl
+
+for owner in "$decl_fn" "$decl_use" "$stmt" "$flat" "$hir" "$cocoa" "$sdl2" "$sffi_io" "$sffi_system" "$cuda_args" "$metal_backend" "$opencl_backend" "$cuda_lane" "$dom_color"; do
+    test -f "$owner" || {
+        echo "unsafe capability ownership: missing owner $owner" >&2
+        exit 1
+    }
+done
+
+# GPU raw-pointer leaves observed in the same strict bootstrap inventory use
+# declaration-scoped ownership too.  This remains a bounded five-file scan and
+# prevents the admitted builder from lowering capability names as GlobalLoads.
+for owner in "$cuda_args" "$metal_backend" "$opencl_backend" "$cuda_lane"; do
+    if grep -Fq 'unsafe(capabilities: [ffi, raw_ptr]):' "$owner"; then
+        echo "unsafe capability ownership: bootstrap-incompatible GPU lexical scope in $owner" >&2
+        exit 1
+    fi
+done
+grep -Fq 'fn cuda_launch_args_write_u8(' "$cuda_args" || { echo "unsafe capability ownership: CUDA byte owner missing" >&2; exit 1; }
+grep -Fq 'fn cuda_launch_args_write_i64(' "$cuda_args" || { echo "unsafe capability ownership: CUDA word owner missing" >&2; exit 1; }
+grep -Fq 'fn metal_host_write_i32(' "$metal_backend" || { echo "unsafe capability ownership: Metal word owner missing" >&2; exit 1; }
+grep -Fq 'fn opencl_host_write_u8(' "$opencl_backend" || { echo "unsafe capability ownership: OpenCL byte owner missing" >&2; exit 1; }
+grep -Fq 'fn opencl_host_write_i64(' "$opencl_backend" || { echo "unsafe capability ownership: OpenCL word owner missing" >&2; exit 1; }
+grep -Fq 'fn write_bytes_to_ptr(' "$cuda_lane" || { echo "unsafe capability ownership: CUDA lane byte owner missing" >&2; exit 1; }
+
+# Optional floats must be pattern-unwrapped before comparison/conversion.  A
+# nullable comparison was previously typed as a float immediate comparison by
+# the admitted Cranelift path.  Exact function-body checks avoid a tree scan.
+parse_pct_body=$(sed -n '/^pub fn parse_pct_value/,/^pub fn f32_abs/p' "$dom_color")
+printf '%s\n' "$parse_pct_body" | grep -Fq 'if val n = num_str.parse_f64():' || {
+    echo "unsafe capability ownership: percentage parser does not unwrap suffixed float" >&2
+    exit 1
+}
+printf '%s\n' "$parse_pct_body" | grep -Fq 'if val n = trimmed.parse_f64():' || {
+    echo "unsafe capability ownership: percentage parser does not unwrap scalar float" >&2
+    exit 1
+}
+if printf '%s\n' "$parse_pct_body" | grep -Fq '!= nil'; then
+    echo "unsafe capability ownership: percentage parser retains nullable float comparison" >&2
+    exit 1
+fi
+
+canonical='use compiler.frontend.core.parser_stmts.{parse_block}'
+grep -Fq "$canonical" "$decl_fn" || {
+    echo "unsafe capability ownership: function declarations lack canonical parse_block owner" >&2
+    exit 1
+}
+grep -Fq "$canonical" "$decl_use" || {
+    echo "unsafe capability ownership: use declarations lack canonical parse_block owner" >&2
+    exit 1
+}
+# This is a source-closure ownership invariant, not just a two-file spelling
+# check. A new declaration split that imports the legacy alias would recreate
+# the same ordinary-expression lowering and unresolved GlobalLoad.
+if grep -R -Fq 'use compiler.core.parser_stmts' src/compiler/10.frontend/core; then
+    echo "unsafe capability ownership: legacy parser_stmts alias remains" >&2
+    exit 1
+fi
+
+# Capability identifiers must be consumed as text before generic expression
+# parsing and stay metadata through Flat AST and HIR.
+grep -Fq 'uns_caps.push(par_text_get())' "$stmt" || {
+    echo "unsafe capability ownership: parser does not consume capability metadata" >&2
+    exit 1
+}
+grep -Fq 'expr_unsafe_block_with_caps(caps_body, uns_caps, 0)' "$stmt" || {
+    echo "unsafe capability ownership: parser does not publish scoped metadata" >&2
+    exit 1
+}
+grep -Fq 'u_caps = u_caps_raw.split(",")' "$flat" || {
+    echo "unsafe capability ownership: Flat AST bridge drops capability metadata" >&2
+    exit 1
+}
+grep -Fq 'case ExprKind.UnsafeBlock(body, caps):' "$hir" || {
+    echo "unsafe capability ownership: HIR lacks scoped capability lowering" >&2
+    exit 1
+}
+grep -Fq 'unsafe_hir_body.unsafe_caps = caps' "$hir" || {
+    echo "unsafe capability ownership: HIR drops capability metadata" >&2
+    exit 1
+}
+
+# Exact production regressors from the strict stage-3 failure use private
+# function-level capability leaves. That form is understood by the admitted
+# Stage-2 builder while public methods remain safe. Lexical capability blocks
+# here would reintroduce an escaped `ffi` GlobalLoad for that builder.
+for owner in "$cocoa" "$sdl2" "$sffi_io" "$sffi_system"; do
+    if grep -Fq 'unsafe(capabilities: [ffi]):' "$owner"; then
+        echo "unsafe capability ownership: bootstrap-incompatible lexical scope in $owner" >&2
+        exit 1
+    fi
+    grep -Fq '@unsafe(reason: "private ' "$owner" || {
+        echo "unsafe capability ownership: private function boundary missing from $owner" >&2
+        exit 1
+    }
+done
+
+grep -Fq 'fn _cocoa_layer_present(' "$cocoa" || {
+    echo "unsafe capability ownership: Cocoa presentation boundary missing" >&2
+    exit 1
+}
+grep -Fq 'fn _sdl2_present_rgba(' "$sdl2" || {
+    echo "unsafe capability ownership: SDL2 presentation boundary missing" >&2
+    exit 1
+}
+grep -Fq 'fn _file_read_lines_raw(' "$sffi_io" || {
+    echo "unsafe capability ownership: nullable I/O boundary missing" >&2
+    exit 1
+}
+grep -Fq 'fn _sffi_system_process_run_raw(' "$sffi_system" || {
+    echo "unsafe capability ownership: process boundary missing" >&2
+    exit 1
+}
+
+echo "unsafe capability metadata ownership: PASS"

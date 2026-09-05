@@ -1,0 +1,53 @@
+"""
+# Growth Runner Runtime Facade Contract
+
+The leak-check growth runner owns policy while `std.io_runtime` owns the exact
+file-existence, child-spawn, child-liveness, and wall-clock runtime boundaries.
+This pins that ownership without broadening the migration to wrappers whose
+sentinel or guard behavior differs from the direct runtime call.
+"""
+
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.step
+
+describe "growth runner runtime facade ownership":
+    it "uses the exact-equivalent named facade operations":
+        step("Load the production growth runner source")
+        val source = rt_file_read_text("src/compiler/90.tools/leak_check/growth_runner.spl") ?? ""
+
+        step("Require the narrow named facade import and direct policy calls")
+        expect(source).to_contain("use std.io_runtime.{thread_sleep, file_exists, process_spawn_async, process_is_running, time_now_unix_micros}")
+        expect(source).to_contain("if not file_exists(status_path):")
+        expect(source).to_contain("if file_exists(\"./target/debug/simple\"):")
+        expect(source).to_contain("if file_exists(\"./target/release/simple\"):")
+        expect(source).to_contain("val pid = process_spawn_async(cmd, args)")
+        expect(source).to_contain("while process_is_running(pid):")
+        expect(source).to_contain("time_now_unix_micros() / 1000")
+
+        step("Reject duplicate direct extern ownership and the local pass-through")
+        expect(source).to_not_contain("extern fn rt_file_exists")
+        expect(source).to_not_contain("extern fn rt_process_spawn_async")
+        expect(source).to_not_contain("extern fn rt_process_is_running")
+        expect(source).to_not_contain("extern fn rt_time_now_unix_micros")
+        expect(source).to_not_contain("fn file_exists(path: text)")
+        expect(source).to_not_contain("rt_file_exists(")
+        expect(source).to_not_contain("rt_process_spawn_async(")
+        expect(source).to_not_contain("rt_process_is_running(")
+        expect(source).to_not_contain("rt_time_now_unix_micros(")
+
+    it "preserves distinct direct-runtime sentinel behavior":
+        step("Load the production growth runner source")
+        val source = rt_file_read_text("src/compiler/90.tools/leak_check/growth_runner.spl") ?? ""
+
+        step("Keep the non-equivalent runtime operations direct")
+        expect(source).to_contain("extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64")
+        expect(source).to_contain("extern fn rt_process_kill(pid: i64) -> bool")
+        expect(source).to_contain("extern fn rt_file_read_text(path: text) -> text")
+        expect(source).to_contain("rt_file_read_text(path) ?? \"\"")
+        expect(source).to_contain("_ = rt_process_kill(pid)")
+        expect(source).to_contain("val exit_code = rt_process_wait(pid, 0)")
+
+        step("Preserve spawn failure and wait sentinel decisions")
+        expect(source).to_contain("if pid <= 0:")
+        expect(source).to_contain("elif exit_code != 0 and exit_code != -2:")

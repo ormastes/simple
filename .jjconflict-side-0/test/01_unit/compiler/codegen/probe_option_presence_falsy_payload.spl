@@ -1,0 +1,161 @@
+# Run-path (Cranelift JIT) probe for the FALSY-BUT-PRESENT PAYLOAD class.
+#
+# WHY THIS FILE EXISTS: `bin/simple test` executes specs on the tree-walk
+# INTERPRETER, which routes presence through `is_condition_present`
+# (`interpreter_control.rs`) and was CORRECT throughout. The defect lived only
+# on the JIT/native lane, in the runtime helper `rt_is_none`
+# (`src/compiler_rust/runtime/src/value/objects.rs`), so no in-process example
+# can observe it. This probe is the oracle; the sibling specs run it as a
+# subprocess under both engines.
+#
+# THE DEFECT: `rt_is_none` opened with
+#     if value.0 == 0 || value.0 == TAG_SPECIAL { return true }
+# Integers box as `(v << 3) | TAG_INT` and TAG_INT is `0b000`, so the integer
+# **0 boxes to the bit pattern 0x0** — bit-identical to that "raw nil" test.
+# Presence and a zero payload were therefore the same value, and the collision
+# fired in BOTH directions:
+#
+#   doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+#     a present `i64?` holding 0: `if o.?:` took the else branch and
+#     `match o:` selected `case None`.
+#   doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+#     a FAILED `"zz".parse_int()` yielding raw 0 was indistinguishable from a
+#     successful parse of `"0"`, so `?? default` never fired.
+#
+# WHY THE MATRIX. Both bugs were found one payload and one syntax at a time.
+# Zero is not the only value that has ever been confused with absence — every
+# falsy payload (`0`, `false`, `""`, `0.0`, `[]`, `{}`) is a candidate, and
+# presence is consumed through several independent lowering paths (`.?` in
+# condition position, `.?` in value position, `match`, `??`, `is_some`/
+# `is_none`, `unwrap or:`). This probe crosses the two axes so the next
+# omission fails here rather than shipping as a plausible-looking answer.
+#
+# Every oracle is an ABSOLUTE literal this probe did not itself compute —
+# never "the two engines agree", which would pass while both are wrong the
+# same way.
+#
+#   bin/simple run <this>                                    -> must ALL PASS
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run <this>   -> control arm
+#
+# If the interpreter arm ever fails, the probe is broken, not the JIT.
+
+use std.io_runtime.{exit}
+
+fn zero_i64() -> i64?:
+    return 0
+
+fn zero_f64() -> f64?:
+    return 0.0
+
+fn false_bool() -> bool?:
+    return false
+
+fn empty_text() -> text?:
+    return ""
+
+fn nonzero_i64() -> i64?:
+    return 5
+
+fn absent_i64() -> i64?:
+    return nil
+
+fn check(name: text, actual: text, expected: text, fails: i64) -> i64:
+    if actual == expected:
+        print("PASS " + name + " = " + actual)
+        return fails
+    print("FAIL " + name + " expected=" + expected + " actual=" + actual)
+    return fails + 1
+
+# --- Axis 2, form A: `.?` in CONDITION position -------------------------
+# Lowered by `lower_condition` to a bare `rt_is_some` call, so this is the
+# most direct read of the helper that carried the defect.
+fn cond_present_i64(o: i64?) -> text:
+    if o.?:
+        return "present"
+    return "absent"
+
+fn cond_present_f64(o: f64?) -> text:
+    if o.?:
+        return "present"
+    return "absent"
+
+fn cond_present_bool(o: bool?) -> text:
+    if o.?:
+        return "present"
+    return "absent"
+
+fn main():
+    var fails = 0
+
+    # === Axis 1: every FALSY payload, held by a genuinely PRESENT optional ===
+    # The correct answer is "present" for all of them. Under the defect the
+    # integer-zero and bool-false rows reported "absent".
+    fails = check("cond_zero_i64", cond_present_i64(zero_i64()), "present", fails)
+    fails = check("cond_zero_f64", cond_present_f64(zero_f64()), "present", fails)
+    fails = check("cond_false_bool", cond_present_bool(false_bool()), "present", fails)
+
+    # The control rows: a NON-falsy present value, and a genuinely absent one.
+    # Without these the matrix would pass if `rt_is_none` were stubbed to
+    # `false` — "everything is present" is not a fix.
+    fails = check("cond_nonzero_i64", cond_present_i64(nonzero_i64()), "present", fails)
+    fails = check("cond_absent_i64", cond_present_i64(absent_i64()), "absent", fails)
+
+    # === Axis 2: the other consumption forms, same present-zero subject ======
+    # Each is an independent lowering path; the defect reached all of them
+    # through the one shared helper, so all of them must be pinned.
+
+    # form B: `match` on the optional. Chose `case None` under the defect.
+    val mz = zero_i64()
+    var matched = "?"
+    match mz:
+        case Some(x): matched = "some"
+        case None: matched = "none"
+    fails = check("match_zero_i64", matched, "some", fails)
+
+    var matched_absent = "?"
+    match absent_i64():
+        case Some(x): matched_absent = "some"
+        case None: matched_absent = "none"
+    fails = check("match_absent_i64", matched_absent, "none", fails)
+
+    # form C: `??`. This is the dangerous one — it silently substituted the
+    # default for a value that was actually there.
+    fails = check("coalesce_zero_i64", (zero_i64() ?? 99).to_string(), "0", fails)
+    fails = check("coalesce_zero_f64", (zero_f64() ?? 9.5).to_string(), "0.0", fails)
+    fails = check("coalesce_empty_text", (empty_text() ?? "fallback"), "", fails)
+    fails = check("coalesce_absent_i64", (absent_i64() ?? 99).to_string(), "99", fails)
+
+    # form D: the explicit predicates `.is_some()` / `.is_none()` — DELIBERATELY
+    # NOT ASSERTED HERE. They belong to this class on paper, and they were in an
+    # earlier revision of this probe, but they are broken on the JIT lane by a
+    # SEPARATE defect that is not about presence at all: the method-call
+    # dispatch for those two names. `.is_some()` on an `i64?` either fails
+    # closed ("Function 'is_some' not found", exit 70) or silently yields a RAW
+    # 0/1 where a tagged RuntimeValue is expected — and a raw `1` has low bits
+    # `001` = TAG_HEAP, so it renders as `nil`. It is wrong for PRESENT and
+    # ABSENT receivers alike, which is what distinguishes it from the presence
+    # collision this probe exists to pin.
+    #
+    # Filed separately as
+    # doc/08_tracking/bug/jit_is_some_is_none_method_dispatch_gap_2026-08-17.md.
+    # Re-add these four rows here once that is fixed; the sibling forms below
+    # already cover presence itself through paths that DO work.
+
+    # form E: `.?` in VALUE position — must yield the payload, not the sentinel.
+    val vz = zero_i64().?
+    fails = check("value_dotq_zero_i64", (vz ?? 99).to_string(), "0", fails)
+
+    # === The parse_* family: the SAME collision reached from the other side ==
+    # A failed parse must be distinguishable from a successful parse of "0".
+    # Under the defect both answered 0, so a caller could not tell them apart.
+    fails = check("parse_ok_zero", ("0".parse_int() ?? -1).to_string(), "0", fails)
+    fails = check("parse_ok_three", ("3".parse_int() ?? -1).to_string(), "3", fails)
+    fails = check("parse_fail_default", ("zz".parse_int() ?? -1).to_string(), "-1", fails)
+
+    if fails == 0:
+        print("OPTION_PRESENCE_FALSY_PAYLOAD PROBE: ALL PASS")
+        exit(0)
+    print("OPTION_PRESENCE_FALSY_PAYLOAD PROBE: " + fails.to_string() + " FAILED")
+    exit(1)
+
+main()

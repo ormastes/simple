@@ -1,0 +1,491 @@
+#!/bin/sh
+# Bounded, fail-closed Phase-2 source-reclamation micro gate.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${PHASE2_RECLAIM_BUILD_DIR:-$ROOT_DIR/build/phase2_low_memory_source_reclaim_gate}"
+ENTRY="test/02_integration/compiler/phase2_low_memory_source_reclaim_probe.spl"
+FIXTURE="test/02_integration/compiler/phase2_low_memory_source_reclaim_fixture.spl"
+DRIVER="src/compiler/80.driver/driver.spl"
+DRIVER_TYPES="src/compiler/80.driver/driver_types.spl"
+LEXER="src/compiler/10.frontend/core/lexer.spl"
+WRAPPER="scripts/check/check-phase2-low-memory-source-reclaim.shs"
+EVIDENCE="$BUILD_DIR/evidence.env"
+RERUN_COMMAND="$BUILD_DIR/rerun-command.sh.txt"
+PROBE_COMMAND="$BUILD_DIR/probe-command.sh.txt"
+VERSION_STDOUT="$BUILD_DIR/version.stdout"
+VERSION_STDERR="$BUILD_DIR/version.stderr"
+PROBE_STDOUT="$BUILD_DIR/probe.stdout"
+PROBE_STDERR="$BUILD_DIR/probe.stderr"
+PROCESS_TIMEOUT_SECS="${PHASE2_RECLAIM_TIMEOUT_SECS:-30}"
+PROCESS_TERM_GRACE_SECS="${PHASE2_RECLAIM_TERM_GRACE_SECS:-3}"
+STREAM_HEAD_BYTES=4096
+STREAM_TAIL_BYTES=4096
+STREAM_MAX_BYTES=8256
+SIMPLE_BIN=""
+SIMPLE_BIN_SHA256=""
+VERSION_EXIT=""
+PROBE_EXIT=""
+ACTIVE_GROUP_PID=""
+ACTIVE_STDOUT_FILTER_PID=""
+ACTIVE_STDERR_FILTER_PID=""
+ACTIVE_STDOUT_FIFO=""
+ACTIVE_STDERR_FIFO=""
+
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+file_bytes() {
+    if [ -f "$1" ]; then wc -c <"$1" | tr -d '[:space:]'; else echo 0; fi
+}
+
+positive_integer() {
+    case "${1:-}" in
+        ""|0|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+canonical_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    file_dir="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)"
+    printf '%s/%s\n' "$file_dir" "$(basename -- "$1")"
+}
+
+resolve_pure_simple() {
+    requested="${1:-}"
+    if [ -n "$requested" ]; then
+        candidates="$requested"
+    else
+        host_os="$(uname -s)"
+        host_arch="$(uname -m)"
+        case "$host_os:$host_arch" in
+            Darwin:arm64|Darwin:aarch64)
+                candidates="
+$ROOT_DIR/bin/release/aarch64-apple-darwin-macho/simple
+$ROOT_DIR/bin/release/aarch64-apple-darwin/simple
+$ROOT_DIR/bin/release/macos-arm64/simple
+$ROOT_DIR/bin/release/darwin-aarch64/simple"
+                ;;
+            Darwin:x86_64)
+                candidates="
+$ROOT_DIR/bin/release/x86_64-apple-darwin/simple
+$ROOT_DIR/bin/release/macos-x86_64/simple"
+                ;;
+            Linux:x86_64)
+                candidates="
+$ROOT_DIR/bin/release/x86_64-unknown-linux-gnu/simple"
+                ;;
+            Linux:aarch64|Linux:arm64)
+                candidates="
+$ROOT_DIR/bin/release/aarch64-unknown-linux-gnu/simple"
+                ;;
+            *) return 1 ;;
+        esac
+    fi
+    for candidate in $candidates; do
+        if [ -x "$candidate" ] && [ ! -L "$candidate" ]; then
+            resolved="$(canonical_file "$candidate")" || continue
+            case "$resolved" in
+                "$ROOT_DIR"/bin/release/*/simple|"$ROOT_DIR"/release/*/simple) ;;
+                *) continue ;;
+            esac
+            printf '%s\n' "$resolved"
+            return
+        fi
+    done
+    return 1
+}
+
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+write_exact_commands() {
+    {
+        printf 'cd '
+        shell_quote "$ROOT_DIR"
+        printf ' && sh '
+        shell_quote "$ROOT_DIR/$WRAPPER"
+        printf ' --simple-bin '
+        shell_quote "$SIMPLE_BIN"
+        printf '\n'
+    } >"$RERUN_COMMAND"
+    {
+        printf 'cd '
+        shell_quote "$ROOT_DIR"
+        printf ' && env'
+        for binding in \
+            "SIMPLE_BINARY=$SIMPLE_BIN" \
+            "SIMPLE_BIN=$SIMPLE_BIN" \
+            "SIMPLE_BOOTSTRAP_DRIVER=$SIMPLE_BIN" \
+            "SIMPLE_FRONTEND_DELEGATE=$SIMPLE_BIN" \
+            "SIMPLE_FRONTEND_DELEGATED=1" \
+            "SIMPLE_NO_STUB_FALLBACK=1" \
+            "SIMPLE_EXECUTION_MODE=" \
+            "SIMPLE_BOOTSTRAP=0" \
+            "SIMPLE_LIB=$ROOT_DIR/src"; do
+            printf ' '
+            shell_quote "$binding"
+        done
+        printf ' '
+        shell_quote "$SIMPLE_BIN"
+        for argument in run "$ENTRY" --mode=interpreter; do
+            printf ' '
+            shell_quote "$argument"
+        done
+        printf '\n'
+    } >"$PROBE_COMMAND"
+}
+
+bounded_stream() {
+    perl -e '
+        my ($head_max, $tail_max) = @ARGV;
+        my ($head, $tail, $full, $total) = ("", "", "", 0);
+        while (1) {
+            my $read = read(STDIN, my $chunk, 4096);
+            last if !defined($read) || $read == 0;
+            $total += $read;
+            if (length($head) < $head_max) {
+                my $take = $head_max - length($head);
+                $take = $read if $take > $read;
+                $head .= substr($chunk, 0, $take);
+            }
+            if (length($full) < $head_max + $tail_max) {
+                my $take = $head_max + $tail_max - length($full);
+                $take = $read if $take > $read;
+                $full .= substr($chunk, 0, $take);
+            }
+            $tail .= $chunk;
+            if (length($tail) > $tail_max) {
+                substr($tail, 0, length($tail) - $tail_max, "");
+            }
+        }
+        if ($total <= $head_max + $tail_max) {
+            print $full;
+        } else {
+            print $head;
+            print "\n--- omitted ", $total - $head_max - $tail_max,
+                " process bytes ---\n";
+            print $tail;
+        }
+    ' "$STREAM_HEAD_BYTES" "$STREAM_TAIL_BYTES"
+}
+
+terminate_active_group() {
+    signal="$1"
+    if [ -n "$ACTIVE_GROUP_PID" ]; then
+        kill "-$signal" -- "-$ACTIVE_GROUP_PID" 2>/dev/null ||
+            kill "-$signal" "$ACTIVE_GROUP_PID" 2>/dev/null || true
+    fi
+}
+
+active_group_is_alive() {
+    [ -n "$ACTIVE_GROUP_PID" ] &&
+        kill -0 -- "-$ACTIVE_GROUP_PID" 2>/dev/null
+}
+
+pid_is_alive() {
+    kill -0 "$1" 2>/dev/null
+}
+
+wait_for_pid_until() {
+    pid="$1"
+    deadline="$2"
+    while pid_is_alive "$pid"; do
+        [ "$(date +%s)" -lt "$deadline" ] || return 1
+        sleep 1
+    done
+    return 0
+}
+
+terminate_active_group_bounded() {
+    grace_secs="$1"
+    terminate_active_group TERM
+    group_deadline=$(($(date +%s) + grace_secs))
+    while active_group_is_alive &&
+            [ "$(date +%s)" -lt "$group_deadline" ]; do
+        sleep 1
+    done
+    if active_group_is_alive; then
+        terminate_active_group KILL
+    fi
+}
+
+terminate_filter_bounded() {
+    filter_pid="$1"
+    grace_secs="$2"
+    kill -TERM "$filter_pid" 2>/dev/null || true
+    filter_deadline=$(($(date +%s) + grace_secs))
+    if ! wait_for_pid_until "$filter_pid" "$filter_deadline"; then
+        kill -KILL "$filter_pid" 2>/dev/null || true
+    fi
+}
+
+cleanup() {
+    terminate_active_group TERM
+    if [ -n "$ACTIVE_STDOUT_FILTER_PID" ]; then
+        kill -TERM "$ACTIVE_STDOUT_FILTER_PID" 2>/dev/null || true
+    fi
+    if [ -n "$ACTIVE_STDERR_FILTER_PID" ]; then
+        kill -TERM "$ACTIVE_STDERR_FILTER_PID" 2>/dev/null || true
+    fi
+    rm -f "${ACTIVE_STDOUT_FIFO:-}" "${ACTIVE_STDERR_FIFO:-}"
+}
+trap cleanup EXIT HUP INT TERM
+
+# Run one command as a new process group. Both streams are drained continuously
+# through deterministic 4-KiB head + 4-KiB tail retainers. On timeout the whole
+# group receives TERM, then KILL after the fixed grace period. FIFO drain is
+# independently bounded so an escaped descendant cannot hold the wrapper open.
+run_bounded_process_group() {
+    stdout_path="$1"
+    stderr_path="$2"
+    timeout_secs="$3"
+    grace_secs="$4"
+    shift 4
+    positive_integer "$timeout_secs" || return 125
+    positive_integer "$grace_secs" || return 125
+
+    ACTIVE_STDOUT_FIFO="$BUILD_DIR/stdout.fifo.$$"
+    ACTIVE_STDERR_FIFO="$BUILD_DIR/stderr.fifo.$$"
+    rm -f "$ACTIVE_STDOUT_FIFO" "$ACTIVE_STDERR_FIFO"
+    mkfifo "$ACTIVE_STDOUT_FIFO" "$ACTIVE_STDERR_FIFO"
+    bounded_stream <"$ACTIVE_STDOUT_FIFO" >"$stdout_path" &
+    ACTIVE_STDOUT_FILTER_PID=$!
+    bounded_stream <"$ACTIVE_STDERR_FIFO" >"$stderr_path" &
+    ACTIVE_STDERR_FILTER_PID=$!
+
+    perl -MPOSIX -e '
+        defined(POSIX::setsid()) or die "setsid failed\n";
+        exec @ARGV;
+        exit 127;
+    ' "$@" >"$ACTIVE_STDOUT_FIFO" 2>"$ACTIVE_STDERR_FIFO" &
+    ACTIVE_GROUP_PID=$!
+    deadline=$(($(date +%s) + timeout_secs))
+    timed_out=0
+    while active_group_is_alive; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            timed_out=1
+            terminate_active_group_bounded "$grace_secs"
+            break
+        fi
+        sleep 1
+    done
+
+    wait "$ACTIVE_GROUP_PID"
+    process_status=$?
+    drain_deadline=$(($(date +%s) + grace_secs))
+    drain_failed=0
+    if ! wait_for_pid_until "$ACTIVE_STDOUT_FILTER_PID" "$drain_deadline"; then
+        drain_failed=1
+    fi
+    if ! wait_for_pid_until "$ACTIVE_STDERR_FILTER_PID" "$drain_deadline"; then
+        drain_failed=1
+    fi
+    if [ "$drain_failed" = 1 ]; then
+        terminate_active_group_bounded "$grace_secs"
+        terminate_filter_bounded "$ACTIVE_STDOUT_FILTER_PID" "$grace_secs"
+        terminate_filter_bounded "$ACTIVE_STDERR_FILTER_PID" "$grace_secs"
+    fi
+    wait "$ACTIVE_STDOUT_FILTER_PID"
+    stdout_status=$?
+    wait "$ACTIVE_STDERR_FILTER_PID"
+    stderr_status=$?
+    ACTIVE_GROUP_PID=""
+    ACTIVE_STDOUT_FILTER_PID=""
+    ACTIVE_STDERR_FILTER_PID=""
+    rm -f "$ACTIVE_STDOUT_FIFO" "$ACTIVE_STDERR_FIFO"
+    ACTIVE_STDOUT_FIFO=""
+    ACTIVE_STDERR_FIFO=""
+
+    [ "$drain_failed" = 0 ] || return 125
+    [ "$stdout_status" = 0 ] && [ "$stderr_status" = 0 ] || return 125
+    [ "$(file_bytes "$stdout_path")" -le "$STREAM_MAX_BYTES" ] || return 125
+    [ "$(file_bytes "$stderr_path")" -le "$STREAM_MAX_BYTES" ] || return 125
+    if [ "$timed_out" = 1 ]; then
+        return 124
+    fi
+    return "$process_status"
+}
+
+field_value() {
+    key="$1"
+    file="$2"
+    count="$(grep -c "^${key}=" "$file" 2>/dev/null || true)"
+    [ "$count" = 1 ] || return 1
+    sed -n "s/^${key}=//p" "$file"
+}
+
+repo_revision() {
+    if command -v jj >/dev/null 2>&1 && jj root >/dev/null 2>&1; then
+        jj log -r @- --no-graph -T 'commit_id' 2>/dev/null
+    else
+        git rev-parse HEAD 2>/dev/null
+    fi
+}
+
+write_evidence() {
+    status="$1"
+    reason="$2"
+    {
+        echo "phase2_low_memory_gate_schema=phase2-source-reclaim-v2"
+        echo "phase2_low_memory_gate_status=$status"
+        echo "phase2_low_memory_gate_reason=$reason"
+        echo "phase2_low_memory_gate_repo_revision=$(repo_revision)"
+        echo "phase2_low_memory_gate_stage4=unused"
+        echo "phase2_low_memory_gate_simple_bin=$SIMPLE_BIN"
+        echo "phase2_low_memory_gate_simple_bin_sha256=$SIMPLE_BIN_SHA256"
+        echo "phase2_low_memory_gate_version_exit=$VERSION_EXIT"
+        echo "phase2_low_memory_gate_probe_exit=$PROBE_EXIT"
+        echo "phase2_low_memory_gate_timeout_secs=$PROCESS_TIMEOUT_SECS"
+        echo "phase2_low_memory_gate_term_grace_secs=$PROCESS_TERM_GRACE_SECS"
+        echo "phase2_low_memory_gate_stream_head_bytes=$STREAM_HEAD_BYTES"
+        echo "phase2_low_memory_gate_stream_tail_bytes=$STREAM_TAIL_BYTES"
+        echo "phase2_low_memory_gate_stream_max_bytes=$STREAM_MAX_BYTES"
+        for artifact in \
+            "$WRAPPER" "$ENTRY" "$FIXTURE" "$DRIVER" "$DRIVER_TYPES" "$LEXER" \
+            "$RERUN_COMMAND" "$PROBE_COMMAND" "$VERSION_STDOUT" "$VERSION_STDERR" \
+            "$PROBE_STDOUT" "$PROBE_STDERR"; do
+            artifact_key="$(basename -- "$artifact" | tr '.-' '__')"
+            echo "phase2_low_memory_gate_${artifact_key}_path=$artifact"
+            if [ -f "$artifact" ]; then
+                echo "phase2_low_memory_gate_${artifact_key}_bytes=$(file_bytes "$artifact")"
+                echo "phase2_low_memory_gate_${artifact_key}_sha256=$(sha256_file "$artifact")"
+            else
+                echo "phase2_low_memory_gate_${artifact_key}_bytes=0"
+                echo "phase2_low_memory_gate_${artifact_key}_sha256="
+            fi
+        done
+        if [ -f "$PROBE_STDOUT" ]; then
+            for key in \
+                phase2_low_memory_probe_alias_first_free \
+                phase2_low_memory_probe_alias_second_free \
+                phase2_low_memory_probe_lexer_release_complete \
+                phase2_low_memory_probe_parse_release_reclaim_evict_lower_ordered \
+                phase2_low_memory_probe_low_memory_non_vhdl_guard \
+                phase2_low_memory_probe_source_contract_negative_control \
+                phase2_low_memory_probe_status; do
+                value="$(field_value "$key" "$PROBE_STDOUT" 2>/dev/null || true)"
+                echo "$key=$value"
+            done
+        fi
+    } >"$EVIDENCE"
+}
+
+fail() {
+    reason="$1"
+    write_evidence fail "$reason"
+    cat "$EVIDENCE"
+    exit 1
+}
+
+requested_simple=""
+case "$#" in
+    0) ;;
+    2)
+        [ "$1" = "--simple-bin" ] || {
+            echo "usage: sh $WRAPPER [--simple-bin <canonical-release-simple>]" >&2
+            exit 2
+        }
+        requested_simple="$2"
+        ;;
+    *)
+        echo "usage: sh $WRAPPER [--simple-bin <canonical-release-simple>]" >&2
+        exit 2
+        ;;
+esac
+
+mkdir -p "$BUILD_DIR"
+[ -f "$ENTRY" ] && [ -f "$FIXTURE" ] && [ -f "$DRIVER" ] &&
+    [ -f "$DRIVER_TYPES" ] && [ -f "$LEXER" ] ||
+    fail "source-input-missing"
+command -v perl >/dev/null 2>&1 || fail "perl-missing"
+rm -f "$EVIDENCE" "$RERUN_COMMAND" "$PROBE_COMMAND" \
+    "$VERSION_STDOUT" "$VERSION_STDERR" "$PROBE_STDOUT" "$PROBE_STDERR"
+
+SIMPLE_BIN="$(resolve_pure_simple "$requested_simple")" ||
+    fail "canonical-pure-simple-binary-missing"
+SIMPLE_BIN_SHA256="$(sha256_file "$SIMPLE_BIN")" ||
+    fail "pure-simple-binary-sha256-failed"
+write_exact_commands
+
+set +e
+run_bounded_process_group "$VERSION_STDOUT" "$VERSION_STDERR" \
+    "$PROCESS_TIMEOUT_SECS" "$PROCESS_TERM_GRACE_SECS" \
+    env SIMPLE_BOOTSTRAP=0 "$SIMPLE_BIN" --version
+VERSION_EXIT=$?
+set -e
+[ "$VERSION_EXIT" != 124 ] || fail "pure-simple-version-timeout"
+[ "$VERSION_EXIT" = 0 ] || fail "pure-simple-version-failed"
+[ "$(file_bytes "$VERSION_STDOUT")" -gt 0 ] ||
+    [ "$(file_bytes "$VERSION_STDERR")" -gt 0 ] ||
+    fail "pure-simple-version-empty"
+if grep -Eiq 'Rust-built|bootstrap seed only|debug build' \
+        "$VERSION_STDOUT" "$VERSION_STDERR"; then
+    fail "pure-simple-binary-rejected-as-seed"
+fi
+[ "$(sha256_file "$SIMPLE_BIN")" = "$SIMPLE_BIN_SHA256" ] ||
+    fail "pure-simple-binary-changed-after-version"
+
+set +e
+run_bounded_process_group "$PROBE_STDOUT" "$PROBE_STDERR" \
+    "$PROCESS_TIMEOUT_SECS" "$PROCESS_TERM_GRACE_SECS" \
+    env \
+    SIMPLE_BINARY="$SIMPLE_BIN" \
+    SIMPLE_BIN="$SIMPLE_BIN" \
+    SIMPLE_BOOTSTRAP_DRIVER="$SIMPLE_BIN" \
+    SIMPLE_FRONTEND_DELEGATE="$SIMPLE_BIN" \
+    SIMPLE_FRONTEND_DELEGATED=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_EXECUTION_MODE= \
+    SIMPLE_BOOTSTRAP=0 \
+    SIMPLE_LIB="$ROOT_DIR/src" \
+    "$SIMPLE_BIN" run "$ENTRY" --mode=interpreter
+PROBE_EXIT=$?
+set -e
+[ "$PROBE_EXIT" != 124 ] || fail "source-reclaim-probe-timeout"
+[ "$PROBE_EXIT" != 125 ] || fail "bounded-process-facade-failed"
+[ "$(sha256_file "$SIMPLE_BIN")" = "$SIMPLE_BIN_SHA256" ] ||
+    fail "pure-simple-binary-changed-after-probe"
+
+for key in \
+    phase2_low_memory_probe_alias_first_free \
+    phase2_low_memory_probe_alias_second_free \
+    phase2_low_memory_probe_lexer_release_complete \
+    phase2_low_memory_probe_parse_release_reclaim_evict_lower_ordered \
+    phase2_low_memory_probe_low_memory_non_vhdl_guard \
+    phase2_low_memory_probe_source_contract_negative_control \
+    phase2_low_memory_probe_status; do
+    field_value "$key" "$PROBE_STDOUT" >/dev/null ||
+        fail "probe-output-schema-invalid"
+done
+
+[ "$(field_value phase2_low_memory_probe_lexer_release_complete "$PROBE_STDOUT")" = true ] &&
+    [ "$(field_value phase2_low_memory_probe_parse_release_reclaim_evict_lower_ordered "$PROBE_STDOUT")" = true ] &&
+    [ "$(field_value phase2_low_memory_probe_low_memory_non_vhdl_guard "$PROBE_STDOUT")" = true ] &&
+    [ "$(field_value phase2_low_memory_probe_source_contract_negative_control "$PROBE_STDOUT")" = true ] ||
+    fail "source-contract-failed"
+
+alias_first="$(field_value phase2_low_memory_probe_alias_first_free "$PROBE_STDOUT")"
+alias_second="$(field_value phase2_low_memory_probe_alias_second_free "$PROBE_STDOUT")"
+[ "$alias_first" = 1 ] && [ "$alias_second" = 0 ] ||
+    fail "alias-free-semantics-not-proven"
+[ "$PROBE_EXIT" = 0 ] ||
+    fail "source-reclaim-probe-failed-status-$PROBE_EXIT"
+[ "$(field_value phase2_low_memory_probe_status "$PROBE_STDOUT")" = pass ] ||
+    fail "source-reclaim-probe-did-not-pass"
+
+write_evidence pass "source-reclaim-gate-complete"
+cat "$EVIDENCE"

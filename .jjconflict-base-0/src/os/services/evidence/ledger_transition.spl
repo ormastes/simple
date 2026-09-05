@@ -1,0 +1,100 @@
+# Pure, non-authorizing preparation of one verified evidence-ledger row.
+# The verifier owner calls this while holding its mutex, then atomically assigns
+# the returned value together with handle consumption. Calling this function
+# directly grants no authority because it mutates no canonical state.
+
+use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
+    SIMPLEOS_LEDGER_SCHEMA_VERSION,
+    SIMPLEOS_LEDGER_MAX_ROWS,
+    SIMPLEOS_LEDGER_MAX_CONSUMED_NONCES,
+    SimpleOsCapabilityRowV1,
+    SimpleOsCapabilityLedgerV1,
+    SimpleOsCapabilityLedgerCandidateV1,
+    SimpleOsCapabilityLedgerCommitResultV1,
+    SimpleOsCapabilityLedgerFailure,
+    simpleos_capability_ledger_check_v1,
+    simpleos_capability_row_key
+}
+
+struct SimpleOsEvidenceLedgerSnapshotV1:
+    ok: bool
+    reason: text
+    ledger: SimpleOsCapabilityLedgerV1
+
+fn _transition_failure(
+    ledger: SimpleOsCapabilityLedgerV1,
+    failure: SimpleOsCapabilityLedgerFailure,
+    reason: text
+) -> SimpleOsCapabilityLedgerCommitResultV1:
+    SimpleOsCapabilityLedgerCommitResultV1(
+        ok: false, ledger: ledger, ordered_keys: [], failure: failure,
+        reason: reason)
+
+fn simpleos_evidence_prepare_ledger_transition(
+    ledger: SimpleOsCapabilityLedgerV1,
+    candidate: SimpleOsCapabilityLedgerCandidateV1
+) -> SimpleOsCapabilityLedgerCommitResultV1:
+    val current_check = simpleos_capability_ledger_check_v1(ledger)
+    if not current_check.ok:
+        return _transition_failure(
+            ledger, SimpleOsCapabilityLedgerFailure.InvalidLedger,
+            "ledger:" + current_check.reason)
+    if ledger.revision == 9223372036854775807:
+        return _transition_failure(
+            ledger, SimpleOsCapabilityLedgerFailure.RevisionExhausted,
+            "revision-exhausted")
+    for nonce in ledger.consumed_nonces:
+        if nonce == candidate.receipt.nonce:
+            return _transition_failure(
+                ledger, SimpleOsCapabilityLedgerFailure.InvalidCandidate,
+                "replayed-nonce")
+    if ledger.consumed_nonces.len() >= SIMPLEOS_LEDGER_MAX_CONSUMED_NONCES:
+        return _transition_failure(
+            ledger, SimpleOsCapabilityLedgerFailure.NonceBound, "nonce-bound")
+
+    val key = simpleos_capability_row_key(candidate.row)
+    var replaces = false
+    for row in ledger.rows:
+        if simpleos_capability_row_key(row) == key:
+            replaces = true
+            break
+    if not replaces and ledger.rows.len() >= SIMPLEOS_LEDGER_MAX_ROWS:
+        return _transition_failure(
+            ledger, SimpleOsCapabilityLedgerFailure.RowBound, "row-bound")
+
+    var next_rows: [SimpleOsCapabilityRowV1] = []
+    var row_inserted = false
+    for row in ledger.rows:
+        val row_key = simpleos_capability_row_key(row)
+        if not row_inserted and key < row_key:
+            next_rows = next_rows.push(candidate.row)
+            row_inserted = true
+        if row_key == key:
+            if not row_inserted:
+                next_rows = next_rows.push(candidate.row)
+                row_inserted = true
+        else:
+            next_rows = next_rows.push(row)
+    if not row_inserted:
+        next_rows = next_rows.push(candidate.row)
+
+    var next_nonces: [text] = []
+    var nonce_inserted = false
+    for nonce in ledger.consumed_nonces:
+        if not nonce_inserted and candidate.receipt.nonce < nonce:
+            next_nonces = next_nonces.push(candidate.receipt.nonce)
+            nonce_inserted = true
+        next_nonces = next_nonces.push(nonce)
+    if not nonce_inserted:
+        next_nonces = next_nonces.push(candidate.receipt.nonce)
+    val next_ledger = SimpleOsCapabilityLedgerV1(
+        schema_version: SIMPLEOS_LEDGER_SCHEMA_VERSION,
+        revision: ledger.revision + 1,
+        rows: next_rows,
+        consumed_nonces: next_nonces)
+    SimpleOsCapabilityLedgerCommitResultV1(
+        ok: true, ledger: next_ledger, ordered_keys: [key],
+        failure: SimpleOsCapabilityLedgerFailure.None, reason: "")
+
+export simpleos_evidence_prepare_ledger_transition
+export SimpleOsEvidenceLedgerSnapshotV1

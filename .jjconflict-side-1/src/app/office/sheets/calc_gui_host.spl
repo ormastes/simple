@@ -1,0 +1,163 @@
+"""Narrow browser GUI host for standalone Calc.
+
+The page and UI-access API share one CalcAccessController and UISession.  The
+browser body is rendered from that session's common semantic tree; this host
+does not import the legacy Office GUI, a GPU backend, or a compiler.
+"""
+
+use app.office.sheets.access_controller.{CalcAccessController, calc_access_controller_with_sheet}
+use app.office.sheets.sheet_io.{sheet_load}
+use app.ui.render.html_widgets.{render_html_tree}
+use app.ui.test_api.json.{extract_json_field}
+use common.convert.{i64_to_text}
+use common.text_advanced.{escape_json}
+use std.nogc_sync_mut.io.tcp.{tcp_listener_bind_fd, tcp_listener_accept_fd, tcp_fd_close, tcp_fd_set_read_timeout, tcp_fd_read_line_or_empty, tcp_fd_read_text_or_empty, tcp_fd_write_text}
+use common.ui.state.{init_state}
+use nogc_sync_mut.ui.session.{UISession}
+
+extern fn rt_stdout_flush()
+
+class CalcGuiHost:
+    controller: CalcAccessController
+    session: UISession
+
+    static fn open(path: text) -> CalcGuiHost:
+        var controller = calc_access_controller_with_sheet(sheet_load(path))
+        val session = UISession.new(controller.ui_tree())
+        CalcGuiHost(controller: controller, session: session)
+
+    me reset(path: text):
+        var controller = calc_access_controller_with_sheet(sheet_load(path))
+        self.controller = controller
+        self.session = UISession.new(controller.ui_tree())
+
+    fn html() -> text:
+        """Render from the owned controller without passing that class value
+        through the Phase-3 function-argument ABI. Reuse the UISession tree:
+        rebuilding all 600 cells here makes the global widget registry perform
+        another quadratic insertion pass before GUI readiness."""
+        val body = render_html_tree(self.session.state.tree.root_node(), self.session.state)
+        var html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Simple Calc</title>"
+        html = html + "<style>body{margin:0;padding:20px;font:14px system-ui;background:#101521;color:#edf3ff}"
+        html = html + "input{min-width:28rem;padding:8px}button{padding:6px;border:1px solid #52627c;background:#202a3b;color:#edf3ff}"
+        html = html + "[data-widget-id=sheet_grid]{display:grid;grid-template-columns:repeat(20,minmax(64px,1fr));overflow:auto}"
+        html = html + "</style></head><body>" + body + "</body></html>"
+        html
+
+# Empty-list module initialization is cheap and Phase-3-safe. Whole-array
+# replacement retains mutations made through named callbacks.
+var _calc_gui_hosts: [CalcGuiHost] = []
+var _calc_gui_htmls: [text] = []
+
+fn _calc_gui_install_host(path: text):
+    _calc_gui_hosts = [CalcGuiHost.open(path)]
+
+fn _calc_gui_write_response(fd: i64, status: i64, content_type: text, body: text):
+    val status_text = if status == 200: "OK" elif status == 400: "Bad Request" elif status == 404: "Not Found" elif status == 409: "Conflict" else: "OK"
+    tcp_fd_write_text(fd, "HTTP/1.1 " + i64_to_text(status) + " " + status_text + "\r\n")
+    tcp_fd_write_text(fd, "Content-Type: " + content_type + "\r\n")
+    tcp_fd_write_text(fd, "X-UI-Protocol-Version: 1\r\n")
+    tcp_fd_write_text(fd, "Content-Length: " + i64_to_text(body.len()) + "\r\n")
+    tcp_fd_write_text(fd, "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+    tcp_fd_write_text(fd, body)
+
+fn _calc_gui_handle_action(fd: i64, body: text):
+    val canonical_id = extract_json_field(body, "canonical_id")
+    val action = extract_json_field(body, "action")
+    val value = extract_json_field(body, "value")
+    var request_id = extract_json_field(body, "request_id")
+    val expected_text = extract_json_field(body, "expected_revision")
+    val before_revision = _calc_gui_hosts[0].controller.snapshot_revision()
+    if request_id == "": request_id = "calc-gui-act-" + i64_to_text(before_revision + 1)
+    if canonical_id == "" or action == "":
+        _calc_gui_write_response(fd, 400, "application/json", "{\"error\":\"missing_field\",\"message\":\"canonical_id and action are required\"}")
+        return
+    if not _calc_gui_hosts[0].controller.has_canonical_id(canonical_id):
+        _calc_gui_write_response(fd, 404, "application/json", "{\"error\":\"target_not_found\",\"request_id\":\"" + escape_json(request_id) + "\"}")
+        return
+    val expected = expected_text.to_int()
+    if expected_text != "" and (expected == nil or expected < 0):
+        _calc_gui_write_response(fd, 400, "application/json", "{\"error\":\"invalid_field\"}")
+        return
+    if expected_text != "" and expected_text != i64_to_text(before_revision):
+        _calc_gui_write_response(fd, 409, "application/json", "{\"error\":\"stale_target\",\"actual_revision\":" + i64_to_text(before_revision) + ",\"request_id\":\"" + escape_json(request_id) + "\"}")
+        return
+    var host = _calc_gui_hosts[0]
+    host.controller.pending_action_value = value
+    host.controller.act_in_place(canonical_id, action, value, request_id)
+    val ok = host.controller.last_action_ok
+    val code = host.controller.last_action_code
+    val revision = host.controller.last_action_revision
+    _calc_gui_hosts = [host]
+    if not ok:
+        val status = if code == "target_not_found" or code == "surface_not_found": 404 else: 400
+        _calc_gui_write_response(fd, status, "application/json", "{\"error\":\"" + escape_json(code) + "\",\"request_id\":\"" + escape_json(request_id) + "\",\"snapshot_revision\":" + i64_to_text(revision) + "}")
+        return
+    _calc_gui_write_response(fd, 200, "application/json", "{\"ok\":true,\"surface_id\":\"main\",\"canonical_id\":\"" + escape_json(canonical_id) + "\",\"request_id\":\"" + escape_json(request_id) + "\",\"snapshot_revision\":" + i64_to_text(revision) + "}")
+
+fn _calc_gui_serve_fd(fd: i64):
+    val request_line = tcp_fd_read_line_or_empty(fd)
+    if request_line == "": return
+    val parts = request_line.split(" ")
+    if parts.len() < 2: return
+    val method = parts[0]
+    val path = parts[1]
+    var content_length = 0
+    loop:
+        val header_line = tcp_fd_read_line_or_empty(fd)
+        if header_line == "" or header_line.trim() == "": break
+        if header_line.starts_with("Content-Length:"):
+            content_length = header_line.slice(15, header_line.len()).trim().to_int() ?? 0
+    var body = ""
+    if method == "POST" and content_length > 0:
+        body = tcp_fd_read_text_or_empty(fd, content_length)
+    if path == "/" and method == "GET":
+        _calc_gui_write_response(fd, 200, "text/html", _calc_gui_htmls[0])
+        return
+    if method == "GET" and path.starts_with("/api/test/ready"):
+        _calc_gui_write_response(fd, 200, "application/json", "{\"ready\":true,\"protocol_version\":1}")
+        return
+    if method == "GET" and path.starts_with("/api/test/ui/"):
+        _calc_gui_write_response(fd, 200, "application/json", _calc_gui_hosts[0].controller.snapshot_json())
+        return
+    if method == "POST" and path.starts_with("/api/test/ui/act"):
+        _calc_gui_handle_action(fd, body)
+        return
+    _calc_gui_write_response(fd, 404, "application/json", "{\"error\":\"not_found\"}")
+
+fn calc_gui_html(controller: CalcAccessController) -> text:
+    val state = init_state(controller.ui_tree())
+    # init_state takes ownership of tree in native Phase-3 builds. Render the
+    # tree retained by UIState instead of reading the moved local value.
+    val body = render_html_tree(state.tree.root_node(), state)
+    var html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Simple Calc</title>"
+    html = html + "<style>body{margin:0;padding:20px;font:14px system-ui;background:#101521;color:#edf3ff}"
+    html = html + "input{min-width:28rem;padding:8px}button{padding:6px;border:1px solid #52627c;background:#202a3b;color:#edf3ff}"
+    html = html + "[data-widget-id=sheet_grid]{display:grid;grid-template-columns:repeat(20,minmax(64px,1fr));overflow:auto}"
+    html = html + "</style></head><body>" + body + "</body></html>"
+    html
+
+fn run_calc_gui_host(port: i32, path: text) -> i32:
+    val address = "127.0.0.1:" + port.to_text()
+    val listener_fd = tcp_listener_bind_fd(address)
+    if listener_fd < 0:
+        print "Error: Calc GUI bind failed: {address}"
+        return 1
+    _calc_gui_install_host(path)
+    val html = _calc_gui_hosts[0].html()
+    _calc_gui_htmls = [html]
+    print "[calc] GUI ready on http://{address}/"
+    # GUI hosts block in accept immediately after announcing readiness. Flush
+    # explicitly so pipe/PTY launchers and modern SSpec can synchronize before
+    # issuing the first HTTP request.
+    rt_stdout_flush()
+    loop:
+        val client_fd = tcp_listener_accept_fd(listener_fd)
+        if client_fd < 0:
+            print "Error: Calc GUI accept failed"
+            return 1
+        tcp_fd_set_read_timeout(client_fd, 1000)
+        _calc_gui_serve_fd(client_fd)
+        tcp_fd_close(client_fd)
+
+export CalcGuiHost, calc_gui_html, run_calc_gui_host

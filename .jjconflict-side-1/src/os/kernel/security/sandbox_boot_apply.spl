@@ -1,0 +1,166 @@
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.pmp.{PmpCsrWrite, pmp_regions_from_sandbox_lowering, pmp_write_plan_from_sandbox_lowering}
+use os.kernel.arch_adapt.arm64_sandbox_paging.{arm64_sandbox_pte_bits_from_lowering}
+use os.kernel.boot.mmio.{mmio_write32}
+
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+extern fn rt_simple_sandbox_section_start() -> u64
+extern fn rt_simple_sandbox_section_end() -> u64
+
+val SIMPLE_SANDBOX_SECTION_START_SYMBOL: text = "__simple_sandbox_start"
+val SIMPLE_SANDBOX_SECTION_END_SYMBOL: text = "__simple_sandbox_end"
+
+# SECURITY NOTE: ARM MPU register addresses and bitmasks are NOT declared as
+# module-level val constants. On baremetal LLVM targets, BSS clearing zeroes all
+# module-level globals after runtime init, turning register addresses and mask
+# values to 0. All ARM_MPU_* literals are inlined as function-local vals in the
+# functions below so they survive BSS clear and are safe to use at early boot.
+
+struct SandboxBootApplyPlan:
+    """Architecture-specific boot protection operations from sandbox lowering."""
+    riscv_pmp_writes: [PmpCsrWrite]
+    arm64_pte_bits: [u64]
+    arm_mpu_mmio_writes: [ArmMpuMmioWrite]
+
+struct ArmMpuMmioWrite:
+    """One volatile MMIO write needed to program an ARM MPU register."""
+    addr: u64
+    value: u32
+
+fn sandbox_boot_apply_plan(sandbox_lowering_sdn: text, xlen: i64) -> SandboxBootApplyPlan:
+    """Build the concrete boot protection plan for supported architectures."""
+    SandboxBootApplyPlan(
+        riscv_pmp_writes: pmp_write_plan_from_sandbox_lowering(sandbox_lowering_sdn, xlen),
+        arm64_pte_bits: arm64_sandbox_pte_bits_from_lowering(sandbox_lowering_sdn),
+        arm_mpu_mmio_writes: arm_mpu_mmio_write_plan_from_sandbox_lowering(sandbox_lowering_sdn)
+    )
+
+fn sandbox_boot_apply_riscv64_count(sandbox_lowering_sdn: text) -> i64:
+    """Return how many RISC-V CSR writes the boot hook would apply."""
+    pmp_write_plan_from_sandbox_lowering(sandbox_lowering_sdn, 64).len()
+
+fn sandbox_boot_apply_arm64_count(sandbox_lowering_sdn: text) -> i64:
+    """Return how many ARM64 protection rows the boot hook would apply."""
+    arm64_sandbox_pte_bits_from_lowering(sandbox_lowering_sdn).len()
+
+fn arm_mpu_region_size_encoding(size: u64) -> u32:
+    """Return ARMv7-M RASR SIZE encoding for a power-of-two region size."""
+    if size < 32:
+        return 0
+    var n = size
+    var log2: u32 = 0
+    while n > 1:
+        n = n >> 1
+        log2 = log2 + 1
+    log2 - 1
+
+fn arm_mpu_access_permission_bits(permissions: text) -> u32:
+    """Map lowered sandbox permissions to ARM MPU AP bits."""
+    if permissions.contains("w"):
+        return 3 << 24
+    if permissions.contains("r"):
+        return 6 << 24
+    0
+
+fn arm_mpu_rbar_value(base: u64, region_index: u32) -> u32:
+    """Build RBAR with VALID and region index for the selected MPU slot."""
+    # SECURITY: function-local — survives baremetal BSS clear (module-level vals would be zeroed).
+    val ARM_MPU_RBAR_VALID: u32 = 0x00000010
+    ((base & 0xFFFFFFE0).to_u32()) | ARM_MPU_RBAR_VALID | region_index
+
+fn arm_mpu_rasr_value(size: u64, permissions: text) -> u32:
+    """Build RASR from lowered size and permission text."""
+    # SECURITY: function-local — survives baremetal BSS clear (module-level vals would be zeroed).
+    val ARM_MPU_RASR_ENABLE: u32 = 0x00000001
+    val ARM_MPU_RASR_XN: u32 = 0x10000000
+    var value = ARM_MPU_RASR_ENABLE | (arm_mpu_region_size_encoding(size) << 1) | arm_mpu_access_permission_bits(permissions)
+    if not permissions.contains("x"):
+        value = value | ARM_MPU_RASR_XN
+    value
+
+fn arm_mpu_mmio_write_plan_from_sandbox_lowering(sandbox_lowering_sdn: text) -> [ArmMpuMmioWrite]:
+    """Build volatile ARM MPU register writes from generated sandbox lowering."""
+    # SECURITY: function-local — survives baremetal BSS clear (module-level vals would be zeroed).
+    val ARM_MPU_CTRL: u64 = 0xE000ED94
+    val ARM_MPU_RNR: u64 = 0xE000ED98
+    val ARM_MPU_RBAR: u64 = 0xE000ED9C
+    val ARM_MPU_RASR: u64 = 0xE000EDA0
+    val ARM_MPU_CTRL_ENABLE_PRIVDEF: u32 = 0x00000005
+    var writes: [ArmMpuMmioWrite] = []
+    val regions = pmp_regions_from_sandbox_lowering(sandbox_lowering_sdn)
+    if regions.len() == 0:
+        return writes
+
+    writes.push(ArmMpuMmioWrite(addr: ARM_MPU_CTRL, value: 0))
+    var index: u32 = 0
+    for region in regions:
+        if region.base > 0 and region.size >= 32:
+            writes.push(ArmMpuMmioWrite(addr: ARM_MPU_RNR, value: index))
+            writes.push(ArmMpuMmioWrite(addr: ARM_MPU_RBAR, value: arm_mpu_rbar_value(region.base, index)))
+            writes.push(ArmMpuMmioWrite(addr: ARM_MPU_RASR, value: arm_mpu_rasr_value(region.size, region.permissions)))
+            index = index + 1
+    if index > 0:
+        writes.push(ArmMpuMmioWrite(addr: ARM_MPU_CTRL, value: ARM_MPU_CTRL_ENABLE_PRIVDEF))
+    writes
+
+fn sandbox_boot_apply_arm_mpu_count(sandbox_lowering_sdn: text) -> i64:
+    """Return how many ARM MPU MMIO writes the boot hook would apply."""
+    arm_mpu_mmio_write_plan_from_sandbox_lowering(sandbox_lowering_sdn).len()
+
+fn sandbox_boot_apply_arm_mpu(sandbox_lowering_sdn: text) -> i64:
+    """Apply generated ARM MPU register writes through volatile MMIO."""
+    val writes = arm_mpu_mmio_write_plan_from_sandbox_lowering(sandbox_lowering_sdn)
+    for write in writes:
+        mmio_write32(write.addr, write.value)
+    writes.len()
+
+fn embedded_sandbox_section_bounds_valid(start_addr: u64, end_addr: u64) -> bool:
+    """Validate linker-provided .simple.sandbox section bounds."""
+    start_addr > 0 and end_addr > start_addr
+
+fn embedded_sandbox_section_text_valid(section_text: text) -> bool:
+    """Recognize generated sandbox lowering payloads embedded in .simple.sandbox."""
+    section_text.contains("sandbox_lowering:") or section_text.contains("pmp_region|") or section_text.contains("baremetal_mpu_linker_regions")
+
+fn embedded_sandbox_lowering_sdn_from_section(start_addr: u64, end_addr: u64, section_text: text) -> text:
+    """Decode already-read linker section text after bounds and payload checks."""
+    if embedded_sandbox_section_bounds_valid(start_addr, end_addr) == false:
+        return ""
+    if embedded_sandbox_section_text_valid(section_text) == false:
+        return ""
+    section_text
+
+fn embedded_sandbox_lowering_sdn_from_raw_bounds(start_addr: u64, end_addr: u64) -> text:
+    """Unsafely read embedded .simple.sandbox bytes from linker section bounds."""
+    if embedded_sandbox_section_bounds_valid(start_addr, end_addr) == false:
+        return ""
+    val section_len = (end_addr - start_addr) as i64
+    val section_text = rt_bytes_to_text(rt_bytes_from_raw(start_addr as i64, section_len))
+    embedded_sandbox_lowering_sdn_from_section(start_addr, end_addr, section_text)
+
+fn embedded_sandbox_lowering_sdn() -> text:
+    """Boot-time lookup seam for .simple.sandbox between linker section symbols.
+
+    The arch linker scripts expose __simple_sandbox_start/end. Architecture
+    providers return those addresses through a tiny C/SFFI shim so all unsafe
+    reads remain behind the validation gate in this module.
+    """
+    embedded_sandbox_lowering_sdn_from_raw_bounds(
+        rt_simple_sandbox_section_start(),
+        rt_simple_sandbox_section_end()
+    )
+
+fn sandbox_boot_apply_embedded_riscv64() -> i64:
+    """Early boot entrypoint for applying embedded RISC-V PMP sandbox lowering."""
+    sandbox_boot_apply_riscv64_count(embedded_sandbox_lowering_sdn())
+
+fn sandbox_boot_apply_embedded_arm_mpu() -> bool:
+    """Early boot entrypoint for applying embedded ARM MPU sandbox lowering.
+
+    Returns true only if at least one non-zero-address MPU write was applied.
+    Returns false if the sandbox section was empty, malformed, or all regions
+    had zero base addresses (indicating BSS-zeroed data or no lowering present).
+    Callers MUST halt if this returns false — a failed MPU apply is fail-closed.
+    """
+    val write_count = sandbox_boot_apply_arm_mpu(embedded_sandbox_lowering_sdn())
+    write_count > 0

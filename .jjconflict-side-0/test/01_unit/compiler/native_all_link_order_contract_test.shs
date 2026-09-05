@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+source_file="$root/src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl"
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+grep -Fq 'val bootstrap_native_all = _llvm_bootstrap_native_all_path(' "$source_file" ||
+  fail 'native-all selection still depends on nested writeback'
+grep -Fq 'all_objects = _llvm_append_link_input_if_present(' "$source_file" ||
+  fail 'native-all composition still depends on conditional list writeback'
+[ "$(grep -Fc 'all_objects = _llvm_append_link_input_if_present(' "$source_file")" = 1 ] ||
+  fail 'native-all is appended more than once'
+grep -Fq 'if stage4_requested or runtime_path == "" or requires_cross:' "$source_file" ||
+  fail 'Stage4/cross/missing-path exclusion is absent'
+grep -Fq 'if not native_all_allowed_for_runtime_bundle(runtime_bundle):' "$source_file" ||
+  fail 'runtime-bundle policy is bypassed'
+grep -Fq 'hosted_os == "windows" and not mingw' "$source_file" ||
+  fail 'Windows archive selection is absent'
+grep -Fq '"simple_native_all.lib"' "$source_file" ||
+  fail 'Windows native-all name is absent'
+grep -Fq '"libsimple_native_all.a"' "$source_file" ||
+  fail 'Unix native-all name is absent'
+grep -Fq 'compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == ""' "$source_file" ||
+  fail 'dynload ownership is not coupled to retained native-all selection'
+if grep -Eq -- '--whole-archive|--start-group|force_load' "$source_file"; then
+  fail 'unsafe whole/group archive fallback was introduced'
+fi
+
+support="$root/src/compiler/70.backend/backend/llvm_native_link_hosted_support.spl"
+for denied in simple-core simple_core core-c-bootstrap core_c_bootstrap runtime core core-c core_c; do
+  grep -Fq "case \"$denied\": false" "$support" ||
+    fail "native-all denied bundle missing: $denied"
+done
+
+# Composition order is caller objects, runtime objects, optional native-all,
+# entry shim, then configured external providers. It must remain that way.
+awk '
+  /all_objects = all_objects.push\(user_object\)/ { user=NR }
+  /all_objects = _llvm_append_link_input_if_present\(/ { archive=NR }
+  archive && /all_objects = all_objects.push\(entry_obj_path\)/ { entry=NR }
+  /all_objects = all_objects.push\(provider\)/ { external=NR }
+  END { exit(user && archive > user && entry > archive && external > entry ? 0 : 1) }
+' "$source_file" || fail 'native-all link-input order is not caller/archive/entry/external'
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cat >"$tmp/definition.c" <<'EOF'
+int capsule_definition(void) { return 41; }
+EOF
+cat >"$tmp/bridge.c" <<'EOF'
+extern int capsule_definition(void);
+int capsule_bridge(void) { return capsule_definition() + 1; }
+EOF
+cat >"$tmp/caller.c" <<'EOF'
+extern int capsule_bridge(void);
+int main(void) { return capsule_bridge() == 42 ? 0 : 1; }
+EOF
+cc -c "$tmp/definition.c" -o "$tmp/definition.o"
+cc -c "$tmp/bridge.c" -o "$tmp/bridge.o"
+cc -c "$tmp/caller.c" -o "$tmp/caller.o"
+ar rcs "$tmp/provider.a" "$tmp/definition.o" "$tmp/bridge.o"
+
+# One archive has T(capsule_definition) in one member and U in another.
+# Caller-before-provider extracts both members; provider-before-caller does not.
+nm -g "$tmp/provider.a" | awk '
+  $NF == "capsule_definition" && $2 == "T" { t=1 }
+  $NF == "capsule_definition" && $1 == "U" { u=1 }
+  END { exit(t && u ? 0 : 1) }
+' || fail 'fixture lacks exact T/U archive shape'
+cc "$tmp/caller.o" "$tmp/provider.a" -o "$tmp/good"
+"$tmp/good" || fail 'caller-before-provider extraction failed'
+if cc "$tmp/provider.a" "$tmp/caller.o" -o "$tmp/bad" >/dev/null 2>&1; then
+  fail 'provider-before-caller unexpectedly linked'
+fi
+
+echo 'PASS: native-all selection is retained and archive follows callers'

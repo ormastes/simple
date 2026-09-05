@@ -1,0 +1,135 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+runner=${RISCV_GATE_RUNNER_UNDER_TEST:-"$repo_root/test/riscv_isa_gate/run_gate.sh"}
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fake_root="$tmp/relocated repo"
+fake_bin="$tmp/bin"
+fake_gate="$fake_root/test/riscv_isa_gate"
+fake_build="$fake_root/build/vhdl/rv32"
+mkdir -p "$fake_gate/payloads" "$fake_build" "$fake_bin"
+cp "$runner" "$fake_gate/run_gate.sh"
+: >"$fake_gate/tb_gate.vhd"
+: >"$fake_build/rv32_exec_core.vhd"
+for test_name in simple add addi mul div rem jal beq lb sw; do
+    : >"$fake_gate/payloads/$test_name.S"
+done
+
+cat >"$fake_bin/ghdl" <<'EOF'
+#!/bin/sh
+printf '%s\t%s\n' "$PWD" "$*" >>"$RISCV_GATE_GHDL_LOG"
+case "$*" in
+    *--help*) exit 0 ;;
+    *'-r --std=08 tb_gate'*) echo 'GATE_RESULT=PASS' ;;
+    *) exit 0 ;;
+esac
+EOF
+cat >"$fake_bin/riscv64-unknown-elf-gcc" <<'EOF'
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -o ]; then
+        shift
+        : >"$1"
+        exit 0
+    fi
+    shift
+done
+exit 64
+EOF
+cat >"$fake_bin/riscv64-unknown-elf-objcopy" <<'EOF'
+#!/bin/sh
+for output do :; done
+: >"$output"
+EOF
+cat >"$fake_bin/hexdump" <<'EOF'
+#!/bin/sh
+echo 00000000
+EOF
+cat >"$fake_bin/timeout" <<'EOF'
+#!/bin/sh
+shift
+exec "$@"
+EOF
+chmod +x "$fake_bin/ghdl" "$fake_bin/riscv64-unknown-elf-gcc" \
+    "$fake_bin/riscv64-unknown-elf-objcopy" "$fake_bin/hexdump" "$fake_bin/timeout"
+
+default_log="$tmp/default-ghdl.log"
+(
+    cd /
+    PATH="$fake_bin:$PATH" RISCV_GATE_GHDL_LOG="$default_log" \
+        "$fake_gate/run_gate.sh" >"$tmp/default.out"
+)
+[ "$(cut -f1 "$default_log" | sort -u)" = "$fake_build" ] || {
+    echo "default repository-relative build path was not used" >&2
+    exit 1
+}
+grep -Fq 'PASS:   10' "$tmp/default.out"
+
+override_root="$tmp/override root"
+override_gate="$tmp/override gate"
+override_build="$tmp/override build"
+root_gate="$override_root/test/riscv_isa_gate"
+root_build="$override_root/build/vhdl/rv32"
+mkdir -p "$root_gate/payloads" "$root_build" \
+    "$override_gate/payloads" "$override_build"
+cp "$fake_gate/tb_gate.vhd" "$root_gate/tb_gate.vhd"
+cp "$fake_build/rv32_exec_core.vhd" "$root_build/rv32_exec_core.vhd"
+cp "$fake_gate/tb_gate.vhd" "$override_gate/tb_gate.vhd"
+cp "$fake_build/rv32_exec_core.vhd" "$override_build/rv32_exec_core.vhd"
+for test_name in simple add addi mul div rem jal beq lb sw; do
+    cp "$fake_gate/payloads/$test_name.S" "$root_gate/payloads/$test_name.S"
+    cp "$fake_gate/payloads/$test_name.S" "$override_gate/payloads/$test_name.S"
+done
+
+root_log="$tmp/root-ghdl.log"
+(
+    cd /
+    PATH="$fake_bin:$PATH" RISCV_GATE_GHDL_LOG="$root_log" \
+        RISCV_ISA_GATE_REPO_ROOT="$override_root" \
+        "$fake_gate/run_gate.sh" >"$tmp/root.out"
+) || {
+    echo "repository-root override was not accepted" >&2
+    exit 1
+}
+[ "$(cut -f1 "$root_log" | sort -u)" = "$root_build" ] || {
+    echo "explicit repository-root override was not used" >&2
+    exit 1
+}
+
+override_log="$tmp/override-ghdl.log"
+(
+    cd /
+    PATH="$fake_bin:$PATH" RISCV_GATE_GHDL_LOG="$override_log" \
+        RISCV_ISA_GATE_REPO_ROOT="$override_root" \
+        RISCV_ISA_GATE_DIR="$override_gate" \
+        RISCV_ISA_GATE_BUILD_DIR="$override_build" \
+        "$fake_gate/run_gate.sh" >"$tmp/override.out"
+)
+[ "$(cut -f1 "$override_log" | sort -u)" = "$override_build" ] || {
+    echo "explicit build-directory override was not used" >&2
+    exit 1
+}
+
+if RISCV_ISA_GATE_DIR="$tmp/absent gate" "$fake_gate/run_gate.sh" \
+    >"$tmp/missing-gate.out" 2>"$tmp/missing-gate.err"; then
+    echo "missing gate directory was accepted" >&2
+    exit 1
+fi
+grep -Fq 'RISC-V ISA gate directory not found' "$tmp/missing-gate.err"
+
+if RISCV_ISA_GATE_BUILD_DIR="$tmp/absent build" "$fake_gate/run_gate.sh" \
+    >"$tmp/missing-build.out" 2>"$tmp/missing-build.err"; then
+    echo "missing build directory was accepted" >&2
+    exit 1
+fi
+grep -Fq 'RISC-V ISA build directory not found' "$tmp/missing-build.err"
+
+if grep -Fq '/home/ormastes/dev/pub/simple' "$runner"; then
+    echo "legacy developer checkout path remains" >&2
+    exit 1
+fi
+
+echo "PASS: RISC-V ISA gate runner paths resolve independently of invocation cwd"

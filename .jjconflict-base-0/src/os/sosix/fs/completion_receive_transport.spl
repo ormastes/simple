@@ -1,0 +1,165 @@
+"""Bounded nonblocking filesystem completion receive over owned-copy IPC v1.
+
+Syscall 133 copies one kernel-owned IPC envelope into a fixed client buffer.
+This adapter authenticates the envelope metadata before passing its payload to
+the completion pump.  One call performs at most one syscall and never waits.
+"""
+
+use os.sosix.core.operation.SosixOperationSlot
+use os.sosix.fs.async_transport_state.SosixFsTransportState
+use os.sosix.fs.completion_pump.{
+    SosixFsCompletionPumpResult,
+    sosix_fs_completion_pump_receive
+}
+use os.sosix.fs.ipc_codec_v1.{
+    SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1,
+    SOSIX_FS_IPC_MAX_COMPLETION_PAYLOAD_V1
+}
+
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+
+pub val SOSIX_FS_OWNED_ENVELOPE_HEADER_BYTES_V1: u64 = 32
+pub val SOSIX_FS_COMPLETION_RECEIVE_CAPACITY_V1: u64 = (
+    SOSIX_FS_OWNED_ENVELOPE_HEADER_BYTES_V1 +
+    SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1 as u64 +
+    SOSIX_FS_IPC_MAX_COMPLETION_PAYLOAD_V1)
+pub val SOSIX_FS_COMPLETION_RECEIVE_EAGAIN: i64 = -11
+
+pub struct SosixFsCompletionReceiveResultV1:
+    accepted: bool
+    pending: bool
+    reason: text
+    status: i64
+    pump: SosixFsCompletionPumpResult
+
+export SOSIX_FS_OWNED_ENVELOPE_HEADER_BYTES_V1
+export SOSIX_FS_COMPLETION_RECEIVE_CAPACITY_V1, SOSIX_FS_COMPLETION_RECEIVE_EAGAIN
+export SosixFsCompletionReceiveResultV1
+
+fn _read_u32(data: [u8], offset: u64) -> u32:
+    ((data[offset] as u32) |
+        ((data[offset + 1] as u32) << 8) |
+        ((data[offset + 2] as u32) << 16) |
+        ((data[offset + 3] as u32) << 24))
+
+fn _read_u64(data: [u8], offset: u64) -> u64:
+    (_read_u32(data, offset) as u64) | ((_read_u32(data, offset + 4) as u64) << 32)
+
+fn _base_pump(
+    expected_service_endpoint: u64, expected_api_id: u32,
+    operation_slot: SosixOperationSlot, transport_state: SosixFsTransportState
+) -> SosixFsCompletionPumpResult:
+    sosix_fs_completion_pump_receive(
+        expected_service_endpoint, 0, expected_api_id,
+        operation_slot, transport_state, [])
+
+fn _reject(
+    reason: text, status: i64, pending: bool,
+    expected_service_endpoint: u64, expected_api_id: u32,
+    operation_slot: SosixOperationSlot, transport_state: SosixFsTransportState
+) -> SosixFsCompletionReceiveResultV1:
+    SosixFsCompletionReceiveResultV1(
+        accepted: false, pending: pending, reason: reason, status: status,
+        pump: _base_pump(
+            expected_service_endpoint, expected_api_id, operation_slot, transport_state))
+
+pub fn sosix_fs_completion_receive_owned_result_v1(
+    syscall_status: i64, received: [u8],
+    expected_service_endpoint: u64, expected_reply_endpoint: u64,
+    expected_api_id: u32, operation_slot: SosixOperationSlot,
+    transport_state: SosixFsTransportState
+) -> SosixFsCompletionReceiveResultV1:
+    """Validate one syscall-133 result and publish at most one completion."""
+    if expected_service_endpoint == 0:
+        return _reject(
+            "invalid-service-endpoint", -22, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    if expected_reply_endpoint == 0:
+        return _reject(
+            "invalid-reply-endpoint", -22, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    if syscall_status == SOSIX_FS_COMPLETION_RECEIVE_EAGAIN:
+        return _reject(
+            "completion-pending", syscall_status, true, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    if syscall_status < 0:
+        return _reject(
+            "owned-receive-rejected", syscall_status, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    val wire_length = syscall_status.to_u64()
+    if (wire_length < SOSIX_FS_OWNED_ENVELOPE_HEADER_BYTES_V1 or
+        wire_length > SOSIX_FS_COMPLETION_RECEIVE_CAPACITY_V1 or
+        wire_length != received.len() as u64):
+        return _reject(
+            "owned-envelope-size-mismatch", -90, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+
+    val source_endpoint = _read_u64(received, 0)
+    val destination_endpoint = _read_u64(received, 8)
+    val method = _read_u32(received, 16)
+    val flags = _read_u32(received, 20)
+    val payload_length = _read_u32(received, 24).to_u64()
+    val capability_count = _read_u32(received, 28)
+    if source_endpoint != expected_service_endpoint:
+        return _reject(
+            "untrusted-service-source", -13, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    if destination_endpoint != expected_reply_endpoint:
+        return _reject(
+            "unexpected-reply-endpoint", -13, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    if method != expected_api_id:
+        return _reject(
+            "owned-envelope-api-mismatch", -22, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    # IpcFlags.Async is discriminant 1. Capability-bearing or reply-shaped
+    # metadata is not valid on the owned-copy v1 completion lane.
+    if flags != 1 or capability_count != 0:
+        return _reject(
+            "unsupported-owned-envelope-metadata", -22, false,
+            expected_service_endpoint, expected_api_id, operation_slot, transport_state)
+    val max_encoded_completion = (
+        SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1 as u64 +
+        SOSIX_FS_IPC_MAX_COMPLETION_PAYLOAD_V1)
+    if (payload_length > max_encoded_completion or
+        payload_length + SOSIX_FS_OWNED_ENVELOPE_HEADER_BYTES_V1 != wire_length):
+        return _reject(
+            "owned-envelope-payload-size-mismatch", -90, false,
+            expected_service_endpoint, expected_api_id, operation_slot, transport_state)
+
+    val pump = sosix_fs_completion_pump_receive(
+        expected_service_endpoint, source_endpoint, expected_api_id,
+        operation_slot, transport_state,
+        received.slice(SOSIX_FS_OWNED_ENVELOPE_HEADER_BYTES_V1, wire_length))
+    SosixFsCompletionReceiveResultV1(
+        accepted: pump.accepted, pending: false, reason: pump.reason,
+        status: if pump.accepted: 0 else: -22, pump: pump)
+
+pub fn sosix_fs_completion_receive_nonblocking_v1(
+    expected_service_endpoint: u64, expected_reply_endpoint: u64,
+    expected_api_id: u32, operation_slot: SosixOperationSlot,
+    transport_state: SosixFsTransportState
+) -> SosixFsCompletionReceiveResultV1:
+    """Poll syscall 133 exactly once; EAGAIN is a nonterminal pending result."""
+    if expected_service_endpoint == 0:
+        return _reject(
+            "invalid-service-endpoint", -22, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    if expected_reply_endpoint == 0:
+        return _reject(
+            "invalid-reply-endpoint", -22, false, expected_service_endpoint,
+            expected_api_id, operation_slot, transport_state)
+    var buffer: [u8] = [0u8; SOSIX_FS_COMPLETION_RECEIVE_CAPACITY_V1]
+    val status = syscall(
+        133, expected_reply_endpoint, buffer.ptr() as u64,
+        SOSIX_FS_COMPLETION_RECEIVE_CAPACITY_V1, 0, 0)
+    val received = if status > 0 and status as u64 <= buffer.len() as u64:
+        buffer.slice(0, status as u64)
+    else:
+        []
+    sosix_fs_completion_receive_owned_result_v1(
+        status, received, expected_service_endpoint, expected_reply_endpoint,
+        expected_api_id, operation_slot, transport_state)
+
+export sosix_fs_completion_receive_owned_result_v1
+export sosix_fs_completion_receive_nonblocking_v1

@@ -1,0 +1,231 @@
+# Simple CLI - spec-gen command
+# Generates spec documentation from *_spec.spl test files
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use app.io.mod (file_exists, file_read, file_write, dir_walk, dir_create)
+use std.log.{error}
+
+val SPEC_DIR = "doc/06_spec"
+
+fn print_help():
+    print "Usage: simple spec-gen [path] [options]"
+    print ""
+    print "Generate spec documentation from SPipe test files."
+    print ""
+    print "Arguments:"
+    print "  [path]       Test directory (default: src/lib/test/features/)"
+    print ""
+    print "Options:"
+    print "  --json       Output summary as JSON"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _is_block(trimmed: text, keyword: text) -> bool:
+    # Both the bare block form `it "name":` and the call form `it("name"):`
+    trimmed.starts_with("{keyword} ") or trimmed.starts_with("{keyword}(")
+
+fn extract_spec_doc(content: text, file_path: text) -> text:
+    val lines = content.split("\n")
+    var doc_lines: [text] = []
+    var in_doc_block = false
+    var doc_block: [text] = []
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Triple-quote doc blocks. The opening/closing \"\"\" may carry text on
+        # the same line (`"""Title.` ... `text"""`) — treating only a bare
+        # \"\"\" as a delimiter swallowed the whole file and dropped the spec.
+        if in_doc_block:
+            if trimmed.ends_with("\"\"\""):
+                val last = trimmed.slice(0, trimmed.len() - 3).trim()
+                if last != "":
+                    doc_block.push(last)
+                for dl in doc_block:
+                    doc_lines.push(dl)
+                doc_block = []
+                in_doc_block = false
+            else:
+                doc_block.push(trimmed)
+            continue
+
+        if trimmed.starts_with("\"\"\""):
+            var rest = trimmed.slice(3, trimmed.len()).trim()
+            if rest.ends_with("\"\"\""):
+                rest = rest.slice(0, rest.len() - 3).trim()
+                if rest != "":
+                    doc_lines.push(rest)
+            else:
+                in_doc_block = true
+                if rest != "":
+                    doc_block.push(rest)
+            continue
+
+        # Doc comments
+        if trimmed.starts_with("///"):
+            val comment = trimmed.slice(3, trimmed.len()).trim()
+            doc_lines.push(comment)
+            continue
+
+        # Describe blocks -> ##
+        if _is_block(trimmed, "describe"):
+            val name = extract_quoted(trimmed)
+            if name != "":
+                doc_lines.push("")
+                doc_lines.push("## {name}")
+                doc_lines.push("")
+            continue
+
+        # Context blocks -> ###
+        if _is_block(trimmed, "context"):
+            val name = extract_quoted(trimmed)
+            if name != "":
+                doc_lines.push("")
+                doc_lines.push("### {name}")
+                doc_lines.push("")
+            continue
+
+        # It/test blocks -> bullet points
+        if _is_block(trimmed, "it") or _is_block(trimmed, "test"):
+            val name = extract_quoted(trimmed)
+            if name != "":
+                doc_lines.push("- {name}")
+            continue
+
+    doc_lines.join("\n")
+
+fn extract_quoted(line: text) -> text:
+    val q1 = line.index_of("\"")
+    if q1 < 0:
+        return ""
+    val after = line.slice(q1 + 1, line.len())
+    val q2 = after.index_of("\"")
+    if q2 < 0:
+        return ""
+    after.slice(0, q2)
+
+fn spec_name_from_path(file_path: text) -> text:
+    val parts = file_path.split("/")
+    val filename = if parts.len() > 0: parts[parts.len() - 1] else: file_path
+    if filename.ends_with("_spec.spl"):
+        return filename.slice(0, filename.len() - 9)
+    if filename.ends_with(".spl"):
+        return filename.slice(0, filename.len() - 4)
+    filename
+
+fn spec_relative_dir(file_path: text) -> text:
+    # Mirror doc/06_spec on the repo `test/` root, independent of the scope
+    # argument the user passed (see spipe_docgen normalize_spec_relative_path).
+    var rel = file_path.replace("\\", "/")
+    if rel.starts_with("test/"):
+        rel = rel.slice(5, rel.len())
+    elif rel.contains("/test/"):
+        val parts = rel.split("/test/")
+        rel = parts[parts.len() - 1]
+    elif rel.starts_with("src/"):
+        rel = rel.slice(4, rel.len())
+    if rel.starts_with("/"):
+        rel = rel.slice(1, rel.len())
+    val parts2 = rel.split("/")
+    if parts2.len() <= 1:
+        return ""
+    var dir_parts: [text] = []
+    var i = 0
+    while i < parts2.len() - 1:
+        val p = parts2[i]
+        if p != ".simple" and p != "build" and p != "..":
+            dir_parts.push(p)
+        i = i + 1
+    dir_parts.join("/")
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("spec-gen", log_opts.error)
+        return 1
+
+    var search_path = "src/lib/test/features"
+    var as_json = log_opts.log_mode == "json"
+
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        elif not arg.starts_with("-"):
+            search_path = arg
+        ai = ai + 1
+
+    if not file_exists(search_path):
+        if as_json:
+            print "{\"command\":\"spec-gen\",\"status\":\"error\",\"generated\":0,\"path\":\"{search_path}\"}"
+        else:
+            error("spec_gen", "path not found: {search_path}")
+        return 1
+
+    dir_create(SPEC_DIR, true)
+
+    val files = dir_walk(search_path)
+    var generated = 0
+    var considered = 0
+    var skipped: [text] = []
+
+    for file in files:
+        if not file.ends_with("_spec.spl"):
+            continue
+
+        considered = considered + 1
+        val content = file_read(file)
+        val doc = extract_spec_doc(content, file)
+
+        if doc.trim() == "":
+            skipped.push(file)
+            continue
+
+        val name = spec_name_from_path(file)
+        val rel_dir = spec_relative_dir(file)
+        var out_dir = SPEC_DIR
+        if rel_dir != "":
+            out_dir = "{SPEC_DIR}/{rel_dir}"
+            dir_create(out_dir, true)
+        val out_path = "{out_dir}/{name}_spec.md"
+
+        var header = "# {name}\n\n"
+        header = header + "_Generated from `{file}`_\n\n"
+        file_write(out_path, header + doc + "\n")
+        generated = generated + 1
+
+    if log_opts.progress != "summary" and not as_json:
+        val progress_line = render_progress(log_opts.progress, generated, if considered > 0: considered else: 1, "spec-gen")
+        if progress_line != "":
+            print progress_line
+    if as_json:
+        val status = if skipped.len() > 0: "incomplete" else: "ok"
+        print "{\"command\":\"spec-gen\",\"status\":\"{status}\",\"generated\":{generated},\"considered\":{considered},\"skipped\":{skipped.len()},\"path\":\"{SPEC_DIR}\"}"
+    else:
+        print "Generated {generated} of {considered} spec documents in {SPEC_DIR}/"
+    if skipped.len() > 0:
+        if not as_json:
+            for sf in skipped:
+                print "spec-gen: WARN no spec content extracted, skipped: {sf}"
+            print "spec-gen: skipped {skipped.len()} of {considered} spec files"
+        return 2
+    0

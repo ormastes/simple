@@ -1,0 +1,94 @@
+use std.spec.{describe, it, expect, step}
+use app.release.support_policy.{parse_support_policy, support_for_channel, required_support, check_required_support, check_single_job_coverage, required_support_json, support_matrix_json}
+
+fn valid_policy() -> text:
+    """support:
+  schema: simple-release-support/2
+  beta:
+    - target: x86_64-unknown-linux-gnu
+      tier: tier_1
+      runner: ubuntu-latest
+      required: true
+      availability: supported
+      bootstrap: full
+      whole_tests: required
+    - target: x86_64-unknown-freebsd
+      tier: tier_2
+      runner: freebsd-qemu
+      required: false
+      availability: blocked
+      bootstrap: full
+      whole_tests: required
+    - target: riscv64gc-unknown-linux-gnu
+      tier: experimental
+      runner: ubuntu-cross
+      required: false
+      availability: experimental
+      bootstrap: full
+      whole_tests: required
+  stable:
+    - target: x86_64-unknown-linux-gnu
+      tier: tier_1
+      runner: ubuntu-latest
+      required: true
+      availability: supported
+      bootstrap: full
+      whole_tests: required
+    - target: aarch64-apple-darwin
+      tier: tier_1
+      runner: macos-latest
+      required: true
+      availability: supported
+      bootstrap: full
+      whole_tests: required
+"""
+
+describe "release support policy":
+    it "renders required evidence separately from every declared platform row":
+        step("Parse tiers, requiredness, and availability")
+        val policy = parse_support_policy(valid_policy())
+        expect(policy.valid).to_be(true)
+        expect(support_for_channel(policy, "beta").len()).to_equal(3)
+        expect(required_support(policy, "beta").len()).to_equal(1)
+        expect(required_support_json(policy, "beta")).to_contain("\"status\":\"passed\"")
+
+        step("Keep unsupported and experimental rows visible without calling them PASS")
+        val matrix = support_matrix_json(policy, "beta", "x86_64-unknown-linux-gnu")
+        expect(matrix).to_contain("x86_64-unknown-freebsd")
+        expect(matrix).to_contain("\"status\":\"unsupported\"")
+        expect(matrix).to_contain("riscv64gc-unknown-linux-gnu")
+        expect(matrix).to_contain("\"status\":\"experimental\"")
+        expect(check_single_job_coverage(policy, "beta", "x86_64-unknown-linux-gnu")).to_equal("")
+
+    it "blocks a channel when one candidate job cannot cover every required row":
+        step("Require exact receipts for the complete stable Tier 1 matrix")
+        val policy = parse_support_policy(valid_policy())
+        expect(check_required_support(policy, "stable")).to_equal("")
+        expect(required_support(policy, "stable").len()).to_equal(2)
+        expect(check_single_job_coverage(policy, "stable", "x86_64-unknown-linux-gnu")).to_contain("missing")
+
+    it "rejects weakened, ambiguous, or implicit support declarations":
+        step("Reject support without whole-suite admission")
+        val weakened = parse_support_policy(valid_policy().replace("whole_tests: required", "whole_tests: optional"))
+        expect(weakened.valid).to_be(false)
+
+        step("Reject an experimental row promoted to required")
+        val experimental_required = parse_support_policy(valid_policy().replace(
+            "tier: experimental\n      runner: ubuntu-cross\n      required: false",
+            "tier: experimental\n      runner: ubuntu-cross\n      required: true"
+        ))
+        expect(experimental_required.valid).to_be(false)
+        expect(experimental_required.error).to_contain("experimental")
+
+        step("Reject a missing requiredness declaration")
+        val implicit = parse_support_policy(valid_policy().replace("      required: false\n      availability: blocked", "      availability: blocked"))
+        expect(implicit.valid).to_be(false)
+        expect(implicit.error).to_contain("required flag is missing")
+
+        step("Reject duplicate target identities within one channel")
+        val duplicate = parse_support_policy(valid_policy().replace(
+            "  stable:\n",
+            "    - target: x86_64-unknown-linux-gnu\n      tier: tier_2\n      runner: ubuntu-latest\n      required: false\n      availability: supported\n      bootstrap: full\n      whole_tests: required\n  stable:\n"
+        ))
+        expect(duplicate.valid).to_be(false)
+        expect(duplicate.error).to_contain("duplicate")

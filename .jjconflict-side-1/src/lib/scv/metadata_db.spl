@@ -1,0 +1,220 @@
+# SCV metadata store (plan row SCV-IMPL-B-04).
+#
+# Backend: the TEXTUAL SdnDatabase (std.database.core / database/core.spl)
+# plus its WriteAheadLog — NOT the embedded rt_sqlite emulation. Chosen
+# deliberately: specs under `bin/simple test` exercise rt_sqlite's EMULATION
+# (non-ACID, constraints unenforced, no ORDER BY semantics), which cannot
+# carry this schema honestly. SdnDatabase gives a CRC32-checked atomic
+# snapshot on save() plus real WAL replay on load(). Note honestly:
+# SdnDatabase's own add_row_to_table never appends WAL entries — this module
+# appends an Insert WalEntry per insert itself, so an unsaved insert survives
+# a reopen once the schema snapshot exists on disk.
+#
+# Tables (one .sdn snapshot at .scv/meta/metadata.sdn, WAL sibling .sdn.wal):
+#   backend_revision, logical_change, implicit_snapshot, path_state,
+#   file_entity, file_entity_version, symbol_entity, symbol_entity_version,
+#   identity_relation, parse_index, event_batch
+#
+# Primary-key discipline: SdnTable indexes rows on their FIRST column, so
+# every multi-row-per-entity table gets a synthetic unique first column
+# (e.g. identity_relation.rel_key = "<n>"), never the entity id.
+#
+# Migration (off pipe-delimited sdn indexes): scv_metadb_migrate_identity
+# imports .scv/meta/file_identity.sdn and identity_edges.sdn into
+# file_entity / identity_relation. Import, not replacement — the pipe files
+# stay the write path for identity.spl this wave.
+
+use app.io.mod (file_exists, file_read, dir_create)
+use std.database.core (SdnDatabase, SdnTable, SdnRow, new_sdn_database, load_sdn_database)
+use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType, row_to_wal_payload)
+use std.scv.core.{scv_meta_dir}
+use std.scv.identity.{scv_identity_rows_path, scv_identity_edges_path}
+
+val SCV_METADB_SCHEMA_VERSION = "scv-metadb-1"
+
+fn scv_metadb_path(root: text) -> text:
+    "{scv_meta_dir(root)}/metadata.sdn"
+
+# Table name -> ordered column list. First column is the unique key.
+fn scv_metadb_tables() -> [text]:
+    ["backend_revision", "logical_change", "implicit_snapshot", "path_state",
+     "file_entity", "file_entity_version", "symbol_entity",
+     "symbol_entity_version", "identity_relation", "parse_index", "event_batch"]
+
+fn scv_metadb_columns(table: text) -> [text]:
+    if table == "backend_revision":
+        ["rev_id", "backend", "backend_ref", "commit", "created_ms"]
+    elif table == "logical_change":
+        ["change_id", "title", "state", "created_ms"]
+    elif table == "implicit_snapshot":
+        ["snap_id", "change_id", "commit", "created_ms"]
+    elif table == "path_state":
+        ["path", "file_id", "state", "commit"]
+    elif table == "file_entity":
+        ["file_id", "current_path", "created_commit", "origin", "state"]
+    elif table == "file_entity_version":
+        ["ver_key", "file_id", "commit", "content_id", "path"]
+    elif table == "symbol_entity":
+        ["sym_id", "file_id", "kind", "name", "state"]
+    elif table == "symbol_entity_version":
+        ["ver_key", "sym_id", "commit", "line", "signature"]
+    elif table == "identity_relation":
+        ["rel_key", "from_id", "to_id", "relation", "commit", "confidence_milli", "evidence", "matcher_version", "status"]
+    elif table == "parse_index":
+        ["entry_key", "path", "parser", "artifact_id", "commit"]
+    elif table == "event_batch":
+        ["batch_id", "seq_start", "seq_end", "kind", "created_ms"]
+    else:
+        []
+
+class ScvMetaDb:
+    root: text
+    db: SdnDatabase
+    wal: WriteAheadLog
+    seq: i64
+
+    # Number of live (non-deleted) rows in `table`.
+    fn count(table: text) -> i64:
+        val t = self.db.get_table(table)
+        match t:
+            Some(tv):
+                tv.valid_rows().len()
+            nil:
+                0
+
+    # Row by unique first-column key, nil when absent.
+    fn row(table: text, key: text) -> SdnRow?:
+        val t = self.db.get_table(table)
+        match t:
+            Some(tv):
+                tv.get_row(key)
+            nil:
+                nil
+
+    fn rows(table: text) -> [SdnRow]:
+        val t = self.db.get_table(table)
+        match t:
+            Some(tv):
+                tv.valid_rows()
+            nil:
+                []
+
+    # Insert one row given as ordered values matching scv_metadb_columns.
+    # Appends a WAL Insert entry BEFORE mutating the in-memory table, so the
+    # write survives a crash between insert and save once a schema snapshot
+    # exists on disk (SdnDatabase.load replays the WAL).
+    me insert(table: text, values: [text]) -> bool:
+        val cols = scv_metadb_columns(table)
+        if cols.len() == 0 or values.len() != cols.len():
+            return false
+        var row = SdnRow.empty()
+        var i = 0
+        while i < cols.len():
+            row.set(cols[i], values[i])
+            i = i + 1
+        self.seq = self.seq + 1
+        val entry = WalEntry(sequence: self.seq, entry_type: WalEntryType.Insert, table_name: table, row_key: values[0], data: row_to_wal_payload(row, cols), timestamp: 0)
+        # TODO(perf): this read-modify-write copies the whole SdnDatabase per
+        # insert — the COW-alias O(n)-per-write class (.claude/rules/code-style.md).
+        # Correct-first; batch APIs should land before this table grows large.
+        # Field receivers can mutate a copy on bootstrap/native backends —
+        # read-modify-write the fields back explicitly (same pattern as
+        # SdnDatabase.save's WAL checkpoint).
+        var w = self.wal
+        w.append(entry)
+        self.wal = w
+        var d = self.db
+        d.add_row_to_table(table, row)
+        self.db = d
+        true
+
+    # Next synthetic key for a table, "<prefix>_<n>" over current row count.
+    fn next_key(table: text, prefix: text) -> text:
+        val t = self.db.get_table(table)
+        var n = 0
+        match t:
+            Some(tv):
+                n = tv.rows.len()
+            nil:
+                n = 0
+        "{prefix}_{n + 1}"
+
+    # Atomic CRC-checked snapshot + WAL checkpoint.
+    me save() -> bool:
+        var d = self.db
+        val ok = d.save()
+        self.db = d
+        # Checkpoint OUR wal handle too: on a fresh (never-loaded) database
+        # SdnDatabase.wal is nil, so db.save() checkpoints nothing and the
+        # entries this module appended would be replayed AGAIN on the next
+        # load, doubling every row.
+        if ok:
+            var w = self.wal
+            w.checkpoint()
+            self.wal = w
+        ok
+
+# Open (or create) the metadata DB at .scv/meta/metadata.sdn, ensuring every
+# schema table exists. WAL entries pending from a crash are replayed by
+# SdnDatabase.load before the handle is returned.
+fn scv_metadb_open(root: text) -> ScvMetaDb:
+    dir_create(scv_meta_dir(root), true)
+    val path = scv_metadb_path(root)
+    var db = new_sdn_database(path)
+    if file_exists(path):
+        val loaded = load_sdn_database(path)
+        match loaded:
+            Some(l):
+                db = l
+            nil:
+                pass
+    for name in scv_metadb_tables():
+        val existing = db.get_table(name)
+        if not existing.?:
+            db.set_table(name, SdnTable.new(name, scv_metadb_columns(name)))
+    val wal = WriteAheadLog.open(path)
+    ScvMetaDb(root: root, db: db, wal: wal, seq: 0)
+
+# Migrate the pipe-delimited identity indexes into relational rows.
+# Returns "files=<n>,edges=<m>". Idempotent by key: a file_id or edge key
+# already present is skipped, never duplicated.
+fn scv_metadb_migrate_identity(root: text, meta: ScvMetaDb) -> text:
+    var m = meta
+    var files = 0
+    var edges = 0
+    val rows_path = scv_identity_rows_path(root)
+    if file_exists(rows_path):
+        for line in file_read(rows_path).split("\n"):
+            val t = line.trim()
+            if t == "":
+                continue
+            val p = t.split("|")
+            if p.len() < 5:
+                continue
+            if m.row("file_entity", p[0]).?:
+                continue
+            if m.insert("file_entity", [p[0], p[1], p[2], p[3], p[4]]):
+                files = files + 1
+    val edges_path = scv_identity_edges_path(root)
+    if file_exists(edges_path):
+        var n = 0
+        for line in file_read(edges_path).split("\n"):
+            val t = line.trim()
+            if t == "":
+                continue
+            val p = t.split("|")
+            if p.len() < 8:
+                continue
+            n = n + 1
+            val key = "rel_{n}"
+            if m.row("identity_relation", key).?:
+                continue
+            if m.insert("identity_relation", [key, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]]):
+                edges = edges + 1
+    m.save()
+    "files={files},edges={edges}"
+
+export SCV_METADB_SCHEMA_VERSION
+export ScvMetaDb
+export scv_metadb_path, scv_metadb_tables, scv_metadb_columns
+export scv_metadb_open, scv_metadb_migrate_identity

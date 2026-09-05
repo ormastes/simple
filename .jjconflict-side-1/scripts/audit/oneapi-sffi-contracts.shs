@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io/oneapi_sffi.spl"
+native="$root/src/runtime/runtime_native.c"
+seed="$root/src/runtime/runtime_native_gpu_stub.c"
+dispatcher="$root/src/compiler_rust/compiler/src/interpreter_extern/oneapi.rs"
+
+declarations=$(grep -c '^[[:space:]]*extern fn rt_oneapi_' "$owner")
+if [ "$declarations" -ne 24 ]; then
+    echo "oneAPI extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_oneapi_/ { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every oneAPI declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /unsafe\(capabilities: \[.*ffi.*\]\):[[:space:]]*$/ {
+        unsafe_indent = indent($0)
+        inside_unsafe = 1
+        next
+    }
+    inside_unsafe && NF && indent($0) <= unsafe_indent { inside_unsafe = 0 }
+    /rt_oneapi_/ && !/^[[:space:]]*extern fn / && !inside_unsafe {
+        print "unscoped oneAPI call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$owner"
+
+# The only linked implementations are capability-unavailable stubs. Keep the
+# partial 14-symbol surface visible until a generated, exact provider replaces
+# both handwritten copies.
+native_symbols=$(grep -c '^[a-z_][a-z_0-9 *]*rt_oneapi_[a-z_]*(' "$native")
+seed_symbols=$(grep -c '^[a-z_][a-z_0-9 *]*rt_oneapi_[a-z_]*(' "$seed")
+dispatcher_symbols=$(grep -c '^    ("rt_oneapi_' "$dispatcher")
+if [ "$native_symbols" -ne 14 ] || [ "$seed_symbols" -ne 14 ] || [ "$dispatcher_symbols" -ne 14 ]; then
+    echo "oneAPI partial provider inventory changed; perform typed ABI review" >&2
+    exit 1
+fi
+grep -q 'bool rt_oneapi_is_available(void) { return false; }' "$native"
+grep -q 'bool rt_oneapi_is_available(void) { return false; }' "$seed"
+
+for symbol in device_name device_type device_memory set_device get_device malloc_shared memcpy_h2d memcpy_d2h synchronize get_last_error; do
+    if grep -q "^[a-z_][a-z_0-9 *]*rt_oneapi_${symbol}(" "$native"; then
+        echo "new oneAPI symbol rt_oneapi_$symbol requires typed contract review" >&2
+        exit 1
+    fi
+done
+
+invalid_successes=$(grep -c '^[[:space:]]*true$' "$owner" || true)
+if [ "$invalid_successes" -ne 0 ]; then
+    echo "oneAPI wrapper fabricates successful cleanup/wait for invalid handles" >&2
+    exit 1
+fi
+grep -q 'if oneapi_copy_to_device(mem, data):' "$owner"
+grep -q 'oneapi_free(mem)' "$owner"
+
+echo "oneAPI SFFI contract audit: PASS (24 unsafe declarations; 14 unavailable stubs; 10 symbols unbacked)"

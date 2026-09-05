@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io/rocm_sffi.spl"
+provider="$root/src/runtime/runtime_rocm.c"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/gpu_rocm.rs"
+
+declarations=$(grep -c '^[[:space:]]*extern fn rt_rocm_' "$owner")
+if [ "$declarations" -ne 23 ]; then
+    echo "ROCm I/O extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_rocm_/ { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every ROCm I/O declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /unsafe\(capabilities: \[.*ffi.*\]\):[[:space:]]*$/ {
+        unsafe_indent = indent($0)
+        inside_unsafe = 1
+        next
+    }
+    inside_unsafe && NF && indent($0) <= unsafe_indent { inside_unsafe = 0 }
+    /rt_rocm_[A-Za-z0-9_]+\(/ && !/^[[:space:]]*extern fn / && !inside_unsafe {
+        print "unscoped ROCm I/O call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$owner"
+
+for symbol in $(sed -n 's/^extern fn \(rt_rocm_[A-Za-z0-9_]*\).*/\1/p' "$owner"); do
+    if ! grep -q "^[a-z_][a-z_0-9 *]*$symbol(" "$provider"; then
+        echo "ROCm I/O declaration $symbol has no C provider" >&2
+        exit 1
+    fi
+done
+
+grep -q 'extern fn rt_rocm_device_name.*-> text?' "$owner"
+grep -q 'extern fn rt_rocm_get_last_error.*-> text?' "$owner"
+grep -q 'src.len() > dst.size' "$owner"
+grep -q 'dst.len() > src.size' "$owner"
+grep -q 'size > dst.size or size > src.size' "$owner"
+grep -q 'if total_elements <= 0 or block_size <= 0:' "$owner"
+if grep -q 'total_elements + block_size - 1' "$owner"; then
+    echo "ROCm 1D launch grid calculation can overflow" >&2
+    exit 1
+fi
+invalid_successes=$(grep -c '^[[:space:]]*true$' "$owner" || true)
+if [ "$invalid_successes" -ne 0 ]; then
+    echo "ROCm wrapper fabricates successful cleanup/synchronization" >&2
+    exit 1
+fi
+grep -q 'if rocm_copy_to_device(mem, data):' "$owner"
+grep -q 'rocm_free(mem)' "$owner"
+
+# Interpreter behavior is still a fixed unavailable simulation, not evidence
+# for the real Linux provider. Keep this mismatch visible until one generated
+# typed registry selects the exact admitted provider per lane.
+grep -q 'const ROCM_UNAVAILABLE: i64 = -3;' "$interpreter"
+grep -q 'Ok(Value::Bool(false))' "$interpreter"
+grep -q 'Ok(Value::text(String::new()))' "$interpreter"
+
+echo "ROCm I/O SFFI contract audit: PASS (23 unsafe declarations; C provider present; interpreter remains unavailable simulation)"

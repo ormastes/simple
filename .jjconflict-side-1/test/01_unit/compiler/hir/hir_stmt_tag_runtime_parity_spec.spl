@@ -1,0 +1,67 @@
+# @tag: unit, compiler, hir, native-safe
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, Stmt, StmtKind, Block, AsmTargetSpec}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmtKind, HirBlock, HirGpuLaunchConfig}
+use compiler.hir.hir_operators.{HirAssignOp}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_stmt_tags.*
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+val stmt_tag_span = Span.empty()
+val stmt_tag_type = HirType(kind: HirTypeKind.Unit, span: stmt_tag_span)
+val stmt_tag_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: stmt_tag_type, span: stmt_tag_span)
+val stmt_tag_block = HirBlock(stmts: [], has: false, value: stmt_tag_expr, span: stmt_tag_span)
+val stmt_tag_asm = AsmTargetSpec(
+    archs: [], has_os: false, os: "", has_abi: false, abi: "",
+    has_backend: false, backend: "", version_constraints: [], span: stmt_tag_span)
+
+fn tail_stmt(expr: Expr) -> Stmt:
+    Stmt(kind: StmtKind.Expr(expr), span: stmt_tag_span)
+
+describe "HIR statement scalar ABI tags":
+    it "matches all statement and Return runtime discriminants":
+        expect(rt_enum_discriminant(HirStmtKind.Expr(stmt_tag_expr))).to_equal(HIR_STMT_EXPR_TAG)
+        expect(rt_enum_discriminant(HirStmtKind.Let(SymbolId(id: -1), stmt_tag_type, stmt_tag_expr))).to_equal(HIR_STMT_LET_TAG)
+        expect(rt_enum_discriminant(HirStmtKind.Assign(stmt_tag_expr, HirAssignOp.Add, stmt_tag_expr))).to_equal(HIR_STMT_ASSIGN_TAG)
+        expect(rt_enum_discriminant(HirStmtKind.Block(stmt_tag_block))).to_equal(HIR_STMT_BLOCK_TAG)
+        expect(rt_enum_discriminant(HirStmtKind.AsmAssert(stmt_tag_asm))).to_equal(HIR_STMT_ASM_ASSERT_TAG)
+        expect(rt_enum_discriminant(HirStmtKind.SharedVal(SymbolId(id: -1), stmt_tag_type, false, stmt_tag_expr))).to_equal(HIR_STMT_SHARED_VAL_TAG)
+        expect(rt_enum_discriminant(HirStmtKind.SharedVar(SymbolId(id: -1), stmt_tag_type, true, stmt_tag_expr))).to_equal(HIR_STMT_SHARED_VAR_TAG)
+        expect(rt_enum_discriminant(HirStmtKind.GpuLaunch(HirGpuLaunchConfig(
+            grid: [stmt_tag_expr], block: [stmt_tag_expr], span: stmt_tag_span), stmt_tag_block))).to_equal(HIR_STMT_GPU_LAUNCH_TAG)
+        expect(rt_enum_discriminant(HirExprKind.Return(nil))).to_equal(HIR_EXPR_RETURN_TAG)
+
+describe "HIR block tail formation":
+    it "forms identifier and constant tails as body values":
+        var lowering = HirLowering.new()
+        lowering.symbols.define("tail_value", SymbolKind.Variable, nil, stmt_tag_span, Visibility.Private, false, nil)
+        val ident_body = lowering.lower_hir_block(Block(
+            stmts: [tail_stmt(Expr(kind: ExprKind.Ident("tail_value"), span: stmt_tag_span))], span: stmt_tag_span))
+        val constant_body = lowering.lower_hir_block(Block(
+            stmts: [tail_stmt(Expr(kind: ExprKind.IntLit(7), span: stmt_tag_span))], span: stmt_tag_span))
+        expect(ident_body.has).to_be_true()
+        expect(ident_body.stmts.len()).to_equal(0)
+        expect(constant_body.has).to_be_true()
+        expect(constant_body.stmts.len()).to_equal(0)
+
+    it "forms recursive if tails and retains explicit Return statements":
+        var lowering = HirLowering.new()
+        val true_expr = Expr(kind: ExprKind.BoolLit(true), span: stmt_tag_span)
+        val one_expr = Expr(kind: ExprKind.IntLit(1), span: stmt_tag_span)
+        val zero_expr = Expr(kind: ExprKind.IntLit(0), span: stmt_tag_span)
+        val if_expr = Expr(kind: ExprKind.If(
+            true_expr,
+            Block(stmts: [tail_stmt(one_expr)], span: stmt_tag_span),
+            Block(stmts: [tail_stmt(zero_expr)], span: stmt_tag_span)), span: stmt_tag_span)
+        val if_body = lowering.lower_hir_block(Block(stmts: [tail_stmt(if_expr)], span: stmt_tag_span))
+        val return_body = lowering.lower_hir_block(Block(
+            stmts: [Stmt(kind: StmtKind.Return(one_expr), span: stmt_tag_span)], span: stmt_tag_span))
+        expect(if_body.has).to_be_true()
+        expect(if_body.stmts.len()).to_equal(0)
+        expect(return_body.has).to_be_false()
+        expect(return_body.stmts.len()).to_equal(1)

@@ -1,0 +1,103 @@
+# Shared Linux DTB asset for the Simple RV32/RV64 FPGA SoCs.
+# The canonical FDT builder produces the binary used by simulation and image
+# packaging. Sequential SoC state carries scalar profile/size metadata only;
+# this module is the ROM boundary that materializes bytes on demand.
+
+use std.nogc_async_mut_noalloc.baremetal.riscv.dtb_gen.{
+    RiscvSocDtbConfig, riscv_soc_linux_dtb_generate
+}
+
+val SOC_DTB_BASE: u64 = 0x88000000
+val SOC_DTB_RAM_BASE: u64 = 0x80000000
+val SOC_DTB_RAM_SIZE: u64 = 0x10000000
+val SOC_DTB_UART_BASE: u64 = 0x10000000
+val SOC_DTB_CLINT_BASE: u64 = 0x02000000
+val SOC_DTB_PLIC_BASE: u64 = 0x0C000000
+val SOC_DTB_RV32_PLIC_SIZE: u64 = 0x04000000
+val SOC_DTB_RV64_PLIC_SIZE: u64 = 0x00400000
+# KV260 generated top-level clock; CLINT increments once per SoC clock.
+val SOC_DTB_CLOCK_HZ: u64 = 100000000
+val SOC_DTB_RESERVED_SIZE: u64 = 0x10000
+
+fn soc_linux_dtb(isa: text, mmu_type: text, plic_size: u64, ram_size: u64,
+                 initrd_start: u64, initrd_end: u64) -> [u8]:
+    riscv_soc_linux_dtb_generate(RiscvSocDtbConfig(
+        isa: isa, mmu_type: mmu_type,
+        dram_base: SOC_DTB_RAM_BASE, dram_size: ram_size,
+        uart_addr: SOC_DTB_UART_BASE, clint_addr: SOC_DTB_CLINT_BASE,
+        plic_addr: SOC_DTB_PLIC_BASE, plic_size: plic_size,
+        boot_hartid: 0, timebase_frequency: SOC_DTB_CLOCK_HZ,
+        uart_clock_frequency: SOC_DTB_CLOCK_HZ,
+        dtb_addr: SOC_DTB_BASE, dtb_reserved_size: SOC_DTB_RESERVED_SIZE,
+        initrd_start: initrd_start, initrd_end: initrd_end))
+
+fn soc_rv32_linux_dtb(initrd_start: u64, initrd_end: u64) -> [u8]:
+    """Build RV32IMAC/Sv32 DTB; pass 0,0 when there is no initrd."""
+    soc_linux_dtb("rv32imac_zicsr_zifencei", "riscv,sv32",
+        SOC_DTB_RV32_PLIC_SIZE, SOC_DTB_RAM_SIZE,
+        initrd_start, initrd_end)
+
+fn soc_rv64_linux_dtb(initrd_start: u64, initrd_end: u64) -> [u8]:
+    """Build qualified RV64IMAC/Sv39 DTB; pass 0,0 when there is no initrd."""
+    soc_linux_dtb("rv64imac_zicsr_zifencei_svade", "riscv,sv39",
+        SOC_DTB_RV64_PLIC_SIZE, SOC_DTB_RAM_SIZE,
+        initrd_start, initrd_end)
+
+fn soc_rv32_linux_dtb_for_ram(ram_size: u64) -> [u8]:
+    soc_rv32_linux_dtb_for_ram_initrd(ram_size, 0, 0)
+
+fn soc_rv32_linux_dtb_for_ram_initrd(ram_size: u64,
+                                     initrd_start: u64,
+                                     initrd_end: u64) -> [u8]:
+    soc_linux_dtb("rv32imac_zicsr_zifencei", "riscv,sv32",
+        SOC_DTB_RV32_PLIC_SIZE, ram_size, initrd_start, initrd_end)
+
+fn soc_rv64_linux_dtb_for_ram(ram_size: u64) -> [u8]:
+    soc_rv64_linux_dtb_for_ram_initrd(ram_size, 0, 0)
+
+fn soc_rv64_linux_dtb_for_ram_initrd(ram_size: u64,
+                                     initrd_start: u64,
+                                     initrd_end: u64) -> [u8]:
+    soc_linux_dtb("rv64imac_zicsr_zifencei_svade", "riscv,sv39",
+        SOC_DTB_RV64_PLIC_SIZE, ram_size, initrd_start, initrd_end)
+
+fn soc_dtb_byte(blob: [u8], offset: u64) -> u32:
+    if offset >= blob.len().to_u64():
+        return 0
+    blob[offset] as u32
+
+fn soc_dtb_word(blob: [u8], offset: u64) -> u32:
+    """Read a little-endian CPU word from the byte-addressed big-endian FDT."""
+    soc_dtb_byte(blob, offset) |
+        (soc_dtb_byte(blob, offset + 1) << 8) |
+        (soc_dtb_byte(blob, offset + 2) << 16) |
+        (soc_dtb_byte(blob, offset + 3) << 24)
+
+fn soc_rv32_dtb_word_for(ram_size: u64, initrd_start: u64,
+                         initrd_end: u64, offset: u64) -> u32:
+    soc_dtb_word(soc_rv32_linux_dtb_for_ram_initrd(
+        ram_size, initrd_start, initrd_end), offset)
+
+fn soc_rv64_dtb_byte_for(ram_size: u64, initrd_start: u64,
+                         initrd_end: u64, offset: u64) -> u32:
+    soc_dtb_byte(soc_rv64_linux_dtb_for_ram_initrd(
+        ram_size, initrd_start, initrd_end), offset)
+
+fn soc_rv32_dtb_size_for(ram_size: u64, initrd_start: u64,
+                         initrd_end: u64) -> u64:
+    soc_rv32_linux_dtb_for_ram_initrd(ram_size, initrd_start, initrd_end).len().to_u64()
+
+fn soc_rv64_dtb_size_for(ram_size: u64, initrd_start: u64,
+                         initrd_end: u64) -> u64:
+    soc_rv64_linux_dtb_for_ram_initrd(ram_size, initrd_start, initrd_end).len().to_u64()
+
+export SOC_DTB_BASE, SOC_DTB_RAM_BASE, SOC_DTB_RAM_SIZE
+export SOC_DTB_UART_BASE, SOC_DTB_CLINT_BASE, SOC_DTB_PLIC_BASE
+export SOC_DTB_RV32_PLIC_SIZE, SOC_DTB_RV64_PLIC_SIZE
+export SOC_DTB_CLOCK_HZ
+export SOC_DTB_RESERVED_SIZE
+export soc_rv32_linux_dtb, soc_rv64_linux_dtb, soc_dtb_byte, soc_dtb_word
+export soc_rv32_linux_dtb_for_ram, soc_rv64_linux_dtb_for_ram
+export soc_rv32_linux_dtb_for_ram_initrd, soc_rv64_linux_dtb_for_ram_initrd
+export soc_rv32_dtb_word_for, soc_rv64_dtb_byte_for
+export soc_rv32_dtb_size_for, soc_rv64_dtb_size_for

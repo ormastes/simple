@@ -1,0 +1,156 @@
+"""
+# The tagged-value-into-a-raw-return-slot class
+
+**Category:** MIR lowering / tagged-vs-raw slot coercion (similar-problem detection)
+**Bug:** doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md
+
+## Overview
+
+`untyped_list_element_raw_return_slot_spec.spl` pins the ONE shape that was
+originally reported: `fn f(l: list, i: i64) -> i64: return l[i] & 0xFF`.
+
+That is one member of a class, and a fix aimed only at `list` indexing, or only
+at `&`, would leave the rest silently wrong. The defect is not about `list` and
+not about any particular operator: it is that a function whose DECLARED return
+type is a raw scalar can be handed a value whose static type is a tagged slot
+(`ANY`, or `T?` over a scalar), and nothing untagged it on the way out. Anything
+statically `ANY` reaching a raw return slot rides the same path.
+
+Measured on the JIT BEFORE the fix (`bin/simple run`), values chosen so no two
+members can be confused:
+
+| member | expected | measured | note |
+|---|---|---|---|
+| `l[i] & 0xFF` over `list` | 10 | **80** | the reported shape (`10 << 3`) |
+| `l[i] + 1` over `list` | 11 | **88** | arithmetic, not just bitwise (`11 << 3`) |
+| `(l[i] >> 2) & 0xFF` over `list` | 2 | **16** | a shift chain (`2 << 3`) |
+| `l[i]` bare over `list` | 10 | **80** | no operator at all — rules out the binop path as the sole trigger |
+| `d[k] + 1` over `dict` | 11 | **88** | a different ANY-producing container |
+| `l[i] & 0xFF` over `[i64]` | 10 | 10 | CONTROL — a typed element must stay correct |
+| `l[i]` over `list` into `-> text` | "ab" | "ab" | CONTROL — a heap value must NOT be untagged |
+
+The two controls are the load-bearing half. The obvious over-broad "fix" is to
+untag every ANY-typed return; that would corrupt the `-> text` member, and it
+would be indistinguishable from the correct fix without a control that pins a
+non-scalar declared return type as unchanged. The `[i64]` control likewise
+proves the fix did not simply disable unboxing everywhere.
+
+Note the wrong answers are all ordinary integers — 80, 88, 16. Nothing about
+them reads as corrupt, which is precisely why this class needs a spec that
+asserts the literal right answers rather than comparing two same-path results.
+
+## Engines
+
+`bin/simple test` runs the tree-walk interpreter, which never goes through MIR
+lowering, so this defect can NEVER go red from a spec body. The single example
+below shells out to `bin/simple run` (Cranelift JIT) and asserts against the
+literal declared values.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# NOTE: no `{...}` interpolation in the embedded source — a `{name}` inside a
+# spec's own string literal is resolved by the SPEC's lexer and kills the whole
+# file before any example runs.
+val CLASS_SOURCE: text = ("fn and_via_list(l: list, i: i64) -> i64:\n" +
+    "    return l[i] & 0xFF\n" +
+    "\n" +
+    "fn add_via_list(l: list, i: i64) -> i64:\n" +
+    "    return l[i] + 1\n" +
+    "\n" +
+    "fn shr_via_list(l: list, i: i64) -> i64:\n" +
+    "    return (l[i] >> 2) & 0xFF\n" +
+    "\n" +
+    "fn bare_via_list(l: list, i: i64) -> i64:\n" +
+    "    return l[i]\n" +
+    "\n" +
+    "fn dict_via_any(d: dict, k: text) -> i64:\n" +
+    "    return d[k] + 1\n" +
+    "\n" +
+    "fn and_via_typed(l: [i64], i: i64) -> i64:\n" +
+    "    return l[i] & 0xFF\n" +
+    "\n" +
+    "fn text_via_list(l: list, i: i64) -> text:\n" +
+    "    return l[i]\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val u: list = [10, 20, 30]\n" +
+    "    val t: [i64] = [10, 20, 30]\n" +
+    "    val s: list = [\"ab\", \"cd\"]\n" +
+    "    val d: dict = {\"k\": 10}\n" +
+    "    print(\"AND\")\n" +
+    "    print(and_via_list(u, 0))\n" +
+    "    print(\"ADD\")\n" +
+    "    print(add_via_list(u, 0))\n" +
+    "    print(\"SHR\")\n" +
+    "    print(shr_via_list(u, 0))\n" +
+    "    print(\"BARE\")\n" +
+    "    print(bare_via_list(u, 0))\n" +
+    "    print(\"DICT\")\n" +
+    "    print(dict_via_any(d, \"k\"))\n" +
+    "    print(\"TYPED\")\n" +
+    "    print(and_via_typed(t, 0))\n" +
+    "    print(\"TEXT\")\n" +
+    "    print(text_via_list(s, 0))\n" +
+    "    return 0\n")
+
+fn run_class_sweep() -> text:
+    val dir = "build/test-artifacts/tagged_value_raw_return_slot_class"
+    val src = dir + "/class_repro.spl"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir])
+    file_write(src, CLASS_SOURCE)
+    val cmd = ("SIMPLE_RUST_SEED_WARNING=0 nice -n 19 " + bin +
+        " run " + src + " 2>&1 || echo RUN-FAILED")
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "every tagged value crossing into a raw scalar return slot is untagged":
+
+    it "returns the declared value for each ANY-producing shape, and leaves the controls alone":
+        # Deliberately ONE example: the sweep costs a subprocess compile+run, and
+        # spec module globals do not persist across examples, so splitting this
+        # into seven examples would mean seven subprocess runs.
+        step("Run the class sweep on the JIT in a subprocess")
+        val out = run_class_sweep()
+
+        step("Refuse to pass on a run that produced nothing")
+        # Without this, a RUN-FAILED string satisfies every `not contains`
+        # assertion below and the spec is vacuously green.
+        expect(out.contains("RUN-FAILED")).to_equal(false)
+        expect(out).to_contain("AND")
+        expect(out).to_contain("TEXT")
+
+        step("Bitwise-and over an untyped list — the originally reported shape")
+        expect(out).to_contain("AND\n10")
+
+        step("Arithmetic, not just bitwise")
+        expect(out).to_contain("ADD\n11")
+
+        step("A shift chain — the tag survives more than one operator")
+        expect(out).to_contain("SHR\n2")
+
+        step("A bare element read with no operator at all")
+        expect(out).to_contain("BARE\n10")
+
+        step("A dict value — a different ANY-producing container, same slot")
+        expect(out).to_contain("DICT\n11")
+
+        step("CONTROL: a statically typed [i64] element is still correct")
+        # Guards against a 'fix' that disables unboxing wholesale.
+        expect(out).to_contain("TYPED\n10")
+
+        step("CONTROL: a heap value into a `-> text` slot is NOT untagged")
+        # Guards against the over-broad fix of untagging every ANY return,
+        # which would corrupt this member while making all the others pass.
+        expect(out).to_contain("TEXT\nab")
+
+        step("The `<< 3` tagged-word fingerprints are absent for every member")
+        expect(out.contains("AND\n80")).to_equal(false)
+        expect(out.contains("ADD\n88")).to_equal(false)
+        expect(out.contains("SHR\n16")).to_equal(false)
+        expect(out.contains("BARE\n80")).to_equal(false)
+        expect(out.contains("DICT\n88")).to_equal(false)

@@ -1,0 +1,43 @@
+use std.spec
+use std.io_runtime.{file_read}
+
+# Source-contract only.  It establishes the production call chain and the
+# allocation-free ABI shape; it does not prove CPUID/ISA selection, throughput,
+# or an 8K performance claim.  Those require native per-ISA execution receipts.
+describe "software backend allocation-free blend span contract":
+    it "uses the public in-place span facade for image and constant blend without row materialization":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
+        expect(source).to_contain("engine2d_simd_blend_span_u32, engine2d_simd_blend_const_span_u32")
+        expect(source).to_contain("self.buf = engine2d_simd_blend_span_u32(")
+        expect(source).to_contain("self.buf = engine2d_simd_blend_const_span_u32(")
+        expect(source.contains("rt_engine2d_simd_blend_span_u32(")).to_equal(false)
+        expect(source.contains("rt_engine2d_simd_blend_const_span_u32(")).to_equal(false)
+        expect(source.contains("var dst_row:")).to_equal(false)
+        expect(source.contains("var src_row:")).to_equal(false)
+        expect(source.contains("engine2d_simd_blend_row_u32")).to_equal(false)
+
+    it "keeps the production image span ISA-neutral and dirties the exact span":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
+        expect(source).to_contain("self.native_simd_spans and native_pixel_rows_enabled()")
+        expect(source.contains("active_arch_text() == \"x86_64\"")).to_equal(false)
+        expect(source).to_contain("self.mark_span_dirty(start_x, py, count)")
+
+    it "routes the public facade to the in-place runtime bridge with x86 NEON and RVV branches":
+        val facade = file_read("src/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl")
+        val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
+        expect(facade).to_contain("pub fn engine2d_simd_blend_span_u32")
+        expect(facade).to_contain("rt_engine2d_simd_blend_span_u32(dst, dst_offset, src, src_offset, count)")
+        expect(facade).to_contain("pub fn engine2d_simd_blend_const_span_u32")
+        expect(facade).to_contain("rt_engine2d_simd_blend_const_span_u32(dst, offset, count, const_color)")
+        expect(runtime).to_contain("No malloc — matches")
+        expect(runtime).to_contain("engine2d_blend_boxed_block4_x86")
+        expect(runtime).to_contain("engine2d_blend_boxed_block4_neon")
+        expect(runtime).to_contain("engine2d_blend_boxed_block4_rvv")
+
+    it "keeps provider fill allocation-free through the in-place span ABI":
+        val provider = file_read(
+            "src/lib/nogc_sync_mut/gpu/engine2d/simd_isa_provider.spl")
+        expect(provider).to_contain("engine2d_simd_fill_span_u32")
+        expect(provider).to_contain(
+            "val result = engine2d_simd_fill_span_u32(dst, offset, count")
+        expect(provider.contains("val row = engine2d_simd_fill_row_u32")).to_equal(false)

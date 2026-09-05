@@ -1,0 +1,216 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @req: REQ-COMP-FV2-PROOF-DEPENDENCY-DAG-001 — stable requirement identity for this spec.
+"""
+## Purpose and audience
+Purpose: Prove that FV2 proof dependency DAG.
+Audience: COMP maintainers who read this spec to confirm the behavior still holds.
+"""
+
+use std.spec.step
+
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.proof_dag.{ProofDagNodeV1, ProofDagComponentV1, ProofDagScheduleV1, ProofDagExecutorConfigV1, ProofDagWorkItemV1, ProofDagWorkerResultV1, proof_dag_affected_symbols, build_proof_dag_schedule_v1, proof_dag_bounded_work_v1, proof_dag_commit_worker_results_v1, execute_proof_dag_bounded_v1}
+
+fn _proof_hash(value: text) -> text:
+    sha256_text(value)
+
+fn _proof_worker(item: ProofDagWorkItemV1) -> i64:
+    item.dispatch_index + 100
+
+describe "FV2 proof dependency DAG":
+    # @manual scenario evidence
+    it "schedules dependencies before consumers and reports the critical path":
+        # @req REQ-SSPEC-COMPILER
+        step("schedules dependencies before consumers and reports the critical path")
+        step("Verify: schedules dependencies before consumers and reports the critical path")
+        # @req: REQ-COMP-FV2-PROOF-DEPENDENCY-DAG-001
+        val schedule = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("api", ["left", "right"], _proof_hash("api"), 3),
+            ProofDagNodeV1("left", [], _proof_hash("left"), 5),
+            ProofDagNodeV1("right", [], _proof_hash("right"), 2)
+        ])
+        expect(schedule.diagnostic).to_equal("")
+        expect(schedule.ordered_components.len()).to_equal(3)
+        val prerequisite_symbols = schedule.ordered_components[0].symbol_ids.join(",") +
+            schedule.ordered_components[1].symbol_ids.join(",")
+        expect(prerequisite_symbols).to_contain("left")
+        expect(prerequisite_symbols).to_contain("right")
+        expect(schedule.ordered_components[2].symbol_ids[0]).to_equal("api")
+        expect(schedule.critical_path_ms).to_equal(8)
+
+    it "collapses recursive proof roots into one SCC":
+        # @req REQ-SSPEC-COMPILER
+        step("collapses recursive proof roots into one SCC")
+        step("Verify: collapses recursive proof roots into one SCC")
+        val schedule = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("even", ["odd"], _proof_hash("even"), 4),
+            ProofDagNodeV1("odd", ["even"], _proof_hash("odd"), 6)
+        ])
+        expect(schedule.diagnostic).to_equal("")
+        expect(schedule.ordered_components.len()).to_equal(1)
+        expect(schedule.ordered_components[0].symbol_ids.join(",")).to_equal("even,odd")
+        expect(schedule.critical_path_ms).to_equal(10)
+
+    it "binds semantic identities into component and work identities":
+        val original = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("root", [], _proof_hash("semantic-a"), 1)
+        ])
+        val changed = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("root", [], _proof_hash("semantic-b"), 1)
+        ])
+        expect(original.ordered_components[0].component_id ==
+            changed.ordered_components[0].component_id).to_be(false)
+        val config = ProofDagExecutorConfigV1(1, 1)
+        expect(proof_dag_bounded_work_v1(original, config)[0].input_hash ==
+            proof_dag_bounded_work_v1(changed, config)[0].input_hash).to_be(false)
+
+    it "carries transitive dependency work identities into every consumer":
+        val original = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("a", ["b"], _proof_hash("a-semantic"), 1),
+            ProofDagNodeV1("b", ["c"], _proof_hash("b-semantic"), 1),
+            ProofDagNodeV1("c", [], _proof_hash("c-semantic-a"), 1)
+        ])
+        val transitive_changed = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("a", ["b"], _proof_hash("a-semantic"), 1),
+            ProofDagNodeV1("b", ["c"], _proof_hash("b-semantic"), 1),
+            ProofDagNodeV1("c", [], _proof_hash("c-semantic-b"), 1)
+        ])
+        val config = ProofDagExecutorConfigV1(1, 1)
+        val original_work = proof_dag_bounded_work_v1(original, config)
+        val changed_work = proof_dag_bounded_work_v1(transitive_changed, config)
+        expect(original.ordered_components[1].component_id).to_equal(
+            transitive_changed.ordered_components[1].component_id)
+        expect(original.ordered_components[2].component_id).to_equal(
+            transitive_changed.ordered_components[2].component_id)
+        expect(original_work[1].input_hash == changed_work[1].input_hash).to_be(false)
+        expect(original_work[2].input_hash == changed_work[2].input_hash).to_be(false)
+
+    it "rejects an empty proof graph":
+        expect(build_proof_dag_schedule_v1([]).diagnostic).to_contain(
+            "PROOF-DAG-EMPTY")
+
+    it "rejects a semantic identity that is not lowercase SHA-256":
+        val schedule = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("root", [], "NOT-A-SHA256", 1)
+        ])
+        expect(schedule.diagnostic).to_contain("PROOF-DAG-HASH")
+
+    it "length-frames symbol identities to prevent delimiter collisions":
+        val component_id = _proof_hash("shared-component")
+        val compact = ProofDagScheduleV1([
+            ProofDagComponentV1(component_id, ["a,b"], [], 1, 1)
+        ], "", 1)
+        val split = ProofDagScheduleV1([
+            ProofDagComponentV1(component_id, ["a", "b"], [], 1, 1)
+        ], "", 1)
+        val config = ProofDagExecutorConfigV1(1, 1)
+        expect(proof_dag_bounded_work_v1(compact, config)[0].input_hash ==
+            proof_dag_bounded_work_v1(split, config)[0].input_hash).to_be(false)
+
+    it "invalidates only the changed symbol and its reverse dependency closure":
+        # @req REQ-SSPEC-COMPILER
+        step("invalidates only the changed symbol and its reverse dependency closure")
+        step("Verify: invalidates only the changed symbol and its reverse dependency closure")
+        val nodes = [
+            ProofDagNodeV1("unrelated", [], _proof_hash("u"), 1),
+            ProofDagNodeV1("api", ["logic"], _proof_hash("a"), 1),
+            ProofDagNodeV1("logic", ["type"], _proof_hash("l"), 1),
+            ProofDagNodeV1("type", [], _proof_hash("t"), 1)
+        ]
+        expect(proof_dag_affected_symbols(nodes, ["type"]).join(",")).to_equal("api,logic,type")
+
+    it "fails closed on a missing transitive dependency":
+        # @req REQ-SSPEC-COMPILER
+        step("fails closed on a missing transitive dependency")
+        step("Verify: fails closed on a missing transitive dependency")
+        val schedule = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("api", ["unchecked-helper"], _proof_hash("api"), 1)
+        ])
+        expect(schedule.diagnostic).to_contain("DEPENDENCY")
+
+    it "bounds worker slots and commits child-created results in parent DAG order":
+        val schedule = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("api", ["left", "right"], _proof_hash("api"), 3),
+            ProofDagNodeV1("left", [], _proof_hash("left"), 5),
+            ProofDagNodeV1("right", [], _proof_hash("right"), 2)
+        ])
+        val config = ProofDagExecutorConfigV1(2, 2)
+        val work = proof_dag_bounded_work_v1(schedule, config)
+        expect(work.len()).to_equal(3)
+        expect(work[0].worker_slot).to_equal(0)
+        expect(work[1].worker_slot).to_equal(1)
+        expect(work[2].worker_slot).to_equal(0)
+        expect(work[0].batch_index).to_equal(0)
+        expect(work[1].batch_index).to_equal(0)
+        expect(work[2].batch_index).to_equal(1)
+        # Deliberately report in completion order, not dispatch order.
+        val api_result = _proof_hash("api-result")
+        val first_result = _proof_hash("first-result")
+        val second_result = _proof_hash("second-result")
+        val receipt = proof_dag_commit_worker_results_v1(schedule, config, [
+            ProofDagWorkerResultV1(work[2].component_id, work[2].dispatch_index, work[2].worker_slot, work[2].input_hash, api_result, 3, 20, true),
+            ProofDagWorkerResultV1(work[0].component_id, work[0].dispatch_index, work[0].worker_slot, work[0].input_hash, first_result, 2, 10, true),
+            ProofDagWorkerResultV1(work[1].component_id, work[1].dispatch_index, work[1].worker_slot, work[1].input_hash, second_result, 5, 30, true)
+        ])
+        expect(receipt.diagnostic).to_equal("")
+        expect(receipt.committed_component_ids.join(",")).to_equal(
+            work[0].component_id + "," + work[1].component_id + "," + work[2].component_id
+        )
+        expect(receipt.committed_result_hashes.join(",")).to_equal(
+            first_result + "," + second_result + "," + api_result)
+        expect(receipt.max_active_workers).to_equal(2)
+        expect(receipt.total_elapsed_ms).to_equal(10)
+        expect(receipt.peak_rss_kib).to_equal(30)
+
+    it "fails closed on forged child result identity and invalid bounds":
+        val schedule = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("root", [], _proof_hash("root"), 1)
+        ])
+        expect(proof_dag_bounded_work_v1(schedule, ProofDagExecutorConfigV1(0, 1)).len()).to_equal(0)
+        val work = proof_dag_bounded_work_v1(schedule, ProofDagExecutorConfigV1(1, 1))
+        val receipt = proof_dag_commit_worker_results_v1(schedule, ProofDagExecutorConfigV1(1, 1), [
+            ProofDagWorkerResultV1(work[0].component_id, 0, 0, "forged-input", _proof_hash("result"), 1, 1, true)
+        ])
+        expect(receipt.diagnostic).to_contain("IDENTITY")
+        val invalid_result_receipt = proof_dag_commit_worker_results_v1(
+            schedule, ProofDagExecutorConfigV1(1, 1), [
+                ProofDagWorkerResultV1(
+                    work[0].component_id, 0, 0, work[0].input_hash,
+                    "not-a-sha256", 1, 1, true)
+            ])
+        expect(invalid_result_receipt.diagnostic).to_contain("EVIDENCE")
+
+    it "rejects caller-constructed empty and malformed schedules":
+        val config = ProofDagExecutorConfigV1(1, 1)
+        val empty_receipt = proof_dag_commit_worker_results_v1(
+            ProofDagScheduleV1([], "", 0), config, [])
+        expect(empty_receipt.diagnostic).to_contain("SCHEDULE-EMPTY")
+
+        val malformed_receipt = proof_dag_commit_worker_results_v1(
+            ProofDagScheduleV1([
+                ProofDagComponentV1(_proof_hash("consumer"), ["root"], [_proof_hash("missing-dependency")], 1, 1)
+            ], "", 1),
+            config,
+            []
+        )
+        expect(malformed_receipt.diagnostic).to_contain("SCHEDULE-ORDER")
+
+    it "rejects scalar worker results that cannot carry measured evidence":
+        val schedule = build_proof_dag_schedule_v1([
+            ProofDagNodeV1("root", ["left", "right"], _proof_hash("root"), 1),
+            ProofDagNodeV1("left", [], _proof_hash("left"), 1),
+            ProofDagNodeV1("right", [], _proof_hash("right"), 1)
+        ])
+        val receipt = execute_proof_dag_bounded_v1(
+            schedule, ProofDagExecutorConfigV1(2, 2), _proof_worker
+        )
+        expect(receipt.diagnostic).to_contain("WORKER-MEASUREMENT")
+        expect(receipt.committed_component_ids.len()).to_equal(0)

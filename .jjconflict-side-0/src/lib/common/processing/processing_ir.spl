@@ -1,0 +1,91 @@
+"""Minimal portable processing IR shared by CPU oracles and device backends."""
+
+val PROCESSING_IR_OP_FILL_U32: i64 = 1
+val PROCESSING_IR_OP_FILL_RECT_U32: i64 = 2
+
+struct ProcessingIr:
+    op: i64
+    element_count: i64
+    value: u32
+    width: i64
+    height: i64
+    stride: i64
+    x: i64
+    y: i64
+    rect_width: i64
+    rect_height: i64
+
+struct ProcessingIrValidation:
+    valid: bool
+    reason: text
+
+fn processing_ir_fill_u32(element_count: i64, value: u32) -> ProcessingIr:
+    ProcessingIr(op: PROCESSING_IR_OP_FILL_U32, element_count: element_count, value: value,
+        width: element_count, height: 1, stride: element_count,
+        x: 0, y: 0, rect_width: element_count, rect_height: 1)
+
+fn processing_ir_fill_rect_u32(width: i64, height: i64, stride: i64, x: i64, y: i64, rect_width: i64, rect_height: i64, value: u32) -> ProcessingIr:
+    ProcessingIr(op: PROCESSING_IR_OP_FILL_RECT_U32, element_count: stride * height, value: value,
+        width: width, height: height, stride: stride,
+        x: x, y: y, rect_width: rect_width, rect_height: rect_height)
+
+fn processing_ir_validate(ir: ProcessingIr) -> ProcessingIrValidation:
+    if ir.op != PROCESSING_IR_OP_FILL_U32 and ir.op != PROCESSING_IR_OP_FILL_RECT_U32:
+        return ProcessingIrValidation(valid: false, reason: "unsupported-op")
+    if ir.element_count <= 0:
+        return ProcessingIrValidation(valid: false, reason: "invalid-element-count")
+    if ir.element_count > 536870911:
+        return ProcessingIrValidation(valid: false, reason: "output-size-overflow")
+    if ir.op == PROCESSING_IR_OP_FILL_RECT_U32:
+        if ir.width <= 0 or ir.height <= 0 or ir.stride < ir.width:
+            return ProcessingIrValidation(valid: false, reason: "invalid-drawing-extent")
+        if ir.element_count != ir.stride * ir.height:
+            return ProcessingIrValidation(valid: false, reason: "drawing-size-mismatch")
+        if ir.x < 0 or ir.y < 0 or ir.rect_width <= 0 or ir.rect_height <= 0:
+            return ProcessingIrValidation(valid: false, reason: "invalid-drawing-rectangle")
+        if ir.x + ir.rect_width > ir.width or ir.y + ir.rect_height > ir.height:
+            return ProcessingIrValidation(valid: false, reason: "drawing-rectangle-out-of-bounds")
+    ProcessingIrValidation(valid: true, reason: "ok")
+
+fn processing_ir_cpu_execute(ir: ProcessingIr) -> [u32]:
+    if not processing_ir_validate(ir).valid:
+        return []
+    var output: [u32] = []
+    var i: i64 = 0
+    while i < ir.element_count:
+        val px = i % ir.stride
+        val py = i / ir.stride
+        val inside = ir.op == PROCESSING_IR_OP_FILL_U32 or
+            (px >= ir.x and px < ir.x + ir.rect_width and py >= ir.y and py < ir.y + ir.rect_height)
+        output.push(if inside: ir.value else: 0u32)
+        i = i + 1
+    output
+
+fn processing_ir_outputs_equal(actual: [u32], expected: [u32]) -> bool:
+    if actual.len() != expected.len():
+        return false
+    var i: i64 = 0
+    while i < actual.len().to_i64():
+        if actual[i] != expected[i]:
+            return false
+        i = i + 1
+    true
+
+fn processing_ir_output_matches(ir: ProcessingIr, actual: [u32]) -> bool:
+    if not processing_ir_validate(ir).valid or actual.len().to_i64() != ir.element_count:
+        return false
+    var i: i64 = 0
+    while i < ir.element_count:
+        val px = i % ir.stride
+        val py = i / ir.stride
+        val inside = ir.op == PROCESSING_IR_OP_FILL_U32 or
+            (px >= ir.x and px < ir.x + ir.rect_width and py >= ir.y and py < ir.y + ir.rect_height)
+        val expected = if inside: ir.value else: 0u32
+        if actual[i] != expected:
+            return false
+        i = i + 1
+    true
+
+export PROCESSING_IR_OP_FILL_U32, PROCESSING_IR_OP_FILL_RECT_U32, ProcessingIr, ProcessingIrValidation
+export processing_ir_fill_u32, processing_ir_fill_rect_u32, processing_ir_validate, processing_ir_cpu_execute
+export processing_ir_outputs_equal, processing_ir_output_matches

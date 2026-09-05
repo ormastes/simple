@@ -1,0 +1,108 @@
+#!/bin/sh
+# Build a REAL clang "hello world" C program, place it on a FAT32 filesystem, and
+# run it from the filesystem in ring-3 via the SimpleOS general FS-exec loader —
+# then verify it printed and exited cleanly.
+#
+# Proves end-to-end: clang builds hello -> loaded from FS -> mapped at its native
+# 0x10000000 (PML4[0]) -> ring-3 (cs=0x2b) -> prints via syscall -> exit(42).
+# Expected serial: "hello from clang on simpleos" then "[user] exit rc=42".
+#
+# Prereqs (built once):
+#   - Host clang-20 on PATH (the cross clang-20 codegen is broken; host clang with
+#     --target=x86_64-unknown-simpleos is used for codegen; cross ld.lld links).
+#   - build/os/sysroot (crt0/libc/linker script) and the cross ld.lld.
+#   - A base FAT32 image build/os/elfexec/fat32-fsexec.img (from the elfexec bake).
+#
+# Usage: sh scripts/os/build_clang_hello_ring3.shs
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+fail() { echo "[clang-hello] FAIL: $*" >&2; exit 1; }
+sha() { sha256sum "$1" | awk '{print $1}'; }
+
+SR=build/os/sysroot
+LLD=build/os/llvm/cross-x86_64-unknown-simpleos/bin/ld.lld
+SRC=examples/09_embedded/simpleos_hello_c/hello_fs.c
+OUT=build/os/hello
+BASE_IMG=build/os/elfexec/fat32-fsexec.img
+HELLO_IMG=$OUT/fat32-hello.img
+IMAGE_CANDIDATE=$HELLO_IMG.candidate
+RECEIPT=$OUT/clang-hello-ring3.receipt
+RECEIPT_CANDIDATE=$RECEIPT.candidate.$$
+OBJECT_CANDIDATE=$OUT/hello_fs.o.candidate.$$
+ELF_CANDIDATE=$OUT/hello_fs.elf.candidate.$$
+mkdir -p "$OUT"
+trap 'rm -f "$IMAGE_CANDIDATE" "$RECEIPT_CANDIDATE" "$OBJECT_CANDIDATE" "$ELF_CANDIDATE"' EXIT HUP INT TERM
+
+for command_name in clang-20 sha256sum awk readelf; do
+    command -v "$command_name" >/dev/null 2>&1 || fail "missing tool: $command_name"
+done
+[ -x "$LLD" ] || fail "missing cross ld.lld: $LLD"
+[ -n "${SIMPLE_BUILD_COMPILER:-}" ] || fail "set SIMPLE_BUILD_COMPILER to the admitted SimpleOS kernel compiler"
+[ -x "$SIMPLE_BUILD_COMPILER" ] || fail "missing SimpleOS kernel compiler: $SIMPLE_BUILD_COMPILER"
+[ -f "$SRC" ] && [ ! -L "$SRC" ] && [ -s "$SRC" ] || fail "missing or unsafe source: $SRC"
+[ -f "$SR/share/simpleos/simpleos.ld" ] && [ ! -L "$SR/share/simpleos/simpleos.ld" ] || fail "missing or unsafe sysroot linker script"
+[ -f "$BASE_IMG" ] && [ ! -L "$BASE_IMG" ] && [ -s "$BASE_IMG" ] || fail "missing or unsafe base image $BASE_IMG"
+rm -f "$RECEIPT" "$IMAGE_CANDIDATE" "$RECEIPT_CANDIDATE" "$OBJECT_CANDIDATE" "$ELF_CANDIDATE"
+
+echo "[clang-hello] 1/4 compile+link $SRC with clang (freestanding, entry 0x10000000)"
+clang-20 --target=x86_64-unknown-simpleos --sysroot="$SR" -ffreestanding \
+    -fno-stack-protector -nostdlib -static -O0 -c "$SRC" -o "$OBJECT_CANDIDATE"
+"$LLD" -T "$SR/share/simpleos/simpleos.ld" -e _start "$OBJECT_CANDIDATE" -o "$ELF_CANDIDATE"
+[ -s "$ELF_CANDIDATE" ] || fail "link produced no executable"
+readelf -h "$ELF_CANDIDATE" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64' \
+    || fail "linked executable is not x86_64"
+readelf -h "$ELF_CANDIDATE" | grep -Eq 'Type:[[:space:]]+EXEC' \
+    || fail "linked artifact is not ET_EXEC"
+mv "$OBJECT_CANDIDATE" "$OUT/hello_fs.o"
+mv "$ELF_CANDIDATE" "$OUT/hello_fs.elf"
+
+echo "[clang-hello] 2/4 stage the ELF onto a FAT32 image as /FSEXEC.ELF"
+bin/simple run examples/09_embedded/simpleos_hello_c/patch_fsexec_image.spl
+[ -s "$IMAGE_CANDIDATE" ] || fail "image patch produced no candidate"
+mv "$IMAGE_CANDIDATE" "$HELLO_IMG"
+
+echo "[clang-hello] 3/4 boot the ring-3 FS-exec kernel with the clang-hello image"
+FSEXEC_DISK="$ROOT/$HELLO_IMG" \
+FSEXEC_PROFILE=execute-artifact \
+FSEXEC_EXPECTED_OUTPUT='hello from clang on simpleos' \
+FSEXEC_EXPECTED_EXIT_STATUS=42 \
+    sh scripts/os/build_fsexec_prod_ring3.shs
+
+echo "[clang-hello] 4/4 marker check"
+SERIAL=build/os/elfexec/prod_ring3_run.log
+if grep -q 'hello from clang on simpleos' "$SERIAL" 2>/dev/null; then
+    echo "PASS clang-hello ran from filesystem in ring-3 (printed)"
+else
+    fail "missing clang-hello print in current serial log"
+fi
+if grep -q '\[user\] exit rc=42' "$SERIAL" 2>/dev/null; then
+    echo "PASS clang-hello exited cleanly rc=42"
+else
+    fail "missing clean exit in current serial log"
+fi
+{
+    echo schema=simpleos-clang-hello-ring3-v1
+    echo status=pass
+    echo target=x86_64-unknown-simpleos
+    echo filesystem=fat32
+    echo source_sha256="$(sha "$SRC")"
+    echo clang_path="$(command -v clang-20)"
+    echo clang_sha256="$(sha "$(command -v clang-20)")"
+    echo lld_path="$LLD"
+    echo lld_sha256="$(sha "$LLD")"
+    echo linker_script_sha256="$(sha "$SR/share/simpleos/simpleos.ld")"
+    echo base_image_sha256="$(sha "$BASE_IMG")"
+    echo executable_sha256="$(sha "$OUT/hello_fs.elf")"
+    echo image_sha256="$(sha "$HELLO_IMG")"
+    echo kernel_compiler_path="$SIMPLE_BUILD_COMPILER"
+    echo kernel_compiler_sha256="$(sha "$SIMPLE_BUILD_COMPILER")"
+    echo kernel_sha256="$(sha build/os/simpleos_x86_64_prod_ring3.elf)"
+    echo serial_sha256="$(sha "$SERIAL")"
+    echo expected_output_sha256="$(printf '%s' 'hello from clang on simpleos' | sha256sum | awk '{print $1}')"
+    echo expected_exit_status=42
+} >"$RECEIPT_CANDIDATE"
+mv "$RECEIPT_CANDIDATE" "$RECEIPT"
+trap - EXIT HUP INT TERM
+echo "[clang-hello] OK — a clang-built C program ran from the filesystem in ring-3 and exited 42"

@@ -1,0 +1,85 @@
+# Run-path probe: a user-defined method whose NAME collides with the builtin
+# array mutators `append` / `push` must receive its arguments unchanged.
+#
+# Defect (2026-06-29, root-caused 2026-08-17):
+# `mir/lower/lowering_expr_method.rs` computed
+#   is_array_append_method = method == "push" || method == "append"
+# from the METHOD NAME ALONE, then tag-boxed (`v << 3`) the first integer
+# argument so `rt_array_push` would see a tagged element. With a non-array
+# receiver the call still dispatched to the user's method, which reads the
+# parameter raw — so the first int argument arrived multiplied by 8, silently,
+# on the JIT lane only.
+#
+# Every oracle below is an ABSOLUTE literal, never "the engines agree".
+# Run me with `bin/simple run <this file>`; I print one verdict line.
+
+struct Journal:
+    slots: [i64]
+    count: i64
+
+impl Journal:
+    me append(lba: i64, old_ppn: i64, new_ppn: i64, seq: i64) -> i64:
+        me.slots[0] = lba
+        me.slots[1] = old_ppn
+        me.slots[2] = new_ppn
+        me.slots[3] = seq
+        me.count = 4
+        lba
+
+    me push(a: i64, b: i64) -> i64:
+        a + b
+
+    me append_one(v: i64) -> i64:
+        v
+
+struct Scalars:
+    tag: i64
+
+impl Scalars:
+    me append(first: i64) -> i64:
+        first
+
+    me push(first: i64) -> i64:
+        first
+
+var failures: i64 = 0
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name + " = " + got.to_text())
+    else:
+        print("FAIL " + name + " -- expected " + want.to_text() + " got " + got.to_text())
+        failures = failures + 1
+
+fn main():
+    var j: Journal = Journal(slots: [0, 0, 0, 0], count: 0)
+
+    # The original shape: 4 params, first one is the victim.
+    val returned: i64 = j.append(100, 10, 20, 1)
+    check("append4_returns_first_param", returned, 100)
+    check("append4_stores_first_param", j.slots[0], 100)
+    check("append4_stores_second_param", j.slots[1], 10)
+    check("append4_stores_third_param", j.slots[2], 20)
+    check("append4_stores_fourth_param", j.slots[3], 1)
+
+    # Arity is irrelevant to the defect: 2-param and 1-param collide too.
+    check("push2_sums_params", j.push(100, 10), 110)
+    check("append1_identity", Scalars(tag: 0).append(100), 100)
+    check("push1_identity", Scalars(tag: 0).push(100), 100)
+
+    # A non-colliding name is the control arm: it must be correct either way.
+    check("control_noncolliding_name", j.append_one(100), 100)
+
+    # The genuine builtin array `push`/`append` must still work — the fix must
+    # not disable element tag-boxing for real arrays.
+    var arr: [i64] = []
+    arr.push(7)
+    arr.append(9)
+    check("builtin_array_push_elem0", arr[0], 7)
+    check("builtin_array_append_elem1", arr[1], 9)
+    check("builtin_array_len", arr.len(), 2)
+
+    if failures == 0:
+        print("USER_METHOD_BUILTIN_NAME PROBE: ALL PASS")
+    else:
+        print("USER_METHOD_BUILTIN_NAME PROBE: " + failures.to_text() + " FAILURES")

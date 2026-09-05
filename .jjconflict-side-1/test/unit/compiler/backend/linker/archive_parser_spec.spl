@@ -1,0 +1,447 @@
+@no_gc
+
+# ============================================================================
+# Archive Parser Unit Tests
+# ============================================================================
+# Tests for the Unix ar (.a) archive format parser.
+# Uses synthetic byte arrays to test parsing logic without real .a files.
+# ============================================================================
+
+use compiler.backend.linker.archive_parser.{
+    ar_check_magic, ar_parse, ar_parse_header, ar_parse_name,
+    ar_parse_size, ar_member_count, ar_find_member, ar_list_names,
+    ar_member_data, ar_parse_symbol_index,
+    ArReader, ArMember, ArSymbolIndex, ArSymbolEntry,
+}
+
+# ============================================================================
+# Helpers to build synthetic archive bytes
+# ============================================================================
+
+# Archive magic: "!<arch>\n"
+fn ar_magic() -> [i64]:
+    [0x21, 0x3C, 0x61, 0x72, 0x63, 0x68, 0x3E, 0x0A]
+
+# Convert a single ASCII char text to its byte code.
+fn ascii_code(ch: text) -> i64:
+    if ch == " ": 0x20
+    elif ch == "!": 0x21
+    elif ch == "/": 0x2F
+    elif ch == ".": 0x2E
+    elif ch == "_": 0x5F
+    elif ch == "0": 0x30
+    elif ch == "1": 0x31
+    elif ch == "2": 0x32
+    elif ch == "3": 0x33
+    elif ch == "4": 0x34
+    elif ch == "5": 0x35
+    elif ch == "6": 0x36
+    elif ch == "7": 0x37
+    elif ch == "8": 0x38
+    elif ch == "9": 0x39
+    elif ch == "a": 0x61
+    elif ch == "b": 0x62
+    elif ch == "c": 0x63
+    elif ch == "d": 0x64
+    elif ch == "e": 0x65
+    elif ch == "f": 0x66
+    elif ch == "g": 0x67
+    elif ch == "h": 0x68
+    elif ch == "i": 0x69
+    elif ch == "j": 0x6A
+    elif ch == "k": 0x6B
+    elif ch == "l": 0x6C
+    elif ch == "m": 0x6D
+    elif ch == "n": 0x6E
+    elif ch == "o": 0x6F
+    elif ch == "p": 0x70
+    elif ch == "q": 0x71
+    elif ch == "r": 0x72
+    elif ch == "s": 0x73
+    elif ch == "t": 0x74
+    elif ch == "u": 0x75
+    elif ch == "v": 0x76
+    elif ch == "w": 0x77
+    elif ch == "x": 0x78
+    elif ch == "y": 0x79
+    elif ch == "z": 0x7A
+    elif ch == "A": 0x41
+    elif ch == "B": 0x42
+    elif ch == "C": 0x43
+    elif ch == "D": 0x44
+    elif ch == "E": 0x45
+    elif ch == "F": 0x46
+    elif ch == "G": 0x47
+    elif ch == "H": 0x48
+    elif ch == "I": 0x49
+    elif ch == "J": 0x4A
+    elif ch == "K": 0x4B
+    elif ch == "L": 0x4C
+    elif ch == "M": 0x4D
+    elif ch == "N": 0x4E
+    elif ch == "O": 0x4F
+    elif ch == "P": 0x50
+    elif ch == "Q": 0x51
+    elif ch == "R": 0x52
+    elif ch == "S": 0x53
+    elif ch == "T": 0x54
+    elif ch == "U": 0x55
+    elif ch == "V": 0x56
+    elif ch == "W": 0x57
+    elif ch == "X": 0x58
+    elif ch == "Y": 0x59
+    elif ch == "Z": 0x5A
+    else: 0x3F  # '?'
+
+# Convert a non-negative i64 to its decimal text representation.
+fn i64_to_dec(n: i64) -> text:
+    if n == 0:
+        return "0"
+    var digits: [text] = []
+    var remaining = n
+    while remaining > 0:
+        val d = remaining - (remaining / 10) * 10
+        if d == 0: digits.push("0")
+        elif d == 1: digits.push("1")
+        elif d == 2: digits.push("2")
+        elif d == 3: digits.push("3")
+        elif d == 4: digits.push("4")
+        elif d == 5: digits.push("5")
+        elif d == 6: digits.push("6")
+        elif d == 7: digits.push("7")
+        elif d == 8: digits.push("8")
+        elif d == 9: digits.push("9")
+        remaining = remaining / 10
+    # digits are in reverse order — reverse them
+    var result = ""
+    var i = digits.len() - 1
+    while i >= 0:
+        result = result + digits[i]
+        i = i - 1
+    result
+
+# Build a 60-byte member header.
+# name: up to 16 ASCII characters; size: member data size in bytes.
+fn make_header(name: text, size: i64) -> [i64]:
+    var hdr: [i64] = []
+
+    # ar_name: 16 bytes, space-padded (offset 0)
+    var ni = 0
+    while ni < 16:
+        if ni < name.len():
+            hdr.push(ascii_code(name[ni:ni + 1]))
+        else:
+            hdr.push(0x20)
+        ni = ni + 1
+
+    # ar_date: 12 bytes spaces (offset 16)
+    var di = 0
+    while di < 12:
+        hdr.push(0x20)
+        di = di + 1
+
+    # ar_uid: 6 bytes spaces (offset 28)
+    di = 0
+    while di < 6:
+        hdr.push(0x20)
+        di = di + 1
+
+    # ar_gid: 6 bytes spaces (offset 34)
+    di = 0
+    while di < 6:
+        hdr.push(0x20)
+        di = di + 1
+
+    # ar_mode: 8 bytes spaces (offset 40)
+    di = 0
+    while di < 8:
+        hdr.push(0x20)
+        di = di + 1
+
+    # ar_size: 10 bytes decimal ASCII, space-padded (offset 48)
+    val size_str = i64_to_dec(size)
+    var si = 0
+    while si < 10:
+        if si < size_str.len():
+            hdr.push(ascii_code(size_str[si:si + 1]))
+        else:
+            hdr.push(0x20)
+        si = si + 1
+
+    # ar_fmag: "`\n" = 0x60, 0x0A (offset 58)
+    hdr.push(0x60)
+    hdr.push(0x0A)
+
+    hdr
+
+# Build a minimal archive with one member.
+fn make_one_member_archive(member_name: text, member_data: [i64]) -> [i64]:
+    var archive = ar_magic()
+    archive = archive + make_header(member_name, member_data.len())
+    archive = archive + member_data
+    if member_data.len() % 2 != 0:
+        archive.push(0x0A)
+    archive
+
+# Build archive for two-member count test: "a.o" (2 bytes) + "b.o" (3 bytes)
+fn make_two_member_archive_count() -> [i64]:
+    val d1: [i64] = [0xAA, 0xBB]
+    val d2: [i64] = [0xCC, 0xDD, 0xEE]
+    var a = ar_magic()
+    a = a + make_header("a.o", d1.len())
+    a = a + d1
+    a = a + make_header("b.o", d2.len())
+    a = a + d2
+    a
+
+# Build archive for find-member test: "alpha.o" (1 byte, odd) + "beta.o" (2 bytes)
+fn make_find_member_archive() -> [i64]:
+    val d1: [i64] = [1]
+    val d2: [i64] = [2, 3]
+    var a = ar_magic()
+    a = a + make_header("alpha.o", d1.len())
+    a = a + d1
+    a.push(0x0A)  # padding for odd-length d1
+    a = a + make_header("beta.o", d2.len())
+    a = a + d2
+    a
+
+# Build archive for list-names test: "first.o" (1 byte, odd) + "second.o" (2 bytes)
+fn make_list_names_archive() -> [i64]:
+    val d1: [i64] = [10]
+    val d2: [i64] = [20, 21]
+    var a = ar_magic()
+    a = a + make_header("first.o", d1.len())
+    a = a + d1
+    a.push(0x0A)  # padding for odd d1
+    a = a + make_header("second.o", d2.len())
+    a = a + d2
+    a
+
+# Build archive for odd-size padding test: "a.o" (3 bytes, odd) + "b.o" (2 bytes)
+fn make_odd_padding_archive() -> [i64]:
+    val d1: [i64] = [0x01, 0x02, 0x03]
+    val d2: [i64] = [0x04, 0x05]
+    var a = ar_magic()
+    a = a + make_header("a.o", d1.len())
+    a = a + d1
+    a.push(0x0A)  # 1-byte padding for odd d1
+    a = a + make_header("b.o", d2.len())
+    a = a + d2
+    a
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "ArParser - Magic":
+    """Tests for ar magic byte validation."""
+
+    it "accepts correct !<arch>\\n magic":
+        val bytes: [i64] = [0x21, 0x3C, 0x61, 0x72, 0x63, 0x68, 0x3E, 0x0A]
+        expect(ar_check_magic(bytes)).to_equal(true)
+
+    it "rejects wrong first byte":
+        val bytes: [i64] = [0x00, 0x3C, 0x61, 0x72, 0x63, 0x68, 0x3E, 0x0A]
+        expect(ar_check_magic(bytes)).to_equal(false)
+
+    it "rejects truncated magic":
+        val bytes: [i64] = [0x21, 0x3C, 0x61]
+        expect(ar_check_magic(bytes)).to_equal(false)
+
+    it "rejects empty bytes":
+        val bytes: [i64] = []
+        expect(ar_check_magic(bytes)).to_equal(false)
+
+    it "rejects all-zero bytes":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        expect(ar_check_magic(bytes)).to_equal(false)
+
+describe "ArParser - Size parsing":
+    """Tests for decimal size field parsing."""
+
+    it "parses a simple size 42":
+        # "42        " → 42 (10 bytes, space-padded)
+        val bytes: [i64] = [
+            0x34, 0x32, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        ]
+        expect(ar_parse_size(bytes, 0)).to_equal(42)
+
+    it "parses size 0":
+        val bytes: [i64] = [
+            0x30, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        ]
+        expect(ar_parse_size(bytes, 0)).to_equal(0)
+
+    it "parses large size 1024":
+        # "1024      "
+        val bytes: [i64] = [
+            0x31, 0x30, 0x32, 0x34, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        ]
+        expect(ar_parse_size(bytes, 0)).to_equal(1024)
+
+    it "strips trailing spaces from size field":
+        # "7         " → 7
+        val bytes: [i64] = [
+            0x37, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        ]
+        expect(ar_parse_size(bytes, 0)).to_equal(7)
+
+describe "ArParser - Minimal archive":
+    """Tests parsing a minimal archive with one member."""
+
+    it "parses member name":
+        val data: [i64] = [0x41, 0x42, 0x43]  # "ABC"
+        val archive = make_one_member_archive("foo.o", data)
+        val result = ar_parse(archive)
+        expect(result.is_ok()).to_equal(true)
+        val reader = result.unwrap()
+        expect(reader.members.len()).to_equal(1)
+        expect(reader.members[0].name).to_equal("foo.o")
+
+    it "parses member size":
+        val data: [i64] = [0x41, 0x42, 0x43]  # 3 bytes
+        val archive = make_one_member_archive("foo.o", data)
+        val result = ar_parse(archive)
+        expect(result.is_ok()).to_equal(true)
+        val reader = result.unwrap()
+        expect(reader.members[0].size).to_equal(3)
+
+    it "parses member data_offset correctly":
+        val data: [i64] = [0x41, 0x42, 0x43]
+        val archive = make_one_member_archive("foo.o", data)
+        val result = ar_parse(archive)
+        expect(result.is_ok()).to_equal(true)
+        val reader = result.unwrap()
+        # data_offset = magic(8) + header(60) = 68
+        expect(reader.members[0].data_offset).to_equal(68)
+
+    it "sets is_valid true for a valid archive":
+        val data: [i64] = [1, 2, 3]
+        val archive = make_one_member_archive("a.o", data)
+        val result = ar_parse(archive)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().is_valid).to_equal(true)
+
+describe "ArParser - Member count":
+    """Tests ar_member_count."""
+
+    it "counts one member":
+        val archive = make_one_member_archive("a.o", [1, 2])
+        val reader = ar_parse(archive).unwrap()
+        expect(ar_member_count(reader)).to_equal(1)
+
+    it "counts two members":
+        val archive = make_two_member_archive_count()
+        val reader = ar_parse(archive).unwrap()
+        expect(ar_member_count(reader)).to_equal(2)
+
+describe "ArParser - Name stripping":
+    """Tests that trailing spaces and slashes are stripped from names."""
+
+    it "strips trailing spaces from plain name":
+        val archive = make_one_member_archive("foo.o", [1])
+        val reader = ar_parse(archive).unwrap()
+        expect(reader.members[0].name).to_equal("foo.o")
+
+    it "preserves special name /":
+        val archive = make_one_member_archive("/", [1, 2, 3, 4])
+        val reader = ar_parse(archive).unwrap()
+        expect(reader.members[0].name).to_equal("/")
+
+    it "preserves special name //":
+        val archive = make_one_member_archive("//", [0x20])
+        val reader = ar_parse(archive).unwrap()
+        expect(reader.members[0].name).to_equal("//")
+
+describe "ArParser - Find member":
+    """Tests ar_find_member."""
+
+    it "finds member by name":
+        val archive = make_find_member_archive()
+        val reader = ar_parse(archive).unwrap()
+        val found = ar_find_member(reader, "beta.o")
+        match found:
+            case Some(m):
+                expect(m.name).to_equal("beta.o")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "returns nil for missing member":
+        val archive = make_one_member_archive("foo.o", [1])
+        val reader = ar_parse(archive).unwrap()
+        val found = ar_find_member(reader, "missing.o")
+        expect(found == nil).to_equal(true)
+
+describe "ArParser - List names":
+    """Tests ar_list_names."""
+
+    it "lists all member names in order":
+        val archive = make_list_names_archive()
+        val reader = ar_parse(archive).unwrap()
+        val names = ar_list_names(reader)
+        expect(names.len()).to_equal(2)
+        expect(names[0]).to_equal("first.o")
+        expect(names[1]).to_equal("second.o")
+
+    it "returns empty list for archive with no members":
+        val archive = ar_magic()
+        val reader = ar_parse(archive).unwrap()
+        val names = ar_list_names(reader)
+        expect(names.len()).to_equal(0)
+
+describe "ArParser - Error cases":
+    """Tests error handling for malformed archives."""
+
+    it "errors on archive too short for magic":
+        val bytes: [i64] = [0x21, 0x3C]
+        val result = ar_parse(bytes)
+        expect(result.is_err()).to_equal(true)
+
+    it "errors on wrong magic":
+        val bytes: [i64] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        val result = ar_parse(bytes)
+        expect(result.is_err()).to_equal(true)
+
+    it "handles archive with truncated header gracefully":
+        # Valid magic + 30 bytes (less than 60-byte header): no valid fmag present
+        val bytes: [i64] = [
+            0x21, 0x3C, 0x61, 0x72, 0x63, 0x68, 0x3E, 0x0A,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        ]
+        # Truncated header: parser stops with 0 members (header loop condition fails)
+        val result = ar_parse(bytes)
+        if result.is_ok():
+            expect(result.unwrap().members.len()).to_equal(0)
+        else:
+            expect(result.is_err()).to_equal(true)
+
+describe "ArParser - Member data extraction":
+    """Tests ar_member_data."""
+
+    it "extracts correct data bytes for a single member":
+        val data: [i64] = [0x7F, 0x45, 0x4C, 0x46]  # ELF magic bytes
+        val archive = make_one_member_archive("obj.o", data)
+        val reader = ar_parse(archive).unwrap()
+        val extracted = ar_member_data(reader, reader.members[0])
+        expect(extracted.len()).to_equal(4)
+        expect(extracted[0]).to_equal(0x7F)
+        expect(extracted[1]).to_equal(0x45)
+        expect(extracted[2]).to_equal(0x4C)
+        expect(extracted[3]).to_equal(0x46)
+
+describe "ArParser - Odd-size padding":
+    """Tests that 1-byte padding after odd-size members is handled correctly."""
+
+    it "parses two members when first has odd size":
+        val archive = make_odd_padding_archive()
+        val reader = ar_parse(archive).unwrap()
+        expect(ar_member_count(reader)).to_equal(2)
+        expect(reader.members[0].name).to_equal("a.o")
+        expect(reader.members[1].name).to_equal("b.o")
+        val d2 = ar_member_data(reader, reader.members[1])
+        expect(d2[0]).to_equal(0x04)
+        expect(d2[1]).to_equal(0x05)

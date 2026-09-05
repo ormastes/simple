@@ -1,0 +1,121 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1
+}
+use os.kernel.arch.riscv32.user_entry_v1.{riscv32_user_sret_state_v1}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityErrorV1, ExecutableAuthorityStateV1,
+    executable_authority_loader_owner_initialize,
+    executable_authority_issue_verified, executable_authority_snapshot,
+    executable_authority_begin_riscv32_user_entry_reservation_v1,
+    executable_authority_commit_riscv32_user_entry_reservation_v1,
+    executable_authority_commit_joint_reservation_v1,
+    executable_authority_abort_riscv32_user_entry_reservation_v1
+}
+use os.kernel.loader.executable_load_plan_v1.{executable_load_consumer_new_v1}
+use os.kernel.loader.executable_riscv32_mapping_owner_v1.{
+    executable_riscv32_process_image_ready_v1
+}
+
+fn _rv32_entry_handle() -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1, open_handle_id: 73u64, mount_id: 2u64,
+        filesystem_name: "fat32", canonical_source_path: "/bin/hello-rv32",
+        mount_generation: 3u64, file_id: 9u64, file_generation: 4u64,
+        size_bytes: 4096u64, role: "main-image",
+        target: ManifestTarget(os: "simpleos", arch: "riscv32", abi: "simpleos"),
+        verified_load_ranges: [ExecutableLoadRangeV1(
+            file_offset: 0u64, file_size: 64u64,
+            virtual_address: 0x10000u64, memory_size: 4096u64,
+            writable: false, executable: true)],
+        image_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        admission_id: "rv32-user-entry-1", trust_epoch: 1u64,
+        read_count: 0u64, read_bytes: 0u64, consumed: false)
+
+describe "RV32 authenticated U-mode entry ownership":
+    it "clears SPP and SIE and sets SPIE without authorizing execution":
+        val state = riscv32_user_sret_state_v1(
+            0x10000u64, 0x7FFFF000u64, 0xFFFFFFFFu32)
+        if state == nil: fail("valid U-mode state rejected")
+        expect(state.unwrap().sepc).to_equal(0x10000u32)
+        expect(state.unwrap().sp).to_equal(0x7FFFF000u32)
+        expect(state.unwrap().sstatus & (1u32 << 8)).to_equal(0u32)
+        expect(state.unwrap().sstatus & (1u32 << 1)).to_equal(0u32)
+        expect(state.unwrap().sstatus & (1u32 << 5)).to_equal(1u32 << 5)
+
+    it "rejects kernel-half entry and misaligned stack":
+        expect(riscv32_user_sret_state_v1(
+            0x80000000u64, 0x7FFFF000u64, 0u32)).to_be_nil()
+        expect(riscv32_user_sret_state_v1(
+            0x10000u64, 0x7FFFF004u64, 0u32)).to_be_nil()
+        expect(riscv32_user_sret_state_v1(
+            0x10001u64, 0x7FFFF000u64, 0u32)).to_be_nil()
+
+    it "pairs authenticated ELF-layout and entry authority atomically":
+        val owner_result = executable_authority_loader_owner_initialize(
+            4, 0x5256333255534552u64)
+        if owner_result.is_err(): fail("authority owner init failed")
+        val owner = owner_result.unwrap()
+        val token_result = executable_authority_issue_verified(
+            owner, _rv32_entry_handle(), true, 0x10000u64)
+        if token_result.is_err(): fail("RV32 authority issue failed")
+        val token = token_result.unwrap()
+        val consumer = executable_load_consumer_new_v1(
+            "simpleos", "riscv32", "simpleos")
+        val reserved = executable_authority_begin_riscv32_user_entry_reservation_v1(
+            owner, token, consumer, 0x10000u64, 0x7FFFF000u64,
+            0xFFFFFFFFu32, "/bin/hello-rv32")
+        if reserved.is_err(): fail("RV32 paired reservation failed")
+        val leases = reserved.unwrap()
+        expect(executable_authority_snapshot(owner, token).unwrap().state).to_equal(
+            ExecutableAuthorityStateV1.JointReserved)
+        match executable_authority_commit_joint_reservation_v1(
+            owner, token, leases._joint_lease, consumer,
+            0x10000u64, "/bin/hello-rv32"):
+            case Err(error):
+                expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidUserEntryLease)
+            case Ok(_): fail("generic joint commit bypassed RV32 entry lease")
+        expect(executable_authority_commit_riscv32_user_entry_reservation_v1(
+            owner, token, leases, consumer,
+            0x10000u64, "/bin/hello-rv32").is_ok()).to_be_true()
+        expect(executable_authority_commit_riscv32_user_entry_reservation_v1(
+            owner, token, leases, consumer,
+            0x10000u64, "/bin/hello-rv32").is_err()).to_be_true()
+
+    it "rejects changed commit bindings and clears paired authority on abort":
+        val owner = executable_authority_loader_owner_initialize(
+            4, 0x5256333255534552u64).unwrap()
+        val consumer = executable_load_consumer_new_v1(
+            "simpleos", "riscv32", "simpleos")
+        val token = executable_authority_issue_verified(
+            owner, _rv32_entry_handle(), true, 0x10000u64).unwrap()
+        val reserved = executable_authority_begin_riscv32_user_entry_reservation_v1(
+            owner, token, consumer, 0x10000u64, 0x7FFFF000u64,
+            0u32, "/bin/hello-rv32").unwrap()
+        expect(executable_authority_commit_riscv32_user_entry_reservation_v1(
+            owner, token, reserved, consumer,
+            0x10002u64, "/bin/hello-rv32").is_err()).to_be_true()
+        expect(executable_authority_commit_riscv32_user_entry_reservation_v1(
+            owner, token, reserved, consumer,
+            0x10000u64, "/bin/other").is_err()).to_be_true()
+        var changed = reserved
+        changed._state.sp = 0x7FFFE000u32
+        expect(executable_authority_commit_riscv32_user_entry_reservation_v1(
+            owner, token, changed, consumer,
+            0x10000u64, "/bin/hello-rv32").is_err()).to_be_true()
+        var substituted = reserved
+        substituted._entry_lease._token.nonce = token.nonce + 1u64
+        expect(executable_authority_abort_riscv32_user_entry_reservation_v1(
+            owner, substituted).is_err()).to_be_true()
+        substituted = reserved
+        substituted._entry_lease._joint_nonce =
+            substituted._entry_lease._joint_nonce + 1u64
+        expect(executable_authority_abort_riscv32_user_entry_reservation_v1(
+            owner, substituted).is_err()).to_be_true()
+        expect(executable_authority_abort_riscv32_user_entry_reservation_v1(
+            owner, reserved).is_ok()).to_be_true()
+        expect(executable_authority_commit_riscv32_user_entry_reservation_v1(
+            owner, token, reserved, consumer,
+            0x10000u64, "/bin/hello-rv32").is_err()).to_be_true()
+        expect(executable_riscv32_process_image_ready_v1()).to_be_true()

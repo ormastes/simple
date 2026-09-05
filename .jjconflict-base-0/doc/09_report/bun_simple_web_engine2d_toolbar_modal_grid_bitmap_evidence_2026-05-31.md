@@ -1,0 +1,98 @@
+# Simple Web Engine2D JS Bitmap Evidence
+
+- status: pass
+- reason: pass
+- baseline runtime: bun
+- scene: simple-web-engine2d-toolbar-modal-grid
+- dimensions: 96x64
+- iterations per trial: 20
+- trials: 1
+- simple checksum: 26316970515228
+- baseline checksum: 26316970515228
+- simple weighted checksum: 80856209175782530
+- baseline weighted checksum: 80856209175782530
+- mismatch count: 0
+- blur/tolerance used: false
+- optimized path: static-pixel-cache
+- simple cache hits: 20
+- simple cache stores: 1
+- best simple frame us: 7
+- best baseline frame us: 946
+- baseline/simple speedup x1000: 135142
+- simple ARGB path: build/bun_simple_web_engine2d_toolbar_modal_grid_bitmap_evidence/simple-argb.json
+- baseline ARGB path: build/bun_simple_web_engine2d_toolbar_modal_grid_bitmap_evidence/bun-argb.json
+
+## Simple Output
+- ## trial 1
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-toolbar-modal-grid
+- width=96
+- height=64
+- iterations=20
+- checksum=26316970515228
+- weighted_checksum=80856209175782530
+- total_checksum=526339410304560
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=20
+- cache_stores=1
+- argb_path=build/bun_simple_web_engine2d_toolbar_modal_grid_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-toolbar-modal-grid
+- width=96
+- height=64
+- iterations=20
+- checksum=26316970515228
+- weighted_checksum=80856209175782530
+- total_checksum=526339410304560
+- frame_us=7
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=20
+- cache_stores=1
+- argb_path=build/bun_simple_web_engine2d_toolbar_modal_grid_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+
+## Baseline Output
+- ## trial 1
+- renderer=bun-simple-web-engine2d-baseline
+- scene=simple-web-engine2d-toolbar-modal-grid
+- width=96
+- height=64
+- iterations=20
+- checksum=26316970515228
+- weighted_checksum=80856209175782530
+- total_checksum=526339410304560
+- frame_us=946
+- blur_or_tolerance_used=false

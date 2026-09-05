@@ -1,0 +1,130 @@
+"""
+# The GUESSED-FIELD-INDEX class (similar-problem detection)
+
+**Category:** HIR lowering / field-index resolution
+**Reproducer:** `field_index_erased_receiver_spec.spl`
+
+The reproducer pins one shape: a three-field `i64` struct. That is one member
+of a class. Any field read whose receiver type is erased rides the same
+resolution chain, and a fix that only repairs the observed shape leaves the
+rest silently wrong.
+
+| shape | why it is a distinct member |
+|---|---|
+| 2-field struct | the smallest struct where index 0 vs 1 can differ |
+| 5-field struct | a wrong index can land in the middle, not only at 0 |
+| mixed-type fields | a wrong index is normally caught by a type mismatch; equal types hide it, so both are swept |
+| nested struct field | the erased receiver is one level down |
+| field read on a call result | no local binding to carry the type |
+
+Every field carries a distinct constant, so no wrong read can coincide with a
+right one, and the field-0 substitution fingerprint is asserted absent.
+
+## Engine
+
+Lowering defects cannot go red from a spec body — the example shells out.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+val CLASS_SOURCE: text = ("struct Two:\n" +
+    "    x: i64\n" +
+    "    y: i64\n" +
+    "\n" +
+    "struct Five:\n" +
+    "    f0: i64\n" +
+    "    f1: i64\n" +
+    "    f2: i64\n" +
+    "    f3: i64\n" +
+    "    f4: i64\n" +
+    "\n" +
+    "struct Mixed:\n" +
+    "    flag: bool\n" +
+    "    count: i64\n" +
+    "    label: text\n" +
+    "\n" +
+    "struct Outer:\n" +
+    "    head: i64\n" +
+    "    inner: Two\n" +
+    "\n" +
+    "fn two() -> Two:\n" +
+    "    Two(x: 41, y: 43)\n" +
+    "\n" +
+    "fn five() -> Five:\n" +
+    "    Five(f0: 51, f1: 53, f2: 59, f3: 61, f4: 67)\n" +
+    "\n" +
+    "fn mixed() -> Mixed:\n" +
+    "    Mixed(flag: false, count: 71, label: \"LBL\")\n" +
+    "\n" +
+    "fn outer() -> Outer:\n" +
+    "    Outer(head: 73, inner: Two(x: 79, y: 83))\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(\"TWO\")\n" +
+    "    print(two().x)\n" +
+    "    print(two().y)\n" +
+    "    print(\"FIVE\")\n" +
+    "    print(five().f0)\n" +
+    "    print(five().f2)\n" +
+    "    print(five().f4)\n" +
+    "    print(\"MIXED\")\n" +
+    "    print(mixed().count)\n" +
+    "    print(mixed().label)\n" +
+    "    print(\"OUTER\")\n" +
+    "    print(outer().head)\n" +
+    "    print(outer().inner.x)\n" +
+    "    print(outer().inner.y)\n")
+
+# NOTE: no `{...}` in the embedded source — the SPEC's lexer would resolve it.
+
+fn native_build_and_run_class() -> text:
+    val dir = "build/test-artifacts/field_index_guess_class"
+    val src = dir + "/class_repro.spl"
+    val bin_out = dir + "/class_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, CLASS_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "no field read resolves to a guessed index, in any struct shape":
+
+    it "reads the declared value for every field of every shape":
+        # ONE example on purpose: this costs a full native-build, and spec
+        # module globals do not persist across examples, so four `it` blocks
+        # would mean four builds.
+        step("Build the class sweep once and run it")
+        val raw = native_build_and_run_class()
+        # print() emits no newline on some engines — compare newline-stripped text
+        val out = raw.replace("\n", "")
+
+        step("Refuse to pass on a build that produced nothing")
+        expect(raw.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("TWO")
+        expect(out).to_contain("FIVE")
+        expect(out).to_contain("MIXED")
+        expect(out).to_contain("OUTER")
+
+        step("Two fields — the smallest struct where 0 and 1 differ")
+        expect(out).to_contain("TWO4143")
+
+        step("Five fields — a wrong index can land mid-struct")
+        expect(out).to_contain("FIVE515967")
+
+        step("Mixed field types — equal types are what normally hide the defect")
+        expect(out).to_contain("MIXED71LBL")
+
+        step("A nested struct reached through a call result")
+        expect(out).to_contain("OUTER737983")
+
+        step("The field-0 substitution fingerprint appears in no shape")
+        expect(out.contains("TWO4141")).to_equal(false)
+        expect(out.contains("FIVE515151")).to_equal(false)
+        expect(out.contains("OUTER737979")).to_equal(false)

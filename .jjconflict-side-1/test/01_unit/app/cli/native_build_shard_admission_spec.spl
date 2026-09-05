@@ -1,0 +1,34 @@
+use std.spec
+use std.io_runtime.{file_read}
+use app.cli.native_build_shard_admission.{native_build_shard_worker_limit}
+
+describe "native-build shard RSS admission":
+
+    it "defaults a 5 GiB budget to two measured 2.5 GiB workers":
+        expect(native_build_shard_worker_limit(8, 5120, 2560, 0)).to_equal(2)
+
+    it "admits one worker when the budget is smaller than one estimate":
+        expect(native_build_shard_worker_limit(8, 1024, 2560, 0)).to_equal(1)
+
+    it "preserves explicitly budgeted parallelism without exceeding request":
+        expect(native_build_shard_worker_limit(8, 20480, 2560, 0)).to_equal(8)
+        expect(native_build_shard_worker_limit(4, 20480, 2560, 0)).to_equal(4)
+
+    it "supports an explicit uncapped budget and independent hard maximum":
+        expect(native_build_shard_worker_limit(8, 0, 2560, 0)).to_equal(8)
+        expect(native_build_shard_worker_limit(8, 0, 2560, 3)).to_equal(3)
+
+    it "falls back safely for a malformed non-positive estimate":
+        expect(native_build_shard_worker_limit(8, 5120, 0, 0)).to_equal(2)
+
+    it "does not turn a negative budget into accidental unlimited admission":
+        expect(native_build_shard_worker_limit(8, -1, 2560, 0)).to_equal(2)
+
+    it "wires one admitted count into both deterministic shard phases":
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src).to_contain("native_build_memory_admit_shards(threads)")
+        expect(src).to_contain("val shard_count = native_build_parse_shard_count(args)")
+        expect(src).to_contain("val hir_shard_count = native_build_hir_shard_count(args)")
+        expect(src).to_contain("SIMPLE_SHARD_RSS_BUDGET_MB")
+        expect(src).to_contain("SIMPLE_SHARD_ESTIMATED_RSS_MB")
+        expect(src).to_contain("SIMPLE_SHARD_MAX_WORKERS")

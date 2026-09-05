@@ -1,0 +1,51 @@
+use std.spec.*
+use compiler.semantics.critical_alloc_closure.{
+    CriticalAllocNodeV1, critical_alloc_closure_check_v1,
+    CRITICAL_ALLOC_MAX_FUNCTIONS, CRITICAL_ALLOC_MAX_EDGES
+}
+
+fn closure_node(name: text, callees: [text], root: bool, init: bool, detail: text) -> CriticalAllocNodeV1:
+    CriticalAllocNodeV1(name: name, module_name: "fixture", callees: callees,
+        is_steady_root: root, is_init_boundary: init,
+        direct_alloc_detail: detail, line: 7)
+
+describe "REQ-011 semantic allocation entry closure":
+    it "rejects a transitive allocation on a failure or shutdown helper":
+        val nodes = [
+            closure_node("hal_run", ["finish"], true, false, ""),
+            closure_node("finish", ["failure_log"], false, false, ""),
+            closure_node("failure_log", [], false, false, "interpolated string"),
+        ]
+        val findings = critical_alloc_closure_check_v1(
+            nodes, CRITICAL_ALLOC_MAX_FUNCTIONS, CRITICAL_ALLOC_MAX_EDGES)
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].root).to_equal("hal_run")
+        expect(findings[0].offender).to_equal("failure_log")
+
+    it "does not promote an initialization function into a steady-state root":
+        val nodes = [closure_node("hal_init", [], true, true, "array literal")]
+        expect(critical_alloc_closure_check_v1(nodes, 8, 8).len()).to_equal(0)
+
+    it "fails closed for an unresolved callee and a bounded graph overflow":
+        val unknown = [closure_node("hal_run", ["foreign_alloc"], true, false, "")]
+        val unknown_findings = critical_alloc_closure_check_v1(unknown, 8, 8)
+        expect(unknown_findings.len()).to_equal(1)
+        expect(unknown_findings[0].detail).to_contain("unknown")
+
+        val oversized = [
+            closure_node("one", [], true, false, ""),
+            closure_node("two", [], false, false, ""),
+        ]
+        val oversized_findings = critical_alloc_closure_check_v1(oversized, 1, 8)
+        expect(oversized_findings.len()).to_equal(1)
+        expect(oversized_findings[0].detail).to_contain("limit exceeded")
+
+    it "terminates once per node on cycles without duplicating a violation":
+        val nodes = [
+            closure_node("hal_run", ["a"], true, false, ""),
+            closure_node("a", ["b"], false, false, ""),
+            closure_node("b", ["a"], false, false, "dictionary literal"),
+        ]
+        val findings = critical_alloc_closure_check_v1(nodes, 8, 8)
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].offender).to_equal("b")

@@ -1,0 +1,132 @@
+use std.spec.*
+use std.io.dma.{DmaDir, DmaCachePolicy, DmaOwner, SharedDmaBuffer, SharedDmaMapping, dma_segment, dma_contiguous_layout, dma_scatter_layout, dma_shared_mapping}
+use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_migration_unavailable}
+
+fn _probe_mapping(allocation_id: u64, owner_id: u64, contiguous: bool) -> SharedDmaMapping:
+    val buffer = SharedDmaBuffer(
+        cpu_virt_addr: 0x1A000,
+        host_phys_addr: 0xA000,
+        device_addr: 0xA000,
+        byte_len: 2048,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: owner_id, bdf_bus: 0, bdf_device: 1, bdf_function: 0),
+        allocation_id: allocation_id
+    )
+    val segment = dma_segment(0x1A000, 0xA000, 0xA000, 2048)
+    val layout = if contiguous: dma_contiguous_layout(segment) else: dma_scatter_layout([segment])
+    dma_shared_mapping(buffer, DmaDir.Bidirectional, layout, allocation_id).unwrap()
+
+describe "adapter probe prints":
+    it "walks adapter lifecycle and prints outcomes":
+        var all_ok = true
+        var config = simpleos_memory_leveling_config_default()
+        config.gpu_capacity_bytes = 65536
+        val manager = memory_leveling_manager_new(config)
+
+        val reg = manager.register_gpu_queue(_probe_mapping(301, 9, true))
+        if reg.ok:
+            all_ok = true
+            print "reg: ok=1"
+        else:
+            all_ok = false
+            print "reg: ok=0 reason=" + reg.reason
+
+        val submit = manager.device_submit(301, 9)
+        if submit.ok:
+            all_ok = all_ok and true
+            print "submit: ok=1 state=" + submit.state
+        else:
+            all_ok = false
+            print "submit: ok=0 reason=" + submit.reason + " state=" + submit.state
+
+        val release_before = manager.release(301, 9)
+        if release_before.ok:
+            all_ok = all_ok and true
+            print "release_before: ok=1 state=" + release_before.state
+        else:
+            all_ok = false
+            print "release_before: ok=0 reason=" + release_before.reason + " state=" + release_before.state
+
+        val complete = manager.device_complete(301, 9)
+        if complete.ok:
+            all_ok = all_ok and true
+            print "complete: ok=1 state=" + complete.state
+        else:
+            all_ok = false
+            print "complete: ok=0 reason=" + complete.reason + " state=" + complete.state
+
+        val unmap = manager.device_unmap(301, 9)
+        if unmap.ok:
+            all_ok = all_ok and true
+            print "unmap: ok=1 state=" + unmap.state
+        else:
+            all_ok = false
+            print "unmap: ok=0 reason=" + unmap.reason + " state=" + unmap.state
+
+        val release_after = manager.release(301, 9)
+        if release_after.ok:
+            all_ok = all_ok and true
+            print "release_after: ok=1 state=" + release_after.state
+        else:
+            all_ok = false
+            print "release_after: ok=0 reason=" + release_after.reason + " state=" + release_after.state
+
+        val migration = memory_leveling_device_migration_unavailable(301)
+        print "migration_reason=" + migration.reason
+
+        var nic = simpleos_memory_leveling_config_default()
+        nic.nic_capacity_bytes = 65536
+        nic.nic_reserved_bytes = 0
+        nic.nic_low_watermark_bytes = 8192
+        nic.nic_high_watermark_bytes = 16384
+        val nic_manager = memory_leveling_manager_new(nic)
+        val nic_reg = nic_manager.register_nic_buffer(_probe_mapping(401, 10, false))
+        if nic_reg.ok:
+            all_ok = all_ok and true
+            print "nic reg: ok=1"
+        else:
+            all_ok = false
+            print "nic reg: ok=0 reason=" + nic_reg.reason
+        val nic_submit = nic_manager.device_submit(nic_reg.allocation_id, 10)
+        if nic_submit.ok:
+            all_ok = all_ok and true
+            print "nic submit: ok=1 state=" + nic_submit.state
+        else:
+            all_ok = false
+            print "nic submit: ok=0 reason=" + nic_submit.reason + " state=" + nic_submit.state
+
+        val nic_complete = nic_manager.device_complete(nic_reg.allocation_id, 10)
+        if nic_complete.ok:
+            all_ok = all_ok and true
+            print "nic complete: ok=1 state=" + nic_complete.state
+        else:
+            all_ok = false
+            print "nic complete: ok=0 reason=" + nic_complete.reason + " state=" + nic_complete.state
+
+        val nic_unmap = nic_manager.device_unmap(nic_reg.allocation_id, 10)
+        if nic_unmap.ok:
+            all_ok = all_ok and true
+            print "nic unmap: ok=1 state=" + nic_unmap.state
+        else:
+            all_ok = false
+            print "nic unmap: ok=0 reason=" + nic_unmap.reason + " state=" + nic_unmap.state
+
+        val nic_release = nic_manager.release(nic_reg.allocation_id, 10)
+        if nic_release.ok:
+            all_ok = all_ok and true
+            print "nic release: ok=1 state=" + nic_release.state
+        else:
+            all_ok = false
+            print "nic release: ok=0 reason=" + nic_release.reason + " state=" + nic_release.state
+
+        val nic_ring = nic_manager.register_nic_ring(_probe_mapping(402, 10, false))
+        if nic_ring.ok == false:
+            all_ok = all_ok and true
+            print "nic ring expected rejection and got: " + nic_ring.reason
+        else:
+            all_ok = false
+            print "nic ring unexpectedly succeeded"
+        print "nic ring reason=" + nic_ring.reason
+
+        expect(all_ok).to_equal(true)

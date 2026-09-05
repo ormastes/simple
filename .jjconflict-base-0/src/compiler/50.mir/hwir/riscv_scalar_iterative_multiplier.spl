@@ -1,0 +1,176 @@
+# Clocked, single-outstanding iterative multiplier for Gen2 M/Zmmul.
+
+use compiler.mir.hwir.bit_vector_constant.{HwBitVectorConstant}
+use compiler.mir.hwir.types.{CoreConfig, HwBitExtractOp, HwCombOp, HwCompareOp,
+    HwConstant, HwFixedSliceOp, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard, HwSeqOutputBinding,
+    HwSeqRule, HwSeqValue, HwSequentialModuleDef, HwSequentialPlan}
+use compiler.mir.hwir.riscv_scalar_muldiv_projection.{RiscvScalarMulDivProjection}
+use compiler.mir.hwir.riscv_scalar_muldiv_iterative_contract.{
+    strict_riscv_scalar_muldiv_iterative_contract}
+use compiler.mir.hwir.riscv_scalar_muldiv_dispatch_datapath.{
+    strict_riscv_scalar_muldiv_dispatch_datapath}
+use compiler.mir.hwir.riscv_scalar_iterative_multiplier_datapath.{
+    strict_riscv_scalar_iterative_multiplier_datapath}
+use compiler.mir.hwir.riscv_scalar_muldiv_completion.{
+    riscv_scalar_muldiv_completion_outputs, riscv_scalar_muldiv_metadata_capture,
+    riscv_scalar_muldiv_owner_ports}
+
+fn multiplier_ports(xlen: i32) -> [HwPort]:
+    riscv_scalar_muldiv_owner_ports(xlen)
+
+fn append_signals(left: [HwSignal], right: [HwSignal]) -> [HwSignal]:
+    var result = left
+    for value in right: result.push(value)
+    result
+
+fn append_constants(left: [HwBitVectorConstant], right: [HwBitVectorConstant]) -> [HwBitVectorConstant]:
+    var result = left
+    for value in right: result.push(value)
+    result
+
+fn append_comb(left: [HwCombOp], right: [HwCombOp]) -> [HwCombOp]:
+    var result = left
+    for value in right: result.push(value)
+    result
+
+fn append_select(left: [HwSelectOp], right: [HwSelectOp]) -> [HwSelectOp]:
+    var result = left
+    for value in right: result.push(value)
+    result
+
+fn append_extract(left: [HwBitExtractOp], right: [HwBitExtractOp]) -> [HwBitExtractOp]:
+    var result = left
+    for value in right: result.push(value)
+    result
+
+fn zero_bits(width: i32) -> text:
+    var result = ""; var index = 0
+    while index < width:
+        result = result + "0"; index = index + 1
+    result
+
+fn capture_assignments(w: i32, wide: i32, xlen: i32) -> [HwSeqAssignment]:
+    var result = [HwSeqAssignment(destination: "busy_reg", value: HwSeqValue.copy("dispatch_valid", 1)),
+        HwSeqAssignment(destination: "count_reg", value: HwSeqValue.zero(if w == 32: 6 else: 7)),
+        HwSeqAssignment(destination: "acc_reg", value: HwSeqValue.zero(wide)),
+        HwSeqAssignment(destination: "multiplicand_reg", value: HwSeqValue.copy("lhs_magnitude_wide", wide)),
+        HwSeqAssignment(destination: "multiplier_reg", value: HwSeqValue.copy("rhs_magnitude", w)),
+        HwSeqAssignment(destination: "result_negate_reg", value: HwSeqValue.copy("quotient_negate", 1)),
+        HwSeqAssignment(destination: "event_id_reg", value: HwSeqValue.copy("dispatch_event_id", 64)),
+        HwSeqAssignment(destination: "decode_event_id_reg", value: HwSeqValue.copy("decode_event_id", 64)),
+        HwSeqAssignment(destination: "rd_reg", value: HwSeqValue.copy("dispatch_rd", 5))]
+    for assignment in riscv_scalar_muldiv_metadata_capture(xlen): result.push(assignment)
+    result
+
+pub fn strict_riscv_scalar_iterative_multiplier(name: text, config: CoreConfig,
+    projection: RiscvScalarMulDivProjection) -> Result<HwSequentialModuleDef, text>:
+    if name == "": return Err("HWIR-E-RISCV-MULTIPLIER-ID: iterative multiplier requires a module name")
+    if projection.config.profile != config.profile or projection.config.xlen != config.xlen:
+        return Err("HWIR-E-RISCV-MULTIPLIER-CONFIG: iterative multiplier requires the exact projection configuration")
+    val contract = strict_riscv_scalar_muldiv_iterative_contract(projection)?
+    if contract.family != "multiply": return Err("HWIR-E-RISCV-MULTIPLIER-FAMILY: multiplier requires a multiply projection")
+    val dispatch = strict_riscv_scalar_muldiv_dispatch_datapath(contract)?
+    val multiply = strict_riscv_scalar_iterative_multiplier_datapath(contract)?
+    val w = contract.operand_width; val wide = contract.multiply_width; val countw = contract.count_width
+
+    var signals = append_signals(dispatch.signals, multiply.signals)
+    for signal in [HwSignal.comb("lhs_magnitude_wide", "Bits", wide),
+        HwSignal.comb("count_is_width", "Bits", 1),
+        HwSignal.comb("canonical_match", "Bits", 1), HwSignal.comb("original_match", "Bits", 1),
+        HwSignal.comb("instruction_match", "Bits", 1), HwSignal.comb("rd_match", "Bits", 1),
+        HwSignal.comb("rs1_match", "Bits", 1), HwSignal.comb("rs2_match", "Bits", 1),
+        HwSignal.comb("event_match", "Bits", 1), HwSignal.comb("length_match", "Bits", 1),
+        HwSignal.comb("illegal_clear", "Bits", 1), HwSignal.comb("identity_a", "Bits", 1),
+        HwSignal.comb("identity_b", "Bits", 1), HwSignal.comb("identity_c", "Bits", 1),
+        HwSignal.comb("identity_d", "Bits", 1), HwSignal.comb("identity_e", "Bits", 1),
+        HwSignal.comb("identity_ok", "Bits", 1), HwSignal.comb("rd_nonzero", "Bits", 1)]:
+        signals.push(signal)
+    var constants = append_constants(dispatch.constants, multiply.constants)
+    for constant in [HwBitVectorConstant.binary("frozen_instruction", 32,
+            binary_u32(projection.canonical_instruction)),
+        HwBitVectorConstant.binary("frozen_rd", 5, binary_small(projection.rd_index, 5)),
+        HwBitVectorConstant.binary("frozen_rs1", 5, binary_small(projection.rs1_index, 5)),
+        HwBitVectorConstant.binary("frozen_rs2", 5, binary_small(projection.rs2_index, 5)),
+        HwBitVectorConstant.binary("length_four", 3, "100"),
+        HwBitVectorConstant.binary("zero1_identity", 1, "0"),
+        HwBitVectorConstant.binary("zero1_owner", 1, "0"),
+        HwBitVectorConstant.binary("zero32_owner", 32, binary_u32(0)),
+        HwBitVectorConstant.binary("zero_xlen_owner", config.xlen, zero_bits(config.xlen)),
+        HwBitVectorConstant.binary("zero5_identity", 5, "00000"),
+        HwBitVectorConstant.binary("count_width_constant", countw, binary_small(w, countw))]:
+        constants.push(constant)
+    var comb = append_comb(dispatch.comb_ops, multiply.comb_ops)
+    for op in [HwCombOp.unary("zext", "lhs_magnitude_wide", "lhs_magnitude", wide),
+        HwCombOp.binary("eq", "canonical_match", "dispatch_canonical_instruction", "frozen_instruction", 32),
+        HwCombOp.binary("eq", "original_match", "dispatch_original_instruction", "frozen_instruction", 32),
+        HwCombOp.binary("and", "instruction_match", "canonical_match", "original_match", 1),
+        HwCombOp.binary("eq", "rd_match", "dispatch_rd", "frozen_rd", 5),
+        HwCombOp.binary("eq", "rs1_match", "rs1_index", "frozen_rs1", 5),
+        HwCombOp.binary("eq", "rs2_match", "rs2_index", "frozen_rs2", 5),
+        HwCombOp.binary("eq", "event_match", "dispatch_event_id", "decode_event_id", 64),
+        HwCombOp.binary("eq", "length_match", "dispatch_instruction_length_bytes", "length_four", 3),
+        HwCombOp.binary("eq", "illegal_clear", "illegal_valid", "zero1_identity", 1),
+        HwCombOp.binary("and", "identity_a", "dispatch_lineage_valid", "event_match", 1),
+        HwCombOp.binary("and", "identity_b", "instruction_match", "rd_match", 1),
+        HwCombOp.binary("and", "identity_c", "rs1_match", "rs2_match", 1),
+        HwCombOp.binary("and", "identity_d", "identity_a", "identity_b", 1),
+        HwCombOp.binary("and", "identity_e", "identity_c", "length_match", 1),
+        HwCombOp.binary("and", "identity_ok", "identity_d", "identity_e", 1),
+        HwCombOp.binary("ne", "rd_nonzero", "rd_reg", "zero5_identity", 5)]: comb.push(op)
+    # illegal_clear is part of admission, using one additional typed AND.
+    signals.push(HwSignal.comb("identity_final", "Bits", 1))
+    comb.push(HwCombOp.binary("and", "identity_final", "identity_ok", "illegal_clear", 1))
+    val compares = [HwCompareOp.equal("count_is_width", "count_reg", "count_width_constant", countw)]
+    val plan = HwSequentialPlan(owner_id: HwNodeId.child(name, "sequential"),
+        registers: contract.registers(), rules: [
+            HwSeqRule(name: "consume", guards: [HwSeqGuard.high("completion_ready"),
+                    HwSeqGuard.high("result_valid_reg")], assignments: [
+                    HwSeqAssignment(destination: "result_valid_reg", value: HwSeqValue.zero(1)),
+                    HwSeqAssignment(destination: "result_reg", value: HwSeqValue.zero(config.xlen))]),
+            HwSeqRule(name: "finalize", guards: [HwSeqGuard.high("busy_reg"),
+                    HwSeqGuard.high("count_is_width")], assignments: [
+                    HwSeqAssignment(destination: "busy_reg", value: HwSeqValue.zero(1)),
+                    HwSeqAssignment(destination: "result_valid_reg", value: HwSeqValue.copy("busy_reg", 1)),
+                    HwSeqAssignment(destination: "result_reg", value: HwSeqValue.copy("architectural_result", config.xlen))]),
+            HwSeqRule(name: "iterate", guards: [HwSeqGuard.high("busy_reg"),
+                    HwSeqGuard.low("count_is_width")], assignments: [
+                    HwSeqAssignment(destination: "acc_reg", value: HwSeqValue.copy("acc_next", wide)),
+                    HwSeqAssignment(destination: "multiplicand_reg", value: HwSeqValue.copy("multiplicand_next", wide)),
+                    HwSeqAssignment(destination: "multiplier_reg", value: HwSeqValue.copy("multiplier_next", w)),
+                    HwSeqAssignment(destination: "count_reg", value: HwSeqValue.increment("count_reg", countw))]),
+            HwSeqRule(name: "identity_fault", guards: [HwSeqGuard.high("dispatch_valid"),
+                    HwSeqGuard.low("busy_reg"), HwSeqGuard.low("result_valid_reg"),
+                    HwSeqGuard.low("fault_reg"), HwSeqGuard.low("identity_final")], assignments: [
+                    HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("dispatch_valid", 1))]),
+            HwSeqRule(name: "capture", guards: [HwSeqGuard.high("dispatch_valid"),
+                    HwSeqGuard.low("busy_reg"), HwSeqGuard.low("result_valid_reg"),
+                    HwSeqGuard.low("fault_reg"), HwSeqGuard.high("identity_final")],
+                assignments: capture_assignments(w, wide, config.xlen))],
+        outputs: riscv_scalar_muldiv_completion_outputs(config.xlen), decoder_pins: [])
+    val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(name), entity_name: name,
+        config: config, origins: [HwOrigin(node_id: HwNodeId.child(name, "iterative_multiplier"),
+            source_name: "riscv.scalar.muldiv.iterative-multiplier/v1|projection=" + projection.structural_sha256())],
+        ports: multiplier_ports(config.xlen), datapath_signals: signals,
+        datapath_constants: [], datapath_bit_vector_constants: constants,
+        datapath_comb_ops: comb, datapath_compare_ops: compares,
+        datapath_select_ops: append_select(dispatch.select_ops, multiply.select_ops),
+        datapath_bit_extract_ops: append_extract(dispatch.bit_extract_ops, multiply.bit_extract_ops),
+        datapath_fixed_slice_ops: multiply.fixed_slice_ops, plan: plan,
+        child_entity: "", child_graph_sha256: "")
+    val diagnostic = module.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)
+
+fn binary_small(value: i32, width: i32) -> text:
+    var result = ""; var index = width - 1
+    while index >= 0:
+        result = result + (if ((value >> index) & 1) == 1: "1" else: "0")
+        index = index - 1
+    result
+
+fn binary_u32(value: u32) -> text:
+    var result = ""; var index = 31
+    while index >= 0:
+        result = result + (if ((value >> index) & 1) == 1: "1" else: "0")
+        index = index - 1
+    result

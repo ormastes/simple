@@ -1,0 +1,281 @@
+# Text protocol format adapter (E3 lane, evidence manifest v1).
+#
+# This module is intentionally pure: it turns a raw HTTP-like request/response
+# transcript into the shared `CanonicalEvidence` record so the existing
+# `compare_evidence` fail-closed comparator can check it, without either side
+# knowing about sockets, files, or a capture runtime.
+#
+# Design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md §5
+#
+# Every rule below exists because its absence produces a green comparison that
+# describes nothing:
+#
+#   - a frame missing its header/body separator is ambiguous about where the
+#     header section ends, so treating it as "no body" would silently accept
+#     a truncated capture as a complete one
+#   - a header line with no colon is not a header; parsing it as one (e.g. as
+#     a key with an empty value) would hide a malformed transcript behind a
+#     clean-looking field
+#   - a header repeated on the wire is a real protocol event (or a real bug);
+#     collapsing duplicates to the last-seen value would let a duplicated
+#     field pass a check that expects exactly one
+
+use std.common.spec.evidence.model.{
+    EvidenceSelectorKind, EvidenceNode, CanonicalEvidence,
+    canonical_evidence, canonical_evidence_parse_error
+}
+
+# ---------------------------------------------------------------------------
+# Trace envelope
+# ---------------------------------------------------------------------------
+
+pub enum ProtocolDirection:
+    client_to_server
+    server_to_client
+
+pub fn protocol_direction_name(direction: ProtocolDirection) -> text:
+    match direction:
+        case ProtocolDirection.client_to_server: "C -> S"
+        case ProtocolDirection.server_to_client: "S -> C"
+
+# One captured message. `raw` is retained verbatim even when comparison uses
+# the parsed nodes below, so a failed check can always show the exact bytes
+# the parser saw. `profile_id` names which grammar this frame's raw text is
+# expected to satisfy (an HTTP-like envelope today; other grammars extend
+# this adapter rather than replacing it).
+pub struct ProtocolFrame:
+    sequence: i64
+    direction: ProtocolDirection
+    connection_id: text
+    correlation_id: text
+    raw: text
+    profile_id: text
+
+pub struct ProtocolTrace:
+    transport: text
+    connection_id: text
+    frames: [ProtocolFrame]
+
+pub fn protocol_frame(
+    sequence: i64,
+    direction: ProtocolDirection,
+    connection_id: text,
+    correlation_id: text,
+    raw: text,
+    profile_id: text
+) -> ProtocolFrame:
+    ProtocolFrame(
+        sequence: sequence,
+        direction: direction,
+        connection_id: connection_id,
+        correlation_id: correlation_id,
+        raw: raw,
+        profile_id: profile_id
+    )
+
+pub fn protocol_trace(transport: text, connection_id: text, frames: [ProtocolFrame]) -> ProtocolTrace:
+    ProtocolTrace(transport: transport, connection_id: connection_id, frames: frames)
+
+# ---------------------------------------------------------------------------
+# Line splitting helpers
+# ---------------------------------------------------------------------------
+
+# Splits on "\n" and strips a trailing "\r" from each line, so both CRLF and
+# LF transcripts parse identically. A raw transcript is line-oriented by
+# construction (start line, header lines, blank line, body lines), so this is
+# the one place line endings are normalized.
+fn split_lines(raw: text) -> [text]:
+    if raw == "":
+        return []
+    var lines: [text] = []
+    var current = ""
+    var i = 0
+    while i < raw.len():
+        val c = raw.slice(i, i + 1)
+        if c == "\n":
+            lines.push(strip_trailing_cr(current))
+            current = ""
+        else:
+            current = current + c
+        i = i + 1
+    if not raw.ends_with("\n"):
+        lines.push(strip_trailing_cr(current))
+    lines
+
+fn strip_trailing_cr(line: text) -> text:
+    if line.ends_with("\r"):
+        return line.slice(0, line.len() - 1)
+    line
+
+fn to_lower(value: text) -> text:
+    value.to_lower()
+
+# ---------------------------------------------------------------------------
+# HTTP-like frame parsing
+# ---------------------------------------------------------------------------
+
+# Parses a raw request/response transcript shaped as: a start line, zero or
+# more "Key: Value" header lines, one blank separator line, then zero or more
+# body lines. Emits nodes at:
+#   <prefix>.start_line
+#   <prefix>.status                (only when the start line has a numeric token)
+#   <prefix>.headers.<lowercased-key>  (repeated per occurrence, multiplicity kept)
+#   <prefix>.body.lines             (repeated per body line, in order)
+#
+# Returns a parse-error evidence when the blank-line separator is missing or
+# a header line has no colon — a partial parse of a malformed frame would
+# describe a transcript that was never actually captured cleanly.
+pub fn parse_http_like_frame(raw: text, prefix: text) -> CanonicalEvidence:
+    val lines = split_lines(raw)
+    if lines.len() == 0:
+        return canonical_evidence_parse_error("text_protocol", prefix, "empty frame")
+
+    val start_line = lines[0]
+
+    # Find the blank separator line. Its absence means the header section
+    # never closed, so the body (if any trailing text exists) is undefined.
+    var separator_index = -1
+    var i = 1
+    while i < lines.len():
+        if lines[i] == "":
+            separator_index = i
+            i = lines.len()
+        else:
+            i = i + 1
+
+    if separator_index < 0:
+        return canonical_evidence_parse_error(
+            "text_protocol", prefix, "missing blank-line separator between headers and body"
+        )
+
+    var nodes: [EvidenceNode] = []
+    var order = 0
+    nodes.push(field_node(prefix + ".start_line", start_line, order))
+    order = order + 1
+
+    val status = extract_status(start_line)
+    if status != "":
+        nodes.push(field_node(prefix + ".status", status, order))
+        order = order + 1
+
+    var h = 1
+    while h < separator_index:
+        val line = lines[h]
+        val colon = line.index_of(":")
+        if colon < 0:
+            return canonical_evidence_parse_error(
+                "text_protocol", prefix, "header line has no colon: \"" + line + "\""
+            )
+        val key = to_lower(line.slice(0, colon).trim())
+        val value = line.slice(colon + 1, line.len()).trim()
+        nodes.push(field_node(prefix + ".headers." + key, value, order))
+        order = order + 1
+        h = h + 1
+
+    var b = separator_index + 1
+    while b < lines.len():
+        nodes.push(field_node(prefix + ".body.lines", lines[b], order))
+        order = order + 1
+        b = b + 1
+
+    canonical_evidence("text_protocol", prefix, nodes)
+
+fn field_node(path: text, value: text, order: i64) -> EvidenceNode:
+    EvidenceNode(
+        path: path,
+        kind: EvidenceSelectorKind.protocol_field,
+        value: value,
+        raw: value,
+        order: order
+    )
+
+# A start line's numeric status token, e.g. "HTTP/1.1 200 OK" -> "200" or
+# "LIST /projects 200" -> "200". Returns "" when no whitespace-delimited
+# token is purely decimal digits, which is the correct "no status" answer for
+# a request start line such as "LIST /projects".
+fn extract_status(start_line: text) -> text:
+    val parts = start_line.split(" ")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed != "" and is_all_digits(trimmed):
+            return trimmed
+    ""
+
+fn is_all_digits(value: text) -> bool:
+    var i = 0
+    while i < value.len():
+        val c = value.slice(i, i + 1)
+        if not "0123456789".contains(c):
+            return false
+        i = i + 1
+    true
+
+# ---------------------------------------------------------------------------
+# Trace -> evidence
+# ---------------------------------------------------------------------------
+
+fn direction_prefix(direction: ProtocolDirection) -> text:
+    match direction:
+        case ProtocolDirection.client_to_server: "request"
+        case ProtocolDirection.server_to_client: "response"
+
+fn reorder(nodes: [EvidenceNode], base_order: i64) -> [EvidenceNode]:
+    var out: [EvidenceNode] = []
+    var i = 0
+    while i < nodes.len():
+        val node = nodes[i]
+        out.push(EvidenceNode(
+            path: node.path,
+            kind: node.kind,
+            value: node.value,
+            raw: node.raw,
+            order: base_order + i
+        ))
+        i = i + 1
+    out
+
+# Merges every frame's parsed nodes under `request.` / `response.` prefixes
+# chosen by direction, in frame sequence order. The first parse failure in
+# the trace propagates as the whole trace's parse failure: a trace is only as
+# trustworthy as its least-parseable frame.
+pub fn trace_to_evidence(trace: ProtocolTrace, profile_id: text) -> CanonicalEvidence:
+    var nodes: [EvidenceNode] = []
+    var order = 0
+    for frame in trace.frames:
+        val prefix = direction_prefix(frame.direction)
+        val parsed = parse_http_like_frame(frame.raw, prefix)
+        if not parsed.parse_ok:
+            return canonical_evidence_parse_error(
+                "text_protocol", profile_id,
+                "frame " + "{frame.sequence}" + " (" + prefix + "): " + parsed.parse_error
+            )
+        val reordered = reorder(parsed.nodes, order)
+        for node in reordered:
+            nodes.push(node)
+        order = order + reordered.len()
+
+    canonical_evidence("text_protocol", profile_id, nodes)
+
+# ---------------------------------------------------------------------------
+# Manual projection
+# ---------------------------------------------------------------------------
+
+# A plain "who sent what" transcript for the manual's narrative section. This
+# is deliberately separate from the field-level nodes above: a reader wants
+# the readable transcript, not the selector-addressed field tree.
+pub fn protocol_transcript_lines(trace: ProtocolTrace) -> [text]:
+    var out: [text] = []
+    for frame in trace.frames:
+        val marker = match frame.direction:
+            case ProtocolDirection.client_to_server: "C -> S"
+            case ProtocolDirection.server_to_client: "S -> C"
+        val lines = split_lines(frame.raw)
+        var first = true
+        for line in lines:
+            if first:
+                out.push(marker + "  " + line)
+                first = false
+            else:
+                out.push("        " + line)
+    out

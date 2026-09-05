@@ -1,0 +1,203 @@
+#!/bin/sh
+# Produce deterministic, unsigned binary-size-go-parity evidence for review.
+set -eu
+LC_ALL=C; export LC_ALL
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+GATE=binary-size-go-parity
+FIXTURE_DIR=test/05_perf/fixtures/binary_size_go_parity
+OUTPUT_DIR=; RUN_ID=; SIMPLE_COMPILER=${SIMPLE_COMPILER:-}; STAGE4_PROVENANCE=${STAGE4_PROVENANCE:-}
+PRODUCER_ID=${PRODUCER_ID:-performance-team}; REVIEWER_KEY_ID=${REVIEWER_KEY_ID:-independent-reviewer-required}; SELF_TEST=0
+fail() { echo "STATUS: FAIL binary-size-go-parity-producer — $*" >&2; exit 1; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+hash_text() { sha256sum | awk '{print $1}'; }
+token_ok() { case "$1" in ''|*[!A-Za-z0-9._:@+/-]*) return 1;; esac; }
+source_fingerprint() { git -C "$ROOT" ls-tree -r HEAD -- src scripts config test rules.sdl doc/07_guide doc/00_llm_process doc/glossary.md >"$1" && sed '\|[[:space:]]doc/08_tracking/check/must_check_db.sdn$|d' "$1" | sha256sum | awk '{print $1}'; }
+usage() { echo "usage: $0 --output-dir <repo-relative-dir> --run-id <id> [--simple-compiler <stage4>] [--stage4-provenance <file>]"; echo "       $0 --self-test"; }
+while [ "$#" -gt 0 ]; do case "$1" in
+ --output-dir) OUTPUT_DIR=$2; shift 2;; --run-id) RUN_ID=$2; shift 2;; --simple-compiler) SIMPLE_COMPILER=$2; shift 2;;
+ --stage4-provenance) STAGE4_PROVENANCE=$2; shift 2;; --producer-id) PRODUCER_ID=$2; shift 2;; --reviewer-key-id) REVIEWER_KEY_ID=$2; shift 2;;
+ --self-test) SELF_TEST=1; shift;; -h|--help) usage; exit 0;; *) fail "unknown-argument-$1";; esac; done
+
+run_self_test() {
+ t=$(mktemp -d); trap 'rm -rf "$t"' EXIT INT TERM
+ cp /bin/true "$t/a"; cp /bin/true "$t/b"
+ a=$(hash_file "$t/a"); b=$(hash_file "$t/b"); [ "$a" = "$b" ] || fail self-test-hash
+ printf x >>"$t/b"; [ "$(hash_file "$t/b")" != "$a" ] || fail self-test-mutated-hash
+ sa=$(wc -c <"$t/a" | tr -d ' '); sb=$(wc -c <"$t/b" | tr -d ' '); [ "$sa" -lt "$sb" ] || fail self-test-mutated-size
+ cp "$t/a" "$t/c"; strip --strip-all "$t/c" 2>/dev/null || fail self-test-strip
+ [ "$(od -An -t x1 -N4 "$t/c" | tr -d ' \n')" = 7f454c46 ] || fail self-test-elf
+ rm -rf "$t"; echo 'STATUS: PASS binary-size-go-parity-producer self-test'
+}
+
+produce() {
+ token_ok "$RUN_ID" || fail invalid-run-id; token_ok "$PRODUCER_ID" || fail invalid-producer-id; token_ok "$REVIEWER_KEY_ID" || fail invalid-reviewer-key-id
+ [ "$PRODUCER_ID" != "$REVIEWER_KEY_ID" ] || fail reviewer-must-be-independent
+ case "$OUTPUT_DIR" in ''|/*|*' '*|..|../*|*/../*|*/..) fail unsafe-output-dir;; esac
+ prefix=$ROOT; old_ifs=$IFS; IFS=/; for c in $OUTPUT_DIR; do prefix=$prefix/$c; [ ! -L "$prefix" ] || fail symlinked-output-ancestor; done; IFS=$old_ifs
+ parent=${OUTPUT_DIR%/*}; [ "$parent" != "$OUTPUT_DIR" ] || parent=.; mkdir -p "$ROOT/$parent"
+ parent_real=$(CDPATH= cd -- "$ROOT/$parent" && pwd -P); case "$parent_real" in "$ROOT"|"$ROOT"/*) ;; *) fail output-parent-escapes-root;; esac
+ OUT="$parent_real/${OUTPUT_DIR##*/}"; [ ! -e "$OUT" ] || fail output-dir-exists; mkdir "$OUT"
+ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT INT TERM
+ if [ -z "$SIMPLE_COMPILER" ]; then for c in "$ROOT/bin/release/$(uname -m)-unknown-linux-gnu/simple" "$ROOT/bin/release/simple"; do [ -x "$c" ] && { SIMPLE_COMPILER=$c; break; }; done; fi
+ [ -n "$SIMPLE_COMPILER" ] || fail missing-simple-compiler; SIMPLE_COMPILER=$(readlink -f "$SIMPLE_COMPILER")
+ case "$SIMPLE_COMPILER" in */bin/release/*) ;; *) fail non-release-simple-compiler;; esac
+ case "$SIMPLE_COMPILER" in *compiler_rust*|*rust*seed*|*bootstrap*simple*) fail rust-seed-compiler;; esac
+ [ -x "$SIMPLE_COMPILER" ] && [ -f "$SIMPLE_COMPILER" ] || fail unusable-simple-compiler
+ [ -n "$STAGE4_PROVENANCE" ] || STAGE4_PROVENANCE=${SIMPLE_COMPILER}.provenance.env; STAGE4_PROVENANCE=$(readlink -f "$STAGE4_PROVENANCE")
+ [ -f "$STAGE4_PROVENANCE" ] && [ ! -L "$STAGE4_PROVENANCE" ] || fail missing-stage4-provenance
+ GO=$(command -v go || true); STRIP=$(command -v strip || true); [ -n "$GO" ] && [ -x "$GO" ] || fail missing-go; [ -n "$STRIP" ] && [ -x "$STRIP" ] || fail missing-strip
+ GO=$(readlink -f "$GO"); STRIP=$(readlink -f "$STRIP")
+ FINGERPRINT=$(source_fingerprint "$work/tree-before") || fail source-fingerprint
+ BUILD=$work/build; mkdir -p "$BUILD/$FIXTURE_DIR" "$work/go-cache"
+ for f in workload.spl workload.go input.txt oracle.txt; do cp "$ROOT/$FIXTURE_DIR/$f" "$BUILD/$FIXTURE_DIR/$f"; done
+ case "$(uname -m)" in x86_64) GOARCH=amd64;; aarch64|arm64) GOARCH=arm64;; riscv64) GOARCH=riscv64;; *) fail unsupported-arch;; esac
+ CLEAN_PATH=/usr/bin:/bin
+ (cd "$BUILD" && env -i LC_ALL=C PATH=$CLEAN_PATH SIMPLE_LIB="$ROOT/src" SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_COMPILER" native-build "$FIXTURE_DIR/workload.spl" --backend llvm --opt-level=aggressive --output simple.unstripped) || fail simple-compile
+ (cd "$BUILD" && env -i LC_ALL=C PATH=$CLEAN_PATH GOENV=off GOOS=linux GOARCH=$GOARCH CGO_ENABLED=0 GOCACHE="$work/go-cache" "$GO" build -trimpath -o go.unstripped "$FIXTURE_DIR/workload.go") || fail go-compile
+ cp "$BUILD/simple.unstripped" "$BUILD/simple.stripped"; cp "$BUILD/go.unstripped" "$BUILD/go.stripped"
+ env -i LC_ALL=C PATH=$CLEAN_PATH "$STRIP" --strip-all "$BUILD/simple.stripped" || fail simple-strip
+ env -i LC_ALL=C PATH=$CLEAN_PATH "$STRIP" --strip-all "$BUILD/go.stripped" || fail go-strip
+ for f in simple.unstripped go.unstripped simple.stripped go.stripped; do [ -x "$BUILD/$f" ] || fail missing-$f; cp "$BUILD/$f" "$OUT/$f"; done
+ cp "$SIMPLE_COMPILER" "$OUT/simple-compiler"; cp "$GO" "$OUT/go-compiler"; cp "$STRIP" "$OUT/strip-tool"; cp "$STAGE4_PROVENANCE" "$OUT/stage4-provenance.env"
+ env -i LC_ALL=C PATH=$CLEAN_PATH SIMPLE_LIB="$ROOT/src" "$OUT/simple-compiler" --version >"$OUT/simple-version.txt" 2>&1 || fail simple-version
+ env -i LC_ALL=C PATH=$CLEAN_PATH "$OUT/go-compiler" version >"$OUT/go-version.txt" 2>&1 || fail go-version
+ expected=$(hash_file "$ROOT/$FIXTURE_DIR/oracle.txt"); empty=$(printf '' | hash_text)
+ for lane in simple go; do "$OUT/$lane.stripped" "$ROOT/$FIXTURE_DIR/input.txt" >"$work/$lane.out" 2>"$work/$lane.err" || fail $lane-run; [ "$(hash_file "$work/$lane.out")" = "$expected" ] || fail $lane-output; [ "$(hash_file "$work/$lane.err")" = "$empty" ] || fail $lane-stderr; done
+ simple_bytes=$(wc -c <"$OUT/simple.stripped" | tr -d ' '); go_bytes=$(wc -c <"$OUT/go.stripped" | tr -d ' '); [ "$simple_bytes" -le "$go_bytes" ] || fail simple-larger-than-go
+ sm=$(od -An -t x1 -j18 -N2 "$OUT/simple.stripped" | tr -d ' \n'); gm=$(od -An -t x1 -j18 -N2 "$OUT/go.stripped" | tr -d ' \n'); [ "$sm" = "$gm" ] || fail target-machine-mismatch
+ cat >"$OUT/size-measurement.env" <<EOF
+measurement_schema=simple.binary-size-go-parity/v2
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+fixture_id=runtime-fed-lcg-100k
+simple_artifact_sha256=$(hash_file "$OUT/simple.stripped")
+go_artifact_sha256=$(hash_file "$OUT/go.stripped")
+simple_stripped_bytes=$simple_bytes
+go_stripped_bytes=$go_bytes
+simple_artifact_kind=native-pure-simple-stage4
+go_artifact_kind=native-go
+simple_strip_exit=0
+go_strip_exit=0
+compression_tool_count=0
+target_format=ELF
+target_machine_id_hex=$sm
+final_verdict=PASS
+simple_unstripped_sha256=$(hash_file "$OUT/simple.unstripped")
+go_unstripped_sha256=$(hash_file "$OUT/go.unstripped")
+simple_unstripped_bytes=$(wc -c <"$OUT/simple.unstripped" | tr -d ' ')
+go_unstripped_bytes=$(wc -c <"$OUT/go.unstripped" | tr -d ' ')
+EOF
+ cat >"$OUT/semantic-equivalence.env" <<EOF
+equivalence_schema=simple.binary-size-equivalence/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+fixture_id=runtime-fed-lcg-100k
+semantic_oracle_path=$FIXTURE_DIR/oracle.txt
+semantic_oracle_sha256=$expected
+simple_source_path=$FIXTURE_DIR/workload.spl
+simple_source_sha256=$(hash_file "$ROOT/$FIXTURE_DIR/workload.spl")
+go_source_path=$FIXTURE_DIR/workload.go
+go_source_sha256=$(hash_file "$ROOT/$FIXTURE_DIR/workload.go")
+expected_stdout_sha256=$expected
+simple_stdout_sha256=$(hash_file "$work/simple.out")
+go_stdout_sha256=$(hash_file "$work/go.out")
+simple_exit=0
+go_exit=0
+final_verdict=PASS
+EOF
+ cat >"$OUT/compile-trace.env" <<EOF
+trace_schema=simple.binary-size-compile-trace/v3
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+simple_compiler_path=$SIMPLE_COMPILER
+simple_compiler_sha256=$(hash_file "$OUT/simple-compiler")
+simple_compiler_kind=pure-simple-stage4
+stage4_admitted=true
+simple_compile_exit=0
+go_compile_exit=0
+final_verdict=PASS
+build_environment_id=clean-build-environment-v1
+lc_all=C
+build_path=$CLEAN_PATH
+simple_lib=$ROOT/src
+simple_no_stub_fallback=1
+goenv=off
+goflags=unset
+cgo_enabled=0
+simple_command=$SIMPLE_COMPILER native-build $FIXTURE_DIR/workload.spl --backend llvm --opt-level=aggressive --output simple.unstripped
+go_command=$GO build -trimpath -o go.unstripped $FIXTURE_DIR/workload.go
+strip_command=$STRIP --strip-all
+go_compiler_path=$GO
+strip_tool_path=$STRIP
+build_working_dir=$BUILD
+goos=linux
+goarch=$GOARCH
+go_cache=$work/go-cache
+go_compiler_sha256=$(hash_file "$OUT/go-compiler")
+strip_tool_sha256=$(hash_file "$OUT/strip-tool")
+simple_version_sha256=$(hash_file "$OUT/simple-version.txt")
+go_version_sha256=$(hash_file "$OUT/go-version.txt")
+EOF
+ host_id=sha256:$({ uname -n; cat /etc/machine-id 2>/dev/null || true; } | hash_text)
+ cat >"$OUT/target-identity.env" <<EOF
+evidence_schema=simple.must-check-target/v1
+gate_id=$GATE
+run_id=$RUN_ID
+target_kind=native-host
+target_id=$host_id
+final_verdict=PASS
+EOF
+ tool_digest=$(printf 'simple=%s\ngo=%s\nstrip=%s\n' "$(hash_file "$OUT/simple-compiler")" "$(hash_file "$OUT/go-compiler")" "$(hash_file "$STRIP")" | hash_text)
+ cat >"$OUT/toolchain-identity.env" <<EOF
+evidence_schema=simple.must-check-toolchain/v1
+gate_id=$GATE
+run_id=$RUN_ID
+toolchain_id=sha256:$tool_digest
+final_verdict=PASS
+EOF
+ cat >"$OUT/command-receipt.env" <<EOF
+evidence_schema=simple.must-check-command/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+command=sh scripts/check/produce-binary-size-go-parity-evidence.shs --output-dir $OUTPUT_DIR --run-id $RUN_ID
+exit_status=0
+final_verdict=PASS
+EOF
+ cat >"$OUT/observations.env" <<EOF
+evidence_schema=simple.must-check-observations/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+acceptance_ids=semantic-equivalence,simple-binary,go-binary,toolchains,stripped-size,simple-le-go
+acceptance.semantic-equivalence=PASS
+acceptance.simple-binary=PASS
+acceptance.go-binary=PASS
+acceptance.toolchains=PASS
+acceptance.stripped-size=PASS
+acceptance.simple-le-go=PASS
+final_verdict=PASS
+EOF
+ [ "$FINGERPRINT" = "$(source_fingerprint "$work/tree-final")" ] || fail head-drift-during-production
+ cat >"$OUT/external-evidence.unsigned.env" <<EOF
+evidence_schema=simple.must-check-external-evidence/v2
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+produced_at_utc=review-time-required
+producer_id=$PRODUCER_ID
+producer_kind=deterministic-host-producer
+reviewer_key_id=$REVIEWER_KEY_ID
+final_verdict=PASS
+acceptance_contract=$GATE/v1
+acceptance_ids=semantic-equivalence,simple-binary,go-binary,toolchains,stripped-size,simple-le-go
+EOF
+ for pair in command_receipt:command-receipt.env target_identity:target-identity.env toolchain_identity:toolchain-identity.env observations:observations.env simple_compiler:simple-compiler simple_binary:simple.stripped go_binary:go.stripped size_measurement:size-measurement.env semantic_equivalence:semantic-equivalence.env compile_trace:compile-trace.env stage4_provenance:stage4-provenance.env simple_unstripped_binary:simple.unstripped go_unstripped_binary:go.unstripped go_compiler:go-compiler strip_tool:strip-tool simple_version:simple-version.txt go_version:go-version.txt; do k=${pair%%:*}; p=${pair#*:}; printf '%s_path=%s/%s\n%s_sha256=%s\n' "$k" "$OUTPUT_DIR" "$p" "$k" "$(hash_file "$OUT/$p")" >>"$OUT/external-evidence.unsigned.env"; done
+ sh "$ROOT/scripts/check/check-binary-size-go-parity.shs" --root "$ROOT" --fingerprint "$FINGERPRINT" --run-id "$RUN_ID" --measurement "$OUT/size-measurement.env" --equivalence "$OUT/semantic-equivalence.env" --compile-trace "$OUT/compile-trace.env" --stage4-provenance "$OUT/stage4-provenance.env" --simple-compiler "$OUT/simple-compiler" --simple-binary "$OUT/simple.stripped" --go-binary "$OUT/go.stripped" --simple-unstripped-binary "$OUT/simple.unstripped" --go-unstripped-binary "$OUT/go.unstripped" --go-compiler "$OUT/go-compiler" --strip-tool "$OUT/strip-tool" --simple-version "$OUT/simple-version.txt" --go-version "$OUT/go-version.txt" >/dev/null || fail independent-validator
+ echo "STATUS: PASS binary-size-go-parity-producer — unsigned reviewer-ready evidence: $OUTPUT_DIR"
+}
+[ "$SELF_TEST" -eq 1 ] && { run_self_test; exit 0; }
+produce

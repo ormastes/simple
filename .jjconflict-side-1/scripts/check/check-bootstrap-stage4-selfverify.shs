@@ -1,0 +1,528 @@
+#!/bin/sh
+# check-bootstrap-stage4-selfverify.shs
+#
+# Stage-4 SELF-VERIFICATION gate: proves, by EXECUTING the stage-4 artifact,
+# that it is what Stage 4 is defined to produce.
+#
+# WHAT STAGE 4 IS (derived, not guessed). doc/07_guide/compiler/build.md
+# § "Bootstrap Stages" is authoritative:
+#     Stage 3: stage2 native-build --entry bootstrap_main.spl
+#              -> build/bootstrap/stage3/<triple>/simple
+#     Stage 4: stage3 native-build --entry main.spl
+#              -> build/bootstrap/full/<triple>/simple
+# and .claude/rules/bootstrap.md: Stage 3 "only proves the Stage-2 binary can
+# recompile the *minimal bootstrap entry* -- it is NOT the full-featured CLI.
+# Stage 4 ('Full CLI') is the separate step where the verified Stage-3 binary
+# compiles main.spl, producing the actual deployable bin/simple with every
+# subcommand (test, lint, duplicate-check, etc.). A binary at
+# build/bootstrap/stage3/<triple>/simple correctly answers only compile /
+# native-build -- it has no run/test/duplicate-check."
+#
+# So the self-hosting property Stage 4 actually claims is NOT a fixpoint. It is:
+#   (a) LINEAGE  -- the stage-4 artifact was produced BY the verified stage-3
+#                   binary (provenance parent_compiler_*), and is a genuinely
+#                   distinct artifact from it (different entry, different bytes);
+#   (b) NOT-SEED -- it is a pure-Simple binary, not the Rust seed;
+#   (c) CAPABILITY DELTA -- it answers the full-CLI subcommands that its own
+#                   stage-3 parent demonstrably rejects.
+# (c) is the only property that mechanically separates a stage-4 binary from a
+# stage-3 one at runtime, which is exactly why this gate runs both.
+#
+# NO FIXPOINT IS ASSERTED, AND THAT IS A KNOWN GAP, NOT A WEAKENED GATE. There
+# is no stage4==stage3 byte-equality claim anywhere in the design (the two
+# stages compile different entry points, so equality would be a defect, and
+# this gate FAILs on it). Neither is there a "stage4 rebuilds itself and
+# reproduces its own bytes" claim: no script in this repo performs any
+# stage-to-stage binary comparison, and no reproduction receipt exists to
+# verify. Asserting a fixpoint here would be asserting something the bootstrap
+# never produces evidence for. See the "Known gap" section of
+# doc/07_guide/tooling/bootstrap_stage4_selfverify_gate.md.
+#
+# WHAT THIS GATE ADDS OVER scripts/check/check-post-bootstrap-stage4-sspec.shs.
+# That gate is a PAPER gate and a good one: it re-runs
+# stage4_verify_candidate_provenance, which recomputes every sha256 in the
+# 21-key provenance manifest, re-binds the stage-3 manifest, and re-validates
+# the build/smoke log lane. But it NEVER EXECUTES THE STAGE-4 BINARY. Its
+# last six lines --
+#     post_bootstrap_stage4_test_runner=true
+#     post_bootstrap_stage4_lint=true
+#     post_bootstrap_stage4_duplicate_check=true
+#     post_bootstrap_stage4_acceptance=true
+# -- are unconditional literal echoes emitted after the paper check succeeds.
+# They assert tool capability by FIAT. Nothing in that script, or in
+# stage4-candidate-provenance.shs, ever spawns the binary. This gate closes
+# exactly that hole: every capability claim here is backed by a real process
+# and compared against captured OUTPUT, never an exit code alone.
+#
+# WHY A GREEN `simple test` IS NEVER CONSULTED. .claude/rules/commands.md:
+# "No pure-Simple binary can lint: bootstrap/stage3/simple lint is unknown
+# command (exit 1). simple test GREEN does not prove self-hosted." A green test
+# run is an explicitly documented FALSE SIGNAL in this repo, so this gate never
+# runs the suite and never accepts its result as evidence. It only asserts that
+# the `test` SUBCOMMAND EXISTS -- which is a capability-delta fact about the
+# binary, not a claim about any spec passing.
+#
+# WHY THE SEED-SUPPRESSION ENV IS SCRUBBED. SIMPLE_BOOTSTRAP=1 and
+# SIMPLE_RUST_SEED_WARNING=0 both silence the Rust-seed banner
+# (src/compiler_rust/driver/src/seed_warning.rs). If either leaked in from the
+# caller's environment, a Rust seed masquerading as stage 4 would sail through
+# the NOT-SEED assertion. Every probe is therefore launched through
+# `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUST_SEED_WARNING`.
+#
+# Verdict line is the LAST line of stdout:
+#   PASS  — <n> assertion(s) checked, ...     exit 0
+#   FAIL  — ...                               exit 1
+#   ERROR — nothing was checked (...)         exit 2
+# Zero assertions is ERROR, never PASS. A missing binary, a missing provenance
+# file, a missing sha256 tool and a missing timeout tool are all ERROR --
+# absence of evidence is never a pass.
+#
+# Usage:
+#   sh scripts/check/check-bootstrap-stage4-selfverify.shs [stage4-binary]
+#   STAGE4_BINARY=... sh scripts/check/check-bootstrap-stage4-selfverify.shs
+#   sh scripts/check/check-bootstrap-stage4-selfverify.shs --selftest
+#   sh scripts/check/check-bootstrap-stage4-selfverify.shs --selftest-only
+# Default target: build/bootstrap/full/<triple>/simple (triple from
+# bin/release/*/ or uname), i.e. the stage-4 output path from build.md.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+
+CLI_TIMEOUT=${STAGE4_SELFVERIFY_TIMEOUT:-60}
+RUN_SELFTEST=1
+SELFTEST_ONLY=0
+TARGET=""
+SENTINEL=1337
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest)      SELFTEST_ONLY=0 ;;
+        --selftest-only) SELFTEST_ONLY=1 ;;
+        --no-selftest)   RUN_SELFTEST=0 ;;   # internal: used by the selftest's
+                                             # own recursive invocations
+        --*) echo "unknown option: $arg" >&2; exit 2 ;;
+        *)   TARGET=$arg ;;
+    esac
+done
+
+TMPROOT=""
+cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; return 0; }
+verdict_pass()  { cleanup; printf 'PASS — %s\n' "$1"; exit 0; }
+verdict_fail()  { cleanup; printf 'FAIL — %s\n' "$1"; exit 1; }
+verdict_error() { cleanup; printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+on_signal()     { cleanup; printf 'ERROR — nothing was checked (interrupted)\n'; exit 2; }
+trap cleanup EXIT
+trap on_signal INT TERM HUP
+
+# ---------------------------------------------------------------- tools
+
+SHA_TOOL=""
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_TOOL="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    SHA_TOOL="shasum -a 256"
+fi
+
+TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_BIN="gtimeout"
+fi
+
+sha256_of() {
+    _f=$1
+    [ -f "$_f" ] || return 1
+    _out=$($SHA_TOOL "$_f" 2>/dev/null)
+    _rc=$?
+    [ "$_rc" -eq 0 ] || return 1
+    [ -n "$_out" ] || return 1
+    printf '%s\n' "${_out%% *}"
+}
+
+size_of() {
+    _s=$(wc -c <"$1" 2>/dev/null)
+    _rc=$?
+    [ "$_rc" -eq 0 ] || return 1
+    printf '%s\n' "$_s" | tr -d ' \t'
+}
+
+# Read one key out of a provenance.env. Never sources the file.
+prov_value() {
+    _key=$1
+    _file=$2
+    _found=1
+    while IFS= read -r _line; do
+        case "$_line" in
+            "$_key"=*) printf '%s\n' "${_line#*=}"; _found=0; break ;;
+        esac
+    done <"$_file"
+    return $_found
+}
+
+# Run the CLI. Exit status is read DIRECTLY into a variable on the line after
+# the invocation -- never through a pipe (a pipeline's $? is the LAST stage's
+# status and has produced false greens in this repo before).
+# run_cli <out-prefix> <binary> [args...]  ; stdout -> <prefix>.out, stderr -> <prefix>.err
+run_cli() {
+    _pre=$1; shift
+    _bin=$1; shift
+    env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUST_SEED_WARNING \
+        $TIMEOUT_BIN -k 5s "${CLI_TIMEOUT}s" "$_bin" "$@" >"${_pre}.out" 2>"${_pre}.err"
+    _rc=$?
+    return $_rc
+}
+
+# True when combined output declares the subcommand unrecognised. Matches the
+# documented stage-3 shape ("unknown command", exit 1) plus the usual variants.
+says_unknown_command() {
+    cat "${1}.out" "${1}.err" 2>/dev/null |
+        grep -q -i -E 'unknown (command|subcommand)|unrecognized (command|subcommand)|not a (known|valid) (command|subcommand)'
+}
+
+# ---------------------------------------------------------------- assertions
+
+CHECKED=0
+FAILURES=""
+
+ok()   { CHECKED=$((CHECKED + 1)); }
+bad()  { CHECKED=$((CHECKED + 1)); FAILURES="$FAILURES $1"; }
+note() { printf '%s\n' "$1"; }
+
+# ---------------------------------------------------------------- core scan
+
+default_target() {
+    _triple=""
+    for _d in "$REPO_ROOT"/bin/release/*/; do
+        [ -d "$_d" ] || continue
+        _d=${_d%/}
+        _triple=${_d##*/}
+        break
+    done
+    if [ -z "$_triple" ]; then
+        _m=$(uname -m 2>/dev/null || echo unknown)
+        _s=$(uname -s 2>/dev/null || echo unknown)
+        case "$_s" in
+            Linux)  _triple="${_m}-unknown-linux-gnu" ;;
+            Darwin) _triple="${_m}-apple-darwin" ;;
+            *)      _triple="${_m}-unknown-${_s}" ;;
+        esac
+    fi
+    printf '%s\n' "$REPO_ROOT/build/bootstrap/full/$_triple/simple"
+}
+
+scan() {
+    bin=$1
+    work=$2
+
+    # --- ERROR conditions: absence of evidence is never a pass ---------------
+    [ -n "$SHA_TOOL" ]     || verdict_error "no sha256sum/shasum on this machine; artifact identity cannot be recorded"
+    [ -n "$TIMEOUT_BIN" ]  || verdict_error "no timeout/gtimeout on this machine; the binary cannot be probed safely"
+    [ -e "$bin" ]          || verdict_error "stage-4 binary not found: $bin"
+    [ -f "$bin" ]          || verdict_error "stage-4 path is not a regular file: $bin"
+
+    prov="${bin}.provenance.env"
+    [ -f "$prov" ] || verdict_error "stage-4 provenance not found beside the binary: $prov"
+
+    # --- A1: artifact exists, is executable and non-empty; identity RECORDED --
+    bin_sha=$(sha256_of "$bin") || verdict_error "cannot hash the stage-4 binary: $bin"
+    bin_size=$(size_of "$bin")  || verdict_error "cannot size the stage-4 binary: $bin"
+    note "stage4_path=$bin"
+    note "stage4_size_bytes=$bin_size"
+    note "stage4_sha256=$bin_sha"
+    note "stage4_provenance_path=$prov"
+    if [ -x "$bin" ] && [ "$bin_size" -gt 0 ]; then
+        ok
+    else
+        bad "artifact_executable_and_nonempty"
+    fi
+
+    # --- A2: provenance schema/status/kind ----------------------------------
+    p_schema=$(prov_value schema "$prov" || echo "")
+    p_status=$(prov_value status "$prov" || echo "")
+    p_kind=$(prov_value artifact_kind "$prov" || echo "")
+    if [ "$p_schema" = "simple-bootstrap-stage4-provenance-v1" ] &&
+       [ "$p_status" = "pass" ] &&
+       [ "$p_kind" = "pure-simple-full-cli" ]; then
+        ok
+    else
+        bad "provenance_schema(schema=$p_schema,status=$p_status,kind=$p_kind)"
+    fi
+
+    # --- A3: the provenance describes THIS EXACT binary ---------------------
+    p_out=$(prov_value output_path "$prov" || echo "")
+    p_out_sha=$(prov_value output_sha256 "$prov" || echo "")
+    if [ "$p_out" = "$bin" ] && [ "$p_out_sha" = "$bin_sha" ]; then
+        ok
+    else
+        bad "provenance_binds_this_binary(recorded=$p_out_sha,actual=$bin_sha)"
+    fi
+
+    # --- A4: LINEAGE -- produced by the verified stage-3 parent -------------
+    parent=$(prov_value parent_compiler_path "$prov" || echo "")
+    parent_sha_rec=$(prov_value parent_compiler_sha256 "$prov" || echo "")
+    parent_sha=""
+    if [ -n "$parent" ] && [ -f "$parent" ]; then
+        parent_sha=$(sha256_of "$parent" || echo "")
+    fi
+    note "stage3_parent_path=$parent"
+    note "stage3_parent_sha256=$parent_sha"
+    if [ -n "$parent_sha" ] && [ "$parent_sha" = "$parent_sha_rec" ]; then
+        ok
+    else
+        bad "stage3_parentage(path=$parent,recorded=$parent_sha_rec,actual=$parent_sha)"
+    fi
+
+    # --- A5: distinct artifact -- stage 4 is not a copy of stage 3 ----------
+    # Stage 3 compiles bootstrap_main.spl, stage 4 compiles main.spl. Identical
+    # bytes would mean the stage-4 step produced nothing new.
+    if [ -n "$parent_sha" ] && [ "$parent_sha" != "$bin_sha" ]; then
+        ok
+    else
+        bad "stage4_distinct_from_stage3(both=$bin_sha)"
+    fi
+
+    # --- A6: NOT the Rust seed ---------------------------------------------
+    run_cli "$work/version" "$bin" --version
+    rc_version=$?
+    ver_txt=$(cat "$work/version.out" "$work/version.err" 2>/dev/null)
+    if [ "$rc_version" -eq 0 ] && [ -n "$ver_txt" ] &&
+       ! printf '%s' "$ver_txt" | grep -q -i 'bootstrap seed only\|Rust-built Simple binary'; then
+        ok
+    else
+        bad "not_rust_seed_version(rc=$rc_version)"
+    fi
+
+    # --- A7: a trivial program actually runs -------------------------------
+    prog="$work/trivial.spl"
+    printf '%s\n' 'fn main():' "    print(1300 + 37)" >"$prog"
+    run_cli "$work/run" "$bin" run "$prog"
+    rc_run=$?
+    run_txt=$(cat "$work/run.out" 2>/dev/null)
+    if says_unknown_command "$work/run"; then
+        # Some lanes take the bare-file form instead of `run <file>`.
+        run_cli "$work/run2" "$bin" "$prog"
+        rc_run=$?
+        run_txt=$(cat "$work/run2.out" 2>/dev/null)
+    fi
+    # Content comparison, never exit code: `bin/simple run` exits 0 even after
+    # a fatal `error: semantic:`.
+    if printf '%s' "$run_txt" | grep -q "$SENTINEL"; then
+        ok
+    else
+        bad "trivial_program_output(want=$SENTINEL,got='$run_txt')"
+    fi
+
+    # --- A8..A11: the full-CLI subcommands stage 4 is defined to provide ----
+    # `test` is asserted to EXIST only. Its green/red result is never consulted
+    # -- a green suite is a documented false signal for self-hosting.
+    for sub in lint duplicate-check test run; do
+        run_cli "$work/sub_$sub" "$bin" "$sub" --help
+        rc_sub=$?
+        if says_unknown_command "$work/sub_$sub"; then
+            bad "full_cli_subcommand_missing($sub)"
+        elif [ "$rc_sub" -eq 127 ]; then
+            bad "full_cli_subcommand_not_executable($sub)"
+        else
+            ok
+        fi
+    done
+
+    # --- A12: negative control -- the stage-3 parent must REJECT `lint` -----
+    # Without this, A8..A11 could be vacuous: if every binary on this machine
+    # accepted `lint`, "stage 4 accepts lint" would prove nothing. The parent
+    # rejecting it is what makes the capability delta a real discriminator.
+    # A parent that ACCEPTS lint means the oracle is void -> ERROR, not PASS.
+    if [ -n "$parent" ] && [ -x "$parent" ]; then
+        run_cli "$work/parent_lint" "$parent" lint --help
+        rc_plint=$?
+        if says_unknown_command "$work/parent_lint"; then
+            ok
+        else
+            verdict_error "stage-3 parent accepted 'lint' (rc=$rc_plint); the stage3/stage4 capability delta is not a discriminator on this machine, so the full-CLI assertions would be vacuous"
+        fi
+    else
+        bad "stage3_parent_not_probeable($parent)"
+    fi
+
+    note "stage4_selfhost_property=lineage+not_seed+capability_delta"
+    note "stage4_fixpoint_asserted=false_known_gap"
+    note "stage4_simple_test_green_consulted=false"
+
+    [ "$CHECKED" -gt 0 ] || verdict_error "zero assertions evaluated"
+    if [ -n "$FAILURES" ]; then
+        verdict_fail "$CHECKED assertion(s) checked in $bin, $(printf '%s' "$FAILURES" | wc -w | tr -d ' ') failed:$FAILURES"
+    fi
+    verdict_pass "$CHECKED assertion(s) checked, stage 4 self-verified (sha256=$bin_sha size=$bin_size parent=$parent_sha)"
+}
+
+# ---------------------------------------------------------------- selftest
+#
+# Fixtures are fake `simple` binaries (shell scripts) plus real provenance.env
+# files, driven through THIS SCRIPT recursively (--no-selftest) so the fixtures
+# exercise the real scan(), not a reimplementation of it.
+
+make_parent() {  # <path> -- a stage-3-shaped binary: compile/native-build only
+    cat >"$1" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo "simple 0.0.0 (stage3 bootstrap entry)"; exit 0 ;;
+  compile|native-build) echo "ok"; exit 0 ;;
+esac
+echo "unknown command: ${1:-}" >&2
+exit 1
+EOF
+    chmod 755 "$1"
+}
+
+make_stage4() {  # <path> [flavour]
+    _flav=${2:-good}
+    cat >"$1" <<EOF
+#!/bin/sh
+FLAV=$_flav
+EOF
+    cat >>"$1" <<'EOF'
+case "${1:-}" in
+  --version)
+    if [ "$FLAV" = seed ]; then
+      echo "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool." >&2
+      echo "Build and use the pure-Simple bin/simple instead." >&2
+    fi
+    echo "simple 0.1.0 (pure-Simple full CLI)"
+    exit 0 ;;
+  run)
+    if [ "$FLAV" = stage3shaped ]; then
+      echo "unknown command: run" >&2; exit 1
+    fi
+    echo 1337; exit 0 ;;
+  lint|duplicate-check|test)
+    if [ "$FLAV" = stage3shaped ]; then
+      echo "unknown command: $1" >&2; exit 1
+    fi
+    echo "usage: simple $1"; exit 0 ;;
+esac
+if [ -f "${1:-}" ]; then echo 1337; exit 0; fi
+echo "unknown command: ${1:-}" >&2
+exit 1
+EOF
+    chmod 755 "$1"
+}
+
+make_prov() {  # <binary> <output_sha_override|-> <parent>
+    _b=$1; _shao=$2; _p=$3
+    _s=$_shao
+    [ "$_s" = "-" ] && _s=$(sha256_of "$_b")
+    _ps=$(sha256_of "$_p" 2>/dev/null || echo "")
+    {
+        echo "schema=simple-bootstrap-stage4-provenance-v1"
+        echo "status=pass"
+        echo "artifact_kind=pure-simple-full-cli"
+        echo "output_path=$_b"
+        echo "output_sha256=$_s"
+        echo "parent_compiler_path=$_p"
+        echo "parent_compiler_sha256=$_ps"
+        echo "completed_gate=stage4-essential-tools-smoke"
+    } >"${_b}.provenance.env"
+}
+
+selftest() {
+    _fx="$TMPROOT/fx"
+    mkdir -p "$_fx" || return 1
+    _pass=0; _total=0; _bad=""
+
+    _expect() {  # <name> <expected-exit> <binary-path>
+        _total=$((_total + 1))
+        sh "$0" --no-selftest "$3" >"$_fx/$1.log" 2>&1
+        _got=$?
+        if [ "$_got" -eq "$2" ]; then
+            _pass=$((_pass + 1))
+        else
+            _bad="$_bad $1(want=$2,got=$_got)"
+        fi
+    }
+
+    make_parent "$_fx/stage3"
+
+    # F1 must-PASS: a well-formed stage-4 artifact.
+    make_stage4 "$_fx/good" good
+    make_prov   "$_fx/good" - "$_fx/stage3"
+    _expect fixture1_wellformed 0 "$_fx/good"
+
+    # F2 must-FAIL: a Rust seed masquerading as stage 4 (the redeploy defect
+    # .claude/rules/bootstrap.md warns about at length).
+    make_stage4 "$_fx/seed" seed
+    make_prov   "$_fx/seed" - "$_fx/stage3"
+    _expect fixture2_rust_seed 1 "$_fx/seed"
+
+    # F3 must-FAIL: a stage-3-shaped binary published as stage 4 -- rejects
+    # lint/test/duplicate-check/run with "unknown command" exactly as
+    # .claude/rules/commands.md documents. This is the real defect shape.
+    make_stage4 "$_fx/s3shaped" stage3shaped
+    make_prov   "$_fx/s3shaped" - "$_fx/stage3"
+    _expect fixture3_stage3_shaped 1 "$_fx/s3shaped"
+
+    # F4 must-FAIL: provenance records a different binary than the one on disk.
+    make_stage4 "$_fx/mismatch" good
+    make_prov   "$_fx/mismatch" "0000000000000000000000000000000000000000000000000000000000000000" "$_fx/stage3"
+    _expect fixture4_sha_mismatch 1 "$_fx/mismatch"
+
+    # F5 must-FAIL: stage 4 is byte-identical to its stage-3 parent, i.e. the
+    # stage-4 step produced nothing new.
+    cp "$_fx/stage3" "$_fx/copyparent" && chmod 755 "$_fx/copyparent"
+    make_prov "$_fx/copyparent" - "$_fx/stage3"
+    _expect fixture5_copy_of_parent 1 "$_fx/copyparent"
+
+    # F6 must-ERROR(2): no artifact at all. Proves the caller is forced to
+    # ERROR on a vacuous run rather than being handed a PASS.
+    _expect fixture6_vacuous_missing_binary 2 "$_fx/does-not-exist"
+
+    # F7 must-ERROR(2): artifact present but no provenance beside it -- also
+    # vacuous, since identity cannot be bound.
+    make_stage4 "$_fx/noprov" good
+    _expect fixture7_vacuous_no_provenance 2 "$_fx/noprov"
+
+    # F8 must-ERROR(2): the negative control is void -- the "stage-3 parent"
+    # accepts lint, so the capability delta proves nothing.
+    make_stage4 "$_fx/fakeparent" good      # a parent that accepts everything
+    make_stage4 "$_fx/oracle" good
+    make_prov   "$_fx/oracle" - "$_fx/fakeparent"
+    _expect fixture8_void_negative_control 2 "$_fx/oracle"
+
+    if [ "$_pass" -ne "$_total" ]; then
+        printf 'selftest: %s/%s fixtures correct; wrong:%s\n' "$_pass" "$_total" "$_bad" >&2
+        return 1
+    fi
+    SELFTEST_FIXTURES=$_total
+    return 0
+}
+
+# ---------------------------------------------------------------- main
+
+TMPROOT=$(mktemp -d 2>/dev/null) || verdict_error "cannot create a temporary directory"
+
+if [ -z "$TARGET" ]; then
+    TARGET=$(default_target)
+fi
+case "$TARGET" in
+    /*) ;;
+    *)  TARGET="$REPO_ROOT/$TARGET" ;;
+esac
+
+SELFTEST_FIXTURES=0
+if [ "$RUN_SELFTEST" -eq 1 ]; then
+    [ -n "$SHA_TOOL" ] || verdict_error "no sha256sum/shasum on this machine; the selftest cannot run"
+    [ -n "$TIMEOUT_BIN" ] || verdict_error "no timeout/gtimeout on this machine; the selftest cannot run"
+    selftest
+    rc_selftest=$?
+    if [ "$rc_selftest" -ne 0 ]; then
+        verdict_error "selftest failed -- the guard itself is not trustworthy"
+    fi
+    if [ "$SELFTEST_ONLY" -eq 1 ]; then
+        verdict_pass "selftest only, no scan requested ($SELFTEST_FIXTURES fixture(s) correct)"
+    fi
+fi
+
+WORK="$TMPROOT/scan"
+mkdir -p "$WORK" || verdict_error "cannot create the probe work directory"
+scan "$TARGET" "$WORK"

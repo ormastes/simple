@@ -1,0 +1,130 @@
+"""Neighbouring argv shapes the single-file lane must classify, not swallow.
+
+Audience: anyone editing `parse_child_run` in
+`src/app/test_runner_new/test_runner_single.spl`.
+
+Why this spec exists (GENERALIZATION). The defect closed on 2026-08-27 was one
+instance of a class: a positional argument that the parser neither consumes nor
+rejects, so the run proceeds as if it had never been asked for. This spec walks
+the argv shapes adjacent to the reported one — extra paths interleaved between
+flags, three paths, extra paths combined with `--timeout`, malformed option
+values that could otherwise hide a path, and the several already-fail-closed
+classes (missing path, non-`.spl`, nonexistent file) — and asserts each is
+CLASSIFIED. Every shape here must land on a definite verdict:
+either `valid: true` with the right path, or `valid: false` with a non-empty
+error. Silence is the bug.
+
+Record: doc/08_tracking/bug/test_runner_single_lane_drops_extra_paths_2026-08-27.md
+Reproducer: test/01_unit/app/test_runner_new/single_lane_extra_paths_spec.spl
+
+# @req REQ-TESTRUNNER-SINGLE-LANE-NO-DROPPED-PATHS
+"""
+
+use std.spec.*
+
+use app.test_runner_new.test_runner_single.{parse_child_run}
+
+val SPEC_A: text = "test/01_unit/lib/std/common/text_helpers_spec.spl"
+val SPEC_B: text = "test/01_unit/lib/std/common/collection_helpers_spec.spl"
+val SPEC_C: text = "test/01_unit/lib/std/common/text_helpers_spec.spl"
+
+describe "single-file lane argv classification", :
+    describe "extra paths in shapes adjacent to the reported one", :
+        it "refuses a second path hidden between flags", :
+            val run = parse_child_run([SPEC_A, "--timeout", "60", SPEC_B, "--sequential"])
+            assert_false(run.valid)
+
+        it "refuses a second path when --timeout uses the = form", :
+            val run = parse_child_run([SPEC_A, "--timeout=60", SPEC_B])
+            assert_false(run.valid)
+
+        it "refuses three paths and accounts for both extras", :
+            val run = parse_child_run([SPEC_A, SPEC_B, SPEC_C])
+            assert_contains(run.error, "2 more")
+
+        it "refuses an extra path even when it is the same file twice", :
+            val run = parse_child_run([SPEC_A, SPEC_A])
+            assert_false(run.valid)
+
+    describe "already fail-closed classes stay fail-closed", :
+        it "rejects an argv with no path at all", :
+            val run = parse_child_run(["--timeout", "60"])
+            assert_false(run.valid)
+
+        it "rejects a path that is not a .spl file", :
+            val run = parse_child_run(["test/01_unit/lib/std/common"])
+            assert_false(run.valid)
+
+        it "rejects a .spl path that does not exist", :
+            val run = parse_child_run(["test/01_unit/lib/std/common/__absent_spec.spl"])
+            assert_false(run.valid)
+
+        it "never reports invalid without saying why", :
+            val run = parse_child_run([SPEC_A, SPEC_B])
+            assert_not_equal(run.error, "")
+
+    describe "flag-only argv must not be mistaken for a path", :
+        it "still accepts one path when many flags surround it", :
+            val run = parse_child_run(["--sequential", "--no-db", SPEC_A, "--no-cache"])
+            assert_true(run.valid)
+
+        it "keeps --list working on a single path", :
+            val run = parse_child_run([SPEC_A, "--list"])
+            assert_true(run.list_only)
+
+    describe "forwarded option values must not be mistaken for paths", :
+        it "accepts the separated --format value after the spec path", :
+            val run = parse_child_run([SPEC_A, "--format", "json"])
+            assert_true(run.valid)
+
+        it "accepts the separated --format value before the spec path", :
+            val run = parse_child_run(["--format", "json", SPEC_A])
+            assert_true(run.valid)
+
+        it "accepts an adapter-forwarded QEMU socket value", :
+            val run = parse_child_run([SPEC_A, "--qemu-socket", "/tmp/simple-qemu.sock"])
+            assert_true(run.valid)
+
+        it "still refuses a real second path after a format value", :
+            val run = parse_child_run([SPEC_A, "--format", "json", SPEC_B])
+            assert_false(run.valid)
+
+        it "fails closed when a value-taking option has no value", :
+            val run = parse_child_run([SPEC_A, "--format"])
+            assert_false(run.valid)
+            assert_contains(run.error, "missing value for --format")
+
+    describe "malformed option values cannot hide another path", :
+        it "rejects a spec path used as an invalid --format value", :
+            val run = parse_child_run([SPEC_A, "--format", SPEC_B])
+            assert_false(run.valid)
+            assert_contains(run.error, "invalid value for --format")
+
+        it "does not swallow --list as the value of --format", :
+            val run = parse_child_run([SPEC_A, "--format", "--list", SPEC_B])
+            assert_false(run.valid)
+            assert_contains(run.error, "missing value for --format")
+
+        it "rejects empty equals syntax before a second path", :
+            val run = parse_child_run([SPEC_A, "--format=", SPEC_B])
+            assert_false(run.valid)
+            assert_contains(run.error, "missing value for --format")
+
+        it "rejects an invalid equals value before a second path", :
+            val run = parse_child_run([SPEC_A, "--format=yaml", SPEC_B])
+            assert_false(run.valid)
+            assert_contains(run.error, "invalid value for --format")
+
+        it "rejects a nonnumeric timeout before a second path", :
+            val run = parse_child_run([SPEC_A, "--timeout", SPEC_B])
+            assert_false(run.valid)
+            assert_contains(run.error, "invalid value for --timeout")
+
+        it "does not swallow --list as a QEMU socket value", :
+            val run = parse_child_run([SPEC_A, "--qemu-socket", "--list", SPEC_B])
+            assert_false(run.valid)
+            assert_contains(run.error, "missing value for --qemu-socket")
+
+        it "accepts a signed decimal threshold value", :
+            val run = parse_child_run([SPEC_A, "--cpu-threshold", "-0.5"])
+            assert_true(run.valid)

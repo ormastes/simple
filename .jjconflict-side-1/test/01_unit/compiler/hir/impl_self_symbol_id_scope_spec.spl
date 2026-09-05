@@ -1,0 +1,65 @@
+# @req BUG-HIR-SELF-SYMBOL-ID-001
+"""
+# HIR impl-block lowering keeps the `self` owner symbol scoped
+
+**Category:** Compiler
+**Status:** Implemented
+**Bug:** doc/08_tracking/bug/hir_flat_ast_impl_lowering_lost_self_symbol_id_2026-08-11.md
+
+## Purpose and Audience
+
+Compiler maintainers working on HIR lowering. When a method body mentions
+`self.<field>`, `expressions.spl` resolves that field through
+`current_method_self_symbol_id`. Every lowering path that publishes
+`current_method_self_type` for an `impl` block must publish the matching
+symbol id, and must restore both afterwards, or `self.x` is typed against the
+wrong owner (or skipped entirely) for every declaration that follows.
+
+## Scope and Preconditions
+
+The defective path is the flat-AST (`SIMPLE_BOOTSTRAP`) impl-block loop in
+`module_lowering.spl`. That path is only entered by the self-hosted compiler
+during bootstrap; the host binary available to this spec is the Rust seed,
+which never runs it. A behavioural repro therefore requires a self-hosted
+bootstrap binary and is recorded as blocked in the bug doc. What IS checkable
+here, and what actually regressed, is the save/set/restore pairing itself:
+commit 83d21f1808 deleted three lines and left the two pieces of `self`
+context disagreeing. This spec pins that pairing.
+
+## Primary Workflow
+
+Read the lowering source, locate the impl-block scope, and assert the owner
+symbol id is saved, set, and restored alongside the self type.
+
+## Compatibility and Limitations
+
+Source-contract scope only: it proves the scope discipline is present, not the
+resulting field types. Pair with a bootstrap run once one is available.
+"""
+
+use std.spec.*
+use app.io.mod.{file_read_text}
+
+val MODULE_LOWERING = "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
+
+fn lowering_source() -> text:
+    return file_read_text(MODULE_LOWERING)
+
+describe "HIR impl-block lowering self-owner scope":
+    it "saves the previous owner symbol id before entering an impl block":
+        step("Read the flat-AST module lowering source")
+        val src = lowering_source()
+        step("Confirm the impl scope snapshots the outer owner symbol id")
+        expect(src).to_contain("val previous_impl_self_symbol_id = self.current_method_self_symbol_id")
+
+    it "publishes the impl owner as the self symbol for the method loop":
+        step("Read the flat-AST module lowering source")
+        val src = lowering_source()
+        step("Confirm the owner symbol id is set when the owner resolves")
+        expect(src).to_contain("self.current_method_self_symbol_id = impl_owner_symbol.id")
+
+    it "restores the outer owner symbol id when the impl block ends":
+        step("Read the flat-AST module lowering source")
+        val src = lowering_source()
+        step("Confirm the saved value is written back so nothing leaks to siblings")
+        expect(src).to_contain("self.current_method_self_symbol_id = previous_impl_self_symbol_id")

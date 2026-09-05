@@ -1,0 +1,71 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV's interface / HIR fingerprints
+(SCV-IMPL-G-05): `syntactic_interface_id` is the Simple compiler frontend's
+canonical `simple/compile-interface/v1` digest (compiler.semantics.interface
+.compile_interface — reused, not reinvented) computed over the public
+declaration surface the `simple` query pack extracts; `normalized_impl_hash`
+is the compiler's comment/format-insensitive implementation digest; and the
+fingerprint record STATES ITS GUARANTEE — a typed-HIR hash is reported as
+unavailable rather than faked, because the compiler frontend has no typed-HIR
+extractor yet. Discriminating properties: a body-only change keeps the
+interface id and changes the impl hash; a comment-only change keeps both; a
+signature change changes the interface id.
+Audience: Maintainers of the SCV gates / build-invalidation layer.
+"""
+# @req: REQ-SCV-HIR-FINGERPRINT-001
+use std.spec.{describe, it, expect, step}
+use std.scv.hir_fingerprint.{scv_hir_fingerprint_version, scv_hir_fingerprint, scv_syntactic_interface_id, scv_normalized_impl_hash, scv_typed_hir_hash, scv_fingerprint_field}
+use compiler.tools.api_surface.{ApiSurface, FunctionSignature, ParamSignature}
+use compiler.semantics.interface.compile_interface.{compile_interface_digest}
+
+val SRC: text = "# header\nuse std.a\n\nfn alpha(x: i64) -> i64:\n    x + 1\n\nfn beta(x: text) -> bool:\n    x.len() > 0\n"
+val SRC_BODY: text = "# header\nuse std.a\n\nfn alpha(x: i64) -> i64:\n    x + 2\n\nfn beta(x: text) -> bool:\n    x.len() > 0\n"
+val SRC_COMMENT: text = "# a different header\nuse std.a\n\n\nfn alpha(x: i64) -> i64:\n    x + 1   \n\nfn beta(x: text) -> bool:  # note\n    x.len() > 0\n"
+val SRC_SIG: text = "# header\nuse std.a\n\nfn alpha(x: i64, y: i64) -> i64:\n    x + 1\n\nfn beta(x: text) -> bool:\n    x.len() > 0\n"
+
+fn _sig(name: text, pname: text, ptype: text, ret: text) -> FunctionSignature:
+    var params: [ParamSignature] = []
+    params.push(ParamSignature(name: pname, type_name: Some(ptype)))
+    FunctionSignature(name: name, params: params, return_type: Some(ret), is_async: false, is_generator: false, visibility_display: nil, declared_visibility: nil)
+
+describe "scv interface and HIR fingerprints":
+    it "reuses the compiler frontend's canonical compile-interface digest":
+        step "the fingerprint format names its version and the digest domain it wraps"
+        assert_equal(scv_hir_fingerprint_version(), "scv/hir-fingerprint/v1")
+        step "the syntactic interface id equals compile_interface_digest over the same surface built by hand"
+        var s = ApiSurface.create("m")
+        s.add_function(_sig("alpha", "x", "i64", "i64"))
+        s.add_function(_sig("beta", "x", "text", "bool"))
+        assert_equal(scv_syntactic_interface_id("m", SRC), "siface1:" + compile_interface_digest(s))
+
+    it "body-only and comment-only changes keep the interface id; a signature change does not":
+        val base = scv_syntactic_interface_id("m", SRC)
+        step "body-only change: same interface id, different normalized impl hash"
+        assert_equal(scv_syntactic_interface_id("m", SRC_BODY), base)
+        assert_not_equal(scv_normalized_impl_hash(SRC_BODY), scv_normalized_impl_hash(SRC))
+        step "comment/formatting-only change: same interface id AND same impl hash"
+        assert_equal(scv_syntactic_interface_id("m", SRC_COMMENT), base)
+        assert_equal(scv_normalized_impl_hash(SRC_COMMENT), scv_normalized_impl_hash(SRC))
+        step "signature change: different interface id"
+        assert_not_equal(scv_syntactic_interface_id("m", SRC_SIG), base)
+        step "a field type change inside a struct changes the interface id (fields are part of the surface)"
+        val s1 = "struct P:\n    x: i64\n    y: i64\n\nenum C:\n    A\n    B\n"
+        val s2 = "struct P:\n    x: i64\n    y: text\n\nenum C:\n    A\n    B\n"
+        val s3 = "struct P:\n    x: i64\n    y: i64\n\nenum C:\n    A\n"
+        assert_not_equal(scv_syntactic_interface_id("m", s1), scv_syntactic_interface_id("m", s2))
+        assert_not_equal(scv_syntactic_interface_id("m", s1), scv_syntactic_interface_id("m", s3))
+
+    it "states its guarantee: no typed-HIR hash is claimed while the frontend has no extractor":
+        val rec = scv_hir_fingerprint("m", SRC)
+        step "the record carries version, syntactic interface id and normalized impl hash"
+        expect(rec).to_contain("fingerprint: scv/hir-fingerprint/v1")
+        expect(scv_fingerprint_field(rec, "syntactic_interface_id")).to_start_with("siface1:")
+        expect(scv_fingerprint_field(rec, "normalized_impl_hash")).to_start_with("nimpl1:")
+        step "the guarantee line says what the id proves — declared surface as text, not types"
+        expect(scv_fingerprint_field(rec, "guarantee")).to_contain("declared public surface")
+        expect(scv_fingerprint_field(rec, "guarantee")).to_contain("not type-checked")
+        step "typed_hir_hash is reported unavailable, never fabricated"
+        expect(scv_typed_hir_hash("m", SRC)).to_start_with("unavailable:")
+        expect(scv_fingerprint_field(rec, "typed_hir_hash")).to_start_with("unavailable:")
+        expect(rec.contains("semantic_hash")).to_equal(false)

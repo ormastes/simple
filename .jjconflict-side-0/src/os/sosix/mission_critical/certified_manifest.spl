@@ -1,0 +1,338 @@
+"""Pure validation for the certified SimpleOS platform manifest.
+
+The public `*V1` type/function names are retained for source compatibility with
+the initial implementation. Only wire schema 2 is admitted; schema 1 lacks the
+hash-bound host identity and is intentionally rejected.
+"""
+
+use std.common.crypto.sha256.{sha256_text}
+
+pub val CERTIFIED_SIMPLEOS_PASS: text = "pass"
+pub val CERTIFIED_SIMPLEOS_BLOCKED: text = "blocked"
+pub val CERTIFIED_SIMPLEOS_FAILED: text = "failed"
+pub val CERTIFIED_SIMPLEOS_MAX_EVIDENCE_AGE_S: u64 = 86400u64
+
+pub struct CertifiedGuestEvidenceV1:
+    present: bool
+    passed: bool
+    target_side: bool
+    run_id: text
+    source_revision: text
+    host_identity: text
+    guest_identity: text
+    configuration_identity: text
+    image_hash: text
+    configuration_hash: text
+    release_id: text
+    compiler_receipt_hash: text
+    captured_at_epoch_s: u64
+    expires_at_epoch_s: u64
+
+pub struct CertifiedGuestPayloadV1:
+    evidence: CertifiedGuestEvidenceV1
+    usr_bin: bool
+    bin: bool
+    sys_apps: bool
+    sys_simpletool_sdn: bool
+    executed_from_guest_storage: bool
+    usr_bin_artifact_hash: text
+    bin_artifact_hash: text
+    sys_apps_artifact_hash: text
+    sys_simpletool_sdn_artifact_hash: text
+
+pub struct CertifiedCellV1:
+    cell_id: text
+    selected: bool
+    unselected_reason: text
+    run_id: text
+    source_revision: text
+    host_identity: text
+    guest_identity: text
+    configuration_identity: text
+    image_hash: text
+    configuration_hash: text
+    boot: CertifiedGuestEvidenceV1
+    mount: CertifiedGuestEvidenceV1
+    target_listing: CertifiedGuestEvidenceV1
+    arbitrary_fs_program: CertifiedGuestEvidenceV1
+    compiler_lineage: CertifiedGuestEvidenceV1
+    source_identity: CertifiedGuestEvidenceV1
+    run_correlation: CertifiedGuestEvidenceV1
+    payload: CertifiedGuestPayloadV1
+    stress_24h: CertifiedGuestEvidenceV1
+    pure_simple_lineage: bool
+
+pub struct CertifiedSimpleOsManifestV1:
+    schema_version: u16
+    run_id: text
+    release_id: text
+    source_revision: text
+    compiler_receipt_hash: text
+    admission_at_epoch_s: u64
+    cells: [CertifiedCellV1]
+    manifest_hash: text
+
+pub struct CertifiedSimpleOsValidationV1:
+    structurally_valid: bool
+    accepted: bool
+    status: text
+    reason: text
+    visible_cell_count: u32
+    selected_cell_count: u32
+    passing_cell_count: u32
+    umbrella_all_platforms: bool
+
+export CERTIFIED_SIMPLEOS_PASS, CERTIFIED_SIMPLEOS_BLOCKED, CERTIFIED_SIMPLEOS_FAILED
+export CERTIFIED_SIMPLEOS_MAX_EVIDENCE_AGE_S
+export CertifiedGuestEvidenceV1, CertifiedGuestPayloadV1, CertifiedCellV1
+export CertifiedSimpleOsManifestV1, CertifiedSimpleOsValidationV1
+
+pub fn certified_simpleos_cell_catalog_v1() -> [text]:
+    val hosts = ["linux", "windows", "macos", "freebsd"]
+    val guests = ["x86_32", "x86_64", "arm32", "arm64", "riscv32", "riscv64"]
+    var cells: [text] = []
+    for host in hosts:
+        for guest in guests:
+            cells.push("{host}:{guest}")
+    cells
+
+fn _hex_hash_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for i in 0..value.len():
+        val ch = value.char_at(i)
+        if not "0123456789abcdef".contains(ch):
+            return false
+    true
+
+fn _evidence_time_valid(evidence: CertifiedGuestEvidenceV1, admission_at_epoch_s: u64) -> bool:
+    # Order comparisons before subtraction so malformed timestamps cannot wrap.
+    if evidence.captured_at_epoch_s == 0 or evidence.captured_at_epoch_s > admission_at_epoch_s:
+        return false
+    if evidence.expires_at_epoch_s < admission_at_epoch_s or evidence.expires_at_epoch_s < evidence.captured_at_epoch_s:
+        return false
+    admission_at_epoch_s - evidence.captured_at_epoch_s <= CERTIFIED_SIMPLEOS_MAX_EVIDENCE_AGE_S and
+        evidence.expires_at_epoch_s - evidence.captured_at_epoch_s <= CERTIFIED_SIMPLEOS_MAX_EVIDENCE_AGE_S
+
+fn _evidence_complete(evidence: CertifiedGuestEvidenceV1, manifest: CertifiedSimpleOsManifestV1) -> bool:
+    evidence.present and evidence.passed and evidence.target_side and
+        evidence.run_id.len() > 0 and evidence.source_revision.len() > 0 and
+        evidence.host_identity.len() > 0 and evidence.guest_identity.len() > 0 and
+        _hex_hash_valid(evidence.image_hash) and
+        _hex_hash_valid(evidence.configuration_hash) and
+        evidence.release_id == manifest.release_id and
+        evidence.compiler_receipt_hash == manifest.compiler_receipt_hash and
+        _evidence_time_valid(evidence, manifest.admission_at_epoch_s)
+
+fn _evidence_correlates(evidence: CertifiedGuestEvidenceV1, cell: CertifiedCellV1) -> bool:
+    evidence.run_id == cell.run_id and
+        evidence.source_revision == cell.source_revision and
+        evidence.host_identity == cell.host_identity and
+        evidence.guest_identity == cell.guest_identity and
+        evidence.configuration_identity == cell.configuration_identity and
+        evidence.image_hash == cell.image_hash and
+        evidence.configuration_hash == cell.configuration_hash
+
+pub fn certified_simpleos_guest_identity_v1(cell_id: text) -> text:
+    if cell_id.ends_with(":x86_32"):
+        return "guest-x86_32"
+    if cell_id.ends_with(":x86_64"):
+        return "guest-x86_64"
+    if cell_id.ends_with(":arm32"):
+        return "guest-arm32"
+    if cell_id.ends_with(":arm64"):
+        return "guest-arm64"
+    if cell_id.ends_with(":riscv32"):
+        return "guest-riscv32"
+    if cell_id.ends_with(":riscv64"):
+        return "guest-riscv64"
+    ""
+
+pub fn certified_simpleos_host_identity_v1(cell_id: text) -> text:
+    if cell_id.starts_with("linux:"):
+        return "host-linux"
+    if cell_id.starts_with("windows:"):
+        return "host-windows"
+    if cell_id.starts_with("macos:"):
+        return "host-macos"
+    if cell_id.starts_with("freebsd:"):
+        return "host-freebsd"
+    ""
+
+pub fn certified_simpleos_configuration_identity_v1(cell_id: text) -> text:
+    "config-{cell_id}"
+
+fn _payload_complete(payload: CertifiedGuestPayloadV1, cell: CertifiedCellV1, manifest: CertifiedSimpleOsManifestV1) -> bool:
+    _evidence_complete(payload.evidence, manifest) and
+        _evidence_correlates(payload.evidence, cell) and
+        payload.usr_bin and payload.bin and payload.sys_apps and
+        payload.sys_simpletool_sdn and payload.executed_from_guest_storage and
+        _hex_hash_valid(payload.usr_bin_artifact_hash) and
+        _hex_hash_valid(payload.bin_artifact_hash) and
+        _hex_hash_valid(payload.sys_apps_artifact_hash) and
+        _hex_hash_valid(payload.sys_simpletool_sdn_artifact_hash)
+
+fn _frame(name: text, value: text) -> text:
+    name.len().to_text() + ":" + name + value.len().to_text() + ":" + value
+
+fn _evidence_canonical(prefix: text, evidence: CertifiedGuestEvidenceV1) -> text:
+    var out = ""
+    out = out + _frame(prefix + ".present", evidence.present.to_text())
+    out = out + _frame(prefix + ".passed", evidence.passed.to_text())
+    out = out + _frame(prefix + ".target_side", evidence.target_side.to_text())
+    out = out + _frame(prefix + ".run_id", evidence.run_id)
+    out = out + _frame(prefix + ".source_revision", evidence.source_revision)
+    out = out + _frame(prefix + ".host_identity", evidence.host_identity)
+    out = out + _frame(prefix + ".guest_identity", evidence.guest_identity)
+    out = out + _frame(prefix + ".configuration_identity", evidence.configuration_identity)
+    out = out + _frame(prefix + ".image_hash", evidence.image_hash)
+    out = out + _frame(prefix + ".configuration_hash", evidence.configuration_hash)
+    out = out + _frame(prefix + ".release_id", evidence.release_id)
+    out = out + _frame(prefix + ".compiler_receipt_hash", evidence.compiler_receipt_hash)
+    out = out + _frame(prefix + ".captured_at_epoch_s", evidence.captured_at_epoch_s.to_text())
+    out + _frame(prefix + ".expires_at_epoch_s", evidence.expires_at_epoch_s.to_text())
+
+pub fn certified_simpleos_manifest_canonical_v1(manifest: CertifiedSimpleOsManifestV1) -> text:
+    # manifest_hash is intentionally omitted from its own digest domain.
+    var out = ""
+    out = out + _frame("schema_version", manifest.schema_version.to_text())
+    out = out + _frame("run_id", manifest.run_id)
+    out = out + _frame("release_id", manifest.release_id)
+    out = out + _frame("source_revision", manifest.source_revision)
+    out = out + _frame("compiler_receipt_hash", manifest.compiler_receipt_hash)
+    out = out + _frame("admission_at_epoch_s", manifest.admission_at_epoch_s.to_text())
+    out = out + _frame("cell_count", manifest.cells.len().to_text())
+    var index = 0
+    for cell in manifest.cells:
+        val prefix = "cells[" + index.to_text() + "]"
+        out = out + _frame(prefix + ".cell_id", cell.cell_id)
+        out = out + _frame(prefix + ".selected", cell.selected.to_text())
+        out = out + _frame(prefix + ".unselected_reason", cell.unselected_reason)
+        out = out + _frame(prefix + ".run_id", cell.run_id)
+        out = out + _frame(prefix + ".source_revision", cell.source_revision)
+        out = out + _frame(prefix + ".host_identity", cell.host_identity)
+        out = out + _frame(prefix + ".guest_identity", cell.guest_identity)
+        out = out + _frame(prefix + ".configuration_identity", cell.configuration_identity)
+        out = out + _frame(prefix + ".image_hash", cell.image_hash)
+        out = out + _frame(prefix + ".configuration_hash", cell.configuration_hash)
+        out = out + _evidence_canonical(prefix + ".boot", cell.boot)
+        out = out + _evidence_canonical(prefix + ".mount", cell.mount)
+        out = out + _evidence_canonical(prefix + ".target_listing", cell.target_listing)
+        out = out + _evidence_canonical(prefix + ".arbitrary_fs_program", cell.arbitrary_fs_program)
+        out = out + _evidence_canonical(prefix + ".compiler_lineage", cell.compiler_lineage)
+        out = out + _evidence_canonical(prefix + ".source_identity", cell.source_identity)
+        out = out + _evidence_canonical(prefix + ".run_correlation", cell.run_correlation)
+        out = out + _evidence_canonical(prefix + ".payload.evidence", cell.payload.evidence)
+        out = out + _frame(prefix + ".payload.usr_bin", cell.payload.usr_bin.to_text())
+        out = out + _frame(prefix + ".payload.bin", cell.payload.bin.to_text())
+        out = out + _frame(prefix + ".payload.sys_apps", cell.payload.sys_apps.to_text())
+        out = out + _frame(prefix + ".payload.sys_simpletool_sdn", cell.payload.sys_simpletool_sdn.to_text())
+        out = out + _frame(prefix + ".payload.executed", cell.payload.executed_from_guest_storage.to_text())
+        out = out + _frame(prefix + ".payload.usr_bin_hash", cell.payload.usr_bin_artifact_hash)
+        out = out + _frame(prefix + ".payload.bin_hash", cell.payload.bin_artifact_hash)
+        out = out + _frame(prefix + ".payload.sys_apps_hash", cell.payload.sys_apps_artifact_hash)
+        out = out + _frame(prefix + ".payload.sys_simpletool_sdn_hash", cell.payload.sys_simpletool_sdn_artifact_hash)
+        out = out + _evidence_canonical(prefix + ".stress_24h", cell.stress_24h)
+        out = out + _frame(prefix + ".pure_simple_lineage", cell.pure_simple_lineage.to_text())
+        index = index + 1
+    out
+
+pub fn certified_simpleos_manifest_hash_v1(manifest: CertifiedSimpleOsManifestV1) -> text:
+    sha256_text(certified_simpleos_manifest_canonical_v1(manifest))
+
+fn _evidence_absent(evidence: CertifiedGuestEvidenceV1) -> bool:
+    not evidence.present and not evidence.passed
+
+fn _unselected_evidence_absent(cell: CertifiedCellV1) -> bool:
+    _evidence_absent(cell.boot) and _evidence_absent(cell.mount) and
+        _evidence_absent(cell.target_listing) and _evidence_absent(cell.arbitrary_fs_program) and
+        _evidence_absent(cell.compiler_lineage) and _evidence_absent(cell.source_identity) and
+        _evidence_absent(cell.run_correlation) and _evidence_absent(cell.payload.evidence) and
+        _evidence_absent(cell.stress_24h)
+
+fn _selected_cell_reason(cell: CertifiedCellV1, manifest: CertifiedSimpleOsManifestV1) -> text:
+    if cell.run_id != manifest.run_id:
+        return "manifest-run-id-mismatch"
+    if not _hex_hash_valid(cell.source_revision) or cell.source_revision != manifest.source_revision:
+        return "source-revision-mismatch"
+    if cell.host_identity != certified_simpleos_host_identity_v1(cell.cell_id) or
+            cell.guest_identity != certified_simpleos_guest_identity_v1(cell.cell_id) or
+            cell.configuration_identity != certified_simpleos_configuration_identity_v1(cell.cell_id):
+        return "cell-coordinate-identity-mismatch"
+    if not _hex_hash_valid(cell.image_hash) or not _hex_hash_valid(cell.configuration_hash):
+        return "missing-cell-identity"
+    if not cell.pure_simple_lineage:
+        return "non-pure-simple-lineage"
+
+    val receipts = [
+        cell.boot, cell.mount, cell.target_listing, cell.arbitrary_fs_program,
+        cell.compiler_lineage, cell.source_identity, cell.run_correlation
+    ]
+    for receipt in receipts:
+        if not _evidence_complete(receipt, manifest):
+            return "missing-or-nontarget-guest-evidence"
+        if not _evidence_correlates(receipt, cell):
+            return "receipt-correlation-mismatch"
+    if not _payload_complete(cell.payload, cell, manifest):
+        return "incomplete-canonical-guest-payload"
+    if not _evidence_complete(cell.stress_24h, manifest) or not _evidence_correlates(cell.stress_24h, cell):
+        return "missing-or-uncorrelated-stress-24h-evidence"
+    ""
+
+fn _canonical_catalog_exact(cells: [CertifiedCellV1]) -> bool:
+    val catalog = certified_simpleos_cell_catalog_v1()
+    var expected_index = 0
+    for expected in catalog:
+        if cells[expected_index].cell_id != expected:
+            return false
+        var matches: u32 = 0
+        for cell in cells:
+            if cell.cell_id == expected:
+                matches = matches + 1
+        if matches != 1:
+            return false
+        expected_index = expected_index + 1
+    true
+
+fn _validation(structurally_valid: bool, accepted: bool, status: text, reason: text, visible: u32, selected: u32, passing: u32, umbrella: bool) -> CertifiedSimpleOsValidationV1:
+    CertifiedSimpleOsValidationV1(structurally_valid: structurally_valid, accepted: accepted, status: status, reason: reason, visible_cell_count: visible, selected_cell_count: selected, passing_cell_count: passing, umbrella_all_platforms: umbrella)
+
+pub fn certified_simpleos_manifest_validate(manifest: CertifiedSimpleOsManifestV1) -> CertifiedSimpleOsValidationV1:
+    val visible_count = manifest.cells.len() as u32
+    # Schema 2 adds hash-bound host identity to rows and target receipts.
+    if manifest.schema_version != 2:
+        return _validation(false, false, CERTIFIED_SIMPLEOS_FAILED, "unsupported-schema", visible_count, 0, 0, false)
+    if manifest.run_id.len() == 0 or manifest.release_id.len() == 0 or not _hex_hash_valid(manifest.source_revision) or not _hex_hash_valid(manifest.compiler_receipt_hash) or manifest.admission_at_epoch_s == 0:
+        return _validation(false, false, CERTIFIED_SIMPLEOS_FAILED, "invalid-manifest-identity", visible_count, 0, 0, false)
+    if manifest.cells.len() != 24:
+        return _validation(false, false, CERTIFIED_SIMPLEOS_FAILED, "visible-cell-count-must-be-24", visible_count, 0, 0, false)
+    if not _canonical_catalog_exact(manifest.cells):
+        return _validation(false, false, CERTIFIED_SIMPLEOS_FAILED, "cells-must-exactly-match-catalog-v1", visible_count, 0, 0, false)
+    if not _hex_hash_valid(manifest.manifest_hash) or manifest.manifest_hash != certified_simpleos_manifest_hash_v1(manifest):
+        return _validation(false, false, CERTIFIED_SIMPLEOS_FAILED, "manifest-content-hash-mismatch", visible_count, 0, 0, false)
+
+    var selected_count: u32 = 0
+    var passing_count: u32 = 0
+    for cell in manifest.cells:
+        if not cell.selected:
+            if cell.unselected_reason.len() == 0:
+                return _validation(false, false, CERTIFIED_SIMPLEOS_FAILED, "unselected-cell-missing-reason:{cell.cell_id}", 24, selected_count, passing_count, false)
+            if not _unselected_evidence_absent(cell):
+                return _validation(false, false, CERTIFIED_SIMPLEOS_FAILED, "unselected-cell-retains-pass-evidence:{cell.cell_id}", 24, selected_count, passing_count, false)
+            continue
+        selected_count = selected_count + 1
+        val reason = _selected_cell_reason(cell, manifest)
+        if reason.len() > 0:
+            return _validation(true, false, CERTIFIED_SIMPLEOS_BLOCKED, "{reason}:{cell.cell_id}", 24, selected_count, passing_count, false)
+        passing_count = passing_count + 1
+
+    if selected_count == 0:
+        return _validation(true, false, CERTIFIED_SIMPLEOS_BLOCKED, "no-certified-cells-selected", 24, 0, 0, false)
+    if selected_count != 24:
+        return _validation(true, true, CERTIFIED_SIMPLEOS_PASS, "certified-subset-pass", 24, selected_count, passing_count, false)
+    _validation(true, true, CERTIFIED_SIMPLEOS_PASS, "all-24-selected-cells-pass", 24, 24, 24, true)
+
+export certified_simpleos_cell_catalog_v1, certified_simpleos_host_identity_v1
+export certified_simpleos_guest_identity_v1
+export certified_simpleos_configuration_identity_v1, certified_simpleos_manifest_validate
+export certified_simpleos_manifest_canonical_v1, certified_simpleos_manifest_hash_v1

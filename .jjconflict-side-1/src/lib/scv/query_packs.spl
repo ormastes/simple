@@ -1,0 +1,328 @@
+# SCV entity query packs per language — SCV-IMPL-P-06.
+#
+# A query pack is a versioned (`scv/query-pack/v1`) text table of rules for
+# one language, consumed by ONE extraction engine:
+#   pack: scv/query-pack/v1
+#   language: <id>
+#   scope: indent|brace          scope-parent policy for containers
+#   comment: <prefix>            comment line prefix (becomes CST trivia)
+#   doc: <prefix>                doc-comment / docstring prefix
+#   decl: <kind>|<prefix>|<mode> declaration rule; mode = sig (capture a
+#                                signature), scope (opens a container of
+#                                <kind>), top (module level only)
+#   member: <container-kind>|<member-kind>|<shape>  member rule inside an
+#                                open container; shape = ident | colon
+#   commutative: <label>|<prefix> lines forming an order-insensitive list
+#   reference: <kind>|<prefix>   reference rule (import edges)
+#
+# Extraction rows are "kind|name|line|container|signature" (1-based lines,
+# container = enclosing container name or ""). The Simple pack reproduces
+# the SCV-IMPL-I-03 symbol-entity rows exactly (symbol_entity.spl delegates
+# here). HONEST SCOPE: packs are line-structural rules, not grammars — no
+# pack claims to parse its language; the Rust/Python packs exist to prove
+# the per-language shape of the engine on brace and indent scopes.
+
+use std.scv.cst_ir.{scv_cst_atom, scv_cst_make, scv_cst_named, scv_cst_list, scv_cst_file, scv_cst_document}
+
+fn scv_query_pack_version() -> text:
+    "scv/query-pack/v1"
+
+fn scv_query_pack_languages() -> [text]:
+    ["simple", "python", "rust"]
+
+fn scv_query_pack_simple() -> text:
+    "pack: {scv_query_pack_version()}\nlanguage: simple\nscope: indent\ncomment: #\ndoc: \"\"\"\ndecl: fn|static fn |sig\ndecl: fn|fn |sig\ndecl: fn|me |sig\ndecl: type|class |scope\ndecl: type|struct |scope\ndecl: enum|enum |scope\ndecl: trait|trait |scope\ndecl: type|type |sig\ndecl: const|val |top\ndecl: const|var |top\nmember: enum|variant|ident\nmember: type|field|colon\ncommutative: imports|use \ncommutative: exports|export \nreference: import|use \n"
+
+fn scv_query_pack_python() -> text:
+    "pack: {scv_query_pack_version()}\nlanguage: python\nscope: indent\ncomment: #\ndoc: \"\"\"\ndecl: fn|async def |sig\ndecl: fn|def |sig\ndecl: type|class |scope\ncommutative: imports|import \ncommutative: imports|from \nreference: import|import \nreference: import|from \n"
+
+fn scv_query_pack_rust() -> text:
+    "pack: {scv_query_pack_version()}\nlanguage: rust\nscope: brace\ncomment: //\ndoc: ///\ndecl: fn|pub fn |sig\ndecl: fn|fn |sig\ndecl: type|pub struct |scope\ndecl: type|struct |scope\ndecl: enum|pub enum |scope\ndecl: enum|enum |scope\ndecl: trait|pub trait |scope\ndecl: trait|trait |scope\ndecl: const|pub const |top\ndecl: const|const |top\nmember: enum|variant|ident\nmember: type|field|colon\ncommutative: imports|use \nreference: import|use \n"
+
+fn scv_query_pack_for_language(language: text) -> text:
+    if language == "simple":
+        scv_query_pack_simple()
+    elif language == "python":
+        scv_query_pack_python()
+    elif language == "rust":
+        scv_query_pack_rust()
+    else:
+        ""
+
+# Rules of one category, each as its "|"-joined payload.
+fn scv_query_pack_rules(pack: text, category: text) -> [text]:
+    var out: [text] = []
+    val marker = "{category}: "
+    for line in pack.split("\n"):
+        if line.starts_with(marker):
+            out.push(line[marker.len():])
+    out
+
+fn scv_query_pack_setting(pack: text, key: text) -> text:
+    val rules = scv_query_pack_rules(pack, key)
+    if rules.len() > 0:
+        rules[0]
+    else:
+        ""
+
+# --- lexical helpers -------------------------------------------------------
+
+fn scv_qp_indent(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line[n:n + 1] == " ":
+        n = n + 1
+    n
+
+fn scv_qp_ident_prefix(s: text) -> text:
+    var i = 0
+    while i < s.len():
+        val c = s[i:i + 1]
+        val ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+        if not ok:
+            break
+        i = i + 1
+    s[0:i]
+
+fn scv_qp_is_ident(s: text) -> bool:
+    s != "" and scv_qp_ident_prefix(s) == s
+
+# Strip a trailing line comment (string-literal aware: a comment prefix
+# inside "..." is not a comment start).
+fn scv_qp_strip_comment(line: text, comment: text) -> text:
+    if comment == "":
+        return line
+    var in_str = false
+    var escaped = false
+    var i = 0
+    while i < line.len():
+        val c = line[i:i + 1]
+        if in_str:
+            if escaped:
+                escaped = false
+            elif c == "\\":
+                escaped = true
+            elif c == "\"":
+                in_str = false
+        elif c == "\"":
+            in_str = true
+        elif line[i:].starts_with(comment):
+            return line[0:i]
+        i = i + 1
+    line
+
+# Signature text after the name: trailing comment removed, then up to the
+# block opener (":" for indent scopes, "{" for brace scopes), trailing
+# ";"/"," stripped.
+fn scv_qp_signature(rest: text, scope: text, comment: text) -> text:
+    var sig = scv_qp_strip_comment(rest, comment).trim()
+    val opener = if scope == "brace": "{" else: ":"
+    if scope == "brace":
+        val idx = sig.index_of(opener)
+        if idx >= 0:
+            sig = sig[0:idx]
+    elif sig.ends_with(":"):
+        sig = sig[0:sig.len() - 1]
+    sig = sig.trim()
+    while sig.ends_with(";") or sig.ends_with(","):
+        sig = sig[0:sig.len() - 1].trim()
+    sig
+
+fn scv_qp_brace_delta(line: text) -> i64:
+    var d = 0
+    for ch in line.chars():
+        if ch == "{":
+            d = d + 1
+        elif ch == "}":
+            d = d - 1
+    d
+
+# --- extraction engine -----------------------------------------------------
+
+# Extract declarations from `source` under the pack for `language`.
+# Rows: "kind|name|line|container|signature". Unknown language -> [].
+fn scv_query_pack_extract_decls(language: text, source: text) -> [text]:
+    val pack = scv_query_pack_for_language(language)
+    if pack == "":
+        return []
+    val scope = scv_query_pack_setting(pack, "scope")
+    val comment = scv_query_pack_setting(pack, "comment")
+    val decl_rules = scv_query_pack_rules(pack, "decl")
+    val member_rules = scv_query_pack_rules(pack, "member")
+    var out: [text] = []
+    var container = ""
+    var container_kind = ""
+    var container_indent = -1
+    var container_depth = -1
+    var depth = 0
+    var line_no = 0
+    for raw in source.split("\n"):
+        line_no = line_no + 1
+        val t = raw.trim()
+        if t == "" or (comment != "" and t.starts_with(comment)):
+            continue
+        val indent = scv_qp_indent(raw)
+        if scope == "indent":
+            if container_indent >= 0 and indent <= container_indent:
+                container = ""
+                container_kind = ""
+                container_indent = -1
+        elif container_depth >= 0 and depth <= container_depth:
+            container = ""
+            container_kind = ""
+            container_depth = -1
+        var kind = ""
+        var mode = ""
+        var rest = ""
+        for rule in decl_rules:
+            val p = rule.split("|")
+            if p.len() < 3:
+                continue
+            if p[2] == "top" and indent != 0:
+                continue
+            if t.starts_with(p[1]):
+                kind = p[0]
+                mode = p[2]
+                rest = t[p[1].len():]
+                break
+        val line_delta = scv_qp_brace_delta(t)
+        if kind != "":
+            val name = scv_qp_ident_prefix(rest)
+            if name != "":
+                val sig = if mode == "sig": scv_qp_signature(rest[name.len():], scope, comment) else: ""
+                out.push("{kind}|{name}|{line_no}|{container}|{sig}")
+                if mode == "scope":
+                    container = name
+                    container_kind = kind
+                    container_indent = indent
+                    container_depth = depth
+            depth = depth + line_delta
+            if scope == "brace" and mode == "scope" and depth <= container_depth:
+                # single-line container (e.g. `enum C { A, B }`)
+                container = ""
+                container_kind = ""
+                container_depth = -1
+            continue
+        # Members of an open container.
+        val inside = if scope == "indent": container != "" and indent > container_indent else: container != "" and depth > container_depth
+        if inside:
+            for rule in member_rules:
+                val p = rule.split("|")
+                if p.len() < 3 or p[0] != container_kind:
+                    continue
+                var body = t
+                while body.ends_with(",") or body.ends_with(";"):
+                    body = body[0:body.len() - 1].trim()
+                if p[2] == "ident" and scv_qp_is_ident(body):
+                    out.push("{p[1]}|{body}|{line_no}|{container}|")
+                    break
+                if p[2] == "colon" and body.contains(":") and not body.contains("("):
+                    val fname = scv_qp_ident_prefix(body)
+                    if fname != "" and body[fname.len():fname.len() + 1] == ":":
+                        out.push("{p[1]}|{fname}|{line_no}|{container}|{body[fname.len() + 1:].trim()}")
+                        break
+        depth = depth + line_delta
+    out
+
+# Per-line declaration lookup (key = 1-based line number as text) for the parser's fallback line nodes:
+# "kind|qualified_name|signature" for a declaration line, "" otherwise.
+# The qualified name is container.name so a flat (fallback) node tree still
+# yields fully qualified named anchors.
+fn scv_query_pack_line_decls(language: text, source: text) -> Dict<text, text>:
+    var by_line: Dict<text, text> = {}
+    for row in scv_query_pack_extract_decls(language, source):
+        val p = row.split("|")
+        if p.len() < 5:
+            continue
+        val qualified = if p[3] != "": "{p[3]}.{p[1]}" else: p[1]
+        by_line[p[2]] = "{p[0]}|{qualified}|{p[4]}"
+    by_line
+
+# --- projection onto the generic CST (P-05) --------------------------------
+
+# File(label) with: a commutative List per commutative rule label, Trivia
+# for comment/doc lines, and a Named(kind) node per declaration carrying
+# name/signature atoms; members nest under their container node.
+fn scv_query_pack_cst(language: text, label: text, source: text) -> text:
+    val pack = scv_query_pack_for_language(language)
+    if pack == "":
+        return scv_cst_document(scv_cst_file(label, [scv_cst_make("error", "", "", "no query pack for language: {language}", [])]))
+    val comment = scv_query_pack_setting(pack, "comment")
+    val doc = scv_query_pack_setting(pack, "doc")
+    val commutative_rules = scv_query_pack_rules(pack, "commutative")
+    val decls = scv_query_pack_line_decls(language, source)
+    var list_labels: [text] = []
+    var list_items: Dict<text, [text]> = {}
+    var top: [text] = []
+    var top_names: [text] = []
+    var member_of: Dict<text, [text]> = {}
+    var line_no = 0
+    for raw in source.split("\n"):
+        line_no = line_no + 1
+        val t = raw.trim()
+        if t == "":
+            continue
+        if doc != "" and t.starts_with(doc):
+            top.push(scv_cst_make("trivia", "doc", "", t, []))
+            top_names.push("")
+            continue
+        if comment != "" and t.starts_with(comment):
+            top.push(scv_cst_make("trivia", "comment", "", t, []))
+            top_names.push("")
+            continue
+        var listed = false
+        for rule in commutative_rules:
+            val p = rule.split("|")
+            if p.len() >= 2 and t.starts_with(p[1]):
+                if not list_items.contains_key(p[0]):
+                    list_labels.push(p[0])
+                    list_items[p[0]] = []
+                var items = list_items[p[0]]
+                items.push(scv_cst_atom("item", t))
+                list_items[p[0]] = items
+                listed = true
+                break
+        if listed:
+            continue
+        if decls.contains_key("{line_no}"):
+            val p = decls["{line_no}"].split("|")
+            val node = scv_cst_named(p[0], [scv_cst_atom("name", p[1]), scv_cst_atom("signature", p[2])])
+            val dot = p[1].index_of(".")
+            if dot >= 0:
+                val owner = p[1][0:dot]
+                if not member_of.contains_key(owner):
+                    member_of[owner] = []
+                var members = member_of[owner]
+                members.push(node)
+                member_of[owner] = members
+            else:
+                top.push(node)
+                top_names.push(p[1])
+    var children: [text] = []
+    for l in list_labels:
+        children.push(scv_cst_list(l, "commutative", list_items[l]))
+    var ti = 0
+    while ti < top.len():
+        val node = top[ti]
+        val nm = top_names[ti]
+        ti = ti + 1
+        if nm != "" and member_of.contains_key(nm):
+            # rebuild the container with its members appended (ordered)
+            val head = scv_cst_named(scv_qp_named_label(node.split("\n")[0]), [scv_cst_atom("name", nm), scv_cst_atom("signature", scv_qp_named_signature(node)), scv_cst_list("members", "ordered", member_of[nm])])
+            children.push(head)
+            continue
+        children.push(node)
+    scv_cst_document(scv_cst_file(label, children))
+
+fn scv_qp_named_label(head: text) -> text:
+    head.split("|")[1]
+
+fn scv_qp_named_signature(node: text) -> text:
+    for line in node.split("\n"):
+        val t = line.trim()
+        if t.starts_with("atom|signature||"):
+            return t["atom|signature||".len():]
+    ""
+
+export scv_query_pack_version, scv_query_pack_languages, scv_query_pack_for_language
+export scv_query_pack_rules, scv_query_pack_setting
+export scv_query_pack_extract_decls, scv_query_pack_line_decls, scv_query_pack_cst

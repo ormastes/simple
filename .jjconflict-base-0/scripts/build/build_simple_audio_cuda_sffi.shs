@@ -1,0 +1,65 @@
+#!/bin/sh
+# Build the narrow CUDA Driver API audio shim loaded by the pure-Simple owner.
+#
+# `src/runtime/sffi/simple_audio_cuda_driver.c` owns the simple_audio_cuda_*
+# and simple_audio_host_*_shared extern surface that
+# `std.engine.audio.simple_audio_cuda_driver` and
+# `src/app/simpleos_audio_host/daemon_runner.spl` reach through
+# `DynLib.load("libsimple_audio_cuda.so")`. It resolves CUDA lazily via dlopen,
+# so it needs no CUDA toolkit at build time and is deliberately absent from the
+# compiler's default core C runtime -- exactly like the sqlite and sdl2
+# providers, it is staged here and reached through LD_LIBRARY_PATH.
+#
+# Until 2026-08-10 this file had NO build rule anywhere in the repo; the only
+# copy on any host was a hand-built artifact under
+# `build/verify/simpleos-io-audio/` that would vanish on a clean checkout.
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+OUT_DIR="${SIMPLE_AUDIO_CUDA_OUT_DIR:-$REPO_ROOT/build/sffi}"
+SRC="$REPO_ROOT/src/runtime/sffi/simple_audio_cuda_driver.c"
+
+case "$(uname -s)" in
+  Darwin) EXT="dylib" ;;
+  Linux|FreeBSD) EXT="so" ;;
+  *) echo "[build_simple_audio_cuda_sffi] unsupported host" >&2; exit 1 ;;
+esac
+
+[ -s "$SRC" ] || { echo "[build_simple_audio_cuda_sffi] missing $SRC" >&2; exit 1; }
+
+CC="${CC:-cc}"
+mkdir -p "$OUT_DIR"
+DST="$OUT_DIR/libsimple_audio_cuda.$EXT"
+
+case "$(uname -s)" in
+  Darwin)
+    SDK_PATH="$(xcrun --show-sdk-path)"
+    "$CC" -dynamiclib -Os -fPIC -std=gnu11 \
+      -isysroot "$SDK_PATH" \
+      -I"$REPO_ROOT/src/runtime" -I"$REPO_ROOT/src/runtime/platform" \
+      -Wl,-install_name,@rpath/libsimple_audio_cuda.dylib \
+      "$SRC" -o "$DST.new"
+    ;;
+  *)
+    "$CC" -shared -Os -fPIC -std=gnu11 \
+      -I"$REPO_ROOT/src/runtime" -I"$REPO_ROOT/src/runtime/platform" \
+      "$SRC" -o "$DST.new" -ldl
+    ;;
+esac
+
+mv "$DST.new" "$DST"
+# Fail closed: a symbol-less provider must never look like success. These are
+# the entry points the Simple owner calls by name, so a rename on either side
+# breaks the build instead of failing at dlsym time.
+for sym in simple_audio_cuda_open simple_audio_cuda_close \
+           simple_audio_cuda_module_load simple_audio_cuda_module_unload \
+           simple_audio_cuda_alloc simple_audio_cuda_free \
+           simple_audio_cuda_upload simple_audio_cuda_download \
+           simple_audio_cuda_launch simple_audio_cuda_sync \
+           simple_audio_cuda_identity \
+           simple_audio_host_map_shared simple_audio_host_unmap_shared; do
+  nm -g "$DST" 2>/dev/null | grep -Eq "(_| )$sym\$" ||
+    { echo "[build_simple_audio_cuda_sffi] provider lacks $sym" >&2; exit 1; }
+done
+echo "[build_simple_audio_cuda_sffi] staged: $DST"
+echo "[build_simple_audio_cuda_sffi] reach it with: LD_LIBRARY_PATH=$OUT_DIR"

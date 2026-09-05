@@ -1,0 +1,30 @@
+# parse_multipart_part misidentifies the header/body separator — gc_async_mut tier
+#
+# Same defect as nogc_sync_mut/http/headers.spl (already fixed there, see
+# test/01_unit/lib/http/multipart_header_separator_spec.spl): a real multipart
+# part, as produced by body.split(delimiter) in parse_multipart, always STARTS
+# with "\r\n" (the CRLF terminating the boundary line is left attached to the
+# following part), so lines[0] is always "". The gc_async_mut copy of
+# parse_multipart_part still scans from index 0 and treats that leading empty
+# line as the header/body separator, setting header_end = 0 and immediately
+# tripping the "if header_end == 0: return nil" guard — so parse_multipart
+# never returns a single valid part for a normal, well-formed body.
+
+use std.spec.*
+use std.gc_async_mut.http.headers.{parse_multipart}
+
+describe "gc_async_mut http.headers parse_multipart — header/body separator":
+    it "parses a normal single-part multipart body with headers and a body":
+        val boundary = "BOUNDARY"
+        val body = "--BOUNDARY\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nhello\r\n--BOUNDARY--\r\n"
+        val parts = parse_multipart(body, boundary)
+        assert_true(parts.length() > 0)
+        var found_real_part = false
+        var i = 0
+        while i < parts.length():
+            val part = parts[i]
+            val body_text = part[1]
+            if body_text.starts_with("hello"):
+                found_real_part = true
+            i = i + 1
+        assert_true(found_real_part)

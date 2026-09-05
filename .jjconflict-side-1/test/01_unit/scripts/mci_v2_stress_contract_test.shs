@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+gate=$root/scripts/check/check-mci-v2-stress.shs
+work=$(mktemp -d "$root/build/.mci-stress-contract.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/input"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+source_hash=$(printf source | sha256sum | awk '{print $1}'); config_hash=$(printf config | sha256sum | awk '{print $1}')
+start=99999999999999999999999999999999999999; end=100000000000000000000000086399999999999
+make_lane() {
+    lane=$1
+    printf 'utc_ns\trss_bytes\tcpu_millis\tqueue_depth\tstorage_bytes\n%s\t100\t0\t0\t1000\n%s\t101\t1\t1\t1001\n' "$start" "$end" > "$work/input/$lane.resources.tsv"
+    resource_sha=$(sha256sum "$work/input/$lane.resources.tsv" | awk '{print $1}')
+    {
+        echo receipt_schema=mci-stress-lane-receipt-v1; echo attestation=signed-v1; echo trusted_key_id=contract-key
+        echo lane=$lane; echo certified_platform=linux-x86_64-certified; echo run_id=stress-contract
+        echo source_hash=$source_hash; echo configuration_hash=$config_hash; echo start_utc_ns=$start; echo end_utc_ns=$end
+        echo resource_series_sha256=$resource_sha; echo sample_count=2
+        echo rss_ceiling_bytes=101; echo cpu_ceiling_millis=1; echo queue_ceiling=1; echo storage_ceiling_bytes=1001
+        echo rss_min_bytes=100; echo rss_max_bytes=101; echo cpu_min_millis=0; echo cpu_max_millis=1
+        echo queue_min=0; echo queue_max=1; echo storage_min_bytes=1000; echo storage_max_bytes=1001
+        echo invariant_violations=0; echo timeout_violations=0; echo leak_violations=0; echo queue_violations=0
+    } > "$work/input/$lane.receipt"
+    openssl dgst -sha256 -sign "$work/private.pem" -out "$work/input/$lane.sig" "$work/input/$lane.receipt"
+}
+for lane in platform allocation process rendering; do make_lane "$lane"; done
+run_gate() { MCI_STRESS_CONTROLLED_FIXTURE=1 "$gate" --contract-fixture --evidence "$1" --input-dir "$2" --run-id stress-contract --source-hash "$source_hash" --configuration-hash "$config_hash" --trusted-key "$work/public.pem" --trusted-key-id contract-key; }
+run_gate "$work/evidence" "$work/input" >/dev/null
+grep -Fxq artifact_schema=mci-stress-evidence-v1 "$work/evidence/artifacts/stress.evidence"
+grep -Fxq artifact_mode=contract-only "$work/evidence/artifacts/stress.evidence"
+grep -Fxq release_eligible=false "$work/evidence/artifacts/stress.evidence"
+grep -Fxq result=contract_only "$work/evidence/receipts/stress.receipt.unsigned.template"
+[ ! -e "$work/evidence/receipts/stress.receipt" ]
+
+# Exact-time negative.
+cp -R "$work/input" "$work/bad-time"; sed 's/end_utc_ns=.*/end_utc_ns=100000000000000000000000086399999999998/' "$work/bad-time/platform.receipt" > "$work/r"; mv "$work/r" "$work/bad-time/platform.receipt"
+openssl dgst -sha256 -sign "$work/private.pem" -out "$work/bad-time/platform.sig" "$work/bad-time/platform.receipt"
+if run_gate "$work/out-time" "$work/bad-time" >/dev/null 2>&1; then exit 1; fi
+cp -R "$work/input" "$work/bad-time-plus"; sed 's/end_utc_ns=.*/end_utc_ns=100000000000000000000000086400000000000/' "$work/bad-time-plus/platform.receipt" > "$work/r"; mv "$work/r" "$work/bad-time-plus/platform.receipt"
+openssl dgst -sha256 -sign "$work/private.pem" -out "$work/bad-time-plus/platform.sig" "$work/bad-time-plus/platform.receipt"
+if run_gate "$work/out-time-plus" "$work/bad-time-plus" >/dev/null 2>&1; then exit 1; fi
+
+# Resource-series and resource-boundary negatives.
+cp -R "$work/input" "$work/bad-resource"; sed 's/101\t1\t1\t1001/102\t1\t1\t1001/' "$work/bad-resource/process.resources.tsv" > "$work/r"; mv "$work/r" "$work/bad-resource/process.resources.tsv"
+resource_sha=$(sha256sum "$work/bad-resource/process.resources.tsv" | awk '{print $1}'); sed "s/resource_series_sha256=.*/resource_series_sha256=$resource_sha/" "$work/bad-resource/process.receipt" > "$work/r"; mv "$work/r" "$work/bad-resource/process.receipt"; openssl dgst -sha256 -sign "$work/private.pem" -out "$work/bad-resource/process.sig" "$work/bad-resource/process.receipt"
+if run_gate "$work/out-resource" "$work/bad-resource" >/dev/null 2>&1; then exit 1; fi
+
+# Tamper and invariant negatives.
+cp -R "$work/input" "$work/tamper"; printf x >> "$work/tamper/rendering.receipt"
+if run_gate "$work/out-tamper" "$work/tamper" >/dev/null 2>&1; then exit 1; fi
+cp -R "$work/input" "$work/violation"; sed 's/queue_violations=0/queue_violations=1/' "$work/violation/allocation.receipt" > "$work/r"; mv "$work/r" "$work/violation/allocation.receipt"
+openssl dgst -sha256 -sign "$work/private.pem" -out "$work/violation/allocation.sig" "$work/violation/allocation.receipt"
+if run_gate "$work/out-violation" "$work/violation" >/dev/null 2>&1; then exit 1; fi
+
+# Even a cryptographically valid fixture-shaped aggregate receipt is rejected.
+aggregate="$work/aggregate"; mkdir -p "$aggregate/artifacts" "$aggregate/receipts" "$aggregate/signatures"
+cp "$work/evidence/artifacts/stress.evidence" "$aggregate/artifacts/stress.evidence"
+sed -e 's/attestation=EXTERNAL_SIGNER_SETS_signed-v1/attestation=signed-v1/' -e 's/trusted_key_id=EXTERNAL_SIGNER_SETS_key_id/trusted_key_id=contract-key/' -e "s/valid_until_utc_ns=EXTERNAL_SIGNER_SETS_valid_until_utc_ns/valid_until_utc_ns=$end/" -e 's/result=contract_only/result=pass/' "$work/evidence/receipts/stress.receipt.unsigned.template" | sed '/^receipt_hash=/d' > "$work/aggregate.canonical"
+cp "$work/aggregate.canonical" "$aggregate/receipts/stress.receipt"; echo "receipt_hash=$(sha256sum "$work/aggregate.canonical" | awk '{print $1}')" >> "$aggregate/receipts/stress.receipt"
+openssl dgst -sha256 -sign "$work/private.pem" -out "$aggregate/signatures/stress.sig" "$work/aggregate.canonical"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/reviewer-private.pem" >/dev/null 2>&1; openssl pkey -in "$work/reviewer-private.pem" -pubout -out "$work/reviewer.pem" >/dev/null 2>&1
+sh "$root/scripts/check/check-mci-v2-aggregate.shs" --evidence "$aggregate" --run-id stress-contract --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$end" --trusted-key "$work/public.pem" --trusted-key-id contract-key --reviewer-key "$work/reviewer.pem" --reviewer-key-id reviewer-key >/dev/null 2>&1 || true
+grep -Fq 'row=stress|BLOCKED|' "$aggregate/aggregate-report-v1.env"
+# Compatibility: aggregate reached artifact policy, rather than schema/result/hash rejection.
+grep -Fq 'row=stress|BLOCKED|non-release-artifact-policy|' "$aggregate/aggregate-report-v1.env"
+echo 'PASS: MCI-v2 stress producer controlled contract'

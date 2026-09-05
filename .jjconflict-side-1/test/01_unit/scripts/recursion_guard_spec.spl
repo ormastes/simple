@@ -1,0 +1,48 @@
+# scripts/lib/recursion_guard.shs — REPRODUCING spec
+#
+# The guard mirrors src/app/llm_caret/agent_workspace.spl's env-depth
+# mechanism (LLM_CARET_WORKSPACE_DEPTH) for .shs scripts: SIMPLE_SHS_DEPTH is
+# bumped per sourcing script and refused at SIMPLE_SHS_MAX_DEPTH (exit 3).
+#
+# WHY A SUBPROCESS: the oracle is the committed sh guard itself (what hooks and
+# humans run); exit codes are echoed as absolute tokens, never read through a
+# pipe's status.
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_run}
+
+val GUARD: text = "scripts/lib/recursion_guard.shs"
+val TMP_PARENT: text = "/mnt/data/tmp/claude-1000"
+
+describe "recursion guard for .shs scripts":
+    """
+    As a maintainer landing through check scripts that fork other check
+    scripts, I want a script that ends up re-invoking itself to be refused
+    at a bounded depth with exit 3 and one clear FAIL line, so a recursion
+    bug cannot fork-bomb the shared box.
+    """
+
+    it "the guard's own --selftest passes with a PASS verdict line":
+        step("Run sh " + GUARD + " --selftest and capture exit code plus last stdout line")
+        val out = process_run("sh", ["-c",
+            "o=$(sh " + GUARD + " --selftest); rc=$?; " +
+            "last=$(printf '%s\\n' \"$o\" | tail -1); echo \"RC=$rc LAST=$last\""])
+        val s: text = out.0
+        step("Exit code is 0")
+        expect(s).to_contain("RC=0")
+        step("Verdict line names a non-zero fixture count")
+        expect(s).to_contain("LAST=recursion-guard selftest: PASS — 4 fixture(s)")
+
+    it "a self-invoking script is refused with exit 3 and the FAIL line":
+        step("Write a fixture that sources the guard then re-executes itself")
+        val out = process_run("sh", ["-c",
+            "mkdir -p " + TMP_PARENT + "; d=$(mktemp -d " + TMP_PARENT + "/rg_spec.XXXXXX); " +
+            "g=$(pwd)/" + GUARD + "; " +
+            "printf '. \"%s\"\\nexec sh \"$0\"\\n' \"$g\" > $d/loop.shs; " +
+            "err=$(env -u SIMPLE_SHS_DEPTH -u SIMPLE_SHS_MAX_DEPTH sh $d/loop.shs 2>&1 >/dev/null); rc=$?; " +
+            "rm -rf $d; echo \"RC=$rc ERR=$err\""])
+        val s: text = out.0
+        step("Exit code is 3 — the recursion-guard refusal code")
+        expect(s).to_contain("RC=3")
+        step("The FAIL line names the script, the depth, and the override knob")
+        expect(s).to_contain("ERR=recursion-guard: FAIL — loop.shs refused at depth 3 (max 3); set SIMPLE_SHS_MAX_DEPTH to raise")

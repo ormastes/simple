@@ -1,0 +1,49 @@
+# codex-impl
+# Stable logical change identity and immutable revision derivation.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.lifecycle.model.{ChangeIdentity, RevisionIdentity, RevisionAliases, LifecycleResult, lifecycle_ok, lifecycle_error}
+
+fn lifecycle_atom_valid(value: text) -> bool:
+    value != "" and not value.contains("|") and not value.contains("\n")
+
+fn lifecycle_change_identity(seed: text, title: text, owner: text, intent: text) -> ChangeIdentity:
+    val change_id = "chg_" + sha256_text("change|" + seed)[0:24]
+    ChangeIdentity(change_id: change_id, title: title, intent_digest: sha256_text(intent), owner: owner)
+
+fn lifecycle_revision_identity(change_id: text, tree_id: text, parents: [text], metadata: text, aliases: RevisionAliases) -> RevisionIdentity:
+    val canonical = change_id + "|" + tree_id + "|" + parents.join(",") + "|" + sha256_text(metadata)
+    RevisionIdentity(
+        revision_id: "rev_" + sha256_text(canonical),
+        change_id: change_id,
+        tree_id: tree_id,
+        parent_revision_ids: parents,
+        metadata_digest: sha256_text(metadata),
+        aliases: aliases
+    )
+
+fn lifecycle_validate_revision(revision: RevisionIdentity) -> LifecycleResult:
+    if not revision.change_id.starts_with("chg_"):
+        return lifecycle_error("LIFECYCLE_CHANGE_ID", "revision change identity is malformed")
+    if not revision.revision_id.starts_with("rev_"):
+        return lifecycle_error("LIFECYCLE_REVISION_ID", "revision identity is malformed")
+    if not lifecycle_atom_valid(revision.tree_id):
+        return lifecycle_error("LIFECYCLE_TREE_ID", "tree identity is empty or unsafe")
+    lifecycle_ok("valid", revision.revision_id)
+
+fn lifecycle_aliases(jj_change_id: text, jj_commit_id: text, git_oid: text, provider_patchsets: [text]) -> RevisionAliases:
+    RevisionAliases(jj_change_id: jj_change_id, jj_commit_id: jj_commit_id, git_oid: git_oid, provider_patchsets: provider_patchsets)
+
+fn lifecycle_aliases_validate(aliases: RevisionAliases) -> LifecycleResult:
+    if aliases.jj_commit_id != "" and aliases.jj_change_id == "":
+        return lifecycle_error("LIFECYCLE_JJ_ALIAS", "JJ commit alias requires a stable JJ change alias")
+    if aliases.git_oid != "" and aliases.git_oid.len() < 7:
+        return lifecycle_error("LIFECYCLE_GIT_ALIAS", "Git object alias is too short to verify")
+    for patchset in aliases.provider_patchsets:
+        if not patchset.contains(":"):
+            return lifecycle_error("LIFECYCLE_PROVIDER_ALIAS", "provider patchset alias must be provider-qualified")
+    lifecycle_ok("aliases_valid", aliases.jj_change_id)
+
+export lifecycle_atom_valid, lifecycle_change_identity, lifecycle_revision_identity
+export lifecycle_validate_revision, lifecycle_aliases
+export lifecycle_aliases_validate

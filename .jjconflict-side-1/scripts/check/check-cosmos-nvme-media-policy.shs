@@ -1,0 +1,567 @@
+#!/bin/sh
+# Independent oracle, compiler edge mapping, C LLVM coverage, and ABI closure
+# for the allocation-free Cosmos NVMe/media scalar-policy owner.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SOURCE_DIR="$ROOT/src/os/kernel/arch/arm32/cosmos"
+TEST_DIR="$ROOT/test/02_integration/os/cosmos"
+POLICY_REL=src/os/kernel/arch/arm32/cosmos/cosmos_nvme_media_policy.spl
+POLICY_SOURCE="$ROOT/$POLICY_REL"
+POLICY_HEADER="$SOURCE_DIR/cosmos_nvme_media_policy.h"
+ORACLE="$TEST_DIR/cosmos_nvme_media_policy_oracle.c"
+ORACLE_HEADER="$TEST_DIR/cosmos_nvme_media_policy_oracle.h"
+PARITY="$TEST_DIR/cosmos_nvme_media_policy_parity_test.c"
+COVERAGE_PROBE="$ROOT/test/fixtures/os/cosmos_nvme_media_policy_coverage_probe.spl"
+DECISION_AUDIT="$ROOT/test/fixtures/os/cosmos_nvme_media_policy_decision_audit.sdn"
+UNIT_SPEC_REL=test/01_unit/os/arch/arm32/cosmos_nvme_media_policy_spec.spl
+UNIT_SPEC="$ROOT/$UNIT_SPEC_REL"
+FIRMWARE_OWNER="$SOURCE_DIR/cosmos_nvme_firmware.c"
+DISPATCH_OWNER="$SOURCE_DIR/cosmos_nvme_dispatch.c"
+FTL_MEDIA_OWNER="$SOURCE_DIR/cosmos_nvme_ftl_media.c"
+EVIDENCE_DIR="$ROOT/build/coverage/cosmos-nvme-media-policy"
+RECEIPT="$EVIDENCE_DIR/receipt.sdn"
+RECEIPT_TMP="$EVIDENCE_DIR/.receipt.sdn.tmp.$$"
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-nvme-media-policy.XXXXXX")
+trap 'case ${SCRATCH:-} in /tmp/cosmos-nvme-media-policy.*|${TMPDIR:-/tmp}/cosmos-nvme-media-policy.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac; rm -f "$RECEIPT_TMP"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL cosmos-nvme-media-policy: $*" >&2
+    exit 1
+}
+
+not_run() {
+    echo "RUNTIME_EVIDENCE: NOT_RUN compiler=${SIMPLE_STAGE4_BIN:-unset} mode=compiler-coverage+llvm-object targets=host,arm reason=$*" >&2
+    echo "STATUS: BLOCKED cosmos-nvme-media pure-policy runtime evidence" >&2
+    exit 2
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+meta_value() {
+    key=$1
+    awk -v key="$key" '
+        $1 == "meta" && $2 == key { value = $3; count++ }
+        END { if (count != 1) exit 1; print value }
+    ' "$DECISION_AUDIT"
+}
+
+verify_hash() {
+    [ "$(hash_file "$1")" = "$2" ] || fail "$3 changed during evidence run"
+}
+
+resolve_llvm_tool() {
+    base=$1
+    major=$2
+    if command -v "$base-$major" >/dev/null 2>&1; then
+        command -v "$base-$major"
+    elif command -v "$base" >/dev/null 2>&1; then
+        command -v "$base"
+    else
+        return 1
+    fi
+}
+
+mkdir -p "$EVIDENCE_DIR"
+rm -f "$RECEIPT" "$RECEIPT_TMP"
+
+EXPECTED_EXPORTS='cosmos_nvme_media_policy_address_set_valid
+cosmos_nvme_media_policy_begin_status
+cosmos_nvme_media_policy_chunk_bytes
+cosmos_nvme_media_policy_command_retry_limit
+cosmos_nvme_media_policy_command_span_status
+cosmos_nvme_media_policy_data_span_valid
+cosmos_nvme_media_policy_deallocate_valid
+cosmos_nvme_media_policy_dispatch_init_valid
+cosmos_nvme_media_policy_dispatch_queue_status
+cosmos_nvme_media_policy_dma_offsets_valid
+cosmos_nvme_media_policy_dsm_range_valid
+cosmos_nvme_media_policy_dsm_status
+cosmos_nvme_media_policy_end_within_namespace
+cosmos_nvme_media_policy_flush_status
+cosmos_nvme_media_policy_full_page
+cosmos_nvme_media_policy_init_valid
+cosmos_nvme_media_policy_mapped_read_status
+cosmos_nvme_media_policy_media_status
+cosmos_nvme_media_policy_page_action
+cosmos_nvme_media_policy_page_count
+cosmos_nvme_media_policy_post_state
+cosmos_nvme_media_policy_post_status
+cosmos_nvme_media_policy_retry_limit
+cosmos_nvme_media_policy_retry_terminal
+cosmos_nvme_media_policy_rw_status
+cosmos_nvme_media_policy_service_init_valid
+cosmos_nvme_media_policy_status_data_transfer
+cosmos_nvme_media_policy_status_invalid_field
+cosmos_nvme_media_policy_status_invalid_namespace
+cosmos_nvme_media_policy_status_invalid_opcode
+cosmos_nvme_media_policy_status_is_success
+cosmos_nvme_media_policy_status_lba_range
+cosmos_nvme_media_policy_status_success
+cosmos_nvme_media_policy_u64
+cosmos_nvme_media_policy_zeroes_span_status
+cosmos_nvme_media_policy_zeroes_status'
+
+EXPECTED_FIRMWARE_IMPORTS='cosmos_nvme_media_policy_dsm_status
+cosmos_nvme_media_policy_flush_status
+cosmos_nvme_media_policy_media_status
+cosmos_nvme_media_policy_post_state
+cosmos_nvme_media_policy_post_status
+cosmos_nvme_media_policy_rw_status
+cosmos_nvme_media_policy_service_init_valid
+cosmos_nvme_media_policy_status_invalid_opcode
+cosmos_nvme_media_policy_status_is_success
+cosmos_nvme_media_policy_status_success
+cosmos_nvme_media_policy_zeroes_status'
+
+EXPECTED_DISPATCH_IMPORTS='cosmos_nvme_media_policy_dispatch_init_valid
+cosmos_nvme_media_policy_dispatch_queue_status'
+
+EXPECTED_FTL_MEDIA_IMPORTS='cosmos_nvme_media_policy_begin_status
+cosmos_nvme_media_policy_chunk_bytes
+cosmos_nvme_media_policy_command_retry_limit
+cosmos_nvme_media_policy_command_span_status
+cosmos_nvme_media_policy_deallocate_valid
+cosmos_nvme_media_policy_dma_offsets_valid
+cosmos_nvme_media_policy_dsm_range_valid
+cosmos_nvme_media_policy_full_page
+cosmos_nvme_media_policy_init_valid
+cosmos_nvme_media_policy_mapped_read_status
+cosmos_nvme_media_policy_page_action
+cosmos_nvme_media_policy_page_count
+cosmos_nvme_media_policy_retry_limit
+cosmos_nvme_media_policy_retry_terminal
+cosmos_nvme_media_policy_u64
+cosmos_nvme_media_policy_zeroes_span_status'
+
+EXPECTED_FIRMWARE_ABI='cosmos_nvme_service_accept
+cosmos_nvme_service_init
+cosmos_nvme_service_poll'
+EXPECTED_DISPATCH_ABI='cosmos_nvme_dispatch_init
+cosmos_nvme_dispatch_poll'
+EXPECTED_FTL_MEDIA_ABI='cosmos_nvme_ftl_media_copy_data
+cosmos_nvme_ftl_media_deallocate
+cosmos_nvme_ftl_media_flush
+cosmos_nvme_ftl_media_init
+cosmos_nvme_ftl_media_program
+cosmos_nvme_ftl_media_program_data
+cosmos_nvme_ftl_media_read
+cosmos_nvme_ftl_media_write_zeroes'
+
+CLANG=${CLANG:-clang}
+READELF=${READELF:-readelf}
+command -v "$CLANG" >/dev/null 2>&1 || fail "clang is required"
+command -v "$READELF" >/dev/null 2>&1 || fail "readelf is required"
+CLANG_MAJOR=$("$CLANG" --version | sed -n '1s/[^0-9]*\([0-9][0-9]*\).*/\1/p')
+[ -n "$CLANG_MAJOR" ] || fail "cannot determine clang major version"
+LLVM_COV=${LLVM_COV:-$(resolve_llvm_tool llvm-cov "$CLANG_MAJOR" || true)}
+LLVM_PROFDATA=${LLVM_PROFDATA:-$(resolve_llvm_tool llvm-profdata "$CLANG_MAJOR" || true)}
+[ -n "$LLVM_COV" ] && [ -x "$LLVM_COV" ] || fail "matching llvm-cov is required"
+[ -n "$LLVM_PROFDATA" ] && [ -x "$LLVM_PROFDATA" ] || fail "matching llvm-profdata is required"
+
+source_exports=$(sed -n \
+    's/^[[:space:]]*@export("C", name: "\([^"]*\)").*/\1/p' \
+    "$POLICY_SOURCE" | LC_ALL=C sort -u)
+[ "$source_exports" = "$EXPECTED_EXPORTS" ] ||
+    fail "Simple source export manifest is not the exact 36-symbol ABI"
+grep -Fqx '#define COSMOS_NVME_MEDIA_POLICY_ABI_VERSION 1U' "$POLICY_HEADER" ||
+    fail "stable ABI version is not pinned to 1"
+grep -Fqx '#define COSMOS_NVME_MEDIA_POLICY_FUNCTIONS 36U' "$POLICY_HEADER" ||
+    fail "function denominator is not pinned to 36"
+grep -Fqx '#define COSMOS_NVME_MEDIA_POLICY_DECISIONS 63U' "$POLICY_HEADER" ||
+    fail "decision denominator is not pinned to 63"
+grep -Fqx '#define COSMOS_NVME_MEDIA_POLICY_BRANCH_OUTCOMES 126U' "$POLICY_HEADER" ||
+    fail "branch-outcome denominator is not pinned to 126"
+awk '
+    $0 == "pub fn cosmos_nvme_media_policy_page_action(" {
+        declarations++
+        if (getline <= 0 ||
+            $0 != "    lookup_status: i32, write: u32, page_offset: u32, page_count: u32")
+            exit 2
+        if (getline <= 0 || $0 != ") -> u32:") exit 3
+        exact++
+    }
+    END { if (declarations != 1 || exact != 1) exit 1 }
+' "$POLICY_SOURCE" || fail "Simple page_action exact signed signature changed"
+grep -Fqx '    int lookup_status, unsigned int write,' "$POLICY_HEADER" ||
+    fail "production C page_action signed signature changed"
+grep -Fqx '    int lookup_status, unsigned int write,' "$ORACLE_HEADER" ||
+    fail "oracle header page_action signed signature changed"
+grep -Fqx '    int lookup_status, unsigned int write,' "$ORACLE" ||
+    fail "oracle definition page_action signed signature changed"
+if grep -Eq 'coverage_(hit|mask|required|reset)|COVERAGE_REQUIRED' "$POLICY_SOURCE"; then
+    fail "owner-authored coverage counter is forbidden"
+fi
+if grep -Eq 'pass_todo|pass_do_nothing|pass_dn|todo\(|TODO|FIXME|unimplemented|stub' \
+        "$POLICY_SOURCE"; then
+    fail "Pure Simple owner contains a stub or placeholder"
+fi
+
+sed -n 's/^[[:space:]]*# @decision \([a-z0-9_][a-z0-9_]*\)$/\1/p' \
+    "$POLICY_SOURCE" >"$SCRATCH/source-decision-names.txt"
+awk '$1 == "decision" { print $3 }' "$DECISION_AUDIT" \
+    >"$SCRATCH/audit-decision-names.txt"
+awk '$1 == "decision" { print $2 "," $3 }' "$DECISION_AUDIT" \
+    >"$SCRATCH/audit-decisions.csv"
+diff -u "$SCRATCH/audit-decision-names.txt" \
+    "$SCRATCH/source-decision-names.txt" || fail "named decision set drifted"
+[ "$(wc -l <"$SCRATCH/source-decision-names.txt" | tr -d '[:space:]')" -eq 63 ] ||
+    fail "source decision denominator is not 63"
+[ "$(sort "$SCRATCH/source-decision-names.txt" | uniq | wc -l | tr -d '[:space:]')" -eq 63 ] ||
+    fail "source decision names are not unique"
+[ "$(meta_value schema)" = cosmos-nvme-media-policy-decision-audit-v1 ] ||
+    fail "decision audit schema changed"
+[ "$(meta_value owner_source)" = "$POLICY_REL" ] ||
+    fail "decision audit owner path changed"
+[ "$(meta_value owner_source_sha256)" = "$(hash_file "$POLICY_SOURCE")" ] ||
+    fail "decision audit owner hash is stale"
+[ "$(meta_value decision_sites)" = 63 ] || fail "decision audit site count changed"
+[ "$(meta_value branch_outcomes)" = 126 ] || fail "decision audit outcome count changed"
+[ "$(meta_value parity_rows)" = 196 ] || fail "frozen parity row count changed"
+[ "$(meta_value parity_digest)" = b6a2f693699eb752 ] ||
+    fail "frozen parity digest changed"
+[ "$(meta_value parity_digest_binding)" = function-id+arity+runtime-values+result+row ] ||
+    fail "frozen parity digest no longer binds runtime vector inputs"
+[ "$(meta_value c_oracle_llvm_branches)" = 259 ] ||
+    fail "C oracle branch denominator changed"
+awk '
+    $1 == "#" && $2 == "@decision" {
+        name = $3
+        if (getline <= 0) exit 2
+        if (index($0, "if ") == 0) exit 3
+        print name "," NR
+    }
+' "$POLICY_SOURCE" >"$SCRATCH/marker-lines.csv" ||
+    fail "a decision marker is not immediately above its branch"
+
+COMMON_FLAGS='-std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2'
+"$CLANG" $COMMON_FLAGS -O2 -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    -c "$ORACLE" -o "$SCRATCH/oracle.o"
+oracle_policy_symbols=$("$READELF" -sW "$SCRATCH/oracle.o" |
+    awk '($4 == "FUNC" || $7 == "UND") &&
+         $8 ~ /^cosmos_nvme_media_policy_/ { print $8 }')
+[ -z "$oracle_policy_symbols" ] ||
+    fail "independent C oracle aliases or imports production policy symbols"
+oracle_exports=$("$READELF" -sW "$SCRATCH/oracle.o" |
+    awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+         $8 ~ /^cosmos_nvme_media_oracle_/ { print $8 }' | LC_ALL=C sort -u)
+expected_oracle_exports=$(printf '%s\n' "$EXPECTED_EXPORTS" |
+    sed 's/^cosmos_nvme_media_policy_/cosmos_nvme_media_oracle_/')
+[ "$oracle_exports" = "$expected_oracle_exports" ] ||
+    fail "independent C oracle is not the exact 36-function surface"
+"$CLANG" $COMMON_FLAGS -O2 -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    -c "$PARITY" -o "$SCRATCH/parity.o"
+parity_policy_imports=$("$READELF" -sW "$SCRATCH/parity.o" |
+    awk '$7 == "UND" && $8 ~ /^cosmos_nvme_media_policy_/ { print $8 }' |
+    LC_ALL=C sort -u)
+[ "$parity_policy_imports" = "$EXPECTED_EXPORTS" ] ||
+    fail "parity vectors do not call the exact 36-symbol production ABI"
+parity_oracle_imports=$("$READELF" -sW "$SCRATCH/parity.o" |
+    awk '$7 == "UND" && $8 ~ /^cosmos_nvme_media_oracle_/ { print $8 }' |
+    LC_ALL=C sort -u)
+[ "$parity_oracle_imports" = "$expected_oracle_exports" ] ||
+    fail "parity vectors do not call the exact 36-symbol oracle ABI"
+
+"$CLANG" $COMMON_FLAGS -O0 -g -fprofile-instr-generate \
+    -fcoverage-mapping -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    -c "$ORACLE" -o "$SCRATCH/oracle-coverage.o"
+"$CLANG" $COMMON_FLAGS -O0 -g \
+    -DCOSMOS_NVME_MEDIA_ORACLE_COVERAGE_ONLY=1 \
+    -I"$SOURCE_DIR" -I"$TEST_DIR" -c "$PARITY" \
+    -o "$SCRATCH/oracle-vectors.o"
+"$CLANG" -fprofile-instr-generate "$SCRATCH/oracle-coverage.o" \
+    "$SCRATCH/oracle-vectors.o" -o "$SCRATCH/oracle-coverage"
+LLVM_PROFILE_FILE="$SCRATCH/oracle.profraw" "$SCRATCH/oracle-coverage" \
+    >"$SCRATCH/oracle-vectors.out"
+grep -Fqx 'COSMOS_NVME_MEDIA_POLICY_PARITY_ROWS 196 digest=b6a2f693699eb752' \
+    "$SCRATCH/oracle-vectors.out" || fail "frozen C vector ledger changed"
+grep -Fqx 'COSMOS_NVME_MEDIA_POLICY_PARITY_INPUT_BINDING function-id+arity+runtime-values+result+row' \
+    "$SCRATCH/oracle-vectors.out" || fail "C vector input binding is missing"
+"$LLVM_PROFDATA" merge -sparse "$SCRATCH/oracle.profraw" \
+    -o "$SCRATCH/oracle.profdata"
+"$LLVM_COV" report "$SCRATCH/oracle-coverage" \
+    -instr-profile="$SCRATCH/oracle.profdata" "$ORACLE" \
+    >"$SCRATCH/c-oracle-llvm-cov.txt"
+set -- $(awk '$1 == "TOTAL" { print $8, $9, $10 }' \
+    "$SCRATCH/c-oracle-llvm-cov.txt")
+[ "$#" -eq 3 ] || fail "cannot parse C oracle LLVM branch coverage"
+[ "$1" -eq 259 ] && [ "$2" -eq 0 ] && [ "$3" = 100.00% ] ||
+    fail "C oracle LLVM branch gate is not the frozen 259/259"
+
+ARM_FLAGS='--target=armv7-none-eabi -mcpu=cortex-a9 -marm -ffreestanding -nostdlib -fno-builtin -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2 -Wno-int-to-pointer-cast'
+"$CLANG" $ARM_FLAGS -I"$SOURCE_DIR" -c "$FIRMWARE_OWNER" \
+    -o "$SCRATCH/firmware-arm.o"
+"$CLANG" $ARM_FLAGS -I"$SOURCE_DIR" -c "$DISPATCH_OWNER" \
+    -o "$SCRATCH/dispatch-arm.o"
+"$CLANG" $ARM_FLAGS -I"$SOURCE_DIR" -c "$FTL_MEDIA_OWNER" \
+    -o "$SCRATCH/ftl-media-arm.o"
+
+check_c_object() {
+    object=$1
+    expected_imports=$2
+    expected_abi=$3
+    imports=$("$READELF" -sW "$object" |
+        awk '$7 == "UND" && $8 ~ /^cosmos_nvme_media_policy_/ { print $8 }' |
+        LC_ALL=C sort -u)
+    [ "$imports" = "$expected_imports" ] ||
+        fail "$object policy import closure changed"
+    definitions=$("$READELF" -sW "$object" |
+        awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+             $8 ~ /^cosmos_nvme_media_policy_/ { print $8 }')
+    [ -z "$definitions" ] || fail "$object redefines migrated policy"
+    abi=$("$READELF" -sW "$object" |
+        awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+             $8 ~ /^cosmos_nvme_/ { print $8 }' | LC_ALL=C sort -u)
+    [ "$abi" = "$expected_abi" ] || fail "$object public ABI changed"
+}
+
+check_c_object "$SCRATCH/firmware-arm.o" "$EXPECTED_FIRMWARE_IMPORTS" \
+    "$EXPECTED_FIRMWARE_ABI"
+check_c_object "$SCRATCH/dispatch-arm.o" "$EXPECTED_DISPATCH_IMPORTS" \
+    "$EXPECTED_DISPATCH_ABI"
+check_c_object "$SCRATCH/ftl-media-arm.o" "$EXPECTED_FTL_MEDIA_IMPORTS" \
+    "$EXPECTED_FTL_MEDIA_ABI"
+
+echo "cosmos_nvme_media_static_abi_exports=36/36"
+echo "cosmos_nvme_media_firmware_imports=11/11 public_abi=3/3"
+echo "cosmos_nvme_media_dispatch_imports=2/2 public_abi=2/2"
+echo "cosmos_nvme_media_ftl_imports=16/16 public_abi=8/8"
+echo "cosmos_nvme_media_exact_c_signatures=36/36 production=36/36 oracle"
+echo "cosmos_nvme_media_page_action_lookup_status=exact-signed-i32-int"
+echo "cosmos_nvme_media_frozen_parity_rows=196 digest=b6a2f693699eb752 input_binding=function-id+arity+runtime-values+result+row"
+echo "cosmos_nvme_media_c_oracle_llvm_branches=259/259"
+echo "STATIC_DIAGNOSTIC_STATUS: PASS retained_receipt=no cosmos-nvme-media pure-policy migration"
+
+[ "${SIMPLE_STAGE4_BIN+x}" = x ] && [ -n "$SIMPLE_STAGE4_BIN" ] ||
+    not_run "set SIMPLE_STAGE4_BIN to an admitted Stage-4 compiler"
+[ -x "$SIMPLE_STAGE4_BIN" ] || not_run "Stage-4 compiler is not executable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL=$(bootstrap_stage3_canonical_file "$SIMPLE_STAGE4_BIN") ||
+    not_run "compiler cannot be resolved through admitted provenance"
+SIMPLE_PROVENANCE="${SIMPLE_CANONICAL}.provenance.env"
+[ -f "$SIMPLE_PROVENANCE" ] || not_run "adjacent Stage-4 provenance is missing"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    not_run "admitted current-tree Stage 4 is absent; seed/Stage 2/Stage 3 fallback is forbidden"
+case "$("$SIMPLE_CANONICAL" --version 2>&1 || true)" in
+    *"Rust-built Simple binary is a bootstrap seed"*|*"bootstrap seed only"*)
+        not_run "Rust seed is diagnostic-only" ;;
+esac
+
+SIMPLE_SHA256=$(hash_file "$SIMPLE_CANONICAL")
+PROVENANCE_SHA256=$(hash_file "$SIMPLE_PROVENANCE")
+POLICY_SHA256=$(hash_file "$POLICY_SOURCE")
+HEADER_SHA256=$(hash_file "$POLICY_HEADER")
+ORACLE_SHA256=$(hash_file "$ORACLE")
+ORACLE_HEADER_SHA256=$(hash_file "$ORACLE_HEADER")
+PARITY_SHA256=$(hash_file "$PARITY")
+PROBE_SHA256=$(hash_file "$COVERAGE_PROBE")
+AUDIT_SHA256=$(hash_file "$DECISION_AUDIT")
+SPEC_SHA256=$(hash_file "$UNIT_SPEC")
+FIRMWARE_SHA256=$(hash_file "$FIRMWARE_OWNER")
+DISPATCH_SHA256=$(hash_file "$DISPATCH_OWNER")
+FTL_MEDIA_SHA256=$(hash_file "$FTL_MEDIA_OWNER")
+
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+    "$SIMPLE_CANONICAL" native-build --backend llvm \
+    --source "$SOURCE_DIR" --entry-closure --entry "$POLICY_SOURCE" \
+    --target x86_64-unknown-linux-gnu --emit-object --no-mangle \
+    --cache-dir "$SCRATCH/host-cache" -o "$SCRATCH/media-policy-host.o"
+host_symbols=$("$READELF" -sW "$SCRATCH/media-policy-host.o")
+host_exports=$(printf '%s\n' "$host_symbols" |
+    awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+         $8 ~ /^cosmos_nvme_media_policy_/ { print $8 }' | LC_ALL=C sort -u)
+[ "$host_exports" = "$EXPECTED_EXPORTS" ] ||
+    fail "host Simple object does not export the exact 36-symbol ABI"
+host_undefined=$(printf '%s\n' "$host_symbols" |
+    awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+[ -z "$host_undefined" ] ||
+    fail "host policy object has runtime dependencies: $host_undefined"
+printf '%s\n' "$host_symbols" |
+    awk 'tolower($8) ~ /(malloc|calloc|realloc|alloc_object|gc_alloc)/ {
+        bad = 1
+    } END { exit bad }' || fail "host policy object exposes allocation"
+
+"$CLANG" $COMMON_FLAGS -O2 -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    "$ORACLE" "$PARITY" "$SCRATCH/media-policy-host.o" \
+    -o "$SCRATCH/parity"
+"$SCRATCH/parity" >"$SCRATCH/parity.out"
+grep -Fqx 'COSMOS_NVME_MEDIA_POLICY_PARITY_ROWS 196 digest=b6a2f693699eb752' \
+    "$SCRATCH/parity.out" || fail "independent C-vs-Simple parity changed"
+grep -Fqx 'COSMOS_NVME_MEDIA_POLICY_PARITY_INPUT_BINDING function-id+arity+runtime-values+result+row' \
+    "$SCRATCH/parity.out" || fail "C-vs-Simple vector input binding is missing"
+
+HOST_RUNTIME_DIR=${SIMPLE_HOST_RUNTIME_PATH:-$ROOT/src/compiler_rust/target/debug/deps}
+if ! (cd "$ROOT" && SIMPLE_RUNTIME_PATH="$HOST_RUNTIME_DIR" \
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_COVERAGE=1 \
+        "$SIMPLE_CANONICAL" compile "$COVERAGE_PROBE" --native --coverage \
+        --no-strip -o "$SCRATCH/coverage-probe") \
+        >"$SCRATCH/coverage-build.log" 2>&1; then
+    fail "compiler-instrumented production Simple probe build failed"
+fi
+[ -s "$SCRATCH/coverage-probe" ] || fail "instrumented Simple probe is missing"
+SIMPLE_COVERAGE=1 "$SCRATCH/coverage-probe" >"$SCRATCH/coverage.full" \
+    2>"$SCRATCH/coverage-run.log" || fail "instrumented Simple probe failed"
+awk '/^COSMOS_NVME_MEDIA_POLICY_COVERAGE_BEGIN$/ { exit } { print }' \
+    "$SCRATCH/coverage.full" >"$SCRATCH/coverage-probe.out"
+awk 'seen { print } /^COSMOS_NVME_MEDIA_POLICY_COVERAGE_BEGIN$/ { seen = 1 }' \
+    "$SCRATCH/coverage.full" >"$SCRATCH/coverage.sdn"
+grep -Eq '^COSMOS_NVME_MEDIA_POLICY_PROBE digest=[0-9]+$' \
+    "$SCRATCH/coverage-probe.out" || fail "Simple coverage probe verdict is missing"
+
+awk -F', *' -v owner="$POLICY_REL" '
+    $1 ~ /^[[:space:]]*[0-9]+$/ &&
+    index($2, owner) == length($2) - length(owner) + 1 {
+        print ($1 + 0) "," ($3 + 0) "," ($4 + 0) "," \
+            (($5 + 0) > 0 ? 1 : 0) "," (($6 + 0) > 0 ? 1 : 0) "," $2
+    }
+' "$SCRATCH/coverage.sdn" | sort -t, -k2,2n -k3,3n \
+    >"$SCRATCH/owner-coverage.csv"
+[ "$(wc -l <"$SCRATCH/owner-coverage.csv" | tr -d '[:space:]')" -eq 63 ] ||
+    fail "compiler coverage did not report the exact 63 owner decisions"
+awk -F, '
+    NR == FNR { line[$1] = $2; next }
+    !($2 in line) { exit 2 }
+    { print $1 "," $2 "," line[$2]; count++ }
+    END { if (count != 63) exit 3 }
+' "$SCRATCH/marker-lines.csv" "$SCRATCH/audit-decisions.csv" \
+    >"$SCRATCH/expected-decisions.csv" || fail "audit-to-source mapping changed"
+awk -F, '
+    NR == FNR { audit_id[$3] = $1; name[$3] = $2; next }
+    !($2 in name) { exit 2 }
+    { print audit_id[$2] "," name[$2] "," $1 "," $2 "," $3 "," $4 "," $5 "," $6; count++ }
+    END { if (count != 63) exit 3 }
+' "$SCRATCH/expected-decisions.csv" "$SCRATCH/owner-coverage.csv" \
+    >"$SCRATCH/named-decisions.csv" ||
+    fail "compiler edge rows do not map one-to-one to named source decisions"
+awk -F, '$6 != 1 || $7 != 1 { exit 1 }' "$SCRATCH/named-decisions.csv" ||
+    fail "compiler-instrumented Simple branch outcomes are incomplete"
+cut -d, -f1,2 "$SCRATCH/named-decisions.csv" \
+    >"$SCRATCH/covered-decision-names.csv"
+awk -F, '{ print $1 "," $2 }' "$SCRATCH/audit-decisions.csv" \
+    >"$SCRATCH/audit-decision-names.csv"
+diff -u "$SCRATCH/audit-decision-names.csv" \
+    "$SCRATCH/covered-decision-names.csv" ||
+    fail "compiler-covered named decision order or set changed"
+
+(cd "$ROOT" && SIMPLE_LIB="$ROOT/src" "$SIMPLE_CANONICAL" test \
+    "$UNIT_SPEC_REL" --quick --no-limits) >"$SCRATCH/unit.out" 2>&1 ||
+    fail "focused Pure Simple unit spec failed"
+[ "$(grep -Ec '^[[:space:]]*it "' "$UNIT_SPEC")" -eq 4 ] ||
+    fail "focused unit spec must declare exactly four examples"
+sed -e 's/\x1b\[[0-9;]*m//g' "$SCRATCH/unit.out" >"$SCRATCH/unit.normalized.out"
+unit_verdict=$(awk '/^SPEC FILE VERDICT:/ { print; count++ }
+    END { if (count != 1) exit 1 }' "$SCRATCH/unit.normalized.out") ||
+    fail "focused unit run must emit exactly one canonical file verdict"
+[ "$unit_verdict" = "SPEC FILE VERDICT: $UNIT_SPEC_REL declared>=4 executed=4 passed=4 failed=0 dropped=0" ] ||
+    fail "focused unit verdict is not exact 4/4 with failed=0 dropped=0"
+
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+    "$SIMPLE_CANONICAL" native-build --backend llvm \
+    --source "$SOURCE_DIR" --entry-closure --entry "$POLICY_SOURCE" \
+    --target armv7-unknown-none-eabi --emit-object --no-mangle \
+    --cache-dir "$SCRATCH/arm-cache" -o "$SCRATCH/media-policy-arm.o"
+arm_header=$("$READELF" -hW "$SCRATCH/media-policy-arm.o")
+printf '%s\n' "$arm_header" | grep -Eq 'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$arm_header" | grep -Eq 'Machine:[[:space:]]+ARM' ||
+    fail "policy object is not ELF32 ARM"
+arm_undefined=$("$READELF" -sW "$SCRATCH/media-policy-arm.o" |
+    awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+[ -z "$arm_undefined" ] ||
+    fail "ARM policy object has runtime dependencies: $arm_undefined"
+arm_exports=$("$READELF" -sW "$SCRATCH/media-policy-arm.o" |
+    awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+         $8 ~ /^cosmos_nvme_media_policy_/ { print $8 }' | LC_ALL=C sort -u)
+[ "$arm_exports" = "$EXPECTED_EXPORTS" ] ||
+    fail "ARM Simple object does not export the exact 36-symbol ABI"
+"$READELF" -sW "$SCRATCH/media-policy-arm.o" |
+    awk 'tolower($8) ~ /(malloc|calloc|realloc|alloc_object|gc_alloc)/ {
+        bad = 1
+    } END { exit bad }' || fail "ARM policy object exposes allocation"
+ld.lld -r "$SCRATCH/firmware-arm.o" "$SCRATCH/dispatch-arm.o" \
+    "$SCRATCH/ftl-media-arm.o" "$SCRATCH/media-policy-arm.o" \
+    -o "$SCRATCH/media-policy-linked.o"
+linked_policy_undefined=$("$READELF" -sW "$SCRATCH/media-policy-linked.o" |
+    awk '$7 == "UND" && $8 ~ /^cosmos_nvme_media_policy_/ { print $8 }')
+[ -z "$linked_policy_undefined" ] ||
+    fail "C-to-Simple ARM policy closure remains unresolved"
+
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    fail "Stage-4 provenance changed during evidence run"
+verify_hash "$SIMPLE_CANONICAL" "$SIMPLE_SHA256" compiler
+verify_hash "$SIMPLE_PROVENANCE" "$PROVENANCE_SHA256" provenance
+verify_hash "$POLICY_SOURCE" "$POLICY_SHA256" policy-source
+verify_hash "$POLICY_HEADER" "$HEADER_SHA256" policy-header
+verify_hash "$ORACLE" "$ORACLE_SHA256" C-oracle
+verify_hash "$ORACLE_HEADER" "$ORACLE_HEADER_SHA256" oracle-header
+verify_hash "$PARITY" "$PARITY_SHA256" parity-vectors
+verify_hash "$COVERAGE_PROBE" "$PROBE_SHA256" coverage-probe
+verify_hash "$DECISION_AUDIT" "$AUDIT_SHA256" decision-audit
+verify_hash "$UNIT_SPEC" "$SPEC_SHA256" focused-spec
+verify_hash "$FIRMWARE_OWNER" "$FIRMWARE_SHA256" firmware-consumer
+verify_hash "$DISPATCH_OWNER" "$DISPATCH_SHA256" dispatch-consumer
+verify_hash "$FTL_MEDIA_OWNER" "$FTL_MEDIA_SHA256" ftl-media-consumer
+
+cp "$SCRATCH/oracle-vectors.out" "$EVIDENCE_DIR/c-oracle-vectors.out"
+cp "$SCRATCH/c-oracle-llvm-cov.txt" "$EVIDENCE_DIR/c-oracle-llvm-cov.txt"
+cp "$SCRATCH/parity.out" "$EVIDENCE_DIR/c-simple-parity.out"
+cp "$SCRATCH/named-decisions.csv" "$EVIDENCE_DIR/named-decisions.csv"
+cp "$SCRATCH/coverage.sdn" "$EVIDENCE_DIR/simple-coverage.sdn"
+umask 077
+{
+    echo "schema=cosmos-nvme-media-policy-evidence-v1"
+    echo "claim_scope=nvme-media-scalar-policy-oracle-coverage-and-c-abi-only"
+    echo "whole_nvme_claim=false"
+    echo "board_evidence=separate-not-included"
+    echo "stage4_compiler_path=$SIMPLE_CANONICAL"
+    echo "stage4_compiler_sha256=$SIMPLE_SHA256"
+    echo "stage4_provenance_path=$SIMPLE_PROVENANCE"
+    echo "stage4_provenance_sha256=$PROVENANCE_SHA256"
+    echo "policy_source_sha256=$POLICY_SHA256"
+    echo "policy_header_sha256=$HEADER_SHA256"
+    echo "oracle_sha256=$ORACLE_SHA256"
+    echo "oracle_header_sha256=$ORACLE_HEADER_SHA256"
+    echo "parity_vectors_sha256=$PARITY_SHA256"
+    echo "coverage_probe_sha256=$PROBE_SHA256"
+    echo "decision_audit_sha256=$AUDIT_SHA256"
+    echo "unit_spec_sha256=$SPEC_SHA256"
+    echo "parity_rows=196"
+    echo "parity_digest=b6a2f693699eb752"
+    echo "parity_input_binding=function-id+arity+runtime-values+result+row"
+    echo "c_signature_types=36/36-production-and-36/36-oracle"
+    echo "page_action_lookup_status=i32-int-signed"
+    echo "policy_exports=36/36"
+    echo "firmware_imports=11/11"
+    echo "dispatch_imports=2/2"
+    echo "ftl_media_imports=16/16"
+    echo "simple_instrumentation=production-compiler"
+    echo "simple_decisions=63/63"
+    echo "simple_branch_outcomes=126/126"
+    echo "c_oracle_llvm_branches=259/259"
+    echo "host_object=ELF64-allocation-free"
+    echo "arm_object=ELF32-ARM-allocation-free"
+    echo "native_link=pass"
+    echo "named_decisions_sha256=$(hash_file "$EVIDENCE_DIR/named-decisions.csv")"
+    echo "simple_coverage_sha256=$(hash_file "$EVIDENCE_DIR/simple-coverage.sdn")"
+    echo "c_llvm_coverage_sha256=$(hash_file "$EVIDENCE_DIR/c-oracle-llvm-cov.txt")"
+    echo "parity_output_sha256=$(hash_file "$EVIDENCE_DIR/c-simple-parity.out")"
+} >"$RECEIPT_TMP"
+mv -f -- "$RECEIPT_TMP" "$RECEIPT"
+
+echo "cosmos_nvme_media_c_oracle_parity=196/196 digest=b6a2f693699eb752 input_binding=function-id+arity+runtime-values+result+row"
+echo "cosmos_nvme_media_simple_compiler_branches=63/63 outcomes=126/126"
+echo "cosmos_nvme_media_c_oracle_llvm_branches=259/259"
+echo "cosmos_nvme_media_host_object=ELF64 allocation_free"
+echo "cosmos_nvme_media_arm_object=ELF32_ARM allocation_free"
+echo "cosmos_nvme_media_native_link=pass"
+echo "RUNTIME_EVIDENCE: PASS compiler=$SIMPLE_CANONICAL mode=compiler-coverage+llvm-object targets=host,arm"
+echo "cosmos_nvme_media_receipt=$RECEIPT"
+echo "cosmos_nvme_media_receipt_sha256=$(hash_file "$RECEIPT")"
+echo "STATUS: PASS cosmos-nvme-media pure-policy migration"

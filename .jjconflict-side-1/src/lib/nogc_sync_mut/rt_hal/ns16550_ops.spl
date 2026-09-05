@@ -1,0 +1,33 @@
+# ns16550_ops.spl — pure-Simple 16550 UART register programming expressed
+# against the dual-run VirtualDevice façade (design B.5 record-compare).
+#
+# These are the dual-run TWINS of:
+#   - C reference `log_write_byte_ns16550` in
+#     src/runtime/startup/baremetal/runtime_log.c (poll LSR bit 5, write THR)
+#   - the riscv startup driver `uart_init` / `uart_putc` in
+#     src/lib/nogc_async_mut_noalloc/baremetal/riscv/startup.spl, which do the
+#     same register sequence through @address @volatile stores.
+#
+# They deliberately take the façade rather than calling mmio_write_* so the
+# runner can compare the effect plan and commit it exactly once. Register
+# offsets: 0 THR/RHR/DLL, 1 IER/DLM, 2 FCR, 3 LCR, 4 MCR, 5 LSR.
+
+use std.nogc_sync_mut.rt_hal.virtual_device.{VirtualDevice}
+
+pub val NS16550_LSR_THRE: i64 = 0x20
+pub val NS16550_LCR_DLAB: i64 = 0x80
+pub val NS16550_LCR_8N1: i64 = 0x03
+
+pub fn ns16550_init(dev: VirtualDevice, base: u64, divisor: i64):
+    dev.write_u8(base + 1, 0x00)                       # IER: disable interrupts
+    dev.write_u8(base + 3, NS16550_LCR_DLAB)           # LCR: enable DLAB
+    dev.write_u8(base + 0, divisor & 0xFF)             # DLL
+    dev.write_u8(base + 1, (divisor >> 8) & 0xFF)      # DLM
+    dev.write_u8(base + 3, NS16550_LCR_8N1)            # LCR: 8N1, DLAB off
+
+pub fn ns16550_putc(dev: VirtualDevice, base: u64, byte: i64):
+    while (dev.read_u8(base + 5) & NS16550_LSR_THRE) == 0:
+        pass
+    dev.write_u8(base + 0, byte & 0xFF)
+
+export NS16550_LSR_THRE, NS16550_LCR_DLAB, NS16550_LCR_8N1, ns16550_init, ns16550_putc

@@ -1,0 +1,153 @@
+# Stage-0 allocation-free invocation classifier (WP-11s).
+#
+# Research: doc/01_research/compiler/startup_performance/
+#   startup_perf_architecture_2026-08-17.md §6.2 (entry flow), §6.4
+#   (allocation-free classifier). Plan: doc/03_plan/agent_tasks/
+#   startup_perf_parallel_plan_2026-08-17.md row WP-11s.
+#
+# Contract (§6.4): the classifier runs before ANY runtime service is up,
+# so classification itself must not be a startup cost. On the classify
+# path this file performs NO heap allocation it can avoid:
+#   - no string construction: no concatenation, no slicing, no split,
+#     no to_lower/upper, no trim, no format/interpolation
+#   - no array/dict construction: no array literals, no push, no dictionary creation
+#   - only borrowed reads of caller-owned argv tokens, boolean
+#     predicates (==, starts_with, ends_with) and integer results
+# Exact option SEMANTICS stay outside this file (§6.3): stage-0 owns
+# only token shapes and the reserved root options. No provider-,
+# project- or command-specific option name appears here; "run"/"test"
+# are CLI-0 embedded command names per §6.2, not provider options.
+#
+# args is the caller-owned program argv WITHOUT argv[0].
+
+# --- class codes (fixed integers; a fn returning an int literal
+# --- allocates nothing) ---
+
+pub fn stage0_class_root_default() -> i64:
+    1
+
+pub fn stage0_class_help() -> i64:
+    2
+
+pub fn stage0_class_version() -> i64:
+    3
+
+pub fn stage0_class_run_source() -> i64:
+    4
+
+pub fn stage0_class_smf_artifact() -> i64:
+    5
+
+pub fn stage0_class_native_exec() -> i64:
+    6
+
+pub fn stage0_class_command_run() -> i64:
+    7
+
+pub fn stage0_class_command_test() -> i64:
+    8
+
+pub fn stage0_class_namespace_option() -> i64:
+    9
+
+pub fn stage0_class_option_route() -> i64:
+    10
+
+pub fn stage0_class_sci_route() -> i64:
+    11
+
+pub fn stage0_class_unknown() -> i64:
+    12
+
+# --- borrowed-token predicates (boolean results only) ---
+
+fn _is_help_token(t: text) -> bool:
+    t == "-h" or t == "--help"
+
+fn _is_version_token(t: text) -> bool:
+    t == "-v" or t == "--version"
+
+fn _is_source_path(t: text) -> bool:
+    # Fixed extension set (§6.2 "source extension"). Case-sensitive by
+    # design: no text normalization is permitted on this path (§6.4).
+    t.ends_with(".spl") or t.ends_with(".simple") or t.ends_with(".sscript") or t.ends_with(".shs")
+
+fn _is_smf_path(t: text) -> bool:
+    t.ends_with(".smf")
+
+fn _is_explicit_path(t: text) -> bool:
+    # A token the shell would resolve as a filesystem path, not a
+    # command word. No directory scan, no stat — shape only (§6.1).
+    t.starts_with("/") or t.starts_with("./") or t.starts_with("../")
+
+# Classify one non-option positional token (a command word or a path).
+fn _classify_positional(t: text) -> i64:
+    if t == "":
+        return stage0_class_unknown()
+    if _is_source_path(t):
+        return stage0_class_run_source()
+    if _is_smf_path(t):
+        return stage0_class_smf_artifact()
+    if _is_explicit_path(t):
+        # Explicit path without a recognized artifact extension:
+        # native executable, direct exec (§6.2).
+        return stage0_class_native_exec()
+    if t == "run":
+        return stage0_class_command_run()
+    if t == "test":
+        return stage0_class_command_test()
+    # Any other bare command word: bounded SCI route lookup happens
+    # later and elsewhere (§6.3); stage-0 only names the route class.
+    stage0_class_sci_route()
+
+# Classify the invocation from caller-owned program args (argv minus
+# argv[0]). Returns a stage0_class_* code; never allocates on any path.
+pub fn stage0_classify(args: [text]) -> i64:
+    if args.len() == 0:
+        return stage0_class_root_default()
+    val t = args[0]
+    if _is_help_token(t):
+        return stage0_class_help()
+    if _is_version_token(t):
+        return stage0_class_version()
+    if t == "--":
+        # Hard terminator (§6.3): everything after it is positional.
+        if args.len() < 2:
+            return stage0_class_unknown()
+        return _classify_positional(args[1])
+    if t.starts_with("--x"):
+        # Generic namespace option shape (§6.3). Stage-0 recognizes the
+        # shape only; namespace/key/value semantics live in SCI.
+        return stage0_class_namespace_option()
+    if t.starts_with("-"):
+        # Any other option first: exact-option SCI lookup route (§6.3).
+        # Stage-0 hardcodes no provider option names.
+        return stage0_class_option_route()
+    _classify_positional(t)
+
+# Human-readable class name for receipts/diagnostics. Returns string
+# LITERALS only — off the hot path, but still allocation-free.
+pub fn stage0_class_name(c: i64) -> text:
+    if c == stage0_class_root_default():
+        return "root_default"
+    if c == stage0_class_help():
+        return "help"
+    if c == stage0_class_version():
+        return "version"
+    if c == stage0_class_run_source():
+        return "run_source"
+    if c == stage0_class_smf_artifact():
+        return "smf_artifact"
+    if c == stage0_class_native_exec():
+        return "native_exec"
+    if c == stage0_class_command_run():
+        return "command_run"
+    if c == stage0_class_command_test():
+        return "command_test"
+    if c == stage0_class_namespace_option():
+        return "namespace_option"
+    if c == stage0_class_option_route():
+        return "option_route"
+    if c == stage0_class_sci_route():
+        return "sci_route"
+    "unknown"

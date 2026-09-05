@@ -1,0 +1,69 @@
+use std.spec.{describe, it, expect}
+use os.kernel.fs.fd_table_descriptor_owner_support_v1.FdTaskLifecycleKeyV1
+use os.kernel.fs.active_fd_context_owner_v1.{
+    ActiveFdOperationV1, active_fd_operation_requires_lease_v1,
+    active_fd_context_begin_v1, active_fd_context_accepts_v1,
+    active_fd_context_note_mutation_v1, active_fd_context_end_v1,
+    active_fd_context_authorize_operation_v1,
+    active_fd_context_prepare_fork_transaction_v1,
+    active_fd_context_publish_fork_v1, active_fd_context_abort_fork_v1,
+    active_fd_context_reserve_cleanup_receipt_v1,
+    active_fd_context_finish_cleanup_receipt_v1,
+    active_fd_context_resume_cleanup_receipt_v1
+}
+
+describe("active fd dispatch context owner"):
+    it("requires one explicit lease for every descriptor operation class"):
+        expect(active_fd_operation_requires_lease_v1(ActiveFdOperationV1.Descriptor)).to_equal(true)
+        expect(active_fd_operation_requires_lease_v1(ActiveFdOperationV1.Open)).to_equal(true)
+        expect(active_fd_operation_requires_lease_v1(ActiveFdOperationV1.Dup)).to_equal(true)
+        expect(active_fd_operation_requires_lease_v1(ActiveFdOperationV1.Close)).to_equal(true)
+        expect(active_fd_operation_requires_lease_v1(ActiveFdOperationV1.BackendClose)).to_equal(true)
+
+    it("rejects stale copies after the context generation changes"):
+        val key = FdTaskLifecycleKeyV1(task_id: 7101u64, lifecycle_generation: 31u64)
+        val lease = active_fd_context_begin_v1(key).unwrap()
+        expect(active_fd_context_accepts_v1(lease, ActiveFdOperationV1.Open)).to_equal(true)
+        val advanced = active_fd_context_note_mutation_v1(lease).unwrap()
+        expect(active_fd_context_accepts_v1(lease, ActiveFdOperationV1.Descriptor)).to_equal(false)
+        expect(active_fd_context_accepts_v1(advanced, ActiveFdOperationV1.Descriptor)).to_equal(true)
+        expect(active_fd_context_end_v1(advanced).is_ok()).to_equal(true)
+
+    it("consumes the operation nonce before the caller touches descriptor state"):
+        val key = FdTaskLifecycleKeyV1(task_id: 7111u64, lifecycle_generation: 41u64)
+        val lease = active_fd_context_begin_v1(key).unwrap()
+        val successor = active_fd_context_authorize_operation_v1(
+            lease, ActiveFdOperationV1.Descriptor).unwrap()
+        expect(active_fd_context_accepts_v1(lease, ActiveFdOperationV1.Descriptor)).to_equal(false)
+        expect(active_fd_context_accepts_v1(successor, ActiveFdOperationV1.Descriptor)).to_equal(true)
+        expect(active_fd_context_end_v1(successor).is_ok()).to_equal(true)
+
+    it("publishes or aborts a reserved fork context exactly once"):
+        val parent_key = FdTaskLifecycleKeyV1(task_id: 7112u64, lifecycle_generation: 42u64)
+        val first_child = FdTaskLifecycleKeyV1(task_id: 7113u64, lifecycle_generation: 43u64)
+        val second_child = FdTaskLifecycleKeyV1(task_id: 7114u64, lifecycle_generation: 44u64)
+        val parent = active_fd_context_begin_v1(parent_key).unwrap()
+        val publish = active_fd_context_prepare_fork_transaction_v1(parent, first_child).unwrap()
+        expect(active_fd_context_publish_fork_v1(parent, publish).is_ok()).to_equal(true)
+        expect(active_fd_context_publish_fork_v1(parent, publish).is_err()).to_equal(true)
+        val abort = active_fd_context_prepare_fork_transaction_v1(parent, second_child).unwrap()
+        expect(active_fd_context_abort_fork_v1(parent, abort).is_ok()).to_equal(true)
+        expect(active_fd_context_abort_fork_v1(parent, abort).is_err()).to_equal(true)
+        expect(active_fd_context_end_v1(parent).is_ok()).to_equal(true)
+        val child = active_fd_context_begin_v1(first_child).unwrap()
+        expect(active_fd_context_end_v1(child).is_ok()).to_equal(true)
+
+    it("requires an opaque consumed receipt for cleanup retry"):
+        val key = FdTaskLifecycleKeyV1(task_id: 7115u64, lifecycle_generation: 45u64)
+        val lease = active_fd_context_begin_v1(key).unwrap()
+        val receipt = active_fd_context_reserve_cleanup_receipt_v1(lease).unwrap()
+        val failed = active_fd_context_finish_cleanup_receipt_v1(
+            lease, receipt, false).unwrap()
+        expect(failed.terminal).to_equal(false)
+        val retry_receipt = failed.retry.unwrap()
+        val resumed = active_fd_context_resume_cleanup_receipt_v1(retry_receipt).unwrap()
+        val terminal = active_fd_context_finish_cleanup_receipt_v1(
+            resumed.lease, resumed.receipt, true).unwrap()
+        expect(terminal.terminal).to_equal(true)
+        expect(terminal.retry.?).to_equal(false)
+        expect(active_fd_context_resume_cleanup_receipt_v1(retry_receipt).is_err()).to_equal(true)

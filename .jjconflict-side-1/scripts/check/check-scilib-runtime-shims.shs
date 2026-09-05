@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${SCILIB_SHIM_BUILD_DIR:-build/scilib}"
+CC="${CC:-gcc}"
+REQUIRE_REAL_OPENBLAS="${SCILIB_REQUIRE_REAL_OPENBLAS:-0}"
+OPENBLAS_CFLAGS="${SCILIB_OPENBLAS_CFLAGS:-}"
+OPENBLAS_LIBS="${SCILIB_OPENBLAS_LIBS:-}"
+OPENBLAS_LD_LIBRARY_PATH="${SCILIB_OPENBLAS_LD_LIBRARY_PATH:-}"
+
+mkdir -p "$BUILD_DIR"
+TMP_SYMBOLS="/tmp/scilib_shim_symbols.$$"
+trap 'rm -f "$TMP_SYMBOLS"' EXIT HUP INT TERM
+
+MOCK_SO="$BUILD_DIR/libspl_scilib_mock.so"
+OPENBLAS_SO="$BUILD_DIR/libspl_scilib_openblas.so"
+OPENBLAS_SFFI_DIR="$BUILD_DIR/openblas"
+OPENBLAS_SFFI_SO="$OPENBLAS_SFFI_DIR/libspl_scilib.so"
+LOCAL_DEP_ROOT="$BUILD_DIR/deps/root"
+RUNTIME_SMOKE="$BUILD_DIR/scilib_runtime_shim_smoke"
+
+if [ -z "$OPENBLAS_CFLAGS" ] && [ -f "$LOCAL_DEP_ROOT/usr/include/lapacke.h" ]; then
+    OPENBLAS_CFLAGS="-I$LOCAL_DEP_ROOT/usr/include -I$LOCAL_DEP_ROOT/usr/include/x86_64-linux-gnu/openblas-pthread"
+fi
+
+if [ -z "$OPENBLAS_LIBS" ] && [ -f "$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu/openblas-pthread/libopenblas.so" ]; then
+    OPENBLAS_LIBS="-L$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu -L$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu/openblas-pthread -lopenblas -llapacke"
+fi
+
+if [ -z "$OPENBLAS_LD_LIBRARY_PATH" ] && [ -d "$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu" ]; then
+    OPENBLAS_LD_LIBRARY_PATH="$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu:$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu/openblas-pthread"
+fi
+if [ -n "$OPENBLAS_LIBS" ]; then
+    OPENBLAS_CFLAGS="-DSIMPLE_SCILIB_ENABLE_REAL_OPENBLAS $OPENBLAS_CFLAGS"
+fi
+
+"$CC" -shared -fPIC src/runtime/scilib/mock_shim.c -o "$MOCK_SO" -lm
+"$CC" -shared -fPIC $OPENBLAS_CFLAGS src/runtime/scilib/openblas_shim.c -o "$OPENBLAS_SO" $OPENBLAS_LIBS -lm
+mkdir -p "$OPENBLAS_SFFI_DIR"
+cp "$OPENBLAS_SO" "$OPENBLAS_SFFI_SO"
+
+src/runtime/scilib/verify_symbols.sh "$MOCK_SO" "$OPENBLAS_SO" >"$TMP_SYMBOLS"
+cat "$TMP_SYMBOLS"
+
+"$CC" -O2 src/runtime/scilib/runtime_shim_smoke.c -o "$RUNTIME_SMOKE" -ldl -lm
+OPENBLAS_REAL="$(LD_LIBRARY_PATH="${OPENBLAS_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$RUNTIME_SMOKE" "$MOCK_SO" "$OPENBLAS_SO")"
+
+echo "mock_shim=$MOCK_SO"
+echo "openblas_shim=$OPENBLAS_SO"
+echo "openblas_sffi_shim=$OPENBLAS_SFFI_SO"
+if [ -n "$OPENBLAS_CFLAGS" ]; then
+    echo "openblas_cflags=$OPENBLAS_CFLAGS"
+fi
+if [ -n "$OPENBLAS_LIBS" ]; then
+    echo "openblas_libs=$OPENBLAS_LIBS"
+fi
+if [ -n "$OPENBLAS_LD_LIBRARY_PATH" ]; then
+    echo "openblas_ld_library_path=$OPENBLAS_LD_LIBRARY_PATH"
+fi
+printf '%s\n' "$OPENBLAS_REAL"
+
+if [ -x bin/simple ]; then
+    LD_LIBRARY_PATH="${OPENBLAS_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        SIMPLE_SFFI_PATH="$OPENBLAS_SFFI_DIR" SIMPLE_BLAS_BACKEND=openblas \
+        bin/simple test test/03_system/feature/scilib/linalg_openblas_backend_spec.spl \
+        --mode=interpreter --no-cache >/tmp/scilib_openblas_spec.$$.log
+    echo "openblas_simple_spec=pass"
+    rm -f /tmp/scilib_openblas_spec.$$.log
+fi
+
+if [ "$REQUIRE_REAL_OPENBLAS" = "1" ] && ! printf '%s\n' "$OPENBLAS_REAL" | grep -q '^openblas_real=true$'; then
+    echo "error: SCILIB_REQUIRE_REAL_OPENBLAS=1 but the OpenBLAS/LAPACKE shim built unavailable fallback" >&2
+    exit 1
+fi

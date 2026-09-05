@@ -1,0 +1,32 @@
+"""Host WM scheduling stays asynchronous at the SOSIX boundary."""
+
+# @cover src/os/compositor/host_compositor_core.spl 1%
+
+use std.spec.*
+use os.compositor.host_compositor_core.{host_wm_idle_timer_request}
+use os.sosix.core.operation.{SosixOperationId}
+use os.sosix.core.capability_ref.{SosixCapabilityRef}
+
+describe "host WM SOSIX timer transition":
+    it "requests the next 16ms deadline without sleeping":
+        val result = host_wm_idle_timer_request(
+            true,
+            SosixOperationId(slot: 5, generation: 2),
+            SosixCapabilityRef(slot: 8, generation: 3),
+            1000000000u64)
+        expect(result.accepted).to_equal(true)
+        expect(result.request.deadline_ns).to_equal(1016000000u64)
+
+    it "fails closed for stopped, invalid, and overflowing timers":
+        val operation = SosixOperationId(slot: 5, generation: 2)
+        val timer = SosixCapabilityRef(slot: 8, generation: 3)
+        expect(host_wm_idle_timer_request(
+            false, operation, timer, 1000000000u64).reason).to_equal(
+                "wm-stopped")
+        expect(host_wm_idle_timer_request(
+            true, operation, SosixCapabilityRef(slot: 8, generation: 0),
+            1000000000u64).reason).to_equal("invalid-timer")
+        expect(host_wm_idle_timer_request(
+            true, operation, timer,
+            18446744073709551615u64).reason).to_equal(
+                "timer-deadline-overflow")

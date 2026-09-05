@@ -1,0 +1,543 @@
+# OS-owned parser and admission boundary for dynamic aspect packs.
+#
+# The common module owns logical catalog values.  This module alone interprets
+# the SMFAPK1 directory wire and cross-checks it against both that catalog and
+# the dynSMF manifest.  Admission never guesses an export symbol or ABI.
+
+use std.common.string_core.{bytes_to_text}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.aspect_pack.{
+    AspectCatalog,
+    aspect_catalog_build
+}
+use os.smf.dynsmf_manifest_contract.{DynSmfManifestEntry}
+
+val ASPECT_PACK_DIRECTORY_SCHEMA_V1: i64 = 1
+val ASPECT_PACK_DIRECTORY_FLAG: i64 = 1
+val ASPECT_PACK_DIRECTORY_HEADER_SIZE: i64 = 32
+val ASPECT_PACK_DIRECTORY_FIXED_ENTRY_SIZE: i64 = 64
+val ASPECT_PACK_DIRECTORY_MAX_BYTES: i64 = 16777216
+val ASPECT_PACK_DIRECTORY_MAX_MODULES: i64 = 4096
+val ASPECT_PACK_CATALOG_MAX_ENTRIES: i64 = 4096
+val ASPECT_PACK_MANIFEST_MAX_ENTRIES: i64 = 4096
+val ASPECT_PACK_EXPORT_MAX_ENTRIES: i64 = 16384
+val ASPECT_PACK_OUTER_SMF_HEADER_SIZE: i64 = 128
+val ASPECT_PACK_OUTER_SMF_SECTION_SIZE: i64 = 64
+val ASPECT_PACK_OUTER_SMF_SYMBOL_SIZE: i64 = 56
+val ASPECT_PACK_OUTER_SMF_MAX_SECTIONS: i64 = 4096
+val ASPECT_PACK_OUTER_SMF_MAX_SYMBOLS: i64 = 65536
+val ASPECT_PACK_OUTER_SMF_ASPECT_TYPE: i64 = 16
+val ASPECT_PACK_OUTER_I64_MAX: i64 = 9223372036854775807
+
+class AspectPackDirectoryEntry:
+    module_id: text
+    aspect_id: text
+    module_abi_hash: text
+    required_core_public_abi_hash: text
+    required_core_layout_hash: text
+    variant_fingerprint: text
+    cluster_id: text
+    payload_offset: i64
+    compressed_size: i64
+    uncompressed_size: i64
+    member_offset: i64
+    member_size: i64
+    chunk_id: i64
+    chunk_kind: i64
+    chunk_flags: i64
+    alignment: i64
+    content_crc32: i64
+
+class AspectPackDirectory:
+    schema_version: i64
+    flags: i64
+    total_size: i64
+    content_hash: text
+    entries: [AspectPackDirectoryEntry]
+
+class AspectPackDirectoryParse:
+    ok: bool
+    error_code: text
+    error_message: text
+    directory: AspectPackDirectory
+
+class AspectPackArtifactIdentity:
+    library_id: text
+    path: text
+    content_hash: text
+
+class AspectPackExportContract:
+    library_id: text
+    export_symbol: text
+    interface_abi_hash: text
+
+class AspectPackAdmittedFacet:
+    facet_id: text
+    library_id: text
+    export_symbol: text
+    interface_abi_hash: text
+    module_id: text
+    module_abi_hash: text
+    library_abi_version: text
+    pack_content_hash: text
+
+class AspectPackAdmission:
+    ok: bool
+    error_code: text
+    error_message: text
+    admitted_facets: i64
+    facets: [AspectPackAdmittedFacet]
+
+class AspectPackLookupRequest:
+    directory: AspectPackDirectory
+    catalog: AspectCatalog
+    manifest: [DynSmfManifestEntry]
+    artifact: AspectPackArtifactIdentity
+    export_contracts: [AspectPackExportContract]
+    facet_id: text
+
+fn _empty_aspect_pack_directory() -> AspectPackDirectory:
+    AspectPackDirectory(schema_version: 0, flags: 0, total_size: 0, content_hash: "", entries: [])
+
+fn _aspect_pack_parse_error(code: text, message: text) -> AspectPackDirectoryParse:
+    AspectPackDirectoryParse(
+        ok: false,
+        error_code: code,
+        error_message: message,
+        directory: _empty_aspect_pack_directory()
+    )
+
+fn _aspect_pack_admission_error(code: text, message: text) -> AspectPackAdmission:
+    AspectPackAdmission(ok: false, error_code: code, error_message: message, admitted_facets: 0, facets: [])
+
+fn _aspect_pack_read_u16(data: [u8], offset: i64) -> i64:
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _aspect_pack_read_u32(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var index = 0
+    while index < 4:
+        value = value | ((data[offset + index] as i64) << (index * 8))
+        index = index + 1
+    value
+
+fn _aspect_pack_read_u64(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var index = 0
+    while index < 8:
+        value = value | ((data[offset + index] as i64) << (index * 8))
+        index = index + 1
+    value
+
+fn _aspect_pack_text(data: [u8], offset: i64, length: i64) -> text:
+    var raw: [u8] = []
+    var index = 0
+    while index < length:
+        raw.push(data[offset + index])
+        index = index + 1
+    bytes_to_text(raw)
+
+fn _aspect_pack_read_text_span(data: [u8], offset: i64, limit: i64) -> [i64]:
+    var invalid: [i64] = []
+    if offset < 0 or offset + 4 > limit:
+        return invalid
+    val length = _aspect_pack_read_u32(data, offset)
+    if length < 0 or length > limit - offset - 4:
+        return invalid
+    [offset + 4, length, offset + 4 + length]
+
+fn _aspect_pack_alignment_valid(alignment: i64) -> bool:
+    alignment > 0 and (alignment & (alignment - 1)) == 0
+
+fn _aspect_pack_export_key(library_id: text, export_symbol: text) -> text:
+    library_id.len().to_text() + ":" + library_id + export_symbol.len().to_text() + ":" + export_symbol
+
+fn _aspect_pack_outer_range_valid(start: i64, size: i64, total: i64) -> bool:
+    start >= 0 and size >= 0 and start <= total and size <= total - start
+
+fn _aspect_pack_outer_ranges_overlap(a_start: i64, a_size: i64, b_start: i64, b_size: i64) -> bool:
+    a_size > 0 and b_size > 0 and a_start < b_start + b_size and b_start < a_start + a_size
+
+fn _aspect_pack_outer_magic_at(data: [u8], offset: i64) -> bool:
+    _aspect_pack_outer_range_valid(offset, 4, data.len()) and
+        data[offset] == 83 and data[offset + 1] == 77 and
+        data[offset + 2] == 70 and data[offset + 3] == 0
+
+fn _aspect_pack_outer_header_offset(data: [u8]) -> i64:
+    if data.len() < ASPECT_PACK_OUTER_SMF_HEADER_SIZE:
+        return -1
+    val trailer = data.len() - ASPECT_PACK_OUTER_SMF_HEADER_SIZE
+    val leading_magic = _aspect_pack_outer_magic_at(data, 0)
+    val trailer_magic = _aspect_pack_outer_magic_at(data, trailer)
+    if leading_magic and trailer_magic and trailer != 0:
+        return -2
+    if leading_magic:
+        return 0
+    if trailer_magic:
+        return trailer
+    -1
+
+fn _aspect_pack_outer_nonnegative_u64(data: [u8], offset: i64) -> i64?:
+    if not _aspect_pack_outer_range_valid(offset, 8, data.len()):
+        return nil
+    if ((data[offset + 7] as i64) & 0x80) != 0:
+        return nil
+    Some(_aspect_pack_read_u64(data, offset))
+
+fn _aspect_pack_outer_checked_add(left: i64, right: i64) -> i64?:
+    if left < 0 or right < 0 or left > ASPECT_PACK_OUTER_I64_MAX - right:
+        return nil
+    Some(left + right)
+
+fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDirectoryParse:
+    """Extract and parse the one `.aspect_pack` payload from exact outer bytes.
+
+    Header and table geometry is bounded here before any general SMF reader is
+    constructed. The returned directory hash therefore names bytes that were
+    actually embedded in this admitted outer image.
+    """
+    val header_offset = _aspect_pack_outer_header_offset(data)
+    if header_offset == -2:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_AMBIGUOUS_HEADER", "outer SMF has both leading and trailer magic")
+    if header_offset < 0:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_HEADER", "outer SMF has no bounded v1.1 header")
+    if data[header_offset + 4] != 1 or data[header_offset + 5] != 1:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_VERSION", "outer SMF version is unsupported")
+    val flags = _aspect_pack_read_u32(data, header_offset + 8)
+    if (flags & 0x01) == 0 or (flags & 0x20) == 0:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_FLAGS", "outer SMF must be executable and carry the aspect-pack flag")
+    if data[header_offset + 12] != 0:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_COMPRESSED", "compressed outer SMF is unsupported")
+
+    val section_count = _aspect_pack_read_u32(data, header_offset + 16)
+    val symbol_count = _aspect_pack_read_u32(data, header_offset + 36)
+    if section_count <= 0 or section_count > ASPECT_PACK_OUTER_SMF_MAX_SECTIONS:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_SECTION_COUNT", "outer SMF section count is outside the admitted range")
+    if symbol_count < 0 or symbol_count > ASPECT_PACK_OUTER_SMF_MAX_SYMBOLS:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_SYMBOL_COUNT", "outer SMF symbol count is outside the admitted range")
+
+    val data_offset = _aspect_pack_read_u32(data, header_offset + 56)
+    val raw_sections = _aspect_pack_outer_nonnegative_u64(data, header_offset + 20)
+    val raw_symbols = _aspect_pack_outer_nonnegative_u64(data, header_offset + 28)
+    if raw_sections == nil or raw_symbols == nil:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_TABLE_OFFSET", "outer SMF table offset exceeds the signed loader range")
+    val sections_offset = _aspect_pack_outer_checked_add(data_offset, raw_sections!)
+    val symbols_offset = _aspect_pack_outer_checked_add(data_offset, raw_symbols!)
+    if sections_offset == nil or symbols_offset == nil:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_TABLE_OFFSET", "outer SMF table offset overflows")
+    val section_table_size = section_count * ASPECT_PACK_OUTER_SMF_SECTION_SIZE
+    val symbol_table_size = symbol_count * ASPECT_PACK_OUTER_SMF_SYMBOL_SIZE
+    if not _aspect_pack_outer_range_valid(sections_offset!, section_table_size, data.len()):
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_TABLE_RANGE", "outer SMF section table escapes admitted bytes")
+    if not _aspect_pack_outer_range_valid(symbols_offset!, symbol_table_size, data.len()):
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SYMBOL_TABLE_RANGE", "outer SMF symbol table escapes admitted bytes")
+    if (_aspect_pack_outer_ranges_overlap(sections_offset!, section_table_size, header_offset, ASPECT_PACK_OUTER_SMF_HEADER_SIZE) or
+        _aspect_pack_outer_ranges_overlap(symbols_offset!, symbol_table_size, header_offset, ASPECT_PACK_OUTER_SMF_HEADER_SIZE) or
+        _aspect_pack_outer_ranges_overlap(sections_offset!, section_table_size, symbols_offset!, symbol_table_size)):
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_TABLE_OVERLAP", "outer SMF tables overlap each other or the header")
+
+    var section_offsets: [i64] = []
+    var section_sizes: [i64] = []
+    var pack_offset = -1i64
+    var pack_size = 0i64
+    var pack_count = 0
+    var index = 0
+    while index < section_count:
+        val entry = sections_offset! + index * ASPECT_PACK_OUTER_SMF_SECTION_SIZE
+        val wire_type = data[entry] as i64
+        val section_flags = _aspect_pack_read_u32(data, entry + 4)
+        val raw_offset = _aspect_pack_outer_nonnegative_u64(data, entry + 8)
+        val size = _aspect_pack_outer_nonnegative_u64(data, entry + 16)
+        val alignment = _aspect_pack_outer_nonnegative_u64(data, entry + 32)
+        if raw_offset == nil or size == nil or alignment == nil:
+            return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_RANGE", "outer SMF section geometry exceeds the signed loader range")
+        val file_offset = _aspect_pack_outer_checked_add(data_offset, raw_offset!)
+        if file_offset == nil or size! <= 0 or not _aspect_pack_outer_range_valid(file_offset!, size!, data.len()):
+            return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_RANGE", "outer SMF section escapes admitted bytes")
+        if alignment! <= 0 or (alignment! & (alignment! - 1)) != 0:
+            return _aspect_pack_parse_error("ASPECT_PACK_OUTER_ALIGNMENT", "outer SMF section alignment is invalid")
+        if (_aspect_pack_outer_ranges_overlap(file_offset!, size!, sections_offset!, section_table_size) or
+            _aspect_pack_outer_ranges_overlap(file_offset!, size!, symbols_offset!, symbol_table_size) or
+            _aspect_pack_outer_ranges_overlap(file_offset!, size!, header_offset, ASPECT_PACK_OUTER_SMF_HEADER_SIZE)):
+            return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_OVERLAP", "outer SMF section overlaps metadata")
+        var previous = 0
+        while previous < section_offsets.len():
+            if _aspect_pack_outer_ranges_overlap(file_offset!, size!, section_offsets[previous], section_sizes[previous]):
+                return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_OVERLAP", "outer SMF sections overlap")
+            previous = previous + 1
+        section_offsets.push(file_offset!)
+        section_sizes.push(size!)
+        if wire_type == ASPECT_PACK_OUTER_SMF_ASPECT_TYPE:
+            pack_count = pack_count + 1
+            pack_offset = file_offset!
+            pack_size = size!
+            if section_flags != 0x01:
+                return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_FLAGS", "aspect-pack section must be read-only data")
+        index = index + 1
+    if pack_count != 1:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_COUNT", "outer SMF must contain exactly one aspect-pack section")
+
+    var payload: [u8] = []
+    var cursor = pack_offset
+    val end = pack_offset + pack_size
+    while cursor < end:
+        payload.push(data[cursor])
+        cursor = cursor + 1
+    aspect_pack_directory_parse_from_smf_bytes(payload)
+
+fn aspect_pack_directory_parse_from_smf_bytes(data: [u8]) -> AspectPackDirectoryParse:
+    """Parse the SMFAPK1 header and its uncompressed directory only.
+
+    All declared spans are checked before use.  Unknown flags, duplicate
+    module ids, trailing directory material, and payload geometry errors are
+    hard failures.
+    """
+    if data.len() < ASPECT_PACK_DIRECTORY_HEADER_SIZE:
+        return _aspect_pack_parse_error("ASPECT_PACK_TRUNCATED_HEADER", "aspect pack is shorter than its fixed header")
+    val magic: [u8] = [83, 77, 70, 65, 80, 75, 49, 0]
+    var index = 0
+    while index < magic.len():
+        if data[index] != magic[index]:
+            return _aspect_pack_parse_error("ASPECT_PACK_BAD_MAGIC", "aspect pack magic is not SMFAPK1")
+        index = index + 1
+    val schema = _aspect_pack_read_u16(data, 8)
+    if schema != ASPECT_PACK_DIRECTORY_SCHEMA_V1:
+        return _aspect_pack_parse_error("ASPECT_PACK_BAD_SCHEMA", "unsupported aspect pack directory schema")
+    val flags = _aspect_pack_read_u16(data, 10)
+    if flags != ASPECT_PACK_DIRECTORY_FLAG:
+        return _aspect_pack_parse_error("ASPECT_PACK_BAD_FLAGS", "dynamic aspect pack flag is missing or unknown flags are set")
+    val module_count = _aspect_pack_read_u32(data, 12)
+    if (((data[23] as i64) & 0x80) != 0 or
+        ((data[31] as i64) & 0x80) != 0):
+        return _aspect_pack_parse_error("ASPECT_PACK_SIZE_RANGE", "aspect pack sizes exceed the signed loader range")
+    val directory_size = _aspect_pack_read_u64(data, 16)
+    val total_size = _aspect_pack_read_u64(data, 24)
+    if module_count <= 0 or module_count > ASPECT_PACK_DIRECTORY_MAX_MODULES:
+        return _aspect_pack_parse_error("ASPECT_PACK_BAD_MODULE_COUNT", "aspect pack module count is outside the admitted range")
+    if directory_size <= 0 or directory_size > ASPECT_PACK_DIRECTORY_MAX_BYTES:
+        return _aspect_pack_parse_error("ASPECT_PACK_BAD_DIRECTORY_SIZE", "aspect pack directory size is outside the admitted range")
+    if total_size != data.len():
+        return _aspect_pack_parse_error("ASPECT_PACK_SIZE_MISMATCH", "declared aspect pack size does not match available bytes")
+    if directory_size > total_size - ASPECT_PACK_DIRECTORY_HEADER_SIZE:
+        return _aspect_pack_parse_error("ASPECT_PACK_DIRECTORY_TRUNCATED", "aspect pack directory extends past the file")
+
+    val directory_end = ASPECT_PACK_DIRECTORY_HEADER_SIZE + directory_size
+    var entries: [AspectPackDirectoryEntry] = []
+    var seen_modules: Dict<text, bool> = {}
+    var offset = ASPECT_PACK_DIRECTORY_HEADER_SIZE
+    var slot = 0
+    while slot < module_count:
+        var spans: [i64] = []
+        var field = 0
+        while field < 7:
+            val span = _aspect_pack_read_text_span(data, offset, directory_end)
+            if span.len() == 0:
+                return _aspect_pack_parse_error("ASPECT_PACK_DIRECTORY_CORRUPT", "a text field escapes the aspect pack directory")
+            spans.push(span[0])
+            spans.push(span[1])
+            offset = span[2]
+            field = field + 1
+        if offset > directory_end - ASPECT_PACK_DIRECTORY_FIXED_ENTRY_SIZE:
+            return _aspect_pack_parse_error("ASPECT_PACK_DIRECTORY_CORRUPT", "a fixed module record escapes the aspect pack directory")
+        if ((((data[offset + 7] as i64) & 0x80) != 0) or
+            (((data[offset + 15] as i64) & 0x80) != 0) or
+            (((data[offset + 23] as i64) & 0x80) != 0) or
+            (((data[offset + 31] as i64) & 0x80) != 0) or
+            (((data[offset + 39] as i64) & 0x80) != 0) or
+            (((data[offset + 47] as i64) & 0x80) != 0)):
+            return _aspect_pack_parse_error("ASPECT_PACK_DIRECTORY_RANGE", "module geometry exceeds the signed loader range")
+
+        val module_id = _aspect_pack_text(data, spans[0], spans[1])
+        val aspect_id = _aspect_pack_text(data, spans[2], spans[3])
+        if module_id == "" or aspect_id == "":
+            return _aspect_pack_parse_error("ASPECT_PACK_DIRECTORY_INCOMPLETE", "module id and aspect id are required")
+        if seen_modules.get(module_id) != nil:
+            return _aspect_pack_parse_error("ASPECT_PACK_DUPLICATE_MODULE", "duplicate module id: " + module_id)
+        seen_modules[module_id] = true
+
+        val payload_offset = _aspect_pack_read_u64(data, offset)
+        val compressed_size = _aspect_pack_read_u64(data, offset + 8)
+        val uncompressed_size = _aspect_pack_read_u64(data, offset + 16)
+        val member_offset = _aspect_pack_read_u64(data, offset + 24)
+        val member_size = _aspect_pack_read_u64(data, offset + 32)
+        val chunk_id = _aspect_pack_read_u64(data, offset + 40)
+        val chunk_kind = _aspect_pack_read_u32(data, offset + 48)
+        val chunk_flags = _aspect_pack_read_u32(data, offset + 52)
+        val alignment = _aspect_pack_read_u32(data, offset + 56)
+        val content_crc32 = _aspect_pack_read_u32(data, offset + 60)
+        if payload_offset < directory_end or compressed_size < 0 or payload_offset > total_size or compressed_size > total_size - payload_offset:
+            return _aspect_pack_parse_error("ASPECT_PACK_PAYLOAD_RANGE", "module payload lies outside the aspect pack")
+        if uncompressed_size < 0 or member_offset < 0 or member_size < 0 or member_offset > uncompressed_size or member_size > uncompressed_size - member_offset:
+            return _aspect_pack_parse_error("ASPECT_PACK_MEMBER_RANGE", "module member slice lies outside its chunk")
+        if chunk_kind != 0 and chunk_kind != 1:
+            return _aspect_pack_parse_error("ASPECT_PACK_CHUNK_KIND", "unknown aspect pack chunk kind")
+        if chunk_flags != 0 and chunk_flags != 1:
+            return _aspect_pack_parse_error("ASPECT_PACK_CHUNK_FLAGS", "unknown aspect pack chunk flags")
+        if not _aspect_pack_alignment_valid(alignment) or (payload_offset % alignment) != 0:
+            return _aspect_pack_parse_error("ASPECT_PACK_ALIGNMENT", "module chunk alignment is invalid")
+
+        entries.push(AspectPackDirectoryEntry(
+            module_id: module_id,
+            aspect_id: aspect_id,
+            module_abi_hash: _aspect_pack_text(data, spans[4], spans[5]),
+            required_core_public_abi_hash: _aspect_pack_text(data, spans[6], spans[7]),
+            required_core_layout_hash: _aspect_pack_text(data, spans[8], spans[9]),
+            variant_fingerprint: _aspect_pack_text(data, spans[10], spans[11]),
+            cluster_id: _aspect_pack_text(data, spans[12], spans[13]),
+            payload_offset: payload_offset,
+            compressed_size: compressed_size,
+            uncompressed_size: uncompressed_size,
+            member_offset: member_offset,
+            member_size: member_size,
+            chunk_id: chunk_id,
+            chunk_kind: chunk_kind,
+            chunk_flags: chunk_flags,
+            alignment: alignment,
+            content_crc32: content_crc32
+        ))
+        offset = offset + ASPECT_PACK_DIRECTORY_FIXED_ENTRY_SIZE
+        slot = slot + 1
+    if offset != directory_end:
+        return _aspect_pack_parse_error("ASPECT_PACK_DIRECTORY_TRAILING_BYTES", "directory contains undeclared trailing bytes")
+    AspectPackDirectoryParse(
+        ok: true,
+        error_code: "",
+        error_message: "",
+        directory: AspectPackDirectory(schema_version: schema, flags: flags, total_size: total_size, content_hash: sha256_u8_hex(data), entries: entries)
+    )
+
+fn aspect_pack_directory_validate_against_manifest(
+    directory: AspectPackDirectory,
+    catalog: AspectCatalog,
+    manifest: [DynSmfManifestEntry],
+    artifact: AspectPackArtifactIdentity,
+    export_contracts: [AspectPackExportContract]
+) -> AspectPackAdmission:
+    """Admit a dynamic catalog only when wire, catalog, and manifest agree.
+
+    Missing or ambiguous facets/modules/libraries, path or ABI mismatches, and
+    absent exports are all explicit failures.
+    """
+    if directory.schema_version != ASPECT_PACK_DIRECTORY_SCHEMA_V1 or directory.flags != ASPECT_PACK_DIRECTORY_FLAG:
+        return _aspect_pack_admission_error("ASPECT_PACK_DIRECTORY_NOT_PARSED", "directory was not produced by the admitted V1 parser")
+    # The directory hash names the inner SMFAPK payload; the artifact hash
+    # names the canonical outer SMF which contains that payload plus mapped
+    # code and symbols.  They are deliberately different identities.  The
+    # catalog binds the former below, while the admitted-byte loader binds the
+    # latter before mapping.
+    if directory.content_hash == "" or artifact.content_hash == "":
+        return _aspect_pack_admission_error("ASPECT_PACK_CONTENT_HASH_MISSING", "pack and outer SMF identities must both be present")
+    if catalog.schema_version != 1:
+        return _aspect_pack_admission_error("ASPECT_CATALOG_BAD_SCHEMA", "unsupported logical aspect catalog schema")
+    if catalog.entries.len() > ASPECT_PACK_CATALOG_MAX_ENTRIES or manifest.len() > ASPECT_PACK_MANIFEST_MAX_ENTRIES or export_contracts.len() > ASPECT_PACK_EXPORT_MAX_ENTRIES:
+        return _aspect_pack_admission_error("ASPECT_PACK_ADMISSION_TOO_LARGE", "catalog or manifest exceeds the bounded admission limit")
+    val rebuilt = aspect_catalog_build(catalog.entries)
+    if not rebuilt.ok:
+        return _aspect_pack_admission_error(rebuilt.error_code, rebuilt.error_message)
+
+    var module_by_id: Dict<text, i64> = {}
+    var module_index = 0
+    while module_index < directory.entries.len():
+        val module_id = directory.entries[module_index].module_id
+        if module_by_id.get(module_id) != nil:
+            return _aspect_pack_admission_error("ASPECT_PACK_MODULE_AMBIGUOUS", "pack directory contains a duplicate module id")
+        module_by_id[module_id] = module_index
+        module_index = module_index + 1
+
+    var manifest_by_id: Dict<text, i64> = {}
+    var manifest_exports: Dict<text, bool> = {}
+    var total_manifest_exports = 0
+    var manifest_index = 0
+    while manifest_index < manifest.len():
+        val library_id = manifest[manifest_index].id
+        if library_id == "" or manifest_by_id.get(library_id) != nil:
+            return _aspect_pack_admission_error("ASPECT_PACK_LIBRARY_AMBIGUOUS", "dynSMF manifest contains an empty or duplicate library id")
+        manifest_by_id[library_id] = manifest_index
+        var manifest_export_index = 0
+        while manifest_export_index < manifest[manifest_index].exports.len():
+            total_manifest_exports = total_manifest_exports + 1
+            if total_manifest_exports > ASPECT_PACK_EXPORT_MAX_ENTRIES:
+                return _aspect_pack_admission_error("ASPECT_PACK_EXPORTS_TOO_LARGE", "dynSMF manifest exports exceed the bounded admission limit")
+            val export_key = _aspect_pack_export_key(library_id, manifest[manifest_index].exports[manifest_export_index])
+            if manifest_exports.get(export_key) != nil:
+                return _aspect_pack_admission_error("ASPECT_PACK_EXPORT_AMBIGUOUS", "dynSMF manifest contains a duplicate library export")
+            manifest_exports[export_key] = true
+            manifest_export_index = manifest_export_index + 1
+        manifest_index = manifest_index + 1
+
+    var contract_hash_by_export: Dict<text, text> = {}
+    var contract_index = 0
+    while contract_index < export_contracts.len():
+        val contract = export_contracts[contract_index]
+        if contract.library_id == "" or contract.export_symbol == "" or contract.interface_abi_hash == "":
+            return _aspect_pack_admission_error("ASPECT_PACK_EXPORT_CONTRACT_INCOMPLETE", "OS export contract fields must be nonempty")
+        val contract_key = _aspect_pack_export_key(contract.library_id, contract.export_symbol)
+        if contract_hash_by_export.get(contract_key) != nil:
+            return _aspect_pack_admission_error("ASPECT_PACK_EXPORT_CONTRACT_AMBIGUOUS", "multiple OS export contracts claim one library export")
+        contract_hash_by_export[contract_key] = contract.interface_abi_hash
+        contract_index = contract_index + 1
+
+    var admitted: [AspectPackAdmittedFacet] = []
+    var bound_modules: Dict<text, bool> = {}
+    var catalog_index = 0
+    while catalog_index < catalog.entries.len():
+        val entry = catalog.entries[catalog_index]
+        val binding = entry.binding
+        val module_slot = module_by_id.get(binding.module_id)
+        if module_slot == nil:
+            return _aspect_pack_admission_error("ASPECT_PACK_MODULE_MISSING", "catalog module is absent from the pack directory")
+        val module = directory.entries[module_slot!]
+        if module.aspect_id != binding.aspect_id:
+            return _aspect_pack_admission_error("ASPECT_PACK_ASPECT_MISMATCH", "catalog aspect id does not match the pack directory")
+        if module.module_abi_hash != binding.module_abi_hash:
+            return _aspect_pack_admission_error("ASPECT_PACK_MODULE_ABI_MISMATCH", "catalog module ABI does not match the pack directory")
+        if binding.pack_content_hash != directory.content_hash:
+            return _aspect_pack_admission_error("ASPECT_PACK_BINDING_HASH_MISMATCH", "catalog binding does not name the parsed pack content")
+        if binding.library_id != artifact.library_id or binding.library_path != artifact.path:
+            return _aspect_pack_admission_error("ASPECT_PACK_ARTIFACT_IDENTITY_MISMATCH", "catalog binding does not name the trusted artifact")
+
+        val library_slot = manifest_by_id.get(binding.library_id)
+        if library_slot == nil:
+            return _aspect_pack_admission_error("ASPECT_PACK_LIBRARY_MISSING", "catalog library is absent from the dynSMF manifest")
+        val library = manifest[library_slot!]
+        if library.path != binding.library_path:
+            return _aspect_pack_admission_error("ASPECT_PACK_LIBRARY_PATH_MISMATCH", "catalog library path does not match the dynSMF manifest")
+        if library.abi_version != binding.library_abi_version:
+            return _aspect_pack_admission_error("ASPECT_PACK_LIBRARY_ABI_MISMATCH", "catalog library ABI version does not match the dynSMF manifest")
+        if library.artifact_kind != "precompiled_smf":
+            return _aspect_pack_admission_error("ASPECT_PACK_LIBRARY_NOT_DYNAMIC", "aspect library is not a precompiled dynamic SMF")
+        val export_key = _aspect_pack_export_key(binding.library_id, entry.descriptor.export_symbol)
+        if manifest_exports.get(export_key) == nil:
+            return _aspect_pack_admission_error("ASPECT_PACK_EXPORT_MISSING", "facet export is absent from the dynSMF manifest")
+        val contract_hash = contract_hash_by_export.get(export_key)
+        if contract_hash == nil:
+            return _aspect_pack_admission_error("ASPECT_PACK_EXPORT_CONTRACT_MISSING", "no OS export contract proves this facet ABI")
+        if contract_hash! != entry.descriptor.interface_abi_hash:
+            return _aspect_pack_admission_error("ASPECT_PACK_INTERFACE_ABI_MISMATCH", "facet interface ABI does not match the OS export contract")
+
+        admitted.push(AspectPackAdmittedFacet(
+            facet_id: entry.descriptor.facet_id,
+            library_id: binding.library_id,
+            export_symbol: entry.descriptor.export_symbol,
+            interface_abi_hash: entry.descriptor.interface_abi_hash,
+            module_id: binding.module_id,
+            module_abi_hash: binding.module_abi_hash,
+            library_abi_version: binding.library_abi_version,
+            pack_content_hash: binding.pack_content_hash
+        ))
+        bound_modules[binding.module_id] = true
+        catalog_index = catalog_index + 1
+
+    var directory_index = 0
+    while directory_index < directory.entries.len():
+        if bound_modules.get(directory.entries[directory_index].module_id) == nil:
+            return _aspect_pack_admission_error("ASPECT_PACK_UNBOUND_MODULE", "pack directory contains a module absent from the logical catalog")
+        directory_index = directory_index + 1
+
+    AspectPackAdmission(ok: true, error_code: "", error_message: "", admitted_facets: admitted.len(), facets: admitted)
+
+export AspectPackDirectoryEntry, AspectPackDirectory, AspectPackDirectoryParse
+export AspectPackArtifactIdentity, AspectPackExportContract, AspectPackAdmission, AspectPackLookupRequest
+export aspect_pack_directory_parse_from_smf_bytes
+export aspect_pack_directory_parse_from_outer_smf_bytes
+export aspect_pack_directory_validate_against_manifest

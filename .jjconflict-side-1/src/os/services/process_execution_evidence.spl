@@ -1,0 +1,66 @@
+# Opaque process execution evidence shared with loader consumers.
+#
+# Authority and storage live in PmService.  This module contains only the
+# value contract crossing the process-manager/loader boundary.
+
+pub enum ProcessExecutionStageV1:
+    ClangCompile
+    LldLink
+    HelloRun
+
+pub struct ProcessExecutionResultV1:
+    stage: ProcessExecutionStageV1
+    child_id: u64
+    parent_id: u64
+    executable_path: text
+    executable_sha256: text
+    filesystem_name: text
+    filesystem_generation: u64
+    input_sha256: text
+    result_sha256: text
+    exit_code: i64
+    captured_stdout: text
+    captured_stderr: text
+
+pub struct ProcessExecutionEvidenceTokenV1:
+    owner_nonce: u64
+    slot_index: i64
+    generation: u64
+    nonce: u64
+
+pub struct ProcessExecutionReapV1:
+    exit_code: i32
+    evidence: ProcessExecutionEvidenceTokenV1?
+
+pub enum ProcessExecutionEvidenceErrorV1:
+    InvalidResult
+    MissingObservation
+    Exhausted
+    InvalidToken
+    AlreadyConsumed
+
+pub(package) struct ProcessExecutionEvidenceSlotV1:
+    generation: u64
+    nonce: u64
+    consumed: bool
+    result: ProcessExecutionResultV1
+
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+
+fn _digest_valid(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+pub fn process_execution_result_v1_validate(result: ProcessExecutionResultV1) -> bool:
+    """Validate diagnostic shape only; this never creates authority."""
+    result.child_id != 0u64 and result.parent_id != 0u64 and
+        result.child_id != result.parent_id and result.executable_path.starts_with("/") and
+        (result.filesystem_name == "fat32" or result.filesystem_name == "dbfs" or
+         result.filesystem_name == "nvfs") and result.filesystem_generation != 0u64 and
+        _digest_valid(result.executable_sha256) and _digest_valid(result.input_sha256) and
+        _digest_valid(result.result_sha256) and result.captured_stdout.len() <= 65536 and
+        result.captured_stderr.len() <= 65536
+
+export ProcessExecutionStageV1, ProcessExecutionResultV1
+export ProcessExecutionEvidenceTokenV1, ProcessExecutionReapV1
+export ProcessExecutionEvidenceErrorV1
+export process_execution_result_v1_validate

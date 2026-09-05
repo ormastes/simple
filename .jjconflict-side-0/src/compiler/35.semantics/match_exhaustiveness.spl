@@ -1,0 +1,62 @@
+# Critical-profile match-exhaustiveness gate (WP-6, 2026-08-07).
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+#
+# Wraps compiler.hir.match_coverage.ResolvedMatchCoverage with the severity
+# decision MIR lowering needs: under the `critical` assurance profile ONLY, a
+# non-exhaustive match against a closed enum with no wildcard arm is a hard
+# error, not the warning every other profile still gets (see
+# switch_operators_calls.spl's existing `self.error(...)` non-fatal
+# diagnostic -- premise #10/#10b: 286 non-exhaustive matches exist in-tree
+# today, so a global promotion would fail the build at every one of them;
+# this is a critical-profile-only escalation, not a global behavior change).
+#
+# Severity is routed through the WP-3 canonical resolver
+# (compiler.common.assurance.policy_names/policy_schema) -- this file adds NO
+# fifth severity table of its own, it only asks "is this profile critical?".
+
+use compiler.hir.match_coverage.{ResolvedMatchCoverage}
+use compiler.common.assurance.policy_names.{normalize_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+
+pub fn build_match_coverage(
+    scrutinee_type_id: i64,
+    enum_symbol_id: i64,
+    enum_name: text,
+    all_variant_ids: [i64],
+    all_variant_names: [text],
+    covered_variant_ids: [i64],
+    has_wildcard: bool,
+) -> ResolvedMatchCoverage:
+    ResolvedMatchCoverage(
+        scrutinee_type_id: scrutinee_type_id,
+        enum_symbol_id: enum_symbol_id,
+        enum_name: enum_name,
+        all_variant_ids: all_variant_ids,
+        all_variant_names: all_variant_names,
+        covered_variant_ids: covered_variant_ids,
+        has_wildcard: has_wildcard,
+    )
+
+# True only when: (a) coverage is genuinely incomplete, AND (b) the resolved
+# profile is `critical` (or its deprecated `mission-critical` alias).
+# `strictness_name` is the same raw SIMPLE_SAFETY_PROFILE value every other
+# profile-gated MIR/driver site reads (see driver_safety_severity.spl's
+# `safety_pass_severity()`, eval_decls.spl's `eval_init()`) -- normalized
+# through the shared alias table so "mission-critical" behaves identically to
+# "critical". moderate/strict/robust always return false here: they keep
+# today's warn-only behavior at the call site, unchanged by this function.
+# Not `pub`: cross-module import still works via explicit `use module.{name}`
+# (same pattern as `compiler.backend.gpu_intrinsics.is_gpu_intrinsic`, also a
+# plain `fn`) -- kept non-pub specifically to avoid the `primitive_api` lint
+# rule, which flags any `pub fn`/`pub me` returning a bare `bool`/int/float
+# from its public surface. This function is an internal severity predicate,
+# not part of a published API, so the rule's concern does not apply.
+fn match_coverage_requires_hard_error(coverage: ResolvedMatchCoverage, strictness_name: text) -> bool:
+    if coverage.is_exhaustive():
+        return false
+    val canonical = normalize_profile_name(strictness_name)
+    val strictness = AssuranceStrictness.from_name(canonical)
+    match strictness:
+        AssuranceStrictness.Critical: true
+        _: false

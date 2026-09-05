@@ -1,0 +1,60 @@
+use os.compositor.compositor.{Compositor}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
+use os.desktop.shell.{DesktopShell}
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test,
+    _mount_hosted_rootfs_for_test,
+}
+use os.services.vfs.vfs_boot_init.{_vfs_ambient_reset_for_test}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+
+fn probe_shell() -> DesktopShell:
+    val backend: CompositorBackend = HeadlessHostCompositorBackend.new(160, 120)
+    DesktopShell.new(Compositor.with_backends(backend, nil, 160, 120))
+
+fn main() -> i64:
+    _vfs_ambient_reset_for_test()
+    _clear_vfs_rootfs_for_test()
+    var shell = probe_shell()
+    val baseline = shell.pinned_app_count()
+    if shell.pin_app("/sys/apps/demo", "Demo", "D"):
+        return 1
+    if shell.pinned_app_count() != baseline:
+        return 2
+
+    val root = DriverInstance.DbFs(DbFsDriver.new_hosted())
+    if not _mount_hosted_rootfs_for_test(root):
+        return 3
+    if not shell.pin_app("/sys/apps/demo", "Demo", "D"):
+        return 4
+
+    var restored = probe_shell()
+    if not restored.load_pinned_layout():
+        return 5
+    if restored.pinned_app_count() != baseline + 1:
+        return 6
+    val window = restored.compositor.create_window("Demo", 1, 1, 40, 40)
+    restored.compositor.set_window_identity(window, 42, "/sys/apps/demo")
+    if restored.runtime_taskbar_model().running.len() != 1:
+        return 7
+    restored.compositor.destroy_window(window)
+    if restored.runtime_taskbar_model().running.len() != 0:
+        return 8
+    if not restored.unpin_app("/sys/apps/demo"):
+        return 9
+
+    var unpinned = probe_shell()
+    if not unpinned.load_pinned_layout():
+        return 10
+    if unpinned.pinned_app_count() != baseline:
+        return 11
+    if not restored.pin_app("/sys/apps/demo", "Demo", "D"):
+        return 12
+    _clear_vfs_rootfs_for_test()
+    if restored.unpin_app("/sys/apps/demo"):
+        return 13
+    if restored.pinned_app_count() != baseline + 1:
+        return 14
+    0

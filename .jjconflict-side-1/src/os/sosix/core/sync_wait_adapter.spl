@@ -1,0 +1,150 @@
+"""Pure protocol state for notification-backed synchronous compatibility waits.
+
+The platform adapter performs exactly one native wait when `should_wait` is
+true. It must call `before_wait` again for `retry` decisions. No method here
+sleeps, polls, or spins.
+"""
+
+use os.sosix.core.operation.{
+    SOSIX_OPERATION_CANCELED,
+    SOSIX_OPERATION_TIMED_OUT,
+    SosixOperationId
+}
+use os.sosix.core.completion.SosixCompletion
+use os.sosix.core.wait_set.SosixWaitSet
+
+pub val SOSIX_NATIVE_WAIT_SIGNALED: u8 = 0
+pub val SOSIX_NATIVE_WAIT_TIMED_OUT: u8 = 1
+pub val SOSIX_NATIVE_WAIT_CANCELED: u8 = 2
+pub val SOSIX_NATIVE_WAIT_ERROR: u8 = 3
+
+pub val SOSIX_SYNC_WAIT_PENDING: u8 = 0
+pub val SOSIX_SYNC_WAIT_COMPLETED: u8 = 1
+pub val SOSIX_SYNC_WAIT_TIMED_OUT: u8 = 2
+pub val SOSIX_SYNC_WAIT_CANCELED: u8 = 3
+pub val SOSIX_SYNC_WAIT_ERROR: u8 = 4
+
+pub struct SosixSyncWaitDecision:
+    outcome: u8
+    should_wait: bool
+    retry: bool
+    cleanup_watch: bool
+    reason: text
+    wait_error_status: i32
+    completion: SosixCompletion
+
+class SosixSyncWaitState:
+    operation: SosixOperationId
+    expected_api_id: u32
+    observed_notification_generation: u64
+    finished: bool
+
+fn _empty_completion(operation: SosixOperationId, api_id: u32) -> SosixCompletion:
+    SosixCompletion(
+        operation: operation,
+        api_id: api_id,
+        status: 0,
+        transferred: 0,
+        partial_progress: false,
+        terminal_state: 0
+    )
+
+fn _decision(
+    state: SosixSyncWaitState,
+    outcome: u8,
+    should_wait: bool,
+    retry: bool,
+    cleanup_watch: bool,
+    reason: text,
+    wait_error_status: i32
+) -> SosixSyncWaitDecision:
+    SosixSyncWaitDecision(
+        outcome: outcome,
+        should_wait: should_wait,
+        retry: retry,
+        cleanup_watch: cleanup_watch,
+        reason: reason,
+        wait_error_status: wait_error_status,
+        completion: _empty_completion(state.operation, state.expected_api_id)
+    )
+
+fn _completion_decision(
+    state: SosixSyncWaitState, completion: SosixCompletion
+) -> SosixSyncWaitDecision:
+    if completion.api_id != state.expected_api_id:
+        return SosixSyncWaitDecision(
+            outcome: SOSIX_SYNC_WAIT_ERROR,
+            should_wait: false,
+            retry: false,
+            cleanup_watch: true,
+            reason: "completion-api-mismatch",
+            wait_error_status: 0,
+            completion: completion
+        )
+    var outcome = SOSIX_SYNC_WAIT_COMPLETED
+    var reason = "completed"
+    if completion.terminal_state == SOSIX_OPERATION_CANCELED:
+        outcome = SOSIX_SYNC_WAIT_CANCELED
+        reason = "operation-canceled"
+    elif completion.terminal_state == SOSIX_OPERATION_TIMED_OUT:
+        outcome = SOSIX_SYNC_WAIT_TIMED_OUT
+        reason = "operation-timed-out"
+    SosixSyncWaitDecision(
+        outcome: outcome,
+        should_wait: false,
+        retry: false,
+        cleanup_watch: true,
+        reason: reason,
+        wait_error_status: 0,
+        completion: completion
+    )
+
+impl SosixSyncWaitState:
+    static fn begin(
+        operation: SosixOperationId, expected_api_id: u32, wait_set: SosixWaitSet
+    ) -> SosixSyncWaitState:
+        """Begin after the caller successfully installs `operation` as a watch."""
+        SosixSyncWaitState(
+            operation: operation,
+            expected_api_id: expected_api_id,
+            observed_notification_generation: wait_set.notification_generation,
+            finished: false
+        )
+
+    me before_wait(wait_set: SosixWaitSet) -> SosixSyncWaitDecision:
+        """Recheck readiness after arming and immediately before native sleep."""
+        if self.finished:
+            return _decision(self, SOSIX_SYNC_WAIT_ERROR, false, false, true, "wait-already-finished", 0)
+        if val completion = wait_set.take_ready_for(self.operation):
+            self.finished = true
+            return _completion_decision(self, completion)
+        if wait_set.notification_generation != self.observed_notification_generation:
+            self.observed_notification_generation = wait_set.notification_generation
+            return _decision(self, SOSIX_SYNC_WAIT_PENDING, false, true, false, "notification-generation-changed", 0)
+        _decision(self, SOSIX_SYNC_WAIT_PENDING, true, false, false, "native-wait-required", 0)
+
+    me after_wait(
+        wait_set: SosixWaitSet, native_result: u8, wait_error_status: i32
+    ) -> SosixSyncWaitDecision:
+        """Classify one native wake; a raced completion wins over timeout/error."""
+        if self.finished:
+            return _decision(self, SOSIX_SYNC_WAIT_ERROR, false, false, true, "wait-already-finished", 0)
+        if val completion = wait_set.take_ready_for(self.operation):
+            self.finished = true
+            return _completion_decision(self, completion)
+        self.observed_notification_generation = wait_set.notification_generation
+        if native_result == SOSIX_NATIVE_WAIT_SIGNALED:
+            return _decision(self, SOSIX_SYNC_WAIT_PENDING, false, true, false, "spurious-wake", 0)
+        self.finished = true
+        if native_result == SOSIX_NATIVE_WAIT_TIMED_OUT:
+            return _decision(self, SOSIX_SYNC_WAIT_TIMED_OUT, false, false, true, "native-wait-timeout", 0)
+        if native_result == SOSIX_NATIVE_WAIT_CANCELED:
+            return _decision(self, SOSIX_SYNC_WAIT_CANCELED, false, false, true, "native-wait-canceled", 0)
+        val reason = if wait_error_status == 0: "native-wait-error" else: "native-wait-error-status"
+        _decision(self, SOSIX_SYNC_WAIT_ERROR, false, false, true, reason, wait_error_status)
+
+export SOSIX_NATIVE_WAIT_SIGNALED, SOSIX_NATIVE_WAIT_TIMED_OUT
+export SOSIX_NATIVE_WAIT_CANCELED, SOSIX_NATIVE_WAIT_ERROR
+export SOSIX_SYNC_WAIT_PENDING, SOSIX_SYNC_WAIT_COMPLETED, SOSIX_SYNC_WAIT_TIMED_OUT
+export SOSIX_SYNC_WAIT_CANCELED, SOSIX_SYNC_WAIT_ERROR
+export SosixSyncWaitDecision, SosixSyncWaitState

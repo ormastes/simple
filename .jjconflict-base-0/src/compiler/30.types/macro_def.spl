@@ -1,0 +1,241 @@
+"""
+Macro Definition - Phase 7A: Shared types and macro definition tracking
+
+Contains:
+- HirType: simplified type system for macro type checking
+- Expr: simplified expression AST for macro bodies
+- MacroParam: macro parameter with type annotation
+- MacroDef: macro definition with type information
+- MacroRegistry: registry for tracking macro definitions
+
+Split from macro_checker.spl
+"""
+
+type Symbol = text
+
+# ============================================================================
+# Type System (Simplified for Testing)
+# ============================================================================
+
+enum HirType:
+    """Simplified HIR type for macro type checking"""
+    Int
+    Str
+    Bool
+    Unit
+    TypeParam(id: i64)
+    Arrow(from: HirType, to: HirType)
+    Generic(name: Symbol, args: [HirType])
+    List(elem: HirType)
+
+impl HirType:
+    fn to_string() -> text:
+        match self:
+            case Int: "i32"
+            case Str: "String"
+            case Bool: "bool"
+            case Unit: "()"
+            case TypeParam(id): "T{id}"
+            case Arrow(from, to):
+                "fn({from.to_string()}) -> {to.to_string()}"
+            case Generic(name, args):
+                if args.len() == 0:
+                    name
+                else:
+                    var arg_strs = []
+                    for arg in args:
+                        arg_strs.push(arg.to_string())
+                    val args_str = if arg_strs.len() > 0: arg_strs[0] else: ""
+                    "{name}<{args_str}>"
+            case List(elem):
+                "[{elem.to_string()}]"
+
+# ============================================================================
+# Expression (Simplified for Testing)
+# ============================================================================
+
+enum Expr:
+    """Simplified expression for macro bodies"""
+    IntLit(value: i64)
+    StrLit(value: text)
+    BoolLit(value: bool)
+    Var(name: Symbol)
+    Call(func: Expr, args: [Expr])
+    If(cond: Expr, then_branch: Expr, else_branch: Expr)
+    Block(stmts: [Expr])
+    Let(name: Symbol, value: Expr, rest: Expr)
+
+impl Expr:
+    fn to_string() -> text:
+        match self:
+            case IntLit(value): "{value}"
+            case StrLit(value): "\"{value}\""
+            case BoolLit(value): if value: "true" else: "false"
+            case Var(name): name
+            case Call(func, _): "{func.to_string()}(...)"
+            case If(cond, _, _): "if {cond.to_string()} ..."
+            case Block(_): "{ ... }"
+            case Let(name, _, _): "let {name} = ..."
+
+# ============================================================================
+# Macro Parameter
+# ============================================================================
+
+class MacroParam:
+    """
+    Macro parameter with type annotation
+
+    Examples:
+        MacroParam(name: "cond", ty: Bool, is_variadic: false)
+        MacroParam(name: "args", ty: List(String), is_variadic: true)
+    """
+    name: Symbol
+    ty: HirType
+    is_variadic: bool
+
+impl MacroParam:
+    static fn regular(name: Symbol, ty: HirType) -> MacroParam:
+        """Create a regular (non-variadic) parameter"""
+        MacroParam(
+            name: name,
+            ty: ty,
+            is_variadic: false
+        )
+
+    static fn variadic(name: Symbol, elem_ty: HirType) -> MacroParam:
+        """Create a variadic parameter (...args)"""
+        MacroParam(
+            name: name,
+            ty: HirType.List(elem: elem_ty),
+            is_variadic: true
+        )
+
+    fn to_string() -> text:
+        if self.is_variadic:
+            "...{self.name}: {self.ty.to_string()}"
+        else:
+            "{self.name}: {self.ty.to_string()}"
+
+# ============================================================================
+# Macro Definition
+# ============================================================================
+
+class MacroDef:
+    """
+    Macro definition with type information
+
+    Examples:
+        @macro assert(cond: bool, msg: text):
+            if not cond:
+                panic(msg)
+
+        @macro log(...msgs: [text]):
+            for msg in msgs:
+                println(msg)
+    """
+    name: Symbol
+    params: [MacroParam]
+    body: Expr
+    expansion_ty: HirType
+    hygiene_scope: i64
+
+impl MacroDef:
+    static fn new_macro(
+        name: Symbol,
+        params: [MacroParam],
+        body: Expr,
+        expansion_ty: HirType
+    ) -> MacroDef:
+        MacroDef(
+            name: name,
+            params: params,
+            body: body,
+            expansion_ty: expansion_ty,
+            hygiene_scope: 0  # Will be set by registry
+        )
+
+    fn param_count() -> i64:
+        """Count non-variadic parameters"""
+        var count = 0
+        for param in self.params:
+            if not param.is_variadic:
+                count = count + 1
+        count
+
+    fn has_variadic() -> bool:
+        """Check if macro has variadic parameter"""
+        for param in self.params:
+            if param.is_variadic:
+                return true
+        false
+
+    fn to_string() -> text:
+        var param_strs = []
+        for param in self.params:
+            param_strs.push(param.to_string())
+
+        val params_str = if param_strs.len() > 0: param_strs[0] else: ""
+        "@macro {self.name}({params_str}) -> {self.expansion_ty.to_string()}"
+
+# ============================================================================
+# Macro Registry
+# ============================================================================
+
+class MacroRegistry:
+    """
+    Registry for tracking macro definitions
+
+    Maintains:
+    - Macro definitions by name
+    - Hygiene scope counters
+    """
+    macros: text  # Dict<Symbol, MacroDef>
+    next_hygiene_scope: i64
+
+impl MacroRegistry:
+    static fn empty() -> MacroRegistry:
+        MacroRegistry(
+            macros: {},
+            next_hygiene_scope: 1
+        )
+
+    me register_macro(macro_def: MacroDef):
+        """Register a macro definition"""
+        # Assign unique hygiene scope
+        var updated_def = macro_def
+        updated_def.hygiene_scope = self.next_hygiene_scope
+        self.next_hygiene_scope = self.next_hygiene_scope + 1
+
+        # Register
+        self.macros[macro_def.name] = updated_def
+
+    fn lookup_macro(name: Symbol) -> MacroDef:
+        """
+        Lookup macro definition
+
+        Returns: macro definition or error if not found
+        """
+        if name in self.macros:
+            return self.macros[name]
+
+        # Return dummy macro for missing
+        MacroDef(
+            name: "__missing__",
+            params: [],
+            body: Expr.IntLit(value: 0),
+            expansion_ty: HirType.Unit,
+            hygiene_scope: 0
+        )
+
+    fn has_macro(name: Symbol) -> bool:
+        """Check if macro is registered"""
+        name in self.macros
+
+    fn macro_count() -> i64:
+        """Count registered macros"""
+        self.macros.len()
+
+    me clear():
+        """Clear all macros"""
+        self.macros = {}
+        self.next_hygiene_scope = 1

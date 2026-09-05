@@ -1,0 +1,123 @@
+"""
+# RV32 Multi-Backend Boot Matrix
+#
+# Classifies the current RV32 proof slices by what they actually prove today:
+# - QEMU: boot_complete
+# - GHDL: payload_exec
+# - hybrid RTL simulator: payload_exec or equivalent
+"""
+
+use std.io_runtime.{shell}
+use os.qemu_runner.{get_target, build_qemu_command}
+use os.kernel.arch.arch_context.{Architecture as OsArchitecture}
+use std.nogc_sync_mut.debug.remote.exec.adapter_ghdl_rv32.{GhdlRv32Adapter}
+use std.nogc_sync_mut.debug.remote.exec.compiler_bridge.{CompilerBridge}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap, Architecture as RemoteArchitecture}
+use timing.hybrid_sim.{HybridSimulator}
+use timing.types.{SimMode}
+use test.helpers.riscv_encode.{encode_addi, encode_ebreak}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val QEMU_TIMEOUT_MS: i64 = 10000
+
+fn qemu_available() -> bool:
+    val result = rt_process_run("which", ["qemu-system-riscv32"])
+    result[2] == 0
+
+fn ghdl_available() -> bool:
+    val ghdl = shell("command -v ghdl >/dev/null 2>&1")
+    val clang = shell("command -v clang >/dev/null 2>&1")
+    val lld = shell("command -v ld.lld >/dev/null 2>&1")
+    val objcopy = shell("command -v llvm-objcopy >/dev/null 2>&1")
+    ghdl.exit_code == 0 and clang.exit_code == 0 and lld.exit_code == 0 and objcopy.exit_code == 0
+
+fn run_qemu_output(timeout_ms: i64) -> (text, i32):
+    val target = get_target(OsArchitecture.Riscv32)
+    val cmd_parts = build_qemu_command(target)
+    val qemu_bin = cmd_parts[0]
+    var args: [text] = []
+    for i in 1..cmd_parts.len():
+        args.push(cmd_parts[i])
+    val result = rt_process_run_timeout(qemu_bin, args, timeout_ms)
+    (result[0] + result[1], result[2])
+
+fn qemu_lane_status() -> text:
+    val target = get_target(OsArchitecture.Riscv32)
+    if not qemu_available():
+        return "skip:qemu-unavailable"
+    if not rt_file_exists(target.output):
+        return "skip:qemu-artifact-missing"
+
+    val run = run_qemu_output(QEMU_TIMEOUT_MS)
+    val output = run[0]
+    val exit_code = run[1]
+    if exit_code == 0 and output.contains("SimpleOS") and output.contains("Memory map") and output.contains("boot complete") and output.contains("[PASS] boot_and_init"):
+        return "boot_complete"
+    "boot_incomplete"
+
+fn ghdl_lane_status() -> text:
+    if not ghdl_available():
+        return "skip:ghdl-unavailable"
+
+    var adapter = GhdlRv32Adapter.new()
+    val conn = adapter.connect()
+    if conn.is_err():
+        return "skip:ghdl-connect-failed"
+
+    val manager_result = adapter.create_manager()
+    if manager_result.is_err():
+        adapter.disconnect()
+        return "skip:ghdl-manager-failed"
+
+    val source = "fn main() -> i64:\n    0\n"
+    val compiled = CompilerBridge.compile(source, RemoteArchitecture.RiscV32, MemoryMap.ghdl_rv32().code_start)
+    if compiled.is_err():
+        adapter.disconnect()
+        return "skip:ghdl-compile-failed"
+
+    var manager = manager_result.ok.unwrap()
+    val exec_result = manager.execute_bytes("payload_zero", compiled.ok.unwrap(), [])
+    adapter.disconnect()
+    if exec_result.is_err():
+        return "skip:ghdl-exec-failed"
+
+    val exec = exec_result.ok.unwrap()
+    if exec.is_ok() and exec.return_value == 0:
+        return "payload_exec"
+    "payload_incomplete"
+
+fn create_hybrid(program: [i64]) -> HybridSimulator:
+    var sim = HybridSimulator.new(SimMode.Fast)
+    sim.load_raw_image(program)
+    sim.reset()
+    sim.load_raw_image(program)
+    sim
+
+fn hybrid_lane_status() -> text:
+    val program = encode_addi(10, 0, 42) + encode_ebreak()
+    var sim = create_hybrid(program)
+    sim.run_until_halt()
+    val a0 = sim.get_reg("a0")
+    val snap = sim.snapshot()
+    if snap.halted and a0 == Some(42):
+        return "payload_exec"
+    "payload_incomplete"
+
+describe "RV32 multi-backend boot matrix":
+    slow_it "classifies QEMU as boot_complete and the other lanes as payload_exec":
+        val qemu_status = qemu_lane_status()
+        val ghdl_status = ghdl_lane_status()
+        val hybrid_status = hybrid_lane_status()
+
+        if qemu_status.starts_with("skip:") or ghdl_status.starts_with("skip:"):
+            print "SKIP: {qemu_status}, {ghdl_status}, {hybrid_status}"
+            return
+
+        expect(qemu_status).to_equal("boot_complete")
+        expect(ghdl_status).to_equal("payload_exec")
+        expect(hybrid_status).to_equal("payload_exec")
+        expect([qemu_status, ghdl_status, hybrid_status]).to_contain("boot_complete")
+        expect([qemu_status, ghdl_status, hybrid_status]).to_contain("payload_exec")

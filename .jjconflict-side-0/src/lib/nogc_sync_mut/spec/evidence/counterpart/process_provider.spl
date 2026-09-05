@@ -1,0 +1,126 @@
+@allow(primitive_api)
+# Counterpart Conformance — ProviderKind.process_bridge (Wave 1, lane F4).
+#
+# primitive_api is allowed here deliberately: exit codes, timeouts and byte
+# caps are the frozen Wave-0 wire types and the operating system's own.
+#
+# Spawns a PINNED executable, captures stdout, stderr and the exit status, and
+# converts the captured stdout into the same SDN response envelope every other
+# transport produces. This is the transport the Chrome adapter will use.
+#
+# Fail-closed, all of them:
+#
+#   * an empty or unpinned executable is `unavailable`, never executed
+#   * a non-zero exit is `crashed`, never a pass with an empty artifact
+#   * a run that hit the output or time bound is `timed_out`, distinct from a
+#     crash, because normalizing one into the other loses the defect
+#   * stdout that carries no `canonical_hash` yields a vacuous artifact, which
+#     the run-level vacuity gate then fails — it is never defaulted
+#
+# Design: doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md §3.2
+# Contracts: src/lib/common/spec/evidence/counterpart/model.spl (frozen, do not edit)
+
+use std.common.spec.evidence.counterpart.model.{
+    ExecutionMode,
+    ExecutionReceipt,
+    ProviderStatus
+}
+use std.nogc_sync_mut.spec.evidence.counterpart.provider_registry.{
+    ProviderSelection,
+    ProviderOutcome,
+    counterpart_response_artifact,
+    counterpart_response_field,
+    provider_outcome_failed
+}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+# How a bridge process is to be launched. Everything is explicit: a bridge that
+# inherits an ambient argument list is not reproducible.
+pub struct ProcessInvocation:
+    args: [text]
+    timeout_ms: i64
+    max_output_bytes: i64
+
+pub fn process_invocation(args: [text]) -> ProcessInvocation:
+    ProcessInvocation(args: args, timeout_ms: 60000, max_output_bytes: 8388608)
+
+pub fn process_invocation_bounded(
+    args: [text],
+    timeout_ms: i64,
+    max_output_bytes: i64
+) -> ProcessInvocation:
+    ProcessInvocation(
+        args: args,
+        timeout_ms: timeout_ms,
+        max_output_bytes: max_output_bytes
+    )
+
+# 124 is the conventional exit status of a bounded run that was killed on time,
+# and the runtime's bounded runner reports it that way.
+pub val PROCESS_BRIDGE_TIMEOUT_EXIT: i64 = 124
+
+pub fn process_status_for_exit(exit_code: i64) -> ProviderStatus:
+    if exit_code == 0:
+        return ProviderStatus.executed
+    if exit_code == PROCESS_BRIDGE_TIMEOUT_EXIT:
+        return ProviderStatus.timed_out
+    ProviderStatus.crashed
+
+fn process_receipt(provider_id: text, stderr: text) -> ExecutionReceipt:
+    ExecutionReceipt(
+        provider_id: provider_id,
+        execution_mode: ExecutionMode.cpu_reference,
+        device_identity: counterpart_response_field(stderr, "device_identity"),
+        queue_identity: "",
+        submission_count: 0,
+        fence_completed: false,
+        device_origin_readback: false,
+        fallback_used: counterpart_response_field(stderr, "fallback_used") == "true",
+        dropped_events: 0,
+        completed: true
+    )
+
+# Run one component through the bridge executable named by the selection.
+pub fn process_provider_execute(
+    selection: ProviderSelection,
+    invocation: ProcessInvocation,
+    request: text
+) -> ProviderOutcome:
+    if not selection.resolved:
+        return provider_outcome_failed(selection.provider_id,
+            selection.unresolved_status,
+            "process provider was not selected", "", 0 - 1)
+    if selection.adapter_path == "":
+        return provider_outcome_failed(selection.provider_id,
+            ProviderStatus.unavailable,
+            "process provider '" + selection.provider_id
+                + "' has no pinned executable", "", 0 - 1)
+
+    var args: [text] = []
+    for argument in invocation.args:
+        args.push(argument)
+    args.push("--component")
+    args.push(selection.component_id)
+    args.push("--request")
+    args.push(request)
+
+    val (stdout, stderr, exit_code) = process_run_bounded(
+        selection.adapter_path, args, invocation.timeout_ms, invocation.max_output_bytes)
+
+    val status = process_status_for_exit(exit_code)
+    match status:
+        ProviderStatus.executed =>
+            ProviderOutcome(
+                status: ProviderStatus.executed,
+                artifact: counterpart_response_artifact(
+                    stdout, selection.counterpart_boundary_id),
+                execution: process_receipt(selection.provider_id, stderr),
+                raw_response: stdout,
+                raw_stderr: stderr,
+                exit_code: exit_code,
+                diagnostics: []
+            )
+        _ =>
+            provider_outcome_failed(selection.provider_id, status,
+                "bridge " + selection.adapter_path + " exited " + exit_code.to_text(),
+                stderr, exit_code)

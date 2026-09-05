@@ -1,0 +1,69 @@
+#!/bin/sh
+# Static lexical-boundary guard for dashboard remote-session collection.
+# This checks source shape only; it does not admit, sign, or verify a provider.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/app/llm_dashboard/collectors/remote_collector.spl"
+
+# --- verdict discipline (.claude/rules/vcs.md): verdict LAST on stdout,
+# --- PASS/FAIL/ERROR, exits 0/1/2, non-vacuity absolute. Inlined rather than
+# --- sourced: scripts/audit/ is scanned by check-guard-wiring.shs, so a shared
+# --- non-guard file in this directory would be mistaken for an unwired guard.
+CHECKED=0
+FAILURES=""
+
+need_file() {
+    if [ ! -f "$1" ]; then
+        echo "ERROR — nothing was checked (missing audited file: $1)"
+        exit 2
+    fi
+}
+
+# count <label> <file> <pattern> <expected>
+count() {
+    _got=$(grep -c "$3" "$2" 2>/dev/null || true)
+    [ -n "$_got" ] || _got=0
+    CHECKED=$((CHECKED + 1))
+    if [ "$_got" -ne "$4" ]; then
+        FAILURES="${FAILURES}${FAILURES:+; }$1 in $2: expected $4, got $_got"
+    fi
+}
+
+# present: at least one match (shape must exist; multiplicity is not pinned).
+present() {
+    _got=$(grep -c "$3" "$2" 2>/dev/null || true)
+    [ -n "$_got" ] || _got=0
+    CHECKED=$((CHECKED + 1))
+    if [ "$_got" -lt 1 ]; then
+        FAILURES="${FAILURES}${FAILURES:+; }$1 in $2: expected at least 1, got $_got"
+    fi
+}
+
+absent()  { count "$1" "$2" "$3" 0; }
+
+verdict() {
+    if [ "$CHECKED" -eq 0 ]; then
+        echo "ERROR — nothing was checked ($1: zero assertions evaluated)"
+        exit 2
+    fi
+    if [ -n "$FAILURES" ]; then
+        echo "FAIL — $1: $FAILURES"
+        exit 1
+    fi
+    echo "PASS — $CHECKED assertion(s) checked, $1"
+    exit 0
+}
+
+need_file "$module"
+
+count 'unsafe-annotated extern declaration' "$module" \
+    '^@unsafe(reason: "raw session-file text ABI; this collector has no error-result channel", capabilities: \[ffi\])$' 1
+count 'rt_file_read_text extern declaration' "$module" \
+    '^extern fn rt_file_read_text(path: text) -> text$' 1
+count 'lexically capability-gated rt_file_read_text call site' "$module" \
+    'unsafe(capabilities: \[ffi\]): rt_file_read_text(path)' 1
+absent 'ungated raw rt_file_read_text call site' "$module" \
+    '[^:] rt_file_read_text(path)$'
+
+verdict 'dashboard remote collector SFFI authority (declarations=1 lexical_calls=1 direct_call_shape=preserved no_false_safe_absence=preserved artifact_admission=absent)'

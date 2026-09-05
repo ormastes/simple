@@ -1,0 +1,371 @@
+const RECONNECT_BASE_DELAY_MS = 1000
+const RECONNECT_MAX_DELAY_MS = 30000
+const RECONNECT_GIVE_UP_MS = 600000
+const LIVENESS_TIMEOUT_MS = 45000
+const POST_MAX_RETRIES = 10
+const POST_BASE_DELAY_MS = 500
+const POST_MAX_DELAY_MS = 8000
+
+class SSEFrame:
+    event: text
+    id: text
+    data: text
+    comment: bool
+
+impl SSEFrame:
+    static fn empty() -> SSEFrame:
+        SSEFrame(event: "", id: "", data: "", comment: false)
+
+class SSEParseResult:
+    frames: [SSEFrame]
+    remaining: text
+
+class StreamClientEvent:
+    event_id: text
+    sequence_num: i64
+    event_type: text
+    source: text
+    payload_type: text
+    payload: text
+    created_at: text
+
+class SSETransport:
+    state: text
+    url: text
+    postUrl: text
+    headers: [text]
+    sessionId: text
+    lastSequenceNum: i64
+    seenSequenceNums: [i64]
+    reconnectAttempts: i64
+    reconnectStartElapsedMs: i64
+    reconnectTimerActive: bool
+    livenessTimerActive: bool
+    abortControllerActive: bool
+    dataLines: [text]
+    eventLog: [StreamClientEvent]
+    closeCodes: [i64]
+    diagnostics: [text]
+    postedMessages: [text]
+
+impl SSETransport:
+    static fn new(url: text, sessionId: text, initialSequenceNum: i64) -> SSETransport:
+        SSETransport(
+            state: "idle",
+            url: url,
+            postUrl: convertSSEUrlToPostUrl(url),
+            headers: [],
+            sessionId: sessionId,
+            lastSequenceNum: maxI64(initialSequenceNum, 0),
+            seenSequenceNums: [],
+            reconnectAttempts: 0,
+            reconnectStartElapsedMs: 0,
+            reconnectTimerActive: false,
+            livenessTimerActive: false,
+            abortControllerActive: false,
+            dataLines: [],
+            eventLog: [],
+            closeCodes: [],
+            diagnostics: ["cli_sse_transport_initialized"],
+            postedMessages: []
+        )
+
+    me getLastSequenceNum() -> i64:
+        me.lastSequenceNum
+
+    me connect(status: i64, hasBody: bool) -> ():
+        if me.state != "idle" and me.state != "reconnecting":
+            me.diagnostics.push("cli_sse_connect_failed")
+            return
+        me.state = "reconnecting"
+        me.abortControllerActive = true
+        if status != 200:
+            me.diagnostics.push("cli_sse_connect_http_error")
+            if isPermanentHttpCode(status):
+                me.state = "closed"
+                me.closeCodes.push(status)
+                return
+            me.handleConnectionError(0)
+            return
+        if not hasBody:
+            me.handleConnectionError(0)
+            return
+        me.state = "connected"
+        me.reconnectAttempts = 0
+        me.reconnectStartElapsedMs = 0
+        me.resetLivenessTimer()
+        me.diagnostics.push("cli_sse_connect_connected")
+
+    me readText(buffer: text) -> text:
+        val parsed = parseSSEFrames(buffer)
+        var i = 0
+        while i < parsed.frames.len():
+            val frame = parsed.frames[i]
+            me.resetLivenessTimer()
+            if frame.id != "":
+                me.observeSequence(parseI64(frame.id))
+            if frame.event != "" and frame.data != "":
+                me.handleSSEFrame(frame.event, frame.data)
+            else:
+                if frame.data != "":
+                    me.diagnostics.push("cli_sse_frame_missing_event_field")
+            i = i + 1
+        parsed.remaining
+
+    me handleSSEFrame(eventType: text, data: text) -> ():
+        if eventType != "client_event":
+            me.diagnostics.push("cli_sse_unexpected_event_type")
+            return
+        val event = parseStreamClientEvent(data)
+        if event.payload_type != "":
+            me.dataLines.push(event.payload + "\n")
+            me.diagnostics.push("cli_sse_message_received")
+        me.eventLog.push(event)
+
+    me observeSequence(seqNum: i64) -> ():
+        if seqNum <= 0:
+            return
+        if containsI64(me.seenSequenceNums, seqNum):
+            me.diagnostics.push("cli_sse_duplicate_sequence")
+        else:
+            me.seenSequenceNums.push(seqNum)
+            me.pruneSeenSequences()
+        if seqNum > me.lastSequenceNum:
+            me.lastSequenceNum = seqNum
+
+    me pruneSeenSequences() -> ():
+        if me.seenSequenceNums.len() <= 1000:
+            return
+        val threshold = me.lastSequenceNum - 200
+        var kept: [i64] = []
+        var i = 0
+        while i < me.seenSequenceNums.len():
+            if me.seenSequenceNums[i] >= threshold:
+                kept.push(me.seenSequenceNums[i])
+            i = i + 1
+        me.seenSequenceNums = kept
+
+    me handleConnectionError(elapsedMs: i64) -> ():
+        me.clearLivenessTimer()
+        if me.state == "closing" or me.state == "closed":
+            return
+        me.abortControllerActive = false
+        me.reconnectStartElapsedMs = elapsedMs
+        if elapsedMs < RECONNECT_GIVE_UP_MS:
+            me.state = "reconnecting"
+            me.reconnectAttempts = me.reconnectAttempts + 1
+            me.reconnectTimerActive = true
+            me.diagnostics.push("cli_sse_reconnect_attempt")
+        else:
+            me.state = "closed"
+            me.closeCodes.push(0)
+            me.diagnostics.push("cli_sse_reconnect_exhausted")
+
+    me onLivenessTimeout() -> ():
+        me.livenessTimerActive = false
+        me.diagnostics.push("cli_sse_liveness_timeout")
+        me.abortControllerActive = false
+        me.handleConnectionError(me.reconnectStartElapsedMs)
+
+    me resetLivenessTimer() -> ():
+        me.livenessTimerActive = true
+
+    me clearLivenessTimer() -> ():
+        me.livenessTimerActive = false
+
+    me write(messageType: text, authAvailable: bool, statuses: [i64]) -> i64:
+        if not authAvailable:
+            me.diagnostics.push("cli_sse_post_no_token")
+            return 0
+        var attempt = 1
+        while attempt <= POST_MAX_RETRIES:
+            var status = 500
+            if attempt - 1 < statuses.len():
+                status = statuses[attempt - 1]
+            if status == 200 or status == 201:
+                me.postedMessages.push(messageType)
+                return attempt
+            if status >= 400 and status < 500 and status != 429:
+                me.diagnostics.push("cli_sse_post_client_error")
+                return attempt
+            me.diagnostics.push("cli_sse_post_retryable_error")
+            if attempt == POST_MAX_RETRIES:
+                me.diagnostics.push("cli_sse_post_retries_exhausted")
+                return attempt
+            attempt = attempt + 1
+        POST_MAX_RETRIES
+
+    me close() -> ():
+        me.reconnectTimerActive = false
+        me.clearLivenessTimer()
+        me.state = "closing"
+        me.abortControllerActive = false
+
+    me isConnectedStatus() -> bool:
+        me.state == "connected"
+
+    me isClosedStatus() -> bool:
+        me.state == "closed"
+
+fn parseSSEFrames(buffer: text) -> SSEParseResult:
+    var frames: [SSEFrame] = []
+    var pos = 0
+    var idx = findFrom(buffer, "\n\n", pos)
+    while idx >= 0:
+        val rawFrame = buffer.slice(pos, idx)
+        pos = idx + 2
+        if rawFrame.trim() != "":
+            frames.push(parseRawSSEFrame(rawFrame))
+        idx = findFrom(buffer, "\n\n", pos)
+    SSEParseResult(frames: frames, remaining: buffer.slice(pos, buffer.len()))
+
+fn parseRawSSEFrame(rawFrame: text) -> SSEFrame:
+    val frame = SSEFrame.empty()
+    val lines = rawFrame.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with(":"):
+            frame.comment = true
+        else:
+            val colonIdx = line.find(":")
+            if colonIdx >= 0:
+                val field = line.slice(0, colonIdx)
+                var value = line.slice(colonIdx + 1, line.len())
+                if value.starts_with(" "):
+                    value = value.slice(1, value.len())
+                if field == "event":
+                    frame.event = value
+                if field == "id":
+                    frame.id = value
+                if field == "data":
+                    if frame.data == "":
+                        frame.data = value
+                    else:
+                        frame.data = frame.data + "\n" + value
+        i = i + 1
+    frame
+
+fn findFrom(value: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i + needle.len() <= value.len():
+        if value.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn parseStreamClientEvent(data: text) -> StreamClientEvent:
+    val parts = data.split("|")
+    var seq = 0
+    var payloadType = ""
+    var payload = ""
+    if parts.len() > 0:
+        seq = parseI64(parts[0])
+    if parts.len() > 1:
+        payloadType = parts[1]
+    if parts.len() > 2:
+        payload = parts[2]
+    StreamClientEvent(event_id: "event-" + seq.to_text(), sequence_num: seq, event_type: "client_event", source: "worker", payload_type: payloadType, payload: payload, created_at: "")
+
+fn convertSSEUrlToPostUrl(sseUrl: text) -> text:
+    val queryStart = sseUrl.find("?")
+    var withoutQuery = sseUrl
+    if queryStart >= 0:
+        withoutQuery = sseUrl.slice(0, queryStart)
+    if withoutQuery.ends_with("/stream"):
+        return withoutQuery.slice(0, withoutQuery.len() - 7)
+    withoutQuery
+
+fn isPermanentHttpCode(status: i64) -> bool:
+    status == 401 or status == 403 or status == 404
+
+fn reconnectDelayMs(attempt: i64) -> i64:
+    minI64(RECONNECT_BASE_DELAY_MS * pow2(attempt - 1), RECONNECT_MAX_DELAY_MS)
+
+fn postDelayMs(attempt: i64) -> i64:
+    minI64(POST_BASE_DELAY_MS * pow2(attempt - 1), POST_MAX_DELAY_MS)
+
+fn containsI64(values: [i64], needle: i64) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == needle:
+            return true
+        i = i + 1
+    false
+
+fn parseI64(value: text) -> i64:
+    var out = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch >= "0" and ch <= "9":
+            out = out * 10 + digitValue(ch)
+        i = i + 1
+    out
+
+fn digitValue(ch: text) -> i64:
+    if ch == "1":
+        return 1
+    if ch == "2":
+        return 2
+    if ch == "3":
+        return 3
+    if ch == "4":
+        return 4
+    if ch == "5":
+        return 5
+    if ch == "6":
+        return 6
+    if ch == "7":
+        return 7
+    if ch == "8":
+        return 8
+    if ch == "9":
+        return 9
+    0
+
+fn pow2(exp: i64) -> i64:
+    var out = 1
+    var i = 0
+    while i < exp:
+        out = out * 2
+        i = i + 1
+    out
+
+fn minI64(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn maxI64(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+fn sseReconnectGiveUpMs() -> i64:
+    RECONNECT_GIVE_UP_MS
+
+fn sseLivenessTimeoutMs() -> i64:
+    LIVENESS_TIMEOUT_MS
+
+fn ssePostMaxRetries() -> i64:
+    POST_MAX_RETRIES
+
+fn sseTransportSourceLinesModeled() -> i64:
+    710
+
+# ponytail: payload parser accepts compact test strings; switch to JSON only when another caller needs full JSON syntax here.
+# Source parity note: parseSSEFrames keeps incomplete trailing data as remaining.
+# Source parity note: comments count as frames to reset liveness.
+# Source parity note: data lines concatenate with newlines.
+# Source parity note: only client_event frames are delivered to worker subscribers.
+# Source parity note: frames with data but no event are diagnosed and dropped.
+# Source parity note: duplicate sequence IDs are diagnosed.
+# Source parity note: lastSequenceNum is a high-water mark for resume headers.
+# Source parity note: reconnect attempts use an exponential delay capped at 30s.
+# Source parity note: reconnect gives up after the 10 minute budget.
+# Source parity note: liveness timeout aborts the current stream and reconnects.
+# Source parity note: POST succeeds only on 200/201.
+# Source parity note: POST treats 4xx except 429 as permanent.
+# Source parity note: POST retries 429, 5xx, and network failures up to ten times.
+# Source parity note: close clears reconnect and liveness timers and aborts fetch.

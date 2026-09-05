@@ -1,0 +1,79 @@
+# Generic SCI-driven execution owner for simple-core.
+#
+# CLI-0 commands remain static. Every other command is resolved from the
+# admitted composition image and dispatched through the exact provider bridge;
+# no provider implementation or compiler command table is statically imported.
+
+use std.nogc_sync_mut.composition.types.{CompositionReadResultV1}
+use app.simple_core.command_resolver.{SIMPLE_CORE_OK}
+use app.simple_core.router.{
+    SIMPLE_CORE_ROUTE_CORE, SIMPLE_CORE_ROUTE_PROVIDER,
+    SimpleCoreRouteV1, simple_core_route_v1
+}
+use app.simple_core.provider_dispatch.{
+    SIMPLE_CORE_PROVIDER_DISPATCH_OK,
+    SimpleCoreProviderDispatchV1, simple_core_dispatch_provider_v1
+}
+
+val SIMPLE_CORE_EXECUTION_OK: i32 = 0
+val SIMPLE_CORE_EXECUTION_CORE_FAILED: i32 = 1
+val SIMPLE_CORE_EXECUTION_ROUTE_REJECTED: i32 = 2
+val SIMPLE_CORE_EXECUTION_PROVIDER_FAILED: i32 = 3
+
+class SimpleCoreExecutionV1:
+    status: i32
+    route_kind: i32
+    core_status: i32
+    provider_status: i32
+    command_status: i32
+    output: text
+    diagnostic: text
+    pin_released: bool
+    session_closed: bool
+
+fn _core_execution_v1(route: SimpleCoreRouteV1) -> SimpleCoreExecutionV1:
+    SimpleCoreExecutionV1(
+        status: if route.core.status == SIMPLE_CORE_OK: SIMPLE_CORE_EXECUTION_OK else: SIMPLE_CORE_EXECUTION_CORE_FAILED,
+        route_kind: route.kind,
+        core_status: route.core.status,
+        provider_status: -1,
+        command_status: -1,
+        output: route.core.output,
+        diagnostic: route.core.diagnostic,
+        pin_released: false,
+        session_closed: false
+    )
+
+fn _provider_execution_v1(route: SimpleCoreRouteV1,
+        dispatch: SimpleCoreProviderDispatchV1) -> SimpleCoreExecutionV1:
+    SimpleCoreExecutionV1(
+        status: if dispatch.status == SIMPLE_CORE_PROVIDER_DISPATCH_OK: SIMPLE_CORE_EXECUTION_OK else: SIMPLE_CORE_EXECUTION_PROVIDER_FAILED,
+        route_kind: route.kind,
+        core_status: -1,
+        provider_status: dispatch.status,
+        command_status: dispatch.command_status,
+        output: dispatch.output,
+        diagnostic: dispatch.diagnostic,
+        pin_released: dispatch.pin_released,
+        session_closed: dispatch.session_closed
+    )
+
+fn simple_core_execute_v1(args: [text], config: CompositionReadResultV1,
+        version: text, host_abi: u64, granted_capability_bits: u64) -> SimpleCoreExecutionV1:
+    val route = simple_core_route_v1(args, config, version)
+    if route.kind == SIMPLE_CORE_ROUTE_CORE:
+        return _core_execution_v1(route)
+    if route.kind != SIMPLE_CORE_ROUTE_PROVIDER:
+        return SimpleCoreExecutionV1(
+            SIMPLE_CORE_EXECUTION_ROUTE_REJECTED, route.kind, -1, -1, -1, "",
+            route.activation.diagnostic_code + ":" + route.activation.diagnostic_subject,
+            false, false
+        )
+    _provider_execution_v1(
+        route,
+        simple_core_dispatch_provider_v1(route.activation, host_abi, granted_capability_bits)
+    )
+
+export SIMPLE_CORE_EXECUTION_OK, SIMPLE_CORE_EXECUTION_CORE_FAILED
+export SIMPLE_CORE_EXECUTION_ROUTE_REJECTED, SIMPLE_CORE_EXECUTION_PROVIDER_FAILED
+export SimpleCoreExecutionV1, simple_core_execute_v1

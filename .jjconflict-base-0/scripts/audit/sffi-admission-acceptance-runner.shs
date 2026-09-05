@@ -1,0 +1,177 @@
+#!/bin/sh
+# Test-time fixture adapter for SFFI v2 evidence admission. It delegates
+# cryptographic, digest, signature, and report validation to the canonical
+# verifier, and accepts a category only when its structured status code matches
+# the fixture matrix. It never derives a category from stderr text.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+admission="$root/scripts/audit/sffi-evidence-admission.shs"
+matrix="$root/test/fixtures/sffi_admission_acceptance/fixture-matrix.tsv"
+null_provider="$root/test/fixtures/sffi_admission_acceptance/null_contract_provider.c"
+null_probe="$root/test/fixtures/sffi_admission_acceptance/null_contract_probe.c"
+
+usage() {
+    echo "usage: $0 FIXTURE_ID" >&2
+    exit 2
+}
+
+test "$#" -eq 1 || usage
+fixture_id=$1
+
+fixture_row=$(awk -F '\t' -v id="$fixture_id" '
+    $1 !~ /^#/ && NF == 3 && $1 == id { count++; row=$0 }
+    END { if (count == 1) print row }
+' "$matrix")
+test "$fixture_row" != "" || {
+    echo "sffi acceptance: unknown or duplicate fixture: $fixture_id" >&2
+    exit 2
+}
+category=$(printf '%s\n' "$fixture_row" | awk -F '\t' '{ print $2 }')
+expected_code=$(printf '%s\n' "$fixture_row" | awk -F '\t' '{ print $3 }')
+
+command -v openssl >/dev/null 2>&1 || {
+    echo 'sffi acceptance: openssl unavailable' >&2
+    exit 2
+}
+command -v sha256sum >/dev/null 2>&1 || {
+    echo 'sffi acceptance: sha256sum unavailable' >&2
+    exit 2
+}
+command -v cc >/dev/null 2>&1 || {
+    echo 'sffi acceptance: C compiler unavailable' >&2
+    exit 2
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+export LC_ALL=C
+
+hash() { sha256sum "$1" | awk '{ print $1 }'; }
+
+# The artifact is a real shared foreign provider for every fixture. The
+# ordinary cases bind identity evidence to it; null-contract additionally
+# invokes it through a separately compiled dlopen/dlsym probe.
+cc -shared -fPIC "$null_provider" -o "$work/provider.so"
+cp "$null_provider" "$work/source-snapshot.c"
+printf 'abi-registry-v1\n' >"$work/abi.tsv"
+printf 'build-input-v1\n' >"$work/build-input.tsv"
+
+artifact_hash=$(hash "$work/provider.so")
+source_hash=$(hash "$work/source-snapshot.c")
+build_hash=$(hash "$work/build-input.tsv")
+compiler_hash=$(hash "$(command -v cc)")
+abi_hash=$(hash "$work/abi.tsv")
+source_signature=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+write_passing_report() {
+    printf 'schema\tsimple.sffi-verification-report.v1\nprovider_id\ttest.sffi.acceptance\nartifact_sha256\t%s\nabi_registry_sha256\t%s\nresult\tpass\n' \
+        "$artifact_hash" "$abi_hash" >"$work/report.tsv"
+}
+
+write_manifest() {
+    report_hash=$(hash "$work/report.tsv")
+    printf 'schema\tsimple.sffi-evidence.v1\nprovider_id\ttest.sffi.acceptance\ntarget\tx86_64-linux\nsigner_key_id\ttest-key\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\nverification_report_sha256\t%s\nevidence_verified\ttrue\nsymbol_count\t1\nsymbol\trt_sffi_acceptance_create\t%s\n' \
+        "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" \
+        "$abi_hash" "$report_hash" "$source_signature" >"$work/manifest.tsv"
+}
+
+sign_manifest() {
+    openssl pkeyutl -sign -inkey "$work/private.pem" -rawin \
+        -in "$work/manifest.tsv" -out "$work/signature.bin"
+}
+
+write_passing_report
+openssl genpkey -algorithm ED25519 -out "$work/private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+printf 'test-key\ttest.sffi.acceptance\tpublic.pem\n' >"$work/trust.tsv"
+write_manifest
+sign_manifest
+
+case "$fixture_id" in
+    admitted)
+        ;;
+    unsigned)
+        rm -f "$work/signature.bin"
+        ;;
+    artifact-mismatch)
+        if test "${SFFI_ACCEPTANCE_TEST_MUTATION:-}" = source-digest; then
+            printf 'tampered\n' >>"$work/source-snapshot.c"
+        else
+            printf 'tampered\n' >>"$work/provider.so"
+        fi
+        ;;
+    untrusted-signer)
+        printf 'other-key\ttest.sffi.acceptance\tpublic.pem\n' >"$work/trust.tsv"
+        ;;
+    abi-mismatch)
+        printf 'tampered\n' >>"$work/abi.tsv"
+        ;;
+    stale-receipt)
+        printf 'stale\n' >>"$work/report.tsv"
+        ;;
+    null-contract)
+        # Exercise the real provider before binding the observed contract
+        # failure into a v2 report. The manifest signature authenticates that
+        # exact report hash, so null-contract reaches callers through the same
+        # verifier-authored status channel as every other rejection.
+        cc "$null_probe" -ldl -o "$work/null-contract-probe"
+        if probe_output=$("$work/null-contract-probe" "$work/provider.so"); then
+            probe_status=0
+        else
+            probe_status=$?
+        fi
+        test "$probe_status" -eq 1 &&
+            test "$probe_output" = E-SFFI-ADM-NULL-CONTRACT || {
+            echo 'internal-error'
+            exit 3
+        }
+        printf 'schema\tsimple.sffi-verification-report.v2\nprovider_id\ttest.sffi.acceptance\nartifact_sha256\t%s\nabi_registry_sha256\t%s\nresult\tfail\nreason\tnull-contract\n' \
+            "$artifact_hash" "$abi_hash" >"$work/report.tsv"
+        write_manifest
+        sign_manifest
+        ;;
+    *)
+        echo "sffi acceptance: fixture is not implemented: $fixture_id" >&2
+        exit 2
+        ;;
+esac
+
+if SFFI_ADMISSION_STATUS_OUTPUT="$work/status.tsv" \
+    sh "$admission" "$work/manifest.tsv" "$work/signature.bin" "$work/trust.tsv" \
+    "$work/provider.so" "$work/source-snapshot.c" "$work/build-input.tsv" "$(command -v cc)" \
+    "$work/abi.tsv" "$work/report.tsv" "$work/admission.tsv" >"$work/admission.stdout" 2>"$work/admission.stderr"; then
+    admission_status=0
+else
+    admission_status=$?
+fi
+
+status_row=$(awk -F '\t' '
+    NR == 1 { good = (NF == 2 && $1 == "schema" && $2 == "simple.sffi-admission-status.v1") }
+    NR == 2 { good = good && NF == 2 && $1 == "decision"; decision = $2 }
+    NR == 3 { good = good && NF == 2 && $1 == "code"; code = $2 }
+    END { if (NR == 3 && good) print decision "\t" code }
+' "$work/status.tsv" 2>/dev/null || true)
+decision=$(printf '%s\n' "$status_row" | awk -F '\t' '{ print $1 }')
+actual_code=$(printf '%s\n' "$status_row" | awk -F '\t' '{ print $2 }')
+
+if test "$category" = admitted; then
+    if test "$admission_status" -eq 0 && test "$decision" = admitted &&
+       test "$actual_code" = "$expected_code" &&
+       awk -F '\t' 'NR == 1 { ok = (NF == 2 && $1 == "schema" && $2 == "simple.sffi-admission.v1") }
+           END { exit !ok }' "$work/admission.tsv"; then
+        printf '%s\n' "$category"
+        exit 0
+    fi
+    echo 'internal-error'
+    exit 3
+fi
+
+if test "$admission_status" -ne 0 && test "$decision" = rejected &&
+   test "$actual_code" = "$expected_code"; then
+    printf '%s\n' "$category"
+    exit 1
+fi
+
+echo 'internal-error'
+exit 3

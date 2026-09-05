@@ -1,0 +1,140 @@
+# Phase C: SCI option-route data layer — record validation, collision and
+# reserved-name rejection, unknown-namespace fail-closed lookup.
+use std.nogc_sync_mut.composition.{
+    CLI_VALUE_MODE_FLAG, CLI_VALUE_MODE_REQUIRED,
+    CLI_ACTION_PLAN_PATCH, CLI_ACTION_PROVIDER_FORWARD,
+    CLI_AVAILABILITY_OPTIONAL, CLI_AVAILABILITY_REQUIRED,
+    CLI_MISSING_ERROR, CLI_MISSING_WARN_SKIP,
+    CLI_SCOPE_GLOBAL, CLI_SCOPE_COMMAND,
+    CLI_ROUTE_ERR_RESERVED_SPELLING, CLI_ROUTE_ERR_DUPLICATE_ALIAS,
+    CLI_ROUTE_ERR_DUPLICATE_NAMESPACE, CLI_ROUTE_ERR_UNKNOWN_NAMESPACE,
+    CLI_ROUTE_ERR_BAD_FIELD,
+    SimpleCliOptionRouteRecordV1, SimpleCliExtensionNamespaceRecordV1,
+    SimpleCliOptionRouteTableV1, cli_lookup_namespace_v1
+}
+
+fn _route_full(option_id: text, spelling: text, aliases: [text], scope: i64, value_mode: i64, action_kind: i64, provider_id: text, forward_name: text) -> SimpleCliOptionRouteRecordV1:
+    SimpleCliOptionRouteRecordV1(
+        option_id: option_id,
+        spelling: spelling,
+        aliases: aliases,
+        scope_kind: scope,
+        value_mode: value_mode,
+        action_kind: action_kind,
+        provider_id: provider_id,
+        forward_name: forward_name,
+        help_summary: "test route",
+        semantic_class: "routing_only",
+        availability: CLI_AVAILABILITY_REQUIRED,
+        missing_policy: CLI_MISSING_ERROR
+    )
+
+fn _route(option_id: text, spelling: text, aliases: [text], scope: i64) -> SimpleCliOptionRouteRecordV1:
+    SimpleCliOptionRouteRecordV1(
+        option_id: option_id,
+        spelling: spelling,
+        aliases: aliases,
+        scope_kind: scope,
+        value_mode: CLI_VALUE_MODE_REQUIRED,
+        action_kind: CLI_ACTION_PLAN_PATCH,
+        provider_id: "",
+        forward_name: "",
+        help_summary: "test route",
+        semantic_class: "routing_only",
+        availability: CLI_AVAILABILITY_REQUIRED,
+        missing_policy: CLI_MISSING_ERROR
+    )
+
+fn _ns(namespace: text, provider: text) -> SimpleCliExtensionNamespaceRecordV1:
+    SimpleCliExtensionNamespaceRecordV1(
+        namespace: namespace,
+        provider_id: provider,
+        availability: CLI_AVAILABILITY_OPTIONAL,
+        missing_policy: CLI_MISSING_WARN_SKIP
+    )
+
+describe "SimpleCliOptionRouteTableV1 validation":
+    it "registers a well-formed global route and a command route":
+        var table = SimpleCliOptionRouteTableV1.create()
+        expect(table.register_route(_route("opt.backend", "--backend", ["-b"], CLI_SCOPE_GLOBAL)).ok).to_equal(true)
+        expect(table.register_route(_route("opt.fmt.width", "--width", [], CLI_SCOPE_COMMAND)).ok).to_equal(true)
+        expect(table.routes.len()).to_equal(2)
+
+    it "rejects every reserved core spelling":
+        var table = SimpleCliOptionRouteTableV1.create()
+        val reserved = ["-h", "--help", "-V", "--version", "--", "--xanything"]
+        var rejected = 0
+        var i = 0
+        while i < reserved.len():
+            val diag = table.register_route(_route("opt.r", reserved[i], [], CLI_SCOPE_GLOBAL))
+            if not diag.ok and diag.code == CLI_ROUTE_ERR_RESERVED_SPELLING:
+                rejected = rejected + 1
+            i = i + 1
+        expect(rejected).to_equal(6)
+        expect(table.routes.len()).to_equal(0)
+
+    it "rejects a reserved spelling hidden in aliases":
+        var table = SimpleCliOptionRouteTableV1.create()
+        val diag = table.register_route(_route("opt.a", "--alpha", ["--xsneaky"], CLI_SCOPE_GLOBAL))
+        expect(diag.ok).to_equal(false)
+        expect(diag.code).to_equal(CLI_ROUTE_ERR_RESERVED_SPELLING)
+
+    it "rejects a duplicate global alias against an existing spelling":
+        var table = SimpleCliOptionRouteTableV1.create()
+        expect(table.register_route(_route("opt.a", "--alpha", ["-a"], CLI_SCOPE_GLOBAL)).ok).to_equal(true)
+        val diag = table.register_route(_route("opt.b", "--beta", ["-a"], CLI_SCOPE_GLOBAL))
+        expect(diag.ok).to_equal(false)
+        expect(diag.code).to_equal(CLI_ROUTE_ERR_DUPLICATE_ALIAS)
+
+    it "rejects a global route colliding with a command-scoped spelling":
+        var table = SimpleCliOptionRouteTableV1.create()
+        expect(table.register_route(_route("opt.cmd", "--width", [], CLI_SCOPE_COMMAND)).ok).to_equal(true)
+        val diag = table.register_route(_route("opt.g", "--width", [], CLI_SCOPE_GLOBAL))
+        expect(diag.ok).to_equal(false)
+        expect(diag.code).to_equal(CLI_ROUTE_ERR_DUPLICATE_ALIAS)
+
+    it "allows the same spelling in two disjoint command scopes":
+        var table = SimpleCliOptionRouteTableV1.create()
+        expect(table.register_route(_route("opt.fmt.width", "--width", [], CLI_SCOPE_COMMAND)).ok).to_equal(true)
+        expect(table.register_route(_route("opt.doc.width", "--width", [], CLI_SCOPE_COMMAND)).ok).to_equal(true)
+
+    it "rejects out-of-range dispatch constants as bad fields":
+        var table = SimpleCliOptionRouteTableV1.create()
+        val bad = _route_full("opt.bad", "--bad", [], CLI_SCOPE_GLOBAL, 99, CLI_ACTION_PLAN_PATCH, "", "")
+        val diag = table.register_route(bad)
+        expect(diag.ok).to_equal(false)
+        expect(diag.code).to_equal(CLI_ROUTE_ERR_BAD_FIELD)
+
+    it "accepts a provider_forward route with flag mode":
+        var table = SimpleCliOptionRouteTableV1.create()
+        val rec = _route_full("opt.trace", "--trace", [], CLI_SCOPE_GLOBAL, CLI_VALUE_MODE_FLAG, CLI_ACTION_PROVIDER_FORWARD, "aspect.log", "trace")
+        expect(table.register_route(rec).ok).to_equal(true)
+
+describe "SimpleCliExtensionNamespaceRecordV1 registration":
+    it "registers distinct namespaces and rejects a duplicate":
+        var table = SimpleCliOptionRouteTableV1.create()
+        expect(table.register_namespace(_ns("llvm", "backend.llvm")).ok).to_equal(true)
+        expect(table.register_namespace(_ns("log", "aspect.log")).ok).to_equal(true)
+        val diag = table.register_namespace(_ns("llvm", "backend.other"))
+        expect(diag.ok).to_equal(false)
+        expect(diag.code).to_equal(CLI_ROUTE_ERR_DUPLICATE_NAMESPACE)
+        expect(table.namespaces.len()).to_equal(2)
+
+    it "rejects a namespace with an invalid shape or empty provider":
+        var table = SimpleCliOptionRouteTableV1.create()
+        expect(table.register_namespace(_ns("Bad", "p")).ok).to_equal(false)
+        expect(table.register_namespace(_ns("has-dash", "p")).ok).to_equal(false)
+        val diag = table.register_namespace(_ns("goodns", ""))
+        expect(diag.ok).to_equal(false)
+        expect(diag.code).to_equal(CLI_ROUTE_ERR_BAD_FIELD)
+
+    it "unknown namespace lookup fails closed with an explicit error code":
+        var table = SimpleCliOptionRouteTableV1.create()
+        expect(table.register_namespace(_ns("log", "aspect.log")).ok).to_equal(true)
+        val hit = cli_lookup_namespace_v1(table, "log")
+        expect(hit.ok).to_equal(true)
+        expect(hit.record.provider_id).to_equal("aspect.log")
+        val miss = cli_lookup_namespace_v1(table, "nosuch")
+        expect(miss.ok).to_equal(false)
+        expect(miss.code).to_equal(CLI_ROUTE_ERR_UNKNOWN_NAMESPACE)
+        expect(miss.record.provider_id).to_equal("")

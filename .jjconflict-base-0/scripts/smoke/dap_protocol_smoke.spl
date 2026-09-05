@@ -1,0 +1,122 @@
+# Live stdio smoke test for the Simple editor DAP adapter.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_exit(code: i32) -> void
+
+fn shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+fn simple_bin() -> text:
+    val configured = rt_env_get("SIMPLE_BIN") ?? ""
+    if configured.trim() == "":
+        return "bin/simple"
+    configured.trim()
+
+fn dap_frame(payload: text) -> text:
+    "Content-Length: " + payload.len().to_string() + "\r\n\r\n" + payload
+
+fn dap_request(seq: i64, command: text, arguments_json: text) -> text:
+    var payload = "{\"seq\":" + seq.to_string() + ",\"type\":\"request\",\"command\":\"" + command + "\""
+    if arguments_json != "":
+        payload = payload + ",\"arguments\":" + arguments_json
+    payload = payload + "}"
+    dap_frame(payload)
+
+fn fail(message: text, detail: text):
+    print("STATUS: FAIL dap_protocol_smoke " + message)
+    if detail != "":
+        print(detail)
+    rt_exit(1)
+
+fn require_contains(haystack: text, needle: text, message: text):
+    if not haystack.contains(needle):
+        fail(message, haystack)
+
+fn run_adapter_case(name: text, input: text) -> text:
+    val root = "/tmp/simple-dap-protocol-smoke-" + name
+    val input_path = root + "/input.dap"
+    val (_prep_out, prep_err, prep_code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + shell_quote(root) + " && mkdir -p " + shell_quote(root)])
+    if prep_code != 0:
+        fail(name + "-prepare", prep_err)
+    if not rt_file_write_text(input_path, input):
+        fail(name + "-input-write", input_path)
+    val command = "timeout 20 " + shell_quote(simple_bin()) + " dap < " + shell_quote(input_path)
+    val result = rt_process_run("/bin/sh", ["-c", command])
+    if result.2 != 0:
+        fail(name + "-exit-" + result.2.to_string(), "STDOUT:\n" + result.0 + "\nSTDERR:\n" + result.1)
+    result.0
+
+fn full_session_input(program: text) -> text:
+    dap_request(1, "initialize", "{\"adapterID\":\"simple\"}") +
+    dap_request(2, "launch", "{\"program\":\"" + program + "\",\"stopOnEntry\":true}") +
+    dap_request(3, "setBreakpoints", "{\"source\":{\"path\":\"" + program + "\"},\"breakpoints\":[{\"line\":2,\"condition\":\"answer == 42\"}]}") +
+    dap_request(12, "setExceptionBreakpoints", "{\"filters\":[\"caught\",\"uncaught\"]}") +
+    dap_request(10, "setBreakpoints", "{\"source\":{\"path\":\"" + program + "\"},\"breakpoints\":[{\"line\":999}]}") +
+    dap_request(4, "threads", "") +
+    dap_request(5, "stackTrace", "{\"threadId\":1}") +
+    dap_request(13, "continue", "{\"threadId\":1}") +
+    dap_request(14, "stackTrace", "{\"threadId\":1}") +
+    dap_request(15, "next", "{\"threadId\":1}") +
+    dap_request(16, "stackTrace", "{\"threadId\":1}") +
+    dap_request(17, "setBreakpoints", "{\"source\":{\"path\":\"" + program + "\"},\"breakpoints\":[{\"line\":4,\"hitCondition\":\"1\"}]}") +
+    dap_request(18, "continue", "{\"threadId\":1}") +
+    dap_request(19, "stackTrace", "{\"threadId\":1}") +
+    dap_request(20, "continue", "{\"threadId\":1}") +
+    dap_request(21, "stackTrace", "{\"threadId\":1}") +
+    dap_request(22, "continue", "{\"threadId\":1}") +
+    dap_request(6, "scopes", "{\"frameId\":1}") +
+    dap_request(7, "variables", "{\"variablesReference\":1}") +
+    dap_request(8, "evaluate", "{\"expression\":\"answer\"}") +
+    dap_request(11, "evaluate", "{\"expression\":\"missing_value\"}") +
+    dap_request(23, "restart", "") +
+    dap_request(24, "stackTrace", "{\"threadId\":1}") +
+    dap_request(25, "terminate", "") +
+    dap_request(9, "disconnect", "")
+
+fn missing_program_input() -> text:
+    dap_request(1, "initialize", "{\"adapterID\":\"simple\"}") +
+    dap_request(2, "launch", "{\"program\":\"/tmp/simple_dap_missing_program.spl\"}") +
+    dap_request(3, "disconnect", "")
+
+val root = "/tmp/simple-dap-protocol-smoke-main"
+val program = root + "/main.spl"
+val dap_probe = rt_process_run("/bin/sh", ["-c", "timeout 5 " + shell_quote(simple_bin()) + " dap --help 2>&1"])
+if dap_probe.0.contains("dap app not found") or dap_probe.1.contains("dap app not found"):
+    print("STATUS: SKIP dap_protocol_smoke dap app not found")
+    rt_exit(0)
+
+val (_setup_out, setup_err, setup_code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + shell_quote(root) + " && mkdir -p " + shell_quote(root)])
+if setup_code != 0:
+    fail("program-prepare", setup_err)
+val source =
+    "fn main() -> i64:\n" +
+    "    val answer = 42\n" +
+    "    var status = \"ready\"\n" +
+    "    answer\n" +
+    "    panic(\"boom\")\n"
+if not rt_file_write_text(program, source):
+    fail("program-write", program)
+
+val full_output = run_adapter_case("full", full_session_input(program))
+require_contains(full_output, "supportsConfigurationDoneRequest", "missing-initialize-capability")
+require_contains(full_output, "exceptionBreakpointFilters", "missing-exception-filter-capability")
+require_contains(full_output, "initialized", "missing-initialized-event")
+require_contains(full_output, "setBreakpoints", "missing-breakpoint-response")
+require_contains(full_output, "condition", "missing-condition-breakpoint-message")
+require_contains(full_output, "hit", "missing-hit-breakpoint-message")
+require_contains(full_output, "threads", "missing-threads-response")
+require_contains(full_output, "stackFrames", "missing-stack-response")
+require_contains(full_output, "variablesReference", "missing-scopes-response")
+require_contains(full_output, "answer", "missing-answer-variable")
+require_contains(full_output, "\"ready\"", "missing-status-variable")
+require_contains(full_output, "<unavailable>", "missing-unavailable-evaluate")
+require_contains(full_output, "exception", "missing-exception-stop")
+require_contains(full_output, "terminated", "missing-terminated-event")
+
+val missing_output = run_adapter_case("missing", missing_program_input())
+require_contains(missing_output, "program not found", "missing-program-did-not-fail")
+
+print("STATUS: PASS dap_protocol_smoke")
+rt_exit(0)

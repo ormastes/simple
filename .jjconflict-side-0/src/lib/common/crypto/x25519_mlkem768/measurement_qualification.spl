@@ -1,0 +1,509 @@
+# Matrix-bound qualification for X25519MLKEM768 performance measurement.
+#
+# The minter accepts source rows, not a caller-asserted MatrixReceipt. It
+# canonically re-admits all seven rows and binds only public outputs and
+# execution provenance. Secret bytes and secret-derived digests are absent.
+
+mod lib.common.crypto.x25519_mlkem768.measurement_qualification
+
+use std.common.crypto.sha256.{sha256_text}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus,
+    x25519_mlkem768_evidence_backend_name}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION,
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Config,
+    X25519MlKem768SimdAdmission}
+use lib.common.crypto.x25519_mlkem768.pinned_public_receipt.{
+    X25519MlKem768PinnedSet, X25519MlKem768PinnedSetReceipt,
+    X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+    X25519_MLKEM768_PINNED_MLKEM_CT_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_X25519_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256}
+use lib.common.crypto.x25519_mlkem768.matrix_receipt.{
+    X25519_MLKEM768_SOURCE_MATRIX_SCHEMA,
+    X25519MlKem768MatrixAdmissionPhase,
+    X25519MlKem768MatrixRowOutcome,
+    X25519MlKem768MatrixOutputComparison,
+    X25519MlKem768MatrixRow,
+    x25519_mlkem768_admit_source_backend_matrix}
+use lib.common.platform_measurement_observation.{
+    PlatformMeasurementObservation,
+    platform_measurement_observation_valid,
+    platform_measurement_process_rss_eligible}
+
+val X25519_MLKEM768_MEASUREMENT_QUALIFICATION_SCHEMA =
+    "x25519mlkem768-measurement-qualification-v4"
+
+enum X25519MlKem768CaptureKind:
+    NativePhysicalFullOperation
+    Synthetic
+    Qemu
+    KernelOnly
+
+struct X25519MlKem768MeasurementTarget:
+    backend: X25519MlKem768EvidenceBackend
+    capture_kind: X25519MlKem768CaptureKind
+    fixture_id: text
+    fixture_manifest_sha256: text
+    fixture_source_sha256: text
+    runner_source_sha256: text
+    runner_artifact_sha256: text
+    scalar_backend_artifact_sha256: text
+    backend_artifact_sha256: text
+    accelerator_build_binding_sha256: text
+    host_os: text
+    host_arch: text
+    executor_identity: text
+    scalar_backend_identity: text
+    session_id: text
+    monotonic_clock_id: text
+    workload_configuration_sha256: text
+    scalar_configuration_sha256: text
+    candidate_configuration_sha256: text
+    matrix_row_set_sha256: text
+
+struct X25519MlKem768MeasurementQualification:
+    schema: text
+    qualification_sha256: text
+    target: X25519MlKem768MeasurementTarget
+    platform_observation: PlatformMeasurementObservation
+    implementation_version: text
+    profile_version: text
+    batch_size: i64
+    scalar_source_receipt_sha256: text
+    candidate_source_receipt_sha256: text
+    client_share_sha256: text
+    server_share_sha256: text
+    set_a: X25519MlKem768PinnedSetReceipt
+    set_b: X25519MlKem768PinnedSetReceipt
+    set_c: X25519MlKem768PinnedSetReceipt
+
+fn _qualification_hex64(value: text) -> bool:
+    if value.len() != 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val decimal = code >= 48 and code <= 57
+        val lower_hex = code >= 97 and code <= 102
+        if not decimal and not lower_hex: return false
+        index = index + 1
+    true
+
+fn _qualification_field_valid(value: text) -> bool:
+    value != "" and value == value.trim() and
+        not value.contains("\n") and not value.contains("\r")
+
+fn _qualification_frame(key: text, value: text) -> text:
+    key.len().to_text() + ":" + key + "=" + value.len().to_text() +
+        ":" + value + ";"
+
+fn _qualification_capture_name(value: X25519MlKem768CaptureKind) -> text:
+    if value == X25519MlKem768CaptureKind.NativePhysicalFullOperation:
+        return "native-physical-full-operation"
+    if value == X25519MlKem768CaptureKind.Synthetic: return "synthetic"
+    if value == X25519MlKem768CaptureKind.Qemu: return "qemu"
+    "kernel-only"
+
+fn _qualification_set_name(value: X25519MlKem768PinnedSet) -> text:
+    if value == X25519MlKem768PinnedSet.MlKem: return "mlkem"
+    if value == X25519MlKem768PinnedSet.X25519: return "x25519"
+    "hybrid"
+
+fn _qualification_set_material(prefix: text,
+        value: X25519MlKem768PinnedSetReceipt) -> text:
+    _qualification_frame(prefix + ".set_id",
+        _qualification_set_name(value.set_id)) +
+    _qualification_frame(prefix + ".first_output_label",
+        value.first_output_label) +
+    _qualification_frame(prefix + ".second_output_label",
+        value.second_output_label) +
+    _qualification_frame(prefix + ".first_output_bytes",
+        value.first_output_bytes.to_text()) +
+    _qualification_frame(prefix + ".second_output_bytes",
+        value.second_output_bytes.to_text()) +
+    _qualification_frame(prefix + ".shared_secret_bytes",
+        value.shared_secret_bytes.to_text()) +
+    _qualification_frame(prefix + ".recovered_secret_bytes",
+        value.recovered_secret_bytes.to_text()) +
+    _qualification_frame(prefix + ".first_output_sha256",
+        value.first_output_sha256) +
+    _qualification_frame(prefix + ".second_output_sha256",
+        value.second_output_sha256)
+
+fn _qualification_target_material(
+        target: X25519MlKem768MeasurementTarget) -> text:
+    _qualification_frame("backend",
+        x25519_mlkem768_evidence_backend_name(target.backend)) +
+    _qualification_frame("capture_kind",
+        _qualification_capture_name(target.capture_kind)) +
+    _qualification_frame("fixture_id", target.fixture_id) +
+    _qualification_frame("fixture_manifest_sha256",
+        target.fixture_manifest_sha256) +
+    _qualification_frame("fixture_source_sha256",
+        target.fixture_source_sha256) +
+    _qualification_frame("runner_source_sha256",
+        target.runner_source_sha256) +
+    _qualification_frame("runner_artifact_sha256",
+        target.runner_artifact_sha256) +
+    _qualification_frame("scalar_backend_artifact_sha256",
+        target.scalar_backend_artifact_sha256) +
+    _qualification_frame("backend_artifact_sha256",
+        target.backend_artifact_sha256) +
+    _qualification_frame("accelerator_build_binding_sha256",
+        target.accelerator_build_binding_sha256) +
+    _qualification_frame("host_os", target.host_os) +
+    _qualification_frame("host_arch", target.host_arch) +
+    _qualification_frame("executor_identity", target.executor_identity) +
+    _qualification_frame("scalar_backend_identity",
+        target.scalar_backend_identity) +
+    _qualification_frame("session_id", target.session_id) +
+    _qualification_frame("monotonic_clock_id", target.monotonic_clock_id) +
+    _qualification_frame("workload_configuration_sha256",
+        target.workload_configuration_sha256) +
+    _qualification_frame("scalar_configuration_sha256",
+        target.scalar_configuration_sha256) +
+    _qualification_frame("candidate_configuration_sha256",
+        target.candidate_configuration_sha256) +
+    _qualification_frame("matrix_row_set_sha256",
+        target.matrix_row_set_sha256)
+
+fn _qualification_observation_clock_id(
+        observation: PlatformMeasurementObservation) -> text:
+    "monotonic-clock-v1|source=" + observation.clock_source +
+        "|epoch=" + observation.clock_epoch_semantics +
+        "|lane=" + observation.runtime_lane
+
+fn _qualification_observation_matches(
+        target: X25519MlKem768MeasurementTarget,
+        observation: PlatformMeasurementObservation) -> bool:
+    platform_measurement_observation_valid(observation) and
+        platform_measurement_process_rss_eligible(observation) and
+        target.host_os == observation.host_os and
+        target.host_arch == observation.host_arch and
+        target.session_id == observation.session_nonce_sha256 and
+        target.runner_artifact_sha256 ==
+            observation.observer_artifact_sha256 and
+        target.monotonic_clock_id ==
+            _qualification_observation_clock_id(observation)
+
+fn _qualification_material(
+        value: X25519MlKem768MeasurementQualification) -> text:
+    _qualification_frame("schema", value.schema) +
+    _qualification_target_material(value.target) +
+    _qualification_frame("platform_observation_sha256",
+        value.platform_observation.observation_sha256) +
+    _qualification_frame("implementation_version",
+        value.implementation_version) +
+    _qualification_frame("profile_version", value.profile_version) +
+    _qualification_frame("batch_size", value.batch_size.to_text()) +
+    _qualification_frame("scalar_source_receipt_sha256",
+        value.scalar_source_receipt_sha256) +
+    _qualification_frame("candidate_source_receipt_sha256",
+        value.candidate_source_receipt_sha256) +
+    _qualification_frame("client_share_sha256", value.client_share_sha256) +
+    _qualification_frame("server_share_sha256", value.server_share_sha256) +
+    _qualification_set_material("set_a", value.set_a) +
+    _qualification_set_material("set_b", value.set_b) +
+    _qualification_set_material("set_c", value.set_c)
+
+fn x25519_mlkem768_measurement_qualification_sha256(
+        value: X25519MlKem768MeasurementQualification) -> text:
+    sha256_text(_qualification_material(value))
+
+fn _qualification_backend_index(
+        backend: X25519MlKem768EvidenceBackend) -> i64:
+    if backend == X25519MlKem768EvidenceBackend.Avx2: return 1
+    if backend == X25519MlKem768EvidenceBackend.Neon: return 2
+    if backend == X25519MlKem768EvidenceBackend.Rvv: return 3
+    if backend == X25519MlKem768EvidenceBackend.Cuda: return 4
+    if backend == X25519MlKem768EvidenceBackend.Vulkan: return 5
+    if backend == X25519MlKem768EvidenceBackend.Metal: return 6
+    -1
+
+fn _qualification_gpu_backend(
+        backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Cuda or
+        backend == X25519MlKem768EvidenceBackend.Vulkan or
+        backend == X25519MlKem768EvidenceBackend.Metal
+
+fn _qualification_target_reason(
+        target: X25519MlKem768MeasurementTarget) -> text:
+    if _qualification_backend_index(target.backend) < 1:
+        return "specialized-measurement-backend-required"
+    if target.capture_kind !=
+            X25519MlKem768CaptureKind.NativePhysicalFullOperation:
+        return "native-physical-full-operation-capture-required"
+    if not _qualification_field_valid(target.fixture_id) or
+            not _qualification_field_valid(target.host_os) or
+            not _qualification_field_valid(target.host_arch) or
+            not _qualification_field_valid(target.executor_identity) or
+            not _qualification_field_valid(target.scalar_backend_identity) or
+            not _qualification_field_valid(target.session_id) or
+            not _qualification_field_valid(target.monotonic_clock_id):
+        return "measurement-target-text-field-invalid"
+    if not _qualification_hex64(target.fixture_manifest_sha256) or
+            not _qualification_hex64(target.fixture_source_sha256) or
+            not _qualification_hex64(target.runner_source_sha256) or
+            not _qualification_hex64(target.runner_artifact_sha256) or
+            not _qualification_hex64(
+                target.scalar_backend_artifact_sha256) or
+            not _qualification_hex64(target.backend_artifact_sha256) or
+            not _qualification_hex64(
+                target.workload_configuration_sha256) or
+            not _qualification_hex64(
+                target.scalar_configuration_sha256) or
+            not _qualification_hex64(
+                target.candidate_configuration_sha256) or
+            not _qualification_hex64(target.matrix_row_set_sha256):
+        return "measurement-target-sha256-invalid"
+    if _qualification_gpu_backend(target.backend):
+        if target.accelerator_build_binding_sha256 == "":
+            return "accelerator-build-binding-sha256-required"
+        if not _qualification_hex64(
+                target.accelerator_build_binding_sha256):
+            return "accelerator-build-binding-sha256-invalid"
+    elif target.accelerator_build_binding_sha256 != "":
+        return "accelerator-build-binding-sha256-unexpected"
+    ""
+
+fn _qualification_row_admitted(
+        outcome: X25519MlKem768MatrixRowOutcome,
+        comparison: X25519MlKem768MatrixOutputComparison,
+        phase: X25519MlKem768MatrixAdmissionPhase) -> bool:
+    outcome == X25519MlKem768MatrixRowOutcome.Admitted and
+    comparison == X25519MlKem768MatrixOutputComparison.Match and
+    phase == X25519MlKem768MatrixAdmissionPhase.Executed
+
+fn x25519_mlkem768_qualify_measurement(
+        source_rows: [X25519MlKem768MatrixRow],
+        target: X25519MlKem768MeasurementTarget,
+        platform_observation: PlatformMeasurementObservation
+        ) -> Result<X25519MlKem768MeasurementQualification, text>:
+    val target_reason = _qualification_target_reason(target)
+    if target_reason != "": return Err(target_reason)
+    if not _qualification_observation_matches(
+            target, platform_observation):
+        return Err("platform-measurement-observation-mismatch")
+    val matrix = x25519_mlkem768_admit_source_backend_matrix(source_rows)
+    if matrix.schema != X25519_MLKEM768_SOURCE_MATRIX_SCHEMA or
+            matrix.status != X25519MlKem768EvidenceStatus.Pass or
+            matrix.rows.len() != 7:
+        return Err("complete-admitted-matrix-required")
+    if matrix.row_set_sha256 != target.matrix_row_set_sha256:
+        return Err("matrix-row-set-sha256-mismatch")
+    val candidate_index = _qualification_backend_index(target.backend)
+    val scalar = matrix.rows[0]
+    val candidate = matrix.rows[candidate_index]
+    if scalar.backend != X25519MlKem768EvidenceBackend.ScalarCpu or
+            not _qualification_row_admitted(
+                scalar.outcome, scalar.output_comparison,
+                scalar.source.admission_phase):
+        return Err("admitted-scalar-reference-required")
+    if candidate.backend != target.backend or
+            not _qualification_row_admitted(
+                candidate.outcome, candidate.output_comparison,
+                candidate.source.admission_phase):
+        return Err("admitted-candidate-row-required")
+    val execution = candidate.source.execution
+    if execution.mode != X25519MlKem768EvidenceMode.Native or
+            execution.scope != X25519MlKem768EvidenceScope.FullOperation or
+            execution.emulated or execution.fallback_used or
+            not execution.absolute_oracle_match:
+        return Err("candidate-native-full-operation-proof-missing")
+    if target.fixture_id != execution.fixture_id or
+            target.fixture_manifest_sha256 !=
+                execution.fixture_manifest_sha256 or
+            target.fixture_source_sha256 != execution.fixture_source_sha256 or
+            target.runner_source_sha256 != execution.runner_source_sha256 or
+            target.runner_artifact_sha256 !=
+                candidate.source.runner_artifact_sha256 or
+            target.backend_artifact_sha256 !=
+                candidate.source.admitted_artifact_sha256 or
+            target.host_os != candidate.source.host_os or
+            target.host_arch != candidate.source.host_arch or
+            target.executor_identity != execution.device_identity:
+        return Err("measurement-target-row-binding-mismatch")
+    if target.scalar_backend_artifact_sha256 !=
+            scalar.source.admitted_artifact_sha256 or
+            target.scalar_backend_identity !=
+                scalar.source.execution.device_identity:
+        return Err("measurement-target-scalar-row-binding-mismatch")
+    val set_a = match candidate.source.set_a:
+        case Some(value): value
+        case nil: return Err("candidate-set-a-missing")
+    val set_b = match candidate.source.set_b:
+        case Some(value): value
+        case nil: return Err("candidate-set-b-missing")
+    val set_c = match candidate.source.set_c:
+        case Some(value): value
+        case nil: return Err("candidate-set-c-missing")
+    var qualification = X25519MlKem768MeasurementQualification(
+        schema: X25519_MLKEM768_MEASUREMENT_QUALIFICATION_SCHEMA,
+        qualification_sha256: "", target: target,
+        platform_observation: platform_observation,
+        implementation_version: execution.implementation_version,
+        profile_version: execution.profile_version,
+        batch_size: execution.batch_size,
+        scalar_source_receipt_sha256: scalar.source_receipt_sha256,
+        candidate_source_receipt_sha256: candidate.source_receipt_sha256,
+        client_share_sha256: candidate.source.client_share_sha256,
+        server_share_sha256: candidate.source.server_share_sha256,
+        set_a: set_a, set_b: set_b, set_c: set_c)
+    qualification.qualification_sha256 =
+        x25519_mlkem768_measurement_qualification_sha256(qualification)
+    Ok(qualification)
+
+fn x25519_mlkem768_measurement_qualification_valid(
+        value: X25519MlKem768MeasurementQualification) -> bool:
+    if value.schema != X25519_MLKEM768_MEASUREMENT_QUALIFICATION_SCHEMA:
+        return false
+    if _qualification_target_reason(value.target) != "": return false
+    if not _qualification_observation_matches(
+            value.target, value.platform_observation): return false
+    if value.implementation_version !=
+            X25519_MLKEM768_IMPLEMENTATION_VERSION or
+            value.profile_version != X25519_MLKEM768_PROFILE_VERSION or
+            value.batch_size < 1:
+        return false
+    if not _qualification_hex64(value.scalar_source_receipt_sha256) or
+            not _qualification_hex64(value.candidate_source_receipt_sha256) or
+            value.client_share_sha256 !=
+                X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256 or
+            value.server_share_sha256 !=
+                X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256:
+        return false
+    if value.set_a.set_id != X25519MlKem768PinnedSet.MlKem or
+            value.set_b.set_id != X25519MlKem768PinnedSet.X25519 or
+            value.set_c.set_id != X25519MlKem768PinnedSet.Hybrid or
+            not _qualification_pinned_set_valid(value.set_a) or
+            not _qualification_pinned_set_valid(value.set_b) or
+            not _qualification_pinned_set_valid(value.set_c):
+        return false
+    _qualification_hex64(value.qualification_sha256) and
+        value.qualification_sha256 ==
+            x25519_mlkem768_measurement_qualification_sha256(value)
+
+fn _qualification_pinned_set_valid(
+        value: X25519MlKem768PinnedSetReceipt) -> bool:
+    if value.set_id == X25519MlKem768PinnedSet.MlKem:
+        return value.first_output_label == "mlkem768-encapsulation-key" and
+            value.second_output_label == "mlkem768-ciphertext" and
+            value.first_output_bytes == 1184 and
+            value.second_output_bytes == 1088 and
+            value.shared_secret_bytes == 32 and
+            value.recovered_secret_bytes == 32 and
+            value.first_output_sha256 ==
+                X25519_MLKEM768_PINNED_MLKEM_EK_SHA256 and
+            value.second_output_sha256 ==
+                X25519_MLKEM768_PINNED_MLKEM_CT_SHA256
+    if value.set_id == X25519MlKem768PinnedSet.X25519:
+        return value.first_output_label == "x25519-client-public" and
+            value.second_output_label == "x25519-server-public" and
+            value.first_output_bytes == 32 and
+            value.second_output_bytes == 32 and
+            value.shared_secret_bytes == 32 and
+            value.recovered_secret_bytes == 32 and
+            value.first_output_sha256 ==
+                X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256 and
+            value.second_output_sha256 ==
+                X25519_MLKEM768_PINNED_SERVER_X25519_SHA256
+    value.first_output_label == "x25519mlkem768-client-share" and
+        value.second_output_label == "x25519mlkem768-server-share" and
+        value.first_output_bytes == 1216 and
+        value.second_output_bytes == 1120 and
+        value.shared_secret_bytes == 64 and
+        value.recovered_secret_bytes == 64 and
+        value.first_output_sha256 ==
+            X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256 and
+        value.second_output_sha256 ==
+            X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256
+
+fn _qualification_config_backend(
+        backend: X25519MlKem768EvidenceBackend) -> X25519MlKem768Backend:
+    if backend == X25519MlKem768EvidenceBackend.Avx2:
+        return X25519MlKem768Backend.Avx2
+    if backend == X25519MlKem768EvidenceBackend.Neon:
+        return X25519MlKem768Backend.Neon
+    if backend == X25519MlKem768EvidenceBackend.Rvv:
+        return X25519MlKem768Backend.Rvv
+    if backend == X25519MlKem768EvidenceBackend.Cuda:
+        return X25519MlKem768Backend.Cuda
+    if backend == X25519MlKem768EvidenceBackend.Vulkan:
+        return X25519MlKem768Backend.Vulkan
+    if backend == X25519MlKem768EvidenceBackend.Metal:
+        return X25519MlKem768Backend.Metal
+    X25519MlKem768Backend.ScalarCpu
+
+fn x25519_mlkem768_qualified_simd_measurement_reason(
+        qualification: X25519MlKem768MeasurementQualification,
+        config: X25519MlKem768Config,
+        admission: X25519MlKem768SimdAdmission) -> text:
+    if not x25519_mlkem768_measurement_qualification_valid(qualification):
+        return "measurement-qualification-invalid"
+    val backend = qualification.target.backend
+    if backend != X25519MlKem768EvidenceBackend.Avx2 and
+            backend != X25519MlKem768EvidenceBackend.Neon and
+            backend != X25519MlKem768EvidenceBackend.Rvv:
+        return "simd-measurement-qualification-required"
+    if config.requested_backend != _qualification_config_backend(backend) or
+            config.selection_mode != X25519MlKem768SelectionMode.Require or
+            config.verification_policy !=
+                X25519MlKem768VerificationPolicy.AbsoluteAndScalar or
+            config.implementation_version != qualification.implementation_version or
+            config.profile_version != qualification.profile_version or
+            config.batch_size != qualification.batch_size or
+            config.minimum_batch < 1 or
+            config.minimum_batch > config.batch_size:
+        return "measurement-qualification-config-mismatch"
+    if admission.actual_binary_sha256 !=
+            qualification.target.backend_artifact_sha256 or
+            not _qualification_hex64(admission.actual_provenance_sha256):
+        return "measurement-qualification-simd-admission-mismatch"
+    ""
+
+fn x25519_mlkem768_render_measurement_qualification(
+        value: X25519MlKem768MeasurementQualification) -> text:
+    "schema=" + value.schema + "\n" +
+    "backend=" +
+        x25519_mlkem768_evidence_backend_name(value.target.backend) + "\n" +
+    "capture_kind=" +
+        _qualification_capture_name(value.target.capture_kind) + "\n" +
+    "matrix_row_set_sha256=" + value.target.matrix_row_set_sha256 + "\n" +
+    "scalar_source_receipt_sha256=" +
+        value.scalar_source_receipt_sha256 + "\n" +
+    "candidate_source_receipt_sha256=" +
+        value.candidate_source_receipt_sha256 + "\n" +
+    "fixture_id=" + value.target.fixture_id + "\n" +
+    "runner_artifact_sha256=" + value.target.runner_artifact_sha256 + "\n" +
+    "scalar_backend_artifact_sha256=" +
+        value.target.scalar_backend_artifact_sha256 + "\n" +
+    "backend_artifact_sha256=" + value.target.backend_artifact_sha256 + "\n" +
+    "accelerator_build_binding_sha256=" +
+        value.target.accelerator_build_binding_sha256 + "\n" +
+    "host_os=" + value.target.host_os + "\n" +
+    "host_arch=" + value.target.host_arch + "\n" +
+    "executor_identity=" + value.target.executor_identity + "\n" +
+    "scalar_backend_identity=" +
+        value.target.scalar_backend_identity + "\n" +
+    "session_id=" + value.target.session_id + "\n" +
+    "monotonic_clock_id=" + value.target.monotonic_clock_id + "\n" +
+    "platform_observation_sha256=" +
+        value.platform_observation.observation_sha256 + "\n" +
+    "client_share_sha256=" + value.client_share_sha256 + "\n" +
+    "server_share_sha256=" + value.server_share_sha256 + "\n" +
+    "qualification_sha256=" + value.qualification_sha256 + "\n"
+
+export X25519_MLKEM768_MEASUREMENT_QUALIFICATION_SCHEMA
+export X25519MlKem768CaptureKind, X25519MlKem768MeasurementTarget
+export X25519MlKem768MeasurementQualification
+export x25519_mlkem768_qualify_measurement
+export x25519_mlkem768_measurement_qualification_sha256
+export x25519_mlkem768_measurement_qualification_valid
+export x25519_mlkem768_qualified_simd_measurement_reason
+export x25519_mlkem768_render_measurement_qualification

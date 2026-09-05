@@ -1,0 +1,108 @@
+# Class-detection probe (defect CLASS, not one instance).
+#
+# CLASS: a value materialized by a field's DECLARED DEFAULT at the construction
+# site must be indistinguishable from the same value assigned explicitly after
+# construction. Two members of this class have already been found:
+#
+#   * scalar half — `var n: i64 = 0` read back as the nil tag `3` under JIT.
+#     Fixed 2026-08-17 in hir/lower/expr/collections.rs ("ROOT FIX (JIT
+#     omitted-field-default)").
+#   * container half — `var arr: [T] = []` / `{}` accepted mutations that then
+#     vanished, and a `{}` dict reported len -1.
+#     doc/08_tracking/bug/jit_field_default_empty_container_mutation_lost_2026-08-17.md
+#
+# Both were found one type at a time by a human noticing a wrong number. This
+# probe sweeps the whole construction-site-default axis instead, so the next
+# omission fails here. Every check is a DIFFERENTIAL against the explicitly
+# assigned form plus an ABSOLUTE literal, so "both paths wrong the same way"
+# cannot pass.
+
+struct Inner:
+    var v: i64 = 11
+
+struct Holder:
+    var flag: bool = true
+    var count: i64 = 7
+    var ratio: f64 = 1.5
+    var name: str = "d"
+    var arr: [i64] = []
+    var strs: [str] = []
+    var tags: {str: i64} = {}
+    var inner: Inner = Inner()
+
+class CHolder:
+    var count: i64 = 7
+    var arr: [i64] = []
+    var tags: {str: i64} = {}
+
+var failures: i64 = 0
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got.to_string() + " want=" + want.to_string())
+        failures = failures + 1
+
+fn main() -> i64:
+    step_scalars()
+    step_containers()
+    step_nested()
+    step_class()
+    if failures == 0:
+        print("DECLARED_DEFAULT_OBJECT_IDENTITY PROBE: ALL PASS")
+    else:
+        print("DECLARED_DEFAULT_OBJECT_IDENTITY PROBE: " + failures.to_string() + " FAILURES")
+    return 0
+
+fn step_scalars():
+    var h = Holder()
+    check("default_bool_reads_true", if h.flag: 1 else: 0, 1)
+    check("default_i64_reads_7", h.count, 7)
+    check("default_f64_reads_1_5", (h.ratio * 2.0).to_int(), 3)
+    check("default_str_len_1", h.name.len(), 1)
+
+fn step_containers():
+    var a = Holder()
+    check("default_array_reads_empty", a.arr.len(), 0)
+    a.arr.push(5)
+    check("default_array_accepts_push", a.arr.len(), 1)
+    if a.arr.len() == 1:
+        check("default_array_element_value", a.arr[0], 5)
+    a.arr.push(6)
+    check("default_array_second_push", a.arr.len(), 2)
+    a.arr.pop()
+    check("default_array_pop_shrinks", a.arr.len(), 1)
+
+    var b = Holder()
+    b.strs.push("q")
+    check("default_str_array_accepts_push", b.strs.len(), 1)
+
+    var c = Holder()
+    c.tags["k"] = 3
+    check("default_dict_accepts_insert", c.tags.len(), 1)
+    if c.tags.len() == 1:
+        check("default_dict_value_readback", c.tags["k"], 3)
+
+    # Differential control arm: the SAME operations on an explicitly assigned
+    # container must behave identically. If this arm also fails, the defect is
+    # not construction-site-default specific.
+    var e = Holder()
+    var fresh: [i64] = []
+    e.arr = fresh
+    e.arr.push(5)
+    check("control_explicit_empty_then_push", e.arr.len(), 1)
+
+fn step_nested():
+    var h = Holder()
+    check("default_nested_struct_field", h.inner.v, 11)
+    h.inner.v = 12
+    check("default_nested_struct_write", h.inner.v, 12)
+
+fn step_class():
+    var c = CHolder()
+    check("class_default_i64", c.count, 7)
+    c.arr.push(1)
+    check("class_default_array_push", c.arr.len(), 1)
+    c.tags["z"] = 9
+    check("class_default_dict_insert", c.tags.len(), 1)

@@ -1,0 +1,118 @@
+# codex-impl
+# Pure-Simple platform device lifecycle owner. Platform ABI leaves provide
+# handles/callback bytes only; this class owns policy and resources.
+
+class SimpleAudioDevice:
+    platform: text
+    backend: text
+    state: text
+    generation: u64
+    sample_rate: i64
+    channels: i64
+    period_frames: i64
+    playback_supported: bool
+    capture_supported: bool
+    live_resources: i64
+    xrun_count: i64
+
+impl SimpleAudioDevice:
+    static fn create(platform: text, backend: text, playback: bool, capture: bool) -> SimpleAudioDevice:
+        SimpleAudioDevice(
+            platform: platform,
+            backend: backend,
+            state: "closed",
+            generation: 0u64,
+            sample_rate: 0,
+            channels: 0,
+            period_frames: 0,
+            playback_supported: playback,
+            capture_supported: capture,
+            live_resources: 0,
+            xrun_count: 0
+        )
+
+    me open(abi_available: bool) -> text:
+        if self.state != "closed":
+            return "invalid-state"
+        if not abi_available:
+            return "unavailable"
+        self.state = "open"
+        self.generation = self.generation + 1u64
+        self.live_resources = 1
+        "opened"
+
+    me negotiate(sample_rate: i64, channels: i64, period_frames: i64) -> text:
+        if self.state != "open":
+            return "invalid-state"
+        if sample_rate < 8000 or sample_rate > 384000 or channels < 1 or channels > 16 or period_frames < 16 or period_frames > 8192:
+            return "invalid-format"
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.period_frames = period_frames
+        self.state = "negotiated"
+        "negotiated"
+
+    me start(playback: bool, capture: bool) -> text:
+        if self.state != "negotiated":
+            return "invalid-state"
+        if playback and not self.playback_supported:
+            return "unsupported-playback"
+        if capture and not self.capture_supported:
+            return "unsupported-capture"
+        if not playback and not capture:
+            return "invalid-direction"
+        self.state = "running"
+        self.live_resources = self.live_resources + 1
+        "started"
+
+    me report_xrun(kind: text) -> text:
+        if self.state != "running":
+            return "invalid-state"
+        if kind != "underrun" and kind != "overrun":
+            return "invalid-xrun"
+        self.xrun_count = self.xrun_count + 1
+        kind
+
+    me stop() -> text:
+        if self.state != "running" and self.state != "lost":
+            return "invalid-state"
+        self.state = "negotiated"
+        if self.live_resources > 1:
+            self.live_resources = self.live_resources - 1
+        "stopped"
+
+    me device_lost() -> text:
+        if self.state == "closed":
+            return "invalid-state"
+        self.state = "lost"
+        self.generation = self.generation + 1u64
+        "disconnected"
+
+    me close() -> text:
+        if self.state == "running":
+            return "invalid-state"
+        if self.state == "closed":
+            return "already-closed"
+        self.state = "closed"
+        self.sample_rate = 0
+        self.channels = 0
+        self.period_frames = 0
+        self.live_resources = 0
+        self.generation = self.generation + 1u64
+        "closed"
+
+fn simple_audio_platform_backend(platform: text) -> text:
+    if platform == "linux":
+        return "pipewire"
+    if platform == "macos":
+        return "coreaudio"
+    if platform == "windows":
+        return "wasapi"
+    if platform == "openbsd":
+        return "sndio"
+    if platform == "freebsd" or platform == "netbsd":
+        return "oss"
+    if platform == "simpleos":
+        return "virtio-snd"
+    "unsupported"
+

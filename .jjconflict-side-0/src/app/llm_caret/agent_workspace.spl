@@ -1,0 +1,248 @@
+@allow(primitive_api)
+# LLM Caret - real tmux sessions + git worktrees for agent processes
+#
+# The model-only `agent_tmux.spl` embed never owns a PID. This module is the
+# side-effecting counterpart: every agent gets a detached git worktree and a
+# pane in a tmux session on a PRIVATE socket (`tmux -L <socket>`), so nothing
+# here can touch another user's attached tmux server.
+#
+# ponytail: thin facade over `tmux`/`git` CLIs via process_run; no daemon, no
+# state file. Upgrade to os.apps.smux when an in-process multiplexer is needed.
+
+use app.io.mod.{process_run, dir_exists, file_exists, dir_create_all, current_time_ms, sleep_ms, env_get}
+
+# Recursion protection. Anything this module spawns (agent commands, the caret
+# suite) carries LLM_CARET_WORKSPACE_DEPTH=<n+1>; at MAX_DEPTH a launch is
+# refused, so a suite that contains the tmux system spec cannot nest forever.
+# ponytail: env counter, not a lock file — good enough until a supervisor needs
+# cross-host accounting.
+val DEPTH_ENV = "LLM_CARET_WORKSPACE_DEPTH"
+val MAX_DEPTH = 1
+
+pub fn workspace_depth() -> i64:
+    val raw = env_get(DEPTH_ENV)
+    if raw == "":
+        return 0
+    int(raw) ?? 0
+
+pub fn depth_exceeded() -> bool:
+    workspace_depth() >= MAX_DEPTH
+
+# Prefix a shell command with the next depth marker.
+pub fn with_depth(command: text) -> text:
+    if command == "":
+        return ""
+    DEPTH_ENV + "=" + (workspace_depth() + 1).to_text() + " " + command
+
+# The pane this process itself runs in (tmux sets TMUX_PANE), or "".
+fn _own_pane_id() -> text:
+    env_get("TMUX_PANE")
+
+struct AgentWorkspace:
+    socket: text          # tmux -L socket name; private per workspace
+    session: text         # tmux session name
+    repo: text            # git repo the worktrees are cut from
+    worktree_root: text   # where <root>/<agent_id> trees live
+
+struct WorkspaceResult:
+    status: text          # "ok" | "error"
+    reason: text
+    output: text
+
+fn _ok(out: text) -> WorkspaceResult:
+    WorkspaceResult(status: "ok", reason: "", output: out)
+
+fn _err(reason: text, out: text) -> WorkspaceResult:
+    WorkspaceResult(status: "error", reason: reason, output: out)
+
+fn _run(cmd: text, args: [text], reason: text) -> WorkspaceResult:
+    val (out, err, code) = process_run(cmd, args)
+    if code != 0:
+        return _err(reason: reason, out: out + err)
+    _ok(out)
+
+fn _fmt(key: text) -> text:
+    "#" + "{" + key + "}"
+
+fn _tmux(ws: AgentWorkspace, args: [text], reason: text) -> WorkspaceResult:
+    _run(cmd: "tmux", args: ["-L", ws.socket] + args, reason: reason)
+
+# `git worktree list` prints symlink-resolved paths; the root is canonicalised
+# up front so `worktree_path` and `worktree_list` name the same tree the same
+# way (a repo reached through a symlinked cwd otherwise never matches itself).
+# `-m` resolves a root that does not exist yet; on failure the raw text stands.
+fn _canonical(path: text) -> text:
+    if path == "":
+        return ""
+    val (out, _e, code) = process_run("realpath", ["-m", path])
+    if code != 0 or out.trim() == "":
+        return path
+    out.trim()
+
+pub fn agent_workspace(id: text, repo: text, worktree_root: text) -> AgentWorkspace:
+    AgentWorkspace(socket: "caret_ws_" + id, session: id, repo: repo,
+        worktree_root: _canonical(worktree_root))
+
+pub fn tmux_available() -> bool:
+    val (_o, _e, code) = process_run("tmux", ["-V"])
+    code == 0
+
+# --- sessions / windows / panes ---------------------------------------------
+
+pub fn session_alive(ws: AgentWorkspace) -> bool:
+    _tmux(ws: ws, args: ["has-session", "-t", ws.session], reason: "no_session").status == "ok"
+
+pub fn session_ensure(ws: AgentWorkspace, cwd: text) -> WorkspaceResult:
+    if session_alive(ws):
+        return _ok("exists")
+    _tmux(ws: ws, args: ["new-session", "-d", "-s", ws.session, "-c", cwd], reason: "new_session_failed")
+
+pub fn session_kill(ws: AgentWorkspace) -> WorkspaceResult:
+    # Only ever the private socket: `-L caret_ws_*` cannot name the user's server.
+    _tmux(ws: ws, args: ["kill-server"], reason: "kill_server_failed")
+
+# Exact-name probe. tmux allows duplicate window names and `-t session:name`
+# matches by PREFIX, so neither new-window nor kill-window can tell us this.
+pub fn window_exists(ws: AgentWorkspace, name: text) -> bool:
+    val r = _tmux(ws: ws, args: ["list-windows", "-t", ws.session, "-F", _fmt("window_name")], reason: "list_windows_failed")
+    if r.status != "ok":
+        return false
+    for line in r.output.split("\n"):
+        if line.trim() == name:
+            return true
+    false
+
+pub fn window_open(ws: AgentWorkspace, name: text, cwd: text, command: text) -> WorkspaceResult:
+    var args = ["new-window", "-d", "-t", ws.session, "-n", name, "-c", cwd]
+    if command != "":
+        args = args + [command]
+    _tmux(ws: ws, args: args, reason: "new_window_failed")
+
+pub fn pane_split(ws: AgentWorkspace, window: text, cwd: text) -> WorkspaceResult:
+    _tmux(ws, ["split-window", "-d", "-t", ws.session + ":" + window, "-c", cwd],
+        "split_failed")
+
+pub fn list_panes(ws: AgentWorkspace) -> [text]:
+    list_panes_except(ws: ws, skip_pane_id: "")
+
+# Every pane target except the one whose tmux pane id is `skip_pane_id`.
+pub fn list_panes_except(ws: AgentWorkspace, skip_pane_id: text) -> [text]:
+    # `#{...}` inside a literal is string interpolation: build the tmux format by hand.
+    val fmt = _fmt("session_name") + ":" + _fmt("window_name") + "." + _fmt("pane_index") + " " + _fmt("pane_id")
+    val r = _tmux(ws, ["list-panes", "-s", "-t", ws.session, "-F", fmt], "list_panes_failed")
+    if r.status != "ok":
+        return []
+    var panes: [text] = []
+    for line in r.output.split("\n"):
+        val parts = line.trim().split(" ")
+        if parts.len() < 2:
+            continue
+        if skip_pane_id != "" and parts[1] == skip_pane_id:
+            continue
+        panes.push(parts[0])
+    panes
+
+pub fn send_to_pane(ws: AgentWorkspace, target: text, command: text) -> WorkspaceResult:
+    _tmux(ws, ["send-keys", "-t", target, command, "Enter"], "send_keys_failed")
+
+# Send one command to EVERY pane of the session except the pane this process
+# runs in (a broadcast must never type into its own shell). Returns the panes
+# it reached.
+pub fn send_to_each_pane(ws: AgentWorkspace, command: text) -> [text]:
+    var reached: [text] = []
+    for target in list_panes_except(ws, _own_pane_id()):
+        if send_to_pane(ws: ws, target: target, command: command).status == "ok":
+            reached.push(target)
+    reached
+
+pub fn capture_pane(ws: AgentWorkspace, target: text) -> text:
+    _tmux(ws, ["capture-pane", "-p", "-J", "-S", "-", "-t", target], "capture_failed").output
+
+# Poll a pane until `marker` shows up (send-keys is async). Bounded.
+pub fn wait_for_pane_text(ws: AgentWorkspace, target: text, marker: text, timeout_ms: i64) -> bool:
+    val deadline = current_time_ms() + timeout_ms
+    while current_time_ms() < deadline:
+        if capture_pane(ws: ws, target: target).contains(marker):
+            return true
+        sleep_ms(200)
+    false
+
+# --- worktrees (paths must be ABSOLUTE: `git -C repo` resolves relative paths against the repo) ---
+
+pub fn worktree_path(ws: AgentWorkspace, agent_id: text) -> text:
+    ws.worktree_root + "/" + agent_id
+
+# Detached: this repo NEVER creates branches (CLAUDE.md).
+pub fn worktree_add(ws: AgentWorkspace, agent_id: text) -> WorkspaceResult:
+    val path = worktree_path(ws: ws, agent_id: agent_id)
+    # "exists" only when git itself lists the path; a plain directory or file
+    # there is the operator's and is neither claimed nor deleted.
+    for registered in worktree_list(ws):
+        if registered == path:
+            return _ok("exists")
+    if dir_exists(path) or file_exists(path):
+        return _err(reason: "path_occupied", out: path)
+    dir_create_all(ws.worktree_root)
+    _run(cmd: "git", args: ["-C", ws.repo, "worktree", "add", "--detach", path], reason: "worktree_add_failed")
+
+pub fn worktree_remove(ws: AgentWorkspace, agent_id: text) -> WorkspaceResult:
+    val path = worktree_path(ws: ws, agent_id: agent_id)
+    if not dir_exists(path):
+        return _ok("absent")
+    _run(cmd: "git", args: ["-C", ws.repo, "worktree", "remove", "--force", path], reason: "worktree_remove_failed")
+
+pub fn worktree_list(ws: AgentWorkspace) -> [text]:
+    val r = _run(cmd: "git", args: ["-C", ws.repo, "worktree", "list", "--porcelain"], reason: "worktree_list_failed")
+    var paths: [text] = []
+    for line in r.output.split("\n"):
+        if line.starts_with("worktree "):
+            paths.push(line.substring(9).trim())
+    paths
+
+# --- composite: one agent = one worktree + one pane --------------------------
+
+pub fn agent_attach(ws: AgentWorkspace, agent_id: text, command: text) -> WorkspaceResult:
+    val wt = worktree_add(ws: ws, agent_id: agent_id)
+    if wt.status != "ok":
+        return wt
+    val s = session_ensure(ws: ws, cwd: worktree_path(ws: ws, agent_id: agent_id))
+    if s.status != "ok":
+        return s
+    if window_exists(ws: ws, name: agent_id):
+        return _ok("exists")
+    window_open(ws: ws, name: agent_id, cwd: worktree_path(ws: ws, agent_id: agent_id), command: with_depth(command))
+
+# An agent that was never attached is an error and nothing is removed.
+pub fn agent_detach(ws: AgentWorkspace, agent_id: text) -> WorkspaceResult:
+    if not window_exists(ws: ws, name: agent_id):
+        return _err(reason: "kill_window_failed", out: ws.session + ":" + agent_id)
+    val k = _tmux(ws: ws, args: ["kill-window", "-t", ws.session + ":" + agent_id], reason: "kill_window_failed")
+    if k.status != "ok":
+        return k
+    worktree_remove(ws: ws, agent_id: agent_id)
+
+# Launch a caret spec suite in its own tmux window; `output` is the pane target.
+# Refused (reason "recursion_limit") when this process is itself already a
+# workspace-launched child.
+pub fn launch_caret_suite(ws: AgentWorkspace, cwd: text, spec: text) -> WorkspaceResult:
+    if depth_exceeded():
+        return _err(reason: "recursion_limit", out: DEPTH_ENV + "=" + workspace_depth().to_text())
+    val cmd = with_depth("SIMPLE_TIMEOUT_SECONDS=900 bin/simple test " + spec + " --no-session-daemon")
+    val s = session_ensure(ws: ws, cwd: cwd)
+    if s.status != "ok":
+        return s
+    val w = window_open(ws: ws, name: "caret_suite", cwd: cwd, command: "")
+    if w.status != "ok":
+        return w
+    val target = ws.session + ":caret_suite"
+    val sent = send_to_pane(ws: ws, target: target, command: cmd)
+    if sent.status != "ok":
+        return sent
+    _ok(target)
+
+export AgentWorkspace, WorkspaceResult
+export agent_workspace, tmux_available, workspace_depth, depth_exceeded, with_depth,
+    session_alive, session_ensure, session_kill,
+    window_exists, window_open, pane_split, list_panes, list_panes_except, send_to_pane, send_to_each_pane,
+    capture_pane, wait_for_pane_text, worktree_path, worktree_add,
+    worktree_remove, worktree_list, agent_attach, agent_detach, launch_caret_suite

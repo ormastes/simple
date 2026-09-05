@@ -1,0 +1,126 @@
+#!/bin/sh
+# Source-authority + runtime contract for the rt_time_* clock providers.
+# Verdict harness (.claude/rules/vcs.md): verdict LAST on stdout, exit 0/1/2,
+# non-vacuity absolute. NOTE: deliberately `set -u` WITHOUT `set -e` — `grep -c`
+# exits 1 on zero matches, and under `-e` that killed this guard silently
+# (exit 1, no output) for the whole time it sat RED.
+set -u
+A_CHECKED=0; A_FAILED=0; A_MSGS=''
+_fail() { A_FAILED=$((A_FAILED+1)); A_MSGS="${A_MSGS}${A_MSGS:+; }$1"; }
+ck() { # ck <desc> <cmd...>  -- status read into a var on the NEXT line, never via a pipe
+    _d=$1; shift
+    "$@" >/dev/null 2>&1
+    _rc=$?
+    A_CHECKED=$((A_CHECKED+1)); [ "$_rc" -eq 0 ] || _fail "$_d"
+}
+cknot() { # cknot <desc> <cmd...>  -- must FAIL
+    _d=$1; shift
+    "$@" >/dev/null 2>&1
+    _rc=$?
+    A_CHECKED=$((A_CHECKED+1)); [ "$_rc" -ne 0 ] || _fail "$_d"
+}
+ckeq() { # ckeq <desc> <actual> <expected>
+    A_CHECKED=$((A_CHECKED+1))
+    [ "$2" = "$3" ] || _fail "$1 (expected $3, actual $2)"
+}
+# grep -c prints 0 and exits 1 on no match; the count is what we want, not the status.
+cnt() { grep -c "$1" "$2" 2>/dev/null; }
+cnte() { grep -Ec "$1" "$2" 2>/dev/null; }
+need_file() { [ -f "$1" ] || { echo "$2: ERROR — nothing was checked (missing $1)"; exit 2; } }
+verdict() {
+    [ "$A_CHECKED" -gt 0 ] || { echo "$1: ERROR — nothing was checked"; exit 2; }
+    [ "$A_FAILED" -eq 0 ] || { echo "$1: FAIL — $A_FAILED of $A_CHECKED assertion(s) failed: $A_MSGS"; exit 1; }
+    echo "$1: PASS — $A_CHECKED assertion(s) checked${VERDICT_EXTRA:-}"
+    exit 0
+}
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+binding="$root/src/lib/nogc_sync_mut/io/time_ops.spl"
+rust="$root/src/compiler_rust/runtime/src/value/sffi/time.rs"
+runtime_value_mod="$root/src/compiler_rust/runtime/src/value/mod.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/time.rs"
+interpreter_registry="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+runtime_c="$root/src/runtime/runtime.c"
+context_manager="$root/src/compiler_rust/lib/std/src/context_manager.spl"
+test_runner="$root/src/compiler_rust/lib/std/src/tooling/testing/runner.spl"
+bootstrap_time="$root/src/compiler_rust/lib/std/src/sys/sffi/time.spl"
+progress="$root/src/compiler_rust/lib/std/src/spec/progress.spl"
+timestamp_c="$root/src/runtime/runtime_timestamp.c"
+L='rt time contract'
+for f in "$binding" "$rust" "$runtime_value_mod" "$interpreter" "$interpreter_registry" \
+         "$runtime_c" "$context_manager" "$test_runner" "$bootstrap_time" "$progress" "$timestamp_c"; do
+    need_file "$f" "$L"
+done
+
+for symbol in rt_time_now_unix_micros rt_time_now_nanos rt_time_now_micros; do
+    ck "$symbol extern declares negative sentinel is failure" \
+        sh -c 'grep -B1 -F "extern fn $1" "$2" | grep -q "negative sentinel is failure"' _ "$symbol" "$binding"
+    ckeq "$symbol call sites in binding" "$(cnt "$symbol()" "$binding")" 2
+done
+
+# 4 lexically scoped raw clock calls, not 3: the fourth is `time_now_seconds()`
+# wrapping `rt_time_now_seconds()`, the legacy C integer ABI this audit itself
+# pins below (`int64_t rt_time_now_seconds(void)`). Its extern carries
+# `@unsafe(reason: "raw wall-clock second provider", capabilities: [ffi])` and
+# it is a whole-second clock with no negative sentinel contract, so it is
+# correctly excluded from the sentinel loop above. Pinned by identity as well
+# as by count so a fifth, unrelated block cannot hide inside the total.
+ckeq 'lexically scoped raw clock calls' "$(cnt 'unsafe(capabilities: \[ffi\]):' "$binding")" 4
+ck 'legacy seconds provider annotated' grep -Fq '@unsafe(reason: "raw wall-clock second provider", capabilities: [ffi])' "$binding"
+ck 'legacy seconds wrapper present' grep -q '^fn time_now_seconds() -> i64:$' "$binding"
+ckeq 'sentinel-lifting error codes' "$(cnt 'E-SFFI-TIME-00[123]' "$binding")" 3
+ckeq 'raw clock externs' "$(cnt '^extern fn rt_time_now_' "$binding")" 4
+
+for wrapper in try_rt_time_now_unix_micros try_rt_time_now_nanos try_rt_time_now_micros; do
+    ck "$wrapper lifts to Option" grep -q "pub fn $wrapper() -> Option<i64>" "$rust"
+done
+# `rt_time_now_seconds` is the legacy C integer ABI.  The separately named
+# fractional clock prevents a native/interpreter return-representation split.
+ck 'C seconds ABI declared' grep -q 'int64_t rt_time_now_seconds(void)' "$runtime_c"
+ck 'rust seconds extern' grep -q 'pub(super) fn rt_time_now_seconds() -> i64;' "$rust"
+ck 'rust seconds wrapper' grep -q 'pub fn rt_time_now_seconds() -> i64' "$rust"
+ck 'rust fractional seconds wrapper' grep -q 'pub fn rt_time_now_seconds_f64() -> f64' "$rust"
+ck 'rust fractional seconds Option wrapper' grep -q 'pub fn try_rt_time_now_seconds_f64() -> Option<f64>' "$rust"
+ck 'runtime value mod re-exports clocks' grep -q 'pub use sffi::{fractional_seconds_to_millis, rt_time_now_seconds, rt_time_now_seconds_f64};' "$runtime_value_mod"
+ck 'interpreter seconds returns Int' \
+    sh -c 'grep -A1 "pub fn rt_time_now_seconds(_args: \&\[Value\])" "$1" | grep -q "Value::Int"' _ "$interpreter"
+ck 'interpreter fractional seconds returns Float' \
+    sh -c 'grep -A1 "pub fn rt_time_now_seconds_f64(_args: \&\[Value\])" "$1" | grep -q "Value::Float"' _ "$interpreter"
+for clock in rt_current_time_ms rt_time_now_ms; do
+    ck "$clock routes through fractional seconds" \
+        sh -c 'grep -A2 "pub fn $1(_args: \&\[Value\])" "$2" | grep -q "rt_time_now_seconds_f64()"' _ "$clock" "$interpreter"
+done
+ck 'subsecond precision test present' grep -q 'fractional_seconds_to_millis_preserves_subsecond_precision' "$rust"
+ck 'fractional seconds registered in interpreter' grep -q 'insert_simple!("rt_time_now_seconds_f64", time::rt_time_now_seconds_f64);' "$interpreter_registry"
+
+for source in "$context_manager" "$test_runner"; do
+    n=$(basename "$source")
+    ck "$n fractional clock extern annotated" grep -q '@unsafe(reason: "raw fractional wall-clock provider; negative f64 sentinel is failure", capabilities: \[ffi\])' "$source"
+    ck "$n declares fractional clock extern" grep -q 'extern fn rt_time_now_seconds_f64() -> f64' "$source"
+    ck "$n scopes its raw clock call" grep -q 'unsafe(capabilities: \[ffi\]):' "$source"
+    cknot "$n does not mistype the integer seconds ABI as f64" grep -q 'extern fn rt_time_now_seconds() -> f64' "$source"
+    cknot "$n carries no allocation/dynamic-symbol surface" grep -Eq 'rt_alloc|dlsym|CString|HashMap|mutex' "$source"
+done
+
+ckeq 'bootstrap time @unsafe declarations' "$(cnt '^@unsafe(' "$bootstrap_time")" 4
+ck 'bootstrap legacy ms clock documented as unadmitted' grep -q 'legacy raw millisecond clock has no owned provider admission' "$bootstrap_time"
+ck 'bootstrap legacy sleep documented as unadmitted' grep -q 'legacy raw sleep provider has no owned provider admission' "$bootstrap_time"
+ck 'progress init provider' grep -q 'pub fn rt_progress_init() -> bool' "$rust"
+ck 'progress reset provider' grep -q 'pub fn rt_progress_reset() -> bool' "$rust"
+ckeq 'progress lexically scoped raw calls' "$(cnt 'unsafe(capabilities: \[ffi\]):' "$progress")" 3
+ckeq 'progress sentinel-lifting error codes' "$(cnt 'E-SFFI-TIME-00[456]' "$progress")" 3
+ck 'timestamp thread-local init flag' grep -q 'RT_TIME_THREAD_LOCAL bool g_progress_initialized' "$timestamp_c"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+for sc in runtime_time_failure_selfcheck runtime_timestamp_failure_selfcheck; do
+    ck "$sc compiles" ${CC:-cc} -std=gnu11 -O2 -Wall -Wextra -Werror \
+        "$root/src/runtime/test/$sc.c" -o "$tmp/$sc"
+    if [ -x "$tmp/$sc" ]; then
+        ck "$sc passes" "$tmp/$sc"
+    else
+        A_CHECKED=$((A_CHECKED+1)); _fail "$sc did not build, so it could not be run"
+    fi
+done
+
+verdict "$L"

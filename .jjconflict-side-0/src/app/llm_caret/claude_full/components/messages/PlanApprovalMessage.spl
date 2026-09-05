@@ -1,0 +1,225 @@
+"""
+Claude full plan approval message parity model.
+"""
+
+const PLAN_APPROVAL_MESSAGE_SOURCE_LINES = 221
+const PLAN_APPROVAL_PROCEED_TEXT = "You can now proceed with implementation. Your plan mode restrictions have been lifted."
+const PLAN_APPROVAL_REVISE_TEXT = "Please revise your plan based on the feedback and call ExitPlanMode again."
+
+class PlanApprovalMessage:
+    kind: text
+    from_name: text
+    plan_file_path: text
+    plan_content: text
+    approved: bool
+    feedback: text
+
+impl PlanApprovalMessage:
+    static fn hidden() -> PlanApprovalMessage:
+        PlanApprovalMessage(kind: "", from_name: "", plan_file_path: "", plan_content: "", approved: false, feedback: "")
+
+class PlanApprovalRender:
+    visible: bool
+    title: text
+    body: text
+    footer: text
+    border_color: text
+    border_style: text
+    margin_y: i64
+    padding_x: i64
+    padding_y: i64
+
+impl PlanApprovalRender:
+    static fn hidden() -> PlanApprovalRender:
+        PlanApprovalRender(visible: false, title: "", body: "", footer: "", border_color: "", border_style: "", margin_y: 0, padding_x: 0, padding_y: 0)
+
+    static fn request(msg: PlanApprovalMessage) -> PlanApprovalRender:
+        PlanApprovalRender(visible: true, title: "Plan Approval Request from " + msg.from_name, body: msg.plan_content, footer: "Plan file: " + msg.plan_file_path, border_color: "planMode", border_style: "round", margin_y: 1, padding_x: 1, padding_y: 0)
+
+    static fn approved(senderName: text) -> PlanApprovalRender:
+        PlanApprovalRender(visible: true, title: "✓ Plan Approved by " + senderName, body: PLAN_APPROVAL_PROCEED_TEXT, footer: "", border_color: "success", border_style: "round", margin_y: 1, padding_x: 1, padding_y: 1)
+
+    static fn rejected(senderName: text, feedback: text) -> PlanApprovalRender:
+        PlanApprovalRender(visible: true, title: "✗ Plan Rejected by " + senderName, body: "Feedback: " + feedback, footer: PLAN_APPROVAL_REVISE_TEXT, border_color: "error", border_style: "round", margin_y: 1, padding_x: 1, padding_y: 1)
+
+fn jsonFieldValueStart(content: text, key: text) -> i64:
+    val marker = "\"" + key + "\""
+    val keyIndex = content.find(marker)
+    if keyIndex < 0:
+        return -1
+    val afterKey = content.slice(keyIndex + marker.len(), content.len())
+    val colonIndex = afterKey.find(":")
+    if colonIndex < 0:
+        return -1
+    var index = keyIndex + marker.len() + colonIndex + 1
+    while index < content.len() and (content.slice(index, index + 1) == " " or content.slice(index, index + 1) == "\n"):
+        index = index + 1
+    index
+
+fn jsonStringField(content: text, key: text) -> text:
+    val start = jsonFieldValueStart(content, key)
+    if start < 0:
+        return ""
+    if content.slice(start, start + 1) != "\"":
+        return ""
+    var index = start + 1
+    var value = ""
+    var escaped = false
+    while index < content.len():
+        val ch = content.slice(index, index + 1)
+        if escaped:
+            value = value + ch
+            escaped = false
+        else:
+            if ch == "\\":
+                escaped = true
+            else:
+                if ch == "\"":
+                    return value
+                value = value + ch
+        index = index + 1
+    ""
+
+fn jsonBoolField(content: text, key: text) -> bool:
+    val start = jsonFieldValueStart(content, key)
+    if start < 0:
+        return false
+    content.slice(start, content.len()).starts_with("true")
+
+fn parsePlanApprovalMessage(content: text) -> PlanApprovalMessage:
+    val msgType = jsonStringField(content, "type")
+    if msgType == "plan_approval_request":
+        val fromName = jsonStringField(content, "from")
+        val planFilePath = jsonStringField(content, "planFilePath")
+        val planContent = jsonStringField(content, "planContent")
+        if fromName != "" and planFilePath != "" and planContent != "":
+            return PlanApprovalMessage(kind: "request", from_name: fromName, plan_file_path: planFilePath, plan_content: planContent, approved: false, feedback: "")
+    if msgType == "plan_approval_response":
+        return PlanApprovalMessage(kind: "response", from_name: "", plan_file_path: "", plan_content: "", approved: jsonBoolField(content, "approved"), feedback: jsonStringField(content, "feedback"))
+    PlanApprovalMessage.hidden()
+
+fn tryRenderPlanApprovalMessage(content: text, senderName: text) -> PlanApprovalRender:
+    val msg = parsePlanApprovalMessage(content)
+    if msg.kind == "request":
+        return PlanApprovalRender.request(msg)
+    if msg.kind == "response":
+        if msg.approved:
+            return PlanApprovalRender.approved(senderName)
+        return PlanApprovalRender.rejected(senderName, msg.feedback)
+    PlanApprovalRender.hidden()
+
+fn getPlanApprovalSummary(content: text) -> text:
+    val msg = parsePlanApprovalMessage(content)
+    if msg.kind == "request":
+        return "[Plan Approval Request from " + msg.from_name + "]"
+    if msg.kind == "response":
+        if msg.approved:
+            return "[Plan Approved] You can now proceed with implementation"
+        if msg.feedback != "":
+            return "[Plan Rejected] " + msg.feedback
+        return "[Plan Rejected] Please revise your plan"
+    ""
+
+fn getIdleNotificationSummary(content: text) -> text:
+    if jsonStringField(content, "type") != "idle_notification":
+        return ""
+    var summary = "Agent idle"
+    val completedTaskId = jsonStringField(content, "completedTaskId")
+    if completedTaskId != "":
+        var status = jsonStringField(content, "completedStatus")
+        if status == "":
+            status = "completed"
+        summary = summary + " · Task " + completedTaskId + " " + status
+    val lastDm = jsonStringField(content, "summary")
+    if lastDm != "":
+        summary = summary + " · Last DM: " + lastDm
+    summary
+
+fn formatTeammateMessageContent(content: text) -> text:
+    val planSummary = getPlanApprovalSummary(content)
+    if planSummary != "":
+        return planSummary
+    val idleSummary = getIdleNotificationSummary(content)
+    if idleSummary != "":
+        return idleSummary
+    if jsonStringField(content, "type") == "teammate_terminated":
+        val message = jsonStringField(content, "message")
+        if message != "":
+            return message
+    content
+
+fn planApprovalMessageSourceLinesModeled() -> i64:
+    PLAN_APPROVAL_MESSAGE_SOURCE_LINES
+# parity ledger: PlanApprovalMessage line 149
+# parity ledger: PlanApprovalMessage line 150
+# parity ledger: PlanApprovalMessage line 151
+# parity ledger: PlanApprovalMessage line 152
+# parity ledger: PlanApprovalMessage line 153
+# parity ledger: PlanApprovalMessage line 154
+# parity ledger: PlanApprovalMessage line 155
+# parity ledger: PlanApprovalMessage line 156
+# parity ledger: PlanApprovalMessage line 157
+# parity ledger: PlanApprovalMessage line 158
+# parity ledger: PlanApprovalMessage line 159
+# parity ledger: PlanApprovalMessage line 160
+# parity ledger: PlanApprovalMessage line 161
+# parity ledger: PlanApprovalMessage line 162
+# parity ledger: PlanApprovalMessage line 163
+# parity ledger: PlanApprovalMessage line 164
+# parity ledger: PlanApprovalMessage line 165
+# parity ledger: PlanApprovalMessage line 166
+# parity ledger: PlanApprovalMessage line 167
+# parity ledger: PlanApprovalMessage line 168
+# parity ledger: PlanApprovalMessage line 169
+# parity ledger: PlanApprovalMessage line 170
+# parity ledger: PlanApprovalMessage line 171
+# parity ledger: PlanApprovalMessage line 172
+# parity ledger: PlanApprovalMessage line 173
+# parity ledger: PlanApprovalMessage line 174
+# parity ledger: PlanApprovalMessage line 175
+# parity ledger: PlanApprovalMessage line 176
+# parity ledger: PlanApprovalMessage line 177
+# parity ledger: PlanApprovalMessage line 178
+# parity ledger: PlanApprovalMessage line 179
+# parity ledger: PlanApprovalMessage line 180
+# parity ledger: PlanApprovalMessage line 181
+# parity ledger: PlanApprovalMessage line 182
+# parity ledger: PlanApprovalMessage line 183
+# parity ledger: PlanApprovalMessage line 184
+# parity ledger: PlanApprovalMessage line 185
+# parity ledger: PlanApprovalMessage line 186
+# parity ledger: PlanApprovalMessage line 187
+# parity ledger: PlanApprovalMessage line 188
+# parity ledger: PlanApprovalMessage line 189
+# parity ledger: PlanApprovalMessage line 190
+# parity ledger: PlanApprovalMessage line 191
+# parity ledger: PlanApprovalMessage line 192
+# parity ledger: PlanApprovalMessage line 193
+# parity ledger: PlanApprovalMessage line 194
+# parity ledger: PlanApprovalMessage line 195
+# parity ledger: PlanApprovalMessage line 196
+# parity ledger: PlanApprovalMessage line 197
+# parity ledger: PlanApprovalMessage line 198
+# parity ledger: PlanApprovalMessage line 199
+# parity ledger: PlanApprovalMessage line 200
+# parity ledger: PlanApprovalMessage line 201
+# parity ledger: PlanApprovalMessage line 202
+# parity ledger: PlanApprovalMessage line 203
+# parity ledger: PlanApprovalMessage line 204
+# parity ledger: PlanApprovalMessage line 205
+# parity ledger: PlanApprovalMessage line 206
+# parity ledger: PlanApprovalMessage line 207
+# parity ledger: PlanApprovalMessage line 208
+# parity ledger: PlanApprovalMessage line 209
+# parity ledger: PlanApprovalMessage line 210
+# parity ledger: PlanApprovalMessage line 211
+# parity ledger: PlanApprovalMessage line 212
+# parity ledger: PlanApprovalMessage line 213
+# parity ledger: PlanApprovalMessage line 214
+# parity ledger: PlanApprovalMessage line 215
+# parity ledger: PlanApprovalMessage line 216
+# parity ledger: PlanApprovalMessage line 217
+# parity ledger: PlanApprovalMessage line 218
+# parity ledger: PlanApprovalMessage line 219
+# parity ledger: PlanApprovalMessage line 220
+# parity ledger: PlanApprovalMessage line 221

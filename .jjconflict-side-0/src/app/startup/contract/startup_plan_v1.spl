@@ -1,0 +1,389 @@
+# StartupRequestV1 / StartupPlanV1 — frozen startup contract (WP-02s).
+#
+# Research: doc/01_research/compiler/startup_performance/
+#   startup_perf_architecture_2026-08-17.md §6.4 (StartupRequestV1),
+#   §6.5 (StartupPlanV1, plan hash, determinism).
+# Plan row: doc/03_plan/agent_tasks/startup_perf_parallel_plan_2026-08-17.md
+#   WP-02s ("malformed/truncated/overflow vectors fail closed").
+#
+# The `V1` in these names is a contract, not a label: the serialized form
+# below is frozen. A new field means `StartupPlanV2`, never a silent
+# additive change here.
+#
+# Serialized form is SDN (never JSON/YAML): one `key: value` line per
+# field, in a FIXED order, version line first, `plan_hash` last:
+#
+#   startup_plan: v1
+#   route_kind: command
+#   ...
+#   plan_hash: 1a2b3c4d
+#
+# Decoding is FAIL-CLOSED. A truncated, reordered, mis-keyed, wrong-version
+# or hash-mismatched record yields a typed error and a ZERO plan — never a
+# partial plan and never a silent default. Values are trimmed and must not
+# contain newlines.
+
+# ---------------------------------------------------------------- request
+
+# Entry kinds (research §6.4 `entry_kind`).
+pub fn startup_entry_kind_root() -> i64:
+    0
+
+pub fn startup_entry_kind_command() -> i64:
+    1
+
+pub fn startup_entry_kind_script() -> i64:
+    2
+
+pub fn startup_entry_kind_artifact() -> i64:
+    3
+
+# Classified argv, pointer-free. Spans are already resolved to text by the
+# stage-0 adapter; ids/counters stay integral so no allocation is required
+# to compare two requests.
+pub struct StartupRequestV1:
+    argv0: text
+    first: text
+    profile_id: i64
+    core_flags: i64
+    entry_kind: i64
+    option_token_first: i64
+    option_token_count: i64
+    routing_boundary: i64
+
+pub fn startup_request_v1(
+    argv0: text,
+    first: text,
+    profile_id: i64,
+    core_flags: i64,
+    entry_kind: i64,
+    option_token_first: i64,
+    option_token_count: i64,
+    routing_boundary: i64
+) -> StartupRequestV1:
+    StartupRequestV1(
+        argv0: argv0,
+        first: first,
+        profile_id: profile_id,
+        core_flags: core_flags,
+        entry_kind: entry_kind,
+        option_token_first: option_token_first,
+        option_token_count: option_token_count,
+        routing_boundary: routing_boundary)
+
+# ------------------------------------------------------------------- plan
+
+pub struct StartupPlanV1:
+    route_kind: text
+    command_id: text
+    profile_id: i64
+    execution_mode: text
+    target_id: text
+    component_ids: [i64]
+    route_patch_ids: [i64]
+    provider_option_batches: [i64]
+    direct_exec_path: text
+    entry_path: text
+    program_arg_start: i64
+    load_policy: text
+    cache_policy: text
+    strictness: text
+    plan_hash: text
+
+pub fn startup_plan_zero() -> StartupPlanV1:
+    val none: [i64] = []
+    val none2: [i64] = []
+    val none3: [i64] = []
+    StartupPlanV1(
+        route_kind: "",
+        command_id: "",
+        profile_id: 0,
+        execution_mode: "",
+        target_id: "",
+        component_ids: none,
+        route_patch_ids: none2,
+        provider_option_batches: none3,
+        direct_exec_path: "",
+        entry_path: "",
+        program_arg_start: 0,
+        load_policy: "",
+        cache_policy: "",
+        strictness: "",
+        plan_hash: "")
+
+fn _route_kind_for(entry_kind: i64) -> text:
+    if entry_kind == 0:
+        return "root"
+    if entry_kind == 1:
+        return "command"
+    if entry_kind == 2:
+        return "script"
+    if entry_kind == 3:
+        return "artifact"
+    ""
+
+# Deterministic request -> plan. Same request, same plan, same hash
+# (research §6.5). An unknown entry_kind produces route_kind "" and an
+# unhashed zero plan, so an unclassifiable request cannot be executed.
+pub fn startup_plan_from_request(request: StartupRequestV1) -> StartupPlanV1:
+    val route = _route_kind_for(request.entry_kind)
+    if route == "":
+        return startup_plan_zero()
+    var plan = startup_plan_zero()
+    plan.route_kind = route
+    plan.profile_id = request.profile_id
+    plan.program_arg_start = request.routing_boundary
+    plan.execution_mode = "interpret"
+    plan.load_policy = "normal"
+    plan.cache_policy = "read_write"
+    plan.strictness = "strict"
+    if route == "command":
+        plan.command_id = request.first
+    if route == "script" or route == "artifact":
+        plan.entry_path = request.first
+    startup_plan_sealed(plan)
+
+# Recompute and stamp `plan_hash`. Every plan handed to a consumer must be
+# sealed; an unsealed plan fails `startup_plan_decode` round-trip.
+pub fn startup_plan_sealed(plan: StartupPlanV1) -> StartupPlanV1:
+    var sealed = plan
+    sealed.plan_hash = startup_plan_hash(plan)
+    sealed
+
+# ------------------------------------------------------------------- hash
+
+# FNV-1a/64 over the canonical body (every field except plan_hash, in the
+# frozen order, with its key). Same idiom as load_plan_receipt's plan hash:
+# collision-resistance is not a goal — discrimination and stability are.
+fn _fnv1a_hex(s: text) -> text:
+    var h: i64 = -3750763034362895579   # 0xcbf29ce484222325 as i64
+    var i = 0
+    while i < s.len():
+        h = h ^ s.char_code_at(i)
+        h = h * 1099511628211
+        i = i + 1
+    _hex_of_i64(h)
+
+fn _hex_of_i64(v: i64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var n = 16
+    var x = v
+    while n > 0:
+        val nib = x & 15
+        out = digits.char_at(nib) + out
+        x = x >> 4
+        n = n - 1
+    out
+
+pub fn startup_plan_hash(plan: StartupPlanV1) -> text:
+    _fnv1a_hex(_plan_body(plan))
+
+# ---------------------------------------------------------------- encoding
+
+fn _join_ids(ids: [i64]) -> text:
+    var out = ""
+    var i = 0
+    while i < ids.len():
+        if i > 0:
+            out = out + ","
+        out = out + ids[i].to_text()
+        i = i + 1
+    out
+
+fn _line(key: text, value: text) -> text:
+    key + ": " + value + "\n"
+
+# Canonical body: every field except plan_hash, frozen order.
+fn _plan_body(plan: StartupPlanV1) -> text:
+    var out = _line("startup_plan", "v1")
+    out = out + _line("route_kind", plan.route_kind)
+    out = out + _line("command_id", plan.command_id)
+    out = out + _line("profile_id", plan.profile_id.to_text())
+    out = out + _line("execution_mode", plan.execution_mode)
+    out = out + _line("target_id", plan.target_id)
+    out = out + _line("component_ids", _join_ids(plan.component_ids))
+    out = out + _line("route_patch_ids", _join_ids(plan.route_patch_ids))
+    out = out + _line("provider_option_batches",
+        _join_ids(plan.provider_option_batches))
+    out = out + _line("direct_exec_path", plan.direct_exec_path)
+    out = out + _line("entry_path", plan.entry_path)
+    out = out + _line("program_arg_start", plan.program_arg_start.to_text())
+    out = out + _line("load_policy", plan.load_policy)
+    out = out + _line("cache_policy", plan.cache_policy)
+    out = out + _line("strictness", plan.strictness)
+    out
+
+pub fn startup_plan_encode(plan: StartupPlanV1) -> text:
+    _plan_body(plan) + _line("plan_hash", plan.plan_hash)
+
+# ---------------------------------------------------------------- decoding
+
+# Typed decode outcome. `ok=false` always carries a zero plan; a caller that
+# reads `.plan` without checking `.ok` gets nothing usable, by construction.
+pub struct StartupPlanDecodeV1:
+    plan: StartupPlanV1
+    ok: bool
+    error_kind: text
+    error: text
+
+# Error kinds.
+pub fn startup_plan_error_truncated() -> text:
+    "truncated"
+
+pub fn startup_plan_error_malformed() -> text:
+    "malformed"
+
+pub fn startup_plan_error_version() -> text:
+    "version"
+
+pub fn startup_plan_error_hash() -> text:
+    "hash_mismatch"
+
+fn _decode_error(kind: text, message: text) -> StartupPlanDecodeV1:
+    StartupPlanDecodeV1(
+        plan: startup_plan_zero(), ok: false, error_kind: kind, error: message)
+
+fn _plan_keys() -> [text]:
+    var keys: [text] = []
+    keys.push("startup_plan")
+    keys.push("route_kind")
+    keys.push("command_id")
+    keys.push("profile_id")
+    keys.push("execution_mode")
+    keys.push("target_id")
+    keys.push("component_ids")
+    keys.push("route_patch_ids")
+    keys.push("provider_option_batches")
+    keys.push("direct_exec_path")
+    keys.push("entry_path")
+    keys.push("program_arg_start")
+    keys.push("load_policy")
+    keys.push("cache_policy")
+    keys.push("strictness")
+    keys.push("plan_hash")
+    keys
+
+# Split "key: value" at the FIRST ": " so path values keep their colons.
+fn _split_key(line: text) -> text:
+    val at = line.index_of(": ")
+    if at > 0:
+        return line.substring(0, at)
+    ""
+
+fn _split_value(line: text) -> text:
+    val at = line.index_of(": ")
+    if at > 0:
+        return line.substring(at + 2, line.len())
+    ""
+
+fn _parse_int(s: text) -> i64:
+    if s.len() == 0:
+        return -1
+    val digits = "0123456789"
+    var value: i64 = 0
+    var i = 0
+    while i < s.len():
+        var d = -1
+        var k = 0
+        while k < 10:
+            if s.char_at(i) == digits.char_at(k):
+                d = k
+            k = k + 1
+        if d < 0:
+            return -1
+        value = value * 10 + d
+        i = i + 1
+    value
+
+fn _parse_ids(s: text) -> [i64]:
+    var out: [i64] = []
+    if s == "":
+        return out
+    for part in s.split(","):
+        val v = _parse_int(part)
+        if v < 0:
+            out.push(-1)
+            return out
+        out.push(v)
+    out
+
+fn _ids_bad(ids: [i64]) -> bool:
+    var i = 0
+    while i < ids.len():
+        if ids[i] < 0:
+            return true
+        i = i + 1
+    false
+
+# Fail-closed decoder. Requires exactly the 16 frozen keys, in order, each
+# on its own line; then re-derives the hash and requires it to match.
+pub fn startup_plan_decode(content: text) -> StartupPlanDecodeV1:
+    if content == "":
+        return _decode_error(startup_plan_error_truncated(), "empty record")
+    var lines: [text] = []
+    for raw in content.split("\n"):
+        if raw != "":
+            lines.push(raw)
+    val keys = _plan_keys()
+    if lines.len() < keys.len():
+        val got = lines.len().to_text()
+        return _decode_error(startup_plan_error_truncated(),
+            "expected " + keys.len().to_text() + " fields, got " + got)
+    if lines.len() > keys.len():
+        return _decode_error(startup_plan_error_malformed(),
+            "trailing content after plan_hash")
+    var values: [text] = []
+    var i = 0
+    while i < keys.len():
+        val key = _split_key(lines[i])
+        if key != keys[i]:
+            if key == "":
+                return _decode_error(startup_plan_error_truncated(),
+                    "truncated field line: " + lines[i])
+            return _decode_error(startup_plan_error_malformed(),
+                "expected key " + keys[i] + ", got " + key)
+        values.push(_split_value(lines[i]))
+        i = i + 1
+    if values[0] != "v1":
+        return _decode_error(startup_plan_error_version(),
+            "unsupported startup_plan version: " + values[0])
+    val profile_id = _parse_int(values[3])
+    if profile_id < 0:
+        return _decode_error(startup_plan_error_malformed(),
+            "non-numeric profile_id: " + values[3])
+    val program_arg_start = _parse_int(values[11])
+    if program_arg_start < 0:
+        return _decode_error(startup_plan_error_malformed(),
+            "non-numeric program_arg_start: " + values[11])
+    val component_ids = _parse_ids(values[6])
+    val route_patch_ids = _parse_ids(values[7])
+    val option_batches = _parse_ids(values[8])
+    val ids_bad = _ids_bad(component_ids) or _ids_bad(route_patch_ids)
+    if ids_bad or _ids_bad(option_batches):
+        return _decode_error(startup_plan_error_malformed(),
+            "non-numeric id list")
+    if values[1] == "":
+        return _decode_error(startup_plan_error_malformed(),
+            "empty route_kind")
+    var plan = StartupPlanV1(
+        route_kind: values[1],
+        command_id: values[2],
+        profile_id: profile_id,
+        execution_mode: values[4],
+        target_id: values[5],
+        component_ids: component_ids,
+        route_patch_ids: route_patch_ids,
+        provider_option_batches: option_batches,
+        direct_exec_path: values[9],
+        entry_path: values[10],
+        program_arg_start: program_arg_start,
+        load_policy: values[12],
+        cache_policy: values[13],
+        strictness: values[14],
+        plan_hash: values[15])
+    val expected = startup_plan_hash(plan)
+    if expected != plan.plan_hash:
+        return _decode_error(startup_plan_error_hash(),
+            "plan_hash " + plan.plan_hash + " != computed " + expected)
+    StartupPlanDecodeV1(plan: plan, ok: true, error_kind: "", error: "")

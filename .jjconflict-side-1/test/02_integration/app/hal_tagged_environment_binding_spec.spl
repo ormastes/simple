@@ -1,0 +1,82 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-011 REQ-016 REQ-017 NFR-005 NFR-006 NFR-010
+# @evidence-class host-fixture
+
+use std.spec.*
+use app.test.hal_environment_executor.{
+    hosted_prepare_clock_read_v1, hosted_clock_read_cursor_v1,
+    hosted_clock_read_execute_v1,
+    hosted_prepare_environment_get_v1, hosted_environment_get_cursor_v1,
+    hosted_environment_get_execute_v1
+}
+use std.common.structural.environment_instruction.*
+
+fn policy(opcode: EnvOpcodeV1, capability_id: i64) -> EnvExecutorPolicyV1:
+    env_executor_policy_v1(
+        env_opcode_mask_v1(opcode), 1 << capability_id, 0,
+        env_opcode_mask_v1(opcode), false, true, true)
+
+fn ascii(value: text) -> [u8]:
+    var out: [u8] = [0u8; value.len()]
+    var index = 0
+    while index < value.len():
+        out[index] = value.char_code_at(index) as u8
+        index = index + 1
+    out
+
+describe "actual tagged HAL interaction extraction":
+    it "captures the tagged clock once then replays its sealed observation":
+        val extracted = rt_hal_environment_extract_v1(
+            rt_hal_environment_binding_v1(
+                RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1, 81, 1),
+            EnvOpcodeV1.ClockRead, 11, 0, 0, 0, 0, 0, 8, 8)
+        val sealed = rt_hal_environment_binding_seal_v1(extracted.binding)
+        val plan = rt_hal_environment_plan_v1(sealed)
+        val clock = hosted_prepare_clock_read_v1(11)
+        var captured: [u8] = [0u8; 8]
+        var replayed: [u8] = [0u8; 8]
+        val physical = hosted_clock_read_execute_v1(
+            clock, hosted_clock_read_cursor_v1(81),
+            policy(EnvOpcodeV1.ClockRead, 11), extracted.instruction,
+            [], captured)
+        val replay = rt_hal_environment_replay_exact_v1(
+            rt_hal_environment_plan_replay_v1(
+                plan, RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1),
+            extracted.instruction, extracted.instruction,
+            physical.receipt.observation, [], captured, replayed)
+
+        expect(extracted.accepted).to_be(true)
+        expect(physical.receipt.applied).to_be(true)
+        expect(physical.receipt.allocation_count_after_seal).to_equal(0)
+        expect(replay.accepted).to_be(true)
+        expect(replay.receipt.physical_effect).to_be(false)
+        expect(replayed).to_equal(captured)
+
+    it "captures one environment lookup and never rereads during replay":
+        val key = ascii("PATH")
+        val extracted = rt_hal_environment_extract_v1(
+            rt_hal_environment_binding_v1(
+                RT_HAL_ENVIRONMENT_GET_OPERATION_V1, 82, 1),
+            EnvOpcodeV1.EnvironmentGet, 8, 0,
+            0, key.len(), key.len(), 0, 65536, 65536)
+        val sealed = rt_hal_environment_binding_seal_v1(extracted.binding)
+        val plan = rt_hal_environment_plan_v1(sealed)
+        val executor = hosted_prepare_environment_get_v1("PATH", 8)
+        var captured: [u8] = [0u8; 65536]
+        var replayed: [u8] = [0u8; 65536]
+        val physical = hosted_environment_get_execute_v1(
+            executor, hosted_environment_get_cursor_v1(82),
+            policy(EnvOpcodeV1.EnvironmentGet, 8), extracted.instruction,
+            key, captured)
+        val replay = rt_hal_environment_replay_exact_v1(
+            rt_hal_environment_plan_replay_v1(
+                plan, RT_HAL_ENVIRONMENT_GET_OPERATION_V1),
+            extracted.instruction, extracted.instruction,
+            physical.receipt.observation, key, captured, replayed)
+
+        expect(physical.receipt.applied).to_be(true)
+        expect(physical.cursor.consumed).to_be(true)
+        expect(replay.accepted).to_be(true)
+        expect(replay.receipt.physical_effect).to_be(false)
+        expect(replay.receipt.observation.bytes_length).to_equal(
+            physical.receipt.observation.bytes_length)

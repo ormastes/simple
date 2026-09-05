@@ -1,0 +1,154 @@
+# ============================================================================
+# common/structural/transfer/transfer_contracts.spl — frozen transfer contract
+#
+# WP-01 owns this vocabulary. It is intentionally a semantic/wire-facing
+# contract only: runtime transport and compiler derivation are later waves.
+# It does not duplicate placement leases or MutationPlan payload ownership.
+# ============================================================================
+
+val TRANSFER_SCHEMA_VERSION: i64 = 1
+
+enum ParallelExecutionDomain:
+    Parent
+    Thread
+    Process
+    Actor
+    Device
+    Remote
+
+enum ParallelTransferMode:
+    Copy
+    FrozenShare
+    OwnedMove
+    ScopedLoan
+    Lease
+
+enum ParallelTransferPayload:
+    InlineCopy
+    FrozenRegion
+    OwnedRegion
+    EncodedCopy
+    ObjectHandle
+    SharedSync
+    DeviceLease
+
+val PARALLEL_DOMAIN_MAX: i64 = 5
+val PARALLEL_DOMAIN_COUNT: i64 = 6
+val PARALLEL_TRANSFER_MODE_MAX: i64 = 4
+val PARALLEL_TRANSFER_MODE_COUNT: i64 = 5
+val PARALLEL_TRANSFER_PAYLOAD_MAX: i64 = 6
+val PARALLEL_TRANSFER_PAYLOAD_COUNT: i64 = 7
+
+fn parallel_execution_domain_to_u8(value: ParallelExecutionDomain) -> i64:
+    match value:
+        case ParallelExecutionDomain.Parent: 0
+        case ParallelExecutionDomain.Thread: 1
+        case ParallelExecutionDomain.Process: 2
+        case ParallelExecutionDomain.Actor: 3
+        case ParallelExecutionDomain.Device: 4
+        case ParallelExecutionDomain.Remote: 5
+
+fn parallel_execution_domain_valid(value: i64) -> bool:
+    value >= 0 and value <= PARALLEL_DOMAIN_MAX
+
+fn parallel_transfer_mode_to_u8(value: ParallelTransferMode) -> i64:
+    match value:
+        case ParallelTransferMode.Copy: 0
+        case ParallelTransferMode.FrozenShare: 1
+        case ParallelTransferMode.OwnedMove: 2
+        case ParallelTransferMode.ScopedLoan: 3
+        case ParallelTransferMode.Lease: 4
+
+fn parallel_transfer_mode_valid(value: i64) -> bool:
+    value >= 0 and value <= PARALLEL_TRANSFER_MODE_MAX
+
+fn parallel_transfer_payload_to_u8(value: ParallelTransferPayload) -> i64:
+    match value:
+        case ParallelTransferPayload.InlineCopy: 0
+        case ParallelTransferPayload.FrozenRegion: 1
+        case ParallelTransferPayload.OwnedRegion: 2
+        case ParallelTransferPayload.EncodedCopy: 3
+        case ParallelTransferPayload.ObjectHandle: 4
+        case ParallelTransferPayload.SharedSync: 5
+        case ParallelTransferPayload.DeviceLease: 6
+
+fn parallel_transfer_payload_valid(value: i64) -> bool:
+    value >= 0 and value <= PARALLEL_TRANSFER_PAYLOAD_MAX
+
+fn parallel_transfer_payload_allows_raw_pointer() -> bool:
+    """Safe transfer has no raw-pointer payload variant. FFI may create a
+    separate admitted handle protocol, but cannot reinterpret pointer bits as
+    an envelope payload."""
+    false
+
+fn parallel_transfer_mode_consumes_source(mode: ParallelTransferMode) -> bool:
+    parallel_transfer_mode_to_u8(mode) == 2
+
+fn parallel_transfer_mode_is_scoped_loan(mode: ParallelTransferMode) -> bool:
+    parallel_transfer_mode_to_u8(mode) == 3
+
+struct TransferEnvelopeV1:
+    contract_version: i64
+    region_id: i64
+    generation: i64
+    source_domain: ParallelExecutionDomain
+    target_domain: ParallelExecutionDomain
+    mode: ParallelTransferMode
+    payload: ParallelTransferPayload
+    ownership_token: i64
+    source_invalidated: bool
+
+fn transfer_envelope_v1(region_id: i64, generation: i64,
+                        source_domain: ParallelExecutionDomain,
+                        target_domain: ParallelExecutionDomain,
+                        mode: ParallelTransferMode,
+                        payload: ParallelTransferPayload,
+                        ownership_token: i64,
+                        source_invalidated: bool) -> TransferEnvelopeV1:
+    TransferEnvelopeV1(contract_version: TRANSFER_SCHEMA_VERSION,
+                       region_id: region_id, generation: generation,
+                       source_domain: source_domain, target_domain: target_domain,
+                       mode: mode, payload: payload,
+                       ownership_token: ownership_token,
+                       source_invalidated: source_invalidated)
+
+fn transfer_envelope_v1_well_formed(value: TransferEnvelopeV1) -> bool:
+    if value.contract_version != TRANSFER_SCHEMA_VERSION:
+        return false
+    if value.region_id <= 0 or value.generation < 0:
+        return false
+    if parallel_transfer_mode_consumes_source(value.mode):
+        return (parallel_transfer_payload_to_u8(value.payload) == 2
+            and value.ownership_token > 0 and value.source_invalidated)
+    if value.ownership_token != 0 or value.source_invalidated:
+        return false
+    if parallel_transfer_mode_is_scoped_loan(value.mode):
+        return (parallel_transfer_payload_to_u8(value.payload) == 4
+            and parallel_execution_domain_to_u8(value.target_domain) == 1)
+    true
+
+fn transfer_envelope_v1_boundary_allowed(value: TransferEnvelopeV1) -> bool:
+    """Boundary policy independent of runtime implementation. In particular a
+    process boundary admits encoded or revisioned immutable material only; an
+    ordinary owned in-memory region cannot be made portable by copying bits."""
+    if not transfer_envelope_v1_well_formed(value):
+        return false
+    val source = parallel_execution_domain_to_u8(value.source_domain)
+    val target = parallel_execution_domain_to_u8(value.target_domain)
+    val mode = parallel_transfer_mode_to_u8(value.mode)
+    val payload = parallel_transfer_payload_to_u8(value.payload)
+    if source == target:
+        return false
+    if target == 2 or target == 5:
+        return payload == 3 or payload == 4
+    if target == 4:
+        return mode == 4 and payload == 6
+    if mode == 1:
+        return payload == 1 or payload == 4
+    if mode == 0:
+        return payload == 0 or payload == 3
+    if mode == 2:
+        return payload == 2 and target != 2 and target != 4 and target != 5
+    if mode == 3:
+        return target == 1 and payload == 4
+    false

@@ -1,0 +1,316 @@
+# Trait Desugar Pass
+#
+# Source-level text transformation that rewrites trait declarations
+# into struct-with-fn-fields before parsing.
+#
+# Transformations:
+#   trait Name:            -> struct Name:
+#   fn method(p: T) -> R  -> method_fn: fn(T) -> R
+#   me method(p: T)       -> method_fn: fn(T)
+#   impl TraitName for X: -> fn X_as_TraitName() -> TraitName:
+#   trait G with A, B:    -> struct G: <A's fn-fields><B's fn-fields>
+#                            + fn G__from(src: C) -> Option<G>
+
+use app.desugar.trait_scanner (scan_traits, parse_trait_group_members, ScannedTrait)
+
+fn desugar_traits(source: text) -> text:
+    """Transform trait declarations into struct-with-fn-fields.
+
+    This is a source-level text rewrite pass. It processes line-by-line,
+    converting trait syntax into struct syntax that the parser understands.
+    """
+    var result = ""
+    var in_trait = false
+    var lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("trait ") and trimmed.ends_with(":"):
+            val group_members = parse_trait_group_members(trimmed)
+            if group_members.len() > 0:
+                # Group trait: `trait G with A, B:` desugars to a struct whose
+                # fields are the CONCATENATION of the members' fn-fields.
+                val gname = _group_name(trimmed)
+                val gindent = _get_indent(line)
+                result = result + gindent + "struct {gname}:" + "\n"
+                var gi = 0
+                while gi < group_members.len():
+                    val mfields = _collect_trait_field_lines(source, group_members[gi])
+                    var fi = 0
+                    while fi < mfields.len():
+                        result = result + gindent + "    " + mfields[fi] + "\n"
+                        fi = fi + 1
+                    gi = gi + 1
+            else:
+                # Convert trait header to struct header
+                result = result + line.replace("trait ", "struct ") + "\n"
+            in_trait = true
+        elif in_trait and trimmed == "":
+            # Empty line ends trait block
+            in_trait = false
+            result = result + line + "\n"
+        elif in_trait and (trimmed.starts_with("fn ") or trimmed.starts_with("me ")):
+            # Convert method to fn-field
+            val indent = _get_indent(line)
+            val field = _method_to_fn_field(trimmed)
+            result = result + indent + field + "\n"
+        else:
+            if in_trait and not trimmed.starts_with("#") and not trimmed.starts_with("\"\"\"") and trimmed.len() > 0:
+                val first_char = trimmed.substring(0, 1)
+                if first_char != " " and first_char != "\t":
+                    in_trait = false
+            result = result + line + "\n"
+        i = i + 1
+    # Append generated `.from()` acquisition statics for every group trait.
+    result = result + _gen_group_froms(source)
+
+    # Remove trailing newline added by loop
+    if result.ends_with("\n"):
+        result = result.substring(0, result.len() - 1)
+    return result
+
+fn _group_name(trimmed: text) -> text:
+    """Group-trait name: the part between `trait ` and ` with `."""
+    val rest = trimmed.substring(6, trimmed.len() - 1)
+    val n = rest.len()
+    var i = 0
+    while i + 6 <= n:
+        if rest.substring(i, i + 6) == " with ":
+            return rest.substring(0, i).trim()
+        i = i + 1
+    return rest.trim()
+
+fn _collect_trait_field_lines(source: text, trait_name: text) -> [text]:
+    """Return the fn-field declarations a member trait desugars to.
+
+    Reads the member trait's body straight out of the source text so parameter
+    TYPES survive (the scanner records only parameter names).
+    """
+    var out = []
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        var is_header = false
+        if trimmed.starts_with("trait ") and trimmed.ends_with(":"):
+            val hname = _group_name(trimmed)
+            if hname == trait_name:
+                is_header = true
+        if is_header:
+            val hindent = _get_indent(lines[i]).len()
+            var j = i + 1
+            while j < lines.len():
+                val bt = lines[j].trim()
+                if bt == "":
+                    j = j + 1
+                    continue
+                if _get_indent(lines[j]).len() <= hindent:
+                    break
+                if bt.starts_with("fn ") or bt.starts_with("me "):
+                    out = out.push(_method_to_fn_field(bt))
+                j = j + 1
+            return out
+        i = i + 1
+    return out
+
+fn _gen_group_froms(source: text) -> text:
+    """Generate `G__from(src) -> Option<G>` for every group trait in source.
+
+    Shape (design §3 CORRECTION 2026-08-09): a group is ONE trait over ONE
+    value. Classes are VALUE types (`val b = a` copies), so a group built by
+    PAIRING per-member accessors (`src.debug()` + `src.profile()`) would hold
+    two DIVERGING copies of the same target -- stepping the debug half leaves
+    the profile half at zero. See
+    `doc/08_tracking/bug/capability_group_from_unsound_under_value_semantics_2026-08-09.md`.
+
+    So `.from()` is generated as:
+
+        capability check   -- every member's `Option<M>` accessor must acquire
+        single acquisition -- the group comes from ONE `Option<G>` accessor
+
+    Accessor-matching rule: the source type must declare an accessor returning
+    `Option<M>` for every member `M`, AND one returning `Option<G>` for the
+    group itself. A missing accessor is a COMPILE ERROR naming it, and
+    `.from()` is NOT generated.
+    """
+    var out = ""
+    val scanned = scan_traits(source)
+    var gi = 0
+    while gi < scanned.len():
+        val g = scanned[gi]
+        if g.group_members.len() == 0:
+            gi = gi + 1
+            continue
+
+        # Locate the source trait that carries accessors for ALL members.
+        val src_trait = _find_accessor_source(scanned, g.group_members)
+        if src_trait == "":
+            # Name the FIRST member that no trait can supply.
+            var mi = 0
+            while mi < g.group_members.len():
+                val m = g.group_members[mi]
+                if _find_accessor_in_any(scanned, m) == "":
+                    print "error: trait group {g.name}: no accessor returning Option<{m}> is declared; cannot generate {g.name}.from()"
+                mi = mi + 1
+            gi = gi + 1
+            continue
+
+        val st = _find_scanned(scanned, src_trait)
+
+        # The group must ALSO be reachable as one value: a single accessor
+        # returning `Option<G>`. Without it there is no sound acquisition --
+        # pairing the member accessors is the defect this rejects.
+        val gacc = _accessor_name(st, g.name)
+        if gacc == "":
+            print "error: trait group {g.name}: no accessor returning Option<{g.name}> is declared on {src_trait}; a group must be acquired from a SINGLE value (classes are value types), so {g.name}.from() cannot be generated"
+            gi = gi + 1
+            continue
+
+        # Capability check: every member must acquire, all-or-nothing. The
+        # acquired member values are checks ONLY -- they are deliberately not
+        # used to build the group, because each is an independent COPY.
+        var body = ""
+        var indent = "    "
+        var k = 0
+        while k < g.group_members.len():
+            val m = g.group_members[k]
+            val acc = _accessor_name(st, m)
+            # `_fn` suffix: the accessor is a fn-FIELD after desugaring, not a
+            # method. `src.{acc}()` does not compile ("method not found").
+            body = body + indent + "val __o{k} = src.{acc}_fn()\n"
+            body = body + indent + "if val __cap{k} = __o{k}:\n"
+            indent = indent + "    "
+            k = k + 1
+
+        # Single-value acquisition: the group comes from ONE accessor, so both
+        # capabilities live on the SAME value and cannot diverge.
+        body = body + indent + "return src.{gacc}_fn()\n"
+        out = out + "\nfn {g.name}__from(src: {src_trait}) -> Option<{g.name}>:\n"
+        out = out + body
+        out = out + "    nil\n"
+        gi = gi + 1
+    return out
+
+fn _find_scanned(scanned: [ScannedTrait], name: text) -> ScannedTrait:
+    var i = 0
+    while i < scanned.len():
+        if scanned[i].name == name:
+            return scanned[i]
+        i = i + 1
+    return ScannedTrait(name: "", methods: [], is_interface: false, group_members: [])
+
+fn _accessor_name(st: ScannedTrait, member: text) -> text:
+    """Name of `st`'s method whose return type is exactly `Option<member>`."""
+    val want = "Option<{member}>"
+    var i = 0
+    while i < st.methods.len():
+        if st.methods[i].ret_type == want:
+            return st.methods[i].name
+        i = i + 1
+    return ""
+
+fn _find_accessor_source(scanned: [ScannedTrait], members: [text]) -> text:
+    """First trait declaring an `Option<M>` accessor for EVERY member M."""
+    var i = 0
+    while i < scanned.len():
+        val st = scanned[i]
+        var all = true
+        var k = 0
+        while k < members.len():
+            if _accessor_name(st, members[k]) == "":
+                all = false
+            k = k + 1
+        if all and members.len() > 0:
+            return st.name
+        i = i + 1
+    return ""
+
+fn _find_accessor_in_any(scanned: [ScannedTrait], member: text) -> text:
+    var i = 0
+    while i < scanned.len():
+        val a = _accessor_name(scanned[i], member)
+        if a != "":
+            return a
+        i = i + 1
+    return ""
+
+fn _get_indent(line: text) -> text:
+    """Extract leading whitespace from a line."""
+    var indent = ""
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if ch == " " or ch == "\t":
+            indent = indent + ch
+        else:
+            return indent
+        i = i + 1
+    return indent
+
+fn _method_to_fn_field(trimmed: text) -> text:
+    """Convert a method signature to a fn-field declaration.
+
+    Input:  fn method(p: T) -> R
+    Output: method_fn: fn(T) -> R
+
+    Input:  me method(p: T)
+    Output: method_fn: fn(T)
+    """
+    var sig = trimmed
+    # Strip leading fn/me keyword
+    if sig.starts_with("fn "):
+        sig = sig.substring(3, sig.len())
+    elif sig.starts_with("me "):
+        sig = sig.substring(3, sig.len())
+
+    # Extract method name (everything before '(')
+    val paren_idx = sig.index_of("(")
+    if val idx = paren_idx:
+        val method_name = sig.substring(0, idx)
+        val rest = sig.substring(idx, sig.len())
+
+        # Extract params and return type
+        val close_paren = rest.index_of(")")
+        if val cp = close_paren:
+            val params_str = rest.substring(1, cp)
+            val after_paren = rest.substring(cp + 1, rest.len()).trim()
+
+            # Extract just the types from params (strip names)
+            val types_str = _extract_param_types(params_str)
+
+            var field_type = "fn({types_str})"
+            if after_paren.starts_with("-> "):
+                val ret_type = after_paren.substring(3, after_paren.len())
+                # Strip trailing colon if present
+                var clean_ret = ret_type.trim()
+                if clean_ret.ends_with(":"):
+                    clean_ret = clean_ret.substring(0, clean_ret.len() - 1).trim()
+                field_type = "fn({types_str}) -> {clean_ret}"
+
+            return "{method_name}_fn: {field_type}"
+    # Fallback: return as-is if parsing fails
+    return sig
+
+fn _extract_param_types(params_str: text) -> text:
+    """Extract just the types from a parameter list.
+
+    Input:  'id: text, count: i64'
+    Output: 'text, i64'
+    """
+    if params_str.trim().len() == 0:
+        return ""
+    val params = params_str.split(",")
+    var types = []
+    var i = 0
+    while i < params.len():
+        val param = params[i].trim()
+        val colon_idx = param.index_of(":")
+        if val ci = colon_idx:
+            val type_part = param.substring(ci + 1, param.len()).trim()
+            types = types.push(type_part)
+        else:
+            # No colon — treat whole thing as a type
+            types = types.push(param)
+        i = i + 1
+    return types.join(", ")

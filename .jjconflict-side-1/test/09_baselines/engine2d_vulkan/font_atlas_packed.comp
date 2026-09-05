@@ -1,0 +1,29 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(std430, binding = 0) readonly buffer AtlasBuffer { uint atlas[]; };
+layout(std430, binding = 1) buffer DestinationBuffer { uint dst[]; };
+layout(std430, binding = 2) readonly buffer ParamsBuffer { uint words[]; } p;
+void main() {
+    uint pixel = gl_GlobalInvocationID.x, glyph = gl_GlobalInvocationID.y;
+    if (p.words.length() < 8u || glyph >= p.words[6]) return;
+    uint base = 8u + glyph * 7u;
+    if (base + 6u >= p.words.length()) return;
+    uint aw=p.words[0], ah=p.words[1], ac=p.words[2];
+    uint dw=p.words[3], dh=p.words[4], dc=p.words[5];
+    uint ax=p.words[base], ay=p.words[base+1u];
+    uint qw=p.words[base+2u], qh=p.words[base+3u];
+    int dx0=int(p.words[base+4u]), dy0=int(p.words[base+5u]);
+    uint color=p.words[base+6u], count=qw*qh;
+    if (pixel >= count || aw*ah != ac || dw*dh != dc) return;
+    uint lx=pixel%qw, ly=pixel/qw, si=(ay+ly)*aw+ax+lx;
+    int dx=dx0+int(lx), dy=dy0+int(ly);
+    if (si>=ac || dx<0 || dy<0 || dx>=int(dw) || dy>=int(dh)) return;
+    uint di=uint(dy)*dw+uint(dx);
+    uint sa=((atlas[si]>>24u)*(color>>24u)+127u)/255u;
+    if(sa==0u)return;
+    uint d=dst[di],da=d>>24u,dwgt=da*(255u-sa)/255u,oa=sa+dwgt;
+    uint r=(((color>>16u)&255u)*sa+((d>>16u)&255u)*dwgt)/oa;
+    uint g=(((color>>8u)&255u)*sa+((d>>8u)&255u)*dwgt)/oa;
+    uint b=((color&255u)*sa+(d&255u)*dwgt)/oa;
+    dst[di]=(oa<<24u)|(r<<16u)|(g<<8u)|b;
+}

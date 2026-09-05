@@ -1,0 +1,286 @@
+#!/bin/sh
+# Produce measured C/Pure-Simple FSBL fail-closed coverage evidence.
+# A provenance-validated full Stage-4 CLI is mandatory; there is no seed fallback.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple=${SIMPLE_BINARY:-}
+out=${COSMOS_FSBL_COVERAGE_OUT:-build/evidence/cosmos-fsbl-fail-closed}
+
+usage() {
+    echo "usage: SIMPLE_BINARY=<stage4-simple> $0 [--out <repo-relative-dir>]" >&2
+    exit 64
+}
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --out) [ "$#" -ge 2 ] || usage; out=$2; shift 2 ;;
+        *) usage ;;
+    esac
+done
+case "$out" in ''|/*|../*|*'/../'*|*'//'*) usage ;; esac
+
+fail() {
+    echo "STATUS: FAIL cosmos-fsbl-fail-closed-coverage reason=$1" >&2
+    exit 1
+}
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+semantic_c_hash() {
+    [ "$(grep -c '^#include "cosmos_hal.h"$' "$1")" -eq 1 ] || return 1
+    sed -n '/^#include "cosmos_hal.h"$/,$p' "$1" | sha256sum | awk '{print $1}'
+}
+require_exact_line() {
+    grep -Fxq "$2" "$1" || fail "source-contract-mismatch:$3"
+}
+
+[ -n "$simple" ] || fail stage4-cli-not-specified
+[ -x "$simple" ] || fail stage4-cli-absent-or-not-executable
+case "$simple" in *compiler_rust*|*'/bootstrap/'*) fail rust-seed-forbidden ;; esac
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+simple=$(bootstrap_stage3_canonical_file "$simple") || fail stage4-cli-not-canonical
+provenance="${simple}.provenance.env"
+stage4_verify_candidate_provenance "$provenance" "$simple" "$root" ||
+    fail stage4-provenance-invalid
+
+fixture="$root/test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv"
+c_source="$root/test/fixtures/os/cosmos/cosmos_fsbl_oracle.c"
+production_c_source="$root/src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c"
+simple_source="$root/src/os/kernel/arch/arm32/cosmos/cosmos_fsbl_decision.spl"
+simple_candidate="$root/src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl"
+spec="$root/test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl"
+c_harness="$root/test/02_integration/os/cosmos/cosmos_hal_mmio_test.c"
+producer="$root/scripts/check/produce-cosmos-fsbl-fail-closed-coverage.shs"
+[ -s "$fixture" ] || fail vector-fixture-absent
+[ -s "$c_source" ] || fail c-oracle-absent
+[ -s "$production_c_source" ] || fail production-c-source-absent
+[ -s "$simple_candidate" ] || fail simple-candidate-absent
+c_oracle_semantic_sha=$(semantic_c_hash "$c_source") || fail c-oracle-extraction-invalid
+production_c_semantic_sha=$(semantic_c_hash "$production_c_source") ||
+    fail production-c-extraction-invalid
+[ "$c_oracle_semantic_sha" = "$production_c_semantic_sha" ] ||
+    fail c-oracle-production-drift
+
+hal_header="$root/src/os/kernel/arch/arm32/cosmos/cosmos_hal.h"
+zynq_header="$root/src/os/kernel/arch/arm32/cosmos/cosmos_zynq_regs.h"
+require_exact_line "$simple_candidate" 'val COSMOS_OK: i32 = 0' simple-status-ok
+require_exact_line "$simple_candidate" 'val COSMOS_UNAVAILABLE: i32 = 1' simple-status-unavailable
+require_exact_line "$simple_candidate" 'val COSMOS_INVALID: i32 = 2' simple-status-invalid
+require_exact_line "$simple_candidate" 'val COSMOS_HW_ERROR: i32 = 4' simple-status-hw-error
+require_exact_line "$hal_header" '    COSMOS_OK = 0,' c-status-ok
+require_exact_line "$hal_header" '    COSMOS_UNAVAILABLE = 1,' c-status-unavailable
+require_exact_line "$hal_header" '    COSMOS_INVALID = 2,' c-status-invalid
+require_exact_line "$hal_header" '    COSMOS_HW_ERROR = 4,' c-status-hw-error
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_BASE: u32 = 0xf8000000u32' simple-slcr-base
+require_exact_line "$simple_candidate" 'val COSMOS_DEVCFG_BASE: u32 = 0xf8007000u32' simple-devcfg-base
+require_exact_line "$hal_header" '#define COSMOS_SLCR_BASE      0xF8000000U' c-slcr-base
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_DEVCFG_BASE            0xF8007000U' c-devcfg-base
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_LOCKSTA_OFFSET: u32 = 0x000cu32' simple-locksta-offset
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_ARM_CLK_OFFSET: u32 = 0x0120u32' simple-arm-clk-offset
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_DDR_CLK_OFFSET: u32 = 0x0124u32' simple-ddr-clk-offset
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_PSS_RST_OFFSET: u32 = 0x0200u32' simple-pss-rst-offset
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_A9_RST_OFFSET: u32 = 0x0244u32' simple-a9-rst-offset
+require_exact_line "$simple_candidate" 'val COSMOS_DEVCFG_INT_STS_OFFSET: u32 = 0x000cu32' simple-devcfg-int-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_LOCKSTA_OFFSET     0x000CU' c-locksta-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_ARM_CLK_OFFSET     0x0120U' c-arm-clk-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_DDR_CLK_OFFSET     0x0124U' c-ddr-clk-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_PSS_RST_OFFSET     0x0200U' c-pss-rst-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_A9_RST_OFFSET      0x0244U' c-a9-rst-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_DEVCFG_INT_STS_OFFSET  0x000CU' c-devcfg-int-offset
+require_exact_line "$simple_source" 'val COSMOS_FSBL_SLCR_LOCKED: u32 = 1u32' simple-lock-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_ARM_CLK_ACTIVE: u32 = 0x1f000000u32' simple-arm-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_DDR_CLK_ACTIVE: u32 = 3u32' simple-ddr-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_PSS_PRIMARY_RESET: u32 = 1u32' simple-pss-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_A9_CPU0_STOPPED: u32 = 0x111u32' simple-a9-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_PCFG_DONE: u32 = 4u32' simple-pcfg-mask
+require_exact_line "$production_c_source" '#define COSMOS_SLCR_LOCKED    (1U << 0)' c-lock-mask
+require_exact_line "$production_c_source" '#define COSMOS_ARM_CLK_ACTIVE (0x1FU << 24)' c-arm-mask
+require_exact_line "$production_c_source" '#define COSMOS_DDR_CLK_ACTIVE ((1U << 0) | (1U << 1))' c-ddr-mask
+require_exact_line "$production_c_source" '#define COSMOS_PSS_PRIMARY_RESET (1U << 0)' c-pss-mask
+require_exact_line "$production_c_source" '#define COSMOS_A9_CPU0_STOPPED ((1U << 0) | (1U << 4) | (1U << 8))' c-a9-mask
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_DEVCFG_PCFG_DONE       (1U << 2)' c-pcfg-mask
+awk -F '\t' '
+    BEGIN {
+        expected[1]="1\t520093696\t3\t0\t0\t4\t1"
+        expected[2]="0\t520093696\t3\t0\t0\t4\t0"
+        expected[3]="1\t503316480\t3\t0\t0\t4\t0"
+        expected[4]="1\t520093696\t2\t0\t0\t4\t0"
+        expected[5]="1\t520093696\t3\t1\t0\t4\t0"
+        expected[6]="1\t520093696\t3\t0\t1\t4\t0"
+        expected[7]="1\t520093696\t3\t0\t0\t0\t0"
+    }
+    NF != 7 || $0 != expected[NR] { exit 1 }
+    END { if (NR != 7) exit 1 }
+' "$fixture" || fail vector-fixture-not-canonical
+
+case "$out" in build/*) : ;; *) fail output-must-be-under-build ;; esac
+out_abs="$root/$out"
+staging="${out_abs}.tmp.$$"
+trap 'rm -rf "$staging"' EXIT HUP INT TERM
+rm -rf "$staging"
+mkdir -p "$staging/c" "$staging/simple"
+
+cflags="-std=c11 -O0 -g --coverage -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2 -Wno-int-to-pointer-cast -DCOSMOS_SILICON=1 -DCOSMOS_MMIO_TEST=1 -DCOSMOS_POLL_LIMIT=16U -DCOSMOS_NFC_POLL_LIMIT=16U"
+cc_command=$(command -v cc) || fail c-compiler-absent
+cc_path=$(readlink -f "$cc_command") || fail c-compiler-not-canonical
+[ -x "$cc_path" ] || fail c-compiler-not-executable
+cc --version >"$staging/c/compiler.version" 2>&1 || fail c-compiler-version-unavailable
+[ -s "$staging/c/compiler.version" ] || fail c-compiler-version-empty
+profile="$root/src/os/kernel/arch/arm32/cosmos/cosmos_profile_openssd2_8ch8way_v300.h"
+include="$root/src/os/kernel/arch/arm32/cosmos"
+cc $cflags -include "$profile" -I"$include" -c \
+    "$root/test/02_integration/os/cosmos/cosmos_hal_mmio_test.c" \
+    -o "$staging/c/harness.o"
+cc $cflags -include "$profile" -I"$include" -c "$c_source" \
+    -o "$staging/c/cosmos_fsbl_oracle.o"
+for unit in cosmos_nfc cosmos_pcie; do
+    cc $cflags -include "$profile" -I"$include" -c "$include/$unit.c" \
+        -o "$staging/c/$unit.o"
+done
+cc --coverage "$staging/c/harness.o" "$staging/c/cosmos_fsbl_oracle.o" \
+    "$staging/c/cosmos_nfc.o" "$staging/c/cosmos_pcie.o" \
+    -o "$staging/c/cosmos_hal_mmio_test"
+COSMOS_FSBL_VECTOR_TSV="$fixture" "$staging/c/cosmos_hal_mmio_test" 0 \
+    >"$staging/c/run.log" 2>&1 || fail c-fsbl-run-failed
+grep -Fq 'STATUS: PASS cosmos host mock-MMIO integration' "$staging/c/run.log" ||
+    fail c-pass-output-absent
+(cd "$staging/c" && gcov -b -c -o . "$c_source") \
+    >"$staging/c/gcov.log" 2>&1 || fail c-gcov-failed
+c_gcov="$staging/c/cosmos_fsbl_oracle.c.gcov"
+[ -s "$c_gcov" ] || fail c-gcov-output-absent
+
+start=$(grep -n '^static int cosmos_fsbl_handoff_valid' "$c_source" | cut -d: -f1)
+end=$(awk -v start="$start" 'NR > start && /^}/ { print NR; exit }' "$c_source")
+set -- $(awk -v start="$start" -v end="$end" '
+    /^[[:space:]]*[0-9#=-]+:[[:space:]]*[0-9]+:/ {
+        split($0, fields, ":"); line = fields[2] + 0
+    }
+    /^[[:space:]]*branch [0-9]+/ && line >= start && line <= end {
+        total++
+        if ($0 !~ /taken 0|never executed/) covered++
+    }
+    END { print total + 0, covered + 0 }
+' "$c_gcov")
+c_total=$1
+c_covered=$2
+[ "$c_total" -eq 12 ] || fail c-core-branch-denominator-not-12
+[ "$c_covered" -eq 12 ] || fail c-core-branches-not-fully-covered
+
+simple_raw="$staging/simple/coverage.sdn"
+SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT="$simple_raw" SIMPLE_MODULE_LIMIT=4000 \
+    "$simple" test "$spec" --coverage --no-cache \
+    >"$staging/simple/run.log" 2>&1 || fail simple-coverage-run-failed
+[ -s "$simple_raw" ] || fail simple-coverage-output-absent
+grep -Fxq 'STATUS: PASS cosmos-fsbl-simple-decision-parity' \
+    "$staging/simple/run.log" || fail simple-specific-pass-verdict-absent
+
+simple_start=$(grep -n '^pub fn cosmos_fsbl_handoff_valid_registers(' "$simple_source" | cut -d: -f1)
+simple_end=$(wc -l < "$simple_source" | tr -d ' ')
+simple_lines=$(awk -v start="$simple_start" -v end="$simple_end" \
+    'NR >= start && NR <= end && /^[[:space:]]*if / { if (out != "") out=out ","; out=out NR } END { print out }' \
+    "$simple_source")
+[ "$simple_lines" = 18,20,22,24,26,28 ] || fail simple-core-lines-unexpected
+set -- $(awk -F', *' -v root="$root/" -v owner="src/os/kernel/arch/arm32/cosmos/cosmos_fsbl_decision.spl" \
+    -v start="$simple_start" -v end="$simple_end" -v expected="$simple_lines" '
+    BEGIN { n=split(expected, lines, ","); for (i=1; i<=n; i++) wanted[lines[i]]=1 }
+    /^decisions \|id, file, line, column, true_count, false_count\|$/ { section="decisions"; next }
+    /^conditions \|decision_id, condition_id, file, line, column, true_count, false_count\|$/ { section="conditions"; next }
+    /^[^[:space:]]/ { if ($0 !~ /^(decisions|conditions) \|/) section="" }
+    section=="decisions" && /cosmos_fsbl_decision\.spl/ && NF!=6 { bad=1 }
+    section=="decisions" && NF==6 {
+        file=$2; sub(/^[[:space:]]+|[[:space:]]+$/, "", file); if (index(file,root)==1) file=substr(file,length(root)+1)
+        line=$3+0
+        if (file==owner && line>=start && line<=end) {
+            if (!wanted[line] || ++decision_line[line]!=1 || seen_decision[$1]++) bad=1
+            if (($5+0)<=0 || ($6+0)<=0) bad=1
+            decision_id[$1]=line; decisions++
+        }
+    }
+    section=="conditions" && /cosmos_fsbl_decision\.spl/ && NF!=7 { bad=1 }
+    section=="conditions" && NF==7 {
+        file=$3; sub(/^[[:space:]]+|[[:space:]]+$/, "", file); if (index(file,root)==1) file=substr(file,length(root)+1)
+        line=$4+0
+        if (file==owner && line>=start && line<=end) {
+            key=$1 SUBSEP $2
+            if (!wanted[line] || ++condition_line[line]!=1 || seen_condition[key]++) bad=1
+            if (($6+0)<=0 || ($7+0)<=0) bad=1
+            condition_decision[$1]=line; conditions++
+        }
+    }
+    END {
+        for (line in wanted) if (decision_line[line]!=1 || condition_line[line]!=1) bad=1
+        for (id in condition_decision) if (!(id in decision_id) || condition_decision[id]!=decision_id[id]) bad=1
+        if (bad || decisions!=6 || conditions!=6) exit 1
+        print decisions, conditions
+    }
+' "$simple_raw") || fail simple-core-coverage-structure-invalid
+simple_decisions=$1
+simple_conditions=$2
+
+mkdir -p "$(dirname -- "$out_abs")"
+rm -rf "$out_abs"
+mv "$staging" "$out_abs"
+trap - EXIT HUP INT TERM
+receipt="$out_abs/receipt.env"
+{
+    echo schema=cosmos-fsbl-fail-closed-coverage-v2
+    echo status=pass
+    echo measurement_status=measured
+    echo fixture_path=test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv
+    echo fixture_sha256=$(hash_file "$fixture")
+    echo vector_count=7
+    echo isolated_fail_closed_vectors=6
+    echo c_source_path=test/fixtures/os/cosmos/cosmos_fsbl_oracle.c
+    echo c_source_sha256=$(hash_file "$c_source")
+    echo c_oracle_semantic_sha256=$c_oracle_semantic_sha
+    echo production_c_source_path=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c
+    echo production_c_source_sha256=$(hash_file "$production_c_source")
+    echo c_harness_path=test/02_integration/os/cosmos/cosmos_hal_mmio_test.c
+    echo c_harness_sha256=$(hash_file "$c_harness")
+    echo c_hal_header_path=src/os/kernel/arch/arm32/cosmos/cosmos_hal.h
+    echo c_hal_header_sha256=$(hash_file "$hal_header")
+    echo c_zynq_header_path=src/os/kernel/arch/arm32/cosmos/cosmos_zynq_regs.h
+    echo c_zynq_header_sha256=$(hash_file "$zynq_header")
+    echo c_profile_header_path=src/os/kernel/arch/arm32/cosmos/cosmos_profile_openssd2_8ch8way_v300.h
+    echo c_profile_header_sha256=$(hash_file "$profile")
+    echo c_run_log_path=$out/c/run.log
+    echo c_run_log_sha256=$(hash_file "$out_abs/c/run.log")
+    echo c_compiler_path=$cc_path
+    echo c_compiler_sha256=$(hash_file "$cc_path")
+    echo c_compiler_version_path=$out/c/compiler.version
+    echo c_compiler_version_sha256=$(hash_file "$out_abs/c/compiler.version")
+    echo c_compiler_flags=$cflags
+    echo c_gcov_path=$out/c/cosmos_fsbl_oracle.c.gcov
+    echo c_gcov_sha256=$(hash_file "$out_abs/c/cosmos_fsbl_oracle.c.gcov")
+    echo c_core_branch_arcs_total=$c_total
+    echo c_core_branch_arcs_covered=$c_covered
+    echo simple_source_path=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl_decision.spl
+    echo simple_source_sha256=$(hash_file "$simple_source")
+    echo simple_candidate_path=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl
+    echo simple_candidate_sha256=$(hash_file "$simple_candidate")
+    echo simple_core_lines=$simple_lines
+    echo simple_spec_path=test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl
+    echo simple_spec_sha256=$(hash_file "$spec")
+    echo simple_run_log_path=$out/simple/run.log
+    echo simple_run_log_sha256=$(hash_file "$out_abs/simple/run.log")
+    echo simple_coverage_path=$out/simple/coverage.sdn
+    echo simple_coverage_sha256=$(hash_file "$out_abs/simple/coverage.sdn")
+    echo simple_decision_rows_total=$simple_decisions
+    echo simple_decision_rows_dual_outcome=$simple_decisions
+    echo simple_condition_rows_total=$simple_conditions
+    echo simple_condition_rows_dual_outcome=$simple_conditions
+    echo producer_path=scripts/check/produce-cosmos-fsbl-fail-closed-coverage.shs
+    echo producer_sha256=$(hash_file "$producer")
+    echo stage4_binary_path=$simple
+    echo stage4_binary_sha256=$(hash_file "$simple")
+    echo stage4_provenance_path=$provenance
+    echo stage4_provenance_sha256=$(hash_file "$provenance")
+    echo fallback_used=false
+    echo production_instrumentation=false
+} >"$receipt"
+
+echo "coverage_receipt=$out/receipt.env"
+echo "STATUS: PASS cosmos-fsbl-fail-closed-coverage"

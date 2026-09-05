@@ -1,0 +1,396 @@
+# vulkan_jit lane executor (Task C2).
+#
+# Design: doc/05_design/runtime/gpu_remote_interpreter_architecture.md
+# §6.1 (jit(remote(vulkan(...))) dispatch shape), §6.3 (step-budget must be
+# threaded through emitted loops), §3.1 (GMB-1 arena layout / RECORD
+# sentinel format).
+#
+# Depends on:
+#   - A3 (src/lib/nogc_sync_mut/test_runner/gpu_lane_common.spl) for the
+#     GpuLaneExecutor shape this class follows (prepare/run_program/
+#     teardown -- structural, no explicit `impl X for Y:` here, matching
+#     B2's landed cuda_jit_lane_executor.spl).
+#   - C1 (src/lib/gc_async_mut/gpu_lane/vulkan_lane_session.spl) for the
+#     Vulkan device/arena/dispatch/fence session shell this dispatches
+#     through.
+#   - A2 (src/lib/nogc_sync_mut/test_runner/gpu_mailbox.spl) for the GMB-1
+#     arena layout constants and RECORD/sentinel encode-decode helpers --
+#     reused here, not redeclared.
+#
+# SPIR-V emission reuses the existing compiler backend emitter,
+# `compiler.backend.vulkan.spirv_builder.SpirvBuilder` (fix-forward, no
+# fork -- see design §6.1 step 1). `SpirvBuilder`'s high-level `emit_*`
+# helpers always self-allocate a fresh SPIR-V ID, which is fine for
+# function-body instructions (each ID is consumed immediately after
+# allocation) but NOT for the handful of module-scope IDs that a
+# `DescriptorSet`/`Binding`/`ArrayStride` decoration must reference --
+# SPIR-V's logical layout requires the Annotations section to precede the
+# Types/variables/constants section that declares those IDs (Core Spec
+# §2.4), so those specific IDs are reserved via `alloc_id()` up front and
+# their `OpDecorate`/`OpType*`/`OpVariable` text is written directly via
+# `emit()`. This is still "the existing emitter" -- `alloc_id`/`id_str`/
+# `emit`/`build` are its primitives -- not a parallel emitter.
+
+mod std.gc_async_mut.gpu_lane.vulkan_jit_lane_executor
+
+use std.test_runner.gpu_lane_common.{GpuLaneExecutor}
+use std.gc_async_mut.gpu_lane.vulkan_lane_session.{
+    VulkanLaneSession, VULKAN_LANE_OK_SENTINEL}
+use std.nogc_sync_mut.test_runner.gpu_mailbox.{
+    MailboxArena, ARENA_SIZE, OFF_RAM_SENTINEL, OFF_LOG_DATA,
+    decode_sentinel, sentinel_exit_code, SentinelState,
+    drain_records, ResultRecord}
+use compiler.backend.vulkan.spirv_builder.{SpirvBuilder}
+use std.io_runtime.{shell, file_write, file_read_bytes}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+# =========================================================================
+# spirv-as / spirv-val host tool probing (host-aware optional, per task
+# instructions: run spirv-val "IF the tool is present on the host").
+# =========================================================================
+
+fn spirv_tool_present(tool: text) -> bool:
+    """True when `tool` (spirv-as / spirv-val) is on PATH."""
+    val result = shell("command -v {tool} >/dev/null 2>&1")
+    result.exit_code == 0
+
+# =========================================================================
+# Assembly -> binary (spirv-as is mandatory: without it there is no way to
+# turn the emitted assembly text into the binary module the Vulkan session
+# consumes, so its absence is a real FAIL, not a host-aware skip).
+# =========================================================================
+
+fn assemble_spirv_text(asm_text: text, work_id: text) -> Result<[u8], text>:
+    """Assemble SPIR-V assembly text to a binary module via `spirv-as`."""
+    if not spirv_tool_present("spirv-as"):
+        return Err("vulkan-jit-spirv-as-not-found")
+    val asm_path = "build/tmp/gpu_lane_vulkan_jit_{work_id}.spvasm"
+    val bin_path = spirv_bin_path_for(work_id)
+    if not file_write(asm_path, asm_text):
+        return Err("vulkan-jit-spirv-asm-write-failed")
+    val (stdout, stderr, exit_code) = process_run_bounded(
+        "spirv-as", [asm_path, "-o", bin_path], 30000, 65536)
+    if exit_code != 0:
+        return Err("vulkan-jit-spirv-as-failed: {stdout}{stderr}")
+    val binary = file_read_bytes(bin_path)
+    if binary.len() < 4:
+        return Err("vulkan-jit-spirv-as-empty-output")
+    Ok(binary)
+
+fn spirv_bin_path_for(work_id: text) -> text:
+    "build/tmp/gpu_lane_vulkan_jit_" + work_id + ".spv"
+
+fn validate_spirv_binary(bin_path_hint: text) -> text:
+    """Run `spirv-val` on the assembled module at `bin_path_hint` when the
+    tool is present on the host; "" means clean-or-skipped, non-"" is a
+    real validation failure. Host-aware optional per design/task: absence
+    of the tool is NOT a failure."""
+    if not spirv_tool_present("spirv-val"):
+        return ""
+    val (stdout, stderr, exit_code) = process_run_bounded(
+        "spirv-val", [bin_path_hint], 30000, 65536)
+    if exit_code == 0:
+        return ""
+    "vulkan-jit-spirv-val-failed: {stdout}{stderr}"
+
+# =========================================================================
+# Step-budget loop lowering (design §6.3): while-true loop bodies emitted
+# for the JIT lane must thread a decrementing step budget through the
+# generated SPIR-V, branching out to a bounded-exit path (writes the GMB-1
+# timeout sentinel to the arena) once the budget is exhausted -- otherwise
+# a device-side infinite loop would hang the whole dispatch.
+#
+# `emit_step_budget_decrement_check` is the reusable, hardware-free
+# testable piece: it injects exactly the "load budget, subtract 1, store
+# back, compare to zero" instruction sequence at the current position in
+# `b`'s output and returns the boolean-exhausted result ID, without owning
+# any loop control flow itself. `build_while_true_budget_loop_spirv`
+# below is a concrete standalone kernel that wires it into a real
+# structured `while true` loop, for the system-facing shape; the emitter
+# unit spec asserts the instruction sequence this function emits.
+# =========================================================================
+
+struct BudgetDecrementIds:
+    loaded_budget: i64
+    decremented_budget: i64
+    exhausted_bool: i64
+
+fn emit_step_budget_decrement_check(
+        b: SpirvBuilder, uint_type: i64, bool_type: i64,
+        budget_ptr: i64) -> BudgetDecrementIds:
+    """Emit the step-budget decrement + exhaustion-check instruction
+    sequence (design §6.3) at the current position: `OpLoad` the budget
+    word, `OpISub` 1, `OpStore` it back, then `OpIEqual` it against the
+    zero constant to produce the exhausted-boolean result ID."""
+    val loaded_budget = b.emit_load(uint_type, budget_ptr)
+    val one_const = b.emit_const_int(uint_type, 1)
+    val decremented = b.emit_isub(uint_type, loaded_budget, one_const)
+    b.emit_store(budget_ptr, decremented)
+    val zero_const = b.emit_const_int(uint_type, 0)
+    val exhausted = b.emit_iequal(bool_type, decremented, zero_const)
+    BudgetDecrementIds(loaded_budget: loaded_budget,
+        decremented_budget: decremented, exhausted_bool: exhausted)
+
+fn build_while_true_budget_loop_spirv() -> text:
+    """Standalone kernel: a `while true` loop body whose lowering threads
+    a step budget per design §6.3 -- each iteration decrements the budget
+    (via `emit_step_budget_decrement_check`) and branches to a bounded
+    exit block (writes the GMB-1 timeout sentinel `0xDEAD0000`, then
+    returns) once exhausted, instead of looping unboundedly. Used only by
+    the emitter unit spec below; not part of the live dispatch path."""
+    val b = SpirvBuilder.create([1, 0])
+
+    val main_fn_id = b.alloc_id()
+    val rtarr_id = b.alloc_id()
+    val struct_id = b.alloc_id()
+    val arena_var_id = b.alloc_id()
+
+    b.emit_header()
+    b.emit_capabilities()
+    b.emit_memory_model()
+    b.emit("OpEntryPoint GLCompute {b.id_str(main_fn_id)} \"main\"")
+    b.emit("OpExecutionMode {b.id_str(main_fn_id)} LocalSize 1 1 1")
+    b.emit("")
+
+    b.emit("OpDecorate {b.id_str(rtarr_id)} ArrayStride 4")
+    b.emit("OpMemberDecorate {b.id_str(struct_id)} 0 Offset 0")
+    b.emit("OpDecorate {b.id_str(struct_id)} BufferBlock")
+    b.emit("OpDecorate {b.id_str(arena_var_id)} DescriptorSet 0")
+    b.emit("OpDecorate {b.id_str(arena_var_id)} Binding 0")
+    b.emit("")
+
+    val void_t = b.emit_type_void()
+    val fn_t = b.emit_type_function(void_t, [])
+    val uint_t = b.emit_type_int(32, false)
+    val bool_t = b.emit_type_bool()
+    b.emit("{b.id_str(rtarr_id)} = OpTypeRuntimeArray {b.id_str(uint_t)}")
+    b.emit("{b.id_str(struct_id)} = OpTypeStruct {b.id_str(rtarr_id)}")
+    val struct_ptr_t = b.emit_type_pointer("Uniform", struct_id)
+    b.emit("{b.id_str(arena_var_id)} = OpVariable {b.id_str(struct_ptr_t)} Uniform")
+    val uint_ptr_t = b.emit_type_pointer("Uniform", uint_t)
+
+    val member0 = b.emit_const_int(uint_t, 0)
+    val idx_budget = b.emit_const_int(uint_t, 0)
+    val idx_sentinel = b.emit_const_int(uint_t, OFF_RAM_SENTINEL / 4)
+    val timeout_sentinel = b.emit_const_int(uint_t, 3735097344)  # 0xDEAD0000
+
+    b.emit("{b.id_str(main_fn_id)} = OpFunction {b.id_str(void_t)} None {b.id_str(fn_t)}")
+    val entry_label = b.emit_label()
+    val budget_ptr = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_budget])
+    val sentinel_ptr = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_sentinel])
+    b.emit_branch(entry_label)
+
+    # NOTE: `emit_label`/`emit_branch` above open the function's entry
+    # block; SPIR-V structured control flow additionally requires the
+    # entry block itself to branch into the loop header block below --
+    # `entry_label` is reused as that branch target's predecessor, and the
+    # loop header is a fresh label.
+    val loop_header = b.emit_label()
+    val decrement = emit_step_budget_decrement_check(b, uint_t, bool_t, budget_ptr)
+    val continue_label = b.alloc_id()
+    val exit_label = b.alloc_id()
+    val merge_label = b.alloc_id()
+    b.emit("OpSelectionMerge {b.id_str(merge_label)} None")
+    b.emit_branch_conditional(decrement.exhausted_bool, exit_label, continue_label)
+
+    b.emit("{b.id_str(exit_label)} = OpLabel")
+    b.emit_store(sentinel_ptr, timeout_sentinel)
+    b.emit_return()
+
+    b.emit("{b.id_str(continue_label)} = OpLabel")
+    b.emit_branch(loop_header)
+
+    b.emit("{b.id_str(merge_label)} = OpLabel")
+    b.emit_return()
+    b.emit_function_end()
+
+    b.build()
+
+# =========================================================================
+# Hello (vector-add-equivalent) test kernel (design §6.1 step 1 + task step
+# 5): reads two u32 operands from the arena DATA region, adds them, and
+# writes the sum as a GMB-1 RECORD entry followed by the GMB-1 exit
+# sentinel -- reusing A2's arena layout constants directly rather than
+# hardcoding duplicate offsets. Single invocation (dispatch grid = 1x1x1,
+# local size 1x1x1), so no gl_GlobalInvocationID guard is needed.
+# =========================================================================
+
+fn _record_ring_word_base() -> i64:
+    """Word index of the RECORD ring header (head/cap), assuming an empty
+    LOG ring (capacity 0) as used by this kernel's fixed arena layout --
+    mirrors `MailboxArena.record_ring_offset()` in A2's gpu_mailbox.spl."""
+    OFF_LOG_DATA / 4
+
+fn build_hello_kernel_spirv() -> text:
+    """SPIR-V assembly for the vector-add-equivalent hello kernel."""
+    val b = SpirvBuilder.create([1, 0])
+
+    # Reserve module-scope IDs that decorations must forward-reference.
+    val main_fn_id = b.alloc_id()
+    val rtarr_id = b.alloc_id()
+    val struct_id = b.alloc_id()
+    val arena_var_id = b.alloc_id()
+
+    b.emit_header()
+    b.emit_capabilities()
+    b.emit_memory_model()
+    b.emit("OpEntryPoint GLCompute {b.id_str(main_fn_id)} \"main\"")
+    b.emit("OpExecutionMode {b.id_str(main_fn_id)} LocalSize 1 1 1")
+    b.emit("")
+
+    b.emit("OpDecorate {b.id_str(rtarr_id)} ArrayStride 4")
+    b.emit("OpMemberDecorate {b.id_str(struct_id)} 0 Offset 0")
+    b.emit("OpDecorate {b.id_str(struct_id)} BufferBlock")
+    b.emit("OpDecorate {b.id_str(arena_var_id)} DescriptorSet 0")
+    b.emit("OpDecorate {b.id_str(arena_var_id)} Binding 0")
+    b.emit("")
+
+    val void_t = b.emit_type_void()
+    val fn_t = b.emit_type_function(void_t, [])
+    val uint_t = b.emit_type_int(32, false)
+    b.emit("{b.id_str(rtarr_id)} = OpTypeRuntimeArray {b.id_str(uint_t)}")
+    b.emit("{b.id_str(struct_id)} = OpTypeStruct {b.id_str(rtarr_id)}")
+    val struct_ptr_t = b.emit_type_pointer("Uniform", struct_id)
+    b.emit("{b.id_str(arena_var_id)} = OpVariable {b.id_str(struct_ptr_t)} Uniform")
+    val uint_ptr_t = b.emit_type_pointer("Uniform", uint_t)
+
+    val member0 = b.emit_const_int(uint_t, 0)
+    val idx_a = b.emit_const_int(uint_t, 0)
+    val idx_b = b.emit_const_int(uint_t, 1)
+    val record_base = _record_ring_word_base()
+    val idx_head = b.emit_const_int(uint_t, record_base)
+    val idx_seq = b.emit_const_int(uint_t, record_base + 2)
+    val idx_pass = b.emit_const_int(uint_t, record_base + 3)
+    val idx_value = b.emit_const_int(uint_t, record_base + 4)
+    val idx_sentinel = b.emit_const_int(uint_t, OFF_RAM_SENTINEL / 4)
+    val const_seq0 = b.emit_const_int(uint_t, 0)
+    val const_pass1 = b.emit_const_int(uint_t, 1)
+    val const_head1 = b.emit_const_int(uint_t, 1)
+    # 0xCAFE0000 | 0 -- GMB-1 exit sentinel, exit code 0.
+    val const_exit_sentinel = b.emit_const_int(uint_t, 3405643776)
+
+    b.emit("{b.id_str(main_fn_id)} = OpFunction {b.id_str(void_t)} None {b.id_str(fn_t)}")
+    val _entry_label = b.emit_label()
+
+    val ptr_a = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_a])
+    val a = b.emit_load(uint_t, ptr_a)
+    val ptr_b = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_b])
+    val bval = b.emit_load(uint_t, ptr_b)
+    val sum = b.emit_iadd(uint_t, a, bval)
+
+    val ptr_seq = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_seq])
+    b.emit_store(ptr_seq, const_seq0)
+    val ptr_pass = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_pass])
+    b.emit_store(ptr_pass, const_pass1)
+    val ptr_value = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_value])
+    b.emit_store(ptr_value, sum)
+    val ptr_head = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_head])
+    b.emit_store(ptr_head, const_head1)
+    val ptr_sentinel = b.emit_access_chain(uint_ptr_t, arena_var_id, [member0, idx_sentinel])
+    b.emit_store(ptr_sentinel, const_exit_sentinel)
+
+    b.emit_return()
+    b.emit_function_end()
+
+    b.build()
+
+# =========================================================================
+# VulkanJitLaneExecutor -- structurally follows the GpuLaneExecutor shape
+# (prepare/run_program/teardown), matching B2's landed
+# CudaJitLaneExecutor style (no explicit `impl X for Y:` block).
+# =========================================================================
+
+class VulkanJitLaneExecutor:
+    session: VulkanLaneSession
+    kernel_bytes: [u8]
+    last_error: text
+
+    static fn create() -> VulkanJitLaneExecutor:
+        VulkanJitLaneExecutor(session: VulkanLaneSession.create(),
+            kernel_bytes: [], last_error: "")
+
+    me prepare(session_id: text) -> Result<bool, text>:
+        """Lower the hello kernel to SPIR-V, assemble it, optionally
+        validate it, and initialize the Vulkan lane session's arena +
+        pipeline against it (design §6.1 steps 1-4)."""
+        val probe_result = self.session.probe()
+        if probe_result.starts_with("skip:"):
+            self.last_error = probe_result
+            return Err(probe_result)
+
+        val asm_text = build_hello_kernel_spirv()
+        val assembled = assemble_spirv_text(asm_text, session_id)
+        if not assembled.is_ok():
+            self.last_error = assembled.unwrap_err()
+            return Err(assembled.unwrap_err())
+        self.kernel_bytes = assembled.unwrap()
+
+        val validation = validate_spirv_binary(spirv_bin_path_for(session_id))
+        if validation != "":
+            self.last_error = validation
+            return Err(validation)
+
+        val init_result = self.session.init(ARENA_SIZE, self.kernel_bytes, "main")
+        if init_result != "":
+            self.last_error = init_result
+            return Err(init_result)
+
+        Ok(true)
+
+    me fn ready() -> bool:
+        self.session.initialized
+
+    me run_program(blob: [u8]) -> Result<[u8], text>:
+        """Write `blob` (the two little-endian u32 vector-add operands, at
+        minimum 8 bytes) into the arena DATA region, dispatch once, fence,
+        and drain the GMB-1 RECORD + sentinel via A2's mailbox helpers."""
+        if not self.session.initialized:
+            return Err("vulkan-jit-lane-not-prepared")
+        if blob.len() < 8:
+            return Err("vulkan-jit-lane-program-blob-too-short")
+
+        var arena = MailboxArena.new(ARENA_SIZE)
+        var i: i64 = 0
+        while i < blob.len():
+            arena.set_u8(i, blob[i])
+            i = i + 1
+
+        if not self.session.arena_write(arena.bytes):
+            return Err("vulkan-jit-lane-arena-write-failed")
+
+        val dispatch_result = self.session.dispatch_once(1)
+        if dispatch_result != "":
+            return Err(dispatch_result)
+        if self.session.last_dispatch_sentinel != VULKAN_LANE_OK_SENTINEL:
+            return Err("vulkan-jit-lane-dispatch-sentinel-not-ok")
+
+        val readback = self.session.arena_read(ARENA_SIZE)
+        if readback.len() != ARENA_SIZE:
+            return Err("vulkan-jit-lane-arena-readback-short")
+
+        Ok(readback)
+
+    me teardown() -> bool:
+        if not self.session.initialized:
+            return true
+        self.session.shutdown() == ""
+
+# =========================================================================
+# Result decode helper for the system spec: turn a run_program() readback
+# into the GMB-1 records + sentinel, reusing A2's decoders directly.
+# =========================================================================
+
+fn decode_hello_result(readback: [u8]) -> ([ResultRecord], SentinelState, i64):
+    val arena = MailboxArena.from_bytes(readback)
+    val records = drain_records(arena)
+    val sentinel_raw = arena.get_u32(OFF_RAM_SENTINEL)
+    val sentinel_state = decode_sentinel(sentinel_raw)
+    val exit_code = sentinel_exit_code(sentinel_raw)
+    (records, sentinel_state, exit_code)
+
+export build_hello_kernel_spirv, build_while_true_budget_loop_spirv
+export emit_step_budget_decrement_check, BudgetDecrementIds
+export assemble_spirv_text, validate_spirv_binary, spirv_tool_present
+export spirv_bin_path_for
+export decode_hello_result
+export VulkanJitLaneExecutor

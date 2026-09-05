@@ -1,0 +1,82 @@
+# Runnable probe for the KV260 DDR boot-testbench generator: emits both members
+# of the XLEN pair and byte-compares them against the silicon-proven goldens.
+# Run: bin/simple run test/01_unit/lib/hardware/vhdl_gen/probe_tb_k26_ddr_gen.spl
+
+use std.hardware.riscv_common.xlen.XlenConfig
+use std.hardware.vhdl_gen.tb_k26_ddr_gen.{generate_tb_k26_ddr_boot, generate_tb_rv32_k26_ddr_boot, generate_tb_rv64_k26_ddr_boot}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS " + name)
+        0
+    else:
+        print("FAIL " + name)
+        1
+
+# Report the first differing line so a mismatch is actionable, not just red.
+fn first_diff(tag: text, got: text, want: text):
+    val gl = got.split("\n")
+    val wl = want.split("\n")
+    var i = 0
+    var n = gl.len()
+    if wl.len() < n:
+        n = wl.len()
+    while i < n:
+        if gl[i] != wl[i]:
+            print("  " + tag + " first diff at line " + (i + 1).to_text())
+            print("    got : [" + gl[i] + "]")
+            print("    want: [" + wl[i] + "]")
+            return
+        i = i + 1
+    print("  " + tag + " common prefix equal; line counts " + gl.len().to_text() + " vs " + wl.len().to_text())
+
+fn main():
+    var fails = 0
+    val g32 = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/tb_rv32_k26_ddr_boot.vhd")
+    val g64 = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/tb_rv64_k26_ddr_boot.vhd")
+    val a32 = generate_tb_rv32_k26_ddr_boot("")
+    val a64 = generate_tb_rv64_k26_ddr_boot("")
+
+    val ok32 = a32 == g32
+    val ok64 = a64 == g64
+    fails = fails + check("tb_rv32_k26_ddr_boot byte-identical (len " + a32.len().to_text() + " vs " + g32.len().to_text() + ")", ok32)
+    if not ok32:
+        rt_file_write_text("/tmp/gen_tb_rv32_k26_ddr_boot.vhd", a32)
+        first_diff("rv32", a32, g32)
+    fails = fails + check("tb_rv64_k26_ddr_boot byte-identical (len " + a64.len().to_text() + " vs " + g64.len().to_text() + ")", ok64)
+    if not ok64:
+        rt_file_write_text("/tmp/gen_tb_rv64_k26_ddr_boot.vhd", a64)
+        first_diff("rv64", a64, g64)
+
+    # Determinism: a second generation in the same process must be identical.
+    val b32 = generate_tb_k26_ddr_boot(XlenConfig.rv32(), "")
+    val b64 = generate_tb_k26_ddr_boot(XlenConfig.rv64(), "")
+    fails = fails + check("determinism rv32 (regenerate)", a32 == b32)
+    fails = fails + check("determinism rv64 (regenerate)", a64 == b64)
+
+    # --mem-prefix threading through init_ram / init_rdisk.
+    val p32 = generate_tb_rv32_k26_ddr_boot("/tmp/fw/")
+    val p64 = generate_tb_rv64_k26_ddr_boot("/tmp/fw/")
+    fails = fails + check("mem prefix applied (rv32 ram + ramdisk)",
+        p32.contains("is \"/tmp/fw/rv32_flat.mem\";") and
+        p32.contains("file_open(fstatus, f, \"/tmp/fw/rv32_ramdisk.mem\", read_mode);"))
+    fails = fails + check("mem prefix applied (rv64 ram + ramdisk)",
+        p64.contains("is \"/tmp/fw/rv64_flat.mem\";") and
+        p64.contains("file_open(fstatus, f, \"/tmp/fw/rv64_ramdisk.mem\", read_mode);"))
+
+    # G_SKIP_BSS_ZERO is an rv64-only generic (landed dae8b497135).
+    fails = fails + check("rv64 carries G_SKIP_BSS_ZERO, rv32 does not",
+        a64.contains("G_SKIP_BSS_ZERO : boolean := false") and not a32.contains("G_SKIP_BSS_ZERO"))
+
+    # XLEN byte lanes / word addressing come from XlenConfig, not from prose.
+    fails = fails + check("XLEN byte lanes (rv32 /4 + 0 to 3, rv64 /8 + 0 to 7)",
+        a32.contains("(addr_v - DDR_BASE) / 4)") and a32.contains("for b in 0 to 3 loop") and
+        a64.contains("(addr_v - DDR_BASE) / 8)") and a64.contains("for b in 0 to 7 loop"))
+
+    if fails == 0:
+        print("TB_K26_DDR_GEN PROBE: ALL PASS")
+    else:
+        print("TB_K26_DDR_GEN PROBE: " + fails.to_text() + " FAILURES")

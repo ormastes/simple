@@ -1,0 +1,151 @@
+# Aspect-seal census (Phase 6 gate, 2026-08-21).
+#
+# Plan:   doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §13.3 (facets), §13.4 (seal), §13.5 (lifecycle), §13.7 (order)
+#
+# Loads aspect documents, runs the real `aspect_seal_check` from
+# `compiler.semantics.aspect_seal`, then runs the stubbed post-weave recheck
+# over the sealed set, and prints a machine-readable census. Driven by
+# `scripts/check/check-aspect-seal.shs`, which turns the census into a verdict.
+#
+# Every decision is made by the real semantics modules. Nothing here inspects
+# document text to reach a verdict.
+#
+# Usage:
+#   bin/simple run src/app/check/aspect_seal_census.spl [--critical] \
+#       --aspect <path.sdn> ...
+#
+# Output contract (stdout, one record per line):
+#   PARSE-FAIL <path>
+#   SEAL <seal-hash> aspects=<n> bindings=<k> obligations=<o>
+#   REJECT <code> <aspect-or-key> <path>
+#   RECHECK ran=<true|false> stable=<true|false>
+#   SUMMARY aspects=<n> bindings=<b> obligations=<o> sealed=<s> \
+#           unbound_required=<u> duplicate_binding=<d> late_activation=<l> \
+#           unverified_signature=<v> open_dyn=<x> empty_pointcut=<e> \
+#           bad_value=<a> post_weave_recheck=<ran|not-run> \
+#           recheck_stable=<true|false> parse_fail=<p>
+
+use std.io_runtime.{read_file}
+use std.nogc_sync_mut.cli.{get_cli_args}
+use compiler.semantics.aspect_seal.facet_model.{
+    AspectDecl,
+    FacetBinding,
+    AspectBindingSet,
+    binding_completeness,
+    parse_aspect_doc
+}
+use compiler.semantics.aspect_seal.seal.{
+    AspectSealProfile,
+    AspectSealReason,
+    aspect_seal_check,
+    aspect_seal_reason_code,
+    post_weave_recheck
+}
+
+class Loaded:
+    ok: bool
+    aspects: [AspectDecl]
+    bindings: [FacetBinding]
+
+fn load(path: text) -> Loaded:
+    val source = read_file(path)
+    match parse_aspect_doc(source, path):
+        case Ok(doc):
+            Loaded(ok: true, aspects: doc.aspects, bindings: doc.bindings)
+        case Err(_):
+            Loaded(ok: false, aspects: [], bindings: [])
+
+fn main():
+    val args = get_cli_args()
+    var critical = false
+    var paths: [text] = []
+    var mode = ""
+    for a in args:
+        if a == "--critical":
+            critical = true
+        elif a == "--aspect":
+            mode = "aspect"
+        elif mode == "aspect":
+            paths = paths + [a]
+
+    var parse_fail = 0
+    var aspects: [AspectDecl] = []
+    var bindings: [FacetBinding] = []
+    var last_path = "<none>"
+    for p in paths:
+        val l = load(p)
+        if not l.ok:
+            parse_fail = parse_fail + 1
+            print("PARSE-FAIL " + p)
+        else:
+            last_path = p
+            for a in l.aspects:
+                aspects = aspects + [a]
+            for b in l.bindings:
+                bindings = bindings + [b]
+
+    val set = AspectBindingSet(aspects: aspects, bindings: bindings)
+    val profile = AspectSealProfile(critical: critical)
+
+    var unbound = 0
+    var dup = 0
+    var late = 0
+    var unverified = 0
+    var open_dyn = 0
+    var empty_pc = 0
+    var bad = 0
+    var sealed_count = 0
+    # Obligations are counted from the report directly, not from the seal:
+    # a REJECTED set still examined obligations, and reporting 0 there would
+    # make a genuine FAIL look like a vacuous ERROR.
+    var obligations: i64 = binding_completeness(set, critical).obligations
+    var recheck_ran = false
+    var recheck_stable = false
+
+    match aspect_seal_check(set, profile):
+        case Ok(s):
+            sealed_count = s.aspect_ids.len()
+            print("SEAL " + s.seal_hash + " aspects=" + s.aspect_ids.len().to_text()
+                + " bindings=" + s.binding_count.to_text()
+                + " obligations=" + s.obligation_count.to_text())
+            # Post-weave recheck: a STUB re-verify pass. It re-runs
+            # binding_completeness over the sealed set and re-derives the hash;
+            # it does NOT re-check woven HIR, because no weaver is wired.
+            recheck_ran = true
+            recheck_stable = post_weave_recheck(s, set, profile)
+            print("RECHECK ran=true stable=" + recheck_stable.to_text())
+        case Err(reasons):
+            for r in reasons:
+                print("REJECT " + aspect_seal_reason_code(r) + " subject " + last_path)
+                match r:
+                    case UnboundRequired(_, _): unbound = unbound + 1
+                    case DuplicateBinding(_, _): dup = dup + 1
+                    case LateActivationInCritical(_, _): late = late + 1
+                    case UnverifiedSignature(_, _): unverified = unverified + 1
+                    case OpenDynAdviceInCritical(_, _): open_dyn = open_dyn + 1
+                    case EmptyPointcut(_, _): empty_pc = empty_pc + 1
+                    case BadAxisValue(_, _): bad = bad + 1
+            print("RECHECK ran=false stable=false")
+
+    var recheck_word = "not-run"
+    if recheck_ran:
+        recheck_word = "ran"
+
+    print("SUMMARY aspects=" + aspects.len().to_text()
+        + " bindings=" + bindings.len().to_text()
+        + " obligations=" + obligations.to_text()
+        + " sealed=" + sealed_count.to_text()
+        + " unbound_required=" + unbound.to_text()
+        + " duplicate_binding=" + dup.to_text()
+        + " late_activation=" + late.to_text()
+        + " unverified_signature=" + unverified.to_text()
+        + " open_dyn=" + open_dyn.to_text()
+        + " empty_pointcut=" + empty_pc.to_text()
+        + " bad_value=" + bad.to_text()
+        + " post_weave_recheck=" + recheck_word
+        + " recheck_stable=" + recheck_stable.to_text()
+        + " parse_fail=" + parse_fail.to_text())
+
+main()

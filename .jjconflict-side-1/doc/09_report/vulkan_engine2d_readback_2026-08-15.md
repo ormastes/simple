@@ -1,0 +1,349 @@
+# Vulkan Engine2D Readback Evidence
+
+- status: pass
+- reason: pass
+- spec status: pass
+- probe status: Initialized
+- available: true
+- backend: vulkan
+- present exercised: true
+- readback exercised: true
+- clear status: pass
+- clear pixels: 256
+- clear expected checksum: 140735349260160
+- clear actual checksum: 140735349260160
+- clear mismatches: 0
+- clear source: device_readback
+- clear backend handle: 63
+- clear device identity: 1
+- clear expected pixels: build/vulkan-engine2d-readback/clear-expected-u32.json
+- clear actual pixels: build/vulkan-engine2d-readback/clear-actual-u32.json
+- rect status: pass
+- rect pixels: 256
+- rect expected checksum: 140781974135910
+- rect actual checksum: 140781974135910
+- rect mismatches: 0
+- rect source: device_readback
+- rect backend handle: 63
+- rect device identity: 1
+- rect expected pixels: build/vulkan-engine2d-readback/rect-expected-u32.json
+- rect actual pixels: build/vulkan-engine2d-readback/rect-actual-u32.json
+- blur/tolerance used: false
+- vulkan strict exit code: 0
+- cpu/vulkan parity exit code: 0
+- execution mode: native
+- Vulkan ICD: 
+
+## Raw Evidence
+- vulkan_engine2d_readback_status=pass
+- vulkan_engine2d_readback_reason=pass
+- vulkan_engine2d_readback_spec_status=pass
+- vulkan_engine2d_readback_probe_status=Initialized
+- vulkan_engine2d_readback_available=true
+- vulkan_engine2d_readback_backend_name=vulkan
+- vulkan_engine2d_readback_present_exercised=true
+- vulkan_engine2d_readback_readback_exercised=true
+- vulkan_engine2d_readback_clear_status=pass
+- vulkan_engine2d_readback_clear_pixels=256
+- vulkan_engine2d_readback_clear_expected_checksum=140735349260160
+- vulkan_engine2d_readback_clear_actual_checksum=140735349260160
+- vulkan_engine2d_readback_clear_mismatches=0
+- vulkan_engine2d_readback_clear_source=device_readback
+- vulkan_engine2d_readback_clear_backend_handle=63
+- vulkan_engine2d_readback_clear_device_identity=1
+- vulkan_engine2d_readback_clear_expected_pixels_path=build/vulkan-engine2d-readback/clear-expected-u32.json
+- vulkan_engine2d_readback_clear_actual_pixels_path=build/vulkan-engine2d-readback/clear-actual-u32.json
+- vulkan_engine2d_readback_rect_status=pass
+- vulkan_engine2d_readback_rect_pixels=256
+- vulkan_engine2d_readback_rect_expected_checksum=140781974135910
+- vulkan_engine2d_readback_rect_actual_checksum=140781974135910
+- vulkan_engine2d_readback_rect_mismatches=0
+- vulkan_engine2d_readback_rect_source=device_readback
+- vulkan_engine2d_readback_rect_backend_handle=63
+- vulkan_engine2d_readback_rect_device_identity=1
+- vulkan_engine2d_readback_rect_expected_pixels_path=build/vulkan-engine2d-readback/rect-expected-u32.json
+- vulkan_engine2d_readback_rect_actual_pixels_path=build/vulkan-engine2d-readback/rect-actual-u32.json
+- vulkan_engine2d_readback_blur_or_tolerance_used=false
+- vulkan_engine2d_readback_vulkan_strict_exit_code=0
+- vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=0
+- vulkan_engine2d_readback_execution_mode=native
+- vulkan_engine2d_readback_icd_path=
+- vulkan_engine2d_readback_evidence_log=build/vulkan-engine2d-readback/evidence.log
+- vulkan_engine2d_readback_vulkan_strict_log=build/vulkan-engine2d-readback/vulkan_strict.json
+- vulkan_engine2d_readback_cpu_vulkan_parity_log=build/vulkan-engine2d-readback/engine2d_cpu_vulkan_parity.json
+
+## Evidence Log
+- WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+- Build and use the pure-Simple bin/simple instead.
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /mnt/data/worktrees/simple-main/src/lib/common/string_core.spl:116:44
+-    |
+- 116 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+- 
+- Use angle brackets: s<...> instead of s[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/backend_software.spl:1220:39
+-    |
+- 1220 |                             previous_x[previous_cursor] < x0):
+-    |                                       ^
+- 
+- Use angle brackets: previous_x<...> instead of previous_x[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/backend_software.spl:1225:39
+-    |
+- 1225 |                             previous_x[previous_cursor] == x0 and
+-    |                                       ^
+- 
+- Use angle brackets: previous_x<...> instead of previous_x[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/text_layout/font_advance_layout.spl:15:49
+-    |
+-  15 |     if low < byte_offsets.len() and byte_offsets[low] == byte_offset:
+-    |                                                 ^
+- 
+- Use angle brackets: byte_offsets<...> instead of byte_offsets[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /mnt/data/worktrees/simple-main/src/lib/skia/feature/glyph/ot_parser_layout.spl:565:67
+-    |
+- 565 |         while active_tag_index < active_tags.len() and active_tags[active_tag_index] != feature_tag:
+-    |                                                                   ^
+- 
+- Use angle brackets: active_tags<...> instead of active_tags[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/path.spl:7:1
+-    |
+-   7 | export use std.nogc_sync_mut.path.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/path.spl:158:31
+-    |
+- 158 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/gpu/engine2d/sffi_directx.spl:6:1
+-    |
+-   6 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/io/metal_ptr.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:4:1
+-    |
+-   4 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /mnt/data/worktrees/simple-main/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- warning: public function `dir_remove_all` has 3 co-compiled definitions with 2 differing signatures ((text)->bool vs (text)->i64); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `file_read_bytes` has 3 co-compiled definitions with 2 differing signatures ((text)->[i64] vs (text)->[u8]); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `file_read_lines` has 2 co-compiled definitions with 2 differing signatures ((text)->Optional([text]) vs (text)->[text]); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `path_join` has 2 co-compiled definitions with 2 differing signatures (([text])->text vs (text,text)->text); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `shell` has 2 co-compiled definitions with 2 differing signatures ((text)->ProcessResult vs (text)->ShellResult); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- evidence_program=engine2d_vulkan_readback
+- [vk-order] flush rc=1 dirty=false cpu_fallback=false completion_unknown=false
+- vulkan_probe_status=Initialized
+- vulkan_probe_available=true
+- vulkan_probe_diagnostic=requested=vulkan;selected=vulkan;status=Initialized;api=vulkan;gate=vulkan_runtime;shader=spirv;compute=true;graphics=true;present=false;reason=Vulkan initialized
+- vulkan_available=true
+- [vk-order] flush rc=1 dirty=false cpu_fallback=false completion_unknown=false
+- strict_create_status=pass
+- backend_name=vulkan
+- [vk-order] dispatch pipe=53 batched=true rc=1 fb=63 pending_cmd=130175777365392 pending_n=1 clip_on=false clip=0,0,16,16
+- [vk-order] flush rc=1 dirty=true cpu_fallback=false completion_unknown=false
+- [vk-order] readback-entry dirty=true pending_cmd=0 pending_n=0 cpu_fallback=false completion_unknown=false fb=63
+- [vk-order] flush rc=1 dirty=true cpu_fallback=false completion_unknown=false
+- [vk-order] flush rc=1 dirty=true cpu_fallback=false completion_unknown=false
+- [vk-order] flush rc=1 dirty=false cpu_fallback=false completion_unknown=false
+- [vk-order] readback-entry dirty=false pending_cmd=0 pending_n=0 cpu_fallback=false completion_unknown=false fb=63
+- [vk-order] flush rc=1 dirty=false cpu_fallback=false completion_unknown=false
+- clear_readback_pixels=256
+- clear_expected_checksum=140735349260160
+- clear_actual_checksum=140735349260160
+- clear_expected_pixels_path=build/vulkan-engine2d-readback/clear-expected-u32.json
+- clear_actual_pixels_path=build/vulkan-engine2d-readback/clear-actual-u32.json
+- clear_expected_pixels_written=true
+- clear_actual_pixels_written=true
+- clear_mismatches=0
+- clear_readback_source=device_readback
+- clear_backend_handle=63
+- clear_device_identity=1
+- clear_present_source=host_cache_after_device_present
+- [vk-order] dispatch pipe=53 batched=true rc=1 fb=63 pending_cmd=130175777365392 pending_n=1 clip_on=false clip=0,0,16,16
+- [vk-order] dispatch pipe=54 batched=true rc=1 fb=63 pending_cmd=130175777365392 pending_n=2 clip_on=false clip=0,0,16,16
+- [vk-order] flush rc=1 dirty=true cpu_fallback=false completion_unknown=false
+- [vk-order] readback-entry dirty=true pending_cmd=0 pending_n=0 cpu_fallback=false completion_unknown=false fb=63
+- [vk-order] flush rc=1 dirty=true cpu_fallback=false completion_unknown=false
+- [vk-order] flush rc=1 dirty=true cpu_fallback=false completion_unknown=false
+- [vk-order] flush rc=1 dirty=false cpu_fallback=false completion_unknown=false
+- [vk-order] readback-entry dirty=false pending_cmd=0 pending_n=0 cpu_fallback=false completion_unknown=false fb=63
+- [vk-order] flush rc=1 dirty=false cpu_fallback=false completion_unknown=false
+- rect_readback_pixels=256
+- rect_expected_checksum=140781974135910
+- rect_actual_checksum=140781974135910
+- rect_mismatches=0
+- rect_readback_source=device_readback
+- rect_backend_handle=63
+- rect_device_identity=1
+- rect_present_source=host_cache_after_device_present
+- rect_expected_pixels_path=build/vulkan-engine2d-readback/rect-expected-u32.json
+- rect_actual_pixels_path=build/vulkan-engine2d-readback/rect-actual-u32.json
+- rect_expected_pixels_written=true
+- rect_actual_pixels_written=true
+- [vk-order] flush rc=1 dirty=false cpu_fallback=false completion_unknown=false
+- present_exercised=true
+- readback_exercised=true
+- clear_status=pass
+- rect_status=pass
+- evidence_status=pass
+- overall=pass

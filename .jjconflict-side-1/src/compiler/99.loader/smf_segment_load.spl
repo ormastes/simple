@@ -1,0 +1,61 @@
+# SMF -> segment extents. The format side of the one-mapping-per-segment
+# loader (startup_perf_architecture_2026-08-17 §8.4).
+#
+# An SMF section IS the loader's segment: it is the contiguous byte range
+# that `read_code` already slices symbols out of. This module exposes that
+# range whole, so the loader can map it once instead of once per symbol.
+#
+# The section-table entry layout mirrors the reader's own `read_code`
+# (64-byte writer-aligned SmfSection):
+#   section_type(1) padding(3) flags(4) offset(8) size(8)
+#   virtual_size(8) alignment(8) name(16)
+
+use compiler.backend.linker.smf_reader_memory.{
+    SmfReaderMemory, smf_payload_file_offset, bytes_to_u64
+}
+
+val SMF_SECTION_ENTRY_SIZE: i64 = 64
+
+"""Byte range of one SMF section inside the file image."""
+struct SmfSectionExtent:
+    section_index: i32
+    file_offset: i64
+    size: i64
+    alignment: i64
+
+"""Locate a section's byte range. Uses exactly the arithmetic `read_code`
+uses for a symbol's section, so symbol offsets stay valid against it."""
+fn smf_section_extent(reader: SmfReaderMemory, section_index: i32) -> Result<SmfSectionExtent, text>:
+    val idx = section_index as i64
+    if idx < 0 or idx >= reader.header.section_count as i64:
+        return Err("Section index {idx} out of range")
+
+    val entry_off = reader.sections_offset + idx * SMF_SECTION_ENTRY_SIZE
+    if entry_off + SMF_SECTION_ENTRY_SIZE > reader.data.len():
+        return Err("Section entry {idx} out of bounds")
+
+    val raw_offset = bytes_to_u64(reader.data, entry_off + 8) as i64
+    val file_offset = smf_payload_file_offset(reader.header, raw_offset)
+    val size = bytes_to_u64(reader.data, entry_off + 16) as i64
+    val alignment = bytes_to_u64(reader.data, entry_off + 32) as i64
+
+    if size < 0 or file_offset < 0 or file_offset + size > reader.data.len():
+        return Err("Section {idx} range [{file_offset},{file_offset + size}) escapes file image")
+
+    Ok(SmfSectionExtent(
+        section_index: section_index,
+        file_offset: file_offset,
+        size: size,
+        alignment: alignment))
+
+"""Copy one section's bytes out whole -- the payload of a single mapping."""
+fn smf_section_bytes(reader: SmfReaderMemory, extent: SmfSectionExtent) -> Result<[u8], text>:
+    if extent.size <= 0:
+        return Err("Section {extent.section_index} is empty")
+    var out: [u8] = []
+    var i = extent.file_offset
+    val end = extent.file_offset + extent.size
+    while i < end:
+        out.push(reader.data[i])
+        i = i + 1
+    Ok(out)

@@ -1,0 +1,156 @@
+# SCV continuous native shadow write (SCV-IMPL-B-05).
+#
+# MIG-24's scv_dual_write_verify seeds this; B-05 makes it CONTINUOUS on the
+# commit path: once enabled (`scv shadow-write enable --dest <dir>`), every
+# explicit revision — every operation written through store.spl's
+# scv_write_operation (snapshot, new-change, close-change, merge, restore) —
+# automatically triggers the dual write (native shadow object sync) plus the
+# independent compare: tree, content, parent DAG, refs, and reachability
+# (shadow fsck: every commit parent and change `latest` resolves), and appends
+# a FAIL-CLOSED report row to .scv/meta/shadow_write_log.sdn:
+#     seq|op|commit|verdict|detail
+# A FAIL row is never dropped or rewritten; `scv shadow-write status` FAILs
+# while any FAIL row is unresolved (i.e. not followed by a later PASS row).
+#
+# Host note (B-05 direction): jj is broken on this host, so the "jj/Git side"
+# of the dual write is the landed READ-ONLY git backend (backend_git.spl) +
+# shadow.spl sync; when the config carries `git: <dir>`, each trigger also
+# re-runs the byte-for-byte git tree comparison (scv_verify_backends_git).
+# Nothing here shells out to sj/jj.
+#
+# Default is a strict NO-OP: with no .scv/meta/shadow_write.sdn config the
+# trigger returns "" and writes nothing, so existing dual-write/mvp specs and
+# object counts are unchanged.
+
+use app.io.mod (file_exists, file_read)
+use std.scv.core.{scv_meta_dir}
+use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_write_text}
+use std.scv.native_shadow.{scv_dual_write_verify, scv_dual_write_fsck}
+use std.scv.stabilize.{scv_verify_backends_git}
+
+fn scv_shadow_write_config_path(root: text) -> text:
+    "{scv_meta_dir(root)}/shadow_write.sdn"
+
+fn scv_shadow_write_log_path(root: text) -> text:
+    "{scv_meta_dir(root)}/shadow_write_log.sdn"
+
+fn scv_shadow_write_config_field(root: text, key: text) -> text:
+    val path = scv_shadow_write_config_path(root)
+    if not file_exists(path):
+        return ""
+    for line in file_read(path).split("\n"):
+        val t = line.trim()
+        if t.starts_with("{key}: "):
+            return t["{key}: ".len():]
+    ""
+
+fn scv_shadow_write_enabled(root: text) -> bool:
+    scv_shadow_write_config_field(root, "dest") != ""
+
+# `scv shadow-write enable --dest <dir> [--git <dir>]`
+fn scv_shadow_write_enable(root: text, dest: text, git_dir: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    if dest == "":
+        return "ERROR — nothing was checked (shadow-write enable requires --dest <dir>)\n"
+    var payload = "shadow_write:\ndest: {dest}\n"
+    if git_dir != "":
+        payload = payload + "git: {git_dir}\n"
+    if not scv_write_text(scv_shadow_write_config_path(root), payload):
+        return "FAIL — shadow-write config write failed\n"
+    "PASS — shadow-write enabled: every explicit revision dual-writes to {dest} and is compared\n"
+
+fn scv_shadow_write_log_rows(root: text) -> [text]:
+    val path = scv_shadow_write_log_path(root)
+    if not file_exists(path):
+        return []
+    var out: [text] = []
+    for line in file_read(path).split("\n"):
+        if line.trim() != "":
+            out.push(line.trim())
+    out
+
+fn scv_shadow_write_append_row(root: text, verdict: text, detail: text) -> bool:
+    val rows = scv_shadow_write_log_rows(root)
+    val seq = rows.len() + 1
+    val line = "{seq}|{scv_current_op(root)}|{scv_read_workspace_commit(root)}|{verdict}|{detail}"
+    val prior = if file_exists(scv_shadow_write_log_path(root)): file_read(scv_shadow_write_log_path(root)) else: ""
+    scv_write_text(scv_shadow_write_log_path(root), prior + line + "\n")
+
+fn scv_shadow_write_last_line(result: text) -> text:
+    var last = ""
+    for line in result.split("\n"):
+        if line.trim() != "":
+            last = line.trim()
+    last
+
+# The continuous trigger. Called from store.spl scv_write_operation after the
+# head/workspace refs are written, on EVERY explicit revision. Config-gated:
+# returns "" untriggered when shadow-write is not enabled. Fail-closed: the
+# commit already exists; a compare failure is RECORDED as a FAIL row (never
+# dropped) and returned for surfacing — it does not roll back the commit.
+fn scv_shadow_write_on_operation(root: text) -> text:
+    val dest = scv_shadow_write_config_field(root, "dest")
+    if dest == "":
+        return ""
+    # Dual write + continuous compare: tree/content/parent DAG/refs via the
+    # MIG-24 verify; reachability via the shadow fsck (parents + change
+    # `latest` must resolve inside the shadow itself).
+    val verify = scv_dual_write_verify(root, dest)
+    val fsck = scv_dual_write_fsck(dest)
+    val v_last = scv_shadow_write_last_line(verify)
+    val f_last = scv_shadow_write_last_line(fsck)
+    var git_last = ""
+    val git_dir = scv_shadow_write_config_field(root, "git")
+    if git_dir != "":
+        git_last = scv_shadow_write_last_line(scv_verify_backends_git(root, git_dir, "HEAD"))
+    val ok = v_last.starts_with("PASS") and f_last.starts_with("PASS") and (git_last == "" or git_last.starts_with("PASS"))
+    val verdict = if ok: "PASS" else: "FAIL"
+    var detail = "verify={v_last}; fsck={f_last}"
+    if git_last != "":
+        detail = detail + "; git={git_last}"
+    scv_shadow_write_append_row(root, verdict, detail)
+    "{verdict} — shadow-write: {detail}\n"
+
+# `scv shadow-write sync` — run one trigger explicitly (also used to clear a
+# FAIL after repair: a later PASS row resolves earlier FAILs in status).
+fn scv_shadow_write_sync(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    if not scv_shadow_write_enabled(root):
+        return "ERROR — nothing was checked (shadow-write not enabled; run: scv shadow-write enable --dest <dir>)\n"
+    val out = scv_shadow_write_on_operation(root)
+    if out == "":
+        return "ERROR — nothing was checked (shadow-write trigger did not run)\n"
+    out
+
+# `scv shadow-write status` — fail-closed report: FAILs while the most recent
+# row is a FAIL (an unrepaired divergence must not look green).
+fn scv_shadow_write_status(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    if not scv_shadow_write_enabled(root):
+        return "ERROR — nothing was checked (shadow-write not enabled)\n"
+    val rows = scv_shadow_write_log_rows(root)
+    val dest = scv_shadow_write_config_field(root, "dest")
+    var out = "shadow_write_status:\n  dest: {dest}\n  rows: {rows.len()}\n"
+    var pass_n = 0
+    var fail_n = 0
+    var last_verdict = ""
+    for row in rows:
+        val parts = row.split("|")
+        if parts.len() >= 4:
+            if parts[3] == "PASS":
+                pass_n = pass_n + 1
+            else:
+                fail_n = fail_n + 1
+            last_verdict = parts[3]
+        out = out + "  {row}\n"
+    if rows.len() == 0:
+        return out + "ERROR — nothing was checked (no shadow-write rows yet; commit once or run shadow-write sync)\n"
+    if last_verdict == "PASS":
+        return out + "PASS — shadow-write continuous: {rows.len()} row(s), {pass_n} pass, {fail_n} fail, latest PASS\n"
+    out + "FAIL — shadow-write divergence unresolved: {rows.len()} row(s), {fail_n} fail row(s), latest {last_verdict}\n"
+
+export scv_shadow_write_config_path, scv_shadow_write_log_path
+export scv_shadow_write_enabled, scv_shadow_write_enable, scv_shadow_write_on_operation, scv_shadow_write_sync, scv_shadow_write_status, scv_shadow_write_log_rows

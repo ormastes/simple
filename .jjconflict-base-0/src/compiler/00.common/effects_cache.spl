@@ -1,0 +1,107 @@
+# Effects Cache
+#
+# Caches effect analysis results for functions and operations.
+# Avoids re-analyzing unchanged functions during incremental compilation.
+#
+# Port of rust/compiler/src/effects_cache.rs (120+ lines)
+
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct EffectCacheConfig:
+    max_entries: i64
+    validate_on_lookup: bool
+
+impl EffectCacheConfig:
+    static fn default_config() -> EffectCacheConfig:
+        EffectCacheConfig(max_entries: 5000, validate_on_lookup: true)
+
+struct EffectCacheStats:
+    hits: i64
+    misses: i64
+    entries: i64
+
+impl EffectCacheStats:
+    static fn empty() -> EffectCacheStats:
+        EffectCacheStats(hits: 0, misses: 0, entries: 0)
+
+    fn hit_ratio() -> f64:
+        val total = self.hits + self.misses
+        if total == 0: 0.0
+        else: self.hits.to_f64() / total.to_f64()
+
+struct CachedFunctionEffectInfo:
+    """Cached effect-analysis results for a single function.
+
+    Distinct from compiler.common.effects.FunctionEffectInfo, which is the
+    lightweight inference-time descriptor (name/is_async/contains_suspension/
+    called_functions). This is the persisted cache entry, and carries the
+    declared/derived effect sets and the recorded violations."""
+    name: text
+    declared_effects: [text]
+    derived_effects: [text]
+    called_operations: [text]
+    called_functions: [text]
+    violations: [text]
+
+impl CachedFunctionEffectInfo:
+    static fn empty(name: text) -> CachedFunctionEffectInfo:
+        CachedFunctionEffectInfo(name: name, declared_effects: [], derived_effects: [],
+                                 called_operations: [], called_functions: [], violations: [])
+
+    fn has_violations() -> bool:
+        not self.violations.is_empty()
+
+    fn all_effects() -> [text]:
+        """Combined declared and derived effects."""
+        self.declared_effects.merge(self.derived_effects)
+
+# ============================================================================
+# Effect Cache
+# ============================================================================
+
+class EffectCache:
+    """Caches function effect analysis results."""
+    config: EffectCacheConfig
+    function_cache: {text: CachedFunctionEffectInfo}
+    operation_effects: {text: [text]}    # operation -> required effects
+    stats: EffectCacheStats
+
+impl EffectCache:
+    static fn create(config: EffectCacheConfig) -> EffectCache:
+        EffectCache(config: config, function_cache: {},
+                    operation_effects: {}, stats: EffectCacheStats.empty())
+
+    fn lookup_function(name: text) -> CachedFunctionEffectInfo?:
+        if self.function_cache.has(name):
+            self.stats = EffectCacheStats(hits: self.stats.hits + 1,
+                misses: self.stats.misses, entries: self.stats.entries)
+            Some(self.function_cache[name])
+        else:
+            self.stats = EffectCacheStats(hits: self.stats.hits,
+                misses: self.stats.misses + 1, entries: self.stats.entries)
+            nil
+
+    me store_function(info: CachedFunctionEffectInfo):
+        self.function_cache[info.name] = info
+        self.stats = EffectCacheStats(hits: self.stats.hits,
+            misses: self.stats.misses,
+            entries: self.function_cache.keys().len())
+
+    me register_operation(operation: text, required_effects: [text]):
+        self.operation_effects[operation] = required_effects
+
+    fn get_operation_effects(operation: text) -> [text]:
+        if self.operation_effects.has(operation):
+            self.operation_effects[operation]
+        else:
+            []
+
+    me clear():
+        self.function_cache = {}
+        self.stats = EffectCacheStats.empty()
+
+    fn get_stats() -> EffectCacheStats:
+        self.stats

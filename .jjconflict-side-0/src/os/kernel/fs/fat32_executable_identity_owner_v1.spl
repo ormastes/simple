@@ -1,0 +1,511 @@
+"""Bounded FAT32 object identity owner for authenticated execution inputs.
+
+The owner never treats a path string as an object identity. A backend first
+opens a mount generation, then submits the exact 32-byte directory entry and
+the validated raw UTF-16 LFN code units (if present). The resulting receipt
+proves only the owner's state at one linearization point. Replacement,
+deletion, remount, or owner exhaustion makes an earlier receipt no longer
+current. It does not authorize a later open or launch: that requires a future
+atomic adapter shared with the FAT mutation owner.
+
+This is an identity prerequisite only. It does not authorize I/O or launch.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+pub const FAT32_EXEC_IDENTITY_MOUNT_LIMIT_V1: i32 = 16
+pub const FAT32_EXEC_IDENTITY_OBJECT_LIMIT_V1: i32 = 128
+pub const FAT32_EXEC_IDENTITY_LFN_LIMIT_V1: i32 = 255
+
+pub struct Fat32ExecutableMountRequestV1:
+    device_id: u64
+    volume_serial: u32
+    root_cluster: u32
+
+pub struct Fat32ExecutableMountSealV1:
+    _slot: i32
+    _generation: u32
+    _nonce: u64
+
+pub struct Fat32ExecutableObjectObservationV1:
+    directory_cluster: u32
+    dirent_sector: u64
+    dirent_offset: i32
+    dirent: [u8]
+    lfn_utf16: [u16]
+
+pub struct Fat32ExecutableObjectIdentityV1:
+    device_id: u64
+    volume_serial: u32
+    mount_generation: u32
+    mount_instance_nonce: u64
+    directory_cluster: u32
+    dirent_sector: u64
+    dirent_offset: i32
+    first_cluster: u32
+    file_size: u32
+    short_name_checksum: u8
+    short_name_hash: u64
+    short_lookup_hash: u64
+    long_name_hash: u64
+    has_long_name: bool
+    long_name_ascii_only: bool
+    object_generation: u32
+
+pub struct Fat32ExecutableIdentitySnapshotV1:
+    identity: Fat32ExecutableObjectIdentityV1
+    _mount_slot: i32
+    _mount_nonce: u64
+    _object_slot: i32
+    _object_nonce: u64
+
+struct Fat32ExecutableMountSlotV1:
+    active: bool
+    retired: bool
+    generation: u32
+    nonce: u64
+    request: Fat32ExecutableMountRequestV1
+
+struct Fat32ExecutableObjectSlotV1:
+    active: bool
+    retired: bool
+    mount_slot: i32
+    mount_generation: u32
+    mount_nonce: u64
+    object_generation: u32
+    nonce: u64
+    identity: Fat32ExecutableObjectIdentityV1
+    dirent_hash: u64
+
+struct Fat32ExecutableIdentityOwnerV1:
+    initialized: bool
+    quarantined: bool
+    next_nonce: u64
+    mounts: [Fat32ExecutableMountSlotV1]
+    objects: [Fat32ExecutableObjectSlotV1]
+
+fn _empty_mount_request_v1() -> Fat32ExecutableMountRequestV1:
+    Fat32ExecutableMountRequestV1(device_id: 0u64, volume_serial: 0u32, root_cluster: 0u32)
+
+fn _empty_identity_v1() -> Fat32ExecutableObjectIdentityV1:
+    Fat32ExecutableObjectIdentityV1(
+        device_id: 0u64, volume_serial: 0u32, mount_generation: 0u32,
+        mount_instance_nonce: 0u64,
+        directory_cluster: 0u32, dirent_sector: 0u64, dirent_offset: 0,
+        first_cluster: 0u32, file_size: 0u32, short_name_checksum: 0u8,
+        short_name_hash: 0u64, short_lookup_hash: 0u64,
+        long_name_hash: 0u64,
+        has_long_name: false, long_name_ascii_only: true,
+        object_generation: 0u32)
+
+fn _new_mount_slots_v1() -> [Fat32ExecutableMountSlotV1]:
+    var result: [Fat32ExecutableMountSlotV1] = []
+    var i = 0
+    while i < FAT32_EXEC_IDENTITY_MOUNT_LIMIT_V1:
+        result.push(Fat32ExecutableMountSlotV1(
+            active: false, retired: false, generation: 1u32, nonce: 0u64,
+            request: _empty_mount_request_v1()))
+        i = i + 1
+    result
+
+fn _new_object_slots_v1() -> [Fat32ExecutableObjectSlotV1]:
+    var result: [Fat32ExecutableObjectSlotV1] = []
+    var i = 0
+    while i < FAT32_EXEC_IDENTITY_OBJECT_LIMIT_V1:
+        result.push(Fat32ExecutableObjectSlotV1(
+            active: false, retired: false, mount_slot: -1,
+            mount_generation: 0u32, mount_nonce: 0u64,
+            object_generation: 1u32, nonce: 0u64,
+            identity: _empty_identity_v1(), dirent_hash: 0u64))
+        i = i + 1
+    result
+
+val _fat32_exec_identity_mutex_v1 = mutex_raw_create()
+var _fat32_exec_identity_owner_v1 = Fat32ExecutableIdentityOwnerV1(
+    initialized: false, quarantined: false,
+    next_nonce: 0x4641543332494431u64, mounts: [], objects: [])
+
+fn _initialize_locked_v1():
+    if not _fat32_exec_identity_owner_v1.initialized:
+        _fat32_exec_identity_owner_v1.mounts = _new_mount_slots_v1()
+        _fat32_exec_identity_owner_v1.objects = _new_object_slots_v1()
+        _fat32_exec_identity_owner_v1.initialized = true
+
+fn _lock_v1() -> bool:
+    if _fat32_exec_identity_mutex_v1 <= 0 or
+       not mutex_raw_lock(_fat32_exec_identity_mutex_v1):
+        return false
+    _initialize_locked_v1()
+    if _fat32_exec_identity_owner_v1.quarantined:
+        _ = mutex_raw_unlock(_fat32_exec_identity_mutex_v1)
+        return false
+    true
+
+fn _unlock_v1() -> bool:
+    if mutex_raw_unlock(_fat32_exec_identity_mutex_v1): return true
+    _fat32_exec_identity_owner_v1.quarantined = true
+    false
+
+fn _next_nonce_locked_v1() -> u64:
+    if _fat32_exec_identity_owner_v1.next_nonce == 0xffffffffffffffffu64:
+        return 0u64
+    _fat32_exec_identity_owner_v1.next_nonce =
+        _fat32_exec_identity_owner_v1.next_nonce + 1u64
+    _fat32_exec_identity_owner_v1.next_nonce
+
+fn _hash_u8_v1(bytes: [u8]) -> u64:
+    var hash = 0xcbf29ce484222325u64
+    for byte in bytes:
+        hash = (hash ^ byte.to_u64()) * 0x100000001b3u64
+    hash
+
+fn _hash_u16_v1(units: [u16], ascii_fold: bool) -> u64:
+    var hash = 0xcbf29ce484222325u64
+    for unit in units:
+        var value = unit
+        if ascii_fold and value >= 97u16 and value <= 122u16:
+            value = value - 32u16
+        hash = (hash ^ (value & 0xffu16).to_u64()) * 0x100000001b3u64
+        hash = (hash ^ (value >> 8).to_u64()) * 0x100000001b3u64
+    hash
+
+fn _lfn_ascii_only_v1(units: [u16]) -> bool:
+    for unit in units:
+        if unit > 0x7fu16: return false
+    true
+
+fn _short_checksum_v1(dirent: [u8]) -> u8:
+    var sum = 0u8
+    var i = 0
+    while i < 11:
+        sum = (((sum & 1u8) << 7) | (sum >> 1)) + dirent[i]
+        i = i + 1
+    sum
+
+fn _short_lookup_units_v1(dirent: [u8]) -> [u16]:
+    # Convert the padded 8+3 field into the same folded NAME.EXT domain used
+    # by ASCII LFNs, so cross-class aliases cannot evade comparison.
+    var result: [u16] = []
+    var i = 0
+    while i < 8:
+        if dirent[i] != 0x20u8 and dirent[i] != 0u8:
+            result.push(dirent[i].to_u16())
+        i = i + 1
+    var has_extension = false
+    var ei = 8
+    while ei < 11:
+        if dirent[ei] != 0x20u8 and dirent[ei] != 0u8:
+            has_extension = true
+        ei = ei + 1
+    if has_extension:
+        result.push(0x2eu16)
+        ei = 8
+        while ei < 11:
+            if dirent[ei] != 0x20u8 and dirent[ei] != 0u8:
+                result.push(dirent[ei].to_u16())
+            ei = ei + 1
+    result
+
+fn _u16_le_v1(bytes: [u8], offset: i32) -> u32:
+    bytes[offset].to_u32() | (bytes[offset + 1].to_u32() << 8)
+
+fn _u32_le_v1(bytes: [u8], offset: i32) -> u32:
+    _u16_le_v1(bytes, offset) | (_u16_le_v1(bytes, offset + 2) << 16)
+
+fn _observation_valid_v1(observation: Fat32ExecutableObjectObservationV1) -> bool:
+    if observation.directory_cluster < 2u32 or observation.dirent_sector == 0u64 or
+       observation.dirent_offset < 0 or observation.dirent_offset % 32 != 0 or
+       observation.dirent.len() != 32 or
+       observation.lfn_utf16.len() > FAT32_EXEC_IDENTITY_LFN_LIMIT_V1:
+        return false
+    val first = observation.dirent[0]
+    val attr = observation.dirent[11]
+    if first == 0u8 or first == 0xe5u8 or attr == 0x0fu8 or
+       (attr & 0x10u8) != 0u8 or (attr & 0x08u8) != 0u8:
+        return false
+    var ui = 0
+    while ui < observation.lfn_utf16.len():
+        val unit = observation.lfn_utf16[ui]
+        if unit == 0u16 or unit == 0xffffu16: return false
+        if unit >= 0xd800u16 and unit <= 0xdbffu16:
+            if ui + 1 >= observation.lfn_utf16.len(): return false
+            val low = observation.lfn_utf16[ui + 1]
+            if low < 0xdc00u16 or low > 0xdfffu16: return false
+            ui = ui + 2
+            continue
+        if unit >= 0xdc00u16 and unit <= 0xdfffu16: return false
+        ui = ui + 1
+    true
+
+fn _mount_index_locked_v1(seal: Fat32ExecutableMountSealV1) -> i32:
+    if seal._slot < 0 or seal._slot >= FAT32_EXEC_IDENTITY_MOUNT_LIMIT_V1 or
+       seal._generation == 0u32 or seal._nonce == 0u64:
+        return -1
+    val slot = _fat32_exec_identity_owner_v1.mounts[seal._slot]
+    if not slot.active or slot.generation != seal._generation or
+       slot.nonce != seal._nonce:
+        return -1
+    seal._slot
+
+fn _same_locator_v1(
+    identity: Fat32ExecutableObjectIdentityV1,
+    mount_generation: u32,
+    observation: Fat32ExecutableObjectObservationV1
+) -> bool:
+    identity.mount_generation == mount_generation and
+        identity.directory_cluster == observation.directory_cluster and
+        identity.dirent_sector == observation.dirent_sector and
+        identity.dirent_offset == observation.dirent_offset
+
+fn _slot_alias_conflicts_v1(
+    slot: Fat32ExecutableObjectSlotV1,
+    observation: Fat32ExecutableObjectObservationV1,
+    short_hash: u64,
+    short_lookup_hash: u64,
+    long_hash: u64,
+    ascii_only: bool
+) -> bool:
+    if slot.identity.short_name_hash == short_hash: return true
+    if observation.lfn_utf16.len() > 0 and ascii_only and
+       slot.identity.short_lookup_hash == long_hash:
+        return true
+    if slot.identity.has_long_name and slot.identity.long_name_ascii_only and
+       slot.identity.long_name_hash == short_lookup_hash:
+        return true
+    if observation.lfn_utf16.len() > 0 and slot.identity.has_long_name and
+       slot.identity.long_name_hash == long_hash:
+        # Exact UTF-16 hashes and ASCII-folded hashes both collide. A hash
+        # collision is rejected rather than retaining unbounded name material.
+        return true
+    if observation.lfn_utf16.len() > 0 and ascii_only and
+       slot.identity.has_long_name and slot.identity.long_name_ascii_only and
+       slot.identity.long_name_hash == long_hash:
+        return true
+    false
+
+pub(package) fn fat32_executable_identity_open_mount_v1(
+    request: Fat32ExecutableMountRequestV1
+) -> Result<Fat32ExecutableMountSealV1, text>:
+    if request.device_id == 0u64 or request.volume_serial == 0u32 or
+       request.root_cluster < 2u32:
+        return Err("invalid-mount-identity")
+    if not _lock_v1(): return Err("serialization-unavailable")
+    for active_mount in _fat32_exec_identity_owner_v1.mounts:
+        # One live identity domain may own a device. Allowing a second seal for
+        # the same mutable medium would let observations through one domain
+        # leave proofs in the other domain live.
+        if active_mount.active and active_mount.request.device_id == request.device_id:
+            _ = _unlock_v1()
+            return Err("device-already-mounted")
+    var index = -1
+    var i = 0
+    while i < FAT32_EXEC_IDENTITY_MOUNT_LIMIT_V1:
+        if not _fat32_exec_identity_owner_v1.mounts[i].active and
+           not _fat32_exec_identity_owner_v1.mounts[i].retired:
+            index = i
+            break
+        i = i + 1
+    if index < 0:
+        _ = _unlock_v1()
+        return Err("mount-capacity-exhausted")
+    val nonce = _next_nonce_locked_v1()
+    if nonce == 0u64:
+        _fat32_exec_identity_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("nonce-exhausted")
+    val generation = _fat32_exec_identity_owner_v1.mounts[index].generation
+    _fat32_exec_identity_owner_v1.mounts[index] = Fat32ExecutableMountSlotV1(
+        active: true, retired: false, generation: generation,
+        nonce: nonce, request: request)
+    val result = Fat32ExecutableMountSealV1(
+        _slot: index, _generation: generation, _nonce: nonce)
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(result)
+
+pub(package) fn fat32_executable_identity_observe_v1(
+    seal: Fat32ExecutableMountSealV1,
+    observation: Fat32ExecutableObjectObservationV1
+) -> Result<Fat32ExecutableIdentitySnapshotV1, text>:
+    if not _observation_valid_v1(observation): return Err("invalid-dirent-observation")
+    if not _lock_v1(): return Err("serialization-unavailable")
+    val mount_index = _mount_index_locked_v1(seal)
+    if mount_index < 0:
+        _ = _unlock_v1()
+        return Err("stale-mount-seal")
+    val mount = _fat32_exec_identity_owner_v1.mounts[mount_index]
+    var short_bytes: [u8] = []
+    var si = 0
+    while si < 11:
+        short_bytes.push(observation.dirent[si])
+        si = si + 1
+    val short_hash = _hash_u8_v1(short_bytes)
+    val short_lookup_hash = _hash_u16_v1(
+        _short_lookup_units_v1(observation.dirent), true)
+    val ascii_only = _lfn_ascii_only_v1(observation.lfn_utf16)
+    val long_hash = _hash_u16_v1(observation.lfn_utf16, ascii_only)
+    val dirent_hash = _hash_u8_v1(observation.dirent) ^ long_hash
+    var object_index = -1
+    var free_index = -1
+    var oi = 0
+    while oi < FAT32_EXEC_IDENTITY_OBJECT_LIMIT_V1:
+        val candidate = _fat32_exec_identity_owner_v1.objects[oi]
+        if candidate.active and candidate.mount_slot == mount_index and
+           candidate.mount_generation == seal._generation:
+            if _same_locator_v1(candidate.identity, seal._generation, observation):
+                object_index = oi
+            elif candidate.identity.directory_cluster == observation.directory_cluster and
+                 _slot_alias_conflicts_v1(candidate, observation, short_hash,
+                                          short_lookup_hash, long_hash, ascii_only):
+                _ = _unlock_v1()
+                return Err("ambiguous-fat32-alias")
+        if not candidate.active and not candidate.retired and free_index < 0:
+            free_index = oi
+        oi = oi + 1
+    if object_index < 0: object_index = free_index
+    if object_index < 0:
+        _ = _unlock_v1()
+        return Err("object-capacity-exhausted")
+    var object_generation = _fat32_exec_identity_owner_v1.objects[object_index].object_generation
+    if _fat32_exec_identity_owner_v1.objects[object_index].active and
+       _fat32_exec_identity_owner_v1.objects[object_index].dirent_hash != dirent_hash:
+        if object_generation == 0xffffffffu32:
+            _fat32_exec_identity_owner_v1.objects[object_index].active = false
+            _fat32_exec_identity_owner_v1.objects[object_index].retired = true
+            _ = _unlock_v1()
+            return Err("object-generation-exhausted")
+        object_generation = object_generation + 1u32
+    val nonce = _next_nonce_locked_v1()
+    if nonce == 0u64:
+        _fat32_exec_identity_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("nonce-exhausted")
+    val first_cluster = _u16_le_v1(observation.dirent, 26) |
+        (_u16_le_v1(observation.dirent, 20) << 16)
+    val identity = Fat32ExecutableObjectIdentityV1(
+        device_id: mount.request.device_id,
+        volume_serial: mount.request.volume_serial,
+        mount_generation: seal._generation,
+        mount_instance_nonce: seal._nonce,
+        directory_cluster: observation.directory_cluster,
+        dirent_sector: observation.dirent_sector,
+        dirent_offset: observation.dirent_offset,
+        first_cluster: first_cluster,
+        file_size: _u32_le_v1(observation.dirent, 28),
+        short_name_checksum: _short_checksum_v1(observation.dirent),
+        short_name_hash: short_hash, short_lookup_hash: short_lookup_hash,
+        long_name_hash: long_hash,
+        has_long_name: observation.lfn_utf16.len() > 0,
+        long_name_ascii_only: ascii_only,
+        object_generation: object_generation)
+    _fat32_exec_identity_owner_v1.objects[object_index] =
+        Fat32ExecutableObjectSlotV1(
+            active: true, retired: false, mount_slot: mount_index,
+            mount_generation: seal._generation, mount_nonce: seal._nonce,
+            object_generation: object_generation, nonce: nonce,
+            identity: identity, dirent_hash: dirent_hash)
+    val proof = Fat32ExecutableIdentitySnapshotV1(
+        identity: identity, _mount_slot: mount_index,
+        _mount_nonce: seal._nonce, _object_slot: object_index,
+        _object_nonce: nonce)
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(proof)
+
+pub fn fat32_executable_identity_snapshot_current_v1(
+    proof: Fat32ExecutableIdentitySnapshotV1
+) -> bool:
+    if not _lock_v1(): return false
+    var live = false
+    if proof._object_slot >= 0 and
+       proof._object_slot < FAT32_EXEC_IDENTITY_OBJECT_LIMIT_V1 and
+       proof._mount_slot >= 0 and proof._mount_slot < FAT32_EXEC_IDENTITY_MOUNT_LIMIT_V1:
+        val mount = _fat32_exec_identity_owner_v1.mounts[proof._mount_slot]
+        val object = _fat32_exec_identity_owner_v1.objects[proof._object_slot]
+        live = mount.active and mount.nonce == proof._mount_nonce and
+            mount.generation == proof.identity.mount_generation and
+            object.active and object.mount_slot == proof._mount_slot and
+            object.mount_nonce == proof._mount_nonce and
+            object.nonce == proof._object_nonce and object.identity == proof.identity
+    if not _unlock_v1(): return false
+    live
+
+pub(package) fn fat32_executable_identity_forget_v1(
+    seal: Fat32ExecutableMountSealV1,
+    directory_cluster: u32,
+    dirent_sector: u64,
+    dirent_offset: i32
+) -> Result<bool, text>:
+    if not _lock_v1(): return Err("serialization-unavailable")
+    val mount_index = _mount_index_locked_v1(seal)
+    if mount_index < 0:
+        _ = _unlock_v1()
+        return Err("stale-mount-seal")
+    var found = false
+    var i = 0
+    while i < FAT32_EXEC_IDENTITY_OBJECT_LIMIT_V1:
+        val slot = _fat32_exec_identity_owner_v1.objects[i]
+        if slot.active and slot.mount_slot == mount_index and
+           slot.identity.directory_cluster == directory_cluster and
+           slot.identity.dirent_sector == dirent_sector and
+           slot.identity.dirent_offset == dirent_offset:
+            val generation = _fat32_exec_identity_owner_v1.objects[i].object_generation
+            if generation == 0xffffffffu32:
+                _fat32_exec_identity_owner_v1.objects[i].active = false
+                _fat32_exec_identity_owner_v1.objects[i].retired = true
+                _fat32_exec_identity_owner_v1.objects[i].nonce = 0u64
+            else:
+                _fat32_exec_identity_owner_v1.objects[i] =
+                    Fat32ExecutableObjectSlotV1(
+                        active: false, retired: false, mount_slot: -1,
+                        mount_generation: 0u32, mount_nonce: 0u64,
+                        object_generation: generation + 1u32, nonce: 0u64,
+                        identity: _empty_identity_v1(), dirent_hash: 0u64)
+            found = true
+            break
+        i = i + 1
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(found)
+
+pub(package) fn fat32_executable_identity_close_mount_v1(
+    seal: Fat32ExecutableMountSealV1
+) -> Result<bool, text>:
+    if not _lock_v1(): return Err("serialization-unavailable")
+    val mount_index = _mount_index_locked_v1(seal)
+    if mount_index < 0:
+        _ = _unlock_v1()
+        return Err("stale-mount-seal")
+    var i = 0
+    while i < FAT32_EXEC_IDENTITY_OBJECT_LIMIT_V1:
+        if _fat32_exec_identity_owner_v1.objects[i].active and
+           _fat32_exec_identity_owner_v1.objects[i].mount_slot == mount_index:
+            val object_generation =
+                _fat32_exec_identity_owner_v1.objects[i].object_generation
+            if object_generation == 0xffffffffu32:
+                _fat32_exec_identity_owner_v1.objects[i].active = false
+                _fat32_exec_identity_owner_v1.objects[i].retired = true
+                _fat32_exec_identity_owner_v1.objects[i].nonce = 0u64
+            else:
+                _fat32_exec_identity_owner_v1.objects[i] =
+                    Fat32ExecutableObjectSlotV1(
+                        active: false, retired: false, mount_slot: -1,
+                        mount_generation: 0u32, mount_nonce: 0u64,
+                        object_generation: object_generation + 1u32,
+                        nonce: 0u64, identity: _empty_identity_v1(),
+                        dirent_hash: 0u64)
+        i = i + 1
+    val generation = _fat32_exec_identity_owner_v1.mounts[mount_index].generation
+    if generation == 0xffffffffu32:
+        _fat32_exec_identity_owner_v1.mounts[mount_index].active = false
+        _fat32_exec_identity_owner_v1.mounts[mount_index].retired = true
+        _fat32_exec_identity_owner_v1.mounts[mount_index].nonce = 0u64
+    else:
+        _fat32_exec_identity_owner_v1.mounts[mount_index] = Fat32ExecutableMountSlotV1(
+            active: false, retired: false, generation: generation + 1u32,
+            nonce: 0u64,
+            request: _empty_mount_request_v1())
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(true)
+
+export Fat32ExecutableMountRequestV1
+export Fat32ExecutableObjectIdentityV1, Fat32ExecutableObjectObservationV1
+export Fat32ExecutableMountSealV1, Fat32ExecutableIdentitySnapshotV1
+export fat32_executable_identity_snapshot_current_v1

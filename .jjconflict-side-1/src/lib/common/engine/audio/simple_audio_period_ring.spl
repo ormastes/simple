@@ -1,0 +1,116 @@
+# codex-impl
+# Bounded generation-safe audio period ownership shared by host and SimpleOS.
+
+class SimpleAudioPeriodRing:
+    capacity: i64
+    states: [text]
+    generations: [u64]
+    sequences: [u64]
+    live_count: i64
+    high_water: i64
+    shutdown_complete: bool
+
+impl SimpleAudioPeriodRing:
+    static fn create(requested_capacity: i64) -> SimpleAudioPeriodRing:
+        var capacity = requested_capacity
+        if capacity < 2:
+            capacity = 2
+        if capacity > 64:
+            capacity = 64
+        var states: [text] = []
+        var generations: [u64] = []
+        var sequences: [u64] = []
+        var i = 0
+        while i < capacity:
+            states.push("free")
+            generations.push(0u64)
+            sequences.push(0u64)
+            i = i + 1
+        SimpleAudioPeriodRing(
+            capacity: capacity,
+            states: states,
+            generations: generations,
+            sequences: sequences,
+            live_count: 0,
+            high_water: 0,
+            shutdown_complete: false
+        )
+
+    fn valid_index(index: i64) -> bool:
+        index >= 0 and index < self.capacity
+
+    me prepare(index: i64, generation: u64, sequence: u64) -> text:
+        if self.shutdown_complete:
+            return "shutdown"
+        if not self.valid_index(index):
+            return "invalid-index"
+        if self.states[index] != "free":
+            return "invalid-state"
+        self.states[index] = "prepared"
+        self.generations[index] = generation
+        self.sequences[index] = sequence
+        self.live_count = self.live_count + 1
+        if self.live_count > self.high_water:
+            self.high_water = self.live_count
+        "prepared"
+
+    me submit(index: i64, generation: u64) -> text:
+        if not self.valid_index(index):
+            return "invalid-index"
+        if self.generations[index] != generation:
+            return "stale-generation"
+        if self.states[index] != "prepared":
+            return "invalid-state"
+        self.states[index] = "device"
+        "submitted"
+
+    me complete(index: i64, generation: u64) -> text:
+        if not self.valid_index(index):
+            return "invalid-index"
+        if self.generations[index] != generation:
+            return "stale-generation"
+        if self.states[index] != "device":
+            return "invalid-state"
+        self.states[index] = "completed"
+        "completed"
+
+    me release(index: i64, generation: u64) -> text:
+        if not self.valid_index(index):
+            return "invalid-index"
+        if self.generations[index] != generation:
+            return "stale-generation"
+        if self.states[index] != "completed" and self.states[index] != "prepared":
+            return "invalid-state"
+        self.states[index] = "free"
+        self.generations[index] = generation + 1u64
+        self.sequences[index] = 0u64
+        self.live_count = self.live_count - 1
+        "released"
+
+    me cancel(index: i64, generation: u64) -> text:
+        if not self.valid_index(index):
+            return "invalid-index"
+        if self.generations[index] != generation:
+            return "stale-generation"
+        if self.states[index] == "free":
+            return "invalid-state"
+        self.states[index] = "free"
+        self.generations[index] = generation + 1u64
+        self.sequences[index] = 0u64
+        self.live_count = self.live_count - 1
+        "cancelled"
+
+    me shutdown() -> i64:
+        var cancelled = 0
+        var i = 0
+        while i < self.capacity:
+            if self.states[i] != "free":
+                self.states[i] = "free"
+                self.generations[i] = self.generations[i] + 1u64
+                self.sequences[i] = 0u64
+                cancelled = cancelled + 1
+            i = i + 1
+        self.live_count = 0
+        self.shutdown_complete = true
+        cancelled
+

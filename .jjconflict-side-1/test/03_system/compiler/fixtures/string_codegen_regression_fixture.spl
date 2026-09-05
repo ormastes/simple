@@ -1,0 +1,126 @@
+# Fixture for test/03_system/compiler/string_codegen_regression_spec.spl
+#
+# Native-codegen regression probe. Every check below was WRONG when compiled
+# to a native binary (correct in the interpreter) before the fixes landed on
+# 2026-07-12: rt_strcat print (180682d), #148 untyped text `==` + fused bool
+# (e4471d60acb), #149 .push()/fill-literal/concat-drop (58b0f33701f). This
+# file is native-built and executed by the spec; the spec asserts on its
+# captured stdout byte-for-byte, so any future regression that reintroduces
+# the tagged-pointer-into-fputs bug, the always-false text `==`, or the
+# concat-drop element loss will show up as a stdout mismatch.
+#
+# One marker line per check, always terminated with println so the spec can
+# assert on the exact full stdout blob.
+#
+# Belt-and-suspenders: every check that CAN be verified from inside the
+# process (i.e. everything except the print/println routing bug itself,
+# which is only observable in the bytes actually written to stdout) is ALSO
+# asserted here directly via rt_exit(N) on mismatch, with a distinct N per
+# check -- a second, stdout-independent verification vehicle. rc 0 means
+# every internal check passed; the spec still separately captures and
+# verifies stdout for the print-routing bug and as a cross-check.
+
+extern fn rt_exit(code: i64)
+
+fn main() -> i64:
+    # --- rt_strcat print bug (commit 180682d) ---
+    # Pre-fix: `+` produced a TAGGED RtCoreString; rt_print/rt_println read
+    # their operand as a raw char*, so printing a concat result fed the
+    # tagged pointer straight into fputs and printed the RtCoreString header
+    # bytes instead of "ab".
+    val lit_a = "a"
+    val lit_b = "b"
+    println(lit_a + lit_b)
+
+    # println of a concat result specifically (as opposed to print).
+    val hello = "hello"
+    val world = "world"
+    println(hello + world)
+
+    # print("x" + str_var) -- concat of a literal with a plain variable.
+    val suffix = "ixed"
+    println("m" + suffix)
+
+    # Concat-.len() (also part of 180682d): rt_strlen must not read the
+    # tagged pointer directly. Pre-fix this read the RtCoreString header's
+    # first reserved byte and stopped early, so "foo"+"bar" (len 6) reported
+    # len 3.
+    val catlen = ("foo" + "bar").len
+    println("CATLEN:" + catlen.to_text())
+    if catlen != 6:
+        rt_exit(1)
+
+    # --- #148: untyped text `==` + fused bool (commit e4471d60acb) ---
+    # Pre-fix: untyped text `==` compared raw pointer bits, so two content-
+    # equal strings materialized via different paths (tagged vs raw) never
+    # matched, and `and`-fused conditions built on it never took the true arm.
+    #
+    # eq_b is built via `+` (forcing a TAGGED RtCoreString) specifically so
+    # eq_a (a raw literal pointer) and eq_b (a tagged handle) are two
+    # different pointers with the same content -- if eq_b were just another
+    # `"foo"` literal, an interned/deduped literal pool could make eq_a and
+    # eq_b the SAME pointer, and the pre-fix pointer-identity compare would
+    # accidentally pass this check even with the bug present (no teeth).
+    val eq_a = "foo"
+    val eq_b = "fo" + "o"
+    val eq_and_len_ok = eq_a == eq_b and eq_a.len() == 3
+    if eq_and_len_ok:
+        println("EQ_AND_LEN:true")
+    else:
+        println("EQ_AND_LEN:false")
+    if not eq_and_len_ok:
+        rt_exit(2)
+
+    # Negative control: distinct content must still compare unequal (a
+    # bitwise-identity "fix" that always returns true would pass the positive
+    # case above but wrongly pass this one too).
+    val neq_a = "foo"
+    val neq_b = "bar"
+    val neq_ok = neq_a == neq_b
+    if neq_ok:
+        println("NEG:true")
+    else:
+        println("NEG:false")
+    if neq_ok:
+        rt_exit(3)
+
+    # --- #149: [""; N] fill-literal + assignment, then concat-drop loop ---
+    # Pre-fix: rt_array_repeat's return type was declared i64 against an
+    # Array-typed destination, corrupting the fill-literal's LLVM IR.
+    var filled: [text] = [""; 3]
+    filled[0] = "x"
+    filled[1] = "y"
+    filled[2] = "z"
+
+    var joined_filled = ""
+    for item in filled:
+        joined_filled = joined_filled + item
+    println("FILLED:" + joined_filled)
+    if joined_filled != "xyz":
+        rt_exit(4)
+
+    # --- #149: .push() on an untyped text array, then concat-drop loop ---
+    # Pre-fix: .push() on a builtin Array (no symbol-bearing HIR type) never
+    # resolved via MethodResolver and hit a fatal "unresolved method call:
+    # push" native-build error.
+    var pushed: [text] = []
+    pushed.push("p")
+    pushed.push("q")
+    pushed.push("r")
+
+    var joined_pushed = ""
+    for item in pushed:
+        joined_pushed = joined_pushed + item
+    println("PUSHED:" + joined_pushed)
+    if joined_pushed != "pqr":
+        rt_exit(5)
+
+    # --- string interpolation mixing numeric + concat ---
+    val n = 3
+    val interp = "n={n} " + "tail"
+    println(interp)
+    if interp != "n=3 tail":
+        rt_exit(6)
+
+    rt_exit(0)
+    return 0

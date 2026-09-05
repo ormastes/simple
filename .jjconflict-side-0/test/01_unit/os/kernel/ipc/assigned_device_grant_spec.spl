@@ -1,0 +1,42 @@
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.types.device_mem_types.{device_grant_iommu_domain_id}
+use os.kernel.ipc.syscall_device.{capability_set_assigned_device_grant_bdf}
+
+fn lease_token(kind: CapabilityKind, owner: u64, token_id: u64) -> CapabilityToken:
+    CapabilityToken(
+        kind: kind, generation: 1u64, owner: owner, token_id: token_id,
+        parent_token_id: 0u64, depth: 0i64
+    )
+
+fn complete_lease(owner: u64) -> CapabilitySet:
+    val bus = 0u8
+    val dev = 4u8
+    val func = 0u8
+    CapabilitySet(caps: [
+        lease_token(CapabilityKind.DeviceGrant(bdf_bus: bus, bdf_device: dev, bdf_func: func), owner, 1u64),
+        lease_token(CapabilityKind.DeviceBarMap(bdf_bus: bus, bdf_device: dev, bdf_func: func, bar_index: 0u8), owner, 2u64),
+        lease_token(CapabilityKind.DeviceDma(bdf_bus: bus, bdf_device: dev, bdf_func: func, max_bytes: 4096u64), owner, 3u64),
+        lease_token(CapabilityKind.IommuDomain(domain_id: device_grant_iommu_domain_id(bus, dev, func)), owner, 4u64)
+    ], is_pledged: true)
+
+describe "opaque assigned DeviceGrant syscall lease resolution":
+    it "resolves the one complete current-task broker lease":
+        val bdf = capability_set_assigned_device_grant_bdf(complete_lease(42u64), TaskId(id: 42u64))
+        expect(bdf).to_equal(Some(0x000400u64))
+
+    it "rejects an ambiguous CSpace even when each grant is otherwise valid":
+        var caps = complete_lease(42u64)
+        caps.caps.push(lease_token(
+            CapabilityKind.DeviceGrant(bdf_bus: 0u8, bdf_device: 5u8, bdf_func: 0u8), 42u64, 5u64))
+        expect(capability_set_assigned_device_grant_bdf(caps, TaskId(id: 42u64))).to_equal(nil)
+
+    it "rejects a grant without the matching IOMMU authority":
+        var caps = complete_lease(42u64)
+        caps.caps = [
+            lease_token(CapabilityKind.DeviceGrant(bdf_bus: 0u8, bdf_device: 4u8, bdf_func: 0u8), 42u64, 1u64),
+            lease_token(CapabilityKind.DeviceBarMap(bdf_bus: 0u8, bdf_device: 4u8, bdf_func: 0u8, bar_index: 0u8), 42u64, 2u64),
+            lease_token(CapabilityKind.DeviceDma(bdf_bus: 0u8, bdf_device: 4u8, bdf_func: 0u8, max_bytes: 4096u64), 42u64, 3u64)
+        ]
+        expect(capability_set_assigned_device_grant_bdf(caps, TaskId(id: 42u64))).to_equal(nil)

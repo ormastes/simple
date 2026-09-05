@@ -1,0 +1,67 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# OIDC ID Token validation — audience claim spec
+#
+# Tests for src/lib/nogc_sync_mut/oidc/id_token.spl
+#
+# Bug: IdTokenValidator.validate_claims() only checks audience mismatch when
+# claims.audience is non-empty. A token whose payload has no "aud" claim at
+# all (claims.audience == "") therefore skips the audience check entirely,
+# even though the OIDC spec (Core 1.0 §2) makes "aud" a REQUIRED claim.
+
+use std.spec.step
+
+use std.spipe.*
+use std.nogc_sync_mut.oidc.id_token.{IdTokenValidator, IdTokenClaims}
+
+fn id_token_claims(audience: text) -> IdTokenClaims:
+    return IdTokenClaims(
+        issuer: "https://issuer.example.com",
+        subject: "user-123",
+        audience: audience,
+        expiry: 0,
+        issued_at: 0,
+        nonce: "",
+        email: "",
+        name: ""
+    )
+
+fn validate_accepted(validator: IdTokenValidator, claims: IdTokenClaims) -> bool:
+    match validator.validate_claims(claims):
+        case Ok(_):
+            return true
+        case Err(_):
+            return false
+
+describe("IdTokenValidator.validate_claims"):
+    it("rejects a token with no audience claim when an audience is expected"):
+        # @req REQ-SSPEC-UNIT
+        step("build a validator expecting client id 'expected-client-id'")
+        val validator = IdTokenValidator.new("https://issuer.example.com", "expected-client-id")
+        step("present claims with no audience claim at all")
+        val accepted = validate_accepted(validator, id_token_claims(""))
+        step("validation rejects the token because aud is a required claim")
+        # oracle: OIDC Core 1.0 section 2 makes aud REQUIRED; a missing aud must never validate
+        assert_false(accepted)
+
+    it("accepts a token whose audience matches the expected client id"):
+        # @req REQ-SSPEC-UNIT
+        step("build a validator expecting client id 'expected-client-id'")
+        val validator = IdTokenValidator.new("https://issuer.example.com", "expected-client-id")
+        step("present claims with the matching audience")
+        val accepted = validate_accepted(validator, id_token_claims("expected-client-id"))
+        step("validation accepts the token")
+        # oracle: exact client-id match is the documented accept case
+        assert_true(accepted)
+
+    it("rejects a token whose audience does not match the expected client id"):
+        # @req REQ-SSPEC-UNIT
+        step("build a validator expecting client id 'expected-client-id'")
+        val validator = IdTokenValidator.new("https://issuer.example.com", "expected-client-id")
+        step("present claims for a different relying party")
+        val accepted = validate_accepted(validator, id_token_claims("other-client-id"))
+        step("validation rejects the mismatched audience")
+        # oracle: an audience naming another client must never validate for this client id
+        assert_false(accepted)

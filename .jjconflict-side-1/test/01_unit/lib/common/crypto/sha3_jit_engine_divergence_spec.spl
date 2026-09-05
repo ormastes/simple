@@ -1,0 +1,65 @@
+# SHA-3 must produce the FIPS 202 digest on BOTH execution engines.
+#
+# `bin/simple test` is the tree-walk interpreter; `bin/simple run` is the
+# Cranelift JIT (.claude/rules/testing.md). A spec BODY therefore cannot reach
+# the JIT, which is why test/01_unit/lib/common/crypto/sha3_kat_spec.spl was
+# green (7/7) while SHA3-256("") under the JIT was
+# c0e8cca8...  instead of a7ffc6f8...  -- a false green over a live defect.
+#
+# Root cause (measured 2026-08-17, seed
+# bin/release/x86_64-unknown-linux-gnu/simple): the JIT's boxed integer keeps a
+# 61-bit payload (value << 3 | 3-bit tag). A computed i64 is destroyed once its
+# magnitude reaches 2^60:
+#     2^60 -> -1152921504606846976   (payload sign bit)
+#     2^61 -> 0     2^62 -> 0     2^63 -> 0
+# The interpreter is exact for all of these. Keccak-f[1600] lanes are full
+# 64-bit, so every SHA-3 digest computed under the JIT is wrong.
+#
+# The fix is in the Rust boxing/codegen (src/compiler_rust/**), out of this
+# lane's ownership. This spec is the fence: it shells out to the JIT so the
+# defect cannot go on hiding behind an interpreter-only suite.
+#
+# Bug: doc/08_tracking/bug/stage4_selfhost_sha3_hir_infer_and_stubs_2026-06-28.md
+
+use std.spipe.*
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+val PROBE = "test/01_unit/lib/common/crypto/_sha3_jit_probe.spl"
+
+fn _run_mode(mode: text) -> text:
+    # `env` is used rather than a helper script because
+    # scripts/resource/test-slot.shs does not propagate env vars to the child.
+    val r = process_run("env", ["SIMPLE_EXECUTION_MODE=" + mode, "bin/simple", "run", PROBE])
+    r.0
+
+fn _digest_line(out: text, tag: text) -> text:
+    for line in out.split("\n"):
+        if line.starts_with(tag + "="):
+            return line.substring(tag.len() + 1, line.len())
+    ""
+
+# SHA3-256("") and SHA3-256("abc"), FIPS 202 Appendix A, as decimal bytes.
+val KAT_EMPTY = "167 255 198 248 191 30 215 102 81 193 71 86 160 97 214 98 245 128 255 77 228 59 73 250 130 216 10 75 128 248 67 74"
+val KAT_ABC = "58 152 93 167 79 226 37 178 4 92 23 45 107 211 144 189 133 95 8 110 62 157 82 91 70 191 226 69 17 67 21 50"
+
+describe "SHA-3 is engine-independent":
+
+    it "the JIT reproduces the FIPS 202 SHA3-256 empty-string vector":
+        val out = _run_mode("jit")
+        assert_equal(_digest_line(out, "empty"), KAT_EMPTY)
+
+    it "the JIT reproduces the FIPS 202 SHA3-256(\"abc\") vector":
+        val out = _run_mode("jit")
+        assert_equal(_digest_line(out, "abc"), KAT_ABC)
+
+describe "detection: 64-bit integer arithmetic survives the JIT boxing":
+
+    # Generalises past SHA-3. The reproducers above only catch this defect
+    # through Keccak; this catches the CLASS -- any value at or above 2^60
+    # computed under the JIT -- so a future 64-bit-heavy stdlib routine cannot
+    # regress silently the way SHA-3 did.
+    it "the two engines agree on the 2^60..2^63 ladder":
+        val jit = _digest_line(_run_mode("jit"), "pow")
+        val interp = _digest_line(_run_mode("interpreter"), "pow")
+        assert_true(interp != "")
+        assert_equal(jit, interp)

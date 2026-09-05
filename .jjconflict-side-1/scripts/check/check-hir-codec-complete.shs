@@ -1,0 +1,104 @@
+#!/bin/sh
+# check-hir-codec-complete.shs — the generated HirModule codec must be
+# (a) GENERATABLE from the current HIR declarations and (b) FRESH in the tree.
+#
+# WHY: src/compiler/20.hir/generated/hir_codec.spl is produced by
+# src/app/compiler_schema/codec_gen.spl from the authoritative struct/enum
+# declarations. The generator refuses any field type it cannot classify, so a
+# new HIR field of a foreign type fails GENERATION here instead of being
+# silently skipped — an omitted field would be a silent miscompile on every HIR
+# cache hit (the parser-side twin is check-flat-ast-codec-complete.shs). A new
+# variant of an existing enum needs no generator change, but it DOES change the
+# generated file, which is why freshness is checked too: a stale committed
+# codec would encode the old variant set and drop the new one on the floor.
+#
+# Verdict (always the LAST line of stdout):
+#   PASS — <n> declaration(s) covered, generated codec fresh   exit 0
+#   FAIL — ...                                                 exit 1
+#   ERROR — nothing was checked                                exit 2
+# --selftest runs before every scan and is fatal.
+
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+GEN_REL="src/compiler/20.hir/generated/hir_codec.spl"
+TMP="${TMPDIR:-/tmp}/hir-codec-complete-$$"
+mkdir -p "$TMP"
+trap 'rm -rf "$TMP"' EXIT
+
+# generate <repo_root> <out_dir> <log>; echoes the declaration count or "" on failure
+generate() {
+    _root="$1"; _out="$2"; _log="$3"
+    # cwd stays the real repo (std/app imports resolve from cwd); only the
+    # DECLARATION sources are read from $_root, via SIMPLE_REPO_ROOT.
+    ( cd "$ROOT" && SIMPLE_REPO_ROOT="$_root" SIMPLE_EXECUTION_MODE=interpret \
+        "$SIMPLE_BIN" run "src/app/compiler_schema/main.spl" codec "$_out" ) >"$_log" 2>&1
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        echo ""
+        return 1
+    fi
+    sed -n 's/^generated HirModule codec over \([0-9][0-9]*\) declaration(s).*/\1/p' "$_log" | tail -1
+}
+
+selftest() {
+    # Fixture 1: a pristine copy of the generator's inputs must generate the
+    # same bytes the repo carries (the generator is deterministic).
+    _fx="$TMP/selftest-clean"
+    mkdir -p "$_fx"
+    for rel in $(sed -n 's/^ *"\(src\/[^"]*\.spl\)",*$/\1/p' "$ROOT/src/app/compiler_schema/codec_gen.spl"); do
+        mkdir -p "$_fx/$(dirname "$rel")"
+        cp "$ROOT/$rel" "$_fx/$rel"
+    done
+    _n=$(generate "$_fx" "$_fx/out" "$_fx/gen.log")
+    if [ -z "$_n" ] || [ "$_n" -le 0 ]; then
+        echo "selftest: clean fixture failed to generate"; sed -n '1,20p' "$_fx/gen.log"; return 1
+    fi
+    if ! cmp -s "$_fx/out/hir_codec.spl" "$ROOT/$GEN_REL"; then
+        echo "selftest: clean fixture generated different bytes from $GEN_REL"; return 1
+    fi
+    # Fixture 2: an unclassifiable field type must FAIL generation, loudly.
+    _bad="$TMP/selftest-bad"
+    cp -r "$_fx" "$_bad"
+    rm -rf "$_bad/out"
+    printf '\nstruct HirCodecSelftestProbe:\n    payload: NoSuchCodecType\n' >> "$_bad/src/compiler/20.hir/hir_types.spl"
+    # reachable: hang it off HirModule's LAST field so the closure sees it
+    sed -i 's/^    extend_enums: \[HirExtendEnum\] = \[\]$/    extend_enums: [HirExtendEnum] = []\n    selftest_probe: HirCodecSelftestProbe/' "$_bad/src/compiler/20.hir/hir_types.spl"
+    _n=$(generate "$_bad" "$_bad/out" "$_bad/gen.log")
+    if [ -n "$_n" ]; then
+        echo "selftest: unknown field type did NOT fail generation"; return 1
+    fi
+    if ! grep -q 'cannot classify field type `NoSuchCodecType`' "$_bad/gen.log"; then
+        echo "selftest: generation failed for the wrong reason"; sed -n '1,20p' "$_bad/gen.log"; return 1
+    fi
+    echo "selftest: 2 fixture(s) ok"
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 2 selftest fixture(s) checked"
+    exit 0
+fi
+
+N=$(generate "$ROOT" "$TMP/gen" "$TMP/gen.log")
+if [ -z "$N" ]; then
+    echo "generator output:"; grep -v '^warning\|^  -->\|^ *|\|^ *[0-9]* |\|^$\|Example\|explicit exports' "$TMP/gen.log" | tail -5
+    echo "FAIL — generator rejected the current HIR declarations (see above); add the declaration source to codec_decl_sources() or hand-code the type in hir_codec_support.spl"
+    exit 1
+fi
+if [ "$N" -le 0 ]; then
+    echo "ERROR — nothing was checked (0 declarations covered)"
+    exit 2
+fi
+if ! cmp -s "$TMP/gen/hir_codec.spl" "$ROOT/$GEN_REL"; then
+    diff -u "$ROOT/$GEN_REL" "$TMP/gen/hir_codec.spl" | head -40
+    echo "FAIL — $N declaration(s) covered, but $GEN_REL is STALE; regenerate: bin/simple run src/app/compiler_schema/main.spl codec"
+    exit 1
+fi
+echo "PASS — $N declaration(s) covered, generated codec fresh"
+exit 0

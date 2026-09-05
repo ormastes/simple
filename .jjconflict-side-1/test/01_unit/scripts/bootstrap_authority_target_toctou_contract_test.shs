@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+PORTABLE_LOCK_ATOMIC_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$root/scripts/check/lib/portable-process-lock.shs"
+
+tmp=${TMPDIR:-/tmp}/simple-authority-target-toctou.$$
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT INT TERM
+mkdir -p "$tmp/parent"
+target="$tmp/parent/target"
+
+lock_root=$(bootstrap_stage3_authority_target_lock_root "$target")
+[ "$lock_root" = "$tmp/parent/.bootstrap-authority-target-locks" ]
+PORTABLE_LOCK_HANDLES=
+portable_lock_acquire "$lock_root" authority-target-root 5
+target_handle=$PORTABLE_LOCK_HANDLE
+prepared=$(bootstrap_stage3_prepare_authority_target_root "$target")
+identity=$(bootstrap_stage3_authority_target_identity "$prepared")
+bootstrap_stage3_revalidate_authority_target_root "$prepared" "$identity"
+
+# Replacing the configured leaf cannot redirect use after the parent-root lock
+# was acquired: canonical path is unchanged, but dev:inode is not.
+mv "$target" "$tmp/parent/target.replaced"
+mkdir "$target"
+if bootstrap_stage3_revalidate_authority_target_root "$prepared" "$identity"; then
+  echo 'FAIL: replaced authority target leaf retained identity' >&2
+  exit 1
+fi
+rm -rf "$target"
+mv "$tmp/parent/target.replaced" "$target"
+bootstrap_stage3_revalidate_authority_target_root "$prepared" "$identity"
+portable_lock_release "$target_handle"
+
+ln -s "$target" "$tmp/parent/target-link"
+if bootstrap_stage3_authority_target_lock_root "$tmp/parent/target-link"; then
+  echo 'FAIL: symlink target lock root admitted' >&2
+  exit 1
+fi
+
+echo 'bootstrap_authority_target_toctou_contract_test: PASS'

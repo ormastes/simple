@@ -1,0 +1,90 @@
+"""Engine-divergence matrix for enum payload sub-patterns.
+
+Regression fixture for
+doc/08_tracking/bug/nested_payload_subpattern_always_matches_2026-08-01.md.
+
+Run under BOTH engines and diff the output -- the tree-walk interpreter was
+always correct here, so an interpreter-only run proves nothing:
+
+    SIMPLE_EXECUTION_MODE=interpreter simple run <this file>
+    SIMPLE_EXECUTION_MODE=jit         simple run <this file>
+
+Both must print `BADCOUNT 0`. Before the fix the JIT printed BADCOUNT 6:
+a nested variant sub-pattern (`Const(Inner.Str(n), _)`) always matched and
+bound zero, and a user enum whose variants are literally named `Some`/`None`
+took the optional-shaped `rt_is_some` probe, which is true for every enum
+value and made `case Some(x)` irrefutable.
+"""
+
+enum Inner:
+    Str(name: i64)
+    Num(v: i64)
+
+enum Outer:
+    Const(inner: Inner, tag: i64)
+    Other(x: i64)
+
+# A user enum is free to name its variants Some/None.
+enum UserOpt:
+    Some(x: i64)
+    None
+
+# Nested variant sub-pattern: the arm must be selected by the INNER variant.
+fn nested(o: Outer) -> i64:
+    match o:
+        case Const(Inner.Str(name), tag): name + tag
+        case Const(Inner.Num(v), tag): v + tag + 500
+        case _: -1
+
+# Same, with the inner binder discarded -- tests refutability alone.
+fn nested_wild(o: Outer) -> i64:
+    match o:
+        case Const(Inner.Str(_), tag): tag
+        case _: -1
+
+# A user enum owning Some/None must NOT take the optional fast path.
+fn user_opt(o: UserOpt) -> i64:
+    match o:
+        case Some(x): x
+        case _: -1
+
+# Single-level payload binds were always correct; keep them pinned.
+fn single(o: Outer) -> i64:
+    match o:
+        case Other(x): x
+        case _: -1
+
+fn check(name: text, got: i64, want: i64) -> i64:
+    if got == want:
+        print("PASS {name} got={got}")
+        return 0
+    print("FAIL {name} got={got} want={want}")
+    1
+
+# Harness self-test. Every row above is a `check` call, so if `check` could
+# never report a mismatch the whole matrix would be vacuously green -- which is
+# exactly how a pattern-match probe false-passes. This proves the detector
+# works without leaving a permanently-red row: it asserts that `check` DOES
+# return 1 for a known-wrong pair. The single FAIL line it prints is expected.
+fn sentinel() -> i64:
+    print("-- sentinel: the next FAIL line is EXPECTED --")
+    val detected = check("SENTINEL_expected_fail", 1, 999)
+    if detected == 1:
+        print("PASS sentinel_harness_live")
+        return 0
+    print("FAIL sentinel_harness_VACUOUS")
+    1
+
+fn main() -> i64:
+    var bad = 0
+    bad = bad + sentinel()
+    bad = bad + check("nested_str", nested(Outer.Const(inner: Inner.Str(name: 7), tag: 3)), 10)
+    bad = bad + check("nested_num", nested(Outer.Const(inner: Inner.Num(v: 7), tag: 3)), 510)
+    bad = bad + check("nested_other", nested(Outer.Other(x: 1)), -1)
+    bad = bad + check("nested_wild_hit", nested_wild(Outer.Const(inner: Inner.Str(name: 7), tag: 3)), 3)
+    bad = bad + check("nested_wild_miss", nested_wild(Outer.Const(inner: Inner.Num(v: 9), tag: 3)), -1)
+    bad = bad + check("user_opt_some", user_opt(UserOpt.Some(x: 42)), 42)
+    bad = bad + check("user_opt_none", user_opt(UserOpt.None), -1)
+    bad = bad + check("single_bind", single(Outer.Other(x: 9)), 9)
+    print("BADCOUNT {bad}")
+    bad

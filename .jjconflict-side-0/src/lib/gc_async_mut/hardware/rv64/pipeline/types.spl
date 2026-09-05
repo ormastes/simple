@@ -1,0 +1,331 @@
+@allow(unnamed_duplicate_typed_args) # reason: hardware register/memory APIs use positional i64 params
+# RV64 Pipeline Shared Types
+#
+# Data structures shared across all five pipeline stages (IF, ID, EX, MEM, WB).
+# Defines the register file, inter-stage latches, and ALU operation enum.
+#
+# Feature IDs: #HW-RV64-PIPE-TYPES
+# Category: Hardware / RTL Simulation
+# Status: Implemented
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val RV64_NUM_REGS: i64 = 32
+val RV64_XLEN: i64 = 64
+
+# ============================================================================
+# ALU Operation Enum
+# ============================================================================
+
+enum Rv64AluOp:
+    """ALU operations for the RV64I execute stage."""
+    Add
+    Sub
+    Sll
+    Slt
+    Sltu
+    Xor
+    Srl
+    Sra
+    Or
+    And
+    # RV64I W-suffix (operate on lower 32 bits, sign-extend to 64)
+    Addw
+    Subw
+    Sllw
+    Srlw
+    Sraw
+    # Pass-through (for LUI / AUIPC where ALU just forwards)
+    PassB
+
+impl Rv64AluOp:
+    me fn to_text() -> text:
+        match self:
+            case Rv64AluOp.Add: "add"
+            case Rv64AluOp.Sub: "sub"
+            case Rv64AluOp.Sll: "sll"
+            case Rv64AluOp.Slt: "slt"
+            case Rv64AluOp.Sltu: "sltu"
+            case Rv64AluOp.Xor: "xor"
+            case Rv64AluOp.Srl: "srl"
+            case Rv64AluOp.Sra: "sra"
+            case Rv64AluOp.Or: "or"
+            case Rv64AluOp.And: "and"
+            case Rv64AluOp.Addw: "addw"
+            case Rv64AluOp.Subw: "subw"
+            case Rv64AluOp.Sllw: "sllw"
+            case Rv64AluOp.Srlw: "srlw"
+            case Rv64AluOp.Sraw: "sraw"
+            case Rv64AluOp.PassB: "passb"
+
+# ============================================================================
+# Instruction Type Enum
+# ============================================================================
+
+enum Rv64InstType:
+    """RISC-V instruction format types."""
+    RType
+    IType
+    SType
+    BType
+    UType
+    JType
+    Unknown
+
+impl Rv64InstType:
+    me fn to_text() -> text:
+        match self:
+            case Rv64InstType.RType: "RType"
+            case Rv64InstType.IType: "IType"
+            case Rv64InstType.SType: "SType"
+            case Rv64InstType.BType: "BType"
+            case Rv64InstType.UType: "UType"
+            case Rv64InstType.JType: "JType"
+            case Rv64InstType.Unknown: "Unknown"
+
+# ============================================================================
+# Register File
+# ============================================================================
+
+struct Rv64RegisterFile:
+    """32 x 64-bit general purpose registers. x0 is hardwired to zero."""
+    regs: [i64]
+
+fn create_rv64_register_file() -> Rv64RegisterFile:
+    """Create a zeroed register file with 32 entries."""
+    var r: [i64] = []
+    for i in 0..RV64_NUM_REGS:
+        r.push(0)
+    Rv64RegisterFile(regs: r)
+
+impl Rv64RegisterFile:
+    fn read(idx: i64) -> i64:
+        """Read register. x0 always returns 0."""
+        if idx == 0:
+            return 0
+        if idx < 0 or idx >= RV64_NUM_REGS:
+            return 0
+        self.regs[idx]
+
+    me write(idx: i64, value: i64):
+        """Write register. Writes to x0 are silently ignored."""
+        if idx == 0:
+            return
+        if idx < 0 or idx >= RV64_NUM_REGS:
+            return
+        self.regs[idx] = value
+
+# ============================================================================
+# IF/ID Latch
+# ============================================================================
+
+struct Rv64IfIdLatch:
+    """Data passed from Instruction Fetch to Instruction Decode."""
+    pc: i64
+    instruction: i64
+    valid: bool
+
+fn create_if_id_latch() -> Rv64IfIdLatch:
+    Rv64IfIdLatch(pc: 0, instruction: 0, valid: false)
+
+# ============================================================================
+# ID/EX Latch
+# ============================================================================
+
+struct Rv64IdExLatch:
+    """Data passed from Instruction Decode to Execute."""
+    pc: i64
+    rs1_val: i64
+    rs2_val: i64
+    imm: i64
+    rd: i64
+    rs1: i64
+    rs2: i64
+    alu_op: Rv64AluOp
+    alu_src_b_imm: bool
+    mem_read: bool
+    mem_write: bool
+    mem_to_reg: bool
+    reg_write: bool
+    branch: bool
+    jump: bool
+    inst_type: Rv64InstType
+    funct3: i64
+    valid: bool
+
+fn create_id_ex_latch() -> Rv64IdExLatch:
+    Rv64IdExLatch(
+        pc: 0, rs1_val: 0, rs2_val: 0, imm: 0,
+        rd: 0, rs1: 0, rs2: 0,
+        alu_op: Rv64AluOp.Add, alu_src_b_imm: false,
+        mem_read: false, mem_write: false, mem_to_reg: false,
+        reg_write: false, branch: false, jump: false,
+        inst_type: Rv64InstType.Unknown, funct3: 0,
+        valid: false
+    )
+
+# ============================================================================
+# EX/MEM Latch
+# ============================================================================
+
+struct Rv64ExMemLatch:
+    """Data passed from Execute to Memory."""
+    pc: i64
+    alu_result: i64
+    rs2_val: i64
+    rd: i64
+    mem_read: bool
+    mem_write: bool
+    mem_to_reg: bool
+    reg_write: bool
+    branch_taken: bool
+    branch_target: i64
+    funct3: i64
+    valid: bool
+
+fn create_ex_mem_latch() -> Rv64ExMemLatch:
+    Rv64ExMemLatch(
+        pc: 0, alu_result: 0, rs2_val: 0, rd: 0,
+        mem_read: false, mem_write: false, mem_to_reg: false,
+        reg_write: false, branch_taken: false, branch_target: 0,
+        funct3: 0, valid: false
+    )
+
+# ============================================================================
+# MEM/WB Latch
+# ============================================================================
+
+struct Rv64MemWbLatch:
+    """Data passed from Memory to Writeback."""
+    alu_result: i64
+    mem_data: i64
+    rd: i64
+    mem_to_reg: bool
+    reg_write: bool
+    valid: bool
+
+fn create_mem_wb_latch() -> Rv64MemWbLatch:
+    Rv64MemWbLatch(
+        alu_result: 0, mem_data: 0, rd: 0,
+        mem_to_reg: false, reg_write: false, valid: false
+    )
+
+# ============================================================================
+# Simple Memory (byte-addressable, 64-bit word)
+# ============================================================================
+
+struct Rv64Memory:
+    """Simple flat memory model for pipeline simulation."""
+    data: [i64]
+    size: i64
+
+fn create_rv64_memory(size_bytes: i64) -> Rv64Memory:
+    """Create a zeroed memory of given size in bytes."""
+    var d: [i64] = []
+    for i in 0..size_bytes:
+        d.push(0)
+    Rv64Memory(data: d, size: size_bytes)
+
+impl Rv64Memory:
+    fn read_byte(addr: i64) -> i64:
+        """Read one byte from memory."""
+        if addr < 0 or addr >= self.size:
+            return 0
+        self.data[addr]
+
+    me write_byte(addr: i64, value: i64):
+        """Write one byte to memory."""
+        if addr < 0 or addr >= self.size:
+            return
+        self.data[addr] = value & 0xFF
+
+    fn read_word32(addr: i64) -> i64:
+        """Read a 32-bit little-endian word."""
+        val b0 = self.read_byte(addr)
+        val b1 = self.read_byte(addr + 1)
+        val b2 = self.read_byte(addr + 2)
+        val b3 = self.read_byte(addr + 3)
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+    fn read_word64(addr: i64) -> i64:
+        """Read a 64-bit little-endian word."""
+        val lo = self.read_word32(addr)
+        val hi = self.read_word32(addr + 4)
+        lo | (hi << 32)
+
+    me write_word32(addr: i64, value: i64):
+        """Write a 32-bit little-endian word."""
+        self.write_byte(addr, value & 0xFF)
+        self.write_byte(addr + 1, (value >> 8) & 0xFF)
+        self.write_byte(addr + 2, (value >> 16) & 0xFF)
+        self.write_byte(addr + 3, (value >> 24) & 0xFF)
+
+    me write_word64(addr: i64, value: i64):
+        """Write a 64-bit little-endian word."""
+        self.write_word32(addr, value & 0xFFFFFFFF)
+        self.write_word32(addr + 4, (value >> 32) & 0xFFFFFFFF)
+
+    me store_instruction(addr: i64, inst: i64):
+        """Store a 32-bit instruction at addr (convenience alias)."""
+        self.write_word32(addr, inst)
+
+    fn load_funct3(addr: i64, funct3: i64) -> i64:
+        """Load data from memory with funct3-determined width and extension.
+
+        funct3: 0=LB, 1=LH, 2=LW, 3=LD, 4=LBU, 5=LHU, 6=LWU
+        """
+        if funct3 == 0:
+            # LB: load byte, sign-extend
+            val bv = self.read_byte(addr)
+            val bm = bv & 0xFF
+            if (bm & 0x80) != 0:
+                return bm | (-1 << 8)
+            return bm
+        if funct3 == 1:
+            # LH: load halfword, sign-extend
+            val b0 = self.read_byte(addr)
+            val b1 = self.read_byte(addr + 1)
+            val hv = b0 | (b1 << 8)
+            val hm = hv & 0xFFFF
+            if (hm & 0x8000) != 0:
+                return hm | (-1 << 16)
+            return hm
+        if funct3 == 2:
+            # LW: load word, sign-extend
+            val wv = self.read_word32(addr)
+            val wm = wv & 0xFFFFFFFF
+            if (wm & 0x80000000) != 0:
+                return wm | (-1 << 32)
+            return wm
+        if funct3 == 3:
+            # LD: load doubleword
+            return self.read_word64(addr)
+        if funct3 == 4:
+            # LBU: load byte, zero-extend
+            return self.read_byte(addr) & 0xFF
+        if funct3 == 5:
+            # LHU: load halfword, zero-extend
+            val b0 = self.read_byte(addr)
+            val b1 = self.read_byte(addr + 1)
+            return (b0 | (b1 << 8)) & 0xFFFF
+        if funct3 == 6:
+            # LWU: load word, zero-extend
+            return self.read_word32(addr) & 0xFFFFFFFF
+        0
+
+    me store_funct3(addr: i64, value: i64, funct3: i64):
+        """Store data to memory with funct3-determined width.
+
+        funct3: 0=SB, 1=SH, 2=SW, 3=SD
+        """
+        if funct3 == 0:
+            self.write_byte(addr, value & 0xFF)
+        else if funct3 == 1:
+            self.write_byte(addr, value & 0xFF)
+            self.write_byte(addr + 1, (value >> 8) & 0xFF)
+        else if funct3 == 2:
+            self.write_word32(addr, value & 0xFFFFFFFF)
+        else if funct3 == 3:
+            self.write_word64(addr, value)

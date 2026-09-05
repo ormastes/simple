@@ -1,0 +1,411 @@
+"""Safe ingestion of an externally signed Simplebox catalog record.
+
+This module never creates or edits a signature.  It reads the payload and the
+signed-record envelope below one retained no-follow host root, proves that the
+record is the one canonical SCR1 encoding of the supplied SAM1 manifest, and
+returns the exact one-record boot plan.  Ed25519 verification and irreversible
+catalog population remain owned by the loader boot owner.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, SimpleArtifactManifest
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    decode_simple_artifact_manifest_v1_signing_bytes,
+    encode_simple_artifact_manifest_v1_signing_bytes
+}
+use std.common.structural.wire.{
+    wire_magic, wire_envelope_len, wire_check_envelope, wire_has,
+    wire_get_u32, wire_put_envelope, wire_put_u8, wire_put_u32
+}
+use os.installer.hosted_safe_artifact_io_v1.{
+    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
+    hosted_safe_artifact_root_acquire_v1,
+    hosted_safe_artifact_root_close_v1,
+    hosted_safe_artifact_read_once_v1
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootRecordV1
+}
+use os.kernel.loader.simplebox_primary_tool_catalog_bundle_v1.{
+    SimpleboxPrimaryToolBundlePlanV1,
+    simplebox_primary_tool_catalog_bundle_plan_v1,
+    simplebox_primary_tool_catalog_bundle_plan_valid_v1
+}
+
+pub const SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1: i64 = 262144
+
+pub struct SimpleboxSignedCatalogExternalCandidateV1:
+    sam1_identity_sha256: text
+    record: InstalledArtifactBootRecordV1
+
+pub enum SimpleboxSignedCatalogProvisionErrorV1:
+    None
+    InvalidInput
+    PayloadHashMismatch
+    Sam1EncodingRejected
+    Sam1IdentityMismatch
+    CanonicalRecordMismatch
+    BootBundleRejected
+    SafeArtifactReadRejected
+    SafeArtifactRootCloseFailed
+
+pub struct SimpleboxSafeArtifactBindingReceiptV1:
+    artifact_relative_path: text
+    artifact_sha256: text
+    artifact_byte_count: i64
+    signed_record_relative_path: text
+    signed_record_sha256: text
+    sam1_identity_sha256: text
+
+pub struct SimpleboxSignedCatalogProvisionResultV1:
+    ok: bool
+    error: SimpleboxSignedCatalogProvisionErrorV1
+    receipt: SimpleboxSafeArtifactBindingReceiptV1
+    plan: SimpleboxPrimaryToolBundlePlanV1
+
+fn _scr1_put_text_v1(out: [u8], value: text) -> [u8]:
+    val raw = value.bytes()
+    var next = wire_put_u32(out, raw.len())
+    for byte in raw:
+        next = wire_put_u8(next, byte)
+    next
+
+fn _scr1_put_bytes_v1(out: [u8], value: [u8]) -> [u8]:
+    var next = wire_put_u32(out, value.len())
+    for byte in value:
+        next = wire_put_u8(next, byte)
+    next
+
+class _Scr1ReaderV1:
+    data: [u8]
+    offset: i64
+    ok: bool
+
+    me read_u32() -> i64:
+        if not self.ok or not wire_has(self.data, self.offset, 4):
+            self.ok = false
+            return 0
+        val value = wire_get_u32(self.data, self.offset)
+        self.offset = self.offset + 4
+        value
+
+    me read_text(maximum: i64) -> text:
+        val size = self.read_u32()
+        if not self.ok or size < 0 or size > maximum or
+            not wire_has(self.data, self.offset, size):
+            self.ok = false
+            return ""
+        var value = ""
+        var index: i64 = 0
+        while index < size:
+            val byte = self.data[self.offset + index] as i64
+            if byte < 32 or byte > 126:
+                self.ok = false
+                return ""
+            value = value + byte.chr()
+            index = index + 1
+        self.offset = self.offset + size
+        value
+
+    me read_bytes(maximum: i64) -> [u8]:
+        val size = self.read_u32()
+        if not self.ok or size < 0 or size > maximum or
+            not wire_has(self.data, self.offset, size):
+            self.ok = false
+            return []
+        var value: [u8] = []
+        var index: i64 = 0
+        while index < size:
+            value.push(self.data[self.offset + index])
+            index = index + 1
+        self.offset = self.offset + size
+        value
+
+fn _scr1_lower_sha256_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+    value != "0" * 64
+
+fn _scr1_target_equal_v1(left: ManifestTarget, right: ManifestTarget) -> bool:
+    left.os == right.os and left.arch == right.arch and left.abi == right.abi
+
+fn _scr1_ascii_bounded_v1(value: text, maximum: i64) -> bool:
+    if value.len() == 0 or value.len() > maximum: return false
+    for ch in value:
+        if ch < ' ' or ch > '~': return false
+    true
+
+fn _scr1_outer_prefix_size_v1(
+    candidate: SimpleboxSignedCatalogExternalCandidateV1,
+) -> i64:
+    val record = candidate.record
+    if not _scr1_ascii_bounded_v1(record.canonical_path, 4096) or
+        record.aliases.len() > 64 or
+        not _scr1_ascii_bounded_v1(record.detached_signature, 512):
+        return -1
+    var total: i64 = 8 + 4 + record.canonical_path.len() + 4
+    for alias in record.aliases:
+        if not _scr1_ascii_bounded_v1(alias, 4096): return -1
+        total = total + 4 + alias.len()
+    # Three hashes, the signature, and their four-byte length prefixes.
+    total = total + 4 + 64 + 4 + 64 + 4 + record.detached_signature.len() + 4 + 64
+    if total > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1: return -1
+    total
+
+fn _scr1_empty_plan_v1(target: ManifestTarget) -> SimpleboxPrimaryToolBundlePlanV1:
+    simplebox_primary_tool_catalog_bundle_plan_v1(target, [], [])
+
+fn _scr1_fail_v1(
+    target: ManifestTarget,
+    error: SimpleboxSignedCatalogProvisionErrorV1,
+) -> SimpleboxSignedCatalogProvisionResultV1:
+    SimpleboxSignedCatalogProvisionResultV1(
+        ok: false, error: error,
+        receipt: SimpleboxSafeArtifactBindingReceiptV1(
+            artifact_relative_path: "", artifact_sha256: "",
+            artifact_byte_count: 0, signed_record_relative_path: "",
+            signed_record_sha256: "", sam1_identity_sha256: ""),
+        plan: _scr1_empty_plan_v1(target))
+
+pub fn simplebox_signed_catalog_record_encode_v1(
+    candidate: SimpleboxSignedCatalogExternalCandidateV1,
+) -> [u8]?:
+    """Encode the complete external SCR1 envelope without signing it."""
+    val record = candidate.record
+    val prefix_size = _scr1_outer_prefix_size_v1(candidate)
+    if prefix_size < 0 or
+        not _scr1_lower_sha256_v1(record.content_sha256) or
+        not _scr1_lower_sha256_v1(record.expected_trust_root_sha256) or
+        not _scr1_lower_sha256_v1(candidate.sam1_identity_sha256):
+        return nil
+    val sam1 = encode_simple_artifact_manifest_v1_signing_bytes(
+        record.manifest, record.content_sha256)
+    if not sam1.ok or sha256_u8_hex(sam1.bytes) != candidate.sam1_identity_sha256:
+        return nil
+    # Preflight the final allocation before appending any caller text.
+    val final_bound = prefix_size + 4 + sam1.bytes.len()
+    if final_bound > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1: return nil
+    var out = wire_put_envelope([], wire_magic("SCR1"), 1)
+    out = _scr1_put_text_v1(out, record.canonical_path)
+    out = wire_put_u32(out, record.aliases.len())
+    for alias in record.aliases:
+        out = _scr1_put_text_v1(out, alias)
+    out = _scr1_put_text_v1(out, record.content_sha256)
+    out = _scr1_put_text_v1(out, candidate.sam1_identity_sha256)
+    out = _scr1_put_text_v1(out, record.detached_signature)
+    out = _scr1_put_text_v1(out, record.expected_trust_root_sha256)
+    out = _scr1_put_bytes_v1(out, sam1.bytes)
+    if out.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1: return nil
+    Some(out)
+
+pub fn simplebox_signed_catalog_record_decode_v1(
+    external_record_bytes: [u8],
+    manifest_projection: SimpleArtifactManifest,
+) -> SimpleboxSignedCatalogExternalCandidateV1?:
+    """Decode bounded SCR1 fields and bind them to the exact SAM1 projection."""
+    if external_record_bytes.len() == 0 or
+        external_record_bytes.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        not wire_check_envelope(
+            external_record_bytes, 0, wire_magic("SCR1"), 1):
+        return nil
+    var reader = _Scr1ReaderV1(
+        data: external_record_bytes, offset: wire_envelope_len(), ok: true)
+    val canonical_path = reader.read_text(4096)
+    val alias_count = reader.read_u32()
+    if not reader.ok or alias_count < 0 or alias_count > 64: return nil
+    var aliases: [text] = []
+    var alias_index: i64 = 0
+    while alias_index < alias_count:
+        aliases.push(reader.read_text(4096))
+        alias_index = alias_index + 1
+    val content_sha256 = reader.read_text(64)
+    val sam1_identity_sha256 = reader.read_text(64)
+    val detached_signature = reader.read_text(512)
+    val expected_trust_root_sha256 = reader.read_text(64)
+    val encoded_sam1 = reader.read_bytes(131072)
+    if not reader.ok or reader.offset != external_record_bytes.len(): return nil
+    val derived_sam1 = encode_simple_artifact_manifest_v1_signing_bytes(
+        manifest_projection, content_sha256)
+    if not derived_sam1.ok or derived_sam1.bytes != encoded_sam1 or
+        sha256_u8_hex(encoded_sam1) != sam1_identity_sha256:
+        return nil
+    val candidate = SimpleboxSignedCatalogExternalCandidateV1(
+        sam1_identity_sha256: sam1_identity_sha256,
+        record: InstalledArtifactBootRecordV1(
+            canonical_path: canonical_path, aliases: aliases,
+            content_sha256: content_sha256,
+            detached_signature: detached_signature,
+            expected_trust_root_sha256: expected_trust_root_sha256,
+            manifest: manifest_projection))
+    val canonical = simplebox_signed_catalog_record_encode_v1(candidate)
+    if not canonical.? or canonical.unwrap() != external_record_bytes: return nil
+    Some(candidate)
+
+pub fn simplebox_signed_catalog_manifest_projection_v1(
+    external_record_bytes: [u8],
+) -> SimpleArtifactManifest?:
+    """Recover the exact typed SAM1 projection carried by canonical SCR1.
+
+    This grants no trust. It exists so an external-media consumer need not
+    accept a second caller-authored manifest object beside the SCR1 bytes.
+    """
+    if external_record_bytes.len() == 0 or
+        external_record_bytes.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        not wire_check_envelope(
+            external_record_bytes, 0, wire_magic("SCR1"), 1):
+        return nil
+    var reader = _Scr1ReaderV1(
+        data: external_record_bytes, offset: wire_envelope_len(), ok: true)
+    _ = reader.read_text(4096)
+    val alias_count = reader.read_u32()
+    if not reader.ok or alias_count < 0 or alias_count > 64: return nil
+    var alias_index: i64 = 0
+    while alias_index < alias_count:
+        _ = reader.read_text(4096)
+        alias_index = alias_index + 1
+    _ = reader.read_text(64)
+    _ = reader.read_text(64)
+    val detached_signature = reader.read_text(512)
+    _ = reader.read_text(64)
+    val encoded_sam1 = reader.read_bytes(131072)
+    if not reader.ok or reader.offset != external_record_bytes.len(): return nil
+    val projection = decode_simple_artifact_manifest_v1_signing_bytes(
+        encoded_sam1, detached_signature)
+    if not projection.?: return nil
+    val manifest = projection.unwrap().manifest
+    if not simplebox_signed_catalog_record_decode_v1(
+        external_record_bytes, manifest).?:
+        return nil
+    Some(manifest)
+
+pub fn simplebox_signed_catalog_candidate_plan_v1(
+    target: ManifestTarget,
+    trust_roots: [ExecutableManifestTrustedSignerV1],
+    candidate: SimpleboxSignedCatalogExternalCandidateV1,
+    external_record_bytes: [u8],
+    artifact_bytes: [u8],
+) -> SimpleboxSignedCatalogProvisionResultV1:
+    """Pure fail-closed binding used after safe I/O has supplied both files."""
+    if artifact_bytes.len() == 0 or
+        artifact_bytes.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        external_record_bytes.len() == 0 or
+        external_record_bytes.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        not _scr1_target_equal_v1(candidate.record.manifest.target, target):
+        return _scr1_fail_v1(target, SimpleboxSignedCatalogProvisionErrorV1.InvalidInput)
+    val payload_sha256 = sha256_u8_hex(artifact_bytes)
+    if payload_sha256 != candidate.record.content_sha256:
+        return _scr1_fail_v1(
+            target, SimpleboxSignedCatalogProvisionErrorV1.PayloadHashMismatch)
+    val sam1 = encode_simple_artifact_manifest_v1_signing_bytes(
+        candidate.record.manifest, payload_sha256)
+    if not sam1.ok:
+        return _scr1_fail_v1(
+            target, SimpleboxSignedCatalogProvisionErrorV1.Sam1EncodingRejected)
+    if not _scr1_lower_sha256_v1(candidate.sam1_identity_sha256) or
+        sha256_u8_hex(sam1.bytes) != candidate.sam1_identity_sha256:
+        return _scr1_fail_v1(
+            target, SimpleboxSignedCatalogProvisionErrorV1.Sam1IdentityMismatch)
+    val canonical = simplebox_signed_catalog_record_encode_v1(candidate)
+    if not canonical.? or canonical.unwrap() != external_record_bytes:
+        return _scr1_fail_v1(
+            target, SimpleboxSignedCatalogProvisionErrorV1.CanonicalRecordMismatch)
+    val plan = simplebox_primary_tool_catalog_bundle_plan_v1(
+        target, trust_roots, [candidate.record])
+    if not simplebox_primary_tool_catalog_bundle_plan_valid_v1(plan):
+        return _scr1_fail_v1(
+            target, SimpleboxSignedCatalogProvisionErrorV1.BootBundleRejected)
+    SimpleboxSignedCatalogProvisionResultV1(
+        ok: true, error: SimpleboxSignedCatalogProvisionErrorV1.None,
+        receipt: SimpleboxSafeArtifactBindingReceiptV1(
+            artifact_relative_path: "", artifact_sha256: payload_sha256,
+            artifact_byte_count: artifact_bytes.len() as i64,
+            signed_record_relative_path: "",
+            signed_record_sha256: sha256_u8_hex(external_record_bytes),
+            sam1_identity_sha256: candidate.sam1_identity_sha256),
+        plan: plan)
+
+pub fn simplebox_signed_catalog_provision_from_safe_root_v1(
+    trusted_absolute_root: text,
+    artifact_relative_path: text,
+    signed_record_relative_path: text,
+    target: ManifestTarget,
+    trust_roots: [ExecutableManifestTrustedSignerV1],
+    manifest_projection: SimpleArtifactManifest,
+) -> SimpleboxSignedCatalogProvisionResultV1:
+    """Read both immutable inputs under one safe root and bind their receipts."""
+    if artifact_relative_path == signed_record_relative_path:
+        return _scr1_fail_v1(
+            target, SimpleboxSignedCatalogProvisionErrorV1.InvalidInput)
+    match hosted_safe_artifact_root_acquire_v1(trusted_absolute_root):
+        case Err(_):
+            _scr1_fail_v1(
+                target, SimpleboxSignedCatalogProvisionErrorV1.SafeArtifactReadRejected)
+        case Ok(authority):
+            match hosted_safe_artifact_read_once_v1(
+                authority, artifact_relative_path,
+                HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1):
+                case Err(_):
+                    match hosted_safe_artifact_root_close_v1(authority):
+                        case Err(_):
+                            _scr1_fail_v1(
+                                target,
+                                SimpleboxSignedCatalogProvisionErrorV1.SafeArtifactRootCloseFailed)
+                        case Ok(_):
+                            _scr1_fail_v1(
+                                target,
+                                SimpleboxSignedCatalogProvisionErrorV1.SafeArtifactReadRejected)
+                case Ok(artifact):
+                    match hosted_safe_artifact_read_once_v1(
+                        authority, signed_record_relative_path,
+                        SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1):
+                        case Err(_):
+                            match hosted_safe_artifact_root_close_v1(authority):
+                                case Err(_):
+                                    _scr1_fail_v1(
+                                        target,
+                                        SimpleboxSignedCatalogProvisionErrorV1.SafeArtifactRootCloseFailed)
+                                case Ok(_):
+                                    _scr1_fail_v1(
+                                        target,
+                                        SimpleboxSignedCatalogProvisionErrorV1.SafeArtifactReadRejected)
+                        case Ok(record_bytes):
+                            val decoded = simplebox_signed_catalog_record_decode_v1(
+                                record_bytes, manifest_projection)
+                            if not decoded.?:
+                                match hosted_safe_artifact_root_close_v1(authority):
+                                    case Err(_):
+                                        return _scr1_fail_v1(
+                                            target,
+                                            SimpleboxSignedCatalogProvisionErrorV1.SafeArtifactRootCloseFailed)
+                                    case Ok(_):
+                                        return _scr1_fail_v1(
+                                            target,
+                                            SimpleboxSignedCatalogProvisionErrorV1.CanonicalRecordMismatch)
+                            val result = simplebox_signed_catalog_candidate_plan_v1(
+                                target, trust_roots, decoded.unwrap(),
+                                record_bytes, artifact)
+                            match hosted_safe_artifact_root_close_v1(authority):
+                                case Err(_):
+                                    _scr1_fail_v1(
+                                        target,
+                                        SimpleboxSignedCatalogProvisionErrorV1.SafeArtifactRootCloseFailed)
+                                case Ok(_):
+                                    if not result.ok: return result
+                                    SimpleboxSignedCatalogProvisionResultV1(
+                                        ok: true,
+                                        error: SimpleboxSignedCatalogProvisionErrorV1.None,
+                                        receipt: SimpleboxSafeArtifactBindingReceiptV1(
+                                            artifact_relative_path: artifact_relative_path,
+                                            artifact_sha256: result.receipt.artifact_sha256,
+                                            artifact_byte_count: result.receipt.artifact_byte_count,
+                                            signed_record_relative_path: signed_record_relative_path,
+                                            signed_record_sha256: result.receipt.signed_record_sha256,
+                                            sam1_identity_sha256: result.receipt.sam1_identity_sha256),
+                                        plan: result.plan)

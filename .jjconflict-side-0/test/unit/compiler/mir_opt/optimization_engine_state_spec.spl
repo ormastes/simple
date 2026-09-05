@@ -1,0 +1,38 @@
+"""Legacy optimizer function-state isolation contracts."""
+
+use std.spec.*
+use compiler.mir_opt.optimization_passes.{OptimizationEngine, OptimizationLevel}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirFunction, MirInst}
+
+fn empty_optimizer_state_function() -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 99), name: "empty_state_probe",
+        signature: MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: [], entry_block: BlockId(id: 0), span: nil,
+        generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {})
+
+describe "OptimizationEngine function state":
+    it "clears every analysis map before the no-optimization early return":
+        step("Prevent LocalId facts and retained MIR from crossing functions")
+        var engine = OptimizationEngine.create(OptimizationLevel.None_)
+        val stale = MirInst(kind: MirInstKind.Const(
+            LocalId(id: 0), MirConstValue.Int(41), MirType.i64()), span: nil)
+        engine.const_map[0] = MirConstValue.Int(41)
+        engine.type_map[0] = MirType.i64()
+        engine.def_map[0] = stale
+        engine.use_count[0] = 7
+        engine.expr_map["stale"] = 0
+        engine.stats.constants_folded = 3
+
+        val result = engine.optimize_function(empty_optimizer_state_function())
+
+        expect(result.name).to_equal("empty_state_probe")
+        expect(engine.const_map.contains_key(0)).to_equal(false)
+        expect(engine.type_map.contains_key(0)).to_equal(false)
+        expect(engine.def_map.contains_key(0)).to_equal(false)
+        expect(engine.use_count.contains_key(0)).to_equal(false)
+        expect(engine.expr_map.contains_key("stale")).to_equal(false)
+        expect(engine.stats.constants_folded).to_equal(3)

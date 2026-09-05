@@ -1,0 +1,51 @@
+# @cover src/os/sosix/fs/positioned_syscall_v1.spl 80%
+"""Dedicated pointer-free positioned filesystem syscall v1 specification."""
+
+use std.spec.*
+use os.kernel.types.syscall_types.SyscallId
+use os.sosix.fs.positioned_syscall_v1.*
+
+describe "SOSIX FS positioned syscall v1":
+    it "allocates additive syscall IDs after owned-copy IPC":
+        expect(SyscallId.FsPreadRegisteredV1 as u64).to_equal(134)
+        expect(SyscallId.FsPwriteRegisteredV1 as u64).to_equal(135)
+        expect(SOSIX_FS_PREAD_REGISTERED_V1).to_equal(134)
+
+    it "carries only authenticated object and registered-buffer identities":
+        val args = sosix_fs_positioned_syscall_args_v1(
+            SOSIX_FS_PREAD_REGISTERED_V1, 41, 73, 0x0000000900000004,
+            4096, 32, 128)
+
+        expect(sosix_fs_positioned_syscall_envelope_valid_v1(args)).to_be(true)
+        expect(args.arg0).to_equal(41)
+        expect(args.arg1).to_equal(73)
+        expect(args.arg2).to_equal(0x0000000900000004)
+        expect(args.arg3).to_equal(4096)
+        expect(args.arg4).to_equal(32)
+        expect(args.arg5).to_equal(128)
+
+    it "fails closed after validating a well-formed request":
+        val args = sosix_fs_positioned_syscall_args_v1(
+            SOSIX_FS_PWRITE_REGISTERED_V1, 41, 73,
+            0x0000000900000004, 4096, 0, 128)
+
+        expect(sosix_fs_handle_positioned_registered_v1(args).value).to_equal(
+            SOSIX_FS_POSITIONED_SYSCALL_UNAVAILABLE_V1)
+
+    it "rejects missing identities and overflowing ranges before provider lookup":
+        val missing = sosix_fs_positioned_syscall_args_v1(
+            SOSIX_FS_PREAD_REGISTERED_V1, 0, 73,
+            0x0000000900000004, 0, 0, 1)
+        val overflow = sosix_fs_positioned_syscall_args_v1(
+            SOSIX_FS_PREAD_REGISTERED_V1, 41, 73,
+            0x0000000900000004, 0xfffffffffffffff0, 0, 32)
+        val stale_buffer = sosix_fs_positioned_syscall_args_v1(
+            SOSIX_FS_PREAD_REGISTERED_V1, 41, 73,
+            0x0000000000000004, 0, 0, 1)
+
+        expect(sosix_fs_handle_positioned_registered_v1(missing).value).to_equal(
+            SOSIX_FS_POSITIONED_SYSCALL_INVALID_V1)
+        expect(sosix_fs_handle_positioned_registered_v1(overflow).value).to_equal(
+            SOSIX_FS_POSITIONED_SYSCALL_INVALID_V1)
+        expect(sosix_fs_handle_positioned_registered_v1(stale_buffer).value).to_equal(
+            SOSIX_FS_POSITIONED_SYSCALL_INVALID_V1)

@@ -1,0 +1,70 @@
+# CLI Command Dispatch - Types
+#
+# Command table entry type and implementation.
+
+use app.io.{env_get}
+
+# ============================================================================
+# Command Table Types
+# ============================================================================
+
+struct CommandEntry:
+    """Single command table entry.
+
+    Each entry defines:
+    - name: CLI command name (e.g., "compile", "test")
+    - app_path: Path to Simple implementation (e.g., "src/app/compile/main.spl")
+    - env_override: Environment variable to force Rust (e.g., "SIMPLE_COMPILE_RUST")
+    - needs_rust_flags: Flags that require Rust handler (e.g., ["--json", "--fix"])
+
+    Example:
+        CommandEntry(
+            name: "compile",
+            app_path: "src/app/compile/main.spl",
+            env_override: "SIMPLE_COMPILE_RUST",
+            needs_rust_flags: []
+        )
+    """
+    name: text
+    app_path: text
+    env_override: text
+    needs_rust_flags: [text]
+
+impl CommandEntry:
+    fn should_use_rust(args: [text]) -> bool:
+        """Check if this invocation requires Rust handler.
+
+        Returns true if:
+        1. Environment override is set (e.g., SIMPLE_COMPILE_RUST=1)
+        2. Any command args match needs_rust_flags
+
+        Example:
+            entry.should_use_rust(["lint", "--json"])  # true if needs_rust_flags contains "--json"
+        """
+        # Check env override
+        if self.env_override.len() > 0:
+            val env_val = env_get(self.env_override) ?? ""
+            if env_val.len() > 0:
+                return true
+
+        # Check if any args require Rust
+        if self.needs_rust_flags.len() > 0:
+            for arg in args:
+                for flag in self.needs_rust_flags:
+                    if arg == flag or arg.starts_with(flag):
+                        return true
+
+        false
+
+    fn has_simple_impl() -> bool:
+        """Check whether this entry DECLARES a Simple implementation.
+
+        This is a declaration check, not an existence check: it does not touch
+        the filesystem, so a stale `app_path` left behind by a rename still
+        answers true here and only fails later in `cli_run_file`, surfacing as a
+        misleading "not implemented in Simple" error. The table is kept honest
+        by `test/01_unit/app/cli/dispatch_table_app_path_resolves_spec.spl`,
+        which asserts every declared `app_path` resolves to a readable file.
+        """
+        self.app_path.len() > 0
+

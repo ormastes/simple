@@ -1,0 +1,161 @@
+# Driver Helpers - Utility functions and types for the compiler driver
+#
+# Extracted from driver.spl to keep file sizes manageable.
+# Contains:
+# - Extern declarations for runtime helpers
+# - Logging helper functions
+# - Source reader state
+# - CheckBackendImpl class
+# - Source collection utilities
+# - Error formatting helpers
+
+use compiler.hir.hir.*
+use compiler.backend.backend.backend_api.{Backend}
+use compiler.types.type_infer.*
+use compiler.borrow.borrow_check.*
+use compiler.traits.trait_coherence.{CoherenceError}
+use compiler.traits.trait_validation.{TraitError}
+use compiler.semantics.const_eval.{ConstEvalError}
+use driver_types.*
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_time_ms() -> i64
+
+# Lightweight logging helpers (module-level free functions for simplicity)
+# Phase 3: These stubs will be replaced with logger_port calls in
+# CompilerDriver methods. Kept for backward compatibility with free functions.
+fn log_debug(msg: text):
+    ()
+fn log_trace(msg: text):
+    ()
+fn log_info(msg: text):
+    ()
+fn log_warn(msg: text):
+    print "[WARN] {msg}"
+fn log_error(msg: text):
+    print "[ERROR] {msg}"
+
+# Phase 4: Track modules with fresh cached SMF (module_name -> source_path)
+var _smf_cached_modules: {text: text} = {}
+
+class CheckBackendImpl(Backend):
+    fn name() -> text:
+        "check"
+
+    fn is_allowed(op: text) -> bool:
+        # Allow everything for type checking
+        true
+
+    fn process_module(module: HirModule) -> Result<Any, text>:
+        # Just validate, don't execute
+        Ok(nil)
+
+    fn eval_expr(expr: HirExpr, env: Environment) -> Result<Value, text>:
+        # Don't evaluate, just return unit
+        Ok(Value.Unit)
+
+    fn exec_stmt(stmt: HirStmt, env: Environment) -> Result<Value, text>:
+        Ok(Value.Unit)
+
+# ------------------------------------------------------------------------------
+# Source loading helpers
+# ------------------------------------------------------------------------------
+
+# SOURCE COLLECTION LIVES IN `driver_source_loading.spl` — NOT HERE.
+#
+# This file used to carry a second, co-compiled `_driver_collect_sources` /
+# `_driver_collect_sources_via_find` pair (plus its own `_skip_dirs` /
+# `_driver_should_skip_dir`) whose filter list omitted the four lane exclusions
+# the real collector applies. Two same-name co-compiled definitions make every
+# measurement of "what the driver collects" ambiguous — exactly the failure
+# mode the `public function 'shell' has 3 co-compiled definitions` warning
+# describes.
+#
+# Resolved 2026-08-11 by SABOTAGE, not inspection: marking this copy produced
+# NO movement in a probe calling `_driver_collect_sources`, while the identical
+# marker in `driver_source_loading.spl` moved it (inverse control). The
+# `driver_source_loading.spl` definition is the one that wins; this one was
+# unreachable. Pinned by
+# `test/01_unit/compiler/driver/driver_collect_sources_single_definition_spec.spl`.
+# See doc/08_tracking/bug/driver_collect_sources_path_exclusions_are_not_dead_code_2026-08-11.md
+
+# ------------------------------------------------------------------------------
+# Structured Error Formatting Helpers
+# ------------------------------------------------------------------------------
+# Errors are encoded as: "line:col: message" with optional related info
+# appended as "|||RELATED:line:col:message" segments and optional help
+# appended as "|||HELP:message".
+
+fn _format_type_infer_error(err: TypeInferError) -> text:
+    """Format a TypeInferError into a structured error string with related info."""
+    val span = err.span()
+    val msg = err.message()
+    var result = "{span.line}:{span.col}: {msg}"
+    # Add related information based on error variant
+    match err:
+        case TypeInferError.Mismatch(expected, found, s):
+            if expected.span.line > 0:
+                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
+            if found.span.line > 0 and found.span.line != s.line:
+                result = result + "|||RELATED:{found.span.line}:{found.span.col}:found type originates here"
+        case TypeInferError.OccursCheck(var_id, ty, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:recursive type reference here"
+            result = result + "|||HELP:break the recursive type by using an explicit type annotation"
+        case TypeInferError.TraitNotImplemented(ty, trait_name, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:type that needs to implement '{trait_name}'"
+            result = result + "|||HELP:add an impl block: impl {trait_name} for {ty.kind}"
+        case TypeInferError.DimensionError(dim_err):
+            for note in dim_err.notes:
+                if note.span.?:
+                    val note_span = note.span.unwrap()
+                    result = result + "|||RELATED:{note_span.line}:{note_span.col}:{note.message}"
+            if dim_err.help.?:
+                result = result + "|||HELP:{dim_err.help.unwrap()}"
+        case TypeInferError.Undefined(name, s):
+            result = result + "|||HELP:check spelling or add an import for '{name}'"
+        case TypeInferError.Other(message, s):
+            pass_do_nothing
+    result
+
+fn _format_nll_error(err: NLLError) -> text:
+    """Format an NLLError into a structured error string with related info."""
+    val primary = if err.has_primary_span: err.primary_span else: 0
+    var result = "{primary}:1: {err.message}"
+    for span_label in err.secondary_spans:
+        result = result + "|||RELATED:{span_label.span}:1:{span_label.label}"
+    if err.has_help:
+        result = result + "|||HELP:{err.help}"
+    result
+
+fn _format_coherence_error(err: CoherenceError) -> text:
+    """Format a CoherenceError into a structured error string."""
+    val msg = err.message()
+    "1:1: {msg}"
+
+fn _format_trait_error(err: TraitError) -> text:
+    """Format a TraitError into a structured error string with related info."""
+    val span = err.span()
+    val msg = err.message()
+    var result = "{span.line}:{span.col}: {msg}"
+    match err:
+        case TraitError.MissingMethod(trait_, method, ty, s):
+            result = result + "|||HELP:add method '{method}' to the impl block"
+        case TraitError.UndefinedTrait(name, s):
+            result = result + "|||HELP:check spelling or add an import for the trait"
+        case TraitError.Unsatisfied(obligation):
+            if obligation.span.line > 0:
+                result = result + "|||RELATED:{obligation.span.line}:{obligation.span.col}:required by this bound"
+        case TraitError.MissingAssocType(trait_, assoc_name, ty, s):
+            result = result + "|||HELP:add 'type {assoc_name} = ...' to the impl block"
+        case TraitError.AssocTypeMismatch(trait_, assoc_name, expected, actual, s):
+            if expected.span.line > 0:
+                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
+            if actual.span.line > 0:
+                result = result + "|||RELATED:{actual.span.line}:{actual.span.col}:actual type found here"
+        case _:
+            pass_do_nothing
+    result

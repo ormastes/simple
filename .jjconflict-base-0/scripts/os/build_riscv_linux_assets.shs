@@ -1,0 +1,170 @@
+#!/bin/sh
+set -eu
+
+# Build pinned boot assets for either generated Simple RISC-V SoC.
+# RISCV_ARCH=rv32|rv64 is normally set by the thin public wrappers.
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RISCV_ARCH="${RISCV_ARCH:-rv64}"
+case "$RISCV_ARCH" in
+  rv32)
+    ARCH_BITS=32; ISA=rv32imac_zicsr_zifencei; ABI=ilp32
+    MARKER=SIMPLE-RV32-INIT
+    KERNEL_LOAD_ADDR=0x80400000
+    DTS_ARCH_DIR=riscv32
+    SYSTEM_CROSS=riscv32-linux-gnu-; KERNEL_DEFCONFIG_DEFAULT=rv32_defconfig ;;
+  rv64)
+    ARCH_BITS=64; ISA=rv64imac_zicsr_zifencei; ABI=lp64
+    MARKER=SIMPLE-RV64-INIT
+    KERNEL_LOAD_ADDR=0x80200000
+    DTS_ARCH_DIR=riscv64
+    SYSTEM_CROSS=riscv64-linux-gnu-; KERNEL_DEFCONFIG_DEFAULT=defconfig ;;
+  *) echo "ERROR: RISCV_ARCH must be rv32 or rv64" >&2; exit 2 ;;
+esac
+
+OUT="${OUT:-$REPO_ROOT/build/os/${RISCV_ARCH}_soc}"
+DTS="${DTS:-$REPO_ROOT/examples/09_embedded/simple_os/arch/$DTS_ARCH_DIR/soc_virt.dts}"
+BUILDROOT_OUTPUT="${BUILDROOT_OUTPUT:-$REPO_ROOT/build/os/buildroot/$RISCV_ARCH}"
+BUILDROOT_ROOTFS="${BUILDROOT_ROOTFS:-$BUILDROOT_OUTPUT/images/rootfs.cpio.gz}"
+BUILDROOT_MANIFEST="${BUILDROOT_MANIFEST:-$BUILDROOT_OUTPUT/buildroot-manifest.txt}"
+BUILDROOT_COMMIT=e4a5ab3b319753f41e2b5cf22e90b6b0304ca225
+BUILDROOT_HOST="$REPO_ROOT/build/os/buildroot/$RISCV_ARCH/host/bin/riscv${ARCH_BITS}-buildroot-linux-uclibc-"
+if [ -z "${CROSS+x}" ]; then
+  if [ -x "${BUILDROOT_HOST}gcc" ]; then CROSS=$BUILDROOT_HOST; else CROSS=$SYSTEM_CROSS; fi
+fi
+TERMINAL_MARKER=SIMPLE_RISCV_LINUX_LOGIN_LS_PASS
+KERNEL_DEFCONFIG="${KERNEL_DEFCONFIG:-$KERNEL_DEFCONFIG_DEFAULT}"
+OPENSBI_TAG="${OPENSBI_TAG:-v1.4}"
+OPENSBI_COMMIT="${OPENSBI_COMMIT:-a2b255b88918715173942f2c5e1f97ac9e90c877}"
+LINUX_TAG="${LINUX_TAG:-v6.6}"
+LINUX_COMMIT="${LINUX_COMMIT:-ffc253263a1375a65fa6c9f62a893e9767fbebfa}"
+BUSYBOX_VERSION=1.36.1
+BUSYBOX_SHA256=b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
+jobs="${RISCV_ASSET_JOBS:-2}"
+case "$jobs" in
+  ''|*[!0-9]*|0) echo "ERROR: RISCV_ASSET_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
+
+DO_OPENSBI=0 DO_KERNEL=0 DO_TERMINAL=0
+for a in "$@"; do case "$a" in
+  --opensbi) DO_OPENSBI=1 ;; --kernel) DO_KERNEL=1 ;; --terminal) DO_TERMINAL=1 ;;
+  --all) DO_OPENSBI=1; DO_KERNEL=1; DO_TERMINAL=1 ;;
+  *) echo "unknown arg: $a" >&2; exit 2 ;;
+esac; done
+mkdir -p "$OUT"
+note() { echo "[$RISCV_ARCH-assets] $*"; }
+require_source_commit() {
+  actual=$(git -C "$1" rev-parse HEAD)
+  [ "$actual" = "$2" ] || { echo "ERROR: $1 is $actual, expected pinned commit $2" >&2; exit 2; }
+  git -C "$1" diff --quiet && git -C "$1" diff --cached --quiet || {
+    echo "ERROR: pinned source has tracked modifications: $1" >&2
+    exit 2
+  }
+}
+manifest_value() {
+  sed -n "s/^$1=//p" "$BUILDROOT_MANIFEST"
+}
+require_manifest_sha() {
+  expected=$(manifest_value "$1")
+  actual=$(sha256sum "$2" | awk '{print $1}')
+  [ -n "$expected" ] && [ "$actual" = "$expected" ] || {
+    echo "ERROR: Buildroot $1 mismatch for $2" >&2
+    exit 1
+  }
+}
+
+# A terminal image is a Buildroot product, never an ad-hoc BusyBox rebuild.
+INITRAMFS_BUILT=0
+if [ "$DO_TERMINAL" = 1 ]; then
+  if [ ! -s "$BUILDROOT_ROOTFS" ]; then
+    echo "ERROR: missing Buildroot terminal rootfs: $BUILDROOT_ROOTFS" >&2
+    echo "Resume: sh scripts/os/build_riscv_buildroot.shs $RISCV_ARCH" >&2
+    exit 1
+  fi
+  if [ ! -s "$BUILDROOT_MANIFEST" ] ||
+     ! grep -q "^buildroot_commit=$BUILDROOT_COMMIT$" "$BUILDROOT_MANIFEST" ||
+     ! grep -q "^arch=$RISCV_ARCH$" "$BUILDROOT_MANIFEST"; then
+    echo "ERROR: missing or mismatched Buildroot provenance: $BUILDROOT_MANIFEST" >&2
+    exit 1
+  fi
+  require_manifest_sha rootfs_sha256 "$BUILDROOT_ROOTFS"
+  require_manifest_sha config_sha256 "$BUILDROOT_OUTPUT/.config"
+  external_tree_sha256=$(
+    cd "$REPO_ROOT/scripts/os/buildroot"
+    find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  )
+  [ "$external_tree_sha256" = "$(manifest_value external_tree_sha256)" ] || {
+    echo "ERROR: Buildroot external-tree provenance mismatch" >&2
+    exit 1
+  }
+  cp "$BUILDROOT_ROOTFS" "$OUT/initramfs.cpio.gz"
+  INITRAMFS_BUILT=1
+  INITRAMFS_MODE="buildroot-$RISCV_ARCH-terminal"
+  note "terminal initramfs copied: $OUT/initramfs.cpio.gz"
+elif command -v "${CROSS}gcc" >/dev/null 2>&1; then
+  W=$(mktemp -d); ROOT="$W/rootfs"; mkdir -p "$ROOT"
+  cat > "$W/init.c" <<EOF
+static long sys3(long n,long a,long b,long c){register long a7 __asm__("a7")=n;register long a0 __asm__("a0")=a;register long a1 __asm__("a1")=b;register long a2 __asm__("a2")=c;__asm__ volatile("ecall":"+r"(a0):"r"(a7),"r"(a1),"r"(a2):"memory");return a0;}
+void _start(void){static const char msg[]="$MARKER OK\\n";static const long ts[2]={5,0};for(;;){sys3(64,1,(long)msg,sizeof(msg)-1);sys3(101,(long)ts,0,0);}}
+EOF
+  "${CROSS}gcc" -static -nostdlib -ffreestanding -march="$ISA" -mabi="$ABI" -Os -o "$ROOT/init" "$W/init.c"
+  touch -d @0 "$ROOT/init"
+  (cd "$ROOT" && echo init | cpio --reproducible -o -H newc --owner=0:0 2>/dev/null) | gzip -9 -n > "$OUT/initramfs.cpio.gz"
+  rm -rf "$W"; INITRAMFS_BUILT=1; INITRAMFS_MODE=marker
+  note "marker initramfs built: $OUT/initramfs.cpio.gz"
+else
+  INITRAMFS_MODE=missing
+  note "SKIP marker initramfs: ${CROSS}gcc not installed"
+fi
+
+if ! command -v dtc >/dev/null 2>&1; then echo "ERROR: dtc not installed (apt install device-tree-compiler)" >&2; exit 1; fi
+if [ ! -f "$DTS" ]; then echo "ERROR: missing $RISCV_ARCH DTS: $DTS" >&2; exit 1; fi
+if [ "$INITRAMFS_BUILT" != 1 ] || [ ! -s "$OUT/initramfs.cpio.gz" ]; then echo "ERROR: fresh initramfs.cpio.gz is required before DTB generation" >&2; exit 1; fi
+INITRD_END=$(printf '0x%x' "$((0x88200000 + $(wc -c < "$OUT/initramfs.cpio.gz")))")
+DTS_RENDERED=$(mktemp)
+sed \
+  -e 's/linux,initrd-start[[:space:]]*=[[:space:]]*<[^>]*>;/linux,initrd-start = <0x0 0x88200000>;/' \
+  -e "s/linux,initrd-end[[:space:]]*=[[:space:]]*<[^>]*>;/linux,initrd-end = <0x0 $INITRD_END>;/" \
+  "$DTS" > "$DTS_RENDERED"
+[ "$(grep -Ec 'linux,initrd-start[[:space:]]*=[[:space:]]*<0x0 0x88200000>;' "$DTS_RENDERED")" = 1 ] &&
+  [ "$(grep -Ec "linux,initrd-end[[:space:]]*=[[:space:]]*<0x0 $INITRD_END>;" "$DTS_RENDERED")" = 1 ] || {
+    echo "ERROR: rendered DTS initrd addresses are missing or ambiguous" >&2
+    exit 1
+  }
+dtc -I dts -O dtb -o "$OUT/soc_virt.dtb" "$DTS_RENDERED"; rm -f "$DTS_RENDERED"
+note "DTB built: $OUT/soc_virt.dtb (initrd 0x88200000..$INITRD_END)"
+
+if [ "$DO_OPENSBI" = 1 ]; then
+  if ! command -v "${CROSS}gcc" >/dev/null 2>&1; then
+    echo "ERROR: requested OpenSBI build needs ${CROSS}gcc" >&2
+    exit 1
+  else
+    SB="$OUT/opensbi-src"; [ -d "$SB/.git" ] || git clone --depth 1 --branch "$OPENSBI_TAG" https://github.com/riscv-software-src/opensbi.git "$SB"
+    require_source_commit "$SB" "$OPENSBI_COMMIT"
+    make -C "$SB" CROSS_COMPILE="$CROSS" PLATFORM=generic PLATFORM_RISCV_ISA="$ISA" PLATFORM_RISCV_ABI="$ABI" FW_DYNAMIC=n FW_PAYLOAD=n FW_JUMP=y FW_JUMP_ADDR="$KERNEL_LOAD_ADDR" FW_JUMP_FDT_ADDR= -j"$jobs" >/dev/null
+    cp "$SB/build/platform/generic/firmware/fw_jump.bin" "$OUT/fw_jump.bin"
+  fi
+fi
+if [ "$DO_KERNEL" = 1 ]; then
+  if ! command -v "${CROSS}gcc" >/dev/null 2>&1; then
+    echo "ERROR: requested Linux build needs ${CROSS}gcc" >&2
+    exit 1
+  else
+    LS="$OUT/linux-src"; [ -d "$LS/.git" ] || git clone --depth 1 --branch "$LINUX_TAG" https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$LS"
+    require_source_commit "$LS" "$LINUX_COMMIT"
+    make -C "$LS" ARCH=riscv CROSS_COMPILE="$CROSS" "$KERNEL_DEFCONFIG" >/dev/null
+    make -C "$LS" ARCH=riscv CROSS_COMPILE="$CROSS" -j"$jobs" Image
+    cp "$LS/arch/riscv/boot/Image" "$OUT/Image"
+  fi
+fi
+stat_of() { if [ -s "$1" ]; then echo "BUILT ($(wc -c < "$1") bytes, sha256=$(sha256sum "$1" | awk '{print $1}'))"; else echo MISSING; fi; }
+cat > "$OUT/manifest.txt" <<EOF
+# $RISCV_ARCH Simple SoC boot-asset manifest
+# ISA=$ISA ABI=$ABI kernel_defconfig=$KERNEL_DEFCONFIG
+# Buildroot=$BUILDROOT_COMMIT manifest=$(stat_of "$BUILDROOT_MANIFEST")
+0x80000000    fw_jump.bin          $(stat_of "$OUT/fw_jump.bin")   # OpenSBI $OPENSBI_TAG@$OPENSBI_COMMIT
+$KERNEL_LOAD_ADDR    Image                $(stat_of "$OUT/Image")   # Linux $LINUX_TAG@$LINUX_COMMIT
+0x88000000    soc_virt.dtb         $(stat_of "$OUT/soc_virt.dtb")   # $RISCV_ARCH DTS
+0x88200000    initramfs.cpio.gz    $(stat_of "$OUT/initramfs.cpio.gz")   # $INITRAMFS_MODE $TERMINAL_MARKER BusyBox $BUSYBOX_VERSION@$BUSYBOX_SHA256
+EOF
+note "manifest written: $OUT/manifest.txt"

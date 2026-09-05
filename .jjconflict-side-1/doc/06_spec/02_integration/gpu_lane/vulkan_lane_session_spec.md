@@ -1,0 +1,304 @@
+# vulkan_lane_session_spec
+
+> Host-aware coverage for the C1 Vulkan lane session shell: a clean skip
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 2 | 2 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# vulkan_lane_session_spec
+
+Host-aware coverage for the C1 Vulkan lane session shell: a clean skip
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/02_integration/gpu_lane/vulkan_lane_session_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Host-aware coverage for the C1 Vulkan lane session shell: a clean skip
+    when no Vulkan ICD/device is present, and on a live host a real arena
+    round-trip through the device plus the fence-timeout sentinel path.
+
+## Scenarios
+
+### VulkanLaneSession host-aware arena round-trip
+
+#### should probe cleanly, and on a live host round-trip the arena through a real no-op dispatch
+
+- should probe cleanly, and on a live host round-trip the arena through a real no-op dispatch
+- Probe for a Vulkan-capable device
+- vulkan
+- Live Vulkan device found:
+- Load the checked-in no-op arena-touch SPIR-V fixture
+- Initialize the session (device select, shader, pipeline, arena)
+   - Expected: init_result equals ``
+- Write a host-side pattern into the arena
+- Dispatch the no-op shader once and fence-wait
+   - Expected: dispatch_result equals ``
+- Read the arena back -- a true no-op leaves it unchanged
+   - Expected: readback.len() equals `_ARENA_BYTES`
+   - Expected: readback[0] equals `pattern[0]`
+   - Expected: readback[100] equals `pattern[100]`
+- Shut the session down cleanly
+   - Expected: session.shutdown() equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 49 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("should probe cleanly, and on a live host round-trip the arena through a real no-op dispatch")
+step("Probe for a Vulkan-capable device")
+var session = VulkanLaneSession.create()
+val probe_result = session.probe()
+
+if probe_result.starts_with("skip:"):
+    # Fail closed. `assert_true(probe_result.starts_with("skip:"))` used
+    # to stand here: it succeeded BECAUSE the probe skipped, recording
+    # fictional device coverage as a PASS with skipped=0. The verdict
+    # helper reports "skip" only when this host has no such device, and
+    # "fail" when the probe skipped on hardware other paths can drive.
+    step(gpu_lane_probe_verdict_reason("vulkan", probe_result))
+    gpu_lane_report_skip("vulkan lane", probe_result)
+    assert_equal(gpu_lane_probe_verdict("vulkan", probe_result), "skip")
+else:
+    step("Live Vulkan device found: " + session.device_name +
+        " driver " + session.driver_identity)
+
+    step("Load the checked-in no-op arena-touch SPIR-V fixture")
+    val lane_spirv = file_read_bytes(_ARENA_TOUCH_SPV)
+    expect(lane_spirv.len()).to_be_greater_than(0)
+
+    step("Initialize the session (device select, shader, pipeline, arena)")
+    val init_result = session.init(_ARENA_BYTES, lane_spirv, "main")
+    expect(init_result).to_equal("")
+    expect(session.device_name).to_not_equal("")
+    expect(session.driver_identity).to_not_equal("")
+
+    step("Write a host-side pattern into the arena")
+    val pattern = _arena_pattern(_ARENA_BYTES)
+    assert_true(session.arena_write(pattern))
+
+    step("Dispatch the no-op shader once and fence-wait")
+    val dispatch_result = session.dispatch_once(1)
+    expect(dispatch_result).to_equal("")
+    expect(session.last_dispatch_sentinel).to_equal(
+        VULKAN_LANE_OK_SENTINEL)
+
+    step("Read the arena back -- a true no-op leaves it unchanged")
+    val readback = session.arena_read(_ARENA_BYTES)
+    expect(readback.len()).to_equal(_ARENA_BYTES)
+    expect(readback[0]).to_equal(pattern[0])
+    expect(readback[100]).to_equal(pattern[100])
+    expect(readback[_ARENA_BYTES - 1]).to_equal(
+        pattern[_ARENA_BYTES - 1])
+
+    step("Shut the session down cleanly")
+    expect(session.shutdown()).to_equal("")
+```
+
+</details>
+
+#### should force the GMB-1 timeout sentinel under a genuinely tight fence timeout, without hanging
+
+- should force the GMB-1 timeout sentinel under a genuinely tight fence timeout, without hanging
+- Probe for a Vulkan-capable device
+- vulkan
+- Initialize a session with a genuinely tight fence timeout
+   - Expected: init_result equals ``
+- Dispatch the bounded long-running shader under the tight budget:
+   - Expected: dispatch_result equals `vulkan-lane-fence-timeout`
+- Recover via the device-idle quarantine retry (waits for the bounded shader to actually finish), then shut down
+   - Expected: retry_result equals `vulkan-lane-quarantine-retry-complete`
+   - Expected: session.shutdown() equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 103 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("should force the GMB-1 timeout sentinel under a genuinely tight fence timeout, without hanging")
+# Safety note: this deliberately does NOT submit an INFINITE-loop
+# shader (unbounded, real hang/TDR risk on a discrete, possibly
+# shared, device). It submits a BOUNDED single-thread xorshift loop
+# (test/fixtures/gpu_lane/vulkan_bounded_long_loop.spv, iteration
+# count supplied at RUNTIME via the arena -- see
+# `_bounded_long_input` -- so the shader compiler cannot
+# constant-fold or close-form-reduce it away) that is guaranteed to
+# terminate on its own in well under a second regardless of what
+# the host observes, paired with a genuinely tight host fence-wait
+# budget (`timeout_ms = 1`) so `vulkan_sffi_wait_fence` reliably
+# reports "not completed within the budget" before the shader
+# finishes.
+#
+# WAS KNOWN-RED, now GREEN on real hardware (2026-08-20). Filed:
+# doc/08_tracking/bug/vulkan_submit_and_wait_fence_blocks_unconditionally_no_nonblocking_submit_2026-08-07.md
+#
+# Fixed by adding a genuinely non-blocking submit primitive
+# (`rt_vulkan_submit_no_wait`) and switching `dispatch_once` onto it,
+# so this session's own `vulkan_sffi_wait_fence(fence, timeout_ns)` is
+# now the only place a wait happens and `timeout_ms = 1` genuinely
+# fires. Verified on an NVIDIA RTX A6000 (Vulkan 1.4.312): dispatch
+# returns `vulkan-lane-fence-timeout` with sentinel 0xDEAD0000, the
+# device-idle quarantine retry then recovers cleanly, and shutdown
+# returns "". The historical analysis below is retained because it
+# explains why the workload is shaped the way it is.
+#
+# Root-caused (not a test-design bug this time, a real native-runtime
+# gap): `rt_vulkan_submit_and_wait_fence`
+# (src/compiler_rust/runtime/src/vulkan/device.rs:1047,
+# `submit_compute_command_with_fence`) calls `fence.wait(u64::MAX)`
+# -- blocks unconditionally for full GPU completion -- BEFORE ever
+# returning a fence handle to Simple code. So the later, separate
+# `vulkan_sffi_wait_fence(fence, timeout_ns)` call this session makes
+# is always polling an ALREADY-SIGNALED fence: no `timeout_ns`, no
+# matter how small, and no shader duration, no matter how long, can
+# ever make it observe a timeout. There is no non-blocking compute
+# submit primitive anywhere in the exposed Vulkan SFFI surface today
+# (`rt_vulkan_submit_and_wait` / `rt_vulkan_submit_and_wait_fence`
+# both block). Confirmed empirically, not by inspection alone: this
+# test dispatches `test/fixtures/gpu_lane/vulkan_bounded_long_loop.spv`,
+# a hand-assembled, non-constant-foldable (seed AND iteration count
+# both read from the arena at shader RUNTIME) single-thread xorshift
+# loop -- provably tens of milliseconds of real, strictly-serial GPU
+# time -- under `timeout_ms = 1`, and it still reports no timeout.
+# (An earlier attempt used a compile-time-constant arithmetic-series
+# loop instead, which IS closed-form-reducible by the shader
+# compiler and so proved nothing either way -- that was a genuine
+# test-design mistake on my part, fixed by switching to the
+# runtime-parameterized xorshift fixture, and is why this test's
+# workload looks the way it does.)
+#
+# `VulkanLaneSession.dispatch_once`'s non-completion branch (force
+# VULKAN_LANE_TIMEOUT_SENTINEL, quarantine, mark
+# completion_unknown/release_pending) is implemented correctly per
+# the design doc and is reachable in principle, but is structurally
+# unreachable through `dispatch_once`'s current submit call because
+# that call has already fully waited by the time its result is
+# checked. Fixing this needs a new Rust extern (a genuine
+# non-blocking submit) -- out of scope for that pure-Simple task and
+# not something to fake around here. That native extern now exists
+# (`rt_vulkan_submit_no_wait`), which is what turned this assertion
+# green; it was left RED and unmodified until the gap was genuinely
+# closed, never weakened to pass.
+step("Probe for a Vulkan-capable device")
+var probe_session = VulkanLaneSession.create()
+val probe_result = probe_session.probe()
+
+if probe_result.starts_with("skip:"):
+    # Fail closed. `assert_true(probe_result.starts_with("skip:"))` used
+    # to stand here: it succeeded BECAUSE the probe skipped, recording
+    # fictional device coverage as a PASS with skipped=0. The verdict
+    # helper reports "skip" only when this host has no such device, and
+    # "fail" when the probe skipped on hardware other paths can drive.
+    step(gpu_lane_probe_verdict_reason("vulkan", probe_result))
+    gpu_lane_report_skip("vulkan lane", probe_result)
+    assert_equal(gpu_lane_probe_verdict("vulkan", probe_result), "skip")
+else:
+    step("Initialize a session with a genuinely tight fence timeout")
+    var session = VulkanLaneSession.create_for_device(
+        probe_session.device_ordinal)
+    session.timeout_ms = 1
+    val lane_spirv = file_read_bytes(_BOUNDED_LONG_SPV)
+    val init_result = session.init(_ARENA_BYTES, lane_spirv, "main")
+    expect(init_result).to_equal("")
+    val bounded_input = _bounded_long_input(
+        len: _ARENA_BYTES, iterations: 5000000)
+    assert_true(session.arena_write(bounded_input))
+
+    step("Dispatch the bounded long-running shader under the tight budget: " +
+        "reports dispatch_result below via expect() failure text if red")
+    val dispatch_result = session.dispatch_once(1)
+    expect(dispatch_result).to_equal("vulkan-lane-fence-timeout")
+    expect(session.last_dispatch_sentinel).to_equal(
+        VULKAN_LANE_TIMEOUT_SENTINEL)
+    assert_true(session.completion_unknown)
+    assert_true(session.release_pending)
+
+    step("Recover via the device-idle quarantine retry (waits for the bounded shader to actually finish), then shut down")
+    val retry_result = session.retry_terminal_completion()
+    expect(retry_result).to_equal("vulkan-lane-quarantine-retry-complete")
+    expect(session.shutdown()).to_equal("")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `85656473f03eac429462aa01d3d19498783ae06a9baf699831df963b05a4b094`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `85656473f03eac429462aa01d3d19498783ae06a9baf699831df963b05a4b094`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `85656473f03eac429462aa01d3d19498783ae06a9baf699831df963b05a4b094`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/gpu_lane/vulkan_lane_session_spec.spl
+mirror: doc/06_spec/02_integration/gpu_lane/vulkan_lane_session_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=90 oracle=100
+  traceability=100 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/gpu_lane/vulkan_lane_session_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/gpu_lane/vulkan_lane_session_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/gpu_lane/vulkan_lane_session_spec.spl:64:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should probe cleanly, and on a live host round-trip the arena through a real no-op dispatch' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/gpu_lane/vulkan_lane_session_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should probe cleanly, and on a live host round-trip the arena through a real no-op dispatch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/gpu_lane/vulkan_lane_session_spec.spl:115:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should force the GMB-1 timeout sentinel under a genuinely tight fence timeout, without hanging' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/gpu_lane/vulkan_lane_session_spec.spl:115:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should force the GMB-1 timeout sentinel under a genuinely tight fence timeout, without hanging' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

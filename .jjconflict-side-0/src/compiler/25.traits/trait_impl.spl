@@ -1,0 +1,395 @@
+# Trait Impl Blocks
+#
+# Implementation blocks for traits and type matching.
+# Split from traits.spl for modularity.
+
+use compiler.hir.hir_types.{HirSymbol, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirParam}
+use compiler.frontend.core.lexer.*
+use compiler.traits.trait_def.{SolverTraitBound, SolverTraitDef, AssocTypeDef, MethodSignature}
+# `Span` is used in DECLARATION position here (`span: Span` at :56 and
+# `fn create(..., span: Span)` at :59) but was reachable only via the
+# `core.lexer.*` glob -- a glob is not an import-origin for surface projection.
+use compiler.common.diagnostics.span.{Span}   # declared: src/compiler/00.common/diagnostics/span.spl:7
+
+# ============================================================================
+# Associated Type Implementation
+# ============================================================================
+
+struct AssocTypeImpl:
+    """Implementation of an associated type in an impl block.
+
+    Example:
+        impl Iterator for Range:
+            type Item = i64  # AssocTypeImpl(name: "Item", concrete_type: i64)
+    """
+    name: text                      # Associated type name (e.g., "Item")
+    concrete_type: HirType          # The concrete type assigned (e.g., i64)
+
+impl AssocTypeImpl:
+    static fn create(name: text, concrete_type: HirType) -> AssocTypeImpl:
+        """Create a new associated type implementation."""
+        AssocTypeImpl(
+            name: name,
+            concrete_type: concrete_type
+        )
+
+    fn to_string() -> text:
+        """Get string representation."""
+        "type {self.name} = <type>"
+
+# ============================================================================
+# Impl Block
+# ============================================================================
+
+struct ImplBlock:
+    """Implementation of a trait for a specific type.
+
+    Example:
+        impl Iterator for Range:
+            type Item = i64
+            fn next() -> i64?:
+                ...
+    """
+    trait_name: HirSymbol              # Which trait is being implemented
+    for_type: HirType               # Which type is implementing the trait
+    type_params: [HirSymbol]           # Generic parameters (impl<T> Trait for Vec<T>)
+    where_clause: [SolverTraitBound]      # Where T: Trait constraints
+    methods: [HirFunction]          # Method implementations
+    assoc_type_impls: Dict<text, AssocTypeImpl>  # Associated type implementations
+    span: Span
+
+impl ImplBlock:
+    static fn create(trait_name: HirSymbol, for_type: HirType, span: Span) -> ImplBlock:
+        """Create a new impl block."""
+        ImplBlock(
+            trait_name: trait_name,
+            for_type: for_type,
+            type_params: [],
+            where_clause: [],
+            methods: [],
+            assoc_type_impls: {},
+            span: span
+        )
+
+    fn has_method(method_name: text) -> bool:
+        """Check if impl has a method with given name."""
+        for method in self.methods:
+            if method.name == method_name:
+                return true
+        false
+
+    fn get_method(method_name: text) -> HirFunction?:
+        """Get method implementation by name."""
+        for method in self.methods:
+            if method.name == method_name:
+                return Some(method)
+        nil
+
+    fn matches_type(ty: HirType) -> bool:
+        """Check if this impl matches the given type.
+
+        Handles generic matching:
+        - impl<T> Display for Vec<T> matches Vec<i64>
+        - impl Display for Point matches Point
+
+        Returns true if the impl can be instantiated to match ty.
+        """
+        match_types(self.for_type, ty)
+
+    me add_assoc_type_impl(name: text, concrete_type: HirType):
+        """Add an associated type implementation.
+
+        Example:
+            impl_block.add_assoc_type_impl("Item", int_type)
+        """
+        val assoc_impl = AssocTypeImpl.create(name, concrete_type)
+        self.assoc_type_impls[name] = assoc_impl
+
+    fn get_assoc_type_impl(name: text) -> HirType?:
+        """Get the concrete type for an associated type implementation.
+
+        Returns the concrete type if this impl specifies the associated type,
+        nil otherwise.
+        """
+        if self.assoc_type_impls.has(name):
+            Some(self.assoc_type_impls[name].concrete_type)
+        else:
+            nil
+
+    fn has_assoc_type_impl(name: text) -> bool:
+        """Check if this impl specifies an associated type."""
+        self.assoc_type_impls.has(name)
+
+    fn validate_methods(trait_def: SolverTraitDef) -> [text]:
+        """Validate that all required trait methods are implemented.
+
+        Returns a list of error messages. Empty list means validation passed.
+
+        Only methods without a default body (required/abstract methods) must
+        be provided by the impl. Default methods are inherited automatically
+        if not overridden.
+
+        Checks:
+        1. All required (no default) trait methods must be in the impl
+        2. Default methods are optional -- impl can override or inherit them
+        3. A provided method must accept the same NUMBER of parameters as the
+           trait declares. Matching on name alone silently accepted an impl
+           with the wrong arity, and every call through the trait then passed
+           the wrong argument count -- a wrong answer with no diagnostic.
+           See doc/08_tracking/bug/trait_conformance_check_ignores_arity_2026-08-04.md
+           (parameter TYPE comparison is still open; arity is checked here).
+        """
+        var errors: [text] = []
+
+        # Check that all required methods are implemented
+        for method in trait_def.required_methods():
+            if not self.has_method(method.name):
+                errors = errors.push(
+                    "missing required method '{method.name}' in impl of '{trait_def.name}' for type"
+                )
+
+        # Arity check applies to every trait method the impl actually provides,
+        # including overridden defaults -- not just the required ones.
+        for method in trait_def.methods:
+            if val provided = self.get_method(method.name):
+                if provided.params.len() != method.arity():
+                    errors = errors.push(
+                        "method '{method.name}' in impl of '{trait_def.name}' takes {provided.params.len()} parameter(s) but the trait declares {method.arity()}"
+                    )
+                else:
+                    # Parameter TYPE comparison. Deliberately conservative: only
+                    # a pair of concrete, resolved, non-generic PRIMITIVE types
+                    # can ever conflict (see param_type_conflict). Generic
+                    # parameters, `Self`, associated-type projections, named
+                    # user types, `Any`, inference variables and absent
+                    # annotations are all skipped, so substitution never
+                    # manufactures a false report.
+                    val impl_params = non_receiver_params(provided.params)
+                    if impl_params.len() == method.params.len():
+                        for i in 0..impl_params.len():
+                            if param_type_conflict(method.params[i], impl_params[i].type_):
+                                errors = errors.push(
+                                    "method '{method.name}' in impl of '{trait_def.name}' declares parameter {i} as {concrete_prim_tag(impl_params[i].type_)} but the trait declares {concrete_prim_tag(method.params[i])}"
+                                )
+
+        errors
+
+    fn missing_default_methods(trait_def: SolverTraitDef) -> [HirFunction]:
+        """Get default methods from the trait that are NOT overridden by this impl.
+
+        These should be injected into the impl's method list during compilation
+        so that default methods are callable on the implementing type.
+        """
+        var missing: [HirFunction] = []
+        for default in trait_def.default_methods():
+            if not self.has_method(default.name):
+                missing = missing.push(default)
+        missing
+
+    fn validate_assoc_types(trait_def: SolverTraitDef) -> [text]:
+        """Validate that all required associated types are implemented.
+
+        Returns a list of error messages. Empty list means validation passed.
+
+        Checks:
+        1. All non-default associated types in the trait must be specified
+        2. No associated types that don't exist in the trait
+        """
+        var errors: [text] = []
+
+        # Check that all required associated types are implemented
+        val required = trait_def.required_assoc_types()
+        for assoc in required:
+            if not self.has_assoc_type_impl(assoc.name):
+                errors = errors.push(
+                    "missing associated type '{assoc.name}' in impl of '{trait_def.name}' for type"
+                )
+
+        # Check that no extra associated types are specified
+        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+        for name in self.assoc_type_impls.keys():
+            if not trait_def.has_assoc_type(name):
+                errors = errors.push(
+                    "associated type '{name}' does not exist in trait '{trait_def.name}'"
+                )
+
+        errors
+
+# ============================================================================
+# Conservative parameter-type conformance
+#
+# doc/08_tracking/bug/trait_conformance_check_ignores_arity_2026-08-04.md
+#
+# Trait conformance matched impl methods by NAME, then (since the arity was
+# armed) by parameter COUNT. Parameter TYPES were still never compared, so a
+# trait declaring `f(a: u64)` and an impl defining `f(a: text)` conformed
+# silently and every call through the trait handed over a wrong-typed value.
+#
+# Exact structural comparison cannot be used here: the trait side is written
+# against type parameters, `Self` and associated-type projections, while the
+# impl side carries them substituted. Comparing those would report the whole
+# tree as broken. So only a pair of CONCRETE, RESOLVED, NON-GENERIC PRIMITIVE
+# types can conflict. Everything else -- named user types (whose SymbolIds are
+# not comparable across the two declaration sites), type parameters, `Self`,
+# projections, `Any`, `Infer`, `Error`, and absent/inferred annotations --
+# yields no tag and is therefore never reported.
+# ============================================================================
+
+fn concrete_prim_tag(ty: HirType) -> text:
+    """Canonical name of a concrete primitive type, or "" if not one.
+
+    An empty tag means "not comparable" and suppresses any conflict report.
+    """
+    match ty.kind:
+        case Int(bits, signed):
+            if signed:
+                "i{bits}"
+            else:
+                "u{bits}"
+        case Float(bits):
+            "f{bits}"
+        case Bool:
+            "bool"
+        case Char:
+            "char"
+        case Str:
+            "text"
+        case Unit:
+            "unit"
+        case _:
+            ""
+
+fn param_type_conflict(declared: HirType, provided: HirType) -> bool:
+    """True only when both sides are concrete primitives that disagree."""
+    val a = concrete_prim_tag(declared)
+    if a == "":
+        return false
+    val b = concrete_prim_tag(provided)
+    if b == "":
+        return false
+    a != b
+
+fn non_receiver_params(params: [HirParam]) -> [HirParam]:
+    """Drop `self`/`me` receiver parameters, at any position.
+
+    The two sides are built by different paths and are not symmetric: an impl
+    method may carry an injected receiver the trait signature never wrote.
+    Filtering by name (rather than stripping a leading element) mirrors
+    `is_receiver` in scripts/check/check-trait-arity.spl, the reference
+    implementation.
+    """
+    var out: [HirParam] = []
+    for p in params:
+        if p.name != "self" and p.name != "me":
+            out = out.push(p)
+    out
+
+# ============================================================================
+# Generic Type Matching (Phase B.3.1)
+# ============================================================================
+
+fn match_types(pattern: HirType, concrete: HirType) -> bool:
+    """Check if a type pattern matches a concrete type.
+
+    Handles generic matching where pattern may contain type parameters.
+
+    Examples:
+    - match_types(Vec<T>, Vec<i64>) -> true (T can be i64)
+    - match_types(Point, Point) -> true
+    - match_types(Vec<T>, Point) -> false
+
+    Algorithm:
+    - If pattern is TypeParam, always matches (can be anything)
+    - If both are Named, check name matches and recursively check args
+    - Otherwise, check structural equality
+    """
+    match pattern.kind:
+        case TypeParam(_, _):
+            # Type parameter matches any concrete type
+            true
+
+        case Named(pattern_symbol, pattern_args):
+            match concrete.kind:
+                case Named(concrete_symbol, concrete_args):
+                    # Check if symbols match
+                    if pattern_symbol != concrete_symbol:
+                        return false
+
+                    # Check if argument counts match
+                    if pattern_args.len() != concrete_args.len():
+                        return false
+
+                    # Recursively check each type argument
+                    for i in 0..pattern_args.len():
+                        if not match_types(pattern_args[i], concrete_args[i]):
+                            return false
+
+                    true
+                case _:
+                    false
+
+        case Function(pattern_params, pattern_ret, _):
+            match concrete.kind:
+                case Function(concrete_params, concrete_ret, _):
+                    # Check parameter count
+                    if pattern_params.len() != concrete_params.len():
+                        return false
+
+                    # Check each parameter
+                    for i in 0..pattern_params.len():
+                        if not match_types(pattern_params[i], concrete_params[i]):
+                            return false
+
+                    # Check return type
+                    match_types(pattern_ret, concrete_ret)
+                case _:
+                    false
+
+        case Tuple(pattern_elems):
+            match concrete.kind:
+                case Tuple(concrete_elems):
+                    if pattern_elems.len() != concrete_elems.len():
+                        return false
+
+                    for i in 0..pattern_elems.len():
+                        if not match_types(pattern_elems[i], concrete_elems[i]):
+                            return false
+
+                    true
+                case _:
+                    false
+
+        case Array(pattern_elem, pattern_size):
+            match concrete.kind:
+                case Array(concrete_elem, concrete_size):
+                    # Check sizes match (if both specified)
+                    if pattern_size.? and concrete_size.?:
+                        match pattern_size:
+                            Some(pattern_value):
+                                match concrete_size:
+                                    Some(concrete_value):
+                                        if pattern_value != concrete_value:
+                                            return false
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+
+                    # Check element types match
+                    match_types(pattern_elem, concrete_elem)
+                case _:
+                    false
+
+        case Projection(pattern_base, pattern_assoc):
+            match concrete.kind:
+                case Projection(concrete_base, concrete_assoc):
+                    if pattern_assoc != concrete_assoc:
+                        return false
+                    match_types(pattern_base, concrete_base)
+                case _:
+                    false
+
+        case _:
+            # For other types, use structural equality
+            pattern.kind == concrete.kind

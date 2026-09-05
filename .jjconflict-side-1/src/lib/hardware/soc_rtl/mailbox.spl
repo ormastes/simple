@@ -1,0 +1,174 @@
+# ============================================================================
+# SoC RTL Mailbox — GHDL Test Peripheral
+# ============================================================================
+#
+# Test mailbox for GHDL simulation.  Provides a command/response interface
+# at MMIO address 0x80FF0000 (within the RAM range, decoded first by the
+# Wishbone interconnect).
+#
+# Register map (byte offsets from mailbox base):
+#   0x00: CMD        — command code (written by software)
+#   0x04: ARG0       — argument 0
+#   0x08: ARG1       — argument 1
+#   0x0C: STATUS     — status (0=idle, 1=busy, 2=done)
+#   0x10: RESULT_VAL — result value
+#   0x14: SEQ_ID     — sequence counter
+#   0x18: TRIGGER    — write 0x0000DEAD to execute command
+#
+# Commands:
+#   CMD_PUTC   (1): output character from ARG0
+#   CMD_EXIT   (2): signal CPU halt
+#   CMD_RESULT (3): record result from ARG0
+#
+# VHDL synthesizable subset: u32, bool, structs only.
+# ============================================================================
+
+use std.hardware.rv32i_rtl.pkg.{MB_OFF_CMD, MB_OFF_ARG0, MB_OFF_ARG1}
+use std.hardware.rv32i_rtl.pkg.{MB_OFF_STATUS, MB_OFF_RESULT, MB_OFF_SEQ_ID, MB_OFF_TRIGGER}
+use std.hardware.rv32i_rtl.pkg.{MB_CMD_PUTC, MB_CMD_EXIT, MB_CMD_RESULT}
+use std.hardware.rv32i_rtl.pkg.MB_TRIGGER_MAGIC
+
+# ============================================================================
+# Mailbox status constants
+# ============================================================================
+
+val MB_STATUS_IDLE: u32 = 0
+val MB_STATUS_BUSY: u32 = 1
+val MB_STATUS_DONE: u32 = 2
+
+# ============================================================================
+# Mailbox State
+# ============================================================================
+
+struct MailboxState:
+    """Mailbox register state."""
+    cmd: u32          # Command code
+    arg0: u32         # Argument 0
+    arg1: u32         # Argument 1
+    status: u32       # 0=idle, 1=busy, 2=done
+    result_val: u32   # Result value
+    seq_id: u32       # Sequence counter (increments on each command)
+    trigger: u32      # Trigger register
+
+# ============================================================================
+# Mailbox Write Result
+# ============================================================================
+
+struct MailboxWriteResult:
+    """Result of an MMIO write to the mailbox."""
+    state: MailboxState    # Updated mailbox state
+    char_out: u32          # Character output (valid when char_valid=true)
+    char_valid: bool       # True if CMD_PUTC produced a character
+    halt_request: bool     # True if CMD_EXIT was executed
+    result_valid: bool     # True if CMD_RESULT was executed
+    result: u32            # Result value (valid when result_valid=true)
+
+# ============================================================================
+# Create — initial mailbox state
+# ============================================================================
+
+fn mailbox_create() -> MailboxState:
+    """Create mailbox in reset state."""
+    MailboxState(
+        cmd: 0,
+        arg0: 0,
+        arg1: 0,
+        status: MB_STATUS_IDLE,
+        result_val: 0,
+        seq_id: 0,
+        trigger: 0
+    )
+
+# ============================================================================
+# MMIO Read
+# ============================================================================
+
+fn mailbox_mmio_read(state: MailboxState, offset: u32) -> u32:
+    """Read a mailbox register by byte offset from mailbox base."""
+    if offset == MB_OFF_CMD:
+        return state.cmd
+    if offset == MB_OFF_ARG0:
+        return state.arg0
+    if offset == MB_OFF_ARG1:
+        return state.arg1
+    if offset == MB_OFF_STATUS:
+        return state.status
+    if offset == MB_OFF_RESULT:
+        return state.result_val
+    if offset == MB_OFF_SEQ_ID:
+        return state.seq_id
+    if offset == MB_OFF_TRIGGER:
+        return state.trigger
+    0
+
+# ============================================================================
+# MMIO Write
+# ============================================================================
+
+fn mailbox_mmio_write(state: MailboxState, offset: u32, value: u32) -> MailboxWriteResult:
+    """Write a mailbox register by byte offset.
+    When the trigger register is written with the magic value (0x0000DEAD),
+    the current command is executed immediately.
+
+    Returns the updated state and any side-effects (char output, halt, result)."""
+    var out = state
+    var char_out: u32 = 0
+    var char_valid: bool = false
+    var halt_request: bool = false
+    var result_valid: bool = false
+    var result: u32 = 0
+
+    if offset == MB_OFF_CMD:
+        out.cmd = value
+    else if offset == MB_OFF_ARG0:
+        out.arg0 = value
+    else if offset == MB_OFF_ARG1:
+        out.arg1 = value
+    else if offset == MB_OFF_STATUS:
+        out.status = value
+    else if offset == MB_OFF_RESULT:
+        out.result_val = value
+    else if offset == MB_OFF_SEQ_ID:
+        out.seq_id = value
+    else if offset == MB_OFF_TRIGGER:
+        out.trigger = value
+        # Execute command when magic value is written
+        if value == MB_TRIGGER_MAGIC:
+            out.status = MB_STATUS_BUSY
+
+            if out.cmd == MB_CMD_PUTC:
+                # Output character from arg0
+                char_out = out.arg0 & 0xFF
+                char_valid = true
+                out.status = MB_STATUS_DONE
+                out.seq_id = out.seq_id + 1
+
+            else if out.cmd == MB_CMD_EXIT:
+                # Signal halt
+                halt_request = true
+                out.status = MB_STATUS_DONE
+                out.seq_id = out.seq_id + 1
+
+            else if out.cmd == MB_CMD_RESULT:
+                # Record result value
+                result = out.arg0
+                result_valid = true
+                out.result_val = out.arg0
+                out.status = MB_STATUS_DONE
+                out.seq_id = out.seq_id + 1
+
+            else:
+                # Unknown command — stay busy (error state)
+                out.status = MB_STATUS_IDLE
+
+            # Clear trigger after execution
+            out.trigger = 0
+
+    MailboxWriteResult(
+        state: out,
+        char_out: char_out,
+        char_valid: char_valid,
+        halt_request: halt_request,
+        result_valid: result_valid,
+        result: result
+    )

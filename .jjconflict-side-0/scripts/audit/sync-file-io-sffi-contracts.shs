@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io/file.spl"
+native="$root/src/compiler_rust/runtime/src/value/sffi/file_io/io_file.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+declarations=$(grep -c '^extern fn rt_io_file_' "$owner")
+if [ "$declarations" -ne 16 ]; then
+    echo "sync file I/O extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ { previous_is_ffi = 1; next }
+    /^extern fn rt_io_file_/ { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every sync file I/O declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /unsafe\(capabilities: \[.*ffi.*\]\):[[:space:]]*$/ {
+        unsafe_indent = indent($0)
+        inside_unsafe = 1
+        next
+    }
+    inside_unsafe && NF && indent($0) <= unsafe_indent { inside_unsafe = 0 }
+    /rt_io_file_[A-Za-z0-9_]+\(/ && !/^extern fn / && !inside_unsafe {
+        print "unscoped sync file I/O call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$owner"
+
+for symbol in $(sed -n 's/^extern fn \(rt_io_file_[A-Za-z0-9_]*\).*/\1/p' "$owner"); do
+    grep -q "pub unsafe extern \"C\" fn $symbol" "$native" || {
+        echo "sync file declaration $symbol lacks its native Rust provider" >&2
+        exit 1
+    }
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" || {
+        echo "sync file declaration $symbol lacks its typed interpreter registration" >&2
+        exit 1
+    }
+done
+
+grep -q 'if size < 0:' "$owner"
+grep -q 'if buf.try_reserve_exact(size).is_err()' "$native"
+if [ "$(grep -c 'if data_len == 0 {' "$native")" -lt 2 ]; then
+    echo "empty file writes must avoid from_raw_parts(null, 0)" >&2
+    exit 1
+fi
+if grep -A8 'fn rt_io_file_write(' "$native" | grep -q 'data_ptr.is_null() && data_len > 0'; then
+    echo "file write retains null-zero slice UB" >&2
+    exit 1
+fi
+
+echo "sync file I/O SFFI contract audit: PASS (16 unsafe declarations; Rust provider and typed interpreter registrations present)"

@@ -1,0 +1,48 @@
+use std.spec.{describe, it, assert_equal, assert_nil}
+use std.common.aes.padding.{pkcs7_pad, pkcs7_unpad}
+
+# NOTE ON COVERAGE: `bin/simple test` runs the tree-walk INTERPRETER, and the
+# JIT-only tagged-element defect that made `pkcs7_unpad` never strip is
+# invisible on this lane -- the interpreter reads parameter-passed list
+# elements correctly. These assertions therefore prove the LOGIC (fail-closed
+# validation), not the codegen. Do not read a green run here as evidence that
+# doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md
+# is fixed; that defect needs a `bin/simple run` reproduction to clear.
+
+describe "AES PKCS7 padding guards":
+    it "pads valid data":
+        assert_equal(pkcs7_pad([1, 2, 3], 4).unwrap(), [1, 2, 3, 1])
+
+    it "pads a block-aligned input with a whole extra block":
+        assert_equal(pkcs7_pad([1, 2, 3, 4], 4).unwrap(), [1, 2, 3, 4, 4, 4, 4, 4])
+
+    it "rejects invalid block sizes":
+        assert_nil(pkcs7_pad([1, 2, 3], 0))
+        assert_nil(pkcs7_pad([1, 2, 3], -1))
+        assert_nil(pkcs7_pad([1, 2, 3], 256))
+
+    it "unpads valid padding":
+        assert_equal(pkcs7_unpad([1, 2, 2, 2], 4).unwrap(), [1, 2])
+
+    it "unpads a full block of padding to the empty list":
+        assert_equal(pkcs7_unpad([4, 4, 4, 4], 4).unwrap(), [])
+
+    it "round-trips pad then unpad":
+        assert_equal(pkcs7_unpad(pkcs7_pad([9, 8, 7], 4).unwrap(), 4).unwrap(), [9, 8, 7])
+
+    it "REJECTS padding whose bytes do not all match the pad length":
+        assert_nil(pkcs7_unpad([1, 2, 3, 2], 4))
+        assert_nil(pkcs7_unpad([1, 5, 3, 3], 4))
+
+    it "REJECTS a zero pad length":
+        assert_nil(pkcs7_unpad([1, 2, 3, 0], 4))
+
+    it "REJECTS a pad length larger than the block size":
+        assert_nil(pkcs7_unpad([1, 2, 3, 9], 4))
+        assert_nil(pkcs7_unpad([1, 2, 3, 5], 4))
+
+    it "REJECTS input that is not a whole number of blocks":
+        assert_nil(pkcs7_unpad([1, 2, 1], 4))
+
+    it "REJECTS empty input":
+        assert_nil(pkcs7_unpad([], 4))

@@ -1,0 +1,124 @@
+# Slide HTML Rendering
+#
+# Renders a slide "like MS PowerPoint" by resolving each element's role through
+# the shared office style resolver's slide theme (centered bold title, subtitle,
+# body) and emitting a styled HTML fragment.
+#
+# Kept separate from `render.spl` — which depends on the UI widget tree — so this
+# path stays a pure model -> CSS -> HTML transform that loads without the GUI
+# widget stack.
+
+use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, SlideLayout}
+use std.common.render_scene.office_style_resolver.{resolve_style, style_to_css_text}
+
+use std.io_runtime.{file_exists}
+
+fn _html_escape(s: text) -> text:
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
+
+fn _is_hex_char(ch: text) -> bool:
+    (ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F")
+
+fn _safe_hex_color(color: text) -> text:
+    if color.len() != 7 or not color.starts_with("#"):
+        return "#ffffff"
+    var i = 1
+    while i < color.len():
+        if not _is_hex_char(color.slice(i, i + 1)):
+            return "#ffffff"
+        i = i + 1
+    color
+
+fn _non_negative_px(value: i32) -> i32:
+    if value < 0:
+        return 0
+    value
+
+fn _slide_element_box_css(element: SlideElement) -> text:
+    val x = _non_negative_px(element.x)
+    val y = _non_negative_px(element.y)
+    val w = _non_negative_px(element.width)
+    val h = _non_negative_px(element.height)
+    "position: absolute; left: {x}px; top: {y}px; width: {w}px; height: {h}px;"
+
+fn _image_el_html(src: text, alt: text) -> text:
+    """Inner HTML for an image element: an `<img>` with inline max-width /
+    max-height so the picture stays inside its element box. When the file is
+    missing, the alt text renders in a styled placeholder box instead (the
+    Word lane's degradation pattern) — never a broken-image icon."""
+    if file_exists(src):
+        return "<img src=\"{_html_escape(src)}\" alt=\"{_html_escape(alt)}\" style=\"max-width: 100%; max-height: 100%;\"/>"
+    var label = alt
+    if label == "":
+        label = src
+    "<span style=\"display: inline-block; max-width: 100%; padding: 8px 12px; border: 1px dashed #999999; background: #f7f7f7; color: #666666; font-size: 14px;\">{_html_escape(label)}</span>"
+
+fn _table_el_html(rows: text) -> text:
+    """Inner HTML for a table element (canonical newline-joined markdown
+    rows): a `<table>` with inline border-collapse styles, header row bold
+    (`<th>`), one `<td>` per data cell. The separator row is deck notation
+    and is skipped. Inline CSS only — no <style> blocks."""
+    var out = "<table style=\"border-collapse: collapse; width: 100%;\">"
+    var ri = 0
+    val lines = rows.split("\n")
+    for line in lines:
+        if not is_table_separator_line(line):
+            out = "{out}<tr>"
+            val cells = table_row_cells(line)
+            for cell in cells:
+                val cell_html = _html_escape(cell)
+                if ri == 0:
+                    out = "{out}<th style=\"border: 1px solid #333333; padding: 4px 8px; font-weight: bold; background: #d9e2f3; text-align: left;\">{cell_html}</th>"
+                else:
+                    out = "{out}<td style=\"border: 1px solid #333333; padding: 4px 8px;\">{cell_html}</td>"
+            out = "{out}</tr>"
+            ri = ri + 1
+    "{out}</table>"
+
+fn _slide_element_text(element: SlideElement) -> text:
+    """Display text for a slide element based on its kind."""
+    match element.kind:
+        SlideElementKind.TextBox(content):
+            return _html_escape(content)
+        SlideElementKind.ImageEl(src: src, alt: alt):
+            if alt != "":
+                return "[Image: {_html_escape(alt)}]"
+            return "[Image: {_html_escape(src)}]"
+        SlideElementKind.ShapeEl(shape_type: shape_type, fill_color: fill_color):
+            return "[{_html_escape(shape_type)}]"
+
+fn _slide_element_style_tag(layout: SlideLayout, index: i32) -> text:
+    """Map an element's position within its slide layout to a resolver style
+    tag (slide_title / slide_subtitle / slide_body)."""
+    if index == 0:
+        return "slide_title"
+    match layout:
+        SlideLayout.TitleSlide:
+            return "slide_subtitle"
+        SlideLayout.SectionHeader:
+            return "slide_subtitle"
+        _:
+            return "slide_body"
+
+fn render_slide_html(slide: Slide) -> text:
+    """Render a slide as a styled HTML fragment using the shared office style
+    resolver's slide theme, so the PPT surface renders with Word-level
+    typography (centered bold title, subtitle, body) rather than primitive
+    empty widgets."""
+    val bg = _safe_hex_color(slide.background)
+    var out = "<section class=\"slide\" style=\"position: relative; width: 960px; height: 540px; overflow: hidden; background: {bg};\">"
+    var index = 0
+    for el in slide.elements:
+        val tag = _slide_element_style_tag(slide.layout, index)
+        val content = _slide_element_text(el)
+        val style = resolve_style(tag, [])
+        val css = style_to_css_text(style)
+        val box_css = _slide_element_box_css(el)
+        out = "{out}<div class=\"{tag}\" style=\"{box_css} {css}\">{content}</div>"
+        index = index + 1
+    "{out}</section>"

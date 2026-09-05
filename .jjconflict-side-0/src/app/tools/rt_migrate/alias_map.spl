@@ -1,0 +1,203 @@
+# Alias map loader for rt_migrate.
+#
+# Reads scripts/check/rt_alias_map.sdn (schema rt-alias-map/1). The file is a
+# plain SDN mapping; this loader is line-based on purpose so the tool has no
+# dependency beyond text — the layout it reads is exactly what the generator
+# writes:
+#
+#   rt_alias_map:
+#     entries:
+#       rt_sym:
+#         class: same | adapted | provider | missing
+#         module: std.x.y
+#         fn: alias_name
+#         decl: "(a: text) -> bool"
+#         variants:
+#           - decl: "(a: text) -> text"
+#             module: std.x.z
+#             fn: other_alias
+
+pub struct AliasVariant:
+    decl: text
+    module: text
+    fn_name: text
+
+pub struct AliasEntry:
+    sym: text
+    cls: text
+    module: text
+    fn_name: text
+    decl: text
+    variants: [AliasVariant]
+    note: text
+
+# Normalise an extern signature so that param names, whitespace and the
+# spelling of "no return" do not matter:  "(path: text) -> bool" -> "(text)->bool",
+# "(code: i32)" / "(code: i32) -> unit" / "(code: i32) -> void" -> "(i32)->unit".
+pub fn normalize_decl(sig: text) -> text:
+    val s = sig.trim()
+    val close = _matching_paren_end(s)
+    if close < 0:
+        # An opening paren with no matching close is the first physical line of
+        # a MULTI-LINE extern declaration (verifier R1): not a signature at all.
+        # Mark it unparseable so no rewrite can ever match against it.
+        if s.starts_with("("):
+            return "!unparseable"
+        return s.replace(" ", "")
+    val params_raw = s.substring(1, close)
+    var ret = s.substring(close + 1, s.len()).trim()
+    if ret.starts_with("->"):
+        ret = ret.substring(2, ret.len()).trim()
+    if ret == "" or ret == "void":
+        ret = "unit"
+    var types: [text] = []
+    for part in _split_top_commas(params_raw):
+        val p = part.trim()
+        if p == "":
+            continue
+        val colon = p.find(":")
+        if colon >= 0:
+            types.push(p.substring(colon + 1, p.len()).replace(" ", ""))
+        else:
+            types.push(p.replace(" ", ""))
+    "(" + types.join(",") + ")->" + ret.replace(" ", "")
+
+fn _matching_paren_end(s: text) -> i64:
+    if s.len() == 0 or s.char_at(0) != "(":
+        return -1
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val c = s.char_at(i)
+        if c == "(" or c == "[" or c == "<":
+            depth = depth + 1
+        elif c == ")" or c == "]" or (c == ">" and (i == 0 or s.char_at(i - 1) != "-")):
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _split_top_commas(s: text) -> [text]:
+    var out: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < s.len():
+        val c = s.char_at(i)
+        if c == "(" or c == "[" or c == "<":
+            depth = depth + 1
+        elif c == ")" or c == "]" or (c == ">" and (i == 0 or s.char_at(i - 1) != "-")):
+            depth = depth - 1
+        elif c == "," and depth == 0:
+            out.push(s.substring(start, i))
+            start = i + 1
+        i = i + 1
+    out.push(s.substring(start, s.len()))
+    out
+
+fn _unquote(v: text) -> text:
+    val t = v.trim()
+    if t.len() >= 2 and t.starts_with("\"") and t.ends_with("\""):
+        return t.substring(1, t.len() - 1).replace("\\\"", "\"")
+    t
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line.char_at(n) == " ":
+        n = n + 1
+    n
+
+fn _key_of(line: text) -> text:
+    val t = line.trim()
+    val colon = t.find(":")
+    if colon < 0:
+        return ""
+    t.substring(0, colon)
+
+fn _value_of(line: text) -> text:
+    val t = line.trim()
+    val colon = t.find(":")
+    if colon < 0:
+        return ""
+    t.substring(colon + 1, t.len()).trim()
+
+# Parse the map text into a symbol -> entry dictionary.
+pub fn parse_alias_map(source: text) -> Dict<text, AliasEntry>:
+    var out: Dict<text, AliasEntry> = {}
+    var sym = ""
+    var cls = ""
+    var module = ""
+    var fn_name = ""
+    var decl = ""
+    var note = ""
+    var variants: [AliasVariant] = []
+    var v_decl = ""
+    var v_module = ""
+    var v_fn = ""
+    var in_variant = false
+    var in_entries = false
+    for raw in source.split("\n"):
+        val t = raw.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        val ind = _indent_of(raw)
+        if ind == 2 and _key_of(raw) == "entries":
+            in_entries = true
+            continue
+        if not in_entries:
+            continue
+        if ind == 4:
+            if in_variant:
+                variants.push(AliasVariant(decl: normalize_decl(_unquote(v_decl)), module: v_module, fn_name: v_fn))
+                in_variant = false
+            if sym != "":
+                out[sym] = AliasEntry(sym: sym, cls: cls, module: module, fn_name: fn_name, decl: normalize_decl(_unquote(decl)), variants: variants, note: note)
+            sym = _key_of(raw)
+            cls = ""
+            module = ""
+            fn_name = ""
+            decl = ""
+            note = ""
+            variants = []
+            continue
+        if ind == 6:
+            val k = _key_of(raw)
+            val v = _value_of(raw)
+            if k == "class":
+                cls = v
+            elif k == "module":
+                module = v
+            elif k == "fn":
+                fn_name = v
+            elif k == "decl":
+                decl = v
+            elif k == "note" or k == "reason":
+                note = _unquote(v)
+            continue
+        if ind == 8 and t.starts_with("- "):
+            if in_variant:
+                variants.push(AliasVariant(decl: normalize_decl(_unquote(v_decl)), module: v_module, fn_name: v_fn))
+            in_variant = true
+            v_decl = ""
+            v_module = ""
+            v_fn = ""
+            val body = t.substring(2, t.len())
+            if _key_of(body) == "decl":
+                v_decl = _value_of(body)
+            continue
+        if ind == 10 and in_variant:
+            val k = _key_of(raw)
+            val v = _value_of(raw)
+            if k == "decl":
+                v_decl = v
+            elif k == "module":
+                v_module = v
+            elif k == "fn":
+                v_fn = v
+            continue
+    if in_variant:
+        variants.push(AliasVariant(decl: normalize_decl(_unquote(v_decl)), module: v_module, fn_name: v_fn))
+    if sym != "":
+        out[sym] = AliasEntry(sym: sym, cls: cls, module: module, fn_name: fn_name, decl: normalize_decl(_unquote(decl)), variants: variants, note: note)
+    out

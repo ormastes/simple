@@ -1,0 +1,191 @@
+# Skybox — cubemap skybox and reflection probe configuration
+#
+# Manages cubemap faces, skybox assignment, gradient sky fallback,
+# and reflection probes for environment lighting.
+#
+# Usage:
+#   var cubemap = Cubemap.new("sky_day")
+#   cubemap.set_face("px", "textures/sky_px.png")
+#   cubemap.set_face("nx", "textures/sky_nx.png")
+#   var mgr = SkyboxManager.new()
+#   mgr.set_skybox(cubemap)
+
+# ============================================================================
+# CubemapFace — single face of a cubemap
+# ============================================================================
+
+struct CubemapFace:
+    face_name: text
+    texture_path: text
+
+# ============================================================================
+# Cubemap — six-faced cubemap texture
+# ============================================================================
+
+struct Cubemap:
+    name: text
+    faces: [CubemapFace]
+
+impl Cubemap:
+    static fn new(name: text) -> Cubemap:
+        """Create an empty cubemap with the given name."""
+        Cubemap(
+            name: name,
+            faces: []
+        )
+
+    me set_face(face_name: text, texture_path: text):
+        """Add or update a cubemap face. Valid names: px, nx, py, ny, pz, nz."""
+        var found = false
+        var i = 0
+        while i < self.faces.len():
+            if self.faces[i].face_name == face_name:
+                self.faces[i] = CubemapFace(
+                    face_name: face_name,
+                    texture_path: texture_path
+                )
+                found = true
+                i = self.faces.len()  # break
+            else:
+                i = i + 1
+        if not found:
+            self.faces = self.faces.push(CubemapFace(
+                face_name: face_name,
+                texture_path: texture_path
+            ))
+
+    fn get_face(face_name: text) -> text:
+        """Return the texture path for a face, or empty string if not found."""
+        var i = 0
+        while i < self.faces.len():
+            if self.faces[i].face_name == face_name:
+                return self.faces[i].texture_path
+            i = i + 1
+        ""
+
+    fn face_count() -> i32:
+        """Return the number of assigned faces."""
+        self.faces.len()
+
+    fn is_complete() -> bool:
+        """Check whether all 6 faces are assigned."""
+        if self.faces.len() < 6:
+            return false
+        var has_px = false
+        var has_nx = false
+        var has_py = false
+        var has_ny = false
+        var has_pz = false
+        var has_nz = false
+        var i = 0
+        while i < self.faces.len():
+            val n = self.faces[i].face_name
+            if n == "px":
+                has_px = true
+            if n == "nx":
+                has_nx = true
+            if n == "py":
+                has_py = true
+            if n == "ny":
+                has_ny = true
+            if n == "pz":
+                has_pz = true
+            if n == "nz":
+                has_nz = true
+            i = i + 1
+        has_px and has_nx and has_py and has_ny and has_pz and has_nz
+
+# ============================================================================
+# ReflectionProbe — environment reflection capture point
+# ============================================================================
+
+struct ReflectionProbe:
+    name: text
+    position_x: f64
+    position_y: f64
+    position_z: f64
+    radius: f64
+    resolution: i32
+    cubemap: Cubemap
+
+impl ReflectionProbe:
+    static fn new(name: text, x: f64, y: f64, z: f64, radius: f64, resolution: i32) -> ReflectionProbe:
+        """Create a reflection probe at the given position."""
+        ReflectionProbe(
+            name: name,
+            position_x: x,
+            position_y: y,
+            position_z: z,
+            radius: radius,
+            resolution: resolution,
+            cubemap: Cubemap.new(name + "_cubemap")
+        )
+
+# ============================================================================
+# SkyboxManager — manages active skybox and reflection probes
+# ============================================================================
+
+class SkyboxManager:
+    _active_skybox: Cubemap
+    _has_skybox: bool
+    probes: [ReflectionProbe]
+    sky_color_top_r: f64
+    sky_color_top_g: f64
+    sky_color_top_b: f64
+    sky_color_bottom_r: f64
+    sky_color_bottom_g: f64
+    sky_color_bottom_b: f64
+
+impl SkyboxManager:
+    static fn new() -> SkyboxManager:
+        """Create an empty skybox manager with black gradient."""
+        SkyboxManager(
+            _active_skybox: Cubemap.new(""),
+            _has_skybox: false,
+            probes: [],
+            sky_color_top_r: 0.0,
+            sky_color_top_g: 0.0,
+            sky_color_top_b: 0.0,
+            sky_color_bottom_r: 0.0,
+            sky_color_bottom_g: 0.0,
+            sky_color_bottom_b: 0.0
+        )
+
+    me set_skybox(cubemap: Cubemap):
+        """Set the active skybox cubemap."""
+        self._active_skybox = cubemap
+        self._has_skybox = true
+
+    me set_gradient(top_r: f64, top_g: f64, top_b: f64, bottom_r: f64, bottom_g: f64, bottom_b: f64):
+        """Set the fallback gradient sky colors."""
+        self.sky_color_top_r = top_r
+        self.sky_color_top_g = top_g
+        self.sky_color_top_b = top_b
+        self.sky_color_bottom_r = bottom_r
+        self.sky_color_bottom_g = bottom_g
+        self.sky_color_bottom_b = bottom_b
+
+    me add_probe(probe: ReflectionProbe) -> i32:
+        """Add a reflection probe and return its index."""
+        self.probes = self.probes.push(probe)
+        self.probes.len() - 1
+
+    fn probe_count() -> i32:
+        """Return the number of reflection probes."""
+        self.probes.len()
+
+    fn has_skybox() -> bool:
+        """Check whether an active skybox is set."""
+        self._has_skybox
+
+    me clear():
+        """Remove active skybox and all probes."""
+        self._active_skybox = Cubemap.new("")
+        self._has_skybox = false
+        self.probes = []
+        self.sky_color_top_r = 0.0
+        self.sky_color_top_g = 0.0
+        self.sky_color_top_b = 0.0
+        self.sky_color_bottom_r = 0.0
+        self.sky_color_bottom_g = 0.0
+        self.sky_color_bottom_b = 0.0

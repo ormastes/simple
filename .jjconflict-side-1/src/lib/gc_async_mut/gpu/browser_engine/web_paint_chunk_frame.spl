@@ -1,0 +1,551 @@
+# Producer-owned PaintChunk sidecar for the canonical Simple Web Draw IR frame.
+#
+# This first O2 slice is metadata-only.  It mirrors every command from the
+# final producer composition in exact batch/command order, but it never
+# rebuilds, filters, or executes Draw IR. Exact opacity proofs are accepted
+# only as producer-attested metadata; `culling_enabled` remains false until a
+# canonical retained transaction owns execution.
+
+use common.ui.draw_ir.{
+    DrawEdge, DrawIrBatch, DrawIrCommand, DrawIrComposition,
+    DrawIrEmbeddingConfig, DrawIrGlyphRunPayload, DrawIrPoint, DrawIrRect,
+    DrawIrSourceInfo, DrawIrStyleProp
+}
+use common.ui.render_opt.property_trees.{PaintChunks}
+use common.ui.render_opt.paint_chunk_rasterizer.{PaintChunkRects}
+use common.ui.render_opt.chunk_occlusion.{
+    ChunkVisibility, CHUNK_OPAQUE_EXACT_RECT, CHUNK_OPAQUE_UNKNOWN
+}
+
+# Attested while the Web producer still owns the source primitive, computed
+# style, ancestor opacity, clip and target surface.  This record is never
+# reconstructed from DrawIR by a consumer.
+struct WebPaintChunkProducerProof:
+    command_id: text
+    opaque_proof: u32
+    batch_id: text
+    surface_id: text
+    embedding_opacity_milli: i32
+    embedding_clip: bool
+
+# Batch identity is retained separately from the numeric PaintChunks surface
+# column.  The latter is only a compact row-group index in this slice; it is
+# not a substitute for the producer's real surface/batch identity.
+struct WebPaintChunkBatchIdentity:
+    schema: text
+    batch_id: text
+    backend_target: text
+    source_kind: text
+    source_id: text
+    style_key: text
+    style_revision: text
+    surface_id: text
+    component_id: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    layer: i32
+    opacity_milli: i32
+    clip: bool
+    command_count: i64
+
+class WebPaintChunkFrame:
+    valid: bool
+    reason: text
+    composition_schema: text
+    composition_id: text
+    scene_key: text
+    backend_target: text
+    chunks: PaintChunks
+    rects: PaintChunkRects
+    visibility: ChunkVisibility
+    producer_proofs: [WebPaintChunkProducerProof]
+    stable_command_ids: [text]
+    command_batch_indices: [i64]
+    batches: [WebPaintChunkBatchIdentity]
+    # Collision-free, field-ordered snapshot tokens.  Text values occupy
+    # separate array elements and every variable-length collection carries an
+    # explicit count, so equality cannot be confused by separators or hashes.
+    semantic_snapshot: [text]
+    culling_enabled: bool
+
+fn _web_paint_chunk_snapshot_bool(value: bool) -> text:
+    if value: "1" else: "0"
+
+fn _web_paint_chunk_snapshot_rect(out: mut [text], rect: DrawIrRect):
+    out.push(_web_paint_chunk_snapshot_bool(rect.present))
+    out.push("{rect.x}")
+    out.push("{rect.y}")
+    out.push("{rect.width}")
+    out.push("{rect.height}")
+
+fn _web_paint_chunk_snapshot_points(out: mut [text], points: [DrawIrPoint]):
+    out.push("{points.len()}")
+    for point in points:
+        out.push("{point.x}")
+        out.push("{point.y}")
+
+fn _web_paint_chunk_snapshot_style(
+    out: mut [text], style: [DrawIrStyleProp]
+):
+    out.push("{style.len()}")
+    for prop in style:
+        out.push(prop.key)
+        out.push(prop.value)
+
+fn _web_paint_chunk_snapshot_glyph_run(
+    out: mut [text], glyph_run: DrawIrGlyphRunPayload
+):
+    out.push(_web_paint_chunk_snapshot_bool(glyph_run.valid))
+    out.push("{glyph_run.glyph_ids.len()}")
+    for glyph_id in glyph_run.glyph_ids:
+        out.push("{glyph_id}")
+    out.push("{glyph_run.xs.len()}")
+    for x in glyph_run.xs:
+        out.push("{x}")
+    out.push("{glyph_run.ys.len()}")
+    for y in glyph_run.ys:
+        out.push("{y}")
+    out.push("{glyph_run.clusters.len()}")
+    for cluster in glyph_run.clusters:
+        out.push("{cluster}")
+
+fn _web_paint_chunk_snapshot_edge(out: mut [text], edge: DrawEdge):
+    out.push(edge.id)
+    out.push(edge.source)
+    out.push(edge.target)
+    out.push(edge.routing)
+    _web_paint_chunk_snapshot_points(out, edge.points)
+    _web_paint_chunk_snapshot_style(out, edge.style)
+
+fn _web_paint_chunk_snapshot_command(
+    out: mut [text], command: DrawIrCommand
+):
+    out.push(command.kind)
+    out.push(command.component_id)
+    out.push("{command.x}")
+    out.push("{command.y}")
+    out.push("{command.width}")
+    out.push("{command.height}")
+    out.push("{command.color}")
+    out.push(command.text_value)
+    out.push("{command.advance_widths.len()}")
+    for advance in command.advance_widths:
+        out.push("{advance}")
+    _web_paint_chunk_snapshot_rect(out, command.border_rect)
+    _web_paint_chunk_snapshot_rect(out, command.content_rect)
+    _web_paint_chunk_snapshot_rect(out, command.hit_rect)
+    _web_paint_chunk_snapshot_rect(out, command.clip_rect)
+    _web_paint_chunk_snapshot_style(out, command.computed_style)
+    if val edge = command.edge:
+        out.push("1")
+        _web_paint_chunk_snapshot_edge(out, edge)
+    else:
+        out.push("0")
+    out.push(command.parent_id)
+    out.push(command.image_uri)
+    _web_paint_chunk_snapshot_points(out, command.points)
+    _web_paint_chunk_snapshot_glyph_run(out, command.glyph_run)
+
+fn _web_paint_chunk_snapshot_source(
+    out: mut [text], source: DrawIrSourceInfo
+):
+    out.push(source.source_kind)
+    out.push(source.source_id)
+    out.push(source.html_tag)
+    out.push(source.html_node_id)
+    out.push(source.css_selector)
+    out.push(source.css_class)
+    out.push(source.style_key)
+    out.push(source.style_revision)
+
+fn _web_paint_chunk_snapshot_embedding(
+    out: mut [text], embedding: DrawIrEmbeddingConfig
+):
+    out.push(embedding.surface_id)
+    out.push(embedding.component_id)
+    out.push("{embedding.x}")
+    out.push("{embedding.y}")
+    out.push("{embedding.width}")
+    out.push("{embedding.height}")
+    out.push("{embedding.layer}")
+    out.push("{embedding.opacity_milli}")
+    out.push(_web_paint_chunk_snapshot_bool(embedding.clip))
+
+# Exact producer-semantic snapshot of every Draw IR field.  This intentionally
+# stores the canonical scalar tokens rather than a digest: matching is direct
+# equality and therefore has no collision-based acceptance path.
+fn _web_paint_chunk_semantic_snapshot(
+    composition: DrawIrComposition
+) -> [text]:
+    var out: [text] = ["web-paint-chunk-semantic-snapshot-v1"]
+    out.push(composition.schema)
+    out.push(composition.composition_id)
+    out.push(composition.scene_key)
+    out.push(composition.backend_target)
+    out.push("{composition.batches.len()}")
+    for batch in composition.batches:
+        out.push(batch.schema)
+        out.push(batch.batch_id)
+        out.push(batch.backend_target)
+        _web_paint_chunk_snapshot_source(out, batch.source)
+        _web_paint_chunk_snapshot_embedding(out, batch.embedding)
+        out.push("{batch.commands.len()}")
+        for command in batch.commands:
+            _web_paint_chunk_snapshot_command(out, command)
+    out
+
+fn _web_paint_chunk_snapshot_matches(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var index: i64 = 0
+    while index < a.len():
+        if a[index] != b[index]:
+            return false
+        index = index + 1
+    true
+
+fn _web_paint_chunk_batch_identity(batch: DrawIrBatch) -> WebPaintChunkBatchIdentity:
+    val source = batch.source
+    val embedding = batch.embedding
+    val command_count = batch.commands.len()
+    WebPaintChunkBatchIdentity(
+        schema: batch.schema,
+        batch_id: batch.batch_id,
+        backend_target: batch.backend_target,
+        source_kind: source.source_kind,
+        source_id: source.source_id,
+        style_key: source.style_key,
+        style_revision: source.style_revision,
+        surface_id: embedding.surface_id,
+        component_id: embedding.component_id,
+        x: embedding.x,
+        y: embedding.y,
+        width: embedding.width,
+        height: embedding.height,
+        layer: embedding.layer,
+        opacity_milli: embedding.opacity_milli,
+        clip: embedding.clip,
+        command_count: command_count
+    )
+
+fn _web_paint_chunk_batch_identity_matches(
+    identity: WebPaintChunkBatchIdentity, batch: DrawIrBatch
+) -> bool:
+    val source = batch.source
+    val embedding = batch.embedding
+    val command_count = batch.commands.len()
+    (
+        identity.schema == batch.schema and
+        identity.batch_id == batch.batch_id and
+        identity.backend_target == batch.backend_target and
+        identity.source_kind == source.source_kind and
+        identity.source_id == source.source_id and
+        identity.style_key == source.style_key and
+        identity.style_revision == source.style_revision and
+        identity.surface_id == embedding.surface_id and
+        identity.component_id == embedding.component_id and
+        identity.x == embedding.x and
+        identity.y == embedding.y and
+        identity.width == embedding.width and
+        identity.height == embedding.height and
+        identity.layer == embedding.layer and
+        identity.opacity_milli == embedding.opacity_milli and
+        identity.clip == embedding.clip and
+        identity.command_count == command_count
+    )
+
+fn _web_paint_chunk_frame_empty(
+    composition: DrawIrComposition, reason: text
+) -> WebPaintChunkFrame:
+    WebPaintChunkFrame(
+        valid: false,
+        reason: reason,
+        composition_schema: composition.schema,
+        composition_id: composition.composition_id,
+        scene_key: composition.scene_key,
+        backend_target: composition.backend_target,
+        chunks: PaintChunks.create(),
+        rects: PaintChunkRects.create(),
+        visibility: ChunkVisibility.create(),
+        producer_proofs: [],
+        stable_command_ids: [],
+        command_batch_indices: [],
+        batches: [],
+        semantic_snapshot: [],
+        culling_enabled: false
+    )
+
+fn _web_paint_chunk_columns_lockstep(chunks: PaintChunks, count: i64) -> bool:
+    (
+        chunks.owner.len() == count and
+        chunks.transform_node.len() == count and
+        chunks.clip_node.len() == count and
+        chunks.effect_node.len() == count and
+        chunks.surface.len() == count and
+        chunks.resource_set.len() == count and
+        chunks.order.len() == count and
+        chunks.key_component_gen.len() == count and
+        chunks.key_grouping_rev.len() == count and
+        chunks.key_property_rev.len() == count and
+        chunks.key_theme_rev.len() == count and
+        chunks.key_scale_rev.len() == count and
+        chunks.key_viewport_gen.len() == count and
+        chunks.key_capability_gen.len() == count and
+        chunks.chunk_area.len() == count
+    )
+
+# Capture one row for every command in the already-final canonical
+# composition.  `component_id` is the producer-owned stable identity.  Empty
+# or duplicate identities invalidate the whole sidecar; the composition itself
+# remains untouched and continues down the established full-frame path.
+fn _web_paint_chunk_proofs_valid_for_composition(
+    composition: DrawIrComposition, proofs: [WebPaintChunkProducerProof]
+) -> bool:
+    var expected: i64 = 0
+    for batch in composition.batches:
+        expected = expected + batch.commands.len()
+    if proofs.len() != expected:
+        return false
+    var index: i64 = 0
+    for batch in composition.batches:
+        val embedding = batch.embedding
+        for command in batch.commands:
+            val proof = proofs[index]
+            if (
+                proof.command_id != command.component_id or
+                proof.batch_id != batch.batch_id or
+                proof.surface_id != embedding.surface_id or
+                proof.embedding_opacity_milli !=
+                    embedding.opacity_milli or
+                proof.embedding_clip != embedding.clip or
+                (proof.opaque_proof == CHUNK_OPAQUE_EXACT_RECT and
+                 embedding.opacity_milli != 1000) or
+                (proof.opaque_proof != CHUNK_OPAQUE_UNKNOWN and
+                 proof.opaque_proof != CHUNK_OPAQUE_EXACT_RECT)
+            ):
+                return false
+            index = index + 1
+    true
+
+# Construct the metadata sidecar from producer-owned proof attestations.  It
+# remains deliberately non-executable: `culling_enabled` stays false until a
+# canonical retained transaction owns full-frame producer-to-executor wiring.
+fn web_paint_chunk_frame_from_composition_with_proofs(
+    composition: DrawIrComposition, producer_proofs: [WebPaintChunkProducerProof]
+) -> WebPaintChunkFrame:
+    if not _web_paint_chunk_proofs_valid_for_composition(
+        composition, producer_proofs
+    ):
+        return _web_paint_chunk_frame_empty(
+            composition, "web-paint-chunk-producer-proof-mismatch")
+    var chunks = PaintChunks.create()
+    var rects = PaintChunkRects.create()
+    var visibility = ChunkVisibility.create()
+    var stable_command_ids: [text] = []
+    var command_batch_indices: [i64] = []
+    var batch_identities: [WebPaintChunkBatchIdentity] = []
+    var seen_commands: Dict<text, bool> = {}
+    var seen_batches: Dict<text, bool> = {}
+    var command_order: i64 = 0
+    var batch_index: i64 = 0
+    while batch_index < composition.batches.len():
+        if batch_index > 4294967295:
+            return _web_paint_chunk_frame_empty(
+                composition, "web-paint-chunk-batch-index-overflow")
+        val batch = composition.batches[batch_index]
+        if batch.batch_id.len() == 0 or seen_batches.has(batch.batch_id):
+            return _web_paint_chunk_frame_empty(
+                composition, "web-paint-chunk-invalid-batch-identity")
+        seen_batches[batch.batch_id] = true
+        batch_identities.push(_web_paint_chunk_batch_identity(batch))
+        var local_index: i64 = 0
+        while local_index < batch.commands.len():
+            if command_order > 4294967295:
+                return _web_paint_chunk_frame_empty(
+                    composition, "web-paint-chunk-command-index-overflow")
+            val command = batch.commands[local_index]
+            val stable_id = command.component_id
+            val proof = producer_proofs[command_order]
+            if stable_id.len() == 0 or seen_commands.has(stable_id):
+                return _web_paint_chunk_frame_empty(
+                    composition, "web-paint-chunk-invalid-command-identity")
+            seen_commands[stable_id] = true
+            # `owner` and numeric `surface` are alignment ordinals only.  The
+            # semantic identity is `stable_id`; exact batch/surface metadata is
+            # retained in `batch_identities` and checked before future use.
+            chunks.add_chunk_sized(
+                command_order.to_u32(), 0, 0, 0, batch_index.to_u32(), 0,
+                command_order.to_u32(), 0)
+            rects.add_rect(
+                command.x.to_i64(), command.y.to_i64(),
+                command.width.to_i64(), command.height.to_i64(),
+                command.color.to_i64())
+            visibility.add(true, proof.opaque_proof)
+            stable_command_ids.push(stable_id)
+            command_batch_indices.push(batch_index)
+            command_order = command_order + 1
+            local_index = local_index + 1
+        batch_index = batch_index + 1
+    WebPaintChunkFrame(
+        valid: true,
+        reason: "",
+        composition_schema: composition.schema,
+        composition_id: composition.composition_id,
+        scene_key: composition.scene_key,
+        backend_target: composition.backend_target,
+        chunks: chunks,
+        rects: rects,
+        visibility: visibility,
+        producer_proofs: producer_proofs,
+        stable_command_ids: stable_command_ids,
+        command_batch_indices: command_batch_indices,
+        batches: batch_identities,
+        semantic_snapshot: _web_paint_chunk_semantic_snapshot(composition),
+        culling_enabled: false
+    )
+
+fn web_paint_chunk_frame_from_composition(
+    composition: DrawIrComposition
+) -> WebPaintChunkFrame:
+    var unknown_proofs: [WebPaintChunkProducerProof] = []
+    for batch in composition.batches:
+        val embedding = batch.embedding
+        for command in batch.commands:
+            unknown_proofs.push(WebPaintChunkProducerProof(
+                command_id: command.component_id,
+                opaque_proof: CHUNK_OPAQUE_UNKNOWN,
+                batch_id: batch.batch_id,
+                surface_id: embedding.surface_id,
+                embedding_opacity_milli: embedding.opacity_milli,
+                embedding_clip: embedding.clip
+            ))
+    web_paint_chunk_frame_from_composition_with_proofs(
+        composition, unknown_proofs)
+
+# Revalidate the sidecar against the exact composition it accompanies.  This
+# is deliberately stronger than a count check: composition identity, batch
+# metadata, command stable IDs, batch membership, bounds, colour, and the
+# producer-attested final embedding must all still match.
+fn web_paint_chunk_frame_matches(
+    frame: WebPaintChunkFrame, composition: DrawIrComposition
+) -> bool:
+    if not frame.valid or frame.culling_enabled:
+        return false
+    if not _web_paint_chunk_snapshot_matches(
+        frame.semantic_snapshot,
+        _web_paint_chunk_semantic_snapshot(composition)
+    ):
+        return false
+    if (
+        frame.composition_schema != composition.schema or
+        frame.composition_id != composition.composition_id or
+        frame.scene_key != composition.scene_key or
+        frame.backend_target != composition.backend_target or
+        frame.batches.len() != composition.batches.len()
+    ):
+        return false
+    val count = frame.chunks.chunk_count
+    val chunks = frame.chunks
+    val rects = frame.rects
+    val visibility = frame.visibility
+    if (
+        not _web_paint_chunk_columns_lockstep(chunks, count) or
+        rects.rect_count != count or
+        rects.rect_x.len() != count or
+        rects.rect_y.len() != count or
+        rects.rect_w.len() != count or
+        rects.rect_h.len() != count or
+        rects.colour.len() != count or
+        visibility.count != count or
+        visibility.present.len() != count or
+        visibility.opaque_proof.len() != count or
+        frame.producer_proofs.len() != count or
+        frame.stable_command_ids.len() != count or
+        frame.command_batch_indices.len() != count
+    ):
+        return false
+    var seen_commands: Dict<text, bool> = {}
+    var seen_batches: Dict<text, bool> = {}
+    var command_index: i64 = 0
+    var batch_index: i64 = 0
+    while batch_index < composition.batches.len():
+        val batch = composition.batches[batch_index]
+        val embedding = batch.embedding
+        if batch.batch_id.len() == 0 or seen_batches.has(batch.batch_id):
+            return false
+        seen_batches[batch.batch_id] = true
+        if not _web_paint_chunk_batch_identity_matches(
+            frame.batches[batch_index], batch
+        ):
+            return false
+        var local_index: i64 = 0
+        while local_index < batch.commands.len():
+            if command_index >= count:
+                return false
+            val command = batch.commands[local_index]
+            val proof = frame.producer_proofs[command_index]
+            if (
+                command.component_id.len() == 0 or
+                seen_commands.has(command.component_id)
+            ):
+                return false
+            seen_commands[command.component_id] = true
+            if (
+                frame.stable_command_ids[command_index] != command.component_id or
+                frame.command_batch_indices[command_index] != batch_index or
+                chunks.owner[command_index] != command_index.to_u32() or
+                # This producer slice does not derive property-tree/cache
+                # columns yet.  They are canonical zero sentinels, so a
+                # tampered sidecar must not pass merely because its DrawIR
+                # identity and geometry still agree.
+                chunks.transform_node[command_index] != 0u32 or
+                chunks.clip_node[command_index] != 0u32 or
+                chunks.effect_node[command_index] != 0u32 or
+                chunks.surface[command_index] != batch_index.to_u32() or
+                chunks.resource_set[command_index] != 0u32 or
+                chunks.order[command_index] != command_index.to_u32() or
+                chunks.key_component_gen[command_index] != 0u32 or
+                chunks.key_grouping_rev[command_index] != 0u32 or
+                chunks.key_property_rev[command_index] != 0u32 or
+                chunks.key_theme_rev[command_index] != 0u32 or
+                chunks.key_scale_rev[command_index] != 0u32 or
+                chunks.key_viewport_gen[command_index] != 0u32 or
+                chunks.key_capability_gen[command_index] != 0u32 or
+                chunks.chunk_area[command_index] != 0 or
+                rects.rect_x[command_index] != command.x.to_i64() or
+                rects.rect_y[command_index] != command.y.to_i64() or
+                rects.rect_w[command_index] != command.width.to_i64() or
+                rects.rect_h[command_index] != command.height.to_i64() or
+                rects.colour[command_index] != command.color.to_i64() or
+                visibility.present[command_index] != 1u32 or
+                proof.command_id !=
+                    command.component_id or
+                proof.batch_id != batch.batch_id or
+                proof.surface_id !=
+                    embedding.surface_id or
+                proof.embedding_opacity_milli !=
+                    embedding.opacity_milli or
+                proof.embedding_clip !=
+                    embedding.clip or
+                (proof.opaque_proof ==
+                    CHUNK_OPAQUE_EXACT_RECT and
+                 embedding.opacity_milli != 1000) or
+                visibility.opaque_proof[command_index] !=
+                    proof.opaque_proof or
+                (visibility.opaque_proof[command_index] !=
+                    CHUNK_OPAQUE_UNKNOWN and
+                 visibility.opaque_proof[command_index] !=
+                    CHUNK_OPAQUE_EXACT_RECT)
+            ):
+                return false
+            command_index = command_index + 1
+            local_index = local_index + 1
+        batch_index = batch_index + 1
+    command_index == count
+
+export WebPaintChunkBatchIdentity, WebPaintChunkFrame, WebPaintChunkProducerProof,
+       web_paint_chunk_frame_from_composition,
+       web_paint_chunk_frame_from_composition_with_proofs,
+       web_paint_chunk_frame_matches

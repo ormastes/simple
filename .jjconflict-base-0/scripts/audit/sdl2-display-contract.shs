@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runtime="$root/src/runtime/runtime_sdl2.c"
+wrapper="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+
+require() {
+    pattern=$1
+    message=$2
+    if ! grep -Eq "$pattern" "$wrapper"; then
+        echo "FAIL: $message" >&2
+        exit 1
+    fi
+}
+
+require 'extern fn rt_sdl2_get_display_name\(index: i64\) -> text\?' \
+    'nullable display names must remain nullable at the raw boundary'
+require 'fn window_get_monitor_count\(\) -> i64\?' \
+    'display-count provider failure must lift to absence'
+require 'fn window_get_monitor_info\(monitor_id: i64\) -> Monitor\?' \
+    'invalid display descriptors must lift to absence'
+require 'name: name\.\?' 'monitor construction must unwrap only a validated name'
+require 'nonnull borrowed error text ABI' \
+    'provider error text must have an explicit nonnull borrowed contract'
+require 'fn window_last_error\(\) -> text:' \
+    'safe error accessor must remain typed text'
+
+count_body=$(sed -n '/^fn window_get_monitor_count(/,/^$/p' "$wrapper")
+info_body=$(sed -n '/^fn window_get_monitor_info(/,/^$/p' "$wrapper")
+if [ "$(printf '%s\n' "$count_body" | grep -c 'rt_sdl2_' || true)" -ne 1 ]; then
+    echo 'FAIL: monitor-count wrapper must retain one native query' >&2
+    exit 1
+fi
+if [ "$(printf '%s\n' "$info_body" | grep -c 'rt_sdl2_' || true)" -ne 6 ]; then
+    echo 'FAIL: monitor-info wrapper must retain its six native queries' >&2
+    exit 1
+fi
+for body in "$count_body" "$info_body"; do
+    if ! printf '%s\n' "$body" | grep -Fq 'unsafe(capabilities: [ffi]):'; then
+        echo 'FAIL: display wrapper lacks lexical FFI scope' >&2
+        exit 1
+    fi
+    if printf '%s\n' "$body" | grep -Eq 'alloc|mutex|hash|dlsym|last_error|retry'; then
+        echo 'FAIL: display wrapper gained allocation, lookup, lock, hash, error-query, or retry work' >&2
+        exit 1
+    fi
+done
+
+if ! grep -q 'SDL2_REQUIRE(-1);' "$runtime" ||
+   ! grep -q 'SDL2_REQUIRE(INT64_MIN);' "$runtime" ||
+   ! grep -q 'SDL2_REQUIRE(NULL);' "$runtime"; then
+    echo 'FAIL: native display sentinels are no longer fail-closed' >&2
+    exit 1
+fi
+
+echo 'PASS: SDL2 display discovery validates sentinels with unchanged query and memory shape'

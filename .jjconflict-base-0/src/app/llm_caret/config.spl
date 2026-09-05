@@ -1,0 +1,528 @@
+# LLM Caret - Configuration
+#
+# Line-based SDN config parser for llm_caret.sdn.
+# Resolves API keys from environment variables.
+
+use app.io.mod.{env_get}
+use app.llm_caret.json_helpers.{json_parse_int}
+
+use std.io_runtime.{read_file_text}
+
+# ============================================================================
+# Module-level state
+# ============================================================================
+
+var CONFIG_LOADED: bool = false
+var DEFAULT_PROVIDER = "claude_cli"
+var DEFAULT_HISTORY_FILE = ".llm_caret_history.sdn"
+var DEFAULT_MAX_HISTORY = 100
+
+# Claude CLI config
+var CLAUDE_CLI_PATH = "claude"
+var CLAUDE_CLI_MODEL = "claude-sonnet-4-20250514"
+var CLAUDE_CLI_EXTRA_ARGS = ""
+
+# OpenCode CLI config
+var CODEX_CLI_PATH = "codex"
+var CODEX_CLI_MODEL = ""
+var OPENCODE_CLI_PATH = "opencode"
+var OPENCODE_CLI_MODEL = ""
+var OPENCODE_CLI_EXTRA_ARGS = ""
+
+# Claude API config
+var CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
+var CLAUDE_API_BASE_URL = "https://api.anthropic.com"
+var CLAUDE_API_MODEL = "claude-sonnet-4-20250514"
+
+# OpenAI config
+var OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+var OPENAI_BASE_URL = "https://api.openai.com"
+var OPENAI_MODEL = "gpt-4o"
+
+# OpenAI-compatible config
+var COMPAT_BASE_URL = "http://localhost:11434"
+var COMPAT_MODEL = "llama3"
+var COMPAT_API_KEY_ENV = ""
+
+# Kimi (Moonshot) and GLM (Zhipu) are OpenAI-compatible endpoints, so they
+# reuse the compat transport and differ only by base URL, key env, and model.
+var KIMI_API_KEY_ENV = "MOONSHOT_API_KEY"
+var KIMI_BASE_URL = "https://api.moonshot.cn"
+var KIMI_MODEL = "kimi-k2-0905-preview"
+
+var GLM_API_KEY_ENV = "ZHIPUAI_API_KEY"
+var GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+var GLM_MODEL = "glm-4.6"
+
+var DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
+var DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+var DEEPSEEK_MODEL = "deepseek-chat"
+
+# slang is this repo's own local LLM runtime (src/lib/gc_async_mut/slang).
+#
+# Two providers reach it, differing in transport, not in engine:
+#   "slang"       -- the OpenAI-compatible HTTP surface (phase A6) at the URL
+#                    below, served by src/app/slang_server/.
+#   "slang_local" -- slang's offline entrypoint, in this process, no socket.
+#                    Its "base url" is a model ROOT DIRECTORY, below.
+#
+# The model root defaults to `models` and is overridden by SLANG_MODEL_ROOT so
+# that a host with its checkouts elsewhere needs no config edit.
+var SLANG_BASE_URL = "http://localhost:8721"
+var SLANG_MODEL = "slang-local"
+var SLANG_API_KEY_ENV = ""
+var SLANG_MODEL_ROOT = "models"
+var SLANG_MODEL_ROOT_ENV = "SLANG_MODEL_ROOT"
+
+# Local torch config
+var LOCAL_MODEL_PATH = ""
+var LOCAL_PYTHON_PATH = "python3"
+
+# Infrastructure: [mail] section (IMAP/SMTP). Secret comes from the env var
+# named by secret_env - never a literal in the settings file.
+var MAIL_IMAP_HOST = ""
+var MAIL_IMAP_PORT = 993
+var MAIL_SMTP_HOST = ""
+var MAIL_SMTP_PORT = 465
+var MAIL_USER = ""
+var MAIL_SECRET_ENV = ""
+
+# Infrastructure: [storage] section (minio | ftp). Keys come from env vars.
+var STORAGE_BACKEND = ""
+var STORAGE_ENDPOINT = ""
+var STORAGE_BUCKET = ""
+var STORAGE_ACCESS_KEY_ENV = ""
+var STORAGE_SECRET_KEY_ENV = ""
+var STORAGE_TLS = false
+
+# Infrastructure: [wiki] section (confluence | local). The Confluence token
+# comes from the env var named by token_env - never a literal in the file.
+# `root` is the markdown directory for the local backend (relative to the
+# workspace root; default "doc").
+var WIKI_BACKEND = ""
+var WIKI_BASE_URL = ""
+var WIKI_SPACE = ""
+var WIKI_USER = ""
+var WIKI_TOKEN_ENV = ""
+var WIKI_ROOT = "doc"
+
+# ============================================================================
+# Accessors
+# ============================================================================
+
+fn config_loaded() -> bool:
+    CONFIG_LOADED
+
+fn config_default_provider() -> text:
+    DEFAULT_PROVIDER
+
+fn config_history_file() -> text:
+    DEFAULT_HISTORY_FILE
+
+fn config_max_history() -> i64:
+    DEFAULT_MAX_HISTORY
+
+fn config_claude_cli_path() -> text:
+    CLAUDE_CLI_PATH
+
+fn config_claude_cli_model() -> text:
+    CLAUDE_CLI_MODEL
+
+fn config_codex_cli_path() -> text:
+    CODEX_CLI_PATH
+
+fn config_codex_cli_model() -> text:
+    CODEX_CLI_MODEL
+
+fn config_opencode_cli_path() -> text:
+    OPENCODE_CLI_PATH
+
+fn config_opencode_cli_model() -> text:
+    OPENCODE_CLI_MODEL
+
+fn config_claude_api_key() -> text:
+    val env_val = env_get(CLAUDE_API_KEY_ENV) ?? ""
+    env_val
+
+fn config_claude_api_base_url() -> text:
+    CLAUDE_API_BASE_URL
+
+fn config_claude_api_model() -> text:
+    CLAUDE_API_MODEL
+
+fn config_openai_api_key() -> text:
+    val env_val = env_get(OPENAI_API_KEY_ENV) ?? ""
+    env_val
+
+fn config_openai_base_url() -> text:
+    OPENAI_BASE_URL
+
+fn config_openai_model() -> text:
+    OPENAI_MODEL
+
+fn config_compat_base_url() -> text:
+    COMPAT_BASE_URL
+
+fn config_compat_model() -> text:
+    COMPAT_MODEL
+
+fn config_compat_api_key() -> text:
+    if COMPAT_API_KEY_ENV == "":
+        return ""
+    val env_val = env_get(COMPAT_API_KEY_ENV) ?? ""
+    env_val
+
+fn config_slang_base_url() -> text:
+    SLANG_BASE_URL
+
+fn config_slang_model() -> text:
+    SLANG_MODEL
+
+# The directory slang_local scans for models. The env var wins so an operator
+# can point caret at a model root without editing configuration.
+fn config_slang_model_root() -> text:
+    val env_val = env_get(SLANG_MODEL_ROOT_ENV) ?? ""
+    if env_val != "":
+        return env_val
+    SLANG_MODEL_ROOT
+
+fn config_slang_api_key() -> text:
+    if SLANG_API_KEY_ENV == "":
+        return ""
+    env_get(SLANG_API_KEY_ENV) ?? ""
+
+fn config_kimi_base_url() -> text:
+    KIMI_BASE_URL
+
+fn config_kimi_model() -> text:
+    KIMI_MODEL
+
+fn config_kimi_api_key() -> text:
+    if KIMI_API_KEY_ENV == "":
+        return ""
+    env_get(KIMI_API_KEY_ENV) ?? ""
+
+fn config_glm_base_url() -> text:
+    GLM_BASE_URL
+
+fn config_glm_model() -> text:
+    GLM_MODEL
+
+fn config_glm_api_key() -> text:
+    if GLM_API_KEY_ENV == "":
+        return ""
+    env_get(GLM_API_KEY_ENV) ?? ""
+
+fn config_deepseek_base_url() -> text:
+    DEEPSEEK_BASE_URL
+
+fn config_deepseek_model() -> text:
+    DEEPSEEK_MODEL
+
+fn config_deepseek_api_key() -> text:
+    if DEEPSEEK_API_KEY_ENV == "":
+        return ""
+    env_get(DEEPSEEK_API_KEY_ENV) ?? ""
+
+fn config_local_model_path() -> text:
+    LOCAL_MODEL_PATH
+
+fn config_local_python_path() -> text:
+    LOCAL_PYTHON_PATH
+
+fn config_mail_imap_host() -> text:
+    MAIL_IMAP_HOST
+
+fn config_mail_imap_port() -> i64:
+    MAIL_IMAP_PORT
+
+fn config_mail_smtp_host() -> text:
+    MAIL_SMTP_HOST
+
+fn config_mail_smtp_port() -> i64:
+    MAIL_SMTP_PORT
+
+fn config_mail_user() -> text:
+    MAIL_USER
+
+fn config_mail_secret_env() -> text:
+    MAIL_SECRET_ENV
+
+# The secret value itself is only ever read from the environment.
+fn config_mail_secret() -> text:
+    if MAIL_SECRET_ENV == "":
+        return ""
+    env_get(MAIL_SECRET_ENV) ?? ""
+
+fn config_storage_backend() -> text:
+    STORAGE_BACKEND
+
+fn config_storage_endpoint() -> text:
+    STORAGE_ENDPOINT
+
+fn config_storage_bucket() -> text:
+    STORAGE_BUCKET
+
+fn config_storage_access_key_env() -> text:
+    STORAGE_ACCESS_KEY_ENV
+
+fn config_storage_secret_key_env() -> text:
+    STORAGE_SECRET_KEY_ENV
+
+fn config_storage_tls() -> bool:
+    STORAGE_TLS
+
+fn config_storage_access_key() -> text:
+    if STORAGE_ACCESS_KEY_ENV == "":
+        return ""
+    env_get(STORAGE_ACCESS_KEY_ENV) ?? ""
+
+fn config_storage_secret_key() -> text:
+    if STORAGE_SECRET_KEY_ENV == "":
+        return ""
+    env_get(STORAGE_SECRET_KEY_ENV) ?? ""
+
+fn config_wiki_backend() -> text:
+    WIKI_BACKEND
+
+fn config_wiki_base_url() -> text:
+    WIKI_BASE_URL
+
+fn config_wiki_space() -> text:
+    WIKI_SPACE
+
+fn config_wiki_user() -> text:
+    WIKI_USER
+
+fn config_wiki_token_env() -> text:
+    WIKI_TOKEN_ENV
+
+fn config_wiki_root() -> text:
+    WIKI_ROOT
+
+# The token value itself is only ever read from the environment.
+fn config_wiki_token() -> text:
+    if WIKI_TOKEN_ENV == "":
+        return ""
+    env_get(WIKI_TOKEN_ENV) ?? ""
+
+# ============================================================================
+# SDN Parser (line-based, NOT std.sdn.parser)
+# ============================================================================
+
+fn load_config(path: text) -> text:
+    val raw = read_file_text(path)
+    complete_config_load(path, raw)
+
+fn complete_config_load(path: text, raw: text) -> text:
+    if raw == "":
+        return "config file not found or empty: " + path
+    parse_config_text(raw)
+
+fn parse_config_text(raw: text) -> text:
+    var current_section = ""
+    val lines = raw.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # Skip empty lines and comments
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        # Section header (no leading whitespace, ends with colon)
+        if not line.starts_with(" ") and not line.starts_with("\t") and trimmed.ends_with(":"):
+            current_section = trimmed.substring(0, trimmed.len() - 1)
+            continue
+        # Key-value pair (indented)
+        val colon_idx = _unwrap_idx_cfg(trimmed.index_of(":"))
+        if colon_idx > 0:
+            val key = trimmed.substring(0, colon_idx).trim()
+            val value = trimmed.substring(colon_idx + 1).trim()
+            _apply_config(current_section, key, value)
+    CONFIG_LOADED = true
+    ""
+
+fn _unwrap_idx_cfg(opt) -> i64:
+    match opt:
+        Some(i): return i
+        nil: return -1
+
+fn _apply_config(section: text, key: text, value: text):
+    if section == "defaults":
+        if key == "provider":
+            DEFAULT_PROVIDER = value
+        elif key == "history_file":
+            DEFAULT_HISTORY_FILE = value
+        elif key == "max_history":
+            DEFAULT_MAX_HISTORY = json_parse_int(value)
+    elif section == "claude_cli":
+        if key == "cli_path":
+            CLAUDE_CLI_PATH = value
+        elif key == "model":
+            CLAUDE_CLI_MODEL = value
+        elif key == "extra_args":
+            CLAUDE_CLI_EXTRA_ARGS = value
+    elif section == "opencode_cli":
+        if key == "cli_path":
+            CODEX_CLI_PATH = value
+        elif key == "codex_cli.model":
+            CODEX_CLI_MODEL = value
+        elif key == "opencode_cli.path":
+            OPENCODE_CLI_PATH = value
+        elif key == "model":
+            OPENCODE_CLI_MODEL = value
+        elif key == "extra_args":
+            OPENCODE_CLI_EXTRA_ARGS = value
+    elif section == "claude_api":
+        if key == "api_key_env":
+            CLAUDE_API_KEY_ENV = value
+        elif key == "base_url":
+            CLAUDE_API_BASE_URL = value
+        elif key == "model":
+            CLAUDE_API_MODEL = value
+    elif section == "openai":
+        if key == "api_key_env":
+            OPENAI_API_KEY_ENV = value
+        elif key == "base_url":
+            OPENAI_BASE_URL = value
+        elif key == "model":
+            OPENAI_MODEL = value
+    elif section == "openai_compat":
+        if key == "base_url":
+            COMPAT_BASE_URL = value
+        elif key == "model":
+            COMPAT_MODEL = value
+        elif key == "api_key_env":
+            COMPAT_API_KEY_ENV = value
+    elif section == "slang":
+        if key == "base_url":
+            SLANG_BASE_URL = value
+        elif key == "model":
+            SLANG_MODEL = value
+        elif key == "api_key_env":
+            SLANG_API_KEY_ENV = value
+    elif section == "kimi":
+        if key == "base_url":
+            KIMI_BASE_URL = value
+        elif key == "model":
+            KIMI_MODEL = value
+        elif key == "api_key_env":
+            KIMI_API_KEY_ENV = value
+    elif section == "glm":
+        if key == "base_url":
+            GLM_BASE_URL = value
+        elif key == "model":
+            GLM_MODEL = value
+        elif key == "api_key_env":
+            GLM_API_KEY_ENV = value
+    elif section == "deepseek":
+        if key == "base_url":
+            DEEPSEEK_BASE_URL = value
+        elif key == "model":
+            DEEPSEEK_MODEL = value
+        elif key == "api_key_env":
+            DEEPSEEK_API_KEY_ENV = value
+    elif section == "local_torch":
+        if key == "model_path":
+            LOCAL_MODEL_PATH = value
+        elif key == "python_path":
+            LOCAL_PYTHON_PATH = value
+    elif section == "mail":
+        if key == "imap_host":
+            MAIL_IMAP_HOST = value
+        elif key == "imap_port":
+            MAIL_IMAP_PORT = json_parse_int(value)
+        elif key == "smtp_host":
+            MAIL_SMTP_HOST = value
+        elif key == "smtp_port":
+            MAIL_SMTP_PORT = json_parse_int(value)
+        elif key == "user":
+            MAIL_USER = value
+        elif key == "secret_env":
+            MAIL_SECRET_ENV = value
+    elif section == "storage":
+        if key == "backend":
+            STORAGE_BACKEND = value
+        elif key == "endpoint":
+            STORAGE_ENDPOINT = value
+        elif key == "bucket":
+            STORAGE_BUCKET = value
+        elif key == "access_key_env":
+            STORAGE_ACCESS_KEY_ENV = value
+        elif key == "secret_key_env":
+            STORAGE_SECRET_KEY_ENV = value
+        elif key == "tls":
+            STORAGE_TLS = value == "true"
+    elif section == "wiki":
+        if key == "backend":
+            WIKI_BACKEND = value
+        elif key == "base_url":
+            WIKI_BASE_URL = value
+        elif key == "space":
+            WIKI_SPACE = value
+        elif key == "user":
+            WIKI_USER = value
+        elif key == "token_env":
+            WIKI_TOKEN_ENV = value
+        elif key == "root":
+            WIKI_ROOT = value
+
+# ============================================================================
+# Config with defaults (no file needed)
+# ============================================================================
+
+fn load_defaults():
+    CONFIG_LOADED = true
+
+fn reset_config():
+    CONFIG_LOADED = false
+    DEFAULT_PROVIDER = "claude_cli"
+    DEFAULT_HISTORY_FILE = ".llm_caret_history.sdn"
+    DEFAULT_MAX_HISTORY = 100
+    CLAUDE_CLI_PATH = "claude"
+    CLAUDE_CLI_MODEL = "claude-sonnet-4-20250514"
+    CLAUDE_CLI_EXTRA_ARGS = ""
+    CODEX_CLI_PATH = "codex"
+    CODEX_CLI_MODEL = ""
+    OPENCODE_CLI_PATH = "opencode"
+    OPENCODE_CLI_MODEL = ""
+    OPENCODE_CLI_EXTRA_ARGS = ""
+    CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
+    CLAUDE_API_BASE_URL = "https://api.anthropic.com"
+    CLAUDE_API_MODEL = "claude-sonnet-4-20250514"
+    OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+    OPENAI_BASE_URL = "https://api.openai.com"
+    OPENAI_MODEL = "gpt-4o"
+    COMPAT_BASE_URL = "http://localhost:11434"
+    COMPAT_MODEL = "llama3"
+    COMPAT_API_KEY_ENV = ""
+    SLANG_BASE_URL = "http://localhost:8721"
+    SLANG_MODEL = "slang-local"
+    SLANG_API_KEY_ENV = ""
+    KIMI_API_KEY_ENV = "MOONSHOT_API_KEY"
+    KIMI_BASE_URL = "https://api.moonshot.cn"
+    KIMI_MODEL = "kimi-k2-0905-preview"
+    GLM_API_KEY_ENV = "ZHIPUAI_API_KEY"
+    GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+    GLM_MODEL = "glm-4.6"
+    DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
+    DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+    DEEPSEEK_MODEL = "deepseek-chat"
+    LOCAL_MODEL_PATH = ""
+    LOCAL_PYTHON_PATH = "python3"
+    MAIL_IMAP_HOST = ""
+    MAIL_IMAP_PORT = 993
+    MAIL_SMTP_HOST = ""
+    MAIL_SMTP_PORT = 465
+    MAIL_USER = ""
+    MAIL_SECRET_ENV = ""
+    STORAGE_BACKEND = ""
+    STORAGE_ENDPOINT = ""
+    STORAGE_BUCKET = ""
+    STORAGE_ACCESS_KEY_ENV = ""
+    STORAGE_SECRET_KEY_ENV = ""
+    STORAGE_TLS = false
+    WIKI_BACKEND = ""
+    WIKI_BASE_URL = ""
+    WIKI_SPACE = ""
+    WIKI_USER = ""
+    WIKI_TOKEN_ENV = ""
+    WIKI_ROOT = "doc"

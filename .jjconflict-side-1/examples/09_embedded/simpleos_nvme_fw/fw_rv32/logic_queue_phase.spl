@@ -1,0 +1,119 @@
+fn rv32_queue_phase_selftest() -> i64:
+    # Scalar NVMe ring floor: bounded doorbells and CQ phase flips only on wrap.
+    var fail = 0
+    val depth = 4
+    var sq_head = 0
+    var sq_tail = 0
+    var sq_len = 0
+    var cq_head = 0
+    var cq_tail = 0
+    var cq_len = 0
+    var cq_phase = 1
+    var host_seen_phase = 1
+
+    val slot_zero = 0
+    if slot_zero < 0 or slot_zero >= depth:
+        fail = fail + 1
+    else:
+        sq_tail = slot_zero
+        sq_len = sq_len + 1
+    if sq_tail != 0 or sq_len != 1:
+        fail = fail + 1
+    sq_tail = 0
+    sq_len = 0
+
+    val max_doorbell = depth - 1
+    if max_doorbell < 0 or max_doorbell >= depth:
+        fail = fail + 1
+    else:
+        sq_tail = max_doorbell
+        sq_len = sq_len + 1
+    if sq_tail != max_doorbell or sq_len != 1:
+        fail = fail + 1
+    sq_tail = 0
+    sq_len = 0
+
+    val doorbell = 1
+    if doorbell < 0 or doorbell >= depth:
+        fail = fail + 1
+    else:
+        sq_tail = doorbell
+        sq_len = sq_len + 1
+    if sq_tail != 1 or sq_len != 1:
+        fail = fail + 1
+
+    val neg_doorbell = -1
+    if neg_doorbell >= 0 and neg_doorbell < depth:
+        sq_tail = neg_doorbell
+        sq_len = sq_len + 1
+    if sq_tail != 1 or sq_len != 1:
+        fail = fail + 1
+
+    val bad_doorbell = depth
+    if bad_doorbell >= 0 and bad_doorbell < depth:
+        sq_tail = bad_doorbell
+        sq_len = sq_len + 1
+    if sq_tail != 1 or sq_len != 1:
+        fail = fail + 1
+
+    while sq_len < depth:
+        sq_tail = (sq_tail + 1) % depth
+        sq_len = sq_len + 1
+    if sq_tail != 0 or sq_len != depth:
+        fail = fail + 1
+    if sq_len < depth:
+        sq_tail = (sq_tail + 1) % depth
+        sq_len = sq_len + 1
+    if sq_tail != 0 or sq_len != depth:
+        fail = fail + 1
+
+    while sq_len > 0:
+        sq_head = (sq_head + 1) % depth
+        sq_len = sq_len - 1
+    if sq_head != sq_tail or sq_len != 0:
+        fail = fail + 1
+
+    while cq_len < depth:
+        cq_tail = (cq_tail + 1) % depth
+        cq_len = cq_len + 1
+        if cq_tail == 0:
+            cq_phase = 1 - cq_phase
+    if cq_tail != 0 or cq_phase != 0 or cq_len != depth:
+        fail = fail + 1
+    if cq_len < depth:
+        cq_tail = (cq_tail + 1) % depth
+        cq_len = cq_len + 1
+        if cq_tail == 0:
+            cq_phase = 1 - cq_phase
+    if cq_tail != 0 or cq_phase != 0 or cq_len != depth:
+        fail = fail + 1
+    if host_seen_phase == cq_phase:
+        fail = fail + 1
+    host_seen_phase = cq_phase
+
+    val neg_cq_head = -1
+    if neg_cq_head >= 0 and neg_cq_head < depth and cq_len > 0:
+        cq_head = neg_cq_head
+        cq_len = cq_len - 1
+    if cq_head != 0 or cq_len != depth:
+        fail = fail + 1
+    val hi_cq_head = depth
+    if hi_cq_head >= 0 and hi_cq_head < depth and cq_len > 0:
+        cq_head = hi_cq_head
+        cq_len = cq_len - 1
+    if cq_head != 0 or cq_len != depth:
+        fail = fail + 1
+
+    while cq_len > 0:
+        cq_head = (cq_head + 1) % depth
+        cq_len = cq_len - 1
+    if cq_head != 0 or cq_len != 0 or host_seen_phase != 0:
+        fail = fail + 1
+    while cq_len < depth:
+        cq_tail = (cq_tail + 1) % depth
+        cq_len = cq_len + 1
+        if cq_tail == 0:
+            cq_phase = 1 - cq_phase
+    if cq_tail != 0 or cq_head != 0 or cq_len != depth or cq_phase != 1 or host_seen_phase != 0:
+        fail = fail + 1
+    fail

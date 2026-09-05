@@ -1,0 +1,422 @@
+# Pure Simple normal-report scanner; --missing retains its bounded shell adapter
+# Supports --format=terminal|json|md, --missing, and optional path argument
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.cli.cli_util (get_cli_args)
+use app.io.mod.{dir_list, is_dir, file_read, file_exists}
+use std.nogc_sync_mut.sffi.io.{path_absolute, path_join2}
+
+struct CoverageCounts:
+    total: i64
+    documented: i64
+    with_docstring: i64
+
+struct CoverageReportFacts:
+    requested: CoverageCounts
+    std: CoverageCounts
+    core: CoverageCounts
+    lib: CoverageCounts
+    app: CoverageCounts
+
+struct CoveragePathRequest:
+    display: text
+    roots: [text]
+
+fn dc_zero_counts() -> CoverageCounts:
+    CoverageCounts(0, 0, 0)
+
+fn dc_add_counts(left: CoverageCounts, right: CoverageCounts) -> CoverageCounts:
+    CoverageCounts(
+        left.total + right.total,
+        left.documented + right.documented,
+        left.with_docstring + right.with_docstring)
+
+fn dc_counts_for_source(source: text) -> CoverageCounts:
+    val lines = source.split("\n")
+    var total = 0
+    var documented = 0
+    var with_docstring = 0
+    var last_docstring_line = -1
+    var i = 0
+    while i < lines.len():
+        if lines[i].starts_with("pub fn "):
+            total = total + 1
+            if i > 0 and lines[i - 1].starts_with("#"):
+                documented = documented + 1
+            var context_i = i - 2
+            if context_i < 0:
+                context_i = 0
+            while context_i <= i:
+                if context_i > last_docstring_line and lines[context_i].contains("\"\"\""):
+                    with_docstring = with_docstring + 1
+                    last_docstring_line = context_i
+                context_i = context_i + 1
+        i = i + 1
+    CoverageCounts(total, documented, with_docstring)
+
+fn dc_scan_resolved(path: text) -> CoverageCounts:
+    if path == "":
+        return dc_zero_counts()
+    if is_dir(path):
+        var counts = dc_zero_counts()
+        for entry in dir_list(path):
+            val child = path_join2(path, entry)
+            val resolved = path_absolute(child) ?? ""
+            # Recursive grep does not follow directory-entry symlinks. A
+            # resolved spelling different from its canonical-parent child is
+            # therefore excluded, which also prevents symlink cycles.
+            if resolved == child:
+                counts = dc_add_counts(counts, dc_scan_resolved(child))
+        return counts
+    if file_exists(path) and path.ends_with(".spl"):
+        return dc_counts_for_source(file_read(path))
+    dc_zero_counts()
+
+fn dc_scan_root(root: text) -> CoverageCounts:
+    if root == "":
+        return dc_zero_counts()
+    # GNU grep follows a command-line symlink but not symlinks encountered
+    # below it. Resolve only this entry root, then enforce that boundary in the
+    # recursive scanner.
+    val resolved = path_absolute(root) ?? ""
+    dc_scan_resolved(resolved)
+
+fn dc_path_roots(path: text) -> [text]:
+    val root = path.trim()
+    if root == "":
+        return []
+    # User paths are literal single roots. Do not reintroduce the historical
+    # shell-word/glob language (or its command-injection surface).
+    [root]
+
+fn dc_report_facts(requested_roots: [text]) -> CoverageReportFacts:
+    var root_names: [text] = []
+    var root_index: {text: i64} = {}
+    for root in requested_roots:
+        if not root_index.has(root):
+            root_index[root] = root_names.len()
+            root_names.push(root)
+    for root in ["src/lib", "src/core", "src/app"]:
+        if not root_index.has(root):
+            root_index[root] = root_names.len()
+            root_names.push(root)
+
+    var root_counts: [CoverageCounts] = []
+    for root in root_names:
+        root_counts.push(dc_scan_root(root))
+
+    var requested = dc_zero_counts()
+    for root in requested_roots:
+        requested = dc_add_counts(requested, root_counts[root_index[root]])
+    val lib = root_counts[root_index["src/lib"]]
+    CoverageReportFacts(
+        requested: requested,
+        std: lib,
+        core: root_counts[root_index["src/core"]],
+        lib: lib,
+        app: root_counts[root_index["src/app"]])
+
+# Run a shell command and return trimmed stdout (or "0" on failure)
+fn dc_run_cmd(cmd: text) -> text:
+    val result = process_run("sh", ["-c", cmd])
+    val stdout = result.0
+    val exit_code = result.2
+    if exit_code == 0:
+        stdout.trim()
+    else:
+        "0"
+
+fn dc_parse_count(output: text) -> i64:
+    output.to_int() ?? 0
+
+# Check if a flag is present in args
+fn dc_has_flag(args: [text], flag: text) -> bool:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag:
+            return true
+        i = i + 1
+    false
+
+# Get value of --format=X flag (returns default if not present)
+fn dc_get_format(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--format="):
+            return arg[9:]
+        i = i + 1
+    "terminal"
+
+# Get optional path argument while preserving whether the built-in default was
+# selected. An explicit string equal to the displayed default stays one root.
+fn dc_get_path(args: [text]) -> CoveragePathRequest:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if not arg.starts_with("--"):
+            return CoveragePathRequest(arg, dc_path_roots(arg))
+        i = i + 1
+    CoveragePathRequest(
+        "src/lib src/core src/lib src/app",
+        ["src/lib", "src/core", "src/lib", "src/app"])
+
+# Count total public functions in path (pub-visible only — bare `fn` is
+# module-private and must not be counted as public).
+fn count_public_fns(path: text) -> i64:
+    var counts = dc_zero_counts()
+    for root in dc_path_roots(path):
+        counts = dc_add_counts(counts, dc_scan_root(root))
+    counts.total
+
+# Count documented functions (# comment on preceding line) in path
+fn count_documented_fns(path: text) -> i64:
+    var counts = dc_zero_counts()
+    for root in dc_path_roots(path):
+        counts = dc_add_counts(counts, dc_scan_root(root))
+    counts.documented
+
+# Count functions with docstrings (\"\"\" before fn)
+fn count_docstring_fns(path: text) -> i64:
+    var counts = dc_zero_counts()
+    for root in dc_path_roots(path):
+        counts = dc_add_counts(counts, dc_scan_root(root))
+    counts.with_docstring
+
+# Print terminal-format coverage report
+fn print_terminal_report(request: CoveragePathRequest):
+    val path = request.display
+    val facts = dc_report_facts(request.roots)
+    val total = facts.requested.total
+    val documented = facts.requested.documented
+    val with_docstring = facts.requested.with_docstring
+
+    print "========================================="
+    print "Documentation Coverage Report"
+    print "========================================="
+    print ""
+    print "Scope: {path}"
+    print ""
+
+    if total > 0:
+        val doc_pct = (documented * 100) / total
+        val ds_pct = (with_docstring * 100) / total
+        print "Public Functions:  {total}"
+        print "Documented:        {documented} ({doc_pct}%)"
+        print "With Docstring:    {with_docstring} ({ds_pct}%)"
+    else:
+        print "Public Functions:  0"
+        print "Documented:        0 (0%)"
+        print "With Docstring:    0 (0%)"
+
+    # Per-scope breakdown
+    print ""
+    print "Per-Scope Breakdown:"
+
+    val std_total = facts.std.total
+    val std_doc = facts.std.documented
+    if std_total > 0:
+        val std_pct = (std_doc * 100) / std_total
+        print "  std/:  {std_doc}/{std_total} ({std_pct}%)"
+
+    val core_total = facts.core.total
+    val core_doc = facts.core.documented
+    if core_total > 0:
+        val core_pct = (core_doc * 100) / core_total
+        print "  core/: {core_doc}/{core_total} ({core_pct}%)"
+
+    val lib_total = facts.lib.total
+    val lib_doc = facts.lib.documented
+    if lib_total > 0:
+        val lib_pct = (lib_doc * 100) / lib_total
+        print "  lib/:  {lib_doc}/{lib_total} ({lib_pct}%)"
+
+    val app_total = facts.app.total
+    val app_doc = facts.app.documented
+    if app_total > 0:
+        val app_pct = (app_doc * 100) / app_total
+        print "  app/:  {app_doc}/{app_total} ({app_pct}%)"
+
+    print ""
+    print "========================================="
+
+# Print JSON-format coverage report
+fn print_json_report(request: CoveragePathRequest):
+    val path = request.display
+    val facts = dc_report_facts(request.roots)
+    val total = facts.requested.total
+    val documented = facts.requested.documented
+    val with_docstring = facts.requested.with_docstring
+
+    var doc_pct = 0
+    var ds_pct = 0
+    if total > 0:
+        doc_pct = (documented * 100) / total
+        ds_pct = (with_docstring * 100) / total
+
+    val std_total = facts.std.total
+    val std_doc = facts.std.documented
+    var std_pct = 0
+    if std_total > 0:
+        std_pct = (std_doc * 100) / std_total
+
+    val core_total = facts.core.total
+    val core_doc = facts.core.documented
+    var core_pct = 0
+    if core_total > 0:
+        core_pct = (core_doc * 100) / core_total
+
+    val lib_total = facts.lib.total
+    val lib_doc = facts.lib.documented
+    var lib_pct = 0
+    if lib_total > 0:
+        lib_pct = (lib_doc * 100) / lib_total
+
+    val app_total = facts.app.total
+    val app_doc = facts.app.documented
+    var app_pct = 0
+    if app_total > 0:
+        app_pct = (app_doc * 100) / app_total
+
+    print "{"
+    print "  \"scope\": \"{path}\","
+    print "  \"total_public\": {total},"
+    print "  \"documented\": {documented},"
+    print "  \"with_docstring\": {with_docstring},"
+    print "  \"doc_percent\": {doc_pct},"
+    print "  \"docstring_percent\": {ds_pct},"
+    print "  \"per_scope\": {"
+    print "    \"std\": \{ \"total\": {std_total}, \"documented\": {std_doc}, \"percent\": {std_pct} },"
+    print "    \"core\": \{ \"total\": {core_total}, \"documented\": {core_doc}, \"percent\": {core_pct} },"
+    print "    \"lib\": \{ \"total\": {lib_total}, \"documented\": {lib_doc}, \"percent\": {lib_pct} },"
+    print "    \"app\": \{ \"total\": {app_total}, \"documented\": {app_doc}, \"percent\": {app_pct} }"
+    print "  }"
+    print "}"
+
+# Print Markdown-format coverage report
+fn print_md_report(request: CoveragePathRequest):
+    val path = request.display
+    val facts = dc_report_facts(request.roots)
+    val total = facts.requested.total
+    val documented = facts.requested.documented
+    val with_docstring = facts.requested.with_docstring
+
+    var doc_pct = 0
+    var ds_pct = 0
+    if total > 0:
+        doc_pct = (documented * 100) / total
+        ds_pct = (with_docstring * 100) / total
+
+    print "# Documentation Coverage Report"
+    print ""
+    print "**Scope:** `{path}`"
+    print ""
+    print "## Summary"
+    print ""
+    print "| Metric | Count | Percent |"
+    print "|--------|-------|---------|"
+    print "| Public Functions | {total} | 100% |"
+    print "| Documented | {documented} | {doc_pct}% |"
+    print "| With Docstring | {with_docstring} | {ds_pct}% |"
+    print ""
+    print "## Per-Scope Breakdown"
+    print ""
+    print "| Scope | Total | Documented | % |"
+    print "|-------|-------|------------|---|"
+
+    val std_total = facts.std.total
+    val std_doc = facts.std.documented
+    var std_pct = 0
+    if std_total > 0:
+        std_pct = (std_doc * 100) / std_total
+    print "| std/ | {std_total} | {std_doc} | {std_pct}% |"
+
+    val core_total = facts.core.total
+    val core_doc = facts.core.documented
+    var core_pct = 0
+    if core_total > 0:
+        core_pct = (core_doc * 100) / core_total
+    print "| core/ | {core_total} | {core_doc} | {core_pct}% |"
+
+    val lib_total = facts.lib.total
+    val lib_doc = facts.lib.documented
+    var lib_pct = 0
+    if lib_total > 0:
+        lib_pct = (lib_doc * 100) / lib_total
+    print "| lib/ | {lib_total} | {lib_doc} | {lib_pct}% |"
+
+    val app_total = facts.app.total
+    val app_doc = facts.app.documented
+    var app_pct = 0
+    if app_total > 0:
+        app_pct = (app_doc * 100) / app_total
+    print "| app/ | {app_total} | {app_doc} | {app_pct}% |"
+
+# Show undocumented public functions: a pub fn is "documented" iff the
+# immediately preceding source line is a `#` comment -- the same definition
+# count_documented_fns uses. Previously this printed EVERY `pub fn` match
+# unconditionally (bug: doc-coverage --missing listed already-documented
+# functions as "missing"; see
+# doc/08_tracking/bug/host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md).
+#
+# NOTE: deliberately avoids `.to_int()` / `??` on grep-derived line-number
+# strings -- both are corrupted by a confirmed interpreter defect (returns
+# garbage instead of the parsed value or the `??` fallback; repros even on a
+# flat, non-nested `"42".to_int() ?? 0`). Comparison below stays string-only.
+fn print_missing(path: text):
+    print "Undocumented public functions in {path}:"
+    print ""
+    val all_cmd = "grep -rnH '^pub fn ' {path} --include='*.spl' 2>/dev/null | head -20"
+    val all_output = dc_run_cmd(all_cmd)
+    if all_output == "0" or all_output == "":
+        print "(none found or all documented)"
+        return
+
+    # Documented pub fns, captured as "path-N-pub fn ..." (via -A1 on the
+    # comment line) -- the SAME line-number format `all_output` uses, so
+    # membership can be checked with a plain substring `contains`.
+    val doc_cmd = "grep -rnH -A1 '^#' {path} --include='*.spl' 2>/dev/null | grep -E -- '-[0-9]+-pub fn '"
+    val doc_output = dc_run_cmd(doc_cmd)
+
+    var missing_count = 0
+    for line in all_output.split("\n"):
+        if line.trim() == "":
+            continue
+        val parts = line.split(":")
+        if parts.len() < 2:
+            print line
+            missing_count = missing_count + 1
+            continue
+        val file = parts[0]
+        val line_no = parts[1]
+        val key = "{file}-{line_no}-pub fn "
+        if doc_output.contains(key):
+            continue
+        print line
+        missing_count = missing_count + 1
+
+    if missing_count == 0:
+        print "(none found or all documented)"
+
+# Main entry point for doc-coverage command
+fn run_doc_coverage(args: [text]) -> i64:
+    val format = dc_get_format(args)
+    val show_missing = dc_has_flag(args, "--missing")
+    val request = dc_get_path(args)
+    val path = request.display
+
+    if show_missing:
+        print_missing(path)
+        return 0
+
+    if format == "json":
+        print_json_report(request)
+    elif format == "md":
+        print_md_report(request)
+    else:
+        print_terminal_report(request)
+
+    0
+
+fn main() -> i64:
+    run_doc_coverage(get_cli_args())

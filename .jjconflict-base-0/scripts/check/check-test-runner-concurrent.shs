@@ -1,0 +1,204 @@
+#!/bin/sh
+# check-test-runner-concurrent.shs — concurrent `simple test` must never lose a run.
+#
+# WHAT THIS GUARDS (incident 2026-08-21,
+# doc/08_tracking/bug/test_runner_concurrent_runs_lose_output_2026-08-21.md).
+# Two concurrent `simple test <spec>` processes in the SAME worktree could make
+# one of them return rc=0 with ZERO test output: no examples, no failure, not
+# even a `SPEC FILE VERDICT:` line. 42 of 122 spec logs in a 2-way sharded run
+# came back that way, and a serial re-run of the same specs was clean. Every
+# sweep that reads exit codes scored those 42 as PASSED — a silent false green.
+#
+# Two independent assertions, because the two halves of the fix are independent:
+#   1. EVERY concurrent run reports its examples: rc=0 AND a verdict line.
+#      A run that exits 0 with no verdict line is the incident itself.
+#   2. The lane never grows a duplicate daemon. `ensure_daemon()` in
+#      test_runner_client.spl is check-then-spawn with no mutual exclusion, so
+#      N racing clients used to leave N light daemons all polling the SAME
+#      request directory and racing to answer the same `.req` files (measured:
+#      a 6-client burst left 4+ alive). `claim_lane()` in light_daemon.spl
+#      makes a non-owner exit instead of serving.
+#
+# FAIL-CLOSED. A run that executed 0 invocations is ERROR, never a pass —
+# absence of evidence is not evidence. The exit status of every spawned client
+# is read DIRECTLY into a variable, never through a pipe: a pipeline's `$?` is
+# the last command's status and has produced false greens in this repo before.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> run(s) executed across <k> iteration(s), 0 silent          exit 0
+#   FAIL  — ...                                                            exit 1
+#   ERROR — nothing was checked (<reason>)                                 exit 2
+
+set -u
+
+ITERATIONS=${CONCURRENT_ITERATIONS:-20}
+ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+BIN=${SIMPLE_BIN:-}
+RUN_SELFTEST=1
+SELFTEST_ONLY=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --iterations=*) ITERATIONS=${arg#--iterations=} ;;
+        --root=*) ROOT=${arg#--root=} ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $arg)"; exit 2 ;;
+    esac
+done
+
+verdict_error() {
+    echo "ERROR — nothing was checked ($1)"
+    exit 2
+}
+
+# ---------------------------------------------------------------------------
+# Selftest. Runs before every scan and is fatal: a scanner whose own
+# classifier is broken cannot certify anything. Fixtures exercise the REAL
+# classifier function below, not a copy of it.
+# ---------------------------------------------------------------------------
+VERDICT_MARKER='SPEC FILE VERDICT:'
+
+# classify <rc> <logfile> -> prints OK | SILENT | FAILED
+classify() {
+    _rc=$1
+    _log=$2
+    if [ ! -f "$_log" ]; then
+        echo "FAILED"
+        return
+    fi
+    if grep -q "$VERDICT_MARKER" "$_log"; then
+        if [ "$_rc" -eq 0 ]; then echo "OK"; else echo "FAILED"; fi
+        return
+    fi
+    # No verdict line at all. rc=0 here is THE incident: a run that executed
+    # nothing while claiming success. rc!=0 is merely a loud failure.
+    if [ "$_rc" -eq 0 ]; then echo "SILENT"; else echo "FAILED"; fi
+}
+
+selftest() {
+    _tmp=$(mktemp -d) || return 1
+    _fail=0
+
+    printf 'x\n%s foo outcome=OK executed=1\n' "$VERDICT_MARKER" > "$_tmp/good.log"
+    [ "$(classify 0 "$_tmp/good.log")" = OK ] || { echo "selftest: a real pass must classify OK"; _fail=1; }
+
+    : > "$_tmp/empty.log"
+    [ "$(classify 0 "$_tmp/empty.log")" = SILENT ] || { echo "selftest: rc=0 with empty output must classify SILENT"; _fail=1; }
+
+    printf '[gc-warning] noise\n[use-warning] noise\n' > "$_tmp/noise.log"
+    [ "$(classify 0 "$_tmp/noise.log")" = SILENT ] || { echo "selftest: rc=0 with warnings but no verdict must classify SILENT"; _fail=1; }
+
+    [ "$(classify 1 "$_tmp/empty.log")" = FAILED ] || { echo "selftest: a loud failure must classify FAILED, not SILENT"; _fail=1; }
+
+    printf '%s foo\n' "$VERDICT_MARKER" > "$_tmp/redverdict.log"
+    [ "$(classify 1 "$_tmp/redverdict.log")" = FAILED ] || { echo "selftest: rc!=0 with a verdict must classify FAILED"; _fail=1; }
+
+    [ "$(classify 0 "$_tmp/does-not-exist.log")" = FAILED ] || { echo "selftest: a missing log must classify FAILED, never OK"; _fail=1; }
+
+    rm -rf "$_tmp"
+    return $_fail
+}
+
+if ! selftest; then
+    echo "FAIL — selftest failed; the scanner's own classifier is broken"
+    exit 1
+fi
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 6 selftest fixture(s) checked, classifier correct"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Scan
+# ---------------------------------------------------------------------------
+[ -d "$ROOT" ] || verdict_error "root not found: $ROOT"
+cd "$ROOT" || verdict_error "cannot enter root: $ROOT"
+
+if [ -z "$BIN" ]; then
+    for cand in \
+        "bin/release/x86_64-unknown-linux-gnu/simple" \
+        "bin/simple"; do
+        if [ -x "$cand" ]; then BIN=$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand"); break; fi
+    done
+fi
+[ -n "$BIN" ] && [ -x "$BIN" ] || verdict_error "no runnable simple binary found (set SIMPLE_BIN)"
+
+SPEC_A=test/fixtures/concurrency/conc_a_spec.spl
+SPEC_B=test/fixtures/concurrency/conc_b_spec.spl
+[ -f "$SPEC_A" ] && [ -f "$SPEC_B" ] || verdict_error "concurrency fixtures missing: $SPEC_A / $SPEC_B"
+
+[ "$ITERATIONS" -ge 1 ] 2>/dev/null || verdict_error "iterations must be >= 1 (got $ITERATIONS)"
+
+WORK=$(mktemp -d) || verdict_error "cannot create a work directory"
+trap 'rm -rf "$WORK"' EXIT
+
+EXECUTED=0
+SILENT=0
+FAILED=0
+OFFENDERS=""
+DAEMON_MAX=0
+
+count_lane_daemons() {
+    _n=0
+    for _p in $(pgrep -f 'light_daemon.spl' 2>/dev/null); do
+        _cwd=$(readlink -f "/proc/$_p/cwd" 2>/dev/null)
+        [ "$_cwd" = "$ROOT" ] && _n=$((_n + 1))
+    done
+    echo "$_n"
+}
+
+i=1
+while [ "$i" -le "$ITERATIONS" ]; do
+    timeout 300 "$BIN" test "$SPEC_A" > "$WORK/a$i.log" 2>&1 &
+    PA=$!
+    timeout 300 "$BIN" test "$SPEC_B" > "$WORK/b$i.log" 2>&1 &
+    PB=$!
+    # Status read straight into a variable on the line after the wait — never
+    # through a pipe.
+    wait "$PA"
+    RA=$?
+    wait "$PB"
+    RB=$?
+
+    D=$(count_lane_daemons)
+    [ "$D" -gt "$DAEMON_MAX" ] && DAEMON_MAX=$D
+
+    for side in a b; do
+        if [ "$side" = a ]; then RC=$RA; else RC=$RB; fi
+        EXECUTED=$((EXECUTED + 1))
+        VERD=$(classify "$RC" "$WORK/$side$i.log")
+        case "$VERD" in
+            OK) ;;
+            SILENT)
+                SILENT=$((SILENT + 1))
+                OFFENDERS="$OFFENDERS iter$i-$side(rc=$RC,silent)"
+                ;;
+            *)
+                FAILED=$((FAILED + 1))
+                OFFENDERS="$OFFENDERS iter$i-$side(rc=$RC,failed)"
+                ;;
+        esac
+    done
+    i=$((i + 1))
+done
+
+if [ "$EXECUTED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 runs executed)"
+    exit 2
+fi
+
+if [ "$SILENT" -gt 0 ] || [ "$FAILED" -gt 0 ]; then
+    echo "FAIL — $EXECUTED run(s) executed across $ITERATIONS iteration(s), $SILENT silent green(s), $FAILED failure(s):$OFFENDERS"
+    exit 1
+fi
+
+# One daemon is the design. More than one means ensure_daemon()'s spawn race
+# is back and two daemons are racing to answer the same requests.
+if [ "$DAEMON_MAX" -gt 1 ]; then
+    echo "FAIL — $EXECUTED run(s) executed across $ITERATIONS iteration(s), 0 silent, but the lane grew $DAEMON_MAX concurrent light daemons (expected at most 1)"
+    exit 1
+fi
+
+echo "PASS — $EXECUTED run(s) executed across $ITERATIONS iteration(s), 0 silent, 0 failed, at most $DAEMON_MAX lane daemon(s)"
+exit 0

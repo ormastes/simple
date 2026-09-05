@@ -1,0 +1,120 @@
+"""Bounded NTDLL loader bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_ntdll_loader_dispatch_gate}
+
+class WineNtdllLoaderExport:
+    name: text
+    proc: text
+
+class WineNtdllLoaderModule:
+    name: text
+    handle: i64
+    exports: [WineNtdllLoaderExport]
+    loaded: bool
+
+class WineNtdllLoaderTable:
+    modules: [WineNtdllLoaderModule]
+    next_handle: i64
+
+class WineNtdllLoaderResult:
+    ok: bool
+    error: text
+    table: WineNtdllLoaderTable
+    handle: i64
+    proc: text
+    operations: text
+
+fn _export(module_name: text, name: text) -> WineNtdllLoaderExport:
+    WineNtdllLoaderExport(name: name, proc: module_name.lower() + "!" + name)
+
+fn _exports(module_name: text, names: [text]) -> [WineNtdllLoaderExport]:
+    var out: [WineNtdllLoaderExport] = []
+    for name in names:
+        out.push(_export(module_name, name))
+    out
+
+fn _module(name: text, handle: i64, exports: [text], loaded: bool) -> WineNtdllLoaderModule:
+    WineNtdllLoaderModule(name: name.lower(), handle: handle, exports: _exports(name, exports), loaded: loaded)
+
+fn _table(modules: [WineNtdllLoaderModule], next_handle: i64) -> WineNtdllLoaderTable:
+    WineNtdllLoaderTable(modules: modules, next_handle: next_handle)
+
+fn _result(ok: bool, error: text, table: WineNtdllLoaderTable, handle: i64, proc: text, operations: text) -> WineNtdllLoaderResult:
+    WineNtdllLoaderResult(ok: ok, error: error, table: table, handle: handle, proc: proc, operations: operations)
+
+fn _find_module(modules: [WineNtdllLoaderModule], module_name: text) -> WineNtdllLoaderModule:
+    val normalized = module_name.lower()
+    for module in modules:
+        if module.loaded and module.name == normalized:
+            return module
+    _module("", 0, [], false)
+
+fn _find_export(module: WineNtdllLoaderModule, proc_name: text) -> WineNtdllLoaderExport:
+    for item in module.exports:
+        if item.name == proc_name:
+            return item
+    WineNtdllLoaderExport(name: "", proc: "")
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_loader_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "ntdll-loader-sequence-count-mismatch"
+    if symbols[0] != "LdrLoadDll":
+        return "ntdll-loader-sequence-expected:LdrLoadDll"
+    if symbols[1] != "LdrGetProcedureAddress":
+        return "ntdll-loader-sequence-expected:LdrGetProcedureAddress"
+    if symbols[2] != "LdrUnloadDll":
+        return "ntdll-loader-sequence-expected:LdrUnloadDll"
+    "ready"
+
+pub fn wine_ntdll_loader_table_new() -> WineNtdllLoaderTable:
+    _table(
+        [
+            _module("ntdll.dll", 0x700, ["LdrLoadDll", "LdrGetProcedureAddress", "LdrUnloadDll"], true),
+            _module("kernel32.dll", 0x701, ["LoadLibraryW", "LoadLibraryExW", "GetProcAddress", "FreeLibrary"], true),
+            _module("user32.dll", 0x702, ["MessageBoxW"], true)
+        ],
+        0x703
+    )
+
+pub fn wine_ntdll_ldr_load_dll(table: WineNtdllLoaderTable, module_name: text) -> WineNtdllLoaderResult:
+    val module = _find_module(table.modules, module_name)
+    if not module.loaded:
+        return _result(false, "module-not-found", table, 0, "", "")
+    _result(true, "", table, module.handle, "", "LdrLoadDll")
+
+pub fn wine_ntdll_ldr_get_procedure_address(table: WineNtdllLoaderTable, handle: i64, module_name: text, proc_name: text) -> WineNtdllLoaderResult:
+    val module = _find_module(table.modules, module_name)
+    if not module.loaded or module.handle != handle:
+        return _result(false, "invalid-module-handle", table, handle, "", "")
+    val item = _find_export(module, proc_name)
+    if item.name == "":
+        return _result(false, "proc-not-found", table, handle, "", "")
+    _result(true, "", table, handle, item.proc, "LdrGetProcedureAddress")
+
+pub fn wine_ntdll_ldr_unload_dll(table: WineNtdllLoaderTable, handle: i64) -> WineNtdllLoaderResult:
+    for module in table.modules:
+        if module.loaded and module.handle == handle:
+            return _result(true, "", table, handle, "", "LdrUnloadDll")
+    _result(false, "invalid-module-handle", table, handle, "", "")
+
+pub fn wine_ntdll_execute_loader_resolution(symbols: [text], table: WineNtdllLoaderTable, module_name: text, proc_name: text) -> WineNtdllLoaderResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, 0, "", "")
+
+    val loaded = wine_ntdll_ldr_load_dll(table, module_name)
+    if not loaded.ok:
+        return _result(false, "LdrLoadDll:" + loaded.error, loaded.table, 0, "", "")
+
+    val proc = wine_ntdll_ldr_get_procedure_address(loaded.table, loaded.handle, module_name, proc_name)
+    if not proc.ok:
+        return _result(false, "LdrGetProcedureAddress:" + proc.error, proc.table, loaded.handle, "", "LdrLoadDll")
+
+    val unloaded = wine_ntdll_ldr_unload_dll(proc.table, loaded.handle)
+    if not unloaded.ok:
+        return _result(false, "LdrUnloadDll:" + unloaded.error, unloaded.table, loaded.handle, proc.proc, "LdrLoadDll LdrGetProcedureAddress")
+
+    _result(true, "", unloaded.table, loaded.handle, proc.proc, "LdrLoadDll LdrGetProcedureAddress LdrUnloadDll")

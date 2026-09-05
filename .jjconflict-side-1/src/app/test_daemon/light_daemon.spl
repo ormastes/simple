@@ -1,0 +1,248 @@
+# Lightweight test daemon for explicit single-file test requests.
+
+use std.sffi.cli.{cli_get_args}
+use app.io.process_ops.{process_run_bounded}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use app.test_daemon.light_protocol.{light_request_deadline, light_request_parse, timeout_verdict_line, has_verdict_line, exit_code_reason}
+
+use std.io_runtime.{dir_create_all}
+use std.io_runtime.{dir_list}
+use std.io_runtime.{file_exists}
+use std.io_runtime.{read_file_text}
+use std.io_runtime.{file_write}
+use std.io_runtime.{file_delete}
+use std.io_runtime.{file_rename}
+use std.io_runtime.{getpid}
+use std.io_runtime.{thread_sleep}
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.io_runtime.{env_get}
+
+# Atomic write: tmp + rename (see test_runner_client.spl for the race this
+# closes — #98: a plain rt_file_write_text response could be observed
+# 0-byte/partial by the polling client between this daemon's open(truncate)
+# and its write()).
+fn atomic_write_text(path: text, content: text) -> bool:
+    val tmp_path = "{path}.tmp"
+    if file_write(tmp_path, content):
+        if file_rename(tmp_path, path):
+            return true
+        file_delete(tmp_path)
+    file_write(path, content)
+
+val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
+val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
+val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
+val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
+val LIGHT_STOP: text = ".build/test_daemon_light/stop"
+# Published so a client can see WHICH compiler this daemon will run every served
+# spec with. Without it the daemon lane is unobservable: the caller cannot tell
+# that its freshly built binary was replaced by whatever started the daemon.
+val LIGHT_BINARY: text = ".build/test_daemon_light/daemon.binary"
+
+fn invoking_binary() -> text:
+    """Absolute path of the compiler binary running THIS process ("" if unknown).
+
+    Canonicalizes /proc/self/exe IN-PROCESS; never shells out (a spawned
+    helper's /proc/self describes the HELPER). The daemon is spawned as
+    `<binary> run light_daemon.spl`, so this is exactly the compiler the client
+    chose — inheriting it is what keeps a daemon-served spec honest. See
+    doc/08_tracking/bug/
+    simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
+    val self_path = path_absolute("/proc/self/exe") ?? ""
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
+        return self_path
+    ""
+
+fn simple_binary() -> text:
+    val configured = (env_get("SIMPLE_BINARY") ?? "")
+    if configured != "" and file_exists(configured):
+        return configured
+    # The invoking binary outranks every guessed candidate below. argv[0] here
+    # is this script's own source path, so the raw[0] check never fires for the
+    # daemon and the old order fell straight through to bin/simple — pinning
+    # every served spec to the deployed binary regardless of who started us.
+    val invoker = invoking_binary()
+    if invoker != "":
+        return invoker
+    val raw = cli_get_args()
+    # Source-mode argv can begin with this file's own .spl path (when the seed
+    # interprets light_daemon.spl directly via `simple run <this file>`). It
+    # exists, but it is not executable; passing it to process_run_timeout
+    # produces a misleading permission-denied failure instead of running the
+    # test. Same fix as test_runner_single.spl's simple_binary().
+    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
+        return raw[0]
+    # bin/simple (the deployed pure-Simple self-hosted binary — see
+    # .claude/rules/bootstrap.md "Default tooling runs on pure-Simple") MUST be
+    # tried before any Rust-seed candidate. This daemon is long-lived (it
+    # serves every `bin/simple test <spec>` request until stopped), and the
+    # raw[0] check above reliably fails here (argv[0] is this script's own
+    # source path when the daemon itself was launched via `simple run
+    # light_daemon.spl`), so the old order — debug seed checked before
+    # bin/simple — pinned the daemon to a stray dev-loop
+    # src/compiler_rust/target/debug/simple build for every test it served,
+    # for its entire lifetime. A debug interpreter is 10-50x slower than
+    # release, so specs that finish in seconds under bin/simple instead blow
+    # through *any* --timeout / SIMPLE_TIMEOUT_SECONDS override passed to this
+    # daemon (the override still fires — it just can't rescue a run that was
+    # never going to finish in time), always ending in "Process timed out".
+    # See doc/08_tracking/bug/test_client_debug_seed_binary_shadowing_timeout_2026-08-06.md.
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    if file_exists("/proc/self/exe"):
+        return "/proc/self/exe"
+    if file_exists("src/compiler_rust/target/debug/simple"):
+        return "src/compiler_rust/target/debug/simple"
+    "./bin/simple"
+
+fn ensure_dirs():
+    dir_create_all(LIGHT_DAEMON_DIR)
+    dir_create_all(LIGHT_REQ_DIR)
+    dir_create_all(LIGHT_RESP_DIR)
+
+fn response_path(name: text) -> text:
+    "{LIGHT_RESP_DIR}/{basename(name)}.resp"
+
+fn basename(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return path
+    parts[parts.len() - 1]
+
+fn handle_request(binary: text, name: text):
+    if not name.ends_with(".req"):
+        return
+    val req_path = if name.contains("/"): name else: "{LIGHT_REQ_DIR}/{name}"
+    # Another poller already consumed this request. Returning WITHOUT writing a
+    # response is load-bearing: the old code fell through to the "missing test
+    # path" branch below and CLOBBERED the winner's real response with a stub,
+    # so the client that owned the request read a body carrying no verdict line
+    # at all. See doc/08_tracking/bug/
+    # test_runner_concurrent_runs_lose_output_2026-08-21.md.
+    if not file_exists(req_path):
+        return
+    val request = light_request_parse(read_file_text(req_path))
+    val test_path = request.0
+    if test_path == "":
+        atomic_write_text(response_path(name), "1\nmissing test path")
+        file_delete(req_path)
+        return
+    val deadline = light_request_deadline(request.1, time_now_unix_micros())
+    if deadline.0:
+        atomic_write_text(response_path(name), "1\nERROR: test daemon request expired before execution")
+        file_delete(req_path)
+        return
+    val timeout_ms = deadline.1
+    val timeout_secs = (timeout_ms + 999) / 1000
+    val (stdout, stderr, code) = process_run_bounded(
+        binary,
+        ["run", "src/app/test_runner_new/test_runner_single.spl", test_path, "--no-session-daemon", "--sequential", "--timeout", timeout_secs.to_string()],
+        timeout_ms,
+        TEST_OUTPUT_CAPTURE_BYTES
+    )
+    var body = stdout
+    if stderr != "":
+        body = body + stderr
+    # The worker was KILLED at the budget: process_run_bounded returns -1 (or
+    # the shell's 124/143/255) and the child never reached its own epilogue, so
+    # nothing in `body` carries a verdict. Synthesise one here rather than
+    # handing the client a bare "Process timed out", which reads as
+    # "never run" in any sweep that counts verdict lines.
+    # Bug: killed_spec_emits_no_verdict_line_2026-08-09.
+    var out_code = code
+    val killed = code == -1 or code == 124 or code == 143 or code == 255
+    if killed and not has_verdict_line(body):
+        body = body + "\nerror: test-daemon: worker killed at {timeout_secs}s budget: {exit_code_reason(code)}\n" + timeout_verdict_line(test_path, "daemon-worker-timeout", timeout_ms) + "\n"
+        if out_code == 0:
+            out_code = 1
+    atomic_write_text(response_path(name), "{out_code}\n{body}")
+    file_delete(req_path)
+
+fn lock_owner_pid() -> text:
+    """Pid recorded in the lane lock ("" when there is no lock)."""
+    if not file_exists(LIGHT_LOCK):
+        return ""
+    ((read_file_text(LIGHT_LOCK)).split("\n")[0]).trim()
+
+fn pid_is_live(pid: text) -> bool:
+    """True when /proc/<pid> exists. Linux-only, like the rest of this lane."""
+    if pid == "":
+        return false
+    file_exists("/proc/{pid}")
+
+fn claim_lane() -> bool:
+    """Take exclusive ownership of the lane, or report that someone else has it.
+
+    `ensure_daemon()` in test_runner_client.spl is check-then-spawn with NO
+    mutual exclusion, so N clients that all find the lock absent all spawn a
+    daemon. Measured 2026-08-21: a 6-client burst left 4+ light daemons alive,
+    every one of them polling the SAME request directory, racing to serve and
+    to answer the same `.req` files. That is the concurrency defect behind
+    doc/08_tracking/bug/test_runner_concurrent_runs_lose_output_2026-08-21.md.
+
+    Fixing the client alone cannot close it (the check and the spawn can never
+    be one atomic step from out there), so the exclusion is enforced HERE, by
+    the only processes that can see each other: a daemon that does not own the
+    lock exits instead of serving. Claim = atomic tmp+rename, then verify. Two
+    racing renames are serialised by the kernel, so after the settle both
+    losers read the same winner pid and stand down."""
+    val my_pid = "{getpid()}"
+    val incumbent = lock_owner_pid()
+    if incumbent != "" and incumbent != my_pid and pid_is_live(incumbent):
+        return false
+    if not atomic_write_text(LIGHT_LOCK, my_pid):
+        return false
+    thread_sleep(200)
+    lock_owner_pid() == my_pid
+
+fn main() -> i64:
+    ensure_dirs()
+    if not claim_lane():
+        return 0
+    val binary = simple_binary()
+    # Publish the served binary BEFORE accepting any request, so a client that
+    # observes the lock also observes an accurate binary record.
+    atomic_write_text(LIGHT_BINARY, binary)
+    var idle = 0
+    while idle < 240:
+        if file_exists(LIGHT_STOP):
+            file_delete(LIGHT_STOP)
+            file_delete(LIGHT_LOCK)
+            file_delete(LIGHT_BINARY)
+            return 0
+        # Stand down the moment another daemon owns the lane, so a duplicate
+        # spawned by a racing client cannot double-serve requests.
+        if lock_owner_pid() != "{getpid()}":
+            return 0
+        val entries = dir_list(LIGHT_REQ_DIR)
+        if entries.len() == 0:
+            idle = idle + 1
+            thread_sleep(250)
+            continue
+        idle = 0
+        # Serve ONE request per poll iteration, then re-list.
+        #
+        # This loop used to drain the whole `entries` snapshot, with every
+        # handle_request blocking inside process_run_bounded for up to the
+        # 600s protocol cap. Draining a stale snapshot means the stop file and
+        # every request that expired WHILE QUEUED go unnoticed for as long as
+        # the drain takes — the shape recorded in
+        # doc/08_tracking/bug/light_test_daemon_serializes_concurrent_test_invocations_2026-08-21.md,
+        # where 4 concurrent clients all returned at ~596s.
+        # Re-listing after each served request bounds the staleness to one
+        # spec runtime: expired requests are then answered immediately by
+        # handle_request's own deadline check instead of being executed long
+        # after their client gave up. It does NOT make the daemon parallel —
+        # clients avoid the queue entirely via daemon_backlog_bypass, which is
+        # wired in test_runner_client.spl.
+        var i = 0
+        while i < entries.len():
+            if entries[i].ends_with(".req"):
+                handle_request(binary, entries[i])
+                i = entries.len()
+            else:
+                i = i + 1
+    file_delete(LIGHT_LOCK)
+    file_delete(LIGHT_BINARY)
+    0

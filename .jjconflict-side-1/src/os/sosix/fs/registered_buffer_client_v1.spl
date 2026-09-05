@@ -1,0 +1,276 @@
+"""Bounded owner-managed SOSIX filesystem v1 registered-buffer client.
+
+Registrations retain owned byte copies and expose only slot/generation
+references to the wire codec. Endpoint creation and service discovery remain
+caller responsibilities. Submission uses syscall 132's immediate owned-copy
+send and never receives or waits for a completion.
+"""
+
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.client_adapter_v1.{SosixFsClientPlanV1, sosix_fs_client_plan_registered_v1}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+
+pub val SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFERS_V1: u64 = 64
+pub val SOSIX_FS_CLIENT_BUFFER_READ_V1: u32 = 1
+pub val SOSIX_FS_CLIENT_BUFFER_WRITE_V1: u32 = 2
+pub val SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1: u32 = 1
+
+pub struct SosixFsClientBufferEntryV1:
+    active: bool
+    ref_: SosixBufferRef
+    owner_process_id: u64
+    access: u32
+    bytes: [u8]
+
+pub struct SosixFsClientBufferTableV1:
+    owner_process_id: u64
+    entries: [SosixFsClientBufferEntryV1]
+
+pub struct SosixFsClientBufferTransitionV1:
+    accepted: bool
+    reason: text
+    ref_: SosixBufferRef
+    table: SosixFsClientBufferTableV1
+
+pub struct SosixFsClientEndpointInputV1:
+    service_discovered: bool
+    service_endpoint: u64
+    reply_endpoint_created: bool
+    reply_endpoint: u64
+
+pub struct SosixFsClientRegistrationReceiptV1:
+    authenticated: bool
+    owner_process_id: u64
+    service_endpoint: u64
+    buffer: SosixBufferRef
+    service_registration_id: u64
+    byte_length: u64
+    access: u32
+    memory_mode: u32
+
+pub struct SosixFsClientOwnedSubmissionV1:
+    accepted: bool
+    reason: text
+    status: i32
+    service_endpoint: u64
+    reply_endpoint: u64
+    api_id: u32
+    payload: [u8]
+
+pub struct SosixFsClientExecuteResultV1:
+    accepted: bool
+    reason: text
+    status: i64
+
+export SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFERS_V1
+export SOSIX_FS_CLIENT_BUFFER_READ_V1, SOSIX_FS_CLIENT_BUFFER_WRITE_V1
+export SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1
+export SosixFsClientBufferEntryV1, SosixFsClientBufferTableV1
+export SosixFsClientBufferTransitionV1, SosixFsClientEndpointInputV1
+export SosixFsClientRegistrationReceiptV1
+export SosixFsClientOwnedSubmissionV1, SosixFsClientExecuteResultV1
+
+fn _copy_bytes_v1(source: [u8]) -> [u8]:
+    var owned: [u8] = []
+    for byte in source:
+        owned.push(byte)
+    owned
+
+fn _next_generation_v1(generation: u32) -> u32:
+    val advanced = generation + 1
+    if advanced == 0: 1 else: advanced
+
+fn _invalid_ref_v1() -> SosixBufferRef:
+    SosixBufferRef(slot: 0, generation: 0)
+
+fn _buffer_table_valid_v1(table: SosixFsClientBufferTableV1) -> bool:
+    """Reject non-canonical public values before they can become live state."""
+    if table.owner_process_id == 0 or table.entries.len().to_u64() > SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFERS_V1:
+        return false
+    val known_access = SOSIX_FS_CLIENT_BUFFER_READ_V1 | SOSIX_FS_CLIENT_BUFFER_WRITE_V1
+    var index = 0u64
+    while index < table.entries.len().to_u64():
+        val entry = table.entries[index]
+        if (entry.ref_.slot.to_u64() != index or entry.ref_.generation == 0 or
+            entry.owner_process_id != table.owner_process_id):
+            return false
+        if entry.active:
+            if (entry.bytes.len() == 0 or entry.access == 0 or
+                (entry.access & ~known_access) != 0):
+                return false
+        else if entry.access != 0 or entry.bytes.len() != 0:
+            return false
+        index = index + 1
+    true
+
+pub fn sosix_fs_client_buffer_table_v1(owner_process_id: u64) -> SosixFsClientBufferTableV1:
+    SosixFsClientBufferTableV1(owner_process_id: owner_process_id, entries: [])
+
+pub fn sosix_fs_client_register_buffer_v1(
+    table: SosixFsClientBufferTableV1, owner_process_id: u64,
+    bytes: [u8], access: u32
+) -> SosixFsClientBufferTransitionV1:
+    if owner_process_id == 0 or owner_process_id != table.owner_process_id:
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "buffer-owner-mismatch",
+            ref_: _invalid_ref_v1(), table: table)
+    if not _buffer_table_valid_v1(table):
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "buffer-table-corrupt",
+            ref_: _invalid_ref_v1(), table: table)
+    if bytes.len() == 0:
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "empty-buffer",
+            ref_: _invalid_ref_v1(), table: table)
+    val known_access = SOSIX_FS_CLIENT_BUFFER_READ_V1 | SOSIX_FS_CLIENT_BUFFER_WRITE_V1
+    if access == 0 or (access & ~known_access) != 0:
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "invalid-buffer-access",
+            ref_: _invalid_ref_v1(), table: table)
+
+    var entries = table.entries
+    var index: u64 = 0
+    while index < entries.len().to_u64():
+        if not entries[index].active:
+            val ref_ = SosixBufferRef(
+                slot: index.to_u32(), generation: entries[index].ref_.generation)
+            entries[index] = SosixFsClientBufferEntryV1(
+                active: true, ref_: ref_, owner_process_id: owner_process_id,
+                access: access, bytes: _copy_bytes_v1(bytes))
+            return SosixFsClientBufferTransitionV1(
+                accepted: true, reason: "registered", ref_: ref_,
+                table: SosixFsClientBufferTableV1(
+                    owner_process_id: table.owner_process_id, entries: entries))
+        index = index + 1
+    if entries.len().to_u64() >= SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFERS_V1:
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "buffer-table-full",
+            ref_: _invalid_ref_v1(), table: table)
+    val ref_ = SosixBufferRef(slot: entries.len().to_u32(), generation: 1)
+    entries.push(SosixFsClientBufferEntryV1(
+        active: true, ref_: ref_, owner_process_id: owner_process_id,
+        access: access, bytes: _copy_bytes_v1(bytes)))
+    SosixFsClientBufferTransitionV1(
+        accepted: true, reason: "registered", ref_: ref_,
+        table: SosixFsClientBufferTableV1(
+            owner_process_id: table.owner_process_id, entries: entries))
+
+pub fn sosix_fs_client_unregister_buffer_v1(
+    table: SosixFsClientBufferTableV1, owner_process_id: u64, ref_: SosixBufferRef
+) -> SosixFsClientBufferTransitionV1:
+    if owner_process_id == 0 or owner_process_id != table.owner_process_id:
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "buffer-owner-mismatch", ref_: ref_, table: table)
+    if not _buffer_table_valid_v1(table):
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "buffer-table-corrupt", ref_: ref_, table: table)
+    if ref_.generation == 0 or ref_.slot.to_u64() >= table.entries.len().to_u64():
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "stale-buffer-ref", ref_: ref_, table: table)
+    val current = table.entries[ref_.slot.to_u64()]
+    if not current.active or current.ref_.generation != ref_.generation:
+        return SosixFsClientBufferTransitionV1(
+            accepted: false, reason: "stale-buffer-ref", ref_: ref_, table: table)
+    var entries = table.entries
+    val retired = SosixBufferRef(
+        slot: ref_.slot, generation: _next_generation_v1(ref_.generation))
+    entries[ref_.slot.to_u64()] = SosixFsClientBufferEntryV1(
+        active: false, ref_: retired, owner_process_id: owner_process_id,
+        access: 0, bytes: [])
+    SosixFsClientBufferTransitionV1(
+        accepted: true, reason: "unregistered", ref_: retired,
+        table: SosixFsClientBufferTableV1(
+            owner_process_id: table.owner_process_id, entries: entries))
+
+fn _reject_submission_v1(reason: text, status: i32) -> SosixFsClientOwnedSubmissionV1:
+    SosixFsClientOwnedSubmissionV1(
+        accepted: false, reason: reason, status: status,
+        service_endpoint: 0, reply_endpoint: 0, api_id: 0, payload: [])
+
+pub fn sosix_fs_client_reject_owned_submission_v1(
+    reason: text, status: i32
+) -> SosixFsClientOwnedSubmissionV1:
+    """Construct an explicit fail-closed result for an unavailable provider."""
+    _reject_submission_v1(reason, status)
+
+pub fn sosix_fs_client_plan_owned_submission_v1(
+    table: SosixFsClientBufferTableV1, owner_process_id: u64,
+    endpoints: SosixFsClientEndpointInputV1,
+    receipt: SosixFsClientRegistrationReceiptV1,
+    operation: SosixOperationId,
+    api_id: u32, file: SosixCapabilityRef, buffer: SosixBufferRef,
+    file_offset: u64, buffer_offset: u64, length: u64,
+    deadline_ns: u64, request_token: u64
+) -> SosixFsClientOwnedSubmissionV1:
+    if owner_process_id == 0 or owner_process_id != table.owner_process_id:
+        return _reject_submission_v1("buffer-owner-mismatch", -13)
+    if not _buffer_table_valid_v1(table):
+        return _reject_submission_v1("buffer-table-corrupt", -5)
+    if not endpoints.service_discovered or endpoints.service_endpoint == 0:
+        return _reject_submission_v1("service-not-discovered", -2)
+    if not endpoints.reply_endpoint_created or endpoints.reply_endpoint == 0:
+        return _reject_submission_v1("reply-endpoint-not-created", -22)
+    if (not receipt.authenticated or receipt.owner_process_id != owner_process_id or
+        receipt.service_endpoint != endpoints.service_endpoint or
+        receipt.service_registration_id == 0 or
+        receipt.memory_mode != SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1):
+        return _reject_submission_v1("service-registration-unconfirmed", -13)
+    if (receipt.buffer.slot != buffer.slot or
+        receipt.buffer.generation != buffer.generation):
+        return _reject_submission_v1("service-registration-ref-mismatch", -116)
+    if buffer.generation == 0 or buffer.slot.to_u64() >= table.entries.len().to_u64():
+        return _reject_submission_v1("stale-buffer-ref", -116)
+    val entry = table.entries[buffer.slot.to_u64()]
+    if (not entry.active or entry.owner_process_id != owner_process_id or
+        entry.ref_.generation != buffer.generation):
+        return _reject_submission_v1("stale-buffer-ref", -116)
+    if receipt.byte_length != entry.bytes.len().to_u64() or receipt.access != entry.access:
+        return _reject_submission_v1("service-registration-facts-mismatch", -13)
+    val required_access = if api_id == SOSIX_FS_READ_AT:
+        SOSIX_FS_CLIENT_BUFFER_WRITE_V1
+    else if api_id == SOSIX_FS_WRITE_AT:
+        SOSIX_FS_CLIENT_BUFFER_READ_V1
+    else:
+        return _reject_submission_v1("unsupported-api", -22)
+    if (entry.access & required_access) == 0:
+        return _reject_submission_v1("buffer-access-denied", -13)
+    if buffer_offset > entry.bytes.len().to_u64() or length > entry.bytes.len().to_u64() - buffer_offset:
+        return _reject_submission_v1("registered-buffer-range-out-of-bounds", -22)
+    val client_plan: SosixFsClientPlanV1 = sosix_fs_client_plan_registered_v1(
+        operation, api_id, file, buffer, file_offset, buffer_offset, length,
+        deadline_ns, endpoints.reply_endpoint, request_token)
+    if not client_plan.accepted:
+        return _reject_submission_v1(client_plan.reason, client_plan.status)
+    SosixFsClientOwnedSubmissionV1(
+        accepted: true, reason: "ready", status: 0,
+        service_endpoint: endpoints.service_endpoint,
+        reply_endpoint: endpoints.reply_endpoint, api_id: api_id,
+        payload: _copy_bytes_v1(client_plan.bytes))
+
+pub fn sosix_fs_client_execute_owned_v1(
+    plan: SosixFsClientOwnedSubmissionV1
+) -> SosixFsClientExecuteResultV1:
+    if not plan.accepted or plan.payload.len() == 0:
+        return SosixFsClientExecuteResultV1(
+            accepted: false, reason: "submission-not-ready", status: -22)
+    if (plan.reason != "ready" or plan.status != 0 or
+        plan.service_endpoint == 0 or plan.reply_endpoint == 0 or
+        (plan.api_id != SOSIX_FS_READ_AT and plan.api_id != SOSIX_FS_WRITE_AT)):
+        return SosixFsClientExecuteResultV1(
+            accepted: false, reason: "submission-plan-corrupt", status: -22)
+    val result = syscall(
+        132, plan.service_endpoint, plan.api_id.to_u64(),
+        plan.payload.ptr() as u64, plan.payload.len().to_u64(),
+        plan.reply_endpoint)
+    if result != 0:
+        return SosixFsClientExecuteResultV1(
+            accepted: false, reason: "owned-send-rejected", status: result)
+    SosixFsClientExecuteResultV1(accepted: true, reason: "submitted", status: 0)
+
+export sosix_fs_client_buffer_table_v1, sosix_fs_client_register_buffer_v1
+export sosix_fs_client_unregister_buffer_v1, sosix_fs_client_plan_owned_submission_v1
+export sosix_fs_client_execute_owned_v1
+export sosix_fs_client_reject_owned_submission_v1

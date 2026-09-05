@@ -1,0 +1,174 @@
+# ECS Entity — opaque handle with generational index (GC-async variant)
+#
+# An Entity is an i64 pair (id, generation). The id is reused after despawn;
+# the generation bumps on free so stale handles do not alias a new entity.
+# EntityAllocator owns the id pool and the free list.
+
+struct Entity:
+    id: i32
+    generation: i32
+
+    static fn null() -> Entity:
+        """The sentinel null entity. Never allocated by EntityAllocator."""
+        Entity(id: -1, generation: 0)
+
+    fn is_null() -> bool:
+        self.id < 0
+
+    fn eq(other: Entity) -> bool:
+        self.id == other.id and self.generation == other.generation
+
+struct EntityAllocator:
+    """Free-list allocator for entity ids with per-slot generational bump.
+
+    Storage is split so that no array carries two meanings (the earlier design
+    stored the free-list link inside `generations`, which destroyed the
+    generation on free and let a reused slot hand back the SAME generation —
+    a stale handle then validated, defeating the whole point of generations):
+
+      - `generations[id]` — the generation of slot `id`, and nothing else.
+        Monotonic per slot: bumped by `free`, never by `alloc`. Slot
+        generations start at 1; generation 0 is reserved for `Entity.null()`
+        and for reservation padding, so it is never handed out.
+      - `next_free[id]`   — the free-list link / slot state, and nothing else:
+            -2  LIVE      slot is allocated and its generation is current
+            -3  RETIRED   slot is permanently withdrawn (generation exhausted)
+            -4  RESERVED  reservation padding from `with_capacity`; never
+                          allocated, never live
+            -1  FREE, end of the free list
+           >=0  FREE, index of the next free slot
+      - `free_head` — head of the free list, -1 when empty.
+
+    Invariant: a handle is live iff its slot is in state LIVE *and* its
+    generation equals `generations[id]`. Both halves are required — the state
+    check alone would accept a fabricated generation, and the generation check
+    alone would accept a handle to a freed-but-not-yet-reused slot.
+
+    Generation wraparound policy: generations never wrap. When a slot's
+    generation reaches `gen_cap` (i32 max by default), `free` RETIRES the slot
+    instead of returning it to the free list: the id is withdrawn from
+    circulation for the life of the allocator and `retired` counts it. This
+    trades a bounded id leak for the guarantee that a generation value is never
+    reissued for a slot, so aliasing cannot happen silently. `gen_cap` is
+    lowered by `with_generation_cap` only so the policy is testable.
+    """
+    generations: [i32]
+    next_free: [i32]
+    free_head: i32
+    live_count: i32
+    gen_cap: i32
+    retired: i32
+
+    static fn new() -> EntityAllocator:
+        EntityAllocator(
+            generations: [],
+            next_free: [],
+            free_head: -1,
+            live_count: 0,
+            gen_cap: 2147483647,
+            retired: 0
+        )
+
+    static fn with_generation_cap(cap: i32) -> EntityAllocator:
+        """Like `new`, but retires a slot once its generation reaches `cap`.
+
+        Exists so the wraparound/retirement policy can be exercised without
+        performing 2^31 frees. `cap` below 2 is clamped to 2 (a slot must be
+        allocatable at generation 1 at least once).
+        """
+        var c = cap
+        if c < 2:
+            c = 2
+        EntityAllocator(
+            generations: [],
+            next_free: [],
+            free_head: -1,
+            live_count: 0,
+            gen_cap: c,
+            retired: 0
+        )
+
+    static fn with_capacity(capacity: i32) -> EntityAllocator:
+        """Pre-size the backing arrays. The padding slots are RESERVED: they are
+        never allocated and never report live, so ids handed out start above
+        `capacity` exactly as before.
+        """
+        var gens: [i32] = []
+        var links: [i32] = []
+        var i = 0
+        while i < capacity:
+            gens.push(0)
+            links.push(-4)
+            i = i + 1
+        EntityAllocator(
+            generations: gens,
+            next_free: links,
+            free_head: -1,
+            live_count: 0,
+            gen_cap: 2147483647,
+            retired: 0
+        )
+
+    me alloc() -> Entity:
+        """Allocate a new Entity. Reuses a free slot if one exists.
+
+        `alloc` never touches the generation: the value it hands out is the one
+        `free` already bumped, so a reused slot always differs from every
+        handle previously issued for it.
+        """
+        if self.free_head >= 0:
+            val id = self.free_head
+            self.free_head = self.next_free[id]
+            self.next_free[id] = -2
+            self.live_count = self.live_count + 1
+            return Entity(id: id, generation: self.generations[id])
+        val id = self.generations.len() as i32
+        self.generations.push(1)
+        self.next_free.push(-2)
+        self.live_count = self.live_count + 1
+        Entity(id: id, generation: 1)
+
+    me free(e: Entity) -> bool:
+        """Free an entity slot. Returns false if the handle is stale.
+
+        Bumps the slot generation so every handle issued so far is dead. If the
+        bump would exceed `gen_cap` the slot is retired rather than recycled.
+        """
+        if e.id < 0 or e.id >= (self.generations.len() as i32):
+            return false
+        if self.next_free[e.id] != -2:
+            return false
+        if self.generations[e.id] != e.generation:
+            return false
+        val id = e.id
+        val g = self.generations[id]
+        self.live_count = self.live_count - 1
+        if g >= self.gen_cap:
+            self.next_free[id] = -3
+            self.retired = self.retired + 1
+            return true
+        self.generations[id] = g + 1
+        self.next_free[id] = self.free_head
+        self.free_head = id
+        true
+
+    fn is_live(e: Entity) -> bool:
+        """True only when the slot is allocated AND the generation matches."""
+        if e.id < 0 or e.id >= (self.generations.len() as i32):
+            return false
+        if self.next_free[e.id] != -2:
+            return false
+        self.generations[e.id] == e.generation
+
+    fn generation_of(id: i32) -> i32:
+        """Current generation of slot `id`, or 0 when the id is out of range."""
+        if id < 0 or id >= (self.generations.len() as i32):
+            return 0
+        self.generations[id]
+
+    fn len() -> i32:
+        self.live_count
+
+    fn retired_slots() -> i32:
+        """Count of slots permanently withdrawn by the wraparound policy."""
+        self.retired

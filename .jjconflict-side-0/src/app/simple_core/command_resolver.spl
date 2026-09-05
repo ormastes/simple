@@ -1,0 +1,115 @@
+# Minimal, pure CLI-0 command resolution for simple-core.
+#
+# The caller owns byte loading and SCI decoding. This module consumes the
+# validated result and immutable provider declarations; it never loads a
+# provider or imports the compiler, build system, root CLI, or applications.
+
+use std.nogc_sync_mut.composition.types.{
+    SimpleProviderRecordV1,
+    CompositionReadResultV1,
+}
+
+val SIMPLE_CORE_OK: i32 = 0
+val SIMPLE_CORE_INVALID_COMMAND: i32 = 1
+val SIMPLE_CORE_INVALID_ARGUMENTS: i32 = 2
+val SIMPLE_CORE_CONFIG_INVALID: i32 = 3
+val SIMPLE_CORE_PROVIDER_NOT_FOUND: i32 = 4
+
+class SimpleCoreCommandReceiptV1:
+    status: i32
+    command_id: text
+    output: text
+    diagnostic: text
+
+fn _receipt(status: i32, command_id: text, output: text, diagnostic: text) -> SimpleCoreCommandReceiptV1:
+    SimpleCoreCommandReceiptV1(
+        status: status,
+        command_id: command_id,
+        output: output,
+        diagnostic: diagnostic,
+    )
+
+fn _help() -> text:
+    "simple-core commands:\n  --help\n  --version\n  config verify\n  provider inspect <provider-id>\n  doctor"
+
+fn _config_failure(config: CompositionReadResultV1, command_id: text) -> SimpleCoreCommandReceiptV1:
+    _receipt(
+        SIMPLE_CORE_CONFIG_INVALID,
+        command_id,
+        "",
+        "configuration rejected: " + config.diagnostic.code + ": " + config.diagnostic.message,
+    )
+
+fn _provider_by_id(config: CompositionReadResultV1, provider_id: text) -> SimpleProviderRecordV1:
+    var i = 0
+    while i < config.image.providers.len():
+        if config.image.providers[i].provider_id == provider_id:
+            return config.image.providers[i]
+        i = i + 1
+    SimpleProviderRecordV1(
+        provider_id: "",
+        artifact_path: "",
+        artifact_kind: "",
+        artifact_digest: "",
+        interface_groups: [],
+        required_capability_bits: 0,
+    )
+
+fn _provider_groups(provider: SimpleProviderRecordV1) -> text:
+    var groups = ""
+    var i = 0
+    while i < provider.interface_groups.len():
+        if i > 0:
+            groups = groups + ","
+        groups = groups + provider.interface_groups[i]
+        i = i + 1
+    groups
+
+fn simple_core_resolve_v1(
+    args: [text],
+    config: CompositionReadResultV1,
+    version: text,
+) -> SimpleCoreCommandReceiptV1:
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _receipt(SIMPLE_CORE_OK, "help", _help(), "")
+    if args.len() == 1 and args[0] == "--version":
+        return _receipt(SIMPLE_CORE_OK, "version", "simple-core " + version, "")
+    if args.len() == 2 and args[0] == "config" and args[1] == "verify":
+        if not config.ok:
+            return _config_failure(config, "config.verify")
+        return _receipt(
+            SIMPLE_CORE_OK,
+            "config.verify",
+            "configuration accepted: " + config.diagnostic.code + " digest=" + config.image.composition_digest,
+            "",
+        )
+    if args.len() >= 2 and args[0] == "config" and args[1] == "verify":
+        return _receipt(SIMPLE_CORE_INVALID_ARGUMENTS, "config.verify", "", "config verify accepts no additional arguments")
+    if args.len() >= 2 and args[0] == "provider" and args[1] == "inspect":
+        if args.len() != 3:
+            return _receipt(SIMPLE_CORE_INVALID_ARGUMENTS, "provider.inspect", "", "provider inspect requires exactly one provider id")
+        if not config.ok:
+            return _config_failure(config, "provider.inspect")
+        val provider = _provider_by_id(config, args[2])
+        if provider.provider_id == "":
+            return _receipt(SIMPLE_CORE_PROVIDER_NOT_FOUND, "provider.inspect", "", "provider not declared: " + args[2])
+        return _receipt(
+            SIMPLE_CORE_OK,
+            "provider.inspect",
+            "provider=" + provider.provider_id + " kind=" + provider.artifact_kind + " artifact=" + provider.artifact_path + " interfaces=" + _provider_groups(provider),
+            "",
+        )
+    if args.len() == 1 and args[0] == "doctor":
+        if not config.ok:
+            return _config_failure(config, "doctor")
+        return _receipt(
+            SIMPLE_CORE_OK,
+            "doctor",
+            "simple-core ready; SCI accepted; providers=" + config.image.providers.len().to_text(),
+            "",
+        )
+    _receipt(SIMPLE_CORE_INVALID_COMMAND, "", "", "not a static simple-core command")
+
+export SIMPLE_CORE_OK, SIMPLE_CORE_INVALID_COMMAND, SIMPLE_CORE_INVALID_ARGUMENTS
+export SIMPLE_CORE_CONFIG_INVALID, SIMPLE_CORE_PROVIDER_NOT_FOUND
+export SimpleCoreCommandReceiptV1, simple_core_resolve_v1

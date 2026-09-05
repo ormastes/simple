@@ -1,0 +1,149 @@
+# ============================================================================
+# Codec degenerate-input round-trip — similar-problem DETECTION spec (defect CLASS)
+#
+# Class: an encoder emits a framing element that its OWN decoder rejects, for a
+# degenerate input (empty, single byte, all-same bytes, incompressible). The
+# normal path — a few hundred bytes of ordinary text — round-trips fine, so the
+# defect ships looking green and only fires on the boundary case.
+#
+# The instance that motivated this:
+#   doc/08_tracking/bug/compress_lz4_empty_payload_roundtrip_corruptstream_2026-07-20.md
+#   `lz4_compress_frame([])` wrote a zero-length data block (size word
+#   0x80000000); `lz4_decompress_frame` correctly rejects a zero-length block, so
+#   the codec refused its own output. Found one input size at a time, by hand.
+#
+# This spec generalises instead of re-testing that one input: it sweeps the
+# degenerate-input axis CROSSED with the frame-option axis (block checksum on/off,
+# content_size present/absent). Those options change the framing bytes — a block
+# checksum is written per block and a content checksum after the EndMark — so an
+# encoder/decoder disagreement about whether a block exists at all shows up in
+# some option combinations and not others. Testing empty-input-with-defaults only
+# would have missed the checksum variants.
+#
+# Oracle is ABSOLUTE, never "encoder and decoder agree": each case asserts the
+# decoded byte LENGTH equals the original input length, a value the codec did not
+# compute. A mutual-agreement oracle would pass while both sides were wrong.
+#
+# No subprocess: the defect class lives in `.spl` library code and reproduces on
+# the interpreter that executes spec bodies (confirmed — the LZ4 instance did go
+# red here before its fix). A subprocess would be required only for a
+# JIT/native-codegen defect.
+# ============================================================================
+
+use std.spec.*
+use std.common.compress.lz4.{lz4_compress_frame, lz4_decompress_frame,
+    CompressionOptions, CompressionLevel}
+use std.common.compress.types.{CompressionCodec}
+
+fn _opts(want_checksum: bool, content_size: i64?) -> CompressionOptions:
+    CompressionOptions(
+        codec: CompressionCodec.lz4,
+        level: CompressionLevel(value: 1),
+        checksum: want_checksum,
+        block_mode: "independent",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: content_size)
+
+# --- degenerate inputs, each built by a module-level fn (avoids the
+# --- module-level-container-mutation footgun that silently empties fixtures) ---
+
+fn _in_empty() -> [u8]:
+    []
+
+fn _in_single() -> [u8]:
+    [7u8]
+
+# All-same bytes: maximally compressible, exercises the match/repeat path.
+fn _in_runs() -> [u8]:
+    var v: [u8] = []
+    var i = 0
+    while i < 64:
+        v.push(0xAAu8)
+        i = i + 1
+    v
+
+# Counter bytes: incompressible at this length, so the encoder takes the
+# uncompressed-block fallback (high bit set in the size word) — the same code
+# path whose length-0 case was the bug.
+fn _in_incompressible() -> [u8]:
+    var v: [u8] = []
+    var i = 0
+    while i < 37:
+        v.push((i & 0xFF).to_u8())
+        i = i + 1
+    v
+
+# Decoded length, or -1 when the decoder rejected the encoder's own frame.
+fn _rt_len(data: [u8], opts: CompressionOptions) -> i64:
+    match lz4_decompress_frame(lz4_compress_frame(data, opts)):
+        case Ok(b): b.len()
+        case Err(_): -1
+
+describe "Codec degenerate-input round-trip (defect class)":
+
+    # ---- axis 1: degenerate inputs, default framing ----
+
+    it "round-trips empty input":
+        expect(_rt_len(_in_empty(), _opts(false, nil))).to_equal(0)
+
+    it "round-trips a single byte":
+        expect(_rt_len(_in_single(), _opts(false, nil))).to_equal(1)
+
+    it "round-trips an all-same-bytes run":
+        expect(_rt_len(_in_runs(), _opts(false, nil))).to_equal(64)
+
+    it "round-trips incompressible input (uncompressed-block fallback path)":
+        expect(_rt_len(_in_incompressible(), _opts(false, nil))).to_equal(37)
+
+    # ---- axis 2: the same inputs with block+content checksums enabled ----
+    # A checksum is written per BLOCK, so encoder/decoder disagreement about
+    # whether a block exists changes where the decoder expects these bytes.
+
+    it "round-trips empty input with checksums enabled":
+        expect(_rt_len(_in_empty(), _opts(true, nil))).to_equal(0)
+
+    it "round-trips a single byte with checksums enabled":
+        expect(_rt_len(_in_single(), _opts(true, nil))).to_equal(1)
+
+    it "round-trips incompressible input with checksums enabled":
+        expect(_rt_len(_in_incompressible(), _opts(true, nil))).to_equal(37)
+
+    # ---- axis 3: declared content_size, which the decoder verifies against
+    # ---- the accumulated output length ----
+
+    it "round-trips empty input with a declared content size of 0":
+        expect(_rt_len(_in_empty(), _opts(false, 0))).to_equal(0)
+
+    it "round-trips empty input with checksums and a declared content size":
+        expect(_rt_len(_in_empty(), _opts(true, 0))).to_equal(0)
+
+    it "round-trips a single byte with a declared content size":
+        expect(_rt_len(_in_single(), _opts(false, 1))).to_equal(1)
+
+    # ---- the decoder must stay STRICT: the fix belongs in the encoder, and
+    # ---- must not have been obtained by loosening corruption detection ----
+
+    it "still rejects a hand-built frame carrying a zero-length data block":
+        # header (7 bytes) + size word 0x80000000 (uncompressed, length 0) + EndMark.
+        # This is exactly what the encoder used to emit. A zero-size word is
+        # reserved for the EndMark, so this frame is genuinely corrupt and must
+        # NOT decode to Ok - if it does, the bug was "fixed" in the wrong place.
+        val f = lz4_compress_frame(_in_empty(), _opts(false, nil))
+        var bad: [u8] = []
+        var i = 0
+        while i < 7:
+            bad.push(f[i])
+            i = i + 1
+        bad.push(0x00u8)
+        bad.push(0x00u8)
+        bad.push(0x00u8)
+        bad.push(0x80u8)
+        bad.push(0x00u8)
+        bad.push(0x00u8)
+        bad.push(0x00u8)
+        bad.push(0x00u8)
+        val rejected = match lz4_decompress_frame(bad):
+            case Ok(_): false
+            case Err(_): true
+        expect(rejected).to_equal(true)

@@ -1,0 +1,69 @@
+# Shared Calc grid-body renderer for the office suite.
+#
+# The Calc TUI (app.office.interactive) and the UI-access controller
+# (app.office.sheets.access_controller) painted the same viewport grid from two
+# separate copies of one loop.  The copies were NOT identical: the access
+# controller offsets every label and cell reference by the live scroll origin
+# and takes its extents from the running SheetsApp, while the TUI renders the
+# fixed default viewport anchored at A1.  That is one algorithm with the scroll
+# origin and the extents as parameters, so it lives here once and both callers
+# pass their own values.  Rendering at scroll (0, 0) reproduces the TUI bytes
+# exactly, which is why this is a dedupe and not a behaviour change.
+#
+# This is deliberately an app-level (app.office.sheets) module rather than part
+# of common.ui.spreadsheet_grid: the body depends on app.office Sheet/Cell
+# types, and common/ must not import app.office.
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text, CellRef, cell_ref_to_string}
+use common.ui.spreadsheet_grid.{SpreadsheetGridMetrics, spreadsheet_grid_column_label}
+
+# Width, in characters, at which a rendered cell value is clipped so a long
+# value cannot push the column grid out of alignment.
+val OFFICE_GRID_CELL_TEXT_LIMIT: i32 = 5
+
+fn office_grid_pad(value: text, width: i32) -> text:
+    """Left-align `value` in a field of `width` characters, padding with spaces.
+
+    Values already at or past `width` are returned unchanged; clipping is the
+    caller's concern.
+    """
+    var out = value
+    while out.len() < width:
+        out = out + " "
+    out
+
+fn office_grid_body(
+    sheet: Sheet,
+    scroll_col: i32,
+    scroll_row: i32,
+    cols: i32,
+    rows: i32,
+    metrics: SpreadsheetGridMetrics
+) -> text:
+    """Render the column-header row and `rows` body rows of a Calc viewport.
+
+    The result starts with a blank row-header cell so the column labels line up
+    over the value columns, and contains no leading or trailing newline: each
+    caller supplies its own surrounding chrome.  `scroll_col` / `scroll_row` are
+    the 0-based sheet coordinates of the top-left visible cell.
+    """
+    var out = office_grid_pad("", metrics.row_header_width)
+    var col = 0
+    while col < cols:
+        out = out + office_grid_pad(spreadsheet_grid_column_label(scroll_col + col), metrics.cell_width)
+        col = col + 1
+    var row = 0
+    while row < rows:
+        out = out + "\n" + office_grid_pad((scroll_row + row + 1).to_text(), metrics.row_header_width)
+        col = 0
+        while col < cols:
+            val ref = cell_ref_to_string(CellRef(col: scroll_col + col, row: scroll_row + row))
+            var display = cell_display_text(sheet.get_cell(ref))
+            if display.len() > OFFICE_GRID_CELL_TEXT_LIMIT:
+                display = display.substring(0, OFFICE_GRID_CELL_TEXT_LIMIT)
+            out = out + office_grid_pad(display, metrics.cell_width)
+            col = col + 1
+        row = row + 1
+    out
+
+export office_grid_body

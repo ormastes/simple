@@ -1,0 +1,67 @@
+# Kernel Event Object (kevent) — M1 thread primitive.
+#
+# Kernel-level event object supporting set/reset/wait.
+# Implemented as a pure-Simple in-process simulation for interpreter-mode testing.
+# In production kernel context, this maps to hardware atomic operations.
+#
+# @cover kevent
+
+# ============================================================================
+# State storage (module-level, interpreter-safe)
+# ============================================================================
+
+# We maintain a flat array of event state records.
+# kevent handles are 1-based indices into the table.
+
+var _kevent_count: i64 = 0
+var _kevent_signaled: [bool] = []
+var _kevent_auto_reset: [bool] = []
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn kevent_create(auto_reset: bool) -> i64:
+    """Create a kernel event object.
+
+    Args:
+        auto_reset: if true, event resets automatically after a successful wait
+
+    Returns:
+        Positive handle (> 0) identifying the event object.
+    """
+    _kevent_count = _kevent_count + 1
+    _kevent_signaled.push(false)
+    _kevent_auto_reset.push(auto_reset)
+    _kevent_count
+
+fn kevent_set(handle: i64):
+    """Signal the event (wake waiters)."""
+    val idx = handle - 1
+    if idx >= 0:
+        _kevent_signaled[idx] = true
+
+fn kevent_reset(handle: i64):
+    """Reset the event to non-signaled state."""
+    val idx = handle - 1
+    if idx >= 0:
+        _kevent_signaled[idx] = false
+
+fn kevent_wait(handle: i64, timeout_ns: i64) -> text:
+    """Wait for the event to become signaled.
+
+    With timeout_ns=0, returns immediately:
+      - "signaled" if the event is currently set
+      - "timeout"  if the event is not set
+
+    Returns:
+        "signaled" | "timeout"
+    """
+    val idx = handle - 1
+    if idx < 0:
+        return "timeout"
+    if _kevent_signaled[idx]:
+        if _kevent_auto_reset[idx]:
+            _kevent_signaled[idx] = false
+        return "signaled"
+    "timeout"

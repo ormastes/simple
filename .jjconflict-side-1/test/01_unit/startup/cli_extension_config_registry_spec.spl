@@ -1,0 +1,103 @@
+# WP-C follow-on: config-driven extension-namespace registry. An SDN config
+# declares namespaces; --x<ns>-<key>[=<value>] argv tokens route to them with
+# zero .spl changes. Fail-closed on unknown namespaces and malformed SDN.
+use std.nogc_sync_mut.composition.{
+    cli_extension_registry_from_sdn_v1, cli_classify_with_registry_v1,
+    cli_extension_parse_argv_v1, cli_spelling_reserved_v1,
+    SimpleCliExtensionNamespaceRecordV1,
+    CLI_AVAILABILITY_REQUIRED, CLI_AVAILABILITY_OPTIONAL,
+    CLI_MISSING_ERROR, CLI_MISSING_WARN_SKIP,
+    CLI_ROUTE_ERR_RESERVED_SPELLING
+}
+
+fn fixture_sdn() -> text:
+    val a = "schema: simple.cli_extension/1\n"
+    val b = "namespaces:\n"
+    val c = "  - namespace: llvm\n    provider_id: provider.llvm\n"
+    val d = "  - namespace: office\n    provider_id: provider.office\n    availability: optional\n    missing_policy: warn_skip\n"
+    a + b + c + d
+
+describe "config-driven registry loading":
+    it "loads two namespaces from SDN with defaults and explicit enums":
+        val table = match cli_extension_registry_from_sdn_v1(fixture_sdn()):
+            case Ok(t): t
+            case Err(e): return expect(e).to_equal("")
+        expect(table.namespaces.len()).to_equal(2)
+        expect(table.namespaces[0].namespace).to_equal("llvm")
+        expect(table.namespaces[0].availability).to_equal(CLI_AVAILABILITY_REQUIRED)
+        expect(table.namespaces[0].missing_policy).to_equal(CLI_MISSING_ERROR)
+        expect(table.namespaces[1].namespace).to_equal("office")
+        expect(table.namespaces[1].availability).to_equal(CLI_AVAILABILITY_OPTIONAL)
+        expect(table.namespaces[1].missing_policy).to_equal(CLI_MISSING_WARN_SKIP)
+
+    it "fails closed on malformed sdn":
+        val res = cli_extension_registry_from_sdn_v1(": : not sdn [")
+        expect(res.is_err()).to_equal(true)
+
+    it "fails closed on a wrong schema":
+        val src = fixture_sdn().replace("simple.cli_extension/1", "simple.other/9")
+        val res = cli_extension_registry_from_sdn_v1(src)
+        var msg = ""
+        match res:
+            case Err(e): msg = e
+            case Ok(_): msg = ""
+        expect(msg.contains("unsupported schema")).to_equal(true)
+
+    it "fails closed when namespaces is missing":
+        val res = cli_extension_registry_from_sdn_v1("schema: simple.cli_extension/1\n")
+        expect(res.is_err()).to_equal(true)
+
+    it "fails closed on an invalid namespace shape from config":
+        val src = fixture_sdn().replace("namespace: llvm", "namespace: Bad-Shape")
+        val res = cli_extension_registry_from_sdn_v1(src)
+        expect(res.is_err()).to_equal(true)
+
+describe "argv routing through the config registry":
+    it "parses valued and flag forms for registered namespaces":
+        val argv = ["--xllvm-pass=loop-vectorize", "--xoffice-experimental", "positional"]
+        val parsed = match cli_extension_parse_argv_v1(fixture_sdn(), argv):
+            case Ok(p): p
+            case Err(e): return expect(e).to_equal("")
+        expect(parsed.values.len()).to_equal(2)
+        match parsed.get("llvm", "pass"):
+            case Some(v): expect(v).to_equal("loop-vectorize")
+            case None: expect("missing").to_equal("llvm pass value")
+        expect(parsed.has("office", "experimental")).to_equal(true)
+        expect(parsed.get("office", "experimental").is_none()).to_equal(true)
+        expect(parsed.values[0].provider_id).to_equal("provider.llvm")
+        expect(parsed.passthrough.len()).to_equal(1)
+
+    it "errors explicitly on an unknown namespace listing declared ones":
+        val res = cli_extension_parse_argv_v1(fixture_sdn(), ["--xghost-mode=on"])
+        var msg = ""
+        match res:
+            case Err(e): msg = e
+            case Ok(_): msg = ""
+        expect(msg.contains("unknown namespace")).to_equal(true)
+        expect(msg.contains("ghost")).to_equal(true)
+        expect(msg.contains("llvm")).to_equal(true)
+        expect(msg.contains("office")).to_equal(true)
+
+    it "hard-stops at -- and never intercepts program args":
+        val argv = ["--xllvm-opt=3", "--", "--xghost-mode=on", "--xllvm-pass=x"]
+        val parsed = match cli_extension_parse_argv_v1(fixture_sdn(), argv):
+            case Ok(p): p
+            case Err(e): return expect(e).to_equal("")
+        expect(parsed.values.len()).to_equal(1)
+        expect(parsed.program_args.len()).to_equal(2)
+        expect(parsed.program_args[0]).to_equal("--xghost-mode=on")
+
+    it "errors on a malformed --x token":
+        val res = cli_extension_parse_argv_v1(fixture_sdn(), ["--x-nokey"])
+        expect(res.is_err()).to_equal(true)
+
+    it "still rejects reserved spellings for route registration":
+        expect(cli_spelling_reserved_v1("--help")).to_equal(true)
+        expect(cli_spelling_reserved_v1("--xanything-key")).to_equal(true)
+        val table = match cli_extension_registry_from_sdn_v1(fixture_sdn()):
+            case Ok(t): t
+            case Err(e): return expect(e).to_equal("")
+        # a duplicate namespace from config is also rejected fail-closed
+        val dup = SimpleCliExtensionNamespaceRecordV1(namespace: "llvm", provider_id: "p", availability: CLI_AVAILABILITY_REQUIRED, missing_policy: CLI_MISSING_ERROR)
+        val diag = table.register_namespace(dup)
+        expect(diag.ok).to_equal(false)

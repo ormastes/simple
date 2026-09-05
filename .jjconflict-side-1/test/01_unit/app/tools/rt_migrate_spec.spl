@@ -1,0 +1,391 @@
+# rt_migrate rewrite contract (rt_* -> typed std alias migration tooling).
+#
+# Every fixture spells the runtime prefix by concatenation (`RT + "x("`) so this
+# spec itself adds no direct call site to the check-no-direct-rt ratchet.
+
+use app.tools.rt_migrate.alias_map.{parse_alias_map, normalize_decl}
+use app.tools.rt_migrate.rewrite.{FileContext, MigrateResult, migrate_source, mask_code, call_sites, parse_use_line, has_skip_marker}
+
+val RT: text = "rt" + "_"
+val IO_MOD: text = "std.nogc_sync_mut.sffi.io"
+val SYS_MOD: text = "std.nogc_sync_mut.sffi.system"
+val FS_MOD: text = "std.nogc_sync_mut.sffi.fs"
+
+fn fixture_map() -> text:
+    val lines: [text] = [
+        "rt_alias_map:",
+        "  schema: rt-alias-map/1",
+        "  entries:",
+        "    " + RT + "file_exists:",
+        "      class: same",
+        "      module: " + IO_MOD,
+        "      fn: file_exists",
+        "      decl: \"(path: text) -> bool\"",
+        "    " + RT + "file_read_text:",
+        "      class: same",
+        "      module: std.nogc_sync_mut.io_runtime",
+        "      fn: file_read_nullable",
+        "      decl: \"(path: text) -> text?\"",
+        "      variants:",
+        "        - decl: \"(path: text) -> text\"",
+        "          module: " + FS_MOD,
+        "          fn: file_read_text_unchecked",
+        "    " + RT + "env_get:",
+        "      class: same",
+        "      module: " + SYS_MOD,
+        "      fn: env_get",
+        "      decl: \"(key: text) -> text?\"",
+        "    " + RT + "port_outb:",
+        "      class: provider",
+        "      reason: \"device port primitive\"",
+        "    " + RT + "mutex_lock:",
+        "      class: adapted",
+        "      module: std.nogc_sync_mut.concurrent.mutex",
+        "      fn: mutex_lock",
+        "      decl: \"(mutex: Mutex) -> Any?\""
+    ]
+    lines.join("\n") + "\n"
+
+fn ctx(path: text) -> FileContext:
+    FileContext(path: path, strict: false)
+
+fn run(path: text, src: text) -> MigrateResult:
+    migrate_source(ctx(path), src, parse_alias_map(fixture_map()))
+
+fn joined(lines: [text]) -> text:
+    lines.join("\n") + "\n"
+
+fn residual_reasons(r: MigrateResult) -> [text]:
+    var out: [text] = []
+    for res in r.residuals:
+        out.push(res.sym + ":" + res.reason)
+    out
+
+describe "rt_migrate: alias map":
+    it "parses classes, aliases and decl variants":
+        val m = parse_alias_map(fixture_map())
+        expect(m.len()).to_equal(5)
+        expect(m[RT + "file_exists"].fn_name).to_equal("file_exists")
+        expect(m[RT + "file_exists"].decl).to_equal("(text)->bool")
+        expect(m[RT + "port_outb"].cls).to_equal("provider")
+        expect(m[RT + "file_read_text"].variants.len()).to_equal(1)
+        expect(m[RT + "file_read_text"].variants[0].fn_name).to_equal("file_read_text_unchecked")
+
+    it "normalizes declarations so names and unit/void spelling do not matter":
+        expect(normalize_decl("(path: text, n: i64) -> bool")).to_equal(normalize_decl("(p:text,count:i64)->bool"))
+        expect(normalize_decl("(code: i32)")).to_equal(normalize_decl("(c: i32) -> unit"))
+        expect(normalize_decl("(code: i32)")).to_equal(normalize_decl("(code: i32) -> void"))
+        expect(normalize_decl("(a: text) -> text") == normalize_decl("(a: text) -> text?")).to_equal(false)
+        expect(normalize_decl("(cb: fn(i64, text) -> bool, xs: [u8]) -> (text, i64)")).to_equal("(fn(i64,text)->bool,[u8])->(text,i64)")
+
+describe "rt_migrate: masking and call detection":
+    it "masks string literals and trailing comments":
+        val line = "val s = \"" + RT + "x(1)\"  # " + RT + "y(2)"
+        expect(call_sites(mask_code(line)).len()).to_equal(0)
+        expect(mask_code(line).len()).to_equal(line.len())
+
+    it "finds every direct call on a line but not method calls or declarations":
+        val line = "    if " + RT + "a(p) and obj." + RT + "b(q) or " + RT + "c(" + RT + "d(1)):"
+        val sites = call_sites(mask_code(line))
+        expect(sites.len()).to_equal(3)
+        val (p0, s0) = sites[0]
+        expect(s0).to_equal(RT + "a")
+        val (p2, s2) = sites[2]
+        expect(s2).to_equal(RT + "d")
+
+    it "parses brace, paren and single-name import forms":
+        val (m1, n1) = parse_use_line("use std.a.b.{" + "x, y as z}")
+        expect(m1).to_equal("std.a.b")
+        expect(n1.join(",")).to_equal("x,z")
+        val (m2, n2) = parse_use_line("use app.x.y (f, g)")
+        expect(m2).to_equal("app.x.y")
+        expect(n2.join(",")).to_equal("f,g")
+        val (m3, n3) = parse_use_line("use std.a.b.c")
+        expect(m3).to_equal("std.a.b")
+        expect(n3.join(",")).to_equal("c")
+
+describe "rt_migrate: rewrite":
+    it "merges the alias into an existing import line for the same module":
+        val src = joined([
+            "use " + IO_MOD + ".{" + "file_delete}",
+            "",
+            "extern fn " + RT + "file_exists(path: text) -> bool",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(1)
+        expect(r.output.contains("use " + IO_MOD + ".{" + "file_delete, file_exists}")).to_equal(true)
+        expect(r.output.contains("    file_exists(p)")).to_equal(true)
+        expect(r.imports_added.join(",")).to_equal(IO_MOD + ".file_exists")
+
+    it "adds a new import after the last top-level use when the module is not imported":
+        val src = joined([
+            "use std.other.{" + "thing}",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        val lines = r.output.split("\n")
+        expect(lines[0]).to_equal("use std.other.{" + "thing}")
+        expect(lines[1]).to_equal("use " + IO_MOD + ".{" + "file_exists}")
+        expect(r.no_decl_rewrites).to_equal(1)
+
+    it "merges into a multi-line use block and sees the names it already binds":
+        val src = joined([
+            "use " + IO_MOD + ".{",
+            "    file_delete,",
+            "    file_exists",
+            "}",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p) and " + RT + "env_get(p) != nil"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(2)
+        expect(r.imports_added.join(",")).to_equal(SYS_MOD + ".env_get")
+        val lines = r.output.split("\n")
+        expect(lines[0]).to_equal("use " + IO_MOD + ".{")
+        expect(lines[3]).to_equal("}")
+        expect(lines[4]).to_equal("use " + SYS_MOD + ".{" + "env_get}")
+        val src2 = joined([
+            "use " + SYS_MOD + ".{",
+            "    env_set",
+            "}",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "env_get(p) != nil"
+        ])
+        val r2 = run("src/app/x/y.spl", src2)
+        val l2 = r2.output.split("\n")
+        expect(l2[1]).to_equal("    env_set,")
+        expect(l2[2]).to_equal("    env_get")
+        expect(l2[3]).to_equal("}")
+        expect(run("src/app/x/y.spl", r2.output).changed).to_equal(false)
+
+    it "treats a multi-line extern declaration as unparseable and refuses the rewrite":
+        # verifier R1: the first physical line of a multi-line extern is `extern fn rt_x(`
+        # — that is not a signature, and matching it as one produced a 0-arg wrapper
+        # for a 20-param runtime fn. The tool must refuse, not guess.
+        expect(normalize_decl("(")).to_equal("!unparseable")
+        expect(normalize_decl("(a: i64,")).to_equal("!unparseable")
+        val src = joined([
+            "extern fn " + RT + "file_exists(",
+            "    path: text",
+            ") -> bool",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(0)
+        expect(r.changed).to_equal(false)
+        expect(residual_reasons(r).join(",")).to_equal(RT + "file_exists:decl-mismatch:multi-line-or-unparseable-decl")
+        # a map row whose decl is itself truncated must never match anything
+        val bad_map = parse_alias_map(fixture_map().replace("decl: \"(path: text) -> bool\"", "decl: \"(\""))
+        val src2 = joined([
+            "extern fn " + RT + "file_exists(path: text) -> bool",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r2 = migrate_source(ctx("src/app/x/y.spl"), src2, bad_map)
+        expect(r2.rewritten).to_equal(0)
+        expect(residual_reasons(r2).join(",")).to_equal(RT + "file_exists:decl-mismatch:map-decl-unparseable")
+
+    it "counts declaration-less rewrites separately from decl-verified ones":
+        val src = joined([
+            "extern fn " + RT + "env_get(key: text) -> text?",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "env_get(p) != nil and " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(2)
+        expect(r.no_decl_rewrites).to_equal(1)
+        val strict = migrate_source(FileContext(path: "src/app/x/y.spl", strict: true), src, parse_alias_map(fixture_map()))
+        expect(strict.rewritten).to_equal(1)
+        expect(residual_reasons(strict).join(",")).to_equal(RT + "file_exists:strict:no-decl")
+
+    it "recognises the opt-out marker comment":
+        expect(has_skip_marker("fn f():\n    1\n# rt-migrate: skip\n")).to_equal(true)
+        expect(has_skip_marker("#   rt-migrate: skip (contract spec locks this source)\n")).to_equal(true)
+        expect(has_skip_marker("val s = \"# rt-migrate: skip\"\n")).to_equal(false)
+
+    it "follows the file's paren import style":
+        val src = joined([
+            "use std.other (thing)",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.output.split("\n")[1]).to_equal("use " + IO_MOD + " (file_exists)")
+
+    it "removes the extern declaration and its attached attributes once unused":
+        val src = joined([
+            "@unsafe(reason: \"raw\", capabilities: [ffi])",
+            "extern fn " + RT + "file_exists(path: text) -> bool",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.decls_removed).to_equal(1)
+        expect(r.output.contains("extern fn")).to_equal(false)
+        expect(r.output.contains("@unsafe")).to_equal(false)
+        expect(r.output.split("\n")[0]).to_equal("use " + IO_MOD + ".{" + "file_exists}")
+
+    it "keeps the declaration while another use of the symbol remains":
+        val src = joined([
+            "extern fn " + RT + "file_exists(path: text) -> bool",
+            "",
+            "fn f(p: text) -> bool:",
+            "    val g = " + RT + "file_exists",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(1)
+        expect(r.decls_removed).to_equal(0)
+
+    it "leaves string literals untouched":
+        val src = joined([
+            "fn f(p: text) -> text:",
+            "    val s = \"" + RT + "file_exists(p)\"",
+            "    if " + RT + "file_exists(p): s else: \"\""
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(1)
+        expect(r.output.contains("val s = \"" + RT + "file_exists(p)\"")).to_equal(true)
+        expect(r.output.contains("if file_exists(p)")).to_equal(true)
+
+    it "leaves comments untouched":
+        val src = joined([
+            "# " + RT + "file_exists(p) in a comment",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)  # trailing " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(1)
+        expect(r.output.contains("# " + RT + "file_exists(p) in a comment")).to_equal(true)
+        expect(r.output.contains("# trailing " + RT + "file_exists(p)")).to_equal(true)
+
+    it "leaves docstrings untouched":
+        val src = joined([
+            "\"\"\"Module doc: call " + RT + "file_exists(p) here.",
+            "still doc " + RT + "file_exists(q)",
+            "\"\"\"",
+            "fn f(p: text) -> bool:",
+            "    \"\"\"fn doc " + RT + "file_exists(p)\"\"\"",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(1)
+        expect(r.output.contains("call " + RT + "file_exists(p) here")).to_equal(true)
+        expect(r.output.contains("still doc " + RT + "file_exists(q)")).to_equal(true)
+        expect(r.output.contains("fn doc " + RT + "file_exists(p)")).to_equal(true)
+
+    it "uses the fully-qualified module even when the file imports family-relative paths":
+        val src = joined([
+            "use std.sffi.io.{" + "file_delete}",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("test/01_unit/lib/x_spec.spl", src)
+        expect(r.rewritten).to_equal(1)
+        expect(r.output.contains("use std.sffi.io.{" + "file_delete}")).to_equal(true)
+        expect(r.output.contains("use " + IO_MOD + ".{" + "file_exists}")).to_equal(true)
+
+    it "refuses a cross-family import and reports it as a residual":
+        val src = joined([
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/lib/gc_async_mut/gpu/thing.spl", src)
+        expect(r.rewritten).to_equal(0)
+        expect(residual_reasons(r).join(",")).to_equal(RT + "file_exists:family-mismatch:gc_async_mut->nogc_sync_mut")
+        val c = run("src/lib/common/pure.spl", src)
+        expect(residual_reasons(c).join(",")).to_equal(RT + "file_exists:layering:common-cannot-import-nogc_sync_mut")
+
+    it "picks the decl variant that matches the file's own extern signature":
+        val src = joined([
+            "extern fn " + RT + "file_read_text(path: text) -> text",
+            "",
+            "fn f(p: text) -> text:",
+            "    " + RT + "file_read_text(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.output.contains("use " + FS_MOD + ".{" + "file_read_text_unchecked}")).to_equal(true)
+        expect(r.output.contains("    file_read_text_unchecked(p)")).to_equal(true)
+        val src2 = joined([
+            "extern fn " + RT + "file_read_text(p: text) -> text?",
+            "",
+            "fn f(p: text) -> text?:",
+            "    " + RT + "file_read_text(p)"
+        ])
+        val r2 = run("src/app/x/y.spl", src2)
+        expect(r2.output.contains("use std.nogc_sync_mut.io_runtime.{" + "file_read_nullable}")).to_equal(true)
+
+    it "reports residuals: provider, adapted, unmapped, decl mismatch, name collision":
+        val src = joined([
+            "extern fn " + RT + "env_get(key: text) -> i64",
+            "",
+            "fn file_exists(p: text) -> bool:",
+            "    true",
+            "",
+            "fn f(p: text) -> bool:",
+            "    " + RT + "port_outb(1, 2)",
+            "    " + RT + "mutex_lock(p)",
+            "    " + RT + "nothing_here(p)",
+            "    " + RT + "env_get(p)",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = run("src/app/x/y.spl", src)
+        expect(r.rewritten).to_equal(0)
+        expect(r.changed).to_equal(false)
+        val reasons = residual_reasons(r).join(",")
+        expect(reasons.contains(RT + "port_outb:provider")).to_equal(true)
+        expect(reasons.contains(RT + "mutex_lock:adapted")).to_equal(true)
+        expect(reasons.contains(RT + "nothing_here:unmapped")).to_equal(true)
+        expect(reasons.contains(RT + "env_get:decl-mismatch:(text)->i64")).to_equal(true)
+        expect(reasons.contains(RT + "file_exists:name-collision:local-fn-file_exists")).to_equal(true)
+        expect(r.residuals.len()).to_equal(5)
+
+    it "strict mode refuses a rewrite without a matching local declaration":
+        val src = joined([
+            "fn f(p: text) -> bool:",
+            "    " + RT + "file_exists(p)"
+        ])
+        val r = migrate_source(FileContext(path: "src/app/x/y.spl", strict: true), src, parse_alias_map(fixture_map()))
+        expect(r.rewritten).to_equal(0)
+        expect(residual_reasons(r).join(",")).to_equal(RT + "file_exists:strict:no-decl")
+
+    it "is idempotent":
+        val src = joined([
+            "\"\"\"doc " + RT + "file_exists(p)\"\"\"",
+            "use " + IO_MOD + ".{" + "file_delete}",
+            "",
+            "@unsafe(reason: \"raw\", capabilities: [ffi])",
+            "extern fn " + RT + "file_exists(path: text) -> bool",
+            "extern fn " + RT + "env_get(name: text) -> text?",
+            "extern fn " + RT + "port_outb(port: i64, v: i64)",
+            "",
+            "fn f(p: text) -> bool:",
+            "    # " + RT + "file_exists(p)",
+            "    val h = " + RT + "env_get(\"HOME\")",
+            "    " + RT + "port_outb(1, 2)",
+            "    " + RT + "file_exists(p) and " + RT + "file_exists(h ?? \"\")"
+        ])
+        val first = run("src/app/x/y.spl", src)
+        expect(first.rewritten).to_equal(3)
+        expect(first.decls_removed).to_equal(2)
+        expect(first.changed).to_equal(true)
+        val second = run("src/app/x/y.spl", first.output)
+        expect(second.rewritten).to_equal(0)
+        expect(second.decls_removed).to_equal(0)
+        expect(second.changed).to_equal(false)
+        expect(second.output).to_equal(first.output)
+        expect(residual_reasons(second).join(",")).to_equal(RT + "port_outb:provider")

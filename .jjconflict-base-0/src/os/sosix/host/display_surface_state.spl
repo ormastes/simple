@@ -1,0 +1,173 @@
+"""Pure ordered lifecycle for an asynchronous SOSIX display surface."""
+
+use os.sosix.core.capability_ref.{SosixCapabilityRef, sosix_capability_ref_is_valid}
+use os.sosix.host.service_contract.{SosixDisplayRequest, SosixDisplayCompletionKey}
+
+pub struct SosixDisplaySurfaceState:
+    surface: SosixCapabilityRef
+    surface_generation: u32
+    next_frame_sequence: u64
+    oldest_inflight_sequence: u64
+    inflight_count: u32
+    max_inflight: u32
+    closed: bool
+
+pub struct SosixDisplaySurfaceTransition:
+    accepted: bool
+    reason: text
+    state: SosixDisplaySurfaceState
+
+pub struct SosixDisplayPresentFence:
+    pending: bool
+    completion: SosixDisplayCompletionKey
+    state: SosixDisplaySurfaceState
+
+pub struct SosixDisplayPresentFenceTransition:
+    accepted: bool
+    reason: text
+    fence: SosixDisplayPresentFence
+
+export SosixDisplaySurfaceState, SosixDisplaySurfaceTransition
+export SosixDisplayPresentFence, SosixDisplayPresentFenceTransition
+
+pub fn sosix_display_surface_state_create(
+    surface: SosixCapabilityRef, max_inflight: u32
+) -> SosixDisplaySurfaceTransition:
+    val state = SosixDisplaySurfaceState(
+        surface: surface,
+        surface_generation: 1,
+        next_frame_sequence: 1,
+        oldest_inflight_sequence: 1,
+        inflight_count: 0,
+        max_inflight: max_inflight,
+        closed: false
+    )
+    if not sosix_capability_ref_is_valid(surface):
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "invalid-surface", state: state)
+    if max_inflight == 0:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "zero-inflight-capacity", state: state)
+    SosixDisplaySurfaceTransition(accepted: true, reason: "accepted", state: state)
+
+fn _sosix_display_surface_matches(
+    state: SosixDisplaySurfaceState, surface: SosixCapabilityRef
+) -> bool:
+    state.surface.slot == surface.slot and state.surface.generation == surface.generation
+
+pub fn sosix_display_surface_submit(
+    state: SosixDisplaySurfaceState, request: SosixDisplayRequest
+) -> SosixDisplaySurfaceTransition:
+    if state.closed:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "surface-closed", state: state)
+    if not _sosix_display_surface_matches(state, request.surface):
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "wrong-surface", state: state)
+    if request.surface_generation != state.surface_generation:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "stale-surface-generation", state: state)
+    if request.frame_sequence != state.next_frame_sequence:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "unexpected-frame-sequence", state: state)
+    if state.inflight_count >= state.max_inflight:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "display-backpressure", state: state)
+    val next = SosixDisplaySurfaceState(
+        surface: state.surface,
+        surface_generation: state.surface_generation,
+        next_frame_sequence: state.next_frame_sequence + 1,
+        oldest_inflight_sequence: state.oldest_inflight_sequence,
+        inflight_count: state.inflight_count + 1,
+        max_inflight: state.max_inflight,
+        closed: false
+    )
+    SosixDisplaySurfaceTransition(accepted: true, reason: "submitted", state: next)
+
+pub fn sosix_display_surface_complete(
+    state: SosixDisplaySurfaceState, completion: SosixDisplayCompletionKey
+) -> SosixDisplaySurfaceTransition:
+    if state.closed:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "surface-closed", state: state)
+    if state.inflight_count == 0:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "no-frame-inflight", state: state)
+    if not _sosix_display_surface_matches(state, completion.surface):
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "wrong-surface", state: state)
+    if completion.surface_generation != state.surface_generation:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "stale-surface-generation", state: state)
+    if completion.frame_sequence != state.oldest_inflight_sequence:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "out-of-order-completion", state: state)
+    val next = SosixDisplaySurfaceState(
+        surface: state.surface,
+        surface_generation: state.surface_generation,
+        next_frame_sequence: state.next_frame_sequence,
+        oldest_inflight_sequence: state.oldest_inflight_sequence + 1,
+        inflight_count: state.inflight_count - 1,
+        max_inflight: state.max_inflight,
+        closed: false
+    )
+    SosixDisplaySurfaceTransition(accepted: true, reason: "completed", state: next)
+
+pub fn sosix_display_present_fence_pending(
+    state: SosixDisplaySurfaceState, completion: SosixDisplayCompletionKey
+) -> SosixDisplayPresentFence:
+    SosixDisplayPresentFence(pending: true, completion: completion, state: state)
+
+pub fn sosix_display_present_fence_observe(
+    fence: SosixDisplayPresentFence, observed: SosixDisplayCompletionKey
+) -> SosixDisplayPresentFenceTransition:
+    if not fence.pending:
+        return SosixDisplayPresentFenceTransition(
+            accepted: false, reason: "present-fence-already-completed", fence: fence)
+    if (observed.surface.slot != fence.completion.surface.slot or
+        observed.surface.generation != fence.completion.surface.generation or
+        observed.surface_generation != fence.completion.surface_generation or
+        observed.frame_sequence != fence.completion.frame_sequence):
+        return SosixDisplayPresentFenceTransition(
+            accepted: false, reason: "wrong-present-fence", fence: fence)
+    val completed = sosix_display_surface_complete(fence.state, observed)
+    if not completed.accepted:
+        return SosixDisplayPresentFenceTransition(
+            accepted: false, reason: completed.reason, fence: fence)
+    SosixDisplayPresentFenceTransition(
+        accepted: true,
+        reason: "present-fence-observed",
+        fence: SosixDisplayPresentFence(
+            pending: false, completion: fence.completion, state: completed.state))
+
+pub fn sosix_display_surface_resize(
+    state: SosixDisplaySurfaceState
+) -> SosixDisplaySurfaceTransition:
+    if state.closed:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "surface-closed", state: state)
+    if state.inflight_count != 0:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "resize-with-frames-inflight", state: state)
+    var generation = state.surface_generation + 1
+    if generation == 0:
+        generation = 1
+    val next = SosixDisplaySurfaceState(
+        surface: state.surface,
+        surface_generation: generation,
+        next_frame_sequence: 1,
+        oldest_inflight_sequence: 1,
+        inflight_count: 0,
+        max_inflight: state.max_inflight,
+        closed: false
+    )
+    SosixDisplaySurfaceTransition(accepted: true, reason: "resized", state: next)
+
+pub fn sosix_display_surface_close(
+    state: SosixDisplaySurfaceState
+) -> SosixDisplaySurfaceTransition:
+    if state.closed:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "surface-closed", state: state)
+    if state.inflight_count != 0:
+        return SosixDisplaySurfaceTransition(accepted: false, reason: "close-with-frames-inflight", state: state)
+    val next = SosixDisplaySurfaceState(
+        surface: state.surface,
+        surface_generation: state.surface_generation,
+        next_frame_sequence: state.next_frame_sequence,
+        oldest_inflight_sequence: state.oldest_inflight_sequence,
+        inflight_count: 0,
+        max_inflight: state.max_inflight,
+        closed: true
+    )
+    SosixDisplaySurfaceTransition(accepted: true, reason: "closed", state: next)
+
+export sosix_display_surface_state_create, sosix_display_surface_submit
+export sosix_display_surface_complete, sosix_display_surface_resize
+export sosix_display_surface_close
+export sosix_display_present_fence_pending, sosix_display_present_fence_observe

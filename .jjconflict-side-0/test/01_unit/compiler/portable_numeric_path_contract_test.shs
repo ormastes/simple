@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+canonical="$repo_root/test/01_unit/compiler/portable_numeric_capabilities_spec.spl"
+mirror="$repo_root/test/unit/compiler/portable_numeric_capabilities_spec.spl"
+
+check_spec() {
+    spec=$1
+    if grep -q '/home/ormastes/dev/pub/simple' "$spec"; then
+        return 1
+    fi
+    grep -q 'val repo_root = cwd()' "$spec" || return 1
+    grep -q 'portable_numeric_simple_bin(repo_root)' "$spec" || return 1
+    grep -q 'portable_numeric_simple_src(repo_root)' "$spec" || return 1
+    grep -q 'portable_numeric_shell_quote(root)' "$spec" || return 1
+    grep -q 'portable_numeric_shell_quote(simple_src)' "$spec" || return 1
+    grep -q 'portable_numeric_shell_quote(simple_bin)' "$spec" || return 1
+    grep -q 'portable_numeric_shell_quote(script_path)' "$spec" || return 1
+    grep -q "/tmp/simple repo/owner's tree" "$spec" || return 1
+}
+
+check_spec "$canonical"
+check_spec "$mirror"
+cmp -s "$canonical" "$mirror"
+
+mutation_root=$(mktemp -d)
+trap 'rm -rf "$mutation_root"' EXIT HUP INT TERM
+mutant="$mutation_root/portable_numeric_capabilities_spec.spl"
+sed 's/val repo_root = cwd()/val repo_root = "\/home\/ormastes\/dev\/pub\/simple"/' "$canonical" > "$mutant"
+if check_spec "$mutant"; then
+    echo "error: path contract accepted a legacy-root mutant" >&2
+    exit 1
+fi
+
+unquoted_mutant="$mutation_root/portable_numeric_unquoted_mutant.spl"
+sed 's/{portable_numeric_shell_quote(simple_bin)}/{simple_bin}/' "$canonical" > "$unquoted_mutant"
+if check_spec "$unquoted_mutant"; then
+    echo "error: path contract accepted an unquoted-path mutant" >&2
+    exit 1
+fi
+
+echo "portable numeric path contract: PASS"

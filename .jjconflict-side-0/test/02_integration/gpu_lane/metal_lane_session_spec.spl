@@ -1,0 +1,59 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Host-aware probe-only spec for MetalLaneSession (Stream N2).
+#
+# Design: doc/05_design/app/tools/metal_gpu_lane_and_vulkan_jit_notebook_architecture_2026-08-09.md
+# section 4 / 9. This repo's primary dev/CI hosts are Linux -- Metal is
+# macOS-only, so this spec legitimately SKIPs on this host today (per
+# design section 1 Goals #3 / section 9: "that is correct, expected
+# behavior, not a shortcoming"). It exists to prove the probe PATH itself
+# is correct (right skip reason, no crash/hang), not to exercise a real
+# device -- a full arena round-trip spec analogous to
+# `vulkan_lane_session_spec.spl` is deferred to when this can run for real
+# on a Mac host (needs a checked-in MSL fixture, tracked alongside the
+# `metal_vm_executor.spl`/`svmg_metal_kernel.metal` work in N3).
+
+use std.spec.step
+
+use std.spipe.*
+use std.gc_async_mut.gpu_lane.metal_lane_session.{MetalLaneSession}
+use std.gc_async_mut.gpu_lane.lane_probe_verdict.{
+    gpu_lane_probe_verdict, gpu_lane_probe_verdict_reason, gpu_lane_report_skip}
+
+describe "MetalLaneSession host-aware probe":
+    # @manual scenario evidence
+    """
+    Host-aware coverage for the Metal lane session shell's probe path: on
+    this Linux dev host (no macOS/Metal), `probe()` must return a
+    `skip:metal-unavailable-not-macos` result -- never a crash, hang, or
+    silent pass -- proving the probe contract itself works correctly ahead
+    of real Mac hardware verification.
+    """
+    it "should probe cleanly and report the macOS-absence skip reason on this host":
+        # @req REQ-SSPEC-INTEGRATION
+        step("should probe cleanly and report the macOS-absence skip reason on this host")
+        step("Probe for a Metal-capable device")
+        var session = MetalLaneSession.create()
+        val probe_result = session.probe()
+
+        # Fail closed -- see lane_probe_verdict.spl. The old
+        # `assert_true(probe_result.starts_with("skip:"))` passed BECAUSE the
+        # probe skipped: on a macOS host with a real Metal device this example
+        # would have gone on reporting a green "clean skip" forever.
+        step(gpu_lane_probe_verdict_reason("metal", probe_result))
+        gpu_lane_report_skip("metal lane", probe_result)
+        assert_equal(gpu_lane_probe_verdict("metal", probe_result), "skip")
+        expect(probe_result).to_equal("skip:metal-unavailable-not-macos")
+
+    it "should refuse init() before a live device is available, returning the same skip reason":
+        # @req REQ-SSPEC-INTEGRATION
+        step("should refuse init() before a live device is available, returning the same skip reason")
+        step("Attempt init() directly against an unprobed session")
+        var session = MetalLaneSession.create()
+        val init_result = session.init(4096, "kernel void lane_main() {}", "lane_main")
+
+        step("init() must route through probe() and report the same skip, not raise or hang")
+        assert_true(init_result.starts_with("skip:"))
+        expect(init_result).to_equal("skip:metal-unavailable-not-macos")

@@ -1,0 +1,779 @@
+# CPU-reference emission pipeline for DrawIR v3 (Kernels A-E).
+#
+# Source of truth: `doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md`
+# §6 "Exact emission without realloc":
+#
+#     Kernel A: count output records per source item
+#     Kernel B: exclusive prefix scan
+#     Kernel C: verify total <= capacity
+#     Kernel D: emit records into exact offsets
+#     Kernel E: compact/cull/batch
+#
+# Shared rule 3 (`doc/03_plan/platform/structural_compute/README.md`): the CPU
+# reference is the oracle and is never deleted. Every GPU tier added later must
+# reproduce these results byte for byte, so the arithmetic here is deliberately
+# plain: no parallel-friendly restructuring that could shift a rounding or an
+# ordering decision.
+#
+# THE INVARIANT THIS FILE EXISTS TO ENFORCE
+# -----------------------------------------
+# Capacity is computed ONCE (Kernel A + B), verified ONCE (Kernel C), and then
+# Kernel D writes into precomputed offsets only. After the scan, no output
+# array changes length. Every destination index is known before the first
+# write.
+#
+# Consequence, and the reason this file does not call the `*_append` helpers in
+# `draw_ir_v3.spl`: those append helpers PUSH, i.e. they grow. They are the
+# incremental-authoring API and are correct for that job. Exact emission cannot
+# use them. This file therefore sizes each flat column once and constructs the
+# frozen table structs directly. `draw_ir_v3.spl` is consumed, never modified;
+# its `*_at` accessors remain the read path and are what parity tests compare
+# through.
+#
+# Fail-closed note (inherited, not invented here): unset manifest bounds are 0,
+# and 0 means UNSET, not unlimited. A caller that emits batches or path points
+# under `gpu_web_capacity_manifest_compile_time_default()` — which leaves
+# `max_draw_batches` and `max_path_points` at 0 — is rejected by Kernel C with
+# a receipt naming that bound. That is the manifest's documented policy, and
+# this lane does not paper over it.
+
+use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_FLAG_HIDDEN,
+    DRAW_IR_V3_KIND_IMAGE,
+    DRAW_IR_V3_KIND_NONE,
+    DRAW_IR_V3_KIND_PATH,
+    DRAW_IR_V3_KIND_RECT,
+    DRAW_IR_V3_KIND_TEXT,
+    DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_SCHEMA_ID,
+    DRAW_IR_V3_SCHEMA_VERSION,
+    DrawIrV3ClipTable,
+    DrawIrV3Command,
+    DrawIrV3GeometryTable,
+    DrawIrV3HitShapeTable,
+    DrawIrV3PaintTable,
+    DrawIrV3PathPointTable,
+    DrawIrV3ResourceTable,
+    DrawIrV3Scene,
+    DrawIrV3SourceProvenanceTable,
+    DrawIrV3TextRunTable,
+    DrawIrV3TransformTable,
+    draw_ir_v3_command,
+    draw_ir_v3_empty_clip_table,
+    draw_ir_v3_empty_command,
+    draw_ir_v3_empty_hit_shape_table,
+    draw_ir_v3_empty_provenance_table,
+    draw_ir_v3_empty_resource_table,
+    draw_ir_v3_empty_transform_table,
+    draw_ir_v3_has_flag
+}
+use common.ui.gpu_web_capacity_manifest.{
+    GpuWebCapacityManifest,
+    GpuWebCapacityPlan,
+    GpuWebCapacityVerdict,
+    gpu_web_capacity_plan_zero,
+    gpu_web_capacity_verify
+}
+
+# ===========================================================================
+# Source item — the input to Kernel A.
+# ===========================================================================
+#
+# One item is one thing the caller wants drawn. An item may expand into more
+# than one v3 command (a stroked rect emits a fill command and a stroke
+# command), which is exactly why a count-then-scan pass is needed rather than
+# a running append.
+#
+# Variable-length payloads follow the same (start, count) span idiom the frozen
+# v3 schema uses: the item carries spans into the request's flat columns, never
+# a nested array.
+
+struct DrawIrV3EmitItem:
+    kind: u16
+    flags: u16
+    component_id: u32
+    component_generation: u32
+    parent_id: u32
+    # Host-side batching key. Not part of the frozen scene; carried alongside.
+    batch_key: u32
+    # geometry payload
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    corner_radius: i32
+    # paint payload
+    fill_color: u32
+    stroke_color: u32
+    stroke_width_milli: i32
+    opacity_milli: i32
+    blend_mode: u16
+    # text payload
+    font_resource_id: u32
+    font_size_milli: i32
+    baseline_x: i32
+    baseline_y: i32
+    text_color: u32
+    # path payload
+    fill_rule: u16
+    # spans into the request's flat payload columns
+    glyph_start: i64
+    glyph_count: i64
+    point_start: i64
+    point_count: i64
+
+# The request bundles the items with the flat payload columns their spans
+# point into.
+struct DrawIrV3EmitRequest:
+    items: [DrawIrV3EmitItem]
+    glyph_ids: [u32]
+    glyph_xs: [i32]
+    glyph_ys: [i32]
+    glyph_clusters: [i64]
+    point_xs: [i32]
+    point_ys: [i32]
+    point_verbs: [u16]
+
+fn draw_ir_v3_empty_request() -> DrawIrV3EmitRequest:
+    DrawIrV3EmitRequest(
+        items: [],
+        glyph_ids: [], glyph_xs: [], glyph_ys: [], glyph_clusters: [],
+        point_xs: [], point_ys: [], point_verbs: []
+    )
+
+# --- item constructors ------------------------------------------------------
+# Long field lists are error-prone at call sites; these keep specs and callers
+# readable without hiding any field.
+
+fn draw_ir_v3_emit_item_blank() -> DrawIrV3EmitItem:
+    DrawIrV3EmitItem(
+        kind: DRAW_IR_V3_KIND_NONE,
+        flags: 0u16,
+        component_id: 0u32,
+        component_generation: 0u32,
+        parent_id: DRAW_IR_V3_NO_ID,
+        batch_key: 0u32,
+        x: 0, y: 0, width: 0, height: 0, corner_radius: 0,
+        fill_color: 0u32, stroke_color: 0u32,
+        stroke_width_milli: 0, opacity_milli: 1000, blend_mode: 0u16,
+        font_resource_id: DRAW_IR_V3_NO_ID,
+        font_size_milli: 0, baseline_x: 0, baseline_y: 0, text_color: 0u32,
+        fill_rule: 0u16,
+        glyph_start: 0, glyph_count: 0, point_start: 0, point_count: 0
+    )
+
+fn draw_ir_v3_emit_item_rect(
+    component_id: u32, batch_key: u32,
+    x: i32, y: i32, width: i32, height: i32, corner_radius: i32,
+    fill_color: u32, stroke_color: u32, stroke_width_milli: i32
+) -> DrawIrV3EmitItem:
+    var item = draw_ir_v3_emit_item_blank()
+    item.kind = DRAW_IR_V3_KIND_RECT
+    item.component_id = component_id
+    item.batch_key = batch_key
+    item.x = x
+    item.y = y
+    item.width = width
+    item.height = height
+    item.corner_radius = corner_radius
+    item.fill_color = fill_color
+    item.stroke_color = stroke_color
+    item.stroke_width_milli = stroke_width_milli
+    item
+
+fn draw_ir_v3_emit_item_text(
+    component_id: u32, batch_key: u32,
+    font_resource_id: u32, font_size_milli: i32,
+    baseline_x: i32, baseline_y: i32, text_color: u32,
+    glyph_start: i64, glyph_count: i64
+) -> DrawIrV3EmitItem:
+    var item = draw_ir_v3_emit_item_blank()
+    item.kind = DRAW_IR_V3_KIND_TEXT
+    item.component_id = component_id
+    item.batch_key = batch_key
+    item.font_resource_id = font_resource_id
+    item.font_size_milli = font_size_milli
+    item.baseline_x = baseline_x
+    item.baseline_y = baseline_y
+    item.text_color = text_color
+    item.glyph_start = glyph_start
+    item.glyph_count = glyph_count
+    item
+
+fn draw_ir_v3_emit_item_path(
+    component_id: u32, batch_key: u32,
+    fill_color: u32, fill_rule: u16,
+    point_start: i64, point_count: i64
+) -> DrawIrV3EmitItem:
+    var item = draw_ir_v3_emit_item_blank()
+    item.kind = DRAW_IR_V3_KIND_PATH
+    item.component_id = component_id
+    item.batch_key = batch_key
+    item.fill_color = fill_color
+    item.fill_rule = fill_rule
+    item.point_start = point_start
+    item.point_count = point_count
+    item
+
+fn draw_ir_v3_emit_item_hide(item: DrawIrV3EmitItem) -> DrawIrV3EmitItem:
+    var out = item
+    out.flags = out.flags | DRAW_IR_V3_FLAG_HIDDEN
+    out
+
+# ===========================================================================
+# Exact-size fills.
+# ===========================================================================
+#
+# `src/lib/common/` has no `with_capacity` / `filled` primitive (those live in
+# the gc/nogc tiers, which this tier must not import), so the one-time sizing
+# pass is a fill loop. This is the ONLY place lengths change. Everything after
+# Kernel B is an indexed write. If a future tier gains a common-tier
+# `Array.filled`, these four helpers are the only things that change.
+
+fn _v3e_zeros_i64(n: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _v3e_zeros_i32(n: i64) -> [i32]:
+    var out: [i32] = []
+    var i = 0
+    while i < n:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _v3e_zeros_u32(n: i64) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i < n:
+        out.push(0u32)
+        i = i + 1
+    out
+
+fn _v3e_zeros_u16(n: i64) -> [u16]:
+    var out: [u16] = []
+    var i = 0
+    while i < n:
+        out.push(0u16)
+        i = i + 1
+    out
+
+fn _v3e_blank_commands(n: i64) -> [DrawIrV3Command]:
+    var out: [DrawIrV3Command] = []
+    var i = 0
+    while i < n:
+        out.push(draw_ir_v3_empty_command())
+        i = i + 1
+    out
+
+fn _v3e_visible(item: DrawIrV3EmitItem) -> bool:
+    (item.flags & DRAW_IR_V3_FLAG_HIDDEN) == 0u16
+
+# ===========================================================================
+# Kernel A — count output records per source item.
+# ===========================================================================
+#
+# Pure counting: no allocation of output records, no side effects on the item.
+# `batch_upper_bound` is the number of ADJACENT runs of equal batch key over
+# the visible items. Order-preserving batching can only merge neighbours (see
+# Kernel E), so a run count is the exact batch count before culling and a safe
+# upper bound after it — which is the number capacity must be verified against.
+
+struct DrawIrV3EmitCounts:
+    command_counts: [i64]
+    text_run_counts: [i64]
+    glyph_counts: [i64]
+    path_span_counts: [i64]
+    path_point_counts: [i64]
+    batch_upper_bound: i64
+
+fn _v3e_item_command_count(item: DrawIrV3EmitItem) -> i64:
+    if not _v3e_visible(item):
+        return 0
+    if item.kind == DRAW_IR_V3_KIND_NONE:
+        return 0
+    if item.kind == DRAW_IR_V3_KIND_RECT:
+        if item.stroke_width_milli > 0:
+            # separate fill and stroke commands
+            return 2
+        return 1
+    return 1
+
+fn draw_ir_v3_count_records(request: DrawIrV3EmitRequest) -> DrawIrV3EmitCounts:
+    val n = request.items.len().to_i64()
+    var commands = _v3e_zeros_i64(n)
+    var text_runs = _v3e_zeros_i64(n)
+    var glyphs = _v3e_zeros_i64(n)
+    var spans = _v3e_zeros_i64(n)
+    var points = _v3e_zeros_i64(n)
+
+    var batches = 0
+    var have_prev = false
+    var prev_key = 0u32
+
+    var i = 0
+    while i < n:
+        val item = request.items[i]
+        val cc = _v3e_item_command_count(item)
+        commands[i] = cc
+
+        if cc > 0 and item.kind == DRAW_IR_V3_KIND_TEXT:
+            text_runs[i] = 1
+            glyphs[i] = item.glyph_count
+        if cc > 0 and item.kind == DRAW_IR_V3_KIND_PATH:
+            spans[i] = 1
+            points[i] = item.point_count
+
+        if cc > 0:
+            if not have_prev:
+                batches = batches + 1
+                have_prev = true
+                prev_key = item.batch_key
+            else:
+                if item.batch_key != prev_key:
+                    batches = batches + 1
+                    prev_key = item.batch_key
+        i = i + 1
+
+    DrawIrV3EmitCounts(
+        command_counts: commands,
+        text_run_counts: text_runs,
+        glyph_counts: glyphs,
+        path_span_counts: spans,
+        path_point_counts: points,
+        batch_upper_bound: batches
+    )
+
+# ===========================================================================
+# Kernel B — exclusive prefix scan.
+# ===========================================================================
+#
+# offsets[0] = 0; offsets[k] = sum(counts[0..k)). `total` is the sum of all
+# counts, i.e. the exclusive scan carried one element past the end. That total
+# is the exact allocation size for the corresponding output column.
+
+struct DrawIrV3Scan:
+    offsets: [i64]
+    total: i64
+
+fn draw_ir_v3_exclusive_scan(counts: [i64]) -> DrawIrV3Scan:
+    val n = counts.len().to_i64()
+    var offsets = _v3e_zeros_i64(n)
+    var running = 0
+    var i = 0
+    while i < n:
+        offsets[i] = running
+        running = running + counts[i]
+        i = i + 1
+    DrawIrV3Scan(offsets: offsets, total: running)
+
+struct DrawIrV3EmitPlan:
+    commands: DrawIrV3Scan
+    text_runs: DrawIrV3Scan
+    glyphs: DrawIrV3Scan
+    path_spans: DrawIrV3Scan
+    path_points: DrawIrV3Scan
+    batch_upper_bound: i64
+
+fn draw_ir_v3_scan_counts(counts: DrawIrV3EmitCounts) -> DrawIrV3EmitPlan:
+    DrawIrV3EmitPlan(
+        commands: draw_ir_v3_exclusive_scan(counts.command_counts),
+        text_runs: draw_ir_v3_exclusive_scan(counts.text_run_counts),
+        glyphs: draw_ir_v3_exclusive_scan(counts.glyph_counts),
+        path_spans: draw_ir_v3_exclusive_scan(counts.path_span_counts),
+        path_points: draw_ir_v3_exclusive_scan(counts.path_point_counts),
+        batch_upper_bound: counts.batch_upper_bound
+    )
+
+# Convenience: Kernel A then Kernel B.
+fn draw_ir_v3_plan_emission(request: DrawIrV3EmitRequest) -> DrawIrV3EmitPlan:
+    draw_ir_v3_scan_counts(draw_ir_v3_count_records(request))
+
+# ===========================================================================
+# Kernel C — verify total <= capacity.
+# ===========================================================================
+#
+# Delegates to Lane H's verifier verbatim. The receipt shape
+# (`GpuWebCapacityVerdict`: accepted / breach_count / first_breach_bound /
+# reason / breaches) is the contract; nothing is reimplemented, reworded, or
+# re-ordered here. This function's only job is to project a scan into a
+# `GpuWebCapacityPlan`.
+#
+# Bounds this lane populates: max_draw_commands, max_glyphs, max_path_points,
+# max_draw_batches. Every other plan field stays 0, so an unset manifest bound
+# for a resource this lane does not use cannot breach.
+
+fn draw_ir_v3_capacity_plan(plan: DrawIrV3EmitPlan) -> GpuWebCapacityPlan:
+    var out = gpu_web_capacity_plan_zero()
+    out.draw_commands = plan.commands.total as u32
+    out.glyphs = plan.glyphs.total as u32
+    out.path_points = plan.path_points.total as u32
+    out.draw_batches = plan.batch_upper_bound as u32
+    out
+
+fn draw_ir_v3_verify_capacity(
+    plan: DrawIrV3EmitPlan, manifest: GpuWebCapacityManifest
+) -> GpuWebCapacityVerdict:
+    gpu_web_capacity_verify(draw_ir_v3_capacity_plan(plan), manifest)
+
+# ===========================================================================
+# Kernel D — emit records into exact offsets.
+# ===========================================================================
+#
+# Every column is sized from the Kernel B totals before the first write, then
+# written by index. Side tables `geometry` and `paint` are kept parallel to the
+# command array (row i belongs to command i), so a command's geometry_id and
+# paint_id are its own flat index. Text runs and path spans are NOT parallel:
+# they get their own scanned columns, because only text/path items produce
+# them.
+#
+# `batch_keys` is a host-side sidecar parallel to the commands. It is
+# deliberately not a scene field: the frozen v3 contract is not extended here.
+
+struct DrawIrV3EmitResult:
+    scene: DrawIrV3Scene
+    batch_keys: [u32]
+    command_total: i64
+
+fn draw_ir_v3_emit(
+    request: DrawIrV3EmitRequest, plan: DrawIrV3EmitPlan,
+    scene_id: u32, generation: u32
+) -> DrawIrV3EmitResult:
+    val n = request.items.len().to_i64()
+    val n_cmd = plan.commands.total
+    val n_run = plan.text_runs.total
+    val n_gly = plan.glyphs.total
+    val n_span = plan.path_spans.total
+    val n_pt = plan.path_points.total
+
+    # --- one-time exact sizing (the last length change in this function) ---
+    var commands = _v3e_blank_commands(n_cmd)
+    var batch_keys = _v3e_zeros_u32(n_cmd)
+
+    var geo_xs = _v3e_zeros_i32(n_cmd)
+    var geo_ys = _v3e_zeros_i32(n_cmd)
+    var geo_ws = _v3e_zeros_i32(n_cmd)
+    var geo_hs = _v3e_zeros_i32(n_cmd)
+    var geo_radii = _v3e_zeros_i32(n_cmd)
+
+    var pt_fills = _v3e_zeros_u32(n_cmd)
+    var pt_strokes = _v3e_zeros_u32(n_cmd)
+    var pt_widths = _v3e_zeros_i32(n_cmd)
+    var pt_opacities = _v3e_zeros_i32(n_cmd)
+    var pt_blends = _v3e_zeros_u16(n_cmd)
+
+    var run_glyph_starts = _v3e_zeros_u32(n_run)
+    var run_glyph_counts = _v3e_zeros_u32(n_run)
+    var run_fonts = _v3e_zeros_u32(n_run)
+    var run_sizes = _v3e_zeros_i32(n_run)
+    var run_bxs = _v3e_zeros_i32(n_run)
+    var run_bys = _v3e_zeros_i32(n_run)
+    var run_colors = _v3e_zeros_u32(n_run)
+
+    var glyph_ids = _v3e_zeros_u32(n_gly)
+    var glyph_xs = _v3e_zeros_i32(n_gly)
+    var glyph_ys = _v3e_zeros_i32(n_gly)
+    var glyph_clusters = _v3e_zeros_i64(n_gly)
+
+    var span_starts = _v3e_zeros_u32(n_span)
+    var span_counts = _v3e_zeros_u32(n_span)
+    var span_rules = _v3e_zeros_u16(n_span)
+
+    var point_xs = _v3e_zeros_i32(n_pt)
+    var point_ys = _v3e_zeros_i32(n_pt)
+    var point_verbs = _v3e_zeros_u16(n_pt)
+
+    # --- exact-offset writes ------------------------------------------------
+    var i = 0
+    while i < n:
+        val item = request.items[i]
+        val cbase = plan.commands.offsets[i]
+        val ccount = _v3e_item_command_count(item)
+
+        if ccount > 0:
+            var text_run_id = DRAW_IR_V3_NO_ID
+            var path_span_id = DRAW_IR_V3_NO_ID
+
+            if item.kind == DRAW_IR_V3_KIND_TEXT:
+                val rbase = plan.text_runs.offsets[i]
+                val gbase = plan.glyphs.offsets[i]
+                text_run_id = rbase as u32
+                run_glyph_starts[rbase] = gbase as u32
+                run_glyph_counts[rbase] = item.glyph_count as u32
+                run_fonts[rbase] = item.font_resource_id
+                run_sizes[rbase] = item.font_size_milli
+                run_bxs[rbase] = item.baseline_x
+                run_bys[rbase] = item.baseline_y
+                run_colors[rbase] = item.text_color
+
+                var g = 0
+                while g < item.glyph_count:
+                    val src = item.glyph_start + g
+                    val dst = gbase + g
+                    glyph_ids[dst] = request.glyph_ids[src]
+                    glyph_xs[dst] = request.glyph_xs[src]
+                    glyph_ys[dst] = request.glyph_ys[src]
+                    glyph_clusters[dst] = request.glyph_clusters[src]
+                    g = g + 1
+
+            if item.kind == DRAW_IR_V3_KIND_PATH:
+                val sbase = plan.path_spans.offsets[i]
+                val pbase = plan.path_points.offsets[i]
+                path_span_id = sbase as u32
+                span_starts[sbase] = pbase as u32
+                span_counts[sbase] = item.point_count as u32
+                span_rules[sbase] = item.fill_rule
+
+                var p = 0
+                while p < item.point_count:
+                    val src = item.point_start + p
+                    val dst = pbase + p
+                    point_xs[dst] = request.point_xs[src]
+                    point_ys[dst] = request.point_ys[src]
+                    point_verbs[dst] = request.point_verbs[src]
+                    p = p + 1
+
+            var k = 0
+            while k < ccount:
+                val slot = cbase + k
+                commands[slot] = draw_ir_v3_command(
+                    item.kind, item.flags,
+                    item.component_id, item.component_generation, item.parent_id,
+                    slot as u32,
+                    slot as u32,
+                    text_run_id,
+                    DRAW_IR_V3_NO_ID,
+                    path_span_id,
+                    DRAW_IR_V3_NO_ID,
+                    DRAW_IR_V3_NO_ID,
+                    DRAW_IR_V3_NO_ID
+                )
+                batch_keys[slot] = item.batch_key
+
+                geo_xs[slot] = item.x
+                geo_ys[slot] = item.y
+                geo_ws[slot] = item.width
+                geo_hs[slot] = item.height
+                geo_radii[slot] = item.corner_radius
+
+                # k == 0 is the fill command; k == 1 (stroked rect) is the
+                # stroke command. Splitting them keeps one paint row per
+                # command, which is what makes paint_id == command index hold.
+                if k == 0:
+                    pt_fills[slot] = item.fill_color
+                    pt_strokes[slot] = 0u32
+                    pt_widths[slot] = 0
+                else:
+                    pt_fills[slot] = 0u32
+                    pt_strokes[slot] = item.stroke_color
+                    pt_widths[slot] = item.stroke_width_milli
+                pt_opacities[slot] = item.opacity_milli
+                pt_blends[slot] = item.blend_mode
+                k = k + 1
+        i = i + 1
+
+    val scene = DrawIrV3Scene(
+        schema: DRAW_IR_V3_SCHEMA_VERSION,
+        schema_id: DRAW_IR_V3_SCHEMA_ID,
+        scene_id: scene_id,
+        generation: generation,
+        commands: commands,
+        geometry: DrawIrV3GeometryTable(
+            xs: geo_xs, ys: geo_ys, widths: geo_ws, heights: geo_hs,
+            corner_radii: geo_radii
+        ),
+        paint: DrawIrV3PaintTable(
+            fill_colors: pt_fills, stroke_colors: pt_strokes,
+            stroke_widths_milli: pt_widths, opacities_milli: pt_opacities,
+            blend_modes: pt_blends
+        ),
+        text_runs: DrawIrV3TextRunTable(
+            run_glyph_starts: run_glyph_starts,
+            run_glyph_counts: run_glyph_counts,
+            run_font_resource_ids: run_fonts,
+            run_font_sizes_milli: run_sizes,
+            run_baseline_xs: run_bxs,
+            run_baseline_ys: run_bys,
+            run_colors: run_colors,
+            glyph_ids: glyph_ids, glyph_xs: glyph_xs, glyph_ys: glyph_ys,
+            glyph_clusters: glyph_clusters
+        ),
+        resources: draw_ir_v3_empty_resource_table(),
+        path_points: DrawIrV3PathPointTable(
+            span_point_starts: span_starts,
+            span_point_counts: span_counts,
+            span_fill_rules: span_rules,
+            point_xs: point_xs, point_ys: point_ys, point_verbs: point_verbs
+        ),
+        clips: draw_ir_v3_empty_clip_table(),
+        transforms: draw_ir_v3_empty_transform_table(),
+        hit_shapes: draw_ir_v3_empty_hit_shape_table(),
+        provenance: draw_ir_v3_empty_provenance_table()
+    )
+
+    DrawIrV3EmitResult(scene: scene, batch_keys: batch_keys, command_total: n_cmd)
+
+# The no-realloc invariant, made observable: every emitted column length must
+# equal the scanned total it was sized from. A growth anywhere in Kernel D
+# shows up here as false.
+fn draw_ir_v3_emit_matches_plan(result: DrawIrV3EmitResult, plan: DrawIrV3EmitPlan) -> bool:
+    val s = result.scene
+    if s.commands.len().to_i64() != plan.commands.total:
+        return false
+    if s.geometry.xs.len().to_i64() != plan.commands.total:
+        return false
+    if s.paint.fill_colors.len().to_i64() != plan.commands.total:
+        return false
+    if s.text_runs.run_glyph_starts.len().to_i64() != plan.text_runs.total:
+        return false
+    if s.text_runs.glyph_ids.len().to_i64() != plan.glyphs.total:
+        return false
+    if s.path_points.span_point_starts.len().to_i64() != plan.path_spans.total:
+        return false
+    if s.path_points.point_xs.len().to_i64() != plan.path_points.total:
+        return false
+    if result.batch_keys.len().to_i64() != plan.commands.total:
+        return false
+    true
+
+# ===========================================================================
+# Kernel E — compact / cull / batch.
+# ===========================================================================
+#
+# Cull rule: a RECT or IMAGE command with a degenerate box (width <= 0 or
+# height <= 0) contributes nothing and is dropped. HIDDEN commands never reach
+# here (Kernel A counted them as zero records), but the flag is re-checked so
+# this kernel is correct in isolation.
+#
+# Batch rule: batches are runs of ADJACENT kept commands sharing a batch key.
+# Merging non-adjacent commands with the same key would reorder drawing, so it
+# is not done. Draw order is therefore preserved exactly: kept indices are
+# strictly increasing, and concatenating the batches in order reproduces the
+# kept sequence.
+#
+# Both outputs are sized once, from bounds already known (kept <= command
+# total, batches <= kept), and written by index. Nothing grows.
+
+struct DrawIrV3Batch:
+    batch_key: u32
+    first_command: i64
+    command_count: i64
+
+struct DrawIrV3CompactResult:
+    # Only the first `kept_count` entries of `kept` are meaningful, and only
+    # the first `batch_count` entries of `batches`. The arrays are sized to the
+    # worst case so that no reallocation is needed.
+    kept: [i64]
+    kept_count: i64
+    batches: [DrawIrV3Batch]
+    batch_count: i64
+    culled_count: i64
+
+fn _v3e_is_culled(scene: DrawIrV3Scene, index: i64) -> bool:
+    val cmd = scene.commands[index]
+    if draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+        return true
+    if cmd.kind == DRAW_IR_V3_KIND_RECT or cmd.kind == DRAW_IR_V3_KIND_IMAGE:
+        val gid = cmd.geometry_id
+        if gid != DRAW_IR_V3_NO_ID:
+            val gi = gid.to_i64()
+            if gi >= 0 and gi < scene.geometry.xs.len().to_i64():
+                if scene.geometry.widths[gi] <= 0 or scene.geometry.heights[gi] <= 0:
+                    return true
+    false
+
+fn draw_ir_v3_compact_batch(result: DrawIrV3EmitResult) -> DrawIrV3CompactResult:
+    val scene = result.scene
+    val total = result.command_total
+
+    var kept = _v3e_zeros_i64(total)
+    var batches: [DrawIrV3Batch] = []
+    var b = 0
+    while b < total:
+        batches.push(DrawIrV3Batch(batch_key: 0u32, first_command: 0, command_count: 0))
+        b = b + 1
+
+    var kept_count = 0
+    var culled = 0
+    var batch_count = 0
+    var have_run = false
+    var run_key = 0u32
+
+    var i = 0
+    while i < total:
+        if _v3e_is_culled(scene, i):
+            culled = culled + 1
+        else:
+            kept[kept_count] = i
+            val key = result.batch_keys[i]
+            if have_run and key == run_key:
+                val slot = batch_count - 1
+                var run = batches[slot]
+                run.command_count = run.command_count + 1
+                batches[slot] = run
+            else:
+                batches[batch_count] = DrawIrV3Batch(
+                    batch_key: key, first_command: i, command_count: 1
+                )
+                batch_count = batch_count + 1
+                have_run = true
+                run_key = key
+            kept_count = kept_count + 1
+        i = i + 1
+
+    DrawIrV3CompactResult(
+        kept: kept,
+        kept_count: kept_count,
+        batches: batches,
+        batch_count: batch_count,
+        culled_count: culled
+    )
+
+# ===========================================================================
+# Whole-pipeline driver: A -> B -> C -> D -> E.
+# ===========================================================================
+#
+# On a Kernel C rejection nothing is emitted: `verdict.accepted` is false, the
+# receipt names the exceeded bound, and the scene is the empty scene. Overflow
+# is an explicit, reported failure — never a clamp, never a silent partial
+# emission (plan §6 overflow policy, shared rule 4).
+
+struct DrawIrV3EmitOutcome:
+    verdict: GpuWebCapacityVerdict
+    plan: DrawIrV3EmitPlan
+    result: DrawIrV3EmitResult
+    compacted: DrawIrV3CompactResult
+    emitted: bool
+
+fn draw_ir_v3_emit_pipeline(
+    request: DrawIrV3EmitRequest, manifest: GpuWebCapacityManifest,
+    scene_id: u32, generation: u32
+) -> DrawIrV3EmitOutcome:
+    val plan = draw_ir_v3_plan_emission(request)
+    val verdict = draw_ir_v3_verify_capacity(plan, manifest)
+
+    if not verdict.accepted:
+        val empty_plan = draw_ir_v3_plan_emission(draw_ir_v3_empty_request())
+        val empty_result = draw_ir_v3_emit(
+            draw_ir_v3_empty_request(), empty_plan, scene_id, generation
+        )
+        return DrawIrV3EmitOutcome(
+            verdict: verdict,
+            plan: plan,
+            result: empty_result,
+            compacted: draw_ir_v3_compact_batch(empty_result),
+            emitted: false
+        )
+
+    val result = draw_ir_v3_emit(request, plan, scene_id, generation)
+    DrawIrV3EmitOutcome(
+        verdict: verdict,
+        plan: plan,
+        result: result,
+        compacted: draw_ir_v3_compact_batch(result),
+        emitted: true
+    )

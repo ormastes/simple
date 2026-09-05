@@ -1,0 +1,255 @@
+# codex-impl
+# Canonical hosted executor for typed RT/HAL environment plans.
+
+use std.common.env_access.model.*
+use std.common.env_access.executor.{EnvAccessCapability, env_access_execute}
+use std.common.env_access.plan_sdn.{
+    ENV_ACCESS_PLAN_SDN_MAX_BYTES, env_access_plan_parse_sdn_v1
+}
+use app.io.env_ops.{env_get, host_arch, host_os}
+use app.io.file_ops.{file_hash_sha256, file_is_regular_no_follow, file_read_text_at, file_size_raw, path_absolute}
+use app.io.process_ops.{process_run_bounded, process_bounded_timed_out}
+use app.io.sysinfo_ops.{hostname}
+use app.io.time_ops.{current_time_ms}
+use app.io.rt_hal_isolated_host.{rt_hal_install_isolated_exact_host_from_plan}
+
+class HostEnvAccessCapability:
+    tools: [EnvToolIdentity]
+    probe_identities: [EnvHardwareProbeIdentity]
+    probes: [HostHardwareProbeAdapter]
+
+# Hardware probes are registered as typed function ports. Adapters must call a
+# typed HAL owner directly; command/process execution is not part of this port.
+pub struct HostHardwareProbeAdapter:
+    identity: EnvHardwareProbeIdentity
+    platform_available_fn: fn() -> bool
+    execute_fn: fn([text], i64, i64, i64) -> EnvAccessRawResult
+
+var _host_hardware_probe_adapters: [HostHardwareProbeAdapter] = []
+var _host_hardware_probe_registry_sealed = false
+
+pub fn register_host_hardware_probe(adapter: HostHardwareProbeAdapter) -> Result<bool, text>:
+    if _host_hardware_probe_registry_sealed:
+        return Err("ENV-E-PROBE-REGISTRY-SEALED")
+    val problem = env_hardware_probe_identity_error(adapter.identity)
+    if problem != "":
+        return Err(problem)
+    if _host_hardware_probe_adapters.len() >= 64:
+        return Err("ENV-E-PROBE-REGISTRY-CAP")
+    for registered in _host_hardware_probe_adapters:
+        if registered.identity.probe_id == adapter.identity.probe_id:
+            return Err("ENV-E-PROBE-DUPLICATE")
+    _host_hardware_probe_adapters.push(adapter)
+    return Ok(true)
+
+fn unsupported_probe(probe_id: text, detail: text) -> EnvAccessRawResult:
+    return EnvAccessRawResult(
+        status: EnvAccessStatus.Unsupported,
+        exit_code: -1,
+        stdout: "",
+        stderr: "",
+        discarded_bytes: 0,
+        elapsed_ms: 0,
+        reason: detail,
+        prerequisite: "register or enable the typed hardware probe adapter for " + probe_id,
+        owner: "environment-executor",
+        artifact_paths: [],
+        resume_command: "rerun the same typed environment plan"
+    )
+
+fn execute_hardware_probe(probes: [HostHardwareProbeAdapter],
+                          identities: [EnvHardwareProbeIdentity],
+                          instruction: EnvAccessInstruction) -> EnvAccessRawResult:
+    var expected_schema = ""
+    for identity in identities:
+        if identity.probe_id == instruction.resource:
+            expected_schema = identity.schema_id
+    for adapter in probes:
+        if adapter.identity.probe_id == instruction.resource:
+            if adapter.identity.schema_id != expected_schema:
+                return unsupported_probe(instruction.resource, "registered hardware probe schema does not match the admitted plan")
+            if (instruction.arguments.len() > adapter.identity.max_arguments or
+                instruction.timeout_ms > adapter.identity.max_timeout_ms or
+                instruction.max_stdout_bytes > adapter.identity.max_stdout_bytes or
+                instruction.max_stderr_bytes > adapter.identity.max_stderr_bytes):
+                return unsupported_probe(instruction.resource, "registered hardware probe bounds are narrower than the admitted request")
+            if not adapter.platform_available_fn():
+                return unsupported_probe(instruction.resource, "registered hardware probe is unavailable on this platform")
+            val started_ms = current_time_ms()
+            val observed = adapter.execute_fn(
+                instruction.arguments,
+                instruction.timeout_ms,
+                instruction.max_stdout_bytes,
+                instruction.max_stderr_bytes
+            )
+            var stdout = observed.stdout
+            var stderr = observed.stderr
+            var discarded_bytes = 0
+            if stdout.len() > instruction.max_stdout_bytes:
+                discarded_bytes = discarded_bytes + stdout.len() - instruction.max_stdout_bytes
+                stdout = stdout.substring(0, instruction.max_stdout_bytes)
+            if stderr.len() > instruction.max_stderr_bytes:
+                discarded_bytes = discarded_bytes + stderr.len() - instruction.max_stderr_bytes
+                stderr = stderr.substring(0, instruction.max_stderr_bytes)
+            return EnvAccessRawResult(
+                status: observed.status,
+                exit_code: observed.exit_code,
+                stdout: stdout,
+                stderr: stderr,
+                discarded_bytes: discarded_bytes,
+                elapsed_ms: current_time_ms() - started_ms,
+                reason: observed.reason,
+                prerequisite: observed.prerequisite,
+                owner: observed.owner,
+                artifact_paths: observed.artifact_paths,
+                resume_command: observed.resume_command
+            )
+    return unsupported_probe(instruction.resource, "no typed hardware probe adapter is registered")
+
+impl EnvAccessCapability for HostEnvAccessCapability:
+    fn canonical_repo_path(canonical_repo_root: text, relative_path: text) -> text?:
+        # The current Windows canonicalizer documents that it cannot prove
+        # symlink resolution. Fail closed until that facade gains a handle-
+        # based final-path implementation.
+        if host_os() == "windows":
+            return nil
+        val candidate = canonical_repo_root + "/" + relative_path
+        if not file_is_regular_no_follow(candidate):
+            return nil
+        val resolved = path_absolute(candidate).replace("\\", "/")
+        if resolved == "":
+            return nil
+        return Some(resolved)
+
+    fn canonical_tool_path(tool_id: text, identity_hash: text) -> text?:
+        if host_os() == "windows":
+            return nil
+        for tool in self.tools:
+            if tool.tool_id == tool_id and tool.identity_hash == identity_hash:
+                if not file_is_regular_no_follow(tool.canonical_path):
+                    return nil
+                val resolved = path_absolute(tool.canonical_path).replace("\\", "/")
+                if resolved != tool.canonical_path:
+                    return nil
+                val observed_hash = file_hash_sha256(resolved)
+                if "sha256:" + observed_hash != identity_hash:
+                    return nil
+                return Some(resolved)
+        return nil
+
+    fn execute_bounded(instruction: EnvAccessInstruction,
+                       canonical_resource: text) -> EnvAccessRawResult:
+        val started_ms = current_time_ms()
+        var status = EnvAccessStatus.Executed
+        var exit_code = 0
+        var stdout = ""
+        var stderr = ""
+        var reason = ""
+        var prerequisite = ""
+        var owner = ""
+        var resume_command = ""
+
+        match instruction.kind:
+            case EnvAccessKind.ReadEnv:
+                stdout = env_get(instruction.resource)
+            case EnvAccessKind.HostIdentity:
+                stdout = "os=" + host_os() + "\narch=" + host_arch() + "\nhost=" + hostname()
+            case EnvAccessKind.ReadRepoFile:
+                match file_read_text_at(canonical_resource, 0, instruction.max_stdout_bytes + 1):
+                    case Ok(content): stdout = content
+                    case Err(problem):
+                        status = EnvAccessStatus.Blocked
+                        exit_code = -1
+                        reason = problem
+                        prerequisite = "provide the declared regular repo file"
+                        owner = "environment-executor"
+                        resume_command = "rerun the same typed environment plan"
+            case EnvAccessKind.RunAllowedTool:
+                val total_cap = instruction.max_stdout_bytes + instruction.max_stderr_bytes + 2
+                val result = process_run_bounded(
+                    canonical_resource, instruction.arguments,
+                    instruction.timeout_ms, total_cap)
+                stdout = result.0
+                stderr = result.1
+                exit_code = result.2
+                if process_bounded_timed_out(exit_code, stderr):
+                    status = EnvAccessStatus.TimedOut
+                    reason = "allowed tool exceeded its declared deadline"
+                    prerequisite = "reduce tool work or increase the reviewed timeout"
+                    owner = "environment-executor"
+                    resume_command = "rerun the same typed environment plan"
+            case EnvAccessKind.HardwareProbe:
+                return execute_hardware_probe(self.probes, self.probe_identities, instruction)
+
+        var discarded_bytes = 0
+        if stdout.len() > instruction.max_stdout_bytes:
+            discarded_bytes = discarded_bytes + stdout.len() - instruction.max_stdout_bytes
+            stdout = stdout.substring(0, instruction.max_stdout_bytes)
+        if stderr.len() > instruction.max_stderr_bytes:
+            discarded_bytes = discarded_bytes + stderr.len() - instruction.max_stderr_bytes
+            stderr = stderr.substring(0, instruction.max_stderr_bytes)
+        val elapsed_ms = current_time_ms() - started_ms
+        return EnvAccessRawResult(
+            status: status,
+            exit_code: exit_code,
+            stdout: stdout,
+            stderr: stderr,
+            discarded_bytes: discarded_bytes,
+            elapsed_ms: elapsed_ms,
+            reason: reason,
+            prerequisite: prerequisite,
+            owner: owner,
+            artifact_paths: [],
+            resume_command: resume_command
+        )
+
+pub fn execute_host_env_access_plan(plan: EnvAccessPlan) -> Result<[EnvAccessReceipt], text>:
+    # Startup registration ends at the first execution. The immutable snapshot
+    # thereafter prevents adapter mutation racing concurrent environment plans.
+    _host_hardware_probe_registry_sealed = true
+    val capability = HostEnvAccessCapability(
+        tools: plan.allowed_tools,
+        probe_identities: plan.allowed_hardware_probes,
+        probes: _host_hardware_probe_adapters
+    )
+    return env_access_execute(plan, capability)
+
+fn canonical_plan_path(path: text) -> text?:
+    if (path == "" or path.len() > 4096 or not path.starts_with("/") or
+        path.contains("\\") or path.contains("//") or path.contains("/../") or
+        path.ends_with("/..") or path.ends_with("/")):
+        return nil
+    for character in path.chars():
+        val code = character.char_code_at(0)
+        if code < 32 or code == 127: return nil
+    if not file_is_regular_no_follow(path): return nil
+    val resolved = path_absolute(path).replace("\\", "/")
+    if resolved != path: return nil
+    return Some(resolved)
+
+# Compiler-injected cold-main entrypoint. Loading is bounded and canonical;
+# parsing/parent validation completes before any adapter or process is installed.
+pub fn rt_hal_install_isolated_exact_host_from_plan_path(path: text) -> text:
+    match canonical_plan_path(path):
+        case nil: return "ENV-E-PLAN-PATH"
+        case Some(canonical):
+            val size = file_size_raw(canonical)
+            if size <= 0 or size > ENV_ACCESS_PLAN_SDN_MAX_BYTES: return "ENV-E-PLAN-SIZE"
+            match file_read_text_at(canonical, 0, ENV_ACCESS_PLAN_SDN_MAX_BYTES + 1):
+                case Err(_): return "ENV-E-PLAN-READ"
+                case Ok(source):
+                    if source.len() != size or source.len() > ENV_ACCESS_PLAN_SDN_MAX_BYTES:
+                        return "ENV-E-PLAN-SIZE"
+                    match env_access_plan_parse_sdn_v1(source):
+                        case Err(problem): return problem
+                        case Ok(loaded):
+                            return rt_hal_install_isolated_exact_host_from_plan(
+                                loaded.plan, loaded.compare_c, loaded.compare_rust,
+                                loaded.c_tool_id, loaded.rust_tool_id,
+                                loaded.worker_count, loaded.queue_capacity,
+                                loaded.timeout_ticks, loaded.max_output_bytes
+                            )
+
+pub fn rt_hal_install_isolated_exact_host_from_plan_path_or_fail(path: text):
+    val problem = rt_hal_install_isolated_exact_host_from_plan_path(path)
+    if problem != "": panic("RTHAL-E-INSTALL: {problem}")

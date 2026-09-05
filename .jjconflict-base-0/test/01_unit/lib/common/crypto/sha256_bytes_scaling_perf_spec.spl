@@ -1,0 +1,72 @@
+# sha256_bytes scaling regression guard.
+#
+# ROOT CAUSE (2026-07-25): `sha256_bytes`'s pre-processing padding loop used to
+# build its buffer with `padded.push(data[pi])` in a `while` loop. Under the
+# interpreter, `arr.push(v)` clones the whole backing array per call, making
+# N one-at-a-time appends O(N^2). The default selected font asset
+# (Noto Sans SC, ~17.8MB) is hashed on every `Engine2D.load_font()` call via
+# this function (`font_registry._validate_selected_font_asset`), so the O(N^2)
+# padding loop turned every font load into a multi-second-to-minutes stall —
+# a major contributor to the "2D x headless showcase: no evidence line after
+# 40+ min" regression. See
+# doc/08_tracking/bug/sha256_bytes_push_quadratic_font_hash_2026-07-25.md.
+#
+# Fixed by pre-sizing the buffers and filling by direct index assignment
+# (O(N)). This spec asserts a BOUNDED SCALING RATIO (8x input -> well under
+# 8x-squared time), not a wall-clock absolute, so it stays meaningful across
+# machines while still catching a regression back to O(N^2)-shaped growth:
+# an 8x input growing quadratically would cost ~64x time; this spec fails if
+# the observed ratio exceeds a generous 24x (3x the expected ~8x linear cost).
+
+use std.spipe.*
+use std.common.crypto.sha256.{sha256_bytes}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+
+fn _make_data(n: i64) -> [i64]:
+    var out: [i64] = [0; n]
+    var i = 0
+    while i < n:
+        out[i] = i % 256
+        i = i + 1
+    out
+
+fn _time_sha256_ms(n: i64) -> i64:
+    val data = _make_data(n)
+    val t0 = time_now_micros()
+    val digest = sha256_bytes(data)
+    val t1 = time_now_micros()
+    if digest.len() != 32:
+        return -1
+    (t1 - t0) / 1000
+
+describe "sha256_bytes scaling (O(N^2) push-clone regression guard)":
+
+    it "8x input does not cost anywhere near 8x-squared time":
+        # Sizes are deliberately small: interpreted pure-Simple array work
+        # measured inside the SSpec test-runner's own (much larger) live
+        # object graph costs far more per element than the same call in a
+        # standalone script (observed ~150-200x here) -- itself a symptom of
+        # doc/08_tracking/bug/interpreter_gc_root_scan_blowup_large_array_2026-07-25.md.
+        # These sizes were calibrated to complete in low single-digit
+        # seconds under that overhead while still cleanly separating O(N)
+        # from O(N^2) growth.
+        val small_n = 1000
+        val big_n = small_n * 8
+
+        val small_ms = _time_sha256_ms(small_n)
+        val big_ms = _time_sha256_ms(big_n)
+
+        expect(small_ms).to_be_greater_than(-1)
+        expect(big_ms).to_be_greater_than(-1)
+
+        # Floor the baseline so a near-zero small_ms measurement (fast
+        # machine, warm cache) cannot make the ratio spuriously explode.
+        val small_floor = if small_ms < 1: 1 else: small_ms
+        val ratio_x100 = (big_ms * 100) / small_floor
+
+        # True O(N) growth ratio is ~8x (800/100). A genuine O(N^2) regression
+        # would show ~64x (6400/100). 24x gives ample headroom above linear
+        # noise while still catching quadratic-shaped blowups long before
+        # they reach the pathological font-hashing scale that caused the
+        # original regression.
+        expect(ratio_x100).to_be_less_than(2400)

@@ -1,0 +1,48 @@
+use std.test.*
+use std.fs.{file_read}
+
+describe "ARM32 generation-bound TCB mapping handle static contract":
+    it "keeps destruction authority outside the ABI TCB":
+        val types = file_read("src/os/kernel/scheduler/scheduler_types.spl")
+        val contract = file_read("src/os/kernel/types/arm32_mapping_handle_v1.spl")
+        val owner = file_read("src/os/kernel/arch/arm32/user_page_table_owner_v1.spl")
+        expect(types).to_contain("arm32_mapping_handle: SchedulerArm32MappingHandleV1")
+        expect(types).not.to_contain("arm32_mapping_handle: SchedulerArm32MappingMoveV1")
+        expect(owner).to_contain("arm32_user_page_table_max_live_v1() -> i64:")
+        expect(owner).to_contain("    4")
+        expect(contract).to_contain("handle_generation: u64")
+        expect(contract).not.to_contain("os.kernel.arch.arm32")
+        expect(owner).to_contain("owner_lifecycle_generation: u64")
+        expect(owner).to_contain("slot.generation != handle.handle_generation")
+        expect(owner).to_contain("_arm32_user_pt_mutex_v1")
+        expect(owner).to_contain("fn _arm32_user_page_table_move_to_scheduler_v1(")
+        expect(owner).not.to_contain("pub(package) fn arm32_user_page_table_move_to_scheduler_v1(")
+        expect(types).to_contain("TASK_CONTROL_BLOCK_ABI_REVISION_V1: u32 = 4u32")
+
+    it "initializes every canonical TCB constructor without copying authority":
+        val bootstrap = file_read("src/os/kernel/scheduler/scheduler_arm_bootstrap.spl")
+        val tasks = file_read("src/os/kernel/scheduler/scheduler_task_mgmt.spl")
+        val exec = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val adoption = file_read("src/os/kernel/scheduler/scheduler_executable_adoption.spl")
+        expect(bootstrap).to_contain("arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()")
+        expect(tasks).to_contain("arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()")
+        expect(adoption).to_contain("arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()")
+        expect(bootstrap.count("arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()")).to_equal(1)
+        expect(tasks.count("arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()")).to_equal(1)
+        expect(exec.count("arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()")).to_equal(4)
+        expect(adoption.count("arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()")).to_equal(1)
+        expect(exec).to_contain("Fork cannot alias the parent's ARM32 destruction authority")
+        expect(exec).to_contain("if scheduler_arm32_mapping_handle_present_v1(old_task.arm32_mapping_handle)")
+
+    it "retains failed terminal and reap rows for owner-side retry":
+        val owner = file_read("src/os/kernel/arch/arm32/user_page_table_owner_v1.spl")
+        expect(owner).to_contain("arm32_scheduler_mapping_handle_mark_terminal_v1")
+        expect(owner).to_contain("terminal.state == Arm32UserPageTableStateV1.SchedulerTerminal")
+        expect(owner).to_contain("arm32_scheduler_mapping_handle_reap_v1")
+        expect(owner).to_contain("destroyed.state == Arm32UserPageTableStateV1.Destroyed")
+        expect(owner).to_contain("_arm32_user_pt_slots_v1")
+
+    it "does not wire destructive exit ordering before its transaction exists":
+        val lifecycle = file_read("src/os/kernel/scheduler/scheduler_task_mgmt.spl")
+        expect(lifecycle).not.to_contain("scheduler_arm32_mapping_handle_mark_terminal_v1")
+        expect(lifecycle).not.to_contain("scheduler_arm32_mapping_handle_reap_v1")

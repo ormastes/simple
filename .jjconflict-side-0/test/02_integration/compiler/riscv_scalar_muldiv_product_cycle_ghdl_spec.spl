@@ -1,0 +1,95 @@
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate,
+    ghdl_run, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_product_to_vhdl.{
+    compile_strict_riscv_scalar_product}
+
+fn m_config(xlen: i32) -> CoreConfig:
+    CoreConfig(xlen: xlen, physical_address_bits: xlen, register_count: 32,
+        profile: if xlen == 32: "riscv-gen2-rv32im" else: "riscv-gen2-rv64im",
+        isa_profile: if xlen == 32: "rv32im" else: "rv64im",
+        compressed_decode_profile: "none")
+
+fn muldiv_product_tb(entity_name: text, tb_name: text, xlen: i32,
+    instruction_hex: text, lhs_hex: text, rhs_hex: text,
+    expected_hex: text) -> text:
+    val high = (xlen - 1).to_text()
+    val zero_hex = if xlen == 32: "00000000" else: "0000000000000000"
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n" +
+    "use std.env.all; entity " + tb_name + " is end entity;\n" +
+    "architecture sim of " + tb_name + " is\n" +
+    " signal clk,rst,dispatch_valid,retire_ready: std_logic := '0';\n" +
+    " signal decode_event_id: std_logic_vector(63 downto 0) := std_logic_vector(to_unsigned(12,64));\n" +
+    " signal in_ready,retire_valid,retire_rd_write,retire_trap,retire_interrupt,protocol_fault: std_logic;\n" +
+    " signal retire_order: std_logic_vector(63 downto 0); signal retire_rd: std_logic_vector(4 downto 0);\n" +
+    " signal retire_value,retire_cause,retire_tval: std_logic_vector(" + high + " downto 0); begin\n" +
+    " clk <= not clk after 5 ns;\n" +
+    " dut: entity work." + entity_name + " port map(clk=>clk,rst=>rst,retire_ready=>retire_ready," +
+    "illegal_valid=>'0',interrupt_valid=>'0',interrupt_cause=>(others=>'0')," +
+    "interrupt_event_id=>(others=>'0'),provider_event_id=>std_logic_vector(to_unsigned(12,64))," +
+    "decode_event_id=>decode_event_id,interrupt_held=>'0',between_events=>'0'," +
+    "dispatch_valid=>dispatch_valid,dispatch_lineage_valid=>'1',dispatch_privilege=>\"11\"," +
+    "dispatch_original_instruction=>x\"" + instruction_hex + "\",dispatch_canonical_instruction=>x\"" + instruction_hex + "\"," +
+    "dispatch_instruction_length_bytes=>\"100\",dispatch_pc_before=>(others=>'0')," +
+    "dispatch_pc_after=>std_logic_vector(to_unsigned(4," + xlen.to_text() + ")),dispatch_rd=>\"00011\"," +
+    "rs1_index=>\"00001\",rs2_index=>\"00010\",rs1_value=>x\"" + lhs_hex + "\",rs2_value=>x\"" + rhs_hex + "\"," +
+    "in_ready=>in_ready,dispatch_accept=>open,retire_valid=>retire_valid,retire_order=>retire_order," +
+    "protocol_fault=>protocol_fault,retire_xlen=>open,retire_privilege=>open," +
+    "retire_original_instruction=>open,retire_canonical_instruction=>open,retire_instruction_length_bytes=>open," +
+    "retire_pc_before=>open,retire_pc_after=>open,retire_rd=>retire_rd,retire_rd_write=>retire_rd_write," +
+    "retire_rd_value=>retire_value,retire_memory_address=>open,retire_memory_read_mask=>open," +
+    "retire_memory_write_mask=>open,retire_memory_read_data=>open,retire_memory_write_data=>open," +
+    "retire_trap=>retire_trap,retire_interrupt=>retire_interrupt,retire_cause=>retire_cause,retire_tval=>retire_tval);\n" +
+    " process begin rst<='1'; wait until rising_edge(clk); wait until rising_edge(clk); rst<='0'; wait for 1 ns;\n" +
+    " assert in_ready='1' report \"muldiv product not ready\" severity failure; dispatch_valid<='1';\n" +
+    " wait until rising_edge(clk); dispatch_valid<='0'; wait for 1 ns; assert in_ready='0' report \"muldiv accepted duplicate while busy\" severity failure;\n" +
+    " for i in 0 to 140 loop exit when retire_valid='1'; wait until rising_edge(clk); wait for 1 ns; end loop;\n" +
+    " assert retire_valid='1' report \"muldiv product did not retire\" severity failure;\n" +
+    " assert retire_value=x\"" + expected_hex + "\" and retire_rd=\"00011\" and retire_rd_write='1' report \"muldiv result mismatch\" severity failure;\n" +
+    " assert retire_trap='0' and retire_interrupt='0' and retire_cause=x\"" + zero_hex + "\" and retire_tval=x\"" + zero_hex + "\" report \"muldiv completion trapped\" severity failure;\n" +
+    " assert retire_order=std_logic_vector(to_unsigned(0,64)) report \"muldiv order mismatch\" severity failure;\n" +
+    " wait until rising_edge(clk); wait for 1 ns; assert retire_valid='1' and retire_value=x\"" + expected_hex + "\" report \"muldiv payload not held\" severity failure;\n" +
+    " retire_ready<='1'; wait until rising_edge(clk); retire_ready<='0'; wait for 1 ns;\n" +
+    " assert retire_valid='0' and in_ready='1' report \"muldiv completion did not consume once\" severity failure;\n" +
+    " assert protocol_fault='0' report \"unexpected muldiv protocol fault\" severity failure;\n" +
+    " decode_event_id<=std_logic_vector(to_unsigned(13,64)); dispatch_valid<='1'; wait until rising_edge(clk); dispatch_valid<='0'; wait for 1 ns;\n" +
+    " assert protocol_fault='1' and retire_valid='0' report \"muldiv identity mismatch did not fail closed\" severity failure;\n" +
+    " wait until rising_edge(clk); wait for 1 ns; assert protocol_fault='1' and retire_valid='0' report \"muldiv identity fault was not sticky\" severity failure; finish; end process;\n" +
+    "end architecture;\n"
+
+fn run_muldiv_product(entity_name: text, tb_name: text, xlen: i32,
+    instruction: u32, instruction_hex: text, lhs_hex: text,
+    rhs_hex: text, expected_hex: text) -> bool:
+    val bus = if xlen == 32: LsuConfig.rv32_product_default() else: LsuConfig.rv64_product_default()
+    val emitted = compile_strict_riscv_scalar_product(entity_name, m_config(xlen), instruction, bus)
+    if not emitted.is_success(): return false
+    val path = "/tmp/" + entity_name + ".vhd"
+    if not vhdl_write_file(path, emitted.vhdl + "\n" + muldiv_product_tb(
+            entity_name, tb_name, xlen, instruction_hex, lhs_hex, rhs_hex, expected_hex)):
+        return false
+    if not ghdl_analyze(path).success: return false
+    if not ghdl_elaborate(tb_name).success: return false
+    ghdl_run(tb_name, Some("2500ns")).success
+
+describe "RISC-V Gen2 integrated M product cycle evidence":
+    # @req REQ-G2-012 REQ-G2-013 NFR-G2-014
+    # @capture exec
+    # @capture artifact
+    # @capture log
+    slow_it "should retire RV32 MUL and RV64 DIV once through arbitration, trap, and sole retirement":
+        step("Require the external GHDL VHDL-2008 cycle runner")
+        val available = ghdl_available()
+        expect(available).to_equal(true)
+        if not available:
+            val blocked = "BLOCKED: GHDL VHDL-2008 runner is unavailable; cannot satisfy REQ-G2-012/013"
+            print blocked
+            fail(blocked)
+            return
+        step("Build and simulate the closed RV32 MUL and RV64 DIV product witnesses")
+        expect(run_muldiv_product("scalar_mul_product_cycle", "scalar_mul_product_cycle_tb",
+            32, 0x022081B3, "022081B3", "00000006", "00000007", "0000002A")).to_equal(true)
+        expect(run_muldiv_product("scalar_div_product_cycle", "scalar_div_product_cycle_tb",
+            64, 0x0220C1B3, "0220C1B3", "FFFFFFFFFFFFFFF9", "0000000000000003",
+            "FFFFFFFFFFFFFFFE")).to_equal(true)

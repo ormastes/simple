@@ -1,0 +1,98 @@
+"""
+# Text ordering under the JIT — executable probe
+
+**Feature IDs:** #P0-TEXT-ORDER-002
+**Category:** Runtime / codegen
+**Status:** Implemented
+**Research:** doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md
+
+## Why this is a runnable program and not an sspec `describe`
+
+`test/01_unit/bugs/text_ordering_cmp_spec.spl` covers the same operators, but
+the sspec TEST path does not execute its examples under the JIT — it passed on
+a binary whose JIT was provably wrong, so an sspec assertion cannot see this
+defect at all. That blindness is a large part of why the bug survived from
+2026-07-22 to 2026-08-01.
+
+This file is therefore a plain program, meant to be run once per engine:
+
+    SIMPLE_EXECUTION_MODE=interpret <simple> test/01_unit/bugs/text_ordering_jit_probe.spl
+    SIMPLE_EXECUTION_MODE=jit       <simple> test/01_unit/bugs/text_ordering_jit_probe.spl
+
+Both must print `PROBE VERDICT: PASS`. Do NOT score this by exit code —
+read the verdict line. `SIMPLE_EXECUTION_MODE` takes `interpret`, not
+`interp`; an unrecognised value silently selects the JIT and makes an A/B
+comparison look like agreement.
+
+## What it pins
+
+Text `<` `<=` `>` `>=` must compare CONTENT, not heap handle addresses, when
+an operand is runtime-produced (a `.substring()` / `.lower()` result) and so
+carries no static `TypeId::STRING` on its vreg. The receiver arrives as a
+function PARAMETER on purpose: that is the shape that reliably loses the
+static type. A substring of a bare literal often kept its typing and answered
+correctly even before the fix, so a literal-receiver probe here would be
+vacuous.
+"""
+
+var failures = 0
+
+fn check(name: text, got: bool, want: bool) -> void:
+    if got == want:
+        print("  ok   ${name}")
+    else:
+        print("  FAIL ${name} (got ${got}, want ${want})")
+        failures = failures + 1
+
+# Receiver via parameter — the shape that loses static typing.
+fn ge_zero(t: text) -> bool:
+    val ch = t.substring(0, 1)
+    ch >= "0"
+
+fn le_nine(t: text) -> bool:
+    val ch = t.substring(0, 1)
+    ch <= "9"
+
+fn lower_lt(a: text, b: text) -> bool:
+    a.lower() < b.lower()
+
+fn main() -> void:
+    print("text ordering JIT probe")
+
+    # Digit-range lower bound. '/' is 0x2F, '.' 0x2E, ' ' 0x20 — all below
+    # '0' (0x30). Pre-fix JIT answered true for these (address order).
+    check("ge_zero(/) is false", ge_zero("/"), false)
+    check("ge_zero(.) is false", ge_zero("."), false)
+    check("ge_zero(space) is false", ge_zero(" "), false)
+    check("ge_zero(0) is true", ge_zero("0"), true)
+    check("ge_zero(7) is true", ge_zero("7"), true)
+    check("ge_zero(9) is true", ge_zero("9"), true)
+
+    # Digit-range upper bound. 'a' is 0x61, above '9' (0x39).
+    check("le_nine(0) is true", le_nine("0"), true)
+    check("le_nine(9) is true", le_nine("9"), true)
+    check("le_nine(a) is false", le_nine("a"), false)
+
+    # Lexicographic sorting comparator: BOTH operands are method results, so
+    # neither is statically typed. Pre-fix JIT returned true in BOTH
+    # directions — the comparator was not antisymmetric, which silently
+    # corrupts any text sort built on it.
+    check("lower_lt(apple,banana) is true", lower_lt("apple", "banana"), true)
+    check("lower_lt(banana,apple) is false", lower_lt("banana", "apple"), false)
+    check("lower_lt(apple,apple) is false", lower_lt("apple", "apple"), false)
+    check("lower_lt(Zebra,apple) is false", lower_lt("Zebra", "apple"), false)
+    check("lower_lt(apple,Zebra) is true", lower_lt("apple", "Zebra"), true)
+
+    # Integer ordering must be untouched by the text fix.
+    val i1 = 3
+    val i2 = 7
+    check("int 3 < 7", i1 < i2, true)
+    check("int 7 < 3", i2 < i1, false)
+    check("int 7 <= 7", i2 <= i2, true)
+    check("int 7 >= 7", i2 >= i2, true)
+    check("int 7 > 7", i2 > i2, false)
+
+    if failures == 0:
+        print("PROBE VERDICT: PASS")
+    else:
+        print("PROBE VERDICT: FAIL (${failures} checks wrong)")

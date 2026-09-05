@@ -1,0 +1,91 @@
+struct MethodUsage:
+    method_name: text
+    external_call_count: i64
+
+struct PublicAPIMetrics:
+    module_name: text
+    pss: i64
+    public_ratio: f64
+    eur: f64
+    entropy: f64
+    api_complexity: f64
+
+fn compute_pss(public_methods: i64, public_fields: i64) -> i64:
+    public_methods + public_fields
+
+fn compute_public_ratio(public_count: i64, total_count: i64) -> f64:
+    if total_count == 0:
+        return 0.0
+    (public_count as f64) / (total_count as f64)
+
+fn compute_avg_param_count(counts: [i64]) -> f64:
+    if counts.len() == 0:
+        return 0.0
+    var total = 0
+    for count in counts:
+        total = total + count
+    (total as f64) / (counts.len() as f64)
+
+fn compute_max_param_count(counts: [i64]) -> i64:
+    var max = 0
+    for count in counts:
+        if count > max:
+            max = count
+    max
+
+fn compute_overload_groups(names: [text]) -> i64:
+    var counts: Dict<text, i64> = {}
+    for name in names:
+        if counts.has(name):
+            counts[name] = counts[name] + 1
+        else:
+            counts[name] = 1
+    var groups = 0
+    for name in counts.keys():
+        if counts[name] > 1:
+            groups = groups + 1
+    groups
+
+fn compute_eur(usages: [MethodUsage], total_public: i64) -> f64:
+    if total_public == 0:
+        return 0.0
+    var used = 0
+    for usage in usages:
+        if usage.external_call_count > 0:
+            used = used + 1
+    (used as f64) / (total_public as f64)
+
+fn compute_entropy(usages: [MethodUsage]) -> f64:
+    var total = 0
+    var active = 0
+    for usage in usages:
+        if usage.external_call_count > 0:
+            total = total + usage.external_call_count
+            active = active + 1
+    if total == 0 or active <= 1:
+        return 0.0
+    var sum_sq = 0.0
+    for usage in usages:
+        if usage.external_call_count > 0:
+            val p = (usage.external_call_count as f64) / (total as f64)
+            sum_sq = sum_sq + (p * p)
+    # ponytail: normalized Simpson evenness; enough for quality heuristics without a log intrinsic.
+    (1.0 - sum_sq) * ((active as f64) / ((active - 1) as f64))
+
+fn compute_api_quality(module_name: text, public_methods: i64, public_fields: i64, total_members: i64, param_counts: [i64], method_names: [text], usages: [MethodUsage]) -> PublicAPIMetrics:
+    val pss = compute_pss(public_methods, public_fields)
+    val avg_params = compute_avg_param_count(param_counts)
+    val max_params = compute_max_param_count(param_counts)
+    val overloads = compute_overload_groups(method_names)
+    PublicAPIMetrics(
+        module_name: module_name,
+        pss: pss,
+        public_ratio: compute_public_ratio(pss, total_members),
+        eur: compute_eur(usages, public_methods),
+        entropy: compute_entropy(usages),
+        api_complexity: avg_params + (max_params as f64) + (overloads as f64)
+    )
+
+export MethodUsage
+export PublicAPIMetrics
+export compute_api_quality

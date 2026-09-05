@@ -1,0 +1,67 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-011 REQ-012 REQ-015 NFR-005 NFR-006
+# @evidence-class source-contract
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "production rt(hal) monotonic clock declaration":
+    it "tags the existing public I/O wrapper with the bounded critical provider contract":
+        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val operation = source.find("@rt(hal, operation: io.clock.monotonic_nanos.v1,")
+        val wrapper = source.find("fn time_now_nanos() -> i64:")
+        expect(operation).to_be_greater_than(-1)
+        expect(wrapper).to_be_greater_than(operation)
+        val contract = source.substring(operation, wrapper)
+        expect(contract).to_contain("providers: pure+c+rust")
+        expect(contract).to_contain("effects: replay_only")
+        expect(contract).to_contain("request_bytes: 32")
+        expect(contract).to_contain("result_bytes: 32")
+        expect(contract).to_contain("trace_operations: 1")
+        expect(contract).to_contain("trace_bytes: 32")
+        expect(contract).to_contain("preferred: c")
+        expect(contract.contains("assurance:")).to_equal(false)
+
+    it "preserves the compatibility API and uses the canonical direct dispatch leaf":
+        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val dispatch = file_read("src/lib/nogc_sync_mut/io/hal_clock_dispatch.spl")
+        val begin = source.find("fn time_now_nanos() -> i64:")
+        val finish = source.find("fn time_now_micros() -> i64:")
+        expect(begin).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(begin)
+        val wrapper = source.substring(begin, finish)
+        expect(wrapper.split("hal_clock_monotonic_nanos_v1()").len() - 1).to_equal(1)
+        expect(wrapper.contains("rt_time_now_nanos()")).to_equal(false)
+        expect(dispatch.split("rt_time_now_nanos()").len() - 1).to_equal(1)
+        expect(dispatch).to_contain("@inline")
+        expect(dispatch).to_contain("fn hal_clock_monotonic_nanos_v1() -> i64:")
+        expect(wrapper).to_contain("if value < 0:")
+        expect(wrapper).to_contain("E-SFFI-TIME-002")
+        expect(source).to_contain("fn current_time_unix() -> i64:")
+        expect(source).to_contain("fn current_time_ms() -> i64:")
+
+    it "keeps the hot path scalar and free of dynamic storage or diagnostics":
+        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val begin = source.find("fn time_now_nanos() -> i64:")
+        val finish = source.find("fn time_now_micros() -> i64:")
+        val wrapper = source.substring(begin, finish)
+        expect(wrapper.contains("var storage: [")).to_equal(false)
+        expect(wrapper.contains("[u8]")).to_equal(false)
+        expect(wrapper.contains(".push(")).to_equal(false)
+        expect(wrapper.contains(".to_text(")).to_equal(false)
+        expect(wrapper.contains("print ")).to_equal(false)
+        expect(wrapper.contains("log ")).to_equal(false)
+
+    it "keeps canonical dispatch constant-time and allocation-free by construction":
+        val dispatch = file_read("src/lib/nogc_sync_mut/io/hal_clock_dispatch.spl")
+        val begin = dispatch.find("fn hal_clock_monotonic_nanos_v1() -> i64:")
+        expect(begin).to_be_greater_than(-1)
+        val leaf = dispatch.substring(begin, dispatch.len())
+        expect(leaf.split("rt_time_now_nanos()").len() - 1).to_equal(1)
+        expect(leaf.contains("if ")).to_equal(false)
+        expect(leaf.contains("while ")).to_equal(false)
+        expect(leaf.contains("for ")).to_equal(false)
+        expect(leaf.contains("[")).to_equal(false)
+        expect(leaf.contains(".push(")).to_equal(false)
+        expect(leaf.contains("rt_env_get")).to_equal(false)
+        expect(leaf.contains("dynload")).to_equal(false)

@@ -1,0 +1,138 @@
+# MinIO adapter specs.
+#
+# Feature: MinIO/S3 adapter — parsing, error mapping, presigned URL generation.
+# Category: App | ITF | adapter_minio
+# Status: Implementation
+#
+# These specs cover pure functions only (no live network):
+#   1. ListBuckets XML parsing
+#   2. ListObjectsV2 XML parsing + IsTruncated/NextContinuationToken
+#   3. Error mapping for HTTP 403/404/503 + transport error
+#   4. <Error><Code>...</Code></Error> XML extraction
+#   5. Presigned URL generation (delegates to aws_sigv4 — vector covered there)
+
+use std.common.crypto.types.{rotr32}
+use app.itf.adapter_minio.{
+    MinioConfig, BucketInfo, ObjectInfo, ListObjectsResult, MinioErrorMap,
+    map_s3_error, minio_presign_get, epoch_to_amz_datetime,
+    _parse_list_buckets_xml, _parse_list_objects_xml, _parse_minio_section
+}
+
+
+val LIST_BUCKETS_XML = "<?xml version=\"1.0\"?><ListAllMyBucketsResult><Owner><ID>x</ID><DisplayName>n</DisplayName></Owner><Buckets><Bucket><Name>firmware-images</Name><CreationDate>2025-01-10T08:00:00.000Z</CreationDate></Bucket><Bucket><Name>logs</Name><CreationDate>2025-02-01T00:00:00.000Z</CreationDate></Bucket></Buckets></ListAllMyBucketsResult>"
+
+val LIST_OBJECTS_XML_TRUNC = "<?xml version=\"1.0\"?><ListBucketResult><Name>firmware-images</Name><Prefix>zynq/</Prefix><MaxKeys>2</MaxKeys><IsTruncated>true</IsTruncated><NextContinuationToken>TOKEN_ABC</NextContinuationToken><Contents><Key>zynq/v1/fw.bin</Key><LastModified>2026-04-01T10:00:00.000Z</LastModified><ETag>&quot;abc&quot;</ETag><Size>1048576</Size></Contents><Contents><Key>zynq/v2/fw.bin</Key><LastModified>2026-04-02T10:00:00.000Z</LastModified><ETag>&quot;def&quot;</ETag><Size>134217728</Size></Contents></ListBucketResult>"
+
+val LIST_OBJECTS_XML_FINAL = "<?xml version=\"1.0\"?><ListBucketResult><Name>firmware-images</Name><IsTruncated>false</IsTruncated><Contents><Key>last.bin</Key><LastModified>2026-04-03T00:00:00Z</LastModified><ETag>&quot;ghi&quot;</ETag><Size>42</Size></Contents></ListBucketResult>"
+
+val ERR_403 = "<?xml version=\"1.0\"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message><Resource>/x</Resource></Error>"
+val ERR_404 = "<?xml version=\"1.0\"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>"
+val ERR_503 = "<?xml version=\"1.0\"?><Error><Code>ServiceUnavailable</Code><Message>Reduce your request rate.</Message></Error>"
+
+
+describe "MinIO adapter":
+
+    context "config parsing":
+
+        it "parses [minio] flat-section SDN":
+            val sdn = "[bitbucket]\nurl = x\n[minio]\nurl = https://minio.corp:9000\nregion = us-east-1\naccess_key = AKIA\nsecret_key = SECRET\ntls_skip_verify = false\n"
+            val cfg = _parse_minio_section(sdn)
+            expect(cfg.url).to_equal("https://minio.corp:9000")
+            expect(cfg.region).to_equal("us-east-1")
+            expect(cfg.access_key).to_equal("AKIA")
+            expect(cfg.secret_key).to_equal("SECRET")
+            expect(cfg.tls_skip_verify).to_equal(false)
+
+        it "honors tls_skip_verify=true":
+            val sdn = "[minio]\nurl = https://x\naccess_key = a\nsecret_key = s\ntls_skip_verify = true\n"
+            val cfg = _parse_minio_section(sdn)
+            expect(cfg.tls_skip_verify).to_equal(true)
+
+    context "ListBuckets XML":
+
+        it "extracts every <Bucket> with Name + CreationDate":
+            val buckets = _parse_list_buckets_xml(LIST_BUCKETS_XML)
+            expect(buckets.len()).to_equal(2)
+            expect(buckets[0].name).to_equal("firmware-images")
+            expect(buckets[0].creation_date).to_equal("2025-01-10T08:00:00.000Z")
+            expect(buckets[1].name).to_equal("logs")
+
+        it "returns empty list for body with no <Buckets> block":
+            val out = _parse_list_buckets_xml("<Other/>")
+            expect(out.len()).to_equal(0)
+
+    context "ListObjectsV2 XML":
+
+        it "extracts Contents[] with Key + Size + LastModified":
+            val r = _parse_list_objects_xml(LIST_OBJECTS_XML_TRUNC)
+            expect(r.objects.len()).to_equal(2)
+            expect(r.objects[0].key).to_equal("zynq/v1/fw.bin")
+            expect(r.objects[0].size).to_equal(1048576)
+            expect(r.objects[1].key).to_equal("zynq/v2/fw.bin")
+            expect(r.objects[1].size).to_equal(134217728)
+
+        it "captures IsTruncated + NextContinuationToken for pagination":
+            val r = _parse_list_objects_xml(LIST_OBJECTS_XML_TRUNC)
+            expect(r.is_truncated).to_equal(true)
+            expect(r.next_continuation_token).to_equal("TOKEN_ABC")
+
+        it "marks final page as not truncated":
+            val r = _parse_list_objects_xml(LIST_OBJECTS_XML_FINAL)
+            expect(r.is_truncated).to_equal(false)
+            expect(r.objects.len()).to_equal(1)
+
+    context "error mapping":
+
+        it "200 maps to ok":
+            val m = map_s3_error(200, "<ok/>", "")
+            expect(m.kind).to_equal("ok")
+
+        it "403 with <Error><Code>AccessDenied</Code> maps to auth":
+            val m = map_s3_error(403, ERR_403, "")
+            expect(m.kind).to_equal("auth")
+            expect(m.message.contains("AccessDenied")).to_equal(true)
+            expect(m.message.contains("Access Denied")).to_equal(true)
+
+        it "404 with NoSuchKey maps to not_found":
+            val m = map_s3_error(404, ERR_404, "")
+            expect(m.kind).to_equal("not_found")
+            expect(m.message.contains("NoSuchKey")).to_equal(true)
+
+        it "503 maps to unavailable":
+            val m = map_s3_error(503, ERR_503, "")
+            expect(m.kind).to_equal("unavailable")
+            expect(m.message.contains("ServiceUnavailable")).to_equal(true)
+
+        it "transport error maps to network":
+            val m = map_s3_error(0, "", "connection refused")
+            expect(m.kind).to_equal("network")
+            expect(m.message).to_equal("connection refused")
+
+        it "409 maps to conflict":
+            val m = map_s3_error(409, "<Error><Code>BucketAlreadyExists</Code><Message>x</Message></Error>", "")
+            expect(m.kind).to_equal("conflict")
+
+    context "presigned URL":
+
+        it "produces a path-style URL with X-Amz-Signature":
+            val cfg = MinioConfig(url: "https://minio.corp:9000", region: "us-east-1", access_key: "AKIA", secret_key: "SECRET", tls_skip_verify: false)
+            val (ok, url, _err) = minio_presign_get(cfg, "firmware-images", "zynq/v1/fw.bin", 3600)
+            expect(ok).to_equal(true)
+            expect(url.starts_with("https://minio.corp:9000/firmware-images/zynq/v1/fw.bin?")).to_equal(true)
+            expect(url.contains("X-Amz-Signature=")).to_equal(true)
+            expect(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")).to_equal(true)
+
+        it "rejects expires > 604800 (7 days)":
+            val cfg = MinioConfig(url: "https://x", region: "us-east-1", access_key: "a", secret_key: "s", tls_skip_verify: false)
+            val (ok, _u, err) = minio_presign_get(cfg, "b", "k", 700000)
+            expect(ok).to_equal(false)
+            expect(err.contains("604800")).to_equal(true)
+
+    context "epoch_to_amz_datetime":
+
+        it "formats epoch 0 as 19700101T000000Z":
+            expect(epoch_to_amz_datetime(0)).to_equal("19700101T000000Z")
+
+        it "formats vector epoch 1369353600 as 20130524T000000Z":
+            # 2013-05-24 00:00:00 UTC = 1369353600
+            expect(epoch_to_amz_datetime(1369353600)).to_equal("20130524T000000Z")

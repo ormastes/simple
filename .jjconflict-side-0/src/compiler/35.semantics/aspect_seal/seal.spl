@@ -1,0 +1,202 @@
+# Aspect completeness seal — hardening plan 2026-08-21 Phase 6,
+# research doc §13.4 (seal contents), §13.5 (lifecycle rules).
+#
+# `aspect_seal_check` is the §13.7 step-2 gate: it turns the raw findings of
+# `binding_completeness` into a CLOSED reason enum, and on success freezes the
+# binding set into an `AspectSeal` (sorted bindings + deterministic hash +
+# profile). There is no wildcard match arm and no silent fallback in this file.
+#
+# HONESTY BOUNDARY — read before quoting this module anywhere:
+#   `UnverifiedSignature` is NOT a signature check. No verifier and no trust
+#   authority is wired into this tree. An aspect that declares
+#   `signature_required: true` is REFUSED with that reason precisely because
+#   its provenance cannot be established here; an aspect that declares no such
+#   requirement is sealed with its signature blob carried, unexamined, in
+#   `unverified_signatures`. Nothing in this module may be described as
+#   signature enforcement.
+#
+# Also unlanded, and not implied by a successful seal: the witness/sidecar ABI,
+# core public ABI comparison, atomic generation publication, weave-plan
+# production and the post-weave HIR hash (§13.7 steps 3-8).
+
+use compiler.semantics.aspect_seal.facet_model.{
+    AspectBindingSet,
+    AspectDecl,
+    BindingReport,
+    binding_completeness,
+    binding_set_hash,
+    canonical_lines,
+    sorted_text
+}
+
+# Closed rejection enum. One variant per §13.4/§13.5 seal obligation.
+pub enum AspectSealReason:
+    # A required facet is bound zero times (§13.3 "complete").
+    UnboundRequired(text, text)
+    # A facet is bound more than once (§13.3 "unique").
+    DuplicateBinding(text, text)
+    # §13.5: no late aspect added after seal; critical forbids `late`
+    # activation outright. Carries the offending key and the activation.
+    LateActivationInCritical(text, text)
+    # Provenance could not be established because nothing verifies it here.
+    UnverifiedSignature(text, text)
+    # §13.6: an open dyn patchpoint is not critical-safe.
+    OpenDynAdviceInCritical(text, text)
+    # A pointcut whose expansion matched no joinpoint. Reported rather than
+    # treated as a vacuous success.
+    EmptyPointcut(text, text)
+    # A `mode:`/`activation:` spelling outside the closed sets.
+    BadAxisValue(text, text)
+
+pub fn aspect_seal_reason_code(r: AspectSealReason) -> text:
+    match r:
+        case UnboundRequired(_, _): "E-ASPECT-001"
+        case DuplicateBinding(_, _): "E-ASPECT-002"
+        case LateActivationInCritical(_, _): "E-ASPECT-003"
+        case UnverifiedSignature(_, _): "E-ASPECT-004"
+        case OpenDynAdviceInCritical(_, _): "E-ASPECT-005"
+        case EmptyPointcut(_, _): "E-ASPECT-006"
+        case BadAxisValue(_, _): "E-ASPECT-007"
+
+pub fn aspect_seal_reason_text(r: AspectSealReason) -> text:
+    match r:
+        case UnboundRequired(key, iface):
+            "E-ASPECT-001:\nrequired facet is not bound\n\nbinding:\n  " + key
+                + "\n\nrequired interface:\n  " + iface
+        case DuplicateBinding(key, detail):
+            "E-ASPECT-002:\nfacet is bound more than once\n\nbinding:\n  " + key
+                + "\n\ndetail:\n  " + detail
+        case LateActivationInCritical(key, activation):
+            "E-ASPECT-003:\nlate activation is not admissible under a critical profile\n\nsubject:\n  "
+                + key + "\n\nactivation:\n  " + activation
+                + "\n\nno aspect may be added after the seal (§13.5)."
+        case UnverifiedSignature(aspect_id, authority):
+            "E-ASPECT-004:\nsignature NOT VERIFIED — no verifier and no trust authority is wired\n\naspect:\n  "
+                + aspect_id + "\n\ndeclared authority:\n  " + authority
+                + "\n\nthis aspect demands verified provenance, which this compiler cannot establish."
+        case OpenDynAdviceInCritical(key, mode):
+            "E-ASPECT-005:\nadvice mode is not critical-safe\n\nadvice:\n  " + key
+                + "\n\nmode:\n  " + mode
+        case EmptyPointcut(key, detail):
+            "E-ASPECT-006:\npointcut expanded to no joinpoint\n\nadvice:\n  " + key
+                + "\n\ndetail:\n  " + detail
+        case BadAxisValue(key, value):
+            "E-ASPECT-007:\nunknown axis value\n\nsubject:\n  " + key + "\n\nvalue:\n  " + value
+
+pub class AspectSealProfile:
+    critical: bool
+
+pub fn profile_tag(p: AspectSealProfile) -> text:
+    if p.critical:
+        return "profile=critical"
+    "profile=default"
+
+# The frozen seal. Constructing one is only possible at the end of a successful
+# `aspect_seal_check`, so an unsealed binding set cannot be mistaken for one.
+pub class AspectSeal:
+    profile_critical: bool
+    # sorted canonical lines — the exact bytes the hash is taken over
+    lines: [text]
+    seal_hash: text
+    aspect_ids: [text]
+    # advice keys in resolved order (`order`, then name) — §13.4 "advice
+    # ordering and conflict resolution", recorded, not executed.
+    advice_order: [text]
+    # signature blobs carried but NEVER checked (see the honesty boundary).
+    unverified_signatures: [text]
+    binding_count: i64
+    obligation_count: i64
+
+fn _iface_for(set: AspectBindingSet, key: text) -> text:
+    for a in set.aspects:
+        for f in a.facets:
+            if a.id + "#" + f.facet == key:
+                return f.interface_name
+    "<unknown interface>"
+
+fn _advice_order(set: AspectBindingSet) -> [text]:
+    var keys: [text] = []
+    for a in set.aspects:
+        for ad in a.advice:
+            # zero-pad so the textual sort is the numeric order
+            var ord = ad.order.to_text()
+            while ord.len() < 6:
+                ord = "0" + ord
+            keys = keys + [ord + "|" + a.id + "|" + ad.name]
+    sorted_text(keys)
+
+fn _signatures(set: AspectBindingSet) -> [text]:
+    var out: [text] = []
+    for a in set.aspects:
+        if a.signature != "":
+            out = out + [a.id + "=" + a.signature + " (NOT VERIFIED)"]
+    sorted_text(out)
+
+fn _signature_reasons(set: AspectBindingSet, mut reasons: [AspectSealReason]):
+    for a in set.aspects:
+        if a.signature_required:
+            var authority = a.signature_authority
+            if authority == "":
+                authority = "<none declared>"
+            reasons.push(AspectSealReason.UnverifiedSignature(a.id, authority))
+
+fn _reasons_from_report(set: AspectBindingSet, report: BindingReport,
+        mut reasons: [AspectSealReason]):
+    for key in report.unbound:
+        reasons.push(AspectSealReason.UnboundRequired(key, _iface_for(set, key)))
+    for key in report.duplicates:
+        reasons.push(AspectSealReason.DuplicateBinding(key, "bound more than once"))
+    for key in report.late_activation:
+        reasons.push(AspectSealReason.LateActivationInCritical(key, "late"))
+    for key in report.open_dyn_advice:
+        reasons.push(AspectSealReason.OpenDynAdviceInCritical(key, "open_dyn_patchpoint"))
+    for key in report.empty_pointcuts:
+        reasons.push(AspectSealReason.EmptyPointcut(key, "pointcut expansion is empty"))
+    for key in report.bad_values:
+        reasons.push(AspectSealReason.BadAxisValue(key, "outside the closed axis set"))
+
+# The §13.7 step-2 gate. Every check runs before any is reported, so a caller
+# sees the whole rejection set at once rather than one reason per retry.
+pub fn aspect_seal_check(bindings: AspectBindingSet, profile: AspectSealProfile)
+        -> Result<AspectSeal, [AspectSealReason]>:
+    var reasons: [AspectSealReason] = []
+    val report = binding_completeness(bindings, profile.critical)
+    _reasons_from_report(bindings, report, reasons)
+    _signature_reasons(bindings, reasons)
+    if reasons.len() > 0:
+        return Err(reasons)
+
+    var ids: [text] = []
+    for a in bindings.aspects:
+        ids = ids + [a.id]
+    Ok(AspectSeal(
+        profile_critical: profile.critical,
+        lines: canonical_lines(bindings),
+        seal_hash: binding_set_hash(bindings, profile_tag(profile)),
+        aspect_ids: sorted_text(ids),
+        advice_order: _advice_order(bindings),
+        unverified_signatures: _signatures(bindings),
+        binding_count: bindings.bindings.len(),
+        obligation_count: report.obligations
+    ))
+
+# Post-weave re-verification (§13.7 step 8) — STUB, and labelled as one.
+#
+# A real post-weave recheck re-runs type/effect/safety over the WOVEN HIR and
+# compares a post-weave HIR hash. No weaver is wired, so there is no woven HIR
+# to re-check. What this does instead is genuine but much smaller: it re-runs
+# `binding_completeness` over the same set the seal froze and confirms the
+# verdict is still clean and the recomputed hash still equals the sealed hash.
+# It therefore proves the seal is self-consistent and reproducible; it proves
+# NOTHING about weaving. Callers must report it as "post-weave-recheck=ran",
+# never as "post-weave verification passed".
+pub fn post_weave_recheck(sealed: AspectSeal, bindings: AspectBindingSet,
+        profile: AspectSealProfile) -> bool:
+    val report = binding_completeness(bindings, profile.critical)
+    if report.unbound.len() > 0 or report.duplicates.len() > 0:
+        return false
+    if report.late_activation.len() > 0 or report.open_dyn_advice.len() > 0:
+        return false
+    if report.bad_values.len() > 0 or report.empty_pointcuts.len() > 0:
+        return false
+    binding_set_hash(bindings, profile_tag(profile)) == sealed.seal_hash

@@ -1,0 +1,519 @@
+# Vulkan Engine2D Readback Evidence
+
+- status: fail
+- reason: native-interpreter-fallback
+- spec status: not_run
+- probe status: Initialized
+- available: true
+- backend: vulkan
+- present exercised: true
+- readback exercised: true
+- clear status: pass
+- clear pixels: 256
+- clear expected checksum: 140735349260160
+- clear actual checksum: 140735349260160
+- clear mismatches: 0
+- clear source: device_readback
+- clear backend handle: 3
+- clear device identity: 138443182108704
+- clear expected pixels: build/vulkan-engine2d-readback/clear-expected-u32.json
+- clear actual pixels: build/vulkan-engine2d-readback/clear-actual-u32.json
+- rect status: pass
+- rect pixels: 256
+- rect expected checksum: 140781974135910
+- rect actual checksum: 140781974135910
+- rect mismatches: 0
+- rect source: device_readback
+- rect backend handle: 3
+- rect device identity: 138443182108704
+- rect expected pixels: build/vulkan-engine2d-readback/rect-expected-u32.json
+- rect actual pixels: build/vulkan-engine2d-readback/rect-actual-u32.json
+- blur/tolerance used: false
+- vulkan strict exit code: 
+- cpu/vulkan parity exit code: 
+- execution mode: native
+- Vulkan ICD: 
+
+## Raw Evidence
+- vulkan_engine2d_readback_status=fail
+- vulkan_engine2d_readback_reason=native-interpreter-fallback
+- vulkan_engine2d_readback_spec_status=not_run
+- vulkan_engine2d_readback_probe_status=Initialized
+- vulkan_engine2d_readback_available=true
+- vulkan_engine2d_readback_backend_name=vulkan
+- vulkan_engine2d_readback_present_exercised=true
+- vulkan_engine2d_readback_readback_exercised=true
+- vulkan_engine2d_readback_clear_status=pass
+- vulkan_engine2d_readback_clear_pixels=256
+- vulkan_engine2d_readback_clear_expected_checksum=140735349260160
+- vulkan_engine2d_readback_clear_actual_checksum=140735349260160
+- vulkan_engine2d_readback_clear_mismatches=0
+- vulkan_engine2d_readback_clear_source=device_readback
+- vulkan_engine2d_readback_clear_backend_handle=3
+- vulkan_engine2d_readback_clear_device_identity=138443182108704
+- vulkan_engine2d_readback_clear_expected_pixels_path=build/vulkan-engine2d-readback/clear-expected-u32.json
+- vulkan_engine2d_readback_clear_actual_pixels_path=build/vulkan-engine2d-readback/clear-actual-u32.json
+- vulkan_engine2d_readback_rect_status=pass
+- vulkan_engine2d_readback_rect_pixels=256
+- vulkan_engine2d_readback_rect_expected_checksum=140781974135910
+- vulkan_engine2d_readback_rect_actual_checksum=140781974135910
+- vulkan_engine2d_readback_rect_mismatches=0
+- vulkan_engine2d_readback_rect_source=device_readback
+- vulkan_engine2d_readback_rect_backend_handle=3
+- vulkan_engine2d_readback_rect_device_identity=138443182108704
+- vulkan_engine2d_readback_rect_expected_pixels_path=build/vulkan-engine2d-readback/rect-expected-u32.json
+- vulkan_engine2d_readback_rect_actual_pixels_path=build/vulkan-engine2d-readback/rect-actual-u32.json
+- vulkan_engine2d_readback_blur_or_tolerance_used=false
+- vulkan_engine2d_readback_vulkan_strict_exit_code=
+- vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=
+- vulkan_engine2d_readback_execution_mode=native
+- vulkan_engine2d_readback_icd_path=
+- vulkan_engine2d_readback_evidence_log=build/vulkan-engine2d-readback/evidence.log
+- vulkan_engine2d_readback_vulkan_strict_log=build/vulkan-engine2d-readback/vulkan_strict.json
+- vulkan_engine2d_readback_cpu_vulkan_parity_log=build/vulkan-engine2d-readback/engine2d_cpu_vulkan_parity.json
+
+## Evidence Log
+- WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+- Build and use the pure-Simple bin/simple instead.
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/string_core.spl:76:44
+-    |
+-  76 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+- 
+- Use angle brackets: s<...> instead of s[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/text_layout/font_advance_layout.spl:15:49
+-    |
+-  15 |     if low < byte_offsets.len() and byte_offsets[low] == byte_offset:
+-    |                                                 ^
+- 
+- Use angle brackets: byte_offsets<...> instead of byte_offsets[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/skia/feature/glyph/ot_parser_layout.spl:565:67
+-    |
+- 565 |         while active_tag_index < active_tags.len() and active_tags[active_tag_index] != feature_tag:
+-    |                                                                   ^
+- 
+- Use angle brackets: active_tags<...> instead of active_tags[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:158:31
+-    |
+- 158 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/gpu/engine2d/sffi_directx.spl:6:1
+-    |
+-   6 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/io/metal_ptr.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:4:1
+-    |
+-   4 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- warning: public function `compress_block` has 2 co-compiled definitions with 2 differing signatures ((i64,i64,i64,i64,i64,i64,i64,i64,i64,i64)->Tuple([i64, i64]) vs (list,list)->list); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `dir_remove_all` has 3 co-compiled definitions with 2 differing signatures ((text)->bool vs (text)->i64); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `file_read_bytes` has 3 co-compiled definitions with 2 differing signatures ((text)->[i64] vs (text)->[u8]); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `file_read_lines` has 2 co-compiled definitions with 2 differing signatures ((text)->Optional([text]) vs (text)->[text]); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `path_join` has 2 co-compiled definitions with 2 differing signatures (([text])->text vs (text,text)->text); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- warning: public function `shell` has 2 co-compiled definitions with 2 differing signatures ((text)->ProcessResult vs (text)->ShellResult); JIT call sites resolve by exact arg-type match (mangled `$dupN` variants), falling back to the last definition when types are ambiguous — a fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) to a unique name. [compiler_cross_module_private_symbol_collision]
+- [jit-fallback] HIR lowering error: Cannot infer field type: struct 'ComputeError' field 'kind': whole module dropped to the interpreter (expect ~100-1000x slowdown). Set SIMPLE_JIT_STRICT=1 to turn this into a hard error.
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Cannot infer field type: struct 'ComputeError' field 'kind'
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/string_core.spl:76:44
+-    |
+-  76 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+- 
+- Use angle brackets: s<...> instead of s[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/text_layout/font_advance_layout.spl:15:49
+-    |
+-  15 |     if low < byte_offsets.len() and byte_offsets[low] == byte_offset:
+-    |                                                 ^
+- 
+- Use angle brackets: byte_offsets<...> instead of byte_offsets[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/skia/feature/glyph/ot_parser_layout.spl:565:67
+-    |
+- 565 |         while active_tag_index < active_tags.len() and active_tags[active_tag_index] != feature_tag:
+-    |                                                                   ^
+- 
+- Use angle brackets: active_tags<...> instead of active_tags[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:158:31
+-    |
+- 158 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/gpu/engine2d/sffi_directx.spl:6:1
+-    |
+-   6 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/io/metal_ptr.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:4:1
+-    |
+-   4 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [use-warning] 'rt_engine2d_simd_fill_span_u32' is named in `use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/gpu/engine2d/simd_kernels.spl)
+- [use-warning] 'rt_engine2d_simd_copy_span_u32' is named in `use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/gpu/engine2d/simd_kernels.spl)
+- [use-warning] 'native_pixel_rows_enabled' is named in `use std.gpu.engine2d.simd_kernels.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_async_mut/gpu/engine2d/simd_kernels.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/gc_async_mut/gpu/engine2d/backend_software.spl)
+- [use-warning] 'rt_engine2d_simd_fill_span_u32' is named in `use std.gpu.engine2d.simd_kernels.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_async_mut/gpu/engine2d/simd_kernels.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/gc_async_mut/gpu/engine2d/backend_software.spl)
+- [use-warning] 'engine2d_simd_blend_row_u32' is named in `use std.gpu.engine2d.simd_kernels.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_async_mut/gpu/engine2d/simd_kernels.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/gc_async_mut/gpu/engine2d/backend_software.spl)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.text_layout.font_renderer' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.simd' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [use-warning] 'Vec16u8' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'Vec2u64' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_add_u8x16' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_xor_u8x16' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_aes_round' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_aes_round_last' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_clmul_lo_u64' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_clmul_hi_u64' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'simd_xor_u64x2' is named in `use std.nogc_sync_mut.simd.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/simd.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/simd.spl)
+- [use-warning] 'rt_font_glyph_advance' is named in `use std.nogc_sync_mut.text_layout.font_rasterizer.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/text_layout/font_rasterizer.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/text_layout/font_renderer.spl)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.env_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [use-warning] 'shell_output' is named in `use std.nogc_sync_mut.io.process_ops.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_sync_mut/io/process_ops.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/nogc_async_mut/io/process_ops.spl)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_vulkan' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.vulkan_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [use-warning] 'native_pixel_rows_enabled' is named in `use std.gpu.engine2d.simd_kernels.{...}` but module '/home/ormastes/dev/pub/simple/src/std/nogc_async_mut/gpu/engine2d/simd_kernels.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/gc_async_mut/gpu/engine2d/engine.spl)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.metal_ptr' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.metal_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_rocm' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [use-warning] 'font_execution_plan_into' is named in `use std.gc_async_mut.text_layout.font_renderer.{...}` but module '/home/ormastes/dev/pub/simple/src/std/gc_async_mut/text_layout/font_renderer.spl' does not provide it (imported from /home/ormastes/dev/pub/simple/src/std/gc_async_mut/gpu/engine2d/engine.spl)
+- evidence_program=engine2d_vulkan_readback
+- vulkan_probe_status=Initialized
+- vulkan_probe_available=true
+- vulkan_probe_diagnostic=requested=vulkan;selected=vulkan;status=Initialized;api=vulkan;gate=vulkan_runtime;shader=spirv;compute=true;graphics=true;present=false;reason=Vulkan initialized
+- vulkan_available=true
+- strict_create_status=pass
+- backend_name=vulkan
+- clear_readback_pixels=256
+- clear_expected_checksum=140735349260160
+- clear_actual_checksum=140735349260160
+- clear_expected_pixels_path=build/vulkan-engine2d-readback/clear-expected-u32.json
+- clear_actual_pixels_path=build/vulkan-engine2d-readback/clear-actual-u32.json
+- clear_expected_pixels_written=true
+- clear_actual_pixels_written=true
+- clear_mismatches=0
+- clear_readback_source=device_readback
+- clear_backend_handle=3
+- clear_device_identity=138443182108704
+- clear_present_source=host_cache_after_device_present
+- rect_readback_pixels=256
+- rect_expected_checksum=140781974135910
+- rect_actual_checksum=140781974135910
+- rect_mismatches=0
+- rect_readback_source=device_readback
+- rect_backend_handle=3
+- rect_device_identity=138443182108704
+- rect_present_source=host_cache_after_device_present
+- rect_expected_pixels_path=build/vulkan-engine2d-readback/rect-expected-u32.json
+- rect_actual_pixels_path=build/vulkan-engine2d-readback/rect-actual-u32.json
+- rect_expected_pixels_written=true
+- rect_actual_pixels_written=true
+- present_exercised=true
+- readback_exercised=true
+- clear_status=pass
+- rect_status=pass
+- evidence_status=pass
+- overall=pass

@@ -1,0 +1,80 @@
+"""NVFS connector mount-path boundary contract."""
+
+use std.spec
+use std.spec.step
+use std.fs_driver.error.{FsError}
+use os.services.vfs.nvfs_connector.{
+    nvfs_vfs_connect, nvfs_vfs_read_bytes, nvfs_vfs_write_text
+}
+
+describe "NVFS connector path boundary":
+    it "rejects a non-canonical trailing slash mount":
+        step("Reject an ambiguous mount spelling")
+        val connected = nvfs_vfs_connect("/nvfs/", "trailing", false, 0, 0)
+        expect(connected.is_err()).to_equal(true)
+        expect(connected.unwrap_err()).to_equal(FsError.InvalidArg)
+
+    it "rejects traversal in a mount path":
+        step("Reject a mount path that escapes its own prefix")
+        val connected = nvfs_vfs_connect("/nvfs/../root", "traversal", false, 0, 0)
+        expect(connected.is_err()).to_equal(true)
+        expect(connected.unwrap_err()).to_equal(FsError.InvalidArg)
+
+    it "rejects dot aliases and duplicate separators in mount paths":
+        step("Reject canonical aliases before creating a driver connection")
+        val dot_mount = nvfs_vfs_connect("/nvfs/./apps", "dot-mount", false, 0, 0)
+        val duplicate_mount = nvfs_vfs_connect("/nvfs//apps", "duplicate-mount", false, 0, 0)
+        expect(dot_mount.is_err()).to_equal(true)
+        expect(dot_mount.unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(duplicate_mount.is_err()).to_equal(true)
+        expect(duplicate_mount.unwrap_err()).to_equal(FsError.InvalidArg)
+
+    it "rejects a text-prefix sibling of a non-root mount":
+        step("Mount NVFS at /nvfs")
+        val connected = nvfs_vfs_connect("/nvfs", "sibling", false, 0, 0)
+        expect(connected.is_ok()).to_equal(true)
+        val conn = connected.unwrap()
+
+        step("Reject /nvfs-other as a sibling rather than a child")
+        val read_r = nvfs_vfs_read_bytes(conn, "/nvfs-other/program.smf")
+        expect(read_r.is_err()).to_equal(true)
+        expect(read_r.unwrap_err()).to_equal(FsError.InvalidArg)
+
+    it "accepts containment only at a slash boundary":
+        step("Mount NVFS at /nvfs")
+        val connected = nvfs_vfs_connect("/nvfs", "child", false, 0, 0)
+        expect(connected.is_ok()).to_equal(true)
+        val conn = connected.unwrap()
+
+        step("A real child reaches the driver instead of boundary rejection")
+        val path = "/nvfs/__nvfs_boundary_program_20260824.smf"
+        val write_r = nvfs_vfs_write_text(conn, path, "program")
+        expect(write_r.is_ok()).to_equal(true)
+        val read_r = nvfs_vfs_read_bytes(conn, path)
+        expect(read_r.is_ok()).to_equal(true)
+        expect(read_r.unwrap().len()).to_equal(7)
+
+    it "rejects relative paths even for the root mount":
+        step("Mount NVFS at the filesystem root")
+        val connected = nvfs_vfs_connect("/", "root", false, 0, 0)
+        expect(connected.is_ok()).to_equal(true)
+        val conn = connected.unwrap()
+
+        step("Reject a relative executable lookup")
+        val read_r = nvfs_vfs_read_bytes(conn, "program.smf")
+        expect(read_r.is_err()).to_equal(true)
+        expect(read_r.unwrap_err()).to_equal(FsError.InvalidArg)
+
+    it "rejects root-mounted dot aliases and duplicate separators":
+        step("Mount NVFS at the filesystem root")
+        val connected = nvfs_vfs_connect("/", "root-canonical", false, 0, 0)
+        expect(connected.is_ok()).to_equal(true)
+        val conn = connected.unwrap()
+
+        step("Reject non-canonical absolute executable lookups")
+        val dot_read = nvfs_vfs_read_bytes(conn, "/./program.smf")
+        val duplicate_read = nvfs_vfs_read_bytes(conn, "//program.smf")
+        expect(dot_read.is_err()).to_equal(true)
+        expect(dot_read.unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(duplicate_read.is_err()).to_equal(true)
+        expect(duplicate_read.unwrap_err()).to_equal(FsError.InvalidArg)

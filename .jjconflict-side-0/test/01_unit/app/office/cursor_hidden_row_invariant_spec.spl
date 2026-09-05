@@ -1,0 +1,132 @@
+"""Defect-CLASS spec: hidden-row awareness is a SHARED invariant of every
+cursor-movement entry point in Calc, not a property of any one of them.
+
+The recurring defect tracked by
+doc/08_tracking/bug/calc_cursor_hidden_row_awareness_divergence_2026-08-11.md
+is not "path X has a bug" -- it is "a NEW cursor-movement entry point was
+added and forgot hidden-row awareness". Three independent implementations
+exist today:
+
+  * GUI session   -- app.office.gui.session_key -> _sheet_gui_move_within_bounds
+  * TUI           -- app.office.interactive.tui_apply_key -> _tui_move
+  * Widget app    -- app.office.sheets.sheets_app.SheetsApp.navigate_to
+
+Each was fixed separately, in that order, after each was separately found
+broken. So this spec deliberately does NOT test one path's arithmetic. It
+drives ALL THREE over the SAME fixture and asserts the invariant they must
+jointly satisfy:
+
+  I1. a vertical move never leaves the cursor on a hidden row;
+  I2. all three paths agree on the resulting row (no silent divergence);
+  I3. at a grid edge with no visible row left, the cursor stays put rather
+      than landing on a hidden row or wrapping.
+
+A fourth entry point added later fails this spec the moment it is added to
+_row_after_down/_row_after_up below -- which is the point. Index base: the
+hidden-row API is 1-BASED, CellRef.row is 0-BASED.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{parse_cell_ref, cell_ref_to_string, CellRef}
+use app.office.gui.{session_new, session_key}
+use app.office.interactive.{tui_new_state, tui_apply_key}
+use app.office.sheets.sheets_app.{SheetsApp}
+
+val GRID_ROWS = 100
+val GRID_COLS = 26
+
+fn _hidden_sheet(rows: [i64]) -> Sheet:
+    """A default-geometry sheet with the given 1-based rows hidden."""
+    val sh = Sheet.new("inv")
+    for r in rows:
+        sh.hide_row(r)
+    sh
+
+fn _gui_row_after(hidden: [i64], start_row: i32, key: text) -> i32:
+    """Row index the GUI session lands on after one arrow key from start_row."""
+    val sh = _hidden_sheet(hidden)
+    var session = session_new(sh, cell_ref_to_string(CellRef(col: 0, row: start_row)))
+    session = session_key(session, key, GRID_ROWS, GRID_COLS, GRID_ROWS, GRID_COLS)
+    val parsed = parse_cell_ref(session.selected_ref)
+    if parsed == nil:
+        return -1
+    parsed.row
+
+fn _tui_row_after(hidden: [i64], start_row: i32, key: text) -> i32:
+    """Row index the TUI lands on after one arrow key from start_row."""
+    val sh = _hidden_sheet(hidden)
+    var s = tui_new_state(sh)
+    # Walk the cursor to start_row using raw state (no key decoding needed).
+    s.cur = CellRef(col: 0, row: start_row)
+    s = tui_apply_key(s, 27)   # ESC
+    s = tui_apply_key(s, 91)   # [
+    if key == "down":
+        s = tui_apply_key(s, 66)   # B
+    else:
+        s = tui_apply_key(s, 65)   # A
+    s.cur.row
+
+fn _app_row_after(hidden: [i64], start_row: i32, key: text) -> i32:
+    """Row index SheetsApp.navigate_to lands on after one arrow step."""
+    val app = SheetsApp.new()
+    val sh = app.workbook.active()
+    for r in hidden:
+        sh.hide_row(r)
+    app.active_cell = CellRef(col: 0, row: start_row)
+    if key == "down":
+        app.navigate_to(0, start_row + 1)
+    else:
+        app.navigate_to(0, start_row - 1)
+    app.active_cell.row
+
+fn _all_paths(hidden: [i64], start_row: i32, key: text) -> [i32]:
+    """The landing row of every cursor-movement entry point, same fixture.
+
+    ADD ANY NEW CURSOR ENTRY POINT HERE. That is the whole contract of this
+    spec: a path that is not listed is a path nobody is checking."""
+    [_gui_row_after(hidden, start_row, key),
+     _tui_row_after(hidden, start_row, key),
+     _app_row_after(hidden, start_row, key)]
+
+describe "cursor movement: hidden-row awareness is a shared invariant":
+    it "I1: no path leaves the cursor on a hidden row (single hidden row)":
+        val hidden = [2.to_i64()]
+        val sh = _hidden_sheet(hidden)
+        for landed in _all_paths(hidden, 0, "down"):
+            assert_false(sh.is_row_hidden((landed + 1).to_i64()))
+
+    it "I1: no path leaves the cursor on a hidden row (run of hidden rows)":
+        val hidden = [2.to_i64(), 3.to_i64(), 4.to_i64()]
+        val sh = _hidden_sheet(hidden)
+        for landed in _all_paths(hidden, 0, "down"):
+            assert_false(sh.is_row_hidden((landed + 1).to_i64()))
+
+    it "I2: all paths agree on the landing row going down":
+        val rows = _all_paths([2.to_i64()], 0, "down")
+        expect(rows[0]).to_equal(2)
+        expect(rows[1]).to_equal(rows[0])
+        expect(rows[2]).to_equal(rows[0])
+
+    it "I2: all paths agree on the landing row going down over a run":
+        val rows = _all_paths([2.to_i64(), 3.to_i64(), 4.to_i64()], 0, "down")
+        expect(rows[0]).to_equal(4)
+        expect(rows[1]).to_equal(rows[0])
+        expect(rows[2]).to_equal(rows[0])
+
+    it "I2: all paths agree on the landing row going up":
+        val rows = _all_paths([2.to_i64()], 2, "up")
+        expect(rows[0]).to_equal(0)
+        expect(rows[1]).to_equal(rows[0])
+        expect(rows[2]).to_equal(rows[0])
+
+    it "I3: every path stays put when no visible row remains below":
+        var hidden: [i64] = []
+        var r = 2
+        while r <= GRID_ROWS:
+            hidden = hidden + [r.to_i64()]
+            r = r + 1
+        val sh = _hidden_sheet(hidden)
+        for landed in _all_paths(hidden, 0, "down"):
+            expect(landed).to_equal(0)
+            assert_false(sh.is_row_hidden((landed + 1).to_i64()))

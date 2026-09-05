@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+runner=$repo/scripts/check/lib/bootstrap-stage3-shared-runner.pl
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/stage3-runner-publication.XXXXXX")
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+sha() { sha256sum -- "$1" | awk '{print $1}'; }
+leaf_for() {
+    case "$1" in
+        runner) printf '%s\n' runner-receipt.env ;;
+        candidate) printf '%s\n' candidate-provenance-verification.env ;;
+        *) return 64 ;;
+    esac
+}
+stem_for() {
+    case "$1" in
+        runner) printf '%s\n' runner-receipt ;;
+        candidate) printf '%s\n' candidate-provenance-verification ;;
+        *) return 64 ;;
+    esac
+}
+harness=$fixture/publication-harness.pl
+{
+    printf '%s\n' \
+        'use strict;' \
+        'use warnings;' \
+        'use Config;' \
+        'use Digest::SHA qw(sha256_hex);' \
+        'use Errno qw(EINTR);' \
+        'use Fcntl qw(:DEFAULT :mode F_GETFD F_SETFD FD_CLOEXEC O_NOFOLLOW O_DIRECTORY);' \
+        'use IO::Handle;' \
+        'use POSIX ();' \
+        'my $O_CLOEXEC = 02000000;' \
+        'my $O_TMPFILE = 020200000;' \
+        'my $AT_SYMLINK_FOLLOW = 0x400;' \
+        'my ($SYS_OPENAT, $SYS_LINKAT) = $Config{archname} =~ /(?:aarch64|riscv64)/ ? (56, 37) : $Config{archname} =~ /x86_64/ ? (257, 265) : (0, 0);' \
+        'my $parent_pid = $$;' \
+        "my \$publication_failpoint = '';"
+    for function in valid_sha normalized_absolute set_cloexec hash_fh \
+        descriptor_handle open_directory_walk read_fh_text publish_exclusive_at \
+        anonymous_pass_inode link_anonymous_final prepare_canonical_pass_at \
+        open_regular_at parse_small_receipt_fh parse_canonical_receipt_fh \
+        accept_committed_canonical_at; do
+        sed -n "/^sub $function /,/^}/p" "$runner"
+    done
+    sed -n '/^__PUBLICATION_HARNESS__$/,/^__PUBLICATION_HARNESS_END__$/p' \
+        "$0" | tail -n +2 | sed '$d'
+} >"$harness"
+
+run_case() {
+    local mode=$1 kind=$2 dir=$3
+    perl "$harness" "$mode" "$kind" "$dir"
+}
+assert_no_canonical_pass() {
+    local kind=$1 dir=$2 leaf
+    leaf=$(leaf_for "$kind")
+    if [ -f "$dir/$leaf" ] && grep -Eqx 'status=(pass|component-pass)' "$dir/$leaf"; then
+        fail "$kind exposed canonical PASS before final link"
+    fi
+    ! grep -R -Eqx 'status=(pass|component-pass)' "$dir" 2>/dev/null ||
+        fail "$kind left named PASS bytes outside canonical recovery"
+}
+assert_committed() {
+    local kind=$1 dir=$2 leaf stem prepared commit expected
+    leaf=$(leaf_for "$kind")
+    stem=$(stem_for "$kind")
+    prepared=$dir/.$stem.prepared.publication_test_001
+    commit=$dir/.$stem.commit.publication_test_001
+    [ -f "$prepared" ] || fail "$kind prepared record absent"
+    [ -f "$commit" ] || fail "$kind commit record absent"
+    grep -qx 'status=prepared' "$prepared" || fail "$kind prepared status"
+    grep -qx 'status=prepared' "$commit" || fail "$kind commit status"
+    ! grep -Eqx 'status=(pass|component-pass)' "$prepared" "$commit" ||
+        fail "$kind named precommit record contains PASS"
+    expected=$(sed -n 's/^pass_sha256=//p' "$commit")
+    [ -n "$expected" ] && [ "$(sha "$dir/$leaf")" = "$expected" ] ||
+        fail "$kind canonical hash does not match durable commit"
+}
+
+perl -c "$runner" >/dev/null
+grep -Fq 'prepare_canonical_pass_at(' "$runner"
+grep -Fq "'candidate-provenance-verification'" "$runner"
+grep -Fq "'runner-receipt'" "$runner"
+! grep -Fq 'publish_exclusive($candidate_verify' "$runner" ||
+    fail 'candidate verification still uses legacy publication'
+! grep -Fq 'publication-contract-' "$runner" ||
+    fail 'test-only publication CLI leaked into production runner'
+
+# The final-link helper may validate the syscall result, but may not hide any
+# filesystem operation after linkat. The runner canonical call is followed
+# only by _exit, making PASS visibility the terminal filesystem transition.
+after_link=$(awk '
+    /^sub link_anonymous_final / { in_fn=1 }
+    in_fn && /my \$result = syscall/ { after=1; next }
+    after { print }
+    after && /^}/ { exit }
+' "$runner")
+if grep -Eq 'sync|fsync|unlink|close|rename|mkdir|open|system|read|write' \
+        <<<"$after_link"; then
+    fail 'fallible filesystem work is hidden after canonical linkat'
+fi
+runner_tail=$(sed -n "/link_anonymous_final(.*'runner-receipt.env'/,\$p" "$runner")
+if tail -n +2 <<<"$runner_tail" | grep -Eq 'sync|fsync|unlink|close|rename|mkdir|open'; then
+    fail 'fallible filesystem work follows runner canonical PASS link'
+fi
+
+# These failpoints close the real production descriptor immediately before
+# its real sync call, or mutate the real temporary leaf immediately before the
+# real cleanup unlink. Every failure must remain non-PASS.
+failure_modes=(
+    pass-inode-fsync prepared-file-fsync prepared-parent-fsync
+    prepared-cleanup prepared-collision commit-file-fsync
+    commit-parent-fsync commit-cleanup commit-collision pre-link-crash
+)
+for mode in "${failure_modes[@]}"; do
+    dir=$fixture/failure-$mode
+    mkdir "$dir"
+    set +e
+    run_case "$mode" runner "$dir" >"$dir.out" 2>&1
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] || fail "$mode unexpectedly passed"
+    case "$mode" in
+        pass-inode-fsync)
+            grep -Eq 'fsync PASS inode|closed filehandle' "$dir.out" ;;
+        prepared-file-fsync)
+            grep -Eq 'fsync .*prepared|closed filehandle' "$dir.out" ;;
+        prepared-parent-fsync|commit-parent-fsync)
+            grep -Eq 'fsync publication directory|closed filehandle' "$dir.out" ;;
+        prepared-cleanup)
+            grep -Eq 'remove .*prepared' "$dir.out" ;;
+        prepared-collision|commit-collision)
+            grep -q 'publication collision' "$dir.out" ;;
+        commit-file-fsync)
+            grep -Eq 'fsync .*commit|closed filehandle' "$dir.out" ;;
+        commit-cleanup)
+            grep -Eq 'remove .*commit' "$dir.out" ;;
+        pre-link-crash)
+            [ "$status" -eq 71 ] ;;
+    esac || fail "$mode did not fail at its intended production operation"
+    assert_no_canonical_pass runner "$dir"
+done
+
+for kind in runner candidate; do
+    dir=$fixture/$kind-pass
+    mkdir "$dir"
+    run_case pass "$kind" "$dir"
+    assert_committed "$kind" "$dir"
+    run_case recover "$kind" "$dir"
+
+    dir=$fixture/$kind-crash
+    mkdir "$dir"
+    set +e
+    run_case post-link-crash "$kind" "$dir" >"$dir.out" 2>&1
+    status=$?
+    set -e
+    [ "$status" -eq 137 ] || fail "$kind post-link crash status $status"
+    assert_committed "$kind" "$dir"
+    run_case recover "$kind" "$dir"
+
+    dir=$fixture/$kind-collision
+    mkdir "$dir"
+    if run_case collision "$kind" "$dir" >"$dir.out" 2>&1; then
+        fail "$kind collision unexpectedly passed"
+    fi
+    grep -qx 'incumbent=true' "$dir/$(leaf_for "$kind")" ||
+        fail "$kind collision replaced incumbent"
+    if run_case recover "$kind" "$dir" >"$dir.recover.out" 2>&1; then
+        fail "$kind collision incumbent passed recovery"
+    fi
+
+    for mode in replacement-before replacement-after; do
+        dir=$fixture/$kind-$mode
+        mkdir "$dir"
+        run_case "$mode" "$kind" "$dir"
+        assert_committed "$kind" "$dir.held"
+        [ ! -e "$dir/$(leaf_for "$kind")" ] ||
+            fail "$kind $mode published through replacement ancestor"
+        run_case recover "$kind" "$dir.held"
+    done
+
+    dir=$fixture/$kind-commit-only
+    mkdir "$dir"
+    if run_case pre-link-crash "$kind" "$dir" >/dev/null 2>&1; then
+        fail "$kind pre-link crash unexpectedly passed"
+    fi
+    if run_case recover "$kind" "$dir" >"$dir.recover.out" 2>&1; then
+        fail "$kind durable commit without canonical PASS was accepted"
+    fi
+
+    for mutation in canonical-bytes canonical-identity prepared-bytes \
+            prepared-identity commit-bytes commit-blank-line; do
+        dir=$fixture/$kind-tamper-$mutation
+        mkdir "$dir"
+        run_case pass "$kind" "$dir"
+        leaf=$(leaf_for "$kind")
+        stem=$(stem_for "$kind")
+        case "$mutation" in
+            canonical-bytes)
+                printf 'tamper=true\n' >>"$dir/$leaf" ;;
+            canonical-identity)
+                cp -- "$dir/$leaf" "$dir/$leaf.replacement"
+                mv -f -- "$dir/$leaf.replacement" "$dir/$leaf" ;;
+            prepared-bytes)
+                printf 'tamper=true\n' \
+                    >>"$dir/.$stem.prepared.publication_test_001" ;;
+            prepared-identity)
+                cp -- "$dir/.$stem.prepared.publication_test_001" \
+                    "$dir/.$stem.prepared.publication_test_001.replacement"
+                mv -f -- \
+                    "$dir/.$stem.prepared.publication_test_001.replacement" \
+                    "$dir/.$stem.prepared.publication_test_001" ;;
+            commit-bytes)
+                printf 'tamper=true\n' \
+                    >>"$dir/.$stem.commit.publication_test_001" ;;
+            commit-blank-line)
+                printf '\n' \
+                    >>"$dir/.$stem.commit.publication_test_001" ;;
+        esac
+        if run_case recover "$kind" "$dir" >"$dir.recover.out" 2>&1; then
+            fail "$kind recovery accepted $mutation mutation"
+        fi
+    done
+done
+
+echo 'bootstrap Stage3 runner and candidate publication contract: PASS'
+exit 0
+
+: <<'__PUBLICATION_HARNESS_END__'
+__PUBLICATION_HARNESS__
+my ($mode, $kind, $dir) = @ARGV;
+defined($mode) && defined($kind) && defined($dir) &&
+    $kind =~ /\A(?:runner|candidate)\z/ && normalized_absolute($dir)
+    or die "invalid publication harness request\n";
+my $dir_fh = open_directory_walk($dir);
+my $run_id = 'publication_test_001';
+my ($stem, $leaf, $schema_stem, $text) = $kind eq 'runner'
+    ? ('runner-receipt', 'runner-receipt.env',
+        'simple-stage3-shared-runner',
+        "schema=simple-stage3-shared-runner-receipt-v1\n" .
+        "status=component-pass\nrun_id=$run_id\n")
+    : ('candidate-provenance-verification',
+        'candidate-provenance-verification.env',
+        'simple-stage3-provenance-verification',
+        "schema=simple-stage3-provenance-verification-v1\n" .
+        "status=pass\nrun_id=$run_id\n");
+my $prepared = ".$stem.prepared.$run_id";
+my $commit = ".$stem.commit.$run_id";
+if ($mode eq 'recover') {
+    accept_committed_canonical_at(
+        $dir_fh, $leaf, $prepared, $commit, $run_id, $schema_stem);
+    POSIX::_exit(0);
+}
+my %failpoint = map { $_ => 1 } qw(pass-inode-fsync prepared-file-fsync
+    prepared-parent-fsync prepared-cleanup commit-file-fsync
+    commit-parent-fsync commit-cleanup);
+$publication_failpoint = $mode if $failpoint{$mode};
+if ($mode eq 'prepared-collision') {
+    publish_exclusive_at(
+        $dir_fh, $prepared, "incumbent=true\n", 0600, 'incumbent');
+} elsif ($mode eq 'commit-collision') {
+    publish_exclusive_at(
+        $dir_fh, $commit, "incumbent=true\n", 0600, 'incumbent');
+} elsif ($mode eq 'replacement-before') {
+    rename($dir, "$dir.held") or die "replace before: $!\n";
+    mkdir($dir, 0700) or die "replacement before: $!\n";
+} elsif ($mode ne 'pass' && $mode ne 'pre-link-crash' &&
+        $mode ne 'post-link-crash' && $mode ne 'collision' &&
+        $mode ne 'replacement-after' && !$failpoint{$mode}) {
+    die "unknown publication harness mode\n";
+}
+my ($pass_fh) = prepare_canonical_pass_at(
+    $dir_fh, $stem, $run_id, $text, 0600, $schema_stem);
+POSIX::_exit(71) if $mode eq 'pre-link-crash';
+if ($mode eq 'replacement-after') {
+    rename($dir, "$dir.held") or die "replace after: $!\n";
+    mkdir($dir, 0700) or die "replacement after: $!\n";
+}
+if ($mode eq 'collision') {
+    publish_exclusive_at(
+        $dir_fh, $leaf, "incumbent=true\n", 0600, 'incumbent');
+}
+link_anonymous_final($pass_fh, $dir_fh, $leaf);
+kill(9, $$) if $mode eq 'post-link-crash';
+POSIX::_exit(0);
+__PUBLICATION_HARNESS_END__

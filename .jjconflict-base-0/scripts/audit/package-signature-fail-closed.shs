@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+# Package authenticity must use the checked cryptographic wrapper. Direct
+# externs, availability sentinels, and HMAC-as-Ed25519 fallbacks are forbidden.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+signing="$root/src/app/package.registry/signing.spl"
+verify="$root/src/app/package.registry/verify.spl"
+failed=0
+
+if grep -n -E 'extern fn rt_.*(sign|verify)|try_ed25519_(sign|verify)|hmac_sha256|hmac-sha256-fallback' \
+    "$signing" "$verify"; then
+    echo "package signature path contains a direct/fabricated crypto fallback" >&2
+    failed=1
+fi
+
+if ! grep -q 'ed25519_sign_pkcs8_checked' "$signing"; then
+    echo "package signing must route through checked Ed25519 SFFI" >&2
+    failed=1
+fi
+if ! grep -q 'ed25519_verify_native_checked' "$verify"; then
+    echo "package verification must route through checked Ed25519 SFFI" >&2
+    failed=1
+fi
+if ! grep -q 'return \[\]' "$verify"; then
+    echo "trust records without public keys must fail closed" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "package signature fail-closed audit: PASS"

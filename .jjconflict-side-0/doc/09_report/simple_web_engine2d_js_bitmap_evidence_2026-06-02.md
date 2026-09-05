@@ -1,0 +1,71 @@
+# Simple Web Engine2D JS Bitmap Evidence
+
+- status: pass
+- reason: pass
+- baseline runtime: node
+- scene: simple-web-engine2d-image-taskbar-command
+- dimensions: 96x64
+- iterations per trial: 25
+- trials: 1
+- simple checksum: 26296152649728
+- baseline checksum: 26296152649728
+- simple weighted checksum: 80792557145241600
+- baseline weighted checksum: 80792557145241600
+- mismatch count: 0
+- blur/tolerance used: false
+- optimized path: static-pixel-cache
+- simple cache hits: 25
+- simple cache stores: 1
+- best simple frame us: 7
+- best baseline frame us: 193
+- baseline/simple speedup x1000: 27571
+- simple ARGB path: build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- baseline ARGB path: build/simple_web_engine2d_js_bitmap_evidence_current/node-argb.json
+
+## Simple Output
+- ## trial 1
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Memory safety error [W1006]: mutation without mut capability (field_0): mutation requires `mut` capability on the receiver while lowering apply_decls at 301:15
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=25
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=657403816243200
+- frame_us=6
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=25
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=25
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=657403816243200
+- frame_us=7
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=25
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- blur_or_tolerance_used=false
+
+## Baseline Output
+- ## trial 1
+- renderer=node-simple-web-engine2d-baseline
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=25
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=657403816243200
+- frame_us=193
+- blur_or_tolerance_used=false

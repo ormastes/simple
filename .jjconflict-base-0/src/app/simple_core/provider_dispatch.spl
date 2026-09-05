@@ -1,0 +1,114 @@
+# Owned dynamic CLI dispatch lifecycle for simple-core.
+#
+# The SCI adapter supplies immutable identity and binding evidence. This owner
+# admits the exact artifact, queries the stable CLI interface, invokes it while
+# its library generation is pinned, then releases the pin before close.
+
+use app.cli_composition.{CliActivationRequestV1}
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK, PROVIDER_SESSION_OK,
+    ProviderAdmissionRequestV1, provider_admit_dynamic_v1,
+    provider_session_query_v1, provider_session_invoke_cli_v1,
+    provider_session_release_v1, provider_session_close_v1
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE, SIMPLE_CLI_COMMAND_V1_INTERFACE,
+    SIMPLE_CLI_RUN, SimpleProviderQueryV1
+}
+
+val SIMPLE_CORE_PROVIDER_DISPATCH_OK: i32 = 0
+val SIMPLE_CORE_PROVIDER_DISPATCH_INVALID: i32 = 1
+val SIMPLE_CORE_PROVIDER_DISPATCH_ADMISSION_FAILED: i32 = 2
+val SIMPLE_CORE_PROVIDER_DISPATCH_QUERY_FAILED: i32 = 3
+val SIMPLE_CORE_PROVIDER_DISPATCH_CALL_FAILED: i32 = 4
+val SIMPLE_CORE_PROVIDER_DISPATCH_RELEASE_FAILED: i32 = 5
+val SIMPLE_CORE_PROVIDER_DISPATCH_CLOSE_FAILED: i32 = 6
+
+class SimpleCoreProviderDispatchV1:
+    status: i32
+    command_status: i32
+    output: text
+    diagnostic: text
+    pin_released: bool
+    session_closed: bool
+
+fn _dispatch_error(status: i32, diagnostic: text) -> SimpleCoreProviderDispatchV1:
+    SimpleCoreProviderDispatchV1(status, -1, "", diagnostic, false, false)
+
+fn simple_core_dispatch_provider_v1(
+    activation: CliActivationRequestV1,
+    host_abi: u64,
+    granted_capability_bits: u64,
+) -> SimpleCoreProviderDispatchV1:
+    if not activation.ok or host_abi == 0:
+        return _dispatch_error(SIMPLE_CORE_PROVIDER_DISPATCH_INVALID, "provider-activation-invalid")
+
+    val capabilities = activation.requested_capability_bits as u64
+    val dynamic = provider_admit_dynamic_v1(ProviderAdmissionRequestV1(
+        artifact_path: activation.provider_artifact_path,
+        artifact_kind: activation.provider_artifact_kind,
+        expected_artifact_digest: activation.provider_artifact_digest,
+        granted_capability_bits: granted_capability_bits,
+        required_capability_bits: capabilities,
+        host_abi: host_abi,
+        minimum_host_abi: host_abi,
+        maximum_host_abi: host_abi,
+        requested_interface_major: activation.interface_major as u32,
+        requested_interface_minor: activation.interface_minor as u32,
+        provided_interface_major: activation.interface_major as u32,
+        provided_interface_minor: activation.interface_minor as u32,
+    ))
+    if dynamic.admission.status != PROVIDER_ADMISSION_OK:
+        return _dispatch_error(
+            SIMPLE_CORE_PROVIDER_DISPATCH_ADMISSION_FAILED,
+            "provider-admission-failed:" + dynamic.admission.reason,
+        )
+
+    val query = provider_session_query_v1(dynamic.session, SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: SIMPLE_CLI_COMMAND_V1_INTERFACE,
+        minimum_major: activation.interface_major as u32,
+        minimum_minor: activation.interface_minor as u32,
+        host_abi: host_abi,
+        target_offset: 0,
+        target_length: 0,
+        requested_capability_bits: capabilities,
+    ))
+    if query.status != PROVIDER_SESSION_OK:
+        val closed = provider_session_close_v1(dynamic.session) == PROVIDER_SESSION_OK
+        return SimpleCoreProviderDispatchV1(
+            SIMPLE_CORE_PROVIDER_DISPATCH_QUERY_FAILED, -1, "",
+            "provider-query-failed:" + query.reason, false, closed,
+        )
+
+    val invoked = provider_session_invoke_cli_v1(
+        dynamic.session, query, activation.canonical_command, activation.args,
+        SIMPLE_CLI_RUN, 1048576,
+    )
+    val released = provider_session_release_v1(dynamic.session, query.pin_id) == PROVIDER_SESSION_OK
+    val closed = if released: provider_session_close_v1(dynamic.session) == PROVIDER_SESSION_OK else: false
+    if invoked.status != PROVIDER_SESSION_OK:
+        return SimpleCoreProviderDispatchV1(
+            SIMPLE_CORE_PROVIDER_DISPATCH_CALL_FAILED, invoked.call.call_status, "",
+            "provider-call-failed:" + invoked.reason, released, closed,
+        )
+    if not released:
+        return SimpleCoreProviderDispatchV1(
+            SIMPLE_CORE_PROVIDER_DISPATCH_RELEASE_FAILED, invoked.call.call_status,
+            invoked.call.result.output, "provider-pin-release-failed", false, false,
+        )
+    if not closed:
+        return SimpleCoreProviderDispatchV1(
+            SIMPLE_CORE_PROVIDER_DISPATCH_CLOSE_FAILED, invoked.call.call_status,
+            invoked.call.result.output, "provider-session-close-failed", true, false,
+        )
+    SimpleCoreProviderDispatchV1(
+        SIMPLE_CORE_PROVIDER_DISPATCH_OK, invoked.call.call_status,
+        invoked.call.result.output, invoked.call.result.diagnostic_text, true, true,
+    )
+
+export SIMPLE_CORE_PROVIDER_DISPATCH_OK, SIMPLE_CORE_PROVIDER_DISPATCH_INVALID
+export SIMPLE_CORE_PROVIDER_DISPATCH_ADMISSION_FAILED, SIMPLE_CORE_PROVIDER_DISPATCH_QUERY_FAILED
+export SIMPLE_CORE_PROVIDER_DISPATCH_CALL_FAILED, SIMPLE_CORE_PROVIDER_DISPATCH_RELEASE_FAILED
+export SIMPLE_CORE_PROVIDER_DISPATCH_CLOSE_FAILED
+export SimpleCoreProviderDispatchV1, simple_core_dispatch_provider_v1

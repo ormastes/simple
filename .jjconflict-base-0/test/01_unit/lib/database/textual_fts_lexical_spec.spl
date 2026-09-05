@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+Purpose: Prove the textual database's BM25 lexical side-index (P9) scores
+whole-word matches distinctly from the pre-existing trigram `FtsIndex`, stays
+correct across row updates, and never lets trigram and BM25 retrieval modes
+collapse into each other.
+Audience: compiler and tooling engineers who maintain the textual database.
+"""
+# @req: REQ-LIB-DATABASE-FTS-LEXICAL-001
+
+use std.spipe.*
+use std.database.core.{SdnTable, SdnRow}
+use std.database.fts.{fts_build, fts_search}
+use std.database.fts_lexical.{fts_lexical_build, fts_lexical_update, search_lexical,
+                               lexical_tokenize, FtsLexicalIndex}
+
+fn make_row(value: text) -> SdnRow:
+    var row = SdnRow.empty()
+    row.set("body", value)
+    row
+
+fn make_table(rows: [text]) -> SdnTable:
+    val table = SdnTable.new("docs", ["body"])
+    for value in rows:
+        table.add_row(make_row(value))
+    table
+
+use std.spec.step
+
+describe "Textual DB BM25 lexical side-index":
+    it "tokenizes lowercase alphanumeric runs":
+        step("Verify: tokenizer lowercases and splits on punctuation")
+        # @req: REQ-LIB-DATABASE-FTS-LEXICAL-001
+        val tokens = lexical_tokenize("Hello, World! 2026")
+        expect(tokens.len()).to_equal(3)  # oracle: value fixed by the spec contract
+        expect(tokens[0]).to_equal("hello")
+        expect(tokens[1]).to_equal("world")
+        expect(tokens[2]).to_equal("2026")
+
+    it "ranks the document with the strongest term signal first":
+        step("Verify: BM25 ranks the term-dense document ahead of a sparse one")
+        # @req: REQ-LIB-DATABASE-FTS-LEXICAL-001
+        val table = make_table([
+            "database engine database database",
+            "database query tool",
+            "completely unrelated content here",
+        ])
+        val index = fts_lexical_build(table, "body")
+        val results = search_lexical(index, "database", 10).unwrap()
+        expect(results.len()).to_equal(2)  # oracle: rows 0 and 1 contain "database"; row 2 does not
+        expect(results[0].row_idx).to_equal(0)
+        expect(results[1].row_idx).to_equal(1)
+        # Absolute oracle: row 0 has 3 occurrences of "database" against a
+        # shorter/comparable document length, so it must score strictly
+        # higher than row 1's single occurrence, never merely "non-zero".
+        expect(results[0].score_milli > results[1].score_milli).to_equal(true)
+
+    it "returns no matches for a term absent from the corpus":
+        step("Verify: an absent term yields zero lexical hits")
+        # @req: REQ-LIB-DATABASE-FTS-LEXICAL-001
+        val table = make_table(["alpha beta", "gamma delta"])
+        val index = fts_lexical_build(table, "body")
+        val results = search_lexical(index, "omega", 10).unwrap()
+        expect(results.len()).to_equal(0)  # oracle: value fixed by the spec contract
+
+    it "reflects a row update in the next lexical search":
+        step("Verify: fts_lexical_update applies a one-row delta transactionally")
+        # @req: REQ-LIB-DATABASE-FTS-LEXICAL-001
+        val table = make_table(["original content here", "other row entirely"])
+        var index = fts_lexical_build(table, "body")
+
+        val before = search_lexical(index, "rewritten", 10).unwrap()
+        expect(before.len()).to_equal(0)  # oracle: value fixed by the spec contract
+
+        index = fts_lexical_update(index, 0, "original content here", "rewritten content here")
+
+        val after_new = search_lexical(index, "rewritten", 10).unwrap()
+        expect(after_new.len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(after_new[0].row_idx).to_equal(0)
+
+        val after_old = search_lexical(index, "original", 10).unwrap()
+        expect(after_old.len()).to_equal(0)  # oracle: old term must be fully retired, not left dangling
+
+    it "keeps trigram and BM25 lexical modes explicitly distinct":
+        step("Verify: trigram fts_search and lexical search_lexical disagree on a fuzzy-only query")
+        # @req: REQ-LIB-DATABASE-FTS-LEXICAL-001
+        # "wrld" is a 3-char substring fragment of "world" (fuzzy/trigram
+        # territory) but is not itself a whole word in any row, so the
+        # BM25 side-index must find nothing while the trigram index still
+        # scores partial substring overlap. If either mode silently fell
+        # back to the other, this pair of assertions would collapse to the
+        # same result.
+        val table = make_table(["hello world", "goodbye world"])
+        val trigram_index = fts_build(table, "body")
+        val lexical_index = fts_lexical_build(table, "body")
+
+        val trigram_results = fts_search(trigram_index, "wrld", 10)
+        expect(trigram_results.len() > 0).to_equal(true)  # oracle: trigram overlap exists ("wrl","rld")
+
+        val lexical_results = search_lexical(lexical_index, "wrld", 10).unwrap()
+        expect(lexical_results.len()).to_equal(0)  # oracle: no row tokenizes to the whole word "wrld"
+
+        # And the reverse: a real whole word scores under BM25 but is not
+        # required to enumerate every trigram-overlap row the same way.
+        val lexical_world = search_lexical(lexical_index, "world", 10).unwrap()
+        expect(lexical_world.len()).to_equal(2)  # oracle: both rows contain the whole word "world"
+
+    it "excludes deleted rows from num_docs and postings after removal":
+        step("Verify: removing all terms from a row retires it from future scoring")
+        # @req: REQ-LIB-DATABASE-FTS-LEXICAL-001
+        val table = make_table(["keyword only row", "second row keyword"])
+        var index = fts_lexical_build(table, "body")
+        expect(index.num_docs).to_equal(2)  # oracle: value fixed by the spec contract
+
+        index = fts_lexical_update(index, 0, "keyword only row", "")
+
+        val results = search_lexical(index, "keyword", 10).unwrap()
+        expect(results.len()).to_equal(1)  # oracle: only row 1 still contains "keyword"
+        expect(results[0].row_idx).to_equal(1)

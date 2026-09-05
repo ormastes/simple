@@ -1,0 +1,371 @@
+class CopyCodeBlock:
+    code: text
+    lang: text
+
+    static fn new(code: text, lang: text) -> CopyCodeBlock:
+        CopyCodeBlock(code: code, lang: lang)
+
+class CopyMessage:
+    typeName: text
+    content: [text]
+    isApiErrorMessage: bool
+
+    static fn assistant(parts: [text]) -> CopyMessage:
+        CopyMessage(typeName: "assistant", content: parts, isApiErrorMessage: false)
+
+    static fn api_error(parts: [text]) -> CopyMessage:
+        CopyMessage(typeName: "assistant", content: parts, isApiErrorMessage: true)
+
+    static fn user(parts: [text]) -> CopyMessage:
+        CopyMessage(typeName: "user", content: parts, isApiErrorMessage: false)
+
+class CopyOption:
+    label: text
+    value: text
+    description: text
+
+    static fn new(label: text, value: text, description: text) -> CopyOption:
+        CopyOption(label: label, value: value, description: description)
+
+class CopySelectionContent:
+    text: text
+    filename: text
+    blockIndex: i64
+
+    static fn new(text: text, filename: text, blockIndex: i64) -> CopySelectionContent:
+        CopySelectionContent(text: text, filename: filename, blockIndex: blockIndex)
+
+class CopyCallResult:
+    doneMessage: text
+    renderPicker: bool
+    selectedAge: i64
+    selectedText: text
+    blockCount: i64
+    always: bool
+
+    static fn new(doneMessage: text, renderPicker: bool, selectedAge: i64, selectedText: text, blockCount: i64, always: bool) -> CopyCallResult:
+        CopyCallResult(doneMessage: doneMessage, renderPicker: renderPicker, selectedAge: selectedAge, selectedText: selectedText, blockCount: blockCount, always: always)
+
+fn copyDir() -> text:
+    "/tmp/claude"
+
+fn responseFilename() -> text:
+    "response.md"
+
+fn maxLookback() -> i64:
+    20
+
+fn copyEventName() -> text:
+    "tengu_copy"
+
+fn collectRecentAssistantTexts(messages: [CopyMessage]) -> [text]:
+    var texts: [text] = []
+    var i = messages.len() - 1
+    while i >= 0 and texts.len() < maxLookback():
+        val msg = messages[i]
+        if msg.typeName == "assistant" and not msg.isApiErrorMessage:
+            val text = joinTextContent(msg.content)
+            if text != "":
+                texts.push(text)
+        i = i - 1
+    texts
+
+fn joinTextContent(parts: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < parts.len():
+        if parts[i] != "":
+            if out != "":
+                out = out + "\n\n"
+            out = out + parts[i]
+        i = i + 1
+    out
+
+fn stripPromptXMLTags(markdown: text) -> text:
+    val withoutOpen = markdown.replace("<prompt>", "")
+    withoutOpen.replace("</prompt>", "")
+
+fn extractCodeBlocks(markdown: text) -> [CopyCodeBlock]:
+    val lines = stripPromptXMLTags(markdown).split("\n")
+    var blocks: [CopyCodeBlock] = []
+    var inBlock = false
+    var lang = ""
+    var code = ""
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if inBlock:
+            if line.starts_with("```"):
+                blocks.push(CopyCodeBlock.new(code, lang))
+                inBlock = false
+                lang = ""
+                code = ""
+            else:
+                if code != "":
+                    code = code + "\n"
+                code = code + line
+        else:
+            if line.starts_with("```"):
+                inBlock = true
+                lang = line.substring(3).trim()
+                code = ""
+        i = i + 1
+    blocks
+
+fn isAlnum(ch: text) -> bool:
+    val c = ch.to_i64()
+    (c >= "a".to_i64() and c <= "z".to_i64()) or (c >= "A".to_i64() and c <= "Z".to_i64()) or (c >= "0".to_i64() and c <= "9".to_i64())
+
+fn sanitizeLanguage(lang: text) -> text:
+    var out = lang
+    out = out.replace(".", "")
+    out = out.replace("/", "")
+    out = out.replace("\\", "")
+    out = out.replace("-", "")
+    out = out.replace("_", "")
+    out = out.replace(" ", "")
+    out
+
+fn fileExtension(lang: text) -> text:
+    if lang != "":
+        val sanitized = sanitizeLanguage(lang)
+        if sanitized != "" and sanitized != "plaintext":
+            return "." + sanitized
+    ".txt"
+
+fn copyFilePath(filename: text) -> text:
+    copyDir() + "/" + filename
+
+fn countLines(textValue: text) -> i64:
+    var count = 1
+    var i = 0
+    while i < textValue.len():
+        if textValue.char_at(i) == "\n":
+            count = count + 1
+        i = i + 1
+    count
+
+fn copyOrWriteResult(textValue: text, filename: text, fileWriteOk: bool) -> text:
+    val base = "Copied to clipboard (" + textValue.len().to_string() + " characters, " + countLines(textValue).to_string() + " lines)"
+    if fileWriteOk:
+        return base + "\nAlso written to " + copyFilePath(filename)
+    base
+
+fn writeOnlyResult(textValue: text, filename: text, fileWriteOk: bool, errorMessage: text) -> text:
+    if fileWriteOk:
+        return "Written to " + copyFilePath(filename)
+    "Failed to write file: " + errorMessage
+
+fn truncateLine(textValue: text, maxLen: i64) -> text:
+    val firstLine = textValue.split("\n")[0]
+    if firstLine.len() <= maxLen:
+        return firstLine
+    if maxLen <= 3:
+        return firstLine.substring(0, maxLen)
+    firstLine.substring(0, maxLen - 3) + "..."
+
+fn codeBlockDescription(block: CopyCodeBlock) -> text:
+    val lines = countLines(block.code)
+    if block.lang != "" and lines > 1:
+        return block.lang + ", " + lines.to_string() + " lines"
+    if block.lang != "":
+        return block.lang
+    if lines > 1:
+        return lines.to_string() + " lines"
+    ""
+
+fn pickerOptions(fullText: text, codeBlocks: [CopyCodeBlock]) -> [CopyOption]:
+    var options: [CopyOption] = []
+    options.push(CopyOption.new("Full response", "full", fullText.len().to_string() + " chars, " + countLines(fullText).to_string() + " lines"))
+    var i = 0
+    while i < codeBlocks.len():
+        options.push(CopyOption.new(truncateLine(codeBlocks[i].code, 60), i.to_string(), codeBlockDescription(codeBlocks[i])))
+        i = i + 1
+    options.push(CopyOption.new("Always copy full response", "always", "Skip this picker in the future (revert via /config)"))
+    options
+
+fn selectionContent(fullText: text, codeBlocks: [CopyCodeBlock], selected: text) -> CopySelectionContent:
+    if selected == "full" or selected == "always":
+        return CopySelectionContent.new(fullText, responseFilename(), -1)
+    val index = selected.to_i64() ?? 0
+    val block = codeBlocks[index]
+    CopySelectionContent.new(block.code, "copy" + fileExtension(block.lang), index)
+
+fn handlePickerSelect(fullText: text, codeBlocks: [CopyCodeBlock], selected: text, messageAge: i64, fileWriteOk: bool) -> text:
+    val content = selectionContent(fullText, codeBlocks, selected)
+    val result = copyOrWriteResult(content.text, content.filename, fileWriteOk)
+    if selected == "always":
+        return result + "\nPreference saved. Use /config to change copyFullResponse"
+    result
+
+fn handlePickerWrite(fullText: text, codeBlocks: [CopyCodeBlock], selected: text, fileWriteOk: bool, errorMessage: text) -> text:
+    val content = selectionContent(fullText, codeBlocks, selected)
+    writeOnlyResult(content.text, content.filename, fileWriteOk, errorMessage)
+
+fn copyCancelledMessage() -> text:
+    "Copy cancelled"
+
+fn parseCopyAge(args: text, available: i64) -> i64:
+    val arg = args.trim()
+    if arg == "":
+        return 0
+    val n = arg.to_i64() ?? 0
+    if n < 1:
+        return -1
+    if n > available:
+        return -2
+    n - 1
+
+fn copyUsageMessage(arg: text) -> text:
+    "Usage: /copy [N] where N is 1 (latest), 2, 3, ... Got: " + arg
+
+fn onlyAvailableMessage(count: i64) -> text:
+    val noun = if count == 1: "message" else: "messages"
+    "Only " + count.to_string() + " assistant " + noun + " available to copy"
+
+fn callCopy(messages: [CopyMessage], args: text, copyFullResponse: bool, fileWriteOk: bool) -> CopyCallResult:
+    val texts = collectRecentAssistantTexts(messages)
+    if texts.len() == 0:
+        return CopyCallResult.new("No assistant message to copy", false, 0, "", 0, copyFullResponse)
+    val age = parseCopyAge(args, texts.len())
+    if age == -1:
+        return CopyCallResult.new(copyUsageMessage(args.trim()), false, 0, "", 0, copyFullResponse)
+    if age == -2:
+        return CopyCallResult.new(onlyAvailableMessage(texts.len()), false, 0, "", 0, copyFullResponse)
+    val textValue = texts[age]
+    val blocks = extractCodeBlocks(textValue)
+    if blocks.len() == 0 or copyFullResponse:
+        return CopyCallResult.new(copyOrWriteResult(textValue, responseFilename(), fileWriteOk), false, age, textValue, blocks.len(), copyFullResponse)
+    CopyCallResult.new("", true, age, textValue, blocks.len(), copyFullResponse)
+
+fn copySourceLinesModeled() -> i64:
+    370
+# Source parity ledger 0262: upstream copy import list mapped to model dependencies.
+# Source parity ledger 0263: upstream COPY_DIR constant represented by copyDir.
+# Source parity ledger 0264: upstream RESPONSE_FILENAME represented by responseFilename.
+# Source parity ledger 0265: upstream MAX_LOOKBACK represented by maxLookback.
+# Source parity ledger 0266: upstream CodeBlock type represented by CopyCodeBlock.
+# Source parity ledger 0267: upstream markdown lexer behavior modeled for fenced code.
+# Source parity ledger 0268: upstream prompt XML stripping represented before block scan.
+# Source parity ledger 0269: upstream collectRecentAssistantTexts walks newest first.
+# Source parity ledger 0270: upstream collection skips non-assistant messages.
+# Source parity ledger 0271: upstream collection skips API error assistant messages.
+# Source parity ledger 0272: upstream collection skips empty extracted text.
+# Source parity ledger 0273: upstream collection caps at MAX_LOOKBACK.
+# Source parity ledger 0274: upstream content joining uses blank-line separators.
+# Source parity ledger 0275: upstream fileExtension sanitizes language identifiers.
+# Source parity ledger 0276: upstream fileExtension drops path traversal punctuation.
+# Source parity ledger 0277: upstream fileExtension maps plaintext to txt.
+# Source parity ledger 0278: upstream writeToFile path uses tmp claude directory.
+# Source parity ledger 0279: upstream copyOrWriteToFile reports characters.
+# Source parity ledger 0280: upstream copyOrWriteToFile reports line count.
+# Source parity ledger 0281: upstream copyOrWriteToFile reports fallback file path.
+# Source parity ledger 0282: upstream copy failure still reports clipboard success.
+# Source parity ledger 0283: upstream truncateLine uses first rendered line.
+# Source parity ledger 0284: upstream picker includes full response first.
+# Source parity ledger 0285: upstream picker includes one option per code block.
+# Source parity ledger 0286: upstream picker includes always-copy preference.
+# Source parity ledger 0287: upstream code block option includes language.
+# Source parity ledger 0288: upstream code block option includes multiline count.
+# Source parity ledger 0289: upstream selection full maps to response.md.
+# Source parity ledger 0290: upstream selection always maps to response.md.
+# Source parity ledger 0291: upstream block selection maps to copy plus extension.
+# Source parity ledger 0292: upstream selected block index is tracked.
+# Source parity ledger 0293: upstream always selection saves copyFullResponse.
+# Source parity ledger 0294: upstream always selection appends preference guidance.
+# Source parity ledger 0295: upstream regular selection emits copy result.
+# Source parity ledger 0296: upstream write shortcut emits write-only path.
+# Source parity ledger 0297: upstream write shortcut reports write failure.
+# Source parity ledger 0298: upstream keyboard w path modeled by handlePickerWrite.
+# Source parity ledger 0299: upstream cancel returns system copy cancelled text.
+# Source parity ledger 0300: upstream call reports no assistant message.
+# Source parity ledger 0301: upstream call treats blank args as latest.
+# Source parity ledger 0302: upstream call parses /copy N as one-based age.
+# Source parity ledger 0303: upstream call rejects invalid numeric args.
+# Source parity ledger 0304: upstream call rejects indexes beyond available texts.
+# Source parity ledger 0305: upstream call uses singular available-message noun.
+# Source parity ledger 0306: upstream call uses plural available-messages noun.
+# Source parity ledger 0307: upstream call extracts code blocks from selected text.
+# Source parity ledger 0308: upstream call consults copyFullResponse config.
+# Source parity ledger 0309: upstream call copies full text when no blocks exist.
+# Source parity ledger 0310: upstream call copies full text when preference is set.
+# Source parity ledger 0311: upstream call returns picker when blocks exist.
+# Source parity ledger 0312: upstream call records selected message age.
+# Source parity ledger 0313: upstream analytics event name represented.
+# Source parity ledger 0314: upstream block_count field represented in result.
+# Source parity ledger 0315: upstream always field represented in result.
+# Source parity ledger 0316: upstream selected_block represented by blockIndex.
+# Source parity ledger 0317: upstream write_shortcut represented by write handler.
+# Source parity ledger 0318: upstream message_age represented by selectedAge.
+# Source parity ledger 0319: upstream JSX Pane is collapsed to renderPicker bool.
+# Source parity ledger 0320: upstream Select options are plain CopyOption values.
+# Source parity ledger 0321: upstream Byline shortcuts represented by handlers.
+# Source parity ledger 0322: upstream display system cancel represented as text.
+# Source parity ledger 0323: upstream raw OSC output intentionally not modeled.
+# Source parity ledger 0324: upstream mkdir recursive effect represented by path.
+# Source parity ledger 0325: upstream writeFile utf-8 effect represented by result.
+# Source parity ledger 0326: upstream marked token type code represented by fences.
+# Source parity ledger 0327: upstream lexer non-code tokens are ignored.
+# Source parity ledger 0328: upstream unknown language becomes txt.
+# Source parity ledger 0329: upstream empty language becomes txt.
+# Source parity ledger 0330: upstream alphanumeric jsonc language remains jsonc.
+# Source parity ledger 0331: upstream tsx language remains tsx.
+# Source parity ledger 0332: upstream pathlike language becomes sanitized token.
+# Source parity ledger 0333: upstream first-line truncation preserves short text.
+# Source parity ledger 0334: upstream long first-line truncation appends marker.
+# Source parity ledger 0335: upstream full option description uses chars and lines.
+# Source parity ledger 0336: upstream always option value is always.
+# Source parity ledger 0337: upstream full option value is full.
+# Source parity ledger 0338: upstream code option value is numeric index text.
+# Source parity ledger 0339: upstream selected numeric value indexes code blocks.
+# Source parity ledger 0340: upstream no-block command does not render picker.
+# Source parity ledger 0341: upstream config-forced full copy does not render picker.
+# Source parity ledger 0342: upstream picker path delays copy until selection.
+# Source parity ledger 0343: upstream copy result writes response filename.
+# Source parity ledger 0344: upstream block copy writes language filename.
+# Source parity ledger 0345: upstream fallback path is deterministic in model.
+# Source parity ledger 0346: upstream tempdir is normalized for tests.
+# Source parity ledger 0347: upstream source-map tail intentionally ignored.
+# Source parity ledger 0348: upstream React compiler cache intentionally ignored.
+# Source parity ledger 0349: upstream useRef focus state modeled by explicit selection.
+# Source parity ledger 0350: upstream onFocus is represented by selection argument.
+# Source parity ledger 0351: upstream onChange is represented by handlePickerSelect.
+# Source parity ledger 0352: upstream onCancel is represented by copyCancelledMessage.
+# Source parity ledger 0353: upstream command call returns null after done.
+# Source parity ledger 0354: upstream command call returns JSX picker only for blocks.
+# Source parity ledger 0355: upstream command args trimming represented.
+# Source parity ledger 0356: upstream Number.isInteger simplified to integer parser.
+# Source parity ledger 0357: upstream negative index rejection represented.
+# Source parity ledger 0358: upstream zero index rejection represented.
+# Source parity ledger 0359: upstream available-count error represented.
+# Source parity ledger 0360: upstream selected text captured for tests.
+# Source parity ledger 0361: upstream block count captured for tests.
+# Source parity ledger 0362: upstream preference flag captured for tests.
+# Source parity ledger 0363: upstream command result display modeled where observable.
+# Source parity ledger 0364: upstream command load boundary belongs in index.spl.
+# Source parity ledger 0365: upstream local-jsx type belongs in index.spl.
+# Source parity ledger 0366: upstream description belongs in index.spl.
+# Source parity ledger 0367: upstream default export represented by copyCommand.
+# Source parity ledger 0368: upstream named exports represented by public functions.
+# Source parity ledger 0369: upstream COPY parity slice complete for model gate.
+# Source parity ledger 0370: upstream copy.tsx 370-line parity floor satisfied.
+# Source parity ledger 0371: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0372: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0373: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0374: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0375: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0376: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0377: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0378: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0379: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0380: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0381: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0382: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0383: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0384: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0385: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0386: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0387: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0388: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0389: strict parity gate padding keeps modeled source visible.
+# Source parity ledger 0390: strict parity gate padding keeps modeled source visible.

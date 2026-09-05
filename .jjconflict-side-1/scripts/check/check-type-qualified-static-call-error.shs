@@ -1,0 +1,121 @@
+#!/bin/sh
+# Verifies that Type-qualified "static call" syntax (e.g. `f64.sin(0.0)`,
+# `i64.abs(-3)`) is rejected with a proper semantic error in BOTH the
+# interpreter/JIT-fallback lane and the native (--native / compile --native)
+# lane, in both statement and `print`-argument position, and never produces
+# silent-nothing output. Also runs a negative control (a form that must
+# succeed) to prove the check isn't vacuous.
+#
+# doc/08_tracking/bug/type_qualified_static_call_form_2026-08-11.md
+#
+# Usage: sh scripts/check/check-type-qualified-static-call-error.shs [path-to-simple-binary]
+set -u
+
+BIN="${1:-}"
+if [ -z "$BIN" ]; then
+    echo "ERROR — nothing was checked (no binary path given, arg1)" >&2
+    exit 2
+fi
+if [ ! -x "$BIN" ]; then
+    echo "ERROR — nothing was checked (binary not executable: $BIN)" >&2
+    exit 2
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+checked=0
+failed=0
+fail_names=""
+
+assert_errors() {
+    name="$1"
+    src="$2"
+    file="$WORK/$name.spl"
+    printf '%s\n' "$src" > "$file"
+
+    checked=$((checked + 1))
+    out="$($BIN "$file" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        failed=$((failed + 1))
+        fail_names="$fail_names $name(interp:exit0)"
+        return
+    fi
+    if [ -z "$out" ]; then
+        failed=$((failed + 1))
+        fail_names="$fail_names $name(interp:silent)"
+        return
+    fi
+    case "$out" in
+        *"undefined identifier"*|*"variable"*"not found"*|*semantic*) : ;;
+        *)
+            failed=$((failed + 1))
+            fail_names="$fail_names $name(interp:no-semantic-error-text)"
+            return
+            ;;
+    esac
+
+    checked=$((checked + 1))
+    out_native="$($BIN compile "$file" --native -o "$WORK/${name}_native" 2>&1)"
+    rc_native=$?
+    if [ "$rc_native" -eq 0 ]; then
+        failed=$((failed + 1))
+        fail_names="$fail_names $name(native:compile-exit0)"
+        return
+    fi
+    if [ -z "$out_native" ]; then
+        failed=$((failed + 1))
+        fail_names="$fail_names $name(native:silent)"
+        return
+    fi
+    case "$out_native" in
+        *"undefined identifier"*|*"variable"*"not found"*|*semantic*) : ;;
+        *)
+            failed=$((failed + 1))
+            fail_names="$fail_names $name(native:no-semantic-error-text)"
+            ;;
+    esac
+}
+
+assert_errors "print_form" 'fn main():
+    print f64.sin(0.0)'
+
+assert_errors "stmt_form" 'fn main():
+    f64.sin(0.0)
+    print "after"'
+
+assert_errors "typed_local" 'fn main():
+    val x = f64.sin(0.0)
+    print x'
+
+assert_errors "i64_abs" 'fn main():
+    print i64.abs(-3)'
+
+assert_errors "f64_sqrt" 'fn main():
+    print f64.sqrt(16.0)'
+
+# Negative control: a plain valid statement must succeed with the expected
+# output, proving this check isn't vacuously green.
+checked=$((checked + 1))
+ctrl_file="$WORK/negative_control.spl"
+printf 'fn main():\n    print 1 + 1\n' > "$ctrl_file"
+ctrl_out="$($BIN "$ctrl_file" 2>&1)"
+ctrl_rc=$?
+if [ "$ctrl_rc" -ne 0 ] || ! printf '%s' "$ctrl_out" | grep -q '^2$'; then
+    failed=$((failed + 1))
+    fail_names="$fail_names negative_control(unexpected:rc=$ctrl_rc)"
+fi
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked" >&2
+    exit 2
+fi
+
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $failed of $checked check(s) failed:$fail_names"
+    exit 1
+fi
+
+echo "PASS — $checked check(s), 0 failures"
+exit 0

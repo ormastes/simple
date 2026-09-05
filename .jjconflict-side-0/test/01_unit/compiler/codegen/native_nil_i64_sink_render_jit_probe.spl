@@ -1,0 +1,74 @@
+"""
+# Tagged nil at an i64 render sink — executable probe
+
+**Feature IDs:** #CODEGEN-NIL-I64-SINK
+**Category:** Compiler / Cranelift codegen
+**Research:** doc/08_tracking/bug/native_tagged_nil_prints_as_integer_3_in_i64_sink_2026-08-18.md
+
+## Why this is a runnable program and not an sspec `describe`
+
+An sspec body physically cannot execute under the Cranelift JIT (`describe` /
+`it` / `expect` are Rust interpreter intrinsics with no codegen lowering, and a
+spec file has no `fn main`, so the driver routes it to `evaluate_module`
+regardless of `SIMPLE_EXECUTION_MODE`). The defect this file pins is
+compiled-lane ONLY, so it must be reached out of process:
+
+    SIMPLE_EXECUTION_MODE=interpret <simple> run <this file>
+    SIMPLE_EXECUTION_MODE=jit       <simple> run <this file>
+
+Score the `CASE_*=` LINES, never the exit code.
+
+## What it pins
+
+A `Dict<text, i64>` MISS returns `RuntimeValue::NIL`, whose word is `3`
+(`TAG_SPECIAL=0b011 | SPECIAL_NIL=0`). `UnboxInt` lowers to
+`rt_value_unbox_int`, which is TOTAL — it shifts `TAG_INT` and passes every
+other tag through VERBATIM — so the nil word survives as a raw `3` in an
+i64 vreg, and `rt_raw_i64_to_string` renders it `"3"`. The tree-walking
+interpreter, the reference oracle, prints `nil`.
+
+The critical case is `three` — a dict entry whose STORED value really is `3`.
+It is what killed the first fix attempt (routing a "tainted" operand to
+`rt_opt_i64_to_string`): that made the miss print `nil` and simultaneously made
+the stored 3 print `nil`, merely flipping which side was wrong. Any candidate
+fix must satisfy `miss -> nil` AND `stored 3 -> 3` at the same time.
+
+`literal` never flows through `UnboxInt` at all and must stay `3`;
+`big` / `neg` pin that the fix does not disturb ordinary i64 rendering.
+"""
+
+fn main() -> void:
+    val d: Dict<text, i64> = {
+        "k": 7,
+        "three": 3,
+        "big": 9223372036854775807,
+        "neg": -7,
+    }
+
+    # The reproduction from the bug record: a dict MISS decoded into an i64
+    # vreg and rendered through an i64 interpolation sink.
+    val miss: i64 = d["nope"]
+    print("CASE_miss={miss}")
+
+    # An ordinary hit must be unaffected.
+    val hit: i64 = d["k"]
+    print("CASE_hit={hit}")
+
+    # A literal 3 never passes through UnboxInt, so it carries no nil
+    # provenance and must render as the integer 3.
+    val literal: i64 = 3
+    print("CASE_literal={literal}")
+
+    # THE case that flips a naive sink-side fix: a genuinely STORED 3 arrives
+    # at UnboxInt as the TAGGED word 24, not 3. It must render as 3, not nil.
+    val stored_three: i64 = d["three"]
+    print("CASE_stored_three={stored_three}")
+
+    # Boundary + sign: the fix must not perturb normal i64 rendering.
+    val big: i64 = d["big"]
+    print("CASE_big={big}")
+
+    val neg: i64 = d["neg"]
+    print("CASE_neg={neg}")
+
+    print("PROBE VERDICT: EMITTED")

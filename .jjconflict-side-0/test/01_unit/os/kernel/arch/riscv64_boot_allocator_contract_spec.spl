@@ -1,0 +1,37 @@
+# codex-system-test
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "RV64 boot allocator ownership contract":
+    it "keeps user frames and trap stacks out of the generic PMM":
+        step("Inspect the boot-lifetime RV64 allocation boundary")
+        val bridge = file_read("src/os/kernel/arch/riscv64/boot_allocator.spl")
+        val user_as = file_read("src/os/kernel/memory/user_address_space.spl")
+        val interrupt = file_read("src/os/kernel/arch/riscv64/interrupt.spl")
+        val reaper = file_read("src/os/kernel/scheduler/scheduler_task_mgmt.spl")
+
+        expect(bridge).to_contain("extern fn rt_riscv_noalloc_alloc_page() -> u64")
+        expect(bridge).to_contain("fn rv64_boot_alloc_page_frame() -> PageFrame?")
+        expect(bridge).to_contain("fn rv64_boot_alloc_contiguous_pages(count: u64) -> PhysAddr?")
+        expect(bridge).to_contain("next != base + index * RV64_BOOT_PAGE_SIZE")
+        expect(bridge).to_contain("rather than being incorrectly returned through the generic PMM")
+
+        val rv64_user_pos = user_as.index_of("@cfg(riscv64)\nfn alloc_user_page_frame")
+        val rv32_user_pos = user_as.index_of("@cfg(riscv32)")
+        expect(rv64_user_pos).to_be_greater_than(-1)
+        expect(rv32_user_pos).to_be_greater_than(rv64_user_pos)
+        val rv64_user = user_as.slice(rv64_user_pos, rv32_user_pos)
+        expect(rv64_user).to_contain("rv64_boot_alloc_page_frame")
+        expect(rv64_user).not.to_contain("pmm_alloc_page")
+
+        expect(interrupt).to_contain("rv64_boot_alloc_contiguous_pages(RV64_TASK_TRAP_STACK_PAGES)")
+        expect(interrupt).not.to_contain("pmm_alloc_pages")
+        expect(interrupt).not.to_contain("pmm_free_page_range")
+
+        val rv64_release_start = reaper.index_of("@cfg(riscv64)\npub fn sched_release_task_kernel_stack")
+        val generic_release_start = reaper.index_of("@cfg(not(riscv64))\npub fn sched_release_task_kernel_stack")
+        expect(rv64_release_start).to_be_greater_than(-1)
+        expect(generic_release_start).to_be_greater_than(rv64_release_start)
+        val rv64_release = reaper.slice(rv64_release_start, generic_release_start)
+        expect(rv64_release).to_contain("Retain a reaped RV64 trap stack until reset")
+        expect(rv64_release).not.to_contain("pmm_free_page_range")

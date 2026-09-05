@@ -1,0 +1,125 @@
+"""
+# x86_64 Scheduler Dispatch Contract Specification
+
+This is a hosted pure-Simple contract test.  It does not import or execute
+the timer interrupt, context-switch assembly, or CR3 write path.  It locks the
+decision boundary that a future ISR bridge may consume.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.arch.x86_64.scheduler_dispatch_contract.{
+    X86SchedulerTaskMetadata,
+    x86_scheduler_dispatch_decide,
+    x86_scheduler_dispatch_request,
+    x86_scheduler_task_metadata
+}
+use os.kernel.arch.x86_64.scheduler_dispatch.{
+    x86_scheduler_timer_tick_dispatch
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskContext}
+use os.kernel.types.task_types.{TaskState}
+
+fn running_task(task_id: u64, cr3: u64) -> X86SchedulerTaskMetadata:
+    x86_scheduler_task_metadata(task_id, cr3, TaskState.Running)
+
+fn selected_task(task_id: u64, cr3: u64) -> X86SchedulerTaskMetadata:
+    x86_scheduler_task_metadata(task_id, cr3, TaskState.Running)
+
+fn valid_request() -> os.kernel.arch.x86_64.scheduler_dispatch_contract.X86SchedulerDispatchRequest:
+    x86_scheduler_dispatch_request(
+        true,
+        running_task(11u64, 0x1000u64),
+        selected_task(12u64, 0x2000u64)
+    )
+
+fn empty_context() -> TaskContext:
+    TaskContext(
+        rax: 0u64, rbx: 0u64, rcx: 0u64, rdx: 0u64,
+        rsi: 0u64, rdi: 0u64, rbp: 0u64, rsp: 0u64,
+        r8: 0u64, r9: 0u64, r10: 0u64, r11: 0u64,
+        r12: 0u64, r13: 0u64, r14: 0u64, r15: 0u64,
+        rip: 0u64, rflags: 0x202u64, cs: 0x08u64,
+        ss: 0x10u64, fpu_state: 0u64
+    )
+
+describe "x86_64 scheduler dispatch contract":
+    it "accepts a timer handoff to a ready task with a distinct CR3":
+        val decision = x86_scheduler_dispatch_decide(valid_request())
+        expect(decision.accepted).to_be(true)
+        expect(decision.reason).to_equal("accepted")
+        expect(decision.task_id).to_equal(12u64)
+        expect(decision.cr3).to_equal(0x2000u64)
+        expect(decision.cr3_switch).to_be(true)
+
+    it "rejects a request that is not a timer handoff":
+        val request = x86_scheduler_dispatch_request(
+            false,
+            running_task(11u64, 0x1000u64),
+            selected_task(12u64, 0x2000u64)
+        )
+        val decision = x86_scheduler_dispatch_decide(request)
+        expect(decision.accepted).to_be(false)
+        expect(decision.reason).to_equal("timer_handoff_missing")
+        expect(decision.task_id).to_equal(0u64)
+        expect(decision.cr3).to_equal(0u64)
+        expect(decision.cr3_switch).to_be(false)
+
+    it "rejects a saved task that is not running":
+        val request = x86_scheduler_dispatch_request(
+            true,
+            x86_scheduler_task_metadata(11u64, 0x1000u64, TaskState.Ready),
+            selected_task(12u64, 0x2000u64)
+        )
+        val decision = x86_scheduler_dispatch_decide(request)
+        expect(decision.accepted).to_be(false)
+        expect(decision.reason).to_equal("saved_task_not_running")
+
+    it "rejects an incoming task not marked running by timer_tick":
+        val request = x86_scheduler_dispatch_request(
+            true,
+            running_task(11u64, 0x1000u64),
+            X86SchedulerTaskMetadata(task_id: 12u64, cr3: 0x2000u64, state: TaskState.Zombie)
+        )
+        val decision = x86_scheduler_dispatch_decide(request)
+        expect(decision.accepted).to_be(false)
+        expect(decision.reason).to_equal("next_task_not_running")
+
+    it "accepts same-address-space tasks and skips the CR3 write":
+        val request = x86_scheduler_dispatch_request(
+            true,
+            running_task(11u64, 0x3000u64),
+            selected_task(12u64, 0x3000u64)
+        )
+        val decision = x86_scheduler_dispatch_decide(request)
+        expect(decision.accepted).to_be(true)
+        expect(decision.reason).to_equal("accepted")
+        expect(decision.task_id).to_equal(12u64)
+        expect(decision.cr3).to_equal(0x3000u64)
+        expect(decision.cr3_switch).to_be(false)
+
+    it "rejects zero task IDs and CR3 roots fail closed":
+        val zero_saved_task = x86_scheduler_dispatch_decide(
+            x86_scheduler_dispatch_request(true, running_task(0u64, 0x1000u64), selected_task(12u64, 0x2000u64))
+        )
+        expect(zero_saved_task.accepted).to_be(false)
+        expect(zero_saved_task.reason).to_equal("saved_task_invalid")
+
+        val zero_next_cr3 = x86_scheduler_dispatch_decide(
+            x86_scheduler_dispatch_request(true, running_task(11u64, 0x1000u64), selected_task(12u64, 0u64))
+        )
+        expect(zero_next_cr3.accepted).to_be(false)
+        expect(zero_next_cr3.reason).to_equal("next_cr3_invalid")
+
+    it "runs the real scheduler tick but rejects the bootstrap identity task":
+        var scheduler = Scheduler.new_bootstrap()
+        val ipc = IpcManager.new()
+        val result = x86_scheduler_timer_tick_dispatch(
+            scheduler, ipc, empty_context()
+        )
+        expect(result.accepted).to_be(false)
+        expect(result.reason).to_equal("saved_cr3_invalid")
+        expect(result.context).to_be_nil()
+        expect(result.scheduler.get_tick_count()).to_equal(1u64)
+        expect(result.ipc.next_port_id).to_equal(ipc.next_port_id)

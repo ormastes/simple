@@ -1,0 +1,275 @@
+"""Stdio MCP protocol adapter over the canonical messaging MCP service."""
+
+use std.mcp_sdk.core.json.{LB, RB, jp, js}
+use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_serve, mcp_server_reset}
+use std.mcp_sdk.transport.transport.{Transport}
+use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal}
+use app.llm_caret.messaging.application.task_service.{TaskState}
+use app.llm_caret.messaging.domain.model.{MessageOrigin}
+use app.llm_caret.messaging.mcp.server.{MessagingMcpServer}
+use app.llm_caret.messaging.mcp.types.{ChatTool, ChatToolRequest, ChatToolResult}
+
+var PROTOCOL_SERVER: MessagingMcpServer = MessagingMcpServer.memory()
+var PROTOCOL_IDENTITY: text = "local-agent"
+var PROTOCOL_WORKSPACE: text = "default"
+var PROTOCOL_SCOPES: [text] = ["room:read", "room:write", "profile:read", "dm:write", "agent:control"]
+
+# App-local declaration is required for interpreter-hosted stdio. Persistent
+# store calls are still in-process in this adapter today; production composition
+# must front them with the compiled database carrier described by
+# database_execution.spl. Do not claim this protocol alone proves offloading.
+extern fn stdin_read_char() -> text
+
+class MessagingStdioTransport with Transport:
+    json_lines: bool
+    detected: bool
+    closed: bool
+
+    static fn new() -> MessagingStdioTransport:
+        MessagingStdioTransport(json_lines: false, detected: false, closed: false)
+
+    fn read_line() -> text:
+        var value = ""
+        while true:
+            val ch = stdin_read_char()
+            if ch == "": return value
+            value = value + ch
+            if ch == "\n": return value
+
+    fn read_chars(count: i64) -> text:
+        var value = ""
+        var i = 0
+        while i < count:
+            val ch = stdin_read_char()
+            if ch == "": return value
+            value = value + ch
+            i = i + 1
+        value
+
+    me read_message() -> text?:
+        if self.closed: return nil
+        var content_length = 0
+        while true:
+            val raw = self.read_line()
+            if raw == "": return nil
+            val line = raw.trim()
+            if line.starts_with("{"):
+                self.json_lines = true
+                self.detected = true
+                return Some(line)
+            if line.starts_with("Content-Length:"):
+                self.detected = true
+                content_length = line.substring(15).trim().to_i64() ?? 0
+            elif line == "" and content_length > 0:
+                return Some(self.read_chars(content_length))
+
+    fn write_message(message: text):
+        if self.closed: return
+        if self.json_lines:
+            print_raw(message + "\n")
+        else:
+            print_raw("Content-Length: " + message.len().to_text() + "\r\n\r\n" + message)
+
+    me close():
+        self.closed = true
+
+fn find_text(haystack: text, needle: text) -> i64:
+    if not haystack.contains(needle): return -1
+    var i = 0
+    while i <= haystack.len() - needle.len():
+        if haystack.substring(i, i + needle.len()) == needle: return i
+        i = i + 1
+    -1
+
+fn arg_text(json: text, key: text) -> text:
+    val marker = "\"" + key + "\":\""
+    val position = find_text(json, marker)
+    if position < 0: return ""
+    val start = position + marker.len()
+    var i = start
+    var escaped = false
+    while i < json.len():
+        val ch = json.substring(i, i + 1)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return json.substring(start, i)
+        i = i + 1
+    ""
+
+fn arg_i64(json: text, key: text, fallback: i64) -> i64:
+    val marker = "\"" + key + "\":"
+    val position = find_text(json, marker)
+    if position < 0: return fallback
+    val start = position + marker.len()
+    var end = start
+    while end < json.len():
+        val ch = json.substring(end, end + 1)
+        if not ((ch >= "0" and ch <= "9") or ch == "-"): break
+        end = end + 1
+    if end == start: return fallback
+    json.substring(start, end).to_i64() ?? fallback
+
+fn request_origin(value: text) -> MessageOrigin:
+    if value == "agent_answer": return MessageOrigin.AgentAnswer
+    if value == "agent_update": return MessageOrigin.AgentUpdate
+    if value == "system": return MessageOrigin.System
+    if value == "transport_bridge": return MessageOrigin.TransportBridge
+    if value == "command_result": return MessageOrigin.CommandResult
+    MessageOrigin.Human
+
+fn request_state(value: text) -> TaskState:
+    if value == "running": return TaskState.Running
+    if value == "waiting_input": return TaskState.WaitingInput
+    if value == "blocked": return TaskState.Blocked
+    if value == "completed": return TaskState.Completed
+    if value == "failed": return TaskState.Failed
+    if value == "canceled": return TaskState.Canceled
+    TaskState.Queued
+
+fn make_request(tool: ChatTool, args: text) -> ChatToolRequest:
+    val requested_identity = arg_text(args, "identity_id")
+    val requested_workspace = arg_text(args, "workspace_id")
+    val identity = if requested_identity == "": PROTOCOL_IDENTITY else: requested_identity
+    val workspace = if requested_workspace == "": PROTOCOL_WORKSPACE else: requested_workspace
+    val occurred = arg_i64(args, "occurred_at", 1)
+    val principal = AuthPrincipal(authenticated: PROTOCOL_IDENTITY != "", identity_id: PROTOCOL_IDENTITY,
+        workspace_id: PROTOCOL_WORKSPACE, scopes: PROTOCOL_SCOPES, expires_at: occurred + 3600000)
+    ChatToolRequest(tool: tool, principal: principal, workspace_id: workspace,
+        room_id: arg_text(args, "room_id"), identity_id: identity,
+        target_identity_id: arg_text(args, "target_identity_id"),
+        agent_id: arg_text(args, "agent_id"), message_id: arg_text(args, "message_id"),
+        task_id: arg_text(args, "task_id"), artifact_id: arg_text(args, "artifact_id"),
+        context_bundle_id: arg_text(args, "context_bundle_id"),
+        body: arg_text(args, "body"), detail: arg_text(args, "detail"),
+        idempotency_key: arg_text(args, "idempotency_key"),
+        after_seq: arg_i64(args, "after_seq", 0), limit: arg_i64(args, "limit", 50),
+        occurred_at: occurred, task_state: request_state(arg_text(args, "task_state")),
+        origin: request_origin(arg_text(args, "origin")))
+
+fn protocol_json_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+
+fn result_text(result: ChatToolResult) -> text:
+    var messages: [text] = []
+    for message in result.messages:
+        messages.push("{\"message_id\":\"" + protocol_json_escape(message.message_id.value) +
+            "\",\"room_id\":\"" + protocol_json_escape(message.room_id.value) +
+            "\",\"room_seq\":" + message.room_seq.to_text() +
+            ",\"sender_identity_id\":\"" + protocol_json_escape(message.sender_identity_id.value) +
+            "\",\"sender_agent_id\":\"" + protocol_json_escape(message.sender_agent_id) +
+            "\",\"body\":\"" + protocol_json_escape(message.body) +
+            "\",\"reply_to_id\":\"" + protocol_json_escape(message.reply_to_id) + "\"}")
+    var profiles: [text] = []
+    for profile in result.profiles:
+        profiles.push("{\"agent_id\":\"" + protocol_json_escape(profile.agent_id.value) +
+            "\",\"display_name\":\"" + protocol_json_escape(profile.display_name) +
+            "\",\"provider\":\"" + protocol_json_escape(profile.provider) +
+            "\",\"role_summary\":\"" + protocol_json_escape(profile.role_summary) +
+            "\",\"current_task_id\":\"" + protocol_json_escape(profile.current_task_id) + "\"}")
+    var tasks: [text] = []
+    for task in result.tasks:
+        tasks.push("{\"task_id\":\"" + protocol_json_escape(task.task_id) +
+            "\",\"assigned_agent_id\":\"" + protocol_json_escape(task.assigned_agent_id) +
+            "\",\"objective\":\"" + protocol_json_escape(task.objective) +
+            "\",\"progress_summary\":\"" + protocol_json_escape(task.progress_summary) + "\"}")
+    var artifacts: [text] = []
+    for artifact in result.artifacts:
+        artifacts.push("{\"artifact_id\":\"" + protocol_json_escape(artifact.artifact_id) +
+            "\",\"task_id\":\"" + protocol_json_escape(artifact.task_id) +
+            "\",\"media_type\":\"" + protocol_json_escape(artifact.media_type) +
+            "\",\"value\":\"" + protocol_json_escape(artifact.value) + "\"}")
+    LB() + jp("ok", if result.ok: "true" else: "false") +
+        "," + jp("status", result.status.to_text()) +
+        "," + jp("error", js(result.error)) +
+        "," + jp("duplicate", if result.duplicate: "true" else: "false") +
+        "," + jp("resource_id", js(result.resource_id)) +
+        "," + jp("evidence", js(result.evidence)) +
+        "," + jp("message_count", result.messages.len().to_text()) +
+        "," + jp("profile_count", result.profiles.len().to_text()) +
+        "," + jp("task_count", result.tasks.len().to_text()) +
+        "," + jp("artifact_count", result.artifacts.len().to_text()) +
+        "," + jp("messages", "[" + messages.join(",") + "]") +
+        "," + jp("profiles", "[" + profiles.join(",") + "]") +
+        "," + jp("tasks", "[" + tasks.join(",") + "]") +
+        "," + jp("artifacts", "[" + artifacts.join(",") + "]") + RB()
+
+fn call(tool: ChatTool, args: text) -> text:
+    result_text(PROTOCOL_SERVER.dispatch(make_request(tool, args)))
+
+fn schema_properties() -> text:
+    "\"workspace_id\":{\"type\":\"string\"},\"identity_id\":{\"type\":\"string\"}," +
+    "\"room_id\":{\"type\":\"string\"},\"target_identity_id\":{\"type\":\"string\"}," +
+    "\"agent_id\":{\"type\":\"string\"},\"message_id\":{\"type\":\"string\"}," +
+    "\"task_id\":{\"type\":\"string\"},\"artifact_id\":{\"type\":\"string\"}," +
+    "\"context_bundle_id\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}," +
+    "\"detail\":{\"type\":\"string\"},\"idempotency_key\":{\"type\":\"string\"}," +
+    "\"after_seq\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}," +
+    "\"occurred_at\":{\"type\":\"integer\"},\"task_state\":{\"type\":\"string\"}," +
+    "\"origin\":{\"type\":\"string\"}"
+
+fn tool_schema(required: [text]) -> text:
+    var quoted: [text] = []
+    for field in required: quoted.push("\"" + field + "\"")
+    "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" +
+        schema_properties() + "},\"required\":[" + quoted.join(",") + "]}"
+
+fn membership_schema() -> text: tool_schema(["room_id", "idempotency_key"])
+fn send_schema() -> text: tool_schema(["room_id", "message_id", "body", "idempotency_key"])
+fn read_schema() -> text: tool_schema(["room_id"])
+fn private_schema() -> text: tool_schema(["room_id", "target_identity_id", "idempotency_key"])
+fn assign_schema() -> text: tool_schema(["room_id", "message_id", "task_id", "agent_id", "body", "idempotency_key"])
+fn task_update_schema() -> text: tool_schema(["task_id", "task_state", "idempotency_key"])
+fn artifact_schema() -> text: tool_schema(["room_id", "task_id", "artifact_id", "body", "idempotency_key"])
+fn context_schema() -> text: tool_schema(["room_id", "context_bundle_id"])
+fn who_schema() -> text: tool_schema([])
+
+fn on_join(a: text) -> text: call(ChatTool.Join, a)
+fn on_leave(a: text) -> text: call(ChatTool.Leave, a)
+fn on_send(a: text) -> text: call(ChatTool.Send, a)
+fn on_read(a: text) -> text: call(ChatTool.Read, a)
+fn on_mark_read(a: text) -> text: call(ChatTool.MarkRead, a)
+fn on_who(a: text) -> text: call(ChatTool.Who, a)
+fn on_open_private(a: text) -> text: call(ChatTool.OpenPrivate, a)
+fn on_notify_all(a: text) -> text: call(ChatTool.NotifyAll, a)
+fn on_assign(a: text) -> text: call(ChatTool.Assign, a)
+fn on_task_update(a: text) -> text: call(ChatTool.TaskUpdate, a)
+fn on_publish_artifact(a: text) -> text: call(ChatTool.PublishArtifact, a)
+fn on_get_context(a: text) -> text: call(ChatTool.GetContext, a)
+
+fn register_messaging_tools():
+    mcp_server_reset()
+    mcp_server_init("llm-caret-messaging", "0.1.0")
+    mcp_server_tool("chat_join", "Join a canonical room", membership_schema, on_join)
+    mcp_server_tool("chat_leave", "Leave a canonical room", membership_schema, on_leave)
+    mcp_server_tool("chat_send", "Send a canonical room message", send_schema, on_send)
+    mcp_server_tool("chat_read", "Read canonical room history", read_schema, on_read)
+    mcp_server_tool("chat_mark_read", "Advance the local canonical read cursor", read_schema, on_mark_read)
+    mcp_server_tool("chat_who", "Query canonical agent profiles", who_schema, on_who)
+    mcp_server_tool("chat_open_private", "Open a private canonical direct room", private_schema, on_open_private)
+    mcp_server_tool("chat_notify_all", "Send an authorized canonical notify-all", send_schema, on_notify_all)
+    mcp_server_tool("chat_assign", "Assign a canonical task", assign_schema, on_assign)
+    mcp_server_tool("chat_task_update", "Update canonical task state", task_update_schema, on_task_update)
+    mcp_server_tool("chat_publish_artifact", "Publish a canonical task artifact", artifact_schema, on_publish_artifact)
+    mcp_server_tool("chat_get_context", "Read bounded canonical agent context", context_schema, on_get_context)
+
+fn configure_messaging_mcp_memory(identity_id: text, workspace_id: text, scopes: [text]):
+    PROTOCOL_SERVER.close()
+    PROTOCOL_SERVER = MessagingMcpServer.memory()
+    PROTOCOL_IDENTITY = identity_id
+    PROTOCOL_WORKSPACE = workspace_id
+    PROTOCOL_SCOPES = scopes
+
+fn serve_messaging_mcp(database_path: text, identity_id: text, workspace_id: text, scopes: [text]):
+    PROTOCOL_SERVER.close()
+    PROTOCOL_SERVER = MessagingMcpServer.open(database_path)
+    PROTOCOL_IDENTITY = identity_id
+    PROTOCOL_WORKSPACE = workspace_id
+    PROTOCOL_SCOPES = scopes
+    register_messaging_tools()
+    mcp_serve(MessagingStdioTransport.new())
+    PROTOCOL_SERVER.close()
+
+export register_messaging_tools, configure_messaging_mcp_memory, serve_messaging_mcp

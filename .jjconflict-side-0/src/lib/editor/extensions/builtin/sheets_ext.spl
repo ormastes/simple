@@ -1,0 +1,112 @@
+# Built-in Sheets Extension
+#
+# Declares the "sheets" document kind and demonstrates the sheet
+# function-registry capability (app.office.sheets.function_registry) with a
+# fixture function, DOUBLE(n) -> 2*n, standing in for a real third-party
+# extension. Registering it is a separate step (`sheets_ext_register_builtins`)
+# from the manifest (`sheets_ext_manifest`) because the extension host does
+# not yet execute extension entry code (see .spipe/ide_extension_kernel/state.md
+# "external entrypoint execution not wired (L6)") -- callers that want the
+# fixture function live must call the register step explicitly, same as the
+# real function_registry.spl API a real extension would use once L6 lands.
+
+use std.editor.extensions.manifest.{ExtensionManifest, ExtensionCommand, ExtensionCustomEditor,
+    ExtensionLanguage, extension_manifest_basic}
+use app.office.sheets.cell.{Cell, CellValue, cell_display_text, default_style}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.function_registry.{SheetFunctionDescriptor, sheet_function_registry_register,
+    sheet_function_registry_has, sheet_function_registry_evaluate}
+use common.office.number.{office_parse_signed_decimal_f64}
+
+fn sheets_ext_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "sheets-function-registry-demo", "1.0.0", "",
+        # "onFunctionRegistry:sheets" is never emitted anywhere in src/ (see
+        # doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
+        # Blocker 1) and stays only as documentation of the hypothetical event
+        # a real function-registry publisher would fire. "onCommand:<own
+        # command id>" is the event that actually makes this builtin lazily
+        # reachable: formula.spl calls
+        # extension_host_ensure_command_activated("sheets.function.double")
+        # before consulting the registry (see formula.spl's
+        # `_eval_function_call`).
+        ["onFunctionRegistry:sheets", "onCommand:sheets.function.double"],
+        [ExtensionCommand(id: "sheets.function.double", title: "Insert DOUBLE(n)", category: "Sheets Functions")],
+        # Declares the spreadsheet file kinds this extension backs. Without
+        # this, `ide_capabilities_live()` (src/app/ide/capabilities.spl) can
+        # never find a manifest for the "sheets" capability's
+        # compatible_with tags (excel/xlsx/tabular/csv) -- the manifest name
+        # and command id don't contain any of them -- so the capability was
+        # stuck reporting "declared" even though the extension is indexed
+        # and (today, via the eager builtin host) active. This is a pure
+        # discoverability/metadata fix; it does not touch activation.
+        [ExtensionLanguage(id: "sheets", extensions: [".xlsx", ".xls", ".csv"])]
+    )
+    m.contributes_custom_editors = [
+        ExtensionCustomEditor(id: "sheets.grid", document_kind: "sheets", priority: 0)
+    ]
+    m
+
+fn _double_descriptor() -> SheetFunctionDescriptor:
+    SheetFunctionDescriptor(
+        id: "DOUBLE",
+        display_name: "DOUBLE",
+        arg_count_min: 1,
+        arg_count_max: 1,
+        volatile: false,
+        description: "DOUBLE(n) -- doubles a number. Fixture function demonstrating the sheet function-registry extension capability."
+    )
+
+fn _double_eval(args: [[f64]], sheet: Sheet) -> Result<CellValue, text>:
+    if args.len() != 1 or args[0].len() != 1:
+        return Err("DOUBLE expects exactly one numeric argument")
+    Ok(CellValue.NumberVal(value: args[0][0] * 2.0))
+
+fn sheets_ext_register_builtins() -> bool:
+    """Activate the fixture extension: register DOUBLE into the sheet
+    function registry. Idempotent -- returns false (no-op) if DOUBLE is
+    already registered, same as any other duplicate-registration attempt."""
+    if sheet_function_registry_has("DOUBLE"):
+        return false
+    sheet_function_registry_register(_double_descriptor(), _double_eval)
+
+# Activation hook (L6b): the extension host now runs this automatically the
+# first time "sheets-function-registry-demo" activates (see
+# ExtensionHost.register_activation_hook / builtin/index.spl
+# builtin_activation_hooks) -- callers no longer need to call
+# sheets_ext_register_builtins() by hand for that path. The function itself
+# stays exported unchanged for callers (and existing tests) that exercise
+# the sheet function registry directly, without going through the host.
+fn sheets_ext_activation_hook(name: text) -> Result<text, text>:
+    if sheets_ext_register_builtins():
+        return Ok("sheets: DOUBLE registered")
+    Ok("sheets: DOUBLE already registered")
+
+# ---- typed kernel handler (registered via ExtensionHost.register_command_handler)
+#
+# Dispatch half of this builtin's `sheets.function.double` contribution. The
+# manifest declared the command from the start; without a handler the command
+# was declared-but-undispatchable, which is why the "sheets" capability's
+# honest ceiling in the IDE census (src/app/ide/capabilities.spl) was
+# "activatable" rather than "bound".
+#
+# This is NOT a stub: it evaluates through `sheet_function_registry_evaluate`,
+# the same registry entry point formula.spl's `_eval_function_call` uses for a
+# real cell formula, so the handler runs the extension's own already-existing
+# evaluator (`_double_eval`) rather than reimplementing it. Registration is
+# ensured first for the direct-dispatch path (a caller may dispatch before the
+# activation hook has run); it is idempotent.
+#
+# Payload: the numeric argument, e.g. "21". Result: the value DOUBLE(n)
+# evaluates to, rendered exactly as the sheet would display it ("42").
+fn sheets_function_double_handler(payload: text) -> Result<text, text>:
+    val arg = payload.trim()
+    if arg == "":
+        return Err("sheets.function.double payload: missing numeric argument")
+    sheets_ext_register_builtins()
+    val n = office_parse_signed_decimal_f64(arg)
+    match sheet_function_registry_evaluate("DOUBLE", [[n]], Sheet.new("sheets.function.double")):
+        case Ok(value):
+            Ok(cell_display_text(Cell(value: value, style: default_style())))
+        case Err(message):
+            Err(message)

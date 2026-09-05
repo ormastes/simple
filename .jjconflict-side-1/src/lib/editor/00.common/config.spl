@@ -1,0 +1,179 @@
+# Editor Configuration
+#
+# Layered config built on the shared `std.common.config_core` engine:
+# compiled default < vendor < machine < sysadmin < device < user < profile
+# < workspace < session < mandatory policy (mandatory is a CEILING, not merely
+# the last layer).
+#
+# The SDN line parser, the per-field type conversions and the constraint guards
+# that used to live here (`_ec_apply_sdn`, `_ec_apply_line`, `_ec_find_char`,
+# `_ec_parse_int`, `_ec_int_to_text`, `_ec_bool_to_text`, `_ec_digit_char`) were
+# duplicates of the core and have been deleted. All config stored in SDN format.
+
+use std.io_runtime.{file_read, file_write}
+use std.common.config_core.schema.{ConfigFieldDescriptor, config_field, config_int_field}
+use std.common.config_core.schema.{config_parse_int, config_int_to_text, config_bool_to_text, config_text_to_bool}
+use std.common.config_core.schema.{config_schema_index}
+use std.common.config_core.layers.{ConfigEntry, config_parse_layer, config_entries_to_sdn}
+use std.common.config_core.layers.{config_resolve, config_resolve_valid}
+
+struct EditorConfig:
+    theme: text
+    font_size: i64
+    tab_size: i64
+    insert_spaces: bool
+    word_wrap: bool
+    line_numbers: bool
+    minimap: bool
+    auto_save: bool
+    auto_save_delay_ms: i64
+    hover_delay_ms: i64
+
+# One configuration document plus the precedence layer it contributes to.
+struct EditorConfigSource:
+    path: text
+    layer: text
+
+fn editor_config_default() -> EditorConfig:
+    EditorConfig(
+        theme: "dark",
+        font_size: 14,
+        tab_size: 4,
+        insert_spaces: true,
+        word_wrap: false,
+        line_numbers: true,
+        minimap: false,
+        auto_save: false,
+        auto_save_delay_ms: 30000,
+        hover_delay_ms: 300
+    )
+
+# Typed loader schema for the ten `EditorConfig` fields.
+#
+# The int minimums are the faithful port of the guards `_ec_apply_line` used to
+# open-code (`n > 0` for font_size / tab_size / auto_save_delay_ms, `n >= 0` for
+# hover_delay_ms).
+#
+# `theme` is declared `text`, not `enum`, on purpose: the loader never enforced
+# the enum option list and this refactor must not change behaviour. The UI
+# metadata (label / description / category / enum options) stays in
+# `settings_schema.spl` — see the lane state file for the single-sourcing
+# follow-up.
+fn editor_config_schema() -> [ConfigFieldDescriptor]:
+    [
+        config_field(key: "theme", value_type: "text", default_value: "dark"),
+        config_int_field(key: "font_size", default_value: "14", min_value: 1),
+        config_int_field(key: "tab_size", default_value: "4", min_value: 1),
+        config_field(key: "insert_spaces", value_type: "bool", default_value: "true"),
+        config_field(key: "word_wrap", value_type: "bool", default_value: "false"),
+        config_field(key: "line_numbers", value_type: "bool", default_value: "true"),
+        config_field(key: "minimap", value_type: "bool", default_value: "false"),
+        config_field(key: "auto_save", value_type: "bool", default_value: "false"),
+        config_int_field(key: "auto_save_delay_ms", default_value: "30000", min_value: 1),
+        config_int_field(key: "hover_delay_ms", default_value: "300", min_value: 0)
+    ]
+
+# Text/bool fields resolve without validation: the old `value == "true"` form
+# accepted any token and mapped everything but "true" to false.
+fn _ec_text_of(entries: [ConfigEntry], key: text) -> text:
+    val schema = editor_config_schema()
+    val idx = config_schema_index(schema, key)
+    if idx < 0:
+        return ""
+    config_resolve(schema[idx], entries).value
+
+fn _ec_bool_of(entries: [ConfigEntry], key: text) -> bool:
+    config_text_to_bool(_ec_text_of(entries, key))
+
+# Int fields resolve with validation, so an out-of-range or non-numeric entry
+# silently leaves the lower layer in effect — exactly what the `n > 0` guards did.
+fn _ec_int_of(entries: [ConfigEntry], key: text) -> i64:
+    val schema = editor_config_schema()
+    val idx = config_schema_index(schema, key)
+    if idx < 0:
+        return 0
+    config_parse_int(config_resolve_valid(schema[idx], entries).value)
+
+# Build the struct ONCE from resolved entries (this replaces the ten
+# near-identical `EditorConfig(...)` literals `_ec_apply_line` used to rebuild).
+fn editor_config_from_entries(entries: [ConfigEntry]) -> EditorConfig:
+    EditorConfig(
+        theme: _ec_text_of(entries, "theme"),
+        font_size: _ec_int_of(entries, "font_size"),
+        tab_size: _ec_int_of(entries, "tab_size"),
+        insert_spaces: _ec_bool_of(entries, "insert_spaces"),
+        word_wrap: _ec_bool_of(entries, "word_wrap"),
+        line_numbers: _ec_bool_of(entries, "line_numbers"),
+        minimap: _ec_bool_of(entries, "minimap"),
+        auto_save: _ec_bool_of(entries, "auto_save"),
+        auto_save_delay_ms: _ec_int_of(entries, "auto_save_delay_ms"),
+        hover_delay_ms: _ec_int_of(entries, "hover_delay_ms")
+    )
+
+# Read every source document and resolve across the full layer order. Precedence
+# is by layer RANK, not by read order, so a mandatory-policy document pins its
+# keys even when a session or workspace document is read afterwards.
+fn editor_config_load_layers(sources: [EditorConfigSource]) -> EditorConfig:
+    var entries: [ConfigEntry] = []
+    var i = 0
+    while i < sources.len():
+        val source = sources[i]
+        val content = file_read(source.path) ?? ""
+        if content != "":
+            val parsed = config_parse_layer(content: content, layer: source.layer)
+            var j = 0
+            while j < parsed.len():
+                entries.push(parsed[j])
+                j = j + 1
+        i = i + 1
+    editor_config_from_entries(entries)
+
+fn editor_config_load(user_path: text, workspace_path: text) -> EditorConfig:
+    editor_config_load_layers([
+        EditorConfigSource(path: user_path, layer: "user"),
+        EditorConfigSource(path: workspace_path, layer: "workspace")
+    ])
+
+# Snapshot an existing config as entries at `layer`, so a mutation can be
+# expressed as "current state at a low layer + one entry at a higher layer".
+fn editor_config_to_entries(config: EditorConfig, layer: text) -> [ConfigEntry]:
+    val schema = editor_config_schema()
+    var result: [ConfigEntry] = []
+    var i = 0
+    while i < schema.len():
+        val key = schema[i].key
+        result.push(ConfigEntry(key: key, value: editor_config_get_by_key(config, key), layer: layer))
+        i = i + 1
+    result
+
+fn editor_config_get_by_key(config: EditorConfig, key: text) -> text:
+    if key == "theme":
+        return config.theme
+    if key == "font_size":
+        return config_int_to_text(config.font_size)
+    if key == "tab_size":
+        return config_int_to_text(config.tab_size)
+    if key == "insert_spaces":
+        return config_bool_to_text(config.insert_spaces)
+    if key == "word_wrap":
+        return config_bool_to_text(config.word_wrap)
+    if key == "line_numbers":
+        return config_bool_to_text(config.line_numbers)
+    if key == "minimap":
+        return config_bool_to_text(config.minimap)
+    if key == "auto_save":
+        return config_bool_to_text(config.auto_save)
+    if key == "auto_save_delay_ms":
+        return config_int_to_text(config.auto_save_delay_ms)
+    if key == "hover_delay_ms":
+        return config_int_to_text(config.hover_delay_ms)
+    ""
+
+fn editor_config_set_by_key(config: EditorConfig, key: text, value: text) -> EditorConfig:
+    var entries = editor_config_to_entries(config, "compiled_default")
+    entries.push(ConfigEntry(key: key, value: value, layer: "user"))
+    editor_config_from_entries(entries)
+
+fn editor_config_save(config: EditorConfig, path: text) -> bool:
+    val content = config_entries_to_sdn(editor_config_to_entries(config, "user"))
+    file_write(path, content)

@@ -1,0 +1,55 @@
+"""Capability bundle for pointer-free POSIX positioned writes over SOSIX FS v1.
+
+The POSIX owner may submit only after a kernel/service registration owner has
+provided every fact in this bundle.  Absence fails closed; this adapter never
+turns a userspace address into a `SosixBufferRef` and never emulates pwrite by
+moving an open-file-description cursor.
+"""
+
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.operation_adapter.SOSIX_FS_WRITE_AT
+use os.sosix.fs.registered_buffer_client_v1.{
+    SosixFsClientBufferTableV1,
+    SosixFsClientEndpointInputV1,
+    SosixFsClientRegistrationReceiptV1,
+    SosixFsClientOwnedSubmissionV1,
+    sosix_fs_client_plan_owned_submission_v1,
+    sosix_fs_client_reject_owned_submission_v1
+}
+
+pub val SOSIX_POSIX_PWRITE_PROVIDER_UNAVAILABLE_V1: i32 = -95
+
+pub struct SosixPosixPositionedWriteProviderV1:
+    available: bool
+    owner_process_id: u64
+    endpoints: SosixFsClientEndpointInputV1
+    table: SosixFsClientBufferTableV1
+    receipt: SosixFsClientRegistrationReceiptV1
+    file: SosixCapabilityRef
+    buffer: SosixBufferRef
+
+export SOSIX_POSIX_PWRITE_PROVIDER_UNAVAILABLE_V1
+export SosixPosixPositionedWriteProviderV1
+
+pub fn sosix_posix_plan_pwrite_v1(
+    provider: SosixPosixPositionedWriteProviderV1,
+    operation: SosixOperationId,
+    file_offset: u64,
+    buffer_offset: u64,
+    length: u64,
+    deadline_ns: u64,
+    request_token: u64
+) -> SosixFsClientOwnedSubmissionV1:
+    """Plan one true positioned write using only provider-certified identities."""
+    if not provider.available:
+        return sosix_fs_client_reject_owned_submission_v1(
+            "positioned-write-provider-unavailable",
+            SOSIX_POSIX_PWRITE_PROVIDER_UNAVAILABLE_V1)
+    sosix_fs_client_plan_owned_submission_v1(
+        provider.table, provider.owner_process_id, provider.endpoints,
+        provider.receipt, operation, SOSIX_FS_WRITE_AT, provider.file,
+        provider.buffer, file_offset, buffer_offset, length, deadline_ns,
+        request_token)
+
+export sosix_posix_plan_pwrite_v1

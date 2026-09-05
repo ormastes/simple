@@ -1,0 +1,44 @@
+# Fixed native-smoke static server with no env or file I/O.
+#
+# This isolates native TCP server performance from env/file runtime issues.
+
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_read_line(fd: i64) -> text?
+extern fn rt_io_tcp_drain_line(fd: i64) -> i64
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+
+fn drain_headers(fd: i64):
+    var done = false
+    while not done:
+        val line = rt_io_tcp_read_line(fd)
+        if line == nil:
+            done = true
+        else:
+            val text_line = line as text
+            if text_line == "" or text_line == "\n" or text_line == "\r\n":
+                done = true
+
+fn main():
+    val listener = rt_io_tcp_bind("127.0.0.1:18083")
+    if listener < 0:
+        print "[simple-static-fixed-error] bind"
+        return
+
+    val response = "HTTP/1.1 200 OK\r\nServer: SimpleStaticFixed\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello world\n"
+    print "[simple-static-fixed-ready] addr=127.0.0.1:18083 requests=128"
+
+    var served: i64 = 0
+    while served < 128:
+        val fd = rt_io_tcp_accept(listener)
+        if fd >= 0:
+            val request_len = rt_io_tcp_drain_line(fd)
+            if request_len > 0:
+                drain_headers(fd)
+                val _written = rt_io_tcp_write_text(fd, response)
+            val _closed = rt_io_tcp_close(fd)
+            served = served + 1
+
+    val _listener_closed = rt_io_tcp_close(listener)
+    print "[simple-static-fixed-done] served={served}"

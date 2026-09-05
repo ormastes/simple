@@ -1,0 +1,72 @@
+# @cover src/os/sosix/fs/registry_lifecycle_v1.spl 80%
+"""# Persistent SOSIX FS registry lifecycle v1
+
+The lifecycle owner bounds the registry and accepts control transitions only
+from the authenticated caller and current service generation. Retirement
+advances the slot generation, so stale identities cannot become live again.
+"""
+
+use std.spec.*
+use os.sosix.core.capability_ref.SosixCapabilityRef
+use os.sosix.fs.service_adapter_v1.{SOSIX_FS_SERVICE_RIGHT_READ_V1, SOSIX_FS_SERVICE_RIGHT_WRITE_V1}
+use os.sosix.fs.registry_lifecycle_v1.*
+
+fn _facts(process_id: u64, generation: u32) -> SosixFsRegistryControlFactsV1:
+    SosixFsRegistryControlFactsV1(
+        caller_authenticated: true, caller_process_id: process_id,
+        service_endpoint: 71, service_generation: generation)
+
+describe "SOSIX FS persistent registry lifecycle v1":
+    it "registers refreshes looks up and retires within one caller generation":
+        val initial = sosix_fs_registry_owner_v1(71, 4)
+        val cap = SosixCapabilityRef(slot: 3, generation: 8)
+        val registered = sosix_fs_registry_register_capability_v1(
+            initial, _facts(42, 4), cap, 91, SOSIX_FS_SERVICE_RIGHT_READ_V1)
+        expect(registered.accepted).to_be(true)
+
+        val refreshed = sosix_fs_registry_refresh_capability_v1(
+            registered.owner, _facts(42, 4), cap, 92,
+            SOSIX_FS_SERVICE_RIGHT_READ_V1 | SOSIX_FS_SERVICE_RIGHT_WRITE_V1)
+        expect(refreshed.accepted).to_be(true)
+        expect(sosix_fs_registry_lookup_capability_v1(
+            refreshed.owner, _facts(42, 4), cap,
+            SOSIX_FS_SERVICE_RIGHT_WRITE_V1).accepted).to_be(true)
+
+        val retired = sosix_fs_registry_retire_capability_v1(
+            refreshed.owner, _facts(42, 4), cap)
+        expect(retired.accepted).to_be(true)
+        expect(retired.capability.generation).to_equal(9)
+        expect(sosix_fs_registry_lookup_capability_v1(
+            retired.owner, _facts(42, 4), cap,
+            SOSIX_FS_SERVICE_RIGHT_READ_V1).accepted).to_be(false)
+
+    it "rejects another caller and a stale service generation without mutation":
+        val initial = sosix_fs_registry_owner_v1(71, 4)
+        val cap = SosixCapabilityRef(slot: 3, generation: 8)
+        val wrong_caller = sosix_fs_registry_register_capability_v1(
+            initial, _facts(99, 4), cap, 91, SOSIX_FS_SERVICE_RIGHT_READ_V1)
+        # Caller 99 is authenticated and may own its own entry; caller 42 cannot refresh it.
+        val stolen = sosix_fs_registry_refresh_capability_v1(
+            wrong_caller.owner, _facts(42, 4), cap, 91, SOSIX_FS_SERVICE_RIGHT_WRITE_V1)
+        expect(stolen.accepted).to_be(false)
+        expect(stolen.reason).to_equal("capability-owner-mismatch")
+
+        val stale_service = sosix_fs_registry_register_capability_v1(
+            initial, _facts(42, 3), cap, 91, SOSIX_FS_SERVICE_RIGHT_READ_V1)
+        expect(stale_service.accepted).to_be(false)
+        expect(stale_service.owner.registry.capabilities.len()).to_equal(0)
+
+    it "requires the retirement generation before reusing a bounded slot":
+        val initial = sosix_fs_registry_owner_v1(71, 4)
+        val cap = SosixCapabilityRef(slot: 3, generation: 8)
+        val registered = sosix_fs_registry_register_capability_v1(
+            initial, _facts(42, 4), cap, 91, SOSIX_FS_SERVICE_RIGHT_READ_V1)
+        val retired = sosix_fs_registry_retire_capability_v1(
+            registered.owner, _facts(42, 4), cap)
+        val stale = sosix_fs_registry_register_capability_v1(
+            retired.owner, _facts(42, 4), cap, 91, SOSIX_FS_SERVICE_RIGHT_READ_V1)
+        expect(stale.accepted).to_be(false)
+        val next = sosix_fs_registry_register_capability_v1(
+            retired.owner, _facts(42, 4), retired.capability, 91,
+            SOSIX_FS_SERVICE_RIGHT_READ_V1)
+        expect(next.accepted).to_be(true)

@@ -1,0 +1,60 @@
+# Fail-closed activation boundary for SimpleProviderQueryV1.
+#
+# Loader admission proves artifact identity, capability policy, interface
+# compatibility, symbol presence, and process-callability.  It is deliberately
+# not equivalent to invoking the provider query ABI.
+#
+# The exact packed query-call bridge and owned dynamic session now exist.
+# Naked evidence-only admission deliberately remains non-activating because it
+# has no library owner. `provider_activate_session_v1` is the executable path:
+# it queries through the retained generation and returns an owner-issued pin.
+
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK,
+    ProviderAdmissionResultV1, ProviderDynamicAdmissionV1, ProviderSessionQueryV1,
+    provider_session_query_v1
+}
+use std.nogc_sync_mut.composition.provider_contract.{SimpleProviderQueryV1}
+
+val PROVIDER_ACTIVATION_OK: i32 = 0
+val PROVIDER_ACTIVATION_NOT_ADMITTED: i32 = 1
+val PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE: i32 = 2
+
+val PROVIDER_ACTIVATION_BLOCKER_OWNER: text = "src/os/smf/provider_loader.spl"
+val PROVIDER_ACTIVATION_BLOCKER: text = "naked-admission-has-no-owned-loader-session"
+
+class ProviderActivationResultV1:
+    status: i32
+    activated: bool
+    reason: text
+    blocker_owner: text
+
+fn provider_activate_admitted_v1(admission: ProviderAdmissionResultV1) -> ProviderActivationResultV1:
+    if admission.status != PROVIDER_ADMISSION_OK or not admission.process_callable or admission.query_symbol_address <= 0:
+        return ProviderActivationResultV1(
+            status: PROVIDER_ACTIVATION_NOT_ADMITTED,
+            activated: false,
+            reason: "provider-not-admitted",
+            blocker_owner: ""
+        )
+
+    # Do not let a provider-owned handle escape naked evidence-only admission.
+    # Callers with ProviderDynamicAdmissionV1 must use the session path below.
+    ProviderActivationResultV1(
+        status: PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE,
+        activated: false,
+        reason: PROVIDER_ACTIVATION_BLOCKER,
+        blocker_owner: PROVIDER_ACTIVATION_BLOCKER_OWNER
+    )
+
+fn provider_activate_session_v1(
+    dynamic: ProviderDynamicAdmissionV1,
+    request: SimpleProviderQueryV1
+) -> ProviderSessionQueryV1:
+    provider_session_query_v1(dynamic.session, request)
+
+export PROVIDER_ACTIVATION_OK, PROVIDER_ACTIVATION_NOT_ADMITTED
+export PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE
+export PROVIDER_ACTIVATION_BLOCKER_OWNER, PROVIDER_ACTIVATION_BLOCKER
+export ProviderActivationResultV1, provider_activate_admitted_v1
+export provider_activate_session_v1

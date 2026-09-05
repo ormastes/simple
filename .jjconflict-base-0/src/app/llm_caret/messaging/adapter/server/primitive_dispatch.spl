@@ -1,0 +1,328 @@
+"""HTTP-independent primitive messaging application dispatcher."""
+
+use app.llm_caret.messaging.adapter.server.api.{ApiResponse, parse_api_route, idempotency_key_valid, json_response, error_response, accepted_response}
+use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal, authorize, has_scope}
+use app.llm_caret.messaging.composition.{MessagingRuntime}
+use app.llm_caret.messaging.domain.model.{RoomKind, MessageOrigin, RoomMessage, AgentProfile, AgentStatus, AgentBinding, AgentHandler, messaging_id}
+use app.llm_caret.messaging.application.enrollment.{EnrollmentService}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore}
+use app.llm_caret.messaging.domain.receipt.{receipt_tag}
+
+struct PrimitiveRequest:
+    method: text
+    path: text
+    body: text
+    idempotency_key: text
+    principal: AuthPrincipal
+    occurred_at: i64
+
+fn primitive_http_find(haystack: text, needle: text) -> i64:
+    if not haystack.contains(needle): return -1
+    var i = 0
+    while i <= haystack.len() - needle.len():
+        if haystack.substring(i, i + needle.len()) == needle: return i
+        i = i + 1
+    -1
+
+fn primitive_http_text(json: text, key: text) -> text:
+    val marker = "\"" + key + "\":\""
+    val position = primitive_http_find(json, marker)
+    if position < 0: return ""
+    val start = position + marker.len()
+    var i = start
+    var escaped = false
+    while i < json.len():
+        val ch = json.substring(i, i + 1)
+        if escaped: escaped = false
+        elif ch == "\\": escaped = true
+        elif ch == "\"": return json.substring(start, i)
+        i = i + 1
+    ""
+
+fn primitive_http_i64(json: text, key: text, fallback: i64) -> i64:
+    val marker = "\"" + key + "\":"
+    val position = primitive_http_find(json, marker)
+    if position < 0: return fallback
+    val start = position + marker.len()
+    var finish = start
+    while finish < json.len():
+        val ch = json.substring(finish, finish + 1)
+        if not ((ch >= "0" and ch <= "9") or ch == "-"): break
+        finish = finish + 1
+    if finish == start: return fallback
+    json.substring(start, finish).to_i64() ?? fallback
+
+fn primitive_agent_handler(value: text) -> AgentHandler:
+    if value == "subagent": AgentHandler.Subagent
+    elif value == "advisor": AgentHandler.Advisor
+    elif value == "router": AgentHandler.Router
+    else: AgentHandler.Main
+
+fn primitive_http_query_i64(path: text, key: text, fallback: i64) -> i64:
+    val marker = key + "="
+    val position = primitive_http_find(path, marker)
+    if position < 0: return fallback
+    val start = position + marker.len()
+    var finish = start
+    while finish < path.len() and path.substring(finish, finish + 1) >= "0" and path.substring(finish, finish + 1) <= "9":
+        finish = finish + 1
+    path.substring(start, finish).to_i64() ?? fallback
+
+fn primitive_http_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+fn primitive_http_kind(value: text) -> RoomKind:
+    if value == "private": return RoomKind.Private
+    if value == "direct": return RoomKind.Direct
+    if value == "task": return RoomKind.Task
+    RoomKind.Channel
+
+fn primitive_http_messages(messages: [RoomMessage], store: PureSqlMessagingStore) -> text:
+    var items: [text] = []
+    for message in messages:
+        var tags: [text] = []
+        for receipt in store.receipts(message.message_id.value):
+            tags.push("\"" + primitive_http_escape(receipt_tag(receipt)) + "\"")
+        items.push("{\"message_id\":\"" + primitive_http_escape(message.message_id.value) +
+            "\",\"room_seq\":" + message.room_seq.to_text() + ",\"sender_identity_id\":\"" +
+            primitive_http_escape(message.sender_identity_id.value) + "\",\"body\":\"" +
+            primitive_http_escape(message.body) + "\",\"receipt_tags\":[" + tags.join(",") + "]}")
+    "{\"messages\":[" + items.join(",") + "]}"
+
+class PrimitiveMessagingApplication:
+    runtime: MessagingRuntime
+    enrollment: EnrollmentService
+    enrollment_secret: text
+    pending_email_token: text
+    pending_email: text
+
+    static fn memory() -> PrimitiveMessagingApplication:
+        val runtime = MessagingRuntime.memory()
+        PrimitiveMessagingApplication(runtime: runtime,
+            enrollment: EnrollmentService.restore(runtime.store.invites(), runtime.store.accounts()),
+            enrollment_secret: "test-enrollment-secret", pending_email_token: "", pending_email: "")
+
+    static fn open(path: text) -> PrimitiveMessagingApplication:
+        val runtime = MessagingRuntime.open(path)
+        PrimitiveMessagingApplication(runtime: runtime,
+            enrollment: EnrollmentService.restore(runtime.store.invites(), runtime.store.accounts()),
+            enrollment_secret: "", pending_email_token: "", pending_email: "")
+
+    me configure_enrollment_secret(secret: text):
+        self.enrollment_secret = secret
+
+    me take_pending_email_token() -> text:
+        val token = self.pending_email_token
+        self.pending_email_token = ""
+        token
+
+    me close() -> bool: self.runtime.close()
+
+    me handle(request: PrimitiveRequest) -> ApiResponse:
+        if request.body.len() > 1048576: return error_response(413, "request_too_large", "maximum body is 1 MiB")
+        val route = parse_api_route(request.method, request.path)
+        if not route.matched: return error_response(404, "route_not_found", request.path)
+        if route.required_scope != "":
+            val auth = authorize(request.principal, route.required_scope, request.principal.workspace_id, request.occurred_at)
+            if not auth.allowed: return error_response(auth.status, auth.error, route.operation)
+        if not idempotency_key_valid(request.method, request.idempotency_key):
+            return error_response(400, "stable_idempotency_key_required", route.operation)
+
+        if route.operation == "invite_create" or route.operation == "email_session_start":
+            val invite_id = primitive_http_text(request.body, "invite_id")
+            val email = primitive_http_text(request.body, "email")
+            val issued = self.enrollment.issue_invite(invite_id, email, self.enrollment_secret,
+                request.occurred_at, 900000, 5)
+            if not issued.accepted: return error_response(400, issued.error, "email_enrollment")
+            for invite in self.enrollment.invites:
+                if invite.invite_id == invite_id: self.runtime.store.put_invite(invite)
+            self.pending_email_token = issued.delivery_token
+            self.pending_email = email
+            return accepted_response("invite", invite_id)
+
+        if route.operation == "invite_accept" or route.operation == "email_session_verify":
+            val token = if route.operation == "invite_accept": route.resource_id else: primitive_http_text(request.body, "token")
+            val accepted = self.enrollment.accept_token(token, request.occurred_at)
+            for invite in self.enrollment.invites: self.runtime.store.put_invite(invite)
+            if not accepted.accepted: return error_response(400, accepted.error, "email_enrollment")
+            for account in self.enrollment.accounts:
+                self.runtime.store.put_account(account)
+                self.runtime.register_human_identity(request.principal.workspace_id, account.identity_id,
+                    account.account_id, account.email, account.created_at)
+            return json_response(201, "{\"account_id\":\"" + primitive_http_escape(accepted.account_id) +
+                "\",\"identity_id\":\"" + primitive_http_escape(accepted.identity_id) + "\"}")
+
+        if route.operation == "room_create":
+            val room_id = primitive_http_text(request.body, "room_id")
+            val mutation = self.runtime.create_canonical_room(room_id, request.principal.workspace_id,
+                primitive_http_kind(primitive_http_text(request.body, "kind")),
+                primitive_http_text(request.body, "name"), primitive_http_text(request.body, "topic"),
+                primitive_http_text(request.body, "visibility"), primitive_http_text(request.body, "mode"),
+                request.principal.identity_id, request.occurred_at)
+            if not mutation.accepted: return error_response(400, mutation.error, "room_create")
+            return accepted_response("room", room_id)
+
+        if route.operation == "direct_room_create":
+            val room_id = primitive_http_text(request.body, "room_id")
+            val target = primitive_http_text(request.body, "target_identity_id")
+            val mutation = self.runtime.open_direct_room(room_id, request.principal.workspace_id,
+                request.principal.identity_id, target, request.occurred_at)
+            if not mutation.accepted: return error_response(400, mutation.error, "direct_room_create")
+            return accepted_response("room", room_id)
+
+        if route.operation == "room_get":
+            val room = self.runtime.store.room(route.resource_id)
+            if room.room_id.value == "": return error_response(404, "room_not_found", route.resource_id)
+            val visible = self.runtime.read_messages(route.resource_id, request.principal.identity_id, 0, 1)
+            if room.visibility != "public" and visible.len() == 0:
+                var member = false
+                for membership in self.runtime.memberships:
+                    if membership.room_id == route.resource_id and membership.identity_id == request.principal.identity_id:
+                        member = true
+                if not member: return error_response(403, "room_access_denied", route.resource_id)
+            return json_response(200, "{\"room_id\":\"" + primitive_http_escape(room.room_id.value) +
+                "\",\"name\":\"" + primitive_http_escape(room.name) + "\",\"visibility\":\"" +
+                primitive_http_escape(room.visibility) + "\",\"mode\":\"" + primitive_http_escape(room.mode) + "\"}")
+
+        if route.operation == "room_list":
+            var items: [text] = []
+            for room in self.runtime.store.rooms():
+                if room.workspace_id.value == request.principal.workspace_id:
+                    var visible = room.visibility == "public"
+                    for membership in self.runtime.memberships:
+                        if membership.room_id == room.room_id.value and membership.identity_id == request.principal.identity_id:
+                            visible = true
+                    if visible:
+                        items.push("{\"room_id\":\"" + primitive_http_escape(room.room_id.value) +
+                            "\",\"name\":\"" + primitive_http_escape(room.name) + "\"}")
+            return json_response(200, "{\"rooms\":[" + items.join(",") + "]}")
+
+        if route.operation == "message_send" or route.operation == "notify_all":
+            if route.operation == "notify_all" and not has_scope(request.principal, "room:manage"):
+                return error_response(403, "notify_all_permission_required", route.resource_id)
+            val message_id = primitive_http_text(request.body, "message_id")
+            val body = primitive_http_text(request.body, "body")
+            val sent = self.runtime.send_message(message_id, request.principal.workspace_id,
+                route.resource_id, request.principal.identity_id,
+                primitive_http_text(request.body, "agent_id"), MessageOrigin.Human, body,
+                primitive_http_text(request.body, "reply_to_id"),
+                primitive_http_text(request.body, "correlation_id"),
+                primitive_http_text(request.body, "causation_id"), 0, request.occurred_at,
+                request.idempotency_key)
+            if not sent.ok: return error_response(400, sent.error, route.resource_id)
+            var routed_ok = false
+            var routed_task_id = ""
+            if not sent.duplicate:
+                val main_agent_id = primitive_http_text(request.body, "main_agent_id")
+                val routed = self.runtime.route_human_message(sent.message_id, main_agent_id,
+                    request.occurred_at)
+                routed_ok = routed.routed
+                routed_task_id = routed.task_id
+            return json_response(202, "{\"accepted\":true,\"message_id\":\"" +
+                primitive_http_escape(sent.message_id) + "\",\"room_seq\":" + sent.room_seq.to_text() +
+                ",\"duplicate\":" + (if sent.duplicate: "true" else: "false") +
+                ",\"routed\":" + (if routed_ok: "true" else: "false") +
+                ",\"task_id\":\"" + primitive_http_escape(routed_task_id) + "\"}")
+
+        if route.operation == "message_history":
+            val after = primitive_http_query_i64(request.path, "after_seq", 0)
+            val limit = primitive_http_query_i64(request.path, "limit", 50)
+            return json_response(200, primitive_http_messages(self.runtime.read_messages(route.resource_id,
+                request.principal.identity_id, after, limit), self.runtime.store))
+
+        if route.operation == "room_events":
+            val after = primitive_http_query_i64(request.path, "after_seq", 0)
+            val messages = self.runtime.read_messages(route.resource_id, request.principal.identity_id, after, 200)
+            var events: [text] = []
+            for message in messages:
+                events.push("id: " + message.room_seq.to_text() + "\nevent: message\ndata: " +
+                    primitive_http_messages([message], self.runtime.store) + "\n")
+            return ApiResponse(status: 200, content_type: "text/event-stream", body: events.join("\n") + "\n")
+
+        if route.operation == "cursor_advance":
+            val changed = self.runtime.mark_read(route.resource_id, request.principal.identity_id,
+                primitive_http_i64(request.body, "room_seq", -1), request.occurred_at)
+            if not changed.ok: return error_response(400, changed.error, route.resource_id)
+            return json_response(200, "{\"room_id\":\"" + primitive_http_escape(route.resource_id) +
+                "\",\"evidence\":\"local_cursor\"}")
+
+        if route.operation == "member_add":
+            val changed = self.runtime.join_room(route.resource_id,
+                primitive_http_text(request.body, "identity_id"),
+                primitive_http_text(request.body, "role"), request.occurred_at)
+            if not changed.accepted: return error_response(400, changed.error, route.resource_id)
+            return accepted_response("room", route.resource_id)
+
+        if route.operation == "member_remove":
+            val changed = self.runtime.leave_room(route.resource_id, route.child_id)
+            if not changed.accepted: return error_response(400, changed.error, route.resource_id)
+            return json_response(200, "{\"removed\":true}")
+
+        if route.operation == "agent_create":
+            val agent_id = primitive_http_text(request.body, "agent_id")
+            val profile = AgentProfile(agent_id: messaging_id("agent", agent_id),
+                display_name: primitive_http_text(request.body, "display_name"), aliases: [],
+                provider: primitive_http_text(request.body, "provider"),
+                role_summary: primitive_http_text(request.body, "role_summary"), capabilities: [],
+                current_task_id: "", status: AgentStatus.Idle,
+                owner_identity_id: request.principal.identity_id, room_ids: [],
+                last_activity_at: request.occurred_at)
+            val registered = self.runtime.register_profile(profile)
+            if not registered.accepted: return error_response(400, registered.error, agent_id)
+            return accepted_response("agent", agent_id)
+
+        if route.operation == "agent_binding_create":
+            val binding_id = primitive_http_text(request.body, "binding_id")
+            val agent_id = primitive_http_text(request.body, "agent_id")
+            val provider = primitive_http_text(request.body, "provider")
+            val binding = AgentBinding(binding_id: messaging_id("agent_binding", binding_id),
+                room_id: messaging_id("room", primitive_http_text(request.body, "room_id")),
+                agent_id: messaging_id("agent", agent_id),
+                handler: primitive_agent_handler(primitive_http_text(request.body, "handler")),
+                session_policy: primitive_http_text(request.body, "session_policy"),
+                trigger_policy: primitive_http_text(request.body, "trigger_policy"),
+                update_policy: primitive_http_text(request.body, "update_policy"),
+                context_policy: primitive_http_text(request.body, "context_policy"), permissions: [])
+            val attached = self.runtime.register_agent_binding(provider, binding)
+            if not attached.ok: return error_response(400, attached.error, binding_id)
+            return json_response(201, "{\"binding_id\":\"" + primitive_http_escape(binding_id) +
+                "\",\"session_id\":\"" + primitive_http_escape(attached.session_id) + "\"}")
+
+        if route.operation == "agent_list":
+            var items: [text] = []
+            for profile in self.runtime.profiles:
+                items.push("{\"agent_id\":\"" + primitive_http_escape(profile.agent_id.value) +
+                    "\",\"display_name\":\"" + primitive_http_escape(profile.display_name) +
+                    "\",\"provider\":\"" + primitive_http_escape(profile.provider) + "\"}")
+            return json_response(200, "{\"agents\":[" + items.join(",") + "]}")
+
+        if route.operation == "profile_get":
+            val found = self.runtime.who(route.resource_id)
+            if not found.found: return error_response(404, found.error, route.resource_id)
+            return json_response(200, "{\"agent_id\":\"" + primitive_http_escape(found.profile.agent_id.value) +
+                "\",\"display_name\":\"" + primitive_http_escape(found.profile.display_name) +
+                "\",\"provider\":\"" + primitive_http_escape(found.profile.provider) + "\"}")
+
+        if route.operation == "task_get":
+            for task in self.runtime.tasks:
+                if task.task_id == route.resource_id:
+                    return json_response(200, "{\"task_id\":\"" + primitive_http_escape(task.task_id) +
+                        "\",\"objective\":\"" + primitive_http_escape(task.objective) + "\"}")
+            return error_response(404, "task_not_found", route.resource_id)
+
+        if route.operation == "task_cancel" or route.operation == "task_approve" or route.operation == "task_decline":
+            val action = route.operation.substring(5)
+            val changed = self.runtime.act_on_task(route.resource_id, action, request.occurred_at)
+            if not changed.accepted: return error_response(409, changed.error, route.resource_id)
+            return json_response(200, "{\"task_id\":\"" + primitive_http_escape(route.resource_id) +
+                "\",\"updated\":true}")
+
+        if route.operation == "webhook_receive":
+            val accepted = self.runtime.store.accept_inbound(route.resource_id,
+                primitive_http_text(request.body, "external_event_id"), request.occurred_at)
+            return json_response(202, "{\"accepted\":" + (if accepted: "true" else: "false") +
+                ",\"duplicate\":" + (if accepted: "false" else: "true") + "}")
+
+        error_response(501, "operation_not_implemented", route.operation)
+
+export PrimitiveRequest, PrimitiveMessagingApplication

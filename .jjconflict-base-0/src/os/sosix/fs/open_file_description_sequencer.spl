@@ -1,0 +1,230 @@
+"""Pure open-file-description I/O ordering and offset ownership.
+
+The sequencer deliberately permits one in-flight reservation per open file
+description.  That is the smallest honest model for POSIX shared-offset
+semantics: a later read/write cannot select its position until the preceding
+operation's actual (possibly partial) progress is known.
+
+Backends always receive the canonical positioned SOSIX operation IDs.  Append
+reservations carry a backend-atomic marker and never guess an EOF offset.
+"""
+
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+
+pub val SOSIX_OFD_POSITION_SHARED: u8 = 1
+pub val SOSIX_OFD_POSITION_EXPLICIT: u8 = 2
+pub val SOSIX_OFD_POSITION_BACKEND_APPEND: u8 = 3
+
+pub struct SosixOfdIoTicket:
+    operation: SosixOperationId
+    sequence: u64
+    api_id: u32
+    requested_length: u64
+    file_offset: u64
+    position_kind: u8
+    backend_atomic_append: bool
+
+pub struct SosixOfdIoState:
+    shared_offset: u64
+    next_sequence: u64
+    active: bool
+    active_operation: SosixOperationId
+    active_sequence: u64
+
+pub struct SosixOfdIoReservation:
+    accepted: bool
+    reason: text
+    state: SosixOfdIoState
+    ticket: SosixOfdIoTicket
+
+pub struct SosixOfdIoCommit:
+    accepted: bool
+    reason: text
+    state: SosixOfdIoState
+
+export SOSIX_OFD_POSITION_SHARED, SOSIX_OFD_POSITION_EXPLICIT
+export SOSIX_OFD_POSITION_BACKEND_APPEND
+export SosixOfdIoTicket, SosixOfdIoState, SosixOfdIoReservation, SosixOfdIoCommit
+
+fn _empty_operation() -> SosixOperationId:
+    SosixOperationId(slot: 0, generation: 0)
+
+fn _empty_ticket() -> SosixOfdIoTicket:
+    SosixOfdIoTicket(
+        operation: _empty_operation(),
+        sequence: 0,
+        api_id: 0,
+        requested_length: 0,
+        file_offset: 0,
+        position_kind: 0,
+        backend_atomic_append: false
+    )
+
+pub fn sosix_ofd_io_state_new(initial_offset: u64) -> SosixOfdIoState:
+    SosixOfdIoState(
+        shared_offset: initial_offset,
+        next_sequence: 1,
+        active: false,
+        active_operation: _empty_operation(),
+        active_sequence: 0
+    )
+
+fn _rejected_reservation(state: SosixOfdIoState, reason: text) -> SosixOfdIoReservation:
+    SosixOfdIoReservation(
+        accepted: false,
+        reason: reason,
+        state: state,
+        ticket: _empty_ticket()
+    )
+
+fn _reserve(
+    state: SosixOfdIoState,
+    operation: SosixOperationId,
+    api_id: u32,
+    requested_length: u64,
+    file_offset: u64,
+    position_kind: u8,
+    backend_atomic_append: bool
+) -> SosixOfdIoReservation:
+    if state.active:
+        return _rejected_reservation(state, "operation-in-flight")
+    if requested_length == 0:
+        return _rejected_reservation(state, "empty-transfer")
+    if operation.generation == 0:
+        return _rejected_reservation(state, "invalid-operation")
+    if api_id != SOSIX_FS_READ_AT and api_id != SOSIX_FS_WRITE_AT:
+        return _rejected_reservation(state, "unsupported-api")
+    if state.next_sequence == 0 or state.next_sequence == 0xffffffffffffffff:
+        return _rejected_reservation(state, "sequence-exhausted")
+
+    val ticket = SosixOfdIoTicket(
+        operation: operation,
+        sequence: state.next_sequence,
+        api_id: api_id,
+        requested_length: requested_length,
+        file_offset: file_offset,
+        position_kind: position_kind,
+        backend_atomic_append: backend_atomic_append
+    )
+    val reserved = SosixOfdIoState(
+        shared_offset: state.shared_offset,
+        next_sequence: state.next_sequence + 1,
+        active: true,
+        active_operation: operation,
+        active_sequence: state.next_sequence
+    )
+    SosixOfdIoReservation(accepted: true, reason: "accepted", state: reserved, ticket: ticket)
+
+pub fn sosix_ofd_reserve_read(
+    state: SosixOfdIoState, operation: SosixOperationId, requested_length: u64
+) -> SosixOfdIoReservation:
+    _reserve(
+        state, operation, SOSIX_FS_READ_AT, requested_length,
+        state.shared_offset, SOSIX_OFD_POSITION_SHARED, false
+    )
+
+pub fn sosix_ofd_reserve_write(
+    state: SosixOfdIoState, operation: SosixOperationId, requested_length: u64
+) -> SosixOfdIoReservation:
+    _reserve(
+        state, operation, SOSIX_FS_WRITE_AT, requested_length,
+        state.shared_offset, SOSIX_OFD_POSITION_SHARED, false
+    )
+
+pub fn sosix_ofd_reserve_read_at(
+    state: SosixOfdIoState,
+    operation: SosixOperationId,
+    file_offset: u64,
+    requested_length: u64
+) -> SosixOfdIoReservation:
+    _reserve(
+        state, operation, SOSIX_FS_READ_AT, requested_length,
+        file_offset, SOSIX_OFD_POSITION_EXPLICIT, false
+    )
+
+pub fn sosix_ofd_reserve_write_at(
+    state: SosixOfdIoState,
+    operation: SosixOperationId,
+    file_offset: u64,
+    requested_length: u64
+) -> SosixOfdIoReservation:
+    _reserve(
+        state, operation, SOSIX_FS_WRITE_AT, requested_length,
+        file_offset, SOSIX_OFD_POSITION_EXPLICIT, false
+    )
+
+pub fn sosix_ofd_reserve_append(
+    state: SosixOfdIoState, operation: SosixOperationId, requested_length: u64
+) -> SosixOfdIoReservation:
+    # file_offset is intentionally not an EOF guess.  The backend must perform
+    # atomic append and return the position it selected when committing.
+    _reserve(
+        state, operation, SOSIX_FS_WRITE_AT, requested_length,
+        0, SOSIX_OFD_POSITION_BACKEND_APPEND, true
+    )
+
+fn _operation_matches(left: SosixOperationId, right: SosixOperationId) -> bool:
+    left.slot == right.slot and left.generation == right.generation
+
+fn _idle_state(state: SosixOfdIoState, shared_offset: u64) -> SosixOfdIoState:
+    SosixOfdIoState(
+        shared_offset: shared_offset,
+        next_sequence: state.next_sequence,
+        active: false,
+        active_operation: _empty_operation(),
+        active_sequence: 0
+    )
+
+pub fn sosix_ofd_commit(
+    state: SosixOfdIoState,
+    ticket: SosixOfdIoTicket,
+    status: i32,
+    transferred: u64,
+    backend_selected_offset: u64,
+    backend_selected_offset_valid: bool
+) -> SosixOfdIoCommit:
+    if not state.active:
+        return SosixOfdIoCommit(accepted: false, reason: "no-operation-in-flight", state: state)
+    if ticket.sequence != state.active_sequence:
+        return SosixOfdIoCommit(accepted: false, reason: "out-of-order", state: state)
+    if not _operation_matches(ticket.operation, state.active_operation):
+        return SosixOfdIoCommit(accepted: false, reason: "stale-operation", state: state)
+    if transferred > ticket.requested_length:
+        return SosixOfdIoCommit(accepted: false, reason: "progress-overflow", state: state)
+    if status < 0 and transferred == 0:
+        return SosixOfdIoCommit(
+            accepted: true,
+            reason: "failed-without-progress",
+            state: _idle_state(state, state.shared_offset)
+        )
+
+    if ticket.position_kind == SOSIX_OFD_POSITION_EXPLICIT:
+        return SosixOfdIoCommit(
+            accepted: true,
+            reason: if status < 0: "failed-after-positioned-progress" else: "completed-positioned",
+            state: _idle_state(state, state.shared_offset)
+        )
+
+    var committed_offset = state.shared_offset
+    if ticket.position_kind == SOSIX_OFD_POSITION_BACKEND_APPEND:
+        if not ticket.backend_atomic_append or not backend_selected_offset_valid:
+            return SosixOfdIoCommit(
+                accepted: false, reason: "append-position-not-proven", state: state
+            )
+        committed_offset = backend_selected_offset
+    if committed_offset + transferred < committed_offset:
+        return SosixOfdIoCommit(accepted: false, reason: "offset-overflow", state: state)
+
+    SosixOfdIoCommit(
+        accepted: true,
+        reason: if status < 0:
+            "failed-after-partial-progress"
+        else:
+            if transferred < ticket.requested_length: "completed-partial" else: "completed",
+        state: _idle_state(state, committed_offset + transferred)
+    )
+
+export sosix_ofd_io_state_new, sosix_ofd_reserve_read, sosix_ofd_reserve_write
+export sosix_ofd_reserve_read_at, sosix_ofd_reserve_write_at
+export sosix_ofd_reserve_append, sosix_ofd_commit

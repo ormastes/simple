@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io/rapier2d_sffi.spl"
+provider="$root/src/compiler_rust/compiler/src/interpreter_extern/rapier2d_sffi.rs"
+
+if [ "$(grep -c '^extern fn rt_rapier2d_' "$owner")" -ne 48 ] ||
+   [ "$(grep -c '^[[:space:]]*@unsafe(.*capabilities: \[.*ffi' "$owner")" -ne 92 ]; then
+    echo "Rapier2D declaration or wrapper authority inventory changed without review" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /^[[:space:]]*@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ {
+        next_function_unsafe = 1
+        next
+    }
+    /^[[:space:]]*(static fn|fn|me) / {
+        function_indent = indent($0)
+        function_unsafe = next_function_unsafe
+        next_function_unsafe = 0
+        inside_function = 1
+        next
+    }
+    inside_function && NF && indent($0) <= function_indent {
+        function_unsafe = 0
+        inside_function = 0
+    }
+    /rt_rapier2d_[A-Za-z0-9_]+\(/ && !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn/ && !function_unsafe {
+        print "unscoped Rapier2D call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$owner"
+
+if awk '
+    /fn physics_.*(destroy|free)/ { in_cleanup = 1 }
+    in_cleanup && /^[^ ]/ && !/fn physics_.*(destroy|free)/ { in_cleanup = 0 }
+    in_cleanup && /^[[:space:]]+true[[:space:]]*$/ { exit 1 }
+' "$owner"; then
+    :
+else
+    echo "invalid Rapier2D cleanup must not report fabricated success" >&2
+    exit 1
+fi
+
+grep -q 'Err(unavailable(name, "ray casting"))' "$provider"
+grep -q 'Err(unavailable(name, "joint creation"))' "$provider"
+grep -q 'Err(unavailable(name, "joint operation"))' "$provider"
+grep -q 'Err(unavailable(name, "joint counting"))' "$provider"
+grep -q 'Err(invalid_handle(name, "body", body_id))' "$provider"
+grep -q 'Err(invalid_handle(name, "contact-list or contact index", list_id))' "$provider"
+
+echo "Rapier2D SFFI contract audit: PASS (48 declarations, 41 raw-calling wrappers, and 3 delegating wrappers explicitly unsafe; unimplemented and missing-record paths fail closed)"

@@ -1,0 +1,435 @@
+"""
+## Purpose and audience
+Purpose: Prove that MirInterpreter ExecIR tier-0.5 dispatch.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-INTERP-001 — stable requirement identity for this spec.
+
+# ExecIR tier-0.5 dispatch spec (startup-perf Phase E, wiring).
+#
+# MirInterpreter.execute_function now probes ExecIR (memoized, incl. nil
+# verdicts) and runs encodable functions in a create-once arena, falling
+# back to the tree-walk otherwise. SIMPLE_EXECIR=0 (read once at create)
+# disables the tier. This spec proves:
+#   (a) differential result identity for an encodable arithmetic loop,
+#       SIMPLE_EXECIR on vs off;
+#   (b) unencodable (string const) function falls back and stays correct;
+#   (c) memoization: repeated runs add one memo entry and probe once — and
+#       two same-name same-shape functions with different consts get
+#       DISTINCT memo entries (fingerprinted key, no collision);
+#   (d) div-by-zero error message parity, tier on vs off.
+
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter, InterpError}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn xt_local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn xt_fn_entry(name: text, locals: [MirLocal], blocks: [MirBlock], entry_id: i64) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId.new(-1),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: blocks,
+        entry_block: BlockId.new(entry_id),
+        span: nil,
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: nil
+    )
+
+fn xt_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    xt_fn_entry(name, locals, blocks, 0)
+
+fn xt_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn xt_blk(id: i64, insts: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: insts, terminator: term)
+
+fn xt_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn xt_str_operand(s: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(s), MirType.i64()))
+
+# fn sum_loop() = sum of i for i in 0..n-1 (encodable: consts + binops + If/Goto/Ret)
+fn xt_sum_loop_fn(n: i64) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var), xt_local(2, LocalKind.Temp)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(0), MirType.i64())),
+        xt_inst(MirInstKind.Const(xt_lid(1), MirConstValue.Int(0), MirType.i64()))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b1 = xt_blk(1, [
+        xt_inst(MirInstKind.BinOp(xt_lid(2), MirBinOp.Lt, mir_operand_copy(xt_lid(0)), mir_operand_const_int(n)))
+    ], MirTerminator.If(mir_operand_copy(xt_lid(2)), BlockId.new(2), BlockId.new(3)))
+    val b2 = xt_blk(2, [
+        xt_inst(MirInstKind.BinOp(xt_lid(1), MirBinOp.Add, mir_operand_copy(xt_lid(1)), mir_operand_copy(xt_lid(0)))),
+        xt_inst(MirInstKind.BinOp(xt_lid(0), MirBinOp.Add, mir_operand_copy(xt_lid(0)), mir_operand_const_int(1)))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b3 = xt_blk(3, [], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn("sum_loop", locals, [b0, b1, b2, b3])
+
+# Same name + same shape as xt_const_fn(k) below, only the const differs.
+fn xt_const_fn(k: i64) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(k), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    xt_fn("twin", locals, [b0])
+
+# Same name and three-block shape; the unique entry is deliberately in the
+# middle so the key builder must find it and stop before the final block.
+fn xt_middle_entry_fn(k: i64) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val before = xt_blk(0, [], MirTerminator.Ret(Some(mir_operand_const_int(-1))))
+    val entry = xt_blk(1, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(k), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    val after = xt_blk(2, [], MirTerminator.Ret(Some(mir_operand_const_int(-2))))
+    xt_fn_entry("middle_entry", locals, [before, entry, after], 1)
+
+# Same name, shape, constants, and result; only the transfer instruction kind
+# differs, proving the Copy/Move kind marker participates in the memo key.
+fn xt_transfer_kind_fn(use_move: bool) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var)]
+    val transfer = if use_move:
+        xt_inst(MirInstKind.Move(xt_lid(1), xt_lid(0)))
+    else:
+        xt_inst(MirInstKind.Copy(xt_lid(1), xt_lid(0)))
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(8), MirType.i64())),
+        transfer
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn("transfer_kind", locals, [b0])
+
+# Same name and shape; Bool(false) and Bool(true) must not share an encoding.
+fn xt_bool_fn(value: bool) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Bool(value), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    xt_fn("bool_fingerprint", locals, [b0])
+
+fn xt_named_caller(name: text, callee: text, addend: i64) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Call(Some(xt_lid(0)), xt_str_operand(callee), [])),
+        xt_inst(MirInstKind.BinOp(xt_lid(1), MirBinOp.Add, mir_operand_copy(xt_lid(0)), mir_operand_const_int(addend)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn(name, locals, [b0])
+
+fn xt_recursive_countdown_fn() -> MirFunction:
+    val locals = [
+        xt_local(0, LocalKind.Arg(0)), xt_local(1, LocalKind.Temp),
+        xt_local(2, LocalKind.Temp), xt_local(3, LocalKind.Temp)
+    ]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.BinOp(xt_lid(1), MirBinOp.Eq, mir_operand_copy(xt_lid(0)), mir_operand_const_int(0)))
+    ], MirTerminator.If(mir_operand_copy(xt_lid(1)), BlockId.new(1), BlockId.new(2)))
+    val b1 = xt_blk(1, [], MirTerminator.Ret(Some(mir_operand_const_int(0))))
+    val b2 = xt_blk(2, [
+        xt_inst(MirInstKind.BinOp(xt_lid(2), MirBinOp.Sub, mir_operand_copy(xt_lid(0)), mir_operand_const_int(1))),
+        xt_inst(MirInstKind.Call(Some(xt_lid(3)), xt_str_operand("countdown"), [mir_operand_copy(xt_lid(2))])),
+        xt_inst(MirInstKind.BinOp(xt_lid(3), MirBinOp.Add, mir_operand_copy(xt_lid(3)), mir_operand_const_int(1)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(3)))))
+    xt_fn("countdown", locals, [b0, b1, b2])
+
+fn xt_recursive_entry_fn() -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(3), MirType.i64())),
+        xt_inst(MirInstKind.Call(Some(xt_lid(1)), xt_str_operand("countdown"), [mir_operand_copy(xt_lid(0))]))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn("recursive_entry", locals, [b0])
+
+# Unencodable: string const forces nil-encode -> tree-walk fallback.
+fn xt_string_fn() -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Str("hello"), MirType.i64())),
+        xt_inst(MirInstKind.Const(xt_lid(1), MirConstValue.Int(7), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn("stringy", locals, [b0])
+
+# fn dz() = 10 / 0
+fn xt_div_zero_fn() -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.BinOp(xt_lid(0), MirBinOp.Div, mir_operand_const_int(10), mir_operand_const_int(0)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    xt_fn("dz", locals, [b0])
+
+fn xt_interp_on() -> MirInterpreter:
+    rt_env_set("SIMPLE_EXECIR", "1")
+    MirInterpreter.create()
+
+fn xt_interp_off() -> MirInterpreter:
+    rt_env_set("SIMPLE_EXECIR", "0")
+    val i = MirInterpreter.create()
+    rt_env_set("SIMPLE_EXECIR", "1")
+    i
+
+describe "MirInterpreter ExecIR tier-0.5 dispatch":
+    it "memo is reused and invalidated when the function table changes":
+        step("Verify: memo reuse and function-table invalidation")
+        val first = xt_const_fn(11)
+        var on = xt_interp_on()
+        expect(on.execute_function(first)[0] ?? -1).to_equal(11)
+        expect(on.execute_function(first)[0] ?? -1).to_equal(11)
+        expect(on.execir_memo_size()).to_equal(1)
+        expect(on.execir_probe_count_value()).to_equal(1)
+        on.set_function_table({"twin": first})
+        expect(on.execir_memo_size()).to_equal(0)
+        expect(on.execute_function(first)[0] ?? -1).to_equal(11)
+        expect(on.execir_probe_count_value()).to_equal(2)
+
+    it "invalid and duplicate identities remain collision safe":
+        step("Verify: invalid and duplicate identities remain collision safe")
+        val a = xt_const_fn(11)
+        val b = xt_const_fn(22)
+        var on = xt_interp_on()
+        expect(on.execute_function(a)[0] ?? -1).to_equal(11)
+        expect(on.execute_function(b)[0] ?? -1).to_equal(22)
+        expect(on.execir_memo_size()).to_equal(2)
+        expect(on.execir_probe_count_value()).to_equal(2)
+
+    it "same symbol and name cannot forge a fingerprint in either call order":
+        step("Verify: same identity cannot forge a fingerprint")
+        val low = xt_const_fn(41)
+        val high = xt_const_fn(99)
+        var low_first = xt_interp_on()
+        expect(low_first.execute_function(low)[0] ?? -1).to_equal(41)
+        expect(low_first.execute_function(high)[0] ?? -1).to_equal(99)
+        var high_first = xt_interp_on()
+        expect(high_first.execute_function(high)[0] ?? -1).to_equal(99)
+        expect(high_first.execute_function(low)[0] ?? -1).to_equal(41)
+        expect(low_first.execir_memo_size()).to_equal(2)
+        expect(high_first.execir_memo_size()).to_equal(2)
+
+    it "same-name arbitrary calls are order independent":
+        step("Verify: same-name arbitrary calls are order independent")
+        val a = xt_const_fn(42)
+        val b = xt_const_fn(41)
+        var a_first = xt_interp_on()
+        expect(a_first.execute_function(a)[0] ?? -1).to_equal(42)
+        expect(a_first.execute_function(b)[0] ?? -1).to_equal(41)
+        expect(a_first.execute_function(a)[0] ?? -1).to_equal(42)
+        var b_first = xt_interp_on()
+        expect(b_first.execute_function(b)[0] ?? -1).to_equal(41)
+        expect(b_first.execute_function(a)[0] ?? -1).to_equal(42)
+
+    it "recursive call graphs remain exact and reusable":
+        step("Verify: recursive call graphs remain exact and reusable")
+        val entry = xt_recursive_entry_fn()
+        val countdown = xt_recursive_countdown_fn()
+        var on = xt_interp_on()
+        on.set_function_table({"recursive_entry": entry, "countdown": countdown})
+        val first = on.execute_function(entry)
+        val second = on.execute_function(entry)
+        expect(first[0] ?? -1).to_equal(3)
+        expect(second[0] ?? -1).to_equal(3)
+        assert_true(first[1] == nil)
+        assert_true(second[1] == nil)
+        expect(on.execir_probe_count_value()).to_equal(1)
+
+    it "absent table name matches exact tree-walk resolution":
+        step("Verify: absent table name matches tree-walk")
+        val direct = xt_sum_loop_fn(4)
+        var on = xt_interp_on()
+        var off = xt_interp_off()
+        val actual = on.execute_function(direct)
+        val expected = off.execute_function(direct)
+        expect(actual[0] ?? -1).to_equal(expected[0] ?? -2)
+        assert_true((actual[1]).? == (expected[1]).?)
+
+    it "absent-name indirect back-edge matches exact tree-walk resolution":
+        step("Verify: absent-name indirect back-edge matches tree-walk")
+        val entry = xt_named_caller("absent_indirect_entry", "indirect_peer", 1)
+        val peer = xt_named_caller("indirect_peer", "absent_indirect_entry", 1)
+        var on = xt_interp_on()
+        var off = xt_interp_off()
+        on.set_function_table({"indirect_peer": peer})
+        off.set_function_table({"indirect_peer": peer})
+        val actual = on.execute_function(entry)
+        val expected = off.execute_function(entry)
+        expect(actual[0] ?? -1).to_equal(expected[0] ?? -2)
+        assert_true((actual[1]).? == (expected[1]).?)
+
+    it "table aliases do not change direct-function fingerprints":
+        step("Verify: aliases do not change direct fingerprints")
+        val direct = xt_const_fn(29)
+        var on = xt_interp_on()
+        on.set_function_table({"alias_key": direct})
+        expect(on.execute_function(direct)[0] ?? -1).to_equal(29)
+        expect(on.execir_memo_size()).to_equal(1)
+        on.set_function_table({"different_alias": direct})
+        expect(on.execir_memo_size()).to_equal(0)
+        expect(on.execute_function(direct)[0] ?? -1).to_equal(29)
+
+    it "a successful direct call clears prior error state":
+        step("Verify: successful call clears prior error state")
+        var on = xt_interp_on()
+        val failed = on.execute_function(xt_div_zero_fn())
+        assert_true(failed[1].?)
+        expect(on.call_stack_trace()).to_contain("dz")
+        val succeeded = on.execute_function(xt_const_fn(29))
+        expect(succeeded[0] ?? -1).to_equal(29)
+        assert_true(succeeded[1] == nil)
+        expect(on.current_function).to_equal("twin")
+        expect(on.call_stack_trace()).to_equal("")
+
+    it "arbitrary adversarial MIR is exact and separately memoized":
+        step("Verify: arbitrary MIR is exact and separately memoized")
+        val enc_a = xt_middle_entry_fn(44)
+        val enc_b = xt_middle_entry_fn(55)
+        val unenc = xt_string_fn()
+        var on = xt_interp_on()
+        expect(on.execute_function(enc_a)[0] ?? -1).to_equal(44)
+        expect(on.execute_function(enc_b)[0] ?? -1).to_equal(55)
+        expect(on.execute_function(unenc)[0] ?? -1).to_equal(7)
+        expect(on.execute_function(enc_a)[0] ?? -1).to_equal(44)
+        expect(on.execir_memo_size()).to_equal(3)
+        expect(on.execir_probe_count_value()).to_equal(3)
+
+    it "nil verdict is isolated from same-name encodable MIR":
+        step("Verify: nil verdict is isolated from encodable MIR")
+        val nil_fn = xt_string_fn()
+        val encoded = xt_const_fn(88)
+        var nil_first = xt_interp_on()
+        expect(nil_first.execute_function(nil_fn)[0] ?? -1).to_equal(7)
+        expect(nil_first.execute_function(encoded)[0] ?? -1).to_equal(88)
+        expect(nil_first.execute_function(nil_fn)[0] ?? -1).to_equal(7)
+        expect(nil_first.execir_probe_count_value()).to_equal(2)
+
+    it "nil verdict and memo state are instance local":
+        step("Verify: memo state is instance local")
+        val s = xt_string_fn()
+        var one = xt_interp_on()
+        var two = xt_interp_on()
+        expect(one.execute_function(s)[0] ?? -1).to_equal(7)
+        expect(one.execute_function(s)[0] ?? -1).to_equal(7)
+        expect(one.execir_probe_count_value()).to_equal(1)
+        expect(two.execir_probe_count_value()).to_equal(0)
+        expect(two.execute_function(s)[0] ?? -1).to_equal(7)
+        expect(two.execir_probe_count_value()).to_equal(1)
+
+    it "(a) encodable arithmetic loop: identical result, tier on vs off":
+        step("Verify: (a) encodable arithmetic loop: identical result, tier on vs off")
+        # @req: REQ-COMPILER-INTERP-001
+        val f = xt_sum_loop_fn(100)
+        var on = xt_interp_on()
+        var off = xt_interp_off()
+        val ron = on.execute_function(f)
+        val roff = off.execute_function(f)
+        expect(ron[0] ?? -1).to_equal(4950)  # oracle: 4950 — named expected value from the requirement
+        expect(ron[0] ?? -1).to_equal(roff[0] ?? -2)
+        assert_true(ron[1] == nil)
+        assert_true(roff[1] == nil)
+        # the on-interpreter actually took the ExecIR path (memoized encodable)
+        expect(on.execir_memo_size()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        # the off-interpreter never probed
+        expect(off.execir_memo_size()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(off.execir_probe_count_value()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+    it "(b) unencodable (string const) falls back to tree-walk, correct result":
+        step("Verify: (b) unencodable (string const) falls back to tree-walk, correct result")
+        val f = xt_string_fn()
+        var on = xt_interp_on()
+        val r = on.execute_function(f)
+        expect(r[0] ?? -1).to_equal(7)  # oracle: 7 — named expected value from the requirement
+        assert_true(r[1] == nil)
+        # nil verdict is memoized too
+        expect(on.execir_memo_size()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(on.execir_probe_count_value()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+
+    it "(c) memoization: repeated runs probe once; twin consts do not collide":
+        step("Verify: (c) memoization: repeated runs probe once; twin consts do not collide")
+        var on = xt_interp_on()
+        val f = xt_sum_loop_fn(50)
+        var i = 0
+        while i < 5:
+            val r = on.execute_function(f)
+            expect(r[0] ?? -1).to_equal(1225)  # oracle: 1225 — named expected value from the requirement
+            i = i + 1
+        expect(on.execir_memo_size()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(on.execir_probe_count_value()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        # unencodable probed once as well, even across repeats
+        val s = xt_string_fn()
+        val r1 = on.execute_function(s)
+        val r2 = on.execute_function(s)
+        expect(r1[0] ?? -1).to_equal(7)  # oracle: 7 — named expected value from the requirement
+        expect(r2[0] ?? -1).to_equal(7)  # oracle: 7 — named expected value from the requirement
+        expect(on.execir_memo_size()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(on.execir_probe_count_value()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        # collision case: same name, same block/local shape, different const
+        val ta = xt_const_fn(11)
+        val tb = xt_const_fn(22)
+        val ra = on.execute_function(ta)
+        val rb = on.execute_function(tb)
+        expect(ra[0] ?? -1).to_equal(11)  # oracle: 11 — named expected value from the requirement
+        expect(rb[0] ?? -1).to_equal(22)  # oracle: 22 — named expected value from the requirement
+        # distinct memo entries -> no shared entry, both encoded
+        expect(on.execir_memo_size()).to_equal(4)  # oracle: 4 — named expected value from the requirement
+        expect(on.execir_probe_count_value()).to_equal(4)  # oracle: 4 — named expected value from the requirement
+
+    it "(d) div-by-zero: error message parity, tier on vs off":
+        step("Verify: (d) div-by-zero: error message parity, tier on vs off")
+        val f = xt_div_zero_fn()
+        var on = xt_interp_on()
+        var off = xt_interp_off()
+        val ron = on.execute_function(f)
+        val roff = off.execute_function(f)
+        assert_true(ron[0] == nil)
+        assert_true(roff[0] == nil)
+        assert_true(ron[1].?)
+        assert_true(roff[1].?)
+        expect(ron[1].unwrap().message()).to_equal(roff[1].unwrap().message())
+        expect(ron[1].unwrap().message()).to_equal("Division by zero: Integer division")
+
+    it "(e) key fingerprints entry-not-last, instruction kind, Int, and Bool":
+        step("Verify: (e) key fingerprints entry-not-last, instruction kind, Int, and Bool")
+        var on = xt_interp_on()
+
+        val middle_a = on.execute_function(xt_middle_entry_fn(31))
+        val middle_b = on.execute_function(xt_middle_entry_fn(47))
+        expect(middle_a[0] ?? -1).to_equal(31)  # oracle: entry Int(31)
+        expect(middle_b[0] ?? -1).to_equal(47)  # oracle: entry Int(47)
+
+        val copied = on.execute_function(xt_transfer_kind_fn(false))
+        val moved = on.execute_function(xt_transfer_kind_fn(true))
+        expect(copied[0] ?? -1).to_equal(8)  # oracle: Copy preserves 8
+        expect(moved[0] ?? -1).to_equal(8)  # oracle: Move transfers 8
+
+        val bool_false = on.execute_function(xt_bool_fn(false))
+        val bool_true = on.execute_function(xt_bool_fn(true))
+        expect(bool_false[0] ?? -1).to_equal(0)  # oracle: Bool(false)
+        expect(bool_true[0] ?? -1).to_equal(1)  # oracle: Bool(true)
+
+        # Six functions in three same-name/same-shape pairs remain distinct by
+        # entry payload or instruction kind. Each is a cold miss exactly once.
+        expect(on.execir_memo_size()).to_equal(6)  # oracle: six distinct keys
+        expect(on.execir_probe_count_value()).to_equal(6)  # oracle: six cold probes

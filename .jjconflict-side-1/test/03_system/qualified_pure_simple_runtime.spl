@@ -1,0 +1,126 @@
+# Shared admission gate for system specs that require a PURE-SIMPLE runtime.
+#
+# WHY THIS EXISTS: several lanes are only meaningful when driven through a real
+# self-hosted `simple` binary. The Rust seed is explicitly NOT acceptable
+# evidence for those lanes -- it self-identifies with
+# "this Rust-built Simple binary is a bootstrap seed only". Silently skipping
+# when no such binary exists is how a lane comes to look green while proving
+# nothing, so this gate is FAIL-CLOSED: absence of a qualified runtime is a
+# FAILURE, never a skip and never a pass.
+#
+# As of 2026-08-16 no qualified runtime exists on the reference machine -- a
+# fleet sweep (1099 binary instances, 19 unique by md5) found all five
+# self-hosted artifacts non-functional, and the sole self-hosting fixpoint
+# segfaults on a three-line hello world. See
+# doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md
+# Specs guarded by this helper are therefore expected to FAIL today, by design,
+# and to start proving something the moment the toolchain is repaired.
+#
+# Admission: export SIMPLE_QUALIFIED_RUNTIME=/abs/path/to/simple
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+# `rt_env_get` does not observe the caller's environment under `simple test`
+# (see test/03_system/check/simpleos_kernel_fabricated_rt_symbol_guard_spec.spl:54),
+# so the variable is resolved through a subshell instead.
+fn qualified_runtime_path() -> text:
+    val (out, _err, code) = process_run("/bin/sh", ["-c", "printf %s \"${SIMPLE_QUALIFIED_RUNTIME:-}\""])
+    if code != 0:
+        return ""
+    out.trim()
+
+fn seed_runtime_path() -> text:
+    val (out, _err, code) = process_run("/bin/sh", ["-c", "printf %s \"${SIMPLE_SEED_RUNTIME:-}\""])
+    if code != 0:
+        return ""
+    out.trim()
+
+fn runtime_version_banner(binary: text) -> text:
+    val (out, err, _code) = process_run(binary, ["--version"])
+    out + err
+
+# ---------------------------------------------------------------------------
+# Dual-toolchain reproduce harness
+# ---------------------------------------------------------------------------
+# Some defects live in match lowering, which BOTH the Rust seed and the
+# pure-Simple self-hosted compiler implement independently. A reproduce fixture
+# is only convincing when it runs under each, so this harness executes the same
+# fixture on every toolchain that is present and lets the caller assert the same
+# expected output for all of them.
+#
+# Admission:
+#   SIMPLE_QUALIFIED_RUNTIME=/abs/path/to/self-hosted-simple   (primary evidence)
+#   SIMPLE_SEED_RUNTIME=/abs/path/to/rust-seed-simple          (cross-check)
+#
+# Fail-closed: if NEITHER is set the scenario FAILS. It never skips, and it
+# never passes on zero toolchains.
+
+struct Toolchain:
+    label: text
+    binary: text
+    is_seed: bool
+
+fn discover_toolchains() -> [Toolchain]:
+    var found: [Toolchain] = []
+
+    val pure = qualified_runtime_path()
+    if pure != "":
+        val banner = runtime_version_banner(pure)
+        if runtime_is_rust_seed(banner):
+            fail("SIMPLE_QUALIFIED_RUNTIME=" + pure + " self-identifies as the Rust bootstrap seed; set SIMPLE_SEED_RUNTIME for the seed and point SIMPLE_QUALIFIED_RUNTIME at a self-hosted binary")
+        else:
+            found.push(Toolchain(label: "pure-simple", binary: pure, is_seed: false))
+
+    val seed = seed_runtime_path()
+    if seed != "":
+        found.push(Toolchain(label: "rust-seed", binary: seed, is_seed: true))
+
+    if found.len() == 0:
+        fail("no toolchain admitted: set SIMPLE_QUALIFIED_RUNTIME (self-hosted) and/or SIMPLE_SEED_RUNTIME (Rust seed). Tracked: doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md")
+
+    found
+
+# Compiles `entry` with `tc` and returns the fixture's stdout. Fails the
+# scenario with the toolchain label attached, so a multi-toolchain run names
+# WHICH compiler produced a wrong answer.
+fn run_fixture_under(tc: Toolchain, entry: text, out_binary: text) -> text:
+    val target = out_binary + "-" + tc.label
+    val (_bo, berr, bcode) = process_run(tc.binary, ["native-build", entry, "-o", target])
+    if bcode != 0:
+        fail("[" + tc.label + "] " + tc.binary + " failed to native-build " + entry + " (exit " + bcode.to_text() + "): " + berr)
+        return ""
+    val (out, err, code) = process_run(target, [])
+    if code != 0:
+        fail("[" + tc.label + "] fixture exited " + code.to_text() + ": " + err)
+        return ""
+    out
+
+fn runtime_is_rust_seed(banner: text) -> bool:
+    banner.contains("bootstrap seed only") or banner.contains("Rust-built Simple binary")
+
+# Returns the admitted binary path, or fails the calling scenario with an
+# actionable reason. Never returns an unusable path.
+fn admit_pure_simple_runtime() -> text:
+    val binary = qualified_runtime_path()
+    if binary == "":
+        fail("no qualified pure-Simple runtime admitted: set SIMPLE_QUALIFIED_RUNTIME to a self-hosted `simple` binary. The Rust seed is not acceptable evidence for this lane. Tracked: doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md")
+        return ""
+
+    val banner = runtime_version_banner(binary)
+    if banner == "":
+        fail("SIMPLE_QUALIFIED_RUNTIME=" + binary + " produced no --version banner; cannot admit an unidentifiable binary")
+        return ""
+    if runtime_is_rust_seed(banner):
+        fail("SIMPLE_QUALIFIED_RUNTIME=" + binary + " is the Rust bootstrap seed; this lane forbids seed evidence. Deploy a self-hosted binary instead.")
+        return ""
+
+    binary
+
+# Proves the admitted runtime can actually compile before a scenario draws any
+# conclusion from its output. A segfaulting compiler must not be mistaken for a
+# failing assertion about the subject under test.
+fn require_runtime_can_native_build(binary: text, entry: text, out_binary: text):
+    val (_out, err, code) = process_run(binary, ["native-build", entry, "-o", out_binary])
+    if code != 0:
+        fail("admitted runtime " + binary + " failed to native-build " + entry + " (exit " + code.to_text() + "): " + err)

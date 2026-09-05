@@ -1,0 +1,181 @@
+# @gc — module uses GC runtime
+#
+# slang execution backend — the seam between slang's own serving logic and the
+# tensor kernels it drives.
+#
+# WHAT SLANG OWNS HERE (and why the seam is drawn at this line)
+#   - the decode loop: `generate` below steps one token at a time
+#   - the stop conditions: token budget and end-of-generation
+#   - the context/KV budget: `open_context` sets n_ctx
+#   - detokenization into the answer text
+#
+# WHAT THE BACKEND SUPPLIES
+#   - dequantization (Q4_K_M and friends), attention, matmul, the tokenizer
+#     vocabulary and the sampler — the kernels pure Simple does not have yet.
+#
+# This mirrors vLLM, which writes no GEMM of its own and drives
+# cuBLAS/FlashAttention instead. slang drives ggml through the int64-only shim
+# in src/runtime/slang_ggml_shim.c, reached with the dynamic SFFI so that no
+# static `extern fn` is declared against a library that may be absent (an
+# unbacked extern returns nil silently — see
+# doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md).
+#
+# ponytail: ggml backend only, single model, single context, greedy sampling.
+# Upgrade path: slang master plan A4 (paged KV cache + paged attention) and A5
+# (scheduler + continuous batching) land pure-Simple kernels behind this same
+# `open`/`load_model`/`open_context`/`generate`/`close` surface, so callers do
+# not change when the backend does.
+
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
+use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
+
+enum BackendError:
+    LibraryNotFound
+    SymbolMissing
+    ModelLoadFailed
+    ContextCreateFailed
+    TokenizeFailed
+    DecodeFailed
+    NotOpen
+
+fn backend_error_text(e: BackendError) -> text:
+    match e:
+        BackendError.LibraryNotFound: "backend library could not be opened"
+        BackendError.SymbolMissing: "backend library is missing a required symbol"
+        BackendError.ModelLoadFailed: "model failed to load"
+        BackendError.ContextCreateFailed: "context could not be created"
+        BackendError.TokenizeFailed: "prompt could not be tokenized"
+        BackendError.DecodeFailed: "decode step failed"
+        BackendError.NotOpen: "backend is not open"
+
+# Resolved entry points. Held as addresses rather than re-resolved per call so
+# that a decode loop does not pay a symbol lookup per token.
+struct GgmlBackend:
+    lib: i64
+    f_str_reset: i64
+    f_str_push: i64
+    f_out_len: i64
+    f_out_byte: i64
+    f_backend_init: i64
+    f_model_load: i64
+    f_ctx_create: i64
+    f_free: i64
+    f_n_ctx: i64
+    f_tokenize: i64
+    f_is_eog: i64
+    f_piece: i64
+    f_eval_prompt: i64
+    f_eval: i64
+    f_sample: i64
+    f_kv_clear: i64
+
+fn _call0(fptr: i64) -> i64:
+    spl_wffi_call_i64(fptr, [], 0)
+
+fn _call1(fptr: i64, a0: i64) -> i64:
+    spl_wffi_call_i64(fptr, [a0], 1)
+
+# Opens the shim and resolves every entry up front. Resolving eagerly means a
+# missing symbol is reported here, by name, instead of surfacing as a zero
+# function pointer in the middle of a generation.
+fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
+    val lib = spl_dlopen(lib_path)
+    if lib == 0:
+        return Err(BackendError.LibraryNotFound)
+    val names = [
+        "slang_ggml_str_reset", "slang_ggml_str_push", "slang_ggml_out_len",
+        "slang_ggml_out_byte", "slang_ggml_backend_init", "slang_ggml_model_load",
+        "slang_ggml_ctx_create", "slang_ggml_free", "slang_ggml_n_ctx",
+        "slang_ggml_tokenize", "slang_ggml_is_eog", "slang_ggml_piece",
+        "slang_ggml_eval_prompt", "slang_ggml_eval", "slang_ggml_sample",
+        "slang_ggml_kv_clear"
+    ]
+    var addrs: [i64] = []
+    for n in names:
+        val a = spl_dlsym(lib, n)
+        if a == 0:
+            spl_dlclose(lib)
+            return Err(BackendError.SymbolMissing)
+        addrs.push(a)
+    Ok(GgmlBackend(
+        lib: lib,
+        f_str_reset: addrs[0], f_str_push: addrs[1], f_out_len: addrs[2],
+        f_out_byte: addrs[3], f_backend_init: addrs[4], f_model_load: addrs[5],
+        f_ctx_create: addrs[6], f_free: addrs[7], f_n_ctx: addrs[8],
+        f_tokenize: addrs[9], f_is_eog: addrs[10], f_piece: addrs[11],
+        f_eval_prompt: addrs[12], f_eval: addrs[13], f_sample: addrs[14],
+        f_kv_clear: addrs[15]
+    ))
+
+# Strings cross the int64-only ABI one byte at a time. That is the price of a
+# boundary that marshals no pointers, and it is paid once per prompt, not per
+# token, so it does not touch the decode loop.
+fn _push_text(b: GgmlBackend, s: text) -> i64:
+    _call0(b.f_str_reset)
+    var pushed = 0
+    for byte in text_to_utf8_bytes(s):
+        if _call1(b.f_str_push, byte.to_i64()) < 0:
+            return -1
+        pushed = pushed + 1
+    pushed
+
+fn _read_out(b: GgmlBackend) -> text:
+    val n = _call0(b.f_out_len)
+    if n <= 0:
+        return ""
+    var bytes: [u8] = []
+    var i = 0
+    while i < n:
+        bytes.push(_call1(b.f_out_byte, i).to_u8())
+        i = i + 1
+    bytes_to_text(bytes)
+
+fn load_model(b: GgmlBackend, model_path: text, n_gpu_layers: i64) -> Result<(), BackendError>:
+    _call0(b.f_backend_init)
+    if _push_text(b, model_path) < 0:
+        return Err(BackendError.ModelLoadFailed)
+    if _call1(b.f_model_load, n_gpu_layers) < 0:
+        return Err(BackendError.ModelLoadFailed)
+    Ok(())
+
+fn open_context(b: GgmlBackend, n_ctx: i64) -> Result<i64, BackendError>:
+    if _call1(b.f_ctx_create, n_ctx) < 0:
+        return Err(BackendError.ContextCreateFailed)
+    Ok(_call0(b.f_n_ctx))
+
+# slang's decode loop. One sample, one detokenize, one eval per iteration, with
+# the stop conditions evaluated here rather than inside the kernel library.
+fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
+    # Start from an empty KV cache. The model stays resident across requests;
+    # the conversation state must not, or the second request answers while still
+    # attending to the first and eventually overruns n_ctx.
+    _call0(b.f_kv_clear)
+    if _push_text(b, prompt) < 0:
+        return Err(BackendError.TokenizeFailed)
+    if _call1(b.f_tokenize, 1) < 0:
+        return Err(BackendError.TokenizeFailed)
+    if _call0(b.f_eval_prompt) < 0:
+        return Err(BackendError.DecodeFailed)
+    var out = ""
+    var produced = 0
+    while produced < max_tokens:
+        val tok = _call0(b.f_sample)
+        if _call1(b.f_is_eog, tok) == 1:
+            break
+        if _call1(b.f_piece, tok) < 0:
+            return Err(BackendError.DecodeFailed)
+        out = out + _read_out(b)
+        if _call1(b.f_eval, tok) < 0:
+            return Err(BackendError.DecodeFailed)
+        produced = produced + 1
+    Ok(out)
+
+# Releases the model, context and sampler, then the library itself. Callers that
+# stop a model mid-session rely on this leaving no handle behind.
+fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
+    _call0(b.f_free)
+    spl_dlclose(b.lib)
+    Ok(())
+
+export BackendError, backend_error_text, GgmlBackend
+export open_backend, load_model, open_context, generate, close_backend

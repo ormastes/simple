@@ -1,0 +1,87 @@
+# Cryptographic authentication for process-transfer frames.
+#
+# FNV-1a remains the V1 corruption checksum. This boundary adds an HMAC over
+# the complete canonical wire plus parent-issued session coordinates before a
+# frame is eligible for replay/session admission.
+
+use std.common.crypto.hmac.{hmac_sha256}
+use std.common.structural.wire.{wire_to_hex}
+use std.common.structural.transfer.process_frame_codec.{
+    ProcessTransferFrameV1,
+    decode_process_transfer_text_line,
+    encode_process_transfer_frame,
+    process_transfer_text_line_encode
+}
+use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain}
+
+val PROCESS_TRANSFER_AUTH_V2: text = "SPRF-AUTH-2"
+val PROCESS_TRANSFER_AUTH_TEXT_PREFIX: text = "SPRF2 "
+
+struct ProcessTransferAuthenticatedTextLineResult:
+    ok: bool
+    wire: [u8]
+    tag: text
+    reason: text
+
+fn process_transfer_auth_material(session_id: text, generation: i64,
+                                  wire: [u8]) -> text:
+    PROCESS_TRANSFER_AUTH_V2 + "|" + session_id + "|" + "{generation}" + "|" + wire_to_hex(wire)
+
+fn process_transfer_auth_tag(key: text, session_id: text, generation: i64,
+                             wire: [u8]) -> text:
+    "" if key == "" or session_id == "" else hmac_sha256(
+        key, process_transfer_auth_material(session_id, generation, wire))
+
+fn process_transfer_auth_tag_matches(expected: text, supplied: text) -> bool:
+    # Walk the complete tag so a mismatch does not return at its byte position.
+    if expected.len() != 64 or supplied.len() != expected.len():
+        return false
+    var difference = 0
+    var i = 0
+    while i < expected.len():
+        difference = difference | (expected.char_code_at(i) ^ supplied.char_code_at(i))
+        i = i + 1
+    difference == 0
+
+fn process_transfer_frame_authenticated(key: text, session_id: text,
+                                        generation: i64, wire: [u8],
+                                        tag: text) -> bool:
+    val expected = process_transfer_auth_tag(key, session_id, generation, wire)
+    process_transfer_auth_tag_matches(expected, tag)
+
+fn process_transfer_authenticated_text_line_encode(
+    value: ProcessTransferFrameV1,
+    key: text,
+    session_id: text,
+    generation: i64
+) -> text:
+    val wire = encode_process_transfer_frame(value)
+    val tag = process_transfer_auth_tag(key, session_id, generation, wire)
+    val armored = process_transfer_text_line_encode(value)
+    if wire.len() == 0 or tag == "" or armored == "":
+        return ""
+    PROCESS_TRANSFER_AUTH_TEXT_PREFIX + tag + " " + armored
+
+fn decode_process_transfer_authenticated_text_line(
+    line: text,
+    target: ParallelExecutionDomain
+) -> ProcessTransferAuthenticatedTextLineResult:
+    var normalized = line
+    if normalized.ends_with("\r"):
+        normalized = normalized.substring(0, normalized.len() - 1)
+    if not normalized.starts_with(PROCESS_TRANSFER_AUTH_TEXT_PREFIX):
+        return ProcessTransferAuthenticatedTextLineResult(
+            ok: false, wire: [], tag: "", reason: "missing-auth-text-prefix")
+    val tag_start = PROCESS_TRANSFER_AUTH_TEXT_PREFIX.len()
+    val tag_end = tag_start + 64
+    if normalized.len() <= tag_end or normalized.substring(tag_end, tag_end + 1) != " ":
+        return ProcessTransferAuthenticatedTextLineResult(
+            ok: false, wire: [], tag: "", reason: "invalid-auth-tag-carrier")
+    val tag = normalized.substring(tag_start, tag_end)
+    val decoded = decode_process_transfer_text_line(
+        normalized.substring(tag_end + 1, normalized.len()), target)
+    if not decoded.ok:
+        return ProcessTransferAuthenticatedTextLineResult(
+            ok: false, wire: [], tag: tag, reason: decoded.reason)
+    ProcessTransferAuthenticatedTextLineResult(
+        ok: true, wire: decoded.wire, tag: tag, reason: "")

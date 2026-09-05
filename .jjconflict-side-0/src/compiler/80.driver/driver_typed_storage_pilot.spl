@@ -1,0 +1,107 @@
+# Compiler-private end-to-end WP-22 conformance pilot.
+#
+# This is not a source builtin and is never injected into ordinary programs.
+# It proves that the driver can own an exact raw fixed-record allocation,
+# derive its declaration, produce typed projections, install evidence, freeze
+# cache authority, and hand backend-ready MIR to native codegen. Executable
+# initialization/readback is a separate W^X gate because raw physical writes
+# require their own admitted owner operation.
+
+use compiler.driver.driver_types.{CompileContext}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_data.*
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{mir_storage_field_binding_v1}
+use compiler.mir_opt.mir_opt.typed_storage_view_declaration.{
+    mir_typed_storage_view_declaration_from_allocation_v1
+}
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
+    MirTypedStorageViewProducerResultV1, produce_mir_typed_storage_views_v1
+}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy, StorageLayoutKind, storage_layout_plan_v1
+}
+
+fn driver_typed_storage_pilot_produce_v1(
+    layout_tag: i64, source_revision: text
+) -> MirTypedStorageViewProducerResultV1:
+    val is_soa = layout_tag == 1
+    val layout = if is_soa: StorageLayoutKind.SoA else: StorageLayoutKind.AoS
+    val module_name = if not is_soa:
+        "__simple_storage_pilot_aos_v1"
+    else:
+        "__simple_storage_pilot_soa_v1"
+    val symbol = SymbolId.new(9201001)
+    val logical_type_id = 9201
+    val revision = 4
+    val element_count = 5
+    val allocation_bytes = 128
+    val logical_stride = 24
+    val allocation_identity = "{module_name}:particle:rev4:count5:bytes128"
+    val allocation_provenance = "compiler-site:{module_name}:read_mass:0"
+    val plan = storage_layout_plan_v1(logical_type_id, layout, 1, 8, false,
+        StorageConversionPolicy.Cached, "driver-storage-pilot-v1", module_name)
+    val fields = [
+        mir_storage_field_binding_v1(0, 0, 8, 0),
+        mir_storage_field_binding_v1(1, 8, 8, 40),
+        mir_storage_field_binding_v1(2, 16, 8, 80)
+    ]
+
+    val i64_type = MirType.i64()
+    val record_type = MirType(kind: MirTypeKind.Struct(SymbolId.new(logical_type_id)))
+    val record_ptr = MirType.ptr(record_type, true)
+    var builder = MirBuilder.new()
+    builder.module.name = module_name
+    builder.begin_function(symbol, "__simple_storage_pilot_read_mass_v1",
+        MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        Span(start: 0, end: 0, line: 1, col: 1))
+    val fact = builder.emit_typed_storage_alloc_owned_raw_v1(record_type,
+        allocation_bytes, logical_type_id, revision, element_count,
+        allocation_identity, allocation_provenance, source_revision)
+
+    # Canonical producer pattern: constant index 3, logical field mass (1).
+    val logical_index = builder.emit_const_int(3)
+    val element_ptr = builder.emit_gep(MirOperand.copy(fact.base_local),
+        [MirOperand.copy(logical_index)], record_ptr)
+    val record = builder.emit_load(MirOperand.copy(element_ptr), record_type)
+    val mass = builder.emit_get_field(MirOperand.copy(record), 1, i64_type)
+
+    # Ownership closes in this function after the last projected use.
+    val free_sig = MirSignature(params: [MirType.i64()], return_type: MirType.unit(),
+        is_variadic: false)
+    val free_fn = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_free"),
+        MirType(kind: MirTypeKind.FuncPtr(free_sig))))
+    _ = builder.emit_call(free_fn, [MirOperand.copy(fact.base_local)], MirType.unit())
+    builder.set_terminator(MirTerminator.Ret(Some(MirOperand.copy(mass))))
+    val function = builder.end_function()
+    builder.add_function(function)
+    val original = builder.module
+
+    val declaration = mir_typed_storage_view_declaration_from_allocation_v1(
+        symbol.id, fact, logical_stride, false, true, plan, fields)
+    produce_mir_typed_storage_views_v1(original, [declaration])
+
+fn driver_typed_storage_pilot_install_tag_v1(
+    ctx: CompileContext, layout_tag: i64, source_revision: text
+) -> text:
+    if ctx.storage_registry_frozen: return "storage-registry-frozen"
+    val module_name = if layout_tag == 1:
+        "__simple_storage_pilot_soa_v1"
+    else:
+        "__simple_storage_pilot_aos_v1"
+    if ctx.mir_modules.has(module_name):
+        return "typed-storage-pilot-module-collision"
+    val produced = driver_typed_storage_pilot_produce_v1(
+        layout_tag, source_revision)
+    if not produced.ok: return "typed-storage-producer:{produced.reason}"
+    ctx.install_produced_storage_module(module_name, produced)
+
+fn driver_typed_storage_pilot_install_aos_v1(
+    ctx: CompileContext, source_revision: text
+) -> text:
+    driver_typed_storage_pilot_install_tag_v1(ctx, 0, source_revision)
+
+fn driver_typed_storage_pilot_install_soa_v1(
+    ctx: CompileContext, source_revision: text
+) -> text:
+    driver_typed_storage_pilot_install_tag_v1(ctx, 1, source_revision)

@@ -1,0 +1,35 @@
+# Typed application action-result propagation.
+
+use std.spec.*
+use app.ui.test_api.handler.{UiTestActionResult, handle_test_request_with_action_result}
+use common.ui.builder.{button}
+use common.ui.widget.{UIEvent, UITree}
+use nogc_sync_mut.ui.session.{UISession}
+
+fn _observe_event(event: UIEvent):
+    ()
+
+fn _reject_malformed_formula(event: UIEvent) -> UiTestActionResult:
+    UiTestActionResult.rejected("malformed_formula")
+
+describe "UI test API typed action results":
+    it "should return an application rejection with its correlated request id":
+        val tree = UITree.new(button("confirm_edit", "Confirm edit", "invoke"))
+        val session = UISession.new(tree)
+        val revision = session.access_snapshot().snapshot_revision
+        val body = "{\"surface_id\":\"main\",\"canonical_id\":\"main#confirm_edit\",\"action\":\"invoke\",\"request_id\":\"malformed-1\",\"expected_revision\":" + revision.to_text() + "}"
+        val response = handle_test_request_with_action_result(
+            "/api/test/ui/act",
+            "POST",
+            body,
+            session.current_state(),
+            _observe_event,
+            _reject_malformed_formula,
+            session
+        )
+        expect(response.0).to_equal(400)
+        expect(response.2).to_contain("malformed_formula")
+        expect(response.2).to_contain("malformed-1")
+        val history = session.access_recent_events(8)
+        expect(history.len()).to_be_greater_than(1)
+        expect(history[history.len() - 1].payload).to_contain("malformed_formula")

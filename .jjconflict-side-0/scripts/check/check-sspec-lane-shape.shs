@@ -1,0 +1,296 @@
+#!/bin/sh
+# check-sspec-lane-shape.shs — fail-closed static guard against a Modern SSpec
+# conversion being clobbered back to the legacy shape.
+#
+# WHY THIS EXISTS
+# ---------------
+# On 2026-08-24 three specs in the smux/LLM Caret lane were found reverted to
+# the legacy `fn test_*` + `print("PASS")` form, while
+# `.spipe/smux_caret_sspec_quality/state.md` recorded every acceptance
+# criterion as DONE:
+#
+#   test/03_system/tools/smux_system_spec.spl        aa94bed2717 -> 376031072c5
+#   test/01_unit/os/smux_spec.spl                    76c0f2f0837 -> f13adc2eca5
+#   test/01_unit/os/smux/smux_dashboard_spec.spl     76c0f2f0837 -> f13adc2eca5
+#
+# The lane already owns a deep executable check
+# (test/03_system/tools/smux_caret_sspec_quality_system_spec.spl) and it
+# detected all three correctly. Nothing ever ran it. That is the whole defect:
+# the verdict existed and no one read it.
+#
+# This guard is the cheap, always-on half. It is deliberately STATIC — it reads
+# committed source text and never invokes the Simple runner — so it can run in
+# CI on a bare checkout with no bootstrap. The executable system spec remains
+# the authoritative deep check; this one exists so a regression cannot sit
+# unnoticed for weeks between deep runs.
+#
+# VERDICT (always the last line of stdout):
+#   PASS  — <n> spec(s) checked, 0 regressed              exit 0
+#   FAIL  — <n> spec(s) checked, <k> regressed: <names>   exit 1
+#   ERROR — nothing was checked (<reason>)                exit 2
+#
+# A run that checked 0 specs is ERROR, never a pass: absence of evidence is not
+# evidence. A listed spec that does not exist is a regression, not a skip —
+# deleting the file is exactly as bad as gutting it.
+#
+# FP-RATE: 0/19 (0%) on a hand-adjudicated sample of real committed specs,
+# measured 2026-08-24. Sample: the 8 manifest specs at HEAD plus 8 modern specs
+# from unrelated lanes (agent_files, agent_plan, smux_app, json/path/string/
+# math/set_utils) — ground truth confirmed by counting `it "` and `fn test_`
+# in each — all correctly PASS; plus the 3 real clobbered blobs from
+# 376031072c5 and f13adc2eca5, all correctly FAIL with the right reason. The
+# guard only inspects paths named in its manifest, so it cannot fire on a file
+# no one opted in.
+
+set -u
+
+MANIFEST_DEFAULT="scripts/check/sspec_lane_shape_manifest.txt"
+MANIFEST="$MANIFEST_DEFAULT"
+ROOT="."
+SELFTEST_ONLY=0
+
+usage() {
+    cat <<'USAGE'
+usage: sh scripts/check/check-sspec-lane-shape.shs [--root DIR] [--manifest FILE] [--selftest]
+
+  --root DIR       tree to inspect (default: the working tree)
+  --manifest FILE  manifest of guarded specs (default: scripts/check/sspec_lane_shape_manifest.txt)
+  --selftest       run the fixture selftest and exit
+
+Manifest format, one record per line, '#' comments and blank lines ignored:
+
+  <path><TAB><minimum example count>
+
+The minimum is a FLOOR, not an equality: adding scenarios is always allowed,
+losing them is what this guard is for.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="${2:-}"; shift 2 ;;
+        --manifest) MANIFEST="${2:-}"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "check-sspec-lane-shape: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Match counting that cannot produce a non-integer.
+# ---------------------------------------------------------------------------
+count_matches() {
+    cm=$(grep -c "$1" "$2" 2>/dev/null | head -1 | tr -cd '0-9')
+    [ -n "$cm" ] || cm=0
+    printf '%s' "$cm"
+}
+
+count_matches_ext() {
+    cm=$(grep -cE "$1" "$2" 2>/dev/null | head -1 | tr -cd '0-9')
+    [ -n "$cm" ] || cm=0
+    printf '%s' "$cm"
+}
+
+# ---------------------------------------------------------------------------
+# Classification of ONE spec file.
+#
+# Echoes a reason on regression, nothing when healthy. Never exits: the caller
+# owns the verdict, so a classification bug cannot silently end the run.
+# ---------------------------------------------------------------------------
+classify_spec() {
+    cs_file="$1"
+    cs_min="$2"
+
+    if [ ! -f "$cs_file" ]; then
+        echo "missing-file"
+        return
+    fi
+
+    # Modern shape: describe/it blocks. `it` is matched with its opening quote
+    # so a prose mention of the word cannot count.
+    # `grep -c` PRINTS 0 and EXITS 1 when nothing matches, so the obvious
+    # `$(grep -c ... || echo 0)` yields the two-line value "0\n0" and every
+    # later `[ "$x" -eq 0 ]` dies with "Illegal number". The arithmetic error
+    # did not stop the run, so the spec was silently treated as healthy — a
+    # fail-open in the guard itself. count_matches keeps the printed count and
+    # normalises it to a single integer.
+    cs_it=$(count_matches '^[[:space:]]*it "' "$cs_file")
+    cs_describe=$(count_matches '^[[:space:]]*describe "' "$cs_file")
+
+    # Legacy shape: `fn test_*` helpers, PASS/FAIL prints, a main() driver.
+    cs_legacy_fn=$(count_matches '^fn test_' "$cs_file")
+    cs_legacy_print=$(count_matches_ext '^[[:space:]]*print\("(PASS|FAIL)' "$cs_file")
+    cs_main=$(count_matches '^fn main(' "$cs_file")
+
+    if [ "$cs_describe" -eq 0 ] || [ "$cs_it" -eq 0 ]; then
+        echo "no-describe-it (describe=$cs_describe it=$cs_it)"
+        return
+    fi
+    if [ "$cs_legacy_fn" -gt 0 ]; then
+        echo "legacy-fn-test-helpers ($cs_legacy_fn)"
+        return
+    fi
+    if [ "$cs_legacy_print" -gt 0 ]; then
+        echo "legacy-pass-fail-prints ($cs_legacy_print)"
+        return
+    fi
+    if [ "$cs_main" -gt 0 ]; then
+        echo "legacy-main-driver"
+        return
+    fi
+    if [ "$cs_it" -lt "$cs_min" ]; then
+        echo "example-count-fell ($cs_it < $cs_min)"
+        return
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Selftest. Fatal and unconditional: a guard whose own classifier is broken
+# reports green on a broken tree, which is worse than no guard.
+# ---------------------------------------------------------------------------
+run_selftest() {
+    st_dir=$(mktemp -d) || { echo "check-sspec-lane-shape: cannot create selftest dir" >&2; return 1; }
+    st_fail=0
+
+    # 1. modern spec, healthy
+    cat > "$st_dir/modern.spl" <<'EOF'
+describe "thing":
+    it "works":
+        expect(1).to_equal(1)
+    it "also works":
+        expect(2).to_equal(2)
+EOF
+    st_r=$(classify_spec "$st_dir/modern.spl" 2)
+    [ -z "$st_r" ] || { echo "selftest: modern spec must PASS, got '$st_r'"; st_fail=1; }
+
+    # 2. the exact incident shape: legacy helpers re-added alongside it blocks
+    cat > "$st_dir/hybrid.spl" <<'EOF'
+fn test_alpha() -> bool:
+    return true
+
+describe "thing":
+    it "works":
+        expect(test_alpha()).to_equal(true)
+EOF
+    st_r=$(classify_spec "$st_dir/hybrid.spl" 1)
+    case "$st_r" in
+        legacy-fn-test-helpers*) : ;;
+        *) echo "selftest: hybrid legacy shape must FAIL, got '$st_r'"; st_fail=1 ;;
+    esac
+
+    # 3. fully legacy: no describe/it at all
+    cat > "$st_dir/legacy.spl" <<'EOF'
+fn test_alpha():
+    print("PASS: alpha")
+
+fn main():
+    test_alpha()
+EOF
+    st_r=$(classify_spec "$st_dir/legacy.spl" 1)
+    [ -n "$st_r" ] || { echo "selftest: fully legacy spec must FAIL"; st_fail=1; }
+
+    # 4. example count fell below the recorded floor
+    st_r=$(classify_spec "$st_dir/modern.spl" 5)
+    case "$st_r" in
+        example-count-fell*) : ;;
+        *) echo "selftest: shrunk example count must FAIL, got '$st_r'"; st_fail=1 ;;
+    esac
+
+    # 5. a deleted spec is a regression, never a skip
+    st_r=$(classify_spec "$st_dir/does-not-exist.spl" 1)
+    [ "$st_r" = "missing-file" ] || { echo "selftest: missing file must FAIL, got '$st_r'"; st_fail=1; }
+
+    # 6. PASS/FAIL prints without fn test_ helpers are still legacy
+    cat > "$st_dir/prints.spl" <<'EOF'
+describe "thing":
+    it "works":
+        print("PASS: alpha")
+        expect(1).to_equal(1)
+EOF
+    st_r=$(classify_spec "$st_dir/prints.spl" 1)
+    case "$st_r" in
+        legacy-pass-fail-prints*) : ;;
+        *) echo "selftest: PASS/FAIL prints must FAIL, got '$st_r'"; st_fail=1 ;;
+    esac
+
+    # 7. prose naming the legacy pattern must NOT false-positive — this file
+    #    and its own docs talk about `fn test_` constantly.
+    cat > "$st_dir/prose.spl" <<'EOF'
+# This spec was converted away from the old fn test_ + print("PASS") form.
+describe "thing":
+    it "works":
+        expect(1).to_equal(1)
+EOF
+    st_r=$(classify_spec "$st_dir/prose.spl" 1)
+    [ -z "$st_r" ] || { echo "selftest: prose mention must PASS, got '$st_r'"; st_fail=1; }
+
+    rm -rf "$st_dir"
+    [ "$st_fail" -eq 0 ] || return 1
+    echo "check-sspec-lane-shape: selftest 7/7 fixtures correct"
+    return 0
+}
+
+if ! run_selftest; then
+    echo "check-sspec-lane-shape: ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "check-sspec-lane-shape: PASS — selftest only, no lane scan requested"
+    exit 0
+fi
+
+if [ ! -d "$ROOT" ]; then
+    echo "check-sspec-lane-shape: ERROR — nothing was checked (root '$ROOT' is not a directory)"
+    exit 2
+fi
+
+cd "$ROOT" || {
+    echo "check-sspec-lane-shape: ERROR — nothing was checked (cannot enter '$ROOT')"
+    exit 2
+}
+
+if [ ! -f "$MANIFEST" ]; then
+    echo "check-sspec-lane-shape: ERROR — nothing was checked (manifest '$MANIFEST' not found)"
+    exit 2
+fi
+
+checked=0
+regressed=0
+offenders=""
+
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+        ''|'#'*) continue ;;
+    esac
+    spec=$(printf '%s' "$line" | cut -f1)
+    minimum=$(printf '%s' "$line" | cut -f2)
+    [ -n "$spec" ] || continue
+    case "$minimum" in
+        ''|*[!0-9]*)
+            echo "check-sspec-lane-shape: ERROR — nothing was checked (bad minimum '$minimum' for $spec)"
+            exit 2
+            ;;
+    esac
+
+    checked=$((checked + 1))
+    reason=$(classify_spec "$spec" "$minimum")
+    if [ -n "$reason" ]; then
+        regressed=$((regressed + 1))
+        offenders="$offenders $spec[$reason]"
+        echo "check-sspec-lane-shape: REGRESSED $spec — $reason"
+    fi
+done < "$MANIFEST"
+
+if [ "$checked" -eq 0 ]; then
+    echo "check-sspec-lane-shape: ERROR — nothing was checked (manifest listed no specs)"
+    exit 2
+fi
+
+if [ "$regressed" -gt 0 ]; then
+    echo "check-sspec-lane-shape: FAIL — $checked spec(s) checked, $regressed regressed:$offenders"
+    exit 1
+fi
+
+echo "check-sspec-lane-shape: PASS — $checked spec(s) checked, 0 regressed"
+exit 0

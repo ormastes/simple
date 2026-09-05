@@ -1,0 +1,115 @@
+use std.spec
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestArgument, ManifestPreload, ManifestResourceLimits, ManifestTarget
+}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.scr2_native_catalog_policy_v1_codec.{
+    Scr2NativeCatalogLaunchTemplateV1, Scr2NativeCatalogRecordV1,
+    Scr2NativeCatalogSubjectV1, scr2_native_catalog_policy_signing_encode_v1,
+    scr2_native_catalog_policy_envelope_encode_v1,
+    scr2_native_catalog_policy_envelope_decode_v1
+}
+use std.common.structural.execution.simple_artifact_receipt_v2_codec.{
+    SimpleArtifactReceiptSubjectV2
+}
+use os.installer.signed_artifact_receipt_producer_v2.{
+    signed_artifact_receipt_produce_v2
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.scr2_native_catalog_policy_v1.{
+    scr2_native_catalog_authenticate_x86_64_v1,
+    scr2_native_catalog_authenticate_arm64_v1
+}
+
+fn native_catalog_target_v1() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+
+fn native_catalog_template_v1() -> Scr2NativeCatalogLaunchTemplateV1:
+    Scr2NativeCatalogLaunchTemplateV1(
+        artifact_kind: "elf", required_abi_features: ["elf64", "little-endian"],
+        required_services: ["vfs"], required_capabilities: 7u32,
+        resource_limits: ManifestResourceLimits(max_memory_bytes: 1048576,
+            max_open_handles: 16, max_threads: 2, cpu_budget_us: 1000000),
+        namespace_template: "system-tools", native_libraries: ["/lib/libsimple.so"],
+        smf_libraries: ["/lib/simple.smf"], interpreter: "/lib/ld-simple.so",
+        argument_schema: [ManifestArgument(name: "--mode", value_kind: "text",
+            required: false, default_value: "run")],
+        startup_preloads: [ManifestPreload(source_arg: "", fixed_path: "/etc/simple.conf",
+            mode: "read", required: true, maximum_bytes: 4096, access: "ro",
+            prefault: false, hash_policy: "required")])
+
+fn native_catalog_record_v1() -> Scr2NativeCatalogRecordV1:
+    Scr2NativeCatalogRecordV1(role: "simple-interpreter",
+        authority_identity: "simpleos-release", target: native_catalog_target_v1(),
+        canonical_path: "/usr/bin/simple", aliases: ["/bin/simple"],
+        entrypoint: "/usr/bin/simple", template: native_catalog_template_v1())
+
+fn native_catalog_subject_v1() -> Scr2NativeCatalogSubjectV1:
+    val delegated = pure_ed25519_keypair_from_seed([41u8] * 32).1
+    Scr2NativeCatalogSubjectV1(policy_identity: "simpleos-native-catalog-v1",
+        delegated_signer_key_id: "simpleos-release-scr2", delegated_public_key: delegated,
+        delegated_public_key_sha256: sha256_u8_hex(delegated),
+        records: [native_catalog_record_v1()])
+
+fn native_catalog_envelope_v1() -> ([u8], ExecutableManifestTrustedSignerV1):
+    val seed = [43u8] * 32
+    val public_key = pure_ed25519_keypair_from_seed(seed).1
+    val subject = native_catalog_subject_v1()
+    val signing = scr2_native_catalog_policy_signing_encode_v1(subject).unwrap()
+    val root = ExecutableManifestTrustedSignerV1(
+        key_id: "simpleos-native-catalog-root", public_key: public_key)
+    (scr2_native_catalog_policy_envelope_encode_v1(subject, root.key_id,
+        pure_ed25519_sign(seed, public_key, signing), sha256_u8_hex(public_key)).unwrap(), root)
+
+fn native_catalog_receipt_v1() -> [u8]:
+    val result = signed_artifact_receipt_produce_v2(SimpleArtifactReceiptSubjectV2(
+        artifact_sha256: "a" * 64, artifact_byte_count: 1234,
+        role: "simple-interpreter", authority_identity: "simpleos-release",
+        signature_algorithm: "", signer_key_id: "", signer_public_key_sha256: "",
+        target: native_catalog_target_v1(), canonical_path: "/usr/bin/simple",
+        aliases: ["/bin/simple"], entrypoint: "/usr/bin/simple"),
+        "simpleos-release-scr2", [41u8] * 32)
+    result.unwrap().bytes
+
+describe "SCR2 native catalog policy v1":
+    it "projects a complete root-signed launch template only after SCR2 authentication":
+        val fixture = native_catalog_envelope_v1()
+        val admitted = scr2_native_catalog_authenticate_x86_64_v1(
+            fixture.0, native_catalog_receipt_v1(), fixture.1)
+        expect(admitted.ok).to_be(true)
+        val policy = admitted.execution_policy.unwrap()
+        expect(policy.catalog_record.template.required_capabilities).to_equal(7u32)
+        expect(policy.catalog_record.template.interpreter).to_equal("/lib/ld-simple.so")
+        expect(policy.catalog_record.template.startup_preloads[0].fixed_path).
+            to_equal("/etc/simple.conf")
+        expect(policy.receipt_subject.artifact_byte_count).to_equal(1234)
+
+    it "rejects catalog tampering, root substitution, and trailing bytes":
+        val fixture = native_catalog_envelope_v1()
+        var tampered = fixture.0
+        tampered[19] = tampered[19] ^ 1u8
+        expect(scr2_native_catalog_authenticate_x86_64_v1(
+            tampered, native_catalog_receipt_v1(), fixture.1).ok).to_be(false)
+        val attacker = pure_ed25519_keypair_from_seed([47u8] * 32).1
+        expect(scr2_native_catalog_authenticate_x86_64_v1(fixture.0,
+            native_catalog_receipt_v1(), ExecutableManifestTrustedSignerV1(
+                key_id: fixture.1.key_id, public_key: attacker)).ok).to_be(false)
+        var trailing = fixture.0
+        trailing.push(0u8)
+        expect(scr2_native_catalog_policy_envelope_decode_v1(trailing).?).to_be(false)
+
+    it "rejects duplicate tuple grants and alias overbreadth at codec entry":
+        var duplicate = native_catalog_subject_v1()
+        duplicate.records.push(native_catalog_record_v1())
+        expect(scr2_native_catalog_policy_signing_encode_v1(duplicate).?).to_be(false)
+        var aliases = native_catalog_subject_v1()
+        aliases.records[0].aliases = ["/bin/simple", "/bin/simple"]
+        expect(scr2_native_catalog_policy_signing_encode_v1(aliases).?).to_be(false)
+
+    it "cannot use an x86 policy through the ARM local-target adapter":
+        val fixture = native_catalog_envelope_v1()
+        expect(scr2_native_catalog_authenticate_arm64_v1(
+            fixture.0, native_catalog_receipt_v1(), fixture.1).ok).to_be(false)

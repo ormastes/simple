@@ -1,0 +1,498 @@
+# Pure, non-authorizing executable load plan and lifecycle model.
+#
+# This module owns validation and state transitions only. It never contains an
+# address space, authority token, file handle, or scheduler capability.
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1,
+    executable_image_handle_validate, executable_image_max_load_ranges
+}
+
+pub enum ExecutableLoadConsumerStateV1:
+    Ready
+    Validated
+    Mapping
+    MappedBlocked
+    Adopted
+    AdoptedCloseRetryable
+    Unmapping
+    ClosePending
+    CloseRetryable
+    Released
+    Quarantined
+
+pub enum ExecutableLoadConsumerErrorV1:
+    None
+    InvalidConsumer
+    InvalidImage
+    UnsupportedArchitecture
+    UnsupportedAbi
+    TargetMismatch
+    InvalidEntryPoint
+    InvalidSegmentCount
+    WriteExecuteDenied
+    SegmentAlignmentInvalid
+    AddressOverflow
+    AddressOutOfRange
+    PageLimitExceeded
+    PageOverlap
+    InvalidTransition
+    AuthorityRejected
+    ConsumerExhausted
+    SourceReadFailed
+    DigestMismatch
+    ElfRejected
+    ProcessImageMismatch
+    AddressSpaceUnavailable
+    RollbackUnavailable
+    MapFailed
+    RollbackFailed
+    CloseFailed
+    SerializationIndeterminate
+
+pub struct ExecutableLoadConsumerV1:
+    schema_version: i64
+    state: ExecutableLoadConsumerStateV1
+    expected_os: text
+    expected_arch: text
+    expected_abi: text
+    segment_count: i64
+    planned_pages: u64
+    mapped_pages: u64
+    pages_to_unmap: u64
+    close_attempt: u64
+    entry_point: u64
+    failure: ExecutableLoadConsumerErrorV1
+
+pub struct ExecutableLoadReceiptV1:
+    schema_version: i64
+    state: ExecutableLoadConsumerStateV1
+    error: ExecutableLoadConsumerErrorV1
+    segment_count: i64
+    planned_pages: u64
+    mapped_pages: u64
+    pages_to_unmap: u64
+    close_attempt: u64
+    entry_point: u64
+    load_slot_index: i64
+    load_generation: u64
+    load_nonce: u64
+    execution_authorized: bool
+    close_retryable: bool
+    reason: text
+
+pub struct ExecutableLoadPlanCheckV1:
+    ok: bool
+    error: ExecutableLoadConsumerErrorV1
+    segment_count: i64
+    page_count: u64
+
+pub fn executable_load_consumer_schema_version_v1() -> i64:
+    1
+
+pub fn executable_load_consumer_page_size_v1() -> u64:
+    4096u64
+
+pub fn executable_load_consumer_max_pages_v1() -> u64:
+    65536u64
+
+pub fn executable_load_consumer_max_segment_pages_v1() -> u64:
+    32768u64
+
+fn _load_consumer_receipt_reason(
+    state: ExecutableLoadConsumerStateV1,
+    error: ExecutableLoadConsumerErrorV1
+) -> text:
+    # A fully mapped image is still loader-owned.  Name the one missing owner
+    # transition instead of returning "none", which could be mistaken for an
+    # executable success receipt by a diagnostic consumer.
+    if error == ExecutableLoadConsumerErrorV1.None and
+        state == ExecutableLoadConsumerStateV1.MappedBlocked:
+        return "legacy-loader-mapped-lease-not-scheduler-adoptable"
+    if error == ExecutableLoadConsumerErrorV1.None and
+        state == ExecutableLoadConsumerStateV1.Adopted:
+        return "adopted-state-requires-scheduler-authority"
+    if state == ExecutableLoadConsumerStateV1.AdoptedCloseRetryable:
+        return "source-close-retryable-after-scheduler-adoption"
+    match error:
+        case ExecutableLoadConsumerErrorV1.None: "none"
+        case ExecutableLoadConsumerErrorV1.InvalidConsumer: "invalid-consumer"
+        case ExecutableLoadConsumerErrorV1.InvalidImage: "invalid-image"
+        case ExecutableLoadConsumerErrorV1.UnsupportedArchitecture: "unsupported-architecture"
+        case ExecutableLoadConsumerErrorV1.UnsupportedAbi: "unsupported-abi"
+        case ExecutableLoadConsumerErrorV1.TargetMismatch: "target-mismatch"
+        case ExecutableLoadConsumerErrorV1.InvalidEntryPoint: "invalid-entry-point"
+        case ExecutableLoadConsumerErrorV1.InvalidSegmentCount: "invalid-segment-count"
+        case ExecutableLoadConsumerErrorV1.WriteExecuteDenied: "write-execute-denied"
+        case ExecutableLoadConsumerErrorV1.SegmentAlignmentInvalid: "segment-alignment-invalid"
+        case ExecutableLoadConsumerErrorV1.AddressOverflow: "address-overflow"
+        case ExecutableLoadConsumerErrorV1.AddressOutOfRange: "address-out-of-range"
+        case ExecutableLoadConsumerErrorV1.PageLimitExceeded: "page-limit-exceeded"
+        case ExecutableLoadConsumerErrorV1.PageOverlap: "page-overlap"
+        case ExecutableLoadConsumerErrorV1.InvalidTransition: "invalid-transition"
+        case ExecutableLoadConsumerErrorV1.AuthorityRejected: "authority-rejected"
+        case ExecutableLoadConsumerErrorV1.ConsumerExhausted: "consumer-exhausted"
+        case ExecutableLoadConsumerErrorV1.SourceReadFailed: "source-read-failed"
+        case ExecutableLoadConsumerErrorV1.DigestMismatch: "digest-mismatch"
+        case ExecutableLoadConsumerErrorV1.ElfRejected: "elf-rejected"
+        case ExecutableLoadConsumerErrorV1.ProcessImageMismatch: "process-image-mismatch"
+        case ExecutableLoadConsumerErrorV1.AddressSpaceUnavailable: "address-space-unavailable"
+        case ExecutableLoadConsumerErrorV1.RollbackUnavailable: "rollback-unavailable"
+        case ExecutableLoadConsumerErrorV1.MapFailed: "map-failed"
+        case ExecutableLoadConsumerErrorV1.RollbackFailed: "rollback-failed"
+        case ExecutableLoadConsumerErrorV1.CloseFailed: "close-failed"
+        case ExecutableLoadConsumerErrorV1.SerializationIndeterminate: "serialization-indeterminate"
+
+fn _load_consumer_supported_arch(arch: text) -> bool:
+    arch == "x86_64" or arch == "aarch64" or arch == "riscv64"
+
+pub(package) fn executable_load_consumer_user_max_v1(arch: text) -> u64:
+    if arch == "riscv64":
+        return 0x0000003FFFFFFFFFu64
+    if arch == "x86_64" or arch == "aarch64":
+        return 0x00007FFFFFFFFFFFu64
+    0u64
+
+pub(package) fn executable_load_consumer_page_start_v1(value: u64) -> u64:
+    value & 0xFFFFFFFFFFFFF000u64
+
+pub(package) fn executable_load_consumer_page_end_v1(value: u64) -> u64:
+    val page_size = executable_load_consumer_page_size_v1()
+    if value % page_size == 0u64:
+        return value
+    value + (page_size - (value % page_size))
+
+fn _load_consumer_ranges_share_page(
+    a: ExecutableLoadRangeV1,
+    b: ExecutableLoadRangeV1
+) -> bool:
+    val a_start = executable_load_consumer_page_start_v1(a.virtual_address)
+    val b_start = executable_load_consumer_page_start_v1(b.virtual_address)
+    val a_end = executable_load_consumer_page_end_v1(a.virtual_address + a.memory_size)
+    val b_end = executable_load_consumer_page_end_v1(b.virtual_address + b.memory_size)
+    a_start < b_end and b_start < a_end
+
+fn _load_consumer_entry_in_executable_range(
+    entry_point: u64,
+    ranges: [ExecutableLoadRangeV1]
+) -> bool:
+    for load_range in ranges:
+        if load_range.executable and
+            entry_point >= load_range.virtual_address and
+            entry_point < load_range.virtual_address + load_range.memory_size:
+            return true
+    false
+
+pub fn executable_load_consumer_new_v1(
+    expected_os: text,
+    expected_arch: text,
+    expected_abi: text
+) -> ExecutableLoadConsumerV1:
+    ExecutableLoadConsumerV1(
+        schema_version: executable_load_consumer_schema_version_v1(),
+        state: ExecutableLoadConsumerStateV1.Ready,
+        expected_os: expected_os,
+        expected_arch: expected_arch,
+        expected_abi: expected_abi,
+        segment_count: 0,
+        planned_pages: 0u64,
+        mapped_pages: 0u64,
+        pages_to_unmap: 0u64,
+        close_attempt: 0u64,
+        entry_point: 0u64,
+        failure: ExecutableLoadConsumerErrorV1.None
+    )
+
+pub fn executable_load_consumer_validate_plan_v1(
+    consumer: ExecutableLoadConsumerV1,
+    image_handle: ExecutableImageHandleV1,
+    entry_point: u64
+) -> ExecutableLoadPlanCheckV1:
+    if (consumer.schema_version != executable_load_consumer_schema_version_v1() or
+        consumer.state != ExecutableLoadConsumerStateV1.Ready or
+        consumer.segment_count != 0 or consumer.planned_pages != 0u64 or
+        consumer.mapped_pages != 0u64 or consumer.pages_to_unmap != 0u64 or
+        consumer.close_attempt != 0u64 or consumer.entry_point != 0u64):
+        return ExecutableLoadPlanCheckV1(
+            ok: false, error: ExecutableLoadConsumerErrorV1.InvalidConsumer,
+            segment_count: 0, page_count: 0u64)
+    if not _load_consumer_supported_arch(consumer.expected_arch):
+        return ExecutableLoadPlanCheckV1(
+            ok: false, error: ExecutableLoadConsumerErrorV1.UnsupportedArchitecture,
+            segment_count: 0, page_count: 0u64)
+    if consumer.expected_os != "simpleos" or consumer.expected_abi != "simpleos":
+        return ExecutableLoadPlanCheckV1(
+            ok: false, error: ExecutableLoadConsumerErrorV1.UnsupportedAbi,
+            segment_count: 0, page_count: 0u64)
+    if image_handle.target.os != consumer.expected_os or
+        image_handle.target.arch != consumer.expected_arch or
+        image_handle.target.abi != consumer.expected_abi:
+        return ExecutableLoadPlanCheckV1(
+            ok: false, error: ExecutableLoadConsumerErrorV1.TargetMismatch,
+            segment_count: 0, page_count: 0u64)
+    val ranges = image_handle.verified_load_ranges
+    if ranges.len() == 0 or ranges.len() > executable_image_max_load_ranges():
+        return ExecutableLoadPlanCheckV1(
+            ok: false, error: ExecutableLoadConsumerErrorV1.InvalidSegmentCount,
+            segment_count: ranges.len(), page_count: 0u64)
+
+    val page_size = executable_load_consumer_page_size_v1()
+    val user_max = executable_load_consumer_user_max_v1(consumer.expected_arch)
+    var total_pages = 0u64
+    var i = 0
+    while i < ranges.len():
+        val load_range = ranges[i]
+        if load_range.writable and load_range.executable:
+            return ExecutableLoadPlanCheckV1(
+                ok: false, error: ExecutableLoadConsumerErrorV1.WriteExecuteDenied,
+                segment_count: ranges.len(), page_count: total_pages)
+        if load_range.file_offset % page_size != load_range.virtual_address % page_size:
+            return ExecutableLoadPlanCheckV1(
+                ok: false, error: ExecutableLoadConsumerErrorV1.SegmentAlignmentInvalid,
+                segment_count: ranges.len(), page_count: total_pages)
+        if load_range.memory_size == 0u64 or
+            load_range.virtual_address > 18446744073709551615u64 - load_range.memory_size:
+            return ExecutableLoadPlanCheckV1(
+                ok: false, error: ExecutableLoadConsumerErrorV1.AddressOverflow,
+                segment_count: ranges.len(), page_count: total_pages)
+        val raw_end = load_range.virtual_address + load_range.memory_size
+        if raw_end > 18446744073709551615u64 - (page_size - 1u64):
+            return ExecutableLoadPlanCheckV1(
+                ok: false, error: ExecutableLoadConsumerErrorV1.AddressOverflow,
+                segment_count: ranges.len(), page_count: total_pages)
+        val page_start = executable_load_consumer_page_start_v1(load_range.virtual_address)
+        val page_end = executable_load_consumer_page_end_v1(raw_end)
+        if page_start < page_size or page_end == 0u64 or page_end - 1u64 > user_max:
+            return ExecutableLoadPlanCheckV1(
+                ok: false, error: ExecutableLoadConsumerErrorV1.AddressOutOfRange,
+                segment_count: ranges.len(), page_count: total_pages)
+        val segment_pages = (page_end - page_start) / page_size
+        if segment_pages == 0u64 or
+            segment_pages > executable_load_consumer_max_segment_pages_v1() or
+            total_pages > executable_load_consumer_max_pages_v1() - segment_pages:
+            return ExecutableLoadPlanCheckV1(
+                ok: false, error: ExecutableLoadConsumerErrorV1.PageLimitExceeded,
+                segment_count: ranges.len(), page_count: total_pages)
+        var j = 0
+        while j < i:
+            if _load_consumer_ranges_share_page(load_range, ranges[j]):
+                return ExecutableLoadPlanCheckV1(
+                    ok: false, error: ExecutableLoadConsumerErrorV1.PageOverlap,
+                    segment_count: ranges.len(), page_count: total_pages)
+            j = j + 1
+        total_pages = total_pages + segment_pages
+        i = i + 1
+
+    if not executable_image_handle_validate(image_handle).ok:
+        return ExecutableLoadPlanCheckV1(
+            ok: false, error: ExecutableLoadConsumerErrorV1.InvalidImage,
+            segment_count: ranges.len(), page_count: total_pages)
+    if entry_point == 0u64 or
+        not _load_consumer_entry_in_executable_range(entry_point, ranges):
+        return ExecutableLoadPlanCheckV1(
+            ok: false, error: ExecutableLoadConsumerErrorV1.InvalidEntryPoint,
+            segment_count: ranges.len(), page_count: total_pages)
+    ExecutableLoadPlanCheckV1(
+        ok: true, error: ExecutableLoadConsumerErrorV1.None,
+        segment_count: ranges.len(), page_count: total_pages)
+
+pub fn executable_load_consumer_plan_v1(
+    consumer: ExecutableLoadConsumerV1,
+    image_handle: ExecutableImageHandleV1,
+    entry_point: u64
+) -> ExecutableLoadConsumerV1:
+    var next = consumer
+    val checked = executable_load_consumer_validate_plan_v1(
+        consumer, image_handle, entry_point)
+    if not checked.ok:
+        next.failure = checked.error
+        return next
+    next.state = ExecutableLoadConsumerStateV1.Validated
+    next.segment_count = checked.segment_count
+    next.planned_pages = checked.page_count
+    next.entry_point = entry_point
+    next.failure = ExecutableLoadConsumerErrorV1.None
+    next
+
+pub fn executable_load_consumer_begin_mapping_v1(
+    consumer: ExecutableLoadConsumerV1
+) -> ExecutableLoadConsumerV1:
+    var next = consumer
+    if consumer.state != ExecutableLoadConsumerStateV1.Validated:
+        next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return next
+    if (consumer.segment_count <= 0 or consumer.planned_pages == 0u64 or
+        consumer.planned_pages > executable_load_consumer_max_pages_v1() or
+        consumer.mapped_pages != 0u64 or consumer.pages_to_unmap != 0u64 or
+        consumer.close_attempt != 0u64 or consumer.entry_point == 0u64):
+        next.state = ExecutableLoadConsumerStateV1.Quarantined
+        next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return next
+    next.state = ExecutableLoadConsumerStateV1.Mapping
+    next
+
+pub fn executable_load_consumer_map_page_v1(
+    consumer: ExecutableLoadConsumerV1,
+    mapped: bool
+) -> ExecutableLoadConsumerV1:
+    var next = consumer
+    if consumer.state != ExecutableLoadConsumerStateV1.Mapping:
+        next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return next
+    if (consumer.segment_count <= 0 or consumer.planned_pages == 0u64 or
+        consumer.planned_pages > executable_load_consumer_max_pages_v1() or
+        consumer.mapped_pages >= consumer.planned_pages or
+        consumer.pages_to_unmap != 0u64 or consumer.close_attempt != 0u64):
+        next.state = ExecutableLoadConsumerStateV1.Quarantined
+        next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return next
+    if not mapped:
+        next.failure = ExecutableLoadConsumerErrorV1.MapFailed
+        next.pages_to_unmap = consumer.mapped_pages
+        if next.pages_to_unmap == 0u64:
+            next.state = ExecutableLoadConsumerStateV1.ClosePending
+        else:
+            next.state = ExecutableLoadConsumerStateV1.Unmapping
+        return next
+    next.mapped_pages = consumer.mapped_pages + 1u64
+    if next.mapped_pages == next.planned_pages:
+        next.state = ExecutableLoadConsumerStateV1.MappedBlocked
+    next
+
+pub fn executable_load_consumer_begin_release_v1(
+    consumer: ExecutableLoadConsumerV1
+) -> ExecutableLoadConsumerV1:
+    var next = consumer
+    if consumer.state == ExecutableLoadConsumerStateV1.MappedBlocked:
+        if (consumer.planned_pages == 0u64 or
+            consumer.planned_pages > executable_load_consumer_max_pages_v1() or
+            consumer.mapped_pages != consumer.planned_pages or
+            consumer.pages_to_unmap != 0u64 or consumer.close_attempt != 0u64):
+            next.state = ExecutableLoadConsumerStateV1.Quarantined
+            next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+            return next
+        next.pages_to_unmap = consumer.mapped_pages
+        if next.pages_to_unmap == 0u64:
+            next.state = ExecutableLoadConsumerStateV1.ClosePending
+        else:
+            next.state = ExecutableLoadConsumerStateV1.Unmapping
+        return next
+    if consumer.state == ExecutableLoadConsumerStateV1.Validated:
+        if (consumer.planned_pages == 0u64 or
+            consumer.planned_pages > executable_load_consumer_max_pages_v1() or
+            consumer.mapped_pages != 0u64 or consumer.pages_to_unmap != 0u64 or
+            consumer.close_attempt != 0u64):
+            next.state = ExecutableLoadConsumerStateV1.Quarantined
+            next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+            return next
+        next.state = ExecutableLoadConsumerStateV1.ClosePending
+        return next
+    if consumer.state == ExecutableLoadConsumerStateV1.CloseRetryable:
+        if (consumer.planned_pages == 0u64 or
+            consumer.planned_pages > executable_load_consumer_max_pages_v1() or
+            consumer.mapped_pages != 0u64 or consumer.pages_to_unmap != 0u64 or
+            consumer.close_attempt == 0u64):
+            next.state = ExecutableLoadConsumerStateV1.Quarantined
+            next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+            return next
+        if consumer.close_attempt == 18446744073709551615u64:
+            next.state = ExecutableLoadConsumerStateV1.Quarantined
+            next.failure = ExecutableLoadConsumerErrorV1.CloseFailed
+            return next
+        next.state = ExecutableLoadConsumerStateV1.ClosePending
+        return next
+    next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+    next
+
+pub fn executable_load_consumer_unmap_page_v1(
+    consumer: ExecutableLoadConsumerV1,
+    unmapped: bool
+) -> ExecutableLoadConsumerV1:
+    var next = consumer
+    if consumer.state != ExecutableLoadConsumerStateV1.Unmapping:
+        next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return next
+    # Both legitimate paths into Unmapping initialize the two counters to the
+    # same positive value and decrement them together. Check that invariant
+    # before either subtraction so forged public values cannot wrap u64.
+    if (consumer.planned_pages == 0u64 or
+        consumer.planned_pages > executable_load_consumer_max_pages_v1() or
+        consumer.mapped_pages == 0u64 or consumer.pages_to_unmap == 0u64 or
+        consumer.pages_to_unmap > consumer.mapped_pages or
+        consumer.pages_to_unmap != consumer.mapped_pages or
+        consumer.mapped_pages > consumer.planned_pages or
+        consumer.close_attempt != 0u64):
+        next.state = ExecutableLoadConsumerStateV1.Quarantined
+        next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return next
+    if not unmapped:
+        next.state = ExecutableLoadConsumerStateV1.Quarantined
+        next.failure = ExecutableLoadConsumerErrorV1.RollbackFailed
+        return next
+    next.pages_to_unmap = consumer.pages_to_unmap - 1u64
+    next.mapped_pages = consumer.mapped_pages - 1u64
+    if next.pages_to_unmap == 0u64:
+        next.state = ExecutableLoadConsumerStateV1.ClosePending
+    next
+
+pub fn executable_load_consumer_close_v1(
+    consumer: ExecutableLoadConsumerV1,
+    closed: bool
+) -> ExecutableLoadConsumerV1:
+    var next = consumer
+    if consumer.state != ExecutableLoadConsumerStateV1.ClosePending:
+        next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return next
+    if (consumer.planned_pages == 0u64 or
+        consumer.planned_pages > executable_load_consumer_max_pages_v1() or
+        consumer.mapped_pages != 0u64 or consumer.pages_to_unmap != 0u64):
+        next.state = ExecutableLoadConsumerStateV1.Quarantined
+        next.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return next
+    if consumer.close_attempt == 18446744073709551615u64:
+        next.state = ExecutableLoadConsumerStateV1.Quarantined
+        next.failure = ExecutableLoadConsumerErrorV1.CloseFailed
+        return next
+    next.close_attempt = consumer.close_attempt + 1u64
+    if not closed:
+        next.state = ExecutableLoadConsumerStateV1.CloseRetryable
+        next.failure = ExecutableLoadConsumerErrorV1.CloseFailed
+        return next
+    next.state = ExecutableLoadConsumerStateV1.Released
+    if next.failure == ExecutableLoadConsumerErrorV1.CloseFailed:
+        next.failure = ExecutableLoadConsumerErrorV1.None
+    next
+
+pub fn executable_load_consumer_receipt_v1(
+    consumer: ExecutableLoadConsumerV1
+) -> ExecutableLoadReceiptV1:
+    ExecutableLoadReceiptV1(
+        schema_version: executable_load_consumer_schema_version_v1(),
+        state: consumer.state,
+        error: consumer.failure,
+        segment_count: consumer.segment_count,
+        planned_pages: consumer.planned_pages,
+        mapped_pages: consumer.mapped_pages,
+        pages_to_unmap: consumer.pages_to_unmap,
+        close_attempt: consumer.close_attempt,
+        entry_point: consumer.entry_point,
+        load_slot_index: -1,
+        load_generation: 0u64,
+        load_nonce: 0u64,
+        execution_authorized: false,
+        close_retryable: consumer.state == ExecutableLoadConsumerStateV1.CloseRetryable or
+            consumer.state == ExecutableLoadConsumerStateV1.AdoptedCloseRetryable,
+        reason: _load_consumer_receipt_reason(consumer.state, consumer.failure)
+    )
+
+export ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1
+export ExecutableLoadConsumerV1, ExecutableLoadReceiptV1
+export ExecutableLoadPlanCheckV1
+export executable_load_consumer_schema_version_v1
+export executable_load_consumer_page_size_v1
+export executable_load_consumer_max_pages_v1
+export executable_load_consumer_max_segment_pages_v1
+export executable_load_consumer_new_v1, executable_load_consumer_validate_plan_v1
+export executable_load_consumer_plan_v1, executable_load_consumer_begin_mapping_v1
+export executable_load_consumer_map_page_v1, executable_load_consumer_begin_release_v1
+export executable_load_consumer_unmap_page_v1, executable_load_consumer_close_v1
+export executable_load_consumer_receipt_v1

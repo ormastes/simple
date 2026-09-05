@@ -1,0 +1,212 @@
+# ============================================================================
+# common/structural/resolve/resolve_codec.spl — CPU reference serializers
+#
+# CPU reference codec for the frozen resolve contract (LINK lane). Per the
+# shared lane rules the CPU reference is the oracle and is never deleted; any
+# future vectorized or GPU-resident encoder must produce byte-identical
+# output.
+#
+# Layout (all little-endian, no padding — see common/structural/wire.spl):
+#
+#   ResolveKey        20  name_hash Hash128 | space u32
+#   DefinitionRecord  44  key ResolveKey | owner EntityRef
+#                         | attributes u64 | order u64
+#   ReferenceRecord   44  key ResolveKey | owner EntityRef
+#                         | attributes u64 | order u64
+#   ResolutionRecord  20  reference EntityRef | definition EntityRef
+#                         | status u8 | reason u8 | reserved u16 (== 0)
+#
+# Bare `*_put`/`*_read` functions are the unframed field codecs used when a
+# record is embedded inside a larger structure. The `encode_*`/`decode_*`
+# pairs wrap a single record in the 8-byte envelope for standalone storage.
+#
+# Decoders are total: they never trap on malformed input, they return a
+# result struct carrying an `ok` flag. Unknown status/reason discriminants
+# and a nonzero reserved field are HARD REJECTS, never silent defaults.
+# ============================================================================
+
+use std.common.structural.wire.{
+    WIRE_ENVELOPE_LEN,
+    wire_check_envelope,
+    wire_get_u8,
+    wire_get_u16,
+    wire_get_u32,
+    wire_get_u64,
+    wire_has,
+    wire_magic,
+    wire_put_envelope,
+    wire_put_u8,
+    wire_put_u16,
+    wire_put_u32,
+    wire_put_u64
+}
+use std.common.structural.identity.entity_id.{
+    EntityRef,
+    Hash128,
+    entity_ref,
+    hash128
+}
+use std.common.structural.identity.identity_codec.{
+    entity_ref_put,
+    entity_ref_read,
+    hash128_put,
+    hash128_read
+}
+use std.common.structural.resolve.resolve_types.{
+    DEFINITION_RECORD_LEN,
+    REFERENCE_RECORD_LEN,
+    RESOLUTION_RECORD_LEN,
+    RESOLVE_KEY_LEN,
+    RESOLVE_SCHEMA_VERSION,
+    DefinitionRecord,
+    ReferenceRecord,
+    ResolutionRecord,
+    ResolveKey,
+    definition_record,
+    reference_record,
+    resolution_record,
+    resolve_key,
+    resolve_reason_valid,
+    resolve_status_valid
+}
+
+# ----------------------------------------------------------------------------
+# Record magics. Distinct per record type so a mis-routed buffer is rejected
+# rather than silently reinterpreted.
+# ----------------------------------------------------------------------------
+
+fn resolve_magic_definition() -> i64:
+    wire_magic("SDFN")
+
+fn resolve_magic_reference() -> i64:
+    wire_magic("SRFR")
+
+fn resolve_magic_resolution() -> i64:
+    wire_magic("SRSL")
+
+# ----------------------------------------------------------------------------
+# Result carriers — explicit `ok` structs, same rationale as identity_codec.
+# ----------------------------------------------------------------------------
+
+struct DefinitionRecordResult:
+    ok: bool
+    value: DefinitionRecord
+
+struct ReferenceRecordResult:
+    ok: bool
+    value: ReferenceRecord
+
+struct ResolutionRecordResult:
+    ok: bool
+    value: ResolutionRecord
+
+fn resolve_zero_entity_ref() -> EntityRef:
+    entity_ref(0, 0)
+
+# ----------------------------------------------------------------------------
+# Unframed field codecs
+# ----------------------------------------------------------------------------
+
+fn resolve_key_put(out: [u8], k: ResolveKey) -> [u8]:
+    var b = hash128_put(out, k.name_hash)
+    wire_put_u32(b, k.space)
+
+fn resolve_key_read(data: [u8], off: i64) -> ResolveKey:
+    resolve_key(hash128_read(data, off), wire_get_u32(data, off + 16))
+
+fn definition_record_put(out: [u8], r: DefinitionRecord) -> [u8]:
+    var b = resolve_key_put(out, r.key)
+    b = entity_ref_put(b, r.owner)
+    b = wire_put_u64(b, r.attributes)
+    wire_put_u64(b, r.order)
+
+fn definition_record_read(data: [u8], off: i64) -> DefinitionRecord:
+    definition_record(
+        resolve_key_read(data, off),
+        entity_ref_read(data, off + RESOLVE_KEY_LEN),
+        wire_get_u64(data, off + RESOLVE_KEY_LEN + 8),
+        wire_get_u64(data, off + RESOLVE_KEY_LEN + 16))
+
+fn reference_record_put(out: [u8], r: ReferenceRecord) -> [u8]:
+    var b = resolve_key_put(out, r.key)
+    b = entity_ref_put(b, r.owner)
+    b = wire_put_u64(b, r.attributes)
+    wire_put_u64(b, r.order)
+
+fn reference_record_read(data: [u8], off: i64) -> ReferenceRecord:
+    reference_record(
+        resolve_key_read(data, off),
+        entity_ref_read(data, off + RESOLVE_KEY_LEN),
+        wire_get_u64(data, off + RESOLVE_KEY_LEN + 8),
+        wire_get_u64(data, off + RESOLVE_KEY_LEN + 16))
+
+fn resolution_record_put(out: [u8], r: ResolutionRecord) -> [u8]:
+    var b = entity_ref_put(out, r.reference)
+    b = entity_ref_put(b, r.definition)
+    b = wire_put_u8(b, r.status)
+    b = wire_put_u8(b, r.reason)
+    wire_put_u16(b, 0)
+
+fn resolution_record_read(data: [u8], off: i64) -> ResolutionRecord:
+    resolution_record(
+        entity_ref_read(data, off),
+        entity_ref_read(data, off + 8),
+        wire_get_u8(data, off + 16),
+        wire_get_u8(data, off + 17))
+
+fn resolution_record_reserved_ok(data: [u8], off: i64) -> bool:
+    """The trailing reserved u16 of an unframed ResolutionRecord must be 0."""
+    wire_get_u16(data, off + 18) == 0
+
+# ----------------------------------------------------------------------------
+# Framed encode/decode
+# ----------------------------------------------------------------------------
+
+fn encode_definition_record(r: DefinitionRecord) -> [u8]:
+    var b: [u8] = []
+    b = wire_put_envelope(b, resolve_magic_definition(), RESOLVE_SCHEMA_VERSION)
+    definition_record_put(b, r)
+
+fn decode_definition_record(data: [u8]) -> DefinitionRecordResult:
+    val zero = definition_record(
+        resolve_key(hash128(0, 0), 0), resolve_zero_entity_ref(), 0, 0)
+    if not wire_check_envelope(data, 0, resolve_magic_definition(), RESOLVE_SCHEMA_VERSION):
+        return DefinitionRecordResult(ok: false, value: zero)
+    if not wire_has(data, WIRE_ENVELOPE_LEN, DEFINITION_RECORD_LEN):
+        return DefinitionRecordResult(ok: false, value: zero)
+    DefinitionRecordResult(ok: true, value: definition_record_read(data, WIRE_ENVELOPE_LEN))
+
+fn encode_reference_record(r: ReferenceRecord) -> [u8]:
+    var b: [u8] = []
+    b = wire_put_envelope(b, resolve_magic_reference(), RESOLVE_SCHEMA_VERSION)
+    reference_record_put(b, r)
+
+fn decode_reference_record(data: [u8]) -> ReferenceRecordResult:
+    val zero = reference_record(
+        resolve_key(hash128(0, 0), 0), resolve_zero_entity_ref(), 0, 0)
+    if not wire_check_envelope(data, 0, resolve_magic_reference(), RESOLVE_SCHEMA_VERSION):
+        return ReferenceRecordResult(ok: false, value: zero)
+    if not wire_has(data, WIRE_ENVELOPE_LEN, REFERENCE_RECORD_LEN):
+        return ReferenceRecordResult(ok: false, value: zero)
+    ReferenceRecordResult(ok: true, value: reference_record_read(data, WIRE_ENVELOPE_LEN))
+
+fn encode_resolution_record(r: ResolutionRecord) -> [u8]:
+    var b: [u8] = []
+    b = wire_put_envelope(b, resolve_magic_resolution(), RESOLVE_SCHEMA_VERSION)
+    resolution_record_put(b, r)
+
+fn decode_resolution_record(data: [u8]) -> ResolutionRecordResult:
+    val zero = resolution_record(
+        resolve_zero_entity_ref(), resolve_zero_entity_ref(), 0, 0)
+    if not wire_check_envelope(data, 0, resolve_magic_resolution(), RESOLVE_SCHEMA_VERSION):
+        return ResolutionRecordResult(ok: false, value: zero)
+    if not wire_has(data, WIRE_ENVELOPE_LEN, RESOLUTION_RECORD_LEN):
+        return ResolutionRecordResult(ok: false, value: zero)
+    if not resolution_record_reserved_ok(data, WIRE_ENVELOPE_LEN):
+        return ResolutionRecordResult(ok: false, value: zero)
+    val v = resolution_record_read(data, WIRE_ENVELOPE_LEN)
+    if not resolve_status_valid(v.status):
+        return ResolutionRecordResult(ok: false, value: zero)
+    if not resolve_reason_valid(v.reason):
+        return ResolutionRecordResult(ok: false, value: zero)
+    ResolutionRecordResult(ok: true, value: v)

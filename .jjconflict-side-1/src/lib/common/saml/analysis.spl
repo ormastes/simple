@@ -1,0 +1,391 @@
+# SAML analysis — the facts an editor, a manual, or an agent needs
+#
+# One `SamlAnalysis` per module. It answers the questions a reviewer actually
+# asks about an `llm fn`: what schema does it reach, does its prompt bind, what
+# evidence backs it, and can that evidence fail?
+#
+# The analysis is deliberately static. It never claims a function produces
+# correct output — only what is declared, what is bound, and what evidence
+# exists. Runtime facts (latency, tokens, repairs, evaluator verdicts) come
+# from run receipts and are reported separately; see the design doc §14.9.
+#
+# Behavior is specified by test/01_unit/lib/saml/saml_spec.spl.
+
+use std.common.saml.ir.{SamlModule, SamlFunction, SamlClass, SamlField}
+use std.common.saml.ir.{find_class, find_enum, find_struct, is_primitive_type}
+use std.common.saml.ir.{has_attribute, attribute_body, type_display}
+use std.common.saml.spec_coverage.{discover_spec_coverage}
+
+# Per-function analysis. This is the record an LSP hover, an IDE panel, a
+# generated manual section, and an agent-facing summary all render from.
+struct SamlFunctionAnalysis:
+    name: text
+    line: i64
+    signature: text
+    client: text
+    reachable_types: [text]
+    prompt_vars: [text]
+    unbound_vars: [text]
+    has_output_format: bool
+    traced: bool
+    parse_strictness: text
+    covering_tests: [text]
+    evidence_kinds: [text]
+    example_count: i64
+    counter_example_count: i64
+    sensitive_fields: [text]
+    evidence_state: text
+    warnings: [text]
+
+struct SamlAnalysis:
+    module_name: text
+    source_path: text
+    functions: [SamlFunctionAnalysis]
+    orphan_classes: [text]
+    module_warnings: [text]
+    error_count: i64
+    warning_count: i64
+
+# Pull `{{ name }}` / `{{ Template(...) }}` heads out of a prompt body.
+fn prompt_variables(prompt: text) -> [text]:
+    """Return the distinct `{{ ... }}` head names referenced by a prompt."""
+    var found: [text] = []
+    var rest = prompt
+    while true:
+        val open = rest.index_of("{{")
+        if open < 0:
+            break
+        val after = rest.slice(open + 2, rest.len())
+        val close = after.index_of("}}")
+        if close < 0:
+            break
+        var name = after.slice(0, close).trim()
+        val paren = name.index_of("(")
+        if paren >= 0:
+            name = name.slice(0, paren).trim()
+        if name != "":
+            var seen = false
+            for f in found:
+                if f == name:
+                    seen = true
+            if not seen:
+                found.push(name)
+        rest = after.slice(close + 2, after.len())
+    found
+
+# Walk a type name transitively, collecting every declared class/enum it can
+# reach. This is what makes a function's real schema surface reviewable: the
+# return type alone hides nested structure.
+fn reachable_types(module: SamlModule, root: text) -> [text]:
+    """Collect the declared types reachable from `root`, root included."""
+    var out: [text] = []
+    var queue: [text] = [root]
+    while queue.len() > 0:
+        val name = queue[0]
+        queue = queue.slice(1, queue.len())
+        if name == "":
+            continue
+        if is_primitive_type(name):
+            continue
+        var seen = false
+        for o in out:
+            if o == name:
+                seen = true
+        if seen:
+            continue
+        val cls = find_class(module, name)
+        val enm = find_enum(module, name)
+        if cls == nil and enm == nil:
+            continue
+        out.push(name)
+        if cls != nil:
+            for field in cls.fields:
+                queue.push(field.type_name)
+    out
+
+# Fields carrying `@sensitive(...)` anywhere in the reachable schema. A
+# function touching these without a redaction policy is a privacy warning,
+# not a style nit.
+fn _sensitive_fields(module: SamlModule, types: [text]) -> [text]:
+    var out: [text] = []
+    for tname in types:
+        val cls = find_class(module, tname)
+        if cls != nil:
+            for field in cls.fields:
+                if field.sensitive != "":
+                    out.push(tname + "." + field.name + " (" + field.sensitive + ")")
+    out
+
+# The callee named by a comment case, e.g. `ExtractResume("x") => ...` -> "ExtractResume".
+fn example_callee(input_text: text) -> text:
+    """Return the function name a `# example:` case invokes, or ""."""
+    val open = input_text.index_of("(")
+    if open < 0:
+        return ""
+    input_text.slice(0, open).trim()
+
+# Count top-level arguments, ignoring commas inside string literals and nested
+# parens. `Extract("Hopper, Rear Admiral")` is one argument, not two.
+fn example_arity(input_text: text) -> i64:
+    """Count the top-level arguments of a `# example:` invocation."""
+    val open = input_text.index_of("(")
+    if open < 0:
+        return -1
+    var depth = 0
+    var in_quote = false
+    var count = 0
+    var seen_any = false
+    var i = open
+    val chars = input_text.chars()
+    while i < chars.len():
+        val ch = chars[i]
+        i = i + 1
+        if ch == "\"":
+            in_quote = not in_quote
+            seen_any = true
+            continue
+        if in_quote:
+            seen_any = true
+            continue
+        if ch == "(":
+            depth = depth + 1
+            continue
+        if ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                break
+            continue
+        if ch == "," and depth == 1:
+            count = count + 1
+            continue
+        if ch != " ":
+            seen_any = true
+    if not seen_any:
+        return 0
+    count + 1
+
+fn _signature_of(fun: SamlFunction) -> text:
+    var parts: [text] = []
+    for p in fun.params:
+        parts.push(p.name + ": " + type_display(p.type_name, p.optional, p.is_list))
+    fun.name + "(" + parts.join(", ") + ") -> " + fun.return_type
+
+# Evidence state ranks how falsifiable a function's backing is. `red_proven`
+# is the only state that has shown its oracle can fail.
+fn evidence_state(test_count: i64, example_count: i64, counter_example_count: i64) -> text:
+    """Rank a function's evidence: unevidenced -> examples_only -> tested -> red_proven."""
+    if counter_example_count > 0 and (test_count > 0 or example_count > 0):
+        return "red_proven"
+    if test_count > 0:
+        return "tested"
+    if example_count > 0:
+        return "examples_only"
+    "unevidenced"
+
+fn analyze_function(module: SamlModule, fun: SamlFunction) -> SamlFunctionAnalysis:
+    """Produce the reviewable analysis record for one llm fn."""
+    val no_external: [text] = []
+    analyze_function_with_external(module, fun, no_external)
+
+# Same as `analyze_function`, but also merges pre-computed external spec
+# coverage (from `spec_coverage.discover_spec_coverage`, already filtered to
+# this function's name) into the evidence ladder. External coverage can lift
+# `unevidenced` -> `tested`, but can NEVER reach `red_proven` — that rung
+# still requires an in-file `# counter-example:`, which `evidence_state`
+# already enforces since `negatives` is sourced only from in-file cases.
+fn analyze_function_with_external(module: SamlModule, fun: SamlFunction, external_covering: [text]) -> SamlFunctionAnalysis:
+    var types = reachable_types(module, fun.return_type)
+    for p in fun.params:
+        for t in reachable_types(module, p.type_name):
+            var seen = false
+            for existing in types:
+                if existing == t:
+                    seen = true
+            if not seen:
+                types.push(t)
+
+    val vars = prompt_variables(fun.prompt)
+    var unbound: [text] = []
+    var has_format = false
+    for v in vars:
+        if v == "saml.output_format":
+            has_format = true
+            continue
+        if v.starts_with("saml."):
+            continue
+        var bound = false
+        for p in fun.params:
+            if p.name == v:
+                bound = true
+        # A capitalised head is a template call, resolved separately.
+        if v.slice(0, 1) != v.slice(0, 1).to_lower():
+            bound = true
+        if not bound:
+            unbound.push(v)
+
+    var covering: [text] = []
+    var evidence: [text] = []
+    for t in module.tests:
+        for target in t.functions:
+            if target == fun.name:
+                covering.push(t.name)
+                if t.evidence_source != "":
+                    evidence.push(t.evidence_source)
+
+    # Only a case that actually names THIS function with the right arity counts
+    # toward the evidence ladder. Otherwise an author raises their own rung by
+    # writing a comment, and the ladder measures typing rather than evidence.
+    var positives = 0
+    var negatives = 0
+    var malformed: [text] = []
+    for ex in fun.example_cases:
+        val callee = example_callee(ex.input_text)
+        val arity = example_arity(ex.input_text)
+        if callee == "":
+            malformed.push("case on line " + ex.line.to_text() + " names no function; write `" + fun.name + "(...) => expectation`")
+            continue
+        if callee != fun.name:
+            malformed.push("case on line " + ex.line.to_text() + " invokes `" + callee + "`, not `" + fun.name + "`")
+            continue
+        if arity != fun.params.len():
+            malformed.push("case on line " + ex.line.to_text() + " passes " + arity.to_text() + " argument(s); `" + fun.name + "` takes " + fun.params.len().to_text())
+            continue
+        if ex.expect_text == "":
+            malformed.push("case on line " + ex.line.to_text() + " states no expectation after `=>`")
+            continue
+        if ex.kind == "counter_example":
+            negatives = negatives + 1
+        else:
+            positives = positives + 1
+
+    val in_file_test_count = covering.len()
+    for e in external_covering:
+        covering.push(e)
+
+    val sensitive = _sensitive_fields(module, types)
+    val state = evidence_state(covering.len(), positives, negatives)
+
+    var warnings: [text] = []
+    for m in malformed:
+        warnings.push("E-SAML-1800: ignored comment case — " + m)
+    for u in unbound:
+        warnings.push("E-SAML-1300: prompt references unbound variable `" + u + "`")
+    if not has_format:
+        warnings.push("E-SAML-1300: prompt never renders `saml.output_format`; the model is not shown the expected schema")
+    if fun.client == "":
+        warnings.push("E-SAML-1500: no client policy declared")
+    if fun.return_type != "" and types.len() == 0 and not is_primitive_type(fun.return_type):
+        warnings.push("E-SAML-1200: return type `" + fun.return_type + "` is not a declared class or enum")
+    if find_struct(module, fun.return_type) != nil:
+        warnings.push("E-SAML-1600: `struct` " + fun.return_type + " is native-only and cannot be an LLM-visible return type")
+    if sensitive.len() > 0 and not has_attribute(fun.attributes, "redact"):
+        warnings.push("E-SAML-1900: reaches sensitive fields but declares no `@redact` policy")
+    if state == "unevidenced":
+        warnings.push("E-SAML-1800: no test and no `# example:` comment backs this function")
+    if state == "examples_only":
+        warnings.push("E-SAML-1800: only comment examples back this function; no declared test binds it")
+    if state == "tested" and negatives == 0:
+        warnings.push("E-SAML-1800: no `# counter-example:` — the oracle has never been shown to fail")
+    if external_covering.len() > 0 and in_file_test_count == 0 and positives == 0 and negatives == 0:
+        warnings.push("E-SAML-1810: function " + fun.name + " is tested only by external specs; add a `# counter-example:` to reach red_proven")
+
+    var strictness = "compatible"
+    val parse_body = attribute_body(fun.attributes, "parse")
+    if parse_body.contains("strictness:"):
+        val at = parse_body.index_of("strictness:")
+        var tail = parse_body.slice(at + 11, parse_body.len()).trim()
+        val comma = tail.index_of(",")
+        if comma >= 0:
+            tail = tail.slice(0, comma).trim()
+        strictness = tail
+
+    SamlFunctionAnalysis(
+        name: fun.name,
+        line: fun.line,
+        signature: _signature_of(fun),
+        client: fun.client,
+        reachable_types: types,
+        prompt_vars: vars,
+        unbound_vars: unbound,
+        has_output_format: has_format,
+        traced: has_attribute(fun.attributes, "trace"),
+        parse_strictness: strictness,
+        covering_tests: covering,
+        evidence_kinds: evidence,
+        example_count: positives,
+        counter_example_count: negatives,
+        sensitive_fields: sensitive,
+        evidence_state: state,
+        warnings: warnings
+    )
+
+fn analyze_module(module: SamlModule) -> SamlAnalysis:
+    """Analyze every llm fn in a module and roll up module-level findings."""
+    val no_paths: [text] = []
+    val no_sources: [text] = []
+    analyze_module_with_specs(module, no_paths, no_sources)
+
+# Same as `analyze_module`, but also discovers external sspec coverage from
+# pre-read spec sources (see `spec_coverage.discover_spec_coverage`) and
+# merges it into each function's evidence ladder. Callers (CLI / MCP / IDE)
+# own the filesystem walk; this stays pure over pre-read `spec_paths` +
+# `spec_sources` (parallel arrays, same convention as `discover_spec_coverage`).
+fn analyze_module_with_specs(module: SamlModule, spec_paths: [text], spec_sources: [text]) -> SamlAnalysis:
+    var fn_names: [text] = []
+    for fun in module.functions:
+        fn_names.push(fun.name)
+    val external = discover_spec_coverage(fn_names, spec_paths, spec_sources)
+
+    var funcs: [SamlFunctionAnalysis] = []
+    var warning_total = 0
+    for fun in module.functions:
+        var external_for_fun: [text] = []
+        for e in external:
+            val tab = e.index_of("\t")
+            if tab >= 0 and e.slice(0, tab) == fun.name:
+                external_for_fun.push(e.slice(tab + 1, e.len()))
+        val a = analyze_function_with_external(module, fun, external_for_fun)
+        warning_total = warning_total + a.warnings.len()
+        funcs.push(a)
+
+    # A class no function can reach is dead schema — it still costs review
+    # time and can drift out of sync with the prompts that never use it.
+    var reached: [text] = []
+    for a in funcs:
+        for t in a.reachable_types:
+            reached.push(t)
+    var orphans: [text] = []
+    for c in module.classes:
+        var used = false
+        for r in reached:
+            if r == c.name:
+                used = true
+        if not used:
+            orphans.push(c.name)
+
+    var module_warnings: [text] = []
+    for o in orphans:
+        module_warnings.push("E-SAML-1100: class `" + o + "` is unreachable from any llm fn")
+
+    var errors = 0
+    for d in module.diagnostics:
+        if d.severity == "error":
+            errors = errors + 1
+        else:
+            warning_total = warning_total + 1
+
+    SamlAnalysis(
+        module_name: module.name,
+        source_path: module.source_path,
+        functions: funcs,
+        orphan_classes: orphans,
+        module_warnings: module_warnings,
+        error_count: errors,
+        warning_count: warning_total + module_warnings.len()
+    )
+
+export SamlFunctionAnalysis, SamlAnalysis
+export prompt_variables, reachable_types, evidence_state
+export example_callee, example_arity
+export analyze_function, analyze_function_with_external
+export analyze_module, analyze_module_with_specs

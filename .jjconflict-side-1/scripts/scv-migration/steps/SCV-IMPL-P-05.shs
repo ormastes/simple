@@ -1,0 +1,35 @@
+#!/bin/sh
+# SCV-IMPL-P-05 — generic CST IR (File / Named / List(ordered|commutative) /
+# Atom / Trivia / Error, versioned scv/cst/v1; parser roots keyed by
+# revision+ContentId). Mechanical: verifies the module, its spec + mirror
+# twin, exports, and the acceptance spec's green run.
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR 2.
+# Committed UNSIGNED: sign with
+#   sh scripts/trust/sign-script.shs --name scv-migration-root scripts/scv-migration/steps/SCV-IMPL-P-05.shs
+set -u
+checked=0
+missing=""
+for f in src/lib/scv/cst_ir.spl \
+         test/integration/app/scv_generic_cst_spec.spl \
+         test/02_integration/app/scv_generic_cst_spec.spl; do
+  checked=$((checked + 1))
+  [ -f "$f" ] || missing="$missing file($f)"
+done
+checked=$((checked + 1))
+grep -q '^export cst_ir\.\*' src/lib/scv/__init__.spl || missing="$missing export(cst_ir)"
+checked=$((checked + 1))
+grep -q 'scv/cst/v1' src/lib/scv/cst_ir.spl || missing="$missing version(scv/cst/v1)"
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-P-05.$$.out"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test test/integration/app/scv_generic_cst_spec.spl > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RES=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+{ [ "$rc" -eq 0 ] && printf '%s' "$RES" | grep -q ', 0 failed'; } || missing="$missing spec-run(rc=$rc $RES)"
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$missing" ]; then
+  echo "PASS — $checked check(s) verified, generic CST IR green ($RES)"
+  exit 0
+fi
+echo "FAIL — $checked check(s) verified, missing:$missing"
+exit 1

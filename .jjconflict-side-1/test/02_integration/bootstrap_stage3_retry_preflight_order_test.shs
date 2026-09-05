@@ -1,0 +1,80 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+facade="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH=$facade
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$facade"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-retry-preflight.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT INT TERM
+stage="$tmp/output/stage3/test-platform"
+mkdir -p "$stage/stage2-native-cache/private"
+printf 'prior receipt\n' >"$stage/tool-authority-before.txt"
+printf 'prior cache\n' >"$stage/stage2-native-cache/private/object"
+prior_receipt=$(bootstrap_stage3_hash_file "$stage/tool-authority-before.txt")
+prior_cache=$(bootstrap_stage3_hash_file "$stage/stage2-native-cache/private/object")
+
+canonical_path=
+old_ifs=$IFS
+IFS=:
+for entry in $PATH; do
+    IFS=$old_ifs
+    [ -d "$entry" ] || { IFS=:; continue; }
+    entry=$(CDPATH= cd -- "$entry" && pwd -P)
+    case ":$canonical_path:" in
+        *":$entry:"*) ;;
+        *) canonical_path="${canonical_path:+$canonical_path:}$entry" ;;
+    esac
+    IFS=:
+done
+IFS=$old_ifs
+
+mkdir "$tmp/real-tools"
+ln -s "$tmp/real-tools" "$tmp/symlink-tools"
+if bootstrap_stage3_retry_preflight "$stage" \
+    "$tmp/symlink-tools:$canonical_path" "$root" >/dev/null 2>&1; then
+    echo "bootstrap retry preflight: accepted symlinked PATH" >&2
+    exit 1
+fi
+[ "$(bootstrap_stage3_hash_file "$stage/tool-authority-before.txt")" = \
+    "$prior_receipt" ]
+[ "$(bootstrap_stage3_hash_file "$stage/stage2-native-cache/private/object")" = \
+    "$prior_cache" ]
+[ -z "$(find "$tmp/output/stage3" -maxdepth 1 -name '*.preflight.*' -print)" ]
+
+# Keep the adjacent success focused on canonical tool authority from this moved
+# checkout; git/source functions still prove their frozen bytes are promoted.
+bootstrap_stage3_git_state() {
+    printf 'head=moved-checkout\ndirty_fingerprint=clean\n' >"$2"
+}
+bootstrap_stage3_source_snapshot() {
+    printf 'file-hex:737263:0:moved-checkout\n' >"$1"
+}
+preflight=$(bootstrap_stage3_retry_preflight "$stage" "$canonical_path" "$root")
+mode_of() { perl -e 'printf "%o\n", (stat $ARGV[0])[2] & 07777' "$1"; }
+[ "$(mode_of "$preflight")" = 700 ]
+[ "$(mode_of "$preflight/tool-authority-before.txt")" = 400 ]
+[ "$(mode_of "$preflight/git-state-before.env")" = 400 ]
+[ "$(mode_of "$preflight/source-inputs-before.txt")" = 400 ]
+tool_sha=$(bootstrap_stage3_hash_file "$preflight/tool-authority-before.txt")
+git_sha=$(bootstrap_stage3_hash_file "$preflight/git-state-before.env")
+source_sha=$(bootstrap_stage3_hash_file "$preflight/source-inputs-before.txt")
+rm -rf "$stage/stage2-native-cache"
+rm -f "$stage/tool-authority-before.txt"
+bootstrap_stage3_promote_retry_preflight "$preflight" "$stage"
+[ "$(bootstrap_stage3_hash_file "$stage/tool-authority-before.txt")" = "$tool_sha" ]
+[ "$(bootstrap_stage3_hash_file "$stage/git-state-before.env")" = "$git_sha" ]
+[ "$(bootstrap_stage3_hash_file "$stage/source-inputs-before.txt")" = "$source_sha" ]
+
+script="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+preflight_line=$(grep -n 'bootstrap_stage3_retry_preflight "${stage3_retry_stage}"' "$script" | cut -d: -f1)
+rust_cleanup_line=$(grep -n 'rm -rf "${rust_authority_root}"' "$script" | cut -d: -f1)
+prior_cleanup_line=$(grep -n 'rm -rf "${stage2_provenance_cache}"' "$script" | cut -d: -f1)
+promote_line=$(grep -n 'bootstrap_stage3_promote_retry_preflight' "$script" | cut -d: -f1)
+[ "$preflight_line" -lt "$rust_cleanup_line" ]
+[ "$preflight_line" -lt "$prior_cleanup_line" ]
+[ "$prior_cleanup_line" -lt "$promote_line" ]
+
+echo "bootstrap_stage3_retry_preflight_order=true"

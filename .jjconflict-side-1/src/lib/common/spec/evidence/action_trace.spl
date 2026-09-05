@@ -1,0 +1,270 @@
+# Interactive GUI/TUI action-trace evidence (E2b lane, evidence manifest v1).
+#
+# A GUI interaction is a sequence of resolved actions, not a single snapshot.
+# Recording only the final screenshot loses which element was actually hit,
+# whether a settle condition ever stabilized, and whether a mutating action
+# actually mutated anything. This module records that sequence as data and
+# projects it into CanonicalEvidence (for compare_evidence) and into a plain
+# user-facing action list (for the manual), so neither view can silently omit
+# the check the other depends on.
+#
+# This module is intentionally pure: no capture, no wm/UI transport, no
+# Markdown rendering. See model.spl and evidence_comparator.spl for the
+# shared pipeline this plugs into.
+#
+# Guide: doc/07_guide/infra/sspec_typed_evidence.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md §4.2
+
+use std.common.spec.evidence.model.{
+    CanonicalEvidence, EvidenceNode, evidence_node_at, canonical_evidence
+}
+
+# ---------------------------------------------------------------------------
+# Action kinds
+# ---------------------------------------------------------------------------
+
+pub enum UiActionKind:
+    click
+    double_click
+    type_text
+    paste
+    press_key
+    focus
+    select
+    toggle
+    drag
+    scroll
+    resize
+    invoke
+
+pub fn ui_action_kind_name(kind: UiActionKind) -> text:
+    match kind:
+        case UiActionKind.click: "click"
+        case UiActionKind.double_click: "double_click"
+        case UiActionKind.type_text: "type_text"
+        case UiActionKind.paste: "paste"
+        case UiActionKind.press_key: "press_key"
+        case UiActionKind.focus: "focus"
+        case UiActionKind.select: "select"
+        case UiActionKind.toggle: "toggle"
+        case UiActionKind.drag: "drag"
+        case UiActionKind.scroll: "scroll"
+        case UiActionKind.resize: "resize"
+        case UiActionKind.invoke: "invoke"
+
+# A step only mutates state if its kind is not a read-only observation.
+# `focus` and `select` inspect/move attention without changing application
+# state on their own, so a revision that fails to advance on those kinds is
+# not evidence of a stuck trace.
+pub fn ui_action_kind_is_mutating(kind: UiActionKind) -> bool:
+    match kind:
+        case UiActionKind.focus: false
+        case UiActionKind.select: false
+        case _: true
+
+# ---------------------------------------------------------------------------
+# Target resolution
+# ---------------------------------------------------------------------------
+
+# `resolved_by` names the strategy that turned the requested target into a
+# concrete node: canonical_id, role_and_name, or coordinates. Coordinate
+# resolution is the weakest of the three — a click at a point says nothing
+# about what was actually under it unless the hit node is also recorded, so
+# `hit_node` is mandatory whenever `resolved_by == "coordinates"`.
+pub struct UiTargetResolution:
+    requested: text
+    resolved: text
+    resolved_by: text
+    hit_node: text
+
+pub fn target_resolution(requested: text, resolved: text, resolved_by: text, hit_node: text) -> UiTargetResolution:
+    UiTargetResolution(requested: requested, resolved: resolved, resolved_by: resolved_by, hit_node: hit_node)
+
+pub fn target_resolved_by_coordinates(target: UiTargetResolution) -> bool:
+    target.resolved_by == "coordinates"
+
+# A coordinate resolution with no recorded hit node cannot be trusted: it
+# claims a point was clicked without saying what was actually there, so a
+# later UI reflow could silently change what the trace exercises.
+pub fn target_resolution_is_valid(target: UiTargetResolution) -> bool:
+    if target_resolved_by_coordinates(target):
+        return target.hit_node != ""
+    true
+
+# ---------------------------------------------------------------------------
+# Settle conditions
+# ---------------------------------------------------------------------------
+
+# What the driver waited on before treating `after_state` as observable.
+# `iterations` records how many polls it took; `timed_out` records whether it
+# gave up instead of actually stabilizing.
+pub struct SettleCondition:
+    kind: text
+    detail: text
+    iterations: i64
+    timed_out: bool
+
+pub fn settle_condition(kind: text, detail: text, iterations: i64, timed_out: bool) -> SettleCondition:
+    SettleCondition(kind: kind, detail: detail, iterations: iterations, timed_out: timed_out)
+
+# A timed-out settle means the driver never observed a stable state, so
+# whatever `after_state` was captured is a race, not a fact about the system.
+pub fn settle_condition_is_valid(settle: SettleCondition) -> bool:
+    not settle.timed_out
+
+# ---------------------------------------------------------------------------
+# Action steps and traces
+# ---------------------------------------------------------------------------
+
+pub struct UiActionStep:
+    sequence: i64
+    kind: UiActionKind
+    target: UiTargetResolution
+    input_value: text
+    before_state: text
+    action_state: text
+    after_state: text
+    settle: SettleCondition
+    revision: i64
+
+pub fn ui_action_step(
+    sequence: i64,
+    kind: UiActionKind,
+    target: UiTargetResolution,
+    input_value: text,
+    before_state: text,
+    action_state: text,
+    after_state: text,
+    settle: SettleCondition,
+    revision: i64
+) -> UiActionStep:
+    UiActionStep(
+        sequence: sequence,
+        kind: kind,
+        target: target,
+        input_value: input_value,
+        before_state: before_state,
+        action_state: action_state,
+        after_state: after_state,
+        settle: settle,
+        revision: revision
+    )
+
+pub struct ActionTrace:
+    surface: text
+    steps: [UiActionStep]
+
+pub fn action_trace(surface: text, steps: [UiActionStep]) -> ActionTrace:
+    ActionTrace(surface: surface, steps: steps)
+
+# A step is only valid if its target resolution and its settle condition are
+# both valid on their own terms. Combining the two gates here (rather than
+# leaving callers to remember both) is what stops a trace validator from
+# checking one rule and silently skipping the other.
+pub fn ui_action_step_is_valid(step: UiActionStep) -> bool:
+    if not target_resolution_is_valid(step.target):
+        return false
+    settle_condition_is_valid(step.settle)
+
+# A mutating action whose revision does not advance past the previous step's
+# revision recorded nothing: either the action was a no-op or the capture
+# never actually re-observed the system after it. Non-mutating kinds
+# (focus/select) are exempt because they are not expected to move revision.
+pub fn ui_action_step_advances_revision(step: UiActionStep, previous_revision: i64) -> bool:
+    if not ui_action_kind_is_mutating(step.kind):
+        return true
+    step.revision > previous_revision
+
+# Validates every step in sequence, threading the previous revision forward
+# so a trace of N steps enforces N-1 revision-advance checks plus N per-step
+# validity checks. The first step is compared against revision 0 exactly like
+# an ordinary initial state, so a first mutating action still has to move it.
+pub fn action_trace_is_valid(trace: ActionTrace) -> bool:
+    var previous_revision = 0
+    for step in trace.steps:
+        if not ui_action_step_is_valid(step):
+            return false
+        if not ui_action_step_advances_revision(step, previous_revision):
+            return false
+        previous_revision = step.revision
+    true
+
+# ---------------------------------------------------------------------------
+# Evidence projection
+# ---------------------------------------------------------------------------
+
+fn step_prefix(step: UiActionStep) -> text:
+    "step." + "{step.sequence}"
+
+# Emits one CanonicalEvidence node per tracked facet of each step so an
+# oracle can check kind, resolved target, resulting state, settle behaviour,
+# and revision independently rather than as one opaque blob.
+pub fn action_trace_to_evidence(trace: ActionTrace, profile_id: text) -> CanonicalEvidence:
+    var nodes: [EvidenceNode] = []
+    var order = 0
+    for step in trace.steps:
+        val prefix = step_prefix(step)
+        nodes.push(evidence_node_at(prefix + ".kind", ui_action_kind_name(step.kind), order))
+        order = order + 1
+        nodes.push(evidence_node_at(prefix + ".target.resolved", step.target.resolved, order))
+        order = order + 1
+        nodes.push(evidence_node_at(prefix + ".after_state", step.after_state, order))
+        order = order + 1
+        nodes.push(evidence_node_at(prefix + ".settle.kind", step.settle.kind, order))
+        order = order + 1
+        nodes.push(evidence_node_at(prefix + ".revision", "{step.revision}", order))
+        order = order + 1
+    canonical_evidence("ui_action_trace", profile_id, nodes)
+
+# ---------------------------------------------------------------------------
+# Manual projection
+# ---------------------------------------------------------------------------
+
+fn manual_target_name(target: UiTargetResolution) -> text:
+    # The reader-facing line names what a person would see and click, never
+    # the resolution mechanism. A coordinate or canonical id in the manual
+    # would describe the harness, not the interaction, and would break the
+    # moment the layout shifts.
+    if target.requested != "":
+        return target.requested
+    target.resolved
+
+pub fn ui_action_step_manual_line(step: UiActionStep) -> text:
+    val name = manual_target_name(step.target)
+    match step.kind:
+        case UiActionKind.click: "Click " + "\"" + name + "\""
+        case UiActionKind.double_click: "Double-click " + "\"" + name + "\""
+        case UiActionKind.type_text: "Type " + "\"" + step.input_value + "\"" + " in " + "\"" + name + "\""
+        case UiActionKind.paste: "Paste " + "\"" + step.input_value + "\"" + " into " + "\"" + name + "\""
+        case UiActionKind.press_key: "Press " + "\"" + step.input_value + "\""
+        case UiActionKind.focus: "Focus " + "\"" + name + "\""
+        case UiActionKind.select: "Select " + "\"" + step.input_value + "\"" + " in " + "\"" + name + "\""
+        case UiActionKind.toggle: "Toggle " + "\"" + name + "\""
+        case UiActionKind.drag: "Drag " + "\"" + name + "\""
+        case UiActionKind.scroll: "Scroll " + "\"" + name + "\""
+        case UiActionKind.resize: "Resize " + "\"" + name + "\""
+        case UiActionKind.invoke: "Run " + "\"" + name + "\""
+
+# The numbered action list a reader follows. It never carries canonical ids
+# or coordinates: those belong to `action_trace_to_evidence`, which a
+# comparator checks, not to prose a person reads and repeats by hand.
+pub fn action_trace_manual_lines(trace: ActionTrace) -> [text]:
+    var lines: [text] = []
+    for step in trace.steps:
+        lines.push("{step.sequence}. " + ui_action_step_manual_line(step))
+    lines
+
+# ---------------------------------------------------------------------------
+# GUI image capture policy
+# ---------------------------------------------------------------------------
+
+# A GUI backend being available is not, by itself, a reason to spend a pixel
+# capture on an ordinary interaction (see sspec_typed_evidence.md §3): only
+# capture when the surface is GUI-only, when visual correctness is the actual
+# requirement under test, or when the run was explicitly configured to.
+pub fn should_capture_gui_image(surface: text, gui_only: bool, visual_requirement: bool, configured: bool) -> bool:
+    if gui_only:
+        return true
+    if visual_requirement:
+        return true
+    configured

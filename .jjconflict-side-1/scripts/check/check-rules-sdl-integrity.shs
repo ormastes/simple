@@ -1,0 +1,228 @@
+#!/bin/sh
+# check-rules-sdl-integrity.shs — rules.sdl may not shrink to escape rules.sdl.
+#
+# The registry is the enumeration of what must exist. Without this guard the
+# cheapest way past a failing gate is to delete the gate, which reads as a small
+# tidy-up in a diff. Between BASE and NEW this checks:
+#   1. gate count did not shrink
+#   2. byte size did not collapse
+#   3. every gate id present at BASE is either still present at NEW, or has a
+#      `# removed: <reason> <doc/...>` tombstone recording the decision
+#
+# Verdict is the LAST LINE of stdout; exit status is corroboration only:
+#   PASS — <n> gates checked, ...   exit 0     FAIL — ...   exit 1
+#   ERROR — nothing was checked     exit 2
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# Lets the selftest drive this same script against a throwaway fixture repo.
+[ -n "${REPO_ROOT_OVERRIDE:-}" ] && REPO_ROOT=$REPO_ROOT_OVERRIDE
+RULES_PATH=rules.sdl
+SELFTEST_ONLY=0
+BASE=""; NEW=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --path) RULES_PATH=$2; shift 2 ;;
+        -h|--help) echo "usage: $0 [BASE NEW] [--path <file>] [--selftest]" >&2; exit 2 ;;
+        *) if [ -z "$BASE" ]; then BASE=$1; elif [ -z "$NEW" ]; then NEW=$1; else
+               echo "unexpected argument: $1" >&2; exit 2; fi; shift ;;
+    esac
+done
+[ -n "$BASE" ] || BASE="main@{upstream}"
+[ -n "$NEW" ]  || NEW=HEAD
+
+gate_ids()   { git -C "$REPO_ROOT" cat-file -p "$1:$RULES_PATH" 2>/dev/null | sed -n 's/^[[:space:]]*- id:[[:space:]]*//p'; }
+gate_bytes() { git -C "$REPO_ROOT" cat-file -s "$1:$RULES_PATH" 2>/dev/null; }
+tombstones() { git -C "$REPO_ROOT" cat-file -p "$1:$RULES_PATH" 2>/dev/null | sed -n 's/^[[:space:]]*#[[:space:]]*removed:[[:space:]]*\([^ ]*\).*/\1/p'; }
+# `# changed: <id> <reason> <doc/...>` — the recorded-decision line for MODIFYING a
+# gate (min/cmd/group/status), the sibling of `# removed:` for deleting one.
+changelines() { git -C "$REPO_ROOT" cat-file -p "$1:$RULES_PATH" 2>/dev/null | sed -n 's/^[[:space:]]*#[[:space:]]*changed:[[:space:]]*\([^ ]*\).*/\1/p'; }
+
+# One line per gate: "<id> <sha1 of its full record>". The record is every non-comment
+# field line (min, cmd, group, status) — comment lines are excluded so annotating a gate
+# does not read as changing it. Adversarial review 2026-08-11 proved count+bytes alone
+# are blind: `min: 14056` -> `min: 1` moves neither, and adding `status: planned` to a
+# live gate silently neutralizes it. Content hashing is what closes both.
+gate_records() {
+    git -C "$REPO_ROOT" cat-file -p "$1:$RULES_PATH" 2>/dev/null | awk '
+        {
+            line = $0
+            sub(/^[ \t]*/, "", line)
+            if (line ~ /^- id: /) {
+                if (id != "") print id " " body
+                id = substr(line, 7); body = ""
+                next
+            }
+            if (id == "") next
+            if (line ~ /^#/) next
+            if (line ~ /^(group|status|min|cmd): /) {
+                gsub(/[ \t]/, "", line)   # whitespace tricks must not change the hash inputs
+                body = body "|" line
+            }
+        }
+        END { if (id != "") print id " " body }
+    '
+}
+
+compare() {
+    base=$1; new=$2
+
+    base_ids=$(gate_ids "$base")
+    new_ids=$(gate_ids "$new")
+    new_bytes=$(gate_bytes "$new")
+
+    if [ -z "$new_ids" ]; then
+        echo "ERROR — nothing was checked ($RULES_PATH absent or gateless at $new)"
+        return 2
+    fi
+    # Adversarial finding 2026-08-11: an UNRESOLVABLE base used to fall into the
+    # "first landing" arm and PASS vacuously — a stale or unset upstream turned the
+    # shrink check green. "First landing" is only legitimate when BASE is a real
+    # commit that genuinely lacks the file; a base we cannot resolve is an ERROR.
+    if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1; then
+        echo "ERROR — nothing was checked (unresolvable BASE '$base'; fetch first, or pass an explicit BASE sha)"
+        return 2
+    fi
+    if [ -z "$base_ids" ]; then
+        # First landing: BASE resolves but has no registry. Nothing to compare.
+        n=$(printf '%s\n' "$new_ids" | wc -l | tr -d ' ')
+        echo "PASS — $n gates checked, $RULES_PATH introduced at $new (no BASE to compare)"
+        return 0
+    fi
+
+    base_n=$(printf '%s\n' "$base_ids" | wc -l | tr -d ' ')
+    new_n=$(printf '%s\n' "$new_ids" | wc -l | tr -d ' ')
+    base_bytes=$(gate_bytes "$base")
+
+    rc=0
+
+    # Classify removals FIRST: a recorded removal legitimately lowers the count, so
+    # the count floor has to account for it or every tombstone trips the raw check.
+    tombs=$(tombstones "$new")
+    missing=0
+    recorded=0
+    for id in $base_ids; do
+        printf '%s\n' "$new_ids" | grep -qx "$id" && continue
+        if printf '%s\n' "$tombs" | grep -qx "$id"; then
+            echo "gate '$id' removed WITH tombstone — recorded"
+            recorded=$((recorded + 1))
+        else
+            echo "gate '$id' removed with NO '# removed: $id <reason> <doc/...>' tombstone"
+            missing=$((missing + 1))
+            rc=1
+        fi
+    done
+
+    allowed_min=$((base_n - recorded))
+    if [ "$new_n" -lt "$allowed_min" ]; then
+        echo "gate count shrank below what the tombstones account for: $base_n -> $new_n (allowed $allowed_min)"
+        rc=1
+    fi
+    # Byte floor at 60% of base catches a truncation that keeps the id lines intact.
+    if [ "$new_bytes" -lt $((base_bytes * 60 / 100)) ]; then
+        echo "byte size collapsed: $base_bytes -> $new_bytes"
+        rc=1
+    fi
+
+    # Per-gate CONTENT diff. Count and bytes are blind to `min: 14056` -> `min: 1`,
+    # to a rewritten cmd, and to `status: planned` stapled onto a live gate — all
+    # confirmed bypasses (adversarial review 2026-08-11). Any change to a surviving
+    # gate's field lines requires a `# changed: <id> <reason> <doc/...>` line at NEW,
+    # the same recorded-decision contract as removal tombstones.
+    changed_ok=$(changelines "$new")
+    base_recs=$(gate_records "$base")
+    new_recs=$(gate_records "$new")
+    unrecorded=0
+    for id in $base_ids; do
+        printf '%s\n' "$new_ids" | grep -qx "$id" || continue
+        b=$(printf '%s\n' "$base_recs" | awk -v i="$id" '$1==i {sub(/^[^ ]+ /, ""); print; exit}')
+        n2=$(printf '%s\n' "$new_recs" | awk -v i="$id" '$1==i {sub(/^[^ ]+ /, ""); print; exit}')
+        [ "$b" = "$n2" ] && continue
+        if printf '%s\n' "$changed_ok" | grep -qx "$id"; then
+            echo "gate '$id' modified WITH '# changed:' annotation — recorded"
+        else
+            echo "gate '$id' MODIFIED (min/cmd/group/status) with NO '# changed: $id <reason> <doc/...>' line"
+            unrecorded=$((unrecorded + 1))
+            rc=1
+        fi
+    done
+    if [ "$unrecorded" -gt 0 ]; then
+        echo "$unrecorded unrecorded gate modification(s) — floors and lanes may not be quietly rewritten"
+    fi
+
+    if [ $rc -ne 0 ]; then
+        echo "FAIL — registry shrank between $base and $new ($missing untombstoned removal(s))"
+        return 1
+    fi
+    echo "PASS — $new_n gates checked, registry did not shrink ($base -> $new)"
+    return 0
+}
+
+# --- selftest: fatal. Proves the guard reports red when the registry shrinks. ----
+selftest() {
+    st=$(mktemp -d) || return 1
+    SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+    export SELF
+    rc=0
+    (
+        cd "$st" || exit 1
+        git init -q . && git config user.email t@t && git config user.name t
+        printf 'rules:\n  - id: a\n  - id: b\n  - id: c\n# padding to give the byte floor something to measure\n' > rules.sdl
+        git add rules.sdl && git commit -qm base
+        base_sha=$(git rev-parse HEAD)
+
+        # arm 1: silent removal must be RED
+        printf 'rules:\n  - id: a\n  - id: b\n# padding to give the byte floor something to measure\n' > rules.sdl
+        git commit -qam shrink
+        out=$(REPO_ROOT_OVERRIDE=$st sh "$SELF" "$base_sha" HEAD --path rules.sdl 2>&1 | tail -1)
+        case "$out" in *FAIL*) ;; *) echo "selftest arm1: silent removal not caught: $out" >&2; exit 1 ;; esac
+
+        # arm 2: same removal WITH a tombstone must be GREEN
+        printf 'rules:\n  - id: a\n  - id: b\n# removed: c superseded doc/08_tracking/bug/x.md\n# padding to give the byte floor something\n' > rules.sdl
+        git commit -qam tombstone
+        out=$(REPO_ROOT_OVERRIDE=$st sh "$SELF" "$base_sha" HEAD --path rules.sdl 2>&1 | tail -1)
+        case "$out" in *PASS*) ;; *) echo "selftest arm2: tombstoned removal wrongly red: $out" >&2; exit 1 ;; esac
+
+        # arms 3-6 use a base with real field content
+        printf 'rules:\n  - id: g1\n    min: 100\n    cmd: echo 100\n  - id: g2\n    min: 5\n    cmd: echo 5\n# padding for the byte floor, padding, padding\n' > rules.sdl
+        git commit -qam fieldbase
+        field_base=$(git rev-parse HEAD)
+
+        # arm 3: silently lowering a min must be RED (confirmed bypass before this fix)
+        printf 'rules:\n  - id: g1\n    min: 1\n    cmd: echo 100\n  - id: g2\n    min: 5\n    cmd: echo 5\n# padding for the byte floor, padding, padding\n' > rules.sdl
+        git commit -qam lowered
+        out=$(REPO_ROOT_OVERRIDE=$st sh "$SELF" "$field_base" HEAD --path rules.sdl 2>&1 | tail -1)
+        case "$out" in *FAIL*) ;; *) echo "selftest arm3: silent min-lowering not caught: $out" >&2; exit 1 ;; esac
+
+        # arm 4: stapling status: planned onto a live gate must be RED
+        printf 'rules:\n  - id: g1\n    status: planned\n    min: 100\n    cmd: echo 100\n  - id: g2\n    min: 5\n    cmd: echo 5\n# padding for the byte floor, padding, padding\n' > rules.sdl
+        git commit -qam neutered
+        out=$(REPO_ROOT_OVERRIDE=$st sh "$SELF" "$field_base" HEAD --path rules.sdl 2>&1 | tail -1)
+        case "$out" in *FAIL*) ;; *) echo "selftest arm4: silent status:planned not caught: $out" >&2; exit 1 ;; esac
+
+        # arm 5: the same min change WITH a `# changed:` annotation must be GREEN
+        printf 'rules:\n  - id: g1\n# changed: g1 rebaselined after split doc/08_tracking/bug/y.md\n    min: 1\n    cmd: echo 100\n  - id: g2\n    min: 5\n    cmd: echo 5\n# padding for the byte floor, padding, padding\n' > rules.sdl
+        git commit -qam annotated
+        out=$(REPO_ROOT_OVERRIDE=$st sh "$SELF" "$field_base" HEAD --path rules.sdl 2>&1 | tail -1)
+        case "$out" in *PASS*) ;; *) echo "selftest arm5: annotated change wrongly red: $out" >&2; exit 1 ;; esac
+
+        # arm 6: an UNRESOLVABLE base must be ERROR, never the first-landing PASS
+        out=$(REPO_ROOT_OVERRIDE=$st sh "$SELF" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" HEAD --path rules.sdl 2>&1 | tail -1)
+        case "$out" in *"ERROR — nothing was checked"*) ;; *) echo "selftest arm6: unresolvable BASE not ERROR: $out" >&2; exit 1 ;; esac
+    ) || rc=1
+    rm -rf "$st"
+    return $rc
+}
+
+# REPO_ROOT override lets the selftest drive this script against its own fixture repo.
+if [ "${REPO_ROOT_OVERRIDE:-}" != "" ]; then REPO_ROOT=$REPO_ROOT_OVERRIDE; fi
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    if selftest; then echo "PASS — 6 selftest arms checked, guard calibrated"; exit 0; fi
+    echo "ERROR — nothing was checked (selftest failed; the guard itself is broken)"; exit 2
+fi
+
+compare "$BASE" "$NEW"
+exit $?

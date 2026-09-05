@@ -1,0 +1,31 @@
+"""
+# `Vec4f` f32 SIMD extern boxed-`Float32` field repro
+
+Reproducing spec for
+`doc/08_tracking/bug/simd_f32x4_vec_field_boxed_float32_not_unwrapped_2026-07-20.md`.
+
+The doc's minimal repro, lifted verbatim into `test/01_unit/**` so the defect has
+a permanent home instead of living only in a perf spec. Root cause per the doc:
+an `f32` read out of a `Float32` box and stored into `Vec4f.x: f32` reaches the
+`rt_simd_mul_f32x4` extern boundary still boxed.
+
+Root-cause path: `src/lib/nogc_async_mut/linalg/simd_ops.spl:126-142`
+(`simd_dot4_f32_values` -> `simd_mul_f32x4`). NOT `:26`, which the bug doc cited
+and which is in the unaffected `f64`/`Vec4d` path.
+"""
+
+use std.ndarray.*
+use std.linalg.*
+
+describe "simd f32 dot repro":
+    it "reproduces the boxed-Float32 crash":
+        val left = vector_from_f32([Float32.new(1.0f32), Float32.new(2.0f32), Float32.new(3.0f32), Float32.new(4.0f32)])
+        val right = vector_from_f32([Float32.new(4.0f32), Float32.new(3.0f32), Float32.new(2.0f32), Float32.new(1.0f32)])
+        val result = dot_f32(left, right).unwrap()
+        expect(result.value).to_equal(20.0f32)
+
+    it "keeps the f64 sibling path green as a control":
+        val left = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)]
+        val right = [Float64.new(4.0), Float64.new(3.0), Float64.new(2.0), Float64.new(1.0)]
+        val result = simd_dot4_values(left, right).unwrap()
+        expect(result.value).to_equal(20.0)

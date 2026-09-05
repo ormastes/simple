@@ -1,0 +1,92 @@
+#!/bin/sh
+# Meta-guard (lane W17-C): proves the enterprise verification guards THEMSELVES
+# still bite. A guard that cannot FAIL is theater; this harness is the periodic
+# proof that they can. It is deliberately CHEAP (no product compile of the real
+# suite) so any future run can invoke it:
+#
+#   sh scripts/check/check-enterprise-guards-bite.shs            # full
+#   sh scripts/check/check-enterprise-guards-bite.shs --fast     # skip cross-os compile selftest
+#
+# What it asserts:
+#   1. check-enterprise-suite-enumeration.shs --selftest PASSES (its internal
+#      over/under/empty fixtures all behaved), AND a LIVE reproduction: a dummy
+#      spec dropped into a throwaway copy of the tree makes the guard FAIL, and
+#      removing one makes it FAIL, and the untouched copy PASSES.
+#   2. check-enterprise-cross-os.shs --selftest PASSES (its host-only fixture is
+#      rejected; requires bin/simple — SKIPPED with --fast or if bin/simple is
+#      absent, never silently counted as a pass).
+#
+# Verdict convention (last line on stdout):
+#   PASS — <n> guard-bite check(s) verified            exit 0
+#   FAIL — ...                                          exit 1
+#   ERROR — nothing was checked (...)                   exit 2
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT" || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+ENUM=scripts/check/check-enterprise-suite-enumeration.shs
+XOS=scripts/check/check-enterprise-cross-os.shs
+FAST=0
+[ "${1:-}" = "--fast" ] && FAST=1
+
+checks=0
+fails=""
+
+# --- 1a. enumeration guard's own --selftest ---------------------------------
+if [ ! -f "$ENUM" ]; then
+    echo "ERROR — nothing was checked ($ENUM missing)"; exit 2
+fi
+out=$(sh "$ENUM" --selftest 2>&1); rc=$?
+checks=$((checks+1))
+[ "$rc" -eq 0 ] || fails="$fails [enum-selftest rc=$rc]"
+
+# --- 1b. LIVE reproduction against a throwaway copy -------------------------
+# Build a minimal isolated tree so we never touch the real suite: EXPECTED there
+# is the guard's own 71, so we mirror only enough to prove FAIL directions using
+# the guard's --root override on a synthetic tree calibrated to 71.
+# Simpler and honest: reproduce over/under on a COPY of the real enterprise
+# files only (fast — just the .spl paths), under a temp root.
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/ent_guards_bite.XXXXXX") || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT
+# Mirror every canonical enterprise .spl (empty placeholders keep it cheap) plus
+# the excluded probe mains, preserving directory structure.
+find src test doc -name '*.spl' -path '*enterprise*' 2>/dev/null | while read -r f; do
+    mkdir -p "$TMP/$(dirname "$f")"; : > "$TMP/$f"
+done
+base=$(sh "$ENUM" --root "$TMP" 2>&1); brc=$?
+checks=$((checks+1))
+if [ "$brc" -ne 0 ]; then fails="$fails [mirror-baseline-not-PASS rc=$brc: $base]"; fi
+# OVER: add a dummy canonical spec
+mkdir -p "$TMP/test/03_system/enterprise"
+: > "$TMP/test/03_system/enterprise/ZZ_meta_dummy_enterprise_spec.spl"
+over=$(sh "$ENUM" --root "$TMP" 2>&1); orc=$?
+checks=$((checks+1))
+[ "$orc" -eq 1 ] || fails="$fails [over-did-not-FAIL rc=$orc]"
+rm -f "$TMP/test/03_system/enterprise/ZZ_meta_dummy_enterprise_spec.spl"
+# UNDER: remove one canonical spec
+victim=$(find "$TMP" -name '*_spec.spl' -path '*enterprise*' ! -name '*_probe_main.spl' 2>/dev/null | head -1)
+[ -n "$victim" ] && rm -f "$victim"
+under=$(sh "$ENUM" --root "$TMP" 2>&1); urc=$?
+checks=$((checks+1))
+[ "$urc" -eq 1 ] || fails="$fails [under-did-not-FAIL rc=$urc]"
+
+# --- 2. cross-os guard's own --selftest -------------------------------------
+if [ "$FAST" -eq 1 ]; then
+    echo "note: cross-os selftest SKIPPED (--fast)"
+elif [ ! -x bin/simple ]; then
+    echo "note: cross-os selftest SKIPPED (bin/simple absent — deploy a seed to include it)"
+else
+    xout=$(sh "$XOS" --selftest 2>&1); xrc=$?
+    checks=$((checks+1))
+    [ "$xrc" -eq 0 ] || fails="$fails [xos-selftest rc=$xrc: $(echo "$xout" | tail -1)]"
+fi
+
+if [ "$checks" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no guard invocations ran)"; exit 2
+fi
+if [ -n "$fails" ]; then
+    echo "FAIL — $checks guard-bite check(s) attempted, defect(s):$fails"
+    exit 1
+fi
+echo "PASS — $checks guard-bite check(s) verified: enumeration bites over+under, cross-os discrimination holds"
+exit 0

@@ -1,0 +1,79 @@
+# ============================================================================
+# Spec: RISC-V Common — Register File
+# ============================================================================
+
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.xlen.XlenConfig
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.registers.{RegisterFile, REG_ZERO, REG_RA, REG_SP, REG_A0, REG_A1, REG_T0, abi_reg_name, REG_COUNT}
+
+describe "RegisterFile":
+    it "initializes all registers to zero":
+        val cfg = XlenConfig.rv32()
+        val rf = RegisterFile.create(cfg)
+        var i = 0
+        var all_zero = true
+        while i < 32:
+            if rf.read(i) != 0:
+                all_zero = false
+            i = i + 1
+        expect all_zero == true
+        expect rf.read_pc() == 0
+
+    it "x0 always reads zero even after write":
+        val cfg = XlenConfig.rv32()
+        var rf = RegisterFile.create(cfg)
+        rf.write(REG_ZERO, 42)
+        expect rf.read(REG_ZERO) == 0
+
+    it "reads back written values":
+        val cfg = XlenConfig.rv32()
+        var rf = RegisterFile.create(cfg)
+        rf.write(REG_A0, 100)
+        rf.write(REG_A1, 200)
+        expect rf.read(REG_A0) == 100
+        expect rf.read(REG_A1) == 200
+
+    it "truncates RV32 writes to 32 bits":
+        val cfg = XlenConfig.rv32()
+        var rf = RegisterFile.create(cfg)
+        rf.write(REG_T0, 0x1FFFFFFFF)
+        expect rf.read(REG_T0) == 0xFFFFFFFF
+
+    it "advances PC by 4":
+        val cfg = XlenConfig.rv32()
+        var rf = RegisterFile.create(cfg)
+        rf.write_pc(0x80000000)
+        rf.advance_pc()
+        expect rf.read_pc() == 0x80000004
+
+    it "works with RV64 config":
+        val cfg = XlenConfig.rv64()
+        var rf = RegisterFile.create(cfg)
+        rf.write(REG_A0, 0x123456789ABCDEF0)
+        expect rf.read(REG_A0) == 0x123456789ABCDEF0
+
+    it "ignores out-of-range register reads":
+        val cfg = XlenConfig.rv32()
+        val rf = RegisterFile.create(cfg)
+        expect rf.read(32) == 0
+        expect rf.read(-1) == 0
+
+    it "dump_nonzero includes only written registers":
+        val cfg = XlenConfig.rv32()
+        var rf = RegisterFile.create(cfg)
+        rf.write(REG_RA, 0x100)
+        rf.write(REG_SP, 0x200)
+        val dump = rf.dump_nonzero()
+        expect dump.len() >= 3
+
+describe "abi_reg_name":
+    it "returns correct ABI names":
+        expect abi_reg_name(0) == "zero"
+        expect abi_reg_name(1) == "ra"
+        expect abi_reg_name(2) == "sp"
+        expect abi_reg_name(8) == "s0"
+        expect abi_reg_name(10) == "a0"
+        expect abi_reg_name(31) == "t6"
+
+    it "returns fallback for invalid index":
+        expect abi_reg_name(32) == "x?"
+        expect abi_reg_name(-1) == "x?"

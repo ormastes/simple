@@ -1,0 +1,44 @@
+# Reproduce + regression proof (2026-08-24): extract_doctests `.trim()`ed each
+# doc-comment line before pushing it into the block body, which FLATTENED all
+# indentation inside `#` doctests. Every example containing an indented line —
+# a lambda body, an if/for/while block, a nested call — was handed to the
+# compiler as mangled code, so the harness reported a parse error the
+# documented example never had. Observed live in the SPL doctest phase as
+# `function arguments: expected Comma, found Integer(1)` for
+# src/lib/nogc_sync_mut/concurrent/thread.spl block 53, whose source is
+# correct and which runs clean when its indentation is preserved.
+use std.test_runner.doctest_runner.*
+
+describe "doc-comment marker stripping preserves indentation":
+    it "strips `# ` and keeps the remaining indentation":
+        expect(_dt_strip_doc_marker("#     thread_sleep(50)", 1)).to_equal("    thread_sleep(50)")
+
+    it "strips `/// ` and keeps the remaining indentation":
+        expect(_dt_strip_doc_marker("///     val x = 1", 3)).to_equal("    val x = 1")
+
+    it "strips `## ` and keeps the remaining indentation":
+        expect(_dt_strip_doc_marker("##     val x = 1", 2)).to_equal("    val x = 1")
+
+    it "removes at most ONE space after the marker":
+        expect(_dt_strip_doc_marker("#  x", 1)).to_equal(" x")
+
+    it "handles a marker with no following space":
+        expect(_dt_strip_doc_marker("#x", 1)).to_equal("x")
+
+    it "leaves an unindented line unchanged":
+        expect(_dt_strip_doc_marker("# val x = 1", 1)).to_equal("val x = 1")
+
+    it "yields empty text for a bare marker":
+        expect(_dt_strip_doc_marker("#", 1)).to_equal("")
+
+describe "extracted doctest bodies keep their indentation":
+    it "keeps the lambda body indented in thread.spl block 53 (the live failure)":
+        var found = false
+        for d in extract_doctests("src/lib/nogc_sync_mut/concurrent/thread.spl"):
+            if d.line_number == 53:
+                found = true
+                # Flattened extraction produced "\nthread_sleep(50)"; the
+                # source indents it by four spaces inside `thread_spawn(\:`.
+                expect(d.code).to_contain("\n    thread_sleep(50)")
+                expect(d.code).to_contain("\n    1")
+        expect(found).to_be_truthy()

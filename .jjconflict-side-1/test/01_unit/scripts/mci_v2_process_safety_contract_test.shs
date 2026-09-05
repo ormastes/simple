@@ -1,0 +1,136 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+gate="$root/scripts/check/check-mci-v2-process-safety.shs"
+work=$(mktemp -d "$root/build/mci-process-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+closure="$work/source.manifest"
+for path in src/runtime/runtime.h src/runtime/runtime_process_owned.c src/lib/nogc_sync_mut/io/process_ops.spl src/app/io/mod.spl src/app/io/__init__.spl src/compiler_rust/common/src/runtime_symbols.rs src/compiler_rust/compiler/src/codegen/runtime_sffi.rs src/compiler/70.backend/backend/stage4_symbol_closure.spl src/compiler/70.backend/backend/runtime_compiler.spl; do
+    echo "$path=$(hash_file "$root/$path")" >> "$closure"
+done
+source_hash=$(hash_file "$closure")
+config_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+common="--run-id fixture-run --source-hash $source_hash --configuration-hash $config_hash --captured-at-utc-ns 100 --valid-until-utc-ns 200 --now-utc-ns 150 --trusted-key-id fixture-key"
+
+# C-only host diagnostics are retained but cannot become a release receipt.
+diagnostic="$work/diagnostic"
+if "$gate" --evidence "$diagnostic" $common >"$work/diagnostic.out" 2>"$work/diagnostic.err"; then exit 1; fi
+grep -q '^result=BLOCKED$' "$diagnostic/artifacts/process-safety.evidence"
+grep -q '^release_candidate=false$' "$diagnostic/artifacts/process-safety.evidence"
+grep -q '^simple_policy_reason=authoritative-runner-admission-unavailable$' "$diagnostic/artifacts/process-safety.evidence"
+[ -f "$diagnostic/receipts/process-safety.receipt.unsigned.template" ]
+[ ! -e "$diagnostic/receipts/process-safety.receipt" ]
+[ ! -e "$diagnostic/signatures/process-safety.sig" ]
+for check in runtime_process_owned_selfcheck runtime_process_owned_adapter_selfcheck runtime_process_owned_nonunix_selfcheck; do
+    retained="$diagnostic/artifacts/process-safety-c-subchecks/$check"
+    grep -q '^compile=timeout 60 ' "$retained.command"
+    grep -q '^run=timeout 30 ' "$retained.command"
+    grep -q '^PASS$' "$retained.status"
+    grep -q "^$check: PASS$" "$retained.log"
+done
+
+# An exact hash/source/config admission permits the focused Simple checks. This
+# fixture proves producer classification only; the missing external signature
+# still prevents it from being aggregate/release evidence.
+runner="$work/authoritative-simple"
+cp "$root/bin/simple" "$runner"
+chmod +x "$runner"
+runner_hash=$(hash_file "$runner")
+producer_hash=$(hash_file "$gate")
+{
+    echo manifest_schema=mci-process-configuration-manifest-v1
+    echo producer_sha256="$producer_hash"
+    echo runner_sha256="$runner_hash"
+    echo controlled_fixture=1
+} > "$work/configuration.manifest"
+config_hash=$(hash_file "$work/configuration.manifest")
+common="--run-id fixture-run --source-hash $source_hash --configuration-hash $config_hash --captured-at-utc-ns 100 --valid-until-utc-ns 200 --now-utc-ns 150 --trusted-key-id fixture-key"
+admission="$work/runner.admission"
+openssl genpkey -algorithm ED25519 -out "$work/admission.key" >/dev/null 2>&1
+openssl pkey -in "$work/admission.key" -pubout -out "$work/admission.pub" >/dev/null 2>&1
+openssl genpkey -algorithm ED25519 -out "$work/native.key" >/dev/null 2>&1
+openssl pkey -in "$work/native.key" -pubout -out "$work/native.pub" >/dev/null 2>&1
+{
+    echo admission_schema=mci-simple-runner-admission-v2
+    echo authority=exact-current-pure-simple
+    echo signing_algorithm=ed25519
+    echo trust_key_id=fixture-key
+    echo trust_key_sha256="$(hash_file "$work/admission.pub")"
+    echo native_evidence_key_id=native-fixture-key
+    echo native_evidence_key_sha256="$(hash_file "$work/native.pub")"
+    echo runner_sha256="$runner_hash"
+    echo source_manifest_sha256="$source_hash"
+    echo configuration_manifest_sha256="$config_hash"
+    echo result=pass
+} > "$admission"
+openssl pkeyutl -sign -rawin -inkey "$work/admission.key" -in "$admission" -out "$work/admission.sig"
+native="$work/native-facade"
+printf '%s\n' '#!/bin/sh' "echo 'process_owned_native_facade: PASS'" > "$native"
+chmod +x "$native"
+native_receipt="$work/native-facade.receipt"
+marker_hash=$(printf %s 'process_owned_native_facade: PASS' | sha256sum | awk '{print $1}')
+{
+    echo receipt_schema=mci-process-native-facade-v2
+    echo signing_algorithm=ed25519
+    echo trust_key_id=native-fixture-key
+    echo trust_key_sha256="$(hash_file "$work/native.pub")"
+    echo run_id=fixture-run
+    echo source_manifest_sha256="$source_hash"
+    echo configuration_manifest_sha256="$config_hash"
+    echo executable_sha256="$(hash_file "$native")"
+    echo marker_sha256="$marker_hash"
+    echo captured_at_utc_ns=100
+    echo valid_until_utc_ns=200
+    echo result=contract-only
+} > "$native_receipt"
+openssl pkeyutl -sign -rawin -inkey "$work/native.key" -in "$native_receipt" -out "$work/native.sig"
+candidate="$work/candidate"
+MCI_PROCESS_CONTROLLED_FIXTURE=1 "$gate" --evidence "$candidate" $common --simple-runner "$runner" --runner-admission "$admission" \
+    --runner-admission-signature "$work/admission.sig" --compiler-admission-trust-key "$work/admission.pub" \
+    --native-facade-executable "$native" --native-facade-receipt "$native_receipt" --native-facade-signature "$work/native.sig" --native-evidence-trust-key "$work/native.pub" --native-evidence-key-id native-fixture-key
+grep -q '^result=CONTRACT_ONLY$' "$candidate/artifacts/process-safety.evidence"
+grep -q '^release_candidate=false$' "$candidate/artifacts/process-safety.evidence"
+grep -q '^attestation_state=unsigned-external-signature-required$' "$candidate/artifacts/process-safety.evidence"
+grep -q '^native_facade_reason=none$' "$candidate/artifacts/process-safety.evidence"
+grep -q '^result=blocked$' "$candidate/receipts/process-safety.receipt.unsigned.template"
+[ ! -e "$candidate/receipts/process-safety.receipt" ]
+[ ! -e "$candidate/signatures/process-safety.sig" ]
+
+# Reruns never delete or overwrite signed evidence.
+artifact_before=$(hash_file "$candidate/artifacts/process-safety.evidence"); template_before=$(hash_file "$candidate/receipts/process-safety.receipt.unsigned.template")
+printf 'signed-receipt\n' > "$candidate/receipts/process-safety.receipt"; printf 'signed-signature\n' > "$candidate/signatures/process-safety.sig"
+if "$gate" --evidence "$candidate" $common >/dev/null 2>&1; then exit 1; fi
+grep -qx 'signed-receipt' "$candidate/receipts/process-safety.receipt"
+grep -qx 'signed-signature' "$candidate/signatures/process-safety.sig"
+[ "$(hash_file "$candidate/artifacts/process-safety.evidence")" = "$artifact_before" ]
+[ "$(hash_file "$candidate/receipts/process-safety.receipt.unsigned.template")" = "$template_before" ]
+
+# Spoofed, swapped, unsigned, and native-missing admissions fail closed.
+cp "$admission" "$work/spoof.admission"; sed -i 's/result=pass/result=fail/' "$work/spoof.admission"
+for mode in spoof swap unsigned substituted-key native-forgery native-replay future expired overlong native-missing; do
+    negative="$work/negative-$mode"; mkdir -p "$negative"
+    case "$mode" in
+        spoof) bad_admission="$work/spoof.admission"; bad_runner="$runner"; bad_signature="$work/admission.sig" ;;
+        swap) cp "$runner" "$work/swapped-runner"; printf x >> "$work/swapped-runner"; chmod +x "$work/swapped-runner"; bad_admission="$admission"; bad_runner="$work/swapped-runner"; bad_signature="$work/admission.sig" ;;
+        unsigned) bad_admission="$admission"; bad_runner="$runner"; : > "$work/unsigned.sig"; bad_signature="$work/unsigned.sig" ;;
+        substituted-key|native-forgery|native-replay|future|expired|overlong) bad_admission="$admission"; bad_runner="$runner"; bad_signature="$work/admission.sig" ;;
+        native-missing) bad_admission="$admission"; bad_runner="$runner"; bad_signature="$work/admission.sig" ;;
+    esac
+    if [ "$mode" = native-missing ]; then
+        MCI_PROCESS_CONTROLLED_FIXTURE=1 "$gate" --evidence "$negative" $common --simple-runner "$bad_runner" --runner-admission "$bad_admission" --runner-admission-signature "$bad_signature" --compiler-admission-trust-key "$work/admission.pub" >/dev/null 2>&1 && exit 1
+    else
+        native_test_receipt=$native_receipt; native_test_sig="$work/native.sig"
+        native_test_key="$work/native.pub"; native_test_key_id=native-fixture-key
+        [ "$mode" != substituted-key ] || { openssl genpkey -algorithm ED25519 -out "$work/substitute.key" >/dev/null 2>&1; openssl pkey -in "$work/substitute.key" -pubout -out "$work/substitute.pub" >/dev/null 2>&1; native_test_key="$work/substitute.pub"; }
+        [ "$mode" != native-forgery ] || { cp "$native_receipt" "$work/native-forged"; sed -i 's/result=contract-only/result=pass/' "$work/native-forged"; native_test_receipt="$work/native-forged"; }
+        if [ "$mode" = native-replay ] || [ "$mode" = future ] || [ "$mode" = expired ] || [ "$mode" = overlong ]; then
+            cp "$native_receipt" "$work/native-$mode"
+            case "$mode" in native-replay) sed -i 's/run_id=fixture-run/run_id=replay-run/' "$work/native-$mode";; future) sed -i 's/captured_at_utc_ns=100/captured_at_utc_ns=160/' "$work/native-$mode";; expired) sed -i 's/valid_until_utc_ns=200/valid_until_utc_ns=140/' "$work/native-$mode";; overlong) sed -i 's/valid_until_utc_ns=200/valid_until_utc_ns=86400000000200/' "$work/native-$mode";; esac
+            native_test_receipt="$work/native-$mode"; native_test_sig="$work/native-$mode.sig"; openssl pkeyutl -sign -rawin -inkey "$work/native.key" -in "$native_test_receipt" -out "$native_test_sig"
+        fi
+        MCI_PROCESS_CONTROLLED_FIXTURE=1 "$gate" --evidence "$negative" $common --simple-runner "$bad_runner" --runner-admission "$bad_admission" --runner-admission-signature "$bad_signature" --compiler-admission-trust-key "$work/admission.pub" --native-facade-executable "$native" --native-facade-receipt "$native_test_receipt" --native-facade-signature "$native_test_sig" --native-evidence-trust-key "$native_test_key" --native-evidence-key-id "$native_test_key_id" >/dev/null 2>&1 && exit 1
+    fi
+done
+
+echo 'mci_v2_process_safety_contract_test: PASS'

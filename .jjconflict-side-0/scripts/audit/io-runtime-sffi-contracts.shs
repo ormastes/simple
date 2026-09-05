@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io_runtime.spl"
+rust_file="$root/src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs"
+rust_dir="$root/src/compiler_rust/runtime/src/value/sffi/file_io/directory.rs"
+rust_process="$root/src/compiler_rust/runtime/src/value/sffi/env_process.rs"
+simple_process="$root/src/runtime/simple_core/core_process.spl"
+
+declarations=$(grep -c '^[[:space:]]*extern fn ' "$owner")
+if [ "$declarations" -ne 37 ]; then
+    echo "io_runtime extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn / { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every io_runtime declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+
+grep -q '^extern fn rt_file_read_bytes(path: text) -> \[u8\]?$' "$owner"
+grep -q '^extern fn rt_dir_list(path: text) -> \[text\]?$' "$owner"
+grep -q '^extern fn rt_platform_name() -> text?$' "$owner"
+grep -q 'fn rt_file_read_bytes(path_ptr: \*const u8, path_len: u64) -> RuntimeValue' "$rust_file"
+grep -q 'fn rt_dir_list(path_ptr: \*const u8, path_len: u64) -> RuntimeValue' "$rust_dir"
+
+# Pin the known cross-lane exit-width conflict until generated typed thunks
+# replace duplicate source declarations.
+grep -q 'fn rt_exit(code: i32) -> !' "$rust_process"
+grep -q 'fn rt_exit(code: i64) -> i64' "$simple_process"
+
+if rg -l --glob '!vendor/**' --glob '!**/vendor/**' --glob '*.{c,cc,cpp,h,rs,spl}' \
+    '^(pub )?(unsafe )?extern "C" fn rt_shell_exec\b|^pub fn rt_shell_exec\b' \
+    "$root/src/runtime" "$root/src/compiler_rust/runtime" | grep -q .; then
+    echo "native shell_exec provider appeared; review status/output and injection contract" >&2
+    exit 1
+fi
+
+echo "io_runtime SFFI contract audit: PASS (37 unsafe declarations; ABI/admission work remains)"

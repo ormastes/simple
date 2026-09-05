@@ -1,0 +1,268 @@
+# AES-GCM-SIV: POLYVAL authentication and tag computation.
+#
+# POLYVAL operates in GF(2^128) with polynomial x^128 + x^127 + x^126 +
+# x^121 + 1 (RFC 8452 §3). Provides _polyval_mul, _polyval_dot, _polyval,
+# padding helpers, and _compute_tag_128/_compute_tag_256.
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+use os.crypto.aes_gcm_siv_aes_core.{_aes128_key_expansion, _aes256_key_expansion}
+use os.crypto.aes128_gcm.{aes128_key_expansion, aes128_encrypt_block}
+use os.crypto.aes256_gcm.aes256_encrypt_block
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _aes128_encrypt_block(key16: [u8], block16: [u8]) -> [u8]:
+    val expanded = aes128_key_expansion(key16)
+    aes128_encrypt_block(block16, expanded)
+
+fn _aes256_encrypt_block(key32: [u8], block16: [u8]) -> [u8]:
+    aes256_encrypt_block(block16, key32)
+
+# ============================================================================
+# POLYVAL (RFC 8452 §3)
+# ============================================================================
+
+fn _polyval_mul(a: [u8], b: [u8]) -> [u8]:
+    """Multiply two 128-bit elements in POLYVAL's GF(2^128).
+
+    POLYVAL uses polynomial x^128 + x^127 + x^126 + x^121 + 1 with
+    little-endian bit ordering (LSB of byte 0 = coefficient of x^0).
+    Reduction constant R (byte representation, POLYVAL LE bit order):
+      byte0 = 0x01 (x^0), bytes1-14 = 0x00, byte15 = 0xC2 (x^127+x^126+x^121)
+    """
+    var z: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        z.push(0x00)
+        i = i + 1
+
+    var v: [u8] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 16:
+        v.push(_u8_at(b, i))
+        i = i + 1
+
+    # Iterate over bits of 'a' from x^0 (LSB of byte0) to x^127 (MSB of byte15)
+    i = 0
+    while i < 128:
+        val byte_idx = i / 8
+        val bit_idx = i % 8   # LSB-first within each byte
+
+        if ((_u8_at(a, byte_idx) >> bit_idx) & 0x01) != 0:
+            # z ^= v
+            var z_next: [u8] = rt_array_new_with_cap(16)
+            var j: u64 = 0
+            while j < 16:
+                z_next.push(_u8_at(z, j) ^ _u8_at(v, j))
+                j = j + 1
+            z = z_next
+
+        # Shift v right by 1 bit in LE representation (x^0 is in byte0 bit0):
+        # rightmost bit (x^0) = LSB of byte0; shifting right means byte0 carries
+        # the bit that was in byte0 bit1, etc.
+        val msb = (_u8_at(v, 15) >> 7) & 0x01   # MSB of byte15 = coefficient of x^127
+        var v_next: [u8] = rt_array_new_with_cap(16)
+        # last byte (byte15): shift right by 1 (no carry in from above)
+        v_next.push((_u8_at(v, 0).to_u32() >> 1).to_u8() | ((_u8_at(v, 1).to_u32() & 0x01) << 7).to_u8())
+        var j: u64 = 1
+        while j < 15:
+            val shifted = (_u8_at(v, j).to_u32() >> 1) | ((_u8_at(v, j + 1).to_u32() & 0x01) << 7)
+            v_next.push((shifted & 0xFF).to_u8())
+            j = j + 1
+        v_next.push((_u8_at(v, 15).to_u32() >> 1).to_u8())
+
+        if msb != 0:
+            # Reduce: XOR with polynomial constant (x^127+x^126+x^121+x^0)
+            # In POLYVAL LE bit order: byte0 ^= 0x01, byte15 ^= 0xC2
+            val b0 = _u8_at(v_next, 0) ^ 0x01
+            val b15 = _u8_at(v_next, 15) ^ 0xC2
+            var v_red: [u8] = rt_array_new_with_cap(16)
+            v_red.push(b0)
+            j = 1
+            while j < 15:
+                v_red.push(_u8_at(v_next, j))
+                j = j + 1
+            v_red.push(b15)
+            v = v_red
+        else:
+            v = v_next
+
+        i = i + 1
+
+    z
+
+fn _polyval_dot(s: [u8], x: [u8], h: [u8]) -> [u8]:
+    """Compute dot(s + x, h) = (s XOR x) * h in POLYVAL's field."""
+    var xored: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        xored.push(_u8_at(s, i) ^ _u8_at(x, i))
+        i = i + 1
+    _polyval_mul(xored, h)
+
+fn _polyval(h: [u8], input: [u8]) -> [u8]:
+    """Compute POLYVAL(H, input) where input is a multiple of 16 bytes.
+
+    S_0 = 0; S_j = dot(S_{j-1} + X_j, H) for each 16-byte block X_j.
+    """
+    var s: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        s.push(0x00)
+        i = i + 1
+
+    val num_blocks = input.len() / 16
+    i = 0
+    while i < num_blocks:
+        val base = i * 16
+        var block: [u8] = rt_array_new_with_cap(16)
+        var j: u64 = 0
+        while j < 16:
+            block.push(_u8_at(input, base + j))
+            j = j + 1
+        s = _polyval_dot(s, block, h)
+        i = i + 1
+
+    s
+
+fn _pad_to_16(data: [u8]) -> [u8]:
+    """Right-pad data to a multiple of 16 bytes with zeros."""
+    val rem = data.len() % 16
+    if rem == 0:
+        var out: [u8] = rt_array_new_with_cap(data.len().to_i64())
+        var i: u64 = 0
+        while i < data.len():
+            out.push(_u8_at(data, i))
+            i = i + 1
+        return out
+    val padded_len = data.len() + (16 - rem)
+    var out: [u8] = rt_array_new_with_cap(padded_len.to_i64())
+    var i: u64 = 0
+    while i < data.len():
+        out.push(_u8_at(data, i))
+        i = i + 1
+    while out.len() < padded_len:
+        out.push(0x00)
+    out
+
+fn _make_length_block(aad_len: u64, pt_len: u64) -> [u8]:
+    """Build the 16-byte length block: LE64(bytelen(AAD)*8) || LE64(bytelen(PT)*8)."""
+    val aad_bits = aad_len * 8
+    val pt_bits = pt_len * 8
+    var lb: [u8] = rt_array_new_with_cap(16)
+    # LE64 for AAD bits
+    lb.push((aad_bits & 0xFF).to_u8())
+    lb.push(((aad_bits >> 8) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 16) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 24) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 32) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 40) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 48) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 56) & 0xFF).to_u8())
+    # LE64 for PT bits
+    lb.push((pt_bits & 0xFF).to_u8())
+    lb.push(((pt_bits >> 8) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 16) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 24) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 32) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 40) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 48) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 56) & 0xFF).to_u8())
+    lb
+
+fn _compute_tag_128(auth_key: [u8], enc_key: [u8], nonce: [u8], aad: [u8], pt: [u8]) -> [u8]:
+    """Compute GCM-SIV tag for AES-128 variant.
+
+    POLYVAL(auth_key, pad(AAD) || pad(PT) || len_block) XOR nonce[0:12],
+    clear bit 127, then AES-128 encrypt with enc_key.
+    """
+    val padded_aad = _pad_to_16(aad)
+    val padded_pt = _pad_to_16(pt)
+    val len_block = _make_length_block(aad.len(), pt.len())
+
+    var polyval_input: [u8] = rt_array_new_with_cap((padded_aad.len() + padded_pt.len() + 16).to_i64())
+    var i: u64 = 0
+    while i < padded_aad.len():
+        polyval_input.push(_u8_at(padded_aad, i))
+        i = i + 1
+    i = 0
+    while i < padded_pt.len():
+        polyval_input.push(_u8_at(padded_pt, i))
+        i = i + 1
+    i = 0
+    while i < 16:
+        polyval_input.push(_u8_at(len_block, i))
+        i = i + 1
+
+    var s = _polyval(auth_key, polyval_input)
+
+    # XOR with first 12 bytes of nonce
+    i = 0
+    while i < 12:
+        var s_xored: [u8] = rt_array_new_with_cap(16)
+        var j: u64 = 0
+        while j < 16:
+            if j == i:
+                s_xored.push(_u8_at(s, j) ^ _u8_at(nonce, j))
+            else:
+                s_xored.push(_u8_at(s, j))
+            j = j + 1
+        s = s_xored
+        i = i + 1
+
+    # Clear bit 127 (MSB of byte 15)
+    var s_masked: [u8] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 15:
+        s_masked.push(_u8_at(s, i))
+        i = i + 1
+    s_masked.push(_u8_at(s, 15) & 0x7F)
+
+    _aes128_encrypt_block(enc_key, s_masked)
+
+fn _compute_tag_256(auth_key: [u8], enc_key: [u8], nonce: [u8], aad: [u8], pt: [u8]) -> [u8]:
+    """Compute GCM-SIV tag for AES-256 variant."""
+    val padded_aad = _pad_to_16(aad)
+    val padded_pt = _pad_to_16(pt)
+    val len_block = _make_length_block(aad.len(), pt.len())
+
+    var polyval_input: [u8] = rt_array_new_with_cap((padded_aad.len() + padded_pt.len() + 16).to_i64())
+    var i: u64 = 0
+    while i < padded_aad.len():
+        polyval_input.push(_u8_at(padded_aad, i))
+        i = i + 1
+    i = 0
+    while i < padded_pt.len():
+        polyval_input.push(_u8_at(padded_pt, i))
+        i = i + 1
+    i = 0
+    while i < 16:
+        polyval_input.push(_u8_at(len_block, i))
+        i = i + 1
+
+    var s = _polyval(auth_key, polyval_input)
+
+    var i2: u64 = 0
+    while i2 < 12:
+        var s_xored: [u8] = rt_array_new_with_cap(16)
+        var j: u64 = 0
+        while j < 16:
+            if j == i2:
+                s_xored.push(_u8_at(s, j) ^ _u8_at(nonce, j))
+            else:
+                s_xored.push(_u8_at(s, j))
+            j = j + 1
+        s = s_xored
+        i2 = i2 + 1
+
+    var s_masked: [u8] = rt_array_new_with_cap(16)
+    i2 = 0
+    while i2 < 15:
+        s_masked.push(_u8_at(s, i2))
+        i2 = i2 + 1
+    s_masked.push(_u8_at(s, 15) & 0x7F)
+
+    _aes256_encrypt_block(enc_key, s_masked)

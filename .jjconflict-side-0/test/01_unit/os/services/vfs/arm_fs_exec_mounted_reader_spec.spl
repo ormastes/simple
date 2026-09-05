@@ -1,0 +1,106 @@
+# @cover src/os/services/vfs/arm_fs_exec_vfs.spl
+"""
+# ARM filesystem-exec mounted reader
+
+Exercises the production typed mounted-namespace boundary with a real
+MountTable and RamFS driver.  This is hosted contract evidence; it does not
+claim ARM VirtIO or live-guest execution evidence.
+"""
+
+use std.spec.*
+use os.services.vfs.arm_fs_exec_vfs.{
+    ARM_FS_EXEC_MAX_REGULAR_FILE_BYTES,
+    arm_fs_exec_read_mounted_regular_file_bounded_v1,
+}
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test, _mount_hosted_rootfs_for_test,
+}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.ops.{FsDriver}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.fs_driver.types.{MountOptions, OpenFlags, Path}
+
+fn _mounted_arm_reader_fixture() -> DriverInstance:
+    var driver = RamFsDriver.new()
+    expect(driver.mount(MountOptions.default()).is_ok()).to_equal(true)
+    expect(driver.mkdir(Path(raw: "/directory"), 0o755u32).is_ok()).to_equal(true)
+    val empty = driver.open(
+        Path(raw: "/empty.bin"), OpenFlags.read_write().with_create())
+    expect(empty.is_ok()).to_equal(true)
+    val empty_handle = empty.unwrap()
+    expect(driver.close(empty_handle).is_ok()).to_equal(true)
+    val payload = driver.open(
+        Path(raw: "/payload.bin"), OpenFlags.read_write().with_create())
+    expect(payload.is_ok()).to_equal(true)
+    val payload_handle = payload.unwrap()
+    val written = driver.write(payload_handle, 0i64, [1u8, 2u8, 3u8])
+    expect(written.is_ok()).to_equal(true)
+    expect(written.unwrap()).to_equal(3i64)
+    expect(driver.close(payload_handle).is_ok()).to_equal(true)
+    DriverInstance.RamFs(driver: driver)
+
+fn _mount_arm_reader_fixture():
+    _clear_vfs_rootfs_for_test()
+    expect(_mount_hosted_rootfs_for_test(_mounted_arm_reader_fixture())).to_equal(true)
+
+describe "ARM mounted filesystem-exec typed reads":
+    it "should preserve an empty regular file as typed success":
+        step("Mount a real empty regular file through the SimpleOS VFS")
+        _mount_arm_reader_fixture()
+        val result = arm_fs_exec_read_mounted_regular_file_bounded_v1(
+            "/empty.bin", 16u64)
+        expect(result.is_ok()).to_equal(true)
+        val file = result.unwrap()
+        expect(file.stat.is_file).to_equal(true)
+        expect(file.stat.is_dir).to_equal(false)
+        expect(file.stat.size).to_equal(0i64)
+        expect(file.bytes).to_equal([])
+        _clear_vfs_rootfs_for_test()
+
+    it "should keep mounted NotFound authoritative and typed":
+        step("Read an absent path from the mounted namespace")
+        _mount_arm_reader_fixture()
+        val result = arm_fs_exec_read_mounted_regular_file_bounded_v1(
+            "/missing.bin", 16u64)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(FsError.NotFound)
+        _clear_vfs_rootfs_for_test()
+
+    it "should reject nonregular mounted objects":
+        step("Read a directory through the regular-file boundary")
+        _mount_arm_reader_fixture()
+        val result = arm_fs_exec_read_mounted_regular_file_bounded_v1(
+            "/directory", 16u64)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(FsError.InvalidArg)
+        _clear_vfs_rootfs_for_test()
+
+    it "should reject a file larger than the caller bound":
+        step("Read a three-byte file with a two-byte admission bound")
+        _mount_arm_reader_fixture()
+        val result = arm_fs_exec_read_mounted_regular_file_bounded_v1(
+            "/payload.bin", 2u64)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(FsError.TooLarge)
+        _clear_vfs_rootfs_for_test()
+
+    it "should return exact bytes from a mounted regular file":
+        step("Read a real RamFS payload through MountTable positioned I/O")
+        _mount_arm_reader_fixture()
+        val result = arm_fs_exec_read_mounted_regular_file_bounded_v1(
+            "/payload.bin", 3u64)
+        expect(result.is_ok()).to_equal(true)
+        val file = result.unwrap()
+        expect(file.stat.size).to_equal(3i64)
+        expect(file.bytes).to_equal([1u8, 2u8, 3u8])
+        _clear_vfs_rootfs_for_test()
+
+    it "should reject a bound above the global ARM regular-file ceiling":
+        step("Submit an invalid caller bound before opening the namespace")
+        _mount_arm_reader_fixture()
+        val result = arm_fs_exec_read_mounted_regular_file_bounded_v1(
+            "/payload.bin", ARM_FS_EXEC_MAX_REGULAR_FILE_BYTES + 1u64)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(FsError.TooLarge)
+        _clear_vfs_rootfs_for_test()

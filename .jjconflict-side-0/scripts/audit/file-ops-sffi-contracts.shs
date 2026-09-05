@@ -1,0 +1,32 @@
+#!/bin/sh
+# Pin the first fail-closed slice in the compatibility file_ops owner.
+# Static source evidence only; provider signing/admission remains separate.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/io/file_ops.spl"
+
+grep -q '^extern fn rt_file_mmap_read_text(path: text) -> text?' "$module"
+grep -q '^extern fn rt_file_hash_sha256(path: text) -> text$' "$module"
+grep -q '^extern fn rt_file_size(path: text) -> i64$' "$module"
+[ "$(grep -c '^fn _file_.*_raw' "$module")" -eq 3 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -ge 7 ]
+
+grep -q '^fn file_size_checked(path: text) -> Result<i64, text>:' "$module"
+grep -q '^fn file_hash_sha256_checked(path: text) -> Result<text, text>:' "$module"
+grep -q '^fn file_mmap_read_text_checked(path: text) -> Result<text, text>:' "$module"
+grep -q 'if size < 0:' "$module"
+grep -q 'if digest.len() != 64:' "$module"
+grep -q 'if value == nil:' "$module"
+
+# Append must not reinterpret a failed size lookup as offset zero: that would
+# overwrite existing content. It performs one size call and one write only.
+grep -q 'val size_result = file_size_checked(path)' "$module"
+grep -A5 '^fn file_append' "$module" | grep -q 'case Err(_): false'
+! grep -A5 '^fn file_append' "$module" | grep -q 'else: 0'
+
+for symbol in rt_file_mmap_read_text rt_file_hash_sha256 rt_file_size; do
+    [ "$(grep -c "\\b${symbol}(" "$module")" -eq 2 ]
+done
+
+echo 'file_ops SFFI contract audit: PASS (nullable mmap text, checked SHA-256/size, append fails closed, one direct owner per provider, no added lookup/allocation)'

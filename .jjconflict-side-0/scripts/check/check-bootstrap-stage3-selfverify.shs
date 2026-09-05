@@ -1,0 +1,524 @@
+#!/bin/sh
+# check-bootstrap-stage3-selfverify.shs
+#
+# Stage-3 self-verification gate.
+#
+# Validates the OUTPUT of a bootstrap Stage 3 (self-hosted) build.  It never
+# starts a bootstrap: it is a consumer-side gate that reads the Stage-3
+# provenance manifest written by scripts/bootstrap/bootstrap-from-scratch.sh,
+# rehashes the live artifacts, asserts the self-host chain, and executes the
+# Stage-3 binary.
+#
+# It deliberately does NOT re-implement:
+#   scripts/check/lib/bootstrap-stage3/manifest-verify.shs  (manifest shape /
+#       canonical-lane / sha-format authority; invoked here via
+#       --full-provenance, and by the bootstrap itself)
+#   scripts/check/check-bootstrap-stage2-struct-receiver.shs (Stage-2 capability)
+#   scripts/check/check-post-bootstrap-stage4-sspec.shs      (Stage-4 candidate)
+#   scripts/check/check-bootstrap-essential-tools-smoke.shs  (Stage-4 full CLI —
+#       must never be pointed at Stage 3, which has no test/lint/duplicate-check)
+#
+# Verdict line is always the LAST line of stdout:
+#   PASS  — <n> assertion(s) checked, ...   exit 0   (n is always > 0)
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked             exit 2
+#
+# Contract doc: doc/07_guide/compiler/bootstrap_stage3_selfverify_gate.md
+
+set -eu
+
+EV_CHECKED=0
+EV_FAIL=''
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+
+usage() {
+    cat >&2 <<'EOF'
+usage: check-bootstrap-stage3-selfverify.shs [options]
+  --output-dir DIR       bootstrap output root (default: <repo>/build/bootstrap)
+  --manifest PATH        explicit stage3 provenance.env
+  --fixpoint-binary PATH artifact produced by re-running the stage3 compiler on
+                         the stage3 entry; asserted byte-identical to stage3
+  --full-provenance      additionally run bootstrap_stage3_verify_manifest
+  --no-deep              skip the trivial-program compile+execute assertion
+  --selftest             run fixtures only (fatal, also runs before every scan)
+EOF
+}
+
+note() { printf '%s\n' "$1"; }
+checked() { EV_CHECKED=$((EV_CHECKED + 1)); }
+fail() {
+    [ -n "$EV_FAIL" ] || EV_FAIL=$1
+    note "stage3_selfverify_reason=$1"
+}
+
+hash_file() {
+    # sha256 of a regular file; empty output + nonzero status on failure.
+    [ -f "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$1" | cut -d' ' -f1
+    else
+        return 1
+    fi
+}
+
+file_size() {
+    [ -f "$1" ] || return 1
+    wc -c <"$1" | tr -d ' \t'
+}
+
+# Singular key lookup: a key that appears zero or twice is an error, never a
+# silent first-wins read.
+manifest_value() {
+    mv_key=$1
+    mv_file=$2
+    mv_count=$(grep -c "^${mv_key}=" "$mv_file" 2>/dev/null || true)
+    [ "$mv_count" = 1 ] || return 1
+    sed -n "s/^${mv_key}=//p" "$mv_file"
+}
+
+# Extract the argv value that follows a given flag from a v2 command transcript.
+transcript_arg_after() {
+    ta_flag=$1
+    ta_file=$2
+    awk -v flag="$ta_flag" '
+        /^argv:/ {
+            sub(/^argv:[0-9]+:/, "")
+            if (want) { print; exit }
+            if ($0 == flag) { want = 1 }
+        }
+    ' "$ta_file"
+}
+
+transcript_executable() {
+    sed -n 's/^executable:[0-9]*://p' "$1" | head -1
+}
+
+run_capture() {
+    # Runs "$@" with a hard timeout, writing combined output to $RUN_OUT.
+    # The command's exit status is read DIRECTLY into RUN_RC on the next line —
+    # never through a pipe.
+    rc_timeout=$1
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        set -- timeout -k 5s "$rc_timeout" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        set -- gtimeout -k 5s "$rc_timeout" "$@"
+    fi
+    set +e
+    "$@" >"$RUN_OUT" 2>&1
+    RUN_RC=$?
+    set -e
+}
+
+# ---------------------------------------------------------------------------
+# scan
+# ---------------------------------------------------------------------------
+scan() {
+    manifest=$1
+    fixpoint_binary=$2
+    full_provenance=$3
+    deep=$4
+
+    if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then
+        note "stage3_selfverify_manifest=$manifest"
+        note 'stage3_selfverify_reason=manifest_missing_or_symlinked'
+        return 2
+    fi
+    checked
+    note "stage3_selfverify_manifest=$manifest"
+
+    schema=$(manifest_value schema "$manifest") || schema=''
+    case "$schema" in
+        simple-bootstrap-stage3-provenance-v*) checked ;;
+        *) checked; fail "manifest_schema_unrecognised:${schema:-none}" ;;
+    esac
+
+    status=$(manifest_value status "$manifest") || status=''
+    checked
+    [ "$status" = pass ] || fail "manifest_status_not_pass:${status:-none}"
+
+    stage3_path=$(manifest_value stage3_path "$manifest") || stage3_path=''
+    stage2_path=$(manifest_value stage2_path "$manifest") || stage2_path=''
+    stage3_sha_recorded=$(manifest_value stage3_sha256 "$manifest") || stage3_sha_recorded=''
+    stage2_sha_recorded=$(manifest_value stage2_sha256 "$manifest") || stage2_sha_recorded=''
+
+    # --- A2/A3: stage3 artifact exists and its identity is RECORDED, not inferred
+    checked
+    if [ -z "$stage3_path" ] || [ ! -f "$stage3_path" ] || [ -L "$stage3_path" ]; then
+        fail "stage3_binary_missing_or_symlinked:${stage3_path:-none}"
+        stage3_sha_live=''
+    else
+        [ -x "$stage3_path" ] || fail 'stage3_binary_not_executable'
+        stage3_size=$(file_size "$stage3_path") || stage3_size=0
+        [ "$stage3_size" -gt 0 ] || fail 'stage3_binary_empty'
+        stage3_sha_live=$(hash_file "$stage3_path") || stage3_sha_live=''
+        [ -n "$stage3_sha_live" ] || fail 'stage3_binary_unhashable_no_sha256_tool'
+        note "stage3_binary_path=$stage3_path"
+        note "stage3_binary_size=$stage3_size"
+        note "stage3_binary_sha256=$stage3_sha_live"
+    fi
+    checked
+    [ -n "$stage3_sha_live" ] && [ "$stage3_sha_live" = "$stage3_sha_recorded" ] ||
+        fail 'stage3_sha256_does_not_match_manifest'
+
+    # --- A4: stage2 artifact identity
+    checked
+    if [ -z "$stage2_path" ] || [ ! -f "$stage2_path" ]; then
+        fail "stage2_binary_missing:${stage2_path:-none}"
+        stage2_sha_live=''
+    else
+        stage2_sha_live=$(hash_file "$stage2_path") || stage2_sha_live=''
+        note "stage2_binary_path=$stage2_path"
+        note "stage2_binary_size=$(file_size "$stage2_path" || echo 0)"
+        note "stage2_binary_sha256=$stage2_sha_live"
+        [ "$stage2_sha_live" = "$stage2_sha_recorded" ] ||
+            fail 'stage2_sha256_does_not_match_manifest'
+    fi
+
+    # --- A5: FIXPOINT chain — stage3 was produced BY stage2, not by anything else.
+    s3_transcript=$(manifest_value stage3_command_transcript_path "$manifest") || s3_transcript=''
+    s2_transcript=$(manifest_value stage2_command_transcript_path "$manifest") || s2_transcript=''
+    checked
+    if [ -n "$s3_transcript" ] && [ -f "$s3_transcript" ]; then
+        s3_producer=$(transcript_executable "$s3_transcript")
+        note "stage3_producer=$s3_producer"
+        [ "$s3_producer" = "$stage2_path" ] ||
+            fail "stage3_not_produced_by_stage2:${s3_producer:-none}"
+    else
+        fail "stage3_command_transcript_missing:${s3_transcript:-none}"
+    fi
+
+    # --- A6: same program — both stages compiled the same --entry.
+    checked
+    if [ -n "$s2_transcript" ] && [ -f "$s2_transcript" ] &&
+        [ -n "$s3_transcript" ] && [ -f "$s3_transcript" ]; then
+        s2_entry=$(transcript_arg_after --entry "$s2_transcript")
+        s3_entry=$(transcript_arg_after --entry "$s3_transcript")
+        note "stage2_entry=$s2_entry"
+        note "stage3_entry=$s3_entry"
+        if [ -z "$s3_entry" ]; then
+            fail 'stage3_entry_not_recorded'
+        elif [ "$s2_entry" != "$s3_entry" ]; then
+            fail "stage_entry_mismatch:${s2_entry}_vs_${s3_entry}"
+        fi
+    else
+        fail 'stage_command_transcripts_incomplete'
+    fi
+
+    # --- A7: stage3 must NOT be a byte-copy of stage2.
+    #
+    # Stage 2 is emitted by the Rust seed and Stage 3 by the Stage-2 compiler:
+    # two different code generators over the same source, so the design does NOT
+    # guarantee byte-identity between them, and asserting it would be wrong.
+    # What byte-EQUALITY here would prove is the fraud shape `cp stage2 stage3`,
+    # so the guaranteed direction is inequality.
+    checked
+    if [ -n "$stage3_sha_live" ] && [ -n "$stage2_sha_live" ] &&
+        [ "$stage3_sha_live" = "$stage2_sha_live" ]; then
+        fail 'stage3_is_byte_copy_of_stage2'
+    fi
+
+    # --- A8: recorded stage sanity statuses (never inferred from an exit code).
+    for key in stage2_sanity_status stage2_receiver_status stage3_sanity_status; do
+        checked
+        v=$(manifest_value "$key" "$manifest") || v=''
+        note "$key=$v"
+        [ "$v" = pass ] || fail "${key}_not_pass:${v:-none}"
+    done
+
+    # --- A9: the stage3 binary is alive and reports its own version.
+    checked
+    if [ -x "$stage3_path" ]; then
+        run_capture 60s env SIMPLE_BOOTSTRAP= SIMPLE_RUST_SEED_WARNING= \
+            "$stage3_path" --version
+        note "stage3_version_rc=$RUN_RC"
+        if [ "$RUN_RC" -ne 0 ]; then
+            fail "stage3_version_failed_rc:$RUN_RC"
+        elif [ ! -s "$RUN_OUT" ]; then
+            fail 'stage3_version_empty'
+        else
+            note "stage3_version=$(head -1 "$RUN_OUT")"
+            checked
+            if grep -Fq 'bootstrap seed only' "$RUN_OUT" ||
+                grep -Fq 'Rust-built' "$RUN_OUT"; then
+                fail 'stage3_binary_is_rust_seed'
+            fi
+        fi
+    else
+        fail 'stage3_binary_not_runnable'
+    fi
+
+    # --- A10: capability boundary. Stage 3 is the MINIMAL bootstrap entry: it
+    # answers compile/native-build only. `lint` is documented as `unknown
+    # command` (exit 1). Asserting the refusal keeps this gate from ever being
+    # read as evidence of full-CLI capability.
+    checked
+    if [ -x "$stage3_path" ]; then
+        run_capture 60s env SIMPLE_BOOTSTRAP= "$stage3_path" lint /dev/null
+        note "stage3_lint_rc=$RUN_RC"
+        [ "$RUN_RC" -ne 0 ] || fail 'stage3_accepted_full_cli_lint_unexpected_capability'
+    else
+        fail 'stage3_capability_boundary_unprobed'
+    fi
+
+    # --- A11: functional — compile a trivial program and run the result.
+    if [ "$deep" -eq 1 ] && [ -x "$stage3_path" ]; then
+        checked
+        deep_dir=$(mktemp -d "${TMPDIR:-/tmp}/stage3-selfverify-deep.XXXXXX")
+        printf '%s\n' 'fn main():' '    print("stage3 trivial program ok")' \
+            >"$deep_dir/trivial.spl"
+        runtime_path=$(manifest_value runtime_path "$manifest") || runtime_path=''
+        set -- native-build --entry "$deep_dir/trivial.spl" -o "$deep_dir/trivial"
+        [ -n "$runtime_path" ] && set -- "$@" --runtime-path "$runtime_path"
+        run_capture 900s env SIMPLE_BOOTSTRAP=1 "$stage3_path" "$@"
+        note "stage3_trivial_build_rc=$RUN_RC"
+        if [ "$RUN_RC" -ne 0 ]; then
+            fail "stage3_trivial_program_build_failed_rc:$RUN_RC"
+            sed -n '1,40p' "$RUN_OUT"
+        elif [ ! -x "$deep_dir/trivial" ]; then
+            fail 'stage3_trivial_program_no_executable'
+        else
+            run_capture 60s "$deep_dir/trivial"
+            note "stage3_trivial_run_rc=$RUN_RC"
+            if [ "$RUN_RC" -ne 0 ]; then
+                fail "stage3_trivial_program_run_failed_rc:$RUN_RC"
+            elif ! grep -Fq 'stage3 trivial program ok' "$RUN_OUT"; then
+                fail 'stage3_trivial_program_wrong_output'
+            fi
+        fi
+        rm -rf "$deep_dir"
+    else
+        note 'stage3_trivial_program=skipped_no_deep'
+    fi
+
+    # --- A12: strict fixpoint, only when a re-run artifact is supplied.
+    if [ -n "$fixpoint_binary" ]; then
+        checked
+        if [ ! -f "$fixpoint_binary" ]; then
+            fail "fixpoint_binary_missing:$fixpoint_binary"
+        else
+            fx_sha=$(hash_file "$fixpoint_binary") || fx_sha=''
+            note "fixpoint_binary_sha256=$fx_sha"
+            [ -n "$fx_sha" ] && [ "$fx_sha" = "$stage3_sha_live" ] ||
+                fail 'fixpoint_stage3_recompile_not_byte_identical'
+        fi
+    else
+        note 'stage3_strict_fixpoint=not_supplied'
+    fi
+
+    # --- optional: delegate to the existing manifest authority.
+    if [ "$full_provenance" -eq 1 ]; then
+        checked
+        facade="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+        if [ ! -f "$facade" ]; then
+            fail 'provenance_facade_missing'
+        else
+            BOOTSTRAP_STAGE3_FACADE_PATH=$facade
+            export BOOTSTRAP_STAGE3_FACADE_PATH
+            set +e
+            # shellcheck disable=SC1090
+            ( . "$facade"
+              bootstrap_stage3_verify_manifest "$manifest" "$repo_root" "$stage3_path"
+            ) >/dev/null 2>&1
+            fp_rc=$?
+            set -e
+            note "stage3_full_provenance_rc=$fp_rc"
+            [ "$fp_rc" -eq 0 ] || fail "full_provenance_verification_failed_rc:$fp_rc"
+        fi
+    fi
+
+    [ -z "$EV_FAIL" ] || return 1
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# selftest
+# ---------------------------------------------------------------------------
+fixture_compiler() {
+    # $1 = destination, $2 = version banner, $3 = lint exit code
+    cat >"$1" <<EOF
+#!/bin/sh
+case "\$1" in
+  --version) printf '%s\n' '$2'; exit 0 ;;
+  lint) exit $3 ;;
+  native-build)
+    out=''
+    while [ "\$#" -gt 0 ]; do
+      [ "\$1" = "-o" ] && { out=\$2; shift 2; continue; }
+      shift
+    done
+    [ -n "\$out" ] || exit 1
+    printf '%s\n' '#!/bin/sh' 'echo "stage3 trivial program ok"' >"\$out"
+    chmod +x "\$out"
+    exit 0 ;;
+esac
+exit 1
+EOF
+    chmod +x "$1"
+}
+
+fixture_transcript() {
+    # $1 = destination, $2 = executable, $3 = entry
+    {
+        echo 'schema=simple-bootstrap-command-transcript-v2'
+        printf 'executable:%s:%s\n' "${#2}" "$2"
+        f_flag='--entry'
+        printf 'argv:%s:%s\n' "${#f_flag}" "$f_flag"
+        printf 'argv:%s:%s\n' "${#3}" "$3"
+    } >"$1"
+}
+
+build_fixture() {
+    # $1 = dir, $2 = variant
+    fd=$1
+    variant=$2
+    mkdir -p "$fd"
+    entry="$repo_root/src/app/cli/bootstrap_main.spl"
+    fixture_compiler "$fd/stage2" 'Simple 0.0.0 (stage2)' 1
+    case "$variant" in
+        no_version) printf '%s\n' '#!/bin/sh' 'exit 3' >"$fd/stage3"; chmod +x "$fd/stage3" ;;
+        seed_banner) fixture_compiler "$fd/stage3" 'Simple (Rust-built bootstrap seed only)' 1 ;;
+        lint_accepted) fixture_compiler "$fd/stage3" 'Simple 0.0.0 (stage3)' 0 ;;
+        copy_of_stage2) cp "$fd/stage2" "$fd/stage3" ;;
+        *) fixture_compiler "$fd/stage3" 'Simple 0.0.0 (stage3)' 1 ;;
+    esac
+    s3_producer="$fd/stage2"
+    [ "$variant" = copy_of_stage2 ] && s3_producer="$fd/seed"
+    fixture_transcript "$fd/stage2.transcript" "$fd/seed" "$entry"
+    fixture_transcript "$fd/stage3.transcript" "$s3_producer" "$entry"
+    {
+        echo 'schema=simple-bootstrap-stage3-provenance-v4'
+        echo 'status=pass'
+        echo "stage2_path=$fd/stage2"
+        echo "stage2_sha256=$(hash_file "$fd/stage2")"
+        echo "stage3_path=$fd/stage3"
+        echo "stage3_sha256=$(hash_file "$fd/stage3")"
+        echo "stage2_command_transcript_path=$fd/stage2.transcript"
+        echo "stage3_command_transcript_path=$fd/stage3.transcript"
+        echo 'stage2_sanity_status=pass'
+        echo 'stage2_receiver_status=pass'
+        echo 'stage3_sanity_status=pass'
+        echo 'runtime_path='
+    } >"$fd/provenance.env"
+    if [ "$variant" = tampered ]; then
+        printf 'tampered\n' >>"$fd/stage3"
+    fi
+    printf '%s\n' "$fd/provenance.env"
+}
+
+run_fixture() {
+    # $1 = variant, $2 = expected exit
+    fx_dir="$SELFTEST_ROOT/$1"
+    if [ "$1" = vacuous ]; then
+        mkdir -p "$fx_dir"
+        fx_manifest="$fx_dir/provenance.env"
+    else
+        fx_manifest=$(build_fixture "$fx_dir" "$1")
+    fi
+    set +e
+    ( EV_CHECKED=0; EV_FAIL=''
+      scan "$fx_manifest" '' 0 1
+      rc=$?
+      [ "$EV_CHECKED" -gt 0 ] || exit 2
+      exit "$rc" ) >"$fx_dir/out.txt" 2>&1
+    fx_rc=$?
+    set -e
+    if [ "$fx_rc" -ne "$2" ]; then
+        note "selftest_fixture=$1 expected_exit=$2 actual_exit=$fx_rc"
+        sed -n '1,40p' "$fx_dir/out.txt"
+        note 'FAIL — selftest fixture did not behave as specified'
+        exit 1
+    fi
+    note "selftest_fixture=$1 exit=$fx_rc ok"
+    SELFTEST_COUNT=$((SELFTEST_COUNT + 1))
+}
+
+selftest() {
+    SELFTEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/stage3-selfverify-selftest.XXXXXX")
+    SELFTEST_COUNT=0
+    run_fixture healthy 0
+    run_fixture tampered 1
+    run_fixture copy_of_stage2 1
+    run_fixture no_version 1
+    run_fixture seed_banner 1
+    run_fixture lint_accepted 1
+    run_fixture vacuous 2
+    rm -rf "$SELFTEST_ROOT"
+    note "selftest_fixtures=$SELFTEST_COUNT"
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+output_dir="$repo_root/build/bootstrap"
+manifest_arg=''
+fixpoint_binary=''
+full_provenance=0
+deep=1
+selftest_only=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output-dir) output_dir=$2; shift 2 ;;
+        --output-dir=*) output_dir=${1#*=}; shift ;;
+        --manifest) manifest_arg=$2; shift 2 ;;
+        --manifest=*) manifest_arg=${1#*=}; shift ;;
+        --fixpoint-binary) fixpoint_binary=$2; shift 2 ;;
+        --fixpoint-binary=*) fixpoint_binary=${1#*=}; shift ;;
+        --full-provenance) full_provenance=1; shift ;;
+        --no-deep) deep=0; shift ;;
+        --selftest) selftest_only=1; shift ;;
+        -h|--help) usage; exit 2 ;;
+        *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
+    esac
+done
+
+RUN_OUT=$(mktemp "${TMPDIR:-/tmp}/stage3-selfverify-run.XXXXXX")
+RUN_RC=0
+trap 'rm -f "$RUN_OUT"' EXIT HUP INT TERM
+
+# The selftest is fatal and runs BEFORE every scan.
+selftest
+
+if [ "$selftest_only" -eq 1 ]; then
+    note "PASS — $SELFTEST_COUNT selftest fixture(s) checked, gate behaves as specified"
+    exit 0
+fi
+
+if [ -n "$manifest_arg" ]; then
+    manifest=$manifest_arg
+else
+    platform=$(uname -m 2>/dev/null || echo unknown)
+    manifest=''
+    for cand in "$output_dir"/stage3/*/provenance.env; do
+        [ -f "$cand" ] || continue
+        manifest=$cand
+        break
+    done
+    if [ -z "$manifest" ]; then
+        note "stage3_selfverify_output_dir=$output_dir"
+        note "stage3_selfverify_platform=$platform"
+        note 'stage3_selfverify_reason=no_stage3_provenance_manifest_found'
+        note 'ERROR — nothing was checked'
+        exit 2
+    fi
+fi
+
+set +e
+scan "$manifest" "$fixpoint_binary" "$full_provenance" "$deep"
+scan_rc=$?
+set -e
+
+if [ "$EV_CHECKED" -eq 0 ] || [ "$scan_rc" -eq 2 ]; then
+    note 'ERROR — nothing was checked'
+    exit 2
+fi
+if [ "$scan_rc" -ne 0 ]; then
+    note "FAIL — $EV_CHECKED assertion(s) checked, first failure: $EV_FAIL"
+    exit 1
+fi
+note "PASS — $EV_CHECKED assertion(s) checked, stage3 self-verified at $manifest"
+exit 0

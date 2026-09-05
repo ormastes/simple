@@ -1,0 +1,77 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.backend.backend.{compile_strict_riscv_scalar_decoder_product}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+describe "compiler-owned declarative scalar decoder product":
+    it "emits deterministic RV32 and RV64 products through the strict route":
+        val rv32 = compile_strict_riscv_scalar_decoder_product(
+            "scalar_decoder_product", CoreConfig.rv32())
+        val rv64 = compile_strict_riscv_scalar_decoder_product(
+            "scalar_decoder_product", CoreConfig.rv64_zicsr_zifencei())
+        expect(rv32.is_success()).to_equal(true)
+        expect(rv64.is_success()).to_equal(true)
+        if rv32.is_success() and rv64.is_success():
+            for product in [rv32, rv64]:
+                expect(product.route).to_equal("hwir-gen2-scalar-decoder-v1")
+                expect(product.vhdl).to_contain(
+                    "-- simple-hwir route=hwir-gen2-scalar-decoder-v1")
+                expect(product.vhdl.contains("route=hwir-strict")).to_equal(false)
+                expect(product.vhdl).to_contain(
+                    "graph=" + product.hwir_graph_sha256)
+                expect(product.hwir_graph_sha256.len()).to_equal(64)
+                expect(product.uses_legacy_fallback()).to_equal(false)
+            expect(rv32.hwir_graph_sha256 == rv64.hwir_graph_sha256).to_equal(false)
+            expect(rv32.module_node_id).to_equal("scalar_decoder_product:module")
+            expect(rv64.module_node_id).to_equal("scalar_decoder_product:module")
+            expect(rv32.config_xlen).to_equal(32)
+            expect(rv64.config_xlen).to_equal(64)
+            expect(rv32.config_profile).to_equal(CoreConfig.rv32().profile)
+            expect(rv64.config_profile).to_equal(
+                CoreConfig.rv64_zicsr_zifencei().profile)
+            expect(rv32.vhdl).to_contain("node=" + rv32.module_node_id +
+                " profile=" + rv32.config_profile + " graph=" +
+                rv32.hwir_graph_sha256)
+            expect(rv64.vhdl).to_contain("node=" + rv64.module_node_id +
+                " profile=" + rv64.config_profile + " graph=" +
+                rv64.hwir_graph_sha256)
+            val typed = strict_riscv_scalar_decoder_hwir("scalar_decoder_product",
+                CoreConfig.rv32(), riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
+            expect(rv32.hwir_graph_sha256).to_equal(typed.structural_sha256())
+
+    it "rejects unsupported and inconsistent scalar product profiles":
+        val unsupported_isa = CoreConfig(xlen: 32, physical_address_bits: 32,
+            register_count: 32, profile: "rv32", isa_profile: "rv32i_a",
+            compressed_decode_profile: "none")
+        val invalid_profile = CoreConfig(xlen: 32, physical_address_bits: 32,
+            register_count: 32, profile: "bad profile", isa_profile: "rv32i",
+            compressed_decode_profile: "none")
+        val wrong_xlen = CoreConfig(xlen: 64, physical_address_bits: 56,
+            register_count: 32, profile: "rv64", isa_profile: "rv32i",
+            compressed_decode_profile: "none")
+        for rejected in [
+            compile_strict_riscv_scalar_decoder_product(
+                "scalar_decoder_unsupported", unsupported_isa),
+            compile_strict_riscv_scalar_decoder_product(
+                "scalar_decoder_invalid_profile", invalid_profile),
+            compile_strict_riscv_scalar_decoder_product(
+                "scalar_decoder_wrong_xlen", wrong_xlen),
+            compile_strict_riscv_scalar_decoder_product("", CoreConfig.rv32())]:
+            expect(rejected.is_success()).to_equal(false)
+            expect(rejected.route).to_equal("hwir-gen2-scalar-decoder-v1")
+            expect(rejected.diagnostic.len() > 0).to_equal(true)
+            expect(rejected.vhdl).to_equal("")
+            expect(rejected.hwir_graph_sha256).to_equal("")
+            expect(rejected.module_node_id).to_equal("")
+
+    it "repeats identical product emission byte for byte":
+        val first = compile_strict_riscv_scalar_decoder_product(
+            "scalar_decoder_repeat", CoreConfig.rv32())
+        val second = compile_strict_riscv_scalar_decoder_product(
+            "scalar_decoder_repeat", CoreConfig.rv32())
+        expect(first.is_success()).to_equal(true)
+        expect(second.is_success()).to_equal(true)
+        if first.is_success() and second.is_success():
+            expect(first.vhdl).to_equal(second.vhdl)
+            expect(first.hwir_graph_sha256).to_equal(second.hwir_graph_sha256)

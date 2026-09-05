@@ -1,0 +1,43 @@
+use os.apps.sshd.ssh_rekey_budget.{SSH_REKEY_PACKET_SOFT_LIMIT_V1, SSH_REKEY_PACKET_HARD_LIMIT_V1, SSH_REKEY_BYTE_SOFT_LIMIT_V1, SSH_REKEY_BYTE_HARD_LIMIT_V1, ssh_rekey_counter_can_admit_v1, ssh_rekey_counter_commit_v1, ssh_rekey_wire_sequence_allowed_v1, ssh_rekey_epoch_due_v1}
+
+describe "SSH encrypted epoch rekey budget":
+    it "requests rekey at the byte soft boundary without losing the commit":
+        val before = SSH_REKEY_BYTE_SOFT_LIMIT_V1 - 8u64
+        val committed = ssh_rekey_counter_commit_v1(7u64, before, 8u64)
+        expect(committed.allowed).to_equal(true)
+        expect(committed.bytes).to_equal(SSH_REKEY_BYTE_SOFT_LIMIT_V1)
+        expect(committed.rekey_due).to_equal(true)
+
+    it "rejects a frame that reaches the hard byte boundary":
+        val before = SSH_REKEY_BYTE_HARD_LIMIT_V1 - 4u64
+        val rejected = ssh_rekey_counter_commit_v1(9u64, before, 4u64)
+        expect(rejected.allowed).to_equal(false)
+        expect(rejected.bytes).to_equal(before)
+
+    it "requests rekey before the packet sequence can approach wrap":
+        val committed = ssh_rekey_counter_commit_v1(
+            SSH_REKEY_PACKET_SOFT_LIMIT_V1 - 1u64, 0u64, 1u64)
+        expect(committed.allowed).to_equal(true)
+        expect(committed.packets).to_equal(SSH_REKEY_PACKET_SOFT_LIMIT_V1)
+        expect(committed.rekey_due).to_equal(true)
+
+    it "rejects the hard packet boundary without wrapping":
+        val rejected = ssh_rekey_counter_commit_v1(
+            SSH_REKEY_PACKET_HARD_LIMIT_V1 - 1u64, 0u64, 1u64)
+        expect(rejected.allowed).to_equal(false)
+        expect(rejected.packets).to_equal(SSH_REKEY_PACKET_HARD_LIMIT_V1 - 1u64)
+
+    it "treats either direction as authoritative for rekey":
+        expect(ssh_rekey_epoch_due_v1(
+            0u64, 0u64, 0u64, SSH_REKEY_BYTE_SOFT_LIMIT_V1)).to_equal(true)
+        expect(ssh_rekey_epoch_due_v1(0u64, 0u64, 0u64, 0u64)).to_equal(false)
+
+    it "guards the lifetime wire sequence independently of key epochs":
+        expect(ssh_rekey_wire_sequence_allowed_v1(0xFFFEFFFFu32)).to_equal(true)
+        expect(ssh_rekey_wire_sequence_allowed_v1(0xFFFF0000u32)).to_equal(false)
+
+    it "preflights byte headroom before cryptographic work":
+        expect(ssh_rekey_counter_can_admit_v1(
+            0u64, SSH_REKEY_BYTE_HARD_LIMIT_V1 - 9u64, 8u64)).to_equal(true)
+        expect(ssh_rekey_counter_can_admit_v1(
+            0u64, SSH_REKEY_BYTE_HARD_LIMIT_V1 - 8u64, 8u64)).to_equal(false)

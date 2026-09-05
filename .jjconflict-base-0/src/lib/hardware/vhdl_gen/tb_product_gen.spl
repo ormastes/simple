@@ -1,0 +1,564 @@
+# Structured generator for the product-core GHDL testbenches, byte-identical to
+# the goldens under test/01_unit/lib/hardware/fpga_linux/:
+#
+#   rv32_product_sv32_pmp_ghdl/tb_rv32_product_sv32_pmp.vhd
+#   rv64_product_sv39_pmp_ghdl/tb_rv64_product_sv39_pmp.vhd
+#   rv64_product_wb_axi_ghdl/tb_rv64_product_wb_axi.vhd
+#
+# The Sv32/Sv39 pair is a genuine XLEN pair at the BOUNDARY and a genuine pair
+# in INTENT (walk a page table, then prove a PMP-denied translated target never
+# reaches the bus, then check mcause 5), and everything on that axis is shared:
+# the Wishbone signal group, the DUT association list, the reset+watchdog
+# process, the walker-PTE observation latches, the assert emitter and the
+# pass-report/finish tail. What does NOT correspond is the MEMORY MODEL: rv32
+# preloads a `.mem` into a mem_t array and answers combinationally, while rv64
+# scans a `.hex` image per access from an impure function and answers in the
+# clocked slave. Those two are different testbench architectures, not two
+# widths of one template, so they are emitted from the same descriptor
+# vocabulary but not from one body. The third file shares only the boundary.
+#
+# XlenConfig drives what is genuinely width-derived (the DUT entity name, the
+# 32-vs-64-bit read word, the byte-lane select), not layout.
+#
+# Determinism: arrays only, no Dict iteration during emission; two runs — and
+# two processes — are byte-identical.
+
+use std.hardware.riscv_common.xlen.XlenConfig
+use std.hardware.vhdl_gen.gen_types.*
+use std.hardware.vhdl_gen.tb_single_lane_types.*
+use std.hardware.vhdl_gen.tb_product_types.*
+use std.hardware.vhdl_gen.tb_product_sections.*
+
+fn tbp_no_generics() -> [VgGenericSpec]:
+    var g: [VgGenericSpec] = []
+    g
+
+fn tbp_no_assocs() -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a
+
+fn tbp_no_rows() -> [i64]:
+    var r: [i64] = []
+    r
+
+fn tbp_rows2(a: i64, b: i64) -> [i64]:
+    var r: [i64] = []
+    r = r.push(a)
+    r = r.push(b)
+    r
+
+# The product core entity name for an XLEN: the two silicon product wrappers.
+fn tbp_core_entity(cfg: XlenConfig) -> text:
+    if cfg.is_rv32():
+        "rv32imac_core_product_wb"
+    else:
+        "rv64imac_core_product_wb"
+
+# ---------------------------------------------------------------------------
+# tb_rv32_product_sv32_pmp
+# ---------------------------------------------------------------------------
+
+fn tbp_sv32_uses() -> [text]:
+    var u = vgtbp_use_std_logic()
+    u = u.push("use std.textio.all;")
+    u = u.push("use ieee.std_logic_textio.all;")
+    u
+
+# `.mem`-backed program array: MEM_WORDS constant + mem_t type.
+fn tbp_sv32_mem_decls(mem_words: i64, cfg: XlenConfig) -> [text]:
+    var l: [text] = []
+    l = l.push("  constant MEM_WORDS : natural := " + mem_words.to_text() + ";")
+    l = l.push("  type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector("
+        + (cfg.xlen - 1).to_text() + " downto 0);")
+    l
+
+fn tbp_sv32_init_program(cfg: XlenConfig, mem_file: text) -> [text]:
+    var decls: [text] = []
+    decls = decls.push(vgtbp_file_decl(4, "source", "\"" + mem_file + "\""))
+    var d1: [VgTbDecl] = []
+    d1 = d1.push(vgtbp_sig("result", "mem_t", "(others => (others => '0'))"))
+    d1 = d1.push(vgtbp_sig("row", "line", ""))
+    d1 = d1.push(vgtbp_sig("word", "std_logic_vector(" + (cfg.xlen - 1).to_text() + " downto 0)", ""))
+    d1 = d1.push(vgtbp_sig("good", "boolean", ""))
+    d1 = d1.push(vgtbp_sig("index", "natural", "0"))
+    var rows: [i64] = []
+    rows = rows.push(1)
+    rows = rows.push(2)
+    rows = rows.push(2)
+    decls = vg_append(decls, vgtb_decl_rows(4, "variable", d1, rows))
+    vgtbp_impure_function("init_program", "", "mem_t", decls, sp_sv32_init_program_body())
+
+# Sv32 walker page-table entries seen by the combinational memory model.
+fn tbp_sv32_pte_entries() -> [VgTbpEntry]:
+    var e: [VgTbpEntry] = []
+    e = e.push(vgtbp_entry("16#4800#", "x\"00001401\"", " -- VPN1=512 -> leaf at 0x5000"))
+    e = e.push(vgtbp_entry("16#4400#", "x\"00001801\"", " -- VPN1=256 -> leaf at 0x6000"))
+    e = e.push(vgtbp_entry("16#5000#", "x\"0000004B\"", " -- physical code page, R/X/A/V"))
+    e = e.push(vgtbp_entry("16#6000#", "x\"000020C7\"", " -- physical 0x8000, R/W/A/D/V"))
+    e
+
+fn tbp_sv32_memory_process(cfg: XlenConfig) -> [text]:
+    var vd: [VgTbDecl] = []
+    vd = vd.push(vgtbp_sig("a", "natural", ""))
+    vd = vd.push(vgtbp_sig("d", "std_logic_vector(" + (cfg.xlen - 1).to_text() + " downto 0)", ""))
+    var vrows: [i64] = []
+    vrows = vrows.push(2)
+    val decls = vgtb_decl_rows(4, "variable", vd, vrows)
+
+    var body: [text] = []
+    body = body.push("    a := to_integer(unsigned(adr(" + (cfg.xlen - 1).to_text() + " downto 0)));")
+    body = body.push("    d := (others => '0');")
+    val head = vgtbp_entry("< MEM_WORDS * " + cfg.bytes_per_reg.to_text(),
+        "program(a / " + cfg.bytes_per_reg.to_text() + ")", "")
+    body = vg_append(body, vgtbp_elsif_table(4, "a", "d", head, tbp_sv32_pte_entries()))
+    body = vg_append(body, sp_sv32_lane_select())
+    vgtbp_clocked_process("all", decls, "", body)
+
+fn tbp_sv32_watches() -> [VgTbpWatch]:
+    var w: [VgTbpWatch] = []
+    w = w.push(vgtbp_watch("we = '0' and sel = x\"0F\" and a = 16#4800#", "code_root"))
+    w = w.push(vgtbp_watch("we = '0' and sel = x\"0F\" and a = 16#5000#", "code_leaf"))
+    w = w.push(vgtbp_watch("we = '0' and sel = x\"0F\" and a = 16#4400#", "target_root"))
+    w = w.push(vgtbp_watch("we = '0' and sel = x\"0F\" and a = 16#6000#", "target_leaf"))
+    w = w.push(vgtbp_watch("a = 16#8000#", "denied_target"))
+    w
+
+fn generate_tb_rv32_product_sv32_pmp() -> text:
+    val cfg = XlenConfig.rv32()
+    val name = "tb_rv32_product_sv32_pmp"
+    val arch = "tb"
+    val tag = "RV32_PRODUCT_SV32_PMP_GHDL_PASS"
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(vgtbp_library_header(tbp_sv32_uses())))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtbp_entity(name, tbp_no_generics())))
+    parts = parts.push("")
+    parts = parts.push(vgtbp_arch_head(arch, name))
+    parts = parts.push(vgtb_join(tbp_sv32_mem_decls(4096, cfg)))
+    parts = parts.push(vgtb_join(tbp_sv32_init_program(cfg, "rv32_product_sv32_pmp.mem")))
+
+    var sigs: [VgTbDecl] = []
+    sigs = sigs.push(vgtbp_sig("program", "mem_t", "init_program"))
+    sigs = vgtb_append_decls(sigs, vgtbp_wb_signals(true))
+    sigs = sigs.push(vgtbp_sig("code_root, code_leaf, target_root, target_leaf, denied_target",
+        "boolean", "false"))
+    var srows: [i64] = []
+    srows = srows.push(1)
+    srows = srows.push(2)
+    srows = srows.push(2)
+    srows = srows.push(2)
+    srows = srows.push(1)
+    parts = parts.push(vgtb_join(vgtb_decl_rows(2, "signal", sigs, srows)))
+
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_clock_driver(5))
+    parts = parts.push("  ack <= cyc and stb;")
+    parts = parts.push("  err <= '0';")
+    parts = parts.push(vgtb_join(tbp_sv32_memory_process(cfg)))
+
+    var gens: [VgTbAssoc] = []
+    gens = gens.push(vgtb_assoc("RESET_ADDR", "x\"0000000000000000\""))
+    var grows: [i64] = []
+    grows = grows.push(1)
+    parts = parts.push(vgtb_join(vgtbp_inst(VgTbpInst(
+        label: "u_dut", colon: ": ", entity_name: tbp_core_entity(cfg), head_map: false,
+        generics: gens, generic_rows: grows, generic_sep: " => ",
+        ports: vgtbp_core_wb_ports("(others=>'0')"), port_rows: tbp_rows2(8, 10),
+        sep: "=>", open_ind: 4, row_ind: 6, inline_first: true))))
+
+    var stmts: [text] = []
+    stmts = stmts.push("wait for 20 ns;")
+    stmts = stmts.push("rst <= '0';")
+    stmts = stmts.push("wait for 20 us;")
+    stmts = stmts.push("assert false report \"timeout waiting for Sv32/PMP trap\" severity failure;")
+    parts = parts.push(vgtb_join(vgtbp_stmt_process(false, false, 4, stmts, tbp_rows2(3, 1))))
+
+    var vd: [VgTbDecl] = []
+    vd = vd.push(vgtbp_sig("a", "natural", ""))
+    var vrows: [i64] = []
+    vrows = vrows.push(1)
+    var body: [text] = []
+    body = body.push("      a := to_integer(unsigned(adr(" + (cfg.xlen - 1).to_text() + " downto 0)));")
+    body = vg_append(body, vgtbp_watch_lines(6, tbp_sv32_watches()))
+    body = body.push("      if a = 16#9000# and we = '1' then")
+    body = vg_append(body, vgtbp_assert(8,
+        "code_root and code_leaf and target_root and target_leaf",
+        "Sv32 code and target walker PTE reads were not all observed", "failure", true))
+    body = vg_append(body, vgtbp_assert(8, "not denied_target",
+        "PMP-denied translated target reached Wishbone", "failure", false))
+    body = vg_append(body, vgtbp_assert(8,
+        "dat_o(" + (cfg.xlen - 1).to_text() + " downto 0) = x\"00000005\"",
+        "expected S-mode load access fault trap", "failure", false))
+    body = vg_append(body, vgtbp_pass_report(8, tag, "std.env.finish;"))
+    body = body.push("      end if;")
+    parts = parts.push(vgtb_join(vgtbp_clocked_process("clk",
+        vgtb_decl_rows(4, "variable", vd, vrows),
+        "rising_edge(clk) and cyc = '1' and stb = '1'", body)))
+
+    parts = parts.push(vgtbp_arch_foot())
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# tb_rv64_product_sv39_pmp
+# ---------------------------------------------------------------------------
+
+fn tbp_sv39_uses() -> [text]:
+    var u = vgtbp_use_std_logic()
+    u = u.push("use ieee.std_logic_textio.all;")
+    u = u.push("use std.textio.all;")
+    u = u.push("use std.env.all;")
+    u
+
+fn tbp_sv39_image_byte(cfg: XlenConfig) -> [text]:
+    val w = (cfg.xlen - 1).to_text()
+    var d: [VgTbDecl] = []
+    d = d.push(vgtbp_sig("row", "line", ""))
+    d = d.push(vgtbp_sig("image_addr", "std_logic_vector(" + w + " downto 0)", ""))
+    d = d.push(vgtbp_sig("image_data", "std_logic_vector(7 downto 0)", ""))
+    d = d.push(vgtbp_sig("good", "boolean", ""))
+    var decls: [text] = []
+    decls = decls.push(vgtbp_file_decl(4, "image", "PROGRAM_HEX"))
+    decls = vg_append(decls, vgtb_decls(4, "variable", d))
+    vgtbp_impure_function("image_byte", "(addr : unsigned(" + w + " downto 0))",
+        "std_logic_vector", decls, sp_sv39_image_byte_body())
+
+fn tbp_sv39_program_qword(cfg: XlenConfig) -> [text]:
+    val w = (cfg.xlen - 1).to_text()
+    var d: [VgTbDecl] = []
+    d = d.push(vgtbp_sig("data", "std_logic_vector(" + w + " downto 0)", "(others => '0')"))
+    d = d.push(vgtbp_sig("base", "unsigned(" + w + " downto 0)",
+        "unsigned(addr) and x\"FFFFFFFFFFFFFFF8\""))
+    vgtbp_impure_function("program_qword", "(addr : std_logic_vector(" + w + " downto 0))",
+        "std_logic_vector", vgtb_decls(4, "variable", d), sp_sv39_program_qword_body())
+
+# Sv39 walker page-table entries: the denied-target chain, then the S-mode
+# program page's identity chain.
+fn tbp_sv39_pte_entries() -> [VgTbpEntry]:
+    var denied: [text] = []
+    denied = denied.push("    -- Sv39 root[1]/l1[0]/l0[0]: VA 0x40000000 -> denied PA 0x40000000.")
+    var ident: [text] = []
+    ident = ident.push("    -- Sv39 root[2]/l1[0]/l0[0]: S-mode program page maps to itself.")
+    var e: [VgTbpEntry] = []
+    e = e.push(vgtbp_entry_c(denied, "x\"0000000080001008\"", "x\"0000000020001001\"", ""))
+    e = e.push(vgtbp_entry("x\"0000000080004000\"", "x\"0000000020001401\"", ""))
+    e = e.push(vgtbp_entry("x\"0000000080005000\"", "x\"0000000010000043\"", ""))
+    e = e.push(vgtbp_entry_c(ident, "x\"0000000080001010\"", "x\"0000000020000801\"", ""))
+    e = e.push(vgtbp_entry("x\"0000000080002000\"", "x\"0000000020000C01\"", ""))
+    e = e.push(vgtbp_entry("x\"0000000080003000\"", "x\"000000002000004B\"", ""))
+    e
+
+fn tbp_sv39_ram_qword(cfg: XlenConfig) -> [text]:
+    val w = (cfg.xlen - 1).to_text()
+    var body = vgtbp_if_return_table(4, "addr", tbp_sv39_pte_entries())
+    body = body.push("    return program_qword(addr);")
+    var decls: [text] = []
+    vgtbp_impure_function("ram_qword", "(addr : std_logic_vector(" + w + " downto 0))",
+        "std_logic_vector", decls, body)
+
+fn tbp_sv39_watches() -> [VgTbpWatch]:
+    var w: [VgTbpWatch] = []
+    w = w.push(vgtbp_watch("we = '0' and adr = x\"0000000080001008\" and sel = x\"FF\"", "root_seen"))
+    w = w.push(vgtbp_watch("we = '0' and adr = x\"0000000080004000\" and sel = x\"FF\"", "l1_seen"))
+    w = w.push(vgtbp_watch("we = '0' and adr = x\"0000000080005000\" and sel = x\"FF\"", "l0_seen"))
+    w
+
+fn generate_tb_rv64_product_sv39_pmp() -> text:
+    val cfg = XlenConfig.rv64()
+    val name = "tb_rv64_product_sv39_pmp"
+    val arch = "tb"
+    val tag = "RV64_PRODUCT_SV39_PMP_GHDL_PASS"
+
+    var gens: [VgGenericSpec] = []
+    gens = gens.push(VgGenericSpec(pre_comments: no_lines(), name: "PROGRAM_HEX", name_w: 11,
+        ty: "string", default_val: "\"rv64_product_sv39_pmp.hex\""))
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(vgtbp_library_header(tbp_sv39_uses())))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtbp_entity(name, gens)))
+    parts = parts.push("")
+    parts = parts.push(vgtbp_arch_head(arch, name))
+
+    var sigs = vgtbp_wb_signals(false)
+    sigs = sigs.push(vgtbp_sig("root_seen, l1_seen, l0_seen", "boolean", "false"))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", sigs)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(tbp_sv39_image_byte(cfg)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(tbp_sv39_program_qword(cfg)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(tbp_sv39_ram_qword(cfg)))
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_clock_driver(5))
+
+    var stmts: [text] = []
+    stmts = stmts.push("wait for 30 ns;")
+    stmts = stmts.push("rst <= '0';")
+    stmts = stmts.push("wait for 80 us;")
+    stmts = stmts.push("assert false report \"RV64 Sv39/PMP product test timed out\" severity failure;")
+    var prows: [i64] = []
+    prows = prows.push(2)
+    prows = prows.push(1)
+    prows = prows.push(1)
+    parts = parts.push(vgtb_join(vgtbp_stmt_process(true, false, 4, stmts, prows)))
+    parts = parts.push("")
+
+    var drows: [i64] = []
+    drows = drows.push(5)
+    drows = drows.push(3)
+    drows = drows.push(4)
+    drows = drows.push(4)
+    drows = drows.push(2)
+    parts = parts.push(vgtb_join(vgtbp_inst(VgTbpInst(
+        label: "dut", colon: " : ", entity_name: tbp_core_entity(cfg), head_map: false,
+        generics: tbp_no_assocs(), generic_rows: tbp_no_rows(), generic_sep: " => ",
+        ports: vgtbp_core_wb_ports("(others => '0')"), port_rows: drows,
+        sep: " => ", open_ind: 4, row_ind: 6, inline_first: false))))
+    parts = parts.push("")
+
+    var inner: [text] = []
+    inner = vg_append(inner, vgtbp_assert(8, "adr /= x\"0000000040000000\"",
+        "PMP-denied final translated target reached Wishbone", "failure", true))
+    inner = vg_append(inner, vgtbp_assert(8, "not (we = '1' and adr = x\"0000000040000000\")",
+        "PMP-denied target issued a Wishbone write", "failure", true))
+    inner = inner.push("        dat_i <= ram_qword(adr);")
+    inner = inner.push("        ack <= '1';")
+    inner = vg_append(inner, vgtbp_watch_lines(8, tbp_sv39_watches()))
+    inner = inner.push("        if we = '1' and adr = x\"0000000010000000\" then")
+    inner = vg_append(inner, vgtbp_assert(10, "sel = x\"FF\" and dat_o = x\"0000000000000005\"",
+        "expected S-mode load access fault mcause 5", "failure", true))
+    inner = vg_append(inner, vgtbp_assert(10, "root_seen and l1_seen and l0_seen",
+        "expected Sv39 walker PTE reads were not all observed", "failure", true))
+    inner = vg_append(inner, vgtbp_pass_report(10, tag, "finish;"))
+    inner = inner.push("        end if;")
+
+    var body: [text] = []
+    body = body.push("      ack <= '0';")
+    body = body.push("      err <= '0';")
+    body = body.push("      if cyc = '1' and stb = '1' then")
+    body = vg_append(body, inner)
+    body = body.push("      end if;")
+    var nodecls: [text] = []
+    parts = parts.push(vgtb_join(vgtbp_clocked_process("clk", nodecls, "rising_edge(clk)", body)))
+
+    parts = parts.push(vgtbp_arch_foot())
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# tb_rv64_product_wb_axi
+# ---------------------------------------------------------------------------
+
+# AXI-HP master channel signals, declared in the golden's dense packed rows.
+fn tbp_axi_signals() -> [VgTbDecl]:
+    var d: [VgTbDecl] = []
+    d = d.push(vgtbp_sig("awaddr, araddr", "std_logic_vector(48 downto 0)", ""))
+    d = d.push(vgtbp_sig("awlen, arlen", "std_logic_vector(7 downto 0)", ""))
+    d = d.push(vgtbp_sig("awsize, arsize", "std_logic_vector(2 downto 0)", ""))
+    d = d.push(vgtbp_sig("awburst, arburst, bresp, rresp", "std_logic_vector(1 downto 0)", ""))
+    d = d.push(vgtbp_sig(
+        "awlock, arlock, awvalid, wvalid, bready, arvalid, rready, awready, wready, bvalid, arready, rlast, rvalid", "std_logic", "'0'"))
+    d = d.push(vgtbp_sig("wdata, rdata", "std_logic_vector(127 downto 0)", ""))
+    d = d.push(vgtbp_sig("wstrb", "std_logic_vector(15 downto 0)", ""))
+    d = d.push(vgtbp_sig("wlast", "std_logic", ""))
+    d = d.push(vgtbp_sig("read_seen", "boolean", "false"))
+    d = d.push(vgtbp_sig("write_phase", "natural range 0 to 4", "0"))
+    d = d.push(vgtbp_sig("held_awaddr", "std_logic_vector(48 downto 0)", "(others => '0')"))
+    d = d.push(vgtbp_sig("held_wdata", "std_logic_vector(127 downto 0)", "(others => '0')"))
+    d = d.push(vgtbp_sig("held_wstrb", "std_logic_vector(15 downto 0)", "(others => '0')"))
+    d
+
+# The WB slave side of the bridge: the same Wishbone wires as the core, with
+# dat_o/dat_i crossed over (the bridge consumes what the core drives).
+fn tbp_bridge_wb_assocs() -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a = a.push(vgtb_wire("clk"))
+    a = a.push(vgtb_wire("rst"))
+    a = a.push(vgtb_assoc("wb_adr_i", "adr"))
+    a = a.push(vgtb_assoc("wb_dat_i", "dat_o"))
+    a = a.push(vgtb_assoc("wb_dat_o", "dat_i"))
+    a = a.push(vgtb_assoc("wb_we_i", "we"))
+    a = a.push(vgtb_assoc("wb_sel_i", "sel"))
+    a = a.push(vgtb_assoc("wb_stb_i", "stb"))
+    a = a.push(vgtb_assoc("wb_cyc_i", "cyc"))
+    a = a.push(vgtb_assoc("wb_lock_i", "lock"))
+    a = a.push(vgtb_assoc("wb_ack_o", "ack"))
+    a = a.push(vgtb_assoc("wb_err_o", "err"))
+    a
+
+fn tbp_axi_channel_names() -> [text]:
+    var n: [text] = []
+    n = n.push("awaddr")
+    n = n.push("awlen")
+    n = n.push("awsize")
+    n = n.push("awburst")
+    n = n.push("awlock")
+    n = n.push("awvalid")
+    n = n.push("awready")
+    n = n.push("wdata")
+    n = n.push("wstrb")
+    n = n.push("wlast")
+    n = n.push("wvalid")
+    n = n.push("wready")
+    n = n.push("bresp")
+    n = n.push("bvalid")
+    n = n.push("bready")
+    n = n.push("araddr")
+    n = n.push("arlen")
+    n = n.push("arsize")
+    n = n.push("arburst")
+    n = n.push("arlock")
+    n = n.push("arvalid")
+    n = n.push("arready")
+    n = n.push("rdata")
+    n = n.push("rresp")
+    n = n.push("rlast")
+    n = n.push("rvalid")
+    n = n.push("rready")
+    n
+
+fn tbp_wb_axi_write_arms() -> [VgArm]:
+    var a0: [text] = []
+    a0 = a0.push("          if awvalid = '1' and wvalid = '1' then")
+    a0 = vg_append(a0, vgtbp_assert(12,
+        "awaddr = std_logic_vector(to_unsigned(16#40000008#, 49))",
+        "AXI write address translation is wrong", "failure", false))
+    a0 = vg_append(a0, vgtbp_assert(12,
+        "wstrb = x\"FF00\" and wdata(95 downto 64) = x\"11223344\"",
+        "upper 128-bit AXI write lane is wrong", "failure", false))
+    a0 = vg_append(a0, vgtbp_assert(12, "awlock = '0' and arlock = '0'",
+        "Wishbone atomic lock must not become AXI exclusive", "failure", false))
+    a0 = a0.push("            held_awaddr <= awaddr; held_wdata <= wdata; held_wstrb <= wstrb;")
+    a0 = a0.push("            write_phase <= 1;")
+    a0 = a0.push("          end if;")
+
+    var a1: [text] = []
+    a1 = vg_append(a1, vgtbp_assert(10, "awvalid = '1' and wvalid = '1'",
+        "AXI valid dropped under backpressure", "failure", false))
+    a1 = vg_append(a1, vgtbp_assert(10,
+        "awaddr = held_awaddr and wdata = held_wdata and wstrb = held_wstrb",
+        "AXI payload changed under backpressure", "failure", false))
+    a1 = a1.push("          wready <= '1';")
+    a1 = a1.push("          write_phase <= 2;")
+
+    var a2: [text] = []
+    a2 = vg_append(a2, vgtbp_assert(10, "awvalid = '1' and awaddr = held_awaddr",
+        "AW channel was not held after W completed", "failure", false))
+    a2 = a2.push("          wready <= '0'; awready <= '1';")
+    a2 = a2.push("          write_phase <= 3;")
+
+    var a3: [text] = []
+    a3 = a3.push("          awready <= '0';")
+    a3 = a3.push("          if bready = '1' then bresp <= \"10\"; bvalid <= '1'; write_phase <= 4; end if;")
+
+    var arms: [VgArm] = []
+    arms = arms.push(vgtbp_arm_body("0", a0))
+    arms = arms.push(vgtbp_arm_body("1", a1))
+    arms = arms.push(vgtbp_arm_body("2", a2))
+    arms = arms.push(vgtbp_arm_body("3", a3))
+    arms = arms.push(vgtbp_arm("others", "null;"))
+    arms
+
+fn generate_tb_rv64_product_wb_axi() -> text:
+    val cfg = XlenConfig.rv64()
+    val name = "tb_rv64_product_wb_axi"
+    val arch = "tb"
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(vgtbp_library_header(vgtbp_use_std_logic())))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtbp_entity(name, tbp_no_generics())))
+    parts = parts.push(vgtbp_arch_head(arch, name))
+
+    var sigs = vgtbp_wb_signals(false)
+    sigs = vgtb_append_decls(sigs, tbp_axi_signals())
+    var srows: [i64] = []
+    srows = srows.push(2)
+    srows = srows.push(1)
+    srows = srows.push(2)
+    srows = srows.push(2)
+    srows = srows.push(2)
+    srows = srows.push(1)
+    srows = srows.push(3)
+    srows = srows.push(1)
+    srows = srows.push(1)
+    srows = srows.push(1)
+    srows = srows.push(1)
+    srows = srows.push(1)
+    parts = parts.push(vgtb_join(vgtb_decl_rows(2, "signal", sigs, srows)))
+
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_clock_driver(5))
+
+    var stmts: [text] = []
+    stmts = stmts.push("wait for 20 ns;")
+    stmts = stmts.push("rst <= '0';")
+    stmts = stmts.push("wait for 1 us;")
+    stmts = stmts.push("assert false report \"timeout\" severity failure;")
+    var orow: [i64] = []
+    orow = orow.push(4)
+    parts = parts.push(vgtb_join(vgtbp_stmt_process(true, true, 4, stmts, orow)))
+
+    parts = parts.push(vgtb_join(vgtbp_inst(VgTbpInst(
+        label: "u_core", colon: ": ", entity_name: tbp_core_entity(cfg), head_map: true,
+        generics: tbp_no_assocs(), generic_rows: tbp_no_rows(), generic_sep: " => ",
+        ports: vgtbp_core_wb_ports("(others=>'0')"), port_rows: tbp_rows2(8, 10),
+        sep: "=>", open_ind: 4, row_ind: 4, inline_first: false))))
+
+    var bports = tbp_bridge_wb_assocs()
+    bports = vgtb_append_assocs(bports, vgtbp_prefixed_assocs("m_axi_", tbp_axi_channel_names()))
+    var brows: [i64] = []
+    brows = brows.push(12)
+    brows = brows.push(7)
+    brows = brows.push(8)
+    brows = brows.push(7)
+    brows = brows.push(5)
+    parts = parts.push(vgtb_join(vgtbp_inst(VgTbpInst(
+        label: "u_bridge", colon: ": ", entity_name: "wb64_axi_hp_bridge", head_map: true,
+        generics: tbp_no_assocs(), generic_rows: tbp_no_rows(), generic_sep: " => ",
+        ports: bports, port_rows: brows,
+        sep: "=>", open_ind: 4, row_ind: 4, inline_first: false))))
+
+    parts = parts.push("  arready <= '1';")
+
+    var body: [text] = []
+    body = body.push("      bvalid <= '0'; rvalid <= '0'; bresp <= \"00\"; rresp <= \"00\"; rlast <= '1';")
+    body = body.push("      if arvalid = '1' then")
+    body = vg_append(body, vgtbp_assert(8, "adr = x\"0000000080000003\" and sel = x\"08\"",
+        "byte lane was not preserved through wrapper", "failure", false))
+    body = vg_append(body, vgtbp_assert(8,
+        "araddr = std_logic_vector(to_unsigned(16#40000000#, 49))",
+        "AXI read address translation/alignment is wrong", "failure", false))
+    body = body.push("        read_seen <= true;")
+    body = body.push("      end if;")
+    body = body.push("      if read_seen and rready = '1' then rdata <= x\"000000000000000000000000A5000000\"; rvalid <= '1'; read_seen <= false; end if;")
+    body = vg_append(body, vgtbp_case(6, "write_phase", tbp_wb_axi_write_arms()))
+    var nodecls: [text] = []
+    parts = parts.push(vgtb_join(vgtbp_clocked_process("clk", nodecls, "rising_edge(clk)", body)))
+
+    parts = parts.push(vgtbp_arch_foot())
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# Public entry
+# ---------------------------------------------------------------------------
+
+# Relative paths (from the repo root) of the product testbenches, in a fixed
+# order — arrays only, so repeated generation is byte-identical.
+fn product_tb_paths() -> [text]:
+    var n: [text] = []
+    n = n.push("test/01_unit/lib/hardware/fpga_linux/rv32_product_sv32_pmp_ghdl/tb_rv32_product_sv32_pmp.vhd")
+    n = n.push("test/01_unit/lib/hardware/fpga_linux/rv64_product_sv39_pmp_ghdl/tb_rv64_product_sv39_pmp.vhd")
+    n = n.push("test/01_unit/lib/hardware/fpga_linux/rv64_product_wb_axi_ghdl/tb_rv64_product_wb_axi.vhd")
+    n
+
+# Generate one product testbench by the path returned from product_tb_paths().
+fn generate_product_tb(path: text) -> text:
+    if path.ends_with("tb_rv32_product_sv32_pmp.vhd"):
+        generate_tb_rv32_product_sv32_pmp()
+    elif path.ends_with("tb_rv64_product_sv39_pmp.vhd"):
+        generate_tb_rv64_product_sv39_pmp()
+    elif path.ends_with("tb_rv64_product_wb_axi.vhd"):
+        generate_tb_rv64_product_wb_axi()
+    else:
+        ""

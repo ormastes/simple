@@ -1,0 +1,46 @@
+# VHDL source-map debuggability tests.
+
+use compiler.driver.driver_compile_vhdl_source_map.{
+    rtl_explain_vhdl_line_from_map,
+    rtl_waveform_groups_from_map,
+    rtl_render_gtkw_from_groups,
+    rtl_first_divergence_report
+}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn sample_map() -> text:
+    "{\n" +
+    "  \"version\": 1,\n" +
+    "  \"source\": \"demo.spl\",\n" +
+    "  \"generated\": \"demo.vhd\",\n" +
+    "  \"entities\": [{\"name\":\"demo\",\"line\":5,\"hwirId\":\"entity:demo:5\",\"sourceLine\":2}],\n" +
+    "  \"ports\": [{\"name\":\"a\",\"originalName\":\"a\",\"sanitizedName\":\"a\",\"line\":8,\"hwirId\":\"port:a:8\",\"sourceLine\":2,\"optimization\":\"width_narrowing\"}]\n" +
+    "}\n"
+
+describe "VHDL source-map HWIR debug metadata":
+    it "explains a VHDL line through HWIR and Simple source":
+        val result = rtl_explain_vhdl_line_from_map(sample_map(), 8)
+        check(result.found)
+        expect result.hwir_id == "port:a:8"
+        expect result.signal_name == "a"
+        expect result.source_line == 2
+        check(result.to_text().contains("width_narrowing"))
+
+    it "returns a missing explanation for unmapped lines":
+        val result = rtl_explain_vhdl_line_from_map(sample_map(), 42)
+        check(not result.found)
+        check(result.to_text().contains("no RTL source-map entry"))
+
+    it "renders waveform groups from source-map ports":
+        val groups = rtl_waveform_groups_from_map(sample_map())
+        expect groups.len() == 1
+        val gtkw = rtl_render_gtkw_from_groups(groups)
+        check(gtkw.contains("[group] ports"))
+        check(gtkw.contains("a"))
+
+    it "renders first divergence reports":
+        val report = rtl_first_divergence_report(12, "0x1000", "0x13", "x1 expected 1 got 0", "", "", "demo.spl:2", "uut.debug_pc", "wave.gtkw")
+        check(report.contains("First RTL Divergence"))
+        check(report.contains("uut.debug_pc"))

@@ -1,0 +1,109 @@
+#!/bin/sh
+# SessionStart hook: re-inject ponytail mode after startup/resume/clear/compact.
+#
+# Reads the level from $PONYTAIL_LEVEL_FILE (default .simple/ponytail.level,
+# gitignored). Missing file -> "full". "off" -> print nothing, exit 0.
+# Otherwise prints a SHORT activation banner: level, the ladder, the rules
+# that change behaviour, and a pointer to the skill file for the long prose.
+# Stdout of a SessionStart hook is added to the model's context by Claude
+# Code on every startup/resume/clear/compact, so every byte here is paid
+# per session. Budget: <= 4,039 bytes, the size of the original plugin's
+# activate banner (measured 2026-08-28; the old hook cat'ed the whole skill
+# file and injected 6,133 B, +51.8%). The full skill stays readable on
+# demand at .claude/skills/ponytail.md.
+#
+# --selftest: run the level-file variants in a temp dir and print
+#   Results: <passed> passed, <failed> failed   (exit 1 on any failure)
+#
+# ponytail: plain POSIX sh, no JSON output; Codex/Copilot readers get the same
+# text via their own skill mirrors, upgrade to hookSpecificOutput JSON if a host needs it.
+
+ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+LEVEL_FILE="${PONYTAIL_LEVEL_FILE:-$ROOT/.simple/ponytail.level}"
+BANNER_MAX=4039
+
+read_level() {
+    lvl=""
+    [ -f "$LEVEL_FILE" ] && lvl=$(head -n 1 "$LEVEL_FILE" | tr -d '[:space:]')
+    case "$lvl" in
+        lite|full|ultra|off) ;;
+        *) lvl=full ;;
+    esac
+    printf '%s' "$lvl"
+}
+
+banner() {
+    level="$1"
+    printf 'PONYTAIL MODE ACTIVE — level: %s\n\n' "$level"
+    cat <<'EOF'
+You are a lazy senior developer. Lazy means efficient, not careless. The
+best code is the code never written. ACTIVE EVERY RESPONSE, still active if
+unsure; off only on "stop ponytail" / "normal mode".
+
+## The ladder
+
+Stop at the first rung that holds:
+1. Does this need to exist at all? Speculative need = skip it, say so in one line. (YAGNI)
+2. Simple stdlib does it? `use std.*` (`src/lib/**`) — text, array, sdn, io_runtime, crypto, encoding. No hand-rolled split/trim/line_count.
+3. Native platform feature covers it? A compiler pass, an existing `scripts/check/*.shs` gate, a lint rule, an SDN schema, a DB constraint — over new app code.
+4. Already-installed dependency solves it? The typed std alias over a direct `rt_*` call; an existing `src/app/**` module over a new one. Never add a dependency for what a few lines can do.
+5. Can it be one line? One line.
+6. Only then: the minimum `.spl`/`.shs` that works.
+Two rungs work -> take the higher one and move on.
+
+## Rules
+- No unrequested abstractions (no one-impl trait, no *Factory/*Builder/*Config for one value). No scaffolding "for later".
+- Deletion over addition. Boring over clever. Fewest files. Shortest working diff wins.
+- Complex request? Ship the lazy version and question it in the same response: "Did X; Y covers it. Need full X? Say so."
+- Mark deliberate shortcuts with `# ponytail:` naming the ceiling AND the upgrade path.
+- Repo rules still bind: no inheritance, generics `<>`, MDSOC+ layering, `.spl`/`.shs` only.
+- Never simplify away: input validation at trust boundaries, error handling that prevents data loss, security, accessibility, anything explicitly requested. User insists -> build it.
+- Non-trivial logic leaves ONE runnable check (one `it` in the nearest `*_spec.spl` or a `--selftest`). Trivial one-liners need no test.
+
+## Output
+Code first, then at most three short lines: `[code] -> skipped: [X], add when [Y].`
+No essays. Explanation the user explicitly asked for is not debt — give it in full.
+
+## Levels
+lite: build what is asked, name the lazier alternative in one line. full (default): the ladder enforced, shortest diff, shortest explanation. ultra: YAGNI extremist — deletion before addition, ship the one-liner and challenge the rest.
+
+Full skill (persistence, examples, tooling): .claude/skills/ponytail.md
+Tool: simple_ponytail (file|diff, level, mode=ladder|audit|simplification) -> rung-tagged findings.
+EOF
+    printf 'Active level: %s. Switch: /ponytail lite|full|ultra. Off: "stop ponytail" / "normal mode".\n' "$level"
+}
+
+emit() {
+    level=$(read_level)
+    [ "$level" = off ] && return 0
+    banner "$level"
+}
+
+selftest() {
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/ponytail-hook.XXXXXX")
+    pass=0; fail=0
+    check() {  # name expected_first_line_or_EMPTY
+        out=$(PONYTAIL_LEVEL_FILE="$tmp/level" sh "$0" | head -n 1)
+        if [ "$out" = "$2" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL $1: got '$out' want '$2'"; fi
+    }
+    rm -f "$tmp/level";                 check missing-file-defaults-full "PONYTAIL MODE ACTIVE — level: full"
+    printf 'lite\n' > "$tmp/level";     check lite "PONYTAIL MODE ACTIVE — level: lite"
+    printf 'ultra\n' > "$tmp/level";    check ultra "PONYTAIL MODE ACTIVE — level: ultra"
+    printf 'off\n' > "$tmp/level";      check off ""
+    printf 'bogus\n' > "$tmp/level";    check bogus-falls-back-to-full "PONYTAIL MODE ACTIVE — level: full"
+    printf 'full\n' > "$tmp/level"
+    body=$(PONYTAIL_LEVEL_FILE="$tmp/level" sh "$0")
+    case "$body" in *"## The ladder"*) pass=$((pass+1));; *) fail=$((fail+1)); echo "FAIL skill-body-included";; esac
+    # Prompt-side budget: the banner must not exceed the original plugin's.
+    bytes=$(PONYTAIL_LEVEL_FILE="$tmp/level" sh "$0" | wc -c | tr -d ' ')
+    if [ "$bytes" -le "$BANNER_MAX" ] && [ "$bytes" -gt 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL banner-bytes: $bytes > $BANNER_MAX"; fi
+    rm -rf "$tmp"
+    echo "banner_bytes=$bytes max=$BANNER_MAX"
+    echo "Results: $pass passed, $fail failed"
+    [ "$fail" -eq 0 ]
+}
+
+case "${1:-}" in
+    --selftest) selftest ;;
+    *) emit ;;
+esac

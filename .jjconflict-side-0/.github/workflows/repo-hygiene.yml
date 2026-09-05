@@ -1,0 +1,898 @@
+name: Repo Hygiene Gate
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # File-type hygiene content gate (forbidden .py/.sh, secrets, naming, staged
+  # root-guard). Kept in its own job: it is currently RED on pre-existing debt
+  # (tracked .py/.sh files that predate this workflow), so it must not gate the
+  # green idiom/structural ratchets below — a shared job would mask their
+  # per-gate pass/fail signal. Fixing that debt is a separate task.
+  repo-hygiene:
+    name: Repo Hygiene Regression Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Repo hygiene regression gate
+        run: |
+          sh scripts/check/check-repo-hygiene.shs
+
+  # Idiom / structural ratchet gates. Every gate here self-passes green on the
+  # current tree and ratchets: a NEW violation fails its step and this job. This
+  # is the authoritative, non-bypassable enforcement lane — jj bypasses the
+  # pre-commit git hook and build-lint routes the CLI lane to clippy, so CI is
+  # the only place these gates are guaranteed to run.
+  code-idiom-gates:
+    name: Code Idiom & Structural Ratchet Gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Most gates below hard-depend on ripgrep; install once for the job.
+      - name: Install ripgrep
+        run: |
+          command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
+
+      # Every gate step below carries `if: ${{ !cancelled() }}`.
+      #
+      # Without it, steps run in sequence and the FIRST red gate aborts the job,
+      # so every later gate reports "skipped" and its signal is invisible. That
+      # is not hypothetical: on 2026-08-01 the CPU hot-loop gate below was red on
+      # every push to main, and as a direct result the UI backend-isolation, TUI
+      # standalone-closure, workspace root-guard, guard-wiring and extern-report
+      # gates had NOT EXECUTED ONCE. The UI gate in particular had been failing
+      # since at least 2026-07-25 (23 unbaselined violations at 37cda4befdc) and
+      # nobody could see it -- CI masked it and jj bypasses the pre-commit hook.
+      #
+      # This is the same masking bug the repo-hygiene job above was split out to
+      # avoid; putting five gates in one sequential job reintroduced it one step
+      # further down. `!cancelled()` makes each gate report its own pass/fail
+      # while the job still fails if ANY gate fails -- enforcement is unchanged,
+      # only visibility improves. Do NOT replace this with continue-on-error,
+      # which would make the gates advisory.
+      #
+      # CPU-lane per-element-loop hot-path gate (design §6.1 / plan W2).
+      # Relocated here from the repo-hygiene job so it actually runs (that job
+      # aborted at its first step, leaving this gate dead). Command unchanged.
+      - name: CPU-lane hot-loop hot-path gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-cpu-hotloop-idiom.shs
+
+      # UI backend-isolation: apps/examples/UI-libs must call rendering facades,
+      # never declare/call rt_* backend externs or construct backend classes.
+      # Baseline-ratcheted (scripts/check/ui_backend_isolation_baseline.txt).
+      - name: UI backend-isolation ratchet gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-ui-backend-isolation.shs
+
+      # Standalone TUI import-closure: the generated TUI lane must route through
+      # the narrow app.ui.tui.screen facade and must not pull web/tauri/electron
+      # or a hosted runtime bundle into the standalone binary.
+      - name: TUI standalone-closure gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-tui-standalone-closure.shs
+
+      # Workspace root write guard: enforces the root-directory placement policy
+      # / FILE.md manifests across the tree (git + POSIX sh only, no rg needed).
+      - name: Workspace root write guard
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check-workspace-root-guard.shs
+
+      # Guard-wiring ratchet. A check script that no hook and no CI job runs is
+      # decoration: on 2026-08-01, 366 of 413 tracked shell guards were
+      # reachable from nothing at all. This gate fails when a guard is neither
+      # wired nor listed in scripts/check/guard_wiring_optout.txt with a reason,
+      # so adding a guard wires it automatically and SKIPPING one becomes the
+      # deliberate act that needs justification. It also fails when an installed
+      # .git/hooks entry is a copy rather than a symlink -- a copied hook goes
+      # stale silently, which is how a two-revisions-behind pre-push hook ran
+      # without any of that session's fail-open fixes.
+      # See doc/08_tracking/bug/check_script_wiring_orphans_2026-08-01.md.
+      - name: Guard-wiring ratchet gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-guard-wiring.shs
+
+      # Dangling `*_partN` facade re-export gate.
+      #
+      # Merge e274cd33719 rewrote ~21 facade files to `export use <name>_partN.*`
+      # naming modules that were never created -- the real split files live in
+      # sibling `_ClassName/` folders. A dangling re-export erases the facade's
+      # ENTIRE exported API downstream, surfacing far away as
+      # `hir: cannot infer field type ... struct 'ANY'` and
+      # `codegen: GlobalLoad: unresolved identifier`. It was the single largest
+      # cause of the SimpleOS kernel being unbuildable (B1), and nothing in the
+      # tree detected it: the failures name the victim modules, never the broken
+      # facade.
+      #
+      # Blocking, not advisory: pure text scan, no seed/compiler/hardware, runs
+      # in seconds, and measured GREEN on this tree
+      # (`PASS — 0 _partN re-export(s) across 9018 module(s)`).
+      # See doc/08_tracking/bug/simpleos_b1_merge_clobber_e274cd33719_2026-08-31.md.
+      - name: Dangling _partN re-export gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-no-dangling-reexports.shs
+
+      # JIT runtime-symbol manifest gate.
+      #
+      # The JIT symbol table is generated from a HAND-MAINTAINED list,
+      # RUNTIME_SYMBOL_NAMES in src/compiler_rust/common/src/runtime_symbols.rs.
+      # There is no scanner. A symbol codegen emits but the list omits is never
+      # registered, the JIT import fails to resolve, and the WHOLE module falls
+      # back to the interpreter -- correct, and ~1000x slower (rt_index_of took
+      # compute_styles from 369ms to over ten minutes, fixed in 5c75a1bbce0).
+      # Because de-JITted code stays CORRECT, nothing else catches this.
+      #
+      # Wired 2026-08-01 from guard_wiring_optout.txt. It was red on three
+      # symbols at the time (rt_array_at, rt_at, rt_mem_attr_set_owner); those
+      # were added to the manifest in the same change rather than baselined.
+      - name: JIT runtime-symbol manifest gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-jit-runtime-symbol-manifest.shs
+
+      # .spipe/spipe gitlink shape gate.
+      #
+      # Index/tree corruption class. When a submodule gitlink (mode 160000) is
+      # flattened into a tracked file tree, or a tracked tree collapses into a
+      # gitlink, the parent index silently changes shape and a clone gets the
+      # wrong content. main was wiped to near-zero twice in 24h on 2026-08-01
+      # through adjacent index-shape failures, so this class gets a gate.
+      # Runs in ~0s and needs nothing but git.
+      - name: spipe submodule gitlink shape gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-spipe-submodule-gitlinks.shs
+
+      # Lint-census classifier self-test.
+      #
+      # check-lint-census.shs exists because `simple lint` can DIE mid-file with
+      # no summary line, and a census that scores by summary lines reads that
+      # crash as success -- a lint census was retracted on 2026-08-01 for
+      # exactly that vacuous oracle. The census itself needs a built bin/simple
+      # and explicit targets so it cannot gate here, but its classifier can:
+      # --self-test drives 11 synthetic runs (clean, not-linted, arena-OOB
+      # crash, crash-with-rc-0, timeout, SIGKILL, missing log) through the real
+      # classify_run and asserts each verdict. If the classifier ever regresses
+      # to scoring a crash as LINTED, this step goes red.
+      - name: Lint-census classifier self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-lint-census.shs --self-test
+
+      # Runnable-probe gate, scorer self-test.
+      #
+      # A *_spec.spl CANNOT execute under the Cranelift JIT -- describe/it/expect
+      # are Rust interpreter intrinsics and a module with no `fn main` de-JITs
+      # regardless -- so a spec pinning engine-dependent behaviour is green by
+      # construction against a JIT-only defect. The repo's answer is the runnable
+      # PROBE (test/**/*_jit_probe.spl), a self-scoring program run once per
+      # engine. On 2026-08-02 an audit found no hook and no workflow executed any
+      # of them: the only cover for that whole defect class asserted nothing.
+      #
+      # The full gate needs a built Simple binary, so it runs in the Core + MCP
+      # Dev Pipeline where one exists. What gates HERE is its scorer and its
+      # fail-closed paths: --self-test drives 25 synthetic assertions (both
+      # verdict shapes, unscoreable output, timeout/signal kill, exit-code
+      # independence proved in both directions, the two discovery branches, and
+      # the four ERROR exits for zero probes / short list / unknown engine /
+      # missing binary) through the real score_verdict and discover_probes. It
+      # was checked against 14 branch sabotages and goes red on every one. If the
+      # scorer ever regresses to reading a FAIL as a PASS, this step goes red.
+      - name: Runnable-probe scorer self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-runnable-probes.shs --self-test
+
+      # Engine2D Vulkan/C parity comparator, self-test only.
+      #
+      # The comparator itself needs two rendered outputs to diff
+      # (--compare --simple FILE --c FILE) and a vulkan-feature seed binary to
+      # produce them, neither of which a hosted runner has; run bare it exits 1
+      # with its usage line. What gates HERE is the comparator's own scoring,
+      # driven by --self-test over synthetic fixtures. Measured 2026-09-05 on a
+      # host with no vulkan seed and no SDK: rc=0,
+      # "engine2d_vulkan_c_parity_selftest=pass". If the comparator ever
+      # regresses to reading a mismatch as parity, this step goes red.
+      - name: Engine2D Vulkan/C parity comparator self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-engine2d-vulkan-c-parity.shs --self-test
+
+      # Unregistered-extern gate, REPORT-ONLY for now.
+      #
+      # An @extern symbol with no registration does not fail to link: depending
+      # on lane it returns a silent nil/0 or NULL-jumps. This has shipped real
+      # wrong answers (b9ae3d91c07). The guard was landed and hardened on
+      # 2026-08-01 and was wired into NOTHING -- it is the case that motivated
+      # the wiring ratchet above.
+      #
+      # It runs WITHOUT --strict deliberately. --strict currently exits 1 at
+      # ~2,377 unregistered symbols; that backlog is a program needing an owner,
+      # not something to be silenced. Report-only makes the number visible in
+      # every run so it can be driven down. When it reaches zero, add --strict
+      # here. Do NOT add an allowlist and do NOT weaken the guard's vacuity
+      # bound or self-tests to shrink the number.
+      - name: Unregistered-extern report (report-only, not yet enforcing)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-extern-registration.shs
+
+      # Crypto verify/sign symbol collisions. The seed interpreter's function
+      # registry is FLAT and GLOBAL, so two modules defining the same verifier
+      # name with the SAME signature collide silently -- one wins by module
+      # load order, with no diagnostic and no symptom saying which. On
+      # 2026-08-02 this was proved to break TLS 1.3 certificate Ed25519
+      # verification: importing ANY symbol from signature_sffi registers all of
+      # that module's functions and replaced the explicitly-imported pure
+      # verifier, so a valid RFC 8032 signature verified as FALSE.
+      #
+      # This one DOES enforce (exit 1). Five known pure-vs-native collisions
+      # are recorded in crypto_verify_symbol_collisions_baseline.txt so the
+      # gate fails on anything NEW without being permanently red on debt it did
+      # not cause. That baseline is a ratchet: it may only ever shrink. Do NOT
+      # add a line to it to make a new collision pass.
+      - name: Crypto verify symbol collision gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-crypto-verify-symbol-collisions.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 1 (2026-08-02).
+      #
+      # These four guards were the entire set that check-guard-wiring.shs
+      # reported as unwired AND unexcused at 66974acc (7 reported; the other
+      # three need a built bin/simple or a Stage-4 corpus and cannot run in
+      # this job). They are pure textual/structural checks -- sh, grep, find,
+      # awk, and rg which this job already installs -- so there was never a
+      # capability reason for them to sit outside CI.
+      #
+      # Each was verified non-vacuous by sabotaging the IMPLEMENTATION it
+      # guards and confirming it goes red; see the wiring batch commit body.
+      # ---------------------------------------------------------------------
+
+      # Memory deallocation ownership: every arena tier must reach its owning
+      # free operation and drop its backing reference, and the hosted/native/
+      # SimpleOS free families must keep their shared native owner. A tier that
+      # allocates but never reaches sys_free leaks silently -- nothing else in
+      # the tree tests that the release path is CONNECTED rather than present.
+      - name: Memory deallocation ownership gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-memory-deallocation-ownership.shs
+
+      # rt_free ABI: pure-Simple declarations and calls must pass exactly ONE
+      # pointer. rt_free is defined in five places (native runtime, hosted
+      # runtime, SimpleOS libc, the Cranelift RuntimeFuncSpec table, and the
+      # Rust SFFI shim); an arity drift in any one of them is a silent
+      # miscompile, not a link error, because -z muldefs makes duplicate C
+      # symbols first-definition-wins.
+      - name: rt_free ABI consistency gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-rt-free-abi.shs
+
+      # Stage-4 generated-facade hint-scan fast path: the exact-marker guard
+      # must precede the empty return, which must precede the line split, and
+      # the marker test must keep the generator's COMPLETE prefix
+      # ("# Re-exported from ", trailing space included). Widening it to
+      # "# Re-exported" admits ordinary prose comments into the facade scan.
+      - name: Module-surface hint-scan fast-path gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-module-surface-hint-scan-fast-path.shs
+
+      # Bootstrap progress watcher: live / exited / stale-PID coverage.
+      #
+      # Wiring this one was a truth reveal. It had rotted while orphaned: its
+      # live-sample assertion ended in `main_log_bytes=3$`, anchoring on that
+      # field being LAST on the line, and the watcher has since gained
+      # phase/unit_kind/tasks_* fields. The guard failed against a watcher that
+      # was working correctly. Fixed by matching main_log_bytes as a whole
+      # field instead of by position -- exactness preserved, ordering coupling
+      # removed. This is precisely the decay an unwired guard accumulates.
+      - name: Bootstrap progress-watcher coverage gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-bootstrap-progress-watch.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 2 (2026-08-06).
+      #
+      # Found by auditing guard_wiring_optout.txt for FALSE exemptions, after
+      # line 22 (the core-C capsule gate) was proved to claim "needs QEMU, an
+      # FPGA or a physical dev board" while in fact needing only cc/ar/nm --
+      # and to have been RED at origin/main the whole time nothing ran it.
+      # See doc/08_tracking/bug/guard_wiring_optout_false_exemptions_2026-08-06.md.
+      # ---------------------------------------------------------------------
+
+      # Reserved keywords used as binding identifiers. The Rust seed parser
+      # accepts `val match = ...` where the self-hosted parser rejects it, so
+      # such code lands clean and detonates hours later at bootstrap Stage 4
+      # attributed to an innocent file (3 stdlib files did exactly that on
+      # 2026-07-27). Needs only git and grep; runs in ~3s.
+      #
+      # Its opt-out reason was honest -- "prints a bare OK with no count, which
+      # violates the guard contract" -- and named its own precondition. The
+      # count (plus a >=500-file vacuity floor and an ERROR exit) is added in
+      # this same change, so the entry is removed and the gate is wired here.
+      # Verified non-vacuous: with a `val match = 1` .spl staged into a scratch
+      # index it reports "FAIL — 34480 .spl file(s) checked, 1 violation(s)"
+      # and exits 1.
+      - name: Keyword-identifier binding gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-keyword-identifier-bindings.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 3 (2026-08-06).
+      #
+      # From triaging the 127 "not yet triaged" guard_wiring_optout entries by
+      # RUNNING all of them. These four LLM-runtime/finetune setup-contract
+      # gates are pure-source: they were re-run from a pristine
+      # `git archive origin/main` tree under `env -i PATH=/usr/bin:/bin
+      # HOME=/nonexistent` and passed there, which is the only evidence that
+      # supports wiring (a stripped env alone still sees working-tree build
+      # artifacts -- see the batch-3 method note in the bug doc).
+      #
+      # Each already reported checked_count=N; this change adds the missing
+      # half of the guard contract -- a `PASS - <n> contract case(s) checked`
+      # verdict plus a vacuity floor that exits 2 with `ERROR - nothing was
+      # checked`. Each floor was PROVED live by neutering the counter in a
+      # throwaway tree: all four then exit 2 with checked_count=0.
+      #   slang 41 case(s) / torch 33 / finetune 34 / prereq-doctor 10
+      # See doc/08_tracking/bug/guard_wiring_optout_false_exemptions_2026-08-06.md.
+      # ---------------------------------------------------------------------
+      - name: LLM runtime and finetune setup-contract gates
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-llm-runtime-slang-setup-contract.shs
+          sh scripts/check/check-llm-runtime-torch-setup-contract.shs
+          sh scripts/check/check-llm-finetune-setup-contract.shs
+          sh scripts/check/check-llm-strict-host-prereq-doctor-contract.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 4 (2026-08-23).
+      #
+      # Three guards landed by today's lanes were reachable from nothing, which
+      # made check-guard-wiring.shs itself red and blocked EVERY push -- lanes
+      # were reaching for `--no-verify`, which silently disables all the other
+      # gates too. That is a strictly worse failure than the three guards being
+      # unwired, so they are wired here by their honest state: green gates
+      # block, red gates land advisory and are named as such.
+      # ---------------------------------------------------------------------
+
+      # Engine-receipt guard, SCORER SELF-TEST only -- this half is green and
+      # therefore blocks.
+      #
+      # The full gate needs a built Simple binary and is honestly RED (verified
+      # 2026-08-23 against a real seed: no [engine-receipt] line is emitted for
+      # either fixture, the documented pre-fix state), so it is wired ADVISORY
+      # in the Core + MCP Dev Pipeline where a binary exists. What gates HERE is
+      # the part that needs no binary: --selftest drives 8 assertions through
+      # the real receipt parser and proves it DISCRIMINATES -- a receipt saying
+      # the same thing for both halves of the pair must FAIL. If that parser
+      # ever regresses to accepting a hardcoded "jit", this step goes red.
+      #
+      # Same split as the runnable-probe scorer self-test above, for the same
+      # reason: wire the falsifiable half now rather than wire nothing.
+      - name: Engine-receipt discrimination scorer self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-sspec-lane-shape.shs
+
+      # PID/clock-keyed build-artifact ratchet.
+      #
+      # Neighbour sweep of the C-runtime recompile (71347b901b6): keying a
+      # DURABLE build artifact by pid, wall-clock, or randomness makes reuse
+      # structurally impossible -- no later run can ever name the path, so no
+      # cache policy can rescue it. That defect cost 102,564 ms of a 108,003 ms
+      # hello-world build and was invisible to every other gate, because a
+      # pid-keyed path is perfectly well-formed source.
+      #
+      # Blocking, not advisory: measured green on this tree
+      # (PASS -- 32 candidate(s) checked, 0 new, 0 stale), needs nothing but
+      # grep/find/comm, and runs in seconds. Fails on a NEW offender and on a
+      # STALE baseline entry, because a baseline that no longer describes the
+      # tree is how a ratchet silently stops ratcheting.
+      - name: PID/clock-keyed build artifact ratchet
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-no-pid-keyed-build-artifacts.shs
+
+  # Advisory gates: honestly RED on the current tree.
+  #
+  # Separate job, exactly like the repo-hygiene job at the top of this file and
+  # for the same reason: a gate that is red on pre-existing debt must not mask
+  # the per-gate signal of the green ratchets in code-idiom-gates. The job is
+  # marked continue-on-error so it reports its own status without blocking the
+  # workflow -- the guards themselves are UNCHANGED and unweakened, and none of
+  # them is opted out. Promote a gate out of this job into code-idiom-gates the
+  # day the underlying defect is fixed and it goes green.
+
+      # Freestanding RuntimeString.len ABI.
+      #
+      # `.len()` never calls rt_len: codegen inlines a LOAD OF i64 AT +8 with
+      # payload at +16. A freestanding runtime declaring `uint32_t len` reads
+      # correct in its own C accessors (so substring/equality/trim/chars all
+      # look fine) while `.len()` alone returns length | first-4-payload-bytes
+      # -- 0x6F72227B_0000000F for a 15-byte string. Unbounded scan loops, no
+      # trap. Fixed 2026-07-12 for x64, silently reverted by tree wipe
+      # 6f86ff32a7d; riscv64/arm64 were never fixed. Host-only, no boot needed.
+      - name: Freestanding string .len() ABI
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-string-len-abi.shs
+
+      # Freestanding tagged-value invariants (siblings of the .len() ABI gate
+      # above, and blocking for the same reason): all four are pure static
+      # scans of tracked C/Simple source, need nothing but a checkout, run in
+      # under a second, and are GREEN on this tree. Verified 2026-09-01:
+      # 9/0, 6/0, 3/0 and 5/0 respectively. They were previously reachable
+      # from no hook and no workflow -- decoration, per check-guard-wiring.
+      - name: Freestanding byte-array slot tags
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-byte-array-slot-tags.shs
+
+      - name: Freestanding rt_value int tags
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-rt-value-int-tags.shs
+
+      - name: Freestanding dict arms in every definition
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-dict-arms-in-every-definition.shs
+
+      - name: Freestanding dict write path
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-dict-write-path.shs
+
+      # Derived syscall-shim linker aliases.
+      #
+      # Hand-maintained `spl_handle_X = kernel__abi__syscall_shim__spl_handle_X`
+      # tables are correct only for the exact entry and seed they were generated
+      # against (mangling carries an entry-specific prefix), and they broke the
+      # x86_64 link outright once the shims were split into sub-modules. The
+      # static scan is host-only and runs in seconds; it fails if any such table
+      # reappears or if the 128MB load base regresses.
+      - name: SimpleOS x86_64 linker aliases are derived, not hand-maintained
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-simpleos-x86-64-linker-alias-derived.shs
+  advisory-gates:
+    name: Advisory Gates (honestly RED, not yet blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      # fetch-depth: 0 -- the dropped-declaration gate below needs a real
+      # merge-base against origin/main, which a shallow clone cannot compute.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Dropped-declaration gate (the mechanical form of the "diff BOTH
+      # directions before overwriting" rule in .claude/rules/vcs.md).
+      #
+      # Repairing a merge clobber means restoring a file from an older
+      # revision, and an older revision can legitimately lack work the current
+      # tree added. This guard fails closed when a restore silently drops a
+      # top-level declaration the base had. It caught 4 dropped cpio helpers
+      # during the B1 restore.
+      #
+      # ADVISORY, deliberately, and this is the honest classification rather
+      # than a way to dodge a red:
+      #   * By contract it exits 2 ("ERROR — nothing was checked") when no .spl
+      #     file changed against the base -- true of most pushes -- so as a
+      #     blocking gate it would fail builds for having nothing to say.
+      #   * It compares the WORKING COPY against a base, so on any PR that
+      #     legitimately DELETES a declaration it reports FAIL. That is correct
+      #     for a restore review and wrong for a merge gate.
+      # It is a restore-time reviewer's guard. Running it here publishes its
+      # verdict on every PR without turning a legitimate deletion into a
+      # blocked merge. The guard itself is UNCHANGED and is not opted out.
+      # Base is the merge-base, not origin/main directly: a plain diff against
+      # origin/main reports every declaration the branch is merely BEHIND on as
+      # a "drop" (measured: 18 such false positives at 91b6b9f28dd).
+      - name: Dropped-declaration gate (advisory; ERRORs by contract when nothing changed)
+        if: ${{ !cancelled() }}
+        run: |
+          git fetch --no-tags origin main || true
+          base=$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)
+          echo "base=$base"
+          sh scripts/check/check-no-decls-dropped.shs "$base"
+
+      # Test-summary reconciliation.
+      #
+      # doc/08_tracking/test/test_result.md was found reading Total 770 /
+      # Passed 0 / Failed 0 -- a tracker that knows about 770 tests and holds a
+      # verdict for none of them, published as if it were a report. Every other
+      # guard was green over it because they all check trees, ranges or source;
+      # none of them ever read the numbers.
+      #
+      # ADVISORY because it is RED right now, on exactly that incident:
+      # measured 2026-08-23 at origin/main it reports
+      #   FAIL — 9 metric(s) checked: 770 test(s) recorded, 0 with a verdict.
+      # Needs nothing but grep and runs in milliseconds. Promote to blocking in
+      # code-idiom-gates once the summary reconciles.
+      - name: Test-summary reconciliation gate (advisory, currently RED)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-test-summary-reconciles.shs
+
+      # ---------------------------------------------------------------------
+      # Modern SSpec conversions must not be clobbered back to the legacy
+      # `fn test_*` + print("PASS") shape.
+      #
+      # On 2026-08-24 three specs in the smux/LLM Caret lane were found
+      # reverted while .spipe/smux_caret_sspec_quality/state.md still recorded
+      # every AC as DONE. smux_system_spec.spl was RED under the zero-examples
+      # gate (executed=0, dropped=1) for weeks.
+      #
+      # The lane already owned a deep executable check that detected all three
+      # correctly — nothing ever ran it. That is the entire defect, and it is
+      # why this belongs in CI rather than in another local script: the verdict
+      # existed and no one read it. This gate is static (no Simple runner, no
+      # bootstrap), so it costs a grep pass on a bare checkout.
+      # See doc/09_report/caret_smux_slang_agent_manager_gap_audit_2026-08-24.md
+      # ---------------------------------------------------------------------
+
+      # ---------------------------------------------------------------------
+      # Guards that existed but nothing invoked (2026-08-30).
+      #
+      # check-guard-wiring.shs reported 191 unwired guards. Triage of every one
+      # (reading the script, not guessing from its name) split them into: 14
+      # sourced helper libraries under scripts/check/lib/ that are not guards at
+      # all and are now excluded by the enumerator; 74 that genuinely cannot run
+      # on a hosted runner, each given a written opt-out reason; 11 that could
+      # not be honestly classified and are baselined pending classification; and
+      # the 92 below, which need nothing but a checkout and standard host tools.
+      #
+      # Judging by name would have been wrong in BOTH directions: several
+      # QEMU-named guards boot no VM (check-arm64-qemu-nonce-slot.shs merely
+      # compiles a C fixture with cc), while several innocuous *-policy gates
+      # need an admitted Stage-3 compiler. The real discriminator is whether a
+      # guard sources lib/bootstrap-stage3-provenance.shs or invokes
+      # $SIMPLE_BIN/native-build. clang, nm, readelf, objdump and llvm-cov are
+      # all available here and are NOT blockers.
+      #
+      # This step runs them for real and fails if any fail. It lives in the
+      # advisory job, which is not a required check, so a red here reports the
+      # truth without blocking a merge -- these guards have never run in CI and
+      # some are expected to be honestly red. Promote to code-idiom-gates
+      # individually as each goes green.
+      # ---------------------------------------------------------------------
+      - name: Newly wired guards (advisory, first CI run)
+        if: ${{ !cancelled() }}
+        run: |
+          set -u
+          # ripgrep and lld are absent from the hosted runner image (first CI
+          # run: "rg: not found", "ld.lld: not found" -> rc=127 for 3 guards).
+          # They are one apt line, so install them and keep those guards
+          # gating rather than writing opt-out lines for them. Non-fatal: if
+          # this fails the guards still report their own rc=127 loudly.
+          sudo apt-get install -y -qq ripgrep lld >/dev/null 2>&1 || true
+          command -v ld.lld >/dev/null 2>&1 || ln -sf "$(command -v lld 2>/dev/null || echo /bin/false)" /usr/local/bin/ld.lld 2>/dev/null || true
+          failed=0
+          ran=0
+          # Resolve a guard by BASENAME to its actual tracked path. The old
+          # helper hardcoded "scripts/check/$1", duplicating the location at
+          # every call site, so a guard living anywhere else (e.g.
+          # scripts/audit/) was mis-wired by construction and surfaced as an
+          # indistinguishable rc=2 "cannot open". Resolution is over
+          # `git ls-files` so an untracked stray cannot satisfy a wiring claim.
+          # A name that resolves to nothing, or to more than one path, is a
+          # WIRING ERROR reported as such -- never as a guard that ran and
+          # failed. A name containing "/" is taken as an explicit repo-relative
+          # path; that is reserved for disambiguating a basename that really
+          # does exist in two directories as two DIFFERENT scripts.
+          guard_index=$(git ls-files 'scripts/*' | grep -E '\.shs$' || true)
+          resolve_guard() {
+            printf '%s\n' "$guard_index" | awk -v n="$1" -F/ '$NF == n'
+          }
+          run_guard() {
+            name=$1
+            shift
+            ran=$((ran + 1))
+            printf '\n--- %s ---\n' "$name"
+            case $name in
+              */*) matches=$name
+                   [ -f "$matches" ] || matches= ;;
+              *)   matches=$(resolve_guard "$name") ;;
+            esac
+            count=$(printf '%s' "$matches" | grep -c . || true)
+            if [ "$count" -eq 0 ]; then
+              echo "  [WIRING ERROR] wiring error: no such guard $name"
+              failed=$((failed + 1))
+              return
+            fi
+            if [ "$count" -gt 1 ]; then
+              echo "  [WIRING ERROR] wiring error: ambiguous guard $name: $(printf '%s' "$matches" | tr '\n' ' ')"
+              failed=$((failed + 1))
+              return
+            fi
+            if timeout 300 sh "$matches" "$@"; then
+              echo "  [ok] $name"
+            else
+              rc=$?
+              echo "  [FAIL rc=$rc] $name"
+              failed=$((failed + 1))
+            fi
+          }
+          run_guard check-arm32-fsexec-loan-v16.shs
+          run_guard check-arm32-qemu-real-exec-markers.shs
+          run_guard check-arm32-real-fsexec-wiring-v16.shs
+          run_guard check-arm32-supervisor-resume-v16.shs
+          run_guard check-arm64-blocking-user-entry-assembly.shs
+          run_guard check-arm64-elf-map-owner.shs
+          run_guard check-arm64-fault-operands.shs
+          run_guard check-arm64-fsexec-probe-abi.shs
+          run_guard check-arm64-handoff-preflight-receipt.shs
+          run_guard check-arm64-image-map-receipt.shs
+          run_guard check-arm64-qemu-nonce-slot.shs
+          run_guard check-arm64-svc-translation-window.shs
+          run_guard check-arm64-user-as-owner.shs
+          run_guard check-arm64-user-trampoline-alignment.shs
+          run_guard check-arm-fs-route-receipt.shs
+          run_guard check-bootstrap-link-libraries-capability.shs
+          run_guard check-bootstrap-resume-stage3-progress.shs
+          run_guard check-bootstrap-stage3-memory-admission.shs
+          # Wired 2026-09-03 (guard-wiring ratchet, 8 NEW orphans triaged by
+          # READING each script and RUNNING it in a detached worktree at
+          # origin/main). Pure grep/awk over C source; verified locally:
+          # "PASS - 6 definition(s) checked, every bump-allocator NULL path
+          # reports exhaustion ...". No compiler, QEMU, GPU or board needed.
+          run_guard check-bump-heap-exhaustion-reported.shs
+          run_guard check-collect-sosix-qemu-evidence.shs
+          run_guard check-cortex-m-access-policy-source-contract.shs
+          run_guard check-cosmos-ftl-nfc-backend-policy-source-c.shs
+          run_guard check-cosmos-ftl-policy-source-c.shs
+          run_guard check-cosmos-nfc-ecc-bridge-coverage.shs
+          run_guard check-cosmos-nfc-ecc-link-wiring.shs
+          run_guard check-critical-alloc-closure-source-contract.shs
+          run_guard check-doc06-spec-layout-migration.shs
+          run_guard check-driver-entry-closure-set-mutation.shs
+          run_guard check-entry-closure-relative-dedup.shs
+          run_guard check-entry-closure-streaming-lines-memory.shs
+          run_guard check-env-runtime-abi.shs
+          run_guard check-focused-failed-shard-harness.shs
+          run_guard check-freebsd-llvm-23-1-provider-contract.shs
+          run_guard check-freestanding-packed-auth-storage.shs
+          run_guard check-freestanding-value-registry-v1.shs
+          run_guard check-gpu-provider-dynload-registry.shs
+          run_guard check-gpu-provider-unload-load-race.shs
+          # Pure /usr/bin/grep census over tracked guard scripts; verified
+          # locally: "PASS - 71 file(s) checked, 0 hardcoded".
+          run_guard check-guard-binary-injectable.shs
+          # Runs the --selftest of three sibling guards and asserts none of
+          # them moves the invoking repo's HEAD or status. SKIP_EXPENSIVE=1
+          # excludes check-seed-builds-push.shs, whose selftest compiles cargo
+          # fixtures (minutes); the guard refuses to count a skipped script as
+          # checked, so the verdict stays non-vacuous. Verified locally with
+          # that env: "PASS - 2 guard(s) checked, 0 mutated the invoking
+          # repo's HEAD or status". Set/unset around the call rather than as a
+          # command prefix so the value cannot leak into later run_guard rows.
+          SKIP_EXPENSIVE=1
+          export SKIP_EXPENSIVE
+          run_guard check-guard-selftest-repo-isolation.shs
+          unset SKIP_EXPENSIVE
+          run_guard check-hal-device-provider-parity-v1.shs
+          run_guard check-hal-process-socket-lifecycle-v4.shs
+          run_guard check-hal-provider-launcher-v1.shs
+          run_guard check-hal-provider-workers-v1.shs
+          run_guard check-hal-pure-worker-noalloc-source.shs
+          run_guard check-hal-runtime-buffer-dispatch-v3.shs
+          run_guard check-hal-sealed-buffer-v3.shs
+          run_guard check-hal-sealed-clock-v2.shs
+          run_guard check-hosted-confined-file.shs
+          run_guard check-llvm-23-1-provider-builder-contract.shs
+          run_guard check-mcdc-aspect-object-converter.shs
+          run_guard check-mcdc-native-runtime-perf.shs
+          run_guard check-native-build-focused-entry-scope.shs
+          run_guard check-native-build-shard-admission.shs
+          # Pure text scan (no compiler, no runtime). Wired here rather than
+          # opted out because it CAN run on a hosted runner -- it is red for a
+          # REAL finding, not an environment gap: "FAIL - 48991 file(s)
+          # examined, 1729 offender file(s), 6642 hit(s); no baseline exists
+          # (run --generate-baseline once, reviewed)". This job is
+          # continue-on-error precisely so an honestly-red guard reports
+          # instead of blocking; generating that baseline needs a reviewed
+          # pass by an owner and is NOT done here.
+          run_guard check-no-windows-style-paths.shs
+          run_guard check-pg-dispatch-port-prototype.shs
+          run_guard check-pg-scalar-adapter-contract.shs
+          run_guard check-pg-scalar-port-readiness.shs
+          run_guard check-pg-worker-scalar-descriptor.shs
+          run_guard check-prepush-no-recursion.shs
+          run_guard check-prepare-sosix-qemu-linux-diagnostic-blocked-bundles.shs
+          run_guard check-release-perf-baseline.shs --self-test
+          run_guard check-release-version-consistency.shs
+          run_guard check-run-simpleos-qemu-guest-evidence.shs
+          run_guard check-runtime-simd-utf8-native.shs
+          run_guard check-rust-bootstrap-llvm-isolation.shs
+          run_guard check-rv32-privilege-transition-abi.shs
+          run_guard check-rv32-real-fs-exec-trap.shs
+          run_guard check-rv32-token-auth-registry.shs
+          run_guard check-rv32-token-siphash-owner.shs
+          run_guard check-rv64-real-fs-exec-wiring.shs
+          run_guard check-simple-freebsd-media.shs
+          run_guard check-prepare-qemu-nonce-media.shs
+          run_guard check-simpleos-arm64-fs-exec-elf.shs
+          run_guard check-simpleos-arm64-llvm23-provider-contract.shs
+          run_guard check-simpleos-posix-ext-positioned-io.shs
+          run_guard check-simpleos-x86-32-user-elf.shs
+          run_guard check-simple-qemu-host-admission.shs
+          run_guard check-simple-qemu-settings.shs
+          run_guard check-sosix-fs-registered-buffer-client-v1.shs
+          run_guard check-sosix-positioned-token-owner.shs
+          run_guard check-sosix-qemu-native-pass-powershell-parity.shs
+          run_guard check-spec-vacuity.shs
+          run_guard check-streaming-source-owner-reclaim-model.shs
+          run_guard check-thread-unsafe-bootstrap-boundaries.shs
+          run_guard check-simpleos-guest-fs-ls-contract.shs --self-test
+          run_guard mcdc-hal-migration-gate.shs --self-test
+          run_guard check-typed-text-bootstrap-provider.shs
+          run_guard check-unsafe-capability-metadata-ownership.shs
+          run_guard check-web-server-request-port-evidence.shs
+          run_guard check-web-tls-hosted-abi-provider.shs
+          run_guard check-x86-32-packed-token-publication.shs
+          run_guard check-x86-64-qemu-nonce-slot.shs
+          # Ambiguous basename: scripts/audit/ and scripts/check/ hold two
+          # DIFFERENT scripts of this name. Pinned to the one the first CI
+          # run actually executed (rc=1, a genuine finding).
+          run_guard scripts/check/rt-unused-declaration-census.shs
+          run_guard sffi-provider-admission-handoff-contract.shs
+          run_guard test-mcdc-performance-gate.shs
+          run_guard test-riscv-hal-migration-evidence-contract.shs
+          # Wired 2026-09-01 to clear check-guard-wiring's NEW-unwired list.
+          # All six are static, source-only checks (no QEMU, no built artifact,
+          # no bootstrapped compiler) and each was run by hand first:
+          #   check-freestanding-byte-array-slot-tags  PASS — 9 definition(s) checked, 0 untagged
+          #   check-freestanding-dict-arms-...         PASS — 6 definition(s) checked, 0 missing a dict arm
+          #   check-freestanding-dict-write-path       PASS — 3 runtime(s) checked, 0 with a broken dict write path
+          #   check-freestanding-rt-value-int-tags     PASS — 5 definition(s) checked, 0 untagged
+          #   check-prepush-no-recursion               PASS — 3 fixture(s) checked, 0 recursion
+          #   check-script-non-vacuity                 PASS — 1078 script(s) checked, 0 new, 0 stale
+          # They land in the ADVISORY job, not code-idiom-gates, because that
+          # job is a required check and none of the six has a CI green on
+          # record yet. Promote each into code-idiom-gates once it is observed
+          # green here -- that is this job's documented purpose.
+          run_guard check-freestanding-byte-array-slot-tags.shs
+          run_guard check-freestanding-dict-arms-in-every-definition.shs
+          run_guard check-freestanding-dict-write-path.shs
+          run_guard check-freestanding-rt-value-int-tags.shs
+          run_guard check-prepush-no-recursion.shs
+          run_guard check-script-non-vacuity.shs
+          echo ""
+          echo "newly_wired_guards_run=$ran"
+          echo "newly_wired_guards_failed=$failed"
+          if [ "$failed" -gt 0 ]; then
+            echo "ADVISORY FAIL — $failed of $ran newly wired guard(s) failed."
+            exit 1
+          fi
+          echo "PASS — all $ran newly wired guard(s) passed."
+
+      - name: Modern SSpec lane shape gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-sspec-lane-shape.shs
+
+      # SimpleOS WM host-Vulkan pixel evidence.
+      #
+      # In-guest Vulkan does NOT exist: VulkanCompositorBackend.is_available()
+      # is unconditionally false and every rt_vulkan_* is an ABSENT() stub in
+      # the freestanding build. What exists is a guest->host ivshmem offload
+      # to a real host Vulkan daemon. This gate captures a real framebuffer and
+      # labels renderer=host-vulkan ONLY on the guest receipts AND the host
+      # receipt together, because gui_entry_desktop.spl passes
+      # backend_required: false and the WM silently falls back to CPU -- a
+      # screenshot alone proves nothing.
+      #
+      # ADVISORY because it is honestly RED: the host daemon does not link
+      # (53 tree-wide undefined rt_* symbols). The gate ERRORs at that
+      # precondition rather than mislabelling a CPU frame, which is why no
+      # renderer=host-vulkan claim exists anywhere. Promote to blocking once
+      # the daemon builds.
+      - name: SimpleOS WM host-Vulkan pixel evidence (advisory, daemon-blocked)
+        run: sh scripts/check/check-simpleos-x86-64-wm-host-vulkan-pixel-evidence.shs || true
+      # SimpleOS x86_64 hello world in-guest, under real OVMF pflash firmware
+      # (GRUB-EFI -> multiboot; never -kernel, never isa-debug-exit -- the gate
+      # self-checks the assembled QEMU argv). It also carries a call-path stub
+      # guard that fails closed if any function on this lane was stub-fallbacked;
+      # that guard caught _text_z_size silently becoming a 0-returning stub and
+      # corrupting every ring-3 argv frame.
+      #
+      # ADVISORY because it is honestly RED at L6/L7: rungs L1-L5 pass (GRUB
+      # handoff, kernel _start, NVMe online, the guest reading its own program
+      # off its own FAT32 volume, ring-3 entry with the ELF admitted), then the
+      # iretq into CPL3 triple-faults. The interpreter row is RED separately --
+      # no in-guest Simple interpreter binary exists in this tree. Promote to
+      # blocking once the program prints its own output.
+      - name: SimpleOS x86_64 hello world in-guest (advisory, L6/L7 red)
+        run: sh scripts/check/check-simpleos-hello-world-in-guest-ovmf.shs || true
+
+      # SimpleOS VFS server round-trip: proves a server is genuinely RUNNING
+      # via a filesystem round-trip, not by a banner or a path existing. A
+      # per-run nonce is minted into generated source, checked across 7
+      # nonce-anchored serial rungs AND independently host-side by finding the
+      # nonce bytes physically present in the raw NVMe image. Its selftest
+      # includes the case that matters: server NOT running but the path exists
+      # carrying a stale nonce must FAIL.
+      #
+      # ADVISORY because it is honestly RED: the kernel does not link (both
+      # linker scripts assign 65 syscall-shim aliases through a pre-split
+      # prefix that no longer matches the emitted symbols). No VM boots, so the
+      # gate reports ERROR rather than inventing a round-trip. Promote once the
+      # weak-stub emission gap is closed.
+      - name: SimpleOS VFS server round-trip (advisory, link-blocked)
+        run: sh scripts/check/check-simpleos-vfs-server-roundtrip-ovmf.shs || true
+
+      # SimpleOS aarch64 in-guest toolchain components (devtool/caret/testrun/mcp)
+      # under EDK2/AAVMF real firmware. Each row demands a real FUNCTIONAL
+      # round-trip, not a banner -- the selftest includes a banner-only
+      # must-FAIL. devtool is genuinely GREEN (the real lint rule discriminates
+      # in both directions in-guest); caret and testrun run to completion but
+      # return wrong text results, and mcp does not link (rt_closure_new).
+      #
+      # ADVISORY because 1 of 4 rows passes. Promote as rows go green.
+      - name: SimpleOS aarch64 in-guest components (advisory, 1 of 4 green)
+        run: sh scripts/check/check-simpleos-aarch64-components-in-guest-efi.shs || true
+
+      # SimpleOS riscv64 interpreter payload invariants.
+      #
+      # Checks the built guest interpreter is a statically linked RISC-V ELF64
+      # carrying DEFINED interpret_hir_module + simpleos_interpret_file with no
+      # strong undefined symbols. It is explicitly NOT an in-guest execution
+      # claim -- the in-guest interpreter row stays RED until riscv64 has a boot
+      # lane that mounts the guest FS and execs a U-mode ELF.
+      #
+      # ADVISORY: ERRORs when no payload is present, which is the normal state
+      # on a fresh checkout (correct fail-closed behaviour, not a pass).
+      - name: SimpleOS riscv64 interpreter payload (advisory, needs a built payload)
+        run: sh scripts/check/check-simpleos-riscv64-interpreter-payload.shs || true
+
+      # Wired 2026-09-01 to clear check-guard-wiring's NEW-unwired list. Each
+      # boots a real guest under real firmware (OVMF / AAVMF / OpenSBI
+      # fw_payload) and reads evidence back out, exactly like the sibling
+      # advisory steps above; `|| true` keeps them reporting without gating,
+      # since none has a CI green on record. Promote individually as each goes
+      # green. Opting them out instead was rejected: the optout file is for
+      # scripts that are NOT meant to gate, and these are evidence gates whose
+      # lane already exists here.
+      - name: SimpleOS arm64 WM Vulkan pixel evidence (advisory, first CI run)
+        run: sh scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs || true
+
+      - name: SimpleOS DBFS server round-trip under OVMF (advisory, first CI run)
+        run: sh scripts/check/check-simpleos-dbfs-server-roundtrip-ovmf.shs || true
+
+      - name: SimpleOS NVFS server round-trip under OVMF (advisory, first CI run)
+        run: sh scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs || true
+
+      - name: SimpleOS x86_64 in-guest components under OVMF (advisory, first CI run)
+        run: sh scripts/check/check-simpleos-x86-64-components-in-guest-ovmf.shs || true
+
+      - name: SimpleOS riscv64 in-guest components under OpenSBI (advisory, first CI run)
+        run: sh scripts/check/check-simpleos-riscv64-components-in-guest-opensbi.shs || true
+
+      - name: SimpleOS riscv64 in-guest interpreter under OpenSBI (advisory, first CI run)
+        run: sh scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs || true
+
+      - name: SimpleOS riscv64 WM render smoke under OpenSBI (advisory, first CI run)
+        run: sh scripts/check/check-simpleos-riscv64-wm-render-smoke-opensbi.shs || true
+
+      - name: riscv64 text primitive probe under OpenSBI (advisory diagnostic harness)
+        run: sh scripts/check/run-riscv64-text-probe-opensbi.shs || true

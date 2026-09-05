@@ -1,0 +1,103 @@
+#!/bin/sh
+# check-bdd-tagged-block-drop.shs
+#
+# DEFECT: a named argument between a BDD keyword's description and its body
+# (`describe "x", tag: ["only-compiled"]:`) makes the ENTIRE body vanish.
+#
+# describe/context/it select their block by HARD-CODED POSITIONAL INDEX 1
+# (interpreter_call/bdd.rs). A named `tag:` argument occupies index 1, so the
+# TAG ARRAY is evaluated as the "block"; exec_block_value's `_ => Ok(Value::Nil)`
+# fallthrough then silently returns Nil. The body never runs, no error is
+# raised, and -- the part that makes this a false green rather than a skip --
+# the spec verdict line still reports `dropped=0`.
+#
+# `only-compiled` itself is a DEAD TAG: it has no parser, no filter and no lane
+# check anywhere in src/. The skipping is not a feature being honoured, it is
+# this argument bug. 146 spec files and 204 tagged describe/context blocks are
+# affected corpus-wide.
+#
+# This check builds a 4-example fixture: 2 examples in an untagged describe
+# (1 pass, 1 deliberate fail) and 2 in a `tag:`-tagged describe. All 4 are
+# declared, so a correct runner must ACCOUNT for all 4 -- either by executing
+# them or by reporting them as dropped/skipped. Reporting `dropped=0` while
+# only 2 ran is the defect.
+#
+# Verdict line is the LAST line of stdout:
+#   PASS  -- all declared examples accounted for
+#   FAIL  -- <n> example(s) vanished and the verdict line reported dropped=0
+#   ERROR -- nothing was checked
+#
+# Negative control (--expect-fail): asserts the defect is STILL present. Use it
+# to prove this check is live. When the defect is fixed, --expect-fail must
+# start failing, and the plain run must start passing.
+
+set -u
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+EXPECT_FAIL=0
+[ "${1:-}" = "--expect-fail" ] && EXPECT_FAIL=1
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR -- nothing was checked (no executable at $SIMPLE_BIN)"
+    exit 2
+fi
+
+# The runner only picks up paths inside the repo, so the fixture is generated
+# under build/ (gitignored) rather than /tmp.
+FIXDIR="build/check-bdd-tagged-block-drop"
+rm -rf "$FIXDIR"
+mkdir -p "$FIXDIR"
+trap 'rm -rf "$FIXDIR"' EXIT
+
+cat > "$FIXDIR/tag_drop_spec.spl" <<'SPL'
+describe "untagged group":
+    it "untagged example that passes":
+        expect(1).to_be(1)
+    it "untagged example that fails on purpose":
+        expect(1).to_be(2)
+
+describe "tagged group", tag: ["only-compiled"]:
+    it "tagged example one":
+        expect(1).to_be(2)
+    it "tagged example two":
+        expect(1).to_be(2)
+SPL
+
+DECLARED=4
+OUT="$(timeout 300 "$SIMPLE_BIN" test "$FIXDIR/tag_drop_spec.spl" 2>&1)"
+
+VERDICT="$(printf '%s\n' "$OUT" | grep 'SPEC FILE VERDICT' | tail -1)"
+if [ -z "$VERDICT" ]; then
+    echo "ERROR -- nothing was checked (no SPEC FILE VERDICT line; exit 0 with no verdict means it ran nothing)"
+    exit 2
+fi
+
+echo "fixture declares $DECLARED examples (2 untagged, 2 under a tag: named argument)"
+echo "$VERDICT"
+
+EXECUTED="$(printf '%s' "$VERDICT" | sed -n 's/.*executed=\([0-9]*\).*/\1/p')"
+DROPPED="$(printf '%s' "$VERDICT" | sed -n 's/.*dropped=\([0-9]*\).*/\1/p')"
+: "${EXECUTED:=0}"
+: "${DROPPED:=0}"
+
+ACCOUNTED=$((EXECUTED + DROPPED))
+MISSING=$((DECLARED - ACCOUNTED))
+
+echo "executed=$EXECUTED dropped=$DROPPED accounted=$ACCOUNTED of $DECLARED"
+
+if [ "$EXPECT_FAIL" -eq 1 ]; then
+    if [ "$MISSING" -le 0 ]; then
+        echo "FAIL -- negative control: expected examples to vanish, but all $DECLARED were accounted for (defect fixed? update this check)"
+        exit 1
+    fi
+    echo "PASS -- negative control live: $MISSING example(s) vanished while the verdict claimed dropped=$DROPPED"
+    exit 0
+fi
+
+if [ "$MISSING" -gt 0 ]; then
+    echo "FAIL -- $MISSING of $DECLARED example(s) vanished and the verdict line reported dropped=$DROPPED"
+    exit 1
+fi
+
+echo "PASS -- all $DECLARED declared example(s) accounted for (executed=$EXECUTED dropped=$DROPPED)"
+exit 0

@@ -1,0 +1,282 @@
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.{
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_image_command,
+    draw_ir_rect
+}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_image_resource}
+use os.compositor.compositor_engine2d.{
+    Engine2dCompositorBackend, engine2d_window_revision_exact_match
+}
+
+fn revision_cache_fixture(color: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition(
+        "revision-cache", "hosted-web", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_rect("fill", 0, 0, 4, 4, color)
+            ])
+        ])
+
+fn revision_cache_local_fixture(color: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition(
+        "revision-cache-local", "hosted-web", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_rect("background", 0, 0, 4, 4, 0xFF111827u32),
+                draw_ir_rect("changed", 1, 1, 1, 1, color)
+            ])
+        ])
+
+fn revision_cache_image_fixture():
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition(
+        "revision-cache-image", "hosted-web", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_image_command(
+                    "image", 0, 0, 4, 4, "asset://revision-cache", [])
+            ])
+        ])
+
+fn revision_cache_image_resource(color: u32):
+    var pixels: [u32] = []
+    var i = 0
+    while i < 16:
+        pixels.push(color)
+        i = i + 1
+    simpleos_host_gpu_image_resource(
+        "asset://revision-cache", 4, 4, pixels)
+
+fn revision_cache_patch_fixture(color: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition(
+        "revision-cache-patch", "hosted-web", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_rect("patch", 1, 1, 1, 1, color)
+            ])
+        ])
+
+fn revision_cache_local_fixture(color: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition(
+        "revision-cache-local", "hosted-web", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_rect("background", 0, 0, 4, 4, 0xFF2563EBu32),
+                draw_ir_rect("patch", 1, 1, 1, 1, color)
+            ])
+        ])
+
+fn revision_cache_culled_damage_fixture(background: u32, patch: u32, distant: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 128, 128, 0, 1000, true)
+    draw_ir_composition(
+        "revision-cache-cull", "hosted-web", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_rect("background", 0, 0, 128, 128, background),
+                draw_ir_rect("patch", 1, 1, 1, 1, patch),
+                draw_ir_rect("distant", 100, 100, 1, 1, distant)
+            ])
+        ])
+
+use std.spec.step
+
+describe "Engine2D compositor producer revision cache":
+    it "selects re-present only for an exact unchanged frame key":
+        step("Verify: selects re-present only for an exact unchanged frame key")
+        # @req: REQ-OS-COMPOSITOR-001
+        val blue = revision_cache_fixture(0xFF2563EBu32)
+        val red = revision_cache_patch_fixture(0xFFDC2626u32)
+        val blue_image = [revision_cache_image_resource(0xFF2563EBu32)]
+        val red_image = [revision_cache_image_resource(0xFFDC2626u32)]
+        expect(engine2d_window_revision_exact_match(
+            7, 3, Some(blue), blue_image, 7, 3, blue, blue_image
+        )).to_equal(true)
+        expect(engine2d_window_revision_exact_match(
+            7, 3, Some(blue), blue_image, 7, 4, blue, blue_image
+        )).to_equal(false)
+        expect(engine2d_window_revision_exact_match(
+            7, 3, Some(blue), blue_image, 7, 3, red, blue_image
+        )).to_equal(false)
+        expect(engine2d_window_revision_exact_match(
+            7, 3, Some(blue), blue_image, 7, 3, blue, red_image
+        )).to_equal(false)
+
+    it "reuses only an exact unsaturated producer revision tuple":
+        val composition = revision_cache_fixture(0xFF2563EBu32)
+        var raster = Engine2dCompositorBackend.create_named(
+            4, 4, "software")
+
+        val first = raster.render_draw_ir_composition_resources_revision(
+            composition, [], 7, 1)
+        val reused = raster.render_draw_ir_composition_resources_revision(
+            composition, [], 7, 1)
+        expect(first.pixels).to_equal(reused.pixels)
+        expect(raster.revision_render_count).to_equal(1)
+        expect(raster.revision_reuse_count).to_equal(1)
+
+        val changed = revision_cache_fixture(0xFFDC2626u32)
+        val changed_same_revision = (
+            raster.render_draw_ir_composition_resources_revision(
+                changed, [], 7, 1)
+        )
+        expect(changed_same_revision.pixels == first.pixels).to_equal(false)
+        expect(raster.revision_render_count).to_equal(2)
+
+        val restarted = raster.render_draw_ir_composition_resources_revision(
+            changed, [], 8, 1)
+        expect(restarted.pixels).to_equal(changed_same_revision.pixels)
+        expect(raster.revision_render_count).to_equal(3)
+        expect(raster.revision_reuse_count).to_equal(1)
+
+        val legacy = raster.render_draw_ir_composition_resources(
+            changed, [])
+        expect(legacy.pixels).to_equal(changed_same_revision.pixels)
+        val after_legacy = raster.render_draw_ir_composition_resources_revision(
+            changed, [], 8, 1)
+        expect(after_legacy.pixels).to_equal(changed_same_revision.pixels)
+        expect(raster.revision_render_count).to_equal(5)
+
+        val saturated = 9223372036854775806
+        val saturated_first = raster.render_draw_ir_composition_resources_revision(
+            changed, [], 8, saturated)
+        val saturated_second = raster.render_draw_ir_composition_resources_revision(
+            changed, [], 8, saturated)
+        expect(saturated_first.pixels).to_equal(saturated_second.pixels)
+        expect(raster.revision_render_count).to_equal(7)
+        expect(raster.revision_reuse_count).to_equal(1)
+        raster.shutdown()
+
+    it "does not reuse when an image resource mutates":
+        val composition = revision_cache_image_fixture()
+        val blue = [revision_cache_image_resource(0xFF2563EBu32)]
+        val red = [revision_cache_image_resource(0xFFDC2626u32)]
+        var raster = Engine2dCompositorBackend.create_named(
+            4, 4, "software")
+
+        val first = raster.render_draw_ir_composition_resources_revision(
+            composition, blue, 7, 1)
+        val reused = raster.render_draw_ir_composition_resources_revision(
+            composition, blue, 7, 1)
+        expect(reused.pixels).to_equal(first.pixels)
+        expect(raster.revision_render_count).to_equal(1)
+        expect(raster.revision_reuse_count).to_equal(1)
+
+        val changed = raster.render_draw_ir_composition_resources_revision(
+            composition, red, 7, 1)
+        expect(changed.pixels == first.pixels).to_equal(false)
+        expect(raster.revision_render_count).to_equal(2)
+        expect(raster.revision_reuse_count).to_equal(1)
+        raster.shutdown()
+
+    it "replays a seeded CPU frame only through the clipped retained plan":
+        step("Verify: replays a seeded CPU frame only through the clipped retained plan")
+        val blue = revision_cache_fixture(0xFF2563EBu32)
+        val red_patch = revision_cache_patch_fixture(0xFFDC2626u32)
+        var raster = Engine2dCompositorBackend.create_named(4, 4, "cpu_simd")
+        val seed = raster.render_draw_ir_composition(blue, [])
+        expect(seed.fallback_required).to_equal(false)
+        expect(raster.seed_cpu_damage_mirror()).to_equal(true)
+        expect(raster.cpu_damage_seeded).to_equal(true)
+        expect(raster.render_draw_ir_composition_cpu_damaged(
+            red_patch, [], [1, 1, 1, 1])).to_equal(true)
+        expect(raster.cpu_damage_rects).to_equal([0, 0, 4, 4])
+        val mirror = raster.cpu_damage_pixels()
+        expect(mirror[1 * 4 + 1]).to_equal(0xFFDC2626u32)
+        expect(mirror[0]).to_equal(0xFF2563EBu32)
+        raster.present_cpu_damage()
+        expect(raster.cpu_damage_rects.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        raster.shutdown()
+
+    it "consumes a local producer receipt without a second full replay":
+        step("Verify: consumes a local producer receipt without a second full replay")
+        val blue = revision_cache_local_fixture(0xFF2563EBu32)
+        val red = revision_cache_local_fixture(0xFFDC2626u32)
+        val green = revision_cache_local_fixture(0xFF16A34Au32)
+        var raster = Engine2dCompositorBackend.create_named(4, 4, "cpu_simd")
+        val seeded = raster.render_draw_ir_composition_resources_revision_damaged(
+            blue, [], 7, 1, [0, 0, 4, 4])
+        expect(seeded.pixels[0]).to_equal(0xFF2563EBu32)
+        expect(raster.cpu_damage_seeded).to_equal(true)
+        val updated = raster.render_draw_ir_composition_resources_revision_damaged(
+            red, [], 7, 2, [1, 1, 1, 1])
+        expect(updated.pixels[1 * 4 + 1]).to_equal(0xFFDC2626u32)
+        expect(updated.pixels[0]).to_equal(0xFF2563EBu32)
+        expect(updated.readback_source).to_equal("cpu_damage_mirror_copy")
+        expect(raster.revision_render_count).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        val third = raster.render_draw_ir_composition_resources_revision_damaged(
+            green, [], 7, 3, [1, 1, 1, 1])
+        expect(third.pixels[1 * 4 + 1]).to_equal(0xFF16A34Au32)
+        expect(updated.pixels[1 * 4 + 1]).to_equal(0xFFDC2626u32)
+        val reused = raster.render_draw_ir_composition_resources_revision_damaged(
+            green, [], 7, 3, [])
+        expect(reused.pixels).to_equal(third.pixels)
+        expect(raster.revision_reuse_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        raster.shutdown()
+
+    it "fails closed when a local receipt omits changed DrawIR coverage":
+        step("Verify: fails closed when a local receipt omits changed DrawIR coverage")
+        val blue = revision_cache_fixture(0xFF2563EBu32)
+        val red = revision_cache_fixture(0xFFDC2626u32)
+        var raster = Engine2dCompositorBackend.create_named(4, 4, "cpu_simd")
+        raster.render_draw_ir_composition_resources_revision_damaged(
+            blue, [], 7, 1, [0, 0, 4, 4])
+        val full = raster.render_draw_ir_composition_resources_revision_damaged(
+            red, [], 7, 2, [1, 1, 1, 1])
+        expect(full.readback_source == "cpu_damage_mirror_copy").to_equal(false)
+        expect(full.pixels[0]).to_equal(0xFFDC2626u32)
+        expect(full.pixels[1 * 4 + 1]).to_equal(0xFFDC2626u32)
+        raster.shutdown()
+
+    it "extracts only normalized retained rows into an owned packed delta":
+        step("Verify: extracts only normalized retained rows into an owned packed delta")
+        var raster = Engine2dCompositorBackend.create_named(128, 128, "cpu_simd")
+        # Use the 128px fixture so one 1px source change normalizes to one
+        # 64x64 tile rather than a hidden full-surface read.
+        val base = revision_cache_culled_damage_fixture(
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32)
+        val changed = revision_cache_culled_damage_fixture(
+            0xFF2563EBu32, 0xFFDC2626u32, 0xFF2563EBu32)
+        val changed_again = revision_cache_culled_damage_fixture(
+            0xFF2563EBu32, 0xFF16A34Au32, 0xFF2563EBu32)
+        raster.render_draw_ir_composition_resources_revision_damaged(
+            base, [], 7, 1, [0, 0, 128, 128])
+        val packed = raster.render_draw_ir_composition_resources_packed_damage(
+            changed, [], 7, 2, [1, 1, 1, 1])
+        expect(packed.ok).to_equal(true)
+        expect(packed.rects).to_equal([0, 0, 64, 64])
+        expect(packed.pixels.len()).to_equal(64 * 64)
+        expect(packed.pixels[1 * 64 + 1]).to_equal(0xFFDC2626u32)
+        expect(packed.pixels[0]).to_equal(0xFF2563EBu32)
+        val packed_again = raster.render_draw_ir_composition_resources_packed_damage(
+            changed_again, [], 7, 3, [1, 1, 1, 1])
+        expect(packed_again.ok).to_equal(true)
+        expect(packed_again.pixels[1 * 64 + 1]).to_equal(0xFF16A34Au32)
+        val exact = raster.render_draw_ir_composition_resources_revision(
+            changed_again, [], 7, 3)
+        expect(exact.pixels[1 * 128 + 1]).to_equal(0xFF16A34Au32)
+        raster.shutdown()
+
+    it "accepts commands intentionally culled outside CPU damage":
+        step("Verify: accepts commands intentionally culled outside CPU damage")
+        val blue = revision_cache_culled_damage_fixture(
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32)
+        val changed = revision_cache_culled_damage_fixture(
+            0xFF2563EBu32, 0xFFDC2626u32, 0xFF2563EBu32)
+        var raster = Engine2dCompositorBackend.create_named(128, 128, "cpu_simd")
+        raster.render_draw_ir_composition(blue, [])
+        expect(raster.seed_cpu_damage_mirror()).to_equal(true)
+        expect(raster.render_draw_ir_composition_cpu_damaged(
+            changed, [], [1, 1, 1, 1])).to_equal(true)
+        expect(raster.cpu_damage_rects).to_equal([0, 0, 64, 64])
+        val mirror = raster.cpu_damage_pixels()
+        expect(mirror[1 * 128 + 1]).to_equal(0xFFDC2626u32)
+        expect(mirror[100 * 128 + 100]).to_equal(0xFF2563EBu32)
+        raster.present_cpu_damage()
+        raster.shutdown()

@@ -1,0 +1,346 @@
+# TLS 1.2 record + handshake round-trip spec — RFC 5246 §6.2.1, §7.4.1.2-§7.4.1.3
+#
+# Exercises the W16-A wire-framing seed:
+#
+#   - TLSPlaintext encode → decode round-trips for handshake / alert /
+#     application_data content types (byte-exact).
+#   - ClientHello build → parse round-trip with 2 cipher suites, 1
+#     compression method, 0 extensions (extensions_present=false).
+#   - ServerHello build → parse round-trip with 1 cipher suite, 1
+#     compression method, 0 extensions.
+#   - Extension list with TWO extensions encoded → decoded; byte-exact
+#     re-encoding equals the original.
+#
+# All tests use [u8] buffers; per `feedback_text_only_byte_cliffs.md` text-
+# typed APIs are forbidden for TLS payloads.
+
+use std.spipe.*
+
+use os.tls12.tls12_record.{
+    TlsRecord12, RecordResult,
+    CT_HANDSHAKE, CT_ALERT, CT_APPLICATION_DATA,
+    TLS12_VERSION_MAJOR, TLS12_VERSION_MINOR,
+    encode_record, decode_record, make_plaintext_record
+}
+use os.tls12.tls12_extensions.{
+    TlsExtension12, ExtensionListResult,
+    EXT12_SNI, EXT12_SUPPORTED_GROUPS,
+    encode_extension_list, decode_extension_list
+}
+use os.tls12.tls12_handshake.{
+    ClientHello12, ClientHelloResult,
+    ServerHello12, ServerHelloResult,
+    HS12_CLIENT_HELLO, HS12_SERVER_HELLO,
+    build_client_hello, build_client_hello_body, parse_client_hello,
+    build_server_hello, build_server_hello_body, parse_server_hello,
+    decode_handshake, HandshakeResult, HandshakeMessage12
+}
+
+# ============================================================================
+# Fixtures (module-level — feedback_it_block_var_mutation.md)
+#
+# All byte arrays are built via `.push((<i64>).to_u8())` to dodge the
+# interpreter `[u8]`-literal bug (see
+# doc/08_tracking/bug/interpreter_array_push_u8_literal_lost_2026-05-02.md):
+# `[0xDEu8, 0xADu8, ...]` literals decode as zero bytes when read back via
+# `rt_bytes_u8_at`, which is exactly what record/handshake parsers do.
+# ============================================================================
+
+fn _bv(values: [i64]) -> [u8]:
+    """Build a [u8] from i64 values via the interpreter-safe push path."""
+    var out: [u8] = []
+    for v in values:
+        out.push(v.to_u8())
+    out
+
+fn _fixture_random32() -> [u8]:
+    # 32 distinct bytes 0x00..0x1F so any byte-shift bug is visible.
+    var r: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        r.push(i.to_u8())
+        i = i + 1
+    r
+
+fn _fixture_session_id_8() -> [u8]:
+    _bv([0xA0i64, 0xA1i64, 0xA2i64, 0xA3i64, 0xA4i64, 0xA5i64, 0xA6i64, 0xA7i64])
+
+fn _fixture_handshake_payload() -> [u8]:
+    # 5-byte handshake fragment (deliberately not a real CH — record layer
+    # does not interpret the fragment).
+    _bv([0xDEi64, 0xADi64, 0xBEi64, 0xEFi64, 0x42i64])
+
+fn _fixture_alert_payload() -> [u8]:
+    # AlertLevel.fatal(2) + AlertDescription.handshake_failure(40)
+    _bv([0x02i64, 0x28i64])
+
+fn _fixture_appdata_payload() -> [u8]:
+    _bv([0x68i64, 0x65i64, 0x6Ci64, 0x6Ci64, 0x6Fi64])   # "hello" — opaque to record
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    """Byte-exact compare via rt_bytes_u8_at to dodge any [u8]-literal indexing
+    quirks under the interpreter."""
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if rt_bytes_u8_at(a, i) != rt_bytes_u8_at(b, i):
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# TLSPlaintext round-trip — RFC 5246 §6.2.1
+# ============================================================================
+
+describe "TLS 1.2 record layer round-trip":
+
+    it "round-trips a handshake-content record byte-exact":
+        val frag = _fixture_handshake_payload()
+        val rec = make_plaintext_record(CT_HANDSHAKE, frag)
+        val wire = encode_record(rec)
+        # 5-byte header + 5-byte fragment = 10 bytes total
+        expect(wire.len().to_i64()).to_equal(10)
+        # Header byte order: type / version_major / version_minor / len_hi / len_lo
+        expect(rt_bytes_u8_at(wire, 0)).to_equal(CT_HANDSHAKE.to_i64())
+        expect(rt_bytes_u8_at(wire, 1)).to_equal(TLS12_VERSION_MAJOR.to_i64())
+        expect(rt_bytes_u8_at(wire, 2)).to_equal(TLS12_VERSION_MINOR.to_i64())
+        expect(rt_bytes_u8_at(wire, 3)).to_equal(0i64)
+        expect(rt_bytes_u8_at(wire, 4)).to_equal(5i64)
+        if val RecordResult.Ok(decoded) = decode_record(wire):
+            expect(decoded.content_type).to_equal(CT_HANDSHAKE)
+            expect(decoded.version_major).to_equal(TLS12_VERSION_MAJOR)
+            expect(decoded.version_minor).to_equal(TLS12_VERSION_MINOR)
+            expect(_bytes_equal(decoded.fragment, frag)).to_equal(true)
+            # Re-encode must be byte-exact identical to wire bytes.
+            val rewire = encode_record(decoded)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips an alert record byte-exact":
+        val frag = _fixture_alert_payload()
+        val rec = make_plaintext_record(CT_ALERT, frag)
+        val wire = encode_record(rec)
+        expect(rt_bytes_u8_at(wire, 0)).to_equal(CT_ALERT.to_i64())
+        expect(wire.len().to_i64()).to_equal(7)   # 5 header + 2 fragment
+        if val RecordResult.Ok(decoded) = decode_record(wire):
+            expect(decoded.content_type).to_equal(CT_ALERT)
+            expect(_bytes_equal(decoded.fragment, frag)).to_equal(true)
+            val rewire = encode_record(decoded)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips an application_data record byte-exact":
+        val frag = _fixture_appdata_payload()
+        val rec = make_plaintext_record(CT_APPLICATION_DATA, frag)
+        val wire = encode_record(rec)
+        expect(rt_bytes_u8_at(wire, 0)).to_equal(CT_APPLICATION_DATA.to_i64())
+        expect(wire.len().to_i64()).to_equal(10)  # 5 header + 5 fragment
+        if val RecordResult.Ok(decoded) = decode_record(wire):
+            expect(decoded.content_type).to_equal(CT_APPLICATION_DATA)
+            expect(_bytes_equal(decoded.fragment, frag)).to_equal(true)
+            val rewire = encode_record(decoded)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects a record with truncated header":
+        # Build via _bv() — `[u8]` literal bytes decode as zero through
+        # rt_bytes_u8_at under the interpreter (see fixture-block comment).
+        val short = _bv([0x16i64, 0x03i64, 0x03i64])
+        if val RecordResult.Err(reason) = decode_record(short):
+            expect(reason.contains("decode_error")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects a record whose declared length overruns the buffer":
+        # Header says len=10 but we only supply 4 fragment bytes.
+        val truncated = _bv([
+            0x16i64, 0x03i64, 0x03i64, 0x00i64, 0x0Ai64,
+            0x00i64, 0x01i64, 0x02i64, 0x03i64
+        ])
+        if val RecordResult.Err(reason) = decode_record(truncated):
+            expect(reason.contains("decode_error")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+# ============================================================================
+# ClientHello round-trip — RFC 5246 §7.4.1.2
+# ============================================================================
+
+fn _fixture_ch_no_exts() -> ClientHello12:
+    ClientHello12(
+        client_version_major: 3u8,
+        client_version_minor: 3u8,
+        random: _fixture_random32(),
+        session_id: _fixture_session_id_8(),
+        cipher_suites: [0xC02Fu16, 0xC030u16],   # ECDHE-RSA-AES128-GCM-SHA256, ...AES256-GCM-SHA384
+        compression_methods: [0u8],
+        extensions_present: false,
+        extensions: []
+    )
+
+describe "TLS 1.2 ClientHello round-trip":
+
+    it "encodes a ClientHello with two cipher suites and no extensions":
+        val ch = _fixture_ch_no_exts()
+        val wire = build_client_hello(ch)
+        # Envelope: type(1) + uint24 length(3) = 4 bytes header.
+        expect(wire[0]).to_equal(HS12_CLIENT_HELLO)
+        # Body length: version(2) + random(32) + sid_len(1) + sid(8) +
+        #              cs_len(2) + cs(4) + cm_len(1) + cm(1) = 51
+        expect(wire[1]).to_equal(0u8)
+        expect(wire[2]).to_equal(0u8)
+        expect(wire[3]).to_equal(51u8)
+        expect(wire.len().to_i64()).to_equal(4 + 51)
+
+    it "round-trips ClientHello body byte-exact":
+        val ch = _fixture_ch_no_exts()
+        val body = build_client_hello_body(ch)
+        if val ClientHelloResult.Ok(parsed) = parse_client_hello(body):
+            expect(parsed.client_version_major).to_equal(3u8)
+            expect(parsed.client_version_minor).to_equal(3u8)
+            expect(parsed.random.len().to_i64()).to_equal(32)
+            expect(_bytes_equal(parsed.random, ch.random)).to_equal(true)
+            expect(_bytes_equal(parsed.session_id, ch.session_id)).to_equal(true)
+            expect(parsed.cipher_suites.len().to_i64()).to_equal(2)
+            expect(parsed.cipher_suites[0]).to_equal(0xC02Fu16)
+            expect(parsed.cipher_suites[1]).to_equal(0xC030u16)
+            expect(parsed.compression_methods.len().to_i64()).to_equal(1)
+            expect(parsed.compression_methods[0]).to_equal(0u8)
+            expect(parsed.extensions_present).to_equal(false)
+            expect(parsed.extensions.len().to_i64()).to_equal(0)
+            # Re-encode body must equal original bytes.
+            val rebody = build_client_hello_body(parsed)
+            expect(_bytes_equal(rebody, body)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips full ClientHello via the handshake envelope":
+        val ch = _fixture_ch_no_exts()
+        val wire = build_client_hello(ch)
+        if val HandshakeResult.Ok(env) = decode_handshake(wire):
+            expect(env.msg_type).to_equal(HS12_CLIENT_HELLO)
+            if val ClientHelloResult.Ok(parsed) = parse_client_hello(env.body):
+                val rewire = build_client_hello(parsed)
+                expect(_bytes_equal(rewire, wire)).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+# ============================================================================
+# ServerHello round-trip — RFC 5246 §7.4.1.3
+# ============================================================================
+
+fn _fixture_sh_no_exts() -> ServerHello12:
+    ServerHello12(
+        server_version_major: 3u8,
+        server_version_minor: 3u8,
+        random: _fixture_random32(),
+        session_id: _fixture_session_id_8(),
+        cipher_suite: 0xC02Fu16,
+        compression_method: 0u8,
+        extensions_present: false,
+        extensions: []
+    )
+
+describe "TLS 1.2 ServerHello round-trip":
+
+    it "round-trips ServerHello body byte-exact":
+        val sh = _fixture_sh_no_exts()
+        val body = build_server_hello_body(sh)
+        # Body length: version(2) + random(32) + sid_len(1) + sid(8) +
+        #              cipher_suite(2) + compression(1) = 46
+        expect(body.len().to_i64()).to_equal(46)
+        if val ServerHelloResult.Ok(parsed) = parse_server_hello(body):
+            expect(parsed.server_version_major).to_equal(3u8)
+            expect(parsed.server_version_minor).to_equal(3u8)
+            expect(_bytes_equal(parsed.random, sh.random)).to_equal(true)
+            expect(_bytes_equal(parsed.session_id, sh.session_id)).to_equal(true)
+            expect(parsed.cipher_suite).to_equal(0xC02Fu16)
+            expect(parsed.compression_method).to_equal(0u8)
+            expect(parsed.extensions_present).to_equal(false)
+            val rebody = build_server_hello_body(parsed)
+            expect(_bytes_equal(rebody, body)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips full ServerHello via the handshake envelope":
+        val sh = _fixture_sh_no_exts()
+        val wire = build_server_hello(sh)
+        expect(wire[0]).to_equal(HS12_SERVER_HELLO)
+        if val HandshakeResult.Ok(env) = decode_handshake(wire):
+            if val ServerHelloResult.Ok(parsed) = parse_server_hello(env.body):
+                val rewire = build_server_hello(parsed)
+                expect(_bytes_equal(rewire, wire)).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+# ============================================================================
+# Extension list round-trip — RFC 5246 §7.4.1.4
+# ============================================================================
+
+fn _fixture_two_extensions() -> [TlsExtension12]:
+    # Extension 1: server_name with a tiny opaque body (we don't parse SNI
+    # semantics in this wave — wire-framing only).
+    val sni_data: [u8] = [0x00u8, 0x06u8, 0x00u8, 0x00u8, 0x03u8, 0x66u8, 0x6Fu8, 0x6Fu8]
+    # Extension 2: supported_groups, list_len(2)=4 + two NamedGroup u16
+    val sg_data: [u8] = [0x00u8, 0x04u8, 0x00u8, 0x1Du8, 0x00u8, 0x17u8]
+    var exts: [TlsExtension12] = []
+    exts.push(TlsExtension12(extension_type: EXT12_SNI, extension_data: sni_data))
+    exts.push(TlsExtension12(extension_type: EXT12_SUPPORTED_GROUPS, extension_data: sg_data))
+    exts
+
+describe "TLS 1.2 extension list round-trip":
+
+    it "encodes a 2-extension list with byte-exact wire layout":
+        val exts = _fixture_two_extensions()
+        val wire = encode_extension_list(exts)
+        # Outer list_len = ext1(4 + 8 = 12) + ext2(4 + 6 = 10) = 22.
+        expect(wire[0]).to_equal(0u8)
+        expect(wire[1]).to_equal(22u8)
+        expect(wire.len().to_i64()).to_equal(2 + 22)
+        # First extension: type=0x0000 (SNI), data_len=0x0008
+        expect(wire[2]).to_equal(0u8)
+        expect(wire[3]).to_equal(0u8)
+        expect(wire[4]).to_equal(0u8)
+        expect(wire[5]).to_equal(8u8)
+        # Second extension starts at offset 2 + 4 + 8 = 14: type=0x000A, data_len=0x0006
+        expect(wire[14]).to_equal(0u8)
+        expect(wire[15]).to_equal(10u8)
+        expect(wire[16]).to_equal(0u8)
+        expect(wire[17]).to_equal(6u8)
+
+    it "round-trips a 2-extension list byte-exact":
+        val exts = _fixture_two_extensions()
+        val wire = encode_extension_list(exts)
+        if val ExtensionListResult.Ok(parsed) = decode_extension_list(wire, 0u64):
+            expect(parsed.len().to_i64()).to_equal(2)
+            expect(parsed[0].extension_type).to_equal(EXT12_SNI)
+            expect(parsed[0].extension_data.len().to_i64()).to_equal(8)
+            expect(parsed[1].extension_type).to_equal(EXT12_SUPPORTED_GROUPS)
+            expect(parsed[1].extension_data.len().to_i64()).to_equal(6)
+            val rewire = encode_extension_list(parsed)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects a list whose declared length truncates the last extension":
+        # Outer says 12 bytes follow, but only 10 are present.
+        # Built via _bv() — interpreter `[u8]`-literal bug zero-fills via
+        # rt_bytes_u8_at, which would mask the negative-path check.
+        val bad = _bv([
+            0x00i64, 0x0Ci64,
+            0x00i64, 0x00i64, 0x00i64, 0x06i64, 0x00i64, 0x00i64, 0x00i64, 0x00i64, 0x00i64, 0x00i64
+        ])
+        if val ExtensionListResult.Err(reason) = decode_extension_list(bad, 0u64):
+            expect(reason.contains("decode_error")).to_equal(true)
+        else:
+            expect(false).to_equal(true)

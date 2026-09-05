@@ -1,0 +1,163 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+# @req REQ-SSPEC-LIB
+"""
+RFC 3501 FETCH response parsing for the IMAP owner module.
+
+Who: a mail client author (LLM Caret's mail_list / mail_read tools) reading
+`* N FETCH (...)` responses off a socket. Why: the previous line scanner
+treated every line independently, so a message body containing ")" or a
+tag-looking line could end a response early and header values could be
+mis-attributed. The parser here frames by literal byte count and returns
+typed items, and the framer is shared by the TCP and TLS transports.
+
+Transcripts are RFC-exact, hand-crafted in greenmail's shape (UID first,
+FLAGS, RFC822.SIZE, then a BODY[...] literal). Literal headers are built by
+concatenation because `{N}` inside a spec string literal is interpolation.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.nogc_sync_mut.imap.parse.{
+    imap_literal_size, imap_response_complete, imap_parse_fetch_response,
+    imap_fetch_item, imap_fetch_item_prefixed, imap_fetch_uid, imap_fetch_size, imap_fetch_flags,
+    imap_parse_header_fields, imap_header_value
+}
+use std.nogc_sync_mut.imap.types.{IMAP_STATUS_OK, IMAP_STATUS_NO, IMAP_STATUS_BAD}
+
+fn lit(body: text) -> text:
+    "{" + body.length().to_text() + "}\r\n" + body
+
+fn crlf() -> text:
+    "\r\n"
+
+# One greenmail-shaped header FETCH row.
+fn header_row(seq: i64, uid: i64, headers: text) -> text:
+    "* " + seq.to_text() + " FETCH (UID " + uid.to_text() + " FLAGS (\\Seen) RFC822.SIZE 512 BODY[HEADER.FIELDS (SUBJECT FROM DATE)] " + lit(headers) + ")" + crlf()
+
+describe "IMAP FETCH response framing (imap_response_complete)":
+    # @manual scenario evidence
+    it "recognises a literal size suffix and rejects everything else":
+        # @req REQ-SSPEC-LIB
+        step("recognises a literal size suffix and rejects everything else")
+        step("Parse the {N} suffix of a response line")
+        expect(imap_literal_size("* 1 FETCH (BODY[] " + "{" + "42" + "}")).to_equal(42)
+        expect(imap_literal_size("* 1 FETCH (BODY[] " + "{" + "0" + "}")).to_equal(0)
+        expect(imap_literal_size("A1 OK done")).to_equal(-1)
+        expect(imap_literal_size("* 1 FETCH (BODY[] {}")).to_equal(-1)
+
+    it "does not let a tag-looking line inside a literal terminate the response":
+        # @req REQ-SSPEC-LIB
+        step("does not let a tag-looking line inside a literal terminate the response")
+        step("Build a body whose literal contains the tagged OK line and a ')'")
+        val body = "A3 OK fake)\r\nreal body\r\n"
+        val raw = "* 1 FETCH (UID 9 BODY[] " + lit(body) + ")" + crlf() + "A3 OK Fetch completed" + crlf()
+        step("The framer consumes exactly through the real tagged line")
+        expect(imap_response_complete(raw, "A3")).to_equal(raw.length())
+        step("A prefix that ends inside the literal is incomplete")
+        expect(imap_response_complete(raw.substring(0, 40), "A3")).to_equal(-1)
+        step("A prefix that ends after the literal but before the tag is incomplete")
+        val cut = raw.length() - 5
+        expect(imap_response_complete(raw.substring(0, cut), "A3")).to_equal(-1)
+
+    it "accepts the untagged greeting when asked for tag '*'":
+        # @req REQ-SSPEC-LIB
+        step("accepts the untagged greeting when asked for tag '*'")
+        val greeting = "* OK IMAP4rev1 Server GreenMail v2.1.3 ready" + crlf()
+        expect(imap_response_complete(greeting, "*")).to_equal(greeting.length())
+        expect(imap_response_complete("* OK partial", "*")).to_equal(-1)
+
+describe "IMAP FETCH response parsing (imap_parse_fetch_response)":
+    it "returns typed items for a header-fields FETCH with UID, FLAGS and RFC822.SIZE":
+        # @req REQ-SSPEC-LIB
+        step("returns typed items for a header-fields FETCH with UID, FLAGS and RFC822.SIZE")
+        step("Feed one greenmail-shaped FETCH row followed by the tagged OK")
+        val headers = "Subject: Weekly report" + crlf() + "From: Ann <ann@example.test>" + crlf() + "Date: Mon, 24 Aug 2026 09:00:00 +0000" + crlf() + crlf()
+        val raw = header_row(1, 101, headers) + "A3 OK FETCH completed." + crlf()
+        val r = imap_parse_fetch_response(raw, "A3")
+        expect(r.error).to_equal("")
+        expect(r.tag_seen).to_equal(true)
+        expect(r.tag_status).to_equal(IMAP_STATUS_OK)
+        expect(r.messages.len()).to_equal(1)
+        step("Items are addressable by name, case-insensitively")
+        val m = r.messages[0]
+        expect(m.seq).to_equal(1)
+        expect(imap_fetch_uid(m)).to_equal("101")
+        expect(imap_fetch_size(m)).to_equal(512)
+        expect(imap_fetch_flags(m)).to_equal(["\\Seen"])
+        expect(imap_fetch_item(m, "rfc822.size")).to_equal("512")
+        step("The literal is returned byte-exact, CRLFs included")
+        expect(imap_fetch_item_prefixed(m, "BODY[HEADER")).to_equal(headers)
+
+    it "parses several messages, interleaved untagged responses and folded headers":
+        # @req REQ-SSPEC-LIB
+        step("parses several messages, interleaved untagged responses and folded headers")
+        step("Two FETCH rows with an EXISTS/RECENT pair between them")
+        val h1 = "Subject: first" + crlf() + "From: a@x" + crlf() + crlf()
+        val h2 = "Subject: a very long subject" + crlf() + " that folds onto a second line" + crlf() + "From: b@y" + crlf() + "Date: Tue, 25 Aug 2026 10:00:00 +0000" + crlf() + crlf()
+        val raw = header_row(3, 7, h1) + "* 5 EXISTS" + crlf() + "* 1 RECENT" + crlf() + header_row(4, 8, h2) + "A3 OK done" + crlf()
+        val r = imap_parse_fetch_response(raw, "A3")
+        expect(r.error).to_equal("")
+        expect(r.messages.len()).to_equal(2)
+        expect(r.others).to_equal(["5 EXISTS", "1 RECENT"])
+        expect(imap_fetch_uid(r.messages[0])).to_equal("7")
+        expect(imap_fetch_uid(r.messages[1])).to_equal("8")
+        step("Folded header lines are unfolded into one value")
+        val fields = imap_parse_header_fields(imap_fetch_item_prefixed(r.messages[1], "BODY[HEADER"))
+        expect(imap_header_value(fields, "subject")).to_equal("a very long subject that folds onto a second line")
+        expect(imap_header_value(fields, "Date")).to_equal("Tue, 25 Aug 2026 10:00:00 +0000")
+        expect(imap_header_value(fields, "X-Missing")).to_equal("")
+
+    it "keeps a body literal containing ')' and CRLF intact for UID FETCH BODY[]":
+        # @req REQ-SSPEC-LIB
+        step("keeps a body literal containing ')' and CRLF intact for UID FETCH BODY[]")
+        val body = "From: a@x" + crlf() + "Subject: parens" + crlf() + crlf() + "line one (with parens)" + crlf() + ")" + crlf() + "A3 OK not really" + crlf()
+        val raw = "* 2 FETCH (UID 44 BODY[] " + lit(body) + ")" + crlf() + "A3 OK UID FETCH completed." + crlf()
+        val r = imap_parse_fetch_response(raw, "A3")
+        expect(r.error).to_equal("")
+        expect(r.messages.len()).to_equal(1)
+        expect(imap_fetch_item_prefixed(r.messages[0], "BODY[")).to_equal(body)
+        expect(r.tag_message).to_equal("UID FETCH completed.")
+
+    it "handles multibyte UTF-8 in a literal by byte count, and an empty literal":
+        # @req REQ-SSPEC-LIB
+        step("handles multibyte UTF-8 in a literal by byte count, and an empty literal")
+        val body = "Subject: caf\u{e9} \u{2603}" + crlf() + crlf()
+        val raw = "* 1 FETCH (UID 1 BODY[HEADER] " + lit(body) + " BODY[TEXT] " + "{" + "0" + "}" + crlf() + ")" + crlf() + "A9 OK ok" + crlf()
+        val r = imap_parse_fetch_response(raw, "A9")
+        expect(r.error).to_equal("")
+        expect(imap_fetch_item(r.messages[0], "BODY[HEADER]")).to_equal(body)
+        expect(imap_fetch_item(r.messages[0], "BODY[TEXT]")).to_equal("")
+        expect(r.messages[0].items.len()).to_equal(3)
+
+    it "reports an empty mailbox FETCH (no rows, tagged OK) and NO/BAD terminators":
+        # @req REQ-SSPEC-LIB
+        step("reports an empty mailbox FETCH (no rows, tagged OK) and NO/BAD terminators")
+        step("Only the tagged line")
+        val empty = imap_parse_fetch_response("A3 OK FETCH completed." + crlf(), "A3")
+        expect(empty.error).to_equal("")
+        expect(empty.messages.len()).to_equal(0)
+        expect(empty.tag_status).to_equal(IMAP_STATUS_OK)
+        step("Tagged NO carries the server's reason")
+        val no = imap_parse_fetch_response("A3 NO [NONEXISTENT] no such message" + crlf(), "A3")
+        expect(no.tag_status).to_equal(IMAP_STATUS_NO)
+        expect(no.tag_message).to_equal("[NONEXISTENT] no such message")
+        step("Tagged BAD is distinguished from NO")
+        expect(imap_parse_fetch_response("A3 BAD parse error" + crlf(), "A3").tag_status).to_equal(IMAP_STATUS_BAD)
+
+    it "fails closed on a truncated literal, a foreign tag, or a missing terminator":
+        # @req REQ-SSPEC-LIB
+        step("fails closed on a truncated literal, a foreign tag, or a missing terminator")
+        val truncated = imap_parse_fetch_response("* 1 FETCH (UID 1 BODY[] " + "{" + "100" + "}" + crlf() + "short)" + crlf() + "A3 OK" + crlf(), "A3")
+        expect(truncated.error).to_contain("literal truncated")
+        expect(truncated.tag_seen).to_equal(false)
+        val foreign = imap_parse_fetch_response("A2 OK earlier" + crlf(), "A3")
+        expect(foreign.error).to_contain("unexpected tag 'A2'")
+        val open = imap_parse_fetch_response("* 1 FETCH (UID 1 FLAGS ())" + crlf(), "A3")
+        expect(open.error).to_contain("response ended before tag 'A3'")
+        expect(open.messages.len()).to_equal(1)

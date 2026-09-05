@@ -1,0 +1,60 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+# Hosted browser-network ABI owner. Rendering modules use these narrow helpers
+# instead of binding raw runtime symbols directly.
+@unsafe(reason: "raw hosted DNS text ABI; empty text is resolution failure", capabilities: [ffi])
+extern fn rt_dns_lookup(hostname: text) -> text
+@unsafe(reason: "raw runtime text release ABI; nonzero status means wrong ownership or invalid value", capabilities: [ffi])
+extern fn rt_string_free(value: text) -> i64
+use std.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.io.tls_sffi.{
+    rt_tls_client_connect_with_sni,
+    rt_tls_client_connect_address_with_sni_timeout,
+    rt_tls_client_write,
+    rt_tls_client_write_timeout,
+    rt_tls_client_read_checked,
+    rt_tls_client_read_timeout_checked,
+    rt_tls_client_close,
+    rt_tls_get_protocol_version
+}
+
+pub fn browser_dns_lookup(hostname: text) -> text: rt_dns_lookup(hostname)
+pub fn browser_runtime_string_free(value: text) -> i64: rt_string_free(value)
+pub fn browser_monotonic_ms() -> i64: time_now_monotonic_ms()
+pub fn browser_tls_connect(host: text, port: i64, server_name: text) -> Result<i64, text>:
+    val handle = rt_tls_client_connect_with_sni(host, port, server_name)
+    if handle < 0:
+        return Err("TLS connect failed")
+    Ok(handle)
+pub fn browser_tls_connect_address(
+    address: text, port: i64, server_name: text, timeout_ms: i64
+) -> Result<i64, text>:
+    val handle = rt_tls_client_connect_address_with_sni_timeout(address, port, server_name, timeout_ms)
+    if handle < 0:
+        return Err("TLS address connect failed")
+    Ok(handle)
+pub fn browser_tls_write(conn: i64, data: text) -> Result<i64, text>:
+    val written = rt_tls_client_write(conn, data)
+    if written < 0:
+        return Err("TLS write failed")
+    Ok(written)
+pub fn browser_tls_write_timeout(conn: i64, data: text, timeout_ms: i64) -> Result<i64, text>:
+    val written = rt_tls_client_write_timeout(conn, data, timeout_ms)
+    if written < 0:
+        return Err("TLS write timed out or failed")
+    Ok(written)
+pub fn browser_tls_read(conn: i64, max_bytes: i64) -> Result<text, text>:
+    val data = rt_tls_client_read_checked(conn, max_bytes)
+    if data == nil:
+        return Err("TLS read failed")
+    Ok(data!)
+pub fn browser_tls_read_timeout(conn: i64, max_bytes: i64, timeout_ms: i64) -> Result<text, text>:
+    val data = rt_tls_client_read_timeout_checked(conn, max_bytes, timeout_ms)
+    if data == nil:
+        return Err("TLS read timed out or failed")
+    Ok(data!)
+pub fn browser_tls_close(conn: i64) -> Result<(), text>:
+    if not rt_tls_client_close(conn):
+        return Err("TLS close failed")
+    Ok(())
+pub fn browser_tls_protocol(conn: i64) -> text?: rt_tls_get_protocol_version(conn)

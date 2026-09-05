@@ -1,0 +1,250 @@
+# Lightweight entrypoint for `simple check`.
+#
+# Cost model and the measurements behind the chunking below:
+# doc/08_tracking/bug/check_costs_two_seconds_per_function_decl_2026-08-10.md
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use app.io.env_ops.{env_get}
+use app.io.process_ops.{process_run_timeout}
+use std.cli.log_modes.{parse_log_options}
+use app.cli.check_options.{check_option_error, check_worker_args, check_presentation_args}
+use app.check.targets.{expand_check_targets}
+
+val OUTPUT_LIMIT = 12000
+val CHECK_WORKER_TIMEOUT_MS = 300000
+# Every worker invocation pays a fixed ~15-25s cost before main() even runs,
+# re-interpreting src/app/check/main.spl and its `compiler.core.parser` import
+# closure from source. Measured 2026-08-10 (load 79-117, so these overstate):
+#   run hello.spl (no imports)          0.08s
+#   run a file that only imports parser 13.7s / 25.9s
+#   check a 1-fn file   wall 17.7s, in-main 2.49s -> 15.2s pre-main
+#   check a 41-fn file  wall 109.2s, in-main 84.0s -> 25.2s pre-main
+# Chunking removes only the pre-main term; the dominant cost is parse itself
+# at ~2s per function declaration (see the bug note referenced in the module
+# header). A failing chunk is re-run file-by-file so per-file attribution and
+# crash isolation survive.
+val CHECK_CHUNK_SIZE = 32
+val CHECK_CHUNK_TIMEOUT_PER_FILE_MS = 60000
+
+# Spawn the worker via the REAL release binary path, not the bin/simple
+# symlink: with a symlinked argv0 the worker's _cli_driver_binary() sibling
+# lookup (simple_seed next to argv0) misses the seed, so its `run` grinds
+# in-process with the slow self-hosted frontend instead of delegating
+# (300s timeout per file). The real release path always has simple_seed
+# as a sibling, so delegation works there.
+fn resolve_worker_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    val configured_bin = env_get("SIMPLE_BIN")
+    if configured_bin != nil and configured_bin != "" and file_exists(configured_bin):
+        return configured_bin
+    val (os_out, _os_err, os_code) = process_run_timeout("uname", ["-s"], 10000)
+    val (arch_out, _arch_err, arch_code) = process_run_timeout("uname", ["-m"], 10000)
+    if os_code != 0 or arch_code != 0:
+        return "bin/simple"
+    val os_name = os_out.trim()
+    var arch = arch_out.trim()
+    if arch == "arm64":
+        arch = "aarch64"
+    if arch == "amd64":
+        arch = "x86_64"
+    var triple = ""
+    if os_name == "Darwin":
+        triple = "{arch}-apple-darwin"
+    elif os_name == "Linux":
+        triple = "{arch}-unknown-linux-gnu"
+    elif os_name == "FreeBSD":
+        triple = "{arch}-unknown-freebsd"
+    else:
+        return "bin/simple"
+    val candidate = "bin/release/{triple}/simple"
+    if file_exists(candidate):
+        return candidate
+    "bin/simple"
+
+fn print_help():
+    print "Usage: simple check <file.spl> [file2.spl ...]"
+    print ""
+    print "Parse and validate Simple source files."
+    print ""
+    print "Options:"
+    # Keep this list in step with check_option_error() in check_options.spl —
+    # every option accepted there has to be discoverable here.
+    print "  --log-mode <human|llm|json>  Select log rendering mode"
+    print "  --human | --llm | --json     Shorthand log modes"
+    print "  --surface=<stdout|tui>       Select output surface"
+    print "  --progress <summary|count|dot|none>"
+    print "  --dots | --count | --no-progress"
+    print "  --quiet | --verbose"
+    print "  -h, --help                   Show this help"
+
+fn normalize_args(args: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        # Dispatch may preserve the command token, while `simple run` already
+        # passes only user arguments. Consume the explicit token only: a source
+        # basename is data and must never be guessed to be this entrypoint.
+        if i == 0 and arg == "check":
+            i = i + 1
+            continue
+        out.push(arg)
+        i = i + 1
+    out
+
+fn last_json_line(output: text) -> text:
+    var found = ""
+    val lines = output.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("{") and trimmed.ends_with("}"):
+            found = trimmed
+    found
+
+fn print_bounded_stdout(output: text, as_json: bool):
+    if output.len() == 0:
+        return
+    if as_json:
+        val json = last_json_line(output)
+        if json != "":
+            print json
+            return
+    if output.len() <= OUTPUT_LIMIT:
+        print output
+        return
+    print output[0:OUTPUT_LIMIT]
+    print "[stdout truncated by check entry]"
+
+fn print_bounded_stderr(output: text):
+    if output.len() == 0:
+        return
+    if output.len() > OUTPUT_LIMIT:
+        eprint output[0:OUTPUT_LIMIT]
+        eprint "[stderr truncated by check entry]"
+    else:
+        eprint output
+
+fn is_check_option(arg: text) -> bool:
+    if arg == "--human" or arg == "--llm" or arg == "--json":
+        return true
+    if arg == "--quiet" or arg == "--verbose" or arg == "--dots":
+        return true
+    if arg == "--count" or arg == "--no-progress":
+        return true
+    if arg.starts_with("--log-mode=") or arg.starts_with("--surface="):
+        return true
+    arg.starts_with("--progress=")
+
+fn check_files_from_args(args: [text]) -> [text]:
+    var files: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif is_check_option(arg):
+            val _skip = 0
+        elif not arg.starts_with("-"):
+            files.push(arg)
+        i = i + 1
+    files
+
+fn run_single_worker(worker_bin: text, args: [text], as_json: bool) -> i64:
+    var worker_args = ["run", "src/app/check/main.spl"]
+    for arg in args:
+        worker_args.push(arg)
+    val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, CHECK_WORKER_TIMEOUT_MS)
+    print_bounded_stdout(stdout, as_json)
+    if code != 0:
+        print_bounded_stderr(stderr)
+    code as i64
+
+fn run_worker_chunk(
+    worker_bin: text,
+    args: [text],
+    chunk: [text],
+    as_json: bool
+) -> i64:
+    var worker_args = ["run", "src/app/check/main.spl"]
+    for file in chunk:
+        worker_args.push(file)
+    for arg in check_presentation_args(args):
+        worker_args.push(arg)
+    var timeout_ms = CHECK_WORKER_TIMEOUT_MS + chunk.len() * CHECK_CHUNK_TIMEOUT_PER_FILE_MS
+    val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, timeout_ms)
+    # A failing multi-file chunk is re-run one file at a time by the caller, so
+    # printing here would duplicate every diagnostic. Single-file invocations
+    # are terminal and always print.
+    val terminal = code == 0 or chunk.len() == 1
+    if terminal and not as_json:
+        print_bounded_stdout(stdout, false)
+    if terminal and code != 0:
+        print_bounded_stderr(stderr)
+    code as i64
+
+fn main() -> i64:
+    val args = normalize_args(get_cli_args())
+    if args.len() == 0:
+        print_help()
+        return 1
+
+    val option_error = check_option_error(args)
+    if option_error != "":
+        print "ERROR: {option_error}"
+        return 2
+
+    if args.contains("-h") or args.contains("--help"):
+        print_help()
+        return 0
+
+    val as_json = parse_log_options(args).log_mode == "json"
+    val files = check_files_from_args(args)
+    val worker_bin = resolve_worker_binary()
+    if files.len() == 0:
+        return run_single_worker(worker_bin, args, as_json)
+
+    val (expanded_files, empty_directories) = expand_check_targets(files)
+    if expanded_files.len() == 1 and empty_directories.len() == 0:
+        return run_single_worker(
+            worker_bin,
+            check_worker_args(args, expanded_files[0]),
+            as_json
+        )
+
+    var checked = 0
+    var errors = empty_directories.len()
+    var files_with_errors = 0
+    if not as_json:
+        for directory in empty_directories:
+            print "ERROR: {directory}: no Simple source files found"
+    var chunk_start = 0
+    while chunk_start < expanded_files.len():
+        var chunk: [text] = []
+        var i = chunk_start
+        while i < expanded_files.len() and chunk.len() < CHECK_CHUNK_SIZE:
+            chunk.push(expanded_files[i])
+            i = i + 1
+        chunk_start = i
+        val chunk_code = run_worker_chunk(worker_bin, args, chunk, as_json)
+        if chunk_code == 0:
+            checked = checked + chunk.len()
+        else:
+            # A chunk only reports pass/fail for the whole group, so re-run its
+            # members one at a time to recover per-file attribution and to
+            # isolate a file that crashed or timed out the shared worker.
+            for file in chunk:
+                val single_code = run_worker_chunk(worker_bin, args, [file], as_json)
+                checked = checked + 1
+                if single_code != 0:
+                    errors = errors + 1
+                    files_with_errors = files_with_errors + 1
+
+    if as_json:
+        val status = if errors == 0: "ok" else: "error"
+        print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{checked},\"files\":{expanded_files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
+    if errors == 0:
+        return 0
+    1

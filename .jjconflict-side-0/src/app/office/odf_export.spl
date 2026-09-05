@@ -1,0 +1,262 @@
+# Flat ODF Export (.fodt / .fods)
+#
+# Real interop with LibreOffice/OpenOffice: flat OpenDocument XML needs no zip
+# container, so pure-Simple string building produces files LibreOffice opens
+# directly — Writer documents as .fodt, Calc sheets as .fods.
+#
+# ponytail: v1 emits plain text content (no text:span character styles, no
+# named paragraph styles); add automatic-styles blocks when styled export
+# matters. Structure follows ODF 1.2 flat-document schema.
+
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, spans_to_plain_text}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{Cell, CellValue, CellRef, cell_display_text, cell_ref_to_string, parse_cell_ref}
+use app.office.sheets.cell_format.{FormatSpec, SheetFormats, formats_get}
+
+fn _xml_escape(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r = r.replace("\"", "&quot;")
+    r = r.replace("'", "&apos;")
+    r
+
+val _ODF_NS = "xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" office:version=\"1.2\""
+
+# =========================================================================
+# Writer -> .fodt
+# =========================================================================
+
+fn _block_to_odf(block: DocBlock) -> text:
+    val content = _xml_escape(spans_to_plain_text(block.spans))
+    match block.kind:
+        case Heading1: return "<text:h text:outline-level=\"1\">{content}</text:h>"
+        case Heading2: return "<text:h text:outline-level=\"2\">{content}</text:h>"
+        case Heading3: return "<text:h text:outline-level=\"3\">{content}</text:h>"
+        case BulletItem: return "<text:list><text:list-item><text:p>{content}</text:p></text:list-item></text:list>"
+        case OrderedItem: return "<text:list><text:list-item><text:p>{content}</text:p></text:list-item></text:list>"
+        case Quote: return "<text:p>{content}</text:p>"
+        case CodeBlock: return "<text:p>{content}</text:p>"
+        case Paragraph: return "<text:p>{content}</text:p>"
+        case FootnoteDef: return ""   # definitions are docx-only (word/footnotes.xml); not yet modeled in flat ODF
+
+fn document_to_fodt(doc: RichDocument) -> text:
+    """Serialize a RichDocument as a flat ODF text document (.fodt) that
+    LibreOffice Writer opens directly."""
+    var body = ""
+    for block in doc.blocks:
+        body = "{body}{_block_to_odf(block)}"
+    var out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    out = "{out}<office:document {_ODF_NS} office:mimetype=\"application/vnd.oasis.opendocument.text\">"
+    out = "{out}<office:body><office:text>{body}</office:text></office:body></office:document>"
+    out
+
+# =========================================================================
+# Calc -> .fods
+# =========================================================================
+
+fn _cell_to_odf(sheet: Sheet, ref_str: text) -> text:
+    val cell = sheet.get_cell(ref_str)
+    val display = _xml_escape(cell_display_text(cell))
+    match cell.value:
+        CellValue.NumberVal(value):
+            return "<table:table-cell office:value-type=\"float\" office:value=\"{value}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.FormulaVal(expr, cached_display):
+            val formula = _xml_escape("of:={expr}")
+            return "<table:table-cell table:formula=\"{formula}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.BoolVal(value):
+            val b = if value: "true" else: "false"
+            return "<table:table-cell office:value-type=\"boolean\" office:boolean-value=\"{b}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.Empty:
+            return "<table:table-cell/>"
+        _:
+            return "<table:table-cell office:value-type=\"string\"><text:p>{display}</text:p></table:table-cell>"
+
+fn sheet_to_fods(sheet: Sheet) -> text:
+    """Serialize a Sheet's used range as a flat ODF spreadsheet (.fods) that
+    LibreOffice Calc opens directly — numbers typed, formulas preserved."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    var rows = ""
+    if start != nil and end_ref != nil:
+        var r = start.row
+        while r <= end_ref.row:
+            var row_xml = ""
+            var c = start.col
+            while c <= end_ref.col:
+                val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+                row_xml = "{row_xml}{_cell_to_odf(sheet, ref_str)}"
+                c = c + 1
+            rows = "{rows}<table:table-row>{row_xml}</table:table-row>"
+            r = r + 1
+    val name = _xml_escape(sheet.name)
+    var out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    out = "{out}<office:document {_ODF_NS} office:mimetype=\"application/vnd.oasis.opendocument.spreadsheet\">"
+    out = "{out}<office:body><office:spreadsheet><table:table table:name=\"{name}\">{rows}</table:table></office:spreadsheet></office:body></office:document>"
+    out
+
+# =========================================================================
+# Calc -> .fods with formatting (automatic-styles + data styles)
+# =========================================================================
+
+val _ODF_NS_FMT = "xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" xmlns:style=\"urn:oasis:names:tc:opendocument:xmlns:style:1.0\" xmlns:number=\"urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0\" xmlns:fo=\"urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0\" office:version=\"1.2\""
+
+fn _fmt_spec_is_default(spec: FormatSpec) -> bool:
+    """True when a FormatSpec carries no formatting at all (general display)."""
+    spec.num_fmt == "" and (not spec.bold) and spec.bg == "" and spec.fg == ""
+
+fn _fmt_spec_key(spec: FormatSpec) -> text:
+    """Dedup key for a FormatSpec: two cells with the same key share one
+    automatic style."""
+    val b = if spec.bold: "1" else: "0"
+    "{spec.num_fmt}|{b}|{spec.bg}|{spec.fg}"
+
+fn _odf_count_decimals(fmt: text) -> i32:
+    """Zeros after the decimal point in an Excel format ('0.00' -> 2)."""
+    var i = 0
+    var dot = -1
+    while i < fmt.len():
+        if fmt.slice(i, i + 1) == ".":
+            dot = i
+            i = fmt.len()
+        else:
+            i = i + 1
+    if dot < 0:
+        return 0
+    var n = 0
+    var j = dot + 1
+    while j < fmt.len() and fmt.slice(j, j + 1) == "0":
+        n = n + 1
+        j = j + 1
+    n
+
+fn _odf_data_style(num_fmt_in: text, style_name: text) -> text:
+    """ODF data style for an Excel-style number format, or "" for formats
+    outside the supported subset (0.00 / #,##0.00 / 0.0% / yyyy-mm-dd)."""
+    val fmt = num_fmt_in.lower()
+    if fmt == "":
+        return ""
+    if fmt.contains("y") and (fmt.contains("m") or fmt.contains("d")):
+        var out = "<number:date-style style:name=\"{style_name}\">"
+        out = "{out}<number:year number:style=\"long\"/><number:text>-</number:text>"
+        out = "{out}<number:month number:style=\"long\"/><number:text>-</number:text>"
+        out = "{out}<number:day number:style=\"long\"/></number:date-style>"
+        return out
+    val decs = _odf_count_decimals(fmt)
+    if fmt.ends_with("%"):
+        var out = "<number:percentage-style style:name=\"{style_name}\">"
+        out = "{out}<number:number number:decimal-places=\"{decs}\" number:min-integer-digits=\"1\"/>"
+        out = "{out}<number:text>%</number:text></number:percentage-style>"
+        return out
+    if fmt.starts_with("0") or fmt.starts_with("#"):
+        val grouping = if fmt.contains(","): " number:grouping=\"true\"" else: ""
+        var out = "<number:number-style style:name=\"{style_name}\">"
+        out = "{out}<number:number number:decimal-places=\"{decs}\" number:min-integer-digits=\"1\"{grouping}/>"
+        out = "{out}</number:number-style>"
+        return out
+    ""
+
+fn _odf_cell_style(spec: FormatSpec, style_name: text, data_style_name: text) -> text:
+    """One <style:style> table-cell automatic style for a FormatSpec.
+    data_style_name is "" when the spec has no supported number format."""
+    val data_ref = if data_style_name != "": " style:data-style-name=\"{data_style_name}\"" else: ""
+    var out = "<style:style style:family=\"table-cell\" style:name=\"{style_name}\"{data_ref}>"
+    if spec.bold or spec.fg != "":
+        val weight = if spec.bold: " fo:font-weight=\"bold\"" else: ""
+        val color = if spec.fg != "": " fo:color=\"{spec.fg}\"" else: ""
+        out = "{out}<style:text-properties{weight}{color}/>"
+    if spec.bg != "":
+        out = "{out}<style:table-cell-properties fo:background-color=\"{spec.bg}\"/>"
+    "{out}</style:style>"
+
+fn _cell_to_odf_styled(sheet: Sheet, ref_str: text, style_name: text) -> text:
+    """Like _cell_to_odf but tags the cell with table:style-name when a
+    formatting style applies (style_name != "")."""
+    val style_attr = if style_name != "": " table:style-name=\"{style_name}\"" else: ""
+    val cell = sheet.get_cell(ref_str)
+    val display = _xml_escape(cell_display_text(cell))
+    match cell.value:
+        CellValue.NumberVal(value):
+            return "<table:table-cell{style_attr} office:value-type=\"float\" office:value=\"{value}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.FormulaVal(expr, cached_display):
+            val formula = _xml_escape("of:={expr}")
+            return "<table:table-cell{style_attr} table:formula=\"{formula}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.BoolVal(value):
+            val b = if value: "true" else: "false"
+            return "<table:table-cell{style_attr} office:value-type=\"boolean\" office:boolean-value=\"{b}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.Empty:
+            if style_name != "":
+                return "<table:table-cell{style_attr}/>"
+            return "<table:table-cell/>"
+        _:
+            return "<table:table-cell{style_attr} office:value-type=\"string\"><text:p>{display}</text:p></table:table-cell>"
+
+fn sheet_to_fods_formatted(sheet: Sheet, formats: SheetFormats) -> text:
+    """Serialize a Sheet as a flat ODF spreadsheet (.fods) carrying the cell
+    formatting from `formats`: one table-cell automatic style per distinct
+    FormatSpec (bold / fo:color / fo:background-color) plus ODF data styles
+    for the supported number formats, referenced via table:style-name.
+    With an empty SheetFormats the cell content matches sheet_to_fods."""
+    # Distinct non-default specs, in first-seen order. Style ceN pairs with
+    # data style nfN (nfN emitted only when the num_fmt is supported).
+    var style_keys: [text] = []
+    var style_specs: [FormatSpec] = []
+    var fi = 0
+    while fi < formats.keys.len():
+        val spec = formats.specs[fi]
+        if not _fmt_spec_is_default(spec):
+            val key = _fmt_spec_key(spec)
+            var seen = false
+            var si = 0
+            while si < style_keys.len():
+                if style_keys[si] == key:
+                    seen = true
+                si = si + 1
+            if not seen:
+                style_keys.push(key)
+                style_specs.push(spec)
+        fi = fi + 1
+    var styles_xml = ""
+    var di = 0
+    while di < style_specs.len():
+        val spec = style_specs[di]
+        val n = di + 1
+        val data_style = _odf_data_style(spec.num_fmt, "nf{n}")
+        val data_name = if data_style != "": "nf{n}" else: ""
+        val cell_style = _odf_cell_style(spec, "ce{n}", data_name)
+        styles_xml = "{styles_xml}{data_style}{cell_style}"
+        di = di + 1
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    var rows = ""
+    if start != nil and end_ref != nil:
+        var r = start.row
+        while r <= end_ref.row:
+            var row_xml = ""
+            var c = start.col
+            while c <= end_ref.col:
+                val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+                val spec = formats_get(formats, ref_str)
+                var style_name = ""
+                if not _fmt_spec_is_default(spec):
+                    val key = _fmt_spec_key(spec)
+                    var si = 0
+                    while si < style_keys.len():
+                        if style_keys[si] == key:
+                            style_name = "ce{si + 1}"
+                        si = si + 1
+                row_xml = "{row_xml}{_cell_to_odf_styled(sheet, ref_str, style_name)}"
+                c = c + 1
+            rows = "{rows}<table:table-row>{row_xml}</table:table-row>"
+            r = r + 1
+    val name = _xml_escape(sheet.name)
+    var out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    out = "{out}<office:document {_ODF_NS_FMT} office:mimetype=\"application/vnd.oasis.opendocument.spreadsheet\">"
+    out = "{out}<office:automatic-styles>{styles_xml}</office:automatic-styles>"
+    out = "{out}<office:body><office:spreadsheet><table:table table:name=\"{name}\">{rows}</table:table></office:spreadsheet></office:body></office:document>"
+    out

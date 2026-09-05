@@ -1,0 +1,124 @@
+#!/bin/sh
+# Census: classify every declared extern symbol by whether anything actually
+# backs it AT RUNTIME (link evidence), not by text-grep proximity.
+#
+# WHY THIS EXISTS
+# ---------------
+# check-extern-registration.shs answers "is this name mentioned as a call or a
+# quoted string anywhere in .c/.h/.rs/.spl?". That is a TEXT test, and it both
+# over- and under-counts: a name merely *called* in C (a use, not a definition)
+# scores "registered", which is precisely the shape of the defect in
+# runtime_native_c_uncompilable_unsigned_box_never_implemented_2026-08-11.
+# This script instead reads DEFINED SYMBOL TABLES out of the real link
+# artifacts, so "backed" means "a linker could resolve it here".
+#
+# Classification is first-match, in this order:
+#   bare          @extern("bare", ...) -- sanctioned target-only intrinsic
+#   c_runtime     defined in build/simple-core/libsimple_runtime.a
+#   host_binary   defined in the deployed compiler/runtime binary (Rust)
+#   provider      defined in a provider archive/shared object under build/
+#   system        defined in a system library (libc/libm/libSDL2/...)
+#   simple_impl   a same-named `fn` exists in the SAME .spl module
+#   dead          no call site anywhere in .spl (declaration only)
+#   missing       genuinely unbacked AND called -- the real blast radius
+#
+# Output: TSV to $OUT (default doc/10_metrics/extern/extern_backing_census.tsv)
+# plus a summary to stdout. Read-only; changes no default and gates nothing.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+OUT=${OUT:-doc/10_metrics/extern/extern_backing_census.tsv}
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT INT TERM
+
+# --- 1. declarations (same four surface forms as check-extern-registration) --
+grep -rnE --include='*.spl' --exclude-dir=vendor \
+     '@extern|^[[:space:]]*(pub[[:space:]]+)?extern[[:space:]]+fn[[:space:]]' src test 2>/dev/null \
+| perl -ne '
+    chomp; next unless /^([^:]+):(\d+):(.*)$/;
+    my ($f,$l,$t)=($1,$2,$3); next if $t =~ /^\s*#/;
+    my ($abi,$sym)=("host","");
+    if    ($t =~ /\@extern\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)/) { $abi=$1; $sym=$2; }
+    elsif ($t =~ /\@extern\(\s*"([^"]+)"\s*\)/)                 { $sym=$1; }
+    elsif ($t =~ /\@extern\s+fn\s+([A-Za-z_]\w*)/)              { $sym=$1; }
+    elsif ($t =~ /^\s*(?:pub\s+)?extern\s+fn\s+([A-Za-z_]\w*)/) { $sym=$1; }
+    print "$sym\t$abi\t$f:$l\n" if $sym ne "";
+' | sort -u > "$work/decls.tsv"
+
+decl_lines=$(wc -l < "$work/decls.tsv" | tr -d ' ')
+# VACUITY GUARD -- mirrors check-extern-registration.shs. Never lower.
+if [ "$decl_lines" -lt 5000 ]; then
+  echo "census_ok=false"
+  echo "VACUITY GUARD TRIPPED: only $decl_lines declaration sites (expected ~9700)."
+  exit 2
+fi
+awk -F'\t' '{print $1}' "$work/decls.tsv" | sort -u > "$work/syms.txt"
+awk -F'\t' '$2=="bare"{print $1}' "$work/decls.tsv" | sort -u > "$work/bare.txt"
+
+# --- 2. defined-symbol tables from real link artifacts ----------------------
+defsyms() { # file -> defined global symbol names
+  [ -r "$1" ] || return 0
+  nm -g --defined-only "$1" 2>/dev/null | awk '{print $NF}'
+  nm -D --defined-only "$1" 2>/dev/null | awk '{print $NF}'
+}
+defsyms build/simple-core/libsimple_runtime.a | sort -u > "$work/c_runtime.txt" || :
+{ defsyms bin/release/x86_64-unknown-linux-gnu/simple; } | sort -u > "$work/host.txt" || :
+{ for f in build/providers/* build/lib/*.so build/counterpart/*.so; do defsyms "$f"; done; } \
+  | sort -u > "$work/provider.txt" || :
+{ for f in /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libm.so.6 \
+           /lib/x86_64-linux-gnu/libpthread.so.0 /lib/x86_64-linux-gnu/libdl.so.2 \
+           /lib/x86_64-linux-gnu/librt.so.1 /usr/lib/x86_64-linux-gnu/libSDL2-2.0.so.0 \
+           /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3 \
+           /usr/lib/x86_64-linux-gnu/libsqlite3.so.0 /usr/lib/x86_64-linux-gnu/libz.so.1; do
+    defsyms "$f"; done; } | sed 's/@.*//' | sort -u > "$work/system.txt" || :
+
+# NON-VACUITY: an empty symbol table would misclassify the whole tree as
+# missing. Each table that has an artifact present must be non-empty.
+for t in c_runtime host; do
+  if [ ! -s "$work/$t.txt" ]; then
+    echo "census_ok=false"; echo "ERROR: $t symbol table is empty -- nm failed or artifact absent."; exit 2
+  fi
+done
+
+# --- 3. pure-Simple same-module backing and call sites ----------------------
+grep -rhoE '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
+     --include='*.spl' --exclude-dir=vendor src test 2>/dev/null \
+  | awk '{print $NF}' | sort -u > "$work/spl_fns.txt" || :
+# call sites: `sym(` in .spl on a line that is not itself a declaration
+grep -rhoE '[A-Za-z_][A-Za-z0-9_]*\(' --include='*.spl' --exclude-dir=vendor src test 2>/dev/null \
+  | tr -d '(' | sort | uniq -c | awk '{print $2"\t"$1}' | sort -u > "$work/calls.tsv" || :
+
+# --- 4. classify -----------------------------------------------------------
+mkdir -p "$(dirname "$OUT")"
+awk -F'\t' '
+  FILENAME==ARGV[1]{ if(!($1 in abi)){abi[$1]=$2; loc[$1]=$3} ndecl[$1]++; next }
+  FILENAME==ARGV[2]{ bare[$1]=1; next }
+  FILENAME==ARGV[3]{ crt[$1]=1; next }
+  FILENAME==ARGV[4]{ host[$1]=1; next }
+  FILENAME==ARGV[5]{ prov[$1]=1; next }
+  FILENAME==ARGV[6]{ sys[$1]=1; next }
+  FILENAME==ARGV[7]{ splfn[$1]=1; next }
+  FILENAME==ARGV[8]{ calls[$1]=$2; next }
+  FILENAME==ARGV[9]{
+    s=$1; n=(s in calls)?calls[s]:0; d=(s in ndecl)?ndecl[s]:0
+    uses=(n>d)?n-d:0
+    if (s in bare) c="bare"
+    else if (s in crt) c="c_runtime"
+    else if (s in host) c="host_binary"
+    else if (s in prov) c="provider"
+    else if (s in sys) c="system"
+    else if (s in splfn) c="simple_impl"
+    else if (uses==0) c="dead"
+    else c="missing"
+    printf "%s\t%s\t%s\t%s\t%s\n", s, c, abi[s], uses, loc[s]
+  }
+' "$work/decls.tsv" "$work/bare.txt" "$work/c_runtime.txt" "$work/host.txt" \
+  "$work/provider.txt" "$work/system.txt" "$work/spl_fns.txt" "$work/calls.tsv" \
+  "$work/syms.txt" > "$work/body.tsv"
+{ printf 'symbol\tclass\tabi\tcall_sites\tfirst_decl\n'; cat "$work/body.tsv"; } > "$OUT"
+
+echo "== extern backing census =="
+echo "extern_decl_sites=$decl_lines"
+echo "extern_distinct_symbols=$(wc -l < "$work/syms.txt" | tr -d ' ')"
+tail -n +2 "$OUT" | awk -F'\t' '{c[$2]++} END{for(k in c) printf "class_%s=%d\n", k, c[k]}' | sort
+echo "census_out=$OUT"
+echo "census_ok=true"

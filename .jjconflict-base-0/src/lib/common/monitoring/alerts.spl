@@ -1,0 +1,140 @@
+# Build/CI monitoring alerts — severity classification, alert store, and rule evaluation.
+#
+# Provides: AlertSeverity, Alert, AlertRule, AlertStore, and pure functions
+# for creating, filtering, acknowledging, and summarising alerts.
+
+enum AlertSeverity:
+    """Urgency level for a monitoring alert."""
+    Info
+    Warning
+    Error
+    Critical
+
+class Alert:
+    """A single monitoring alert raised by the build or CI system."""
+    id: text
+    severity: AlertSeverity
+    title: text
+    message: text
+    source: text
+    timestamp: i64
+    acknowledged: bool
+
+class AlertRule:
+    """A named rule that can generate alerts when its condition is met."""
+    name: text
+    condition_desc: text
+    severity: AlertSeverity
+    enabled: bool
+
+class AlertStore:
+    """Immutable collection of active alerts and registered rules."""
+    alerts: [Alert]
+    rules: [AlertRule]
+
+fn alert_store_new() -> AlertStore:
+    """Return an empty AlertStore with no alerts or rules."""
+    AlertStore(alerts: [], rules: [])
+
+fn alert_add(store: AlertStore, alert: Alert) -> AlertStore:
+    """Return a new AlertStore with the given alert appended."""
+    var new_alerts: [Alert] = []
+    var i = 0
+    while i < store.alerts.len():
+        new_alerts.push(store.alerts[i])
+        i = i + 1
+    new_alerts.push(alert)
+    AlertStore(alerts: new_alerts, rules: store.rules)
+
+fn alert_acknowledge(store: AlertStore, id: text) -> AlertStore:
+    """Return a new AlertStore where the alert with the given id is acknowledged."""
+    var new_alerts: [Alert] = []
+    var i = 0
+    while i < store.alerts.len():
+        val a = store.alerts[i]
+        if a.id == id:
+            new_alerts.push(Alert(
+                id: a.id,
+                severity: a.severity,
+                title: a.title,
+                message: a.message,
+                source: a.source,
+                timestamp: a.timestamp,
+                acknowledged: true
+            ))
+        else:
+            new_alerts.push(a)
+        i = i + 1
+    AlertStore(alerts: new_alerts, rules: store.rules)
+
+fn alerts_active(store: AlertStore) -> [Alert]:
+    """Return all unacknowledged alerts."""
+    var out: [Alert] = []
+    var i = 0
+    while i < store.alerts.len():
+        val a = store.alerts[i]
+        if not a.acknowledged:
+            out.push(a)
+        i = i + 1
+    out
+
+fn alerts_by_severity(store: AlertStore, severity: AlertSeverity) -> [Alert]:
+    """Return all alerts whose severity matches the given level."""
+    var out: [Alert] = []
+    var i = 0
+    while i < store.alerts.len():
+        val a = store.alerts[i]
+        val matches = match severity:
+            case Info:     match a.severity: case Info: true case _: false
+            case Warning:  match a.severity: case Warning: true case _: false
+            case Error:    match a.severity: case Error: true case _: false
+            case Critical: match a.severity: case Critical: true case _: false
+        if matches:
+            out.push(a)
+        i = i + 1
+    out
+
+fn alert_check_threshold(value: i64, threshold: i64, rule: AlertRule) -> Option<Alert>:
+    """Create an Alert if value exceeds threshold and rule is enabled; otherwise None."""
+    if not rule.enabled:
+        return Option.None
+    if value <= threshold:
+        return Option.None
+    val msg = "Value " + value.to_text() + " exceeds threshold " + threshold.to_text()
+    Option.Some(Alert(
+        id: rule.name,
+        severity: rule.severity,
+        title: rule.name,
+        message: msg,
+        source: "threshold_check",
+        timestamp: 0,
+        acknowledged: false
+    ))
+
+fn alert_severity_label(severity: AlertSeverity) -> text:
+    """Return the lowercase text label for a severity level."""
+    match severity:
+        case Info:     "info"
+        case Warning:  "warning"
+        case Error:    "error"
+        case Critical: "critical"
+
+fn alert_summary(store: AlertStore) -> text:
+    """Return a one-line summary of alert counts grouped by severity."""
+    var n_info = 0
+    var n_warning = 0
+    var n_error = 0
+    var n_critical = 0
+    var i = 0
+    while i < store.alerts.len():
+        val a = store.alerts[i]
+        match a.severity:
+            case Info:     n_info = n_info + 1
+            case Warning:  n_warning = n_warning + 1
+            case Error:    n_error = n_error + 1
+            case Critical: n_critical = n_critical + 1
+        i = i + 1
+    "critical=" + n_critical.to_text() +
+    " error=" + n_error.to_text() +
+    " warning=" + n_warning.to_text() +
+    " info=" + n_info.to_text()

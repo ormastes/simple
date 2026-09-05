@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/hardware/riscv/fpga_board_bringup_jtag_10min_plan_2026-07-24.md.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/fpga_board_bringup_jtag_10min_plan_spec.spl
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkbox is implemented. Board/JTAG evidence per
+.claude/rules/board-runnable.md: the oracle targets the real Simple TAP/DTM
+bit-level protocol shared by the already-PASSing Vivado hw_jtag raw-mode
+path and the still-blocked OpenOCD-specific path, not a QEMU/simulation
+shortcut.
+## Verification guidance / troubleshooting
+If this scenario fails to load, jtag_route.spl's TAP codec functions have
+been renamed or removed — re-grep src/lib/hardware/link_mux/jtag_route.spl
+for jtag_read_idcode_cmds/jtag_decode_idcode before assuming a real board
+regression.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/hardware/riscv/fpga_board_bringup_jtag_10min_plan_2026-07-24.md
+# @manual_section FPGA board bring-up remains
+
+use std.spec.{step}
+use std.spec.{describe, context, it, expect}
+use std.hardware.link_mux.jtag_route.{jtag_read_idcode_cmds, jtag_decode_idcode}
+
+# Real board oracle recorded in the plan's own evidence: the KV260's inner
+# TAP IDCODE, confirmed through the BSCANE2 tunnel via Vivado hw_jtag raw
+# mode on 2026-07-24 (Lane B soak PASS section).
+# oracle: 0x15350067 is the literal IDCODE the plan's own 2026-07-24
+# evidence section records reading back from the real board, not an
+# invented constant.
+val KV260_INNER_TAP_IDCODE: i64 = 0x15350067
+
+describe "plan: hardware/riscv/fpga_board_bringup_jtag_10min_plan remains":
+
+    context "Exit Criteria":
+
+        it "JTAG: board-origin OpenOCD halt/regs/step transcript through the Simple TAP/DTM/DM (rv32 satisfied this via Vivado hw_jtag raw mode; the OpenOCD-specific path stays blocked on the tunnel-framing interop bug)":
+            step("build the remote_bitbang command stream jtag_read_idcode_cmds() emits for walking the TAP to SHIFT_DR")
+            # @req REQ-PLAN-FPGA-BRINGUP-001
+            # Interface pin, forcing function: no Simple-level function for
+            # "OpenOCD attach -> halt -> read regs -> step -> resume" exists
+            # yet (the stack is VHDL + a shell harness, run_gdb_e2e.shs,
+            # with no .spl driver). The nearest real, already-exercised
+            # Simple interface is the TAP command encode/decode pair that
+            # both the working raw-mode path and the still-blocked
+            # OpenOCD-tunnel path must agree on.
+            val cmds = jtag_read_idcode_cmds()
+            expect(cmds.len() > 0u64).to_equal(true)
+            step("decode a simulated 32-bit TDO capture and require it to match the board's own recorded IDCODE")
+            # Simulate the 32-bit reply for KV260_INNER_TAP_IDCODE exactly as
+            # the real hardware's TDO stream would encode it (LSB-first
+            # ASCII '0'/'1', matching jtag_decode_idcode's own convention).
+            var replies: [u8] = []
+            var bit = 0
+            while bit < 32:
+                if ((KV260_INNER_TAP_IDCODE >> bit) & 1) == 1:
+                    replies.push(0x31u8)
+                else:
+                    replies.push(0x30u8)
+                bit = bit + 1
+            val decoded = jtag_decode_idcode(replies)
+            expect(decoded).to_equal(KV260_INNER_TAP_IDCODE)
+            # evidence(assertion): the decoded IDCODE equality above is this
+            # scenario's retained evidence — it reproduces the exact
+            # board-origin value from the plan's 2026-07-24 status section.
+            # This proves the shared TAP-protocol codec is sound; it is NOT
+            # itself a halt/regs/step transcript. The OpenOCD-specific
+            # halt/regs/step function is the genuine gap: it does not exist
+            # in Simple source anywhere under src/lib/hardware/debug/ (VHDL
+            # + gdb_e2e shell harness only), so this `it` is the forcing
+            # function for that missing interface.

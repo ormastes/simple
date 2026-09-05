@@ -1,0 +1,88 @@
+# Baremetal Host Communication - DAP Comm Adapter
+#
+# Wraps any DebugAdapter (from dap/adapter/mod.spl) as a TransportBackend.
+# Allows using existing debug adapters for terminal communication.
+
+use std.nogc_sync_mut.dap.adapter.{DebugAdapter}
+
+# Adapts a DebugAdapter to work as a transport backend
+class DapCommAdapter:
+    adapter: DebugAdapter
+    connected: bool
+    recv_buffer: text
+
+impl DapCommAdapter:
+    static fn create(adapter: DebugAdapter) -> DapCommAdapter:
+        DapCommAdapter(
+            adapter: adapter,
+            connected: false,
+            recv_buffer: ""
+        )
+
+    fn name() -> text:
+        "dap({self.adapter.name()})"
+
+    fn is_connected() -> bool:
+        self.connected
+
+    me connect() -> Result<text, text>:
+        if self.adapter.is_attached():
+            self.connected = true
+            Ok("DAP adapter already attached")
+        else:
+            val result = self.adapter.attach("", [])
+            match result:
+                Ok(msg):
+                    self.connected = true
+                    Ok("DAP connected: {msg}")
+                Err(e):
+                    Err("DAP attach failed: {e}")
+
+    me disconnect() -> Result<text, text>:
+        val result = self.adapter.detach()
+        self.connected = false
+        match result:
+            Ok(msg): Ok("DAP disconnected: {msg}")
+            Err(e): Err("DAP detach failed: {e}")
+
+    fn send(data: text) -> Result<i32, text>:
+        if not self.connected:
+            return Err("not connected")
+        # Use evaluate to send data through DAP
+        val result = self.adapter.evaluate(data)
+        match result:
+            Ok(_): Ok(data.len())
+            Err(e): Err("DAP send failed: {e}")
+
+    me receive() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        # Read output via evaluate
+        val result = self.adapter.evaluate("__semihost_read()")
+        match result:
+            Ok(data):
+                self.recv_buffer = data
+                Ok(data)
+            Err(e):
+                Err("DAP receive failed: {e}")
+
+    fn receive_timeout(timeout_ms: i64) -> Result<text, text>:
+        self.receive()
+
+    me send_command(cmd: text) -> Result<text, text>:
+        self.send(cmd)?
+        self.receive()
+
+    fn flush() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        Ok("flushed")
+
+    fn available() -> Result<i32, text>:
+        if not self.connected:
+            return Err("not connected")
+        Ok(0)
+
+    # Access the underlying debug adapter for direct debug operations
+    fn debug_adapter() -> DebugAdapter:
+        self.adapter

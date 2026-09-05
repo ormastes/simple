@@ -1,0 +1,248 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+runner="$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-diagnostic-resume-test.XXXXXX")
+step=setup
+finish() {
+  finish_status=$?
+  trap - EXIT INT TERM HUP
+  if [ "$finish_status" -ne 0 ]; then
+    echo "bootstrap diagnostic resume integration: FAIL step=$step status=$finish_status" >&2
+    if [ -n "${DIAGNOSTIC_RESUME_TEST_ARTIFACT_DIR:-}" ]; then
+      mkdir -p "$DIAGNOSTIC_RESUME_TEST_ARTIFACT_DIR"
+      [ ! -d "$evidence" ] || cp -R "$evidence" "$DIAGNOSTIC_RESUME_TEST_ARTIFACT_DIR/evidence"
+      [ -z "${signal_evidence:-}" ] || [ ! -d "$signal_evidence" ] || cp -R "$signal_evidence" "$DIAGNOSTIC_RESUME_TEST_ARTIFACT_DIR/signal-evidence"
+      [ ! -f "$fixture/run.out" ] || cp "$fixture/run.out" "$DIAGNOSTIC_RESUME_TEST_ARTIFACT_DIR/run.out"
+      [ ! -f "$fixture/run.err" ] || cp "$fixture/run.err" "$DIAGNOSTIC_RESUME_TEST_ARTIFACT_DIR/run.err"
+      [ ! -f "$invocations" ] || cp "$invocations" "$DIAGNOSTIC_RESUME_TEST_ARTIFACT_DIR/invocations.log"
+    fi
+  fi
+  rm -rf "$fixture"
+  exit "$finish_status"
+}
+trap finish EXIT INT TERM HUP
+
+sources="$fixture/sources"
+evidence="$fixture/evidence"
+cache="$fixture/cache"
+invocations="$fixture/invocations.log"
+compiler="$fixture/fake-simple"
+child="$fixture/fake-child"
+signal_source="$fixture/raise_sigsegv.c"
+signal_helper="$fixture/raise_sigsegv"
+mkdir -p "$sources" "$evidence" "$cache"
+
+for name in 01_pass 02_failure 03_signal 04_timeout 05_pass; do
+  printf 'fn %s() -> i64: 1\n' "$name" >"$sources/$name.spl"
+done
+
+command -v cc >/dev/null 2>&1 || {
+  echo 'bootstrap diagnostic resume integration: host C compiler unavailable' >&2
+  exit 1
+}
+printf '%s\n' \
+  '#include <signal.h>' \
+  '#include <sys/resource.h>' \
+  'int main(void) {' \
+  '  struct rlimit no_core = {0, 0};' \
+  '  setrlimit(RLIMIT_CORE, &no_core);' \
+  '  signal(SIGSEGV, SIG_DFL);' \
+  '  raise(SIGSEGV);' \
+  '  return 99;' \
+  '}' >"$signal_source"
+cc -o "$signal_helper" "$signal_source"
+
+printf '%s\n' \
+  '#!/bin/sh' \
+  'set -u' \
+  'source_path=${2:-}' \
+  'printf '\''%s\n'\'' "$source_path" >>"$DIAGNOSTIC_TEST_INVOCATIONS"' \
+  'case "$(basename -- "$source_path")" in' \
+  '  diagnostic_preflight.spl|01_pass.spl|05_pass.spl) exit 0 ;;' \
+  '  02_failure.spl) echo '\''fake diagnostic failure'\'' >&2; exit 7 ;;' \
+  '  03_signal.spl|signal_only.spl) exec "$DIAGNOSTIC_TEST_SIGNAL_HELPER" ;;' \
+  '  04_timeout.spl) trap '\'''\'' TERM; /bin/sleep 10; exit 0 ;;' \
+  '  *) echo "unexpected fake source: $source_path" >&2; exit 99 ;;' \
+  'esac' >"$compiler"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$child"
+chmod +x "$compiler" "$child"
+
+common_args="--compiler=$compiler --child-compiler=$child --root=$sources --cache-dir=$cache --evidence-dir=$evidence --jobs=1 --timeout=1 --timeout-grace=1"
+
+run_status() {
+  expected=$1
+  shift
+  actual=0
+  DIAGNOSTIC_TEST_INVOCATIONS="$invocations" \
+    DIAGNOSTIC_TEST_SIGNAL_HELPER="$signal_helper" \
+    "$runner" "$@" >"$fixture/run.out" 2>"$fixture/run.err" || actual=$?
+  [ "$actual" -eq "$expected" ] || {
+    echo "expected exit $expected, got $actual: $*" >&2
+    sed -n '1,80p' "$fixture/run.err" >&2
+    exit 1
+  }
+}
+
+assert_count() {
+  expected=$1
+  name=$2
+  actual=$(grep -c "/$name.spl$" "$invocations" 2>/dev/null || true)
+  [ "$actual" -eq "$expected" ] || {
+    echo "expected $name invocation count $expected, got $actual" >&2
+    exit 1
+  }
+}
+
+# A single row distinguishes an intrinsic signal from watchdog timeout and
+# proves that an exact resume preserves the terminal signal without preflight.
+step=single_signal_inventory
+signal_sources="$fixture/signal-sources"
+signal_evidence="$fixture/signal-evidence"
+signal_cache="$fixture/signal-cache"
+mkdir -p "$signal_sources" "$signal_evidence" "$signal_cache"
+printf 'fn signal_only() -> i64: 1\n' >"$signal_sources/signal_only.spl"
+signal_args="--compiler=$compiler --child-compiler=$child --root=$signal_sources --cache-dir=$signal_cache --evidence-dir=$signal_evidence --jobs=1 --timeout=5 --timeout-grace=1"
+# shellcheck disable=SC2086
+run_status 1 $signal_args
+expected_signal_row=$(printf 'simple-bootstrap-diagnostic-result-v1\t1\t139\tsignal\t139\t11\t%s' "$signal_sources/signal_only.spl")
+[ "$(sed -n '1p' "$signal_evidence/results.tsv")" = "$expected_signal_row" ]
+grep -qx 'source_total=1' "$signal_evidence/summary.env"
+grep -qx 'terminal_count=1' "$signal_evidence/summary.env"
+grep -qx 'failed=1' "$signal_evidence/summary.env"
+grep -qx 'signaled=1' "$signal_evidence/summary.env"
+grep -qx 'timed_out=0' "$signal_evidence/summary.env"
+grep -qx 'remaining=0' "$signal_evidence/summary.env"
+[ ! -e "$signal_evidence/state/1.deadline" ]
+signal_before=$(wc -l <"$invocations" | tr -d ' ')
+step=single_signal_terminal_resume
+# shellcheck disable=SC2086
+run_status 1 $signal_args --resume
+[ "$(wc -l <"$invocations" | tr -d ' ')" -eq "$signal_before" ]
+
+# First inventory produces all terminal classes and complete durable evidence.
+step=initial_inventory
+# shellcheck disable=SC2086
+run_status 1 $common_args
+grep -qx 'complete=true' "$evidence/summary.env"
+grep -qx 'source_total=5' "$evidence/summary.env"
+grep -qx 'terminal_count=5' "$evidence/summary.env"
+grep -qx 'passed=2' "$evidence/summary.env"
+grep -qx 'failed=3' "$evidence/summary.env"
+grep -qx 'signaled=1' "$evidence/summary.env"
+grep -qx 'timed_out=1' "$evidence/summary.env"
+grep -qx 'remaining=0' "$evidence/summary.env"
+[ "$(wc -l <"$evidence/results.tsv" | tr -d ' ')" -eq 5 ]
+for name in 01_pass 02_failure 03_signal 04_timeout 05_pass; do assert_count 1 "$name"; done
+
+# Ordinary mode and changed run identity reject the nonempty frozen lane before
+# any diagnostic compiler invocation.
+before=$(wc -l <"$invocations" | tr -d ' ')
+# A fully terminal exact resume rebuilds aggregates without even a preflight.
+step=full_terminal_resume
+# shellcheck disable=SC2086
+run_status 1 $common_args --resume
+[ "$(wc -l <"$invocations" | tr -d ' ')" -eq "$before" ]
+# shellcheck disable=SC2086
+step=ordinary_nonempty_rejection
+run_status 2 $common_args
+# shellcheck disable=SC2086
+step=run_identity_rejection
+run_status 2 $common_args --jobs=2 --resume
+[ "$(wc -l <"$invocations" | tr -d ' ')" -eq "$before" ]
+
+# Source bytes are part of the manifest identity.
+cp "$sources/01_pass.spl" "$fixture/01_pass.saved"
+printf '# identity mutation\n' >>"$sources/01_pass.spl"
+# shellcheck disable=SC2086
+step=manifest_identity_rejection
+run_status 2 $common_args --resume
+cp "$fixture/01_pass.saved" "$sources/01_pass.spl"
+[ "$(wc -l <"$invocations" | tr -d ' ')" -eq "$before" ]
+
+# Compiler and delegated-child bytes are independently frozen by their hash
+# receipts. Restore the fixture bytes after proving each rejection.
+cp "$compiler" "$fixture/fake-simple.saved"
+printf '# compiler identity mutation\n' >>"$compiler"
+# shellcheck disable=SC2086
+step=compiler_identity_rejection
+run_status 2 $common_args --resume
+cp "$fixture/fake-simple.saved" "$compiler"
+cp "$child" "$fixture/fake-child.saved"
+printf '# child identity mutation\n' >>"$child"
+# shellcheck disable=SC2086
+step=child_identity_rejection
+run_status 2 $common_args --resume
+cp "$fixture/fake-child.saved" "$child"
+[ "$(wc -l <"$invocations" | tr -d ' ')" -eq "$before" ]
+
+# A valid-shaped FAIL-to-PASS result tamper must not bypass the bound evidence
+# hashes. Resume quarantines the row and redispatches only its original id.
+step=valid_shaped_result_tamper
+printf 'simple-bootstrap-diagnostic-result-v1\t2\t0\tpass\t0\t0\t%s\n' \
+  "$sources/02_failure.spl" >"$evidence/state/2.result"
+# shellcheck disable=SC2086
+run_status 1 $common_args --resume
+assert_count 1 01_pass
+assert_count 2 02_failure
+assert_count 1 03_signal
+assert_count 1 04_timeout
+assert_count 1 05_pass
+[ -f "$evidence/state/rejected/2.1.result" ]
+[ -f "$evidence/state/rejected/2.1.evidence.sha256" ]
+
+# A hash-matching log reached through a symlink is not reusable evidence.
+step=symlink_log_tamper
+mv "$evidence/logs/2.log" "$fixture/id2-log.saved"
+ln -s "$fixture/id2-log.saved" "$evidence/logs/2.log"
+# shellcheck disable=SC2086
+run_status 1 $common_args --resume
+assert_count 1 01_pass
+assert_count 3 02_failure
+assert_count 1 03_signal
+assert_count 1 04_timeout
+assert_count 1 05_pass
+[ -L "$evidence/state/rejected/2.2.log" ]
+
+# A missing terminal row redispatches only that id. Existing FAIL, signal, and
+# timeout rows are terminal and must never be rerun.
+rm "$evidence/state/5.result"
+# shellcheck disable=SC2086
+step=missing_terminal_redispatch
+run_status 1 $common_args --resume
+assert_count 1 01_pass
+assert_count 3 02_failure
+assert_count 1 03_signal
+assert_count 1 04_timeout
+assert_count 2 05_pass
+
+# A prior partial rejected slot cannot be overwritten. A malformed row selects
+# the next free slot and only its id is redispatched.
+mkdir -p "$evidence/state/rejected"
+printf 'prior-partial\n' >"$evidence/state/rejected/1.1.status"
+printf 'not-a-result\n' >"$evidence/state/1.result"
+# shellcheck disable=SC2086
+step=corrupt_terminal_redispatch
+run_status 1 $common_args --resume
+assert_count 2 01_pass
+assert_count 3 02_failure
+assert_count 1 03_signal
+assert_count 1 04_timeout
+assert_count 2 05_pass
+grep -qx 'prior-partial' "$evidence/state/rejected/1.1.status"
+[ -f "$evidence/state/rejected/1.2.result" ]
+grep -qx 'not-a-result' "$evidence/state/rejected/1.2.result"
+
+step=ordered_aggregate_validation
+awk -F '\t' '
+  $1 != "simple-bootstrap-diagnostic-result-v1" { exit 1 }
+  $2 != NR { exit 1 }
+  END { if (NR != 5) exit 1 }
+' "$evidence/results.tsv"
+grep -qx 'complete=true' "$evidence/summary.env"
+grep -qx 'terminal_count=5' "$evidence/summary.env"
+grep -qx 'remaining=0' "$evidence/summary.env"
+[ ! -e "$evidence/.active" ]
+
+echo 'bootstrap diagnostic resume integration: PASS'

@@ -1,0 +1,67 @@
+# @cover src/lib/nogc_sync_mut/df/mod.spl 80%
+"""
+# DataFrame Melt Numeric Specification
+
+**Feature IDs:** REQ-SCILIB-D-002, science-math-lib-set-dataframe-reshape-lite
+**Plan:** doc/03_plan/science_math_dataframe_compatibility_manifest.md
+
+Validates the constrained numeric wide-to-long reshape. The variable column is
+an Int64 ordinal for the selected value column; text/object dtype and
+multi-index behavior are intentionally out of scope.
+"""
+
+use std.spipe.*
+use std.df.*
+use std.ndarray.*
+
+
+describe "DataFrame melt_numeric":
+    it "reshapes numeric value columns to long form with an Int64 variable ordinal":
+        val df = DataFrame.from_columns([
+            SeriesErased.I64Series(Series.from_values(Symbol.from("id"), [Int64.new(1), Int64.new(2)])),
+            SeriesErased.F64Series(Series.from_values(Symbol.from("jan"), [Float64.new(10.0), Float64.new(20.0)])),
+            SeriesErased.I64Series(Series.from_values(Symbol.from("feb"), [Int64.new(30), Int64.new(40)])),
+        ]).unwrap()
+        val out = df.melt_numeric(
+            Symbol.from("id"),
+            [Symbol.from("jan"), Symbol.from("feb")],
+            Symbol.from("variable"),
+            Symbol.from("value")
+        ).unwrap()
+        expect(out.num_rows()).to_equal(Index.new(4))
+        expect(out.num_cols()).to_equal(Index.new(3))
+        expect(out.col(Symbol.from("id")).unwrap().get(Index.new(0))).to_equal(Int64.new(1))
+        expect(out.col(Symbol.from("id")).unwrap().get(Index.new(1))).to_equal(Int64.new(1))
+        expect(out.col(Symbol.from("variable")).unwrap().get(Index.new(0))).to_equal(Int64.new(0))
+        expect(out.col(Symbol.from("variable")).unwrap().get(Index.new(1))).to_equal(Int64.new(1))
+        expect(out.col(Symbol.from("value")).unwrap().get(Index.new(0))).to_equal(Float64.new(10.0))
+        expect(out.col(Symbol.from("value")).unwrap().get(Index.new(1))).to_equal(Float64.new(30.0))
+        expect(out.col(Symbol.from("value")).unwrap().get(Index.new(3))).to_equal(Float64.new(40.0))
+
+    it "preserves value missing masks":
+        val df = DataFrame.from_columns([
+            SeriesErased.I64Series(Series.from_values(Symbol.from("id"), [Int64.new(1)])),
+            SeriesErased.F64Series(Series.from_f64_masked(
+                Symbol.from("jan"),
+                [Float64.new(0.0)],
+                [Bool.new(true)]
+            ).unwrap()),
+        ]).unwrap()
+        val out = melt_numeric(
+            df,
+            Symbol.from("id"),
+            [Symbol.from("jan")],
+            Symbol.from("variable"),
+            Symbol.from("value")
+        ).unwrap()
+        expect(out.col(Symbol.from("value")).unwrap().is_missing(Index.new(0)).unwrap()).to_equal(true)
+
+    it "returns errors for missing columns, empty value set, and duplicate output names":
+        val df = DataFrame.from_columns([
+            SeriesErased.I64Series(Series.from_values(Symbol.from("id"), [Int64.new(1)])),
+            SeriesErased.F64Series(Series.from_values(Symbol.from("jan"), [Float64.new(10.0)])),
+        ]).unwrap()
+        expect(df.melt_numeric(Symbol.from("id"), [], Symbol.from("variable"), Symbol.from("value")).is_err()).to_equal(true)
+        expect(df.melt_numeric(Symbol.from("missing"), [Symbol.from("jan")], Symbol.from("variable"), Symbol.from("value")).is_err()).to_equal(true)
+        expect(df.melt_numeric(Symbol.from("id"), [Symbol.from("missing")], Symbol.from("variable"), Symbol.from("value")).is_err()).to_equal(true)
+        expect(df.melt_numeric(Symbol.from("id"), [Symbol.from("jan")], Symbol.from("id"), Symbol.from("value")).is_err()).to_equal(true)

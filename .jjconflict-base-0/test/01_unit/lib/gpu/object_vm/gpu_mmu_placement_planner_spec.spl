@@ -1,0 +1,56 @@
+# @tag: gpu, object-vm, placement
+# @cover src/lib/nogc_async_mut/gpu/placement_backends/planner.spl 80%
+
+use std.spec.*
+use common.compute.placement_contracts.handles.{object_ref}
+use common.compute.placement_contracts.residency.{ResidencyTier}
+use common.compute.placement_contracts.semantic.{AnyObject, AccessPattern, ResidencyTierSet, DeviceMask, StageEpoch, CostUnit, PersistencePolicy, AffinityGroupId}
+use common.compute.placement_contracts.planner.{PlacementBudget, PlacementRequest}
+use std.gpu.placement_backends.planner.{PlacementObjectState, placement_object_state, placement_retain_score, placement_plan_states, placement_calibration}
+
+fn _budget() -> PlacementBudget:
+    PlacementBudget(device_bytes: 8, host_pinned_bytes: 0, host_hot_bytes: 0, staging_bytes: 16, driver_queue_bytes: 4, manifest_cache_bytes: 2, runtime_base_bytes: 10)
+
+fn _state(slot: i64, bytes: i64, live_end: i64, reuse: i64, transfer: i64, recompute: i64, group: i64, pinned: bool) -> PlacementObjectState:
+    val request = PlacementRequest(
+        object: object_ref<AnyObject>(slot.to_u32(), 1u32),
+        access: AccessPattern.ReadMostly,
+        required_tiers: ResidencyTierSet(tiers: []),
+        preferred_tiers: [],
+        device_mask: DeviceMask(bits: 1u64),
+        expected_first_use: StageEpoch(value: 0u64),
+        expected_last_use: StageEpoch(value: live_end.to_u64()),
+        expected_reuse_distance: reuse.to_u32(),
+        recompute_cost: CostUnit(value: recompute.to_u64()),
+        transfer_cost_hint: CostUnit(value: transfer.to_u64()),
+        persistence: PersistencePolicy.Recomputable,
+        affinity_group: AffinityGroupId(value: group.to_u64()),
+        deadline: nil
+    )
+    placement_object_state(request, bytes, pinned, false)
+
+describe "GPU MMU deterministic placement planner":
+    it "ranks liveness reuse transfer savings affinity and protection":
+        val first = _state(1, 8, 20, 1, 5, 100, 7, false)
+        val peer = _state(2, 8, 5, 50, 20, 4, 7, false)
+        val pinned = _state(3, 1, 1, 100, 10, 10, 0, true)
+        val all = [first, peer, pinned]
+        expect(placement_retain_score(first, all)).to_be_greater_than(placement_retain_score(peer, all))
+        expect(placement_retain_score(pinned, all)).to_be_greater_than(placement_retain_score(first, all))
+
+    it "produces stable arena operations for permuted input":
+        val retain = _state(1, 8, 20, 1, 5, 100, 7, false)
+        val recompute = _state(2, 8, 5, 50, 20, 4, 7, false)
+        val left = placement_plan_states([retain, recompute], _budget())
+        val right = placement_plan_states([recompute, retain], _budget())
+        expect(left.operations.reservations[0].object.object_slot).to_equal(right.operations.reservations[0].object.object_slot)
+        expect(left.operations.reservations[0].tier).to_equal(ResidencyTier.DeviceLocal)
+        expect(left.operations.evictions.len()).to_equal(1)
+        expect(left.plan.receipt_seed.value).to_equal(right.plan.receipt_seed.value)
+
+    it "calibrates the integer cost estimate to a stated bound":
+        val accepted = placement_calibration(105, 100, 50000)
+        val rejected = placement_calibration(106, 100, 50000)
+        expect(accepted.error_ppm).to_equal(50000)
+        expect(accepted.within_confidence).to_be(true)
+        expect(rejected.within_confidence).to_be(false)

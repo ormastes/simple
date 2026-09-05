@@ -1,0 +1,341 @@
+#!/bin/sh
+# check-rt-dual-implementation-ratchet.shs — freeze today's single-lane rt_*
+# population and FAIL any push that adds a new one.
+#
+# Standing architectural directive: every rt_* runtime primitive should have a C
+# implementation AND a Simple implementation, bound by an alias so call sites
+# reach one name, with intensive tests dual-running the two. The related rule is
+# that no NEW rt_* may be added in C or Rust — a Rust-only rt_* silently
+# diverges the C lane, because nothing compares them.
+#
+# Measured 2026-09-01 by scripts/check/rt-dual-implementation-census.shs (nm over
+# real link artifacts): 2594 distinct rt_*, of which 609 are defined in both
+# lanes, 932 are C-only and 1053 are Rust-only. That population is far too large
+# to fix at once, so — exactly like scripts/check/check-unbacked-extern-ratchet.shs
+# and its unbacked_extern_baseline.txt — it is FROZEN in a baseline and only the
+# DELTA is fatal.
+#
+# WHY THIS GUARD USES TEXT EXTRACTION, NOT nm
+# The census is authoritative because it reads DEFINED symbols out of real link
+# artifacts. A per-push gate cannot: a clean checkout has no built artifact, and
+# a gate that needs one would either ERROR on every push or, far worse, quietly
+# fail open. So this guard reuses the committed-content definition patterns that
+# check-runtime-api-regression-push.shs already relies on, and reads them via
+# `git show <rev>:<path>` so the shared, contested working copy is never
+# consulted. The two methods' counts are cross-checked once in the census report;
+# the text patterns' error bar is stated there rather than left implicit.
+#
+# LANES ARE NEVER UNIONED. CLAUDE.md records that unioning the C and Rust symbol
+# sets was tried for check-runtime-api-regression-push.shs and found to mask real
+# Rust-only removals whenever a same-named C fallback existed. The same applies
+# here in reverse: a union would make every Rust-only symbol look dual-lane and
+# the guard would ratchet nothing.
+#
+# Baseline: scripts/check/rt_dual_implementation_baseline.txt, lines
+#   <symbol>\t<c-only|rust-only>
+#
+# FAILs on, in both directions (a baseline that no longer describes the tree is
+# how a ratchet silently stops ratcheting):
+#   * a NEW single-lane rt_* not in the baseline;
+#   * a STALE baseline entry — one that is no longer single-lane (it gained its
+#     other lane, or was deleted entirely).
+#
+# Verdict, always the last line of stdout:
+#   PASS — <n> symbol(s) checked, 0 new, 0 stale                  exit 0
+#   FAIL — <n> symbol(s) checked, ...                             exit 1
+#   ERROR — nothing was checked                                   exit 2
+# 0 symbols compared is ERROR, never a pass. --selftest runs before every scan
+# and is fatal.
+#
+# Deliberate-update path: --generate-baseline. For REVIEWED updates only, exactly
+# like the divergence and unbacked-extern baselines. Do not "fix" a FAIL with it
+# without reading the diff — a FAIL naming new symbols is real new debt, and
+# regenerating hides it.
+
+set -u
+
+REV=""
+ROOT=""
+BASELINE=""
+GENERATE=0
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) REV="$2"; shift 2 ;;
+        --root) ROOT="$2"; shift 2 ;;
+        --baseline) BASELINE="$2"; shift 2 ;;
+        --generate-baseline) GENERATE=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Extraction. Two lanes, kept strictly separate.
+#
+# $1 = root directory holding a checkout (working tree or a materialised rev).
+# Writes  $2/c_syms.txt  and  $2/rust_syms.txt.
+# ---------------------------------------------------------------------------
+extract_lanes() {
+    el_root="$1"
+    el_out="$2"
+
+    : > "$el_out/c_syms.txt"
+    : > "$el_out/rust_syms.txt"
+
+    # C lane: `rt_NAME(...) {` definitions in owned C sources. Vendored runtime
+    # source is excluded per CLAUDE.md's Owned-Code Scope.
+    if [ -d "$el_root/src/runtime" ]; then
+        find "$el_root/src/runtime" -name '*.c' -not -path '*/vendor/*' -print0 2>/dev/null \
+            | xargs -0 grep -hoE '\brt_[A-Za-z0-9_]+[[:space:]]*\([^;]*\)[[:space:]]*\{' 2>/dev/null \
+            | grep -oE '^rt_[A-Za-z0-9_]+' \
+            | sort -u > "$el_out/c_syms.txt"
+    fi
+
+    # Rust lane: `fn rt_*` definitions. Test modules are excluded by path; a
+    # #[cfg(test)] helper is not a runtime primitive.
+    if [ -d "$el_root/src/compiler_rust/runtime/src" ]; then
+        find "$el_root/src/compiler_rust/runtime/src" -name '*.rs' \
+            -not -path '*/vendor/*' -not -name 'tests.rs' -print0 2>/dev/null \
+            | xargs -0 grep -hoE '\bfn[[:space:]]+rt_[A-Za-z0-9_]+' 2>/dev/null \
+            | grep -oE 'rt_[A-Za-z0-9_]+' \
+            | sort -u > "$el_out/rust_syms.txt"
+    fi
+}
+
+# Emit "<symbol>\t<class>" for every SINGLE-LANE symbol, sorted.
+single_lane() {
+    sl_dir="$1"
+    awk '
+        FILENAME == ARGV[1] { c[$0] = 1; next }
+        { r[$0] = 1 }
+        END {
+            for (s in c) if (!(s in r)) printf "%s\tc-only\n", s
+            for (s in r) if (!(s in c)) printf "%s\trust-only\n", s
+        }
+    ' "$sl_dir/c_syms.txt" "$sl_dir/rust_syms.txt" | sort
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal, runs before every scan. Fixtures are real directory trees
+# fed to the real extractor and the real comparison, never a mocked shortcut.
+# ---------------------------------------------------------------------------
+selftest() {
+    st_dir=$(mktemp -d)
+    RC=$?
+    if [ $RC -ne 0 ]; then
+        echo "selftest: FAILED — mktemp"
+        return 1
+    fi
+    st_n=0
+
+    mkfixture() {
+        mf="$st_dir/$1"
+        mkdir -p "$mf/src/runtime" "$mf/src/compiler_rust/runtime/src"
+        printf 'int64_t rt_shared(int64_t a) { return a; }\nint64_t rt_conly(void) { return 1; }\n' \
+            > "$mf/src/runtime/r.c"
+        printf 'pub extern "C" fn rt_shared(a: i64) -> i64 { a }\npub fn rt_ronly() -> i64 { 2 }\n' \
+            > "$mf/src/compiler_rust/runtime/src/lib.rs"
+    }
+
+    # Fixture 1: extraction separates the lanes and finds exactly the two
+    # single-lane symbols — never the shared one.
+    mkfixture f1
+    mkdir -p "$st_dir/w1"
+    extract_lanes "$st_dir/f1" "$st_dir/w1"
+    single_lane "$st_dir/w1" > "$st_dir/w1/sl.txt"
+    st_got=$(cat "$st_dir/w1/sl.txt")
+    st_want="$(printf 'rt_conly\tc-only\nrt_ronly\trust-only')"
+    if [ "$st_got" != "$st_want" ]; then
+        echo "selftest: FAILED — lane separation, got [$st_got]"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Fixture 2: a matching baseline PASSes.
+    cp "$st_dir/w1/sl.txt" "$st_dir/base_ok.txt"
+    st_new=$(comm -23 "$st_dir/w1/sl.txt" "$st_dir/base_ok.txt" | wc -l | tr -d ' ')
+    st_stale=$(comm -13 "$st_dir/w1/sl.txt" "$st_dir/base_ok.txt" | wc -l | tr -d ' ')
+    if [ "$st_new" -ne 0 ] || [ "$st_stale" -ne 0 ]; then
+        echo "selftest: FAILED — clean fixture not read as clean (new=$st_new stale=$st_stale)"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Fixture 3: a NEW Rust-only symbol must be caught. This is the directive's
+    # most severe violation and the guard's whole reason to exist.
+    mkfixture f3
+    printf 'pub fn rt_brand_new_rust_only() -> i64 { 7 }\n' \
+        >> "$st_dir/f3/src/compiler_rust/runtime/src/lib.rs"
+    mkdir -p "$st_dir/w3"
+    extract_lanes "$st_dir/f3" "$st_dir/w3"
+    single_lane "$st_dir/w3" > "$st_dir/w3/sl.txt"
+    st_new=$(comm -23 "$st_dir/w3/sl.txt" "$st_dir/base_ok.txt")
+    if [ "$st_new" != "$(printf 'rt_brand_new_rust_only\trust-only')" ]; then
+        echo "selftest: FAILED — new rust-only symbol not caught, got [$st_new]"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Fixture 4: a baselined symbol that GAINED its other lane is a stale
+    # baseline entry and must also FAIL — a baseline that no longer describes
+    # the tree is how a ratchet silently stops ratcheting.
+    mkfixture f4
+    printf 'int64_t rt_ronly(void) { return 2; }\n' >> "$st_dir/f4/src/runtime/r.c"
+    mkdir -p "$st_dir/w4"
+    extract_lanes "$st_dir/f4" "$st_dir/w4"
+    single_lane "$st_dir/w4" > "$st_dir/w4/sl.txt"
+    st_stale=$(comm -13 "$st_dir/w4/sl.txt" "$st_dir/base_ok.txt")
+    if [ "$st_stale" != "$(printf 'rt_ronly\trust-only')" ]; then
+        echo "selftest: FAILED — stale baseline entry not caught, got [$st_stale]"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Fixture 5: a baselined symbol that was DELETED outright is likewise stale.
+    mkfixture f5
+    printf 'int64_t rt_shared(int64_t a) { return a; }\n' > "$st_dir/f5/src/runtime/r.c"
+    mkdir -p "$st_dir/w5"
+    extract_lanes "$st_dir/f5" "$st_dir/w5"
+    single_lane "$st_dir/w5" > "$st_dir/w5/sl.txt"
+    st_stale=$(comm -13 "$st_dir/w5/sl.txt" "$st_dir/base_ok.txt" | grep -c 'rt_conly')
+    if [ "$st_stale" -ne 1 ]; then
+        echo "selftest: FAILED — deleted baselined symbol not caught as stale"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    # Fixture 6: an empty tree must yield 0 symbols, so the caller is FORCED to
+    # ERROR rather than reporting a vacuous pass. Non-vacuity is absolute.
+    mkdir -p "$st_dir/f6" "$st_dir/w6"
+    extract_lanes "$st_dir/f6" "$st_dir/w6"
+    st_empty=$(single_lane "$st_dir/w6" | wc -l | tr -d ' ')
+    if [ "$st_empty" -ne 0 ]; then
+        echo "selftest: FAILED — empty tree yielded $st_empty symbol(s)"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    rm -rf "$st_dir"
+    echo "selftest: $st_n fixture(s) passed"
+    return 0
+}
+
+selftest
+RC=$?
+if [ $RC -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 6 fixture(s) checked, selftest only, no real tree scanned"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Real scan.
+# ---------------------------------------------------------------------------
+if [ -z "$ROOT" ]; then
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    RC=$?
+    if [ $RC -ne 0 ] || [ -z "$ROOT" ]; then
+        echo "ERROR — nothing was checked (not inside a git repository and no --root)"
+        exit 2
+    fi
+fi
+
+if [ -z "$BASELINE" ]; then
+    BASELINE="$ROOT/scripts/check/rt_dual_implementation_baseline.txt"
+fi
+
+WORK=$(mktemp -d)
+RC=$?
+if [ $RC -ne 0 ]; then
+    echo "ERROR — nothing was checked (mktemp failed)"
+    exit 2
+fi
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+SCAN_ROOT="$ROOT"
+if [ -n "$REV" ]; then
+    # Read COMMITTED content, never the shared working copy — a plumbing-built
+    # commit may never have been checked out, and under concurrent agent load
+    # the working copy disagrees with what is actually being pushed.
+    mkdir -p "$WORK/rev"
+    ( cd "$ROOT" && git archive "$REV" -- src/runtime src/compiler_rust/runtime ) 2>/dev/null \
+        | tar -x -C "$WORK/rev" 2>/dev/null
+    RC=$?
+    if [ $RC -ne 0 ] || [ ! -d "$WORK/rev/src" ]; then
+        echo "ERROR — nothing was checked (could not materialise $REV)"
+        exit 2
+    fi
+    SCAN_ROOT="$WORK/rev"
+fi
+
+extract_lanes "$SCAN_ROOT" "$WORK"
+single_lane "$WORK" > "$WORK/current.txt"
+
+CUR_N=$(wc -l < "$WORK/current.txt" | tr -d ' ')
+if [ "$CUR_N" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 single-lane rt_* symbols extracted from $SCAN_ROOT)"
+    exit 2
+fi
+
+if [ "$GENERATE" -eq 1 ]; then
+    {
+        echo "# rt_* single-lane baseline — frozen population for"
+        echo "# scripts/check/check-rt-dual-implementation-ratchet.shs."
+        echo "#"
+        echo "# Each line is an rt_* symbol defined in exactly ONE of the two runtime"
+        echo "# lanes, and therefore a violation of the standing directive that every"
+        echo "# rt_* have both a C and a Simple implementation bound by an alias. The"
+        echo "# population is frozen rather than fixed because it is far too large to"
+        echo "# fix at once; the ratchet makes it non-increasing."
+        echo "#"
+        echo "# Regenerate ONLY as a deliberate, reviewed update. A FAIL naming new"
+        echo "# symbols is real new debt — regenerating hides it."
+        echo "#"
+        echo "# format: <symbol>\t<c-only|rust-only>"
+        cat "$WORK/current.txt"
+    } > "$BASELINE"
+    echo "PASS — $CUR_N symbol(s) checked, baseline regenerated at $BASELINE"
+    exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (baseline not found at $BASELINE)"
+    exit 2
+fi
+
+grep -v '^#' "$BASELINE" | grep -v '^[[:space:]]*$' | sort > "$WORK/baseline.txt"
+BASE_N=$(wc -l < "$WORK/baseline.txt" | tr -d ' ')
+if [ "$BASE_N" -eq 0 ]; then
+    echo "ERROR — nothing was checked (baseline $BASELINE has 0 entries)"
+    exit 2
+fi
+
+comm -23 "$WORK/current.txt" "$WORK/baseline.txt" > "$WORK/new.txt"
+comm -13 "$WORK/current.txt" "$WORK/baseline.txt" > "$WORK/stale.txt"
+
+NEW_N=$(wc -l < "$WORK/new.txt" | tr -d ' ')
+STALE_N=$(wc -l < "$WORK/stale.txt" | tr -d ' ')
+
+if [ "$NEW_N" -ne 0 ] || [ "$STALE_N" -ne 0 ]; then
+    if [ "$NEW_N" -ne 0 ]; then
+        echo "NEW single-lane rt_* (adding one violates the directive — implement the"
+        echo "missing lane in C and Simple with an alias, do not regenerate the baseline):"
+        cut -f1 "$WORK/new.txt" | sed 's/^/  /'
+    fi
+    if [ "$STALE_N" -ne 0 ]; then
+        echo "STALE baseline entries (no longer single-lane, or deleted — the baseline"
+        echo "no longer describes the tree, which is how a ratchet stops ratcheting):"
+        cut -f1 "$WORK/stale.txt" | sed 's/^/  /'
+    fi
+    echo "FAIL — $CUR_N symbol(s) checked against $BASE_N baselined, $NEW_N new, $STALE_N stale"
+    exit 1
+fi
+
+echo "PASS — $CUR_N symbol(s) checked against $BASE_N baselined, 0 new, 0 stale"
+exit 0

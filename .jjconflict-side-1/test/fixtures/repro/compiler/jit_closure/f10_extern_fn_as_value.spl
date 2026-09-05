@@ -1,0 +1,48 @@
+# Fixture f10 — an EXTERN function passed as a value (companion to f06, which
+# covers a locally-DEFINED function passed as a value).
+#
+# Regression pin for
+# doc/08_tracking/bug/jit_extern_fn_as_value_still_miscompiles_2026-08-08.md,
+# itself a narrower instance of Defect 2 in
+# doc/08_tracking/bug/jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md.
+#
+# Before the fix (2026-08-08): `apply0(rt_getpid)` under JIT silently
+# dereferenced `rt_getpid`'s raw code address as a closure struct --
+# SIGSEGV or a garbage i64, exit 0, no diagnostic.
+#
+# After the fix (verified against the current deployed seed binary,
+# md5 varies by rebuild -- check via `bin/simple --version`):
+#
+#   SIMPLE_EXECUTION_MODE=jit       -> loud "[INFO] JIT compilation failed,
+#                                       falling back to interpreter: ...
+#                                       loads a named function as a callable
+#                                       value ..." followed by
+#                                       "error: semantic: variable `rt_getpid`
+#                                       not found" (rc reported as 0 by the
+#                                       driver wrapper; the semantic error is
+#                                       the operative failure signal)
+#   SIMPLE_EXECUTION_MODE=interpret -> the SAME "variable `rt_getpid` not
+#                                       found" error, with NO JIT fallback
+#                                       line (there is nothing to fall back
+#                                       from)
+#
+# The "variable not found" outcome on BOTH engines is a SEPARATE, pre-existing
+# interpreter-side gap (extern fn names are not bound as first-class values in
+# either engine's scope) -- explicitly called out as out of scope by the bug
+# doc above. What this fixture pins is narrower and already fixed: the JIT
+# must never reach `compile_indirect_call`'s raw-pointer-deref path for an
+# extern fn name used as a value. A regression that removes the
+# `mir.extern_fn_names` filter from `first_named_fn_value_load`
+# (src/compiler_rust/compiler/src/codegen/jit.rs) would reintroduce the
+# silent SIGSEGV/garbage instead of this loud, engine-agreeing error --
+# that is the behavior change to watch for, not the "not found" message
+# itself.
+
+extern fn rt_getpid() -> i64
+
+fn apply0(f: () -> i64) -> i64:
+    f()
+
+fn main():
+    val r = apply0(rt_getpid)
+    print("f10 marker result={r}")

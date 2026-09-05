@@ -1,0 +1,107 @@
+# codex-impl: checked dynamic backend provider library lease.
+#
+# This boundary validates and retains the exact v1 entry symbol. Provider calls
+# route through the typed boxed-byte runtime bridge rather than this raw address.
+
+use std.sffi.dynamic.{DynLib}
+
+val DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1 = "simple_backend_plugin_v1"
+
+enum DynamicBackendPluginLoadError:
+    LoadFailed(detail: text)
+    MissingSymbol(detail: text)
+    Unsupported(detail: text)
+
+impl DynamicBackendPluginLoadError:
+    fn code() -> text:
+        match self:
+            case LoadFailed(_): "BACKEND_PLUGIN_LOAD_FAILED"
+            case MissingSymbol(_): "BACKEND_PLUGIN_MISSING_SYMBOL"
+            case Unsupported(_): "BACKEND_PLUGIN_DYNAMIC_ABI_UNSUPPORTED"
+
+    fn diagnostic() -> text:
+        match self:
+            case LoadFailed(detail): detail
+            case MissingSymbol(detail): detail
+            case Unsupported(detail): detail
+
+class DynamicBackendPluginLease:
+    """Loaded provider library pinned around one resolved v1 entry symbol.
+
+    A lease proves only checked load and exact-name symbol resolution. It is not
+    descriptor admission and deliberately offers no raw-call operation.
+    """
+    library: DynLib
+    provider_path: text
+    entry_symbol_address: i64
+    closed: bool
+
+impl DynamicBackendPluginLease:
+    fn symbol_name() -> text:
+        DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+
+    fn is_open() -> bool:
+        not self.closed and self.entry_symbol_address > 0
+
+    me close() -> bool:
+        """Release the provider library once without invoking provider code."""
+        if self.closed:
+            return true
+        unsafe(capabilities: [ffi]):
+            self.library.close()
+        self.entry_symbol_address = 0
+        self.closed = true
+        true
+
+@unsafe(
+    reason: "loads an unverified backend provider and resolves one raw symbol without invoking it",
+    capabilities: [ffi, raw_ptr],
+)
+fn load_dynamic_backend_plugin_lease(
+    provider_path: text
+) -> Result<DynamicBackendPluginLease, DynamicBackendPluginLoadError>:
+    """Load a provider and retain its exact v1 symbol, failing closed."""
+    if provider_path == "":
+        return Err(DynamicBackendPluginLoadError.LoadFailed(
+            "dynamic backend provider path is required"
+        ))
+
+    val loaded = unsafe(capabilities: [ffi]):
+        DynLib.load_checked(provider_path)
+    var library = match loaded:
+        case Ok(value): value
+        case Err(detail):
+            return Err(DynamicBackendPluginLoadError.LoadFailed(detail))
+
+    val resolved = unsafe(capabilities: [ffi, raw_ptr]):
+        library.sym_checked(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+    val entry_symbol = match resolved:
+        case Ok(value): value
+        case Err(detail):
+            unsafe(capabilities: [ffi]):
+                library.close()
+            return Err(DynamicBackendPluginLoadError.MissingSymbol(
+                "missing " + DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+                    + " in " + provider_path + ": " + detail
+            ))
+
+    Ok(DynamicBackendPluginLease(
+        library: library,
+        provider_path: provider_path,
+        entry_symbol_address: entry_symbol,
+        closed: false
+    ))
+
+fn dynamic_backend_plugin_admission_status(
+    lease: DynamicBackendPluginLease
+) -> Result<bool, DynamicBackendPluginLoadError>:
+    """Report that the retained lease is ready for typed bridge activation."""
+    if not lease.is_open():
+        return Err(DynamicBackendPluginLoadError.LoadFailed(
+            "dynamic backend provider lease is closed"
+        ))
+    Ok(true)
+
+export DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+export DynamicBackendPluginLoadError, DynamicBackendPluginLease
+export load_dynamic_backend_plugin_lease, dynamic_backend_plugin_admission_status

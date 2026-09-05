@@ -1,0 +1,392 @@
+# x86-32 non-PAE explicit user page-root owner.
+#
+# The capsule is the sole issuer of root leases and the sole registry for leaf
+# physical provenance. A lease is a coordinate, never CPU-entry authority.
+
+use os.kernel.types.memory_types.{PhysAddr, PageFrame, VmFlags}
+use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
+use os.kernel.arch.x86_32.paging.{vmm_get_manager}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+val _X86_32_PAGE_BYTES_V1: u64 = 4096u64
+val _X86_32_ENTRY_COUNT_V1: u64 = 1024u64
+val _X86_32_KERNEL_PD_START_V1: u64 = 768u64
+val _X86_32_PHYS_LIMIT_V1: u64 = 0x100000000u64
+val _X86_32_PTE_PRESENT_V1: u32 = 1u32
+val _X86_32_PTE_WRITABLE_V1: u32 = 2u32
+val _X86_32_PTE_USER_V1: u32 = 4u32
+val _X86_32_PTE_PAGE_SIZE_V1: u32 = 128u32
+val _X86_32_PTE_ADDR_MASK_V1: u32 = 0xFFFFF000u32
+
+pub enum X8632NonPaeExecutePolicyV1:
+    ExecuteDisableUnavailable
+
+pub enum X8632UserRootStateV1:
+    MutableUnpublished
+    AdoptionReserved
+    Detached
+    Destroyed
+    Quarantined
+
+pub enum X8632LeafDispositionV1:
+    NotMapped
+    Registered
+    RegisteredQuarantined
+    Unregistered
+    UnregisteredQuarantined
+
+pub enum X8632RootCreateDispositionV1:
+    NotCreated
+    Created
+    CreatedQuarantined
+
+pub struct X8632UserRootLeaseV1:
+    root_phys: u64
+    generation: u64
+    nonce: u64
+
+pub struct X8632MapReceiptV1:
+    ok: bool
+    disposition: X8632LeafDispositionV1
+    root_phys: u64
+    virt: u64
+    phys: u64
+    created_table_phys: u64
+    execute_policy: X8632NonPaeExecutePolicyV1
+    hardware_wx_enforced: bool
+    scheduler_adoption_permitted: bool
+    execution_authorized: bool
+
+pub struct X8632RootCreateReceiptV1:
+    ok: bool
+    disposition: X8632RootCreateDispositionV1
+    lease: X8632UserRootLeaseV1?
+
+pub struct X8632UnmapReceiptV1:
+    ok: bool
+    disposition: X8632LeafDispositionV1
+    phys: u64
+
+pub struct X8632RootReleaseReceiptV1:
+    ok: bool
+    root_phys: u64
+    generation: u64
+    state: X8632UserRootStateV1
+
+struct X8632OwnedLeafV1:
+    virt: u64
+    phys: u64
+
+struct X8632OwnedTableV1:
+    pd_index: u64
+    phys: u64
+
+struct X8632UserRootSlotV1:
+    generation: u64
+    nonce: u64
+    state: X8632UserRootStateV1
+    root_phys: u64
+    leaves: [X8632OwnedLeafV1]
+    tables: [X8632OwnedTableV1]
+    contains_effectively_writable_executable: bool
+
+val _x86_32_root_mutex_v1: i64 = mutex_raw_create()
+var _x86_32_root_slots_v1: [X8632UserRootSlotV1] = []
+var _x86_32_root_next_generation_v1: u64 = 1u64
+var _x86_32_root_quarantined_v1: bool = false
+
+pub fn x86_32_user_root_max_live_v1() -> i64: 4
+pub fn x86_32_user_root_max_leaves_v1() -> i64: 65536
+
+pub fn x86_32_non_pae_execute_policy_v1() -> X8632NonPaeExecutePolicyV1:
+    X8632NonPaeExecutePolicyV1.ExecuteDisableUnavailable
+
+fn _x86_32_lock_v1() -> bool:
+    if _x86_32_root_quarantined_v1: return false
+    _x86_32_root_mutex_v1 > 0 and mutex_raw_lock(_x86_32_root_mutex_v1)
+
+fn _x86_32_unlock_v1() -> bool:
+    if not mutex_raw_unlock(_x86_32_root_mutex_v1):
+        _x86_32_root_quarantined_v1 = true
+        return false
+    true
+
+fn _x86_32_read_entry_v1(table: u64, index: u64) -> u32:
+    mmio_read32(table + index * 4u64)
+
+fn _x86_32_write_entry_v1(table: u64, index: u64, value: u32):
+    mmio_write32(table + index * 4u64, value)
+
+fn _x86_32_zero_table_v1(phys: u64) -> bool:
+    var index = 0u64
+    while index < _X86_32_ENTRY_COUNT_V1:
+        _x86_32_write_entry_v1(phys, index, 0u32)
+        if _x86_32_read_entry_v1(phys, index) != 0u32: return false
+        index = index + 1u64
+    true
+
+fn _x86_32_initialize_root_v1(root: u64, kernel_root: u64) -> bool:
+    if not _x86_32_zero_table_v1(root): return false
+    var pd_index = _X86_32_KERNEL_PD_START_V1
+    while pd_index < _X86_32_ENTRY_COUNT_V1:
+        var kernel_entry = _x86_32_read_entry_v1(kernel_root, pd_index)
+        if ((kernel_entry & _X86_32_PTE_PRESENT_V1) != 0u32 and
+            (kernel_entry & _X86_32_PTE_PAGE_SIZE_V1) == 0u32 and
+            (kernel_entry & _X86_32_PTE_ADDR_MASK_V1) as u64 == kernel_root):
+            kernel_entry = (kernel_entry & ~_X86_32_PTE_ADDR_MASK_V1) | root as u32
+        _x86_32_write_entry_v1(root, pd_index, kernel_entry)
+        if _x86_32_read_entry_v1(root, pd_index) != kernel_entry: return false
+        pd_index = pd_index + 1u64
+    true
+
+fn _x86_32_slot_index_v1(lease: X8632UserRootLeaseV1) -> i64:
+    var index = 0
+    while index < _x86_32_root_slots_v1.len():
+        val slot = _x86_32_root_slots_v1[index]
+        if (slot.root_phys == lease.root_phys and
+            slot.generation == lease.generation and slot.nonce == lease.nonce):
+            return index
+        index = index + 1
+    -1
+
+fn _x86_32_phys_owned_v1(phys: u64) -> bool:
+    for slot in _x86_32_root_slots_v1:
+        if slot.root_phys == phys: return true
+        for table in slot.tables:
+            if table.phys == phys: return true
+        for leaf in slot.leaves:
+            if leaf.phys == phys: return true
+    false
+
+fn _x86_32_owned_table_v1(slot: X8632UserRootSlotV1, pd_index: u64, phys: u64) -> bool:
+    for table in slot.tables:
+        if table.pd_index == pd_index and table.phys == phys: return true
+    false
+
+fn _x86_32_map_reject_v1(virt: u64, phys: u64) -> X8632MapReceiptV1:
+    X8632MapReceiptV1(
+        ok: false, disposition: X8632LeafDispositionV1.NotMapped,
+        root_phys: 0u64, virt: virt, phys: phys, created_table_phys: 0u64,
+        execute_policy: x86_32_non_pae_execute_policy_v1(),
+        hardware_wx_enforced: false, scheduler_adoption_permitted: false,
+        execution_authorized: false)
+
+pub(package) fn x86_32_user_root_create_v1() -> X8632RootCreateReceiptV1:
+    val rejected = X8632RootCreateReceiptV1(
+        ok: false, disposition: X8632RootCreateDispositionV1.NotCreated,
+        lease: nil)
+    if not _x86_32_lock_v1(): return rejected
+    var answer = rejected
+    if (_x86_32_root_slots_v1.len() < x86_32_user_root_max_live_v1() and
+        _x86_32_root_next_generation_v1 != 0u64 and
+        _x86_32_root_next_generation_v1 != 18446744073709551615u64):
+        val root_frame = pmm_alloc_page()
+        if root_frame.?:
+            val root = root_frame.unwrap().to_phys_addr().addr
+            val kernel_root = vmm_get_manager().pd_phys as u64
+            if (root != 0u64 and root < _X86_32_PHYS_LIMIT_V1 and
+                root % _X86_32_PAGE_BYTES_V1 == 0u64 and
+                kernel_root != 0u64 and kernel_root < _X86_32_PHYS_LIMIT_V1):
+                val initialized = _x86_32_initialize_root_v1(root, kernel_root)
+                if not initialized:
+                    pmm_free_page(root_frame.unwrap())
+                else:
+                    val generation = _x86_32_root_next_generation_v1
+                    _x86_32_root_next_generation_v1 = generation + 1u64
+                    var nonce = root ^ generation ^ 0x5838363332524F4Fu64
+                    if nonce == 0u64: nonce = generation ^ 0x8632A55Au64
+                    _x86_32_root_slots_v1.push(X8632UserRootSlotV1(
+                        generation: generation, nonce: nonce,
+                        state: X8632UserRootStateV1.MutableUnpublished,
+                        root_phys: root, leaves: [], tables: [],
+                        contains_effectively_writable_executable: false))
+                    answer = X8632RootCreateReceiptV1(
+                        ok: true, disposition: X8632RootCreateDispositionV1.Created,
+                        lease: Some(X8632UserRootLeaseV1(
+                            root_phys: root, generation: generation, nonce: nonce)))
+            else:
+                pmm_free_page(root_frame.unwrap())
+    if not _x86_32_unlock_v1():
+        if answer.disposition == X8632RootCreateDispositionV1.Created:
+            answer.ok = false
+            answer.disposition = X8632RootCreateDispositionV1.CreatedQuarantined
+        return answer
+    answer
+
+pub(package) fn x86_32_user_allocate_and_map_v1(
+    lease: X8632UserRootLeaseV1,
+    virt: u64,
+    flags: VmFlags
+) -> X8632MapReceiptV1:
+    val rejected = _x86_32_map_reject_v1(virt, 0u64)
+    if (virt == 0u64 or virt >= 0xC0000000u64 or
+        virt % _X86_32_PAGE_BYTES_V1 != 0u64 or
+        not flags.present() or not flags.user() or
+        (flags.writable() and not flags.no_execute())):
+        return rejected
+    if not _x86_32_lock_v1(): return rejected
+    var answer = rejected
+    val slot_index = _x86_32_slot_index_v1(lease)
+    if slot_index >= 0:
+        var slot = _x86_32_root_slots_v1[slot_index]
+        if (slot.state == X8632UserRootStateV1.MutableUnpublished and
+            slot.leaves.len() < x86_32_user_root_max_leaves_v1()):
+            val pd_index = (virt >> 22) & 0x3FFu64
+            val pt_index = (virt >> 12) & 0x3FFu64
+            var pd_entry = _x86_32_read_entry_v1(slot.root_phys, pd_index)
+            var table = 0u64
+            var created_table = 0u64
+            if (pd_entry & _X86_32_PTE_PRESENT_V1) == 0u32:
+                val table_frame = pmm_alloc_page()
+                if table_frame.?:
+                    table = table_frame.unwrap().to_phys_addr().addr
+                    if (table != 0u64 and table < _X86_32_PHYS_LIMIT_V1 and
+                        table % _X86_32_PAGE_BYTES_V1 == 0u64):
+                        if _x86_32_zero_table_v1(table):
+                            pd_entry = (table as u32) | _X86_32_PTE_PRESENT_V1 |
+                                _X86_32_PTE_WRITABLE_V1 | _X86_32_PTE_USER_V1
+                            _x86_32_write_entry_v1(slot.root_phys, pd_index, pd_entry)
+                            slot.tables.push(X8632OwnedTableV1(
+                                pd_index: pd_index, phys: table))
+                            # Retain ownership before classifying publication.
+                            _x86_32_root_slots_v1[slot_index] = slot
+                            if _x86_32_read_entry_v1(slot.root_phys, pd_index) == pd_entry:
+                                created_table = table
+                            else:
+                                table = 0u64
+                        else:
+                            pmm_free_page(table_frame.unwrap())
+                    else:
+                        pmm_free_page(table_frame.unwrap())
+            elif (pd_entry & _X86_32_PTE_PAGE_SIZE_V1) == 0u32:
+                val candidate = (pd_entry & _X86_32_PTE_ADDR_MASK_V1) as u64
+                if _x86_32_owned_table_v1(slot, pd_index, candidate): table = candidate
+            if table != 0u64 and _x86_32_read_entry_v1(table, pt_index) == 0u32:
+                val leaf_frame = pmm_alloc_page()
+                if leaf_frame.?:
+                    val phys = leaf_frame.unwrap().to_phys_addr().addr
+                    if (phys != 0u64 and phys < _X86_32_PHYS_LIMIT_V1 and
+                        phys % _X86_32_PAGE_BYTES_V1 == 0u64 and
+                        not _x86_32_phys_owned_v1(phys)):
+                        # Scrub the complete caller-visible frame before the
+                        # present PTE is published. PMM reuse is not assumed to
+                        # provide confidentiality.
+                        if _x86_32_zero_table_v1(phys):
+                            var pte = (phys as u32) | _X86_32_PTE_PRESENT_V1 | _X86_32_PTE_USER_V1
+                            if flags.writable():
+                                pte = pte | _X86_32_PTE_WRITABLE_V1
+                                slot.contains_effectively_writable_executable = true
+                            _x86_32_write_entry_v1(table, pt_index, pte)
+                            slot.leaves.push(X8632OwnedLeafV1(virt: virt, phys: phys))
+                            _x86_32_root_slots_v1[slot_index] = slot
+                            val exact_pte = _x86_32_read_entry_v1(table, pt_index) == pte
+                            val disposition = if exact_pte:
+                                X8632LeafDispositionV1.Registered
+                            else:
+                                X8632LeafDispositionV1.RegisteredQuarantined
+                            answer = X8632MapReceiptV1(
+                                ok: exact_pte,
+                                disposition: disposition,
+                                root_phys: slot.root_phys, virt: virt, phys: phys,
+                                created_table_phys: created_table,
+                                execute_policy: x86_32_non_pae_execute_policy_v1(),
+                                hardware_wx_enforced: false,
+                                scheduler_adoption_permitted: false,
+                                execution_authorized: false)
+                        else:
+                            pmm_free_page(leaf_frame.unwrap())
+                    else:
+                        pmm_free_page(leaf_frame.unwrap())
+    if not _x86_32_unlock_v1():
+        if answer.disposition == X8632LeafDispositionV1.Registered:
+            answer.ok = false
+            answer.disposition = X8632LeafDispositionV1.RegisteredQuarantined
+        return answer
+    answer
+
+pub(package) fn x86_32_user_unmap_exact_v1(
+    lease: X8632UserRootLeaseV1,
+    virt: u64,
+    expected_phys: u64
+) -> X8632UnmapReceiptV1:
+    var answer = X8632UnmapReceiptV1(
+        ok: false, disposition: X8632LeafDispositionV1.NotMapped, phys: expected_phys)
+    if not _x86_32_lock_v1(): return answer
+    val slot_index = _x86_32_slot_index_v1(lease)
+    if slot_index >= 0:
+        var slot = _x86_32_root_slots_v1[slot_index]
+        if slot.state == X8632UserRootStateV1.MutableUnpublished:
+            var leaf_index = 0
+            while leaf_index < slot.leaves.len():
+                val leaf = slot.leaves[leaf_index]
+                if leaf.virt == virt and leaf.phys == expected_phys:
+                    val pd_entry = _x86_32_read_entry_v1(
+                        slot.root_phys, (virt >> 22) & 0x3FFu64)
+                    if ((pd_entry & _X86_32_PTE_PRESENT_V1) != 0u32 and
+                        (pd_entry & _X86_32_PTE_PAGE_SIZE_V1) == 0u32):
+                        val table = (pd_entry & _X86_32_PTE_ADDR_MASK_V1) as u64
+                        val pt_index = (virt >> 12) & 0x3FFu64
+                        val pte = _x86_32_read_entry_v1(table, pt_index)
+                        if (_x86_32_owned_table_v1(slot, (virt >> 22) & 0x3FFu64, table) and
+                            (pte & _X86_32_PTE_PRESENT_V1) != 0u32 and
+                            (pte & _X86_32_PTE_ADDR_MASK_V1) as u64 == expected_phys):
+                            _x86_32_write_entry_v1(table, pt_index, 0u32)
+                            if _x86_32_read_entry_v1(table, pt_index) == 0u32:
+                                slot.leaves.remove(leaf_index)
+                                _x86_32_root_slots_v1[slot_index] = slot
+                                answer = X8632UnmapReceiptV1(
+                                    ok: true,
+                                    disposition: X8632LeafDispositionV1.Unregistered,
+                                    phys: expected_phys)
+                    break
+                leaf_index = leaf_index + 1
+    if not _x86_32_unlock_v1():
+        if answer.disposition == X8632LeafDispositionV1.Unregistered:
+            answer.ok = false
+            answer.disposition = X8632LeafDispositionV1.UnregisteredQuarantined
+        return answer
+    answer
+
+pub(package) fn x86_32_user_root_destroy_unpublished_v1(
+    lease: X8632UserRootLeaseV1
+) -> X8632RootReleaseReceiptV1:
+    var answer = X8632RootReleaseReceiptV1(
+        ok: false, root_phys: lease.root_phys, generation: lease.generation,
+        state: X8632UserRootStateV1.Quarantined)
+    if not _x86_32_lock_v1(): return answer
+    val slot_index = _x86_32_slot_index_v1(lease)
+    if slot_index >= 0:
+        var slot = _x86_32_root_slots_v1[slot_index]
+        if (slot.state == X8632UserRootStateV1.MutableUnpublished and
+            slot.leaves.len() == 0):
+            var retained_tables: [X8632OwnedTableV1] = []
+            for table in slot.tables:
+                _x86_32_write_entry_v1(slot.root_phys, table.pd_index, 0u32)
+                if _x86_32_read_entry_v1(slot.root_phys, table.pd_index) == 0u32:
+                    pmm_free_page(PageFrame.from_phys_addr(PhysAddr(addr: table.phys)))
+                else:
+                    retained_tables.push(table)
+            slot.tables = retained_tables
+            if retained_tables.len() == 0:
+                pmm_free_page(PageFrame.from_phys_addr(PhysAddr(addr: slot.root_phys)))
+                _x86_32_root_slots_v1.remove(slot_index)
+                answer = X8632RootReleaseReceiptV1(
+                    ok: true, root_phys: lease.root_phys, generation: lease.generation,
+                    state: X8632UserRootStateV1.Destroyed)
+            else:
+                _x86_32_root_slots_v1[slot_index] = slot
+    # Post-free failure remains terminal; retrying would double free.
+    if not _x86_32_unlock_v1(): return answer
+    answer
+
+# Scheduler CR3/CPL3 adoption is deliberately absent. This mapper cannot flip
+# global executable readiness or authorize entry on its own.
+pub fn x86_32_user_root_scheduler_ready_v1() -> bool: false
+
+export X8632NonPaeExecutePolicyV1, X8632UserRootStateV1
+export X8632LeafDispositionV1, X8632RootCreateDispositionV1, X8632UserRootLeaseV1
+export X8632RootCreateReceiptV1
+export X8632MapReceiptV1, X8632UnmapReceiptV1, X8632RootReleaseReceiptV1
+export x86_32_user_root_max_live_v1, x86_32_user_root_max_leaves_v1
+export x86_32_non_pae_execute_policy_v1, x86_32_user_root_scheduler_ready_v1

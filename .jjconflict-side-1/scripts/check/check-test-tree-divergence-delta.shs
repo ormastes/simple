@@ -1,0 +1,166 @@
+#!/bin/sh
+# Scoped-delta escape for check-test-tree-divergence.shs.
+#
+# A FAIL of the divergence guard is acceptable for landing IFF the outgoing
+# range introduces ZERO new divergence — i.e. the guard's offender state at
+# NEW is byte-identical to its offender state at BASE (the origin tip the
+# push replaces). This helper proves exactly that, mechanically:
+#
+#   sh scripts/check/check-test-tree-divergence-delta.shs <BASE> <NEW>
+#
+# It runs the guard in --ref (committed-content) mode for BOTH sides — never
+# the working copy, which disagrees with committed content under concurrent
+# shared-WC load — captures each side's diverged-offender list via
+# TEST_TREE_DIVERGENCE_OUT, and diffs them, plus the FAIL verdict lines
+# (which carry the mirror-only / stale-allowlist / new / fixed counts, so a
+# category change that doesn't alter the diverged list still trips it).
+#
+# Verdict (always the LAST line of stdout):
+#   PASS — <n> pre-existing offender(s), 0 introduced by this range   exit 0
+#   FAIL — <n> newly introduced: <names>                              exit 1
+#   ERROR — nothing was checked                                       exit 2
+#
+# This is NOT a licence to skip the guard: a PASS here still requires the
+# lander to record the pre-existing offender list (the base .offenders file
+# this prints the path of) in the commit message or a tracking bug. Any
+# range that changes the offender state stays hard-blocked. No directory is
+# excluded; the underlying guard scans the full pair table at each ref.
+
+set -u
+
+SELF=check-test-tree-divergence-delta
+
+die() {
+    status="$1"; shift
+    echo "$SELF: ERROR: $*" >&2
+    echo "$SELF: ERROR — nothing was checked"
+    exit "$status"
+}
+
+[ $# -eq 2 ] || die 2 "usage: $SELF <BASE> <NEW> (both commit-ish)"
+BASE_REF="$1"
+NEW_REF="$2"
+
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null)
+[ -n "$toplevel" ] || die 2 "not inside a git repository (cwd=$(pwd))"
+cd "$toplevel" || die 2 "cannot cd to repo root $toplevel"
+
+GUARD="$toplevel/scripts/check/check-test-tree-divergence.shs"
+[ -f "$GUARD" ] || die 2 "guard script missing: $GUARD"
+
+git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null \
+    || die 2 "BASE '$BASE_REF' does not resolve to a commit"
+git rev-parse --verify --quiet "${NEW_REF}^{commit}" >/dev/null \
+    || die 2 "NEW '$NEW_REF' does not resolve to a commit"
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence_delta.XXXXXX") \
+    || die 2 "mktemp failed"
+trap 'rm -rf "$work"' EXIT INT TERM
+
+# Pin the guard script, baseline, and allowlist ONCE for both runs. All three
+# live in the shared working copy, which concurrent sessions mutate; without
+# pinning, the two --ref runs can read DIFFERENT baselines (observed live:
+# base run 3 fixed-but-still-baselined, new run 4, on a range touching no
+# test path) and a byte-identical offender state reads as a delta. TOCTOU.
+cp "$GUARD" "$work/guard.shs" || die 2 "cannot snapshot guard script"
+BL="${TEST_TREE_DIVERGENCE_BASELINE:-$toplevel/scripts/check/test_tree_divergence_baseline.txt}"
+[ -f "$BL" ] && cp "$BL" "$work/baseline.txt"
+AL="${TEST_TREE_MIRROR_ONLY_ALLOWLIST:-$toplevel/scripts/check/test_tree_mirror_only_allowlist.txt}"
+[ -f "$AL" ] && cp "$AL" "$work/allowlist.txt"
+GUARD="$work/guard.shs"
+# Do NOT export TEST_TREE_DIVERGENCE_BASELINE / TEST_TREE_MIRROR_ONLY_ALLOWLIST
+# here. Both --ref runs below read the baseline and allowlist FROM THE REF, and
+# the base guard fail-closes (exit 2, "override is not supported with --ref")
+# when either variable is set. Exporting them made this helper ERROR on every
+# invocation, so the scoped-delta escape it exists to provide was unusable.
+# The TOCTOU concern above is already satisfied in --ref mode: content read from
+# a committed ref cannot be mutated by a concurrent session.
+
+# run_side <name> <ref> — runs the guard in committed-content mode.
+# Sets: <name>_rc, and writes $work/<name>.out / .err / .offenders / .verdict
+run_side() {
+    name="$1"; sref="$2"
+    TEST_TREE_DIVERGENCE_OUT="$work/$name.offenders" \
+        sh "$GUARD" --ref "$sref" > "$work/$name.out" 2> "$work/$name.err"
+    rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] \
+        || die 2 "guard errored (exit $rc) at $name=$sref — cannot determine offender list; stderr: $(tail -1 "$work/$name.err" 2>/dev/null)"
+    verdict=$(tail -1 "$work/$name.out")
+    case "$verdict" in
+        "check-test-tree-divergence: PASS — "*|"check-test-tree-divergence: FAIL — "*) ;;
+        *) die 2 "no recognizable verdict line from guard at $name=$sref (got: $verdict)" ;;
+    esac
+    # The guard writes the offender list on every rc-0/1 run (step 5); its
+    # absence means the run never reached comparison — that is an ERROR.
+    [ -f "$work/$name.offenders" ] || die 2 "guard did not write offender list for $name=$sref"
+    printf '%s\n' "$verdict" > "$work/$name.verdict"
+    eval "${name}_rc=$rc"
+}
+
+run_side base "$BASE_REF"
+run_side new  "$NEW_REF"
+
+# Guard green at NEW: nothing to escape — the range is clean regardless of BASE.
+if [ "$new_rc" -eq 0 ]; then
+    echo "$SELF: guard is PASS at NEW ($NEW_REF); no escape needed"
+    echo "$SELF: PASS — 0 pre-existing offender(s), 0 introduced by this range"
+    exit 0
+fi
+
+# Guard red at NEW but green at BASE: this range introduced the red. Hard block.
+if [ "$base_rc" -eq 0 ]; then
+    comm -13 "$work/base.offenders" "$work/new.offenders" > "$work/introduced.txt"
+    n_intro=$(wc -l < "$work/introduced.txt" | tr -d ' ')
+    names=$(tr '\n' ' ' < "$work/introduced.txt")
+    [ "$n_intro" -gt 0 ] || { n_intro="?"; names="(offender-category change — see $work/new.err; verdict: $(cat "$work/new.verdict"))"; }
+    echo "$SELF: guard is PASS at BASE but FAIL at NEW — this range introduced the red" >&2
+    sed 's/^/  + /' "$work/introduced.txt" >&2
+    echo "$SELF: FAIL — $n_intro newly introduced: $names"
+    exit 1
+fi
+
+# Both sides red: acceptable ONLY if offender state is byte-identical.
+if ! cmp -s "$work/base.offenders" "$work/new.offenders"; then
+    comm -13 "$work/base.offenders" "$work/new.offenders" > "$work/introduced.txt"
+    n_intro=$(wc -l < "$work/introduced.txt" | tr -d ' ')
+    if [ "$n_intro" -gt 0 ]; then
+        names=$(tr '\n' ' ' < "$work/introduced.txt")
+        echo "$SELF: offender list changed between BASE and NEW:" >&2
+        sed 's/^/  + /' "$work/introduced.txt" >&2
+        echo "$SELF: FAIL — $n_intro newly introduced: $names"
+    else
+        # List shrank without converging to PASS — offender state still moved;
+        # a shrink should normally flip the guard green or shrink the baseline.
+        echo "$SELF: offender list SHRANK but guard still FAILs — offender state changed; investigate, do not treat as pre-existing" >&2
+        echo "$SELF: FAIL — offender list changed (removed entries, guard still red)"
+    fi
+    exit 1
+fi
+
+if ! cmp -s "$work/base.verdict" "$work/new.verdict"; then
+    echo "$SELF: diverged lists identical but FAIL verdicts differ — an offender CATEGORY (mirror-only / stale-allowlist / stale-baseline) changed in this range:" >&2
+    echo "  BASE: $(cat "$work/base.verdict")" >&2
+    echo "  NEW:  $(cat "$work/new.verdict")" >&2
+    echo "$SELF: FAIL — offender categories changed between BASE and NEW"
+    exit 1
+fi
+
+# Byte-identical offender state. Count the pre-existing offenders from the
+# base verdict line: new + fixed-but-still-baselined + unallowlisted
+# mirror-only + stale-allowlist. Parse fail-closed.
+counts=$(sed -n 's/^check-test-tree-divergence: FAIL — [0-9]* diverged vs [0-9]* baselined (\([0-9]*\) new, \([0-9]*\) fixed-but-still-baselined); [0-9]* mirror-only (\([0-9]*\) unallowlisted, \([0-9]*\) stale-allowlist).*/\1 \2 \3 \4/p' "$work/base.verdict")
+# Older guard versions emit the verdict without the mirror-only segment;
+# accept that too (mirror-only counts then 0). Both formats end fail-closed.
+[ -n "$counts" ] || counts=$(sed -n 's/^check-test-tree-divergence: FAIL — [0-9]* diverged vs [0-9]* baselined (\([0-9]*\) new, \([0-9]*\) fixed-but-still-baselined).*/\1 \2 0 0/p' "$work/base.verdict")
+[ -n "$counts" ] || die 2 "could not parse offender counts from base verdict: $(cat "$work/base.verdict")"
+set -- $counts
+n_pre=$(( $1 + $2 + $3 + $4 ))
+[ "$n_pre" -gt 0 ] || die 2 "guard FAILs at both refs but parsed 0 offenders — verdict format drift? ($(cat "$work/base.verdict"))"
+
+keep="${TEST_TREE_DIVERGENCE_DELTA_OUT:-${TMPDIR:-/tmp}/test_tree_divergence_preexisting.txt}"
+cp "$work/base.offenders" "$keep" 2>/dev/null || keep="(failed to write $keep)"
+echo "$SELF: pre-existing red is identical at BASE and NEW; this range introduces nothing"
+echo "$SELF: pre-existing diverged-offender list saved to $keep — RECORD IT (commit message or tracking bug) before landing"
+echo "$SELF: base verdict: $(cat "$work/base.verdict")"
+echo "$SELF: PASS — $n_pre pre-existing offender(s), 0 introduced by this range"
+exit 0

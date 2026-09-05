@@ -1,0 +1,82 @@
+# Run-path probe: `@packed` bitfield field reads must arrive at the formatter as
+# TAGGED runtime values, exactly like every other scalar field read.
+#
+# Reproducer for
+# doc/08_tracking/bug/jit_packed_bitfield_field_read_returns_nil_2026-08-10.md
+#
+# Under the JIT this printed `ready=nil ro=nil rsv=0`: the extracted bitfield
+# scalar reached `rt_value_to_string` UNTAGGED, so the formatter read its low 3
+# bits as a type tag — 1 -> "nil", 5 -> "<value:0x5>", 9 -> "<invalid-heap:0x9>",
+# while 0 happened to render correctly and hid the defect.
+#
+# Every oracle below is an ABSOLUTE decimal literal this probe did not compute.
+# Run with `bin/simple run`, under both SIMPLE_EXECUTION_MODE values.
+
+@packed
+struct Reg:
+    ready: u32:1
+    readonly: u32:1
+    reserved: u32:30
+
+@packed
+struct Bytes:
+    lo: u32:8
+    mid: u32:8
+    hi: u32:16
+
+struct Plain:
+    q: u32
+
+var failures: i64 = 0
+
+fn check(name: text, got: text, want: text):
+    if got == want:
+        print "PASS " + name
+    else:
+        failures = failures + 1
+        print "FAIL " + name + " got=" + got + " want=" + want
+
+fn main() -> i64:
+    var r = Reg(0)
+    r.ready = 1
+    r.readonly = 1
+
+    # The three low bit-patterns that alias the runtime tag space.
+    # 1 aliases TAG_HEAP-adjacent space and rendered as "nil"; this is the
+    # exact expression from the bug report.
+    check("bitfield_bit0_is_1", "{r.ready}", "1")
+    check("bitfield_bit1_is_1", "{r.readonly}", "1")
+    check("bitfield_wide_is_0", "{r.reserved}", "0")
+
+    var b = Bytes(0)
+    b.lo = 5
+    b.mid = 9
+    b.hi = 300
+
+    # 5 rendered as "<value:0x5>", 9 as "<invalid-heap:0x9>" before the fix.
+    check("bitfield_byte0_is_5", "{b.lo}", "5")
+    check("bitfield_byte1_is_9", "{b.mid}", "9")
+    check("bitfield_word_is_300", "{b.hi}", "300")
+
+    # A multiple of 8 has tag bits 0, so it is read back as a BOXED int and
+    # silently DIVIDED BY 8 (measured: 8 rendered as "1"). This is the quietest
+    # form of the defect — a plausible small number, no marker text at all.
+    b.lo = 8
+    check("bitfield_byte0_is_8", "{b.lo}", "8")
+
+    # Control arm: an ordinary (non-bitfield) u32 struct field. This path was
+    # never broken; a red here means the probe or the harness is wrong, not
+    # the bitfield lowering.
+    val p = Plain(7)
+    check("plain_u32_field_is_7", "{p.q}", "7")
+
+    # Round-tripping through a local was the documented WORKAROUND — it must
+    # keep working too.
+    val via_local: u32 = r.ready
+    check("bitfield_via_local_is_1", "{via_local}", "1")
+
+    if failures == 0:
+        print "PACKED_BITFIELD_READ PROBE: ALL PASS"
+    else:
+        print "PACKED_BITFIELD_READ PROBE: FAILURES"
+    0

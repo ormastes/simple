@@ -1,0 +1,356 @@
+use std.common.structural.receipt.simpleos_evidence_receipt_v1_codec.{
+    encode_simpleos_evidence_receipt_v1_signing_bytes
+}
+use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
+    SimpleOsCapabilityStatus,
+    SimpleOsCapabilityLedgerV1,
+    SimpleOsCapabilityLedgerCandidateV1,
+    SimpleOsCapabilityLedgerCheckV1,
+    SimpleOsCapabilityLedgerCommitResultV1,
+    SimpleOsCapabilityLedgerFailure,
+    simpleos_capability_ledger_v1,
+    simpleos_capability_ledger_check_v1,
+    simpleos_capability_row_key
+}
+use os.services.evidence.capability_ledger.{
+    simpleos_capability_candidate_validate
+}
+use os.services.evidence.artifact_snapshot.{
+    SimpleOsEvidenceArtifactSnapshotV1,
+    simpleos_evidence_artifact_snapshot_check
+}
+use os.services.evidence.ledger_transition.{
+    SimpleOsEvidenceLedgerSnapshotV1,
+    simpleos_evidence_prepare_ledger_transition
+}
+use os.services.evidence.admission_gates.*
+use os.services.evidence.signature_codec.{simpleos_evidence_signature_hex_decode}
+use os.services.evidence.owner_value.{
+    simpleos_evidence_bounded_identity,
+    simpleos_evidence_bytes_copy,
+    simpleos_evidence_bytes_equal
+}
+use os.services.evidence.owner_serialization_transition.{
+    simpleos_evidence_owner_unlock_outcome
+}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+use os.services.evidence._verifier_owner.verifier_core.*
+fn simpleos_evidence_verify_candidate(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    challenge: SimpleOsEvidenceChallengeV1,
+    consumer: text,
+    now_unix_us: i64
+) -> SimpleOsEvidenceVerificationResultV1:
+    _simpleos_evidence_verify_candidate_checked(
+        candidate, challenge, consumer, now_unix_us,
+        _simpleos_evidence_check_failure("artifact-rehash-required"))
+
+fn simpleos_evidence_verify_candidate_with_snapshot(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    challenge: SimpleOsEvidenceChallengeV1,
+    consumer: text,
+    snapshot: SimpleOsEvidenceArtifactSnapshotV1,
+    now_unix_us: i64
+) -> SimpleOsEvidenceVerificationResultV1:
+    val candidate_check = simpleos_capability_candidate_validate(candidate)
+    if not candidate_check.ok:
+        return _simpleos_evidence_verification_failure(
+            "candidate:" + candidate_check.reason)
+    val snapshot_check = simpleos_evidence_artifact_snapshot_check(
+        candidate, snapshot)
+    _simpleos_evidence_verify_candidate_checked(
+        candidate, challenge, consumer, now_unix_us, snapshot_check)
+
+# Verify already-captured evidence against the current trusted clock without
+# reconstructing a historical challenge. Persistent replay reservation is
+# performed by the importing owner before this returned handle is consumed.
+fn simpleos_evidence_verify_detached_candidate_with_snapshot(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    consumer: text,
+    snapshot: SimpleOsEvidenceArtifactSnapshotV1,
+    now_unix_us: i64
+) -> SimpleOsEvidenceVerificationResultV1:
+    if not simpleos_evidence_bounded_identity(
+        consumer, SIMPLEOS_EVIDENCE_MAX_CONSUMER_BYTES):
+        return _simpleos_evidence_verification_failure("consumer-format")
+    if now_unix_us <= 0 or candidate.receipt.finished_unix_us > now_unix_us:
+        return _simpleos_evidence_verification_failure("verification-time")
+    val candidate_check = simpleos_capability_candidate_validate(candidate)
+    if not candidate_check.ok:
+        return _simpleos_evidence_verification_failure("candidate:" + candidate_check.reason)
+    val snapshot_check = simpleos_evidence_artifact_snapshot_check(candidate, snapshot)
+    if not snapshot_check.ok:
+        return _simpleos_evidence_verification_failure(snapshot_check.reason)
+    val signing_bytes = encode_simpleos_evidence_receipt_v1_signing_bytes(candidate.receipt)
+    if not signing_bytes.ok:
+        return _simpleos_evidence_verification_failure("canonical-signing-bytes")
+    val signature = simpleos_evidence_signature_hex_decode(candidate.receipt.signature)
+    if signature.len() != 64:
+        return _simpleos_evidence_verification_failure("signature-encoding")
+    if _simpleos_evidence_quarantined or
+        not mutex_raw_lock(_SIMPLEOS_EVIDENCE_OWNER_MUTEX):
+        return _simpleos_evidence_verification_failure("evidence-owner-lock-unavailable")
+    if not _simpleos_evidence_initialized or
+        not _simpleos_evidence_owner_state_valid_locked():
+        return _simpleos_evidence_finish_verification(
+            _simpleos_evidence_verification_failure("evidence-owner-state"))
+    val gate_reason = simpleos_evidence_admission_gate_reason()
+    if gate_reason != "":
+        return _simpleos_evidence_finish_verification(
+            _simpleos_evidence_verification_failure(gate_reason))
+    val signer_index = _simpleos_evidence_signer_index_locked(
+        candidate.receipt.signer_key_id)
+    if signer_index < 0:
+        return _simpleos_evidence_finish_verification(
+            _simpleos_evidence_verification_failure("signer-untrusted"))
+    val trusted_key = simpleos_evidence_bytes_copy(
+        _simpleos_evidence_trusted_public_keys[signer_index])
+    if not _simpleos_evidence_unlock_owner():
+        return _simpleos_evidence_verification_failure("serialization-indeterminate")
+    if not pure_ed25519_verify(trusted_key, signing_bytes.bytes, signature):
+        return _simpleos_evidence_verification_failure("signature-invalid")
+    if _simpleos_evidence_quarantined or
+        not mutex_raw_lock(_SIMPLEOS_EVIDENCE_OWNER_MUTEX):
+        return _simpleos_evidence_verification_failure("evidence-owner-lock-unavailable")
+    val live_signer = _simpleos_evidence_signer_index_locked(
+        candidate.receipt.signer_key_id)
+    if live_signer < 0 or not simpleos_evidence_bytes_equal(
+        trusted_key, _simpleos_evidence_trusted_public_keys[live_signer]):
+        return _simpleos_evidence_finish_verification(
+            _simpleos_evidence_verification_failure("trust-root-changed"))
+    val slot = _simpleos_evidence_free_handle_slot_locked()
+    if slot < 0:
+        return _simpleos_evidence_finish_verification(
+            _simpleos_evidence_verification_failure("verified-handle-bound"))
+    val generation = _simpleos_evidence_next_generation
+    if generation == 0u64 or generation == _SIMPLEOS_EVIDENCE_MAX_GENERATION:
+        return _simpleos_evidence_finish_verification(
+            _simpleos_evidence_verification_failure("generation-exhausted"))
+    val row_key = simpleos_capability_row_key(candidate.row)
+    val handle_id = "evd-" + generation.to_text()
+    val entry = _SimpleOsEvidenceHandleEntryV1(
+        active: true, handle_id: handle_id,
+        receipt_id: candidate.receipt.receipt_id,
+        receipt_nonce: candidate.receipt.nonce, row_key: row_key,
+        consumer: consumer, signature: candidate.receipt.signature,
+        signing_bytes_hash: sha256_u8_hex(signing_bytes.bytes),
+        generation: generation,
+        expires_unix_us: now_unix_us + SIMPLEOS_EVIDENCE_MAX_CHALLENGE_TTL_US)
+    if slot == _simpleos_evidence_handles.len():
+        _simpleos_evidence_handles = _simpleos_evidence_handles.push(entry)
+    else:
+        _simpleos_evidence_handles[slot] = entry
+    _simpleos_evidence_next_generation = generation + 1u64
+    _simpleos_evidence_finish_verification(SimpleOsEvidenceVerificationResultV1(
+        ok: true, reason: "", handle: SimpleOsVerifiedEvidenceHandleV1(
+            handle_id: handle_id, receipt_id: candidate.receipt.receipt_id,
+            receipt_nonce: candidate.receipt.nonce, row_key: row_key,
+            consumer: consumer, generation: generation,
+            expires_unix_us: entry.expires_unix_us)))
+
+fn simpleos_evidence_row_admitted(row_key: text, now_unix_us: i64) -> bool:
+    if row_key.len() == 0 or now_unix_us <= 0:
+        return false
+    if _simpleos_evidence_quarantined: return false
+    if not mutex_raw_lock(_SIMPLEOS_EVIDENCE_OWNER_MUTEX):
+        return false
+    if not _simpleos_evidence_owner_state_valid_locked():
+        return _simpleos_evidence_finish_bool(false)
+    val index = _simpleos_evidence_admitted_row_index_locked(row_key)
+    var admitted = false
+    if index >= 0:
+        admitted = _simpleos_evidence_admitted_rows[index].expires_unix_us >=
+            now_unix_us
+    _simpleos_evidence_finish_bool(admitted)
+
+# Retire an unconsumed verified handle after its importing transaction fails.
+# Only the exact copied handle and bound consumer may release the private slot.
+fn simpleos_evidence_release_verified(
+    handle: SimpleOsVerifiedEvidenceHandleV1,
+    consumer: text
+) -> bool:
+    if handle.handle_id == "" or consumer == "": return false
+    if _simpleos_evidence_quarantined: return false
+    if not mutex_raw_lock(_SIMPLEOS_EVIDENCE_OWNER_MUTEX): return false
+    if not _simpleos_evidence_owner_state_valid_locked():
+        return _simpleos_evidence_finish_bool(false)
+    val index = _simpleos_evidence_handle_index_locked(handle)
+    if index < 0: return _simpleos_evidence_finish_bool(false)
+    val entry = _simpleos_evidence_handles[index]
+    if not entry.active or entry.handle_id != handle.handle_id
+        or entry.receipt_id != handle.receipt_id
+        or entry.receipt_nonce != handle.receipt_nonce
+        or entry.row_key != handle.row_key
+        or entry.consumer != handle.consumer
+        or entry.consumer != consumer
+        or entry.generation != handle.generation
+        or entry.expires_unix_us != handle.expires_unix_us:
+        return _simpleos_evidence_finish_bool(false)
+    var retired = entry
+    retired.active = false
+    _simpleos_evidence_handles[index] = retired
+    _simpleos_evidence_finish_bool(true)
+
+fn simpleos_evidence_owner_quarantined() -> bool:
+    _simpleos_evidence_quarantined
+
+fn simpleos_evidence_ledger_snapshot() -> SimpleOsEvidenceLedgerSnapshotV1:
+    if _simpleos_evidence_quarantined:
+        return SimpleOsEvidenceLedgerSnapshotV1(
+            ok: false, reason: "serialization-indeterminate",
+            ledger: simpleos_capability_ledger_v1())
+    if not mutex_raw_lock(_SIMPLEOS_EVIDENCE_OWNER_MUTEX):
+        return SimpleOsEvidenceLedgerSnapshotV1(
+            ok: false, reason: "evidence-owner-lock-unavailable",
+            ledger: simpleos_capability_ledger_v1())
+    val snapshot = _simpleos_evidence_ledger
+    _simpleos_evidence_finish_snapshot(
+        SimpleOsEvidenceLedgerSnapshotV1(
+            ok: true, reason: "", ledger: snapshot))
+
+fn _simpleos_evidence_ledger_failure_locked(
+    failure: SimpleOsCapabilityLedgerFailure,
+    reason: text
+) -> SimpleOsCapabilityLedgerCommitResultV1:
+    SimpleOsCapabilityLedgerCommitResultV1(
+        ok: false,
+        ledger: _simpleos_evidence_ledger,
+        ordered_keys: [],
+        failure: failure,
+        reason: reason)
+
+fn simpleos_evidence_consume_verified(
+    handle: SimpleOsVerifiedEvidenceHandleV1,
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    consumer: text,
+    now_unix_us: i64) -> SimpleOsCapabilityLedgerCommitResultV1:
+    if now_unix_us <= 0:
+        return SimpleOsCapabilityLedgerCommitResultV1(
+            ok: false, ledger: simpleos_capability_ledger_v1(), ordered_keys: [],
+            failure: SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            reason: "consume-time")
+    if _simpleos_evidence_quarantined:
+        return SimpleOsCapabilityLedgerCommitResultV1(
+            ok: false, ledger: simpleos_capability_ledger_v1(), ordered_keys: [],
+            failure: SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            reason: "serialization-indeterminate")
+    val candidate_check = simpleos_capability_candidate_validate(candidate)
+    if not candidate_check.ok:
+        return SimpleOsCapabilityLedgerCommitResultV1(
+            ok: false, ledger: simpleos_capability_ledger_v1(), ordered_keys: [],
+            failure: SimpleOsCapabilityLedgerFailure.InvalidCandidate,
+            reason: "candidate:" + candidate_check.reason)
+    val signing_bytes = encode_simpleos_evidence_receipt_v1_signing_bytes(
+        candidate.receipt)
+    if not signing_bytes.ok:
+        return SimpleOsCapabilityLedgerCommitResultV1(
+            ok: false, ledger: simpleos_capability_ledger_v1(), ordered_keys: [],
+            failure: SimpleOsCapabilityLedgerFailure.InvalidCandidate,
+            reason: "canonical-signing-bytes")
+    val candidate_signing_hash = sha256_u8_hex(signing_bytes.bytes)
+    if not mutex_raw_lock(_SIMPLEOS_EVIDENCE_OWNER_MUTEX):
+        return SimpleOsCapabilityLedgerCommitResultV1(
+            ok: false, ledger: simpleos_capability_ledger_v1(), ordered_keys: [],
+            failure: SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            reason: "evidence-owner-lock-unavailable")
+    if not _simpleos_evidence_initialized:
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            "trust-root-configuration")
+        return _simpleos_evidence_finish_commit(failed)
+    if not _simpleos_evidence_owner_state_valid_locked():
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.InvalidLedger,
+            "evidence-owner-state")
+        return _simpleos_evidence_finish_commit(failed)
+    _simpleos_evidence_expire_locked(now_unix_us)
+    val handle_index = _simpleos_evidence_handle_index_locked(handle)
+    if handle_index < 0:
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            "verified-handle-unknown")
+        return _simpleos_evidence_finish_commit(failed)
+    val entry = _simpleos_evidence_handles[handle_index]
+    if not entry.active:
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            "verified-handle-spent-or-expired")
+        return _simpleos_evidence_finish_commit(failed)
+    if handle.receipt_id != entry.receipt_id
+        or handle.receipt_nonce != entry.receipt_nonce
+        or handle.row_key != entry.row_key
+        or handle.consumer != entry.consumer
+        or handle.expires_unix_us != entry.expires_unix_us:
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            "verified-handle-fields")
+        return _simpleos_evidence_finish_commit(failed)
+    if consumer != entry.consumer:
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            "verified-handle-consumer")
+        return _simpleos_evidence_finish_commit(failed)
+    if candidate.receipt.receipt_id != entry.receipt_id
+        or candidate.receipt.nonce != entry.receipt_nonce
+        or candidate.receipt.signature != entry.signature
+        or candidate_signing_hash != entry.signing_bytes_hash
+        or simpleos_capability_row_key(candidate.row) != entry.row_key:
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            "verified-handle-candidate")
+        return _simpleos_evidence_finish_commit(failed)
+    val ledger_commit = simpleos_evidence_prepare_ledger_transition(
+        _simpleos_evidence_ledger, candidate)
+    if not ledger_commit.ok:
+        return _simpleos_evidence_finish_commit(ledger_commit)
+    val admitted_index = _simpleos_evidence_admitted_row_index_locked(entry.row_key)
+    if admitted_index < 0
+        and _simpleos_evidence_admitted_rows.len() >=
+            SIMPLEOS_EVIDENCE_MAX_ADMITTED_ROWS:
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.RowBound,
+            "admitted-row-bound")
+        return _simpleos_evidence_finish_commit(failed)
+
+    var next_handles: [_SimpleOsEvidenceHandleEntryV1] = []
+    for existing_handle in _simpleos_evidence_handles:
+        next_handles = next_handles.push(existing_handle)
+    var spent = entry
+    spent.active = false
+    next_handles[handle_index] = spent
+    val admitted = _SimpleOsEvidenceAdmittedRowV1(
+        row_key: entry.row_key, expires_unix_us: entry.expires_unix_us)
+    var next_admitted_rows: [_SimpleOsEvidenceAdmittedRowV1] = []
+    for existing_row in _simpleos_evidence_admitted_rows:
+        next_admitted_rows = next_admitted_rows.push(existing_row)
+    if admitted_index < 0:
+        next_admitted_rows = next_admitted_rows.push(admitted)
+    else:
+        next_admitted_rows[admitted_index] = admitted
+    _simpleos_evidence_handles = next_handles
+    _simpleos_evidence_admitted_rows = next_admitted_rows
+    _simpleos_evidence_ledger = ledger_commit.ledger
+    _simpleos_evidence_finish_commit(ledger_commit)
+
+export SimpleOsTrustedEvidenceSignerV1
+export SimpleOsEvidenceChallengeV1, SimpleOsVerifiedEvidenceHandleV1
+export SimpleOsEvidenceChallengeResultV1, SimpleOsEvidenceVerificationResultV1
+export simpleos_evidence_trust_roots_check
+export simpleos_evidence_verifier_start, simpleos_evidence_verifier_ready
+export simpleos_evidence_pass_admission_available
+export simpleos_evidence_issue_challenge, simpleos_evidence_verify_candidate
+export simpleos_evidence_verify_candidate_with_snapshot
+export simpleos_evidence_verify_detached_candidate_with_snapshot
+export simpleos_evidence_consume_verified, simpleos_evidence_row_admitted
+export simpleos_evidence_release_verified
+export simpleos_evidence_ledger_snapshot
+export simpleos_evidence_owner_quarantined
+export SIMPLEOS_EVIDENCE_MAX_TRUSTED_SIGNERS
+export SIMPLEOS_EVIDENCE_MAX_LIVE_CHALLENGES
+export SIMPLEOS_EVIDENCE_MAX_LIVE_HANDLES
+export SIMPLEOS_EVIDENCE_MAX_SEEN_NONCES
+export SIMPLEOS_EVIDENCE_MAX_ADMITTED_ROWS
+export SIMPLEOS_EVIDENCE_MAX_CHALLENGE_TTL_US

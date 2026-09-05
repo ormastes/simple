@@ -1,0 +1,293 @@
+"""
+## Purpose and audience
+Purpose: Prove that async parser — request line limit.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-NOGC-ASYNC-MUT-001 — stable requirement identity for this spec.
+
+"""
+# Async HTTP Parser — request limits enforced during parsing
+
+## Overview
+
+The async server's incremental parser must enforce the same request limits as
+the sync server (shared `std.common.net.http_core` policy), and it must do so
+DURING parsing — before buffer growth — so a hostile client cannot exhaust
+memory with an endless request line, oversized headers, or an oversized body.
+
+Each limit is proven at the boundary (accepted) and boundary+1 (rejected),
+using `HttpRequestParser.with_limits` so the fixtures stay small. The
+"endless" cases additionally prove the parser cuts a client off while the
+terminator has NOT yet arrived — the memory-exhaustion scenario an
+after-the-fact check cannot catch.
+
+## Limit matrix proven here
+
+| Limit | Boundary case | Over-limit case | Streaming case |
+|-------|---------------|-----------------|----------------|
+| Request line | exact length accepted | +1 byte → 431 | endless line cut off |
+| Header line | exact length accepted | +1 byte → 431 | endless header cut off |
+| Header count | exact count accepted | +1 header → 431 | — |
+| Body (Content-Length) | exact size accepted | declared +1 → 413 pre-buffer | rejected before body bytes |
+| Body (chunked) | small body decoded | decoded over limit → 413 | raw accumulation cut off → 413 |
+
+## Examples
+
+```simple
+var p = HttpRequestParser.with_limits(64, 100, 8192, 10485760)
+val r = p.feed("GET /" + long_path + " HTTP/1.1\r\n")
+# Err(ParseError("431 Request line too long: ...")) once the limit is crossed
+```
+
+## Troubleshooting
+
+- `431` in `error_message` — a line/header limit fired during parsing.
+- `413` — the declared or decoded body exceeds `max_body`; note the
+  rejection happens BEFORE body bytes are buffered.
+- `400` — duplicate/invalid Content-Length or Content-Length combined with
+  chunked (smuggling ambiguity), decided by the shared core.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Design:** N/A
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (Wave A, AC-2).
+"""
+
+use std.spec.*
+use std.http_server.parser.{HttpRequestParser}
+
+# repeat_char builds a string of n copies of ch (no text.repeat builtin).
+fn repeat_char(ch: text, n: i32) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = out + ch
+        i = i + 1
+    out
+
+# feed_ok feeds data and returns true when the parser accepted it (Ok).
+fn feed_ok(parser: HttpRequestParser, data: text) -> bool:
+    val r = parser.feed(data)
+    match r:
+        Ok(_): true
+        Err(_): false
+
+use std.spec.step
+
+describe "async parser — request line limit":
+    it "accepts a request line exactly at the limit":
+        # @req: REQ-LIB-NOGC-ASYNC-MUT-001
+        step("Open a parser with a 64-byte request-line limit")
+        var p = HttpRequestParser.with_limits(64, 100, 8192, 10485760)
+        # "GET " + path + " HTTP/1.1" == 4 + 51 + 9 == exactly 64 bytes
+        val path = "/" + repeat_char("a", 50)
+        val line = "GET " + path + " HTTP/1.1"
+        expect(line.len()).to_equal(64)  # oracle: 64 — named expected value from the requirement
+
+        step("Feed the boundary-length request line")
+        expect(feed_ok(p, line + "\r\n")).to_be(true)
+        expect(p.has_error()).to_be(false)
+
+    it "rejects a request line one byte over the limit with 431":
+        var p = HttpRequestParser.with_limits(64, 100, 8192, 10485760)
+        val path = "/" + repeat_char("a", 51)
+        val line = "GET " + path + " HTTP/1.1"
+        expect(line.len()).to_equal(65)  # oracle: 65 — named expected value from the requirement
+
+        step("Feed the over-limit request line")
+        expect(feed_ok(p, line + "\r\n")).to_be(false)
+        expect(p.has_error()).to_be(true)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+    it "cuts off an endless request line before buffering it all":
+        step("Stream request-line bytes with no CRLF terminator")
+        var p = HttpRequestParser.with_limits(64, 100, 8192, 10485760)
+        expect(feed_ok(p, repeat_char("a", 80))).to_be(false)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+describe "async parser — header line limit":
+    it "accepts a header line exactly at the limit":
+        var p = HttpRequestParser.with_limits(8192, 100, 32, 10485760)
+        step("Feed the request line, then a boundary-length header line")
+        expect(feed_ok(p, "GET / HTTP/1.1\r\n")).to_be(true)
+        # "X-A: " (5) + 27 = exactly 32 bytes
+        val hline = "X-A: " + repeat_char("b", 27)
+        expect(hline.len()).to_equal(32)  # oracle: 32 — named expected value from the requirement
+        expect(feed_ok(p, hline + "\r\n")).to_be(true)
+        expect(p.has_error()).to_be(false)
+
+    it "rejects a header line one byte over the limit with 431":
+        step("Verify: rejects a header line one byte over the limit with 431")
+        var p = HttpRequestParser.with_limits(8192, 100, 32, 10485760)
+        expect(feed_ok(p, "GET / HTTP/1.1\r\n")).to_be(true)
+        val hline = "X-A: " + repeat_char("b", 28)
+        expect(hline.len()).to_equal(33)  # oracle: 33 — named expected value from the requirement
+        expect(feed_ok(p, hline + "\r\n")).to_be(false)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+    it "cuts off an endless header line before buffering it all":
+        var p = HttpRequestParser.with_limits(8192, 100, 32, 10485760)
+        expect(feed_ok(p, "GET / HTTP/1.1\r\n")).to_be(true)
+        step("Stream header bytes with no CRLF terminator")
+        expect(feed_ok(p, repeat_char("c", 40))).to_be(false)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+describe "async parser — header count limit":
+    it "accepts exactly the maximum number of headers":
+        var p = HttpRequestParser.with_limits(8192, 3, 8192, 10485760)
+        step("Feed a request with exactly 3 headers")
+        expect(feed_ok(p, "GET / HTTP/1.1\r\nHost: test\r\nA: 1\r\nB: 2\r\n\r\n")).to_be(true)
+        expect(p.is_complete()).to_be(true)
+
+    it "rejects one header beyond the maximum with 431":
+        var p = HttpRequestParser.with_limits(8192, 3, 8192, 10485760)
+        step("Feed a request with 4 headers")
+        expect(feed_ok(p, "GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nC: 3\r\nD: 4\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+describe "async parser — HTTP field-name grammar":
+    it "rejects whitespace before the colon and non-token field names":
+        var whitespace = HttpRequestParser.new()
+        expect(feed_ok(whitespace, "GET / HTTP/1.1\r\nHost : example.test\r\n")).to_be(false)
+        expect(whitespace.error_message.starts_with("400")).to_be(true)
+
+        var invalid_char = HttpRequestParser.new()
+        expect(feed_ok(invalid_char, "GET / HTTP/1.1\r\nX@Trace: value\r\n")).to_be(false)
+        expect(invalid_char.error_message.starts_with("400")).to_be(true)
+
+describe "async parser — body size limit":
+    it "accepts a Content-Length body exactly at the limit":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 16)
+        step("POST a body of exactly 16 bytes")
+        val body = repeat_char("d", 16)
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 16\r\n\r\n" + body)).to_be(true)
+        expect(p.is_complete()).to_be(true)
+        val req = p.to_request("127.0.0.1")
+        expect(req.body.len()).to_equal(16)  # oracle: 16 — named expected value from the requirement
+
+    it "rejects a declared body one byte over the limit with 413":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 16)
+        step("Declare Content-Length 17 against a 16-byte limit")
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 17\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("413")).to_be(true)
+
+    it "rejects the declared body BEFORE any body bytes arrive":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 16)
+        step("Send only the headers of an oversized POST")
+        val accepted = feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 9999\r\n\r\n")
+        expect(accepted).to_be(false)
+        step("Verify no body bytes were ever buffered")
+        expect(p.body.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+describe "async parser — header policy parity with the shared core":
+    it "rejects a missing Host before request dispatch":
+        var p = HttpRequestParser.new()
+        expect(feed_ok(p, "GET / HTTP/1.1\r\nUser-Agent: test\r\n\r\n")).to_be(false)
+        expect(p.is_complete()).to_be(false)
+        expect(p.error_message).to_contain("Missing Host")
+
+    it "rejects duplicate and invalid Host authorities before dispatch":
+        var duplicate = HttpRequestParser.new()
+        expect(feed_ok(duplicate, "GET / HTTP/1.1\r\nHost: a.test\r\nHost: a.test\r\n\r\n")).to_be(false)
+        var empty = HttpRequestParser.new()
+        expect(feed_ok(empty, "GET / HTTP/1.1\r\nHost:\r\n\r\n")).to_be(false)
+        var userinfo = HttpRequestParser.new()
+        expect(feed_ok(userinfo, "GET / HTTP/1.1\r\nHost: user@host.test\r\n\r\n")).to_be(false)
+        expect(userinfo.is_complete()).to_be(false)
+
+    it "requires absolute-form target and Host authorities to agree":
+        var matching = HttpRequestParser.new()
+        expect(feed_ok(matching, "GET http://Example.test/a HTTP/1.1\r\nHost: example.TEST\r\n\r\n")).to_be(true)
+        expect(matching.is_complete()).to_be(true)
+        var mismatch = HttpRequestParser.new()
+        expect(feed_ok(mismatch, "GET http://safe.test/a HTTP/1.1\r\nHost: attacker.test\r\n\r\n")).to_be(false)
+        expect(mismatch.is_complete()).to_be(false)
+
+    it "rejects whitespace before a framing header colon":
+        step("Send a Content-Length field with forbidden whitespace before its colon")
+        var p = HttpRequestParser.new()
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length : 4\r\n\r\nWiki")).to_be(false)
+        expect(p.error_message.starts_with("400")).to_be(true)
+
+    it "rejects non-token field names before request dispatch":
+        step("Send field-name separators forbidden by the shared token grammar")
+        var punctuation = HttpRequestParser.new()
+        expect(feed_ok(punctuation, "GET / HTTP/1.1\r\nBad(Name: value\r\n\r\n")).to_be(false)
+        expect(punctuation.error_message).to_contain("Invalid header name")
+        var at_sign = HttpRequestParser.new()
+        expect(feed_ok(at_sign, "GET / HTTP/1.1\r\nBad@Name: value\r\n\r\n")).to_be(false)
+        expect(at_sign.is_complete()).to_be(false)
+
+    it "rejects forbidden field-value controls before request dispatch":
+        step("Send NUL, CTL, and DEL bytes through the incremental parser")
+        var nul = HttpRequestParser.new()
+        expect(feed_ok(nul, "GET / HTTP/1.1\r\nX-Test: safe\x00smuggled\r\n\r\n")).to_be(false)
+        expect(nul.error_message).to_contain("Invalid header value")
+        var ctl = HttpRequestParser.new()
+        expect(feed_ok(ctl, "GET / HTTP/1.1\r\nX-Test: safe\x01smuggled\r\n\r\n")).to_be(false)
+        var del = HttpRequestParser.new()
+        expect(feed_ok(del, "GET / HTTP/1.1\r\nX-Test: safe\x7fsmuggled\r\n\r\n")).to_be(false)
+        expect(del.is_complete()).to_be(false)
+
+    it "continues to accept horizontal tab in a valid field value":
+        var p = HttpRequestParser.new()
+        expect(feed_ok(p, "GET / HTTP/1.1\r\nHost: example.test\r\nX-Trace: one\ttwo\r\n\r\n")).to_be(true)
+        expect(p.is_complete()).to_be(true)
+
+    it "rejects duplicate Content-Length with 400":
+        step("Verify: rejects duplicate Content-Length with 400")
+        var p = HttpRequestParser.new()
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("400")).to_be(true)
+
+    it "rejects invalid Content-Length with 400":
+        step("Verify: rejects invalid Content-Length with 400")
+        var p = HttpRequestParser.new()
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("400")).to_be(true)
+
+    it "rejects Content-Length combined with chunked as smuggling ambiguity":
+        var p = HttpRequestParser.new()
+        step("Send BOTH Content-Length and Transfer-Encoding: chunked")
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("400")).to_be(true)
+
+describe "async parser — chunked bodies stay bounded":
+    it "decodes a small chunked body normally":
+        var p = HttpRequestParser.new()
+        step("Send a well-formed 4-byte chunked body")
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n0\r\n\r\n")).to_be(true)
+        expect(p.is_complete()).to_be(true)
+        val req = p.to_request("127.0.0.1")
+        expect(req.body).to_equal("Wiki")
+
+    it "cuts off unbounded chunked accumulation with 413":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 16)
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n")).to_be(true)
+        step("Stream chunk bytes past the accumulation bound with no terminator")
+        # Raw accumulation bound is max_body + max_header_line (16 + 8192).
+        expect(feed_ok(p, repeat_char("e", 8300))).to_be(false)
+        expect(p.error_message.starts_with("413")).to_be(true)
+
+    it "rejects a decoded chunked body over the limit with 413":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 4)
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n")).to_be(true)
+        step("Send a well-formed chunked body decoding to 5 bytes against a 4-byte limit")
+        expect(feed_ok(p, "5\r\nWikis\r\n0\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("413")).to_be(true)
+
+describe "async parser — well-formed requests still parse":
+    it "parses a complete GET request end to end":
+        var p = HttpRequestParser.new()
+        step("Feed a complete request in two fragments")
+        expect(feed_ok(p, "GET /hello?x=1 HTTP/1.1\r\nHost: example.com\r\n")).to_be(true)
+        expect(feed_ok(p, "\r\n")).to_be(true)
+        step("Verify the parsed request fields")
+        expect(p.is_complete()).to_be(true)
+        val req = p.to_request("127.0.0.1")
+        expect(req.method).to_equal("GET")
+        expect(req.path).to_equal("/hello")
+        expect(req.query).to_equal("x=1")
+        expect(req.headers.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement

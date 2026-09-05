@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/checker-perf-test.XXXXXX")
+trap 'rm -rf -- "$work_dir"' EXIT HUP INT TERM
+
+fixture_a="$repo_root/test/fixtures/lint/clean.spl"
+fixture_b="$repo_root/test/fixtures/pure_simple_tooling/clean.spl"
+digest_a=$(sha256sum "$fixture_a" | cut -d ' ' -f 1)
+digest_b=$(sha256sum "$fixture_b" | cut -d ' ' -f 1)
+manifest="$work_dir/manifest.tsv"
+printf 'one\t%s\t%s\ntwo\t%s\t%s\n' \
+    "$digest_a" "$fixture_a" "$digest_b" "$fixture_b" > "$manifest"
+
+python3 "$repo_root/scripts/bench/checker-performance.py" \
+    --engine=python-orchestration \
+    --manifest="$manifest" \
+    --workers=1,2 \
+    --cache-states=cold,warm \
+    --output="$work_dir/result.json"
+
+python3 - "$work_dir/result.json" <<'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+assert report["manifest_files"] == 2
+assert len(report["rows"]) == 4
+for row in report["rows"]:
+    assert row["outcome_count"] == 2
+    assert row["parity_proof"] == "not_applicable_no_simple_semantics"
+    assert row["worker_exit_codes"] == [0] * row["workers"]
+    assert row["peak_process_count"] >= row["workers"]
+    assert len(row["outcome_checksum"]) == 64
+PY
+
+bad_manifest="$work_dir/bad.tsv"
+printf 'bad\t%s\t%s\n' "$(printf '0%.0s' $(seq 1 64))" "$fixture_a" > "$bad_manifest"
+if python3 "$repo_root/scripts/bench/checker-performance.py" \
+    --engine=python-orchestration --manifest="$bad_manifest" \
+    --workers=1 --cache-states=cold,warm > /dev/null 2>&1; then
+    echo "expected digest mismatch to fail" >&2
+    exit 1
+fi
+
+echo "checker performance harness: PASS"

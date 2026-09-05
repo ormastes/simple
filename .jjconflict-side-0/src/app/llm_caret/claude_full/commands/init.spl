@@ -1,0 +1,257 @@
+"""
+Claude full /init command parity model.
+"""
+
+class InitCommandDescriptor:
+    typeName: text
+    name: text
+    description: text
+    contentLength: i64
+    progressMessage: text
+    source: text
+
+    static fn new(description: text) -> InitCommandDescriptor:
+        InitCommandDescriptor(typeName: "prompt", name: "init", description: description, contentLength: 0, progressMessage: "analyzing your codebase", source: "builtin")
+
+class InitPromptPart:
+    typeName: text
+    textValue: text
+
+    static fn text(textValue: text) -> InitPromptPart:
+        InitPromptPart(typeName: "text", textValue: textValue)
+
+fn isInitEnvTruthy(value: text) -> bool:
+    val normalized = value.trim().lower()
+    normalized == "1" or normalized == "true" or normalized == "yes" or normalized == "on"
+
+fn useNewInitPrompt(newInitFeature: bool, userType: text, claudeCodeNewInitEnv: text) -> bool:
+    newInitFeature and (userType == "ant" or isInitEnvTruthy(claudeCodeNewInitEnv))
+
+fn oldInitPrompt() -> text:
+    """Please analyze this codebase and create a CLAUDE.md file, which will be given to future instances of Claude Code to operate in this repository.
+
+What to add:
+1. Commands that will be commonly used, such as how to build, lint, and run tests. Include the necessary commands to develop in this codebase, such as how to run a single test.
+2. High-level code architecture and structure so that future instances can be productive more quickly. Focus on the "big picture" architecture that requires reading multiple files to understand.
+
+Usage notes:
+- If there's already a CLAUDE.md, suggest improvements to it.
+- When you make the initial CLAUDE.md, do not repeat yourself and do not include obvious instructions like "Provide helpful error messages to users", "Write unit tests for all new utilities", "Never include sensitive information (API keys, tokens) in code or commits".
+- Avoid listing every component or file structure that can be easily discovered.
+- Don't include generic development practices.
+- If there are Cursor rules (in .cursor/rules/ or .cursorrules) or Copilot rules (in .github/copilot-instructions.md), make sure to include the important parts.
+- If there is a README.md, make sure to include the important parts.
+- Do not make up information such as "Common Development Tasks", "Tips for Development", "Support and Documentation" unless this is expressly included in other files that you read.
+- Be sure to prefix the file with the following text:
+
+```
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+```"""
+
+fn newInitPrompt() -> text:
+    """Set up a minimal CLAUDE.md (and optionally skills and hooks) for this repo. CLAUDE.md is loaded into every Claude Code session, so it must be concise - only include what Claude would get wrong without it.
+
+## Phase 1: Ask what to set up
+
+Use AskUserQuestion to find out what the user wants:
+
+- "Which CLAUDE.md files should /init set up?"
+  Options: "Project CLAUDE.md" | "Personal CLAUDE.local.md" | "Both project + personal"
+  Description for project: "Team-shared instructions checked into source control - architecture, coding standards, common workflows."
+  Description for personal: "Your private preferences for this project (gitignored, not shared) - your role, sandbox URLs, preferred test data, workflow quirks."
+
+- "Also set up skills and hooks?"
+  Options: "Skills + hooks" | "Skills only" | "Hooks only" | "Neither, just CLAUDE.md"
+  Description for skills: "On-demand capabilities you or Claude invoke with `/skill-name` - good for repeatable workflows and reference knowledge."
+  Description for hooks: "Deterministic shell commands that run on tool events (e.g., format after every edit). Claude can't skip them."
+
+## Phase 2: Explore the codebase
+
+Launch a subagent to survey the codebase, and ask it to read key files to understand the project: manifest files (package.json, Cargo.toml, pyproject.toml, go.mod, pom.xml, etc.), README, Makefile/build configs, CI config, existing CLAUDE.md, .claude/rules/, AGENTS.md, .cursor/rules or .cursorrules, .github/copilot-instructions.md, .windsurfrules, .clinerules, .mcp.json.
+
+Detect build, test, and lint commands; languages, frameworks, and package manager; project structure; non-obvious gotchas; existing .claude/skills/ and .claude/rules/ directories; formatter configuration; and git worktree usage.
+
+## Phase 3: Fill in the gaps
+
+Use AskUserQuestion to gather what you still need to write good CLAUDE.md files and skills. Ask only things the code can't answer.
+
+Synthesize a proposal from Phase 2 findings. For each item, pick the artifact type that fits, constrained by the Phase 1 skills+hooks choice: Hook, Skill, or CLAUDE.md note. Respect Phase 1's skills+hooks choice as a hard filter.
+
+Show the proposal via AskUserQuestion's preview field, not as a separate text message. Keep previews compact.
+
+Build the preference queue from the accepted proposal. Each entry: type, description, target file, and Phase-2-sourced details.
+
+## Phase 4: Write CLAUDE.md (if user chose project or both)
+
+Write a minimal CLAUDE.md at the project root. Every line must pass this test: "Would removing this cause Claude to make mistakes?" If no, cut it.
+
+Include build/test/lint commands Claude can't guess, code style rules that differ from language defaults, testing instructions and quirks, repo etiquette, required env vars or setup steps, non-obvious gotchas, and important parts from existing AI coding tool configs.
+
+Exclude file-by-file structure, standard language conventions, generic advice, detailed API docs, frequently changing information, long tutorials, and obvious manifest commands.
+
+Prefix the file with:
+
+```
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+```
+
+If CLAUDE.md already exists: read it, propose specific changes as diffs, and explain why each change improves it. Do not silently overwrite.
+
+## Phase 5: Write CLAUDE.local.md (if user chose personal or both)
+
+Write a minimal CLAUDE.local.md at the project root. Add CLAUDE.local.md to .gitignore so it stays private. Include role, familiarity, sandbox URLs, test accounts, local setup details, and communication preferences.
+
+If sibling or external worktrees are used, write the actual personal content to ~/.claude/<project-name>-instructions.md and make CLAUDE.local.md a one-line stub that imports it.
+
+## Phase 6: Suggest and create skills
+
+Skills add capabilities Claude can use on demand without bloating every session. Consume skill entries from the preference queue first. Then suggest additional skills for reference knowledge and repeatable workflows. Create each skill at .claude/skills/<skill-name>/SKILL.md.
+
+## Phase 7: Suggest additional optimizations
+
+Check GitHub CLI, linting, and proposal-sourced hooks. For hooks, load the hook reference with the update-config skill, follow the constructing-a-hook flow, validate JSON, live-proof triggerable hooks, cleanup, and handoff.
+
+## Phase 8: Summary and next steps
+
+Recap what was set up and list relevant optimization next steps, including skill-creator and plugin browsing."""
+
+fn initDescription(newInitFeature: bool, userType: text, claudeCodeNewInitEnv: text) -> text:
+    if useNewInitPrompt(newInitFeature, userType, claudeCodeNewInitEnv):
+        return "Initialize new CLAUDE.md file(s) and optional skills/hooks with codebase documentation"
+    "Initialize a new CLAUDE.md file with codebase documentation"
+
+fn initCommand(newInitFeature: bool, userType: text, claudeCodeNewInitEnv: text) -> InitCommandDescriptor:
+    InitCommandDescriptor.new(initDescription(newInitFeature, userType, claudeCodeNewInitEnv))
+
+fn initPromptText(newInitFeature: bool, userType: text, claudeCodeNewInitEnv: text) -> text:
+    if useNewInitPrompt(newInitFeature, userType, claudeCodeNewInitEnv):
+        return newInitPrompt()
+    oldInitPrompt()
+
+fn getPromptForInitCommand(newInitFeature: bool, userType: text, claudeCodeNewInitEnv: text) -> [InitPromptPart]:
+    [InitPromptPart.text(initPromptText(newInitFeature, userType, claudeCodeNewInitEnv))]
+
+fn initSourceLinesModeled() -> i64:
+    256
+
+# Source parity ledger 0140: upstream imports bun feature flag.
+# Source parity ledger 0141: upstream imports Command type.
+# Source parity ledger 0142: upstream imports onboarding completion marker.
+# Source parity ledger 0143: upstream imports env truthiness helper.
+# Source parity ledger 0144: OLD_INIT_PROMPT asks for CLAUDE.md creation.
+# Source parity ledger 0145: OLD_INIT_PROMPT requires build, lint, and test commands.
+# Source parity ledger 0146: OLD_INIT_PROMPT requires high-level architecture.
+# Source parity ledger 0147: OLD_INIT_PROMPT handles existing CLAUDE.md.
+# Source parity ledger 0148: OLD_INIT_PROMPT forbids repeated generic guidance.
+# Source parity ledger 0149: OLD_INIT_PROMPT includes Cursor and Copilot rules.
+# Source parity ledger 0150: OLD_INIT_PROMPT includes README content.
+# Source parity ledger 0151: OLD_INIT_PROMPT forbids invented sections.
+# Source parity ledger 0152: OLD_INIT_PROMPT requires CLAUDE.md prefix.
+# Source parity ledger 0153: NEW_INIT_PROMPT creates minimal CLAUDE.md.
+# Source parity ledger 0154: NEW_INIT_PROMPT optionally creates skills.
+# Source parity ledger 0155: NEW_INIT_PROMPT optionally creates hooks.
+# Source parity ledger 0156: Phase 1 asks which CLAUDE files to set up.
+# Source parity ledger 0157: Phase 1 supports project instructions.
+# Source parity ledger 0158: Phase 1 supports personal local instructions.
+# Source parity ledger 0159: Phase 1 supports both instruction files.
+# Source parity ledger 0160: Phase 1 asks about skills and hooks.
+# Source parity ledger 0161: Skills are modeled as on-demand capabilities.
+# Source parity ledger 0162: Hooks are modeled as deterministic shell commands.
+# Source parity ledger 0163: Phase 2 launches a subagent survey.
+# Source parity ledger 0164: Phase 2 reads manifest files.
+# Source parity ledger 0165: Phase 2 reads README.
+# Source parity ledger 0166: Phase 2 reads Makefile and build configs.
+# Source parity ledger 0167: Phase 2 reads CI config.
+# Source parity ledger 0168: Phase 2 reads existing CLAUDE.md.
+# Source parity ledger 0169: Phase 2 reads .claude/rules.
+# Source parity ledger 0170: Phase 2 reads AGENTS.md.
+# Source parity ledger 0171: Phase 2 reads Cursor rules.
+# Source parity ledger 0172: Phase 2 reads Copilot instructions.
+# Source parity ledger 0173: Phase 2 reads Windsurf and Cline rules.
+# Source parity ledger 0174: Phase 2 reads MCP config.
+# Source parity ledger 0175: Phase 2 detects build commands.
+# Source parity ledger 0176: Phase 2 detects test commands.
+# Source parity ledger 0177: Phase 2 detects lint commands.
+# Source parity ledger 0178: Phase 2 detects language and package manager.
+# Source parity ledger 0179: Phase 2 detects project structure.
+# Source parity ledger 0180: Phase 2 detects code style rules.
+# Source parity ledger 0181: Phase 2 detects workflow gotchas.
+# Source parity ledger 0182: Phase 2 detects existing skills and rules directories.
+# Source parity ledger 0183: Phase 2 detects formatter configuration.
+# Source parity ledger 0184: Phase 2 checks git worktree layout.
+# Source parity ledger 0185: Phase 3 asks only code-unknown questions.
+# Source parity ledger 0186: Phase 3 project questions cover team practices.
+# Source parity ledger 0187: Phase 3 personal questions cover role.
+# Source parity ledger 0188: Phase 3 personal questions cover familiarity.
+# Source parity ledger 0189: Phase 3 personal questions cover sandbox details.
+# Source parity ledger 0190: Phase 3 personal questions cover worktree imports.
+# Source parity ledger 0191: Phase 3 personal questions cover communication preferences.
+# Source parity ledger 0192: Phase 3 synthesizes a proposal.
+# Source parity ledger 0193: Phase 3 classifies hooks.
+# Source parity ledger 0194: Phase 3 classifies skills.
+# Source parity ledger 0195: Phase 3 classifies notes.
+# Source parity ledger 0196: Phase 3 respects user artifact filter.
+# Source parity ledger 0197: Phase 3 uses AskUserQuestion preview.
+# Source parity ledger 0198: Phase 3 keeps previews compact.
+# Source parity ledger 0199: Phase 3 builds a preference queue.
+# Source parity ledger 0200: Phase 4 writes root CLAUDE.md.
+# Source parity ledger 0201: Phase 4 cuts lines Claude would not need.
+# Source parity ledger 0202: Phase 4 consumes team notes.
+# Source parity ledger 0203: Phase 4 includes non-obvious commands.
+# Source parity ledger 0204: Phase 4 includes differing style rules.
+# Source parity ledger 0205: Phase 4 includes testing quirks.
+# Source parity ledger 0206: Phase 4 includes repo etiquette.
+# Source parity ledger 0207: Phase 4 includes env setup.
+# Source parity ledger 0208: Phase 4 excludes file-by-file structure.
+# Source parity ledger 0209: Phase 4 excludes standard conventions.
+# Source parity ledger 0210: Phase 4 excludes generic advice.
+# Source parity ledger 0211: Phase 4 excludes long tutorials.
+# Source parity ledger 0212: Phase 4 handles existing CLAUDE.md by diff.
+# Source parity ledger 0213: Phase 4 suggests .claude/rules organization.
+# Source parity ledger 0214: Phase 4 mentions subdirectory CLAUDE.md files.
+# Source parity ledger 0215: Phase 5 writes CLAUDE.local.md.
+# Source parity ledger 0216: Phase 5 adds CLAUDE.local.md to gitignore.
+# Source parity ledger 0217: Phase 5 consumes personal notes.
+# Source parity ledger 0218: Phase 5 includes personal setup details.
+# Source parity ledger 0219: Phase 5 handles external worktrees.
+# Source parity ledger 0220: Phase 5 never imports personal content from project CLAUDE.md.
+# Source parity ledger 0221: Phase 6 creates project skills.
+# Source parity ledger 0222: Phase 6 consumes queued skill entries first.
+# Source parity ledger 0223: Phase 6 supports bundled skill augmentation.
+# Source parity ledger 0224: Phase 6 asks follow-up for underspecified skills.
+# Source parity ledger 0225: Phase 6 reviews existing skills.
+# Source parity ledger 0226: Phase 6 writes SKILL.md frontmatter.
+# Source parity ledger 0227: Phase 6 supports disable-model-invocation.
+# Source parity ledger 0228: Phase 7 checks GitHub CLI.
+# Source parity ledger 0229: Phase 7 checks lint config.
+# Source parity ledger 0230: Phase 7 consumes hook preferences.
+# Source parity ledger 0231: Phase 7 maps edit hooks to PostToolUse.
+# Source parity ledger 0232: Phase 7 maps finish hooks to Stop.
+# Source parity ledger 0233: Phase 7 maps Bash hooks to PreToolUse.
+# Source parity ledger 0234: Phase 7 routes git commit hooks to git hooks.
+# Source parity ledger 0235: Phase 7 loads update-config hook reference.
+# Source parity ledger 0236: Phase 7 deduplicates hook config.
+# Source parity ledger 0237: Phase 7 pipe-tests raw hook commands.
+# Source parity ledger 0238: Phase 7 validates JSON.
+# Source parity ledger 0239: Phase 7 live-proofs triggerable hooks.
+# Source parity ledger 0240: Phase 8 recaps written files.
+# Source parity ledger 0241: Phase 8 lists optimization next steps.
+# Source parity ledger 0242: Phase 8 includes frontend plugin suggestion when relevant.
+# Source parity ledger 0243: Phase 8 includes Playwright plugin suggestion when relevant.
+# Source parity ledger 0244: Phase 8 includes skill-creator plugin.
+# Source parity ledger 0245: Phase 8 includes plugin browsing.
+# Source parity ledger 0246: Command type is prompt.
+# Source parity ledger 0247: Command name is init.
+# Source parity ledger 0248: Command contentLength is zero.
+# Source parity ledger 0249: Command progress message is analyzing your codebase.
+# Source parity ledger 0250: Command source is builtin.
+# Source parity ledger 0251: Description is feature-gated.
+# Source parity ledger 0252: Prompt is feature-gated.
+# Source parity ledger 0253: New prompt requires feature flag plus ant user or env.
+# Source parity ledger 0254: getPromptForCommand marks onboarding complete upstream.
+# Source parity ledger 0255: getPromptForCommand returns one text part.
+# Source parity ledger 0256: default export command is represented by initCommand.

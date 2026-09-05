@@ -1,0 +1,139 @@
+#!/bin/sh
+# check-rt-clear-receiver-dispatch.shs
+#
+# Fail-closed guard for the receiver dispatch in `rt_clear`
+# (src/runtime/runtime_native.c). Sibling of
+# scripts/check/check-dict-engine-differential.shs (dd1c0525c5b), but it checks
+# a different property: not "do the two Dict engines agree", but "does the Dict
+# arm added by 8510a8368ca2 ever get entered by a receiver that is not a Dict,
+# and is a misclassified receiver still LOUD".
+#
+# Why a C harness and not a .spl test: `bin/simple native-build` on a small
+# fixture currently dies with BUILD_RC=255 (see
+# doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md),
+# so the only reliable way to exercise these file-static predicates is to
+# compile runtime_native.c directly. That also makes this a seconds-long check
+# rather than a bootstrap.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> case(s) checked        exit 0
+#   FAIL  — ...                        exit 1
+#   ERROR — nothing was checked        exit 2
+# A run that checked 0 cases is ERROR, never a pass. A machine with no C
+# compiler is ERROR: absence of a compiler is absence of evidence.
+#
+# --selftest runs first and is fatal. It proves the harness has discriminating
+# power by ABLATION: with the Dict arm removed from a scratch copy of
+# runtime_native.c, the harness must NOT report PASS. A guard that passes on
+# both arms is measuring nothing.
+
+set -u
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+HARNESS="$ROOT/test/harness/rt_clear_receiver_dispatch_harness.c"
+STUBS="$ROOT/test/harness/rt_clear_harness_stubs.c"
+RUNTIME="$ROOT/src/runtime/runtime_native.c"
+WORK="${TMPDIR:-/tmp}/rt_clear_dispatch_guard.$$"
+SELFTEST=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST=1 ;;
+        *) printf 'ERROR — nothing was checked (unknown argument: %s)\n' "$arg"; exit 2 ;;
+    esac
+done
+
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+
+CC=""
+for c in clang cc gcc; do
+    if command -v "$c" >/dev/null 2>&1; then CC="$c"; break; fi
+done
+if [ -z "$CC" ]; then
+    printf 'ERROR — nothing was checked (no clang/cc/gcc on this machine)\n'
+    exit 2
+fi
+
+for f in "$HARNESS" "$STUBS" "$RUNTIME"; do
+    if [ ! -f "$f" ]; then
+        printf 'ERROR — nothing was checked (missing %s)\n' "$f"
+        exit 2
+    fi
+done
+
+mkdir -p "$WORK" || { printf 'ERROR — nothing was checked (cannot create %s)\n' "$WORK"; exit 2; }
+
+CFLAGS="-O1 -g -std=gnu11 -D_GNU_SOURCE -w"
+LDLIBS="-lm -lpthread -ldl"
+
+# ---------------------------------------------------------------- selftest ---
+# Ablation: build the harness against a tree whose rt_clear Dict arm has been
+# removed, and require that it does NOT pass. Run BEFORE the real scan and
+# fatal, so a harness that has lost its power cannot silently green the guard.
+if [ "$SELFTEST" -eq 1 ]; then
+    ABL="$WORK/ablated"
+    mkdir -p "$ABL/src/runtime" "$ABL/test/harness"
+    # Strip exactly the three-line Dict arm. If the pattern is not found the
+    # source has moved on and the selftest must fail loudly, not pass.
+    awk '
+        /^    if \(rt_core_as_dict\(receiver\)\) \{$/ { skip = 3; found = 1; next }
+        skip > 0 { skip--; next }
+        { print }
+        END { if (!found) exit 3 }
+    ' "$RUNTIME" > "$ABL/src/runtime/runtime_native.c"
+    if [ $? -ne 0 ]; then
+        printf 'ERROR — nothing was checked (selftest could not locate the rt_clear Dict arm; source has moved)\n'
+        exit 2
+    fi
+    # Everything else the runtime #includes must come from the real tree.
+    for extra in "$ROOT/src/runtime"/*.h; do
+        [ -f "$extra" ] && cp "$extra" "$ABL/src/runtime/"
+    done
+    cp "$HARNESS" "$STUBS" "$ABL/test/harness/"
+    "$CC" $CFLAGS -o "$ABL/h" "$ABL/test/harness/$(basename "$HARNESS")" \
+        "$ABL/test/harness/$(basename "$STUBS")" $LDLIBS >"$ABL/build.log" 2>&1
+    BUILD_RC=$?
+    if [ "$BUILD_RC" -ne 0 ]; then
+        printf 'ERROR — nothing was checked (selftest ablated build failed; see %s)\n' "$ABL/build.log"
+        exit 2
+    fi
+    "$ABL/h" >"$ABL/out.txt" 2>&1
+    ABL_RC=$?
+    if [ "$ABL_RC" -eq 0 ]; then
+        printf 'FAIL — selftest: the harness PASSED against an ablated rt_clear (Dict arm removed); it is measuring nothing\n'
+        exit 1
+    fi
+    printf 'selftest: ablated arm rejected as expected (rc=%d)\n' "$ABL_RC"
+fi
+
+# ------------------------------------------------------------------- scan ----
+"$CC" $CFLAGS -o "$WORK/h" "$HARNESS" "$STUBS" $LDLIBS >"$WORK/build.log" 2>&1
+BUILD_RC=$?
+if [ "$BUILD_RC" -ne 0 ]; then
+    printf 'ERROR — nothing was checked (harness build failed; see %s)\n' "$WORK/build.log"
+    cat "$WORK/build.log"
+    exit 2
+fi
+
+"$WORK/h" >"$WORK/out.txt" 2>&1
+RUN_RC=$?
+cat "$WORK/out.txt"
+
+# The harness prints its own verdict as its last stdout line. Re-derive the case
+# count here so this script's verdict states what it actually examined, and so a
+# harness that printed nothing cannot be mistaken for a pass. Read the count from
+# the harness output, never from the exit code alone.
+CASES=$(grep -c -E '^\[( ok |FAIL)\]' "$WORK/out.txt" 2>/dev/null || true)
+[ -z "$CASES" ] && CASES=0
+
+if [ "$CASES" -eq 0 ]; then
+    printf 'ERROR — nothing was checked (harness reported 0 cases; rc=%d)\n' "$RUN_RC"
+    exit 2
+fi
+if [ "$RUN_RC" -ne 0 ]; then
+    printf 'FAIL — %d rt_clear receiver-dispatch case(s) checked, harness rc=%d\n' "$CASES" "$RUN_RC"
+    exit 1
+fi
+printf 'PASS — %d rt_clear receiver-dispatch case(s) checked\n' "$CASES"
+exit 0

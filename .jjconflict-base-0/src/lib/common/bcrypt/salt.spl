@@ -1,0 +1,140 @@
+# bcrypt Salt Generation and Base64 Encoding
+#
+# Contains bcrypt-specific base64 encoding/decoding, random byte generation,
+# and salt formatting functions.
+#
+# Depends on: types.spl (constants, bitwise ops)
+
+use std.bcrypt.types.{BCRYPT_BASE64_ALPHABET, BCRYPT_SALT_LEN, u32_and, u32_or, u32_shl, u32_shr}
+
+# OS CSPRNG. Rust interpreter path: rand::rngs::OsRng (panics rather than
+# degrading on entropy failure). Native path: src/runtime/runtime.c reads
+# /dev/urandom. Declared as a direct extern -- do NOT route this through
+# std.common.random_pure, which is an LCG that mirrors the same names.
+extern fn rt_random_i64() -> i64
+
+# ============================================================================
+# BCRYPT BASE64 ENCODING
+# ============================================================================
+
+# Encode bytes to bcrypt base64
+fn bcrypt_encode_base64(bytes: [i64]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < bytes.length():
+        # Process 3 bytes at a time into 4 base64 chars
+        var b0 = bytes[i]
+        var b1 = 0
+        var b2 = 0
+        if i + 1 < bytes.length():
+            b1 = bytes[i + 1]
+        if i + 2 < bytes.length():
+            b2 = bytes[i + 2]
+
+        # Convert to 4 6-bit values
+        var c0 = u32_shr(b0, 2)
+        var c1_temp = u32_shl(u32_and(b0, 3), 4)
+        var c1 = u32_or(c1_temp, u32_shr(b1, 4))
+        var c2_temp = u32_shl(u32_and(b1, 15), 2)
+        var c2 = u32_or(c2_temp, u32_shr(b2, 6))
+        var c3 = u32_and(b2, 63)
+
+        parts.push(BCRYPT_BASE64_ALPHABET[c0])
+        parts.push(BCRYPT_BASE64_ALPHABET[c1])
+        if i + 1 < bytes.length():
+            parts.push(BCRYPT_BASE64_ALPHABET[c2])
+        if i + 2 < bytes.length():
+            parts.push(BCRYPT_BASE64_ALPHABET[c3])
+
+        i = i + 3
+
+    parts.join("")
+
+# Decode bcrypt base64 to bytes
+fn bcrypt_decode_base64(encoded: text) -> [i64]:
+    var bytes = []
+    var i = 0
+    while i < encoded.length():
+        # Find indices in alphabet
+        var c0_idx = 0
+        var c1_idx = 0
+        var c2_idx = 0
+        var c3_idx = 0
+
+        var j = 0
+        while j < BCRYPT_BASE64_ALPHABET.length():
+            if BCRYPT_BASE64_ALPHABET[j] == encoded[i]:
+                c0_idx = j
+            if i + 1 < encoded.length():
+                if BCRYPT_BASE64_ALPHABET[j] == encoded[i + 1]:
+                    c1_idx = j
+            if i + 2 < encoded.length():
+                if BCRYPT_BASE64_ALPHABET[j] == encoded[i + 2]:
+                    c2_idx = j
+            if i + 3 < encoded.length():
+                if BCRYPT_BASE64_ALPHABET[j] == encoded[i + 3]:
+                    c3_idx = j
+            j = j + 1
+
+        # Convert back to bytes
+        var b0_temp = u32_shl(c0_idx, 2)
+        var b0 = u32_or(b0_temp, u32_shr(c1_idx, 4))
+        bytes.push(b0)
+
+        if i + 2 < encoded.length():
+            var b1_temp = u32_shl(u32_and(c1_idx, 15), 4)
+            var b1 = u32_or(b1_temp, u32_shr(c2_idx, 2))
+            bytes.push(b1)
+
+        if i + 3 < encoded.length():
+            var b2_temp = u32_shl(u32_and(c2_idx, 3), 6)
+            var b2 = u32_or(b2_temp, c3_idx)
+            bytes.push(b2)
+
+        i = i + 4
+
+    bytes
+
+# ============================================================================
+# SALT GENERATION
+# ============================================================================
+
+# Generate cryptographically secure random bytes.
+#
+# Backed by the OS CSPRNG via `rt_random_i64` (OsRng / /dev/urandom). This
+# MUST NOT be replaced by a seeded PRNG: the output feeds bcrypt salts
+# (hash.spl) and password-reset tokens (web_framework/password_reset.spl).
+# A previous revision used a constant-seeded LCG here, which made every
+# bcrypt salt and every reset token in the process identical.
+fn generate_random_bytes(count: i64) -> [i64]:
+    var bytes = []
+    var i = 0
+    while i < count:
+        # One CSPRNG draw per byte; take the low byte, normalising the
+        # sign so the result is exactly (value mod 256) with no bias.
+        var byte_val = rt_random_i64() % 256
+        if byte_val < 0:
+            byte_val = byte_val + 256
+        bytes.push(byte_val)
+        i = i + 1
+    bytes
+
+# Generate bcrypt salt
+fn generate_salt() -> [i64]:
+    generate_random_bytes(BCRYPT_SALT_LEN)
+
+# Generate salt with specific cost
+fn generate_salt_with_cost(cost: i64) -> [i64]:
+    generate_salt()
+
+# Encode salt to bcrypt format
+fn encode_salt(salt_bytes: [i64], cost: i64) -> text:
+    var encoded_salt = bcrypt_encode_base64(salt_bytes)
+    # Trim to 22 characters
+    var parts: [text] = []
+    var i = 0
+    while i < 22:
+        if i < encoded_salt.length():
+            parts.push(encoded_salt[i])
+        i = i + 1
+    parts.join("")

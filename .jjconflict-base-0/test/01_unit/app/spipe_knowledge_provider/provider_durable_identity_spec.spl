@@ -1,0 +1,72 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.durable_records.{restore_document, lifecycle_json_bytes_canonical}
+use app.spipe_knowledge_provider.wire.{ProviderHostBindingV1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.serializer.{json_escape_string}
+
+fn identity_scope() -> text: "sha256:" + "1" * 64
+fn identity_snapshot() -> text: "spks1-" + "0" * 64
+
+fn durable_document_row(document_id: text, revision: text,
+                        visibility_digest: text,
+                        canonical: bool) -> text:
+    val fields = "[{\"name\":\"title\",\"value\":\"Durable identity\",\"weight_milli\":4000}]"
+    val facets = "[{\"name\":\"component\",\"value\":\"search\"}]"
+    val preimage_prefix = if canonical: "{" else: "{ "
+    val preimage = preimage_prefix + "\"document_id\":\"" +
+        json_escape_string(document_id) + "\",\"facets\":" + facets +
+        ",\"fields\":" + fields + ",\"revision\":\"" +
+        json_escape_string(revision) + "\",\"scope_digest\":\"" +
+        identity_scope() + "\",\"visibility_digest\":\"" +
+        json_escape_string(visibility_digest) + "\"}"
+    val scoped_hash = "sha256:" + sha256_u8_hex(text_to_bytes(preimage))
+    "{\"facets\":" + facets + ",\"fields\":" + fields +
+        ",\"id\":\"" + json_escape_string(document_id) +
+        "\",\"revision\":\"" + json_escape_string(revision) +
+        "\",\"scoped_hash\":\"" + scoped_hash +
+        "\",\"scoped_hash_preimage\":\"" +
+        json_escape_string(preimage) + "\"}"
+
+fn restore_identity(document_id: text, revision: text,
+                    visibility_digest: text,
+                    canonical: bool) -> bool:
+    val parsed = json_parse_with_error(durable_document_row(document_id,
+        revision, visibility_digest, canonical))
+    if parsed.1 != "": return false
+    restore_document(parsed.0, identity_scope()).is_ok()
+
+describe "SPipe durable identity closure":
+    it "accepts exact IdText and lowercase HashText persisted identities":
+        expect(restore_identity("DOC-IDENTITY", "REV-IDENTITY",
+            "sha256:" + "2" * 64, true)).to_be(true)
+
+    it "rejects control IDs uppercase visibility hashes and noncanonical preimages":
+        expect(restore_identity("DOC-\u0001", "REV-IDENTITY",
+            "sha256:" + "2" * 64, true)).to_be(false)
+        expect(restore_identity("DOC-IDENTITY", "REV-\u0085",
+            "sha256:" + "2" * 64, true)).to_be(false)
+        expect(restore_identity("DOC-IDENTITY", "REV-IDENTITY",
+            "sha256:" + "A" * 64, true)).to_be(false)
+        expect(restore_identity("DOC-IDENTITY", "REV-IDENTITY",
+            "sha256:" + "2" * 64, false)).to_be(false)
+
+    it "keeps SnapshotId distinct from HashText at the host boundary":
+        expect(ProviderHostBindingV1.create("WS-PROVIDER", identity_snapshot(),
+            identity_scope()).is_ok()).to_be(true)
+        expect(ProviderHostBindingV1.create("WS-PROVIDER",
+            "sha256:" + "0" * 64, identity_scope()).is_err()).to_be(true)
+        expect(ProviderHostBindingV1.create("WS-PROVIDER",
+            "spks1-" + "A" * 64, identity_scope()).is_err()).to_be(true)
+        expect(ProviderHostBindingV1.create("provider",
+            identity_snapshot(), identity_scope()).is_err()).to_be(true)
+
+    it "requires exact canonical outer lifecycle bytes":
+        val canonical = "{\"candidates\":[],\"current_logical_root\":\"sha256:" +
+            "3" * 64 + "\",\"provider_generation\":1,\"publications\":[]," +
+            "\"replay\":[],\"schema\":\"spipe-provider-lifecycle-store-v1\"," +
+            "\"scope_digest\":\"" + identity_scope() + "\",\"snapshot\":\"" +
+            identity_snapshot() + "\",\"workspace\":\"WS-PROVIDER\"}"
+        expect(lifecycle_json_bytes_canonical(canonical)).to_be(true)
+        expect(lifecycle_json_bytes_canonical(" " + canonical)).to_be(false)

@@ -1,0 +1,287 @@
+"""Retained PATH execute resolution across FAT32, DBFS, and NVFS."""
+
+use std.spec.*
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
+
+fn executable_opts() -> MountOptions:
+    var opts = MountOptions.default()
+    opts.allow_untrusted_exec = true
+    opts
+
+fn dbfs_with_tool() -> MountTable:
+    var table = MountTable.new()
+    table.mount("/", DriverInstance.DbFs(DbFsDriver.new_hosted()), executable_opts()).unwrap()
+    table.mkdir("/usr", 0o755).unwrap()
+    table.mkdir("/usr/bin", 0o755).unwrap()
+    val file = table.open("/usr/bin/tool", OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(file.id, PositionedDriverKind.Dbfs, 0u64, [1u8]).unwrap()
+    table.close(file).unwrap()
+    table
+
+fn nvfs_with_tool() -> MountTable:
+    var table = MountTable.new()
+    table.mount("/", DriverInstance.Nvfs(NvfsDriver.new("execute-path")), executable_opts()).unwrap()
+    table.mkdir("/usr", 0o755).unwrap()
+    table.mkdir("/usr/bin", 0o755).unwrap()
+    val file = table.open("/usr/bin/tool", OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(file.id, PositionedDriverKind.Nvfs, 0u64, [2u8]).unwrap()
+    table.close(file).unwrap()
+    table
+
+fn fat32_with_binary_tool() -> MountTable:
+    var table = MountTable.new()
+    table.mount("/", DriverInstance.Fat32(
+        FsFat32Driver.new_ram_backed_with_file("TOOL", "abcd")),
+        executable_opts()).unwrap()
+    val file = table.open("/TOOL", OpenFlags.read_write()).unwrap()
+    table.positioned_write_bytes(
+        file.id, PositionedDriverKind.Fat32, 0u64,
+        [0u8, 0x80u8, 0xffu8, 0x41u8]).unwrap()
+    table.close(file).unwrap()
+    table
+
+describe "MountTable retained execute path resolution":
+    it "reads retained executable bindings as exact binary bytes on every backend":
+        val expected = [0u8, 0x80u8, 0xffu8, 0x41u8]
+
+        var fat = fat32_with_binary_tool()
+        val fat_binding = fat.open_for_execute(
+            "/TOOL", ExecuteTrust.Untrusted).unwrap()
+        expect(fat.read_execute_binding_exact_v1(
+            fat_binding, 4u64).unwrap()).to_equal(expected)
+        fat.close(fat_binding.file_handle).unwrap()
+
+        var dbfs = dbfs_with_tool()
+        val db_file = dbfs.open("/usr/bin/tool", OpenFlags.read_write()).unwrap()
+        dbfs.positioned_write_bytes(
+            db_file.id, PositionedDriverKind.Dbfs, 0u64, expected).unwrap()
+        dbfs.close(db_file).unwrap()
+        val db_binding = dbfs.open_for_execute(
+            "/usr/bin/tool", ExecuteTrust.Untrusted).unwrap()
+        expect(dbfs.read_execute_binding_exact_v1(
+            db_binding, 4u64).unwrap()).to_equal(expected)
+        dbfs.close(db_binding.file_handle).unwrap()
+
+        var nvfs = nvfs_with_tool()
+        val nv_file = nvfs.open("/usr/bin/tool", OpenFlags.read_write()).unwrap()
+        nvfs.positioned_write_bytes(
+            nv_file.id, PositionedDriverKind.Nvfs, 0u64, expected).unwrap()
+        nvfs.close(nv_file).unwrap()
+        val nv_binding = nvfs.open_for_execute(
+            "/usr/bin/tool", ExecuteTrust.Untrusted).unwrap()
+        expect(nvfs.read_execute_binding_exact_v1(
+            nv_binding, 4u64).unwrap()).to_equal(expected)
+        nvfs.close(nv_binding.file_handle).unwrap()
+
+    it "streams bounded executable source chunks through one backend-neutral adapter":
+        val expected = [0u8, 0x80u8, 0xffu8, 0x41u8]
+
+        var fat = fat32_with_binary_tool()
+        val fat_binding = fat.open_for_execute("/TOOL", ExecuteTrust.Untrusted).unwrap()
+        val fat_source = fat.execute_readonly_source_v1(fat_binding).unwrap()
+        val fat_copy = fat
+        expect(fat_copy.execute_readonly_source_is_current_v1(fat_source)).to_be(true)
+        expect(fat.execute_readonly_source_size_v1(fat_source).unwrap()).to_equal(4u64)
+        expect(fat.read_execute_source_at_v1(fat_source, 1u64, 2u64).unwrap()).to_equal([0x80u8, 0xffu8])
+        expect(fat.read_execute_source_at_v1(fat_source, 4u64, 1u64).unwrap()).to_equal([])
+
+        var dbfs = dbfs_with_tool()
+        val db_file = dbfs.open("/usr/bin/tool", OpenFlags.read_write()).unwrap()
+        dbfs.positioned_write_bytes(db_file.id, PositionedDriverKind.Dbfs, 0u64, expected).unwrap()
+        dbfs.close(db_file).unwrap()
+        val db_binding = dbfs.open_for_execute("/usr/bin/tool", ExecuteTrust.Untrusted).unwrap()
+        val db_source = dbfs.execute_readonly_source_v1(db_binding).unwrap()
+        expect(dbfs.read_execute_source_at_v1(db_source, 0u64, 3u64).unwrap()).to_equal([0u8, 0x80u8, 0xffu8])
+
+        var nvfs = nvfs_with_tool()
+        val nv_file = nvfs.open("/usr/bin/tool", OpenFlags.read_write()).unwrap()
+        nvfs.positioned_write_bytes(nv_file.id, PositionedDriverKind.Nvfs, 0u64, expected).unwrap()
+        nvfs.close(nv_file).unwrap()
+        val nv_binding = nvfs.open_for_execute("/usr/bin/tool", ExecuteTrust.Untrusted).unwrap()
+        val nv_source = nvfs.execute_readonly_source_v1(nv_binding).unwrap()
+        expect(nvfs.read_execute_source_at_v1(nv_source, 2u64, 64u64).unwrap()).to_equal([0xffu8, 0x41u8])
+
+        fat.close_execute_readonly_source_v1(fat_source).unwrap()
+        dbfs.close_execute_readonly_source_v1(db_source).unwrap()
+        nvfs.close_execute_readonly_source_v1(nv_source).unwrap()
+
+    it "rejects stale and invalid executable source reads":
+        var table = fat32_with_binary_tool()
+        val binding = table.open_for_execute("/TOOL", ExecuteTrust.Untrusted).unwrap()
+        val source = table.execute_readonly_source_v1(binding).unwrap()
+        expect(table.read_execute_source_at_v1(source, 0u64, 0u64).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(table.read_execute_source_at_v1(source, 0u64, 65537u64).unwrap_err()).to_equal(FsError.InvalidArg)
+        table.close(binding.file_handle).unwrap()
+        expect(table.execute_readonly_source_is_current_v1(source)).to_be(false)
+        expect(table.execute_readonly_source_size_v1(source).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(table.read_execute_source_at_v1(source, 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
+
+    it "still closes a source after its executable observation becomes stale":
+        var table = nvfs_with_tool()
+        val binding = table.open_for_execute("/usr/bin/tool", ExecuteTrust.Untrusted).unwrap()
+        val source = table.execute_readonly_source_v1(binding).unwrap()
+        val writer = table.open("/usr/bin/tool", OpenFlags.read_write()).unwrap()
+        table.positioned_write_bytes(writer.id, PositionedDriverKind.Nvfs, 0u64, [7u8]).unwrap()
+        table.close(writer).unwrap()
+        expect(table.execute_readonly_source_is_current_v1(source)).to_be(false)
+        table.close_execute_readonly_source_v1(source).unwrap()
+        expect(table.close_execute_readonly_source_v1(source).unwrap_err()).to_equal(FsError.StaleHandle)
+
+    it "rejects every foreign source operation without touching a colliding handle":
+        var owner = fat32_with_binary_tool()
+        val binding = owner.open_for_execute("/TOOL", ExecuteTrust.Untrusted).unwrap()
+        val source = owner.execute_readonly_source_v1(binding).unwrap()
+        var other = fat32_with_binary_tool()
+        val other_binding = other.open_for_execute("/TOOL", ExecuteTrust.Untrusted).unwrap()
+        val other_source = other.execute_readonly_source_v1(other_binding).unwrap()
+        expect(binding.file_handle.id).to_equal(other_binding.file_handle.id)
+        expect(other.execute_readonly_source_is_current_v1(source)).to_be(false)
+        expect(other.execute_readonly_source_size_v1(source).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(other.read_execute_source_at_v1(source, 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(other.close_execute_readonly_source_v1(source).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(other.read_execute_source_at_v1(other_source, 0u64, 1u64).unwrap()).to_equal([0u8])
+        other.close_execute_readonly_source_v1(other_source).unwrap()
+        owner.close_execute_readonly_source_v1(source).unwrap()
+
+    it "rejects invalid limits, size substitution, and stale execute bindings":
+        var table = fat32_with_binary_tool()
+        val binding = table.open_for_execute(
+            "/TOOL", ExecuteTrust.Untrusted).unwrap()
+        expect(table.read_execute_binding_exact_v1(
+            binding, 0u64).is_err()).to_be(true)
+        expect(table.read_execute_binding_exact_v1(
+            binding, 3u64).is_err()).to_be(true)
+        var forged_size = binding
+        forged_size.size = 3
+        expect(table.read_execute_binding_exact_v1(
+            forged_size, 4u64).is_err()).to_be(true)
+        table.close(binding.file_handle).unwrap()
+        expect(table.read_execute_binding_exact_v1(
+            binding, 4u64).is_err()).to_be(true)
+
+    it "keeps NVFS trust and exact reads bound to the same retained file row":
+        var table = nvfs_with_tool()
+        val other = table.open("/usr/bin/other", OpenFlags.create_write()).unwrap()
+        table.positioned_write_bytes(
+            other.id, PositionedDriverKind.Nvfs, 0u64, [9u8]).unwrap()
+        table.close(other).unwrap()
+
+        val tool_binding = table.open_for_execute(
+            "/usr/bin/tool", ExecuteTrust.Untrusted).unwrap()
+        val other_binding = table.open_for_execute(
+            "/usr/bin/other", ExecuteTrust.Untrusted).unwrap()
+        var mixed = tool_binding
+        mixed.file_handle = other_binding.file_handle
+
+        expect(table.validate_execute_open_binding_trust(
+            mixed, ExecuteTrust.Untrusted)).to_be(false)
+        expect(table.read_execute_binding_exact_v1(
+            mixed, 1u64).is_err()).to_be(true)
+        expect(table.read_execute_binding_exact_v1(
+            tool_binding, 1u64).unwrap()).to_equal([2u8])
+
+        table.close(tool_binding.file_handle).unwrap()
+        table.close(other_binding.file_handle).unwrap()
+
+    it "searches FAT32, DBFS, and NVFS without reopening the selected file":
+        var fat = MountTable.new()
+        fat.mount("/", DriverInstance.Fat32(
+            FsFat32Driver.new_ram_backed_with_file("TOOL", "x")), executable_opts()).unwrap()
+        val fat_open = fat.resolve_and_open_for_execute(
+            "TOOL", ["/missing", "/"], ExecuteTrust.Untrusted).unwrap()
+        expect(fat_open.canonical_path).to_equal("/TOOL")
+        expect(fat_open.binding.backend_kind).to_equal("fat32")
+        expect(fat_open.binding.execute_trust).to_equal(ExecuteTrust.Untrusted)
+        expect(fat.execute_binding_is_current(fat_open.binding)).to_be(true)
+        var forged_trust = fat_open.binding
+        forged_trust.execute_trust = ExecuteTrust.Trusted
+        expect(fat.validate_execute_open_binding_trust(
+            forged_trust, ExecuteTrust.Untrusted)).to_be(true)
+        expect(fat.validate_execute_open_binding_trust(
+            forged_trust, ExecuteTrust.Trusted)).to_be(false)
+        fat.close(fat_open.binding.file_handle).unwrap()
+        expect(fat.validate_execute_open_binding_trust(
+            forged_trust, ExecuteTrust.Untrusted)).to_be(false)
+
+        var dbfs = dbfs_with_tool()
+        val db_open = dbfs.resolve_and_open_for_execute(
+            "tool", ["/missing", "/usr/bin"], ExecuteTrust.Untrusted).unwrap()
+        expect(db_open.binding.backend_kind).to_equal("dbfs")
+        expect(dbfs.execute_binding_is_current(db_open.binding)).to_be(true)
+        dbfs.close(db_open.binding.file_handle).unwrap()
+
+        var nvfs = nvfs_with_tool()
+        val nv_open = nvfs.resolve_and_open_for_execute(
+            "tool", ["/usr/bin"], ExecuteTrust.Untrusted).unwrap()
+        expect(nv_open.binding.backend_kind).to_equal("nvfs")
+        expect(nvfs.execute_binding_is_current(nv_open.binding)).to_be(true)
+        nvfs.close(nv_open.binding.file_handle).unwrap()
+
+    it "uses slash input exactly and stops on the first non-NotFound error":
+        var table = dbfs_with_tool()
+        val exact = table.resolve_and_open_for_execute(
+            "/usr/bin/tool", ["/ignored"], ExecuteTrust.Untrusted).unwrap()
+        expect(exact.canonical_path).to_equal("/usr/bin/tool")
+        table.close(exact.binding.file_handle).unwrap()
+
+        var denied = MountTable.new()
+        denied.mount("/", DriverInstance.DbFs(DbFsDriver.new_hosted()), MountOptions.default()).unwrap()
+        denied.mkdir("/blocked", 0o755).unwrap()
+        val file = denied.open("/blocked/tool", OpenFlags.create_write()).unwrap()
+        denied.write(file, "x").unwrap()
+        denied.close(file).unwrap()
+        val result = denied.resolve_and_open_for_execute(
+            "tool", ["/blocked", "/usr/bin"], ExecuteTrust.Untrusted)
+        expect(result.is_err()).to_be(true)
+        match result.unwrap_err():
+            case FsError.Permission: expect(true).to_be(true)
+            case _: fail("resolver continued after terminal execute denial")
+
+    it "rejects invalid components and bounded search input before allocation":
+        var table = dbfs_with_tool()
+        expect(table.resolve_and_open_for_execute(
+            "..", ["/usr/bin"], ExecuteTrust.Untrusted).is_err()).to_be(true)
+        expect(table.resolve_and_open_for_execute(
+            "bad\\name", ["/usr/bin"], ExecuteTrust.Untrusted).is_err()).to_be(true)
+
+        var excessive_dirs: [text] = []
+        var i: i32 = 0
+        while i < 65:
+            excessive_dirs = excessive_dirs.push("/usr/bin")
+            i = i + 1
+        val excessive = table.resolve_and_open_for_execute(
+            "tool", excessive_dirs, ExecuteTrust.Untrusted)
+        expect(excessive.is_err()).to_be(true)
+        match excessive.unwrap_err():
+            case FsError.TooLarge: expect(true).to_be(true)
+            case _: fail("resolver accepted an excessive PATH directory count")
+
+        var long_dir = "/"
+        var j: i32 = 0
+        while j < 4095:
+            long_dir = long_dir + "a"
+            j = j + 1
+        val oversized = table.resolve_and_open_for_execute(
+            "tool", [long_dir], ExecuteTrust.Untrusted)
+        expect(oversized.is_err()).to_be(true)
+        match oversized.unwrap_err():
+            case FsError.TooLarge: expect(true).to_be(true)
+            case _: fail("resolver allocated an oversized combined pathname")
+
+        var root_max_command = ""
+        var k: i32 = 0
+        while k < 4095:
+            root_max_command = root_max_command + "x"
+            k = k + 1
+        val root_boundary = table.resolve_and_open_for_execute(
+            root_max_command, ["/"], ExecuteTrust.Untrusted)
+        expect(root_boundary.is_err()).to_be(true)
+        match root_boundary.unwrap_err():
+            case FsError.NotFound: expect(true).to_be(true)
+            case _: fail("resolver rejected a valid maximum-length root candidate")

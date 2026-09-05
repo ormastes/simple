@@ -1,0 +1,84 @@
+"""Google Chat API adapter core for bound spaces and threads."""
+
+use app.llm_caret.messaging.port.contracts.{ChatTransportPort}
+use app.llm_caret.messaging.domain.capability.{TransportCapabilities}
+use app.llm_caret.messaging.domain.model.{RoomMessage}
+use app.llm_caret.messaging.adapter.chat.capability_registry.{chat_adapter_descriptor}
+use app.llm_caret.messaging.adapter.chat.rest_common.*
+
+class GoogleChatTransport with ChatTransportPort:
+    access_token: text
+    bindings: [RestRoomBinding]
+    inbound_keys: [text]
+    outbound_keys: [text]
+
+    static fn new(access_token: text) -> GoogleChatTransport:
+        GoogleChatTransport(access_token: access_token, bindings: [], inbound_keys: [], outbound_keys: [])
+
+    fn capabilities() -> TransportCapabilities: chat_adapter_descriptor("google_chat").capabilities
+
+    me bind_space(binding_id: text, canonical_room_id: text, space_name: text) -> text:
+        if binding_id == "" or canonical_room_id == "" or not space_name.starts_with("spaces/"):
+            return "invalid_binding"
+        for value in self.bindings:
+            if value.binding_id == binding_id: return "binding_exists"
+        self.bindings.push(RestRoomBinding(binding_id: binding_id,
+            canonical_room_id: canonical_room_id, external_room_id: space_name))
+        "binding_attached"
+
+    fn binding(binding_id: text) -> RestRoomBinding?:
+        for value in self.bindings:
+            if value.binding_id == binding_id: return Some(value)
+        nil
+
+    me connect(binding_id: text) -> text:
+        if self.access_token == "": return "access_token_required"
+        if self.binding(binding_id).?: "connected:google_chat:" + binding_id else: "binding_not_found"
+
+    fn prepare_send(binding_id: text, message: RoomMessage, idempotency_key: text) -> ChatHttpRequest:
+        val bound = self.binding(binding_id)
+        if not bound.?: return rejected_request("binding_not_connected")
+        if idempotency_key.len() < 8: return rejected_request("stable_idempotency_key_required")
+        var body = "{\"text\":\"" + json_escape(message.body) + "\""
+        if message.thread_root_id != "":
+            body = body + ",\"thread\":{\"name\":\"" + json_escape(message.thread_root_id) + "\"}"
+        body = body + "}"
+        ChatHttpRequest(accepted: true, method: "POST",
+            url: "https://chat.googleapis.com/v1/" + bound.external_room_id + "/messages",
+            headers: ["Authorization: Bearer " + self.access_token, "Content-Type: application/json",
+                "X-Idempotency-Key: " + idempotency_key], body: body,
+            idempotency_key: idempotency_key, error: "")
+
+    me send(binding_id: text, message: RoomMessage, idempotency_key: text) -> text:
+        for key in self.outbound_keys:
+            if key == idempotency_key: return "google_chat_outbox_duplicate:" + message.message_id.value
+        val request = self.prepare_send(binding_id, message, idempotency_key)
+        if not request.accepted: return request.error
+        self.outbound_keys.push(idempotency_key)
+        "google_chat_outbox:" + message.message_id.value
+
+    me normalize_event(binding_id: text, event: ExternalChatEvent) -> NormalizedChatEvent:
+        val bound = self.binding(binding_id)
+        if not bound.?:
+            return NormalizedChatEvent(accepted: false, duplicate: false, event_kind: "",
+                canonical_room_id: "", external_message_id: "", thread_root_id: "",
+                sender_external_id: "", body: "", error: "binding_not_connected")
+        val key = binding_id + ":" + event.event_id
+        var duplicate = false
+        for seen in self.inbound_keys:
+            if seen == key: duplicate = true
+        if not duplicate: self.inbound_keys.push(key)
+        NormalizedChatEvent(accepted: true, duplicate: duplicate, event_kind: "message_created",
+            canonical_room_id: bound.canonical_room_id, external_message_id: event.external_message_id,
+            thread_root_id: event.external_thread_id, sender_external_id: event.sender_external_id,
+            body: event.body, error: "")
+
+    me mark_read(binding_id: text, external_message_id: text) -> text:
+        if not self.binding(binding_id).?: return "binding_not_connected"
+        "google_chat_native_read_state:" + external_message_id
+
+    me open_private(binding_id: text, identity_ids: [text]) -> text:
+        if identity_ids.len() < 2: return "private_room_requires_two_identities"
+        "google_chat_native_direct_space:create"
+
+export GoogleChatTransport

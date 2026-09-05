@@ -1,0 +1,104 @@
+# Enclosing-Scope Write-Back — Similar-Problem Detection Spec (defect CLASS)
+#
+# THE CLASS: the interpreter represents a nested scope as a COPY of its parent
+# (`Env::clone`), so every construct that runs a body in a child env needs an
+# explicit write-back for the parent to observe a mutation. Each construct has
+# its own write-back, added separately, at a different time:
+#
+#   nested `fn`      exec_function_with_captured_env  (MISSING until 2026-08-17)
+#   module globals   sync_owned_captured_globals
+#   `mut` parameters write_back_mutable_arguments
+#   if/match blocks  copy_back_block_writes
+#
+# That is four parallel implementations of one idea, which is exactly why a gap
+# in one went unnoticed for months while the others worked. A missing write-back
+# is SILENT: it compiles, exits 0, and yields a stale value.
+#
+# This spec does not test the nested-`fn` bug (its reproducer is
+# nested_fn_enclosing_var_mutation_spec.spl). It sweeps the OTHER constructs
+# with the same shape, so the next omission — or a regression in one of the
+# existing four caused by touching a shared helper — fails here.
+#
+# Every oracle is an absolute literal, never "construct A agrees with construct
+# B", which would pass while both are stale in the same way.
+# @tag: unit, compiler, interpreter, closure, mutation, scope
+
+use std.spec.{describe, it, expect}
+
+fn add_via_mut(acc: mut [i64], n: i64):
+    acc.push(n)
+
+describe "enclosing-scope write-back across constructs":
+
+    it "if-block body mutates an enclosing var":
+        var total = 0
+        val cond = true
+        if cond:
+            total = total + 5
+        expect(total).to_equal(5)
+
+    it "else-branch body mutates an enclosing var":
+        var total = 0
+        val cond = false
+        if cond:
+            total = 1
+        else:
+            total = total + 9
+        expect(total).to_equal(9)
+
+    it "while body accumulates into an enclosing var":
+        var total = 0
+        var i = 0
+        while i < 4:
+            total = total + i
+            i = i + 1
+        expect(total).to_equal(6)
+
+    it "for body accumulates into an enclosing var":
+        var total = 0
+        for n in [1, 2, 3, 4]:
+            total = total + n
+        expect(total).to_equal(10)
+
+    it "match arm body mutates an enclosing var":
+        var label = ""
+        val n = 2
+        match n:
+            1 => label = "one"
+            2 => label = "two"
+            _ => label = "other"
+        expect(label).to_equal("two")
+
+    it "nested if inside while mutates the outermost var":
+        # Two levels of child env between the write and the binding.
+        var evens = 0
+        var i = 0
+        while i < 6:
+            if i % 2 == 0:
+                evens = evens + 1
+            i = i + 1
+        expect(evens).to_equal(3)
+
+    it "mut array parameter write-back is visible to the caller":
+        var items: [i64] = []
+        add_via_mut(items, 7)
+        add_via_mut(items, 8)
+        expect(items.len()).to_equal(2)
+
+    it "array mutated directly inside an if-block is visible after it":
+        var items: [i64] = []
+        val cond = true
+        if cond:
+            items.push(1)
+            items.push(2)
+        expect(items.len()).to_equal(2)
+
+    it "does not leak a block-local name into the enclosing scope":
+        # The dual defect: write-back must copy only names the parent ALREADY
+        # binds. A block-local escaping upward is as wrong as a lost write.
+        var total = 0
+        val cond = true
+        if cond:
+            var scratch = 99
+            total = total + scratch
+        expect(total).to_equal(99)

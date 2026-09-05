@@ -1,0 +1,98 @@
+# @cover src/os/compositor/screenshot_compare.spl 70%
+# @tag: imaging, diff, regions, screenshot
+#
+# Diff Region Detection Specification
+#
+# Verifies connected-region bounding boxes over the pixel diff mask:
+# a synthetic two-region mask yields exactly two bboxes with correct
+# geometry, pixel counts, and max channel deltas.
+#
+# Plan: doc/03_plan/agent_tasks/rendering_lane_hardening_2026-08-19.md (Phase 1)
+
+use std.spec.{describe, context, it, expect}
+use os.compositor.screenshot_compare.{find_diff_regions, DiffRegion}
+
+fn uniform(width: i32, height: i32, color: u32) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i < width * height:
+        out.push(color)
+        i = i + 1
+    out
+
+fn set_rect(buf: [u32], width: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var out = buf
+    var yy = y
+    while yy < y + h:
+        var xx = x
+        while xx < x + w:
+            out[yy * width + xx] = color
+            xx = xx + 1
+        yy = yy + 1
+    out
+
+describe "screenshot_compare find_diff_regions":
+
+    context "identical buffers":
+
+        it "returns no regions":
+            val a = uniform(16, 16, 0xFF808080u32)
+            val regions = find_diff_regions(a, a, 16, 16, 0)
+            expect(regions.len()).to_equal(0)
+
+    context "two separated diff regions":
+
+        it "returns two bounding boxes with exact geometry, pixel counts, and max deltas":
+            val base = uniform(20, 20, 0xFF808080u32)
+            var changed = uniform(20, 20, 0xFF808080u32)
+            # Region 1: 3x2 rect at (2, 3), red channel +0x10 (delta 16)
+            changed = set_rect(changed, 20, 2, 3, 3, 2, 0xFF908080u32)
+            # Region 2: 2x4 rect at (12, 10), blue channel +0x40 (delta 64)
+            changed = set_rect(changed, 20, 12, 10, 2, 4, 0xFF8080C0u32)
+            val regions = find_diff_regions(base, changed, 20, 20, 0)
+            expect(regions.len()).to_equal(2)
+            # Scan order finds the (2, 3) region first
+            val r1 = regions[0]
+            expect(r1.x).to_equal(2)
+            expect(r1.y).to_equal(3)
+            expect(r1.width).to_equal(3)
+            expect(r1.height).to_equal(2)
+            expect(r1.pixel_count).to_equal(6)
+            expect(r1.max_channel_diff).to_equal(16)
+            val r2 = regions[1]
+            expect(r2.x).to_equal(12)
+            expect(r2.y).to_equal(10)
+            expect(r2.width).to_equal(2)
+            expect(r2.height).to_equal(4)
+            expect(r2.pixel_count).to_equal(8)
+            expect(r2.max_channel_diff).to_equal(64)
+
+    context "threshold filtering":
+
+        it "drops regions whose max delta is at or below the threshold":
+            val base = uniform(10, 10, 0xFF808080u32)
+            var changed = uniform(10, 10, 0xFF808080u32)
+            changed = set_rect(changed, 10, 1, 1, 2, 2, 0xFF828080u32)   # delta 2
+            changed = set_rect(changed, 10, 6, 6, 2, 2, 0xFFA08080u32)   # delta 32
+            val regions = find_diff_regions(base, changed, 10, 10, 4)
+            expect(regions.len()).to_equal(1)
+            expect(regions[0].x).to_equal(6)
+            expect(regions[0].max_channel_diff).to_equal(32)
+
+    context "L-shaped connected region":
+
+        it "merges touching pixels into one region with a covering bbox":
+            val base = uniform(10, 10, 0xFF000000u32)
+            var changed = uniform(10, 10, 0xFF000000u32)
+            # Vertical bar (2,2)-(2,5) plus horizontal bar (2,5)-(5,5): connected L
+            changed = set_rect(changed, 10, 2, 2, 1, 4, 0xFFFFFFFFu32)
+            changed = set_rect(changed, 10, 3, 5, 3, 1, 0xFFFFFFFFu32)
+            val regions = find_diff_regions(base, changed, 10, 10, 0)
+            expect(regions.len()).to_equal(1)
+            val r = regions[0]
+            expect(r.x).to_equal(2)
+            expect(r.y).to_equal(2)
+            expect(r.width).to_equal(4)
+            expect(r.height).to_equal(4)
+            expect(r.pixel_count).to_equal(7)
+            expect(r.max_channel_diff).to_equal(255)

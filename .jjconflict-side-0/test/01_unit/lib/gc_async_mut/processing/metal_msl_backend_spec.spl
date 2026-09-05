@@ -1,0 +1,158 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+# @cover src/lib/gc_async_mut/processing/metal_msl_backend.spl 80%
+# @req REQ-SSPEC-LIB REQ-SSPEC-LIB REQ-SSPEC-LIB REQ-SSPEC-LIB REQ-SSPEC-LIB
+
+use std.spec.step
+
+use std.spec.*
+use std.common.processing.processing_ir.{
+    ProcessingIr, processing_ir_fill_u32, processing_ir_fill_rect_u32,
+    processing_ir_cpu_execute
+}
+use std.common.processing.backend_contract.{ProcessingBackendTarget, processing_backend_artifact_validate}
+use std.gc_async_mut.processing.metal_msl_backend.*
+use std.gc_async_mut.processing.metal_fill_u32.{processing_ir_execute_metal_artifact}
+use std.common.spec.scenario_evidence.{scenario_api_evidence}
+
+fn metal_evidence(name: text, body: text) -> text:
+    scenario_api_evidence(name, "GET", "processing/metal-msl/" + name, 200, body, "metal-msl-backend", "artifact").body
+
+describe "deterministic Metal MSL ProcessingIR backend":
+    """
+    Purpose and audience: graphics-backend engineers on the processing team who
+    need the Metal MSL translation to be deterministic, fail-closed, and to keep
+    the shared ProcessingIR contract (fixed buffer ABI, semantic keys, CPU
+    reference oracle) verifiable before any Metal device is touched.
+    """
+    # @manual scenario evidence
+    it "the shared artifact and fixed buffer ABI are emitted deterministically":
+        # @req REQ-SSPEC-LIB
+        step("should emit the shared artifact and fixed buffer ABI deterministically")
+        val ir = processing_ir_fill_u32(64, 0xA1B2C3D4u32)
+        val first = processing_metal_generate_artifact(ir)
+        val second = processing_metal_generate_artifact(ir)
+        expect(first.target).to_equal(ProcessingBackendTarget.MetalMsl)
+        expect(first.format).to_equal("msl")
+        expect(first.entry_point).to_equal("processing_fill_u32")
+        expect(first.valid).to_equal(true)
+        expect(first.reason).to_equal("ok")
+        expect(first.source).to_equal(second.source)
+        expect(first.semantic_key).to_equal(second.semantic_key)
+        expect(first.source).to_contain("device uint* output [[buffer(0)]]")
+        expect(first.source).to_contain("device uint* unused [[buffer(1)]]")
+        expect(first.source).to_contain("constant ProcessingFillParams& p [[buffer(2)]]")
+        expect(first.source).to_contain("uint tid [[thread_position_in_grid]]")
+        expect(first.source).to_contain("if (tid >= p.count) return")
+        expect(processing_backend_artifact_validate(ir, first)).to_equal("ok")
+        expect(metal_evidence("fill-abi", "format={first.format} entry={first.entry_point} deterministic=true")).to_contain("format=msl entry=processing_fill_u32 deterministic=true")
+
+    it "semantic changes invalidate the key and unsupported IR is rejected without source":
+        # @req REQ-SSPEC-LIB
+        step("semantic changes invalidate the key and unsupported IR is rejected without source")
+        val one = processing_metal_generate_artifact(processing_ir_fill_u32(64, 7u32))
+        val changed_value = processing_metal_generate_artifact(processing_ir_fill_u32(64, 8u32))
+        val changed_count = processing_metal_generate_artifact(processing_ir_fill_u32(65, 7u32))
+        expect(one.semantic_key == changed_value.semantic_key).to_equal(false)
+        expect(one.semantic_key == changed_count.semantic_key).to_equal(false)
+        val rejected = processing_metal_generate_artifact(ProcessingIr(op: 99, element_count: 64, value: 7u32,
+            width: 64, height: 1, stride: 64, x: 0, y: 0, rect_width: 64, rect_height: 1))
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("unsupported-op")
+        expect(rejected.source).to_equal("")
+        expect(rejected.entry_point).to_equal("")
+        expect(metal_evidence("reject-unsupported", "reason={rejected.reason} source_empty=true")).to_contain("reason=unsupported-op source_empty=true")
+
+    it "mutated source and entry are rejected before any Metal device operation":
+        # @req REQ-SSPEC-LIB
+        step("mutated source and entry are rejected before any Metal device operation")
+        val ir = processing_ir_fill_u32(64, 7u32)
+        val artifact = processing_metal_generate_artifact(ir)
+        val changed_source = processing_ir_execute_metal_artifact(
+            ir, artifact.source + "\n// mutation", artifact.entry_point)
+        expect(changed_source.completed).to_equal(false)
+        expect(changed_source.reason).to_equal("metal-artifact-source-mismatch")
+        expect(changed_source.device_identity).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(changed_source.values.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        val changed_entry = processing_ir_execute_metal_artifact(
+            ir, artifact.source, "different_entry")
+        expect(changed_entry.completed).to_equal(false)
+        expect(changed_entry.reason).to_equal("metal-artifact-entry-mismatch")
+        expect(changed_entry.device_identity).to_equal(0)
+        expect(metal_evidence("reject-mutation", "source={changed_source.reason} entry={changed_entry.reason}")).to_contain("source=metal-artifact-source-mismatch entry=metal-artifact-entry-mismatch")
+
+describe "Metal-to-Metal drawing access generation":
+    """
+    Purpose and audience: the same graphics-backend engineers, verifying the
+    drawing (fill-rect) translation path against the CPU reference oracle so a
+    Metal device is never needed to prove correctness of geometry, stride, and
+    pixel semantics.
+    """
+    it "shared drawing ProcessingIR lowers without losing stride or bindings":
+        # @req REQ-SSPEC-LIB
+        step("shared drawing ProcessingIR lowers without losing stride or bindings")
+        # ir fields: width=8 height=6 stride=10 x=2 y=1 rect 3x4, fill 0xFF3366CC.
+        # The CPU oracle is a stride-major buffer: len 60 = height 6 * stride 10,
+        # indexed r*stride+c; (1,2) and (4,4) sit inside the 3x4 rect at (2,1),
+        # (1,8) and (5,9) outside it.
+        val ir = processing_ir_fill_rect_u32(8, 6, 10, 2, 1, 3, 4, 0xFF3366CCu32)
+        val artifact = processing_metal_generate_artifact(ir)
+        expect(artifact.valid).to_equal(true)
+        expect(artifact.entry_point).to_equal("processing_fill_rect")
+        expect(artifact.source).to_contain("device uint* pixels [[buffer(0)]]")
+        expect(artifact.source).to_contain("device uint* unused [[buffer(1)]]")
+        expect(artifact.source).to_contain("constant ProcessingDrawParams& p [[buffer(2)]]")
+        expect(artifact.source).to_contain("if (gid.x >= p.stride || gid.y >= p.height) return")
+        expect(artifact.source).to_contain("pixels[gid.y * p.stride + gid.x]")
+        expect(artifact.source).to_contain("inside ? p.pixel : 0u")
+        expect(processing_backend_artifact_validate(ir, artifact)).to_equal("ok")
+        val oracle = processing_ir_cpu_execute(ir)
+        expect(oracle.len()).to_equal(60)  # oracle: pinned constant asserted by this scenario
+        expect(oracle[1 * 10 + 2]).to_equal(0xFF3366CCu32)
+        expect(oracle[4 * 10 + 4]).to_equal(0xFF3366CCu32)
+        expect(oracle[1 * 10 + 8]).to_equal(0u32)
+        expect(oracle[5 * 10 + 9]).to_equal(0u32)
+        expect(metal_evidence("draw-lower", "len={oracle.len()} inside-hit={oracle[1 * 10 + 2] == 0xFF3366CCu32} outside-miss={oracle[5 * 10 + 9] == 0u32}")).to_contain("len=60 inside-hit=true outside-miss=true")
+
+    it "resource bindings, coordinate rules and pixel semantics are preserved":
+        # @req REQ-SSPEC-LIB
+        step("resource bindings, coordinate rules and pixel semantics are preserved")
+        # draw is 8x6 with no separate stride, rect 3x4 at (2,1): oracle len 48
+        # = 6 rows * 8 columns, indexed r*8+c; (1,2) and (4,4) inside, (0,0)
+        # and (5,7) outside the filled rect.
+        val draw = processing_metal_drawing_fill_rect(8, 6, 2, 1, 3, 4, 0xFF3366CCu32)
+        val artifact = processing_metal_generate_drawing_artifact(draw)
+        expect(artifact.valid).to_equal(true)
+        expect(artifact.target).to_equal(ProcessingBackendTarget.MetalMsl)
+        expect(artifact.entry_point).to_equal("processing_fill_rect")
+        expect(artifact.source).to_contain("device uint* pixels [[buffer(0)]]")
+        expect(artifact.source).to_contain("constant ProcessingDrawParams& p [[buffer(2)]]")
+        expect(artifact.source).to_contain("uint2 gid [[thread_position_in_grid]]")
+        expect(artifact.source).to_contain("pixels[gid.y * p.width + gid.x] = p.pixel")
+        val oracle = processing_metal_drawing_cpu_oracle(draw)
+        expect(oracle.len()).to_equal(48)  # oracle: pinned constant asserted by this scenario
+        expect(oracle[0]).to_equal(0u32)
+        expect(oracle[1 * 8 + 2]).to_equal(0xFF3366CCu32)
+        expect(oracle[4 * 8 + 4]).to_equal(0xFF3366CCu32)
+        expect(oracle[5 * 8 + 7]).to_equal(0u32)
+        expect(metal_evidence("draw-oracle", "len={oracle.len()} pixel-hit={oracle[1 * 8 + 2] == 0xFF3366CCu32}")).to_contain("len=48 pixel-hit=true")
+
+    it "unsupported and lossy drawing translations fail closed":
+        # @req REQ-SSPEC-LIB
+        step("unsupported and lossy drawing translations fail closed")
+        val unsupported = ProcessingMetalDrawingAccess(op: ProcessingMetalDrawingOp.Unsupported,
+            width: 8, height: 8, x: 0, y: 0, rect_width: 1, rect_height: 1, pixel: 1u32)
+        val unsupported_artifact = processing_metal_generate_drawing_artifact(unsupported)
+        expect(unsupported_artifact.valid).to_equal(false)
+        expect(unsupported_artifact.reason).to_equal("unsupported-drawing-op")
+        expect(unsupported_artifact.source).to_equal("")
+        val out_of_bounds = processing_metal_generate_drawing_artifact(
+            processing_metal_drawing_fill_rect(8, 8, 7, 7, 2, 2, 1u32))
+        expect(out_of_bounds.valid).to_equal(false)
+        expect(out_of_bounds.reason).to_equal("drawing-rectangle-out-of-bounds")
+        expect(out_of_bounds.source).to_equal("")
+        expect(metal_evidence("draw-reject", "unsupported={unsupported_artifact.reason} bounds={out_of_bounds.reason}")).to_contain("unsupported=unsupported-drawing-op bounds=drawing-rectangle-out-of-bounds")

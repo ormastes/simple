@@ -1,0 +1,157 @@
+#!/bin/sh
+# check-test-session-setup-budget.shs
+#
+# Fail-closed perf gate on the fixed per-invocation cost of `bin/simple test`.
+#
+# WHY THIS EXISTS
+# ---------------
+# Measured 2026-08-17 on the deployed seed, same spec, same tree, same binary:
+#
+#   bin/simple test <spec> --no-session-daemon --sequential   ->   4.6s,  69 lines
+#   bin/simple test <spec>                (daemon path)       ->  62.4s, 2012 lines
+#   ... same command, second run                              -> 130.0s, 2012 lines
+#   bin/simple test <dir-with-one-spec> --sequential          -> >600s, KILLED
+#
+# 99.6% of the daemon-path wall clock is spent BEFORE the spec runs (59.8s
+# pre-child vs 0.27s of actual spec execution), emitting ~1943 lines of
+# module-load warnings. A companion lane measured the same shape as
+# "Session setup: 309585ms" followed by an 11s spec.
+#
+# That fixed cost is what capped every sweep: the lib sweep finished ~1/8 of
+# its tree, and test/feature ended with 332 of 352 specs carrying no verdict.
+# Nothing in the tree measured it, so a regression back to this could return
+# silently. This gate measures it directly.
+#
+# WHAT IS CHECKED
+# ---------------
+# A single known-good spec is run on the direct path and must (a) finish inside
+# the budget and (b) print a real `Results: N total` line. Requiring the
+# verdict line is not decoration: `bin/simple test` has been observed printing
+# ~1897 lines of warnings with no result summary at all and exiting 0
+# (doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md),
+# so a time-only gate would pass a run that never executed anything.
+#
+# VERDICT (last line of stdout, per repo convention)
+#   PASS  — <n> measurement(s) checked, ...      exit 0
+#   FAIL  — ...                                  exit 1
+#   ERROR — nothing was checked                  exit 2
+#
+# A run that timed nothing is ERROR, never a pass.
+#
+# Usage:
+#   sh scripts/check/check-test-session-setup-budget.shs [--budget-seconds N] [--spec PATH]
+#   sh scripts/check/check-test-session-setup-budget.shs --selftest
+
+set -u
+
+BUDGET_SECONDS=90
+SPEC="test/01_unit/lib/nogc_sync_mut/hashset_probe_spec.spl"
+RUN_SELFTEST=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --budget-seconds) BUDGET_SECONDS="${2:-}"; shift 2 ;;
+        --spec)           SPEC="${2:-}";           shift 2 ;;
+        --selftest)       RUN_SELFTEST=1;          shift ;;
+        -h|--help)        sed -n '1,45p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2
+           echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Verdict classifier. Pure function of (elapsed, budget, output) so --selftest
+# can exercise it on fixtures without running the compiler at all.
+# Echoes one of: ok | over_budget | no_verdict_line
+# ---------------------------------------------------------------------------
+classify_run() {
+    _elapsed="$1"; _budget="$2"; _outfile="$3"
+    if ! grep -qE '^[[:space:]]*Results:[[:space:]]+[0-9]+ total' "$_outfile"; then
+        echo "no_verdict_line"; return
+    fi
+    # integer compare; _elapsed is truncated to whole seconds by the caller
+    if [ "$_elapsed" -gt "$_budget" ]; then
+        echo "over_budget"; return
+    fi
+    echo "ok"
+}
+
+selftest() {
+    _t=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    _fail=0
+
+    # 1. fast run with a proper verdict line -> ok
+    printf 'some warning\nResults: 5 total, 5 passed, 0 failed\n' > "$_t/a"
+    [ "$(classify_run 4 90 "$_t/a")" = "ok" ] || { echo "selftest: fast+verdict should be ok" >&2; _fail=1; }
+
+    # 2. verdict line present but too slow -> over_budget
+    [ "$(classify_run 600 90 "$_t/a")" = "over_budget" ] || { echo "selftest: slow run should be over_budget" >&2; _fail=1; }
+
+    # 3. the real silent-green shape: thousands of warnings, no Results line.
+    #    Must NOT pass even though it was fast.
+    i=0; : > "$_t/b"
+    while [ $i -lt 50 ]; do echo "warning: Avoid 'export use *'" >> "$_t/b"; i=$((i+1)); done
+    [ "$(classify_run 3 90 "$_t/b")" = "no_verdict_line" ] || { echo "selftest: silent-green should fail" >&2; _fail=1; }
+
+    # 4. a 'passed' token inside warning prose must not be mistaken for a verdict
+    printf 'note: 5 passed earlier\nexpected 0 to equal 999\n' > "$_t/c"
+    [ "$(classify_run 3 90 "$_t/c")" = "no_verdict_line" ] || { echo "selftest: prose must not count as verdict" >&2; _fail=1; }
+
+    rm -rf "$_t"
+    if [ "$_fail" -ne 0 ]; then
+        echo "FAIL — selftest fixtures did not behave as specified"; exit 1
+    fi
+    echo "PASS — 4 fixture(s) checked"
+    exit 0
+}
+
+[ "$RUN_SELFTEST" -eq 1 ] && selftest
+
+# --- selftest always runs before a real scan, and is fatal ------------------
+_st=$(sh "$0" --selftest 2>&1)
+_st_rc=$?
+if [ "$_st_rc" -ne 0 ]; then
+    echo "$_st" >&2
+    echo "ERROR — nothing was checked"; exit 2
+fi
+
+BIN="bin/simple"
+if [ ! -x "$BIN" ]; then
+    echo "no runnable $BIN in $(pwd)" >&2
+    echo "ERROR — nothing was checked"; exit 2
+fi
+if [ ! -f "$SPEC" ]; then
+    echo "spec not found: $SPEC" >&2
+    echo "ERROR — nothing was checked"; exit 2
+fi
+
+OUT=$(mktemp) || { echo "ERROR — nothing was checked"; exit 2; }
+GRACE=$((BUDGET_SECONDS * 4 + 60))
+
+START=$(date +%s)
+# Exit status is deliberately NOT read through a pipe: a pipeline's $? is the
+# LAST element's status, which has produced false greens in this repo before.
+nice -n 19 timeout "$GRACE" "$BIN" test "$SPEC" --no-session-daemon --sequential --timeout "$GRACE" > "$OUT" 2>&1
+RUN_RC=$?
+END=$(date +%s)
+ELAPSED=$((END - START))
+
+VERDICT=$(classify_run "$ELAPSED" "$BUDGET_SECONDS" "$OUT")
+
+case "$VERDICT" in
+    ok)
+        rm -f "$OUT"
+        echo "PASS — 1 measurement(s) checked, $SPEC completed in ${ELAPSED}s (budget ${BUDGET_SECONDS}s) with a result summary"
+        exit 0 ;;
+    over_budget)
+        echo "--- last 5 lines ---" >&2; tail -5 "$OUT" >&2; rm -f "$OUT"
+        echo "FAIL — 1 measurement(s) checked, $SPEC took ${ELAPSED}s, over the ${BUDGET_SECONDS}s fixed-cost budget (exit $RUN_RC)"
+        exit 1 ;;
+    no_verdict_line)
+        echo "--- last 5 lines ---" >&2; tail -5 "$OUT" >&2; rm -f "$OUT"
+        echo "FAIL — 1 measurement(s) checked, $SPEC printed no 'Results: N total' line in ${ELAPSED}s (exit $RUN_RC): ran silently or never executed"
+        exit 1 ;;
+    *)
+        rm -f "$OUT"
+        echo "ERROR — nothing was checked"; exit 2 ;;
+esac

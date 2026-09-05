@@ -1,0 +1,181 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.query_clock.{QueryClockPort}
+use app.spipe_knowledge_provider.work_control.{ProviderRequestControlHandleV1}
+use app.spipe_knowledge_provider.request_control.{ProviderRequestControlOwnerV1, ProviderCommitAdmissionPermitV1, ProviderPermitAuthorityPort}
+
+class RequestControlTestClockV1 with QueryClockPort:
+    var observed_at_ms: i64
+    step_ms: i64
+    static fn at(observed_at_ms: i64,
+                 step_ms: i64 = 0) -> RequestControlTestClockV1:
+        RequestControlTestClockV1(observed_at_ms: observed_at_ms,
+            step_ms: step_ms)
+    me now_ms() -> i64:
+        val observed = self.observed_at_ms
+        self.observed_at_ms = observed + self.step_ms
+        observed
+    fn request_cancelled(request_id: text) -> bool: false
+
+class RequestControlSequenceClockV1 with QueryClockPort:
+    observations: [i64]
+    var index: i64
+    static fn configured(observations: [i64]) -> RequestControlSequenceClockV1:
+        RequestControlSequenceClockV1(observations: observations, index: 0)
+    me now_ms() -> i64:
+        val bounded = if self.index < self.observations.len(): self.index else: self.observations.len() - 1
+        val observed = self.observations[bounded]
+        self.index = self.index + 1
+        observed
+    fn request_cancelled(request_id: text) -> bool: false
+
+class RequestControlTestPermitAuthorityV1 with ProviderPermitAuthorityPort:
+    private_prefix: text
+    static fn configured() -> RequestControlTestPermitAuthorityV1:
+        RequestControlTestPermitAuthorityV1(private_prefix: "owner-opaque")
+    me issue(request_id: text, registration_generation: i64,
+             intent_hash: text) -> Result<text, text>:
+        Ok(self.private_prefix + "-" + registration_generation.to_text())
+
+fn h(letter: text) -> text:
+    "sha256:" + letter.repeat(64)
+
+fn owner_with(clock: QueryClockPort,
+              maximum_requests: i64) -> Result<ProviderRequestControlOwnerV1, text>:
+    val authority = RequestControlTestPermitAuthorityV1.configured()
+    ProviderRequestControlOwnerV1.configured(clock, maximum_requests, authority)
+
+describe "SPipe provider request control owner":
+    it "registers a unique bounded request with an absolute deadline":
+        var clock = RequestControlTestClockV1.at(100)
+        var owner = owner_with(clock, 2)?
+        val handle = owner.register("req-1", 100, 1, h("a"))?
+        expect(handle.registration_generation).to_equal(1)
+        expect(owner.request_state("req-1")).to_equal("running")
+        expect(owner.request_count()).to_equal(1)
+        expect(owner.register("req-1", 101, 30, h("b")))
+            .to_equal(Err("duplicate_request_id"))
+        val upper = owner.register("req-2", 100, 30000, h("b"))?
+        expect(upper.registration_generation).to_equal(2)
+        expect(owner.register("req-3", 101, 30, h("b")))
+            .to_equal(Err("request_registry_full"))
+        expect(owner.request_count()).to_equal(2)
+
+    it "rejects invalid overflow expired and backwards-clock registration":
+        var clock = RequestControlTestClockV1.at(100)
+        var owner = owner_with(clock, 4)?
+        expect(owner.register("bad-0", 100, 0, h("a")))
+            .to_equal(Err("invalid_request_deadline"))
+        expect(owner.register("bad-30k", 100, 30001, h("a")))
+            .to_equal(Err("invalid_request_deadline"))
+        expect(owner.register("overflow", 9223372036854775800, 10, h("a")))
+            .to_equal(Err("request_deadline_overflow"))
+        expect(owner.register("expired", 70, 30, h("a")))
+            .to_equal(Err("deadline_exceeded"))
+        expect(owner.register("future", 101, 30, h("a")))
+            .to_equal(Err("monotonic_clock_error"))
+        expect(owner.register("bad\nrequest", 100, 30, h("a")))
+            .to_equal(Err("invalid_request_registration"))
+        expect(owner.register("bad-hash", 100, 30,
+            "sha256:" + "A".repeat(64)))
+            .to_equal(Err("invalid_request_registration"))
+        expect(owner.request_count()).to_equal(0)
+
+    it "gives cancellation precedence and exact dispositions":
+        var clock = RequestControlTestClockV1.at(100)
+        var owner = owner_with(clock, 2)?
+        val handle = owner.register("req-cancel", 100, 1, h("c"))?
+        expect(owner.cancel("cancel-unknown", "missing")?.disposition)
+            .to_equal("target_not_found")
+        expect(owner.cancel("cancel-1", "req-cancel")?.disposition)
+            .to_equal("cancelled")
+        expect(owner.try_commit_admission(handle, h("c")))
+            .to_equal(Err("cancelled"))
+        expect(owner.cancel("cancel-2", "req-cancel")?.disposition)
+            .to_equal("already_complete")
+
+    it "atomically admits only the matching generation and intent":
+        var clock = RequestControlTestClockV1.at(200)
+        var owner = owner_with(clock, 2)?
+        val handle = owner.register("req-admit", 200, 30, h("d"))?
+        val forged = ProviderRequestControlHandleV1(request_id: "req-admit",
+            registration_generation: handle.registration_generation + 1)
+        expect(owner.try_commit_admission(forged, h("d")))
+            .to_equal(Err("invalid_request_control_handle"))
+        expect(owner.try_commit_admission(handle, h("e")))
+            .to_equal(Err("intent_hash_mismatch"))
+        expect(owner.request_state("req-admit")).to_equal("running")
+        val permit = owner.try_commit_admission(handle, h("d"))?
+        expect(permit.request_id).to_equal("req-admit")
+        expect(permit.intent_hash).to_equal(h("d"))
+        expect(permit.permit_id).to_start_with("owner-opaque-")
+        expect(permit.permit_id ==
+            "permit:" + handle.registration_generation.to_text() +
+            ":" + handle.request_id).to_equal(false)
+        expect(owner.request_state("req-admit")).to_equal("commit_admitted")
+        expect(owner.cancel("cancel-late", "req-admit")?.disposition)
+            .to_equal("already_complete")
+        expect(owner.try_commit_admission(handle, h("d")))
+            .to_equal(Err("already_complete"))
+
+    it "records an exact outcome once and rejects forged permits":
+        var clock = RequestControlTestClockV1.at(300)
+        var owner = owner_with(clock, 1)?
+        val handle = owner.register("req-complete", 300, 30, h("e"))?
+        val permit = owner.try_commit_admission(handle, h("e"))?
+        val forged = ProviderCommitAdmissionPermitV1(request_id: permit.request_id,
+            registration_generation: permit.registration_generation,
+            intent_hash: permit.intent_hash, permit_id: "permit:forged")
+        expect(owner.complete(forged, h("f")))
+            .to_equal(Err("invalid_commit_admission_permit"))
+        expect(owner.recorded_outcome_hash("req-complete")).to_equal("")
+        owner.complete(permit, h("f"))?
+        expect(owner.request_state("req-complete")).to_equal("completed")
+        expect(owner.recorded_outcome_hash("req-complete"))
+            .to_equal(h("f"))
+        expect(owner.complete(permit, h("0")))
+            .to_equal(Err("already_complete"))
+        expect(owner.recorded_outcome_hash("req-complete"))
+            .to_equal(h("f"))
+
+    it "fails a deadline before admission without issuing a permit":
+        var clock = RequestControlTestClockV1.at(400, 2)
+        var owner = owner_with(clock, 1)?
+        val handle = owner.register("req-deadline", 400, 2, h("f"))?
+        expect(owner.try_commit_admission(handle, h("f")))
+            .to_equal(Err("deadline_exceeded"))
+        expect(owner.request_state("req-deadline")).to_equal("running")
+        expect(owner.recorded_outcome_hash("req-deadline")).to_equal("")
+
+    it "fails admission on a regressing owner clock without state mutation":
+        var clock = RequestControlTestClockV1.at(500, -1)
+        var owner = owner_with(clock, 1)?
+        val handle = owner.register("req-clock", 500, 30, h("1"))?
+        expect(owner.try_commit_admission(handle, h("1")))
+            .to_equal(Err("monotonic_clock_error"))
+        expect(owner.request_state("req-clock")).to_equal("running")
+
+    it "cannot resurrect an expired request after clock regression":
+        var clock = RequestControlSequenceClockV1.configured([600, 611, 605])
+        var owner = owner_with(clock, 1)?
+        val handle = owner.register("req-expired", 600, 10, h("2"))?
+        expect(owner.try_commit_admission(handle, h("2")))
+            .to_equal(Err("deadline_exceeded"))
+        # The next clock value regresses to 605, before the deadline. The
+        # latched expiry remains authoritative and no permit can be issued.
+        expect(owner.try_commit_admission(handle, h("2")))
+            .to_equal(Err("deadline_exceeded"))
+
+    it "rejects the old publicly reconstructible permit form":
+        var clock = RequestControlTestClockV1.at(700)
+        var owner = owner_with(clock, 1)?
+        val handle = owner.register("req-nonce", 700, 30, h("3"))?
+        val permit = owner.try_commit_admission(handle, h("3"))?
+        val reconstructed = ProviderCommitAdmissionPermitV1(
+            request_id: handle.request_id,
+            registration_generation: handle.registration_generation,
+            intent_hash: h("3"), permit_id: "permit:" +
+                handle.registration_generation.to_text() + ":" +
+                handle.request_id)
+        expect(owner.complete(reconstructed, h("4")))
+            .to_equal(Err("invalid_commit_admission_permit"))
+        owner.complete(permit, h("4"))?

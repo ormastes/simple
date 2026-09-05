@@ -1,0 +1,64 @@
+# Secure Pure-Simple production web server
+
+Source: `test/03_system/web/server/secure_pure_simple_web_server_spec.spl`
+
+## Purpose and audience
+
+1. **Bind the production listener.** Construct `SecureServerPolicy.production`,
+   validate every bound (including the positive response-byte ceiling), and
+   confirm plaintext development mode is disabled.
+2. **Reject an unsafe web request before dispatch.** Reject encoded traversal,
+   ambiguous `Content-Length`, every unsupported transfer coding, and duplicate
+   singleton security headers before the router can invoke application code.
+   The native line API's 4096-byte truncation boundary is explicit evidence.
+3. Start TLS only with present, structurally valid certificate and private-key
+   material. Missing or invalid material is a startup error. Plaintext requires
+   an explicit capability passed to both `SecureServerPolicy.plaintext_dev`
+   and `start_plaintext`.
+4. Attach the socket peer address to the request before routing and apply
+   default CSP, nosniff, frame-denial, and referrer headers before writing.
+   The canonical writer emits a complete response with `write_all`; an
+   oversized handler response is replaced—not truncated—with a bounded,
+   security-header-bearing 500 response.
+5. A TLS accept failure owns and closes its TCP stream. GAP-TLS-3 remains the
+   exact blocker to encrypted application traffic; no plaintext fallback is
+   accepted as production evidence. A failed connection with empty ALPN is
+   classified as neither HTTP/1 nor HTTP/2.
+6. A shared atomic admission owner claims before thread spawn. Exactly the
+   configured connection boundary is admitted; boundary+1 closes before thread
+   spawn, while every admitted handler releases its slot
+   on completion.
+
+## Preconditions
+
+- Use the exact current-source Stage-4 full CLI whose adjacent provenance file
+  passes the repository admission contract.
+- Never substitute the Rust seed or a Stage-2/3 bootstrap compiler.
+- Run from the repository root with loopback bind/connect available.
+- Treat a missing admitted CLI as `TEST_BLOCKED`, never PASS or skip.
+
+An unverified operator observation says the final one-shot LLVM `native-build`
+route also did not execute this spec: it stopped in HIR because the native compiler could not infer the `ANY` field
+`error?` used by Result assertions. It produced no executable, and no retry or
+flag variant was permitted. The spec now uses typed `Result` matches instead
+of those two `error?` assertions, but that source correction has not been
+compiled or executed on an admitted Stage-4 CLI. This remains blocker evidence,
+not a passing oracle.
+
+- Production policy validation returns the empty error string and retains one
+  request per connection with finite read/write and response-byte bounds.
+- Unsafe traversal is `false`; malformed framing returns its exact rejection
+  category. `gzip` and `identity` transfer codings both return the exact
+  unsupported-coding error, while an absent `Transfer-Encoding` remains an
+  accepted control. Invalid TLS material returns a non-empty error.
+- A secured response fits at its exact serialized byte boundary and fails at
+  boundary minus one. A larger response yields one complete bounded 500 wire
+  response retaining nosniff and frame-denial headers.
+- No executable spec is stored under `doc/06_spec`; a static author scan found
+  no placeholder stubs. No maintained-manual scorecard is claimed.
+- Plaintext startup requires both an explicit development policy and a
+  non-empty `PlaintextDevelopmentCapability` audit reason.
+- The default production `start()` returns an error and never silently opens a
+  plaintext listener; loopback callers handle their typed startup result.
+- A two-slot admission fixture accepts two, rejects the third, releases to one,
+  and accepts a replacement through the same shared atomic handle.

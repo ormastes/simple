@@ -1,0 +1,73 @@
+# Contract coverage for the interpreter environment's outward scope walk.
+#
+# The environment globals are intentionally not exported solely for tests.
+# This source contract pins the behaviorally significant lookup shape: one
+# identifier hash and scope bucket computation precede each outward walk, while
+# the global lookup remains after the scoped lookup in the same operation.
+
+use std.io_runtime.{file_read}
+use std.spec.*
+
+val ENV_SOURCE = "src/compiler/10.frontend/core/interpreter/env.spl"
+
+fn env_function_body(name: text, next_name: text) -> text:
+    val source = file_read(ENV_SOURCE)
+    val start_marker = "fn " + name
+    val end_marker = "fn " + next_name
+    val start = source.find(start_marker)
+    if start < 0:
+        fail("environment function start marker is missing: " + name)
+        return ""
+    val tail = source.substring(start, source.len())
+    val finish = tail.find(end_marker)
+    if finish < 0:
+        fail("environment function end marker is missing: " + next_name)
+        return ""
+    tail.substring(0, finish)
+
+fn occurrence_count(haystack: text, needle: text) -> i64:
+    var count: i64 = 0
+    var remaining = haystack
+    var found = remaining.find(needle)
+    while found >= 0:
+        count = count + 1
+        val next = found + needle.len()
+        remaining = remaining.substring(next, remaining.len())
+        found = remaining.find(needle)
+    count
+
+fn expect_scope_bucket_hoisted(body: text):
+    val hash = body.find("val hash_val = hm_hash_text(name)")
+    val bucket = body.find("val scope_bucket = hash_val % SCOPE_HM_SIZE")
+    val walk = body.find("while si >= 0:")
+    val scoped_probe = body.find("var idx = buckets[scope_bucket]")
+    val global_marker = body.find("# Check globals")
+    val global_probe = body.find("val gl_bucket = hash_val % HM_SIZE")
+
+    expect(hash >= 0).to_equal(true)
+    expect(hash < bucket).to_equal(true)
+    expect(bucket >= 0).to_equal(true)
+    expect(bucket < walk).to_equal(true)
+    expect(scoped_probe > walk).to_equal(true)
+    expect(global_marker > scoped_probe).to_equal(true)
+    expect(global_probe > global_marker).to_equal(true)
+    expect(occurrence_count(body, "hm_hash_text(name)")).to_equal(1)
+    expect(occurrence_count(body, "% SCOPE_HM_SIZE")).to_equal(1)
+    expect(occurrence_count(body, "# Check globals")).to_equal(1)
+    expect(body.contains("        si = si - 1\n    # Check globals\n")).to_equal(true)
+    expect(body.contains("val bucket = hash_val % SCOPE_HM_SIZE")).to_equal(false)
+
+describe "interpreter environment scope bucket hoisting":
+    it "computes the assignment scope bucket once before walking outward":
+        step("Inspect the scoped assignment implementation")
+        val body = env_function_body("env_assign(", "env_lookup(")
+
+        step("Verify the invariant bucket is hoisted without reordering globals")
+        expect_scope_bucket_hoisted(body)
+
+    it "computes the lookup scope bucket once before walking outward":
+        step("Inspect the scoped lookup implementation")
+        val body = env_function_body("env_lookup(", "env_define_global(")
+
+        step("Verify the invariant bucket is hoisted without reordering globals")
+        expect_scope_bucket_hoisted(body)

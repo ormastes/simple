@@ -1,0 +1,148 @@
+# web_render_file_gui.spl — render an HTML file through the pure-Simple web
+# renderer backed by Engine2D CPU SIMD and present it to a window.
+#
+# This is intended as a web-renderer sanity view, so prefer sample pages with
+# class/id selectors; those route through the generic layout renderer instead of
+# the legacy corpus heuristic path.
+#
+# Run (window):
+#   SIMPLE_TIMEOUT_SECONDS=0 scripts/macos-gui-run.shs examples/ui/web_render_file_gui.spl \
+#     examples/ui/sample_web_renderer_sanity.html
+# Headless: drop SIMPLE_GUI / use bin/simple run.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name}
+use common.ui.builder.{button, column, build_tree_with_title, with_icon}
+use common.ui.state.{init_state}
+use app.ui.render.html_widgets.{render_html_tree}
+use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
+use std.sffi.cli.{cli_get_args}
+
+use std.io_runtime.{read_file, file_exists, env_get}
+
+# First argv entry that ends in .html, else the bundled sample page. Pass an
+# absolute path when launching via a .app bundle (its cwd is a temp directory).
+fn html_path() -> text:
+    val args = cli_get_args()
+    var i = 0
+    while i < args.len():
+        if args[i].ends_with(".html"):
+            return args[i]
+        i = i + 1
+    "examples/ui/sample_web_renderer_sanity.html"
+
+val RW: i32 = 80
+val RH: i32 = 60
+val W: i32 = 80
+val H: i32 = 60
+val SAMPLE_MARKER: text = "data-simple-actual-gui-button"
+
+fn pack_pixels(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    out
+
+fn actual_gui_button_html() -> text:
+    val btn = with_icon(button("actual_gui_button", "RUN", "run_actual_gui_button"), "image")
+    val root = column("actual_gui_root", [btn])
+    val tree = build_tree_with_title(root, "Actual GUI Button", "light")
+    val state = init_state(tree)
+    render_html_tree(state.tree.root_node(), state)
+
+fn html_for_render(html: text) -> text:
+    if html.contains(SAMPLE_MARKER):
+        return actual_gui_button_html()
+    html
+
+fn main() -> i64:
+    val path = html_path()
+    if not file_exists(path):
+        print "HTML file not found: {path}"
+        return 1
+    val raw_html = read_file(path)
+    val resolved = simple_web_resolved_engine2d_backend_name(RW, RH, "cpu_simd")
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(raw_html, RW, RH, "cpu_simd")
+    if pixels.len() != RW * RH:
+        print "web_standards_showcase status=fail reason=wrong-pixel-count expected={RW * RH} actual={pixels.len()}"
+        return 2
+    val checksum = showcase_checksum(pixels)
+    val initial_pixel_readback_checksum = web_readback_checksum(pixels)
+    val font_expected_identity = web_live_font_expected_identity()
+    val font_identity = initial_result.vector_font_identity
+    val font_pixel_size = initial_result.vector_font_pixel_size
+    val font_execution_target = initial_result.vector_font_execution_target
+    val font_batch_identity = initial_result.vector_font_batch_identity
+    val font_readback_source = initial_result.vector_font_readback_source
+    val font_device_checksum = initial_result.vector_font_device_checksum
+    val font_oracle_checksum = initial_result.vector_font_oracle_checksum
+    val font_readback_nonblank_pixels =
+        initial_result.vector_font_readback_nonblank_pixels
+    val font_device_executed = initial_result.vector_font_device_executed
+    val font_promotion_ready = initial_result.vector_font_promotion_ready
+    if initial_readback.checksum != initial_pixel_readback_checksum:
+        print "web_standards_showcase status=fail reason=initial-checksum-mismatch pixels_checksum={initial_pixel_readback_checksum} readback_checksum={initial_readback.checksum}"
+        return 9
+    var first = pixels[0]
+    var varied = false
+    var nonzero = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] != first:
+            varied = true
+        if (pixels[i] & 0x00FFFFFFu32) != 0u32:
+            nonzero = nonzero + 1
+        i = i + 1
+    if not varied or nonzero == 0 or checksum == 0:
+        print "web_standards_showcase status=fail reason=blank-or-uniform pixels={pixels.len()} nonzero={nonzero} checksum={checksum}"
+        return 3
+    val gpu_requested = requested == "vulkan" or requested == "metal"
+    if (resolved != requested or (gpu_requested and
+            (initial_readback.source != "device_readback" or
+             initial_readback.backend_handle <= 0))):
+        print "web_standards_showcase status=fail reason=backend-provenance requested={requested} resolved={resolved} source={initial_readback.source} handle={initial_readback.backend_handle}"
+        return 6
+    if (font_expected_identity == "" or font_identity != font_expected_identity or
+            font_pixel_size != web_live_font_pixels()):
+        print "web_standards_showcase status=fail reason=vector-font-evidence expected_identity={font_expected_identity} identity={font_identity} expected_pixels={web_live_font_pixels()} pixels={font_pixel_size}"
+        return 10
+    if (requested == "vulkan" and
+            (font_execution_target != "vulkan" or font_batch_identity == "" or
+             font_readback_source != "device_readback" or
+             font_device_checksum <= 0 or
+             font_device_checksum != font_oracle_checksum or
+             font_readback_nonblank_pixels <= 0 or
+             not font_device_executed or not font_promotion_ready)):
+        print "web_standards_showcase status=fail reason=vector-font-device-evidence target={font_execution_target} batch={font_batch_identity} source={font_readback_source} device_checksum={font_device_checksum} oracle_checksum={font_oracle_checksum} nonblank={font_readback_nonblank_pixels} executed={font_device_executed} promotion={font_promotion_ready}"
+        return 11
+    print "web_standards_showcase status=pass path={path} html_bytes={raw_html.len()} width={RW} height={RH} pixels={pixels.len()} nonzero={nonzero} checksum={checksum} readback_checksum={initial_readback.checksum} requested={requested} resolved={resolved} source={initial_readback.source} backend_handle={initial_readback.backend_handle} dpi={SHOWCASE_DPI_VALUE} dpi_scale_applied=false font_dpi_applied=true font_expected_identity={font_expected_identity} font_identity={font_identity} font_loaded=true font_point_size={WEB_LIVE_FONT_POINTS} font_dpi={SHOWCASE_DPI_VALUE} font_pixel_size={font_pixel_size} font_execution_target={font_execution_target} font_batch_identity={font_batch_identity} font_readback_source={font_readback_source} font_device_checksum={font_device_checksum} font_oracle_checksum={font_oracle_checksum} font_readback_nonblank_pixels={font_readback_nonblank_pixels} font_device_executed={font_device_executed} font_promotion_ready={font_promotion_ready}"
+
+    if env_get("SIMPLE_GUI") != "1":
+        print "No GUI requested; headless render only."
+        return 0
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        print "No GUI runtime available."
+        return 4
+    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Pure-Simple web renderer CPU SIMD — {path}")
+    if not win.is_valid:
+        print "Window creation failed."
+        winit_loop_free(lp)
+        return 0
+    val packed = pack_pixels(pixels)
+    winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+    var running = true
+    var iters = 0
+    while running and iters < 2000000:
+        if winit_poll_close_requested(lp):
+            running = false
+        if iters % 200 == 0:
+            winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+        iters = iters + 1
+    winit_window_free(win)
+    winit_loop_free(lp)
+    return 0

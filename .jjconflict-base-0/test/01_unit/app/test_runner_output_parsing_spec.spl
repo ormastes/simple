@@ -1,0 +1,169 @@
+use std.test_runner.test_executor_parsing.{parse_test_output}
+
+describe "test runner output parsing":
+    it "uses the outer runner summary without double-counting skips":
+        val output =
+            "  PASS test/sample_spec.spl (2 passed, 1 skipped, 5ms)\n" +
+            "Results: 3 total, 2 passed, 1 failed, 1 skipped\n"
+        val (passed, failed, skipped, pending) = parse_test_output(output)
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(1)
+        expect(skipped).to_equal(1)
+        expect(pending).to_equal(0)
+
+    it "retains explicit single-file summary counts":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Passed: 3\nFailed: 0\nSkipped: 2\nPending: 1\n"
+        )
+        expect(passed).to_equal(3)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(2)
+        expect(pending).to_equal(1)
+
+    it "rejects internally inconsistent outer summaries":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Passed: 2\nFailed: 0\nResults: 9 total, 2 passed, 1 failed, 0 skipped\n"
+        )
+        expect(passed).to_equal(0)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "uses the last canonical outer summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Results: 2 total, 1 passed, 1 failed\n" +
+            "Results: 3 total, 3 passed, 0 failed, 1 skipped\n"
+        )
+        expect(passed).to_equal(3)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(1)
+        expect(pending).to_equal(0)
+
+    it "ignores test-authored Results lines":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Results: repository operation completed\n" +
+            "Results: 2 total, 2 passed, 0 failed\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "uses a later direct summary after canonical-shaped authored output":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Results: 9 total, 2 passed, 1 failed\n" +
+            "Passed: 2\nFailed: 0\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "uses a later BDD summary after canonical-shaped authored output":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "8 examples, 3 failures\n" +
+            "Results: 9 total, 2 passed, 1 failed, 4 skipped\n" +
+            "2 examples, 0 failures\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    # Reproduces doc/08_tracking/bug/
+    # simpleos_testrun_row_feeds_unsupported_transcript_shape_2026-08-31.md:
+    # `parse_test_output` had no `test result:` branch, so a cargo-style
+    # transcript silently summarised as 0 passed / 0 failed — indistinguishable
+    # from "no tests ran". The SimpleOS in-guest `testrun` component row on all
+    # three arches feeds exactly this shape and was red on every one of them
+    # because the HOST answer was already wrong.
+    it "parses a cargo-style failing test result summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "running 3 tests\n" +
+            "test arithmetic adds ... ok\n" +
+            "test arithmetic subtracts ... ok\n" +
+            "test arithmetic divides by zero ... FAILED\n" +
+            "\n" +
+            "test result: FAILED. 2 passed; 1 failed; 0 ignored\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(1)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "parses a cargo-style all-green test result summary with ignored tests":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "running 5 tests\n" +
+            "test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out\n"
+        )
+        expect(passed).to_equal(3)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(2)
+        expect(pending).to_equal(0)
+
+    it "lets a later canonical summary win over an earlier cargo summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "test result: ok. 9 passed; 0 failed; 0 ignored\n" +
+            "Results: 3 total, 2 passed, 1 failed\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(1)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "lets a later cargo summary win over an earlier canonical summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Results: 3 total, 2 passed, 1 failed\n" +
+            "test result: ok. 9 passed; 0 failed; 0 ignored\n"
+        )
+        expect(passed).to_equal(9)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "ignores a test-authored line that merely mentions a test result":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "test result: inconclusive, see log\n" +
+            "Results: 2 total, 2 passed, 0 failed\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    # Second defect, isolated in-guest on SimpleOS x86_64 under real OVMF
+    # firmware 2026-08-31: `extract_number_before`/`extract_number_after_colon`
+    # ended in `num_str.to_int() ?? 0`, and that Optional decode is the ONE
+    # failing layer in a freestanding image — a probe kernel printed
+    # starts_with/contains/slice-eq/split YES and `("2".to_int() ?? 0) == 2` NO,
+    # so every extracted count came back 0 in-guest even after the cargo branch
+    # landed. Both extractors now decode digits with char_code arithmetic
+    # (digits_to_i64). Multi-digit and boundary values are covered here because
+    # a single-digit-only accumulator would pass the in-guest row while being
+    # wrong on any real run.
+    it "extracts multi-digit counts from both summary shapes":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Results: 1247 total, 1230 passed, 17 failed, 105 skipped\n"
+        )
+        expect(passed).to_equal(1230)
+        expect(failed).to_equal(17)
+        expect(skipped).to_equal(105)
+        expect(pending).to_equal(0)
+
+    it "extracts multi-digit counts from a cargo summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "test result: FAILED. 908 passed; 42 failed; 100 ignored\n"
+        )
+        expect(passed).to_equal(908)
+        expect(failed).to_equal(42)
+        expect(skipped).to_equal(100)
+        expect(pending).to_equal(0)
+
+    it "extracts multi-digit counts from a direct Passed:/Failed: summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Passed: 1024\nFailed: 30\nSkipped: 256\nPending: 12\n"
+        )
+        expect(passed).to_equal(1024)
+        expect(failed).to_equal(30)
+        expect(skipped).to_equal(256)
+        expect(pending).to_equal(12)

@@ -1,0 +1,211 @@
+# Bounded implementation-linked refinement for green_channel_close_drain.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1,
+    VerificationCacheKeyV1, ProofReceiptV1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
+use lib.nogc_async_mut.concurrent.green_channel.{GreenChannel,
+    GreenChannelCloseResult, green_channel_close_drain}
+
+pub val GREEN_CHANNEL_CLOSE_CASE_COUNT_V1: i64 = 4
+
+fn i64_arrays_equal_v1(lhs: [i64], rhs: [i64]) -> bool:
+    if lhs.len() != rhs.len(): return false
+    var index = 0
+    while index < lhs.len():
+        if lhs[index] != rhs[index]: return false
+        index = index + 1
+    true
+
+fn green_channel_equal_v1(lhs: GreenChannel, rhs: GreenChannel) -> bool:
+    lhs.capacity == rhs.capacity and
+        i64_arrays_equal_v1(lhs.queued_values, rhs.queued_values) and
+        i64_arrays_equal_v1(lhs.waiting_task_ids, rhs.waiting_task_ids) and
+        lhs.backpressure_count == rhs.backpressure_count and
+        lhs.closed == rhs.closed
+
+fn close_result_equal_v1(lhs: GreenChannelCloseResult,
+    rhs: GreenChannelCloseResult) -> bool:
+    green_channel_equal_v1(lhs.channel, rhs.channel) and
+        i64_arrays_equal_v1(lhs.woken_task_ids, rhs.woken_task_ids)
+
+fn close_spec_v1(channel: GreenChannel) -> GreenChannelCloseResult:
+    GreenChannelCloseResult(channel: GreenChannel(capacity: channel.capacity,
+        queued_values: channel.queued_values, waiting_task_ids: [],
+        backpressure_count: channel.backpressure_count, closed: true),
+        woken_task_ids: channel.waiting_task_ids)
+
+fn close_drop_buffer_mutant_v1(channel: GreenChannel) -> GreenChannelCloseResult:
+    GreenChannelCloseResult(channel: GreenChannel(capacity: channel.capacity,
+        queued_values: [], waiting_task_ids: [],
+        backpressure_count: channel.backpressure_count, closed: true),
+        woken_task_ids: channel.waiting_task_ids)
+
+fn close_drop_waiter_mutant_v1(channel: GreenChannel) -> GreenChannelCloseResult:
+    GreenChannelCloseResult(channel: GreenChannel(capacity: channel.capacity,
+        queued_values: channel.queued_values, waiting_task_ids: [],
+        backpressure_count: channel.backpressure_count, closed: true),
+        woken_task_ids: [])
+
+fn close_samples_v1() -> [GreenChannel]:
+    [GreenChannel(1, [], [], 0, false),
+        GreenChannel(2, [7, -3], [], 4, false),
+        GreenChannel(1, [], [11, 12], 0, false),
+        GreenChannel(3, [9], [21, 22, 23], 8, true)]
+
+pub struct SimpleOsGreenChannelCloseReceiptV1:
+    symbol_id: text
+    semantic_hash: text
+    model_semantics_hash: text
+    theorem_roots: [text]
+    axiom_audit_hash: text
+    cache_key_hash: text
+    trust_manifest_hash: text
+    proof_receipt_hash: text
+    replay_closure_hash: text
+    checked_case_count: i64
+    counterexample_count: i64
+    dropped_buffer_mutant_counterexamples: i64
+    dropped_waiter_mutant_counterexamples: i64
+    idempotence_counterexamples: i64
+    status: FormalStatus
+    diagnostic: text
+
+impl SimpleOsGreenChannelCloseReceiptV1:
+    fn permits_model_evidence(key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.ModelProven and self.diagnostic == "" and
+            key.diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.semantic_hash != "" and self.model_semantics_hash != "" and
+            self.axiom_audit_hash != "" and self.trust_manifest_hash != "" and
+            self.checked_case_count == GREEN_CHANNEL_CLOSE_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and
+            self.dropped_buffer_mutant_counterexamples > 0 and
+            self.dropped_waiter_mutant_counterexamples > 0 and
+            self.idempotence_counterexamples == 0
+
+    pub fn permits_source_refinement(key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.SourceRefined and self.diagnostic == "" and
+            key.diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.semantic_hash != "" and self.model_semantics_hash != "" and
+            self.axiom_audit_hash != "" and self.trust_manifest_hash != "" and
+            self.proof_receipt_hash != "" and self.replay_closure_hash != "" and
+            self.checked_case_count == GREEN_CHANNEL_CLOSE_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and
+            self.dropped_buffer_mutant_counterexamples > 0 and
+            self.dropped_waiter_mutant_counterexamples > 0 and
+            self.idempotence_counterexamples == 0
+
+fn green_channel_close_semantic_hash_v1() -> text:
+    sha256_text("green_channel_close_drain/bounded-v1|samples=empty,buffered,waiters,mixed-closed|preserve=capacity,queue,backpressure|drain=waiters|closed=true")
+
+fn green_channel_close_roots_v1() -> [text]:
+    ["ActorChannel.GreenCloseExact.close_drain_refinement_bundle"]
+
+fn green_channel_close_model_semantics_hash_v1() -> text:
+    sha256_text("ActorChannel.GreenCloseExact.closeDrain/v2|preserve=capacity,queue,backpressure|waiting=[]|woken=old-waiters|closed=true|second-close=no-wakes")
+
+fn green_channel_close_trust_v1() -> TrustManifestV1:
+    TrustManifestV1(["propext"], [], [], [], [], [])
+
+fn green_channel_close_cache_key_v1() -> VerificationCacheKeyV1:
+    val trust = green_channel_close_trust_v1()
+    VerificationCacheKeyV1(green_channel_close_semantic_hash_v1(),
+        green_channel_close_model_semantics_hash_v1(),
+        sha256_text("canonical-weave:none"), sha256_text("macro:none"),
+        [sha256_text("lib.nogc_async_mut.concurrent.green_channel.GreenChannel")],
+        "simple-effects-v1:pure", "source-refinement-validator-v1",
+        "simple-source:green-channel", "4.33.0", "", [],
+        sha256_text("lean-exact-record-v1"),
+        sha256_text(trust.canonical_text()), "verified")
+
+pub fn validate_simpleos_green_channel_close_refinement_v1(
+    axiom_report: text) -> SimpleOsGreenChannelCloseReceiptV1:
+    val key = green_channel_close_cache_key_v1()
+    val trust_hash = sha256_text(green_channel_close_trust_v1().canonical_text())
+    val roots = green_channel_close_roots_v1()
+    val audit = audit_lean_axiom_report(axiom_report, roots, [])
+    if not audit.permits_closed_verification():
+        return SimpleOsGreenChannelCloseReceiptV1(
+            "lib.nogc_async_mut.concurrent.green_channel.green_channel_close_drain@bounded-v1",
+            green_channel_close_semantic_hash_v1(),
+            green_channel_close_model_semantics_hash_v1(), roots, "", key.hash(),
+            trust_hash, "", "", 0, 0, 0, 0, 0, FormalStatus.Failed,
+            "FV2-E-SIMPLEOS-IPC-AUDIT: exact close/drain theorem audit is required")
+    var checked = 0
+    var counterexamples = 0
+    var buffer_mutants = 0
+    var waiter_mutants = 0
+    var idempotence_counterexamples = 0
+    for channel in close_samples_v1():
+        val expected = close_spec_v1(channel)
+        val actual = green_channel_close_drain(channel)
+        if not close_result_equal_v1(actual, expected):
+            counterexamples = counterexamples + 1
+        if not close_result_equal_v1(close_drop_buffer_mutant_v1(channel), expected):
+            buffer_mutants = buffer_mutants + 1
+        if not close_result_equal_v1(close_drop_waiter_mutant_v1(channel), expected):
+            waiter_mutants = waiter_mutants + 1
+        val closed_again = green_channel_close_drain(actual.channel)
+        if not green_channel_equal_v1(closed_again.channel, actual.channel) or
+            closed_again.woken_task_ids.len() != 0:
+            idempotence_counterexamples = idempotence_counterexamples + 1
+        checked = checked + 1
+    val good = checked == GREEN_CHANNEL_CLOSE_CASE_COUNT_V1 and
+        counterexamples == 0 and buffer_mutants > 0 and waiter_mutants > 0 and
+        idempotence_counterexamples == 0
+    SimpleOsGreenChannelCloseReceiptV1(
+        "lib.nogc_async_mut.concurrent.green_channel.green_channel_close_drain@bounded-v1",
+        green_channel_close_semantic_hash_v1(),
+        green_channel_close_model_semantics_hash_v1(), roots,
+        sha256_text(axiom_report), key.hash(), trust_hash, "", "", checked,
+        counterexamples, buffer_mutants, waiter_mutants,
+        idempotence_counterexamples,
+        if good: FormalStatus.ModelProven else: FormalStatus.Failed,
+        if good: "" else: "FV2-E-SIMPLEOS-IPC-REFINEMENT: close/drain matrix or mutation evidence failed")
+
+pub fn promote_simpleos_green_channel_close_refinement_v2(
+    model: SimpleOsGreenChannelCloseReceiptV1,
+    proof: ProofReceiptV1,
+    replay: IndependentReplayClosureV1
+) -> SimpleOsGreenChannelCloseReceiptV1:
+    val key = green_channel_close_cache_key_v1()
+    if not model.permits_model_evidence(key):
+        return green_channel_close_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-IPC-MODEL: closed model evidence is required")
+    if model.theorem_roots.len() != 1 or proof.proof_root != model.theorem_roots[0] or
+            proof.status != FormalStatus.ModelProven or proof.diagnostic() != "":
+        return green_channel_close_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-IPC-PROOF: exact composite theorem receipt is required")
+    if proof.trust_manifest_hash != model.trust_manifest_hash:
+        return green_channel_close_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-IPC-TRUST: proof trust identity differs")
+    if not proof.binds_independent_replay(replay):
+        return green_channel_close_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-IPC-REPLAY: exact independent replay is required")
+    if not proof.theorem_dependencies.contains(
+            "fv2-simpleos-source-semantics:" + model.semantic_hash) or
+            not proof.theorem_dependencies.contains(
+                "fv2-simpleos-model-semantics:" + model.model_semantics_hash):
+        return green_channel_close_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-IPC-DEPENDENCY: exact semantic identities are required")
+    SimpleOsGreenChannelCloseReceiptV1(model.symbol_id, model.semantic_hash,
+        model.model_semantics_hash, model.theorem_roots, proof.axiom_audit_hash,
+        model.cache_key_hash, model.trust_manifest_hash, proof.hash(), replay.hash(),
+        model.checked_case_count, model.counterexample_count,
+        model.dropped_buffer_mutant_counterexamples,
+        model.dropped_waiter_mutant_counterexamples,
+        model.idempotence_counterexamples, FormalStatus.SourceRefined, "")
+
+fn green_channel_close_promotion_failure_v2(
+    model: SimpleOsGreenChannelCloseReceiptV1,
+    diagnostic: text
+) -> SimpleOsGreenChannelCloseReceiptV1:
+    SimpleOsGreenChannelCloseReceiptV1(model.symbol_id, model.semantic_hash,
+        model.model_semantics_hash, model.theorem_roots, model.axiom_audit_hash,
+        model.cache_key_hash, model.trust_manifest_hash, "", "",
+        model.checked_case_count, model.counterexample_count,
+        model.dropped_buffer_mutant_counterexamples,
+        model.dropped_waiter_mutant_counterexamples,
+        model.idempotence_counterexamples, FormalStatus.Failed, diagnostic)

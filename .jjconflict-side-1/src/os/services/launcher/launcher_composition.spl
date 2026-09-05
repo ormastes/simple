@@ -1,0 +1,135 @@
+# SCI v1 application projection adapter for the launcher service.
+#
+# This is a one-way projection into the existing launcher registry. SCI is the
+# configuration authority; launcher process/lifecycle state remains local.
+
+use std.nogc_sync_mut.composition.types.{SimpleCompositionImageV1}
+use std.nogc_sync_mut.composition.codec.{decode_composition_image_v1}
+use os.services.launcher.launcher.{launcher_register, launcher_unregister}
+use os.services.launcher.launcher_registry.{
+    MAX_APPS, MOD_META, MOD_CTRL, MOD_ALT, MOD_SHIFT,
+    app_count, _app_index_by_name
+}
+
+class LauncherCompositionLoadV1:
+    ok: bool
+    code: text
+    registered_count: i64
+    failed_app_id: text
+
+var composition_app_ids_v1: [text] = []
+var composition_app_names_v1: [text] = []
+
+class LauncherShortcutProjectionV1:
+    ok: bool
+    key: u32
+    modifiers: u32
+
+fn _project_shortcut_v1(shortcut: text) -> LauncherShortcutProjectionV1:
+    if shortcut == "":
+        return LauncherShortcutProjectionV1(ok: true, key: 0u32, modifiers: 0u32)
+    val parts = shortcut.split("+")
+    if parts.len() < 2:
+        return LauncherShortcutProjectionV1(ok: false, key: 0u32, modifiers: 0u32)
+    var modifiers = 0u32
+    var i = 0
+    while i < parts.len() - 1:
+        val part = parts[i]
+        if part == "Meta":
+            modifiers = modifiers | MOD_META
+        elif part == "Ctrl":
+            modifiers = modifiers | MOD_CTRL
+        elif part == "Alt":
+            modifiers = modifiers | MOD_ALT
+        elif part == "Shift":
+            modifiers = modifiers | MOD_SHIFT
+        else:
+            return LauncherShortcutProjectionV1(ok: false, key: 0u32, modifiers: 0u32)
+        i = i + 1
+    val key_part = parts[parts.len() - 1]
+    if key_part.len() != 1:
+        return LauncherShortcutProjectionV1(ok: false, key: 0u32, modifiers: 0u32)
+    val key = key_part.char_code_at(0)
+    if key < 33 or key > 126:
+        return LauncherShortcutProjectionV1(ok: false, key: 0u32, modifiers: 0u32)
+    LauncherShortcutProjectionV1(ok: true, key: key.to_u32(), modifiers: modifiers)
+
+fn _composition_name_seen_v1(image: SimpleCompositionImageV1, end: i64, name: text) -> bool:
+    var i = 0
+    while i < end:
+        if image.apps[i].display_name == name:
+            return true
+        i = i + 1
+    false
+
+fn _composition_owned_name_v1(name: text) -> bool:
+    var i = 0
+    while i < composition_app_names_v1.len():
+        if composition_app_names_v1[i] == name:
+            return true
+        i = i + 1
+    false
+
+fn _launcher_commit_composition_v1(image: SimpleCompositionImageV1) -> LauncherCompositionLoadV1:
+    # Validate the entire supported projection before mutating launcher state.
+    # v1 intentionally fails closed on policy fields whose authoritative
+    # SimpleArtifactManifest projection has not landed yet.
+    var active_old_count: u64 = 0
+    var old_index = 0
+    while old_index < composition_app_names_v1.len():
+        if _app_index_by_name(composition_app_names_v1[old_index]) >= 0:
+            active_old_count = active_old_count + 1
+        old_index = old_index + 1
+    if app_count - active_old_count + (image.apps.len() as u64) > MAX_APPS:
+        return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_CAPACITY", registered_count: 0, failed_app_id: "")
+    var checked = 0
+    while checked < image.apps.len():
+        val candidate = image.apps[checked]
+        if candidate.app_id == "" or candidate.display_name == "" or candidate.artifact_path == "":
+            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_RECORD", registered_count: 0, failed_app_id: candidate.app_id)
+        # Capability admission must project through SimpleArtifactManifest.
+        # Its current u32 API cannot preserve path scopes, so accepting any
+        # SCI capability here would create a weaker second policy authority.
+        if candidate.capabilities.len() > 0:
+            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED", registered_count: 0, failed_app_id: candidate.app_id)
+        # Associations currently have no mutable/indexed owner API; the legacy
+        # lookup is compiled into launcher_registry. Keep SCI authoritative by
+        # rejecting rather than silently allowing the legacy table to win.
+        if candidate.associations.len() > 0:
+            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_ASSOCIATION_PROJECTION_REQUIRED", registered_count: 0, failed_app_id: candidate.app_id)
+        val projected_shortcut = _project_shortcut_v1(candidate.shortcut)
+        if not projected_shortcut.ok:
+            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_SHORTCUT_INVALID", registered_count: 0, failed_app_id: candidate.app_id)
+        if (_app_index_by_name(candidate.display_name) >= 0 and not _composition_owned_name_v1(candidate.display_name)) or _composition_name_seen_v1(image, checked, candidate.display_name):
+            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_DUPLICATE_NAME", registered_count: 0, failed_app_id: candidate.app_id)
+        checked = checked + 1
+
+    var retiring = 0
+    while retiring < composition_app_names_v1.len():
+        launcher_unregister(composition_app_names_v1[retiring])
+        retiring = retiring + 1
+
+    var registered: i64 = 0
+    var next_ids: [text] = []
+    var next_names: [text] = []
+    var i = 0
+    while i < image.apps.len():
+        val app = image.apps[i]
+        val shortcut = _project_shortcut_v1(app.shortcut)
+        if not launcher_register(app.display_name, app.artifact_path, app.icon, shortcut.key, shortcut.modifiers):
+            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_COMMIT", registered_count: registered, failed_app_id: app.app_id)
+        next_ids.push(app.app_id)
+        next_names.push(app.display_name)
+        registered = registered + 1
+        i = i + 1
+    composition_app_ids_v1 = next_ids
+    composition_app_names_v1 = next_names
+    LauncherCompositionLoadV1(ok: true, code: "SCI_LAUNCHER_OK", registered_count: registered, failed_app_id: "")
+
+fn launcher_load_composition_bytes_v1(data: [u8]) -> LauncherCompositionLoadV1:
+    val admitted = decode_composition_image_v1(data)
+    if not admitted.ok:
+        return LauncherCompositionLoadV1(ok: false, code: admitted.diagnostic.code, registered_count: 0, failed_app_id: "")
+    _launcher_commit_composition_v1(admitted.image)
+
+export LauncherCompositionLoadV1, launcher_load_composition_bytes_v1, composition_app_ids_v1, composition_app_names_v1

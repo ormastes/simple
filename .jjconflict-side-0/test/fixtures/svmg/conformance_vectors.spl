@@ -1,0 +1,285 @@
+# SVM-G conformance vector table (Task D3).
+#
+# Each vector is a self-contained (source source, expected drained log text,
+# expected result records, expected sentinel [+ trap/timeout flags]) tuple.
+# The table is exported as plain data (`all_vectors()`) so it can be driven
+# against the host reference VM (Task D2, this task's consumer:
+# test/02_integration/svmg/conformance/conformance_suite_spec.spl) and,
+# later, against the CUDA/Vulkan device executors (Tasks B3/C3) without
+# duplicating the vectors themselves — only the "run + compare" harness
+# differs per backend.
+#
+# Byte offsets in the hand-assembled programs are computed the same way as
+# test/01_unit/lib/svmg/ref_vm_spec.spl: PUSHI/PUSHF=5 bytes, HALT/TRAP=2
+# bytes, JMP/JZ/JNZ/CALL/PARFOR=3 bytes, everything else=1 byte. Each
+# control-flow vector's per-instruction pc/next-pc trace is written above it
+# so the jump immediates can be checked by inspection, not just by the
+# assertion (which is the actual proof).
+#
+# Coverage (see conformance_suite_spec.spl's coverage `it` for the
+# machine-checked version of this claim): all 50 opcodes in
+# src/lib/common/svmg/opcodes.spl, both trap kinds (TRAP_OOB bounds trap and
+# TRAP_DIV0 divide-by-zero trap, plus the explicit TRAP opcode), step-budget
+# exhaustion (SENTINEL_TIMEOUT), PARFOR, and the design doc §4.4 lowered
+# "Supported Simple subset" patterns (if/elif/else, bounded while-style
+# loop, a loop-with-array-in-DATA "bounded for" shape, non-recursive fn
+# calls, `print` of a string literal, and `expect(x).to_equal(y)`).
+
+use std.common.svmg.mailbox_const.{SENTINEL_EXIT_MASK, SENTINEL_TIMEOUT, TRAP_OOB, TRAP_OOB_EXIT_CODE, TRAP_DIV0}
+
+pub struct ExpectedRecord:
+    passed: i64
+    value: i64
+
+pub struct ConformanceVector:
+    name: text
+    source: text
+    step_budget: i64
+    entry_pc: i64
+    expected_log: text
+    expected_records: [ExpectedRecord]
+    expected_sentinel: i64
+    expected_trapped: bool
+    expected_timed_out: bool
+
+fn _ok(name: text, source: text, records: [ExpectedRecord], exit_code: i64) -> ConformanceVector:
+    """Convenience constructor for the common case: a program that runs to
+    completion (no trap, no timeout) and exits via HALT/SYS_EXIT with
+    `exit_code`."""
+    ConformanceVector(
+        name: name,
+        source: source,
+        step_budget: 1000,
+        entry_pc: 0,
+        expected_log: "",
+        expected_records: records,
+        expected_sentinel: SENTINEL_EXIT_MASK | exit_code,
+        expected_trapped: false,
+        expected_timed_out: false,
+    )
+
+fn _rec1(passed: i64, value: i64) -> [ExpectedRecord]:
+    [ExpectedRecord(passed: passed, value: value)]
+
+pub fn all_vectors() -> [ConformanceVector]:
+    var v: [ConformanceVector] = []
+
+    # ------------------------------------------------------------------
+    # Control / misc
+    # ------------------------------------------------------------------
+    v.push(_ok("nop_passthrough", "NOP\nPUSHI 1\nPUSHI 5\nSYS_RESULT\nHALT 0", _rec1(1, 5), 0))
+    v.push(ConformanceVector(
+        name: "halt_with_code", source: "HALT 7", step_budget: 1000, entry_pc: 0,
+        expected_log: "", expected_records: [], expected_sentinel: SENTINEL_EXIT_MASK | 7,
+        expected_trapped: false, expected_timed_out: false,
+    ))
+    v.push(ConformanceVector(
+        name: "trap_explicit", source: "TRAP 42\nHALT 0", step_budget: 1000, entry_pc: 0,
+        expected_log: "", expected_records: _rec1(0, 42),
+        expected_sentinel: SENTINEL_EXIT_MASK | TRAP_OOB_EXIT_CODE,
+        expected_trapped: true, expected_timed_out: false,
+    ))
+
+    # ------------------------------------------------------------------
+    # Stack ops
+    # ------------------------------------------------------------------
+    v.push(_ok("pushi_negative", "PUSHI 1\nPUSHI -100\nSYS_RESULT\nHALT 0", _rec1(1, -100), 0))
+    v.push(_ok("pushf_literal", "PUSHI 1\nPUSHF 2.5\nSYS_RESULT\nHALT 0", _rec1(1, 1075838976), 0))
+    v.push(_ok("dup_doubles", "PUSHI 1\nPUSHI 9\nDUP\nADD\nSYS_RESULT\nHALT 0", _rec1(1, 18), 0))
+    v.push(_ok("drop_discards_top", "PUSHI 1\nPUSHI 999\nPUSHI 5\nDROP\nSYS_RESULT\nHALT 0", _rec1(1, 999), 0))
+    v.push(_ok("swap_reorders", "PUSHI 5\nPUSHI 1\nSWAP\nSYS_RESULT\nHALT 0", _rec1(1, 5), 0))
+
+    # ------------------------------------------------------------------
+    # Integer arithmetic
+    # ------------------------------------------------------------------
+    v.push(_ok("add", "PUSHI 1\nPUSHI 3\nPUSHI 4\nADD\nSYS_RESULT\nHALT 0", _rec1(1, 7), 0))
+    v.push(_ok("sub", "PUSHI 1\nPUSHI 10\nPUSHI 3\nSUB\nSYS_RESULT\nHALT 0", _rec1(1, 7), 0))
+    v.push(_ok("mul", "PUSHI 1\nPUSHI 10\nPUSHI 3\nMUL\nSYS_RESULT\nHALT 0", _rec1(1, 30), 0))
+    v.push(_ok("div", "PUSHI 1\nPUSHI 10\nPUSHI 3\nDIV\nSYS_RESULT\nHALT 0", _rec1(1, 3), 0))
+    v.push(_ok("rem", "PUSHI 1\nPUSHI 10\nPUSHI 3\nREM\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+
+    # ------------------------------------------------------------------
+    # Float arithmetic (IEEE-754 f32 bit patterns as the record value)
+    # ------------------------------------------------------------------
+    v.push(_ok("fadd", "PUSHI 1\nPUSHF 1.5\nPUSHF 2.25\nFADD\nSYS_RESULT\nHALT 0", _rec1(1, 1081081856), 0))
+    v.push(_ok("fsub", "PUSHI 1\nPUSHF 2.5\nPUSHF 1.0\nFSUB\nSYS_RESULT\nHALT 0", _rec1(1, 1069547520), 0))
+    v.push(_ok("fmul", "PUSHI 1\nPUSHF 2.5\nPUSHF 2.0\nFMUL\nSYS_RESULT\nHALT 0", _rec1(1, 1084227584), 0))
+    v.push(_ok("fdiv", "PUSHI 1\nPUSHF 5.0\nPUSHF 2.0\nFDIV\nSYS_RESULT\nHALT 0", _rec1(1, 1075838976), 0))
+
+    # ------------------------------------------------------------------
+    # Bitwise
+    # ------------------------------------------------------------------
+    v.push(_ok("bitwise_and", "PUSHI 1\nPUSHI 12\nPUSHI 10\nAND\nSYS_RESULT\nHALT 0", _rec1(1, 8), 0))
+    v.push(_ok("bitwise_or", "PUSHI 1\nPUSHI 12\nPUSHI 10\nOR\nSYS_RESULT\nHALT 0", _rec1(1, 14), 0))
+    v.push(_ok("bitwise_xor", "PUSHI 1\nPUSHI 12\nPUSHI 10\nXOR\nSYS_RESULT\nHALT 0", _rec1(1, 6), 0))
+    v.push(_ok("shift_left", "PUSHI 1\nPUSHI 1\nPUSHI 4\nSHL\nSYS_RESULT\nHALT 0", _rec1(1, 16), 0))
+    v.push(_ok("shift_right_logical", "PUSHI 1\nPUSHI -1\nPUSHI 28\nSHR\nSYS_RESULT\nHALT 0", _rec1(1, 15), 0))
+    v.push(_ok("shift_right_arithmetic", "PUSHI 1\nPUSHI -16\nPUSHI 2\nSAR\nSYS_RESULT\nHALT 0", _rec1(1, -4), 0))
+
+    # ------------------------------------------------------------------
+    # Integer comparisons
+    # ------------------------------------------------------------------
+    v.push(_ok("cmp_eq", "PUSHI 1\nPUSHI 5\nPUSHI 5\nEQ\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("cmp_ne", "PUSHI 1\nPUSHI 5\nPUSHI 6\nNE\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("cmp_lt", "PUSHI 1\nPUSHI 3\nPUSHI 5\nLT\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("cmp_le", "PUSHI 1\nPUSHI 5\nPUSHI 5\nLE\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("cmp_gt", "PUSHI 1\nPUSHI 7\nPUSHI 5\nGT\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("cmp_ge", "PUSHI 1\nPUSHI 5\nPUSHI 5\nGE\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+
+    # ------------------------------------------------------------------
+    # Float comparisons
+    # ------------------------------------------------------------------
+    v.push(_ok("fcmp_eq", "PUSHI 1\nPUSHF 2.5\nPUSHF 2.5\nFEQ\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("fcmp_ne", "PUSHI 1\nPUSHF 2.5\nPUSHF 1.0\nFNE\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("fcmp_lt", "PUSHI 1\nPUSHF 1.0\nPUSHF 2.5\nFLT\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("fcmp_le", "PUSHI 1\nPUSHF 2.5\nPUSHF 2.5\nFLE\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("fcmp_gt", "PUSHI 1\nPUSHF 2.5\nPUSHF 1.0\nFGT\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("fcmp_ge", "PUSHI 1\nPUSHF 2.5\nPUSHF 2.5\nFGE\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+
+    # ------------------------------------------------------------------
+    # Memory (DATA region load/store)
+    # ------------------------------------------------------------------
+    v.push(_ok(
+        "mem_store_load_word",
+        "PUSHI 100\nPUSHI 424242\nSTORE32\nPUSHI 1\nPUSHI 100\nLOAD32\nSYS_RESULT\nHALT 0",
+        _rec1(1, 424242), 0,
+    ))
+    v.push(_ok(
+        "mem_store_load_byte",
+        "PUSHI 50\nPUSHI 200\nSTORE8\nPUSHI 1\nPUSHI 50\nLOAD8\nSYS_RESULT\nHALT 0",
+        _rec1(1, 200), 0,
+    ))
+
+    # ------------------------------------------------------------------
+    # Control flow (JMP/JZ/JNZ/CALL/RET)
+    # ------------------------------------------------------------------
+    v.push(_ok(
+        "jmp_skips_dead_code",
+        "JMP 2\nHALT 99\nPUSHI 1\nPUSHI 55\nSYS_RESULT\nHALT 0",
+        _rec1(1, 55), 0,
+    ))
+    v.push(_ok(
+        "jz_takes_zero_branch",
+        "PUSHI 0\nJZ 13\nPUSHI 1\nPUSHI 111\nSYS_RESULT\nHALT 1\nPUSHI 1\nPUSHI 222\nSYS_RESULT\nHALT 0",
+        _rec1(1, 222), 0,
+    ))
+    v.push(_ok(
+        "jnz_takes_nonzero_branch",
+        "PUSHI 5\nJNZ 13\nPUSHI 1\nPUSHI 111\nSYS_RESULT\nHALT 1\nPUSHI 1\nPUSHI 222\nSYS_RESULT\nHALT 0",
+        _rec1(1, 222), 0,
+    ))
+    v.push(_ok(
+        "call_ret_subroutine_double",
+        "PUSHI 21\nCALL 17\nPUSHI 1\nSWAP\nSYS_RESULT\nHALT 0\nDUP\nADD\nRET",
+        _rec1(1, 42), 0,
+    ))
+    v.push(ConformanceVector(
+        name: "ret_at_top_level_exits", source: "RET", step_budget: 1000, entry_pc: 0,
+        expected_log: "", expected_records: [], expected_sentinel: SENTINEL_EXIT_MASK | 0,
+        expected_trapped: false, expected_timed_out: false,
+    ))
+
+    # ------------------------------------------------------------------
+    # SYS_* / thread-id opcodes
+    # ------------------------------------------------------------------
+    v.push(ConformanceVector(
+        name: "sys_putc_log_text", source: "PUSHI 72\nSYS_PUTC\nPUSHI 105\nSYS_PUTC\nHALT 0",
+        step_budget: 1000, entry_pc: 0, expected_log: "Hi", expected_records: [],
+        expected_sentinel: SENTINEL_EXIT_MASK | 0, expected_trapped: false, expected_timed_out: false,
+    ))
+    v.push(ConformanceVector(
+        name: "sys_exit_writes_sentinel", source: "PUSHI 1\nPUSHI 9\nSYS_RESULT\nPUSHI 3\nSYS_EXIT",
+        step_budget: 1000, entry_pc: 0, expected_log: "", expected_records: _rec1(1, 9),
+        expected_sentinel: SENTINEL_EXIT_MASK | 3, expected_trapped: false, expected_timed_out: false,
+    ))
+    v.push(_ok("sys_result_records_pass_and_value", "PUSHI 0\nPUSHI 123\nSYS_RESULT\nHALT 0", _rec1(0, 123), 0))
+    v.push(_ok("tid_is_zero", "PUSHI 1\nTID\nSYS_RESULT\nHALT 0", _rec1(1, 0), 0))
+    v.push(_ok("ntid_is_one", "PUSHI 1\nNTID\nSYS_RESULT\nHALT 0", _rec1(1, 1), 0))
+    v.push(_ok("parfor_falls_through", "PARFOR 3\nPUSHI 1\nPUSHI 77\nSYS_RESULT\nHALT 0", _rec1(1, 77), 0))
+
+    # ------------------------------------------------------------------
+    # Traps (both kinds: bounds and div-by-zero) + explicit TRAP is above.
+    # ------------------------------------------------------------------
+    v.push(ConformanceVector(
+        name: "trap_bounds_load32_oob", source: "PUSHI 65536\nLOAD32\nHALT 0",
+        step_budget: 1000, entry_pc: 0, expected_log: "", expected_records: _rec1(0, TRAP_OOB),
+        expected_sentinel: SENTINEL_EXIT_MASK | TRAP_OOB_EXIT_CODE, expected_trapped: true, expected_timed_out: false,
+    ))
+    v.push(ConformanceVector(
+        name: "trap_bounds_store8_negative_offset", source: "PUSHI -1\nPUSHI 7\nSTORE8\nHALT 0",
+        step_budget: 1000, entry_pc: 0, expected_log: "", expected_records: _rec1(0, TRAP_OOB),
+        expected_sentinel: SENTINEL_EXIT_MASK | TRAP_OOB_EXIT_CODE, expected_trapped: true, expected_timed_out: false,
+    ))
+    v.push(ConformanceVector(
+        name: "trap_div0_on_div", source: "PUSHI 5\nPUSHI 0\nDIV\nHALT 0",
+        step_budget: 1000, entry_pc: 0, expected_log: "", expected_records: _rec1(0, TRAP_DIV0),
+        expected_sentinel: SENTINEL_EXIT_MASK | TRAP_OOB_EXIT_CODE, expected_trapped: true, expected_timed_out: false,
+    ))
+    v.push(ConformanceVector(
+        name: "trap_div0_on_rem", source: "PUSHI 5\nPUSHI 0\nREM\nHALT 0",
+        step_budget: 1000, entry_pc: 0, expected_log: "", expected_records: _rec1(0, TRAP_DIV0),
+        expected_sentinel: SENTINEL_EXIT_MASK | TRAP_OOB_EXIT_CODE, expected_trapped: true, expected_timed_out: false,
+    ))
+
+    # ------------------------------------------------------------------
+    # Step-budget exhaustion (SENTINEL_TIMEOUT = 0xDEAD0000)
+    # ------------------------------------------------------------------
+    v.push(ConformanceVector(
+        name: "budget_exhaustion_timeout", source: "NOP\nJMP -4",
+        step_budget: 10, entry_pc: 0, expected_log: "", expected_records: [],
+        expected_sentinel: SENTINEL_TIMEOUT, expected_trapped: false, expected_timed_out: true,
+    ))
+
+    # ------------------------------------------------------------------
+    # Design doc §4.4 lowered-subset patterns
+    # ------------------------------------------------------------------
+    # if/elif/else: x=1 -> elif branch taken -> value 200.
+    v.push(_ok(
+        "pattern_if_elif_else",
+        "PUSHI 1\nDUP\nPUSHI 0\nEQ\nJZ 14\nPUSHI 1\nPUSHI 100\nSYS_RESULT\nJMP 35\n"
+        + "DUP\nPUSHI 1\nEQ\nJZ 14\nPUSHI 1\nPUSHI 200\nSYS_RESULT\nJMP 11\n"
+        + "PUSHI 1\nPUSHI 300\nSYS_RESULT\nHALT 0",
+        _rec1(1, 200), 0,
+    ))
+    # bounded while-style loop (counter lives on the operand stack, no
+    # DATA-region storage needed): counts 5 down to 0.
+    v.push(_ok(
+        "pattern_while_loop",
+        "PUSHI 5\nDUP\nJZ 9\nPUSHI 1\nSUB\nJMP -13\nPUSHI 1\nSWAP\nSYS_RESULT\nHALT 0",
+        _rec1(1, 0), 0,
+    ))
+    # bounded "for i in 0..5" with the loop-carried sum/i pair lowered into
+    # the DATA region (offsets 0 and 4) the way design §4.4 specifies
+    # fixed-size arrays/locals are lowered: sum = 0+1+2+3+4 = 10.
+    v.push(_ok(
+        "pattern_bounded_for_sum_with_array",
+        "PUSHI 0\nPUSHI 0\nSTORE32\nPUSHI 4\nPUSHI 0\nSTORE32\n"
+        + "PUSHI 4\nLOAD32\nPUSHI 5\nLT\nJZ 40\n"
+        + "PUSHI 0\nPUSHI 0\nLOAD32\nPUSHI 4\nLOAD32\nADD\nSTORE32\n"
+        + "PUSHI 4\nPUSHI 4\nLOAD32\nPUSHI 1\nADD\nSTORE32\nJMP -55\n"
+        + "PUSHI 1\nPUSHI 0\nLOAD32\nSYS_RESULT\nHALT 0",
+        _rec1(1, 10), 0,
+    ))
+    # non-recursive fn call: square(6) = 36 via CALL/RET (distinct body from
+    # call_ret_subroutine_double above -- MUL instead of ADD).
+    v.push(_ok(
+        "pattern_nonrecursive_fn_call_square",
+        "PUSHI 6\nCALL 17\nPUSHI 1\nSWAP\nSYS_RESULT\nHALT 0\nDUP\nMUL\nRET",
+        _rec1(1, 36), 0,
+    ))
+    # print of a string literal, lowered to a PUTC-per-byte sequence.
+    v.push(ConformanceVector(
+        name: "pattern_print_string_literal",
+        source: "PUSHI 83\nSYS_PUTC\nPUSHI 86\nSYS_PUTC\nPUSHI 77\nSYS_PUTC\nPUSHI 71\nSYS_PUTC\nHALT 0",
+        step_budget: 1000, entry_pc: 0, expected_log: "SVMG", expected_records: [],
+        expected_sentinel: SENTINEL_EXIT_MASK | 0, expected_trapped: false, expected_timed_out: false,
+    ))
+    # expect(3 + 4).to_equal(7), lowered to: compute both sides, EQ them,
+    # SYS_RESULT(pass=eq_result, value=computed_value).
+    v.push(_ok(
+        "pattern_expect_to_equal",
+        "PUSHI 3\nPUSHI 4\nADD\nDUP\nPUSHI 7\nEQ\nSWAP\nSYS_RESULT\nHALT 0",
+        _rec1(1, 7), 0,
+    ))
+
+    v

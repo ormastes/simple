@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/apps/servers_user/arm64_payload_symbol_contract_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/arm64_payload_symbol_contract_spec.md
+# doc-path: doc/03_plan/sys_test/arm64_payload_symbol_contract_spec.md
+# doc-path: doc/04_architecture/arm64_payload_symbol_contract_spec.md
+# doc-path: doc/05_design/arm64_payload_symbol_contract_spec_oracles.md
+# @manual: primary
+
+use std.spec.*
+use std.io.*
+
+
+describe "ARM64 SimpleOS server payload symbol ownership":
+    # @manual scenario evidence
+    it "uses the sysroot-owned libc syscall trampoline":
+        step("Verify: uses the sysroot-owned libc syscall trampoline")
+        # @req: REQ-SSPEC-LOCAL-001
+        val source = read_text("scripts/os/build_arm64_servers_payload.shs")
+        val userlib = read_text("src/os/userlib/syscall_raw.spl")
+        expect(source).to_contain("BACKEND=\"${SIMPLE_NATIVE_BACKEND:-cranelift}\"")
+        expect(source).to_contain("(bytes_to_string|rt_arm64_syscall|simpleos_syscall|Array[._](enumerate|data_ptr))")
+        expect(userlib).to_contain("extern fn simpleos_syscall(")
+        expect(userlib).to_contain("simpleos_syscall(id, arg0, arg1, arg2, arg3, arg4)")
+        expect(userlib.contains("extern fn rt_arm64_syscall")).to_equal(false)
+
+    it "routes the public bytes helper through the canonical runtime ABI":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: routes the public bytes helper through the canonical runtime ABI")
+        val source = read_text("src/lib/common/binary_io.spl")
+        expect(source).to_contain("extern fn rt_bytes_to_text(bytes: [u8]) -> text")
+        expect(source).to_contain("fn bytes_to_string(bytes: [u8]) -> text:")
+        expect(source).to_contain("rt_bytes_to_text(bytes)")
+        expect(source.contains("extern fn bytes_to_string(bytes: [u8]) -> text")).to_equal(false)
+
+    it "keeps byte-array addresses scoped to the consuming syscall":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: keeps byte-array addresses scoped to the consuming syscall")
+        val raw = read_text("src/os/userlib/syscall_raw.spl")
+        val fs = read_text("src/os/userlib/fs.spl")
+        val net = read_text("src/os/userlib/net.spl")
+        val llvm_sysroot = read_text("src/os/port/llvm/sysroot.shs")
+        val arm64_sysroot = read_text("scripts/os/simpleos-sysroot-aarch64.shs")
+        val riscv64_sysroot = read_text("scripts/os/simpleos-sysroot-riscv64.shs")
+        expect(raw).to_contain("extern fn rt_simpleos_file_open_bytes(path: [u8], flags: u64) -> i64")
+        expect(raw).to_contain("extern fn rt_simpleos_file_read_bytes(fd: u64, out: [u8], max_len: u64) -> i64")
+        expect(raw).to_contain("extern fn rt_simpleos_file_write_bytes(fd: u64, data: [u8]) -> i64")
+        expect(raw).to_contain("extern fn rt_simpleos_file_rename_bytes(old_path: [u8], new_path: [u8]) -> i64")
+        expect(raw).to_contain("extern fn rt_simpleos_socket_bind_bytes(fd: u64, sockaddr: [u8]) -> i64")
+        expect(raw).to_contain("extern fn rt_simpleos_socket_connect_bytes(fd: u64, sockaddr: [u8]) -> i64")
+        expect(raw).to_contain("extern fn rt_simpleos_socket_send_bytes(fd: u64, data: [u8]) -> i64")
+        expect(raw).to_contain("extern fn rt_simpleos_socket_recv_bytes(fd: u64, out: [u8], max_len: u64) -> i64")
+        expect(raw.contains("rt_array_data_ptr_u8")).to_equal(false)
+        expect(fs).to_contain("rt_simpleos_file_open_bytes(path_bytes, flags as u64)")
+        expect(fs).to_contain("rt_simpleos_file_read_bytes(fd as u64, buf, max_len)")
+        expect(fs).to_contain("rt_simpleos_file_write_bytes(fd as u64, bytes)")
+        expect(fs).to_contain("rt_simpleos_file_rename_bytes(old_bytes, new_bytes)")
+        expect(net).to_contain("rt_simpleos_socket_bind_bytes(sock.fd as u64, encoded)")
+        expect(net).to_contain("rt_simpleos_socket_connect_bytes(sock.fd as u64, encoded)")
+        expect(net).to_contain("rt_simpleos_socket_send_bytes(sock.fd as u64, data)")
+        expect(net).to_contain("rt_simpleos_socket_recv_bytes(sock.fd as u64, buf, max_len)")
+        expect(llvm_sysroot.count("runtime_simpleos_syscall_adapters")).to_equal(2)
+        expect(arm64_sysroot.count("runtime_simpleos_syscall_adapters")).to_equal(1)
+        expect(riscv64_sysroot.count("runtime_simpleos_syscall_adapters")).to_equal(1)
+        expect(fs.contains(".data_ptr()")).to_equal(false)
+        expect(net.contains(".data_ptr()")).to_equal(false)
+
+    it "keeps database traversal independent of Array enumerate lowering":
+        step("Verify: keeps database traversal independent of Array enumerate lowering")
+        # @req: REQ-SSPEC-LOCAL-001
+        val core = read_text("src/lib/nogc_sync_mut/database/core.spl")
+        expect(core.contains(".enumerate()")).to_equal(false)
+
+    it "gates the final payload on the emitted secure-zeroization owners":
+        # @req REQ-SSPEC-OS
+        step("gates the final payload on the emitted secure-zeroization owners")
+        val source = read_text("scripts/os/build_arm64_servers_payload.shs")
+        expect(source).to_contain("lib__common__crypto__secure_memory__secure_zero_u8_slots")
+        expect(source).to_contain("lib__common__crypto__secure_memory__secure_zero_i64_slots")
+        expect(source).to_contain("lib__common__crypto__sha256__sha256_u8_hex_zeroizing")
+        expect(source).to_contain("rt_volatile_read_u8 rt_volatile_write_u8")
+        expect(source).to_contain("rt_volatile_read_u64 rt_volatile_write_u64 rt_memory_barrier")

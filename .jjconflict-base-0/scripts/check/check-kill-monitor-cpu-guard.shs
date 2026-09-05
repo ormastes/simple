@@ -1,0 +1,160 @@
+#!/bin/sh
+# check-kill-monitor-cpu-guard.shs — prove the kill monitor's CPU guard can FIRE.
+#
+# Regression test for 2026-08-18: `set -e` plus an unguarded `_prev=$(cat ...)`
+# in instant_cpu_pct terminated the monitor on the very first pid it sampled,
+# BEFORE the line that writes the state file. The state dir therefore stayed
+# empty forever, no pid ever had a prior sample, spin_streak never reached 3,
+# and the CPU guard was structurally incapable of firing while the daemon
+# looked "active (running)" (systemd respawned it every ~15s, 3735 times).
+#
+# Every case runs against an ISOLATED lock dir, state dir and log, and targets
+# ONLY a private fixture pid. Real work is never a candidate: the monitor only
+# considers argv matching `*/simple run|test`, and the fixture is the only such
+# process this test creates. Thresholds are never loosened onto real processes.
+#
+# Verdict is the LAST line of stdout: PASS/FAIL/ERROR with exit 0/1/2.
+set -u
+
+MON="${MON:-$(dirname "$0")/../resource/kill_simple_monitor.shs}"
+[ -f "$MON" ] || { echo "ERROR — nothing was checked: monitor not found at $MON"; exit 2; }
+
+CHECKED=0
+FAILED=0
+FAILNAMES=""
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+FIXBIN="$WORK/fixture/simple"
+mkdir -p "$WORK/fixture"
+
+# A stand-in for `bin/simple`: argv is `<...>/simple test <mode>`, which is
+# exactly what is_simple_run_or_test() matches on.
+cat > "$FIXBIN" <<'FIX'
+#!/bin/sh
+# $1 = run|test (ignored), $2 = spin|idle|spin_briefly, $3 = seconds
+# The spin is pure in-process arithmetic: instant_cpu_pct reads utime+stime from
+# /proc/<pid>/stat, which counts only THIS process, so a loop that forks `date`
+# every iteration would park the CPU in children and read as idle.
+burn() {
+    _end=$(( $(date +%s) + $1 ))
+    while :; do
+        _i=0
+        while [ "$_i" -lt 20000 ]; do _i=$(( _i + 1 )); done
+        [ "$(date +%s)" -lt "$_end" ] || return 0
+    done
+}
+case "$2" in
+    spin)         burn "${3:-60}" ;;
+    spin_briefly) burn "${3:-3}"; sleep 600 ;;
+    *)            sleep "${3:-600}" ;;
+esac
+FIX
+chmod +x "$FIXBIN"
+
+cleanup_all() { kill $(jobs -p) 2>/dev/null; rm -rf "$WORK" 2>/dev/null; }
+trap cleanup_all EXIT INT TERM
+
+# run_case NAME MODE FIXTURE_SECS WATCH_SECS CPU_PCT MEM_MB EXPECT(killed|alive)
+run_case() {
+    _name="$1"; _mode="$2"; _fsecs="$3"; _watch="$4"; _cpu="$5"; _mem="$6"; _expect="$7"
+    CHECKED=$(( CHECKED + 1 ))
+    _d="$WORK/$_name"; mkdir -p "$_d/state"
+
+    "$FIXBIN" test "$_mode" "$_fsecs" & _vic=$!
+    # Isolated everything, and -- critically -- the monitor is allowed to kill
+    # ONLY this fixture pid. Lowering a threshold without this killed five other
+    # sessions' bin/simple processes on 2026-08-18. MIN_AGE 0 so the fixture
+    # need not live 900s.
+    KILL_SIMPLE_ONLY_PIDS="$_vic" \
+    KILL_SIMPLE_LOCKDIR="$_d/lock" \
+    KILL_SIMPLE_CPU_STATE_DIR="$_d/state" \
+    KILL_SIMPLE_LOG="$_d/log" \
+    KILL_SIMPLE_INTERVAL=1 \
+    KILL_SIMPLE_CPU_PCT="$_cpu" \
+    KILL_SIMPLE_MEM_MB="$_mem" \
+    KILL_SIMPLE_MIN_AGE_SECS=0 \
+    KILL_SIMPLE_SPIN_SAMPLES=3 \
+    KILL_ANY_MEM_MB=9999999 \
+    KILL_SIMPLE_WARN_MB=9999999 \
+    KILL_SIMPLE_HEARTBEAT_SECS=2 \
+        sh "$MON" > "$_d/out" 2>&1 & _mon=$!
+
+    _i=0
+    while [ "$_i" -lt "$_watch" ]; do
+        kill -0 "$_vic" 2>/dev/null || break
+        sleep 1
+        _i=$(( _i + 1 ))
+    done
+
+    if kill -0 "$_vic" 2>/dev/null; then _got=alive; else _got=killed; fi
+    _monalive=no; kill -0 "$_mon" 2>/dev/null && _monalive=yes
+    _samples=$(ls "$_d/state" 2>/dev/null | wc -l)
+    kill "$_vic" "$_mon" 2>/dev/null
+    wait "$_vic" "$_mon" 2>/dev/null
+
+    printf '  %-28s expect=%-6s got=%-6s monitor_alive=%s samples=%s\n' \
+        "$_name" "$_expect" "$_got" "$_monalive" "$_samples"
+    if [ "$_got" != "$_expect" ]; then
+        FAILED=$(( FAILED + 1 )); FAILNAMES="$FAILNAMES $_name"
+    fi
+}
+
+echo "kill-monitor CPU-guard checks (isolated state; fixture pids only)"
+
+# 1. THE REGRESSION. A spinner must be caught by the CPU guard. Before the fix
+#    the monitor died on its first sample and this stayed alive forever.
+run_case cpu_guard_fires        spin         120 25 50 9999999 killed
+
+# 2. Similar case: the monitor must SURVIVE its own poll loop and populate the
+#    state dir. Asserted via monitor_alive/samples printed above and below.
+CHECKED=$(( CHECKED + 1 ))
+_d="$WORK/survives"; mkdir -p "$_d/state"
+KILL_SIMPLE_LOCKDIR="$_d/lock" KILL_SIMPLE_CPU_STATE_DIR="$_d/state" \
+KILL_SIMPLE_LOG="$_d/log" KILL_SIMPLE_INTERVAL=1 KILL_SIMPLE_CPU_PCT=999 \
+KILL_SIMPLE_MEM_MB=9999999 KILL_ANY_MEM_MB=9999999 KILL_SIMPLE_WARN_MB=9999999 \
+KILL_SIMPLE_MIN_AGE_SECS=9999999 KILL_SIMPLE_HEARTBEAT_SECS=2 \
+KILL_SIMPLE_ONLY_PIDS=-1 \
+    sh "$MON" > "$_d/out" 2>&1 & _m=$!
+sleep 12
+_alive=no; kill -0 "$_m" 2>/dev/null && _alive=yes
+_ns=$(ls "$_d/state" 2>/dev/null | wc -l)
+_hb=$(grep -c HEARTBEAT "$_d/log" 2>/dev/null || echo 0)
+kill "$_m" 2>/dev/null; wait "$_m" 2>/dev/null
+printf '  %-28s alive=%s samples=%s heartbeats=%s\n' survives_and_samples "$_alive" "$_ns" "$_hb"
+if [ "$_alive" != yes ] || [ "$_ns" -lt 1 ] || [ "$_hb" -lt 1 ]; then
+    FAILED=$(( FAILED + 1 )); FAILNAMES="$FAILNAMES survives_and_samples"
+fi
+
+# 3. Similar case: the RSS guard must STILL work (it was the only surviving
+#    guard; a fix that breaks it trades one dead guard for another).
+run_case rss_guard_still_fires  idle          60 20 999 0      killed
+
+# 4. Similar case: a briefly-hot process must NOT be killed. A guard that kills
+#    healthy work is worse than one that sleeps.
+run_case brief_spin_not_killed  spin_briefly   2 20 50 9999999 alive
+
+# 5. Similar case: an idle process must never be touched by the CPU guard.
+run_case idle_not_killed        idle          60 15 50 9999999 alive
+
+# 6. Visibility: an unusable state dir must be a LOUD startup failure, never a
+#    silent degrade to RSS-only.
+CHECKED=$(( CHECKED + 1 ))
+_d="$WORK/selftest"; mkdir -p "$_d"
+: > "$_d/state"   # a FILE where a dir is expected => unwritable
+KILL_SIMPLE_LOCKDIR="$_d/lock" KILL_SIMPLE_CPU_STATE_DIR="$_d/state" \
+KILL_SIMPLE_LOG="$_d/log" KILL_SIMPLE_INTERVAL=1 KILL_SIMPLE_ONLY_PIDS=-1 \
+    sh "$MON" > "$_d/out" 2>&1
+_rc=$?
+if [ "$_rc" -eq 0 ] || ! grep -q FATAL "$_d/out"; then
+    FAILED=$(( FAILED + 1 )); FAILNAMES="$FAILNAMES startup_selftest_is_loud"
+fi
+printf '  %-28s exit=%s loud=%s\n' startup_selftest_is_loud "$_rc" \
+    "$(grep -c FATAL "$_d/out" 2>/dev/null || echo 0)"
+
+[ "$CHECKED" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ "$FAILED" -gt 0 ]; then
+    echo "FAIL — $CHECKED case(s) checked, $FAILED failed:$FAILNAMES"
+    exit 1
+fi
+echo "PASS — $CHECKED case(s) checked, CPU guard fires, RSS guard intact, healthy work spared"
+exit 0

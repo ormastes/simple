@@ -1,0 +1,409 @@
+# NvmeDriver synchronous, notification, and shared-DMA sector I/O.
+use os.drivers.nvme.nvme_driver.*
+use os.drivers.nvme._NvmeDriver.driver_class.*
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+use os.drivers.nvme.nvme_queue_notify.*
+use os.drivers.nvme.nvme_transfer_command.{nvme_read_io_command_for_namespace, nvme_write_io_command_for_namespace, nvme_flush_io_command_for_namespace, nvme_io_status_code}
+use os.drivers.nvme.nvme_storage_model.{nvme_queue_is_system_reserved}
+use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
+
+impl NvmeDriver:
+    me read_sectors(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors from namespace 1.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to read (1-based)
+        buf_phys: Physical address of DMA buffer (must be pre-allocated via AllocDma)
+
+        NVMe Read command (opcode 0x02):
+          NSID = 1
+          PRP1 = buf_phys
+          CDW10 = LBA lower 32 bits
+          CDW11 = LBA upper 32 bits
+          CDW12 = Number of Logical Blocks (0-based, so count-1)
+        """
+        self.read_sectors_in_namespace(self.get_namespace_id(), lba, count, buf_phys)
+
+    me read_sectors_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors from an identified namespace."""
+        self.read_sectors_in_namespace_on_queue(nsid, self.io_queue.qid, lba, count, buf_phys)
+
+    me read_sectors_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors from an identified namespace on a concrete I/O queue."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        val cmd_result = nvme_read_io_command_for_namespace(nsid, lba, count, buf_phys, sector_count.unwrap())
+        if cmd_result.is_err():
+            return Result.Err("NVMe: read " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+
+        var status_dw3: u32 = 0u32
+        if queue_id == self.io_queue.qid:
+            val cmd_id = self.io_queue.submit_command(
+                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                cmd.cdw10, cmd.cdw11, cmd.cdw12
+            )
+            if cmd_id == 0xFFFFu16:
+                return Result.Err("NVMe: read submit failed")
+            if not self.io_queue.wait_completion_for_command(cmd_id, CMD_TIMEOUT):
+                return Result.Err("NVMe: read timeout at LBA {lba}")
+            status_dw3 = self.io_queue.get_completion_status()
+        else:
+            var updated_queues: [NvmeQueuePair] = []
+            var matched_queue = false
+            for existing in self.user_io_queues:
+                if existing.qid == queue_id:
+                    var q = existing
+                    val cmd_id = q.submit_command(
+                        cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                        cmd.cdw10, cmd.cdw11, cmd.cdw12
+                    )
+                    if cmd_id == 0xFFFFu16:
+                        return Result.Err("NVMe: read submit failed")
+                    if not q.wait_completion_for_command(cmd_id, CMD_TIMEOUT):
+                        return Result.Err("NVMe: read timeout at LBA {lba}")
+                    status_dw3 = q.get_completion_status()
+                    updated_queues.push(q)
+                    matched_queue = true
+                else:
+                    updated_queues.push(existing)
+            self.user_io_queues = updated_queues
+            if not matched_queue:
+                return Result.Err("NVMe: I/O queue not ready")
+
+        val status_code = nvme_io_status_code(status_dw3)
+        if status_code != 0:
+            return Result.Err("NVMe: read error, status={status_code}")
+
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
+        Result.Ok(true)
+
+    me write_sectors(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors to namespace 1.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to write (1-based)
+        buf_phys: Physical address of DMA buffer containing data to write
+
+        NVMe Write command (opcode 0x01):
+          NSID = 1
+          PRP1 = buf_phys
+          CDW10 = LBA lower 32 bits
+          CDW11 = LBA upper 32 bits
+          CDW12 = Number of Logical Blocks (0-based, so count-1)
+        """
+        self.write_sectors_in_namespace(self.get_namespace_id(), lba, count, buf_phys)
+
+    me write_sectors_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors to an identified namespace."""
+        self.write_sectors_in_namespace_on_queue(nsid, self.io_queue.qid, lba, count, buf_phys)
+
+    me write_sectors_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors to an identified namespace on a concrete I/O queue."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        val cmd_result = nvme_write_io_command_for_namespace(nsid, lba, count, buf_phys, sector_count.unwrap())
+        if cmd_result.is_err():
+            return Result.Err("NVMe: write " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+
+        var status_dw3: u32 = 0u32
+        if queue_id == self.io_queue.qid:
+            val cmd_id = self.io_queue.submit_command(
+                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                cmd.cdw10, cmd.cdw11, cmd.cdw12
+            )
+            if cmd_id == 0xFFFFu16:
+                return Result.Err("NVMe: write submit failed")
+            if not self.io_queue.wait_completion(CMD_TIMEOUT):
+                return Result.Err("NVMe: write timeout at LBA {lba}")
+            status_dw3 = self.io_queue.get_completion_status()
+        else:
+            var updated_queues: [NvmeQueuePair] = []
+            var matched_queue = false
+            for existing in self.user_io_queues:
+                if existing.qid == queue_id:
+                    var q = existing
+                    val cmd_id = q.submit_command(
+                        cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                        cmd.cdw10, cmd.cdw11, cmd.cdw12
+                    )
+                    if cmd_id == 0xFFFFu16:
+                        return Result.Err("NVMe: write submit failed")
+                    if not q.wait_completion(CMD_TIMEOUT):
+                        return Result.Err("NVMe: write timeout at LBA {lba}")
+                    status_dw3 = q.get_completion_status()
+                    updated_queues.push(q)
+                    matched_queue = true
+                else:
+                    updated_queues.push(existing)
+            self.user_io_queues = updated_queues
+            if not matched_queue:
+                return Result.Err("NVMe: I/O queue not ready")
+
+        val status_code = nvme_io_status_code(status_dw3)
+        if status_code != 0:
+            return Result.Err("NVMe: write error, status={status_code}")
+
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
+        Result.Ok(true)
+
+    me flush() -> Result<bool, text>:
+        """Flush controller write cache to persistent storage.
+
+        NVMe Flush command (opcode 0x00) on the I/O queue.
+        """
+        self.flush_in_namespace(self.get_namespace_id())
+
+    me flush_in_namespace(nsid: u32) -> Result<bool, text>:
+        """Flush write cache for an identified namespace."""
+        self.flush_in_namespace_on_queue(nsid, self.io_queue.qid)
+
+    me flush_in_namespace_on_queue(nsid: u32, queue_id: u16) -> Result<bool, text>:
+        """Flush write cache for an identified namespace on a concrete I/O queue."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
+            return Result.Err("NVMe: namespace not identified")
+
+        val cmd_result = nvme_flush_io_command_for_namespace(nsid)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: flush " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+
+        var status_dw3: u32 = 0u32
+        if queue_id == self.io_queue.qid:
+            val cmd_id = self.io_queue.submit_command(
+                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                cmd.cdw10, cmd.cdw11, cmd.cdw12
+            )
+            if cmd_id == 0xFFFFu16:
+                return Result.Err("NVMe: flush submit failed")
+            if not self.io_queue.wait_completion(CMD_TIMEOUT):
+                return Result.Err("NVMe: flush timeout")
+            status_dw3 = self.io_queue.get_completion_status()
+        else:
+            var updated_queues: [NvmeQueuePair] = []
+            var matched_queue = false
+            for existing in self.user_io_queues:
+                if existing.qid == queue_id:
+                    var q = existing
+                    val cmd_id = q.submit_command(
+                        cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                        cmd.cdw10, cmd.cdw11, cmd.cdw12
+                    )
+                    if cmd_id == 0xFFFFu16:
+                        return Result.Err("NVMe: flush submit failed")
+                    if not q.wait_completion(CMD_TIMEOUT):
+                        return Result.Err("NVMe: flush timeout")
+                    status_dw3 = q.get_completion_status()
+                    updated_queues.push(q)
+                    matched_queue = true
+                else:
+                    updated_queues.push(existing)
+            self.user_io_queues = updated_queues
+            if not matched_queue:
+                return Result.Err("NVMe: I/O queue not ready")
+
+        val status_code = nvme_io_status_code(status_dw3)
+        if status_code != 0:
+            return Result.Err("NVMe: flush error, status={status_code}")
+
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
+        Result.Ok(true)
+
+    # ========================================================================
+    # Notification-Based Block I/O (non-spinning)
+    # ========================================================================
+
+    me read_sectors_notify(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors using notification-based completion (non-spinning).
+
+        Same as read_sectors() but uses wait_completion_notify() which blocks
+        on the IRQ notification instead of spin-polling. This yields the CPU
+        to other tasks while waiting for the NVMe controller to complete.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to read (1-based)
+        buf_phys: Physical address of DMA buffer (must be pre-allocated)
+        """
+        self.read_sectors_notify_in_namespace(self.get_namespace_id(), lba, count, buf_phys)
+
+    me read_sectors_notify_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors from an identified namespace using IRQ notification."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, self.io_queue.qid)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        val cmd_result = nvme_read_io_command_for_namespace(nsid, lba, count, buf_phys, sector_count.unwrap())
+        if cmd_result.is_err():
+            return Result.Err("NVMe: read " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+
+        val cmd_id = self.io_queue.submit_command(
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
+        )
+        if cmd_id == 0xFFFFu16:
+            return Result.Err("NVMe: read submit failed")
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: read timeout at LBA {lba}")
+
+        # Check completion status
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = nvme_io_status_code(status_dw3)
+        if status_code != 0:
+            return Result.Err("NVMe: read error, status={status_code}")
+
+        self.remember_system_namespace_raw_access(nsid)
+        Result.Ok(true)
+
+    me write_sectors_notify(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors using notification-based completion (non-spinning).
+
+        Same as write_sectors() but uses wait_completion_notify() which blocks
+        on the IRQ notification instead of spin-polling.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to write (1-based)
+        buf_phys: Physical address of DMA buffer containing data
+        """
+        self.write_sectors_notify_in_namespace(self.get_namespace_id(), lba, count, buf_phys)
+
+    me write_sectors_notify_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors to an identified namespace using IRQ notification."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, self.io_queue.qid)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        val cmd_result = nvme_write_io_command_for_namespace(nsid, lba, count, buf_phys, sector_count.unwrap())
+        if cmd_result.is_err():
+            return Result.Err("NVMe: write " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+
+        val cmd_id = self.io_queue.submit_command(
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
+        )
+        if cmd_id == 0xFFFFu16:
+            return Result.Err("NVMe: write submit failed")
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: write timeout at LBA {lba}")
+
+        # Check completion status
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = nvme_io_status_code(status_dw3)
+        if status_code != 0:
+            return Result.Err("NVMe: write error, status={status_code}")
+
+        self.remember_system_namespace_raw_access(nsid)
+        Result.Ok(true)
+
+    me read_shared_dma(lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Submit a direct NVMe read into caller-owned shared DMA memory."""
+        self.read_shared_dma_in_namespace_on_queue(self.get_namespace_id(), self.io_queue.qid, lba, count, buf)
+
+    me read_shared_dma_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Submit a direct NVMe read into caller-owned shared DMA memory on a concrete namespace queue."""
+        if not buf.is_valid():
+            return Result.Err("NVMe: invalid shared DMA buffer")
+        val sector_size = self.namespace_sector_size(nsid)
+        if sector_size.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        val bytes = count.to_u64() * sector_size.unwrap().to_u64()
+        if bytes == 0 or buf.byte_len < bytes:
+            return Result.Err("NVMe: shared DMA buffer too small")
+        if (buf.device_addr % sector_size.unwrap().to_u64()) != 0:
+            return Result.Err("NVMe: shared DMA device address unaligned")
+        val result = self.read_sectors_in_namespace_on_queue(nsid, queue_id, lba, count, buf.device_addr)
+        if result.is_ok():
+            dma_shared_sync_device_to_cpu(buf)
+        result
+
+    me write_shared_dma(lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Submit a direct NVMe write from caller-owned shared DMA memory."""
+        self.write_shared_dma_in_namespace_on_queue(self.get_namespace_id(), self.io_queue.qid, lba, count, buf)
+
+    me write_shared_dma_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Submit a direct NVMe write from caller-owned shared DMA memory on a concrete namespace queue."""
+        if not buf.is_valid():
+            return Result.Err("NVMe: invalid shared DMA buffer")
+        val sector_size = self.namespace_sector_size(nsid)
+        if sector_size.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        val bytes = count.to_u64() * sector_size.unwrap().to_u64()
+        if bytes == 0 or buf.byte_len < bytes:
+            return Result.Err("NVMe: shared DMA buffer too small")
+        if (buf.device_addr % sector_size.unwrap().to_u64()) != 0:
+            return Result.Err("NVMe: shared DMA device address unaligned")
+        dma_shared_sync_cpu_to_device(buf)
+        self.write_sectors_in_namespace_on_queue(nsid, queue_id, lba, count, buf.device_addr)
+
+
+    me flush_notify() -> Result<bool, text>:
+        """Flush write cache using notification-based completion (non-spinning).
+
+        Same as flush() but uses wait_completion_notify() instead of spin-polling.
+        """
+        self.flush_notify_in_namespace(self.get_namespace_id())
+
+    me flush_notify_in_namespace(nsid: u32) -> Result<bool, text>:
+        """Flush an identified namespace using notification-based completion."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
+            return Result.Err("NVMe: namespace not identified")
+
+        val cmd_result = nvme_flush_io_command_for_namespace(nsid)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: flush " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+        val cmd_id = self.io_queue.submit_command(
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
+        )
+        if cmd_id == 0xFFFFu16:
+            return Result.Err("NVMe: flush submit failed")
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: flush timeout")
+
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = nvme_io_status_code(status_dw3)
+        if status_code != 0:
+            return Result.Err("NVMe: flush error, status={status_code}")
+
+        Result.Ok(true)

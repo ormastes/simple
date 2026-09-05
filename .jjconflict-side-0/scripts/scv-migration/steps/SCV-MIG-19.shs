@@ -1,0 +1,30 @@
+#!/bin/sh
+# SCV-MIG-19 — one-read FileBuffer (month plan W3, scv_v2_final_report §6.5).
+# The snapshot path used to read each changed file up to 3 times (content id,
+# chunk copy, CDC payload); src/lib/scv/file_buffer.spl reads once and derives
+# all three from the buffer, wired into scv_snapshot (working_copy.spl).
+# Acceptance: bin/simple test test/integration/app/scv_filebuffer_status_spec.spl
+# (byte-compat ids, single-read proof via clobber-after-buffer, oversize
+# rejection against SCV_MAX_OBJECT_BYTES).
+# NOTE (honest scope): the plan row's "event/index-driven working-copy status
+# with reconcile" half is NOT delivered here — lane B owns only the FileBuffer
+# seam + snapshot wiring; status remains the existing full scan (the row's
+# stated fallback).
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Committed UNSIGNED: sign with
+#   sh scripts/trust/sign-script.shs --name scv-migration-root scripts/scv-migration/steps/SCV-MIG-19.shs
+set -u
+REPO="$(pwd)"
+[ -x "$REPO/bin/simple" ] || { echo "ERROR — nothing was checked (missing: bin/simple)"; exit 2; }
+SPEC="test/integration/app/scv_filebuffer_status_spec.spl"
+[ -f "$REPO/$SPEC" ] || { echo "ERROR — nothing was checked (missing: $SPEC)"; exit 2; }
+
+OUT=$(SIMPLE_TIMEOUT_SECONDS=900 "$REPO/bin/simple" test "$SPEC" 2>&1)
+RC=$?
+printf '%s\n' "$OUT" | tail -20
+RESULTS=$(printf '%s\n' "$OUT" | grep "Results:" | tail -1)
+[ -n "$RESULTS" ] || { echo "ERROR — nothing was checked (no Results: line, rc=$RC)"; exit 2; }
+case "$RESULTS" in
+  *" 0 failed"*) echo "PASS — SCV-MIG-19: $RESULTS"; exit 0 ;;
+  *) echo "FAIL — SCV-MIG-19: $RESULTS"; exit 1 ;;
+esac

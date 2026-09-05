@@ -1,0 +1,302 @@
+"""CUDA SFFI Dispatch — Static/Dynamic Dual-Path
+
+@tag:stdlib
+@tag:gpu
+
+Wraps CUDA Driver API functions behind a CudaFfi class supporting
+both static (extern fn rt_cuda_*) and dynamic (DynLib libcuda.so) dispatch.
+
+Usage:
+    val sffi = CudaFfi.create(GpuFfiMode.Dynamic)
+    if ffi.is_available():
+        ffi.init()
+"""
+
+use std.sffi.dynamic.{DynLib}
+use std.gpu.engine2d.sffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
+
+# ============================================================================
+# Static extern declarations
+# ============================================================================
+
+@unsafe(reason: "raw CUDA availability ABI", capabilities: [ffi])
+extern fn rt_cuda_available() -> i64
+@unsafe(reason: "raw CUDA driver initialization status", capabilities: [ffi])
+extern fn rt_cuda_init() -> i64
+@unsafe(reason: "raw legacy CUDA shutdown status", capabilities: [ffi])
+extern fn rt_cuda_shutdown() -> i64
+@unsafe(reason: "raw CUDA device-count result", capabilities: [ffi])
+extern fn rt_cuda_device_count() -> i64
+@unsafe(reason: "raw CUDA device lookup result", capabilities: [ffi])
+extern fn rt_cuda_device_get(id: i64) -> i64
+@unsafe(reason: "raw opaque CUDA context creation", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_ctx_create(device: i64) -> i64
+@unsafe(reason: "raw generationless CUDA context selection", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_ctx_set_current(ctx: i64) -> i64
+@unsafe(reason: "raw generationless CUDA context release", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_ctx_destroy(ctx: i64) -> i64
+@unsafe(reason: "raw CUDA module load and opaque handle", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_module_load(ptx: text) -> i64
+@unsafe(reason: "raw PTX module load and opaque handle", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_module_load_data(ptx: text) -> i64
+@unsafe(reason: "raw generationless CUDA module release", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_module_unload(module: i64) -> i64
+@unsafe(reason: "raw generationless module lookup and function handle", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_module_get_function(module: i64, name: text) -> i64
+@unsafe(reason: "raw CUDA launch geometry and argument-pointer contract", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_launch_kernel(module: i64, name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args_ptr: i64) -> i64
+@unsafe(reason: "raw opaque CUDA device allocation", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+@unsafe(reason: "raw generationless CUDA allocation release", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
+@unsafe(reason: "raw host-span to device-pointer copy", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_memcpy_htod(dst: i64, src: [u8], size: i64) -> i64
+@unsafe(reason: "raw device-pointer to mutable-host-span copy", capabilities: [ffi, raw_ptr])
+extern fn rt_cuda_memcpy_dtoh(dst: [u8], src: i64, size: i64) -> i64
+@unsafe(reason: "raw CUDA context synchronization status", capabilities: [ffi])
+extern fn rt_cuda_sync() -> i64
+@unsafe(reason: "raw owned CUDA argument-pack handle", capabilities: [ffi, raw_ptr])
+extern fn rt_engine2d_pack_args_4(a: i64, b: i64, c: i64, d: i64) -> i64
+@unsafe(reason: "raw owned CUDA argument-pack handle", capabilities: [ffi, raw_ptr])
+extern fn rt_engine2d_pack_args_8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64
+@unsafe(reason: "raw pixel span to device-pointer copy", capabilities: [ffi, raw_ptr])
+extern fn rt_engine2d_upload_pixels(d_dst: i64, pixels: [u32], count: i64) -> i64
+@unsafe(reason: "raw device-pointer to mutable-pixel-span copy", capabilities: [ffi, raw_ptr])
+extern fn rt_engine2d_download_pixels(d_src: i64, pixels: [u32], byte_size: i64) -> i64
+@unsafe(reason: "raw host-buffer span to device-pointer copy", capabilities: [ffi, raw_ptr])
+extern fn rt_engine2d_upload_host_buf(d_dst: i64, host_buf: [u32], byte_size: i64) -> i64
+
+fn cuda_engine2d_pack_args_4(a: i64, b: i64, c: i64, d: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_engine2d_pack_args_4(a, b, c, d)
+
+fn cuda_engine2d_pack_args_8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_engine2d_pack_args_8(a, b, c, d, e, f, g, h)
+
+fn cuda_engine2d_upload_pixels(d_dst: i64, pixels: [u32], count: i64) -> i64:
+    if d_dst <= 0 or count < 0 or count > pixels.len():
+        return -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_engine2d_upload_pixels(d_dst, pixels, count)
+
+fn cuda_engine2d_download_pixels(d_src: i64, pixels: [u32], byte_size: i64) -> i64:
+    if d_src <= 0 or byte_size < 0 or byte_size % 4 != 0 or byte_size / 4 > pixels.len():
+        return -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_engine2d_download_pixels(d_src, pixels, byte_size)
+
+fn cuda_engine2d_upload_host_buf(d_dst: i64, host_buf: [u32], byte_size: i64) -> i64:
+    if d_dst <= 0 or byte_size < 0 or byte_size % 4 != 0 or byte_size / 4 > host_buf.len():
+        return -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_engine2d_upload_host_buf(d_dst, host_buf, byte_size)
+
+# ============================================================================
+# CudaFfi
+# ============================================================================
+
+@unsafe(reason: "CUDA dispatch exposes raw generationless handles and generic dynamic calls without typed out-parameter support", capabilities: [ffi, raw_ptr])
+class CudaFfi:
+    _mode: GpuFfiMode
+    _dyn_lib: DynLib?
+
+impl CudaFfi:
+    static fn create_static() -> CudaFfi:
+        CudaFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil)
+
+    static fn create_dynamic() -> CudaFfi?:
+        val lib = try_load_gpu_lib("cuda")
+        if lib == nil:
+            return nil
+        CudaFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create_dynamic_from(path: text) -> CudaFfi?:
+        val lib = DynLib.load(path)
+        if lib == nil:
+            return nil
+        CudaFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create(sffi_mode: GpuFfiMode) -> CudaFfi?:
+        match sffi_mode:
+            case Dynamic:
+                val dyn_sffi = CudaFfi.create_dynamic()
+                if dyn_sffi != nil:
+                    return dyn_sffi
+                CudaFfi.create_static()
+            case Static:
+                CudaFfi.create_static()
+
+impl FfiDispatchBase for CudaFfi:
+
+    fn mode() -> GpuFfiMode:
+        self._mode
+
+    fn api_name() -> text:
+        "CUDA Driver API"
+
+    fn is_available() -> bool:
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi]):
+                    rt_cuda_available() != 0
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("cuInit", 0)
+                    if result != 0:
+                        return false
+                    unsafe(capabilities: [ffi]):
+                        rt_cuda_device_count() > 0
+                else:
+                    false
+
+    fn init() -> bool:
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi]):
+                    rt_cuda_init() == 0
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("cuInit", 0)
+                    result == 0
+                else:
+                    false
+
+    fn shutdown() -> bool:
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi]):
+                    rt_cuda_shutdown() == 0
+            case Dynamic: false
+
+    fn device_count() -> i64:
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi]):
+                    rt_cuda_device_count()
+            case Dynamic:
+                # cuDeviceGetCount returns the count through an out pointer;
+                # generic integer dispatch cannot represent that contract.
+                unsafe(capabilities: [ffi]):
+                    rt_cuda_device_count()
+
+    fn ctx_create(device: i64) -> i64:
+        if device < 0:
+            return 0
+        match self._mode:
+            case Static:
+                val ctx = unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_ctx_create(device)
+                if ctx < 0: 0 else: ctx
+            case Dynamic:
+                # cuCtxCreate also returns through an out pointer.
+                val ctx = unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_ctx_create(device)
+                if ctx < 0: 0 else: ctx
+
+    fn ctx_set_current(ctx: i64) -> bool:
+        if ctx <= 0:
+            return false
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_ctx_set_current(ctx) == 0
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call1("cuCtxSetCurrent", ctx) == 0
+                else:
+                    false
+
+    fn ctx_destroy(ctx: i64) -> bool:
+        if ctx <= 0:
+            return false
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_ctx_destroy(ctx) == 0
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("cuCtxDestroy", ctx)
+                    result == 0
+                else:
+                    false
+
+    fn module_load_ptx(ptx: text) -> i64:
+        match self._mode:
+            case Static:
+                val module = unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_module_load_data(ptx)
+                if module < 0: 0 else: module
+            case Dynamic: 0
+
+    fn module_unload(module: i64) -> bool:
+        if module <= 0:
+            return false
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_module_unload(module) == 0
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("cuModuleUnload", module)
+                    result == 0
+                else:
+                    false
+
+    fn kernel_get(module: i64, name: text) -> i64:
+        if module <= 0 or name == "":
+            return 0
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_module_get_function(module, name)
+            case Dynamic: 0
+
+    fn launch_kernel(module: i64, name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args_ptr: i64) -> bool:
+        if module <= 0 or name == "" or gx <= 0 or gy <= 0 or gz <= 0 or bx <= 0 or by <= 0 or bz <= 0:
+            return false
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_launch_kernel(module, name, gx, gy, gz, bx, by, bz, args_ptr) == 0
+            case Dynamic: false
+
+    fn mem_alloc(size: i64) -> i64:
+        if size <= 0:
+            return 0
+        match self._mode:
+            case Static:
+                val ptr = unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_mem_alloc(size)
+                if ptr < 0: 0 else: ptr
+            case Dynamic:
+                # cuMemAlloc returns the device pointer through an out pointer.
+                val ptr = unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_mem_alloc(size)
+                if ptr < 0: 0 else: ptr
+
+    fn mem_free(ptr: i64) -> bool:
+        if ptr <= 0:
+            return false
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi, raw_ptr]):
+                    rt_cuda_mem_free(ptr) == 0
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("cuMemFree", ptr)
+                    result == 0
+                else:
+                    false
+
+    fn synchronize() -> bool:
+        match self._mode:
+            case Static:
+                unsafe(capabilities: [ffi]):
+                    rt_cuda_sync() == 0
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call0("cuCtxSynchronize")
+                    result == 0
+                else:
+                    false

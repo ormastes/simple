@@ -1,0 +1,53 @@
+"""Pure-Simple Cosmos NVMe admin validation/status policy."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.arch.arm32.cosmos.cosmos_nvme_admin_policy.{
+    COSMOS_NVME_ADMIN_POLICY_DECISION_COUNT,
+    cosmos_nvme_admin_policy_status_success,
+    cosmos_nvme_admin_policy_status_generic,
+    cosmos_nvme_admin_policy_status_specific,
+    cosmos_nvme_admin_policy_identify_status,
+    cosmos_nvme_admin_policy_get_log_status,
+    cosmos_nvme_admin_policy_set_features_status,
+    cosmos_nvme_admin_policy_queue_count,
+    cosmos_nvme_admin_policy_queue_result,
+    cosmos_nvme_admin_policy_payload_valid,
+    cosmos_nvme_admin_policy_abort_result,
+    cosmos_nvme_admin_policy_decision_probe
+}
+
+describe "Cosmos pure-Simple NVMe admin policy":
+    it "preserves exact completion status fields and queue feature result":
+        expect(cosmos_nvme_admin_policy_status_success()).to_equal(0u32)
+        expect(cosmos_nvme_admin_policy_status_generic(0x02u32)).to_equal(0x00010002u32)
+        expect(cosmos_nvme_admin_policy_status_specific(0x08u32)).to_equal(0x00010108u32)
+        expect(cosmos_nvme_admin_policy_queue_count(0x00090009u32)).to_equal(4u32)
+        expect(cosmos_nvme_admin_policy_queue_result(4u32)).to_equal(0x00030003u32)
+
+    it "preserves Identify, SMART, feature, PRP, and Abort edge semantics":
+        expect(cosmos_nvme_admin_policy_identify_status(0u32, 1u32, 0u32, 0u32, 0u32)).to_equal(0u32)
+        expect(cosmos_nvme_admin_policy_identify_status(1u32, 1u32, 0u32, 0u32, 0u32)).to_equal(0x0001000Bu32)
+        expect(cosmos_nvme_admin_policy_get_log_status(0xFFFFFFFFu32, 0x007F0002u32, 0u32, 0u32, 0u32)).to_equal(0u32)
+        expect(cosmos_nvme_admin_policy_get_log_status(0xFFFFFFFFu32, 0x007F0003u32, 0u32, 0u32, 0u32)).to_equal(0x00010109u32)
+        expect(cosmos_nvme_admin_policy_set_features_status(0u32, 0x80000007u32, 0u32, 0u32, 0u32)).to_equal(0x0001010Du32)
+        expect(cosmos_nvme_admin_policy_payload_valid(0x1000u32, 0u32, 0u32, 0u32, 4096u32, 4096u32)).to_equal(1)
+        expect(cosmos_nvme_admin_policy_payload_valid(0x1FFCu32, 0u32, 0x3000u32, 0u32, 8u32, 8u32)).to_equal(1)
+        expect(cosmos_nvme_admin_policy_payload_valid(0x1FFCu32, 0u32, 0x3004u32, 0u32, 8u32, 8u32)).to_equal(0)
+        expect(cosmos_nvme_admin_policy_abort_result(0u32, 7u32, 1u32, 7u32)).to_equal(0u32)
+        expect(cosmos_nvme_admin_policy_abort_result(1u32, 7u32, 1u32, 7u32)).to_equal(1u32)
+
+    it "records both outcomes of every production decision":
+        var decisions_hit = 0u32
+        var outcomes_hit = 0u32
+        var decision_id = 0u32
+        while decision_id < COSMOS_NVME_ADMIN_POLICY_DECISION_COUNT:
+            val false_outcome = cosmos_nvme_admin_policy_decision_probe(decision_id, 0u32)
+            val true_outcome = cosmos_nvme_admin_policy_decision_probe(decision_id, 1u32)
+            expect(false_outcome).to_equal(0u32)
+            expect(true_outcome).to_equal(1u32)
+            decisions_hit = decisions_hit + 1u32
+            outcomes_hit = outcomes_hit + 2u32
+            decision_id = decision_id + 1u32
+        expect(decisions_hit).to_equal(COSMOS_NVME_ADMIN_POLICY_DECISION_COUNT)
+        expect(outcomes_hit).to_equal(COSMOS_NVME_ADMIN_POLICY_DECISION_COUNT * 2u32)
+        print("COSMOS_NVME_ADMIN_SIMPLE_DECISIONS {decisions_hit}/{COSMOS_NVME_ADMIN_POLICY_DECISION_COUNT} outcomes={outcomes_hit}/{COSMOS_NVME_ADMIN_POLICY_DECISION_COUNT * 2u32}")

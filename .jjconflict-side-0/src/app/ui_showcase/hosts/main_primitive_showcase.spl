@@ -1,0 +1,426 @@
+# Engine2D primitive showcase with an ON-SCREEN mode and a VIRTUAL mode.
+#
+# WHY TWO MODES
+#   The two default target dimensions are 7680x4320 (8K screen) and 8192x8192.
+#   Neither fits on this MacBook's panel, so they can only ever be verified
+#   headless.  The on-screen mode therefore renders at THIS machine's DETECTED
+#   screen resolution -- never a hardcoded guess -- while the virtual mode
+#   exercises the two big targets offscreen and proves they really rendered.
+#
+#   SHOWCASE_MODE=onscreen   render at the detected display size, show it
+#   SHOWCASE_MODE=virtual    render at SHOWCASE_W x SHOWCASE_H, verify, no window
+#
+# VERIFICATION (virtual mode)
+#   A full nonclear sweep is 67M interpreted iterations at 8192x8192 and would
+#   dwarf the render itself, so instead we check three concrete signals:
+#     1. probe pixel INSIDE draw_rect_filled must equal that primitive's colour
+#     2. probe pixel in a known-empty corner must equal the clear colour
+#     3. a strided nonclear count (every STRIDE-th pixel) must be > 0
+#
+# Env: VK2D_BACKEND (default vulkan), SHOWCASE_MODE, SHOWCASE_W/H,
+#      SHOWCASE_BMP (write a 24-bit BMP), SHOWCASE_OPEN=1 (open it after write).
+
+use std.io_runtime.{time_now_unix_micros, file_write_bytes}
+use app.io.mod.{env_get}
+use io.process_ops.{process_run}
+use gpu.engine2d.engine.{Engine2D}
+
+# Reference scene is authored at 800x600 and scaled to the target.
+const BASE_W: i32 = 800
+const BASE_H: i32 = 600
+const CLEAR: u32 = 0xFF141414u32
+const PROBE_FILL: u32 = 0xFF3366CCu32
+
+var TIMES: [text] = []
+
+fn _pmark(name: text, t0: i64):
+    TIMES.push("  feat {name} us={time_now_unix_micros() - t0}")
+
+fn _env_i32(key: text, fallback: i32) -> i32:
+    val raw = env_get(key).trim()
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+# --- runtime display detection ---------------------------------------------
+# Chain, never a hardcoded constant:
+#   1. SDL2 display bounds (works wherever SDL video can initialise)
+#   2. system_profiler, parsed at runtime
+# Both are queried live; if both fail we say so and refuse to guess.
+
+extern fn rt_sdl2_init() -> i64
+extern fn rt_sdl2_get_display_bounds_w(index: i64) -> i64
+extern fn rt_sdl2_get_display_bounds_h(index: i64) -> i64
+extern fn rt_sdl2_get_display_usable_w(index: i64) -> i64
+extern fn rt_sdl2_get_display_usable_h(index: i64) -> i64
+
+fn _detect_via_sdl2() -> (i32, i32, text):
+    var w: i64 = -1
+    var h: i64 = -1
+    unsafe(capabilities: [ffi]):
+        if rt_sdl2_init() == 1:
+            w = rt_sdl2_get_display_usable_w(0)
+            h = rt_sdl2_get_display_usable_h(0)
+            if w <= 0 or h <= 0:
+                w = rt_sdl2_get_display_bounds_w(0)
+                h = rt_sdl2_get_display_bounds_h(0)
+    if w <= 0 or h <= 0:
+        return (0, 0, "sdl2-video-unavailable")
+    (w.to_i32(), h.to_i32(), "sdl2")
+
+fn _parse_res_line(line: text) -> (i32, i32):
+    # "          Resolution: 2880 x 1864 Retina"
+    val idx = line.index_of("Resolution:")
+    if idx < 0:
+        return (0, 0)
+    val rest = line.substring(idx + 11, line.len()).trim()
+    val xi = rest.index_of("x")
+    if xi <= 0:
+        return (0, 0)
+    val lhs = rest.substring(0, xi).trim()
+    var rhs = rest.substring(xi + 1, rest.len()).trim()
+    # strip any trailing words such as "Retina"
+    val sp = rhs.index_of(" ")
+    if sp > 0:
+        rhs = rhs.substring(0, sp)
+    val w = lhs.to_int() ?? 0
+    val h = rhs.to_int() ?? 0
+    (w.to_i32(), h.to_i32())
+
+fn _detect_via_system_profiler() -> (i32, i32, text):
+    val args: [text] = ["SPDisplaysDataType"]
+    val (out, _err, code) = process_run("system_profiler", args)
+    if code != 0:
+        return (0, 0, "system_profiler-failed")
+    for line in out.split("\n"):
+        if line.index_of("Resolution:") >= 0:
+            val (w, h) = _parse_res_line(line)
+            if w > 0 and h > 0:
+                return (w, h, "system_profiler")
+    (0, 0, "system_profiler-no-resolution-line")
+
+fn detect_screen() -> (i32, i32, text):
+    val (sw, sh, ssrc) = _detect_via_sdl2()
+    if sw > 0 and sh > 0:
+        return (sw, sh, ssrc)
+    val (pw, ph, psrc) = _detect_via_system_profiler()
+    if pw > 0 and ph > 0:
+        return (pw, ph, "{psrc} (sdl2 said {ssrc})")
+    (0, 0, "undetectable: sdl2={ssrc} profiler={psrc}")
+
+# --- the scene -------------------------------------------------------------
+# Every primitive from test/05_perf/bench/vulkan_2d_c/feature_showcase.spl, with the 800x600
+# reference coordinates scaled to the target so an 8192-wide frame is not 99%
+# empty.  Scaling is done in one place, by these helpers.
+
+var SX: i32 = 1
+var SY: i32 = 1
+
+fn _x(v: i32) -> i32: v * SX
+fn _y(v: i32) -> i32: v * SY
+fn _r(v: i32) -> i32:
+    val s = if SX < SY: SX else: SY
+    val out = v * s
+    if out < 1: 1 else: out
+
+fn _gpu_native(e: Engine2D):
+    var t = time_now_unix_micros()
+    e.draw_rect_filled(_x(20), _y(20), _x(120), _y(80), PROBE_FILL)
+    _pmark("draw_rect_filled", t)
+    t = time_now_unix_micros()
+    e.draw_rect(_x(160), _y(20), _x(120), _y(80), 0xFFCC6633u32)
+    _pmark("draw_rect", t)
+    t = time_now_unix_micros()
+    e.draw_line(_x(300), _y(20), _x(420), _y(100), 0xFF33CC66u32, _r(3))
+    _pmark("draw_line", t)
+    t = time_now_unix_micros()
+    e.draw_circle_filled(_x(500), _y(60), _r(40), 0xFFCC3366u32)
+    _pmark("draw_circle_filled", t)
+    t = time_now_unix_micros()
+    e.draw_triangle_filled(_x(580), _y(100), _x(640), _y(20), _x(700), _y(100), 0xFF66CC33u32)
+    _pmark("draw_triangle_filled", t)
+    t = time_now_unix_micros()
+    e.draw_gradient_rect(_x(20), _y(120), _x(160), _y(80), 0xFF000088u32, 0xFF8800FFu32)
+    _pmark("draw_gradient_rect", t)
+    t = time_now_unix_micros()
+    e.draw_shadow_rect(_x(200), _y(120), _x(100), _y(60), _r(6), _r(6), _r(4), 0xFF101010u32)
+    _pmark("draw_shadow_rect", t)
+
+fn _cpu_emu(e: Engine2D):
+    var t = time_now_unix_micros()
+    e.draw_circle(_x(360), _y(155), _r(35), 0xFFFFCC00u32)
+    _pmark("draw_circle", t)
+    t = time_now_unix_micros()
+    e.draw_ellipse(_x(460), _y(155), _r(45), _r(30), 0xFF00CCFFu32)
+    _pmark("draw_ellipse", t)
+    t = time_now_unix_micros()
+    e.draw_ellipse_filled(_x(570), _y(155), _r(45), _r(30), 0xFFFF00CCu32)
+    _pmark("draw_ellipse_filled", t)
+    t = time_now_unix_micros()
+    e.draw_arc(_x(680), _y(155), _r(40), 0, 270, 0xFFCCFF00u32, _r(3))
+    _pmark("draw_arc", t)
+    t = time_now_unix_micros()
+    e.draw_bezier(_x(20), _y(230), _x(80), _y(200), _x(140), _y(280), _x(200), _y(230), 0xFF00FF88u32, _r(2))
+    _pmark("draw_bezier", t)
+    t = time_now_unix_micros()
+    e.draw_rounded_rect(_x(220), _y(220), _x(120), _y(70), _r(16), 0xFF8844FFu32)
+    _pmark("draw_rounded_rect", t)
+    t = time_now_unix_micros()
+    e.draw_rounded_rect_outline(_x(360), _y(220), _x(120), _y(70), _r(16), 0xFF44FF88u32, _r(3))
+    _pmark("draw_rounded_rect_outline", t)
+    t = time_now_unix_micros()
+    e.draw_rect_thick(_x(500), _y(220), _x(110), _y(70), 0xFFFF8844u32, _r(5))
+    _pmark("draw_rect_thick", t)
+    t = time_now_unix_micros()
+    e.draw_circle_thick(_x(680), _y(255), _r(35), 0xFF4488FFu32, _r(5))
+    _pmark("draw_circle_thick", t)
+    t = time_now_unix_micros()
+    e.draw_triangle_outline(_x(40), _y(320), _x(110), _y(380), _x(40), _y(380), 0xFFFF4488u32, _r(3))
+    _pmark("draw_triangle_outline", t)
+    t = time_now_unix_micros()
+    e.draw_gradient_rect_h(_x(150), _y(315), _x(150), _y(70), 0xFF884400u32, 0xFF0044FFu32)
+    _pmark("draw_gradient_rect_h", t)
+    t = time_now_unix_micros()
+    e.draw_radial_gradient(_x(380), _y(350), _r(45), 0xFFFFFFFFu32, 0xFF202080u32)
+    _pmark("draw_radial_gradient", t)
+
+    var xs: [i32] = [_x(470), _x(540), _x(570), _x(520), _x(460)]
+    var ys: [i32] = [_y(320), _y(315), _y(380), _y(395), _y(370)]
+    t = time_now_unix_micros()
+    e.draw_polygon_filled(xs, ys, 5, 0xFF22AA88u32)
+    _pmark("draw_polygon_filled", t)
+
+fn _text_tier(e: Engine2D):
+    var t = time_now_unix_micros()
+    e.draw_text(_x(30), _y(560), "Simple 2D", 0xFFFFFFFFu32, _r(16))
+    _pmark("draw_text", t)
+    t = time_now_unix_micros()
+    e.draw_text_bg(_x(200), _y(560), "showcase", 0xFF000000u32, 0xFFCCCCCCu32, _r(16))
+    _pmark("draw_text_bg", t)
+
+fn _advanced_tier(e: Engine2D):
+    var stops: [u32] = [0xFFFF0000u32, 0xFF00FF00u32, 0xFF0000FFu32]
+    var pos: [i32] = [0, 500, 1000]
+    var t = time_now_unix_micros()
+    e.draw_gradient_rect_stops(_x(320), _y(460), _x(120), _y(60), stops, pos, 0)
+    _pmark("draw_gradient_rect_stops", t)
+    t = time_now_unix_micros()
+    e.draw_radial_gradient_rect_stops(_x(470), _y(490), _r(40), stops, pos)
+    _pmark("draw_radial_gradient_rect_stops", t)
+
+    var img: [u32] = [0u32; 256]
+    var i = 0
+    while i < 256:
+        val x = i % 16
+        val y = i / 16
+        if (x + y) % 2 == 0:
+            img[i] = 0xFF22FFAAu32
+        else:
+            img[i] = 0xFFAA22FFu32
+        i = i + 1
+    t = time_now_unix_micros()
+    e.draw_image_transform(_x(700), _y(440), 16, 16, 2000, 0, 0, 2000, 0, 0, img)
+    _pmark("draw_image_transform", t)
+    t = time_now_unix_micros()
+    e.draw_image_scaled_blend(_x(700), _y(500), _r(48), _r(48), 16, 16, img)
+    _pmark("draw_image_scaled_blend", t)
+
+fn draw_scene(e: Engine2D, w: i32, h: i32, backend: text):
+    var t = time_now_unix_micros()
+    if backend == "vulkan":
+        # A failed Vulkan clear dispatch flips completion_unknown and silently
+        # poisons the rest of the frame -- observed here at 7680x4320, where the
+        # readback then came back with 0 pixels. Same avoidance as
+        # host_2d_vulkan.spl; see doc/08_tracking/bug/
+        # vulkan_engine2d_sequential_frames_flaky_moltenvk_2026-09-02.md.
+        # A full-frame CLEAR-coloured rect is semantically identical for every
+        # probe below, including the known-empty background pixel.
+        e.draw_rect_filled(0, 0, w, h, CLEAR)
+        _pmark("clear(as_rect)", t)
+    else:
+        e.clear(CLEAR)
+        _pmark("clear", t)
+    if env_get("SHOWCASE_MINIMAL").trim() == "1":
+        # Existence check only: prove a framebuffer of THIS size is really
+        # allocated, drawn into, and read back. Deliberately skips the 32 other
+        # primitives, whose cost -- not whose correctness -- is what makes the
+        # full scene take over an hour at these dimensions.
+        t = time_now_unix_micros()
+        e.draw_rect_filled(_x(20), _y(20), _x(120), _y(80), PROBE_FILL)
+        _pmark("draw_rect_filled", t)
+        t = time_now_unix_micros()
+        e.submit_batch()
+        _pmark("submit_batch", t)
+        t = time_now_unix_micros()
+        e.present()
+        _pmark("present", t)
+        return
+    _gpu_native(e)
+    _cpu_emu(e)
+    _text_tier(e)
+    _advanced_tier(e)
+    t = time_now_unix_micros()
+    e.submit_batch()
+    _pmark("submit_batch", t)
+    t = time_now_unix_micros()
+    e.present()
+    _pmark("present", t)
+
+# --- output ----------------------------------------------------------------
+
+fn _bmp_bytes(px: [u32], w: i32, h: i32) -> [u8]:
+    """24-bit uncompressed BMP; Preview opens it without any converter."""
+    val wi = w.to_i64()
+    val hi = h.to_i64()
+    var row_raw = wi * 3
+    var pad = (4 - (row_raw % 4)) % 4
+    val row = row_raw + pad
+    val pixel_bytes = row * hi
+    val total = 54 + pixel_bytes
+    var b: [u8] = [0u8; total]
+    b[0] = 66u8
+    b[1] = 77u8
+    var k = 2
+    var v = total
+    while k < 6:
+        b[k] = (v & 255).to_i32().to_u8()
+        v = v >> 8
+        k = k + 1
+    b[10] = 54u8
+    b[14] = 40u8
+    k = 18
+    v = wi
+    while k < 22:
+        b[k] = (v & 255).to_i32().to_u8()
+        v = v >> 8
+        k = k + 1
+    k = 22
+    v = hi
+    while k < 26:
+        b[k] = (v & 255).to_i32().to_u8()
+        v = v >> 8
+        k = k + 1
+    b[26] = 1u8
+    b[28] = 24u8
+    var y: i64 = 0
+    while y < hi:
+        val src_y = hi - 1 - y            # BMP rows are bottom-up
+        var o = 54 + y * row
+        var x: i64 = 0
+        while x < wi:
+            val p = px[src_y * wi + x].to_i32().to_i64() & 0xFFFFFF
+            b[o] = (p & 255).to_i32().to_u8()          # B
+            b[o + 1] = ((p >> 8) & 255).to_i32().to_u8()   # G
+            b[o + 2] = ((p >> 16) & 255).to_i32().to_u8()  # R
+            o = o + 3
+            x = x + 1
+        y = y + 1
+    b
+
+fn _verify(px: [u32], w: i32, h: i32) -> bool:
+    val wi = w.to_i64()
+    val hi = h.to_i64()
+    val n = px.len()
+    if n != wi * hi:
+        print "  VERIFY FAIL: pixel count {n} != {wi * hi}"
+        return false
+
+    # 1. inside draw_rect_filled: base (80,60) is the centre of the 20,20 120x80 rect
+    val px_in = (_x(80).to_i64()) + (_y(60).to_i64()) * wi
+    val got_in = px[px_in].to_i32().to_i64() & 0xFFFFFFFF
+    val want_in = PROBE_FILL.to_i32().to_i64() & 0xFFFFFFFF
+
+    # 2. known-empty top-left corner: base (5,5) precedes every primitive
+    val px_bg = (_x(5).to_i64()) + (_y(5).to_i64()) * wi
+    val got_bg = px[px_bg].to_i32().to_i64() & 0xFFFFFFFF
+    val want_bg = CLEAR.to_i32().to_i64() & 0xFFFFFFFF
+
+    # 3. strided nonclear count -- stride is PRIME so it cannot alias with the
+    #    row width (4096 divides 8192 exactly and sampled only 2 columns) -- a concrete population signal without a 67M loop
+    val stride: i64 = if n > 4000000: 4093 else: 61
+    var sampled: i64 = 0
+    var nonclear: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        sampled = sampled + 1
+        if (px[i].to_i32().to_i64() & 0xFFFFFFFF) != want_bg:
+            nonclear = nonclear + 1
+        i = i + stride
+
+    print "  probe_inside_rect at ({_x(80)},{_y(60)}) got={got_in} want={want_in}"
+    print "  probe_background at ({_x(5)},{_y(5)}) got={got_bg} want={want_bg}"
+    print "  strided_nonclear stride={stride} sampled={sampled} nonclear={nonclear}"
+    (got_in == want_in) and (got_bg == want_bg) and (nonclear > 0)
+
+fn render_at(w: i32, h: i32, backend: text, label: text, bmp: text) -> bool:
+    SX = if w / BASE_W < 1: 1 else: w / BASE_W
+    SY = if h / BASE_H < 1: 1 else: h / BASE_H
+    TIMES = []
+    print "== {label}: {w}x{h} backend={backend} scale={SX}x{SY} =="
+    val e = Engine2D.create_with_backend_fast(w, h, backend)
+    if e.backend_name() != backend:
+        print "  status=blocked reason=backend-unavailable requested={backend} got={e.backend_name()}"
+        return false
+    val t0 = time_now_unix_micros()
+    draw_scene(e, w, h, backend)
+    val draw_us = time_now_unix_micros() - t0
+    val t1 = time_now_unix_micros()
+    val rb = e.read_pixels_with_source()
+    val read_us = time_now_unix_micros() - t1
+    for line in TIMES:
+        print line
+    print "  timing draw_us={draw_us} readback_us={read_us} src={rb.source}"
+    val ok = _verify(rb.pixels, w, h)
+    if bmp != "":
+        val t2 = time_now_unix_micros()
+        if file_write_bytes(bmp, _bmp_bytes(rb.pixels, w, h)):
+            print "  bmp={bmp} encode_us={time_now_unix_micros() - t2}"
+        else:
+            print "  bmp=write-failed path={bmp}"
+    e.shutdown()
+    print "  status={if ok: \"pass\" else: \"fail\"} {label} {w}x{h}"
+    ok
+
+fn main():
+    var backend = env_get("VK2D_BACKEND").trim()
+    if backend == "":
+        backend = "vulkan"
+    var mode = env_get("SHOWCASE_MODE").trim()
+    if mode == "":
+        mode = "onscreen"
+
+    if mode == "onscreen":
+        val (dw, dh, src) = detect_screen()
+        print "detected_screen w={dw} h={dh} source={src}"
+        if dw <= 0 or dh <= 0:
+            print "showcase status=blocked mode=onscreen reason=screen-undetectable"
+            return
+        # Never open an 8192x8192 window: the on-screen size is the panel's.
+        val w = _env_i32("SHOWCASE_W", dw)
+        val h = _env_i32("SHOWCASE_H", dh)
+        var bmp = env_get("SHOWCASE_BMP").trim()
+        if bmp == "":
+            bmp = "build/showcase/onscreen_{w}x{h}.bmp"
+        val ok = render_at(w, h, backend, "onscreen", bmp)
+        print "showcase mode=onscreen status={if ok: \"pass\" else: \"fail\"} bmp={bmp}"
+        if ok and env_get("SHOWCASE_OPEN").trim() == "1":
+            val args: [text] = [bmp]
+            val (_o, _e2, code) = process_run("/usr/bin/open", args)
+            print "showcase display_open rc={code} path={bmp}"
+        return
+
+    if mode == "virtual":
+        val w = _env_i32("SHOWCASE_W", 0)
+        val h = _env_i32("SHOWCASE_H", 0)
+        var all_ok = true
+        if w > 0 and h > 0:
+            all_ok = render_at(w, h, backend, "virtual", env_get("SHOWCASE_BMP").trim())
+        else:
+            # the two default targets, neither of which fits on any panel here
+            val a = render_at(7680, 4320, backend, "virtual-8k-screen", "")
+            val b = render_at(8192, 8192, backend, "virtual-8192sq", "")
+            all_ok = a and b
+        print "showcase mode=virtual status={if all_ok: \"pass\" else: \"fail\"}"
+        return
+
+    print "showcase status=blocked reason=unknown-mode mode={mode}"

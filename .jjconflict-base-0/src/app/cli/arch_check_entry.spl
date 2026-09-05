@@ -1,0 +1,64 @@
+# Lightweight entrypoint for `simple check-arch`.
+#
+# `check-arch` is registered in command_registry.spl but the bootstrap seed has
+# no entry for it, so it fell through to "error: file not found: check-arch"
+# plus the usage dump. This file gives the command a runnable target
+# (`simple run src/app/cli/arch_check_entry.spl [root-or-file]`), which is what
+# the MCP tool `simple_check_arch` invokes.
+#
+# A file argument is accepted as a convenience: the check runs on the file's
+# directory, since architecture rules are scanned per directory tree.
+
+use std.cli.cli_util.{get_cli_args}
+use std.io_runtime.{file_exists, dir_exists}
+use app.cli.arch_check.{run_arch_check}
+
+fn _print_help():
+    print "Usage: simple check-arch [root-or-file]"
+    print "Validate architecture dependency rules without modifying files."
+
+fn _help_requested(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--help" or arg == "-h":
+            return true
+    false
+
+fn _dirname(path: text) -> text:
+    var idx = -1
+    var i = 0
+    for ch in path:
+        if ch == "/":
+            idx = i
+        i = i + 1
+    if idx <= 0:
+        return "."
+    path.substring(0, idx)
+
+fn _normalize_root_args(args: [text]) -> [text]:
+    var out: [text] = []
+    for arg in args:
+        if arg == "check-arch":
+            # Dispatch may preserve the command token; `simple run` does not.
+            continue
+        if arg.starts_with("--"):
+            out.push(arg)
+        elif dir_exists(arg):
+            out.push(arg)
+        elif file_exists(arg):
+            out.push(_dirname(arg))
+        else:
+            print "ERROR: check-arch: path not found: {arg}"
+            return ["--missing-path"]
+    out
+
+fn main() -> i64:
+    # Help must return before run_arch_check: the normal path intentionally
+    # discovers every __init__.spl under the requested root.
+    val raw_args = get_cli_args()
+    if _help_requested(raw_args):
+        _print_help()
+        return 0
+    val args = _normalize_root_args(raw_args)
+    if args.len() == 1 and args[0] == "--missing-path":
+        return 2
+    run_arch_check(args)

@@ -1,0 +1,172 @@
+# Frozen typed completion envelope shared by scalar ALU, control, and LSU providers.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+
+pub class HwScalarCompletionField:
+    name: text
+    direction: text
+    bit_width: i32
+    semantic: text
+
+pub class HwScalarCompletionBinding:
+    interface_field: text
+    source_kind: text
+    source_name: text
+    bit_width: i32
+
+fn completion_fields(xlen: i32) -> [HwScalarCompletionField]:
+    [HwScalarCompletionField(name: "completion_valid", direction: "out", bit_width: 1, semantic: "held-valid"),
+        HwScalarCompletionField(name: "completion_ready", direction: "in", bit_width: 1, semantic: "atomic-accept"),
+        HwScalarCompletionField(name: "privilege", direction: "out", bit_width: 2, semantic: "architectural"),
+        HwScalarCompletionField(name: "original_instruction", direction: "out", bit_width: 32, semantic: "fetched"),
+        HwScalarCompletionField(name: "canonical_instruction", direction: "out", bit_width: 32, semantic: "decoded"),
+        HwScalarCompletionField(name: "instruction_length_bytes", direction: "out", bit_width: 3, semantic: "architectural"),
+        HwScalarCompletionField(name: "pc_before", direction: "out", bit_width: xlen, semantic: "architectural"),
+        HwScalarCompletionField(name: "pc_after", direction: "out", bit_width: xlen, semantic: "architectural-next"),
+        HwScalarCompletionField(name: "rd", direction: "out", bit_width: 5, semantic: "architectural"),
+        HwScalarCompletionField(name: "rd_write", direction: "out", bit_width: 1, semantic: "architectural-effect"),
+        HwScalarCompletionField(name: "rd_value", direction: "out", bit_width: xlen, semantic: "architectural"),
+        HwScalarCompletionField(name: "memory_address", direction: "out", bit_width: xlen, semantic: "effective-byte-address"),
+        HwScalarCompletionField(name: "memory_read_mask", direction: "out", bit_width: 32, semantic: "low-justified-byte-mask"),
+        HwScalarCompletionField(name: "memory_write_mask", direction: "out", bit_width: 32, semantic: "low-justified-byte-mask"),
+        HwScalarCompletionField(name: "memory_read_data", direction: "out", bit_width: xlen, semantic: "low-justified-transfer"),
+        HwScalarCompletionField(name: "memory_write_data", direction: "out", bit_width: xlen, semantic: "low-justified-transfer"),
+        HwScalarCompletionField(name: "execute_trap_valid", direction: "out", bit_width: 1, semantic: "exception"),
+        HwScalarCompletionField(name: "execute_trap_cause", direction: "out", bit_width: xlen, semantic: "exception"),
+        HwScalarCompletionField(name: "execute_trap_tval", direction: "out", bit_width: xlen, semantic: "exception"),
+        HwScalarCompletionField(name: "memory_trap_valid", direction: "out", bit_width: 1, semantic: "exception"),
+        HwScalarCompletionField(name: "memory_trap_cause", direction: "out", bit_width: xlen, semantic: "exception"),
+        HwScalarCompletionField(name: "memory_trap_tval", direction: "out", bit_width: xlen, semantic: "exception"),
+        HwScalarCompletionField(name: "redirect_valid", direction: "out", bit_width: 1, semantic: "atomic-with-completion"),
+        HwScalarCompletionField(name: "redirect_target", direction: "out", bit_width: xlen, semantic: "atomic-with-completion")]
+
+pub class HwScalarCompletionInterface:
+    version: text
+    config: CoreConfig
+    lsu: LsuConfig
+    fields: [HwScalarCompletionField]
+
+    me diagnostic() -> text:
+        if self.version != "hwir-scalar-completion/v1":
+            return "HWIR-E-SCALAR-COMPLETION-VERSION: completion interface requires frozen v1"
+        val config_error = self.config.diagnostic(); if config_error != "": return config_error
+        val lsu_error = self.lsu.diagnostic(); if lsu_error != "": return lsu_error
+        val expected = completion_fields(self.config.xlen)
+        if self.fields.len() != expected.len():
+            return "HWIR-E-SCALAR-COMPLETION-SHAPE: completion interface requires the exact frozen fields"
+        var names: [text] = []
+        var index = 0
+        while index < expected.len():
+            val field = self.fields[index]; val required = expected[index]
+            val folded = field.name.lower()
+            if folded == "" or names.contains(folded):
+                return "HWIR-E-SCALAR-COMPLETION-NAME: completion fields require unique names"
+            names.push(folded)
+            if field.name != required.name or field.direction != required.direction or
+                field.bit_width != required.bit_width or field.semantic != required.semantic:
+                return "HWIR-E-SCALAR-COMPLETION-SHAPE: completion interface requires the exact frozen fields"
+            index = index + 1
+        ""
+
+    me structural_sha256() -> text:
+        var rows = [self.version, self.config.profile, self.config.isa_profile,
+            self.config.compressed_decode_profile, self.config.xlen.to_text(),
+            self.config.physical_address_bits.to_text(), self.config.register_count.to_text(),
+            self.lsu.bus_data_bits.to_text(), self.lsu.byte_mask_bits.to_text()]
+        for field in self.fields:
+            rows.push([field.name, field.direction, field.bit_width.to_text(), field.semantic].join("|"))
+        sha256_text(rows.join("\n"))
+
+pub fn strict_hw_scalar_completion_interface(config: CoreConfig,
+    lsu: LsuConfig) -> Result<HwScalarCompletionInterface, text>:
+    val completion = HwScalarCompletionInterface(version: "hwir-scalar-completion/v1",
+        config: config, lsu: lsu, fields: completion_fields(config.xlen))
+    val error = completion.diagnostic(); if error != "": return Err(error)
+    Ok(completion)
+
+fn payload_bindings(xlen: i32) -> [HwScalarCompletionBinding]:
+    var bindings = [HwScalarCompletionBinding(interface_field: "completion_valid",
+            source_kind: "provider", source_name: "retire_valid", bit_width: 1),
+        HwScalarCompletionBinding(interface_field: "completion_ready",
+            source_kind: "hold_contract", source_name: "upstream_ready", bit_width: 1)]
+    for row in [("privilege", 2), ("original_instruction", 32),
+            ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+            ("pc_before", xlen), ("pc_after", xlen), ("rd", 5),
+            ("rd_write", 1), ("rd_value", xlen), ("memory_address", xlen),
+            ("memory_read_mask", 32), ("memory_write_mask", 32),
+            ("memory_read_data", xlen), ("memory_write_data", xlen)]:
+        bindings.push(HwScalarCompletionBinding(interface_field: row[0],
+            source_kind: "provider", source_name: "retire_" + row[0], bit_width: row[1]))
+    bindings
+
+fn expected_adapter_bindings(kind: text, xlen: i32) -> [HwScalarCompletionBinding]:
+    var bindings = payload_bindings(xlen)
+    for suffix_width in [("valid", 1), ("cause", xlen), ("tval", xlen)]:
+        bindings.push(HwScalarCompletionBinding(interface_field: "execute_trap_" + suffix_width[0],
+            source_kind: if kind == "control": "provider" else: "constant",
+            source_name: if kind == "control": "execute_exception" + (if suffix_width[0] == "valid": "" else: "_" + suffix_width[0]) else: "zero_" + suffix_width[0],
+            bit_width: suffix_width[1]))
+    for suffix_width in [("valid", 1), ("cause", xlen), ("tval", xlen)]:
+        bindings.push(HwScalarCompletionBinding(interface_field: "memory_trap_" + suffix_width[0],
+            source_kind: "constant", source_name: "zero_" + suffix_width[0], bit_width: suffix_width[1]))
+    for suffix_width in [("valid", 1), ("target", xlen)]:
+        bindings.push(HwScalarCompletionBinding(interface_field: "redirect_" + suffix_width[0],
+            source_kind: if kind == "control": "provider" else: "constant",
+            source_name: if kind == "control": "redirect_" + suffix_width[0] else: "zero_" + suffix_width[0],
+            bit_width: suffix_width[1]))
+    bindings
+
+pub class HwScalarCompletionAdapter:
+    provider_kind: text
+    completion_interface: HwScalarCompletionInterface
+    provider_graph_sha256: text
+    bindings: [HwScalarCompletionBinding]
+
+    me diagnostic_for_provider(provider: HwModuleDef) -> text:
+        val interface_error = self.completion_interface.diagnostic(); if interface_error != "": return interface_error
+        if self.provider_kind != "alu" and self.provider_kind != "control":
+            return "HWIR-E-SCALAR-COMPLETION-ADAPTER-KIND: adapter requires ALU or control"
+        val provider_error = provider.shape_diagnostic(); if provider_error != "": return provider_error
+        if provider.config.profile != self.completion_interface.config.profile or
+            provider.config.xlen != self.completion_interface.config.xlen or
+            provider.structural_sha256() != self.provider_graph_sha256:
+            return "HWIR-E-SCALAR-COMPLETION-ADAPTER-PROVIDER: adapter requires its exact concrete provider"
+        val expected = expected_adapter_bindings(self.provider_kind, self.completion_interface.config.xlen)
+        if self.bindings.len() != expected.len():
+            return "HWIR-E-SCALAR-COMPLETION-ADAPTER-BINDING: adapter requires exact unique bindings"
+        var names: [text] = []
+        var index = 0
+        while index < expected.len():
+            val binding = self.bindings[index]; val required = expected[index]
+            if names.contains(binding.interface_field.lower()):
+                return "HWIR-E-SCALAR-COMPLETION-ADAPTER-BINDING: adapter requires exact unique bindings"
+            names.push(binding.interface_field.lower())
+            if binding.interface_field != required.interface_field or
+                binding.source_kind != required.source_kind or binding.source_name != required.source_name or
+                binding.bit_width != required.bit_width:
+                return "HWIR-E-SCALAR-COMPLETION-ADAPTER-BINDING: adapter requires exact unique bindings"
+            if binding.source_kind == "provider" and
+                (provider.port_direction(binding.source_name) != "out" or
+                    provider.port_width(binding.source_name) != binding.bit_width):
+                return "HWIR-E-SCALAR-COMPLETION-ADAPTER-PORT: provider binding requires a typed output"
+            index = index + 1
+        ""
+
+    me structural_sha256() -> text:
+        var rows = ["hwir-scalar-completion-adapter/v1", self.provider_kind,
+            self.completion_interface.structural_sha256(), self.provider_graph_sha256]
+        for binding in self.bindings:
+            rows.push([binding.interface_field, binding.source_kind,
+                binding.source_name, binding.bit_width.to_text()].join("|"))
+        sha256_text(rows.join("\n"))
+
+pub fn strict_hw_scalar_completion_adapter(provider_kind: text,
+    completion_interface: HwScalarCompletionInterface,
+    provider: HwModuleDef) -> Result<HwScalarCompletionAdapter, text>:
+    val adapter = HwScalarCompletionAdapter(provider_kind: provider_kind,
+        completion_interface: completion_interface, provider_graph_sha256: provider.structural_sha256(),
+        bindings: expected_adapter_bindings(provider_kind, completion_interface.config.xlen))
+    val error = adapter.diagnostic_for_provider(provider); if error != "": return Err(error)
+    Ok(adapter)

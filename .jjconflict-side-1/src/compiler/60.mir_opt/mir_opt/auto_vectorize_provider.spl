@@ -1,0 +1,112 @@
+# SIMD Auto-Vectorization Provider Metadata
+#
+# Declares the OptimizationRuleProvider for the SIMD lowering/vectorization
+# pass.  Target-feature gating and required facts are explicit here so the
+# pipeline can skip the provider on targets without SIMD support.
+
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
+    optimization_rule_provider_builtin_with_contract
+}
+
+# ============================================================================
+# SIMDOptProvider — metadata record
+# ============================================================================
+
+struct SIMDOptProvider:
+    """Provider metadata for the CPU SIMD rendering optimization pass.
+
+    target_features: target ISA extensions required (sse2, avx2, neon).
+    applies_to:      rendering operations this provider vectorizes.
+    required_facts:  pipeline facts that must be present before applying.
+    change_counter:  incremented each time this provider rewrites a site.
+    """
+    name:             text
+    target_features:  [text]
+    applies_to:       [text]
+    required_facts:   [text]
+    change_counter:   i32
+
+fn simd_opt_provider_new() -> SIMDOptProvider:
+    SIMDOptProvider(
+        name:            "cpu_simd_rendering",
+        target_features: ["sse2", "avx2", "neon"],
+        applies_to:      ["fill_rect", "clear_buffer", "blit_pixels", "blend_alpha"],
+        required_facts:  ["target_has_simd", "loop_is_contiguous"],
+        change_counter:  0
+    )
+
+fn simd_opt_provider_record_change(p: SIMDOptProvider) -> SIMDOptProvider:
+    """Return a copy of the provider with change_counter incremented by 1."""
+    SIMDOptProvider(..p, change_counter: p.change_counter + 1)
+
+# ============================================================================
+# OptimizationRuleProvider — pipeline integration
+# ============================================================================
+
+fn simd_vectorize_provider() -> OptimizationRuleProvider:
+    """Built-in provider for CPU SIMD rendering vectorization.
+
+    Requires target_has_simd and loop_is_contiguous facts so the pipeline
+    skips this provider on scalar-only targets or non-contiguous loops.
+    Produces simd_lowered_loops and simd_extern_used facts consumed by the
+    backend link-tree to strip unused rt_simd_* externs.
+    """
+    optimization_rule_provider_builtin_with_contract(
+        "simple.opt.simd.rendering",
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        true,
+        ["target_has_simd", "loop_is_contiguous"],
+        ["simd_lowered_loops", "simd_extern_used"],
+        "pure"
+    )
+
+# ============================================================================
+# Target-feature gating helpers
+# ============================================================================
+
+fn target_has_simd_feature(target_triple: text, feature: text) -> bool:
+    """Return true when target_triple supports the named SIMD feature.
+
+    Recognised features: sse2, avx2, neon.
+    """
+    if feature == "sse2":
+        # sse2 is baseline for all x86_64 targets
+        target_triple.contains("x86_64")
+    else if feature == "avx2":
+        # avx2 requires explicit opt-in via target triple suffix or env
+        (target_triple.contains("x86_64") and target_triple.contains("avx2"))
+    else if feature == "neon":
+        (target_triple.contains("aarch64") or target_triple.contains("arm64"))
+    else:
+        false
+
+fn simd_provider_applicable(meta: SIMDOptProvider, target_triple: text) -> bool:
+    """Return true when at least one required target feature is present."""
+    for feat in meta.target_features:
+        if target_has_simd_feature(target_triple, feat):
+            return true
+    false
+
+# ============================================================================
+# Unused SIMD extern guard
+# ============================================================================
+
+fn simd_extern_needed(provider_ran: bool) -> bool:
+    """Return true only when the SIMD provider actually emitted lowered code.
+
+    The backend link step should call this to decide whether to include
+    rt_simd_* extern declarations in the output symbol table.  When false,
+    no rt_simd_* externs are linked, preventing dead extern linkage.
+    """
+    provider_ran
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SIMDOptProvider, simd_opt_provider_new, simd_opt_provider_record_change
+export simd_vectorize_provider
+export target_has_simd_feature, simd_provider_applicable
+export simd_extern_needed

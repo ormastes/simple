@@ -1,0 +1,205 @@
+#!/bin/sh
+# Repository-wide semantic parity gate for release operator/model surfaces.
+set -eu
+
+root=${1:-.}
+
+surfaces='.agents/skills/software-release/SKILL.md
+.agents/skills/release/SKILL.md
+.codex/skills/software-release/SKILL.md
+.codex/skills/release/SKILL.md
+.claude/skills/software-release.md
+.claude/skills/release.md
+.gemini/commands/software-release.toml
+.gemini/commands/release.toml
+doc/07_guide/infra/software_release.md
+src/app/release/main.spl'
+
+delegating_surfaces='.claude/agents/spipe/release.md
+.claude/commands/software-release.md'
+
+failed=0
+
+normalized_file() {
+    tr '[:upper:]' '[:lower:]' < "$1" \
+        | tr '\n\r\t`_*./|:-' '              ' \
+        | tr -cs '[:alnum:]' ' '
+}
+
+require_words() {
+    file=$1
+    clause=$2
+    shift 2
+    normalized=$(normalized_file "$file")
+    for word in "$@"; do
+        # Stems intentionally accept projection-specific grammar (for example
+        # candidate/candidates and promote/promotion) after normalization.
+        case "$normalized" in
+            *"$word"*) ;;
+            *)
+                echo "release-policy-parity: $file misses $clause token '$word'" >&2
+                failed=1
+                ;;
+        esac
+    done
+}
+
+for relative in $surfaces; do
+    file=$root/$relative
+    if test ! -f "$file"; then
+        echo "release-policy-parity: missing required surface $relative" >&2
+        failed=1
+        continue
+    fi
+
+    require_words "$file" isolated_session isolated session branch worktree
+    require_words "$file" canonical_version canonical version
+    require_words "$file" exact_reviewed_fix beta exact reviewed fix
+    require_words "$file" read_only_convergence main release read only
+    require_words "$file" convergence_checkpoints candidate attempt bootstrap failure admission
+    require_words "$file" independent_trunk main development trunk
+    require_words "$file" stable_patch stable patch
+    require_words "$file" adapted_fail_closed adapted fail closed
+    require_words "$file" release_specific_exception non fix reason owner expir
+    require_words "$file" immutable_candidate candidate immutable once
+    require_words "$file" promote_not_rebuild promotion rebuild
+    require_words "$file" signed_annotated_tag signed annotated tag
+    require_words "$file" non_destructive_recovery rollback withdrawal
+    require_words "$file" external_approval push publication
+done
+
+for relative in $delegating_surfaces; do
+    file=$root/$relative
+    if test ! -f "$file"; then
+        echo "release-policy-parity: missing required delegating surface $relative" >&2
+        failed=1
+        continue
+    fi
+    normalized=$(normalized_file "$file")
+    case "$normalized" in
+        *"doc 07 guide infra software release md"*) ;;
+        *) echo "release-policy-parity: $relative does not delegate to release authority" >&2; failed=1 ;;
+    esac
+done
+
+# These are executable legacy recipes, not prose that describes their denial.
+for relative in $surfaces; do
+    file=$root/$relative
+    test -f "$file" || continue
+    if grep -Eiq 'NO[[:space:]]+BRANCHES|work[[:space:]]+directly[[:space:]]+on[[:space:]]+main|git[[:space:]]+push[[:space:]]+--tags|git[[:space:]]+tag[[:space:]]+-a|jj[[:space:]]+bookmark[[:space:]]+set[[:space:]]+main' "$file"; then
+        echo "release-policy-parity: forbidden legacy mutation recipe in $relative" >&2
+        failed=1
+    fi
+done
+
+# GitHub rejects an oversized inline expression before it creates any job; the
+# resulting push run has the workflow path as its name and no jobs. A `run`
+# block containing `${{ ... }}` is internally expression-encoded, so its
+# service length can exceed 21,000 while the raw YAML is only about 10,500
+# bytes. Keep interpolated blocks below 9,000 bytes; untemplated shell blocks
+# retain the existing 20,000-byte source limit.
+candidate_workflow="$root/.github/workflows/candidate.yml"
+if test -f "$candidate_workflow"; then
+    if ! grep -Fxq 'name: Build and qualify immutable candidate' "$candidate_workflow" ||
+       ! grep -Fxq 'on:' "$candidate_workflow" ||
+       ! grep -Fxq '  workflow_dispatch:' "$candidate_workflow" ||
+       ! grep -Fxq 'jobs:' "$candidate_workflow" ||
+       ! grep -Fxq '  qualify-linux:' "$candidate_workflow"; then
+        echo "release-policy-parity: candidate workflow name/dispatch/job contract is missing" >&2
+        failed=1
+    fi
+    if ! awk '
+        function finish() {
+            if (active && (bytes > 20000 || (templated && bytes > 9000))) oversized = 1
+            active = 0
+            bytes = 0
+            templated = 0
+        }
+        {
+            indent = match($0, /[^ ]/) - 1
+            if (active && $0 !~ /^[[:space:]]*$/ && indent <= start_indent)
+                finish()
+            if ($0 ~ /^[[:space:]]+run:[[:space:]]*\|[[:space:]]*$/) {
+                finish()
+                active = 1
+                start_indent = indent
+                next
+            }
+            if (active)
+                bytes += length($0) + 1
+            if (active && $0 ~ /\$\{\{/)
+                templated = 1
+        }
+        END {
+            finish()
+            exit oversized
+        }
+    ' "$candidate_workflow"; then
+        echo "release-policy-parity: candidate workflow contains an oversized inline run template" >&2
+        failed=1
+    fi
+fi
+
+checkpoint_workflow="$root/.github/workflows/release-convergence-checkpoint.yml"
+checkpoint_script="$root/scripts/release/convergence-checkpoint.shs"
+if test ! -f "$checkpoint_workflow" || test ! -f "$checkpoint_script"; then
+    echo "release-policy-parity: scheduled/operator convergence checkpoint is missing" >&2
+    failed=1
+else
+    grep -Fxq '  workflow_dispatch:' "$checkpoint_workflow" || {
+        echo "release-policy-parity: convergence checkpoint lacks operator dispatch" >&2
+        failed=1
+    }
+    grep -Fxq '  schedule:' "$checkpoint_workflow" || {
+        echo "release-policy-parity: convergence checkpoint lacks bounded schedule" >&2
+        failed=1
+    }
+    grep -Fq 'scripts/release/convergence-checkpoint.shs' "$checkpoint_workflow" || {
+        echo "release-policy-parity: convergence checkpoint workflow does not invoke its checker" >&2
+        failed=1
+    }
+    grep -Fq 'simple-release-source-convergence-observation/1' "$checkpoint_script" &&
+    grep -Fq 'deployed_runtime_used: false' "$checkpoint_script" &&
+    grep -Fq 'release_admission_eligible: false' "$checkpoint_script" || {
+        echo "release-policy-parity: convergence checkpoint overstates its source-only boundary" >&2
+        failed=1
+    }
+    if grep -Eq 'git[^#]*(push|cherry-pick|merge[[:space:]])' "$checkpoint_script"; then
+        echo "release-policy-parity: convergence checkpoint contains a prohibited Git mutation" >&2
+        failed=1
+    fi
+fi
+
+if ! sh "$root/scripts/check/test-release-fresh-checkout-boundaries.shs"; then
+    echo "release-policy-parity: fresh-checkout release boundary contract failed" >&2
+    failed=1
+fi
+
+release_cli="$root/src/app/release/main.spl"
+if test -f "$release_cli"; then
+    if grep -Fq 'blocked until the promote-only provider and live-policy verifier exist' "$release_cli" ||
+       grep -Fq 'promote-only provider and live-policy verification are not implemented' "$release_cli" ||
+       grep -Fq 'Publication is unavailable until a provider is bound' "$release_cli"; then
+        echo "release-policy-parity: release CLI still reports implemented provider surfaces as missing" >&2
+        failed=1
+    fi
+    grep -Fq 'Candidate qualification and promote-only provider workflows are implemented.' "$release_cli" || {
+        echo "release-policy-parity: release CLI does not report the current provider implementation boundary" >&2
+        failed=1
+    }
+    grep -Fq 'external signed review broker remain unavailable' "$release_cli" || {
+        echo "release-policy-parity: release CLI does not retain the current fail-closed broker boundary" >&2
+        failed=1
+    }
+fi
+
+if test "$failed" -ne 0; then
+    exit 1
+fi
+
+sh "$root/scripts/check/check-github-policy-projection.shs"
+sh "$root/scripts/check/test-github-policy-contracts.shs"
+sh "$root/scripts/check/check-self-review-policy.shs"
+
+count=$({ printf '%s\n' "$surfaces"; printf '%s\n' "$delegating_surfaces"; } | awk 'NF { count += 1 } END { print count }')
+echo "release-policy-parity: PASS ($count surfaces)"

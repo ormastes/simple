@@ -1,0 +1,46 @@
+# @tag: perf, startup, dynsmf, source-closure
+"""Source-closure and fast-path guard for the production dynSMF trust cutover."""
+
+use std.spec.{describe, it, expect}
+use app.io.mod.{file_read_text}
+
+describe "dynSMF trust cutover startup source closure":
+    it "places OS trust admission after empty help and version returns":
+        val source = file_read_text("src/app/main.spl")
+        val empty_fast_path = source.index_of("if args.len() == 0 and not option_plan.component_configured")
+        val help_fast_path = source.index_of("if command == \"--help\"")
+        val version_fast_path = source.index_of("if command == \"--version\"")
+        val trust_load = source.index_of("val dynsmf_registry = dynsmf_admitted_registry_load")
+        expect(empty_fast_path).to_be_greater_than(0)
+        expect(help_fast_path).to_be_greater_than(empty_fast_path)
+        expect(version_fast_path).to_be_greater_than(help_fast_path)
+        expect(trust_load).to_be_greater_than(version_fast_path)
+
+    it "keeps the OS trust owner free of compiler process and directory scans":
+        val source = file_read_text("src/os/smf/dynsmf_trust_registry.spl")
+        expect(source.contains("use app.")).to_equal(false)
+        expect(source.contains("use compiler.")).to_equal(false)
+        expect(source.contains("process_run(")).to_equal(false)
+        expect(source.contains("process_spawn")).to_equal(false)
+        expect(source.contains("directory_entries(")).to_equal(false)
+        expect(source).to_contain("artifact_bytes: rt_file_read_bytes(path)")
+
+    it "loads registry consumers only from retained bytes with no legacy loader bypass":
+        val ordinary = file_read_text("src/app/startup/dynsmf_autoload.spl")
+        val ordinary_start = ordinary.index_of("fn _dynsmf_startup_load_registry")
+        val ordinary_end = ordinary.index_of("fn _dynsmf_startup_queue_missing_without_artifact_read")
+        val ordinary_registry_path = ordinary.substring(ordinary_start, ordinary_end)
+        expect(ordinary_registry_path).to_contain("admitted!.artifact_bytes")
+        expect(ordinary_registry_path.contains("file_read_bytes(")).to_equal(false)
+        expect(ordinary_registry_path.contains("dynsmf_session_load_checked(")).to_equal(false)
+
+        val component = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
+        expect(component).to_contain("retained_registry_bytes = registry_artifact!.artifact_bytes")
+        expect(component).to_contain("if registry == nil:")
+        expect(component.contains("dynsmf_session_load_checked(")).to_equal(false)
+
+    it "keeps the hard option terminator in the one canonical router":
+        val source = file_read_text("src/app/startup/option_router.spl")
+        expect(source).to_contain("if token == \"--\":")
+        expect(source).to_contain("terminated = true")
+        expect(source).to_contain("routed.push(token)")

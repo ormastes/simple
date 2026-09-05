@@ -1,0 +1,60 @@
+"""
+Raw TCP socket benchmark using std library imports.
+Tests I/O layer ceiling without HTTP parsing overhead.
+"""
+
+use std.io.tcp.{tcp_backend_socket_create, tcp_backend_bind_fd, tcp_backend_listen,
+    tcp_backend_set_nonblocking, tcp_backend_set_reuseaddr, tcp_backend_set_reuseport,
+    tcp_backend_set_nodelay, tcp_backend_close}
+use std.io.platform_event.{PlatformEvent, EventMode}
+
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+
+fn main():
+    print "Raw TCP HTTP Server (std imports)"
+    val fd = tcp_backend_socket_create(4)
+    print "  Socket fd: {fd}"
+
+    tcp_backend_set_reuseaddr(fd, true)
+    tcp_backend_set_reuseport(fd, true)
+    tcp_backend_bind_fd(fd, "0.0.0.0:9090")
+    tcp_backend_set_nonblocking(fd, true)
+    tcp_backend_listen(fd, 1024)
+
+    var pe = PlatformEvent.new()
+    val epfd = pe.create()
+    print "  epoll fd: {epfd}, backend: {pe.backend_name()}"
+    pe.register(epfd, fd, EventMode.Read)
+
+    val resp = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\n\r\nHello, World!"
+
+    print "  Listening on http://0.0.0.0:9090"
+    print "  Benchmark: wrk -t4 -c100 -d10s http://localhost:9090/"
+
+    var count: i64 = 0
+    while true:
+        val ready_fds = pe.poll(epfd, 256, 1000)
+        var i: i64 = 0
+        while i < ready_fds.len():
+            val efd = ready_fds[i]
+            if efd == fd:
+                var j = 0
+                while j < 64:
+                    val cfd = rt_io_tcp_accept(fd)
+                    if cfd < 0:
+                        j = 64
+                    else:
+                        tcp_backend_set_nonblocking(cfd, true)
+                        tcp_backend_set_nodelay(cfd, true)
+                        pe.register(epfd, cfd, EventMode.Read)
+                    j = j + 1
+            else:
+                val data = rt_io_tcp_read(efd, 4096)
+                if data.len() > 0:
+                    rt_io_tcp_write_text(efd, resp)
+                    count = count + 1
+                else:
+                    tcp_backend_close(efd)
+            i = i + 1

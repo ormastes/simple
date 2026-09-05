@@ -1,0 +1,98 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+script="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage3-resume-binding.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+# The preflight must happen before both the Stage-2 compiler admission and the
+# first candidate deletion.  This structural assertion backs the executable
+# drift fixture below, whose Stage-2 paths are deliberately symlinks.
+source_pre_line=$(grep -n -F 'bootstrap_stage3_source_snapshot "$resume_source_check" "$root"' \
+  "$script" | sed -n '1s/:.*//p')
+stage2_guard_line=$(grep -n -F 'for stage2_required in "$stage2" "$admitted"; do' \
+  "$script" | sed -n '1s/:.*//p')
+candidate_remove_line=$(grep -n -F 'rm -f "$candidate" "$stage3_transcript"' \
+  "$script" | sed -n '1s/:.*//p')
+[ -n "$source_pre_line" ] && [ -n "$stage2_guard_line" ] && \
+  [ -n "$candidate_remove_line" ] || fail "resume preflight markers missing"
+[ "$source_pre_line" -lt "$stage2_guard_line" ] || \
+  fail "Stage-2 admission precedes fresh authority snapshot"
+[ "$stage2_guard_line" -lt "$candidate_remove_line" ] || \
+  fail "candidate deletion precedes Stage-2 admission"
+
+fixture="$tmp/repo"
+mkdir -p "$fixture/scripts/bootstrap" "$fixture/scripts/check/lib" \
+  "$fixture/src/compiler" "$fixture/src/app" "$fixture/src/lib" \
+  "$fixture/examples/10_tooling" "$fixture/src/compiler_rust"
+cp "$script" "$fixture/scripts/bootstrap/"
+cp "$root/scripts/check/lib/bootstrap-stage3-provenance.shs" \
+  "$fixture/scripts/check/lib/"
+cp -R "$root/scripts/check/lib/bootstrap-stage3" "$fixture/scripts/check/lib/"
+cp "$root/src/compiler_rust/rust-toolchain.toml" "$fixture/src/compiler_rust/"
+printf 'compiler authority\n' >"$fixture/src/compiler/marker.spl"
+printf 'app authority\n' >"$fixture/src/app/marker.spl"
+printf 'lib authority\n' >"$fixture/src/lib/marker.spl"
+printf 'tooling authority\n' >"$fixture/examples/10_tooling/marker.spl"
+printf '.stage3-resume-output/\n' >"$fixture/.gitignore"
+git -C "$fixture" init -q
+git -C "$fixture" config user.email bootstrap-contract@example.invalid
+git -C "$fixture" config user.name bootstrap-contract
+git -C "$fixture" add .
+git -C "$fixture" commit -qm 'fixture: Stage 3 resume authority'
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$fixture/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+platform=$(bootstrap_stage3_host_platform)
+output="$fixture/.stage3-resume-output"
+stage3="$output/stage3/$platform"
+mkdir -p "$stage3/stage2-admitted" "$output/stage2/$platform"
+
+# Produce genuine Stage-2 source/git/tool receipts, then make only the source
+# receipt drift.  The resume must reject this before following the deliberately
+# symlinked Stage-2 paths and without replacing the existing candidate.
+bootstrap_stage3_source_snapshot "$stage3/source-inputs-before.txt" "$fixture"
+printf 'drift\n' >>"$stage3/source-inputs-before.txt"
+bootstrap_stage3_git_state "$fixture" "$stage3/git-state-before.env"
+bootstrap_stage3_tool_authority_snapshot "$stage3/tool-authority-before.txt" \
+  "$PATH" "$fixture"
+cat >"$stage3/stage2-command.transcript" <<EOF
+host-env:0:PATH=$PATH
+host-env:0:HOME=${HOME:-/tmp}
+host-env:0:TMPDIR=${TMPDIR:-/tmp}
+EOF
+printf 'candidate sentinel\n' >"$stage3/simple"
+printf 'manifest sentinel\n' >"$stage3/provenance.env"
+ln -s "$stage3/not-a-stage2" "$output/stage2/$platform/simple"
+ln -s "$stage3/not-an-admitted-stage2" "$stage3/stage2-admitted/simple"
+
+cp "$stage3/source-inputs-before.txt" "$tmp/source.receipt"
+cp "$stage3/git-state-before.env" "$tmp/git.receipt"
+cp "$stage3/tool-authority-before.txt" "$tmp/tool.receipt"
+if sh "$fixture/scripts/bootstrap/resume-stage3-from-admitted.sh" \
+  .stage3-resume-output >"$tmp/resume.out" 2>&1; then
+  fail "source-drift resume unexpectedly succeeded"
+fi
+
+cmp -s "$tmp/source.receipt" "$stage3/source-inputs-before.txt" || \
+  fail "source receipt was rewritten on drift rejection"
+cmp -s "$tmp/git.receipt" "$stage3/git-state-before.env" || \
+  fail "git receipt was rewritten on drift rejection"
+cmp -s "$tmp/tool.receipt" "$stage3/tool-authority-before.txt" || \
+  fail "tool receipt was rewritten on drift rejection"
+[ "$(cat "$stage3/simple")" = 'candidate sentinel' ] || \
+  fail "candidate changed before drift rejection"
+[ "$(cat "$stage3/provenance.env")" = 'manifest sentinel' ] || \
+  fail "manifest changed before drift rejection"
+[ ! -e "$output.lock" ] || fail "resume lock remained after drift rejection"
+[ ! -e "$stage3/recovery-threads1" ] || \
+  fail "recovery tree was created before drift rejection"
+
+echo 'bootstrap_stage3_resume_snapshot_binding_contract_test: PASS'

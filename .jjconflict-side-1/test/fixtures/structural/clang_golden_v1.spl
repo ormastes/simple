@@ -1,0 +1,147 @@
+# ============================================================================
+# test/fixtures/structural/clang_golden_v1.spl
+#
+# GOLDEN VECTORS for the frozen CLANG-AST export contract v1.
+#
+# Every hex string below was derived BY HAND from the frozen layout in
+# doc/05_design/platform/structural_compute/clang_bridge_contract_v1.md, not
+# captured from encoder output. That is what makes them an oracle: the spec
+# asserts encoder output EQUALS these bytes, so a codec regression cannot
+# silently redefine the contract. A vector captured from the encoder would only
+# ever detect the encoder disagreeing with itself.
+#
+# Follows the golden-vector convention established by the ID-TAG lane in
+# test/fixtures/structural/identity_tagmap_golden_v1.spl: pure data, no file
+# I/O, lowercase unseparated hex of the COMPLETE framed record, one vector per
+# record shape plus zero and all-ones edge cases, mirrored byte for byte in the
+# sibling .sdn, never edited in place.
+#
+# Envelope = magic(4 ASCII, LE) | version u16 | reserved u16.
+#   "SCEI" = 53 43 45 49   ClangEntityIdentity    -> 5343454901000000
+#   "SCAP" = 53 43 41 50   ClangAdapterCapability -> 5343415001000000
+#   "SCAX" = 53 43 41 58   ClangAstExport         -> 5343415801000000
+#
+# ClangEntityIdentity body, 68 bytes, no padding:
+#   tu_artifact ArtifactId 20 | ast_kind u32 | source SourceAnchor 36
+#   | semantic_usr u32 | local_ordinal u32
+#
+# ClangAdapterCapability body, 14 bytes:
+#   clang_major u16 | ast_export_schema u16 | matcher_adapter_version u16
+#   | transformer_adapter_version u16 | llvm_ir_schema u16
+#   | supported_features u32
+#
+# ClangAstExport body, COLUMN-MAJOR:
+#   producer_clang_major u32 | tu_artifact ArtifactId 20 | node_count u32
+#   | kind u32*n | parent u32*n | ordinal u32*n | flags u32*n | usr u32*n
+#   | anchor SourceAnchor(36)*n
+#
+# The shared sub-values the asymmetric vectors are built from — each chosen so
+# that a byte-order error is visible rather than symmetric:
+#   TU  = ArtifactId(Hash128(0x0102030405060708, 0x1112131415161718), 7)
+#       -> 0807060504030201 1817161514131211 07000000
+#   SRC = ArtifactId(Hash128(0x2122232425262728, 0x3132333435363738), 3)
+#       -> 2827262524232221 3837363534333231 03000000
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# ClangEntityIdentity
+# ----------------------------------------------------------------------------
+
+# Zero case: zero tu_artifact, kind 0, zero anchor, usr 0, ordinal 0.
+# Note usr 0 is a PRESENT StringId; absent is 0xffffffff, not 0.
+val GOLDEN_IDENTITY_ZERO: text =
+    "5343454901000000"
+        + "0000000000000000000000000000000000000000"
+        + "00000000"
+        + "000000000000000000000000000000000000000000000000000000000000000000000000"
+        + "00000000"
+        + "00000000"
+
+# All-ones case: every field saturated. semantic_usr = 0xffffffff is the ABSENT
+# sentinel, which is exactly what an all-ones identity should mean.
+val GOLDEN_IDENTITY_MAX: text =
+    "5343454901000000"
+        + "ffffffffffffffffffffffffffffffffffffffff"
+        + "ffffffff"
+        + "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        + "ffffffff"
+        + "ffffffff"
+
+# Asymmetric declaration case: TU artifact, ast_kind 0x2a, source anchor in SRC
+# spanning bytes 0x100..0x140 with spelling context 5 and NO expansion context
+# (0xffffffff), USR StringId 0x00abcdef, local ordinal 9.
+val GOLDEN_IDENTITY_DECL: text =
+    "5343454901000000"
+        + "0807060504030201" + "1817161514131211" + "07000000"
+        + "2a000000"
+        + "2827262524232221" + "3837363534333231" + "03000000"
+        + "00010000" + "40010000" + "05000000" + "ffffffff"
+        + "efcdab00"
+        + "09000000"
+
+# ----------------------------------------------------------------------------
+# ClangAdapterCapability
+# ----------------------------------------------------------------------------
+
+# Zero case. Decodes cleanly; `clang_capability_decide` REJECTS it with
+# UnsupportedMajor, because reading an advertisement and accepting it are
+# separate steps.
+val GOLDEN_CAP_ZERO: text =
+    "5343415001000000"
+        + "0000" + "0000" + "0000" + "0000" + "0000"
+        + "00000000"
+
+# What this wave-1 build advertises: Clang 18, ast_export_schema 1, no matcher,
+# no transformer, no LLVM IR schema, features = AST_EXPORT only.
+val GOLDEN_CAP_THIS_BUILD: text =
+    "5343415001000000"
+        + "1200" + "0100" + "0000" + "0000" + "0000"
+        + "01000000"
+
+# Asymmetric fully-featured adapter: Clang 18, ast 1, matcher 2, transformer 3,
+# llvm ir 4, all five feature bits (0x1f).
+val GOLDEN_CAP_FULL: text =
+    "5343415001000000"
+        + "1200" + "0100" + "0200" + "0300" + "0400"
+        + "1f000000"
+
+# Maximum LEGAL all-ones case. The five u16 fields saturate; the feature set
+# does NOT, because bits 5..31 are reserved and a set reserved bit is a hard
+# reject. 0x1f is the all-ones value of the frozen feature vocabulary.
+val GOLDEN_CAP_MAX: text =
+    "5343415001000000"
+        + "ffff" + "ffff" + "ffff" + "ffff" + "ffff"
+        + "1f000000"
+
+# ----------------------------------------------------------------------------
+# ClangAstExport
+# ----------------------------------------------------------------------------
+
+# Empty export: a translation unit with zero exported nodes. VALID, not an
+# error. Zero tu_artifact, producer Clang 18, node_count 0, six empty columns.
+val GOLDEN_EXPORT_EMPTY: text =
+    "5343415801000000"
+        + "12000000"
+        + "0000000000000000000000000000000000000000"
+        + "00000000"
+
+# Two-node export: node 0 is a root declaration (parent absent, ordinal 0, no
+# flags, USR 0x00abcdef) and node 1 is its first child, coming from a macro
+# expansion inside a system header (flags 1|4 = 5) with no USR.
+#
+# The column-major order is visible here: all four kinds/parents/ordinals/flags
+# /usrs precede the two source anchors.
+val GOLDEN_EXPORT_TWO: text =
+    "5343415801000000"
+        + "12000000"
+        + "0807060504030201" + "1817161514131211" + "07000000"
+        + "02000000"
+        + "2a000000" + "2b000000"
+        + "ffffffff" + "00000000"
+        + "00000000" + "01000000"
+        + "00000000" + "05000000"
+        + "efcdab00" + "ffffffff"
+        + "2827262524232221" + "3837363534333231" + "03000000"
+        + "00010000" + "40010000" + "05000000" + "ffffffff"
+        + "2827262524232221" + "3837363534333231" + "03000000"
+        + "10010000" + "20010000" + "05000000" + "09000000"

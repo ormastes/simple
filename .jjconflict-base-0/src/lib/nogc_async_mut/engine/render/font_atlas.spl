@@ -1,0 +1,85 @@
+# Font Atlas — Minimal monospace grid atlas for GPU text rendering
+#
+# Provides a default 5x7-in-8x8-cell bitmap font atlas laid out as a 16x8
+# grid of characters covering ASCII 32–127. UVs are normalised to 0.0–1.0
+# over a 128x64 virtual atlas texture (16 cols × 8 rows × 8 px per cell).
+#
+# No real texture upload happens here — this is pure geometry metadata.
+# The GPU batch uses texture_handle 0 (solid-color pass) so characters render
+# as tinted cells whose UV coordinates match this atlas layout.
+# A real font upload is the follow-up (GAME-RENDER-003).
+
+# Per-glyph geometry + UV rectangle in atlas space.
+class GlyphInfo:
+    # On-screen advance (pixels)
+    advance_x: f64
+    advance_y: f64
+    # Screen-space glyph quad size
+    w: f64
+    h: f64
+    # Normalised UV corners in the atlas texture
+    u0: f64
+    v0: f64
+    u1: f64
+    v1: f64
+
+# Monospace grid font atlas — maps ASCII codepoints to UV rectangles.
+class FontAtlas:
+    # Cell size in atlas pixels
+    cell_w: f64
+    cell_h: f64
+    # Atlas grid dimensions (columns × rows)
+    cols: i64
+    rows: i64
+    # On-screen rendering cell size
+    screen_cell_w: f64
+    screen_cell_h: f64
+    # ASCII base codepoint (first char in atlas row 0, col 0)
+    base_codepoint: i64
+
+impl FontAtlas:
+    # Build the default 16×8 ASCII atlas (chars 32–127, 8×8 cells, 128×64 atlas).
+    static fn default_monospace() -> FontAtlas:
+        FontAtlas(
+            cell_w: 8.0,
+            cell_h: 8.0,
+            cols: 16,
+            rows: 8,
+            screen_cell_w: 8.0,
+            screen_cell_h: 14.0,
+            base_codepoint: 32
+        )
+
+    # Look up glyph info for a given codepoint.
+    # Returns the fallback '?' glyph for codepoints outside 32–126.
+    fn glyph(codepoint: i64) -> GlyphInfo:
+        val atlas_w = self.cell_w * (self.cols * 1.0)
+        val atlas_h = self.cell_h * (self.rows * 1.0)
+        val cp = _clamp_codepoint(self, codepoint)
+        val idx = cp - self.base_codepoint
+        val col = idx - ((idx / self.cols) * self.cols)
+        val row = idx / self.cols
+        val u0 = (col * 1.0) * self.cell_w / atlas_w
+        val v0 = (row * 1.0) * self.cell_h / atlas_h
+        val u1 = u0 + self.cell_w / atlas_w
+        val v1 = v0 + self.cell_h / atlas_h
+        GlyphInfo(
+            advance_x: self.screen_cell_w,
+            advance_y: 0.0,
+            w: self.screen_cell_w,
+            h: self.screen_cell_h,
+            u0: u0,
+            v0: v0,
+            u1: u1,
+            v1: v1
+        )
+
+# Map an arbitrary codepoint to a valid atlas index.
+# Printable ASCII 32–126 → as-is. Everything else → '?' (63).
+fn _clamp_codepoint(atlas: FontAtlas, cp: i64) -> i64:
+    val first = atlas.base_codepoint
+    val last = first + atlas.cols * atlas.rows - 1
+    if cp >= first and cp <= last:
+        return cp
+    # fallback to '?'
+    63

@@ -1,0 +1,114 @@
+# @req REQ-010 REQ-011
+# @capture exec
+# @capture artifact
+# @manual: primary
+"""Typed bounded environment instruction, receipt, BLOCKED, and exclusion contract."""
+use std.spec.*
+use std.spec.step
+use std.common.env_access.model.*
+use app.io.env_access_host.{
+    HostPhysicalAccessAdapter, execute_host_env_access_plan_with_physical
+}
+
+fn physical_available() -> bool: true
+
+fn physical_result(arguments: [text], timeout_ms: i64,
+                   max_stdout_bytes: i64, max_stderr_bytes: i64) -> EnvAccessRawResult:
+    return EnvAccessRawResult(
+        status: EnvAccessStatus.Executed, exit_code: 0,
+        stdout: "physical", stderr: "", discarded_bytes: 0, elapsed_ms: 1,
+        reason: "", prerequisite: "", owner: "", artifact_paths: [],
+        resume_command: "")
+
+fn physical_identity(schema: text = "socket-v1") -> EnvHardwareProbeIdentity:
+    return EnvHardwareProbeIdentity(
+        probe_id: "loopback-socket", schema_id: schema, max_arguments: 2,
+        max_timeout_ms: 100, max_stdout_bytes: 128, max_stderr_bytes: 128)
+
+fn physical_plan() -> EnvAccessPlan:
+    val identity = physical_identity()
+    val access = EnvAccessInstruction(
+        kind: EnvAccessKind.SocketConnect, resource: identity.probe_id,
+        arguments: ["127.0.0.1", "1"], timeout_ms: 100,
+        max_stdout_bytes: 128, max_stderr_bytes: 128)
+    return EnvAccessPlan(
+        plan_id: "rt-hal-physical-v1", canonical_repo_root: "/workspace/simple",
+        instructions: [access], max_total_bytes: 256, max_processes: 0,
+        allowed_tools: [], allowed_hardware_probes: [identity])
+
+fn instruction(resource: text = "HAL_TARGET") -> EnvAccessInstruction:
+    EnvAccessInstruction(kind: EnvAccessKind.ReadEnv, resource: resource,
+        arguments: [], timeout_ms: 100, max_stdout_bytes: 128, max_stderr_bytes: 128)
+
+fn plan() -> EnvAccessPlan:
+    EnvAccessPlan(plan_id: "rt-hal-env-v1", canonical_repo_root: "/workspace/simple",
+        instructions: [instruction()], max_total_bytes: 256, max_processes: 0,
+        allowed_tools: [], allowed_hardware_probes: [])
+
+describe "RT HAL environment receipts":
+    it "should keep all 24 production environment opcodes closed and classified":
+        step("classify production environment instructions")
+        val kinds = [
+            EnvAccessKind.ReadEnv, EnvAccessKind.HostIdentity,
+            EnvAccessKind.ReadRepoFile, EnvAccessKind.RunAllowedTool,
+            EnvAccessKind.HardwareProbe, EnvAccessKind.SocketConnect,
+            EnvAccessKind.SocketSend, EnvAccessKind.SocketReceive,
+            EnvAccessKind.SocketClose, EnvAccessKind.DeviceRead,
+            EnvAccessKind.DeviceWrite, EnvAccessKind.MmioRead,
+            EnvAccessKind.MmioWrite, EnvAccessKind.IrqEnable,
+            EnvAccessKind.IrqWait, EnvAccessKind.IrqAcknowledge,
+            EnvAccessKind.IrqDisable, EnvAccessKind.DmaMap,
+            EnvAccessKind.DmaSyncForDevice, EnvAccessKind.DmaSyncForCpu,
+            EnvAccessKind.DmaSubmit, EnvAccessKind.DmaWait,
+            EnvAccessKind.DmaUnmap, EnvAccessKind.ClockRead
+        ]
+        expect(kinds.len()).to_equal(ENV_ACCESS_KIND_COUNT)
+        expect(env_access_kind_requires_physical_adapter(EnvAccessKind.SocketConnect)).to_equal(true)
+        expect(env_access_kind_requires_physical_adapter(EnvAccessKind.MmioWrite)).to_equal(true)
+        expect(env_access_kind_requires_physical_adapter(EnvAccessKind.IrqWait)).to_equal(true)
+        expect(env_access_kind_requires_physical_adapter(EnvAccessKind.DmaSubmit)).to_equal(true)
+        expect(env_access_kind_requires_physical_adapter(EnvAccessKind.ClockRead)).to_equal(false)
+
+    it "should fail closed with canonical evidence when physical authority is absent or wrong-kind":
+        step("execute environment instructions")
+        val absent = execute_host_env_access_plan_with_physical(physical_plan(), []).unwrap()[0]
+        expect(absent.status).to_equal(EnvAccessStatus.Unsupported)
+        expect(absent.artifact_paths).to_contain("doc/07_guide/language/environment_access_plans.md")
+        val wrong_kind = HostPhysicalAccessAdapter(
+            kind: EnvAccessKind.DmaSubmit, identity: physical_identity(),
+            platform_available_fn: physical_available, execute_fn: physical_result)
+        val rejected = execute_host_env_access_plan_with_physical(
+            physical_plan(), [wrong_kind]).unwrap()[0]
+        expect(rejected.status).to_equal(EnvAccessStatus.Unsupported)
+
+    it "should reject schema and bound substitution before physical execution":
+        step("execute environment instructions")
+        val wrong_schema = HostPhysicalAccessAdapter(
+            kind: EnvAccessKind.SocketConnect,
+            identity: physical_identity("socket-v2"),
+            platform_available_fn: physical_available, execute_fn: physical_result)
+        val receipt = execute_host_env_access_plan_with_physical(
+            physical_plan(), [wrong_schema]).unwrap()[0]
+        expect(receipt.status).to_equal(EnvAccessStatus.Unsupported)
+        expect(receipt.reason).to_contain("schema does not match")
+
+    it "should accept a typed bounded instruction plan without direct process access":
+        step("execute environment instructions")
+        expect(env_access_instruction_error(instruction())).to_equal("")
+        expect(env_access_plan_error(plan())).to_equal("")
+
+    it "should reject undeclared unsafe or unbounded interactions":
+        step("execute environment instructions")
+        expect(env_access_instruction_error(instruction(""))).to_equal("ENV-E-UNDECLARED")
+        val unbounded = EnvAccessInstruction(kind: EnvAccessKind.HardwareProbe, resource: "gpio",
+            arguments: [], timeout_ms: 600001, max_stdout_bytes: 0, max_stderr_bytes: 0)
+        expect(env_access_instruction_error(unbounded)).to_equal("ENV-E-BOUND")
+
+    it "should retain a blocked scenario with reason owner artifact and resume command":
+        step("execute environment instructions")
+        val blocked = env_scenario_skip("board-gpio", "board is not attached", "hal-team",
+            "BUG-204", "attach board rev C", ["build/evidence/board-gpio.log"],
+            "bin/simple test test/03_system/runtime/rt_hal_environment_receipt_spec.spl")
+        expect(env_scenario_selection_error(blocked)).to_equal("")
+        expect(blocked.disposition).to_equal(EnvScenarioDisposition.Skip)
+        expect(env_scenario_selection_error(env_scenario_skip("board-gpio", "", "", "", "", [], ""))).to_equal("ENV-E-OMISSION-REASON")

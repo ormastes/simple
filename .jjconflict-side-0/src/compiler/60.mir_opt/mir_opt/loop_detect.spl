@@ -1,0 +1,247 @@
+# Loop Detection
+#
+# Detects loops in MIR via backedge analysis.
+#
+# Provides:
+#   - LoopInfo: Information about a detected loop
+#   - LoopDetector: Finds loops in a MirFunction
+#   - EdgePair: Represents an edge between two blocks
+#
+# Algorithm:
+#   1. Build CFG (control flow graph)
+#   2. Find backedges (edges to earlier blocks)
+#   3. Identify natural loops (blocks reachable from backedge sources)
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir_opt.mir_opt.perf_facts.{
+    PerfFacts, perf_facts_build_requested, perf_fact_request_cfg_dominators,
+    perf_facts_successors, perf_facts_predecessors, perf_facts_dominates}
+
+# ============================================================================
+# Edge Pair
+# ============================================================================
+
+struct EdgePair:
+    """Represents an edge between two blocks."""
+    from: BlockId
+    to: BlockId
+
+# ============================================================================
+# Loop Info
+# ============================================================================
+
+class LoopInfo:
+    """
+    Information about a loop in the MIR.
+
+    A loop is a set of basic blocks with:
+    - Header: Entry point (dominates all blocks in loop)
+    - Backedges: Edges that jump back to header
+    - Body: All blocks in the loop
+    - Exit edges: Edges leaving the loop
+    - Trip count: Constant iteration count if determinable
+    """
+    header: BlockId
+    body: [BlockId]
+    backedges: [BlockId]  # Blocks that jump back to header
+    exit_edges: [EdgePair]  # Edges leaving the loop
+    trip_count: i64?       # Constant iteration count (if determinable)
+
+impl LoopInfo:
+    fn contains_block(block_id: BlockId) -> bool:
+        """Check if block is in this loop."""
+        if block_id.id == self.header.id:
+            return true
+
+        for body_block in self.body:
+            if body_block.id == block_id.id:
+                return true
+
+        false
+
+    fn iteration_count() -> i64?:
+        """
+        Try to determine constant iteration count.
+
+        Returns Some(n) if loop has constant iteration count.
+        The trip count is computed during loop detection by analyzing
+        exit edge comparison instructions (e.g., i < N where N is constant).
+        """
+        self.trip_count
+
+# ============================================================================
+# Loop Detector
+# ============================================================================
+
+class LoopDetector:
+    """
+    Detects loops in MIR via backedge analysis.
+
+    Algorithm:
+    1. Build CFG (control flow graph)
+    2. Find strongly connected components (SCCs)
+    3. Identify natural loops (single-entry SCCs with backedges)
+    """
+    loops: [LoopInfo]
+
+impl LoopDetector:
+    static fn new() -> LoopDetector:
+        LoopDetector(loops: [])
+
+    me detect_loops(func: MirFunction):
+        """
+        Detect all loops in function.
+
+        A natural-loop backedge is an edge whose target dominates its source.
+        Storage order and block IDs are never used as dominance substitutes.
+        """
+        # Reset loops
+        self.loops = []
+        val facts = perf_facts_build_requested(
+            func, perf_fact_request_cfg_dominators())
+        if not facts.cfg_complete or not facts.dominators_complete:
+            return
+
+        # Find natural-loop headers from dominance-proven backedges.
+        var potential_headers: [BlockId] = []
+        var header_bucket_index: Dict<i64, i64> = {}
+        var header_latch_buckets: [[BlockId]] = []
+        var header_latch_seen: [Dict<i64, bool>] = []
+
+        for block in func.blocks:
+            val successors = perf_facts_successors(facts, block.id)
+            for succ in successors:
+                if perf_facts_dominates(facts, succ, block.id):
+                    if not header_bucket_index.has(succ.id):
+                        header_bucket_index[succ.id] = header_latch_buckets.len()
+                        potential_headers.push(succ)
+                        header_latch_buckets.push([])
+                        header_latch_seen.push({})
+                    val bucket = header_bucket_index[succ.id]
+                    if not header_latch_seen[bucket].has(block.id.id):
+                        header_latch_seen[bucket][block.id.id] = true
+                        header_latch_buckets[bucket].push(block.id)
+
+        # Build one natural loop from all dominance-proven latches per header.
+        var header_position = 0
+        while header_position < potential_headers.len():
+            val header = potential_headers[header_position]
+            val loop_info_opt = self.build_loop_info(
+                func, header, header_latch_buckets[header_position], facts)
+            if loop_info_opt.?:
+                self.loops.push(loop_info_opt.unwrap())
+            header_position = header_position + 1
+
+    fn build_loop_info(func: MirFunction, header: BlockId, latches: [BlockId], facts: PerfFacts) -> LoopInfo?:
+        """Build LoopInfo for the natural loop with the given header.
+
+        Bug #160: the previous heuristic treated any block whose successor
+        appears earlier in the block list as a backedge and set the loop body
+        to just the blocks jumping directly to the header. With `break`, a
+        forward edge to an earlier-listed exit block was misread as a backedge
+        (spurious loop), and the body under-approximated the real loop, so
+        collection_opt's loop-invariant hoist wrongly moved a body instruction
+        into a bogus header and produced a silent miscompile.
+
+        Correct natural loop: start with the dominance-proven latch edges and
+        walk predecessors backwards to the header. Only blocks dominated by
+        the header may enter the set. An SCC intersection is too broad for
+        nested loops: an inner header can reach an outer latch and cycle back,
+        causing the inner loop to absorb outer-loop blocks."""
+        if latches.len() == 0:
+            return nil
+
+        var loop_set: Dict<i64, bool> = {}
+        loop_set[header.id] = true
+        var worklist: [BlockId] = []
+        for latch in latches:
+            if latch.id != header.id:
+                worklist.push(latch)
+
+        var next_index = 0
+        while next_index < worklist.len():
+            val current = worklist[next_index]
+            next_index = next_index + 1
+            if loop_set.has(current.id):
+                continue
+            if not perf_facts_dominates(facts, header, current):
+                continue
+            loop_set[current.id] = true
+            for predecessor in perf_facts_predecessors(facts, current):
+                if predecessor != header.id and not loop_set.has(predecessor):
+                    worklist.push(BlockId(id: predecessor))
+
+        # Preserve MIR block order for deterministic diagnostics and dumps.
+        var body: [BlockId] = []
+        for block in func.blocks:
+            if block.id.id != header.id and loop_set.has(block.id.id):
+                body.push(block.id)
+
+        # Detect exit edges: edges from body blocks to non-body blocks
+        var exit_edges: [EdgePair] = []
+        val all_body = [header] + body
+        for block in func.blocks:
+            if not loop_set.has(block.id.id):
+                continue
+            val successors = perf_facts_successors(facts, block.id)
+            for succ in successors:
+                if not loop_set.has(succ.id):
+                    exit_edges = exit_edges.push(EdgePair(from: block.id, to: succ))
+
+        # Analyze iteration count from exit conditions
+        # Look at conditional terminators in loop blocks that branch out
+        val trip_count = self.analyze_trip_count(func, header, all_body)
+
+        Some(LoopInfo(
+            header: header,
+            body: body,
+            backedges: latches,
+            exit_edges: exit_edges,
+            trip_count: trip_count
+        ))
+
+    fn analyze_trip_count(func: MirFunction, header: BlockId, loop_blocks: [BlockId]) -> i64?:
+        """
+        Analyze loop exit conditions to determine constant trip count.
+
+        Looks for patterns like:
+        - Header block has If terminator comparing a local against a constant
+        - The comparison is Lt (i < N) where N is a constant integer
+        - One branch exits the loop, the other stays in
+
+        Returns Some(N) if a constant bound is found, nil otherwise.
+        """
+        # A comparison bound is not a trip count.  Fail closed until SCEV-lite
+        # proves the induction's initial value, signed step, direction, branch
+        # polarity, nowrap behavior, and finiteness.  Keep no dormant pattern
+        # recognizer behind this return: it could be re-enabled mechanically
+        # without supplying any of those proofs.
+        return nil
+
+    fn block_index(func: MirFunction, block_id: BlockId) -> i64:
+        """Find index of block in function."""
+        var idx = 0
+        for block in func.blocks:
+            if block.id.id == block_id.id:
+                return idx
+            idx = idx + 1
+        -1
+
+    fn is_block_in_list(block_id: BlockId, list: [BlockId]) -> bool:
+        """Check if block is in list."""
+        for item in list:
+            if item.id == block_id.id:
+                return true
+        false
+
+    fn find_loop_for_block(block_id: BlockId) -> LoopInfo?:
+        """Find innermost loop containing block."""
+        for loop_info in self.loops:
+            if loop_info.contains_block(block_id):
+                return Some(loop_info)
+        nil
+
+# ============================================================================
+# Exports
+# ============================================================================

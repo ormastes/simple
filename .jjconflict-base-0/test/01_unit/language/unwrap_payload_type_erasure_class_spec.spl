@@ -1,0 +1,77 @@
+# Defect-CLASS spec for TODO 558 (siblings of
+# doc/08_tracking/bug/result_unwrap_receiver_type_erasure_2026-07-13.md).
+#
+# The defect class is: a payload-extracting call (`Result.unwrap()`,
+# `Option.unwrap()`, chained/nested unwraps, unwrap through a function
+# argument or a container element) erases the payload TYPE on the resulting
+# unannotated local, so a later method call on it cannot pick the right owner
+# when the method name collides with another type's method.
+#
+# The exact-defect spec covers only the direct `Result<A, text>` shape. This
+# one sweeps the sibling shapes with the SAME colliding method name, so a
+# regression on any one of them fails here rather than silently passing.
+#
+# POSITIVE CONTROL: `it "positive control ..."` below proves the colliding
+# methods really exist and really compute distinct values. Without it a
+# broken/no-op scanner would report a clean sweep, which is worse than having
+# no spec at all.
+
+struct ClsPayloadP:
+    v: i64
+    fn tagged(self) -> i64:
+        return self.v + 1000
+
+struct ClsPayloadQ:
+    v: i64
+    fn tagged(self) -> i64:
+        return self.v + 2000
+
+fn result_p() -> Result<ClsPayloadP, text>:
+    return Ok(ClsPayloadP(v: 7))
+
+fn option_p() -> ClsPayloadP?:
+    return ClsPayloadP(v: 7)
+
+fn result_nested() -> Result<Result<ClsPayloadP, text>, text>:
+    return Ok(Ok(ClsPayloadP(v: 7)))
+
+fn take_p(p: ClsPayloadP) -> i64:
+    return p.tagged()
+
+describe "unwrap payload-type erasure -- defect class sweep":
+    it "positive control: both colliding tagged() methods load and compute distinctly":
+        val p = ClsPayloadP(v: 7)
+        val q = ClsPayloadQ(v: 7)
+        expect(p.tagged()).to_equal(1007)
+        expect(q.tagged()).to_equal(2007)
+        expect(p.tagged() == q.tagged()).to_equal(false)
+
+    it "Result.unwrap() into an unannotated local keeps the payload type":
+        val r = result_p()
+        val p = r.unwrap()
+        expect(p.tagged()).to_equal(1007)
+
+    it "Option.unwrap() into an unannotated local keeps the payload type":
+        val o = option_p()
+        val p = o.unwrap()
+        expect(p.tagged()).to_equal(1007)
+
+    it "unwrap() called directly on the call expression keeps the payload type":
+        expect(result_p().unwrap().tagged()).to_equal(1007)
+
+    it "nested double unwrap keeps the innermost payload type":
+        val outer = result_nested()
+        val inner = outer.unwrap()
+        val p = inner.unwrap()
+        expect(p.tagged()).to_equal(1007)
+
+    it "an unwrapped payload passed as a typed argument still type-checks":
+        val r = result_p()
+        val p = r.unwrap()
+        expect(take_p(p)).to_equal(1007)
+
+    it "an unwrapped payload stored in an array keeps the payload type":
+        val r = result_p()
+        val p = r.unwrap()
+        val items = [p]
+        expect(items.get(0).tagged()).to_equal(1007)

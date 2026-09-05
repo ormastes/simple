@@ -1,0 +1,149 @@
+# ============================================================================
+# common/bytes/bits.spl — bit-packed read/write with explicit ordering
+#
+# Consolidates the LSB-first (brotli/zstd-forward) and MSB-first conventions
+# into behaviour-carrying types:
+#   BitWriter  : me put_bits(v, n), me align(), finish() -> ByteBuffer
+#   BitReader  : me read_bits(n) -> i64, cursor invariant, eof()
+#
+# Ordering is selected at construction:
+#   lsb_first = true  -> first bit written/read is bit 0 of the value / byte
+#                        (DEFLATE / brotli / zstd-forward convention)
+#   lsb_first = false -> MSB-first (big-endian bit order; PNG/JPEG style)
+#
+# A BitWriter(order) -> BitReader(order) round-trip is bit-exact for widths
+# 1..64 (AC-4).
+# ============================================================================
+
+use lib.common.bytes.span.{ByteSpan, ByteBuffer}
+
+# ----------------------------------------------------------------------------
+# BitWriter
+# ----------------------------------------------------------------------------
+struct BitWriter:
+    """Packs bits into bytes. `acc` holds up to `nbits` pending bits; when 8
+    accumulate they are flushed into `buf`."""
+    buf: [u8]
+    acc: i64
+    nbits: i64
+    lsb_first: bool
+
+impl BitWriter:
+    static fn lsb() -> BitWriter:
+        BitWriter(buf: [], acc: 0, nbits: 0, lsb_first: true)
+
+    static fn msb() -> BitWriter:
+        BitWriter(buf: [], acc: 0, nbits: 0, lsb_first: false)
+
+    me put_bits(value: i64, n: i64):
+        """Append the low `n` bits of `value` (1..64) in this writer's order."""
+        if n < 1 or n > 64:
+            return
+        var i = 0
+        while i < n:
+            var bit = 0
+            if self.lsb_first:
+                bit = (value >> i) & 1
+            else:
+                bit = (value >> (n - 1 - i)) & 1
+            if self.lsb_first:
+                self.acc = self.acc | (bit << self.nbits)
+            else:
+                self.acc = (self.acc << 1) | bit
+            self.nbits = self.nbits + 1
+            if self.nbits == 8:
+                self.buf.push((self.acc & 0xFF).to_u8())
+                self.acc = 0
+                self.nbits = 0
+            i = i + 1
+
+    me align():
+        """Flush any pending partial byte (zero-padded) to a byte boundary."""
+        if self.nbits > 0:
+            if self.lsb_first:
+                self.buf.push((self.acc & 0xFF).to_u8())
+            else:
+                # MSB-first: remaining bits are the high bits of the byte.
+                val shifted = self.acc << (8 - self.nbits)
+                self.buf.push((shifted & 0xFF).to_u8())
+            self.acc = 0
+            self.nbits = 0
+
+    fn finish() -> ByteBuffer:
+        """Return the accumulated bytes (flushing any partial byte) as a buffer."""
+        var out = ByteBuffer.new()
+        var i = 0
+        while i < self.buf.len():
+            out.push_u8(self.buf[i])
+            i = i + 1
+        if self.nbits > 0:
+            if self.lsb_first:
+                out.push_byte(self.acc)
+            else:
+                out.push_byte(self.acc << (8 - self.nbits))
+        out
+
+# ----------------------------------------------------------------------------
+# BitReader
+# ----------------------------------------------------------------------------
+struct BitReader:
+    """Reads bits from a byte slice in the configured order. `byte_pos` is the
+    next byte to consume; `bit_pos` is the bit offset within the current byte
+    (0..7)."""
+    data: [u8]
+    byte_pos: i64
+    bit_pos: i64
+    lsb_first: bool
+
+impl BitReader:
+    static fn lsb(data: [u8]) -> BitReader:
+        BitReader(data: data, byte_pos: 0, bit_pos: 0, lsb_first: true)
+
+    static fn msb(data: [u8]) -> BitReader:
+        BitReader(data: data, byte_pos: 0, bit_pos: 0, lsb_first: false)
+
+    static fn lsb_span(span: ByteSpan) -> BitReader:
+        BitReader(data: span.to_bytes(), byte_pos: 0, bit_pos: 0, lsb_first: true)
+
+    static fn msb_span(span: ByteSpan) -> BitReader:
+        BitReader(data: span.to_bytes(), byte_pos: 0, bit_pos: 0, lsb_first: false)
+
+    fn eof() -> bool:
+        self.byte_pos >= self.data.len()
+
+    fn bits_remaining() -> i64:
+        if self.byte_pos >= self.data.len():
+            return 0
+        ((self.data.len() - self.byte_pos) * 8) - self.bit_pos
+
+    me read_bits(n: i64) -> i64:
+        """Read `n` bits (1..64) in this reader's order, returning them as an
+        integer. Reads past end yield zero bits (fail closed)."""
+        if n < 1 or n > 64:
+            return 0
+        var result: i64 = 0
+        var i = 0
+        while i < n:
+            var bit = 0
+            if self.byte_pos < self.data.len():
+                val cur = self.data[self.byte_pos].to_i64()
+                if self.lsb_first:
+                    bit = (cur >> self.bit_pos) & 1
+                else:
+                    bit = (cur >> (7 - self.bit_pos)) & 1
+            if self.lsb_first:
+                result = result | (bit << i)
+            else:
+                result = (result << 1) | bit
+            self.bit_pos = self.bit_pos + 1
+            if self.bit_pos == 8:
+                self.bit_pos = 0
+                self.byte_pos = self.byte_pos + 1
+            i = i + 1
+        result
+
+    me align():
+        """Skip to the next byte boundary."""
+        if self.bit_pos > 0:
+            self.bit_pos = 0
+            self.byte_pos = self.byte_pos + 1

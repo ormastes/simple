@@ -1,0 +1,380 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/mir/mir_exported_types_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/mir_exported_types_spec.md
+# doc-path: doc/03_plan/sys_test/mir_exported_types_spec.md
+# doc-path: doc/04_architecture/mir_exported_types_spec.md
+# doc-path: doc/05_design/mir_exported_types_spec_oracles.md
+# @manual: primary
+
+"""
+# MIR Exported Type Lowering Specification
+
+**Feature IDs:** #SFFI-BIDIR #SFFI-MIR-TYPES
+**Category:** Compiler / MIR
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Verifies that HIR classes and structs are materialized into `MirModule.types`,
+including export metadata, field offsets, and explicit bit-width metadata.
+"""
+use std.spec.step
+
+use std.spec.step
+
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.hir.hir_definitions.{HirClass, HirStruct, HirField, HirFunction, HirParam, HirBlock, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.core.lexer_types.{Span}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.common.attributes.{ExportAttr, DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_hir_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: empty_span())
+
+fn make_i32_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(32, true))
+
+fn make_u8_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(8, false))
+
+fn dummy_expr() -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.UnitLit,
+        has_type_: false,
+        type_: make_hir_type(HirTypeKind.Unit),
+        span: empty_span()
+    )
+
+fn dummy_block() -> HirBlock:
+    HirBlock(
+        stmts: [],
+        has: true,
+        value: dummy_expr(),
+        span: empty_span()
+    )
+
+fn make_driver_function() -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: 30),
+        name: "register_null_block_driver",
+        type_params: [],
+        params: [],
+        return_type: make_hir_type(HirTypeKind.Unit),
+        body: dummy_block(),
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: nil,
+        export_attr: nil,
+        driver_manifest_attr: DriverManifestAttr(
+            kind: DriverManifestAttrKind.Driver,
+            driver_class: 0,
+            vendor: 0,
+            device_ids: [0],
+            version: "0.1",
+            abi: ""
+        ),
+        has_doc_comment: false,
+        doc_comment: "",
+        span: empty_span()
+    )
+
+fn make_field(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: dummy_expr(),
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: empty_span()
+    )
+
+fn make_bits_field(name: text, type_: HirType, bits_width: i64) -> HirField:
+    val field = make_field(name, type_)
+    field.has_bits_attr = true
+    field.bits_width = bits_width
+    field
+
+fn make_exported_class() -> HirClass:
+    HirClass(
+        symbol: SymbolId(id: 10),
+        name: "GpioRegister",
+        type_params: [],
+        fields: [
+            make_bits_field("mode", make_u8_type(), 4),
+            make_bits_field("output", make_u8_type(), 1),
+            make_bits_field("input", make_u8_type(), 1),
+            make_bits_field("speed", make_u8_type(), 2)
+        ],
+        methods: {},
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: empty_span(),
+        has_layout_attr: true,
+        layout_attr: LayoutAttr(layout_kind: LayoutKind.C, is_packed: false),
+        has_export_attr: true,
+        export_attr: ExportAttr(is_export_c: true, export_name: ""),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+
+fn make_plain_struct() -> HirStruct:
+    HirStruct(
+        symbol: SymbolId(id: 20),
+        name: "Point",
+        type_params: [],
+        fields: [
+            make_field("x", make_i32_type()),
+            make_field("y", make_i32_type())
+        ],
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: empty_span(),
+        has_layout_attr: true,
+        layout_attr: LayoutAttr(layout_kind: LayoutKind.C, is_packed: false),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+
+fn make_plain_enum() -> HirEnum:
+    HirEnum(
+        symbol: SymbolId(id: 21),
+        name: "Direction",
+        runtime_name: "test.mir.Direction",
+        type_params: [],
+        variants: [HirVariant(
+            symbol: SymbolId(id: 22),
+            name: "North",
+            kind: HirVariantKind.Unit,
+            has_discriminant: false,
+            discriminant: dummy_expr(),
+            span: empty_span()
+        )],
+        visibility: Visibility.Public,
+        is_public: true,
+        doc_comment: nil,
+        span: empty_span(),
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+
+fn point_construct_expr() -> HirExpr:
+    val i32_type = make_i32_type()
+    val x = HirExpr(kind: HirExprKind.IntLit(3, nil), has_type_: true, type_: i32_type, span: empty_span())
+    val y = HirExpr(kind: HirExprKind.IntLit(5, nil), has_type_: true, type_: i32_type, span: empty_span())
+    HirExpr(
+        kind: HirExprKind.Call(
+            HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 20), "Point"), has_type_: false,
+                type_: i32_type, span: empty_span()),
+            [
+                HirCallArg(has_name: false, name: "", value: x, span: empty_span()),
+                HirCallArg(has_name: false, name: "", value: y, span: empty_span())
+            ],
+            []
+        ),
+        has_type_: false,
+        type_: i32_type,
+        span: empty_span()
+    )
+
+fn make_prescan_function() -> HirFunction:
+    var fn_ = make_driver_function()
+    fn_.name = "construct_point"
+    fn_.body = HirBlock(stmts: [], has: true, value: point_construct_expr(), span: empty_span())
+    fn_
+
+fn make_owner(fn_: HirFunction) -> BootstrapHirModuleOwner:
+    BootstrapHirModuleOwner(
+        name: "test.mir",
+        is_entry: true,
+        symbols: [],
+        functions: [fn_],
+        constants: [],
+        enums: [make_plain_enum()],
+        structs: [make_plain_struct()],
+        classes: [make_exported_class()]
+    )
+
+fn make_module() -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    val driver_fn = make_driver_function()
+    functions[driver_fn.symbol] = driver_fn
+
+    var classes: Dict<SymbolId, HirClass> = {}
+    val cls = make_exported_class()
+    classes[cls.symbol] = cls
+
+    var structs: Dict<SymbolId, HirStruct> = {}
+    val struct_def = make_plain_struct()
+    structs[struct_def.symbol] = struct_def
+
+    var enums: Dict<SymbolId, HirEnum> = {}
+    val enum_def = make_plain_enum()
+    enums[enum_def.symbol] = enum_def
+
+    HirModule(
+        name: "test.mir",
+        path: "test.mir.spl",
+        imports: [],
+        exports: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        classes: classes,
+        structs: structs,
+        enums: enums,
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: []
+    )
+
+describe "MIR exported type lowering":
+    # @manual scenario evidence
+    it "materializes exported classes into MirModule.types with bit metadata":
+        # @req REQ-SSPEC-COMPILER
+        step("materializes exported classes into MirModule.types with bit metadata")
+        val hir_module = make_module()
+        val lowering = MirLowering.new(hir_module.symbols)
+
+        val mir_module = lowering.lower_module(hir_module)
+        val type_def = mir_module.types[SymbolId(id: 10)]
+
+        expect(type_def.is_export_c).to_equal(true)
+        expect(type_def.name).to_equal("GpioRegister")
+
+        match type_def.kind:
+            case Struct(fields):
+                expect(fields.len()).to_equal(4)
+                expect(fields[0].name).to_equal("mode")
+                expect(fields[0].has_bits_attr).to_equal(true)
+                expect(fields[0].bits_width).to_equal(4)
+                expect(fields[0].offset).to_equal(0)
+                expect(fields[3].bits_width).to_equal(2)
+                expect(fields[3].offset).to_equal(0)
+            case _:
+                fail("exported GPIO register type did not lower to Struct fields")
+
+    it "materializes plain structs into MirModule.types with computed offsets":
+        # @req REQ-SSPEC-COMPILER
+        step("materializes plain structs into MirModule.types with computed offsets")
+        val hir_module = make_module()
+        val lowering = MirLowering.new(hir_module.symbols)
+
+        val mir_module = lowering.lower_module(hir_module)
+        val type_def = mir_module.types[SymbolId(id: 20)]
+
+        expect(type_def.is_export_c).to_equal(false)
+        expect(type_def.name).to_equal("Point")
+
+        match type_def.kind:
+            case Struct(fields):
+                expect(fields.len()).to_equal(2)
+                expect(fields[0].offset).to_equal(0)
+                expect(fields[1].offset).to_equal(4)
+            case _:
+                fail("plain Point type did not lower to Struct fields")
+
+    it "propagates driver manifest attributes onto MIR functions":
+        # @req REQ-SSPEC-COMPILER
+        step("propagates driver manifest attributes onto MIR functions")
+        val hir_module = make_module()
+        val lowering = MirLowering.new(hir_module.symbols)
+
+        val mir_module = lowering.lower_module(hir_module)
+        val fn_ = mir_module.functions[SymbolId(id: 30)]
+
+        expect(fn_.has_driver_manifest_attr).to_equal(true)
+        expect(fn_.driver_manifest_attr.kind).to_equal(DriverManifestAttrKind.Driver)
+        expect(fn_.driver_manifest_attr.version).to_equal("0.1")
+
+describe "bootstrap owner registration and prescan parity":
+    it "matches established module registration for struct, class, and enum maps":
+        val hir_module = make_module()
+        val owner = make_owner(make_prescan_function())
+
+        bootstrap_type_registry_reset()
+        val direct = bootstrap_register_hir_type_defs(MirLowering.new(SymbolTable.new()), hir_module)
+        bootstrap_type_registry_reset()
+        var indexed = bootstrap_register_flat_type_defs_owner(MirLowering.new(SymbolTable.new()), owner)
+        indexed = bootstrap_register_flat_class_defs_owner(indexed, owner)
+
+        expect(indexed.field_map[20]).to_equal(direct.field_map[20])
+        expect(indexed.field_map[10]).to_equal(direct.field_map[10])
+        expect(indexed.struct_field_order["Point"]).to_equal(direct.struct_field_order["Point"])
+        expect(indexed.enum_variant_index["Direction"]).to_equal(direct.enum_variant_index["Direction"])
+        expect(indexed.enum_variant_index_q["test.mir.Direction"]).to_equal(
+            direct.enum_variant_index_q["test.mir.Direction"])
+        expect(indexed.builder.module.types[SymbolId(id: 20)].name).to_equal(
+            direct.builder.module.types[SymbolId(id: 20)].name)
+        expect(indexed.class_type_names["GpioRegister"]).to_equal(true)
+        expect(indexed.struct_field_has_default["GpioRegister"].len()).to_equal(4)
+
+    it "matches direct block prescan without transporting the owner root block":
+        val fn_ = make_prescan_function()
+        val owner = make_owner(fn_)
+
+        var direct = bootstrap_register_flat_type_defs_owner(MirLowering.new(SymbolTable.new()), owner)
+        direct.prescan_block_for_struct_types(fn_.body)
+        var indexed = bootstrap_register_flat_type_defs_owner(MirLowering.new(SymbolTable.new()), owner)
+        indexed.prescan_owner_function_for_struct_types(owner, 0)
+
+        expect(indexed.struct_field_type_name.has("Point")).to_equal(true)
+        expect(indexed.struct_field_type_name["Point"]).to_equal(direct.struct_field_type_name["Point"])
+        expect(indexed.struct_field_type_name["Point"].len()).to_equal(2)

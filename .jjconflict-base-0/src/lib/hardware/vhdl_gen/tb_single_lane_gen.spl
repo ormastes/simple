@@ -1,0 +1,670 @@
+# Structured generator for the four single-lane GHDL testbenches, byte-identical
+# to the proven goldens in examples/09_embedded/fpga_riscv/rtl/:
+#
+#   tb_rv32_nvme_fw_smoke.vhd       NVMe self-test firmware on rv32_exec_core
+#   tb_rv32_simpleos_boot_tiny.vhd  BRAM-only SimpleOS boot on rv32_exec_core_flat
+#   tb_rv32_tiny_bram_soc.vhd       rehearsal of the synthesizable rv32_bram_soc
+#   tb_rv64_soak.vhd                Adler-32 soak on soc_top_rv64_sim
+#
+# "Single-lane" means these four have NO XLEN sibling: each exists once, so
+# there is no rv32/rv64 pairing to factor. The sharing that IS real runs
+# ACROSS the four (and with the exec-core generator's section vocabulary):
+#
+#   all 4  library header, entity shell, clk/rst/uart_tx signal group,
+#          clk driver, DUT instantiation (vgtb_inst), reset-release process
+#   3 of 4 debug-UART tap signal pair, clocked tap process scaffold,
+#          debug-register stuck-dump report (vgtb_reg_dump_report)
+#   2 of 4 generic block with TINY_* budget knobs, budget banner report,
+#          UART line-accumulator body, wait-guard process
+#
+# XLEN still parameterises the widths even without a sibling: XlenConfig drives
+# the debug_* vector widths, the obs-port command/response widths, and the
+# words->bytes factor (bytes_per_reg) in the budget banners and compare loop.
+#
+# Determinism: arrays only, no Dict iteration during emission; two runs are
+# byte-identical.
+
+use std.hardware.riscv_common.xlen.XlenConfig
+use std.hardware.vhdl_gen.gen_types.*
+use std.hardware.vhdl_gen.tb_single_lane_types.*
+use std.hardware.vhdl_gen.tb_single_lane_sections.*
+
+fn tbsl_no_generics() -> [VgGenericSpec]:
+    var g: [VgGenericSpec] = []
+    g
+
+# ---------------------------------------------------------------------------
+# Shared descriptor groups
+# ---------------------------------------------------------------------------
+
+# clk / rst / uart_tx: identical declaration group in all four testbenches.
+fn tbsl_clk_rst_uart_signals() -> [VgTbDecl]:
+    var d: [VgTbDecl] = []
+    d = d.push(vgtb_decl("clk", 4, "std_logic", "'0'"))
+    d = d.push(vgtb_decl("rst", 4, "std_logic", "'1'"))
+    d = d.push(vgtb_decl("uart_tx", 8, "std_logic", ""))
+    d
+
+# The parallel debug-UART tap pair (valid + byte), used instead of serial
+# baud-decoding by the three tap-based testbenches. Column width 17 is the
+# group-local alignment the goldens use.
+fn tbsl_debug_tap_signals() -> [VgTbDecl]:
+    var d: [VgTbDecl] = []
+    d = d.push(vgtb_decl("debug_uart_valid", 17, "std_logic", ""))
+    d = d.push(vgtb_decl("debug_uart_byte", 17, "std_logic_vector(7 downto 0)", ""))
+    d
+
+# debug_<name> vector taps. `hi` is the MSB index of each tap's vector.
+fn tbsl_debug_reg_signals(names: [text], hi: [i64], name_w: i64) -> [VgTbDecl]:
+    var d: [VgTbDecl] = []
+    var i = 0
+    while i < names.len():
+        d = d.push(vgtb_decl("debug_" + names[i], name_w,
+            "std_logic_vector(" + hi[i].to_text() + " downto 0)", ""))
+        i = i + 1
+    d
+
+fn tbsl_done_signal() -> [VgTbDecl]:
+    var d: [VgTbDecl] = []
+    d = d.push(vgtb_decl("done", 5, "boolean", "false"))
+    d
+
+fn tbsl_core_port_assocs() -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a = a.push(vgtb_wire("clk"))
+    a = a.push(vgtb_wire("rst"))
+    a = a.push(vgtb_wire("uart_tx"))
+    a
+
+fn tbsl_tap_port_assocs() -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a = a.push(vgtb_wire("debug_uart_valid"))
+    a = a.push(vgtb_wire("debug_uart_byte"))
+    a
+
+fn tbsl_debug_reg_assocs(names: [text]) -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    var i = 0
+    while i < names.len():
+        a = a.push(vgtb_wire("debug_" + names[i]))
+        i = i + 1
+    a
+
+# CLK_FREQ / BAUD_RATE: the shrunk-divisor sim clocking every DUT here uses.
+fn tbsl_sim_clock_generics() -> [VgTbAssoc]:
+    var a: [VgTbAssoc] = []
+    a = a.push(vgtb_assoc("CLK_FREQ", "1_000_000"))
+    a = a.push(vgtb_assoc("BAUD_RATE", "115_200"))
+    a
+
+# `<GENERIC> * <bytes_per_reg>` — words-to-bytes for the budget banners.
+fn tbsl_words_to_bytes(gen_name: text, cfg: XlenConfig) -> text:
+    gen_name + " * " + cfg.bytes_per_reg.to_text()
+
+# The `variable lbuf/llen/ch` trio of the UART line accumulator.
+fn tbsl_line_accum_vars(buf_len: i64) -> [VgTbDecl]:
+    var d: [VgTbDecl] = []
+    d = d.push(vgtb_decl("lbuf", 5, "string(1 to " + buf_len.to_text() + ")", "(others => ' ')"))
+    d = d.push(vgtb_decl("llen", 5, "natural", "0"))
+    d = d.push(vgtb_decl("ch", 5, "character", ""))
+    d
+
+# UART line-accumulator body shared by boot-tiny and bram-soc: mirror hook,
+# byte->char, LF-terminated line report, marker hook, CR skip, buffer append.
+fn tbsl_line_accum_body(tag: text, buf_len: i64, pre_lines: [text], marker_lines: [text]) -> [text]:
+    var l: [text] = []
+    l = vg_append(l, pre_lines)
+    l = l.push(vgtb_tap_byte_to_char(8))
+    l = l.push("        if ch = LF then")
+    l = l.push("          report \"" + tag + "_UART_LINE: \" & lbuf(1 to llen) severity note;")
+    l = vg_append(l, marker_lines)
+    l = l.push("          llen := 0;")
+    l = l.push("        elsif ch /= CR then")
+    l = l.push("          if llen < " + buf_len.to_text() + " then")
+    l = l.push("            llen := llen + 1;")
+    l = l.push("            lbuf(llen) := ch;")
+    l = l.push("          end if;")
+    l = l.push("        end if;")
+    l
+
+# ---------------------------------------------------------------------------
+# tb_rv64_soak
+# ---------------------------------------------------------------------------
+
+fn tbsl_soak_decoder_process(byte_tag: text, sentinel_tag: text, sentinel: i64, bits: i64) -> [text]:
+    var vars: [VgTbDecl] = []
+    vars = vars.push(vgtb_decl("byte_value", 11, "integer", "0"))
+    var l: [text] = []
+    l = l.push("  process")
+    l = vg_append(l, vgtb_decls(4, "variable", vars))
+    l = l.push("  begin")
+    l = l.push("    wait until rst = '0';")
+    l = l.push("    loop")
+    l = vg_append(l, sl_soak_bit_sampler(bits))
+    l = vg_append(l, vgtb_report(6, "\"" + byte_tag + "=\" & integer'image(byte_value)", no_lines(), "note"))
+    l = l.push("      if byte_value = " + sentinel.to_text() + " then  -- '~' sentinel")
+    l = vg_append(l, vgtb_report(8, "\"" + sentinel_tag + "\"", no_lines(), "note"))
+    l = l.push("        stop;")
+    l = l.push("      end if;")
+    l = vg_append(l, sl_soak_resync())
+    l = l.push("    end loop;")
+    l = l.push("  end process;")
+    l
+
+fn generate_tb_rv64_soak() -> text:
+    val cfg = XlenConfig.rv64()
+    val name = "tb_rv64_soak"
+    val arch = "sim"
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(vgtb_library_header()))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(sl_soak_head_comment()))
+    parts = parts.push(vgtb_join(vgtb_entity(name, tbsl_no_generics())))
+    parts = parts.push("")
+    parts = parts.push(vgtb_arch_head(arch, name))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", tbsl_clk_rst_uart_signals())))
+    var consts: [VgTbDecl] = []
+    consts = consts.push(vgtb_decl("BIT_TIME", 9, "time", "8680 ns"))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "constant", consts)))
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_clock_driver(5))
+    parts = parts.push("")
+    var ports = tbsl_core_port_assocs()
+    ports = ports.push(vgtb_assoc("uart_rx", "'1'"))
+    var prows: [i64] = []
+    prows = prows.push(ports.len())
+    val inst = VgTbInst(
+        label: "dut", entity_name: "soc_top_rv" + cfg.xlen.to_text() + "_sim",
+        generics: [], generic_rows: [], ports: ports, port_rows: prows)
+    parts = parts.push(vgtb_join(vgtb_inst(inst)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_reset_process(no_lines(), "200 ns")))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(tbsl_soak_decoder_process("SOAK_BYTE", "SOAK_SENTINEL_SEEN", 126, 8)))
+    parts = parts.push(vgtb_arch_foot(arch))
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# tb_rv32_nvme_fw_smoke
+# ---------------------------------------------------------------------------
+
+fn tbsl_nvme_tap_body(tag: text, fail_len: i64) -> [text]:
+    var l: [text] = []
+    l = l.push(vgtb_tap_byte_to_char(8))
+    l = vg_append(l, vgtb_report(8,
+        "\"" + tag + "_BYTE=\" & integer'image(to_integer(unsigned(debug_uart_byte)))",
+        ["\" '\" & ch & \"'\""], "note"))
+    l = vg_append(l, sl_nvme_window_shift(fail_len))
+    l = l.push("        if win = MARKER then")
+    l = vg_append(l, vgtb_report(10, "\"" + tag + "_MARKER_SEEN: \" & MARKER", no_lines(), "note"))
+    l = vg_append(l, vgtb_report(10, "\"" + tag + "_PASS\"", no_lines(), "note"))
+    l = l.push("          done <= true;")
+    l = l.push("          stop;")
+    l = l.push("        elsif fwin = \"FAIL\" then")
+    l = vg_append(l, vgtb_report(10, "\"" + tag + "_FAIL_MARKER\"", no_lines(), "note"))
+    l = l.push("        end if;")
+    l
+
+fn generate_tb_rv32_nvme_fw_smoke() -> text:
+    val cfg = XlenConfig.rv32()
+    val name = "tb_rv32_nvme_fw_smoke"
+    val arch = "sim"
+    val tag = "RV32_NVME_FW"
+    val marker = "ALL RV32 NVME FW CHECKS PASS"
+    # Narrow taps: this core exports truncated debug vectors (pc/ra/sp 16-bit,
+    # a0 8-bit, phase 4-bit) rather than full XLEN registers.
+    var reg_names: [text] = []
+    reg_names = reg_names.push("pc")
+    reg_names = reg_names.push("ins")
+    reg_names = reg_names.push("a0")
+    reg_names = reg_names.push("ra")
+    reg_names = reg_names.push("sp")
+    reg_names = reg_names.push("phase")
+    var reg_hi: [i64] = []
+    reg_hi = reg_hi.push(15)
+    reg_hi = reg_hi.push(cfg.sign_bit)
+    reg_hi = reg_hi.push(7)
+    reg_hi = reg_hi.push(15)
+    reg_hi = reg_hi.push(15)
+    reg_hi = reg_hi.push(3)
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(sl_nvme_head_comment(marker, "rv32_payload.mem")))
+    parts = parts.push(vgtb_join(vgtb_library_header()))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_entity(name, tbsl_no_generics())))
+    parts = parts.push("")
+    parts = parts.push(vgtb_arch_head(arch, name))
+    var sigs = tbsl_clk_rst_uart_signals()
+    sigs = vgtb_append_decls(sigs, tbsl_debug_tap_signals())
+    sigs = vgtb_append_decls(sigs, tbsl_debug_reg_signals(reg_names, reg_hi, 12))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", sigs)))
+    parts = parts.push("")
+    var consts: [VgTbDecl] = []
+    consts = consts.push(vgtb_decl("MARKER", 7, "string", "\"" + marker + "\""))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "constant", consts)))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", tbsl_done_signal())))
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_clock_driver(5))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(sl_nvme_inst_comment()))
+    var ports = tbsl_core_port_assocs()
+    ports = vgtb_append_assocs(ports, tbsl_tap_port_assocs())
+    ports = vgtb_append_assocs(ports, tbsl_debug_reg_assocs(reg_names))
+    var prows: [i64] = []
+    prows = vgtb_append_i64(prows, [3, 2, 3, 3])
+    var grows: [i64] = []
+    grows = grows.push(2)
+    val inst = VgTbInst(
+        label: "u_core", entity_name: "rv" + cfg.xlen.to_text() + "_exec_core",
+        generics: tbsl_sim_clock_generics(), generic_rows: grows,
+        ports: ports, port_rows: prows)
+    parts = parts.push(vgtb_join(vgtb_inst(inst)))
+    parts = parts.push("")
+    parts = parts.push("  -- Release reset.")
+    parts = parts.push(vgtb_join(vgtb_reset_process(no_lines(), "200 ns")))
+    parts = parts.push("")
+    parts = parts.push("  -- Accumulate UART bytes; match the PASS marker and the FAIL sentinel.")
+    var tvars: [VgTbDecl] = []
+    tvars = tvars.push(vgtb_decl("win", 5, "string(1 to MARKER'length)", "(others => ' ')"))
+    tvars = tvars.push(vgtb_decl("fwin", 5, "string(1 to 4)", "(others => ' ')"))
+    tvars = tvars.push(vgtb_decl("ch", 5, "character", ""))
+    tvars = tvars.push(vgtb_decl("ncols", 6, "natural", "0"))
+    parts = parts.push(vgtb_join(vgtb_uart_tap_process(tvars, tbsl_nvme_tap_body(tag, 4))))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(sl_nvme_timeout_comment()))
+    var guard: [text] = []
+    guard = vg_append(guard, vgtb_reg_dump_report(6, tag + "_STUCK", reg_names, "note"))
+    guard = vg_append(guard, vgtb_report_sev_line(6,
+        "\"" + tag + "_TIMEOUT: marker not seen (fw hung or UART stalled)\"",
+        no_lines(), "failure"))
+    parts = parts.push(vgtb_join(vgtb_guard_process(no_lines(), "2 ms", guard)))
+    parts = parts.push(vgtb_arch_foot(arch))
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# tb_rv32_simpleos_boot_tiny
+# ---------------------------------------------------------------------------
+
+# `if/elsif` chain over terminal markers. Shared by the boot-tiny testbench
+# (length-prefix match, run stops on the arm) and the NVMe BRAM-SoC rehearsal
+# (exact-length match against MARKER, run continues so the obs port can be
+# exercised); `trailer` is the per-arm action line.
+fn tbsl_marker_arms(tag: text, arms: [VgTbMarkerArm], trailer: text) -> [text]:
+    var l: [text] = []
+    var i = 0
+    while i < arms.len():
+        val a = arms[i]
+        var kw = "elsif"
+        if i == 0:
+            kw = "if"
+        l = l.push("          " + kw + " llen " + a.cmp + " " + a.len_expr +
+            " and lbuf(1 to " + a.len_expr + ") = " + a.match_expr + " then")
+        l = vg_append(l, vgtb_report(12,
+            "\"" + tag + "_BOOT_DONE reached=" + a.reached + "\"", no_lines(), "note"))
+        l = l.push("            " + trailer)
+        i = i + 1
+    l = l.push("          end if;")
+    l
+
+fn tbsl_marker_arm(cmp: text, len_expr: text, match_expr: text, reached: text) -> VgTbMarkerArm:
+    VgTbMarkerArm(cmp: cmp, len_expr: len_expr, match_expr: match_expr, reached: reached)
+
+fn generate_tb_rv32_simpleos_boot_tiny() -> text:
+    val cfg = XlenConfig.rv32()
+    val name = "tb_rv32_simpleos_boot_tiny"
+    val arch = "sim"
+    val tag = "RV32_TINY"
+    var reg_names: [text] = []
+    reg_names = reg_names.push("pc")
+    reg_names = reg_names.push("ins")
+    reg_names = reg_names.push("a0")
+    reg_names = reg_names.push("ra")
+    reg_names = reg_names.push("sp")
+    var reg_hi: [i64] = []
+    var ri = 0
+    while ri < reg_names.len():
+        reg_hi = reg_hi.push(cfg.sign_bit)
+        ri = ri + 1
+
+    var gens: [VgGenericSpec] = []
+    gens = gens.push(VgGenericSpec(pre_comments: sl_boot_tiny_ram_generic_comment(),
+        name: "TINY_RAM_WORDS", name_w: 17, ty: "natural", default_val: "131072"))
+    gens = gens.push(VgGenericSpec(pre_comments: no_lines(),
+        name: "TINY_RDISK_WORDS", name_w: 17, ty: "natural", default_val: "262144"))
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(sl_boot_tiny_head_comment()))
+    parts = parts.push(vgtb_join(vgtb_library_header()))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_entity(name, gens)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_arch_head(arch, name))
+    var sigs = tbsl_clk_rst_uart_signals()
+    sigs = vgtb_append_decls(sigs, tbsl_debug_tap_signals())
+    sigs = vgtb_append_decls(sigs, tbsl_debug_reg_signals(reg_names, reg_hi, 12))
+    sigs = vgtb_append_decls(sigs, tbsl_done_signal())
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", sigs)))
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_clock_driver(5))
+    parts = parts.push("")
+    var gmap = tbsl_sim_clock_generics()
+    gmap = gmap.push(vgtb_assoc("RAM_WORDS", "TINY_RAM_WORDS"))
+    gmap = gmap.push(vgtb_assoc("RDISK_WORDS", "TINY_RDISK_WORDS"))
+    var grows: [i64] = []
+    grows = vgtb_append_i64(grows, [2, 2])
+    var ports = tbsl_core_port_assocs()
+    ports = vgtb_append_assocs(ports, tbsl_tap_port_assocs())
+    ports = vgtb_append_assocs(ports, tbsl_debug_reg_assocs(reg_names))
+    var prows: [i64] = []
+    prows = vgtb_append_i64(prows, [3, 2, 3, 2])
+    val inst = VgTbInst(
+        label: "u_core", entity_name: "rv" + cfg.xlen.to_text() + "_exec_core_flat",
+        generics: gmap, generic_rows: grows, ports: ports, port_rows: prows)
+    parts = parts.push(vgtb_join(vgtb_inst(inst)))
+    parts = parts.push("")
+    var budget: [VgTbAssoc] = []
+    budget = budget.push(vgtb_assoc("ram_bytes", tbsl_words_to_bytes("TINY_RAM_WORDS", cfg)))
+    budget = budget.push(vgtb_assoc("rdisk_bytes", tbsl_words_to_bytes("TINY_RDISK_WORDS", cfg)))
+    parts = parts.push(vgtb_join(vgtb_reset_process(
+        vgtb_int_fields_report(4, tag + "_BUDGET", budget, "note"), "200 ns")))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(sl_boot_tiny_tap_comment()))
+    var markers: [VgTbMarkerArm] = []
+    markers = markers.push(tbsl_marker_arm(">=", "11", "\"TEST FAILED\"", "TEST_FAILED"))
+    markers = markers.push(tbsl_marker_arm(">=", "11", "\"TEST PASSED\"", "TEST_PASSED"))
+    val body = tbsl_line_accum_body(tag, 256, no_lines(),
+        tbsl_marker_arms(tag, markers, "done <= true; stop;"))
+    parts = parts.push(vgtb_join(vgtb_uart_tap_process(tbsl_line_accum_vars(256), body)))
+    parts = parts.push("")
+    var guard: [text] = []
+    guard = vg_append(guard, vgtb_reg_dump_report(6, tag + "_BOOT_STUCK", reg_names, "note"))
+    guard = vg_append(guard, vgtb_report(6,
+        "\"" + tag + "_BOOT_STUCK: no terminal marker within window\"", no_lines(), "note"))
+    guard = guard.push("      stop;")
+    var ghead: [text] = []
+    ghead = ghead.push("    -- Safety timeout only; a terminal marker (TEST PASSED/FAILED) stops earlier.")
+    parts = parts.push(vgtb_join(vgtb_guard_process(ghead, "200 ms", guard)))
+    parts = parts.push(vgtb_arch_foot(arch))
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# tb_rv32_tiny_bram_soc
+# ---------------------------------------------------------------------------
+
+fn tbsl_bram_marker_arms(tag: text, pass_marker: text, fail_marker: text, mlen: i64) -> [text]:
+    val ml = mlen.to_text()
+    var l: [text] = []
+    l = l.push("          if llen >= " + ml + " and (lbuf(1 to " + ml + ") = \"" + pass_marker +
+        "\" or lbuf(1 to " + ml + ") = \"" + fail_marker + "\") then")
+    l = l.push("            if lbuf(1 to " + ml + ") = \"" + pass_marker + "\" then")
+    l = vg_append(l, vgtb_report(14, "\"" + tag + "_BOOT_DONE reached=TEST_PASSED\"", no_lines(), "note"))
+    l = l.push("            else")
+    l = vg_append(l, vgtb_report(14, "\"" + tag + "_BOOT_DONE reached=TEST_FAILED\"", no_lines(), "note"))
+    l = l.push("            end if;")
+    l = l.push("            done <= true;")
+    l = l.push("          end if;")
+    l
+
+# --- rv32_bram_soc rehearsal groups, shared by both BRAM-SoC testbenches ---
+
+# debug_pc + observation-port signals + the done flag.
+fn tbsl_bram_soc_obs_signals(cfg: XlenConfig, resp_w: i64) -> [VgTbDecl]:
+    val word_ty = "std_logic_vector(" + cfg.sign_bit.to_text() + " downto 0)"
+    var d: [VgTbDecl] = []
+    d = d.push(vgtb_decl("debug_pc", 9, word_ty, ""))
+    d = d.push(vgtb_decl("obs_cmd", 8, word_ty, "(others => '0')"))
+    d = d.push(vgtb_decl("obs_cmd_valid", 14, "std_logic", "'0'"))
+    d = d.push(vgtb_decl("obs_resp", 9, "std_logic_vector(" + (resp_w - 1).to_text() + " downto 0)", ""))
+    d = d.push(vgtb_decl("done", 5, "boolean", "false"))
+    d
+
+# Capture-buffer mirror: bound constant, array type, storage + fill level.
+fn tbsl_bram_mirror_block() -> [text]:
+    var mirror_const: [VgTbDecl] = []
+    mirror_const = mirror_const.push(vgtb_decl_c(sl_bram_mirror_comment(), "MIRROR_MAX", 11, "natural", "8192"))
+    var l = vgtb_decls(2, "constant", mirror_const)
+    l = l.push("  type byte_arr_t is array (0 to MIRROR_MAX - 1) of std_logic_vector(7 downto 0);")
+    var mirror_sigs: [VgTbDecl] = []
+    mirror_sigs = mirror_sigs.push(vgtb_decl("mirror", 7, "byte_arr_t", "(others => (others => '0'))"))
+    mirror_sigs = mirror_sigs.push(vgtb_decl("mirror_len", 11, "natural", "0"))
+    l = vg_append(l, vgtb_decls(2, "signal", mirror_sigs))
+    l
+
+# The rv32_bram_soc instantiation — identical in both rehearsals; only the
+# TINY_* generic DEFAULTS (in the entity) differ between them.
+fn tbsl_bram_soc_inst(cfg: XlenConfig) -> VgTbInst:
+    var gmap = tbsl_sim_clock_generics()
+    gmap = gmap.push(vgtb_assoc("RAM_WORDS", "TINY_RAM_WORDS"))
+    gmap = gmap.push(vgtb_assoc("RDISK_WORDS", "TINY_RDISK_WORDS"))
+    gmap = gmap.push(vgtb_assoc("UARTBUF_WORDS", "TINY_UARTBUF_WORDS"))
+    gmap = gmap.push(vgtb_assoc("RAM_INIT_FILE", "\"rv32_flat.mem\""))
+    gmap = gmap.push(vgtb_assoc("RDISK_INIT_FILE", "\"rv32_ramdisk.mem\""))
+    var grows: [i64] = []
+    grows = vgtb_append_i64(grows, [2, 2, 1, 2])
+    var ports = tbsl_core_port_assocs()
+    ports = ports.push(vgtb_wire("obs_cmd"))
+    ports = ports.push(vgtb_wire("obs_cmd_valid"))
+    ports = ports.push(vgtb_wire("obs_resp"))
+    ports = vgtb_append_assocs(ports, tbsl_tap_port_assocs())
+    ports = ports.push(vgtb_wire("debug_pc"))
+    var prows: [i64] = []
+    prows = vgtb_append_i64(prows, [3, 3, 2, 1])
+    VgTbInst(
+        label: "u_soc", entity_name: "rv" + cfg.xlen.to_text() + "_bram_soc",
+        generics: gmap, generic_rows: grows, ports: ports, port_rows: prows)
+
+# The three-field budget banner both rehearsals print before releasing reset.
+fn tbsl_bram_budget_fields(cfg: XlenConfig) -> [VgTbAssoc]:
+    var b: [VgTbAssoc] = []
+    b = b.push(vgtb_assoc("ram_bytes", tbsl_words_to_bytes("TINY_RAM_WORDS", cfg)))
+    b = b.push(vgtb_assoc("rdisk_bytes", tbsl_words_to_bytes("TINY_RDISK_WORDS", cfg)))
+    b = b.push(vgtb_assoc("uartbuf_bytes", tbsl_words_to_bytes("TINY_UARTBUF_WORDS", cfg)))
+    b
+
+# Observation-port exercise, shared by both BRAM-SoC rehearsals. `status_ok`
+# adds the pass/fail-flag assertion block, which only the SimpleOS rehearsal
+# has (the NVMe firmware never sets the SoC's hardwired pass_seen flag, so its
+# verdict comes from the transcript line instead — see the file header NOTE).
+fn tbsl_bram_obs_process(cfg: XlenConfig, tag: text, magic: text, resp_w: i64, status_ok: bool) -> [text]:
+    val bpw = cfg.bytes_per_reg
+    var vars: [VgTbDecl] = []
+    vars = vars.push(vgtb_decl("d", 2, "std_logic_vector(" + cfg.sign_bit.to_text() + " downto 0)", ""))
+    vars = vars.push(vgtb_decl("nbytes", 7, "natural", ""))
+    vars = vars.push(vgtb_decl("widx", 5, "natural", ""))
+    vars = vars.push(vgtb_decl("mism", 5, "natural", ""))
+    vars = vars.push(vgtb_decl("cmdv", 5, "std_logic_vector(" + cfg.sign_bit.to_text() + " downto 0)", ""))
+
+    var l: [text] = []
+    l = l.push("  process")
+    l = vg_append(l, sl_bram_obs_procedure(cfg.xlen, resp_w, tag))
+    l = vg_append(l, vgtb_decls(4, "variable", vars))
+    l = l.push("  begin")
+    l = l.push("    wait until done for 400 ms;")
+    l = l.push("    if not done then")
+    var pc_only: [text] = []
+    pc_only = pc_only.push("pc")
+    l = vg_append(l, vgtb_reg_dump_report(6, tag + "_BOOT_STUCK", pc_only, "note"))
+    l = l.push("    end if;")
+    l = vg_append(l, sl_bram_settle())
+    l = l.push("")
+    l = l.push("    obs_do(x\"00000000\", d);")
+    l = l.push("    if d = x\"" + magic + "\" then")
+    l = vg_append(l, vgtb_report(6, "\"" + tag + "_OBS_MAGIC_OK\"", no_lines(), "note"))
+    l = l.push("    else")
+    l = vg_append(l, vgtb_report(6, "\"" + tag + "_OBS_MAGIC_BAD data=\" & to_hstring(d)", no_lines(), "note"))
+    l = l.push("    end if;")
+    l = l.push("")
+    l = l.push("    obs_do(x\"00000001\", d);")
+    var stails: [text] = []
+    stails = stails.push("\" fail=\" & std_logic'image(d(" + (cfg.sign_bit - 1).to_text() + "))")
+    stails = stails.push("\" count=\" & integer'image(to_integer(unsigned(d(23 downto 0))))")
+    l = vg_append(l, vgtb_report(4,
+        "\"" + tag + "_OBS_STATUS pass=\" & std_logic'image(d(" + cfg.sign_bit.to_text() + "))",
+        stails, "note"))
+    if status_ok:
+        l = l.push("    if d(" + cfg.sign_bit.to_text() + ") = '1' and d(" + (cfg.sign_bit - 1).to_text() + ") = '0' then")
+        l = vg_append(l, vgtb_report(6, "\"" + tag + "_OBS_STATUS_OK\"", no_lines(), "note"))
+        l = l.push("    end if;")
+    l = l.push("    nbytes := to_integer(unsigned(d(23 downto 0)));")
+    l = l.push("    if nbytes > " + tbsl_words_to_bytes("TINY_UARTBUF_WORDS", cfg) + " then")
+    l = l.push("      nbytes := " + tbsl_words_to_bytes("TINY_UARTBUF_WORDS", cfg) + ";")
+    l = l.push("    end if;")
+    l = l.push("")
+    l = vg_append(l, sl_bram_compare_loop(bpw))
+    l = l.push("    if mism = 0 and nbytes > 0 then")
+    l = vg_append(l, vgtb_report(6,
+        "\"" + tag + "_OBS_UART_MATCH bytes=\" & integer'image(nbytes)", no_lines(), "note"))
+    l = l.push("    else")
+    var mtails: [text] = []
+    mtails = mtails.push("\" mismatches=\" & integer'image(mism)")
+    l = vg_append(l, vgtb_report(6,
+        "\"" + tag + "_OBS_UART_MISMATCH bytes=\" & integer'image(nbytes)", mtails, "note"))
+    l = l.push("    end if;")
+    l = l.push("    stop;")
+    l = l.push("  end process;")
+    l
+
+fn generate_tb_rv32_tiny_bram_soc() -> text:
+    val cfg = XlenConfig.rv32()
+    val name = "tb_rv32_tiny_bram_soc"
+    val arch = "sim"
+    val tag = "RV32_BRAMSOC"
+    val resp_w = 2 * cfg.xlen
+
+    var gens: [VgGenericSpec] = []
+    gens = gens.push(VgGenericSpec(pre_comments: no_lines(),
+        name: "TINY_RAM_WORDS", name_w: 17, ty: "natural", default_val: "131072"))
+    gens = gens.push(VgGenericSpec(pre_comments: no_lines(),
+        name: "TINY_RDISK_WORDS", name_w: 17, ty: "natural", default_val: "262144"))
+    gens = gens.push(VgGenericSpec(pre_comments: no_lines(),
+        name: "TINY_UARTBUF_WORDS", name_w: 19, ty: "natural", default_val: "2048"))
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(sl_bram_head_comment()))
+    parts = parts.push(vgtb_join(vgtb_library_header()))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_entity(name, gens)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_arch_head(arch, name))
+    var sigs = tbsl_clk_rst_uart_signals()
+    sigs = vgtb_append_decls(sigs, tbsl_debug_tap_signals())
+    sigs = vgtb_append_decls(sigs, tbsl_bram_soc_obs_signals(cfg, resp_w))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", sigs)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(tbsl_bram_mirror_block()))
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_join(sl_bram_clock_comment()))
+    parts = parts.push(vgtb_clock_driver(5))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_inst(tbsl_bram_soc_inst(cfg))))
+    parts = parts.push("")
+    val budget = tbsl_bram_budget_fields(cfg)
+    parts = parts.push(vgtb_join(vgtb_reset_process(
+        vgtb_int_fields_report(4, tag + "_BUDGET", budget, "note"), "2 us")))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(sl_bram_tap_comment()))
+    val body = tbsl_line_accum_body(tag, 256, sl_bram_mirror_capture(),
+        tbsl_bram_marker_arms(tag, "TEST PASSED", "TEST FAILED", 11))
+    parts = parts.push(vgtb_join(vgtb_uart_tap_process(tbsl_line_accum_vars(256), body)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(sl_bram_obs_process_comment("boot")))
+    parts = parts.push(vgtb_join(tbsl_bram_obs_process(cfg, tag, "51F0B007", resp_w, true)))
+    parts = parts.push(vgtb_arch_foot(arch))
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# tb_rv32_nvme_bram_soc
+# ---------------------------------------------------------------------------
+#
+# The KV260 silicon-lane sibling of tb_rv32_tiny_bram_soc: same rv32_bram_soc
+# DUT, same signal set, same mirror/capture/observation datapath — only the
+# firmware under test differs (NVMe self-test instead of the SimpleOS kernel).
+# Everything below reuses the tiny-BRAM descriptors and emitters; the deltas
+# are the generic defaults, the marker arms (exact MARKER match, no `stop`),
+# the missing OBS_STATUS_OK block, and the file header.
+
+fn generate_tb_rv32_nvme_bram_soc() -> text:
+    val cfg = XlenConfig.rv32()
+    val name = "tb_rv32_nvme_bram_soc"
+    val arch = "sim"
+    val tag = "RV32_NVMEBRAM"
+    val marker = "ALL RV32 NVME FW CHECKS PASS"
+    val resp_w = 2 * cfg.xlen
+
+    var gens: [VgGenericSpec] = []
+    gens = gens.push(VgGenericSpec(pre_comments: no_lines(),
+        name: "TINY_RAM_WORDS", name_w: 19, ty: "natural", default_val: "16384"))
+    gens = gens.push(VgGenericSpec(pre_comments: no_lines(),
+        name: "TINY_RDISK_WORDS", name_w: 19, ty: "natural", default_val: "1024"))
+    gens = gens.push(VgGenericSpec(pre_comments: no_lines(),
+        name: "TINY_UARTBUF_WORDS", name_w: 19, ty: "natural", default_val: "2048"))
+
+    var parts: [text] = []
+    parts = parts.push(vgtb_join(sl_nvme_bram_head_comment(marker)))
+    parts = parts.push(vgtb_join(vgtb_library_header()))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_entity(name, gens)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_arch_head(arch, name))
+    var sigs = tbsl_clk_rst_uart_signals()
+    sigs = vgtb_append_decls(sigs, tbsl_debug_tap_signals())
+    sigs = vgtb_append_decls(sigs, tbsl_bram_soc_obs_signals(cfg, resp_w))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "signal", sigs)))
+    parts = parts.push("")
+    var consts: [VgTbDecl] = []
+    consts = consts.push(vgtb_decl("MARKER", 7, "string", "\"" + marker + "\""))
+    parts = parts.push(vgtb_join(vgtb_decls(2, "constant", consts)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(tbsl_bram_mirror_block()))
+    parts = parts.push("begin")
+    parts = parts.push(vgtb_join(sl_bram_clock_comment()))
+    parts = parts.push(vgtb_clock_driver(5))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_inst(tbsl_bram_soc_inst(cfg))))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(vgtb_reset_process(
+        vgtb_int_fields_report(4, tag + "_BUDGET", tbsl_bram_budget_fields(cfg), "note"), "2 us")))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(sl_bram_tap_comment()))
+    var markers: [VgTbMarkerArm] = []
+    markers = markers.push(tbsl_marker_arm("=", "MARKER'length", "MARKER", "NVME_FW_PASS"))
+    markers = markers.push(tbsl_marker_arm("=", "4", "\"FAIL\"", "NVME_FW_FAIL"))
+    val body = tbsl_line_accum_body(tag, 256, sl_bram_mirror_capture(),
+        tbsl_marker_arms(tag, markers, "done <= true;"))
+    parts = parts.push(vgtb_join(vgtb_uart_tap_process(tbsl_line_accum_vars(256), body)))
+    parts = parts.push("")
+    parts = parts.push(vgtb_join(sl_bram_obs_process_comment("firmware")))
+    parts = parts.push(vgtb_join(tbsl_bram_obs_process(cfg, tag, "51F0B007", resp_w, false)))
+    parts = parts.push(vgtb_arch_foot(arch))
+    parts.join("\n") + "\n"
+
+# ---------------------------------------------------------------------------
+# Public entry
+# ---------------------------------------------------------------------------
+
+# File names (without directory) of the four single-lane testbenches, in a
+# fixed order — arrays only, so repeated generation is byte-identical.
+fn single_lane_tb_names() -> [text]:
+    var n: [text] = []
+    n = n.push("tb_rv32_nvme_bram_soc.vhd")
+    n = n.push("tb_rv32_nvme_fw_smoke.vhd")
+    n = n.push("tb_rv32_simpleos_boot_tiny.vhd")
+    n = n.push("tb_rv32_tiny_bram_soc.vhd")
+    n = n.push("tb_rv64_soak.vhd")
+    n
+
+# Generate one testbench by file name (as returned by single_lane_tb_names()).
+fn generate_single_lane_tb(file_name: text) -> text:
+    if file_name == "tb_rv32_nvme_bram_soc.vhd":
+        generate_tb_rv32_nvme_bram_soc()
+    elif file_name == "tb_rv32_nvme_fw_smoke.vhd":
+        generate_tb_rv32_nvme_fw_smoke()
+    elif file_name == "tb_rv32_simpleos_boot_tiny.vhd":
+        generate_tb_rv32_simpleos_boot_tiny()
+    elif file_name == "tb_rv32_tiny_bram_soc.vhd":
+        generate_tb_rv32_tiny_bram_soc()
+    elif file_name == "tb_rv64_soak.vhd":
+        generate_tb_rv64_soak()
+    else:
+        ""

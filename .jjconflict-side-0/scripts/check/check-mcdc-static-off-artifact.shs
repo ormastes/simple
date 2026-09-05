@@ -1,0 +1,98 @@
+#!/bin/sh
+# Compiler-independent ELF proof for the MC/DC static-off contract.
+#
+# The control and static-off executables must be produced from the same source
+# and flags.  Static-off is accepted only when all runtime-relevant artifact
+# surfaces are identical and no MC/DC material remains addressable.
+set -eu
+
+fail() { echo "mcdc-static-off-artifact: FAIL reason=$1" >&2; exit 1; }
+usage() { echo "usage: $0 CONTROL_ELF STATIC_OFF_ELF [EVIDENCE_DIR]" >&2; exit 2; }
+
+[ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
+control=$1
+static_off=$2
+out=${3:-build/mcdc-static-off-artifact}
+
+for tool in readelf objcopy nm strings sha256sum awk cmp; do
+    command -v "$tool" >/dev/null 2>&1 || fail "tool-$tool-missing"
+done
+[ -f "$control" ] || fail control-missing
+[ -f "$static_off" ] || fail static-off-missing
+readelf -h "$control" >/dev/null 2>&1 || fail control-not-elf
+readelf -h "$static_off" >/dev/null 2>&1 || fail static-off-not-elf
+mkdir -p "$out"
+
+# Compare every SHF_ALLOC section byte-for-byte. Notes are included: allowing
+# policy receipts or build IDs to differ would leave nonzero static-off bytes.
+alloc_sections() {
+    readelf -SW "$1" | awk '
+        $1 ~ /^\[[0-9]+\]$/ { name=$2; flags=$8 }
+        $1 == "[" { name=$3; flags=$9 }
+        flags ~ /A/ && name != ".bss" && name != ".tbss" && name !~ /^\.note/ { print name }
+    ' | LC_ALL=C sort -u
+}
+alloc_sections "$control" >"$out/control.alloc-sections"
+alloc_sections "$static_off" >"$out/static-off.alloc-sections"
+cmp -s "$out/control.alloc-sections" "$out/static-off.alloc-sections" ||
+    fail alloc-section-set-differs
+
+: >"$out/alloc-section-sha256.tsv"
+while IFS= read -r section; do
+    [ -n "$section" ] || continue
+    safe=$(printf '%s' "$section" | tr '/.' '__')
+    objcopy --dump-section "$section=$out/control.$safe.bin" "$control" 2>/dev/null ||
+        fail "control-section-read-$safe"
+    objcopy --dump-section "$section=$out/static-off.$safe.bin" "$static_off" 2>/dev/null ||
+        fail "static-off-section-read-$safe"
+    cmp -s "$out/control.$safe.bin" "$out/static-off.$safe.bin" ||
+        fail "alloc-section-bytes-differ-$safe"
+    hash=$(sha256sum "$out/static-off.$safe.bin" | awk '{print $1}')
+    printf '%s\t%s\n' "$section" "$hash" >>"$out/alloc-section-sha256.tsv"
+done <"$out/control.alloc-sections"
+
+# BSS has no file bytes, so compare its size/alignment through the normalized
+# section table. Also compare symbols, relocations, and dynamic imports: these
+# surfaces catch hidden tables, calls, loader edges, and addressable payloads.
+normalize_sections() {
+    readelf -SW "$1" | awk '$1 ~ /^\[[0-9]+\]$/ || $1 == "[" { print }'
+}
+normalize_sections "$control" >"$out/control.sections"
+normalize_sections "$static_off" >"$out/static-off.sections"
+cmp -s "$out/control.sections" "$out/static-off.sections" || fail section-layout-differs
+
+nm -P "$control" | LC_ALL=C sort >"$out/control.symbols"
+nm -P "$static_off" | LC_ALL=C sort >"$out/static-off.symbols"
+cmp -s "$out/control.symbols" "$out/static-off.symbols" || fail symbol-table-differs
+
+readelf -Wr "$control" | sed '/^$/d' >"$out/control.relocations"
+readelf -Wr "$static_off" | sed '/^$/d' >"$out/static-off.relocations"
+cmp -s "$out/control.relocations" "$out/static-off.relocations" || fail relocations-differ
+
+readelf -Wd "$control" >"$out/control.dynamic"
+readelf -Wd "$static_off" >"$out/static-off.dynamic"
+cmp -s "$out/control.dynamic" "$out/static-off.dynamic" || fail dynamic-table-differs
+
+# Exact equivalence is primary. This explicit scan gives a useful diagnostic
+# when both fixtures were accidentally instrumented and therefore identical.
+for surface in symbols relocations dynamic; do
+    if grep -Eiq 'rt_mcdc|mcdc_(probe|manifest|aspect|event|record|vector|dynload)|coverage_(record|log|probe)|aspect[_-]?(pack|payload)' \
+        "$out/static-off.$surface"; then
+        fail "forbidden-$surface-material"
+    fi
+done
+strings -a "$static_off" >"$out/static-off.strings"
+if grep -Eiq 'rt_mcdc|mcdc[_ -]?(probe|manifest|aspect|event|record|vector)|coverage[_ -]?(probe|event|log|manifest)|aspect[_ -]?(pack|payload)|SMFAPK' \
+    "$out/static-off.strings"; then
+    fail forbidden-payload-string
+fi
+
+control_hash=$(sha256sum "$control" | awk '{print $1}')
+off_hash=$(sha256sum "$static_off" | awk '{print $1}')
+printf 'surface\tsha256\n' >"$out/receipt.tsv"
+for surface in alloc-section-sha256 symbols relocations dynamic sections; do
+    hash=$(sha256sum "$out/static-off.$surface" 2>/dev/null | awk '{print $1}')
+    [ -n "$hash" ] || hash=$(sha256sum "$out/$surface.tsv" | awk '{print $1}')
+    printf '%s\t%s\n' "$surface" "$hash" >>"$out/receipt.tsv"
+done
+echo "mcdc-static-off-artifact: PASS control_sha256=$control_hash static_off_sha256=$off_hash alloc_sections_exact=1 symbols_exact=1 relocations_exact=1 dynamic_exact=1 forbidden_material=0 evidence=$out"

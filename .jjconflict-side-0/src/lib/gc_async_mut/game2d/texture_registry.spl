@@ -1,0 +1,71 @@
+# game2d — TextureRegistry
+#
+# Minimal id -> pixel-buffer registry for the game2d tier.  TileMap (and,
+# longer-term, Sprite/SpriteBatch) need somewhere to look up the actual
+# pixel data behind a `texture_id: u64` before blitting it via
+# `Engine2D.draw_image`.  Both call sites previously only had a solid-color
+# placeholder because "a TextureRegistry not defined in this module" (see
+# tilemap.spl / batch.spl history).  This closes that gap for TileMap.
+#
+# Lookup is a linear scan over a small array (matches the existing
+# `TextureAtlas2D.lookup` linear-scan-by-id pattern this tier used to have
+# in `game2d/render/texture_atlas.spl`, removed as an unused duplicate of
+# `nogc_sync_mut/engine/sprite/atlas.spl`'s `TextureAtlas` — see that
+# file's `__init__.spl` for why) rather than a Dict, since native
+# Dict.get() on a struct-valued dict is unsafe on this codebase's native
+# backends (see .claude/rules/code-style.md).
+#
+# Usage:
+#   var reg = TextureRegistry.create()
+#   reg.register(7, 32, 16, tileset_pixels)   # 32x16 horizontal strip
+#   val tex = reg.lookup(7)
+
+# ============================================================================
+# RegisteredTexture — one registered texture's raw pixel buffer
+# ============================================================================
+
+class RegisteredTexture:
+    """A registered texture: its id plus raw ARGB pixel buffer.
+
+    pixels is row-major, width * height entries, matching the buffer shape
+    `Engine2D.draw_image` already expects.
+    """
+    texture_id: u64
+    width: i32
+    height: i32
+    pixels: [u32]
+
+# ============================================================================
+# TextureRegistry
+# ============================================================================
+
+class TextureRegistry:
+    """Id -> RegisteredTexture registry, linear-scan lookup."""
+    entries: [RegisteredTexture]
+
+    static fn create() -> TextureRegistry:
+        """Create an empty registry."""
+        TextureRegistry(entries: [])
+
+    me register(texture_id: u64, width: i32, height: i32, pixels: [u32]):
+        """Register (or replace) the pixel buffer behind `texture_id`."""
+        self.entries.push(RegisteredTexture(
+            texture_id: texture_id,
+            width: width,
+            height: height,
+            pixels: pixels
+        ))
+
+    fn lookup(texture_id: u64) -> RegisteredTexture?:
+        """Return the RegisteredTexture for `texture_id`, or nil if unknown."""
+        var i = 0
+        while i < self.entries.len():
+            val e = self.entries[i]
+            if e.texture_id == texture_id:
+                return Some(e)
+            i = i + 1
+        nil
+
+    fn count() -> i32:
+        """Number of registered textures."""
+        self.entries.len()

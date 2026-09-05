@@ -1,0 +1,159 @@
+# @cover src/lib/common/ui/render_opt/damage_plan.spl 90%
+# @tag: unit, ui, render_perf, render_opt, o2, g0, damage_plan, 8k
+
+use std.spec
+use common.ui.render_opt.damage_tiles.DirtyTilePyramid
+use common.ui.render_opt.damage_plan.{
+    DamageFramePlan, build_damage_frame_plan,
+    DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL,
+    DAMAGE_FALLBACK_NONE, DAMAGE_FALLBACK_AREA, DAMAGE_FALLBACK_CAP,
+    DAMAGE_FALLBACK_INVALID
+}
+
+# REQ-101: CPU and Vulkan consume one deterministic exact rectangle plan.
+# REQ-102: Adjacent dirty tiles coalesce without widening damage.
+# REQ-103: Area and rectangle-cap fallback return only the full viewport.
+# REQ-104: 8K planning and thresholds use overflow-safe i64 arithmetic.
+# REQ-105: Plan receipts expose source, output, merge, scan and fallback counts.
+
+fn grid(w: u32, h: u32, tile: u32) -> DirtyTilePyramid:
+    DirtyTilePyramid.create(w, h, [tile], [tile])
+
+fn plan(d: DirtyTilePyramid, cap: i64 = 16, threshold: i64 = 60) -> DamageFramePlan:
+    build_damage_frame_plan(d, 0, cap, threshold)
+
+describe "shared CPU/Vulkan damage-frame planning":
+    it "REQ-101 REQ-105 returns an empty receipt for an idle frame":
+        val p = plan(grid(256, 256, 64))
+        expect(p.mode).to_equal(DAMAGE_PLAN_NONE)
+        expect(p.rects.len()).to_equal(0)
+        expect(p.source_tile_count).to_equal(0)
+        expect(p.tiles_examined).to_equal(0)
+
+    it "REQ-101 REQ-102 merges three horizontal tiles into one exact rect":
+        val d = grid(256, 128, 64)
+        d.mark_rect(0, 0, 192, 64)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.rects).to_equal([0, 0, 192, 64])
+        expect(p.source_tile_count).to_equal(3)
+        expect(p.output_rect_count).to_equal(1)
+        expect(p.merged_tile_count).to_equal(2)
+        expect(p.planned_pixels).to_equal(p.dirty_pixels)
+
+    it "REQ-102 merges a solid two-by-three tile block vertically":
+        val d = grid(256, 256, 64)
+        d.mark_rect(64, 0, 128, 192)
+        val p = plan(d)
+        expect(p.rects).to_equal([64, 0, 128, 192])
+        expect(p.source_tile_count).to_equal(6)
+        expect(p.output_rect_count).to_equal(1)
+
+    it "REQ-102 merges both separated columns instead of only the last run":
+        val d = grid(256, 128, 64)
+        d.mark_rect(0, 0, 64, 128)
+        d.mark_rect(192, 0, 64, 128)
+        val p = plan(d)
+        expect(p.rects).to_equal([0, 0, 64, 128, 192, 0, 64, 128])
+        expect(p.output_rect_count).to_equal(2)
+
+    it "REQ-105 matches many vertical runs with one monotonic previous-row pass":
+        val d = grid(1024, 128, 64)
+        var x = 0
+        while x < 1024:
+            d.mark_rect(x, 0, 64, 128)
+            x = x + 128
+        val p = plan(d)
+        expect(p.output_rect_count).to_equal(8)
+        expect(p.source_tile_count).to_equal(16)
+        # Three fixed ping-pong columns serve every row; the count must not
+        # scale with viewport height or active-row count.
+        expect(p.run_workspace_allocations).to_equal(3)
+        # Seven monotonic advances plus eight equality checks. The former
+        # restart-from-zero lookup inspected 1+...+8 = 36 candidates.
+        expect(p.vertical_candidates_examined).to_equal(15)
+        assert_true(p.vertical_candidates_examined < 36)
+
+    it "REQ-102 does not merge or widen when the next row run changes shape":
+        val d = grid(256, 128, 64)
+        d.mark_rect(0, 0, 128, 64)
+        d.mark_rect(0, 64, 64, 64)
+        val p = plan(d)
+        expect(p.rects).to_equal([0, 0, 128, 64, 0, 64, 64, 64])
+        expect(p.planned_pixels).to_equal(12288)
+
+    it "REQ-101 is deterministic regardless of first-mark order":
+        val a = grid(256, 128, 64)
+        a.mark_rect(192, 64, 64, 64)
+        a.mark_rect(0, 0, 64, 64)
+        val b = grid(256, 128, 64)
+        b.mark_rect(0, 0, 64, 64)
+        b.mark_rect(192, 64, 64, 64)
+        expect(plan(a).rects).to_equal(plan(b).rects)
+
+    it "REQ-104 clips the ragged 8K bottom-right CPU tile":
+        val d = grid(7680, 4320, 64)
+        d.mark_rect(7679, 4319, 1, 1)
+        val p = plan(d)
+        expect(p.rects).to_equal([7616, 4288, 64, 32])
+        expect(p.dirty_pixels).to_equal(2048)
+        expect(p.tiles_examined).to_equal(1)
+        expect(p.run_workspace_allocations).to_equal(3)
+
+    it "REQ-104 clips both axes for a two-axis ragged 8K-class edge tile":
+        # 7680x4320 happens to divide evenly across the 64px horizontal
+        # grid. Keep the nearby 8K-class shape explicit so transfer consumers
+        # cannot regress the one-pixel right edge while retaining the usual
+        # bottom-edge-only coverage.
+        val d = grid(7681, 4321, 64)
+        d.mark_rect(7680, 4320, 1, 1)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.rects).to_equal([7680, 4288, 1, 33])
+        expect(p.dirty_pixels).to_equal(33)
+        expect(p.planned_pixels).to_equal(33)
+        expect(p.tiles_examined).to_equal(1)
+
+    it "REQ-103 REQ-104 falls back at exact area threshold using i64":
+        val d = grid(7680, 4320, 64)
+        d.mark_rect(0, 0, 7680, 2592)
+        val p = plan(d, 10000, 60)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_AREA)
+        expect(p.rects).to_equal([0, 0, 7680, 4320])
+        expect(p.planned_pixels).to_equal(33177600)
+
+    it "REQ-103 keeps exactly-cap local and makes cap-plus-one full":
+        val exact = grid(320, 64, 64)
+        exact.mark_rect(0, 0, 64, 64)
+        exact.mark_rect(128, 0, 64, 64)
+        expect(plan(exact, 2, 100).mode).to_equal(DAMAGE_PLAN_LOCAL)
+        val over = grid(320, 64, 64)
+        over.mark_rect(0, 0, 64, 64)
+        over.mark_rect(128, 0, 64, 64)
+        over.mark_rect(256, 0, 64, 64)
+        val p = plan(over, 2, 100)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_CAP)
+        expect(p.rects).to_equal([0, 0, 320, 64])
+        expect(p.full_fallback_count).to_equal(1)
+
+    it "REQ-103 fails closed to full viewport for invalid policy":
+        val d = grid(256, 256, 64)
+        d.mark_rect(0, 0, 64, 64)
+        val p = plan(d, 0, 60)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+        expect(p.rects).to_equal([0, 0, 256, 256])
+
+describe "SABOTAGE: local damage plans never omit or widen tile coverage":
+    it "REQ-102 planned pixels equal the exact disjoint dirty-tile union":
+        val d = grid(256, 256, 64)
+        d.mark_rect(0, 0, 64, 64)
+        d.mark_rect(128, 128, 64, 64)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.dirty_pixels).to_equal(8192)
+        expect(p.planned_pixels).to_equal(8192)
+        assert_true(p.planned_pixels != 4096)
+        assert_true(p.planned_pixels != 16384)

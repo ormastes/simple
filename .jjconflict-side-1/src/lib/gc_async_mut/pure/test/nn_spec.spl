@@ -1,0 +1,48 @@
+# Reproducing spec for
+# doc/08_tracking/bug/pure_nn_layers_mix_autograd_tensor_and_puretensor_2026-07-25.md
+#
+# Before the fix this file was parked on `pending(...)`, because both assertions
+# below failed at semantic-analysis time:
+#   ✗ semantic: method `shape` not found on class `PureTensor`
+#   ✗ semantic: class `Tensor` has no field named `data`
+#
+# The ownership decision: `std.pure.nn` layers own raw `PureTensor<f64>`
+# parameters (Conv2d / pooling / norm layers are index math, not autograd op
+# graphs), `std.pure.autograd` owns `Tensor`, and `std.pure.autograd_bridge`
+# is the one explicit crossing between them. `PureTensor.dims()` is the
+# method-shaped accessor matching autograd `Tensor.shape()`.
+
+use std.pure.tensor (PureTensor)
+use std.pure.autograd (Tensor)
+use std.pure.autograd_bridge (to_pure, to_autograd)
+use std.pure.nn (Linear)
+
+describe "std.pure.nn layer / autograd type surface":
+    it "exposes a method-shaped dims accessor on a Linear layer's PureTensor weight":
+        val l = Linear.create(10, 5, bias: true)
+        assert_equal(l.weight.dims(), [5, 10])
+
+    it "exposes a method-shaped dims accessor on the bias":
+        val l = Linear.create(10, 5, bias: true)
+        assert_equal(l.bias.unwrap().dims(), [5])
+
+    it "accepts an autograd Tensor input through the explicit bridge":
+        val l = Linear.create(3, 2, bias: true)
+        val i = Tensor.from_data([1.0, 2.0, 3.0], [1, 3], requires_grad: false)
+        val out = l.forward(to_pure(i))
+        assert_equal(out.dims(), [2])
+
+    it "lifts a layer output back onto the autograd surface":
+        val l = Linear.create(3, 2, bias: true)
+        val i = Tensor.from_data([1.0, 2.0, 3.0], [1, 3], requires_grad: false)
+        val back = to_autograd(l.forward(to_pure(i)), requires_grad: false)
+        assert_equal(back.shape(), [2])
+
+    it "computes the forward value, not just the shape":
+        # weight is initialised to 0.1 everywhere, bias to zero:
+        # y_i = 0.1*1 + 0.1*2 + 0.1*3 = 0.6
+        val l = Linear.create(3, 2, bias: true)
+        val i = Tensor.from_data([1.0, 2.0, 3.0], [1, 3], requires_grad: false)
+        val out = l.forward(to_pure(i))
+        assert out.data[0] > 0.59 and out.data[0] < 0.61
+        assert out.data[1] > 0.59 and out.data[1] < 0.61

@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+fixture="$root/test/fixtures/sffi/unused_declaration_census"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+RT_UNUSED_SOURCE_ROOT="$fixture" \
+    sh "$root/scripts/audit/rt-unused-declaration-census.shs" \
+    "$work/summary.tsv" "$work/declarations.tsv" "$work/scopes.tsv" >/dev/null
+
+test "$(awk -F '\t' '$1 == "declaration_rows" { print $2 }' "$work/summary.tsv")" -eq 5
+test "$(awk -F '\t' '$1 == "unused_declaration_rows" { print $2 }' "$work/summary.tsv")" -eq 1
+test "$(awk -F '\t' '$1 == "referenced_declaration_rows" { print $2 }' "$work/summary.tsv")" -eq 4
+awk -F '\t' '$1 == "rt_fixture_unused" && $5 == 0 && $6 == "unused" { found=1 }
+    END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_fixture_called" && $5 == 1 && $6 == "referenced" { found=1 }
+    END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_fixture_value" && $5 == 1 && $6 == "referenced" { found=1 }
+    END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_fixture_unsafe" && $5 == 1 && $6 == "referenced" { found=1 }
+    END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_fixture_alias" && $2 == "fixture_alias" && $5 == 1 && $6 == "referenced" { found=1 }
+    END { exit !found }' "$work/declarations.tsv"
+
+echo 'rt unused declaration census: PASS'

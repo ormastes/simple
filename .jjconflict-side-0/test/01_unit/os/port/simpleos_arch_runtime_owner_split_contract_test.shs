@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+cd "$root"
+work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-runtime-owner-split.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+x86_boot=examples/09_embedded/simple_os/arch/x86_64/boot
+arm_boot=examples/09_embedded/simple_os/arch/arm64/boot
+linker=src/compiler/70.backend/backend/simpleos_native_linkers.spl
+
+cc -std=c11 -ffreestanding -fno-pic -fno-pie -m64 \
+    -c "$x86_boot/baremetal_stubs.c" -o "$work/x86-stubs.o"
+cc -std=c11 -ffreestanding -fno-pic -fno-pie -m64 \
+    -c "$x86_boot/runtime_service_owners.c" -o "$work/x86-owners.o"
+ld -r "$work/x86-stubs.o" "$work/x86-owners.o" -o "$work/x86-combined.o"
+
+for symbol in rt_boot_tcp_read_bytes_for_fd rt_collection_remove rt_debug_exit_failure \
+              rt_net_rx_ready rt_net_tx_test rt_x86_topology_field; do
+    count=$(nm -g --defined-only "$work/x86-combined.o" |
+        awk -v wanted="$symbol" '$3 == wanted { n++ } END { print n + 0 }')
+    [ "$count" -eq 1 ] || {
+        echo "FAIL x86_64 owner count for $symbol: $count" >&2
+        exit 1
+    }
+done
+
+clang --target=aarch64-none-elf -ffreestanding \
+    -c "$arm_boot/baremetal_stubs.c" -o "$work/arm-stubs.o"
+clang --target=aarch64-none-elf -ffreestanding \
+    -c "$arm_boot/scheduler_runtime_owner.c" -o "$work/arm-owner.o"
+clang --target=aarch64-none-elf -ffreestanding \
+    -c "$arm_boot/value_runtime_owner.c" -o "$work/arm-value.o"
+ld.lld -r "$work/arm-stubs.o" "$work/arm-owner.o" "$work/arm-value.o" \
+    -o "$work/arm-combined.o"
+count=$(llvm-nm -g --defined-only "$work/arm-combined.o" |
+    awk '$3 == "rt_arm64_wfe" { n++ } END { print n + 0 }')
+[ "$count" -eq 1 ] || {
+    echo "FAIL ARM64 owner count for rt_arm64_wfe: $count" >&2
+    exit 1
+}
+for symbol in rt_raw_i64_to_string rt_any_sub rt_any_mul rt_any_div \
+              rt_any_mod rt_any_lt rt_any_gt rt_any_le rt_any_ge; do
+    count=$(llvm-nm -g --defined-only "$work/arm-combined.o" |
+        awk -v wanted="$symbol" '$3 == wanted { n++ } END { print n + 0 }')
+    [ "$count" -eq 1 ] || {
+        echo "FAIL ARM64 owner count for $symbol: $count" >&2
+        exit 1
+    }
+done
+
+grep -Fq "$x86_boot/runtime_service_owners.c" "$linker"
+grep -Fq "$arm_boot/scheduler_runtime_owner.c" "$linker"
+grep -Fq "$arm_boot/value_runtime_owner.c" "$linker"
+
+[ "$(wc -l < "$x86_boot/runtime_service_owners.c")" -le 800 ]
+[ "$(wc -l < "$arm_boot/scheduler_runtime_owner.c")" -le 800 ]
+[ "$(wc -l < "$arm_boot/value_runtime_owner.c")" -le 800 ]
+
+echo 'PASS SimpleOS architecture runtime owner split contract'

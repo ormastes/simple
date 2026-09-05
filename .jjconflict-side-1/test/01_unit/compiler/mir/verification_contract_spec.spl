@@ -1,0 +1,133 @@
+use std.spec
+use compiler.mir.verification_contract.{VerificationContractOutcomeV1, VerificationContractClauseKindV1, VerificationContractClauseV1, VerificationFunctionContractV1, ExecutionContractObligationKindV1, ExecutionContractSemanticContextV2, generate_execution_contract_obligations_v1, generate_execution_contract_obligations_with_context_v2}
+
+fn contract_clause(id: text, kind: VerificationContractClauseKindV1, binding: text) -> VerificationContractClauseV1:
+    VerificationContractClauseV1(id, kind, "predicate-" + id, "bool", "fixture.spl:1", binding, [])
+
+describe "FV2 retained verification contracts":
+    it "binds normal and error predicates to actual translated outcomes":
+        val contract = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:parse", "woven-function",
+            VerificationContractOutcomeV1.Result,
+            [
+                contract_clause("requires", VerificationContractClauseKindV1.Requires, ""),
+                contract_clause("normal", VerificationContractClauseKindV1.EnsuresNormal, "ret"),
+                contract_clause("error", VerificationContractClauseKindV1.EnsuresError, "err")
+            ],
+            "Parse.contract_refinement"
+        )
+        val generated = generate_execution_contract_obligations_with_context_v2(
+            contract, ExecutionContractSemanticContextV2(
+                "translated-exec", "input-domain", "", "", "", "", ""))
+        expect(generated.diagnostic).to_equal("")
+        expect(generated.obligations.len()).to_equal(3)
+        expect(generated.obligations[1].kind).to_equal(ExecutionContractObligationKindV1.ActualNormalOutcome)
+        expect(generated.obligations[1].actual_outcome_relation).to_contain("actual_result")
+        expect(generated.obligations[2].actual_outcome_relation).to_contain("actual_error")
+        expect(generated.obligations[1].actual_outcome_relation.contains("∃ result")).to_equal(false)
+
+    it "rejects an invariant when state reachability and transition identities are absent":
+        val contract = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:loop", "woven-function",
+            VerificationContractOutcomeV1.Plain,
+            [contract_clause("invariant", VerificationContractClauseKindV1.StatePredicate, "")],
+            ""
+        )
+        val generated = generate_execution_contract_obligations_v1(contract, "translated-exec")
+        expect(generated.obligations.len()).to_equal(0)
+        expect(generated.diagnostic).to_contain("INVARIANT-REACHABLE")
+
+    it "rejects precondition non-vacuity without an exact input domain":
+        val contract = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:input", "woven-function",
+            VerificationContractOutcomeV1.Plain,
+            [contract_clause("requires", VerificationContractClauseKindV1.Requires, "")], "")
+        val generated = generate_execution_contract_obligations_v1(contract, "translated-exec")
+        expect(generated.obligations.len()).to_equal(0)
+        expect(generated.diagnostic).to_contain("PRECONDITION-DOMAIN")
+
+    it "binds invariant initialization and preservation to distinct typed semantic authorities":
+        val contract = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:loop", "woven-function",
+            VerificationContractOutcomeV1.Plain,
+            [contract_clause("invariant", VerificationContractClauseKindV1.StatePredicate, "")],
+            ""
+        )
+        val semantics = ExecutionContractSemanticContextV2(
+            "translated-exec", "", "reachable-v1", "transition-v1", "", "", "")
+        val generated = generate_execution_contract_obligations_with_context_v2(contract, semantics)
+        expect(generated.diagnostic).to_equal("")
+        expect(generated.obligations.len()).to_equal(2)
+        expect(generated.obligations[0].kind).to_equal(ExecutionContractObligationKindV1.InvariantInitialization)
+        expect(generated.obligations[1].kind).to_equal(ExecutionContractObligationKindV1.InvariantPreservation)
+        expect(generated.obligations[0].relation_semantic_hash == generated.obligations[1].relation_semantic_hash).to_equal(false)
+        val changed = generate_execution_contract_obligations_with_context_v2(
+            contract, ExecutionContractSemanticContextV2(
+                "translated-exec", "", "reachable-v2", "transition-v1", "", "", ""))
+        expect(generated.obligations[0].hash() == changed.obligations[0].hash()).to_equal(false)
+
+    it "requires exact frame and termination semantic owners":
+        val frame_contract = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:state", "woven-function",
+            VerificationContractOutcomeV1.Plain,
+            [contract_clause("frame", VerificationContractClauseKindV1.Frame, "")], "")
+        val missing_frame = generate_execution_contract_obligations_with_context_v2(
+            frame_contract, ExecutionContractSemanticContextV2("exec", "", "", "transition", "", "", ""))
+        expect(missing_frame.diagnostic).to_contain("FRAME-MODEL")
+        val complete_frame = generate_execution_contract_obligations_with_context_v2(
+            frame_contract, ExecutionContractSemanticContextV2("exec", "", "", "transition", "regions", "", ""))
+        expect(complete_frame.diagnostic).to_equal("")
+        expect(complete_frame.obligations[0].semantic_authority_hashes).to_equal(["exec", "transition", "regions"])
+
+        val decreases_contract = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:recursive", "woven-function",
+            VerificationContractOutcomeV1.Plain,
+            [VerificationContractClauseV1("measure",
+                VerificationContractClauseKindV1.Decreases, "predicate-measure",
+                "u64", "fixture.spl:1", "", [])], "")
+        val missing_order = generate_execution_contract_obligations_with_context_v2(
+            decreases_contract, ExecutionContractSemanticContextV2("exec", "", "", "", "", "recursive-calls", ""))
+        expect(missing_order.diagnostic).to_contain("DECREASES-ORDER")
+
+        val complete = generate_execution_contract_obligations_with_context_v2(
+            decreases_contract, ExecutionContractSemanticContextV2("exec", "", "", "", "", "recursive-calls", "nat-lt-well-founded"))
+        expect(complete.diagnostic).to_equal("")
+        expect(complete.obligations[0].kind).to_equal(ExecutionContractObligationKindV1.TerminationDecrease)
+        expect(complete.obligations[0].relation_semantic_hash == "").to_equal(false)
+
+    it "rejects error postconditions on a plain outcome":
+        val contract = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:plain", "woven-function",
+            VerificationContractOutcomeV1.Plain,
+            [contract_clause("error", VerificationContractClauseKindV1.EnsuresError, "err")],
+            ""
+        )
+        expect(contract.diagnostic()).to_contain("ERROR-OUTCOME")
+
+    it "rejects untyped or source-unmapped predicates":
+        val bad = VerificationContractClauseV1("clause", VerificationContractClauseKindV1.Requires, "predicate", "Int", "", "", [])
+        expect(bad.diagnostic()).to_contain("TYPE")
+
+    it "rejects a Boolean or signed termination measure":
+        val bool_measure = contract_clause("measure", VerificationContractClauseKindV1.Decreases, "")
+        expect(bool_measure.diagnostic()).to_contain("MEASURE-TYPE")
+        val signed_measure = VerificationContractClauseV1(
+            "measure", VerificationContractClauseKindV1.Decreases,
+            "predicate-measure", "i64", "fixture.spl:1", "", [])
+        expect(signed_measure.diagnostic()).to_contain("MEASURE-TYPE")
+
+    it "binds proof-root changes into contract identity":
+        val clauses = [contract_clause("requires", VerificationContractClauseKindV1.Requires, "")]
+        val first = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:proof", "woven-function",
+            VerificationContractOutcomeV1.Plain, clauses, "Proof.first")
+        val second = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:proof", "woven-function",
+            VerificationContractOutcomeV1.Plain, clauses, "Proof.second")
+        expect(first.hash() == second.hash()).to_equal(false)
+
+    it "rejects proof-root text that is not one exact identifier":
+        val bad = VerificationFunctionContractV1(
+            "VerificationFunctionContract-v1", "symbol:proof", "woven-function",
+            VerificationContractOutcomeV1.Plain, [], "Proof.one Proof.two")
+        expect(bad.diagnostic()).to_contain("PROOF-ROOT")

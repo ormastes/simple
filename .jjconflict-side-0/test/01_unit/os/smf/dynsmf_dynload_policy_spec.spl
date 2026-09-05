@@ -1,0 +1,170 @@
+# @cover src/os/smf/dynsmf_session.spl 60%
+"""
+# dynSMF Dynload Policy Specification
+
+## Overview
+
+Verifies the Phase B config-driven dynload settings overlay for dynSMF
+manifest entries: three independent axes (presence off/auto/on, placement
+auto/static/dynamic, activation startup/command/first_use/manual), axis-spec
+parsing, the section-5.3 resolution algorithm, load-plan construction with
+presence=off producing zero rows (aspect packs), fail-closed handling of
+unknown axis values, and the back-compat mapping of default_autoload onto
+presence=auto with startup/first_use activation.
+
+## Examples
+
+An aspect log/trace pack entry with presence=off contributes no load-plan
+rows at all. placement=dynamic never folds static; placement=auto folds
+static only on a matching implementation hash. Unknown axis values are hard
+errors, never silent defaults.
+
+**Plan:** doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
+**Research:** doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md
+"""
+
+use std.spec
+use os.smf.dynsmf_session.{
+    DynSmfManifestEntry,
+    DynSmfDynloadSetting,
+    dynsmf_dynload_setting_default,
+    dynsmf_dynload_setting_parse,
+    dynsmf_dynload_setting_find,
+    dynsmf_resolve_dynload,
+    dynsmf_dynload_load_plan,
+    dynsmf_dynload_plan_has_errors,
+    dynsmf_presence_off,
+    dynsmf_presence_auto,
+    dynsmf_presence_on,
+    dynsmf_placement_auto,
+    dynsmf_placement_static,
+    dynsmf_placement_dynamic,
+    dynsmf_activation_startup,
+    dynsmf_activation_first_use,
+    dynsmf_activation_manual,
+    dynsmf_outcome_absent,
+    dynsmf_outcome_static,
+    dynsmf_outcome_dynamic,
+    dynsmf_outcome_error
+}
+
+fn spec_entry(id: text, autoload: bool) -> DynSmfManifestEntry:
+    DynSmfManifestEntry(id: id, path: "build/dynsmf/" + id + ".smf", source_module: "test.mod." + id, artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: autoload, exports: ["run"])
+
+fn spec_aspect_entry() -> DynSmfManifestEntry:
+    spec_entry("aspect_log_trace", false)
+
+describe "dynSMF dynload axis parsing":
+    it "maps default_autoload false to presence=auto activation=first_use (back-compat)":
+        val setting = dynsmf_dynload_setting_default(spec_entry("lib_a", false))
+        expect(setting.presence).to_equal(dynsmf_presence_auto())
+        expect(setting.placement).to_equal(dynsmf_placement_auto())
+        expect(setting.activation).to_equal(dynsmf_activation_first_use())
+
+    it "maps default_autoload true to presence=auto activation=startup (back-compat)":
+        val setting = dynsmf_dynload_setting_default(spec_entry("lib_b", true))
+        expect(setting.presence).to_equal(dynsmf_presence_auto())
+        expect(setting.activation).to_equal(dynsmf_activation_startup())
+
+    it "parses an explicit three-axis spec":
+        val parsed = dynsmf_dynload_setting_parse(spec_entry("lib_c", false), "presence=on,placement=dynamic,activation=manual")
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.setting.presence).to_equal(dynsmf_presence_on())
+        expect(parsed.setting.placement).to_equal(dynsmf_placement_dynamic())
+        expect(parsed.setting.activation).to_equal(dynsmf_activation_manual())
+
+    it "keeps entry defaults for omitted axes and empty spec":
+        val parsed = dynsmf_dynload_setting_parse(spec_entry("lib_d", false), "placement=static")
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.setting.presence).to_equal(dynsmf_presence_auto())
+        expect(parsed.setting.placement).to_equal(dynsmf_placement_static())
+        expect(parsed.setting.activation).to_equal(dynsmf_activation_first_use())
+        val empty = dynsmf_dynload_setting_parse(spec_entry("lib_d", false), "")
+        expect(empty.ok).to_equal(true)
+        expect(empty.reason).to_equal("defaults")
+
+    it "fails closed on unknown axis values and unknown keys":
+        val bad_value = dynsmf_dynload_setting_parse(spec_entry("lib_e", false), "presence=maybe")
+        expect(bad_value.ok).to_equal(false)
+        expect(bad_value.reason).to_equal("unknown_presence:maybe")
+        val bad_key = dynsmf_dynload_setting_parse(spec_entry("lib_e", false), "priority=high")
+        expect(bad_key.ok).to_equal(false)
+        expect(bad_key.reason).to_equal("unknown_axis:priority")
+        val malformed = dynsmf_dynload_setting_parse(spec_entry("lib_e", false), "presence")
+        expect(malformed.ok).to_equal(false)
+        expect(malformed.reason).to_equal("malformed_axis:presence")
+
+describe "dynSMF dynload resolution (research section 5.3)":
+    it "resolves presence=off to absent regardless of placement":
+        val setting = DynSmfDynloadSetting(library_id: "lib_off", presence: dynsmf_presence_off(), placement: dynsmf_placement_static(), activation: dynsmf_activation_startup())
+        val decision = dynsmf_resolve_dynload(setting, true, 7, 7)
+        expect(decision.outcome).to_equal(dynsmf_outcome_absent())
+        expect(decision.reason).to_equal("presence_off")
+
+    it "keeps placement=dynamic external even when a matching static impl exists":
+        val setting = DynSmfDynloadSetting(library_id: "lib_dyn", presence: dynsmf_presence_on(), placement: dynsmf_placement_dynamic(), activation: dynsmf_activation_manual())
+        val decision = dynsmf_resolve_dynload(setting, true, 7, 7)
+        expect(decision.outcome).to_equal(dynsmf_outcome_dynamic())
+        expect(decision.reason).to_equal("dynamic_pinned")
+
+    it "folds placement=auto static only on a matching impl hash":
+        val setting = DynSmfDynloadSetting(library_id: "lib_auto", presence: dynsmf_presence_auto(), placement: dynsmf_placement_auto(), activation: dynsmf_activation_first_use())
+        val matched = dynsmf_resolve_dynload(setting, true, 42, 42)
+        expect(matched.outcome).to_equal(dynsmf_outcome_static())
+        expect(matched.reason).to_equal("auto_static_match")
+        val stale = dynsmf_resolve_dynload(setting, true, 42, 43)
+        expect(stale.outcome).to_equal(dynsmf_outcome_dynamic())
+        expect(stale.reason).to_equal("auto_dynamic")
+        val unknown_hash = dynsmf_resolve_dynload(setting, true, 42, -1)
+        expect(unknown_hash.outcome).to_equal(dynsmf_outcome_dynamic())
+
+    it "fails closed on placement=static without a matching static impl":
+        val setting = DynSmfDynloadSetting(library_id: "lib_pin", presence: dynsmf_presence_on(), placement: dynsmf_placement_static(), activation: dynsmf_activation_startup())
+        val missing = dynsmf_resolve_dynload(setting, false, -1, 5)
+        expect(missing.outcome).to_equal(dynsmf_outcome_error())
+        expect(missing.reason).to_equal("static_required_missing")
+        val stale = dynsmf_resolve_dynload(setting, true, 4, 5)
+        expect(stale.outcome).to_equal(dynsmf_outcome_error())
+        expect(stale.reason).to_equal("static_required_stale")
+
+    it "fails closed on unknown axis values instead of silently defaulting":
+        val bad = DynSmfDynloadSetting(library_id: "lib_bad", presence: "sometimes", placement: dynsmf_placement_auto(), activation: dynsmf_activation_manual())
+        val decision = dynsmf_resolve_dynload(bad, false, -1, -1)
+        expect(decision.outcome).to_equal(dynsmf_outcome_error())
+        expect(decision.reason).to_equal("unknown_presence:sometimes")
+        val bad_act = DynSmfDynloadSetting(library_id: "lib_bad2", presence: dynsmf_presence_on(), placement: dynsmf_placement_auto(), activation: "whenever")
+        val decision2 = dynsmf_resolve_dynload(bad_act, false, -1, -1)
+        expect(decision2.outcome).to_equal(dynsmf_outcome_error())
+        expect(decision2.reason).to_equal("unknown_activation:whenever")
+
+describe "dynSMF dynload load plan":
+    it "produces zero plan rows for a presence=off aspect pack entry":
+        val manifest = [spec_entry("lib_kept", false), spec_aspect_entry()]
+        val off = DynSmfDynloadSetting(library_id: "aspect_log_trace", presence: dynsmf_presence_off(), placement: dynsmf_placement_dynamic(), activation: dynsmf_activation_first_use())
+        val plan = dynsmf_dynload_load_plan(manifest, [off])
+        expect(plan.len()).to_equal(1)
+        expect(plan[0].library_id).to_equal("lib_kept")
+
+    it "resolves unconfigured entries to dynamic via defaults (no static table)":
+        val manifest = [spec_entry("lib_plain", false)]
+        val plan = dynsmf_dynload_load_plan(manifest, [])
+        expect(plan.len()).to_equal(1)
+        expect(plan[0].outcome).to_equal(dynsmf_outcome_dynamic())
+        expect(plan[0].activation).to_equal(dynsmf_activation_first_use())
+
+    it "keeps error decisions visible in the plan and flags them":
+        val manifest = [spec_entry("lib_err", false)]
+        val pinned = DynSmfDynloadSetting(library_id: "lib_err", presence: dynsmf_presence_on(), placement: dynsmf_placement_static(), activation: dynsmf_activation_startup())
+        val plan = dynsmf_dynload_load_plan(manifest, [pinned])
+        expect(plan.len()).to_equal(1)
+        expect(plan[0].outcome).to_equal(dynsmf_outcome_error())
+        expect(dynsmf_dynload_plan_has_errors(plan)).to_equal(true)
+        val clean = dynsmf_dynload_load_plan(manifest, [])
+        expect(dynsmf_dynload_plan_has_errors(clean)).to_equal(false)
+
+    it "finds settings by library id":
+        val a = DynSmfDynloadSetting(library_id: "a", presence: dynsmf_presence_on(), placement: dynsmf_placement_auto(), activation: dynsmf_activation_manual())
+        val found = dynsmf_dynload_setting_find([a], "a")
+        expect(found.?).to_equal(true)
+        val missing = dynsmf_dynload_setting_find([a], "b")
+        expect(missing.?).to_equal(false)

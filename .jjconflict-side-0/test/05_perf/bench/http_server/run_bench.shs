@@ -1,0 +1,215 @@
+#!/bin/sh
+# HTTP Server Benchmark: Simple vs nginx
+#
+# Usage:
+#   sh test/perf/bench/http_server/run_bench.shs
+#   sh test/perf/bench/http_server/run_bench.shs --simple-only
+#   sh test/perf/bench/http_server/run_bench.shs --nginx-only
+#   sh test/perf/bench/http_server/run_bench.shs --duration=30 --connections=500
+#
+# Requirements:
+#   - wrk (https://github.com/wg/wrk)
+#   - nginx (optional, for comparison)
+#   - bin/simple (Simple compiler/interpreter)
+
+set -e
+
+# ── Defaults ────────────────────────────────────────────────────────────────
+
+DURATION=10
+THREADS=4
+CONNECTIONS=100
+SIMPLE_PORT=9090
+NGINX_PORT=9091
+DATA_ROOT=/tmp/simple_bench_data
+SIMPLE_ONLY=0
+NGINX_ONLY=0
+WORKERS=0
+
+# ── Parse args ──────────────────────────────────────────────────────────────
+
+for arg in "$@"; do
+    case "$arg" in
+        --simple-only) SIMPLE_ONLY=1 ;;
+        --nginx-only)  NGINX_ONLY=1 ;;
+        --duration=*)  DURATION="${arg#*=}" ;;
+        --threads=*)   THREADS="${arg#*=}" ;;
+        --connections=*) CONNECTIONS="${arg#*=}" ;;
+        --workers=*)   WORKERS="${arg#*=}" ;;
+        --help)
+            echo "Usage: sh run_bench.shs [--simple-only] [--nginx-only] [--duration=N] [--threads=N] [--connections=N] [--workers=N]"
+            exit 0
+            ;;
+    esac
+done
+
+# ── Preflight checks ───────────────────────────────────────────────────────
+
+if ! command -v wrk >/dev/null 2>&1; then
+    echo "ERROR: wrk not found. Install: apt install wrk / brew install wrk"
+    exit 1
+fi
+
+REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+cd "$REPO_ROOT"
+SIMPLE_BIN="${REPO_ROOT}/bin/simple"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR: bin/simple not found at $SIMPLE_BIN"
+    exit 1
+fi
+
+HAS_NGINX=0
+if command -v nginx >/dev/null 2>&1; then
+    HAS_NGINX=1
+fi
+
+if [ "$NGINX_ONLY" = "1" ] && [ "$HAS_NGINX" = "0" ]; then
+    echo "ERROR: --nginx-only specified but nginx not found"
+    exit 1
+fi
+
+# ── Generate test data ─────────────────────────────────────────────────────
+
+mkdir -p "$DATA_ROOT"
+printf 'Hello, World!' > "$DATA_ROOT/hello.txt"
+
+# 1KB HTML (shell-only, no python)
+printf '<!DOCTYPE html><html><body>' > "$DATA_ROOT/1kb.html"
+i=0
+while [ "$i" -lt 30 ]; do
+    printf '<p>Benchmark payload line %d.</p>\n' "$i" >> "$DATA_ROOT/1kb.html"
+    i=$((i + 1))
+done
+printf '</body></html>' >> "$DATA_ROOT/1kb.html"
+
+# 1MB binary
+dd if=/dev/zero bs=1M count=1 of="$DATA_ROOT/1mb.bin" 2>/dev/null
+
+echo ""
+echo "============================================"
+echo "  HTTP Server Benchmark: Simple vs nginx"
+echo "============================================"
+echo ""
+echo "  Duration:    ${DURATION}s"
+echo "  Threads:     ${THREADS}"
+echo "  Connections: ${CONNECTIONS}"
+echo "  Data root:   ${DATA_ROOT}"
+echo "  Files:       hello.txt ($(wc -c < "$DATA_ROOT/hello.txt") B)"
+echo "               1kb.html  ($(wc -c < "$DATA_ROOT/1kb.html") B)"
+echo "               1mb.bin   ($(wc -c < "$DATA_ROOT/1mb.bin") B)"
+echo ""
+
+# ── Helper: run wrk and extract RPS + latency ──────────────────────────────
+
+run_wrk() {
+    local label="$1"
+    local url="$2"
+    local dur="$3"
+    local conns="$4"
+
+    echo "  [$label] wrk -t${THREADS} -c${conns} -d${dur}s $url"
+    wrk -t"$THREADS" -c"$conns" -d"${dur}s" "$url" 2>&1 | tee "/tmp/wrk_${label}.txt"
+    echo ""
+}
+
+extract_rps() {
+    grep "Requests/sec:" "$1" | awk '{print $2}'
+}
+
+extract_latency_avg() {
+    grep "Latency" "$1" | awk '{print $2}'
+}
+
+extract_transfer() {
+    grep "Transfer/sec:" "$1" | awk '{print $2}'
+}
+
+# ── Simple server benchmark ────────────────────────────────────────────────
+
+SIMPLE_RESULTS=""
+
+if [ "$NGINX_ONLY" != "1" ]; then
+    echo "── Simple Async HTTP Server ──────────────────────────────"
+    echo ""
+
+    WORKER_ARG=""
+    if [ "$WORKERS" != "0" ]; then
+        WORKER_ARG="--workers=${WORKERS}"
+    fi
+
+    "$SIMPLE_BIN" run test/perf/bench/http_server/bench_server.spl -- \
+        --port="$SIMPLE_PORT" --root="$DATA_ROOT" $WORKER_ARG &
+    SIMPLE_PID=$!
+    sleep 2
+
+    if ! kill -0 "$SIMPLE_PID" 2>/dev/null; then
+        echo "ERROR: Simple server failed to start"
+    else
+        run_wrk "simple_hello" "http://localhost:${SIMPLE_PORT}/hello.txt" "$DURATION" "$CONNECTIONS"
+        run_wrk "simple_1kb"   "http://localhost:${SIMPLE_PORT}/1kb.html"  "$DURATION" "$CONNECTIONS"
+        run_wrk "simple_1mb"   "http://localhost:${SIMPLE_PORT}/1mb.bin"   "$DURATION" 50
+
+        kill "$SIMPLE_PID" 2>/dev/null || true
+        wait "$SIMPLE_PID" 2>/dev/null || true
+    fi
+    echo ""
+fi
+
+# ── nginx benchmark ────────────────────────────────────────────────────────
+
+if [ "$SIMPLE_ONLY" != "1" ] && [ "$HAS_NGINX" = "1" ]; then
+    echo "── nginx ────────────────────────────────────────────────"
+    echo ""
+
+    NGINX_CONF="${REPO_ROOT}/test/perf/bench/http_server/nginx_bench.conf"
+    nginx -c "$NGINX_CONF" &
+    NGINX_PID=$!
+    sleep 1
+
+    if ! kill -0 "$NGINX_PID" 2>/dev/null; then
+        echo "ERROR: nginx failed to start"
+    else
+        run_wrk "nginx_hello" "http://localhost:${NGINX_PORT}/hello.txt" "$DURATION" "$CONNECTIONS"
+        run_wrk "nginx_1kb"   "http://localhost:${NGINX_PORT}/1kb.html"  "$DURATION" "$CONNECTIONS"
+        run_wrk "nginx_1mb"   "http://localhost:${NGINX_PORT}/1mb.bin"   "$DURATION" 50
+
+        kill "$NGINX_PID" 2>/dev/null || true
+        wait "$NGINX_PID" 2>/dev/null || true
+    fi
+    echo ""
+fi
+
+# ── Results comparison ──────────────────────────────────────────────────────
+
+echo "============================================"
+echo "  Results Summary"
+echo "============================================"
+echo ""
+echo "| Scenario     | Server | RPS        | Avg Latency | Transfer/s |"
+echo "|-------------|--------|------------|-------------|------------|"
+
+for scenario in hello 1kb 1mb; do
+    for server in simple nginx; do
+        f="/tmp/wrk_${server}_${scenario}.txt"
+        if [ -f "$f" ]; then
+            rps=$(extract_rps "$f")
+            lat=$(extract_latency_avg "$f")
+            xfer=$(extract_transfer "$f")
+            printf "| %-11s | %-6s | %10s | %11s | %10s |\n" \
+                "$scenario" "$server" "$rps" "$lat" "$xfer"
+        fi
+    done
+done
+
+echo ""
+echo "Raw wrk output saved to /tmp/wrk_*.txt"
+
+# ── Performance targets (from design doc) ───────────────────────────────────
+
+echo ""
+echo "Design doc targets:"
+echo "  Hello RPS (1 core):  >100,000   (nginx ref: 145,551)"
+echo "  Hello RPS (N cores): >80% linear scaling"
+echo "  p99 latency:         <10ms at 50K RPS"
+echo "  Static file:         >10 Gbps throughput"

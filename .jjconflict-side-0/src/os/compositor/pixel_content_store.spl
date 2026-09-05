@@ -1,0 +1,244 @@
+# Freestanding-safe pixel content ownership.
+#
+# Pixel words and registry records live behind one scalar address so the WM
+# never transports aggregate-held buffers through native method boundaries.
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_memset(ptr: i64, value: i64, size: i64) -> i64
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64) -> i64
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i64) -> i64
+
+val PIXEL_CONTENT_STORE_CAPACITY: i64 = 64
+val PIXEL_CONTENT_STORE_MAX_PIXELS: i64 = 16777216
+val _PIXEL_CONTENT_RECORD_BYTES: i64 = 40
+val _PIXEL_CONTENT_HANDLE: i64 = 0
+val _PIXEL_CONTENT_WIDTH: i64 = 8
+val _PIXEL_CONTENT_HEIGHT: i64 = 16
+val _PIXEL_CONTENT_LENGTH: i64 = 24
+val _PIXEL_CONTENT_ADDRESS: i64 = 32
+
+fn _pixel_content_offset(index: i64, field: i64) -> i64:
+    index * _PIXEL_CONTENT_RECORD_BYTES + field
+
+fn _pixel_content_read(registry: i64, index: i64, field: i64) -> i64:
+    rt_ptr_read_i64(registry, _pixel_content_offset(index, field))
+
+fn _pixel_content_write(
+    registry: i64, index: i64, field: i64, value: i64
+):
+    rt_ptr_write_i64(registry, _pixel_content_offset(index, field), value)
+
+fn pixel_content_store_create() -> i64:
+    val bytes = PIXEL_CONTENT_STORE_CAPACITY * _PIXEL_CONTENT_RECORD_BYTES
+    val registry = rt_alloc(bytes)
+    if registry != 0:
+        rt_memset(registry, 0, bytes)
+    registry
+
+fn pixel_content_store_index(registry: i64, handle: i64) -> i64:
+    if registry == 0 or handle <= 0:
+        return -1
+    var index: i64 = 0
+    while index < PIXEL_CONTENT_STORE_CAPACITY:
+        if _pixel_content_read(
+            registry, index, _PIXEL_CONTENT_HANDLE
+        ) == handle:
+            return index
+        index = index + 1
+    -1
+
+fn pixel_content_store_live_count(registry: i64) -> i64:
+    if registry == 0:
+        return 0
+    var count: i64 = 0
+    var index: i64 = 0
+    while index < PIXEL_CONTENT_STORE_CAPACITY:
+        if _pixel_content_read(
+            registry, index, _PIXEL_CONTENT_HANDLE
+        ) != 0:
+            count = count + 1
+        index = index + 1
+    count
+
+fn pixel_content_store_add(
+    registry: i64,
+    handle: i64,
+    width: i32,
+    height: i32,
+    fill: u32
+) -> bool:
+    if (registry == 0 or handle <= 0 or width <= 0 or height <= 0 or
+        pixel_content_store_index(registry, handle) >= 0):
+        return false
+    val length = (width as i64) * (height as i64)
+    if length <= 0 or length > PIXEL_CONTENT_STORE_MAX_PIXELS:
+        return false
+    var record: i64 = 0
+    while (record < PIXEL_CONTENT_STORE_CAPACITY and
+        _pixel_content_read(
+            registry, record, _PIXEL_CONTENT_HANDLE
+        ) != 0):
+        record = record + 1
+    if record >= PIXEL_CONTENT_STORE_CAPACITY:
+        return false
+    val pixels = rt_alloc(length * 8)
+    if pixels == 0:
+        return false
+    var pixel: i64 = 0
+    while pixel < length:
+        rt_ptr_write_i64(pixels, pixel * 8, fill as i64)
+        pixel = pixel + 1
+    _pixel_content_write(registry, record, _PIXEL_CONTENT_HANDLE, handle)
+    _pixel_content_write(
+        registry, record, _PIXEL_CONTENT_WIDTH, width as i64
+    )
+    _pixel_content_write(
+        registry, record, _PIXEL_CONTENT_HEIGHT, height as i64
+    )
+    _pixel_content_write(registry, record, _PIXEL_CONTENT_LENGTH, length)
+    _pixel_content_write(registry, record, _PIXEL_CONTENT_ADDRESS, pixels)
+    true
+
+fn pixel_content_store_width(registry: i64, handle: i64) -> i32:
+    val index = pixel_content_store_index(registry, handle)
+    if index < 0:
+        return 0
+    _pixel_content_read(registry, index, _PIXEL_CONTENT_WIDTH) as i32
+
+fn pixel_content_store_height(registry: i64, handle: i64) -> i32:
+    val index = pixel_content_store_index(registry, handle)
+    if index < 0:
+        return 0
+    _pixel_content_read(registry, index, _PIXEL_CONTENT_HEIGHT) as i32
+
+fn pixel_content_store_length(registry: i64, handle: i64) -> i64:
+    val index = pixel_content_store_index(registry, handle)
+    if index < 0:
+        return 0
+    _pixel_content_read(registry, index, _PIXEL_CONTENT_LENGTH)
+
+fn pixel_content_store_address(registry: i64, handle: i64) -> i64:
+    val index = pixel_content_store_index(registry, handle)
+    if index < 0:
+        return 0
+    _pixel_content_read(registry, index, _PIXEL_CONTENT_ADDRESS)
+
+fn pixel_content_store_color(
+    registry: i64, handle: i64, pixel: i64
+) -> u32:
+    val index = pixel_content_store_index(registry, handle)
+    if index < 0:
+        return 0u32
+    val length = _pixel_content_read(
+        registry, index, _PIXEL_CONTENT_LENGTH
+    )
+    if pixel < 0 or pixel >= length:
+        return 0u32
+    val pixels = _pixel_content_read(
+        registry, index, _PIXEL_CONTENT_ADDRESS
+    )
+    rt_ptr_read_i64(pixels, pixel * 8) as u32
+
+fn pixel_content_store_set(
+    registry: i64, handle: i64, pixel: i64, color: u32
+) -> bool:
+    val index = pixel_content_store_index(registry, handle)
+    if index < 0:
+        return false
+    val length = _pixel_content_read(
+        registry, index, _PIXEL_CONTENT_LENGTH
+    )
+    if pixel < 0 or pixel >= length:
+        return false
+    val pixels = _pixel_content_read(
+        registry, index, _PIXEL_CONTENT_ADDRESS
+    )
+    rt_ptr_write_i64(pixels, pixel * 8, color as i64)
+    true
+
+fn pixel_content_store_blit_argb32(
+    registry: i64,
+    handle: i64,
+    destination: i64,
+    destination_width: i32,
+    destination_height: i32,
+    destination_pitch: i64,
+    destination_x: i32,
+    destination_y: i32
+) -> bool:
+    val index = pixel_content_store_index(registry, handle)
+    if (index < 0 or destination == 0 or destination_width <= 0 or
+        destination_height <= 0 or destination_x < 0 or destination_y < 0):
+        return false
+    val source_width = _pixel_content_read(
+        registry, index, _PIXEL_CONTENT_WIDTH
+    )
+    val source_height = _pixel_content_read(
+        registry, index, _PIXEL_CONTENT_HEIGHT
+    )
+    val max_i64 = 0x7fffffffffffffff
+    if (source_width <= 0 or source_height <= 0 or
+        destination_pitch < (destination_width as i64) * 4 or
+        destination_pitch > max_i64 / (destination_height as i64) or
+        (destination_x as i64) + source_width > destination_width as i64 or
+        (destination_y as i64) + source_height > destination_height as i64):
+        return false
+    val pixels = _pixel_content_read(
+        registry, index, _PIXEL_CONTENT_ADDRESS
+    )
+    var y: i64 = 0
+    while y < source_height:
+        var x: i64 = 0
+        while x < source_width:
+            val source_offset = (y * source_width + x) * 8
+            val destination_offset = (
+                (destination_y as i64) + y
+            ) * destination_pitch + ((destination_x as i64) + x) * 4
+            rt_ptr_write_i32(
+                destination,
+                destination_offset,
+                rt_ptr_read_i64(pixels, source_offset)
+            )
+            x = x + 1
+        y = y + 1
+    true
+
+fn pixel_content_store_release(registry: i64, handle: i64) -> bool:
+    val index = pixel_content_store_index(registry, handle)
+    if index < 0:
+        return false
+    val pixels = _pixel_content_read(
+        registry, index, _PIXEL_CONTENT_ADDRESS
+    )
+    if pixels != 0:
+        rt_free(pixels)
+    rt_memset(
+        registry + index * _PIXEL_CONTENT_RECORD_BYTES,
+        0,
+        _PIXEL_CONTENT_RECORD_BYTES
+    )
+    true
+
+fn pixel_content_store_destroy(registry: i64):
+    if registry == 0:
+        return
+    var index: i64 = 0
+    while index < PIXEL_CONTENT_STORE_CAPACITY:
+        val pixels = _pixel_content_read(
+            registry, index, _PIXEL_CONTENT_ADDRESS
+        )
+        if pixels != 0:
+            rt_free(pixels)
+        index = index + 1
+    rt_free(registry)
+
+export pixel_content_store_create, pixel_content_store_index
+export pixel_content_store_live_count, pixel_content_store_add
+export pixel_content_store_width, pixel_content_store_height
+export pixel_content_store_length, pixel_content_store_address
+export pixel_content_store_color
+export pixel_content_store_set, pixel_content_store_blit_argb32
+export pixel_content_store_release
+export pixel_content_store_destroy

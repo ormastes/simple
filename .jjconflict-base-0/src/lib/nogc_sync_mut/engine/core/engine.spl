@@ -1,0 +1,240 @@
+# Engine2D — Top-level engine that owns all subsystems
+#
+# The user-facing entry point for the Simple 2D game engine.
+# Creates and manages the window, renderer, scene graph, component
+# registry, physics world, input manager, audio system, and resources.
+#
+# Usage:
+#   var engine = Engine2D.create("My Game", 800, 600)
+#   val node_id = engine.create_node("player")
+#   val tex_id = engine.resources.add_texture(my_tex)
+#   val sprite_id = engine.create_sprite_node("enemy", tex_id, src_rect)
+#   engine.destroy()
+
+use std.common.engine.ids.{NodeId, TextureId}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.rect.{Rect2}
+use std.nogc_sync_mut.engine.scene.node.{Node2D, NodeStore}
+use std.nogc_sync_mut.engine.component.registry.{ComponentRegistry, Component2D}
+use std.nogc_sync_mut.engine.component.sprite.{SpriteData}
+use std.nogc_sync_mut.engine.physics.world.{PhysicsWorld2D}
+use std.nogc_sync_mut.engine.physics.types.{PhysicsConfig, default_physics_config}
+use std.nogc_sync_mut.engine.input.input_manager.{InputManager}
+use std.nogc_sync_mut.engine.audio.audio_manager.{AudioManager}
+use std.nogc_sync_mut.engine.audio.types.{AudioConfig, default_audio_config}
+use std.nogc_sync_mut.engine.render.pipeline.{SoftwareRenderer}
+use std.gc_async_mut.gpu.context.{Context}
+use std.nogc_sync_mut.engine.render.gpu_pipeline.{GpuRenderer2D}
+use std.nogc_sync_mut.engine.render.vector.{VectorRenderer}
+use std.nogc_sync_mut.engine.resource.manager.{ResourceManager}
+use std.nogc_sync_mut.io.window_ffi.{
+    EventLoop, Window,
+    window_create_event_loop, window_create, window_destroy,
+    window_destroy_event_loop
+}
+
+# ============================================================================
+# RendererMode — software vs GPU rendering
+# ============================================================================
+
+enum RendererMode:
+    Software
+    Gpu
+
+impl RendererMode:
+    fn to_text() -> text:
+        match self:
+            Software: "Software"
+            Gpu: "Gpu"
+
+# ============================================================================
+# Engine2D
+# ============================================================================
+
+class Engine2D:
+    """Top-level engine owning all 2D game subsystems.
+
+    Provides a simple API for creating nodes, attaching components,
+    and managing the game lifecycle. Subsystem fields are public so
+    the game loop and user code can access them directly.
+    """
+    nodes: NodeStore
+    components: ComponentRegistry
+    physics: PhysicsWorld2D
+    input: InputManager
+    audio: AudioManager
+    renderer: SoftwareRenderer
+    gpu_renderer: GpuRenderer2D
+    renderer_mode: RendererMode
+    resources: ResourceManager
+    vector: VectorRenderer
+    window_handle: i64
+    event_loop_handle: i64
+    gpu_ctx: Context
+
+impl Engine2D:
+    static fn create(title: text, width: i64, height: i64) -> Engine2D:
+        """Create an engine with default physics and audio configs.
+
+        Opens a window, initializes all subsystems, and returns a ready
+        engine. Use with GameLoop.run() to start the game.
+
+        Args:
+            title: Window title
+            width: Window width in pixels
+            height: Window height in pixels
+
+        Returns:
+            A fully initialized Engine2D
+        """
+        Engine2D.create_with_config(
+            title, width, height,
+            default_physics_config(),
+            default_audio_config()
+        )
+
+    static fn create_with_config(title: text, width: i64, height: i64, physics_config: PhysicsConfig, audio_config: AudioConfig) -> Engine2D:
+        """Create an engine with custom physics and audio configs.
+
+        Args:
+            title: Window title
+            width: Window width in pixels
+            height: Window height in pixels
+            physics_config: Physics world parameters
+            audio_config: Audio system parameters
+
+        Returns:
+            A fully initialized Engine2D
+        """
+        # Create window system
+        val event_loop = window_create_event_loop()
+        val window = window_create(event_loop, width, height, title)
+
+        # Create all subsystems
+        val nodes = NodeStore.new()
+        val components = ComponentRegistry.create()
+        val physics = PhysicsWorld2D.create(physics_config)
+        val input = InputManager.create(event_loop.handle)
+        val audio = AudioManager.create(audio_config)
+        val renderer = SoftwareRenderer.create(width, height)
+        val gpu_ctx = Context.default()
+        val gpu_renderer = GpuRenderer2D.create(width, height)
+        val resources = ResourceManager.create("assets")
+        val vector = VectorRenderer.create()
+
+        Engine2D(
+            nodes: nodes,
+            components: components,
+            physics: physics,
+            input: input,
+            audio: audio,
+            renderer: renderer,
+            gpu_renderer: gpu_renderer,
+            renderer_mode: RendererMode.Software,
+            resources: resources,
+            vector: vector,
+            window_handle: window.handle,
+            event_loop_handle: event_loop.handle,
+            gpu_ctx: gpu_ctx
+        )
+
+    # ========================================================================
+    # Scene Graph Helpers
+    # ========================================================================
+
+    me create_node(name: text) -> NodeId:
+        """Create a new node in the scene graph.
+
+        Args:
+            name: Human-readable name for the node
+
+        Returns:
+            NodeId handle for the new node
+        """
+        self.nodes.create_node(name)
+
+    fn get_node(id: NodeId) -> Node2D?:
+        """Look up a node by its handle.
+
+        Args:
+            id: NodeId from a previous create_node call
+
+        Returns:
+            The Node2D, or nil if not found
+        """
+        self.nodes.get_node(id)
+
+    # ========================================================================
+    # Component Helpers
+    # ========================================================================
+
+    me attach_component(node_id: NodeId, component: Component2D):
+        """Attach a component to a node.
+
+        Args:
+            node_id: Target node
+            component: Component to attach
+        """
+        self.components.attach(node_id, component)
+
+    me create_sprite_node(name: text, texture_id: TextureId, src_rect: Rect2) -> NodeId:
+        """Create a node with a Sprite component attached.
+
+        Convenience method that creates a node, builds a SpriteData
+        from the given texture and source rect, and attaches it.
+
+        Args:
+            name: Node name
+            texture_id: Handle to the sprite's texture
+            src_rect: Source rectangle within the texture
+
+        Returns:
+            NodeId of the newly created sprite node
+        """
+        val node_id = self.nodes.create_node(name)
+        val sprite = SpriteData.create(texture_id, src_rect)
+        self.components.attach(node_id, Component2D.Sprite(data: sprite))
+        node_id
+
+    # ========================================================================
+    # Renderer Mode
+    # ========================================================================
+
+    me set_renderer_mode(mode: RendererMode):
+        """Switch between software and GPU rendering.
+
+        Args:
+            mode: RendererMode.Software or RendererMode.Gpu
+        """
+        self.renderer_mode = mode
+        if val RendererMode.Gpu = mode:
+            self.gpu_renderer.init_gpu(self.gpu_ctx, self.window_handle)
+
+    fn get_renderer_mode() -> RendererMode:
+        """Get the current renderer mode."""
+        self.renderer_mode
+
+    # ========================================================================
+    # Lifecycle
+    # ========================================================================
+
+    me destroy():
+        """Shut down all subsystems and close the window.
+
+        Must be called when the game exits to release FFI resources.
+        """
+        self.gpu_renderer.destroy_gpu(self.gpu_ctx)
+        self.input.destroy()
+        self.physics.destroy()
+        self.audio.destroy()
+        val event_loop = EventLoop(
+            handle: self.event_loop_handle,
+            is_valid: self.event_loop_handle != 0
+        )
+        val window = Window(
+            handle: self.window_handle,
+            event_loop: event_loop,
+            is_valid: self.window_handle != 0
+        )
+        window_destroy(window)
+        window_destroy_event_loop(event_loop)

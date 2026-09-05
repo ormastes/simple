@@ -1,0 +1,204 @@
+use std.spec.{describe, it, expect}
+use os.services.container.container_manager.{ContainerWorld}
+use os.services.container.container_runtime.{ContainerRuntime}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_grants, spawn_recipe_seed_parent_caps}
+use os.kernel.loader.workload_image_hash.{workload_image_blake3_hash}
+use os.kernel.security.execution_context.{kernel_call_context_from_task}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskPriority, TaskId}
+use os.kernel.arch.arch_context.{Architecture}
+use os.services.workload.workload_manifest.{
+    WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
+    ResourceBudget, LifecyclePolicy, ObservabilityPolicy, WorkloadManifest,
+    compile_workload_manifest
+}
+
+fn _push_u16(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _push_u64(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32(out, value & 0xFFFFFFFF)
+    out = _push_u32(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _minimal_x86_64_elf() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16(bytes, 2)
+    bytes = _push_u16(bytes, 62)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 64)
+    bytes = _push_u64(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 64)
+    bytes = _push_u16(bytes, 56)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u32(bytes, 5)
+    bytes = _push_u64(bytes, 0x80)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 0x1000)
+    while bytes.len() < 0x80:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+fn _policy(bytes: [u8]) -> WorkloadManifest:
+    val digest = workload_image_blake3_hash(bytes)
+    WorkloadManifest(
+        identity: WorkloadIdentitySpec(
+            principal_id: "container:worker", tenant_id: "system", image_hash: digest,
+            signer: "test", parent_principal: "pid1", expires_at_ms: 1u64
+        ),
+        image: ImageSpec(executable_path: "/sys/apps/live-worker", content_hash: digest, signer: "test"),
+        authority: AuthorityRequest(grants: spawn_recipe_grants(SPAWN_RECIPE_APP_LAUNCHER)),
+        isolation: IsolationSpec(
+            filesystem_view: "/container/worker", process_view: "private", ipc_view: "private",
+            network_view: "none", syscall_allowlist: [4u64]
+        ),
+        resources: ResourceBudget(
+            cpu_weight: 1u64, memory_pages: 1u64, process_limit: 2u64,
+            io_weight: 1u64, network_bytes: 0u64, wall_time_ms: 1u64
+        ),
+        lifecycle: LifecyclePolicy(restart_policy: "never", max_restarts: 0u64, watchdog_timeout_ms: 0u64),
+        observability: ObservabilityPolicy(audit_required: false, log_retention_ms: 0u64)
+    )
+
+fn _live_parent_scheduler() -> Scheduler:
+    var scheduler = Scheduler.new()
+    scheduler.create_task(
+        0x1000, TaskPriority.High,
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_APP_LAUNCHER, 0u64))
+    scheduler.schedule()
+    scheduler
+
+describe "container runtime bridge":
+    it "does not treat a model container as a live task before managed launch":
+        var world = ContainerWorld.new()
+        val idx = world.sys_create(
+            "worker", "/container/worker", [101u64], "blake3:image",
+            100u64, 64u64, 10u64, 4u64, [], false
+        )
+        val runtime = ContainerRuntime.new(world)
+        expect(runtime.runtime_pid_of(idx)).to_equal(0)
+        expect(runtime.is_live(idx)).to_equal(false)
+
+    it "rejects an exit report without a matching live task binding":
+        var world = ContainerWorld.new()
+        val idx = world.sys_create(
+            "worker", "/container/worker", [101u64], "blake3:image",
+            100u64, 64u64, 10u64, 4u64, [], false
+        )
+        var runtime = ContainerRuntime.new(world)
+        expect(runtime.note_exit_from_task(idx, 77, 1)).to_equal(false)
+        expect(runtime.runtime_pid_of(idx)).to_equal(0)
+
+    it "rejects a policy that is not bound to the container image":
+        val bytes = _minimal_x86_64_elf()
+        val compiled = compile_workload_manifest(_policy(bytes))
+        var world = ContainerWorld.new()
+        val idx = world.sys_create(
+            "worker", "/container/worker", [101u64],
+            "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+            100u64, 64u64, 10u64, 4u64, [], false
+        )
+        var runtime = ContainerRuntime.new(world)
+        var scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            val started = runtime.start_into_scheduler(
+                idx, kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(started.pid).to_equal(-13)
+            expect(started.reason).to_equal("container image/policy hash mismatch")
+            expect(runtime.is_live(idx)).to_equal(false)
+            expect(world.lifecycle_state(idx)).to_equal("created")
+
+    it "rejects a policy filesystem root wider than the container view":
+        val bytes = _minimal_x86_64_elf()
+        var policy = _policy(bytes)
+        policy.isolation.filesystem_view = "/"
+        val compiled = compile_workload_manifest(policy)
+        var world = ContainerWorld.new()
+        val idx = world.sys_create(
+            "worker", "/container/worker", [101u64], workload_image_blake3_hash(bytes),
+            100u64, 64u64, 10u64, 4u64, [], false
+        )
+        var runtime = ContainerRuntime.new(world)
+        var scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            val started = runtime.start_into_scheduler(
+                idx, kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(started.pid).to_equal(-13)
+            expect(started.reason).to_equal("container filesystem/policy root mismatch")
+            expect(runtime.is_live(idx)).to_equal(false)
+
+    it "marks running only after a hash-bound policy creates a live task":
+        val bytes = _minimal_x86_64_elf()
+        val policy = _policy(bytes)
+        val compiled = compile_workload_manifest(policy)
+        var world = ContainerWorld.new()
+        val idx = world.sys_create(
+            "worker", "/container/worker", [101u64], workload_image_blake3_hash(bytes),
+            100u64, 64u64, 10u64, 4u64, [], false
+        )
+        var runtime = ContainerRuntime.new(world)
+        var scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            val started = runtime.start_into_scheduler(
+                idx, kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(started.pid).to_be_greater_than(0)
+            expect(started.reason).to_equal("")
+            expect(runtime.is_live(idx)).to_equal(true)
+            expect(world.lifecycle_state(idx)).to_equal("running")
+            expect(world.allows_pid(idx, started.pid as u64)).to_equal(true)
+            var exited_scheduler = started.scheduler
+            var ipc = IpcManager.new()
+            val container_port = ipc.create_port(
+                TaskId(id: started.pid as u64), "container-exit-cleanup")
+            expect(container_port.id).to_be_greater_than(0u64)
+            exited_scheduler.exit_task_by_id(TaskId(id: started.pid as u64), 0)
+            val reconciled = runtime.reconcile_exit_from_scheduler(
+                idx, exited_scheduler, ipc)
+            expect(reconciled.accepted).to_equal(true)
+            expect(reconciled.ipc.connect("container-exit-cleanup")).to_equal(nil)
+            expect(runtime.is_live(idx)).to_equal(false)
+            expect(runtime.reap_exits()).to_equal(1)
+            expect(world.lifecycle_state(idx)).to_equal("exited")

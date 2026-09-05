@@ -1,0 +1,216 @@
+#!/bin/sh
+# build-simpleos-x86-64-efi-esp.shs
+#
+# Build a REAL-FIRMWARE x86_64 EFI System Partition directory for an arbitrary
+# SimpleOS multiboot `kernel.elf`, plus the writable OVMF VARS copy the VM needs.
+# The x86_64 sibling of scripts/os/build-simpleos-aarch64-efi-esp.shs.
+#
+# WHY THIS EXISTS. The x86_64 boot half was already solved once, inline, inside
+# scripts/check/check-simpleos-hello-world-in-guest-ovmf.shs (steps 4-5 of that
+# file). It was not reusable: a second lane wanting to boot a DIFFERENT kernel
+# had to copy the grub-mkstandalone incantation and the pflash argv by hand, and
+# a hand-copied argv is exactly how a lane silently drifts onto `-kernel` pass
+# semantics or isa-debug-exit, which .claude/rules/board-runnable.md forbids
+# because they cannot exist on real hardware. This script is that half, lifted
+# out and parameterised, with the boot rule enforced HERE rather than trusted to
+# each caller.
+#
+# DESIGN NOTE — the kernel rides in GRUB's memdisk, not as a file on the ESP.
+# grub-mkstandalone embeds boot/grub/grub.cfg AND boot/kernel.elf into the
+# BOOTX64.EFI image itself, so the produced EFI application is self-contained
+# and `multiboot /boot/kernel.elf` resolves out of the memdisk. That is what the
+# merged hello lane does and is proven to reach ring 3 under OVMF, so this
+# script reproduces it rather than inventing a part_gpt/fat file layout that
+# nothing here has ever booted. `part_gpt` and `fat` are still embedded so the
+# firmware can reach a real disk when a lane adds one (the hello lane's NVMe
+# payload volume is a separate drive and is NOT this script's business).
+#
+# USAGE
+#   sh scripts/os/build-simpleos-x86-64-efi-esp.shs --kernel <kernel.elf> \
+#       --out-dir <workdir> [--title "menu entry title"] [--boot-echo "text"]
+#
+# OUTPUTS (under <workdir>)
+#   esp/EFI/BOOT/BOOTX64.EFI   the GRUB-EFI application, kernel embedded
+#   grub.cfg                   the generated config (kept for evidence)
+#   OVMF_VARS_4M.fd            a WRITABLE copy of the firmware vars
+#   qemu-argv.txt              the exact pflash argv fragment a caller must use
+#
+# The caller boots with:
+#   -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE
+#   -drive if=pflash,format=raw,file=<workdir>/OVMF_VARS_4M.fd
+#   -drive file=fat:rw:<workdir>/esp,format=raw,id=esp,if=none
+#   -device virtio-blk-pci,drive=esp,bootindex=0
+# ...which is what qemu-argv.txt contains verbatim, so no caller retypes it.
+#
+# `--boot-echo` is the string GRUB prints just before the multiboot handover. It
+# is the FIRST rung of any booting gate: it proves OVMF actually executed the EFI
+# application, as opposed to the VM dying in firmware with an empty serial log.
+#
+# Verdict is the last line of stdout, repo convention:
+#   PASS  — <n> artifact(s) checked, ...      exit 0
+#   FAIL  — ...                               exit 1
+#   ERROR — nothing was checked: <reason>     exit 2
+# A missing host tool is ERROR, never a pass: absence of grub-mkstandalone is
+# absence of evidence, not evidence of a good ESP.
+#
+# --selftest is fatal and runs before any real work.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+
+KERNEL=''
+OUTDIR=''
+TITLE='SimpleOS x86_64 (UEFI/multiboot)'
+BOOT_ECHO='[grub-uefi] multiboot loading /boot/kernel.elf ...'
+
+fail()    { echo "FAIL — $1"; exit 1; }
+nothing() { echo "ERROR — nothing was checked: $1"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# The boot rule, as code. Applied to the argv this script itself emits, so a
+# caller that uses qemu-argv.txt verbatim cannot violate it.
+# ---------------------------------------------------------------------------
+assert_real_firmware_argv() {
+    case " $1 " in
+        *" -kernel "*) echo "argv uses QEMU -kernel pass semantics"; return 1 ;;
+    esac
+    case "$1" in
+        *isa-debug-exit*) echo "argv uses isa-debug-exit"; return 1 ;;
+    esac
+    case "$1" in
+        *"if=pflash"*) ;;
+        *) echo "argv has no pflash firmware"; return 1 ;;
+    esac
+    # A read-only VARS pflash cannot hold a boot entry across the firmware's own
+    # variable writes; the merged hello lane copies VARS for exactly this reason.
+    case "$1" in
+        *"if=pflash,format=raw,readonly=on,file="*) ;;
+        *) echo "argv has no read-only CODE pflash"; return 1 ;;
+    esac
+    return 0
+}
+
+# emit_argv WORKDIR -> the pflash+ESP argv fragment for that workdir.
+emit_argv() {
+    ea_w=$1
+    printf -- '-drive if=pflash,format=raw,readonly=on,file=%s -drive if=pflash,format=raw,file=%s/OVMF_VARS_4M.fd -drive file=fat:rw:%s/esp,format=raw,id=esp,if=none -device virtio-blk-pci,drive=esp,bootindex=0' \
+        "$OVMF_CODE" "$ea_w" "$ea_w"
+}
+
+selftest() {
+    st_fail=0
+
+    # (1) must-REJECT: -kernel pass semantics.
+    if assert_real_firmware_argv "qemu-system-x86_64 -m 2G -kernel k.elf" >/dev/null 2>&1; then
+        echo "selftest: -kernel argv wrongly accepted"; st_fail=1
+    fi
+    # (2) must-REJECT: isa-debug-exit.
+    if assert_real_firmware_argv "-drive if=pflash,format=raw,readonly=on,file=c.fd -device isa-debug-exit,iobase=0xf4" >/dev/null 2>&1; then
+        echo "selftest: isa-debug-exit argv wrongly accepted"; st_fail=1
+    fi
+    # (3) must-REJECT: no firmware at all.
+    if assert_real_firmware_argv "-drive file=x.img,format=raw" >/dev/null 2>&1; then
+        echo "selftest: firmware-less argv wrongly accepted"; st_fail=1
+    fi
+    # (4) must-REJECT: a writable CODE pflash (no readonly CODE volume).
+    if assert_real_firmware_argv "-drive if=pflash,format=raw,file=vars.fd" >/dev/null 2>&1; then
+        echo "selftest: argv with no read-only CODE pflash wrongly accepted"; st_fail=1
+    fi
+    # (5) must-ACCEPT: this script's own emitted argv.
+    if assert_real_firmware_argv "$(emit_argv /tmp/selftest-workdir)" >/dev/null 2>&1; then :; else
+        echo "selftest: this script's own emitted argv was rejected"; st_fail=1
+    fi
+    # (6) the emitted argv must actually name a writable VARS copy inside the
+    #     workdir, never the pristine system VARS file (a shared, often
+    #     read-only path — writing it would fail or poison every other lane).
+    case "$(emit_argv /tmp/selftest-workdir)" in
+        *"file=/tmp/selftest-workdir/OVMF_VARS_4M.fd"*) ;;
+        *) echo "selftest: emitted argv does not use a per-workdir VARS copy"; st_fail=1 ;;
+    esac
+    case "$(emit_argv /tmp/selftest-workdir)" in
+        *"if=pflash,format=raw,file=$OVMF_VARS_SRC"*)
+            echo "selftest: emitted argv writes the pristine system VARS file"; st_fail=1 ;;
+    esac
+
+    [ "$st_fail" -eq 0 ] || { echo "ERROR — nothing was checked: selftest failed"; exit 2; }
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest; echo "selftest OK"; exit 0 ;;
+        --kernel)    KERNEL=${2:?--kernel needs a path}; shift 2 ;;
+        --out-dir)   OUTDIR=${2:?--out-dir needs a path}; shift 2 ;;
+        --title)     TITLE=${2:?--title needs a value}; shift 2 ;;
+        --boot-echo) BOOT_ECHO=${2:?--boot-echo needs a value}; shift 2 ;;
+        *) nothing "unknown argument: $1" ;;
+    esac
+done
+selftest >/dev/null || exit 2
+
+[ -n "$KERNEL" ] || nothing "no --kernel given"
+[ -n "$OUTDIR" ] || nothing "no --out-dir given"
+
+command -v grub-mkstandalone >/dev/null 2>&1 || nothing "grub-mkstandalone missing"
+[ -s "$KERNEL" ]        || nothing "kernel missing or empty at $KERNEL"
+[ -f "$OVMF_CODE" ]     || nothing "OVMF_CODE missing at $OVMF_CODE"
+[ -f "$OVMF_VARS_SRC" ] || nothing "OVMF_VARS missing at $OVMF_VARS_SRC"
+
+# A kernel that is not an x86-64 ELF cannot be multiboot-loaded by GRUB; catching
+# it here turns a silent black-screen boot into a named failure.
+if command -v readelf >/dev/null 2>&1; then
+    readelf -hW "$KERNEL" 2>/dev/null | grep -q 'X86-64' \
+        || fail "$KERNEL is not an x86-64 ELF"
+fi
+
+ESP="$OUTDIR/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+VARS="$OUTDIR/OVMF_VARS_4M.fd"
+CFG="$OUTDIR/grub.cfg"
+
+mkdir -p "$OUTDIR"
+rm -rf "$ESP"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$VARS"
+
+{
+    echo 'set timeout=0'
+    echo 'set default=0'
+    echo 'insmod multiboot'
+    echo 'insmod normal'
+    printf 'menuentry "%s" {\n' "$TITLE"
+    printf '    echo "%s"\n' "$BOOT_ECHO"
+    echo '    multiboot /boot/kernel.elf'
+    echo '    boot'
+    echo '}'
+} > "$CFG"
+
+grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$CFG" "boot/kernel.elf=$KERNEL" \
+    || fail "grub-mkstandalone failed"
+
+ARGV=$(emit_argv "$OUTDIR")
+if ! ARGV_ERR=$(assert_real_firmware_argv "$ARGV"); then
+    nothing "the argv this script emitted violates the real-firmware rule: $ARGV_ERR"
+fi
+printf '%s\n' "$ARGV" > "$OUTDIR/qemu-argv.txt"
+
+CHECKED=0
+for a in "$EFIAPP" "$VARS" "$CFG" "$OUTDIR/qemu-argv.txt"; do
+    [ -s "$a" ] || fail "artifact missing or empty: $a"
+    CHECKED=$((CHECKED + 1))
+done
+[ "$CHECKED" -gt 0 ] || nothing "0 artifacts produced"
+
+# The EFI application must actually carry the kernel — a memdisk that silently
+# dropped it would boot GRUB and then hang with "file not found", which reads on
+# serial as a kernel bug rather than a packaging bug.
+EFISZ=$(wc -c < "$EFIAPP")
+KSZ=$(wc -c < "$KERNEL")
+[ "$EFISZ" -gt "$KSZ" ] \
+    || fail "BOOTX64.EFI ($EFISZ bytes) is not larger than the kernel ($KSZ bytes) — the memdisk cannot contain it"
+
+echo "PASS — $CHECKED artifact(s) checked, x86_64 ESP built for $KERNEL ($KSZ bytes) at $ESP; BOOTX64.EFI $EFISZ bytes, writable VARS at $VARS, real-firmware argv in $OUTDIR/qemu-argv.txt"

@@ -1,0 +1,107 @@
+#!/bin/sh
+# soak_rv32_hard_job.shs  (Lane OO — NEW additive soak, not in CI)
+#
+# Sustained hard-job soak of the rv32 exec core under GHDL. Runs an Adler-32
+# reduction over a deterministic byte sequence for @COUNT@ iterations, driving
+# the core's multi-cycle divider (two `remu` per iteration) for minutes of
+# wall-clock. Emits periodic 'P' progress markers (liveliness / no-stall proof)
+# and a final Adler-32 golden value over UART. The gate asserts: sustained wall
+# time >= MIN_WALL seconds, the golden value matches the host reference, every
+# emitted byte is in the expected charset (zero UART garbage), and progress
+# markers were seen (no early livelock).
+#
+# RTL is READ-ONLY, pinned to THIS worktree's origin copy. All GHDL steps run
+# from a private work dir holding the generated .mem files (the core opens them
+# by bare relative name).
+#
+# Tunables (env): RV32_SOAK_COUNT (default 90000, sized for ~2.5x margin over a
+# 60s floor on a ~50 kHz-sim host), RV32_SOAK_INTERVAL, RV32_SOAK_MIN_WALL.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+RTL="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
+PAY="$ROOT_DIR/examples/09_embedded/fpga_riscv/payload"
+WORK="$ROOT_DIR/build/ghdl/laneOO_soak"
+GCC="${RV32_GCC:-riscv64-unknown-elf-gcc}"
+OBJCOPY="${RV32_OBJCOPY:-riscv64-unknown-elf-objcopy}"
+COUNT="${RV32_SOAK_COUNT:-90000}"
+INTERVAL="${RV32_SOAK_INTERVAL:-10000}"
+MIN_WALL="${RV32_SOAK_MIN_WALL:-60}"
+
+fail() { echo "FAIL: $1"; echo "SOAK_RV32_HARD_JOB: FAIL"; exit 1; }
+
+command -v ghdl >/dev/null 2>&1 || fail "ghdl not found"
+command -v "$GCC" >/dev/null 2>&1 || fail "$GCC not found"
+command -v "$OBJCOPY" >/dev/null 2>&1 || fail "$OBJCOPY not found"
+
+rm -rf "$WORK"; mkdir -p "$WORK"
+
+echo "=== RV32 FPGA hard-job soak ==="
+echo "iterations = $COUNT   progress_interval = $INTERVAL   min_wall = ${MIN_WALL}s"
+
+# --- Host Adler-32 golden (exact in awk: all intermediates < 2^32 < 2^53) -----
+GOLDEN="$(awk -v k="$COUNT" 'BEGIN{
+    a=1; b=0;
+    for(i=0;i<k;i++){ a=(a+(i%256))%65521; b=(b+a)%65521; }
+    printf "%08X", (b*65536+a)%4294967296;
+}')"
+echo "host_golden = $GOLDEN"
+
+# --- Assemble the soak payload -> code ROM ------------------------------------
+sed -e "s/@COUNT@/$COUNT/g" -e "s/@INTERVAL@/$INTERVAL/g" \
+    "$PAY/soak_rv32.s" > "$WORK/soak.s"
+"$GCC" -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles \
+    -Wl,-Ttext=0x80000000 -o "$WORK/soak.elf" "$WORK/soak.s" || fail "assemble soak payload"
+"$OBJCOPY" -O binary "$WORK/soak.elf" "$WORK/soak.bin" || fail "objcopy"
+od -An -v -tx4 -w4 "$WORK/soak.bin" | tr -d ' ' | awk 'NF{print}' > "$WORK/rv32_payload.mem"
+[ -s "$WORK/rv32_payload.mem" ] || fail "empty rv32_payload.mem"
+# The soak does not touch the data ROM; the core still opens rv32_fat32.mem at
+# elaboration, so provide a one-word stub.
+printf '00000000\n' > "$WORK/rv32_fat32.mem"
+
+# --- Bound the sim so a hypothetical livelock cannot run away ------------------
+# Expected completion ~= COUNT * ~140 cycles (measured 122, +margin); cap at ~2x.
+STOP_MS="$(awk -v c="$COUNT" 'BEGIN{ ms=(c*140*10)/1000000*2; if(ms<50)ms=50; printf "%d", ms }')"
+echo "sim_stop_time = ${STOP_MS}ms"
+
+# --- GHDL analyse / elaborate / run from the mem dir --------------------------
+ghdl -a --std=08 --workdir="$WORK" "$RTL/rv32_exec_core.vhd" 2>"$WORK/a1.log" \
+    || { cat "$WORK/a1.log"; fail "analyse rv32_exec_core"; }
+ghdl -a --std=08 --workdir="$WORK" "$PAY/tb_rv32_payload.vhd" 2>"$WORK/a2.log" \
+    || { cat "$WORK/a2.log"; fail "analyse tb"; }
+( cd "$WORK" && ghdl -e --std=08 --workdir="$WORK" tb_rv32_payload ) >"$WORK/e.log" 2>&1 \
+    || { cat "$WORK/e.log"; fail "elaborate tb"; }
+
+echo "=== running soak (this takes minutes) ==="
+T0="$(date +%s)"
+( cd "$WORK" && ghdl -r --std=08 --workdir="$WORK" tb_rv32_payload --stop-time="${STOP_MS}ms" ) \
+    >"$WORK/sim.log" 2>&1 || true
+T1="$(date +%s)"
+WALL=$((T1 - T0))
+
+# --- Verify -------------------------------------------------------------------
+[ -f "$WORK/uart_capture.txt" ] || fail "no uart_capture.txt produced"
+CAP="$(tr -d '\r\n' < "$WORK/uart_capture.txt")"
+CYCLES="$(sed -n 's/.*PAYLOAD_CYCLES=\([0-9][0-9]*\).*/\1/p' "$WORK/sim.log" | head -1)"
+[ -n "$CYCLES" ] || fail "no PAYLOAD_CYCLES (soak did not reach sentinel: livelock/stall)"
+
+# Zero-garbage: string must be P{n} DONE=<8 hex> ~ and nothing else.
+PMARK="$(printf '%s' "$CAP" | tr -cd 'P' | wc -c | tr -d ' ')"
+BODY="$(printf '%s' "$CAP" | sed -n 's/^P*\(DONE=[0-9A-F]\{8\}~\)$/\1/p')"
+[ -n "$BODY" ] || fail "UART output not P*DONE=<8hex>~ (garbage): [$CAP]"
+CORE_GOLD="$(printf '%s' "$BODY" | sed -n 's/^DONE=\([0-9A-F]\{8\}\)~$/\1/p')"
+[ "$PMARK" -ge 1 ] || fail "no progress markers (livelock)"
+[ "$CORE_GOLD" = "$GOLDEN" ] || fail "golden mismatch core=$CORE_GOLD host=$GOLDEN"
+[ "$WALL" -ge "$MIN_WALL" ] || fail "wall ${WALL}s < required ${MIN_WALL}s (raise RV32_SOAK_COUNT)"
+
+HZ="n/a"; [ "$WALL" -gt 0 ] && HZ="$((CYCLES / WALL))"
+echo "--- metrics ---"
+echo "iterations       = $COUNT"
+echo "progress_markers = $PMARK"
+echo "core_cycles      = $CYCLES"
+echo "wall_seconds     = $WALL"
+echo "effective_hz     = $HZ"
+echo "golden           = $CORE_GOLD (core) == $GOLDEN (host)"
+echo "SOAK_RV32_HARD_JOB: PASS"

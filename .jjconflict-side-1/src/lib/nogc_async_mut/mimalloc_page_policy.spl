@@ -1,0 +1,96 @@
+@no_gc
+# mimalloc page policy — cross-thread delayed free + page commit/decommit policy
+#
+# Handles delayed (cross-thread) free entries and page commit/decommit state.
+# All operations are functional: mutation is expressed by returning new values.
+
+# ============================================================================
+# OS page operation type
+# ============================================================================
+
+enum OsPageOp:
+    """OS-level page operation requested by the policy layer."""
+    Commit
+    Decommit
+    Recommit
+
+# ============================================================================
+# Delayed free entry and list
+# ============================================================================
+
+struct MiDelayedFreeEntry:
+    """One cross-thread free request: identifies heap, size class, and block."""
+    heap_id: i64
+    block_size: usize
+    block_index: usize
+
+struct MiDelayedFreeList:
+    """Queue of pending cross-thread free entries."""
+    entries: [MiDelayedFreeEntry]
+
+fn delayed_free_list_new() -> MiDelayedFreeList:
+    """Create an empty delayed free list."""
+    MiDelayedFreeList(entries: [])
+
+fn delayed_free_push(list: MiDelayedFreeList, entry: MiDelayedFreeEntry) -> MiDelayedFreeList:
+    """Append one entry to the list. Returns the updated list."""
+    MiDelayedFreeList(entries: list.entries.push(entry))
+
+fn delayed_free_drain(list: MiDelayedFreeList) -> (MiDelayedFreeList, [MiDelayedFreeEntry]):
+    """Drain all entries from the list.
+
+    Returns a tuple of (empty list, drained entries). The caller is responsible
+    for processing each drained entry (e.g. calling _record_free).
+    """
+    val drained = list.entries
+    (MiDelayedFreeList(entries: []), drained)
+
+# ============================================================================
+# Page policy
+# ============================================================================
+
+struct MiPagePolicy:
+    """Commit/decommit policy for a single page."""
+    committed: bool
+    decommit_threshold: usize
+    recommit_count: usize
+
+fn page_policy_new() -> MiPagePolicy:
+    """Create a default page policy: committed, threshold 4096, count 0."""
+    MiPagePolicy(committed: true, decommit_threshold: 4096, recommit_count: 0)
+
+fn mi_page_decommit(policy: MiPagePolicy) -> MiPagePolicy:
+    """Mark page as decommitted. Returns updated policy."""
+    MiPagePolicy(
+        committed: false,
+        decommit_threshold: policy.decommit_threshold,
+        recommit_count: policy.recommit_count,
+    )
+
+fn mi_page_recommit(policy: MiPagePolicy) -> MiPagePolicy:
+    """Mark page as recommitted and increment recommit_count. Returns updated policy."""
+    MiPagePolicy(
+        committed: true,
+        decommit_threshold: policy.decommit_threshold,
+        recommit_count: policy.recommit_count + 1,
+    )
+
+fn should_decommit(policy: MiPagePolicy, free_bytes: usize) -> bool:
+    """Return true if the page is committed and free_bytes >= decommit_threshold."""
+    policy.committed and free_bytes >= policy.decommit_threshold
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export OsPageOp
+export MiDelayedFreeEntry
+export MiDelayedFreeList
+export MiPagePolicy
+export delayed_free_list_new
+export delayed_free_push
+export delayed_free_drain
+export page_policy_new
+export mi_page_decommit
+export mi_page_recommit
+export should_decommit

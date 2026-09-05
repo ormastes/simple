@@ -1,0 +1,86 @@
+# @cover src/compiler/00.common/diagnostics/diagnostic_v1.spl
+#
+# DiagnosticV1 round-trips through its JSON renderer with the fields that
+# drifted between the thin pure-Simple Diagnostic and the Rust seed's richer
+# type: a stable (non-optional) code, multi-file labels, a nested child
+# diagnostic, a macro expansion chain, and a confidence-scored suggested fix.
+
+use std.spec
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, DiagnosticFix, FixConfidence}
+use compiler.common.diagnostics.span.{Span}
+
+describe "DiagnosticV1":
+    it "round-trips a stable code, multi-file labels, a nested child, and a confidence-scored fix":
+        val primary_span = Span.new(4, 9, 2, 5)
+        val other_file_span = Span.new(0, 3, 1, 1)
+
+        val child = DiagnosticV1.error("E2002", "in expansion of macro `derive_eq`")
+            .with_span(other_file_span)
+
+        val fix = DiagnosticFix.new("E2001:1", "insert missing semicolon", FixConfidence.Likely)
+            .with_replacement("main.spl", primary_span, ";")
+
+        val diag = DiagnosticV1.error("E2001", "type mismatch")
+            .with_span(primary_span)
+            .with_label("main.spl", primary_span, "expected i64, found text")
+            .with_label("lib.spl", other_file_span, "declared here")
+            .with_note("both files must agree on type")
+            .with_help("convert the value before returning it")
+            .with_child(child)
+            .with_fix(fix)
+
+        val rendered = diag.to_json()
+
+        # Stable code and severity on the parent
+        expect(rendered).to_contain("\"code\":\"E2001\"")
+        expect(rendered).to_contain("\"severity\":\"error\"")
+        expect(rendered).to_contain("\"message\":\"type mismatch\"")
+
+        # Multi-file labels: each label carries its own file, not a single
+        # diagnostic-wide file the way the Rust seed's Diagnostic does
+        expect(rendered).to_contain("\"file\":\"main.spl\"")
+        expect(rendered).to_contain("\"file\":\"lib.spl\"")
+        expect(rendered).to_contain("\"message\":\"expected i64, found text\"")
+        expect(rendered).to_contain("\"message\":\"declared here\"")
+        expect(rendered).to_contain("\"primary\":true")
+
+        # Notes and help
+        expect(rendered).to_contain("both files must agree on type")
+        expect(rendered).to_contain("convert the value before returning it")
+
+        # Nested child diagnostic, with its own stable code
+        expect(rendered).to_contain("\"code\":\"E2002\"")
+        expect(rendered).to_contain("in expansion of macro")
+
+        # Confidence-scored suggested fix
+        expect(rendered).to_contain("\"id\":\"E2001:1\"")
+        expect(rendered).to_contain("\"confidence\":\"likely\"")
+        expect(rendered).to_contain("\"new_text\":\";\"")
+
+    it "renders zero fixes and no children as an empty array and a null fix":
+        val diag = DiagnosticV1.warning("W3001", "unused import")
+            .with_note("prefix with _ to silence this warning")
+
+        val rendered = diag.to_json()
+
+        expect(rendered).to_contain("\"severity\":\"warning\"")
+        expect(rendered).to_contain("\"code\":\"W3001\"")
+        expect(rendered).to_contain("\"children\":[]")
+        expect(rendered).to_contain("\"fix\":null")
+        expect(rendered).to_contain("\"file\":null")
+        expect(rendered).to_contain("\"span\":null")
+        expect(rendered).to_contain("\"labels\":[]")
+        expect(rendered).to_contain("\"macro_trace\":[]")
+
+    it "renders a macro expansion chain with each frame's own file and span":
+        val site = Span.new(10, 14, 5, 2)
+        val diag = DiagnosticV1.error("E4001", "recursive macro expansion")
+            .with_macro_frame("derive_eq", site, "macros.spl")
+            .with_macro_frame("derive_ord", site, "macros.spl")
+
+        val rendered = diag.to_json()
+
+        expect(rendered).to_contain("\"name\":\"derive_eq\"")
+        expect(rendered).to_contain("\"name\":\"derive_ord\"")
+        expect(rendered).to_contain("\"file\":\"macros.spl\"")
+        expect(rendered).to_contain("\"line\":5")

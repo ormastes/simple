@@ -1,0 +1,142 @@
+"""REQ-001 production MIR lowering for reason-independent match guards."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+fn lower_guard_fixture(policy: text, function_name: text) -> text:
+    val source = "enum Choice:\n    Some(i64)\n    None\n\nfn integer_guard(x: i64, b: bool) -> i64:\n    match x:\n        case n if n > 0 and b:\n            10\n        n =>\n            n\n\nfn enum_guard(x: Choice, b: bool) -> i64:\n    match x:\n        case Choice.Some(v) if v > 0 and b:\n            v\n        case Choice.Some(_):\n            0\n        case Choice.None:\n            -1\n"
+    val path = "src/mcdc_match_guard_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = policy
+    mir_lowering.mcdc_source_digest = 7331
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == function_name or function.name.ends_with("." + function_name):
+            return serialize_mir_function(function)
+    ""
+
+fn match_guard_manifest_count() -> i64:
+    val source = "fn guarded(x: i64, b: bool) -> i64:\n    match x:\n        case n if n > 0 and b:\n            10\n        n =>\n            n\n"
+    val path = "src/mcdc_match_guard_manifest_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = "static"
+    mir_lowering.mcdc_source_digest = 7332
+    mir_lowering.lower_module(hir)
+    var count = 0
+    for semantic_id in mir_lowering.mcdc_manifest_semantic_ids:
+        if semantic_id.contains(":match-guard:decision"):
+            count = count + 1
+    count
+
+fn enum_guard_order_rejected() -> bool:
+    val source = "enum Choice:\n    Some(i64)\n    None\n\nfn misordered(x: Choice, b: bool) -> i64:\n    match x:\n        case _ if b:\n            0\n        case Choice.Some(v):\n            v\n        case Choice.None:\n            -1\n        case _:\n            -2\n"
+    val path = "src/mcdc_match_guard_order_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = "static"
+    mir_lowering.mcdc_source_digest = 7333
+    mir_lowering.lower_module(hir)
+    for lowering_error in mir_lowering.errors:
+        if lowering_error.fatal and lowering_error.message.starts_with("MCDC-E-MATCH-GUARD-ORDER"):
+            return true
+    false
+
+fn scalar_guard_nonexhaustive_rejected() -> bool:
+    val source = "fn missing(x: i64, b: bool) -> i64:\n    match x:\n        case 1 if b:\n            10\n"
+    val path = "src/mcdc_match_guard_missing_fallback_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = "static"
+    mir_lowering.mcdc_source_digest = 7334
+    mir_lowering.lower_module(hir)
+    for lowering_error in mir_lowering.errors:
+        if lowering_error.fatal and lowering_error.message.starts_with("MCDC-E-MATCH-GUARD-NONEXHAUSTIVE"):
+            return true
+    false
+
+fn enum_guard_nonexhaustive_rejected() -> bool:
+    val source = "enum Choice:\n    Some(i64)\n    None\n\nfn missing(x: Choice, b: bool) -> i64:\n    match x:\n        case Choice.Some(v) if b:\n            v\n        case Choice.None:\n            -1\n"
+    val path = "src/mcdc_enum_guard_missing_fallback_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = "static"
+    mir_lowering.mcdc_source_digest = 7335
+    mir_lowering.lower_module(hir)
+    for lowering_error in mir_lowering.errors:
+        if lowering_error.fatal and lowering_error.message.starts_with("MCDC-E-MATCH-GUARD-NONEXHAUSTIVE"):
+            return true
+    false
+
+fn enum_guard_subsumed_rejected() -> bool:
+    val source = "enum Choice:\n    Some(i64)\n    None\n\nfn unreachable_guard(x: Choice, b: bool) -> i64:\n    match x:\n        case Choice.Some(v):\n            v\n        case Choice.Some(v) if b:\n            v + 1\n        case Choice.None:\n            -1\n"
+    val path = "src/mcdc_enum_guard_subsumed_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = "static"
+    mir_lowering.mcdc_source_digest = 7336
+    mir_lowering.lower_module(hir)
+    for lowering_error in mir_lowering.errors:
+        if lowering_error.fatal and lowering_error.message.starts_with("MCDC-E-MATCH-GUARD-SUBSUMED"):
+            return true
+    false
+
+describe "MC/DC match-guard MIR lowering", tag: ["only-compiled"]:
+    it "erases all guard probes in static-off mode":
+        val mir = lower_guard_fixture("off", "integer_guard")
+        expect(mir.contains("rt_mcdc_record_compiled_vector_v1")).to_equal(false)
+        expect(mir.contains("rt_mcdc_dynamic_vector_patchpoint_v1")).to_equal(false)
+
+    it "records one stable compound decision after an integer pattern succeeds":
+        val mir = lower_guard_fixture("static", "integer_guard")
+        expect(match_guard_manifest_count()).to_equal(1)
+        expect(mir).to_contain("match_guard_body")
+        expect(mir).to_contain("match_guard_next")
+        expect(mir.contains("\"Zero\"")).to_equal(false)
+        expect(mir).to_contain("logic_rhs")
+        expect(mir).to_contain("rt_mcdc_record_compiled_vector_v1")
+
+    it "fails closed rather than reordering a guarded wildcard before enum variants":
+        expect(enum_guard_order_rejected()).to_equal(true)
+
+    it "fails closed when a guarded scalar match has no final unconditional fallback":
+        expect(scalar_guard_nonexhaustive_rejected()).to_equal(true)
+
+    it "fails closed when a guarded enum match has no final unconditional fallback":
+        expect(enum_guard_nonexhaustive_rejected()).to_equal(true)
+
+    it "rejects a guarded variant candidate subsumed by an earlier unguarded catch-all":
+        expect(enum_guard_subsumed_rejected()).to_equal(true)
+
+    it "accepts exhaustive enum candidates and preserves guarded-before-unguarded order":
+        val mir = lower_guard_fixture("static", "enum_guard")
+        expect(mir).to_contain("ematch_guard_body")
+        expect(mir).to_contain("ematch_next")
+        expect(mir).to_contain("rt_enum_payload")
+        expect(mir).to_contain("logic_rhs")
+        expect(mir.contains("\"Zero\"")).to_equal(false)
+        expect(mir).to_contain("guarded exhaustive enum match received an invalid discriminant")
+        expect(mir).to_contain("Unreachable")
+
+    it "uses the dormant patchpoint in dynamic mode without changing guard CFG":
+        val mir = lower_guard_fixture("dynamic", "integer_guard")
+        expect(mir).to_contain("match_guard_body")
+        expect(mir).to_contain("rt_mcdc_dynamic_vector_patchpoint_v1")
+        expect(mir.contains("rt_mcdc_record_compiled_vector_v1")).to_equal(false)

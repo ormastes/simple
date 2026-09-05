@@ -1,0 +1,351 @@
+# SDN source parser and canonical application validation for SCI v1.
+
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.nogc_sync_mut.composition.types.{SimpleAppRecordV1, SimpleInterfaceGroupRecordV1, SimpleProviderRecordV1, SimpleBindingRecordV1, SimpleCliCommandRecordV1, SimpleCompositionImageV1}
+
+fn _source_text(value: SdnValue, key: text) -> Result<text, text>:
+    match value.get(key):
+        case Some(v):
+            match v.as_str():
+                case Some(s): Ok(s)
+                case None: Err("composition-error: invalid-field: " + key + " must be text")
+        case None: Err("composition-error: missing-field: " + key)
+
+fn _source_optional_text(value: SdnValue, key: text) -> Result<text, text>:
+    match value.get(key):
+        case Some(v):
+            match v.as_str():
+                case Some(s): Ok(s)
+                case None: Err("composition-error: invalid-field: " + key + " must be text")
+        case None: Ok("")
+
+fn _source_text_array(value: SdnValue, key: text) -> Result<[text], text>:
+    var out: [text] = []
+    match value.get(key):
+        case None: return Ok(out)
+        case Some(v):
+            match v.as_array():
+                case None: return Err("composition-error: invalid-field: " + key + " must be an array")
+                case Some(items):
+                    var i = 0
+                    while i < items.len():
+                        match items[i].as_str():
+                            case Some(s): out.push(s)
+                            case None: return Err("composition-error: invalid-field: " + key + " entries must be text")
+                        i = i + 1
+    Ok(_sort_text(out))
+
+fn _source_i64(value: SdnValue, key: text) -> Result<i64, text>:
+    match value.get(key):
+        case Some(v):
+            match v.as_i64():
+                case Some(n): Ok(n)
+                case None: Err("composition-error: invalid-field: " + key + " must be an integer")
+        case None: Err("composition-error: missing-field: " + key)
+
+fn _hex_digest(value: text) -> bool:
+    if value.len() != 64: return false
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn _artifact_kind(value: text) -> bool:
+    value == "smf" or value == "so" or value == "dylib" or value == "dll"
+
+fn _contains_text(values: [text], wanted: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == wanted: return true
+        i = i + 1
+    false
+
+fn _sort_text(values: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < values.len():
+        val item = values[i]
+        var next: [text] = []
+        var inserted = false
+        var j = 0
+        while j < out.len():
+            if not inserted and item < out[j]:
+                next.push(item)
+                inserted = true
+            next.push(out[j])
+            j = j + 1
+        if not inserted:
+            next.push(item)
+        out = next
+        i = i + 1
+    out
+
+fn _safe_artifact_path(path: text) -> bool:
+    path.starts_with("/") and not path.contains("/../") and not path.ends_with("/..") and not path.contains("//")
+
+fn _safe_provider_path(path: text) -> bool:
+    val approved = path.starts_with("build/providers/") or path.starts_with("/sys/providers/") or path.starts_with("/usr/lib/simple/providers/")
+    approved and not path.contains("/../") and not path.ends_with("/..") and not path.contains("//") and not path.contains("\\")
+
+fn _app_less(a: SimpleAppRecordV1, b: SimpleAppRecordV1) -> bool:
+    a.app_id < b.app_id
+
+fn _sort_apps(apps: [SimpleAppRecordV1]) -> [SimpleAppRecordV1]:
+    var out: [SimpleAppRecordV1] = []
+    var i = 0
+    while i < apps.len():
+        val item = apps[i]
+        var next: [SimpleAppRecordV1] = []
+        var inserted = false
+        var j = 0
+        while j < out.len():
+            if not inserted and _app_less(item, out[j]):
+                next.push(item)
+                inserted = true
+            next.push(out[j])
+            j = j + 1
+        if not inserted:
+            next.push(item)
+        out = next
+        i = i + 1
+    out
+
+fn _sort_groups(values: [SimpleInterfaceGroupRecordV1]) -> [SimpleInterfaceGroupRecordV1]:
+    var out: [SimpleInterfaceGroupRecordV1] = []
+    var i = 0
+    while i < values.len():
+        val item = values[i]
+        var next: [SimpleInterfaceGroupRecordV1] = []
+        var inserted = false
+        var j = 0
+        while j < out.len():
+            if not inserted and item.group_id < out[j].group_id: next.push(item); inserted = true
+            next.push(out[j]); j = j + 1
+        if not inserted: next.push(item)
+        out = next; i = i + 1
+    out
+
+fn _sort_providers(values: [SimpleProviderRecordV1]) -> [SimpleProviderRecordV1]:
+    var out: [SimpleProviderRecordV1] = []
+    var i = 0
+    while i < values.len():
+        val item = values[i]
+        var next: [SimpleProviderRecordV1] = []
+        var inserted = false
+        var j = 0
+        while j < out.len():
+            if not inserted and item.provider_id < out[j].provider_id: next.push(item); inserted = true
+            next.push(out[j]); j = j + 1
+        if not inserted: next.push(item)
+        out = next; i = i + 1
+    out
+
+fn _sort_bindings(values: [SimpleBindingRecordV1]) -> [SimpleBindingRecordV1]:
+    var out: [SimpleBindingRecordV1] = []
+    var i = 0
+    while i < values.len():
+        val item = values[i]
+        var next: [SimpleBindingRecordV1] = []
+        var inserted = false
+        var j = 0
+        while j < out.len():
+            if not inserted and item.service_id < out[j].service_id: next.push(item); inserted = true
+            next.push(out[j]); j = j + 1
+        if not inserted: next.push(item)
+        out = next; i = i + 1
+    out
+
+fn _sort_commands(values: [SimpleCliCommandRecordV1]) -> [SimpleCliCommandRecordV1]:
+    var out: [SimpleCliCommandRecordV1] = []
+    var i = 0
+    while i < values.len():
+        val item = values[i]
+        var next: [SimpleCliCommandRecordV1] = []
+        var inserted = false
+        var j = 0
+        while j < out.len():
+            if not inserted and item.command_name < out[j].command_name: next.push(item); inserted = true
+            next.push(out[j]); j = j + 1
+        if not inserted: next.push(item)
+        out = next; i = i + 1
+    out
+
+fn _contains_app_id(apps: [SimpleAppRecordV1], app_id: text) -> bool:
+    var i = 0
+    while i < apps.len():
+        if apps[i].app_id == app_id:
+            return true
+        i = i + 1
+    false
+
+fn parse_composition_source_v1(source: text) -> Result<SimpleCompositionImageV1, text>:
+    match parse_with_issues(source):
+        case Err(e): return Err("composition-error: parse: " + e)
+        case Ok(parsed):
+            val root = parsed.0
+            val issues = parsed.1
+            if issues.len() > 0:
+                return Err("composition-error: duplicate-source-key: " + issues[0].path)
+
+            val schema = _source_text(root, "schema")?
+            if schema != "simple.composition/1":
+                return Err("composition-error: unsupported-schema: " + schema)
+            val profile = _source_optional_text(root, "profile")?
+            var apps: [SimpleAppRecordV1] = []
+            var groups: [SimpleInterfaceGroupRecordV1] = []
+            var providers: [SimpleProviderRecordV1] = []
+            var bindings: [SimpleBindingRecordV1] = []
+            var commands: [SimpleCliCommandRecordV1] = []
+            match root.get("apps"):
+                case None: ()
+                case Some(apps_value):
+                    match apps_value.as_array():
+                        case None: return Err("composition-error: invalid-field: apps must be an array")
+                        case Some(items):
+                            var i = 0
+                            while i < items.len():
+                                val item = items[i]
+                                val app_id = _source_text(item, "id")?
+                                if app_id == "":
+                                    return Err("composition-error: invalid-app-id: empty")
+                                if _contains_app_id(apps, app_id):
+                                    return Err("composition-error: duplicate-app-id: " + app_id)
+                                val artifact = _source_text(item, "artifact")?
+                                if not _safe_artifact_path(artifact):
+                                    return Err("composition-error: unsafe-artifact-path: " + artifact)
+                                val display_name = _source_text(item, "name")?
+                                val icon = _source_optional_text(item, "icon")?
+                                val shortcut = _source_optional_text(item, "shortcut")?
+                                val associations = _source_text_array(item, "associations")?
+                                val capabilities = _source_text_array(item, "capabilities")?
+                                apps.push(SimpleAppRecordV1(
+                                    app_id: app_id,
+                                    display_name: display_name,
+                                    artifact_path: artifact,
+                                    icon: icon,
+                                    shortcut: shortcut,
+                                    associations: associations,
+                                    capabilities: capabilities
+                                ))
+                                i = i + 1
+            match root.get("interface_groups"):
+                case None: ()
+                case Some(v):
+                    match v.as_array():
+                        case None: return Err("composition-error: invalid-field: interface_groups must be an array")
+                        case Some(items):
+                            var i = 0
+                            while i < items.len():
+                                val id = _source_text(items[i], "id")?
+                                var ids: [text] = []
+                                var j = 0
+                                while j < groups.len():
+                                    ids.push(groups[j].group_id)
+                                    j = j + 1
+                                if id == "" or _contains_text(ids, id): return Err("composition-error: duplicate-interface-group: " + id)
+                                val major = _source_i64(items[i], "major")?
+                                val minor = _source_i64(items[i], "minor")?
+                                val abi = _source_text(items[i], "abi_digest")?
+                                if major < 1 or minor < 0: return Err("composition-error: invalid-interface-version: " + id)
+                                if not _hex_digest(abi): return Err("composition-error: invalid-abi-digest: " + id)
+                                groups.push(SimpleInterfaceGroupRecordV1(group_id: id, major: major, minor: minor, abi_digest: abi))
+                                i = i + 1
+            match root.get("providers"):
+                case None: ()
+                case Some(v):
+                    match v.as_array():
+                        case None: return Err("composition-error: invalid-field: providers must be an array")
+                        case Some(items):
+                            var i = 0
+                            while i < items.len():
+                                val id = _source_text(items[i], "id")?
+                                var j = 0
+                                while j < providers.len():
+                                    if providers[j].provider_id == id: return Err("composition-error: duplicate-provider-id: " + id)
+                                    j = j + 1
+                                val path = _source_text(items[i], "artifact")?
+                                val kind = _source_text(items[i], "kind")?
+                                val digest = _source_text(items[i], "artifact_digest")?
+                                val implements = _source_text_array(items[i], "interface_groups")?
+                                val bits = _source_i64(items[i], "required_capability_bits")?
+                                if not _safe_provider_path(path): return Err("composition-error: unsafe-provider-path: " + path)
+                                if not _artifact_kind(kind): return Err("composition-error: invalid-artifact-kind: " + kind)
+                                if not _hex_digest(digest): return Err("composition-error: invalid-artifact-digest: " + id)
+                                if bits < 0: return Err("composition-error: invalid-capability-bits: " + id)
+                                j = 0
+                                while j < implements.len():
+                                    var found = false
+                                    var k = 0
+                                    while k < groups.len():
+                                        if groups[k].group_id == implements[j]: found = true
+                                        k = k + 1
+                                    if not found: return Err("composition-error: unknown-interface-group: " + implements[j])
+                                    j = j + 1
+                                providers.push(SimpleProviderRecordV1(provider_id: id, artifact_path: path, artifact_kind: kind, artifact_digest: digest, interface_groups: implements, required_capability_bits: bits))
+                                i = i + 1
+            match root.get("bindings"):
+                case None: ()
+                case Some(v):
+                    match v.as_array():
+                        case None: return Err("composition-error: invalid-field: bindings must be an array")
+                        case Some(items):
+                            var i = 0
+                            while i < items.len():
+                                val service = _source_text(items[i], "service")?
+                                val group = _source_text(items[i], "interface_group")?
+                                val provider = _source_text(items[i], "provider")?
+                                var pi = -1
+                                var j = 0
+                                while j < providers.len():
+                                    if providers[j].provider_id == provider: pi = j
+                                    j = j + 1
+                                if pi < 0: return Err("composition-error: unknown-provider: " + provider)
+                                if not _contains_text(providers[pi].interface_groups, group): return Err("composition-error: unresolved-required-interface: " + group)
+                                j = 0
+                                while j < bindings.len():
+                                    if bindings[j].service_id == service or bindings[j].interface_group_id == group: return Err("composition-error: duplicate-binding: " + service)
+                                    j = j + 1
+                                bindings.push(SimpleBindingRecordV1(service_id: service, interface_group_id: group, provider_id: provider))
+                                i = i + 1
+            match root.get("commands"):
+                case None: ()
+                case Some(v):
+                    match v.as_array():
+                        case None: return Err("composition-error: invalid-field: commands must be an array")
+                        case Some(items):
+                            var names: [text] = []
+                            var i = 0
+                            while i < items.len():
+                                val name = _source_text(items[i], "name")?
+                                val aliases = _source_text_array(items[i], "aliases")?
+                                if name == "" or _contains_text(names, name): return Err("composition-error: duplicate-command: " + name)
+                                names.push(name)
+                                var j = 0
+                                while j < aliases.len():
+                                    if aliases[j] == "" or _contains_text(names, aliases[j]): return Err("composition-error: duplicate-command-alias: " + aliases[j])
+                                    names.push(aliases[j]); j = j + 1
+                                val binding = _source_text(items[i], "binding")?
+                                val group = _source_text(items[i], "interface_group")?
+                                var resolved = false
+                                j = 0
+                                while j < bindings.len():
+                                    if bindings[j].service_id == binding and bindings[j].interface_group_id == group: resolved = true
+                                    j = j + 1
+                                if not resolved: return Err("composition-error: unresolved-command-binding: " + binding)
+                                commands.push(SimpleCliCommandRecordV1(command_name: name, aliases: aliases, summary: _source_text(items[i], "summary")?, binding_service_id: binding, interface_group_id: group))
+                                i = i + 1
+            Ok(SimpleCompositionImageV1(
+                schema: schema,
+                profile: profile,
+                apps: _sort_apps(apps),
+                interface_groups: _sort_groups(groups),
+                providers: _sort_providers(providers),
+                bindings: _sort_bindings(bindings),
+                commands: _sort_commands(commands),
+                bytes: [],
+                composition_digest: ""
+            ))

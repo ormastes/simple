@@ -1,0 +1,110 @@
+"""Modeled Wine DLL loaded-image session over image-map handoff evidence."""
+
+use common.wine_dll_image_loader.{wine_dll_prepare_image_map_handoff}
+
+class WineDllLoadedImage:
+    dll_name: text
+    selected_path: text
+    mapped_base: i64
+    mapped_size: i64
+    section_handle: i64
+    ref_count: i64
+    loaded: bool
+
+class WineDllLoadSession:
+    images: [WineDllLoadedImage]
+    next_base: i64
+    evidence: text
+
+class WineDllLoadSessionResult:
+    ok: bool
+    error: text
+    session: WineDllLoadSession
+    dll_name: text
+    selected_path: text
+    mapped_base: i64
+    mapped_size: i64
+    section_handle: i64
+    ref_count: i64
+    evidence: text
+    status: text
+
+fn _image(dll_name: text, selected_path: text, mapped_base: i64, mapped_size: i64, section_handle: i64, ref_count: i64, loaded: bool) -> WineDllLoadedImage:
+    WineDllLoadedImage(dll_name: dll_name.lower(), selected_path: selected_path, mapped_base: mapped_base, mapped_size: mapped_size, section_handle: section_handle, ref_count: ref_count, loaded: loaded)
+
+fn _session(images: [WineDllLoadedImage], next_base: i64, evidence: text) -> WineDllLoadSession:
+    WineDllLoadSession(images: images, next_base: next_base, evidence: evidence)
+
+fn _result(ok: bool, error: text, session: WineDllLoadSession, dll_name: text, selected_path: text, mapped_base: i64, mapped_size: i64, section_handle: i64, ref_count: i64, evidence: text, status: text) -> WineDllLoadSessionResult:
+    WineDllLoadSessionResult(ok: ok, error: error, session: session, dll_name: dll_name, selected_path: selected_path, mapped_base: mapped_base, mapped_size: mapped_size, section_handle: section_handle, ref_count: ref_count, evidence: evidence, status: status)
+
+fn _find_loaded(images: [WineDllLoadedImage], dll_name: text) -> WineDllLoadedImage:
+    val normalized = dll_name.lower()
+    for item in images:
+        if item.loaded and item.dll_name == normalized:
+            return item
+    _image("", "", 0, 0, 0, 0, false)
+
+fn _replace_image(session: WineDllLoadSession, replacement: WineDllLoadedImage, evidence: text) -> WineDllLoadSession:
+    var images: [WineDllLoadedImage] = []
+    for item in session.images:
+        if item.dll_name == replacement.dll_name:
+            images.push(replacement)
+        else:
+            images.push(item)
+    _session(images, session.next_base, session.evidence + " " + evidence)
+
+fn _append_image(session: WineDllLoadSession, item: WineDllLoadedImage, next_base: i64, evidence: text) -> WineDllLoadSession:
+    var images = session.images
+    images.push(item)
+    _session(images, next_base, session.evidence + " " + evidence)
+
+pub fn wine_dll_load_session_new(next_base: i64) -> WineDllLoadSession:
+    _session([], next_base, "dll-load-session-created")
+
+pub fn wine_dll_load_session_loaded_count(session: WineDllLoadSession) -> i64:
+    var count = 0
+    for item in session.images:
+        if item.loaded:
+            count = count + 1
+    count
+
+pub fn wine_dll_session_load_modeled(session: WineDllLoadSession, dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], image_size: i64) -> WineDllLoadSessionResult:
+    val existing = _find_loaded(session.images, dll_name)
+    if existing.loaded:
+        val updated = _replace_image(session, _image(existing.dll_name, existing.selected_path, existing.mapped_base, existing.mapped_size, existing.section_handle, existing.ref_count + 1, true), "dll-load-existing-refcounted no-host-filesystem-access no-real-dll-loaded no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution")
+        return _result(true, "", updated, existing.dll_name, existing.selected_path, existing.mapped_base, existing.mapped_size, existing.section_handle, existing.ref_count + 1, updated.evidence, "dll-load-existing-refcounted")
+
+    val handoff = wine_dll_prepare_image_map_handoff(dll_name, application_directory, working_directory, path_dirs, known_dlls, image_size, session.next_base)
+    if not handoff.ok:
+        return _result(false, "image-map:" + handoff.error, session, handoff.dll_name, handoff.selected_path, 0, image_size, 0, 0, session.evidence + " " + handoff.evidence, "rejected")
+
+    val item = _image(handoff.dll_name, handoff.selected_path, handoff.mapped_base, handoff.mapped_size, handoff.section_handle, 1, true)
+    val next_base = handoff.mapped_base + handoff.mapped_size + 0x10000
+    val updated = _append_image(session, item, next_base, handoff.evidence + " dll-load-session-recorded modeled-loaded-image no-host-filesystem-access no-real-dll-loaded no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution")
+    _result(true, "", updated, item.dll_name, item.selected_path, item.mapped_base, item.mapped_size, item.section_handle, item.ref_count, updated.evidence, "dll-load-session-recorded")
+
+pub fn wine_dll_session_unload_modeled(session: WineDllLoadSession, dll_name: text) -> WineDllLoadSessionResult:
+    val existing = _find_loaded(session.images, dll_name)
+    if not existing.loaded:
+        return _result(false, "dll-not-loaded", session, dll_name.lower(), "", 0, 0, 0, 0, session.evidence, "rejected")
+
+    var next_ref = existing.ref_count - 1
+    var loaded = true
+    if next_ref <= 0:
+        next_ref = 0
+        loaded = false
+    val updated = _replace_image(session, _image(existing.dll_name, existing.selected_path, existing.mapped_base, existing.mapped_size, existing.section_handle, next_ref, loaded), "dll-load-session-unloaded modeled-refcount-release no-real-dll-unmapped no-dll-entrypoint-executed")
+    _result(true, "", updated, existing.dll_name, existing.selected_path, existing.mapped_base, existing.mapped_size, existing.section_handle, next_ref, updated.evidence, "dll-load-session-unloaded")
+
+pub fn wine_dll_session_load_with_rollback(session: WineDllLoadSession, dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], image_size: i64, commit_load: bool) -> WineDllLoadSessionResult:
+    val loaded = wine_dll_session_load_modeled(session, dll_name, application_directory, working_directory, path_dirs, known_dlls, image_size)
+    if not loaded.ok:
+        return loaded
+    if commit_load:
+        return loaded
+
+    val rolled = wine_dll_session_unload_modeled(loaded.session, dll_name)
+    if not rolled.ok:
+        return _result(false, "rollback:" + rolled.error, session, loaded.dll_name, loaded.selected_path, loaded.mapped_base, loaded.mapped_size, loaded.section_handle, loaded.ref_count, loaded.evidence + " dll-load-session-rollback-failed", "blocked")
+    _result(false, "dll-load-session-rolled-back", rolled.session, loaded.dll_name, loaded.selected_path, loaded.mapped_base, loaded.mapped_size, loaded.section_handle, 0, rolled.evidence + " dll-load-session-rolled-back no-real-dll-loaded no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution", "rolled-back")

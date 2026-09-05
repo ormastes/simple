@@ -1,0 +1,308 @@
+# Structured Chrome/Electron WebGPU compute evidence.
+
+use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_text}
+use std.gc_async_mut.io.mod_stub.{env_get as chrome_webgpu_compute_env_get}
+use std.process.{process_run}
+
+val _DEFAULT_CHROME_WEBGPU_COMPUTE_OUT: text = "/tmp/simple_chrome_webgpu_compute_evidence.json"
+
+fn _env_or(key: text, fallback: text) -> text:
+    val v = chrome_webgpu_compute_env_get(key) ?? ""
+    if v == "":
+        return fallback
+    v
+
+fn _repo_root() -> text:
+    val lib = chrome_webgpu_compute_env_get("SIMPLE_LIB") ?? ""
+    if lib.ends_with("/src"):
+        return lib[0 : lib.len() - 4]
+    if lib == "" or lib == "src":
+        return _env_or("PWD", ".")
+    lib
+
+fn _shell_quote(s: text) -> text:
+    "'" + s.replace("'", "'\\''") + "'"
+
+fn _json_after_key(json: text, key: text) -> text:
+    val marker = "\"" + key + "\":"
+    val parts = json.split(marker)
+    if parts.len() < 2:
+        return ""
+    parts[1]
+
+fn _json_text(json: text, key: text, fallback: text) -> text:
+    val rest = _json_after_key(json, key).trim()
+    if not rest.starts_with("\""):
+        return fallback
+    val parts = rest[1 : rest.len()].split("\"")
+    if parts.len() < 1:
+        return fallback
+    parts[0]
+
+fn _json_bool(json: text, key: text) -> bool:
+    _json_after_key(json, key).trim().starts_with("true")
+
+fn _json_i64(json: text, key: text) -> i64:
+    val rest = _json_after_key(json, key).trim()
+    if rest == "":
+        return 0
+    val token = rest.split(",")[0].split("}")[0].trim()
+    if token == "":
+        return 0
+    var i = 0
+    if token.starts_with("-"):
+        if token.len() == 1:
+            return 0
+        i = 1
+    while i < token.len():
+        val c = token[i]
+        if (c != "0" and c != "1" and c != "2" and c != "3" and c != "4" and
+            c != "5" and c != "6" and c != "7" and c != "8" and c != "9"):
+            return 0
+        i = i + 1
+    token.to_i64()
+
+fn _json_i32(json: text, key: text) -> i32:
+    _json_i64(json, key).to_i32()
+
+class ChromeWebGPUComputeEvidence:
+    status: text
+    diagnostic_text: text
+    backend_target: text
+    source_format: text
+    binary_format: text
+    tool_hint: text
+    entry_name: text
+    operation: text
+    source_origin: text
+    source_byte_count: i32
+    source_checksum: i64
+    payload_byte_count: i32
+    payload_checksum: i64
+    element_count: i32
+    adapter: bool
+    adapter_info: text
+    fallback_adapter: bool
+    device_configured: bool
+    shader_module_valid: bool
+    pipeline_valid: bool
+    bind_group_valid: bool
+    compute_pass_count: i32
+    dispatch_call_count: i32
+    dispatched_workgroups: i32
+    queue_submit_count: i32
+    readback_byte_count: i32
+    readback_valid: bool
+    result_checksum: i64
+    expected_checksum: i64
+    mismatch_count: i32
+    hardware_acceleration_verified: bool
+    electron_path: text
+    helper_path: text
+    exit_code: i64
+
+class ChromeWebGPUSimple2DFillPayload:
+    valid: bool
+    diagnostic_text: text
+    count: i32
+    fill_value: i32
+    payload_byte_count: i32
+    payload_checksum: i64
+
+impl ChromeWebGPUComputeEvidence:
+    fn ok(self) -> bool:
+        (self.status == "ok" and
+            self.adapter and
+            not self.fallback_adapter and
+            self.device_configured and
+            self.shader_module_valid and
+            self.pipeline_valid and
+            self.bind_group_valid and
+            self.compute_pass_count > 0 and
+            self.dispatch_call_count > 0 and
+            self.dispatched_workgroups > 0 and
+            self.queue_submit_count > 0 and
+            self.readback_byte_count > 0 and
+            self.readback_valid and
+            self.result_checksum == self.expected_checksum and
+            self.mismatch_count == 0)
+
+    fn host_unavailable(self) -> bool:
+        self.status.starts_with("host-unavailable:")
+
+    fn processing_failed(self) -> bool:
+        self.status == "processing-mismatch:readback" or self.status == "readback-failed" or self.status == "compile-failed:wgsl" or self.status == "processing-failed:compute-launch"
+
+    fn summary(self) -> text:
+        "status={self.status} source={self.source_origin} payload_bytes={self.payload_byte_count} payload_checksum={self.payload_checksum} adapter={self.adapter} pipeline={self.pipeline_valid} dispatches={self.dispatch_call_count} workgroups={self.dispatched_workgroups} submits={self.queue_submit_count} readback_bytes={self.readback_byte_count} checksum={self.result_checksum} expected={self.expected_checksum} mismatches={self.mismatch_count} exit={self.exit_code}"
+
+fn _parse_payload_byte(token: text) -> i32:
+    val trimmed = token.trim()
+    if trimmed == "":
+        return -1
+    var i = 0
+    while i < trimmed.len():
+        val c = trimmed[i]
+        if (c != "0" and c != "1" and c != "2" and c != "3" and c != "4" and
+            c != "5" and c != "6" and c != "7" and c != "8" and c != "9"):
+            return -1
+        i = i + 1
+    val value = trimmed.to_i64()
+    if value < 0 or value > 255:
+        return -1
+    value.to_i32()
+
+pub fn chrome_webgpu_parse_simple2d_fill_payload_bytes(payload_bytes: text) -> ChromeWebGPUSimple2DFillPayload:
+    val parts = payload_bytes.split(",")
+    if parts.len() != 8:
+        return ChromeWebGPUSimple2DFillPayload(valid: false, diagnostic_text: "expected exactly 8 payload bytes", count: 0, fill_value: 0, payload_byte_count: 0, payload_checksum: 0)
+    var bytes: [i32] = []
+    var checksum: i64 = 0
+    var i = 0
+    while i < parts.len():
+        val byte = _parse_payload_byte(parts[i])
+        if byte < 0:
+            return ChromeWebGPUSimple2DFillPayload(valid: false, diagnostic_text: "payload byte out of range", count: 0, fill_value: 0, payload_byte_count: 0, payload_checksum: 0)
+        bytes.push(byte)
+        checksum = checksum + byte
+        i = i + 1
+    val count = bytes[0] + bytes[1] * 256 + bytes[2] * 65536 + bytes[3] * 16777216
+    val fill_value = bytes[4] + bytes[5] * 256 + bytes[6] * 65536 + bytes[7] * 16777216
+    ChromeWebGPUSimple2DFillPayload(valid: true, diagnostic_text: "", count: count, fill_value: fill_value, payload_byte_count: 8, payload_checksum: checksum)
+
+pub fn chrome_webgpu_compute_unavailable(reason: text, diagnostic: text, electron_path: text, helper_path: text, exit_code: i64) -> ChromeWebGPUComputeEvidence:
+    ChromeWebGPUComputeEvidence(
+        status: "host-unavailable:" + reason,
+        diagnostic_text: diagnostic,
+        backend_target: "webgpu",
+        source_format: "wgsl",
+        binary_format: "source",
+        tool_hint: "browser-webgpu-host-import",
+        entry_name: "simple_webgpu_add_u32",
+        operation: "u32_add",
+        source_origin: "none",
+        source_byte_count: 0,
+        source_checksum: 0,
+        payload_byte_count: 0,
+        payload_checksum: 0,
+        element_count: 0,
+        adapter: false,
+        adapter_info: "",
+        fallback_adapter: false,
+        device_configured: false,
+        shader_module_valid: false,
+        pipeline_valid: false,
+        bind_group_valid: false,
+        compute_pass_count: 0,
+        dispatch_call_count: 0,
+        dispatched_workgroups: 0,
+        queue_submit_count: 0,
+        readback_byte_count: 0,
+        readback_valid: false,
+        result_checksum: 0,
+        expected_checksum: 0,
+        mismatch_count: 0,
+        hardware_acceleration_verified: false,
+        electron_path: electron_path,
+        helper_path: helper_path,
+        exit_code: exit_code
+    )
+
+pub fn chrome_webgpu_compute_evidence_from_json(json: text, diagnostic: text, electron_path: text, helper_path: text, exit_code: i64) -> ChromeWebGPUComputeEvidence:
+    val output_count = _json_i32(json, "output_count")
+    val output_matches = _json_bool(json, "output_matches")
+    val dispatch_count = _json_i32(json, "dispatch_count")
+    val submitted = _json_bool(json, "submitted")
+    val parsed_result_checksum = _json_i64(json, "result_checksum")
+    val result_checksum = if parsed_result_checksum > 0: parsed_result_checksum else: _json_i64(json, "output_checksum")
+    val parsed_readback_bytes = _json_i32(json, "readback_byte_count")
+    val readback_bytes = if parsed_readback_bytes > 0: parsed_readback_bytes else: output_count * 4
+    val parsed_mismatch_count = _json_i32(json, "mismatch_count")
+    val mismatch_count = if parsed_mismatch_count > 0:
+        parsed_mismatch_count
+    else:
+        if output_matches: 0 else: output_count
+    ChromeWebGPUComputeEvidence(
+        status: _json_text(json, "status", "host-unavailable:invalid-json"),
+        diagnostic_text: _json_text(json, "diagnostic_text", diagnostic),
+        backend_target: _json_text(json, "backend_target", "webgpu"),
+        source_format: _json_text(json, "source_format", "wgsl"),
+        binary_format: _json_text(json, "binary_format", "source"),
+        tool_hint: _json_text(json, "tool_hint", "browser-webgpu-host-import"),
+        entry_name: _json_text(json, "entry_name", "simple_webgpu_add_u32"),
+        operation: _json_text(json, "operation", "u32_add"),
+        source_origin: _json_text(json, "source_origin", "helper-default"),
+        source_byte_count: _json_i32(json, "source_byte_count"),
+        source_checksum: _json_i64(json, "source_checksum"),
+        payload_byte_count: _json_i32(json, "payload_byte_count"),
+        payload_checksum: _json_i64(json, "payload_checksum"),
+        element_count: if _json_i32(json, "element_count") > 0: _json_i32(json, "element_count") else: output_count,
+        adapter: _json_bool(json, "adapter"),
+        adapter_info: _json_text(json, "adapter_info", ""),
+        fallback_adapter: _json_bool(json, "fallback_adapter"),
+        device_configured: _json_bool(json, "device_configured"),
+        shader_module_valid: _json_bool(json, "shader_module_valid") or _json_bool(json, "shader_valid"),
+        pipeline_valid: _json_bool(json, "pipeline_valid"),
+        bind_group_valid: _json_bool(json, "bind_group_valid"),
+        compute_pass_count: if _json_i32(json, "compute_pass_count") > 0: _json_i32(json, "compute_pass_count") else: dispatch_count,
+        dispatch_call_count: if _json_i32(json, "dispatch_call_count") > 0: _json_i32(json, "dispatch_call_count") else: dispatch_count,
+        dispatched_workgroups: if _json_i32(json, "dispatched_workgroups") > 0: _json_i32(json, "dispatched_workgroups") else: _json_i32(json, "workgroup_count"),
+        queue_submit_count: if _json_i32(json, "queue_submit_count") > 0: _json_i32(json, "queue_submit_count") else: if submitted: 1 else: 0,
+        readback_byte_count: readback_bytes,
+        readback_valid: _json_bool(json, "readback_valid"),
+        result_checksum: result_checksum,
+        expected_checksum: _json_i64(json, "expected_checksum"),
+        mismatch_count: mismatch_count,
+        hardware_acceleration_verified: _json_bool(json, "hardware_acceleration_verified"),
+        electron_path: electron_path,
+        helper_path: helper_path,
+        exit_code: exit_code
+    )
+
+pub fn chrome_webgpu_compute_add_u32_evidence(count: i32) -> ChromeWebGPUComputeEvidence:
+    chrome_webgpu_compute_add_u32_generated_source_evidence(count, "", "simple_webgpu_add_u32")
+
+pub fn chrome_webgpu_compute_add_u32_generated_source_evidence(count: i32, wgsl_source: text, entry_name: text) -> ChromeWebGPUComputeEvidence:
+    chrome_webgpu_compute_generated_source_evidence(count, wgsl_source, entry_name, "u32_add", 0)
+
+pub fn chrome_webgpu_compute_simple2d_fill_generated_source_evidence(count: i32, fill_value: i32, wgsl_source: text, entry_name: text) -> ChromeWebGPUComputeEvidence:
+    chrome_webgpu_compute_generated_source_evidence(count, wgsl_source, entry_name, "simple2d_fill", fill_value)
+
+pub fn chrome_webgpu_compute_wasm_simple2d_fill_payload_bytes_evidence(payload_bytes: text, wgsl_source: text, entry_name: text) -> ChromeWebGPUComputeEvidence:
+    val payload = chrome_webgpu_parse_simple2d_fill_payload_bytes(payload_bytes)
+    if not payload.valid:
+        return chrome_webgpu_compute_unavailable("invalid-simple2d-fill-payload", payload.diagnostic_text, "", "", 0)
+    chrome_webgpu_compute_generated_source_evidence_with_payload(payload.count, wgsl_source, entry_name, "simple2d_fill", payload.fill_value, payload.payload_byte_count, payload.payload_checksum, "wasm-simple2d-compute-payload")
+
+fn chrome_webgpu_compute_generated_source_evidence(count: i32, wgsl_source: text, entry_name: text, operation: text, fill_value: i32) -> ChromeWebGPUComputeEvidence:
+    chrome_webgpu_compute_generated_source_evidence_with_payload(count, wgsl_source, entry_name, operation, fill_value, 0, 0, "compiler-portable-compute")
+
+fn chrome_webgpu_compute_generated_source_evidence_with_payload(count: i32, wgsl_source: text, entry_name: text, operation: text, fill_value: i32, payload_byte_count: i32, payload_checksum: i64, source_origin: text) -> ChromeWebGPUComputeEvidence:
+    val root = _repo_root()
+    val electron = _env_or("SIMPLE_WEB_RENDER_ELECTRON", root + "/tools/electron-shell/node_modules/.bin/electron")
+    val helper = _env_or("SIMPLE_CHROME_WEBGPU_COMPUTE_HELPER", root + "/tools/web-render-backend/chromium-webgpu-compute")
+    val out = _env_or("SIMPLE_CHROME_WEBGPU_COMPUTE_OUT", _DEFAULT_CHROME_WEBGPU_COMPUTE_OUT)
+    var source_env = ""
+    if wgsl_source != "":
+        source_env = " CWC_WGSL_SOURCE=" + _shell_quote(wgsl_source) + " CWC_SOURCE_ORIGIN=" + _shell_quote(source_origin)
+    var entry_env = ""
+    if entry_name != "":
+        entry_env = " CWC_ENTRY_NAME=" + _shell_quote(entry_name)
+    val cmd = "CWC_OUT=" + _shell_quote(out) +
+        " CWC_COUNT=" + count.to_text() +
+        " CWC_OPERATION=" + _shell_quote(operation) +
+        " CWC_FILL_VALUE=" + fill_value.to_text() +
+        " CWC_PAYLOAD_BYTE_COUNT=" + payload_byte_count.to_text() +
+        " CWC_PAYLOAD_CHECKSUM=" + payload_checksum.to_text() +
+        source_env +
+        entry_env +
+        " " + _shell_quote(electron) + " --no-sandbox " + _shell_quote(helper)
+    val result = process_run("/bin/sh", ["-c", cmd])
+    if result.2 != 0:
+        if result.2 == 127:
+            return chrome_webgpu_compute_unavailable("electron-missing", result.1, electron, helper, result.2)
+        return chrome_webgpu_compute_unavailable("electron-launch", result.1, electron, helper, result.2)
+    val json = browser_file_read_text(out) ?? ""
+    if json.trim() == "":
+        return chrome_webgpu_compute_unavailable("electron-launch", result.1, electron, helper, result.2)
+    chrome_webgpu_compute_evidence_from_json(json, result.1, electron, helper, result.2)

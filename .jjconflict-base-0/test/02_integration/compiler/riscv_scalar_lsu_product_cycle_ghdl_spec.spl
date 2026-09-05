@@ -1,0 +1,141 @@
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate,
+    ghdl_run, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_product_to_vhdl.{
+    compile_strict_riscv_scalar_product}
+
+fn lsu_product_tb(entity_name: text, tb_name: text, instruction_hex: text,
+    response_hex: text, expected_value_hex: text,
+    request_mask_hex: text, retire_mask_hex: text) -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n" +
+    "entity " + tb_name + " is end entity; architecture sim of " + tb_name + " is\n" +
+    " signal clk,rst,dispatch_valid,retire_ready,request_ready,response_valid,response_fault: std_logic := '0';\n" +
+    " signal in_ready,request_valid,request_write,response_ready,retire_valid,retire_trap,protocol_fault: std_logic;\n" +
+    " signal request_id,response_id,retire_order: std_logic_vector(63 downto 0) := (others=>'0');\n" +
+    " signal request_address: std_logic_vector(55 downto 0); signal request_mask: std_logic_vector(7 downto 0);\n" +
+    " signal request_data,response_data,retire_value,retire_address,retire_read_data: std_logic_vector(63 downto 0);\n" +
+    " signal retire_read_mask: std_logic_vector(31 downto 0); begin clk <= not clk after 5 ns;\n" +
+    " dut: entity work." + entity_name + " port map(clk=>clk,rst=>rst,retire_ready=>retire_ready," +
+    "illegal_valid=>'0',interrupt_valid=>'0',interrupt_cause=>(others=>'0'),interrupt_event_id=>(others=>'0')," +
+    "provider_event_id=>std_logic_vector(to_unsigned(31,64)),decode_event_id=>std_logic_vector(to_unsigned(31,64))," +
+    "interrupt_held=>'0',between_events=>'0',dispatch_valid=>dispatch_valid,dispatch_lineage_valid=>'1'," +
+    "dispatch_privilege=>\"11\",dispatch_original_instruction=>x\"" + instruction_hex + "\"," +
+    "dispatch_canonical_instruction=>x\"" + instruction_hex + "\",dispatch_instruction_length_bytes=>\"100\"," +
+    "dispatch_pc_before=>x\"0000000000000200\",dispatch_pc_after=>x\"0000000000000204\"," +
+    "dispatch_rd=>\"00001\",rs1_index=>\"00001\",rs2_index=>\"00000\"," +
+    "rs1_value=>x\"0000000000000100\",rs2_value=>(others=>'0'),memory_request_ready=>request_ready," +
+    "memory_response_valid=>response_valid,memory_response_id=>response_id,memory_response_data=>response_data," +
+    "memory_response_fault=>response_fault,memory_response_cause=>(others=>'0'),memory_response_tval=>(others=>'0')," +
+    "in_ready=>in_ready,memory_request_valid=>request_valid,memory_request_id=>request_id," +
+    "memory_request_address=>request_address,memory_request_write=>request_write," +
+    "memory_request_byte_mask=>request_mask,memory_request_write_data=>request_data," +
+    "memory_response_ready=>response_ready,dispatch_accept=>open,retire_valid=>retire_valid," +
+    "retire_order=>retire_order,protocol_fault=>protocol_fault,retire_xlen=>open,retire_privilege=>open," +
+    "retire_original_instruction=>open,retire_canonical_instruction=>open,retire_instruction_length_bytes=>open," +
+    "retire_pc_before=>open,retire_pc_after=>open,retire_rd=>open,retire_rd_write=>open," +
+    "retire_rd_value=>retire_value,retire_memory_address=>retire_address," +
+    "retire_memory_read_mask=>retire_read_mask,retire_memory_write_mask=>open," +
+    "retire_memory_read_data=>retire_read_data,retire_memory_write_data=>open," +
+    "retire_trap=>retire_trap,retire_interrupt=>open,retire_cause=>open,retire_tval=>open);\n" +
+    " process begin rst<='1'; wait until rising_edge(clk); wait until rising_edge(clk); rst<='0'; wait for 1 ns;\n" +
+    " assert in_ready='1' report \"LSU product not ready\" severity failure; dispatch_valid<='1'; wait until rising_edge(clk); dispatch_valid<='0'; wait for 1 ns;\n" +
+    " assert request_valid='1' and request_address=x\"00000000000100\" and request_write='0' and request_mask=x\"" + request_mask_hex + "\" report \"load request mismatch\" severity failure;\n" +
+    " wait until rising_edge(clk); wait for 1 ns; assert request_valid='1' and request_address=x\"00000000000100\" and request_mask=x\"" + request_mask_hex + "\" report \"load request not held under backpressure\" severity failure;\n" +
+    " response_id<=request_id; request_ready<='1'; wait until rising_edge(clk); request_ready<='0'; wait for 1 ns;\n" +
+    " assert request_valid='0' and response_ready='1' report \"LD issue handshake mismatch\" severity failure;\n" +
+    " response_data<=x\"" + response_hex + "\"; response_valid<='1'; wait until rising_edge(clk); response_valid<='0'; wait for 1 ns;\n" +
+    " for i in 0 to 8 loop exit when retire_valid='1'; wait until rising_edge(clk); wait for 1 ns; end loop;\n" +
+    " assert retire_valid='1' and retire_trap='0' and retire_value=x\"" + expected_value_hex + "\" report \"load retirement value mismatch\" severity failure;\n" +
+    " assert retire_address=x\"0000000000000100\" and retire_read_mask=x\"" + retire_mask_hex + "\" and retire_read_data=x\"" + expected_value_hex + "\" report \"load retirement memory record mismatch\" severity failure;\n" +
+    " assert retire_order=std_logic_vector(to_unsigned(0,64)) report \"LD retirement order mismatch\" severity failure;\n" +
+    " wait until rising_edge(clk); wait for 1 ns; assert retire_valid='1' and retire_value=x\"" + expected_value_hex + "\" report \"load retirement not held\" severity failure;\n" +
+    " retire_ready<='1'; wait until rising_edge(clk); retire_ready<='0'; wait for 1 ns; assert retire_valid='0' report \"LD retirement duplicated\" severity failure;\n" +
+    " response_valid<='1'; wait until rising_edge(clk); response_valid<='0'; wait for 1 ns;\n" +
+    " assert protocol_fault='1' and retire_valid='0' report \"rogue LSU response did not fail closed\" severity failure;\n" +
+    " wait until rising_edge(clk); wait for 1 ns; assert protocol_fault='1' report \"LSU protocol fault not sticky\" severity failure; finish; end process; end architecture;\n"
+
+fn lsu_local_fault_tb() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n" +
+    "entity scalar_ld_misaligned_tb is end entity; architecture sim of scalar_ld_misaligned_tb is\n" +
+    " signal clk,rst,dispatch_valid,retire_ready: std_logic := '0'; signal in_ready,request_valid,response_ready,retire_valid,retire_trap,retire_rd_write,protocol_fault: std_logic;\n" +
+    " signal retire_cause,retire_tval: std_logic_vector(63 downto 0); begin clk<=not clk after 5 ns;\n" +
+    " dut: entity work.scalar_ld_misaligned port map(clk=>clk,rst=>rst,retire_ready=>retire_ready," +
+    "illegal_valid=>'0',interrupt_valid=>'0',interrupt_cause=>(others=>'0'),interrupt_event_id=>(others=>'0')," +
+    "provider_event_id=>std_logic_vector(to_unsigned(51,64)),decode_event_id=>std_logic_vector(to_unsigned(51,64))," +
+    "interrupt_held=>'0',between_events=>'0',dispatch_valid=>dispatch_valid,dispatch_lineage_valid=>'1'," +
+    "dispatch_privilege=>\"11\",dispatch_original_instruction=>x\"0000B083\",dispatch_canonical_instruction=>x\"0000B083\"," +
+    "dispatch_instruction_length_bytes=>\"100\",dispatch_pc_before=>(others=>'0'),dispatch_pc_after=>std_logic_vector(to_unsigned(4,64))," +
+    "dispatch_rd=>\"00001\",rs1_index=>\"00001\",rs2_index=>\"00000\",rs1_value=>x\"0000000000001001\",rs2_value=>(others=>'0')," +
+    "memory_request_ready=>'0',memory_response_valid=>'0',memory_response_id=>(others=>'0'),memory_response_data=>(others=>'0')," +
+    "memory_response_fault=>'0',memory_response_cause=>(others=>'0'),memory_response_tval=>(others=>'0'),in_ready=>in_ready," +
+    "memory_request_valid=>request_valid,memory_request_id=>open,memory_request_address=>open,memory_request_write=>open," +
+    "memory_request_byte_mask=>open,memory_request_write_data=>open,memory_response_ready=>response_ready,dispatch_accept=>open," +
+    "retire_valid=>retire_valid,retire_order=>open,protocol_fault=>protocol_fault,retire_xlen=>open,retire_privilege=>open," +
+    "retire_original_instruction=>open,retire_canonical_instruction=>open,retire_instruction_length_bytes=>open," +
+    "retire_pc_before=>open,retire_pc_after=>open,retire_rd=>open,retire_rd_write=>retire_rd_write,retire_rd_value=>open," +
+    "retire_memory_address=>open,retire_memory_read_mask=>open,retire_memory_write_mask=>open,retire_memory_read_data=>open," +
+    "retire_memory_write_data=>open,retire_trap=>retire_trap,retire_interrupt=>open,retire_cause=>retire_cause,retire_tval=>retire_tval);\n" +
+    " process begin rst<='1'; wait until rising_edge(clk); wait until rising_edge(clk); rst<='0'; wait for 1 ns; dispatch_valid<='1'; wait until rising_edge(clk); dispatch_valid<='0'; wait for 1 ns;\n" +
+    " assert request_valid='0' and response_ready='0' report \"misaligned LD issued memory traffic\" severity failure;\n" +
+    " for i in 0 to 6 loop exit when retire_valid='1'; wait until rising_edge(clk); wait for 1 ns; end loop;\n" +
+    " assert retire_valid='1' and retire_trap='1' and retire_rd_write='0' report \"misaligned LD did not trap precisely\" severity failure;\n" +
+    " assert retire_cause=x\"0000000000000004\" and retire_tval=x\"0000000000001001\" report \"misaligned LD cause/tval mismatch\" severity failure;\n" +
+    " wait until rising_edge(clk); wait for 1 ns; assert retire_valid='1' and request_valid='0' report \"misaligned retirement not held\" severity failure;\n" +
+    " retire_ready<='1'; wait until rising_edge(clk); retire_ready<='0'; wait for 1 ns; assert retire_valid='0' and protocol_fault='0' report \"misaligned retirement did not consume cleanly\" severity failure; finish; end process; end architecture;\n"
+
+describe "RISC-V Gen2 integrated LSU product cycle evidence":
+    # @req REQ-G2-012 NFR-G2-013
+    # @capture exec
+    # @capture artifact
+    # @capture log
+    slow_it "should hold one LD request and retire one matched response through the closed product":
+        step("Require the external GHDL VHDL-2008 cycle runner")
+        val available = ghdl_available()
+        expect(available).to_equal(true)
+        if not available:
+            val blocked = "BLOCKED: GHDL VHDL-2008 runner is unavailable; cannot satisfy REQ-G2-012"
+            print blocked
+            fail(blocked)
+            return
+        step("Build and simulate the closed load request/response witnesses")
+        val cases = [("scalar_ld_product_cycle", "scalar_ld_product_cycle_tb", 0x0000B083,
+                "0000B083", "8877665544332211", "8877665544332211", "FF", "000000FF"),
+            ("scalar_lw_product_cycle", "scalar_lw_product_cycle_tb", 0x0000A083,
+                "0000A083", "0000000080000001", "FFFFFFFF80000001", "0F", "0000000F")]
+        for item in cases:
+            val emitted = compile_strict_riscv_scalar_product(item[0], CoreConfig.rv64(),
+                item[2], LsuConfig.rv64_product_default())
+            expect(emitted.is_success()).to_equal(true)
+            if emitted.is_success():
+                val path = "/tmp/" + item[0] + ".vhd"
+                expect(vhdl_write_file(path, emitted.vhdl + "\n" + lsu_product_tb(
+                    item[0], item[1], item[3], item[4], item[5], item[6], item[7]))).to_equal(true)
+                expect(ghdl_analyze(path).success).to_equal(true)
+                expect(ghdl_elaborate(item[1]).success).to_equal(true)
+                expect(ghdl_run(item[1], Some("1000ns")).success).to_equal(true)
+
+    # @req REQ-G2-012 NFR-G2-013
+    # @capture exec
+    # @capture artifact
+    # @capture log
+    slow_it "should retire a local misalignment trap without memory traffic":
+        step("Require the external GHDL VHDL-2008 cycle runner")
+        val available = ghdl_available()
+        expect(available).to_equal(true)
+        if not available:
+            val blocked = "BLOCKED: GHDL VHDL-2008 runner is unavailable; cannot satisfy REQ-G2-012"
+            print blocked
+            fail(blocked)
+            return
+        step("Build and simulate the local misalignment trap witness")
+        val emitted = compile_strict_riscv_scalar_product("scalar_ld_misaligned",
+            CoreConfig.rv64(), 0x0000B083, LsuConfig.rv64_product_default())
+        expect(emitted.is_success()).to_equal(true)
+        if emitted.is_success():
+            val path = "/tmp/scalar_ld_misaligned.vhd"
+            expect(vhdl_write_file(path, emitted.vhdl + "\n" + lsu_local_fault_tb())).to_equal(true)
+            expect(ghdl_analyze(path).success).to_equal(true)
+            expect(ghdl_elaborate("scalar_ld_misaligned_tb").success).to_equal(true)
+            expect(ghdl_run("scalar_ld_misaligned_tb", Some("500ns")).success).to_equal(true)

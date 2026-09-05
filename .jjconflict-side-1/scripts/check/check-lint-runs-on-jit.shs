@@ -1,0 +1,64 @@
+#!/bin/sh
+# Gate: `simple lint` must compile and run on the seed's Cranelift JIT lane,
+# never silently de-JIT to the interpreter.
+#
+# Two regressions this replays (both found 2026-08-21):
+#   1. A duplicate struct name `Span` (lexer `LexSpan` vs diagnostics `Span`)
+#      collided in the flattened whole-program namespace, so HIR lowering failed
+#      with "Cannot infer field type: struct 'Span' field 'end_pos'" and the
+#      WHOLE program fell back to the interpreter.
+#   2. Deprecated module-qualified references (`import std.path` + `path.join2`)
+#      in src/lib/*/env/paths.spl failed Cranelift codegen with
+#      "GlobalLoad: unresolved identifier 'path'", again de-JITing everything.
+#
+# Verdict is the last line of stdout, same convention as the other guards:
+#   PASS — <n> invocation(s) executed, JIT lane taken, 0 de-JIT
+#   FAIL — ...            (exit 1)
+#   ERROR — nothing was checked   (exit 2)
+set -u
+
+BIN="${SIMPLE_BIN:-bin/simple}"
+TARGET="${1:-src/compiler/80.driver/driver_types.spl}"
+
+if [ ! -x "$BIN" ]; then
+    echo "ERROR — nothing was checked (no runnable binary at $BIN)"
+    exit 2
+fi
+if [ ! -f "$TARGET" ]; then
+    echo "ERROR — nothing was checked (lint target missing: $TARGET)"
+    exit 2
+fi
+
+ERRLOG=$(mktemp)
+OUTLOG=$(mktemp)
+SIMPLE_EXECUTION_MODE=jit "$BIN" lint "$TARGET" >"$OUTLOG" 2>"$ERRLOG"
+RC=$?
+CHECKED=1
+
+OFFENDERS=""
+if [ "$RC" -ne 0 ]; then
+    OFFENDERS="$OFFENDERS lint-exit-$RC"
+fi
+if grep -q 'falling back to interpreter' "$ERRLOG"; then
+    OFFENDERS="$OFFENDERS whole-module-de-jit"
+fi
+if grep -q 'CODEGEN-STUB-FALLBACK' "$ERRLOG"; then
+    OFFENDERS="$OFFENDERS codegen-stub-fallback"
+fi
+if ! grep -q 'Lint passed' "$OUTLOG"; then
+    OFFENDERS="$OFFENDERS no-lint-verdict"
+fi
+
+REASON=$(grep -m1 'falling back to interpreter\|CODEGEN-STUB-FALLBACK' "$ERRLOG")
+rm -f "$ERRLOG" "$OUTLOG"
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL — $CHECKED invocation(s) executed, de-JIT detected:$OFFENDERS; $REASON"
+    exit 1
+fi
+echo "PASS — $CHECKED invocation(s) executed, JIT lane taken, 0 de-JIT"
+exit 0

@@ -1,0 +1,101 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# design: doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md (B.7, B.8) ;
+# plan: doc/03_plan/os/hal/asm_to_simple_migration_plan.md (1.8, Phase 3 soak)
+#
+# Feature (6): the soak ledger. Rows are SDN, appended per runner flush; the
+# soak summary counts clean comparisons per pair against the plan's stability
+# bar (>= 1000 cases, >= 30 independent runs, >= 2 binary identities, 0
+# mismatches). Rows here are SYNTHESISED to exercise the accounting — the
+# real ledger accumulates over future runs and is reported, not fabricated.
+
+use std.spec
+use std.io_runtime.{mkdir_p, read_file, remove_file_if_exists}
+use std.nogc_sync_mut.rt_hal.dual_run_ledger.*
+
+val TMP_DIR = "build/dual_run/spec_tmp"
+
+fn tmp_ledger(name: text) -> text:
+    mkdir_p(TMP_DIR)
+    val p = "{TMP_DIR}/{name}.sdn"
+    remove_file_if_exists(p)
+    p
+
+fn row(pair: text, run_id: text, cases: i64, mismatches: i64, ident: text) -> LedgerRow:
+    LedgerRow(pair: pair, mode: "value", run_id: run_id, cases: cases, mismatches: mismatches,
+              first_mismatch_repr: if mismatches > 0: "ref=1 cand=2" else: "", binary_identity: ident)
+
+describe "dual-run (6) soak ledger":
+    it "appends SDN rows and parses them back losslessly":
+        val path = tmp_ledger("ledger_roundtrip")
+        expect(dual_ledger_append(path, row("p1", "r1", 12, 0, "seed-a"))).to_equal(true)
+        expect(dual_ledger_append(path, row("p2", "r1", 3, 1, "seed-a"))).to_equal(true)
+        val body = read_file(path)
+        expect(body).to_contain("dual_run_ledger:")
+        expect(body).to_contain("- pair: p1")
+        expect(body).to_contain("first_mismatch_repr: \"ref=1 cand=2\"")
+        val rows = dual_ledger_load(path)
+        expect(rows.len()).to_equal(2)
+        expect(rows[1].pair).to_equal("p2")
+        expect(rows[1].mismatches).to_equal(1)
+        expect(rows[1].first_mismatch_repr).to_equal("ref=1 cand=2")
+        expect(rows[0].binary_identity).to_equal("seed-a")
+
+    it "a missing ledger loads as zero rows, never an error":
+        expect(dual_ledger_load("build/dual_run/spec_tmp/does_not_exist.sdn").len()).to_equal(0)
+
+    it "soak summary aggregates cases, runs, identities and mismatches per pair":
+        var rows: [LedgerRow] = []
+        rows.push(row("p", "r1", 500, 0, "seed"))
+        rows.push(row("p", "r2", 600, 0, "self"))
+        rows.push(row("p", "r2", 10, 0, "self"))
+        rows.push(row("q", "r1", 5, 2, "seed"))
+        val s = dual_ledger_soak(rows, "p")
+        expect(s.cases).to_equal(1110)
+        expect(s.runs).to_equal(2)
+        expect(s.identities.len()).to_equal(2)
+        expect(s.mismatches).to_equal(0)
+        val q = dual_ledger_soak(rows, "q")
+        expect(q.mismatches).to_equal(2)
+        expect(q.stable).to_equal(false)
+
+    it "stable only when >=1000 cases, >=30 runs, >=2 identities and 0 mismatches":
+        var rows: [LedgerRow] = []
+        var i = 0
+        while i < 30:
+            rows.push(row("p", "run-{i}", 40, 0, if i % 2 == 0: "seed" else: "self"))
+            i = i + 1
+        expect(dual_ledger_soak(rows, "p").stable).to_equal(true)
+        expect(dual_ledger_soak(rows, "p").cases).to_equal(1200)
+        # 29 runs -> not stable
+        var fewer: [LedgerRow] = []
+        i = 0
+        while i < 29:
+            fewer.push(row("p", "run-{i}", 40, 0, if i % 2 == 0: "seed" else: "self"))
+            i = i + 1
+        expect(dual_ledger_soak(fewer, "p").stable).to_equal(false)
+        # one identity -> not stable
+        var one_id: [LedgerRow] = []
+        i = 0
+        while i < 30:
+            one_id.push(row("p", "run-{i}", 40, 0, "seed"))
+            i = i + 1
+        expect(dual_ledger_soak(one_id, "p").stable).to_equal(false)
+        # a single mismatch anywhere -> not stable
+        var dirty = rows
+        dirty.push(row("p", "run-x", 1, 1, "self"))
+        expect(dual_ledger_soak(dirty, "p").stable).to_equal(false)
+
+    it "soak_all lists every pair once with its summary line":
+        var rows: [LedgerRow] = []
+        rows.push(row("b", "r1", 1, 0, "seed"))
+        rows.push(row("a", "r1", 1, 0, "seed"))
+        rows.push(row("b", "r2", 1, 0, "seed"))
+        val all = dual_ledger_soak_all(rows)
+        expect(all.len()).to_equal(2)
+        expect(dual_ledger_soak_line(all[0])).to_contain("pair=")
+        expect(dual_ledger_soak_line(all[0])).to_contain("stable=")
+
+    it "binary identity and run id come from the environment with honest defaults":
+        expect(dual_run_binary_identity().len() > 0).to_equal(true)
+        expect(dual_run_run_id().len() > 0).to_equal(true)

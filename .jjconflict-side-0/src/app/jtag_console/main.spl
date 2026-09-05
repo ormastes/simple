@@ -1,0 +1,96 @@
+# jtag_console — decode a KV260 JTAG-terminal readout and rule on completeness.
+#
+# Consumes a scripts/fpga/jtag_obs_tunnel.tcl log (the `OBSn CMD=.. DATA=..`
+# lines), rebuilds the console byte stream from the on-chip UART capture buffer,
+# and prints a COMPLETE/INCOMPLETE verdict. Exits non-zero when the transcript
+# is not the whole boot log, so a soak lane cannot mistake a truncated capture
+# for a clean run.
+#
+#   bin/simple run src/app/jtag_console/main.spl --log <tunnel.log>
+#   bin/simple run src/app/jtag_console/main.spl --log <l> --buf-words 4096
+#   bin/simple run src/app/jtag_console/main.spl --log <l> --mode uart
+#
+# --mode selects the console transport the bitstream was built for
+# (uart|jtag|both); --buf-words must match the UARTBUF_WORDS generic.
+
+use std.cli.cli_util (get_cli_args)
+use std.nogc_sync_mut.io_runtime.{file_read}
+use std.hardware.fpga_k26.jtag_console.{
+    ConsoleConfig, console_default_config, console_mode_from_text,
+    console_mode_name, console_capacity, console_parse_obs_log,
+    console_status_bytes, console_decode, console_complete, console_render,
+    console_verdict_line
+}
+
+fn _arg_value(args: [text], name: text) -> text:
+    val prefix = name + "="
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with(prefix):
+            return arg.slice(prefix.len())
+        if arg == name and i + 1 < args.len():
+            return args[i + 1]
+        i = i + 1
+    ""
+
+fn _to_i64(s: text, fallback: i64) -> i64:
+    if s == "":
+        return fallback
+    var v = 0
+    var i = 0
+    var ok = true
+    while ok and i < s.len():
+        val d = "0123456789".index_of(s.substring(i, i + 1))
+        if d < 0:
+            ok = false
+        else:
+            v = v * 10 + d
+            i = i + 1
+    if ok and i > 0:
+        return v
+    fallback
+
+fn _print_usage():
+    print "Usage: simple run src/app/jtag_console/main.spl --log <tunnel.log> [--mode uart|jtag|both] [--buf-words N] [--count N]"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val log_path = _arg_value(args, "--log")
+    if log_path == "":
+        _print_usage()
+        return 2
+
+    val defaults = console_default_config()
+    val mode_arg = _arg_value(args, "--mode")
+    var mode = defaults.mode
+    if mode_arg != "":
+        mode = console_mode_from_text(mode_arg)
+    val buf_words = _to_i64(_arg_value(args, "--buf-words"), defaults.buf_words)
+    val cfg = ConsoleConfig(mode: mode, buf_words: buf_words,
+                            user_chain: defaults.user_chain, baud: defaults.baud,
+                            tck_hz: defaults.tck_hz)
+
+    val log = file_read(log_path) ?? ""
+    if log == "":
+        print "FAIL: empty or unreadable log {log_path}"
+        return 2
+
+    val readout = console_parse_obs_log(log, cfg)
+    # An explicit --count overrides the status word for logs captured without a
+    # status read; otherwise the core's own counter is the source of truth.
+    var emitted = console_status_bytes(readout.status_word)
+    val count_arg = _arg_value(args, "--count")
+    if count_arg != "":
+        emitted = _to_i64(count_arg, emitted)
+
+    val t = console_decode(readout.words, emitted, cfg)
+
+    print "mode={console_mode_name(cfg.mode)} buf_words={cfg.buf_words} capacity={console_capacity(cfg)} words_read={readout.words.len()} gap_at={readout.gap_at}"
+    print "----- console transcript -----"
+    print console_render(t.bytes)
+    print "------------------------------"
+    print console_verdict_line(t)
+    if console_complete(t):
+        return 0
+    1

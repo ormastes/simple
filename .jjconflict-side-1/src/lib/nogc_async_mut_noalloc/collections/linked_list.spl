@@ -1,0 +1,202 @@
+# Pool-Allocated Linked List - Doubly-Linked List with Fixed Node Pool
+#
+# Nodes are allocated from a pre-sized pool. No heap growth.
+# Pool exhaustion returns false on insert operations.
+# Index-based links (i32) instead of pointers for safety.
+#
+# Backed by parallel primitive arrays (values: [i64], nexts: [i32],
+# prevs: [i32]) rather than an array of ListNode structs. The struct-array
+# shape was tried first and rejected by the interpreter: mutating a struct
+# field through an array index in place (`self.nodes[idx].next = v`) hits
+# "invalid assignment: complex indexed field receiver is not supported"
+# for any indexed receiver more complex than a bare identifier (here,
+# `self.nodes[idx]` — the receiver is a field access, not a plain
+# identifier). See
+# doc/08_tracking/bug/pool_linked_list_push_fails_complex_indexed_field_receiver_2026-08-07.md.
+# The parallel-array refactor sidesteps it entirely using plain
+# (non-field) index assignment, the same pattern FixedMap uses
+# (commit 57f7f44849f).
+#
+# Usage:
+#   val list = PoolLinkedList.new(32)
+#   list.push_back(10)
+#   list.push_front(5)
+#   val v = list.pop_front()
+
+
+# ============================================================================
+# PoolLinkedList - Fixed-Capacity Doubly-Linked List
+# ============================================================================
+
+class PoolLinkedList:
+    """Doubly-linked list backed by a fixed-size node pool.
+
+    All operations are O(1). Pool exhaustion is signaled by
+    returning false from push operations.
+
+    Backed by parallel primitive arrays reserved once at construction
+    (values: [i64], nexts: [i32], prevs: [i32]) — no node object is ever
+    constructed after new().
+    """
+    values: [i64]
+    nexts: [i32]        # Index into pool, -1 = end
+    prevs: [i32]         # Index into pool, -1 = none
+    head: i32           # Index of first node, -1 = empty
+    tail: i32           # Index of last node, -1 = empty
+    free_head: i32      # Head of free list
+    len: i32
+    capacity: i32
+
+    static fn new(capacity: i32) -> PoolLinkedList:
+        """Create a new linked list with a fixed node pool.
+
+        Pre-allocates all nodes and chains them into a free list.
+        """
+        var vs: [i64] = []
+        var ns: [i32] = []
+        var ps: [i32] = []
+        var i = 0
+        while i < capacity:
+            # Chain free list: each node points to next
+            val next_free = if i < capacity - 1: i + 1 else: -1
+            vs.push(0)
+            ns.push(next_free)
+            ps.push(-1)
+            i = i + 1
+        PoolLinkedList(
+            values: vs,
+            nexts: ns,
+            prevs: ps,
+            head: -1,
+            tail: -1,
+            free_head: 0,
+            len: 0,
+            capacity: capacity
+        )
+
+    me alloc_node() -> i32:
+        """Allocate a node from the free list. Returns -1 if pool exhausted."""
+        if self.free_head == -1:
+            return -1
+        val idx = self.free_head
+        self.free_head = self.nexts[idx]
+        self.nexts[idx] = -1
+        self.prevs[idx] = -1
+        idx
+
+    me free_node(idx: i32):
+        """Return a node to the free list."""
+        self.values[idx] = 0
+        self.nexts[idx] = self.free_head
+        self.prevs[idx] = -1
+        self.free_head = idx
+
+    me push_front(value: i64) -> bool:
+        """Insert value at the front. Returns false if pool exhausted."""
+        val idx = self.alloc_node()
+        if idx == -1:
+            return false
+        self.values[idx] = value
+        self.nexts[idx] = self.head
+        self.prevs[idx] = -1
+        if self.head != -1:
+            self.prevs[self.head] = idx
+        self.head = idx
+        if self.tail == -1:
+            self.tail = idx
+        self.len = self.len + 1
+        true
+
+    me push_back(value: i64) -> bool:
+        """Insert value at the back. Returns false if pool exhausted."""
+        val idx = self.alloc_node()
+        if idx == -1:
+            return false
+        self.values[idx] = value
+        self.nexts[idx] = -1
+        self.prevs[idx] = self.tail
+        if self.tail != -1:
+            self.nexts[self.tail] = idx
+        self.tail = idx
+        if self.head == -1:
+            self.head = idx
+        self.len = self.len + 1
+        true
+
+    me pop_front() -> i64:
+        """Remove and return front value. Returns -1 if empty."""
+        if self.head == -1:
+            return -1
+        val idx = self.head
+        val value = self.values[idx]
+        self.head = self.nexts[idx]
+        if self.head != -1:
+            self.prevs[self.head] = -1
+        else:
+            self.tail = -1
+        self.free_node(idx)
+        self.len = self.len - 1
+        value
+
+    me pop_back() -> i64:
+        """Remove and return back value. Returns -1 if empty."""
+        if self.tail == -1:
+            return -1
+        val idx = self.tail
+        val value = self.values[idx]
+        self.tail = self.prevs[idx]
+        if self.tail != -1:
+            self.nexts[self.tail] = -1
+        else:
+            self.head = -1
+        self.free_node(idx)
+        self.len = self.len - 1
+        value
+
+    fn peek_front() -> i64:
+        """Return front value without removing. Returns -1 if empty."""
+        if self.head == -1:
+            return -1
+        self.values[self.head]
+
+    fn peek_back() -> i64:
+        """Return back value without removing. Returns -1 if empty."""
+        if self.tail == -1:
+            return -1
+        self.values[self.tail]
+
+    me remove_at(idx: i32):
+        """Remove node at pool index. Caller must ensure idx is valid."""
+        val prev_idx = self.prevs[idx]
+        val next_idx = self.nexts[idx]
+        if prev_idx != -1:
+            self.nexts[prev_idx] = next_idx
+        else:
+            self.head = next_idx
+        if next_idx != -1:
+            self.prevs[next_idx] = prev_idx
+        else:
+            self.tail = prev_idx
+        self.free_node(idx)
+        self.len = self.len - 1
+
+    fn is_empty() -> bool:
+        """Check if list has no elements."""
+        self.len == 0
+
+    fn is_full() -> bool:
+        """Check if node pool is exhausted."""
+        self.free_head == -1
+
+    fn size() -> i32:
+        """Return number of elements."""
+        self.len
+
+    fn contains(value: i64) -> bool:
+        """Check if value exists in list. O(n) scan."""
+        var cur = self.head
+        while cur != -1:
+            if self.values[cur] == value:
+                return true
+            cur = self.nexts[cur]
+        false

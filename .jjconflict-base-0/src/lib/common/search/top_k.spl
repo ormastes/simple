@@ -1,0 +1,115 @@
+use std.common.search.types.{Score}
+use std.common.search.document.{SearchHit, SearchHitV1}
+use std.common.search.ranking.{Bm25FieldV1, bm25_fixed_v1_score_checked, bm25_fixed_v1_precedes}
+
+struct TextScoredDoc:
+    document_id: text
+    score: Score
+
+impl TextScoredDoc:
+    static fn of(document_id: text, score: Score) -> TextScoredDoc:
+        TextScoredDoc(document_id: document_id, score: score)
+
+    fn better_than(other: TextScoredDoc) -> bool:
+        if self.score.is_greater_than(other.score):
+            return true
+        if self.score.is_less_than(other.score):
+            return false
+        self.document_id < other.document_id
+
+fn text_top_k(docs: [TextScoredDoc], k: i64) -> [SearchHit]:
+    var out: [SearchHit] = []
+    var limit = k
+    if limit < 0:
+        limit = 0
+    if limit > docs.len():
+        limit = docs.len()
+    var taken: [bool] = []
+    var i = 0
+    while i < docs.len():
+        taken.push(false)
+        i = i + 1
+    var rank = 1
+    while rank <= limit:
+        var best = 0 - 1
+        var j = 0
+        while j < docs.len():
+            if not taken[j]:
+                if best < 0 or docs[j].better_than(docs[best]):
+                    best = j
+            j = j + 1
+        if best < 0:
+            return out
+        taken[best] = true
+        out.push(SearchHit.of(docs[best].document_id, docs[best].score, rank))
+        rank = rank + 1
+    out
+
+struct SearchPageV1:
+    logical_root: text
+    hits: [SearchHit]
+    next_cursor: text?
+    exhausted: bool
+
+impl SearchPageV1:
+    static fn of(logical_root: text, hits: [SearchHit], next_cursor: text?, exhausted: bool) -> SearchPageV1:
+        SearchPageV1(logical_root: logical_root, hits: hits, next_cursor: next_cursor, exhausted: exhausted)
+
+# ----------------------------------------------------------------------------
+# P2 extension: exhaustive top-k oracle over SearchHitV1/Bm25FieldV1.
+#
+# This is the naive, obviously-correct "score everything then sort" reference
+# implementation every later optimized retrieval strategy (WAND, block-max-
+# WAND, in other packages) must match bit-for-bit. It reuses the frozen
+# canonical scorer (`bm25_fixed_v1_score_checked`) and the frozen tie-break
+# (`bm25_fixed_v1_precedes`: score descending, then ascending unsigned UTF-8
+# document id) rather than re-deriving either.
+# ----------------------------------------------------------------------------
+
+# One scored candidate ready for exhaustive top-k selection.
+struct ExhaustiveCandidateV1:
+    document_id: text
+    score: Score
+    matched_fields: [text]
+
+impl ExhaustiveCandidateV1:
+    static fn of(document_id: text, score: Score, matched_fields: [text]) -> ExhaustiveCandidateV1:
+        ExhaustiveCandidateV1(document_id: document_id, score: score, matched_fields: matched_fields)
+
+# Scores one document's fields with the canonical BM25 scorer and wraps the
+# result as an exhaustive-top-k candidate. Propagates scorer errors verbatim.
+fn score_exhaustive_candidate(document_id: text, fields: [Bm25FieldV1], matched_fields: [text]) -> Result<ExhaustiveCandidateV1, text>:
+    val score = bm25_fixed_v1_score_checked(fields)?
+    Ok(ExhaustiveCandidateV1.of(document_id, score, matched_fields))
+
+# Naive O(n*k) selection using the frozen tie-break. Negative/oversized k is
+# clamped to [0, n], mirroring `text_top_k`/`ranking.top_k`. `source_rank` is
+# assigned 1-based in output order.
+fn exhaustive_top_k_v1(candidates: [ExhaustiveCandidateV1], k: i64) -> [SearchHitV1]:
+    var out: [SearchHitV1] = []
+    val n = candidates.len()
+    var limit = k
+    if limit < 0:
+        limit = 0
+    if limit > n:
+        limit = n
+    var taken: [bool] = []
+    var t = 0
+    while t < n:
+        taken.push(false)
+        t = t + 1
+    var rank = 1
+    while rank <= limit:
+        var best = 0 - 1
+        var j = 0
+        while j < n:
+            if not taken[j]:
+                if best < 0 or bm25_fixed_v1_precedes(candidates[j].score, candidates[j].document_id, candidates[best].score, candidates[best].document_id):
+                    best = j
+            j = j + 1
+        if best < 0:
+            return out
+        taken[best] = true
+        out.push(SearchHitV1.of(candidates[best].document_id, candidates[best].score.raw_value(), rank, candidates[best].matched_fields, nil))
+        rank = rank + 1
+    out

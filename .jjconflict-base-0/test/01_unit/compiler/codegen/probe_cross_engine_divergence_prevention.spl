@@ -1,0 +1,177 @@
+# Run-path probe: SIMILAR-BUG PREVENTION for two silent-divergence defect
+# CLASSES. Executed as a subprocess by
+# cross_engine_divergence_prevention_spec.spl under both engines.
+#
+# CLASS A — "a nil-valued condition that is not statically Optional".
+#   The guard in src/compiler/50.mir/mir_lowering_stmts.spl:1886 only rewrites a
+#   condition to `rt_is_some` when `find_local_hir_type` reports
+#   `HirTypeKind.Optional(_)`. Every OTHER way of getting a nil word into
+#   condition position walks straight past it and branches on the raw non-zero
+#   RT_NIL (3). The single-literal reproducer covers exactly one of those ways.
+#   This sweeps the rest, so the next omission fails here instead of shipping.
+#
+# CLASS B — "a mutation reached THROUGH an index is discarded".
+#   The filed row measured three shapes. The rule is not "arrays are value
+#   types" — array-of-array works. What decides it is whether the index step
+#   yields a reference or a copy, so the class must be swept as a MATRIX of
+#   container x element combinations, not as three anecdotes.
+#
+# Every oracle is an ABSOLUTE literal, never "the two engines agree".
+
+struct Bag:
+    items: [i64]
+
+fn nil_text() -> text?:
+    return nil
+
+fn main() -> i64:
+    var fails = 0
+
+    # ---------- CLASS A: nil-valued conditions that are not Optional-typed
+
+    var a1 = "FALSY"
+    if nil:
+        a1 = "TRUTHY"
+    if a1 == "FALSY":
+        print("PASS condA_bare_nil_literal")
+    else:
+        print("FAIL condA_bare_nil_literal expected=FALSY got={a1}")
+        fails = fails + 1
+
+    var a2 = "FALSY"
+    if not nil:
+        a2 = "TRUTHY"
+    if a2 == "TRUTHY":
+        print("PASS condA_not_nil")
+    else:
+        print("FAIL condA_not_nil expected=TRUTHY got={a2}")
+        fails = fails + 1
+
+    var a3 = "NO"
+    if nil and true:
+        a3 = "YES"
+    if a3 == "NO":
+        print("PASS condA_nil_and_true")
+    else:
+        print("FAIL condA_nil_and_true expected=NO got={a3}")
+        fails = fails + 1
+
+    var a4 = "NO"
+    if true and nil:
+        a4 = "YES"
+    if a4 == "NO":
+        print("PASS condA_true_and_nil")
+    else:
+        print("FAIL condA_true_and_nil expected=NO got={a4}")
+        fails = fails + 1
+
+    var a5 = "NO"
+    if nil or false:
+        a5 = "YES"
+    if a5 == "NO":
+        print("PASS condA_nil_or_false")
+    else:
+        print("FAIL condA_nil_or_false expected=NO got={a5}")
+        fails = fails + 1
+
+    # A CALL RESULT in condition position: the value is nil at runtime but the
+    # condition expression is not a local with a recorded Optional HIR type, so
+    # the :1886 `find_local_hir_type` lookup is the part under test.
+    var a6 = "FALSY"
+    if nil_text():
+        a6 = "TRUTHY"
+    if a6 == "FALSY":
+        print("PASS condA_call_returning_nil")
+    else:
+        print("FAIL condA_call_returning_nil expected=FALSY got={a6}")
+        fails = fails + 1
+
+    # while-loop condition uses the same lower_cond_expr path as `if`.
+    var a7 = 0
+    while nil:
+        a7 = a7 + 1
+        if a7 > 3:
+            break
+    if a7 == 0:
+        print("PASS condA_while_nil")
+    else:
+        print("FAIL condA_while_nil expected=0 got={a7}")
+        fails = fails + 1
+
+    # ---------- CLASS B: mutation through an index, as a matrix
+
+    var b1: [[i64]] = [[1]]
+    b1[0].push(2)
+    if b1[0].len() == 2:
+        print("PASS mutB_array_of_array")
+    else:
+        print("FAIL mutB_array_of_array expected=2 got={b1[0].len()}")
+        fails = fails + 1
+
+    var b2: Dict<text, [i64]> = {}
+    b2["k"] = [1]
+    b2["k"].push(2)
+    if b2["k"].len() == 2:
+        print("PASS mutB_dict_text_key_array_value")
+    else:
+        print("FAIL mutB_dict_text_key_array_value expected=2 got={b2["k"].len()}")
+        fails = fails + 1
+
+    var b3: Dict<i64, [text]> = {}
+    b3[7] = ["a"]
+    b3[7].push("b")
+    if b3[7].len() == 2:
+        print("PASS mutB_dict_int_key_text_array_value")
+    else:
+        print("FAIL mutB_dict_int_key_text_array_value expected=2 got={b3[7].len()}")
+        fails = fails + 1
+
+    var b4: [(i64, [i64])] = [(0, [1])]
+    b4[0].1.push(2)
+    if b4[0].1.len() == 2:
+        print("PASS mutB_array_of_tuple_field")
+    else:
+        print("FAIL mutB_array_of_tuple_field expected=2 got={b4[0].1.len()}")
+        fails = fails + 1
+
+    var b5: [Bag] = [Bag(items: [1])]
+    b5[0].items.push(2)
+    if b5[0].items.len() == 2:
+        print("PASS mutB_array_of_struct_field")
+    else:
+        print("FAIL mutB_array_of_struct_field expected=2 got={b5[0].items.len()}")
+        fails = fails + 1
+
+    var b6: Dict<text, Bag> = {}
+    b6["g"] = Bag(items: [1])
+    b6["g"].items.push(2)
+    if b6["g"].items.len() == 2:
+        print("PASS mutB_dict_of_struct_field")
+    else:
+        print("FAIL mutB_dict_of_struct_field expected=2 got={b6["g"].items.len()}")
+        fails = fails + 1
+
+    var b7: [[[i64]]] = [[[1]]]
+    b7[0][0].push(2)
+    if b7[0][0].len() == 2:
+        print("PASS mutB_array_of_array_of_array")
+    else:
+        print("FAIL mutB_array_of_array_of_array expected=2 got={b7[0][0].len()}")
+        fails = fails + 1
+
+    # Explicit write-back is the documented workaround and must keep working —
+    # if this ever goes red there is no escape hatch left for the class.
+    var b8: Dict<text, [i64]> = {}
+    b8["k"] = [1]
+    b8["k"] = b8["k"].push(2)
+    if b8["k"].len() == 2:
+        print("PASS mutB_dict_explicit_writeback")
+    else:
+        print("FAIL mutB_dict_explicit_writeback expected=2 got={b8["k"].len()}")
+        fails = fails + 1
+
+    if fails == 0:
+        print("DIVERGENCE_PREVENTION PROBE: ALL PASS")
+    else:
+        print("DIVERGENCE_PREVENTION PROBE: {fails} FAIL")
+    return 0

@@ -1,0 +1,233 @@
+use os.crypto.p384.{
+    p384_ecdsa_sign, p384_ecdsa_verify,
+    p384_keygen, p384_ecdh
+}
+use os.crypto.sha384.{sha384}
+
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_cli_exit(code: i64)
+
+fn _make_key(seed: u8) -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        val v: u8 = ((seed.to_u64() + i * 7 + 3) & 0xFF).to_u8()
+        k.push(v)
+        i = i + 1
+    k
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0: "0"
+    elif n == 1: "1"
+    elif n == 2: "2"
+    elif n == 3: "3"
+    elif n == 4: "4"
+    elif n == 5: "5"
+    elif n == 6: "6"
+    elif n == 7: "7"
+    elif n == 8: "8"
+    elif n == 9: "9"
+    elif n == 10: "a"
+    elif n == 11: "b"
+    elif n == 12: "c"
+    elif n == 13: "d"
+    elif n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    while i < b.len().to_u64():
+        val bv = b[i]
+        s = s + _hex_nibble((bv >> 4) & 0x0F)
+        s = s + _hex_nibble(bv & 0x0F)
+        i = i + 1
+    s
+
+fn _alice_pub_hex() -> text:
+    "045c1175e56418c0f978034efbdce6453f787b47b722a4c14cceee43653857895a8dce11c025295617adcafa524e07a7a34177b866d0fc47e2d83de93550664524d4cd855e2a1d178336af4a8432df0bae4d4f0e44ad58be2889fb07a13fa6fd45"
+
+fn _bob_pub_hex() -> text:
+    "0474d29aa76737dce53e9f0061af7fd98b88e90b5673d12b0817429491a01767fb7bd9f301f615f03153ff878ba7d760fc80cb6a966b20279169cff5b2e7516f49cc97bd698102da8920744cb10cdfca1b5b99a9f3759cf38c8f80a15d9ab4fd6b"
+
+fn _shared_hex() -> text:
+    "82d29493f35f463d4e55c4c56f686e041f994cd90106da667fe70877f052f2fe45c15ca1b04915c6c5ad1dc571d0abcf"
+
+fn _report(label: text, iterations: i64, elapsed_ns: i64):
+    val avg_ns = if iterations > 0 { elapsed_ns / iterations } else { 0 }
+    print "{label}: iterations={iterations} elapsed_ns={elapsed_ns} avg_ns={avg_ns}"
+
+fn _pass_case(name: text) -> bool:
+    print "PASS {name}"
+    true
+
+fn _fail_case(name: text, detail: text) -> bool:
+    print "FAIL {name}: {detail}"
+    false
+
+fn _selected_case() -> text:
+    val args = rt_cli_get_args() ?? []
+    var i: i64 = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--case" and i + 1 < args.len():
+            return args[i + 1]
+        elif arg.starts_with("--case="):
+            return arg.slice(7, arg.len())
+        i = i + 1
+    ""
+
+fn _run_case(selected: text, name: text) -> bool:
+    selected == "" or selected == name
+
+fn _check_alice_pub(alice_priv: [u8]) -> bool:
+    val alice_pub = p384_keygen(alice_priv)
+    if _bytes_hex(alice_pub) != _alice_pub_hex():
+        print "alice_pub mismatch"
+        return false
+    true
+
+fn _check_bob_pub(bob_priv: [u8]) -> bool:
+    val bob_pub = p384_keygen(bob_priv)
+    if _bytes_hex(bob_pub) != _bob_pub_hex():
+        print "bob_pub mismatch"
+        return false
+    true
+
+fn _check_shared(alice_priv: [u8], bob_priv: [u8]) -> bool:
+    val bob_pub = p384_keygen(bob_priv)
+    val shared = p384_ecdh(alice_priv, bob_pub)
+    if _bytes_hex(shared) != _shared_hex():
+        print "ecdh oracle mismatch"
+        return false
+    true
+
+fn _probe_keygen(iterations: i64, sk: [u8]) -> bool:
+    val warm = p384_keygen(sk)
+    if warm.len() != 97:
+        return _fail_case("keygen", "warmup length mismatch")
+    var i: i64 = 0
+    val start = rt_time_now_nanos()
+    while i < iterations:
+        val pub_key = p384_keygen(sk)
+        if pub_key.len() != 97:
+            return _fail_case("keygen", "iteration length mismatch")
+        i = i + 1
+    val elapsed = rt_time_now_nanos() - start
+    _report("keygen", iterations, elapsed)
+    _pass_case("keygen")
+
+fn _probe_sign(iterations: i64, sk: [u8], msg_hash: [u8]) -> bool:
+    val warm = p384_ecdsa_sign(sk, msg_hash)
+    if warm.len() != 96:
+        return _fail_case("sign", "warmup length mismatch")
+    var i: i64 = 0
+    val start = rt_time_now_nanos()
+    while i < iterations:
+        val sig = p384_ecdsa_sign(sk, msg_hash)
+        if sig.len() != 96:
+            return _fail_case("sign", "iteration length mismatch")
+        i = i + 1
+    val elapsed = rt_time_now_nanos() - start
+    _report("sign", iterations, elapsed)
+    _pass_case("sign")
+
+fn _probe_verify(iterations: i64, pub_key: [u8], msg_hash: [u8], sig: [u8]) -> bool:
+    if not p384_ecdsa_verify(pub_key, msg_hash, sig):
+        return _fail_case("verify", "warmup verification failed")
+    var i: i64 = 0
+    val start = rt_time_now_nanos()
+    while i < iterations:
+        if not p384_ecdsa_verify(pub_key, msg_hash, sig):
+            return _fail_case("verify", "iteration verification failed")
+        i = i + 1
+    val elapsed = rt_time_now_nanos() - start
+    _report("verify", iterations, elapsed)
+    _pass_case("verify")
+
+fn _probe_ecdh(iterations: i64, sk: [u8], peer_pub: [u8]) -> bool:
+    val warm = p384_ecdh(sk, peer_pub)
+    if warm.len() != 48:
+        return _fail_case("ecdh", "warmup length mismatch")
+    var i: i64 = 0
+    val start = rt_time_now_nanos()
+    while i < iterations:
+        val shared = p384_ecdh(sk, peer_pub)
+        if shared.len() != 48:
+            return _fail_case("ecdh", "iteration length mismatch")
+        i = i + 1
+    val elapsed = rt_time_now_nanos() - start
+    _report("ecdh", iterations, elapsed)
+    _pass_case("ecdh")
+
+fn main():
+    val iterations: i64 = 1
+    val selected = _selected_case()
+    var ran_case = false
+    var ok = true
+    val alice_priv = _make_key(0x6B)
+    val bob_priv = _make_key(0x01)
+    val msg_hash = sha384(_make_key(0x33))
+
+    print "p384_ops_probe start selected={selected}"
+
+    if _run_case(selected, "alice_pub"):
+        ran_case = true
+        if not _check_alice_pub(alice_priv):
+            ok = _fail_case("alice_pub", "oracle mismatch") and ok
+        else:
+            ok = _pass_case("alice_pub") and ok
+
+    if _run_case(selected, "bob_pub"):
+        ran_case = true
+        if not _check_bob_pub(bob_priv):
+            ok = _fail_case("bob_pub", "oracle mismatch") and ok
+        else:
+            ok = _pass_case("bob_pub") and ok
+
+    if _run_case(selected, "keygen"):
+        ran_case = true
+        if not _check_alice_pub(alice_priv):
+            ok = _fail_case("keygen", "alice_pub prerequisite mismatch") and ok
+        else:
+            ok = _probe_keygen(iterations, alice_priv) and ok
+
+    if _run_case(selected, "sign"):
+        ran_case = true
+        if not _check_alice_pub(alice_priv):
+            ok = _fail_case("sign", "alice_pub prerequisite mismatch") and ok
+        else:
+            ok = _probe_sign(iterations, alice_priv, msg_hash) and ok
+
+    val alice_pub = p384_keygen(alice_priv)
+    val sig = p384_ecdsa_sign(alice_priv, msg_hash)
+    if _run_case(selected, "verify"):
+        ran_case = true
+        if _bytes_hex(alice_pub) != _alice_pub_hex():
+            ok = _fail_case("verify", "alice_pub prerequisite mismatch") and ok
+        elif sig.len() != 96:
+            ok = _fail_case("verify", "signature prerequisite length mismatch") and ok
+        else:
+            ok = _probe_verify(iterations, alice_pub, msg_hash, sig) and ok
+
+    val bob_pub = p384_keygen(bob_priv)
+    if _run_case(selected, "ecdh"):
+        ran_case = true
+        if not _check_shared(alice_priv, bob_priv):
+            ok = _fail_case("ecdh", "oracle mismatch") and ok
+        else:
+            ok = _probe_ecdh(iterations, alice_priv, bob_pub) and ok
+
+    if not ran_case:
+        print "FAIL p384_ops_probe: unknown case {selected}"
+        rt_cli_exit(1)
+        return
+
+    if not ok:
+        print "FAIL p384_ops_probe"
+        rt_cli_exit(1)
+        return
+
+    print "PASS p384_ops_probe"
+    rt_cli_exit(0)

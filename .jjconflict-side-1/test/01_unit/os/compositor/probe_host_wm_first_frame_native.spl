@@ -1,0 +1,81 @@
+use common.ui.widget.{UIEvent}
+use common.ui.layout.{compute_layout, find_rect_index}
+use common.ui.window_scene_draw_ir.{
+    shared_wm_pixel_buffer_addr,
+    shared_wm_pixel_buffer_count,
+}
+use common.ui.wm_full_stack_demo.{
+    WM_FULL_STACK_DEMO_IMAGE_URI,
+    wm_full_stack_demo_tree,
+}
+use common.ui.native_scalar_text.{ui_native_i64_text}
+use common.window_protocol.geometry.{Size}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.host_compositor_entry.{HostCompositor}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_resolved_draw_ir_image,
+}
+use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
+
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+
+fn main() -> i64:
+    var compositor = HostCompositor.new_headless(Size.wh(160, 120))
+    compositor.apply_bridge_request(
+        1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+        "Window", 10, 10, 108, 96, "", 99, "/sys/apps/window"
+    )
+    if compositor.windows.len() != 1:
+        return 1
+    val window_id = compositor.windows[0].id
+    if not compositor.require_external_content_frame(window_id):
+        return 2
+    val tree = wm_full_stack_demo_tree("Ready", "Play sound", "")
+    val rects = compute_layout(tree.root_node(), 0, 0, 480, 480)
+    val button_rect = find_rect_index(rects, "demo-button")
+    val status_rect = find_rect_index(rects, "demo-status")
+    if button_rect < 0:
+        return 21
+    if rects[button_rect].y != 91:
+        return 23
+    if rects[button_rect].w != 478:
+        return 24
+    if rects[button_rect].h != 32:
+        return 25
+    if status_rect < 0:
+        return 22
+    if rects[status_rect].y != 375:
+        return 26
+    if rects[status_rect].h != 24:
+        return 27
+    var session = UISession.new(tree)
+    session.dispatch(UIEvent.Resize(100, 60))
+    val image = engine2d_resolved_draw_ir_image(
+        WM_FULL_STACK_DEMO_IMAGE_URI, 2, 2,
+        [0xffffcc00u32, 0xff00ccffu32, 0xff00ccffu32, 0xffffcc00u32]
+    )
+    val images = [image]
+    val frame = gui_session_content_frame(
+        session, ui_native_i64_text(window_id), "", 0, 0,
+        100, 60, 1, 1, images
+    )
+    if frame.width != 100:
+        return 31
+    if frame.height != 60:
+        return 32
+    if frame.pixels.len() != 100 * 60:
+        return 33
+    if frame.checksum == 0u64:
+        return 34
+    if not compositor.set_external_content_frame(window_id, frame):
+        return 4
+    compositor.render_frame()
+
+    val addr = shared_wm_pixel_buffer_addr()
+    if addr == 0 or shared_wm_pixel_buffer_count() != 160 * 120:
+        return 5
+    if ((rt_ptr_read_i64(addr, (98 * 160 + 110) * 4) &
+        0xFFFFFFFF) as u32) != 0xff0e0e10u32:
+        return 6
+    0

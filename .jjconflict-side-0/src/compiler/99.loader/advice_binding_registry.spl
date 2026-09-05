@@ -1,0 +1,150 @@
+# AdviceBindingRegistry -- design §14.1, scoped to the slot-cell patchpoint.
+#
+# The surface the aspect catalog needs to route a join point to a slot: register
+# a join point (stable key -> reserved cell, defaulting to the unadvised
+# target), bind advice to it, unbind back to the unadvised target, and ask what
+# a call through that join point currently dispatches to.
+#
+# Everything about executable memory lives in `joinpoint_slots.spl`; this file
+# is routing and refusal policy only. It deliberately does NOT implement the
+# §14.2 state machine or any signature check -- both are out of the scoped
+# BUILD-NOW per
+# `doc/04_architecture/compiler/aspect_dynload/patchpoint_and_signing_prerequisites_2026-08-19.md`.
+#
+# REFUSAL POLICY (fail-closed): every lookup of an unregistered join point, and
+# every out-of-range slot id, returns Err. There is no silent no-op path -- a
+# bind that does not land must be visible to the caller, because the aspect
+# state machine's `Bound` transition is only sound if a failed bind cannot be
+# mistaken for a successful one.
+
+use .joinpoint_slots.{JoinpointSlotTable, joinpoint_key}
+
+"""One registered join point, as the catalog sees it."""
+struct AdviceBinding:
+    key: text
+    slot_id: i64
+    unadvised_target: i64
+    advice_target: i64
+    active: bool
+    rebind_count: i64
+
+struct AdviceBindingRegistry:
+    table: JoinpointSlotTable
+    bindings: Dict<text, AdviceBinding>
+    bind_count: i64
+    unbind_count: i64
+
+impl AdviceBindingRegistry:
+    static fn alloc(capacity: i64) -> Result<AdviceBindingRegistry, text>:
+        match JoinpointSlotTable.alloc(capacity):
+            case Ok(t):
+                Ok(AdviceBindingRegistry(table: t, bindings: {}, bind_count: 0, unbind_count: 0))
+            case Err(e):
+                Err(e)
+
+    """Register a join point and reserve its cell, defaulting to the unadvised
+    target. Must happen before `seal`."""
+    me register(owner_id: text, symbol: text, site_index: i64, unadvised_target: i64) -> Result<text, text>:
+        val key = joinpoint_key(owner_id, symbol, site_index)
+        match self.table.reserve(key, unadvised_target):
+            case Ok(slot_id):
+                self.bindings[key] = AdviceBinding(
+                    key: key,
+                    slot_id: slot_id,
+                    unadvised_target: unadvised_target,
+                    advice_target: 0,
+                    active: false,
+                    rebind_count: 0
+                )
+                Ok(key)
+            case Err(e):
+                Err(e)
+
+    """Seal the underlying table (RW -> RX). Every later bind goes through the
+    single-cell W^X patch path."""
+    me seal() -> Result<i64, text>:
+        self.table.seal()
+
+    """Resolve a stable key to its slot id. Unknown key is refused."""
+    me slot_of(key: text) -> Result<i64, text>:
+        if not self.bindings.has(key):
+            return Err("Unregistered join point: {key}")
+        self.table.lookup(key)
+
+    """What a call through this join point dispatches to RIGHT NOW, read back
+    out of the mapped cell rather than from bookkeeping."""
+    me dispatch_target(key: text) -> Result<i64, text>:
+        match self.slot_of(key):
+            case Ok(slot_id):
+                self.table.dispatch_target(slot_id)
+            case Err(e):
+                Err(e)
+
+    """Execute the join point's indirect call through its cell."""
+    me call_through_0(key: text) -> Result<i64, text>:
+        match self.slot_of(key):
+            case Ok(slot_id):
+                self.table.call_through_0(slot_id)
+            case Err(e):
+                Err(e)
+
+    """Bind advice: route this join point's call site to `advice_target`.
+
+    Rebinding an already-bound join point is allowed and is how an advice chain
+    is replaced; the rebind is counted so it is observable."""
+    me bind(key: text, advice_target: i64) -> Result<i64, text>:
+        if not self.bindings.has(key):
+            return Err("Cannot bind unregistered join point: {key}")
+        if advice_target == 0:
+            return Err("Cannot bind join point {key} to a null advice target")
+        val binding = self.bindings[key]
+        match self.table.patch_cell(binding.slot_id, advice_target):
+            case Ok(_):
+                self.bindings[key] = AdviceBinding(
+                    key: binding.key,
+                    slot_id: binding.slot_id,
+                    unadvised_target: binding.unadvised_target,
+                    advice_target: advice_target,
+                    active: true,
+                    rebind_count: binding.rebind_count + 1
+                )
+                self.bind_count = self.bind_count + 1
+                Ok(advice_target)
+            case Err(e):
+                Err(e)
+
+    """Unbind: restore the unadvised target. Refuses when nothing is bound, so
+    an unbalanced unbind cannot be mistaken for a successful one."""
+    me unbind(key: text) -> Result<i64, text>:
+        if not self.bindings.has(key):
+            return Err("Cannot unbind unregistered join point: {key}")
+        val binding = self.bindings[key]
+        if not binding.active:
+            return Err("Join point {key} has no advice bound")
+        match self.table.patch_cell(binding.slot_id, binding.unadvised_target):
+            case Ok(_):
+                self.bindings[key] = AdviceBinding(
+                    key: binding.key,
+                    slot_id: binding.slot_id,
+                    unadvised_target: binding.unadvised_target,
+                    advice_target: 0,
+                    active: false,
+                    rebind_count: binding.rebind_count + 1
+                )
+                self.unbind_count = self.unbind_count + 1
+                Ok(binding.unadvised_target)
+            case Err(e):
+                Err(e)
+
+    me is_active(key: text) -> bool:
+        if not self.bindings.has(key):
+            return false
+        self.bindings[key].active
+
+    me rebind_count(key: text) -> i64:
+        if not self.bindings.has(key):
+            return -1
+        self.bindings[key].rebind_count
+
+    me free() -> bool:
+        self.table.free()

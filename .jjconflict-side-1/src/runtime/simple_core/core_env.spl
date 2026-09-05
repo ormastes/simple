@@ -1,0 +1,132 @@
+# Pure-Simple `simple-core` environment ABI wrappers.
+#
+# Provides rt_env_get, rt_env_set, and rt_env_cwd by delegating to libc
+# getenv, setenv, and getcwd. Public rt_* entrypoints follow the compiler
+# runtime SFFI ABI: text inputs arrive as pointer/length pairs and text outputs
+# return runtime tagged string values.
+
+@unsafe(reason: "raw NUL-terminated key pointer and borrowed value-pointer ABI", capabilities: [ffi, raw_ptr])
+extern fn getenv(name: i64) -> i64
+@unsafe(reason: "raw NUL-terminated key/value pointers and overwrite status ABI", capabilities: [ffi, raw_ptr])
+extern fn setenv(key: i64, value: i64, overwrite: i64) -> i64
+@unsafe(reason: "raw mutable buffer pointer/extent CWD ABI", capabilities: [ffi, raw_ptr])
+extern fn getcwd(buf: i64, size: i64) -> i64
+@unsafe(reason: "raw libc heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn malloc(size: i64) -> i64
+@unsafe(reason: "raw libc owned allocation release ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+@unsafe(reason: "raw NUL-terminated string pointer length ABI", capabilities: [ffi, raw_ptr])
+extern fn strlen(s: i64) -> i64
+@unsafe(reason: "raw borrowed byte pointer/length and owned tagged-string ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_string_new(bytes: i64, len: i64) -> i64
+@unsafe(reason: "raw pointer/offset byte load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer/offset byte store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+@always_inline
+fn _sffi_core_env_getenv(name: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        getenv(name)
+
+@always_inline
+fn _sffi_core_env_setenv(key: i64, value: i64, overwrite: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        setenv(key, value, overwrite)
+
+@always_inline
+fn _sffi_core_env_getcwd(buf: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        getcwd(buf, size)
+
+@always_inline
+fn _sffi_core_env_malloc(size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        malloc(size)
+
+@always_inline
+fn _sffi_core_env_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_core_env_strlen(ptr: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        strlen(ptr)
+
+@always_inline
+fn _sffi_core_env_rt_string_new(bytes: i64, len: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_string_new(bytes, len)
+
+@always_inline
+fn _sffi_core_env_load_u8(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_u8(ptr, offset)
+
+@always_inline
+fn _sffi_core_env_store_u8(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(ptr, offset, value)
+
+fn env_copy_cstr(ptr: i64, len: i64) -> i64:
+    if len < 0:
+        return 0
+    if len > 0 and ptr < 1:
+        return 0
+    val out = _sffi_core_env_malloc(len + 1)
+    if out < 1:
+        return 0
+    var i = 0
+    while i < len:
+        val byte = _sffi_core_env_load_u8(ptr, i)
+        if byte == 0:
+            _sffi_core_env_free(out)
+            return 0
+        _sffi_core_env_store_u8(out, i, byte)
+        i = i + 1
+    _sffi_core_env_store_u8(out, len, 0)
+    return out
+
+pub fn rt_env_get(key_ptr_raw: i64, key_len: i64) -> i64:
+    if key_len < 1:
+        return 3
+    val key_ptr = env_copy_cstr(key_ptr_raw, key_len)
+    if key_ptr < 1:
+        return 3
+    val result = _sffi_core_env_getenv(key_ptr)
+    _sffi_core_env_free(key_ptr)
+    if result < 1:
+        return 3
+    val len = _sffi_core_env_strlen(result)
+    return _sffi_core_env_rt_string_new(result, len)
+
+pub fn rt_env_set(key_ptr_raw: i64, key_len: i64, value_ptr_raw: i64, value_len: i64) -> i8:
+    if key_len < 1:
+        return 0
+    val key_ptr = env_copy_cstr(key_ptr_raw, key_len)
+    if key_ptr < 1:
+        return 0
+    val value_ptr = env_copy_cstr(value_ptr_raw, value_len)
+    if value_ptr < 1:
+        _sffi_core_env_free(key_ptr)
+        return 0
+    val result = _sffi_core_env_setenv(key_ptr, value_ptr, 1)
+    _sffi_core_env_free(key_ptr)
+    _sffi_core_env_free(value_ptr)
+    if result < 0:
+        return 0
+    return 1
+
+pub fn rt_env_cwd() -> i64:
+    val buf = _sffi_core_env_malloc(4096)
+    if buf < 1:
+        return 3
+    val result = _sffi_core_env_getcwd(buf, 4096)
+    if result < 1:
+        _sffi_core_env_free(buf)
+        return 3
+    val len = _sffi_core_env_strlen(buf)
+    val out = _sffi_core_env_rt_string_new(buf, len)
+    _sffi_core_env_free(buf)
+    return out

@@ -1,0 +1,381 @@
+# Census driver for the declared-return-type WARN lint.
+#
+# Counts, per class, every function whose declared return type provably
+# disagrees with what its body yields. This is the missing prerequisite for
+# doc/08_tracking/bug/declared_return_type_not_enforced_2026-08-09.md: the
+# recommended sequence there is warn -> census -> error, and nobody has ever
+# produced the census number the third step depends on.
+#
+# The scoring logic lives in the lint rule itself
+# (src/compiler/35.semantics/lint/return_type_mismatch.spl) so the census and
+# the warning that will eventually be promoted to an error can never disagree.
+#
+# Usage:
+#   bin/simple run scripts/check/census-return-type-mismatch.spl [roots...]
+#   bin/simple run scripts/check/census-return-type-mismatch.spl --selftest
+#   bin/simple run scripts/check/census-return-type-mismatch.spl --list [roots...]
+#
+# This script is a CENSUS, not a gate: it exits 0 whenever it actually
+# scanned something, however many findings it reports. Turning findings into
+# a non-zero exit is the "promote to error" decision, which is explicitly out
+# of scope here and is an owner-level call that depends on these numbers.
+#
+#   REPORT -- <n> file(s) scanned, <m> finding(s)   (exit 0)
+#   ERROR  -- nothing was scanned                   (exit 2)
+#
+# --selftest runs a positive control before every scan and is fatal. A "0
+# findings" result from a scorer whose control never fired is
+# indistinguishable from a scorer that silently stopped working.
+
+use std.nogc_sync_mut.io_runtime.{file_read, dir_walk, dir_exists, get_args, exit}
+use compiler.semantics.lint.return_type_mismatch.{ReturnTypeWarning, check_return_type_mismatch}
+
+fn should_scan(path: text) -> bool:
+    if not path.ends_with(".spl"):
+        return false
+    # Owned-code scope: vendored and generated trees are not ours to census.
+    if path.contains("/vendor/") or path.contains("/node_modules/"):
+        return false
+    if path.contains("/target/") or path.contains("/build/"):
+        return false
+    true
+
+fn norm_path(p: text) -> text:
+    var s = p
+    while s.starts_with("./"):
+        s = s.substring(2, s.len())
+    s
+
+# test/01_unit is a byte-duplicate tree of test/unit (likewise 03_system vs
+# system) and BOTH execute, so a raw count double-reports every finding in
+# them. The census reports both numbers and this predicate marks the copy.
+fn is_duplicate_tree(p: text) -> bool:
+    p.contains("test/01_unit/") or p.contains("test/03_system/")
+        or p.contains("test/02_integration/") or p.contains("test/04_external/")
+
+fn list_has(xs: [text], v: text) -> bool:
+    for x in xs:
+        if x == v:
+            return true
+    false
+
+struct Row:
+    file: text
+    code: text
+    kind: text
+    declared: text
+    actual: text
+    fn_name: text
+    line: i64
+    dup: bool
+
+fn scan(roots: [text]) -> [Row]:
+    var rows: [Row] = []
+    for root in roots:
+        if not dir_exists(root):
+            continue
+        for p in dir_walk(root):
+            if not should_scan(p):
+                continue
+            val rel = norm_path(p)
+            val dup = is_duplicate_tree(rel)
+            for w in check_return_type_mismatch(file_read(p)):
+                rows.push(Row(file: rel, code: w.code, kind: w.kind,
+                              declared: w.declared, actual: w.actual,
+                              fn_name: w.fn_name, line: w.line_num, dup: dup))
+    rows
+
+fn count_files(roots: [text]) -> i64:
+    var n: i64 = 0
+    for root in roots:
+        if not dir_exists(root):
+            continue
+        for p in dir_walk(root):
+            if should_scan(p):
+                n = n + 1
+    n
+
+fn count_where_code(rows: [Row], code: text, deduped: bool) -> i64:
+    var n: i64 = 0
+    for r in rows:
+        if deduped and r.dup:
+            continue
+        if r.code == code:
+            n = n + 1
+    n
+
+fn count_where_kind(rows: [Row], kind: text, deduped: bool) -> i64:
+    var n: i64 = 0
+    for r in rows:
+        if deduped and r.dup:
+            continue
+        if r.kind == kind:
+            n = n + 1
+    n
+
+fn count_where_declared(rows: [Row], declared: text, deduped: bool) -> i64:
+    var n: i64 = 0
+    for r in rows:
+        if deduped and r.dup:
+            continue
+        if r.declared == declared:
+            n = n + 1
+    n
+
+fn total(rows: [Row], deduped: bool) -> i64:
+    var n: i64 = 0
+    for r in rows:
+        if deduped and r.dup:
+            continue
+        n = n + 1
+    n
+
+fn kinds_seen(rows: [Row]) -> [text]:
+    var out: [text] = []
+    for r in rows:
+        if not list_has(out, r.kind):
+            out.push(r.kind)
+    out
+
+fn declared_seen(rows: [Row]) -> [text]:
+    var out: [text] = []
+    for r in rows:
+        if not list_has(out, r.declared):
+            out.push(r.declared)
+    out
+
+# ------------------------------------------------------------- positive control
+#
+# Written as an in-memory source string rather than a checked-in fixture, so a
+# deliberately-wrong .spl can never be picked up by lint, the test runner or
+# any other repo sweep, and cannot drift away from this checker.
+#
+# Four planted violations MUST fire and five correct forms MUST stay silent.
+# The silent half is not decoration: a scorer that simply reported every
+# function would look identical to a working one without it.
+
+fn control_source() -> text:
+    var s: text = ""
+    # --- MUST FIRE
+    s = s + "fn ctrl_tail_text() -> bool:\n"
+    s = s + "    \"not-a-bool\"\n"
+    s = s + "\n"
+    s = s + "fn ctrl_dotq(xs: [text]) -> bool:\n"
+    s = s + "    xs.?\n"
+    s = s + "\n"
+    s = s + "fn ctrl_return_int() -> text:\n"
+    s = s + "    return 7\n"
+    s = s + "\n"
+    s = s + "fn ctrl_no_value() -> i64:\n"
+    s = s + "    var acc = 0\n"
+    s = s + "    acc = acc + 1\n"
+    s = s + "\n"
+    # --- MUST STAY SILENT
+    s = s + "fn ctrl_ok_bool(a: i64, b: i64) -> bool:\n"
+    s = s + "    a == b\n"
+    s = s + "\n"
+    s = s + "fn ctrl_ok_text() -> text:\n"
+    s = s + "    \"fine\"\n"
+    s = s + "\n"
+    s = s + "fn ctrl_ok_widen() -> f64:\n"
+    s = s + "    return 1\n"
+    s = s + "\n"
+    s = s + "fn ctrl_ok_option(xs: [text]) -> bool?:\n"
+    s = s + "    xs.?\n"
+    s = s + "\n"
+    s = s + "fn ctrl_ok_hash() -> text:\n"
+    s = s + "    \"# not a comment\"\n"
+    s = s + "\n"
+    # A void function ending on an assignment yields no value and is CORRECT.
+    # The first census run reported 224 of 538 findings against `-> void` /
+    # `-> ()` / `-> nil` bodies doing exactly this; these two guards exist so
+    # that regression cannot recur silently.
+    s = s + "fn ctrl_ok_void() -> void:\n"
+    s = s + "    var acc = 0\n"
+    s = s + "    acc = acc + 1\n"
+    s = s + "\n"
+    s = s + "fn ctrl_ok_unit() -> ():\n"
+    s = s + "    var acc = 0\n"
+    s = s + "    acc = acc + 1\n"
+    s = s + "\n"
+    # A one-liner if-expression yields from its ARMS. Reading the line as one
+    # expression sees the `==` in the condition and calls it bool; that
+    # misreported this exact shape (real: websocket/types.spl) as a mismatch.
+    s = s + "fn ctrl_ok_inline_if(op: i64) -> i64:\n"
+    s = s + "    if op == 3: 1 else: 0\n"
+    s = s + "\n"
+    # A `pass` stub must land in RET005, not RET004: it is a declaration hole,
+    # not a body that computed the wrong type.
+    s = s + "fn ctrl_stub() -> bool:\n"
+    s = s + "    pass\n"
+    s = s + "\n"
+    # `return <if-expression>` yields from the arms, not the condition.
+    s = s + "fn ctrl_ok_return_if(e: i64) -> i64:\n"
+    s = s + "    return if e >= 0: 2 else: 1\n"
+    s = s + "\n"
+    # `or` is also the BITWISE or on integers, so it is not bool evidence.
+    s = s + "fn ctrl_ok_bitor(ppn: i64, flags: i64) -> i64:\n"
+    s = s + "    (ppn << 10) or flags or 1\n"
+    s = s + "\n"
+    # An embedded conditional: the `!=` belongs to the CONDITION, not the value.
+    s = s + "fn ctrl_ok_embedded_if(p: text, d: text) -> text:\n"
+    s = s + "    p + if d != \"\" then \"  \" + d else: \"\"\n"
+    s = s + "\n"
+    # `loop` must match as a whole keyword: a prefix test also swallows the
+    # identifiers `loopback` and `loop_ref` (real: tcp/socket.spl, timer_api.spl).
+    s = s + "fn ctrl_ok_loopback(a: text) -> bool:\n"
+    s = s + "    val loopback = a == \"::1\"\n"
+    s = s + "    loopback\n"
+    s = s + "\n"
+    # `break`, `continue` and `pass_` were still matched as bare PREFIXES after
+    # `loop` was fixed, so every identifier merely BEGINNING with them was read
+    # as a valueless statement. All four of these are correct code.
+    s = s + "fn ctrl_ok_pass_name(pass_name: text) -> bool:\n"
+    s = s + "    val other = \"x\"\n"
+    s = s + "    pass_name == \"inline_functions\"\n"
+    s = s + "\n"
+    s = s + "fn ctrl_ok_breakpoints(bp: [i64]) -> [i64]:\n"
+    s = s + "    val n = bp.len()\n"
+    s = s + "    breakpoints\n"
+    s = s + "\n"
+    s = s + "fn ctrl_ok_break_count() -> i64:\n"
+    s = s + "    val a = 1\n"
+    s = s + "    break_count\n"
+    s = s + "\n"
+    s = s + "fn ctrl_ok_continue_flag() -> bool:\n"
+    s = s + "    val a = 1\n"
+    s = s + "    continue_flag\n"
+    s = s + "\n"
+    # ...but a REAL bare `break` tail under `-> i64` must still fire, or the
+    # fix above would have been a blanket mute rather than a narrowing.
+    s = s + "fn ctrl_break_tail() -> i64:\n"
+    s = s + "    var i = 0\n"
+    s = s + "    break\n"
+    s = s + "\n"
+    # A triple-quoted block whose CONTENT has a column-0 line must not
+    # terminate the body walk, and a docstring must not be read as code.
+    s = s + "fn ctrl_ok_triple(x: text) -> text:\n"
+    s = s + "    \"\"\"Doc line.\n"
+    s = s + "\n"
+    s = s + "    Returns: a thing\n"
+    s = s + "    \"\"\"\n"
+    s = s + "    val js = \"\"\"<script>\n"
+    s = s + "(function() {\n"
+    s = s + "})();\n"
+    s = s + "</script>\"\"\"\n"
+    s = s + "    js + x\n"
+    s
+
+fn control_names() -> [text]:
+    ["ctrl_tail_text", "ctrl_dotq", "ctrl_return_int", "ctrl_no_value",
+     "ctrl_ok_bool", "ctrl_ok_text", "ctrl_ok_widen", "ctrl_ok_option", "ctrl_ok_hash",
+     "ctrl_ok_void", "ctrl_ok_unit", "ctrl_ok_inline_if", "ctrl_stub", "ctrl_ok_return_if", "ctrl_ok_bitor", "ctrl_ok_embedded_if", "ctrl_ok_loopback", "ctrl_ok_triple",
+     "ctrl_ok_pass_name", "ctrl_ok_breakpoints", "ctrl_ok_break_count", "ctrl_ok_continue_flag", "ctrl_break_tail"]
+
+fn control_must_fire(name: text) -> bool:
+    not name.starts_with("ctrl_ok_")
+
+fn run_control() -> bool:
+    var fired: [text] = []
+    var codes: [text] = []
+    for w in check_return_type_mismatch(control_source()):
+        if not list_has(fired, w.fn_name):
+            fired.push(w.fn_name)
+        codes.push(w.fn_name + "=" + w.code)
+    var ok = true
+    for want in control_names():
+        val hit = list_has(fired, want)
+        val need = control_must_fire(want)
+        if hit != need:
+            ok = false
+            print("  control MISMATCH {want}: detected={hit} expected={need}")
+    # The `.?` case must land in its own bucket, not the generic one, or the
+    # census cannot separate the known 42-site family from everything else.
+    if not list_has(codes, "ctrl_dotq=RET002"):
+        ok = false
+        print("  control MISMATCH ctrl_dotq did not land in the RET002 bucket")
+    if not list_has(codes, "ctrl_no_value=RET004"):
+        ok = false
+        print("  control MISMATCH ctrl_no_value did not land in the RET004 bucket")
+    if not list_has(codes, "ctrl_stub=RET005"):
+        ok = false
+        print("  control MISMATCH ctrl_stub did not land in the RET005 bucket")
+    if not list_has(codes, "ctrl_break_tail=RET004"):
+        ok = false
+        print("  control MISMATCH ctrl_break_tail did not land in the RET004 bucket")
+    if ok:
+        print("control: 6 planted violations detected, 17 correct forms silent")
+    ok
+
+fn main():
+    val argv = get_args()
+    var roots: [text] = []
+    var selftest = false
+    var listing = false
+    var i: i64 = 0
+    while i < argv.len():
+        val a = argv[i]
+        if a == "--selftest":
+            selftest = true
+            i = i + 1
+            continue
+        if a == "--list":
+            listing = true
+            i = i + 1
+            continue
+        if a.starts_with("--") or a.ends_with("/simple") or a == "run" or a.ends_with(".spl"):
+            i = i + 1
+            continue
+        roots.push(a)
+        i = i + 1
+
+    if not run_control():
+        print("ERROR -- positive control did not reproduce; scan not attempted")
+        exit(2)
+        return
+    if selftest:
+        print("REPORT -- positive control reproduced")
+        return
+
+    if roots.len() == 0:
+        roots.push("src")
+        roots.push("test")
+        roots.push("scripts")
+
+    val nfiles = count_files(roots)
+    val rows = scan(roots)
+
+    print("=== declared-return-type census ===")
+    print("files scanned                 : {nfiles}")
+    print("findings (raw, incl. dup tree): {total(rows, false)}")
+    print("findings (deduped)            : {total(rows, true)}")
+    print("")
+    print("--- by code (deduped / raw) ---")
+    print("RET001 tail-expression mismatch : {count_where_code(rows, \"RET001\", true)} / {count_where_code(rows, \"RET001\", false)}")
+    print("RET002 `.?` in value position   : {count_where_code(rows, \"RET002\", true)} / {count_where_code(rows, \"RET002\", false)}")
+    print("RET003 `return <expr>` mismatch : {count_where_code(rows, \"RET003\", true)} / {count_where_code(rows, \"RET003\", false)}")
+    print("RET004 tail yields no value     : {count_where_code(rows, \"RET004\", true)} / {count_where_code(rows, \"RET004\", false)}")
+    print("RET005 `pass` stub under -> T   : {count_where_code(rows, \"RET005\", true)} / {count_where_code(rows, \"RET005\", false)}")
+    print("")
+    print("--- by declaration kind (deduped / raw) ---")
+    for k in kinds_seen(rows):
+        print("{k} : {count_where_kind(rows, k, true)} / {count_where_kind(rows, k, false)}")
+    print("")
+    print("--- by declared return type (deduped / raw) ---")
+    for d in declared_seen(rows):
+        print("-> {d} : {count_where_declared(rows, d, true)} / {count_where_declared(rows, d, false)}")
+
+    if listing:
+        print("")
+        print("--- findings ---")
+        for r in rows:
+            var tag = ""
+            if r.dup:
+                tag = "  [dup-tree]"
+            print("  {r.code} {r.file}:{r.line} {r.fn_name} declared=-> {r.declared} actual={r.actual} kind={r.kind}{tag}")
+
+    if nfiles == 0:
+        print("ERROR -- nothing was scanned")
+        exit(2)
+        return
+    print("REPORT -- {nfiles} file(s) scanned, {total(rows, true)} deduped finding(s), {total(rows, false)} raw")

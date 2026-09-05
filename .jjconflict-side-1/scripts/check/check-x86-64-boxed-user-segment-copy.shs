@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_file="$root/src/os/kernel/memory/vmm_address_space.spl"
+
+fail() {
+    printf '%s\n' "x86_64 boxed segment-copy gate: $*" >&2
+    exit 1
+}
+
+test -f "$source_file" || fail "missing VMM owner"
+awk '
+  /@cfg\(x86_64\)/ { x86 = 1; next }
+  /@cfg\(not\(x86_64\)\)/ { x86 = 0 }
+  x86 && /fn vmm_copy_bytes_to_phys/ { copy = 1 }
+  x86 && /rt_bytes_u8_at\(src, \(src_offset \+ i\) as i64\)/ { decode = 1 }
+  x86 && /mmio_write8\(dst_virt \+ i, byte\)/ { write = 1 }
+  END { exit !(copy && decode && write) }
+' "$source_file" || fail "x86_64 path must decode boxed bytes before each physical write"
+
+awk '
+  /@cfg\(x86_64\)/ { x86 = 1; next }
+  /@cfg\(not\(x86_64\)\)/ { x86 = 0 }
+  x86 && /rt_memcpy\(/ { bad = 1 }
+  END { exit bad }
+' "$source_file" || fail "x86_64 path must not memcpy boxed backing storage"
+
+printf '%s\n' 'PASS x86_64 boxed PT_LOAD byte copy'

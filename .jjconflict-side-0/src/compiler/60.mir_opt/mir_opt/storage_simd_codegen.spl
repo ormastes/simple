@@ -1,0 +1,78 @@
+# Typed MIR emission for one proven full AoSoA block. Callers iterate only over
+# schedule.full_block_count and preserve the scalar tail separately. Native
+# x86 native emission additionally requires an explicit 32-byte alignment proof.
+
+use compiler.mir.mir_data.{MirInst, MirInstKind, MirOperand, LocalId}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir_opt.mir_opt.storage_simd_schedule.{StorageSimdScheduleV1}
+
+struct StorageSimdCodegenResultV1:
+    ok: bool
+    instructions: [MirInst]
+    reason: text
+
+fn storage_simd_codegen_failure(reason: text) -> StorageSimdCodegenResultV1:
+    StorageSimdCodegenResultV1(ok: false, instructions: [], reason: reason)
+
+fn storage_simd_vector_type(scalar_kind: text, lane_count: i64) -> MirType?:
+    if scalar_kind == "f32" and lane_count == 4:
+        return Some(MirType(kind: MirTypeKind.Vec4f))
+    if scalar_kind == "f32" and lane_count == 8:
+        return Some(MirType(kind: MirTypeKind.Vec8f))
+    if scalar_kind == "f64" and lane_count == 4:
+        return Some(MirType(kind: MirTypeKind.Vec4d))
+    if scalar_kind == "i32" and lane_count == 4:
+        return Some(MirType(kind: MirTypeKind.Vec4i))
+    if scalar_kind == "i32" and lane_count == 8:
+        return Some(MirType(kind: MirTypeKind.Vec8i))
+    nil
+
+fn storage_simd_operation_supported(operation: text) -> bool:
+    operation == "Add" or operation == "Sub" or operation == "Mul"
+        or operation == "Div" or operation == "Min" or operation == "Max"
+
+fn storage_simd_emit_full_block(
+    schedule: StorageSimdScheduleV1,
+    block_index: i64,
+    scalar_kind: text,
+    operation: text,
+    target_backend: text,
+    projected_pointers_aligned_32: bool,
+    projected_input_a_ptr: LocalId,
+    projected_input_b_ptr: LocalId,
+    projected_output_ptr: LocalId,
+    value_a: LocalId,
+    value_b: LocalId,
+    result_value: LocalId
+) -> StorageSimdCodegenResultV1:
+    if not schedule.valid:
+        return storage_simd_codegen_failure("invalid-simd-schedule")
+    if block_index < 0 or block_index >= schedule.full_block_count:
+        return storage_simd_codegen_failure("block-is-not-a-full-vector-block")
+    val native_avx2 = target_backend == "native-x86_64-avx2"
+    if target_backend != "opencl" and not native_avx2:
+        return storage_simd_codegen_failure("backend-has-no-typed-simd-lowering")
+    if not storage_simd_operation_supported(operation):
+        return storage_simd_codegen_failure("unsupported-vector-operation")
+    val vector_type = storage_simd_vector_type(scalar_kind, schedule.lane_count)
+    if not vector_type.?:
+        return storage_simd_codegen_failure("unsupported-vector-type")
+    if native_avx2 and (scalar_kind != "f32" or schedule.lane_count != 8):
+        return storage_simd_codegen_failure("native-avx2-requires-f32x8")
+    if native_avx2 and not projected_pointers_aligned_32:
+        return storage_simd_codegen_failure("native-avx2-alignment-unproven")
+
+    val type_ = vector_type.unwrap()
+    val aligned = native_avx2
+    StorageSimdCodegenResultV1(ok: true, instructions: [
+        MirInst(kind: MirInstKind.MirSimdLoad(
+            value_a, MirOperand.copy(projected_input_a_ptr), aligned, type_), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(
+            value_b, MirOperand.copy(projected_input_b_ptr), aligned, type_), span: nil),
+        MirInst(kind: MirInstKind.MirSimdBinop(
+            result_value, MirOperand.copy(value_a),
+            MirOperand.copy(value_b), operation), span: nil),
+        MirInst(kind: MirInstKind.MirSimdStore(
+            MirOperand.copy(result_value), MirOperand.copy(projected_output_ptr), aligned),
+            span: nil)
+    ], reason: "typed-full-block-emitted")

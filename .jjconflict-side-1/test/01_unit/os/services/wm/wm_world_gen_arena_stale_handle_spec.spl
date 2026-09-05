@@ -1,0 +1,114 @@
+# @cover src/os/services/wm/wm_world.spl 40%
+# @cover src/lib/nogc_sync_mut/mem/gen_arena.spl 60%
+"""
+# WmWorld Generational Window Registry — Stale Handle Rejection
+
+**Category:** Memory safety (M6 — stdlib generational slotmap)
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Plan `doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md`
+§M6 requires `std.mem.gen_arena` to be proven by migrating a real ECS store,
+because generation reuse and stale-handle rejection can only fail under real
+churn — an arena exercised in isolation never recycles a slot under a handle
+somebody is still holding.
+
+`WmWorld` (the window manager's ECS world) is that store. Its window registry
+`win_handles: GenArena<u64>` takes a slot per spawned window and frees it on
+despawn. These examples are written so that they go RED if the generation
+check is ever removed: each one holds a handle across a despawn, lets a NEW
+window recycle the very same arena slot, and then demands that the OLD handle
+resolve to **nothing** rather than to the new occupant.
+
+The negative control is the point: `expect(stale_wid).to_equal(0)` fails with
+`expected 4242 to equal 0` the moment a stale handle is accepted, because the
+recycled slot is asserted to be the same index the old handle names.
+"""
+
+use std.spec
+use std.mem.gen_arena.{GenArena, GenHandle}
+use os.services.wm.wm_world.{WmWorld}
+
+describe "WmWorld generational window registry":
+
+    it "mints a live handle that resolves to its window":
+        var w = WmWorld.new()
+        w.spawn_window(1001, 7, 70, "app.a")
+        val h = w.handle_for_window(1001)
+        assert_true(h.idx >= 0)
+        expect(w.window_id_for_handle(h)).to_equal(1001)
+        expect(w.live_window_count()).to_equal(1)
+
+    it "rejects a handle held across despawn even after the slot is recycled":
+        var w = WmWorld.new()
+        w.spawn_window(1111, 7, 70, "app.a")
+        val stale = w.handle_for_window(1111)
+        assert_true(stale.idx >= 0)
+
+        # Close the window: the registry slot is freed and its generation bumps.
+        assert_true(w.despawn_window(1111))
+
+        # A different window now recycles that exact slot. Without the
+        # generation check `stale` would name a live slot holding 4242.
+        w.spawn_window(4242, 9, 90, "app.b")
+        val fresh = w.handle_for_window(4242)
+        expect(fresh.idx).to_equal(stale.idx)
+        assert_true(fresh.generation != stale.generation)
+
+        # The fresh handle works...
+        expect(w.window_id_for_handle(fresh)).to_equal(4242)
+        # ...and the stale one is REFUSED, not aliased onto window 4242.
+        # If the generation check is removed this reads `4242`, not `0`.
+        expect(w.window_id_for_handle(stale)).to_equal(0)
+        expect(w.stale_handle_rejections()).to_be_greater_than(0)
+
+    it "refuses to resolve a stale handle to an Entity":
+        var w = WmWorld.new()
+        w.spawn_window(2001, 7, 70, "app.a")
+        val stale = w.handle_for_window(2001)
+        w.despawn_window(2001)
+        w.spawn_window(2002, 8, 80, "app.b")
+
+        val live = w.entity_for_handle(w.handle_for_window(2002))
+        assert_false(live.is_null())
+        val dead = w.entity_for_handle(stale)
+        assert_true(dead.is_null())
+
+    it "keeps the live count honest across spawn/despawn churn":
+        var w = WmWorld.new()
+        var i: u64 = 0
+        while i < 5:
+            w.spawn_window(3000 + i, 7, 70, "app.churn")
+            i = i + 1
+        expect(w.live_window_count()).to_equal(5)
+        w.despawn_window(3001)
+        w.despawn_window(3003)
+        expect(w.live_window_count()).to_equal(3)
+        # Recycled slots are reused, not appended.
+        w.spawn_window(3999, 7, 70, "app.churn")
+        expect(w.live_window_count()).to_equal(4)
+
+    it "recycles the ECS entity id once despawn carries a real generation":
+        # entity_at_id() reads the allocator's live generation instead of
+        # fabricating 0. Fabricated generation 0 never matched
+        # EntityAllocator.free's check, so despawn silently no-oped and ids
+        # leaked. Proof the migration made the churn real: the id comes back.
+        var w = WmWorld.new()
+        w.spawn_window(5001, 7, 70, "app.a")
+        val e1 = w.find_entity_for_window(5001)
+        assert_false(e1.is_null())
+        assert_true(w.despawn_window(5001))
+
+        w.spawn_window(5002, 7, 70, "app.b")
+        val e2 = w.find_entity_for_window(5002)
+        expect(e2.id).to_equal(e1.id)
+        assert_true(e2.generation != e1.generation)
+
+    it "reports the registry as a GEN_ARENA row for simple mem":
+        var w = WmWorld.new()
+        w.spawn_window(6001, 7, 70, "app.a")
+        w.despawn_window(6001)
+        val line = w.registry_report()
+        expect(line).to_start_with("GEN_ARENA\twm.windows\t")

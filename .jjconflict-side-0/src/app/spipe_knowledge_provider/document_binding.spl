@@ -1,0 +1,157 @@
+use std.common.search.document.{SearchField, SearchFacet}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_string, json_to_number}
+use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
+use app.spipe_knowledge_provider.wire_json.{wire_has_exact_keys, wire_valid_id, wire_json_string, wire_canonical_json_value}
+use app.spipe_knowledge_provider.query_clock.{QueryClockPort, SystemQueryClockV1, query_stop_reason}
+
+fn _binding_check(clock: QueryClockPort, request_id: text,
+                  admitted_at_ms: i64,
+                  deadline_ms: i64) -> Result<(), text>:
+    val reason = query_stop_reason(clock, request_id, admitted_at_ms, deadline_ms)
+    if reason != "": return Err(reason)
+    Ok(())
+
+fn _binding_text(value: any, key: text) -> text:
+    val item = json_to_string(json_object_get(value, key))
+    if item == nil: "" else: item
+
+fn _binding_int(value: any, key: text, missing: i64) -> i64:
+    val item = json_to_number(json_object_get(value, key))
+    if item == nil: missing else: item as i64
+
+fn scoped_field_rank(name: text) -> i64:
+    val names = ["identifier", "title", "heading", "classification", "body"]
+    var i = 0
+    while i < names.len():
+        if names[i] == name: return i
+        i = i + 1
+    0 - 1
+
+fn scoped_field_weight(name: text) -> i64:
+    val rank = scoped_field_rank(name)
+    val weights = [4000, 4000, 2500, 2000, 1000]
+    if rank < 0: 0 - 1 else: weights[rank]
+
+# Normalize a caller-authorized field subset into the weighted commitment
+# form.  The subset may be empty, but present fields stay in relative canonical
+# order and each closed field may occur at most once.
+fn scoped_fields_controlled(value: any, weighted_input: bool,
+                            request_id: text, admitted_at_ms: i64,
+                            deadline_ms: i64,
+                            clock: QueryClockPort) -> Result<(text, [SearchField]), text>:
+    if json_get_type(value) != "array" or json_array_length(value) > 5:
+        return Err("invalid_request")
+    var rows: [text] = []
+    var fields: [SearchField] = []
+    var previous_rank = 0 - 1
+    var i = 0
+    while i < json_array_length(value):
+        _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val item = json_array_get(value, i)
+        val expected_keys = if weighted_input:
+            ["name", "value", "weight_milli"]
+        else:
+            ["name", "value"]
+        if not wire_has_exact_keys(item, expected_keys):
+            return Err("invalid_request")
+        val name = _binding_text(item, "name")
+        val rank = scoped_field_rank(name)
+        val weight = scoped_field_weight(name)
+        val field_value = _binding_text(item, "value")
+        _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if json_get_type(json_object_get(item, "name")) != "string" or
+                json_get_type(json_object_get(item, "value")) != "string" or
+                (weighted_input and json_get_type(
+                    json_object_get(item, "weight_milli")) != "number") or
+                rank <= previous_rank or weight < 0 or
+                unicode_normalize_nfc(field_value) != field_value or
+                field_value.bytes().len() > 1048576 or
+                (weighted_input and _binding_int(item, "weight_milli", -1) != weight):
+            return Err("invalid_request")
+        previous_rank = rank
+        rows.push("{\"name\":" + wire_json_string(name) +
+            ",\"value\":" + wire_json_string(field_value) +
+            ",\"weight_milli\":" + weight.to_text() + "}")
+        fields.push(SearchField.of(name, field_value, weight))
+        i = i + 1
+    _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    Ok(("[" + rows.join(",") + "]", fields))
+
+fn scoped_fields(value: any,
+                 weighted_input: bool) -> Result<(text, [SearchField]), text>:
+    scoped_fields_controlled(value, weighted_input, "", -1, 0,
+                             SystemQueryClockV1.configured())
+
+fn scoped_field_arrays_bound(unweighted: any, weighted: any) -> bool:
+    val left = scoped_fields(unweighted, false)
+    val right = scoped_fields(weighted, true)
+    if val Err(_) = left: return false
+    if val Err(_) = right: return false
+    left.unwrap().0 == right.unwrap().0
+
+# Facet identity is the pair, not its name.  Selection-sort by unsigned-valid
+# UTF-8 text yields one deterministic persisted/hash order while allowing one
+# facet name to carry several distinct authorized values.
+fn scoped_facets_controlled(value: any, request_id: text,
+                            admitted_at_ms: i64, deadline_ms: i64,
+                            clock: QueryClockPort) -> Result<(text, [SearchFacet]), text>:
+    if json_get_type(value) != "array" or json_array_length(value) > 32:
+        return Err("invalid_request")
+    var names: [text] = []
+    var values: [text] = []
+    var i = 0
+    while i < json_array_length(value):
+        _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val item = json_array_get(value, i)
+        if not wire_has_exact_keys(item, ["name", "value"]):
+            return Err("invalid_request")
+        val name = _binding_text(item, "name")
+        val facet_value = _binding_text(item, "value")
+        _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if json_get_type(json_object_get(item, "name")) != "string" or
+                json_get_type(json_object_get(item, "value")) != "string" or
+                not wire_valid_id(name) or
+                unicode_normalize_nfc(facet_value) != facet_value:
+            return Err("invalid_request")
+        var prior = 0
+        while prior < names.len():
+            _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            if names[prior] == name and values[prior] == facet_value:
+                return Err("invalid_request")
+            prior = prior + 1
+        names.push(name)
+        values.push(facet_value)
+        i = i + 1
+    var selected: [i64] = []
+    var rows: [text] = []
+    var facets: [SearchFacet] = []
+    while selected.len() < names.len():
+        _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        var best = 0 - 1
+        i = 0
+        while i < names.len():
+            _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            if not selected.contains(i) and (best < 0 or names[i] < names[best] or
+                    (names[i] == names[best] and values[i] < values[best])):
+                best = i
+            i = i + 1
+        if best < 0: return Err("invalid_request")
+        selected.push(best)
+        rows.push("{\"name\":" + wire_json_string(names[best]) +
+            ",\"value\":" + wire_json_string(values[best]) + "}")
+        facets.push(SearchFacet.of(names[best], values[best]))
+    _binding_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    Ok(("[" + rows.join(",") + "]", facets))
+
+fn scoped_facets(value: any) -> Result<(text, [SearchFacet]), text>:
+    scoped_facets_controlled(value, "", -1, 0,
+                             SystemQueryClockV1.configured())
+
+fn scoped_facets_are_canonical(value: any) -> bool:
+    val normalized = scoped_facets(value)
+    if val Err(_) = normalized: return false
+    val original = wire_canonical_json_value(value)
+    if val Err(_) = original: return false
+    original.unwrap() == normalized.unwrap().0

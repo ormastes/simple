@@ -1,0 +1,531 @@
+# PS/2 Keyboard Driver — Userspace Driver with Port I/O Capability
+#
+# MDSOC: feature dimension, drivers layer
+# Requires: CapabilityKind.PortIO(base: 0x60, count: 4) capability
+#
+# Scancodes → UIEvent translation for compositor input.
+#
+# ISR/decode split (WS-C, C2 driver half)
+# ---------------------------------------
+# `isr_ingest()` is the ISR-safe half: read the status port, read at most ONE
+# scancode byte, store it in the fixed-capacity `raw_ring`, return. No
+# allocation, no `text`, no trait dispatch, no event construction — the ring is
+# preallocated in `new()`. `decode_pending()` is the task-side half: it drains
+# the ring, maps scancodes to `Key`, updates modifier state, and builds
+# `KeyEvent`s. `poll()` is now "call `isr_ingest()`, then `decode_pending()`",
+# so the polled and (future) IRQ-driven paths differ by exactly one line.
+#
+# Key code space: this driver reads PS/2 **scancode set 1** bytes and maps them
+# to the local `Key` enum, which stays the symbolic vocabulary shared by the
+# drivers. The NUMERIC cross-producer vocabulary is owned by
+# `common.ui.key_code` (Windows VK / W3C keyCode); `key_to_canon` at the bottom
+# of this file is the single seam from `Key` to that space, and every producer
+# (PS/2, evdev, SDL2, winit) must go through it before filling
+# `HostInputEvent.Key.code`.
+
+use os.kernel.types.capability_types.{CapabilityKind}
+use common.ui.key_code.{
+    CANON_UNKNOWN, CANON_BACKSPACE, CANON_TAB, CANON_ENTER, CANON_SHIFT,
+    CANON_CTRL, CANON_ALT, CANON_CAPSLOCK, CANON_ESCAPE, CANON_SPACE,
+    CANON_PAGEUP, CANON_PAGEDOWN, CANON_END, CANON_HOME,
+    CANON_LEFT, CANON_UP, CANON_RIGHT, CANON_DOWN,
+    CANON_INSERT, CANON_DELETE,
+    CANON_0, CANON_1, CANON_2, CANON_3, CANON_4,
+    CANON_5, CANON_6, CANON_7, CANON_8, CANON_9,
+    CANON_A, CANON_B, CANON_C, CANON_D, CANON_E, CANON_F, CANON_G,
+    CANON_H, CANON_I, CANON_J, CANON_K, CANON_L, CANON_M, CANON_N,
+    CANON_O, CANON_P, CANON_Q, CANON_R, CANON_S, CANON_T, CANON_U,
+    CANON_V, CANON_W, CANON_X, CANON_Y, CANON_Z,
+    CANON_F1, CANON_F2, CANON_F3, CANON_F4, CANON_F5, CANON_F6,
+    CANON_F7, CANON_F8, CANON_F9, CANON_F10, CANON_F11, CANON_F12,
+    CANON_SEMICOLON, CANON_EQUALS, CANON_COMMA, CANON_MINUS,
+    CANON_PERIOD, CANON_SLASH, CANON_BACKTICK,
+    CANON_LEFT_BRACKET, CANON_BACKSLASH, CANON_RIGHT_BRACKET, CANON_QUOTE
+}
+
+# PS/2 controller ports
+val PS2_DATA_PORT: u16 = 0x60
+val PS2_STATUS_PORT: u16 = 0x64
+val PS2_COMMAND_PORT: u16 = 0x64
+
+# Status register bits
+val PS2_STATUS_OUTPUT_FULL: u8 = 0x01
+val PS2_STATUS_INPUT_FULL: u8 = 0x02
+
+# Raw scancode ring capacity (ISR side; fixed, never reallocated)
+val KBD_RING_CAPACITY: i64 = 64
+
+use os.kernel.boot.cpu.{port_inb, port_outb}
+
+# ============================================================================
+# Scancode Set 1 → Key mapping
+# ============================================================================
+
+enum Key:
+    Escape | F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 | F9 | F10 | F11 | F12
+    Backtick | Num1 | Num2 | Num3 | Num4 | Num5 | Num6 | Num7 | Num8 | Num9 | Num0
+    Minus | Equals | Backspace | Tab
+    Q | W | E | R | T | Y | U | I | O | P | LeftBracket | RightBracket | Backslash
+    CapsLock | A | S | D | F | G | H | J | K | L | Semicolon | Quote | Enter
+    LeftShift | Z | X | C | V | B | N | M | Comma | Period | Slash | RightShift
+    LeftCtrl | LeftAlt | Space | RightAlt | RightCtrl
+    Up | Down | Left | Right
+    Insert | Delete | Home | End | PageUp | PageDown
+    Unknown
+
+enum KeyEvent:
+    Press(key: Key)
+    Release(key: Key)
+
+fn scancode_to_key(code: i64) -> Key:
+    """Convert scancode set 1 to Key enum.
+
+    The parameter is `i64`, not `u8`, for TWO independent reasons.
+
+    1. Extended keys need the COMBINED 16-bit value. Arrows, Home/End,
+       Insert/Delete, PageUp/PageDown, right Ctrl/Alt and keypad Enter are all
+       E0-prefixed on set 1, and are passed here as `0xE000 | second_byte`
+       (Left = 0xE04B). A one-byte parameter cannot express any of them, which
+       is why the enum declared Up/Down/Left/Right/Insert/... that nothing
+       could ever produce.
+    2. The scrutinee MUST be i64 when it reaches `match`. A `match` on a `u8`
+       scrutinee does NOT match integer-literal patterns, so every arm below
+       fell through to `case _: Key.Unknown`. The effect was that the PS/2
+       keyboard decoded EVERY key to `Key.Unknown` — the driver produced no
+       usable keystroke at all — while 12 examples in `ps2_keyboard_spec.spl`
+       recorded the breakage as long-standing red. `virtio_input_ops.spl` notes
+       the same sidestep for evdev codes. Do not narrow this parameter back to
+       `u8`, and do not reintroduce a `.to_u8()` at any call site.
+
+    Break codes (bit 0x80 on the FINAL byte) must be stripped by the caller;
+    for an extended key that means `0xE000 | (byte & 0x7F)`, not
+    `combined & 0x7F` — see `decode_pending`.
+
+    E0 5B / E0 5C (left/right Meta) have no `Key` variant and deliberately
+    stay `Key.Unknown` here; `common.ui.key_code.ps2_set1_to_canon` maps them
+    to CANON_META for consumers that work in the numeric space.
+    """
+    val scan = code
+    match scan:
+        # --- Extended (E0-prefixed) block, passed as 0xE000 | byte ----------
+        case 0xE01C: Key.Enter          # keypad Enter
+        case 0xE01D: Key.RightCtrl
+        case 0xE038: Key.RightAlt
+        case 0xE047: Key.Home
+        case 0xE048: Key.Up
+        case 0xE049: Key.PageUp
+        case 0xE04B: Key.Left
+        case 0xE04D: Key.Right
+        case 0xE04F: Key.End
+        case 0xE050: Key.Down
+        case 0xE051: Key.PageDown
+        case 0xE052: Key.Insert
+        case 0xE053: Key.Delete
+        # --- Base block ------------------------------------------------------
+        case 0x01: Key.Escape
+        case 0x02: Key.Num1
+        case 0x03: Key.Num2
+        case 0x04: Key.Num3
+        case 0x05: Key.Num4
+        case 0x06: Key.Num5
+        case 0x07: Key.Num6
+        case 0x08: Key.Num7
+        case 0x09: Key.Num8
+        case 0x0A: Key.Num9
+        case 0x0B: Key.Num0
+        case 0x0C: Key.Minus
+        case 0x0D: Key.Equals
+        case 0x0E: Key.Backspace
+        case 0x0F: Key.Tab
+        case 0x10: Key.Q
+        case 0x11: Key.W
+        case 0x12: Key.E
+        case 0x13: Key.R
+        case 0x14: Key.T
+        case 0x15: Key.Y
+        case 0x16: Key.U
+        case 0x17: Key.I
+        case 0x18: Key.O
+        case 0x19: Key.P
+        case 0x1A: Key.LeftBracket
+        case 0x1B: Key.RightBracket
+        case 0x1C: Key.Enter
+        case 0x1D: Key.LeftCtrl
+        case 0x1E: Key.A
+        case 0x1F: Key.S
+        case 0x20: Key.D
+        case 0x21: Key.F
+        case 0x22: Key.G
+        case 0x23: Key.H
+        case 0x24: Key.J
+        case 0x25: Key.K
+        case 0x26: Key.L
+        case 0x27: Key.Semicolon
+        case 0x28: Key.Quote
+        case 0x29: Key.Backtick
+        case 0x2A: Key.LeftShift
+        case 0x2B: Key.Backslash
+        case 0x2C: Key.Z
+        case 0x2D: Key.X
+        case 0x2E: Key.C
+        case 0x2F: Key.V
+        case 0x30: Key.B
+        case 0x31: Key.N
+        case 0x32: Key.M
+        case 0x33: Key.Comma
+        case 0x34: Key.Period
+        case 0x35: Key.Slash
+        case 0x36: Key.RightShift
+        case 0x38: Key.LeftAlt
+        case 0x39: Key.Space
+        case 0x3A: Key.CapsLock
+        case 0x3B: Key.F1
+        case 0x3C: Key.F2
+        case 0x3D: Key.F3
+        case 0x3E: Key.F4
+        case 0x3F: Key.F5
+        case 0x40: Key.F6
+        case 0x41: Key.F7
+        case 0x42: Key.F8
+        case 0x43: Key.F9
+        case 0x44: Key.F10
+        case 0x57: Key.F11
+        case 0x58: Key.F12
+        case _: Key.Unknown
+
+# ============================================================================
+# PS/2 Keyboard Driver
+# ============================================================================
+
+class Ps2Keyboard:
+    """PS/2 keyboard driver.
+
+    Reads scancodes from port 0x60 and converts to KeyEvents.
+    Runs as a userspace driver with PortIO capability.
+    """
+    shift_held: bool
+    ctrl_held: bool
+    alt_held: bool
+    caps_lock: bool
+    # ISR-side raw scancode ring (C2). Fixed capacity, allocated once in new().
+    raw_ring: [i64]
+    raw_head: i64
+    raw_tail: i64
+    raw_count: i64
+    raw_dropped: i64
+    # True when the previous decoded byte was the 0xE0 extended prefix. Set-1
+    # sends E0 as its OWN byte, so without this latch every E0xx arm in
+    # `scancode_to_key` would be unreachable and arrows/Home/End/Insert/Delete
+    # would keep decoding to Key.Unknown.
+    pending_e0: bool
+
+impl Ps2Keyboard:
+    static fn new() -> Ps2Keyboard:
+        Ps2Keyboard(
+            shift_held: false,
+            ctrl_held: false,
+            alt_held: false,
+            caps_lock: false,
+            raw_ring: [0; 64],
+            raw_head: 0,
+            raw_tail: 0,
+            raw_count: 0,
+            raw_dropped: 0,
+            pending_e0: false
+        )
+
+    fn init():
+        """Initialize PS/2 keyboard controller."""
+        # Disable devices
+        port_outb(PS2_COMMAND_PORT, 0xAD)  # Disable first port
+        port_outb(PS2_COMMAND_PORT, 0xA7)  # Disable second port
+
+        # Flush output buffer
+        port_inb(PS2_DATA_PORT)
+
+        # Enable first port
+        port_outb(PS2_COMMAND_PORT, 0xAE)
+
+        # Enable scanning
+        port_outb(PS2_DATA_PORT, 0xF4)
+
+    me poll() -> KeyEvent?:
+        """Poll for a keyboard event. Returns nil if no event pending.
+
+        Exactly two steps: drain the hardware into the raw ring via the SAME
+        `isr_ingest()` an interrupt handler will call, then decode. Under IRQ
+        mode the ingest call is simply not made here — that is the only
+        difference between the two modes.
+        """
+        self.isr_ingest()
+        self.decode_pending()
+
+    me isr_ingest() -> bool:
+        """ISR-safe half: read the status port, read at most ONE scancode byte.
+
+        Returns true when a byte was captured. No allocation, no `text`, no
+        trait dispatch, no event construction. On ring overflow the byte is
+        dropped and `raw_dropped` is incremented — the ISR never blocks.
+        """
+        val status = port_inb(PS2_STATUS_PORT)
+        if (status & PS2_STATUS_OUTPUT_FULL) == 0:
+            return false
+        val scancode = port_inb(PS2_DATA_PORT).to_i64()
+        self.feed_raw_byte(scancode)
+        true
+
+    me feed_raw_byte(scancode: i64) -> bool:
+        """Push one raw scancode into the ring. Returns false if it was dropped.
+
+        This is the store half of `isr_ingest()`, split out so specs (and any
+        replay harness) can drive the decoder without a live PS/2 controller.
+        """
+        if self.raw_count >= KBD_RING_CAPACITY:
+            self.raw_dropped = self.raw_dropped + 1
+            return false
+        self.raw_ring[self.raw_tail] = scancode
+        self.raw_tail = (self.raw_tail + 1) % KBD_RING_CAPACITY
+        self.raw_count = self.raw_count + 1
+        true
+
+    me decode_pending() -> KeyEvent?:
+        """Task-side half: pop one raw scancode and decode it to a KeyEvent.
+
+        Returns nil when the ring is empty. Modifier state is updated here,
+        not in the ISR. Any remaining bytes stay in the ring for the next
+        call, which is exactly the old `poll()` contract (one event per call).
+        """
+        if self.raw_count <= 0:
+            return nil
+
+        val raw = self.raw_ring[self.raw_head]
+        self.raw_head = (self.raw_head + 1) % KBD_RING_CAPACITY
+        self.raw_count = self.raw_count - 1
+
+        # 0xE0 is a PREFIX, not a key: latch it and decode on the next byte.
+        # It yields no event of its own.
+        if raw == 0xE0:
+            self.pending_e0 = true
+            return self.decode_pending()
+
+        # Fold the prefix in. NOTE the break-code mask is applied to the BYTE
+        # and the 0xE000 prefix re-added afterwards: masking the combined
+        # value (`0xE0CB & 0x7F`) would drop the prefix entirely and decode the
+        # release of Left arrow as the release of `K`.
+        val extended = self.pending_e0
+        self.pending_e0 = false
+        val released = (raw & 0x80) != 0
+        val byte = if released: raw & 0x7F else: raw
+        val scancode = if extended: 0xE000 | byte else: byte
+
+        if released:
+            val rkey = scancode_to_key(scancode)
+            self.update_modifiers_release(rkey)
+            return KeyEvent.Release(key: rkey)
+
+        val key = scancode_to_key(scancode)
+        self.update_modifiers_press(key)
+        KeyEvent.Press(key: key)
+
+    me update_modifiers_press(key: Key):
+        match key:
+            case Key.LeftShift: self.shift_held = true
+            case Key.RightShift: self.shift_held = true
+            case Key.LeftCtrl: self.ctrl_held = true
+            case Key.RightCtrl: self.ctrl_held = true
+            case Key.LeftAlt: self.alt_held = true
+            case Key.RightAlt: self.alt_held = true
+            case Key.CapsLock: self.caps_lock = not self.caps_lock
+            case _: pass_dn
+
+    me update_modifiers_release(key: Key):
+        match key:
+            case Key.LeftShift: self.shift_held = false
+            case Key.RightShift: self.shift_held = false
+            case Key.LeftCtrl: self.ctrl_held = false
+            case Key.RightCtrl: self.ctrl_held = false
+            case Key.LeftAlt: self.alt_held = false
+            case Key.RightAlt: self.alt_held = false
+            case _: pass_dn
+
+    fn key_to_char(key: Key) -> text?:
+        """Convert key to character, respecting shift state."""
+        if self.shift_held or self.caps_lock:
+            match key:
+                case Key.A: "A"
+                case Key.B: "B"
+                case Key.C: "C"
+                case Key.D: "D"
+                case Key.E: "E"
+                case Key.F: "F"
+                case Key.G: "G"
+                case Key.H: "H"
+                case Key.I: "I"
+                case Key.J: "J"
+                case Key.K: "K"
+                case Key.L: "L"
+                case Key.M: "M"
+                case Key.N: "N"
+                case Key.O: "O"
+                case Key.P: "P"
+                case Key.Q: "Q"
+                case Key.R: "R"
+                case Key.S: "S"
+                case Key.T: "T"
+                case Key.U: "U"
+                case Key.V: "V"
+                case Key.W: "W"
+                case Key.X: "X"
+                case Key.Y: "Y"
+                case Key.Z: "Z"
+                case Key.Space: " "
+                case Key.Enter: "\n"
+                case _: nil
+        else:
+            match key:
+                case Key.A: "a"
+                case Key.B: "b"
+                case Key.C: "c"
+                case Key.D: "d"
+                case Key.E: "e"
+                case Key.F: "f"
+                case Key.G: "g"
+                case Key.H: "h"
+                case Key.I: "i"
+                case Key.J: "j"
+                case Key.K: "k"
+                case Key.L: "l"
+                case Key.M: "m"
+                case Key.N: "n"
+                case Key.O: "o"
+                case Key.P: "p"
+                case Key.Q: "q"
+                case Key.R: "r"
+                case Key.S: "s"
+                case Key.T: "t"
+                case Key.U: "u"
+                case Key.V: "v"
+                case Key.W: "w"
+                case Key.X: "x"
+                case Key.Y: "y"
+                case Key.Z: "z"
+                case Key.Space: " "
+                case Key.Enter: "\n"
+                case Key.Num0: "0"
+                case Key.Num1: "1"
+                case Key.Num2: "2"
+                case Key.Num3: "3"
+                case Key.Num4: "4"
+                case Key.Num5: "5"
+                case Key.Num6: "6"
+                case Key.Num7: "7"
+                case Key.Num8: "8"
+                case Key.Num9: "9"
+                case _: nil
+
+# ============================================================================
+# Key -> canonical numeric code (THE cross-producer seam)
+# ============================================================================
+
+fn key_to_canon(key: Key) -> i64:
+    """Map the symbolic `Key` enum to the canonical numeric key code owned by
+    `common.ui.key_code` (Windows VK / W3C keyCode).
+
+    This is the ONE place `Key` becomes an integer. All four producers already
+    converge on `Key` — `scancode_to_key` (PS/2 set 1),
+    `virtio_input_ops.evdev_key_to_key` (evdev), `hosted_input_sdl2.
+    sdl2_keysym_to_key` (SDL2 keysyms) and `hosted_input_backend.
+    _winit_keycode_to_key` (winit VK) — so routing that single enum through
+    here is what makes the same physical keypress the same integer on every
+    host. Nothing may fill `HostInputEvent.Key.code` by any other route.
+
+    Left/right modifier pairs COLLAPSE to one canonical code by design; which
+    side was pressed belongs in `HostInputEvent.mods`, not in `code`.
+
+    `os.drivers` -> `common.ui` is the permitted import direction: `key_code`
+    is integer-only precisely so the reverse (a lib module importing a driver
+    enum) is never needed.
+    """
+    match key:
+        case Key.Escape: CANON_ESCAPE
+        case Key.F1: CANON_F1
+        case Key.F2: CANON_F2
+        case Key.F3: CANON_F3
+        case Key.F4: CANON_F4
+        case Key.F5: CANON_F5
+        case Key.F6: CANON_F6
+        case Key.F7: CANON_F7
+        case Key.F8: CANON_F8
+        case Key.F9: CANON_F9
+        case Key.F10: CANON_F10
+        case Key.F11: CANON_F11
+        case Key.F12: CANON_F12
+        case Key.Backtick: CANON_BACKTICK
+        case Key.Num1: CANON_1
+        case Key.Num2: CANON_2
+        case Key.Num3: CANON_3
+        case Key.Num4: CANON_4
+        case Key.Num5: CANON_5
+        case Key.Num6: CANON_6
+        case Key.Num7: CANON_7
+        case Key.Num8: CANON_8
+        case Key.Num9: CANON_9
+        case Key.Num0: CANON_0
+        case Key.Minus: CANON_MINUS
+        case Key.Equals: CANON_EQUALS
+        case Key.Backspace: CANON_BACKSPACE
+        case Key.Tab: CANON_TAB
+        case Key.Q: CANON_Q
+        case Key.W: CANON_W
+        case Key.E: CANON_E
+        case Key.R: CANON_R
+        case Key.T: CANON_T
+        case Key.Y: CANON_Y
+        case Key.U: CANON_U
+        case Key.I: CANON_I
+        case Key.O: CANON_O
+        case Key.P: CANON_P
+        case Key.LeftBracket: CANON_LEFT_BRACKET
+        case Key.RightBracket: CANON_RIGHT_BRACKET
+        case Key.Backslash: CANON_BACKSLASH
+        case Key.CapsLock: CANON_CAPSLOCK
+        case Key.A: CANON_A
+        case Key.S: CANON_S
+        case Key.D: CANON_D
+        case Key.F: CANON_F
+        case Key.G: CANON_G
+        case Key.H: CANON_H
+        case Key.J: CANON_J
+        case Key.K: CANON_K
+        case Key.L: CANON_L
+        case Key.Semicolon: CANON_SEMICOLON
+        case Key.Quote: CANON_QUOTE
+        case Key.Enter: CANON_ENTER
+        case Key.LeftShift: CANON_SHIFT
+        case Key.RightShift: CANON_SHIFT
+        case Key.Z: CANON_Z
+        case Key.X: CANON_X
+        case Key.C: CANON_C
+        case Key.V: CANON_V
+        case Key.B: CANON_B
+        case Key.N: CANON_N
+        case Key.M: CANON_M
+        case Key.Comma: CANON_COMMA
+        case Key.Period: CANON_PERIOD
+        case Key.Slash: CANON_SLASH
+        case Key.LeftCtrl: CANON_CTRL
+        case Key.RightCtrl: CANON_CTRL
+        case Key.LeftAlt: CANON_ALT
+        case Key.RightAlt: CANON_ALT
+        case Key.Space: CANON_SPACE
+        case Key.Up: CANON_UP
+        case Key.Down: CANON_DOWN
+        case Key.Left: CANON_LEFT
+        case Key.Right: CANON_RIGHT
+        case Key.Insert: CANON_INSERT
+        case Key.Delete: CANON_DELETE
+        case Key.Home: CANON_HOME
+        case Key.End: CANON_END
+        case Key.PageUp: CANON_PAGEUP
+        case Key.PageDown: CANON_PAGEDOWN
+        case _: CANON_UNKNOWN

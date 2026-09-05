@@ -1,0 +1,107 @@
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use std.spec.step
+
+fn gen_span() -> Span:
+    lex_span_empty()
+
+fn gen_fn(params: [HirType], ret: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Function(params, ret, []), span: gen_span())
+
+fn gen_tuple(elements: [HirType]) -> HirType:
+    HirType(kind: HirTypeKind.Tuple(elements), span: gen_span())
+
+fn gen_var_id(ty: HirType) -> i64:
+    match ty.kind:
+        case Infer(id, _): id
+        case _: -1
+
+describe "HM generalization membership indexes":
+    it "excludes a free variable owned by the outer environment":
+        step("Verify: outer environment free variables remain monomorphic")
+        var ctx = HmInferContext.new()
+        ctx.enter_level()
+        val outer = ctx.fresh_var(gen_span())
+        ctx.exit_level()
+        ctx.bind_mono("outer", outer)
+        ctx.enter_level()
+        val local = ctx.fresh_var(gen_span())
+        ctx.exit_level()
+
+        val scheme = ctx.generalize(gen_fn([outer, local], outer))
+        expect(scheme.vars).to_equal([gen_var_id(local)])
+
+    it "does not treat a scheme-bound variable as environment-free":
+        step("Verify: polymorphic environment binders do not exclude candidates")
+        var ctx = HmInferContext.new()
+        ctx.enter_level()
+        val bound = ctx.fresh_var(gen_span())
+        ctx.exit_level()
+        val bound_id = gen_var_id(bound)
+        ctx.bind_poly("poly", TypeScheme(vars: [bound_id], ty: gen_fn([bound], bound)))
+
+        val scheme = ctx.generalize(bound)
+        expect(scheme.vars).to_equal([bound_id])
+
+    it "deduplicates nested repeated variables in first encounter order":
+        step("Verify: nested repeats do not reorder quantified variables")
+        var ctx = HmInferContext.new()
+        ctx.enter_level()
+        val first = ctx.fresh_var(gen_span())
+        val second = ctx.fresh_var(gen_span())
+        val third = ctx.fresh_var(gen_span())
+        ctx.exit_level()
+
+        val nested = gen_fn(
+            [gen_tuple([second, first, second]), gen_fn([third, first], second)],
+            gen_tuple([third, first]))
+        val scheme = ctx.generalize(nested)
+        expect(scheme.vars).to_equal([
+            gen_var_id(second), gen_var_id(first), gen_var_id(third)])
+
+    it "keeps the same ordered owner for generalize and generalize_all":
+        step("Verify: level filtering differs without changing encounter ownership")
+        var ctx = HmInferContext.new()
+        val current = ctx.fresh_var(gen_span())
+        ctx.enter_level()
+        val deeper = ctx.fresh_var(gen_span())
+        ctx.exit_level()
+        val ty = gen_tuple([deeper, current, deeper, current])
+
+        expect(ctx.generalize(ty).vars).to_equal([gen_var_id(deeper)])
+        expect(ctx.generalize_all(ty).vars).to_equal([
+            gen_var_id(deeper), gen_var_id(current)])
+
+    it "deduplicates after applying substitutions":
+        step("Verify: resolved aliases quantify their substituted owner once")
+        var ctx = HmInferContext.new()
+        ctx.enter_level()
+        val alias = ctx.fresh_var(gen_span())
+        val owner = ctx.fresh_var(gen_span())
+        expect(ctx.unify(alias, owner).is_ok()).to_equal(true)
+        ctx.exit_level()
+
+        val scheme = ctx.generalize(gen_tuple([alias, owner, alias]))
+        val resolved_owner = gen_var_id(ctx.resolve(owner))
+        expect(scheme.vars).to_equal([resolved_owner])
+
+describe "HM generalization membership-index source contract":
+    it "uses dictionaries only for membership and retains an ordered output":
+        step("Verify: generalization has no linear membership scan")
+        val source = file_read("src/compiler/30.types/type_infer/generalization.spl")
+        expect(source).to_contain("me env_free_var_ids() -> Dict<i64, bool>:")
+        expect(source).to_contain("var bound_vars: Dict<i64, bool> = {}")
+        expect(source).to_contain("var to_generalize: [i64] = []")
+        expect(source.count("var seen: Dict<i64, bool> = {}" )).to_equal(2)
+        expect(source.count("if not bound_vars.has(id):")).to_equal(1)
+        expect(source.count("if not env_vars.has(id)")).to_equal(2)
+        expect(source.count("if not seen.has(id):")).to_equal(2)
+        expect(source.count("seen[id] = true")).to_equal(2)
+        expect(source.count("to_generalize = to_generalize.push(id)")).to_equal(2)
+        expect(source.contains("scheme.vars.contains(id)")).to_equal(false)
+        expect(source.contains("env_vars.contains(id)")).to_equal(false)
+        expect(source.contains("to_generalize.contains(id)")).to_equal(false)

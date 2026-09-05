@@ -1,0 +1,110 @@
+# Bounded primitive-Nat normalization candidate evidence for FV2.
+#
+# This is intentionally separate from `IndependentReplayClosureV1`: normalizing
+# an export is not replaying a theorem.  The future owner must run an exact
+# independently checked normalizer and then submit the transformed export to the
+# existing independent-kernel lane.  In particular, this schema never enables
+# nanoda's native Nat/String extensions and never produces an accepted replay
+# closure on its own.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+fn _nat_normalizer_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+enum BoundedNatNormalizerOutcomeV1:
+    NotRun
+    Normalized
+    Rejected
+    MissingTool
+    Timeout
+    ToolFailure
+
+impl BoundedNatNormalizerOutcomeV1:
+    fn name() -> text:
+        match self:
+            case NotRun: "not_run"
+            case Normalized: "normalized"
+            case Rejected: "rejected"
+            case MissingTool: "missing_tool"
+            case Timeout: "timeout"
+            case ToolFailure: "tool_failure"
+
+struct BoundedNatNormalizerReceiptV1:
+    schema: text
+    normalizer_name: text
+    normalizer_version: text
+    normalizer_binary_hash: text
+    source_export_hash: text
+    normalized_export_hash: text
+    module_name: text
+    declaration_root: text
+    max_literal_bits: int
+    max_rewrite_steps: int
+    native_extensions_enabled: bool
+    outcome: BoundedNatNormalizerOutcomeV1
+    diagnostic: text
+
+impl BoundedNatNormalizerReceiptV1:
+    # A candidate is well formed only when it declares finite resource bounds
+    # and explicitly keeps native extensions disabled.  It is deliberately not
+    # an accepted proof or replay predicate.
+    fn candidate_diagnostic() -> text:
+        if self.schema != "BoundedNatNormalizerReceipt-v1":
+            return "FV2-E-NAT-NORMALIZER-SCHEMA: unsupported normalizer receipt schema"
+        if self.normalizer_name == "" or self.normalizer_version == "" or
+                not sha256_lower_hex_valid(self.normalizer_binary_hash):
+            return "FV2-E-NAT-NORMALIZER-IDENTITY: normalizer identity is required"
+        # These values cross the exporter/normalizer boundary.  Accepting
+        # arbitrary text here would make this receipt merely a claim about a
+        # label, rather than an identity for two exact byte artifacts.
+        if not sha256_lower_hex_valid(self.source_export_hash) or
+                not sha256_lower_hex_valid(self.normalized_export_hash):
+            return "FV2-E-NAT-NORMALIZER-EXPORT: exact source and normalized export hashes are required"
+        if self.source_export_hash == self.normalized_export_hash:
+            return "FV2-E-NAT-NORMALIZER-IDENTITY-TRANSFORM: normalized export must differ from source export"
+        if self.module_name == "" or self.declaration_root == "":
+            return "FV2-E-NAT-NORMALIZER-ROOT: module and declaration root are required"
+        if self.max_literal_bits <= 0 or self.max_rewrite_steps <= 0:
+            return "FV2-E-NAT-NORMALIZER-BOUNDS: finite positive normalization bounds are required"
+        if self.native_extensions_enabled:
+            return "FV2-E-NAT-NORMALIZER-NATIVE: closed replay forbids native Nat/String extensions"
+        if self.outcome != BoundedNatNormalizerOutcomeV1.Normalized:
+            return "FV2-E-NAT-NORMALIZER-OUTCOME: normalizer did not produce a candidate export"
+        if self.diagnostic != "":
+            return "FV2-E-NAT-NORMALIZER-DIAGNOSTIC: normalized candidate must not carry a diagnostic"
+        ""
+
+    fn is_candidate() -> bool:
+        self.candidate_diagnostic() == ""
+
+    fn canonical_text() -> text:
+        "BoundedNatNormalizerReceiptV1" +
+            _nat_normalizer_frame_v1(self.schema) +
+            _nat_normalizer_frame_v1(self.normalizer_name) +
+            _nat_normalizer_frame_v1(self.normalizer_version) +
+            _nat_normalizer_frame_v1(self.normalizer_binary_hash) +
+            _nat_normalizer_frame_v1(self.source_export_hash) +
+            _nat_normalizer_frame_v1(self.normalized_export_hash) +
+            _nat_normalizer_frame_v1(self.module_name) +
+            _nat_normalizer_frame_v1(self.declaration_root) +
+            _nat_normalizer_frame_v1(self.max_literal_bits.to_string()) +
+            _nat_normalizer_frame_v1(self.max_rewrite_steps.to_string()) +
+            _nat_normalizer_frame_v1(self.native_extensions_enabled.to_string()) +
+            _nat_normalizer_frame_v1(self.outcome.name())
+
+    fn hash() -> text:
+        if not self.is_candidate(): return ""
+        sha256_text(self.canonical_text())
+
+# This deliberately has no conversion to `ReplayCheckerReceiptV1` or
+# `IndependentReplayClosureV1`.  A future adapter must prove/export its own
+# transformation relation and pass the resulting export through the existing
+# independent checker before the replay closure can be constructed.
+fn nat_normalizer_cannot_close_replay_v1(
+    receipt: BoundedNatNormalizerReceiptV1
+) -> text:
+    if receipt.is_candidate():
+        return "FV2-E-NAT-NORMALIZER-NONPROMOTING: a normalized export is not independent replay evidence"
+    receipt.candidate_diagnostic()

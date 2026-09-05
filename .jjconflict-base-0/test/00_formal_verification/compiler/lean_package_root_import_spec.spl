@@ -1,0 +1,33 @@
+# @cover src/compiler_rust/lib/std/src/verification/lean/__init__.spl 60%
+#
+# Regression spec for:
+# doc/08_tracking/bug/verification_lean_init_missing_use_before_export_2026-07-20.md
+#
+# Root cause: verification/lean/__init__.spl re-exported ~150 symbols via bare
+# `export Name1, Name2, ...` lines with no preceding `use` importing those
+# names into __init__.spl's own scope, so package-root imports
+# (`use verification.lean.{X}`) never resolved even though X is a real,
+# fully-defined symbol of a submodule. Direct submodule imports
+# (`use verification.lean.codegen.{X}`) always worked, masking the defect.
+#
+# This spec imports ONLY from the package root (`verification.lean`, not
+# `verification.lean.codegen`) to force resolution through __init__.spl.
+
+use std.spipe.*
+use verification.lean.{LeanCodegenOptions, LeanCodegen, LeanBlock, LeanBlockPlacement}
+
+describe "Lean package-root import (verification.lean.__init__)":
+    it "resolves LeanCodegenOptions via the package root, not a submodule import":
+        var opts = LeanCodegenOptions.new()
+        opts = opts.with_module_name("PackageRootTest")
+        var cgen = LeanCodegen.new(opts)
+
+        val block = LeanBlock.create(
+            "pkgroot.spl", 1,
+            LeanBlockPlacement.ModuleLevel,
+            "theorem pkg_root_ok : True := trivial"
+        )
+        cgen = cgen.add_lean_block(block)
+
+        val output = cgen.emit()
+        expect(output).to_contain("theorem pkg_root_ok")

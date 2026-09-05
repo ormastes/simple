@@ -1,0 +1,69 @@
+#!/bin/sh
+# Stage the checked-in RV32 execution core for the legacy ISA gate.
+#
+# This intentionally does not invoke the generated-product VHDL pipeline.  The
+# gate testbench instantiates only rv32_exec_core, whose canonical source is
+# checked in under examples/.  Requiring an empty target prevents a stale GHDL
+# work library or generated RTL from silently changing what the gate exercises.
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+repo_root=${RISCV_ISA_GATE_REPO_ROOT:-$(CDPATH= cd -- "$script_dir/../.." && pwd -P)}
+core_source="$repo_root/examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd"
+
+if [ "$#" -ne 1 ] || [ -z "$1" ]; then
+    echo "usage: $0 EMPTY_FIXTURE_DIR" >&2
+    exit 2
+fi
+
+fixture_dir=$1
+case "$fixture_dir" in
+    /*) ;;
+    *) fixture_dir="$PWD/$fixture_dir" ;;
+esac
+
+[ -f "$core_source" ] || {
+    echo "ERROR: checked-in RV32 core not found: $core_source" >&2
+    exit 2
+}
+grep -Eq '^[[:space:]]*entity[[:space:]]+rv32_exec_core[[:space:]]+is([[:space:]]|$)' "$core_source" || {
+    echo "ERROR: checked-in RV32 core has no rv32_exec_core entity" >&2
+    exit 2
+}
+grep -Eq '^[[:space:]]*file[[:space:]]+f[[:space:]]*:[[:space:]]*text[[:space:]]+open[[:space:]]+read_mode[[:space:]]+is[[:space:]]+"rv32_payload[.]mem";[[:space:]]*$' "$core_source" || {
+    echo "ERROR: checked-in RV32 core payload-memory contract changed" >&2
+    exit 2
+}
+grep -Eq '^[[:space:]]*file[[:space:]]+f[[:space:]]*:[[:space:]]*text[[:space:]]+open[[:space:]]+read_mode[[:space:]]+is[[:space:]]+"rv32_fat32[.]mem";[[:space:]]*$' "$core_source" || {
+    echo "ERROR: checked-in RV32 core auxiliary-memory contract changed" >&2
+    exit 2
+}
+
+if command -v sha256sum >/dev/null 2>&1; then
+    hash_output=$(sha256sum "$core_source") || {
+        echo "ERROR: could not hash checked-in RV32 core" >&2
+        exit 2
+    }
+elif command -v shasum >/dev/null 2>&1; then
+    hash_output=$(shasum -a 256 "$core_source") || {
+        echo "ERROR: could not hash checked-in RV32 core" >&2
+        exit 2
+    }
+else
+    echo "ERROR: SHA-256 tool not found (need sha256sum or shasum)" >&2
+    exit 2
+fi
+core_sha256=${hash_output%% *}
+
+mkdir -p "$fixture_dir"
+if [ -n "$(find "$fixture_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    echo "ERROR: fixture directory must be empty: $fixture_dir" >&2
+    exit 2
+fi
+
+cp "$core_source" "$fixture_dir/rv32_exec_core.vhd"
+: >"$fixture_dir/rv32_payload.mem"
+: >"$fixture_dir/rv32_fat32.mem"
+
+echo "RISCV_ISA_GATE_FIXTURE: PASS source=checked-in-rv32-exec-core sha256=$core_sha256 dir=$fixture_dir"

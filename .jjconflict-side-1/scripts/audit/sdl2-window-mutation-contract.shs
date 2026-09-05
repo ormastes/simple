@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+provider="$root/src/runtime/runtime_sdl2.c"
+header="$root/src/runtime/runtime.h"
+binding="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+dispatcher="$root/src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs"
+compositor="$root/src/os/compositor/hosted_backend_sdl2.spl"
+failed=0
+
+symbols='set_window_title set_window_resizable set_window_size set_window_position show_window hide_window'
+for symbol in $symbols; do
+    body=$(sed -n "/^bool rt_sdl2_$symbol/,/^}/p" "$provider")
+    if [ -z "$body" ] || ! printf '%s\n' "$body" | grep -q 'return false' ||
+       ! printf '%s\n' "$body" | grep -q 'return true'; then
+        echo "rt_sdl2_$symbol must retain generation-checked boolean status" >&2
+        failed=1
+    fi
+    if ! grep -q "^bool     rt_sdl2_$symbol" "$header" ||
+       ! grep -q "^extern fn rt_sdl2_$symbol.*-> bool" "$binding" ||
+       ! grep -q "(\"rt_sdl2_$symbol\", Ret::B" "$dispatcher"; then
+        echo "rt_sdl2_$symbol ABI declarations must agree on boolean status" >&2
+        failed=1
+    fi
+    if printf '%s\n' "$body" | grep -Eq 'malloc|calloc|realloc|pthread_|mutex|SDL_GetError'; then
+        echo "rt_sdl2_$symbol must remain allocation-, lock-, and extra-query-free" >&2
+        failed=1
+    fi
+done
+
+for wrapper in window_set_title window_set_size window_set_position window_set_visible window_set_resizable; do
+    if grep -B1 "^fn $wrapper" "$binding" | grep -q '^@unsafe'; then
+        echo "$wrapper must expose checked status with lexical FFI authority" >&2
+        failed=1
+    fi
+done
+if ! grep -q 'if not resized:' "$compositor" ||
+   ! grep -q 'rt_sdl2_set_window_size.*-> bool' "$compositor"; then
+    echo "hosted compositor resize must commit local state only after native success" >&2
+    failed=1
+fi
+if ! grep -q '(Ret::B, 2)' "$dispatcher" || ! grep -q '(Ret::B, 3)' "$dispatcher"; then
+    echo "Rust SDL dispatcher must retain typed boolean arity-2/3 thunks" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SDL2 window mutation contract audit: PASS"

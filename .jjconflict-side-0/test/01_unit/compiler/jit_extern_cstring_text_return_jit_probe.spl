@@ -1,0 +1,115 @@
+"""
+# An extern declared `-> text` whose runtime returns `*const c_char` — executable probe
+
+**Category:** Compiler / Cranelift call lowering — runtime SFFI return marshalling
+**Research:** doc/08_tracking/bug/run_path_extern_text_corruption_causes_false_gpu_skip_2026-08-20.md
+
+## Why this is a runnable program and not an sspec `describe`
+
+An sspec body physically cannot execute under the Cranelift JIT — `describe` /
+`it` / `expect` are Rust interpreter intrinsics with no codegen lowering, and a
+spec file has no `fn main`, so the driver routes it to `evaluate_module`
+regardless of `SIMPLE_EXECUTION_MODE`. This was measured for exactly this
+defect: a spec asserting these contracts printed `4 examples, 0 failures` on
+the BROKEN binary, because it never reached the engine that was broken. See
+`doc/07_guide/infra/testing/spec_engine_reach.md` and
+`scripts/check/check-engine-claiming-specs-use-probe.shs`.
+
+Run directly, once per engine:
+
+    SIMPLE_EXECUTION_MODE=interpret <simple> run <this file>
+    SIMPLE_EXECUTION_MODE=jit       <simple> run <this file>
+
+Score the `PROBE VERDICT:` LINE, never the exit code — the broken binary exited
+0 while silently truncating its own output mid-program.
+
+## What it pins
+
+Almost every `rt_*` entry point declared `-> text` returns a tagged
+`RuntimeValue` string, so the JIT could store the returned `i64` verbatim and
+be right. Twelve do not: they return a raw `*const c_char`
+(`rt_vulkan_device_type`, `rt_vulkan_device_name`, `rt_cuda_device_name`,
+`rt_metal_device_name`, ...). Stored verbatim, the pointer's low bits read as
+`TAG_HEAP`, so every consumer treated it as a heap string handle:
+
+    print(t)                  ->  <invalid-heap:0x600570e2fe71>
+    t.len()                   ->  -1     (the corruption sentinel, not 0)
+    t == "discrete"           ->  false  on a genuinely discrete device
+    print("prefix-" + t)      ->  an empty line, swallowing the literal too
+
+The tree-walking interpreter was always correct (it decodes through
+`interpreter_extern/vulkan.rs::text_from_ptr`), so `bin/simple test` reported
+`len=8` / `true` for the same source `bin/simple run` corrupted. That asymmetry
+is why it survived: a GPU capability probe on the `run` path degraded to a
+`skip:`, and the established spec idiom records a `skip:` as a PASS.
+
+Fixed by decoding the return through `rt_cstring_to_text` in the Cranelift call
+lowering (`src/compiler_rust/compiler/src/codegen/instr/calls.rs`), with that
+helper promoted to a codegen root so it is always declared.
+
+## Host independence
+
+The checks hold with or without a Vulkan device and with or without the seed's
+`vulkan` feature: a build without it returns an empty C string, so the honest
+answer is length 0. What is pinned is that the value is a VALID STRING AT ALL —
+never the -1 sentinel — and that concatenation keeps its literal prefix. The
+`PROBE LEN:` line reports the observed length outside the pass/fail count. It
+reads 0 here because this probe deliberately does not initialise Vulkan (that
+would make it host-dependent); on a `vulkan`-feature build that first calls
+`vulkan_sffi_init()`, the same value reads 8 (`"discrete"`) — measured
+2026-08-20 on an RTX A6000 host, `len=8  discrete=true` for the inline, the
+cross-parameter, and the concatenated shapes alike.
+"""
+
+extern fn rt_vulkan_device_type(id: i64) -> text
+extern fn rt_vulkan_device_name(id: i64) -> text
+
+var failures = 0
+
+fn check_bool(name: text, got: bool, want: bool) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + got.to_text() + ", want " + want.to_text() + ")")
+        failures = failures + 1
+
+fn check_i64(name: text, got: i64, want: i64) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + got.to_text() + ", want " + want.to_text() + ")")
+        failures = failures + 1
+
+# Receiver via PARAMETER: the shape the bug report singled out as diverging
+# from the inline shape.
+fn length_of(t: text) -> i64:
+    t.len()
+
+fn main() -> void:
+    print("extern c_char -> text decode probe")
+
+    val ty = rt_vulkan_device_type(0)
+    check_bool("device_type len is not the -1 corruption sentinel", ty.len() == -1, false)
+    check_bool("device_type len is non-negative", ty.len() >= 0, true)
+    check_i64("device_type len across a parameter boundary", length_of(ty), ty.len())
+
+    # Concatenation used to collapse the WHOLE expression, discarding the
+    # literal prefix as well as the extern's value.
+    val joined = "prefix-" + rt_vulkan_device_type(0)
+    check_bool("literal prefix survives concatenation", joined.starts_with("prefix-"), true)
+    check_i64("concat length is prefix + value", joined.len(), 7 + ty.len())
+
+    # A second member of the same *const c_char family, to prove the fix is
+    # not a one-symbol special case.
+    val nm = rt_vulkan_device_name(0)
+    check_bool("device_name len is not the -1 sentinel", nm.len() == -1, false)
+    check_i64("device_name len across a parameter boundary", length_of(nm), nm.len())
+
+    if failures == 0:
+        print("PROBE VERDICT: PASS")
+    else:
+        print("PROBE VERDICT: FAIL (" + failures.to_text() + " checks wrong)")
+
+    # Outside the pass/fail count: 0 on a build without the `vulkan` feature,
+    # 8 ("discrete") on a Vulkan-enabled build with a discrete GPU at ordinal 0.
+    print("PROBE LEN: " + ty.len().to_text())

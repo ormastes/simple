@@ -1,0 +1,159 @@
+# ============================================================================
+# compiler/70.backend/linker/gpu_smf/smf_link_attributes.spl — SmfLinkProfile
+# `attributes` u64 bit layout (FROZEN, schema v1, Lane ATTR)
+#
+# Contract document:
+# doc/05_design/platform/structural_compute/link_manager_contract_v1.md §6 —
+# the "SmfLinkProfile record `attributes` bit assignments" item is frozen
+# HERE (schema SMF_LINK_ATTR_SCHEMA_VERSION = 1). The layout covers exactly
+# what `SmfWriterSymbol` (smf_writer.spl:137) actually carries today.
+#
+# Bit layout (schema v1, low bits first):
+#
+#   bit 0      defined               1 = this module provides a body
+#   bits 1-2   binding               0 Local · 1 Global · 2 Weak ·
+#                                    3 = unknown discriminant (hard reject)
+#   bits 3-4   sym_type              0 NoType · 1 Function · 2 Object ·
+#                                    3 Section
+#   bits 5-6   layout_phase          0 startup · 1 first_frame · 2 steady ·
+#                                    3 cold
+#   bit 7      is_event_loop_anchor  1 = event-loop anchor symbol
+#   bit 8      layout_pinned         1 = layout-pinned symbol
+#   bits 9-63  reserved              must encode as 0; any set bit is a
+#                                    hard decode reject
+#
+# Discipline (mirrors the frozen resolve wire codec, resolve_codec.spl /
+# structural/wire.spl):
+#   - The ENCODER masks each field to its frozen width — same trust-the-
+#     in-memory-record discipline as `wire_put_u8` writing `status` u32.
+#   - The DECODER is TOTAL and hard-rejects (ok = false, never a partial
+#     value): any reserved bit set, or the unknown binding discriminant 3.
+#     Result carrier is an explicit `ok: bool` struct (resolve_codec.spl
+#     result-carrier style), not an Option.
+#   - Schema evolution: any bit reassignment bumps
+#     SMF_LINK_ATTR_SCHEMA_VERSION and adds new golden values — existing
+#     spec goldens are never edited in place (contract §5 rule applied to
+#     this schema).
+#
+# In-memory carrier fields are u32/bool scalars — never u8 struct fields
+# (repo rule). Composition only: plain value structs + free functions.
+# ============================================================================
+
+val SMF_LINK_ATTR_SCHEMA_VERSION: u32 = 1
+
+# ----------------------------------------------------------------------------
+# Bit constants (schema v1). Masks are the already-shifted bit ranges.
+# ----------------------------------------------------------------------------
+
+val SMF_LINK_ATTR_DEFINED_BIT: u64 = 0x1
+val SMF_LINK_ATTR_BINDING_SHIFT: u64 = 1
+val SMF_LINK_ATTR_BINDING_MASK: u64 = 0x6
+val SMF_LINK_ATTR_SYM_TYPE_SHIFT: u64 = 3
+val SMF_LINK_ATTR_SYM_TYPE_MASK: u64 = 0x18
+val SMF_LINK_ATTR_LAYOUT_PHASE_SHIFT: u64 = 5
+val SMF_LINK_ATTR_LAYOUT_PHASE_MASK: u64 = 0x60
+val SMF_LINK_ATTR_EVENT_LOOP_ANCHOR_BIT: u64 = 0x80
+val SMF_LINK_ATTR_LAYOUT_PINNED_BIT: u64 = 0x100
+
+# Every known bit of schema v1. A valid attributes word satisfies
+# `(attributes & SMF_LINK_ATTR_KNOWN_MASK) == attributes`.
+val SMF_LINK_ATTR_KNOWN_MASK: u64 = 0x1FF
+
+# ----------------------------------------------------------------------------
+# Field discriminants — in-memory u32 codes, numerically identical to the
+# 2-bit field values above (binding 3 is deliberately absent: it is the
+# hard-rejected unknown discriminant).
+# ----------------------------------------------------------------------------
+
+val SMF_LINK_BINDING_LOCAL: u32 = 0
+val SMF_LINK_BINDING_GLOBAL: u32 = 1
+val SMF_LINK_BINDING_WEAK: u32 = 2
+
+val SMF_LINK_SYM_TYPE_NOTYPE: u32 = 0
+val SMF_LINK_SYM_TYPE_FUNCTION: u32 = 1
+val SMF_LINK_SYM_TYPE_OBJECT: u32 = 2
+val SMF_LINK_SYM_TYPE_SECTION: u32 = 3
+
+val SMF_LINK_LAYOUT_PHASE_STARTUP: u32 = 0
+val SMF_LINK_LAYOUT_PHASE_FIRST_FRAME: u32 = 1
+val SMF_LINK_LAYOUT_PHASE_STEADY: u32 = 2
+val SMF_LINK_LAYOUT_PHASE_COLD: u32 = 3
+
+# ----------------------------------------------------------------------------
+# Field carrier + total-decode result carrier
+# ----------------------------------------------------------------------------
+
+struct SmfLinkAttrFields:
+    """In-memory attribute fields (u32/bool scalars, never u8). `binding`,
+    `sym_type` and `layout_phase` hold the SMF_LINK_* codes above."""
+    defined: bool
+    binding: u32
+    sym_type: u32
+    layout_phase: u32
+    is_event_loop_anchor: bool
+    layout_pinned: bool
+
+struct SmfLinkAttrDecodeResult:
+    """Explicit-ok result carrier (resolve_codec.spl style). When `ok` is
+    false, `value` is the all-zero fields and must not be read."""
+    ok: bool
+    value: SmfLinkAttrFields
+
+fn smf_link_attr_fields_zero() -> SmfLinkAttrFields:
+    """All-zero fields: undefined, Local, NoType, startup, no flags."""
+    SmfLinkAttrFields(
+        defined: false,
+        binding: SMF_LINK_BINDING_LOCAL,
+        sym_type: SMF_LINK_SYM_TYPE_NOTYPE,
+        layout_phase: SMF_LINK_LAYOUT_PHASE_STARTUP,
+        is_event_loop_anchor: false,
+        layout_pinned: false)
+
+# ----------------------------------------------------------------------------
+# Encode — fields -> u64 attributes (schema v1)
+# ----------------------------------------------------------------------------
+
+fn smf_link_attributes_encode(f: SmfLinkAttrFields) -> u64:
+    """Pack `f` into the schema-v1 u64. Each multi-bit field is masked to
+    its frozen width (encoder discipline, see header) — an out-of-range
+    in-memory code can therefore alias, exactly as `wire_put_u8` truncates
+    a u32 `status`; the decoder side is where unknowns are hard-rejected.
+    All reserved bits (9-63) are always emitted as 0."""
+    var v: u64 = 0
+    if f.defined:
+        v = v | SMF_LINK_ATTR_DEFINED_BIT
+    v = v | (((f.binding as u64) << SMF_LINK_ATTR_BINDING_SHIFT) & SMF_LINK_ATTR_BINDING_MASK)
+    v = v | (((f.sym_type as u64) << SMF_LINK_ATTR_SYM_TYPE_SHIFT) & SMF_LINK_ATTR_SYM_TYPE_MASK)
+    v = v | (((f.layout_phase as u64) << SMF_LINK_ATTR_LAYOUT_PHASE_SHIFT) & SMF_LINK_ATTR_LAYOUT_PHASE_MASK)
+    if f.is_event_loop_anchor:
+        v = v | SMF_LINK_ATTR_EVENT_LOOP_ANCHOR_BIT
+    if f.layout_pinned:
+        v = v | SMF_LINK_ATTR_LAYOUT_PINNED_BIT
+    v
+
+# ----------------------------------------------------------------------------
+# Decode — TOTAL field extractor (hard-reject, never partial)
+# ----------------------------------------------------------------------------
+
+fn smf_link_attributes_decode(attributes: u64) -> SmfLinkAttrDecodeResult:
+    """Total extractor for every schema-v1 field. Hard-rejects (ok = false):
+      - any reserved bit (9-63) set — unknown future schema bits are never
+        silently dropped;
+      - binding discriminant 3 — a known bit range holding an unknown value
+        (contract §3 discipline: unknown = hard reject).
+    All other 9-bit words decode; sym_type and layout_phase have all four
+    2-bit values assigned, so they cannot reject."""
+    if (attributes & SMF_LINK_ATTR_KNOWN_MASK) != attributes:
+        return SmfLinkAttrDecodeResult(ok: false, value: smf_link_attr_fields_zero())
+    val binding = ((attributes & SMF_LINK_ATTR_BINDING_MASK) >> SMF_LINK_ATTR_BINDING_SHIFT) as u32
+    if binding > SMF_LINK_BINDING_WEAK:
+        return SmfLinkAttrDecodeResult(ok: false, value: smf_link_attr_fields_zero())
+    val sym_type = ((attributes & SMF_LINK_ATTR_SYM_TYPE_MASK) >> SMF_LINK_ATTR_SYM_TYPE_SHIFT) as u32
+    val layout_phase = ((attributes & SMF_LINK_ATTR_LAYOUT_PHASE_MASK) >> SMF_LINK_ATTR_LAYOUT_PHASE_SHIFT) as u32
+    SmfLinkAttrDecodeResult(ok: true, value: SmfLinkAttrFields(
+        defined: (attributes & SMF_LINK_ATTR_DEFINED_BIT) != 0,
+        binding: binding,
+        sym_type: sym_type,
+        layout_phase: layout_phase,
+        is_event_loop_anchor: (attributes & SMF_LINK_ATTR_EVENT_LOOP_ANCHOR_BIT) != 0,
+        layout_pinned: (attributes & SMF_LINK_ATTR_LAYOUT_PINNED_BIT) != 0))

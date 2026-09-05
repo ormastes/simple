@@ -1,0 +1,46 @@
+# Native Backend - Section Byte Collection Helper
+#
+# Shared helper for collecting rodata / data bytes from a module's data_sections.
+# Used by both ELF and Mach-O emission modules to avoid duplicated loops.
+
+use compiler.backend.native.mach_inst.{DataEntry}
+
+struct NativeDataLayout:
+    bytes: [i64]
+    offsets: Dict<text, i64>
+    max_alignment: i64
+
+fn native_data_alignment_valid(alignment: i64) -> bool:
+    if alignment <= 0: return false
+    var remaining = alignment
+    while remaining > 1:
+        if remaining % 2 != 0: return false
+        remaining = remaining / 2
+    true
+
+fn solve_native_data_layout(data_sections: [DataEntry], readonly: bool) -> NativeDataLayout:
+    """Lay out one native object section once, including inter-object padding."""
+    var bytes: [i64] = []
+    var offsets: Dict<text, i64> = {}
+    var max_alignment = 1
+    for entry in data_sections:
+        if entry.is_readonly == readonly:
+            val alignment = if entry.alignment > 0: entry.alignment else: 1
+            if not native_data_alignment_valid(alignment):
+                panic("native data symbol '{entry.name}' has non-power-of-two alignment {alignment}")
+            if alignment > max_alignment: max_alignment = alignment
+            val remainder = bytes.len() % alignment
+            if remainder != 0:
+                val padding = alignment - remainder
+                for _ in 0..padding: bytes.push(0)
+            if offsets.contains(entry.name):
+                panic("duplicate native data symbol '{entry.name}'")
+            offsets[entry.name] = bytes.len()
+            for byte in entry.data: bytes.push(byte)
+    NativeDataLayout(bytes: bytes, offsets: offsets, max_alignment: max_alignment)
+
+fn collect_section_bytes(data_sections: [DataEntry], readonly: bool) -> [i64]:
+    """Concatenate the .data of every section matching the `readonly` flag."""
+    solve_native_data_layout(data_sections, readonly).bytes
+
+export NativeDataLayout, native_data_alignment_valid, solve_native_data_layout, collect_section_bytes

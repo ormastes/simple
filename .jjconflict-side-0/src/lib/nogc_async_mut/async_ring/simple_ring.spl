@@ -1,0 +1,530 @@
+# codex-impl
+# Fixed-capacity, single-owner reference ring.  All mutable storage is
+# allocated during create; the three queues contain slot indices only.
+
+use std.common.contracts.execution.simple_ring_async_v1.{
+    RingGeneration, RingToken, RingTerminalKind, RingCompletion,
+    RingPayloadOwnership, RingPayloadLease, RingOperationMetadata,
+    ring_payload_lease_validate, ring_operation_metadata_validate
+}
+
+const SIMPLE_RING_U64_MAX: u64 = 18446744073709551615u64
+
+pub enum RingSlotState:
+    Empty
+    Reserved
+    Committed
+    InFlight
+    Terminal
+
+pub enum SimpleRingError:
+    InvalidCapacity
+    Full
+    InvalidRingId
+    InvalidOwner
+    WrongOwner
+    UnknownToken
+    StaleToken
+    InvalidReservation
+    InvalidTransition
+    AlreadyCommitted
+    NotCommitted
+    NotInFlight
+    TerminalAlreadyPublished
+    CancellationAlreadyRequested
+    CancellationRequired
+    InvalidPayloadLease
+    InvalidOperationMetadata
+    InvalidTimestamp
+    CompletionQueueFull
+    GenerationExhausted
+
+pub struct RingReservation:
+    token: RingToken
+    owner_id: u64
+    task_key: u64
+
+pub struct RingSubmission<Op>:
+    token: RingToken
+    task_key: u64
+    payload_lease: RingPayloadLease
+    metadata: RingOperationMetadata
+    cancel_requested: bool
+    operation: Op
+
+pub enum RingBatchPolicy:
+    AllOrNothing
+
+pub struct RingBatchCommitReceipt:
+    committed: u64
+    policy: RingBatchPolicy
+
+pub enum RingCancelOutcome:
+    CancelledBeforeCommit(RingToken)
+    ProviderCancelRequested(RingToken)
+    AlreadyTerminal(RingToken)
+    UnknownOrStale(RingToken)
+    CancelRejected(SimpleRingError)
+
+pub struct RingResetReceipt:
+    ring_id: u64
+    invalidated: u64
+    stale_completions: u64
+
+pub struct RingTelemetry:
+    occupancy: u64
+    high_water: u64
+    full_events: u64
+    reservations: u64
+    releases: u64
+    commits: u64
+    batches: u64
+    batch_items: u64
+    provider_takes: u64
+    completions: u64
+    cancellations: u64
+    stale_rejects: u64
+    duplicate_rejects: u64
+    completion_latency_samples: u64
+    completion_latency_total: u64
+    completion_latency_max: u64
+
+class SimpleRing<Op, Cpl>:
+    ring_id: u64
+    owner_id: u64
+    capacity: i64
+    states: [RingSlotState]
+    generations: [u64]
+    slot_owners: [u64]
+    task_keys: [u64]
+    payload_leases: [RingPayloadLease?]
+    operation_metadata: [RingOperationMetadata?]
+    cancel_requested: [bool]
+    operations: [Op?]
+    completion_kinds: [RingTerminalKind]
+    completion_values: [Cpl?]
+    completion_errors: [text]
+    provider_started_at: [u64]
+    free_indices: [i64]
+    free_head: i64
+    free_tail: i64
+    free_count: i64
+    submission_indices: [i64]
+    submission_head: i64
+    submission_tail: i64
+    submission_count: i64
+    completion_indices: [i64]
+    completion_head: i64
+    completion_tail: i64
+    completion_count: i64
+    telemetry_value: RingTelemetry
+
+impl SimpleRing<Op, Cpl>:
+    static fn create(ring_id: u64, owner_id: u64, capacity: i64) -> Result<SimpleRing<Op, Cpl>, SimpleRingError>:
+        if ring_id == 0u64:
+            return Err(SimpleRingError.InvalidRingId)
+        if owner_id == 0u64:
+            return Err(SimpleRingError.InvalidOwner)
+        if capacity <= 0:
+            return Err(SimpleRingError.InvalidCapacity)
+        var states: [RingSlotState] = []
+        var generations: [u64] = []
+        var slot_owners: [u64] = []
+        var task_keys: [u64] = []
+        var payload_leases: [RingPayloadLease?] = []
+        var operation_metadata: [RingOperationMetadata?] = []
+        var cancel_requested: [bool] = []
+        var operations: [Op?] = []
+        var completion_kinds: [RingTerminalKind] = []
+        var completion_values: [Cpl?] = []
+        var completion_errors: [text] = []
+        var provider_started_at: [u64] = []
+        var free_indices: [i64] = []
+        var submission_indices: [i64] = []
+        var completion_indices: [i64] = []
+        var index = 0
+        while index < capacity:
+            states.push(RingSlotState.Empty)
+            generations.push(1u64)
+            slot_owners.push(0u64)
+            task_keys.push(0u64)
+            payload_leases.push(nil)
+            operation_metadata.push(nil)
+            cancel_requested.push(false)
+            operations.push(nil)
+            completion_kinds.push(RingTerminalKind.Cancelled)
+            completion_values.push(nil)
+            completion_errors.push("")
+            provider_started_at.push(0u64)
+            free_indices.push(index)
+            submission_indices.push(0)
+            completion_indices.push(0)
+            index = index + 1
+        Ok(SimpleRing(
+            ring_id: ring_id, owner_id: owner_id, capacity: capacity,
+            states: states, generations: generations, slot_owners: slot_owners,
+            task_keys: task_keys, payload_leases: payload_leases,
+            operation_metadata: operation_metadata,
+            cancel_requested: cancel_requested, operations: operations,
+            completion_kinds: completion_kinds, completion_values: completion_values,
+            completion_errors: completion_errors, provider_started_at: provider_started_at,
+            free_indices: free_indices,
+            free_head: 0, free_tail: 0, free_count: capacity,
+            submission_indices: submission_indices, submission_head: 0,
+            submission_tail: 0, submission_count: 0,
+            completion_indices: completion_indices, completion_head: 0,
+            completion_tail: 0, completion_count: 0,
+            telemetry_value: RingTelemetry(occupancy: 0u64, high_water: 0u64,
+                full_events: 0u64, reservations: 0u64, releases: 0u64,
+                commits: 0u64, batches: 0u64, batch_items: 0u64,
+                provider_takes: 0u64, completions: 0u64,
+                cancellations: 0u64, stale_rejects: 0u64, duplicate_rejects: 0u64,
+                completion_latency_samples: 0u64, completion_latency_total: 0u64,
+                completion_latency_max: 0u64)
+        ))
+
+    me reserve(owner_id: u64, task_key: u64) -> Result<RingReservation, SimpleRingError>:
+        self.reserve_with_payload(owner_id, task_key, RingPayloadLease(
+            ownership: RingPayloadOwnership.CallerOwned, owner_id: owner_id,
+            handle: 0u64, generation: RingGeneration(value: 1u64), byte_length: 0u64))
+
+    me reserve_with_payload(owner_id: u64, task_key: u64, payload_lease: RingPayloadLease) -> Result<RingReservation, SimpleRingError>:
+        if owner_id != self.owner_id:
+            return Err(SimpleRingError.WrongOwner)
+        if payload_lease.owner_id != owner_id or not ring_payload_lease_validate(payload_lease).ok:
+            return Err(SimpleRingError.InvalidPayloadLease)
+        self.reserve_with_metadata(owner_id, RingOperationMetadata(
+            resource_handle: 0u64, task_key: task_key, priority: 0,
+            deadline: 0u64, dependency_value: 0u64, flags: 0u64,
+            payload_lease: payload_lease, trace_id: task_key))
+
+    me reserve_with_metadata(owner_id: u64, metadata: RingOperationMetadata) -> Result<RingReservation, SimpleRingError>:
+        if owner_id != self.owner_id:
+            return Err(SimpleRingError.WrongOwner)
+        if metadata.payload_lease.owner_id != owner_id or
+           not ring_operation_metadata_validate(metadata).ok:
+            return Err(SimpleRingError.InvalidOperationMetadata)
+        if self.free_count == 0:
+            self.telemetry_value.full_events = _ring_next_counter(self.telemetry_value.full_events)
+            return Err(SimpleRingError.Full)
+        val slot = self._free_pop()
+        self.states[slot] = RingSlotState.Reserved
+        self.slot_owners[slot] = owner_id
+        self.task_keys[slot] = metadata.task_key
+        self.payload_leases[slot] = metadata.payload_lease
+        self.operation_metadata[slot] = metadata
+        self.cancel_requested[slot] = false
+        self.operations[slot] = nil
+        self.completion_values[slot] = nil
+        self.completion_errors[slot] = ""
+        self.provider_started_at[slot] = 0u64
+        self.telemetry_value.reservations = _ring_next_counter(self.telemetry_value.reservations)
+        self._occupancy_changed()
+        Ok(RingReservation(token: self._token_for(slot), owner_id: owner_id, task_key: metadata.task_key))
+
+    # The caller owns task_keys/operations; the ring allocates no batch list.
+    # Prevalidation makes admission all-or-nothing before any slot is changed.
+    me commit_batch(owner_id: u64, task_keys: [u64], operations: [Op], policy: RingBatchPolicy) -> Result<RingBatchCommitReceipt, SimpleRingError>:
+        if owner_id != self.owner_id:
+            return Err(SimpleRingError.WrongOwner)
+        if task_keys.len() == 0 or task_keys.len() != operations.len():
+            return Err(SimpleRingError.InvalidReservation)
+        if task_keys.len() > self.free_count:
+            self.telemetry_value.full_events = _ring_next_counter(self.telemetry_value.full_events)
+            return Err(SimpleRingError.Full)
+        for task_key in task_keys:
+            if task_key == 0u64:
+                return Err(SimpleRingError.InvalidReservation)
+        var index = 0
+        while index < task_keys.len():
+            val reservation = match self.reserve(owner_id, task_keys[index]):
+                case Ok(value): value
+                case Err(error): return Err(error)
+            match self.commit(owner_id, reservation, operations[index]):
+                case Ok(_): ()
+                case Err(error): return Err(error)
+            index = index + 1
+        self.telemetry_value.batches = _ring_next_counter(self.telemetry_value.batches)
+        self.telemetry_value.batch_items = _ring_add_counter(
+            self.telemetry_value.batch_items, task_keys.len().to_u64())
+        Ok(RingBatchCommitReceipt(committed: task_keys.len().to_u64(), policy: policy))
+
+    me release(owner_id: u64, reservation: RingReservation) -> Result<(), SimpleRingError>:
+        val slot_result = self._reservation_slot(owner_id, reservation)
+        match slot_result:
+            case Err(error): Err(error)
+            case Ok(slot):
+                self._release_slot(slot)
+                self.telemetry_value.releases = _ring_next_counter(self.telemetry_value.releases)
+                Ok(())
+
+    me commit(owner_id: u64, reservation: RingReservation, operation: Op) -> Result<RingToken, SimpleRingError>:
+        val slot_result = self._reservation_slot(owner_id, reservation)
+        match slot_result:
+            case Err(error): Err(error)
+            case Ok(slot):
+                self.operations[slot] = operation
+                self.states[slot] = RingSlotState.Committed
+                self.submission_indices[self.submission_tail] = slot
+                self.submission_tail = self._advance(self.submission_tail)
+                self.submission_count = self.submission_count + 1
+                self.telemetry_value.commits = _ring_next_counter(self.telemetry_value.commits)
+                Ok(self._token_for(slot))
+
+    me provider_take(maximum: i64) -> Result<RingSubmission<Op>?, SimpleRingError>:
+        self.provider_take_at(maximum, 0u64)
+
+    me provider_take_at(maximum: i64, started_at: u64) -> Result<RingSubmission<Op>?, SimpleRingError>:
+        if maximum <= 0:
+            return Err(SimpleRingError.InvalidCapacity)
+        if self.submission_count == 0:
+            return Ok(nil)
+        val slot = self.submission_indices[self.submission_head]
+        self.submission_head = self._advance(self.submission_head)
+        self.submission_count = self.submission_count - 1
+        if self.states[slot] != RingSlotState.Committed:
+            return Err(SimpleRingError.NotCommitted)
+        if val operation = self.operations[slot]:
+            val payload_lease = if val lease = self.payload_leases[slot]:
+                lease
+            else:
+                return Err(SimpleRingError.InvalidPayloadLease)
+            val metadata = if val item = self.operation_metadata[slot]:
+                item
+            else:
+                return Err(SimpleRingError.InvalidOperationMetadata)
+            self.states[slot] = RingSlotState.InFlight
+            self.provider_started_at[slot] = started_at
+            self.telemetry_value.provider_takes = _ring_next_counter(self.telemetry_value.provider_takes)
+            return Ok(RingSubmission(token: self._token_for(slot), task_key: self.task_keys[slot],
+                payload_lease: payload_lease, metadata: metadata,
+                cancel_requested: self.cancel_requested[slot],
+                operation: operation))
+        Err(SimpleRingError.InvalidTransition)
+
+    me complete_success(token: RingToken, value: Cpl) -> Result<(), SimpleRingError>:
+        self._complete(token, RingTerminalKind.Success, value, "", 0u64)
+
+    me complete_success_at(token: RingToken, value: Cpl, completed_at: u64) -> Result<(), SimpleRingError>:
+        self._complete(token, RingTerminalKind.Success, value, "", completed_at)
+
+    me complete_failure(token: RingToken, error: text) -> Result<(), SimpleRingError>:
+        if error.trim() == "":
+            return Err(SimpleRingError.InvalidTransition)
+        self._complete(token, RingTerminalKind.Failure, nil, error, 0u64)
+
+    me complete_failure_at(token: RingToken, error: text, completed_at: u64) -> Result<(), SimpleRingError>:
+        if error.trim() == "":
+            return Err(SimpleRingError.InvalidTransition)
+        self._complete(token, RingTerminalKind.Failure, nil, error, completed_at)
+
+    me complete_cancelled(token: RingToken, reason: text) -> Result<(), SimpleRingError>:
+        if reason.trim() == "":
+            return Err(SimpleRingError.InvalidTransition)
+        self._complete(token, RingTerminalKind.Cancelled, nil, reason, 0u64)
+
+    me complete_cancelled_at(token: RingToken, reason: text, completed_at: u64) -> Result<(), SimpleRingError>:
+        if reason.trim() == "":
+            return Err(SimpleRingError.InvalidTransition)
+        self._complete(token, RingTerminalKind.Cancelled, nil, reason, completed_at)
+
+    me take_completion(owner_id: u64) -> Result<RingCompletion<Cpl>?, SimpleRingError>:
+        if owner_id != self.owner_id:
+            return Err(SimpleRingError.WrongOwner)
+        if self.completion_count == 0:
+            return Ok(nil)
+        val slot = self.completion_indices[self.completion_head]
+        self.completion_head = self._advance(self.completion_head)
+        self.completion_count = self.completion_count - 1
+        if self.states[slot] != RingSlotState.Terminal:
+            return Err(SimpleRingError.InvalidTransition)
+        val completion = RingCompletion<Cpl>(token: self._token_for(slot),
+            task_key: self.task_keys[slot], kind: self.completion_kinds[slot],
+            value: self.completion_values[slot], error: self.completion_errors[slot])
+        val release_result = self._release_slot(slot)
+        match release_result:
+            case Ok(_): Ok(completion)
+            case Err(error): Err(error)
+
+    me cancel(owner_id: u64, token: RingToken) -> RingCancelOutcome:
+        if owner_id != self.owner_id:
+            return RingCancelOutcome.CancelRejected(SimpleRingError.WrongOwner)
+        val token_result = self._token_slot(token)
+        match token_result:
+            case Err(_): RingCancelOutcome.UnknownOrStale(token)
+            case Ok(slot):
+                match self.states[slot]:
+                    case RingSlotState.Reserved:
+                        val release_result = self._release_slot(slot)
+                        match release_result:
+                            case Ok(_):
+                                self.telemetry_value.cancellations = _ring_next_counter(self.telemetry_value.cancellations)
+                                RingCancelOutcome.CancelledBeforeCommit(token)
+                            case Err(error): RingCancelOutcome.CancelRejected(error)
+                    case RingSlotState.Committed:
+                        self._request_provider_cancel(slot, token)
+                    case RingSlotState.InFlight:
+                        self._request_provider_cancel(slot, token)
+                    case RingSlotState.Terminal: RingCancelOutcome.AlreadyTerminal(token)
+                    case RingSlotState.Empty: RingCancelOutcome.UnknownOrStale(token)
+
+    me reset(owner_id: u64) -> Result<RingResetReceipt, SimpleRingError>:
+        if owner_id != self.owner_id:
+            return Err(SimpleRingError.WrongOwner)
+        var index = 0
+        while index < self.capacity:
+            if self.generations[index] == SIMPLE_RING_U64_MAX:
+                return Err(SimpleRingError.GenerationExhausted)
+            index = index + 1
+        var invalidated = 0u64
+        index = 0
+        while index < self.capacity:
+            if self.states[index] != RingSlotState.Empty:
+                invalidated = invalidated + 1u64
+            self.states[index] = RingSlotState.Empty
+            self.generations[index] = self.generations[index] + 1u64
+            self.slot_owners[index] = 0u64
+            self.task_keys[index] = 0u64
+            self.payload_leases[index] = nil
+            self.operation_metadata[index] = nil
+            self.cancel_requested[index] = false
+            self.operations[index] = nil
+            self.completion_values[index] = nil
+            self.completion_errors[index] = ""
+            self.provider_started_at[index] = 0u64
+            self.free_indices[index] = index
+            index = index + 1
+        self.free_head = 0
+        self.free_tail = 0
+        self.free_count = self.capacity
+        self.submission_head = 0
+        self.submission_tail = 0
+        self.submission_count = 0
+        self.completion_head = 0
+        self.completion_tail = 0
+        self.completion_count = 0
+        self.telemetry_value.occupancy = 0u64
+        Ok(RingResetReceipt(ring_id: self.ring_id, invalidated: invalidated,
+            stale_completions: self.telemetry_value.stale_rejects))
+
+    fn occupancy() -> u64: self.telemetry_value.occupancy
+    fn capacity_value() -> i64: self.capacity
+    fn high_water() -> u64: self.telemetry_value.high_water
+    fn is_full() -> bool: self.free_count == 0
+    fn telemetry() -> RingTelemetry: self.telemetry_value
+
+    me _complete(token: RingToken, kind: RingTerminalKind, value: Cpl?, error: text, completed_at: u64) -> Result<(), SimpleRingError>:
+        val token_result = self._token_slot(token)
+        match token_result:
+            case Err(error): Err(error)
+            case Ok(slot):
+                if self.states[slot] == RingSlotState.Terminal:
+                    self.telemetry_value.duplicate_rejects = _ring_next_counter(self.telemetry_value.duplicate_rejects)
+                    return Err(SimpleRingError.TerminalAlreadyPublished)
+                if self.states[slot] != RingSlotState.InFlight:
+                    return Err(SimpleRingError.NotInFlight)
+                if self.cancel_requested[slot] and kind != RingTerminalKind.Cancelled:
+                    return Err(SimpleRingError.CancellationRequired)
+                if completed_at != 0u64 and (self.provider_started_at[slot] == 0u64 or
+                   completed_at < self.provider_started_at[slot]):
+                    return Err(SimpleRingError.InvalidTimestamp)
+                if self.completion_count == self.capacity:
+                    return Err(SimpleRingError.CompletionQueueFull)
+                self.completion_kinds[slot] = kind
+                self.completion_values[slot] = value
+                self.completion_errors[slot] = error
+                self.states[slot] = RingSlotState.Terminal
+                self.completion_indices[self.completion_tail] = slot
+                self.completion_tail = self._advance(self.completion_tail)
+                self.completion_count = self.completion_count + 1
+                self.telemetry_value.completions = _ring_next_counter(self.telemetry_value.completions)
+                if completed_at != 0u64:
+                    val latency = completed_at - self.provider_started_at[slot]
+                    self.telemetry_value.completion_latency_samples = _ring_next_counter(
+                        self.telemetry_value.completion_latency_samples)
+                    self.telemetry_value.completion_latency_total = _ring_add_counter(
+                        self.telemetry_value.completion_latency_total, latency)
+                    if latency > self.telemetry_value.completion_latency_max:
+                        self.telemetry_value.completion_latency_max = latency
+                Ok(())
+
+    me _reservation_slot(owner_id: u64, reservation: RingReservation) -> Result<i64, SimpleRingError>:
+        if owner_id != self.owner_id or reservation.owner_id != self.owner_id:
+            return Err(SimpleRingError.WrongOwner)
+        val token_result = self._token_slot(reservation.token)
+        match token_result:
+            case Err(error): Err(error)
+            case Ok(slot):
+                if self.states[slot] != RingSlotState.Reserved:
+                    return Err(SimpleRingError.InvalidReservation)
+                if self.slot_owners[slot] != owner_id or self.task_keys[slot] != reservation.task_key:
+                    return Err(SimpleRingError.InvalidReservation)
+                Ok(slot)
+
+    me _token_slot(token: RingToken) -> Result<i64, SimpleRingError>:
+        if token.ring_id != self.ring_id:
+            self.telemetry_value.stale_rejects = _ring_next_counter(self.telemetry_value.stale_rejects)
+            return Err(SimpleRingError.UnknownToken)
+        val slot = token.slot.to_i64()
+        if slot < 0 or slot >= self.capacity:
+            self.telemetry_value.stale_rejects = _ring_next_counter(self.telemetry_value.stale_rejects)
+            return Err(SimpleRingError.UnknownToken)
+        if token.generation.value != self.generations[slot]:
+            self.telemetry_value.stale_rejects = _ring_next_counter(self.telemetry_value.stale_rejects)
+            return Err(SimpleRingError.StaleToken)
+        Ok(slot)
+
+    me _release_slot(slot: i64) -> Result<(), SimpleRingError>:
+        if self.generations[slot] == SIMPLE_RING_U64_MAX:
+            return Err(SimpleRingError.GenerationExhausted)
+        self.states[slot] = RingSlotState.Empty
+        self.generations[slot] = self.generations[slot] + 1u64
+        self.slot_owners[slot] = 0u64
+        self.task_keys[slot] = 0u64
+        self.payload_leases[slot] = nil
+        self.operation_metadata[slot] = nil
+        self.cancel_requested[slot] = false
+        self.operations[slot] = nil
+        self.completion_values[slot] = nil
+        self.completion_errors[slot] = ""
+        self.provider_started_at[slot] = 0u64
+        self.free_indices[self.free_tail] = slot
+        self.free_tail = self._advance(self.free_tail)
+        self.free_count = self.free_count + 1
+        self._occupancy_changed()
+        Ok(())
+
+    me _free_pop() -> i64:
+        val slot = self.free_indices[self.free_head]
+        self.free_head = self._advance(self.free_head)
+        self.free_count = self.free_count - 1
+        slot
+
+    fn _advance(index: i64) -> i64:
+        if index + 1 == self.capacity: 0 else: index + 1
+
+    fn _token_for(slot: i64) -> RingToken:
+        RingToken(ring_id: self.ring_id, slot: slot.to_u64(),
+            generation: RingGeneration(value: self.generations[slot]))
+
+    me _occupancy_changed():
+        self.telemetry_value.occupancy = (self.capacity - self.free_count).to_u64()
+        if self.telemetry_value.occupancy > self.telemetry_value.high_water:
+            self.telemetry_value.high_water = self.telemetry_value.occupancy
+
+    me _request_provider_cancel(slot: i64, token: RingToken) -> RingCancelOutcome:
+        if self.cancel_requested[slot]:
+            return RingCancelOutcome.CancelRejected(SimpleRingError.CancellationAlreadyRequested)
+        self.cancel_requested[slot] = true
+        self.telemetry_value.cancellations = _ring_next_counter(self.telemetry_value.cancellations)
+        RingCancelOutcome.ProviderCancelRequested(token)
+
+fn _ring_next_counter(value: u64) -> u64:
+    if value == SIMPLE_RING_U64_MAX: value else: value + 1u64
+
+fn _ring_add_counter(value: u64, amount: u64) -> u64:
+    if amount > SIMPLE_RING_U64_MAX - value: SIMPLE_RING_U64_MAX else: value + amount
+
+export RingSlotState, SimpleRingError, RingReservation, RingSubmission
+export RingBatchPolicy, RingBatchCommitReceipt
+export RingCancelOutcome, RingResetReceipt, RingTelemetry, SimpleRing

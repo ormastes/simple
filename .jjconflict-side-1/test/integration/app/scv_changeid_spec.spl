@@ -1,0 +1,129 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves SCV allocates a persistent logical ChangeId that is
+carried across successive snapshots of the same working-copy change, and that a
+new change is allocated only by `scv new-change` or after `scv close-change`.
+Audience: Maintainers of the SCV storage layer (report §3.3.A / §7.7 / §14.2).
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _prelude(tag: text) -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-changeid-{tag}.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cur_commit() { sed -n 's/default: //p' .scv/meta/workspaces.sdn; }",
+        "cur_change() { sed -n 's/change: //p' \".scv/objects/commits/$(cur_commit).sdn\"; }",
+        "cd \"$TMP\"",
+        "printf 'fn main():\\n    1\\n' > a.spl",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null",
+        "C1=$(cur_commit); CH1=$(cur_change)"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    expect(out == "" and err == "").to_equal(false)
+    combined
+
+describe "scv persistent logical ChangeId":
+    # @manual scenario evidence
+    it "carries the same change id across a comment-only re-snapshot":
+        # @req REQ-SSPEC-INTEGRATION
+        step("carries the same change id across a comment-only re-snapshot")
+        step("Snapshot, add a comment line, snapshot again")
+        var lines = _prelude("comment")
+        lines.push("printf '# note\\nfn main():\\n    1\\n' > a.spl")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("C2=$(cur_commit); CH2=$(cur_change)")
+        lines.push("printf 'commit_changed=%s\\n' \"$([ \"$C1\" != \"$C2\" ] && echo yes || echo no)\"")
+        lines.push("printf 'change_same=%s\\n' \"$([ \"$CH1\" = \"$CH2\" ] && echo yes || echo no)\"")
+        lines.push("printf 'latest_is_c2=%s\\n' \"$([ \"$(sed -n 's/latest: //p' .scv/objects/changes/$CH2.sdn)\" = \"$C2\" ] && echo yes || echo no)\"")
+        lines.push("printf 'pred_is_c1=%s\\n' \"$([ \"$(sed -n 's/predecessors: //p' .scv/objects/changes/$CH2.sdn)\" = \"$C1\" ] && echo yes || echo no)\"")
+        lines.push("printf 'format=%s\\n' \"$(sed -n 's/format: //p' .scv/objects/changes/$CH2.sdn)\"")
+        lines.push("printf 'state=%s\\n' \"$(sed -n 's/state: //p' .scv/objects/changes/$CH2.sdn)\"")
+        val out = _run(lines)
+        step("Verify the commit id changed but the change id was carried")
+        expect(out).to_contain("commit_changed=yes")
+        expect(out).to_contain("change_same=yes")
+        expect(out).to_contain("latest_is_c2=yes")
+        expect(out).to_contain("pred_is_c1=yes")
+        expect(out).to_contain("format=2")
+        expect(out).to_contain("state=open")
+        expect(out).to_contain("exit=0")
+
+    it "allocates a fresh change id only on new-change":
+        # @req REQ-SSPEC-INTEGRATION
+        step("allocates a fresh change id only on new-change")
+        step("Run new-change, then snapshot an edit")
+        var lines = _prelude("new")
+        lines.push("scv new-change")
+        lines.push("CH2=$(cur_change)")
+        lines.push("printf 'x\\n' > b.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("CH3=$(cur_change)")
+        lines.push("printf 'new_differs=%s\\n' \"$([ \"$CH1\" != \"$CH2\" ] && echo yes || echo no)\"")
+        lines.push("printf 'new_carried=%s\\n' \"$([ \"$CH2\" = \"$CH3\" ] && echo yes || echo no)\"")
+        lines.push("printf 'prefix=%s\\n' \"$(printf '%s' \"$CH2\" | cut -c1-7)\"")
+        lines.push("FSCK=$(scv fsck || true)")
+        lines.push("printf 'fsck_struct_errors=%s\\n' \"$(printf '%s' \"$FSCK\" | grep -Ec 'missing|corrupt|mismatch|bad (commit|change|tree)' || true)\"")
+        val out = _run(lines)
+        step("Verify the new change differs, is carried, and fsck stays clean")
+        expect(out).to_contain("new-change change_")
+        expect(out).to_contain("new_differs=yes")
+        expect(out).to_contain("new_carried=yes")
+        expect(out).to_contain("prefix=change_")
+        expect(out).to_contain("fsck_struct_errors=0")
+        expect(out).to_contain("exit=0")
+
+    it "allocates a fresh change id after close-change":
+        # @req REQ-SSPEC-INTEGRATION
+        step("allocates a fresh change id after close-change")
+        step("Close the active change, then snapshot an edit")
+        var lines = _prelude("close")
+        lines.push("scv close-change")
+        lines.push("printf 'closed_state=%s\\n' \"$(sed -n 's/state: //p' .scv/objects/changes/$CH1.sdn)\"")
+        lines.push("printf 'y\\n' > c.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("CH2=$(cur_change)")
+        lines.push("printf 'after_close_differs=%s\\n' \"$([ \"$CH1\" != \"$CH2\" ] && echo yes || echo no)\"")
+        lines.push("printf 'old_latest_kept=%s\\n' \"$([ \"$(sed -n 's/latest: //p' .scv/objects/changes/$CH1.sdn)\" = \"$C1\" ] && echo yes || echo no)\"")
+        lines.push("FSCK=$(scv fsck || true)")
+        lines.push("printf 'fsck_struct_errors=%s\\n' \"$(printf '%s' \"$FSCK\" | grep -Ec 'missing|corrupt|mismatch|bad (commit|change|tree)' || true)\"")
+        val out = _run(lines)
+        step("Verify the closed change is frozen and a new one was allocated")
+        expect(out).to_contain("close-change change_")
+        expect(out).to_contain("closed_state=closed")
+        expect(out).to_contain("after_close_differs=yes")
+        expect(out).to_contain("old_latest_kept=yes")
+        expect(out).to_contain("fsck_struct_errors=0")
+        expect(out).to_contain("exit=0")
+
+    it "keeps reading v1 change objects that have no format field":
+        # @req REQ-SSPEC-INTEGRATION
+        step("keeps reading v1 change objects that have no format field")
+        step("Rewrite the change object in v1 shape and snapshot again")
+        var lines = _prelude("v1")
+        lines.push("printf 'latest: %s\\npredecessors: \\n' \"$C1\" > \".scv/objects/changes/$CH1.sdn\"")
+        lines.push("printf 'z\\n' > d.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("CH2=$(cur_change)")
+        lines.push("printf 'v1_carried=%s\\n' \"$([ \"$CH1\" = \"$CH2\" ] && echo yes || echo no)\"")
+        lines.push("FSCK=$(scv fsck || true)")
+        lines.push("printf 'fsck_struct_errors=%s\\n' \"$(printf '%s' \"$FSCK\" | grep -Ec 'missing|corrupt|mismatch|bad (commit|change|tree)' || true)\"")
+        val out = _run(lines)
+        step("Verify a v1 object is treated as an open change and upgraded on write")
+        expect(out).to_contain("v1_carried=yes")
+        expect(out).to_contain("fsck_struct_errors=0")
+        expect(out).to_contain("exit=0")

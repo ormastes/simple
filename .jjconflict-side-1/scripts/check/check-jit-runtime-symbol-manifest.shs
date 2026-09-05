@@ -1,0 +1,242 @@
+#!/bin/sh
+# Fail when codegen emits an rt_* runtime symbol that the hand-maintained JIT
+# symbol manifest does not list.
+#
+# WHY THIS EXISTS
+#
+# The JIT symbol table is NOT produced by scanning the runtime. It is generated
+# from a hand-maintained list, RUNTIME_SYMBOL_NAMES in
+# src/compiler_rust/common/src/runtime_symbols.rs, which runtime/build.rs reads
+# to emit runtime_symbol_entries.rs. codegen/jit.rs then registers ONLY the
+# names in that list. There is no scanner and no automatic discovery, so a
+# symbol that codegen emits but the manifest omits is simply never registered.
+#
+# The consequence is not a crash. The JIT import fails to resolve and the WHOLE
+# module silently falls back to the interpreter. That fallback is correct but
+# roughly 1000x slower (one such symbol took compute_styles from 369ms to over
+# ten minutes), and because de-JITted code stays CORRECT it masks real
+# miscompiles until somebody makes it fast again. rt_index_of was exactly this
+# bug, fixed in 5c75a1bbce0; an audit then found 24 more of the same shape.
+#
+# A hand-maintained list silently diverges from codegen the moment anyone adds
+# an rt_* call. This check closes that class.
+#
+# WHAT IS AND IS NOT A FAILURE
+#
+# A symbol is REQUIRED in the manifest only when it is both emitted by codegen
+# and *always linkable*. build.rs discovers definitions with a purely textual
+# scan that ignores cfg, so it will happily emit an extern declaration for a
+# symbol whose definition disappears under the default feature set. Listing
+# such a symbol turns a silent de-JIT into a hard link error. This check
+# therefore requires a symbol only when it is always defined, meaning either
+#   - it has a definition with no feature cfg on it, or
+#   - it has complementary definitions under both a feature and its negation
+#     (the rt_vulkan_* stub pattern),
+# and its defining module is not itself behind a #[cfg(feature = ...)].
+#
+# Symbols that are correctly absent (do not "fix" these by listing them):
+#   rt_vk_*      value/gpu_vulkan is #[cfg(feature = "vulkan")]
+#   rt_monoio_*  monoio_direct / value/monoio_future are #[cfg(feature = "monoio-direct")]
+# The existing manifest already honours this invariant: zero of its registered
+# entries come from a cfg-gated module.
+#
+# Usage: check-jit-runtime-symbol-manifest.shs [repo-root]
+# Exit 0 = manifest covers codegen, 1 = missing entries, 2 = could not determine.
+
+set -u
+
+root="${1:-.}"
+manifest="$root/src/compiler_rust/common/src/runtime_symbols.rs"
+codegen="$root/src/compiler_rust/compiler/src/codegen"
+runtime_src="$root/src/compiler_rust/runtime/src"
+
+for p in "$manifest" "$codegen" "$runtime_src"; do
+    if [ ! -e "$p" ]; then
+        echo "check-jit-runtime-symbol-manifest: cannot find $p" >&2
+        echo "RESULT: UNDETERMINED"
+        exit 2
+    fi
+done
+
+work=$(mktemp -d) || { echo "RESULT: UNDETERMINED"; exit 2; }
+trap 'rm -rf "$work"' EXIT INT TERM
+
+# ---------------------------------------------------------------- manifest --
+# Mirror build.rs's parser: first quoted token on each line between the
+# RUNTIME_SYMBOL_NAMES header and the closing "];".
+awk '
+    /pub const RUNTIME_SYMBOL_NAMES/ { inlist = 1; next }
+    !inlist { next }
+    /\];/ { exit }
+    { print }
+' "$manifest" > "$work/list_lines"
+
+awk '
+    {
+        line = $0
+        gsub(/\r/, "", line)
+        sub(/^[ \t]+/, "", line)
+        q = index(line, "\"")
+        if (q == 0) next
+        rest = substr(line, q + 1)
+        e = index(rest, "\"")
+        if (e == 0) next
+        sym = substr(rest, 1, e - 1)
+        if (line ~ /^\/\//) { print "PHANTOM\t" sym; next }
+        print "NAME\t" sym
+    }
+' "$work/list_lines" > "$work/manifest_raw"
+
+grep '^PHANTOM	' "$work/manifest_raw" | cut -f2 | sort -u > "$work/phantoms"
+grep '^NAME	' "$work/manifest_raw" | cut -f2 | sort -u > "$work/manifest_names"
+
+# ----------------------------------------------------------------- emitted --
+# rt_* names appearing as string literals anywhere under codegen. Prefix
+# fragments such as "rt_array_" are harmless noise here: they can never
+# intersect the set of real definitions, which is what the gate uses.
+find "$codegen" -name '*.rs' -type f -print0 \
+    | xargs -0 grep -ho '"rt_[A-Za-z0-9_]*"' 2>/dev/null \
+    | tr -d '"' | sort -u > "$work/emitted"
+
+# ----------------------------------------------------------------- defined --
+# Definition sites, tagged with the feature cfg (if any) that guards them.
+# The 4-line lookback for #[no_mangle] mirrors build.rs exactly.
+find "$runtime_src" -name '*.rs' -type f -print0 \
+    | xargs -0 awk '
+    FNR == 1 { p1 = p2 = p3 = p4 = "" }
+    {
+        line = $0
+        gsub(/\r/, "", line)
+        sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+
+        cfg = "none"
+        for (i = 1; i <= 4; i++) {
+            prev = (i == 1 ? p1 : (i == 2 ? p2 : (i == 3 ? p3 : p4)))
+            if (prev ~ /^#\[cfg\(/ && prev ~ /feature/) {
+                cfg = (prev ~ /not\(/) ? "neg" : "pos"
+                break
+            }
+        }
+
+        sym = ""
+        if (line ~ /^#\[export_name = "/) {
+            s = line
+            sub(/^#\[export_name = "/, "", s)
+            sub(/".*$/, "", s)
+            sym = s
+        } else if (index(line, "fn ") > 0) {
+            if (p1 == "#[no_mangle]" || p2 == "#[no_mangle]" || \
+                p3 == "#[no_mangle]" || p4 == "#[no_mangle]") {
+                s = substr(line, index(line, "fn ") + 3)
+                b = index(s, "(")
+                if (b > 0) {
+                    s = substr(s, 1, b - 1)
+                    gsub(/[ \t]/, "", s)
+                    sym = s
+                }
+            }
+        }
+        if (sym ~ /^rt_/) print FILENAME "\t" sym "\t" cfg
+
+        p4 = p3; p3 = p2; p2 = p1; p1 = line
+    }
+' > "$work/def_sites"
+
+# ------------------------------------------------- cfg-gated module paths --
+# "#[cfg(feature = ...)]" immediately above a "mod NAME;" gates NAME.rs and
+# NAME/ relative to the declaring file's directory.
+find "$runtime_src" -name '*.rs' -type f -print0 \
+    | xargs -0 awk '
+    FNR == 1 { pending = 0 }
+    {
+        line = $0
+        gsub(/\r/, "", line)
+        sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+        if (line ~ /^#\[cfg\(/ && line ~ /feature/) { pending = 1; next }
+        if (line ~ /^#\[/) next
+        if (line ~ /^(pub[ \t]+)?mod[ \t]+[A-Za-z0-9_]+[ \t]*;/) {
+            if (pending) {
+                name = line
+                sub(/^(pub[ \t]+)?mod[ \t]+/, "", name)
+                sub(/[ \t]*;.*$/, "", name)
+                dir = FILENAME
+                sub(/\/[^\/]*$/, "", dir)
+                print dir "/" name
+            }
+            pending = 0
+            next
+        }
+        if (line != "") pending = 0
+    }
+' | sort -u > "$work/gated_mods"
+
+# Drop definition sites that live inside a gated module subtree.
+awk -F'\t' '
+    NR == FNR { gated[FNR] = $0; n = FNR; next }
+    {
+        f = $1
+        for (i = 1; i <= n; i++) {
+            g = gated[i]
+            if (f == g ".rs") next
+            if (index(f, g "/") == 1) next
+        }
+        print
+    }
+' "$work/gated_mods" "$work/def_sites" > "$work/def_sites_ungated"
+
+# A symbol is always-defined if some site has no feature cfg, or if it has
+# both a positive and a negative feature-cfg site (complementary stubs).
+awk -F'\t' '
+    { sym = $2; cfg = $3
+      if (cfg == "none") none[sym] = 1
+      else if (cfg == "pos") pos[sym] = 1
+      else neg[sym] = 1
+      seen[sym] = 1 }
+    END { for (s in seen) if (none[s] || (pos[s] && neg[s])) print s }
+' "$work/def_sites_ungated" | sort -u > "$work/always_defined"
+
+# -------------------------------------------------------------- the gate --
+comm -12 "$work/emitted" "$work/always_defined" > "$work/emitted_and_defined"
+comm -23 "$work/emitted_and_defined" "$work/manifest_names" > "$work/missing"
+
+emitted_n=$(wc -l < "$work/emitted" | tr -d ' ')
+manifest_n=$(wc -l < "$work/manifest_names" | tr -d ' ')
+defined_n=$(wc -l < "$work/always_defined" | tr -d ' ')
+missing_n=$(wc -l < "$work/missing" | tr -d ' ')
+phantom_n=$(wc -l < "$work/phantoms" | tr -d ' ')
+
+echo "manifest names:            $manifest_n"
+echo "rt_* literals in codegen:  $emitted_n"
+echo "always-defined rt_*:       $defined_n"
+echo "emitted + always-defined + NOT in manifest: $missing_n"
+
+status=0
+
+if [ "$phantom_n" -gt 0 ]; then
+    echo
+    echo "PHANTOM manifest entries ($phantom_n): a comment inside RUNTIME_SYMBOL_NAMES"
+    echo "contains a quoted string. build.rs takes the first quoted token on EVERY"
+    echo "line in the list, comments included, so these become bogus symbol names."
+    sed 's/^/  /' "$work/phantoms"
+    status=1
+fi
+
+if [ "$missing_n" -gt 0 ]; then
+    echo
+    echo "MISSING from RUNTIME_SYMBOL_NAMES in"
+    echo "  src/compiler_rust/common/src/runtime_symbols.rs"
+    echo "Each of these is emitted by codegen and is always linkable, so each is a"
+    echo "silent whole-module de-JIT waiting to happen. Add a line per symbol."
+    sed 's/^/  /' "$work/missing"
+    status=1
+fi
+
+if [ "$status" -ne 0 ]; then
+    echo
+    echo "RESULT: FAIL"
+    exit 1
+fi
+
+echo
+echo "RESULT: PASS"
+exit 0

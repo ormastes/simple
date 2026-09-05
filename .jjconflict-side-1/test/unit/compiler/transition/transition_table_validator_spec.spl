@@ -1,0 +1,160 @@
+# @cover src/compiler/00.common/transition/transition_table.spl 80%
+# @cover src/compiler/00.common/transition/validator.spl 80%
+"""
+# Transition-table loader and the negative-space checker
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md sections 11.3-11.4
+
+## Purpose
+
+`Missing = ProducerUniverse - declared`, and the build invariant is
+`Missing = {}`. This spec pins the two halves that make that proof real.
+
+The loader half: a table is a list of `transition:` blocks with an explicit
+`universe:`. Repeated top-level `transition:` keys are the reason a
+map-shaped document model is not used — a model that collapses duplicate keys
+would silently keep ONE row and report the other 26 as missing, or worse,
+report nothing.
+
+The checker half: it returns the missing SET, never a bare bool. A checker
+that can only say "no" cannot name the variant that was forgotten, and naming
+it is the whole point. Two further failures are pinned because each is a way
+a green verdict can be a lie: a row naming a variant absent from the universe
+(stale universe or typo — the row proves nothing about the variant it meant),
+and an EMPTY universe, which would otherwise make every table vacuously total.
+
+## Scope
+
+Parsing, per-field validation, and set subtraction over local fixture text.
+The real checked-in table is exercised by
+`hir_type_to_mir_type_coverage_spec.spl`.
+"""
+
+use std.spec
+use compiler.common.transition.transition_table.{
+    parse_transition_table, variant_name_of, unquote_scalar, split_key_value
+}
+use compiler.common.transition.validator.{
+    validate_transition_table, coverage_report_is_clean, coverage_report_handled
+}
+use compiler.common.transition.coverage_state.{coverage_state_tag}
+
+fn complete_fixture() -> text:
+    return "table: fixture\nproducer: FixtureKind\nconsumer: OtherKind\n\nuniverse:\n  - Alpha\n  - Beta\n  - Gamma\n\ntransition:\n  from: FixtureKind.Alpha\n  to: OtherKind.A\n  state: implemented\n  reason: \"direct arm\"\n  test: fixture_spec\n\ntransition:\n  from: FixtureKind.Beta\n  to: OtherKind.A\n  state: normalized\n  reason: \"rewritten upstream\"\n  test: fixture_spec\n\ntransition:\n  from: FixtureKind.Gamma\n  to: \"\"\n  state: unsupported\n  reason: \"no arm\"\n  issue: doc/08_tracking/bug/fixture.md\n  test: fixture_spec\n"
+
+fn hole_fixture() -> text:
+    return "table: fixture\nproducer: FixtureKind\n\nuniverse:\n  - Alpha\n  - Beta\n\ntransition:\n  from: FixtureKind.Alpha\n  to: OtherKind.A\n  state: implemented\n  reason: \"direct arm\"\n  test: fixture_spec\n"
+
+fn ghost_fixture() -> text:
+    return "table: fixture\nproducer: FixtureKind\n\nuniverse:\n  - Alpha\n\ntransition:\n  from: FixtureKind.Alpha\n  to: OtherKind.A\n  state: implemented\n  reason: \"direct arm\"\n  test: fixture_spec\n\ntransition:\n  from: FixtureKind.Ghost\n  to: OtherKind.A\n  state: implemented\n  reason: \"variant the producer cannot emit\"\n  test: fixture_spec\n"
+
+fn duplicate_fixture() -> text:
+    return "table: fixture\nproducer: FixtureKind\n\nuniverse:\n  - Alpha\n\ntransition:\n  from: FixtureKind.Alpha\n  to: OtherKind.A\n  state: implemented\n  reason: \"direct arm\"\n  test: fixture_spec\n\ntransition:\n  from: FixtureKind.Alpha\n  to: OtherKind.B\n  state: unsupported\n  reason: \"contradicts the row above\"\n  issue: doc/08_tracking/bug/fixture.md\n  test: fixture_spec\n"
+
+fn empty_universe_fixture() -> text:
+    return "table: fixture\nproducer: FixtureKind\n"
+
+describe "transition table loader":
+    it "keeps every repeated transition block":
+        step("Parse a three-row table")
+        val table = parse_transition_table(complete_fixture())
+        expect(table.rows.len()).to_equal(3)
+        expect(table.universe.len()).to_equal(3)
+        expect(table.errors.len()).to_equal(0)
+        step("Header fields land where they belong")
+        expect(table.name).to_equal("fixture")
+        expect(table.producer).to_equal("FixtureKind")
+        expect(table.consumer).to_equal("OtherKind")
+
+    it "parses each row's state from its own fields":
+        val table = parse_transition_table(complete_fixture())
+        expect(coverage_state_tag(table.rows[0].state)).to_equal("implemented")
+        expect(coverage_state_tag(table.rows[1].state)).to_equal("normalized")
+        expect(coverage_state_tag(table.rows[2].state)).to_equal("unsupported")
+
+    it "strips quotes and splits at the first colon only":
+        expect(unquote_scalar("\"a b\"")).to_equal("a b")
+        expect(unquote_scalar("  bare  ")).to_equal("bare")
+        step("A reason containing a colon must survive intact")
+        val pair = split_key_value("reason: no arm: hits the wildcard")
+        expect(pair.0).to_equal("reason")
+        expect(pair.1).to_equal("no arm: hits the wildcard")
+
+    it "reduces a stable id to its bare variant name":
+        expect(variant_name_of("HirTypeKind.Int")).to_equal("Int")
+        expect(variant_name_of("Int")).to_equal("Int")
+
+    it "records a row whose state is under-specified as an error, not a row":
+        step("An unsupported row with no reason must not become a covered variant")
+        val table = parse_transition_table(
+            "table: f\nuniverse:\n  - Alpha\n\ntransition:\n  from: F.Alpha\n  state: unsupported\n  test: t\n")
+        expect(table.rows.len()).to_equal(0)
+        expect(table.errors.len() > 0).to_equal(true)
+
+    it "records profile_dependent rows as such":
+        step("A state that differs under the critical profile is flagged, not flattened")
+        val table = parse_transition_table(
+            "table: f\nuniverse:\n  - Alpha\n  - Beta\n\ntransition:\n  from: F.Alpha\n  to: G.A\n  state: normalized\n  profile_dependent: true\n  reason: \"fatal under critical\"\n  test: t\n\ntransition:\n  from: F.Beta\n  to: G.B\n  state: implemented\n  reason: \"plain arm\"\n  test: t\n")
+        expect(table.errors.len()).to_equal(0)
+        expect(table.rows[0].profile_dependent).to_equal(true)
+        expect(table.rows[1].profile_dependent).to_equal(false)
+
+    it "accepts the nested `transitions:` list shape as well as the flat one":
+        step("Lane C2's frontend censuses wrap rows in a `- transition:` list")
+        val table = parse_transition_table(
+            "table: f\nproducer: F\n\ntransitions:\n  - transition:\n      from: \"F.Alpha\"\n      to: \"G.A\"\n      state: \"Implemented\"\n      reason: \"arm\"\n      test: \"t\"\n  - transition:\n      from: \"F.Beta\"\n      to: \"\"\n      state: \"Unsupported\"\n      reason: \"no arm\"\n      test: \"t\"\n")
+        expect(table.errors.len()).to_equal(0)
+        expect(table.rows.len()).to_equal(2)
+        expect(coverage_state_tag(table.rows[1].state)).to_equal("unsupported")
+        step("Such a table declares no universe, so it cannot prove totality")
+        expect(table.universe_declared).to_equal(false)
+        val report = validate_transition_table(table)
+        step("Its rows become the universe, which makes Missing empty by construction — recorded as an error, never a green verdict")
+        expect(report.universe_size).to_equal(2)
+        expect(report.missing.len()).to_equal(0)
+        expect(report.errors.len()).to_equal(1)
+        expect(coverage_report_is_clean(report)).to_equal(false)
+
+describe "negative-space checker":
+    it "passes a table that declares its whole universe":
+        val report = validate_transition_table(parse_transition_table(complete_fixture()))
+        expect(report.missing.len()).to_equal(0)
+        expect(report.unknown.len()).to_equal(0)
+        expect(coverage_report_is_clean(report)).to_equal(true)
+        expect(report.universe_size).to_equal(3)
+        expect(report.declared).to_equal(3)
+
+    it "returns the missing SET, naming the undeclared variant":
+        step("Beta is in the universe with no row")
+        val report = validate_transition_table(parse_transition_table(hole_fixture()))
+        expect(report.missing.len()).to_equal(1)
+        expect(report.missing[0]).to_equal("Beta")
+        expect(coverage_report_is_clean(report)).to_equal(false)
+
+    it "fails a row naming a variant absent from the universe":
+        val report = validate_transition_table(parse_transition_table(ghost_fixture()))
+        expect(report.missing.len()).to_equal(0)
+        expect(report.unknown.len()).to_equal(1)
+        expect(report.unknown[0]).to_equal("Ghost")
+        expect(coverage_report_is_clean(report)).to_equal(false)
+
+    it "fails a variant declared twice":
+        step("Two states for one edge is ambiguous, not redundant")
+        val report = validate_transition_table(parse_transition_table(duplicate_fixture()))
+        expect(report.duplicated.len()).to_equal(1)
+        expect(report.duplicated[0]).to_equal("Alpha")
+        expect(coverage_report_is_clean(report)).to_equal(false)
+
+    it "refuses to call an empty universe total":
+        step("Zero variants checked is the shape a broken generator produces")
+        val report = validate_transition_table(parse_transition_table(empty_universe_fixture()))
+        expect(report.universe_size).to_equal(0)
+        expect(report.errors.len() > 0).to_equal(true)
+        expect(coverage_report_is_clean(report)).to_equal(false)
+
+    it "counts handled separately from declared":
+        step("Unsupported is declared and covered, but NOT handled")
+        val table = parse_transition_table(complete_fixture())
+        expect(table.rows.len()).to_equal(3)
+        expect(coverage_report_handled(table)).to_equal(2)

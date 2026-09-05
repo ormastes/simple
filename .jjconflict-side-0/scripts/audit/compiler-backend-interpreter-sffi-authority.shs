@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+owner=src/compiler/70.backend/backend/interpreter.spl
+expr=src/compiler/70.backend/backend/interpreter_expr.spl
+facade=src/lib/nogc_sync_mut/io_runtime.spl
+
+if rg -q '^extern fn rt_env_get' "$owner"; then
+    echo "backend interpreter must use the canonical environment facade" >&2
+    exit 1
+fi
+
+rg -q '^use std\.nogc_sync_mut\.io_runtime\.\{env_get_opt\}$' "$owner"
+rg -q '^extern fn rt_enum_discriminant\(value: HirExprKind\) -> i64$' "$owner"
+test "$(rg -c '^fn interp_enum_discriminant_raw' "$owner")" -eq 1
+test "$(rg -c 'unsafe\(capabilities: \[ffi\]\):' "$owner")" -eq 1
+test "$(rg -c 'rt_enum_discriminant\(' "$owner")" -eq 2
+test "$(rg -o 'interp_enum_discriminant_raw\(' "$owner" "$expr" | wc -l)" -eq 4
+test "$(rg -c '^[[:space:]]+interp_enum_discriminant_raw$' "$expr")" -eq 1
+if rg -q '^[[:space:]]+rt_enum_discriminant$' "$expr"; then
+    echo "backend interpreter split must import only the owner wrapper" >&2
+    exit 1
+fi
+test "$(rg -c 'env_get_opt\("SIMPLE_(INTERP_TRACE|STRICT_MEM)"\)' "$owner")" -eq 2
+rg -Uq '@always_inline\npub fn env_get_opt\(key: text\) -> text\?:' "$facade"

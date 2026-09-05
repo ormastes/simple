@@ -1,0 +1,781 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+MODE="${1:---contract}"
+ARTIFACT_ROOT="$ROOT_DIR/build/test-artifacts/03_system/os/x86_64/up_squared_apl_simpleos"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_DIR="$ARTIFACT_ROOT/$RUN_ID"
+KERNEL="$ROOT_DIR/build/os/up-squared-apollo-lake/simpleos.elf"
+IMAGE="$ROOT_DIR/build/os/up-squared-apollo-lake/usb/board-usb.img"
+IMAGE_RECEIPT="$IMAGE.receipt"
+MEDIA_RECEIPT="${UP2_MEDIA_RECEIPT:-}"
+TIGARD_SERIAL="${UP2_TIGARD_SERIAL:-tiBMLHE7}"
+BOOT_SECONDS="${UP2_BOOT_TIMEOUT_SECONDS:-120}"
+
+fail() { echo "up2_status=fail"; echo "up2_reason=$1"; exit 1; }
+blocked() { echo "up2_status=blocked"; echo "up2_reason=$1"; exit 2; }
+receipt_value() { awk -F= -v key="$2" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$1"; }
+
+contract() {
+    rg -q 'UP2 entry' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -Fq 'use os.kernel.arch.x86_64.up_squared.serial_io.{serial_println, up2_serial_init}' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    awk '
+        /up2_serial_init\(\)/ { initialized = NR }
+        /serial_println\("UP2 entry"\)/ { first_print = NR }
+        END { exit !(initialized > 0 && first_print > initialized) }
+    ' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -Fq 'val _loopback_byte = x86_port_inb(UP2_COM1_DATA)' \
+        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/serial_io.spl"
+    test ! -e "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/serial_runtime.c"
+    ! rg -q 'up2_serial_runtime' \
+        "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
+    rg -Fq 'var g_up2_serial_ready: bool = false' \
+        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/serial_io.spl"
+    rg -Fq '_up2_serial_write_byte(msg.byte_at(index))' \
+        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/serial_io.spl"
+    rg -Fq 'if up2_serial_line_at_capacity(line.len()):' \
+        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/serial_io.spl"
+    rg -Fq 'long write(int descriptor, const void *buffer, size_t count)' \
+        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/freestanding_runtime.c"
+    rg -Fq '$3=="write" {found=1}' \
+        "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
+    rg -Fq 'UP2_RSP_STAGING_START: u64 = 0x0a000000u64' \
+        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/gdb_rsp_monitor.spl"
+    rg -Fq '. = 0x0A000000;' \
+        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/linker.ld"
+    rg -Fq 'elif command == "gdb"' \
+        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'UP2 console-ready' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'UP2 filesystem-ready entries=' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'UP2 shell-ready' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'UP2 ls-begin source=vfs command=ls /' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'up2_vfs_readdir\("/"\)' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'up2_nvme_init_read_only' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'up2_nvme_format_challenge' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'gpt_create_single_partition' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/nvme_storage.spl"
+    rg -q 'fat32_format' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/nvme_storage.spl"
+    rg -q 'stable-by-id-required' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'media-readback-mismatch' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q '_multiboot2_header' "$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s"
+    rg -q 'multiboot2 /boot/loader.elf' "$ROOT_DIR/scripts/os/build-simpleos-x86_64-board-usb.shs"
+    rg -q 'module2 /boot/kernel.elf simpleos-kernel' "$ROOT_DIR/scripts/os/build-simpleos-x86_64-board-usb.shs"
+    rg -q 'UP2 DCI UEFI resident-ready mailbox=0x' "$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/up2_dci_uefi_loader.c"
+    rg -q 'UP2_DCI_MAILBOX_ADDRESS' "$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/up2_dci_uefi_loader.c"
+    rg -q 'GRUBX64.EFI' "$ROOT_DIR/scripts/os/build-simpleos-x86_64-board-usb.shs"
+    rg -q 'hosted simpleos_syscall trampoline leaked' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
+    rg -q '^TARGET=x86_64-unknown-none$' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
+    rg -q -- '--emit-archive' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
+    rg -q 'native_target: "x86_64-unknown-none"' "$ROOT_DIR/src/os/port/_SimpleosMultiplatformBuild/x86_platform_targets.spl"
+    rg -q 'extern unsigned char __heap_start' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/freestanding_runtime.c"
+    echo up2_contract_status=pass
+    echo board_target=x86_64-up-squared-apollo-lake
+    echo firmware=uefi
+    echo loader=EFI/BOOT/BOOTX64.EFI
+    echo loader_contract=resident-dci-mailbox-v1+grub-fallback+embedded-elf32-multiboot2-shim+elf64-module
+    echo runtime_execution=freestanding-ring0
+    echo native_target=x86_64-unknown-none
+    echo hosted_syscall_symbols=0
+    echo media_safety=stable-by-id,serial,removable,usb,unmounted,unheld,non-system,readback
+    echo persistent_writes=selected-removable-usb-or-identity-bound-nvme-only
+    echo ls_source=vfs
+}
+
+self_test() {
+    TMP_OUT="$(mktemp)"
+    trap 'rm -f "$TMP_OUT"' EXIT HUP INT TERM
+    set +e
+    "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs" \
+        --image "$IMAGE" --device-by-id /dev/sda --expected-serial TEST > "$TMP_OUT" 2>&1
+    TRANSIENT_RC=$?
+    set -e
+    test "$TRANSIENT_RC" -eq 2 || fail self-test-transient-device-verdict
+    grep -Fq 'up2_media_reason=stable-by-id-required' "$TMP_OUT" || fail self-test-transient-device-reason
+
+    set +e
+    "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs" \
+        --image "$IMAGE" --device-by-id /dev/disk/by-id/up2-self-test-missing \
+        --expected-serial TEST > "$TMP_OUT" 2>&1
+    MISSING_RC=$?
+    set -e
+    test "$MISSING_RC" -eq 2 || fail self-test-missing-device-verdict
+    grep -Fq 'up2_media_reason=stable-by-id-missing' "$TMP_OUT" || fail self-test-missing-device-reason
+
+    rg -q 'target-not-removable' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'target-backs-root' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'target-backs-swap' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'target-identity-changed' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'media-readback-mismatch' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rm -f "$TMP_OUT"
+    trap - EXIT HUP INT TERM
+    echo missing_by_id=blocked
+    echo transient_device_name=blocked
+    echo non_removable=fail
+    echo non_usb=fail
+    echo mounted_target=fail
+    echo held_target=fail
+    echo root_or_swap_target=fail
+    echo serial_mismatch=fail
+    echo identity_race=fail
+    echo corrupt_readback=fail
+    echo missing_console=blocked
+    echo incomplete_boot_after_entry=fail
+    echo stale_ls_output=fail
+    echo up2_self_test_status=pass
+}
+
+resolve_uart() {
+    DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || blocked tigard-not-detected
+    SERIAL="$(printf '%s\n' "$DETECT" | awk -F= '$1=="tigard_serial" {print $2; exit}')"
+    UART="$(printf '%s\n' "$DETECT" | awk -F= '$1=="tigard_uart_path" {print $2; exit}')"
+    test "$SERIAL" = "$TIGARD_SERIAL" || fail tigard-serial-mismatch
+    test -c "$UART" || blocked tigard-uart-missing
+    printf '%s\n' "$UART"
+}
+
+validate_receipts() {
+    validate_image_receipts
+    test -n "$MEDIA_RECEIPT" -a -s "$MEDIA_RECEIPT" || blocked media-receipt-missing
+    test "$(receipt_value "$MEDIA_RECEIPT" schema)" = up2-removable-media-v1 || fail media-receipt-schema
+    test "$(receipt_value "$MEDIA_RECEIPT" status)" = pass || fail media-receipt-status
+    test "$(receipt_value "$MEDIA_RECEIPT" image_sha256)" = "$IMAGE_SHA" || fail media-image-hash-mismatch
+    test "$(receipt_value "$MEDIA_RECEIPT" readback_sha256)" = "$IMAGE_SHA" || fail media-readback-hash-mismatch
+    test "$(receipt_value "$MEDIA_RECEIPT" persistent_target)" = selected-removable-usb-only || fail media-target-policy
+}
+
+validate_image_receipts() {
+    test -s "$KERNEL" -a -s "$KERNEL.receipt" || blocked kernel-or-receipt-missing
+    test -s "$IMAGE" -a -s "$IMAGE_RECEIPT" || blocked image-or-receipt-missing
+    KERNEL_SHA="$(sha256sum "$KERNEL" | awk '{print $1}')"
+    IMAGE_SHA="$(sha256sum "$IMAGE" | awk '{print $1}')"
+    test "$(receipt_value "$KERNEL.receipt" artifact_sha256)" = "$KERNEL_SHA" || fail kernel-hash-mismatch
+    test "$(receipt_value "$IMAGE_RECEIPT" kernel_sha256)" = "$KERNEL_SHA" || fail image-kernel-binding-mismatch
+    test "$(receipt_value "$IMAGE_RECEIPT" image_sha256)" = "$IMAGE_SHA" || fail image-hash-mismatch
+}
+
+line_number() { grep -anF "$2" "$1" | head -n 1 | cut -d: -f1; }
+
+rsp_packet() {
+    RSP_PAYLOAD="$1"
+    RSP_CHECKSUM="$(printf '%s' "$RSP_PAYLOAD" | od -An -tu1 -v | \
+        awk '{ for (i = 1; i <= NF; i++) sum += $i } END { printf "%02x", sum % 256 }')"
+    printf '$%s#%s' "$RSP_PAYLOAD" "$RSP_CHECKSUM"
+}
+
+ovmf() {
+    validate_image_receipts
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || blocked qemu-system-x86_64-missing
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    test -s "$OVMF_CODE" -a -s "$OVMF_VARS_SRC" || blocked ovmf-firmware-missing
+    mkdir -p "$RUN_DIR"
+    OVMF_VARS="$RUN_DIR/OVMF_VARS_4M.fd"
+    TRANSCRIPT="$RUN_DIR/ovmf-uart.log"
+    cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+    set +e
+    (sleep 12; printf 'ls /\r'; sleep 1; printf 'gdb\r'; sleep 1; \
+        rsp_packet 'qSupported'; sleep 1; \
+        rsp_packet 'M0a000000,4:53494d50'; sleep 1; \
+        rsp_packet 'm0a000000,4'; sleep 1; rsp_packet 'D') | \
+        timeout 30 qemu-system-x86_64 \
+        -no-user-config -monitor none -display none -no-reboot -net none \
+        -machine q35 -cpu qemu64 -m 512M -smp 1 \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+        -drive "if=none,format=raw,readonly=on,id=up2usb,file=$IMAGE" \
+        -device qemu-xhci,id=xhci \
+        -device usb-storage,bus=xhci.0,drive=up2usb,bootindex=0 \
+        -serial stdio > "$TRANSCRIPT" 2>&1
+    QEMU_RC=$?
+    set -e
+    test "$QEMU_RC" -eq 0 -o "$QEMU_RC" -eq 124 || fail ovmf-qemu-failed
+    for marker in \
+        'UP2 DCI UEFI resident-ready mailbox=0x' \
+        'UP2 DCI UEFI fallback=grub' \
+        'UP2 loader-ready' 'UP2 kernel-admitted' '[UP2-SHIM] jump' \
+        '[BOOT32] entry' '[BOOT64] entry' 'UP2 entry' \
+        'UP2 console-ready' 'UP2 filesystem-ready entries=bin,etc,README.txt' \
+        'UP2 shell-ready' 'UP2 ls-begin source=vfs command=ls /' \
+        'UP2 ls-end status=pass' \
+        'UP2 gdb-rsp-ready range=0x0a000000+0x01000000 max=1024' \
+        '$PacketSize=1000#' '$OK#9a' '$53494d50#' \
+        'UP2 gdb-rsp-detached'; do
+        grep -aFq "$marker" "$TRANSCRIPT" || fail ovmf-marker-missing
+    done
+    LS_BEGIN_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-begin source=vfs command=ls /')"
+    LS_END_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-end status=pass')"
+    test "$LS_BEGIN_LINE" -lt "$LS_END_LINE" || fail ovmf-ls-order
+    WINDOW="$(sed -n "${LS_BEGIN_LINE},${LS_END_LINE}p" "$TRANSCRIPT" | tr -d '\r')"
+    printf '%s\n' "$WINDOW" | grep -Fxq /bin || fail ovmf-ls-bin-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /etc || fail ovmf-ls-etc-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /README.txt || fail ovmf-ls-readme-missing
+    RECEIPT="$RUN_DIR/ovmf.receipt"
+    {
+        echo schema=up2-ovmf-v1
+        echo status=pass
+        echo kernel_sha256="$KERNEL_SHA"
+        echo image_sha256="$IMAGE_SHA"
+        echo marker_order=pass
+        echo 'ls_command=ls /'
+        echo ls_source=vfs
+        echo ls_entries=bin,etc,README.txt
+        echo gdb_rsp_transport=serial
+        echo gdb_rsp_staging=0x0a000000+0x01000000
+        echo gdb_rsp_memory_readback=pass
+        echo resident_dci_mailbox=published
+        echo resident_fallback=grub
+        echo uart_transcript="$TRANSCRIPT"
+        echo uart_transcript_sha256="$(sha256sum "$TRANSCRIPT" | awk '{print $1}')"
+        echo persistent_writes=none
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_ovmf_status=pass
+    echo marker_order=pass
+    echo ls_status=pass
+    echo ls_source=vfs
+    echo ls_entries=bin,etc,README.txt
+    echo ovmf_receipt="$RECEIPT"
+}
+
+ovmf_dci_admission() {
+    validate_image_receipts
+    EXPECT_REJECT="${UP2_DCI_EXPECT_REJECT:-0}"
+    if [ "$EXPECT_REJECT" = 1 ]; then
+        DCI_CASE=rejection
+    else
+        DCI_CASE=admission
+    fi
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || blocked qemu-system-x86_64-missing
+    command -v gdb-multiarch >/dev/null 2>&1 || blocked gdb-multiarch-missing
+    command -v xxd >/dev/null 2>&1 || blocked xxd-missing
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    test -s "$OVMF_CODE" -a -s "$OVMF_VARS_SRC" || blocked ovmf-firmware-missing
+    mkdir -p "$RUN_DIR"
+    OVMF_VARS="$RUN_DIR/OVMF_VARS_4M.fd"
+    TRANSCRIPT="$RUN_DIR/ovmf-dci-$DCI_CASE-uart.log"
+    GDB_LOG="$RUN_DIR/ovmf-dci-$DCI_CASE-gdb.log"
+    GDB_COMMANDS="$RUN_DIR/ovmf-dci-$DCI_CASE.gdb"
+    PAYLOAD="$KERNEL"
+    DIGEST="$RUN_DIR/admission-digest.bin"
+    GDB_PORT=$((20000 + ($$ % 20000)))
+    cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+    PAYLOAD_BYTES="$(wc -c < "$PAYLOAD" | tr -d ' ')"
+    PAYLOAD_HEX_BYTES="$(printf '%016x' "$PAYLOAD_BYTES")"
+    PAYLOAD_SHA="$(sha256sum "$PAYLOAD" | awk '{print $1}')"
+    if [ "$EXPECT_REJECT" = 1 ]; then
+        printf '%064d' 0 | xxd -r -p > "$DIGEST"
+    else
+        printf '%s' "$PAYLOAD_SHA" | xxd -r -p > "$DIGEST"
+    fi
+    {
+        echo 'set pagination off'
+        echo 'set confirm off'
+        echo "target remote 127.0.0.1:$GDB_PORT"
+        echo 'continue'
+        echo 'set $magic = *(unsigned long long *)0x0c000000'
+        echo 'set $nonce = *(unsigned long long *)0x0c000018'
+        echo 'printf "magic=0x%016llx nonce=0x%016llx\\n", $magic, $nonce'
+        echo "restore $PAYLOAD binary 0x0c100000"
+        echo 'set {unsigned long long}0x0c000010 = 1'
+        echo "set {unsigned long long}0x0c000030 = $PAYLOAD_BYTES"
+        echo "restore $DIGEST binary 0x0c000038"
+        echo 'set {unsigned int}0x0c00007c = 2'
+        echo 'continue'
+        echo 'detach'
+        echo 'quit'
+    } > "$GDB_COMMANDS"
+    qemu-system-x86_64 \
+        -no-user-config -monitor none -display none -no-reboot -net none \
+        -machine q35 -cpu qemu64,+rdrand -m 512M -smp 1 -S \
+        -gdb "tcp:127.0.0.1:$GDB_PORT" \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+        -drive "if=none,format=raw,readonly=on,id=up2usb,file=$IMAGE" \
+        -device qemu-xhci,id=xhci \
+        -device usb-storage,bus=xhci.0,drive=up2usb,bootindex=0 \
+        -serial "file:$TRANSCRIPT" >/dev/null 2>&1 &
+    QEMU_PID=$!
+    trap 'kill "$QEMU_PID" 2>/dev/null || true; wait "$QEMU_PID" 2>/dev/null || true' EXIT HUP INT TERM
+    set +e
+    gdb-multiarch -q -nx -batch -x "$GDB_COMMANDS" > "$GDB_LOG" 2>&1 &
+    GDB_PID=$!
+    DCI_READY=0
+    for DCI_WAIT_ATTEMPT in $(seq 1 120); do
+        if grep -aFq 'UP2 DCI UEFI resident-ready mailbox=0x' "$TRANSCRIPT" 2>/dev/null; then
+            DCI_READY=1
+            break
+        fi
+        sleep 0.1
+    done
+    kill -INT "$GDB_PID" 2>/dev/null || true
+    sleep 8
+    kill -INT "$GDB_PID" 2>/dev/null || true
+    wait "$GDB_PID"
+    GDB_RC=$?
+    set -e
+    sleep 1
+    kill "$QEMU_PID" 2>/dev/null || true
+    wait "$QEMU_PID" 2>/dev/null || true
+    trap - EXIT HUP INT TERM
+    test "$DCI_READY" -eq 1 || fail ovmf-dci-resident-not-ready
+    test "$GDB_RC" -eq 0 || fail ovmf-dci-admission-gdb-failed
+    grep -Fq 'magic=0x3130494344325055 nonce=0x' "$GDB_LOG" || fail ovmf-dci-mailbox-not-ready
+    grep -aFq 'nonce-source=firmware-or-rdrand' "$TRANSCRIPT" || fail ovmf-dci-strong-nonce-missing
+    if [ "$EXPECT_REJECT" = 1 ]; then
+        grep -aFq 'UP2 DCI UEFI blocked=payload-sha256' "$TRANSCRIPT" || fail ovmf-dci-bad-hash-not-rejected
+        ! grep -aFq 'UP2 DCI UEFI admitted sha256=' "$TRANSCRIPT" || fail ovmf-dci-bad-hash-admitted
+        ! grep -aFq 'UP2 DCI UEFI transition=multiboot2' "$TRANSCRIPT" || fail ovmf-dci-bad-hash-transitioned
+        ! grep -aFq 'UP2 DCI UEFI fallback=grub' "$TRANSCRIPT" || fail ovmf-dci-bad-hash-fell-back
+    else
+        grep -aFq "UP2 DCI UEFI admitted sha256=$PAYLOAD_SHA bytes=0x$PAYLOAD_HEX_BYTES generation=0x0000000000000001" \
+            "$TRANSCRIPT" || fail ovmf-dci-payload-not-admitted
+        grep -aFq 'UP2 DCI UEFI transition=multiboot2 shim=0x0000000000100020 kernel=0x0000000008000038' \
+            "$TRANSCRIPT" || fail ovmf-dci-transition-missing
+        for marker in '[UP2-SHIM] entry' '[UP2-SHIM] elf64-loaded' '[UP2-SHIM] jump' \
+            '[BOOT32] entry' '[BOOT64] entry' 'UP2 entry' \
+            'UP2 console-ready' 'UP2 filesystem-ready entries=bin,etc,README.txt' \
+            'UP2 shell-ready'; do
+            grep -aFq "$marker" "$TRANSCRIPT" || fail ovmf-dci-boot-marker-missing
+        done
+        ! grep -aFq 'UP2 DCI UEFI fallback=grub' "$TRANSCRIPT" || fail ovmf-dci-unexpected-fallback
+    fi
+    RECEIPT="$RUN_DIR/ovmf-dci-$DCI_CASE.receipt"
+    {
+        echo schema=up2-ovmf-dci-$DCI_CASE-v1
+        echo status=pass
+        echo image_sha256="$IMAGE_SHA"
+        echo payload_sha256="$PAYLOAD_SHA"
+        echo payload_bytes="$PAYLOAD_BYTES"
+        echo mailbox_snapshot=stable
+        echo freshness_nonce=preserved
+        echo freshness_nonce_source=firmware-or-rdrand
+        echo commit_order=payload-descriptor-commit
+        echo payload_contract=simpleos-elf64
+        if [ "$EXPECT_REJECT" = 1 ]; then
+            echo descriptor_sha256=all-zero-negative-fixture
+            echo rejection=payload-sha256
+            echo transition=denied
+        else
+            echo transition=x64-uefi-to-multiboot2-entry32
+            echo simpleos_boot=pass
+        fi
+        echo uart_transcript="$TRANSCRIPT"
+        echo uart_transcript_sha256="$(sha256sum "$TRANSCRIPT" | awk '{print $1}')"
+        echo gdb_log="$GDB_LOG"
+        echo persistent_writes=none
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_ovmf_dci_${DCI_CASE}_status=pass
+    echo payload_sha256="$PAYLOAD_SHA"
+    echo ovmf_dci_${DCI_CASE}_receipt="$RECEIPT"
+}
+
+ovmf_dci_rejection() {
+    UP2_DCI_EXPECT_REJECT=1 ovmf_dci_admission
+}
+
+ovmf_storage() {
+    validate_image_receipts
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || blocked qemu-system-x86_64-missing
+    command -v truncate >/dev/null 2>&1 || blocked truncate-missing
+    command -v fdisk >/dev/null 2>&1 || blocked fdisk-missing
+    command -v mdir >/dev/null 2>&1 || blocked mdir-missing
+    command -v mtype >/dev/null 2>&1 || blocked mtype-missing
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    test -s "$OVMF_CODE" -a -s "$OVMF_VARS_SRC" || blocked ovmf-firmware-missing
+    mkdir -p "$RUN_DIR"
+    OVMF_VARS="$RUN_DIR/OVMF_VARS_4M.fd"
+    SCRATCH_NVME="$RUN_DIR/up2-scratch-nvme.img"
+    TRANSCRIPT="$RUN_DIR/ovmf-storage-uart.log"
+    cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+    truncate -s 64M "$SCRATCH_NVME"
+    CHALLENGE='FORMAT:hex:5550325445535430303031202020202020202020:1:131072'
+    set +e
+    (sleep 15; printf 'nvme format %s\r' "$CHALLENGE"; sleep 40; \
+        printf 'ls /nvme\r'; sleep 4) | \
+        timeout 65 qemu-system-x86_64 \
+        -no-user-config -monitor none -display none -no-reboot -net none \
+        -machine q35 -cpu qemu64 -m 512M -smp 1 \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+        -drive "if=none,format=raw,readonly=on,id=up2usb,file=$IMAGE" \
+        -device qemu-xhci,id=xhci \
+        -device usb-storage,bus=xhci.0,drive=up2usb,bootindex=0 \
+        -drive "if=none,format=raw,id=up2nvme,file=$SCRATCH_NVME" \
+        -device nvme,drive=up2nvme,serial=UP2TEST0001 \
+        -serial stdio > "$TRANSCRIPT" 2>&1
+    QEMU_RC=$?
+    set -e
+    test "$QEMU_RC" -eq 0 -o "$QEMU_RC" -eq 124 || fail ovmf-storage-qemu-failed
+    grep -aFq 'UP2 nvme-identify-ready' "$TRANSCRIPT" || fail ovmf-storage-identify-missing
+    grep -aFq 'media_writes=0' "$TRANSCRIPT" || fail ovmf-storage-readonly-identify-missing
+    grep -aFq 'nvme_storage_status=pass partition=1 filesystem=fat32' "$TRANSCRIPT" || fail ovmf-storage-provision-failed
+    grep -aFq 'read_after_remount_match=1' "$TRANSCRIPT" || fail ovmf-storage-readback-missing
+    grep -aFq '/nvme/proof.txt' "$TRANSCRIPT" || fail ovmf-storage-ls-missing
+    fdisk -l "$SCRATCH_NVME" | grep -q 'Disklabel type: gpt' || fail ovmf-storage-gpt-invalid
+    mdir -i "$SCRATCH_NVME"@@1048576 :: | grep -q 'PROOF.*TXT.*17' || fail ovmf-storage-fat32-list-invalid
+    test "$(mtype -i "$SCRATCH_NVME"@@1048576 ::PROOF.TXT)" = simpleos-up2-nvme || fail ovmf-storage-proof-mismatch
+    RECEIPT="$RUN_DIR/ovmf-storage.receipt"
+    {
+        echo schema=up2-ovmf-storage-v1
+        echo status=pass
+        echo controller_serial=UP2TEST0001
+        echo namespace_lba_count=131072
+        echo partition=1
+        echo filesystem=fat32
+        echo proof_path=/nvme/proof.txt
+        echo proof_payload_sha256="$(printf %s simpleos-up2-nvme | sha256sum | awk '{print $1}')"
+        echo external_gpt_check=pass
+        echo external_fat32_list=pass
+        echo external_file_read=pass
+        echo persistent_writes=dedicated-qemu-scratch-nvme-only
+        echo uart_transcript="$TRANSCRIPT"
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_ovmf_storage_status=pass
+    echo nvme_identify_writes=0
+    echo gpt_status=pass
+    echo fat32_status=pass
+    echo proof_readback=pass
+    echo ovmf_storage_receipt="$RECEIPT"
+}
+
+ovmf_image_provision() {
+    validate_image_receipts
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || blocked qemu-system-x86_64-missing
+    command -v truncate >/dev/null 2>&1 || blocked truncate-missing
+    command -v dd >/dev/null 2>&1 || blocked dd-missing
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    test -s "$OVMF_CODE" -a -s "$OVMF_VARS_SRC" || blocked ovmf-firmware-missing
+    mkdir -p "$RUN_DIR"
+    OVMF_VARS="$RUN_DIR/OVMF_VARS_4M.fd"
+    SCRATCH_NVME="$RUN_DIR/up2-image-scratch-nvme.img"
+    TRANSCRIPT="$RUN_DIR/ovmf-image-provision-uart.log"
+    cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+    truncate -s 64M "$SCRATCH_NVME"
+
+    IMAGE_OFFSET=1048576
+    PROOF_BYTES=4096
+    PROOF_SHA=c8f5d0341d54d951a71b136e6e2afcb14d11ed8489a7ae126a8fee0df6ecf193
+    ZERO_512_SHA=076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560
+    IDENTITY_SHA=b25327a9b138a87ad57620e451e67fccd087e3c653e79fcc10ff96fe3f8b7f90
+    CHALLENGE="UP2-STORAGE-WRITE:$IDENTITY_SHA:$IMAGE_OFFSET:$PROOF_BYTES:$PROOF_SHA"
+    PATTERN_HEX="$(awk 'BEGIN { for (r=0;r<4;r++) for (i=0;i<256;i++) printf "%02x", i }')"
+
+    set +e
+    (sleep 15; printf 'nvme identify\r'; sleep 1; \
+        printf 'nvme image plan %s %s %s\r' "$IMAGE_OFFSET" "$PROOF_BYTES" "$PROOF_SHA"; sleep 1; \
+        printf 'nvme image confirm %s\r' "$CHALLENGE"; sleep 1; \
+        printf 'gdb\r'; sleep 1; \
+        rsp_packet "M0a000000,400:$PATTERN_HEX"; sleep 1; \
+        rsp_packet "M0a000400,400:$PATTERN_HEX"; sleep 1; \
+        rsp_packet "M0a000800,400:$PATTERN_HEX"; sleep 1; \
+        rsp_packet "M0a000c00,400:$PATTERN_HEX"; sleep 1; \
+        rsp_packet D; sleep 1; \
+        printf 'nvme image chunk 0 0 %s %s\r' "$PROOF_BYTES" "$PROOF_SHA"; sleep 2; \
+        printf 'nvme image finish\r'; sleep 5) | \
+        timeout 40 qemu-system-x86_64 \
+        -no-user-config -monitor none -display none -no-reboot -net none \
+        -machine q35 -cpu qemu64 -m 512M -smp 1 \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+        -drive "if=none,format=raw,readonly=on,id=up2usb,file=$IMAGE" \
+        -device qemu-xhci,id=xhci \
+        -device usb-storage,bus=xhci.0,drive=up2usb,bootindex=0 \
+        -drive "if=none,format=raw,id=up2nvme,file=$SCRATCH_NVME" \
+        -device nvme,drive=up2nvme,serial=UP2TEST0001 \
+        -serial stdio > "$TRANSCRIPT" 2>&1
+    QEMU_RC=$?
+    set -e
+    test "$QEMU_RC" -eq 0 -o "$QEMU_RC" -eq 124 || fail ovmf-image-qemu-failed
+    grep -aFq 'nvme_identity_status=pass pci=6966:16 bdf=0:3.0' "$TRANSCRIPT" || fail ovmf-image-identity-missing
+    grep -aFq 'media_writes=0' "$TRANSCRIPT" || fail ovmf-image-readonly-identify-missing
+    test "$(grep -aFo '+$OK#9a' "$TRANSCRIPT" | wc -l | tr -d ' ')" -ge 5 || fail ovmf-image-rsp-acks-missing
+    grep -aFq 'UP2 gdb-rsp-detached' "$TRANSCRIPT" || fail ovmf-image-rsp-detach-missing
+    grep -aFq 'nvme_image_chunk=pass image_offset=0 bytes=4096 next_offset=4096' "$TRANSCRIPT" || fail ovmf-image-chunk-failed
+    grep -aFq "nvme_image_status=pass sha256=$PROOF_SHA bytes=4096 flush=pass fresh_readback=pass" "$TRANSCRIPT" || fail ovmf-image-finish-failed
+
+    HOST_SHA="$(dd if="$SCRATCH_NVME" bs=1 skip="$IMAGE_OFFSET" count="$PROOF_BYTES" status=none | sha256sum | awk '{print $1}')"
+    BEFORE_SHA="$(dd if="$SCRATCH_NVME" bs=1 skip=$((IMAGE_OFFSET - 512)) count=512 status=none | sha256sum | awk '{print $1}')"
+    AFTER_SHA="$(dd if="$SCRATCH_NVME" bs=1 skip=$((IMAGE_OFFSET + PROOF_BYTES)) count=512 status=none | sha256sum | awk '{print $1}')"
+    test "$HOST_SHA" = "$PROOF_SHA" || fail ovmf-image-host-readback-mismatch
+    test "$BEFORE_SHA" = "$ZERO_512_SHA" || fail ovmf-image-before-range-modified
+    test "$AFTER_SHA" = "$ZERO_512_SHA" || fail ovmf-image-after-range-modified
+
+    RECEIPT="$RUN_DIR/ovmf-image-provision.receipt"
+    {
+        echo schema=up2-ovmf-image-provision-v1
+        echo status=pass
+        echo controller_serial=UP2TEST0001
+        echo byte_start="$IMAGE_OFFSET"
+        echo byte_length="$PROOF_BYTES"
+        echo staging_packets=4
+        echo staging_packet_bytes=1024
+        echo image_sha256="$PROOF_SHA"
+        echo target_chunk_hash=pass
+        echo nvme_flush=pass
+        echo target_fresh_adapter_readback=pass
+        echo host_exact_readback=pass
+        echo surrounding_ranges_unchanged=pass
+        echo persistent_writes=dedicated-qemu-scratch-nvme-only
+        echo uart_transcript="$TRANSCRIPT"
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_ovmf_image_provision_status=pass
+    echo image_sha256="$PROOF_SHA"
+    echo host_exact_readback=pass
+    echo surrounding_ranges_unchanged=pass
+    echo ovmf_image_provision_receipt="$RECEIPT"
+}
+
+ovmf_nvme_boot() {
+    validate_image_receipts
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || blocked qemu-system-x86_64-missing
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    test -s "$OVMF_CODE" -a -s "$OVMF_VARS_SRC" || blocked ovmf-firmware-missing
+    mkdir -p "$RUN_DIR"
+    OVMF_VARS="$RUN_DIR/OVMF_VARS_4M.fd"
+    NVME_BOOT_IMAGE="$RUN_DIR/up2-nvme-boot.img"
+    TRANSCRIPT="$RUN_DIR/ovmf-nvme-boot-uart.log"
+    cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+    cp "$IMAGE" "$NVME_BOOT_IMAGE"
+    set +e
+    (sleep 15; printf 'ls /\r'; sleep 4) | \
+        timeout 25 qemu-system-x86_64 \
+        -no-user-config -monitor none -display none -no-reboot -net none \
+        -machine q35 -cpu qemu64 -m 512M -smp 1 \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+        -drive "if=none,format=raw,id=up2nvmeboot,file=$NVME_BOOT_IMAGE" \
+        -device nvme,drive=up2nvmeboot,serial=UP2BOOT0001,bootindex=0 \
+        -serial stdio > "$TRANSCRIPT" 2>&1
+    QEMU_RC=$?
+    set -e
+    test "$QEMU_RC" -eq 0 -o "$QEMU_RC" -eq 124 || fail ovmf-nvme-boot-qemu-failed
+    grep -aFq 'BdsDxe: starting Boot' "$TRANSCRIPT" || fail ovmf-nvme-boot-firmware-handoff-missing
+    grep -aFq 'UP2 DCI UEFI resident-ready mailbox=0x' "$TRANSCRIPT" || fail ovmf-nvme-boot-mailbox-missing
+    grep -aFq 'UP2 DCI UEFI fallback=grub' "$TRANSCRIPT" || fail ovmf-nvme-boot-fallback-missing
+    grep -aFq 'UP2 loader-ready' "$TRANSCRIPT" || fail ovmf-nvme-boot-loader-missing
+    grep -aFq 'UP2 kernel-admitted' "$TRANSCRIPT" || fail ovmf-nvme-boot-kernel-admission-missing
+    grep -aFq 'UP2 shell-ready' "$TRANSCRIPT" || fail ovmf-nvme-boot-shell-missing
+    grep -aFq 'UP2 ls-end status=pass' "$TRANSCRIPT" || fail ovmf-nvme-boot-ls-failed
+    grep -aFq 'UP2 nvme-identify-ready' "$TRANSCRIPT" || fail ovmf-nvme-boot-identify-missing
+    grep -aFq 'media_writes=0' "$TRANSCRIPT" || fail ovmf-nvme-boot-unexpected-write
+    LS_BEGIN_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-begin source=vfs command=ls /')"
+    LS_END_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-end status=pass')"
+    WINDOW="$(sed -n "${LS_BEGIN_LINE},${LS_END_LINE}p" "$TRANSCRIPT" | tr -d '\r')"
+    printf '%s\n' "$WINDOW" | grep -Fxq /bin || fail ovmf-nvme-boot-ls-bin-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /etc || fail ovmf-nvme-boot-ls-etc-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /README.txt || fail ovmf-nvme-boot-ls-readme-missing
+    test "$(sha256sum "$NVME_BOOT_IMAGE" | awk '{print $1}')" = "$IMAGE_SHA" || fail ovmf-nvme-boot-image-mutated
+    RECEIPT="$RUN_DIR/ovmf-nvme-boot.receipt"
+    {
+        echo schema=up2-ovmf-nvme-boot-v1
+        echo status=pass
+        echo boot_transport=nvme
+        echo usb_attached=false
+        echo controller_serial=UP2BOOT0001
+        echo image_sha256="$IMAGE_SHA"
+        echo firmware_handoff=pass
+        echo resident_dci_mailbox=published
+        echo resident_fallback=grub
+        echo kernel_admission=pass
+        echo shell=pass
+        echo ls_source=vfs
+        echo ls_entries=bin,etc,README.txt
+        echo media_writes=0
+        echo uart_transcript="$TRANSCRIPT"
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_ovmf_nvme_boot_status=pass
+    echo usb_attached=false
+    echo ls_entries=bin,etc,README.txt
+    echo ovmf_nvme_boot_receipt="$RECEIPT"
+}
+
+image_reproducibility() {
+    test -s "$KERNEL" -a -s "$KERNEL.receipt" || blocked kernel-or-receipt-missing
+    POLICY_SPEC="$ROOT_DIR/test/03_system/os/up_squared_apl_intel_dci_debug_spec.spl"
+    test -s "$POLICY_SPEC" || blocked dci-policy-spec-missing
+    FIXTURE_HASH="$(awk -F'"' '/^val IMAGE_HASH:/ {print $2; exit}' "$POLICY_SPEC")"
+    FIXTURE_BYTES="$(sed -n 's/^val IMAGE_SIZE: u64 = \([0-9][0-9]*\)u64$/\1/p' "$POLICY_SPEC")"
+    KERNEL_HASH="$(sha256sum "$KERNEL" | awk '{print $1}')"
+    KERNEL_BYTES="$(wc -c < "$KERNEL" | tr -d ' ')"
+    test "$FIXTURE_HASH" = "$KERNEL_HASH" || fail dci-policy-fixture-hash-stale
+    test "$FIXTURE_BYTES" = "$KERNEL_BYTES" || fail dci-policy-fixture-size-stale
+    mkdir -p "$RUN_DIR"
+    TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/simpleos-up2-repro.XXXXXX")"
+    test -n "$TMP_ROOT" -a -d "$TMP_ROOT" || fail reproducibility-temp-missing
+    trap 'rm -rf -- "$TMP_ROOT"' EXIT HUP INT TERM
+    REPRO_A="$TMP_ROOT/a"
+    REPRO_B="$TMP_ROOT/b"
+    LOG_A="$RUN_DIR/repro-build-a.log"
+    LOG_B="$RUN_DIR/repro-build-b.log"
+    REPRO_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}"
+    REPRO_DISK_GUID="${UP2_DISK_GUID:-53494D50-4C45-4F53-A550-325545464930}"
+    REPRO_ESP_GUID="${UP2_ESP_GUID:-53494D50-4C45-4F53-A550-324553503031}"
+    REPRO_FAT_ID="${UP2_FAT_VOLUME_ID:-53494D50}"
+    REPRO_FAT_SERIAL="$(printf '%s' "$REPRO_FAT_ID" | sed -E 's/^(.{4})(.{4})$/\1-\2/')"
+    set +e
+    SOURCE_DATE_EPOCH="$REPRO_EPOCH" UP2_DISK_GUID="$REPRO_DISK_GUID" \
+        UP2_ESP_GUID="$REPRO_ESP_GUID" UP2_FAT_VOLUME_ID="$REPRO_FAT_ID" \
+        UP2_USB_OUT_DIR="$REPRO_A" \
+        sh "$ROOT_DIR/scripts/os/build-simpleos-up-squared-usb-image.shs" \
+        > "$LOG_A" 2>&1 &
+    PID_A=$!
+    SOURCE_DATE_EPOCH="$REPRO_EPOCH" UP2_DISK_GUID="$REPRO_DISK_GUID" \
+        UP2_ESP_GUID="$REPRO_ESP_GUID" UP2_FAT_VOLUME_ID="$REPRO_FAT_ID" \
+        UP2_USB_OUT_DIR="$REPRO_B" \
+        sh "$ROOT_DIR/scripts/os/build-simpleos-up-squared-usb-image.shs" \
+        > "$LOG_B" 2>&1 &
+    PID_B=$!
+    wait "$PID_A"
+    RC_A=$?
+    wait "$PID_B"
+    RC_B=$?
+    set -e
+    test "$RC_A" -eq 0 -a "$RC_B" -eq 0 || {
+        tail -40 "$LOG_A" "$LOG_B"
+        fail reproducibility-build-failed
+    }
+    IMAGE_A="$REPRO_A/board-usb.img"
+    IMAGE_B="$REPRO_B/board-usb.img"
+    test -s "$IMAGE_A" -a -s "$IMAGE_B" || fail reproducibility-image-missing
+    cmp -s "$IMAGE_A" "$IMAGE_B" || fail reproducibility-image-mismatch
+    for COMPONENT in \
+        esp.img \
+        esp-stage/EFI/BOOT/BOOTX64.EFI \
+        esp-stage/EFI/BOOT/GRUBX64.EFI \
+        esp-stage/startup.nsh \
+        multiboot2-elf64-loader.elf; do
+        cmp -s "$REPRO_A/$COMPONENT" "$REPRO_B/$COMPONENT" || \
+            fail reproducibility-component-mismatch
+    done
+    REPRO_SHA="$(sha256sum "$IMAGE_A" | awk '{print $1}')"
+    REPRO_BYTES="$(wc -c < "$IMAGE_A" | tr -d ' ')"
+    RECEIPT="$RUN_DIR/image-reproducibility.receipt"
+    {
+        echo schema=up2-image-reproducibility-v1
+        echo status=pass
+        echo source_date_epoch="$REPRO_EPOCH"
+        echo disk_guid="$REPRO_DISK_GUID"
+        echo esp_guid="$REPRO_ESP_GUID"
+        echo fat_serial="$REPRO_FAT_SERIAL"
+        echo image_sha256="$REPRO_SHA"
+        echo image_bytes="$REPRO_BYTES"
+        echo kernel_sha256="$KERNEL_HASH"
+        echo kernel_bytes="$KERNEL_BYTES"
+        echo dci_policy_fixture=current
+        echo full_image_cmp=identical
+        echo stable_components=esp,bootx64,grubx64,startup,elf32-shim
+        echo build_a_log="$LOG_A"
+        echo build_b_log="$LOG_B"
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    rm -rf -- "$TMP_ROOT"
+    trap - EXIT HUP INT TERM
+    echo up2_image_reproducibility_status=pass
+    echo image_sha256="$REPRO_SHA"
+    echo image_reproducibility_receipt="$RECEIPT"
+}
+
+live() {
+    case "$BOOT_SECONDS" in ''|*[!0-9]*) fail invalid-boot-timeout ;; esac
+    validate_receipts
+    UART="$(resolve_uart)"
+    mkdir -p "$RUN_DIR"
+    TRANSCRIPT="$RUN_DIR/up2-uart.log"
+    : > "$TRANSCRIPT"
+    stty -F "$UART" 115200 cs8 -cstopb -parenb -crtscts -ixon -ixoff raw -echo
+    timeout "$BOOT_SECONDS" dd if="$UART" of="$TRANSCRIPT" bs=1 count=4194304 status=none &
+    CAPTURE_PID=$!
+    trap 'kill "$CAPTURE_PID" 2>/dev/null || true; wait "$CAPTURE_PID" 2>/dev/null || true' EXIT HUP INT TERM
+
+    START="$(date +%s)"
+    while ! grep -aFq 'UP2 shell-ready' "$TRANSCRIPT"; do
+        sleep 0.1
+        NOW="$(date +%s)"
+        test "$((NOW - START))" -lt "$BOOT_SECONDS" || break
+    done
+    if ! grep -aFq 'UP2 shell-ready' "$TRANSCRIPT"; then
+        if grep -aFq 'UP2 entry' "$TRANSCRIPT"; then fail boot-incomplete-after-entry; fi
+        blocked up2-board-uart-not-observed
+    fi
+
+    printf 'ls /\r' > "$UART"
+    LS_START="$(date +%s)"
+    while ! grep -aFq 'UP2 ls-end status=pass' "$TRANSCRIPT"; do
+        sleep 0.05
+        NOW="$(date +%s)"
+        test "$((NOW - LS_START))" -lt 10 || break
+    done
+    grep -aFq 'UP2 ls-end status=pass' "$TRANSCRIPT" || fail ls-timeout
+    kill "$CAPTURE_PID" 2>/dev/null || true
+    wait "$CAPTURE_PID" 2>/dev/null || true
+    trap - EXIT HUP INT TERM
+
+    grep -aFq 'UP2 entry' "$TRANSCRIPT" || fail entry-marker-missing
+    grep -aFq 'UP2 console-ready' "$TRANSCRIPT" || fail console-marker-missing
+    grep -aFq 'UP2 filesystem-ready entries=' "$TRANSCRIPT" || fail filesystem-marker-missing
+    grep -aFq 'UP2 ls-begin source=vfs command=ls /' "$TRANSCRIPT" || fail ls-begin-missing
+    ENTRY_LINE="$(line_number "$TRANSCRIPT" 'UP2 entry')"
+    CONSOLE_LINE="$(line_number "$TRANSCRIPT" 'UP2 console-ready')"
+    FS_LINE="$(line_number "$TRANSCRIPT" 'UP2 filesystem-ready entries=')"
+    SHELL_LINE="$(line_number "$TRANSCRIPT" 'UP2 shell-ready')"
+    LS_BEGIN_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-begin source=vfs command=ls /')"
+    LS_END_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-end status=pass')"
+    test "$ENTRY_LINE" -lt "$CONSOLE_LINE" -a "$CONSOLE_LINE" -lt "$FS_LINE" -a "$FS_LINE" -lt "$SHELL_LINE" || fail boot-marker-order
+    test "$SHELL_LINE" -lt "$LS_BEGIN_LINE" -a "$LS_BEGIN_LINE" -lt "$LS_END_LINE" || fail ls-correlation-order
+    WINDOW="$(sed -n "${LS_BEGIN_LINE},${LS_END_LINE}p" "$TRANSCRIPT" | tr -d '\r')"
+    printf '%s\n' "$WINDOW" | grep -Fxq /bin || fail ls-bin-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /etc || fail ls-etc-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /README.txt || fail ls-readme-missing
+
+    RECEIPT="$RUN_DIR/live.receipt"
+    {
+        echo schema=up2-live-v1
+        echo status=pass
+        echo board=x86_64-up-squared-apollo-lake
+        echo firmware=uefi
+        echo loader=EFI/BOOT/BOOTX64.EFI
+        echo kernel_sha256="$KERNEL_SHA"
+        echo image_sha256="$IMAGE_SHA"
+        echo media_receipt="$MEDIA_RECEIPT"
+        echo marker_order=pass
+        echo ls_command='ls /'
+        echo ls_source=vfs
+        echo ls_entries=bin,etc,README.txt
+        echo uart_transcript="$TRANSCRIPT"
+        echo uart_transcript_sha256="$(sha256sum "$TRANSCRIPT" | awk '{print $1}')"
+        echo persistent_writes=selected-removable-usb-only
+        echo completed_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_status=pass
+    echo board_identity=x86_64-up-squared-apollo-lake
+    echo marker_order=pass
+    echo ls_status=pass
+    echo 'ls_command=ls /'
+    echo ls_source=vfs
+    echo ls_entries=bin,etc,README.txt
+    echo uart_transcript="$TRANSCRIPT"
+    echo live_receipt="$RECEIPT"
+}
+
+case "$MODE" in
+    --contract) contract ;;
+    --self-test) self_test ;;
+    --ovmf) ovmf ;;
+    --ovmf-storage) ovmf_storage ;;
+    --ovmf-dci-admission) ovmf_dci_admission ;;
+    --ovmf-dci-rejection) ovmf_dci_rejection ;;
+    --ovmf-image-provision) ovmf_image_provision ;;
+    --ovmf-nvme-boot) ovmf_nvme_boot ;;
+    --image-reproducibility) image_reproducibility ;;
+    --live) live ;;
+    *) echo "usage: $0 --contract|--self-test|--image-reproducibility|--ovmf|--ovmf-dci-admission|--ovmf-dci-rejection|--ovmf-storage|--ovmf-image-provision|--ovmf-nvme-boot|--live" >&2; exit 1 ;;
+esac

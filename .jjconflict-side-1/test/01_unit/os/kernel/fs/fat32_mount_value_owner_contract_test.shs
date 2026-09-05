@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+fat32=$repo/src/os/kernel/fs/_Fat32Filesystem/mount_and_read.spl
+boot=$repo/src/os/kernel/boot/boot_fs_mount.spl
+
+grep -Fq 'me mount(dev: BlockDevice) -> Result<(), i32>:' "$fat32" || {
+    echo 'FAIL: FAT32 mount must mutate its caller-owned value' >&2
+    exit 1
+}
+grep -Fq 'var fs = Fat32Filesystem.new(0u64)' "$boot" || {
+    echo 'FAIL: boot mount owner must retain the mutable filesystem value' >&2
+    exit 1
+}
+
+mount_line=$(grep -nF 'val mount_r = fs.mount(dev)' "$boot" | cut -d: -f1)
+publish_line=$(grep -nF 'fat32_mount_publish(fs, dev)' "$boot" | cut -d: -f1)
+if [ -z "$mount_line" ] || [ -z "$publish_line" ] || [ "$mount_line" -ge "$publish_line" ]; then
+    echo 'FAIL: boot owner must mount before publishing the same filesystem value' >&2
+    exit 1
+fi
+
+echo 'PASS: FAT32 mount state remains with the boot publication owner'

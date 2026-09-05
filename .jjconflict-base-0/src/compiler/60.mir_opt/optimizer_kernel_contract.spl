@@ -1,0 +1,102 @@
+# Versioned optimizer-kernel identity, deterministic selection, and cache projection.
+# Additive P4/P5 bridge: it does not change MIR semantics or backend admission.
+
+use std.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq, action_key_sort_texts}
+
+struct OptimizerPluginIdentityV1:
+    name: text
+    version: text
+    interface_digest: text
+    implementation_digest: text
+
+impl OptimizerPluginIdentityV1:
+    fn canonical() -> text:
+        canon_field("simple/optimizer-plugin-identity/v1", canon_seq([
+            canon_field("name", canon_str(self.name)),
+            canon_field("version", canon_str(self.version)),
+            canon_field("interface", canon_str(self.interface_digest)),
+            canon_field("implementation", canon_str(self.implementation_digest)),
+        ]))
+
+    fn digest() -> text:
+        sha256_text(self.canonical())
+
+    fn valid() -> bool:
+        self.name != "" and self.version != "" and self.interface_digest != "" and self.implementation_digest != ""
+
+struct OptimizerKernelSelectionV1:
+    identity: OptimizerPluginIdentityV1
+    used_legacy_fallback: bool
+    reason: text
+
+fn optimizer_kernel_select(
+    candidates: [OptimizerPluginIdentityV1],
+    requested_name: text,
+    allow_legacy_fallback: bool,
+    legacy_identity: OptimizerPluginIdentityV1,
+) -> Result<OptimizerKernelSelectionV1, text>:
+    var selected: OptimizerPluginIdentityV1? = nil
+    for candidate in candidates:
+        if not candidate.valid():
+            return Err("invalid optimizer plugin identity: " + candidate.name)
+        if candidate.name == requested_name:
+            match selected:
+                Some(existing):
+                    if existing.digest() != candidate.digest():
+                        return Err("conflicting optimizer plugin identities for: " + requested_name)
+                nil:
+                    selected = Some(candidate)
+    match selected:
+        Some(identity):
+            Ok(OptimizerKernelSelectionV1(identity, false, "requested-plugin"))
+        nil:
+            if allow_legacy_fallback:
+                if not legacy_identity.valid():
+                    return Err("invalid explicit legacy optimizer identity")
+                Ok(OptimizerKernelSelectionV1(legacy_identity, true, "explicit-legacy-fallback"))
+            else:
+                Err("optimizer plugin unavailable: " + requested_name)
+
+struct OptimizerKernelCacheIdentityV1:
+    producer_identity: text
+    target: text
+    plugin_identity: OptimizerPluginIdentityV1
+    optimization_level: text
+    profile_flags: [text]
+
+fn optimizer_kernel_cache_key(identity: OptimizerKernelCacheIdentityV1) -> text:
+    val sorted_flags = action_key_sort_texts(identity.profile_flags)
+    var encoded_flags: [text] = []
+    for flag in sorted_flags:
+        encoded_flags.push(canon_str(flag))
+    sha256_text(canon_field("simple/optimizer-kernel-cache/v1", canon_seq([
+        canon_field("producer", canon_str(identity.producer_identity)),
+        canon_field("target", canon_str(identity.target)),
+        canon_field("plugin", canon_str(identity.plugin_identity.canonical())),
+        canon_field("optimization", canon_str(identity.optimization_level)),
+        canon_field("profileFlags", canon_seq(encoded_flags)),
+    ])))
+
+struct OptimizerKernelReceiptV1:
+    action_key: text
+    plugin_digest: text
+    cache_hit: bool
+    used_legacy_fallback: bool
+    reason: text
+
+fn optimizer_kernel_receipt(
+    expected_key: text,
+    observed_key: text,
+    content_valid: bool,
+    selection: OptimizerKernelSelectionV1,
+) -> OptimizerKernelReceiptV1:
+    if not content_valid:
+        return OptimizerKernelReceiptV1(expected_key, selection.identity.digest(), false, selection.used_legacy_fallback, "corrupt-content")
+    if expected_key != observed_key:
+        return OptimizerKernelReceiptV1(expected_key, selection.identity.digest(), false, selection.used_legacy_fallback, "identity-mismatch")
+    OptimizerKernelReceiptV1(expected_key, selection.identity.digest(), true, selection.used_legacy_fallback, "verified-hit")
+
+export OptimizerPluginIdentityV1, OptimizerKernelSelectionV1
+export OptimizerKernelCacheIdentityV1, OptimizerKernelReceiptV1
+export optimizer_kernel_select, optimizer_kernel_cache_key, optimizer_kernel_receipt

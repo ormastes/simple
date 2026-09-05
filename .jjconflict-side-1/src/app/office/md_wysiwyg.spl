@@ -1,0 +1,149 @@
+# Markdown WYSIWYG View
+#
+# A side-by-side editor view-model: each editable markdown source line is paired
+# with its rendered styled-HTML preview (via the shared office style resolver),
+# so an IDE can show a WYSIWYG preview *beside* line-by-line source editing.
+#
+# This is a pure model→view transform (no GUI dependency), so the IDE's TUI and
+# GUI surfaces can both consume it.
+
+use std.common.markdown.render.{render_markdown_line_styled_html, render_markdown_code_line_styled_html}
+use std.common.markdown.utilities.{markdown_is_code_fence}
+
+# One editor row: the source line and its rendered preview.
+struct WysiwygLine:
+    line_no: i32
+    source: text
+    rendered: text
+
+# The full side-by-side view: source lines paired with previews.
+struct WysiwygView:
+    lines: [WysiwygLine]
+
+struct WysiwygEditResult:
+    accepted: bool
+    reason: text
+    line_no: i32
+    expected_source: text
+    actual_source: text
+    new_source: text
+    diff: text
+    view: WysiwygView
+
+fn build_wysiwyg_view(source: text) -> WysiwygView:
+    """Split markdown source into lines and pair each with its styled preview.
+
+    Fenced code blocks are tracked across lines: the ``` delimiters are hidden and
+    the lines between them render as preformatted monospace (preserving
+    indentation), instead of being mis-parsed as paragraphs or headings."""
+    var lines: [WysiwygLine] = []
+    val raw_lines = source.split("\n")
+    var n = 0
+    var in_fence = false
+    for ln in raw_lines:
+        var rendered = ""
+        if markdown_is_code_fence(ln):
+            # The ``` delimiter line toggles fence state and is not itself shown.
+            in_fence = not in_fence
+        elif in_fence:
+            rendered = render_markdown_code_line_styled_html(ln)
+        else:
+            rendered = render_markdown_line_styled_html(ln)
+        lines.push(WysiwygLine(line_no: n, source: ln, rendered: rendered))
+        n = n + 1
+    WysiwygView(lines: lines)
+
+fn wysiwyg_line_count(view: WysiwygView) -> i32:
+    """Number of editor rows."""
+    view.lines.len()
+
+fn wysiwyg_source_pane(view: WysiwygView) -> text:
+    """The left (source) pane: the original markdown, line by line."""
+    var out: [text] = []
+    for l in view.lines:
+        out.push(l.source)
+    out.join("\n")
+
+fn wysiwyg_preview_pane(view: WysiwygView) -> text:
+    """The right (preview) pane: the rendered styled HTML for all lines."""
+    var out = "<div class=\"wysiwyg-preview\">"
+    for l in view.lines:
+        out = "{out}{l.rendered}"
+    "{out}</div>"
+
+fn wysiwyg_update_line(view: WysiwygView, line_no: i32, new_source: text) -> WysiwygView:
+    """Return a new view with one source line edited and its preview re-rendered,
+    leaving the other rows untouched — the core of beside-the-line editing."""
+    var lines: [WysiwygLine] = []
+    for l in view.lines:
+        if l.line_no == line_no:
+            lines.push(WysiwygLine(line_no: l.line_no, source: new_source, rendered: render_markdown_line_styled_html(new_source)))
+        else:
+            lines.push(l)
+    WysiwygView(lines: lines)
+
+fn wysiwyg_edit_diff(line_no: i32, expected_source: text, actual_source: text, new_source: text, accepted: bool) -> text:
+    """A compact, deterministic diff for command/edit automation."""
+    if accepted:
+        return "@@ line {line_no} @@\n- {expected_source}\n+ {new_source}"
+    "@@ line {line_no} @@\nexpected: {expected_source}\nactual: {actual_source}\nrejected: {new_source}"
+
+fn wysiwyg_update_line_checked(view: WysiwygView, line_no: i32, expected_source: text, new_source: text) -> WysiwygEditResult:
+    """Apply an edit only when the caller's expected line matches the current line.
+
+    This is the fail-closed command/edit contract for LLM-driven updates: if the
+    model thinks a line exists but the actual line differs, the update is rejected
+    with both values and a deterministic diff summary.
+    """
+    var lines: [WysiwygLine] = []
+    var found = false
+    var actual_source = ""
+    for l in view.lines:
+        if l.line_no == line_no:
+            found = true
+            actual_source = l.source
+            if l.source == expected_source:
+                lines.push(WysiwygLine(line_no: l.line_no, source: new_source, rendered: render_markdown_line_styled_html(new_source)))
+            else:
+                lines.push(l)
+        else:
+            lines.push(l)
+
+    if not found:
+        val diff = wysiwyg_edit_diff(line_no, expected_source, "<missing>", new_source, false)
+        return WysiwygEditResult(
+            accepted: false,
+            reason: "line-not-found",
+            line_no: line_no,
+            expected_source: expected_source,
+            actual_source: "<missing>",
+            new_source: new_source,
+            diff: diff,
+            view: view,
+        )
+
+    if actual_source != expected_source:
+        val diff = wysiwyg_edit_diff(line_no, expected_source, actual_source, new_source, false)
+        return WysiwygEditResult(
+            accepted: false,
+            reason: "stale-line",
+            line_no: line_no,
+            expected_source: expected_source,
+            actual_source: actual_source,
+            new_source: new_source,
+            diff: diff,
+            view: view,
+        )
+
+    val updated = WysiwygView(lines: lines)
+    val diff = wysiwyg_edit_diff(line_no, expected_source, actual_source, new_source, true)
+    WysiwygEditResult(
+        accepted: true,
+        reason: "updated",
+        line_no: line_no,
+        expected_source: expected_source,
+        actual_source: actual_source,
+        new_source: new_source,
+        diff: diff,
+        view: updated,
+    )

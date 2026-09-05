@@ -1,0 +1,185 @@
+# Executable fixed-record storage conversion oracle for AoS, SoA, AoSoA, and
+# pinned external layouts. This is semantic reference code, not backend
+# lowering: optimized implementations must produce byte-equivalent logical
+# fields or fall back to this checked path.
+
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageLayoutPlanV1,
+    storage_layout_plan_v1_well_formed
+}
+use std.common.structural.storage_layout.mapping.{
+    storage_layout_project,
+    storage_projection_request_v1
+}
+
+val STORAGE_REFERENCE_MAX_BYTES: i64 = 67108864
+
+struct StorageReferenceFieldV1:
+    logical_offset: i64
+    field_size: i64
+    column_offset: i64
+    field_block_offset: i64
+
+struct StorageReferenceShapeV1:
+    element_count: i64
+    logical_stride: i64
+    physical_bytes: i64
+    block_stride: i64
+    fields: [StorageReferenceFieldV1]
+
+struct StorageReferenceConversionResultV1:
+    ok: bool
+    bytes: [u8]
+    reason: text
+
+fn storage_reference_field_v1(
+    logical_offset: i64,
+    field_size: i64,
+    column_offset: i64,
+    field_block_offset: i64
+) -> StorageReferenceFieldV1:
+    StorageReferenceFieldV1(
+        logical_offset: logical_offset, field_size: field_size,
+        column_offset: column_offset, field_block_offset: field_block_offset)
+
+fn storage_reference_shape_v1(
+    element_count: i64,
+    logical_stride: i64,
+    physical_bytes: i64,
+    block_stride: i64,
+    fields: [StorageReferenceFieldV1]
+) -> StorageReferenceShapeV1:
+    StorageReferenceShapeV1(
+        element_count: element_count, logical_stride: logical_stride,
+        physical_bytes: physical_bytes, block_stride: block_stride,
+        fields: fields)
+
+fn storage_reference_failure(reason: text) -> StorageReferenceConversionResultV1:
+    StorageReferenceConversionResultV1(ok: false, bytes: [], reason: reason)
+
+fn storage_reference_shapes_compatible(
+    source: StorageReferenceShapeV1,
+    destination: StorageReferenceShapeV1
+) -> bool:
+    if source.element_count != destination.element_count
+        or source.logical_stride != destination.logical_stride
+        or source.fields.len() != destination.fields.len():
+        return false
+    var i = 0
+    while i < source.fields.len():
+        if source.fields[i].logical_offset != destination.fields[i].logical_offset
+            or source.fields[i].field_size != destination.fields[i].field_size:
+            return false
+        i = i + 1
+    true
+
+fn storage_reference_shape_well_formed(
+    plan: StorageLayoutPlanV1,
+    shape: StorageReferenceShapeV1
+) -> bool:
+    if not storage_layout_plan_v1_well_formed(plan):
+        return false
+    if shape.element_count < 0 or shape.logical_stride <= 0
+        or shape.physical_bytes < 0 or shape.block_stride < 0
+        or shape.fields.len() == 0:
+        return false
+    if shape.physical_bytes > STORAGE_REFERENCE_MAX_BYTES:
+        return false
+    var i = 0
+    while i < shape.fields.len():
+        val field = shape.fields[i]
+        if field.logical_offset < 0 or field.field_size <= 0
+            or field.logical_offset > shape.logical_stride - field.field_size:
+            return false
+        var j = i + 1
+        while j < shape.fields.len():
+            val other = shape.fields[j]
+            val field_end = field.logical_offset + field.field_size
+            val other_end = other.logical_offset + other.field_size
+            if field.logical_offset < other_end and other.logical_offset < field_end:
+                return false
+            j = j + 1
+        i = i + 1
+    if shape.element_count == 0:
+        return shape.physical_bytes == 0
+    var occupied: [bool] = []
+    var physical_index = 0
+    while physical_index < shape.physical_bytes:
+        occupied.push(false)
+        physical_index = physical_index + 1
+    i = 0
+    while i < shape.fields.len():
+        var element = 0
+        while element < shape.element_count:
+            val projected = storage_layout_project(plan,
+                storage_projection_request_v1(
+                    element, shape.element_count,
+                    shape.fields[i].logical_offset, shape.fields[i].field_size,
+                    shape.logical_stride, shape.fields[i].column_offset,
+                    shape.block_stride, shape.fields[i].field_block_offset))
+            if not projected.ok or projected.byte_offset < 0
+                or projected.byte_offset > shape.physical_bytes - shape.fields[i].field_size:
+                return false
+            var byte_index = 0
+            while byte_index < shape.fields[i].field_size:
+                val address = projected.byte_offset + byte_index
+                if occupied[address]:
+                    return false
+                occupied[address] = true
+                byte_index = byte_index + 1
+            element = element + 1
+        i = i + 1
+    true
+
+fn storage_reference_convert(
+    source_plan: StorageLayoutPlanV1,
+    source_shape: StorageReferenceShapeV1,
+    source_bytes: [u8],
+    destination_plan: StorageLayoutPlanV1,
+    destination_shape: StorageReferenceShapeV1
+) -> StorageReferenceConversionResultV1:
+    if not storage_reference_shape_well_formed(source_plan, source_shape):
+        return storage_reference_failure("invalid-source-shape")
+    if not storage_reference_shape_well_formed(destination_plan, destination_shape):
+        return storage_reference_failure("invalid-destination-shape")
+    if source_plan.logical_type_id != destination_plan.logical_type_id:
+        return storage_reference_failure("logical-type-mismatch")
+    if not storage_reference_shapes_compatible(source_shape, destination_shape):
+        return storage_reference_failure("incompatible-logical-schema")
+    if source_bytes.len() != source_shape.physical_bytes:
+        return storage_reference_failure("source-byte-length-mismatch")
+
+    var destination: [u8] = []
+    var fill = 0
+    while fill < destination_shape.physical_bytes:
+        destination.push(0u8)
+        fill = fill + 1
+
+    var element = 0
+    while element < source_shape.element_count:
+        var field_index = 0
+        while field_index < source_shape.fields.len():
+            val source_field = source_shape.fields[field_index]
+            val destination_field = destination_shape.fields[field_index]
+            val source_projection = storage_layout_project(source_plan,
+                storage_projection_request_v1(
+                    element, source_shape.element_count,
+                    source_field.logical_offset, source_field.field_size,
+                    source_shape.logical_stride, source_field.column_offset,
+                    source_shape.block_stride, source_field.field_block_offset))
+            val destination_projection = storage_layout_project(destination_plan,
+                storage_projection_request_v1(
+                    element, destination_shape.element_count,
+                    destination_field.logical_offset, destination_field.field_size,
+                    destination_shape.logical_stride, destination_field.column_offset,
+                    destination_shape.block_stride, destination_field.field_block_offset))
+            if not source_projection.ok or not destination_projection.ok:
+                return storage_reference_failure("projection-failed")
+            var byte_index = 0
+            while byte_index < source_field.field_size:
+                destination[destination_projection.byte_offset + byte_index] =
+                    source_bytes[source_projection.byte_offset + byte_index]
+                byte_index = byte_index + 1
+            field_index = field_index + 1
+        element = element + 1
+    StorageReferenceConversionResultV1(ok: true, bytes: destination, reason: "")

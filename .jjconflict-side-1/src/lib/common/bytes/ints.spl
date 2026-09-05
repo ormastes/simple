@@ -1,0 +1,184 @@
+# ============================================================================
+# common/bytes/ints.spl — typed fixed-width endian integer views
+#
+# U16le/U32le/U64le and U16be/U32be/U64be carry a value plus the knowledge of
+# how to load/store themselves from/to a ByteSpan or ByteBuffer. These replace
+# scattered `(b0 << 8) | b1` open-coded endian shuffles.
+#
+# Each type:
+#   static load(span, off)  -> Self        (little/big-endian decode)
+#   me store(buf)                            (append big/little-endian bytes)
+#   fn value() -> i64                        (the decoded integer)
+#   fn to_span() -> ByteSpan                 (encoded bytes as a span)
+# ============================================================================
+
+use lib.common.bytes.span.{ByteSpan, ByteBuffer}
+
+# ----------------------------------------------------------------------------
+# Little-endian
+# ----------------------------------------------------------------------------
+struct U16le:
+    raw: i64
+
+impl U16le:
+    static fn of(v: i64) -> U16le:
+        U16le(raw: v & 0xFFFF)
+
+    static fn load(span: ByteSpan, off: i64) -> U16le:
+        val b0 = span.get(off).to_i64()
+        val b1 = span.get(off + 1).to_i64()
+        U16le(raw: b0 | (b1 << 8))
+
+    fn value() -> i64:
+        self.raw
+
+    me store(buf: ByteBuffer):
+        buf.push_byte(self.raw)
+        buf.push_byte(self.raw >> 8)
+
+    fn to_span() -> ByteSpan:
+        var b = ByteBuffer.new()
+        b.push_byte(self.raw)
+        b.push_byte(self.raw >> 8)
+        b.freeze()
+
+struct U32le:
+    raw: i64
+
+impl U32le:
+    static fn of(v: i64) -> U32le:
+        U32le(raw: v & 0xFFFFFFFF)
+
+    static fn load(span: ByteSpan, off: i64) -> U32le:
+        val b0 = span.get(off).to_i64()
+        val b1 = span.get(off + 1).to_i64()
+        val b2 = span.get(off + 2).to_i64()
+        val b3 = span.get(off + 3).to_i64()
+        U32le(raw: b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+
+    fn value() -> i64:
+        self.raw
+
+    me store(buf: ByteBuffer):
+        buf.push_byte(self.raw)
+        buf.push_byte(self.raw >> 8)
+        buf.push_byte(self.raw >> 16)
+        buf.push_byte(self.raw >> 24)
+
+    fn to_span() -> ByteSpan:
+        var b = ByteBuffer.new()
+        self.store(b)
+        b.freeze()
+
+struct U64le:
+    raw: i64
+
+impl U64le:
+    static fn of(v: i64) -> U64le:
+        U64le(raw: v)
+
+    static fn load(span: ByteSpan, off: i64) -> U64le:
+        var acc: i64 = 0
+        var i = 0
+        while i < 8:
+            acc = acc | (span.get(off + i).to_i64() << (i * 8))
+            i = i + 1
+        U64le(raw: acc)
+
+    fn value() -> i64:
+        self.raw
+
+    me store(buf: ByteBuffer):
+        var i = 0
+        while i < 8:
+            buf.push_byte(self.raw >> (i * 8))
+            i = i + 1
+
+    fn to_span() -> ByteSpan:
+        var b = ByteBuffer.new()
+        self.store(b)
+        b.freeze()
+
+# ----------------------------------------------------------------------------
+# Big-endian (network byte order)
+# ----------------------------------------------------------------------------
+struct U16be:
+    raw: i64
+
+impl U16be:
+    static fn of(v: i64) -> U16be:
+        U16be(raw: v & 0xFFFF)
+
+    static fn load(span: ByteSpan, off: i64) -> U16be:
+        val b0 = span.get(off).to_i64()
+        val b1 = span.get(off + 1).to_i64()
+        U16be(raw: (b0 << 8) | b1)
+
+    fn value() -> i64:
+        self.raw
+
+    me store(buf: ByteBuffer):
+        buf.push_byte(self.raw >> 8)
+        buf.push_byte(self.raw)
+
+    fn to_span() -> ByteSpan:
+        var b = ByteBuffer.new()
+        self.store(b)
+        b.freeze()
+
+struct U32be:
+    raw: i64
+
+impl U32be:
+    static fn of(v: i64) -> U32be:
+        U32be(raw: v & 0xFFFFFFFF)
+
+    static fn load(span: ByteSpan, off: i64) -> U32be:
+        val b0 = span.get(off).to_i64()
+        val b1 = span.get(off + 1).to_i64()
+        val b2 = span.get(off + 2).to_i64()
+        val b3 = span.get(off + 3).to_i64()
+        U32be(raw: (b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+
+    fn value() -> i64:
+        self.raw
+
+    me store(buf: ByteBuffer):
+        buf.push_byte(self.raw >> 24)
+        buf.push_byte(self.raw >> 16)
+        buf.push_byte(self.raw >> 8)
+        buf.push_byte(self.raw)
+
+    fn to_span() -> ByteSpan:
+        var b = ByteBuffer.new()
+        self.store(b)
+        b.freeze()
+
+struct U64be:
+    raw: i64
+
+impl U64be:
+    static fn of(v: i64) -> U64be:
+        U64be(raw: v)
+
+    static fn load(span: ByteSpan, off: i64) -> U64be:
+        var acc: i64 = 0
+        var i = 0
+        while i < 8:
+            acc = (acc << 8) | span.get(off + i).to_i64()
+            i = i + 1
+        U64be(raw: acc)
+
+    fn value() -> i64:
+        self.raw
+
+    me store(buf: ByteBuffer):
+        var i = 7
+        while i >= 0:
+            buf.push_byte(self.raw >> (i * 8))
+            i = i - 1
+
+    fn to_span() -> ByteSpan:
+        var b = ByteBuffer.new()
+        self.store(b)
+        b.freeze()

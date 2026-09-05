@@ -1,0 +1,33 @@
+use std.spec.*
+use std.io_runtime.{file_read, time_now_unix_micros}
+use common.js.engine.string_trim.{js_trim_text}
+
+describe "JavaScript trim reconstruction work":
+    it "uses one slice per trim variant instead of prefix-copy concatenation":
+        val trim_source = file_read("src/lib/common/js/engine/string_trim.spl")
+
+        # A concat loop copies 1+2+...+N bytes (quadratic). These direct slices
+        # bound reconstruction to one result allocation for N and 2N alike.
+        expect(trim_source.contains("result = result + value[i]")).to_be(false)
+        expect(trim_source).to_contain("value.slice(start, end)")
+        for family in ["nogc_sync_mut", "nogc_async_mut", "gc_async_mut"]:
+            val dispatch = file_read("src/lib/{family}/js/engine/interpreter_string_methods.spl")
+            expect(dispatch).to_contain("js_trim_text(str_val, true, true)")
+            expect(dispatch).to_contain("js_trim_text(str_val, true, false)")
+            expect(dispatch).to_contain("js_trim_text(str_val, false, true)")
+
+    it "has bounded N-to-2N reconstruction scaling":
+        val small = [for _ in 0..20000: "a"].join("")
+        val large = [for _ in 0..40000: "a"].join("")
+        var checksum = 0
+        val small_start = time_now_unix_micros()
+        for _ in 0..32:
+            checksum = checksum + js_trim_text(small, true, true).len()
+        val small_us = time_now_unix_micros() - small_start
+        val large_start = time_now_unix_micros()
+        for _ in 0..32:
+            checksum = checksum + js_trim_text(large, true, true).len()
+        val large_us = time_now_unix_micros() - large_start
+        print "js_trim_scaling small_us={small_us} large_us={large_us} checksum={checksum}"
+        expect(checksum).to_equal(1920000)
+        expect(large_us).to_be_less_than(small_us * 3 + 5000)

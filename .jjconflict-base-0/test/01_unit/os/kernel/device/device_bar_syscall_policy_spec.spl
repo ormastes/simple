@@ -1,0 +1,60 @@
+# @req REQ-001 REQ-003 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/kernel/device/device_bar_syscall_policy.spl 80%
+# @tag: unit, simpleos, kernel, syscall, pci, bar, capability
+
+use std.spec.*
+use os.kernel.device.device_bar_syscall_policy.*
+
+describe "device BAR map syscall ABI":
+    it "decodes an exact BDF BAR subwindow and automatic address":
+        val request = decode_device_bar_map_syscall(0x000207u64, 4u64,
+            0x123u64, 0x1800u64, 0u64, 0u64)
+        expect(request.ok).to_be(true)
+        expect(request.bus).to_equal(0u8)
+        expect(request.device).to_equal(2u8)
+        expect(request.function).to_equal(7u8)
+        expect(request.bar_index).to_equal(4u8)
+        expect(request.byte_offset).to_equal(0x123u64)
+
+    it "rejects malformed packed BDF coordinates":
+        expect(decode_device_bar_map_syscall(0x1000000u64, 0u64,
+            0u64, 1u64, 0u64, 0u64).reason).to_equal("blocked:bdf-invalid")
+        expect(decode_device_bar_map_syscall(0x002000u64, 0u64,
+            0u64, 1u64, 0u64, 0u64).reason).to_equal("blocked:bdf-invalid")
+        expect(decode_device_bar_map_syscall(0x000008u64, 0u64,
+            0u64, 1u64, 0u64, 0u64).reason).to_equal("blocked:bdf-invalid")
+
+    it "rejects invalid BAR length hint and future flags":
+        expect(decode_device_bar_map_syscall(0u64, 6u64,
+            0u64, 1u64, 0u64, 0u64).reason).to_equal(
+                "blocked:bar-index-out-of-range")
+        expect(decode_device_bar_map_syscall(0u64, 0u64,
+            0u64, 0u64, 0u64, 0u64).reason).to_equal(
+                "blocked:window-length-invalid")
+        expect(decode_device_bar_map_syscall(0u64, 0u64,
+            0u64, DEVICE_BAR_MAX_WINDOW + 1u64, 0u64, 0u64).reason).to_equal(
+                "blocked:window-length-invalid")
+        expect(decode_device_bar_map_syscall(0u64, 0u64,
+            0u64, 1u64, 0x400001u64, 0u64).reason).to_equal(
+                "blocked:map-hint-invalid")
+        expect(decode_device_bar_map_syscall(0u64, 0u64,
+            0u64, 1u64, 0u64, 1u64).reason).to_equal(
+                "blocked:map-flags-unsupported")
+
+describe "device BAR unmap syscall ABI":
+    it "accepts an unaligned returned address for exact ledger lookup":
+        val request = decode_device_bar_unmap_syscall(0x800123u64,
+            0x1800u64, 0u64, 0u64, 0u64, 0u64)
+        expect(request.ok).to_be(true)
+        expect(request.user_addr).to_equal(0x800123u64)
+
+    it "rejects invalid extents and nonzero reserved arguments":
+        expect(decode_device_bar_unmap_syscall(0x1000u64, 1u64,
+            0u64, 0u64, 0u64, 0u64).reason).to_equal(
+                "blocked:unmap-extent-invalid")
+        expect(decode_device_bar_unmap_syscall(0x800000u64, 0u64,
+            0u64, 0u64, 0u64, 0u64).reason).to_equal(
+                "blocked:unmap-extent-invalid")
+        expect(decode_device_bar_unmap_syscall(0x800000u64, 1u64,
+            1u64, 0u64, 0u64, 0u64).reason).to_equal(
+                "blocked:unmap-arguments-unsupported")

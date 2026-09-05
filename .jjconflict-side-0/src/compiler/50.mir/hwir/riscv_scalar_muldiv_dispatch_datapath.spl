@@ -1,0 +1,93 @@
+# Typed dispatch-time operand normalization for iterative M/Zmmul engines.
+
+use compiler.mir.hwir.bit_vector_constant.{HwBitVectorConstant}
+use compiler.mir.hwir.types.{HwBitExtractOp, HwCombOp, HwSelectOp, HwSignal}
+use compiler.mir.hwir.riscv_scalar_muldiv_iterative_contract.{
+    RiscvScalarMulDivIterativeContract}
+
+pub class RiscvScalarMulDivDispatchDatapath:
+    contract: RiscvScalarMulDivIterativeContract
+    signals: [HwSignal]
+    constants: [HwBitVectorConstant]
+    comb_ops: [HwCombOp]
+    select_ops: [HwSelectOp]
+    bit_extract_ops: [HwBitExtractOp]
+
+    me diagnostic() -> text:
+        val error = self.contract.diagnostic(); if error != "": return error
+        if self.signals.len() != 19 or self.constants.len() != 9 or
+            self.comb_ops.len() != 13 or self.select_ops.len() != 4 or
+            self.bit_extract_ops.len() != 2:
+            return "HWIR-E-RISCV-MULDIV-DISPATCH-SHAPE: dispatch normalization requires the closed magnitude and special-case graph"
+        ""
+
+fn repeated(bit: text, width: i32) -> text:
+    var result = ""; var index = 0
+    while index < width:
+        result = result + bit; index = index + 1
+    result
+
+fn minimum_bits(width: i32) -> text:
+    "1" + repeated("0", width - 1)
+
+pub fn strict_riscv_scalar_muldiv_dispatch_datapath(
+    contract: RiscvScalarMulDivIterativeContract
+) -> Result<RiscvScalarMulDivDispatchDatapath, text>:
+    val error = contract.diagnostic(); if error != "": return Err(error)
+    val w = contract.operand_width; val x = contract.xlen
+    val operation = contract.projection.operation
+    val lhs_signed = operation == "multiply_high_signed" or
+        operation == "multiply_high_signed_unsigned" or operation == "divide_signed" or
+        operation == "remainder_signed"
+    val rhs_signed = operation == "multiply_high_signed" or
+        operation == "divide_signed" or operation == "remainder_signed"
+    val signed_division = operation == "divide_signed" or operation == "remainder_signed"
+    val datapath = RiscvScalarMulDivDispatchDatapath(contract: contract,
+        signals: [HwSignal.comb("lhs_operand", "Bits", w),
+            HwSignal.comb("rhs_operand", "Bits", w),
+            HwSignal.comb("lhs_sign", "Bits", 1), HwSignal.comb("rhs_sign", "Bits", 1),
+            HwSignal.comb("lhs_negative", "Bits", 1), HwSignal.comb("rhs_negative", "Bits", 1),
+            HwSignal.comb("lhs_negated", "Bits", w), HwSignal.comb("rhs_negated", "Bits", w),
+            HwSignal.comb("lhs_magnitude", "Bits", w), HwSignal.comb("rhs_magnitude", "Bits", w),
+            HwSignal.comb("quotient_negate", "Bits", 1),
+            HwSignal.comb("remainder_negate", "Bits", 1),
+            HwSignal.comb("divisor_zero", "Bits", 1), HwSignal.comb("lhs_is_min", "Bits", 1),
+            HwSignal.comb("rhs_is_minus_one", "Bits", 1),
+            HwSignal.comb("overflow_pair", "Bits", 1),
+            HwSignal.comb("signed_overflow", "Bits", 1),
+            HwSignal.comb("overflow_or_none", "Bits", 2),
+            HwSignal.comb("special_value", "Bits", 2)],
+        constants: [HwBitVectorConstant.binary("zero_operand_dispatch", w, repeated("0", w)),
+            HwBitVectorConstant.binary("minimum_operand_dispatch", w, minimum_bits(w)),
+            HwBitVectorConstant.binary("all_ones_operand_dispatch", w, repeated("1", w)),
+            HwBitVectorConstant.binary("lhs_signed_constant", 1, if lhs_signed: "1" else: "0"),
+            HwBitVectorConstant.binary("rhs_signed_constant", 1, if rhs_signed: "1" else: "0"),
+            HwBitVectorConstant.binary("signed_division_constant", 1, if signed_division: "1" else: "0"),
+            HwBitVectorConstant.binary("special_none_dispatch", 2, "00"),
+            HwBitVectorConstant.binary("special_divzero_dispatch", 2, "01"),
+            HwBitVectorConstant.binary("special_overflow_dispatch", 2, "10")],
+        comb_ops: [HwCombOp.unary("trunc", "lhs_operand", "rs1_value", w),
+            HwCombOp.unary("trunc", "rhs_operand", "rs2_value", w),
+            HwCombOp.binary("and", "lhs_negative", "lhs_sign", "lhs_signed_constant", 1),
+            HwCombOp.binary("and", "rhs_negative", "rhs_sign", "rhs_signed_constant", 1),
+            HwCombOp.binary("sub", "lhs_negated", "zero_operand_dispatch", "lhs_operand", w),
+            HwCombOp.binary("sub", "rhs_negated", "zero_operand_dispatch", "rhs_operand", w),
+            HwCombOp.binary("xor", "quotient_negate", "lhs_negative", "rhs_negative", 1),
+            HwCombOp.unary("passthrough", "remainder_negate", "lhs_negative", 1),
+            HwCombOp.binary("eq", "divisor_zero", "rhs_operand", "zero_operand_dispatch", w),
+            HwCombOp.binary("eq", "lhs_is_min", "lhs_operand", "minimum_operand_dispatch", w),
+            HwCombOp.binary("eq", "rhs_is_minus_one", "rhs_operand", "all_ones_operand_dispatch", w),
+            HwCombOp.binary("and", "overflow_pair", "lhs_is_min", "rhs_is_minus_one", 1),
+            HwCombOp.binary("and", "signed_overflow", "overflow_pair", "signed_division_constant", 1)],
+        select_ops: [HwSelectOp.mux("lhs_magnitude", "lhs_negative",
+                "lhs_negated", "lhs_operand", w),
+            HwSelectOp.mux("rhs_magnitude", "rhs_negative",
+                "rhs_negated", "rhs_operand", w),
+            HwSelectOp.mux("overflow_or_none", "signed_overflow",
+                "special_overflow_dispatch", "special_none_dispatch", 2),
+            HwSelectOp.mux("special_value", "divisor_zero", "special_divzero_dispatch",
+                "overflow_or_none", 2)],
+        bit_extract_ops: [HwBitExtractOp.fixed("lhs_sign", "lhs_operand", w - 1),
+            HwBitExtractOp.fixed("rhs_sign", "rhs_operand", w - 1)])
+    val diagnostic = datapath.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(datapath)

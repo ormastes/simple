@@ -1,0 +1,350 @@
+# metal_vm per-launch SVM-G executor (stream N3 of the Metal GPU lane).
+#
+# Design: doc/05_design/app/tools/metal_gpu_lane_and_vulkan_jit_notebook_architecture_2026-08-09.md
+# section 5, on top of doc/05_design/runtime/gpu_remote_interpreter_architecture.md
+# section 5.2/3.3/6.3. Third backend after CUDA (`cuda_vm_executor.spl`) and
+# Vulkan (`vulkan_vm_executor.spl`); structurally a port of the VULKAN sibling,
+# not the CUDA one, because Metal shares Vulkan's asymmetry: a pipeline must be
+# built before any dispatch, and there is no Metal-native persistent-kernel /
+# polling-ring primitive analogous to a CUDA resident kernel. So: buffered
+# mailbox only, no interactive PUTC servicing loop, no resident submode -- the
+# LOG ring is drained wholesale from the final arena readback after the single
+# dispatch completes.
+#
+# Builds an SGP program blob (D1's assembler + encode_sgp_header) into a GMB-1
+# arena, uploads it through N2's `MetalLaneSession`, dispatches the checked-in
+# `svmg_metal_kernel.metal` compute kernel 1x1x1, waits for command-buffer
+# completion, and drains the result via the same log/record decoding
+# conventions as D2's host reference VM (ref_vm.spl) and the CUDA/Vulkan
+# siblings -- the MSL kernel is a device-side reimplementation of
+# `SvmgVm.step`/`run`, so a caller compares its output against `ref_vm.run()`
+# on the *same* assembled bytes for conformance (and against the CUDA/Vulkan
+# output, since all four share the identical GMB-1 wire format).
+#
+# ONE DELIBERATE API DIFFERENCE from the two siblings: `init` takes the kernel
+# as `text` (MSL SOURCE), not `[u8]` (a compiled artifact). CUDA/Vulkan ship a
+# pre-built `.ptx`/`.spv`; Metal has no offline `metal`/`metallib` toolchain on
+# a non-macOS build host, and `MetalLaneSession.init(arena_bytes, lane_msl:
+# text, entry: text)` compiles the source on-device through
+# `rt_metal_compile_shader`. Checking in MSL source is the same precedent as
+# the hand-written `.ptx` and `.spvasm` artifacts (each backend checks in the
+# lowest form its toolchain can actually produce here).
+#
+# NOTE on RECORD ring layout: this executor's `build_svmg_arena`/
+# `read_records` match D2's ref_vm layout (records start at ring_base+0, no
+# head-counter word) -- the same divergence from A2's
+# `gpu_mailbox.MailboxArena` documented in both siblings' module docstrings
+# and doc/08_tracking/bug/svmg_a2_record_ring_head_counter_diverges_from_d2_ref_vm_2026-08-07.md.
+# The arena builder/decoders are reimplemented locally here (not imported from
+# a sibling gpu_lane file) for the same tier-ownership reason documented there.
+#
+# DEVICE VERIFICATION STATUS: this host is Linux, where `rt_metal_is_available()`
+# hard-returns false (the Rust runtime's Metal path is `#[cfg(target_os =
+# "macos")]`). Everything below is exercised on Linux only through its pure
+# host-side arena/decoder functions and its skip path. Nothing here has been
+# run against a real Metal device -- see
+# doc/08_tracking/bug/metal_gpu_lane_device_verification_pending_2026-08-09.md.
+
+mod std.gc_async_mut.gpu_lane.metal_vm_executor
+
+use std.common.svmg.assembler.{svmg_asm}
+use std.common.svmg.sgp.{sgp_header_new, encode_sgp_header, SGP_HEADER_SIZE}
+use std.common.svmg.mailbox_const.{
+    ARENA_DATA_SIZE, ARENA_TOTAL_SIZE, RAM_SENTINEL_OFFSET,
+    LOG_HEAD_OFFSET, LOG_CAP_OFFSET, LOG_DATA_OFFSET, DEFAULT_LOG_CAP,
+    RECORD_SIZE, SENTINEL_EXIT_MASK, SENTINEL_TIMEOUT, SENTINEL_DEBUG_BREAK}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.gc_async_mut.gpu_lane.metal_lane_session.{
+    MetalLaneSession, METAL_LANE_OK_SENTINEL, METAL_LANE_TIMEOUT_SENTINEL}
+
+# Entry point name inside svmg_metal_kernel.metal (the MSL `kernel` function),
+# handed to `rt_metal_create_compute_pipeline`.
+pub val SVMG_ENTRY: text = "svmg_interpret"
+
+# Default step budget when SVMG_STEP_BUDGET is unset/unparseable (same
+# knob/default as the CUDA and Vulkan lanes -- shared across GPU lanes).
+pub val DEFAULT_STEP_BUDGET: i64 = 100000
+
+pub struct SvmgResultRecord:
+    seq: i64
+    passed: i64
+    value: i64
+
+pub struct SvmgRunOutcome:
+    ok: bool
+    error: text
+    sentinel: i64
+    trapped: bool
+    timed_out: bool
+    # True when the kernel stopped for a DBG-1 reason (breakpoint hit or
+    # single-step completion). This is the ONLY sound way to detect a debug
+    # break: SENTINEL_DEBUG_BREAK (0xCAFE00DB) ALIASES a clean exit with code
+    # 0xDB, so `exit_code == 0xDB` cannot distinguish them (mailbox_const.spl
+    # reserves exit code 0xDB for exactly this reason). Never branch on
+    # `exit_code` to detect a break.
+    debug_break: bool
+    exit_code: i64
+    log_text: text
+    records: [SvmgResultRecord]
+    # Full ARENA_TOTAL_SIZE output arena from this call's readback (empty on
+    # any error path before a successful `arena_read`), plus the logical
+    # DATA-region start offset it was built at (`SGP_HEADER_SIZE +
+    # code.len()`). Feed both back into `run_source_persisting_data` as
+    # `prior_arena`/`prior_data_off` to preserve this call's DATA/LOG/RECORD
+    # state into the next call -- see `run_source_persisting_data` docstring.
+    out_arena: [u8]
+    data_off: i64
+
+fn _u32_le_at(bytes: [u8], idx: i64) -> i64:
+    (bytes[idx] as i64) | ((bytes[idx + 1] as i64) << 8) | ((bytes[idx + 2] as i64) << 16) | ((bytes[idx + 3] as i64) << 24)
+
+# NOTE: `step_budget_from_env`/`build_svmg_arena`/`read_sentinel`/
+# `read_records` are deliberately plain `fn`, not `pub fn` -- same
+# `primitive_api`-lint workaround documented in cuda_vm_executor.spl/
+# vulkan_vm_executor.spl/opcodes.spl/sgp.spl. Still externally importable as
+# plain `fn`.
+
+fn step_budget_from_env() -> i64:
+    val raw = env_get("SVMG_STEP_BUDGET")
+    if raw == "" or raw == nil:
+        return DEFAULT_STEP_BUDGET
+    val parsed = raw.trim().to_i64_opt()
+    match parsed:
+        Some(n): if n > 0: n else: DEFAULT_STEP_BUDGET
+        None: DEFAULT_STEP_BUDGET
+
+fn _zero_bytes(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(0 as u8)
+        i = i + 1
+    out
+
+# Build a full ARENA_TOTAL_SIZE (128 KiB) GMB-1 arena with an SGP blob at
+# DATA+0 -- pure host-side bytes, no device calls. Byte-for-byte identical
+# layout to the CUDA/Vulkan siblings' `build_svmg_arena`.
+fn build_svmg_arena(code: [u8], step_budget: i64, entry_pc: i64) -> [u8]:
+    val code_off = SGP_HEADER_SIZE
+    val code_len = code.len()
+    val data_off = code_off + code_len
+    if data_off > ARENA_DATA_SIZE:
+        panic("metal_vm: SGP blob ({data_off} bytes) exceeds DATA region ({ARENA_DATA_SIZE} bytes)")
+    val header = sgp_header_new(code_off, code_len, data_off, 0, step_budget, entry_pc)
+    val header_bytes = encode_sgp_header(header)
+
+    var arena = _zero_bytes(ARENA_TOTAL_SIZE)
+    var i = 0
+    while i < header_bytes.len():
+        arena[i] = header_bytes[i]
+        i = i + 1
+    i = 0
+    while i < code.len():
+        arena[code_off + i] = code[i]
+        i = i + 1
+
+    arena[LOG_CAP_OFFSET + 0] = (DEFAULT_LOG_CAP & 0xFF) as u8
+    arena[LOG_CAP_OFFSET + 1] = ((DEFAULT_LOG_CAP >> 8) & 0xFF) as u8
+    arena[LOG_CAP_OFFSET + 2] = ((DEFAULT_LOG_CAP >> 16) & 0xFF) as u8
+    arena[LOG_CAP_OFFSET + 3] = ((DEFAULT_LOG_CAP >> 24) & 0xFF) as u8
+    arena
+
+# Carry a previous launch's DATA/LOG/RECORD state forward into a freshly built
+# arena. `prior_arena` must be a previous call's full ARENA_TOTAL_SIZE output
+# arena (anything else, including the default `[]`, is treated as "no prior
+# state" and this degrades to plain `build_svmg_arena` -- i.e. the
+# fresh-every-call behavior `run_source` needs for its stateless one-shot
+# conformance-vector contract). `prior_data_off` is the logical DATA-region
+# start offset `prior_arena` was laid out at (its own `code_off + code_len`).
+#
+# ABSOLUTE-OFFSET COPY -- READ BEFORE CHANGING. SVM-G STORE32/STORE8/LOAD32/
+# LOAD8 address the arena by ABSOLUTE byte offset (see `bounds_ok` in
+# ref_vm.spl: `offset + width <= ARENA_DATA_SIZE`, no `data_off` added), NOT
+# relative to `data_off`. So the copy must start at
+# `max(data_off, prior_data_off)` -- the first index safely past BOTH arenas'
+# code footprints -- and walk ABSOLUTE indices, writing `arena[k] =
+# prior_arena[k]`. The relative form (`arena[data_off + k] =
+# prior_arena[prior_data_off + k]`) is the bug this class of fix has corrected
+# three times already across the CUDA and Vulkan lanes; see the "2026-08-08
+# follow-up" in
+# doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md.
+#
+# Why the debug/conformance vectors CANNOT catch a regression here, and what
+# can: when every launch re-assembles the SAME source, `data_off ==
+# prior_data_off`, and the two forms are arithmetically IDENTICAL. Only a
+# cross-cell chain whose successive sources have DIFFERING code lengths
+# separates them -- which is what
+# `test/01_unit/lib/gpu_lane/metal_vm_arena_persist_spec.spl` exercises.
+fn build_svmg_arena_persisting_data(code: [u8], step_budget: i64, entry_pc: i64, prior_arena: [u8], prior_data_off: i64) -> [u8]:
+    var arena = build_svmg_arena(code, step_budget, entry_pc)
+    if prior_arena.len() != ARENA_TOTAL_SIZE:
+        return arena
+    val data_off = SGP_HEADER_SIZE + code.len()
+    val copy_start = if data_off > prior_data_off: data_off else: prior_data_off
+    var k = copy_start
+    while k < ARENA_DATA_SIZE:
+        arena[k] = prior_arena[k]
+        k = k + 1
+    # LOG/RECORD/DBG-1 region lives at FIXED absolute offsets (all >=
+    # ARENA_DATA_SIZE, see mailbox_const) -- carried forward verbatim so a
+    # program's SYS_PUTC/SYS_RESULT output accumulates across calls instead of
+    # being wiped by the next rebuild. This is ALSO what makes DBG-1 "break,
+    # inspect, resume" reachable on the Metal lane: the DBG-1 block at
+    # 0x1F000..0x20000 sits inside this copied region, so the saved pc/sp/csp/
+    # stacks/seq/record_count ride forward across dispatches for free.
+    var j = ARENA_DATA_SIZE
+    while j < ARENA_TOTAL_SIZE:
+        arena[j] = prior_arena[j]
+        j = j + 1
+    arena
+
+fn read_sentinel(arena: [u8]) -> i64:
+    _u32_le_at(arena, RAM_SENTINEL_OFFSET)
+
+pub fn read_log(arena: [u8]) -> text:
+    val head = _u32_le_at(arena, LOG_HEAD_OFFSET)
+    val cap = _u32_le_at(arena, LOG_CAP_OFFSET)
+    var out = ""
+    var i = 0
+    while i < head and i < cap:
+        val code = arena[LOG_DATA_OFFSET + i] as i64
+        if code == 10:
+            out = out + "\n"
+        elif code >= 32 and code <= 126:
+            out = out + text_from_ascii_byte(code)
+        i = i + 1
+    out
+
+fn text_from_ascii_byte(code: i64) -> text:
+    val table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = code - 32
+    table[idx:idx + 1]
+
+# Decode records starting at ring_base+0 (D2/ref_vm layout -- see module
+# docstring), stopping at the first all-zero record or after `max_records`.
+fn read_records(arena: [u8], max_records: i64) -> [SvmgResultRecord]:
+    val log_cap = _u32_le_at(arena, LOG_CAP_OFFSET)
+    val base = LOG_DATA_OFFSET + log_cap
+    var out: [SvmgResultRecord] = []
+    var i = 0
+    while i < max_records:
+        val off = base + i * RECORD_SIZE
+        val seq = _u32_le_at(arena, off)
+        val passed = _u32_le_at(arena, off + 4)
+        val value_raw = _u32_le_at(arena, off + 8)
+        if seq == 0 and passed == 0 and value_raw == 0:
+            return out
+        val value = if value_raw >= 0x80000000: value_raw - 0x100000000 else: value_raw
+        out.push(SvmgResultRecord(seq: seq, passed: passed, value: value))
+        i = i + 1
+    out
+
+# Decode the sentinel into (trapped, timed_out, exit_code) exactly like
+# ref_vm's VmRunResult fields / the CUDA and Vulkan `_decode_sentinel`.
+fn _decode_sentinel(sentinel: i64) -> (bool, bool, i64):
+    if sentinel == SENTINEL_TIMEOUT:
+        return (false, true, 0)
+    val high16 = sentinel & 0xFFFF0000
+    if high16 == SENTINEL_EXIT_MASK:
+        val code_val = sentinel & 0xFFFF
+        return (code_val == 0x7F, false, code_val)
+    (false, false, 0)
+
+# Exact-equality test against SENTINEL_DEBUG_BREAK. Deliberately NOT derived
+# from the decoded exit code: 0xCAFE00DB is indistinguishable from a clean
+# exit with code 0xDB on the wire, which is precisely why mailbox_const.spl
+# RESERVES exit code 0xDB. Conformance programs must not exit 0xDB.
+fn debug_break_of(sentinel: i64) -> bool:
+    sentinel == SENTINEL_DEBUG_BREAK
+
+# `MetalVmExecutor` -- one MetalLaneSession, the checked-in MSL kernel
+# compiled into a pipeline once at `init`, and a per-call `run_source` entry
+# point. Buffered mailbox only (design section 6.3).
+class MetalVmExecutor:
+    session: MetalLaneSession
+    entry_loaded: bool
+
+    static fn create() -> MetalVmExecutor:
+        MetalVmExecutor(session: MetalLaneSession.create(), entry_loaded: false)
+
+    # Host-aware capability probe, forwarded from the session so a caller can
+    # decide to SKIP before constructing anything device-side. Returns "" when
+    # a live Metal device is usable, or a "skip:<reason>" string. On this
+    # Linux host it always returns "skip:metal-unavailable-not-macos".
+    me probe() -> text:
+        self.session.probe()
+
+    # `kernel_msl` is the checked-in svmg_metal_kernel.metal source text (the
+    # caller reads the file -- this module never touches the filesystem
+    # directly, matching the rest of the gpu_lane tier). See the module
+    # docstring for why this is `text` and not `[u8]`.
+    me init(kernel_msl: text) -> text:
+        val init_err = self.session.init(ARENA_TOTAL_SIZE, kernel_msl, SVMG_ENTRY)
+        if init_err != "":
+            return init_err
+        self.entry_loaded = true
+        ""
+
+    # Assemble `source` (SVM-G assembly text, D1's mnemonic syntax), build an
+    # SGP-blob arena, upload, dispatch 1x1x1, wait, and drain.
+    me run_source(source: text, step_budget: i64, entry_pc: i64) -> SvmgRunOutcome:
+        self.run_source_persisting_data(source, step_budget, entry_pc, [], 0)
+
+    # Same upload/dispatch/wait/drain sequence as `run_source`, but the arena
+    # is built with `build_svmg_arena_persisting_data` -- it carries
+    # `prior_arena`'s DATA/LOG/RECORD/DBG-1 state forward into this call's
+    # arena before dispatch, and returns this call's own output arena
+    # (`out_arena`) plus the logical DATA-region offset it was built at
+    # (`data_off`) so a caller can chain calls: pass this outcome's
+    # `out_arena`/`data_off` back in as the NEXT call's `prior_arena`/
+    # `prior_data_off`. `run_source` calls this with `prior_arena: []`, which
+    # degrades to a plain fresh build, so `run_source`'s stateless-per-call
+    # contract (relied on by the conformance spec's independent per-vector
+    # runs) is unchanged.
+    me run_source_persisting_data(source: text, step_budget: i64, entry_pc: i64, prior_arena: [u8], prior_data_off: i64) -> SvmgRunOutcome:
+        if not self.entry_loaded:
+            return SvmgRunOutcome(ok: false, error: "metal-vm-entry-not-loaded",
+                sentinel: 0, trapped: false, timed_out: false, debug_break: false,
+                exit_code: 0, log_text: "", records: [], out_arena: [], data_off: 0)
+        val code = svmg_asm(source)
+        val data_off = SGP_HEADER_SIZE + code.len()
+        val arena = build_svmg_arena_persisting_data(code, step_budget, entry_pc, prior_arena, prior_data_off)
+        if not self.session.arena_write(arena):
+            return SvmgRunOutcome(ok: false, error: "metal-vm-arena-write-failed",
+                sentinel: 0, trapped: false, timed_out: false, debug_break: false,
+                exit_code: 0, log_text: "", records: [], out_arena: [], data_off: 0)
+
+        val dispatch_err = self.session.dispatch_once(1)
+        if dispatch_err != "":
+            val forced_timeout = self.session.last_dispatch_sentinel == METAL_LANE_TIMEOUT_SENTINEL
+            return SvmgRunOutcome(ok: not forced_timeout, error: dispatch_err,
+                sentinel: self.session.last_dispatch_sentinel,
+                trapped: false, timed_out: forced_timeout, debug_break: false,
+                exit_code: 0, log_text: "", records: [],
+                out_arena: [], data_off: 0)
+
+        val out_arena = self.session.arena_read(ARENA_TOTAL_SIZE)
+        if out_arena.len() != ARENA_TOTAL_SIZE:
+            return SvmgRunOutcome(ok: false, error: "metal-vm-arena-readback-short",
+                sentinel: 0, trapped: false, timed_out: false, debug_break: false,
+                exit_code: 0, log_text: "", records: [], out_arena: [], data_off: 0)
+
+        val sentinel = read_sentinel(out_arena)
+        val (trapped, timed_out, exit_code) = _decode_sentinel(sentinel)
+        SvmgRunOutcome(
+            ok: true, error: "", sentinel: sentinel,
+            trapped: trapped, timed_out: timed_out,
+            debug_break: debug_break_of(sentinel),
+            exit_code: exit_code,
+            log_text: read_log(out_arena),
+            records: read_records(out_arena, 64),
+            out_arena: out_arena, data_off: data_off,
+        )
+
+    me shutdown() -> text:
+        self.session.shutdown()
+
+export MetalVmExecutor, SvmgRunOutcome, SvmgResultRecord
+export SVMG_ENTRY, DEFAULT_STEP_BUDGET
+export step_budget_from_env, build_svmg_arena, build_svmg_arena_persisting_data
+export read_sentinel, read_log, read_records, debug_break_of

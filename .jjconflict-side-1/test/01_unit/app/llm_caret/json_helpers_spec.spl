@@ -1,0 +1,448 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: Prove that JSON Escaping.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-LLM-CARET-001 — stable requirement identity for this spec.
+
+# LLM Caret JSON Helpers Specification
+#
+# Subject: src/app/llm_caret/json_helpers.spl
+#
+# History: this spec previously carried a 165-line local reimplementation of the
+# whole module and imported nothing, so it could never observe the shipped code.
+# The local copy had drifted in a way that mattered: it used `json.index_of()`
+# and `int()`, while the shipped module deliberately hand-rolls `json_find` and
+# `json_parse_int` to route around the seed's Option<i64>/char tag-box defect
+# (doc/08_tracking/bug/llm_caret_index_of_optioni64_tagbox_2026-07-07.md).
+# The copy therefore reintroduced the exact bug the shipped code exists to avoid
+# — five examples were RED for that reason, while the real workaround functions
+# json_find / json_parse_int / jo4 / jo5 / jo6 had zero coverage.
+#
+# IMPORTANT — do NOT add `use std.mcp.helpers.{...}` to this spec.
+# src/lib/nogc_async_mut/mcp/helpers.spl defines its own `extract_json_string`
+# (and jo1/jo2/jo3/ja/extract_json_value) with the SAME signatures but WITHOUT
+# escape handling. Co-compiling it silently hijacks the calls this spec makes to
+# app.llm_caret.json_helpers, and no collision warning is emitted because the
+# signatures match. See the shim-vacuity addendum in
+# doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md.
+#
+# The `_lb`/`_rb`/`_q`/`_str`/`_pair` below are deliberately-renamed local test
+# fixtures for building JSON literals. They are NOT copies of the subject: the
+# subject is the object/array builders and the extractors imported above.
+
+use app.llm_caret.json_helpers.{escape_json_text, jo1, jo2, jo3, jo4, jo5, jo6}
+use app.llm_caret.json_helpers.{ja, json_find, json_parse_int}
+use app.llm_caret.json_helpers.{extract_json_string, extract_json_value}
+use app.llm_caret.json_helpers.{extract_json_int, extract_json_bool}
+use app.llm_caret.json_helpers.{extract_nested_string}
+use app.llm_caret.json_helpers.{build_message_json, build_messages_json}
+
+fn _q() -> text:
+    "\""
+
+fn _lb() -> text:
+    "{"
+
+fn _rb() -> text:
+    "}"
+
+fn _str(s: text) -> text:
+    _q() + escape_json_text(s) + _q()
+
+fn _pair(key: text, val_str: text) -> text:
+    _q() + key + _q() + ":" + val_str
+
+use std.spec.step
+
+describe "JSON Escaping":
+    # @manual scenario evidence
+    it "escapes plain text unchanged":
+        # @req REQ-SSPEC-APP
+        step("escapes plain text unchanged")
+        step("Verify: escapes plain text unchanged")
+        # @req: REQ-APP-LLM-CARET-001
+        expect(escape_json_text("hello")).to_equal("hello")
+
+    it "escapes double quotes":
+        # @req REQ-SSPEC-APP
+        step("escapes double quotes")
+        step("Verify: escapes double quotes")
+        expect(escape_json_text("say \"hi\"")).to_equal("say \\\"hi\\\"")
+
+    it "escapes backslashes":
+        # @req REQ-SSPEC-APP
+        step("escapes backslashes")
+        step("Verify: escapes backslashes")
+        expect(escape_json_text("a\\b")).to_equal("a\\\\b")
+
+    it "escapes newlines":
+        # @req REQ-SSPEC-APP
+        step("escapes newlines")
+        step("Verify: escapes newlines")
+        expect(escape_json_text("line1\nline2")).to_equal("line1\\nline2")
+
+    it "escapes tabs":
+        # @req REQ-SSPEC-APP
+        step("escapes tabs")
+        step("Verify: escapes tabs")
+        expect(escape_json_text("a\tb")).to_equal("a\\tb")
+
+describe "JSON Building":
+    it "builds single-pair object":
+        # @req REQ-SSPEC-APP
+        step("builds single-pair object")
+        step("Verify: builds single-pair object")
+        val result = jo1(_pair("key", _str("val")))
+        expect(result).to_start_with(_lb())
+        expect(result).to_end_with(_rb())
+
+    it "builds two-pair object":
+        # @req REQ-SSPEC-APP
+        step("builds two-pair object")
+        step("Verify: builds two-pair object")
+        val result = jo2(_pair("a", _str("1")), _pair("b", _str("2")))
+        expect(result).to_contain(",")
+        expect(result).to_contain("\"a\"")
+        expect(result).to_contain("\"b\"")
+
+    it "builds three-pair object":
+        # @req REQ-SSPEC-APP
+        step("builds three-pair object")
+        step("Verify: builds three-pair object")
+        val result = jo3(_pair("a", _str("1")), _pair("b", _str("2")), _pair("c", _str("3")))
+        expect(result).to_start_with(_lb())
+        expect(result).to_end_with(_rb())
+        expect(result).to_contain("\"c\"")
+
+    it "builds four-pair object":
+        # @req REQ-SSPEC-APP
+        step("builds four-pair object")
+        step("Verify: builds four-pair object")
+        val result = jo4(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"))
+        expect(extract_json_value(result, "d")).to_equal("4")
+
+    it "builds five-pair object":
+        # @req REQ-SSPEC-APP
+        step("builds five-pair object")
+        step("Verify: builds five-pair object")
+        val result = jo5(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"), _pair("e", "5"))
+        expect(extract_json_value(result, "e")).to_equal("5")
+
+    it "builds six-pair object":
+        # @req REQ-SSPEC-APP
+        step("builds six-pair object")
+        step("Verify: builds six-pair object")
+        val result = jo6(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"), _pair("e", "5"), _pair("f", "6"))
+        expect(extract_json_value(result, "f")).to_equal("6")
+
+    it "builds array from items":
+        # @req REQ-SSPEC-APP
+        step("builds array from items")
+        step("Verify: builds array from items")
+        val result = ja([_str("a"), _str("b"), _str("c")])
+        expect(result).to_start_with("[")
+        expect(result).to_end_with("]")
+        expect(result).to_contain("\"a\"")
+        expect(result).to_contain(",")
+
+    it "builds empty array":
+        # @req REQ-SSPEC-APP
+        step("builds empty array")
+        step("Verify: builds empty array")
+        val result = ja([])
+        expect(result).to_equal("[]")
+
+describe "JSON Substring Search":
+    # json_find is the shipped hand-written replacement for text.index_of().
+    # It had no coverage at all while the spec carried its own index_of copy.
+    it "finds a needle at the start":
+        # @req REQ-SSPEC-APP
+        step("finds a needle at the start")
+        step("Verify: finds a needle at the start")
+        expect(json_find("abcdef", "abc")).to_equal(0)
+
+    it "finds a needle in the middle":
+        # @req REQ-SSPEC-APP
+        step("finds a needle in the middle")
+        step("Verify: finds a needle in the middle")
+        expect(json_find("abcdef", "cd")).to_equal(2)
+
+    it "finds a needle at index 3":
+        # @req REQ-SSPEC-APP
+        step("finds a needle at index 3")
+        step("Verify: finds a needle at index 3")
+        # Index 3 is the exact value the seed's Option<i64> tag-box collides
+        # with the nil sentinel on; json_find exists to avoid that.
+        expect(json_find("abcdef", "d")).to_equal(3)
+
+    it "returns -1 when absent":
+        # @req REQ-SSPEC-APP
+        step("returns -1 when absent")
+        step("Verify: returns -1 when absent")
+        expect(json_find("abcdef", "xyz")).to_equal(-1)
+
+    it "returns -1 when the needle is longer than the haystack":
+        # @req REQ-SSPEC-APP
+        step("returns -1 when the needle is longer than the haystack")
+        step("Verify: returns -1 when the needle is longer than the haystack")
+        expect(json_find("ab", "abcdef")).to_equal(-1)
+
+    it "returns 0 for an empty needle":
+        # @req REQ-SSPEC-APP
+        step("returns 0 for an empty needle")
+        step("Verify: returns 0 for an empty needle")
+        expect(json_find("abcdef", "")).to_equal(0)
+
+describe "JSON Integer Parsing":
+    # json_parse_int is the shipped boxing-free replacement for int().
+    it "parses a positive integer":
+        # @req REQ-SSPEC-APP
+        step("parses a positive integer")
+        step("Verify: parses a positive integer")
+        expect(json_parse_int("42")).to_equal(42)
+
+    it "parses zero":
+        # @req REQ-SSPEC-APP
+        step("parses zero")
+        step("Verify: parses zero")
+        expect(json_parse_int("0")).to_equal(0)
+
+    it "parses a negative integer":
+        # @req REQ-SSPEC-APP
+        step("parses a negative integer")
+        step("Verify: parses a negative integer")
+        expect(json_parse_int("-17")).to_equal(-17)
+
+    it "parses a multi-digit integer":
+        # @req REQ-SSPEC-APP
+        step("parses a multi-digit integer")
+        step("Verify: parses a multi-digit integer")
+        expect(json_parse_int("12345")).to_equal(12345)
+
+    # DEFECT PIN (positive control, not an endorsement).
+    # TODO(json-parse-int-strict): json_parse_int silently SKIPS any non-digit
+    # character instead of rejecting the input, so "1a2" parses as 12 and a
+    # non-numeric string parses as 0. See src/app/llm_caret/json_helpers.spl:194.
+    it "PINS DEFECT: skips embedded non-digits instead of rejecting":
+        # @req REQ-SSPEC-APP
+        step("PINS DEFECT: skips embedded non-digits instead of rejecting")
+        step("Verify: PINS DEFECT: skips embedded non-digits instead of rejecting")
+        expect(json_parse_int("1a2")).to_equal(12)
+
+    it "PINS DEFECT: returns 0 for a wholly non-numeric string":
+        # @req REQ-SSPEC-APP
+        step("PINS DEFECT: returns 0 for a wholly non-numeric string")
+        step("Verify: PINS DEFECT: returns 0 for a wholly non-numeric string")
+        expect(json_parse_int("abc")).to_equal(0)
+
+describe "JSON Parsing":
+    it "extracts string value":
+        # @req REQ-SSPEC-APP
+        step("extracts string value")
+        step("Verify: extracts string value")
+        val json = jo1(_pair("name", _str("Alice")))
+        val result = extract_json_string(json, "name")
+        expect(result).to_equal("Alice")
+
+    it "returns empty for missing key":
+        # @req REQ-SSPEC-APP
+        step("returns empty for missing key")
+        step("Verify: returns empty for missing key")
+        val json = jo1(_pair("name", _str("Alice")))
+        expect(extract_json_string(json, "missing")).to_equal("")
+
+    # Reproduce for doc/08_tracking/bug/llm_caret_json_helpers_escaped_quote_cross_module_2026-08-25.md:
+    # under `simple test` this call used to be served by std.mcp.helpers'
+    # same-signature `extract_json_string` (no escape tracking) because the
+    # subject module imported std.mcp.helpers and the seed keys co-compiled
+    # functions by bare name (module_loader.rs:1504). Proven by sabotage:
+    # editing that std definition changed this spec's result. Fixed by
+    # dropping the import from the subject; the seed defect itself stays open.
+    it "extracts a string value containing an escaped quote":
+        # @req REQ-SSPEC-APP
+        step("extracts a string value containing an escaped quote")
+        step("Verify: extracts a string value containing an escaped quote")
+        # The shipped extractor tracks backslash escapes; this is the behaviour
+        # that std.mcp.helpers' same-named function does NOT have.
+        val json = jo1(_pair("name", _str("say \"hi\"")))
+        expect(extract_json_string(json, "name")).to_equal("say \\\"hi\\\"")
+
+    it "extracts a string whose escaped quote is the last char (backslash before closing quote)":
+        # @req REQ-SSPEC-APP
+        step("extracts a string whose escaped quote is the last char (backslash before closing quote)")
+        step("Verify: escaped quote directly before the closing quote")
+        val json = jo1(_pair("name", _str("end\"")))
+        expect(extract_json_string(json, "name")).to_equal("end\\\"")
+
+    it "extracts a string ending in an escaped backslash":
+        # @req REQ-SSPEC-APP
+        step("extracts a string ending in an escaped backslash")
+        step("Verify: backslash at end resets escape state before the closing quote")
+        val json = jo1(_pair("name", _str("dir\\")))
+        expect(extract_json_string(json, "name")).to_equal("dir\\\\")
+
+    it "extracts a string containing a double backslash":
+        # @req REQ-SSPEC-APP
+        step("extracts a string containing a double backslash")
+        step("Verify: double backslash in the middle is kept verbatim")
+        val json = jo1(_pair("name", _str("a\\b")))
+        expect(extract_json_string(json, "name")).to_equal("a\\\\b")
+
+    it "extracts a string containing a unicode escape":
+        # @req REQ-SSPEC-APP
+        step("extracts a string containing a unicode escape")
+        step("Verify: \\u escape sequence is kept verbatim")
+        val json = jo1(_pair("name", "\"caf\\u00e9\""))
+        expect(extract_json_string(json, "name")).to_equal("caf\\u00e9")
+
+    it "extracts numeric value":
+        # @req REQ-SSPEC-APP
+        step("extracts numeric value")
+        step("Verify: extracts numeric value")
+        val json = jo2(_pair("count", "42"), _pair("name", _str("test")))
+        val result = extract_json_value(json, "count")
+        expect(result).to_equal("42")
+
+    it "returns null for a missing raw value":
+        # @req REQ-SSPEC-APP
+        step("returns null for a missing raw value")
+        step("Verify: returns null for a missing raw value")
+        val json = jo1(_pair("count", "42"))
+        expect(extract_json_value(json, "missing")).to_equal("null")
+
+    it "extracts integer value":
+        # @req REQ-SSPEC-APP
+        step("extracts integer value")
+        step("Verify: extracts integer value")
+        val json = jo1(_pair("count", "99"))
+        expect(extract_json_int(json, "count")).to_equal(99)
+
+    it "returns 0 for missing int":
+        # @req REQ-SSPEC-APP
+        step("returns 0 for missing int")
+        step("Verify: returns 0 for missing int")
+        val json = jo1(_pair("name", _str("test")))
+        expect(extract_json_int(json, "missing")).to_equal(0)
+
+    it "extracts a negative integer value":
+        # @req REQ-SSPEC-APP
+        step("extracts a negative integer value")
+        step("Verify: extracts a negative integer value")
+        val json = jo1(_pair("delta", "-5"))
+        expect(extract_json_int(json, "delta")).to_equal(-5)
+
+    it "extracts boolean value":
+        # @req REQ-SSPEC-APP
+        step("extracts boolean value")
+        step("Verify: extracts boolean value")
+        val json = jo1(_pair("active", "true"))
+        expect(extract_json_bool(json, "active")).to_equal(true)
+
+    it "extracts false boolean":
+        # @req REQ-SSPEC-APP
+        step("extracts false boolean")
+        step("Verify: extracts false boolean")
+        val json = jo1(_pair("active", "false"))
+        expect(extract_json_bool(json, "active")).to_equal(false)
+
+    it "extracts nested string":
+        # @req REQ-SSPEC-APP
+        step("extracts nested string")
+        step("Verify: extracts nested string")
+        val inner = jo1(_pair("name", _str("Bob")))
+        val json = jo1(_pair("user", inner))
+        expect(extract_nested_string(json, "user", "name")).to_equal("Bob")
+
+    it "returns empty for a missing outer key in a nested lookup":
+        # @req REQ-SSPEC-APP
+        step("returns empty for a missing outer key in a nested lookup")
+        step("Verify: returns empty for a missing outer key in a nested lookup")
+        val inner = jo1(_pair("name", _str("Bob")))
+        val json = jo1(_pair("user", inner))
+        expect(extract_nested_string(json, "missing", "name")).to_equal("")
+
+describe "Message JSON":
+    it "builds single message":
+        # @req REQ-SSPEC-APP
+        step("builds single message")
+        step("Verify: builds single message")
+        val result = build_message_json("user", "Hello")
+        expect(result).to_contain("\"role\"")
+        expect(result).to_contain("\"user\"")
+        expect(result).to_contain("\"content\"")
+        expect(result).to_contain("\"Hello\"")
+
+    it "round-trips a message through the extractors":
+        # @req REQ-SSPEC-APP
+        step("round-trips a message through the extractors")
+        step("Verify: round-trips a message through the extractors")
+        val result = build_message_json("user", "Hello")
+        expect(extract_json_string(result, "role")).to_equal("user")
+        expect(extract_json_string(result, "content")).to_equal("Hello")
+
+    it "builds messages array":
+        # @req REQ-SSPEC-APP
+        step("builds messages array")
+        step("Verify: builds messages array")
+        val result = build_messages_json(["user", "assistant"], ["Hi", "Hello!"])
+        expect(result).to_start_with("[")
+        expect(result).to_end_with("]")
+        expect(result).to_contain("\"user\"")
+        expect(result).to_contain("\"assistant\"")
+
+    it "pads missing content with an empty string":
+        # @req REQ-SSPEC-APP
+        step("pads missing content with an empty string")
+        step("Verify: pads missing content with an empty string")
+        val result = build_messages_json(["user", "assistant"], ["Hi"])
+        expect(result).to_contain("\"assistant\"")
+        expect(result).to_contain("\"\"")
+
+describe "json helpers - non-ASCII payloads":
+    # Regression: `.len()`/`.substring()` count bytes while `[]` counts
+    # characters, so json_find bounded a loop by the byte length and indexed by
+    # character, trapping with "string index out of bounds: index is N but
+    # length is N" on any non-ASCII JSON. It also RETURNED a character index to
+    # callers that feed it to byte-based substring. A GLM auth error whose
+    # message is Chinese was enough to kill caret outright. See
+    # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
+    # @manual scenario evidence
+    it "finds a key positioned after non-ASCII text":
+        # @req: REQ-APP-LLM-CARET-001
+        step("Locate a key that sits behind a multi-byte value")
+        val body = "{\"msg\":\"没找到对象\",\"code\":\"1001\"}"
+        val idx = json_find(body, "\"code\":")
+        expect(idx >= 0).to_equal(true)
+        # A byte index is what the substring-based callers require.
+        expect(body.substring(idx).starts_with("\"code\":")).to_equal(true)
+
+    it "extracts a non-ASCII string value intact":
+        # @req: REQ-APP-LLM-CARET-001
+        step("Read back a Chinese message verbatim")
+        val body = "{\"message\":\"Header中未收到Authorization参数\",\"code\":\"1001\"}"
+        expect(extract_json_string(body, "message")).to_equal(
+            "Header中未收到Authorization参数")
+
+    it "extracts a value that follows a non-ASCII field":
+        # @req: REQ-APP-LLM-CARET-001
+        step("Read a later scalar past a multi-byte earlier field")
+        val body = "{\"message\":\"没找到对象\",\"code\":5}"
+        expect(extract_json_value(body, "code")).to_equal("5")
+
+    it "escapes a string containing non-ASCII characters":
+        # @req: REQ-APP-LLM-CARET-001
+        step("Escape a prompt holding Chinese text and an em dash")
+        expect(escape_json_text("用三个词说你好 — ok")).to_equal("用三个词说你好 — ok")

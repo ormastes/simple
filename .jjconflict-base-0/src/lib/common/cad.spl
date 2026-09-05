@@ -1,0 +1,149 @@
+# Minimal cad{} parametric authoring model and STEP AP242 fixture export.
+#
+# This is a typed domain surface, not a geometry kernel. It records primitives,
+# transforms, feature metadata, parameters, assemblies, and constraints, then
+# emits a representative STEP AP242 exchange fixture for conformance tests.
+
+class CadParameter:
+    name: text
+    value: f64
+    unit_name: text
+
+class CadPrimitive:
+    kind: text
+    name: text
+    x: f64
+    y: f64
+    z: f64
+
+class CadFeature:
+    kind: text
+    target: text
+    radius: f64
+    depth: f64
+
+class CadTransform:
+    tx: f64
+    ty: f64
+    tz: f64
+    rx: f64
+    ry: f64
+    rz: f64
+
+class CadPart:
+    name: text
+    parameters: [CadParameter]
+    primitives: [CadPrimitive]
+    features: [CadFeature]
+    transform: CadTransform
+
+class CadAssemblyRef:
+    instance_name: text
+    part_name: text
+    transform: CadTransform
+
+class CadConstraint:
+    kind: text
+    a: text
+    b: text
+    value: f64
+
+class CadAssembly:
+    name: text
+    references: [CadAssemblyRef]
+    constraints: [CadConstraint]
+
+fn cad_parameter(name: text, value: f64, unit_name: text) -> CadParameter:
+    CadParameter(name: name, value: value, unit_name: unit_name)
+
+fn cad_box(name: text, width: f64, height: f64, depth: f64) -> CadPrimitive:
+    CadPrimitive(kind: "box", name: name, x: width, y: height, z: depth)
+
+fn cad_cylinder(name: text, radius: f64, height: f64) -> CadPrimitive:
+    CadPrimitive(kind: "cylinder", name: name, x: radius, y: height, z: 0.0)
+
+fn cad_hole(target: text, radius: f64, depth: f64) -> CadFeature:
+    CadFeature(kind: "hole", target: target, radius: radius, depth: depth)
+
+fn cad_fillet(target: text, radius: f64) -> CadFeature:
+    CadFeature(kind: "fillet", target: target, radius: radius, depth: 0.0)
+
+fn cad_transform(tx: f64, ty: f64, tz: f64, rx: f64, ry: f64, rz: f64) -> CadTransform:
+    CadTransform(tx: tx, ty: ty, tz: tz, rx: rx, ry: ry, rz: rz)
+
+fn cad_identity_transform() -> CadTransform:
+    cad_transform(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+fn cad_part(name: text) -> CadPart:
+    CadPart(name: name, parameters: [], primitives: [], features: [], transform: cad_identity_transform())
+
+fn cad_part_add_parameter(part: CadPart, param: CadParameter) -> CadPart:
+    CadPart(name: part.name, parameters: part.parameters.push(param), primitives: part.primitives, features: part.features, transform: part.transform)
+
+fn cad_part_add_primitive(part: CadPart, primitive: CadPrimitive) -> CadPart:
+    CadPart(name: part.name, parameters: part.parameters, primitives: part.primitives.push(primitive), features: part.features, transform: part.transform)
+
+fn cad_part_add_feature(part: CadPart, feature: CadFeature) -> CadPart:
+    CadPart(name: part.name, parameters: part.parameters, primitives: part.primitives, features: part.features.push(feature), transform: part.transform)
+
+fn cad_part_with_transform(part: CadPart, transform: CadTransform) -> CadPart:
+    CadPart(name: part.name, parameters: part.parameters, primitives: part.primitives, features: part.features, transform: transform)
+
+fn cad_part_complete(part: CadPart) -> bool:
+    part.name != "" and part.primitives.len() > 0
+
+fn cad_assembly(name: text) -> CadAssembly:
+    CadAssembly(name: name, references: [], constraints: [])
+
+fn cad_assembly_ref(instance_name: text, part_name: text, transform: CadTransform) -> CadAssemblyRef:
+    CadAssemblyRef(instance_name: instance_name, part_name: part_name, transform: transform)
+
+fn cad_constraint(kind: text, a: text, b: text, value: f64) -> CadConstraint:
+    CadConstraint(kind: kind, a: a, b: b, value: value)
+
+fn cad_assembly_add_ref(assembly: CadAssembly, ref: CadAssemblyRef) -> CadAssembly:
+    CadAssembly(name: assembly.name, references: assembly.references.push(ref), constraints: assembly.constraints)
+
+fn cad_assembly_add_constraint(assembly: CadAssembly, constraint: CadConstraint) -> CadAssembly:
+    CadAssembly(name: assembly.name, references: assembly.references, constraints: assembly.constraints.push(constraint))
+
+fn cad_assembly_complete(assembly: CadAssembly) -> bool:
+    assembly.name != "" and assembly.references.len() > 0
+
+fn cad_part_to_step_ap242_fixture(part: CadPart) -> text:
+    var step = "ISO-10303-21;\n"
+    step = "{step}HEADER;\nFILE_DESCRIPTION(('Simple CAD AP242 fixture'),'4;1');\nFILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));\nENDSEC;\n"
+    step = "{step}DATA;\n"
+    step = "{step}#1=PRODUCT('{_step_escape(part.name)}','{_step_escape(part.name)}','',(#2));\n"
+    step = "{step}#2=PRODUCT_CONTEXT('',#3,'mechanical');\n"
+    step = "{step}#3=APPLICATION_CONTEXT('managed model based 3d engineering');\n"
+    var idx = 10
+    for primitive in part.primitives:
+        step = "{step}#{idx}=GEOMETRIC_REPRESENTATION_ITEM('{_step_escape(primitive.kind)}:{_step_escape(primitive.name)}:{primitive.x}:{primitive.y}:{primitive.z}');\n"
+        idx = idx + 1
+    for feature in part.features:
+        step = "{step}#{idx}=FEATURE_DEFINITION('{_step_escape(feature.kind)}:{_step_escape(feature.target)}:{feature.radius}:{feature.depth}');\n"
+        idx = idx + 1
+    step = "{step}ENDSEC;\nEND-ISO-10303-21;\n"
+    step
+
+fn cad_assembly_to_step_ap242_fixture(assembly: CadAssembly) -> text:
+    var step = "ISO-10303-21;\n"
+    step = "{step}HEADER;\nFILE_DESCRIPTION(('Simple CAD AP242 assembly fixture'),'4;1');\nFILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));\nENDSEC;\n"
+    step = "{step}DATA;\n"
+    step = "{step}#1=PRODUCT('{_step_escape(assembly.name)}','{_step_escape(assembly.name)}','',(#2));\n"
+    var idx = 20
+    for ref in assembly.references:
+        step = "{step}#{idx}=NEXT_ASSEMBLY_USAGE_OCCURRENCE('{_step_escape(ref.instance_name)}','{_step_escape(ref.part_name)}','',#1,#1,$);\n"
+        idx = idx + 1
+    for constraint in assembly.constraints:
+        step = "{step}#{idx}=GEOMETRIC_CONSTRAINT('{_step_escape(constraint.kind)}:{_step_escape(constraint.a)}:{_step_escape(constraint.b)}:{constraint.value}');\n"
+        idx = idx + 1
+    step = "{step}ENDSEC;\nEND-ISO-10303-21;\n"
+    step
+
+fn step_ap242_fixture_valid(step: text) -> bool:
+    step.contains("ISO-10303-21") and step.contains("FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'))") and step.contains("END-ISO-10303-21")
+
+fn _step_escape(value: text) -> text:
+    value.replace("'", "''")

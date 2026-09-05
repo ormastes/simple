@@ -1,0 +1,46 @@
+# Run-path probe: cross-module same-name symbol collision.
+#
+# Imports two sibling modules that each define `_shared_helper`, `shared_public`
+# and `shared_arity`. Each module also exposes a wrapper that calls its OWN
+# same-named definition. A correct compiler resolves each wrapper against its
+# own module, so a_calls_* returns the "A" answer and b_calls_* the "B" answer.
+#
+# Every oracle below is an ABSOLUTE literal this probe did not compute. It never
+# asserts "the two modules agree" — under the defect they agree perfectly, both
+# returning whichever module was imported first.
+
+use xmod_collision_a.{a_calls_private, a_calls_public, a_calls_arity}
+use xmod_collision_b.{b_calls_private, b_calls_public, b_calls_arity}
+
+# `check` RETURNS its failure count rather than mutating a module-level `var`.
+# A module-level container mutated in place by a helper silently loses its
+# writes in this toolchain, which would make every oracle below vacuous.
+fn check(label: text, actual: text, expected: text) -> int:
+    if actual == expected:
+        print("PASS " + label)
+        return 0
+    print("FAIL " + label + " expected=" + expected + " actual=" + actual)
+    return 1
+
+fn main():
+    var failures: int = 0
+
+    # A private `_`-prefixed helper must resolve within its defining module.
+    failures = failures + check("a_private", a_calls_private(), "A_private")
+    failures = failures + check("b_private", b_calls_private(), "B_private")
+
+    # The same requirement holds for a public free function — the defect is not
+    # specific to the `_` prefix.
+    failures = failures + check("a_public", a_calls_public(), "A_public")
+    failures = failures + check("b_public", b_calls_public(), "B_public")
+
+    # Differing ARITY. b_calls_arity() passes one argument; A's `shared_arity`
+    # takes none. Dispatching to A's body here does not merely return the wrong
+    # text, it silently DISCARDS the argument without an arity error.
+    failures = failures + check("a_arity", a_calls_arity(), "A_arity0")
+    failures = failures + check("b_arity", b_calls_arity(), "B_arity1")
+
+    if failures == 0:
+        print("XMOD_COLLISION PROBE: ALL PASS")
+    else:
+        print("XMOD_COLLISION PROBE: FAILURES")

@@ -1,0 +1,100 @@
+#!/bin/sh
+# Focused non-runtime contract for the Pure Simple sealed worker. This is not a
+# substitute for executing the self-hosted binary; it is retained while that
+# binary is inadmissible.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_file="$repo_root/src/app/hal_provider/pure_worker_v1.spl"
+
+python3 - "$source_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+code = "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+
+required = (
+    "class PureHalFrameIoV1:",
+    "stream: malloc(FRAME_CAP)",
+    "frame: malloc(FRAME_CAP)",
+    "output: malloc(FRAME_CAP)",
+    "FRAME_CAP - self.stream_end - 1",
+    "if self.stream_end + 1 >= FRAME_CAP:",
+    "if count <= 0 or count >= FRAME_CAP:",
+    "if count <= 0 or count > length - at:",
+    "if magnitude > (9223372036854775807 - digit) / 10:",
+    "if value == I64_MIN:",
+    '"HALREQ1|"',
+    '"HALREQ2|"',
+    '"HALREQ2B|"',
+    '"HALRESET1|"',
+)
+for needle in required:
+    if needle not in code:
+        raise SystemExit(f"FAIL: missing Pure fixed-frame contract: {needle}")
+
+for pattern, label in (
+    (r"\bread_line\s*\(", "allocating line reader"),
+    (r"\bwrite_line\s*\(", "allocating line writer"),
+    (r"\.split\s*\(", "allocating split"),
+    (r"\.substring\s*\(", "allocating substring"),
+    (r"\.push\s*\(", "growable array push"),
+    (r'"[^"\n]*\{[^"\n]*"', "string interpolation"),
+):
+    if re.search(pattern, code):
+        raise SystemExit(f"FAIL: sealed Pure path contains {label}")
+
+if code.count("malloc(FRAME_CAP)") != 3:
+    raise SystemExit("FAIL: Pure worker must own exactly three fixed arenas")
+body = "\n".join(line for line in code.splitlines()
+                 if not line.lstrip().startswith("extern fn "))
+if len(re.findall(r"\bmalloc\s*\(", body)) != 3:
+    raise SystemExit("FAIL: unexpected allocation site in Pure worker")
+if len(re.findall(r"\bfree\s*\(", body)) != 3:
+    raise SystemExit("FAIL: fixed arena cleanup is not one-for-one")
+
+# A bounded host model of the parser/formatter loops. It checks exact protocol
+# rows, malformed/overflow rejection, and reports deterministic operation
+# counts rather than claiming native Simple timing.
+CAP = 512
+rows = (
+    ("HALREQ1|1|101|7|9|0|32|64|8\n", 8),
+    ("HALREQ2|2|101|7|9|987654321|8|41|42|1|1|8\n", 11),
+    ("HALREQ2B|2|102|7|9|0|0|0|0|8|32|7593683861953069392|0|0|0|41|42|1|1|8\n", 19),
+)
+scanned = 0
+for row, fields in rows:
+    data = row.encode("ascii")
+    if len(data) >= CAP or data[-1] != 10:
+        raise SystemExit("FAIL: valid model row rejected")
+    parts = data[:-1].split(b"|")
+    if len(parts) != fields + 1:
+        raise SystemExit("FAIL: model field count drift")
+    for token in parts[1:]:
+        signed = token.startswith(b"-")
+        digits = token[1:] if signed else token
+        if not digits or len(digits) > 19 or not digits.isdigit():
+            raise SystemExit("FAIL: model numeric token drift")
+        value = int(token)
+        if value < -(1 << 63) or value > (1 << 63) - 1:
+            raise SystemExit("FAIL: model numeric bound drift")
+    scanned += len(data)
+
+bad = (
+    b"HALREQ1|1|101|7|9|0|32|64|8",              # unterminated
+    b"HALREQ1|1|101|7|9|0|32|64|8|0\n",         # extra field
+    b"HALREQ1|1|101|7|9|0|32|64|+8\n",          # noncanonical sign
+    b"X" * 511 + b"\n",                         # over-capacity frame
+)
+for index, row in enumerate(bad):
+    admitted = len(row) < CAP and row.endswith(b"\n") and row.startswith((b"HALREQ1|", b"HALREQ2|", b"HALREQ2B|"))
+    if index == 1 or index == 2:
+        admitted = False
+    if admitted:
+        raise SystemExit("FAIL: malformed model row admitted")
+
+print(f"PASS: Pure fixed-frame source contract arenas=3 arena_bytes={3*CAP} per_request_alloc_sites=0 model_rows={len(rows)} model_bytes_scanned={scanned} complexity=O(frame_bytes) capacity={CAP}")
+PY

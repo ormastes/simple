@@ -1,0 +1,62 @@
+# Probe — Result<T,E>.unwrap() payload type must survive into an UNANNOTATED local
+# so that method resolution on that local picks T's method.
+# TODO row 558 (doc/08_tracking/todo/todo_db.sdn).
+# Absolute-literal oracles only; never "the two engines agree".
+
+class Alpha:
+    n: i64
+    fn emit() -> str:
+        return "alpha:" + me.n.to_string()
+
+class Beta:
+    s: str
+    fn emit() -> str:
+        return "beta:" + me.s
+
+fn mk_alpha() -> Result<Alpha, str>:
+    return Ok(Alpha(n: 3))
+
+fn mk_nested() -> Result<Result<Alpha, str>, str>:
+    return Ok(Ok(Alpha(n: 9)))
+
+fn mk_err() -> Result<Alpha, str>:
+    return Err("nope")
+
+fn main():
+    var fails = 0
+
+    # negative control: `emit` is genuinely ambiguous by NAME alone (Alpha+Beta),
+    # so a correct resolver must be using the receiver TYPE, not the name.
+    val b = Beta(s: "x")
+    if b.emit() != "beta:x":
+        fails = fails + 1
+        print("FAIL control beta")
+
+    # annotated receiver
+    val a: Alpha = mk_alpha().unwrap()
+    if a.emit() != "alpha:3":
+        fails = fails + 1
+        print("FAIL annotated")
+
+    # unannotated receiver — the row's subject
+    val u = mk_alpha().unwrap()
+    if u.emit() != "alpha:3":
+        fails = fails + 1
+        print("FAIL unannotated")
+
+    # nested Result<Result<T,E>,E>, both unwraps unannotated
+    val nested = mk_nested().unwrap().unwrap()
+    if nested.emit() != "alpha:9":
+        fails = fails + 1
+        print("FAIL nested")
+
+    # Err path must still behave
+    val r = mk_err()
+    if not r.is_err():
+        fails = fails + 1
+        print("FAIL err path")
+
+    if fails == 0:
+        print("PROBE_VERDICT: PASS")
+    else:
+        print("PROBE_VERDICT: FAIL " + fails.to_string())

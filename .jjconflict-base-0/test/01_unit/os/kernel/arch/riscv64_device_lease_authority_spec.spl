@@ -1,0 +1,35 @@
+use std.spec.{describe, it, expect}
+use os.kernel.arch.riscv64.syscall.{rv64_exact_device_lease_allows}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilitySet, CapabilityToken, CapabilityKind}
+use os.kernel.types.device_mem_types.{device_grant_iommu_domain_id}
+
+fn rv64_device_token(kind: CapabilityKind, owner: u64, token_id: u64) -> CapabilityToken:
+    CapabilityToken(
+        kind: kind, generation: 1u64, owner: owner, token_id: token_id,
+        parent_token_id: 0u64, depth: 0i64
+    )
+
+fn rv64_complete_device_lease(owner: u64, dma_limit: u64) -> CapabilitySet:
+    val bus = 0u8
+    val device = 4u8
+    val function = 0u8
+    CapabilitySet(caps: [
+        rv64_device_token(CapabilityKind.DeviceGrant(bdf_bus: bus, bdf_device: device, bdf_func: function), owner, 1u64),
+        rv64_device_token(CapabilityKind.DeviceBarMap(bdf_bus: bus, bdf_device: device, bdf_func: function, bar_index: 0u8), owner, 2u64),
+        rv64_device_token(CapabilityKind.DeviceDma(bdf_bus: bus, bdf_device: device, bdf_func: function, max_bytes: dma_limit), owner, 3u64),
+        rv64_device_token(CapabilityKind.IommuDomain(domain_id: device_grant_iommu_domain_id(bus, device, function)), owner, 4u64)
+    ], is_pledged: true)
+
+describe "RV64 driver lease authority":
+    it "accepts only the current task exact BDF within its DMA budget":
+        val owner = TaskId(id: 41u64)
+        val caps = rv64_complete_device_lease(owner.id, 4096u64)
+        expect(rv64_exact_device_lease_allows(caps, owner, 0x000400u64, 4096u64)).to_equal(true)
+
+    it "rejects a foreign caller, BDF, and oversized DMA request":
+        val owner = TaskId(id: 41u64)
+        val caps = rv64_complete_device_lease(owner.id, 4096u64)
+        expect(rv64_exact_device_lease_allows(caps, TaskId(id: 42u64), 0x000400u64, 1u64)).to_equal(false)
+        expect(rv64_exact_device_lease_allows(caps, owner, 0x000500u64, 1u64)).to_equal(false)
+        expect(rv64_exact_device_lease_allows(caps, owner, 0x000400u64, 4097u64)).to_equal(false)

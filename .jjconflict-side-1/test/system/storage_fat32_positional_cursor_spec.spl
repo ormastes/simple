@@ -1,0 +1,78 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# FAT32 Positional Cursor Preservation
+
+System-level regression check for FR-STORAGE-0002. FAT32 positional I/O uses
+save/seek/operation/restore, so cursor restoration must preserve size changes.
+"""
+
+use std.spec.step
+
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.fat32_core.{Fat32Core, Fat32CloseState}
+use std.fs_driver.types.{FileHandle}
+
+class CursorMockBlockDevice:
+    sector: [u8]
+
+impl CursorMockBlockDevice:
+    static fn new() -> CursorMockBlockDevice:
+        var bytes: [u8] = []
+        var i = 0
+        while i < 512:
+            bytes.push(0)
+            i = i + 1
+        CursorMockBlockDevice(sector: bytes)
+
+impl BlockDevice for CursorMockBlockDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        Result.Ok(self.sector)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        512
+
+fn cursor_driver() -> Fat32Core:
+    var driver = Fat32Core.new(CursorMockBlockDevice.new())
+    driver.mounted = true
+    driver.bytes_per_sector = 512u32
+    driver.sectors_per_cluster = 1u32
+    val handle = driver.alloc_file_handle(2u32, 64, false).unwrap()
+    driver.seek(handle, 10).unwrap()
+    (driver, handle)
+
+describe "FAT32 positional cursor preservation":
+    # @manual scenario evidence
+    """FAT32 open-file cursor restoration must not roll back metadata."""
+    it "seek updates the open-file cursor":
+        # @req REQ-SSPEC-SYSTEM
+        step("seek updates the open-file cursor")
+        """Seek replaces the stored open-file entry with the requested offset."""
+        val setup = cursor_driver()
+        var driver = setup.0
+        val seek_r = driver.seek(setup.1, 0)
+        expect(seek_r.is_ok()).to_equal(true)
+        val file = driver.open_files[0]
+        expect(file.position).to_equal(0)
+
+    it "cursor restore keeps file size while restoring saved position":
+        # @req REQ-SSPEC-SYSTEM
+        step("cursor restore keeps file size while restoring saved position")
+        """Restoring a saved cursor preserves any file-size growth already recorded."""
+        val setup = cursor_driver()
+        var driver = setup.0
+        driver.seek(setup.1, 0)
+        var current = driver.open_files[0]
+        current.size = 96
+        driver.open_files[0] = current
+        val restore = driver.restore_open_file_cursor(setup.1, 2, 10)
+        expect(restore.is_ok()).to_equal(true)
+        val file = driver.open_files[0]
+        expect(file.position).to_equal(10)
+        expect(file.current_cluster).to_equal(2)
+        expect(file.size).to_equal(96)

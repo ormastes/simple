@@ -1,0 +1,110 @@
+# Mode Filter
+#
+# File-level execution-mode filtering for the test runner.
+#
+# A spec file may declare which execution modes it is valid under, using
+# either of two directives on their own comment line:
+#
+#     # @mode: interpreter, native     -- run ONLY in these modes
+#     # @skip_mode: native             -- run in every mode EXCEPT these
+#
+# Both accept a comma-separated list and may appear more than once.
+# `@skip_mode:` entries are normalised to a leading `!` so a single tag
+# string can carry both kinds.
+#
+# The runner consults `file_mode_matches` before dispatching a file to an
+# execution mode; a file whose tags exclude the active mode is skipped for
+# that mode rather than being run and failing.
+
+use std.io_runtime.{read_file_text}
+
+fn extract_directive_lines(content: text) -> [text]:
+    """Returns the trimmed comment / docstring lines that can carry directives.
+
+    Outside a `\"\"\"` docstring every `#` comment line counts; inside one, only
+    lines opening with `@` or `# @` do, so prose is never mistaken for a tag.
+    """
+    var result: [text] = []
+    var in_docstring = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("\"\"\""):
+            in_docstring = not in_docstring
+            continue
+        if in_docstring:
+            if trimmed.starts_with("# @") or trimmed.starts_with("@"):
+                result.push(trimmed)
+        elif trimmed.starts_with("#"):
+            result.push(trimmed)
+    result
+
+fn _parse_mode_line(trimmed: text, tags: [text]):
+    """Appends the tags declared on one directive line to `tags`."""
+    var raw = ""
+    var negate = false
+    if trimmed.starts_with("# @mode:"):
+        raw = trimmed[8:].trim()
+    elif trimmed.starts_with("@mode:"):
+        raw = trimmed[6:].trim()
+    elif trimmed.starts_with("# @skip_mode:"):
+        raw = trimmed[13:].trim()
+        negate = true
+    elif trimmed.starts_with("@skip_mode:"):
+        raw = trimmed[11:].trim()
+        negate = true
+    else:
+        return
+    if raw == "":
+        return
+    for part in raw.split(","):
+        val p = part.trim()
+        if p != "":
+            if negate:
+                tags.push("!{p}")
+            else:
+                tags.push(p)
+
+fn file_get_mode_tags(content: text) -> [text]:
+    """Returns the mode tags declared in `content`, `!`-prefixed for skips."""
+    var tags: [text] = []
+    for line in extract_directive_lines(content):
+        _parse_mode_line(line, tags)
+    tags
+
+fn extract_mode_tags(content: text) -> text:
+    """Returns the declared mode tags as one comma-separated string."""
+    file_get_mode_tags(content).join(",")
+
+fn file_mode_matches(mode_tags: text, mode_name: text) -> bool:
+    """True when a file carrying `mode_tags` should run under `mode_name`."""
+    if mode_tags == "":
+        return true
+    if mode_name == "all-modes":
+        return true
+    var has_positive = false
+    var has_skip = false
+    for tag in mode_tags.split(","):
+        val t = tag.trim()
+        if t == "":
+            continue
+        if t.starts_with("!"):
+            if t[1:] == mode_name:
+                return false
+            has_skip = true
+        else:
+            has_positive = true
+            if t == mode_name:
+                return true
+    if has_skip and not has_positive:
+        return true
+    if has_positive:
+        return false
+    true
+
+fn content_mode_matches(content: text, mode_name: text) -> bool:
+    """Convenience: extract tags from `content` and test them against a mode."""
+    file_mode_matches(extract_mode_tags(content), mode_name)
+
+fn path_mode_matches(path: text, mode_name: text) -> bool:
+    """True when the spec file at `path` should run under `mode_name`."""
+    content_mode_matches(read_file_text(path), mode_name)

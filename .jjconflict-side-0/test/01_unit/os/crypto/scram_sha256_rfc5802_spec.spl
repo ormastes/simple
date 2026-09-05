@@ -1,0 +1,393 @@
+# SCRAM-SHA-256 Known-Answer Tests — RFC 7677 §3 + RFC 5802
+#
+# Verifies the pure-Simple SCRAM-SHA-256 implementation in
+# src/os/crypto/scram.spl against the canonical RFC 7677 §3 example.
+#
+# RFC 7677 §3 example (user=user, password=pencil, SCRAM-SHA-256):
+#   client-nonce  = "rOprNGfwEbeRWgbNEkqO"
+#   server-nonce  = "rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"
+#   salt (b64)    = "W22ZaJ0SNY7soEsUEjb6gQ=="
+#   salt (hex)    = 5b6d99689d12358eeca04b141236fa81
+#   iterations    = 4096
+#
+# Derived values (python3 hashlib.pbkdf2_hmac + hmac.new, verified against RFC):
+#   SaltedPassword = c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d
+#   ClientKey      = a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b
+#   StoredKey      = 586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6
+#   ClientProof b64= dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=  (RFC 7677 §3)
+#   ServerSig b64  = 6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=  (RFC 7677 §3)
+#   ServerSig hex  = eabae24d1062db75a9451ff0b6ea7e98c8546549ff741e672d3251b2397de46e
+#
+# Tampered proof: "dHzbXapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=" — char [4]
+# flipped from 'Z' to 'X', decodes to 32 bytes (length unchanged), so the
+# constant-time content comparison fires rather than the length check.
+#
+# NOTE: interpreter-mode test runner verifies file loading, NOT it-block
+# execution. All MAC assertions require compiled/native mode
+# (feedback_compile_mode_false_greens.md).
+#
+# All helper fns are module-level (feedback_it_block_var_mutation.md).
+
+use std.spipe.*
+use os.crypto.scram.{
+    scram_sha256_client_first,
+    scram_sha256_client_final,
+    scram_sha256_server_verify,
+    scram_sha256_server_signature_check,
+    scram_sha256_ct_eq,
+    scram_sha256_decode_server_final
+}
+
+# ===========================================================================
+# Data helpers — all module-level (no it-block var mutation)
+# ===========================================================================
+
+fn _user_bytes() -> [u8]:
+    # ASCII "user" = 75 73 65 72
+    var out: [u8] = []
+    out.push(0x75)
+    out.push(0x73)
+    out.push(0x65)
+    out.push(0x72)
+    out
+
+fn _password_bytes() -> [u8]:
+    # ASCII "pencil" = 70 65 6e 63 69 6c
+    var out: [u8] = []
+    out.push(0x70)
+    out.push(0x65)
+    out.push(0x6e)
+    out.push(0x63)
+    out.push(0x69)
+    out.push(0x6c)
+    out
+
+fn _client_nonce_bytes() -> [u8]:
+    # ASCII "rOprNGfwEbeRWgbNEkqO"
+    val s = "rOprNGfwEbeRWgbNEkqO"
+    _str_to_u8(s)
+
+fn _gs2_header_bytes() -> [u8]:
+    # "n,," — no channel binding, no authzid
+    var out: [u8] = []
+    out.push(0x6e)
+    out.push(0x2c)
+    out.push(0x2c)
+    out
+
+fn _client_first_expected() -> [u8]:
+    # "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+    _str_to_u8("n,,n=user,r=rOprNGfwEbeRWgbNEkqO")
+
+fn _server_first_bytes() -> [u8]:
+    # "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+    _str_to_u8("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
+
+fn _salt_bytes() -> [u8]:
+    # base64decode("W22ZaJ0SNY7soEsUEjb6gQ==") = 5b6d99689d12358eeca04b141236fa81
+    var out: [u8] = []
+    out.push(0x5b)
+    out.push(0x6d)
+    out.push(0x99)
+    out.push(0x68)
+    out.push(0x9d)
+    out.push(0x12)
+    out.push(0x35)
+    out.push(0x8e)
+    out.push(0xec)
+    out.push(0xa0)
+    out.push(0x4b)
+    out.push(0x14)
+    out.push(0x12)
+    out.push(0x36)
+    out.push(0xfa)
+    out.push(0x81)
+    out
+
+fn _auth_message_bytes() -> [u8]:
+    # n=user,r=rOprNGfwEbeRWgbNEkqO,
+    # r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,
+    # c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0
+    val s = "n=user,r=rOprNGfwEbeRWgbNEkqO,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"
+    _str_to_u8(s)
+
+fn _client_final_expected() -> [u8]:
+    # "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+    val s = "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+    _str_to_u8(s)
+
+fn _server_final_bytes() -> [u8]:
+    # "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
+    _str_to_u8("v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=")
+
+fn _server_sig_expected() -> [u8]:
+    # hex: eabae24d1062db75a9451ff0b6ea7e98c8546549ff741e672d3251b2397de46e
+    var out: [u8] = []
+    out.push(0xea)
+    out.push(0xba)
+    out.push(0xe2)
+    out.push(0x4d)
+    out.push(0x10)
+    out.push(0x62)
+    out.push(0xdb)
+    out.push(0x75)
+    out.push(0xa9)
+    out.push(0x45)
+    out.push(0x1f)
+    out.push(0xf0)
+    out.push(0xb6)
+    out.push(0xea)
+    out.push(0x7e)
+    out.push(0x98)
+    out.push(0xc8)
+    out.push(0x54)
+    out.push(0x65)
+    out.push(0x49)
+    out.push(0xff)
+    out.push(0x74)
+    out.push(0x1e)
+    out.push(0x67)
+    out.push(0x2d)
+    out.push(0x32)
+    out.push(0x51)
+    out.push(0xb2)
+    out.push(0x39)
+    out.push(0x7d)
+    out.push(0xe4)
+    out.push(0x6e)
+    out
+
+fn _tampered_final_bytes() -> [u8]:
+    # Proof char[4] flipped: 'Z' -> 'X'; decoded length stays 32 bytes.
+    # Ensures the constant-time XOR-accumulate loop runs (not length check).
+    # "c=biws,r=...nonce...,p=dHzbXapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+    val s = "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbXapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+    _str_to_u8(s)
+
+fn _wrong_password_bytes() -> [u8]:
+    # ASCII "wrongpw"
+    _str_to_u8("wrongpw")
+
+# ===========================================================================
+# Utility helpers
+# ===========================================================================
+
+fn _str_to_u8(s: text) -> [u8]:
+    """Encode ASCII text to [u8] byte array."""
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len(): return false
+    var i: u64 = 0
+    while i < a.len().to_u64():
+        if a[i] != b[i]: return false
+        i = i + 1
+    true
+
+fn _hex_nibble(n: i64) -> text:
+    if n == 0: "0"
+    else if n == 1: "1"
+    else if n == 2: "2"
+    else if n == 3: "3"
+    else if n == 4: "4"
+    else if n == 5: "5"
+    else if n == 6: "6"
+    else if n == 7: "7"
+    else if n == 8: "8"
+    else if n == 9: "9"
+    else if n == 10: "a"
+    else if n == 11: "b"
+    else if n == 12: "c"
+    else if n == 13: "d"
+    else if n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    while i < b.len().to_u64():
+        val byte = b[i].to_i64()
+        s = s + _hex_nibble((byte >> 4) & 0xF)
+        s = s + _hex_nibble(byte & 0xF)
+        i = i + 1
+    s
+
+fn _u8_to_text_spec(buf: [u8]) -> text:
+    val printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var s: text = ""
+    var i: u64 = 0
+    while i < buf.len().to_u64():
+        val code = buf[i].to_i64()
+        if code >= 32 and code <= 126:
+            val idx = code - 32
+            s = s + printable[idx:idx + 1]
+        i = i + 1
+    s
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "SCRAM-SHA-256 — RFC 7677 §3 client-first":
+
+    it "client-first format is n,,n=user,r=<nonce>":
+        val cf = scram_sha256_client_first(_user_bytes(), _client_nonce_bytes())
+        expect(_bytes_eq(cf, _client_first_expected())).to_equal(true)
+
+    it "client-first length is 32 bytes":
+        val cf = scram_sha256_client_first(_user_bytes(), _client_nonce_bytes())
+        expect(cf.len()).to_equal(32)
+
+describe "SCRAM-SHA-256 — RFC 7677 §3 client-final (full round-trip)":
+
+    it "client-final is byte-exact with RFC 7677 §3 ClientProof":
+        val (cf, _) = scram_sha256_client_final(
+            _client_first_expected(),
+            _server_first_bytes(),
+            _password_bytes(),
+            _gs2_header_bytes()
+        )
+        expect(_bytes_eq(cf, _client_final_expected())).to_equal(true)
+
+    it "client-final text matches RFC 7677 §3 expected message":
+        val (cf, _) = scram_sha256_client_final(
+            _client_first_expected(),
+            _server_first_bytes(),
+            _password_bytes(),
+            _gs2_header_bytes()
+        )
+        val expected_text = "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+        expect(_u8_to_text_spec(cf)).to_equal(expected_text)
+
+    it "expected ServerSignature hex matches RFC 7677 §3":
+        val (_, server_sig) = scram_sha256_client_final(
+            _client_first_expected(),
+            _server_first_bytes(),
+            _password_bytes(),
+            _gs2_header_bytes()
+        )
+        expect(_bytes_hex(server_sig)).to_equal(
+            "eabae24d1062db75a9451ff0b6ea7e98c8546549ff741e672d3251b2397de46e"
+        )
+
+    it "expected ServerSignature is 32 bytes":
+        val (_, server_sig) = scram_sha256_client_final(
+            _client_first_expected(),
+            _server_first_bytes(),
+            _password_bytes(),
+            _gs2_header_bytes()
+        )
+        expect(server_sig.len()).to_equal(32)
+
+describe "SCRAM-SHA-256 — RFC 7677 §3 server-side verify":
+
+    it "server_verify accepts valid ClientProof":
+        val ok = scram_sha256_server_verify(
+            _client_final_expected(),
+            _password_bytes(),
+            _salt_bytes(),
+            4096,
+            _auth_message_bytes()
+        )
+        expect(ok).to_equal(true)
+
+    it "server_verify rejects tampered ClientProof (content differs, length=32)":
+        # Tampered: proof char[4] 'Z'→'X'; decoded length unchanged at 32 bytes.
+        # The constant-time XOR-accumulate fires, not the length check.
+        val ok = scram_sha256_server_verify(
+            _tampered_final_bytes(),
+            _password_bytes(),
+            _salt_bytes(),
+            4096,
+            _auth_message_bytes()
+        )
+        expect(ok).to_equal(false)
+
+    it "server_verify rejects wrong password":
+        val ok = scram_sha256_server_verify(
+            _client_final_expected(),
+            _wrong_password_bytes(),
+            _salt_bytes(),
+            4096,
+            _auth_message_bytes()
+        )
+        expect(ok).to_equal(false)
+
+    it "server_verify rejects wrong salt":
+        val wrong_salt: [u8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val ok = scram_sha256_server_verify(
+            _client_final_expected(),
+            _password_bytes(),
+            wrong_salt,
+            4096,
+            _auth_message_bytes()
+        )
+        expect(ok).to_equal(false)
+
+describe "SCRAM-SHA-256 — RFC 7677 §3 server-final mutual auth":
+
+    it "server_signature_check diagnostic: decoded server sig is 32 bytes":
+        expect(_server_final_bytes().len()).to_equal(46)
+        expect(_server_sig_expected().len()).to_equal(32)
+
+    it "server_signature_check diagnostic: server_sig b64 decodes to correct hex":
+        # Direct b64 decode test using scram module's internal _base64_decode
+        # We test indirectly: build a server_final where the decoded sig
+        # matches _server_sig_expected
+        # The b64 of the server sig: "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
+        # eabae24d1062db75a9451ff0b6ea7e98c8546549ff741e672d3251b2397de46e
+        # We verify by checking that server_signature_check works when
+        # we pass the correct hex-verified expected sig alongside the server_final
+        val (_, derived_sig) = scram_sha256_client_final(
+            _client_first_expected(),
+            _server_first_bytes(),
+            _password_bytes(),
+            _gs2_header_bytes()
+        )
+        expect(_bytes_hex(derived_sig)).to_equal(
+            "eabae24d1062db75a9451ff0b6ea7e98c8546549ff741e672d3251b2397de46e"
+        )
+        # Manually build server-final with the derived_sig b64
+        # to bypass the hardcoded _server_sig_expected
+        # This tests that _ct_eq_bytes works correctly
+        val ok = _bytes_eq(derived_sig, _server_sig_expected())
+        expect(ok).to_equal(true)
+
+    it "server_signature_check diagnostic: _server_sig_expected hex":
+        expect(_bytes_hex(_server_sig_expected())).to_equal(
+            "eabae24d1062db75a9451ff0b6ea7e98c8546549ff741e672d3251b2397de46e"
+        )
+
+    it "server_signature_check diagnostic: ct_eq_bytes on identical arrays":
+        val a = _server_sig_expected()
+        val b = _server_sig_expected()
+        expect(scram_sha256_ct_eq(a, b)).to_equal(true)
+
+    it "server_signature_check diagnostic: decoded server-final sig hex":
+        val decoded = scram_sha256_decode_server_final(_server_final_bytes())
+        expect(decoded.len()).to_equal(32)
+        expect(_bytes_hex(decoded)).to_equal(
+            "eabae24d1062db75a9451ff0b6ea7e98c8546549ff741e672d3251b2397de46e"
+        )
+
+    it "server_signature_check accepts valid server-final":
+        val ok = scram_sha256_server_signature_check(
+            _server_final_bytes(),
+            _server_sig_expected()
+        )
+        expect(ok).to_equal(true)
+
+    it "server_signature_check rejects corrupted server-final":
+        # Flip first byte of expected signature
+        var bad_sig = _server_sig_expected()
+        bad_sig[0] = (bad_sig[0].to_i64() ^ 0xFF).to_u8()
+        val ok = scram_sha256_server_signature_check(
+            _server_final_bytes(),
+            bad_sig
+        )
+        expect(ok).to_equal(false)

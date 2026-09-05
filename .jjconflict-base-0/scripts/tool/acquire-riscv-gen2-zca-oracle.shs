@@ -1,0 +1,28 @@
+#!/bin/sh
+# Acquire the exact independent Sail model admitted by the Gen2 Zca oracle gate.
+set -eu
+
+revision=a33475aeb80090127433b5a8b30e717edaa19e71
+repository=https://github.com/riscv/sail-riscv.git
+expected_archive_sha=665822b80f1f0ad2dd33709673a5fb92980ea051d9f977d50c70d587d2f0cdc8
+expected_zca_sha=b6dee98f5fa917dfcf37452f3f475eefd59215f949c21dda541c54f14a5de039
+destination=${1:-build/oracles/sail-riscv-a33475a}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+if [ ! -d "$destination/.git" ]; then
+    mkdir -p "$(dirname -- "$destination")"
+    git clone --no-checkout "$repository" "$destination"
+fi
+
+git -C "$destination" fetch origin "$revision"
+git -C "$destination" checkout --detach "$revision"
+[ "$(git -C "$destination" rev-parse HEAD)" = "$revision" ] || fail "checkout is not the pinned Sail revision"
+[ -z "$(git -C "$destination" status --porcelain --untracked-files=no)" ] || fail "pinned Sail checkout has tracked modifications"
+
+archive_sha=$(git -C "$destination" archive --format=tar HEAD | sha256sum | awk '{print $1}')
+[ "$archive_sha" = "$expected_archive_sha" ] || fail "Sail source archive SHA-256 mismatch"
+zca_sha=$(sha256sum "$destination/model/extensions/C/zca_insts.sail" | awk '{print $1}')
+[ "$zca_sha" = "$expected_zca_sha" ] || fail "Sail Zca source SHA-256 mismatch"
+
+echo "PASS: acquired pinned Sail RISC-V oracle source at $destination"

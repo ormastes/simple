@@ -1,0 +1,136 @@
+"""
+SDK MCP Transport Bridge parity model.
+
+Models the CLI-side and SDK-side control transports used when SDK MCP servers
+run in-process and communicate with Claude Code through control messages.
+"""
+
+class SendMcpMessageCallback:
+    serverNames: [text]
+    messages: [text]
+    responses: [text]
+
+impl SendMcpMessageCallback:
+    static fn new(responses: [text]) -> SendMcpMessageCallback:
+        SendMcpMessageCallback(serverNames: [], messages: [], responses: responses)
+
+    me send(serverName: text, message: text) -> text:
+        me.serverNames = appendText(me.serverNames, serverName)
+        me.messages = appendText(me.messages, message)
+        if me.responses.len() == 0:
+            return ""
+        val response = me.responses[0]
+        me.responses = dropFirstText(me.responses)
+        response
+
+class SdkControlClientTransport:
+    serverName: text
+    callback: SendMcpMessageCallback
+    isClosed: bool
+    receivedMessages: [text]
+    closeCount: i64
+    error: text
+
+impl SdkControlClientTransport:
+    static fn new(serverName: text, callback: SendMcpMessageCallback) -> SdkControlClientTransport:
+        SdkControlClientTransport(serverName: serverName, callback: callback, isClosed: false, receivedMessages: [], closeCount: 0, error: "")
+
+    me start() -> ():
+        pass
+
+    me send(message: text) -> bool:
+        if me.isClosed:
+            me.error = "Transport is closed"
+            return false
+        val response = me.callback.send(me.serverName, message)
+        if response != "":
+            me.receivedMessages = appendText(me.receivedMessages, response)
+        true
+
+    me close() -> ():
+        if me.isClosed:
+            return
+        me.isClosed = true
+        me.closeCount = me.closeCount + 1
+
+class SdkControlServerTransport:
+    isClosed: bool
+    sentMessages: [text]
+    inboundMessages: [text]
+    closeCount: i64
+    error: text
+
+impl SdkControlServerTransport:
+    static fn new() -> SdkControlServerTransport:
+        SdkControlServerTransport(isClosed: false, sentMessages: [], inboundMessages: [], closeCount: 0, error: "")
+
+    me start() -> ():
+        pass
+
+    me receive(message: text) -> ():
+        if not me.isClosed:
+            me.inboundMessages = appendText(me.inboundMessages, message)
+
+    me send(message: text) -> bool:
+        if me.isClosed:
+            me.error = "Transport is closed"
+            return false
+        me.sentMessages = appendText(me.sentMessages, message)
+        true
+
+    me close() -> ():
+        if me.isClosed:
+            return
+        me.isClosed = true
+        me.closeCount = me.closeCount + 1
+
+fn appendText(values: [text], value: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < values.len():
+        out.push(values[i])
+        i = i + 1
+    out.push(value)
+    out
+
+fn dropFirstText(values: [text]) -> [text]:
+    var out: [text] = []
+    var i = 1
+    while i < values.len():
+        out.push(values[i])
+        i = i + 1
+    out
+
+fn sdkControlTransportSourceLinesModeled() -> i64:
+    136
+
+# Source parity note: SendMcpMessageCallback receives server name and JSONRPC message.
+# Source parity note: SdkControlClientTransport converts MCP messages into control requests.
+# Source parity note: client transport passes callback response to onmessage.
+# Source parity note: client transport close is idempotent.
+# Source parity note: client transport rejects send after close.
+# Source parity note: SdkControlServerTransport forwards server responses through callback.
+# Source parity note: server transport close is idempotent.
+# Source parity note: server transport rejects send after close.
+# Source parity note: SDK Query owns request/response correlation.
+# Source parity note: message IDs are preserved as opaque JSON text.
+# Source parity note: multiple SDK MCP servers route by serverName.
+# Source parity note: source file length target is 136 lines.
+# Source parity note: CLI side waits for callback response before delivery.
+# Source parity note: server side is a pass-through response bridge.
+# Source parity note: start is intentionally a no-op on both transports.
+# Source parity note: onerror exists in source but is not invoked by normal sends.
+# Source parity note: onclose fires only on first close.
+# Source parity note: response routing is represented by receivedMessages.
+# Source parity note: callback request log preserves server name.
+# Source parity note: callback request log preserves message body.
+# Source parity note: server sentMessages represents sendMcpMessage callback.
+# Source parity note: inboundMessages represents Query calling onmessage.
+# Source parity note: no subprocess is spawned for SDK MCP servers.
+# Source parity note: transport supports simultaneous SDK servers by name.
+# Source parity note: control request wrapper owns server_name.
+# Source parity note: StructuredIO owns pending client requests.
+# Source parity note: Query owns pending server requests.
+# Source parity note: close after close is a no-op.
+# Source parity note: send after close records Transport is closed.
+# Source parity note: SdkControlTransport parity model ends here.

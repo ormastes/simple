@@ -1,0 +1,261 @@
+# browser_interaction_capture.spl — Capture-backed browser scroll + low-res
+# text evidence for the Simple web render path (master plan W4 / G2.3 / G2.4).
+#
+# Renders offscreen only (pure-Simple layout renderer, cpu_simd backend):
+#   1. A long page at scroll offsets 0 and 120: asserts the marker row shifted
+#      up by exactly 120 px and both framebuffers are viewport-sized.
+#   2. A text-heavy page at 640x480 and 800x600 for the readability oracle.
+#
+# Prints key=value evidence lines; exits 0 only when every check passes.
+# Usage: bin/simple run src/app/test/browser_interaction_capture.spl [out_dir]
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_pixels_at_scroll}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.web.simple_browser_page.{
+    simple_browser_history_new, simple_browser_history_navigate,
+    simple_browser_history_back, simple_browser_history_forward,
+    simple_browser_history_can_back, simple_browser_history_can_forward,
+    simple_browser_anchor_href_at, simple_browser_first_anchor_center}
+use common.image.ppm_decode.{encode_ppm_p6}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes, file_read_text}
+use std.sffi.cli.{cli_get_args}
+
+# Marker row background: #ff00aa, unique in the page.
+val MARKER_COLOR: u32 = 0xFFFF00AAu32
+
+# @step: Build long scroll page (content ~550px, viewport 360px)
+fn long_page_html() -> text:
+    var html = "<html><head><style>"
+    html = html + "body { margin: 0; background-color: #ffffff; } "
+    html = html + ".filler { height: 100px; background-color: #eeeeee; margin: 0; } "
+    html = html + ".marker { height: 16px; background-color: #ff00aa; margin: 0; } "
+    html = html + "h1 { color: #111111; }"
+    html = html + "</style></head><body>"
+    html = html + "<h1>Scroll evidence page</h1>"
+    html = html + "<div class='filler'>Section one filler content for scrolling.</div>"
+    html = html + "<div class='filler'>Section two filler content for scrolling.</div>"
+    html = html + "<div class='marker'></div>"
+    html = html + "<div class='filler'>Section three filler content below marker.</div>"
+    html = html + "<div class='filler'>Section four filler content below marker.</div>"
+    html = html + "<div class='filler'>Section five filler content below marker.</div>"
+    html = html + "</body></html>"
+    html
+
+# @step: Build text-heavy page for low-res readability
+fn text_page_html() -> text:
+    var html = "<html><head><style>"
+    html = html + "body { margin: 16px; background-color: #ffffff; } "
+    html = html + ".para { color: #222222; font-size: 16px; margin: 8px; } "
+    html = html + "h1 { color: #111111; }"
+    html = html + "</style></head><body>"
+    html = html + "<h1>Low resolution readability evidence</h1>"
+    # ponytail: 4 short paragraphs, not a full article — interpreter glyph paint
+    # costs ~60ms/glyph; this is the smallest corpus the oracle still passes on.
+    var i = 0
+    while i < 4:
+        html = html + "<p class='para'>The quick brown fox jumps over the lazy dog while vexed zebras watch. Paragraph {i} keeps glyph ink measurable.</p>"
+        i = i + 1
+    html = html + "</body></html>"
+    html
+
+# @step: Find first row where at least half the pixels match the marker color
+fn find_marker_row(pixels: [u32], width: i32, height: i32) -> i32:
+    var y: i32 = 0
+    while y < height:
+        var count: i32 = 0
+        var x: i32 = 0
+        while x < width:
+            if pixels[y * width + x] == MARKER_COLOR:
+                count = count + 1
+            x = x + 1
+        if count * 2 >= width:
+            return y
+        y = y + 1
+    -1
+
+# @step: Write ARGB pixels as binary P6 PPM
+fn write_ppm(path: text, pixels: [u32], width: i32, height: i32) -> bool:
+    val bytes = encode_ppm_p6(width.to_u32(), height.to_u32(), pixels)
+    file_write_bytes(path, bytes)
+
+# @step: Count pixels exactly matching a color (page-identity marker)
+fn count_color(pixels: [u32], color: u32) -> i32:
+    var c: i32 = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] == color:
+            c = c + 1
+        i = i + 1
+    c
+
+# @step: Count differing pixels between two framebuffers
+fn pixels_differ(a: [u32], b: [u32]) -> i32:
+    var d: i32 = 0
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var i = 0
+    while i < n:
+        if a[i] != b[i]:
+            d = d + 1
+        i = i + 1
+    d
+
+fn main() -> i64:
+    val args = cli_get_args()
+    var out_dir = "build/browser-interaction"
+    if args.len() >= 1 and args[0] != "":
+        out_dir = args[0]
+
+    var all_pass = true
+
+    # ---- G2.4 scroll evidence -------------------------------------------
+    val scroll_w: i32 = 480
+    val scroll_h: i32 = 360
+    val scroll_amount: i32 = 120
+    val page = long_page_html()
+
+    val px0 = simple_web_layout_render_html_pixels_at_scroll(page, scroll_w, scroll_h, "cpu_simd", 0)
+    val px1 = simple_web_layout_render_html_pixels_at_scroll(page, scroll_w, scroll_h, "cpu_simd", scroll_amount)
+    val expected_count = scroll_w * scroll_h
+    print "scroll_viewport={scroll_w}x{scroll_h}"
+    print "scroll_offset_px={scroll_amount}"
+    print "scroll_pixels_offset0={px0.len()}"
+    print "scroll_pixels_offset120={px1.len()}"
+    if px0.len() != expected_count or px1.len() != expected_count:
+        all_pass = false
+        print "scroll_status=fail"
+        print "scroll_reason=framebuffer_not_viewport_sized"
+    else:
+        val y0 = find_marker_row(px0, scroll_w, scroll_h)
+        val y1 = find_marker_row(px1, scroll_w, scroll_h)
+        print "scroll_marker_y_offset0={y0}"
+        print "scroll_marker_y_offset120={y1}"
+        val shift = y0 - y1
+        print "scroll_marker_shift={shift}"
+        if y0 >= 0 and y1 >= 0 and shift == scroll_amount:
+            print "scroll_status=pass"
+        else:
+            all_pass = false
+            print "scroll_status=fail"
+            print "scroll_reason=marker_shift_mismatch"
+
+    val p0_path = "{out_dir}/scroll_offset0.ppm"
+    val p1_path = "{out_dir}/scroll_offset120.ppm"
+    if write_ppm(p0_path, px0, scroll_w, scroll_h):
+        print "scroll_ppm_offset0={p0_path}"
+    else:
+        all_pass = false
+        print "scroll_ppm_offset0="
+    if write_ppm(p1_path, px1, scroll_w, scroll_h):
+        print "scroll_ppm_offset120={p1_path}"
+    else:
+        all_pass = false
+        print "scroll_ppm_offset120="
+
+    # ---- G2.3 low-res text evidence --------------------------------------
+    val text_page = text_page_html()
+    val low_w: i32 = 640
+    val low_h: i32 = 480
+    val px_low = simple_web_render_html_to_pixels_with_engine2d_backend(text_page, low_w, low_h, "cpu_simd")
+    print "lowres_640x480_pixels={px_low.len()}"
+    val low_path = "{out_dir}/lowres_640x480.ppm"
+    if px_low.len() == low_w * low_h and write_ppm(low_path, px_low, low_w, low_h):
+        print "lowres_640x480_ppm={low_path}"
+    else:
+        all_pass = false
+        print "lowres_640x480_ppm="
+
+    val mid_w: i32 = 800
+    val mid_h: i32 = 600
+    val px_mid = simple_web_render_html_to_pixels_with_engine2d_backend(text_page, mid_w, mid_h, "cpu_simd")
+    print "lowres_800x600_pixels={px_mid.len()}"
+    val mid_path = "{out_dir}/lowres_800x600.ppm"
+    if px_mid.len() == mid_w * mid_h and write_ppm(mid_path, px_mid, mid_w, mid_h):
+        print "lowres_800x600_ppm={mid_path}"
+    else:
+        all_pass = false
+        print "lowres_800x600_ppm="
+
+    # ---- G2.4 link-click + back/forward navigation ----------------------
+    # Two-page local corpus: page A has a full-width anchor to page B (green).
+    # Hit-test the anchor's layout box (layout-layer hit_test_anchor), resolve
+    # its href relative to the file:// base, drive a back/forward history, and
+    # render both pages to prove distinct framebuffers each way.
+    val nav_w: i32 = 400
+    val nav_h: i32 = 300
+    val a_path = "test/03_system/gui/browser_nav_corpus/page_a.html"
+    val base_a = "file://" + a_path
+    val a_html = file_read_text(a_path)
+    val marker_a: u32 = 0xFFDDDDDDu32
+    val marker_b: u32 = 0xFF00CC66u32
+
+    if a_html == "":
+        all_pass = false
+        print "link_click_status=fail"
+        print "link_click_reason=fixture_a_unreadable"
+    else:
+        val (cx, cy) = simple_browser_first_anchor_center(a_html, nav_w, nav_h)
+        print "link_click_anchor_center={cx},{cy}"
+        val href = simple_browser_anchor_href_at(a_html, base_a, cx, cy, nav_w, nav_h)
+        print "link_click_href={href}"
+        # Negative control: a point far below the anchor resolves to no link.
+        val miss = simple_browser_anchor_href_at(a_html, base_a, cx, cy + 900, nav_w, nav_h)
+        print "link_click_miss_href={miss}"
+
+        val b_path = if href.starts_with("file://"): href.substring(7, href.len()) else: ""
+        val b_html = if b_path != "": file_read_text(b_path) else: ""
+
+        var hist = simple_browser_history_new(base_a)
+        hist = simple_browser_history_navigate(hist, href)
+        val after_click_url = hist.current
+        val back_hist = simple_browser_history_back(hist)
+        val after_back_url = back_hist.current
+        val fwd_hist = simple_browser_history_forward(back_hist)
+        val after_forward_url = fwd_hist.current
+        print "link_click_after_click_url={after_click_url}"
+        print "link_click_after_back_url={after_back_url}"
+        print "link_click_after_forward_url={after_forward_url}"
+
+        val pxA = simple_web_layout_render_html_pixels_at_scroll(a_html, nav_w, nav_h, "cpu_simd", 0)
+        val pxB = simple_web_layout_render_html_pixels_at_scroll(b_html, nav_w, nav_h, "cpu_simd", 0)
+        val a_marker = count_color(pxA, marker_a)
+        val b_marker = count_color(pxB, marker_b)
+        val diff = pixels_differ(pxA, pxB)
+        print "link_click_a_marker_pixels={a_marker}"
+        print "link_click_b_marker_pixels={b_marker}"
+        print "link_click_diff_pixels={diff}"
+
+        # Evidence PPMs for each navigation state (renders are deterministic:
+        # after-back reuses A's framebuffer, after-forward reuses B's).
+        val _r0 = write_ppm("{out_dir}/nav_a_initial.ppm", pxA, nav_w, nav_h)
+        val _r1 = write_ppm("{out_dir}/nav_b_after_click.ppm", pxB, nav_w, nav_h)
+        val _r2 = write_ppm("{out_dir}/nav_a_after_back.ppm", pxA, nav_w, nav_h)
+        val _r3 = write_ppm("{out_dir}/nav_b_after_forward.ppm", pxB, nav_w, nav_h)
+        print "link_click_ppm_a_initial={out_dir}/nav_a_initial.ppm"
+        print "link_click_ppm_b_after_click={out_dir}/nav_b_after_click.ppm"
+        print "link_click_ppm_a_after_back={out_dir}/nav_a_after_back.ppm"
+        print "link_click_ppm_b_after_forward={out_dir}/nav_b_after_forward.ppm"
+
+        val threshold: i32 = 500
+        val hit_ok = cx >= 0 and href.ends_with("page_b.html") and miss == ""
+        val load_ok = b_html != ""
+        val history_ok = after_click_url == href and after_back_url == base_a and after_forward_url == href
+        val pixels_ok = a_marker > threshold and b_marker > threshold and diff > threshold
+        if hit_ok and load_ok and history_ok and pixels_ok:
+            print "link_click_status=pass"
+        else:
+            all_pass = false
+            print "link_click_status=fail"
+            if not hit_ok:
+                print "link_click_reason=hit_test_or_resolve_failed"
+            elif not load_ok:
+                print "link_click_reason=target_page_unreadable"
+            elif not history_ok:
+                print "link_click_reason=history_transition_mismatch"
+            else:
+                print "link_click_reason=render_evidence_below_threshold"
+
+    if all_pass:
+        print "capture_overall=pass"
+        return 0
+    print "capture_overall=fail"
+    1

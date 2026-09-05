@@ -1,0 +1,219 @@
+# RV32 physical memory protection matching.
+#
+# The fixed entry fields and fixed call chain are deliberate hardware shapes:
+# no arrays, loops, or data-dependent shifts are used in this owner.
+
+val PMP32_ADDRESS_MASK: u32 = 0x18
+val PMP32_ADDRESS_OFF: u32 = 0x00
+val PMP32_ADDRESS_TOR: u32 = 0x08
+val PMP32_ADDRESS_NA4: u32 = 0x10
+val PMP32_ADDRESS_NAPOT: u32 = 0x18
+val PMP32_READ: u32 = 0x01
+val PMP32_WRITE: u32 = 0x02
+val PMP32_EXECUTE: u32 = 0x04
+val PMP32_LOCKED: u32 = 0x80
+val PMP32_ACCESS_EXECUTE: u32 = 0
+val PMP32_ACCESS_READ: u32 = 1
+val PMP32_ACCESS_WRITE: u32 = 2
+val PMP32_PRIV_U: u32 = 0
+val PMP32_PRIV_S: u32 = 1
+val PMP32_PRIV_M: u32 = 3
+val PMP32_MAX_PADDR: i64 = 0x3FFFFFFFF
+val PMP32_PADDR_LIMIT: i64 = 0x400000000
+val PMP32_NO_MATCH: u32 = 16
+val PMP32_CAUSE_INSN_ACCESS_FAULT: u32 = 1
+val PMP32_CAUSE_LOAD_ACCESS_FAULT: u32 = 5
+val PMP32_CAUSE_STORE_ACCESS_FAULT: u32 = 7
+
+struct PmpEntries32:
+    cfg_0: u32
+    cfg_1: u32
+    cfg_2: u32
+    cfg_3: u32
+    cfg_4: u32
+    cfg_5: u32
+    cfg_6: u32
+    cfg_7: u32
+    cfg_8: u32
+    cfg_9: u32
+    cfg_10: u32
+    cfg_11: u32
+    cfg_12: u32
+    cfg_13: u32
+    cfg_14: u32
+    cfg_15: u32
+    addr_0: u32
+    addr_1: u32
+    addr_2: u32
+    addr_3: u32
+    addr_4: u32
+    addr_5: u32
+    addr_6: u32
+    addr_7: u32
+    addr_8: u32
+    addr_9: u32
+    addr_10: u32
+    addr_11: u32
+    addr_12: u32
+    addr_13: u32
+    addr_14: u32
+    addr_15: u32
+
+struct PmpCheckResult32:
+    matched: bool
+    allowed: bool
+    matched_index: u32
+
+struct PmpEntryCheck32:
+    matched: bool
+    allowed: bool
+
+struct PmpAccessGateResult32:
+    bus_valid: bool
+    paddr: i64
+    fault: bool
+    fault_cause: u32
+    matched_index: u32
+
+@hardware
+fn pmp32_check_entry(cfg: u32, prev_addr: u32, addr: u32, first: i64, last: i64, access_kind: u32, effective_priv: u32) -> PmpEntryCheck32:
+    """Check one PMP entry against an already validated inclusive byte range."""
+    val address_mode = cfg & PMP32_ADDRESS_MASK
+    if address_mode == PMP32_ADDRESS_OFF:
+        return PmpEntryCheck32(matched: false, allowed: false)
+
+    val wide_addr = addr as i64
+    var region_first: i64 = 0
+    var region_top: i64 = 0
+    if address_mode == PMP32_ADDRESS_TOR:
+        region_first = (prev_addr as i64) << 2
+        region_top = wide_addr << 2
+    else if address_mode == PMP32_ADDRESS_NA4:
+        region_first = wide_addr << 2
+        region_top = region_first + 4
+    else:
+        # addr xor (addr + 1) derives the NAPOT size without a variable shift.
+        val next_addr = wide_addr + 1
+        val differing_bits = wide_addr ^ next_addr
+        region_first = (wide_addr & next_addr) << 2
+        val region_size = (differing_bits + 1) << 2
+        region_top = region_first + region_size
+        if region_size <= 0:
+            return PmpEntryCheck32(matched: true, allowed: false)
+        if region_top > PMP32_PADDR_LIMIT:
+            region_top = PMP32_PADDR_LIMIT
+
+    if region_top <= region_first:
+        return PmpEntryCheck32(matched: false, allowed: false)
+    val overlaps = first < region_top and last >= region_first
+    if not overlaps:
+        return PmpEntryCheck32(matched: false, allowed: false)
+    val contained = first >= region_first and last < region_top
+    if not contained:
+        return PmpEntryCheck32(matched: true, allowed: false)
+
+    val valid_privilege = effective_priv == PMP32_PRIV_U or effective_priv == PMP32_PRIV_S or effective_priv == PMP32_PRIV_M
+    if access_kind > PMP32_ACCESS_WRITE or not valid_privilege:
+        return PmpEntryCheck32(matched: true, allowed: false)
+    val locked = (cfg & PMP32_LOCKED) != 0
+    if effective_priv == PMP32_PRIV_M and not locked:
+        return PmpEntryCheck32(matched: true, allowed: true)
+
+    val readable = (cfg & PMP32_READ) != 0
+    val writable = (cfg & PMP32_WRITE) != 0
+    val executable = (cfg & PMP32_EXECUTE) != 0
+    if writable and not readable:
+        return PmpEntryCheck32(matched: true, allowed: false)
+    if access_kind == PMP32_ACCESS_EXECUTE:
+        return PmpEntryCheck32(matched: true, allowed: executable)
+    if access_kind == PMP32_ACCESS_READ:
+        return PmpEntryCheck32(matched: true, allowed: readable)
+    if access_kind == PMP32_ACCESS_WRITE:
+        return PmpEntryCheck32(matched: true, allowed: writable)
+    PmpEntryCheck32(matched: true, allowed: false)
+
+@hardware
+fn pmp32_check16(entries: PmpEntries32, paddr: i64, size_bytes: u32, access_kind: u32, effective_priv: u32) -> PmpCheckResult32:
+    """Apply sixteen PMP entries in architectural priority order."""
+    val valid_privilege = effective_priv == PMP32_PRIV_U or effective_priv == PMP32_PRIV_S or effective_priv == PMP32_PRIV_M
+    if size_bytes == 0 or size_bytes > 8 or access_kind > PMP32_ACCESS_WRITE or not valid_privilege:
+        return PmpCheckResult32(matched: false, allowed: false, matched_index: PMP32_NO_MATCH)
+    if paddr < 0 or paddr > PMP32_MAX_PADDR:
+        return PmpCheckResult32(matched: false, allowed: false, matched_index: PMP32_NO_MATCH)
+    val last = paddr + (size_bytes as i64) - 1
+    if last < paddr or last > PMP32_MAX_PADDR:
+        return PmpCheckResult32(matched: false, allowed: false, matched_index: PMP32_NO_MATCH)
+
+    val r0 = pmp32_check_entry(entries.cfg_0, 0, entries.addr_0, paddr, last, access_kind, effective_priv)
+    if r0.matched:
+        return PmpCheckResult32(matched: true, allowed: r0.allowed, matched_index: 0)
+    val r1 = pmp32_check_entry(entries.cfg_1, entries.addr_0, entries.addr_1, paddr, last, access_kind, effective_priv)
+    if r1.matched:
+        return PmpCheckResult32(matched: true, allowed: r1.allowed, matched_index: 1)
+    val r2 = pmp32_check_entry(entries.cfg_2, entries.addr_1, entries.addr_2, paddr, last, access_kind, effective_priv)
+    if r2.matched:
+        return PmpCheckResult32(matched: true, allowed: r2.allowed, matched_index: 2)
+    val r3 = pmp32_check_entry(entries.cfg_3, entries.addr_2, entries.addr_3, paddr, last, access_kind, effective_priv)
+    if r3.matched:
+        return PmpCheckResult32(matched: true, allowed: r3.allowed, matched_index: 3)
+    val r4 = pmp32_check_entry(entries.cfg_4, entries.addr_3, entries.addr_4, paddr, last, access_kind, effective_priv)
+    if r4.matched:
+        return PmpCheckResult32(matched: true, allowed: r4.allowed, matched_index: 4)
+    val r5 = pmp32_check_entry(entries.cfg_5, entries.addr_4, entries.addr_5, paddr, last, access_kind, effective_priv)
+    if r5.matched:
+        return PmpCheckResult32(matched: true, allowed: r5.allowed, matched_index: 5)
+    val r6 = pmp32_check_entry(entries.cfg_6, entries.addr_5, entries.addr_6, paddr, last, access_kind, effective_priv)
+    if r6.matched:
+        return PmpCheckResult32(matched: true, allowed: r6.allowed, matched_index: 6)
+    val r7 = pmp32_check_entry(entries.cfg_7, entries.addr_6, entries.addr_7, paddr, last, access_kind, effective_priv)
+    if r7.matched:
+        return PmpCheckResult32(matched: true, allowed: r7.allowed, matched_index: 7)
+    val r8 = pmp32_check_entry(entries.cfg_8, entries.addr_7, entries.addr_8, paddr, last, access_kind, effective_priv)
+    if r8.matched:
+        return PmpCheckResult32(matched: true, allowed: r8.allowed, matched_index: 8)
+    val r9 = pmp32_check_entry(entries.cfg_9, entries.addr_8, entries.addr_9, paddr, last, access_kind, effective_priv)
+    if r9.matched:
+        return PmpCheckResult32(matched: true, allowed: r9.allowed, matched_index: 9)
+    val r10 = pmp32_check_entry(entries.cfg_10, entries.addr_9, entries.addr_10, paddr, last, access_kind, effective_priv)
+    if r10.matched:
+        return PmpCheckResult32(matched: true, allowed: r10.allowed, matched_index: 10)
+    val r11 = pmp32_check_entry(entries.cfg_11, entries.addr_10, entries.addr_11, paddr, last, access_kind, effective_priv)
+    if r11.matched:
+        return PmpCheckResult32(matched: true, allowed: r11.allowed, matched_index: 11)
+    val r12 = pmp32_check_entry(entries.cfg_12, entries.addr_11, entries.addr_12, paddr, last, access_kind, effective_priv)
+    if r12.matched:
+        return PmpCheckResult32(matched: true, allowed: r12.allowed, matched_index: 12)
+    val r13 = pmp32_check_entry(entries.cfg_13, entries.addr_12, entries.addr_13, paddr, last, access_kind, effective_priv)
+    if r13.matched:
+        return PmpCheckResult32(matched: true, allowed: r13.allowed, matched_index: 13)
+    val r14 = pmp32_check_entry(entries.cfg_14, entries.addr_13, entries.addr_14, paddr, last, access_kind, effective_priv)
+    if r14.matched:
+        return PmpCheckResult32(matched: true, allowed: r14.allowed, matched_index: 14)
+    val r15 = pmp32_check_entry(entries.cfg_15, entries.addr_14, entries.addr_15, paddr, last, access_kind, effective_priv)
+    if r15.matched:
+        return PmpCheckResult32(matched: true, allowed: r15.allowed, matched_index: 15)
+    PmpCheckResult32(matched: false, allowed: effective_priv == PMP32_PRIV_M, matched_index: PMP32_NO_MATCH)
+
+@hardware
+fn pmp32_gate_access(entries: PmpEntries32, paddr: i64, size_bytes: u32, access_kind: u32, effective_priv: u32, translation_fault: bool, translation_fault_cause: u32) -> PmpAccessGateResult32:
+    """Suppress bus issue on translation or PMP failure."""
+    if translation_fault:
+        return PmpAccessGateResult32(bus_valid: false, paddr: paddr, fault: true, fault_cause: translation_fault_cause, matched_index: PMP32_NO_MATCH)
+    val protection = pmp32_check16(entries, paddr, size_bytes, access_kind, effective_priv)
+    if not protection.allowed:
+        val cause = if access_kind == PMP32_ACCESS_EXECUTE:
+            PMP32_CAUSE_INSN_ACCESS_FAULT
+        else if access_kind == PMP32_ACCESS_READ:
+            PMP32_CAUSE_LOAD_ACCESS_FAULT
+        else if access_kind == PMP32_ACCESS_WRITE:
+            PMP32_CAUSE_STORE_ACCESS_FAULT
+        else:
+            0
+        return PmpAccessGateResult32(bus_valid: false, paddr: paddr, fault: true, fault_cause: cause, matched_index: protection.matched_index)
+    PmpAccessGateResult32(bus_valid: true, paddr: paddr, fault: false, fault_cause: 0, matched_index: protection.matched_index)
+
+export PmpEntries32, PmpCheckResult32, PmpEntryCheck32, PmpAccessGateResult32
+export pmp32_check_entry, pmp32_check16, pmp32_gate_access
+export PMP32_ACCESS_EXECUTE, PMP32_ACCESS_READ, PMP32_ACCESS_WRITE
+export PMP32_PRIV_U, PMP32_PRIV_S, PMP32_PRIV_M, PMP32_NO_MATCH
+export PMP32_CAUSE_INSN_ACCESS_FAULT, PMP32_CAUSE_LOAD_ACCESS_FAULT, PMP32_CAUSE_STORE_ACCESS_FAULT

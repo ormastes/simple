@@ -1,0 +1,280 @@
+# SimpleOS Data Store Service (G5)
+#
+# Minix-style name service: services publish well-known names (typically their
+# own capability / endpoint) and peers subscribe to receive notifications on
+# change or restart.  Used by RS (Wave 4) to rediscover restarted services.
+#
+# ECS internals: each published name is an entity.  Five component stores
+# model the per-name state.  TTL of 0 means never-expire; TTL > 0 is an
+# *absolute* deadline tick (computed at publish time as tick + ttl_arg).
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
+
+# ============================================================================
+# Errno constants (negative POSIX-ish values)
+# ============================================================================
+
+val ENOENT: i32 = 2    # No such entry
+
+# ============================================================================
+# Components (per MDSOC+ ECS spec)
+# ============================================================================
+
+struct Name:
+    """ECS component: the published name string."""
+    text: text
+
+struct EndpointId:
+    """ECS component: the numeric endpoint/capability identifier."""
+    value: u64
+
+struct Owner:
+    """ECS component: PID of the process that published this name."""
+    pid: u32
+
+struct SubscriberList:
+    """ECS component: list of PIDs subscribed to this name."""
+    pids: [u32]
+
+struct Ttl:
+    """ECS component: absolute expiry tick (0 = never expires).
+
+    When a name is published with ttl_arg > 0, Ttl.ticks is set to
+    publish_tick + ttl_arg.  When ttl_arg == 0, Ttl.ticks is stored as 0
+    and the name never expires.
+    """
+    ticks: u64
+
+# ============================================================================
+# DsWorld — ECS container for all name-service state
+# ============================================================================
+
+struct DsWorld:
+    """ECS world owning all published-name entities and their component data."""
+    base:        WorldBase
+    names:       ComponentStore<Name>
+    endpoints:   ComponentStore<EndpointId>
+    owners:      ComponentStore<Owner>
+    subscribers: ComponentStore<SubscriberList>
+    ttls:        ComponentStore<Ttl>
+
+# ============================================================================
+# Notification stub — kernel will wire real IPC at link time.
+# A module-level counter lets tests observe calls without an extern.
+# ============================================================================
+
+var ds_notify_count: u64 = 0
+
+fn ds_notify(pid: u32, name: text):
+    """Notify subscriber pid that name has changed.
+
+    Production build: replace body with real IPC send.
+    Tests observe ds_notify_count to verify notification was issued.
+    """
+    ds_notify_count = ds_notify_count + 1
+
+# ============================================================================
+# DsService — public API
+# ============================================================================
+
+class DsService:
+    """Data Store service: name publication, lookup, and TTL-based expiry.
+
+    Owns a DsWorld (ECS world) internally.  The public API is a thin shell
+    over ECS component operations and two ECS systems (gc_expired, advance).
+    """
+    world:       DsWorld
+    tick:        u64
+    initialized: bool
+
+impl DsService:
+    static fn new() -> DsService:
+        """Create a fresh DsService with tick=0 and empty world."""
+        DsService(
+            world: DsWorld(
+                base:        WorldBase.new(),
+                names:       ComponentStore.new(),
+                endpoints:   ComponentStore.new(),
+                owners:      ComponentStore.new(),
+                subscribers: ComponentStore.new(),
+                ttls:        ComponentStore.new()
+            ),
+            tick:        0,
+            initialized: false
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    fn find_entity_for_name(self, name: text) -> Entity:
+        """Linear scan of names store. Returns Entity.null() if not found."""
+        var i: i32 = 0
+        while i < self.world.names.len():
+            if self.world.names.dense[i].text == name:
+                val eid_raw = self.world.names.entity_at(i)
+                return Entity(id: eid_raw, generation: 1)
+            i = i + 1
+        Entity.null()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    me ds_publish(self, name: text, endpoint: u64, owner_pid: u32, ttl: u64) -> Entity:
+        """Publish a name → endpoint mapping.
+
+        If the name already exists and belongs to the same owner, the
+        endpoint and TTL are updated in-place (no new entity) and
+        ds_notify is called for each current subscriber.
+
+        If the name exists but belongs to a different owner, the call is
+        a no-op and the existing entity is returned unchanged.
+
+        TTL semantics: 0 = never expires; >0 is stored as an absolute
+        deadline of (self.tick + ttl).
+        """
+        val existing = self.find_entity_for_name(name)
+        if not existing.is_null():
+            val owner_slot = self.world.owners.get_slot(existing)
+            if owner_slot >= 0:
+                val current_owner = self.world.owners.dense[owner_slot].pid
+                if current_owner == owner_pid:
+                    # Same owner: overwrite endpoint and TTL
+                    val ecs_tick = self.world.base.now()
+                    self.world.endpoints.insert(existing, EndpointId(value: endpoint), ecs_tick)
+                    val abs_ttl: u64 = if ttl == 0: 0 else: self.tick + ttl
+                    self.world.ttls.insert(existing, Ttl(ticks: abs_ttl), ecs_tick)
+                    # Notify subscribers about the endpoint change
+                    val sub_slot = self.world.subscribers.get_slot(existing)
+                    if sub_slot >= 0:
+                        for pid in self.world.subscribers.dense[sub_slot].pids:
+                            ds_notify(pid, name)
+            return existing
+
+        # New name: spawn entity and populate all components
+        val e = self.world.base.spawn()
+        val ecs_tick = self.world.base.now()
+        val abs_ttl: u64 = if ttl == 0: 0 else: self.tick + ttl
+        self.world.names.insert(e,       Name(text: name),                          ecs_tick)
+        self.world.endpoints.insert(e,   EndpointId(value: endpoint),               ecs_tick)
+        self.world.owners.insert(e,      Owner(pid: owner_pid),                     ecs_tick)
+        self.world.subscribers.insert(e, SubscriberList(pids: []),                  ecs_tick)
+        self.world.ttls.insert(e,        Ttl(ticks: abs_ttl),                       ecs_tick)
+        self.initialized = true
+        e
+
+    fn ds_lookup(self, name: text) -> i64:
+        """Look up a published name and return its endpoint id (>0) or -ENOENT."""
+        val e = self.find_entity_for_name(name)
+        if e.is_null():
+            return -ENOENT.to_i64()
+        val slot = self.world.endpoints.get_slot(e)
+        if slot < 0:
+            return -ENOENT.to_i64()
+        self.world.endpoints.dense[slot].value.to_i64()
+
+    me ds_unpublish(self, name: text, owner_pid: u32) -> bool:
+        """Remove a published name. Only the owner may unpublish.
+
+        Returns true if the name was found and removed, false if not found
+        or if owner_pid does not match the recorded owner.
+        """
+        val e = self.find_entity_for_name(name)
+        if e.is_null():
+            return false
+        val owner_slot = self.world.owners.get_slot(e)
+        if owner_slot < 0:
+            return false
+        if self.world.owners.dense[owner_slot].pid != owner_pid:
+            return false
+        self.world.names.remove(e)
+        self.world.endpoints.remove(e)
+        self.world.owners.remove(e)
+        self.world.subscribers.remove(e)
+        self.world.ttls.remove(e)
+        self.world.base.despawn(e)
+        true
+
+    me ds_subscribe(self, name: text, subscriber_pid: u32) -> bool:
+        """Add subscriber_pid to the SubscriberList for name.
+
+        Returns true if name exists, false otherwise.
+        Does not add duplicates if pid is already in the list.
+        """
+        val e = self.find_entity_for_name(name)
+        if e.is_null():
+            return false
+        val sub_slot = self.world.subscribers.get_slot(e)
+        if sub_slot < 0:
+            return false
+        val current_pids = self.world.subscribers.dense[sub_slot].pids
+        # Check for duplicate
+        for pid in current_pids:
+            if pid == subscriber_pid:
+                return true
+        val new_pids = current_pids.push(subscriber_pid)
+        val ecs_tick = self.world.base.now()
+        self.world.subscribers.insert(e, SubscriberList(pids: new_pids), ecs_tick)
+        true
+
+    me ds_unsubscribe(self, name: text, subscriber_pid: u32) -> bool:
+        """Remove subscriber_pid from the SubscriberList for name.
+
+        Returns true if name exists and pid was removed, false otherwise.
+        """
+        val e = self.find_entity_for_name(name)
+        if e.is_null():
+            return false
+        val sub_slot = self.world.subscribers.get_slot(e)
+        if sub_slot < 0:
+            return false
+        val current_pids = self.world.subscribers.dense[sub_slot].pids
+        var new_pids: [u32] = []
+        for pid in current_pids:
+            if pid != subscriber_pid:
+                new_pids = new_pids.push(pid)
+        val ecs_tick = self.world.base.now()
+        self.world.subscribers.insert(e, SubscriberList(pids: new_pids), ecs_tick)
+        true
+
+    me ds_advance(self) -> u64:
+        """Increment tick by 1, run TTL expiry system, return new tick."""
+        self.tick = self.tick + 1
+        self.world.base.advance()
+        self.sys_gc_expired()
+        self.tick
+
+    me sys_gc_expired(self):
+        """ECS system: remove all entries whose TTL has passed.
+
+        Two-pass to avoid aliasing during swap-with-last removal.
+        An entry expires when Ttl.ticks > 0 and self.tick >= Ttl.ticks.
+        """
+        val count = self.world.ttls.len()
+        var to_remove: [i32] = []
+        var i: i32 = 0
+        while i < count:
+            val eid_raw = self.world.ttls.entity_at(i)
+            val e = Entity(id: eid_raw, generation: 1)
+            val slot = self.world.ttls.get_slot(e)
+            if slot >= 0:
+                val ttl_val = self.world.ttls.dense[slot].ticks
+                if (ttl_val > 0 and self.tick >= ttl_val):
+                    to_remove = to_remove.push(eid_raw)
+            i = i + 1
+
+        for eid_raw in to_remove:
+            val e = Entity(id: eid_raw, generation: 1)
+            self.world.names.remove(e)
+            self.world.endpoints.remove(e)
+            self.world.owners.remove(e)
+            self.world.subscribers.remove(e)
+            self.world.ttls.remove(e)
+            self.world.base.despawn(e)
+
+    fn ds_count(self) -> i32:
+        """Return the count of currently published names."""
+        self.world.names.len()

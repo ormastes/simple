@@ -1,0 +1,98 @@
+#!/bin/sh
+# Build and validate the NVIDIA CUDA+Vulkan image used by the 8K80 campaign.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+DOCKERFILE="${RENDER_8K80_DOCKERFILE:-$ROOT/tools/docker/Dockerfile.render-8k80-nvidia}"
+DEFAULT_TAG=simple-render-8k80-nvidia:local
+
+fail() { echo "render_8k80_image_status=failed reason=$1" >&2; exit 1; }
+blocked() { echo "render_8k80_image_status=blocked reason=$1" >&2; exit 2; }
+is_sha256_ref() { printf '%s\n' "$1" | grep -Eq '^[^[:space:]@]+@sha256:[0-9a-f]{64}$'; }
+require_docker() { command -v docker >/dev/null 2>&1 || blocked missing-container-runtime; }
+image_id() {
+    id=$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null) || blocked missing-container-image
+    printf '%s\n' "$id" | grep -Eq '^sha256:[0-9a-f]{64}$' || fail invalid-container-image-id
+    printf '%s\n' "$id"
+}
+
+check_contract() {
+    [ -f "$DOCKERFILE" ] || fail missing-dockerfile
+    grep -Fq 'ARG NVIDIA_CUDA_BASE' "$DOCKERFILE" || fail unparameterized-base
+    grep -Fq 'snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}' "$DOCKERFILE" || fail mutable-package-repository
+    grep -Eq 'apt-get install .*vulkan-tools' "$DOCKERFILE" || fail vulkan-tools-missing
+    grep -Eq 'apt-get install .*time' "$DOCKERFILE" || fail usr-bin-time-missing
+    grep -Fq "dpkg-query -W -f='\${Status}\\n' mesa-vulkan-drivers" "$DOCKERFILE" || fail mesa-rejection-missing
+    ! grep -Eq 'apt-get install[^#]*(mesa-vulkan-drivers|mesa-utils)' "$DOCKERFILE" || fail mesa-substitution-forbidden
+    grep -Fq 'org.simple-lang.driver-model="nvidia-container-toolkit-injection"' "$DOCKERFILE" || fail driver-model-label-missing
+    echo render_8k80_image_contract=pass
+}
+
+check_image() {
+    image=$1 receipt=${2:-}
+    require_docker
+    id=$(image_id "$image")
+    docker run --rm --network=none \
+        --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" \
+        --pids-limit="${CONTAINER_PIDS_LIMIT:-256}" \
+        --cap-drop=ALL --security-opt=no-new-privileges \
+        --entrypoint /bin/sh "$id" -lc '
+          set -eu
+          command -v /usr/bin/time >/dev/null
+          command -v vulkaninfo >/dev/null
+          ! dpkg-query -W -f="${Status}\n" mesa-vulkan-drivers 2>/dev/null | grep -Fq "install ok installed"
+          [ "$(cat /proc/1/status | sed -n "s/^NoNewPrivs:[[:space:]]*//p")" = 1 ]
+        ' >/dev/null || fail image-contract-runtime-check
+    hash=${id#sha256:}
+    if [ -n "$receipt" ]; then
+        case "$receipt" in /*) ;; *) fail receipt-path-must-be-absolute ;; esac
+        mkdir -p "$(dirname "$receipt")"
+        tmp="${receipt}.$$"
+        trap 'rm -f "$tmp"' EXIT HUP INT TERM
+        { echo receipt_schema=render-8k80-container-image-v1; echo status=pass; echo image_reference="$image"; echo image_id="$id"; echo image_hash="$hash"; echo driver_model=nvidia-container-toolkit-injection; echo mesa_icd=absent; echo nvidia_driver_capabilities=compute,utility,graphics; } > "$tmp"
+        mv "$tmp" "$receipt"; trap - EXIT HUP INT TERM
+    fi
+    echo "render_8k80_image_status=pass image_id=$id"
+}
+
+check_gpu() {
+    image=$1 gpu=${2:-all}
+    require_docker
+    id=$(image_id "$image")
+    [ "$gpu" = all ] && gpu_flag=all || gpu_flag="device=$gpu"
+    docker run --rm --gpus "$gpu_flag" --network=none \
+        --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" \
+        --pids-limit="${CONTAINER_PIDS_LIMIT:-256}" --cap-drop=ALL \
+        --security-opt=no-new-privileges \
+        -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
+        --entrypoint /bin/sh "$id" -lc '
+          set -eu
+          [ "$NVIDIA_DRIVER_CAPABILITIES" = compute,utility,graphics ]
+          command -v nvidia-smi >/dev/null
+          nvidia-smi --query-gpu=name,uuid,driver_version --format=csv,noheader
+          vulkaninfo --summary
+        ' | tee /dev/stderr | grep -Eq 'deviceName[[:space:]]*=.*NVIDIA' || blocked nvidia-vulkan-injection-unavailable
+    echo "render_8k80_image_gpu_status=pass image_id=$id capabilities=compute,utility,graphics"
+}
+
+case ${1:-} in
+  --check-contract) [ $# -eq 1 ] || fail unexpected-argument; check_contract ;;
+  --build)
+    shift; base= tag=$DEFAULT_TAG receipt=
+    while [ $# -gt 0 ]; do case $1 in --base-image) base=${2:-}; shift 2;; --tag) tag=${2:-}; shift 2;; --receipt) receipt=${2:-}; shift 2;; *) fail unknown-argument;; esac; done
+    is_sha256_ref "$base" || fail base-image-must-use-sha256-digest
+    printf '%s\n' "$tag" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/:+-]*$' || fail invalid-image-tag
+    require_docker; check_contract >/dev/null
+    docker build --pull --build-arg NVIDIA_CUDA_BASE="$base" -f "$DOCKERFILE" -t "$tag" "$ROOT/tools/docker"
+    check_image "$tag" "$receipt"
+    ;;
+  --check-image)
+    [ $# -eq 2 ] || { [ $# -eq 4 ] && [ "$3" = --receipt ] && [ -n "$4" ]; } || fail usage
+    image=$2; receipt=; [ $# -eq 2 ] || receipt=$4; check_image "$image" "$receipt"
+    ;;
+  --check-gpu)
+    [ $# -eq 2 ] || { [ $# -eq 4 ] && [ "$3" = --gpu ] && [ -n "$4" ]; } || fail usage
+    image=$2; gpu=all; [ $# -eq 2 ] || gpu=$4; check_gpu "$image" "$gpu"
+    ;;
+  *) fail 'usage: --check-contract | --build --base-image NAME@sha256:HASH [--tag TAG] [--receipt ABS] | --check-image IMAGE [--receipt ABS] | --check-gpu IMAGE [--gpu ID]' ;;
+esac

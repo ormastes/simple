@@ -1,0 +1,245 @@
+"""Pure service-side validation and dispatch planning for filesystem IPC v1.
+
+The IPC owner supplies authenticated transport facts.  This module never owns
+an endpoint, dereferences a capability, or accepts a raw address.  A successful
+result is a typed plan for a future positioned-I/O backend; it is not evidence
+that I/O has already happened.
+"""
+
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.fs.ipc_codec_v1.{
+    SosixFsIpcCompletionV1,
+    sosix_fs_ipc_decode_request_v1,
+    sosix_fs_ipc_encode_completion_v1
+}
+
+pub val SOSIX_FS_SERVICE_RIGHT_READ_V1: u32 = 1
+pub val SOSIX_FS_SERVICE_RIGHT_WRITE_V1: u32 = 2
+pub val SOSIX_FS_SERVICE_BUFFER_READ_V1: u32 = 1
+pub val SOSIX_FS_SERVICE_BUFFER_WRITE_V1: u32 = 2
+pub val SOSIX_FS_SERVICE_STATUS_INVALID_V1: i32 = -22
+pub val SOSIX_FS_SERVICE_STATUS_DENIED_V1: i32 = -13
+pub val SOSIX_FS_SERVICE_STATUS_STALE_V1: i32 = -116
+pub val SOSIX_FS_SERVICE_MAX_CAPABILITIES_V1: u64 = 1024
+pub val SOSIX_FS_SERVICE_MAX_BUFFERS_V1: u64 = 1024
+
+pub struct SosixFsIpcReceiveFactsV1:
+    source_authenticated: bool
+    source_process_id: u64
+    received_service_endpoint: u64
+    expected_service_endpoint: u64
+    reply_endpoint_authenticated: bool
+    authenticated_reply_endpoint: u64
+    reply_endpoint_owner_process_id: u64
+
+pub struct SosixFsCapabilityEntryV1:
+    active: bool
+    ref_: SosixCapabilityRef
+    owner_process_id: u64
+    file_object_id: u64
+    rights: u32
+
+pub struct SosixFsBufferEntryV1:
+    active: bool
+    ref_: SosixBufferRef
+    owner_process_id: u64
+    registration_id: u64
+    byte_length: u64
+    access: u32
+    service_endpoint: u64
+    memory_mode: u32
+    bytes: [u8]
+
+pub struct SosixFsServiceRegistryV1:
+    capabilities: [SosixFsCapabilityEntryV1]
+    buffers: [SosixFsBufferEntryV1]
+
+pub struct SosixFsServiceDispatchPlanV1:
+    ready: bool
+    api_id: u32
+    source_process_id: u64
+    reply_endpoint: u64
+    operation_slot: u32
+    operation_generation: u32
+    request_token: u64
+    deadline_ns: u64
+    file_object_id: u64
+    buffer_registration_id: u64
+    buffer_slot: u32
+    buffer_generation: u32
+    resource_offset: u64
+    buffer_offset: u64
+    length: u64
+
+pub struct SosixFsServicePrepareResultV1:
+    accepted: bool
+    reason: text
+    status: i32
+    plan: SosixFsServiceDispatchPlanV1
+
+pub struct SosixFsServiceCompletionResultV1:
+    accepted: bool
+    reason: text
+    bytes: [u8]
+
+export SOSIX_FS_SERVICE_RIGHT_READ_V1, SOSIX_FS_SERVICE_RIGHT_WRITE_V1
+export SOSIX_FS_SERVICE_BUFFER_READ_V1, SOSIX_FS_SERVICE_BUFFER_WRITE_V1
+export SOSIX_FS_SERVICE_STATUS_INVALID_V1, SOSIX_FS_SERVICE_STATUS_DENIED_V1
+export SOSIX_FS_SERVICE_STATUS_STALE_V1
+export SOSIX_FS_SERVICE_MAX_CAPABILITIES_V1, SOSIX_FS_SERVICE_MAX_BUFFERS_V1
+export SosixFsIpcReceiveFactsV1, SosixFsCapabilityEntryV1
+export SosixFsBufferEntryV1, SosixFsServiceRegistryV1
+export SosixFsServiceDispatchPlanV1, SosixFsServicePrepareResultV1
+export SosixFsServiceCompletionResultV1
+
+fn _empty_service_plan_v1() -> SosixFsServiceDispatchPlanV1:
+    SosixFsServiceDispatchPlanV1(
+        ready: false, api_id: 0, source_process_id: 0, reply_endpoint: 0,
+        operation_slot: 0, operation_generation: 0, request_token: 0,
+        deadline_ns: 0, file_object_id: 0, buffer_registration_id: 0,
+        buffer_slot: 0, buffer_generation: 0,
+        resource_offset: 0, buffer_offset: 0, length: 0
+    )
+
+fn _rejected_service_prepare_v1(reason: text, status: i32) -> SosixFsServicePrepareResultV1:
+    SosixFsServicePrepareResultV1(
+        accepted: false, reason: reason, status: status,
+        plan: _empty_service_plan_v1()
+    )
+
+pub fn sosix_fs_service_prepare_v1(
+    data: [u8], expected_api_id: u32, facts: SosixFsIpcReceiveFactsV1,
+    registry: SosixFsServiceRegistryV1
+) -> SosixFsServicePrepareResultV1:
+    if not facts.source_authenticated or facts.source_process_id == 0:
+        return _rejected_service_prepare_v1("unauthenticated-source", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+    if (facts.expected_service_endpoint == 0 or
+        facts.received_service_endpoint != facts.expected_service_endpoint):
+        return _rejected_service_prepare_v1("wrong-service-endpoint", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+    if (not facts.reply_endpoint_authenticated or
+        facts.authenticated_reply_endpoint == 0):
+        return _rejected_service_prepare_v1("unauthenticated-reply-endpoint", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+    if facts.reply_endpoint_owner_process_id != facts.source_process_id:
+        return _rejected_service_prepare_v1("reply-endpoint-owner-mismatch", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+
+    val decoded = sosix_fs_ipc_decode_request_v1(data, expected_api_id)
+    if not decoded.accepted:
+        return _rejected_service_prepare_v1(decoded.reason, SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+    val request = decoded.request
+    if request.reply_endpoint != facts.authenticated_reply_endpoint:
+        return _rejected_service_prepare_v1("reply-endpoint-mismatch", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+    if registry.capabilities.len() as u64 > SOSIX_FS_SERVICE_MAX_CAPABILITIES_V1:
+        return _rejected_service_prepare_v1("capability-registry-too-large", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+    if registry.buffers.len() as u64 > SOSIX_FS_SERVICE_MAX_BUFFERS_V1:
+        return _rejected_service_prepare_v1("buffer-registry-too-large", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+
+    var capability_slot_found = false
+    var capability_matches = 0u32
+    var capability_owner = 0u64
+    var file_object_id = 0u64
+    var capability_rights = 0u32
+    for entry in registry.capabilities:
+        if entry.active and entry.ref_.slot == request.capability.slot:
+            capability_slot_found = true
+            if entry.ref_.generation == request.capability.generation:
+                capability_matches = capability_matches + 1
+                capability_owner = entry.owner_process_id
+                file_object_id = entry.file_object_id
+                capability_rights = entry.rights
+    if capability_matches == 0:
+        val reason = if capability_slot_found: "stale-capability" else: "unknown-capability"
+        return _rejected_service_prepare_v1(reason, SOSIX_FS_SERVICE_STATUS_STALE_V1)
+    if capability_matches != 1:
+        return _rejected_service_prepare_v1("ambiguous-capability", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+    if file_object_id == 0:
+        return _rejected_service_prepare_v1("invalid-file-object", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+    if capability_owner != facts.source_process_id:
+        return _rejected_service_prepare_v1("capability-owner-mismatch", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+    val required_right = if request.api_id == SOSIX_FS_READ_AT:
+        SOSIX_FS_SERVICE_RIGHT_READ_V1
+    else:
+        SOSIX_FS_SERVICE_RIGHT_WRITE_V1
+    if (capability_rights & required_right) == 0:
+        return _rejected_service_prepare_v1("capability-right-denied", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+
+    var buffer_slot_found = false
+    var buffer_matches = 0u32
+    var buffer_owner = 0u64
+    var registration_id = 0u64
+    var byte_length = 0u64
+    var buffer_access = 0u32
+    for entry in registry.buffers:
+        if entry.active and entry.ref_.slot == request.buffer.slot:
+            buffer_slot_found = true
+            if entry.ref_.generation == request.buffer.generation:
+                buffer_matches = buffer_matches + 1
+                buffer_owner = entry.owner_process_id
+                registration_id = entry.registration_id
+                byte_length = entry.byte_length
+                buffer_access = entry.access
+    if buffer_matches == 0:
+        val reason = if buffer_slot_found: "stale-buffer" else: "unknown-buffer"
+        return _rejected_service_prepare_v1(reason, SOSIX_FS_SERVICE_STATUS_STALE_V1)
+    if buffer_matches != 1:
+        return _rejected_service_prepare_v1("ambiguous-buffer", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+    if registration_id == 0:
+        return _rejected_service_prepare_v1("invalid-buffer-registration", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+    if buffer_owner != facts.source_process_id:
+        return _rejected_service_prepare_v1("buffer-owner-mismatch", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+    val required_access = if request.api_id == SOSIX_FS_READ_AT:
+        SOSIX_FS_SERVICE_BUFFER_WRITE_V1
+    else:
+        SOSIX_FS_SERVICE_BUFFER_READ_V1
+    if (buffer_access & required_access) == 0:
+        return _rejected_service_prepare_v1("buffer-access-denied", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+    if request.buffer_offset > byte_length or request.length > byte_length - request.buffer_offset:
+        return _rejected_service_prepare_v1("buffer-range-out-of-bounds", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+
+    SosixFsServicePrepareResultV1(
+        accepted: true, reason: "dispatch-ready", status: 0,
+        plan: SosixFsServiceDispatchPlanV1(
+            ready: true, api_id: request.api_id,
+            source_process_id: facts.source_process_id,
+            reply_endpoint: facts.authenticated_reply_endpoint,
+            operation_slot: request.operation_slot,
+            operation_generation: request.operation_generation,
+            request_token: request.request_token, deadline_ns: request.deadline_ns,
+            file_object_id: file_object_id,
+            buffer_registration_id: registration_id,
+            buffer_slot: request.buffer.slot,
+            buffer_generation: request.buffer.generation,
+            resource_offset: request.resource_offset,
+            buffer_offset: request.buffer_offset, length: request.length
+        )
+    )
+
+pub fn sosix_fs_service_encode_completion_v1(
+    plan: SosixFsServiceDispatchPlanV1, status: i32, transferred: u64,
+    partial_progress: bool
+) -> SosixFsServiceCompletionResultV1:
+    if not plan.ready:
+        return SosixFsServiceCompletionResultV1(
+            accepted: false, reason: "dispatch-plan-not-ready", bytes: []
+        )
+    if transferred > plan.length:
+        return SosixFsServiceCompletionResultV1(
+            accepted: false, reason: "transferred-exceeds-request", bytes: []
+        )
+    if partial_progress and transferred >= plan.length:
+        return SosixFsServiceCompletionResultV1(
+            accepted: false, reason: "invalid-partial-progress", bytes: []
+        )
+    val flags = if partial_progress: 1u32 else: 0u32
+    val encoded = sosix_fs_ipc_encode_completion_v1(SosixFsIpcCompletionV1(
+        api_id: plan.api_id, flags: flags,
+        operation_slot: plan.operation_slot,
+        operation_generation: plan.operation_generation,
+        request_token: plan.request_token, status: status,
+        transferred: transferred, payload: []
+    ))
+    SosixFsServiceCompletionResultV1(
+        accepted: encoded.accepted, reason: encoded.reason, bytes: encoded.bytes
+    )
+
+export sosix_fs_service_prepare_v1, sosix_fs_service_encode_completion_v1

@@ -1,0 +1,199 @@
+# reachable_unsupported_census -- driver for
+# scripts/check/check-reachable-unsupported.shs (hardening plan Phase 9,
+# release obligation "reachable unsupported 0"; definition per plan
+# sections 11.6 and 22.1).
+#
+# QUESTION IT ANSWERS
+#   How many code paths that are REACHABLE from the compiler's main entry
+#   (src/app/cli/main.spl -> src/compiler/80.driver) end in an
+#   "unsupported" / "not implemented" diagnostic?
+#
+# HOW REACHABILITY IS DECIDED, and why this and not something looser
+#   The registry in spec/compiler_schema/transitions/*.sdn is the only
+#   mechanically checkable statement of what each lowering/backend lane does
+#   with each node kind. Every one of those 15 tables sits on a lane the
+#   driver dispatches: the flat-AST bridge and HIR lowering are unconditional,
+#   and the four MIR consumers (interpreter, LLVM, C backend, native isel) are
+#   each selected by an ordinary `simple` CLI command. So the table is not the
+#   discriminator -- the ROW is:
+#
+#     A row counts as REACHABLE-UNSUPPORTED when
+#       (a) its `state:` is `unsupported` (bare or quoted, any case), AND
+#       (b) the variant named by `from:` appears in that table's `universe:`
+#           block.
+#
+#   (b) is the load-bearing half. The universe block is every tag the PRODUCER
+#   can actually construct; a row whose variant is absent from it describes a
+#   node no reachable path can hand to that consumer, which is exactly the
+#   `notapplicable` state's meaning. Counting those would inflate the number
+#   with paths that cannot be taken, and a ratchet on an inflated number can be
+#   satisfied by deleting dead rows instead of implementing anything.
+#
+#   Rows in state `implemented` or `normalized` are, by construction, not
+#   unsupported; they are still counted into `rows=` so the verdict can never
+#   be vacuous.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+#   It does not infer reachability by walking the generated visitors. That
+#   would be a strictly better signal and is the intended upgrade, but the
+#   generated-visitor freshness gate is currently red on another lane, so
+#   joining against it would make this census inherit an unrelated failure.
+#   The registry-only join is the honest minimum stated in the plan.
+#
+# Output lines (the shell gate reads only these):
+#   ROW <table> <variant> issue=<issue-or-(none)>
+#   TABLE <table> rows=<n> unsupported=<n> reachable_unsupported=<n>
+#   SUMMARY tables=<n> rows=<n> unsupported=<n> reachable_unsupported=<n>
+#
+# Accumulators are module-level for the same reason
+# critical_release_seal_census.spl's are: a returned aggregate is mis-typed by
+# the seed at the call site
+# (doc/08_tracking/bug/seed_helper_return_type_mistyped_as_tuple_2026-08-21.md).
+
+use std.nogc_sync_mut.cli.{get_cli_args}
+
+var N_TABLES: i64 = 0
+var N_ROWS: i64 = 0
+var N_UNSUPPORTED: i64 = 0
+var N_REACHABLE: i64 = 0
+
+var LIST_ROWS: bool = false
+
+fn strip_quotes(s: text) -> text:
+    var t = s.trim()
+    if t.len() >= 2 and t.starts_with("\"") and t.ends_with("\""):
+        return t.slice(1, t.len() - 1)
+    t
+
+fn field_value(line: text, key: text) -> text:
+    # `  key: value` -> `value` (unquoted, trimmed). "" when the line is not
+    # that key.
+    val t = line.trim()
+    val prefix = key + ":"
+    if not t.starts_with(prefix):
+        return ""
+    strip_quotes(t.slice(prefix.len(), t.len()))
+
+fn last_segment(s: text) -> text:
+    # `MirInstKind.AcquireSnapshot` -> `AcquireSnapshot`. The loader's own
+    # variant_name_of() takes the text after the last dot verbatim; this
+    # mirrors it so a universe entry and a `from:` can be compared.
+    var out = s
+    for part in s.split("."):
+        out = part
+    out.trim()
+
+fn state_is_unsupported(raw: text) -> bool:
+    # States appear both bare (`unsupported`) and quoted with an argument
+    # (`"Unsupported(no arm)"`). Match on the leading token, case-folded.
+    var t = strip_quotes(raw).trim().to_lower()
+    if t.contains("("):
+        t = t.slice(0, t.index_of("("))
+    t.trim() == "unsupported"
+
+fn census_one(path: text) -> i64:
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        print "ERROR unreadable-table {path}"
+        return 1
+    val table_name = path.split("/").last() ?? path
+
+    # Pass 1: collect the universe.
+    var universe: [text] = []
+    var in_universe = false
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t.starts_with("#"):
+            continue
+        if t == "universe:":
+            in_universe = true
+            continue
+        if in_universe:
+            if t.starts_with("- "):
+                universe.push(last_segment(strip_quotes(t.slice(2, t.len()))))
+            elif t != "":
+                in_universe = false
+
+    # Pass 2: walk the transition blocks.
+    var rows = 0
+    var unsupported = 0
+    var reachable = 0
+    var cur_from: text = ""
+    var cur_state: text = ""
+    var cur_issue: text = ""
+    var in_row = false
+
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t.starts_with("#"):
+            continue
+        if t == "transition:":
+            in_row = true
+            cur_from = ""
+            cur_state = ""
+            cur_issue = ""
+            continue
+        if not in_row:
+            continue
+        if t == "":
+            # Blank line closes the block; score it.
+            if cur_from != "":
+                rows = rows + 1
+                if state_is_unsupported(cur_state):
+                    unsupported = unsupported + 1
+                    val variant = last_segment(cur_from)
+                    if universe.contains(variant):
+                        reachable = reachable + 1
+                        if LIST_ROWS:
+                            val issue = if cur_issue == "": "(none)" else: cur_issue
+                            print "ROW {table_name} {variant} issue={issue}"
+            in_row = false
+            continue
+        val f = field_value(t, "from")
+        if f != "":
+            cur_from = f
+        val s = field_value(t, "state")
+        if s != "":
+            cur_state = s
+        val i = field_value(t, "issue")
+        if i != "":
+            cur_issue = i
+
+    # A file that ends without a trailing blank line still owes its last block.
+    if in_row and cur_from != "":
+        rows = rows + 1
+        if state_is_unsupported(cur_state):
+            unsupported = unsupported + 1
+            val variant2 = last_segment(cur_from)
+            if universe.contains(variant2):
+                reachable = reachable + 1
+                if LIST_ROWS:
+                    val issue2 = if cur_issue == "": "(none)" else: cur_issue
+                    print "ROW {table_name} {variant2} issue={issue2}"
+
+    N_TABLES = N_TABLES + 1
+    N_ROWS = N_ROWS + rows
+    N_UNSUPPORTED = N_UNSUPPORTED + unsupported
+    N_REACHABLE = N_REACHABLE + reachable
+    print "TABLE {table_name} rows={rows} unsupported={unsupported} reachable_unsupported={reachable}"
+    0
+
+fn main() -> i64:
+    val args = get_cli_args()
+    var paths: [text] = []
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--table" and i + 1 < args.len():
+            paths.push(args[i + 1])
+            i = i + 1
+        elif a == "--list-rows":
+            LIST_ROWS = true
+        i = i + 1
+    var rc = 0
+    for p in paths:
+        val one = census_one(p)
+        if one != 0:
+            rc = 1
+    print "SUMMARY tables={N_TABLES} rows={N_ROWS} unsupported={N_UNSUPPORTED} reachable_unsupported={N_REACHABLE}"
+    rc

@@ -1,0 +1,83 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+"""
+# MCP JSON Framing — escaper, isError, CLI output hygiene
+
+**Requirements:** doc/09_report (MCP server audit 2026-08-27, P0 gaps 1/3/4)
+
+## Overview
+
+Every simple-mcp response must be one line of strict JSON. The live 2026-08-27
+audit found the chained-`replace` escaper leaving raw control characters in
+tool payloads and shifting `\n` escapes by two bytes (`WARNING` -> `W\nRNING`),
+CLI failures reported with `isError:false`, and the bootstrap seed's warning
+banner embedded in every answer. These specs pin the fixed behaviour through
+the JSON helper module directly (no server process).
+"""
+
+use std.spec.{describe, it, expect}
+use app.mcp.main_lazy_json.{escape_json_text, js, make_tool_result, make_tool_result_status, strip_ansi}
+use app.mcp.cli_passthrough.{strip_seed_banner}
+
+fn count_char(s: text, needle: text) -> i64:
+    var n = 0
+    for ch in s:
+        if ch == needle:
+            n = n + 1
+    n
+
+describe "escape_json_text — single-pass JSON string escaper":
+    it "round-trips newline, quote, tab and backslash byte-exactly":
+        val payload = "a\nb\"c\td\\e"
+        val escaped = escape_json_text(payload)
+        expect(escaped).to_equal("a\\nb\\\"c\\td\\\\e")
+
+    it "leaves plain text untouched":
+        expect(escape_json_text("WARNING: plain text 123")).to_equal("WARNING: plain text 123")
+
+    it "keeps WARNING intact next to a newline (the W\\nRNING corruption)":
+        val escaped = escape_json_text("seed\nWARNING: x")
+        expect(escaped).to_equal("seed\\nWARNING: x")
+        expect(escaped.contains("RNING")).to_equal(true)
+        expect(escaped.contains("W\\nRNING")).to_equal(false)
+
+    it "emits no raw control character for CR and ESC":
+        val escaped = escape_json_text("a\rb\u001Bc")
+        expect(escaped).to_equal("a\\rb\\u001Bc")
+        expect(count_char(escaped, "\r")).to_equal(0)
+        expect(count_char(escaped, "\u001B")).to_equal(0)
+
+    it "escapes every C0 control character as \\u00XX":
+        val escaped = escape_json_text("\u0001\u0007\u001F")
+        expect(escaped).to_equal("\\u0001\\u0007\\u001F")
+
+    it "js() wraps the escaped text in quotes":
+        expect(js("x\ny")).to_equal("\"x\\ny\"")
+
+describe "make_tool_result — one line, explicit isError":
+    it "produces a single physical line even for multi-line output":
+        val response = make_tool_result("7", "line1\nline2\r\nline3")
+        expect(count_char(response, "\n")).to_equal(0)
+        expect(count_char(response, "\r")).to_equal(0)
+        expect(response.contains("\"isError\":false")).to_equal(true)
+
+    it "carries isError:true when the caller flags a failure":
+        val response = make_tool_result_status("8", "-- simple_check (exit: 1) --\nerror", true)
+        expect(response.contains("\"isError\":true")).to_equal(true)
+        expect(response.contains("\"jsonrpc\":\"2.0\"")).to_equal(true)
+        expect(count_char(response, "\n")).to_equal(0)
+
+describe "CLI output hygiene":
+    it "strip_seed_banner removes both bootstrap-seed banner lines and nothing else":
+        val raw = "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.\nBuild and use the pure-Simple bin/simple instead.\nArchitecture check PASSED.\n"
+        val cleaned = strip_seed_banner(raw)
+        expect(cleaned.contains("bootstrap seed only")).to_equal(false)
+        expect(cleaned.contains("pure-Simple bin/simple")).to_equal(false)
+        expect(cleaned.contains("Architecture check PASSED.")).to_equal(true)
+
+    it "strip_seed_banner is the identity on banner-free output":
+        expect(strip_seed_banner("ok\n")).to_equal("ok\n")
+
+    it "strip_ansi removes whole CSI sequences, not just the ESC byte":
+        val colored = "\u001B[33mwarning\u001B[0m: x"
+        expect(strip_ansi(colored)).to_equal("warning: x")

@@ -1,0 +1,141 @@
+# ============================================================================
+# nand_emu — Vt array + per-page / per-block metadata
+# ============================================================================
+#
+# The threshold-voltage byte array [u8] (1 byte per cell) plus NePageMeta and
+# NeBlockMeta arrays, and the deterministic per-cell seed (doc §3.3). Vt array
+# size is page_bytes * 8 * total_pages (doc §4.1: "Vt RAM = page_bytes x 8 x pages").
+#
+# All mutating accessors follow the "return the object" rule: arrays are value
+# types (passed by copy), so a helper that writes a cell MUST return the array
+# and the caller MUST reassign.
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+# ============================================================================
+
+use std.hardware.nand_emu.nand_types.{
+    NeGeometry, NePageMeta, NeBlockMeta,
+    ne_vt_erase_mean, ne_page_meta_new, ne_block_meta_new
+}
+
+# ----------------------------------------------------------------------------
+# Vt-array sizing (doc §4.1) — IMPLEMENTED (pure, no allocation).
+# ----------------------------------------------------------------------------
+
+pub fn ne_vt_ram_bytes(geo: NeGeometry) -> i64:
+    """Vt array size in bytes = page_bytes * 8 * total_pages (doc §4.1).
+    S1 => 528 * 8 * 32 = 135168 bytes (132 KB)."""
+    geo.page_bytes * 8 * geo.total_pages
+
+# ----------------------------------------------------------------------------
+# Vt array allocation + accessors (doc §3, Appendix A) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_vt_array_new(geo: NeGeometry) -> [u8]:
+    """Allocate a Vt array of ne_vt_ram_bytes(geo) cells, all in the erased
+    distribution (initialized to the erase-mean code, 88 = -1.00 V, doc §3.1)
+    — a freshly-erased chip's Vt state before any programming."""
+    val size = ne_vt_ram_bytes(geo)
+    val fill = ne_vt_erase_mean() as u8
+    var vt: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        vt.push(fill)
+        i = i + 1
+    vt
+
+pub fn ne_vt_get(vt: [u8], index: i64) -> i64:
+    """Read the stored Vt code (0-255) at a cell index (Appendix A).
+
+    Out-of-bounds indices (index < 0 or index >= vt.len()) read 0 — this
+    mirrors the RAM model's out-of-range read convention
+    (src/lib/hardware/soc_rtl/ram.spl ram_read: "Returns 0 for out-of-range
+    addresses"): a defined, deterministic value, never a crash on a read
+    path."""
+    if index < 0 or index >= vt.len():
+        return 0
+    vt[index] as i64
+
+pub fn ne_vt_set(vt: [u8], index: i64, code: i64) -> [u8]:
+    """Write a Vt code and RETURN the array (arrays are value types — the
+    caller must reassign). `code` is masked to a single byte (0-255) so an
+    out-of-range code wraps rather than corrupting adjacent cells.
+
+    Out-of-bounds indices (index < 0 or index >= vt.len()) leave the array
+    unchanged — this mirrors the RAM model's out-of-range write convention
+    (src/lib/hardware/soc_rtl/ram.spl ram_write: bounds-checked, dropped on
+    miss): a defined, deterministic outcome, never a crash on a write path."""
+    if index < 0 or index >= vt.len():
+        return vt
+    var out = vt
+    out[index] = (code & 0xFF) as u8
+    out
+
+# ----------------------------------------------------------------------------
+# Deterministic per-cell seed (doc §3.3) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_splitmix32(x: i64) -> i64:
+    """splitmix32 mixing function (doc §3.3): the canonical 32-bit avalanche
+    hash (golden-ratio increment + two xor-shift/multiply rounds + a final
+    xor-shift). `x` is masked into the 32-bit domain on entry and every
+    intermediate is masked back to 32 bits, so the arithmetic matches the
+    fixed-width reference implementation bit-for-bit regardless of the host
+    i64 width. Same input always yields the same output (deterministic);
+    a 1-bit input change avalanches into a very different output."""
+    var z = (x & 0xFFFFFFFF) + 0x9E3779B9
+    z = z & 0xFFFFFFFF
+    z = (z ^ (z >> 16)) * 0x21F0AAAD
+    z = z & 0xFFFFFFFF
+    z = (z ^ (z >> 15)) * 0x735A2D97
+    z = z & 0xFFFFFFFF
+    z ^ (z >> 15)
+
+pub fn ne_cell_seed(row: i64, col: i64, bit: i64, chip_seed: i64) -> i64:
+    """seed(cell) = splitmix32(row ^ (col << 3) ^ bit ^ CHIP_SEED) (doc §3.3).
+    Deterministic per-cell intrinsic variation derived on the fly (no
+    per-cell storage): the same (row, col, bit, chip_seed) always yields the
+    same offset, and changing CHIP_SEED yields a different "physical die"
+    with the same firmware."""
+    ne_splitmix32(row ^ (col << 3) ^ bit ^ chip_seed)
+
+# ----------------------------------------------------------------------------
+# Metadata arrays (Appendix A) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_page_meta_get(metas: [NePageMeta], row: i64) -> NePageMeta:
+    """Read per-page metadata (Appendix A). Out-of-bounds rows read a fresh
+    (all-counters-zero) meta — the same value an unbacked/never-touched page
+    would report (doc §4 WINDOW policy: outside the window, "no cell
+    state")."""
+    if row < 0 or row >= metas.len():
+        return ne_page_meta_new()
+    metas[row]
+
+pub fn ne_page_meta_set(metas: [NePageMeta], row: i64, meta: NePageMeta) -> [NePageMeta]:
+    """Write per-page metadata and RETURN the array (value type). Out-of-bounds
+    rows leave the array unchanged (see ne_vt_set for the bounds-check
+    convention)."""
+    if row < 0 or row >= metas.len():
+        return metas
+    var out = metas
+    out[row] = meta
+    out
+
+pub fn ne_block_meta_get(metas: [NeBlockMeta], blk: i64) -> NeBlockMeta:
+    """Read per-block metadata (Appendix A). Out-of-bounds blocks read a
+    fresh (good, unworn) meta — see ne_page_meta_get for the bounds-check
+    rationale."""
+    if blk < 0 or blk >= metas.len():
+        return ne_block_meta_new()
+    metas[blk]
+
+pub fn ne_block_meta_set(metas: [NeBlockMeta], blk: i64, meta: NeBlockMeta) -> [NeBlockMeta]:
+    """Write per-block metadata and RETURN the array (value type). Out-of-bounds
+    blocks leave the array unchanged (see ne_vt_set for the bounds-check
+    convention)."""
+    if blk < 0 or blk >= metas.len():
+        return metas
+    var out = metas
+    out[blk] = meta
+    out

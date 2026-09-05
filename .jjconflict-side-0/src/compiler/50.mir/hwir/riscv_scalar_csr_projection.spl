@@ -1,0 +1,173 @@
+# Stateless, fail-closed Zicsr access projection for the Gen2 scalar path.
+#
+# The selected CSR instruction and address are elaboration-time constants.  A
+# separate CSR state owner supplies presence/read data and consumes the typed
+# write intent; this module does not claim CSR storage or atomic commit.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp,
+    HwSignal}
+use compiler.mir.hwir.riscv_scalar_core.{riscv_gen2_scalar_dispatch,
+    riscv_gen2_scalar_elaboration}
+
+fn csr_ports(xlen: i32) -> [HwPort]:
+    [HwPort.input("in_valid", "Bits", 1), HwPort.input("in_order", "Bits", 64),
+        HwPort.input("in_privilege", "Bits", 2), HwPort.input("in_pc", "Bits", xlen),
+        HwPort.input("rs1_index", "Bits", 5), HwPort.input("rs1_value", "Bits", xlen),
+        HwPort.output("csr_lookup_address", "Bits", 12),
+        HwPort.input("csr_present", "Bits", 1), HwPort.input("csr_read_value", "Bits", xlen),
+        HwPort.output("csr_read_enable", "Bits", 1),
+        HwPort.output("csr_write_enable", "Bits", 1),
+        HwPort.output("csr_address", "Bits", 12),
+        HwPort.output("csr_write_value", "Bits", xlen),
+        HwPort.output("execute_exception", "Bits", 1),
+        HwPort.output("retire_valid", "Bits", 1), HwPort.output("retire_order", "Bits", 64),
+        HwPort.output("retire_xlen", "Bits", 7), HwPort.output("retire_privilege", "Bits", 2),
+        HwPort.output("retire_original_instruction", "Bits", 32),
+        HwPort.output("retire_canonical_instruction", "Bits", 32),
+        HwPort.output("retire_instruction_length_bytes", "Bits", 3),
+        HwPort.output("retire_pc_before", "Bits", xlen), HwPort.output("retire_pc_after", "Bits", xlen),
+        HwPort.output("retire_rd", "Bits", 5), HwPort.output("retire_rd_write", "Bits", 1),
+        HwPort.output("retire_rd_value", "Bits", xlen),
+        HwPort.output("retire_memory_address", "Bits", xlen),
+        HwPort.output("retire_memory_read_mask", "Bits", 32),
+        HwPort.output("retire_memory_write_mask", "Bits", 32),
+        HwPort.output("retire_memory_read_data", "Bits", xlen),
+        HwPort.output("retire_memory_write_data", "Bits", xlen),
+        HwPort.output("retire_trap", "Bits", 1), HwPort.output("retire_interrupt", "Bits", 1),
+        HwPort.output("retire_cause", "Bits", xlen), HwPort.output("retire_tval", "Bits", xlen)]
+
+fn csr_is_immediate(entry_id: text) -> bool:
+    entry_id == "rv.zicsr.csrrwi" or entry_id == "rv.zicsr.csrrsi" or
+        entry_id == "rv.zicsr.csrrci"
+
+fn csr_is_set(entry_id: text) -> bool:
+    entry_id == "rv.zicsr.csrrs" or entry_id == "rv.zicsr.csrrsi"
+
+fn csr_is_clear(entry_id: text) -> bool:
+    entry_id == "rv.zicsr.csrrc" or entry_id == "rv.zicsr.csrrci"
+
+pub fn strict_riscv_scalar_csr_projection_hwir(module_name: text,
+    config: CoreConfig, instruction: u32) -> Result<HwModuleDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-CSR-ID: CSR projection requires a module name")
+    val dispatch = riscv_gen2_scalar_dispatch(riscv_gen2_scalar_elaboration(config, "none")?, instruction)?
+    if dispatch.entry.execution_class != "csr" or not dispatch.entry.id.starts_with("rv.zicsr."):
+        return Err("HWIR-E-RISCV-CSR-SCOPE: CSR projection admits only exact Zicsr rows")
+
+    val x = config.xlen
+    val csr_address = ((instruction >> 20) & 0xFFF) as i64
+    val rd_index = ((instruction >> 7) & 31) as i64
+    val rs1_or_zimm = ((instruction >> 15) & 31) as i64
+    val immediate = csr_is_immediate(dispatch.entry.id)
+    val read_write_form = dispatch.entry.id == "rv.zicsr.csrrw" or
+        dispatch.entry.id == "rv.zicsr.csrrwi"
+    val write_requested = read_write_form or rs1_or_zimm != 0
+    val read_requested = not (read_write_form and rd_index == 0)
+    val rd_write_requested = rd_index != 0
+    val constants = [HwConstant.bits("instruction", 32, instruction as i64),
+        HwConstant.bits("csr_address_value", 12, csr_address),
+        HwConstant.bits("required_privilege", 2, (csr_address >> 8) & 3),
+        HwConstant.bits("privilege_reserved", 2, 2),
+        HwConstant.bits("address_privilege_reserved", 2, 2),
+        HwConstant.bits("csr_read_only_class", 2, 3),
+        HwConstant.bits("csr_access_class", 2, (csr_address >> 10) & 3),
+        HwConstant.bits("encoded_rs1", 5, rs1_or_zimm),
+        HwConstant.bits("source_immediate", x, rs1_or_zimm),
+        HwConstant.bits("rd_index", 5, rd_index), HwConstant.bits("four", x, 4),
+        HwConstant.bits("length4", 3, 4), HwConstant.bits("xlen_value", 7, x as i64),
+        HwConstant.bits("cause_illegal", x, 2), HwConstant.bits("all_ones", x, -1),
+        HwConstant.bits("zero1", 1, 0), HwConstant.bits("one1", 1, 1),
+        HwConstant.bits("zero2", 2, 0), HwConstant.bits("zero3", 3, 0),
+        HwConstant.bits("zero5", 5, 0), HwConstant.bits("zero7", 7, 0),
+        HwConstant.bits("zero12", 12, 0), HwConstant.bits("zero32", 32, 0),
+        HwConstant.bits("zero64", 64, 0), HwConstant.bits("zero_xlen", x, 0)]
+    val signals = [HwSignal.comb("privilege_sufficient", "Bits", 1),
+        HwSignal.comb("privilege_is_reserved", "Bits", 1),
+        HwSignal.comb("address_privilege_is_reserved", "Bits", 1),
+        HwSignal.comb("csr_is_read_only", "Bits", 1),
+        HwSignal.comb("rs1_matches", "Bits", 1), HwSignal.comb("rs1_nonzero", "Bits", 1),
+        HwSignal.comb("operand_binding_ok", "Bits", 1),
+        HwSignal.comb("write_readonly_violation", "Bits", 1),
+        HwSignal.comb("not_reserved", "Bits", 1), HwSignal.comb("address_privilege_supported", "Bits", 1),
+        HwSignal.comb("privilege_class_ok", "Bits", 1), HwSignal.comb("not_readonly_violation", "Bits", 1),
+        HwSignal.comb("present_and_privileged", "Bits", 1),
+        HwSignal.comb("bound_and_writable", "Bits", 1),
+        HwSignal.comb("access_allowed", "Bits", 1), HwSignal.comb("access_policy_ok", "Bits", 1),
+        HwSignal.comb("access_valid", "Bits", 1),
+        HwSignal.comb("access_denied", "Bits", 1), HwSignal.comb("trap_valid", "Bits", 1),
+        HwSignal.comb("effective_rs1_value", "Bits", x), HwSignal.comb("source_value", "Bits", x),
+        HwSignal.comb("inverted_source", "Bits", x), HwSignal.comb("set_value", "Bits", x),
+        HwSignal.comb("clear_value", "Bits", x), HwSignal.comb("selected_write_value", "Bits", x),
+        HwSignal.comb("instruction_xlen", "Bits", x),
+        HwSignal.comb("pc_after_value", "Bits", x)]
+    val ops = [HwCombOp.binary("uge", "privilege_sufficient", "in_privilege", "required_privilege", 2),
+        HwCombOp.binary("eq", "privilege_is_reserved", "in_privilege", "privilege_reserved", 2),
+        HwCombOp.binary("eq", "address_privilege_is_reserved", "required_privilege", "address_privilege_reserved", 2),
+        HwCombOp.binary("eq", "csr_is_read_only", "csr_access_class", "csr_read_only_class", 2),
+        HwCombOp.binary("eq", "rs1_matches", "rs1_index", "encoded_rs1", 5),
+        HwCombOp.binary("ne", "rs1_nonzero", "encoded_rs1", "zero5", 5),
+        HwCombOp.binary("and", "write_readonly_violation", "csr_is_read_only",
+            if write_requested: "one1" else: "zero1", 1),
+        HwCombOp.binary("eq", "not_reserved", "privilege_is_reserved", "zero1", 1),
+        HwCombOp.binary("eq", "address_privilege_supported", "address_privilege_is_reserved", "zero1", 1),
+        HwCombOp.binary("and", "privilege_class_ok", "not_reserved", "address_privilege_supported", 1),
+        HwCombOp.binary("eq", "not_readonly_violation", "write_readonly_violation", "zero1", 1),
+        HwCombOp.binary("and", "present_and_privileged", "csr_present", "privilege_sufficient", 1),
+        HwCombOp.binary("and", "bound_and_writable", "operand_binding_ok", "not_readonly_violation", 1),
+        HwCombOp.binary("and", "access_allowed", "present_and_privileged", "privilege_class_ok", 1),
+        HwCombOp.binary("and", "access_policy_ok", "access_allowed", "bound_and_writable", 1),
+        HwCombOp.binary("and", "access_valid", "in_valid", "access_policy_ok", 1),
+        HwCombOp.binary("eq", "access_denied", "access_valid", "zero1", 1),
+        HwCombOp.binary("and", "trap_valid", "in_valid", "access_denied", 1),
+        HwCombOp.binary("xor", "inverted_source", "source_value", "all_ones", x),
+        HwCombOp.binary("or", "set_value", "csr_read_value", "source_value", x),
+        HwCombOp.binary("and", "clear_value", "csr_read_value", "inverted_source", x),
+        HwCombOp.binary("add", "pc_after_value", "in_pc", "four", x),
+        HwCombOp.unary("zext", "instruction_xlen", "instruction", x),
+        HwCombOp.unary("passthrough", "retire_valid", "in_valid", 1),
+        HwCombOp.unary("passthrough", "retire_memory_address", "zero_xlen", x),
+        HwCombOp.unary("passthrough", "retire_memory_read_mask", "zero32", 32),
+        HwCombOp.unary("passthrough", "retire_memory_write_mask", "zero32", 32),
+        HwCombOp.unary("passthrough", "retire_memory_read_data", "zero_xlen", x),
+        HwCombOp.unary("passthrough", "retire_memory_write_data", "zero_xlen", x),
+        HwCombOp.unary("passthrough", "retire_interrupt", "zero1", 1),
+        HwCombOp.unary("passthrough", "execute_exception", "trap_valid", 1),
+        HwCombOp.unary("passthrough", "retire_trap", "trap_valid", 1)]
+    val selects = [HwSelectOp.mux("operand_binding_ok", "one1",
+            if immediate: "one1" else: "rs1_matches", "zero1", 1),
+        HwSelectOp.mux("effective_rs1_value", "rs1_nonzero", "rs1_value", "zero_xlen", x),
+        HwSelectOp.mux("source_value", "one1", if immediate: "source_immediate" else: "effective_rs1_value", "zero_xlen", x),
+        HwSelectOp.mux("selected_write_value", "one1",
+            if csr_is_set(dispatch.entry.id): "set_value" elif csr_is_clear(dispatch.entry.id): "clear_value" else: "source_value",
+            "zero_xlen", x),
+        HwSelectOp.mux("csr_lookup_address", "in_valid", "csr_address_value", "zero12", 12),
+        HwSelectOp.mux("csr_read_enable", "access_valid", if read_requested: "one1" else: "zero1", "zero1", 1),
+        HwSelectOp.mux("csr_write_enable", "access_valid", if write_requested: "one1" else: "zero1", "zero1", 1),
+        HwSelectOp.mux("csr_address", "access_valid", "csr_address_value", "zero12", 12),
+        HwSelectOp.mux("csr_write_value", "access_valid", "selected_write_value", "zero_xlen", x),
+        HwSelectOp.mux("retire_order", "in_valid", "in_order", "zero64", 64),
+        HwSelectOp.mux("retire_xlen", "in_valid", "xlen_value", "zero7", 7),
+        HwSelectOp.mux("retire_privilege", "in_valid", "in_privilege", "zero2", 2),
+        HwSelectOp.mux("retire_original_instruction", "in_valid", "instruction", "zero32", 32),
+        HwSelectOp.mux("retire_canonical_instruction", "in_valid", "instruction", "zero32", 32),
+        HwSelectOp.mux("retire_instruction_length_bytes", "in_valid", "length4", "zero3", 3),
+        HwSelectOp.mux("retire_pc_before", "in_valid", "in_pc", "zero_xlen", x),
+        HwSelectOp.mux("retire_pc_after", "in_valid", "pc_after_value", "zero_xlen", x),
+        HwSelectOp.mux("retire_rd", "access_valid", if rd_write_requested: "rd_index" else: "zero5", "zero5", 5),
+        HwSelectOp.mux("retire_rd_write", "access_valid", if rd_write_requested: "one1" else: "zero1", "zero1", 1),
+        HwSelectOp.mux("retire_rd_value", "access_valid", if rd_write_requested: "csr_read_value" else: "zero_xlen", "zero_xlen", x),
+        HwSelectOp.mux("retire_cause", "trap_valid", "cause_illegal", "zero_xlen", x),
+        HwSelectOp.mux("retire_tval", "trap_valid", "instruction_xlen", "zero_xlen", x)]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: csr_ports(x).len(), signal_count: signals.len(), register_count: 0,
+        comb_op_count: ops.len() + selects.len(), memory_count: 0,
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), ports: csr_ports(x), signals: signals,
+        constants: constants, comb_ops: ops, compare_ops: [], select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()], origins: [HwOrigin(
+            node_id: HwNodeId.child(module_name, "csr-access"),
+            source_name: "riscv.scalar.zicsr." + dispatch.entry.id)])
+    val diagnostic = module.shape_diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

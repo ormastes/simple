@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Purpose: This spec proves the SCV-IMPL-E-02 EventSource protocol
+(`src/lib/scv/event_source.spl`): the cursor carries exactly
+{source, opaque_token, fresh_instance, overflowed}; a fresh instance or an
+overflowed cursor is REFUSED events until the mandatory invalidate/rescan
+path runs; after a rescan incremental pulls flow and advance the opaque
+token. Watchers are hints — rescan is the only authority.
+Audience: Maintainers of the SCV event layer.
+"""
+# @req: REQ-SCV-EVENT-SOURCE-001
+use std.spec.{describe, it, expect, step}
+use app.io.mod (dir_create, file_write, dir_remove_all)
+use std.scv.event_source.{scv_event_source_open, scv_event_source_pull, scv_event_source_rescan}
+use std.nogc_async_mut.file_system.event_watch.{fswatch_mark_overflow}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _fixture(tag: text) -> text:
+    val root = "/tmp/scv-event-source-{tag}-{current_time_ms()}"
+    dir_create(root, true)
+    root
+
+describe "scv event source protocol (E-02)":
+    it "opens with a poll cursor marked fresh_instance":
+        step("Open and inspect the cursor fields")
+        val root = _fixture("open")
+        val (state, cursor) = scv_event_source_open(root)
+        expect(cursor.source).to_equal("poll")
+        expect(cursor.fresh_instance).to_equal(true)
+        expect(cursor.overflowed).to_equal(false)
+        expect(cursor.opaque_token != "").to_equal(true)
+        dir_remove_all(root)
+
+    it "refuses events on a fresh instance until the mandatory rescan runs":
+        step("Pull on a fresh cursor, rescan, then pull incrementally")
+        val root = _fixture("fresh")
+        val (state, cursor) = scv_event_source_open(root)
+        val (s1, pull1) = scv_event_source_pull(state, cursor)
+        expect(pull1.needs_rescan).to_equal(true)
+        expect(pull1.events.len()).to_equal(0)
+        val (s2, cur2) = scv_event_source_rescan(s1, cursor)
+        expect(cur2.fresh_instance).to_equal(false)
+        file_write("{root}/a.txt", "hello")
+        val (s3, pull3) = scv_event_source_pull(s2, cur2)
+        expect(pull3.needs_rescan).to_equal(false)
+        expect(pull3.events.len()).to_equal(1)
+        expect(pull3.events[0].kind).to_equal("created")
+        dir_remove_all(root)
+
+    it "advances the opaque token across pulls":
+        step("Token before and after a change-bearing pull must differ")
+        val root = _fixture("token")
+        val (state, cursor) = scv_event_source_open(root)
+        val (s1, cur1) = scv_event_source_rescan(state, cursor)
+        file_write("{root}/b.txt", "x")
+        val (s2, pull2) = scv_event_source_pull(s1, cur1)
+        expect(pull2.cursor.opaque_token != cur1.opaque_token).to_equal(true)
+        dir_remove_all(root)
+
+    it "flags overflow on the cursor and demands the invalidate/rescan path":
+        step("Overflowed state ⇒ pull refuses events; rescan clears the flag")
+        val root = _fixture("ovf")
+        val (state, cursor) = scv_event_source_open(root)
+        val (s1, cur1) = scv_event_source_rescan(state, cursor)
+        val s2 = fswatch_mark_overflow(s1)
+        val (s3, pull3) = scv_event_source_pull(s2, cur1)
+        expect(pull3.needs_rescan).to_equal(true)
+        expect(pull3.cursor.overflowed).to_equal(true)
+        expect(pull3.events.len()).to_equal(0)
+        val (s4, cur4) = scv_event_source_rescan(s3, pull3.cursor)
+        expect(cur4.overflowed).to_equal(false)
+        val (s5, pull5) = scv_event_source_pull(s4, cur4)
+        expect(pull5.needs_rescan).to_equal(false)
+        dir_remove_all(root)

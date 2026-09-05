@@ -1,0 +1,154 @@
+#!/bin/sh
+
+# Shared fail-closed receipt contract for the SimpleOS deployment/desktop
+# wrapper. Production mode and the hermetic self-test use this same owner.
+
+sos_td_block() {
+    printf '%s\n' "blocked:$1" >&2
+    return 1
+}
+
+sos_td_hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sos_td_block sha256-tool-missing
+    fi
+}
+
+sos_td_hash_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        sos_td_block sha256-tool-missing
+    fi
+}
+
+sos_td_is_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+    return 0
+}
+
+sos_td_value() {
+    sos_td_value_file=$1
+    sos_td_value_key=$2
+    sos_td_value_count=$(awk -F= -v key="$sos_td_value_key" '$1 == key { count += 1 } END { print count + 0 }' "$sos_td_value_file")
+    [ "$sos_td_value_count" -eq 1 ] || {
+        sos_td_block "${sos_td_value_key}-missing-or-duplicate"
+        return 1
+    }
+    awk -F= -v key="$sos_td_value_key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$sos_td_value_file"
+}
+
+sos_td_require_value() {
+    sos_td_require_file=$1
+    sos_td_require_key=$2
+    sos_td_require_expected=$3
+    sos_td_require_actual=$(sos_td_value "$sos_td_require_file" "$sos_td_require_key") || return 1
+    [ "$sos_td_require_actual" = "$sos_td_require_expected" ] || {
+        sos_td_block "${sos_td_require_key}-mismatch"
+        return 1
+    }
+}
+
+sos_td_validate_record() {
+    sos_td_record=$1
+    [ -f "$sos_td_record" ] || {
+        sos_td_block receipt-missing
+        return 1
+    }
+    [ -s "$sos_td_record" ] || {
+        sos_td_block receipt-empty
+        return 1
+    }
+    awk 'BEGIN { ok=1 } !/^[a-z0-9_]+=/ { ok=0 } END { exit(ok ? 0 : 1) }' "$sos_td_record" || {
+        sos_td_block receipt-line-malformed
+        return 1
+    }
+    sos_td_last=$(tail -n 1 "$sos_td_record")
+    case "$sos_td_last" in
+        record_sha256=*) ;;
+        *) sos_td_block record-sha256-not-final; return 1 ;;
+    esac
+    sos_td_record_hash=${sos_td_last#record_sha256=}
+    sos_td_is_sha256 "$sos_td_record_hash" || {
+        sos_td_block record-sha256-malformed
+        return 1
+    }
+    sos_td_keys=$(sed '$d' "$sos_td_record" | cut -d= -f1)
+    sos_td_sorted_keys=$(printf '%s\n' "$sos_td_keys" | LC_ALL=C sort -u)
+    [ "$sos_td_keys" = "$sos_td_sorted_keys" ] || {
+        sos_td_block record-keys-unsorted-or-duplicate
+        return 1
+    }
+    sos_td_expected_hash=$(sed '$d' "$sos_td_record" | sos_td_hash_stream) || return 1
+    [ "$sos_td_record_hash" = "$sos_td_expected_hash" ] || {
+        sos_td_block record-sha256-mismatch
+        return 1
+    }
+}
+
+sos_td_validate_common_receipt() {
+    sos_td_common_file=$1
+    sos_td_common_schema=$2
+    sos_td_common_class=$3
+    sos_td_validate_record "$sos_td_common_file" || return 1
+    sos_td_require_value "$sos_td_common_file" schema "$sos_td_common_schema" || return 1
+    sos_td_require_value "$sos_td_common_file" evidence_class "$sos_td_common_class" || return 1
+    sos_td_require_value "$sos_td_common_file" status pass || return 1
+    for sos_td_common_key in producer_path producer_sha256 run_id source_revision; do
+        sos_td_common_value=$(sos_td_value "$sos_td_common_file" "$sos_td_common_key") || return 1
+        [ -n "$sos_td_common_value" ] || {
+            sos_td_block "${sos_td_common_key}-empty"
+            return 1
+        }
+    done
+    sos_td_common_producer_hash=$(sos_td_value "$sos_td_common_file" producer_sha256) || return 1
+    sos_td_is_sha256 "$sos_td_common_producer_hash" || {
+        sos_td_block producer-sha256-malformed
+        return 1
+    }
+}
+
+sos_td_require_same_field() {
+    sos_td_left=$1
+    sos_td_right=$2
+    sos_td_field=$3
+    sos_td_left_value=$(sos_td_value "$sos_td_left" "$sos_td_field") || return 1
+    sos_td_right_value=$(sos_td_value "$sos_td_right" "$sos_td_field") || return 1
+    [ "$sos_td_left_value" = "$sos_td_right_value" ] || {
+        sos_td_block "cross-bind-${sos_td_field}-mismatch"
+        return 1
+    }
+}
+
+sos_td_validate_desktop_policy() {
+    sos_td_desktop=$1
+    sos_td_validate_common_receipt "$sos_td_desktop" simpleos-toolchain-desktop-guest-v1 live-guest || return 1
+    for sos_td_false_key in rust_seed_used host_compile_used host_linker_used preloaded_command_used fixed_ssh_response_used skip_used qemu_kernel_flag_used isa_debug_exit_used marker_app_used; do
+        sos_td_require_value "$sos_td_desktop" "$sos_td_false_key" false || return 1
+    done
+    sos_td_require_value "$sos_td_desktop" guest_exec_source mounted-filesystem || return 1
+    sos_td_require_value "$sos_td_desktop" linker_target x86_64-unknown-simpleos || return 1
+}
+
+sos_td_validate_receipt_set() {
+    sos_td_manifest=$1
+    sos_td_image=$2
+    sos_td_desktop=$3
+    sos_td_validate_common_receipt "$sos_td_manifest" simpleos-toolchain-deployment-v1 image-manifest || return 1
+    sos_td_validate_common_receipt "$sos_td_image" simpleos-toolchain-image-admission-v1 image-admission || return 1
+    sos_td_validate_desktop_policy "$sos_td_desktop" || return 1
+    for sos_td_cross_field in source_revision run_id; do
+        sos_td_require_same_field "$sos_td_manifest" "$sos_td_image" "$sos_td_cross_field" || return 1
+        sos_td_require_same_field "$sos_td_image" "$sos_td_desktop" "$sos_td_cross_field" || return 1
+    done
+    for sos_td_cross_field in image_sha256 kernel_sha256 manifest_sha256; do
+        sos_td_require_same_field "$sos_td_image" "$sos_td_desktop" "$sos_td_cross_field" || return 1
+    done
+}

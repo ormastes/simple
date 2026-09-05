@@ -1,0 +1,50 @@
+# Fixture for test/03_system/compiler/user_option_enum_match_lowering_system_spec.spl
+#
+# Regression fixture for
+# doc/08_tracking/bug/seed_builtin_option_name_heuristic_breaks_user_option_enum_2026-08-16.md
+#
+# A USER-DECLARED enum that happens to be named `Option` with the shape
+# Some(payload) / None. The builtin `Option<T>` is nil-boxed at runtime and is
+# identified by a RESERVED enum id (1); this one is an ordinary enum object with
+# an ordinary id. Match lowering must therefore take the discriminant path for
+# it, not the nil-boxing fast path.
+#
+# If lowering misroutes it, the observable failures are exact:
+#   - `case Option::Some(v)` becomes irrefutable (rt_is_some on a non-nil enum
+#     object is always true) AND drops its payload binding, so `none_via_some`
+#     stops being `unmatched`;
+#   - `case Option::None` never matches (rt_is_none checks enum_id == 1), so
+#     `none_arm` stops being `99`.
+#
+# Every printed value is computed by the match, never hardcoded.
+
+enum Option:
+    Some(i64)
+    None
+
+fn classify(opt: Option) -> i64:
+    match opt:
+        Option::Some(v) =>
+            return v
+        Option::None =>
+            return 99
+
+fn main() -> i32:
+    # Some arm must bind its payload.
+    print("some_arm=" + classify(Option::Some(42)).to_text())
+
+    # None arm must match, and must NOT be captured by the Some arm.
+    print("none_arm=" + classify(Option::None).to_text())
+
+    # Direct probe of Some-arm refutability against a None value: if the Some
+    # arm is irrefutable this prints a bound payload instead of `unmatched`.
+    var witness = "unmatched"
+    val none_value = Option::None
+    match none_value:
+        Option::Some(v) =>
+            witness = "some-matched-none:" + v.to_text()
+        Option::None =>
+            witness = "unmatched"
+    print("none_via_some=" + witness)
+
+    return 0

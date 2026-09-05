@@ -1,0 +1,96 @@
+# Expression Type Inference — Call Helpers
+#
+# Split from inference_expr.spl. Contains ordinary function-call and method-call
+# inference, including bidirectional argument checking and MethodCall transport
+# safeguards for nested value aggregates.
+
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use type_infer_types.*
+use compiler.types.type_infer_types.{HmInferContext}
+
+impl HmInferContext:
+    me infer_function_call(callee: HirExpr, args: [HirCallArg], type_args: [HirType], span: Span) -> Result<HirType, TypeInferError>:
+        match self.synthesize_expr(callee):
+            case Ok(callee_ty):
+                val resolved_callee = self.resolve(callee_ty)
+                val callee_effects = match resolved_callee.kind:
+                    case Function(_, _, effects): effects
+                    case _: []
+                for eff in callee_effects:
+                    self.accumulate_effect(eff)
+
+                val expected_params = match resolved_callee.kind:
+                    case Function(params, _, _): Some(params)
+                    case _: nil
+                var arg_types: [HirType] = []
+                var i = 0
+                for arg in args:
+                    val arg_result = if expected_params.? and i < expected_params.unwrap().len():
+                        val expected_param = expected_params.unwrap()[i]
+                        self.infer_expr(arg.value, InferMode.Check(expected_param))
+                    else:
+                        self.synthesize_expr(arg.value)
+                    match arg_result:
+                        case Ok(ty): arg_types = arg_types.push(ty)
+                        case Err(e): return Err(e)
+                    i = i + 1
+
+                val ret_ty = self.fresh_var(span)
+                val expected_fn_ty = HirType(
+                    kind: HirTypeKind.Function(arg_types, ret_ty, []),
+                    span: span
+                )
+                match self.unify(callee_ty, expected_fn_ty):
+                    case Err(e): Err(e)
+                    case _:
+                        match callee.kind:
+                            case Var(func_symbol):
+                                self.generate_obligations_for_function_call(func_symbol, type_args, span)
+                            case _: pass
+                        Ok(self.resolve(ret_ty))
+            case Err(e): Err(e)
+
+    me infer_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, span: Span) -> Result<HirType, TypeInferError>:
+        # HirExpr/HirCallArg are nested value aggregates. Stage-3 native
+        # recursion may materialize a fresh aggregate copy. Snapshot scalar
+        # resolution metadata, and retain only the args array's tagged owner
+        # handle across recursive calls. Do not bind a HirCallArg/HirExpr
+        # element across an inference boundary.
+        val method_name = method
+        val argument_count = args.len()
+        var resolved_method_id = -1
+        var has_resolved_method = false
+        val needs_trait_obligation = match resolution:
+            case InstanceMethod(_, method_id):
+                resolved_method_id = method_id.id
+                has_resolved_method = true
+                false
+            case TraitMethod(_, method_id):
+                resolved_method_id = method_id.id
+                has_resolved_method = true
+                true
+            case FreeFunction(func_id):
+                resolved_method_id = func_id.id
+                has_resolved_method = true
+                false
+            case StaticMethod(_, method_id):
+                resolved_method_id = method_id.id
+                has_resolved_method = true
+                false
+            case Unresolved: true
+        match self.synthesize_expr(receiver):
+            case Ok(receiver_ty):
+                var argument_index = 0
+                while argument_index < argument_count:
+                    match self.synthesize_expr(args[argument_index].value):
+                        case Err(e): return Err(e)
+                        case _: pass
+                    argument_index = argument_index + 1
+
+                if needs_trait_obligation:
+                    self.generate_obligation_for_method_call(receiver_ty, method_name, span)
+                if has_resolved_method and resolved_method_id < 0:
+                    return Err(TypeInferError.Other("invalid resolved method id", span))
+                Ok(self.fresh_var(span))
+            case Err(e): Err(e)

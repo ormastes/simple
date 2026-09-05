@@ -1,0 +1,56 @@
+"""
+## Purpose and audience
+Purpose: Prove that a BDD assertion failure reaches the file's error text
+instead of collapsing into the opaque "Process exited with code 1".
+Audience: compiler and tooling engineers who maintain the test runner.
+"""
+# @req: REQ-LIB-TEST-RUNNER-002 — assertion failures must be diagnosable from the runner summary.
+
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{make_result_from_output, extract_error_message}
+use std.spec.step
+
+# Defect (2026-08-26): `_is_test_error_line` recognised only compiler/runtime
+# shapes (`semantic:`, `parse error:`, `Error:`, `not found`, ...). A spec whose
+# child ran to completion and failed a plain `expect(...)` printed
+# `✗ <example>` + `expected 0 to equal 154`, matched nothing, and the caller
+# fell back to "Process exited with code 1" -- 102 specs in one sweep were
+# indistinguishable from a crash. See
+# doc/08_tracking/bug/test_01_unit_process_exit_cluster_2026-08-26.md.
+
+val ESC = "\x1b"
+
+fn failing_bdd_output() -> text:
+    "AC-3: round trip\n" +
+    "  {ESC}[32m✓ buffer freezes back{ESC}[0m\n" +
+    "{ESC}[32m1 example, 0 failures{ESC}[0m\n" +
+    "Cross-module: checksum\n" +
+    "  {ESC}[31m✗ U32be + U32le CRC matches a recomputed CRC{ESC}[0m\n" +
+    "    {ESC}[31mexpected 0 to equal 154{ESC}[0m\n" +
+    "{ESC}[31m1 example, 1 failure{ESC}[0m\n"
+
+describe "assertion failures are surfaced, not reported as a bare exit code":
+    it "names the failing example and its expectation in the file error":
+        step("Verify: names the failing example and its expectation in the file error")
+        # @req: REQ-LIB-TEST-RUNNER-002
+        # Reproducing case: exit 1 after a green-then-red BDD run.
+        val r = make_result_from_output("t_spec.spl", failing_bdd_output(), "", 1, 10, 60)
+        expect(r.failed).to_equal(1)  # oracle: 1 -- the one red example
+        expect(r.passed).to_equal(1)  # oracle: 1 -- the green example is still counted
+        expect(r.error.contains("✗ U32be + U32le CRC matches a recomputed CRC")).to_equal(true)
+        expect(r.error.contains("expected 0 to equal 154")).to_equal(true)
+        expect(r.error.contains("Process exited with code")).to_equal(false)
+
+    it "still reports the exit code when the child printed no assertion line":
+        step("Verify: still reports the exit code when the child printed no assertion line")
+        # A child that died silently after a green block keeps the old message:
+        # the fallback must never invent an assertion.
+        val silent = "AC-1\n  ✓ ok\n1 example, 0 failures\n"
+        val r = make_result_from_output("t2_spec.spl", silent, "", 1, 10, 60)
+        expect(r.failed).to_equal(1)  # oracle: 1 -- non-zero exit still fails the file
+        expect(r.error).to_equal("Process exited with code 1")
+
+    it "extracts only the first failing example, ANSI stripped":
+        step("Verify: extracts only the first failing example, ANSI stripped")
+        val two = "  {ESC}[31m✗ first{ESC}[0m\n    expected 1 to equal 2\n  ✗ second\n    expected 3 to equal 4\n"
+        val msg = extract_error_message(two)
+        expect(msg).to_equal("✗ first -- expected 1 to equal 2")

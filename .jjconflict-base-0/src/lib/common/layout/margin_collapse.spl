@@ -1,0 +1,206 @@
+# CSS margin collapsing — common.layout.margin_collapse
+#
+# WHY THIS MODULE EXISTS
+#
+# Margin collapsing is blocker 7 of doc/03_plan/ui/rendering/blink_wiring_plan.md.
+# The live browser lane has it inline inside
+# `gc_async_mut/gpu/browser_engine/layout_core.spl:168-176`, welded to
+# `BeDomNode`/`StyleProps`. blink is architecturally a LEAF — it imports only
+# `blink`, `skia` and `common`, never `gc_async_mut.gpu.**` — so that code is
+# unreachable from it, and copying it would grow a duplicate family the wiring
+# plan exists to shrink. The rule therefore lands HERE, in `common/`, as pure
+# arithmetic over `f64` with no DOM and no style type, so both lanes can import
+# it.
+#
+# MEASURED DIVERGENCE FROM THE LIVE LANE (2026-08-11) — READ BEFORE "FIXING"
+#
+# `layout_core.spl:170` collapses adjacent siblings with
+# `if prev_bottom_margin < child_mt: prev_bottom_margin else: child_mt`, i.e.
+# it subtracts the SMALLER of the two margins from the cursor, which leaves the
+# LARGER in place... but only because it then also adds the child's own
+# margin-top separately. The net used margin is therefore
+# `prev_mb + child_mt - min(prev_mb, child_mt)` = `max(prev_mb, child_mt)`,
+# which is right for two POSITIVE margins and WRONG the moment either is
+# negative: for `prev_mb = 20`, `child_mt = -10` CSS 2.1 §8.3.1 requires
+# `20 + (-10) = 10`, while that expression yields `max(20, -10) = 20`. This
+# module implements the spec rule (max of the positives plus min of the
+# negatives) and so disagrees with the live lane on any negative margin. That
+# divergence is intentional and this is the correct side of it.
+#
+# WHAT IS AND IS NOT MODELLED
+#
+# Modelled: adjacent-sibling collapse, parent/first-child top collapse,
+# parent/last-child bottom collapse, and the suppression rules that gate them
+# (border, padding, block-formatting-context roots, clearance).
+#
+# NOT modelled, deliberately, because each needs tree walking rather than
+# arithmetic and the caller is better placed to do it:
+#   - SELF-COLLAPSING boxes (an empty box whose own top and bottom margins
+#     collapse THROUGH it and then with its neighbours). `collapse_margins`
+#     will collapse such a box's two margins correctly if the caller detects
+#     the case and asks, but nothing here detects it.
+#   - Collapse through a chain of empty ancestors.
+#   - Margins of floats, absolutely positioned boxes, and flex/grid items,
+#     which never collapse at all — the caller must not route them here.
+
+# --------------------------------------------------------------------------
+# The collapse rule itself
+# --------------------------------------------------------------------------
+
+pub fn collapse_margins(a: f64, b: f64) -> f64:
+    """Return the single used margin that results from collapsing `a` and `b`.
+
+    CSS 2.1 §8.3.1: the collapsed margin is the maximum of the positive
+    margins plus the minimum of the negative margins. So `20` and `10` give
+    `20` (not 30 — that is the whole point of collapsing), `20` and `-10` give
+    `10`, and `-20` and `-10` give `-20` (the most negative wins)."""
+    var most_positive: f64 = 0.0
+    var most_negative: f64 = 0.0
+    if a > most_positive:
+        most_positive = a
+    if b > most_positive:
+        most_positive = b
+    if a < most_negative:
+        most_negative = a
+    if b < most_negative:
+        most_negative = b
+    most_positive + most_negative
+
+pub fn collapse_margin_list(margins: [f64]) -> f64:
+    """Collapse a whole adjoining set of margins at once.
+
+    Equivalent to folding `collapse_margins` across the list, but stated
+    directly because the fold is associative only by accident of the max/min
+    split. An empty list collapses to `0.0`."""
+    var most_positive: f64 = 0.0
+    var most_negative: f64 = 0.0
+    var i: i64 = 0
+    while i < margins.len():
+        val m = margins[i as i32]
+        if m > most_positive:
+            most_positive = m
+        if m < most_negative:
+            most_negative = m
+        i = i + 1
+    most_positive + most_negative
+
+pub fn collapsed_gap(prev_margin_bottom: f64, next_margin_top: f64) -> f64:
+    """Return the vertical gap between two adjacent in-flow siblings.
+
+    This is just `collapse_margins`, named for the caller that wants a gap
+    rather than a margin. A layout cursor that has already advanced past the
+    previous box's border-box bottom adds exactly this to reach the next box's
+    border-box top."""
+    collapse_margins(prev_margin_bottom, next_margin_top)
+
+# --------------------------------------------------------------------------
+# Suppression: when collapsing does NOT happen
+# --------------------------------------------------------------------------
+
+pub fn top_margin_collapses_with_parent(
+    parent_border_top: f64,
+    parent_padding_top: f64,
+    parent_establishes_bfc: bool,
+    child_has_clearance: bool
+) -> bool:
+    """Return true when a first in-flow child's margin-top collapses with its
+    parent's margin-top.
+
+    Blocked by ANY of: a top border, a top padding (either separates the two
+    margins so they are no longer adjoining), the parent establishing a new
+    block formatting context (CSS 2.1 §8.3.1 — a BFC root's margins never
+    collapse with its children's), or the child having clearance from a
+    `clear` that actually moved it."""
+    if parent_establishes_bfc:
+        return false
+    if child_has_clearance:
+        return false
+    if parent_border_top != 0.0:
+        return false
+    if parent_padding_top != 0.0:
+        return false
+    true
+
+pub fn bottom_margin_collapses_with_parent(
+    parent_border_bottom: f64,
+    parent_padding_bottom: f64,
+    parent_height_is_auto: bool,
+    parent_min_height: f64,
+    parent_establishes_bfc: bool
+) -> bool:
+    """Return true when a last in-flow child's margin-bottom collapses with
+    its parent's margin-bottom.
+
+    Everything that blocks the top case blocks this one, plus two more: a
+    parent with a DECLARED height has a bottom content edge fixed by that
+    height, so the child's margin cannot reach the parent's; and a non-zero
+    `min-height` can hold the edge apart the same way."""
+    if parent_establishes_bfc:
+        return false
+    if parent_border_bottom != 0.0:
+        return false
+    if parent_padding_bottom != 0.0:
+        return false
+    if not parent_height_is_auto:
+        return false
+    if parent_min_height != 0.0:
+        return false
+    true
+
+pub fn siblings_margins_collapse(
+    prev_establishes_bfc: bool,
+    next_establishes_bfc: bool,
+    next_has_clearance: bool,
+    separated_by_float_or_line: bool
+) -> bool:
+    """Return true when two adjacent in-flow siblings' facing margins collapse.
+
+    A BFC root's margins do not collapse with anything OUTSIDE it, but two
+    sibling BFC roots still collapse with EACH OTHER — only their inner
+    children are fenced off. So the two `_establishes_bfc` flags are accepted
+    and deliberately ignored for the sibling case; they are in the signature so
+    a caller reading it does not conclude the case was overlooked, and so the
+    rule has one honest home. Collapsing IS blocked by clearance on the second
+    box, and by anything in between them (a float, an inline line box) that
+    stops the margins adjoining."""
+    if next_has_clearance:
+        return false
+    if separated_by_float_or_line:
+        return false
+    true
+
+# --------------------------------------------------------------------------
+# Block formatting context roots
+# --------------------------------------------------------------------------
+
+pub fn establishes_bfc(
+    is_float: bool,
+    is_absolutely_positioned: bool,
+    is_inline_block: bool,
+    overflow_is_visible: bool,
+    is_table_cell: bool,
+    is_flex_or_grid_item: bool,
+    is_root_element: bool
+) -> bool:
+    """Return true when a box establishes a new block formatting context.
+
+    A BFC root is the fence that stops margin collapsing crossing its boundary
+    and that keeps floats from escaping it. CSS 2.1 §9.4.1 plus the display
+    additions: floats, absolutely positioned boxes, inline-blocks, table cells,
+    flex/grid items, the root element, and any box whose `overflow` is
+    something other than `visible`."""
+    if is_root_element:
+        return true
+    if is_float:
+        return true
+    if is_absolutely_positioned:
+        return true
+    if is_inline_block:
+        return true
+    if is_table_cell:
+        return true
+    if is_flex_or_grid_item:
+        return true
+    if not overflow_is_visible:
+        return true
+    false

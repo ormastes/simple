@@ -1,0 +1,174 @@
+# SCV persistent file-entity identity store (report §7.6/§7.8, P1 item 1).
+#
+# Repo-unique logical FileEntityId ("file_<n>") allocated per logical file and
+# kept across renames. NOT the same thing as the content-derived `file_id`
+# second field of a tree line in store.spl — that id changes on every edit;
+# this one never does.
+#
+# Persistence:
+#   .scv/meta/file_identity.sdn   one row per logical file (rewritten whole)
+#       file_id|current_path|created_commit|origin|state
+#   .scv/meta/identity_edges.sdn  append-only relation edges (immutable —
+#       corrections append superseding edges, nothing is rewritten)
+#       from_id|to_id|relation|commit|confidence_milli|evidence|matcher_version|status
+#
+# Invariants (report §7.8):
+#   - a copy allocates a NEW id plus a copied_from edge
+#   - delete is terminal: state flips to deleted, the id is never reused
+#   - an ambiguous match stays status=suggested and never moves current_path;
+#     only an accepted move updates current_path
+
+use app.io.mod (file_exists, file_read, dir_create)
+use std.nogc_sync_mut.io.file_ops.{file_append}
+use std.scv.core.{scv_meta_dir}
+use std.scv.store.{scv_write_text}
+
+val SCV_IDENTITY_MATCHER_VERSION = "fim-1"
+
+fn scv_identity_rows_path(root: text) -> text:
+    "{scv_meta_dir(root)}/file_identity.sdn"
+
+fn scv_identity_edges_path(root: text) -> text:
+    "{scv_meta_dir(root)}/identity_edges.sdn"
+
+fn scv_identity_seq_path(root: text) -> text:
+    "{scv_meta_dir(root)}/file_identity_seq"
+
+fn scv_identity_append_line(path: text, line: text) -> bool:
+    # Append-only: never read+rewrite the edge log.
+    file_append(path, line + "\n")
+
+fn scv_identity_rows(root: text) -> [text]:
+    val path = scv_identity_rows_path(root)
+    if not file_exists(path):
+        return []
+    var out: [text] = []
+    for line in file_read(path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            out.push(trimmed)
+    out
+
+fn scv_identity_write_rows(root: text, rows: [text]) -> bool:
+    dir_create(scv_meta_dir(root), true)
+    var payload = ""
+    for row in rows:
+        payload = payload + row + "\n"
+    scv_write_text(scv_identity_rows_path(root), payload)
+
+fn scv_identity_row_field(row: text, index: i64) -> text:
+    val parts = row.split("|")
+    if index < parts.len():
+        parts[index]
+    else:
+        ""
+
+# Returns the file_id currently mapped to `path` among live rows, "" if none.
+fn scv_identity_lookup_by_path(root: text, path: text) -> text:
+    for row in scv_identity_rows(root):
+        if scv_identity_row_field(row, 1) == path and scv_identity_row_field(row, 4) == "live":
+            return scv_identity_row_field(row, 0)
+    ""
+
+fn scv_identity_state(root: text, file_id: text) -> text:
+    for row in scv_identity_rows(root):
+        if scv_identity_row_field(row, 0) == file_id:
+            return scv_identity_row_field(row, 4)
+    ""
+
+fn scv_identity_current_path(root: text, file_id: text) -> text:
+    for row in scv_identity_rows(root):
+        if scv_identity_row_field(row, 0) == file_id:
+            return scv_identity_row_field(row, 1)
+    ""
+
+fn scv_identity_next_id(root: text) -> text:
+    # Monotonic sequence — an id is never reused, deleted or not.
+    dir_create(scv_meta_dir(root), true)
+    val path = scv_identity_seq_path(root)
+    var next = 1
+    if file_exists(path):
+        next = (file_read(path).trim().to_int() ?? 0) + 1
+    scv_write_text(path, "{next}")
+    "file_{next}"
+
+fn scv_identity_allocate_with_origin(root: text, path: text, commit: text, origin: text) -> text:
+    val existing = scv_identity_lookup_by_path(root, path)
+    if existing != "":
+        return existing
+    val id = scv_identity_next_id(root)
+    var rows = scv_identity_rows(root)
+    rows.push("{id}|{path}|{commit}|{origin}|live")
+    scv_identity_write_rows(root, rows)
+    scv_identity_append_line(scv_identity_edges_path(root), "{id}|{id}|create|{commit}|1000|{origin}|{SCV_IDENTITY_MATCHER_VERSION}|accepted")
+    id
+
+# Allocate a new repo-unique FileEntityId for a new logical file at `path`.
+fn scv_identity_allocate(root: text, path: text, commit: text) -> text:
+    scv_identity_allocate_with_origin(root, path, commit, "new")
+
+# Record a move edge. Only status=accepted updates current_path; a
+# status=suggested edge is evidence only and moves nothing.
+fn scv_identity_record_move(root: text, old_path: text, new_path: text, commit: text, evidence: text, confidence_milli: i64, status: text) -> text:
+    val id = scv_identity_lookup_by_path(root, old_path)
+    if id == "":
+        return ""
+    val relation = if confidence_milli >= 1000: "move" else: "move_edit"
+    scv_identity_append_line(scv_identity_edges_path(root), "{id}|{id}|{relation}|{commit}|{confidence_milli}|{evidence}|{SCV_IDENTITY_MATCHER_VERSION}|{status}")
+    if status == "accepted":
+        var rows = scv_identity_rows(root)
+        var i = 0
+        while i < rows.len():
+            if scv_identity_row_field(rows[i], 0) == id:
+                val r = rows[i]
+                rows[i] = "{id}|{new_path}|{scv_identity_row_field(r, 2)}|{scv_identity_row_field(r, 3)}|{scv_identity_row_field(r, 4)}"
+            i = i + 1
+        scv_identity_write_rows(root, rows)
+    id
+
+# A copy allocates a NEW id with a copied_from edge back to the source id.
+fn scv_identity_record_copy(root: text, src_path: text, new_path: text, commit: text, evidence: text) -> text:
+    val src_id = scv_identity_lookup_by_path(root, src_path)
+    if src_id == "":
+        return ""
+    val new_id = scv_identity_allocate_with_origin(root, new_path, commit, "copied_from:{src_id}")
+    scv_identity_append_line(scv_identity_edges_path(root), "{src_id}|{new_id}|copy|{commit}|1000|{evidence}|{SCV_IDENTITY_MATCHER_VERSION}|accepted")
+    new_id
+
+# Delete is terminal: the id keeps its row (state=deleted) and is never reused.
+fn scv_identity_record_delete(root: text, path: text, commit: text) -> text:
+    val id = scv_identity_lookup_by_path(root, path)
+    if id == "":
+        return ""
+    var rows = scv_identity_rows(root)
+    var i = 0
+    while i < rows.len():
+        if scv_identity_row_field(rows[i], 0) == id:
+            val r = rows[i]
+            rows[i] = "{id}|{scv_identity_row_field(r, 1)}|{scv_identity_row_field(r, 2)}|{scv_identity_row_field(r, 3)}|deleted"
+        i = i + 1
+    scv_identity_write_rows(root, rows)
+    scv_identity_append_line(scv_identity_edges_path(root), "{id}|{id}|delete|{commit}|1000|tree_delete|{SCV_IDENTITY_MATCHER_VERSION}|accepted")
+    id
+
+# Ordered relation history for one id: rows "commit|path_or_relation_target|relation|status".
+fn scv_identity_history(root: text, file_id: text) -> [text]:
+    val path = scv_identity_edges_path(root)
+    if not file_exists(path):
+        return []
+    var out: [text] = []
+    for line in file_read(path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() < 8:
+            continue
+        if parts[0] == file_id or parts[1] == file_id:
+            out.push("{parts[3]}|{parts[2]}|{parts[7]}|{parts[4]}")
+    out
+
+export SCV_IDENTITY_MATCHER_VERSION
+export scv_identity_rows_path, scv_identity_edges_path
+export scv_identity_allocate, scv_identity_lookup_by_path, scv_identity_state, scv_identity_current_path
+export scv_identity_record_move, scv_identity_record_copy, scv_identity_record_delete, scv_identity_history

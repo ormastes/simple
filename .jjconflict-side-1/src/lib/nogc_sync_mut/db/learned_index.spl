@@ -1,0 +1,125 @@
+# Experimental learned index for sealed/static sorted numeric segments.
+#
+# This is deliberately opt-in and scalar. The model predicts a narrow candidate
+# window, then exact lookup verifies keys inside that window. Unsafe inputs fall
+# back to full exact scans.
+
+struct LearnedSegmentIndex:
+    keys: [i64]
+    row_ids: [i64]
+    opt_in: bool
+    enabled: bool
+    min_key: i64
+    max_key: i64
+    max_error: i64
+    unsafe_fallbacks: i64
+
+struct LearnedSegmentProbe:
+    start: i64
+    end: i64
+    used_model: bool
+    fallback: bool
+
+fn learned_segment_index_disabled(keys: [i64], row_ids: [i64], opt_in: bool, fallback_count: i64) -> LearnedSegmentIndex:
+    LearnedSegmentIndex(
+        keys: keys,
+        row_ids: row_ids,
+        opt_in: opt_in,
+        enabled: false,
+        min_key: 0,
+        max_key: 0,
+        max_error: 0,
+        unsafe_fallbacks: fallback_count
+    )
+
+fn learned_segment_build(keys: [i64], row_ids: [i64], opt_in: bool) -> LearnedSegmentIndex:
+    if not opt_in:
+        return learned_segment_index_disabled(keys, row_ids, opt_in, 0)
+    if keys.len() == 0 or keys.len() != row_ids.len():
+        return learned_segment_index_disabled(keys, row_ids, opt_in, 1)
+    if not learned_segment_keys_sorted(keys):
+        return learned_segment_index_disabled(keys, row_ids, opt_in, 1)
+    val min_key = keys[0]
+    val max_key = keys[(keys.len() - 1) as i32]
+    if max_key == min_key:
+        return LearnedSegmentIndex(keys: keys, row_ids: row_ids, opt_in: opt_in, enabled: true, min_key: min_key, max_key: max_key, max_error: keys.len(), unsafe_fallbacks: 0)
+    var max_error = 0
+    var pos = 0
+    while pos < keys.len():
+        val predicted = learned_segment_predict_position_raw(keys[pos as i32], min_key, max_key, keys.len())
+        val err = learned_abs_i64(predicted - pos)
+        if err > max_error:
+            max_error = err
+        pos = pos + 1
+    LearnedSegmentIndex(keys: keys, row_ids: row_ids, opt_in: opt_in, enabled: true, min_key: min_key, max_key: max_key, max_error: max_error + 1, unsafe_fallbacks: 0)
+
+fn learned_segment_lookup_exact(idx: LearnedSegmentIndex, key: i64) -> [i64]:
+    val probe = learned_segment_probe(idx, key)
+    var result: [i64] = []
+    var i = probe.start
+    while i < probe.end:
+        if idx.keys[i as i32] == key:
+            result.push(idx.row_ids[i as i32])
+        i = i + 1
+    result
+
+fn learned_segment_probe(idx: LearnedSegmentIndex, key: i64) -> LearnedSegmentProbe:
+    if not idx.opt_in or not idx.enabled:
+        return LearnedSegmentProbe(start: 0, end: idx.keys.len(), used_model: false, fallback: true)
+    if idx.keys.len() == 0:
+        return LearnedSegmentProbe(start: 0, end: 0, used_model: false, fallback: true)
+    if key < idx.min_key or key > idx.max_key:
+        return LearnedSegmentProbe(start: 0, end: 0, used_model: true, fallback: false)
+    val predicted = learned_segment_predict_position_raw(key, idx.min_key, idx.max_key, idx.keys.len())
+    var start = predicted - idx.max_error
+    var end_pos = predicted + idx.max_error + 1
+    if start < 0:
+        start = 0
+    if end_pos > idx.keys.len():
+        end_pos = idx.keys.len()
+    LearnedSegmentProbe(start: start, end: end_pos, used_model: true, fallback: false)
+
+fn learned_segment_lookup_exact_fallback(idx: LearnedSegmentIndex, key: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < idx.keys.len():
+        if idx.keys[i as i32] == key:
+            result.push(idx.row_ids[i as i32])
+        i = i + 1
+    result
+
+fn learned_segment_keys_sorted(keys: [i64]) -> bool:
+    if keys.len() <= 1:
+        return true
+    var i = 1
+    while i < keys.len():
+        if keys[i as i32] < keys[(i - 1) as i32]:
+            return false
+        i = i + 1
+    true
+
+fn learned_segment_predict_position_raw(key: i64, min_key: i64, max_key: i64, count: i64) -> i64:
+    if count <= 1 or max_key == min_key:
+        return 0
+    val numerator = (key - min_key) * (count - 1)
+    val denominator = max_key - min_key
+    var predicted = numerator / denominator
+    if predicted < 0:
+        predicted = 0
+    if predicted >= count:
+        predicted = count - 1
+    predicted
+
+fn learned_abs_i64(value: i64) -> i64:
+    if value < 0:
+        return 0 - value
+    value
+
+fn learned_segment_enabled(idx: LearnedSegmentIndex) -> bool:
+    idx.enabled
+
+fn learned_segment_unsafe_fallbacks(idx: LearnedSegmentIndex) -> i64:
+    idx.unsafe_fallbacks
+
+fn learned_segment_window_size(probe: LearnedSegmentProbe) -> i64:
+    probe.end - probe.start

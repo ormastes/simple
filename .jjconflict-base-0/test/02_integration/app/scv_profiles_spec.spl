@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-G-04 — per-repo strictness profiles
+(`default` / `strict` / `mission_critical`). The profile is pinned in
+`.scv/profile.sdn`; an environment request may raise `default` to `strict`
+but can never lower a pinned profile and can never grant `mission_critical`.
+Under `strict` and `mission_critical` the `--force-unparsed` escape hatch is
+refused outright, the `forced_unparsed` state is unreachable, and any recorded
+forced_unparsed audit entry blocks publication. The `default` profile keeps
+the landed G-02 behaviour byte-for-byte.
+Audience: Maintainers of the SCV commit gates and mission-critical lanes.
+"""
+# @req: REQ-SCV-PROFILES-001
+use std.spec.{describe, it, expect, step}
+use app.io.mod (dir_create, file_write)
+use std.scv.store.{scv_init_repo}
+use std.scv.profiles.{scv_profile_names, scv_profile_valid, scv_profile_read, scv_profile_set, scv_profile_effective, scv_profile_refuses_forced, scv_profile_publication_blocked_reason}
+use std.scv.commit_policy.{scv_commit_parse_policy_forced, scv_forced_unparsed_blocks_public}
+use std.scv.state_model.{scv_state_transition_profile}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _repo(tag: text) -> text:
+    val root = "/tmp/scv-prof-{tag}-{current_time_ms()}"
+    dir_create(root, true)
+    scv_init_repo(root)
+    root
+
+describe "scv strictness profiles (G-04)":
+    it "knows exactly three profiles and defaults to `default`":
+        expect(scv_profile_names()).to_be(["default", "strict", "mission_critical"])
+        expect(scv_profile_valid("strict")).to_be(true)
+        expect(scv_profile_valid("permissive")).to_be(false)
+        val root = _repo("default")
+        expect(scv_profile_read(root)).to_be("default")
+
+    it "pins a profile per repo and rejects unknown names":
+        val root = _repo("pin")
+        expect(scv_profile_set(root, "lenient").starts_with("ERROR")).to_be(true)
+        expect(scv_profile_read(root)).to_be("default")
+        expect(scv_profile_set(root, "strict")).to_contain("profile: strict")
+        expect(scv_profile_read(root)).to_be("strict")
+        expect(scv_profile_set(root, "mission_critical")).to_contain("profile: mission_critical")
+        expect(scv_profile_read(root)).to_be("mission_critical")
+
+    it "lets an environment request raise but never lower, and never grant mission_critical":
+        val root = _repo("env")
+        expect(scv_profile_effective(root, "")).to_be("default")
+        expect(scv_profile_effective(root, "strict")).to_be("strict")
+        step("mission_critical must be pinned in the repo, never requested from outside")
+        expect(scv_profile_effective(root, "mission_critical")).to_be("default")
+        scv_profile_set(root, "strict")
+        expect(scv_profile_effective(root, "default")).to_be("strict")
+        scv_profile_set(root, "mission_critical")
+        expect(scv_profile_effective(root, "default")).to_be("mission_critical")
+        expect(scv_profile_effective(root, "strict")).to_be("mission_critical")
+        expect(scv_profile_effective(root, "bogus")).to_be("mission_critical")
+
+    it "refuses --force-unparsed under strict and mission_critical":
+        expect(scv_profile_refuses_forced("default")).to_be(false)
+        expect(scv_profile_refuses_forced("strict")).to_be(true)
+        expect(scv_profile_refuses_forced("mission_critical")).to_be(true)
+        val root = _repo("forced")
+        file_write("{root}/tool.py", "print('hello')\n")
+        scv_profile_set(root, "strict")
+        val out = scv_commit_parse_policy_forced(root, "{root}/tool.py", "vendored")
+        expect(out.starts_with("ERROR")).to_be(true)
+        expect(out).to_contain("profile strict")
+        step("A refused force records nothing and blocks nothing")
+        expect(scv_forced_unparsed_blocks_public(root)).to_be(false)
+        expect(scv_profile_publication_blocked_reason(root)).to_be("")
+
+    it "makes forced_unparsed unreachable in the state model under strict profiles":
+        expect(scv_state_transition_profile("default", "private_editing", "forced_unparsed")).to_contain("state: forced_unparsed")
+        expect(scv_state_transition_profile("strict", "private_editing", "forced_unparsed").starts_with("ERROR")).to_be(true)
+        expect(scv_state_transition_profile("mission_critical", "private_editing", "forced_unparsed").starts_with("ERROR")).to_be(true)
+        step("Ordinary promotions are untouched by the profile")
+        expect(scv_state_transition_profile("mission_critical", "private_parsed", "compile_ok")).to_contain("state: compile_ok")
+
+    it "blocks publication on a legacy forced_unparsed audit under every profile, naming the profile":
+        val root = _repo("legacy")
+        file_write("{root}/tool.py", "print('hello')\n")
+        step("Forced under default (allowed), then the repo is raised to mission_critical")
+        expect(scv_commit_parse_policy_forced(root, "{root}/tool.py", "legacy")).to_contain("policy: forced_unparsed")
+        expect(scv_forced_unparsed_blocks_public(root)).to_be(true)
+        expect(scv_profile_publication_blocked_reason(root)).to_contain("profile default")
+        scv_profile_set(root, "mission_critical")
+        expect(scv_forced_unparsed_blocks_public(root)).to_be(true)
+        val reason = scv_profile_publication_blocked_reason(root)
+        expect(reason).to_contain("profile mission_critical")
+        expect(reason).to_contain("forced_unparsed")

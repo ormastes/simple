@@ -1,0 +1,211 @@
+# Bounded filesystem projection for the complete-OS umbrella.  This module
+# never treats file presence as evidence: exact receipt and artifact bytes are
+# admitted by the serialized cryptographic verifier owner.
+
+use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
+    SimpleOsCapabilityStatus, SimpleOsCapabilityRowV1,
+    SimpleOsCapabilityLedgerCandidateV1, simpleos_capability_row_key
+}
+use std.common.structural.receipt.simpleos_evidence_receipt_v1_codec.{
+    decode_simpleos_evidence_receipt_v1
+}
+use os.services.evidence.artifact_snapshot.{SimpleOsEvidenceArtifactSnapshotV1}
+use os.services.evidence.verifier_owner.{
+    SimpleOsTrustedEvidenceSignerV1, simpleos_evidence_verifier_start,
+    simpleos_evidence_verify_detached_candidate_with_snapshot,
+    simpleos_evidence_consume_verified, simpleos_evidence_release_verified,
+    simpleos_evidence_row_admitted
+}
+use std.nogc_sync_mut.io.file_ops.{
+    file_exists, file_read, file_atomic_write, file_lock, file_unlock
+}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+val SIMPLEOS_UMBRELLA_MAX_RECEIPT_AGE_US: i64 = 900000000
+val SIMPLEOS_UMBRELLA_MAX_NONCE_LEDGER_BYTES: i64 = 1048576
+val _SIMPLEOS_UMBRELLA_NONCE_LEDGER_PATH: text =
+    "build/test-artifacts/simpleos_complete_os_hardening/consumed_nonces.v1"
+
+pub struct SimpleOsUmbrellaAdmissionResultV1:
+    ok: bool
+    reason: text
+
+fn _reject(reason: text) -> SimpleOsUmbrellaAdmissionResultV1:
+    SimpleOsUmbrellaAdmissionResultV1(ok: false, reason: reason)
+
+fn _nonce_seen(ledger: text, nonce: text) -> bool:
+    for line in ledger.split("\n"):
+        if line == nonce or line == "A " + nonce: return true
+    false
+
+fn _nonce_pending(ledger: text, nonce: text) -> bool:
+    for line in ledger.split("\n"):
+        if line == "P " + nonce: return true
+    false
+
+fn _without_pending_nonce(ledger: text, nonce: text) -> text:
+    var kept = ""
+    for line in ledger.split("\n"):
+        if line != "" and line != "P " + nonce:
+            kept = kept + line + "\n"
+    kept
+
+fn _persist_nonce_once(path: text, nonce: text) -> text:
+    if path == "" or nonce == "" or nonce.contains("\n") or nonce.contains("\r"):
+        return "nonce-ledger-input"
+    val lock = file_lock(path + ".lock", 10)
+    if lock < 0: return "nonce-ledger-lock"
+    val current = if file_exists(path): file_read(path) else: ""
+    var reason = ""
+    if current.len() > SIMPLEOS_UMBRELLA_MAX_NONCE_LEDGER_BYTES:
+        reason = "nonce-ledger-bound"
+    elif _nonce_seen(current, nonce):
+        reason = "nonce-replay-persistent"
+    else:
+        # A pending record is a crash-recovery reservation, not consumption.
+        # Retrying promotes it instead of permanently burning the nonce.
+        val next = _without_pending_nonce(current, nonce) + "A " + nonce + "\n"
+        if next.len() > SIMPLEOS_UMBRELLA_MAX_NONCE_LEDGER_BYTES or
+            not file_atomic_write(path, next):
+            reason = "nonce-ledger-persist"
+    if not file_unlock(lock): return "nonce-ledger-unlock"
+    reason
+
+fn _persist_pending_nonce_locked(path: text, current: text, nonce: text) -> text:
+    val next = _without_pending_nonce(current, nonce) + "P " + nonce + "\n"
+    if next.len() > SIMPLEOS_UMBRELLA_MAX_NONCE_LEDGER_BYTES or
+        not file_atomic_write(path, next):
+        return "nonce-ledger-persist"
+    ""
+
+fn _persist_admitted_nonce_locked(path: text, current: text, nonce: text) -> text:
+    val next = _without_pending_nonce(current, nonce) + "A " + nonce + "\n"
+    if next.len() > SIMPLEOS_UMBRELLA_MAX_NONCE_LEDGER_BYTES or
+        not file_atomic_write(path, next):
+        return "nonce-ledger-persist"
+    ""
+
+fn _rollback_pending_nonce_locked(path: text, current: text, nonce: text) -> bool:
+    file_atomic_write(path, _without_pending_nonce(current, nonce))
+
+pub fn simpleos_umbrella_receipt_freshness_reason_v1(
+    started_unix_us: i64, finished_unix_us: i64, now_unix_us: i64
+) -> text:
+    if now_unix_us <= 0 or started_unix_us <= 1 or
+        finished_unix_us < started_unix_us:
+        return "receipt-time"
+    if finished_unix_us > now_unix_us: return "receipt-from-future"
+    if now_unix_us - finished_unix_us > SIMPLEOS_UMBRELLA_MAX_RECEIPT_AGE_US:
+        return "receipt-expired"
+    ""
+
+pub fn simpleos_umbrella_persist_nonce_once_v1(path: text, nonce: text) -> text:
+    _persist_nonce_once(path, nonce)
+
+# Durable publication gate used by transaction tests and recovery callers.
+# A failed ledger commit never reaches the nonce file, so the exact nonce can
+# be retried after its transient verified handle has been retired.
+pub fn simpleos_umbrella_persist_admitted_nonce_v1(
+    path: text, nonce: text, admitted: bool
+) -> text:
+    if not admitted: return "row-not-admitted"
+    _persist_nonce_once(path, nonce)
+
+fn _candidate(receipt_bytes: [u8]) -> SimpleOsCapabilityLedgerCandidateV1?:
+    val decoded = decode_simpleos_evidence_receipt_v1(receipt_bytes)
+    if not decoded.ok: return nil
+    val receipt = decoded.value
+    Some(SimpleOsCapabilityLedgerCandidateV1(
+        row: SimpleOsCapabilityRowV1(
+            requirement_id: receipt.requirement_id, capability: receipt.capability,
+            target: receipt.target, environment: receipt.environment,
+            filesystem: receipt.filesystem, protocol_profile: receipt.protocol_profile,
+            status: SimpleOsCapabilityStatus.Pass, receipt_id: receipt.receipt_id,
+            receipt_nonce: receipt.nonce, source_hash: receipt.source_hash,
+            image_hash: receipt.image_hash, binary_hash: receipt.binary_hash,
+            config_hash: receipt.config_hash, artifacts: receipt.artifact_hashes,
+            artifact_paths: [], blocker_reason: "", todo: "", prerequisite: "",
+            resume_command: "", owner: receipt.owner, reviewer: receipt.reviewer),
+        receipt_present: true, receipt: receipt))
+
+pub fn simpleos_umbrella_admit_exact_evidence_v1(
+    requirement: text,
+    consumer: text,
+    trusted_roots: [SimpleOsTrustedEvidenceSignerV1],
+    receipt_bytes: [u8],
+    snapshot: SimpleOsEvidenceArtifactSnapshotV1
+) -> SimpleOsUmbrellaAdmissionResultV1:
+    val now_unix_us = time_now_unix_micros()
+    val candidate_value = _candidate(receipt_bytes)
+    if not candidate_value.?: return _reject("receipt-decode")
+    val candidate = candidate_value.unwrap()
+    if candidate.row.requirement_id != requirement:
+        return _reject("requirement-binding")
+    val receipt = candidate.receipt
+    val freshness = simpleos_umbrella_receipt_freshness_reason_v1(
+        receipt.started_unix_us, receipt.finished_unix_us, now_unix_us)
+    if freshness != "": return _reject(freshness)
+    val started = simpleos_evidence_verifier_start(trusted_roots)
+    if not started.ok: return _reject("verifier:" + started.reason)
+    # Keep replay exclusion live until either no state changed or both the
+    # admitted row and its durable nonce record exist. A retryable pending
+    # record closes the crash window around the owner commit.
+    val nonce_path = _SIMPLEOS_UMBRELLA_NONCE_LEDGER_PATH
+    val nonce_lock = file_lock(nonce_path + ".lock", 10)
+    if nonce_lock < 0: return _reject("nonce-ledger-lock")
+    val nonce_ledger = if file_exists(nonce_path): file_read(nonce_path) else: ""
+    if nonce_ledger.len() > SIMPLEOS_UMBRELLA_MAX_NONCE_LEDGER_BYTES:
+        if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
+        return _reject("nonce-ledger-bound")
+    if _nonce_seen(nonce_ledger, receipt.nonce):
+        if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
+        return _reject("nonce-replay-persistent")
+    val row_key = simpleos_capability_row_key(candidate.row)
+    if _nonce_pending(nonce_ledger, receipt.nonce) and
+        simpleos_evidence_row_admitted(row_key, now_unix_us):
+        val recovered = _persist_admitted_nonce_locked(
+            nonce_path, nonce_ledger, receipt.nonce)
+        if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
+        if recovered != "": return _reject(recovered)
+        return _reject("nonce-replay-persistent")
+    val pending = _persist_pending_nonce_locked(
+        nonce_path, nonce_ledger, receipt.nonce)
+    if pending != "":
+        if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
+        return _reject(pending)
+    val pending_ledger = _without_pending_nonce(nonce_ledger, receipt.nonce) +
+        "P " + receipt.nonce + "\n"
+    val verified = simpleos_evidence_verify_detached_candidate_with_snapshot(
+        candidate, consumer, snapshot, now_unix_us)
+    if not verified.ok:
+        if not _rollback_pending_nonce_locked(
+            nonce_path, pending_ledger, receipt.nonce):
+            file_unlock(nonce_lock)
+            return _reject("serialization-indeterminate")
+        if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
+        return _reject("verification:" + verified.reason)
+    val committed = simpleos_evidence_consume_verified(
+        verified.handle, candidate, consumer, now_unix_us)
+    if not committed.ok:
+        val released = simpleos_evidence_release_verified(verified.handle, consumer)
+        val rolled_back = _rollback_pending_nonce_locked(
+            nonce_path, pending_ledger, receipt.nonce)
+        val unlocked = file_unlock(nonce_lock)
+        if not released or not rolled_back or not unlocked:
+            return _reject("serialization-indeterminate")
+        return _reject("commit:" + committed.reason)
+    if not simpleos_evidence_row_admitted(row_key, now_unix_us):
+        if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
+        return _reject("row-not-admitted")
+    val persistence = _persist_admitted_nonce_locked(
+        nonce_path, pending_ledger, receipt.nonce)
+    if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
+    if persistence != "": return _reject(persistence)
+    SimpleOsUmbrellaAdmissionResultV1(ok: true, reason: "")
+
+export SimpleOsUmbrellaAdmissionResultV1
+export simpleos_umbrella_admit_exact_evidence_v1
+export simpleos_umbrella_receipt_freshness_reason_v1
+export simpleos_umbrella_persist_nonce_once_v1
+export simpleos_umbrella_persist_admitted_nonce_v1
+export SIMPLEOS_UMBRELLA_MAX_RECEIPT_AGE_US

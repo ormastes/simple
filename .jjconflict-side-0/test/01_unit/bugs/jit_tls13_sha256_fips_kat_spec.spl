@@ -1,0 +1,74 @@
+"""
+# `rt_tls13_sha256` must produce the FIPS 180-4 digest on BOTH engines
+
+Regression guard for
+`doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`.
+
+## What went wrong
+
+`rt_tls13_sha256` is an interpreter-table-only extern: `nm` on the seed binary
+shows `T rt_text_to_bytes` but NO global `rt_tls13_sha256` (only the local,
+Rust-mangled `interpreter_extern::tls13::rt_tls13_sha256`). So the hybrid
+transform rewrote every call to it into `MirInst::InterpCall`.
+
+`compilability.rs::return_type_keeps_boxed` decided whether that `InterpCall`
+keeps its result boxed. It had arms for `Type::Tuple` and text only -- NOT for
+`Type::Array` -- so `boxed_result` was `false` for `-> [u8]`. With the name
+starting `rt_`, `codegen/instr/core.rs::compile_interp_call` then applied
+`rt_value_raw_i64` to the marshalled heap array, stripping its tag. The caller
+read `len() == 0` for EVERY input, silently, exit 0, on the DEFAULT engine of
+`bin/simple run`.
+
+## Why this cannot be an ordinary in-process `expect`
+
+A spec body never reaches the Cranelift JIT: `describe`/`it`/`expect` are Rust
+interpreter intrinsics with no JIT lowering, and a spec file has no `fn main`,
+so it is routed to `evaluate_module` regardless of `SIMPLE_EXECUTION_MODE`.
+An in-process assertion here would have been green throughout the defect.
+
+The block below therefore spawns a runnable `fn main` probe under an
+explicitly NAMED engine and scores its self-reported VERDICT LINE, never the
+exit code -- the defect produced exit 0 with an empty digest.
+
+## Proven to fail
+
+Run against the pre-fix seed the JIT arm reports
+`PROBE VERDICT: FAIL rt_tls13_sha256 failed 3/3 FIPS 180-4 vectors`
+while the interpret arm reports PASS. This guard was observed RED before it
+was trusted.
+
+@tag:crypto
+@tag:regression
+"""
+
+use std.spec
+use std.spec.engine_probe.{engine_stdout}
+
+val _PROBE = "src/app/test/jit_tls13_sha256_fips_kat_probe.spl"
+val _PASS = "PROBE VERDICT: PASS"
+
+describe "rt_tls13_sha256 matches the published FIPS 180-4 vectors on both engines":
+    """
+    As a maintainer of the std TLS 1.3 and sshd kex digest channel, I need the
+    one-shot SHA-256 runtime extern checked against published known-answer
+    vectors under each NAMED engine, so that an engine-specific wrong answer
+    cannot ship behind a spec that only ever ran on the interpreter.
+
+    Vectors are FIPS 180-4 / NIST CAVP, not hand-computed. Helper tier:
+    src/lib/nogc_sync_mut/spec/engine_probe.spl
+    """
+    it "matches all three vectors under the interpreter":
+        # Control column: the interpreter was correct throughout the defect,
+        # so this arm going red means the probe or harness broke, not codegen.
+        expect(engine_stdout(_PROBE, "interpret")).to_contain(_PASS)
+
+    it "matches all three vectors under the cranelift JIT":
+        # The arm that was RED. Pre-fix this stdout carried
+        # "FAIL rt_tls13_sha256 failed 3/3 FIPS 180-4 vectors".
+        expect(engine_stdout(_PROBE, "jit")).to_contain(_PASS)
+
+    it "does not report an empty digest under the cranelift JIT":
+        # Names the exact symptom independently of the KAT comparison: a
+        # 0-length digest is the signature of the InterpCall unbox stripping
+        # the array tag. `len=0` must never appear.
+        expect(engine_stdout(_PROBE, "jit")).to_not_contain("len=0 ")

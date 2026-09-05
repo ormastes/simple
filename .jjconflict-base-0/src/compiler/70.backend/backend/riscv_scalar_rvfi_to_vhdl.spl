@@ -1,0 +1,125 @@
+# RVFI projection for the first bounded RV32 ADD scalar product.
+#
+# Source operand evidence is captured on the retirement owner's exact
+# dispatch_accept event and held with the one-entry record.  Wiring live inputs
+# directly to a later rvfi_valid event would describe the wrong instruction.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.hwir_to_vhdl.{HwirStrictVhdlResult}
+use compiler.backend.backend.riscv_scalar_product_to_vhdl.{
+    compile_strict_riscv_scalar_product}
+
+pub class RiscvScalarRvfiProductV1:
+    emitted: HwirStrictVhdlResult
+    rvfi_contract_sha256: text
+    rtl_sha256: text
+
+    me diagnostic() -> text:
+        if not self.emitted.is_success(): return self.emitted.diagnostic
+        if self.emitted.route != "hwir-gen2-scalar-rvfi-v1":
+            return "HWIR-E-RISCV-RVFI-ROUTE: scalar RVFI requires the sealed RVFI route"
+        if not sha256_lower_hex_valid(self.rvfi_contract_sha256):
+            return "HWIR-E-RISCV-RVFI-CONTRACT: exact RVFI projection identity is required"
+        if not sha256_lower_hex_valid(self.rtl_sha256):
+            return "HWIR-E-RISCV-RVFI-RTL: emitted RVFI artifact identity is required"
+        ""
+
+fn rv32_add_instruction(instruction: u32) -> bool:
+    (instruction & 0x7F) == 0x33 and ((instruction >> 12) & 0x7) == 0 and
+        ((instruction >> 25) & 0x7F) == 0
+
+fn rvfi_contract_text(instruction: u32, hwir_hash: text) -> text:
+    "simple-riscv-rvfi-projection/v1|scope=rv32i.add|hwir=" + hwir_hash +
+        "|instruction=" + instruction.to_text() +
+        "|accept=dispatch_accept|valid=retire_valid|order=retire_order" +
+        "|insn=retire_original_instruction|trap=retire_trap|intr=retire_interrupt" +
+        "|mode=retire_privilege|ixl=rv32|pc_rdata=retire_pc_before" +
+        "|pc_wdata=retire_pc_after|rd_addr=retire_rd|rd_wdata=retire_rd_value" +
+        "|rs_evidence=captured_on_dispatch_accept|memory=retire_memory_low4"
+
+fn rv32_add_rvfi_wrapper(entity: text, product_entity: text,
+    instruction: u32, contract_hash: text) -> text:
+    val rs1 = ((instruction >> 15) & 31).to_text()
+    val rs2 = ((instruction >> 20) & 31).to_text()
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+    "-- simple-rvfi contract=" + contract_hash + " scope=rv32i.add\n" +
+    "entity " + entity + " is port(\n" +
+    "  clk : in std_logic; rst : in std_logic; retire_ready : in std_logic;\n" +
+    "  in_valid : in std_logic; in_order : in std_logic_vector(63 downto 0);\n" +
+    "  in_privilege : in std_logic_vector(1 downto 0);\n" +
+    "  in_pc : in std_logic_vector(31 downto 0);\n" +
+    "  rs1_value : in std_logic_vector(31 downto 0); rs2_value : in std_logic_vector(31 downto 0);\n" +
+    "  illegal_valid : in std_logic; memory_trap_valid : in std_logic;\n" +
+    "  memory_trap_cause : in std_logic_vector(31 downto 0); memory_trap_tval : in std_logic_vector(31 downto 0);\n" +
+    "  interrupt_valid : in std_logic; interrupt_cause : in std_logic_vector(31 downto 0);\n" +
+    "  rvfi_valid : out std_logic; rvfi_order : out std_logic_vector(63 downto 0);\n" +
+    "  rvfi_insn : out std_logic_vector(31 downto 0); rvfi_trap : out std_logic;\n" +
+    "  rvfi_halt : out std_logic; rvfi_intr : out std_logic;\n" +
+    "  rvfi_mode : out std_logic_vector(1 downto 0); rvfi_ixl : out std_logic_vector(1 downto 0);\n" +
+    "  rvfi_rs1_addr : out std_logic_vector(4 downto 0); rvfi_rs2_addr : out std_logic_vector(4 downto 0);\n" +
+    "  rvfi_rs1_rdata : out std_logic_vector(31 downto 0); rvfi_rs2_rdata : out std_logic_vector(31 downto 0);\n" +
+    "  rvfi_rd_addr : out std_logic_vector(4 downto 0); rvfi_rd_wdata : out std_logic_vector(31 downto 0);\n" +
+    "  rvfi_pc_rdata : out std_logic_vector(31 downto 0); rvfi_pc_wdata : out std_logic_vector(31 downto 0);\n" +
+    "  rvfi_mem_addr : out std_logic_vector(31 downto 0); rvfi_mem_rmask : out std_logic_vector(3 downto 0);\n" +
+    "  rvfi_mem_wmask : out std_logic_vector(3 downto 0); rvfi_mem_rdata : out std_logic_vector(31 downto 0);\n" +
+    "  rvfi_mem_wdata : out std_logic_vector(31 downto 0)\n" +
+    "); end entity;\narchitecture rtl of " + entity + " is\n" +
+    "  signal dispatch_accept : std_logic; signal retire_valid_i : std_logic;\n" +
+    "  signal rs1_reg, rs2_reg : std_logic_vector(31 downto 0) := (others => '0');\n" +
+    "  signal rs1_addr_reg : std_logic_vector(4 downto 0) := (others => '0');\n" +
+    "  signal rs2_addr_reg : std_logic_vector(4 downto 0) := (others => '0');\n" +
+    "begin\n" +
+    "  product: entity work." + product_entity + " port map(" +
+    "in_valid=>in_valid,in_order=>in_order,in_privilege=>in_privilege,in_pc=>in_pc," +
+    "rs1_value=>rs1_value,rs2_value=>rs2_value,illegal_valid=>illegal_valid," +
+    "memory_trap_valid=>memory_trap_valid,memory_trap_cause=>memory_trap_cause," +
+    "memory_trap_tval=>memory_trap_tval,interrupt_valid=>interrupt_valid," +
+    "interrupt_cause=>interrupt_cause,clk=>clk,rst=>rst,retire_ready=>retire_ready," +
+    "dispatch_ready=>open,dispatch_accept=>dispatch_accept,protocol_fault=>open," +
+    "retire_valid=>retire_valid_i,retire_order=>rvfi_order,retire_xlen=>open," +
+    "retire_privilege=>rvfi_mode,retire_original_instruction=>rvfi_insn," +
+    "retire_canonical_instruction=>open,retire_instruction_length_bytes=>open," +
+    "retire_pc_before=>rvfi_pc_rdata,retire_pc_after=>rvfi_pc_wdata," +
+    "retire_rd=>rvfi_rd_addr,retire_rd_write=>open,retire_rd_value=>rvfi_rd_wdata," +
+    "retire_memory_address=>rvfi_mem_addr,retire_memory_read_mask=>open," +
+    "retire_memory_write_mask=>open,retire_memory_read_data=>rvfi_mem_rdata," +
+    "retire_memory_write_data=>rvfi_mem_wdata,retire_trap=>rvfi_trap," +
+    "retire_interrupt=>rvfi_intr,retire_cause=>open,retire_tval=>open);\n" +
+    "  rvfi_valid <= retire_valid_i; rvfi_halt <= '0'; rvfi_ixl <= \"01\";\n" +
+    "  rvfi_rs1_addr <= rs1_addr_reg; rvfi_rs2_addr <= rs2_addr_reg;\n" +
+    "  rvfi_rs1_rdata <= rs1_reg; rvfi_rs2_rdata <= rs2_reg;\n" +
+    "  rvfi_mem_rmask <= (others => '0'); rvfi_mem_wmask <= (others => '0');\n" +
+    "  process(clk) begin if rising_edge(clk) then if rst='1' then " +
+    "rs1_reg <= (others => '0'); rs2_reg <= (others => '0'); " +
+    "rs1_addr_reg <= (others => '0'); rs2_addr_reg <= (others => '0'); " +
+    "elsif dispatch_accept='1' then rs1_reg <= rs1_value; rs2_reg <= rs2_value; " +
+    "rs1_addr_reg <= std_logic_vector(to_unsigned(" + rs1 + ",5)); " +
+    "rs2_addr_reg <= std_logic_vector(to_unsigned(" + rs2 + ",5)); " +
+    "elsif retire_ready='1' and retire_valid_i='1' then rs1_reg <= (others => '0'); " +
+    "rs2_reg <= (others => '0'); rs1_addr_reg <= (others => '0'); " +
+    "rs2_addr_reg <= (others => '0'); end if; end if; end process;\n" +
+    "end architecture rtl;\n"
+
+pub fn compile_strict_rv32_add_rvfi_product(module_name: text,
+    instruction: u32) -> RiscvScalarRvfiProductV1:
+    if not rv32_add_instruction(instruction):
+        val rejected = HwirStrictVhdlResult.rejected(
+            "HWIR-E-RISCV-RVFI-SCOPE: first RVFI product admits only RV32I ADD")
+        return RiscvScalarRvfiProductV1(rejected, "", "")
+    val base = compile_strict_riscv_scalar_product(module_name,
+        CoreConfig.rv32_zca_mission_critical(), instruction,
+        LsuConfig.rv32_product_default())
+    if not base.is_success(): return RiscvScalarRvfiProductV1(base, "", "")
+    val contract_hash = sha256_text(rvfi_contract_text(instruction,
+        base.hwir_graph_sha256))
+    val vhdl = base.vhdl + "\n" + rv32_add_rvfi_wrapper(module_name + "_rvfi",
+        module_name, instruction, contract_hash)
+    val emitted = HwirStrictVhdlResult(success: true, vhdl: vhdl,
+        diagnostic: "", route: "hwir-gen2-scalar-rvfi-v1",
+        module_node_id: base.module_node_id, config_xlen: 32,
+        config_profile: base.config_profile,
+        hwir_graph_sha256: base.hwir_graph_sha256)
+    RiscvScalarRvfiProductV1(emitted, contract_hash, sha256_text(vhdl))

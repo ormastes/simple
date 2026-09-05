@@ -1,0 +1,132 @@
+# Kernel caller context — the single authorization input for a syscall path.
+#
+# Policy may name roles, profiles, and manifests before spawn, but kernel
+# authorization consumes this immutable value plus typed capability handles.
+# `capabilities` is copied from the live calling TCB by the syscall-dispatch
+# owner; callers without such a TCB must be rejected before reaching a
+# security-sensitive operation.
+
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.scheduler.scheduler_types.{TaskControlBlock}
+
+pub struct PrincipalId:
+    id: u64
+
+pub struct JobId:
+    id: u64
+
+pub struct CspaceId:
+    id: u64
+
+pub struct IsolationDomainId:
+    id: u64
+
+pub struct ResourceDomainId:
+    id: u64
+
+pub struct AuditContextId:
+    id: u64
+
+pub struct KernelCallContext:
+    task_id: TaskId
+    principal_id: PrincipalId
+    job_id: JobId
+    cspace_id: CspaceId
+    isolation_domain_id: IsolationDomainId
+    resource_domain_id: ResourceDomainId
+    audit_context_id: AuditContextId
+    capabilities: CapabilitySet
+    filesystem_root: text
+    filesystem_denied: bool
+    filesystem_view_bound: bool
+
+pub fn kernel_call_context_task_id(context: KernelCallContext) -> TaskId:
+    context.task_id
+
+pub fn kernel_call_context_capabilities(context: KernelCallContext) -> CapabilitySet:
+    context.capabilities
+
+pub fn kernel_call_context_is_kernel_origin(context: KernelCallContext) -> bool:
+    context.task_id.id == 0u64
+
+pub fn kernel_call_context_translate_filesystem_path(
+    context: KernelCallContext,
+    logical_path: text
+) -> Result<text, text>:
+    """Translate a task-visible absolute path through its immutable root.
+
+    Callers normalize `.` and `..` before entering this helper. The capability
+    gate must use the returned concrete host path, never the logical spelling.
+    """
+    if logical_path == "" or logical_path.starts_with("/") == false:
+        return Err("filesystem path is not absolute")
+    if kernel_call_context_is_kernel_origin(context):
+        return Ok(logical_path)
+    if context.filesystem_view_bound == false or context.filesystem_denied:
+        return Err("filesystem view denies access")
+    val root = context.filesystem_root
+    if root == "" or root.starts_with("/") == false:
+        return Err("filesystem view is malformed")
+    if root == "/":
+        return Ok(logical_path)
+    if logical_path == "/":
+        return Ok(root)
+    Ok(root + logical_path)
+
+pub fn kernel_call_context_from_legacy_task(
+    task_id: TaskId,
+    capabilities: CapabilitySet,
+    profile_id: u64,
+    address_space_id: u64,
+    capability_generation: u64
+) -> KernelCallContext:
+    """Adapt the current TCB metadata into the Phase-0 caller context.
+
+    SimpleOS does not yet persist dedicated principal, job, CSpace, resource,
+    or audit objects in every TCB. Until that migration lands, the live task ID
+    is the stable process/principal/job/audit identity, capability generation
+    identifies its current CSpace revision, and the task isolation profile (or
+    address space fallback) identifies the isolation view. Resource domain 0
+    explicitly means the legacy shared resource domain; it grants nothing.
+    """
+    val isolation_id = if profile_id == 0u64: address_space_id else: profile_id
+    KernelCallContext(
+        task_id: task_id,
+        principal_id: PrincipalId(id: task_id.id),
+        job_id: JobId(id: task_id.id),
+        cspace_id: CspaceId(id: capability_generation),
+        isolation_domain_id: IsolationDomainId(id: isolation_id),
+        resource_domain_id: ResourceDomainId(id: 0u64),
+        audit_context_id: AuditContextId(id: task_id.id),
+        capabilities: capabilities,
+        filesystem_root: "/",
+        filesystem_denied: false,
+        filesystem_view_bound: false
+    )
+
+pub fn kernel_call_context_from_task(task: TaskControlBlock) -> KernelCallContext:
+    """Build the Phase-0 immutable context from the scheduler's live TCB.
+
+    This is intentionally the only task-to-context adapter used by syscall
+    lanes.  Keeping it here prevents each security-sensitive subsystem from
+    inventing a subtly different mapping between task isolation metadata and
+    its authorization context.
+    """
+    val isolation_id = if task.isolation.profile_id == 0u64:
+        task.isolation.address_space_id
+    else:
+        task.isolation.profile_id
+    KernelCallContext(
+        task_id: task.id,
+        principal_id: PrincipalId(id: task.security.principal_id),
+        job_id: JobId(id: task.security.job_id),
+        cspace_id: CspaceId(id: task.security.cspace_id),
+        isolation_domain_id: IsolationDomainId(id: isolation_id),
+        resource_domain_id: ResourceDomainId(id: task.security.resource_domain_id),
+        audit_context_id: AuditContextId(id: task.security.audit_context_id),
+        capabilities: task.capabilities,
+        filesystem_root: task.isolation.filesystem_root,
+        filesystem_denied: task.isolation.filesystem_denied,
+        filesystem_view_bound: task.isolation.filesystem_view_bound
+    )

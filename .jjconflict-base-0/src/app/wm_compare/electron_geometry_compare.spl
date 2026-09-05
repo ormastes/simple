@@ -1,0 +1,159 @@
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_to_number, json_to_string}
+use app.wm_compare.structural_layout_report.{StructuralLayoutBox, structural_layout_box, structural_layout_computed_style_box, StructuralLayoutReport, structural_box_layout_compare}
+
+fn _json_text(value: any) -> text:
+    val out = json_to_string(value)
+    if out == nil:
+        return ""
+    out
+
+fn _json_i32(value: any) -> i32:
+    val out = json_to_number(value)
+    if out == nil:
+        return 0
+    (out as i64) as i32
+
+fn _normal_background_color(value: text) -> text:
+    if value == "rgba(0, 0, 0, 0)" or value == "transparent":
+        return ""
+    value
+
+fn _text_after_marker(source: text, marker: text) -> text:
+    val idx = source.index_of(marker)
+    if idx == -1:
+        return ""
+    source.substring(idx + marker.len())
+
+fn _geometry_json_text_after(source: text, marker: text) -> text:
+    val rest = _text_after_marker(source, marker)
+    if rest == "":
+        return ""
+    val end = rest.index_of("\"")
+    if end == -1:
+        return ""
+    rest.substring(0, end)
+
+fn _geometry_json_i32_after(source: text, marker: text) -> i32:
+    val rest = _text_after_marker(source, marker)
+    if rest == "":
+        return 0
+    var end = 0
+    while end < rest.len():
+        val c = rest.char_at(end)
+        if c == "," or c == "\n" or c == "}" or c == " ":
+            break
+        end = end + 1
+    val number_text = rest.substring(0, end)
+    (number_text.parse_int() ?? 0) as i32
+
+fn _electron_geometry_json_to_boxes_fallback(json_text: text) -> [StructuralLayoutBox]:
+    var boxes: [StructuralLayoutBox] = []
+    val label_marker = "\"label\": \""
+    var tail = json_text
+    while true:
+        val label_pos = tail.index_of(label_marker)
+        if label_pos == -1:
+            break
+        val item = tail.substring(label_pos)
+        val label = _geometry_json_text_after(item, label_marker)
+        if label == "":
+            break
+        if item.index_of("\"paddingLeft\": ") != -1 or item.index_of("\"borderLeft\": ") != -1 or item.index_of("\"backgroundColor\": \"") != -1:
+            boxes.push(structural_layout_computed_style_box(
+                label,
+                _geometry_json_i32_after(item, "\"x\": "),
+                _geometry_json_i32_after(item, "\"y\": "),
+                _geometry_json_i32_after(item, "\"width\": "),
+                _geometry_json_i32_after(item, "\"height\": "),
+                _geometry_json_text_after(item, "\"rectLeft\": \""),
+                _geometry_json_text_after(item, "\"rectTop\": \""),
+                _geometry_json_text_after(item, "\"rectWidth\": \""),
+                _geometry_json_text_after(item, "\"rectHeight\": \""),
+                _geometry_json_i32_after(item, "\"paddingLeft\": "),
+                _geometry_json_i32_after(item, "\"paddingTop\": "),
+                _geometry_json_i32_after(item, "\"paddingRight\": "),
+                _geometry_json_i32_after(item, "\"paddingBottom\": "),
+                _geometry_json_i32_after(item, "\"borderLeft\": "),
+                _geometry_json_i32_after(item, "\"borderTop\": "),
+                _geometry_json_i32_after(item, "\"borderRight\": "),
+                _geometry_json_i32_after(item, "\"borderBottom\": "),
+                _normal_background_color(_geometry_json_text_after(item, "\"backgroundColor\": \"")),
+                _geometry_json_text_after(item, "\"color\": \""),
+                _geometry_json_text_after(item, "\"display\": \""),
+                _geometry_json_text_after(item, "\"alignItems\": \""),
+                _geometry_json_text_after(item, "\"fontSize\": \""),
+                _geometry_json_text_after(item, "\"lineHeight\": \""),
+                _geometry_json_text_after(item, "\"fontFamily\": \""),
+                _geometry_json_text_after(item, "\"fontWeight\": \""),
+                _geometry_json_text_after(item, "\"text\": \"")
+            ))
+        else:
+            boxes.push(structural_layout_box(
+                label,
+                _geometry_json_i32_after(item, "\"x\": "),
+                _geometry_json_i32_after(item, "\"y\": "),
+                _geometry_json_i32_after(item, "\"width\": "),
+                _geometry_json_i32_after(item, "\"height\": "),
+                _geometry_json_text_after(item, "\"text\": \"")
+            ))
+        tail = item.substring(label_marker.len() + label.len())
+    boxes
+
+pub fn electron_geometry_json_to_boxes(json_text: text) -> [StructuralLayoutBox]:
+    val parsed = json_parse(json_text)
+    if parsed == nil:
+        return _electron_geometry_json_to_boxes_fallback(json_text)
+    val items = json_object_get(parsed, "items")
+    val count = json_array_length(items) as i32
+    var boxes: [StructuralLayoutBox] = []
+    var i: i32 = 0
+    while i < count:
+        val item = json_array_get(items, i)
+        val label = _json_text(json_object_get(item, "label"))
+        if label != "":
+            boxes.push(structural_layout_computed_style_box(
+                label,
+                _json_i32(json_object_get(item, "x")),
+                _json_i32(json_object_get(item, "y")),
+                _json_i32(json_object_get(item, "width")),
+                _json_i32(json_object_get(item, "height")),
+                _json_text(json_object_get(item, "rectLeft")),
+                _json_text(json_object_get(item, "rectTop")),
+                _json_text(json_object_get(item, "rectWidth")),
+                _json_text(json_object_get(item, "rectHeight")),
+                _json_i32(json_object_get(item, "paddingLeft")),
+                _json_i32(json_object_get(item, "paddingTop")),
+                _json_i32(json_object_get(item, "paddingRight")),
+                _json_i32(json_object_get(item, "paddingBottom")),
+                _json_i32(json_object_get(item, "borderLeft")),
+                _json_i32(json_object_get(item, "borderTop")),
+                _json_i32(json_object_get(item, "borderRight")),
+                _json_i32(json_object_get(item, "borderBottom")),
+                _normal_background_color(_json_text(json_object_get(item, "backgroundColor"))),
+                _json_text(json_object_get(item, "color")),
+                _json_text(json_object_get(item, "display")),
+                _json_text(json_object_get(item, "alignItems")),
+                _json_text(json_object_get(item, "fontSize")),
+                _json_text(json_object_get(item, "lineHeight")),
+                _json_text(json_object_get(item, "fontFamily")),
+                _json_text(json_object_get(item, "fontWeight")),
+                _json_text(json_object_get(item, "text"))
+            ))
+        i = i + 1
+    if boxes.len() == 0:
+        return _electron_geometry_json_to_boxes_fallback(json_text)
+    boxes
+
+pub fn compare_electron_geometry_json(source_a: text, source_b: text,
+                                      viewport_width: i32, viewport_height: i32,
+                                      source_a_json: text, source_b_boxes: [StructuralLayoutBox],
+                                      backend_evidence: text, pixel_link: text) -> StructuralLayoutReport:
+    val source_a_boxes = electron_geometry_json_to_boxes(source_a_json)
+    structural_box_layout_compare(
+        source_a, source_b, viewport_width, viewport_height,
+        source_a_boxes, source_b_boxes,
+        backend_evidence, pixel_link
+    )

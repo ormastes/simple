@@ -1,0 +1,187 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @cover src/os/smf/smf_dynlib.spl 80%
+"""Real admitted-byte SMF loader specification.
+
+The fixtures are canonical SMF v1.1 artifacts emitted by the in-tree writer:
+real section, symbol, string, relocation, and trailer-header bytes. The loader
+must map those exact bytes through the canonical W^X owner and must never turn
+manifest-shaped text into a handle or symbol.
+"""
+
+use std.spec.step
+
+use std.spec
+use os.smf.smf_dynlib.{DynLoadRequest, smf_dlopen, smf_dlopen_checked}
+
+fn smf_test_artifact(export_name: text, with_relocation: bool) -> [u8]:
+    var writer = SmfWriter.create()
+    var code: [i64] = [195]
+    if with_relocation:
+        code = [0, 0, 0, 0, 0, 0, 0, 0]
+    writer.add_code_section("code", code)
+    writer.add_symbol(SmfWriterSymbol(
+        name: export_name,
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0,
+        value: 0,
+        size: code.len(),
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false
+    ))
+    if with_relocation:
+        writer.add_relocation(SmfRelocation(
+            offset: 0,
+            symbol_index: 0,
+            reloc_type: RelocationType.Abs64,
+            addend: 0
+        ))
+    val built = writer.write_bytes()
+    if built.is_err():
+        return []
+    built.unwrap()
+
+fn smf_test_u64(data: [u8], offset: i64) -> i64:
+    var value = 0i64
+    var index = 0i64
+    while index < 8:
+        value = value | ((data[offset + index] as i64) << (index * 8))
+        index = index + 1
+    value
+
+describe "SMF dynlib checked open":
+    # @manual scenario evidence
+    it "keeps compatibility open shape validation":
+        # @req REQ-SSPEC-OS
+        # @req REQ-010
+        step("keeps compatibility open shape validation")
+        val ok = smf_dlopen(DynLoadRequest.lazy("file_io", "build/dynsmf/file_io.smf", "unit"), 42)
+        expect(ok.success).to_equal(true)
+        expect(ok.handle_id).to_equal(42)  # oracle: pinned constant asserted by this scenario
+
+describe "SMF admitted-byte dynamic loader":
+    it "fails closed when compatibility callers do not supply admitted bytes":
+        val request = smf_test_request("compat")
+        val unchecked = smf_dlopen(request, 9101)
+        expect(unchecked.success).to_equal(false)
+        expect(unchecked.error_msg).to_equal("admitted smf bytes required")
+        val checked = smf_dlopen_checked(request, 9101)
+        expect(checked.success).to_equal(false)
+        expect(checked.error_msg).to_equal("admitted smf bytes required")
+
+    it "checked open accepts generated SMF artifacts":
+        # @req REQ-SSPEC-OS
+        # @req REQ-005
+        step("checked open accepts generated SMF artifacts")
+        val build = ensure_low_dependency_dynsmf_artifacts()
+        expect(build.2).to_equal(0)  # oracle: pinned constant asserted by this scenario
+
+        val opened = smf_dlopen_admitted(smf_test_request("trace_pack"), 9102, bytes)
+        expect(opened.success).to_equal(true)
+        expect(opened.handle_id).to_equal(9102)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+    it "checked open rejects missing and non-SMF artifacts":
+        # @req REQ-SSPEC-OS
+        # @req REQ-009
+        step("checked open rejects missing and non-SMF artifacts")
+        val missing = smf_dlopen_checked(DynLoadRequest.lazy("missing", "build/dynsmf/not_present_for_smf_dynlib_spec.smf", "unit"), 88)
+        expect(missing.success).to_equal(false)
+        expect(missing.error_msg).to_equal("artifact missing")
+
+        val closed = smf_dlclose(9102)
+        expect(closed.success).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before)
+        expect(smf_dlsym(9102, "trace_facet_v1", "").found).to_equal(false)
+        expect(smf_dlclose(9102).success).to_equal(false)
+
+    it "applies a real relocation before the RX seal":
+        val before = native_exec_memory_count()
+        val bytes = smf_test_artifact("self_address", true)
+        val opened = smf_dlopen_admitted(smf_test_request("relocated"), 9103, bytes)
+        expect(opened.success).to_equal(true)
+        val symbol = smf_dlsym(9103, "self_address", "")
+        expect(symbol.found).to_equal(true)
+        val relocated = native_mmap_read_bytes(symbol.offset, 0, 8)
+        expect(smf_test_u64(relocated, 0)).to_equal(symbol.offset)
+        expect(smf_dlclose(9103).success).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before)
+
+    it "rejects fake magic witnesses and malformed segment and export tables":
+        val before = native_exec_memory_count()
+        val fake: [u8] = [83, 77, 70, 0, 116, 114, 97, 99, 101, 95, 102, 97, 99, 101, 116, 95, 118, 49, 0]
+        expect(smf_artifact_has_export(fake, "trace_facet_v1")).to_equal(false)
+        expect(smf_dlopen_admitted(smf_test_request("fake"), 9104, fake).success).to_equal(false)
+
+        var bad_segment = smf_test_artifact("bad_segment", false)
+        val segment_header = bad_segment.len() - 128
+        val section_table = smf_test_u64(bad_segment, segment_header + 20)
+        bad_segment[section_table + 16] = 0
+        val segment_result = smf_dlopen_admitted(smf_test_request("bad_segment"), 9105, bad_segment)
+        expect(segment_result.success).to_equal(false)
+        expect(segment_result.error_msg).to_contain("section 0")
+
+        var bad_exports = smf_test_artifact("bad_exports", false)
+        val export_header = bad_exports.len() - 128
+        bad_exports[export_header + 40] = 0
+        val export_result = smf_dlopen_admitted(smf_test_request("bad_exports"), 9106, bad_exports)
+        expect(export_result.success).to_equal(false)
+        expect(export_result.error_msg).to_equal("export count mismatch")
+        expect(native_exec_memory_count()).to_equal(before)
+
+    it "rejects malformed relocations before any handle is published":
+        val before = native_exec_memory_count()
+        var bytes = smf_test_artifact("bad_reloc", true)
+        val header = bytes.len() - 128
+        val section_table = smf_test_u64(bytes, header + 20)
+        val relocation_payload = smf_test_u64(bytes, section_table + 64 + 8)
+        bytes[relocation_payload + 12] = 99
+        val result = smf_dlopen_admitted(smf_test_request("bad_reloc"), 9107, bytes)
+        expect(result.success).to_equal(false)
+        expect(result.error_msg).to_equal("unknown relocation type 99")
+        expect(smf_dlsym(9107, "bad_reloc", "9107:bad_reloc:1").found).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before)
+
+    it "rejects signed-range escape fields and overflowing relocation values":
+        val before = native_exec_memory_count()
+        var bad_offset = smf_test_artifact("bad_offset", false)
+        val offset_header = bad_offset.len() - 128
+        val offset_sections = smf_test_u64(bad_offset, offset_header + 20)
+        bad_offset[offset_sections + 15] = 128
+        val offset_result = smf_dlopen_admitted(smf_test_request("bad_offset"), 9109, bad_offset)
+        expect(offset_result.success).to_equal(false)
+        expect(offset_result.error_msg).to_contain("exceeds signed loader range")
+
+        var overflow = smf_test_artifact("overflow", true)
+        val overflow_header = overflow.len() - 128
+        val overflow_sections = smf_test_u64(overflow, overflow_header + 20)
+        val relocation_payload = smf_test_u64(overflow, overflow_sections + 64 + 8)
+        var byte_index = 0
+        while byte_index < 7:
+            overflow[relocation_payload + 16 + byte_index] = 255
+            byte_index = byte_index + 1
+        overflow[relocation_payload + 23] = 127
+        val overflow_result = smf_dlopen_admitted(smf_test_request("overflow"), 9110, overflow)
+        expect(overflow_result.success).to_equal(false)
+        expect(overflow_result.error_msg).to_equal("absolute 64-bit relocation overflows")
+        expect(native_exec_memory_count()).to_equal(before)
+
+    it "rejects a duplicate live handle without disturbing its mapping":
+        val before = native_exec_memory_count()
+        val bytes = smf_test_artifact("one_handle", false)
+        expect(smf_dlopen_admitted(smf_test_request("one_handle"), 9108, bytes).success).to_equal(true)
+        val duplicate = smf_dlopen_admitted(smf_test_request("other_bytes"), 9108, smf_test_artifact("other_export", false))
+        expect(duplicate.success).to_equal(false)
+        expect(duplicate.error_msg).to_equal("handle already loaded")
+        expect(smf_dlsym(9108, "one_handle", "").found).to_equal(true)
+        expect(smf_dlsym(9108, "other_export", "9108:other_export:2").found).to_equal(false)
+        expect(smf_dlclose(9108).success).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before)

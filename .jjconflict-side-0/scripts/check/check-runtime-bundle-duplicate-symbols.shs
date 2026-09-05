@@ -1,0 +1,308 @@
+#!/bin/sh
+# Runtime bundle duplicate-symbol gate.
+#
+# Regression class (2026-07-24 session): src/runtime/runtime_simd_dispatch.c
+# has long defined the real cpuid/hwcap implementations of rt_simd_has_sse,
+# rt_simd_has_avx, rt_simd_has_avx2, rt_simd_has_neon, rt_simd_has_rvv. A
+# later commit (490d26dd504) added scalar `return false;` stubs for those
+# SAME five symbols to runtime_native.c while legitimately fixing an
+# *undefined*-symbol failure for a different symbol (rt_simd_detect_profile).
+# Both .c files are unconditionally in the same C bundle (see the `sources`
+# array in src/compiler/70.backend/backend/runtime_compiler.spl), so the
+# stage4 archive core ended up defining each of the five symbols twice and
+# EVERY native link died with "Stage4 archive core defines `rt_simd_has_avx`
+# 2 times". Nothing checked for this, so it went unnoticed. Fixed in
+# 7ce46eb187e (removed the five duplicate stubs). See also
+# .claude/memory feedback_recurring_problem_team_analysis_and_tests.
+#
+# Scope correction (2026-08-01, proved at link level, not by source
+# reading): that 2026-07-24 regression broke the STAGE4 STRICT profile,
+# where each admitted object arrives via a labelled per-provider archive
+# whose core contract rejects a doubly-defined symbol. It is NOT true that
+# any cross-file duplicate breaks *every* native link:
+#   - `runtime` (runtime.c) is not one of the stage4 candidate labels
+#     (see candidate_labels in llvm_native_link.spl), so runtime.c's object
+#     never reaches a stage4 archive core at all.
+#   - the default non-stage4 profile sets `allow_duplicate_definitions:
+#     not stage4_requested` (llvm_native_link.spl), i.e. -z muldefs, and
+#     links the whole bundle successfully with first-definition-wins.
+# Measured at 9349ff90f60: runtime.o and runtime_native.o already share 23
+# strong (T) symbols; `ld.lld-18` without muldefs reports 20 duplicate-symbol
+# errors, and WITH muldefs the full 14-object bundle links rc=0 into a real
+# ELF that runs. So the value of this gate is DRIFT detection between two
+# copies that both ship, not "the build is down".
+#
+# This gate is text/regex only (no compiler invocation, no C parser): it
+# reads the actual `sources` array (plus its two conditional
+# sources.push(...) entries) straight out of runtime_compiler.spl, so the
+# file list here cannot silently drift out of sync with the real bundle the
+# way a hand-maintained lane list (see check-runtime-symbol-lane-divergence.shs)
+# can. For every non-static top-level function symbol defined in 2+ of those
+# files, the pair is a duplicate-definition candidate. Pre-existing,
+# already-triaged duplicates (mostly __attribute__((weak)) fallback pairs
+# that the linker resolves without error) are baselined (ratchet pattern,
+# same convention as check-runtime-symbol-lane-divergence.shs and
+# check-core-lib-purity.shs). Only NEW duplicate pairs fail.
+#
+# Semantic-agreement marker (added 2026-08-05). Recording a collision is NOT
+# enough: on 2026-08-05 spl_dlopen/spl_dlsym/spl_dlclose were baselined here
+# as a known runtime_dynload.c/runtime_native.c pair while the two copies
+# decoded their string argument from DIFFERENT value encodings
+# (rt_interp_cstr vs a tagged-string-only helper). runtime_native.o links
+# first, so the weaker copy won and spl_dlopen returned 0 for any raw-char*
+# path -- indistinguishable from a missing library. This gate was GREEN on
+# that bug because it only compared the collision line.
+#
+# A baseline line may therefore carry an optional THIRD tab-separated field:
+#
+#   <symbol><TAB><file1,file2><TAB>same
+#
+# `same` means: the normalized function body must be IDENTICAL in every listed
+# file. That is the machine-checkable form of the "confirm the bodies agree"
+# instruction below, and it fails loudly (runtime_bundle_duplicate_symbol_
+# divergent=...) the moment two shipped copies drift apart. Use it for every
+# pair that is a deliberate per-lane duplicate of one implementation. Omit it
+# only for pairs that are genuinely different implementations (e.g. a weak
+# stub vs the real thing) and say so in a comment.
+#
+# Caveat: pure regex over "identifier(...) {" lines starting at column 0.
+# Does not understand #ifdef/#ifndef platform guards, so a symbol guarded to
+# be mutually exclusive across two files can still show up as a candidate
+# pair (add it to the baseline with a one-line reason if so). Multi-line
+# function signatures (return type / `{` not on the declarator's line) are
+# not recognized — this codebase's runtime/*.c consistently keeps `{` on the
+# declarator line (verified 2026-07-24), so this is a documented, accepted
+# gap rather than a silent one.
+#
+# SIGNATURE agreement is a SEPARATE gate (added 2026-08-10):
+# scripts/check/check-extern-abi-signatures.shs. This gate compares
+# duplicate-definition PRESENCE and, for `same`-marked pairs, C body text; it
+# is structurally blind to a definition whose ARITY disagrees with the
+# compiler's RuntimeFuncSpec declaration, because such a symbol usually has
+# only ONE C definition and so never becomes a duplicate candidate here at
+# all. That is the whole rt_extern_abi_divergence_family
+# (doc/08_tracking/bug/rt_extern_abi_divergence_family_2026-08-10.md): 21 rows
+# that were green under this gate. Run both.
+#
+# Run manually:
+#   sh scripts/check/check-runtime-bundle-duplicate-symbols.shs
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+RUNTIME_DIR="src/runtime"
+COMPILER_SPL="src/compiler/70.backend/backend/runtime_compiler.spl"
+BASELINE="scripts/check/runtime_bundle_duplicate_symbols_baseline.txt"
+
+[ -f "$COMPILER_SPL" ] || { echo "error: missing $COMPILER_SPL" >&2; exit 1; }
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+# --- Source of truth: parse the `sources` array + its conditional pushes
+# directly out of runtime_compiler.spl's compile_runtime_objects(). ---
+NAMES_FILE="$TMP_DIR/names.txt"
+grep -m1 'var sources = \[' "$COMPILER_SPL" | grep -oE '"[A-Za-z0-9_]+"' | tr -d '"' >"$NAMES_FILE"
+grep -oE 'sources\.push\("[A-Za-z0-9_]+"\)' "$COMPILER_SPL" | grep -oE '"[A-Za-z0-9_]+"' | tr -d '"' >>"$NAMES_FILE"
+sort -u -o "$NAMES_FILE" "$NAMES_FILE"
+
+[ -s "$NAMES_FILE" ] || { echo "error: could not parse sources array from $COMPILER_SPL" >&2; exit 1; }
+
+# Trigger: a top-level (column 0) line of the form `<decl>(<args>) {...`.
+# Matching ") {" rather than requiring "{" at end-of-line also catches
+# one-line stub bodies like `bool rt_simd_has_avx(void) { return false; }`
+# -- the exact shape of the regression this gate exists to catch.
+AWK_EXTRACT='
+    /^[A-Za-z_]/ && /\)[[:space:]]*\{/ {
+        if ($0 ~ /^static[[:space:]]/) next
+        if ($0 ~ /^(typedef|struct|enum|union)([[:space:]]|\{)/) next
+        line = $0
+        gsub(/__attribute__\(\([^()]*\)\)/, "", line)
+        brace_pos = index(line, "{")
+        if (brace_pos > 0) line = substr(line, 1, brace_pos - 1)
+        gsub(/[[:space:]]+$/, "", line)
+        p = index(line, "(")
+        if (p > 0) {
+            pre = substr(line, 1, p - 1)
+            gsub(/[[:space:]]+$/, "", pre)
+            n = split(pre, parts, /[^A-Za-z0-9_]+/)
+            name = parts[n]
+            if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) print name
+        }
+    }
+'
+
+MAP_FILE="$TMP_DIR/sym_file.tsv"
+: >"$MAP_FILE"
+file_count=0
+while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    src="$RUNTIME_DIR/$name.c"
+    if [ ! -f "$src" ]; then
+        echo "warn: bundle source not found, skipped: $src" >&2
+        continue
+    fi
+    file_count=$((file_count + 1))
+    awk "$AWK_EXTRACT" "$src" | while IFS= read -r sym; do
+        printf '%s\t%s.c\n' "$sym" "$name" >>"$MAP_FILE"
+    done
+done <"$NAMES_FILE"
+
+sym_count=$(cut -f1 "$MAP_FILE" | sort -u | wc -l | tr -d ' ')
+echo "runtime_bundle_files_scanned=$file_count"
+echo "runtime_bundle_symbols_scanned=$sym_count"
+
+# A symbol is a duplicate-definition candidate if 2+ DISTINCT bundle files
+# define it.
+sort -u -o "$MAP_FILE" "$MAP_FILE"
+FOUND="$TMP_DIR/found.txt"
+: >"$FOUND"
+cut -f1 "$MAP_FILE" | sort | uniq -d >"$TMP_DIR/dup_syms.txt"
+while IFS= read -r sym; do
+    [ -n "$sym" ] || continue
+    files=$(awk -F'\t' -v s="$sym" '$1==s {print $2}' "$MAP_FILE" | sort -u | tr '\n' ',' | sed 's/,$//')
+    echo "$sym	$files" >>"$FOUND"
+done <"$TMP_DIR/dup_syms.txt"
+sort -o "$FOUND" "$FOUND"
+
+total=$(wc -l <"$FOUND" | tr -d ' ')
+
+# Baseline keys = first two fields only, so an optional third `same` field does
+# not change which collisions are considered already-triaged.
+KEYS_FILE="$TMP_DIR/baseline_keys.txt"
+awk -F'\t' '!/^#/ && NF>=2 {print $1 "\t" $2}' "$BASELINE" >"$KEYS_FILE" 2>/dev/null || : >"$KEYS_FILE"
+
+new_count=0
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if ! grep -qxF "$line" "$KEYS_FILE" 2>/dev/null; then
+        echo "runtime_bundle_duplicate_symbol_new=$line"
+        new_count=$((new_count + 1))
+    fi
+done <"$FOUND"
+
+# --- Semantic agreement: baseline lines marked `same` must have IDENTICAL
+# normalized bodies in every file that defines them. ---
+AWK_BODY='
+    BEGIN { inb = 0 }
+    # src/runtime/runtime.c is CRLF, runtime_native.c is LF. Strip CR first so
+    # the comparison is about code, not line endings.
+    { gsub(/\r/, "") }
+    inb == 0 {
+        if ($0 !~ /^[A-Za-z_]/) next
+        if ($0 ~ /^static[[:space:]]/) next
+        if ($0 !~ ("[^A-Za-z0-9_]" sym "[[:space:]]*\\(")) next
+        if ($0 !~ /\)[[:space:]]*\{/) next
+        inb = 1
+        line = $0
+        sub(/^.*\(/, "(", line)
+        gsub(/[[:space:]]+/, " ", line)
+        print line
+        next
+    }
+    inb == 1 {
+        line = $0
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        gsub(/[[:space:]]+/, " ", line)
+        if (line != "") print line
+        if ($0 ~ /^\}/) { inb = 0 }
+    }
+'
+divergent_count=0
+same_checked=0
+while IFS="$(printf '\t')" read -r bsym bfiles bmark; do
+    case "$bsym" in \#*|"") continue ;; esac
+    [ "${bmark:-}" = "same" ] || continue
+    same_checked=$((same_checked + 1))
+    ref=""
+    first=1
+    mismatch=""
+    IFS=','
+    for bf in $bfiles; do
+        unset IFS
+        body=$(awk -v sym="$bsym" "$AWK_BODY" "$RUNTIME_DIR/$bf" 2>/dev/null)
+        if [ -z "$body" ]; then
+            mismatch="$bf (body not extractable)"
+            break
+        fi
+        if [ "$first" = 1 ]; then
+            ref="$body"
+            first=0
+        elif [ "$body" != "$ref" ]; then
+            mismatch="$bf"
+            break
+        fi
+        IFS=','
+    done
+    unset IFS
+    if [ -n "$mismatch" ]; then
+        echo "runtime_bundle_duplicate_symbol_divergent=$bsym	$bfiles	$mismatch"
+        divergent_count=$((divergent_count + 1))
+    fi
+done <"$BASELINE"
+echo "runtime_bundle_duplicate_symbols_same_checked=$same_checked"
+echo "runtime_bundle_duplicate_symbols_divergent=$divergent_count"
+
+baseline_total=$(grep -cv '^#' "$BASELINE" 2>/dev/null || echo 0)
+echo "runtime_bundle_duplicate_symbols_baselined=$baseline_total"
+echo "runtime_bundle_duplicate_symbols_current=$total"
+echo "runtime_bundle_duplicate_symbols_new=$new_count"
+
+# Baseline entries that no longer reproduce (symbol renamed/removed/unified) —
+# report so the baseline can be shrunk, never auto-remove.
+while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    case "$b" in \#*) continue ;; esac
+    key=$(printf '%s\n' "$b" | cut -f1,2)
+    if ! grep -qxF "$key" "$FOUND"; then
+        echo "runtime_bundle_duplicate_symbols_stale_baseline=$key"
+    fi
+done <"$BASELINE"
+
+if [ "$divergent_count" -gt 0 ]; then
+    echo "runtime_bundle_duplicate_symbols_ok=false"
+    echo "A duplicate pair marked 'same' in $BASELINE now has DIVERGENT bodies." >&2
+    echo "" >&2
+    echo "Both copies ship. The bundle links with -z muldefs, so the FIRST" >&2
+    echo "definition in link order silently wins and the other set of callers" >&2
+    echo "gets the wrong behaviour with no diagnostic -- exactly the" >&2
+    echo "spl_dlopen encoding split fixed on 2026-08-05." >&2
+    echo "" >&2
+    echo "Make the bodies identical again, or split the two behaviours into" >&2
+    echo "two DIFFERENTLY NAMED functions. Dropping the 'same' marker to" >&2
+    echo "silence this is not a fix." >&2
+    exit 1
+fi
+
+if [ "$new_count" -gt 0 ]; then
+    echo "runtime_bundle_duplicate_symbols_ok=false"
+    echo "A NEW non-static symbol is now defined by 2+ files in the runtime" >&2
+    echo "C bundle read from $COMPILER_SPL." >&2
+    echo "" >&2
+    echo "Consequence depends on WHICH link profile consumes the object:" >&2
+    echo "  * stage4 strict profile (stage4_requested=true): the object is" >&2
+    echo "    admitted only via a labelled per-provider archive, and the" >&2
+    echo "    archive-core contract rejects a symbol defined more than once" >&2
+    echo "    -> that link FAILS. Note runtime.c itself is NOT one of the" >&2
+    echo "    stage4 candidate labels, so a runtime.c/<other>.c pair does not" >&2
+    echo "    by itself break the stage4 link." >&2
+    echo "  * default (non-stage4) profile: llvm_native_link.spl passes" >&2
+    echo "    allow_duplicate_definitions (-z muldefs / --allow-multiple-" >&2
+    echo "    definition) so the link SUCCEEDS and the FIRST definition in" >&2
+    echo "    link order silently wins. That is the real hazard here: a" >&2
+    echo "    behavioral drift between the two copies becomes a silent wrong" >&2
+    echo "    answer, not a build error." >&2
+    echo "" >&2
+    echo "Do NOT read this failure as \"every native link is broken\" without" >&2
+    echo "checking the profile -- $BASELINE already" >&2
+    echo "carries dozens of accepted pairs that link fine today." >&2
+    echo "" >&2
+    echo "Remove the duplicate definition, or if the two copies are" >&2
+    echo "deliberately per-lane (each .c belongs to a different lane's source" >&2
+    echo "set) or an intentional weak-symbol fallback pair, add the" >&2
+    echo "'symbol<TAB>file1,file2' line to $BASELINE" >&2
+    echo "with a one-line reason AND confirm the bodies agree." >&2
+    exit 1
+fi
+echo "runtime_bundle_duplicate_symbols_ok=true"

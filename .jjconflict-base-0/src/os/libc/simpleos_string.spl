@@ -1,0 +1,173 @@
+# SimpleOS libc — pure-Simple, musl-shaped string / memory / ctype / strtol core.
+#
+# Syscall-free subset of musl libc, written in pure Simple (replaces the
+# hand-written C in src/os/libc/simpleos_libc*.c for these functions).
+# Buffers are modeled as exact-length `[u8]` (no implicit NUL); functions that
+# would mutate `dst` in C return a fresh array instead, to keep value semantics
+# and avoid the interpreter's lost-arg-mutation pitfall.
+#
+# Shared interface: libc_<fn> per .spipe/simpleos-alpine-harden-musl-busybox.
+# ponytail: ctype predicates inlined (one-liners) to keep this a single
+# self-contained module — no cross-module import (interp merge traps).
+
+# ---- ctype (ASCII) ---------------------------------------------------------
+
+fn libc_isdigit(ch: i64) -> bool:
+    ch >= 48 and ch <= 57
+
+fn libc_isalpha(ch: i64) -> bool:
+    (ch >= 65 and ch <= 90) or (ch >= 97 and ch <= 122)
+
+fn libc_isalnum(ch: i64) -> bool:
+    libc_isalpha(ch) or libc_isdigit(ch)
+
+fn libc_isspace(ch: i64) -> bool:
+    ch == 32 or ch == 9 or ch == 10 or ch == 13 or ch == 11 or ch == 12
+
+fn libc_isxdigit(ch: i64) -> bool:
+    libc_isdigit(ch) or (ch >= 65 and ch <= 70) or (ch >= 97 and ch <= 102)
+
+fn libc_toupper(ch: i64) -> i64:
+    if ch >= 97 and ch <= 122:
+        ch - 32
+    else:
+        ch
+
+fn libc_tolower(ch: i64) -> i64:
+    if ch >= 65 and ch <= 90:
+        ch + 32
+    else:
+        ch
+
+# ---- string length / compare (read-only, no allocation) --------------------
+
+fn libc_strlen(s: [u8]) -> i64:
+    """Length up to a NUL byte, else the full buffer length (musl strlen)."""
+    var i = 0
+    val n = s.len()
+    while i < n and s[i] != 0:
+        i = i + 1
+    i
+
+fn libc_strcmp(a: [u8], b: [u8]) -> i64:
+    """musl strcmp: 0 if equal, sign of first differing byte otherwise."""
+    val la = libc_strlen(a)
+    val lb = libc_strlen(b)
+    var i = 0
+    while i < la and i < lb:
+        val ca = a[i]
+        val cb = b[i]
+        if ca != cb:
+            return ca - cb
+        i = i + 1
+    la - lb
+
+fn libc_strncmp(a: [u8], b: [u8], n: i64) -> i64:
+    """Compare at most n bytes."""
+    val la = libc_strlen(a)
+    val lb = libc_strlen(b)
+    var i = 0
+    while i < n and i < la and i < lb:
+        val ca = a[i]
+        val cb = b[i]
+        if ca != cb:
+            return ca - cb
+        i = i + 1
+    if i >= n:
+        return 0
+    la - lb
+
+fn libc_strchr(s: [u8], c: i64) -> i64:
+    """Index of first byte == c within strlen(s), else -1."""
+    val n = libc_strlen(s)
+    var i = 0
+    while i < n:
+        if s[i] == c:
+            return i
+        i = i + 1
+    -1
+
+fn libc_strrchr(s: [u8], c: i64) -> i64:
+    """Index of last byte == c within strlen(s), else -1."""
+    val n = libc_strlen(s)
+    var i = n - 1
+    while i >= 0:
+        if s[i] == c:
+            return i
+        i = i - 1
+    -1
+
+fn libc_memcmp(a: [u8], b: [u8], n: i64) -> i64:
+    """Compare n bytes; sign of first difference, 0 if all equal."""
+    var i = 0
+    while i < n:
+        val ca = a[i]
+        val cb = b[i]
+        if ca != cb:
+            return ca - cb
+        i = i + 1
+    0
+
+# ---- memory (value-returning copies) ---------------------------------------
+
+fn libc_memset(n: i64, value: i64) -> [u8]:
+    """Return an n-byte buffer filled with (value & 0xFF)."""
+    val byte = value % 256
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(byte)
+        i = i + 1
+    out
+
+fn libc_memcpy(src: [u8], n: i64) -> [u8]:
+    """Return the first n bytes of src (musl memcpy, value-returning)."""
+    var out: [u8] = []
+    var i = 0
+    val lim = if n < src.len(): n else: src.len()
+    while i < lim:
+        out.push(src[i])
+        i = i + 1
+    out
+
+# ---- numeric parse ---------------------------------------------------------
+
+fn _libc_digit_val(ch: i64) -> i64:
+    """Digit value for base parsing, or -1 if not a digit char."""
+    if ch >= 48 and ch <= 57:
+        ch - 48
+    elif ch >= 97 and ch <= 122:
+        ch - 97 + 10
+    elif ch >= 65 and ch <= 90:
+        ch - 65 + 10
+    else:
+        -1
+
+fn libc_strtol(s: [u8], base: i64) -> i64:
+    """Parse a signed integer in the given base (2-36). Leading whitespace and
+    an optional +/- sign are honored; parsing stops at the first invalid digit.
+    base 16 accepts an optional 0x prefix. (musl strtol, no errno out-param.)"""
+    val n = libc_strlen(s)
+    var i = 0
+    while i < n and libc_isspace(s[i]):
+        i = i + 1
+    var sign = 1
+    if i < n and (s[i] == 43 or s[i] == 45):
+        if s[i] == 45:
+            sign = -1
+        i = i + 1
+    var b = base
+    if b == 16 and i + 1 < n and s[i] == 48 and (s[i + 1] == 120 or s[i + 1] == 88):
+        i = i + 2
+    var acc = 0
+    while i < n:
+        val d = _libc_digit_val(s[i])
+        if d < 0 or d >= b:
+            return sign * acc
+        acc = acc * b + d
+        i = i + 1
+    sign * acc
+
+fn libc_atoi(s: [u8]) -> i64:
+    """Decimal parse, musl atoi semantics (== strtol base 10)."""
+    libc_strtol(s, 10)

@@ -1,0 +1,82 @@
+# Struct-in-array i64 Field Round-trip Regression Spec
+#
+# Regression coverage for
+# doc/08_tracking/bug/layoutglyph_struct_array_i64_field_tag_shift_readback_2026-07-20.md:
+# a class/struct instance pushed into an array declared via an initially-EMPTY
+# `[]` literal (element type fixed at the erased i64 default -- the exact
+# `var glyphs: [LayoutGlyph] = []` then `.push(...)` shape used by the SimpleOS
+# font renderer) lost track of the array's real element type on the
+# self-hosted native-build path (src/compiler/50.mir): re-reading `arr[i]`
+# fell through decode_runtime_value's raw-i64 default (`raw >> 3`), shredding
+# the struct's heap pointer -- SIGSEGV on the next field access, or garbage
+# tag-shifted/masked i64 field values when the corrupted bits happened not to
+# fault. An array LITERAL with elements (`[Rec(...), Rec(...)]`) was
+# unaffected -- only empty-literal + push.
+#
+# Fix: note_container_elem_type (expr_dispatch.spl, called at every
+# push/index-assign call site) now also captures a struct-typed value's name
+# into array_element_struct_syms (mirroring lower_array_lit's own capture),
+# so the read side learns the real element type regardless of how the
+# container was declared.
+#
+# This spec runs on the seed interpreter path (`bin/simple test`), which
+# already round-tripped these values correctly before the fix -- interpreter
+# and native-build are DIFFERENT evaluators (see
+# test/03_system/native/struct_array_push_i64_field_tagshift.spl for the
+# native-build-specific regression guard, checked by exit code per that
+# directory's harness convention). Kept here too as an evaluator-parity
+# guard and to document the exact field/value matrix.
+
+use std.spec.*
+
+class Rec:
+    codepoint: i64
+    x: i64
+    y: i64
+    width: i64
+    height: i64
+    byte_offset: i64
+
+describe "struct-in-array i64 field precision":
+    it "keeps a bare struct local's i64 fields exact, including large values":
+        val bare = Rec(codepoint: 12345, x: 7, y: 0, width: -1, height: 42, byte_offset: 999999999999)
+        expect(bare.codepoint).to_equal(12345)
+        expect(bare.byte_offset).to_equal(999999999999)
+
+    it "round-trips i64 fields for a struct in an array literal":
+        val arr = [Rec(codepoint: 83, x: 5, y: 12, width: 6, height: 12, byte_offset: 0)]
+        expect(arr[0].codepoint).to_equal(83)
+        expect(arr[0].width).to_equal(6)
+
+    it "round-trips i64 fields for structs pushed into an empty-literal array":
+        var arr: [Rec] = []
+        arr.push(Rec(codepoint: 83, x: 5, y: 12, width: 6, height: 12, byte_offset: 0))
+        arr.push(Rec(codepoint: 0, x: 0, y: 0, width: 0, height: 0, byte_offset: 0))
+        arr.push(Rec(codepoint: 7, x: -7, y: 7, width: -7, height: 7, byte_offset: -7))
+        expect(arr[0].codepoint).to_equal(83)
+        expect(arr[0].width).to_equal(6)
+        expect(arr[0].height).to_equal(12)
+        expect(arr[1].codepoint).to_equal(0)
+        expect(arr[2].x).to_equal(-7)
+        expect(arr[2].codepoint).to_equal(7)
+
+    it "round-trips an i64 field near the 3-bit tag boundary (2^60 - 1)":
+        var arr: [Rec] = []
+        arr.push(Rec(codepoint: 1152921504606846975, x: 1, y: 1, width: 1, height: 1, byte_offset: 1))
+        expect(arr[0].codepoint).to_equal(1152921504606846975)
+
+    it "round-trips i64 fields via for-in over a push-built array":
+        var arr: [Rec] = []
+        arr.push(Rec(codepoint: 83, x: 5, y: 12, width: 6, height: 12, byte_offset: 0))
+        arr.push(Rec(codepoint: 7, x: -7, y: 7, width: -7, height: 7, byte_offset: -7))
+        var sum_cp = 0
+        for r in arr:
+            sum_cp = sum_cp + r.codepoint
+        expect(sum_cp).to_equal(90)
+
+    it "round-trips i64 fields for a struct value in a dict":
+        var d: Dict<text, Rec> = {}
+        d["k"] = Rec(codepoint: 65535, x: 3, y: 4, width: 5, height: 6, byte_offset: 7)
+        val dv = d["k"]
+        expect(dv.codepoint).to_equal(65535)
+        expect(dv.byte_offset).to_equal(7)

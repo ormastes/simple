@@ -1,0 +1,335 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSH Cipher Layer — live-safe AES-256-GCM only.
+
+use os.apps.sshd.ssh_packet.{ssh_get_u32, SSH_MAX_PACKET}
+use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
+
+@unsafe(reason: "raw AES-256-GCM encrypt provider; exact key/nonce/output lengths are validated", capabilities: [ffi])
+extern fn rt_tls13_aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
+@unsafe(reason: "raw AES-256-GCM decrypt provider returns a status-prefixed result", capabilities: [ffi])
+extern fn rt_tls13_aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
+@unsafe(reason: "raw SSH AES-256-GCM packet provider; tagged v2 response is lifted immediately", capabilities: [ffi])
+extern fn rt_ssh_aes256_gcm_decrypt_packet_v2(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
+
+val GCM_TAG_LEN: u64 = 16
+val SSH_GCM_MIN_PACKET_LENGTH: u64 = 12
+val SSH_GCM_PACKET_BODY_MAX: u64 = 35000u64
+
+class SshCipher:
+    seq_c2s: u32
+    seq_s2c: u32
+    active: bool
+
+impl SshCipher:
+
+    static fn new() -> SshCipher:
+        SshCipher(
+            seq_c2s: 0,
+            seq_s2c: 0,
+            active: false
+        )
+
+    me activate(start_c2s_seq: u32, start_s2c_seq: u32):
+        self.seq_c2s = start_c2s_seq
+        self.seq_s2c = start_s2c_seq
+        self.active = true
+
+@inline
+fn _u8_at(data: [u8], idx: u64) -> u8:
+    if idx >= data.len():
+        return 0u8
+    data[idx]
+
+@inline
+fn _push_byte(arr: [u8], byte_val: u8) -> [u8]:
+    var out = arr
+    out.push(byte_val)
+    out
+
+fn _validate_gcm_wire_packet(data: [u8]) -> Result<u64, text>:
+    """Validate the authenticated SSH AES-GCM frame before crypto dispatch.
+
+    The four-byte packet length is AAD and describes exactly the encrypted
+    body, excluding both the length field and authentication tag.  Rejecting
+    inconsistent or oversized frames here keeps every decrypt implementation,
+    including the runtime fast path, behind the same bounded admission rule.
+    """
+    if data.len() < 4u64 + SSH_GCM_MIN_PACKET_LENGTH + GCM_TAG_LEN:
+        return Err("encrypted packet too short")
+    val packet_length = ssh_get_u32(data, 0u64).to_u64()
+    if packet_length < SSH_GCM_MIN_PACKET_LENGTH or packet_length > SSH_MAX_PACKET:
+        return Err("encrypted packet length outside SSH bounds")
+    if packet_length != data.len() - 4u64 - GCM_TAG_LEN:
+        return Err("encrypted packet length mismatch")
+    if (packet_length + 4u64) % 16u64 != 0u64:
+        return Err("encrypted packet block alignment invalid")
+    Ok(packet_length)
+
+fn _make_nonce(iv: [u8], seq: u32) -> [u8]:
+    # RFC 5647 increments the AES-GCM invocation counter after each packet, so
+    # encrypted packet sequence 0 uses the KDF IV unchanged.
+    if iv.len() != 12u64:
+        return []
+    var carry: u64 = seq.to_u64()
+    val s11 = _u8_at(iv, 11).to_u64() + (carry & 0xFF)
+    val b11 = (s11 & 0xFF).to_u8()
+    carry = (carry >> 8) + (s11 >> 8)
+    val s10 = _u8_at(iv, 10).to_u64() + (carry & 0xFF)
+    val b10 = (s10 & 0xFF).to_u8()
+    carry = (carry >> 8) + (s10 >> 8)
+    val s9 = _u8_at(iv, 9).to_u64() + (carry & 0xFF)
+    val b9 = (s9 & 0xFF).to_u8()
+    carry = (carry >> 8) + (s9 >> 8)
+    val s8 = _u8_at(iv, 8).to_u64() + (carry & 0xFF)
+    val b8 = (s8 & 0xFF).to_u8()
+    carry = (carry >> 8) + (s8 >> 8)
+    val s7 = _u8_at(iv, 7).to_u64() + (carry & 0xFF)
+    val b7 = (s7 & 0xFF).to_u8()
+    carry = (carry >> 8) + (s7 >> 8)
+    val s6 = _u8_at(iv, 6).to_u64() + (carry & 0xFF)
+    val b6 = (s6 & 0xFF).to_u8()
+    carry = (carry >> 8) + (s6 >> 8)
+    val s5 = _u8_at(iv, 5).to_u64() + (carry & 0xFF)
+    val b5 = (s5 & 0xFF).to_u8()
+    carry = (carry >> 8) + (s5 >> 8)
+    val s4 = _u8_at(iv, 4).to_u64() + (carry & 0xFF)
+    val b4 = (s4 & 0xFF).to_u8()
+
+    var nonce: [u8] = []
+    nonce.push(_u8_at(iv, 0))
+    nonce.push(_u8_at(iv, 1))
+    nonce.push(_u8_at(iv, 2))
+    nonce.push(_u8_at(iv, 3))
+    nonce.push(b4)
+    nonce.push(b5)
+    nonce.push(b6)
+    nonce.push(b7)
+    nonce.push(b8)
+    nonce.push(b9)
+    nonce.push(b10)
+    nonce.push(b11)
+    nonce
+
+fn _ssh_gcm_frame_allowed(data: [u8]) -> bool:
+    if data.len() < 22u64 or data.len() > 4u64 + SSH_GCM_PACKET_BODY_MAX + GCM_TAG_LEN:
+        return false
+    val packet_length = ssh_get_u32(data, 0).to_u64()
+    if packet_length < 2u64 or packet_length > SSH_GCM_PACKET_BODY_MAX:
+        return false
+    data.len() == 4u64 + packet_length + GCM_TAG_LEN
+
+fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv_s2c: [u8]) -> [u8]:
+    if enc_key_s2c.len() != 32u64 or iv_s2c.len() != 12u64 or payload.len() > SSH_GCM_PACKET_BODY_MAX:
+        return []
+    var padding_len: u64 = 4
+    while ((1 + payload.len() + padding_len) % 16) != 0:
+        padding_len = padding_len + 1
+    val packet_length: u64 = 1 + payload.len() + padding_len
+    if packet_length > SSH_GCM_PACKET_BODY_MAX:
+        return []
+    var aad: [u8] = []
+    aad = _push_byte(aad, ((packet_length >> 24) & 0xFF).to_u8())
+    aad = _push_byte(aad, ((packet_length >> 16) & 0xFF).to_u8())
+    aad = _push_byte(aad, ((packet_length >> 8) & 0xFF).to_u8())
+    aad = _push_byte(aad, (packet_length & 0xFF).to_u8())
+
+    var body: [u8] = []
+    body = _push_byte(body, padding_len.to_u8())
+    var i: u64 = 0
+    while i < payload.len():
+        body = _push_byte(body, _u8_at(payload, i))
+        i = i + 1
+    i = 0
+    while i < padding_len:
+        body = _push_byte(body, 0)
+        i = i + 1
+
+    val nonce = _make_nonce(iv_s2c, seq_s2c)
+    var encrypted_with_tag: [u8] = []
+    unsafe(capabilities: [ffi]):
+        encrypted_with_tag = rt_tls13_aes256_gcm_encrypt(enc_key_s2c, nonce, body, aad)
+    if encrypted_with_tag.len() != body.len() + GCM_TAG_LEN:
+        return []
+
+    var result: [u8] = []
+    i = 0
+    while i < aad.len():
+        result = _push_byte(result, _u8_at(aad, i))
+        i = i + 1
+    i = 0
+    while i < encrypted_with_tag.len():
+        result = _push_byte(result, _u8_at(encrypted_with_tag, i))
+        i = i + 1
+    result
+
+fn ssh_encrypt_packet_aes128_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv_s2c: [u8]) -> [u8]:
+    if enc_key_s2c.len() != 16u64 or iv_s2c.len() != 12u64 or payload.len() > SSH_GCM_PACKET_BODY_MAX:
+        return []
+    var padding_len: u64 = 4
+    while ((1 + payload.len() + padding_len) % 16) != 0:
+        padding_len = padding_len + 1
+    val packet_length: u64 = 1 + payload.len() + padding_len
+    if packet_length > SSH_GCM_PACKET_BODY_MAX:
+        return []
+    var aad: [u8] = []
+    aad.push(((packet_length >> 24) & 0xFF).to_u8())
+    aad.push(((packet_length >> 16) & 0xFF).to_u8())
+    aad.push(((packet_length >> 8) & 0xFF).to_u8())
+    aad.push((packet_length & 0xFF).to_u8())
+
+    var body: [u8] = []
+    body.push(padding_len.to_u8())
+    var i: u64 = 0
+    while i < payload.len():
+        body.push(_u8_at(payload, i))
+        i = i + 1
+    i = 0
+    while i < padding_len:
+        body.push(0u8)
+        i = i + 1
+
+    val nonce = _make_nonce(iv_s2c, seq_s2c)
+    val encrypted_with_tag = aes128_gcm_encrypt(enc_key_s2c, nonce, body, aad)
+    if encrypted_with_tag.len() != body.len() + GCM_TAG_LEN:
+        return []
+
+    var result: [u8] = []
+    i = 0
+    while i < aad.len():
+        result.push(_u8_at(aad, i))
+        i = i + 1
+    i = 0
+    while i < encrypted_with_tag.len():
+        result.push(_u8_at(encrypted_with_tag, i))
+        i = i + 1
+    result
+
+fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:
+    if enc_key_c2s.len() != 32u64 or iv_c2s.len() != 12u64:
+        return Err("invalid encrypted packet contract")
+    val packet_length = _validate_gcm_wire_packet(data)?
+
+    var aad: [u8] = []
+    var i: u64 = 0
+    while i < 4:
+        aad.push(_u8_at(data, i))
+        i = i + 1
+
+    val ct_len = packet_length
+
+    var ciphertext: [u8] = []
+    i = 0
+    while i < ct_len:
+        ciphertext.push(_u8_at(data, 4 + i))
+        i = i + 1
+
+    var tag: [u8] = []
+    i = 0
+    while i < GCM_TAG_LEN:
+        tag.push(_u8_at(data, 4 + ct_len + i))
+        i = i + 1
+
+    val nonce = _make_nonce(iv_c2s, seq_c2s)
+    var result: [u8] = []
+    unsafe(capabilities: [ffi]):
+        result = rt_tls13_aes256_gcm_decrypt(enc_key_c2s, nonce, ciphertext, aad, tag)
+    if result.len() == 0:
+        return Err("GCM decryption failed: invalid input")
+    val status = _u8_at(result, 0)
+    if status == 0x00:
+        return Err("GCM decryption failed: authentication tag mismatch")
+    if status != 0x01 or result.len() != ct_len + 1u64:
+        return Err("GCM decryption failed: invalid provider result")
+
+    # The runtime prepends one status byte to the authenticated plaintext.
+    # Require the exact admitted body size before observing its padding byte.
+    if result.len() != packet_length + 1u64:
+        return Err("GCM decryption failed: plaintext length mismatch")
+    if result.len() < 2:
+        return Err("decrypted body empty")
+    val padding_len = _u8_at(result, 1).to_u64()
+    # Every SSH transport packet carries at least its message-number byte.
+    if padding_len < 4u64 or 2u64 + padding_len >= result.len():
+        return Err("invalid padding in decrypted packet")
+    val payload_len = result.len() - 2 - padding_len
+    var payload: [u8] = []
+    i = 0
+    while i < payload_len:
+        payload.push(_u8_at(result, 2 + i))
+        i = i + 1
+    Ok(payload)
+
+fn ssh_decrypt_packet_aes256_gcm_payload_direct(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:
+    if enc_key_c2s.len() != 32u64 or iv_c2s.len() != 12u64:
+        return Err("invalid encrypted packet contract")
+    val packet_length = _validate_gcm_wire_packet(data)?
+    var raw: [u8] = []
+    unsafe(capabilities: [ffi]):
+        raw = rt_ssh_aes256_gcm_decrypt_packet_v2(enc_key_c2s, iv_c2s, seq_c2s.to_i64(), data)
+    if raw.len() == 0u64:
+        return Err("GCM packet decryption failed: invalid provider result")
+    # The v2 provider appends the status byte, so pop preserves the owned
+    # payload array in place and avoids a hot-path payload copy.
+    val status = raw.pop()
+    if status == 0x00:
+        return Err("GCM packet decryption failed: invalid input")
+    if status == 0x01:
+        return Err("GCM packet decryption failed: authentication tag mismatch")
+    if status != 0x02:
+        return Err("GCM packet decryption failed: invalid provider result")
+    val payload = raw
+    # The authenticated body reserves one padding-length byte and at least
+    # four padding bytes, so a runtime result cannot legitimately exceed this.
+    if payload.len() > packet_length - 5u64:
+        return Err("GCM packet decryption failed: payload length invalid")
+    Ok(payload)
+
+fn ssh_decrypt_packet_aes128_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:
+    if enc_key_c2s.len() != 16u64 or iv_c2s.len() != 12u64:
+        return Err("invalid encrypted packet contract")
+    val packet_length = _validate_gcm_wire_packet(data)?
+
+    var aad: [u8] = []
+    var i: u64 = 0
+    while i < 4:
+        aad.push(_u8_at(data, i))
+        i = i + 1
+
+    val ct_len = packet_length
+
+    var ciphertext: [u8] = []
+    i = 0
+    while i < ct_len:
+        ciphertext.push(_u8_at(data, 4 + i))
+        i = i + 1
+
+    var tag: [u8] = []
+    i = 0
+    while i < GCM_TAG_LEN:
+        tag.push(_u8_at(data, 4 + ct_len + i))
+        i = i + 1
+
+    val nonce = _make_nonce(iv_c2s, seq_c2s)
+    val result = aes128_gcm_decrypt(enc_key_c2s, nonce, ciphertext, aad, tag)
+    match result:
+        case Aes128GcmResult.Ok(data):
+            if data.len() != packet_length:
+                return Err("GCM decryption failed: plaintext length mismatch")
+            if data.len() < 1:
+                return Err("decrypted body empty")
+            val padding_len = _u8_at(data, 0).to_u64()
+            if padding_len < 4u64 or 1u64 + padding_len >= data.len():
+                return Err("invalid padding in decrypted packet")
+            val payload_len = data.len() - 1 - padding_len
+            var payload: [u8] = []
+            i = 0
+            while i < payload_len:
+                payload.push(_u8_at(data, 1 + i))
+                i = i + 1
+            Ok(payload)
+        case Aes128GcmResult.Err(msg):
+            Err("GCM decryption failed: " + msg)
+
+export SshCipher
+export ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm, ssh_decrypt_packet_aes256_gcm_payload_direct
+export ssh_encrypt_packet_aes128_gcm, ssh_decrypt_packet_aes128_gcm

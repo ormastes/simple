@@ -1,0 +1,261 @@
+# VirtIO-GPU Feature Negotiation and Capset Discovery (WS-E1)
+#
+# MDSOC: feature dimension, drivers layer
+#
+# This module is the E1 deliverable: it lets the driver ACK the 3D-related
+# device feature bits (instead of acking nothing) and walk the device's capset
+# table so that a Venus capset can be *discovered* rather than assumed.
+#
+# Design note — why the pure/impure split matters here:
+#   `gpu_negotiate_features`, `gpu_encode_*` and `gpu_decode_*` are PURE
+#   functions over plain integers / byte lists. They carry the whole protocol
+#   contract and are unit-testable with no device, no DMA and no QEMU. The only
+#   impure functions are `gpu_query_capsets` / `gpu_get_capset`, which do the
+#   DMA writes and ring submission via the existing controlq path.
+#
+# HONESTY NOTE (read before citing anything from this file as evidence):
+#   The capset ids below (VENUS = 4, etc.) are SPEC CONSTANTS transcribed from
+#   virtio_gpu.h. They are NOT measurements. As of this commit no live capset
+#   has been queried from a running device on this host, because the host QEMU
+#   cannot instantiate `virtio-gpu-gl-pci` at all. See
+#   `doc/08_tracking/bug/simpleos_vulkan_board_gap_venus_is_qemu_only.md`.
+
+use os.drivers.virtio.virtio_gpu.{
+    VirtioGpuDriver, ram_read32, ram_write32_raw
+}
+use os.drivers.virtio.virtio_gpu_types.{
+    VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_RESOURCE_BLOB, VIRTIO_GPU_F_CONTEXT_INIT,
+    VIRTIO_GPU_WANT_FEATURES_3D,
+    VIRTIO_GPU_CMD_GET_CAPSET_INFO, VIRTIO_GPU_CMD_GET_CAPSET,
+    VIRTIO_GPU_RESP_OK_CAPSET_INFO, VIRTIO_GPU_RESP_OK_CAPSET,
+    VIRTIO_GPU_CAPSET_VENUS,
+    GET_CAPSET_INFO_SIZE, RESP_CAPSET_INFO_SIZE, GET_CAPSET_SIZE,
+    CTRL_HDR_SIZE,
+    CAPSET_INFO_OFF_ID, CAPSET_INFO_OFF_MAX_VERSION, CAPSET_INFO_OFF_MAX_SIZE,
+    GET_CAPSET_OFF_ID, GET_CAPSET_OFF_VERSION, GET_CAPSET_INFO_OFF_INDEX
+}
+use os.kernel.log.klog_api.{log_info}
+
+val GPU_CAPSET_COUNT_LIMIT: u32 = 64
+val GPU_CAPSET_PAYLOAD_LIMIT: u64 = 4072
+
+# ============================================================================
+# Capset descriptor
+# ============================================================================
+
+struct GpuCapset:
+    """One entry of the device's capset table, as reported by GET_CAPSET_INFO."""
+    id: u32
+    max_version: u32
+    max_size: u32
+
+impl GpuCapset:
+    fn is_venus() -> bool:
+        self.id == VIRTIO_GPU_CAPSET_VENUS
+
+    fn is_empty() -> bool:
+        """A capset the device advertises but cannot serve (max_size == 0)."""
+        self.max_size == 0
+
+# ============================================================================
+# Feature negotiation — PURE
+# ============================================================================
+
+fn gpu_negotiate_features(host_features: u32) -> u32:
+    """Return the low-word feature mask the driver should ACK.
+
+    Ack ONLY the intersection of what the host offers and what E1 wants
+    (VIRGL | RESOURCE_BLOB | CONTEXT_INIT). Bits the host does not offer are
+    never acked, and bits E1 does not want (EDID, RESOURCE_UUID) are never
+    acked even when offered — acking those would change existing 2D
+    display-info behavior, which is outside E1's scope.
+
+    Regression guard: a host offering none of the wanted bits yields exactly 0,
+    which is byte-identical to the pre-E1 behavior of writing a hardcoded 0.
+    """
+    host_features & VIRTIO_GPU_WANT_FEATURES_3D
+
+fn gpu_features_have_3d(acked: u32) -> bool:
+    (acked & VIRTIO_GPU_F_VIRGL) != 0
+
+fn gpu_features_have_blob(acked: u32) -> bool:
+    (acked & VIRTIO_GPU_F_RESOURCE_BLOB) != 0
+
+fn gpu_features_have_ctx_init(acked: u32) -> bool:
+    (acked & VIRTIO_GPU_F_CONTEXT_INIT) != 0
+
+fn gpu_features_venus_capable(acked: u32) -> bool:
+    """Venus needs all three: 3D contexts, blob resources, and typed contexts.
+
+    This is a NECESSARY condition, not a sufficient one — a device can ack all
+    three and still expose no Venus capset. Capset discovery is what decides.
+    """
+    gpu_features_have_3d(acked) and gpu_features_have_blob(acked) and gpu_features_have_ctx_init(acked)
+
+fn gpu_capset_count_valid(num_capsets: u32) -> bool:
+    num_capsets <= GPU_CAPSET_COUNT_LIMIT
+
+fn gpu_capset_payload_size_valid(max_size: u64) -> bool:
+    max_size > 0 and max_size <= GPU_CAPSET_PAYLOAD_LIMIT
+
+# ============================================================================
+# Little-endian byte helpers — PURE
+# ============================================================================
+
+fn gpu_le32_read(buf: List<u8>, off: u64) -> u32:
+    """Read a little-endian u32 at `off`; returns 0 if the buffer is too short."""
+    val end = off + 4
+    if end > (buf.len() as u64):
+        return 0
+    val b0 = buf[off as i64] as u32
+    val b1 = buf[(off + 1) as i64] as u32
+    val b2 = buf[(off + 2) as i64] as u32
+    val b3 = buf[(off + 3) as i64] as u32
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn gpu_le32_write(buf_in: List<u8>, off: u64, value: u32) -> List<u8>:
+    """Write a little-endian u32 at `off`, returning the updated buffer."""
+    var buf = buf_in
+    val end = off + 4
+    if end > (buf.len() as u64):
+        return buf
+    buf[off as i64] = (value & 0xFF) as u8
+    buf[(off + 1) as i64] = ((value >> 8) & 0xFF) as u8
+    buf[(off + 2) as i64] = ((value >> 16) & 0xFF) as u8
+    buf[(off + 3) as i64] = ((value >> 24) & 0xFF) as u8
+    buf
+
+fn gpu_zero_buffer(size: u64) -> List<u8>:
+    var out: List<u8> = []
+    var i: u64 = 0
+    while i < size:
+        out.push(0 as u8)
+        i = i + 1
+    out
+
+# ============================================================================
+# Request encoding — PURE
+# ============================================================================
+
+fn gpu_encode_get_capset_info(capset_index: u32) -> List<u8>:
+    """Build a 32-byte GET_CAPSET_INFO request: hdr(24) + index(4) + pad(4)."""
+    var buf = gpu_zero_buffer(GET_CAPSET_INFO_SIZE)
+    buf = gpu_le32_write(buf, 0, VIRTIO_GPU_CMD_GET_CAPSET_INFO)
+    buf = gpu_le32_write(buf, GET_CAPSET_INFO_OFF_INDEX, capset_index)
+    buf
+
+fn gpu_encode_get_capset(capset_id: u32, capset_version: u32) -> List<u8>:
+    """Build a 32-byte GET_CAPSET request: hdr(24) + id(4) + version(4)."""
+    var buf = gpu_zero_buffer(GET_CAPSET_SIZE)
+    buf = gpu_le32_write(buf, 0, VIRTIO_GPU_CMD_GET_CAPSET)
+    buf = gpu_le32_write(buf, GET_CAPSET_OFF_ID, capset_id)
+    buf = gpu_le32_write(buf, GET_CAPSET_OFF_VERSION, capset_version)
+    buf
+
+# ============================================================================
+# Response decoding — PURE
+# ============================================================================
+
+fn gpu_response_type(buf: List<u8>) -> u32:
+    """The ctrl-hdr `type` field is the first LE u32 of any response."""
+    gpu_le32_read(buf, 0)
+
+fn gpu_decode_capset_info(buf: List<u8>) -> Result<GpuCapset, text>:
+    """Decode a RESP_OK_CAPSET_INFO buffer into a GpuCapset.
+
+    Rejects a short buffer and any response whose type is not 0x1102. Note that
+    a RESP_OK_NODATA (0x1100) here is an ERROR, not a success: it proves the
+    command parsed, not that a capset was returned.
+    """
+    if (buf.len() as u64) < RESP_CAPSET_INFO_SIZE:
+        return Err("capset-info response too short ({buf.len()} < 40)")
+    val rtype = gpu_response_type(buf)
+    if rtype != VIRTIO_GPU_RESP_OK_CAPSET_INFO:
+        return Err("capset-info bad resp=0x{rtype}")
+    Ok(GpuCapset(
+        id: gpu_le32_read(buf, CAPSET_INFO_OFF_ID),
+        max_version: gpu_le32_read(buf, CAPSET_INFO_OFF_MAX_VERSION),
+        max_size: gpu_le32_read(buf, CAPSET_INFO_OFF_MAX_SIZE)
+    ))
+
+fn gpu_find_venus(caps: List<GpuCapset>) -> GpuCapset?:
+    """Return the Venus capset from a discovered table, or nil if absent."""
+    for c in caps:
+        if c.is_venus():
+            return c
+    nil
+
+# ============================================================================
+# Device-facing capset walk — IMPURE (requires an initialized controlq)
+# ============================================================================
+
+fn gpu_query_capset_info(drv: VirtioGpuDriver, capset_index: u32) -> Result<GpuCapset, text>:
+    """GET_CAPSET_INFO(capset_index) over the existing controlq path."""
+    if not drv.has_3d:
+        return Err("capset query requires VIRTIO_GPU_F_VIRGL (not acked)")
+
+    drv._write_ctrl_hdr(VIRTIO_GPU_CMD_GET_CAPSET_INFO as u64)
+    ram_write32_raw(drv.cmd_buf_virt + GET_CAPSET_INFO_OFF_INDEX, capset_index as u64)
+    ram_write32_raw(drv.cmd_buf_virt + 28, 0)
+
+    val resp_type = drv._send_command(GET_CAPSET_INFO_SIZE, RESP_CAPSET_INFO_SIZE)
+    if resp_type != VIRTIO_GPU_RESP_OK_CAPSET_INFO:
+        return Err("GET_CAPSET_INFO[{capset_index}] failed (resp=0x{resp_type})")
+
+    val cap = GpuCapset(
+        id: ram_read32(drv.resp_buf_virt + CAPSET_INFO_OFF_ID),
+        max_version: ram_read32(drv.resp_buf_virt + CAPSET_INFO_OFF_MAX_VERSION),
+        max_size: ram_read32(drv.resp_buf_virt + CAPSET_INFO_OFF_MAX_SIZE)
+    )
+    log_info("[virtio] " + "[virtio-gpu] capset[{capset_index}] id={cap.id} max_version={cap.max_version} max_size={cap.max_size}")
+    Ok(cap)
+
+fn gpu_query_capsets(drv: VirtioGpuDriver, num_capsets: u32) -> List<GpuCapset>:
+    """Walk capset indices 0..num_capsets, collecting every one that decodes.
+
+    `num_capsets` is passed IN rather than read from device config space: the
+    driver currently maps only the common/notify/isr virtio-pci capabilities,
+    NOT the device-specific config window where virtio_gpu_config.num_capsets
+    lives (offset 12). Reading offset 12 off the common-cfg window would return
+    a device_feature field and yield a plausible-looking wrong count. Wiring a
+    DEVICE_CFG accessor is tracked as E2 work.
+    """
+    var out: List<GpuCapset> = []
+    if not drv.has_3d:
+        log_info("[virtio] " + "[virtio-gpu] capset walk skipped: no VIRGL feature")
+        return out
+    if not gpu_capset_count_valid(num_capsets):
+        log_info("[virtio] " + "[virtio-gpu] capset walk rejected: count={num_capsets} limit={GPU_CAPSET_COUNT_LIMIT}")
+        return out
+    var i: u32 = 0
+    while i < num_capsets:
+        val r = gpu_query_capset_info(drv, i)
+        if val Ok(cap) = r:
+            out.push(cap)
+        else:
+            log_info("[virtio] " + "[virtio-gpu] capset[{i}] query failed, stopping walk")
+            return out
+        i = i + 1
+    out
+
+fn gpu_get_capset(drv: VirtioGpuDriver, capset_id: u32, capset_version: u32, max_size: u64) -> Result<u64, text>:
+    """GET_CAPSET — returns the response byte length on success.
+
+    The capset blob itself is left in `drv.resp_buf_virt` for the caller to
+    parse; E1 only needs to prove it can be fetched.
+    """
+    if not drv.has_3d:
+        return Err("GET_CAPSET requires VIRTIO_GPU_F_VIRGL (not acked)")
+    if not gpu_capset_payload_size_valid(max_size):
+        return Err("GET_CAPSET payload out of bounds ({max_size} > {GPU_CAPSET_PAYLOAD_LIMIT})")
+
+    drv._write_ctrl_hdr(VIRTIO_GPU_CMD_GET_CAPSET as u64)
+    ram_write32_raw(drv.cmd_buf_virt + GET_CAPSET_OFF_ID, capset_id as u64)
+    ram_write32_raw(drv.cmd_buf_virt + GET_CAPSET_OFF_VERSION, capset_version as u64)
+
+    val resp_len = CTRL_HDR_SIZE + max_size
+    val resp_type = drv._send_command(GET_CAPSET_SIZE, resp_len)
+    if resp_type != VIRTIO_GPU_RESP_OK_CAPSET:
+        return Err("GET_CAPSET(id={capset_id}, v={capset_version}) failed (resp=0x{resp_type})")
+    log_info("[virtio] " + "[virtio-gpu] GET_CAPSET id={capset_id} v={capset_version} bytes={max_size}")
+    Ok(max_size)

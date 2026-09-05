@@ -1,0 +1,96 @@
+# @mode: native
+use std.spec.*
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, ManifestResourceLimits, SimpleArtifactManifest
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1,
+    executable_manifest_trust_owner_initialize,
+    executable_manifest_signature_check
+}
+
+fn _emsv_hash(ch: text) -> text:
+    ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch +
+        ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch +
+        ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch +
+        ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch + ch
+
+fn _emsv_nibble(value: text) -> i64:
+    val code = value.char_code_at(0)
+    if code >= 48 and code <= 57: return code - 48
+    code - 87
+
+fn _emsv_hex(value: text) -> [u8]:
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < value.len():
+        bytes = bytes.push((_emsv_nibble(value.substring(i, i + 1)) * 16 +
+            _emsv_nibble(value.substring(i + 1, i + 2))).to_u8())
+        i = i + 2
+    bytes
+
+fn _emsv_public_key() -> [u8]:
+    _emsv_hex("79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664")
+
+fn _emsv_manifest(signature: text) -> SimpleArtifactManifest:
+    SimpleArtifactManifest(
+        format_version: 1,
+        artifact_kind: "elf",
+        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+        entrypoint: "main",
+        required_abi_features: ["elf64"],
+        required_services: [],
+        required_capabilities: 1u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 1048576, max_open_handles: 8,
+            max_threads: 2, cpu_budget_us: 100000),
+        namespace_template: "app_default",
+        native_libraries: [],
+        smf_libraries: [],
+        interpreter: "",
+        argument_schema: [],
+        startup_preloads: [],
+        content_hashes: [_emsv_hash("a")],
+        signature: signature,
+        debug_identity: "signed-fixture")
+
+fn _emsv_signed_manifest() -> SimpleArtifactManifest:
+    _emsv_manifest("ed25519:release-test:" +
+        "4f47616d4d7195151323ecc5af280a83e987c6789b317748581f83ff46808552" +
+        "369c0b8a69c0e35c9305f40dc21a888f32d4cff20d308070e43658cd61aed003")
+
+describe "loader-owned executable manifest signature verification":
+    """Ed25519 verification uses the canonical manifest/image payload and a
+    one-time private trust-root capsule; structural booleans are not evidence."""
+
+    it "accepts an exact signed artifact and rejects image substitution":
+        val public_key = _emsv_public_key()
+        val initialized = executable_manifest_trust_owner_initialize([
+            ExecutableManifestTrustedSignerV1(
+                key_id: "release-test", public_key: public_key)
+        ])
+        expect(initialized.is_ok()).to_equal(true)
+        val image_hash = _emsv_hash("b")
+        val manifest = _emsv_signed_manifest()
+        val accepted = executable_manifest_signature_check(
+            manifest, image_hash,
+            "65b60673d6ed884bf01c2c222d82ada0740f29ac3355d6a925c81f17f47a27b8")
+        expect(accepted.ok).to_equal(true)
+        val substituted = executable_manifest_signature_check(
+            manifest, _emsv_hash("c"),
+            "65b60673d6ed884bf01c2c222d82ada0740f29ac3355d6a925c81f17f47a27b8")
+        expect(substituted.ok).to_equal(false)
+        expect(substituted.reason).to_equal("signature-invalid")
+
+    it "rejects an untrusted root hash and malformed envelope":
+        val image_hash = _emsv_hash("b")
+        val manifest = _emsv_signed_manifest()
+        val wrong_root = executable_manifest_signature_check(
+            manifest, image_hash, _emsv_hash("d"))
+        expect(wrong_root.ok).to_equal(false)
+        expect(wrong_root.reason).to_equal("trust-root-mismatch")
+        val malformed = executable_manifest_signature_check(
+            _emsv_manifest("signed"), image_hash,
+            "65b60673d6ed884bf01c2c222d82ada0740f29ac3355d6a925c81f17f47a27b8")
+        expect(malformed.ok).to_equal(false)
+        expect(malformed.reason).to_equal("signature-envelope-invalid")

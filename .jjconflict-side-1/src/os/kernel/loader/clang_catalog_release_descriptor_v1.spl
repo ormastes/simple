@@ -1,0 +1,210 @@
+"""Signed aggregate identity for one exact nine-row Clang catalog release.
+
+The descriptor authenticates the ordered payload/SCR1 pair for every path in
+the loader-owned Clang catalog.  It is an offline release value: verification
+does not publish catalog rows or grant execution authority.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1,
+    EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS}
+use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{
+    CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1,
+    clang_sysroot_catalog_required_paths_v1}
+
+pub const CLANG_CATALOG_RELEASE_DESCRIPTOR_DOMAIN_V1: text =
+    "simpleos.clang-catalog-release.v1"
+pub const CLANG_CATALOG_RELEASE_PAYLOAD_MAX_BYTES_V1: i64 = 268435456
+pub const CLANG_CATALOG_RELEASE_SCR1_MAX_BYTES_V1: i64 = 16777216
+pub const CLANG_CATALOG_RELEASE_MEDIA_MAX_BYTES_V1: i64 = 536870912
+
+pub struct ClangCatalogReleaseDescriptorRowV1:
+    canonical_path: text
+    payload_sha256: text
+    scr1_sha256: text
+
+pub struct ClangCatalogReleaseDescriptorV1:
+    domain: text
+    target: ManifestTarget
+    release_id: text
+    signer_key_id: text
+    rows: [ClangCatalogReleaseDescriptorRowV1]
+    signature: [u8]
+
+pub struct ClangCatalogReleaseDescriptorCheckV1:
+    ok: bool
+    reason: text
+
+fn _lower_token_v1(value: text, maximum: i64) -> bool:
+    if value.len() == 0 or value.len() > maximum: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val valid = (code >= 97 and code <= 122) or
+            (code >= 48 and code <= 57) or code == 45 or code == 46 or
+            code == 95
+        if not valid: return false
+        index = index + 1
+    true
+
+fn _lower_sha256_v1(value: text) -> bool:
+    if value.len() != 64 or value == "0" * 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or
+                (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _target_valid_v1(target: ManifestTarget) -> bool:
+    target.os == "simpleos" and target.abi == "simpleos" and
+        (target.arch == "x86" or target.arch == "x86_64" or
+         target.arch == "arm" or target.arch == "aarch64" or
+         target.arch == "riscv32" or target.arch == "riscv64")
+
+fn _append_field_v1(body: text, name: text, value: text) -> text:
+    body + name + "=" + value.len().to_text() + ":" + value + "\n"
+
+fn _shape_reason_v1(descriptor: ClangCatalogReleaseDescriptorV1) -> text:
+    if descriptor.domain != CLANG_CATALOG_RELEASE_DESCRIPTOR_DOMAIN_V1 or
+        not _lower_token_v1(descriptor.domain, 64):
+        return "domain-invalid"
+    if not _target_valid_v1(descriptor.target): return "target-invalid"
+    if not _lower_token_v1(descriptor.release_id, 128):
+        return "release-id-invalid"
+    if not _lower_token_v1(descriptor.signer_key_id, 128):
+        return "signer-key-id-invalid"
+    val required = clang_sysroot_catalog_required_paths_v1()
+    if required.len() != CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1 or
+        descriptor.rows.len() != CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1:
+        return "row-count-invalid"
+    var index: i64 = 0
+    while index < required.len():
+        val row = descriptor.rows[index]
+        if row.canonical_path != required[index]: return "row-order-invalid"
+        if not _lower_sha256_v1(row.payload_sha256):
+            return "payload-sha256-invalid"
+        if not _lower_sha256_v1(row.scr1_sha256):
+            return "scr1-sha256-invalid"
+        index = index + 1
+    ""
+
+pub fn clang_catalog_release_descriptor_signing_bytes_v1(
+    descriptor: ClangCatalogReleaseDescriptorV1
+) -> Result<[u8], text>:
+    val reason = _shape_reason_v1(descriptor)
+    if reason != "": return Err(reason)
+    var body = ""
+    body = _append_field_v1(body, "domain", descriptor.domain)
+    body = _append_field_v1(body, "target-os", descriptor.target.os)
+    body = _append_field_v1(body, "target-arch", descriptor.target.arch)
+    body = _append_field_v1(body, "target-abi", descriptor.target.abi)
+    body = _append_field_v1(body, "release-id", descriptor.release_id)
+    body = _append_field_v1(body, "signer-key-id", descriptor.signer_key_id)
+    body = body + "row-count=" +
+        CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1.to_text() + "\n"
+    var index: i64 = 0
+    while index < descriptor.rows.len():
+        val prefix = "row-" + index.to_text() + "-"
+        val row = descriptor.rows[index]
+        body = _append_field_v1(body, prefix + "path", row.canonical_path)
+        body = _append_field_v1(
+            body, prefix + "payload-sha256", row.payload_sha256)
+        body = _append_field_v1(body, prefix + "scr1-sha256", row.scr1_sha256)
+        index = index + 1
+    Ok(text_to_bytes_pure(body))
+
+pub fn clang_catalog_release_descriptor_verify_v1(
+    descriptor: ClangCatalogReleaseDescriptorV1,
+    trusted_signers: [ExecutableManifestTrustedSignerV1]
+) -> ClangCatalogReleaseDescriptorCheckV1:
+    val signing = clang_catalog_release_descriptor_signing_bytes_v1(descriptor)
+    val signing_bytes = match signing:
+        case Ok(bytes): bytes
+        case Err(reason): return ClangCatalogReleaseDescriptorCheckV1(
+            ok: false, reason: reason)
+    if descriptor.signature.len() != 64:
+        return ClangCatalogReleaseDescriptorCheckV1(
+            ok: false, reason: "signature-invalid")
+    if trusted_signers.len() == 0 or
+        trusted_signers.len() > EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS:
+        return ClangCatalogReleaseDescriptorCheckV1(
+            ok: false, reason: "trusted-signers-invalid")
+    var matching_count: i64 = 0
+    var matching_key: [u8] = []
+    var signer_index: i64 = 0
+    while signer_index < trusted_signers.len():
+        val signer = trusted_signers[signer_index]
+        if not _lower_token_v1(signer.key_id, 128) or
+            signer.public_key.len() != 32:
+            return ClangCatalogReleaseDescriptorCheckV1(
+                ok: false, reason: "trusted-signers-invalid")
+        var prior: i64 = 0
+        while prior < signer_index:
+            if trusted_signers[prior].key_id == signer.key_id:
+                return ClangCatalogReleaseDescriptorCheckV1(
+                    ok: false, reason: "trusted-signer-not-unique")
+            prior = prior + 1
+        if signer.key_id == descriptor.signer_key_id:
+            matching_count = matching_count + 1
+            matching_key = signer.public_key
+        signer_index = signer_index + 1
+    if matching_count != 1:
+        return ClangCatalogReleaseDescriptorCheckV1(
+            ok: false, reason: "trusted-signer-not-unique")
+    if matching_key.len() != 32:
+        return ClangCatalogReleaseDescriptorCheckV1(
+            ok: false, reason: "trusted-signer-invalid")
+    if not pure_ed25519_verify(
+        matching_key, signing_bytes, descriptor.signature):
+        return ClangCatalogReleaseDescriptorCheckV1(
+            ok: false, reason: "signature-invalid")
+    ClangCatalogReleaseDescriptorCheckV1(ok: true, reason: "")
+
+pub fn clang_catalog_release_descriptor_verify_media_v1(
+    descriptor: ClangCatalogReleaseDescriptorV1,
+    trusted_signers: [ExecutableManifestTrustedSignerV1],
+    payloads: [[u8]],
+    scr1_records: [[u8]]
+) -> ClangCatalogReleaseDescriptorCheckV1:
+    """Verify the signature and bind every row to the supplied media bytes."""
+    val signed = clang_catalog_release_descriptor_verify_v1(
+        descriptor, trusted_signers)
+    if not signed.ok: return signed
+    if payloads.len() != CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1 or
+        scr1_records.len() != CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1:
+        return ClangCatalogReleaseDescriptorCheckV1(
+            ok: false, reason: "media-row-count-invalid")
+    var aggregate: i64 = 0
+    var index: i64 = 0
+    while index < CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1:
+        if payloads[index].len() == 0 or
+            payloads[index].len() > CLANG_CATALOG_RELEASE_PAYLOAD_MAX_BYTES_V1 or
+            scr1_records[index].len() == 0 or
+            scr1_records[index].len() > CLANG_CATALOG_RELEASE_SCR1_MAX_BYTES_V1:
+            return ClangCatalogReleaseDescriptorCheckV1(
+                ok: false, reason: "media-bounds-invalid")
+        if payloads[index].len() >
+                CLANG_CATALOG_RELEASE_MEDIA_MAX_BYTES_V1 - aggregate:
+            return ClangCatalogReleaseDescriptorCheckV1(
+                ok: false, reason: "media-bounds-invalid")
+        aggregate = aggregate + payloads[index].len()
+        if scr1_records[index].len() >
+                CLANG_CATALOG_RELEASE_MEDIA_MAX_BYTES_V1 - aggregate:
+            return ClangCatalogReleaseDescriptorCheckV1(
+                ok: false, reason: "media-bounds-invalid")
+        aggregate = aggregate + scr1_records[index].len()
+        if sha256_u8_hex(payloads[index]) !=
+                descriptor.rows[index].payload_sha256 or
+            sha256_u8_hex(scr1_records[index]) !=
+                descriptor.rows[index].scr1_sha256:
+            return ClangCatalogReleaseDescriptorCheckV1(
+                ok: false, reason: "media-digest-mismatch")
+        index = index + 1
+    ClangCatalogReleaseDescriptorCheckV1(ok: true, reason: "")

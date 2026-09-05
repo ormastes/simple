@@ -1,0 +1,819 @@
+# SSH session key exchange; extracted from ssh_session.spl.
+
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32}
+use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_negotiate_algorithms, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex, ssh_build_disconnect}
+use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, host_key_set_advertised_algorithms}
+use os.apps.sshd.ssh_kex_core.{ssh_kex_compute_exchange_hash, ssh_derive_keys}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _append_byte, _push_bytes, _push_mpint_bytes, curve25519_shared_secret_mpint_bytes}
+use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
+use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _slice_range, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey, _zeroed_32_bytes}
+use os.kernel.log.klog_api.{log_info}
+use os.kernel.net.rt_net_socket_facade.{rt_net_last_ssh_plain_payload_len, rt_net_last_ssh_plain_payload_slice}
+use os.crypto.dual_backend.{dual_backend_alpha_default_mode, dual_backend_bytes_equal, dual_backend_choose_bytes, dual_backend_run_bytes}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_sign_live_pure_only, ed25519_sign_live_runtime_only, ed25519_verify}
+use os.crypto.curve25519.{x25519, x25519_base}
+@unsafe(reason: "raw runtime X25519 public-key provider; exact scalar/output lengths require validation", capabilities: [ffi])
+extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
+@unsafe(reason: "raw runtime X25519 shared-secret provider; exact scalar/point/output lengths require validation", capabilities: [ffi])
+extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
+@unsafe(reason: "raw runtime SHA-256 provider returns a runtime-owned digest requiring exact-length validation", capabilities: [ffi])
+extern fn rt_tls13_sha256(data: [u8]) -> [u8]
+@unsafe(reason: "raw SSH exchange-hash provider over borrowed transcript/key arrays", capabilities: [ffi])
+extern fn rt_ssh_curve25519_exchange_hash(client_version: [u8], server_version: [u8], client_kexinit: [u8], server_kexinit: [u8], host_key_blob: [u8], client_public: [u8], server_public: [u8], shared_secret: [u8]) -> [u8]
+extern fn rt_boot_tcp_send_kex_reply_ed25519(fd: i64, host_key_blob: [u8], server_public: [u8], sig_blob: [u8]) -> i64
+extern fn rt_boot_tcp_send_newkeys_fixed(fd: i64) -> i64
+extern fn serial_println(msg: text)
+
+fn log_raw_println(msg: text):
+    serial_println(msg)
+
+fn _live_exchange_hash_debug(
+    client_version: [u8],
+    server_version: [u8],
+    client_kexinit: [u8],
+    server_kexinit: [u8],
+    host_key_blob: [u8],
+    client_public: [u8],
+    server_public: [u8],
+    shared_secret: [u8]
+) -> [u8]:
+    serial_println("[sshd-session] exchash: v_c")
+    var hash_input: [u8] = []
+    hash_input = _push_string_live(hash_input, client_version)
+    serial_println("[sshd-session] exchash: v_s")
+    hash_input = _push_string_live(hash_input, server_version)
+    serial_println("[sshd-session] exchash: i_c")
+    hash_input = _push_string_live(hash_input, client_kexinit)
+    serial_println("[sshd-session] exchash: i_s")
+    hash_input = _push_string_live(hash_input, server_kexinit)
+    serial_println("[sshd-session] exchash: k_s")
+    hash_input = _push_string_live(hash_input, host_key_blob)
+    serial_println("[sshd-session] exchash: q_c")
+    hash_input = _push_string_live(hash_input, client_public)
+    serial_println("[sshd-session] exchash: q_s")
+    hash_input = _push_string_live(hash_input, server_public)
+    serial_println("[sshd-session] exchash: k")
+    hash_input = _push_mpint_bytes(hash_input, curve25519_shared_secret_mpint_bytes(shared_secret))
+    serial_println("[sshd-session] exchash: sha256 input len={hash_input.len()}")
+    val digest = rt_tls13_sha256(hash_input)
+    serial_println("[sshd-session] exchash: sha256 out len={digest.len()}")
+    digest
+
+fn _live_exchange_hash_fast(
+    client_version: [u8],
+    server_version: [u8],
+    client_kexinit: [u8],
+    server_kexinit: [u8],
+    host_key_blob: [u8],
+    client_public: [u8],
+    server_public: [u8],
+    shared_secret: [u8]
+) -> [u8]:
+    serial_println("[sshd-session] exchash lens vc={client_version.len()} vs={server_version.len()} ic={client_kexinit.len()} is={server_kexinit.len()} ks={host_key_blob.len()} qc={client_public.len()} qs={server_public.len()} k={shared_secret.len()}")
+    serial_println("[sshd-session] exchash sha vc={_bytes_to_hex(rt_tls13_sha256(client_version))}")
+    serial_println("[sshd-session] exchash sha vs={_bytes_to_hex(rt_tls13_sha256(server_version))}")
+    serial_println("[sshd-session] exchash sha ic={_bytes_to_hex(rt_tls13_sha256(client_kexinit))}")
+    serial_println("[sshd-session] exchash sha is={_bytes_to_hex(rt_tls13_sha256(server_kexinit))}")
+    serial_println("[sshd-session] exchash sha ks={_bytes_to_hex(rt_tls13_sha256(host_key_blob))}")
+    serial_println("[sshd-session] exchash sha qc={_bytes_to_hex(rt_tls13_sha256(client_public))}")
+    serial_println("[sshd-session] exchash sha qs={_bytes_to_hex(rt_tls13_sha256(server_public))}")
+    val shared_secret_mpint = curve25519_shared_secret_mpint_bytes(shared_secret)
+    # Never log the shared secret, its SSH mpint encoding, or a digest of
+    # either.  A digest still exposes an offline equality oracle for ephemeral
+    # KEX material and makes production serial logs security-sensitive.
+    var hash_input: [u8] = []
+    hash_input = _push_string_live(hash_input, client_version)
+    hash_input = _push_string_live(hash_input, server_version)
+    hash_input = _push_string_live(hash_input, client_kexinit)
+    hash_input = _push_string_live(hash_input, server_kexinit)
+    hash_input = _push_string_live(hash_input, host_key_blob)
+    hash_input = _push_string_live(hash_input, client_public)
+    hash_input = _push_string_live(hash_input, server_public)
+    hash_input = _push_mpint_bytes(hash_input, shared_secret_mpint)
+    rt_tls13_sha256(hash_input)
+
+# Transitional local spelling retained for the bootstrap packet builders.
+# This is Pure Simple, not an extern: it removes per-byte foreign dispatch
+# without changing call sites or array-growth semantics.
+@inline
+fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]:
+    _append_byte(arr, byte_val.to_u8())
+
+fn _live_bootstrap_x25519_private_key() -> [u8]:
+    """Deterministic live-QEMU bootstrap scalar used only while baremetal random_bytes is unstable."""
+    var key: [u8] = []
+    key.push((0x48) as u8)
+    key.push((0x9c) as u8)
+    key.push((0x2a) as u8)
+    key.push((0x61) as u8)
+    key.push((0xf5) as u8)
+    key.push((0x33) as u8)
+    key.push((0x17) as u8)
+    key.push((0xb8) as u8)
+    key.push((0x2d) as u8)
+    key.push((0x74) as u8)
+    key.push((0xa1) as u8)
+    key.push((0x0e) as u8)
+    key.push((0xcc) as u8)
+    key.push((0x59) as u8)
+    key.push((0x83) as u8)
+    key.push((0x42) as u8)
+    key.push((0x91) as u8)
+    key.push((0x06) as u8)
+    key.push((0xdf) as u8)
+    key.push((0x38) as u8)
+    key.push((0xbe) as u8)
+    key.push((0x27) as u8)
+    key.push((0x65) as u8)
+    key.push((0xaa) as u8)
+    key.push((0x14) as u8)
+    key.push((0xe7) as u8)
+    key.push((0x90) as u8)
+    key.push((0x4b) as u8)
+    key.push((0x6c) as u8)
+    key.push((0x21) as u8)
+    key.push((0xd3) as u8)
+    key.push((0x7f) as u8)
+    key
+
+fn _live_bootstrap_x25519_public_key() -> [u8]:
+    [
+        0x8c, 0x16, 0xc1, 0xdd, 0x75, 0xb7, 0x97, 0xa2,
+        0x9b, 0xa2, 0xc1, 0x7e, 0xb5, 0xa7, 0x68, 0xe4,
+        0x4a, 0x76, 0x0b, 0x9a, 0x0d, 0x0f, 0x8c, 0x59,
+        0x72, 0xca, 0xfb, 0x72, 0xef, 0xe1, 0x03, 0x37
+    ]
+
+fn _live_host_key_sig_algs() -> text:
+    "ssh-ed25519"
+
+fn _rv64_live_x25519_public_runtime_probe(server_private: [u8]) -> [u8]:
+    if server_private.len() != 32:
+        return []
+    var out: [u8] = []
+    unsafe(capabilities: [ffi]):
+        out = rt_tls13_x25519_public_key(server_private)
+    if out.len() != 32:
+        return []
+    out
+
+fn _rv64_live_x25519_public_pure_probe(server_private: [u8]) -> [u8]:
+    val out = x25519_base(server_private)
+    out
+
+fn _rv64_live_x25519_public_alpha(server_private: [u8]) -> [u8]:
+    val runtime_out = _rv64_live_x25519_public_runtime_probe(server_private)
+    val pure_out = _rv64_live_x25519_public_pure_probe(server_private)
+    val selected = dual_backend_choose_bytes(
+        "curve25519",
+        "rv64_live_public",
+        dual_backend_alpha_default_mode(),
+        [
+            "priv_len=" + server_private.len().to_text()
+        ],
+        runtime_out,
+        pure_out
+    )
+    if not dual_backend_bytes_equal(runtime_out, pure_out):
+        return []
+    selected
+
+fn _rv64_live_x25519_shared_alpha(server_private: [u8], client_public: [u8]) -> [u8]:
+    if server_private.len() != 32 or client_public.len() != 32:
+        return []
+    var runtime_out: [u8] = []
+    unsafe(capabilities: [ffi]):
+        runtime_out = rt_tls13_x25519_shared_secret(server_private, client_public)
+    if runtime_out.len() != 32:
+        return []
+    val pure_out = x25519(server_private, client_public)
+    val selected = dual_backend_choose_bytes(
+        "curve25519",
+        "rv64_live_shared",
+        dual_backend_alpha_default_mode(),
+        [
+            "priv_len=" + server_private.len().to_text(),
+            "pub_len=" + client_public.len().to_text()
+        ],
+        runtime_out,
+        pure_out
+    )
+    if not dual_backend_bytes_equal(runtime_out, pure_out):
+        return []
+    selected
+
+
+fn _derive_session_x25519_private_key(host_seed: [u8]?, client_public: [u8], client_kexinit_payload: [u8], rekey_epoch: u32) -> [u8]:
+    var seed_material: [u8] = []
+    if host_seed != nil:
+        seed_material = _copy_bytes_stable(host_seed)
+    val stable_client_public = _copy_bytes_stable(client_public)
+    var i: u64 = 0
+    while i < stable_client_public.len():
+        seed_material.push(ssh_session_u8_at(stable_client_public, i))
+        i = i + 1
+    val stable_kex_prefix = _copy_prefix_stable(client_kexinit_payload, 64)
+    i = 0
+    while i < stable_kex_prefix.len():
+        seed_material.push(ssh_session_u8_at(stable_kex_prefix, i))
+        i = i + 1
+    # Bind peer-controlled repeat proposals to a monotonically bounded daemon
+    # epoch so two accepted rekeys cannot reuse the server ephemeral scalar.
+    seed_material.push(((rekey_epoch >> 24) & 0xFFu32).to_u8())
+    seed_material.push(((rekey_epoch >> 16) & 0xFFu32).to_u8())
+    seed_material.push(((rekey_epoch >> 8) & 0xFFu32).to_u8())
+    seed_material.push((rekey_epoch & 0xFFu32).to_u8())
+    val digest = ssh_kex_compute_exchange_hash(
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        seed_material
+    )
+    if digest.len() != 32:
+        return _live_bootstrap_x25519_private_key()
+    _copy_bytes_stable(digest)
+
+fn _live_bootstrap_shared_secret(client_public: [u8]) -> [u8]:
+    var key: [u8] = []
+    key.push((0x8a) as u8)
+    key.push((0x14) as u8)
+    key.push((0x3d) as u8)
+    key.push((0x52) as u8)
+    key.push((0xe1) as u8)
+    key.push((0xc7) as u8)
+    key.push((0x90) as u8)
+    key.push((0x63) as u8)
+    key.push((0x1b) as u8)
+    key.push((0x49) as u8)
+    key.push((0xfd) as u8)
+    key.push((0x08) as u8)
+    key.push((0x6e) as u8)
+    key.push((0xb4) as u8)
+    key.push((0x2a) as u8)
+    key.push((0x5f) as u8)
+    key.push((0x97) as u8)
+    key.push((0x22) as u8)
+    key.push((0xc8) as u8)
+    key.push((0x71) as u8)
+    key.push((0x35) as u8)
+    key.push((0xaa) as u8)
+    key.push((0x0c) as u8)
+    key.push((0xde) as u8)
+    key.push((0x44) as u8)
+    key.push((0x6f) as u8)
+    key.push((0xb9) as u8)
+    key.push((0x18) as u8)
+    key.push((0x27) as u8)
+    key.push((0xd1) as u8)
+    key.push((0x5c) as u8)
+    key.push((0xe3) as u8)
+    key
+
+fn _live_bootstrap_exchange_hash() -> [u8]:
+    var key: [u8] = []
+    key.push((0x51) as u8)
+    key.push((0xa7) as u8)
+    key.push((0x2c) as u8)
+    key.push((0x89) as u8)
+    key.push((0xde) as u8)
+    key.push((0x14) as u8)
+    key.push((0xf0) as u8)
+    key.push((0x63) as u8)
+    key.push((0xb1) as u8)
+    key.push((0x37) as u8)
+    key.push((0x9a) as u8)
+    key.push((0x48) as u8)
+    key.push((0x26) as u8)
+    key.push((0xcd) as u8)
+    key.push((0x75) as u8)
+    key.push((0x1e) as u8)
+    key.push((0x93) as u8)
+    key.push((0x04) as u8)
+    key.push((0xbf) as u8)
+    key.push((0xe8) as u8)
+    key.push((0x5d) as u8)
+    key.push((0x21) as u8)
+    key.push((0x6a) as u8)
+    key.push((0xf4) as u8)
+    key.push((0x80) as u8)
+    key.push((0x19) as u8)
+    key.push((0x3c) as u8)
+    key.push((0xaa) as u8)
+    key.push((0x67) as u8)
+    key.push((0xd2) as u8)
+    key.push((0x0f) as u8)
+    key.push((0x58) as u8)
+    key
+
+fn _live_bootstrap_ed25519_signature() -> [u8]:
+    [
+        0x72, 0x17, 0xd3, 0x88, 0xf0, 0xf3, 0x0d, 0x43,
+        0x71, 0xd0, 0xe8, 0xf2, 0x9b, 0x6c, 0xc8, 0x25,
+        0x9e, 0x14, 0x6b, 0xed, 0x15, 0x2c, 0xa9, 0x8b,
+        0xa5, 0xc6, 0x74, 0x76, 0x62, 0xee, 0x1e, 0xf5,
+        0x40, 0x5e, 0x01, 0xba, 0x7b, 0x23, 0x12, 0x2c,
+        0xbd, 0x08, 0xf6, 0xa3, 0x59, 0xbb, 0xce, 0x6b,
+        0x1d, 0x42, 0x59, 0xd4, 0x9f, 0xe7, 0xf5, 0x1e,
+        0x01, 0x00, 0x19, 0xcb, 0x78, 0x69, 0x62, 0x09
+    ]
+
+fn _push_u32_be_live(buf: [u8], val_: u64) -> [u8]:
+    var out = buf
+    out.push((((val_ >> 24) & 0xFF).to_i64()) as u8)
+    out.push((((val_ >> 16) & 0xFF).to_i64()) as u8)
+    out.push((((val_ >> 8) & 0xFF).to_i64()) as u8)
+    out.push(((val_ & 0xFF).to_i64()) as u8)
+    out
+
+fn _push_bytes_live(buf: [u8], data: [u8]) -> [u8]:
+    var out = buf
+    var i: u64 = 0
+    while i < data.len():
+        out.push((ssh_session_u8_at(data, i).to_i64()) as u8)
+        i = i + 1
+    out
+
+fn _push_string_live(buf: [u8], data: [u8]) -> [u8]:
+    _push_bytes_live(_push_u32_be_live(buf, data.len()), data)
+
+fn _build_live_ed25519_host_key_blob(public_key: [u8]) -> [u8]:
+    var blob: [u8] = []
+    blob = _push_u32_be_live(blob, 11)
+    blob.push((0x73) as u8)
+    blob.push((0x73) as u8)
+    blob.push((0x68) as u8)
+    blob.push((0x2D) as u8)
+    blob.push((0x65) as u8)
+    blob.push((0x64) as u8)
+    blob.push((0x32) as u8)
+    blob.push((0x35) as u8)
+    blob.push((0x35) as u8)
+    blob.push((0x31) as u8)
+    blob.push((0x39) as u8)
+    blob = _push_string_live(blob, public_key)
+    blob
+
+fn _live_fixed_ed25519_host_key_blob() -> [u8]:
+    [
+        0x00, 0x00, 0x00, 0x0b, 0x73, 0x73, 0x68, 0x2d,
+        0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39, 0x00,
+        0x00, 0x00, 0x20, 0xd7, 0x5a, 0x98, 0x01, 0x82,
+        0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9,
+        0x64, 0x07, 0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda,
+        0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7,
+        0x07, 0x51, 0x1a
+    ]
+
+fn _build_live_kex_ecdh_reply(host_key_blob: [u8], server_public: [u8], signature: [u8]) -> [u8]:
+    var buf: [u8] = []
+    buf.push((31) as u8)
+    buf = _push_string_live(buf, host_key_blob)
+    buf = _push_string_live(buf, server_public)
+    buf = _push_string_live(buf, signature)
+    buf
+
+fn _build_live_ed25519_sig_blob() -> [u8]:
+    [
+        0x00, 0x00, 0x00, 0x0b, 0x73, 0x73, 0x68, 0x2d,
+        0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39, 0x00,
+        0x00, 0x00, 0x40, 0x72, 0x17, 0xd3, 0x88, 0xf0,
+        0xf3, 0x0d, 0x43, 0x71, 0xd0, 0xe8, 0xf2, 0x9b,
+        0x6c, 0xc8, 0x25, 0x9e, 0x14, 0x6b, 0xed, 0x15,
+        0x2c, 0xa9, 0x8b, 0xa5, 0xc6, 0x74, 0x76, 0x62,
+        0xee, 0x1e, 0xf5, 0x40, 0x5e, 0x01, 0xba, 0x7b,
+        0x23, 0x12, 0x2c, 0xbd, 0x08, 0xf6, 0xa3, 0x59,
+        0xbb, 0xce, 0x6b, 0x1d, 0x42, 0x59, 0xd4, 0x9f,
+        0xe7, 0xf5, 0x1e, 0x01, 0x00, 0x19, 0xcb, 0x78,
+        0x69, 0x62, 0x09
+    ]
+
+fn _derive_key_live_runtime_sha256(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id: [u8], needed: u64) -> [u8]:
+    if shared_secret.len() != 32 or exchange_hash.len() != 32 or session_id.len() != 32 or needed == 0u64 or needed > 64u64:
+        return []
+    var input: [u8] = []
+    val shared_secret_mpint = curve25519_shared_secret_mpint_bytes(shared_secret)
+    input = _push_mpint_bytes(input, shared_secret_mpint)
+    input = _push_bytes(input, exchange_hash)
+    input = _append_byte(input, letter)
+    input = _push_bytes(input, session_id)
+    var k1: [u8] = []
+    unsafe(capabilities: [ffi]):
+        k1 = rt_tls13_sha256(input)
+    if k1.len() != 32:
+        return []
+    var key_material: [u8] = _push_bytes([], k1)
+    while key_material.len() < needed:
+        var ext_input: [u8] = []
+        ext_input = _push_mpint_bytes(ext_input, shared_secret_mpint)
+        ext_input = _push_bytes(ext_input, exchange_hash)
+        ext_input = _push_bytes(ext_input, key_material)
+        var next: [u8] = []
+        unsafe(capabilities: [ffi]):
+            next = rt_tls13_sha256(ext_input)
+        if next.len() != 32:
+            return []
+        key_material = _push_bytes(key_material, next)
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < needed:
+        result = _append_byte(result, ssh_session_u8_at(key_material, i))
+        i = i + 1
+    result
+
+impl SshSession:
+
+    # Phase 2: Key Exchange
+
+    me do_kex() -> bool:
+        """Perform key exchange (curve25519-sha256)."""
+        self._do_kex([])
+
+    me do_rekey(client_kexinit: [u8]) -> bool:
+        """Complete one peer-initiated rekey while preserving connection state.
+
+        The caller has already authenticated and decrypted client_kexinit with
+        the old inbound key.  Rekey owns no channel/authentication state and
+        publishes each new directional key only after that direction's
+        NEWKEYS boundary.
+        """
+        if not self.cipher.active or client_kexinit.len() == 0u64:
+            return false
+        # The freestanding rekey scalar derivation is keyed by this host
+        # secret.  Never fall back to peer-only deterministic material.
+        if self.host_keys.ed25519_seed == nil:
+            return false
+        if self.rekey_in_progress or self.rekey_count >= 16u32:
+            return false
+        self.rekey_in_progress = true
+        val completed = self._do_kex(client_kexinit)
+        self.rekey_in_progress = false
+        if completed:
+            self.rekey_count = self.rekey_count + 1u32
+        completed
+
+    me _do_kex(preloaded_client_kexinit: [u8]) -> bool:
+        """Perform initial KEX or one staged rekey."""
+        val was_rekey = self.cipher.active
+        val state_before_kex = self.state
+        log_info("[app.sshd] " + "[sshd-session] kex start")
+        # Send our KEXINIT — advertise algorithms available in our host key set
+        val server_kexinit = ssh_build_kexinit_for_host_keys_and_certs(self.host_keys, self.host_certs)
+        self.server_kexinit_payload = server_kexinit
+        self.send_packet(server_kexinit)
+
+        # A peer-initiated rekey arrives through the connection dispatcher, so
+        # do not consume the following KEX_ECDH_INIT as a second KEXINIT.
+        val client_payload =
+            if preloaded_client_kexinit.len() > 0u64:
+                preloaded_client_kexinit
+            else:
+                self.recv_packet_payload()
+        log_info("[app.sshd] " + "[sshd-session] client kexinit received")
+        if client_payload.len() == 0:
+            log_info("[app.sshd] " + "[sshd-session] client kexinit missing")
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEXINIT received")
+            return false
+        if ssh_session_u8_at(client_payload, 0) == SSH_MSG_IGNORE or ssh_session_u8_at(client_payload, 0) == SSH_MSG_DEBUG:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unexpected pre-kex control message")
+            return false
+        self.client_kexinit_payload = client_payload
+
+        # Parse client KEXINIT. Prefer the structural byte parser on the live
+        # path; OpenSSH name-lists can be large enough to trip baremetal text
+        # conversion before negotiation.
+        val using_live_openssh_profile = true
+        val client_kex = match _parse_kexinit_fast(client_payload):
+            Ok(parsed): parsed
+            Err(_):
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEXINIT")
+                return false
+        if client_kex.first_kex_packet_follows:
+            # This constrained transport cannot prove that an optimistic guess
+            # matches both selected algorithms without retaining the original
+            # ordered name-list heads.  Fail closed instead of interpreting a
+            # guessed packet under the wrong KEX state.
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "optimistic KEX unsupported")
+            return false
+        val server_kex = match _parse_kexinit_fast(server_kexinit):
+            Ok(parsed): parsed
+            Err(_):
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad server KEXINIT")
+                return false
+        log_info("[app.sshd] " + "[sshd-session] client kexinit parsed")
+
+        val algos_early = match ssh_negotiate_algorithms(client_kex, server_kex):
+            Ok(negotiated): negotiated
+            Err(_):
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no matching KEX algorithms")
+                return false
+        val strict_kex = ssh_kex_uses_strict_kex(client_kex, server_kex)
+        log_info("[app.sshd] " + "[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
+
+        # Receive KEX_ECDH_INIT (client's ephemeral public key)
+        val kex_init_payload = self.recv_packet_payload()
+        if kex_init_payload.len() == 0:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEX_ECDH_INIT")
+            return false
+        if ssh_validate_kex_ecdh_init_payload(kex_init_payload, strict_kex).is_err():
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
+            return false
+        var client_public: [u8] = []
+        if using_live_openssh_profile:
+            if kex_init_payload.len() < 37:
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
+                return false
+            client_public = _slice_range(kex_init_payload, 5, 37)
+        else:
+            val r_client_pub = ssh_parse_kex_ecdh_init(kex_init_payload)
+            client_public = match r_client_pub:
+                Ok(parsed):
+                    parsed
+                Err(_):
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
+                    return false
+
+        # Generate our ephemeral keypair without the hosted random runtime path.
+        val server_private = if was_rekey:
+            _derive_session_x25519_private_key(
+                self.host_keys.ed25519_seed,
+                client_public,
+                self.client_kexinit_payload,
+                self.rekey_count + 1u32
+            )
+        elif using_live_openssh_profile:
+            _live_bootstrap_x25519_private_key()
+        elif client_public.len() == 32:
+            _derive_session_x25519_private_key(self.host_keys.ed25519_seed, client_public, self.client_kexinit_payload, 0u32)
+        else:
+            _live_bootstrap_x25519_private_key()
+        val server_public = if using_live_openssh_profile and server_private.len() == 32:
+            _rv64_live_x25519_public_alpha(server_private)
+        elif server_private.len() == 32:
+            x25519_base(server_private)
+        else:
+            []
+        log_info("[app.sshd] " + "[sshd-session] server ecdh material ready pub_len={server_public.len()}")
+        if server_public.len() != 32:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "server X25519 public failed")
+            return false
+        log_info("[app.sshd] " + "[sshd-session] server ecdh pub len={server_public.len()}")
+
+        # Compute shared secret
+        val shared_secret = if using_live_openssh_profile and server_private.len() == 32 and client_public.len() == 32:
+            _rv64_live_x25519_shared_alpha(server_private, client_public)
+        elif server_private.len() == 32 and client_public.len() == 32:
+            x25519(server_private, client_public)
+        else:
+            []
+        if shared_secret.len() != 32:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "server X25519 shared failed")
+            return false
+        log_info("[app.sshd] " + "[sshd-session] shared secret len={shared_secret.len()}")
+        # Length is sufficient operational evidence.  Secret bytes must never
+        # cross into either the kernel log or the serial diagnostic channel.
+
+        # Resolve negotiated algorithms — needed now for host-key-blob type
+        var negotiated_hk_algo = algos_early.host_key
+
+        # Build host key blob for the negotiated algorithm
+        var host_key_blob = if self.host_ed25519_public.len() == 32: ssh_build_ed25519_host_key_blob(self.host_ed25519_public) else: _build_live_host_key_blob_for_algo(negotiated_hk_algo, self.host_keys, self.host_certs, self.host_ed25519_public)
+        if host_key_blob.len() == 0:
+            if self.host_ed25519_public.len() == 32:
+                negotiated_hk_algo = "ssh-ed25519"
+                host_key_blob = ssh_build_ed25519_host_key_blob(self.host_ed25519_public)
+            elif self.host_keys.ed25519_seed != nil:
+                val fallback_pubkey = _ed25519_public_key_from_seed(self.host_keys.ed25519_seed)
+                if fallback_pubkey.len() == 32:
+                    negotiated_hk_algo = "ssh-ed25519"
+                    host_key_blob = ssh_build_ed25519_host_key_blob(fallback_pubkey)
+        log_info("[app.sshd] " + "[sshd-session] host key algo={negotiated_hk_algo} blob len={host_key_blob.len()}")
+
+        # Compute exchange hash.
+        # NOTE: on x64 freestanding native-build, storing an extern `[u8]` return
+        # (ANY-erased across the C facade) directly into a typed local/var drops
+        # the BYTE_PACKED representation and corrupts the handle (same class as
+        # the abi_probe P9 if-expr phi-merge bug). Pass the extern return straight
+        # through `_copy_bytes_stable` — the proven-safe idiom used throughout —
+        # so `exchange_hash` holds a Simple-built packed copy. Verified: with this
+        # form the ed25519 signature verifies against a real OpenSSH client.
+        var exchange_hash = _zeroed_32_bytes()
+        if using_live_openssh_profile:
+            var raw_exchange_hash: [u8] = []
+            unsafe(capabilities: [ffi]):
+                raw_exchange_hash = rt_ssh_curve25519_exchange_hash(
+                    self.client_version_bytes,
+                    self.server_version_bytes,
+                    self.client_kexinit_payload,
+                    self.server_kexinit_payload,
+                    host_key_blob,
+                    client_public,
+                    server_public,
+                    shared_secret
+                )
+            exchange_hash = _copy_bytes_stable(raw_exchange_hash)
+        else:
+            exchange_hash = ssh_kex_compute_exchange_hash(
+                self.client_version_bytes,
+                self.server_version_bytes,
+                self.client_kexinit_payload,
+                self.server_kexinit_payload,
+                host_key_blob,
+                client_public,
+                server_public,
+                shared_secret
+            )
+        log_info("[app.sshd] " + "[sshd-session] exchange hash len={exchange_hash.len()}")
+        if exchange_hash.len() != 32:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "exchange hash failed")
+            return false
+
+        # Session ID is the first exchange hash
+        if self.session_id.len() == 0:
+            self.session_id = exchange_hash
+
+        # Sign the exchange hash with the appropriate host key.
+        # For Ed25519 on the live lane, use the daemon's stored public key
+        # directly so the signature is bound to the exact host key blob we
+        # advertised, instead of re-deriving a public key mid-KEX.
+        var sig_blob: [u8] = []
+        if negotiated_hk_algo == "ssh-ed25519" and self.host_keys.ed25519_seed != nil and self.host_ed25519_public.len() == 32:
+            val stable_seed = _copy_bytes_stable(self.host_keys.ed25519_seed)
+            val stable_pub = _copy_bytes_stable(self.host_ed25519_public)
+            val stable_hash = _copy_bytes_stable(exchange_hash)
+            var sig_raw: [u8] = []
+            if using_live_openssh_profile:
+                val runtime_sig_result = ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
+                if runtime_sig_result.is_err():
+                    log_info("[app.sshd] [sshd-session] host key runtime signing failed")
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
+                    return false
+                val runtime_sig = runtime_sig_result.unwrap()
+                val pure_sig = ed25519_sign_live_pure_only(stable_seed, stable_pub, stable_hash)
+                if not dual_backend_bytes_equal(runtime_sig, pure_sig):
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key backend mismatch")
+                    return false
+                sig_raw = runtime_sig
+            else:
+                sig_raw = ed25519_sign(stable_seed, stable_pub, stable_hash)
+            if sig_raw.len() != 64:
+                log_info("[app.sshd] " + "[sshd-session] host key signing err")
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
+                return false
+            sig_blob = ssh_put_u32(sig_blob, 11)
+            sig_blob.push(0x73)
+            sig_blob.push(0x73)
+            sig_blob.push(0x68)
+            sig_blob.push(0x2D)
+            sig_blob.push(0x65)
+            sig_blob.push(0x64)
+            sig_blob.push(0x32)
+            sig_blob.push(0x35)
+            sig_blob.push(0x35)
+            sig_blob.push(0x31)
+            sig_blob.push(0x39)
+            sig_blob.push(0x00)
+            sig_blob.push(0x00)
+            sig_blob.push(0x00)
+            sig_blob.push(0x40)
+            var sig_i: u64 = 0
+            while sig_i < 64 and sig_i < sig_raw.len():
+                sig_blob.push(ssh_session_u8_at(sig_raw, sig_i))
+                sig_i = sig_i + 1
+        else:
+            log_info("[app.sshd] " + "[sshd-session] unexpected non-ed25519 host key algo={negotiated_hk_algo}")
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported host key algorithm")
+            return false
+        log_info("[app.sshd] " + "[sshd-session] sig blob len={sig_blob.len()}")
+        if negotiated_hk_algo == "ssh-ed25519" and not using_live_openssh_profile:
+            val sig_pubkey = _extract_ed25519_pubkey(host_key_blob)
+            val sig_raw = _unwrap_ssh_signature(sig_blob)
+            val sig_verify = if ed25519_verify(sig_pubkey, exchange_hash, sig_raw): 1 else: 0
+            log_info("[app.sshd] " + "[sshd-session] sig self-verify rc={sig_verify} pub len={sig_pubkey.len()} raw len={sig_raw.len()}")
+
+        # Send KEX_ECDH_REPLY
+        val reply = ssh_build_kex_ecdh_reply(host_key_blob, server_public, sig_blob)
+        if using_live_openssh_profile:
+            self.send_packet(reply)
+        else:
+            log_info("[app.sshd] " + "[sshd-session] kex reply len={reply.len()}")
+            self.send_packet(reply)
+
+        # Send NEWKEYS
+        val newkeys = ssh_build_newkeys()
+        if using_live_openssh_profile:
+            self.send_packet(newkeys)
+        else:
+            self.send_packet(newkeys)
+        val keys = ssh_derive_keys(shared_secret, exchange_hash, self.session_id)
+        if using_live_openssh_profile:
+            val runtime_iv_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x42, self.session_id, 12)
+            val runtime_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x44, self.session_id, 32)
+            if not dual_backend_bytes_equal(keys.iv_s2c, runtime_iv_s2c) or not dual_backend_bytes_equal(keys.enc_key_s2c, runtime_key_s2c):
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "key derivation backend mismatch")
+                return false
+        # Derive into locals.  During rekey the old inbound material must stay
+        # live until the peer's NEWKEYS has been authenticated; publishing it
+        # earlier would attempt to decrypt that packet with the new key.
+        var next_iv_c2s: [u8] = []
+        var next_iv_s2c: [u8] = []
+        if using_live_openssh_profile:
+            next_iv_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x41, self.session_id, 12)
+            next_iv_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x42, self.session_id, 12)
+        else:
+            next_iv_c2s = _copy_bytes_stable(keys.iv_c2s)
+            next_iv_s2c = _copy_bytes_stable(keys.iv_s2c)
+        var enc_key_len: u64 = 0
+        if algos_early.cipher_c2s == "aes256-gcm@openssh.com" and algos_early.cipher_s2c == "aes256-gcm@openssh.com":
+            enc_key_len = 32
+        elif algos_early.cipher_c2s == "aes128-gcm@openssh.com" and algos_early.cipher_s2c == "aes128-gcm@openssh.com":
+            enc_key_len = 16
+        elif algos_early.cipher_c2s == "aes256-ctr" and algos_early.cipher_s2c == "aes256-ctr":
+            enc_key_len = 32
+        else:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
+            return false
+        var next_enc_key_c2s: [u8] = []
+        var next_enc_key_s2c: [u8] = []
+        var next_mac_key_c2s: [u8] = []
+        var next_mac_key_s2c: [u8] = []
+        if using_live_openssh_profile:
+            next_enc_key_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x43, self.session_id, enc_key_len)
+            next_enc_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x44, self.session_id, enc_key_len)
+            next_mac_key_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x45, self.session_id, 32)
+            next_mac_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x46, self.session_id, 32)
+        else:
+            next_enc_key_c2s = _copy_prefix_stable(keys.enc_key_c2s, enc_key_len)
+            next_enc_key_s2c = _copy_prefix_stable(keys.enc_key_s2c, enc_key_len)
+            next_mac_key_c2s = _copy_bytes_stable(keys.mac_key_c2s)
+            next_mac_key_s2c = _copy_bytes_stable(keys.mac_key_s2c)
+        if next_iv_c2s.len() != 12 or next_iv_s2c.len() != 12 or next_enc_key_c2s.len() != enc_key_len or next_enc_key_s2c.len() != enc_key_len or next_mac_key_c2s.len() != 32 or next_mac_key_s2c.len() != 32:
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "key derivation failed")
+            return false
+
+        # Our NEWKEYS was just sent with the old outbound key.  RFC 4253 makes
+        # the next outbound packet use the new key, independently of inbound.
+        self.iv_s2c = next_iv_s2c
+        self.enc_key_s2c = next_enc_key_s2c
+        self.mac_key_s2c = next_mac_key_s2c
+        self.ctr_counter_s2c = _copy_bytes_stable(next_iv_s2c)
+        self.negotiated_cipher_s2c = algos_early.cipher_s2c
+        self.negotiated_mac_s2c = algos_early.mac_s2c
+        if was_rekey and strict_kex:
+            self.cipher.seq_s2c = 0u32
+        # Keep inbound and outbound plaintext until the client's NEWKEYS is
+        # consumed. Sending encrypted EXT_INFO before this point races
+        # OpenSSH's strict-kex state, where it is still waiting for our
+        # plaintext NEWKEYS.
+        var sent_server_ext_info_early = false
+
+        # Receive client NEWKEYS under the pre-NEWKEYS plaintext framing.
+        var client_newkeys: [u8] = []
+        var client_newkeys_attempts: u64 = 0
+        while client_newkeys.len() == 0 and client_newkeys_attempts < 1000:
+            client_newkeys = self.recv_packet_payload()
+            if client_newkeys.len() == 0:
+                unsafe(capabilities: [ffi]):
+                    rt_thread_sleep(1)
+            client_newkeys_attempts = client_newkeys_attempts + 1
+        val client_newkeys_len = client_newkeys.len()
+        if client_newkeys_len != 1 or ssh_validate_newkeys_payload(client_newkeys, strict_kex).is_err():
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid NEWKEYS")
+            return false
+
+        # The authenticated peer NEWKEYS is the inbound publication boundary.
+        self.iv_c2s = next_iv_c2s
+        self.enc_key_c2s = next_enc_key_c2s
+        self.mac_key_c2s = next_mac_key_c2s
+        self.ctr_counter_c2s = _copy_bytes_stable(next_iv_c2s)
+        self.negotiated_cipher_c2s = algos_early.cipher_c2s
+        self.negotiated_mac_c2s = algos_early.mac_c2s
+
+        # Strict KEX resets each encrypted direction at its own NEWKEYS
+        # boundary.  Initial KEX has no encrypted counters but initializes both
+        # to the same canonical value before cipher activation.
+        if strict_kex:
+            self.cipher.seq_c2s = 0u32
+            if not was_rekey and not sent_server_ext_info_early:
+                self.cipher.seq_s2c = 0u32
+        elif not was_rekey:
+            # Without strict-KEX, RFC 4253 sequence numbers span the plaintext
+            # handshake instead of restarting at cipher activation.
+            self.cipher.seq_c2s = self.recv_seq
+            self.cipher.seq_s2c = self.send_seq
+        self.cipher.active = true
+        if was_rekey:
+            self.state = state_before_kex
+        else:
+            self.state = SshSessionState.Authentication
+        log_info("[app.sshd] " + "[sshd-session] cipher activated")
+
+        if not using_live_openssh_profile and not sent_server_ext_info_early:
+            val ext_info = ssh_build_ext_info_server_sig_algs(if using_live_openssh_profile: _live_host_key_sig_algs() else: host_key_set_advertised_algorithms(self.host_keys))
+            self.send_packet(ext_info)
+        log_info("[app.sshd] " + "[sshd-session] kex ok")
+
+        true

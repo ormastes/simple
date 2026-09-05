@@ -1,0 +1,83 @@
+# GREEN (was RED, fixed 2026-07-30, commit 48af531ce0e "fix(jit): lower
+# module-level dynamic global initializers as real code" + follow-ups
+# 6061fb7ed45, a9e53f9f2bc, 2352f106899): a module-level `val`/`var` whose
+# initializer needs genuine runtime evaluation -- a function call, or an
+# expression referencing another global -- used to silently stay at its
+# zeroed default under both the Cranelift JIT (`bin/simple run`) and AOT
+# (`bin/simple compile --native`), because `generate_module_init` /
+# `runtime_init_globals` recognized only five closed-form initializer shapes
+# (const-eval int/float/bool, string, array literal, struct literal, bare
+# function reference).
+#
+# Root cause (write-side, not JIT-specific): no path existed for an
+# initializer needing real evaluation, so the global's storage slot was
+# declared and never written -- it just stayed at its bss zero forever. This
+# was NOT specific to function calls: `val DERIVED = BASE + 5` (referencing
+# another global, no call involved) hit the identical bug.
+#
+# Fix: `hir/lower/module_lowering/module_pass.rs` now synthesizes a
+# `__module_init_dynamic` HIR function -- one `HirStmt::Assign` per
+# non-const-foldable module-level val/var, in source declaration order,
+# built through the ordinary `lower_expr` path (the same one every real
+# function body uses). `common_backend.rs` appends a call to it at the end
+# of `__module_init`, so it runs wherever `__module_init` already does, for
+# both JIT and AOT, with no dispatch changes.
+#
+# See doc/08_tracking/bug/ and
+# .claude/memory/reference_jit_module_level_val_from_function_call_reads_zero.md
+# for the full investigation. This probe follows the same convention as
+# probe_freestanding_text_concat_chain.spl in this directory (exit code 0 =
+# pass). Exercise the two engines that share this codegen:
+#   bin/simple run <this file>                                  # JIT
+#   bin/simple compile <this file> --native --backend cranelift # AOT
+# Both must print the OK lines below and exit 0.
+
+fn compute_answer() -> i64:
+    return 42
+
+struct Dims:
+    w: i32
+    h: i32
+
+fn compute_dims() -> Dims:
+    return Dims(w: 480, h: 360)
+
+# Function-call initializer -- the bug's original trigger shape.
+val CALL_INIT: i64 = compute_answer()
+
+# Struct-returning function-call initializer + field access -- the shape
+# that surfaced the write-side defect in the web-showcase campaign
+# (SHOWCASE_DIMS / RW / RH reading 0).
+val DIMS: Dims = compute_dims()
+
+# Cross-global-reference initializer (no call at all) -- proven to hit the
+# identical bug, so it must be covered by the same regression.
+val BASE: i64 = 10
+val DERIVED: i64 = BASE + 5
+
+# Literal initializer -- control case. Always worked (const-folded into
+# static .data); must keep working after the fix (no regression).
+val LIT: i64 = 7
+
+fn main() -> i64:
+    if CALL_INIT != 42:
+        print("FAIL CALL_INIT=" + CALL_INIT.to_text())
+        return 1
+    if DIMS.w != 480 or DIMS.h != 360:
+        print("FAIL DIMS.w=" + DIMS.w.to_text() + " DIMS.h=" + DIMS.h.to_text())
+        return 2
+    if BASE != 10:
+        print("FAIL BASE=" + BASE.to_text())
+        return 3
+    if DERIVED != 15:
+        print("FAIL DERIVED=" + DERIVED.to_text())
+        return 4
+    if LIT != 7:
+        print("FAIL LIT=" + LIT.to_text())
+        return 5
+    print("OK CALL_INIT=" + CALL_INIT.to_text())
+    print("OK DIMS.w=" + DIMS.w.to_text() + " DIMS.h=" + DIMS.h.to_text())
+    print("OK BASE=" + BASE.to_text())
+    print("OK DERIVED=" + DERIVED.to_text())
+    print("OK LIT=" + LIT.to_text())
+    0

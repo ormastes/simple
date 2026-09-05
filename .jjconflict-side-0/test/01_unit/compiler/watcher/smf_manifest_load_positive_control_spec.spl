@@ -1,0 +1,60 @@
+"""
+# SMF Manifest Whole-Entry Verification On Load
+
+**Category:** Infrastructure
+**Gap:** `smf_manifest_entry_verifies` (watcher/smf_manifest.spl) was defined
+and exported but had ZERO callers — the whole-entry wrapper that re-reads
+`entry.source_path` itself was never wired into any load path.
+
+Now wired: `load_smf_manifest` whole-entry verifies every parsed row via
+`smf_manifest_drop_unverified` and DROPS failures — fail closed. A manifest
+lookup on a changed or missing source misses instead of silently reusing a
+stale .smf. Unchanged valid entries are retained (positive control), so the
+fix is not "reject everything".
+"""
+
+use std.spec.*
+use compiler.driver.watcher.smf_manifest.{
+    SmfManifest, SmfManifestEntry, smf_manifest_new, smf_manifest_entry_new,
+    smf_manifest_update, smf_manifest_find,
+    load_smf_manifest, save_smf_manifest, smf_manifest_entry_verifies
+}
+use std.io_runtime.{dir_create_all}
+
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+val DIR: text = "build/tmp/smf_load_verify_spec"
+
+fn make_entry(source_path: text, source_text: text) -> SmfManifestEntry:
+    smf_manifest_entry_new(
+        source_path, "{DIR}/out.smf", rt_hash_text(source_text),
+        "cranelift", 0, false, true, false, "dev", []
+    )
+
+fn save_manifest_with(entry: SmfManifestEntry, manifest_path: text) -> bool:
+    var m = smf_manifest_new()
+    m = smf_manifest_update(m, entry)
+    save_smf_manifest(m, manifest_path)
+
+describe "load_smf_manifest defect-class: verification must not reject valid entries":
+    it "POSITIVE CONTROL: an unchanged valid entry still verifies and is reused":
+        dir_create_all(DIR)
+        val src_path = "{DIR}/stable.spl"
+        val manifest_path = "{DIR}/manifest_stable.sdn"
+        val original = "fn main(): print \"stable\"\n"
+        expect(rt_file_write_text(src_path, original)).to_equal(true)
+        val entry = make_entry(src_path, original)
+        # Guard: on paths where rt_hash_text stubs to 0, an accept case is
+        # vacuous (0 is the never-trusted sentinel). Assert non-zero first so
+        # this control is real evidence, not a silent pass-through.
+        expect(entry.source_hash != 0).to_equal(true)
+        expect(save_manifest_with(entry, manifest_path)).to_equal(true)
+        val loaded = load_smf_manifest(manifest_path)
+        match smf_manifest_find(loaded, src_path):
+            case Some(e):
+                expect(smf_manifest_entry_verifies(e)).to_equal(true)
+                expect(e.smf_path).to_equal("{DIR}/out.smf")
+            case nil:
+                expect(false).to_equal(true)

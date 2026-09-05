@@ -1,0 +1,90 @@
+"""
+# An untyped `list` element read returned through a raw `i64` slot
+
+**Category:** MIR lowering / tagged-vs-raw slot coercion (reproducing spec)
+**Bug:** doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md
+
+## Overview
+
+`list` resolves to `HirType::Array { element: ANY }`, so `l[i]` is statically
+`ANY` and carries the RUNTIME-TAGGED representation (`v << 3 | TAG_INT`). An
+arithmetic/bit op with an `ANY` operand deliberately re-boxes its result
+(`lowering_expr_ops.rs`, fixing `seed_mir_any_binop_result_unboxed_2026-08-15`).
+
+The gap this spec pins is on the way OUT: a function declared `-> i64` has a
+RAW return slot, and nothing untagged the boxed value before it was returned.
+The caller therefore read `10 << 3 == 80` instead of `10` — a plausible number,
+no crash, no diagnostic.
+
+Measured before the fix, on the JIT (`bin/simple run`):
+
+    typed=10      <- `[i64]` param, correct
+    list=80       <- `list` param, WRONG (10 << 3)
+
+`10` and `80` are both ordinary values; nothing about the wrong one looks wrong.
+
+## Engines
+
+The tree-walk interpreter that `bin/simple test` uses does not go through MIR
+lowering at all, so a spec BODY can never go red on this defect. The example
+below shells out to `bin/simple run` (Cranelift JIT) and compares the untyped
+`list` answer against the `[i64]`-typed control computed the same way.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# NOTE: no `{...}` interpolation in the embedded source — a `{name}` inside a
+# spec's own string literal is resolved by the SPEC's lexer and kills the whole
+# file before any example runs.
+val REPRO_SOURCE: text = ("fn via_list(l: list, i: i64) -> i64:\n" +
+    "    return l[i] & 0xFF\n" +
+    "\n" +
+    "fn via_typed(l: [i64], i: i64) -> i64:\n" +
+    "    return l[i] & 0xFF\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val typed: [i64] = [10, 20, 30]\n" +
+    "    val untyped: list = [10, 20, 30]\n" +
+    "    print(\"TYPED\")\n" +
+    "    print(via_typed(typed, 0))\n" +
+    "    print(\"LIST\")\n" +
+    "    print(via_list(untyped, 0))\n" +
+    "    return 0\n")
+
+fn run_repro() -> text:
+    val dir = "build/test-artifacts/untyped_list_raw_return_slot"
+    val src = dir + "/repro.spl"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir])
+    file_write(src, REPRO_SOURCE)
+    val cmd = ("SIMPLE_RUST_SEED_WARNING=0 nice -n 19 " + bin +
+        " run " + src + " 2>&1 || echo RUN-FAILED")
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "an ANY-typed element read returned through a declared i64 slot":
+
+    it "returns the element value, not the tagged word":
+        step("Run the fixture on the JIT in a subprocess — the spec body is interpreted")
+        val out = run_repro()
+
+        step("Refuse to pass on a run that produced nothing")
+        # Without this, a RUN-FAILED string satisfies every `not contains`
+        # assertion below and the spec is vacuously green.
+        expect(out.contains("RUN-FAILED")).to_equal(false)
+        expect(out).to_contain("TYPED")
+        expect(out).to_contain("LIST")
+
+        step("The `[i64]`-typed control is the reference answer")
+        expect(out).to_contain("TYPED\n10")
+
+        step("The untyped `list` must agree with the typed control")
+        expect(out).to_contain("LIST\n10")
+
+        step("The `<< 3` tagged-word fingerprint is absent")
+        # 10 << 3 == 80. Asserted explicitly because `80` is a perfectly
+        # ordinary i64 — only its absence distinguishes fixed from broken.
+        expect(out.contains("LIST\n80")).to_equal(false)

@@ -1,0 +1,192 @@
+use std.spec.*
+use os.apps.servers_user.web_h2_control_owner_v1.{WebH2ControlOwnerV1, WebH2ControlSendKindV1}
+use os.apps.servers_user.web_h2_response_owner_v1.{WebH2ResponseOwnerV1, WebH2ResponsePrepareStatusV1}
+use os.apps.servers_user.web_h2_coordinator_v1.{WebH2CoordinatorV1, WebH2OrderedApplyStatusV1}
+use std.http.h2.h2_hpack.{HpackEntry, hpack_encode, hpack_static_table}
+use std.http.h2.h2_frame.{H2Frame, H2SettingsFrame, H2Setting, H2HeadersFrame, H2RstStreamFrame, H2GoawayFrame, H2WindowUpdateFrame, H2_FLAG_END_HEADERS, H2_FLAG_END_STREAM, H2_ERR_PROTOCOL_ERROR, H2_SETTINGS_INITIAL_WINDOW_SIZE}
+use std.http.h2.h2_writer.{h2_write_frame}
+use std.http.h2.h2_preface.{h2_connection_preface_bytes}
+
+fn _request_headers() -> [u8]:
+    hpack_encode([HpackEntry(name: ":method", value: "GET"),
+        HpackEntry(name: ":scheme", value: "https"),
+        HpackEntry(name: ":authority", value: "example.com"),
+        HpackEntry(name: ":path", value: "/")], hpack_static_table()).bytes
+
+describe "ordered H2 receive and transactional GOAWAY seams":
+    it "revokes END_STREAM admission when a later same-feed RST arrives":
+        var coordinator = WebH2CoordinatorV1.create(0xA50Eu64, 65535, 16384)
+        val settings = h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+            flags: 0, settings: [])))
+        val headers = h2_write_frame(H2Frame.Headers(H2HeadersFrame(stream_id: 1,
+            flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+            header_block: _request_headers())))
+        val reset = h2_write_frame(H2Frame.RstStream(H2RstStreamFrame(
+            stream_id: 1, error_code: 8)))
+        val result = coordinator.feed_authenticated_plaintext(
+            h2_connection_preface_bytes() + settings + headers + reset, true)
+        expect(result.apply_result.status).to_equal(WebH2OrderedApplyStatusV1.Applied)
+        val lease = coordinator.response_owner.issue_lease(
+            result.response_admissions[0], 65535)
+        expect(coordinator.response_owner.stream_send_credit(lease)).to_equal(-1)
+
+    it "prepares bounded protocol GOAWAY and changes state only on commit":
+        var control = WebH2ControlOwnerV1.create()
+        val malformed = control.feed_authenticated_plaintext([0u8], true)
+        expect(malformed.close_after_error_goaway).to_be(true)
+        expect(malformed.protocol_error_code).to_equal(H2_ERR_PROTOCOL_ERROR)
+        val prepared = control.prepare_error_goaway_v1(malformed.protocol_error_code)
+        expect(prepared.kind).to_equal(WebH2ControlSendKindV1.Goaway)
+        expect(prepared.wire_bytes.len()).to_be_less_than(64u64)
+        expect(control.abort_control(prepared.token)).to_be(true)
+        val retry = control.prepare_error_goaway_v1(H2_ERR_PROTOCOL_ERROR)
+        expect(retry.wire_bytes).to_equal(prepared.wire_bytes)
+        expect(control.commit_control(retry.token)).to_be(true)
+        expect(control.prepare_error_goaway_v1(H2_ERR_PROTOCOL_ERROR).kind).to_equal(WebH2ControlSendKindV1.None)
+
+    it "forces close after the bounded error GOAWAY write budget":
+        var control = WebH2ControlOwnerV1.create()
+        val _ = control.feed_authenticated_plaintext([0u8], true)
+        val first = control.prepare_error_goaway_v1(H2_ERR_PROTOCOL_ERROR)
+        expect(control.abort_control(first.token)).to_be(true)
+        val second = control.prepare_error_goaway_v1(H2_ERR_PROTOCOL_ERROR)
+        expect(control.abort_control(second.token)).to_be(true)
+        expect(control.must_close_without_send_v1()).to_be(true)
+        expect(control.prepare_error_goaway_v1(H2_ERR_PROTOCOL_ERROR).kind).to_equal(WebH2ControlSendKindV1.None)
+
+    it "derives local GOAWAY cutoff from committed response completion":
+        var response_owner = WebH2ResponseOwnerV1.create(65535, 16384)
+        var control = WebH2ControlOwnerV1.create_bound(
+            response_owner.bind_request_owner(0xA510u64))
+        val settings = h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+            flags: 0, settings: [])))
+        val headers = h2_write_frame(H2Frame.Headers(H2HeadersFrame(stream_id: 1,
+            flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+            header_block: _request_headers())))
+        val result = control.feed_authenticated_plaintext(
+            h2_connection_preface_bytes() + settings + headers, true)
+        val lease = response_owner.issue_lease(
+            result.ordered_actions[1].response_admissions[0], 65535)
+        val response = response_owner.prepare_response(lease,
+            [HpackEntry(name: ":status", value: "200")], [], true)
+        expect(response.status).to_equal(WebH2ResponsePrepareStatusV1.Prepared)
+        expect(response_owner.commit_response(response.transaction)).to_be(true)
+        val goaway = control.prepare_local_goaway_v1(
+            response_owner.local_goaway_cutoff_v1(), 0)
+        expect(goaway.kind).to_equal(WebH2ControlSendKindV1.Goaway)
+
+    it "applies ordered SETTINGS and WINDOW_UPDATE before response output":
+        var coordinator = WebH2CoordinatorV1.create(0xA511u64, 65535, 16384)
+        val settings = h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+            flags: 0, settings: [])))
+        val headers = h2_write_frame(H2Frame.Headers(H2HeadersFrame(stream_id: 1,
+            flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+            header_block: _request_headers())))
+        val admitted = coordinator.feed_authenticated_plaintext(
+            h2_connection_preface_bytes() + settings + headers, true)
+        expect(admitted.apply_result.status).to_equal(WebH2OrderedApplyStatusV1.Applied)
+        val lease = coordinator.response_owner.issue_lease(
+            admitted.response_admissions[0], 65535)
+        val lower = h2_write_frame(H2Frame.Settings(H2SettingsFrame(flags: 0,
+            settings: [H2Setting(identifier: H2_SETTINGS_INITIAL_WINDOW_SIZE,
+                value: 0)])))
+        val lowered = coordinator.feed_authenticated_plaintext(lower, true)
+        expect(lowered.apply_result.status).to_equal(WebH2OrderedApplyStatusV1.Applied)
+        expect(coordinator.response_owner.prepare_response(lease,
+            [HpackEntry(name: ":status", value: "200")], [1u8], true).status).to_equal(
+                WebH2ResponsePrepareStatusV1.FlowBlocked)
+        val update = h2_write_frame(H2Frame.WindowUpdate(H2WindowUpdateFrame(
+            stream_id: 1, increment: 1)))
+        val unblocked = coordinator.feed_authenticated_plaintext(update, true)
+        expect(unblocked.apply_result.status).to_equal(WebH2OrderedApplyStatusV1.Applied)
+        expect(coordinator.response_owner.prepare_response(lease,
+            [HpackEntry(name: ":status", value: "200")], [1u8], true).status).to_equal(
+                WebH2ResponsePrepareStatusV1.Prepared)
+
+    it "registers request flow before a same-feed stream WINDOW_UPDATE":
+        var coordinator = WebH2CoordinatorV1.create(0xA512u64, 65535, 16384)
+        val settings = h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+            flags: 0, settings: [])))
+        val headers = h2_write_frame(H2Frame.Headers(H2HeadersFrame(stream_id: 1,
+            flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+            header_block: _request_headers())))
+        val update = h2_write_frame(H2Frame.WindowUpdate(H2WindowUpdateFrame(
+            stream_id: 1, increment: 1)))
+        val result = coordinator.feed_authenticated_plaintext(
+            h2_connection_preface_bytes() + settings + headers + update, true)
+        expect(result.apply_result.status).to_equal(
+            WebH2OrderedApplyStatusV1.Applied)
+        expect(result.response_admissions.len()).to_equal(1u64)
+
+    it "routes coordinator flow failure through bounded error GOAWAY then close":
+        var coordinator = WebH2CoordinatorV1.create(0xA513u64, 65535, 16384)
+        val settings = h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+            flags: 0, settings: [])))
+        val headers = h2_write_frame(H2Frame.Headers(H2HeadersFrame(stream_id: 1,
+            flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+            header_block: _request_headers())))
+        val admitted = coordinator.feed_authenticated_plaintext(
+            h2_connection_preface_bytes() + settings + headers, true)
+        expect(admitted.apply_result.status).to_equal(WebH2OrderedApplyStatusV1.Applied)
+        val overflow = h2_write_frame(H2Frame.WindowUpdate(H2WindowUpdateFrame(
+            stream_id: 1, increment: 2147483647)))
+        val failed = coordinator.feed_authenticated_plaintext(overflow, true)
+        expect(failed.apply_result.status).to_equal(
+            WebH2OrderedApplyStatusV1.ProtocolError)
+        val first = coordinator.prepare_error_goaway_v1()
+        expect(first.wire_bytes.len()).to_be_greater_than(0u64)
+        expect(coordinator.abort_error_goaway_v1(first.token)).to_be(true)
+        val retry = coordinator.prepare_error_goaway_v1()
+        expect(retry.wire_bytes).to_equal(first.wire_bytes)
+        expect(coordinator.commit_error_goaway_v1(retry.token)).to_be(true)
+        expect(coordinator.must_close_v1()).to_be(true)
+
+    it "retains the parser protocol error code for coordinator GOAWAY":
+        var coordinator = WebH2CoordinatorV1.create(0xA514u64, 65535, 16384)
+        val failed = coordinator.feed_authenticated_plaintext([0u8], true)
+        expect(failed.close_after_error_goaway).to_be(true)
+        val goaway = coordinator.prepare_error_goaway_v1()
+        expect(goaway.wire_bytes.len()).to_be_greater_than(16u64)
+        expect(goaway.wire_bytes[16]).to_equal(1u8)
+
+    it "projects ordered request events only after flow actions apply":
+        var coordinator = WebH2CoordinatorV1.create(0xA515u64, 65535, 16384)
+        val settings = h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+            flags: 0, settings: [])))
+        val headers = h2_write_frame(H2Frame.Headers(H2HeadersFrame(stream_id: 1,
+            flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+            header_block: _request_headers())))
+        val result = coordinator.feed_authenticated_plaintext(
+            h2_connection_preface_bytes() + settings + headers, true)
+        expect(result.apply_result.status).to_equal(WebH2OrderedApplyStatusV1.Applied)
+        expect(result.request_events.len()).to_equal(2u64)
+        expect(result.response_admissions.len()).to_equal(1u64)
+
+    it "applies and projects peer GOAWAY in wire order":
+        var coordinator = WebH2CoordinatorV1.create(0xA516u64, 65535, 16384)
+        val settings = h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+            flags: 0, settings: [])))
+        val _ = coordinator.feed_authenticated_plaintext(
+            h2_connection_preface_bytes() + settings, true)
+        val goaway = h2_write_frame(H2Frame.Goaway(H2GoawayFrame(
+            last_stream_id: 0, error_code: 0, debug_data: [])))
+        val result = coordinator.feed_authenticated_plaintext(goaway, true)
+        expect(result.apply_result.status).to_equal(WebH2OrderedApplyStatusV1.Applied)
+        expect(result.peer_goaway).to_be(true)
+
+    it "prepares HEAD metadata with the GET representation length and no DATA body":
+        var coordinator = WebH2CoordinatorV1.create(0xA517u64, 65535, 16384)
+        val settings = h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+            flags: 0, settings: [])))
+        val headers = h2_write_frame(H2Frame.Headers(H2HeadersFrame(stream_id: 1,
+            flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+            header_block: _request_headers())))
+        val admitted = coordinator.feed_authenticated_plaintext(
+            h2_connection_preface_bytes() + settings + headers, true)
+        val lease = coordinator.response_owner.issue_lease(
+            admitted.response_admissions[0], 65535)
+        val response = coordinator.response_owner.prepare_head_response_v1(lease,
+            [HpackEntry(name: ":status", value: "200"),
+                HpackEntry(name: "content-length", value: "123")], 123)
+        expect(response.status).to_equal(WebH2ResponsePrepareStatusV1.Prepared)
+        expect(response.wire_bytes.len()).to_be_greater_than(9u64)

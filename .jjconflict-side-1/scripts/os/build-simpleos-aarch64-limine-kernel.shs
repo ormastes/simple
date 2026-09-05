@@ -1,0 +1,81 @@
+#!/bin/sh
+# build-simpleos-aarch64-limine-kernel.shs
+#
+# Build `build/os/aarch64_limine/kernel.elf` from tracked source.
+#
+# WHY THIS EXISTS
+# ---------------
+# doc/08_tracking/bug/arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md
+# fixed the *ESP* half of the reproducibility gap
+# (scripts/os/build-simpleos-aarch64-efi-esp.shs). The *kernel* half was left
+# open: the ESP builder documents its `KERNEL_ELF` input as "the one already in
+# build/os/aarch64_limine/kernel.elf" and deliberately does not build it, and
+# `grep -rn aarch64_limine` found NO producer anywhere in the tree. `build/` is
+# gitignored, so on a clean clone the whole aarch64 real-firmware lane
+# (scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs and
+# scripts/check/check-simpleos-aarch64-limine-framebuffer.shs) died with
+#
+#     ERROR — nothing was checked: ... missing kernel ELF .../kernel.elf
+#
+# — measured 2026-08-24, exit 2. That is exactly the "passed only because a
+# binary happened to survive in a gitignored directory" failure the bug record
+# names. This script closes it: the build command is the one the 2026-08-07
+# real boot transcript in
+# doc/08_tracking/bug/aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md
+# used, now committed instead of retyped by hand.
+#
+# NOTE ON THE COMPILER: this uses the Rust bootstrap seed on purpose. The
+# aarch64 *unified desktop* kernel refuses the seed (its virtio modules hit
+# known-broken seed codegen), but this Limine kernel is a different, much
+# smaller artifact and links cleanly with it — verified 2026-08-24, 103 KB ELF.
+#
+# Usage: sh scripts/os/build-simpleos-aarch64-limine-kernel.shs
+# Env:   SIMPLE_BIN  compiler to use (default bin/simple)
+#        OUT_DIR     default build/os/aarch64_limine
+#
+# Exit status: 0 = a non-empty aarch64 ELF was produced and verified;
+# non-zero = nothing usable. There is no partial success.
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/aarch64_limine}
+SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/bin/simple}
+ENTRY=$REPO_ROOT/examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl
+LDS=$REPO_ROOT/examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld
+KERNEL=$OUT_DIR/kernel.elf
+LOG=$OUT_DIR/kernel-build.log
+
+fail() { printf 'build-aarch64-limine-kernel: ERROR — %s\n' "$*" >&2; exit 1; }
+
+[ -x "$SIMPLE_BIN" ] || fail "no compiler at $SIMPLE_BIN"
+[ -f "$ENTRY" ] || fail "missing entry $ENTRY"
+[ -f "$LDS" ] || fail "missing linker script $LDS"
+
+mkdir -p "$OUT_DIR"
+rm -f "$KERNEL"
+
+# Exit status read DIRECTLY into a variable on the next line — never through a
+# pipe, whose $? is the last pipeline element's status.
+"$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
+    --entry "$ENTRY" \
+    --target aarch64-unknown-none-elf \
+    --linker-script "$LDS" \
+    -o "$KERNEL" >"$LOG" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { tail -30 "$LOG" >&2; fail "native-build failed (rc=$rc), log: $LOG"; }
+
+[ -s "$KERNEL" ] || fail "native-build reported success but $KERNEL is missing or empty"
+
+# Structural read-back: a link that silently emitted a host-arch or empty image
+# must not report success.
+hdr=$(readelf -h "$KERNEL" 2>/dev/null) || fail "readelf could not parse $KERNEL"
+case "$hdr" in
+    *AArch64*) ;;
+    *) fail "$KERNEL is not an AArch64 ELF" ;;
+esac
+readelf -SW "$KERNEL" 2>/dev/null | grep -q ' \.text ' \
+    || fail "$KERNEL has no .text section (empty-link false success)"
+
+size=$(wc -c <"$KERNEL")
+printf 'PASS — aarch64 Limine kernel built: %s (%s bytes, AArch64 ELF with .text)\n' \
+    "$KERNEL" "$size"

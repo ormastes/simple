@@ -1,0 +1,38 @@
+# Bug llvm_text_backend_array_copy_loop_ssa_redefinition_2026-08-22: `val t = xs`
+# native-build died at llc with "multiple definition of local value" because the
+# alloca SSA transform refused value-returning functions. Native-build + run the
+# probe and compare with the interpret lane (whitespace-normalised: native
+# `print` still drops its newline).
+use std.spec
+use std.io_runtime.{process_run, env_get, dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+val PROBE = "test/02_integration/compiler/backend/probe_array_value_copy_ssa.spl"
+
+fn simple_bin() -> text:
+    val b = env_get("SIMPLE_BIN")
+    if b == "": "bin/simple" else: b
+
+fn squash(s: text) -> text:
+    s.replace("\n", "").replace(" ", "")
+
+describe "array value copy (val t = xs) on the native lane":
+    slow_it "native-builds, runs, and matches the interpret lane; copy leaves the alias unchanged":
+        step("interpret lane is the reference")
+        val interp = process_run("sh", ["-c", "SIMPLE_RUST_SEED_WARNING=0 " + simple_bin() + " run " + PROBE + " 2>/dev/null"])
+        expect(interp.0).to_contain("ints 2 3 2 9")
+        expect(interp.0).to_contain("texts 2 3 b")
+        expect(interp.0).to_contain("structs 1 2 2")
+        expect(interp.0).to_contain("valuefn 31")
+
+        step("native-build must not hit the llc SSA redefinition")
+        val root = "build/tmp/array_value_copy_{getpid()}"
+        expect(dir_create_all(root)).to_equal(true)
+        val out = root + "/probe"
+        val build = process_run("sh", ["-c", simple_bin() + " native-build --runtime-bundle core-c-bootstrap --threads 2 -o " + out + " " + PROBE + " 2>&1"])
+        expect(build.0.contains("multiple definition of local value")).to_equal(false)
+        expect(build.2).to_equal(0)
+
+        step("the native binary prints the same lines as the interpret lane")
+        val run = process_run("sh", ["-c", out + " 2>&1"])
+        expect(squash(run.0)).to_equal(squash(interp.0))

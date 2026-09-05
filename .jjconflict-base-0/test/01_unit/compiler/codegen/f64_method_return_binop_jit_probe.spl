@@ -1,0 +1,130 @@
+"""
+# Runnable probe: f64-returning instance method used as a binop operand
+
+Spawned out-of-process under a NAMED engine by
+`f64_method_return_binop_spec.spl` via `std.spec.engine_probe`. In-process
+specs are structurally blind to JIT-only defects (describe/it/expect are
+interpreter intrinsics and a module with no `fn main` de-JITs regardless), so
+the guard has to be a real program with a `fn main` and a verdict line.
+
+Seed values are read out of a runtime-built `[f64]` so codegen cannot
+constant-fold the method bodies and accidentally sidestep the defect.
+
+Score the VERDICT line, never the exit code.
+"""
+
+fn el(values: [f64], index: i64) -> f64:
+    var result = 0.0
+    var i = 0
+    for v in values:
+        if i == index:
+            result = v
+        i = i + 1
+    result
+
+class FloatBox:
+    m: [f64]
+
+    fn get(i: i64) -> f64:
+        el(self.m, i)
+
+fn free_at(b: FloatBox, i: i64) -> f64:
+    el(b.m, i)
+
+fn approx(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+    abs_diff < 0.0001
+
+fn main():
+    # Built at runtime; get(0)=3.0 get(1)=5.0 get(2)=11.0 get(3)=101.0
+    var seed: [f64] = []
+    seed.push(3.0)
+    seed.push(5.0)
+    seed.push(11.0)
+    seed.push(101.0)
+
+    val a = FloatBox(m: seed)
+    val b = FloatBox(m: seed)
+
+    var ok_n = 0
+    var bad_n = 0
+
+    # 1. method call minus a literal.
+    #    Pre-fix: 4613937818241073000.0 == bits(3.0) read as an integer.
+    if approx(a.get(0) - 1.0, 2.0):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 1 a.get(0)-1.0 = " + (a.get(0) - 1.0).to_text())
+
+    # 2. literal minus method call
+    if approx(1.0 - a.get(0), 0.0 - 2.0):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 2 1.0-a.get(0) = " + (1.0 - a.get(0)).to_text())
+
+    # 3. division
+    if approx(a.get(0) / 2.0, 1.5):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 3 a.get(0)/2.0 = " + (a.get(0) / 2.0).to_text())
+
+    # 4. TWO receivers multiplied -- the Matrix4.multiply shape.
+    #    Pre-fix: 0.0, because bits(11.0)*bits(101.0) is 0 mod 2^64.
+    if approx(a.get(2) * b.get(3), 1111.0):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 4 a.get(2)*b.get(3) = " + (a.get(2) * b.get(3)).to_text())
+
+    # 5. two receivers added
+    if approx(a.get(2) + b.get(3), 112.0):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 5 a.get(2)+b.get(3) = " + (a.get(2) + b.get(3)).to_text())
+
+    # 6. SAME receiver twice -- not a two-receiver problem
+    if approx(a.get(0) - a.get(1), 0.0 - 2.0):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 6 a.get(0)-a.get(1) = " + (a.get(0) - a.get(1)).to_text())
+
+    # 7. instance method mixed with a free function (free fns were never broken)
+    if approx(a.get(0) - free_at(b, 1), 0.0 - 2.0):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 7 a.get(0)-free_at(b,1) = " + (a.get(0) - free_at(b, 1)).to_text())
+
+    # 8. three chained calls
+    if approx(a.get(0) - a.get(1) - a.get(0), 0.0 - 5.0):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 8 a.get(0)-a.get(1)-a.get(0) = " + (a.get(0) - a.get(1) - a.get(0)).to_text())
+
+    # 9-11. comparisons must not INVERT (pre-fix `3.0 < 5.0` was false)
+    if a.get(0) < 5.0:
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 9 a.get(0) < 5.0 was false")
+
+    if not (a.get(0) > 5.0):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 10 a.get(0) > 5.0 was true")
+
+    if a.get(0) < b.get(1):
+        ok_n = ok_n + 1
+    else:
+        bad_n = bad_n + 1
+        print("FAIL 11 a.get(0) < b.get(1) was false")
+
+    print("F64_METHOD_BINOP_VERDICT: pass=" + ok_n.to_text() + " fail=" + bad_n.to_text())

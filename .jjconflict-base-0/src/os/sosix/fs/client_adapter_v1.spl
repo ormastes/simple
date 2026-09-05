@@ -1,0 +1,99 @@
+"""SOSIX filesystem v1 client request planner.
+
+The planner is deliberately separate from transport syscalls.  Registered
+capability and buffer references can be encoded for the owned-copy v1 IPC
+transport.  Legacy raw pointers are rejected until a real buffer-registration
+owner can provide a generation-bearing `SosixBufferRef`.
+"""
+
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.operation_adapter.{sosix_file_operation_create}
+use os.sosix.fs.ipc_codec_v1.{
+    SOSIX_FS_IPC_REQUEST_FLAG_CANCELLABLE,
+    SOSIX_FS_IPC_REQUEST_FLAG_REGISTERED_BUFFER,
+    SosixFsIpcRequestV1,
+    sosix_fs_ipc_encode_request_v1
+}
+
+pub val SOSIX_FS_CLIENT_REGISTRATION_REQUIRED: i32 = -95
+
+pub struct SosixFsClientPlanV1:
+    accepted: bool
+    reason: text
+    status: i32
+    api_id: u32
+    operation: SosixOperationId
+    request_token: u64
+    bytes: [u8]
+
+export SOSIX_FS_CLIENT_REGISTRATION_REQUIRED, SosixFsClientPlanV1
+
+fn _rejected(
+    reason: text, status: i32, api_id: u32, operation: SosixOperationId
+) -> SosixFsClientPlanV1:
+    SosixFsClientPlanV1(
+        accepted: false, reason: reason, status: status, api_id: api_id,
+        operation: operation, request_token: 0, bytes: []
+    )
+
+pub fn sosix_fs_client_plan_registered_v1(
+    operation: SosixOperationId,
+    api_id: u32,
+    file: SosixCapabilityRef,
+    buffer: SosixBufferRef,
+    file_offset: u64,
+    buffer_offset: u64,
+    length: u64,
+    deadline_ns: u64,
+    reply_endpoint: u64,
+    request_token: u64
+) -> SosixFsClientPlanV1:
+    """Validate and encode one request backed by registered typed references."""
+    if reply_endpoint == 0:
+        return _rejected("invalid-reply-endpoint", -22, api_id, operation)
+    if request_token == 0:
+        return _rejected("invalid-request-token", -22, api_id, operation)
+    val typed = sosix_file_operation_create(
+        operation, api_id, file, buffer, file_offset, buffer_offset, length,
+        deadline_ns
+    )
+    if not typed.accepted:
+        return _rejected(typed.reason, -22, api_id, operation)
+    val request = SosixFsIpcRequestV1(
+        api_id: api_id,
+        flags: SOSIX_FS_IPC_REQUEST_FLAG_CANCELLABLE |
+            SOSIX_FS_IPC_REQUEST_FLAG_REGISTERED_BUFFER,
+        operation_slot: operation.slot,
+        operation_generation: operation.generation,
+        reply_endpoint: reply_endpoint,
+        request_token: request_token,
+        deadline_ns: deadline_ns,
+        capability: file,
+        resource_offset: file_offset,
+        length: length,
+        buffer: buffer,
+        buffer_offset: buffer_offset
+    )
+    val encoded = sosix_fs_ipc_encode_request_v1(request)
+    if not encoded.accepted:
+        return _rejected(encoded.reason, -22, api_id, operation)
+    SosixFsClientPlanV1(
+        accepted: true, reason: "ready", status: 0, api_id: api_id,
+        operation: operation, request_token: request_token, bytes: encoded.bytes
+    )
+
+pub fn sosix_fs_client_reject_legacy_raw_v1(
+    operation: SosixOperationId, api_id: u32, raw_buffer_address: u64
+) -> SosixFsClientPlanV1:
+    """Reject a raw address instead of inventing a registered buffer identity."""
+    if raw_buffer_address == 0:
+        return _rejected("invalid-raw-buffer", -14, api_id, operation)
+    _rejected(
+        "registered-buffer-required",
+        SOSIX_FS_CLIENT_REGISTRATION_REQUIRED,
+        api_id,
+        operation
+    )
+
+export sosix_fs_client_plan_registered_v1, sosix_fs_client_reject_legacy_raw_v1

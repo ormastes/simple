@@ -1,0 +1,56 @@
+# Socket-facing handoff from the canonical Pure-Simple TLS 1.3 handshake to
+# the transport-neutral WEB application-record owner.
+
+use os.userlib.net.{Socket}
+use os.tls13.server.{tls13_accept, Tls13AcceptResult}
+use os.tls13.server_types.{
+    Tls13ServerConfig, tls13_server_context_wipe_v1
+}
+use os.apps.servers_user.web_tls_stream_owner.{WebTlsStreamOwnerV1}
+
+pub enum WebTlsTransportAcceptStatusV1:
+    Accepted
+    HandshakeRejected
+    ContextRejected
+
+pub class WebTlsTransportAcceptV1:
+    status: WebTlsTransportAcceptStatusV1
+    stream: WebTlsStreamOwnerV1?
+    blocker: text
+
+pub fn web_tls_transport_accept_v1(
+    client: Socket, config: Tls13ServerConfig
+) -> WebTlsTransportAcceptV1:
+    match tls13_accept(client.fd.to_i64(), config):
+        case Tls13AcceptResult.Failed(reason):
+            WebTlsTransportAcceptV1(
+                status: WebTlsTransportAcceptStatusV1.HandshakeRejected,
+                stream: nil, blocker: reason)
+        case Tls13AcceptResult.Accepted(context):
+            # The handshake context crosses this boundary exactly once.  The
+            # stream owner copies its traffic secrets and becomes the sole
+            # application-record sequence/close owner.
+            val stream_result = WebTlsStreamOwnerV1.from_context(context)
+            # from_context deep-copies on success.  Regardless of success or
+            # rejection, retire the handshake owner's context immediately and
+            # exactly once before inspecting/returning the result.
+            val wipe = tls13_server_context_wipe_v1(context)
+            if not wipe.verified():
+                if stream_result.is_ok():
+                    var quarantined = stream_result.unwrap()
+                    val _ = quarantined.transport_eof()
+                return WebTlsTransportAcceptV1(
+                    status: WebTlsTransportAcceptStatusV1.ContextRejected,
+                    stream: nil, blocker: "tls-context-zeroization-failed")
+            match stream_result:
+                case Err(reason):
+                    WebTlsTransportAcceptV1(
+                        status: WebTlsTransportAcceptStatusV1.ContextRejected,
+                        stream: nil, blocker: reason)
+                case Ok(stream):
+                    WebTlsTransportAcceptV1(
+                        status: WebTlsTransportAcceptStatusV1.Accepted,
+                        stream: Some(stream), blocker: "")
+
+export WebTlsTransportAcceptV1, WebTlsTransportAcceptStatusV1
+export web_tls_transport_accept_v1

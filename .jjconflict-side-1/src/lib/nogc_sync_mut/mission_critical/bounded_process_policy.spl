@@ -1,0 +1,512 @@
+# Mission-critical bounded process and work admission policy.
+# codex-impl: pure policy owner; process execution remains in app.io facades.
+use std.common.crypto.sha256.{sha256_text}
+
+enum ProcessSafetyCodeV1:
+    Accepted
+    InvalidPid
+    InvalidCapacity
+    WorkerLimitReached
+    QueueLimitReached
+    CaptureLimitReached
+    TimeoutLimitReached
+    InFlightLimitReached
+    UnrelatedPid
+    InvalidTransition
+
+enum ProcessLifecycleStateV2:
+    Admitted
+    Running
+    CancelRequested
+    TimedOut
+    Completed
+
+enum ProcessLifecycleEventV2:
+    Start
+    RequestCancel
+    ReachTimeout
+    ObserveCompletion
+
+enum BoundedExecutionStateV4:
+    Running
+    TerminationRequested
+    ReapPending
+    Completed
+
+enum BoundedExecutionEventV4:
+    RequestCancel
+    ReachTimeout
+    ConfirmTermination
+    AcknowledgeRegisteredReap
+
+struct ProcessOwnerLeaseV4:
+    run_id: i64
+    execution_id: i64
+    generation: i64
+    start_identity: i64
+    pid: i64
+    process_group_id: i64
+    admission_slot_token: text
+    lease_token: text
+
+struct BoundedExecutionV4:
+    state: BoundedExecutionStateV4
+    lease: ProcessOwnerLeaseV4
+    transition_sequence: i64
+
+struct BoundedExecutionReceiptV4:
+    accepted: bool
+    code: ProcessSafetyCodeV1
+    after: BoundedExecutionStateV4
+    next_sequence: i64
+    terminate_group_intent: bool
+    reap_intent: bool
+
+struct ProcessSlotPoolV4:
+    max_in_flight: i64
+    reserved: i64
+    generation: i64
+
+struct ProcessSlotReceiptV4:
+    accepted: bool
+    code: ProcessSafetyCodeV1
+    next_reserved: i64
+    slot_token: text
+
+struct CaptureAccumulatorV4:
+    max_stdout_bytes: i64
+    max_stderr_bytes: i64
+    stdout_bytes: i64
+    stderr_bytes: i64
+    lease_token: text
+    sequence: i64
+
+struct CaptureAccumulatorReceiptV4:
+    accepted: bool
+    code: ProcessSafetyCodeV1
+    next: CaptureAccumulatorV4
+    receipt_token: text
+
+struct BoundedWorkPoolV1:
+    max_workers: i64
+    max_pending: i64
+    active_workers: i64
+    pending_work: i64
+
+struct BoundedProcessCaptureV1:
+    max_stdout_bytes: i64
+    max_stderr_bytes: i64
+    stdout_bytes: i64
+    stderr_bytes: i64
+
+struct BoundedProcessPolicyV2:
+    max_timeout_ms: i64
+    max_in_flight: i64
+
+struct BoundedProcessAdmissionV2:
+    policy: BoundedProcessPolicyV2
+    requested_timeout_ms: i64
+    active_workers: i64
+    in_flight_processes: i64
+
+struct ProcessSafetyReceiptV1:
+    accepted: bool
+    code: ProcessSafetyCodeV1
+    observed: i64
+    limit: i64
+
+struct ProcessLifecycleReceiptV2:
+    accepted: bool
+    code: ProcessSafetyCodeV1
+    before: ProcessLifecycleStateV2
+    after: ProcessLifecycleStateV2
+    signal_intent: bool
+    wait_intent: bool
+    terminal: bool
+
+struct BoundedCaptureReceiptV3:
+    accepted: bool
+    code: ProcessSafetyCodeV1
+    stdout_retained_bytes: i64
+    stderr_retained_bytes: i64
+    stdout_truncated: bool
+    stderr_truncated: bool
+
+struct BoundedProcessExecutionV3:
+    state: ProcessLifecycleStateV2
+    pid: i64
+    process_group_id: i64
+
+struct ProcessExecutionReceiptV3:
+    accepted: bool
+    code: ProcessSafetyCodeV1
+    before: ProcessLifecycleStateV2
+    after: ProcessLifecycleStateV2
+    terminate_process_group_intent: bool
+    reap_registered_child_intent: bool
+    registered_pid: i64
+    registered_process_group_id: i64
+
+fn process_safety_accept(observed: i64, limit: i64) -> ProcessSafetyReceiptV1:
+    ProcessSafetyReceiptV1(
+        accepted: true,
+        code: ProcessSafetyCodeV1.Accepted,
+        observed: observed,
+        limit: limit
+    )
+
+fn process_safety_reject(code: ProcessSafetyCodeV1, observed: i64, limit: i64) -> ProcessSafetyReceiptV1:
+    ProcessSafetyReceiptV1(
+        accepted: false,
+        code: code,
+        observed: observed,
+        limit: limit
+    )
+
+fn validate_process_signal_pid(pid: i64) -> ProcessSafetyReceiptV1:
+    """Reject non-positive process IDs before any signal or wait facade call."""
+    if pid <= 0:
+        return process_safety_reject(ProcessSafetyCodeV1.InvalidPid, pid, 1)
+    process_safety_accept(pid, pid)
+
+fn admit_bounded_process(admission: BoundedProcessAdmissionV2) -> ProcessSafetyReceiptV1:
+    """Admit a process only within its timeout and independent in-flight bounds."""
+    if admission.policy.max_timeout_ms <= 0 or admission.policy.max_in_flight <= 0:
+        return process_safety_reject(ProcessSafetyCodeV1.InvalidCapacity, 0, 0)
+    if admission.requested_timeout_ms <= 0:
+        return process_safety_reject(
+            ProcessSafetyCodeV1.InvalidCapacity,
+            admission.requested_timeout_ms,
+            admission.policy.max_timeout_ms
+        )
+    if admission.requested_timeout_ms > admission.policy.max_timeout_ms:
+        return process_safety_reject(
+            ProcessSafetyCodeV1.TimeoutLimitReached,
+            admission.requested_timeout_ms,
+            admission.policy.max_timeout_ms
+        )
+    if admission.active_workers < 0 or admission.in_flight_processes < 0:
+        return process_safety_reject(ProcessSafetyCodeV1.InvalidCapacity, -1, 0)
+    if admission.in_flight_processes >= admission.policy.max_in_flight:
+        return process_safety_reject(
+            ProcessSafetyCodeV1.InFlightLimitReached,
+            admission.in_flight_processes,
+            admission.policy.max_in_flight
+        )
+    process_safety_accept(
+        admission.in_flight_processes + 1,
+        admission.policy.max_in_flight
+    )
+
+fn process_lifecycle_receipt_v2(
+    accepted: bool,
+    code: ProcessSafetyCodeV1,
+    before: ProcessLifecycleStateV2,
+    after: ProcessLifecycleStateV2,
+    signal_intent: bool,
+    wait_intent: bool
+) -> ProcessLifecycleReceiptV2:
+    ProcessLifecycleReceiptV2(
+        accepted: accepted,
+        code: code,
+        before: before,
+        after: after,
+        signal_intent: signal_intent,
+        wait_intent: wait_intent,
+        terminal: after == ProcessLifecycleStateV2.TimedOut or after == ProcessLifecycleStateV2.Completed
+    )
+
+fn reject_process_transition_v2(state: ProcessLifecycleStateV2) -> ProcessLifecycleReceiptV2:
+    process_lifecycle_receipt_v2(
+        false, ProcessSafetyCodeV1.InvalidTransition,
+        state, state, false, false
+    )
+
+fn transition_process_lifecycle_v2(
+    state: ProcessLifecycleStateV2,
+    event: ProcessLifecycleEventV2,
+    pid: i64
+) -> ProcessLifecycleReceiptV2:
+    """Return policy intent only; this owner never signals, waits, or imports a runtime."""
+    if state == ProcessLifecycleStateV2.Admitted and event == ProcessLifecycleEventV2.Start:
+        # Registration of Running state is itself PID-bearing state. Reject the
+        # invalid target before publishing that registration.
+        if pid <= 0:
+            return process_lifecycle_receipt_v2(
+                false, ProcessSafetyCodeV1.InvalidPid,
+                state, state, false, false
+            )
+        return process_lifecycle_receipt_v2(
+            true, ProcessSafetyCodeV1.Accepted,
+            state, ProcessLifecycleStateV2.Running, false, false
+        )
+
+    var valid = false
+    var after = state
+    var signal_intent = false
+    var wait_intent = false
+    if state == ProcessLifecycleStateV2.Running:
+        if event == ProcessLifecycleEventV2.RequestCancel:
+            valid = true
+            after = ProcessLifecycleStateV2.CancelRequested
+            signal_intent = true
+        elif event == ProcessLifecycleEventV2.ReachTimeout:
+            valid = true
+            after = ProcessLifecycleStateV2.TimedOut
+            signal_intent = true
+            wait_intent = true
+        elif event == ProcessLifecycleEventV2.ObserveCompletion:
+            valid = true
+            after = ProcessLifecycleStateV2.Completed
+            wait_intent = true
+    elif state == ProcessLifecycleStateV2.CancelRequested:
+        if event == ProcessLifecycleEventV2.ReachTimeout:
+            valid = true
+            after = ProcessLifecycleStateV2.TimedOut
+            signal_intent = true
+            wait_intent = true
+        elif event == ProcessLifecycleEventV2.ObserveCompletion:
+            valid = true
+            after = ProcessLifecycleStateV2.Completed
+            wait_intent = true
+
+    if not valid:
+        return reject_process_transition_v2(state)
+    if pid <= 0:
+        return process_lifecycle_receipt_v2(
+            false, ProcessSafetyCodeV1.InvalidPid,
+            state, state, false, false
+        )
+    process_lifecycle_receipt_v2(
+        true, ProcessSafetyCodeV1.Accepted,
+        state, after, signal_intent, wait_intent
+    )
+
+fn admit_bounded_work(pool: BoundedWorkPoolV1) -> ProcessSafetyReceiptV1:
+    """Admit one unit only when worker and pending capacities are valid and bounded."""
+    if pool.max_workers <= 0 or pool.max_pending < 0:
+        return process_safety_reject(ProcessSafetyCodeV1.InvalidCapacity, 0, 0)
+    if pool.active_workers < 0 or pool.pending_work < 0:
+        return process_safety_reject(ProcessSafetyCodeV1.InvalidCapacity, -1, 0)
+    if pool.active_workers > pool.max_workers:
+        return process_safety_reject(
+            ProcessSafetyCodeV1.WorkerLimitReached,
+            pool.active_workers,
+            pool.max_workers
+        )
+    if pool.active_workers < pool.max_workers:
+        return process_safety_accept(pool.active_workers + 1, pool.max_workers)
+    if pool.pending_work >= pool.max_pending:
+        return process_safety_reject(
+            ProcessSafetyCodeV1.QueueLimitReached,
+            pool.pending_work,
+            pool.max_pending
+        )
+    process_safety_accept(pool.pending_work + 1, pool.max_pending)
+
+fn admit_bounded_capture(capture: BoundedProcessCaptureV1) -> ProcessSafetyReceiptV1:
+    """Validate per-stream capture bounds before captured bytes are published."""
+    if capture.max_stdout_bytes < 0 or capture.max_stderr_bytes < 0:
+        return process_safety_reject(ProcessSafetyCodeV1.InvalidCapacity, 0, 0)
+    if capture.stdout_bytes < 0 or capture.stderr_bytes < 0:
+        return process_safety_reject(ProcessSafetyCodeV1.InvalidCapacity, -1, 0)
+    if capture.stdout_bytes > capture.max_stdout_bytes:
+        return process_safety_reject(
+            ProcessSafetyCodeV1.CaptureLimitReached,
+            capture.stdout_bytes,
+            capture.max_stdout_bytes
+        )
+    if capture.stderr_bytes > capture.max_stderr_bytes:
+        return process_safety_reject(
+            ProcessSafetyCodeV1.CaptureLimitReached,
+            capture.stderr_bytes,
+            capture.max_stderr_bytes
+        )
+    if capture.stdout_bytes >= capture.stderr_bytes:
+        return process_safety_accept(capture.stdout_bytes, capture.max_stdout_bytes)
+    process_safety_accept(capture.stderr_bytes, capture.max_stderr_bytes)
+
+fn bounded_capture_receipt_v3(capture: BoundedProcessCaptureV1) -> BoundedCaptureReceiptV3:
+    """Return bounded retained byte counts; the execution adapter must never retain beyond them."""
+    if capture.max_stdout_bytes < 0 or capture.max_stderr_bytes < 0:
+        return BoundedCaptureReceiptV3(
+            accepted: false, code: ProcessSafetyCodeV1.InvalidCapacity,
+            stdout_retained_bytes: 0, stderr_retained_bytes: 0,
+            stdout_truncated: false, stderr_truncated: false)
+    if capture.stdout_bytes < 0 or capture.stderr_bytes < 0:
+        return BoundedCaptureReceiptV3(
+            accepted: false, code: ProcessSafetyCodeV1.InvalidCapacity,
+            stdout_retained_bytes: 0, stderr_retained_bytes: 0,
+            stdout_truncated: false, stderr_truncated: false)
+    val stdout_overflow = capture.stdout_bytes > capture.max_stdout_bytes
+    val stderr_overflow = capture.stderr_bytes > capture.max_stderr_bytes
+    val stdout_retained = if stdout_overflow: capture.max_stdout_bytes else: capture.stdout_bytes
+    val stderr_retained = if stderr_overflow: capture.max_stderr_bytes else: capture.stderr_bytes
+    BoundedCaptureReceiptV3(
+        accepted: not stdout_overflow and not stderr_overflow,
+        code: if stdout_overflow or stderr_overflow:
+            ProcessSafetyCodeV1.CaptureLimitReached
+        else:
+            ProcessSafetyCodeV1.Accepted,
+        stdout_retained_bytes: stdout_retained,
+        stderr_retained_bytes: stderr_retained,
+        stdout_truncated: stdout_overflow,
+        stderr_truncated: stderr_overflow)
+
+fn transition_bounded_process_execution_v3(
+    execution: BoundedProcessExecutionV3,
+    event: ProcessLifecycleEventV2,
+    target_pid: i64
+) -> ProcessExecutionReceiptV3:
+    """Produce host-independent signal/reap intent only for the registered child and group."""
+    var code = ProcessSafetyCodeV1.Accepted
+    var accepted = true
+    var after = execution.state
+    var terminate_group = false
+    var reap_child = false
+    if execution.pid <= 0 or execution.process_group_id <= 0 or target_pid <= 0:
+        accepted = false
+        code = ProcessSafetyCodeV1.InvalidPid
+    elif target_pid != execution.pid:
+        accepted = false
+        code = ProcessSafetyCodeV1.UnrelatedPid
+    elif execution.state == ProcessLifecycleStateV2.Running:
+        if event == ProcessLifecycleEventV2.RequestCancel:
+            after = ProcessLifecycleStateV2.CancelRequested
+            terminate_group = true
+            reap_child = true
+        elif event == ProcessLifecycleEventV2.ReachTimeout:
+            after = ProcessLifecycleStateV2.TimedOut
+            terminate_group = true
+            reap_child = true
+        elif event == ProcessLifecycleEventV2.ObserveCompletion:
+            after = ProcessLifecycleStateV2.Completed
+            reap_child = true
+        else:
+            accepted = false
+            code = ProcessSafetyCodeV1.InvalidTransition
+    elif execution.state == ProcessLifecycleStateV2.CancelRequested and event == ProcessLifecycleEventV2.ObserveCompletion:
+        after = ProcessLifecycleStateV2.Completed
+        reap_child = true
+    elif execution.state == ProcessLifecycleStateV2.CancelRequested and event == ProcessLifecycleEventV2.ReachTimeout:
+        after = ProcessLifecycleStateV2.TimedOut
+        terminate_group = true
+        reap_child = true
+    else:
+        accepted = false
+        code = ProcessSafetyCodeV1.InvalidTransition
+    ProcessExecutionReceiptV3(
+        accepted: accepted, code: code, before: execution.state, after: after,
+        terminate_process_group_intent: terminate_group,
+        reap_registered_child_intent: reap_child,
+        registered_pid: execution.pid,
+        registered_process_group_id: execution.process_group_id)
+
+fn process_owner_lease_token_v4(
+    run_id: i64, execution_id: i64, generation: i64, start_identity: i64,
+    pid: i64, process_group_id: i64, admission_slot_token: text
+) -> text:
+    """Canonical SHA-256 binding for every owner and process identity field."""
+    if run_id <= 0 or execution_id <= 0 or generation <= 0 or start_identity <= 0:
+        return ""
+    if pid <= 0 or process_group_id <= 0 or admission_slot_token == "":
+        return ""
+    if run_id > 1000000 or execution_id > 1000000 or generation > 1000000:
+        return ""
+    if start_identity > 1000000 or pid > 1000000 or process_group_id > 1000000:
+        return ""
+    sha256_text("process-owner-lease-v4|run={run_id}|execution={execution_id}|generation={generation}|start={start_identity}|pid={pid}|pgid={process_group_id}|slot={admission_slot_token}")
+
+fn valid_process_owner_lease_v4(lease: ProcessOwnerLeaseV4) -> bool:
+    lease.lease_token == process_owner_lease_token_v4(
+        lease.run_id, lease.execution_id, lease.generation, lease.start_identity,
+        lease.pid, lease.process_group_id, lease.admission_slot_token)
+
+fn transition_bounded_execution_v4(
+    execution: BoundedExecutionV4, event: BoundedExecutionEventV4,
+    target: ProcessOwnerLeaseV4, expected_sequence: i64
+) -> BoundedExecutionReceiptV4:
+    var code = ProcessSafetyCodeV1.Accepted
+    var accepted = true
+    var after = execution.state
+    var terminate = false
+    var reap = false
+    if not valid_process_owner_lease_v4(execution.lease) or not valid_process_owner_lease_v4(target):
+        accepted = false
+        code = ProcessSafetyCodeV1.InvalidPid
+    elif target.lease_token != execution.lease.lease_token:
+        accepted = false
+        code = ProcessSafetyCodeV1.UnrelatedPid
+    elif expected_sequence != execution.transition_sequence:
+        accepted = false
+        code = ProcessSafetyCodeV1.InvalidTransition
+    elif execution.state == BoundedExecutionStateV4.Running and (
+        event == BoundedExecutionEventV4.RequestCancel or event == BoundedExecutionEventV4.ReachTimeout):
+        after = BoundedExecutionStateV4.TerminationRequested
+        terminate = true
+    elif execution.state == BoundedExecutionStateV4.TerminationRequested and event == BoundedExecutionEventV4.ConfirmTermination:
+        after = BoundedExecutionStateV4.ReapPending
+        reap = true
+    elif execution.state == BoundedExecutionStateV4.ReapPending and event == BoundedExecutionEventV4.AcknowledgeRegisteredReap:
+        after = BoundedExecutionStateV4.Completed
+    else:
+        accepted = false
+        code = ProcessSafetyCodeV1.InvalidTransition
+    if accepted and execution.transition_sequence >= 9223372036854775806:
+        accepted = false
+        code = ProcessSafetyCodeV1.InvalidCapacity
+        after = execution.state
+        terminate = false
+        reap = false
+    BoundedExecutionReceiptV4(
+        accepted: accepted, code: code, after: after,
+        next_sequence: if accepted: execution.transition_sequence + 1 else: execution.transition_sequence,
+        terminate_group_intent: terminate, reap_intent: reap)
+
+fn reserve_process_slot_v4(pool: ProcessSlotPoolV4) -> ProcessSlotReceiptV4:
+    if pool.max_in_flight <= 0 or pool.reserved < 0 or pool.generation <= 0:
+        return ProcessSlotReceiptV4(false, ProcessSafetyCodeV1.InvalidCapacity, pool.reserved, "")
+    if pool.reserved >= pool.max_in_flight:
+        return ProcessSlotReceiptV4(false, ProcessSafetyCodeV1.InFlightLimitReached, pool.reserved, "")
+    val next = pool.reserved + 1
+    ProcessSlotReceiptV4(true, ProcessSafetyCodeV1.Accepted, next,
+        sha256_text("process-slot-v4|generation={pool.generation}|slot={next}"))
+
+fn release_process_slot_v4(pool: ProcessSlotPoolV4, slot_index: i64, slot_token: text) -> ProcessSlotReceiptV4:
+    val expected = sha256_text("process-slot-v4|generation={pool.generation}|slot={slot_index}")
+    if pool.reserved <= 0 or slot_index <= 0 or slot_index > pool.max_in_flight or slot_token != expected:
+        return ProcessSlotReceiptV4(false, ProcessSafetyCodeV1.InvalidTransition, pool.reserved, "")
+    ProcessSlotReceiptV4(true, ProcessSafetyCodeV1.Accepted, pool.reserved - 1, slot_token)
+
+fn append_capture_chunk_v4(
+    accumulator: CaptureAccumulatorV4, stdout_chunk_bytes: i64, stderr_chunk_bytes: i64
+) -> CaptureAccumulatorReceiptV4:
+    if stdout_chunk_bytes < 0 or stderr_chunk_bytes < 0 or accumulator.lease_token == "":
+        return CaptureAccumulatorReceiptV4(false, ProcessSafetyCodeV1.InvalidCapacity, accumulator, "")
+    if accumulator.stdout_bytes < 0 or accumulator.stderr_bytes < 0 or
+        accumulator.stdout_bytes > accumulator.max_stdout_bytes or accumulator.stderr_bytes > accumulator.max_stderr_bytes:
+        return CaptureAccumulatorReceiptV4(false, ProcessSafetyCodeV1.InvalidCapacity, accumulator, "")
+    if stdout_chunk_bytes > accumulator.max_stdout_bytes - accumulator.stdout_bytes or
+        stderr_chunk_bytes > accumulator.max_stderr_bytes - accumulator.stderr_bytes:
+        return CaptureAccumulatorReceiptV4(false, ProcessSafetyCodeV1.CaptureLimitReached, accumulator, "")
+    if accumulator.sequence >= 9223372036854775806:
+        return CaptureAccumulatorReceiptV4(false, ProcessSafetyCodeV1.InvalidCapacity, accumulator, "")
+    val next = CaptureAccumulatorV4(
+        max_stdout_bytes: accumulator.max_stdout_bytes, max_stderr_bytes: accumulator.max_stderr_bytes,
+        stdout_bytes: accumulator.stdout_bytes + stdout_chunk_bytes,
+        stderr_bytes: accumulator.stderr_bytes + stderr_chunk_bytes,
+        lease_token: accumulator.lease_token, sequence: accumulator.sequence + 1)
+    val token = sha256_text("capture-v4|lease={next.lease_token}|sequence={next.sequence}|stdout={next.stdout_bytes}|stderr={next.stderr_bytes}|stdout_limit={next.max_stdout_bytes}|stderr_limit={next.max_stderr_bytes}")
+    CaptureAccumulatorReceiptV4(true, ProcessSafetyCodeV1.Accepted, next, token)
+
+export ProcessSafetyCodeV1,
+    BoundedWorkPoolV1, BoundedProcessCaptureV1, BoundedProcessPolicyV2,
+    BoundedProcessAdmissionV2, ProcessSafetyReceiptV1,
+    BoundedExecutionStateV4, BoundedExecutionEventV4, ProcessOwnerLeaseV4,
+    BoundedExecutionV4, BoundedExecutionReceiptV4, ProcessSlotPoolV4,
+    ProcessSlotReceiptV4, CaptureAccumulatorV4, CaptureAccumulatorReceiptV4,
+    validate_process_signal_pid, admit_bounded_process,
+    admit_bounded_work, admit_bounded_capture,
+    process_owner_lease_token_v4, valid_process_owner_lease_v4,
+    transition_bounded_execution_v4, reserve_process_slot_v4,
+    release_process_slot_v4, append_capture_chunk_v4

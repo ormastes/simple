@@ -1,0 +1,115 @@
+#!/bin/sh
+# GHDL SoC-sim: boot the TINY (BRAM-only) rv32 SimpleOS kernel on the Simple
+# rv32 soft-core, with main RAM shrunk to an on-chip block-RAM budget.
+#
+# Sibling of ghdl_rv32_simpleos_boot.shs. That lane proves the kernel boots with
+# a 16 MB flat RAM (a DDR stand-in). THIS lane proves the same marker chain runs
+# with NO external DDR at all: main RAM is 512 KB, small enough to live entirely
+# in the KV260 xck26 PL fabric's block RAM.
+#
+# What makes the tiny config fit:
+#   The default image's "72 MB .bss" is an artefact of llvm-size folding every
+#   NOBITS section into one column. Real .bss is ~104 KB; the other ~72 MB is
+#   two linker reservations (8 MB .stack + 64 MB .heap) in
+#   examples/09_embedded/simple_os/arch/common/linker_riscv_common.ld, and the
+#   64 MB .heap is entirely unreferenced (the C runtime bump-allocates from a
+#   static g_heap[64*1024] in .bss). linker_tiny.ld reserves 256 KB of stack
+#   (measured, see below) and a token 4 KB heap instead, giving a 388 KB image.
+#
+# Budget proven by this lane:
+#   main RAM       512 KB   (tb generic RAM_WORDS => 131072)
+#   ramdisk bank  1024 KB   (tb generic RDISK_WORDS => 262144, FAT32 at 0x88000000)
+#   total          1.5 MB   inside the ~2.8 MB xck26 BRAM budget.
+#
+# If the kernel touched any address past the 512 KB window, the core's is_ram()
+# would reject it and the marker chain would break — so a PASS here is real
+# evidence the image fits, not just a smaller linker script.
+#
+# The tiny kernel also reports its measured stack high-water mark over the UART
+# as `[tiny] stack_used=<n> of=<n>`; baremetal_stubs.c paints the stack span
+# with a sentinel at _start whenever the linker reserved a BRAM-sized stack.
+#
+# NO Vivado. GHDL simulation only.
+set -e
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+RTL_DIR="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
+WORK_DIR="$ROOT_DIR/build/ghdl/rv32_simpleos_boot_tiny"
+KERNEL_ELF="${KERNEL_ELF:-$ROOT_DIR/build/os/simpleos_riscv32_smf_fs_tiny.elf}"
+FAT32_IMG="${FAT32_IMG:-$ROOT_DIR/build/os/fat32-riscv32.img}"
+RAMDISK_BYTES="${RAMDISK_BYTES:-1048576}"
+# Testbench generic overrides (defaults identical to the tb's own defaults, so
+# the lane is behavior-identical unless explicitly overridden):
+#   RAM_WORDS   — main-RAM words   (default 131072 = 512 KB)
+#   RDISK_WORDS — ramdisk words    (default 262144 = 1 MiB)
+RAM_WORDS="${RAM_WORDS:-131072}"
+RDISK_WORDS="${RDISK_WORDS:-262144}"
+TINY_RAM_BYTES=$((RAM_WORDS * 4))
+
+command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 1; }
+[ -f "$KERNEL_ELF" ] || { echo "ERROR: tiny kernel ELF missing: $KERNEL_ELF"; exit 1; }
+[ -f "$FAT32_IMG" ] || { echo "ERROR: FAT32 ramdisk image missing: $FAT32_IMG"; exit 1; }
+
+mkdir -p "$WORK_DIR"
+echo "=== GHDL RV32 SimpleOS TINY boot ($((RAM_WORDS * 4)) B BRAM core + $((RDISK_WORDS * 4)) B ramdisk bank) ==="
+echo "  Kernel ELF: $KERNEL_ELF"
+echo "  Ramdisk img: $FAT32_IMG (first $RAMDISK_BYTES bytes -> 0x88000000)"
+
+# 0. Static budget gate: refuse to run if the image does not actually fit the
+#    RAM the testbench configures. Cheaper and clearer than a simulation fault.
+if command -v llvm-nm >/dev/null 2>&1; then
+  kend_hex="$(llvm-nm "$KERNEL_ELF" | awk '$3=="_kernel_end"{print $1}')"
+  if [ -n "$kend_hex" ]; then
+    kend=$(printf '%d' "0x$kend_hex")
+    base=$(printf '%d' 0x80000000)
+    used=$((kend - base))
+    echo "  Image footprint: $used bytes (_kernel_end=0x$kend_hex) vs $TINY_RAM_BYTES bytes of RAM"
+    if [ "$used" -gt "$TINY_RAM_BYTES" ]; then
+      echo "ERROR: tiny image does not fit the configured BRAM budget"; exit 1
+    fi
+  fi
+fi
+
+# 1. Flatten loadable PROGBITS to the flat core's init_mem file.
+riscv64-unknown-elf-objcopy -O binary "$KERNEL_ELF" "$WORK_DIR/kernel.bin"
+od -An -v -tx4 -w4 "$WORK_DIR/kernel.bin" | awk 'NF{print $1}' > "$WORK_DIR/rv32_flat.mem"
+echo "  Kernel image: $(wc -l < "$WORK_DIR/rv32_flat.mem") words (rv32_flat.mem)"
+
+# 1b. Flatten the ramdisk (FAT32) image into the core's ramdisk-bank init file.
+head -c "$RAMDISK_BYTES" "$FAT32_IMG" > "$WORK_DIR/rv32_ramdisk.img"
+od -An -v -tx4 -w4 "$WORK_DIR/rv32_ramdisk.img" | awk 'NF{print $1}' > "$WORK_DIR/rv32_ramdisk.mem"
+echo "  Ramdisk image: $(wc -l < "$WORK_DIR/rv32_ramdisk.mem") words (rv32_ramdisk.mem)"
+
+# 2. Analyse + elaborate.
+printf "  Analysing flat core + tiny testbench ... "
+out="$(ghdl -a --std=08 --workdir="$WORK_DIR" \
+  "$RTL_DIR/rv32_exec_core_flat.vhd" \
+  "$RTL_DIR/tb_rv32_simpleos_boot_tiny.vhd" 2>&1)" || true
+if echo "$out" | grep -q ":error:"; then
+  echo "FAIL"; echo "$out" | tail -40; exit 1
+fi
+echo "OK"
+
+printf "  Elaborating ... "
+out="$(cd "$WORK_DIR" && ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv32_simpleos_boot_tiny 2>&1)" || true
+if echo "$out" | grep -qi "error"; then
+  echo "FAIL"; echo "$out" | tail -40; exit 1
+fi
+echo "OK"
+
+# 3. Run from WORK_DIR so the core's relative init_mem open finds rv32_flat.mem.
+STOP_TIME="${STOP_TIME:-200ms}"
+printf "  Running simulation (stop-time=%s) ... \n" "$STOP_TIME"
+sim="$(cd "$WORK_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" \
+  tb_rv32_simpleos_boot_tiny \
+  -gTINY_RAM_WORDS="$RAM_WORDS" -gTINY_RDISK_WORDS="$RDISK_WORDS" \
+  --stop-time="$STOP_TIME" 2>&1)" || true
+echo "$sim" | grep -E "RV32_TINY_BUDGET" | tail -1
+echo "----- UART transcript -----"
+echo "$sim" | grep -E "RV32_TINY_UART_LINE:" | sed 's/.*RV32_TINY_UART_LINE: //'
+echo "---------------------------"
+# NOTE: only these timestamped testbench `(report note)` lines are evidence.
+# Grepping the build dir for "TEST PASSED" also matches the BINARY kernel
+# image, whose string table contains both "TEST PASSED" and "TEST FAILED".
+echo "$sim" | grep -E "RV32_TINY_BOOT_(DONE|STUCK)" | tail -4

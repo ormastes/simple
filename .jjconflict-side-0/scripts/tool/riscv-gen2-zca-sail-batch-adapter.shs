@@ -1,0 +1,107 @@
+#!/bin/sh
+# Reproducible envelope for an independently built Sail Zca batch executable.
+# This script validates provenance and TSV shape; it contains no decoder.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+approved_receipts="$root/scripts/tool/riscv-gen2-zca-sail-approved-receipts.txt"
+revision=a33475aeb80090127433b5a8b30e717edaa19e71
+archive_pin=665822b80f1f0ad2dd33709673a5fb92980ea051d9f977d50c70d587d2f0cdc8
+zca_pin=b6dee98f5fa917dfcf37452f3f475eefd59215f949c21dda541c54f14a5de039
+model_root=
+xlen=
+
+fail() { echo "ERROR: Sail Zca batch adapter: $*" >&2; exit 1; }
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --model-root) [ "$#" -ge 2 ] || fail "--model-root requires a path"; model_root=$2; shift 2 ;;
+        --xlen) [ "$#" -ge 2 ] || fail "--xlen requires 32 or 64"; xlen=$2; shift 2 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[ "$xlen" = 32 ] || [ "$xlen" = 64 ] || fail "--xlen must be exactly 32 or 64"
+[ -n "$model_root" ] && [ -d "$model_root/.git" ] || fail "--model-root must name the pinned Sail checkout"
+[ "$(git -C "$model_root" rev-parse HEAD)" = "$revision" ] || fail "model revision mismatch"
+[ -z "$(git -C "$model_root" status --porcelain --untracked-files=no)" ] || fail "pinned model has tracked modifications"
+[ "$(git -C "$model_root" archive --format=tar HEAD | sha256sum | awk '{print $1}')" = "$archive_pin" ] || fail "model archive pin mismatch"
+[ "$(sha256sum "$model_root/model/extensions/C/zca_insts.sail" | awk '{print $1}')" = "$zca_pin" ] || fail "Zca semantic source pin mismatch"
+
+binary=${SAIL_ZCA_BATCH_EXECUTABLE:-}
+[ -n "$binary" ] || fail "SAIL_ZCA_BATCH_EXECUTABLE is required; local decoder fallback is forbidden"
+[ -x "$binary" ] || fail "Sail-generated batch executable is not executable: $binary"
+receipt=${SAIL_ZCA_BATCH_RECEIPT:-"$binary.receipt"}
+[ -f "$receipt" ] || fail "missing Sail build receipt: $receipt"
+
+receipt_value() {
+    key=$1
+    count=$(awk -F= -v key="$key" '$1 == key { n++ } END { print n + 0 }' "$receipt")
+    [ "$count" -eq 1 ] || fail "receipt key $key must occur exactly once"
+    awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print }' "$receipt"
+}
+
+[ "$(receipt_value schema)" = simple-riscv-zca-sail-batch-v1 ] || fail "unsupported build receipt schema"
+[ "$(receipt_value execution_source)" = sail-generated ] || fail "batch executable is not recorded as Sail-generated"
+[ "$(receipt_value oracle_revision)" = "$revision" ] || fail "receipt revision mismatch"
+[ "$(receipt_value oracle_archive_sha256)" = "$archive_pin" ] || fail "receipt archive pin mismatch"
+[ "$(receipt_value oracle_zca_source_sha256)" = "$zca_pin" ] || fail "receipt Zca source pin mismatch"
+compiler_version=$(receipt_value sail_compiler_version)
+echo "$compiler_version" | awk -F. '
+    NF >= 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {
+        exit !(($1 > 0) || ($1 == 0 && (($2 > 20) || ($2 == 20 && $3 >= 1))))
+    }
+    { exit 1 }
+' || fail "receipt Sail compiler version must be >=0.20.1"
+compiler_sha=$(receipt_value sail_compiler_sha256)
+overlay_sha=$(receipt_value overlay_source_sha256)
+build_sha=$(receipt_value build_script_sha256)
+for pin in "$compiler_sha" "$overlay_sha" "$build_sha"; do
+    echo "$pin" | awk 'length($0) == 64 && $0 ~ /^[0-9a-f]+$/ { ok=1 } END { exit !ok }' || fail "receipt build provenance SHA-256 is malformed"
+done
+receipt_sha=$(sha256sum "$receipt" | awk '{print $1}')
+[ -f "$approved_receipts" ] || fail "checked-in reviewed receipt allowlist is missing"
+grep -Fxq "$receipt_sha" "$approved_receipts" || fail "build receipt is not independently reviewed and admitted"
+binary_sha=$(receipt_value binary_sha256)
+[ "$(sha256sum "$binary" | awk '{print $1}')" = "$binary_sha" ] || fail "batch executable SHA-256 mismatch"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-sail-zca-adapter.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+input="$tmp/input"
+output="$tmp/output"
+cat > "$input"
+
+awk '
+    function hex4(n, a, b, c, d) {
+        a = int(n / 4096); n %= 4096; b = int(n / 256); n %= 256
+        c = int(n / 16); d = n % 16
+        return substr("0123456789ABCDEF", a+1, 1) substr("0123456789ABCDEF", b+1, 1) substr("0123456789ABCDEF", c+1, 1) substr("0123456789ABCDEF", d+1, 1)
+    }
+    { if ($0 != hex4(NR - 1)) bad = 1 }
+    END { if (NR != 65536 || bad) exit 1 }
+' "$input" || fail "stdin must contain exactly ordered uppercase parcels 0000 through FFFF"
+
+"$binary" --xlen "$xlen" < "$input" > "$output" || fail "Sail-generated batch execution failed"
+
+awk -F '\t' '
+    function hex4(n, a, b, c, d) {
+        a = int(n / 4096); n %= 4096; b = int(n / 256); n %= 256
+        c = int(n / 16); d = n % 16
+        return substr("0123456789ABCDEF", a+1, 1) substr("0123456789ABCDEF", b+1, 1) substr("0123456789ABCDEF", c+1, 1) substr("0123456789ABCDEF", d+1, 1)
+    }
+    {
+        if (NF != 5 || $1 != hex4(NR - 1)) bad = 1
+        if ($2 != "legal" && $2 != "illegal" && $2 != "not-compressed") bad = 1
+        if ($3 != "--------" && !(length($3) == 8 && $3 ~ /^[0-9A-F]+$/)) bad = 1
+        if ($4 != "2" && $4 != "4") bad = 1
+        if ($5 !~ /^[A-Za-z0-9_.-]+$/) bad = 1
+        low2_is_3 = substr($1, 4, 1) ~ /^[37BF]$/
+        if (low2_is_3 && ($2 != "not-compressed" || $3 != "--------" || $4 != "4")) bad = 1
+        if (!low2_is_3 && ($2 == "not-compressed" || $4 != "2")) bad = 1
+        if ($2 == "illegal" && $3 != "--------") bad = 1
+        if ($2 == "legal" && $3 == "--------") bad = 1
+    }
+    END { if (NR != 65536 || bad) exit 1 }
+' "$output" || fail "Sail-generated output violates the exhaustive TSV v1 contract"
+
+cat "$output"

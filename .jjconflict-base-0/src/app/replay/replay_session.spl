@@ -1,0 +1,87 @@
+# SReplay — CLI Replay Session Handler
+#
+# Handles `simple replay trace.srr` — loads a recorded process trace,
+# replays events, and reports results.
+
+use std.nogc_sync_mut.replay.process.replayer.{ProcessReplayer}
+
+# ============================================================================
+# CLI Entry Point
+# ============================================================================
+
+fn run_replay(args: [text]):
+    if args.len() == 0:
+        print_replay_help()
+        return
+
+    # Parse arguments
+    var trace_dir = ""
+    var step_count: i64 = 0
+    var show_all = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            print_replay_help()
+            return
+        elif arg == "--all" or arg == "-a":
+            show_all = true
+        elif arg == "-n" or arg == "--steps":
+            if i + 1 < args.len():
+                i = i + 1
+                step_count = args[i].to_i64()
+            else:
+                print "Error: -n requires a number"
+                return
+        else:
+            trace_dir = arg
+        i = i + 1
+
+    if trace_dir.len() == 0:
+        print "Error: no trace directory specified"
+        print_replay_help()
+        return
+
+    # Load and replay
+    print "[sreplay] Loading trace from {trace_dir}/"
+    var replayer = ProcessReplayer.create(trace_dir)
+    val load_result = replayer.load()
+    match load_result:
+        case Ok(_):
+            pass_dn
+        case Err(e):
+            print "Error loading trace: {e}"
+            return
+
+    if replayer.event_count() == 0:
+        print "[sreplay] No events in trace"
+        return
+
+    # Determine how many events to step
+    var count = step_count
+    if show_all or count == 0:
+        count = replayer.event_count()
+
+    # Step through events
+    print "[sreplay] Stepping through {count} events..."
+    val results = replayer.step_n(count)
+    for r in results:
+        print "  {r.message}"
+
+    # Summary
+    replayer.print_summary()
+
+fn print_replay_help():
+    print "Usage: simple replay [options] <trace_dir>"
+    print ""
+    print "Replay a recorded process trace."
+    print ""
+    print "Options:"
+    print "  -a, --all            Show all events"
+    print "  -n, --steps <N>      Step through N events"
+    print "  -h, --help           Show this help"
+    print ""
+    print "Examples:"
+    print "  simple replay trace.srr"
+    print "  simple replay -n 10 trace.srr"
+    print "  simple replay --all my_trace.srr"

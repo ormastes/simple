@@ -1,0 +1,31 @@
+use std.spec
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{DebugVerificationV1, debug_policy_observe_only_v1}
+use std.common.debug.service_v1.{central_debug_service_v1_graph, central_debug_service_v1_receipts, central_debug_service_v1_close}
+use app.debug.browser.cdp_debug_service_adapter_v1.{
+    browser_cdp_targets_v1, browser_cdp_worker_event_v1, browser_cdp_blocked_v1,
+}
+
+describe "browser CDP DebugServiceV1 harmony adapter":
+    it "retains only redacted target identity and type from discovery":
+        val targets = browser_cdp_targets_v1("{\"targetInfos\":[{\"targetId\":\"page-1\",\"type\":\"page\",\"url\":\"https://secret.example/token\",\"title\":\"private\"}]}")
+        expect(targets.len()).to_equal(1)
+        expect(targets[0].target_id).to_equal("page-1")
+        expect(targets[0].kind).to_equal("page")
+
+    it "requires a real attached worker event before verification":
+        expect(browser_cdp_worker_event_v1("Target.targetCreated", "{\"type\":\"worker\"}")).to_equal(false)
+        expect(browser_cdp_worker_event_v1("Target.attachedToTarget", "{\"targetInfo\":{\"type\":\"worker\"}}")).to_equal(true)
+        expect(browser_cdp_worker_event_v1("Target.attachedToTarget", "{\"targetInfo\":{\"type\":\"page\"}}")).to_equal(false)
+
+    it "binds absent browser support to an exact build and blocked capability rows":
+        val slice = browser_cdp_blocked_v1("build-browser-host-fixture", debug_policy_observe_only_v1(), "browser executable unavailable on host").unwrap()
+        val graph = central_debug_service_v1_graph(slice.session_id).unwrap()
+        expect(graph.build_id).to_equal("build-browser-host-fixture")
+        expect(graph.capabilities.len()).to_equal(4)
+        expect(graph.capabilities.all(\cap: cap.support == CapLevel.Unavailable and cap.verification == DebugVerificationV1.Blocked)).to_equal(true)
+        val receipts = central_debug_service_v1_receipts(slice.session_id)
+        expect(receipts.last().action).to_equal("browser.cdp.target-discovery.outcome")
+        expect(receipts.last().allowed).to_equal(false)
+        expect(receipts.last().reason).to_equal("blocked; endpoint and page URLs redacted")
+        central_debug_service_v1_close(slice.session_id).unwrap()

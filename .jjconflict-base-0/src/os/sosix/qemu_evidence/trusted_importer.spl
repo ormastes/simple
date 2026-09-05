@@ -1,0 +1,541 @@
+"""Production owner for byte-bound SOSIX QEMU matrix admission.
+
+Raw admission text and `SosixQemuMatrixResult` are structural-only. This module
+owns the closed collector-manifest grammar, beneath-root resolution, exact-byte
+hash binding, and the distinct sealed result used for release admission.
+"""
+
+use os.sosix.qemu_evidence.matrix_contract.{
+    SOSIX_QEMU_ADMISSION_MAX_BYTES,
+    SOSIX_QEMU_ROW_PASS,
+    SOSIX_QEMU_ROW_FAILED,
+    SOSIX_QEMU_ROW_BLOCKED,
+    SOSIX_QEMU_ROW_UNSUPPORTED,
+    SosixQemuMatrixRow,
+    SosixQemuMatrixResult,
+    sosix_qemu_bundle_admission_from_collector_record,
+    sosix_qemu_structural_row_from_collector_record,
+    sosix_qemu_matrix_hosts,
+    sosix_qemu_matrix_guests,
+    sosix_qemu_matrix_evaluate
+}
+use std.common.base_encoding.base64.{base64_decode, base64_encode}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.ffi.io.{file_exists, file_read_bytes, path_absolute}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+
+val SOSIX_QEMU_MATRIX_MANIFEST_MAX_BYTES: i64 = 262144
+val SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT: i64 = 42
+val SOSIX_QEMU_MATRIX_ROW_COUNT: i64 = 24
+val SOSIX_QEMU_MATRIX_HEADER_FIELD_COUNT: i64 = 2
+
+pub struct SosixQemuManifestRowDescriptor:
+    structurally_valid: bool
+    reason: text
+    prefix: text
+    host: text
+    guest: text
+    status: text
+    row_reason: text
+    evidence_path: text
+    admission_record_path: text
+    resume_command: text
+    owner: text
+    reviewer: text
+    compiler_in_filesystem: bool
+    compiler_identity_scope: text
+    compiler_policy_sha256: text
+    compiler_policy_value: text
+    compiler_designation_scope: text
+    compiler_version_evidence_path: text
+    compiler_hello_evidence_path: text
+    compiler_alias_evidence_path: text
+    compiler_manifest_evidence_path: text
+    source_identity: text
+    compiler_identity: text
+    compiler_payload_identity: text
+    compiler_image_identity: text
+    compiler_alias_identity: text
+    compiler_manifest_identity: text
+    kernel_identity: text
+    image_identity: text
+    qemu_identity: text
+    qemu_argv: text
+    accelerator_identity: text
+    firmware_identity: text
+    firmware_mode: text
+    firmware_path: text
+    firmware_version: text
+    firmware_sha256: text
+    firmware_stage_markers: text
+    boot_correlation_marker: text
+    run_nonce: text
+    transcript_identity: text
+    program_identity: text
+    evidence_sha256: text
+    admission_record_sha256: text
+    artifact_count: u32
+
+struct _SosixQemuTrustedMatrixResult:
+    manifest_sha256: text
+    status: text
+    reason: text
+    row_count: u32
+    pass_count: u32
+    blocked_count: u32
+    failed_count: u32
+
+struct _SosixQemuManifestField:
+    count: u32
+    value: text
+
+struct _SosixQemuCollectorSnapshot:
+    accepted: bool
+    reason: text
+    root: text
+    manifest: text
+    manifest_sha256: text
+
+struct _SosixQemuTrustedRowLoad:
+    accepted: bool
+    reason: text
+    row: SosixQemuMatrixRow
+
+fn _sosix_qemu_blank_row() -> SosixQemuMatrixRow:
+    SosixQemuMatrixRow(
+        host: "", guest: "", compiler_in_filesystem: false,
+        status: "", reason: "", evidence_path: "", admission_record: "",
+        collector_manifest_evidence_sha256: "", resume_command: "",
+        owner: "", reviewer: "", compiler_version_evidence_path: "",
+        compiler_hello_evidence_path: "")
+
+fn _sosix_qemu_manifest_descriptor_rejected(reason: text) -> SosixQemuManifestRowDescriptor:
+    SosixQemuManifestRowDescriptor(
+        structurally_valid: false, reason: reason, prefix: "", host: "", guest: "",
+        status: "", row_reason: "", evidence_path: "", admission_record_path: "",
+        resume_command: "", owner: "", reviewer: "", compiler_in_filesystem: false,
+        compiler_identity_scope: "", compiler_policy_sha256: "", compiler_policy_value: "",
+        compiler_designation_scope: "",
+        compiler_version_evidence_path: "", compiler_hello_evidence_path: "",
+        compiler_alias_evidence_path: "", compiler_manifest_evidence_path: "",
+        source_identity: "", compiler_identity: "", compiler_payload_identity: "",
+        compiler_image_identity: "", compiler_alias_identity: "", compiler_manifest_identity: "",
+        kernel_identity: "", image_identity: "", qemu_identity: "", qemu_argv: "",
+        accelerator_identity: "", firmware_identity: "", firmware_mode: "",
+        firmware_path: "", firmware_version: "", firmware_sha256: "",
+        firmware_stage_markers: "", boot_correlation_marker: "", run_nonce: "",
+        transcript_identity: "", program_identity: "",
+        evidence_sha256: "", admission_record_sha256: "", artifact_count: 0)
+
+fn _sosix_qemu_manifest_field(manifest: text, key: text) -> _SosixQemuManifestField:
+    var count: u32 = 0
+    var value = ""
+    val marker = key + "="
+    for line in manifest.split_lines():
+        if line.starts_with(marker):
+            count = count + 1
+            value = line.substring(marker.len(), line.len())
+    _SosixQemuManifestField(count: count, value: value)
+
+fn _sosix_qemu_lower_hex(value: text, size: i64) -> bool:
+    if value.len() != size:
+        return false
+    for character in value:
+        if not ((character >= '0' and character <= '9') or
+            (character >= 'a' and character <= 'f')):
+            return false
+    true
+
+fn _sosix_qemu_known_host(value: text) -> bool:
+    value == "linux" or value == "windows" or value == "macos" or value == "freebsd"
+
+fn _sosix_qemu_known_guest(value: text) -> bool:
+    value == "x86_32" or value == "x86_64" or value == "arm32" or
+        value == "arm64" or value == "riscv32" or value == "riscv64"
+
+fn _sosix_qemu_known_status(value: text) -> bool:
+    value == SOSIX_QEMU_ROW_PASS or value == SOSIX_QEMU_ROW_FAILED or
+        value == SOSIX_QEMU_ROW_BLOCKED or value == SOSIX_QEMU_ROW_UNSUPPORTED
+
+fn _sosix_qemu_canonical_artifact_count(value: text) -> bool:
+    value == "1" or value == "2" or value == "3" or value == "4" or
+        value == "5" or value == "6" or value == "7" or value == "8" or
+        value == "9" or value == "10" or value == "11" or value == "12" or value == "13"
+
+fn _sosix_qemu_expected_row_field_key(index: i64) -> text:
+    if index == 0: return "host"
+    if index == 1: return "guest"
+    if index == 2: return "status"
+    if index == 3: return "reason_b64"
+    if index == 4: return "evidence_path_b64"
+    if index == 5: return "admission_record_path_b64"
+    if index == 6: return "resume_command_b64"
+    if index == 7: return "owner_b64"
+    if index == 8: return "reviewer_b64"
+    if index == 9: return "compiler_in_filesystem"
+    if index == 10: return "compiler_identity_scope"
+    if index == 11: return "compiler_policy_sha256"
+    if index == 12: return "compiler_policy_value"
+    if index == 13: return "compiler_designation_scope"
+    if index == 14: return "compiler_version_evidence_path_b64"
+    if index == 15: return "compiler_hello_evidence_path_b64"
+    if index == 16: return "compiler_alias_evidence_path_b64"
+    if index == 17: return "compiler_manifest_evidence_path_b64"
+    if index == 18: return "source_identity_b64"
+    if index == 19: return "compiler_identity_b64"
+    if index == 20: return "compiler_payload_identity_b64"
+    if index == 21: return "compiler_image_identity_b64"
+    if index == 22: return "compiler_alias_identity_b64"
+    if index == 23: return "compiler_manifest_identity_b64"
+    if index == 24: return "kernel_identity_b64"
+    if index == 25: return "image_identity_b64"
+    if index == 26: return "qemu_identity_b64"
+    if index == 27: return "qemu_argv_b64"
+    if index == 28: return "accelerator_identity_b64"
+    if index == 29: return "firmware_identity_b64"
+    if index == 30: return "firmware_mode_b64"
+    if index == 31: return "firmware_path_b64"
+    if index == 32: return "firmware_version_b64"
+    if index == 33: return "firmware_sha256_b64"
+    if index == 34: return "firmware_stage_markers_b64"
+    if index == 35: return "boot_correlation_marker_b64"
+    if index == 36: return "run_nonce_b64"
+    if index == 37: return "transcript_identity_b64"
+    if index == 38: return "program_identity_b64"
+    if index == 39: return "evidence_sha256"
+    if index == 40: return "admission_record_sha256"
+    if index == 41: return "artifact_count"
+    ""
+
+fn _sosix_qemu_manifest_wire_valid(manifest: text) -> bool:
+    val expected_lines = SOSIX_QEMU_MATRIX_HEADER_FIELD_COUNT +
+        SOSIX_QEMU_MATRIX_ROW_COUNT * SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT + 1
+    var line_index: i64 = 0
+    for line in manifest.split_lines():
+        if line.len() == 0 or line.len() > 8192:
+            return false
+        var expected_key = ""
+        if line_index == 0:
+            expected_key = "sosix_qemu_matrix_manifest_version"
+        elif line_index == 1:
+            expected_key = "sosix_qemu_matrix_row_count"
+        elif line_index < expected_lines - 1:
+            val row_offset = line_index - SOSIX_QEMU_MATRIX_HEADER_FIELD_COUNT
+            val row = row_offset / SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT + 1
+            val field_index = row_offset % SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT
+            expected_key = "sosix_qemu_matrix_row_{row}_" + _sosix_qemu_expected_row_field_key(field_index)
+        else:
+            expected_key = "sosix_qemu_matrix_bundle_id"
+        if expected_key.len() == 0 or not line.starts_with(expected_key + "="):
+            return false
+        val value = line.substring(expected_key.len() + 1, line.len())
+        if line_index == 0 and value != "1": return false
+        if line_index == 1 and value != "24": return false
+        if line_index >= 2 and line_index < expected_lines - 1:
+            val field_index = (line_index - SOSIX_QEMU_MATRIX_HEADER_FIELD_COUNT) % SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT
+            if field_index == 0 and not _sosix_qemu_known_host(value): return false
+            if field_index == 1 and not _sosix_qemu_known_guest(value): return false
+            if field_index == 2 and not _sosix_qemu_known_status(value): return false
+            if field_index == 9 and value != "true" and value != "false": return false
+            if field_index == 39 and not _sosix_qemu_lower_hex(value, 64): return false
+            if field_index == 40 and not _sosix_qemu_lower_hex(value, 64): return false
+            if field_index == 41 and not _sosix_qemu_canonical_artifact_count(value): return false
+        if line_index == expected_lines - 1 and not _sosix_qemu_lower_hex(value, 16):
+            return false
+        line_index = line_index + 1
+    line_index == expected_lines
+
+fn _sosix_qemu_canonical_b64(encoded: text) -> bool:
+    base64_encode(base64_decode(encoded)) == encoded
+
+fn _sosix_qemu_decoded_field(manifest: text, key: text) -> _SosixQemuManifestField:
+    val encoded = _sosix_qemu_manifest_field(manifest, key)
+    if encoded.count != 1 or not _sosix_qemu_canonical_b64(encoded.value):
+        return _SosixQemuManifestField(count: 0, value: "")
+    _SosixQemuManifestField(count: 1, value: base64_decode(encoded.value))
+
+pub fn sosix_qemu_manifest_row_descriptor_parse(
+    manifest: text,
+    host: text,
+    guest: text
+) -> SosixQemuManifestRowDescriptor:
+    if not _sosix_qemu_manifest_wire_valid(manifest):
+        return _sosix_qemu_manifest_descriptor_rejected("manifest-wire-schema")
+    var selected_prefix = ""
+    var selected_count: u32 = 0
+    var row: i64 = 1
+    while row <= SOSIX_QEMU_MATRIX_ROW_COUNT:
+        val prefix = "sosix_qemu_matrix_row_{row}"
+        val row_host = _sosix_qemu_manifest_field(manifest, prefix + "_host")
+        val row_guest = _sosix_qemu_manifest_field(manifest, prefix + "_guest")
+        if row_host.count == 1 and row_guest.count == 1 and
+            row_host.value == host and row_guest.value == guest:
+            selected_prefix = prefix
+            selected_count = selected_count + 1
+        row = row + 1
+    if selected_count != 1:
+        return _sosix_qemu_manifest_descriptor_rejected("missing-or-duplicate-manifest-cell")
+
+    val status = _sosix_qemu_manifest_field(manifest, selected_prefix + "_status")
+    val reason = _sosix_qemu_decoded_field(manifest, selected_prefix + "_reason_b64")
+    val evidence_path = _sosix_qemu_decoded_field(manifest, selected_prefix + "_evidence_path_b64")
+    val admission_path = _sosix_qemu_decoded_field(manifest, selected_prefix + "_admission_record_path_b64")
+    val resume = _sosix_qemu_decoded_field(manifest, selected_prefix + "_resume_command_b64")
+    val owner = _sosix_qemu_decoded_field(manifest, selected_prefix + "_owner_b64")
+    val reviewer = _sosix_qemu_decoded_field(manifest, selected_prefix + "_reviewer_b64")
+    val compiler_value = _sosix_qemu_manifest_field(manifest, selected_prefix + "_compiler_in_filesystem")
+    val compiler_identity_scope = _sosix_qemu_manifest_field(manifest, selected_prefix + "_compiler_identity_scope")
+    val compiler_policy_sha256 = _sosix_qemu_manifest_field(manifest, selected_prefix + "_compiler_policy_sha256")
+    val compiler_policy_value = _sosix_qemu_manifest_field(manifest, selected_prefix + "_compiler_policy_value")
+    val compiler_designation_scope = _sosix_qemu_manifest_field(manifest, selected_prefix + "_compiler_designation_scope")
+    val compiler_version = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_version_evidence_path_b64")
+    val compiler_hello = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_hello_evidence_path_b64")
+    val compiler_alias_path = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_alias_evidence_path_b64")
+    val compiler_manifest_path = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_manifest_evidence_path_b64")
+    val source_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_source_identity_b64")
+    val compiler_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_identity_b64")
+    val compiler_payload_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_payload_identity_b64")
+    val compiler_image_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_image_identity_b64")
+    val compiler_alias_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_alias_identity_b64")
+    val compiler_manifest_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_compiler_manifest_identity_b64")
+    val kernel_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_kernel_identity_b64")
+    val image_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_image_identity_b64")
+    val qemu_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_qemu_identity_b64")
+    val qemu_argv = _sosix_qemu_decoded_field(manifest, selected_prefix + "_qemu_argv_b64")
+    val accelerator_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_accelerator_identity_b64")
+    val firmware_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_firmware_identity_b64")
+    val firmware_mode = _sosix_qemu_decoded_field(manifest, selected_prefix + "_firmware_mode_b64")
+    val firmware_path = _sosix_qemu_decoded_field(manifest, selected_prefix + "_firmware_path_b64")
+    val firmware_version = _sosix_qemu_decoded_field(manifest, selected_prefix + "_firmware_version_b64")
+    val firmware_sha256 = _sosix_qemu_decoded_field(manifest, selected_prefix + "_firmware_sha256_b64")
+    val firmware_stage_markers = _sosix_qemu_decoded_field(manifest, selected_prefix + "_firmware_stage_markers_b64")
+    val boot_correlation_marker = _sosix_qemu_decoded_field(manifest, selected_prefix + "_boot_correlation_marker_b64")
+    val run_nonce = _sosix_qemu_decoded_field(manifest, selected_prefix + "_run_nonce_b64")
+    val transcript_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_transcript_identity_b64")
+    val program_identity = _sosix_qemu_decoded_field(manifest, selected_prefix + "_program_identity_b64")
+    val evidence_sha256 = _sosix_qemu_manifest_field(manifest, selected_prefix + "_evidence_sha256")
+    val admission_sha256 = _sosix_qemu_manifest_field(manifest, selected_prefix + "_admission_record_sha256")
+    val artifact_count = _sosix_qemu_manifest_field(manifest, selected_prefix + "_artifact_count")
+    if status.count != 1 or reason.count != 1 or evidence_path.count != 1 or
+        admission_path.count != 1 or resume.count != 1 or owner.count != 1 or
+        reviewer.count != 1 or compiler_value.count != 1 or compiler_identity_scope.count != 1 or
+        compiler_policy_sha256.count != 1 or compiler_policy_value.count != 1 or
+        compiler_designation_scope.count != 1 or compiler_version.count != 1 or
+        compiler_hello.count != 1 or compiler_alias_path.count != 1 or
+        compiler_manifest_path.count != 1 or source_identity.count != 1 or
+        compiler_identity.count != 1 or compiler_payload_identity.count != 1 or
+        compiler_image_identity.count != 1 or compiler_alias_identity.count != 1 or
+        compiler_manifest_identity.count != 1 or kernel_identity.count != 1 or
+        image_identity.count != 1 or qemu_identity.count != 1 or qemu_argv.count != 1 or
+        accelerator_identity.count != 1 or firmware_identity.count != 1 or
+        firmware_mode.count != 1 or firmware_path.count != 1 or firmware_version.count != 1 or
+        firmware_sha256.count != 1 or firmware_stage_markers.count != 1 or
+        boot_correlation_marker.count != 1 or run_nonce.count != 1 or
+        transcript_identity.count != 1 or program_identity.count != 1 or
+        evidence_sha256.count != 1 or
+        admission_sha256.count != 1 or artifact_count.count != 1:
+        return _sosix_qemu_manifest_descriptor_rejected("manifest-row-field-decode")
+    val expected_evidence_path = "rows/" + host + "/" + guest + "/evidence.env"
+    val expected_admission_path = "rows/" + host + "/" + guest + "/admission.env"
+    if evidence_path.value != expected_evidence_path or admission_path.value != expected_admission_path:
+        return _sosix_qemu_manifest_descriptor_rejected("manifest-row-path-cell-mismatch")
+    if owner.value.len() == 0 or reviewer.value.len() == 0:
+        return _sosix_qemu_manifest_descriptor_rejected("manifest-row-missing-ownership")
+    if status.value == SOSIX_QEMU_ROW_PASS:
+        if reason.value != "" or resume.value != "":
+            return _sosix_qemu_manifest_descriptor_rejected("manifest-pass-has-nonpass-fields")
+    else:
+        if reason.value.len() == 0 or resume.value.len() == 0:
+            return _sosix_qemu_manifest_descriptor_rejected("manifest-nonpass-missing-reason-or-resume")
+
+    SosixQemuManifestRowDescriptor(
+        structurally_valid: true, reason: "manifest-row-structurally-valid",
+        prefix: selected_prefix, host: host, guest: guest, status: status.value,
+        row_reason: reason.value, evidence_path: evidence_path.value,
+        admission_record_path: admission_path.value, resume_command: resume.value,
+        owner: owner.value, reviewer: reviewer.value,
+        compiler_in_filesystem: compiler_value.value == "true",
+        compiler_identity_scope: compiler_identity_scope.value,
+        compiler_policy_sha256: compiler_policy_sha256.value,
+        compiler_policy_value: compiler_policy_value.value,
+        compiler_designation_scope: compiler_designation_scope.value,
+        compiler_version_evidence_path: compiler_version.value,
+        compiler_hello_evidence_path: compiler_hello.value,
+        compiler_alias_evidence_path: compiler_alias_path.value,
+        compiler_manifest_evidence_path: compiler_manifest_path.value,
+        source_identity: source_identity.value, compiler_identity: compiler_identity.value,
+        compiler_payload_identity: compiler_payload_identity.value,
+        compiler_image_identity: compiler_image_identity.value,
+        compiler_alias_identity: compiler_alias_identity.value,
+        compiler_manifest_identity: compiler_manifest_identity.value,
+        kernel_identity: kernel_identity.value, image_identity: image_identity.value,
+        qemu_identity: qemu_identity.value, qemu_argv: qemu_argv.value,
+        accelerator_identity: accelerator_identity.value,
+        firmware_identity: firmware_identity.value, firmware_mode: firmware_mode.value,
+        firmware_path: firmware_path.value, firmware_version: firmware_version.value,
+        firmware_sha256: firmware_sha256.value,
+        firmware_stage_markers: firmware_stage_markers.value,
+        boot_correlation_marker: boot_correlation_marker.value, run_nonce: run_nonce.value,
+        transcript_identity: transcript_identity.value, program_identity: program_identity.value,
+        evidence_sha256: evidence_sha256.value,
+        admission_record_sha256: admission_sha256.value,
+        artifact_count: artifact_count.value.to_i64() as u32)
+
+export SosixQemuManifestRowDescriptor, sosix_qemu_manifest_row_descriptor_parse
+
+fn _sosix_qemu_ascii_bytes(bytes: [u8]) -> bool:
+    for byte in bytes:
+        if byte > 127 or byte == 0:
+            return false
+    true
+
+fn _sosix_qemu_trim_root(root: text) -> text:
+    var normalized = root.replace("\\", "/")
+    while normalized.len() > 1 and normalized.ends_with("/"):
+        normalized = normalized.substring(0, normalized.len() - 1)
+    normalized
+
+fn _sosix_qemu_collector_snapshot(collector_root: text) -> _SosixQemuCollectorSnapshot:
+    if collector_root.len() == 0:
+        return _SosixQemuCollectorSnapshot(accepted: false, reason: "empty-collector-root", root: "", manifest: "", manifest_sha256: "")
+    val root = _sosix_qemu_trim_root(path_absolute(collector_root))
+    if root.len() == 0 or root == "/":
+        return _SosixQemuCollectorSnapshot(accepted: false, reason: "unsafe-collector-root", root: "", manifest: "", manifest_sha256: "")
+    val candidate = root + "/matrix.env"
+    if not file_exists(candidate) or not file_is_regular_no_follow(candidate):
+        return _SosixQemuCollectorSnapshot(accepted: false, reason: "manifest-not-regular", root: root, manifest: "", manifest_sha256: "")
+    val resolved = _sosix_qemu_trim_root(path_absolute(candidate))
+    if resolved != candidate:
+        return _SosixQemuCollectorSnapshot(accepted: false, reason: "manifest-path-escape", root: root, manifest: "", manifest_sha256: "")
+    val bytes = file_read_bytes(resolved)
+    if bytes.len() == 0 or bytes.len() > SOSIX_QEMU_MATRIX_MANIFEST_MAX_BYTES or
+        not _sosix_qemu_ascii_bytes(bytes):
+        return _SosixQemuCollectorSnapshot(accepted: false, reason: "manifest-byte-contract", root: root, manifest: "", manifest_sha256: "")
+    if not file_is_regular_no_follow(candidate) or _sosix_qemu_trim_root(path_absolute(candidate)) != resolved:
+        return _SosixQemuCollectorSnapshot(accepted: false, reason: "manifest-path-changed", root: root, manifest: "", manifest_sha256: "")
+    _SosixQemuCollectorSnapshot(
+        accepted: true, reason: "collector-manifest-snapshotted", root: root,
+        manifest: bytes_to_text(bytes), manifest_sha256: sha256_u8_hex(bytes))
+
+fn _sosix_qemu_record_complete_for_descriptor(
+    descriptor: SosixQemuManifestRowDescriptor,
+    record: text
+) -> bool:
+    val parsed = sosix_qemu_bundle_admission_from_collector_record(record)
+    parsed.receipt.manifest_version == 1 and parsed.receipt.host == descriptor.host and
+        parsed.receipt.guest == descriptor.guest and parsed.receipt.status == descriptor.status and
+        parsed.receipt.reason == descriptor.row_reason and
+        parsed.receipt.resume_command == descriptor.resume_command and
+        parsed.receipt.owner == descriptor.owner and parsed.receipt.reviewer == descriptor.reviewer and
+        parsed.receipt.evidence_path == descriptor.evidence_path and
+        parsed.receipt.evidence_sha256 == descriptor.evidence_sha256 and
+        parsed.receipt.compiler_in_filesystem == descriptor.compiler_in_filesystem and
+        parsed.receipt.compiler_identity_scope == descriptor.compiler_identity_scope and
+        parsed.receipt.compiler_policy_sha256 == descriptor.compiler_policy_sha256 and
+        parsed.receipt.compiler_policy_value == descriptor.compiler_policy_value and
+        parsed.receipt.compiler_designation_scope == descriptor.compiler_designation_scope and
+        parsed.receipt.compiler_version_evidence_path == descriptor.compiler_version_evidence_path and
+        parsed.receipt.compiler_hello_evidence_path == descriptor.compiler_hello_evidence_path and
+        parsed.receipt.compiler_alias_evidence_path == descriptor.compiler_alias_evidence_path and
+        parsed.receipt.compiler_manifest_evidence_path == descriptor.compiler_manifest_evidence_path and
+        parsed.receipt.source_identity == descriptor.source_identity and
+        parsed.receipt.compiler_identity == descriptor.compiler_identity and
+        parsed.receipt.compiler_payload_identity == descriptor.compiler_payload_identity and
+        parsed.receipt.compiler_image_identity == descriptor.compiler_image_identity and
+        parsed.receipt.compiler_alias_identity == descriptor.compiler_alias_identity and
+        parsed.receipt.compiler_manifest_identity == descriptor.compiler_manifest_identity and
+        parsed.receipt.kernel_identity == descriptor.kernel_identity and
+        parsed.receipt.image_identity == descriptor.image_identity and
+        parsed.receipt.qemu_identity == descriptor.qemu_identity and
+        parsed.receipt.qemu_argv == descriptor.qemu_argv and
+        parsed.receipt.accelerator_identity == descriptor.accelerator_identity and
+        parsed.receipt.firmware_identity == descriptor.firmware_identity and
+        parsed.receipt.firmware_mode == descriptor.firmware_mode and
+        parsed.receipt.firmware_path == descriptor.firmware_path and
+        parsed.receipt.firmware_version == descriptor.firmware_version and
+        parsed.receipt.firmware_sha256 == descriptor.firmware_sha256 and
+        parsed.receipt.firmware_stage_markers == descriptor.firmware_stage_markers and
+        parsed.receipt.boot_correlation_marker == descriptor.boot_correlation_marker and
+        parsed.receipt.run_nonce == descriptor.run_nonce and
+        parsed.receipt.transcript_identity == descriptor.transcript_identity and
+        parsed.receipt.program_identity == descriptor.program_identity and
+        parsed.receipt.artifact_count == descriptor.artifact_count and
+        parsed.receipt.artifacts.len() as u32 == descriptor.artifact_count
+
+fn _sosix_qemu_trusted_row_load(
+    root: text,
+    manifest: text,
+    host: text,
+    guest: text
+) -> _SosixQemuTrustedRowLoad:
+    val descriptor = sosix_qemu_manifest_row_descriptor_parse(manifest, host, guest)
+    if not descriptor.structurally_valid:
+        return _SosixQemuTrustedRowLoad(accepted: false, reason: descriptor.reason, row: _sosix_qemu_blank_row())
+    val candidate = root + "/" + descriptor.admission_record_path
+    if not file_exists(candidate) or not file_is_regular_no_follow(candidate):
+        return _SosixQemuTrustedRowLoad(accepted: false, reason: "admission-record-not-regular", row: _sosix_qemu_blank_row())
+    val resolved = _sosix_qemu_trim_root(path_absolute(candidate))
+    if resolved != candidate or not resolved.starts_with(root + "/"):
+        return _SosixQemuTrustedRowLoad(accepted: false, reason: "admission-record-path-escape", row: _sosix_qemu_blank_row())
+    val bytes = file_read_bytes(resolved)
+    if bytes.len() == 0 or bytes.len() > SOSIX_QEMU_ADMISSION_MAX_BYTES or not _sosix_qemu_ascii_bytes(bytes):
+        return _SosixQemuTrustedRowLoad(accepted: false, reason: "admission-record-byte-contract", row: _sosix_qemu_blank_row())
+    if not file_is_regular_no_follow(candidate) or _sosix_qemu_trim_root(path_absolute(candidate)) != resolved:
+        return _SosixQemuTrustedRowLoad(accepted: false, reason: "admission-record-path-changed", row: _sosix_qemu_blank_row())
+    if sha256_u8_hex(bytes) != descriptor.admission_record_sha256:
+        return _SosixQemuTrustedRowLoad(accepted: false, reason: "admission-record-sha256-mismatch", row: _sosix_qemu_blank_row())
+    val record = bytes_to_text(bytes)
+    if not _sosix_qemu_record_complete_for_descriptor(descriptor, record):
+        return _SosixQemuTrustedRowLoad(accepted: false, reason: "admission-record-manifest-mismatch", row: _sosix_qemu_blank_row())
+    if descriptor.status == SOSIX_QEMU_ROW_PASS:
+        val parsed = sosix_qemu_bundle_admission_from_collector_record(record)
+        if not parsed.structurally_valid:
+            return _SosixQemuTrustedRowLoad(accepted: false, reason: "admission-record-pass-invalid", row: _sosix_qemu_blank_row())
+        val row = sosix_qemu_structural_row_from_collector_record(record, descriptor.evidence_sha256)
+        return _SosixQemuTrustedRowLoad(accepted: true, reason: "trusted-pass-imported", row: row)
+    val row = SosixQemuMatrixRow(
+        host: descriptor.host, guest: descriptor.guest,
+        compiler_in_filesystem: descriptor.compiler_in_filesystem,
+        status: descriptor.status, reason: descriptor.row_reason,
+        evidence_path: descriptor.evidence_path, admission_record: record,
+        collector_manifest_evidence_sha256: descriptor.evidence_sha256,
+        resume_command: descriptor.resume_command, owner: descriptor.owner, reviewer: descriptor.reviewer,
+        compiler_version_evidence_path: descriptor.compiler_version_evidence_path,
+        compiler_hello_evidence_path: descriptor.compiler_hello_evidence_path)
+    _SosixQemuTrustedRowLoad(accepted: true, reason: "trusted-nonpass-imported", row: row)
+
+fn _sosix_qemu_trusted_result(
+    result: SosixQemuMatrixResult,
+    manifest_sha256: text
+) -> _SosixQemuTrustedMatrixResult:
+    _SosixQemuTrustedMatrixResult(
+        manifest_sha256: manifest_sha256, status: result.status, reason: result.reason,
+        row_count: result.row_count, pass_count: result.pass_count,
+        blocked_count: result.blocked_count, failed_count: result.failed_count)
+
+fn _sosix_qemu_trusted_matrix_evaluate(collector_root: text) -> _SosixQemuTrustedMatrixResult:
+    val snapshot = _sosix_qemu_collector_snapshot(collector_root)
+    if not snapshot.accepted:
+        return _sosix_qemu_trusted_result(
+            SosixQemuMatrixResult(status: "failed", reason: "trusted-import:" + snapshot.reason,
+                row_count: 0, pass_count: 0, blocked_count: 0, failed_count: 1), "")
+    var rows: [SosixQemuMatrixRow] = []
+    for host in sosix_qemu_matrix_hosts():
+        for guest in sosix_qemu_matrix_guests():
+            val loaded = _sosix_qemu_trusted_row_load(snapshot.root, snapshot.manifest, host, guest)
+            if not loaded.accepted:
+                return _sosix_qemu_trusted_result(
+                    SosixQemuMatrixResult(status: "failed", reason: "trusted-import:" + host + ":" + guest + ":" + loaded.reason,
+                        row_count: rows.len() as u32, pass_count: 0, blocked_count: 0, failed_count: 1),
+                    snapshot.manifest_sha256)
+            rows.push(loaded.row)
+    _sosix_qemu_trusted_result(sosix_qemu_matrix_evaluate(rows), snapshot.manifest_sha256)
+
+pub fn sosix_qemu_collector_root_is_release_admissible(collector_root: text) -> bool:
+    val result = _sosix_qemu_trusted_matrix_evaluate(collector_root)
+    result.manifest_sha256.len() == 64 and
+        result.status == SOSIX_QEMU_ROW_PASS and result.reason == "all-required-rows-pass" and
+        result.row_count == 24 and result.pass_count == 24 and
+        result.blocked_count == 0 and result.failed_count == 0
+
+export sosix_qemu_collector_root_is_release_admissible

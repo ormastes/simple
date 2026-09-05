@@ -1,0 +1,343 @@
+# codex-impl
+# Reusable GPU web/database queue accounting boundary.
+
+use std.web_db_offload.contract.{
+    GpuWdbWorkKind,
+    GpuWdbBudget,
+    GpuWdbRuntimeSnapshot,
+    GpuWdbExecutionPlan,
+    GpuWdbDecisionPath,
+    GpuWdbBatchWindow,
+    GpuWdbBatchPlan,
+    gpu_wdb_kind_name,
+    gpu_wdb_is_db_work,
+    gpu_wdb_batch_window,
+    gpu_wdb_batch_plan
+}
+
+struct GpuWdbQueueState:
+    queue_depth: i64
+    submitted_count: i64
+    completed_count: i64
+    gpu_hit_count: i64
+    cpu_fallback_count: i64
+    rejected_count: i64
+    pinned_host_bytes: i64
+    stream_count: i64
+
+struct GpuWdbQueueSubmission:
+    accepted: bool
+    state: GpuWdbQueueState
+    execution: GpuWdbExecutionPlan
+    queue_depth_after: i64
+    dispatch_target: text
+    pinned_host_bytes: i64
+    stream_id: i64
+    reason: text
+
+struct GpuWdbExecutionEvidence:
+    work_kind: GpuWdbWorkKind
+    work_kind_name: text
+    dispatch_target: text
+    accepted: bool
+    batch_size: i64
+    batch_bytes: i64
+    transfer_bytes: i64
+    kernel_time_us: i64
+    completion_latency_us: i64
+    queue_depth_after: i64
+    gpu_hits: i64
+    cpu_fallbacks: i64
+    stream_id: i64
+    pinned_host_bytes: i64
+    fallback_reason: text
+    device_time_us: i64
+    device_timing_source: text
+    backend_timing_valid: bool
+
+struct GpuWdbDbBatchAdmission:
+    accepted: bool
+    action: text
+    reason: text
+    dispatch_target: text
+    batch_bytes: i64
+    item_count: i64
+    queue_depth_after: i64
+
+struct GpuWdbTransferAmortization:
+    accepted: bool
+    logical_call_count: i64
+    item_count: i64
+    payload_bytes: i64
+    naive_transfer_bytes: i64
+    amortized_transfer_bytes: i64
+    saved_transfer_bytes: i64
+    bytes_per_logical_call: i64
+    reason: text
+
+fn gpu_wdb_queue_initial(stream_count: i64) -> GpuWdbQueueState:
+    val streams = if stream_count > 0: stream_count else: 1
+    GpuWdbQueueState(
+        queue_depth: 0,
+        submitted_count: 0,
+        completed_count: 0,
+        gpu_hit_count: 0,
+        cpu_fallback_count: 0,
+        rejected_count: 0,
+        pinned_host_bytes: 0,
+        stream_count: streams
+    )
+
+fn gpu_wdb_queue_snapshot(state: GpuWdbQueueState, gpu_available: bool,
+                          generation_current: bool,
+                          cpu_fallback_available: bool) -> GpuWdbRuntimeSnapshot:
+    GpuWdbRuntimeSnapshot(
+        queue_depth: state.queue_depth,
+        gpu_available: gpu_available,
+        generation_current: generation_current,
+        cpu_fallback_available: cpu_fallback_available
+    )
+
+fn gpu_wdb_queue_stream_id(state: GpuWdbQueueState) -> i64:
+    if state.stream_count <= 0:
+        return 0
+    state.submitted_count % state.stream_count
+
+fn gpu_wdb_queue_pinned_bytes(plan: GpuWdbBatchPlan, budget: GpuWdbBudget) -> i64:
+    if plan.execution.decision.path != GpuWdbDecisionPath.GpuEvidence:
+        return 0
+    val bytes = plan.average_item_bytes * plan.item_count
+    if bytes > budget.max_batch_bytes:
+        return budget.max_batch_bytes
+    bytes
+
+fn gpu_wdb_transfer_amortization(logical_call_count: i64,
+                                 items_per_call: i64,
+                                 bytes_per_item: i64,
+                                 fixed_transfer_overhead_bytes: i64,
+                                 budget: GpuWdbBudget) -> GpuWdbTransferAmortization:
+    if logical_call_count <= 0 or items_per_call <= 0 or bytes_per_item <= 0:
+        return GpuWdbTransferAmortization(
+            accepted: false,
+            logical_call_count: logical_call_count,
+            item_count: 0,
+            payload_bytes: 0,
+            naive_transfer_bytes: 0,
+            amortized_transfer_bytes: 0,
+            saved_transfer_bytes: 0,
+            bytes_per_logical_call: 0,
+            reason: "invalid-transfer-shape"
+        )
+    val overhead = if fixed_transfer_overhead_bytes > 0: fixed_transfer_overhead_bytes else: 0
+    val item_count = logical_call_count * items_per_call
+    val payload_bytes = item_count * bytes_per_item
+    if payload_bytes < budget.min_gpu_batch_bytes:
+        return GpuWdbTransferAmortization(
+            accepted: false,
+            logical_call_count: logical_call_count,
+            item_count: item_count,
+            payload_bytes: payload_bytes,
+            naive_transfer_bytes: payload_bytes + (logical_call_count * overhead),
+            amortized_transfer_bytes: 0,
+            saved_transfer_bytes: 0,
+            bytes_per_logical_call: items_per_call * bytes_per_item,
+            reason: "batch-too-small"
+        )
+    if payload_bytes > budget.max_batch_bytes:
+        return GpuWdbTransferAmortization(
+            accepted: false,
+            logical_call_count: logical_call_count,
+            item_count: item_count,
+            payload_bytes: payload_bytes,
+            naive_transfer_bytes: payload_bytes + (logical_call_count * overhead),
+            amortized_transfer_bytes: budget.max_batch_bytes,
+            saved_transfer_bytes: 0,
+            bytes_per_logical_call: items_per_call * bytes_per_item,
+            reason: "batch-too-large"
+        )
+    val naive_transfer = payload_bytes + (logical_call_count * overhead)
+    val amortized_transfer = payload_bytes + overhead
+    GpuWdbTransferAmortization(
+        accepted: true,
+        logical_call_count: logical_call_count,
+        item_count: item_count,
+        payload_bytes: payload_bytes,
+        naive_transfer_bytes: naive_transfer,
+        amortized_transfer_bytes: amortized_transfer,
+        saved_transfer_bytes:
+            if naive_transfer > amortized_transfer:
+                naive_transfer - amortized_transfer
+            else:
+                0,
+        bytes_per_logical_call: items_per_call * bytes_per_item,
+        reason: "amortized-transfer"
+    )
+
+fn gpu_wdb_submit_window(state: GpuWdbQueueState, window: GpuWdbBatchWindow,
+                         budget: GpuWdbBudget) -> GpuWdbQueueSubmission:
+    val plan = gpu_wdb_batch_plan(window, budget)
+    var next = state
+    next.submitted_count = next.submitted_count + 1
+    val pinned = gpu_wdb_queue_pinned_bytes(plan, budget)
+    val accepted = plan.execution.decision.path == GpuWdbDecisionPath.GpuEvidence
+    if accepted:
+        next.queue_depth = plan.queue_depth_after
+        next.gpu_hit_count = next.gpu_hit_count + 1
+        next.pinned_host_bytes = next.pinned_host_bytes + pinned
+    elif plan.execution.decision.path == GpuWdbDecisionPath.CpuFallback:
+        next.cpu_fallback_count = next.cpu_fallback_count + 1
+    else:
+        next.rejected_count = next.rejected_count + 1
+
+    GpuWdbQueueSubmission(
+        accepted: accepted,
+        state: next,
+        execution: plan.execution,
+        queue_depth_after: next.queue_depth,
+        dispatch_target: plan.execution.target,
+        pinned_host_bytes: pinned,
+        stream_id: if accepted: gpu_wdb_queue_stream_id(state) else: -1,
+        reason: plan.execution.decision.reason
+    )
+
+fn gpu_wdb_submit_batch(state: GpuWdbQueueState, kind: GpuWdbWorkKind,
+                        total_batch_bytes: i64, item_count: i64,
+                        gpu_available: bool, generation_current: bool,
+                        cpu_fallback_available: bool,
+                        budget: GpuWdbBudget) -> GpuWdbQueueSubmission:
+    val snapshot = gpu_wdb_queue_snapshot(state, gpu_available, generation_current, cpu_fallback_available)
+    val window = gpu_wdb_batch_window(kind, total_batch_bytes, item_count, snapshot)
+    gpu_wdb_submit_window(state, window, budget)
+
+fn gpu_wdb_complete_submission(state: GpuWdbQueueState,
+                               submission: GpuWdbQueueSubmission) -> GpuWdbQueueState:
+    var next = state
+    if submission.accepted:
+        if next.queue_depth > 0:
+            next.queue_depth = next.queue_depth - 1
+        next.completed_count = next.completed_count + 1
+        if next.pinned_host_bytes >= submission.pinned_host_bytes:
+            next.pinned_host_bytes = next.pinned_host_bytes - submission.pinned_host_bytes
+        else:
+            next.pinned_host_bytes = 0
+    next
+
+fn gpu_wdb_submission_evidence(submission: GpuWdbQueueSubmission,
+                               batch_size: i64,
+                               batch_bytes: i64,
+                               started_us: i64,
+                               finished_us: i64) -> GpuWdbExecutionEvidence:
+    gpu_wdb_submission_evidence_with_device_timing(
+        submission,
+        batch_size,
+        batch_bytes,
+        started_us,
+        finished_us,
+        0,
+        "host-derived",
+        false
+    )
+
+fn gpu_wdb_submission_evidence_with_device_timing(submission: GpuWdbQueueSubmission,
+                                                  batch_size: i64,
+                                                  batch_bytes: i64,
+                                                  started_us: i64,
+                                                  finished_us: i64,
+                                                  device_time_us: i64,
+                                                  device_timing_source: text,
+                                                  backend_timing_valid: bool) -> GpuWdbExecutionEvidence:
+    val latency = if finished_us > started_us: finished_us - started_us else: 1
+    val valid_device_timing = submission.accepted and backend_timing_valid and device_time_us > 0
+    val source =
+        if valid_device_timing:
+            device_timing_source
+        else:
+            "host-derived"
+    GpuWdbExecutionEvidence(
+        work_kind: submission.execution.kind,
+        work_kind_name: gpu_wdb_kind_name(submission.execution.kind),
+        dispatch_target: submission.dispatch_target,
+        accepted: submission.accepted,
+        batch_size: batch_size,
+        batch_bytes: batch_bytes,
+        transfer_bytes: submission.pinned_host_bytes,
+        kernel_time_us:
+            if valid_device_timing:
+                device_time_us
+            else:
+                if submission.accepted: latency else: 0,
+        completion_latency_us: latency,
+        queue_depth_after: submission.queue_depth_after,
+        gpu_hits: submission.state.gpu_hit_count,
+        cpu_fallbacks: submission.state.cpu_fallback_count,
+        stream_id: submission.stream_id,
+        pinned_host_bytes: submission.pinned_host_bytes,
+        fallback_reason: if submission.accepted: "" else: submission.reason,
+        device_time_us: if valid_device_timing: device_time_us else: 0,
+        device_timing_source: source,
+        backend_timing_valid: valid_device_timing
+    )
+
+fn gpu_wdb_db_item_count(kind: GpuWdbWorkKind, row_count: i64,
+                         document_count: i64, vector_count: i64) -> i64:
+    match kind:
+        DbDocumentFilter:
+            document_count
+        DbVectorSearch:
+            vector_count
+        _:
+            row_count
+
+fn gpu_wdb_db_batch_bytes(kind: GpuWdbWorkKind, row_count: i64,
+                          document_count: i64, vector_count: i64,
+                          bytes_per_item: i64) -> i64:
+    val item_count = gpu_wdb_db_item_count(kind, row_count, document_count, vector_count)
+    if item_count <= 0 or bytes_per_item <= 0:
+        return 0
+    item_count * bytes_per_item
+
+fn gpu_wdb_db_batch_admission(state: GpuWdbQueueState, kind: GpuWdbWorkKind,
+                              row_count: i64, document_count: i64,
+                              vector_count: i64, bytes_per_item: i64,
+                              gpu_available: bool, generation_current: bool,
+                              cpu_fallback_available: bool,
+                              budget: GpuWdbBudget) -> GpuWdbDbBatchAdmission:
+    if not gpu_wdb_is_db_work(kind):
+        return GpuWdbDbBatchAdmission(
+            accepted: false,
+            action: "reject",
+            reason: "not-db-work",
+            dispatch_target: "reject",
+            batch_bytes: 0,
+            item_count: 0,
+            queue_depth_after: state.queue_depth
+        )
+    val item_count = gpu_wdb_db_item_count(kind, row_count, document_count, vector_count)
+    val batch_bytes = gpu_wdb_db_batch_bytes(kind, row_count, document_count, vector_count, bytes_per_item)
+    val submission = gpu_wdb_submit_batch(
+        state,
+        kind,
+        batch_bytes,
+        item_count,
+        gpu_available,
+        generation_current,
+        cpu_fallback_available,
+        budget
+    )
+    val action =
+        if submission.accepted:
+            "dispatch-gpu"
+        else:
+            if submission.execution.decision.path == GpuWdbDecisionPath.CpuFallback:
+                "run-cpu-fallback"
+            else:
+                "reject"
+    GpuWdbDbBatchAdmission(
+        accepted: submission.accepted,
+        action: action,
+        reason: submission.reason,
+        dispatch_target: submission.dispatch_target,
+        batch_bytes: batch_bytes,
+        item_count: item_count,
+        queue_depth_after: submission.queue_depth_after
+    )

@@ -1,0 +1,54 @@
+"""Vulkan Engine2D SFFI provider ownership contract.
+
+The Engine2D facade owns pure-Simple dispatch and product policy. Raw runtime
+declarations belong only to the allowlisted io.vulkan_sffi provider.
+"""
+
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.{describe, it, expect}
+
+fn _vulkan_raw_call_line_count(source: text) -> i64:
+    val lines = source.split("\n")
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < lines.len():
+        val raw = lines[i].find("rt_vulkan_")
+        val call = lines[i].find("(")
+        if raw >= 0 and call > raw:
+            count += 1
+        i += 1
+    count
+
+fn _occurrences(source: text, token: text) -> i64:
+    source.split(token).len() - 1
+
+describe "Vulkan SFFI canonical provider ownership":
+    it "keeps raw declarations and calls out of the Engine2D product facade":
+        val facade = rt_file_read_text(
+            "src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl") ?? ""
+
+        expect(facade.contains("extern fn rt_vulkan_")).to_equal(false)
+        expect(facade.contains("extern fn rt_byte_array_new_len")).to_equal(false)
+        expect(_vulkan_raw_call_line_count(facade)).to_equal(0)
+        expect(facade.contains("rt_byte_array_new_len(")).to_equal(false)
+
+    it "resolves every migrated primitive through inline canonical aliases":
+        val facade = rt_file_read_text(
+            "src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl") ?? ""
+        val provider = rt_file_read_text(
+            "src/lib/nogc_sync_mut/io/vulkan_sffi.spl") ?? ""
+
+        expect(facade).to_contain("use std.nogc_sync_mut.io.vulkan_sffi.{")
+        expect(_occurrences(facade, " as vulkan_abi_")).to_equal(0)
+        expect(facade.contains("fn vulkan_abi_")).to_equal(false)
+        expect(_occurrences(provider, "@inline\npub fn vulkan_abi_")).to_equal(55)
+
+    it "allowlists only the canonical provider, never the product facade":
+        val allowlist = rt_file_read_text(
+            "scripts/check/no_direct_rt_allowlist.txt") ?? ""
+
+        expect(allowlist).to_contain(
+            "src/lib/nogc_sync_mut/io/vulkan_sffi.spl")
+        expect(allowlist.contains(
+            "src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl")).to_equal(false)

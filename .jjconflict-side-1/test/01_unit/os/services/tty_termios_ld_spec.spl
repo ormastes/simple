@@ -1,0 +1,296 @@
+# @cover src/os/services/tty_service.spl 80%
+"""
+# TTY Termios Line Discipline + Controlling Terminal Specification (TERM)
+
+**Feature IDs:** #G8-TERM
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Validates the termios line discipline across the PTY boundary
+(pty_master_write_ld -> slave line discipline -> tty_read_input /
+pty_master_read) plus the controlling-terminal / session / foreground
+process group ownership model (tty_set_session, tty_set_foreground,
+pending-signal accessors).
+
+## Key Concepts
+
+| Concept          | Description |
+|------------------|-------------|
+| ICANON           | Canonical mode — line gated until '\n' or VEOF |
+| ECHO             | Input bytes reflected to the master-readable queue |
+| ISIG             | VINTR (ETX=3) becomes a pending SIGINT, never input |
+| session_id       | Owning session of the controlling terminal |
+| foreground_pgrp  | Foreground process group; session-checked setter |
+| pending_signal   | Model of signal delivery: SIGINT=2 targeted at fg pgrp |
+
+## Behavior
+
+- Canonical mode gates bytes until newline; the whole line (incl. '\n')
+  then becomes readable via tty_read_input on the slave
+- VEOF (Ctrl-D=4) flushes a partial line without the EOF byte
+- Raw mode (ICANON off) delivers every byte immediately
+- ECHO on reflects input bytes into the queue pty_master_read drains;
+  ECHO off reflects nothing
+- VINTR (3) with ISIG records pending_signal=SIGINT for the foreground
+  pgrp and never enters the input stream; without ISIG it is ordinary data
+- tty_set_foreground succeeds only for a caller in the TTY's session
+  (deny-wins, fail closed); cross-session callers are denied
+"""
+
+use std.spec.*
+use src.os.services.tty_service.*
+
+# ============================================================================
+# Group 1: Canonical line gating across the PTY boundary
+# ============================================================================
+
+describe "Termios LD canonical line gating":
+    """
+    ## Canonical (ICANON) gating
+
+    Bytes written by the PTY master accumulate in the slave's line buffer;
+    nothing is readable by the slave until '\n' (or VEOF) arrives.
+    """
+
+    it "partial line is NOT readable before newline":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        val data: [u8] = [104, 105]            # "hi", no newline
+        val w = svc.pty_master_write_ld(master, data)
+        expect(w).to_equal(2)
+        val got = svc.tty_read_input(slave)
+        expect(got.len()).to_equal(0)
+
+    it "newline releases the whole line including the newline byte":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        val data: [u8] = [104, 105, 10]        # "hi\n"
+        svc.pty_master_write_ld(master, data)
+        val got = svc.tty_read_input(slave)
+        expect(got.len()).to_equal(3)
+        expect(got[0]).to_equal(104)
+        expect(got[1]).to_equal(105)
+        expect(got[2]).to_equal(10)
+
+    it "line accumulates across separate master writes until newline":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        val part1: [u8] = [104, 105]
+        svc.pty_master_write_ld(master, part1)
+        expect(svc.tty_read_input(slave).len()).to_equal(0)
+        val part2: [u8] = [10]
+        svc.pty_master_write_ld(master, part2)
+        val got = svc.tty_read_input(slave)
+        expect(got.len()).to_equal(3)
+
+    it "VEOF flushes a partial line without the EOF byte":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        val data: [u8] = [104, 105, 4]         # "hi" + Ctrl-D (VEOF=4)
+        svc.pty_master_write_ld(master, data)
+        val got = svc.tty_read_input(slave)
+        expect(got.len()).to_equal(2)
+        expect(got[0]).to_equal(104)
+        expect(got[1]).to_equal(105)
+
+    it "pty_master_write_ld returns -1 for a non-master entity":
+        var svc = TtyService.new()
+        val ghost = Entity(id: 9999, generation: 1)
+        val data: [u8] = [65]
+        val r = svc.pty_master_write_ld(ghost, data)
+        expect(r).to_equal((-1))
+
+# ============================================================================
+# Group 2: Raw-mode passthrough
+# ============================================================================
+
+describe "Termios LD raw mode passthrough":
+    """
+    ## Raw (ICANON off) mode
+
+    Every byte written by the master is immediately readable by the slave,
+    with no line gating.
+    """
+
+    it "raw mode delivers a single byte immediately":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        svc.tty_set_termios(slave, 0, 0, 0)    # raw: no ICANON/ECHO/ISIG
+        val data: [u8] = [65]                  # 'A'
+        svc.pty_master_write_ld(master, data)
+        val got = svc.tty_read_input(slave)
+        expect(got.len()).to_equal(1)
+        expect(got[0]).to_equal(65)
+
+    it "raw mode delivers all bytes of a burst with no gating":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        svc.tty_set_termios(slave, 0, 0, 0)
+        val data: [u8] = [104, 105, 33]        # "hi!" — no newline needed
+        svc.pty_master_write_ld(master, data)
+        val got = svc.tty_read_input(slave)
+        expect(got.len()).to_equal(3)
+        expect(got[2]).to_equal(33)
+
+# ============================================================================
+# Group 3: Echo
+# ============================================================================
+
+describe "Termios LD echo":
+    """
+    ## ECHO
+
+    With ECHO set, each input byte is reflected into the queue that
+    pty_master_read drains — before any newline arrives. With ECHO
+    cleared, nothing is reflected.
+    """
+
+    it "ECHO on reflects input bytes to the master before newline":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val data: [u8] = [104, 105]            # "hi", default lflag has ECHO
+        svc.pty_master_write_ld(master, data)
+        val echoed = svc.pty_master_read(master)
+        expect(echoed.len()).to_equal(2)
+        expect(echoed[0]).to_equal(104)
+        expect(echoed[1]).to_equal(105)
+
+    it "ECHO off reflects nothing to the master":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        svc.tty_set_termios(slave, 0, 0, ICANON | ISIG)   # ECHO cleared
+        val data: [u8] = [104, 105]
+        svc.pty_master_write_ld(master, data)
+        val echoed = svc.pty_master_read(master)
+        expect(echoed.len()).to_equal(0)
+
+# ============================================================================
+# Group 4: ISIG — VINTR becomes a pending signal for the fg pgrp
+# ============================================================================
+
+describe "Termios LD VINTR pending signal":
+    """
+    ## ISIG / VINTR
+
+    A VINTR byte (ETX=3) with ISIG set never enters the input stream;
+    instead pending_signal records SIGINT (2) targeted at the foreground
+    process group current at that instant. Without ISIG the byte is
+    ordinary data.
+    """
+
+    it "VINTR with ISIG records SIGINT for the fg pgrp and stays out of input":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        svc.tty_set_session(slave, 7)
+        val ok = svc.tty_set_foreground(slave, 7, 42)
+        expect(ok).to_equal(true)
+        val data: [u8] = [3, 65, 10]           # ^C then "A\n"
+        svc.pty_master_write_ld(master, data)
+        expect(svc.tty_pending_signal(slave)).to_equal(2)      # SIGINT
+        expect(svc.tty_pending_signal_pgrp(slave)).to_equal(42)
+        val got = svc.tty_read_input(slave)
+        expect(got.len()).to_equal(2)          # only "A\n" — ^C swallowed
+        expect(got[0]).to_equal(65)
+        expect(got[1]).to_equal(10)
+
+    it "tty_take_pending_signal consumes the signal exactly once":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        svc.tty_set_session(slave, 7)
+        svc.tty_set_foreground(slave, 7, 42)
+        val data: [u8] = [3]
+        svc.pty_master_write_ld(master, data)
+        val first = svc.tty_take_pending_signal(slave)
+        expect(first).to_equal(2)
+        val second = svc.tty_take_pending_signal(slave)
+        expect(second).to_equal(0)
+        expect(svc.tty_pending_signal_pgrp(slave)).to_equal(0)
+
+    it "VINTR without ISIG is ordinary data (no pending signal)":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        svc.tty_set_session(slave, 7)
+        svc.tty_set_foreground(slave, 7, 42)
+        svc.tty_set_termios(slave, 0, 0, ICANON)   # ISIG (and ECHO) cleared
+        val data: [u8] = [3, 10]
+        svc.pty_master_write_ld(master, data)
+        expect(svc.tty_pending_signal(slave)).to_equal(0)
+        val got = svc.tty_read_input(slave)
+        expect(got.len()).to_equal(2)          # ^C entered the line as data
+        expect(got[0]).to_equal(3)
+
+    it "pending signal targets the fg pgrp current at VINTR time":
+        var svc = TtyService.new()
+        val pair = svc.tty_create_pty_pair()
+        val master = pair.0
+        val slave  = pair.1
+        svc.tty_set_session(slave, 5)
+        svc.tty_set_foreground(slave, 5, 11)
+        val data: [u8] = [3]
+        svc.pty_master_write_ld(master, data)
+        # Foreground changes AFTER the interrupt — recorded target must not move.
+        svc.tty_set_foreground(slave, 5, 99)
+        expect(svc.tty_pending_signal_pgrp(slave)).to_equal(11)
+
+# ============================================================================
+# Group 5: Controlling terminal / session ownership
+# ============================================================================
+
+describe "Controlling terminal session ownership":
+    """
+    ## Session-checked foreground control
+
+    tty_set_foreground succeeds only when the caller's session matches the
+    TTY's owning session. Cross-session callers and unknown entities are
+    denied (fail closed) and leave foreground_pgrp unchanged.
+    """
+
+    it "same-session caller sets the foreground pgrp":
+        var svc = TtyService.new()
+        val tty = svc.tty_create(TTY_CONSOLE, 1, 2)
+        svc.tty_set_session(tty, 3)
+        expect(svc.tty_session_id(tty)).to_equal(3)
+        val ok = svc.tty_set_foreground(tty, 3, 55)
+        expect(ok).to_equal(true)
+        expect(svc.tty_foreground_pgrp(tty)).to_equal(55)
+
+    it "cross-session caller is denied and fg pgrp is unchanged":
+        var svc = TtyService.new()
+        val tty = svc.tty_create(TTY_CONSOLE, 1, 2)
+        svc.tty_set_session(tty, 3)
+        svc.tty_set_foreground(tty, 3, 55)
+        val denied = svc.tty_set_foreground(tty, 4, 99)   # wrong session
+        expect(denied).to_equal(false)
+        expect(svc.tty_foreground_pgrp(tty)).to_equal(55)
+
+    it "unknown entity fails closed for set_session and set_foreground":
+        var svc = TtyService.new()
+        val ghost = Entity(id: 9999, generation: 1)
+        expect(svc.tty_set_session(ghost, 1)).to_equal(false)
+        expect(svc.tty_set_foreground(ghost, 1, 2)).to_equal(false)
+        expect(svc.tty_session_id(ghost)).to_equal(0)
+        expect(svc.tty_foreground_pgrp(ghost)).to_equal(0)

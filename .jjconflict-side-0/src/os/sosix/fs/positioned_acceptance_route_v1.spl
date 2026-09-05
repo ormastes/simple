@@ -1,0 +1,136 @@
+"""Canonical SOSIX transaction used by the live positioned-I/O boot oracle.
+
+The route opens one MountTable virtual object, installs an authenticated
+registry owner, and executes the registered-buffer pwrite/pread envelopes via
+the kernel dispatcher.  It never calls a driver positioned primitive directly.
+"""
+
+use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_open, g_vfs_positioned_close}
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.kernel_positioned_dispatch_v1.{
+    sosix_fs_kernel_positioned_state_v1,
+    sosix_fs_kernel_install_positioned_owner_v1,
+    sosix_fs_kernel_dispatch_positioned_v1
+}
+use os.sosix.fs.positioned_backend_composition_v1.{
+    SosixPositionedBackendKindV1,
+    sosix_positioned_backend_unavailable_v1,
+    sosix_positioned_backend_install_v1
+}
+use os.sosix.fs.positioned_dispatch_owner_v1.SosixFsPositionedDispatchOwnerV1
+use os.sosix.fs.positioned_syscall_v1.{
+    SOSIX_FS_PREAD_REGISTERED_V1, SOSIX_FS_PWRITE_REGISTERED_V1,
+    sosix_fs_positioned_syscall_args_v1
+}
+use os.sosix.fs.registry_lifecycle_v1.SosixFsRegistryOwnerV1
+use os.sosix.fs.service_adapter_v1.{
+    SOSIX_FS_SERVICE_RIGHT_READ_V1, SOSIX_FS_SERVICE_RIGHT_WRITE_V1,
+    SOSIX_FS_SERVICE_BUFFER_READ_V1, SOSIX_FS_SERVICE_BUFFER_WRITE_V1,
+    SosixFsCapabilityEntryV1, SosixFsBufferEntryV1,
+    SosixFsServiceRegistryV1
+}
+use std.fs_driver.types.OpenFlags
+
+val _SOSIX_ACCEPTANCE_PROCESS_V1: u64 = 1u64
+val _SOSIX_ACCEPTANCE_ENDPOINT_V1: u64 = 1u64
+val _SOSIX_ACCEPTANCE_BUFFER_ID_V1: u64 = 1u64
+val _SOSIX_ACCEPTANCE_BUFFER_IDENTITY_V1: u64 = 0x0000000100000001u64
+
+pub struct SosixPositionedAcceptanceResultV1:
+    accepted: bool
+    reason: text
+    bytes: [u8]
+
+export SosixPositionedAcceptanceResultV1
+
+fn _acceptance_reject_v1(reason: text) -> SosixPositionedAcceptanceResultV1:
+    SosixPositionedAcceptanceResultV1(
+        accepted: false, reason: reason, bytes: [])
+
+fn _acceptance_dispatch_owner_v1(
+    file_object_id: u64
+) -> SosixFsPositionedDispatchOwnerV1:
+    SosixFsPositionedDispatchOwnerV1(
+        registry_owner: SosixFsRegistryOwnerV1(
+            service_endpoint: _SOSIX_ACCEPTANCE_ENDPOINT_V1,
+            service_generation: 1u32,
+            registry: SosixFsServiceRegistryV1(
+                capabilities: [SosixFsCapabilityEntryV1(
+                    active: true,
+                    ref_: SosixCapabilityRef(slot: 1u32, generation: 1u32),
+                    owner_process_id: _SOSIX_ACCEPTANCE_PROCESS_V1,
+                    file_object_id: file_object_id,
+                    rights: SOSIX_FS_SERVICE_RIGHT_READ_V1 |
+                        SOSIX_FS_SERVICE_RIGHT_WRITE_V1)],
+                buffers: [SosixFsBufferEntryV1(
+                    active: true,
+                    ref_: SosixBufferRef(slot: 1u32, generation: 1u32),
+                    owner_process_id: _SOSIX_ACCEPTANCE_PROCESS_V1,
+                    registration_id: _SOSIX_ACCEPTANCE_BUFFER_ID_V1,
+                    byte_length: 4u64,
+                    access: SOSIX_FS_SERVICE_BUFFER_READ_V1 |
+                        SOSIX_FS_SERVICE_BUFFER_WRITE_V1,
+                    service_endpoint: _SOSIX_ACCEPTANCE_ENDPOINT_V1,
+                    memory_mode: 1u32,
+                    bytes: [11u8, 22u8, 0u8, 0u8])])),
+        operation_slot: 1u32,
+        operation_generation: 1u32,
+        next_request_token: 1u64)
+
+pub fn sosix_positioned_acceptance_round_trip_v1(
+    kind: SosixPositionedBackendKindV1, path: text
+) -> SosixPositionedAcceptanceResultV1:
+    """Write at offset two and read four bytes through the full SOSIX route."""
+    val opened = g_vfs_positioned_open(path, OpenFlags.create_write())
+    if opened.is_err():
+        return _acceptance_reject_v1("positioned-acceptance-open-failed")
+    val file_object_id = opened.unwrap()
+
+    val selected = sosix_positioned_backend_install_v1(
+        sosix_positioned_backend_unavailable_v1(), kind)
+    if not selected.accepted:
+        val _ = g_vfs_positioned_close(file_object_id)
+        return _acceptance_reject_v1(selected.reason)
+    var backend = selected.owner
+
+    val initial = sosix_fs_kernel_positioned_state_v1(
+        _acceptance_dispatch_owner_v1(file_object_id))
+    val installed = sosix_fs_kernel_install_positioned_owner_v1(
+        initial, initial.owner)
+    if not installed.accepted:
+        val _ = g_vfs_positioned_close(file_object_id)
+        return _acceptance_reject_v1(installed.reason)
+
+    val wrote = sosix_fs_kernel_dispatch_positioned_v1(
+        installed.state,
+        sosix_fs_positioned_syscall_args_v1(
+            SOSIX_FS_PWRITE_REGISTERED_V1,
+            file_object_id, _SOSIX_ACCEPTANCE_BUFFER_ID_V1,
+            _SOSIX_ACCEPTANCE_BUFFER_IDENTITY_V1,
+            2u64, 0u64, 2u64),
+        true, _SOSIX_ACCEPTANCE_PROCESS_V1, backend)
+    if not wrote.accepted or wrote.result.value != 2:
+        val _ = g_vfs_positioned_close(file_object_id)
+        return _acceptance_reject_v1("positioned-acceptance-write-failed:" + wrote.reason)
+
+    val read = sosix_fs_kernel_dispatch_positioned_v1(
+        wrote.state,
+        sosix_fs_positioned_syscall_args_v1(
+            SOSIX_FS_PREAD_REGISTERED_V1,
+            file_object_id, _SOSIX_ACCEPTANCE_BUFFER_ID_V1,
+            _SOSIX_ACCEPTANCE_BUFFER_IDENTITY_V1,
+            0u64, 0u64, 4u64),
+        true, _SOSIX_ACCEPTANCE_PROCESS_V1, backend)
+    if not read.accepted or read.result.value != 4:
+        val _ = g_vfs_positioned_close(file_object_id)
+        return _acceptance_reject_v1("positioned-acceptance-read-failed:" + read.reason)
+
+    val bytes = read.state.owner.registry_owner.registry.buffers[0].bytes
+    val closed = g_vfs_positioned_close(file_object_id)
+    if closed.is_err():
+        return _acceptance_reject_v1("positioned-acceptance-close-failed")
+    SosixPositionedAcceptanceResultV1(
+        accepted: true, reason: "positioned-acceptance-round-trip",
+        bytes: bytes)
+
+export sosix_positioned_acceptance_round_trip_v1

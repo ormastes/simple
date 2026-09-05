@@ -1,0 +1,85 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV's SymbolEntityId layer (plan row
+SCV-IMPL-I-03): declaration extraction from Simple (.spl) source via the
+interim structural line scanner (module/type/trait/fn/field/variant/const —
+query-pack hookup is an explicit TODO on SCV-IMPL-P-06), and persistent
+symbol_entity(+version) rows in the SCV-IMPL-B-04 metadata db (textual
+SdnDatabase backend + WAL — not the rt_sqlite emulation). Symbol ids are
+stable across commits: re-ingesting allocates no new id for an unchanged
+declaration but always appends a version row.
+Audience: Maintainers of the SCV identity layer.
+"""
+# @req: REQ-SCV-SYMBOL-ENTITY-001
+use std.spec.{describe, it, expect, step}
+use app.io.mod (dir_create)
+use std.scv.store.{scv_init_repo}
+use std.scv.metadata_db.{scv_metadb_open}
+use std.scv.symbol_entity.{scv_symbol_extract_decls, scv_symbol_ingest}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _repo(tag: text) -> text:
+    val root = "/tmp/scv-sym-{tag}-{current_time_ms()}"
+    dir_create(root, true)
+    scv_init_repo(root)
+    root
+
+fn _sample() -> text:
+    "val LIMIT = 10\n\nfn top(a: i64) -> i64:\n    a + 1\n\nstruct Point:\n    x: i64\n    y: i64\n\n    fn norm() -> i64:\n        self.x\n\nenum Color:\n    Red\n    Green\n\ntrait Shape:\n    fn area() -> i64\n"
+
+describe "scv symbol entity ids and declaration extraction":
+    it "extracts module, type, trait, fn, field, variant and const declarations":
+        step("Scan a representative .spl source")
+        val rows = scv_symbol_extract_decls(_sample())
+        var joined = ""
+        for r in rows:
+            joined = joined + r + "\n"
+        expect(joined).to_contain("const|LIMIT|1|")
+        expect(joined).to_contain("fn|top|3|")
+        expect(joined).to_contain("type|Point|6|")
+        expect(joined).to_contain("field|x|7|Point")
+        expect(joined).to_contain("field|y|8|Point")
+        expect(joined).to_contain("fn|norm|10|Point")
+        expect(joined).to_contain("enum|Color|13|")
+        expect(joined).to_contain("variant|Red|14|Color")
+        expect(joined).to_contain("variant|Green|15|Color")
+        expect(joined).to_contain("trait|Shape|17|")
+        expect(joined).to_contain("fn|area|18|Shape")
+
+    it "persists symbol_entity rows with repo-unique stable ids":
+        step("Ingest a file at commit c1")
+        val root = _repo("ingest")
+        var m = scv_metadb_open(root)
+        val verdict = scv_symbol_ingest(m, "file_1", "fn alpha():\n    pass\n\nfn beta():\n    pass\n", "c1")
+        expect(verdict).to_equal("symbols=2,new=2,versions=2")
+        step("Rows survive a reopen with sym_<n> ids")
+        var m2 = scv_metadb_open(root)
+        expect(m2.count("symbol_entity")).to_equal(2)
+        expect(m2.count("symbol_entity_version")).to_equal(2)
+        val row = m2.row("symbol_entity", "sym_1")
+        expect(row.?).to_equal(true)
+        match row:
+            Some(r):
+                expect(r.get("file_id") ?? "").to_equal("file_1")
+                expect(r.get("kind") ?? "").to_equal("fn")
+                expect(r.get("state") ?? "").to_equal("live")
+            nil:
+                pass
+
+    it "reuses ids across commits and appends version rows":
+        step("Ingest the same file at c1 then at c2 with one added fn")
+        val root = _repo("stable")
+        var m = scv_metadb_open(root)
+        expect(scv_symbol_ingest(m, "file_1", "fn alpha():\n    pass\n", "c1")).to_equal("symbols=1,new=1,versions=1")
+        var m2 = scv_metadb_open(root)
+        val v2 = scv_symbol_ingest(m2, "file_1", "fn alpha():\n    pass\n\nfn gamma():\n    pass\n", "c2")
+        step("alpha kept its id (new=1 is gamma only); versions accumulate")
+        expect(v2).to_equal("symbols=2,new=1,versions=2")
+        var m3 = scv_metadb_open(root)
+        expect(m3.count("symbol_entity")).to_equal(2)
+        expect(m3.count("symbol_entity_version")).to_equal(3)
+        step("Same-named symbols in DIFFERENT files get different ids")
+        val v3 = scv_symbol_ingest(m3, "file_2", "fn alpha():\n    pass\n", "c2")
+        expect(v3).to_equal("symbols=1,new=1,versions=1")
+        var m4 = scv_metadb_open(root)
+        expect(m4.count("symbol_entity")).to_equal(3)

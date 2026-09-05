@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/gpu/engine2d/ffi_cuda.spl"
+
+declarations=$(grep -c '^[[:space:]]*extern fn rt_cuda_' "$owner")
+if [ "$declarations" -ne 9 ]; then
+    echo "CudaDynFfi extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_cuda_/ { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every CudaDynFfi declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /unsafe\(capabilities: \[.*ffi.*\]\):[[:space:]]*$/ {
+        unsafe_indent = indent($0)
+        inside_unsafe = 1
+        next
+    }
+    inside_unsafe && NF && indent($0) <= unsafe_indent { inside_unsafe = 0 }
+    /rt_cuda_[A-Za-z0-9_]+\(/ && !/^[[:space:]]*extern fn / && !inside_unsafe {
+        print "unscoped CudaDynFfi call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$owner"
+
+grep -q '@unsafe(reason: "CUDA dynamic dispatch exposes generationless handles' "$owner"
+
+# Never restore unbacked helpers or the ABI-incompatible function-handle call
+# under the canonical rt_cuda_launch_kernel identity.
+for symbol in rt_cuda_shutdown rt_cuda_kernel_get rt_cuda_launch_kernel rt_cuda_synchronize rt_engine2d_pack_args_4 rt_engine2d_pack_args_8 rt_engine2d_upload_pixels rt_engine2d_download_pixels rt_engine2d_upload_host_buf; do
+    if grep -q "extern fn $symbol" "$owner"; then
+        echo "CudaDynFfi restored unsafe or unbacked declaration $symbol" >&2
+        exit 1
+    fi
+done
+grep -q 'case Static: false' "$owner"
+grep -q 'rt_cuda_module_load_data(ptx)' "$owner"
+grep -q 'rt_cuda_module_get_function(module, name)' "$owner"
+grep -q 'rt_cuda_sync() == 0' "$owner"
+
+# Generic integer dispatch remains limited to CUDA functions whose values are
+# direct inputs/returns. Out-parameter operations use exact typed static thunks.
+if grep -q 'call0("cuDeviceGetCount")\|call2("cuCtxCreate"\|call1("cuMemAlloc"' "$owner"; then
+    echo "CudaDynFfi misuses generic dispatch for an out-parameter ABI" >&2
+    exit 1
+fi
+grep -q 'call_n("cuLaunchKernel"' "$owner"
+
+echo "CudaDynFfi SFFI contract audit: PASS (9 unsafe declarations; 12 unsafe duplicates removed; incompatible static launch disabled)"

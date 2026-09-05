@@ -1,0 +1,311 @@
+"""CPU-composited glass material for canonical Engine2D Draw IR rectangles.
+
+The helper samples the already-rendered framebuffer, applies a bounded
+separable box blur and saturation, then alpha-composites one rounded surface
+or two-stop vertical gradient. It returns replacement pixels for the requested
+rectangle; callers keep backend presentation and readback ownership.
+"""
+
+use std.gpu.engine2d.color.{blend, color_a, color_b, color_g, color_r, rgba}
+
+val ENGINE2D_GLASS_MAX_WORK_PIXELS: i64 = 67108864
+
+struct Engine2dGlassMaterialConfig:
+    framebuffer_width: i32
+    framebuffer_height: i32
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    radius: i32
+    blur_radius: i32
+    saturation_milli: i32
+    surface_alpha_milli: i32
+    surface_color: u32
+    gradient_from: u32
+    gradient_to: u32
+    gradient_enabled: bool
+    gradient_layered_over_surface: bool
+
+struct Engine2dGlassExecutionResult:
+    applied: bool
+    execution_target: text
+    backend_handle: i64
+    device_identity: i64
+    failure_reason: text
+
+fn engine2d_glass_execution_unavailable(reason: text) -> Engine2dGlassExecutionResult:
+    Engine2dGlassExecutionResult(
+        applied: false,
+        execution_target: "unavailable",
+        backend_handle: 0,
+        device_identity: 0,
+        failure_reason: reason
+    )
+
+fn engine2d_glass_execution_metal(
+    backend_handle: i64, device_identity: i64
+) -> Engine2dGlassExecutionResult:
+    if backend_handle <= 0 or device_identity <= 0:
+        return engine2d_glass_execution_unavailable(
+            "metal-device-identity-unavailable")
+    Engine2dGlassExecutionResult(
+        applied: true,
+        execution_target: "metal-device-glass-v1",
+        backend_handle: backend_handle,
+        device_identity: device_identity,
+        failure_reason: ""
+    )
+
+fn engine2d_glass_execution_cpu() -> Engine2dGlassExecutionResult:
+    Engine2dGlassExecutionResult(
+        applied: true,
+        execution_target: "cpu-scalar-glass-v1",
+        backend_handle: 0,
+        device_identity: 0,
+        failure_reason: ""
+    )
+
+fn _glass_clamp(value: i32, low: i32, high: i32) -> i32:
+    if value < low:
+        return low
+    if value > high:
+        return high
+    value
+
+fn _glass_radius(config: Engine2dGlassMaterialConfig) -> i32:
+    var radius = config.radius
+    if radius < 0:
+        radius = 0
+    if radius > config.width / 2:
+        radius = config.width / 2
+    if radius > config.height / 2:
+        radius = config.height / 2
+    radius
+
+fn _glass_inside_rounded_rect(px: i32, py: i32, width: i32, height: i32, radius: i32) -> bool:
+    if radius <= 0:
+        return true
+    if px >= radius and px < width - radius:
+        return true
+    if py >= radius and py < height - radius:
+        return true
+    val cx = if px < radius: radius else: width - radius - 1
+    val cy = if py < radius: radius else: height - radius - 1
+    val dx = px - cx
+    val dy = py - cy
+    dx * dx + dy * dy <= radius * radius
+
+fn _glass_frame_pixel(framebuffer: [u32], width: i32, height: i32, x: i32, y: i32) -> u32:
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return 0u32
+    framebuffer[y.to_i64() * width.to_i64() + x.to_i64()]
+
+fn _glass_pack_average(red: i64, green: i64, blue: i64, alpha: i64, count: i64) -> u32:
+    if count <= 0:
+        return 0u32
+    rgba(
+        (red / count) as i32,
+        (green / count) as i32,
+        (blue / count) as i32,
+        (alpha / count) as i32
+    )
+
+fn _glass_horizontal_blur(framebuffer: [u32], config: Engine2dGlassMaterialConfig, blur_radius: i32) -> [u32]:
+    val expanded_height64 = (config.height as i64) + 2 * (blur_radius as i64)
+    val expanded_height = expanded_height64 as i32
+    val count = (config.width as i64) * expanded_height64
+    var horizontal: [u32] = [0u32; count]
+    var row = 0
+    while row < expanded_height:
+        val frame_y64: i64 = (config.y as i64) + (row as i64) - (blur_radius as i64)
+        var px = 0
+        while px < config.width:
+            var red: i64 = 0
+            var green: i64 = 0
+            var blue: i64 = 0
+            var alpha: i64 = 0
+            var samples: i64 = 0
+            var offset = 0 - blur_radius
+            while offset <= blur_radius:
+                val frame_x64: i64 = (config.x as i64) + (px as i64) + (offset as i64)
+                if (frame_x64 >= 0 and frame_x64 < (config.framebuffer_width as i64) and
+                    frame_y64 >= 0 and frame_y64 < (config.framebuffer_height as i64)):
+                    val pixel = _glass_frame_pixel(
+                        framebuffer,
+                        config.framebuffer_width,
+                        config.framebuffer_height,
+                        frame_x64 as i32,
+                        frame_y64 as i32
+                    )
+                    red = red + (color_r(pixel) as i64)
+                    green = green + (color_g(pixel) as i64)
+                    blue = blue + (color_b(pixel) as i64)
+                    alpha = alpha + (color_a(pixel) as i64)
+                    samples = samples + 1
+                offset = offset + 1
+            horizontal[(row as i64) * (config.width as i64) + (px as i64)] = _glass_pack_average(red, green, blue, alpha, samples)
+            px = px + 1
+        row = row + 1
+    horizontal
+
+fn _glass_blurred_pixel(horizontal: [u32], config: Engine2dGlassMaterialConfig, px: i32, py: i32, blur_radius: i32) -> u32:
+    var red: i64 = 0
+    var green: i64 = 0
+    var blue: i64 = 0
+    var alpha: i64 = 0
+    var samples: i64 = 0
+    var offset = 0 - blur_radius
+    while offset <= blur_radius:
+        val frame_y64: i64 = (config.y as i64) + (py as i64) + (offset as i64)
+        if frame_y64 >= 0 and frame_y64 < (config.framebuffer_height as i64):
+            val row = py + offset + blur_radius
+            val pixel = horizontal[(row as i64) * (config.width as i64) + (px as i64)]
+            red = red + (color_r(pixel) as i64)
+            green = green + (color_g(pixel) as i64)
+            blue = blue + (color_b(pixel) as i64)
+            alpha = alpha + (color_a(pixel) as i64)
+            samples = samples + 1
+        offset = offset + 1
+    _glass_pack_average(red, green, blue, alpha, samples)
+
+fn _glass_saturate(pixel: u32, saturation_milli: i32) -> u32:
+    val saturation = _glass_clamp(saturation_milli, 0, 3000)
+    if saturation == 1000:
+        return pixel
+    val red = color_r(pixel)
+    val green = color_g(pixel)
+    val blue = color_b(pixel)
+    val luminance = (red * 54 + green * 183 + blue * 19 + 128) / 256
+    val out_red = _glass_clamp(
+        luminance + (red - luminance) * saturation / 1000, 0, 255)
+    val out_green = _glass_clamp(
+        luminance + (green - luminance) * saturation / 1000, 0, 255)
+    val out_blue = _glass_clamp(
+        luminance + (blue - luminance) * saturation / 1000, 0, 255)
+    rgba(out_red, out_green, out_blue, color_a(pixel))
+
+fn _glass_lerp_channel(from_value: i32, to_value: i32, row: i32, denominator: i32) -> i32:
+    if denominator <= 0:
+        return from_value
+    val from64: i64 = from_value as i64
+    val to64: i64 = to_value as i64
+    val row64: i64 = row as i64
+    val denominator64: i64 = denominator as i64
+    ((from64 * (denominator64 - row64) + to64 * row64) / denominator64) as i32
+
+fn _glass_surface_tint(config: Engine2dGlassMaterialConfig) -> u32:
+    val alpha = _glass_clamp(
+        255 * _glass_clamp(config.surface_alpha_milli, 0, 1000) / 1000,
+        0,
+        255
+    )
+    rgba(
+        color_r(config.surface_color),
+        color_g(config.surface_color),
+        color_b(config.surface_color),
+        alpha
+    )
+
+fn _glass_gradient_tint(config: Engine2dGlassMaterialConfig, py: i32) -> u32:
+    val denominator = config.height - 1
+    val alpha = if config.gradient_layered_over_surface:
+        _glass_lerp_channel(
+            color_a(config.gradient_from),
+            color_a(config.gradient_to),
+            py,
+            denominator
+        )
+    else:
+        _glass_clamp(
+            255 * _glass_clamp(config.surface_alpha_milli, 0, 1000) / 1000,
+            0,
+            255
+        )
+    rgba(
+        _glass_lerp_channel(
+            color_r(config.gradient_from),
+            color_r(config.gradient_to),
+            py,
+            denominator
+        ),
+        _glass_lerp_channel(
+            color_g(config.gradient_from),
+            color_g(config.gradient_to),
+            py,
+            denominator
+        ),
+        _glass_lerp_channel(
+            color_b(config.gradient_from),
+            color_b(config.gradient_to),
+            py,
+            denominator
+        ),
+        alpha
+    )
+
+pub fn engine2d_draw_ir_glass_material_pixels(framebuffer: [u32], config: Engine2dGlassMaterialConfig) -> [u32]:
+    """Return a rounded, blurred, saturated and alpha-composited pixel region."""
+    if (config.framebuffer_width <= 0 or config.framebuffer_height <= 0 or
+        config.width <= 0 or config.height <= 0 or
+        config.x < 0 or config.y < 0):
+        return []
+    val blur_radius = _glass_clamp(config.blur_radius, 0, 4)
+    val framebuffer_width64: i64 = config.framebuffer_width as i64
+    val framebuffer_height64: i64 = config.framebuffer_height as i64
+    val width64: i64 = config.width as i64
+    val height64: i64 = config.height as i64
+    val expected = framebuffer_width64 * framebuffer_height64
+    val output_count = width64 * height64
+    val expanded_height64 = height64 + 2 * (blur_radius as i64)
+    val horizontal_count = width64 * expanded_height64
+    if ((config.x as i64) + width64 > framebuffer_width64 or
+        (config.y as i64) + height64 > framebuffer_height64 or
+        output_count <= 0 or output_count > ENGINE2D_GLASS_MAX_WORK_PIXELS or
+        horizontal_count <= 0 or horizontal_count > ENGINE2D_GLASS_MAX_WORK_PIXELS or
+        framebuffer.len() != expected):
+        return []
+    val radius = _glass_radius(config)
+    val horizontal = _glass_horizontal_blur(framebuffer, config, blur_radius)
+    var output: [u32] = [0u32; output_count]
+    var py = 0
+    while py < config.height:
+        var px = 0
+        while px < config.width:
+            val original = _glass_frame_pixel(
+                framebuffer,
+                config.framebuffer_width,
+                config.framebuffer_height,
+                config.x + px,
+                config.y + py
+            )
+            var result = original
+            if _glass_inside_rounded_rect(
+                px, py, config.width, config.height, radius):
+                val blurred = _glass_blurred_pixel(
+                    horizontal, config, px, py, blur_radius)
+                val saturated = _glass_saturate(
+                    blurred, config.saturation_milli)
+                val surface = blend(_glass_surface_tint(config), saturated)
+                if config.gradient_enabled:
+                    val gradient_destination = if config.gradient_layered_over_surface:
+                        surface
+                    else:
+                        saturated
+                    result = blend(
+                        _glass_gradient_tint(config, py),
+                        gradient_destination
+                    )
+                else:
+                    result = surface
+            output[(py as i64) * width64 + (px as i64)] = result
+            px = px + 1
+        py = py + 1
+    output
+
+export Engine2dGlassMaterialConfig
+export Engine2dGlassExecutionResult
+export engine2d_glass_execution_unavailable
+export engine2d_glass_execution_metal
+export engine2d_glass_execution_cpu
+export engine2d_draw_ir_glass_material_pixels

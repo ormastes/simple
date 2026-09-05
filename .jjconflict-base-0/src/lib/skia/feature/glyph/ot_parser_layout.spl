@@ -1,0 +1,717 @@
+# OpenType layout table parsers: GSUB, GPOS, GDEF
+
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_i16_be, read_u32_be}
+
+# ===== GSUB / GPOS =====
+
+class GsubLookup:
+    lookup_index: i64
+    lookup_type: u32
+    flag: u32
+    lookup_offset: u32
+    table_start: u32
+    table_end: u32
+    subtable_offsets: [u32]
+    subtable_ends: [u32]
+    mark_filtering_set: i64
+
+class GsubSingleResult:
+    glyph_id: u32
+    applied: bool
+    valid: bool
+
+class _CoverageResult:
+    index: i64
+    count: i64
+    found: bool
+    valid: bool
+
+fn _layout_coverage_index(blob: [u8], coverage_abs: i64, limit: i64, glyph_id: u32) -> _CoverageResult:
+    if limit < 0 or limit > blob.len() as i64 or coverage_abs < 0 or coverage_abs + 4 > limit:
+        return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+    val format = read_u16_be(blob, coverage_abs)
+    val count = read_u16_be(blob, coverage_abs + 2) as i64
+    if format == 1:
+        if coverage_abs + 4 + count * 2 > limit:
+            return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+        var previous: i64 = -1
+        var found: i64 = -1
+        var i: i64 = 0
+        while i < count:
+            val covered = read_u16_be(blob, coverage_abs + 4 + i * 2) as i64
+            if covered <= previous:
+                return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+            if covered == glyph_id as i64:
+                found = i
+            previous = covered
+            i = i + 1
+        return _CoverageResult(index: found, count: count, found: found >= 0, valid: true)
+    if format == 2:
+        if coverage_abs + 4 + count * 6 > limit:
+            return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+        var previous_end: i64 = -1
+        var expected_index: i64 = 0
+        var found: i64 = -1
+        var i: i64 = 0
+        while i < count:
+            val range_abs = coverage_abs + 4 + i * 6
+            val first = read_u16_be(blob, range_abs) as i64
+            val last = read_u16_be(blob, range_abs + 2) as i64
+            val first_index = read_u16_be(blob, range_abs + 4) as i64
+            if first > last or first <= previous_end or first_index != expected_index:
+                return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+            val next_index = first_index + last - first + 1
+            if next_index > 65536:
+                return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+            if glyph_id as i64 >= first and glyph_id as i64 <= last:
+                found = first_index + glyph_id as i64 - first
+            previous_end = last
+            expected_index = next_index
+            i = i + 1
+        return _CoverageResult(index: found, count: expected_index, found: found >= 0, valid: true)
+    _CoverageResult(index: 0, count: 0, found: false, valid: false)
+
+fn apply_gsub_single(blob: [u8], table_start: i64, table_end: i64, subtable_abs: i64, glyph_id: u32) -> GsubSingleResult:
+    val unchanged = GsubSingleResult(glyph_id: glyph_id, applied: false, valid: false)
+    if table_start < 0 or table_start > subtable_abs or table_end < table_start or table_end > blob.len() as i64 or glyph_id > 65535 or subtable_abs + 6 > table_end:
+        return unchanged
+    val format = read_u16_be(blob, subtable_abs)
+    val coverage_offset = read_u16_be(blob, subtable_abs + 2) as i64
+    var glyph_count: i64 = 0
+    var minimum_coverage_offset: i64 = 6
+    if format == 2:
+        glyph_count = read_u16_be(blob, subtable_abs + 4) as i64
+        minimum_coverage_offset = 6 + glyph_count * 2
+        if subtable_abs + minimum_coverage_offset > table_end:
+            return unchanged
+    else if format != 1:
+        return unchanged
+    if coverage_offset < minimum_coverage_offset or subtable_abs + coverage_offset < subtable_abs:
+        return unchanged
+    val coverage = _layout_coverage_index(blob, subtable_abs + coverage_offset, table_end, glyph_id)
+    if not coverage.valid:
+        return unchanged
+    if format == 2 and coverage.count != glyph_count:
+        return unchanged
+    if not coverage.found:
+        return GsubSingleResult(glyph_id: glyph_id, applied: false, valid: true)
+    if format == 1:
+        val delta = read_i16_be(blob, subtable_abs + 4) as i64
+        val replacement = ((glyph_id as i64 + delta) & 65535) as u32
+        return GsubSingleResult(glyph_id: replacement, applied: true, valid: true)
+    if format == 2:
+        if coverage.index >= glyph_count:
+            return unchanged
+        return GsubSingleResult(glyph_id: read_u16_be(blob, subtable_abs + 6 + coverage.index * 2), applied: true, valid: true)
+    unchanged
+
+class GposLookup:
+    lookup_index: i64
+    lookup_type: u32
+    flag: u32
+    lookup_offset: u32
+    table_start: u32
+    table_end: u32
+    subtable_offsets: [u32]
+    subtable_ends: [u32]
+    mark_filtering_set: i64
+
+class LayoutLookupActivation:
+    lookup_index: i64
+    feature_mask: u64
+
+class LayoutFeatureActivation:
+    feature_tag: u32
+    feature_mask: u64
+
+class LayoutLookupPlan:
+    valid: bool
+    lookup_indices: [i64]
+    activations: [LayoutLookupActivation]
+    features: [LayoutFeatureActivation]
+
+fn _layout_feature_variations_header_valid(blob: [u8], base: i64, limit: i64, offset: i64) -> bool:
+    if offset < 14 or base + offset + 8 > limit: return false
+    val variations = base + offset
+    if read_u16_be(blob, variations) != 1u32 or read_u16_be(blob, variations + 2) != 0u32: return false
+    val count = read_u32_be(blob, variations + 4) as i64
+    count <= (limit - variations - 8) / 8
+
+fn _layout_feature_variations_valid(blob: [u8], base: i64, limit: i64, offset: i64,
+                                    feature_count: i64, lookup_count: i64) -> bool:
+    if not _layout_feature_variations_header_valid(blob, base, limit, offset): return false
+    val variations = base + offset
+    val count = read_u32_be(blob, variations + 4) as i64
+    val records_end = variations + 8 + count * 8
+    var child_offsets: [i64] = []
+    var index: i64 = 0
+    while index < count:
+        val record = variations + 8 + index * 8
+        val condition_offset = read_u32_be(blob, record) as i64
+        val substitution_offset = read_u32_be(blob, record + 4) as i64
+        if condition_offset != 0:
+            if child_offsets.contains(condition_offset) or variations + condition_offset < records_end: return false
+            child_offsets.push(condition_offset)
+        if substitution_offset != 0:
+            if child_offsets.contains(substitution_offset) or variations + substitution_offset < records_end: return false
+            child_offsets.push(substitution_offset)
+        index = index + 1
+    index = 0
+    while index < count:
+        val record = variations + 8 + index * 8
+        val condition_offset = read_u32_be(blob, record) as i64
+        if condition_offset != 0:
+            val condition_set = variations + condition_offset
+            val condition_end = _nearest_sibling_end(variations, child_offsets, condition_offset, limit)
+            if condition_set + 2 > condition_end: return false
+            val condition_count = read_u16_be(blob, condition_set) as i64
+            if condition_set + 2 + condition_count * 4 > condition_end: return false
+            var condition_offsets: [i64] = []
+            var condition_index: i64 = 0
+            while condition_index < condition_count:
+                val condition = read_u32_be(blob, condition_set + 2 + condition_index * 4) as i64
+                if condition == 0 or condition_offsets.contains(condition): return false
+                condition_offsets.push(condition)
+                condition_index = condition_index + 1
+            val condition_records_end = condition_set + 2 + condition_count * 4
+            for condition in condition_offsets:
+                val condition_table = condition_set + condition
+                val condition_table_end = _nearest_sibling_end(condition_set, condition_offsets, condition, condition_end)
+                if condition_table < condition_records_end or condition_table + 8 > condition_table_end or read_u16_be(blob, condition_table) != 1u32:
+                    return false
+        val substitution_offset = read_u32_be(blob, record + 4) as i64
+        if substitution_offset != 0:
+            val substitution = variations + substitution_offset
+            val substitution_end = _nearest_sibling_end(variations, child_offsets, substitution_offset, limit)
+            if (substitution + 6 > substitution_end or read_u16_be(blob, substitution) != 1u32 or
+                read_u16_be(blob, substitution + 2) != 0u32): return false
+            val substitution_count = read_u16_be(blob, substitution + 4) as i64
+            val substitution_records_end = substitution + 6 + substitution_count * 6
+            if substitution_records_end > substitution_end: return false
+            var alternate_offsets: [i64] = []
+            var previous_feature_index: i64 = -1
+            var substitution_index: i64 = 0
+            while substitution_index < substitution_count:
+                val substitution_record = substitution + 6 + substitution_index * 6
+                val feature_index = read_u16_be(blob, substitution_record) as i64
+                val alternate = read_u32_be(blob, substitution_record + 2) as i64
+                if feature_index <= previous_feature_index or feature_index >= feature_count: return false
+                previous_feature_index = feature_index
+                if (alternate == 0 or alternate_offsets.contains(alternate) or
+                    substitution + alternate < substitution_records_end): return false
+                alternate_offsets.push(alternate)
+                substitution_index = substitution_index + 1
+            for alternate in alternate_offsets:
+                val alternate_table = substitution + alternate
+                val alternate_end = _nearest_sibling_end(substitution, alternate_offsets, alternate, substitution_end)
+                if alternate_table + 4 > alternate_end: return false
+                val params_offset = read_u16_be(blob, alternate_table) as i64
+                val alternate_lookup_count = read_u16_be(blob, alternate_table + 2) as i64
+                val alternate_records_end = alternate_table + 4 + alternate_lookup_count * 2
+                if alternate_records_end > alternate_end: return false
+                var lookup_index: i64 = 0
+                while lookup_index < alternate_lookup_count:
+                    if read_u16_be(blob, alternate_table + 4 + lookup_index * 2) as i64 >= lookup_count: return false
+                    lookup_index = lookup_index + 1
+                if (params_offset != 0 and
+                    (alternate_table + params_offset < alternate_records_end or alternate_table + params_offset + 2 > alternate_end)):
+                    return false
+        index = index + 1
+    true
+
+fn _layout_header_size(blob: [u8], base: i64, limit: i64) -> i64:
+    if base < 0 or base + 10 > limit: return -1
+    val version = read_u32_be(blob, base)
+    if version == 65536u32: return 10
+    if version == 65537u32:
+        if base + 14 > limit: return -1
+        val variations_offset = read_u32_be(blob, base + 10) as i64
+        if variations_offset != 0 and not _layout_feature_variations_header_valid(blob, base, limit, variations_offset): return -1
+        return 14
+    -1
+
+fn _nearest_sibling_end(parent: i64, offsets: [i64], current: i64, parent_end: i64) -> i64:
+    var result = parent_end
+    for offset in offsets:
+        if offset > current and parent + offset < result:
+            result = parent + offset
+    result
+
+fn read_lookup_list(blob: [u8], lookup_list_abs: i64) -> [u32]:
+    if lookup_list_abs + 1 >= blob.len() as i64:
+        return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    if lookup_list_abs + 2 + count * 2 > blob.len() as i64:
+        return []
+    var offsets: [u32] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2)
+        offsets.append(off)
+        i = i + 1
+    offsets
+
+fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
+    # Tag 'GSUB' = 0x47535542
+    val gsub_tag: u32 = 1196643650
+    val maybe_tbl = find_table(font, gsub_tag)
+    val tbl = match maybe_tbl:
+        Some(value):
+            value
+        None:
+            return []
+    val base = tbl.offset as i64
+    val end = base + tbl.length as i64
+    val blob = font.blob
+    val header_size = _layout_header_size(blob, base, end)
+    if base < 0 or end < base or end > blob.len() as i64 or end > 4294967295 or header_size < 0:
+        return []
+    val script_list_off = read_u16_be(blob, base + 4) as i64
+    val feature_list_off = read_u16_be(blob, base + 6) as i64
+    val lookup_list_off = read_u16_be(blob, base + 8) as i64
+    if (script_list_off < header_size or feature_list_off < header_size or lookup_list_off < header_size or
+        script_list_off == feature_list_off or script_list_off == lookup_list_off or
+        feature_list_off == lookup_list_off):
+        return []
+    if base + script_list_off + 2 > end or base + feature_list_off + 2 > end:
+        return []
+    val lookup_list_abs = base + lookup_list_off
+    var top_offsets: [i64] = [script_list_off, feature_list_off, lookup_list_off]
+    val variations_offset = if read_u32_be(blob, base) == 65537u32: (read_u32_be(blob, base + 10) as i64) else: 0
+    if variations_offset != 0:
+        if top_offsets.contains(variations_offset): return []
+        top_offsets.push(variations_offset)
+    val lookup_list_end = _nearest_sibling_end(base, top_offsets, lookup_list_off, end)
+    if lookup_list_abs + 2 > lookup_list_end: return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    if lookup_list_abs + 2 + count * 2 > lookup_list_end:
+        return []
+    val lookup_list_metadata_end = lookup_list_abs + 2 + count * 2
+    var lookup_offsets: [i64] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
+        if off == 0 or lookup_offsets.contains(off):
+            return []
+        lookup_offsets.push(off)
+        i = i + 1
+    var results: [GsubLookup] = []
+    i = 0
+    while i < count:
+        val off = lookup_offsets[i]
+        val lkp_abs = lookup_list_abs + off
+        val lookup_end = _nearest_sibling_end(lookup_list_abs, lookup_offsets, off, lookup_list_end)
+        if lkp_abs < lookup_list_metadata_end or lkp_abs + 6 > lookup_end:
+            return []
+        val ltype = read_u16_be(blob, lkp_abs)
+        val flag = read_u16_be(blob, lkp_abs + 2)
+        val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
+        val lookup_bytes = 6 + sub_count * 2 + (if (flag & 0x0010u32) != 0u32: 2 else: 0)
+        if lkp_abs + lookup_bytes > lookup_end:
+            return []
+        val lookup_metadata_end = lkp_abs + lookup_bytes
+        var subs: [u32] = []
+        var subtable_offsets: [i64] = []
+        var j: i64 = 0
+        while j < sub_count:
+            val soff = read_u16_be(blob, lkp_abs + 6 + j * 2) as i64
+            if soff == 0 or subtable_offsets.contains(soff):
+                return []
+            subtable_offsets.push(soff)
+            j = j + 1
+        var subtable_ends: [u32] = []
+        for soff in subtable_offsets:
+            val sub_abs = lkp_abs + soff
+            val sub_end = _nearest_sibling_end(lkp_abs, subtable_offsets, soff, lookup_end)
+            if sub_abs < lookup_metadata_end or sub_abs + 2 > sub_end: return []
+            subs.push(sub_abs as u32)
+            subtable_ends.push(sub_end as u32)
+        val mark_filtering_set = if (flag & 16u32) != 0u32: (read_u16_be(blob, lkp_abs + 6 + sub_count * 2) as i64) else: -1
+        val lkp = GsubLookup(lookup_index: i, lookup_type: ltype, flag: flag, lookup_offset: lkp_abs as u32, table_start: base as u32, table_end: lookup_end as u32, subtable_offsets: subs, subtable_ends: subtable_ends, mark_filtering_set: mark_filtering_set)
+        results.append(lkp)
+        i = i + 1
+    results
+
+fn select_gsub_lookups(font: OtFont, script_tag: u32, language_tag: u32,
+                       default_feature_tags: [u32]) -> [GsubLookup]:
+    val plan = select_gsub_lookup_plan(font, script_tag, language_tag, default_feature_tags)
+    if not plan.valid: return []
+    val catalog = parse_gsub_skeleton(font)
+    if catalog.len() == 0: return []
+    var selected: [GsubLookup] = []
+    for index in plan.lookup_indices:
+        if index < 0 or index >= catalog.len(): return []
+        selected.push(catalog[index])
+    selected
+
+fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
+    # Tag 'GPOS' = 0x47504F53
+    val gpos_tag: u32 = 1196445523
+    val maybe_tbl = find_table(font, gpos_tag)
+    val tbl = match maybe_tbl:
+        Some(value):
+            value
+        None:
+            return []
+    val base = tbl.offset as i64
+    val end = base + tbl.length as i64
+    val blob = font.blob
+    val header_size = _layout_header_size(blob, base, end)
+    if base < 0 or end < base or end > blob.len() as i64 or header_size < 0: return []
+    val script_list_off = read_u16_be(blob, base + 4) as i64
+    val feature_list_off = read_u16_be(blob, base + 6) as i64
+    val lookup_list_off = read_u16_be(blob, base + 8) as i64
+    if (script_list_off < header_size or feature_list_off < header_size or lookup_list_off < header_size or
+        script_list_off == feature_list_off or script_list_off == lookup_list_off or
+        feature_list_off == lookup_list_off): return []
+    if base + script_list_off + 2 > end or base + feature_list_off + 2 > end: return []
+    val lookup_list_abs = base + lookup_list_off
+    var top_offsets: [i64] = [script_list_off, feature_list_off, lookup_list_off]
+    val variations_offset = if read_u32_be(blob, base) == 65537u32: (read_u32_be(blob, base + 10) as i64) else: 0
+    if variations_offset != 0:
+        if top_offsets.contains(variations_offset): return []
+        top_offsets.push(variations_offset)
+    val lookup_list_end = _nearest_sibling_end(base, top_offsets, lookup_list_off, end)
+    if lookup_list_abs + 2 > lookup_list_end: return []
+    val count = read_u16_be(blob, lookup_list_abs) as i64
+    if lookup_list_abs + 2 + count * 2 > lookup_list_end: return []
+    val list_metadata_end = lookup_list_abs + 2 + count * 2
+    var lookup_offsets: [i64] = []
+    var i: i64 = 0
+    while i < count:
+        val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
+        if off == 0 or lookup_offsets.contains(off): return []
+        lookup_offsets.push(off)
+        i = i + 1
+    var results: [GposLookup] = []
+    i = 0
+    while i < count:
+        val off = lookup_offsets[i]
+        val lkp_abs = lookup_list_abs + off
+        val lookup_end = _nearest_sibling_end(lookup_list_abs, lookup_offsets, off, lookup_list_end)
+        if lkp_abs < list_metadata_end or lkp_abs + 6 > lookup_end: return []
+        val ltype = read_u16_be(blob, lkp_abs)
+        val flag = read_u16_be(blob, lkp_abs + 2)
+        val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
+        val lookup_bytes = 6 + sub_count * 2 + (if (flag & 16u32) != 0u32: 2 else: 0)
+        if lkp_abs + lookup_bytes > lookup_end: return []
+        val lookup_metadata_end = lkp_abs + lookup_bytes
+        var subs: [u32] = []
+        var subtable_offsets: [i64] = []
+        var j: i64 = 0
+        while j < sub_count:
+            val soff = read_u16_be(blob, lkp_abs + 6 + j * 2) as i64
+            if soff == 0 or subtable_offsets.contains(soff): return []
+            subtable_offsets.push(soff)
+            j = j + 1
+        var subtable_ends: [u32] = []
+        for soff in subtable_offsets:
+            val sub_abs = lkp_abs + soff
+            val sub_end = _nearest_sibling_end(lkp_abs, subtable_offsets, soff, lookup_end)
+            if sub_abs < lookup_metadata_end or sub_abs + 2 > sub_end: return []
+            subs.push(sub_abs as u32)
+            subtable_ends.push(sub_end as u32)
+        val lkp = GposLookup(lookup_index: i, lookup_type: ltype, flag: flag,
+            lookup_offset: lkp_abs as u32, table_start: base as u32,
+            table_end: lookup_end as u32, subtable_offsets: subs, subtable_ends: subtable_ends,
+            mark_filtering_set: if (flag & 16u32) != 0u32: (read_u16_be(blob, lkp_abs + 6 + sub_count * 2) as i64) else: -1)
+        results.append(lkp)
+        i = i + 1
+    results
+
+fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
+                                 script_tag: u32, language_tag: u32,
+                                 default_feature_tags: [u32]) -> LayoutLookupPlan:
+    val invalid = LayoutLookupPlan(valid: false, lookup_indices: [], activations: [], features: [])
+    val table = match find_table(font, table_tag):
+        Some(value): value
+        None: return LayoutLookupPlan(valid: true, lookup_indices: [], activations: [], features: [])
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    val blob = font.blob
+    val header_size = _layout_header_size(blob, base, limit)
+    if base < 0 or limit < base or limit > blob.len() as i64 or header_size < 0: return invalid
+    val script_offset = read_u16_be(blob, base + 4) as i64
+    val feature_offset = read_u16_be(blob, base + 6) as i64
+    val lookup_offset = read_u16_be(blob, base + 8) as i64
+    if (script_offset < header_size or feature_offset < header_size or lookup_offset < header_size or
+        script_offset == feature_offset or script_offset == lookup_offset or
+        feature_offset == lookup_offset): return invalid
+    val script_list = base + script_offset
+    val feature_list = base + feature_offset
+    val lookup_list = base + lookup_offset
+    var top_offsets: [i64] = [script_offset, feature_offset, lookup_offset]
+    val variations_offset = if read_u32_be(blob, base) == 65537u32: (read_u32_be(blob, base + 10) as i64) else: 0
+    if variations_offset != 0:
+        if top_offsets.contains(variations_offset): return invalid
+        top_offsets.push(variations_offset)
+    val script_limit = _nearest_sibling_end(base, top_offsets, script_offset, limit)
+    val feature_limit = _nearest_sibling_end(base, top_offsets, feature_offset, limit)
+    val lookup_limit = _nearest_sibling_end(base, top_offsets, lookup_offset, limit)
+    if script_list + 2 > script_limit or feature_list + 2 > feature_limit or lookup_list + 2 > lookup_limit: return invalid
+    val feature_count = read_u16_be(blob, feature_list) as i64
+    val feature_records_end = feature_list + 2 + feature_count * 6
+    if feature_records_end > feature_limit: return invalid
+    val lookup_count = read_u16_be(blob, lookup_list) as i64
+    val lookup_records_end = lookup_list + 2 + lookup_count * 2
+    if lookup_records_end > lookup_limit: return invalid
+    if variations_offset != 0:
+        val variations_limit = _nearest_sibling_end(base, top_offsets, variations_offset, limit)
+        if not _layout_feature_variations_valid(blob, base, variations_limit, variations_offset, feature_count, lookup_count):
+            return invalid
+    val script_count = read_u16_be(blob, script_list) as i64
+    val script_records_end = script_list + 2 + script_count * 6
+    if script_records_end > script_limit: return invalid
+    var script_offset_selected: i64 = -1
+    var default_script_offset: i64 = -1
+    var script_offsets: [i64] = []
+    var previous_tag: i64 = -1
+    var index: i64 = 0
+    while index < script_count:
+        val record = script_list + 2 + index * 6
+        val tag = read_u32_be(blob, record)
+        val offset = read_u16_be(blob, record + 4) as i64
+        if (offset == 0 or tag as i64 <= previous_tag or script_offsets.contains(offset) or
+            script_list + offset < script_records_end or script_list + offset + 4 > script_limit): return invalid
+        previous_tag = tag as i64
+        script_offsets.push(offset)
+        if tag == script_tag: script_offset_selected = offset
+        if tag == 1145457748u32: default_script_offset = offset  # DFLT
+        index = index + 1
+    if script_offset_selected < 0: script_offset_selected = default_script_offset
+    if script_offset_selected < 0: return LayoutLookupPlan(valid: true, lookup_indices: [], activations: [], features: [])
+    val script = script_list + script_offset_selected
+    val script_end = _nearest_sibling_end(script_list, script_offsets, script_offset_selected, script_limit)
+    val default_offset = read_u16_be(blob, script) as i64
+    val language_count = read_u16_be(blob, script + 2) as i64
+    val language_records_end = script + 4 + language_count * 6
+    if language_records_end > script_end: return invalid
+    var language_offsets: [i64] = []
+    if (default_offset != 0 and
+        (script + default_offset < language_records_end or script + default_offset + 6 > script_end)): return invalid
+    if default_offset != 0: language_offsets.push(default_offset)
+    var language_offset_selected: i64 = -1
+    previous_tag = -1
+    index = 0
+    while index < language_count:
+        val record = script + 4 + index * 6
+        val tag = read_u32_be(blob, record)
+        val offset = read_u16_be(blob, record + 4) as i64
+        if (offset == 0 or tag as i64 <= previous_tag or language_offsets.contains(offset) or
+            script + offset < language_records_end or script + offset + 6 > script_end): return invalid
+        previous_tag = tag as i64
+        language_offsets.push(offset)
+        if tag == language_tag: language_offset_selected = offset
+        index = index + 1
+    if language_offset_selected < 0: language_offset_selected = default_offset
+    if language_offset_selected <= 0: return LayoutLookupPlan(valid: true, lookup_indices: [], activations: [], features: [])
+    val language_system = script + language_offset_selected
+    val language_end = _nearest_sibling_end(script, language_offsets, language_offset_selected, script_end)
+    if language_system + 6 > language_end or read_u16_be(blob, language_system) != 0u32: return invalid
+    val required = read_u16_be(blob, language_system + 2)
+    val listed_count = read_u16_be(blob, language_system + 4) as i64
+    if language_system + 6 + listed_count * 2 > language_end: return invalid
+    var feature_tags: [u32] = []
+    var feature_offsets: [i64] = []
+    previous_tag = -1
+    index = 0
+    while index < feature_count:
+        val record = feature_list + 2 + index * 6
+        val tag = read_u32_be(blob, record)
+        val offset = read_u16_be(blob, record + 4) as i64
+        if (offset == 0 or tag as i64 < previous_tag or feature_offsets.contains(offset) or
+            feature_list + offset < feature_records_end or feature_list + offset + 4 > feature_limit): return invalid
+        previous_tag = tag as i64
+        feature_tags.push(tag)
+        feature_offsets.push(offset)
+        index = index + 1
+    var listed_features: [u32] = []
+    index = 0
+    while index < listed_count:
+        val available = read_u16_be(blob, language_system + 6 + index * 2)
+        if available as i64 >= feature_count or listed_features.contains(available): return invalid
+        listed_features.push(available)
+        index = index + 1
+    var feature_indices: [u32] = []
+    if required != 65535u32:
+        if required as i64 >= feature_count: return invalid
+        feature_indices.push(required)
+    for wanted_tag in default_feature_tags:
+        for available in listed_features:
+            val available_record = feature_list + 2 + available as i64 * 6
+            if (available != required and not feature_indices.contains(available) and
+                read_u32_be(blob, available_record) == wanted_tag):
+                feature_indices.push(available)
+    if feature_indices.len() > 64: return invalid
+    var active_feature_indices: [u32] = []
+    index = 0
+    while index < feature_count:
+        if feature_indices.contains(index as u32): active_feature_indices.push(index as u32)
+        index = index + 1
+    var result: [i64] = []
+    var lookup_feature_masks: [u64] = []
+    index = 0
+    while index < lookup_count:
+        lookup_feature_masks.push(0u64)
+        index = index + 1
+    var active_tags: [u32] = []
+    var active_tag_masks: [u64] = []
+    var active_feature_index: i64 = 0
+    while active_feature_index < active_feature_indices.len():
+        val feature_index = active_feature_indices[active_feature_index]
+        val feature_mask = 1u64 << (active_feature_index as u64)
+        val feature_tag = feature_tags[feature_index as i64]
+        var active_tag_index: i64 = 0
+        while active_tag_index < active_tags.len() and active_tags[active_tag_index] != feature_tag:
+            active_tag_index = active_tag_index + 1
+        if active_tag_index == active_tags.len():
+            active_tags.push(feature_tag)
+            active_tag_masks.push(feature_mask)
+        else:
+            active_tag_masks[active_tag_index] = active_tag_masks[active_tag_index] | feature_mask
+        val record = feature_list + 2 + feature_index as i64 * 6
+        val offset = read_u16_be(blob, record + 4) as i64
+        val feature = feature_list + offset
+        val feature_end = _nearest_sibling_end(feature_list, feature_offsets, offset, feature_limit)
+        val params_offset = read_u16_be(blob, feature) as i64
+        val lookup_count = read_u16_be(blob, feature + 2) as i64
+        val feature_lookup_end = feature + 4 + lookup_count * 2
+        if feature_lookup_end > feature_end: return invalid
+        if params_offset != 0:
+            if feature + params_offset < feature_lookup_end or feature + params_offset + 2 > feature_end: return invalid
+            return invalid
+        index = 0
+        while index < lookup_count:
+            val selected = read_u16_be(blob, feature + 4 + index * 2) as i64
+            if selected < 0 or selected >= lookup_feature_masks.len(): return invalid
+            lookup_feature_masks[selected] = lookup_feature_masks[selected] | feature_mask
+            if not result.contains(selected): result.push(selected)
+            index = index + 1
+        active_feature_index = active_feature_index + 1
+    # A zero-record FeatureVariations table is a no-op. Nonempty records remain
+    # unsupported for an active plan until default-instance evaluation lands.
+    if (variations_offset != 0 and read_u32_be(blob, base + variations_offset + 4) > 0u32 and
+        result.len() > 0): return invalid
+    var lookup_offsets: [i64] = []
+    index = 0
+    while index < lookup_count:
+        val offset = read_u16_be(blob, lookup_list + 2 + index * 2) as i64
+        if offset == 0 or lookup_offsets.contains(offset) or lookup_list + offset < lookup_records_end:
+            return invalid
+        lookup_offsets.push(offset)
+        index = index + 1
+    for selected in result:
+        if selected < 0 or selected >= lookup_count: return invalid
+        val offset = lookup_offsets[selected]
+        val lookup = lookup_list + offset
+        val lookup_end = _nearest_sibling_end(lookup_list, lookup_offsets, offset, lookup_limit)
+        if lookup + 6 > lookup_end: return invalid
+        val flag = read_u16_be(blob, lookup + 2)
+        val subtable_count = read_u16_be(blob, lookup + 4) as i64
+        val lookup_bytes = 6 + subtable_count * 2 + (if (flag & 16u32) != 0u32: 2 else: 0)
+        if lookup + lookup_bytes > lookup_end: return invalid
+        var subtable_offsets: [i64] = []
+        index = 0
+        while index < subtable_count:
+            val subtable_offset = read_u16_be(blob, lookup + 6 + index * 2) as i64
+            if subtable_offset == 0 or subtable_offsets.contains(subtable_offset): return invalid
+            subtable_offsets.push(subtable_offset)
+            index = index + 1
+        for subtable_offset in subtable_offsets:
+            val subtable = lookup + subtable_offset
+            val subtable_end = _nearest_sibling_end(lookup, subtable_offsets, subtable_offset, lookup_end)
+            if subtable < lookup + lookup_bytes or subtable + 2 > subtable_end: return invalid
+    # OpenType executes the active lookup union in ascending LookupList order.
+    var ordered: [i64] = []
+    var activations: [LayoutLookupActivation] = []
+    index = 0
+    while index < lookup_count:
+        if result.contains(index):
+            ordered.push(index)
+            activations.push(LayoutLookupActivation(lookup_index: index, feature_mask: lookup_feature_masks[index]))
+        index = index + 1
+    var features: [LayoutFeatureActivation] = []
+    index = 0
+    while index < active_tags.len():
+        features.push(LayoutFeatureActivation(feature_tag: active_tags[index], feature_mask: active_tag_masks[index]))
+        index = index + 1
+    LayoutLookupPlan(valid: true, lookup_indices: ordered, activations: activations, features: features)
+
+fn select_gsub_lookup_plan(font: OtFont, script_tag: u32, language_tag: u32,
+                           default_feature_tags: [u32]) -> LayoutLookupPlan:
+    _active_layout_lookup_indices(font, 1196643650u32, script_tag, language_tag, default_feature_tags)
+
+fn select_gpos_lookup_plan(font: OtFont, script_tag: u32, language_tag: u32,
+                           default_feature_tags: [u32]) -> LayoutLookupPlan:
+    _active_layout_lookup_indices(font, 1196445523u32, script_tag, language_tag, default_feature_tags)
+
+fn select_gpos_lookups(font: OtFont, script_tag: u32, language_tag: u32,
+                       default_feature_tags: [u32]) -> [GposLookup]:
+    val plan = select_gpos_lookup_plan(font, script_tag, language_tag, default_feature_tags)
+    if not plan.valid: return []
+    val catalog = parse_gpos_skeleton(font)
+    if catalog.len() == 0: return []
+    var selected: [GposLookup] = []
+    for index in plan.lookup_indices:
+        if index < 0 or index >= catalog.len(): return []
+        selected.push(catalog[index])
+    selected
+
+# ===== GDEF =====
+
+enum GlyphClass:
+    Base
+    Ligature
+    Mark
+    Component
+    Unknown
+
+fn parse_gdef_glyph_class(font: OtFont, glyph_id: u32) -> GlyphClass:
+    # Tag 'GDEF' = 0x47444546
+    val gdef_tag: u32 = 1195656006
+    val maybe_tbl = find_table(font, gdef_tag)
+    val tbl = match maybe_tbl:
+        Some(value):
+            value
+        None:
+            return GlyphClass.Unknown
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 13 >= blob.len() as i64:
+        return GlyphClass.Unknown
+    # GlyphClassDef offset at bytes 4-5
+    val glyph_class_def_off = read_u16_be(blob, base + 4) as i64
+    if glyph_class_def_off == 0:
+        return GlyphClass.Unknown
+    val class_def_abs = base + glyph_class_def_off
+    if class_def_abs + 1 >= blob.len() as i64:
+        return GlyphClass.Unknown
+    val format = read_u16_be(blob, class_def_abs)
+    var class_val: u32 = 0
+    if format == 1:
+        val start_glyph = read_u16_be(blob, class_def_abs + 2) as i64
+        val glyph_count = read_u16_be(blob, class_def_abs + 4) as i64
+        val idx = glyph_id as i64 - start_glyph
+        if idx >= 0 and idx < glyph_count:
+            class_val = read_u16_be(blob, class_def_abs + 6 + idx * 2)
+    else if format == 2:
+        val range_count = read_u16_be(blob, class_def_abs + 2) as i64
+        var ri: i64 = 0
+        while ri < range_count:
+            val rbase = class_def_abs + 4 + ri * 6
+            val start_g = read_u16_be(blob, rbase) as i64
+            val end_g = read_u16_be(blob, rbase + 2) as i64
+            val cls = read_u16_be(blob, rbase + 4)
+            if (glyph_id as i64) >= start_g and (glyph_id as i64) <= end_g:
+                class_val = cls
+            ri = ri + 1
+    if class_val == 1:
+        GlyphClass.Base
+    else if class_val == 2:
+        GlyphClass.Ligature
+    else if class_val == 3:
+        GlyphClass.Mark
+    else if class_val == 4:
+        GlyphClass.Component
+    else:
+        GlyphClass.Unknown

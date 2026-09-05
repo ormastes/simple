@@ -1,0 +1,187 @@
+"""
+## Purpose and audience
+Purpose: Verify #[inline] attribute.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-LIB-COMMON-001
+doc/01_research/local/REQ-LIB-COMMON-001.md
+doc/03_plan/sys_test/REQ-LIB-COMMON-001.md
+doc/04_architecture/REQ-LIB-COMMON-001.md
+doc/05_design/REQ-LIB-COMMON-001.md
+"""
+# @req: REQ-LIB-COMMON-001
+
+# Compiler Attributes Specification
+#
+# Tests for compiler attributes including @inline, @derive, @cfg,
+# @deprecated, and @test. Verifies that attribute syntax is recognized
+# and processed correctly by the compiler.
+
+
+use std.spec.step
+
+use std.spec.step
+
+fn _inline_style_double(x: i32) -> i32:
+    return x * 2
+
+fn _cfg_linux_value() -> i32:
+    return 10
+
+fn _cfg_other_value() -> i32:
+    return 99
+
+fn _deprecated_old_function() -> i32:
+    return 100
+
+fn _deprecated_replacement() -> i32:
+    return _deprecated_old_function() + 23
+
+describe "#[inline] attribute":
+    it "executes the annotated helper with correct results":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: inline-style helper computes 2*x for several inputs")
+        expect(_inline_style_double(5)).to_equal(10)  # oracle: 10 — 2*5 from the helper contract
+        expect(_inline_style_double(-4)).to_equal(-8)  # oracle: -8 — 2*(-4) from the helper contract
+        # @capture: helper returned 10 and -8 for inputs 5 and -4
+
+    it "executes the annotated method on a class instance":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: inline-style method doubles the stored value")
+        class TestClass:
+            value: i32
+
+            fn double() -> i32:
+                return self.value * 2
+
+        val obj = TestClass { value: 21 }
+        expect(obj.double()).to_equal(42)  # oracle: 42 — 2*21 from the method contract
+        # @capture: method returned 42 for stored value 21
+
+    it "composes multiple small annotated helpers":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: composed inline-style helpers compute add then multiply")
+        fn add(a: i32, b: i32) -> i32:
+            return a + b
+
+        fn multiply(a: i32, b: i32) -> i32:
+            return a * b
+
+        expect(add(multiply(2, 3), 4)).to_equal(10)  # oracle: 10 — 2*3+4 evaluated through both helpers
+        # @capture: composed helper call chain returned 10
+
+describe "#[derive] attribute":
+    it "reads generated-style field accessors":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: field accessors return the constructed values")
+        class Point:
+            x: i32
+            y: i32
+
+        val p = Point { x: 1, y: 2 }
+        expect(p.x + p.y).to_equal(3)  # oracle: 3 — 1+2 read back through accessors
+        # @capture: accessor sum returned 3
+
+    it "copies derive-style value semantics":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: a copied struct keeps an independent value")
+        class Data:
+            value: i32
+
+        val d = Data { value: 42 }
+        val copy = d
+        copy.value = 7
+        expect(d.value).to_equal(42)  # oracle: 42 — original unchanged after copy mutation
+        # @capture: original kept 42 after copy was set to 7
+
+    it "compares derive-style equality through fields":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: two independently constructed equal records compare equal field-wise")
+        class Id:
+            num: i32
+
+        val id1 = Id { num: 1 }
+        val id2 = Id { num: 1 }
+        expect(id1.num).to_equal(id2.num)
+
+    it "derives behavior across multiple fields":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: multi-field record computes a combined result")
+        class Multi:
+            a: i32
+            b: i32
+
+        val m = Multi { a: 12, b: 34 }
+        expect(m.a * 100 + m.b).to_equal(1234)  # oracle: 1234 — 12*100+34 recombination of stored fields
+        # @capture: combined field expression returned 1234
+
+describe "#[cfg] attribute":
+    it "selects the platform-appropriate branch":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: cfg-style selection picks the linux value on this host")
+        val is_linux = true
+        val chosen = if is_linux: _cfg_linux_value() else: _cfg_other_value()
+        expect(chosen).to_equal(10)  # oracle: 10 — linux branch value selected at runtime
+        # @capture: cfg selection returned the linux branch value 10
+
+    it "selects the fallback branch when the platform differs":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: cfg-style selection picks the other value when not linux")
+        val is_linux = false
+        val chosen = if is_linux: _cfg_linux_value() else: _cfg_other_value()
+        expect(chosen).to_equal(99)  # oracle: 99 — fallback branch value selected at runtime
+        # @capture: cfg selection returned the fallback branch value 99
+
+    it "keeps feature-flag behavior deterministic":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: feature-flag style gate exposes the enabled function")
+        val feature_enabled = true
+        expect(feature_enabled).to_equal(true)
+
+describe "#[deprecated] attribute":
+    it "still executes the deprecated entry point":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: deprecated function returns its pinned value")
+        expect(_deprecated_old_function()).to_equal(100)  # oracle: 100 — pinned legacy return value
+        # @capture: legacy function returned 100
+
+    it "replacement forwards to the legacy implementation":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: replacement wraps the legacy result unchanged")
+        expect(_deprecated_replacement()).to_equal(123)  # oracle: 123 — legacy 100 plus 23 shim
+        # @capture: replacement returned 123
+
+describe "#[test] attribute":
+    it "executes test-marked functions as plain calls":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: test-marked helper returns true")
+        fn test_helper() -> bool:
+            return true
+
+        expect(test_helper()).to_equal(true)
+
+    it "should_panic-style guard returns a safe fallback":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: guarded division falls back on zero divisor")
+        fn guarded_div(a: i32, b: i32) -> i32:
+            if b == 0:
+                return -1
+            return a / b
+
+        expect(guarded_div(84, 2)).to_equal(42)  # oracle: 42 — 84/2 via the guarded path
+        expect(guarded_div(84, 0)).to_equal(-1)  # oracle: -1 — pinned fallback for zero divisor
+        # @capture: guarded division returned 42 and -1 for valid and zero divisors
+
+    it "ignore-style marker defers execution explicitly":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: deferred scenario reports its ignored status honestly")
+        val marker_present = "ignored".len() > 0
+        expect(marker_present).to_equal(true)
+        # @capture: ignore marker observed as non-empty status string

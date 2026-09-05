@@ -1,0 +1,36 @@
+# Test that optimized bootstrap functions work correctly
+# Tests individual functions rather than the full server loop
+
+use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, jo3, extract_json_string_v2, extract_nested_string, make_error_response}
+use std.nogc_async_mut.mcp.schema.{get_all_tool_schemas, init_core_schemas}
+use std.nogc_async_mut.mcp.session.{McpState}
+
+describe "MCP bootstrap response builders":
+    it "builds an initialize response carrying protocolVersion and capabilities":
+        val result = """{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true},"resources":{"subscribe":true,"listChanged":true},"prompts":{"listChanged":true},"logging":{},"completions":{},"tasks":{}},"serverInfo":{"name":"simple-mcp","version":"2.1.0","instructions":"Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features."}}"""
+        val response = jo3(jp("jsonrpc", js("2.0")), jp("id", "1"), jp("result", result))
+        expect(response.contains("protocolVersion")).to_equal(true)
+        expect(response.contains("capabilities")).to_equal(true)
+        expect(response.contains("jsonrpc")).to_equal(true)
+
+    it "builds a tools/list response wrapping the schema array":
+        init_core_schemas()
+        val tools = get_all_tool_schemas()
+        val result = LB() + jp("tools", tools) + RB()
+        val response = jo3(jp("jsonrpc", js("2.0")), jp("id", "2"), jp("result", result))
+        expect(response.contains("tools")).to_equal(true)
+        expect(response.contains("[")).to_equal(true)
+
+    it "builds an error response carrying the JSON-RPC code":
+        val response = make_error_response("3", -32601, "Method not found: unknown")
+        expect(response.contains("error")).to_equal(true)
+        expect(response.contains("-32601")).to_equal(true)
+
+describe "MCP bootstrap JSON extraction":
+    it "extracts a top-level string field":
+        val test_json = """{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"""
+        expect(extract_json_string_v2(test_json, "method")).to_equal("initialize")
+
+    it "extracts a nested string field":
+        val test_json = """{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"""
+        expect(extract_nested_string(test_json, "params", "protocolVersion")).to_equal("2024-11-05")

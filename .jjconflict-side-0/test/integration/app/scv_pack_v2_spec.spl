@@ -1,0 +1,136 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/app/tools/scv_complete_impl_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-B-06 pack v2 hardening:
+(a) reachability-aware packing — `scv pack-write-v2r` walks the SAME root set
+    the MIG-21 quarantine GC walks (heads, bookmarks/tags, changes, conflicts,
+    checkpoint manifests, identity commits) via `scv_gc_roots_reachable`, records
+    the walked root ids in the pack payload as `reach <id>` lines, and PROVES
+    after writing that every reachable loose object resolves out of the pack
+    byte-identically — it can never pack-then-lose a reachable object;
+(b) delta robustness — `scv pack-fuzz-v2 <seed> <cases>` runs a bounded,
+    deterministic seeded-LCG fuzz (no Math.random) that flips bits inside delta
+    and full chunk entry DATA and requires every corruption to be DETECTED by a
+    content-hash mismatch or a decode error, never silently decoded;
+(c) GC-never-loses-reachable soak — `scv pack-soak-v2 <n>` runs n bounded
+    write/pack/gc-quarantine/verify cycles and asserts after EACH cycle that every
+    reachable object is still readable and `fsck` is still clean.
+Backward compatibility: the `reach` lines are skipped by the pre-existing v2
+reader, and v1 packs are still read by `pack-verify-v2` — both directions pinned
+below. Verdict is the last line of every command.
+Audience: Maintainers of the SCV storage/pack layer.
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, step, assert_false}
+use app.io.mod (process_run)
+
+
+fn _harness() -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-packv2.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "scv init >/dev/null",
+        "printf 'alpha beta gamma delta epsilon zeta eta theta\\n' > a.txt",
+        "scv snapshot >/dev/null",
+        "printf 'alpha beta gamma delta epsilon zeta eta theta iota\\n' > a.txt",
+        "printf 'alpha beta gamma delta epsilon zeta eta theta kappa\\n' > b.txt",
+        "scv snapshot >/dev/null"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    assert_false(out == "" and err == "")
+    combined
+
+describe "scv pack v2 hardening (SCV-IMPL-B-06)":
+    # @manual scenario evidence
+    it "packs reachability-aware and proves no reachable object was lost":
+        # @req REQ-SSPEC-INTEGRATION
+        step "write a reachability-aware pack over a repo with two snapshots"
+        val out = _run(_harness() + ["scv pack-write-v2r"])
+        expect(out).to_contain("pack-write-v2r ")
+        expect(out).to_contain("lost=0")
+        expect(out).to_contain("PASS — pack v2 reachability-aware write")
+
+    it "re-verifies pack reachability coverage against the live GC root set":
+        # @req REQ-SSPEC-INTEGRATION
+        step "verify every recorded reach id still resolves byte-identically"
+        val out = _run(_harness() + ["scv pack-write-v2r >/dev/null", "scv pack-verify-v2r"])
+        expect(out).to_contain("pack-verify-v2r ")
+        expect(out).to_contain("mismatched=0")
+        expect(out).to_contain("PASS — pack v2 reachability verified")
+
+    it "fails closed when a reachability-aware pack payload is truncated":
+        # @req REQ-SSPEC-INTEGRATION
+        step "truncate the gzip payload and re-verify"
+        val out = _run(_harness() + [
+            "scv pack-write-v2r >/dev/null",
+            "P=$(ls .scv/objects/packs/*.pack.gz | head -1)",
+            "head -c 40 \"$P\" > \"$P.t\" && mv \"$P.t\" \"$P\"",
+            "scv pack-verify-v2r || true"
+        ])
+        expect(out).to_contain("ERROR")
+        assert_false(out.contains("PASS — pack v2 reachability verified"))
+
+    it "detects every seeded delta corruption and never silently decodes one":
+        # @req REQ-SSPEC-INTEGRATION
+        step "run a bounded deterministic LCG fuzz over delta and full chunk entry data"
+        val out = _run(_harness() + ["scv pack-write-v2r >/dev/null", "scv pack-fuzz-v2 20260826 64"])
+        expect(out).to_contain("pack-fuzz-v2 seed=20260826 cases=64")
+        expect(out).to_contain("detected=64")
+        expect(out).to_contain("undetected=0")
+        expect(out).to_contain("PASS — pack v2 delta fuzz: 64/64 corruptions detected")
+
+    it "is deterministic: the same seed reproduces the same fuzz row":
+        # @req REQ-SSPEC-INTEGRATION
+        step "run the identical seed twice and diff the report rows"
+        val out = _run(_harness() + [
+            "scv pack-write-v2r >/dev/null",
+            "scv pack-fuzz-v2 7 16 | grep pack-fuzz-v2 > f1.txt",
+            "scv pack-fuzz-v2 7 16 | grep pack-fuzz-v2 > f2.txt",
+            "cmp -s f1.txt f2.txt && echo DETERMINISTIC || echo NONDETERMINISTIC",
+            "cat f1.txt"
+        ])
+        expect(out).to_contain("DETERMINISTIC")
+        expect(out).to_contain("digest=")
+
+    it "keeps every reachable object readable and fsck clean across a bounded GC soak":
+        # @req REQ-SSPEC-INTEGRATION
+        step "run 20 write/pack/gc-quarantine/verify cycles in one process"
+        # 20, not 50: per-cycle cost grows with repository size in the layers this
+        # item may only READ (maintenance.spl's GC root walk ~2.7s/cycle and
+        # integrity.spl's fsck ~1.9s/cycle at 12 cycles, both rising), so a
+        # 50-cycle run is projected at ~2500s and cannot share an 1800s spec budget
+        # with the other cases. `scv pack-soak-v2` itself accepts 1..500, but no
+        # 50-cycle run has COMPLETED on this host: two out-of-band attempts were
+        # killed (one by the CPU watchdog at 963s). The scaling and both attempts
+        # are recorded in
+        # doc/08_tracking/bug/scv_gzip_compress_dominates_pack_write_2026-08-26.md.
+        val out = _run(_harness() + ["scv pack-soak-v2 20"])
+        expect(out).to_contain("pack-soak-v2 iterations=20")
+        expect(out).to_contain("lost=0")
+        expect(out).to_contain("fsck_dirty=0")
+        expect(out).to_contain("PASS — pack v2 GC soak: 20 cycle(s), 0 reachable object(s) lost")
+
+    it "still reads v1 packs, so existing repositories never become unreadable":
+        # @req REQ-SSPEC-INTEGRATION
+        step "write a v1 pack and verify it through the v2 verifier"
+        val out = _run(_harness() + ["scv pack-write >/dev/null", "scv pack-verify-v2"])
+        expect(out).to_contain("pack-verify-v2 ")
+        assert_false(out.contains("ERROR unsupported pack payload format"))
+
+    it "keeps the pre-existing v2 verifier green on a reach-augmented pack":
+        # @req REQ-SSPEC-INTEGRATION
+        step "the older v2 reader must skip reach lines rather than reject them"
+        val out = _run(_harness() + ["scv pack-write-v2r >/dev/null", "scv pack-verify-v2"])
+        expect(out).to_contain("pack-verify-v2 packs=")
+        assert_false(out.contains("ERROR"))

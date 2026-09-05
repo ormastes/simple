@@ -1,0 +1,192 @@
+# VS Code manifest generator (IDE extension kernel campaign, lane L7b).
+#
+# Generates the `contributes.commands` array in
+# `src/app/vscode_extension/package.json` as the union of:
+#   (a) existing "bridge-only" command entries in package.json that have no
+#       builtin extension-kernel owner (preserved: id/title/category kept
+#       exactly as authored) -- legitimate VS Code-side commands (LSP
+#       restart, math preview, AI chat, editor markers, ...) that the
+#       `.spl` extension kernel does not (yet) back.
+#   (b) every command contributed by the builtin extension-kernel manifests
+#       (`std.editor.extensions.builtin.index.builtin_manifest_providers`)
+#       that package.json is currently missing.
+#
+# Approach: TARGETED TEXT SPLICE, not full-file JSON re-emission. The rest
+# of package.json (menus, views, semantic tokens, configuration defaults,
+# scripts, dependencies) is hand-maintained and the JSON lib does not
+# guarantee key-order-preserving round-trips; re-emitting the whole file via
+# json_parse -> encode risks reordering or reformatting untouched sections.
+# Only the text of the `"commands": [ ... ]` array inside `contributes` is
+# replaced -- everything else is copied through byte-identical.
+
+use app.io.mod.{file_exists, file_read, file_write}
+use std.common.json.parser.{json_parse}
+use std.common.json.path_ops.{json_path_get}
+use std.common.json.array_ops.{json_array_length, json_array_get}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_is_array, json_to_string}
+use std.editor.extensions.builtin.index.{builtin_manifest_providers}
+use std.editor.extensions.manifest.{ExtensionCommand}
+use app.vscode_extension.manifest_check.{vscode_package_json_path}
+
+fn _gen_text(entry: any, field: text) -> text:
+    val value = json_to_string(json_object_get(entry, field))
+    if value == nil: "" else: value
+
+# Every command entry currently declared in package.json's
+# `contributes.commands`, with full id/title/category (not just ids).
+fn _vscode_manifest_commands(package_json_text: text) -> [ExtensionCommand]:
+    var out: [ExtensionCommand] = []
+    if package_json_text.trim() == "":
+        return out
+    val parsed = json_parse(package_json_text)
+    if parsed == nil:
+        return out
+    val commands = json_path_get(parsed, "contributes.commands")
+    if commands == nil or not json_is_array(commands):
+        return out
+    val n = json_array_length(commands)
+    var i = 0
+    while i < n:
+        val entry = json_array_get(commands, i)
+        val id = _gen_text(entry, "command")
+        if id != "":
+            out.push(ExtensionCommand(id: id, title: _gen_text(entry, "title"), category: _gen_text(entry, "category")))
+        i = i + 1
+    out
+
+fn _gen_contains(xs: [ExtensionCommand], id: text) -> bool:
+    for x in xs:
+        if x.id == id:
+            return true
+    false
+
+fn _list_contains(xs: [text], v: text) -> bool:
+    for x in xs:
+        if x == v:
+            return true
+    false
+
+# Every command contributed by a builtin manifest, de-duplicated by id
+# (first provider wins if two builtins ever declared the same id).
+fn _builtin_gen_commands() -> [ExtensionCommand]:
+    var out: [ExtensionCommand] = []
+    for m in builtin_manifest_providers():
+        for cmd in m.contributes_commands:
+            if not _gen_contains(out, cmd.id):
+                out.push(cmd)
+    out
+
+# Insertion via selection sort (no in-place index-element mutation on a
+# struct array -- rebuilds `remaining` each pick instead). Command counts
+# are in the dozens so O(n^2) is fine.
+fn _sort_by_id(xs: [ExtensionCommand]) -> [ExtensionCommand]:
+    var remaining: [ExtensionCommand] = []
+    for x in xs:
+        remaining.push(x)
+    var out: [ExtensionCommand] = []
+    while remaining.len() > 0:
+        var min_idx = 0
+        var i = 1
+        while i < remaining.len():
+            if remaining[i].id < remaining[min_idx].id:
+                min_idx = i
+            i = i + 1
+        out.push(remaining[min_idx])
+        var next_remaining: [ExtensionCommand] = []
+        var j = 0
+        while j < remaining.len():
+            if j != min_idx:
+                next_remaining.push(remaining[j])
+            j = j + 1
+        remaining = next_remaining
+    out
+
+# The union command set the generator wants package.json to contain: every
+# existing bridge-only entry (preserved id/title/category) plus every
+# builtin command package.json is currently missing. Sorted by id so
+# generation is deterministic and independent of provider registration
+# order or existing file order.
+fn vscode_manifest_union_commands() -> [ExtensionCommand]:
+    val package_text = if file_exists(vscode_package_json_path()): file_read(vscode_package_json_path()) else: ""
+    val existing = _vscode_manifest_commands(package_text)
+    val builtin = _builtin_gen_commands()
+    var existing_ids: [text] = []
+    for e in existing:
+        existing_ids.push(e.id)
+    var combined: [ExtensionCommand] = []
+    for e in existing:
+        combined.push(e)
+    for b in builtin:
+        if not _list_contains(existing_ids, b.id):
+            combined.push(b)
+    _sort_by_id(combined)
+
+fn _json_escape(s: text) -> text:
+    var out = ""
+    for ch in s.chars():
+        if ch == "\"":
+            out = out + "\\\""
+        else:
+            if ch == "\\":
+                out = out + "\\\\"
+            else:
+                out = out + ch
+    out
+
+fn _render_command_entry(cmd: ExtensionCommand) -> text:
+    "      {\n" +
+    "        \"command\": \"" + _json_escape(cmd.id) + "\",\n" +
+    "        \"title\": \"" + _json_escape(cmd.title) + "\",\n" +
+    "        \"category\": \"" + _json_escape(cmd.category) + "\"\n" +
+    "      }"
+
+# Full package.json text with ONLY the `contributes.commands` array text
+# replaced by the generated union block; every other byte is untouched.
+# Returns "" when package.json is missing or the splice markers aren't
+# found (caller should treat that as "nothing to generate", not "empty
+# commands").
+fn vscode_manifest_generate() -> text:
+    val original = if file_exists(vscode_package_json_path()): file_read(vscode_package_json_path()) else: ""
+    if original.trim() == "":
+        return original
+    val start_marker = "    \"commands\": [\n"
+    val end_marker = "\n    ],\n    \"menus\""
+    val start = original.index_of(start_marker)
+    if start < 0:
+        return original
+    val after_start = start + start_marker.len()
+    val rest = original.slice(after_start, original.len())
+    val end_rel = rest.index_of(end_marker)
+    if end_rel < 0:
+        return original
+    val end = after_start + end_rel
+    val before = original.slice(0, after_start)
+    val after = original.slice(end, original.len())
+    val commands = vscode_manifest_union_commands()
+    var entries_joined = ""
+    var i = 0
+    while i < commands.len():
+        entries_joined = entries_joined + _render_command_entry(commands[i])
+        if i < commands.len() - 1:
+            entries_joined = entries_joined + ",\n"
+        i = i + 1
+    before + entries_joined + after
+
+# CI gate entry point: regenerate and compare with what's on disk. true =
+# in sync (nothing to apply). This is the primitive future CI wiring
+# should call; `vscode_manifest_check()` in manifest_check.spl remains the
+# human-readable bridge-only-vs-mismatch classifier.
+fn vscode_manifest_sync_check() -> bool:
+    val generated = vscode_manifest_generate()
+    val on_disk = if file_exists(vscode_package_json_path()): file_read(vscode_package_json_path()) else: ""
+    generated == on_disk
+
+# Writes the generated package.json back to disk. Returns false (no write)
+# when generation produced nothing (missing file or splice markers not
+# found) so callers don't truncate package.json on a malformed input.
+fn vscode_manifest_write_generated() -> bool:
+    val generated = vscode_manifest_generate()
+    if generated.trim() == "":
+        return false
+    file_write(vscode_package_json_path(), generated)

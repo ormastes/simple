@@ -1,0 +1,116 @@
+#!/bin/sh
+# Build the pure-Simple simple-core runtime archive for a cross SimpleOS target.
+#
+# Mirrors the archive loop in scripts/check/check-simple-core-runtime-smoke.shs
+# but probes --emit-archive support directly instead of grepping the (stale)
+# native-build --help text, which omits supported flags like --target and
+# --emit-archive (see the probe comment in scripts/os/simpleos-native-build.shs).
+#
+# Usage:
+#   sh scripts/os/simpleos-core-archive.shs --target riscv64-unknown-simpleos \
+#      [--out-dir build/os/simple-core-simpleos-riscv64] [--backend llvm]
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+TARGET=""
+OUT_DIR=""
+BACKEND="${SIMPLE_CORE_BACKEND:-llvm}"
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/release/simple}"
+CORE_SOURCE_DIR="${SIMPLE_CORE_SOURCE_DIR:-src/runtime/simple_core}"
+ARCHIVER="${SIMPLE_CORE_ARCHIVER:-${AR:-}}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target)   shift; TARGET="$1" ;;
+    --target=*) TARGET="${1#*=}" ;;
+    --out-dir)  shift; OUT_DIR="$1" ;;
+    --out-dir=*) OUT_DIR="${1#*=}" ;;
+    --backend)  shift; BACKEND="$1" ;;
+    --backend=*) BACKEND="${1#*=}" ;;
+    --archiver) shift; ARCHIVER="$1" ;;
+    --archiver=*) ARCHIVER="${1#*=}" ;;
+    *) echo "error: unknown option '$1'" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+# Keep archive creation and extraction on one explicitly resolved tool.  Using
+# the shell's literal `ar` here made a successful compiler --emit-archive step
+# fail later on hosts that only provision llvm-ar (the supported Simple native
+# toolchain layout).  Prefer llvm-ar, while retaining versioned LLVM installs
+# and POSIX ar as fallbacks.  An explicit override is fail-closed.
+if [ -n "$ARCHIVER" ]; then
+  command -v "$ARCHIVER" >/dev/null 2>&1 || {
+    echo "error: configured archive tool not found: $ARCHIVER" >&2
+    exit 1
+  }
+else
+  for candidate in llvm-ar llvm-ar-22 llvm-ar-21 llvm-ar-20 llvm-ar-19 \
+                   llvm-ar-18 llvm-ar-17 llvm-ar-16 ar; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      ARCHIVER="$candidate"
+      break
+    fi
+  done
+  [ -n "$ARCHIVER" ] || {
+    echo "error: simple-core archive requires llvm-ar or ar" >&2
+    exit 1
+  }
+fi
+
+[ -n "$TARGET" ] || { echo "error: --target is required" >&2; exit 1; }
+if [ -z "$OUT_DIR" ]; then
+  ARCH="$(printf '%s' "$TARGET" | cut -d- -f1)"
+  OUT_DIR="build/os/simple-core-simpleos-$ARCH"
+fi
+
+PART_DIR="$OUT_DIR/parts"
+CORE_ARCHIVE="$OUT_DIR/libsimple_runtime.a"
+rm -rf "$PART_DIR/objects"
+mkdir -p "$PART_DIR/objects"
+
+echo "Compiler: $SIMPLE_BINARY"
+echo "Target:   $TARGET"
+echo "Backend:  $BACKEND"
+echo "Archiver: $ARCHIVER"
+echo "Output:   $CORE_ARCHIVE"
+rm -f "$CORE_ARCHIVE"
+
+FAILED=0
+BUILT=0
+for core_entry in "$CORE_SOURCE_DIR"/*.spl; do
+  part_name="$(basename "$core_entry" .spl)"
+  part_archive="$PART_DIR/$part_name.a"
+  part_log="$PART_DIR/$part_name.log"
+  rm -f "$part_archive" "$part_log"
+  if ! "$SIMPLE_BINARY" native-build \
+        --backend "$BACKEND" \
+        --source "$CORE_SOURCE_DIR" \
+        --entry-closure \
+        --entry "$core_entry" \
+        --no-mangle \
+        --emit-archive \
+        --output "$part_archive" \
+        --clean \
+        --target "$TARGET" >"$part_log" 2>&1 ||
+     grep -q 'FAILED FILES' "$part_log" ||
+     [ ! -f "$part_archive" ]; then
+    echo "part FAILED: $part_name (log: $part_log)"
+    FAILED=$((FAILED + 1))
+    continue
+  fi
+  mkdir -p "$PART_DIR/objects/$part_name"
+  (cd "$PART_DIR/objects/$part_name" && "$ARCHIVER" x "../../$part_name.a")
+  BUILT=$((BUILT + 1))
+  echo "part ok: $part_name"
+done
+
+if [ "$FAILED" -ne 0 ] || [ "$BUILT" -eq 0 ]; then
+  rm -f "$CORE_ARCHIVE"
+  exit 1
+fi
+
+"$ARCHIVER" rcs "$CORE_ARCHIVE" "$PART_DIR"/objects/*/*.o
+echo "archive=$CORE_ARCHIVE parts_built=$BUILT parts_failed=$FAILED"

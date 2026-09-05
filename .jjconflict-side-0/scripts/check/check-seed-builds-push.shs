@@ -1,0 +1,1013 @@
+#!/bin/sh
+# Refuse to push a commit range whose Rust seed (src/compiler_rust) does not
+# compile, when that range actually touches compiler/runtime source.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# Incident 2026-08-11: origin/main was found UNBUILDABLE -- `cargo build
+# --release --bin simple` in src/compiler_rust failed with unresolved-import
+# and missing-enum-variant errors (E0432/E0599-class) from two independent
+# incomplete changes that landed hours apart. Every one of the five existing
+# pre-push guards passed, because none of them compiles anything: they check
+# tree structure (conflict trees, tree size), literal conflict-marker text,
+# test-tree divergence, and revert patterns. A syntactically/structurally
+# clean tree can still be a tree that does not build. This is the sixth
+# guard, closing that gap: it actually invokes rustc (via `cargo check`)
+# against the OUTGOING COMMIT's content.
+#
+# See doc/08_tracking/bug/origin_main_unbuildable_rust_seed_2026-08-11.md.
+#
+# ---------------------------------------------------------------------------
+# THE 2026-08-18 FAIL-OPEN GAP (and why the fast path changed shape)
+# ---------------------------------------------------------------------------
+# Incident 2026-08-18: origin/main was AGAIN unbuildable -- E0432 at
+# compiler/src/interpreter_call/core/function_exec.rs:10 (importing
+# module_globals_generation, which existed nowhere at origin) and E0599 at
+# compiler/src/interpreter_sffi.rs:125 -- and pushes over it kept reporting
+# PASS. Cause: this guard validated a RANGE, not the resulting TREE. Origin's
+# tip commits were docs-only, so the old PATH FILTER short-circuited to
+# `PASS — n file(s) checked, no compiler/runtime changes in range` without
+# compiling anything, for hours.
+# doc/08_tracking/bug/origin_main_unbuildable_missing_half_1e40de916bb_2026-08-18.md
+#
+# The path filter's inference was "the range didn't touch the seed, so the
+# seed's buildable-ness cannot have REGRESSED in this push". That is true and
+# entirely beside the point: it presumes the BASE was green. Nothing ever
+# established that, so a broken base laundered every subsequent docs-only push
+# into a green verdict. Same class of fail-open that
+# check-c-runtime-compiles-push.shs closed by being TREE-scoped ("a push that
+# edits only a header can break a .c it never touched, so a changed-files-only
+# scan would be fail-open").
+#
+# DESIGN CHOSEN, and why not the other one.
+#   (a) Pure tree scope -- always `cargo check` the resulting tree. Correct,
+#       and it is what the C-runtime guard does. But that guard's whole scan is
+#       `clang -fsyntax-only` over ~96 files, seconds. A warm `cargo check
+#       --release` of the seed is 1-2 MINUTES on this host (1m08s measured in
+#       the incident write-up; cold is far worse), and this guard runs on EVERY
+#       push. Charging every docs-only push 1-2 minutes is a real cost, and a
+#       guard people route around with --no-verify protects nothing.
+#   (b) Keep a fast path, but only when the base is KNOWN-GREEN. Chosen, in a
+#       strengthened form: rather than a per-COMMIT green marker (shas churn
+#       constantly under rebase, so that cache would almost always miss), the
+#       marker is keyed on a digest of the SEED'S OWN CONTENT -- the git tree
+#       object ids of src/compiler_rust and src/runtime plus Cargo.lock. Any
+#       tip whose seed content is byte-identical to a tree this guard already
+#       compiled green is green, whatever its sha or history.
+# The result is strictly stronger than the old behaviour and pays (a)'s cost
+# only on a cache miss: a SKIP now rests on "this exact seed content was
+# compiled and it passed", a positive proof, instead of "nobody touched it", an
+# absence. Steady state is as cheap as before; a docs-only push over a seed
+# NOBODY has ever compiled now pays the 1-2 minutes and, as in the incident,
+# FAILS instead of lying. Markers are written ONLY after a genuine green run of
+# this script, into $SEED_GREEN_MARKER_DIR (override to isolate; deleting it is
+# always safe -- it only forces recompilation).
+#
+# ---------------------------------------------------------------------------
+# MECHANISM
+# ---------------------------------------------------------------------------
+# 1. Resolve the outgoing range the same way the sibling guards do:
+#    main@origin..@- by default (via jj), or an explicit '<base>..<new>'.
+# 2. SEED-CONTENT FAST PATH (cost control) -- REPLACED THE PATH FILTER on
+#    2026-08-18 because the path filter was FAIL-OPEN. See "THE 2026-08-18
+#    FAIL-OPEN GAP" below. The guard now reasons about the resulting TREE:
+#    it digests the seed's own content at the NEW tip (the git tree object
+#    ids of src/compiler_rust and src/runtime, plus Cargo.lock), and skips
+#    compiling ONLY when that exact seed content has already been PROVEN
+#    green by a previous run of this guard (a recorded marker). "The range
+#    didn't touch it" is no longer accepted as evidence of anything.
+# 3. Otherwise, materialise the NEW tip's content into an isolated git
+#    worktree (`git worktree add --detach`), never the shared working copy
+#    -- the WC is contested by parallel sessions and proves nothing about
+#    what is actually being pushed (see .claude/rules/vcs.md "Land only your
+#    paths" and the shared-WC trap family in MEMORY.md).
+# SCOPE, as of 2026-08-17 (read this before trusting a PASS)
+#   Four legs, and the verdict line says which:
+#     GATING  `cargo check --release --bin simple`   (the original leg)
+#     GATING  `cargo check --release --tests`        (added 2026-08-17)
+#     GATING  `cargo build --release --bin simple`   (LINK leg, added 2026-08-28)
+#     ADVISORY `cargo check --release --all-targets` (examples/benches)
+#   A PASS therefore means: the bin target and the test targets COMPILE, AND
+#   the bin target LINKS. It does not mean the tests pass (that is `cargo
+#   test`, a different, heavier proof not gated here).
+#   Why the --tests leg exists: `--bin simple` compiles no `#[cfg(test)]`
+#   module, no `tests/*.rs`, and no `examples/*.rs`, so at origin sha
+#   2fb45ea1960954447acf12f769935ac83277397e this guard said "seed builds
+#   cleanly" while `cargo test --release` produced NO test binary at all
+#   (TEST_RC=101, zero `test result:` lines). Fully written up in
+#   doc/08_tracking/bug/seed_build_guard_checks_only_bin_target_no_link_2026-08-17.md
+#   That row also recorded two further blind spots this script did NOT close
+#   at the time: the missing LINK step, and deployed-binary staleness in the
+#   guards that native-build with bin/simple. The LINK step is now closed
+#   (see "THE 2026-08-28 UNLINKABLE-TIP GAP" below) -- deployed-binary
+#   staleness remains open; this guard proves buildability of a fresh
+#   worktree, not that a previously-deployed bin/simple is current.
+#
+# ---------------------------------------------------------------------------
+# THE 2026-08-28 UNLINKABLE-TIP GAP (second incident of this class)
+# ---------------------------------------------------------------------------
+# origin/main sat UNLINKABLE -- an `extern "C"` declaration
+# (rt_time_now_seconds) with no definition anywhere in the linked graph --
+# while this guard reported PASS, because every gating leg used `cargo
+# check`, and `check` never invokes the linker. This is the SECOND
+# unlinkable-tip incident of this exact class (the first is the
+# 2026-08-17 scope-gap row cited above, which named the missing link step as
+# a known, then-unclosed gap). `cargo check` catches E0432/E0599-class
+# resolve/type errors, which is real and worth keeping (it is much cheaper
+# than a full build), but a symbol that resolves at the Rust-item level and
+# is merely UNDEFINED at the object/link level is invisible to it by
+# construction -- an `extern "C"` block only promises the compiler a
+# signature, and nothing about `check` demands that anything backs it.
+#
+# FIX: a fourth GATING leg runs `cargo build --release --bin simple` -- a
+# real link, not just a frontend pass. Cost: measured warm (this guard's
+# existing CARGO_TARGET_DIR, i.e. legs 1-3 already primed the incremental
+# cache) at ~35-70s additional over the `--bin` check leg's ~1-2s marginal
+# cost on this host, because check and build now share almost all frontend
+# work and build only pays for codegen+link on top; cold is close to a full
+# `cargo build --release` (minutes). This is paid ONLY on a seed-content
+# cache miss, exactly like legs 1-3 -- a tip whose seed content already has a
+# recorded green marker skips ALL FOUR legs, unchanged from before.
+#
+# MARKER FORMAT: bumped from `seed/v2+vulkan` to `seed/v3+link` (see
+# seed_content_digest below). This is required, not cosmetic: an old
+# `seed/v2+vulkan` marker only proves the content passed check-only legs, and
+# without the bump every tree already marked green under v2 would silently
+# skip the new link leg forever -- the exact fail-open shape this leg exists
+# to close, just moved into the cache instead of the scan logic.
+#
+# 4. Run `cargo check --release --bin simple` (NOT a full `cargo build`)
+#    inside that worktree's src/compiler_rust, with a dedicated
+#    CARGO_TARGET_DIR under /mnt/data (fast NVMe, not the space-constrained
+#    root fs), reused warm across runs to keep incremental cost low.
+#
+# ---------------------------------------------------------------------------
+# WHY `cargo check` NOT `cargo build --release`
+# ---------------------------------------------------------------------------
+# The real incident's failures were unresolved-import (E0432) and
+# missing-enum-variant / no-method-named (E0599) errors -- both are pure
+# type/name-resolution errors that `cargo check` catches identically to
+# `cargo build`, because `check` runs the full frontend (parse, resolve,
+# type-check, borrow-check) and only skips codegen. `cargo check` is
+# materially cheaper (no LLVM codegen, no linking) and is the standard tool
+# for exactly this class of error. This is verified mechanically by this
+# script's own --selftest: a minimal two-crate fixture with a deliberate
+# unresolved import (E0432 shape) and a deliberate call to a non-existent
+# enum variant (E0599 shape) is `cargo check`ed and PROVEN to fail with
+# those exact error codes, and a clean sibling fixture is proven to pass.
+# `cargo build` would ALSO have failed on these fixtures -- `check` is not
+# weaker for this error class, only faster.
+#
+# ---------------------------------------------------------------------------
+# VERDICT CONTRACT (matches the five sibling guards)
+# ---------------------------------------------------------------------------
+#   PASS — <n> file(s) checked, seed builds cleanly (or: seed content
+#          <digest> already proven green by a previous run)      exit 0
+#   FAIL — cargo check failed in <sha>: <first error line(s)>    exit 1
+#   ERROR — nothing was checked                                 exit 2
+# A run that checks 0 files (empty/vacuous range) is ALWAYS an ERROR.
+# Every stop -- normal, trap, signal -- ends in exactly one verdict line as
+# the LAST line of stdout, matching the no-silent-exit invariant documented
+# in doc/08_tracking/bug/pre_push_guards_exit_silently_with_no_verdict_2026-08-10.md.
+#
+# Usage:
+#   check-seed-builds-push.shs                  # default range main@origin..@-
+#   check-seed-builds-push.shs '<base>..<new>'   # explicit range
+#   check-seed-builds-push.shs --selftest        # fixtures only, no scan
+#   KEEP_BUILD_DIR=1 check-seed-builds-push.shs  # keep the worktree+target dir for debugging
+#   SEED_GREEN_MARKER_DIR=... check-seed-builds-push.shs  # isolate/clear the green cache
+#
+# Exit 0 = safe to push, 1 = seed does not build, 2 = could not determine.
+
+# Recursion guard: refuse to run at SIMPLE_SHS_DEPTH >= SIMPLE_SHS_MAX_DEPTH (exit 3).
+case "$0" in */*) . "${0%/*}/../lib/recursion_guard.shs" ;; *) . ./scripts/lib/recursion_guard.shs ;; esac
+set -u
+
+SELF=check-seed-builds-push
+
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+# Git exports repository-local variables while running hooks.  In particular,
+# an inherited GIT_DIR overrides -C and can make a fixture's `git init` and
+# `git commit` operate on the repository whose push invoked this guard.  Every
+# command aimed at a repository selected by path must therefore discard those
+# ambient selectors first.
+git_in_repo() {
+    gir_repo=$1
+    shift
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+        git -C "$gir_repo" "$@"
+}
+
+# /mnt/data is a fast NVMe scratch volume that exists on the Linux CI hosts and
+# NOWHERE ELSE. Hardcoding it made this guard FAIL — not skip, FAIL — on macOS
+# with `error: failed to create directory \`/mnt/data\``, so the mandatory
+# pre-push seed-build gate could never pass from a mac and every push aborted
+# part-way through the gate list. the bootstrap preflight guard (scripts/check/, line 33) already had
+# the right shape (`if [ -d /mnt/data ]`); this is the same idea, extended to
+# prefer the declared user storage root when there is one.
+_seed_scratch_base() {
+    if [ -d /mnt/data ] && [ -w /mnt/data ]; then echo /mnt/data; return; fi
+    if [ -n "${SIMPLE_USER_STORAGE_ROOT:-}" ]; then echo "$SIMPLE_USER_STORAGE_ROOT"; return; fi
+    echo "${TMPDIR:-/tmp}"
+}
+SEED_SCRATCH_BASE=$(_seed_scratch_base)
+CARGO_TARGET_ROOT=${CARGO_TARGET_ROOT:-$SEED_SCRATCH_BASE/cargo-target-seed-build-guard}
+KEEP_BUILD_DIR=${KEEP_BUILD_DIR:-0}
+SEED_GREEN_MARKER_DIR=${SEED_GREEN_MARKER_DIR:-$SEED_SCRATCH_BASE/.seed-build-guard-green}
+
+TMPROOT=""
+WORKTREE=""
+WORKTREE_REPO=""
+
+VERDICT_EMITTED=0
+cleanup() {
+    cl_status=$?
+    trap - EXIT HUP INT TERM QUIT PIPE
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        case "$cl_status" in
+            129) cl_why="killed by SIGHUP (129)" ;;
+            130) cl_why="interrupted by SIGINT (130)" ;;
+            131) cl_why="killed by SIGQUIT (131)" ;;
+            141) cl_why="killed by SIGPIPE (141)" ;;
+            143) cl_why="killed by SIGTERM (143) — a harness timeout, earlyoom, or an explicit kill. Re-run detached (setsid) with no cap." ;;
+            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
+            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
+        esac
+        echo "$SELF: ERROR — $cl_why" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        cl_status=2
+    fi
+    if [ "$KEEP_BUILD_DIR" != "1" ]; then
+        [ -n "$WORKTREE" ] && [ -n "$WORKTREE_REPO" ] && \
+            git -C "$WORKTREE_REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1
+        [ -n "$WORKTREE" ] && rm -rf "$WORKTREE" 2>/dev/null
+    else
+        [ -n "$WORKTREE" ] && echo "$SELF: KEEP_BUILD_DIR=1 -- worktree left at $WORKTREE" >&2
+    fi
+    [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"
+    exit "$cl_status"
+}
+trap cleanup EXIT HUP INT TERM QUIT PIPE
+
+die() {
+    code=$1
+    shift
+    VERDICT_EMITTED=1
+    echo "$SELF: ERROR — $*" >&2
+    echo "$SELF: ERROR — nothing was checked (exit $code)"
+    exit "$code"
+}
+
+# ---------------------------------------------------------------------------
+# count_changed_files <repo> <base> <new>
+#   Prints the changed-file count on stdout. Used ONLY for the non-vacuity
+#   report in the verdict line -- NEVER to decide whether to compile. That
+#   inversion (path filter as authority) is exactly the 2026-08-18 fail-open.
+# ---------------------------------------------------------------------------
+count_changed_files() {
+    cf_repo=$1; cf_base=$2; cf_new=$3
+    git -C "$cf_repo" diff --name-only "$cf_base" "$cf_new" -- \
+        >"$TMPROOT/changed.out" 2>"$TMPROOT/diff.err"
+    cf_st=$?
+    [ "$cf_st" -eq 0 ] || return 2
+    wc -l <"$TMPROOT/changed.out" | tr -d ' '
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# seed_content_digest <repo> <rev>
+#   Prints a digest of the SEED'S OWN CONTENT at <rev>: the git tree object
+#   ids of src/compiler_rust and src/runtime, plus the Cargo.lock blob id.
+#   Tree object ids are recursive content hashes, so two revs share a digest
+#   iff their seed sources are byte-identical. Empty output = could not
+#   determine (caller must treat that as "must compile", never as green).
+# ---------------------------------------------------------------------------
+seed_content_digest() {
+    sd_repo=$1; sd_rev=$2
+    sd_ct=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust" 2>/dev/null) || sd_ct=""
+    [ -n "$sd_ct" ] || return 1
+    sd_rt=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/runtime" 2>/dev/null) || sd_rt="none"
+    sd_lk=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust/Cargo.lock" 2>/dev/null) || sd_lk="none"
+    # The recipe tag is part of the digest ON PURPOSE: the marker records
+    # "this content passed THIS guard's legs". Adding a leg (the 2026-08-21
+    # --features vulkan leg) must invalidate every marker written by the older,
+    # weaker recipe -- otherwise a tree already recorded green under seed/v1
+    # would skip the new leg forever and the fast path would launder exactly
+    # the fail-open this leg exists to close. Bump the tag whenever a leg is
+    # added or its selector changes.
+    printf 'seed/v3+link %s %s %s\n' "$sd_ct" "$sd_rt" "$sd_lk" \
+        | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-40
+    return 0
+}
+
+green_marker_path() { echo "$SEED_GREEN_MARKER_DIR/$1"; }
+
+# Written ONLY after a genuine green compile in this script.
+record_green_marker() {
+    mkdir -p "$SEED_GREEN_MARKER_DIR" 2>/dev/null || return 1
+    date -u '+%Y-%m-%dT%H:%M:%SZ' >"$(green_marker_path "$1")" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# build_seed_worktree <src_repo> <tip_sha>
+#   Creates a detached worktree of tip_sha and sets $WORKTREE / $WORKTREE_REPO.
+# ---------------------------------------------------------------------------
+build_seed_worktree() {
+    bs_repo=$1
+    bs_tip=$2
+    WORKTREE_REPO="$bs_repo"
+    WORKTREE="$TMPROOT/seed-worktree"
+    rm -rf "$WORKTREE"
+    git -C "$bs_repo" worktree add --detach --force "$WORKTREE" "$bs_tip" \
+        >"$TMPROOT/worktree.out" 2>"$TMPROOT/worktree.err"
+    return $?
+}
+
+# ---------------------------------------------------------------------------
+# run_cargo_check <worktree_dir> <target_selector> <out_basename>
+#   Runs `cargo check --release <target_selector>` under
+#   <worktree_dir>/src/compiler_rust. Returns cargo's exit status. Output
+#   captured to $TMPROOT/<out_basename>.
+#
+# TARGET SCOPE — why there is more than one leg (2026-08-17)
+#
+# This guard originally ran ONLY `--bin simple`. That selector compiles the
+# binary target and the library code it transitively uses. It does NOT compile
+# `#[cfg(test)]` modules inside the library, `tests/*.rs` integration targets,
+# or `examples/*.rs` — so test code that does not compile was invisible to it
+# BY CONSTRUCTION. This is a scope gap layered on top of the check-vs-build gap
+# discussed below: even `cargo build --release --bin simple` would have missed
+# it, because none of that code is in the bin target's graph.
+#
+# Measured at origin 2fb45ea1960954447acf12f769935ac83277397e:
+#   ERROR — 0 tests executed; cargo test --release cannot build the test targets
+#   TEST_RC=101, and ZERO `test result:` lines in 546 log lines -- no test
+#   binary was ever produced -- while this guard reported
+#   `PASS — <n> file(s) checked, seed builds cleanly at <sha>`.
+# Three real defects lived in that blind spot: an E0061 `#[cfg(test)]` caller in
+# runtime/src/value/net.rs, an E0599 for `RuntimeValue::fits_inline_int`
+# (referenced only by runtime/tests/boxed_int_wide_roundtrip.rs and defined
+# nowhere), and E0599 x2 for two examples missing `required-features = ["llvm"]`.
+# See doc/08_tracking/bug/seed_build_guard_checks_only_bin_target_no_link_2026-08-17.md
+#
+# KNOWN REMAINING GAP, stated rather than papered over: `cargo check` does not
+# LINK. Four `rt_*` symbols are defined in both the Rust and the C runtime and
+# collide under `-Wl,--whole-archive`, which no `check` leg can see. That is
+# filed as doc/08_tracking/bug/runtime_duplicate_symbols_rust_and_c_whole_archive_2026-08-17.md
+# and is currently RED at origin, which is exactly why a linking leg is NOT
+# gated here yet: gating on a known-red condition gets routed around with
+# --no-verify, which is worse than an honest advisory. Promote a link leg once
+# that row is fixed -- the same way check-c-runtime-compiles-push.shs landed
+# advisory on 2026-08-11 and was promoted the same day.
+# ---------------------------------------------------------------------------
+run_cargo_check() {
+    rc_dir="$1/src/compiler_rust"
+    rc_sel="$2"
+    rc_out="$TMPROOT/$3"
+    [ -d "$rc_dir" ] || { echo "RC_ERR: $rc_dir does not exist in this worktree" >"$rc_out"; return 2; }
+    mkdir -p "$CARGO_TARGET_ROOT" 2>/dev/null
+    # rc is captured on the line AFTER the invocation and never through a pipe:
+    # a pipeline's $? is the LAST stage's status and has produced false greens
+    # in this repo before.
+    ( cd "$rc_dir" && CARGO_TARGET_DIR="$CARGO_TARGET_ROOT" cargo check --release $rc_sel ) \
+        >"$rc_out" 2>&1
+    return $?
+}
+
+# ---------------------------------------------------------------------------
+# run_cargo_build_link <worktree_dir> <target_selector> <out_basename>
+#   Runs `cargo build --release <target_selector>` -- a REAL link, unlike
+#   run_cargo_check above. Added 2026-08-28 to close the unlinkable-tip gap:
+#   `cargo check` never invokes the linker, so an `extern "C"` symbol with no
+#   definition anywhere in the linked graph is invisible to every leg above.
+#   Same rc-capture discipline: read directly on the line after the
+#   invocation, never through a pipe.
+# ---------------------------------------------------------------------------
+run_cargo_build_link() {
+    rb_dir="$1/src/compiler_rust"
+    rb_sel="$2"
+    rb_out="$TMPROOT/$3"
+    [ -d "$rb_dir" ] || { echo "RB_ERR: $rb_dir does not exist in this worktree" >"$rb_out"; return 2; }
+    mkdir -p "$CARGO_TARGET_ROOT" 2>/dev/null
+    ( cd "$rb_dir" && CARGO_TARGET_DIR="$CARGO_TARGET_ROOT" cargo build --release $rb_sel ) \
+        >"$rb_out" 2>&1
+    return $?
+}
+
+# ===========================================================================
+# SELFTEST — proves cargo check catches the real incident's error classes
+# (E0432 unresolved import, E0599 missing enum variant / no method) and
+# that a clean fixture passes. Fatal if it does not pass.
+# ===========================================================================
+SELFTEST_EXPECTED=7
+
+selftest() {
+    st_dir="$TMPROOT/selftest-crate"
+    rm -rf "$st_dir"
+    mkdir -p "$st_dir/src" || return 1
+
+    st_ran=0
+    st_fail=0
+
+    # --- Fixture A: E0432 unresolved import, must FAIL --------------------
+    cat >"$st_dir/Cargo.toml" <<'EOF'
+[package]
+name = "seed-build-guard-selftest"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "selftest_bin"
+path = "src/main.rs"
+EOF
+    cat >"$st_dir/src/main.rs" <<'EOF'
+use this_module_does_not_exist::nope; // E0432 shape
+
+enum Status { Ok, Err }
+
+fn classify() -> Status {
+    Status::Ok
+}
+
+fn main() {
+    match classify() {
+        Status::Ok => {}
+        Status::MissingVariant => {} // E0599/E0532 shape: no such variant
+    }
+}
+EOF
+    st_ran=$((st_ran + 1))
+    ( cd "$st_dir" && CARGO_TARGET_DIR="$TMPROOT/selftest-target" cargo check 2>&1 ) >"$TMPROOT/st_a.out"
+    st_got=$?
+    if [ "$st_got" -eq 0 ]; then
+        echo "SELFTEST FAIL: broken fixture expected cargo check to fail, it exited 0" >&2
+        st_fail=1
+    elif ! $GREP -qE 'E0432|unresolved import' "$TMPROOT/st_a.out"; then
+        echo "SELFTEST FAIL: broken fixture failed but did not report E0432/unresolved-import" >&2
+        cat "$TMPROOT/st_a.out" >&2
+        st_fail=1
+    fi
+
+    # --- Fixture B: clean crate, must PASS ---------------------------------
+    cat >"$st_dir/src/main.rs" <<'EOF'
+enum Status { Ok, Err }
+
+fn classify() -> Status {
+    Status::Ok
+}
+
+fn main() {
+    match classify() {
+        Status::Ok => println!("ok"),
+        Status::Err => println!("err"),
+    }
+}
+EOF
+    st_ran=$((st_ran + 1))
+    ( cd "$st_dir" && CARGO_TARGET_DIR="$TMPROOT/selftest-target" cargo check 2>&1 ) >"$TMPROOT/st_b.out"
+    st_got=$?
+    if [ "$st_got" -ne 0 ]; then
+        echo "SELFTEST FAIL: clean fixture expected cargo check to pass, it failed" >&2
+        cat "$TMPROOT/st_b.out" >&2
+        st_fail=1
+    fi
+
+    # --- Fixture D: the SCOPE gap this guard's --tests leg exists to close --
+    # A crate whose bin target is perfectly fine but whose #[cfg(test)] module
+    # calls a function that does not exist. `--bin` MUST pass and `--tests`
+    # MUST fail; if `--bin` also failed, the fixture would not be proving that
+    # the new leg catches anything the old leg missed. This is the exact shape
+    # of the 2026-08-17 origin defects (E0061 in a #[cfg(test)] caller in
+    # runtime/src/value/net.rs; E0599 for a never-defined
+    # RuntimeValue::fits_inline_int used only by an integration test).
+    st_dir_d="$TMPROOT/selftest-crate-tests"
+    rm -rf "$st_dir_d"
+    mkdir -p "$st_dir_d/src" "$st_dir_d/tests" || return 1
+    cat >"$st_dir_d/Cargo.toml" <<'EOF'
+[package]
+name = "seed-build-guard-selftest-tests"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "sbgst"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sbgst_bin"
+path = "src/main.rs"
+EOF
+    cat >"$st_dir_d/src/lib.rs" <<'EOF'
+pub fn takes_two(a: i64, b: i64) -> i64 { a + b }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn stale_caller() {
+        // E0061 shape: the function gained a second parameter and this
+        // #[cfg(test)] caller was never updated.
+        assert_eq!(takes_two(1), 1);
+    }
+}
+EOF
+    cat >"$st_dir_d/src/main.rs" <<'EOF'
+fn main() { println!("{}", sbgst::takes_two(1, 2)); }
+EOF
+    cat >"$st_dir_d/tests/integration.rs" <<'EOF'
+// E0599 shape: referenced by this test only, defined nowhere.
+#[test]
+fn calls_a_symbol_that_does_not_exist() {
+    assert!(sbgst::never_written_predicate(7));
+}
+EOF
+    st_ran=$((st_ran + 1))
+    ( cd "$st_dir_d" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-d" cargo check --bin sbgst_bin 2>&1 ) >"$TMPROOT/st_d_bin.out"
+    st_got_bin=$?
+    ( cd "$st_dir_d" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-d" cargo check --tests 2>&1 ) >"$TMPROOT/st_d_tests.out"
+    st_got_tests=$?
+    if [ "$st_got_bin" -ne 0 ]; then
+        echo "SELFTEST FAIL: scope fixture's --bin leg was expected to PASS (that is what makes the gap a gap), it failed" >&2
+        cat "$TMPROOT/st_d_bin.out" >&2
+        st_fail=1
+    fi
+    if [ "$st_got_tests" -eq 0 ]; then
+        echo "SELFTEST FAIL: scope fixture's --tests leg was expected to FAIL, it exited 0 -- the new leg is vacuous" >&2
+        cat "$TMPROOT/st_d_tests.out" >&2
+        st_fail=1
+    elif ! $GREP -qE 'E0061|E0599|this function takes|not found' "$TMPROOT/st_d_tests.out"; then
+        echo "SELFTEST FAIL: scope fixture's --tests leg failed but not with the expected E0061/E0599 shape" >&2
+        cat "$TMPROOT/st_d_tests.out" >&2
+        st_fail=1
+    fi
+
+    # --- Fixture E: REPLAY OF THE 2026-08-18 FAIL-OPEN --------------------
+    # A tree that is broken in a file THE RANGE DOES NOT TOUCH must not be
+    # able to reach a PASS. Fixture shape is the incident's exactly: commit 1
+    # carries a seed with an E0432 unresolved import; commit 2 changes only a
+    # docs file. The old path filter looked at the range, saw no
+    # src/compiler_rust path, and PASSed without compiling. The proof has four
+    # parts, because each is separately load-bearing:
+    #   E1 the range really is docs-only (else the fixture is not the incident)
+    #   E2 with a FRESH marker store, the tree's seed digest has no recorded
+    #      green -- so the guard is obliged to compile
+    #   E3 compiling that tree genuinely FAILS with the incident's E0432 shape
+    #   E4 the marker mechanism is not dead: after a recorded green, the same
+    #      digest is recognised (otherwise E2 would pass vacuously forever)
+    st_repo="$TMPROOT/selftest-incident-repo"
+    rm -rf "$st_repo"
+    mkdir -p "$st_repo/src/compiler_rust/src" "$st_repo/doc" || return 1
+    cat >"$st_repo/src/compiler_rust/Cargo.toml" <<'EOF'
+[package]
+name = "seed-guard-incident-fixture"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "simple"
+path = "src/main.rs"
+EOF
+    cat >"$st_repo/src/compiler_rust/src/main.rs" <<'EOF'
+// The incident's first error, verbatim in shape: an import of an item that
+// exists nowhere in this tree (module_globals_generation at origin/main).
+use crate::interpreter::module_globals_generation;
+
+fn main() { let _ = module_globals_generation(); }
+EOF
+    echo "before" >"$st_repo/doc/notes.md"
+    (
+        git_in_repo "$st_repo" init -q . &&
+        git_in_repo "$st_repo" config user.email guard@selftest &&
+        git_in_repo "$st_repo" config user.name guard &&
+        git_in_repo "$st_repo" add -A &&
+        git_in_repo "$st_repo" commit -q -m "seed (already broken) + docs" &&
+        echo "after" >"$st_repo/doc/notes.md" &&
+        git_in_repo "$st_repo" add -A &&
+        git_in_repo "$st_repo" commit -q -m "docs(tracking): docs-only tip, touches no seed file"
+    ) < /dev/null >"$TMPROOT/st_e_setup.out" 2>&1
+    st_setup=$?
+    st_ran=$((st_ran + 1))
+    if [ "$st_setup" -ne 0 ]; then
+        echo "SELFTEST FAIL: incident-replay fixture repo setup failed" >&2
+        cat "$TMPROOT/st_e_setup.out" >&2
+        st_fail=1
+    else
+        st_e_base=$(git_in_repo "$st_repo" rev-parse HEAD~1)
+        st_e_tip=$(git_in_repo "$st_repo" rev-parse HEAD)
+        # E1 -- the range is docs-only
+        git_in_repo "$st_repo" diff --name-only "$st_e_base" "$st_e_tip" -- >"$TMPROOT/st_e_changed.out" 2>&1
+        if $GREP -qE '^src/(compiler_rust|runtime)/' "$TMPROOT/st_e_changed.out"; then
+            echo "SELFTEST FAIL: incident-replay range touches the seed -- fixture does not reproduce the fail-open" >&2
+            st_fail=1
+        fi
+        # E2 -- fresh marker store must NOT excuse compiling this tree
+        st_e_markers="$TMPROOT/st_e_markers"
+        rm -rf "$st_e_markers"; mkdir -p "$st_e_markers"
+        st_e_digest=$(seed_content_digest "$st_repo" "$st_e_tip") || st_e_digest=""
+        if [ -z "$st_e_digest" ]; then
+            echo "SELFTEST FAIL: incident-replay tree yielded no seed digest" >&2
+            st_fail=1
+        elif [ -f "$st_e_markers/$st_e_digest" ]; then
+            echo "SELFTEST FAIL: a fresh marker store already claims this seed is green" >&2
+            st_fail=1
+        fi
+        # E3 -- and compiling it really does fail, with the incident's shape
+        ( cd "$st_repo/src/compiler_rust" && CARGO_TARGET_DIR="$TMPROOT/st_e_target" cargo check --bin simple 2>&1 ) >"$TMPROOT/st_e_cargo.out"
+        st_got=$?
+        if [ "$st_got" -eq 0 ]; then
+            echo "SELFTEST FAIL: incident-replay tree was expected NOT to compile, cargo check exited 0" >&2
+            st_fail=1
+        elif ! $GREP -qE 'E0432|unresolved import|failed to resolve' "$TMPROOT/st_e_cargo.out"; then
+            echo "SELFTEST FAIL: incident-replay tree failed but not with the E0432 shape" >&2
+            cat "$TMPROOT/st_e_cargo.out" >&2
+            st_fail=1
+        fi
+        # E4 -- marker recognition is live, not dead code
+        if [ -n "$st_e_digest" ]; then
+            st_e_saved_dir="$SEED_GREEN_MARKER_DIR"
+            SEED_GREEN_MARKER_DIR="$st_e_markers"
+            record_green_marker "$st_e_digest"
+            if [ ! -f "$(green_marker_path "$st_e_digest")" ]; then
+                echo "SELFTEST FAIL: green marker was not recorded -- the fast path could never be taken" >&2
+                st_fail=1
+            fi
+            SEED_GREEN_MARKER_DIR="$st_e_saved_dir"
+        fi
+    fi
+
+    # --- Fixture C: empty range must be treated as vacuous/ERROR ----------
+    # (exercised via the path-filter contract, not cargo: 0 changed files
+    # must never report PASS with n=0.)
+    st_ran=$((st_ran + 1))
+    : >"$TMPROOT/empty.out"
+    st_n=$(wc -l <"$TMPROOT/empty.out" | tr -d ' ')
+    if [ "$st_n" -ne 0 ]; then
+        echo "SELFTEST FAIL: empty-range fixture setup is broken" >&2
+        st_fail=1
+    fi
+
+    # --- Fixture F: the CFG gap that gating leg 3 exists to close ----------
+    # Replays doc/08_tracking/bug/seed_build_guard_never_compiles_vulkan_feature_2026-08-20.md:
+    # a crate with a stray unconditional `use` duplicating one that is already
+    # cfg-gated. With default features the cfg body is not compiled at all, so
+    # `cargo check` PASSES; with the feature enabled it is E0252 and FAILS.
+    # Both halves are asserted -- the default-features PASS is what proves the
+    # new leg is load-bearing rather than decorative, since a fixture that
+    # failed both ways would demonstrate nothing about cfg scope.
+    st_dir_f="$TMPROOT/selftest-crate-cfg"
+    rm -rf "$st_dir_f"
+    mkdir -p "$st_dir_f/src" || return 1
+    cat >"$st_dir_f/Cargo.toml" <<'EOF'
+[package]
+name = "seed-build-guard-selftest-cfg"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+default = []
+gfx = []
+
+[lib]
+name = "sbgstcfg"
+path = "src/lib.rs"
+EOF
+    cat >"$st_dir_f/src/lib.rs" <<'EOF'
+pub mod inner {
+    pub struct Device;
+}
+
+#[cfg(feature = "gfx")]
+mod gated {
+    use crate::inner::Device;
+    // The incident's exact shape: a stray unconditional duplicate import left
+    // behind next to an already-gated one. E0252 -- but only when the cfg is on.
+    use crate::inner::Device;
+
+    pub fn make() -> Device { Device }
+}
+EOF
+    st_ran=$((st_ran + 1))
+    ( cd "$st_dir_f" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-f" cargo check 2>&1 ) >"$TMPROOT/st_f_default.out"
+    st_got_f_default=$?
+    ( cd "$st_dir_f" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-f" cargo check --features gfx 2>&1 ) >"$TMPROOT/st_f_feat.out"
+    st_got_f_feat=$?
+    if [ "$st_got_f_default" -ne 0 ]; then
+        echo "SELFTEST FAIL: cfg fixture's default-features check was expected to PASS (that is what makes the cfg gap a gap), it failed" >&2
+        cat "$TMPROOT/st_f_default.out" >&2
+        st_fail=1
+    fi
+    if [ "$st_got_f_feat" -eq 0 ]; then
+        echo "SELFTEST FAIL: cfg fixture was expected NOT to compile with --features gfx, cargo check exited 0" >&2
+        st_fail=1
+    elif ! $GREP -q 'E0252\|defined multiple times' "$TMPROOT/st_f_feat.out" 2>/dev/null; then
+        echo "SELFTEST FAIL: cfg fixture failed with --features gfx but not with the expected E0252 duplicate-import error" >&2
+        cat "$TMPROOT/st_f_feat.out" >&2
+        st_fail=1
+    fi
+
+    # --- Fixture G: REPLAY OF THE 2026-08-28 UNLINKABLE-TIP INCIDENT -------
+    # A crate that declares an `extern "C"` function with no definition
+    # anywhere in the linked graph. `cargo check` must PASS (it never links --
+    # this is exactly why the old guard reported PASS on the real incident);
+    # `cargo build --release` must FAIL at the link stage with an
+    # undefined-symbol/undefined-reference error. If `check` also failed, the
+    # fixture would not be proving anything -- the whole point of this leg is
+    # to catch what `check` structurally cannot.
+    st_dir_g="$TMPROOT/selftest-crate-link"
+    rm -rf "$st_dir_g"
+    mkdir -p "$st_dir_g/src" || return 1
+    cat >"$st_dir_g/Cargo.toml" <<'EOF'
+[package]
+name = "seed-build-guard-selftest-link"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "selftest_link_bin"
+path = "src/main.rs"
+EOF
+    cat >"$st_dir_g/src/main.rs" <<'EOF'
+// The incident's exact shape: an extern "C" symbol (rt_time_now_seconds at
+// origin/main) declared but defined nowhere in the linked graph. `cargo
+// check` never links, so it cannot see this; only a real link can.
+extern "C" {
+    fn seed_guard_selftest_undefined_native_symbol() -> i64;
+}
+
+fn main() {
+    let v = unsafe { seed_guard_selftest_undefined_native_symbol() };
+    println!("{}", v);
+}
+EOF
+    st_ran=$((st_ran + 1))
+    ( cd "$st_dir_g" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-g" cargo check --release 2>&1 ) >"$TMPROOT/st_g_check.out"
+    st_got_g_check=$?
+    ( cd "$st_dir_g" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-g" cargo build --release 2>&1 ) >"$TMPROOT/st_g_build.out"
+    st_got_g_build=$?
+    if [ "$st_got_g_check" -ne 0 ]; then
+        echo "SELFTEST FAIL: link fixture's cargo check was expected to PASS (that is what makes the link gap a gap), it failed" >&2
+        cat "$TMPROOT/st_g_check.out" >&2
+        st_fail=1
+    fi
+    if [ "$st_got_g_build" -eq 0 ]; then
+        echo "SELFTEST FAIL: link fixture's cargo build --release was expected to FAIL at link, it exited 0 -- the link leg is vacuous" >&2
+        st_fail=1
+    elif ! $GREP -qiE 'undefined (symbol|reference)|undefined_native_symbol|linking with|link.*error|ld returned' "$TMPROOT/st_g_build.out"; then
+        echo "SELFTEST FAIL: link fixture's cargo build failed but not with an undefined-symbol/link-error shape" >&2
+        cat "$TMPROOT/st_g_build.out" >&2
+        st_fail=1
+    fi
+
+    if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
+        echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran" >&2
+        return 1
+    fi
+    [ "$st_fail" -eq 0 ] || return 1
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, 2026-08-18 incident replay: docs-only range over a broken untouched seed must compile and FAIL, vacuous-range contract, cfg-gap: default-features PASS + --features FAIL with E0252, 2026-08-28 link-gap: extern \"C\" undefined symbol passes check but FAILs cargo build --release at link)"
+    return 0
+}
+
+# ===========================================================================
+# MAIN
+# ===========================================================================
+TMPROOT=$(mktemp -d) || { echo "$SELF: ERROR — cannot mktemp" >&2
+                          echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
+
+if ! command -v cargo >/dev/null 2>&1; then
+    die 2 "cargo not found on PATH -- cannot verify the seed builds."
+fi
+
+if ! selftest; then
+    VERDICT_EMITTED=1
+    echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
+    echo "$SELF: ERROR — nothing was checked (exit 2)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    VERDICT_EMITTED=1
+    echo "$SELF: PASS — $SELFTEST_EXPECTED fixture(s) checked (selftest only, scan skipped)"
+    exit 0
+fi
+
+range="${1:-}"
+explicit=0
+[ -n "$range" ] && explicit=1
+
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+if [ -z "$toplevel" ]; then
+    die 2 "cwd '$(pwd)' is not inside a git repository.
+  This guard must run from the repo root of the clone you are about to push."
+fi
+toplevel=$(CDPATH= cd -- "$toplevel" && pwd -P) || die 2 "cannot canonicalise toplevel"
+
+if [ "$explicit" -eq 0 ]; then
+    base=$(jj --ignore-working-copy log -r 'main@origin' --no-graph -T 'commit_id' 2>/dev/null) || base=""
+    tip=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id' 2>/dev/null) || tip=""
+    if [ -z "$base" ] || [ -z "$tip" ]; then
+        die 2 "cannot resolve main@origin..@- via jj (is jj available and is this a jj workspace?).
+  Pass an explicit range instead, e.g. $SELF '<base-sha>..<new-sha>'."
+    fi
+    range="$base..$tip"
+else
+    case "$range" in
+        *..*) : ;;
+        *) die 2 "explicit range '$range' does not contain '..'.
+  A bare revision means 'all history reachable from it' to git, which is not
+  what this guard is for. Pass '<base>..<new>'." ;;
+    esac
+    base=${range%%..*}
+    tip=${range#*..}
+    tip=${tip#.}
+fi
+
+for ep in "$base" "$tip"; do
+    git rev-parse --verify --quiet "$ep^{commit}" >/dev/null 2>&1 \
+        || die 2 "revision '$ep' (from range '$range') does not exist in the repository at $toplevel."
+done
+
+nfiles=$(count_changed_files "$toplevel" "$base" "$tip")
+cf_rc=$?
+[ "$cf_rc" -eq 0 ] || die 2 "cannot diff range '$range': $(tail -n 3 "$TMPROOT/diff.err" 2>/dev/null)"
+nfiles=${nfiles:-0}
+
+if [ "$nfiles" -eq 0 ]; then
+    die 2 "0 files changed in range '$range' -- nothing to check. If the range is genuinely empty, do not call this guard."
+fi
+
+# --- TREE-SCOPED DECISION (2026-08-18) --------------------------------------
+# The question is never "did this range touch the seed" -- it is "does the
+# resulting TREE build". The only licence to skip compiling is a recorded
+# green for this exact seed CONTENT. Anything else compiles.
+seed_digest=$(seed_content_digest "$toplevel" "$tip") || seed_digest=""
+if [ -z "$seed_digest" ]; then
+    die 2 "cannot resolve src/compiler_rust in the tree at '$tip' -- the seed's buildability is undetermined, which is never a pass."
+fi
+
+if [ -f "$(green_marker_path "$seed_digest")" ]; then
+    VERDICT_EMITTED=1
+    echo "$SELF: PASS — $nfiles file(s) checked, seed content $seed_digest at $tip byte-identical to a tree this guard already compiled green ($(cat "$(green_marker_path "$seed_digest")" 2>/dev/null))"
+    exit 0
+fi
+
+build_seed_worktree "$toplevel" "$tip"
+if [ $? -ne 0 ]; then
+    die 2 "cannot create a detached worktree for $tip: $(cat "$TMPROOT/worktree.err" 2>/dev/null | tail -n 5)"
+fi
+
+# --- GATING LEG 1: the bin target (the original check, unchanged) -----------
+run_cargo_check "$WORKTREE" "--bin simple" cargo.out
+cc_st=$?
+
+if [ "$cc_st" -ne 0 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. src/compiler_rust does not compile at $tip (cargo check
+--release --bin simple failed). This is the exact shape of the 2026-08-11
+incident: origin/main was unbuildable and no guard caught it because none of
+the other five guards compile anything.
+
+$(tail -n 40 "$TMPROOT/cargo.out")
+
+Fix the build error in the range before pushing. Re-run standalone to
+iterate:
+  cd $WORKTREE/src/compiler_rust && CARGO_TARGET_DIR=$CARGO_TARGET_ROOT cargo check --release --bin simple
+EOF
+    VERDICT_EMITTED=1
+    err1=$($GREP -m1 -E '^error' "$TMPROOT/cargo.out" 2>/dev/null)
+    echo "$SELF: FAIL — cargo check failed in $tip: ${err1:-see stderr above}"
+    exit 1
+fi
+
+# --- GATING LEG 2: test targets --------------------------------------------
+# `--tests` covers `#[cfg(test)]` lib modules AND `tests/*.rs` integration
+# targets -- the blind spot that let an unbuildable test suite sit in main.
+# Measured clean on 2026-08-17 at the commit carrying the three fixes
+# (rc=0), which is why it is safe to GATE rather than advise. Examples are
+# deliberately NOT in this leg: a broken probe fixture is not product code and
+# must not be able to take down the gating path.
+run_cargo_check "$WORKTREE" "--tests" cargo_tests.out
+ct_st=$?
+
+if [ "$ct_st" -ne 0 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. src/compiler_rust compiles its bin target but its TEST targets do
+not compile at $tip (cargo check --release --tests failed). A tree in this state
+cannot run its own Rust test suite at all: cargo test produces no test binary
+and emits ZERO \`test result:\` lines, so any "tests passed" claim about it is
+impossible. This is the 2026-08-17 scope gap
+(doc/08_tracking/bug/seed_build_guard_checks_only_bin_target_no_link_2026-08-17.md).
+
+$(tail -n 40 "$TMPROOT/cargo_tests.out")
+
+Re-run standalone to iterate:
+  cd $WORKTREE/src/compiler_rust && CARGO_TARGET_DIR=$CARGO_TARGET_ROOT cargo check --release --tests
+EOF
+    VERDICT_EMITTED=1
+    err1=$($GREP -m1 -E '^error' "$TMPROOT/cargo_tests.out" 2>/dev/null)
+    echo "$SELF: FAIL — cargo check --tests failed in $tip: ${err1:-see stderr above}"
+    exit 1
+fi
+
+# --- GATING LEG 3: cfg-gated feature bodies (`--features vulkan`) ----------
+# Legs 1 and 2 run with DEFAULT features, so every `#[cfg(feature = "vulkan")]`
+# body is never type-checked by them -- cfg-gated code that does not compile is
+# invisible BY CONSTRUCTION, which is the same fail-open shape as the old
+# path-filter: an absence of evidence laundered into a green verdict.
+# Measured incident (2026-08-20): vulkan_graphics_runtime_compute.rs and
+# ..._shader.rs carried 4 stray unconditional `use` lines duplicating cfg-gated
+# imports -- 4 x E0252 -- so `cargo check -p simple-runtime --features vulkan`
+# failed outright and had never compiled, while main looked green the whole
+# time. See doc/08_tracking/bug/seed_build_guard_never_compiles_vulkan_feature_2026-08-20.md
+#
+# `cargo check` (not `build`) means this needs NO GPU, no Vulkan loader and no
+# device: it is pure type-checking, which is exactly what was missing. The
+# existing device gates (check-engine2d-vulkan-*.shs) are RUNTIME gates and are
+# device-blocked on hosts without a GPU, so they never covered this.
+# Scoped to `-p simple-runtime` because that is the crate proven green
+# (2026-08-21, 40s warm). Other feature flags (llvm, wasm, pytorch, cuda,
+# monoio-*, ratatui-tui, and the compiler crate's own vulkan) are NOT gated
+# here: none has been proven green on this host, and gating on an unproven-red
+# condition gets routed around with --no-verify, which protects nothing. The
+# general form is a per-feature matrix; add each leg as it is proven.
+run_cargo_check "$WORKTREE" "-p simple-runtime --features vulkan" cargo_vulkan.out
+cv_st=$?
+
+if [ "$cv_st" -ne 0 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. src/compiler_rust compiles with default features but the
+cfg-gated \`vulkan\` bodies do not compile at $tip (cargo check --release
+-p simple-runtime --features vulkan failed). Code behind a cfg is not
+type-checked unless the cfg is enabled, so this is invisible to every
+default-features leg.
+
+$(tail -n 40 "$TMPROOT/cargo_vulkan.out")
+
+Re-run standalone to iterate:
+  cd $WORKTREE/src/compiler_rust && CARGO_TARGET_DIR=$CARGO_TARGET_ROOT cargo check --release -p simple-runtime --features vulkan
+EOF
+    VERDICT_EMITTED=1
+    err1=$($GREP -m1 -E '^error' "$TMPROOT/cargo_vulkan.out" 2>/dev/null)
+    echo "$SELF: FAIL — cargo check --features vulkan failed in $tip: ${err1:-see stderr above}"
+    exit 1
+fi
+
+# --- GATING LEG 4: the LINK step (`cargo build --release --bin simple`) ----
+# Legs 1-3 all use `cargo check`, which never invokes the linker. On
+# 2026-08-28 origin/main was UNLINKABLE (extern "C" rt_time_now_seconds had
+# no definition anywhere in the linked graph) while every check-only leg
+# above reported PASS -- the second unlinkable-tip incident of this exact
+# shape. This leg is a real link: a symbol that merely resolves as a Rust
+# item but is undefined at the object/link level is invisible to `check` by
+# construction, since an `extern "C"` block only promises the compiler a
+# signature. Warm cost is small on top of legs 1-3 (they already primed
+# CARGO_TARGET_DIR's incremental cache; build only pays for codegen+link),
+# measured ~35-70s marginal on this host; cold is close to a full release
+# build. Paid only on a seed-content cache miss, exactly like the legs above.
+run_cargo_build_link "$WORKTREE" "--bin simple" cargo_link.out
+cl_st=$?
+
+if [ "$cl_st" -ne 0 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. src/compiler_rust compiles (cargo check passes) but does NOT
+LINK at $tip (cargo build --release --bin simple failed). This is the exact
+shape of the 2026-08-28 incident: an extern "C" symbol with no definition
+anywhere in the linked graph, invisible to every check-only leg above.
+
+$(tail -n 40 "$TMPROOT/cargo_link.out")
+
+Fix the missing definition/link error before pushing. Re-run standalone to
+iterate:
+  cd $WORKTREE/src/compiler_rust && CARGO_TARGET_DIR=$CARGO_TARGET_ROOT cargo build --release --bin simple
+EOF
+    VERDICT_EMITTED=1
+    err1=$($GREP -m1 -iE 'undefined (symbol|reference)|error' "$TMPROOT/cargo_link.out" 2>/dev/null)
+    echo "$SELF: FAIL — cargo build --release --bin simple failed to link in $tip: ${err1:-see stderr above}"
+    exit 1
+fi
+
+# --- ADVISORY LEG: every remaining target (examples, benches) ---------------
+# Reported, never fatal. Kept separate from leg 2 so that a breakage in a probe
+# fixture is visible without turning a genuine product-code PASS into a FAIL
+# for an unrelated reason.
+run_cargo_check "$WORKTREE" "--all-targets" cargo_all.out
+ca_st=$?
+advisory=""
+if [ "$ca_st" -ne 0 ]; then
+    err1=$($GREP -m1 -E '^error' "$TMPROOT/cargo_all.out" 2>/dev/null)
+    advisory=" [ADVISORY: --all-targets failed: ${err1:-see $TMPROOT/cargo_all.out}]"
+    echo "$SELF: ADVISORY — cargo check --release --all-targets failed at $tip (not gating): ${err1:-see stderr}" >&2
+    tail -n 20 "$TMPROOT/cargo_all.out" >&2
+fi
+
+record_green_marker "$seed_digest"
+
+VERDICT_EMITTED=1
+echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test + vulkan-feature targets compile cleanly AND the bin target LINKS at $tip (seed content $seed_digest recorded green)$advisory"
+exit 0

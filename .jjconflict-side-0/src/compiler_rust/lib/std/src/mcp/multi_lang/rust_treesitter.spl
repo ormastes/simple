@@ -1,0 +1,158 @@
+struct TreeSitterParser:
+    language: text
+    parser_handle: i64
+    lang_handle: i64
+
+impl TreeSitterParser:
+    fn new(lang: &str) -> TreeSitterParser:
+        val parser_handle = ts_parser_new()
+        val lang_handle = match lang:
+            case "rust": tree_sitter_rust()
+            case _: 0
+
+        if parser_handle != 0 and lang_handle != 0:
+            ts_parser_set_language(parser_handle, lang_handle)
+
+        return TreeSitterParser {
+            language: lang.to_string(),
+            parser_handle: parser_handle,
+            lang_handle: lang_handle
+        }
+
+    fn parse(source: &str) -> Result<Tree, McpError>:
+        """Parse source code using tree-sitter.
+
+        Falls back to regex-based parsing if tree-sitter is unavailable.
+        """
+        if self.parser_handle == 0 or self.lang_handle == 0:
+            # Fallback to regex-based parsing for Rust
+            return self.parse_regex_fallback(source)
+
+        val tree_handle = ts_parser_parse_string(
+            self.parser_handle,
+            0,  # No old tree
+            source.as_ptr(),
+            source.len() as u64
+        )
+
+        if tree_handle == 0:
+            return Err(McpError.ParseError("Tree-sitter parse failed"))
+
+        val root_handle = ts_tree_root_node(tree_handle)
+        val root = TreeNode.from_handle(root_handle, source)
+
+        return Ok(Tree { root: root, tree_handle: tree_handle })
+
+    fn parse_regex_fallback(source: &str) -> Result<Tree, McpError>:
+        """Regex-based fallback parser for Rust."""
+        var children: Array<TreeNode> = []
+
+        # Find function definitions
+        var lines = source.split("\n")
+        for (line_num, line) in lines.enumerate():
+            val trimmed = line.trim()
+
+            # Match pub fn name(...) or fn name(...)
+            if trimmed.contains("fn ") and trimmed.contains("("):
+                val kind = if trimmed.starts_with("pub "): "function_item" else: "function_item"
+                children.push(TreeNode {
+                    kind_str: kind,
+                    child_nodes: [],
+                    start_pos: line_num as u32,
+                    end_pos: line_num as u32,
+                    text_slice: trimmed
+                })
+
+            # Match struct definitions
+            elif trimmed.starts_with("struct ") or trimmed.starts_with("pub struct "):
+                children.push(TreeNode {
+                    kind_str: "struct_item",
+                    child_nodes: [],
+                    start_pos: line_num as u32,
+                    end_pos: line_num as u32,
+                    text_slice: trimmed
+                })
+
+            # Match impl blocks
+            elif trimmed.starts_with("impl "):
+                children.push(TreeNode {
+                    kind_str: "impl_item",
+                    child_nodes: [],
+                    start_pos: line_num as u32,
+                    end_pos: line_num as u32,
+                    text_slice: trimmed
+                })
+
+        val root = TreeNode {
+            kind_str: "source_file",
+            child_nodes: children,
+            start_pos: 0,
+            end_pos: lines.len() as u32,
+            text_slice: source
+        }
+
+        return Ok(Tree { root: root, tree_handle: 0 })
+
+    fn close():
+        """Clean up parser resources."""
+        if self.parser_handle != 0:
+            ts_parser_delete(self.parser_handle)
+
+struct Tree:
+    root: TreeNode
+    tree_handle: i64
+
+impl Tree:
+    fn root_node() -> TreeNode:
+        return self.root
+
+    fn close():
+        """Clean up tree resources."""
+        if self.tree_handle != 0:
+            ts_tree_delete(self.tree_handle)
+
+struct TreeNode:
+    kind_str: text
+    child_nodes: Array<TreeNode>
+    start_pos: u32
+    end_pos: u32
+    text_slice: text
+
+impl TreeNode:
+    fn from_handle(handle: i64, source: &str) -> TreeNode:
+        """Create TreeNode from tree-sitter handle."""
+        val type_ptr = ts_node_type(handle)
+        val kind = text.from_c_str(type_ptr)
+        val start = ts_node_start_byte(handle)
+        val end = ts_node_end_byte(handle)
+
+        var children: Array<TreeNode> = []
+        val child_count = ts_node_child_count(handle)
+        for i in 0..child_count:
+            val child_handle = ts_node_child(handle, i)
+            children.push(TreeNode.from_handle(child_handle, source))
+
+        return TreeNode {
+            kind_str: kind,
+            child_nodes: children,
+            start_pos: start,
+            end_pos: end,
+            text_slice: source.substring(start as usize, end as usize)
+        }
+
+    fn kind() -> &str:
+        return &self.kind_str
+
+    fn children() -> Array<TreeNode>:
+        return self.child_nodes
+
+    fn start_byte() -> u32:
+        return self.start_pos
+
+    fn end_byte() -> u32:
+        return self.end_pos
+
+    fn text() -> &str:
+        return &self.text_slice
+
+# MCP Output types

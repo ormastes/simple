@@ -1,0 +1,125 @@
+#!/bin/sh
+# Bind benchmark sources, fixed build recipes, retained compiler identities, and
+# retained outputs. The reviewer attests execution; this checker recomputes all
+# identities without rebuilding during evidence import.
+set -eu
+LC_ALL=C
+export LC_ALL
+ROOT=""; FINGERPRINT=""; RUN_ID=""; ORIGIN=""; TOOLCHAIN=""; EQUIV=""; ENVIRONMENT=""; SIMPLE_COMPILER=""; RUST_COMPILER=""; GO_COMPILER=""; SIMPLE_EXE=""; RUST_EXE=""; GO_EXE=""; SIMPLE_VERSION=""; RUST_VERSION=""; GO_VERSION=""; CLOCK_SOURCE=""; CLOCK_COMPILER=""; CLOCK_VERSION=""; CLOCK_HELPER=""
+fail() { echo "STATUS: FAIL rust-go-benchmark-build-origin — $*" >&2; exit 1; }
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=$2; shift 2 ;; --fingerprint) FINGERPRINT=$2; shift 2 ;; --run-id) RUN_ID=$2; shift 2 ;;
+        --origin) ORIGIN=$2; shift 2 ;; --toolchain) TOOLCHAIN=$2; shift 2 ;; --equivalence) EQUIV=$2; shift 2 ;; --environment) ENVIRONMENT=$2; shift 2 ;;
+        --simple-compiler) SIMPLE_COMPILER=$2; shift 2 ;; --rust-compiler) RUST_COMPILER=$2; shift 2 ;; --go-compiler) GO_COMPILER=$2; shift 2 ;;
+        --simple-executable) SIMPLE_EXE=$2; shift 2 ;; --rust-executable) RUST_EXE=$2; shift 2 ;; --go-executable) GO_EXE=$2; shift 2 ;;
+        --simple-version) SIMPLE_VERSION=$2; shift 2 ;; --rust-version) RUST_VERSION=$2; shift 2 ;; --go-version) GO_VERSION=$2; shift 2 ;;
+        --clock-source) CLOCK_SOURCE=$2; shift 2 ;; --clock-compiler) CLOCK_COMPILER=$2; shift 2 ;; --clock-version) CLOCK_VERSION=$2; shift 2 ;; --clock-helper) CLOCK_HELPER=$2; shift 2 ;;
+        *) fail "unknown-argument-$1" ;;
+    esac
+done
+[ -n "$ROOT" ] && [ -n "$FINGERPRINT" ] && [ -n "$RUN_ID" ] || fail missing-identity
+ROOT=$(CDPATH= cd -- "$ROOT" && pwd -P) || fail invalid-root
+for file in "$ORIGIN" "$TOOLCHAIN" "$EQUIV" "$ENVIRONMENT" "$SIMPLE_COMPILER" "$RUST_COMPILER" "$GO_COMPILER" "$SIMPLE_EXE" "$RUST_EXE" "$GO_EXE" "$SIMPLE_VERSION" "$RUST_VERSION" "$GO_VERSION"; do [ -f "$file" ] && [ ! -L "$file" ] || fail missing-evidence-blob; done
+field() { [ "$(grep -c "^$2=" "$1" 2>/dev/null || true)" -eq 1 ] || return 1; sed -n "s/^$2=//p" "$1"; }
+eqf() { value=$(field "$1" "$2") || fail "missing-$2"; [ "$value" = "$3" ] || fail "$2"; }
+sha_field() { value=$(field "$1" "$2") || fail "missing-$2"; case "$value" in *[!0-9a-f]*|'') fail "invalid-$2" ;; esac; [ "${#value}" -eq 64 ] || fail "invalid-$2"; printf %s "$value"; }
+token() { value=$(field "$1" "$2") || fail "missing-$2"; case "$value" in ''|*[!A-Za-z0-9._:@+/-]*) fail "invalid-$2" ;; esac; printf %s "$value"; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+
+[ "$(wc -l <"$TOOLCHAIN" | tr -d ' ')" -eq 11 ] || fail toolchain-field-count
+eqf "$TOOLCHAIN" evidence_schema simple.must-check-toolchain/v1
+eqf "$TOOLCHAIN" gate_id rust-go-benchmark-parity
+eqf "$TOOLCHAIN" run_id "$RUN_ID"
+eqf "$TOOLCHAIN" final_verdict PASS
+for language in simple rust go; do
+    compiler_sha=$(sha_field "$TOOLCHAIN" "${language}_compiler_sha256")
+    version_sha=$(sha_field "$TOOLCHAIN" "${language}_version_sha256")
+    eval "${language}_compiler_sha=\$compiler_sha; ${language}_version_sha=\$version_sha"
+done
+toolchain_digest=$(printf 'simple=%s\nrust=%s\ngo=%s\nsimple-version=%s\nrust-version=%s\ngo-version=%s\n' \
+    "$simple_compiler_sha" "$rust_compiler_sha" "$go_compiler_sha" "$simple_version_sha" "$rust_version_sha" "$go_version_sha" | sha256sum | awk '{print $1}')
+eqf "$TOOLCHAIN" toolchain_id "sha256:$toolchain_digest"
+[ "$simple_compiler_sha" = "$(hash_file "$SIMPLE_COMPILER")" ] || fail simple-compiler-attachment-hash
+[ "$rust_compiler_sha" = "$(hash_file "$RUST_COMPILER")" ] || fail rust-compiler-attachment-hash
+[ "$go_compiler_sha" = "$(hash_file "$GO_COMPILER")" ] || fail go-compiler-attachment-hash
+[ -s "$SIMPLE_VERSION" ] && [ -s "$RUST_VERSION" ] && [ -s "$GO_VERSION" ] || fail empty-version-evidence
+[ "$simple_version_sha" = "$(hash_file "$SIMPLE_VERSION")" ] || fail simple-version-hash
+[ "$rust_version_sha" = "$(hash_file "$RUST_VERSION")" ] || fail rust-version-hash
+[ "$go_version_sha" = "$(hash_file "$GO_VERSION")" ] || fail go-version-hash
+
+build_schema=$(field "$ORIGIN" build_schema) || fail missing-build_schema
+case "$build_schema" in
+ simple.rust-go-benchmark-build-origin/v1) [ "$(wc -l <"$ORIGIN" | tr -d ' ')" -eq 32 ] || fail origin-field-count ;;
+ simple.rust-go-benchmark-build-origin/v2)
+  [ "$(wc -l <"$ORIGIN" | tr -d ' ')" -eq 52 ] || fail origin-field-count
+  for file in "$CLOCK_SOURCE" "$CLOCK_COMPILER" "$CLOCK_VERSION" "$CLOCK_HELPER"; do [ -f "$file" ] && [ ! -L "$file" ] || fail missing-clock-evidence-blob; done ;;
+ *) fail unsupported-build-schema ;;
+esac
+eqf "$ORIGIN" build_schema "$build_schema"
+eqf "$ORIGIN" gate_id rust-go-benchmark-parity
+eqf "$ORIGIN" source_fingerprint "$FINGERPRINT"
+eqf "$ORIGIN" run_id "$RUN_ID"
+fixture=$(token "$ORIGIN" fixture_id)
+eqf "$ORIGIN" toolchain_identity_sha256 "$(hash_file "$TOOLCHAIN")"
+eqf "$ORIGIN" environment_sha256 "$(hash_file "$ENVIRONMENT")"
+if [ "$build_schema" = simple.rust-go-benchmark-build-origin/v2 ]; then
+eqf "$ORIGIN" build_environment_id clean-build-environment-v1
+eqf "$ORIGIN" lc_all C
+eqf "$ORIGIN" build_path /usr/bin:/bin
+eqf "$ORIGIN" simple_lib src
+eqf "$ORIGIN" simple_no_stub_fallback 1
+eqf "$ORIGIN" rustflags unset
+eqf "$ORIGIN" cargo_encoded_rustflags unset
+eqf "$ORIGIN" rustc_wrapper unset
+eqf "$ORIGIN" rustc_workspace_wrapper unset
+eqf "$ORIGIN" goflags unset
+eqf "$ORIGIN" goenv off
+eqf "$ORIGIN" go_cache isolated
+eqf "$ORIGIN" cgo_enabled 0
+environment_arch=$(field "$ENVIRONMENT" arch) || fail environment-arch
+case "$environment_arch" in
+    x86_64) expected_goarch=amd64 ;; aarch64|arm64) expected_goarch=arm64 ;;
+    riscv64) expected_goarch=riscv64 ;; ppc64le) expected_goarch=ppc64le ;;
+    *) fail unsupported-build-environment-arch ;;
+esac
+eqf "$ORIGIN" goos linux
+eqf "$ORIGIN" goarch "$expected_goarch"
+clock_source_path=scripts/check/lib/rust-go-benchmark-monotonic-ns.c
+eqf "$ORIGIN" clock_source_path "$clock_source_path"
+eqf "$ORIGIN" clock_source_sha256 "$(git -C "$ROOT" show "HEAD:$clock_source_path" | sha256sum | awk '{print $1}')"
+eqf "$ORIGIN" clock_source_sha256 "$(hash_file "$CLOCK_SOURCE")"
+eqf "$ORIGIN" clock_compiler_sha256 "$(hash_file "$CLOCK_COMPILER")"
+eqf "$ORIGIN" clock_compiler_version_sha256 "$(hash_file "$CLOCK_VERSION")"
+eqf "$ORIGIN" clock_helper_sha256 "$(hash_file "$CLOCK_HELPER")"
+[ -x "$CLOCK_COMPILER" ] && [ -s "$CLOCK_VERSION" ] && [ -x "$CLOCK_HELPER" ] || fail invalid-clock-authority-attachment
+eqf "$ENVIRONMENT" clock_tool_sha256 "$(hash_file "$CLOCK_HELPER")"
+fi
+for language in simple rust go; do
+    case "$language" in
+        simple) ext=spl; command_id=simple-native-o3-v1; command='simple native-build test/05_perf/fixtures/rust_go_benchmark/workload.spl --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable'; exe=$SIMPLE_EXE ;;
+        rust) ext=rs; command_id=rust-opt3-codegen1-v1; command='rustc -C opt-level=3 -C codegen-units=1 -C strip=symbols -o benchmark_rust_executable test/05_perf/fixtures/rust_go_benchmark/workload.rs'; exe=$RUST_EXE ;;
+        go) ext=go; command_id=go-trimpath-v1; command='go build -trimpath -o benchmark_go_executable test/05_perf/fixtures/rust_go_benchmark/workload.go'; exe=$GO_EXE ;;
+    esac
+    source_path="test/05_perf/fixtures/rust_go_benchmark/workload.$ext"
+    eqf "$ORIGIN" "${language}_source_path" "$source_path"
+    source_sha=$(sha_field "$ORIGIN" "${language}_source_sha256")
+    [ "$source_sha" = "$(git -C "$ROOT" show "HEAD:$source_path" | sha256sum | awk '{print $1}')" ] || fail "${language}-source-head-hash"
+    eqf "$EQUIV" "${language}_source_path" "$source_path"
+    eqf "$EQUIV" "${language}_source_sha256" "$source_sha"
+    eqf "$ORIGIN" "${language}_command_id" "$command_id"
+    eqf "$ORIGIN" "${language}_command" "$command"
+    output_sha=$(sha_field "$ORIGIN" "${language}_output_sha256")
+    [ "$output_sha" = "$(hash_file "$exe")" ] || fail "${language}-output-hash"
+    eqf "$ENVIRONMENT" "${language}_executable_sha256" "$output_sha"
+    eqf "$ORIGIN" "${language}_compile_exit" 0
+done
+eqf "$ORIGIN" simple_compiler_sha256 "$simple_compiler_sha"
+eqf "$ORIGIN" rust_compiler_sha256 "$rust_compiler_sha"
+eqf "$ORIGIN" go_compiler_sha256 "$go_compiler_sha"
+eqf "$ORIGIN" simple_version_sha256 "$simple_version_sha"
+eqf "$ORIGIN" rust_version_sha256 "$rust_version_sha"
+eqf "$ORIGIN" go_version_sha256 "$go_version_sha"
+eqf "$ORIGIN" final_verdict PASS
+eqf "$EQUIV" fixture_id "$fixture"
+echo "STATUS: PASS rust-go-benchmark-build-origin — sources, recipes, retained compilers, and outputs bound"

@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/hal-launcher-perf.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+cc=${CC:-cc}
+flags='-std=c11 -O2 -Wall -Wextra -Werror -pedantic'
+"$cc" $flags "$repo_root/src/app/hal_provider/hal_provider_launcher_v1.c" \
+    -o "$work/launcher"
+"$cc" $flags "$repo_root/src/app/hal_provider/test/hal_provider_fake_worker_v1.c" \
+    -o "$work/worker"
+
+request='HALREQ1|1|101|7|9|0|32|64|8'
+if ! printf '%s\n' "$request" | "$work/launcher" 1000 512 \
+        "$work/worker" 0 ok >/dev/null; then
+    echo 'UNVERIFIED: host cannot create the required HAL provider sandbox; no latency/RSS admission evidence is possible' >&2
+    exit 2
+fi
+start_ns=$(date +%s%N)
+iterations=64
+i=0
+while [ "$i" -lt "$iterations" ]; do
+    printf '%s\n' "$request" | "$work/launcher" 1000 512 \
+        "$work/worker" 0 ok >/dev/null
+    i=$((i + 1))
+done
+end_ns=$(date +%s%N)
+elapsed_ns=$((end_ns - start_ns))
+average_us=$((elapsed_ns / iterations / 1000))
+[ "$average_us" -le 50000 ] || {
+    echo "FAIL: average isolated provider latency ${average_us}us exceeds 50000us" >&2
+    exit 1
+}
+
+if [ -x /usr/bin/time ]; then
+    /usr/bin/time -f '%M' -o "$work/rss" sh -c \
+        'printf "%s\n" "$1" | "$2" 1000 512 "$3" 0 ok >/dev/null' \
+        sh "$request" "$work/launcher" "$work/worker"
+    rss_kib=$(sed -n '1p' "$work/rss")
+    case "$rss_kib" in (*[!0-9]*|'') echo 'FAIL: invalid max-RSS evidence' >&2; exit 1;; esac
+    [ "$rss_kib" -le 16384 ] || {
+        echo "FAIL: launcher max RSS ${rss_kib}KiB exceeds 16384KiB" >&2
+        exit 1
+    }
+else
+    echo 'FAIL: /usr/bin/time is required for admitted RSS evidence' >&2
+    exit 1
+fi
+
+# The trusted launcher source must remain fixed-storage: introducing a direct
+# heap API invalidates its sealed/no-post-init-allocation design until a new
+# allocation probe is added.
+if grep -E '\b(malloc|calloc|realloc|free|strdup|asprintf)\s*\(' \
+    "$repo_root/src/app/hal_provider/hal_provider_launcher_v1.c" >/dev/null; then
+    echo 'FAIL: trusted launcher contains a direct heap operation' >&2
+    exit 1
+fi
+
+echo "PASS: iterations=$iterations average_us=$average_us max_rss_kib=$rss_kib ipc_cap_bytes=512 direct_heap_calls=0"

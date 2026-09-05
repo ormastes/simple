@@ -1,0 +1,107 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves the SCV-IMPL-E-01 event watch layer
+(`src/lib/nogc_async_mut/file_system/event_watch.spl`): polling detection of
+create/modify/delete with monotonic sequence tokens, deterministic test
+injection, cookie-based rename pairing, overflow classification (one overflow
+event + forced resnapshot), an ignore policy, and an EXPLICITLY failing native
+notify bridge (never a silent polling fallback).
+Audience: Maintainers of the SCV event layer.
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod (dir_create, file_write, file_delete, dir_remove_all)
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent, fswatch_open, fswatch_poll, fswatch_inject, fswatch_mark_overflow, fswatch_pair_renames, fswatch_native_open}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _fixture(tag: text) -> text:
+    val root = "/tmp/scv-event-watch-{tag}-{current_time_ms()}"
+    dir_create(root, true)
+    root
+
+fn _kinds(events: [FsWatchEvent]) -> text:
+    var out: [text] = []
+    for ev in events:
+        out.push(ev.kind)
+    out.join(",")
+
+describe "scv event watch (E-01)":
+    # @manual scenario evidence
+    it "detects create, modify, and delete with monotonic sequence tokens":
+        # @req REQ-SSPEC-INTEGRATION
+        step("detects create, modify, and delete with monotonic sequence tokens")
+        step("Open a watcher, mutate files, poll, and check kinds + seq order")
+        val root = _fixture("cmd")
+        var state = fswatch_open(root, [])
+        file_write("{root}/a.txt", "one")
+        val (s1, ev1) = fswatch_poll(state)
+        expect(_kinds(ev1)).to_equal("created")
+        file_write("{root}/a.txt", "longer-content")
+        val (s2, ev2) = fswatch_poll(s1)
+        expect(_kinds(ev2)).to_equal("modified")
+        file_delete("{root}/a.txt")
+        val (s3, ev3) = fswatch_poll(s2)
+        expect(_kinds(ev3)).to_equal("deleted")
+        expect(ev1[0].seq < ev2[0].seq).to_equal(true)
+        expect(ev2[0].seq < ev3[0].seq).to_equal(true)
+        dir_remove_all(root)
+
+    it "pairs injected rename_from/rename_to events by cookie":
+        # @req REQ-SSPEC-INTEGRATION
+        step("pairs injected rename_from/rename_to events by cookie")
+        step("Inject a cookie-matched rename pair plus an unpaired from")
+        val root = _fixture("ren")
+        var state = fswatch_open(root, [])
+        state = fswatch_inject(state, "rename_from", "{root}/old.txt", "cookie-7")
+        state = fswatch_inject(state, "rename_to", "{root}/new.txt", "cookie-7")
+        state = fswatch_inject(state, "rename_from", "{root}/lost.txt", "cookie-9")
+        val (s1, raw) = fswatch_poll(state)
+        val paired = fswatch_pair_renames(raw)
+        expect(paired.len()).to_equal(2)
+        expect(paired[0].kind).to_equal("renamed")
+        expect(paired[0].path).to_equal("{root}/new.txt")
+        expect(paired[0].related).to_equal("{root}/old.txt")
+        expect(paired[1].kind).to_equal("rename_from")
+        dir_remove_all(root)
+
+    it "classifies overflow as a single overflow event and resnapshots":
+        # @req REQ-SSPEC-INTEGRATION
+        step("classifies overflow as a single overflow event and resnapshots")
+        step("Mark overflow, poll once for the overflow, poll again clean")
+        val root = _fixture("ovf")
+        var state = fswatch_open(root, [])
+        file_write("{root}/lost-while-overflowed.txt", "x")
+        state = fswatch_inject(state, "created", "{root}/stale-hint.txt", "")
+        state = fswatch_mark_overflow(state)
+        val (s1, ev1) = fswatch_poll(state)
+        expect(_kinds(ev1)).to_equal("overflow")
+        val (s2, ev2) = fswatch_poll(s1)
+        expect(ev2.len()).to_equal(0)
+        dir_remove_all(root)
+
+    it "applies the ignore policy to scans and injection":
+        # @req REQ-SSPEC-INTEGRATION
+        step("applies the ignore policy to scans and injection")
+        step("Files under an ignored prefix produce no events")
+        val root = _fixture("ign")
+        var state = fswatch_open(root, [".scv/"])
+        dir_create("{root}/.scv/journal", true)
+        file_write("{root}/.scv/journal/events.log", "internal")
+        state = fswatch_inject(state, "created", "{root}/.scv/HEAD_OP", "")
+        val (s1, ev1) = fswatch_poll(state)
+        expect(ev1.len()).to_equal(0)
+        dir_remove_all(root)
+
+    it "fails the native notify bridge explicitly instead of faking it":
+        # @req REQ-SSPEC-INTEGRATION
+        step("fails the native notify bridge explicitly instead of faking it")
+        step("fswatch_native_open reports an ERROR naming the missing bridge")
+        val verdict = fswatch_native_open("/tmp")
+        expect(verdict.starts_with("ERROR")).to_equal(true)
+        expect(verdict).to_contain("fswatch")

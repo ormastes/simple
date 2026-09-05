@@ -1,0 +1,45 @@
+# SCV one-read FileBuffer (scv_v2_final_report §6.5).
+#
+# A snapshot used to read every changed file up to THREE times: once for the
+# content id (scv_content_id_for_file), once to copy the bytes into the chunk
+# store (scv_write_chunk_from_file), and once more for the CDC chunk payload
+# (scv_file_chunk_payload, files > 2 KiB). ScvFileBuffer reads the file ONCE
+# and derives all three — content id, chunk write, CDC chunk map — from that
+# single in-memory buffer via scv_write_file_object_from_bytes, whose payload
+# is byte-identical to the legacy path (same CDC loop, same rolling hash), so
+# existing repositories' object ids do not change.
+#
+# Bounds: the file size is checked against SCV_MAX_OBJECT_BYTES BEFORE the
+# bytes are read, so an oversize file is rejected without allocating it.
+
+use app.io.mod (file_size)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
+use std.scv.alloc_bounds.{SCV_MAX_OBJECT_BYTES}
+use std.scv.store.{scv_content_id_for_u8, scv_write_file_object_from_bytes}
+
+struct ScvFileBuffer:
+    path: text
+    bytes: [u8]
+    size: i64
+    error: text
+
+fn scv_file_buffer_read_bounded(path: text, max_bytes: i64) -> ScvFileBuffer:
+    val size = file_size(path)
+    if size > max_bytes:
+        return ScvFileBuffer(path: path, bytes: [], size: size, error: "ERROR file buffer over bound: {path} is {size} bytes (max {max_bytes})\n")
+    val bytes = file_read_bytes(path) ?? []
+    ScvFileBuffer(path: path, bytes: bytes, size: bytes.len(), error: "")
+
+fn scv_file_buffer_read(path: text) -> ScvFileBuffer:
+    scv_file_buffer_read_bounded(path, SCV_MAX_OBJECT_BYTES)
+
+fn scv_file_buffer_content_id(buffer: ScvFileBuffer) -> text:
+    scv_content_id_for_u8(buffer.bytes)
+
+# Writes chunk store entry, CDC sub-chunks, and the file object from the
+# buffer's bytes — zero additional disk reads. Returns (file_id, chunk_id).
+fn scv_file_buffer_write_objects(root: text, rel: text, buffer: ScvFileBuffer, mtime: i64) -> (text, text):
+    scv_write_file_object_from_bytes(root, rel, buffer.bytes, mtime)
+
+export ScvFileBuffer, scv_file_buffer_read, scv_file_buffer_read_bounded
+export scv_file_buffer_content_id, scv_file_buffer_write_objects

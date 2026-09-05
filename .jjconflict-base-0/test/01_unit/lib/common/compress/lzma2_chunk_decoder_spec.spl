@@ -1,0 +1,91 @@
+use std.spec
+use std.common.compress.{CompressionError}
+use std.common.compress.lzma2_chunk_decoder.{Lzma2ChunkState, _lzma_decode_chunk, _lzma_decode_chunk_3_0_2, _read_u16_be_chunk, _parse_lzma2_chunk_header}
+use std.common.compress.lzma2_range_coder.{LzmaProperties, LzmaState, _lzma_init_probs, LZMA_PROBS_TOTAL}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn fresh_state() -> LzmaState:
+    LzmaState(state: 0, rep0: 0, rep1: 0, rep2: 0, rep3: 0)
+
+describe "LZMA2 chunk decoder validation":
+    it "rejects negative chunk control offsets before indexing":
+        var input: [u8] = [0x00u8]
+        val decoded = _parse_lzma2_chunk_header(input, -1, Lzma2ChunkState(need_dict_reset: true, need_props: true))
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.TruncatedInput(message):
+                check(message.contains("lzma2 control"))
+            _:
+                check(false)
+
+    it "rejects negative chunk header offsets before indexing":
+        var input: [u8] = [0x00u8, 0x01u8]
+        val decoded = _read_u16_be_chunk(input, -1)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.TruncatedInput(message):
+                check(message.contains("need 2 bytes"))
+            _:
+                check(false)
+
+    it "rejects truncated legacy range decoder bodies":
+        var input: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        val decoded = _lzma_decode_chunk_3_0_2(input, 0, input.len(), 1, [], fresh_state(), _lzma_init_probs(LZMA_PROBS_TOTAL), true)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.TruncatedInput(message):
+                check(message.contains("range decoder init"))
+            _:
+                check(false)
+
+    it "rejects truncated parameterized range decoder bodies":
+        var input: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        val props = LzmaProperties(lc: 3, lp: 0, pb: 2)
+        val decoded = _lzma_decode_chunk(input, 0, input.len(), 1, [], fresh_state(), [], true, props)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.TruncatedInput(message):
+                check(message.contains("range decoder init"))
+            _:
+                check(false)
+
+    it "rejects negative declared legacy chunk output sizes":
+        var input: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        val decoded = _lzma_decode_chunk_3_0_2(input, 0, input.len(), -1, [], fresh_state(), _lzma_init_probs(LZMA_PROBS_TOTAL), true)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("chunk size"))
+            _:
+                check(false)
+
+    it "rejects negative declared parameterized chunk output sizes":
+        var input: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        val props = LzmaProperties(lc: 3, lp: 0, pb: 2)
+        val decoded = _lzma_decode_chunk(input, 0, input.len(), -1, [], fresh_state(), [], true, props)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("chunk size"))
+            _:
+                check(false)
+
+    it "rejects invalid parameterized LZMA properties before shift-derived indexes":
+        var input: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        val props = LzmaProperties(lc: 3, lp: 0, pb: -1)
+        val decoded = _lzma_decode_chunk(input, 0, input.len(), 1, [], fresh_state(), [], true, props)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("properties"))
+            _:
+                check(false)

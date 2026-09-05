@@ -1,0 +1,414 @@
+#!/bin/sh
+# rt_migration_cycle.shs — one SPipe continuous-check cycle for the
+# binary_runtime_hardening rt_ migration track (goal: drive the
+# check-no-direct-rt baseline to zero mechanically and safely).
+#
+# One cycle:
+#   1. selftest the gate (fatal if broken)
+#   2. find UNCALLED rt_ symbols: every repo-wide occurrence of the symbol
+#      is an `extern fn` declaration line — no call site, no import, no
+#      re-export anywhere. Deleting every declaration of such a symbol
+#      cannot change behavior.
+#   3. delete them; verify a re-scan finds zero
+#   4. run the gate; the baseline must ratchet DOWN or stay equal
+#   5. commit only the touched files (never `git add -A` on this shared tree)
+#
+# Verdict is the last stdout line: PASS/NOOP exit 0, FAIL exit 1, ERROR exit 2.
+# Flags: --dry-run (report only, no deletion/commit), --max N (cap deletions).
+#
+# Invoked by /spipe_loop continuous mode for the rt-migration track.
+# Design: doc/03_plan/infra/binary_runtime_hardening/plan.md (Wave 3).
+
+set -u
+cd "$(dirname "$0")/../.." || { echo "ERROR — cannot cd to repo root"; exit 2; }
+
+DRY=0
+MAX=200
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1 ;;
+    --max) shift; MAX="$1" ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+  shift
+done
+
+sh scripts/check/check-no-direct-rt.shs --selftest-only >/dev/null 2>&1
+st=$?
+if [ $st -ne 0 ]; then echo "ERROR — gate selftest failed"; exit 2; fi
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# Step 2: candidate symbols — declared via `extern fn rt_*` somewhere under
+# src/lib or src/app, whose EVERY repo-wide occurrence is a declaration line.
+# Two whole-tree scans total (not per-symbol): one for all rt_ token mentions,
+# one for declaration lines; compare per-symbol counts. A comment mentioning a
+# symbol counts as a mention and keeps it alive — conservative by design.
+/usr/bin/grep -rhoE '\brt_[a-z0-9_]+' src --include='*.spl' 2>/dev/null \
+  | sort | uniq -c | awk '{print $2, $1}' > "$WORK/mentions.txt"
+/usr/bin/grep -rhE '^extern fn rt_[a-z0-9_]+\(' src --include='*.spl' 2>/dev/null \
+  | sed -E 's/^extern fn (rt_[a-z0-9_]+)\(.*/\1/' | sort | uniq -c | awk '{print $2, $1}' > "$WORK/decls.txt"
+# uncalled: mention count == decl count (every mention IS a declaration).
+# Restrict to symbols declared under src/lib or src/app.
+/usr/bin/grep -rhE '^extern fn rt_[a-z0-9_]+\(' src/lib src/app --include='*.spl' 2>/dev/null \
+  | sed -E 's/^extern fn (rt_[a-z0-9_]+)\(.*/\1/' | sort -u > "$WORK/libapp_declared.txt"
+awk 'NR==FNR {m[$1]=$2; next} {d[$1]=$2} END {for (s in d) if (m[s]==d[s]) print s}' \
+  "$WORK/mentions.txt" "$WORK/decls.txt" | sort > "$WORK/uncalled_all.txt"
+comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.txt"
+
+# --- Track B: mechanical call-site rewrite to a std.* wrapper -------------
+# Table of rt_symbol -> identical-signature provider wrapper, all exported by
+# src/lib/nogc_sync_mut/io_runtime.spl (thin passthroughs, verified). Scope:
+# files under src/lib/nogc_sync_mut and src/app that DECLARE the extern
+# in-file (the decl line becomes the use line, so import placement is exact),
+# do not already mention the bare wrapper name (collision guard), do not
+# re-export the extern (dangling-export guard), and are not the provider.
+# Async families are IN scope: their io_runtime.spl is a re-export facade
+# over nogc_sync_mut, so std.io_runtime resolves family-correctly.
+# EXCLUDED deliberately: rt_file_read_text (wrapper nil-coalesces to "") —
+# bare callers whose nil flows onward need per-site review (track C handles
+# the ?? "" subclass). rt_file_write_text TABLED after site audit
+# (2026-08-18): 149 sites, 0 directory-probe patterns; the wrapper's
+# mkdir-retry is a transparent improvement at every audited site.
+# rt_cli_get_args TABLED after nil-audit (2026-08-18): nil is reachable only
+# on malloc failure (runtime_native.c:5221 returns nil on OOM); all audited
+# callers guard via len()/indexing, so nil->[] is benign.
+# rt_env_set / rt_dir_exists TABLED after site audit (2026-08-18): every
+# in-scope extern re-declaration is a uniform `(text[, text]) -> bool` (no
+# `?`/i64/List divergence like the file_size/file_read_bytes family below),
+# and io_runtime.spl's env_set/dir_exists are pure one-line passthroughs
+# (`rt_env_set(key, value)` / `rt_dir_exists(path)`, no coalescing) — safe.
+# EXCLUDED — rt_file_read_bytes: NOT tabled. The extern is re-declared 47
+# times across SIX incompatible return-type shapes ([u8], [u8]?, [i64],
+# [i64]?, List<i32>, i64) per
+# doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md
+# (still open at that section's "Not fixed here"). Even restricted to the
+# 11 in-scope files that declare the extern locally, fs.spl:625 declares
+# `-> [u8]?` and its read_bytes() (fs.spl:235) is a bare passthrough that
+# PRESERVES nil-vs-empty for callers; io_runtime.spl's wrapper
+# (file_read_bytes, line 140) is `rt_file_read_bytes(path) ?? []`, which
+# coalesces nil to []. A mechanical row would silently merge the
+# nil-distinguishing fs.spl call shape into the coalescing wrapper and
+# would additionally cross element-width lines at any [i64]-declaring site
+# outside this narrow scope. fs.spl is left untouched (provider boundary).
+# EXCLUDED — rt_file_size: same family. fs.spl:633 declares
+# `-> usize?` while every other in-scope site (io.spl, file_ops.spl,
+# process_ops.spl, etc.) declares `-> i64`, and io_runtime.spl's wrapper
+# (file_size, line 152) coalesces a negative rt_file_size result (i64
+# error sentinel) to 0 — not a passthrough, and not compatible with the
+# optional-preserving fs.spl shape.
+#
+# Round 3 (2026-08-18) — top uncovered symbols by mention frequency audited:
+# rt_dir_create_all, rt_file_append_text, rt_process_is_running TABLED below
+# (uniform signature across every in-scope src/lib/nogc_sync_mut + src/app
+# declaration, and io_runtime.spl's wrapper is a bare one-line passthrough
+# with no branching/coalescing/guard).
+# EXCLUDED — rt_dir_create: NOT tabled. io_runtime.spl's wrapper
+# (dir_create, line 250) is `if recursive: rt_dir_create_all(path) else:
+# rt_dir_create(path, false)` — a branching dispatch to a DIFFERENT extern
+# depending on the argument value, not a bare passthrough of the callee's
+# own extern. A mechanical rewrite would swap a direct 2-arg call for this
+# branch and assumes rt_dir_create(path, true) == rt_dir_create_all(path),
+# which is unverified.
+# EXCLUDED — rt_process_kill: NOT tabled. io_runtime.spl's wrapper
+# (process_kill, line 313) adds `if pid <= 1: return false` before calling
+# rt_process_kill — a safety guard that changes behavior for pid<=1
+# call-site values, not a bare passthrough.
+# EXCLUDED — rt_process_spawn_async: NOT tabled. Signature split:
+# src/app/io/process_env_ops.spl:4 declares a THIRD parameter,
+# `(cmd: text, args: [text], env: {text: text}) -> i64`, while every other
+# in-scope site (io_runtime.spl, play/launcher.spl, io/process_ops.spl,
+# test_runner/system_monitor.spl, app/io/process_ops.spl) declares the
+# 2-arg `(cmd: text, args: [text]) -> i64` form the wrapper matches. A
+# mechanical rewrite would silently drop the `env` argument at that site.
+# EXCLUDED — rt_path_join / rt_path_absolute / rt_time_now_micros: NOT
+# tabled. io_runtime.spl exports no path_join/path_absolute/time_now_micros
+# wrapper at all (path.spl is a separate, non-io_runtime provider; only
+# rt_time_now_unix_micros — already tabled above — has an io_runtime
+# wrapper), so there is no passthrough target for the mechanical rewrite.
+#
+# Round 4 (2026-08-18) — top uncovered symbols by mention frequency audited
+# (rt_dir_list, rt_hash_text, rt_platform_name, rt_dict_contains, rt_dir_walk):
+# rt_dir_list, rt_dir_walk, rt_platform_name TABLED below (uniform signature
+# — only the extern's parameter NAME varies across in-scope declarations,
+# e.g. `rt_dir_list(parent: text)` vs `rt_dir_list(path: text)`, same as
+# every pre-existing table row — and io_runtime.spl's wrapper is a bare
+# one-line passthrough: `dir_list`/`dir_walk`/`platform_name` each just
+# call the extern with no coalescing/guard/branch).
+# Round 5 (2026-08-18) — wrapper-first closure for the two Round 4
+# wrapper-first candidates:
+# rt_hash_text TABLED below. Verified uniform `(text) -> i64` shape across
+# every in-scope declaration (parameter name varies: `s`/`content`/`t`, same
+# tolerated variance as every other table row). io_runtime.spl now exports a
+# bare-passthrough wrapper (hash_text, added this round) — `rt_hash_text(s)`,
+# no coalescing/guard/branch.
+# EXCLUDED — rt_dict_contains: STILL NOT tabled, and not a wrapper-first
+# candidate. Signature split found on verification:
+# src/runtime/simple_core/core_string.spl:30 declares
+# `(dict: i64, key: i64) -> i8`, while every other in-scope declaration
+# (hir_lowering/expressions.spl, hir_types.spl, MirLoweringExpr/*,
+# mir_lowering_stmts.spl, vhdl_design_catalog.spl,
+# compiler_rust/lib/std/src/alloc/sffi.spl) declares
+# `(dict: i64, key: Any) -> bool`. A mechanical passthrough wrapper written
+# to either shape would be wrong for the other's call sites (key type and
+# return type both differ), so this symbol is excluded on evidence, not
+# merely deferred.
+# Round 6 (2026-08-18) — frequency census top candidates after exclusions
+# (rt_exit, rt_mkdir_p, rt_math_sqrt, rt_time_now_monotonic_ms,
+# rt_timestamp_now were the top-5 by mention count outside the existing
+# table/exclusions/allowlist; two tiers below audited):
+# rt_time_now_monotonic_ms TABLED below. Uniform `() -> i64` extern across
+# every in-scope declaration; io_runtime.spl now exports a bare-passthrough
+# wrapper (time_now_monotonic_ms, added this round).
+# EXCLUDED — rt_exit: NOT tabled. Three incompatible extern shapes found:
+# `(code: i32)`, `(code: i32) -> void`, `(code: i64)` — parameter width and
+# return type both diverge, so no single bare passthrough is signature-exact
+# for every in-scope site.
+# EXCLUDED — rt_math_sqrt: NOT tabled. Two extern overloads, `(x: f32) ->
+# f32` and `(x: f64) -> f64` — a bare passthrough wrapper needs one fixed
+# type; this symbol has two.
+# EXCLUDED — rt_mkdir_p: NOT tabled, wrapper-first candidate blocked by a
+# name collision inside io_runtime.spl itself: `pub fn mkdir_p` already
+# exists there, but its body calls `rt_dir_create_all(path)`, a DIFFERENT
+# extern than `rt_mkdir_p` — same class of mismatch as the already-excluded
+# rt_dir_create row above. Adding a bare `rt_mkdir_p` passthrough under the
+# name `mkdir_p` would silently redefine/shadow the existing (different)
+# function; per the collision rule this symbol is skipped rather than
+# renamed speculatively.
+# EXCLUDED — rt_timestamp_now: NOT a wrapper-first candidate. Zero
+# `extern fn rt_timestamp_now(` declarations exist under src/lib or src/app
+# — every mention is a codegen/runtime-internal reference outside migration
+# scope.
+# Next-tier candidates (by mention count, after excluding the above) also
+# audited and TABLED below: rt_shell_exec `(cmd: text) -> text` (uniform,
+# io_runtime.spl was clean of the name `shell_exec` itself — a same-named,
+# different-signature `shell_exec` exists only in src/os/apps/shell/exec.spl,
+# outside TB_TABLE's rewrite scope, so the conventional name was used per the
+# collision rule); rt_file_rename `(_, _) -> bool` (uniform up to parameter
+# name across 4 declaration sites — from/to, old_path/new_path, source/dest,
+# src/dst — same tolerated variance as every other table row; io_runtime.spl
+# had no `file_rename` name); rt_process_run_timeout
+# `(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)` (uniform
+# across every in-scope declaration; io_runtime.spl had no
+# `process_run_timeout` name — several PROVIDER files define their own
+# same-named function, which naturally excludes them from Track B rewrite via
+# the existing bare-identifier collision guard, and is not a blocker for
+# adding the io_runtime wrapper itself).
+TB_TABLE="rt_time_now_unix_micros time_now_unix_micros
+rt_file_exists file_exists
+rt_file_delete file_delete
+rt_env_get env_get
+rt_getpid getpid
+rt_process_run process_run
+rt_file_copy file_copy
+rt_thread_sleep thread_sleep
+rt_sleep_ms thread_sleep
+rt_cli_get_args get_args
+rt_file_write_text file_write
+rt_file_write_bytes file_write_bytes
+rt_env_set env_set
+rt_dir_exists dir_exists
+rt_dir_create_all dir_create_all
+rt_file_append_text file_append_text
+rt_process_is_running process_is_running
+rt_dir_list dir_list
+rt_dir_walk dir_walk
+rt_platform_name platform_name
+rt_hash_text hash_text
+rt_time_now_monotonic_ms time_now_monotonic_ms
+rt_shell_exec shell_exec
+rt_file_rename file_rename
+rt_process_run_timeout process_run_timeout"
+
+track_b() {
+  tb_done=0
+  : > "$WORK/tb_touched.txt"
+  : > "$WORK/tb_pairs.txt"
+  printf '%s\n' "$TB_TABLE" | while IFS=' ' read -r sym wrap; do
+    [ -n "$sym" ] || continue
+    for f in $(/usr/bin/grep -rlE "^extern fn ${sym}\(" src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null); do
+      case "$f" in src/lib/nogc_sync_mut/io_runtime.spl) continue ;; esac
+      grep -qE "^export .*\b${sym}\b" "$f" && continue
+      # identifier-exact collision guard: tokenize and count identifiers
+      # EQUAL to the wrapper name (the old prefix-capture truncated
+      # rt_file_write_text to rt_file_write and self-collided every file).
+      bare=$(grep -oE '[a-z0-9_]+' "$f" | grep -cx "${wrap}")
+      [ "$bare" -gt 0 ] && continue
+      sed -i "s/^extern fn ${sym}(.*\$/use std.io_runtime.{${wrap}}/" "$f"
+      sed -i "s/\b${sym}(/${wrap}(/g" "$f"
+      echo "$f" >> "$WORK/tb_touched.txt"
+      echo "$f $sym" >> "$WORK/tb_pairs.txt"
+    done
+  done
+  # --- Track C: rt_file_read_text(X) ?? "" -> read_file_text(X) ---------
+  # The wrapper read_file_text(path) IS rt_file_read_text(path) ?? "" (see
+  # io_runtime.spl file_read), so ONLY call sites already coalescing to ""
+  # are drop-in. A file qualifies when it declares the extern AND every
+  # call-position use matches the simple-argument coalesced shape
+  # rt_file_read_text(<no-parens-arg>) ?? "". Anything else (bare call whose
+  # nil flows onward, ?? other-default, nested-paren arg) leaves the file
+  # for per-site review.
+  for f in $(/usr/bin/grep -rlE '^extern fn rt_file_read_text\(' src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null); do
+    case "$f" in src/lib/nogc_sync_mut/io_runtime.spl) continue ;; esac
+    grep -qE '^export .*\brt_file_read_text\b' "$f" && continue
+    bare=$(grep -oE '[a-z_]*read_file_text' "$f" | grep -cv '^rt_file_read_text$')
+    [ "$bare" -gt 0 ] && continue
+    coalesced=$(grep -cE '^[^#]*\brt_file_read_text\([^()]*\) \?\? ""' "$f")
+    [ "$coalesced" -gt 0 ] || continue
+    sed -i 's/\brt_file_read_text(\([^()]*\)) ?? ""/read_file_text(\1)/g' "$f"
+    remaining=$(grep -cE '^[^#]*\brt_file_read_text\(' "$f")
+    if [ "$remaining" -eq 0 ]; then
+      # every call migrated: the decl becomes the import
+      sed -i 's/^extern fn rt_file_read_text(.*$/use std.io_runtime.{read_file_text}/' "$f"
+      echo "$f rt_file_read_text" >> "$WORK/tb_pairs.txt"
+    else
+      # mixed file: keep the extern for the remaining bare calls and add the
+      # import on the line after it
+      sed -i '/^extern fn rt_file_read_text(/a use std.io_runtime.{read_file_text}' "$f"
+    fi
+    # per-site residual: the coalesced pattern itself must be gone
+    if grep -qE '^[^#]*\brt_file_read_text\([^()]*\) \?\? ""' "$f"; then
+      echo "TRACKC-RESIDUE $f" >> "$WORK/tb_residue.txt"
+    fi
+    echo "$f" >> "$WORK/tb_touched.txt"
+  done
+  if [ -s "$WORK/tb_residue.txt" ] 2>/dev/null; then
+    echo "FAIL — track C residue: $(wc -l < "$WORK/tb_residue.txt") file(s)"
+    exit 1
+  fi
+  # --- Track D: text<->bytes provider wrappers (signature-exact only) -----
+  # std.common.string_core.{text_to_bytes, bytes_to_text} are thin
+  # passthroughs. A caller file qualifies only when its extern decl matches
+  # the provider signature EXACTLY (param name free, types fixed) — signature
+  # variance (e.g. `-> [i64]`) means the caller relies on a different shape
+  # and stays manual.
+  for pair in "rt_text_to_bytes text_to_bytes text [u8]" "rt_bytes_to_text bytes_to_text [u8] text"; do
+    set -- $pair
+    sym=$1; wrap=$2
+    declre=""
+    case "$sym" in
+      rt_text_to_bytes) declre='^extern fn rt_text_to_bytes\([a-z_]+: text\) -> \[u8\]$' ;;
+      rt_bytes_to_text) declre='^extern fn rt_bytes_to_text\([a-z_]+: \[u8\]\) -> text$' ;;
+    esac
+    for f in $(/usr/bin/grep -rlE "$declre" src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null); do
+      case "$f" in src/lib/common/string_core.spl) continue ;; esac
+      grep -qE "^export .*\b${sym}\b" "$f" && continue
+      # identifier-exact collision guard: tokenize and count identifiers
+      # EQUAL to the wrapper name (the old prefix-capture truncated
+      # rt_file_write_text to rt_file_write and self-collided every file).
+      bare=$(grep -oE '[a-z0-9_]+' "$f" | grep -cx "${wrap}")
+      [ "$bare" -gt 0 ] && continue
+      sed -i -E "s@${declre}@use std.common.string_core.{${wrap}}@" "$f"
+      sed -i "s/\b${sym}(/${wrap}(/g" "$f"
+      echo "$f" >> "$WORK/tb_touched.txt"
+      echo "$f $sym" >> "$WORK/tb_pairs.txt"
+    done
+  done
+  sort -u "$WORK/tb_touched.txt" > "$WORK/tb_touched_u.txt"
+  mv "$WORK/tb_touched_u.txt" "$WORK/tb_touched.txt"
+  sort -u "$WORK/tb_touched.txt" > "$WORK/tb_touched_u.txt"
+  mv "$WORK/tb_touched_u.txt" "$WORK/tb_touched.txt"
+  wc -l < "$WORK/tb_touched.txt"
+}
+
+n_candidates=$(wc -l < "$WORK/uncalled.txt")
+if [ "$n_candidates" -eq 0 ]; then
+  echo "cycle: scanned $(wc -l < "$WORK/libapp_declared.txt") declared symbol(s), 0 uncalled (track A converged)"
+  if [ $DRY -eq 1 ]; then
+    tbc=$(/usr/bin/grep -rlE '^extern fn rt_time_now_unix_micros\(' src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null | grep -v 'io_runtime.spl' | wc -l)
+    echo "PASS — dry-run, track B candidates: $tbc file(s)"
+    exit 0
+  fi
+  nb=$(track_b)
+  if [ "$nb" -eq 0 ]; then
+    echo "NOOP — nothing safely migratable this cycle (tracks A and B converged)"
+    exit 0
+  fi
+  # residual check: for each (file, symbol) pair actually rewritten, the
+  # CALL form of that symbol must be gone from that file. Other table symbols
+  # left in the file (their own pass legitimately skipped it) and prose
+  # mentions without parens are not residue.
+  left=0
+  while IFS=' ' read -r rf rsym; do
+    c=$(grep -cE "^[^#]*\b${rsym}\(" "$rf" 2>/dev/null)
+    left=$((left + c))
+  done < "$WORK/tb_pairs.txt"
+  if [ "$left" -ne 0 ]; then
+    echo "FAIL — $left file(s) still reference a track-B rt_ symbol after rewrite; NOT committing"
+    exit 1
+  fi
+  out=$(sh scripts/check/check-no-direct-rt.shs)
+  gate=$?
+  verdict=$(printf '%s\n' "$out" | tail -1)
+  echo "$verdict"
+  [ $gate -ne 0 ] && { echo "FAIL — gate did not pass after track B rewrite"; exit 1; }
+  xargs git add < "$WORK/tb_touched.txt"
+  git add scripts/check/no_direct_rt_baseline.txt
+  git commit -q -m "refactor(rt): spipe cycle track B — rt_ externs -> std.io_runtime wrappers in $nb file(s)
+
+Automated by scripts/spipe/rt_migration_cycle.shs track B: in-file extern
+declaration replaced by the use-import at the same position; call sites
+renamed to the identical-signature provider wrapper. Gate: $verdict
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>" || { echo "FAIL — commit failed"; exit 1; }
+  echo "PASS — track B rewrote $nb file(s), committed; $verdict"
+  exit 0
+fi
+
+head -"$MAX" "$WORK/uncalled.txt" > "$WORK/batch.txt"
+n_batch=$(wc -l < "$WORK/batch.txt")
+echo "cycle: $n_candidates uncalled symbol(s), deleting $n_batch this cycle"
+
+if [ $DRY -eq 1 ]; then
+  cat "$WORK/batch.txt"
+  echo "PASS — dry-run, $n_batch deletable symbol(s) reported"
+  exit 0
+fi
+
+# Step 3: delete every declaration of each batch symbol; record touched files.
+: > "$WORK/touched.txt"
+while IFS= read -r sym; do
+  /usr/bin/grep -rlE "^extern fn ${sym}\(" src --include='*.spl' >> "$WORK/touched.txt" 2>/dev/null
+  for f in $(/usr/bin/grep -rlE "^extern fn ${sym}\(" src --include='*.spl' 2>/dev/null); do
+    sed -i "/^extern fn ${sym}(/d" "$f"
+  done
+done < "$WORK/batch.txt"
+sort -u "$WORK/touched.txt" > "$WORK/touched_u.txt"
+
+# verify: none of the batch symbols remain anywhere
+left=0
+while IFS= read -r sym; do
+  c=$(/usr/bin/grep -rE "\b${sym}\b" src --include='*.spl' 2>/dev/null | wc -l)
+  left=$((left + c))
+done < "$WORK/batch.txt"
+if [ "$left" -ne 0 ]; then
+  echo "FAIL — $left residual reference(s) after deletion; NOT committing"
+  exit 1
+fi
+
+# Step 4: gate must ratchet down or hold.
+out=$(sh scripts/check/check-no-direct-rt.shs)
+gate=$?
+verdict=$(printf '%s\n' "$out" | tail -1)
+echo "$verdict"
+if [ $gate -ne 0 ]; then
+  echo "FAIL — gate did not pass after deletion"
+  exit 1
+fi
+
+# Step 5: scoped commit.
+n_files=$(wc -l < "$WORK/touched_u.txt")
+xargs git add < "$WORK/touched_u.txt"
+xargs git add scripts/check/no_direct_rt_baseline.txt < /dev/null
+git commit -q -m "refactor(rt): spipe cycle — delete $n_batch uncalled rt_ extern symbol(s) across $n_files file(s)
+
+Automated by scripts/spipe/rt_migration_cycle.shs: every occurrence of each
+symbol repo-wide was an extern declaration (no call sites, verified pre- and
+post-deletion). Gate: $verdict
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+ci=$?
+if [ $ci -ne 0 ]; then echo "FAIL — commit failed"; exit 1; fi
+echo "PASS — $n_batch symbol(s) deleted in $n_files file(s), committed; $verdict"
+exit 0

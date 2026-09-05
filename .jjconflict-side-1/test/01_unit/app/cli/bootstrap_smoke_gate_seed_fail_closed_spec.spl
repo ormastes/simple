@@ -1,0 +1,55 @@
+# @cover scripts/check/check-bootstrap-essential-tools-smoke.shs 20%
+#
+# DETECTION spec for the class behind
+# doc/08_tracking/bug/no_self_hosted_binary_deployed_blocks_bootstrap_gate_2026-08-09.md
+#
+# That row's actual defect — no self-hosted binary is deployed — can only be
+# fixed by a bootstrap + redeploy, which this shard is forbidden from doing (a
+# redeploy of the shared `bin/simple` clobbers every other lane in this
+# checkout). It stays OPEN.
+#
+# What CAN be fenced, and is the more dangerous half, is the gate itself: the
+# only reason anyone noticed the machine was running the seed is that this gate
+# refused to certify it. If the gate ever reported success while `bin/simple` is
+# a Rust seed, every lane would silently accumulate seed-only evidence and call
+# it self-hosted verification. So the invariant pinned here is:
+#
+#   while bin/simple is a Rust seed, the bootstrap smoke gate must NOT pass.
+#
+# This is the inverse of the usual assertion: a green from the gate is the
+# failure condition.
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+
+val GATE = "scripts/check/check-bootstrap-essential-tools-smoke.shs"
+
+fn binary_is_rust_seed() -> bool:
+    val (out, err, _rc) = rt_process_run_timeout("bin/simple", ["--version"], 120000)
+    "{out}{err}".contains("bootstrap seed")
+
+describe "the bootstrap smoke gate fails closed on a Rust-seed binary":
+    it "the gate script and the binary under test both exist (non-vacuity)":
+        expect(rt_file_exists(GATE)).to_equal(true)
+        expect(rt_file_exists("bin/simple")).to_equal(true)
+
+    it "does not certify bootstrap while bin/simple is a seed":
+        if not binary_is_rust_seed():
+            # A genuine self-hosted deploy landed; this spec's premise is gone
+            # and the row it fences should be re-triaged rather than asserted
+            # against. Do not weaken the branch below to make this case pass.
+            expect(binary_is_rust_seed()).to_equal(false)
+        else:
+            val (out, err, rc) = rt_process_run_timeout("sh", [GATE], 600000)
+            val combined = "{out}{err}"
+            # rc is read directly from the process tuple, never through a pipe.
+            expect(rc == 0).to_equal(false)
+            # And it must SAY why, rather than exiting non-zero mutely.
+            expect(combined).to_contain("rust_seed_binary")
+
+    it "the gate names the seed-refusal condition in its own source":
+        val source = rt_file_read_text(GATE) ?? ""
+        expect(source.len() > 0).to_equal(true)
+        expect(source).to_contain("rust_seed_binary")
+
+extern fn rt_file_read_text(path: text) -> text?

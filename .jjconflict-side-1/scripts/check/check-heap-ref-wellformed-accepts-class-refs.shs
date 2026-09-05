@@ -1,0 +1,238 @@
+#!/bin/sh
+# Fail-closed gate: rt_heap_ref_wellformed must NEVER require the heap tag.
+#
+# Incident 2026-08-24 (doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md):
+# the probe's body required RT_VALUE_TAG_HEAP. On the NATIVE codegen lane a
+# class reference is a RAW UNTAGGED pointer, not a |1-tagged runtime value, so
+# the probe answered 0 for EVERY LIVE CLASS INSTANCE. The two driver HIR-entry
+# guards in src/compiler/80.driver/driver_hir_pipeline_lowering.spl pass a
+# class reference (ModuleSurfacesByName), so they could never pass on that
+# lane: Stage 2/3 aborted with E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED on a
+# VALID hello world, blocking self-hosting.
+#
+# Measured differential that proved it (same live object, same probe):
+#   interpreter lane : class-instance wellformed = true
+#   native lane      : class-instance wellformed = false
+#
+# Why a dedicated gate rather than only the .spl spec: the spec asserts SOURCE
+# TEXT. This gate COMPILES AND RUNS the probe, so it fences behaviour. That
+# distinction is exactly why the original defect shipped green -- every test
+# the probe had was either source-text matching or a C self-check fed only
+# synthetic heap-TAGGED words, so nothing ever asked it about an untagged
+# pointer.
+#
+# Verdict is the LAST line of stdout, repo convention:
+#   PASS  -- <n> case(s) checked, ...        exit 0   (n > 0 always)
+#   FAIL  -- ...                             exit 1
+#   ERROR -- nothing was checked (<reason>)  exit 2
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RUNTIME_C="$ROOT/src/runtime/runtime_native.c"
+CORE_ENUM="$ROOT/src/runtime/simple_core/core_enum.spl"
+WORK=$(mktemp -d 2>/dev/null) || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+CC_BIN=""
+for c in clang cc gcc; do
+    if command -v "$c" >/dev/null 2>&1; then CC_BIN="$c"; break; fi
+done
+# Absence of a compiler is absence of evidence, never a pass.
+if [ -z "$CC_BIN" ]; then
+    echo "ERROR -- nothing was checked (no clang/cc/gcc on PATH)"
+    exit 2
+fi
+
+# ---------------------------------------------------------------- harness
+# Extracts the shipped probe body and exercises it on real values.
+# $1 = C file to take the rt_heap_ref_wellformed definition from
+# Prints "ACCEPT"/"REJECT" per case; sets EV_CHECKED.
+emit_driver() {
+    cat > "$WORK/driver.c" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+int8_t rt_heap_ref_wellformed(int64_t value);
+int main(void) {
+    static int64_t anchor __attribute__((aligned(8))) = 0;
+    int64_t untagged = (int64_t)(uintptr_t)&anchor;
+    int64_t tagged   = (int64_t)(((uint64_t)(uintptr_t)&anchor) | 1ULL);
+    printf("untagged=%d\n", (int)rt_heap_ref_wellformed(untagged));
+    printf("tagged=%d\n",   (int)rt_heap_ref_wellformed(tagged));
+    printf("zero=%d\n",     (int)rt_heap_ref_wellformed(0));
+    printf("nil=%d\n",      (int)rt_heap_ref_wellformed(3));
+    printf("zeropage=%d\n", (int)rt_heap_ref_wellformed(2048 | 1));
+    return 0;
+}
+EOF
+}
+
+# Pull just the probe definition out of a C file into a standalone TU, so we
+# never have to link the whole runtime (which needs the full archive).
+extract_probe() {
+    _src="$1"; _out="$2"
+    if [ ! -f "$_src" ]; then return 1; fi
+    {
+        printf '#include <stdint.h>\n'
+        printf '#define RT_VALUE_TAG_MASK 0x7ULL\n'
+        printf '#define RT_VALUE_TAG_HEAP 0x1ULL\n'
+        awk '/^int8_t rt_heap_ref_wellformed\(int64_t value\) \{/,/^\}/' "$_src"
+    } > "$_out"
+    # Non-vacuity: the awk range must actually have captured a body.
+    grep -q 'rt_heap_ref_wellformed' "$_out" || return 1
+    grep -q 'return' "$_out" || return 1
+    return 0
+}
+
+# Runs the 5 cases against a probe source; echoes results, returns rc.
+run_cases() {
+    _probe="$1"
+    emit_driver
+    "$CC_BIN" -o "$WORK/t" "$WORK/driver.c" "$_probe" 2>"$WORK/cc.err"
+    _rc=$?
+    [ "$_rc" -ne 0 ] && return 1
+    "$WORK/t" > "$WORK/t.out" 2>&1
+    _rc=$?
+    [ "$_rc" -ne 0 ] && return 1
+    return 0
+}
+
+# ---------------------------------------------------------------- selftest
+# Runs FIRST and is FATAL. Two fixtures replaying both directions of the
+# defect, so this gate cannot silently stop discriminating.
+selftest() {
+    # Fixture A: the FIXED body must accept an untagged pointer.
+    cat > "$WORK/fix_a.c" <<'EOF'
+#include <stdint.h>
+#define RT_VALUE_TAG_MASK 0x7ULL
+int8_t rt_heap_ref_wellformed(int64_t value) {
+    return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
+}
+EOF
+    if ! run_cases "$WORK/fix_a.c"; then
+        echo "SELFTEST FAIL: fixed-body fixture did not build/run" >&2
+        return 1
+    fi
+    if ! grep -q '^untagged=1$' "$WORK/t.out"; then
+        echo "SELFTEST FAIL: fixed body must ACCEPT an untagged pointer" >&2
+        return 1
+    fi
+    if ! grep -q '^zero=0$' "$WORK/t.out"; then
+        echo "SELFTEST FAIL: fixed body must still reject the incident value 0" >&2
+        return 1
+    fi
+
+    # Fixture B: the PRE-FIX body (tag required) must be CAUGHT.
+    cat > "$WORK/fix_b.c" <<'EOF'
+#include <stdint.h>
+#define RT_VALUE_TAG_MASK 0x7ULL
+#define RT_VALUE_TAG_HEAP 0x1ULL
+int8_t rt_heap_ref_wellformed(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
+    return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
+}
+EOF
+    if ! run_cases "$WORK/fix_b.c"; then
+        echo "SELFTEST FAIL: pre-fix fixture did not build/run" >&2
+        return 1
+    fi
+    if ! grep -q '^untagged=0$' "$WORK/t.out"; then
+        echo "SELFTEST FAIL: pre-fix body should have REJECTED the untagged pointer;" >&2
+        echo "               this gate is no longer discriminating." >&2
+        return 1
+    fi
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR -- nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS -- 2 selftest fixture(s) checked, gate discriminates"
+    exit 0
+fi
+
+# ---------------------------------------------------------------- real scan
+EV_CHECKED=0
+OFFENDERS=""
+
+# --- Lane 1: the C runtime probe, COMPILED AND RUN.
+if ! extract_probe "$RUNTIME_C" "$WORK/real.c"; then
+    echo "ERROR -- nothing was checked (could not extract rt_heap_ref_wellformed from $RUNTIME_C)"
+    exit 2
+fi
+if ! run_cases "$WORK/real.c"; then
+    echo "ERROR -- nothing was checked (shipped C probe failed to build/run)"
+    exit 2
+fi
+
+check_case() {
+    _name="$1"; _want="$2"
+    EV_CHECKED=$((EV_CHECKED + 1))
+    if ! grep -q "^${_name}=${_want}\$" "$WORK/t.out"; then
+        _got=$(grep "^${_name}=" "$WORK/t.out" | head -1)
+        OFFENDERS="$OFFENDERS C:${_name}(want ${_want}, got ${_got:-none})"
+    fi
+}
+
+# The load-bearing case: a native-lane class reference is an untagged pointer.
+check_case untagged 1
+check_case tagged   1
+# The incident value and the zero page must STILL be rejected -- the fix
+# must not have weakened the protection it was added for.
+check_case zero     0
+check_case nil      0
+check_case zeropage 0
+
+# --- Lane 2: the pure-Simple mirror must agree by source (no runner here).
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ ! -f "$CORE_ENUM" ]; then
+    echo "ERROR -- nothing was checked (missing $CORE_ENUM)"
+    exit 2
+fi
+# Its body must NOT carry a tag test. Scope the grep to the function body so
+# the identical line in OTHER accessors in the same file cannot false-fail.
+MIRROR_BODY=$(awk '/^pub fn rt_heap_ref_wellformed\(value: i64\) -> i8:/{f=1;next} f&&/^pub fn /{f=0} f' "$CORE_ENUM")
+if [ -z "$MIRROR_BODY" ]; then
+    echo "ERROR -- nothing was checked (could not isolate the pure-Simple mirror body)"
+    exit 2
+fi
+if printf '%s' "$MIRROR_BODY" | grep -q '& 7) != 1'; then
+    OFFENDERS="$OFFENDERS simple-mirror:requires-heap-tag"
+fi
+
+# --- Lane 3: the RUST mirror. THIS IS THE ONE THE NATIVE LANE ACTUALLY LINKS.
+# Measured 2026-08-24 by disassembling build/bootstrap/*/stage2/*/simple: the
+# Stage-2 compiler resolves rt_heap_ref_wellformed to objects.rs, NOT to
+# runtime_native.c. Fixing only the C probe left the shipped binary unchanged,
+# which is exactly the false-green this row exists to prevent.
+EV_CHECKED=$((EV_CHECKED + 1))
+RUST_OBJECTS="$ROOT/src/compiler_rust/runtime/src/value/objects.rs"
+if [ ! -f "$RUST_OBJECTS" ]; then
+    echo "ERROR -- nothing was checked (missing $RUST_OBJECTS)"
+    exit 2
+fi
+RUST_BODY=$(awk '/pub extern "C" fn rt_heap_ref_wellformed/{f=1} f{print} f&&/^\}/{exit}' "$RUST_OBJECTS")
+if [ -z "$RUST_BODY" ]; then
+    echo "ERROR -- nothing was checked (could not isolate the Rust mirror body)"
+    exit 2
+fi
+# Strip comment lines first: the body's own prose explains that it is
+# deliberately NOT gated on is_heap(), and matching that would false-fail.
+if printf '%s' "$RUST_BODY" | grep -v '^[[:space:]]*//' | grep -q 'is_heap()'; then
+    OFFENDERS="$OFFENDERS rust-mirror:gated-on-is_heap"
+fi
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+    echo "ERROR -- nothing was checked (0 cases evaluated)"
+    exit 2
+fi
+
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL -- $EV_CHECKED case(s) checked, rt_heap_ref_wellformed regressed:$OFFENDERS"
+    exit 1
+fi
+
+echo "PASS -- $EV_CHECKED case(s) checked, rt_heap_ref_wellformed accepts untagged class refs and still rejects 0/nil/zero-page"
+exit 0

@@ -1,0 +1,42 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Regression guard for the Range header parser.
+#
+# History: `start = start_str.to_int() ?? 0` was DEAD -- `.to_int()` is typed
+# `i64?` but its runtime returns a plain int64_t and can never produce nil, so
+# the `??` arm never fired and `bytes=abc-def` was silently served as
+# `bytes=0-0`. `utilities.spl` now parses through `try_parse_int` and IGNORES a
+# malformed Range (serve the whole entity, RFC 9110 §14.2). The oracles below
+# execute the real parser and pin that behaviour.
+
+use std.spec.step
+
+use std.nogc_sync_mut.http_server.utilities.{parse_range_header}
+
+describe "nogc sync http server range numeric guard":
+    it "defaults malformed range numeric parsing":
+        val source = rt_file_read_text("src/lib/nogc_sync_mut/http_server/utilities.spl") ?? ""
+
+    it "fails closed on a malformed bound instead of coercing it":
+        # @req REQ-SSPEC-LIB
+        step("fails closed on a malformed bound instead of coercing it")
+        # oracle: whole-entity sentinel (0, -1) — never the historical silent (0, 0)
+        val (s1, e1) = parse_range_header("bytes=abc-def")
+        expect(s1).to_equal(0)
+        expect(e1).to_equal(-1)
+        val (s2, e2) = parse_range_header("bytes=-7")
+        expect(s2).to_equal(0)
+        expect(e2).to_equal(-1)
+        val (s3, e3) = parse_range_header("")
+        expect(s3).to_equal(0)
+        expect(e3).to_equal(-1)
+
+    it "never reintroduces the coercing to_int spellings":
+        # @req REQ-SSPEC-LIB
+        step("never reintroduces the coercing to_int spellings")
+        # oracle: a negative start is rejected, not parsed into a negative slice
+        val (s, e) = parse_range_header("bytes=abc-20")
+        expect(s).to_equal(0)
+        expect(e).to_equal(-1)

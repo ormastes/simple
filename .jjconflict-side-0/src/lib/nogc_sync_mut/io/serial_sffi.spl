@@ -1,0 +1,162 @@
+# Serial Port SFFI Wrapper
+#
+# POSIX tty serial port driver (Linux/macOS).
+# Wraps libc open + nix termios for raw-mode serial I/O.
+# Devices: /dev/ttyUSB*, /dev/ttyS*, /dev/cu.* etc.
+
+use std.nogc_sync_mut.io.sffi_common.{is_valid_handle, is_invalid_handle}
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw SFFI)
+# ============================================================================
+
+# Open serial device at baud rate in raw mode. Returns fd (> 0) or 0 on error.
+@unsafe(reason: "raw serial-device handle ABI; 0 is an invalid handle", capabilities: [ffi])
+extern fn rt_serial_open(device: text, baud: i64) -> i64
+
+# Close serial fd. Returns true on success.
+@unsafe(reason: "raw serial close status ABI", capabilities: [ffi])
+extern fn rt_serial_close(handle: i64) -> bool
+
+# Read up to max_bytes from serial. Blocks until data or 5s timeout.
+@unsafe(reason: "raw serial read ABI returns runtime-owned text", capabilities: [ffi])
+extern fn rt_serial_read(handle: i64, max_bytes: i64) -> text
+
+# Write data to serial. Returns bytes written (0 on error).
+@unsafe(reason: "raw serial write byte-count ABI", capabilities: [ffi])
+extern fn rt_serial_write(handle: i64, data: text) -> i64
+
+# Set read timeout. timeout_ms < 0 = block forever, 0 = non-blocking, > 0 = timed.
+@unsafe(reason: "raw serial timeout status ABI", capabilities: [ffi])
+extern fn rt_serial_set_timeout(handle: i64, timeout_ms: i64) -> bool
+
+# Flush (drain) output buffer. Returns true on success.
+@unsafe(reason: "raw serial flush status ABI", capabilities: [ffi])
+extern fn rt_serial_flush(handle: i64) -> bool
+
+# Bidirectional relay: stdin (fd 0) ↔ serial fd, until either end closes.
+# Used by serial_proxy as SSH ProxyCommand. Returns true on clean exit.
+@unsafe(reason: "raw serial relay status ABI", capabilities: [ffi])
+extern fn rt_serial_relay(serial_fd: i64) -> bool
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper
+# ============================================================================
+
+struct SerialPort:
+    handle: i64
+    device: text
+    baud: i64
+    is_valid: bool
+    # Set once `serial_close` has released `handle`. A SerialPort is passed BY
+    # VALUE, so this field alone cannot stop a second close made through a stale
+    # copy — `_closed_handles` below is the authoritative guard. The field is
+    # kept so a caller that threads the returned record sees the state directly.
+    closed: bool
+
+# Process-global set of descriptors this module has already closed. Without it
+# two copies of the same SerialPort each carry `closed: false` and both reach
+# `rt_serial_close(handle)`, double-freeing the descriptor; once the kernel
+# recycles that number a later open() aliases it and the second close tears down
+# an unrelated port. Keyed by handle because that is the resource released.
+var _closed_handles: [i64] = []
+
+fn _handle_already_closed(handle: i64) -> bool:
+    """True when `handle` was already released by `serial_close` this process."""
+    for closed_handle in _closed_handles:
+        if closed_handle == handle:
+            return true
+    false
+
+fn _mark_handle_closed(handle: i64) -> void:
+    """Record `handle` as released so a repeat `serial_close` is rejected."""
+    _closed_handles.push(handle)
+
+fn _forget_closed_handle(handle: i64) -> void:
+    """Drop `handle` from the closed set when the OS hands the number back."""
+    var remaining: [i64] = []
+    for closed_handle in _closed_handles:
+        if closed_handle != handle:
+            remaining.push(closed_handle)
+    _closed_handles = remaining
+
+fn serial_open(device: text, baud: i64) -> SerialPort:
+    """Open a serial port at the given baud rate in raw mode.
+
+    Args:
+        device: Device path, e.g. "/dev/ttyUSB0" or "/dev/cu.usbserial"
+        baud:   Baud rate (9600 / 19200 / 38400 / 57600 / 115200 / 230400)
+
+    Returns: SerialPort (check is_valid before use)
+
+    Example:
+        val port = serial_open("/dev/ttyUSB0", 115200)
+        if port.is_valid:
+            serial_write(port, "hello\n")
+    """
+    val handle = rt_serial_open(device, baud)
+    # The OS reuses descriptor numbers, so a freshly opened handle must drop any
+    # stale "already closed" record or the first close of this port is refused.
+    if is_valid_handle(handle):
+        _forget_closed_handle(handle)
+    SerialPort(
+        handle: handle,
+        device: device,
+        baud: baud,
+        is_valid: is_valid_handle(handle),
+        closed: false
+    )
+
+fn serial_close(port: SerialPort) -> bool:
+    """Close the serial port.
+
+    Rejects a repeat close instead of double-freeing the descriptor: returns
+    false (without entering termios) when the handle was never valid, when the
+    caller's own record is already `closed`, or when any copy of this port has
+    already released `handle`.
+    """
+    if is_invalid_handle(port.handle):
+        return false
+    if port.closed:
+        return false
+    if _handle_already_closed(port.handle):
+        return false
+    _mark_handle_closed(port.handle)
+    rt_serial_close(port.handle)
+
+fn serial_is_closed(port: SerialPort) -> bool:
+    """True when this port's descriptor has already been released."""
+    if is_invalid_handle(port.handle):
+        return true
+    port.closed or _handle_already_closed(port.handle)
+
+fn serial_read(port: SerialPort, max_bytes: i64) -> text:
+    """Read up to max_bytes from the serial port. Blocks until data arrives."""
+    if is_invalid_handle(port.handle):
+        return ""
+    rt_serial_read(port.handle, max_bytes)
+
+fn serial_write(port: SerialPort, data: text) -> i64:
+    """Write data to the serial port. Returns bytes written."""
+    if is_invalid_handle(port.handle):
+        return 0
+    rt_serial_write(port.handle, data)
+
+fn serial_flush(port: SerialPort) -> bool:
+    """Flush pending output to the serial port."""
+    if is_invalid_handle(port.handle):
+        return false
+    rt_serial_flush(port.handle)
+
+fn serial_set_timeout(port: SerialPort, timeout_ms: i64) -> bool:
+    """Set read timeout in milliseconds. -1 = block, 0 = non-blocking."""
+    if is_invalid_handle(port.handle):
+        return false
+    rt_serial_set_timeout(port.handle, timeout_ms)
+
+fn serial_relay(port: SerialPort) -> bool:
+    """Bidirectional relay: stdin ↔ serial until either end closes.
+    Suitable for use as SSH ProxyCommand relay. Returns true on clean exit."""
+    if is_invalid_handle(port.handle):
+        return false
+    rt_serial_relay(port.handle)

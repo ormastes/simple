@@ -1,0 +1,132 @@
+"""
+# Text Decoration Paint Parity
+
+## Overview
+
+GAP-1 of the DrawIR feature-gap audit
+(doc/03_plan/ui/unified_2d_engine/drawir_feature_gap_2026-07-31.md) flagged
+text-decoration as a correctness bug: the `Style` struct only carried an
+`underline` flag, so `overline` and `line-through` were silently dropped
+before they ever reached paint, while a second consumer of that same style
+data reported decoration metadata independently. This spec proves the two
+live consumers of decoration state inside
+`simple_web_html_layout_renderer_paint_layout.spl` now agree for all three
+CSS decorations:
+
+- the pixel rasterizer (`paint()`, exercised here through
+  `simple_web_render_html_to_pixels`)
+- the Draw IR computed-style metadata exporter (`_html_draw_ir_style_props`
+  / `_text_decoration_line_value`, exercised here through
+  `simple_web_layout_render_html_draw_ir`)
+
+It also proves the two CSS entry points that feed the same flags — the
+`text-decoration` shorthand and the `text-decoration-line` longhand, parsed
+by two separate blocks in `simple_web_html_layout_renderer_decl_apply.spl`
+— stay in lock-step, since a divergent edit to only one block would show up
+as a pixel or metadata mismatch here.
+
+**Requirements:** N/A (correctness-gap closure, not a new feature)
+
+**Plan:** doc/03_plan/ui/unified_2d_engine/drawir_feature_gap_2026-07-31.md
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
+
+val TEXT_COLOR: u32 = 0xFF111827u32
+val W: i32 = 96
+val H: i32 = 32
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var idx: i32 = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn _draw_ir_command_by_id(commands: [DrawIrCommand], component_id: text) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
+    var idx = 0
+    while idx < command.computed_style.len():
+        if command.computed_style[idx].key == key:
+            return command.computed_style[idx].value
+        idx = idx + 1
+    ""
+
+fn _label_html(decl: text) -> text:
+    (
+        "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}" +
+        ".label{color:#111827;font-size:8px;" + decl + "}" +
+        "</style></head><body><span id='label' class='label'>DECO</span></body></html>"
+    )
+
+fn _decoration_line_value(html: text) -> text:
+    val composition = simple_web_layout_render_html_draw_ir(html, W, H)
+    val label = _draw_ir_command_by_id(composition.batches[0].commands, "label")
+    _draw_ir_style_value(label, "text-decoration-line")
+
+fn _decoration_pixels(html: text) -> [u32]:
+    simple_web_render_html_to_pixels(html, W, H)
+
+
+describe "Text decoration paint parity across the pixel and metadata paths":
+
+    it "reports each single decoration identically in metadata and raster pixels":
+        val plain = _decoration_pixels(_label_html(""))
+
+        for deco in ["underline", "overline", "line-through"]:
+            val html = _label_html("text-decoration: " + deco)
+            val metadata = _decoration_line_value(html)
+            val pixels = _decoration_pixels(html)
+
+            expect(metadata).to_equal(deco)
+            expect(_count_color(pixels, TEXT_COLOR)).to_be_greater_than(_count_color(plain, TEXT_COLOR))
+            expect(_pixels_equal(plain, pixels)).to_equal(false)
+
+    it "combines all three decorations when authored together":
+        val underline_only = _decoration_pixels(_label_html("text-decoration: underline"))
+        val overline_only = _decoration_pixels(_label_html("text-decoration: overline"))
+        val strike_only = _decoration_pixels(_label_html("text-decoration: line-through"))
+        val combo_html = _label_html("text-decoration: underline overline line-through")
+        val combo_metadata = _decoration_line_value(combo_html)
+        val combo_pixels = _decoration_pixels(combo_html)
+
+        expect(combo_metadata).to_equal("underline overline line-through")
+        expect(_count_color(combo_pixels, TEXT_COLOR)).to_be_greater_than(_count_color(underline_only, TEXT_COLOR))
+        expect(_count_color(combo_pixels, TEXT_COLOR)).to_be_greater_than(_count_color(overline_only, TEXT_COLOR))
+        expect(_count_color(combo_pixels, TEXT_COLOR)).to_be_greater_than(_count_color(strike_only, TEXT_COLOR))
+
+    it "resets all three decorations when text-decoration: none is authored":
+        val none_html = _label_html("text-decoration: underline overline line-through; text-decoration: none")
+
+        expect(_decoration_line_value(none_html)).to_equal("none")
+
+    it "keeps the shorthand and text-decoration-line longhand paths in lock-step":
+        for deco in ["underline", "overline", "line-through"]:
+            val shorthand_html = _label_html("text-decoration: " + deco)
+            val longhand_html = _label_html("text-decoration-line: " + deco)
+
+            expect(_decoration_line_value(longhand_html)).to_equal(_decoration_line_value(shorthand_html))
+            expect(_pixels_equal(_decoration_pixels(shorthand_html), _decoration_pixels(longhand_html))).to_equal(true)

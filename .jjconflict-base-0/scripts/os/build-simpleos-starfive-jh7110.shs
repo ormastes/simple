@@ -1,0 +1,98 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+. "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
+
+TARGET="riscv64-unknown-none"
+BOARD_TARGET="riscv64-starfive-jh7110"
+ENTRY="src/os/kernel/arch/riscv64/starfive/entry.spl"
+LINKER="src/os/kernel/arch/riscv64/starfive_jh7110_linker.ld"
+OUTPUT="${STARFIVE_ELF:-build/os/starfive-jh7110/simpleos.elf}"
+RECEIPT="$OUTPUT.receipt"
+BACKEND="${SIMPLE_NATIVE_BACKEND:-cranelift}"
+
+COMPILER="$(simple_compiler_select --root "$ROOT_DIR" --builder-target "$TARGET")" || {
+    echo "error: no admitted self-hosted compiler for $TARGET" >&2
+    exit 1
+}
+simple_compiler_is_seed "$COMPILER" && {
+    echo "error: implicit Rust bootstrap seed is forbidden" >&2
+    exit 1
+}
+COMPILER_PROVENANCE="$(dirname "$COMPILER")/provenance.env"
+test -f "$COMPILER_PROVENANCE" || {
+    echo "error: StarFive production build requires adjacent compiler provenance" >&2
+    exit 1
+}
+test "$(awk -F= '/^status=/ {print $2}' "$COMPILER_PROVENANCE")" = "pass" || {
+    echo "error: compiler provenance is not admitted PASS" >&2
+    exit 1
+}
+test "$(awk -F= '/^stage3_sha256=/ {print $2}' "$COMPILER_PROVENANCE")" = "$(sha256sum "$COMPILER" | awk '{print $1}')" || {
+    echo "error: compiler hash does not match Stage 3 provenance" >&2
+    exit 1
+}
+
+mkdir -p "$(dirname "$OUTPUT")" build/os/generated
+timeout 240 "$COMPILER" native-build \
+    --source build/os/generated --source src/os --source src/lib \
+    --backend "$BACKEND" --opt-level=aggressive --log on --timeout 180 \
+    --entry-closure --entry "$ENTRY" --target "$TARGET" \
+    --linker-script "$LINKER" -o "$OUTPUT"
+
+test -f "$OUTPUT"
+file "$OUTPUT" | grep -Eq 'ELF 64-bit.*RISC-V'
+ENTRY_HEX="$(readelf -h "$OUTPUT" | awk '/Entry point address:/ { print $4 }')"
+if test "$ENTRY_HEX" != "0x40200000"; then
+    command -v llvm-objcopy >/dev/null 2>&1 || {
+        echo "error: llvm-objcopy is required to bind the StarFive entry trampoline" >&2
+        exit 1
+    }
+    llvm-objcopy --set-start 0x40200000 "$OUTPUT"
+    ENTRY_HEX="$(readelf -h "$OUTPUT" | awk '/Entry point address:/ { print $4 }')"
+fi
+test "$ENTRY_HEX" = "0x40200000" || {
+    echo "error: expected ELF entry 0x40200000, got $ENTRY_HEX" >&2
+    exit 1
+}
+
+TMP_RECEIPT="$RECEIPT.tmp.$$"
+trap 'rm -f "$TMP_RECEIPT"' EXIT HUP INT TERM
+{
+    echo "schema=starfive-simpleos-receipt-v1"
+    echo "target=$BOARD_TARGET"
+    echo "native_target=$TARGET"
+    echo "artifact=$OUTPUT"
+    echo "artifact_size=$(wc -c < "$OUTPUT")"
+    echo "artifact_sha256=$(sha256sum "$OUTPUT" | awk '{print $1}')"
+    echo "elf_class=ELF64"
+    echo "elf_machine=RISC-V"
+    echo "load_address=0x40200000"
+    echo "entry=0x40200000"
+    echo "privilege=supervisor"
+    echo "dtb_contract=validate-a1-or-firmware-fdt-0x42200000"
+    echo "compiler=$COMPILER"
+    echo "compiler_sha256=$(sha256sum "$COMPILER" | awk '{print $1}')"
+    echo "compiler_version=$("$COMPILER" --version | sed -n '1p')"
+    echo "compiler_provenance=$COMPILER_PROVENANCE"
+    echo "compiler_provenance_sha256=$(sha256sum "$COMPILER_PROVENANCE" | awk '{print $1}')"
+    echo "linker=$LINKER"
+    echo "linker_sha256=$(sha256sum "$LINKER" | awk '{print $1}')"
+    echo "root_entries=bin,etc,README.txt"
+    echo "root_source_sha256=$(sha256sum src/os/kernel/arch/riscv64/starfive_root.spl | awk '{print $1}')"
+    echo "backend=$BACKEND"
+    echo "build_command=$COMPILER native-build --source build/os/generated --source src/os --source src/lib --backend $BACKEND --opt-level=aggressive --log on --timeout 180 --entry-closure --entry $ENTRY --target $TARGET --linker-script $LINKER -o $OUTPUT"
+    echo "loader_contract=jtag-raw-elf@0x48000000+uboot-bootelf-s"
+    echo "flash_writes=0"
+    echo "git_revision=$(git rev-parse HEAD)"
+    echo "git_dirty_files_sha256=$(git status --porcelain=v1 | sha256sum | awk '{print $1}')"
+    echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$TMP_RECEIPT"
+mv "$TMP_RECEIPT" "$RECEIPT"
+trap - EXIT HUP INT TERM
+echo "starfive_build_status=pass"
+echo "target=$BOARD_TARGET"
+echo "artifact=$OUTPUT"
+echo "receipt=$RECEIPT"

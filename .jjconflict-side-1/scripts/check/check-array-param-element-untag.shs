@@ -1,0 +1,165 @@
+#!/bin/sh
+# Gate: int element reads off an ARRAY PARAMETER must decode identically under
+# the tree-walk interpreter and the Cranelift JIT.
+#
+# Pins doc/08_tracking/bug/interp_array_param_indexing_2026-07-03.md. Under
+# SIMPLE_EXECUTION_MODE=jit every such read came back exactly 8x too large --
+# the tag-boxed word `v << 3` with the 3-bit untag never applied -- while the
+# interpreter arm was correct. `bin/simple test` runs the tree-walk
+# interpreter, and a spec body runs interpreted regardless of any engine pin,
+# so no spec can exercise this lane. Hence a shell gate that pins BOTH arms.
+#
+# Verdict is the LAST line of stdout, per repo convention:
+#   PASS  — <n> probe(s) checked, ...            exit 0
+#   FAIL  — ...                                  exit 1
+#   ERROR — nothing was checked                  exit 2
+# A run that compared 0 probes is an ERROR, never a pass. rc=143/137 (timeout /
+# OOM kill) is UNVERIFIED and is reported as ERROR, never as a pass or a fail.
+#
+# Non-vacuity is enforced by an ENGINE WITNESS: `SIMPLE_JIT_TRACE_ADDR=1` makes
+# the JIT print one `[jit-addr] <fn> 0x...` line per function it actually
+# compiled to a real code address (codegen/jit.rs:194-202). The jit arm MUST
+# emit at least one such line and the interpreter arm MUST emit none; otherwise
+# the run is UNVERIFIED -> ERROR, never a pass.
+#
+# This deliberately REPLACES the earlier 2^60 divergence control. That control
+# inferred "the jit arm compiled" from the arms DISAGREEING about
+# 1152921504606846976 -- i.e. it depended on the int61 truncation BUG still
+# being present. Once that bug was fixed the control started reporting ERROR on
+# a perfectly good binary (measured 2026-08-17 against a build of current HEAD),
+# which would have made this gate a false blocker. An engine witness must not be
+# a defect: witnessing compilation directly is version-independent and was
+# verified to give 0 lines interpreted / 13 lines jitted on BOTH the stale
+# shipped seed and a fresh HEAD build.
+
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SIMPLE=${SIMPLE_BIN:-$ROOT/bin/simple}
+FIXTURE=${FIXTURE:-$ROOT/test/fixtures/compiler/array_param_element_untag.spl}
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+EV_CHECKED=0
+EV_FAILED=""
+
+# Expected value for each probe. `ctl` is deliberately absent: it is the
+# engine-identity control and is expected to DIFFER between the arms.
+expected_for() {
+    case "$1" in
+        bare)        echo 10 ;;
+        bracket)     echo 10 ;;
+        unannotated) echo 10 ;;
+        sum3)        echo 60 ;;
+        plus1)       echo 11 ;;
+        times2)      echo 20 ;;
+        rsub)        echo 90 ;;
+        len_of)      echo 3 ;;
+        hop1)        echo 10 ;;
+        local_read)  echo 10 ;;
+        any_left_add)  echo 11 ;;
+        any_right_add) echo 11 ;;
+        any_left_sub)  echo 9 ;;
+        any_right_mul) echo 20 ;;
+        any_right_div) echo 10 ;;
+        any_both_sub)  echo 10 ;;
+        *)           echo "" ;;
+    esac
+}
+
+run_arm() {
+    # $1 = engine, $2 = fixture, $3 = output file.
+    # rc is read from a variable on the line AFTER the command, never through a
+    # pipe -- a pipeline's $? is the LAST stage's status and has produced false
+    # greens in this repo before.
+    SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE="$1" "$SIMPLE" run "$2" >"$3" 2>&1
+    RC=$?
+    return $RC
+}
+
+check_fixture() {
+    FX=$1
+    LABEL=$2
+    MUST=$3   # "pass" or "fail" -- selftest fixtures declare their verdict
+
+    run_arm interpreter "$FX" "$WORK/interp.out"
+    RC_I=$?
+    run_arm jit "$FX" "$WORK/jit.out"
+    RC_J=$?
+
+    if [ "$RC_I" = 143 ] || [ "$RC_I" = 137 ] || [ "$RC_J" = 143 ] || [ "$RC_J" = 137 ]; then
+        echo "ERROR — nothing was checked: $LABEL killed (rc_interp=$RC_I rc_jit=$RC_J); UNVERIFIED, not a pass"
+        exit 2
+    fi
+    if [ "$RC_I" != 0 ] || [ "$RC_J" != 0 ]; then
+        echo "ERROR — nothing was checked: $LABEL exited nonzero (rc_interp=$RC_I rc_jit=$RC_J)"
+        exit 2
+    fi
+
+    # Engine witness: the jit arm must have actually compiled functions to real
+    # code addresses, and the interpreter arm must not have. Without this a
+    # silently-demoted jit arm would run interpreted and every probe would
+    # "pass" while testing nothing.
+    ADDR_J=$(grep -c '\[jit-addr\]' "$WORK/jit.out" 2>/dev/null || echo 0)
+    ADDR_I=$(grep -c '\[jit-addr\]' "$WORK/interp.out" 2>/dev/null || echo 0)
+    if [ "$ADDR_J" -lt 1 ]; then
+        echo "ERROR — nothing was checked: $LABEL jit arm emitted no [jit-addr] lines; it did not JIT-compile, run is UNVERIFIED"
+        exit 2
+    fi
+    if [ "$ADDR_I" -ne 0 ]; then
+        echo "ERROR — nothing was checked: $LABEL interpreter arm emitted $ADDR_I [jit-addr] line(s); the arms are not distinct, run is UNVERIFIED"
+        exit 2
+    fi
+
+    LOCAL_FAILED=""
+    LOCAL_N=0
+    for NAME in bare bracket unannotated sum3 plus1 times2 rsub len_of hop1 local_read \
+                any_left_add any_right_add any_left_sub any_right_mul any_right_div any_both_sub; do
+        WANT=$(expected_for "$NAME")
+        [ -z "$WANT" ] && continue
+        GOT_J=$(sed -n "s/^$NAME=//p" "$WORK/jit.out" | head -1)
+        GOT_I=$(sed -n "s/^$NAME=//p" "$WORK/interp.out" | head -1)
+        if [ -z "$GOT_J" ] || [ -z "$GOT_I" ]; then
+            echo "ERROR — nothing was checked: $LABEL probe '$NAME' produced no output line"
+            exit 2
+        fi
+        LOCAL_N=$((LOCAL_N + 1))
+        if [ "$GOT_I" != "$WANT" ] || [ "$GOT_J" != "$WANT" ]; then
+            LOCAL_FAILED="$LOCAL_FAILED $NAME(want=$WANT interp=$GOT_I jit=$GOT_J)"
+        fi
+    done
+
+    if [ "$LOCAL_N" = 0 ]; then
+        echo "ERROR — nothing was checked: $LABEL compared 0 probes"
+        exit 2
+    fi
+
+    EV_CHECKED=$((EV_CHECKED + LOCAL_N))
+    if [ "$MUST" = "fail" ]; then
+        # selftest: this fixture is expected to be caught.
+        if [ -z "$LOCAL_FAILED" ]; then
+            echo "ERROR — nothing was checked: selftest fixture '$LABEL' was expected to FAIL and did not; the gate is broken, not the code"
+            exit 2
+        fi
+    else
+        EV_FAILED="$EV_FAILED$LOCAL_FAILED"
+    fi
+}
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR — nothing was checked: no runnable simple binary at $SIMPLE"
+    exit 2
+fi
+if [ ! -f "$FIXTURE" ]; then
+    echo "ERROR — nothing was checked: fixture not found at $FIXTURE"
+    exit 2
+fi
+
+check_fixture "$FIXTURE" "array_param_element_untag" pass
+
+if [ -n "$EV_FAILED" ]; then
+    echo "FAIL — $EV_CHECKED probe(s) checked, divergent/wrong:$EV_FAILED"
+    exit 1
+fi
+echo "PASS — $EV_CHECKED probe(s) checked, interpreter and jit agree on every array-parameter element read"
+exit 0

@@ -1,0 +1,900 @@
+# codex-impl
+# DB-server-facing storage mode offload facade.
+
+use std.database.gpu_mode_plan.{DbGpuMode, db_gpu_mode_profile}
+use std.database.db_offload.{
+    DbGpuBatchKind,
+    DbGpuBatchOffloadExecution,
+    DbGpuBatchDeviceOffloadExecution,
+    db_gpu_batch_offload_execute,
+    db_gpu_batch_offload_execute_device_for_generation,
+    db_gpu_batch_offload_used_gpu
+}
+use std.database.nosql_offload.{
+    NoSqlDocumentOffloadExecution,
+    NoSqlSsdDocumentCollection,
+    nosql_document_offload_execute,
+    nosql_document_offload_execute_device_validated,
+    nosql_document_offload_used_gpu
+}
+use std.database.vector.types.{DistanceMetric, SearchResult}
+use std.database.vector.search_offload.{
+    VectorSearchOffloadExecution,
+    vector_search_offload_execute,
+    vector_search_offload_execute_validated,
+    vector_search_offload_execute_device_validated,
+    vector_search_offload_used_gpu
+}
+use std.web_db_offload.contract.{GpuWdbWorkKind, GpuWdbBudget, GpuWdbCoarseBatchProfile, GpuWdbCoarseDataPath, gpu_wdb_default_budget}
+use std.web_db_offload.queue.{GpuWdbQueueState}
+use std.web_db_offload.library.{GpuWdbLibraryRegistry}
+use std.web_db_offload.device_backend.{GpuWdbDeviceBackend, GpuWdbDeviceRunResult, gpu_wdb_device_backend_registry, gpu_wdb_run_device_batch}
+use std.db.dbfs_engine.offload_snapshot.{DbfsSsdOffloadSnapshot, DbfsSsdScanMaterialization, dbfs_ssd_snapshot_current, dbfs_ssd_snapshot_scan_row_ids}
+
+enum DbStorageOffloadMode:
+    RamOnly
+    SsdAccelerated
+    NoSqlDocument
+    VectorSearch
+
+enum DbStorageOffloadWorkload:
+    ScanFilterProject
+    JoinAggregate
+    DocumentFilter
+    VectorSearch
+
+struct DbStorageOffloadExecution:
+    mode: DbStorageOffloadMode
+    workload: DbStorageOffloadWorkload
+    profile: GpuWdbCoarseBatchProfile
+    dispatch_target: text
+    reason: text
+    gpu_dispatched: bool
+    cpu_authoritative: bool
+    row_ids: [i64]
+    document_ids: [text]
+    vector_ids: [text]
+    queue_depth_after: i64
+    completed_count: i64
+    state_after: GpuWdbQueueState
+    gpu_candidate_validated: bool
+    validation_reason: text
+
+struct DbStorageDeviceOffloadExecution:
+    execution: DbStorageOffloadExecution
+    device_execution: DbGpuBatchDeviceOffloadExecution
+
+struct DbStorageDocumentDeviceOffloadExecution:
+    execution: DbStorageOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+struct DbStorageVectorDeviceOffloadExecution:
+    execution: DbStorageOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+fn db_storage_mode_to_gpu_mode(mode: DbStorageOffloadMode) -> DbGpuMode:
+    match mode:
+        DbStorageOffloadMode.RamOnly: DbGpuMode.RamOnly
+        DbStorageOffloadMode.SsdAccelerated: DbGpuMode.SsdAccelerated
+        DbStorageOffloadMode.NoSqlDocument: DbGpuMode.NoSqlDocument
+        DbStorageOffloadMode.VectorSearch: DbGpuMode.VectorSearch
+
+fn db_storage_workload_to_batch_kind(workload: DbStorageOffloadWorkload) -> DbGpuBatchKind:
+    match workload:
+        DbStorageOffloadWorkload.JoinAggregate: DbGpuBatchKind.JoinAggregate
+        _: DbGpuBatchKind.ScanFilterProject
+
+fn db_storage_execution_from_rows(mode: DbStorageOffloadMode, workload: DbStorageOffloadWorkload,
+                                  execution: DbGpuBatchOffloadExecution) -> DbStorageOffloadExecution:
+    DbStorageOffloadExecution(
+        mode: mode,
+        workload: workload,
+        profile: db_gpu_mode_profile(db_storage_mode_to_gpu_mode(mode)),
+        dispatch_target: execution.submission.dispatch_target,
+        reason: execution.submission.reason,
+        gpu_dispatched: db_gpu_batch_offload_used_gpu(execution),
+        cpu_authoritative: execution.cpu_authoritative,
+        row_ids: execution.result_row_ids,
+        document_ids: [],
+        vector_ids: [],
+        queue_depth_after: execution.state_after.queue_depth,
+        completed_count: execution.state_after.completed_count,
+        state_after: execution.state_after,
+        gpu_candidate_validated: false,
+        validation_reason: "gpu-candidate-not-evaluated"
+    )
+
+fn db_storage_execution_from_documents(execution: NoSqlDocumentOffloadExecution) -> DbStorageOffloadExecution:
+    DbStorageOffloadExecution(
+        mode: DbStorageOffloadMode.NoSqlDocument,
+        workload: DbStorageOffloadWorkload.DocumentFilter,
+        profile: db_gpu_mode_profile(DbGpuMode.NoSqlDocument),
+        dispatch_target: execution.submission.dispatch_target,
+        reason: execution.submission.reason,
+        gpu_dispatched: nosql_document_offload_used_gpu(execution),
+        cpu_authoritative: execution.cpu_authoritative,
+        row_ids: [],
+        document_ids: execution.result_ids,
+        vector_ids: [],
+        queue_depth_after: execution.state_after.queue_depth,
+        completed_count: execution.state_after.completed_count,
+        state_after: execution.state_after,
+        gpu_candidate_validated: false,
+        validation_reason: "gpu-candidate-not-evaluated"
+    )
+
+fn db_storage_vector_ids(results: [SearchResult]) -> [text]:
+    var ids: [text] = []
+    for result in results:
+        ids.push(result.id)
+    ids
+
+fn db_storage_execution_from_vector(execution: VectorSearchOffloadExecution) -> DbStorageOffloadExecution:
+    DbStorageOffloadExecution(
+        mode: DbStorageOffloadMode.VectorSearch,
+        workload: DbStorageOffloadWorkload.VectorSearch,
+        profile: db_gpu_mode_profile(DbGpuMode.VectorSearch),
+        dispatch_target: execution.submission.dispatch_target,
+        reason: execution.submission.reason,
+        gpu_dispatched: vector_search_offload_used_gpu(execution),
+        cpu_authoritative: execution.cpu_authoritative,
+        row_ids: [],
+        document_ids: [],
+        vector_ids: db_storage_vector_ids(execution.results),
+        queue_depth_after: execution.state_after.queue_depth,
+        completed_count: execution.state_after.completed_count,
+        state_after: execution.state_after,
+        gpu_candidate_validated: execution.gpu_candidate_validated,
+        validation_reason: execution.validation_reason
+    )
+
+fn db_storage_i64_ids_equal(left: [i64], right: [i64]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i: i64 = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn db_storage_text_ids_equal(left: [text], right: [text]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i: i64 = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn db_storage_offload_with_validation(offload: DbStorageOffloadExecution,
+                                      dispatch_target: text,
+                                      reason: text,
+                                      gpu_dispatched: bool,
+                                      validated: bool) -> DbStorageOffloadExecution:
+    DbStorageOffloadExecution(
+        mode: offload.mode,
+        workload: offload.workload,
+        profile: offload.profile,
+        dispatch_target: dispatch_target,
+        reason: reason,
+        gpu_dispatched: gpu_dispatched,
+        cpu_authoritative: offload.cpu_authoritative,
+        row_ids: offload.row_ids,
+        document_ids: offload.document_ids,
+        vector_ids: offload.vector_ids,
+        queue_depth_after: offload.queue_depth_after,
+        completed_count: offload.completed_count,
+        state_after: offload.state_after,
+        gpu_candidate_validated: validated,
+        validation_reason: reason
+    )
+
+fn db_storage_offload_with_authority(offload: DbStorageOffloadExecution,
+                                     dispatch_target: text,
+                                     reason: text,
+                                     gpu_dispatched: bool,
+                                     cpu_authoritative: bool,
+                                     row_ids: [i64],
+                                     validated: bool) -> DbStorageOffloadExecution:
+    DbStorageOffloadExecution(
+        mode: offload.mode,
+        workload: offload.workload,
+        profile: offload.profile,
+        dispatch_target: dispatch_target,
+        reason: reason,
+        gpu_dispatched: gpu_dispatched,
+        cpu_authoritative: cpu_authoritative,
+        row_ids: row_ids,
+        document_ids: offload.document_ids,
+        vector_ids: offload.vector_ids,
+        queue_depth_after: offload.queue_depth_after,
+        completed_count: offload.completed_count,
+        state_after: offload.state_after,
+        gpu_candidate_validated: validated,
+        validation_reason: reason
+    )
+
+fn db_storage_offload_with_document_authority(offload: DbStorageOffloadExecution,
+                                              dispatch_target: text,
+                                              reason: text,
+                                              gpu_dispatched: bool,
+                                              cpu_authoritative: bool,
+                                              document_ids: [text],
+                                              validated: bool) -> DbStorageOffloadExecution:
+    DbStorageOffloadExecution(
+        mode: offload.mode,
+        workload: offload.workload,
+        profile: offload.profile,
+        dispatch_target: dispatch_target,
+        reason: reason,
+        gpu_dispatched: gpu_dispatched,
+        cpu_authoritative: cpu_authoritative,
+        row_ids: offload.row_ids,
+        document_ids: document_ids,
+        vector_ids: offload.vector_ids,
+        queue_depth_after: offload.queue_depth_after,
+        completed_count: offload.completed_count,
+        state_after: offload.state_after,
+        gpu_candidate_validated: validated,
+        validation_reason: reason
+    )
+
+fn db_storage_cpu_row_fallback(mode: DbStorageOffloadMode,
+                               workload: DbStorageOffloadWorkload,
+                               reason: text,
+                               state: GpuWdbQueueState,
+                               row_ids: [i64]) -> DbStorageOffloadExecution:
+    DbStorageOffloadExecution(
+        mode: mode,
+        workload: workload,
+        profile: db_gpu_mode_profile(db_storage_mode_to_gpu_mode(mode)),
+        dispatch_target: "cpu_fallback",
+        reason: reason,
+        gpu_dispatched: false,
+        cpu_authoritative: true,
+        row_ids: row_ids,
+        document_ids: [],
+        vector_ids: [],
+        queue_depth_after: state.queue_depth,
+        completed_count: state.completed_count,
+        state_after: state,
+        gpu_candidate_validated: false,
+        validation_reason: reason
+    )
+
+fn db_storage_execute_rows(mode: DbStorageOffloadMode, workload: DbStorageOffloadWorkload,
+                           row_count: i64, bytes_per_row: i64,
+                           state: GpuWdbQueueState,
+                           registry: GpuWdbLibraryRegistry,
+                           gpu_available: bool,
+                           wal_generation_current: bool,
+                           cpu_fallback_available: bool,
+                           budget: GpuWdbBudget,
+                           cpu_row_ids: [i64]) -> DbStorageOffloadExecution:
+    val batch_kind = db_storage_workload_to_batch_kind(workload)
+    val execution = db_gpu_batch_offload_execute(
+        db_storage_mode_to_gpu_mode(mode),
+        batch_kind,
+        row_count,
+        bytes_per_row,
+        state,
+        registry,
+        gpu_available,
+        wal_generation_current,
+        cpu_fallback_available,
+        budget,
+        cpu_row_ids
+    )
+    db_storage_execution_from_rows(mode, workload, execution)
+
+fn db_storage_execute_rows_with_device_backend(mode: DbStorageOffloadMode,
+                                               workload: DbStorageOffloadWorkload,
+                                               row_count: i64,
+                                               bytes_per_row: i64,
+                                               state: GpuWdbQueueState,
+                                               backend: GpuWdbDeviceBackend,
+                                               wal_generation_current: bool,
+                                               expected_backend_generation: i64,
+                                               cpu_fallback_available: bool,
+                                               budget: GpuWdbBudget,
+                                               cpu_row_ids: [i64],
+                                               started_us: i64,
+                                               finished_us: i64,
+                                               measured_device_time_us: i64,
+                                               timing_source: text) -> DbStorageDeviceOffloadExecution:
+    val batch_kind = db_storage_workload_to_batch_kind(workload)
+    val device_execution = db_gpu_batch_offload_execute_device_for_generation(
+        db_storage_mode_to_gpu_mode(mode),
+        batch_kind,
+        row_count,
+        bytes_per_row,
+        state,
+        backend,
+        wal_generation_current,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        cpu_row_ids,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    DbStorageDeviceOffloadExecution(
+        execution: db_storage_execution_from_rows(mode, workload, device_execution.execution),
+        device_execution: device_execution
+    )
+
+fn db_storage_execute_rows_with_device_backend_validated(mode: DbStorageOffloadMode,
+                                                         workload: DbStorageOffloadWorkload,
+                                                         row_count: i64,
+                                                         bytes_per_row: i64,
+                                                         state: GpuWdbQueueState,
+                                                         backend: GpuWdbDeviceBackend,
+                                                         wal_generation_current: bool,
+                                                         expected_backend_generation: i64,
+                                                         cpu_fallback_available: bool,
+                                                         budget: GpuWdbBudget,
+                                                         cpu_row_ids: [i64],
+                                                         gpu_candidate_row_ids: [i64],
+                                                         started_us: i64,
+                                                         finished_us: i64,
+                                                         measured_device_time_us: i64,
+                                                         timing_source: text) -> DbStorageDeviceOffloadExecution:
+    val device_execution = db_storage_execute_rows_with_device_backend(
+        mode,
+        workload,
+        row_count,
+        bytes_per_row,
+        state,
+        backend,
+        wal_generation_current,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        cpu_row_ids,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    val base = device_execution.execution
+    if not device_execution.device_execution.device_result.production_device_claim:
+        return DbStorageDeviceOffloadExecution(
+            execution: db_storage_offload_with_authority(
+                base,
+                base.dispatch_target,
+                "production-device-not-measured",
+                false,
+                true,
+                cpu_row_ids,
+                false
+            ),
+            device_execution: device_execution.device_execution
+        )
+    if db_storage_i64_ids_equal(cpu_row_ids, gpu_candidate_row_ids):
+        return DbStorageDeviceOffloadExecution(
+            execution: db_storage_offload_with_authority(
+                base,
+                base.dispatch_target,
+                "production-gpu-row-match",
+                true,
+                false,
+                gpu_candidate_row_ids,
+                true
+            ),
+            device_execution: device_execution.device_execution
+        )
+    DbStorageDeviceOffloadExecution(
+        execution: db_storage_offload_with_authority(
+            base,
+            "cpu_fallback",
+            "production-gpu-row-mismatch",
+            false,
+            true,
+            cpu_row_ids,
+            false
+        ),
+        device_execution: device_execution.device_execution
+    )
+
+fn db_storage_execute_rows_validated(mode: DbStorageOffloadMode, workload: DbStorageOffloadWorkload,
+                                     row_count: i64, bytes_per_row: i64,
+                                     state: GpuWdbQueueState,
+                                     registry: GpuWdbLibraryRegistry,
+                                     gpu_available: bool,
+                                     wal_generation_current: bool,
+                                     cpu_fallback_available: bool,
+                                     budget: GpuWdbBudget,
+                                     cpu_row_ids: [i64],
+                                     gpu_candidate_row_ids: [i64]) -> DbStorageOffloadExecution:
+    val execution = db_storage_execute_rows(
+        mode,
+        workload,
+        row_count,
+        bytes_per_row,
+        state,
+        registry,
+        gpu_available,
+        wal_generation_current,
+        cpu_fallback_available,
+        budget,
+        cpu_row_ids
+    )
+    if not db_storage_offload_used_gpu(execution):
+        return db_storage_offload_with_validation(execution, execution.dispatch_target, "gpu-not-dispatched", false, false)
+    if db_storage_i64_ids_equal(cpu_row_ids, gpu_candidate_row_ids):
+        return db_storage_offload_with_validation(execution, execution.dispatch_target, "gpu-cpu-row-match", true, true)
+    db_storage_offload_with_validation(execution, "cpu_fallback", "gpu-cpu-row-mismatch", false, false)
+
+fn db_storage_execute_rows_default(mode: DbStorageOffloadMode, workload: DbStorageOffloadWorkload,
+                                   row_count: i64, bytes_per_row: i64,
+                                   state: GpuWdbQueueState,
+                                   registry: GpuWdbLibraryRegistry,
+                                   gpu_available: bool,
+                                   wal_generation_current: bool,
+                                   cpu_fallback_available: bool,
+                                   cpu_row_ids: [i64]) -> DbStorageOffloadExecution:
+    db_storage_execute_rows(
+        mode,
+        workload,
+        row_count,
+        bytes_per_row,
+        state,
+        registry,
+        gpu_available,
+        wal_generation_current,
+        cpu_fallback_available,
+        gpu_wdb_default_budget(),
+        cpu_row_ids
+    )
+
+fn db_storage_execute_rows_for_ssd_snapshot(snapshot: DbfsSsdOffloadSnapshot,
+                                            workload: DbStorageOffloadWorkload,
+                                            state: GpuWdbQueueState,
+                                            registry: GpuWdbLibraryRegistry,
+                                            gpu_available: bool,
+                                            cpu_fallback_available: bool,
+                                            budget: GpuWdbBudget,
+                                            cpu_row_ids: [i64]) -> DbStorageOffloadExecution:
+    db_storage_execute_rows(
+        DbStorageOffloadMode.SsdAccelerated,
+        workload,
+        snapshot.row_count,
+        snapshot.bytes_per_row,
+        state,
+        registry,
+        gpu_available,
+        dbfs_ssd_snapshot_current(snapshot),
+        cpu_fallback_available,
+        budget,
+        cpu_row_ids
+    )
+
+fn db_storage_execute_rows_for_ssd_snapshot_validated(snapshot: DbfsSsdOffloadSnapshot,
+                                                      workload: DbStorageOffloadWorkload,
+                                                      state: GpuWdbQueueState,
+                                                      registry: GpuWdbLibraryRegistry,
+                                                      gpu_available: bool,
+                                                      cpu_fallback_available: bool,
+                                                      budget: GpuWdbBudget,
+                                                      cpu_row_ids: [i64],
+                                                      gpu_candidate_row_ids: [i64]) -> DbStorageOffloadExecution:
+    db_storage_execute_rows_validated(
+        DbStorageOffloadMode.SsdAccelerated,
+        workload,
+        snapshot.row_count,
+        snapshot.bytes_per_row,
+        state,
+        registry,
+        gpu_available,
+        dbfs_ssd_snapshot_current(snapshot),
+        cpu_fallback_available,
+        budget,
+        cpu_row_ids,
+        gpu_candidate_row_ids
+    )
+
+fn db_storage_execute_ssd_snapshot_scan(snapshot: DbfsSsdOffloadSnapshot,
+                                        state: GpuWdbQueueState,
+                                        registry: GpuWdbLibraryRegistry,
+                                        gpu_available: bool,
+                                        cpu_fallback_available: bool,
+                                        budget: GpuWdbBudget) -> DbStorageOffloadExecution:
+    db_storage_execute_rows_for_ssd_snapshot(
+        snapshot,
+        DbStorageOffloadWorkload.ScanFilterProject,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        budget,
+        dbfs_ssd_snapshot_scan_row_ids(snapshot)
+    )
+
+fn db_storage_execute_ssd_materialized_scan(materialization: DbfsSsdScanMaterialization,
+                                           state: GpuWdbQueueState,
+                                           registry: GpuWdbLibraryRegistry,
+                                           gpu_available: bool,
+                                           cpu_fallback_available: bool,
+                                           budget: GpuWdbBudget) -> DbStorageOffloadExecution:
+    if not materialization.materialized:
+        return db_storage_cpu_row_fallback(
+            DbStorageOffloadMode.SsdAccelerated,
+            DbStorageOffloadWorkload.ScanFilterProject,
+            materialization.reason,
+            state,
+            materialization.row_ids
+        )
+    db_storage_execute_rows(
+        DbStorageOffloadMode.SsdAccelerated,
+        DbStorageOffloadWorkload.ScanFilterProject,
+        materialization.row_count,
+        materialization.bytes_per_row,
+        state,
+        registry,
+        gpu_available,
+        materialization.current,
+        cpu_fallback_available,
+        budget,
+        materialization.row_ids
+    )
+
+fn db_storage_execute_ssd_materialized_scan_validated(materialization: DbfsSsdScanMaterialization,
+                                                     state: GpuWdbQueueState,
+                                                     registry: GpuWdbLibraryRegistry,
+                                                     gpu_available: bool,
+                                                     cpu_fallback_available: bool,
+                                                     budget: GpuWdbBudget,
+                                                     gpu_candidate_row_ids: [i64]) -> DbStorageOffloadExecution:
+    if not materialization.materialized:
+        return db_storage_cpu_row_fallback(
+            DbStorageOffloadMode.SsdAccelerated,
+            DbStorageOffloadWorkload.ScanFilterProject,
+            materialization.reason,
+            state,
+            materialization.row_ids
+        )
+    db_storage_execute_rows_validated(
+        DbStorageOffloadMode.SsdAccelerated,
+        DbStorageOffloadWorkload.ScanFilterProject,
+        materialization.row_count,
+        materialization.bytes_per_row,
+        state,
+        registry,
+        gpu_available,
+        materialization.current,
+        cpu_fallback_available,
+        budget,
+        materialization.row_ids,
+        gpu_candidate_row_ids
+    )
+
+fn db_storage_execute_ssd_materialized_scan_with_device_backend_validated(materialization: DbfsSsdScanMaterialization,
+                                                                         state: GpuWdbQueueState,
+                                                                         backend: GpuWdbDeviceBackend,
+                                                                         expected_backend_generation: i64,
+                                                                         cpu_fallback_available: bool,
+                                                                         budget: GpuWdbBudget,
+                                                                         gpu_candidate_row_ids: [i64],
+                                                                         started_us: i64,
+                                                                         finished_us: i64,
+                                                                         measured_device_time_us: i64,
+                                                                         timing_source: text) -> DbStorageDeviceOffloadExecution:
+    db_storage_execute_rows_with_device_backend_validated(
+        DbStorageOffloadMode.SsdAccelerated,
+        DbStorageOffloadWorkload.ScanFilterProject,
+        materialization.row_count,
+        materialization.bytes_per_row,
+        state,
+        backend,
+        materialization.current and materialization.materialized,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        materialization.row_ids,
+        gpu_candidate_row_ids,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+
+fn db_storage_execute_documents(document_count: i64, bytes_per_document: i64,
+                                metadata_filter_cpu_owned: bool,
+                                state: GpuWdbQueueState,
+                                registry: GpuWdbLibraryRegistry,
+                                gpu_available: bool,
+                                generation_current: bool,
+                                cpu_fallback_available: bool,
+                                budget: GpuWdbBudget,
+                                cpu_document_ids: [text]) -> DbStorageOffloadExecution:
+    val execution = nosql_document_offload_execute(
+        document_count,
+        bytes_per_document,
+        metadata_filter_cpu_owned,
+        state,
+        registry,
+        gpu_available,
+        generation_current,
+        cpu_fallback_available,
+        budget,
+        cpu_document_ids
+    )
+    db_storage_execution_from_documents(execution)
+
+fn db_storage_execute_documents_validated(document_count: i64, bytes_per_document: i64,
+                                          metadata_filter_cpu_owned: bool,
+                                          state: GpuWdbQueueState,
+                                          registry: GpuWdbLibraryRegistry,
+                                          gpu_available: bool,
+                                          generation_current: bool,
+                                          cpu_fallback_available: bool,
+                                          budget: GpuWdbBudget,
+                                          cpu_document_ids: [text],
+                                          gpu_candidate_document_ids: [text]) -> DbStorageOffloadExecution:
+    val execution = db_storage_execute_documents(
+        document_count,
+        bytes_per_document,
+        metadata_filter_cpu_owned,
+        state,
+        registry,
+        gpu_available,
+        generation_current,
+        cpu_fallback_available,
+        budget,
+        cpu_document_ids
+    )
+    if not db_storage_offload_used_gpu(execution):
+        return db_storage_offload_with_validation(execution, execution.dispatch_target, "gpu-not-dispatched", false, false)
+    if db_storage_text_ids_equal(cpu_document_ids, gpu_candidate_document_ids):
+        return db_storage_offload_with_validation(execution, execution.dispatch_target, "gpu-cpu-document-match", true, true)
+    db_storage_offload_with_validation(execution, "cpu_fallback", "gpu-cpu-document-mismatch", false, false)
+
+fn db_storage_execute_documents_with_device_backend_validated(document_count: i64,
+                                                             bytes_per_document: i64,
+                                                             metadata_filter_cpu_owned: bool,
+                                                             state: GpuWdbQueueState,
+                                                             backend: GpuWdbDeviceBackend,
+                                                             generation_current: bool,
+                                                             expected_backend_generation: i64,
+                                                             cpu_fallback_available: bool,
+                                                             budget: GpuWdbBudget,
+                                                             cpu_document_ids: [text],
+                                                             gpu_candidate_document_ids: [text],
+                                                             started_us: i64,
+                                                             finished_us: i64,
+                                                             measured_device_time_us: i64,
+                                                             timing_source: text) -> DbStorageDocumentDeviceOffloadExecution:
+    val device_execution = nosql_document_offload_execute_device_validated(
+        document_count,
+        bytes_per_document,
+        metadata_filter_cpu_owned,
+        state,
+        backend,
+        generation_current,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        cpu_document_ids,
+        gpu_candidate_document_ids,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    val converted = db_storage_execution_from_documents(device_execution.execution)
+    DbStorageDocumentDeviceOffloadExecution(
+        execution: db_storage_offload_with_document_authority(
+            converted,
+            converted.dispatch_target,
+            converted.reason,
+            converted.gpu_dispatched,
+            converted.cpu_authoritative,
+            converted.document_ids,
+            converted.gpu_dispatched and not converted.cpu_authoritative
+        ),
+        device_result: device_execution.device_result
+    )
+
+fn db_storage_execute_ssd_documents(collection: NoSqlSsdDocumentCollection,
+                                    key: text,
+                                    value: text,
+                                    state: GpuWdbQueueState,
+                                    registry: GpuWdbLibraryRegistry,
+                                    gpu_available: bool,
+                                    cpu_fallback_available: bool,
+                                    budget: GpuWdbBudget) -> DbStorageOffloadExecution:
+    db_storage_execution_from_documents(
+        collection.filter_metadata_with_offload(
+            key,
+            value,
+            state,
+            registry,
+            gpu_available,
+            cpu_fallback_available,
+            budget
+        )
+    )
+
+fn db_storage_execute_ssd_documents_with_device_backend_validated(collection: NoSqlSsdDocumentCollection,
+                                                                  key: text,
+                                                                  value: text,
+                                                                  state: GpuWdbQueueState,
+                                                                  backend: GpuWdbDeviceBackend,
+                                                                  expected_backend_generation: i64,
+                                                                  cpu_fallback_available: bool,
+                                                                  budget: GpuWdbBudget,
+                                                                  gpu_candidate_document_ids: [text],
+                                                                  started_us: i64,
+                                                                  finished_us: i64,
+                                                                  measured_device_time_us: i64,
+                                                                  timing_source: text) -> DbStorageDocumentDeviceOffloadExecution:
+    val base = db_storage_execute_ssd_documents(
+        collection,
+        key,
+        value,
+        state,
+        gpu_wdb_device_backend_registry(backend),
+        backend.native_device_execution,
+        cpu_fallback_available,
+        budget
+    )
+    val effective_generation =
+        if collection.collection.generation_current and collection.durable_generation_current:
+            expected_backend_generation
+        else:
+            -1
+    val device_result = gpu_wdb_run_device_batch(
+        state,
+        backend,
+        GpuWdbWorkKind.DbDocumentFilter,
+        collection.document_count() * collection.average_encoded_bytes(),
+        collection.document_count(),
+        effective_generation,
+        cpu_fallback_available,
+        budget,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    if not device_result.production_device_claim:
+        return DbStorageDocumentDeviceOffloadExecution(
+            execution: db_storage_offload_with_document_authority(
+                base,
+                base.dispatch_target,
+                "production-device-not-measured",
+                false,
+                true,
+                base.document_ids,
+                false
+            ),
+            device_result: device_result
+        )
+    if db_storage_text_ids_equal(base.document_ids, gpu_candidate_document_ids):
+        return DbStorageDocumentDeviceOffloadExecution(
+            execution: db_storage_offload_with_document_authority(
+                base,
+                base.dispatch_target,
+                "production-gpu-document-match",
+                true,
+                false,
+                gpu_candidate_document_ids,
+                true
+            ),
+            device_result: device_result
+        )
+    DbStorageDocumentDeviceOffloadExecution(
+        execution: db_storage_offload_with_document_authority(
+            base,
+            "cpu_fallback",
+            "production-gpu-document-mismatch",
+            false,
+            true,
+            base.document_ids,
+            false
+        ),
+        device_result: device_result
+    )
+
+fn db_storage_execute_vector(metric: DistanceMetric, candidate_count: i64,
+                             dimensions: i64, metadata_filter_cpu_owned: bool,
+                             state: GpuWdbQueueState,
+                             registry: GpuWdbLibraryRegistry,
+                             gpu_available: bool,
+                             generation_current: bool,
+                             cpu_fallback_available: bool,
+                             budget: GpuWdbBudget,
+                             cpu_results: [SearchResult]) -> DbStorageOffloadExecution:
+    val execution = vector_search_offload_execute(
+        metric,
+        candidate_count,
+        dimensions,
+        metadata_filter_cpu_owned,
+        state,
+        registry,
+        gpu_available,
+        generation_current,
+        cpu_fallback_available,
+        budget,
+        cpu_results
+    )
+    db_storage_execution_from_vector(execution)
+
+fn db_storage_execute_vector_validated(metric: DistanceMetric, candidate_count: i64,
+                                       dimensions: i64, metadata_filter_cpu_owned: bool,
+                                       state: GpuWdbQueueState,
+                                       registry: GpuWdbLibraryRegistry,
+                                       gpu_available: bool,
+                                       generation_current: bool,
+                                       cpu_fallback_available: bool,
+                                       budget: GpuWdbBudget,
+                                       cpu_results: [SearchResult],
+                                       gpu_candidate_results: [SearchResult]) -> DbStorageOffloadExecution:
+    val execution = vector_search_offload_execute_validated(
+        metric,
+        candidate_count,
+        dimensions,
+        metadata_filter_cpu_owned,
+        state,
+        registry,
+        gpu_available,
+        generation_current,
+        cpu_fallback_available,
+        budget,
+        cpu_results,
+        gpu_candidate_results
+    )
+    db_storage_execution_from_vector(execution)
+
+fn db_storage_execute_vector_with_device_backend_validated(metric: DistanceMetric,
+                                                           candidate_count: i64,
+                                                           dimensions: i64,
+                                                           metadata_filter_cpu_owned: bool,
+                                                           state: GpuWdbQueueState,
+                                                           backend: GpuWdbDeviceBackend,
+                                                           generation_current: bool,
+                                                           expected_backend_generation: i64,
+                                                           cpu_fallback_available: bool,
+                                                           budget: GpuWdbBudget,
+                                                           cpu_results: [SearchResult],
+                                                           gpu_candidate_results: [SearchResult],
+                                                           started_us: i64,
+                                                           finished_us: i64,
+                                                           measured_device_time_us: i64,
+                                                           timing_source: text) -> DbStorageVectorDeviceOffloadExecution:
+    val execution = vector_search_offload_execute_device_validated(
+        metric,
+        candidate_count,
+        dimensions,
+        metadata_filter_cpu_owned,
+        state,
+        backend,
+        generation_current,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        cpu_results,
+        gpu_candidate_results,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    DbStorageVectorDeviceOffloadExecution(
+        execution: db_storage_execution_from_vector(execution.execution),
+        device_result: execution.device_result
+    )
+
+fn db_storage_offload_used_gpu(execution: DbStorageOffloadExecution) -> bool:
+    db_storage_profile_allows_gpu(execution)
+
+fn db_storage_profile_allows_gpu(execution: DbStorageOffloadExecution) -> bool:
+    if execution.profile.data_path == GpuWdbCoarseDataPath.CpuOnly:
+        return false
+    if not execution.profile.cpu_control_path:
+        return false
+    execution.gpu_dispatched

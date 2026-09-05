@@ -1,0 +1,158 @@
+# Mail HTML Rendering
+#
+# Renders the Mail surface of the office suite "like Gmail" as a styled HTML
+# fragment: a single message view and a mailbox list view (folder sidebar +
+# message list). Pure model -> CSS -> HTML transform with all styling inlined
+# (no <style> selector blocks, because `{`/`}` collide with Simple string
+# interpolation), so this path loads without the GUI widget stack.
+#
+# Kept separate from the widget-tree UI in `mail_app.spl` so the HTML export
+# stays a deterministic, testable model->HTML transform.
+
+use app.office.mail.message.{Email, EmailAddress, MailFolder, folder_name}
+use app.office.mail.mail_app.{MailApp}
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _html_escape(s: text) -> text:
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
+
+fn _sender_display(addr: EmailAddress) -> text:
+    """Compact sender label: the display name if present, else the address."""
+    if addr.name != "":
+        return addr.name
+    addr.address
+
+fn _preview(body: text, max_len: i32) -> text:
+    """First max_len characters of a body as a single-line preview."""
+    if body.len() <= max_len:
+        return body
+    "{body.substring(0, max_len)}..."
+
+fn _folder_unread(app: MailApp, folder: text) -> i32:
+    """Count unread emails in the named folder across the whole mailbox."""
+    var count: i32 = 0
+    for email in app.emails:
+        if email.folder == folder and not email.read:
+            count = count + 1
+    count
+
+# =========================================================================
+# Single message
+# =========================================================================
+
+fn render_message_html(msg: Email) -> text:
+    """Render one email as a styled HTML fragment: sender, subject, date and
+    body. An unread message renders its subject in bold."""
+    val sender = _html_escape(_sender_display(msg.from_addr))
+    val address = _html_escape(msg.from_addr.address)
+    val subject = _html_escape(msg.subject)
+    val date = _html_escape(msg.date)
+    val body = _html_escape(msg.body)
+    val subject_weight = if not msg.read: "700" else: "400"
+    val star = if msg.starred: "&#9733; " else: ""
+
+    val card_style = "font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1f2937; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px 24px; margin: 0 0 16px 0; background: #ffffff;"
+    val head_style = "display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;"
+    val sender_style = "font-size: 15px; font-weight: 600; color: #111827;"
+    val addr_style = "font-size: 13px; color: #6b7280;"
+    val date_style = "font-size: 13px; color: #6b7280; white-space: nowrap;"
+    val subject_style = "font-size: 18px; font-weight: {subject_weight}; margin: 4px 0 12px 0; color: #111827;"
+    val body_style = "font-size: 15px; line-height: 1.6; color: #374151; white-space: pre-wrap;"
+
+    var out = "<article class=\"mail-message\" style=\"{card_style}\">"
+    out = "{out}<div class=\"mail-message-head\" style=\"{head_style}\">"
+    out = "{out}<span class=\"mail-sender\" style=\"{sender_style}\">{sender} <span style=\"{addr_style}\">&lt;{address}&gt;</span></span>"
+    out = "{out}<span class=\"mail-date\" style=\"{date_style}\">{date}</span></div>"
+    out = "{out}<h2 class=\"mail-subject\" style=\"{subject_style}\">{star}{subject}</h2>"
+    out = "{out}<div class=\"mail-body\" style=\"{body_style}\">{body}</div>"
+    "{out}</article>"
+
+# =========================================================================
+# Mailbox list view
+# =========================================================================
+
+fn _sidebar_item_html(app: MailApp, folder: MailFolder, active_name: text) -> text:
+    val name = folder_name(folder)
+    val unread = _folder_unread(app, name)
+    val is_active = name == active_name
+    val bg = if is_active: "#e8f0fe" else: "transparent"
+    val weight = if unread > 0: "700" else: "400"
+    val color = if is_active: "#1a73e8" else: "#202124"
+    val item_style = "display: flex; justify-content: space-between; align-items: center; padding: 8px 20px; border-radius: 0 16px 16px 0; background: {bg}; color: {color}; font-size: 14px; font-weight: {weight};"
+    val esc_name = _html_escape(name)
+    var row = "<div class=\"mail-folder\" style=\"{item_style}\"><span>{esc_name}</span>"
+    if unread > 0:
+        val badge_style = "font-size: 12px; color: #5f6368;"
+        row = "{row}<span style=\"{badge_style}\">{unread}</span>"
+    "{row}</div>"
+
+fn _sidebar_html(app: MailApp) -> text:
+    val active_name = folder_name(app.active_folder)
+    val side_style = "width: 220px; flex: 0 0 220px; padding: 16px 0; border-right: 1px solid #e5e7eb; background: #ffffff;"
+    var out = "<nav class=\"mail-sidebar\" style=\"{side_style}\">"
+    for folder in app.folders:
+        out = "{out}{_sidebar_item_html(app, folder, active_name)}"
+    "{out}</nav>"
+
+fn _list_row_html(msg: Email) -> text:
+    val sender = _html_escape(_sender_display(msg.from_addr))
+    val subject = _html_escape(msg.subject)
+    val preview = _html_escape(_preview(msg.body, 60))
+    val date = _html_escape(msg.date)
+    val weight = if not msg.read: "700" else: "400"
+    val bg = if not msg.read: "#ffffff" else: "#f8f9fa"
+    val star = if msg.starred: "&#9733;" else: "&#9734;"
+    val star_color = if msg.starred: "#f4b400" else: "#dadce0"
+
+    val row_style = "display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid #f1f3f4; background: {bg}; font-family: -apple-system, Segoe UI, Roboto, sans-serif; font-size: 14px; font-weight: {weight};"
+    val star_style = "flex: 0 0 auto; color: {star_color};"
+    val sender_style = "flex: 0 0 180px; color: #202124; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+    val body_col_style = "flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #202124;"
+    val preview_style = "color: #5f6368; font-weight: 400;"
+    val date_style = "flex: 0 0 auto; color: #5f6368; font-size: 12px; white-space: nowrap;"
+
+    var out = "<div class=\"mail-row\" style=\"{row_style}\">"
+    out = "{out}<span style=\"{star_style}\">{star}</span>"
+    out = "{out}<span class=\"mail-row-sender\" style=\"{sender_style}\">{sender}</span>"
+    out = "{out}<span class=\"mail-row-subject\" style=\"{body_col_style}\">{subject} <span style=\"{preview_style}\">&mdash; {preview}</span></span>"
+    out = "{out}<span class=\"mail-row-date\" style=\"{date_style}\">{date}</span></div>"
+    out
+
+fn _list_html(app: MailApp) -> text:
+    val list_style = "flex: 1 1 auto; background: #ffffff;"
+    var out = "<section class=\"mail-list\" style=\"{list_style}\">"
+    for email in app.emails:
+        out = "{out}{_list_row_html(email)}"
+    "{out}</section>"
+
+fn render_mailbox_html(app: MailApp) -> text:
+    """Render the mailbox as a Gmail-like inbox: a folder sidebar with unread
+    badges next to a message list. All demo emails are listed. Styling is fully
+    inlined; the fragment references no external assets."""
+    val unread = app.unread_count()
+    val active_name = _html_escape(folder_name(app.active_folder))
+    val total = app.emails.len()
+
+    val shell_style = "font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #202124; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;"
+    val bar_style = "display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; background: #f6f8fa; border-bottom: 1px solid #e5e7eb;"
+    val title_style = "font-size: 18px; font-weight: 600; color: #202124;"
+    val meta_style = "font-size: 13px; color: #5f6368;"
+    val cols_style = "display: flex; align-items: stretch; min-height: 320px;"
+
+    var out = "<div class=\"mailbox\" style=\"{shell_style}\">"
+    out = "{out}<header class=\"mailbox-bar\" style=\"{bar_style}\">"
+    out = "{out}<span class=\"mailbox-title\" style=\"{title_style}\">Simple Mail &mdash; {active_name}</span>"
+    out = "{out}<span class=\"mailbox-meta\" style=\"{meta_style}\">{unread} unread / {total} messages</span></header>"
+    out = "{out}<div class=\"mailbox-cols\" style=\"{cols_style}\">"
+    out = "{out}{_sidebar_html(app)}"
+    out = "{out}{_list_html(app)}"
+    out = "{out}</div></div>"
+    out

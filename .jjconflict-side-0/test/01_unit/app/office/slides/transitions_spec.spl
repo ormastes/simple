@@ -1,0 +1,81 @@
+"""Slide transition + auto-advance timing spec.
+
+Verifies the presentation timeline model in `app.office.slides.transitions`:
+total auto-run duration, count of auto-advancing slides, PowerPoint
+`<p:transition>` XML export per slide, and the plain-text timeline summary.
+"""
+
+use std.spec
+use app.office.slides.transitions.{timing_new, timeline_new, timeline_add, timeline_total_ms, timeline_auto_slides, timing_to_pptx_xml, timeline_summary}
+
+describe "transitions: timeline totals":
+    """A 3-slide timeline sums transition + advance durations and counts
+    only the slides that auto-advance (advance_ms > 0)."""
+
+    it "computes the total auto-run duration across all slides":
+        val intro = timing_new("Intro", "fade", 500, 3000)
+        val body = timing_new("Body", "push", 800, 0)
+        val end_slide = timing_new("End", "wipe", 1000, 5000)
+        var timeline = timeline_new()
+        timeline = timeline_add(timeline, intro)
+        timeline = timeline_add(timeline, body)
+        timeline = timeline_add(timeline, end_slide)
+        expect(timeline_total_ms(timeline)).to_equal(10300)
+
+    it "counts only slides with advance_ms > 0 as auto-advancing":
+        val intro = timing_new("Intro", "fade", 500, 3000)
+        val body = timing_new("Body", "push", 800, 0)
+        val end_slide = timing_new("End", "wipe", 1000, 5000)
+        var timeline = timeline_new()
+        timeline = timeline_add(timeline, intro)
+        timeline = timeline_add(timeline, body)
+        timeline = timeline_add(timeline, end_slide)
+        expect(timeline_auto_slides(timeline)).to_equal(2)
+
+describe "transitions: PowerPoint XML export":
+    """Per-slide `<p:transition>` XML reflects transition kind, speed
+    bucket, and optional advTm attribute."""
+
+    it "renders a fade transition with fast speed and advTm for a 3000ms advance":
+        val intro = timing_new("Intro", "fade", 500, 3000)
+        val xml = timing_to_pptx_xml(intro)
+        expect(xml).to_contain("<p:transition")
+        expect(xml).to_contain("spd=\"fast\"")
+        expect(xml).to_contain("<p:fade")
+        expect(xml).to_contain("advTm=\"3000\"")
+
+    it "renders empty XML for a 'none' transition":
+        val silent = timing_new("Blank", "none", 0, 0)
+        val xml = timing_to_pptx_xml(silent)
+        expect(xml).to_equal("")
+
+    it "omits advTm entirely when advance_ms is 0":
+        val body = timing_new("Body", "push", 800, 0)
+        val xml = timing_to_pptx_xml(body)
+        expect(xml.find("advTm") < 0).to_equal(true)
+
+describe "transitions: plain-text summary":
+    """`timeline_summary` renders one human-readable line per slide."""
+
+    it "renders the first slide's summary line with title, transition, and timings":
+        val intro = timing_new("Intro", "fade", 500, 3000)
+        val body = timing_new("Body", "push", 800, 0)
+        var timeline = timeline_new()
+        timeline = timeline_add(timeline, intro)
+        timeline = timeline_add(timeline, body)
+        val summary = timeline_summary(timeline)
+        expect(summary[0]).to_equal("Intro: fade 500ms advance=3000ms")
+
+    describe "deliberate-fail probe (fixed to green)":
+        """A probe that intentionally asserted the wrong auto-slide count
+        first, to confirm the example is actually exercised, then corrected."""
+
+        it "has exactly two auto-advancing slides in the timeline":
+            val intro = timing_new("Intro", "fade", 500, 3000)
+            val body = timing_new("Body", "push", 800, 0)
+            val end_slide = timing_new("End", "wipe", 1000, 5000)
+            var timeline = timeline_new()
+            timeline = timeline_add(timeline, intro)
+            timeline = timeline_add(timeline, body)
+            timeline = timeline_add(timeline, end_slide)
+            expect(timeline_auto_slides(timeline)).to_equal(2)

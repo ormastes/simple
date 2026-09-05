@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/crypto/ocb3.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 3 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 1 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 1 ]
+[ "$(grep -c '_ocb3_new_u8(' "$module")" -eq 31 ]
+[ "$(grep -c 'rt_array_new_with_cap(' "$module")" -eq 2 ]
+[ "$(grep -c 'rt_bytes_u8_at(' "$module")" -eq 2 ]
+
+providers=0
+grep -q 'RuntimeFuncSpec::new("rt_bytes_u8_at"' "$registry" && providers=$((providers + 1))
+grep -q 'insert_simple!("rt_bytes_u8_at"' "$interpreter" && providers=$((providers + 1))
+[ "$providers" -eq 2 ]
+providers=0
+grep -q 'RuntimeFuncSpec::new("rt_array_new_with_cap"' "$registry" && providers=$((providers + 1))
+grep -q 'insert_simple!("rt_array_new_with_cap"' "$interpreter" && providers=$((providers + 1))
+[ "$providers" -eq 1 ]
+
+grep -q 'diff = diff | (_u8_at(tag_exp, ti) \^ _u8_at(tag_rcv, ti))' "$module"
+
+echo "OCB3 SFFI authority audit: PASS (31 former direct calls routed through 1 mandatory-inline capacity owner plus 1 unsafe byte owner; 1 both/1 one/0 no-provider; capacity hints and constant-time tag accumulator retained)"

@@ -1,0 +1,448 @@
+"""
+# Enterprise Channel Hub — generic adapter SPI + deterministic mock channel
+
+Channel Hub over `std.enterprise_store` (lane `.spipe/simple_enterprise_suite`,
+W5-C; design: doc/01_research/app/enterprise/
+simple_enterprise_suite_full_design_2026-08-14.md §8). Rollout step 1 ONLY:
+the generic adapter SPI and the mock channel. Amazon (and every other real
+provider) is explicitly FUTURE work behind the same SPI — no provider-specific
+field or call lives here or in any business module (§8.1).
+
+## SPI as a composition seam
+
+`ChannelAdapter` is a mode-struct like the outbox worker's `DispatchTarget`
+and the store's `StoreFaults` — a small value with a `kind`/`mode` field, NOT
+a captured-mutable-state closure (closures stored in structs are copied by
+value in the interpreter). Canonical operations (§8.1 subset for step 1):
+
+- `channel_publish_listing(adapter, sku, price)` -> (ok, external_listing_id)
+- `channel_update_quantity(adapter, sku, qty)` -> ok
+- `channel_fetch_orders(adapter, cursor)` -> ChannelFetch(ok, orders, next_cursor)
+- `channel_acknowledge_order(adapter, external_id)` -> ok
+
+The mock adapter is fully deterministic: it is configured with a scripted
+order list and pages through it by numeric cursor; `fail_at_cursor` simulates
+a provider error at an exact page so retry/checkpoint specs are repeatable.
+
+## Hub state (insert-only, both backends)
+
+All hub tables are insert-only + derive, filtered in pure Simple (the
+interpreter rt_sqlite emulation has no UPDATE/WHERE — see store.spl):
+
+- `channel_accounts` — per (tenant, channel) status rows; LATEST row wins
+  ("enabled" | "killed"). The kill switch (§8.2) is one more insert; a killed
+  channel denies every hub operation with the closed reason `forbidden`.
+- `channel_listings` — sku <-> external listing id mapping rows.
+- `channel_inbox` — one row per imported external order, dedup key is the
+  external order id: an already-imported order is a recorded result and
+  produces exactly ONE internal effect ever (§9.3 exactly-once rule).
+- `channel_checkpoints` — import cursor rows; LATEST row wins, so an import
+  resumes from the last committed cursor after a restart or crash.
+- `channel_acks` — acknowledgement rows per external order.
+
+## Import contract
+
+`channel_import_orders` runs the frozen guarded sequence
+(session -> rbac -> domain/kill -> per-order idempotency -> effects). Each
+new external order becomes an internal order via `sale_place_order` with the
+idempotency key derived from the external order id
+(`chan:<channel>:<external_id>`) — the sale vertical's own idempotency makes
+the internal effect exactly-once even across inbox corruption. A provider
+failure mid-batch leaves the checkpoint at the last successful page:
+at-least-once fetch, exactly-once effect via dedup.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit
+}
+use std.nogc_sync_mut.enterprise_store.records.{audit_append}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, Money,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{sale_place_order}
+
+# =============================================================================
+# Schema (insert-only)
+# =============================================================================
+
+# channel_setup applies the hub's migrations once. Idempotent.
+fn channel_setup(store: EnterpriseStore) -> bool:
+    var ok = store_migrate(store, "channel_001_accounts",
+        "CREATE TABLE IF NOT EXISTS channel_accounts (id INTEGER PRIMARY KEY, tenant_id TEXT, channel_id TEXT, adapter_kind TEXT, status TEXT)")
+    ok = ok and store_migrate(store, "channel_002_listings",
+        "CREATE TABLE IF NOT EXISTS channel_listings (id INTEGER PRIMARY KEY, tenant_id TEXT, channel_id TEXT, sku TEXT, external_listing_id TEXT)")
+    ok = ok and store_migrate(store, "channel_003_inbox",
+        "CREATE TABLE IF NOT EXISTS channel_inbox (id INTEGER PRIMARY KEY, tenant_id TEXT, channel_id TEXT, external_order_id TEXT, sku TEXT, qty TEXT, order_id TEXT)")
+    ok = ok and store_migrate(store, "channel_004_checkpoints",
+        "CREATE TABLE IF NOT EXISTS channel_checkpoints (id INTEGER PRIMARY KEY, tenant_id TEXT, channel_id TEXT, cursor TEXT)")
+    ok = ok and store_migrate(store, "channel_005_acks",
+        "CREATE TABLE IF NOT EXISTS channel_acks (id INTEGER PRIMARY KEY, tenant_id TEXT, channel_id TEXT, external_order_id TEXT)")
+    ok
+
+# =============================================================================
+# Adapter SPI — mode-struct composition seam (mock is the only kind in step 1)
+# =============================================================================
+
+# One scripted external order on the mock channel.
+struct ChannelOrder:
+    external_id: text
+    sku: text
+    qty: i64
+
+# ChannelAdapter — the SPI seam. `kind` selects the provider implementation
+# ("mock" today; "amazon" etc. are FUTURE kinds behind this same struct).
+# The remaining fields configure the deterministic mock:
+#   mode: "ok" | "fail_all" | "fail_at_cursor"
+#   fail_cursor: the cursor value whose fetch fails when mode=="fail_at_cursor"
+#   page_size: orders returned per fetch_orders page
+#   orders: the scripted order list, paged by numeric cursor
+struct ChannelAdapter:
+    kind: text
+    mode: text
+    fail_cursor: text
+    page_size: i64
+    orders: [ChannelOrder]
+
+fn mock_channel(orders: [ChannelOrder], page_size: i64) -> ChannelAdapter:
+    ChannelAdapter(kind: "mock", mode: "ok", fail_cursor: "", page_size: page_size, orders: orders)
+
+fn mock_channel_failing(orders: [ChannelOrder], page_size: i64, fail_cursor: text) -> ChannelAdapter:
+    ChannelAdapter(kind: "mock", mode: "fail_at_cursor", fail_cursor: fail_cursor, page_size: page_size, orders: orders)
+
+fn mock_channel_down(orders: [ChannelOrder], page_size: i64) -> ChannelAdapter:
+    ChannelAdapter(kind: "mock", mode: "fail_all", fail_cursor: "", page_size: page_size, orders: orders)
+
+# channel_publish_listing pushes one listing to the provider. The mock is
+# deterministic: external listing id is derived from the sku.
+fn channel_publish_listing(adapter: ChannelAdapter, sku: text, price: Money) -> (bool, text):
+    if adapter.mode == "fail_all":
+        return (false, "")
+    if sku == "" or price.amount_cents <= 0:
+        return (false, "")
+    (true, "ext-listing-" + sku)
+
+fn channel_update_quantity(adapter: ChannelAdapter, sku: text, qty: i64) -> bool:
+    if adapter.mode == "fail_all":
+        return false
+    sku != "" and qty >= 0
+
+# Result of one fetch_orders page. `next_cursor` is the cursor to persist and
+# resume from; orders is empty when the script is exhausted.
+struct ChannelFetch:
+    ok: bool
+    orders: [ChannelOrder]
+    next_cursor: text
+
+fn cursor_index(cursor: text) -> i64:
+    if cursor == "":
+        return 0
+    int(cursor)
+
+# channel_fetch_orders pages through the mock's scripted orders. Cursor "" or
+# "0" is the start; each page advances by page_size. fail_at_cursor makes the
+# fetch AT that cursor fail (provider error) — everything before it succeeds.
+fn channel_fetch_orders(adapter: ChannelAdapter, cursor: text) -> ChannelFetch:
+    if adapter.mode == "fail_all":
+        return ChannelFetch(ok: false, orders: [], next_cursor: cursor)
+    if adapter.mode == "fail_at_cursor" and cursor_index(cursor) == cursor_index(adapter.fail_cursor):
+        return ChannelFetch(ok: false, orders: [], next_cursor: cursor)
+    val start = cursor_index(cursor)
+    var page: [ChannelOrder] = []
+    var i = start
+    while i < adapter.orders.len() and i < start + adapter.page_size:
+        page.push(adapter.orders[i])
+        i = i + 1
+    ChannelFetch(ok: true, orders: page, next_cursor: "{i}")
+
+fn channel_acknowledge_order(adapter: ChannelAdapter, external_id: text) -> bool:
+    if adapter.mode == "fail_all":
+        return false
+    external_id != ""
+
+# =============================================================================
+# Channel accounts and kill switch (insert-only; latest row wins)
+# =============================================================================
+
+# channel_status derives the account's current status from its row stream:
+# "" (never registered) -> "enabled" -> ... -> latest wins.
+fn channel_status(store: EnterpriseStore, tenant_id: text, channel_id: text) -> text:
+    var status = ""
+    for row in store_rows(store, "channel_accounts", "id, tenant_id, channel_id, adapter_kind, status"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "channel_id") == channel_id:
+            status = sqlite_row_get(row, "status")
+    status
+
+fn channel_enabled(store: EnterpriseStore, tenant_id: text, channel_id: text) -> bool:
+    channel_status(store, tenant_id, channel_id) == "enabled"
+
+# channel_register enables a channel account for the tenant (guarded, admin).
+fn channel_register(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, channel_id: text, adapter_kind: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", channel_id)
+    if not role_allows(who.role, "channel.admin"):
+        return denied("forbidden", channel_id)
+    if channel_id == "" or adapter_kind == "":
+        return denied("invalid-record", channel_id)
+    store_insert_row(store,
+        "INSERT INTO channel_accounts (tenant_id, channel_id, adapter_kind, status) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, channel_id, adapter_kind, "enabled"])
+    audit_append(store, tenant.tenant_id, who.actor_id, "channel.register", channel_id + ":" + adapter_kind)
+    accepted(channel_id)
+
+# channel_kill flips the kill switch: one more insert-only status row. Every
+# hub operation on a killed channel is denied with reason `forbidden`.
+fn channel_kill(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, channel_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", channel_id)
+    if not role_allows(who.role, "channel.admin"):
+        return denied("forbidden", channel_id)
+    if channel_status(store, tenant.tenant_id, channel_id) == "":
+        return denied("not-found", channel_id)
+    store_insert_row(store,
+        "INSERT INTO channel_accounts (tenant_id, channel_id, adapter_kind, status) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, channel_id, "", "killed"])
+    audit_append(store, tenant.tenant_id, who.actor_id, "channel.kill", channel_id)
+    accepted(channel_id)
+
+# =============================================================================
+# Listing mapping (sku <-> external listing id)
+# =============================================================================
+
+# channel_list_product publishes a listing through the adapter and records the
+# sku <-> external-listing-id mapping row. Guarded; killed channel denies.
+fn channel_list_product(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, adapter: ChannelAdapter, channel_id: text, sku: text, price: Money) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", sku)
+    if not role_allows(who.role, "channel.admin"):
+        return denied("forbidden", sku)
+    if not channel_enabled(store, tenant.tenant_id, channel_id):
+        return denied("forbidden", channel_id)
+    val (ok, ext_id) = channel_publish_listing(adapter, sku, price)
+    if not ok:
+        return denied("store-error", sku)
+    store_insert_row(store,
+        "INSERT INTO channel_listings (tenant_id, channel_id, sku, external_listing_id) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, channel_id, sku, ext_id])
+    audit_append(store, tenant.tenant_id, who.actor_id, "channel.listing.publish", sku + ":" + ext_id)
+    accepted(ext_id)
+
+# channel_listing_external_id derives the sku's latest external listing id.
+fn channel_listing_external_id(store: EnterpriseStore, tenant_id: text, channel_id: text, sku: text) -> text:
+    var ext = ""
+    for row in store_rows(store, "channel_listings", "id, tenant_id, channel_id, sku, external_listing_id"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "channel_id") == channel_id and sqlite_row_get(row, "sku") == sku:
+            ext = sqlite_row_get(row, "external_listing_id")
+    ext
+
+# =============================================================================
+# Import cursor / checkpoint (insert-only; latest row wins)
+# =============================================================================
+
+fn channel_cursor(store: EnterpriseStore, tenant_id: text, channel_id: text) -> text:
+    var cursor = ""
+    for row in store_rows(store, "channel_checkpoints", "id, tenant_id, channel_id, cursor"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "channel_id") == channel_id:
+            cursor = sqlite_row_get(row, "cursor")
+    cursor
+
+fn checkpoint_count(store: EnterpriseStore, tenant_id: text, channel_id: text) -> int:
+    var n = 0
+    for row in store_rows(store, "channel_checkpoints", "id, tenant_id, channel_id, cursor"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "channel_id") == channel_id:
+            n = n + 1
+    n
+
+# =============================================================================
+# Inbox (dedup by external order id)
+# =============================================================================
+
+fn inbox_seen(store: EnterpriseStore, tenant_id: text, channel_id: text, external_order_id: text) -> bool:
+    for row in store_rows(store, "channel_inbox", "id, tenant_id, channel_id, external_order_id, sku, qty, order_id"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "channel_id") == channel_id and sqlite_row_get(row, "external_order_id") == external_order_id:
+            return true
+    false
+
+fn channel_inbox_count(store: EnterpriseStore, tenant_id: text, channel_id: text) -> int:
+    var n = 0
+    for row in store_rows(store, "channel_inbox", "id, tenant_id, channel_id, external_order_id, sku, qty, order_id"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "channel_id") == channel_id:
+            n = n + 1
+    n
+
+fn acked_ids(store: EnterpriseStore, tenant_id: text, channel_id: text) -> [text]:
+    var ids: [text] = []
+    for row in store_rows(store, "channel_acks", "id, tenant_id, channel_id, external_order_id"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "channel_id") == channel_id:
+            ids.push(sqlite_row_get(row, "external_order_id"))
+    ids
+
+fn id_listed(ids: [text], id: text) -> bool:
+    for x in ids:
+        if x == id:
+            return true
+    false
+
+# =============================================================================
+# Import flow — guarded, checkpointed, exactly-once effect via dedup
+# =============================================================================
+
+struct ImportReport:
+    ok: bool
+    reason: text       # closed set: accepted | invalid-session | forbidden | store-error
+    fetched: int       # external orders returned by the provider this run
+    imported: int      # NEW internal orders created this run
+    duplicates: int    # already-imported orders skipped (recorded result)
+    cursor: text       # committed checkpoint after this run
+
+fn import_denied(reason: text) -> ImportReport:
+    ImportReport(ok: false, reason: reason, fetched: 0, imported: 0, duplicates: 0, cursor: "")
+
+# channel_import_orders pulls up to `max_batch` external orders from the
+# adapter, resuming at the persisted checkpoint. Frozen guarded sequence:
+# session -> rbac -> domain/kill -> per-order idempotency -> effects.
+# Each NEW external order creates one internal order via sale_place_order
+# (idempotency key chan:<channel>:<external_id>) and one inbox row in one
+# unit of work; the checkpoint is recorded after each successful page. A
+# provider failure mid-batch stops the loop with the cursor at the last
+# success — the rerun resumes there, and dedup keeps effects exactly-once.
+fn channel_import_orders(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, adapter: ChannelAdapter, channel_id: text, max_batch: i64) -> ImportReport:
+    if not session_valid(session, tenant, who):
+        return import_denied("invalid-session")
+    if not role_allows(who.role, "channel.import"):
+        return import_denied("forbidden")
+    if not channel_enabled(store, tenant.tenant_id, channel_id):
+        return import_denied("forbidden")
+
+    var cursor = channel_cursor(store, tenant.tenant_id, channel_id)
+    var fetched = 0
+    var imported = 0
+    var duplicates = 0
+    var provider_ok = true
+    while fetched < max_batch:
+        val page = channel_fetch_orders(adapter, cursor)
+        if not page.ok:
+            provider_ok = false
+            break
+        if page.orders.len() == 0:
+            break
+        for order in page.orders:
+            fetched = fetched + 1
+            if inbox_seen(store, tenant.tenant_id, channel_id, order.external_id):
+                # Already imported — recorded result, exactly one internal
+                # effect ever for this external order id.
+                duplicates = duplicates + 1
+                continue
+            val order_env = CommandEnvelope(
+                request_id: envelope.request_id,
+                idempotency_key: "chan:" + channel_id + ":" + order.external_id,
+                action: "channel.order.import",
+                payload: order.external_id)
+            val internal_id = "chan-" + channel_id + "-" + order.external_id
+            val placed = sale_place_order(store, session, tenant, who, order_env, internal_id, order.sku, order.qty)
+            if not placed.ok:
+                # Domain rejection (unknown sku, no stock): recorded in the
+                # inbox with an empty internal order id so reconcile flags it.
+                uow_begin(store)
+                store_insert_row(store,
+                    "INSERT INTO channel_inbox (tenant_id, channel_id, external_order_id, sku, qty, order_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    [tenant.tenant_id, channel_id, order.external_id, order.sku, "{order.qty}", ""])
+                audit_append(store, tenant.tenant_id, who.actor_id, "channel.order.reject", order.external_id + ":" + placed.reason)
+                uow_commit(store)
+                continue
+            uow_begin(store)
+            store_insert_row(store,
+                "INSERT INTO channel_inbox (tenant_id, channel_id, external_order_id, sku, qty, order_id) VALUES (?, ?, ?, ?, ?, ?)",
+                [tenant.tenant_id, channel_id, order.external_id, order.sku, "{order.qty}", internal_id])
+            audit_append(store, tenant.tenant_id, who.actor_id, "channel.order.import", order.external_id + ":" + internal_id)
+            uow_commit(store)
+            imported = imported + 1
+        # Page fully processed — commit the checkpoint so a restart resumes here.
+        cursor = page.next_cursor
+        store_insert_row(store,
+            "INSERT INTO channel_checkpoints (tenant_id, channel_id, cursor) VALUES (?, ?, ?)",
+            [tenant.tenant_id, channel_id, cursor])
+    val reason = if provider_ok: "accepted" else: "store-error"
+    ImportReport(ok: provider_ok, reason: reason, fetched: fetched, imported: imported, duplicates: duplicates, cursor: cursor)
+
+# =============================================================================
+# Acknowledge flow
+# =============================================================================
+
+# channel_ack_order acknowledges one imported external order back to the
+# provider and records the ack row. Guarded; killed channel denies; an order
+# never imported is not-found; a repeated ack is a recorded duplicate-key.
+fn channel_ack_order(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, adapter: ChannelAdapter, channel_id: text, external_order_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", external_order_id)
+    if not role_allows(who.role, "channel.import"):
+        return denied("forbidden", external_order_id)
+    if not channel_enabled(store, tenant.tenant_id, channel_id):
+        return denied("forbidden", channel_id)
+    if not inbox_seen(store, tenant.tenant_id, channel_id, external_order_id):
+        return denied("not-found", external_order_id)
+    if id_listed(acked_ids(store, tenant.tenant_id, channel_id), external_order_id):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: external_order_id)
+    if not channel_acknowledge_order(adapter, external_order_id):
+        return denied("store-error", external_order_id)
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO channel_acks (tenant_id, channel_id, external_order_id) VALUES (?, ?, ?)",
+        [tenant.tenant_id, channel_id, external_order_id])
+    audit_append(store, tenant.tenant_id, who.actor_id, "channel.order.ack", external_order_id)
+    uow_commit(store)
+    accepted(external_order_id)
+
+# =============================================================================
+# Reconciliation — inconsistency detection as data, not prints
+# =============================================================================
+
+struct ChannelReconcileReport:
+    inbox_total: int
+    imported_count: int          # inbox rows that DID produce an internal order
+    orphan_external_ids: [text]  # inbox rows WITHOUT an internal order (rejected/corrupt)
+    unacked_external_ids: [text] # imported but never acknowledged to the provider
+    checkpoints_recorded: int
+    last_cursor: text
+
+# channel_reconcile scans one tenant+channel's hub state (§8.2: periodic full
+# reconciliation, never notification-only trust) and reports inbox rows with
+# no internal order, internal orders never acked, and checkpoint stats.
+fn channel_reconcile(store: EnterpriseStore, tenant_id: text, channel_id: text) -> ChannelReconcileReport:
+    val acked = acked_ids(store, tenant_id, channel_id)
+    var total = 0
+    var imported = 0
+    var orphans: [text] = []
+    var unacked: [text] = []
+    for row in store_rows(store, "channel_inbox", "id, tenant_id, channel_id, external_order_id, sku, qty, order_id"):
+        if sqlite_row_get(row, "tenant_id") != tenant_id or sqlite_row_get(row, "channel_id") != channel_id:
+            continue
+        total = total + 1
+        val ext_id = sqlite_row_get(row, "external_order_id")
+        if sqlite_row_get(row, "order_id") == "":
+            orphans.push(ext_id)
+            continue
+        imported = imported + 1
+        if not id_listed(acked, ext_id):
+            unacked.push(ext_id)
+    ChannelReconcileReport(
+        inbox_total: total,
+        imported_count: imported,
+        orphan_external_ids: orphans,
+        unacked_external_ids: unacked,
+        checkpoints_recorded: checkpoint_count(store, tenant_id, channel_id),
+        last_cursor: channel_cursor(store, tenant_id, channel_id))
+
+export ChannelOrder, ChannelAdapter, ChannelFetch
+export mock_channel, mock_channel_failing, mock_channel_down
+export channel_publish_listing, channel_update_quantity, channel_fetch_orders, channel_acknowledge_order
+export channel_setup
+export channel_status, channel_enabled, channel_register, channel_kill
+export channel_list_product, channel_listing_external_id
+export channel_cursor, channel_inbox_count
+export ImportReport, channel_import_orders
+export channel_ack_order
+export ChannelReconcileReport, channel_reconcile

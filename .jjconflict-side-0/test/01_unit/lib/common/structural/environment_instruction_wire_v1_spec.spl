@@ -1,0 +1,122 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-015 REQ-016 REQ-017 NFR-005 NFR-006
+
+use std.spec.*
+use std.common.structural.environment_instruction.*
+
+fn put_i64(bytes: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 8:
+        bytes[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+
+fn frame(sequence: i64 = 0, opcode: i64 = 1) -> [u8]:
+    var bytes: [u8] = [0u8; 128]
+    put_i64(bytes, 0, ENV_WIRE_MAGIC_V1)
+    put_i64(bytes, 8, ENV_INSTRUCTION_SCHEMA_VERSION)
+    put_i64(bytes, 16, 128)
+    put_i64(bytes, 24, 1)
+    put_i64(bytes, 32, ENV_INSTRUCTION_SCHEMA_VERSION)
+    put_i64(bytes, 40, 17)
+    put_i64(bytes, 48, sequence)
+    put_i64(bytes, 56, opcode)
+    put_i64(bytes, 64, 21)
+    put_i64(bytes, 72, 0)
+    put_i64(bytes, 80, 0)
+    put_i64(bytes, 88, 2)
+    put_i64(bytes, 96, 8)
+    put_i64(bytes, 104, 4)
+    put_i64(bytes, 112, 4)
+    put_i64(bytes, 120, 16)
+    bytes
+
+describe "bounded environment instruction wire V1":
+    it "decodes one exact versioned record without allocating output":
+        val bytes = frame()
+        val step = env_wire_decode_next_v1(
+            env_wire_decoder_v1(bytes, 1), bytes)
+
+        expect(step.accepted).to_be(true)
+        expect(env_wire_decoder_complete_v1(step.cursor)).to_be(true)
+        expect(step.instruction.invocation_id).to_equal(17)
+        expect(step.instruction.opcode).to_equal(EnvOpcodeV1.FileRead)
+
+    it "fails closed for unknown opcode and wrong version":
+        val unknown = frame(opcode: 99)
+        val unknown_step = env_wire_decode_next_v1(
+            env_wire_decoder_v1(unknown, 1), unknown)
+        val wrong_version = frame()
+        put_i64(wrong_version, 8, 2)
+        val version = env_wire_decoder_v1(wrong_version, 1)
+
+        expect(unknown_step.accepted).to_be(false)
+        expect(unknown_step.cursor.evidence.error_code).to_equal(
+            ENV_WIRE_ERROR_OPCODE_V1)
+        expect(version.evidence.error_code).to_equal(
+            ENV_WIRE_ERROR_VERSION_V1)
+
+    it "rejects missing extra and capacity-overflow frames exactly":
+        val missing: [u8] = [0u8; 127]
+        val extra: [u8] = [0u8; 129]
+        val valid = frame()
+        var i = 0
+        while i < 127:
+            missing[i] = valid[i]
+            i = i + 1
+        i = 0
+        while i < 128:
+            extra[i] = valid[i]
+            i = i + 1
+        val missing_result = env_wire_decoder_v1(missing, 1)
+        val extra_result = env_wire_decoder_v1(extra, 1)
+        val overflow = env_wire_decoder_v1(valid, 0)
+
+        expect(missing_result.evidence.error_code).to_equal(
+            ENV_WIRE_ERROR_LENGTH_V1)
+        expect(extra_result.evidence.error_code).to_equal(
+            ENV_WIRE_ERROR_LENGTH_V1)
+        expect(overflow.evidence.status).to_equal(
+            EnvInstructionStatusV1.Overflow)
+
+    it "rejects reordered duplicate and post-completion records":
+        val reordered = frame(sequence: 1)
+        val reordered_step = env_wire_decode_next_v1(
+            env_wire_decoder_v1(reordered, 1), reordered)
+        val valid = frame()
+        val first = env_wire_decode_next_v1(
+            env_wire_decoder_v1(valid, 1), valid)
+        val duplicate = env_wire_decode_next_v1(first.cursor, valid)
+
+        expect(reordered_step.cursor.evidence.error_code).to_equal(
+            ENV_WIRE_ERROR_SEQUENCE_V1)
+        expect(duplicate.accepted).to_be(false)
+        expect(duplicate.cursor.evidence.error_code).to_equal(
+            ENV_WIRE_ERROR_TRAILING_V1)
+
+    it "feeds decoded records through the tagged extraction owner":
+        val bytes = frame()
+        val decoder = env_wire_decoder_v1(bytes, 1)
+        val binding = rt_hal_environment_binding_v1(
+            rt_hal_environment_operation_for_opcode_v1(EnvOpcodeV1.FileRead),
+            17, 1)
+        val step = rt_hal_environment_decode_wire_next_v1(
+            binding, decoder, bytes)
+        val sealed = rt_hal_environment_binding_seal_v1(step.binding)
+
+        expect(step.accepted).to_be(true)
+        expect(env_wire_decoder_complete_v1(step.decoder)).to_be(true)
+        expect(rt_hal_environment_binding_complete_v1(sealed)).to_be(true)
+
+    it "seals tagged extraction without advancing on decoder failure":
+        val bytes = frame(opcode: 99)
+        val binding = rt_hal_environment_binding_v1(
+            rt_hal_environment_operation_for_opcode_v1(EnvOpcodeV1.FileOpen),
+            17, 1)
+        val step = rt_hal_environment_decode_wire_next_v1(
+            binding, env_wire_decoder_v1(bytes, 1), bytes)
+
+        expect(step.accepted).to_be(false)
+        expect(step.binding.extraction.sealed).to_be(true)
+        expect(step.binding.extraction.instruction_count).to_equal(0)
+        expect(step.binding.extraction.status).to_equal(
+            EnvInstructionStatusV1.InvalidInstruction)

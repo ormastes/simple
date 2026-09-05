@@ -1,0 +1,289 @@
+# ============================================================================
+# common/search/ann.spl — approximate nearest-neighbor vector search (Phase 2)
+#
+# Two cooperating pieces over the behavior-carrying `Embedding<D>` custom type
+# (src/lib/common/search/types.spl):
+#
+#   1. ExactKnn   — the ORACLE. Exact brute-force k-nearest-neighbor by integer
+#                   squared-L2 distance. Deterministic tie-break: distance asc,
+#                   then id asc. This is the independent ground truth ANN is
+#                   measured against.
+#   2. IvfIndex   — an APPROXIMATE index (IVF: inverted-file / cluster + probe).
+#                   Points are assigned to the nearest of a few centroids; a
+#                   query brute-forces only the `nprobe` nearest clusters. The
+#                   returned neighbors are approximate; callers measure RECALL
+#                   against ExactKnn.
+#
+# WHY FIXED-POINT INTEGERS: f64 is unreliable across this repo's backends
+# (MEMORY: f64 Unreliable All Backends — interpreter returns 0.0, native cores).
+# Every distance here is an integer squared-L2 over `Embedding.fixed` ([i64]),
+# so distances are exact and the oracle is bit-for-bit verifiable. We never call
+# Embedding.dot()/l2_sq() (the f64 path) on the correctness path.
+#
+# KNOWN BUGS designed around:
+#   * no for-in over custom structs → all traversal is index/counter loops
+#   * `text + i64` garbage → no string interpolation of ints in hot paths
+#
+# Plan: doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md
+# ============================================================================
+
+use std.common.search.types.{Embedding, Score}
+
+# ----------------------------------------------------------------------------
+# Pairwise integer squared-L2 distance over fixed-point components.
+# ----------------------------------------------------------------------------
+# Embedding only carries `l2_sq_fixed()` (self-norm); ANN needs the squared
+# distance BETWEEN two vectors. Computed here, integer-only, so it is exact.
+fn l2_sq_distance(a: Embedding<D>, b: Embedding<D>) -> i64:
+    """Squared Euclidean distance between two embeddings over fixed-point
+    components. Integer-only (no sqrt, no f64) so it is exactly reproducible.
+    Lower means closer. Uses the shorter dimension if they disagree."""
+    val av = a.fixed
+    val bv = b.fixed
+    var n = av.len()
+    if bv.len() < n:
+        n = bv.len()
+    var acc = 0
+    var i = 0
+    while i < n:
+        val d = av[i] - bv[i]
+        acc = acc + d * d
+        i = i + 1
+    acc
+
+# ----------------------------------------------------------------------------
+# Neighbor — a typed (id, distance) result so call sites never juggle two raw
+# i64s. Distance is the integer squared-L2 (lower = closer). `score()` exposes
+# the value as an ordered Score (higher = better) for top-k ranking reuse.
+# ----------------------------------------------------------------------------
+struct Neighbor:
+    """A ranked search result: the document `id` and its integer squared-L2
+    `dist` to the query. Lower `dist` is nearer."""
+    id: i64
+    dist: i64
+
+impl Neighbor:
+    static fn of(id: i64, dist: i64) -> Neighbor:
+        Neighbor(id: id, dist: dist)
+
+    fn doc_id() -> i64:
+        self.id
+
+    fn distance() -> i64:
+        self.dist
+
+    fn score() -> Score:
+        """Closer = higher score. Negate distance so Score's higher-is-better
+        ordering matches nearest-first. Stays on the integer path."""
+        Score.from_raw(0 - self.dist)
+
+    fn is_nearer_than(other: Neighbor) -> bool:
+        """Deterministic order: smaller distance first, then smaller id."""
+        if self.dist < other.dist:
+            return true
+        if self.dist > other.dist:
+            return false
+        self.id < other.id
+
+# ----------------------------------------------------------------------------
+# Shared: sort a Neighbor list ascending (nearest first), deterministic ties.
+# ----------------------------------------------------------------------------
+# Insertion sort (small k); uses Neighbor.is_nearer_than for the total order.
+fn sort_neighbors(items: [Neighbor]) -> [Neighbor]:
+    """Return a new list sorted nearest-first (distance asc, id asc)."""
+    var out: [Neighbor] = []
+    var i = 0
+    while i < items.len():
+        out.push(items[i])
+        i = i + 1
+    var a = 1
+    while a < out.len():
+        val key = out[a]
+        var b = a - 1
+        # Shift larger elements right.
+        while b >= 0 and key.is_nearer_than(out[b]):
+            out[b + 1] = out[b]
+            b = b - 1
+        out[b + 1] = key
+        a = a + 1
+    out
+
+# Take the first k (or fewer) of an already-sorted list.
+fn take_k(sorted: [Neighbor], k: i64) -> [Neighbor]:
+    var out: [Neighbor] = []
+    var i = 0
+    while i < sorted.len() and i < k:
+        out.push(sorted[i])
+        i = i + 1
+    out
+
+# ----------------------------------------------------------------------------
+# ExactKnn — the ORACLE. Exact brute-force kNN over all stored points.
+# ----------------------------------------------------------------------------
+struct ExactKnn:
+    """Exact brute-force k-nearest-neighbor index — the ground-truth oracle.
+    Stores points and their ids in parallel index-aligned arrays (no for-in over
+    custom structs). Query scans every point: O(n*dim)."""
+    ids: [i64]
+    points: [Embedding<D>]
+
+impl ExactKnn:
+    static fn new() -> ExactKnn:
+        ExactKnn(ids: [], points: [])
+
+    me add(id: i64, point: Embedding<D>):
+        """Insert a point with its id (self-mutating)."""
+        self.ids.push(id)
+        self.points.push(point)
+
+    fn size() -> i64:
+        self.ids.len()
+
+    fn query(q: Embedding<D>, k: i64) -> [Neighbor]:
+        """Return the exact k nearest neighbors, nearest-first, ties by id."""
+        var cand: [Neighbor] = []
+        var i = 0
+        while i < self.points.len():
+            val d = l2_sq_distance(q, self.points[i])
+            cand.push(Neighbor.of(self.ids[i], d))
+            i = i + 1
+        val sorted = sort_neighbors(cand)
+        take_k(sorted, k)
+
+    fn nearest_id(q: Embedding<D>) -> i64:
+        """Convenience: id of the single nearest point (-1 if empty)."""
+        val top = self.query(q, 1)
+        if top.len() == 0:
+            return 0 - 1
+        top[0].doc_id()
+
+# ----------------------------------------------------------------------------
+# IvfIndex — APPROXIMATE: inverted-file (cluster + probe).
+# ----------------------------------------------------------------------------
+# Build: pick `nlist` centroids (the first nlist inserted points act as seeds —
+# deterministic, no f64 k-means averaging needed), then assign every point to
+# its nearest centroid cluster. Query: rank centroids by distance to the query,
+# brute-force only the points in the `nprobe` nearest clusters, then return the
+# k nearest of those candidates. Higher nprobe → higher recall → toward exact.
+#
+# All integer-only; identical distance fn as the oracle, so recall is honestly
+# comparable.
+struct IvfIndex:
+    """Approximate NN index via coarse clustering. `centroids` are seed points;
+    `assign[p]` is the cluster id of point p. Index-aligned arrays only."""
+    nlist: i64
+    nprobe: i64
+    ids: [i64]
+    points: [Embedding<D>]
+    centroids: [Embedding<D>]
+    assign: [i64]
+
+impl IvfIndex:
+    static fn new(nlist: i64, nprobe: i64) -> IvfIndex:
+        """`nlist` clusters; query probes the `nprobe` nearest of them."""
+        IvfIndex(nlist: nlist, nprobe: nprobe, ids: [], points: [], centroids: [], assign: [])
+
+    me add(id: i64, point: Embedding<D>):
+        """Insert a point. The first `nlist` inserts also seed centroids; every
+        point is assigned to its nearest existing centroid."""
+        self.ids.push(id)
+        self.points.push(point)
+        # Seed a new centroid until we have nlist of them.
+        if self.centroids.len() < self.nlist:
+            self.centroids.push(point)
+        # Assign this point to the nearest centroid currently known.
+        val c = self.nearest_centroid(point)
+        self.assign.push(c)
+
+    fn size() -> i64:
+        self.ids.len()
+
+    fn cluster_count() -> i64:
+        self.centroids.len()
+
+    fn nearest_centroid(point: Embedding<D>) -> i64:
+        """Index of the closest centroid to `point` (-1 if none)."""
+        var best = 0 - 1
+        var best_d = 0
+        var c = 0
+        while c < self.centroids.len():
+            val d = l2_sq_distance(point, self.centroids[c])
+            if best < 0 or d < best_d:
+                best = c
+                best_d = d
+            c = c + 1
+        best
+
+    fn probe_order(q: Embedding<D>) -> [i64]:
+        """Centroid ids ordered nearest-first to the query (selection sort)."""
+        # Build (centroid id, dist) as Neighbors and reuse the sorter.
+        var cs: [Neighbor] = []
+        var c = 0
+        while c < self.centroids.len():
+            val d = l2_sq_distance(q, self.centroids[c])
+            cs.push(Neighbor.of(c, d))
+            c = c + 1
+        val sorted = sort_neighbors(cs)
+        var order: [i64] = []
+        var i = 0
+        while i < sorted.len():
+            order.push(sorted[i].doc_id())
+            i = i + 1
+        order
+
+    fn query(q: Embedding<D>, k: i64) -> [Neighbor]:
+        """Approximate kNN: scan only points in the nprobe nearest clusters."""
+        val order = self.probe_order(q)
+        # Mark which clusters we probe.
+        var probe_n = self.nprobe
+        if probe_n > order.len():
+            probe_n = order.len()
+        var cand: [Neighbor] = []
+        var p = 0
+        while p < self.points.len():
+            val cl = self.assign[p]
+            # Is this point's cluster among the first probe_n probed clusters?
+            var probed = false
+            var oi = 0
+            while oi < probe_n:
+                if order[oi] == cl:
+                    probed = true
+                oi = oi + 1
+            if probed:
+                val d = l2_sq_distance(q, self.points[p])
+                cand.push(Neighbor.of(self.ids[p], d))
+            p = p + 1
+        val sorted = sort_neighbors(cand)
+        take_k(sorted, k)
+
+    fn nearest_id(q: Embedding<D>) -> i64:
+        val top = self.query(q, 1)
+        if top.len() == 0:
+            return 0 - 1
+        top[0].doc_id()
+
+# ----------------------------------------------------------------------------
+# Recall measurement — the honest ANN quality metric vs the exact oracle.
+# ----------------------------------------------------------------------------
+# recall@k = |approx_ids ∩ exact_ids| / |exact_ids|, scaled to per-mille (0..1000)
+# so it stays on the integer path (no f64). 1000 == perfect recall.
+fn recall_permille(approx: [Neighbor], exact: [Neighbor]) -> i64:
+    """Fraction of the exact top-k that the approximate result also found,
+    expressed in per-mille (0..1000). Integer-only."""
+    val denom = exact.len()
+    if denom == 0:
+        return 1000
+    var hits = 0
+    var e = 0
+    while e < exact.len():
+        val want = exact[e].doc_id()
+        var found = false
+        var a = 0
+        while a < approx.len():
+            if approx[a].doc_id() == want:
+                found = true
+            a = a + 1
+        if found:
+            hits = hits + 1
+        e = e + 1
+    (hits * 1000) / denom

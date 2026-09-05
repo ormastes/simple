@@ -1,0 +1,234 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+CHECKER=$ROOT_DIR/scripts/check/check-rv64-noalloc-pmm-migration.shs
+EVIDENCE_HELPER=$ROOT_DIR/scripts/check/lib/riscv-hal-migration-evidence.shs
+[ -f "$EVIDENCE_HELPER" ] || { echo "rv64_noalloc_pmm_migration status=FAIL reason=evidence-helper-missing" >&2; exit 1; }
+. "$EVIDENCE_HELPER"
+HAL_MIGRATION_LANE=rv64_noalloc_pmm
+hal_migration_parse_admission "$@"
+hal_migration_require_stage4 "$ROOT_DIR"
+SIMPLE_BIN=$HAL_MIGRATION_SIMPLE_BIN
+CC_BIN=${CC:-cc}
+GCOV_BIN=${GCOV:-gcov}
+NM_BIN=${NM:-nm}
+READELF_BIN=${READELF:-readelf}
+ORACLE_SRC=$ROOT_DIR/test/02_integration/os/kernel/arch/riscv64/rv64_noalloc_pmm_c_oracle.c
+ABI_HARNESS_SRC=$ROOT_DIR/test/02_integration/os/kernel/arch/riscv64/rv64_noalloc_pmm_c_abi_harness.c
+SIMPLE_PROBE=$ROOT_DIR/test/fixtures/os/rv64_noalloc_pmm_oracle_probe.spl
+COVERAGE_PIN=$ROOT_DIR/test/fixtures/os/rv64_noalloc_pmm_coverage_pin.env
+SPEC=$ROOT_DIR/test/01_unit/os/kernel/arch/riscv64_noalloc_pmm_spec.spl
+POLICY_REL=src/os/kernel/boot/riscv_noalloc_pmm.spl
+POLICY_SRC=$ROOT_DIR/$POLICY_REL
+ABI_RUNTIME=$ROOT_DIR/src/os/kernel/arch/riscv64/noalloc_pmm_runtime.spl
+RUNTIME_C=$ROOT_DIR/src/os/kernel/arch/riscv64/boot/freestanding_runtime.c
+HOST_RUNTIME_DIR=${SIMPLE_HOST_RUNTIME_PATH:-$ROOT_DIR/src/compiler_rust/target/debug/deps}
+HOST_RUNTIME_ARCHIVE=$HOST_RUNTIME_DIR/libsimple_runtime.a
+hal_migration_bind_target_runtime host-runtime-archive "$HOST_RUNTIME_ARCHIVE"
+
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/rv64-noalloc-pmm.XXXXXX")
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+CC_BIN=$(hal_migration_resolve_tool "$CC_BIN" cc)
+GCOV_BIN=$(hal_migration_resolve_tool "$GCOV_BIN" gcov)
+NM_BIN=$(hal_migration_resolve_tool "$NM_BIN" nm)
+READELF_BIN=$(hal_migration_resolve_tool "$READELF_BIN" readelf)
+hal_migration_begin_input_freeze "$TMP_DIR/evidence-inputs.tsv"
+hal_migration_capture_input evidence_helper "$EVIDENCE_HELPER"
+hal_migration_capture_input checker "$CHECKER"
+hal_migration_capture_input owner_source "$POLICY_SRC"
+hal_migration_capture_input abi_runtime_source "$ABI_RUNTIME"
+hal_migration_capture_input runtime_consumer_source "$RUNTIME_C"
+hal_migration_capture_input coverage_pin "$COVERAGE_PIN"
+hal_migration_capture_input oracle_source "$ORACLE_SRC"
+hal_migration_capture_input simple_probe "$SIMPLE_PROBE"
+hal_migration_capture_input abi_harness_source "$ABI_HARNESS_SRC"
+hal_migration_capture_input focused_spec "$SPEC"
+hal_migration_capture_input tool_cc "$CC_BIN"
+hal_migration_capture_input tool_gcov "$GCOV_BIN"
+hal_migration_capture_input tool_nm "$NM_BIN"
+hal_migration_capture_input tool_readelf "$READELF_BIN"
+hal_migration_seal_input_freeze
+
+fail() {
+    echo "rv64_noalloc_pmm_migration status=FAIL reason=$1" >&2
+    exit 1
+}
+
+pin_value() {
+    sed -n "s/^$1=//p" "$COVERAGE_PIN"
+}
+
+hash_file() {
+    hal_migration_hash_file "$1"
+}
+
+# Independent C policy oracle parity and compiler-produced branch outcomes.
+# Neither oracle owns coverage counters; gcov consumes counters inserted by the
+# host C compiler and written by the executed oracle process.
+"$CC_BIN" -std=c11 -O0 -Wall -Wextra -Werror --coverage "$ORACLE_SRC" -o "$TMP_DIR/c-oracle"
+"$TMP_DIR/c-oracle" >"$TMP_DIR/c.out"
+(cd "$ROOT_DIR" && "$SIMPLE_BIN" run "$SIMPLE_PROBE") >"$TMP_DIR/simple.out" 2>"$TMP_DIR/simple.log"
+diff -u "$TMP_DIR/c.out" "$TMP_DIR/simple.out" || fail oracle-parity-mismatch
+
+ln -s "$ROOT_DIR/test" "$TMP_DIR/test"
+(cd "$TMP_DIR" && "$GCOV_BIN" -b -c \
+    -o "$TMP_DIR/c-oracle-rv64_noalloc_pmm_c_oracle.gcno" \
+    test/02_integration/os/kernel/arch/riscv64/rv64_noalloc_pmm_c_oracle.c) \
+    >"$TMP_DIR/gcov.log" 2>&1 || fail gcov-report-failed
+GCOV_REPORT=$TMP_DIR/rv64_noalloc_pmm_c_oracle.c.gcov
+[ -s "$GCOV_REPORT" ] || fail gcov-report-missing
+awk '
+    /^function / {
+        function_name = $2
+        scoped = (function_name == "normalize_phys32" ||
+                  function_name == "init_pmm" ||
+                  function_name == "alloc_page")
+        next
+    }
+    scoped && /^[[:space:]]*[^:]+:[[:space:]]*[0-9]+:/ {
+        split($0, fields, ":")
+        source_line = fields[2] + 0
+        next
+    }
+    scoped && /^branch / {
+        print function_name "," source_line "," ($2 + 0) "," (($4 + 0) > 0 ? 1 : 0)
+    }
+' "$GCOV_REPORT" >"$TMP_DIR/owner-branch-outcomes.csv"
+[ -s "$TMP_DIR/owner-branch-outcomes.csv" ] || fail compiler-runtime-branch-outcomes-missing
+
+# The owner stays pure Simple and test-counter free.
+if grep -Eq 'coverage_(hit|mask|required|reset)|COVERAGE_REQUIRED' "$POLICY_SRC"; then
+    fail owner-authored-coverage-counter
+fi
+if grep -Eq '^spl_(i64|u64) rt_riscv_(noalloc|qemu_).*[)][[:space:]]*\{' "$RUNTIME_C"; then
+    fail stateful-symbol-still-defined-in-c
+fi
+grep -F 'spl_u64 rt_riscv_noalloc_alloc_page(void);' "$RUNTIME_C" >/dev/null ||
+    fail historical-c-caller-prototype-missing
+grep -F '@export("C", name: "rt_riscv_noalloc_pmm_init")' "$ABI_RUNTIME" >/dev/null ||
+    fail init-c-abi-export-missing
+grep -F 'fn rv64_noalloc_pmm_initialize(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> i64:' "$ABI_RUNTIME" >/dev/null ||
+    fail init-export-is-not-i64
+grep -F '@export("C", name: "rt_riscv_noalloc_pmm_init_default")' "$ABI_RUNTIME" >/dev/null ||
+    fail default-init-c-abi-export-missing
+grep -F 'fn rv64_noalloc_pmm_initialize_default() -> i64:' "$ABI_RUNTIME" >/dev/null ||
+    fail default-init-export-is-not-i64
+grep -F '@export("C", name: "rt_riscv_noalloc_pmm_is_ready")' "$ABI_RUNTIME" >/dev/null ||
+    fail readiness-c-abi-export-missing
+grep -F 'fn rv64_noalloc_pmm_ready_abi() -> i64:' "$ABI_RUNTIME" >/dev/null ||
+    fail readiness-export-is-not-i64
+if grep -Eq 'fn rv64_noalloc_pmm_(initialize|initialize_default|ready_abi).*-> bool:' "$ABI_RUNTIME"; then
+    fail native-bool-leaked-through-c-abi
+fi
+
+# Build a fresh host ELF shared object, inspect its dynamic symbol surface and
+# its one intentional hardware undefined, then link and call it from C. The
+# unresolved-rt override is scoped to this link only; the symbol audit and C
+# executable must resolve rt_riscv_uart_put before any ABI call runs.
+ABI_LIB=$TMP_DIR/librv64_noalloc_pmm.so
+[ -s "$HOST_RUNTIME_ARCHIVE" ] || fail host-runtime-archive-missing
+if ! (cd "$ROOT_DIR" && SIMPLE_RUNTIME_PATH="$HOST_RUNTIME_DIR" \
+        SIMPLE_ALLOW_UNRESOLVED_RT=1 "$SIMPLE_BIN" compile \
+        "$ABI_RUNTIME" --native --shared --no-strip -o "$ABI_LIB") \
+        >"$TMP_DIR/abi-build.log" 2>&1; then
+    fail abi-shared-build-failed
+fi
+[ -s "$ABI_LIB" ] || fail abi-shared-elf-missing
+"$READELF_BIN" -h "$ABI_LIB" >"$TMP_DIR/abi-elf-header.txt" || fail abi-output-not-elf
+
+ABI_SYMBOLS='rt_riscv_noalloc_pmm_init
+rt_riscv_noalloc_pmm_init_default
+rt_riscv_noalloc_alloc_page
+rt_riscv_noalloc_pmm_is_ready
+rt_riscv_noalloc_pmm_free_pages
+rt_riscv_noalloc_pmm_total_pages
+rt_riscv_qemu_ram_base
+rt_riscv_qemu_ram_size
+rt_riscv_qemu_reserved_end
+rt_riscv_qemu_heap_start
+rt_riscv_qemu_heap_size'
+printf '%s\n' "$ABI_SYMBOLS" | sort >"$TMP_DIR/abi-symbols-required.txt"
+"$NM_BIN" -D --defined-only "$ABI_LIB" | awk '{print $3}' |
+    grep -E '^rt_riscv_(noalloc|qemu_)' | sort >"$TMP_DIR/abi-symbols-observed.txt"
+diff -u "$TMP_DIR/abi-symbols-required.txt" "$TMP_DIR/abi-symbols-observed.txt" ||
+    fail historical-export-set-mismatch
+"$NM_BIN" -D --undefined-only "$ABI_LIB" | awk '{print $NF}' |
+    grep '^rt_' >"$TMP_DIR/abi-rt-undefined.txt" || true
+[ "$(cat "$TMP_DIR/abi-rt-undefined.txt")" = rt_riscv_uart_put ] ||
+    fail unexpected-abi-rt-undefined-set
+
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -Wl,--export-dynamic \
+    "$ABI_HARNESS_SRC" -L"$TMP_DIR" -lrv64_noalloc_pmm \
+    -Wl,-rpath,"$TMP_DIR" -o "$TMP_DIR/c-abi-harness"
+"$NM_BIN" -D --defined-only "$TMP_DIR/c-abi-harness" | awk '{print $3}' |
+    grep -Fx rt_riscv_uart_put >/dev/null || fail uart-provider-not-exported-by-harness
+"$TMP_DIR/c-abi-harness" >"$TMP_DIR/c-abi.out"
+grep -F 'rv64_noalloc_pmm_c_abi status=PASS integer_predicates=0/1' \
+    "$TMP_DIR/c-abi.out" >/dev/null || fail c-abi-call-harness-failed
+
+# Canonical compiler/runtime rows are pinned to both policy sources, so either
+# source changing invalidates the receipt instead of inheriting a stale mask.
+branch_total=$(awk -F, '{total += 1} END {print total + 0}' "$TMP_DIR/owner-branch-outcomes.csv")
+branch_covered=$(awk -F, '{covered += $4} END {print covered + 0}' "$TMP_DIR/owner-branch-outcomes.csv")
+policy_sha=$(hal_migration_frozen_hash owner_source "$POLICY_SRC")
+oracle_sha=$(hal_migration_frozen_hash oracle_source "$ORACLE_SRC")
+branch_rows_sha=$(hash_file "$TMP_DIR/owner-branch-outcomes.csv")
+expected_policy_sha=$(pin_value owner_source_sha256)
+expected_oracle_sha=$(pin_value oracle_source_sha256)
+expected_branch_rows_sha=$(pin_value branch_rows_sha256)
+hal_migration_is_sha256 "$expected_policy_sha" || fail coverage-pin-source-hash-invalid
+hal_migration_is_sha256 "$expected_oracle_sha" || fail coverage-pin-oracle-hash-invalid
+hal_migration_is_sha256 "$expected_branch_rows_sha" || fail coverage-pin-branch-rows-hash-invalid
+[ "$(pin_value schema)" = rv64-noalloc-pmm-coverage/v1 ] || fail coverage-pin-schema
+[ "$(pin_value owner_source)" = "$POLICY_REL" ] || fail coverage-pin-owner-path
+[ "$expected_policy_sha" = "$policy_sha" ] || fail coverage-pin-source-hash-stale
+[ "$(pin_value oracle_source)" = test/02_integration/os/kernel/arch/riscv64/rv64_noalloc_pmm_c_oracle.c ] || fail coverage-pin-oracle-path
+[ "$expected_oracle_sha" = "$oracle_sha" ] || fail coverage-pin-oracle-hash-stale
+[ "$expected_branch_rows_sha" = "$branch_rows_sha" ] || fail coverage-pin-branch-rows-mismatch
+[ "$(pin_value branch_outcomes_covered)" = "$branch_covered" ] || fail coverage-pin-covered-mismatch
+[ "$(pin_value branch_outcomes_total)" = "$branch_total" ] || fail coverage-pin-total-mismatch
+[ "$branch_covered" -eq "$branch_total" ] || fail compiler-runtime-branch-outcomes-incomplete
+
+(cd "$ROOT_DIR" && "$SIMPLE_BIN" test "$SPEC" --no-cache) >"$TMP_DIR/spec.log" 2>&1
+grep -F 'outcome=OK' "$TMP_DIR/spec.log" >/dev/null || fail focused-spec-did-not-pass
+
+compiler_sha=$(hash_file "$SIMPLE_BIN")
+runtime_sha=$(hash_file "$HOST_RUNTIME_ARCHIVE")
+coverage_sha=$(hash_file "$GCOV_REPORT")
+RECEIPT=$(hal_migration_receipt_path "$ROOT_DIR" rv64-noalloc-pmm)
+PAYLOAD=$TMP_DIR/receipt.payload.env
+{
+    hal_migration_write_common_fields rv64-noalloc-pmm "$CHECKER"
+    printf 'evidence_scope=rv64-noalloc-pmm\n'
+    printf 'owner_source=%s\n' "$POLICY_REL"
+    printf 'owner_source_sha256=%s\n' "$policy_sha"
+    printf 'abi_runtime_source=src/os/kernel/arch/riscv64/noalloc_pmm_runtime.spl\n'
+    printf 'abi_runtime_source_sha256=%s\n' "$(hal_migration_frozen_hash abi_runtime_source "$ABI_RUNTIME")"
+    printf 'runtime_consumer_source=src/os/kernel/arch/riscv64/boot/freestanding_runtime.c\n'
+    printf 'runtime_consumer_source_sha256=%s\n' "$(hal_migration_frozen_hash runtime_consumer_source "$RUNTIME_C")"
+    printf 'coverage_pin=test/fixtures/os/rv64_noalloc_pmm_coverage_pin.env\n'
+    printf 'coverage_pin_sha256=%s\n' "$(hal_migration_frozen_hash coverage_pin "$COVERAGE_PIN")"
+    printf 'oracle_source=test/02_integration/os/kernel/arch/riscv64/rv64_noalloc_pmm_c_oracle.c\n'
+    printf 'oracle_source_sha256=%s\n' "$oracle_sha"
+    printf 'simple_probe=test/fixtures/os/rv64_noalloc_pmm_oracle_probe.spl\n'
+    printf 'simple_probe_sha256=%s\n' "$(hal_migration_frozen_hash simple_probe "$SIMPLE_PROBE")"
+    printf 'abi_harness_source=test/02_integration/os/kernel/arch/riscv64/rv64_noalloc_pmm_c_abi_harness.c\n'
+    printf 'abi_harness_source_sha256=%s\n' "$(hal_migration_frozen_hash abi_harness_source "$ABI_HARNESS_SRC")"
+    printf 'focused_spec=test/01_unit/os/kernel/arch/riscv64_noalloc_pmm_spec.spl\n'
+    printf 'focused_spec_sha256=%s\n' "$(hal_migration_frozen_hash focused_spec "$SPEC")"
+    printf 'coverage_kind=executed-host-compiler-oracle\n'
+    printf 'coverage_rows_sha256=%s\n' "$branch_rows_sha"
+    printf 'coverage_artifact_sha256=%s\n' "$coverage_sha"
+    printf 'branch_outcomes_covered=%s\n' "$branch_covered"
+    printf 'branch_outcomes_total=%s\n' "$branch_total"
+    printf 'oracle_parity=exact\n'
+    printf 'c_abi_exports=11/11\n'
+    printf 'c_abi_predicates=i64\n'
+} >"$PAYLOAD"
+hal_migration_revalidate_before_receipt "$ROOT_DIR"
+hal_migration_revalidate_inputs_before_receipt
+hal_migration_publish_receipt "$RECEIPT" "$PAYLOAD"
+
+echo "rv64_noalloc_pmm_migration status=PASS oracle_parity=exact c_abi_exports=11/11 c_abi_predicates=i64 coverage_kind=executed-host-compiler-oracle coverage_source_sha256=$policy_sha coverage_oracle_sha256=$oracle_sha coverage_rows_sha256=$branch_rows_sha coverage_artifact_sha256=$coverage_sha compiler_sha256=$compiler_sha runtime_sha256=$runtime_sha branch_outcomes=$branch_covered/$branch_total qemu=not-run receipt=$HAL_MIGRATION_RECEIPT_PATH receipt_sha256=$HAL_MIGRATION_RECEIPT_SHA256"

@@ -1,0 +1,153 @@
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_exit(code: i32)
+
+fn field_kind_disc(field: ParserField) -> i64:
+    val field_type: Type = field.type_
+    rt_enum_discriminant(field_type.kind)
+
+fn field_named_name(field: ParserField) -> text:
+    val field_type: Type = field.type_
+    parser_type_kind_named_name(field_type.kind)
+
+fn probe_field(name: text, type_: Type, span: Span) -> ParserField:
+    ParserField(
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: Expr(kind: ExprKind.NilLit, span: span),
+        visibility: Visibility.Private,
+        is_public: false,
+        is_volatile: false,
+        has_bits: false,
+        bits: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: span
+    )
+
+# Construction/transport control independent of the parser and flat bridge.
+val manual_span = Span.empty()
+val manual_text = Type(kind: TypeKind.Named("text", []), span: manual_span)
+val manual_array = Type(kind: TypeKind.Array(manual_text, nil), span: manual_span)
+val manual_dict = Type(kind: TypeKind.Named("Dict", [manual_text, Type(kind: TypeKind.Named("i64", []), span: manual_span)]), span: manual_span)
+val manual_array_before = rt_enum_discriminant(manual_array.kind)
+val manual_dict_before = rt_enum_discriminant(manual_dict.kind)
+val manual_field = probe_field("mem_infra_requested", manual_array, manual_span)
+val manual_field_disc = rt_enum_discriminant(manual_field.type_.kind)
+val manual_fields: [ParserField] = [manual_field, probe_field("metadata", manual_dict, manual_span)]
+val manual_array_after = rt_enum_discriminant(manual_fields[0].type_.kind)
+val manual_dict_after = rt_enum_discriminant(manual_fields[1].type_.kind)
+val manual_element_after = parser_type_kind_array_element_name(manual_fields[0].type_.kind)
+val manual_dict_name_after = parser_type_kind_named_name(manual_fields[1].type_.kind)
+print "MANUAL array_before={manual_array_before} field={manual_field_disc} array_after={manual_array_after} dict_before={manual_dict_before} dict_after={manual_dict_after} element={manual_element_after} dict_name={manual_dict_name_after}"
+
+val source = "struct Neighbor:\n" +
+    "    value: i64\n" +
+    "\n" +
+    "struct GlobalFlags:\n" +
+    "    mem_infra_requested: [text]\n" +
+    "    mem_infra_strict: bool\n" +
+    "    neighbor: Neighbor\n" +
+    "    metadata: Dict<text, i64>\n" +
+    "    maybe_neighbor: Option<Neighbor>\n"
+
+val filename = "src/app/cli/_CliMain/args_and_os_commands.spl"
+
+# Non-streaming control separates flat assembly from transient promotion.
+val control: ParserModule = parse_and_build_module_scoped(source, filename, false)
+val control_struct: ParserStruct = control.structs["GlobalFlags"]
+val control_mem = rt_enum_discriminant(control_struct.fields[0].type_.kind)
+val control_dict = rt_enum_discriminant(control_struct.fields[3].type_.kind)
+val control_mem_element = parser_type_kind_array_element_name(control_struct.fields[0].type_.kind)
+print "CONTROL nonstream mem={control_mem} dict={control_dict} mem_element={control_mem_element}"
+
+val parsed: ParserModule = parse_and_build_module_scoped(source, filename, true)
+
+# Boundary A: values retained in ParserModule.structs immediately after parse.
+val stored_struct: ParserStruct = parsed.structs["GlobalFlags"]
+val a_mem = rt_enum_discriminant(stored_struct.fields[0].type_.kind)
+val a_bool = rt_enum_discriminant(stored_struct.fields[1].type_.kind)
+val a_neighbor = rt_enum_discriminant(stored_struct.fields[2].type_.kind)
+val a_dict = rt_enum_discriminant(stored_struct.fields[3].type_.kind)
+val a_option = rt_enum_discriminant(stored_struct.fields[4].type_.kind)
+val a_mem_element = parser_type_kind_array_element_name(stored_struct.fields[0].type_.kind)
+print "A module mem={a_mem} bool={a_bool} neighbor={a_neighbor} dict={a_dict} option={a_option} mem_element={a_mem_element}"
+
+val named_ref: TypeKind = TypeKind.Named("", [])
+val type_ref = Type(kind: named_ref, span: stored_struct.span)
+val array_ref: TypeKind = TypeKind.Array(type_ref, nil)
+val d_named = rt_enum_discriminant(named_ref)
+val d_array = rt_enum_discriminant(array_ref)
+val d_tuple = rt_enum_discriminant(TypeKind.Tuple([]))
+val d_optional = rt_enum_discriminant(TypeKind.Optional(type_ref))
+val d_infer = rt_enum_discriminant(TypeKind.Infer)
+val d_error = rt_enum_discriminant(TypeKind.Error)
+print "REF named={d_named} array={d_array} tuple={d_tuple} optional={d_optional} infer={d_infer} error={d_error}"
+
+# Boundary B: force the elements through ParserField- and Type-typed locals.
+val mem_field: ParserField = stored_struct.fields[0]
+val bool_field: ParserField = stored_struct.fields[1]
+val neighbor_field: ParserField = stored_struct.fields[2]
+val dict_field: ParserField = stored_struct.fields[3]
+val option_field: ParserField = stored_struct.fields[4]
+val b_mem = field_kind_disc(mem_field)
+val b_bool = field_kind_disc(bool_field)
+val b_neighbor = field_kind_disc(neighbor_field)
+val b_dict = field_kind_disc(dict_field)
+val b_option = field_kind_disc(option_field)
+val b_mem_element = parser_type_kind_array_element_name(mem_field.type_.kind)
+print "B field mem={b_mem} bool={b_bool} neighbor={b_neighbor} dict={b_dict} option={b_option} mem_element={b_mem_element}"
+
+var boundary_mismatches = 0
+if a_mem != d_array: boundary_mismatches = boundary_mismatches + 1
+if b_mem != d_array: boundary_mismatches = boundary_mismatches + 1
+if a_bool != d_named: boundary_mismatches = boundary_mismatches + 1
+if b_bool != d_named: boundary_mismatches = boundary_mismatches + 1
+if a_neighbor != d_named: boundary_mismatches = boundary_mismatches + 1
+if b_neighbor != d_named: boundary_mismatches = boundary_mismatches + 1
+if a_dict != d_named: boundary_mismatches = boundary_mismatches + 1
+if b_dict != d_named: boundary_mismatches = boundary_mismatches + 1
+if a_option != d_named: boundary_mismatches = boundary_mismatches + 1
+if b_option != d_named: boundary_mismatches = boundary_mismatches + 1
+if a_mem_element != "text": boundary_mismatches = boundary_mismatches + 1
+if b_mem_element != "text": boundary_mismatches = boundary_mismatches + 1
+if field_named_name(bool_field) != "bool": boundary_mismatches = boundary_mismatches + 1
+if field_named_name(neighbor_field) != "Neighbor": boundary_mismatches = boundary_mismatches + 1
+if field_named_name(dict_field) != "Dict": boundary_mismatches = boundary_mismatches + 1
+if field_named_name(option_field) != "Option": boundary_mismatches = boundary_mismatches + 1
+print "AB mismatches={boundary_mismatches}"
+
+# Boundary C: direct HIR type lowering with the extracted Type.
+var direct_lowering = HirLowering.with_filename(filename)
+val before_direct = direct_lowering.lowering_error_count()
+val mem_type: Type = mem_field.type_
+val direct_result: HirType = direct_lowering.lower_type(mem_type)
+val after_direct = direct_lowering.lowering_error_count()
+val direct_disc = rt_enum_discriminant(direct_result.kind)
+print "C lower_type input={rt_enum_discriminant(mem_type.kind)} result={direct_disc} errors_before={before_direct} errors_after={after_direct}"
+if after_direct != before_direct:
+    print direct_lowering.lowering_error_message_at(before_direct, "boundary_probe")
+
+# Boundary D: the true whole-module lowering route.
+var module_lowering = HirLowering.with_filename(filename)
+module_lowering.lower_module(parsed)
+val module_errors = module_lowering.lowering_error_count()
+print "D lower_module errors={module_errors}"
+if module_errors != 0:
+    print module_lowering.lowering_error_message_at(0, "boundary_probe")
+
+if boundary_mismatches != 0 or after_direct != before_direct or module_errors != 0:
+    print "FAIL parser-field-to-HIR boundary changed"
+    rt_exit(1)
+else:
+    print "PASS parser-field-to-HIR boundary preserved"
+    rt_exit(0)

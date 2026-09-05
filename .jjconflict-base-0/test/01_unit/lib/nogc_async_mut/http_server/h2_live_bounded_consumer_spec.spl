@@ -1,0 +1,80 @@
+"""
+# Live HTTP/2 worker consumer — bounded typed parser outcomes
+
+Exercises the connection object used by the async worker with real HTTP/2
+wire bytes. Unknown extensions must make progress, incomplete frames must be
+retained until their tail arrives, and malformed frames must terminally close
+the connection rather than becoming indistinguishable from partial input.
+"""
+
+use std.spec.*
+use std.http.h2.h2_preface.{h2_connection_preface_bytes}
+use std.http_server.h2_connection.{H2Connection}
+
+fn ready_connection() -> H2Connection:
+    var conn = H2Connection.new(17, "test-peer", 1)
+    # Ignore the server SETTINGS preface; each example inspects only writes
+    # caused by the client bytes it feeds below.
+    conn.take_pending_writes()
+    expect(conn.h2_on_data_received(h2_connection_preface_bytes(), 2)).to_be(true)
+    conn
+
+describe "live HTTP/2 worker bounded frame consumption":
+    it "consumes and ignores an unknown extension frame without stalling":
+        var conn = ready_connection()
+        val extension: [u8] = [0, 0, 0, 10, 0, 0, 0, 0, 0]
+
+        expect(conn.h2_on_data_received(extension, 3)).to_be(true)
+        expect(conn.consume_frames()).to_be(true)
+        expect(conn.recv_buf.len()).to_equal(0)
+        expect(conn.is_goaway_sent()).to_be(false)
+
+    it "retains a partial PING exactly and dispatches it after its tail arrives":
+        var conn = ready_connection()
+        # 8-byte PING payload, split after its first three opaque bytes.
+        val prefix: [u8] = [0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3]
+        val tail: [u8] = [4, 5, 6, 7, 8]
+
+        expect(conn.h2_on_data_received(prefix, 3)).to_be(true)
+        expect(conn.consume_frames()).to_be(true)
+        expect(conn.recv_buf.len()).to_equal(12)
+
+        expect(conn.h2_on_data_received(tail, 4)).to_be(true)
+        expect(conn.consume_frames()).to_be(true)
+        expect(conn.recv_buf.len()).to_equal(0)
+        val ack = conn.take_pending_writes()
+        expect(ack.len()).to_equal(17)
+        expect(ack[3]).to_equal(6)
+        expect(ack[4]).to_equal(1)
+
+    it "preserves sole mapped ownership across fragmented frame assembly":
+        var connections: Dict<i64, H2Connection> = {}
+        connections[17] = ready_connection()
+        val ping: [u8] = [0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]
+        var index = 0
+        while index < ping.len():
+            # Mirror Worker ownership: remove the published Dict value before
+            # mutating the retained buffer, then publish the sole owner again.
+            var conn = connections[17]
+            connections.remove(17)
+            expect(conn.h2_on_data_received([ping[index]], 3 + index)).to_be(true)
+            expect(conn.consume_frames()).to_be(true)
+            connections[17] = conn
+            index = index + 1
+
+        var final_conn = connections[17]
+        expect(final_conn.recv_buf.len()).to_equal(0)
+        expect(final_conn.take_pending_writes().len()).to_equal(17)
+        expect(final_conn.is_goaway_sent()).to_be(false)
+
+    it "rejects zero WINDOW_UPDATE and tells the worker to cancel":
+        var conn = ready_connection()
+        val malformed: [u8] = [0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+        expect(conn.h2_on_data_received(malformed, 3)).to_be(true)
+        expect(conn.consume_frames()).to_be(false)
+        expect(conn.is_goaway_sent()).to_be(true)
+        expect(conn.recv_buf.len()).to_equal(0)
+        # A protocol-error GOAWAY (9-byte header + 8-byte payload) is queued
+        # before the worker observes false and tears down transport ownership.
+        expect(conn.take_pending_writes().len()).to_equal(17)

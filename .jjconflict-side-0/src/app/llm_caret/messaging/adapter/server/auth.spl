@@ -1,0 +1,40 @@
+#![allow(primitive_api, unnamed_duplicate_typed_args)]
+@allow(primitive_api, unnamed_duplicate_typed_args)
+"""Pure scoped-auth decisions for primitive messaging endpoints."""
+
+struct AuthPrincipal:
+    authenticated: bool
+    identity_id: text
+    workspace_id: text
+    scopes: [text]
+    expires_at: i64
+
+struct AuthDecision:
+    allowed: bool
+    status: i64
+    error: text
+
+pub fn bearer_token(header: text) -> text:
+    val value = header.trim()
+    if not value.starts_with("Bearer "):
+        return ""
+    value.substring(7).trim()
+
+pub fn has_scope(principal: AuthPrincipal, required_scope: text) -> bool:
+    for scope in principal.scopes:
+        if scope == required_scope or scope == "admin:workspace":
+            return true
+    false
+
+pub fn authorize(principal: AuthPrincipal, required_scope: text, workspace_id: text, now: i64) -> AuthDecision:
+    if not principal.authenticated:
+        return AuthDecision(allowed: false, status: 401, error: "authentication_required")
+    if principal.expires_at <= now:
+        return AuthDecision(allowed: false, status: 401, error: "token_expired")
+    if workspace_id != "" and principal.workspace_id != workspace_id:
+        return AuthDecision(allowed: false, status: 403, error: "workspace_access_denied")
+    if not has_scope(principal, required_scope):
+        return AuthDecision(allowed: false, status: 403, error: "scope_required:" + required_scope)
+    AuthDecision(allowed: true, status: 200, error: "")
+
+export AuthPrincipal, AuthDecision, bearer_token, has_scope, authorize

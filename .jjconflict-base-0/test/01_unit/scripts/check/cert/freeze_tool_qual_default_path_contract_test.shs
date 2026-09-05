@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+subject="$repo_root/scripts/check/cert/freeze-tool-qual-golden.shs"
+
+check_source() {
+    file=$1
+    if grep -q '/home/ormastes/dev/pub/simple' "$file"; then
+        return 1
+    fi
+    grep -Fxq 'REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)' "$file" || return 1
+    grep -Fxq 'SIMPLE_BIN="${SIMPLE_BIN:-$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple}"' "$file" || return 1
+}
+
+fixture_root=$(mktemp -d)
+trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+relocated="$fixture_root/repo with owner's space"
+mkdir -p "$relocated/scripts/check/cert" "$relocated/bin/release/x86_64-unknown-linux-gnu"
+cp "$subject" "$relocated/scripts/check/cert/freeze-tool-qual-golden.shs"
+cat > "$relocated/bin/release/x86_64-unknown-linux-gnu/simple" <<'FAKE_BIN'
+#!/bin/sh
+printf 'x\n' >> "$0.invoked"
+printf '42\n'
+FAKE_BIN
+chmod 755 "$relocated/bin/release/x86_64-unknown-linux-gnu/simple"
+
+probe="$fixture_root/probe.spl"
+printf 'fn main():\n    print 42\n' > "$probe"
+output=$(env -u SIMPLE_BIN sh "$relocated/scripts/check/cert/freeze-tool-qual-golden.shs" "$probe" --value 42)
+printf '%s\n' "$output" | grep -Fq "observed output of $relocated/bin/release/x86_64-unknown-linux-gnu/simple"
+test -f "$relocated/bin/release/x86_64-unknown-linux-gnu/simple.invoked"
+observed=$(printf '%s\n' "$output" | awk '/^observed output of / { getline; print; exit }')
+test "$observed" = 42
+golden_hex=$(od -An -tx1 "$fixture_root/probe.expected" | tr -d ' \n')
+test "$golden_hex" = 34320a
+
+override="$fixture_root/override simple"
+cat > "$override" <<'OVERRIDE_BIN'
+#!/bin/sh
+: > "$0.invoked"
+printf '99\n'
+OVERRIDE_BIN
+chmod 755 "$override"
+override_probe="$fixture_root/override_probe.spl"
+printf 'fn main():\n    print 99\n' > "$override_probe"
+override_output=$(SIMPLE_BIN="$override" sh "$relocated/scripts/check/cert/freeze-tool-qual-golden.shs" "$override_probe" --value 99)
+printf '%s\n' "$override_output" | grep -Fq "observed output of $override"
+test -f "$override.invoked"
+override_observed=$(printf '%s\n' "$override_output" | awk '/^observed output of / { getline; print; exit }')
+test "$override_observed" = 99
+override_golden_hex=$(od -An -tx1 "$fixture_root/override_probe.expected" | tr -d ' \n')
+test "$override_golden_hex" = 39390a
+
+check_source "$subject"
+legacy_mutant="$relocated/scripts/check/cert/legacy.shs"
+sed 's|$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple|/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple|' "$subject" > "$legacy_mutant"
+if check_source "$legacy_mutant"; then
+    echo 'error: accepted legacy-root mutant' >&2
+    exit 1
+fi
+
+legacy_probe="$fixture_root/legacy_probe.spl"
+printf 'fn main():\n    print 42\n' > "$legacy_probe"
+default_invocations_before=$(wc -l < "$relocated/bin/release/x86_64-unknown-linux-gnu/simple.invoked")
+legacy_output=$(env -u SIMPLE_BIN sh "$legacy_mutant" "$legacy_probe" --value 42)
+printf '%s\n' "$legacy_output" | grep -Fq '/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple'
+default_invocations_after=$(wc -l < "$relocated/bin/release/x86_64-unknown-linux-gnu/simple.invoked")
+if [ "$default_invocations_after" -ne "$default_invocations_before" ]; then
+    echo 'error: legacy mutant unexpectedly used the relocated default binary' >&2
+    exit 1
+fi
+
+echo 'freeze tool-qualification default-path contract: PASS'

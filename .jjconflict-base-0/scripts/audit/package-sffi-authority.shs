@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+# Source-only package boundary gate. Provider identity in both registries is
+# required, but signed exact-artifact admission remains a separate gate.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/package_sffi.spl"
+bootstrap="$root/src/compiler_rust/lib/std/src/package_sffi.spl"
+sffi_facade="$root/src/lib/nogc_sync_mut/sffi/package.spl"
+ffi_facade="$root/src/lib/nogc_sync_mut/ffi/package.spl"
+runtime_provider="$root/src/compiler_rust/runtime/src/value/sffi/package.rs"
+runtime_symbols="$root/src/compiler_rust/common/src/runtime_symbols.rs"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+for module in "$owner" "$bootstrap"; do
+    [ "$(grep -c '^extern fn ' "$module")" -eq 11 ]
+    [ "$(grep -c '^@unsafe(' "$module")" -eq 11 ]
+    [ "$(grep -c '^@always_inline$' "$module")" -eq 11 ]
+    [ "$(grep -c '^[[:space:]]*unsafe(capabilities: \[ffi\]):$' "$module")" -eq 11 ]
+    grep -q '^extern fn rt_package_sha256(file_path: text) -> text?$' "$module"
+    grep -q '^fn calculate_checksum(file_path: text) -> text?:$' "$module"
+    grep -q '^fn path_exists(path: text) -> bool?:$' "$module"
+    grep -q '^fn is_directory(path: text) -> bool?:$' "$module"
+    for raw in $(sed -n 's/^extern fn \([A-Za-z0-9_]*\).*/\1/p' "$module"); do
+        [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+        grep -q "\"$raw\"" "$registry"
+        grep -q "\"$raw\"" "$interpreter"
+    done
+done
+
+! grep -q '^extern fn ' "$sffi_facade" "$ffi_facade"
+! grep -R -q -w 'rt_package_free_string' \
+    "$owner" "$bootstrap" "$sffi_facade" "$ffi_facade" \
+    "$runtime_symbols"
+! grep -q 'fn rt_package_free_string' "$runtime_provider"
+! grep -q '^extern fn rt_cargo_' "$owner" "$bootstrap" "$sffi_facade" "$ffi_facade"
+
+echo "package SFFI authority: PASS (11 canonical contracts mirrored; raw calls confined; duplicate/Cargo/free-string surfaces retired)"

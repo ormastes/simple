@@ -1,0 +1,139 @@
+# codex-impl: canonical sealed DrawIR-v3 generation consumer for Engine2D.
+
+use common.mission_critical.draw_ir_packed_generation_store_v3.*
+use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_KIND_RECT,
+    DRAW_IR_V3_SCHEMA_ID,
+    DrawIrV3Scene,
+    draw_ir_v3_geometry_at,
+    draw_ir_v3_paint_at
+}
+use common.ui.draw_ir_v3_oracle.{
+    draw_ir_v3_oracle_count,
+    draw_ir_v3_oracle_hash,
+    draw_ir_v3_oracle_validate
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+const ENGINE2D_PACKED_V3_OK: u16 = 0u16
+const ENGINE2D_PACKED_V3_QUEUE_EMPTY: u16 = 1u16
+const ENGINE2D_PACKED_V3_IDENTITY_MISMATCH: u16 = 2u16
+const ENGINE2D_PACKED_V3_INVALID_SCENE: u16 = 3u16
+const ENGINE2D_PACKED_V3_UNSUPPORTED_COMMAND: u16 = 4u16
+
+struct Engine2dPackedGenerationReceiptV3:
+    accepted: bool
+    reason: u16
+    arena_id: u64
+    generation: u64
+    content_hash: text
+    rendered_command_count: u32
+    storage_released: bool
+    backend_name: text
+
+fn engine2d_draw_ir_v3_identity_rows(scene: DrawIrV3Scene) -> [u64]:
+    var rows: [u64] = [
+        scene.schema_id as u64,
+        scene.scene_id as u64,
+        scene.generation as u64,
+        draw_ir_v3_oracle_count(scene) as u64,
+        draw_ir_v3_oracle_hash(scene)
+    ]
+    # The oracle binds every command record. Bind the durable columns that
+    # this owner actually consumes as well; otherwise a producer could change
+    # geometry or paint after sealing while leaving command ids unchanged.
+    for command in scene.commands:
+        val geometry = draw_ir_v3_geometry_at(scene.geometry, command.geometry_id)
+        val paint = draw_ir_v3_paint_at(scene.paint, command.paint_id)
+        rows.push(if geometry.present: 1u64 else: 0u64)
+        rows.push(geometry.x as i64 as u64)
+        rows.push(geometry.y as i64 as u64)
+        rows.push(geometry.width as i64 as u64)
+        rows.push(geometry.height as i64 as u64)
+        rows.push(geometry.corner_radius as i64 as u64)
+        rows.push(if paint.present: 1u64 else: 0u64)
+        rows.push(paint.fill_color as u64)
+        rows.push(paint.stroke_color as u64)
+        rows.push(paint.stroke_width_milli as i64 as u64)
+        rows.push(paint.opacity_milli as i64 as u64)
+        rows.push(paint.blend_mode as u64)
+    rows
+
+fn _engine2d_packed_receipt(
+    accepted: bool, reason: u16, submission: DrawIrPackedSubmissionV3,
+    rendered: u32, released: bool, backend_name: text
+) -> Engine2dPackedGenerationReceiptV3:
+    Engine2dPackedGenerationReceiptV3(
+        accepted: accepted, reason: reason,
+        arena_id: submission.generation_ref.arena_id,
+        generation: submission.generation_ref.generation,
+        content_hash: submission.content_hash,
+        rendered_command_count: rendered,
+        storage_released: released,
+        backend_name: backend_name
+    )
+
+fn engine2d_draw_ir_v3_take_and_render(
+    engine: Engine2D, store: DrawIrPackedGenerationStoreV3, scene: DrawIrV3Scene
+) -> (Engine2D, DrawIrPackedGenerationStoreV3, Engine2dPackedGenerationReceiptV3):
+    var eng = engine
+    var owned_store = store
+    var submission = DrawIrPackedSubmissionV3(
+        generation_ref: DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32),
+        row_count: 0u32, content_hash: ""
+    )
+    match owned_store.take():
+        DrawIrPackedHandoffV3.Refused(reason):
+            return (eng, owned_store, _engine2d_packed_receipt(
+                false, ENGINE2D_PACKED_V3_QUEUE_EMPTY, submission, 0u32, false,
+                eng.backend_name()))
+        DrawIrPackedHandoffV3.Ready(value): submission = value
+
+    val rows = engine2d_draw_ir_v3_identity_rows(scene)
+    if not owned_store.matches(submission, rows):
+        val released = owned_store.complete(submission.generation_ref) == DRAW_IR_PACKED_REASON_OK
+        return (eng, owned_store, _engine2d_packed_receipt(
+            false, ENGINE2D_PACKED_V3_IDENTITY_MISMATCH, submission, 0u32,
+            released, eng.backend_name()))
+    if (scene.schema_id != DRAW_IR_V3_SCHEMA_ID or
+        not draw_ir_v3_oracle_validate(scene)):
+        val released = owned_store.complete(submission.generation_ref) == DRAW_IR_PACKED_REASON_OK
+        return (eng, owned_store, _engine2d_packed_receipt(
+            false, ENGINE2D_PACKED_V3_INVALID_SCENE, submission, 0u32,
+            released, eng.backend_name()))
+
+    # Wave-one owner integration is deliberately fail-closed: only the v3
+    # primitive whose durable columns map exactly to Engine2D is accepted.
+    # Text remains on Engine2D's transient FontRenderer/FontRenderBatch path;
+    # no atlas or cache material is copied into Draw IR.
+    for command in scene.commands:
+        if command.kind != DRAW_IR_V3_KIND_RECT:
+            val released = owned_store.complete(submission.generation_ref) == DRAW_IR_PACKED_REASON_OK
+            return (eng, owned_store, _engine2d_packed_receipt(
+                false, ENGINE2D_PACKED_V3_UNSUPPORTED_COMMAND, submission, 0u32,
+                released, eng.backend_name()))
+        val geometry = draw_ir_v3_geometry_at(scene.geometry, command.geometry_id)
+        val paint = draw_ir_v3_paint_at(scene.paint, command.paint_id)
+        if (not geometry.present or not paint.present or geometry.width <= 0 or
+            geometry.height <= 0 or paint.opacity_milli != 1000):
+            val released = owned_store.complete(submission.generation_ref) == DRAW_IR_PACKED_REASON_OK
+            return (eng, owned_store, _engine2d_packed_receipt(
+                false, ENGINE2D_PACKED_V3_INVALID_SCENE, submission, 0u32,
+                released, eng.backend_name()))
+
+    var rendered = 0u32
+    for command in scene.commands:
+        val geometry = draw_ir_v3_geometry_at(scene.geometry, command.geometry_id)
+        val paint = draw_ir_v3_paint_at(scene.paint, command.paint_id)
+        eng.draw_rect_filled(geometry.x, geometry.y, geometry.width, geometry.height, paint.fill_color)
+        rendered = rendered + 1u32
+    val released = owned_store.complete(submission.generation_ref) == DRAW_IR_PACKED_REASON_OK
+    (eng, owned_store, _engine2d_packed_receipt(
+        released, if released: ENGINE2D_PACKED_V3_OK else: ENGINE2D_PACKED_V3_INVALID_SCENE,
+        submission, rendered, released, eng.backend_name()))
+
+export ENGINE2D_PACKED_V3_OK, ENGINE2D_PACKED_V3_QUEUE_EMPTY,
+    ENGINE2D_PACKED_V3_IDENTITY_MISMATCH, ENGINE2D_PACKED_V3_INVALID_SCENE,
+    ENGINE2D_PACKED_V3_UNSUPPORTED_COMMAND,
+    Engine2dPackedGenerationReceiptV3, engine2d_draw_ir_v3_identity_rows,
+    engine2d_draw_ir_v3_take_and_render

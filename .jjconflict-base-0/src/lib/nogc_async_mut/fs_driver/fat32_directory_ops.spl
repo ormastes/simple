@@ -1,0 +1,257 @@
+# FAT32 directory scanning and path-entry lookup extensions.
+use std.fs_driver.fat32_core.{
+    Fat32Core, FAT32_FREE, FAT32_EOC, FAT32_DIR_ENTRY_SIZE,
+    FAT32_ATTR_DIRECTORY, FAT32_ATTR_LONG_NAME
+}
+use std.fs_driver.types.{DirEntry, Inode}
+use std.fs_driver.fat32_parsers.{
+    _parse_short_name, _parse_lfn_slot, _lfn_slot_metadata_valid,
+    _lfn_short_name_checksum, _lower_text, _read_u16_le, _read_u32_le
+}
+
+impl Fat32Core:
+    # --- Directory entry scanning ---
+
+    me fn invalidate_dentry_cache():
+        self._dcache_valid = false
+
+    me fn free_chain(start_cluster: u32) -> Result<bool, text>:
+        var current = start_cluster
+        var max_iter: u32 = 1000000
+        while current >= 2 and current < (self.total_clusters + 2) and max_iter > 0:
+            val next_result = self.read_fat_entry(current)
+            if next_result.is_err():
+                return match next_result:
+                    Ok(_): Err("failed to read FAT entry")
+                    Err(err): Err(err)
+            val next = match next_result:
+                Ok(value): value
+                Err(err): return Err(err)
+            val free_result = self.write_fat_entry(current, FAT32_FREE)
+            if free_result.is_err():
+                return match free_result:
+                    Ok(_): Err("failed to free FAT entry")
+                    Err(err): Err(err)
+            if next >= FAT32_EOC or next < 2:
+                break
+            current = next
+            max_iter = max_iter - 1
+        Ok(true)
+
+    me fn truncate_chain(first_cluster: u32, keep_bytes: u64) -> Result<u32, text>:
+        if first_cluster < 2:
+            if keep_bytes == 0u64:
+                return Ok(0)
+            return self.alloc_cluster()
+        val cluster_size = (self.sectors_per_cluster * self.bytes_per_sector).to_u64()
+        if cluster_size == 0u64:
+            return Err("invalid FAT32 geometry")
+        if keep_bytes == 0u64:
+            val freed = self.free_chain(first_cluster)
+            if freed.is_err():
+                return match freed:
+                    Ok(_): Err("failed to free FAT chain")
+                    Err(err): Err(err)
+            self._chain_valid = false
+            return Ok(0)
+        var clusters_to_keep = keep_bytes / cluster_size
+        if keep_bytes % cluster_size != 0u64:
+            clusters_to_keep = clusters_to_keep + 1u64
+        var current = first_cluster
+        var kept: u64 = 1u64
+        while kept < clusters_to_keep:
+            val next_result = self.read_fat_entry(current)
+            if next_result.is_err():
+                return match next_result:
+                    Ok(_): Err("failed to read FAT entry")
+                    Err(err): Err(err)
+            val next = match next_result:
+                Ok(value): value
+                Err(err): return Err(err)
+            if next >= FAT32_EOC or next < 2:
+                val ext = self.alloc_cluster()
+                if ext.is_err():
+                    return match ext:
+                        Ok(_): Err("failed to allocate FAT32 cluster")
+                        Err(err): Err(err)
+                val ext_cluster = match ext:
+                    Ok(value): value
+                    Err(err): return Err(err)
+                val link = self.write_fat_entry(current, ext_cluster)
+                if link.is_err():
+                    return match link:
+                        Ok(_): Err("failed to link FAT32 cluster")
+                        Err(err): Err(err)
+                current = ext_cluster
+            else:
+                current = next
+            kept = kept + 1u64
+        val tail_result = self.read_fat_entry(current)
+        if tail_result.is_err():
+            return match tail_result:
+                Ok(_): Err("failed to read FAT entry")
+                Err(err): Err(err)
+        val tail = match tail_result:
+            Ok(value): value
+            Err(err): return Err(err)
+        if tail >= 2 and tail < FAT32_EOC:
+            val freed_tail = self.free_chain(tail)
+            if freed_tail.is_err():
+                return match freed_tail:
+                    Ok(_): Err("failed to free FAT chain")
+                    Err(err): Err(err)
+        val mark_eoc = self.write_fat_entry(current, FAT32_EOC)
+        if mark_eoc.is_err():
+            return match mark_eoc:
+                Ok(_): Err("failed to mark FAT chain end")
+                Err(err): Err(err)
+        self._chain_valid = false
+        Ok(first_cluster)
+
+    me fn read_dir_entries(dir_cluster: u32) -> Result<[DirEntry], text>:
+        if not self.mounted:
+            return Err("filesystem not mounted")
+        if self._dcache_valid and self._dcache_cluster == dir_cluster:
+            return Ok(self._dcache_entries)
+        val chain_rc = self.follow_chain(dir_cluster)
+        if chain_rc.is_err():
+            return match chain_rc:
+                Ok(_): Err("failed to follow FAT chain")
+                Err(err): Err(err)
+        val chain = match chain_rc:
+            Ok(value): value
+            Err(err): return Err(err)
+        var entries: [DirEntry] = []
+        var pending_lfn = ""
+        var pending_lfn_checksum: i32 = -1
+        var pending_lfn_next_sequence: i32 = 0
+        var pending_lfn_valid = false
+        var ci = 0
+        while ci < chain.len():
+            val cluster_data_rc = self.read_cluster(chain[ci])
+            if cluster_data_rc.is_err():
+                return match cluster_data_rc:
+                    Ok(_): Err("failed to read cluster data")
+                    Err(err): Err(err)
+            val cluster_data = match cluster_data_rc:
+                Ok(value): value
+                Err(err): return Err(err)
+            val entries_per_cluster = (self.bytes_per_sector * self.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+            var ei: u32 = 0
+            while ei < entries_per_cluster:
+                val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+                val first_byte = cluster_data[off]
+                if first_byte == 0x00:
+                    self._dcache_cluster = dir_cluster
+                    self._dcache_entries = entries
+                    self._dcache_valid = true
+                    return Ok(self._dcache_entries)
+                if first_byte == 0xE5:
+                    pending_lfn = ""
+                    pending_lfn_checksum = -1
+                    pending_lfn_next_sequence = 0
+                    pending_lfn_valid = false
+                    ei = ei + 1
+                    continue
+                val attr = cluster_data[off + 11]
+                if attr == FAT32_ATTR_LONG_NAME:
+                    val sequence = (first_byte & 0x1Fu8).to_i32()
+                    val starts_chain = (first_byte & 0x40u8) != 0u8
+                    if starts_chain:
+                        pending_lfn = ""
+                        pending_lfn_checksum = cluster_data[off + 13].to_i32()
+                        pending_lfn_next_sequence = sequence
+                        pending_lfn_valid = _lfn_slot_metadata_valid(cluster_data, off)
+                    if (pending_lfn_valid and _lfn_slot_metadata_valid(cluster_data, off) and
+                            sequence == pending_lfn_next_sequence and
+                            cluster_data[off + 13].to_i32() == pending_lfn_checksum):
+                        pending_lfn = _parse_lfn_slot(cluster_data, off) + pending_lfn
+                        pending_lfn_next_sequence = sequence - 1
+                    else:
+                        pending_lfn = ""
+                        pending_lfn_checksum = -1
+                        pending_lfn_next_sequence = 0
+                        pending_lfn_valid = false
+                    ei = ei + 1
+                    continue
+                val short_name = _parse_short_name(cluster_data, off)
+                val use_lfn = (pending_lfn_valid and pending_lfn_next_sequence == 0 and
+                    pending_lfn != "" and pending_lfn.len() <= 255 and
+                    _lfn_short_name_checksum(cluster_data, off).to_i32() == pending_lfn_checksum)
+                val name = if use_lfn: pending_lfn else: short_name
+                pending_lfn = ""
+                pending_lfn_checksum = -1
+                pending_lfn_next_sequence = 0
+                pending_lfn_valid = false
+                if name == "." or name == "..":
+                    ei = ei + 1
+                    continue
+                val hi = _read_u16_le(cluster_data, off + 20).to_u32()
+                val lo = _read_u16_le(cluster_data, off + 26).to_u32()
+                val entry_cluster = (hi << 16) | lo
+                val entry_size = _read_u32_le(cluster_data, off + 28)
+                val is_dir = (attr & FAT32_ATTR_DIRECTORY) != 0
+                entries.push(DirEntry(
+                    name: name,
+                    inode: Inode(id: entry_cluster.to_u64()),
+                    is_dir: is_dir,
+                    size: entry_size.to_i64()
+                ))
+                ei = ei + 1
+            ci = ci + 1
+        self._dcache_cluster = dir_cluster
+        self._dcache_entries = entries
+        self._dcache_valid = true
+        Ok(self._dcache_entries)
+
+    me fn _find_short_entry_in_dir(dir_cluster: u32, target_name: text) -> Result<DirEntry, text>:
+        val target = _lower_text(target_name)
+        val chain_rc = self.follow_chain(dir_cluster)
+        if chain_rc.is_err():
+            return Err(chain_rc.unwrap_err())
+        val chain = chain_rc.unwrap()
+        var ci = 0
+        while ci < chain.len():
+            val data_rc = self.read_cluster(chain[ci])
+            if data_rc.is_err():
+                return Err(data_rc.unwrap_err())
+            val data = data_rc.unwrap()
+            val entry_count = (self.bytes_per_sector * self.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+            var ei: u32 = 0
+            while ei < entry_count:
+                val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+                if data[off] == 0x00u8:
+                    return Err("file not found")
+                val attr = data[off + 11]
+                if (data[off] != 0xE5u8 and attr != FAT32_ATTR_LONG_NAME and
+                        _parse_short_name(data, off) == target):
+                    val hi = _read_u16_le(data, off + 20).to_u32()
+                    val lo = _read_u16_le(data, off + 26).to_u32()
+                    return Ok(DirEntry(
+                        name: _parse_short_name(data, off),
+                        inode: Inode(id: ((hi << 16) | lo).to_u64()),
+                        is_dir: (attr & FAT32_ATTR_DIRECTORY) != 0,
+                        size: _read_u32_le(data, off + 28).to_i64()))
+                ei = ei + 1
+            ci = ci + 1
+        Err("file not found")
+
+    me fn find_entry_in_dir(dir_cluster: u32, target_name: text) -> Result<DirEntry, text>:
+        val entries_rc = self.read_dir_entries(dir_cluster)
+        if entries_rc.is_err():
+            return match entries_rc:
+                Ok(_): Err("failed to read directory entries")
+                Err(err): Err(err)
+        val entries = match entries_rc:
+            Ok(value): value
+            Err(err): return Err(err)
+        val lower_target = _lower_text(target_name)
+        var i = 0
+        while i < entries.len():
+            val entry_name = _lower_text(entries[i].name)
+            if entry_name == lower_target:
+                return Ok(entries[i])
+            i = i + 1
+        self._find_short_entry_in_dir(dir_cluster, target_name)
+
+export Fat32Core

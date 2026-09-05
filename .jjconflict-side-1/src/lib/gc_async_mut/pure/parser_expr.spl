@@ -1,0 +1,625 @@
+# Pure Simple Parser — Expression Parsing
+#
+# Extracted from parser.spl. Contains all expression parsing methods
+# for the Parser class via impl block.
+#
+# Methods:
+# - parse_expression, parse_pipeline, parse_coalesce
+# - parse_logical_or/and, parse_equality, parse_comparison
+# - parse_bitwise_or/xor/and, parse_shift
+# - parse_addition, parse_multiplication, parse_power, parse_unary
+# - parse_postfix, parse_call_args, parse_index_or_slice
+# - parse_primary, parse_string_interpolation
+# - parse_lambda_short, parse_lambda_long, parse_type
+
+use std.pure.lexer (Token, TokenKind, lex_source)
+use std.pure.ast (Expr, Stmt, Pattern, TypeExpr, Module, BinOp, UnaryOp, Literal)
+use std.gc_async_mut.pure.parser.{Parser, ParseError, parse_expr}
+
+impl Parser:
+
+    # ===== Expression Parsing =====
+
+    me parse_expression() -> Result<Expr, ParseError>:
+        self.parse_pipeline()
+
+    me parse_pipeline() -> Result<Expr, ParseError>:
+        match self.parse_coalesce():
+            case Ok(left):
+                var current = left
+                while self.check("|>") or self.check(">>") or self.check("<<") or self.check("~>") or self.check("//"):
+                    val op_token = self.advance()
+                    val op = match op_token.kind:
+                        case TokenKind.Operator("|>"): BinOp.Pipe
+                        case TokenKind.Operator(">>"): BinOp.ComposeForward
+                        case TokenKind.Operator("<<"): BinOp.ComposeBackward
+                        case TokenKind.Operator("~>"): BinOp.LayerConnect
+                        case TokenKind.Operator("//"): BinOp.Parallel
+                        case _: BinOp.Pipe
+                    match self.parse_coalesce():
+                        case Ok(right):
+                            current = Expr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_coalesce() -> Result<Expr, ParseError>:
+        match self.parse_logical_or():
+            case Ok(left):
+                var current = left
+                while self.check("??"):
+                    self.advance()
+                    match self.parse_logical_or():
+                        case Ok(right):
+                            current = Expr.Binary(BinOp.Coalesce, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_logical_or() -> Result<Expr, ParseError>:
+        match self.parse_logical_and():
+            case Ok(left):
+                var current = left
+                while self.check("||"):
+                    self.advance()
+                    match self.parse_logical_and():
+                        case Ok(right):
+                            current = Expr.Binary(BinOp.Or, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_logical_and() -> Result<Expr, ParseError>:
+        match self.parse_equality():
+            case Ok(left):
+                var current = left
+                while self.check("&&"):
+                    self.advance()
+                    match self.parse_equality():
+                        case Ok(right):
+                            current = Expr.Binary(BinOp.And, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_equality() -> Result<Expr, ParseError>:
+        match self.parse_comparison():
+            case Ok(left):
+                var current = left
+                while self.check("==") or self.check("!="):
+                    val op_token = self.advance()
+                    val op = match op_token.kind:
+                        case TokenKind.Operator("=="): BinOp.Eq
+                        case TokenKind.Operator("!="): BinOp.NotEq
+                        case _: BinOp.Eq
+                    match self.parse_comparison():
+                        case Ok(right):
+                            current = Expr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_comparison() -> Result<Expr, ParseError>:
+        match self.parse_bitwise_or():
+            case Ok(left):
+                var current = left
+                while self.check("<") or self.check(">") or self.check("<=") or self.check(">="):
+                    val op_token = self.advance()
+                    val op = match op_token.kind:
+                        case TokenKind.Operator("<"): BinOp.Lt
+                        case TokenKind.Operator(">"): BinOp.Gt
+                        case TokenKind.Operator("<="): BinOp.LtEq
+                        case TokenKind.Operator(">="): BinOp.GtEq
+                        case _: BinOp.Lt
+                    match self.parse_bitwise_or():
+                        case Ok(right):
+                            current = Expr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_bitwise_or() -> Result<Expr, ParseError>:
+        match self.parse_bitwise_xor():
+            case Ok(left):
+                var current = left
+                while self.check("|"):
+                    self.advance()
+                    match self.parse_bitwise_xor():
+                        case Ok(right):
+                            current = Expr.Binary(BinOp.BitOr, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_bitwise_xor() -> Result<Expr, ParseError>:
+        match self.parse_bitwise_and():
+            case Ok(left):
+                var current = left
+                while self.check("^"):
+                    self.advance()
+                    match self.parse_bitwise_and():
+                        case Ok(right):
+                            current = Expr.Binary(BinOp.BitXor, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_bitwise_and() -> Result<Expr, ParseError>:
+        match self.parse_shift():
+            case Ok(left):
+                var current = left
+                while self.check("&"):
+                    self.advance()
+                    match self.parse_shift():
+                        case Ok(right):
+                            current = Expr.Binary(BinOp.BitAnd, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_shift() -> Result<Expr, ParseError>:
+        match self.parse_addition():
+            case Ok(left):
+                var current = left
+                while self.check("<<") or self.check(">>"):
+                    val op_token = self.advance()
+                    val op = match op_token.kind:
+                        case TokenKind.Operator("<<"): BinOp.BitShl
+                        case TokenKind.Operator(">>"): BinOp.BitShr
+                        case _: BinOp.BitShl
+                    match self.parse_addition():
+                        case Ok(right):
+                            current = Expr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_addition() -> Result<Expr, ParseError>:
+        match self.parse_multiplication():
+            case Ok(left):
+                var current = left
+                while self.check("+") or self.check("-"):
+                    val op_token = self.advance()
+                    val op = match op_token.kind:
+                        case TokenKind.Operator("+"): BinOp.Add
+                        case TokenKind.Operator("-"): BinOp.Sub
+                        case _: BinOp.Add
+                    match self.parse_multiplication():
+                        case Ok(right):
+                            current = Expr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_multiplication() -> Result<Expr, ParseError>:
+        match self.parse_power():
+            case Ok(left):
+                var current = left
+                while self.check("*") or self.check("/") or self.check("%"):
+                    val op_token = self.advance()
+                    val op = match op_token.kind:
+                        case TokenKind.Operator("*"): BinOp.Mul
+                        case TokenKind.Operator("/"): BinOp.Div
+                        case TokenKind.Operator("%"): BinOp.Mod
+                        case _: BinOp.Mul
+                    match self.parse_power():
+                        case Ok(right):
+                            current = Expr.Binary(op, current, right)
+                        case Err(e):
+                            return Err(e)
+                Ok(current)
+            case Err(e):
+                Err(e)
+
+    me parse_power() -> Result<Expr, ParseError>:
+        match self.parse_unary():
+            case Ok(left):
+                if self.check("**"):
+                    self.advance()
+                    match self.parse_power():
+                        case Ok(right):
+                            Ok(Expr.Binary(BinOp.Pow, left, right))
+                        case Err(e):
+                            Err(e)
+                else:
+                    Ok(left)
+            case Err(e):
+                Err(e)
+
+    me parse_unary() -> Result<Expr, ParseError>:
+        if self.check("-") or self.check("!") or self.check("~"):
+            val op_token = self.advance()
+            val op = match op_token.kind:
+                case TokenKind.Operator("-"): UnaryOp.Neg
+                case TokenKind.Operator("!"): UnaryOp.Not
+                case TokenKind.Operator("~"): UnaryOp.Not
+                case _: UnaryOp.Neg
+
+            match self.parse_unary():
+                case Ok(right):
+                    Ok(Expr.Unary(op, right))
+                case Err(e):
+                    Err(e)
+        else:
+            self.parse_postfix()
+
+    me parse_postfix() -> Result<Expr, ParseError>:
+        match self.parse_primary():
+            case Ok(expr):
+                self.parse_postfix_loop(expr)
+            case Err(e):
+                Err(e)
+
+    me parse_postfix_loop(expr: Expr) -> Result<Expr, ParseError>:
+        var current = expr
+
+        while true:
+            # Field access or method call
+            if self.check("."):
+                self.advance()
+                match self.peek().kind:
+                    case TokenKind.Identifier(name):
+                        self.advance()
+                        if self.check("("):
+                            self.advance()
+                            match self.parse_call_args():
+                                case Ok(args):
+                                    self.consume_operator(")")
+                                    current = Expr.Method(current, name, args)
+                                case Err(e):
+                                    return Err(e)
+                        else:
+                            current = Expr.Field(current, name)
+                    case _:
+                        return Err(ParseError(
+                            message: "Expected field or method name after '.'",
+                            line: self.peek().line,
+                            column: self.peek().column
+                        ))
+
+            # Indexing or slicing
+            elif self.check("["):
+                self.advance()
+                match self.parse_index_or_slice(current):
+                    case Ok(indexed):
+                        current = indexed
+                    case Err(e):
+                        return Err(e)
+
+            # Function call
+            elif self.check("("):
+                self.advance()
+                match self.parse_call_args():
+                    case Ok(args):
+                        self.consume_operator(")")
+                        current = Expr.Call(current, args)
+                    case Err(e):
+                        return Err(e)
+            else:
+                break
+
+        Ok(current)
+
+    me parse_call_args() -> Result<[Expr], ParseError>:
+        var args: [Expr] = []
+
+        if self.check(")"):
+            return Ok(args)
+
+        while true:
+            match self.parse_expression():
+                case Ok(arg):
+                    args.push(arg)
+                case Err(e):
+                    return Err(e)
+
+            if self.check(")"):
+                break
+            elif self.check(","):
+                self.advance()
+                if self.check(")"):
+                    break
+            else:
+                return Err(ParseError(
+                    message: "Expected ',' or ')' in argument list",
+                    line: self.peek().line,
+                    column: self.peek().column
+                ))
+
+        Ok(args)
+
+    me parse_index_or_slice(expr: Expr) -> Result<Expr, ParseError>:
+        var start: Expr? = nil
+        var end: Expr? = nil
+        var step: Expr? = nil
+
+        if not self.check(":"):
+            match self.parse_expression():
+                case Ok(s):
+                    start = Some(s)
+                case Err(e):
+                    return Err(e)
+
+        if self.check("]"):
+            self.advance()
+            match start:
+                case Some(idx):
+                    return Ok(Expr.Index(expr, idx))
+                case nil:
+                    return Err(ParseError(
+                        message: "Empty index expression",
+                        line: self.peek().line,
+                        column: self.peek().column
+                    ))
+
+        if self.consume_operator(":"):
+            if not self.check(":") and not self.check("]"):
+                match self.parse_expression():
+                    case Ok(e):
+                        end = Some(e)
+                    case Err(err):
+                        return Err(err)
+
+            if self.consume_operator(":"):
+                if not self.check("]"):
+                    match self.parse_expression():
+                        case Ok(s):
+                            step = Some(s)
+                        case Err(err):
+                            return Err(err)
+
+        self.consume_operator("]")
+        Ok(Expr.Slice(expr, start, end, step))
+
+    me parse_primary() -> Result<Expr, ParseError>:
+        val token = self.peek()
+
+        match token.kind:
+            case TokenKind.Number(n):
+                self.advance()
+                Ok(Expr.Literal(Literal.Int(42)))
+
+            case TokenKind.String(s):
+                self.advance()
+                # Check if string has interpolation
+                if s.contains("{"):
+                    self.parse_string_interpolation(s)
+                else:
+                    Ok(Expr.Literal(Literal.String(s)))
+
+            case TokenKind.Keyword("true"):
+                self.advance()
+                Ok(Expr.Literal(Literal.Bool(true)))
+
+            case TokenKind.Keyword("false"):
+                self.advance()
+                Ok(Expr.Literal(Literal.Bool(false)))
+
+            case TokenKind.Identifier(name):
+                self.advance()
+                Ok(Expr.Identifier(name))
+
+            case TokenKind.Operator("("):
+                self.advance()
+                match self.parse_expression():
+                    case Ok(expr):
+                        self.consume_operator(")")
+                        Ok(expr)
+                    case Err(e):
+                        Err(e)
+
+            case TokenKind.Operator("["):
+                self.advance()
+                var elements: [Expr] = []
+                if self.check("]"):
+                    self.advance()
+                    return Ok(Expr.List(elements))
+                while true:
+                    match self.parse_expression():
+                        case Ok(elem):
+                            elements.push(elem)
+                        case Err(e):
+                            return Err(e)
+                    if self.check("]"):
+                        self.advance()
+                        break
+                    elif self.check(","):
+                        self.advance()
+                        if self.check("]"):
+                            self.advance()
+                            break
+                    else:
+                        return Err(ParseError(
+                            message: "Expected ',' or ']' in array literal",
+                            line: self.peek().line,
+                            column: self.peek().column
+                        ))
+                Ok(Expr.List(elements))
+
+            case TokenKind.Operator("\\"):
+                # Short lambda form: \x: expr or \x, y: expr
+                self.parse_lambda_short()
+
+            case TokenKind.Keyword("fn"):
+                # Long lambda form: fn(x): expr or fn(x, y): expr
+                self.parse_lambda_long()
+
+            case _:
+                Err(ParseError(
+                    message: "Expected expression",
+                    line: token.line,
+                    column: token.column
+                ))
+
+    me parse_string_interpolation(s: text) -> Result<Expr, ParseError>:
+        # Parse "Hello {name} world {x + 1}" into parts
+        # For now, simplified: just detect {...} and mark as interpolation
+        # Full implementation would parse expressions inside braces
+
+        var parts: [Expr] = []
+        var current = ""
+        var i = 0
+        var in_brace = false
+        var brace_content = ""
+
+        while i < s.len():
+            val ch = s[i:i + 1]
+
+            if ch == "{" and not in_brace:
+                # Save current string part
+                if current.len() > 0:
+                    parts.push(Expr.Literal(Literal.String(current)))
+                    current = ""
+                in_brace = true
+                brace_content = ""
+            elif ch == "}" and in_brace:
+                # Parse expression in braces
+                match parse_expr(brace_content):
+                    case Ok(expr):
+                        parts.push(expr)
+                    case Err(e):
+                        return Err(ParseError(
+                            message: "Failed to parse interpolated expression: {e.message}",
+                            line: self.peek().line,
+                            column: self.peek().column
+                        ))
+                in_brace = false
+                brace_content = ""
+            elif in_brace:
+                brace_content = brace_content + ch
+            else:
+                current = current + ch
+
+            i = i + 1
+
+        # Add remaining string part
+        if current.len() > 0:
+            parts.push(Expr.Literal(Literal.String(current)))
+
+        Ok(Expr.StringInterpolation(parts))
+
+    me parse_lambda_short() -> Result<Expr, ParseError>:
+        # Short lambda: \x: expr or \x, y: expr
+        self.advance()  # consume \
+
+        var params: [text] = []
+
+        # Parse parameter list (no parens)
+        while true:
+            match self.peek().kind:
+                case TokenKind.Identifier(name):
+                    self.advance()
+                    params.push(name)
+                case _:
+                    return Err(ParseError(
+                        message: "Expected parameter name in lambda",
+                        line: self.peek().line,
+                        column: self.peek().column
+                    ))
+
+            # Check for more params or colon
+            if self.check(":"):
+                break
+            elif self.check(","):
+                self.advance()
+            else:
+                return Err(ParseError(
+                    message: "Expected ',' or ':' in lambda",
+                    line: self.peek().line,
+                    column: self.peek().column
+                ))
+
+        # Consume colon
+        self.consume_operator(":")
+
+        # Parse body expression
+        match self.parse_expression():
+            case Ok(body):
+                Ok(Expr.Lambda(params, body))
+            case Err(e):
+                Err(e)
+
+    me parse_lambda_long() -> Result<Expr, ParseError>:
+        # Long lambda: fn(x): expr or fn(x, y): expr
+        self.advance()  # consume fn
+
+        # Expect opening paren
+        if not self.check("("):
+            return Err(ParseError(
+                message: "Expected '(' after 'fn' in lambda",
+                line: self.peek().line,
+                column: self.peek().column
+            ))
+
+        self.advance()  # consume (
+
+        var params: [text] = []
+
+        # Parse parameter list
+        if not self.check(")"):
+            while true:
+                match self.peek().kind:
+                    case TokenKind.Identifier(name):
+                        self.advance()
+                        params.push(name)
+                    case _:
+                        return Err(ParseError(
+                            message: "Expected parameter name in lambda",
+                            line: self.peek().line,
+                            column: self.peek().column
+                        ))
+
+                if self.check(")"):
+                    break
+                elif self.check(","):
+                    self.advance()
+                else:
+                    return Err(ParseError(
+                        message: "Expected ',' or ')' in lambda parameters",
+                        line: self.peek().line,
+                        column: self.peek().column
+                    ))
+
+        self.consume_operator(")")
+        self.consume_operator(":")
+
+        # Parse body expression
+        match self.parse_expression():
+            case Ok(body):
+                Ok(Expr.Lambda(params, body))
+            case Err(e):
+                Err(e)
+
+    me parse_type() -> Result<TypeExpr, ParseError>:
+        match self.peek().kind:
+            case TokenKind.Identifier(name):
+                self.advance()
+                Ok(TypeExpr.Named(name))
+            case _:
+                Err(ParseError(
+                    message: "Expected type",
+                    line: self.peek().line,
+                    column: self.peek().column
+                ))

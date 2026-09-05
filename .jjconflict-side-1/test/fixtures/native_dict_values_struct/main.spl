@@ -1,0 +1,52 @@
+# Fixture for scripts/check/check-native-dict-values-struct-fields.shs
+#
+# Defect class: `for x in <dict>.values()` miscompiled under native codegen —
+# inside such a loop every field read of the loop variable collapsed to byte
+# offset 0 with i64 typing, so `p.b` returned `p.a` and `f.name` returned the
+# raw pointer stored in the first field. See
+# doc/08_tracking/bug/native_dict_values_loop_field_offset_collapse_2026-08-24.md
+#
+# Each line is a `key: value` probe consumed by the gate script. The array and
+# d[k] lines are CONTROLS: they were always correct and must stay correct.
+
+struct P:
+    a: i64
+    b: text
+    c: i64
+
+fn main():
+    var ds: Dict<i64, P> = {}
+    ds[1] = P(a: 7, b: "hi", c: 11)
+
+    # 1. the defect: iterate .values() directly
+    for p in ds.values():
+        print "<<values_a={p.a}>>"
+        print "<<values_b={p.b}>>"
+        print "<<values_c={p.c}>>"
+
+    # 2. same, hoisted into a local first (also broken pre-fix)
+    val vs = ds.values()
+    for p2 in vs:
+        print "<<hoisted_b={p2.b}>>"
+        print "<<hoisted_c={p2.c}>>"
+
+    # 3. neighbour: .keys() over a text-keyed dict
+    var dk: Dict<text, i64> = {}
+    dk["kx"] = 5
+    for k in dk.keys():
+        print "<<keys_k={k}>>"
+
+    # 4. neighbour: dict with text keys and struct values
+    var dt: Dict<text, P> = {}
+    dt["z"] = P(a: 1, b: "zz", c: 2)
+    for p3 in dt.values():
+        print "<<textkey_b={p3.b}>>"
+
+    # 5. CONTROL: d[k] direct read (always worked)
+    val direct = ds[1]
+    print "<<direct_b={direct.b}>>"
+
+    # 6. CONTROL: array literal iteration (always worked)
+    val arr: [P] = [P(a: 7, b: "hi", c: 11)]
+    for q in arr:
+        print "<<array_b={q.b}>>"

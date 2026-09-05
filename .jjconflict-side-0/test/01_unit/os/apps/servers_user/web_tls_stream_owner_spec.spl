@@ -1,0 +1,227 @@
+# @cover src/os/apps/servers_user/web_tls_stream_owner.spl 90%
+
+use std.spec
+use os.apps.servers_user.web_tls_stream_owner.{
+    WebTlsStreamOwnerV1, WebTlsStreamStatusV1, WebTlsSendKindV1,
+    WEB_TLS_MAX_RESPONSE_PLAINTEXT_V1,
+    WEB_TLS_MAX_INGRESS_WIRE_BYTES_V1
+}
+use os.tls13.application_record_session_v1.{Tls13ApplicationIngressStatusV1}
+use std.common.net.tls_application_record_stream_v1.{
+    TLS_APPLICATION_DATA_TYPE_V1,
+    TLS_MAX_FRAGMENT_LENGTH_V1
+}
+use os.tls13.handshake13.{CIPHER_AES_128_GCM_SHA256}
+use os.tls13.record13.{RecordKey, RecordResult, record13_decrypt_for_suite, record13_encrypt_for_suite}
+use os.tls13.server_types.{Tls13ServerContext}
+
+fn _bytes(value: u8, count: i64) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        out.push(value)
+        index = index + 1
+    out
+
+fn _context_with_alpn(alpn: [u8]) -> Tls13ServerContext:
+    Tls13ServerContext(
+        cipher_suite: CIPHER_AES_128_GCM_SHA256,
+        named_group: 29u16,
+        server_random: _bytes(1u8, 32),
+        server_keyshare_pub: _bytes(2u8, 32),
+        client_app_key: _bytes(3u8, 16),
+        client_app_iv: _bytes(4u8, 12),
+        server_app_key: _bytes(5u8, 16),
+        server_app_iv: _bytes(6u8, 12),
+        client_seq: 0u64,
+        server_seq: 0u64,
+        selected_alpn: alpn)
+
+fn _context() -> Tls13ServerContext:
+    _context_with_alpn([104u8, 50u8])
+
+fn _client_record(sequence: u64, plaintext: [u8]) -> [u8]:
+    record13_encrypt_for_suite(
+        CIPHER_AES_128_GCM_SHA256,
+        RecordKey(key: _bytes(3u8, 16), iv: _bytes(4u8, 12)),
+        sequence, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), plaintext)
+
+fn _client_close(sequence: u64) -> [u8]:
+    record13_encrypt_for_suite(
+        CIPHER_AES_128_GCM_SHA256,
+        RecordKey(key: _bytes(3u8, 16), iv: _bytes(4u8, 12)),
+        sequence, 21u8, [1u8, 0u8])
+
+describe "web TLS transport-neutral ingress":
+    it "retains negotiated ALPN after the handshake context handoff":
+        val owner = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(owner.negotiated_alpn()).to_equal("h2")
+        expect(owner.is_http2()).to_equal(true)
+        expect(owner.is_http1()).to_equal(false)
+
+    it "commits only exact handler ALPN before opening application dispatch":
+        val h1 = [104u8, 116u8, 116u8, 112u8, 47u8, 49u8, 46u8, 49u8]
+        val http1 = WebTlsStreamOwnerV1.from_context(_context_with_alpn(h1)).unwrap()
+        expect(http1.is_http1()).to_equal(true)
+        expect(http1.is_http2()).to_equal(false)
+        expect(http1.can_dispatch()).to_equal(true)
+
+        expect(WebTlsStreamOwnerV1.from_context(
+            _context_with_alpn([])).is_err()).to_equal(true)
+        expect(WebTlsStreamOwnerV1.from_context(
+            _context_with_alpn([104u8, 50u8, 99u8])).is_err()).to_equal(true)
+        expect(WebTlsStreamOwnerV1.from_context(
+            _context_with_alpn([104u8, 116u8, 116u8, 112u8, 47u8, 49u8, 46u8, 48u8])).is_err()).to_equal(true)
+
+    it "authenticates split and coalesced records before dispatch":
+        var split = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        val record = _client_record(0u64, [65u8, 66u8])
+        val first = split.ingest(record.slice(0u64, 7u64))
+        expect(first.ingress.status).to_equal(Tls13ApplicationIngressStatusV1.NeedMore)
+        expect(first.ingress.plaintext_frames.len()).to_equal(0u64)
+        val second = split.ingest(record.slice(7u64, record.len()))
+        expect(second.ingress.plaintext_frames).to_equal([[65u8, 66u8]])
+        expect(split.receive_sequence()).to_equal(1i64)
+
+        var coalesced = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        val event = coalesced.ingest(
+            _client_record(0u64, [1u8]) + _client_record(1u64, [2u8]))
+        expect(event.ingress.plaintext_frames).to_equal([[1u8], [2u8]])
+        expect(event.ingress.authenticated_record_count).to_equal(2i64)
+        expect(event.dispatch_stopped).to_be(false)
+
+    it "fails terminally on wire budget overflow and forged authentication":
+        var over = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        val overflow = over.ingest(_bytes(0u8, WEB_TLS_MAX_INGRESS_WIRE_BYTES_V1 + 1))
+        expect(overflow.ingress.status).to_equal(Tls13ApplicationIngressStatusV1.Overflow)
+        expect(over.status).to_equal(WebTlsStreamStatusV1.Failed)
+
+        var forged_owner = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        var forged = _client_record(0u64, [9u8, 8u8])
+        val last = forged.len() - 1u64
+        forged[last] = forged[last] ^ 1u8
+        val rejected = forged_owner.ingest(forged)
+        expect(rejected.ingress.status).to_equal(Tls13ApplicationIngressStatusV1.AuthenticationFailed)
+        expect(rejected.ingress.plaintext_frames.len()).to_equal(0u64)
+        expect(forged_owner.receive_sequence()).to_equal(0i64)
+        expect(forged_owner.status).to_equal(WebTlsStreamStatusV1.Failed)
+
+    it "stops dispatch on peer close and commits one reciprocal close":
+        var owner = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        val close_event = owner.ingest(_client_close(0u64))
+        expect(close_event.ingress.status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(close_event.dispatch_stopped).to_be(true)
+        expect(close_event.reciprocal_close_required).to_be(true)
+        val prepared = owner.prepare_next()
+        expect(prepared.kind).to_equal(WebTlsSendKindV1.CloseNotify)
+        expect(owner.commit_send(prepared.token)).to_be(true)
+        expect(owner.status).to_equal(WebTlsStreamStatusV1.Closed)
+
+    it "preserves ordered application frames preceding coalesced close_notify":
+        var owner = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        var event = owner.ingest(
+            _client_record(0u64, [71u8, 69u8, 84u8]) +
+            _client_close(1u64))
+        expect(event.ingress.status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(event.ingress.plaintext_frames).to_equal([[71u8, 69u8, 84u8]])
+        expect(event.authenticated_frames_dispatchable).to_be(true)
+        expect(event.dispatch_stopped).to_be(true)
+        expect(event.reciprocal_close_required).to_be(true)
+        expect(event.ingress.zeroize_plaintext_frames()).to_equal(3i64)
+
+describe "web TLS transactional egress":
+    it "requires all application bytes committed before local close_notify":
+        var owner = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(owner.begin_application(_bytes(70u8, TLS_MAX_FRAGMENT_LENGTH_V1 + 1))).to_be(true)
+        expect(owner.request_local_close()).to_be(true)
+        expect(owner.can_dispatch()).to_be(false)
+        val first = owner.prepare_next()
+        expect(first.kind).to_equal(WebTlsSendKindV1.Application)
+        expect(first.final_application_chunk).to_be(false)
+        expect(owner.commit_send(first.token)).to_be(true)
+        val second = owner.prepare_next()
+        expect(second.kind).to_equal(WebTlsSendKindV1.Application)
+        expect(second.final_application_chunk).to_be(true)
+        expect(owner.commit_send(second.token)).to_be(true)
+        val close = owner.prepare_next()
+        expect(close.kind).to_equal(WebTlsSendKindV1.CloseNotify)
+        expect(owner.commit_send(close.token)).to_be(true)
+        expect(owner.status).to_equal(WebTlsStreamStatusV1.LocalClosed)
+
+    it "makes failed and partial application sends terminal":
+        var failed = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(failed.begin_application([1u8, 2u8, 3u8])).to_be(true)
+        val pending = failed.prepare_next()
+        expect(failed.abort_send(pending.token, 0)).to_be(true)
+        expect(failed.status).to_equal(WebTlsStreamStatusV1.Failed)
+
+        var partial = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(partial.begin_application([1u8, 2u8, 3u8])).to_be(true)
+        val partial_record = partial.prepare_next()
+        expect(partial.abort_send(partial_record.token, 1)).to_be(true)
+        expect(partial.status).to_equal(WebTlsStreamStatusV1.Failed)
+
+    it "makes close abort and a stale pending token terminal":
+        var closing = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(closing.request_local_close()).to_be(true)
+        val close = closing.prepare_next()
+        expect(close.kind).to_equal(WebTlsSendKindV1.CloseNotify)
+        expect(closing.abort_send(close.token, 0)).to_be(true)
+        expect(closing.status).to_equal(WebTlsStreamStatusV1.Failed)
+
+        var stale = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(stale.begin_application([1u8])).to_be(true)
+        val pending = stale.prepare_next()
+        expect(stale.commit_send(pending.token + 1)).to_be(false)
+        expect(stale.status).to_equal(WebTlsStreamStatusV1.Failed)
+
+    it "preserves an already prepared local close across simultaneous peer close":
+        var owner = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(owner.request_local_close()).to_be(true)
+        val local_close = owner.prepare_next()
+        expect(owner.status).to_equal(WebTlsStreamStatusV1.ClosePending)
+        val peer = owner.ingest(_client_close(0u64))
+        expect(peer.ingress.status).to_equal(Tls13ApplicationIngressStatusV1.CloseNotify)
+        expect(peer.reciprocal_close_required).to_be(false)
+        expect(owner.status).to_equal(WebTlsStreamStatusV1.ClosePending)
+        expect(owner.commit_send(local_close.token)).to_be(true)
+        expect(owner.status).to_equal(WebTlsStreamStatusV1.Closed)
+
+    it "chunks a 64 KiB response as four direct records without a record array":
+        var owner = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(owner.begin_application(_bytes(88u8, WEB_TLS_MAX_RESPONSE_PLAINTEXT_V1))).to_be(true)
+        var sequence: u64 = 0u64
+        while sequence < 4u64:
+            val prepared = owner.prepare_next()
+            expect(prepared.kind).to_equal(WebTlsSendKindV1.Application)
+            expect(prepared.wire_bytes.len().to_i64()).to_equal(TLS_MAX_FRAGMENT_LENGTH_V1 + 22)
+            val opened = record13_decrypt_for_suite(
+                CIPHER_AES_128_GCM_SHA256,
+                RecordKey(key: _bytes(5u8, 16), iv: _bytes(6u8, 12)),
+                sequence, prepared.wire_bytes)
+            match opened:
+                case RecordResult.Err(_): fail("prepared web record did not authenticate")
+                case RecordResult.Ok(_, plaintext):
+                    expect(plaintext.len().to_i64()).to_equal(TLS_MAX_FRAGMENT_LENGTH_V1)
+            expect(owner.commit_send(prepared.token)).to_be(true)
+            if sequence == 0u64:
+                expect(owner.retained_response_nonzero_bytes()).to_equal(
+                    WEB_TLS_MAX_RESPONSE_PLAINTEXT_V1 - TLS_MAX_FRAGMENT_LENGTH_V1)
+            sequence = sequence + 1u64
+        expect(owner.has_response_bytes()).to_be(false)
+        expect(owner.retained_response_nonzero_bytes()).to_equal(0i64)
+        expect(owner.send_sequence()).to_equal(4i64)
+
+    it "rejects response budget overflow and truncating EOF":
+        var budget = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        expect(budget.begin_application(
+            _bytes(1u8, WEB_TLS_MAX_RESPONSE_PLAINTEXT_V1 + 1))).to_be(false)
+        expect(budget.send_sequence()).to_equal(0i64)
+        expect(budget.transport_eof()).to_be(false)
+        expect(budget.status).to_equal(WebTlsStreamStatusV1.Failed)
+
+        var notified = WebTlsStreamOwnerV1.from_context(_context()).unwrap()
+        val _ = notified.ingest(_client_close(0u64))
+        val reciprocal = notified.prepare_next()
+        expect(notified.commit_send(reciprocal.token)).to_be(true)
+        expect(notified.transport_eof()).to_be(true)

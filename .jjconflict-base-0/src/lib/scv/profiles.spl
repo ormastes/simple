@@ -1,0 +1,88 @@
+# SCV-IMPL-G-04 — per-repo strictness profiles.
+#
+# Exactly three profiles, ordered by strictness:
+#   default          — landed G-02 behaviour: --force-unparsed allowed with a
+#                      reason, audited, and publication blocked while the audit
+#                      is non-empty.
+#   strict           — --force-unparsed REFUSED at commit; forced_unparsed is
+#                      unreachable in the state model; publication blocked on
+#                      any (legacy) audit entry.
+#   mission_critical — strict, and the profile can only be PINNED in the repo
+#                      (.scv/profile.sdn); no environment request can grant it.
+#
+# The pinned profile lives in `.scv/profile.sdn` (one row: `profile: <name>`).
+# An outside request (e.g. SCV_PROFILE) may RAISE default -> strict, never
+# lower a pinned profile, and never yields mission_critical. There is no
+# permissive profile: nothing here weakens the default.
+
+use app.io.mod (file_exists, file_read)
+use std.scv.core.{scv_repo_dir}
+use std.scv.store.{scv_write_text}
+
+fn scv_profile_names() -> [text]:
+    ["default", "strict", "mission_critical"]
+
+fn scv_profile_valid(name: text) -> bool:
+    for known in scv_profile_names():
+        if name == known:
+            return true
+    false
+
+fn scv_profile_rank(name: text) -> i64:
+    if name == "default":
+        return 0
+    if name == "strict":
+        return 1
+    if name == "mission_critical":
+        return 2
+    -1
+
+fn scv_profile_path(root: text) -> text:
+    "{scv_repo_dir(root)}/profile.sdn"
+
+# Pinned repo profile; `default` when nothing (or junk) is pinned.
+fn scv_profile_read(root: text) -> text:
+    val path = scv_profile_path(root)
+    if not file_exists(path):
+        return "default"
+    for line in file_read(path).split("\n"):
+        if line.starts_with("profile:"):
+            val name = line[8:].trim()
+            if scv_profile_valid(name):
+                return name
+    "default"
+
+fn scv_profile_set(root: text, name: text) -> text:
+    if not scv_profile_valid(name):
+        return "ERROR profile: unknown profile '{name}' (expected default|strict|mission_critical)\n"
+    if not file_exists(scv_repo_dir(root)):
+        return "ERROR profile: not an scv repository: {root}\n"
+    scv_write_text(scv_profile_path(root), "profile: {name}\n")
+    "profile: {name}\n"
+
+# Effective profile = max(pinned, requested) with mission_critical excluded
+# from `requested`; unknown requests are ignored.
+fn scv_profile_effective(root: text, requested: text) -> text:
+    val pinned = scv_profile_read(root)
+    if requested == "" or not scv_profile_valid(requested) or requested == "mission_critical":
+        return pinned
+    if scv_profile_rank(requested) > scv_profile_rank(pinned):
+        requested
+    else:
+        pinned
+
+fn scv_profile_refuses_forced(name: text) -> bool:
+    scv_profile_rank(name) >= 1
+
+# "" when publication is not blocked by the forced_unparsed audit; otherwise a
+# reason naming the profile. The audit is read directly (not via
+# commit_policy) so this module stays import-free of it.
+fn scv_profile_publication_blocked_reason(root: text) -> text:
+    val log = "{scv_repo_dir(root)}/forced_unparsed.log"
+    if not file_exists(log) or file_read(log) == "":
+        return ""
+    "forced_unparsed audit is non-empty (profile {scv_profile_read(root)}): publication blocked"
+
+export scv_profile_names, scv_profile_valid, scv_profile_rank, scv_profile_path
+export scv_profile_read, scv_profile_set, scv_profile_effective
+export scv_profile_refuses_forced, scv_profile_publication_blocked_reason

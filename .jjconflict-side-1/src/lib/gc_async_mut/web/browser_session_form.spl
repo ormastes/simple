@@ -1,0 +1,361 @@
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_attr, be_dom_get_text_content, be_dom_has_attr,
+    be_dom_node_for_route, be_dom_submit_form_owner_route
+}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomIdentityIndex, DomNodeRoute
+}
+use std.gc_async_mut.web.browser_session_url.{
+    browser_url_form_encode, resolve_relative_url, without_fragment
+}
+
+class BrowserFormSubmission:
+    method: text
+    url: text
+    body: text
+    content_type: text
+    error: text
+
+fn browser_form_encode(value: text) -> text:
+    browser_url_form_encode(value)
+
+fn browser_form_encode_textarea_value(value: text) -> text:
+    val bytes = value.bytes()
+    var parts: [text] = []
+    var segment_start: i64 = 0
+    var index: i64 = 0
+    while index < bytes.len():
+        if bytes[index] == 13u8 or bytes[index] == 10u8:
+            parts.push(value.slice(segment_start, index))
+            parts.push("\r\n")
+            if (
+                bytes[index] == 13u8 and index + 1 < bytes.len() and
+                bytes[index + 1] == 10u8
+            ):
+                index = index + 1
+            segment_start = index + 1
+        index = index + 1
+    if parts.len() == 0:
+        return browser_form_encode(value)
+    parts.push(value.slice(segment_start, value.len()))
+    browser_form_encode(parts.join(""))
+
+fn _browser_form_pair(name: text, value: text) -> text:
+    browser_form_encode(name) + "=" + browser_form_encode(value)
+
+fn _browser_textarea_form_pair(name: text, value: text) -> text:
+    browser_form_encode(name) + "=" + browser_form_encode_textarea_value(value)
+
+fn _browser_option_value(node: BeDomNode) -> text:
+    if be_dom_has_attr(node, "value"):
+        return be_dom_get_attr(node, "value")
+    be_dom_get_text_content(node)
+
+fn _browser_option_values(
+    node: BeDomNode, selected_only: bool, ancestor_disabled: bool
+) -> [text]:
+    var values: [text] = []
+    val disabled = ancestor_disabled or (
+        (node.tag_name == "optgroup" or node.tag_name == "option") and
+        be_dom_has_attr(node, "disabled")
+    )
+    if node.tag_name == "option" and not disabled:
+        if not selected_only or be_dom_has_attr(node, "selected"):
+            values.push(_browser_option_value(node))
+        return values
+    for child in node.children:
+        for value in _browser_option_values(child, selected_only, disabled):
+            values.push(value)
+    values
+
+class BrowserSelectLookup:
+    found: bool
+    value: text
+
+fn _browser_select_lookup(
+    node: BeDomNode, selected_only: bool, ancestor_disabled: bool
+) -> BrowserSelectLookup:
+    val disabled = ancestor_disabled or (
+        (node.tag_name == "optgroup" or node.tag_name == "option") and
+        be_dom_has_attr(node, "disabled")
+    )
+    if node.tag_name == "option":
+        if not disabled and (
+            not selected_only or be_dom_has_attr(node, "selected")
+        ):
+            return BrowserSelectLookup(
+                found: true, value: _browser_option_value(node)
+            )
+        return BrowserSelectLookup(found: false, value: "")
+    for child in node.children:
+        val found = _browser_select_lookup(
+            child, selected_only, disabled
+        )
+        if found.found:
+            return found
+    BrowserSelectLookup(found: false, value: "")
+
+fn browser_select_value(node: BeDomNode) -> text:
+    val selected = _browser_select_lookup(node, true, false)
+    if selected.found:
+        return selected.value
+    if be_dom_has_attr(node, "multiple"):
+        return ""
+    _browser_select_lookup(node, false, false).value
+
+fn _browser_select_has_value(
+    node: BeDomNode, value: text, ancestor_disabled: bool
+) -> bool:
+    val disabled = ancestor_disabled or (
+        (node.tag_name == "optgroup" or node.tag_name == "option") and
+        be_dom_has_attr(node, "disabled")
+    )
+    if node.tag_name == "option":
+        return not disabled and _browser_option_value(node) == value
+    for child in node.children:
+        if _browser_select_has_value(child, value, disabled):
+            return true
+    false
+
+fn browser_select_has_value(node: BeDomNode, value: text) -> bool:
+    _browser_select_has_value(node, value, false)
+
+class BrowserSelectUpdate:
+    node: BeDomNode
+    found: bool
+    changed: bool
+
+fn _browser_select_update(
+    node: BeDomNode, value: text, ancestor_disabled: bool,
+    matched_before: bool
+) -> BrowserSelectUpdate:
+    var next = node
+    val disabled = ancestor_disabled or (
+        (next.tag_name == "optgroup" or next.tag_name == "option") and
+        be_dom_has_attr(next, "disabled")
+    )
+    if next.tag_name == "option":
+        val was_selected = be_dom_has_attr(next, "selected")
+        val matches = (
+            not matched_before and not disabled and
+            _browser_option_value(next) == value
+        )
+        if matches:
+            next.set_attr("selected", "selected")
+        else:
+            next.remove_attr("selected")
+        return BrowserSelectUpdate(
+            node: next, found: matches,
+            changed: was_selected != matches
+        )
+    var found = false
+    var changed = false
+    var children: [BeDomNode] = []
+    for child in next.children:
+        val update = _browser_select_update(
+            child, value, disabled, matched_before or found
+        )
+        children.push(update.node)
+        found = found or update.found
+        changed = changed or update.changed
+    next.children = children
+    BrowserSelectUpdate(node: next, found: found, changed: changed)
+
+fn browser_select_update(node: BeDomNode, value: text) -> BrowserSelectUpdate:
+    _browser_select_update(node, value, false, false)
+
+fn _browser_same_route(left: DomNodeRoute, right: DomNodeRoute) -> bool:
+    left.generation.value == right.generation.value and
+        left.node_id == right.node_id
+
+fn _browser_owned_by_form(
+    index: DomIdentityIndex, route: DomNodeRoute, form_route: DomNodeRoute
+) -> bool:
+    if val Some(owner) = index.form_owner_for_route(route):
+        return _browser_same_route(owner, form_route)
+    false
+
+fn _browser_is_submitter(
+    route: DomNodeRoute, submitter_route: DomNodeRoute?
+) -> bool:
+    if val Some(submitter) = submitter_route:
+        return _browser_same_route(route, submitter)
+    false
+
+fn _browser_control_pairs(
+    node: BeDomNode, index: DomIdentityIndex, form_route: DomNodeRoute,
+    submitter_route: DomNodeRoute?
+) -> [text]:
+    var pairs: [text] = []
+    val route = DomNodeRoute(
+        generation: index.generation, node_id: node.node_id
+    )
+    if (
+        (node.tag_name == "input" or node.tag_name == "button" or
+         node.tag_name == "textarea" or node.tag_name == "select") and
+        not _browser_owned_by_form(index, route, form_route)
+    ):
+        return pairs
+    if be_dom_has_attr(node, "disabled"):
+        return pairs
+    val name = be_dom_get_attr(node, "name")
+    if node.tag_name == "input":
+        val declared_type = be_dom_get_attr(node, "type").lower()
+        val input_type = if declared_type == "": "text" else: declared_type
+        if (
+            name == "" or input_type == "button" or input_type == "reset" or
+            input_type == "file" or input_type == "image"
+        ):
+            return pairs
+        if (
+            (input_type == "checkbox" or input_type == "radio") and
+            not be_dom_has_attr(node, "checked")
+        ):
+            return pairs
+        if input_type == "submit" and not _browser_is_submitter(
+            route, submitter_route
+        ):
+            return pairs
+        var value = be_dom_get_attr(node, "value")
+        if (input_type == "checkbox" or input_type == "radio") and value == "":
+            value = "on"
+        pairs.push(_browser_form_pair(name, value))
+        return pairs
+    if node.tag_name == "button":
+        val declared_type = be_dom_get_attr(node, "type").lower()
+        val button_type = if declared_type == "": "submit" else: declared_type
+        if (
+            name != "" and button_type == "submit" and
+            _browser_is_submitter(route, submitter_route)
+        ):
+            val declared = be_dom_get_attr(node, "value")
+            pairs.push(_browser_form_pair(
+                name,
+                if be_dom_has_attr(node, "value"):
+                    declared
+                else:
+                    be_dom_get_text_content(node)
+            ))
+        return pairs
+    if node.tag_name == "textarea":
+        if name != "":
+            pairs.push(_browser_textarea_form_pair(
+                name, be_dom_get_text_content(node)
+            ))
+        return pairs
+    if node.tag_name == "select":
+        if name == "":
+            return pairs
+        var values = _browser_option_values(node, true, false)
+        if values.len() == 0 and not be_dom_has_attr(node, "multiple"):
+            val all_values = _browser_option_values(node, false, false)
+            if all_values.len() > 0:
+                values.push(all_values[0])
+        for value in values:
+            pairs.push(_browser_form_pair(name, value))
+        return pairs
+    for child in node.children:
+        for pair in _browser_control_pairs(
+            child, index, form_route, submitter_route
+        ):
+            pairs.push(pair)
+    pairs
+
+fn browser_form_submission(
+    root: BeDomNode,
+    index: DomIdentityIndex,
+    form_route: DomNodeRoute,
+    submitter_route: DomNodeRoute?,
+    current_url: text
+) -> BrowserFormSubmission:
+    val form = match be_dom_node_for_route(root, index, form_route):
+        Some(node): node
+        nil: return BrowserFormSubmission(
+            method: "", url: "", body: "", content_type: "",
+            error: "form not found"
+        )
+    if form.tag_name != "form":
+        return BrowserFormSubmission(
+            method: "", url: "", body: "", content_type: "",
+            error: "form not found"
+        )
+    var submitter_action = ""
+    var submitter_method = ""
+    var submitter_has_method = false
+    var submitter_enctype = ""
+    if val Some(route) = submitter_route:
+        val submitter = match be_dom_node_for_route(root, index, route):
+            Some(node): node
+            nil: return BrowserFormSubmission(
+                method: "", url: "", body: "", content_type: "",
+                error: "submitter not found"
+            )
+        val submitter_owner = match be_dom_submit_form_owner_route(
+            root, index, route
+        ):
+            Some(owner): owner
+            nil: return BrowserFormSubmission(
+                method: "", url: "", body: "", content_type: "",
+                error: "submitter not found"
+            )
+        if not _browser_same_route(submitter_owner, form_route):
+            return BrowserFormSubmission(
+                method: "", url: "", body: "", content_type: "",
+                error: "submitter not found"
+            )
+        submitter_action = be_dom_get_attr(submitter, "formaction")
+        submitter_method = be_dom_get_attr(submitter, "formmethod")
+        submitter_has_method = be_dom_has_attr(submitter, "formmethod")
+        submitter_enctype = be_dom_get_attr(submitter, "formenctype")
+    val form_action = be_dom_get_attr(form, "action")
+    val raw_action = if submitter_action != "":
+        submitter_action
+    elif form_action != "":
+        form_action
+    else:
+        current_url
+    val action = without_fragment(resolve_relative_url(current_url, raw_action))
+    val form_method = be_dom_get_attr(form, "method")
+    val declared_method = (if submitter_has_method:
+        submitter_method
+    else:
+        form_method).lower()
+    val method = if declared_method == "post":
+        "post"
+    elif declared_method == "dialog":
+        "dialog"
+    else:
+        "get"
+    val form_enctype = be_dom_get_attr(form, "enctype")
+    val enctype = if submitter_enctype != "":
+        submitter_enctype.lower()
+    elif form_enctype != "":
+        form_enctype.lower()
+    else:
+        "application/x-www-form-urlencoded"
+    if method == "dialog":
+        return BrowserFormSubmission(
+            method: "", url: "", body: "", content_type: "",
+            error: "unsupported form method: dialog"
+        )
+    if method == "post" and enctype != "application/x-www-form-urlencoded":
+        return BrowserFormSubmission(
+            method: "", url: "", body: "", content_type: "",
+            error: "unsupported form encoding: {enctype}"
+        )
+    # One O(N) tree walk; each control consults the immutable owner map.
+    val body = _browser_control_pairs(
+        root, index, form_route, submitter_route
+    ).join("&")
+    if method == "post":
+        return BrowserFormSubmission(
+            method: "POST", url: action, body: body,
+            content_type: "application/x-www-form-urlencoded", error: ""
+        )
+    val joiner = if action.contains("?"): "&" else: "?"
+    BrowserFormSubmission(
+        method: "GET",
+        url: if body == "": action else: action + joiner + body,
+        body: "", content_type: "", error: ""
+    )

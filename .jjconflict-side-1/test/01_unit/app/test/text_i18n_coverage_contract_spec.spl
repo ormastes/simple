@@ -1,0 +1,61 @@
+# @tag: unit, text, unicode, i18n, rendering, coverage
+# @req REQ-014 NFR-001 NFR-014 NFR-016
+# @cover src/app/test/text_i18n_coverage_contract.spl 100%
+
+use std.spec.*
+use app.test.text_i18n_coverage_contract.*
+
+fn owner(id: text, path: text, language: text, area: text) -> TextI18nCoverageOwner:
+    TextI18nCoverageOwner(id: id, path: path, language: language, area: area)
+
+fn backend_rows_with_first(first: TextI18nBackendRow) -> [TextI18nBackendRow]:
+    val canonical = text_i18n_backend_rows()
+    [first, canonical[1], canonical[2], canonical[3], canonical[4],
+        canonical[5], canonical[6], canonical[7], canonical[8], canonical[9]]
+
+describe "UTF-8 i18n coverage closure contract":
+    it "pins every current owner and required backend row":
+        val owners = text_i18n_coverage_owners()
+        val checked = text_i18n_coverage_contract_check(owners)
+        expect(owners.len()).to_equal(TEXT_I18N_COVERAGE_OWNER_COUNT)
+        expect(checked.valid).to_be(true)
+        expect(checked.absent_paths.len()).to_equal(0)
+        expect(checked.duplicate_ids.len()).to_equal(0)
+        expect(checked.duplicate_paths.len()).to_equal(0)
+        expect(checked.invalid_rows.len()).to_equal(0)
+        expect(text_i18n_backend_rows().len()).to_equal(TEXT_I18N_BACKEND_ROW_COUNT)
+        expect(text_i18n_backend_contract_valid(text_i18n_backend_rows())).to_be(true)
+        expect(text_i18n_coverage_manifest_report()).to_start_with(
+            "text-i18n-coverage-contract: PASS")
+
+    it "fails closed for owner count, missing paths, duplicates, and invalid classifications":
+        val path = "src/lib/common/string_core.spl"
+        val malformed = [
+            owner("same", path, "simple", "text"),
+            owner("same", path, "other", "") ,
+            owner("missing", "test/fixtures/does-not-exist-text-i18n.spl", "rust", "parser")
+        ]
+        val checked = text_i18n_coverage_contract_check(malformed)
+        expect(checked.valid).to_be(false)
+        expect(checked.actual_owner_count).to_equal(3)
+        expect(checked.duplicate_ids).to_equal(["same"])
+        expect(checked.duplicate_paths).to_equal([path])
+        expect(checked.absent_paths).to_equal([
+            "test/fixtures/does-not-exist-text-i18n.spl"])
+        expect(checked.invalid_rows.len()).to_equal(1)
+
+    it "rejects missing duplicate optional and unknown backend evidence rows":
+        val valid = TextI18nBackendRow(
+            id: "scalar", evidence_class: "forced-backend", required: true)
+        expect(text_i18n_backend_contract_valid([])).to_be(false)
+        expect(text_i18n_backend_contract_valid(
+            backend_rows_with_first(valid))).to_be(true)
+        expect(text_i18n_backend_contract_valid(backend_rows_with_first(
+            TextI18nBackendRow(
+                id: "sse2", evidence_class: "forced-backend", required: true)))).to_be(false)
+        expect(text_i18n_backend_contract_valid(backend_rows_with_first(
+            TextI18nBackendRow(
+                id: "scalar", evidence_class: "forced-backend", required: false)))).to_be(false)
+        expect(text_i18n_backend_contract_valid(backend_rows_with_first(
+            TextI18nBackendRow(
+                id: "scalar", evidence_class: "source-contract", required: true)))).to_be(false)

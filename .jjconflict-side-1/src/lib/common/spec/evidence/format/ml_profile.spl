@@ -1,0 +1,148 @@
+# ML / probabilistic evidence profile (E7 domain, evidence manifest v1).
+#
+# This module is pure: it turns a recorded ML/probabilistic run (model +
+# dataset identity, metrics, predictions) into `CanonicalEvidence` nodes that
+# the shared comparator in `evidence_comparator.spl` can check. It owns no
+# training, no acquisition, no plotting, and no Markdown.
+#
+# f64 is banned in this layer. All magnitudes are scaled fixed-point integers
+# (i64), mirroring `format/simulation_profile.spl`. Callers document their
+# own scale alongside the field; this module does not assume one.
+#
+# Guide: doc/07_guide/infra/sspec_typed_evidence.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md §7
+
+use std.common.spec.evidence.model.{
+    EvidenceNode, CanonicalEvidence,
+    evidence_node_at, canonical_evidence
+}
+
+# `dataset_hash` and `model_hash` are required for the run to be reproducible
+# evidence: without them, "this model scored 92%" cannot be tied to a specific
+# dataset/model artifact, and a metric nobody can trace back to its inputs is
+# not evidence of anything. `seed` is required for the same reason a
+# simulation run needs one: without it a stochastic training/inference run can
+# produce a different result on replay.
+pub struct MlRun:
+    model_id: text
+    model_version: text
+    dataset_hash: text
+    model_hash: text
+    seed: text
+    framework: text
+
+# A single scalar metric (accuracy, F1, loss, calibration error, ...) with a
+# fixed-point value and an explicit tolerance band. `reason` is mandatory: a
+# tolerance without a reason is how real drift hides behind "close enough",
+# same rule as `KpiSpec` in the simulation profile and the core comparator's
+# ignore-needs-reason rule.
+pub struct MlMetric:
+    name: text
+    value_scaled: i64
+    scale: i64
+    tolerance_scaled: i64
+    reason: text
+
+# One prediction row used for confusion/accuracy accounting.
+pub struct MlPrediction:
+    input_id: text
+    predicted_class: text
+    expected_class: text
+    confidence_permille: i64
+
+pub fn ml_run_is_valid(run: MlRun) -> bool:
+    if run.dataset_hash == "":
+        return false
+    if run.model_hash == "":
+        return false
+    if run.seed == "":
+        return false
+    true
+
+pub fn ml_metric_is_valid(metric: MlMetric) -> bool:
+    metric.reason != ""
+
+fn abs_i64(v: i64) -> i64:
+    if v < 0:
+        return 0 - v
+    v
+
+fn ml_run_nodes(run: MlRun) -> [EvidenceNode]:
+    [
+        evidence_node_at("ml.model_id", run.model_id, 0),
+        evidence_node_at("ml.model_version", run.model_version, 1),
+        evidence_node_at("ml.dataset_hash", run.dataset_hash, 2),
+        evidence_node_at("ml.model_hash", run.model_hash, 3),
+        evidence_node_at("ml.seed", run.seed, 4),
+        evidence_node_at("ml.framework", run.framework, 5)
+    ]
+
+# Converts a recorded run + its metrics into canonical evidence. An
+# untracked dataset/model, or an unseeded run, is refused: it would otherwise
+# emit nodes that look checkable but describe a result nobody can reproduce.
+pub fn ml_run_to_evidence(run: MlRun, metrics: [MlMetric], profile_id: text) -> CanonicalEvidence:
+    if not ml_run_is_valid(run):
+        return CanonicalEvidence(
+            kind: "ml_run",
+            profile_id: profile_id,
+            parse_ok: false,
+            parse_error: "ml run has no recorded dataset/model hash or seed; its metrics are not reproducible evidence",
+            nodes: []
+        )
+
+    var nodes = ml_run_nodes(run)
+    var order = nodes.len()
+    for metric in metrics:
+        nodes.push(evidence_node_at("ml.metric." + metric.name, "{metric.value_scaled}", order))
+        order = order + 1
+
+    canonical_evidence("ml_run", profile_id, nodes)
+
+# Evaluates each metric against a parallel `actual_values` array (same index
+# = same metric). A mismatched length is itself a finding, never a silent
+# truncation to the shorter array, because that would quietly stop checking
+# metrics without ever reporting it did.
+pub fn evaluate_metrics(metrics: [MlMetric], actual_values: [i64]) -> [text]:
+    var findings: [text] = []
+    if metrics.len() != actual_values.len():
+        findings.push(
+            "metrics/actual_values length mismatch: " + "{metrics.len()}" + " metrics vs "
+            + "{actual_values.len()}" + " actual values"
+        )
+        return findings
+
+    var i = 0
+    while i < metrics.len():
+        val metric = metrics[i]
+        val actual = actual_values[i]
+        if not ml_metric_is_valid(metric):
+            findings.push(metric.name + ": tolerance has no recorded reason")
+        elif abs_i64(actual - metric.value_scaled) > metric.tolerance_scaled:
+            findings.push(
+                metric.name + ": was " + "{actual}" + ", expected " + "{metric.value_scaled}"
+                + " +/- " + "{metric.tolerance_scaled}"
+            )
+        i = i + 1
+    findings
+
+# Returns (correct, total) over a prediction set.
+pub fn confusion_counts(predictions: [MlPrediction]) -> (i64, i64):
+    var correct: i64 = 0
+    var total: i64 = 0
+    for pred in predictions:
+        total = total + 1
+        if pred.predicted_class == pred.expected_class:
+            correct = correct + 1
+    (correct, total)
+
+# Parts-per-thousand accuracy, integer only. An empty prediction set is
+# refused rather than reported as 0/0 rounding to some default — a 0/0 ratio
+# looks like a clean measurement instead of the absence of one, the same
+# reasoning `sample_set_is_valid` applies to an empty sample set.
+pub fn accuracy_permille(predictions: [MlPrediction]) -> i64:
+    if predictions.len() == 0:
+        return -1
+    val counts = confusion_counts(predictions)
+    val correct = counts.0
+    val total = counts.1
+    (correct * 1000) / total

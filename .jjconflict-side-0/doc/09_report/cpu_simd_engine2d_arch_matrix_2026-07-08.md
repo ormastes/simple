@@ -1,0 +1,21 @@
+# CPU SIMD Engine2D Arch Matrix
+
+- cpu_simd_engine2d_arch_matrix_host_arch=x86_64
+- cpu_simd_engine2d_arch_matrix_strict=0
+- cpu_simd_engine2d_arch_matrix_x86_64_status=pass
+- cpu_simd_engine2d_arch_matrix_x86_64_reason=runtime-evidence-verified
+- cpu_simd_engine2d_arch_matrix_x86_64_simple_bin=bin/simple
+- cpu_simd_engine2d_arch_matrix_x86_64_report=build/check/cpu-simd-engine2d-arch-matrix/x86_64/report.md
+- cpu_simd_engine2d_arch_matrix_aarch64_status=unavailable
+- cpu_simd_engine2d_arch_matrix_aarch64_reason=missing-simple-bin
+- cpu_simd_engine2d_arch_matrix_aarch64_simple_bin=
+- cpu_simd_engine2d_arch_matrix_aarch64_report=build/check/cpu-simd-engine2d-arch-matrix/aarch64/report.md
+- cpu_simd_engine2d_arch_matrix_riscv64_status=unavailable
+- cpu_simd_engine2d_arch_matrix_riscv64_reason=missing-simple-bin
+- cpu_simd_engine2d_arch_matrix_riscv64_simple_bin=
+- cpu_simd_engine2d_arch_matrix_riscv64_report=build/check/cpu-simd-engine2d-arch-matrix/riscv64/report.md
+- cpu_simd_engine2d_arch_matrix_passed_count=1
+- cpu_simd_engine2d_arch_matrix_unavailable_count=2
+- cpu_simd_engine2d_arch_matrix_failed_count=0
+- cpu_simd_engine2d_arch_matrix_status=partial
+- cpu_simd_engine2d_arch_matrix_reason=arch-evidence-unavailable

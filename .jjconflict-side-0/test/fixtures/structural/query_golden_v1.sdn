@@ -1,0 +1,178 @@
+# Golden vectors — frozen QueryIR bytecode / capture format contract v1
+#
+# Language-neutral mirror of test/fixtures/structural/query_golden_v1.spl.
+# Byte-for-byte identical to the Simple fixture; this copy exists so a Rust/C++
+# bridge or an external validator can check its encoder without linking Simple.
+#
+# Normative layout: doc/05_design/platform/structural_compute/
+#                   query_contract_v1.md
+#
+# All `bytes` values are lowercase unseparated hex of the COMPLETE framed record
+# (8-byte envelope included).
+
+contract:
+  query_schema_version: 1
+  byte_order: little-endian
+  envelope: magic_u32 | version_u16 | reserved_u16
+  query_op_len: 18
+  capture_slot_len: 6
+  entity_set_view_len: 13
+  query_program_header_len: 22
+  query_dialect_count: 9
+  query_dialect_max: 8
+  query_op_kind_count: 22
+  query_op_kind_max: 21
+  query_determinism_max: 2
+  capture_kind_max: 1
+  entity_set_order_max: 2
+  absent_u32_sentinel: 0xffffffff
+
+magic:
+  QueryOp: SQOP
+  CaptureSlot: SQCP
+  EntitySetView: SQSV
+  QueryProgram: SQPG
+
+query_dialect_discriminants:
+  Syntax: 0
+  Semantic: 1
+  Mir: 2
+  ClangAst: 3
+  LlvmIr: 4
+  Dom: 5
+  CssSelector: 6
+  LinkGraph: 7
+  LayoutGraph: 8
+
+query_op_kind_discriminants:
+  SeedAll: 0
+  SeedKind: 1
+  SeedTag: 2
+  SeedTagValue: 3
+  FilterKind: 4
+  FilterTag: 5
+  FilterName: 6
+  FilterSourceRange: 7
+  TraverseParent: 8
+  TraverseChild: 9
+  TraverseAncestor: 10
+  TraverseDescendant: 11
+  TraverseSibling: 12
+  TraverseMapping: 13
+  TraverseReference: 14
+  Intersect: 15
+  Union: 16
+  Difference: 17
+  NegateWithinUniverse: 18
+  Capture: 19
+  StableSort: 20
+  Limit: 21
+
+# Seed ops consume no input set; the three set-algebra ops are the only ones
+# that consume a second input. Every input must name a strictly earlier op.
+op_arity:
+  seed_range: 0..3
+  binary_range: 15..17
+
+# DERIVED, not stated by the architecture — see the contract document's
+# "Underspecified in section 7" table.
+query_determinism_discriminants:
+  SetDeterministic: 0
+  OrderDeterministic: 1
+  CaptureDeterministic: 2
+  monotone: true
+
+capture_kind_discriminants:
+  Entity: 0
+  EntitySet: 1
+
+entity_set_order_discriminants:
+  Unordered: 0
+  EntityRefOrder: 1
+  StableSourceOrder: 2
+  monotone: false
+
+tag_index_set:
+  width: u32
+  DENSE_MARKER: 1
+  DENSE_SCALAR: 2
+  SPARSE_RECORDS: 4
+  INVERTED_QUERY: 8
+  SMALL_SET: 16
+  known_mask: 31
+  reserved: bits 5..31 must be zero
+
+query_op_layout:
+  kind: u8
+  reserved: u8 must be zero
+  input_a: u32
+  input_b: u32
+  operand: u32
+  constant: u32
+
+capture_slot_layout:
+  name: u32
+  kind: u8
+  reserved: u8 must be zero
+
+entity_set_view_layout:
+  object_slot: u32
+  offset: u32
+  count: u32
+  order: u8
+
+query_program_layout:
+  envelope: 8
+  dialect: u8
+  schema_version: u32
+  determinism: u8
+  index_requirements: u32
+  op_count: u32
+  const_count: u32
+  capture_count: u32
+  ops: QueryOp * op_count
+  constants: u64 * const_count
+  captures: CaptureSlot * capture_count
+
+vectors:
+  GOLDEN_OP_SEED_ALL:
+    len: 26
+    bytes: 53514f50010000000000ffffffffffffffffffffffffffffffff
+  GOLDEN_OP_INTERSECT:
+    len: 26
+    bytes: 53514f50010000000f000000000001000000ffffffffffffffff
+  GOLDEN_OP_TRAVERSE_MAPPING:
+    len: 26
+    bytes: 53514f50010000000d0001000000ffffffff0000000002000000
+  GOLDEN_OP_LIMIT_MAX:
+    len: 26
+    bytes: 53514f5001000000150003000000ffffffff40000000ffffffff
+  GOLDEN_CAPTURE_SLOT_ENTITY:
+    len: 14
+    bytes: 5351435001000000070000000000
+  GOLDEN_CAPTURE_SLOT_SET:
+    len: 14
+    bytes: 5351435001000000443322110100
+  GOLDEN_VIEW_EMPTY:
+    len: 21
+    bytes: 535153560100000000000000000000000000000000
+  GOLDEN_VIEW_BASIC:
+    len: 21
+    bytes: 535153560100000001000000020000000300000002
+  GOLDEN_PROGRAM_MINIMAL:
+    len: 48
+    bytes: 5351504701000000000100000000000000000100000000000000000000000000ffffffffffffffffffffffffffffffff
+  GOLDEN_PROGRAM_AOP:
+    len: 132
+    bytes: 53515047010000000101000000020c0000000400000003000000010000000200ffffffffffffffffffffffff00000000060000000000ffffffffffffffff01000000050001000000ffffffffffffffff02000000130002000000ffffffff00000000ffffffff887766554433221102000000000000000300000000000000090000000000
+  GOLDEN_PROGRAM_CSS:
+    len: 188
+    bytes: 5351504701000000060100000001080000000700000004000000000000000300ffffffffffffffffffffffff000000000300ffffffffffffffffffffffff010000000f000000000001000000ffffffffffffffff050002000000ffffffffffffffff02000000080003000000ffffffff01000000ffffffff050004000000ffffffffffffffff03000000140005000000ffffffffffffffffffffffff1000000000000000110000000000000012000000000000001300000000000000
+
+# NOTE ON THIS FILE
+#
+# The `bytes` values above are the same hand-derived vectors as the Simple
+# fixture, concatenated. Neither copy was captured from encoder output: the
+# fixture was written from the layout tables above and the spec then asserts
+# that the encoder MATCHES it. That direction is what makes a symmetric
+# encode/decode defect detectable — a round trip alone would pass one through.

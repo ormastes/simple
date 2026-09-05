@@ -1,0 +1,241 @@
+#!/bin/sh
+# check-critical-release-seal.shs — the Phase 9 aggregate release gate.
+#
+# Plan: doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md §Phase 9
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §15, §19, §22, §23.9.
+#
+# WHAT THIS PROVES, AND WHAT IT DELIBERATELY REFUSES TO DO
+# --------------------------------------------------------
+# A critical release requires thirteen zero/100% metrics to hold AT THE SAME
+# TIME, ON THE SAME ARTIFACT. This gate does not re-derive any of them. It
+# checks that every required obligation has a FRESH EVIDENCE RECEIPT: a file
+# carrying that gate's own verbatim verdict line, bound to the sha256 of the
+# artifact being released and to the sha256 of the frozen seal, with a
+# timestamp inside the allowed age.
+#
+# It never reads a report, never infers a verdict from an exit code, and never
+# accepts "the gate passed once". A receipt for a different artifact is a
+# mismatch even if that artifact also passed — evidence must not outlive the
+# thing it describes.
+#
+# It also does not RUN the gates. That is the point: running them here would
+# make this gate the producer of its own evidence, and a producer cannot audit
+# itself. The gates mint receipts (scripts/check/lib/emit_receipt.shs); this
+# reads them.
+#
+# Usage:
+#   sh scripts/check/check-critical-release-seal.shs
+#   sh scripts/check/check-critical-release-seal.shs --selftest
+#   sh scripts/check/check-critical-release-seal.shs --dir <evidence-dir> \
+#       --artifact <path> --seal <path> --max-age <seconds> --require-list <file>
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS — <n> evidence receipt(s) checked, all fresh and bound to artifact+seal hash   exit 0
+#   FAIL — <n> evidence receipt(s) checked, <k> not fresh: <id>(<reason>) ...           exit 1
+#   ERROR — nothing was checked (<reason>)                                              exit 2
+#
+# Non-vacuity is absolute: 0 required obligations is ERROR, a missing driver is
+# ERROR, a missing artifact or seal is ERROR (a hash that cannot be computed is
+# absence of evidence, never a pass). The selftest runs before every scan and
+# is fatal.
+
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+# shellcheck source=scripts/check/lib/emit_receipt.shs
+. "$SCRIPT_DIR/lib/emit_receipt.shs"
+
+SIMPLE_BIN="bin/simple"
+DRIVER="src/app/check/critical_release_seal_census.spl"
+REQUIRE_LIST="scripts/check/critical_release_required_receipts.txt"
+EVID_DIR="build/evidence"
+ARTIFACT=""
+SEAL="spec/compiler_schema/contract_lock.sdn"
+MAX_AGE=86400
+MODE="scan"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest"; shift ;;
+        --dir) EVID_DIR="${2:-}"; shift 2 ;;
+        --artifact) ARTIFACT="${2:-}"; shift 2 ;;
+        --seal) SEAL="${2:-}"; shift 2 ;;
+        --max-age) MAX_AGE="${2:-}"; shift 2 ;;
+        --require-list) REQUIRE_LIST="${2:-}"; shift 2 ;;
+        --help|-h) sed -n '2,45p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
+    exit 2
+fi
+if [ ! -f "$DRIVER" ]; then
+    echo "ERROR — nothing was checked (driver $DRIVER missing)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+# run_census <dir> <artifact-sha> <seal-sha> <max-age> <now> <require-list> <out>
+# The driver's exit status is read DIRECTLY into a variable on the line after
+# the invocation, never through a pipe.
+run_census() {
+    "$SIMPLE_BIN" run "$DRIVER" --dir "$1" --artifact "$2" --seal "$3" \
+        --max-age "$4" --now "$5" --require-list "$6" > "$7" 2>"$7.err"
+    _rc=$?
+    return $_rc
+}
+
+summary_field() {
+    grep '^SUMMARY ' "$1" 2>/dev/null | tail -1 | tr ' ' '\n' | grep "^$2=" | cut -d= -f2
+}
+
+status_of() {
+    # status_of <out> <check_id>
+    grep "^RECEIPT $2 " "$1" 2>/dev/null | tail -1 | tr ' ' '\n' | grep '^status=' | cut -d= -f2
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — seven receipts in a private evidence dir, one per ReceiptReason
+# plus the happy path. Every fixture goes through the REAL writer
+# (emit_receipt) and the REAL driver; the two malformed ones are written by
+# hand because a correct writer cannot produce them.
+#
+# The `ok` fixture is the load-bearing one in the negative direction: without
+# it, a driver that reported every receipt as broken would pass the other six.
+# ---------------------------------------------------------------------------
+selftest() {
+    _sfail=0
+    _sdir="$WORK/evidence"
+    mkdir -p "$_sdir" || { echo "selftest: cannot create $_sdir"; return 1; }
+
+    _art="$WORK/artifact.bin"
+    _seal="$WORK/seal.sdn"
+    printf 'artifact bytes\n' > "$_art"
+    printf 'seal bytes\n' > "$_seal"
+    _ahash=$(_receipt_sha256_file "$_art") || { echo "selftest: no sha256 tool"; return 1; }
+    _shash=$(_receipt_sha256_file "$_seal") || { echo "selftest: no sha256 tool"; return 1; }
+    _now=$(date +%s)
+
+    (
+        EVIDENCE_DIR="$_sdir"
+        emit_receipt "sf-ok" "PASS — 3 thing(s) checked, bad=0" "$_art" "$_seal"
+        emit_receipt "sf-verdict" "FAIL — 3 thing(s) checked, bad=1" "$_art" "$_seal"
+        emit_receipt "sf-artifact" "PASS — 3 thing(s) checked, bad=0" "$_seal" "$_seal"
+        emit_receipt "sf-seal" "PASS — 3 thing(s) checked, bad=0" "$_art" "$_art"
+        emit_receipt "sf-stale" "PASS — 3 thing(s) checked, bad=0" "$_art" "$_seal"
+    ) || { echo "selftest: emit_receipt failed"; return 1; }
+
+    # Age the stale fixture by rewriting only its produced_at line. Its
+    # self-hash no longer matches, which is fine and deliberate: the census
+    # classifies on the declared timestamp, and this proves the age test is
+    # live rather than dead code.
+    _old=$((_now - 999999))
+    sed "s/^produced_at=.*/produced_at=$_old/" "$_sdir/sf-stale.receipt" > "$_sdir/sf-stale.tmp" \
+        && mv -f "$_sdir/sf-stale.tmp" "$_sdir/sf-stale.receipt"
+
+    # Unparseable: not receipt/v1 at all.
+    printf 'this is a report, not a receipt\n' > "$_sdir/sf-unparseable.receipt"
+    # sf-missing is deliberately never written.
+
+    printf 'sf-ok\nsf-missing\nsf-stale\nsf-artifact\nsf-seal\nsf-verdict\nsf-unparseable\n' > "$WORK/sf.list"
+
+    run_census "$_sdir" "$_ahash" "$_shash" 3600 "$_now" "$WORK/sf.list" "$WORK/sf.out"
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        echo "selftest: driver exited $_rc"
+        head -20 "$WORK/sf.out.err" >&2
+        return 1
+    fi
+
+    _req=$(summary_field "$WORK/sf.out" required)
+    [ "${_req:-0}" -eq 7 ] || { echo "selftest: expected 7 required, got ${_req:-none}"; _sfail=1; }
+
+    for _pair in "sf-ok:ok" "sf-missing:missing" "sf-stale:stale" \
+                 "sf-artifact:artifact-mismatch" "sf-seal:seal-mismatch" \
+                 "sf-verdict:verdict-not-pass" "sf-unparseable:unparseable"; do
+        _id=${_pair%%:*}
+        _want=${_pair##*:}
+        _got=$(status_of "$WORK/sf.out" "$_id")
+        [ "$_got" = "$_want" ] || { echo "selftest: $_id expected status=$_want, got status=${_got:-none}"; _sfail=1; }
+    done
+
+    _ok=$(summary_field "$WORK/sf.out" ok)
+    [ "${_ok:-0}" -eq 1 ] || { echo "selftest: expected exactly 1 fresh receipt, got ${_ok:-none}"; _sfail=1; }
+    return $_sfail
+}
+
+selftest
+SELF_RC=$?
+if [ "$SELF_RC" -ne 0 ]; then
+    echo "FAIL — selftest failed; no scan was attempted"
+    exit 1
+fi
+if [ "$MODE" = "selftest" ]; then
+    echo "PASS — 7 fixture(s) checked, selftest only (no scan requested)"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# SCAN
+# ---------------------------------------------------------------------------
+if [ -z "$ARTIFACT" ]; then
+    if [ -e "$SIMPLE_BIN" ]; then
+        ARTIFACT=$(readlink -f "$SIMPLE_BIN" 2>/dev/null || echo "$SIMPLE_BIN")
+    fi
+fi
+if [ ! -f "$ARTIFACT" ]; then
+    echo "ERROR — nothing was checked (no release artifact at '${ARTIFACT:-<unset>}')"
+    exit 2
+fi
+if [ ! -f "$SEAL" ]; then
+    echo "ERROR — nothing was checked (no seal at '$SEAL')"
+    exit 2
+fi
+if [ ! -f "$REQUIRE_LIST" ]; then
+    echo "ERROR — nothing was checked (no required-receipt list at '$REQUIRE_LIST')"
+    exit 2
+fi
+
+ARTIFACT_SHA=$(_receipt_sha256_file "$ARTIFACT") || ARTIFACT_SHA=""
+SEAL_SHA=$(_receipt_sha256_file "$SEAL") || SEAL_SHA=""
+if [ -z "$ARTIFACT_SHA" ] || [ -z "$SEAL_SHA" ]; then
+    echo "ERROR — nothing was checked (cannot compute sha256; absence of a hash is absence of evidence)"
+    exit 2
+fi
+
+NOW=$(date +%s)
+run_census "$EVID_DIR" "$ARTIFACT_SHA" "$SEAL_SHA" "$MAX_AGE" "$NOW" "$REQUIRE_LIST" "$WORK/scan.out"
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    echo "ERROR — nothing was checked (driver exited $RC)"
+    head -20 "$WORK/scan.out.err" >&2
+    exit 2
+fi
+
+grep '^RECEIPT ' "$WORK/scan.out"
+
+REQUIRED=$(summary_field "$WORK/scan.out" required)
+OK=$(summary_field "$WORK/scan.out" ok)
+if [ -z "$REQUIRED" ] || [ "$REQUIRED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 release obligation(s) in $REQUIRE_LIST; a vacuous seal is not a pass)"
+    exit 2
+fi
+
+OFFENDERS=$(grep '^RECEIPT ' "$WORK/scan.out" | grep -v ' status=ok ' \
+    | awk '{ id=$2; st=""; for (i=3; i<=NF; i++) if ($i ~ /^status=/) st=substr($i,8); printf " %s(%s)", id, st }')
+BAD=$((REQUIRED - OK))
+if [ "$BAD" -ne 0 ]; then
+    echo "FAIL — $REQUIRED evidence receipt(s) checked, $BAD not fresh:$OFFENDERS"
+    exit 1
+fi
+VERDICT="PASS — $REQUIRED evidence receipt(s) checked, all fresh and bound to artifact+seal hash"
+echo "$VERDICT"
+exit 0

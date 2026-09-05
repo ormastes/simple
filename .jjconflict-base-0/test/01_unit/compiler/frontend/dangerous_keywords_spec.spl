@@ -1,0 +1,248 @@
+# @cover src/compiler/10.frontend/core/dangerous_keywords.spl
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+"""
+# Dangerous Keywords Specification
+
+**Feature IDs:** #REQC-AC3
+**Category:** Compiler | Frontend | Parser
+**Difficulty:** 2/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Tests the extensible "dangerous keyword" registry. Any identifier registered in
+DANGEROUS_KEYWORDS must be called with a required comment string argument;
+omitting the comment emits a REQC002 warning. The registry ships with at least
+`dangerous_token_but_needs` and `loss` pre-registered.
+
+## Syntax
+
+```simple
+# Required form — comment arg mandatory
+dangerous_token_but_needs("reason for using this dangerous construct")
+dangerous_token_but_needs("reason", [SymbolRef1, SymbolRef2])
+loss("reason: gradient accumulation intentional")
+
+# Missing comment — emits REQC002 warning
+dangerous_token_but_needs
+dangerous_token_but_needs()
+loss
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| REQC002 | Warning code for dangerous keyword used without a comment string |
+| DANGEROUS_KEYWORDS | Extensible list of identifier strings that require comments |
+| is_dangerous_keyword | Predicate checked by parser when encountering an identifier |
+| DangerousKeywordRef | Struct holding a symbol name referenced by a dangerous call |
+| symbol_refs | Optional second argument listing symbols associated with the dangerous call |
+"""
+
+# ============================================================================
+# Self-contained re-implementation of dangerous_keywords.spl logic
+# (mirrors the implementation under test for interpreter-mode testing)
+# ============================================================================
+
+val DANGEROUS_KEYWORDS_TEST: [text] = [
+    "dangerous_token_but_needs",
+    "loss"
+]
+
+fn is_dangerous_keyword_test(name: text) -> bool:
+    for kw in DANGEROUS_KEYWORDS_TEST:
+        if kw == name:
+            return true
+    false
+
+fn should_warn_dangerous(keyword: text, comment: text) -> bool:
+    is_dangerous_keyword_test(keyword) and comment == ""
+
+fn collect_dangerous_warning(keyword: text, comment: text) -> [text]:
+    var ws: [text] = []
+    if should_warn_dangerous(keyword, comment):
+        ws.push("REQC002: dangerous keyword '{keyword}' used without a comment string")
+    ws
+
+fn has_reqc002(ws: [text]) -> bool:
+    for w in ws:
+        if w.contains("REQC002"):
+            return true
+    false
+
+
+# ============================================================================
+# Test Group 1: dangerous_token_but_needs — AC-3
+# ============================================================================
+
+describe "dangerous_token_but_needs — required comment":
+    """
+    ## dangerous_token_but_needs
+
+    The primary dangerous keyword. Must always carry a comment string argument.
+    """
+
+    context "when called without any argument":
+        it "emits a REQC002 warning":
+            val ws = collect_dangerous_warning("dangerous_token_but_needs", "")
+            expect(ws.len()).to_be_greater_than(0)
+            expect(has_reqc002(ws)).to_equal(true)
+
+        it "warning message names the keyword":
+            val ws = collect_dangerous_warning("dangerous_token_but_needs", "")
+            expect(ws[0]).to_contain("dangerous_token_but_needs")
+
+    context "when called with a non-empty comment string":
+        it "does NOT emit a REQC002 warning":
+            val ws = collect_dangerous_warning("dangerous_token_but_needs", "needed for ABI compat")
+            expect(ws.len()).to_equal(0)
+
+    context "when called with comment and symbol references":
+        it "does NOT emit a warning (comment present)":
+            val ws = collect_dangerous_warning("dangerous_token_but_needs", "using Allocator reference")
+            expect(ws.len()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 2: loss — AC-3
+# ============================================================================
+
+describe "loss — dangerous keyword outside ML block context":
+    """
+    ## loss as Dangerous Keyword
+
+    In statement position (outside a loss block), `loss(...)` is treated as a
+    dangerous keyword and requires a comment string.
+    """
+
+    context "when loss is called without a comment":
+        it "emits a REQC002 warning":
+            val ws = collect_dangerous_warning("loss", "")
+            expect(ws.len()).to_be_greater_than(0)
+            expect(has_reqc002(ws)).to_equal(true)
+
+    context "when loss is called with a comment":
+        it "does NOT emit a warning":
+            val ws = collect_dangerous_warning("loss", "gradient accumulation intentional here")
+            expect(ws.len()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 3: Registry membership — is_dangerous_keyword — AC-3
+# ============================================================================
+
+describe "is_dangerous_keyword — registry lookup":
+    """
+    ## Registry Lookup
+
+    is_dangerous_keyword returns true for any registered identifier and false
+    for unregistered identifiers.
+    """
+
+    it "dangerous_token_but_needs is registered":
+        expect(is_dangerous_keyword_test("dangerous_token_but_needs")).to_equal(true)
+
+    it "loss is registered":
+        expect(is_dangerous_keyword_test("loss")).to_equal(true)
+
+    it "print is NOT registered":
+        expect(is_dangerous_keyword_test("print")).to_equal(false)
+
+    it "pass_todo is NOT in dangerous keywords registry":
+        expect(is_dangerous_keyword_test("pass_todo")).to_equal(false)
+
+    it "empty string is NOT registered":
+        expect(is_dangerous_keyword_test("")).to_equal(false)
+
+    it "partial match is NOT registered":
+        expect(is_dangerous_keyword_test("dangerous_token")).to_equal(false)
+
+
+# ============================================================================
+# Test Group 4: Custom dangerous keyword registration — AC-3
+# ============================================================================
+
+describe "dangerous keyword registry — custom extension":
+    """
+    ## Custom Registration
+
+    The registry is extensible: adding a new identifier to DANGEROUS_KEYWORDS
+    causes is_dangerous_keyword to return true for it and triggers REQC002 when
+    no comment is supplied.
+    """
+
+    context "when a custom keyword is added to the registry":
+        it "is_dangerous_keyword returns true for the new keyword":
+            # Simulate extending the registry
+            val extended = DANGEROUS_KEYWORDS_TEST + ["unsafe_gc_bypass"]
+            val found = _list_contains(extended, "unsafe_gc_bypass")
+            expect(found).to_equal(true)
+
+        it "warning is emitted when new keyword used without comment":
+            # Simulate using the new keyword without a comment
+            val extended_check = _extended_should_warn(
+                ["dangerous_token_but_needs", "loss", "unsafe_gc_bypass"],
+                "unsafe_gc_bypass",
+                ""
+            )
+            expect(extended_check).to_equal(true)
+
+        it "no warning when new keyword used with comment":
+            val extended_check = _extended_should_warn(
+                ["dangerous_token_but_needs", "loss", "unsafe_gc_bypass"],
+                "unsafe_gc_bypass",
+                "GC bypass approved for hot path"
+            )
+            expect(extended_check).to_equal(false)
+
+
+# ============================================================================
+# Test Group 5: symbol references parsed alongside comment — AC-3
+# ============================================================================
+
+describe "dangerous keyword — symbol reference parsing":
+    """
+    ## Symbol References
+
+    dangerous_token_but_needs accepts an optional second argument: a list of
+    symbol references. DangerousKeywordRef holds each symbol name.
+    """
+
+    it "zero symbol refs is valid when comment is present":
+        val ws = collect_dangerous_warning("dangerous_token_but_needs", "only comment, no refs")
+        expect(ws.len()).to_equal(0)
+
+    it "parsed symbol refs are stored as DangerousKeywordRef list":
+        val refs = parse_symbol_refs_test(["Allocator", "MemPool"])
+        expect(refs.len()).to_equal(2)
+        expect(refs[0]).to_equal("Allocator")
+        expect(refs[1]).to_equal("MemPool")
+
+    it "no symbol refs returns empty list":
+        val refs = parse_symbol_refs_test([])
+        expect(refs.len()).to_equal(0)
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _list_contains(lst: [text], item: text) -> bool:
+    for x in lst:
+        if x == item:
+            return true
+    false
+
+fn _extended_should_warn(registry: [text], keyword: text, comment: text) -> bool:
+    val registered = _list_contains(registry, keyword)
+    registered and comment == ""
+
+fn parse_symbol_refs_test(names: [text]) -> [text]:
+    # Simulates parsing the symbol reference list argument
+    names

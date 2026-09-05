@@ -1,0 +1,111 @@
+# Atomic arbitration between a selected scalar provider event and trap inputs.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp,
+    HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort,
+    HwSelectOp, HwSignal}
+
+fn arbitration_ports() -> [HwPort]:
+    [HwPort.input("provider_valid", "Bits", 1),
+        HwPort.input("provider_selected", "Bits", 1),
+        HwPort.input("provider_is_lsu", "Bits", 1),
+        HwPort.input("provider_event_id", "Bits", 64),
+        HwPort.input("decode_valid", "Bits", 1),
+        HwPort.input("decode_event_id", "Bits", 64),
+        HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("interrupt_valid", "Bits", 1),
+        HwPort.input("interrupt_event_id", "Bits", 64),
+        HwPort.input("interrupt_held", "Bits", 1),
+        HwPort.input("between_events", "Bits", 1),
+        HwPort.input("normalized_ready", "Bits", 1),
+        HwPort.output("normalized_valid", "Bits", 1),
+        HwPort.output("normalized_event_id", "Bits", 64),
+        HwPort.output("normalized_illegal", "Bits", 1),
+        HwPort.output("normalized_interrupt", "Bits", 1),
+        HwPort.output("normalized_accept", "Bits", 1),
+        HwPort.output("provider_accept", "Bits", 1),
+        HwPort.output("lsu_accept", "Bits", 1),
+        HwPort.output("interrupt_accept", "Bits", 1),
+        HwPort.output("arbitration_fault", "Bits", 1)]
+
+pub fn strict_riscv_scalar_event_arbitration_hwir(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Build the fail-closed scalar event arbitration boundary.
+
+    A provider is consumed exactly when its selected normalized event is
+    accepted. Illegal status can only decorate the same decode/provider event.
+    An interrupt can be sampled only between provider events or from an
+    explicit held envelope, and never substitutes for a live provider event.
+    """
+    if module_name == "":
+        return Err("HWIR-E-RISCV-EVENT-ARBITRATION-ID: arbitration requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val ports = arbitration_ports()
+    val signals = [HwSignal.comb("event_ids_match", "Bits", 1),
+        HwSignal.comb("not_provider_selected", "Bits", 1),
+        HwSignal.comb("unselected_provider", "Bits", 1),
+        HwSignal.comb("selected_provider", "Bits", 1),
+        HwSignal.comb("decode_identity_valid", "Bits", 1),
+        HwSignal.comb("illegal_context_valid", "Bits", 1),
+        HwSignal.comb("not_illegal_context_valid", "Bits", 1),
+        HwSignal.comb("invalid_illegal", "Bits", 1),
+        HwSignal.comb("provider_candidate", "Bits", 1),
+        HwSignal.comb("provider_event", "Bits", 1),
+        HwSignal.comb("not_active_event", "Bits", 1),
+        HwSignal.comb("interrupt_sampling_mode", "Bits", 1),
+        HwSignal.comb("interrupt_between_events", "Bits", 1),
+        HwSignal.comb("interrupt_event", "Bits", 1),
+        HwSignal.comb("provider_or_decode", "Bits", 1),
+        HwSignal.comb("between_conflict", "Bits", 1),
+        HwSignal.comb("fault_low", "Bits", 1),
+        HwSignal.comb("not_arbitration_fault", "Bits", 1),
+        HwSignal.comb("normalized_interrupt_event_id", "Bits", 64)]
+    val constants = [HwConstant.bits("zero64", 64, 0), HwConstant.bits("one1", 1, 1)]
+    val compares = [HwCompareOp.equal("event_ids_match", "provider_event_id", "decode_event_id", 64)]
+    val ops = [
+        HwCombOp.binary("xor", "not_provider_selected", "provider_selected", "one1", 1),
+        HwCombOp.binary("and", "unselected_provider", "provider_valid", "not_provider_selected", 1),
+        HwCombOp.binary("and", "selected_provider", "provider_valid", "provider_selected", 1),
+        HwCombOp.binary("and", "decode_identity_valid", "decode_valid", "event_ids_match", 1),
+        HwCombOp.binary("and", "illegal_context_valid", "selected_provider", "decode_identity_valid", 1),
+        HwCombOp.binary("xor", "not_illegal_context_valid", "illegal_context_valid", "one1", 1),
+        HwCombOp.binary("and", "invalid_illegal", "illegal_valid", "not_illegal_context_valid", 1),
+        HwCombOp.binary("or", "provider_or_decode", "provider_valid", "decode_valid", 1),
+        HwCombOp.binary("and", "between_conflict", "between_events", "provider_or_decode", 1),
+        HwCombOp.binary("or", "fault_low", "unselected_provider", "invalid_illegal", 1),
+        HwCombOp.binary("or", "arbitration_fault", "fault_low", "between_conflict", 1),
+        HwCombOp.binary("xor", "not_arbitration_fault", "arbitration_fault", "one1", 1),
+        HwCombOp.binary("and", "provider_candidate", "selected_provider", "not_arbitration_fault", 1),
+        HwCombOp.unary("passthrough", "provider_event", "provider_candidate", 1),
+        HwCombOp.binary("or", "interrupt_sampling_mode", "between_events", "interrupt_held", 1),
+        HwCombOp.binary("xor", "not_active_event", "provider_or_decode", "one1", 1),
+        HwCombOp.binary("and", "interrupt_between_events", "interrupt_valid", "not_active_event", 1),
+        HwCombOp.binary("and", "interrupt_event", "interrupt_between_events", "interrupt_sampling_mode", 1),
+        HwCombOp.binary("or", "normalized_valid", "provider_event", "interrupt_event", 1),
+        HwCombOp.binary("and", "normalized_illegal", "illegal_valid", "provider_event", 1),
+        HwCombOp.unary("passthrough", "normalized_interrupt", "interrupt_event", 1),
+        HwCombOp.binary("and", "normalized_accept", "normalized_valid", "normalized_ready", 1),
+        HwCombOp.binary("and", "provider_accept", "provider_event", "normalized_accept", 1),
+        HwCombOp.binary("and", "lsu_accept", "provider_accept", "provider_is_lsu", 1),
+        HwCombOp.binary("and", "interrupt_accept", "interrupt_event", "normalized_accept", 1),
+        ]
+    val selects = [HwSelectOp.mux("normalized_interrupt_event_id", "interrupt_event",
+            "interrupt_event_id", "zero64", 64),
+        HwSelectOp.mux("normalized_event_id", "provider_event",
+            "provider_event_id", "normalized_interrupt_event_id", 64)]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: ops.len() + compares.len() + selects.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "provider-accept"),
+                source_name: "riscv.scalar.event.provider-atomic-accept"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "illegal-identity"),
+                source_name: "riscv.scalar.event.illegal-same-decode"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "interrupt-envelope"),
+                source_name: "riscv.scalar.event.interrupt-between-or-held")],
+        ports: ports, signals: signals, constants: constants, comb_ops: ops,
+        compare_ops: compares, select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

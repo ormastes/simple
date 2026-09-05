@@ -1,0 +1,341 @@
+# Diagnostic V1
+#
+# Canonical, richer diagnostic type that closes the drift between the thin
+# pure-Simple `Diagnostic` (diagnostic.spl) and the Rust seed's richer type
+# (src/compiler_rust/common/src/diagnostic.rs). Additive only: this module
+# does not replace `Diagnostic`, it defines a new `DiagnosticV1` shape that
+# existing emitters can adopt incrementally.
+#
+# Field-level delta vs both prior types (see report for full detail):
+#   - child/nested diagnostics       -> NEITHER prior type has this. New here.
+#   - multi-file labels              -> Rust tracks one `file` per Diagnostic;
+#                                        `LabelV1` here carries its own `file`.
+#   - macro expansion chain          -> NEITHER prior type has this. New here.
+#   - suggested fix + confidence     -> Rust has EasyFix/Replacement/
+#                                        FixConfidence; pure-Simple has none.
+#                                        Ported here as DiagnosticFix.
+#   - stable diagnostic codes        -> both prior types make `code` optional;
+#                                        `DiagnosticV1.code` is required text.
+#
+# JSON is the interchange format shipped here (LSP/SARIF explicitly later).
+# SDN is the schema description format: see diagnostic_v1_schema.sdn.
+
+use severity.Severity
+use span.Span
+use std.common.string_core.{char_from_code}
+
+# --- Confidence for a suggested fix ---
+
+enum FixConfidence:
+    Safe        # Safe to auto-apply (e.g. syntax migration)
+    Likely      # Likely correct but should be reviewed
+    Uncertain   # May change semantics, needs human review
+
+impl FixConfidence:
+    fn name() -> text:
+        match self:
+            FixConfidence.Safe: "safe"
+            FixConfidence.Likely: "likely"
+            FixConfidence.Uncertain: "uncertain"
+
+# --- A single text replacement within a source file ---
+
+struct FixReplacement:
+    file: text        # File path this replacement applies to
+    span: Span         # The span to replace
+    new_text: text     # The new text to insert
+
+impl FixReplacement:
+    static fn new(file: text, span: Span, new_text: text) -> FixReplacement:
+        FixReplacement(file: file, span: span, new_text: new_text)
+
+# --- A machine-applicable fix for a diagnostic ---
+
+struct DiagnosticFix:
+    id: text                        # Unique fix ID (e.g. "L:bare_bool:1")
+    description: text               # What the fix does
+    replacements: [FixReplacement]   # Text replacements to apply
+    confidence: FixConfidence        # Is this safe to auto-apply?
+
+impl DiagnosticFix:
+    static fn new(id: text, description: text, confidence: FixConfidence) -> DiagnosticFix:
+        DiagnosticFix(id: id, description: description, replacements: [], confidence: confidence)
+
+    # Add a replacement to this fix
+    fn with_replacement(file: text, span: Span, new_text: text) -> DiagnosticFix:
+        var result = self
+        result.replacements.push(FixReplacement.new(file, span, new_text))
+        result
+
+# --- One frame in a macro expansion chain ---
+
+struct MacroFrame:
+    name: text   # Macro name being expanded
+    span: Span    # Expansion-site span
+    file: text    # File of the expansion site
+
+impl MacroFrame:
+    static fn new(name: text, span: Span, file: text) -> MacroFrame:
+        MacroFrame(name: name, span: span, file: file)
+
+# --- A labeled span, possibly in a different file than the diagnostic ---
+
+struct LabelV1:
+    file: text      # File this label points into ("" = diagnostic's primary file)
+    span: Span       # Source location
+    message: text    # Label message
+    primary: bool    # Whether this is the primary label (shown with ^^^)
+
+impl LabelV1:
+    static fn primary(file: text, span: Span, message: text) -> LabelV1:
+        LabelV1(file: file, span: span, message: message, primary: true)
+
+    static fn secondary(file: text, span: Span, message: text) -> LabelV1:
+        LabelV1(file: file, span: span, message: message, primary: false)
+
+# --- The canonical diagnostic ---
+
+struct DiagnosticV1:
+    severity: Severity           # Diagnostic severity level
+    code: text                   # Stable diagnostic code (e.g. "E0001") -- required, unlike prior types
+    message: text                # Primary message
+    file: text?                  # Primary file (nil = no file context)
+    span: Span?                  # Primary source location
+    labels: [LabelV1]             # Additional labeled spans, each with its own file
+    notes: [text]                 # Additional notes
+    help: [text]                  # Help suggestions (list, not a single message)
+    children: [DiagnosticV1]      # Nested/child diagnostics
+    macro_trace: [MacroFrame]     # Macro expansion chain, outermost-first
+    fix: DiagnosticFix?           # Suggested machine-applicable fix
+
+impl DiagnosticV1:
+    static fn new(severity: Severity, code: text, message: text) -> DiagnosticV1:
+        DiagnosticV1(
+            severity: severity,
+            code: code,
+            message: message,
+            file: nil,
+            span: nil,
+            labels: [],
+            notes: [],
+            help: [],
+            children: [],
+            macro_trace: [],
+            fix: nil
+        )
+
+    static fn error(code: text, message: text) -> DiagnosticV1:
+        DiagnosticV1.new(Severity.Error, code, message)
+
+    static fn warning(code: text, message: text) -> DiagnosticV1:
+        DiagnosticV1.new(Severity.Warning, code, message)
+
+    # === Builder methods ===
+
+    fn with_file(file: text) -> DiagnosticV1:
+        var result = self
+        result.file = Some(file)
+        result
+
+    fn with_span(span: Span) -> DiagnosticV1:
+        var result = self
+        result.span = Some(span)
+        result
+
+    # Add a primary label, optionally pointing into a different file
+    fn with_label(file: text, span: Span, message: text) -> DiagnosticV1:
+        var result = self
+        result.labels.push(LabelV1.primary(file, span, message))
+        result
+
+    # Add a secondary label, optionally pointing into a different file
+    fn with_secondary_label(file: text, span: Span, message: text) -> DiagnosticV1:
+        var result = self
+        result.labels.push(LabelV1.secondary(file, span, message))
+        result
+
+    fn with_note(note: text) -> DiagnosticV1:
+        var result = self
+        result.notes.push(note)
+        result
+
+    fn with_help(help: text) -> DiagnosticV1:
+        var result = self
+        result.help.push(help)
+        result
+
+    # Attach a nested child diagnostic
+    fn with_child(child: DiagnosticV1) -> DiagnosticV1:
+        var result = self
+        result.children.push(child)
+        result
+
+    # Append one frame to the macro expansion chain
+    fn with_macro_frame(name: text, span: Span, file: text) -> DiagnosticV1:
+        var result = self
+        result.macro_trace.push(MacroFrame.new(name, span, file))
+        result
+
+    fn with_fix(fix: DiagnosticFix) -> DiagnosticV1:
+        var result = self
+        result.fix = Some(fix)
+        result
+
+    # === Accessors ===
+
+    fn has_children() -> bool:
+        self.children.len() > 0
+
+    fn has_fix() -> bool:
+        match self.fix:
+            Some(_): true
+            nil: false
+
+    # === Display ===
+
+    # Render this diagnostic (and any nested children) as JSON.
+    fn to_json() -> text:
+        render_diagnostic_v1_json(self)
+
+# === JSON rendering ===
+#
+# Boring and direct: build small objects/arrays out of already-escaped
+# fragments. Curly braces are produced via char_from_code, never as a bare
+# "{" / "}" literal in a Simple string -- a literal brace inside a
+# double-quoted string is parsed as string interpolation (see
+# doc/08_tracking/bug/string_interpolation_silently_evaluates_literal_braces_2026-07-28.md).
+
+fn json_lbrace() -> text:
+    char_from_code(123)
+
+fn json_rbrace() -> text:
+    char_from_code(125)
+
+fn escape_json(s: text) -> text:
+    var result: [text] = []
+    for ch in s:
+        if ch == "\"":
+            result.push("\\\"")
+        elif ch == "\\":
+            result.push("\\\\")
+        elif ch == "\n":
+            result.push("\\n")
+        elif ch == "\r":
+            result.push("\\r")
+        elif ch == "\t":
+            result.push("\\t")
+        else:
+            result.push(ch)
+    result.join("")
+
+fn json_string(value: text) -> text:
+    "\"" + escape_json(value) + "\""
+
+fn json_pair(key: text, value: text) -> text:
+    json_string(key) + ":" + value
+
+fn json_bool(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn json_int(value: i64) -> text:
+    value.to_text()
+
+fn json_array(items: [text]) -> text:
+    "[" + items.join(",") + "]"
+
+fn json_object(pairs: [text]) -> text:
+    json_lbrace() + pairs.join(",") + json_rbrace()
+
+fn render_span_json(span: Span) -> text:
+    json_object([
+        json_pair("start", json_int(span.start)),
+        json_pair("end", json_int(span.end)),
+        json_pair("line", json_int(span.line)),
+        json_pair("col", json_int(span.col))
+    ])
+
+fn render_label_json(label: LabelV1) -> text:
+    json_object([
+        json_pair("file", json_string(label.file)),
+        json_pair("span", render_span_json(label.span)),
+        json_pair("message", json_string(label.message)),
+        json_pair("primary", json_bool(label.primary))
+    ])
+
+fn render_replacement_json(r: FixReplacement) -> text:
+    json_object([
+        json_pair("file", json_string(r.file)),
+        json_pair("span", render_span_json(r.span)),
+        json_pair("new_text", json_string(r.new_text))
+    ])
+
+fn render_fix_json(fix: DiagnosticFix) -> text:
+    var items: [text] = []
+    for r in fix.replacements:
+        items.push(render_replacement_json(r))
+    json_object([
+        json_pair("id", json_string(fix.id)),
+        json_pair("description", json_string(fix.description)),
+        json_pair("replacements", json_array(items)),
+        json_pair("confidence", json_string(fix.confidence.name()))
+    ])
+
+fn render_macro_frame_json(frame: MacroFrame) -> text:
+    json_object([
+        json_pair("name", json_string(frame.name)),
+        json_pair("span", render_span_json(frame.span)),
+        json_pair("file", json_string(frame.file))
+    ])
+
+fn render_diagnostic_v1_json(d: DiagnosticV1) -> text:
+    var pairs: [text] = []
+    pairs.push(json_pair("severity", json_string(d.severity.name())))
+    pairs.push(json_pair("code", json_string(d.code)))
+    pairs.push(json_pair("message", json_string(d.message)))
+
+    match d.file:
+        Some(file):
+            pairs.push(json_pair("file", json_string(file)))
+        nil:
+            pairs.push(json_pair("file", "null"))
+
+    match d.span:
+        Some(span):
+            pairs.push(json_pair("span", render_span_json(span)))
+        nil:
+            pairs.push(json_pair("span", "null"))
+
+    var label_items: [text] = []
+    for l in d.labels:
+        label_items.push(render_label_json(l))
+    pairs.push(json_pair("labels", json_array(label_items)))
+
+    var note_items: [text] = []
+    for n in d.notes:
+        note_items.push(json_string(n))
+    pairs.push(json_pair("notes", json_array(note_items)))
+
+    var help_items: [text] = []
+    for h in d.help:
+        help_items.push(json_string(h))
+    pairs.push(json_pair("help", json_array(help_items)))
+
+    var child_items: [text] = []
+    for c in d.children:
+        child_items.push(render_diagnostic_v1_json(c))
+    pairs.push(json_pair("children", json_array(child_items)))
+
+    var frame_items: [text] = []
+    for f in d.macro_trace:
+        frame_items.push(render_macro_frame_json(f))
+    pairs.push(json_pair("macro_trace", json_array(frame_items)))
+
+    match d.fix:
+        Some(fix):
+            pairs.push(json_pair("fix", render_fix_json(fix)))
+        nil:
+            pairs.push(json_pair("fix", "null"))
+
+    json_object(pairs)
+
+# Public exports

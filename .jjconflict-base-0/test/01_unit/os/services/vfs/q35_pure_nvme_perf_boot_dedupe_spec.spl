@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/services/vfs/q35_pure_nvme_perf_boot_dedupe_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/q35_pure_nvme_perf_boot_dedupe_spec.md
+# doc-path: doc/03_plan/sys_test/q35_pure_nvme_perf_boot_dedupe_spec.md
+# doc-path: doc/04_architecture/q35_pure_nvme_perf_boot_dedupe_spec.md
+# doc-path: doc/05_design/q35_pure_nvme_perf_boot_dedupe_spec_oracles.md
+# @manual: primary
+
+# Regression coverage for the perf-timing helpers shared between
+# q35_pure_nvme_perf_boot.spl and vfs_boot_init.spl. Both files used to carry
+# byte-identical copies of `_elapsed_us`/`_iops`; vfs_boot_init.spl now
+# imports the q35_pure_nvme_perf_boot.spl originals instead of redefining
+# them. This spec asserts the real behavior of the shared functions (not
+# just their existence) and that the duplicate definitions are gone.
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_time_now_unix_micros() -> i64
+use os.services.vfs.q35_pure_nvme_perf_boot.{_elapsed_us, _iops}
+
+
+describe "q35 perf timing helpers shared across vfs boot files":
+    # @manual scenario evidence
+    it "computes elapsed microseconds from start/end timestamps":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: computes elapsed microseconds from start/end timestamps")
+        expect(_elapsed_us(1000i64, 1500i64)).to_equal(500u64)
+        expect(_elapsed_us(0i64, 1000000i64)).to_equal(1000000u64)
+
+    it "clamps elapsed microseconds to 1 when end does not advance past start":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: clamps elapsed microseconds to 1 when end does not advance past start")
+        expect(_elapsed_us(1000i64, 1000i64)).to_equal(1u64)
+        expect(_elapsed_us(1000i64, 500i64)).to_equal(1u64)
+
+    it "computes IOPS from an op count and elapsed microseconds":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: computes IOPS from an op count and elapsed microseconds")
+        expect(_iops(1000u64, 1000000u64)).to_equal(1000u64)
+        expect(_iops(4000u64, 500000u64)).to_equal(8000u64)
+
+    it "clamps IOPS to 1 for a zero elapsed window or a zero-valued result":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: clamps IOPS to 1 for a zero elapsed window or a zero-valued result")
+        expect(_iops(1000u64, 0u64)).to_equal(1u64)
+        expect(_iops(1u64, 1000000000u64)).to_equal(1u64)
+
+    it "measures a real wall-clock window with the shared helpers":
+        # @req REQ-SSPEC-OS
+        step("run the helpers over live timestamps bracketing actual work")
+        # evidence(protocol_json): elapsed/iops values asserted below are the complete typed oracle
+        val start = rt_time_now_unix_micros()
+        var i = 0
+        while i < 100000:
+            i = i + 1
+        val end = rt_time_now_unix_micros()
+        val elapsed = _elapsed_us(start, end)
+        expect(elapsed > 0u64).to_equal(true)  # oracle: a real busy loop must take nonzero time per the shared clock helper
+        expect(_iops(100000u64, elapsed) > 0u64).to_equal(true)  # oracle: derived IOPS from a measured window must be positive

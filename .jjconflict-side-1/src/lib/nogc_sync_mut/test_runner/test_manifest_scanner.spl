@@ -1,0 +1,333 @@
+# Test Manifest Scanner — Full and incremental scanning for test discovery
+#
+# Walks test/src/doc directories, extracts metadata from each file,
+# and builds/updates the TestManifest used for fast discovery.
+
+use std.test_runner.test_manifest.{
+    TestManifest, TestManifestEntry, SdoctestManifestEntry,
+    MANIFEST_VERSION, manifest_new, manifest_merge_roots
+}
+use std.test_runner.doctest_runner.{extract_doctests}
+use std.test_runner.sdoctest.extractor.{extract_blocks_from_content}
+use std.io.{dir_walk_native}
+use std.io.{path_basename}
+use std.test_runner.test_level_detect.{test_level_of_path}
+use std.test_runner.mode_filter.{extract_directive_lines}
+
+use std.io_runtime.{read_file_text}
+use std.nogc_sync_mut.io.file_ops.{file_stat, file_size}
+use std.io_runtime.{time_now_unix_micros}
+
+# ============================================================================
+# Full Scan
+# ============================================================================
+
+fn manifest_full_scan(dirs: [text]) -> TestManifest:
+    var manifest = manifest_new()
+    manifest.scan_timestamp = time_now_unix_micros()
+    manifest.roots = manifest_merge_roots([], dirs)
+
+    # Local accumulators, fields assigned once — appending straight into a struct
+    # field array is a read-modify-write of the whole array on the interpreter
+    # path, i.e. quadratic in the number of test files. Same reason as
+    # manifest_incremental_update below.
+    var new_entries: [TestManifestEntry] = []
+    var new_sd: [SdoctestManifestEntry] = []
+    for dir in dirs:
+        val all_files = dir_walk_native(dir)
+        for raw_f in all_files:
+            # Normalize path separators for Windows compatibility
+            val f = raw_f.replace("\\", "/")
+            if is_spec_file(f):
+                val entry = scan_test_file(f)
+                new_entries.push(entry)
+            elif is_sdoctest_candidate(f):
+                val sd = scan_sdoctest_file(f)
+                if sd.block_count > 0:
+                    new_sd.push(sd)
+    manifest.entries = new_entries
+    manifest.sdoctest_entries = new_sd
+
+    manifest
+
+# ============================================================================
+# Incremental Update
+# ============================================================================
+
+fn manifest_incremental_update(old: TestManifest, dirs: [text]) -> TestManifest:
+    var manifest = manifest_new()
+    manifest.scan_timestamp = time_now_unix_micros()
+    # A scoped scan WIDENS coverage; it never narrows it, because entries
+    # outside `dirs` are carried over below.
+    manifest.roots = manifest_merge_roots(old.roots, dirs)
+
+    # Path -> INDEX into old.entries, built once.
+    #
+    # This used to be a `{text: bool}` presence set that nothing ever read, while
+    # the walk below resolved each file with manifest_find_entry() /
+    # manifest_find_sdoctest_entry() — both full LINEAR scans of old.entries. That
+    # made the reindex O(walked_files x old_entries): ~4.2e8 text comparisons for
+    # the 20,552 spec files under test/, which is why `bin/simple test` sat at
+    # `[setup] discover: begin` for >1900s at 101% CPU and never printed the
+    # matching `discover: Nms` line (measured 2026-08-18, see
+    # doc/08_tracking/bug/test_discovery_hangs_on_large_targets_2026-08-18.md).
+    # Isolated probe of the lookup alone: 250 entries 23ms, 1000 526ms, 2000
+    # 1732ms, 4000 8935ms — quadratic — versus 5/34/95/233ms for this index.
+    #
+    # Restored 2026-08-21 after f13adc2eca5 clobbered it with a stale snapshot.
+    # Pinned by scripts/check/check-perf-regression-tests.shs.
+    #
+    # contains_key + bracket read only; Dict.len() stays unused
+    # (doc/07_guide/language/dict_native_pitfalls.md).
+    var old_index: {text: i64} = {}
+    var oi = 0
+    for entry in old.entries:
+        old_index[entry.path] = oi
+        oi = oi + 1
+    var old_sd_index: {text: i64} = {}
+    var osi = 0
+    for sd in old.sdoctest_entries:
+        old_sd_index[sd.path] = osi
+        osi = osi + 1
+
+    # Track which old paths we saw in the new walk (for deletion detection)
+    var seen_paths: {text: bool} = {}
+
+    # Accumulate into LOCAL arrays; the struct fields are assigned once at the
+    # end. See the carry-over note below for why appending straight into
+    # `manifest.entries` is quadratic on the interpreter path.
+    var new_entries: [TestManifestEntry] = []
+    var new_sd: [SdoctestManifestEntry] = []
+
+    for dir in dirs:
+        val all_files = dir_walk_native(dir)
+        for raw_f in all_files:
+            # Normalize path separators for Windows compatibility
+            val f = raw_f.replace("\\", "/")
+            if is_spec_file(f):
+                seen_paths[f] = true
+                val current_size = file_size(f)
+                val current_mtime = file_stat(f)
+
+                # Check if file exists in old manifest with same size+mtime.
+                # O(1) index lookup — see the note on old_index above.
+                var reused = false
+                if old_index.contains_key(f):
+                    val old_entry = old.entries[old_index[f]]
+                    if (old_entry.path != "" and
+                        old_entry.file_size == current_size and
+                        old_entry.file_mtime == current_mtime):
+                        # Unchanged — reuse old entry
+                        new_entries.push(old_entry)
+                        reused = true
+                if not reused:
+                    # New or changed — full rescan
+                    val entry = scan_test_file(f)
+                    new_entries.push(entry)
+
+            elif is_sdoctest_candidate(f):
+                seen_paths[f] = true
+                val current_size = file_size(f)
+                val current_mtime = file_stat(f)
+
+                var sd_reused = false
+                if old_sd_index.contains_key(f):
+                    val old_sd = old.sdoctest_entries[old_sd_index[f]]
+                    if (old_sd.path != "" and
+                        old_sd.file_size == current_size and
+                        old_sd.file_mtime == current_mtime):
+                        new_sd.push(old_sd)
+                        sd_reused = true
+                if not sd_reused:
+                    val sd = scan_sdoctest_file(f)
+                    if sd.block_count > 0:
+                        new_sd.push(sd)
+
+    # Deleted files are automatically excluded — they won't be in seen_paths.
+    #
+    # Entries OUTSIDE the scanned dirs must be preserved: a scoped scan narrows
+    # the WALK, not the INDEX. Dropping them shrank the manifest to whichever
+    # subtree was tested last while leaving scan_timestamp fresh, so the next
+    # run for any other path matched zero entries and reported
+    # "No test files found" with exit 0 — a silent false green.
+    for entry in old.entries:
+        if not path_under_any(entry.path, dirs):
+            new_entries.push(entry)
+    for sd in old.sdoctest_entries:
+        if not path_under_any(sd.path, dirs):
+            new_sd.push(sd)
+    manifest.entries = new_entries
+    manifest.sdoctest_entries = new_sd
+
+    manifest
+
+# Is `path` inside (or equal to) any of `dirs`?
+fn path_under_any(path: text, dirs: [text]) -> bool:
+    for raw_dir in dirs:
+        var d = raw_dir.replace("\\", "/")
+        if d == "":
+            continue
+        if path == d:
+            return true
+        if not d.ends_with("/"):
+            d = d + "/"
+        if path.starts_with(d):
+            return true
+    false
+
+# ============================================================================
+# File Classification
+# ============================================================================
+
+fn is_spec_file(path: text) -> bool:
+    val name = path_basename(path)
+    if name.starts_with("."):
+        return false
+    if not name.ends_with(".spl"):
+        return false
+    name.contains("_spec.") or name.contains("_test.")
+
+fn is_sdoctest_candidate(path: text) -> bool:
+    path.ends_with(".md") or (path.ends_with(".spl") and not is_spec_file(path))
+
+# ============================================================================
+# File Scanning — Extract Metadata
+# ============================================================================
+
+fn scan_test_file(path: text) -> TestManifestEntry:
+    val size = file_size(path)
+    val mtime = file_stat(path)
+    val content = read_file_text(path)
+
+    TestManifestEntry(
+        path: path,
+        file_size: size,
+        file_mtime: mtime,
+        test_level: detect_test_level(path),
+        slow_tag: content.contains("slow_it "),
+        skip_tag: (content.contains("tag: \"skip\"") or
+                   content.contains("tag: 'skip'") or
+                   content.contains("# @skip")),
+        pending_tag: (content.contains("# @pending") or
+                      content.contains("tag: \"pending\"") or
+                      content.contains("tag: 'pending'")),
+        tags: extract_tags(content),
+        platform_tags: extract_platform_tags(content),
+        is_fuzz: path.contains("/fuzz/"),
+        is_chaos: path.contains("/resilience/"),
+        is_deploy: path.contains("/deploy/"),
+        is_security: path.contains("/security/"),
+        is_baremetal: path.contains("/baremetal/"),
+        last_duration_ms: 0
+    )
+
+fn scan_sdoctest_file(path: text) -> SdoctestManifestEntry:
+    val size = file_size(path)
+    val mtime = file_stat(path)
+    val content = read_file_text(path)
+    val blocks = count_sdoctest_blocks_for_path(path, content)
+
+    SdoctestManifestEntry(
+        path: path,
+        file_size: size,
+        file_mtime: mtime,
+        block_count: blocks
+    )
+
+# ============================================================================
+# Metadata Extraction Helpers
+# ============================================================================
+
+fn detect_test_level(path: text) -> i64:
+    # Segment-based so BOTH `test/01_unit/` (maintained) and `test/unit/`
+    # (legacy mirror) classify. See std.test_runner.test_level_detect.
+    test_level_of_path(path)
+
+fn extract_tags(content: text) -> text:
+    # Extract tag: "name" patterns
+    var tags: [text] = []
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("tag:"):
+            val rest = trimmed[4:].trim()
+            # Strip quotes: "foo" or 'foo'
+            if rest.len() >= 2:
+                val first = rest[0:1]
+                if first == "\"" or first == "'":
+                    val inner = rest[1:rest.len() - 1]
+                    if inner != "skip" and inner != "pending":
+                        var already = false
+                        for t in tags:
+                            if t == inner:
+                                already = true
+                        if not already:
+                            tags.push(inner)
+    # Directive form: `# @tag: a, b` in a comment, or `@tag: a, b` inside a
+    # `"""` docstring. Values may be bracketed and/or quoted (`["a", 'b']`).
+    for trimmed in extract_directive_lines(content):
+        var rest = ""
+        if trimmed.starts_with("# @tag:"):
+            rest = trimmed[7:].trim()
+        elif trimmed.starts_with("@tag:"):
+            rest = trimmed[5:].trim()
+        else:
+            continue
+        for part in rest.split(","):
+            var inner = part.trim()
+            if inner.starts_with("["):
+                inner = inner[1:]
+            if inner.ends_with("]"):
+                inner = inner[0:inner.len() - 1]
+            inner = inner.trim()
+            if inner.len() >= 2:
+                val q = inner[0:1]
+                if q == "\"" or q == "'":
+                    inner = inner[1:inner.len() - 1]
+            if inner != "" and inner != "skip" and inner != "pending":
+                var seen = false
+                for t in tags:
+                    if t == inner:
+                        seen = true
+                if not seen:
+                    tags.push(inner)
+    tags.join(",")
+
+fn extract_platform_tags(content: text) -> text:
+    var tags: [text] = []
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @platform:"):
+            val tag = trimmed[12:].trim()
+            if tag != "":
+                tags.push(tag)
+    tags.join(",")
+
+fn count_sdoctest_blocks(content: text) -> i64:
+    # Registration must use the same closed, non-empty block parser as execution.
+    extract_blocks_from_content(content: content, file_path: "").len()
+
+fn count_sdoctest_blocks_for_path(path: text, content: text) -> i64:
+    if path.ends_with(".md"):
+        return count_sdoctest_blocks(content)
+    if path.ends_with(".spl"):
+        # Avoid a second file read for ordinary source files.
+        if not content.contains("```simple") and not content.contains("```spl") and not content.contains("```sdoctest") and not content.contains("sdoctest:"):
+            return 0
+        return extract_doctests(path).len()
+    0
+
+# ============================================================================
+# Internal Lookup Helper
+# ============================================================================
+
+fn manifest_find_sdoctest_entry(manifest: TestManifest, path: text) -> SdoctestManifestEntry:
+    for sd in manifest.sdoctest_entries:
+        if sd.path == path:
+            return sd
+    SdoctestManifestEntry(path: "", file_size: 0, file_mtime: 0, block_count: 0)
+
+# ============================================================================
+# Exports
+# ============================================================================

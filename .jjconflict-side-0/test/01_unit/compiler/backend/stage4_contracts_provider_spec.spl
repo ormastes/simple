@@ -1,0 +1,63 @@
+use compiler.backend.backend.stage4_symbol_closure.{stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_resolve_requested_archive_owners}
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Stage4 contract provider":
+    it "names and validates the exact cross-platform contract ABI":
+        expect(stage4_contracts_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_contracts.a")
+        expect(stage4_contracts_provider_archive_file("macos", false).unwrap()).to_equal("libsimple_stage4_contracts.a")
+        expect(stage4_contracts_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_contracts.lib")
+        expect(stage4_contracts_provider_archive_file("windows", false).unwrap()).to_equal("libsimple_stage4_contracts.a")
+        expect(stage4_contracts_provider_archive_file("linux", true).is_err()).to_be(true)
+        expect(stage4_contracts_provider_object_format("linux", false).unwrap()).to_equal("elf")
+        expect(stage4_contracts_provider_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_contracts_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
+        expect(stage4_contracts_provider_object_format("windows", true).unwrap()).to_equal("coff-msvc")
+
+        val elf = "0001 T simple_contract_check\n0002 T simple_contract_check_msg\n         U rt_terminal_disable_raw_mode\n         U rt_terminal_signal_scope_emergency_restore\n"
+        val macho = elf.replace(" T simple_", " T _simple_").replace(" U rt_", " U _rt_")
+        expect(stage4_validate_contracts_provider_symbol_contract(elf, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_contracts_provider_symbol_contract(macho, "macho").is_ok()).to_be(true)
+        expect(stage4_validate_contracts_provider_symbol_contract(elf, "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_contracts_provider_symbol_contract(elf.replace("0002 T simple_contract_check_msg\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_contracts_provider_symbol_contract(elf + "0003 T simple_contract_check\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_contracts_provider_symbol_contract(elf + "0003 T rt_unrelated\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_contracts_provider_symbol_contract(elf, "wasm").is_err()).to_be(true)
+
+    it "selects the dedicated owner and its runtime-native dependencies":
+        val (selected, owners) = stage4_resolve_requested_archive_owners(
+            ["simple_contract_check"],
+            ["runtime_native", "runtime_contracts"],
+            [
+                "0001 T rt_terminal_disable_raw_mode\n0002 T rt_terminal_signal_scope_emergency_restore\n",
+                "0001 T simple_contract_check\n0002 T simple_contract_check_msg\n         U rt_terminal_disable_raw_mode\n         U rt_terminal_signal_scope_emergency_restore\n"
+            ],
+            false
+        ).unwrap()
+        expect(selected).to_equal([0, 1])
+        expect(owners.join("\n")).to_contain("simple_contract_check=runtime_contracts")
+        expect(owners.join("\n")).to_contain("rt_terminal_disable_raw_mode=runtime_native")
+        expect(owners.join("\n")).to_contain("rt_terminal_signal_scope_emergency_restore=runtime_native")
+
+    it "builds inventories projects and cleans the sole contract object":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val build_start: i64 = source.find("fn llvm_stage4_build_contracts_provider_archive(")
+        val build_end: i64 = source.find("fn llvm_stage4_build_process_provider_archive(")
+        val build_source = if build_start >= 0 and build_end > build_start: source.substring(build_start, build_end) else: ""
+        expect(build_source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_contracts\"")
+        expect(build_source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_contracts\"], [archive_path])")
+        expect(build_source).to_contain("stage4_validate_contracts_provider_symbol_contract(scans[0], object_format)")
+
+        val strict_start: i64 = source.find("var stage4_requested_symbols: [text] = []")
+        val strict_source = if strict_start >= 0: source.substring(strict_start) else: ""
+        val build_pos = strict_source.find("llvm_stage4_build_contracts_provider_archive(runtime_objects")
+        val labels_pos = strict_source.find("\"runtime_native\", \"runtime_contracts\", \"runtime_legacy_compat\"")
+        val owner_pos = strict_source.find("stage4_resolve_requested_archive_owners(")
+        val projection_pos = strict_source.find("llvm_stage4_project_selected_archives(candidate_labels, candidate_paths")
+        expect(build_pos).to_be_greater_than(-1)
+        expect(labels_pos).to_be_greater_than(build_pos)
+        expect(owner_pos).to_be_greater_than(labels_pos)
+        expect(projection_pos).to_be_greater_than(owner_pos)
+        expect(strict_source).to_contain("file_delete(contracts_provider_archive)")
+        expect(strict_source).to_contain("llvm_stage4_cleanup_candidate_inputs(candidate_paths")

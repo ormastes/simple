@@ -1,0 +1,134 @@
+# codex-impl
+
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_INVALID}
+use std.tiny.common.types.{TinyHandle, TinyRect}
+use std.tiny.gui.component.{tiny_component_metadata, TINY_COMPONENT_FLAG_FOCUSABLE, TINY_COMPONENT_FLAG_SCROLLABLE, TINY_COMPONENT_COLUMN, TINY_COMPONENT_LIST, TINY_COMPONENT_ROW, TINY_COMPONENT_SCROLL_PANE, TINY_COMPONENT_STACK}
+use std.tiny.pane.model.{TinyResolvedPane, TINY_PANE_VISIBLE, TINY_PANE_ENABLED, TINY_PANE_FOCUSABLE, TINY_PANE_POINTER}
+
+class TinyGuiNode:
+    id: TinyHandle
+    parent: TinyHandle
+    class_id: i32
+    bounds: TinyRect
+    flags: i32
+    text_value: text
+    value: i32
+
+class TinyGuiState:
+    nodes: [TinyGuiNode]
+    max_nodes: i32
+    focused_index: i32
+    next_generation: i32
+
+    static fn bounded(max_nodes: i32) -> TinyGuiState:
+        TinyGuiState(nodes: [], max_nodes: max_nodes, focused_index: -1, next_generation: 1)
+
+    me add(parent: TinyHandle, class_id: i32, bounds: TinyRect, text_value: text) -> TinyStatus:
+        if tiny_component_metadata(class_id) == nil:
+            return TinyStatus.error(TINY_ERR_INVALID, class_id)
+        if bounds.width < 0 or bounds.height < 0:
+            return TinyStatus.error(TINY_ERR_INVALID, class_id)
+        if self.nodes.len() >= self.max_nodes:
+            return TinyStatus.error(TINY_ERR_CAPACITY, self.nodes.len())
+        if parent.is_valid() and (parent.index >= self.nodes.len() or self.nodes[parent.index].id.generation != parent.generation):
+            return TinyStatus.error(TINY_ERR_INVALID, parent.index)
+        val id = TinyHandle(index: self.nodes.len(), generation: self.next_generation)
+        self.next_generation = self.next_generation + 1
+        self.nodes.push(TinyGuiNode(id: id, parent: parent, class_id: class_id, bounds: bounds, flags: 0, text_value: text_value, value: 0))
+        TinyStatus.ok()
+
+    fn handle_at(index: i32) -> TinyHandle:
+        if index < 0 or index >= self.nodes.len(): return TinyHandle.invalid()
+        self.nodes[index].id
+
+    fn focused() -> TinyHandle:
+        self.handle_at(self.focused_index)
+
+    fn direct_child_count(parent_index: i32) -> i32:
+        if parent_index < 0 or parent_index >= self.nodes.len(): return 0
+        var count = 0
+        for node in self.nodes:
+            if node.parent.is_valid() and node.parent.index == parent_index and node.parent.generation == self.nodes[parent_index].id.generation:
+                count = count + 1
+        count
+
+    fn direct_child_extent_y(parent_index: i32) -> i32:
+        if parent_index < 0 or parent_index >= self.nodes.len(): return 0
+        var extent = 0
+        for node in self.nodes:
+            if node.parent.is_valid() and node.parent.index == parent_index and node.parent.generation == self.nodes[parent_index].id.generation:
+                if node.bounds.height > 2147483647 - extent: return 2147483647
+                extent = extent + node.bounds.height
+        extent
+
+    fn resolved_panes(viewport: TinyRect) -> [TinyResolvedPane]:
+        var panes: [TinyResolvedPane] = []
+        var node_index = 0
+        while node_index < self.nodes.len():
+            val node = self.nodes[node_index]
+            var pane_flags = TINY_PANE_VISIBLE + TINY_PANE_ENABLED
+            if val metadata = tiny_component_metadata(node.class_id):
+                if metadata.flags & TINY_COMPONENT_FLAG_FOCUSABLE != 0:
+                    pane_flags = pane_flags + TINY_PANE_FOCUSABLE + TINY_PANE_POINTER
+                elif metadata.flags & TINY_COMPONENT_FLAG_SCROLLABLE != 0:
+                    pane_flags = pane_flags + TINY_PANE_POINTER
+            var resolved = TinyResolvedPane.root(
+                node.id, node.bounds, viewport, node.id.index,
+                pane_flags,
+                node.id.index,
+            )
+            if node.parent.is_valid():
+                var parent_index = -1
+                var i = 0
+                while i < panes.len():
+                    if panes[i].id.index == node.parent.index and panes[i].id.generation == node.parent.generation:
+                        parent_index = i
+                    i = i + 1
+                if parent_index >= 0:
+                    val parent_node = self.nodes[node.parent.index]
+                    var local = node.bounds
+                    if parent_node.class_id == TINY_COMPONENT_STACK:
+                        local = TinyRect(x: node.bounds.x, y: node.bounds.y, width: node.bounds.width, height: node.bounds.height)
+                    if parent_node.class_id == TINY_COMPONENT_ROW:
+                        var flow_x = 0
+                        var sibling_index = 0
+                        while sibling_index < node_index:
+                            val sibling = self.nodes[sibling_index]
+                            if sibling.parent.is_valid() and sibling.parent.index == node.parent.index and sibling.parent.generation == node.parent.generation:
+                                flow_x = flow_x + sibling.bounds.width
+                            sibling_index = sibling_index + 1
+                        local = TinyRect(x: flow_x, y: 0, width: node.bounds.width, height: node.bounds.height)
+                    if parent_node.class_id == TINY_COMPONENT_COLUMN or parent_node.class_id == TINY_COMPONENT_LIST or parent_node.class_id == TINY_COMPONENT_SCROLL_PANE:
+                        var flow_y = 0
+                        var sibling_index = 0
+                        while sibling_index < node_index:
+                            val sibling = self.nodes[sibling_index]
+                            if sibling.parent.is_valid() and sibling.parent.index == node.parent.index and sibling.parent.generation == node.parent.generation:
+                                flow_y = flow_y + sibling.bounds.height
+                            sibling_index = sibling_index + 1
+                        val inset_x = if parent_node.class_id == TINY_COMPONENT_LIST: 2 else: 0
+                        local = TinyRect(x: inset_x, y: flow_y, width: node.bounds.width, height: node.bounds.height)
+                    val scroll_y = if parent_node.class_id == TINY_COMPONENT_SCROLL_PANE: parent_node.value else: 0
+                    resolved = panes[parent_index].resolve_child(
+                        node.id, local, TinyRect.empty(), 0, scroll_y, node.id.index,
+                        pane_flags,
+                        node.id.index,
+                    )
+            panes.push(resolved)
+            node_index = node_index + 1
+        panes
+
+    me focus_next() -> TinyStatus:
+        if self.nodes.len() == 0:
+            return TinyStatus.error(TINY_ERR_INVALID, 0)
+        var scanned = 0
+        var index = self.focused_index
+        while scanned < self.nodes.len():
+            index = (index + 1) % self.nodes.len()
+            val metadata = tiny_component_metadata(self.nodes[index].class_id)
+            if val item = metadata:
+                if item.flags & TINY_COMPONENT_FLAG_FOCUSABLE != 0:
+                    self.focused_index = index
+                    return TinyStatus.ok()
+            scanned = scanned + 1
+        TinyStatus.error(TINY_ERR_INVALID, self.nodes.len())

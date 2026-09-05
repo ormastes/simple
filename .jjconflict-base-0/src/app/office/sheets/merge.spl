@@ -1,0 +1,228 @@
+# Sheet Three-Way Merge
+#
+# Collaboration primitive for async multi-user editing: given a common
+# ancestor (base) and two independently edited copies (mine, theirs),
+# compute a merged Sheet plus a list of cell-level conflicts. This is the
+# deterministic-merge honest MVP — no operational-transform / CRDT session,
+# no semantic formula merge, no live co-authoring. Excel/Sheets do
+# realtime co-authoring; we do batch three-way merge (git-for-cells).
+#
+# Comparisons use each cell's RAW STORED TEXT, not its display text: for a
+# formula cell that means the formula source ("=A1+B1"), not the cached
+# computed display. This avoids spurious conflicts caused by two copies
+# recalculating the same formula to different cached strings.
+#
+# Merge policy per cell reference (base/mine/theirs each either "absent"
+# i.e. no entry in the sheet's cell dict, or present with some raw text):
+#
+#   absent/absent/absent          -> absent (nothing to do)
+#   base, absent, absent          -> absent (deleted in both -> deleted)
+#   base=X, mine=X, theirs=X      -> base   (unchanged everywhere)
+#   base=X, mine=Y, theirs=X      -> mine   (changed only in mine)
+#   base=X, mine=X, theirs=Z      -> theirs (changed only in theirs)
+#   base=X, mine=Y, theirs=Y      -> Y      (both changed identically)
+#   base=X, mine=Y, theirs=Z      -> CONFLICT, merged keeps mine (Y)
+#   base=X, mine=absent, theirs=X -> absent (deleted in mine, theirs unchanged)
+#   base=X, mine=X, theirs=absent -> absent (deleted in theirs, mine unchanged)
+#   base=X, mine=absent, theirs=Z -> CONFLICT, merged keeps theirs' change (Z)
+#   base=X, mine=Y, theirs=absent -> CONFLICT, merged keeps mine's change (Y)
+#   absent, mine=Y, theirs=absent -> mine   (added only in mine)
+#   absent, mine=absent, theirs=Z -> theirs (added only in theirs)
+#   absent, mine=Y, theirs=Y      -> Y      (added identically in both)
+#   absent, mine=Y, theirs=Z      -> CONFLICT, merged keeps mine (Y)
+#
+# MINE-WINS POLICY: whenever both sides changed the SAME existing cell to
+# DIFFERENT values, or both ADDED a cell with different values, the merged
+# sheet keeps mine's value (matching "mine" being the local, already-applied
+# copy in a typical async-merge flow) and records a MergeConflict with all
+# three raw texts so a caller/UI can offer to take theirs instead. When one
+# side DELETED a cell and the other CHANGED it, the merged sheet keeps the
+# CHANGE (whichever side made it) rather than the deletion, and still
+# records the conflict — silently dropping an edit is worse than silently
+# keeping one.
+#
+# CEILINGS (documented, not bugs): formulas merge as plain text — there is
+# no cell-range-shift-aware formula merge. Hidden-row state is not merged
+# per-row; mine's hidden_rows list wins wholesale, as do the sheet's other
+# scalar fields (name/col_count/row_count).
+
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{Cell, CellValue, cell_display_text, empty_cell}
+
+val _ABSENT_MARKER: text = "<absent>"
+
+struct MergeConflict:
+    ref: text
+    base_text: text
+    mine_text: text
+    theirs_text: text
+
+struct MergeResult:
+    merged: Sheet
+    conflicts: [MergeConflict]
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+fn sheet_merge3(base: Sheet, mine: Sheet, theirs: Sheet) -> MergeResult:
+    """Three-way merge base/mine/theirs into one Sheet plus conflict list.
+
+    See the module docstring for the full cell-level merge table and the
+    mine-wins-on-conflict policy. Sheet-level scalars (name, col_count,
+    row_count) and hidden_rows all take mine's value wholesale (documented
+    ceiling — no per-row hidden-state merge)."""
+    var merged = Sheet.new(mine.name)
+    merged.col_count = mine.col_count
+    merged.row_count = mine.row_count
+    merged.hidden_rows = mine.hidden_rows
+
+    var conflicts: [MergeConflict] = []
+    val refs = _collect_all_refs(base, mine, theirs)
+    for ref_str in refs:
+        val outcome = _merge_one_cell(ref_str, base, mine, theirs)
+        if outcome.present:
+            merged.set_cell(ref_str, outcome.value)
+        if outcome.conflicted:
+            conflicts.push(MergeConflict(
+                ref: ref_str,
+                base_text: outcome.base_text,
+                mine_text: outcome.mine_text,
+                theirs_text: outcome.theirs_text,
+            ))
+
+    MergeResult(merged: merged, conflicts: conflicts)
+
+fn conflict_report(result: MergeResult) -> [text]:
+    """One "<ref>|base=<b>|mine=<m>|theirs=<t>" line per recorded conflict."""
+    var lines: [text] = []
+    for c in result.conflicts:
+        lines.push("{c.ref}|base={c.base_text}|mine={c.mine_text}|theirs={c.theirs_text}")
+    lines
+
+fn merge_annotate(result: MergeResult) -> Sheet:
+    """A copy of the merged sheet where every conflicted cell's text is
+    replaced by a "<<mine>>|<<theirs>>" marker, for a future conflict-
+    resolution UI to highlight and let a user pick a side."""
+    var annotated = result.merged
+    for c in result.conflicts:
+        annotated.set_value(c.ref, "<<{c.mine_text}>>|<<{c.theirs_text}>>")
+    annotated
+
+# =========================================================================
+# Internals
+# =========================================================================
+
+struct _MergeCellOutcome:
+    present: bool
+    value: Cell
+    conflicted: bool
+    base_text: text
+    mine_text: text
+    theirs_text: text
+
+fn _cell_raw_text(cell: Cell) -> text:
+    """Raw stored text for merge comparison: for formulas this is the
+    formula source ("=expr"), never the cached computed display (which can
+    differ across copies without the formula itself having changed)."""
+    match cell.value:
+        CellValue.FormulaVal(expr, cached_display):
+            return "={expr}"
+        _:
+            return cell_display_text(cell)
+
+fn _text_list_contains(items: [text], s: text) -> bool:
+    for item in items:
+        if item == s:
+            return true
+    false
+
+fn _collect_all_refs(base: Sheet, mine: Sheet, theirs: Sheet) -> [text]:
+    """Union of every cell reference present in any of the three sheets,
+    in first-seen order (base, then mine, then theirs)."""
+    var refs: [text] = []
+    for k in base.cells.keys():
+        if not _text_list_contains(refs, k):
+            refs.push(k)
+    for k in mine.cells.keys():
+        if not _text_list_contains(refs, k):
+            refs.push(k)
+    for k in theirs.cells.keys():
+        if not _text_list_contains(refs, k):
+            refs.push(k)
+    refs
+
+fn _merge_one_cell(ref_str: text, base: Sheet, mine: Sheet, theirs: Sheet) -> _MergeCellOutcome:
+    val b_cell = base.cells.get(ref_str)
+    val m_cell = mine.cells.get(ref_str)
+    val t_cell = theirs.cells.get(ref_str)
+
+    val b_present = b_cell != nil
+    val m_present = m_cell != nil
+    val t_present = t_cell != nil
+
+    val b_text = if b_present: _cell_raw_text(b_cell) else: _ABSENT_MARKER
+    val m_text = if m_present: _cell_raw_text(m_cell) else: _ABSENT_MARKER
+    val t_text = if t_present: _cell_raw_text(t_cell) else: _ABSENT_MARKER
+
+    # Nothing anywhere.
+    if not b_present and not m_present and not t_present:
+        return _no_op_outcome()
+
+    # Existing cell tracked by base.
+    if b_present:
+        # Deleted in both -> deleted, no conflict.
+        if not m_present and not t_present:
+            return _no_op_outcome()
+
+        # Deleted in mine only.
+        if not m_present and t_present:
+            if t_text == b_text:
+                # Theirs left it unchanged -> mine's deletion wins.
+                return _no_op_outcome()
+            # Theirs changed it -> keep the change, flag the conflict.
+            return _outcome_conflict(t_cell, b_text, m_text, t_text)
+
+        # Deleted in theirs only.
+        if m_present and not t_present:
+            if m_text == b_text:
+                # Mine left it unchanged -> theirs' deletion wins.
+                return _no_op_outcome()
+            # Mine changed it -> keep the change, flag the conflict.
+            return _outcome_conflict(m_cell, b_text, m_text, t_text)
+
+        # Present on all three sides.
+        val m_changed = m_text != b_text
+        val t_changed = t_text != b_text
+        if not m_changed and not t_changed:
+            return _outcome_clean(b_cell)
+        if m_changed and not t_changed:
+            return _outcome_clean(m_cell)
+        if not m_changed and t_changed:
+            return _outcome_clean(t_cell)
+        # Both changed.
+        if m_text == t_text:
+            return _outcome_clean(m_cell)
+        return _outcome_conflict(m_cell, b_text, m_text, t_text)
+
+    # Not tracked by base: an add on one or both sides.
+    if m_present and not t_present:
+        return _outcome_clean(m_cell)
+    if not m_present and t_present:
+        return _outcome_clean(t_cell)
+    # Added on both sides.
+    if m_text == t_text:
+        return _outcome_clean(m_cell)
+    _outcome_conflict(m_cell, b_text, m_text, t_text)
+
+fn _no_op_outcome() -> _MergeCellOutcome:
+    _MergeCellOutcome(present: false, value: empty_cell(), conflicted: false,
+                      base_text: "", mine_text: "", theirs_text: "")
+
+fn _outcome_clean(cell: Cell) -> _MergeCellOutcome:
+    _MergeCellOutcome(present: true, value: cell, conflicted: false,
+                      base_text: "", mine_text: "", theirs_text: "")
+
+fn _outcome_conflict(winner: Cell, base_text: text, mine_text: text, theirs_text: text) -> _MergeCellOutcome:
+    _MergeCellOutcome(present: true, value: winner, conflicted: true,
+                      base_text: base_text, mine_text: mine_text, theirs_text: theirs_text)

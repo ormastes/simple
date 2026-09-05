@@ -1,0 +1,99 @@
+# Typed per-cycle shift/add datapath for the Gen2 iterative multiplier.
+
+use compiler.mir.hwir.bit_vector_constant.{HwBitVectorConstant}
+use compiler.mir.hwir.types.{HwBitExtractOp, HwCombOp, HwFixedSliceOp,
+    HwSelectOp, HwSignal}
+use compiler.mir.hwir.riscv_scalar_muldiv_iterative_contract.{
+    RiscvScalarMulDivIterativeContract}
+
+pub class RiscvScalarIterativeMultiplierDatapath:
+    contract: RiscvScalarMulDivIterativeContract
+    signals: [HwSignal]
+    constants: [HwBitVectorConstant]
+    comb_ops: [HwCombOp]
+    select_ops: [HwSelectOp]
+    bit_extract_ops: [HwBitExtractOp]
+    fixed_slice_ops: [HwFixedSliceOp]
+    selected_result: text
+
+    me diagnostic() -> text:
+        val contract_error = self.contract.diagnostic()
+        if contract_error != "": return contract_error
+        if self.contract.family != "multiply":
+            return "HWIR-E-RISCV-MULTIPLIER-DATAPATH-FAMILY: shift-add datapath requires a multiply projection"
+        if self.signals.len() != 12 or self.constants.len() != 5 or
+            self.comb_ops.len() != 6 or self.select_ops.len() != 3 or
+            self.bit_extract_ops.len() != 1 or self.fixed_slice_ops.len() != 2:
+            return "HWIR-E-RISCV-MULTIPLIER-DATAPATH-SHAPE: shift-add datapath requires the closed transition graph"
+        if self.selected_result != "architectural_result":
+            return "HWIR-E-RISCV-MULTIPLIER-DATAPATH-RESULT: datapath requires one normalized architectural result"
+        ""
+
+fn zero_bits(width: i32) -> text:
+    var bits = ""
+    var index = 0
+    while index < width:
+        bits = bits + "0"
+        index = index + 1
+    bits
+
+fn one_bits(width: i32) -> text:
+    if width == 1: return "1"
+    zero_bits(width - 1) + "1"
+
+pub fn strict_riscv_scalar_iterative_multiplier_datapath(
+    contract: RiscvScalarMulDivIterativeContract
+) -> Result<RiscvScalarIterativeMultiplierDatapath, text>:
+    val contract_error = contract.diagnostic()
+    if contract_error != "": return Err(contract_error)
+    if contract.family != "multiply":
+        return Err("HWIR-E-RISCV-MULTIPLIER-DATAPATH-FAMILY: shift-add datapath requires a multiply projection")
+    val w = contract.operand_width
+    val x = contract.xlen
+    val wide = contract.multiply_width
+    val high_result = contract.projection.operation != "multiply_low"
+    val selected_slice = if high_result: "product_high" else: "product_low"
+    val result_op = if contract.projection.word_result:
+        HwCombOp.unary("sext", "architectural_result", selected_slice, x)
+    else:
+        HwCombOp.unary("passthrough", "architectural_result", selected_slice, x)
+    val datapath = RiscvScalarIterativeMultiplierDatapath(contract: contract,
+        signals: [HwSignal.comb("multiplier_lsb", "Bits", 1),
+            HwSignal.comb("selected_addend", "Bits", wide),
+            HwSignal.comb("acc_next", "Bits", wide),
+            HwSignal.comb("multiplicand_next", "Bits", wide),
+            HwSignal.comb("multiplier_next", "Bits", w),
+            HwSignal.comb("product_negated", "Bits", wide),
+            HwSignal.comb("signed_product", "Bits", wide),
+            HwSignal.comb("product_low", "Bits", w),
+            HwSignal.comb("product_high", "Bits", w),
+            HwSignal.comb("selected_product", "Bits", w),
+            HwSignal.comb("selected_slice", "Bits", w),
+            HwSignal.comb("architectural_result", "Bits", x)],
+        constants: [HwBitVectorConstant.binary("zero_wide", wide, zero_bits(wide)),
+            HwBitVectorConstant.binary("one_wide", wide, one_bits(wide)),
+            HwBitVectorConstant.binary("zero_operand", w, zero_bits(w)),
+            HwBitVectorConstant.binary("one_operand", w, one_bits(w)),
+            HwBitVectorConstant.binary("select_high_constant", 1,
+                if high_result: "1" else: "0")],
+        comb_ops: [HwCombOp.binary("add", "acc_next", "acc_reg", "selected_addend", wide),
+            HwCombOp.binary("shl", "multiplicand_next", "multiplicand_reg", "one_wide", wide),
+            HwCombOp.binary("shr", "multiplier_next", "multiplier_reg", "one_operand", w),
+            HwCombOp.binary("sub", "product_negated", "zero_wide", "acc_reg", wide),
+            HwCombOp.unary("passthrough", "selected_slice", "selected_product", w),
+            result_op],
+        select_ops: [HwSelectOp.mux("selected_addend", "multiplier_lsb",
+                "multiplicand_reg", "zero_wide", wide),
+            HwSelectOp.mux("signed_product", "result_negate_reg",
+                "product_negated", "acc_reg", wide),
+            HwSelectOp.mux("selected_product", "select_high_constant",
+                "product_high", "product_low", w)],
+        bit_extract_ops: [HwBitExtractOp.fixed("multiplier_lsb", "multiplier_reg", 0)],
+        fixed_slice_ops: [HwFixedSliceOp.fixed("product_low", "signed_product", w - 1, 0),
+            HwFixedSliceOp.fixed("product_high", "signed_product", wide - 1, w)],
+        selected_result: "architectural_result")
+    # The high/low choice is an elaboration-time constant. No runtime
+    # operation/provider selection input is emitted.
+    val diagnostic = datapath.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(datapath)

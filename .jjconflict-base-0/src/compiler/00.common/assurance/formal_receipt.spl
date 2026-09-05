@@ -1,0 +1,237 @@
+# Formal Verification 2.0 evidence identities.
+#
+# Receipts are immutable descriptions of evidence, not claims inferred from a
+# tool exit code. Every field that can alter semantics or trust participates in
+# the canonical cache key.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_interfaces.{CompilerCertificateV1}
+use compiler.common.assurance.policy_schema.{AssuranceStrictnessV2, ResolvedAssurancePolicyV2}
+
+fn _receipt_sorted(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn _receipt_frame(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _receipt_frames(values: [text]) -> text:
+    val sorted = _receipt_sorted(values)
+    var framed: [text] = []
+    for value in sorted: framed.push(_receipt_frame(value))
+    sorted.len().to_string() + ":[" + framed.join("") + "]"
+
+# A receipt is an identity boundary, rather than merely a display record.
+# Keep the V1 shape frozen, but reject ambiguous declarations before they can
+# participate in a closed verified-release decision.  In particular, sorting
+# is for canonical serialization only; it must not silently normalize a
+# duplicated assumption or dependency into apparently independent evidence.
+fn _receipt_nonempty_unique(values: [text]) -> bool:
+    var seen: [text] = []
+    for value in values:
+        if value == "" or seen.contains(value): return false
+        seen.push(value)
+    true
+
+fn _receipt_sha256_values_valid(values: [text]) -> bool:
+    var seen: [text] = []
+    for value in values:
+        if not sha256_lower_hex_valid(value) or seen.contains(value): return false
+        seen.push(value)
+    true
+
+struct TrustManifestV1:
+    logic_assumptions: [text]
+    project_axioms: [text]
+    trusted_operations: [text]
+    external_solvers: [text]
+    foreign_boundaries: [text]
+    environment_assumptions: [text]
+
+impl TrustManifestV1:
+    fn diagnostic() -> text:
+        if not _receipt_nonempty_unique(self.logic_assumptions):
+            return "FV2-E-TRUST-LOGIC: logic assumptions must be nonempty and unique"
+        if not _receipt_nonempty_unique(self.project_axioms):
+            return "FV2-E-TRUST-PROJECT: project axioms must be nonempty and unique"
+        if not _receipt_nonempty_unique(self.trusted_operations):
+            return "FV2-E-TRUST-OPERATIONS: trusted operations must be nonempty and unique"
+        if not _receipt_nonempty_unique(self.external_solvers):
+            return "FV2-E-TRUST-SOLVERS: external solver declarations must be nonempty and unique"
+        if not _receipt_nonempty_unique(self.foreign_boundaries):
+            return "FV2-E-TRUST-FOREIGN: foreign-boundary declarations must be nonempty and unique"
+        if not _receipt_nonempty_unique(self.environment_assumptions):
+            return "FV2-E-TRUST-ENVIRONMENT: environment assumptions must be nonempty and unique"
+        ""
+
+    fn is_closed() -> bool:
+        self.diagnostic() == "" and self.project_axioms.is_empty() and self.trusted_operations.is_empty() and
+            self.external_solvers.is_empty() and self.foreign_boundaries.is_empty() and
+            self.environment_assumptions.is_empty()
+
+    fn canonical_text() -> text:
+        "TrustManifestV1" + _receipt_frames(self.logic_assumptions) +
+            _receipt_frames(self.project_axioms) +
+            _receipt_frames(self.trusted_operations) +
+            _receipt_frames(self.external_solvers) +
+            _receipt_frames(self.foreign_boundaries) +
+            _receipt_frames(self.environment_assumptions)
+
+struct VerificationCacheKeyV1:
+    vir_hash: text
+    contract_hash: text
+    woven_join_points_hash: text
+    macro_expansion_hash: text
+    dependency_hashes: [text]
+    effect_model_version: text
+    compiler_pass_version: text
+    target: text
+    lean_version: text
+    mathlib_hash: text
+    solver_versions: [text]
+    tactic_policy_hash: text
+    trust_policy_hash: text
+    assurance_profile: text
+
+impl VerificationCacheKeyV1:
+    fn diagnostic() -> text:
+        if self.vir_hash == "": return "FV2-E-CACHE-VIR: VIR hash is required"
+        if self.contract_hash == "": return "FV2-E-CACHE-CONTRACT: contract hash is required"
+        if self.woven_join_points_hash == "": return "FV2-E-CACHE-WEAVE: weave manifest hash is required"
+        if self.macro_expansion_hash == "": return "FV2-E-CACHE-MACRO: macro expansion hash is required"
+        if self.effect_model_version == "": return "FV2-E-CACHE-EFFECT: effect model version is required"
+        if self.compiler_pass_version == "": return "FV2-E-CACHE-COMPILER: compiler pass version is required"
+        if self.target == "": return "FV2-E-CACHE-TARGET: target is required"
+        if self.lean_version == "": return "FV2-E-CACHE-LEAN: Lean version is required"
+        if not _receipt_nonempty_unique(self.solver_versions): return "FV2-E-CACHE-SOLVERS: solver versions must be nonempty and unique when declared"
+        if self.tactic_policy_hash == "": return "FV2-E-CACHE-TACTIC: tactic policy hash is required"
+        if self.trust_policy_hash == "": return "FV2-E-CACHE-TRUST: trust policy hash is required"
+        if self.assurance_profile != "verified": return "FV2-E-CACHE-PROFILE: verified evidence requires the verified profile"
+        ""
+
+    # V1 is retained for persisted receipts, so adding a field here would
+    # break historical material.  This stricter predicate is used only when
+    # accepting *new closed release* evidence: every existing semantic-hash
+    # field must carry a canonical SHA-256 identity, including the previously
+    # unchecked Mathlib/import closure identity.
+    fn verified_identity_diagnostic() -> text:
+        val structural = self.diagnostic()
+        if structural != "": return structural
+        if not sha256_lower_hex_valid(self.vir_hash): return "FV2-E-CACHE-VIR-HASH: VIR identity must be lowercase SHA-256"
+        if not sha256_lower_hex_valid(self.contract_hash): return "FV2-E-CACHE-CONTRACT-HASH: contract identity must be lowercase SHA-256"
+        if not sha256_lower_hex_valid(self.woven_join_points_hash): return "FV2-E-CACHE-WEAVE-HASH: weave identity must be lowercase SHA-256"
+        if not sha256_lower_hex_valid(self.macro_expansion_hash): return "FV2-E-CACHE-MACRO-HASH: macro identity must be lowercase SHA-256"
+        if not _receipt_sha256_values_valid(self.dependency_hashes): return "FV2-E-CACHE-DEPENDENCY-HASH: dependency identities must be unique lowercase SHA-256"
+        if not sha256_lower_hex_valid(self.mathlib_hash): return "FV2-E-CACHE-MATHLIB-HASH: Mathlib/import closure identity must be lowercase SHA-256"
+        if not sha256_lower_hex_valid(self.tactic_policy_hash): return "FV2-E-CACHE-TACTIC-HASH: tactic-policy identity must be lowercase SHA-256"
+        if not sha256_lower_hex_valid(self.trust_policy_hash): return "FV2-E-CACHE-TRUST-HASH: trust-policy identity must be lowercase SHA-256"
+        ""
+
+    fn canonical_text() -> text:
+        "VerificationCacheKeyV1" + _receipt_frame(self.vir_hash) +
+            _receipt_frame(self.contract_hash) +
+            _receipt_frame(self.woven_join_points_hash) +
+            _receipt_frame(self.macro_expansion_hash) +
+            _receipt_frames(self.dependency_hashes) +
+            _receipt_frame(self.effect_model_version) +
+            _receipt_frame(self.compiler_pass_version) +
+            _receipt_frame(self.target) + _receipt_frame(self.lean_version) +
+            _receipt_frame(self.mathlib_hash) +
+            _receipt_frames(self.solver_versions) +
+            _receipt_frame(self.tactic_policy_hash) +
+            _receipt_frame(self.trust_policy_hash) +
+            _receipt_frame(self.assurance_profile)
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+struct ProofReceiptV1:
+    proof_root: text
+    status: FormalStatus
+    cache_key_hash: text
+    artifact_hash: text
+    theorem_dependencies: [text]
+    axiom_audit_hash: text
+    trust_manifest_hash: text
+    compiler_certificate_hash: text
+    independent_replay_hash: text
+
+impl ProofReceiptV1:
+    fn diagnostic() -> text:
+        if self.proof_root == "": return "FV2-E-RECEIPT-ROOT: proof root is required"
+        if self.cache_key_hash == "": return "FV2-E-RECEIPT-CACHE: cache identity is required"
+        if self.axiom_audit_hash == "": return "FV2-E-RECEIPT-AXIOMS: transitive axiom audit is required"
+        if self.status == FormalStatus.ArtifactVerified:
+            if self.artifact_hash == "": return "FV2-E-RECEIPT-ARTIFACT: artifact hash is required"
+            if self.compiler_certificate_hash == "": return "FV2-E-RECEIPT-COMPILER: compiler refinement certificate is required"
+            if self.independent_replay_hash == "": return "FV2-E-RECEIPT-REPLAY: independent proof replay is required"
+            if self.trust_manifest_hash == "": return "FV2-E-RECEIPT-TRUST: trust manifest is required"
+        ""
+
+    fn verified_identity_diagnostic() -> text:
+        val structural = self.diagnostic()
+        if structural != "": return structural
+        if not sha256_lower_hex_valid(self.cache_key_hash): return "FV2-E-RECEIPT-CACHE-HASH: cache identity must be lowercase SHA-256"
+        if self.status == FormalStatus.ArtifactVerified:
+            if not sha256_lower_hex_valid(self.artifact_hash): return "FV2-E-RECEIPT-ARTIFACT-HASH: artifact identity must be lowercase SHA-256"
+            if not _receipt_sha256_values_valid(self.theorem_dependencies): return "FV2-E-RECEIPT-DEPENDENCY-HASH: theorem dependencies must be unique lowercase SHA-256"
+            if not sha256_lower_hex_valid(self.axiom_audit_hash): return "FV2-E-RECEIPT-AXIOMS-HASH: axiom-audit identity must be lowercase SHA-256"
+            if not sha256_lower_hex_valid(self.trust_manifest_hash): return "FV2-E-RECEIPT-TRUST-HASH: trust-manifest identity must be lowercase SHA-256"
+            if not sha256_lower_hex_valid(self.compiler_certificate_hash): return "FV2-E-RECEIPT-COMPILER-HASH: compiler-certificate identity must be lowercase SHA-256"
+            if not sha256_lower_hex_valid(self.independent_replay_hash): return "FV2-E-RECEIPT-REPLAY-HASH: independent-replay identity must be lowercase SHA-256"
+        ""
+
+    fn permits_verified_release() -> bool:
+        self.status == FormalStatus.ArtifactVerified and self.verified_identity_diagnostic() == ""
+
+    fn reusable_for(key: VerificationCacheKeyV1) -> bool:
+        key.verified_identity_diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.permits_verified_release()
+
+    fn canonical_text() -> text:
+        "ProofReceiptV1" + _receipt_frame(self.proof_root) +
+            _receipt_frame(self.status.name()) + _receipt_frame(self.cache_key_hash) +
+            _receipt_frame(self.artifact_hash) +
+            _receipt_frames(self.theorem_dependencies) +
+            _receipt_frame(self.axiom_audit_hash) +
+            _receipt_frame(self.trust_manifest_hash) +
+            _receipt_frame(self.compiler_certificate_hash) +
+            _receipt_frame(self.independent_replay_hash)
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+    fn binds_independent_replay(closure: IndependentReplayClosureV1) -> bool:
+        val closure_hash = closure.hash()
+        closure_hash != "" and self.independent_replay_hash == closure_hash and
+            self.artifact_hash != "" and self.artifact_hash == closure.artifact_hash
+
+fn permits_closed_verified_release(
+    policy: ResolvedAssurancePolicyV2,
+    key: VerificationCacheKeyV1,
+    receipt: ProofReceiptV1,
+    trust: TrustManifestV1,
+    compiler_certificate: CompilerCertificateV1,
+    replay_closure: IndependentReplayClosureV1
+) -> bool:
+    policy.strictness == AssuranceStrictnessV2.Verified and trust.is_closed() and
+        key.verified_identity_diagnostic() == "" and
+        receipt.verified_identity_diagnostic() == "" and
+        sha256_text(trust.canonical_text()) == receipt.trust_manifest_hash and
+        compiler_certificate.diagnostic() == "" and
+        receipt.compiler_certificate_hash == compiler_certificate.expected_certificate_hash() and
+        receipt.binds_independent_replay(replay_closure) and
+        receipt.reusable_for(key)

@@ -1,0 +1,29 @@
+use std.common.encoding.protobuf_wire.{pb_encode_string}
+
+# Multi-byte regression coverage for
+# src/lib/common/encoding/protobuf_wire.spl. pb_text_to_bytes/
+# pb_encode_string are documented as an explicit Latin-1-style "ASCII
+# fast-path" (NOT real UTF-8 -- the module's own docstring says
+# non-ASCII codepoints are emitted as raw single bytes and to pre-encode
+# via std.common.encoding.utf8 for wire-valid UTF-8). Even with that
+# documented design, both functions bounded their character-indexed
+# `s[i]` scan by `s.len()` (BYTE length) instead of the character count --
+# for "café" (4 characters, 5 bytes) this let the loop run one iteration
+# past the last valid character index, silently appending a spurious
+# extra byte and reporting the wrong length. Fixed by bounding on
+# text_codepoints(s).len() (character count) instead, matching the
+# function's own single-byte-per-character design intent exactly.
+
+describe "pb_encode_string multi-byte (documented Latin-1-style scope)":
+    it "café (codepoints <=255) encodes to exactly 4 bytes, no spurious trailing byte":
+        val f = pb_encode_string(1, "café")
+        # tag byte (field 1, wire type 2) + length=4 + 4 payload bytes
+        expect(f).to_equal([10, 4, 99, 97, 102, 233])
+
+    it "CJK (codepoints >255) is still cleanly rejected per documented scope, not corrupted":
+        val f = pb_encode_string(1, "日本")
+        expect(f).to_equal([])
+
+    it "pure ASCII of the same character count is unaffected (regression guard)":
+        val f = pb_encode_string(1, "cafe")
+        expect(f).to_equal([10, 4, 99, 97, 102, 101])

@@ -1,0 +1,53 @@
+# Fixture (NOT collected: the runner's discovery skips any path containing
+# "/fixtures/" -- see src/lib/nogc_sync_mut/test_runner/test_runner_files.spl).
+#
+# Generalises test/fixtures/mem_infra/env_override_target_spec.spl from the one
+# name SIMPLE_TEST_BINARY to the whole *selector* family: every environment
+# variable by which a caller picks WHICH binary, backend or toolchain a spec
+# exercises.
+#
+# It reports, from inside a real spec body, the value that body observes for
+# each name -- both Simple-side via env_get and in a child shell. The two
+# channels are printed separately because they fail together: when the body runs
+# inside the long-lived test daemon, the daemon's frozen environment is what
+# env_get reads AND what any child shell inherits.
+#
+# Decisive use: set one name to a fresh sentinel and run twice, keeping the same
+# daemon alive across both. If the second run still reports the first run's
+# sentinel, that name is DEAD on the daemon lane -- i.e. it is missing from
+# _binary_override_vars() in src/app/test_runner_new/test_runner_client.spl.
+# Note the trap: the run that *starts* the daemon always reports correctly, so a
+# single run proves nothing. Compare the daemon PID before and after.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+fn selector_names() -> [text]:
+    ["SIMPLE_TEST_BINARY",
+     "CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN",
+     "SIMPLEOS_QEMU_SIMPLE_BIN",
+     "SIMPLEOS_DBFS_BOOT_QEMU_EXEC",
+     "SIMPLE_HOSTED_BROWSER_EXECUTABLE",
+     "DEVHUB_MAIL_BIN",
+     "T32_PYTHON_BINARY",
+     "T32_BACKEND_PREFERENCE",
+     "LLVM_BUILD",
+     "SIMPLE_MMU_DIRECT_BACKEND",
+     "SIMPLE_MMU_DEVICE_INITIATED_BACKEND",
+     "SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND",
+     "SIMPLE_GPU_COMPILER_PRODUCER",
+     "SIMPLE_GPU_COMPILER_RUNTIME_PATH",
+     "SIMPLE_NATIVE_BUILD_TARGET"]
+
+describe "env selector probe fixture":
+    it "reports every selector value visible to a spec body":
+        for name in selector_names():
+            val direct = env_get(name) ?? ""
+            print "SELECTOR_PROBE direct {name}=[{direct}]"
+        # The child-shell channel is read with `env`, not parameter expansion:
+        # a `$name` inside a Simple text literal is consumed by Simple's own
+        # interpolation before the shell ever sees it.
+        val (out, _err, _code) = process_run("/bin/sh",
+            ["-c", "env | grep -E '^(SIMPLE_TEST_BINARY|CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN|SIMPLEOS_QEMU_SIMPLE_BIN|SIMPLEOS_DBFS_BOOT_QEMU_EXEC|SIMPLE_HOSTED_BROWSER_EXECUTABLE|DEVHUB_MAIL_BIN|T32_PYTHON_BINARY|T32_BACKEND_PREFERENCE|LLVM_BUILD|SIMPLE_MMU_DIRECT_BACKEND|SIMPLE_MMU_DEVICE_INITIATED_BACKEND|SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND|SIMPLE_GPU_COMPILER_PRODUCER|SIMPLE_GPU_COMPILER_RUNTIME_PATH|SIMPLE_NATIVE_BUILD_TARGET)=' | sed 's/^/SELECTOR_PROBE shell /' || echo 'SELECTOR_PROBE shell NONE'"])
+        print out.trim()
+        assert_equal(1, 1)

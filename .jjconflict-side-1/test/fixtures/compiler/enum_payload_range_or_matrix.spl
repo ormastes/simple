@@ -1,0 +1,101 @@
+"""Runtime matrix for nested Range / Or / enum sub-patterns in an enum payload.
+
+Companion fixture to
+test/01_unit/compiler/hir/enum_payload_nested_range_or_lowering_spec.spl.
+
+These shapes are lowered by the pure-Simple HIR pass
+(20.hir/hir_lowering/_Expressions/match_desugaring.spl); the Rust seed's own
+parser rejects `case V(2 | 3):` outright, so run this on a self-hosted lane:
+
+    simple run <this file>
+    simple native-build <this file> && ./<binary>
+
+Must print `BADCOUNT 0`. Before the HIR change, the range and or rows did not
+compile at all ("nested match pattern kind not supported inside an enum
+payload here"); a fresh-binding flatten of those slots would instead make the
+arm ALWAYS match, which is what the *_miss rows below detect.
+"""
+
+enum Inner:
+    A(i64)
+    B(i64)
+
+enum Shape:
+    Circle(i64)
+    Square(i64)
+    Boxed(Inner)
+
+# Nested Range sub-pattern: the arm must fire only inside the range, and a
+# miss must fall through to the LATER arms, not to the default.
+fn ranged(s: Shape) -> i64:
+    match s:
+        case Shape.Circle(1..5): 100
+        case Shape.Circle(9): 900
+        case Shape.Circle(_): 1
+        case _: -1
+
+fn ranged_inclusive(s: Shape) -> i64:
+    match s:
+        case Shape.Square(1..=5): 200
+        case Shape.Square(_): 2
+        case _: -1
+
+# Nested Or sub-pattern over literals.
+fn ored(s: Shape) -> i64:
+    match s:
+        case Shape.Square(2 | 3): 300
+        case Shape.Square(_): 3
+        case _: -1
+
+# Nested Or sub-pattern over nested enum variants, with a shared binder.
+fn ored_enum(s: Shape) -> i64:
+    match s:
+        case Shape.Boxed(Inner.A(n) | Inner.B(n)): n
+        case _: -1
+
+# Nested enum destructure (neighbor of the same defect class; already lowered
+# by MIR's emit_enum_payload_deep -- pinned here so a regression is visible).
+fn nested_enum(s: Shape) -> i64:
+    match s:
+        case Shape.Boxed(Inner.A(n)): n + 10
+        case Shape.Boxed(Inner.B(n)): n + 20
+        case _: -1
+
+fn check(name: text, got: i64, want: i64) -> i64:
+    if got == want:
+        print("PASS {name} got={got}")
+        return 0
+    print("FAIL {name} got={got} want={want}")
+    1
+
+# Harness self-test: proves `check` can report a mismatch, so a green matrix
+# is not vacuous. The single FAIL line it prints is expected.
+fn sentinel() -> i64:
+    print("-- sentinel: the next FAIL line is EXPECTED --")
+    val detected = check("SENTINEL_expected_fail", 1, 999)
+    if detected == 1:
+        print("PASS sentinel_harness_live")
+        return 0
+    print("FAIL sentinel_harness_VACUOUS")
+    1
+
+fn main() -> i64:
+    var bad = 0
+    bad = bad + sentinel()
+    bad = bad + check("range_hit_low", ranged(Shape.Circle(1)), 100)
+    bad = bad + check("range_hit_mid", ranged(Shape.Circle(3)), 100)
+    bad = bad + check("range_excl_high", ranged(Shape.Circle(5)), 1)
+    bad = bad + check("range_miss_falls_to_later_arm", ranged(Shape.Circle(9)), 900)
+    bad = bad + check("range_other_variant", ranged(Shape.Square(3)), -1)
+    bad = bad + check("range_incl_high", ranged_inclusive(Shape.Square(5)), 200)
+    bad = bad + check("range_incl_over", ranged_inclusive(Shape.Square(6)), 2)
+    bad = bad + check("or_first_alt", ored(Shape.Square(2)), 300)
+    bad = bad + check("or_second_alt", ored(Shape.Square(3)), 300)
+    bad = bad + check("or_miss", ored(Shape.Square(4)), 3)
+    bad = bad + check("or_other_variant", ored(Shape.Circle(2)), -1)
+    bad = bad + check("or_enum_a", ored_enum(Shape.Boxed(Inner.A(7))), 7)
+    bad = bad + check("or_enum_b", ored_enum(Shape.Boxed(Inner.B(8))), 8)
+    bad = bad + check("nested_enum_a", nested_enum(Shape.Boxed(Inner.A(7))), 17)
+    bad = bad + check("nested_enum_b", nested_enum(Shape.Boxed(Inner.B(7))), 27)
+    print("BADCOUNT {bad}")
+    bad

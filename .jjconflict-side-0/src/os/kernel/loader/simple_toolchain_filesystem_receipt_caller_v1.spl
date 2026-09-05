@@ -1,0 +1,59 @@
+"""Atomic caller surface for authenticated Simple toolchain evidence.
+
+The launch bridge owns executable authority retirement.  The terminal owner
+then consumes all three scheduler tokens and returns the sole success receipt.
+No caller-authored exit status, digest, mount identity, or generation crosses
+this boundary.
+
+Source and artifact fields come from owner-issued stable snapshot leases held
+across each stage.  Submission revalidates and consumes those leases before it
+attaches their bounded identities to the consume-once scheduler observation.
+"""
+
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
+    AuthenticatedFsExecSubmissionV1
+}
+use os.kernel.loader.simple_toolchain_filesystem_launch_v1.{
+    SimpleToolchainFilesystemLaunchPlanV1,
+    simple_toolchain_filesystem_launch_authenticated_v1
+}
+use os.kernel.loader.simple_toolchain_terminal_receipt_owner_v1.{
+    SimpleToolchainTerminalReceiptV1,
+    simple_toolchain_terminal_receipt_consume_once_v1
+}
+
+pub(package) struct SimpleToolchainFilesystemReceiptResultV1:
+    receipt: SimpleToolchainTerminalReceiptV1
+    scheduler: Scheduler
+
+pub(package) struct SimpleToolchainFilesystemReceiptErrorV1:
+    reason: text
+    scheduler: Scheduler
+
+pub(package) fn simple_toolchain_filesystem_launch_and_receipt_v1(
+    scheduler: Scheduler,
+    caller_caps: CapabilitySet,
+    table: MountTable,
+    plan: SimpleToolchainFilesystemLaunchPlanV1,
+    interpreter_submission: AuthenticatedFsExecSubmissionV1,
+    compiler_submission: AuthenticatedFsExecSubmissionV1,
+    loader_submission: AuthenticatedFsExecSubmissionV1
+) -> Result<SimpleToolchainFilesystemReceiptResultV1,
+            SimpleToolchainFilesystemReceiptErrorV1>:
+    val launched = simple_toolchain_filesystem_launch_authenticated_v1(
+        scheduler, caller_caps, table, plan, interpreter_submission,
+        compiler_submission, loader_submission)
+    if launched.is_err():
+        val failed = launched.unwrap_err()
+        return Err(SimpleToolchainFilesystemReceiptErrorV1(
+            reason: failed.reason, scheduler: failed.scheduler))
+    val launch = launched.unwrap()
+    val receipt = simple_toolchain_terminal_receipt_consume_once_v1(plan, launch)
+    if receipt.is_err():
+        return Err(SimpleToolchainFilesystemReceiptErrorV1(
+            reason: receipt.unwrap_err(), scheduler: launch.scheduler))
+    Ok(SimpleToolchainFilesystemReceiptResultV1(
+        receipt: receipt.unwrap(), scheduler: launch.scheduler))

@@ -1,0 +1,171 @@
+# Host-independent full-operation contract for the unpromoted Vulkan candidate.
+# @cover src/os/crypto/x25519_mlkem768/hybrid.spl 98%
+# @cover src/os/crypto/x25519_mlkem768/vulkan_ntt_provider.spl 98%
+
+use std.spipe.*
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Config,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use os.crypto.x25519_mlkem768.execution_policy.{
+    x25519_mlkem768_resolve_cuda_candidate,
+    x25519_mlkem768_resolve_metal_candidate,
+    x25519_mlkem768_resolve_vulkan_candidate}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_keygen_vulkan_candidate,
+    x25519_mlkem768_encapsulate_vulkan_candidate,
+    x25519_mlkem768_decapsulate_vulkan_candidate}
+use os.crypto.x25519_mlkem768.vulkan_ntt_provider.{
+    X25519MlKem768VulkanNttExecutor,
+    x25519_mlkem768_vulkan_ntt_execute}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_is_available}
+use app.test.x25519mlkem768_pinned_workload.{
+    X25519MlKem768PinnedSet,
+    x25519_mlkem768_run_pinned_vulkan_workload}
+use test.fixtures.crypto.x25519mlkem768.canonical_fixture.{
+    x25519_mlkem768_fixture_list32, x25519_mlkem768_fixture_bytes32}
+
+fn _vulkan_candidate_config(backend: X25519MlKem768Backend) -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        requested_backend: backend,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy:
+            X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        minimum_batch: 1, batch_size: 1)
+
+fn _vulkan_zero_list(count: i64) -> list:
+    var out: list = []
+    var i: i64 = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _pinned_vulkan_config() -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        requested_backend: X25519MlKem768Backend.Vulkan,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy:
+            X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        minimum_batch: 1, batch_size: 1)
+
+describe "X25519MLKEM768 Vulkan full candidate facade":
+    it "should run the exact pinned A B C fixture or retain its physical blocker":
+        step("Construct one executor from the retained forward and inverse SPIR-V")
+        var executor = X25519MlKem768VulkanNttExecutor.create_binaries(
+            "build/evidence/x25519mlkem768/vulkan/x25519mlkem768_ntt_forward.spv",
+            "0865f588f0825a3ff66a1d5e2cd2a9d0c356bb75b4fceaaf5c2196ffa05f6379",
+            "build/evidence/x25519mlkem768/vulkan/x25519mlkem768_ntt_inverse.spv",
+            "07a11b541ef204a4fb6c907338dafc99bdf870d2046edcfad02a3d42dcca2687")
+        defer executor.shutdown()
+        val result = x25519_mlkem768_run_pinned_vulkan_workload(
+            _pinned_vulkan_config(), executor)
+        expect(executor.zeta_bytes.len()).to_equal(512)
+        expect(executor.zeta_encoding_count).to_equal(1)
+        if executor.admission_reason != "":
+            step("Retain the exact binary-admission blocker")
+            match result:
+                case Ok(_): fail("Vulkan ran without admitted exact SPIR-V")
+                case Err(reason): expect(reason).to_equal(
+                    "pinned-set-a-vulkan-keygen:" + executor.admission_reason)
+        elif not vulkan_sffi_is_available():
+            step("Retain physical Vulkan unavailability without a fake pass")
+            match result:
+                case Ok(_): fail("Unavailable Vulkan returned execution evidence")
+                case Err(reason): expect(reason).to_equal(
+                    "pinned-set-a-vulkan-keygen:vulkan-unavailable")
+        else:
+            step("Require exact same-data output and device lifecycle evidence")
+            match result:
+                case Ok(outputs):
+                    expect(outputs.set_a.set_id).to_equal(
+                        X25519MlKem768PinnedSet.MlKem)
+                    expect(outputs.set_b.set_id).to_equal(
+                        X25519MlKem768PinnedSet.X25519)
+                    expect(outputs.set_c.set_id).to_equal(
+                        X25519MlKem768PinnedSet.Hybrid)
+                    expect(outputs.selected_backend).to_equal(
+                        X25519MlKem768Backend.Vulkan)
+                    expect(outputs.artifact_digest).to_equal(
+                        "13ef51351c0147cf5fc71877d4eaac6730796e6833d78b49126e3159936d11e6")
+                    expect(outputs.execution_proof_digest).to_equal(
+                        outputs.artifact_digest)
+                    expect(outputs.candidate_oracle_match).to_be(true)
+                    expect(outputs.fallback_used).to_be(false)
+                    expect(outputs.accelerated_operation_count).to_equal(3)
+                    expect(outputs.kernel_invocations).to_equal(7)
+                    expect(outputs.compiled).to_be(true)
+                    expect(outputs.submitted).to_be(true)
+                    expect(outputs.fence_completed).to_be(true)
+                    expect(outputs.device_readback).to_be(true)
+                    expect(executor.session.generation).to_equal(1)
+                    expect(executor.zeta_encoding_count).to_equal(1)
+                    step("Reject the adjacent invalid operation without stale fence state")
+                    match x25519_mlkem768_vulkan_ntt_execute(executor, []):
+                        case Ok(_): fail("Vulkan accepted an empty post-success batch")
+                        case Err(reason): expect(reason).to_equal(
+                            "vulkan-ntt-input-size-invalid")
+                    expect(executor.fence_completed).to_be(false)
+                case Err(reason): fail(reason)
+
+    it "should keep unverified GPU resolvers from claiming scalar parity for REQ-010":
+        step("Resolve CUDA, Metal, and Vulkan candidates before oracle comparison")
+        match x25519_mlkem768_resolve_cuda_candidate(
+                _vulkan_candidate_config(X25519MlKem768Backend.Cuda), "keygen"):
+            case Ok(evidence): expect(evidence.oracle_match).to_be(false)
+            case Err(reason): fail(reason)
+        match x25519_mlkem768_resolve_metal_candidate(
+                _vulkan_candidate_config(X25519MlKem768Backend.Metal), "keygen"):
+            case Ok(evidence): expect(evidence.oracle_match).to_be(false)
+            case Err(reason): fail(reason)
+        match x25519_mlkem768_resolve_vulkan_candidate(
+                _vulkan_candidate_config(X25519MlKem768Backend.Vulkan), "keygen"):
+            case Ok(evidence): expect(evidence.oracle_match).to_be(false)
+            case Err(reason): fail(reason)
+
+    it "should validate and fail closed across all three operations for REQ-010":
+        step("Exercise invalid inputs and missing SPIR-V across the full facade")
+        val config = _vulkan_candidate_config(X25519MlKem768Backend.Vulkan)
+        var missing = X25519MlKem768VulkanNttExecutor.create_binaries(
+            "test/fixtures/crypto/x25519mlkem768/missing.spv",
+            "0123456789abcdef",
+            "test/fixtures/crypto/x25519mlkem768/missing_inverse.spv",
+            "fedcba9876543210")
+        match x25519_mlkem768_keygen_vulkan_candidate(
+                config, missing, x25519_mlkem768_fixture_bytes32(1), [],
+                x25519_mlkem768_fixture_list32(65)):
+            case Ok(_): fail("Vulkan keygen accepted an invalid seed")
+            case Err(reason): expect(reason).to_contain("three 32-byte inputs")
+        match x25519_mlkem768_encapsulate_vulkan_candidate(
+                config, missing, [], x25519_mlkem768_fixture_bytes32(97),
+                x25519_mlkem768_fixture_list32(129)):
+            case Ok(_): fail("Vulkan encapsulation accepted an invalid share")
+            case Err(reason): expect(reason).to_contain("1216 bytes")
+        match x25519_mlkem768_decapsulate_vulkan_candidate(
+                config, missing, [], x25519_mlkem768_fixture_bytes32(1), []):
+            case Ok(_): fail("Vulkan decapsulation accepted an invalid share")
+            case Err(reason): expect(reason).to_contain("1120 bytes")
+        match x25519_mlkem768_keygen_vulkan_candidate(
+                config, missing, x25519_mlkem768_fixture_bytes32(1),
+                x25519_mlkem768_fixture_list32(33),
+                x25519_mlkem768_fixture_list32(65)):
+            case Ok(_): fail("Vulkan keygen ran without admitted SPIR-V")
+            case Err(reason): expect(reason).to_contain("vulkan-ntt-binary")
+        match x25519_mlkem768_encapsulate_vulkan_candidate(
+                config, missing, _vulkan_zero_list(1216),
+                x25519_mlkem768_fixture_bytes32(97),
+                x25519_mlkem768_fixture_list32(129)):
+            case Ok(_): fail("Vulkan encapsulation ran without admitted SPIR-V")
+            case Err(reason): expect(reason).to_contain("vulkan-ntt-binary")
+        match x25519_mlkem768_decapsulate_vulkan_candidate(
+                config, missing, _vulkan_zero_list(1120),
+                x25519_mlkem768_fixture_bytes32(1),
+                _vulkan_zero_list(2400)):
+            case Ok(_): fail("Vulkan decapsulation ran without admitted SPIR-V")
+            case Err(reason): expect(reason).to_contain("vulkan-ntt-binary")
+        missing.shutdown()

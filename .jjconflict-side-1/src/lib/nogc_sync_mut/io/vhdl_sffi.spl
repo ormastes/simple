@@ -1,0 +1,107 @@
+# VHDL Toolchain SFFI Bindings
+#
+# SFFI pattern for VHDL synthesis/simulation tools.
+# Wraps GHDL and Yosys command-line invocations.
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+# ============================================================================
+# Tier 1: File Extern Declarations (Raw SFFI)
+# ============================================================================
+
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.io_runtime.{file_write}
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+struct VhdlToolResult:
+    success: bool
+    exit_code: i64
+    stdout: text
+    stderr: text
+
+# reason: positional io vhdl_sffi API
+fn vhdl_tool_result(code: i64, stdout: text, stderr: text) -> VhdlToolResult:
+    VhdlToolResult(
+        success: code == 0,
+        exit_code: code,
+        stdout: stdout,
+        stderr: stderr
+    )
+
+fn vhdl_process_run(command: text, args: [text]) -> VhdlToolResult:
+    val result = process_run(command, args)
+    vhdl_tool_result(result.2, result.0, result.1)
+
+# === GHDL Analysis & Elaboration ===
+
+fn ghdl_available() -> bool:
+    """Check if GHDL is installed."""
+    vhdl_process_run("ghdl", ["--version"]).success
+
+fn ghdl_analyze(vhdl_file: text) -> VhdlToolResult:
+    """Analyze a VHDL file with GHDL (syntax + semantic check)."""
+    vhdl_process_run("ghdl", ["-a", "--std=08", "--workdir=/tmp/ghdl_work", vhdl_file])
+
+fn ghdl_elaborate(entity_name: text) -> VhdlToolResult:
+    """Elaborate a VHDL entity with GHDL."""
+    vhdl_process_run("ghdl", ["-e", "--std=08", "--workdir=/tmp/ghdl_work", entity_name])
+
+fn ghdl_run(entity_name: text, stop_time: text?) -> VhdlToolResult:
+    """Run a VHDL simulation with GHDL."""
+    var args = ["-r", "--std=08", "--workdir=/tmp/ghdl_work", entity_name]
+    match stop_time:
+        Some(value):
+            args = args.push("--stop-time={value}")
+        nil:
+            pass_do_nothing("GHDL run has no stop time")
+    vhdl_process_run("ghdl", args)
+
+fn ghdl_synth(entity_name: text) -> VhdlToolResult:
+    """Synthesize a VHDL entity with GHDL (produces netlists)."""
+    vhdl_process_run("ghdl", ["--synth", "--std=08", "--workdir=/tmp/ghdl_work", entity_name])
+
+# reason: positional io vhdl_sffi API
+fn ghdl_analyze_and_elaborate(vhdl_file: text, entity_name: text) -> VhdlToolResult:
+    """Analyze and elaborate in one step."""
+    val analyze = ghdl_analyze(vhdl_file)
+    if not analyze.success:
+        return analyze
+    ghdl_elaborate(entity_name)
+
+# === Yosys Synthesis ===
+
+fn yosys_available() -> bool:
+    """Check if Yosys is installed."""
+    vhdl_process_run("yosys", ["--version"]).success
+
+# reason: positional io vhdl_sffi API
+fn yosys_synth_ghdl(vhdl_file: text, entity_name: text, output_json: text) -> VhdlToolResult:
+    """Synthesize VHDL using Yosys with GHDL plugin."""
+    val script = "mkdir -p /tmp/ghdl_work && ghdl --std=08 --workdir=/tmp/ghdl_work -a {vhdl_file}; ghdl --std=08 --workdir=/tmp/ghdl_work {entity_name}; synth -top {entity_name}; write_json {output_json}"
+    vhdl_process_run("yosys", ["-m", "ghdl", "-p", script])
+
+# === File Operations ===
+
+# reason: positional io vhdl_sffi API
+fn vhdl_write_file(path: text, content: text) -> bool:
+    """Write VHDL source to a file."""
+    file_write(path, content)
+
+fn vhdl_read_file(path: text) -> text?:
+    """Read a VHDL source file."""
+    if file_exists(path):
+        Some(file_read_text(path))
+    else:
+        nil
+
+fn vhdl_file_exists(path: text) -> bool:
+    """Check if a VHDL file exists."""
+    file_exists(path)
+
+# ============================================================================
+# Exports
+# ============================================================================

@@ -1,0 +1,101 @@
+# SCV-IMPL-G-03 — the v2 commit state model.
+#
+# Promotion chain: journal_only -> private_editing -> private_unparsed /
+# private_parse_error -> private_parsed -> compile_ok -> test_ok ->
+# verified_ok -> public_ready. Transitions are enforced one gate at a time:
+# no skipping, edits demote back to private_editing, and forced_unparsed is a
+# recorded dead-end that never reaches the gate chain or public_ready by
+# default (profile overrides are G-04's concern).
+
+fn scv_state_model_states() -> [text]:
+    ["journal_only", "private_editing", "private_unparsed", "private_parse_error", "private_parsed", "forced_unparsed", "compile_ok", "test_ok", "verified_ok", "public_ready"]
+
+fn scv_state_model_valid(state: text) -> bool:
+    for known in scv_state_model_states():
+        if state == known:
+            return true
+    false
+
+# Map legacy (v1) state names onto the v2 model; v2 names map to themselves.
+fn scv_state_canonical(state: text) -> text:
+    if state == "private_dirty":
+        return "private_editing"
+    if state == "parsed_error":
+        return "private_parse_error"
+    if state == "parsed_ok":
+        return "private_parsed"
+    if scv_state_model_valid(state):
+        return state
+    "ERROR state-model: unknown state: {state}\n"
+
+# Tier of each state in the promotion chain. forced_unparsed shares the
+# private tier: it is a recorded classification, never a promotion.
+fn scv_state_tier(state: text) -> i64:
+    if state == "journal_only":
+        return 0
+    if state == "private_editing":
+        return 1
+    if state == "private_unparsed" or state == "private_parse_error" or state == "forced_unparsed":
+        return 2
+    if state == "private_parsed":
+        return 3
+    if state == "compile_ok":
+        return 4
+    if state == "test_ok":
+        return 5
+    if state == "verified_ok":
+        return 6
+    if state == "public_ready":
+        return 7
+    -1
+
+fn scv_state_transition_allowed(from: text, to: text) -> bool:
+    val a = scv_state_canonical(from)
+    val b = scv_state_canonical(to)
+    if a.starts_with("ERROR") or b.starts_with("ERROR"):
+        return false
+    if a == b:
+        return true
+    # journal_only enters editing; any later state may be demoted by an edit
+    # back to private_editing — but never below it (journal_only is entry-only).
+    if b == "private_editing":
+        return true
+    if b == "journal_only":
+        return false
+    # forced_unparsed is a dead-end: no gate chain, no public_ready.
+    if a == "forced_unparsed":
+        return false
+    # forced_unparsed is only entered from the editing tier as a recorded override.
+    if b == "forced_unparsed":
+        return a == "private_editing"
+    # Forward promotion: exactly one tier at a time, never backwards.
+    val ta = scv_state_tier(a)
+    val tb = scv_state_tier(b)
+    if tb == ta + 1:
+        return true
+    # Within the private classification tier, reclassification is allowed
+    # (e.g. private_unparsed -> private_parse_error after a parse attempt).
+    ta == 2 and tb == 2
+
+fn scv_state_transition(from: text, to: text) -> text:
+    val a = scv_state_canonical(from)
+    if a.starts_with("ERROR"):
+        return a
+    val b = scv_state_canonical(to)
+    if b.starts_with("ERROR"):
+        return b
+    if not scv_state_transition_allowed(a, b):
+        return "ERROR state-model: transition {a} -> {b} not allowed\n"
+    "state: {b}\nfrom: {a}\n"
+
+# SCV-IMPL-G-04 — profile-aware transition. Under `strict` / `mission_critical`
+# the forced_unparsed dead-end is unreachable; every other rule is unchanged.
+fn scv_state_transition_profile(profile: text, from: text, to: text) -> text:
+    val b = scv_state_canonical(to)
+    if b == "forced_unparsed" and (profile == "strict" or profile == "mission_critical"):
+        return "ERROR state-model: profile {profile} forbids forced_unparsed\n"
+    scv_state_transition(from, to)
+
+export scv_state_model_states, scv_state_model_valid, scv_state_canonical
+export scv_state_tier, scv_state_transition_allowed, scv_state_transition
+export scv_state_transition_profile

@@ -1,0 +1,58 @@
+# @cover src/os/lib/gpu_bridge/vulkan_host_offload_adapter.spl 80%
+# @tag: unit, simpleos, processing-ir, vulkan, ivshmem
+
+use std.spec.{describe, it, expect}
+use common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
+    SIMPLEOS_HOST_GPU_STATUS_PASS,
+    SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+    SIMPLEOS_HOST_GPU_BACKEND_CUDA,
+    SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN,
+    SIMPLEOS_HOST_GPU_READBACK_DEVICE,
+    SIMPLEOS_HOST_GPU_READBACK_CPU
+}
+use os.lib.gpu_bridge.host_gpu_ivshmem.{HostGpuIvshmemReceipt, HostGpuIvshmemHelloReceipt}
+use os.lib.gpu_bridge.vulkan_host_offload_adapter.{VulkanHostOffloadAdapter}
+
+fn vulkan_hello(mask: i64, completed: bool) -> HostGpuIvshmemHelloReceipt:
+    HostGpuIvshmemHelloReceipt(
+        published: true, completed: completed, status: SIMPLEOS_HOST_GPU_STATUS_PASS,
+        reason: 0, generation: 1, render_mask: 1, processing_mask: mask,
+        max_payload_bytes: 65536, max_readback_bytes: 1024,
+        version: SIMPLEOS_HOST_GPU_PROTOCOL_VERSION, elapsed_us: 1,
+        capability_mask: 0)
+
+fn vulkan_receipt(backend: i64, source: i64, identity: i64, handle: i64) -> HostGpuIvshmemReceipt:
+    HostGpuIvshmemReceipt(
+        completed: true, status: SIMPLEOS_HOST_GPU_STATUS_PASS, reason: 0,
+        generation: 7, native_handle: handle, output_addr: 4096u64,
+        output_bytes: 16, output_checksum: 28, elapsed_us: 3,
+        readback_source: source, device_identity: identity,
+        run_id_hash: 31, frame_id: 9, backend_code: backend)
+
+describe "Vulkan host offload adapter":
+    it "should preserve Vulkan identity and negotiation":
+        # @covers VULKAN_NEGOTIATED:true VULKAN_NEGOTIATED:false
+        val adapter = VulkanHostOffloadAdapter.create(4096u64, 100)
+        expect(adapter.backend_name()).to_equal("vulkan")
+        expect(adapter.backend_code()).to_equal(SIMPLEOS_HOST_GPU_BACKEND_VULKAN)
+        expect(adapter.negotiated(vulkan_hello(SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN, true))).to_equal(true)
+        expect(adapter.negotiated(vulkan_hello(0, true))).to_equal(false)
+        expect(adapter.negotiated(vulkan_hello(SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN, false))).to_equal(false)
+
+    it "should reject invalid submissions before MMIO":
+        # @covers VULKAN_INVALID_SUBMIT:true
+        expect(VulkanHostOffloadAdapter.create(0u64, 100).submit_fill_u32(7, 31, 9, 4, 7u32).completed).to_equal(false)
+        val adapter = VulkanHostOffloadAdapter.create(4096u64, 100)
+        expect(adapter.submit_fill_u32(0, 31, 9, 4, 7u32).completed).to_equal(false)
+        expect(adapter.submit_fill_u32(7, 0, 9, 4, 7u32).completed).to_equal(false)
+        expect(adapter.submit_fill_u32(7, 31, 9, 0, 7u32).completed).to_equal(false)
+        expect(VulkanHostOffloadAdapter.create(4096u64, 0).submit_fill_u32(7, 31, 9, 4, 7u32).completed).to_equal(false)
+
+    it "should admit only correlated Vulkan device readback":
+        val adapter = VulkanHostOffloadAdapter.create(4096u64, 100)
+        expect(adapter.device_receipt_valid(vulkan_receipt(SIMPLEOS_HOST_GPU_BACKEND_VULKAN, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 17, 3), 7, 31, 9, 16)).to_equal(true)
+        expect(adapter.device_receipt_valid(vulkan_receipt(SIMPLEOS_HOST_GPU_BACKEND_CUDA, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 17, 3), 7, 31, 9, 16)).to_equal(false)
+        expect(adapter.device_receipt_valid(vulkan_receipt(SIMPLEOS_HOST_GPU_BACKEND_VULKAN, SIMPLEOS_HOST_GPU_READBACK_CPU, 17, 3), 7, 31, 9, 16)).to_equal(false)
+        expect(adapter.device_receipt_valid(vulkan_receipt(SIMPLEOS_HOST_GPU_BACKEND_VULKAN, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 0, 3), 7, 31, 9, 16)).to_equal(false)
+        expect(adapter.device_receipt_valid(vulkan_receipt(SIMPLEOS_HOST_GPU_BACKEND_VULKAN, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 17, 0), 7, 31, 9, 16)).to_equal(false)

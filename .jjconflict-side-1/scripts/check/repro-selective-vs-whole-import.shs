@@ -1,0 +1,77 @@
+#!/bin/sh
+# Reproducer for doc/08_tracking/bug/selective_vs_whole_module_import_closures_2026-08-31.md
+#
+# Diagnosis only -- asserts the CURRENT observed behaviour of two independent
+# defects so a later change to either is visible. Not a gate; run explicitly.
+#
+#   sh scripts/check/repro-selective-vs-whole-import.shs [path/to/simple]
+#
+# Every rc is read into a variable on the line AFTER the invocation, never
+# through a pipe (a pipeline's $? is the last command's status).
+set -u
+SIMPLE="${1:-bin/simple}"
+if [ ! -x "$SIMPLE" ]; then
+  echo "ERROR -- nothing was checked (no executable compiler at $SIMPLE)"
+  exit 2
+fi
+D=$(mktemp -d) || exit 2
+trap 'rm -rf "$D"' EXIT
+CHECKED=0
+FAILED=""
+
+expect_rc() { # label file want_rc
+  "$SIMPLE" compile "$2" >"$D/out" 2>&1
+  got=$?
+  CHECKED=$((CHECKED + 1))
+  if [ "$got" -ne "$3" ]; then
+    FAILED="$FAILED $1(rc=$got,want=$3)"
+  fi
+}
+
+# Defect A -- ANY-erasure is import-independent: identical rc with and without
+# an import naming the undeclared type.
+mkdir -p "$D/a"
+printf 'pub struct Real:\n    x: i64\n' > "$D/a/m.spl"
+printf 'fn probe(v: Ghost) -> i64:\n    return v.w0\n\nfn main():\n    return ()\n' > "$D/a/noimport.spl"
+printf 'use m.{Ghost}\n\nfn probe(v: Ghost) -> i64:\n    return v.w0\n\nfn main():\n    return ()\n' > "$D/a/withimport.spl"
+expect_rc A-no-import   "$D/a/noimport.spl"   1
+expect_rc A-with-import "$D/a/withimport.spl" 1
+
+# Defect B -- single-segment relative `use p` never loads the module's closure,
+# so a module carrying a hard error still compiles green; `use p.{boom}` does not.
+mkdir -p "$D/b"
+printf 'pub fn boom() -> i64:\n    return totally_undefined_symbol_xyz()\n' > "$D/b/p.spl"
+printf 'use p\n\nfn main():\n    return ()\n' > "$D/b/whole.spl"
+printf 'use p.{boom}\n\nfn main():\n    return ()\n' > "$D/b/sel.spl"
+expect_rc B-bare-vacuous "$D/b/whole.spl" 0
+expect_rc B-selective    "$D/b/sel.spl"   1
+
+# Containment -- with a dotted path to a FILE the two forms agree. Only the
+# package form (below) and the single-segment relative form diverge.
+mkdir -p "$D/c/d"
+printf 'pub fn boom() -> i64:\n    return totally_undefined_symbol_xyz()\n' > "$D/c/d/p.spl"
+printf 'use d.p\n\nfn main():\n    return ()\n' > "$D/c/whole.spl"
+printf 'use d.p.{boom}\n\nfn main():\n    return ()\n' > "$D/c/sel.spl"
+expect_rc C-dotted-whole     "$D/c/whole.spl" 1
+expect_rc C-dotted-selective "$D/c/sel.spl"   1
+
+# Defect B, the load-bearing cell -- a DOTTED PACKAGE is vacuous too, which is
+# the real module shape from PR #182 (std.gc_sync_mut.db is package-only). This
+# is what makes the discriminating variable package-vs-file, not segment count.
+mkdir -p "$D/e/d/pkg"
+printf 'pub fn boom() -> i64:\n    return totally_undefined_symbol_xyz()\n' > "$D/e/d/pkg/__init__.spl"
+printf 'use d.pkg\n\nfn main():\n    return ()\n' > "$D/e/whole.spl"
+printf 'use d.pkg.{boom}\n\nfn main():\n    return ()\n' > "$D/e/sel.spl"
+expect_rc E-pkg-bare-vacuous "$D/e/whole.spl" 0
+expect_rc E-pkg-selective    "$D/e/sel.spl"   1
+
+if [ "$CHECKED" -eq 0 ]; then
+  echo "ERROR -- nothing was checked"
+  exit 2
+fi
+if [ -n "$FAILED" ]; then
+  echo "FAIL -- $CHECKED probe(s) executed, behaviour changed:$FAILED"
+  exit 1
+fi
+echo "PASS -- $CHECKED probe(s) executed, both defects reproduce as recorded"
+exit 0

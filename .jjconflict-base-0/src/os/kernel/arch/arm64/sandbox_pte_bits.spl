@@ -1,0 +1,96 @@
+# ARM64 sandbox PTE-bit policy — CPU-intrinsic-free.
+#
+# Pure text/VmFlags -> PTE-bit computation extracted out of
+# os.kernel.arch.arm64.paging so arch-neutral boot code
+# (os.kernel.security.sandbox_boot_apply) can build the ARM64 protection plan
+# WITHOUT dragging os.kernel.arch.arm64.cpu (rt_arm64_* intrinsics) into the
+# riscv64 boot reachable set. See
+# doc/08_tracking/bug/rv64_web_gate_arm64_import_leak_and_storage_2026-06-15.md.
+#
+# This module imports ONLY memory_types. It must never import
+# os.kernel.arch.arm64.cpu / .paging or any rt_arm64_* extern.
+
+use os.kernel.types.memory_types.{VmFlags, VM_PRESENT, VM_NO_EXECUTE}
+
+# ARM64 page table entry attribute bits (subset used by sandbox PTE policy).
+# Kept as module-level vals to mirror os.kernel.arch.arm64.paging; on the
+# riscv64 boot lane these functions are linked but never invoked, so BSS-zero
+# does not affect that lane.
+val PTE_VALID: u64 = 1 << 0
+val PTE_TABLE: u64 = 1 << 1        # Page descriptor (L3)
+val PTE_ATTR_NORMAL: u64 = 0 << 2  # MAIR index 0 = Normal memory
+val PTE_ATTR_DEVICE: u64 = 1 << 2  # MAIR index 1 = Device-nGnRnE
+val PTE_AP_RW_ALL: u64 = 1 << 6    # Read/Write at all ELs
+val PTE_AP_RO_EL1: u64 = 2 << 6    # Read-only at EL1 only
+val PTE_AP_RO_ALL: u64 = 3 << 6    # Read-only at all ELs
+val PTE_SH_INNER: u64 = 3 << 8     # Inner Shareable
+val PTE_AF: u64 = 1 << 10
+val PTE_PXN: u64 = 1 << 53         # Privileged eXecute-Never
+val PTE_UXN: u64 = 1 << 54         # User eXecute-Never (XN)
+
+fn _flags_to_pte_bits(flags: VmFlags) -> u64:
+    """Convert VmFlags to ARM64 page table entry bits.
+
+    Maps generic flags to ARM64-specific PTE attributes:
+    - present -> PTE_VALID | PTE_TABLE (L3 page descriptor)
+    - writable -> PTE_AP_RW_EL1 (default is RW at EL1)
+    - !writable -> PTE_AP_RO_EL1
+    - user -> PTE_AP_RW_ALL or PTE_AP_RO_ALL
+    - cache_disable -> PTE_ATTR_DEVICE instead of PTE_ATTR_NORMAL
+    - no_execute -> PTE_PXN | PTE_UXN
+    """
+    var bits: u64 = PTE_VALID | PTE_TABLE | PTE_AF | PTE_SH_INNER
+
+    # Memory attribute (normal vs device)
+    if flags.cache_disable():
+        bits = bits | PTE_ATTR_DEVICE
+    else:
+        bits = bits | PTE_ATTR_NORMAL
+
+    # Access permissions
+    if flags.user():
+        if flags.writable():
+            bits = bits | PTE_AP_RW_ALL
+        else:
+            bits = bits | PTE_AP_RO_ALL
+        if not flags.no_execute():
+            bits = bits | PTE_PXN
+    else:
+        if not flags.writable():
+            bits = bits | PTE_AP_RO_EL1
+        # else: PTE_AP_RW_EL1 = 0, default
+
+    # Execute-never
+    if flags.no_execute():
+        bits = bits | PTE_PXN | PTE_UXN
+
+    bits
+
+fn arm64_sandbox_permissions_to_vm_flags(permissions: text) -> VmFlags:
+    """Map lowered sandbox permission text to kernel ARM64 page flags."""
+    if permissions.contains("x"):
+        return VmFlags.kernel_rx()
+    if permissions.contains("w"):
+        return VmFlags.kernel_rw()
+    VmFlags(bits: VM_PRESENT | VM_NO_EXECUTE)
+
+fn arm64_sandbox_pte_bits_for_permissions(permissions: text) -> u64:
+    """Return ARM64 PTE bits for one lowered sandbox permission string."""
+    _flags_to_pte_bits(arm64_sandbox_permissions_to_vm_flags(permissions))
+
+fn arm64_sandbox_pte_bits_from_lowering(sandbox_lowering_sdn: text) -> [u64]:
+    """Read pmp_region-style rows and return equivalent ARM64 PTE policy bits."""
+    var bits: [u64] = []
+    for raw_line in sandbox_lowering_sdn.split("\n"):
+        var line = raw_line.trim()
+        if line.starts_with("- "):
+            line = line.substring(2)
+        if line.starts_with("pmp_region|"):
+            val parts = line.split("|")
+            if parts.len() >= 4:
+                bits.push(arm64_sandbox_pte_bits_for_permissions(parts[3]))
+    bits
+
+export arm64_sandbox_permissions_to_vm_flags
+export arm64_sandbox_pte_bits_for_permissions
+export arm64_sandbox_pte_bits_from_lowering

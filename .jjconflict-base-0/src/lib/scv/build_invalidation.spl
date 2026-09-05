@@ -1,0 +1,188 @@
+# SCV build invalidation — SCV-IMPL-G-06.
+#
+# Wires the G-05 fingerprints (`syntactic_interface_id`, `normalized_impl_hash`)
+# into SCV's OWN build-invalidation metadata: interface_id drives downstream
+# invalidation — when a module's declared surface is unchanged, its consumers
+# are marked skippable; when it changed, every (transitive) consumer is
+# invalidated.
+#
+# HONEST SCOPE (plan row G-06 + .claude/rules/commands.md): the comment-only-
+# skips-codegen claim requires the COMPILER dependency model to confirm
+# irrelevance, and the compiler has NO dependency model wired today —
+# `interface_digest_of` (src/compiler/cache/action_key.spl:199) has ZERO call
+# sites and `src/lib/simple.sdn` `dependencies:` edges are traversed by no
+# build path. So `scv_dependency_model_status()` reports "unavailable", and
+# a comment-only change NEVER skips codegen here: the skip is gated on an
+# explicit `dependency_model` field that must read "confirmed", which nothing
+# can currently produce. We never claim compiler-confirmed irrelevance.
+# TODO(SCV-IMPL-G-06/compiler): flip the status to "confirmed" only when the
+# compiler wires `interface_digest_of` into a real dependency model
+# (simple.sdn `dependencies:` traversal + ActionDep.iface_digest) and exposes
+# it to SCV; until then comment-only changes still classify as `comment_only`
+# but plan as codegen-required.
+#
+# Row formats (text, canonical):
+#   fingerprint row : "module|<siface1:…>|<nimpl1:…>|<raw1:…>"
+#   dependency edge : "consumer|dependency"   (consumer imports dependency)
+#   plan row        : "module|class|action|reason"
+#     class  ∈ unchanged | comment_only | impl_only | interface_changed
+#              | added | removed
+#     action ∈ skip | codegen | rebuild+invalidate_downstream | invalidated
+
+use std.scv.hir_fingerprint.{scv_syntactic_interface_id, scv_normalized_impl_hash}
+use std.scv.store.{scv_hash_text}
+
+fn scv_build_invalidation_version() -> text:
+    "scv/build-invalidation/v1"
+
+# The compiler dependency model is NOT wired (interface_digest_of: zero
+# callers; simple.sdn dependencies: untraversed). Nothing in this module can
+# return "confirmed" today.
+fn scv_dependency_model_status() -> text:
+    "unavailable"
+
+# Raw-bytes hash (distinguishes comment/format-only changes from no change).
+fn scv_raw_source_hash(source: text) -> text:
+    "raw1:" + scv_hash_text("build_raw_source", source)
+
+fn scv_build_fingerprint_row(module: text, source: text) -> text:
+    "{module}|{scv_syntactic_interface_id(module, source)}|{scv_normalized_impl_hash(source)}|{scv_raw_source_hash(source)}"
+
+fn _scv_bi_field(row: text, idx: i64) -> text:
+    val p = row.split("|")
+    if idx >= p.len():
+        return ""
+    p[idx]
+
+# Classify one module's change from its old and new fingerprint rows.
+fn scv_build_change_class(old_row: text, new_row: text) -> text:
+    if old_row == "" and new_row != "":
+        return "added"
+    if new_row == "" and old_row != "":
+        return "removed"
+    if _scv_bi_field(old_row, 3) == _scv_bi_field(new_row, 3):
+        return "unchanged"
+    if _scv_bi_field(old_row, 1) != _scv_bi_field(new_row, 1):
+        return "interface_changed"
+    if _scv_bi_field(old_row, 2) != _scv_bi_field(new_row, 2):
+        return "impl_only"
+    "comment_only"
+
+# The comment-only codegen skip is allowed ONLY when the compiler dependency
+# model explicitly confirms irrelevance. "unavailable" (today's only real
+# value) always blocks it.
+fn scv_comment_only_skip_allowed(dependency_model: text) -> bool:
+    dependency_model == "confirmed"
+
+# Deterministic text sort (selection sort; no reliance on a sort builtin).
+fn _scv_bi_sort(items: [text]) -> [text]:
+    var rest = items
+    var out: [text] = []
+    while rest.len() > 0:
+        var mi = 0
+        var i = 1
+        while i < rest.len():
+            if rest[i] < rest[mi]:
+                mi = i
+            i = i + 1
+        out.push(rest[mi])
+        var nr: [text] = []
+        var k = 0
+        while k < rest.len():
+            if k != mi:
+                nr.push(rest[k])
+            k = k + 1
+        rest = nr
+    out
+
+# Transitive consumers of `module` per the dependency edges ("consumer|dependency").
+fn scv_downstream_of(module: text, deps: [text]) -> [text]:
+    var out: [text] = []
+    var frontier: [text] = [module]
+    var seen: Dict<text, bool> = {}
+    seen[module] = true
+    while frontier.len() > 0:
+        var next_frontier: [text] = []
+        for target in frontier:
+            for edge in deps:
+                val p = edge.split("|")
+                if p.len() == 2 and p[1] == target and not seen.contains_key(p[0]):
+                    seen[p[0]] = true
+                    out.push(p[0])
+                    next_frontier.push(p[0])
+        frontier = next_frontier
+    _scv_bi_sort(out)
+
+# Compute the invalidation plan. old_rows/new_rows are fingerprint rows;
+# deps are "consumer|dependency" edges; dependency_model is the explicit
+# compiler dependency-model status (pass scv_dependency_model_status()).
+# One plan row per module named in new_rows plus removed modules, sorted.
+fn scv_build_invalidation_plan(old_rows: [text], new_rows: [text],
+                               deps: [text], dependency_model: text) -> [text]:
+    var old_by: Dict<text, text> = {}
+    for r in old_rows:
+        old_by[_scv_bi_field(r, 0)] = r
+    var new_by: Dict<text, text> = {}
+    var modules: [text] = []
+    for r in new_rows:
+        val m = _scv_bi_field(r, 0)
+        new_by[m] = r
+        modules.push(m)
+    for r in old_rows:
+        val m = _scv_bi_field(r, 0)
+        if not new_by.contains_key(m):
+            modules.push(m)
+    modules = _scv_bi_sort(modules)
+    # classes first
+    var class_by: Dict<text, text> = {}
+    for m in modules:
+        val old_row = if old_by.contains_key(m): old_by[m] else: ""
+        val new_row = if new_by.contains_key(m): new_by[m] else: ""
+        class_by[m] = scv_build_change_class(old_row, new_row)
+    # downstream invalidation: interface_changed / added / removed poison consumers
+    var invalidated_by: Dict<text, text> = {}
+    for m in modules:
+        val cls = class_by[m]
+        if cls == "interface_changed" or cls == "added" or cls == "removed":
+            for c in scv_downstream_of(m, deps):
+                if invalidated_by.contains_key(c):
+                    invalidated_by[c] = invalidated_by[c] + "," + m
+                else:
+                    invalidated_by[c] = m
+    var plan: [text] = []
+    for m in modules:
+        val cls = class_by[m]
+        var action = ""
+        var reason = ""
+        if cls == "interface_changed" or cls == "added" or cls == "removed":
+            action = "rebuild+invalidate_downstream"
+            reason = "interface_id changed"
+        elif invalidated_by.contains_key(m):
+            action = "invalidated"
+            reason = "interface_id changed in dependency: {invalidated_by[m]}"
+        elif cls == "impl_only":
+            action = "codegen"
+            reason = "normalized_impl_hash changed; interface unchanged so downstream skippable"
+        elif cls == "comment_only":
+            if scv_comment_only_skip_allowed(dependency_model):
+                action = "skip"
+                reason = "comment-only; compiler dependency model confirmed irrelevance"
+            else:
+                action = "codegen"
+                reason = "comment-only, but skip blocked: dependency_model: {dependency_model} (compiler confirmation required, interface_digest_of unwired)"
+        else:
+            action = "skip"
+            reason = "raw bytes unchanged"
+        plan.push("{m}|{cls}|{action}|{reason}")
+    plan
+
+fn scv_build_plan_row(plan: [text], module: text) -> text:
+    for r in plan:
+        if r.starts_with(module + "|"):
+            return r
+    ""
+
+export scv_build_invalidation_version, scv_dependency_model_status
+export scv_raw_source_hash, scv_build_fingerprint_row, scv_build_change_class
+export scv_comment_only_skip_allowed, scv_downstream_of
+export scv_build_invalidation_plan, scv_build_plan_row

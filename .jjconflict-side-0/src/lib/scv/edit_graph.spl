@@ -1,0 +1,316 @@
+# SCV refactoring-aware edit graph — SCV-IMPL-D-03.
+#
+# ONE comparison (status index vs working copy, the same one the D-02
+# views render) reported as a graph that links raw hunks <-> symbol
+# entities <-> inferred refactoring operations (I-04 rows).
+#
+# Report rows (stable, one per line):
+#   edit-graph files=<n> hunks=<h> entities=<e> ops=<o>
+#   file <rel> <modified|added|deleted>            or  file <old> -> <new> renamed
+#   hunk h<i> <rel> -<old_start>,<old_len> +<new_start>,<new_len>
+#   entity e<i> <rel>:<kind>:<qname> old=<ls>-<le> new=<ls>-<le>   ("-" = absent side)
+#   op r<i> <kind> <from> -> <to> <confidence_milli> <status>
+#   link hunk h<i> -> entity e<j>       (hunk range overlaps the entity on either side)
+#   link entity e<j> -> op r<k>         (entity ref appears in the op's from/to)
+# "no changes\n" when the comparison is empty.
+#
+# Hunks come from a patience-style line diff: common prefix/suffix are
+# trimmed, then lines unique on both sides anchor the middle (longest
+# increasing subsequence over at most SCV_EDIT_GRAPH_MAX_ANCHORS anchors);
+# a middle longer than SCV_EDIT_GRAPH_MAX_LINES on either side is reported
+# as ONE hunk rather than searched (bounded, never silently dropped).
+
+use app.io.mod (file_exists, file_read)
+use std.scv.core.{scv_status_index_path, scv_chunk_path}
+use std.scv.working_copy.{scv_line_for_path, scv_line_chunk}
+use std.scv.diff.{scv_diff}
+use std.scv.refactoring_relations.{RefactorFileInput, DeclUnit, scv_refactor_units, scv_refactor_infer}
+
+val SCV_EDIT_GRAPH_MAX_ANCHORS = 256
+val SCV_EDIT_GRAPH_MAX_LINES = 4000
+
+struct EditGraphFile:
+    old_rel: text     # "" when added
+    new_rel: text     # "" when deleted
+    old_text: text
+    new_text: text
+
+struct EditHunk:
+    rel: text
+    old_start: i64
+    old_len: i64
+    new_start: i64
+    new_len: i64
+
+fn scv_eg_lines(content: text) -> [text]:
+    if content == "":
+        return []
+    val rows = content.split("\n")
+    var count = rows.len()
+    if count > 0 and rows[count - 1] == "":
+        count = count - 1
+    var out: [text] = []
+    var i = 0
+    while i < count:
+        out.push(rows[i])
+        i = i + 1
+    out
+
+fn scv_eg_count_range(lines: [text], value: text, from: i64, to: i64) -> i64:
+    var n = 0
+    var i = from
+    while i < to:
+        if lines[i] == value:
+            n = n + 1
+        i = i + 1
+    n
+
+fn scv_eg_index_of(lines: [text], value: text, from: i64, to: i64) -> i64:
+    var i = from
+    while i < to:
+        if lines[i] == value:
+            return i
+        i = i + 1
+    -1
+
+# Patience anchors as parallel arrays (a index, b index), increasing in both.
+fn scv_eg_anchors(a: [text], b: [text], a_from: i64, a_to: i64, b_from: i64, b_to: i64) -> ([i64], [i64]):
+    var ca: [i64] = []
+    var cb: [i64] = []
+    var i = a_from
+    while i < a_to and ca.len() < SCV_EDIT_GRAPH_MAX_ANCHORS:
+        val line = a[i]
+        if line.trim() != "" and scv_eg_count_range(a, line, a_from, a_to) == 1 and scv_eg_count_range(b, line, b_from, b_to) == 1:
+            ca.push(i)
+            cb.push(scv_eg_index_of(b, line, b_from, b_to))
+        i = i + 1
+    # LIS over cb (O(k^2), k <= SCV_EDIT_GRAPH_MAX_ANCHORS).
+    var best_len: [i64] = []
+    var prev: [i64] = []
+    var k = 0
+    while k < ca.len():
+        best_len.push(1)
+        prev.push(-1)
+        var j = 0
+        while j < k:
+            if cb[j] < cb[k] and best_len[j] + 1 > best_len[k]:
+                best_len[k] = best_len[j] + 1
+                prev[k] = j
+            j = j + 1
+        k = k + 1
+    var end = -1
+    var end_len = 0
+    k = 0
+    while k < ca.len():
+        if best_len[k] > end_len:
+            end_len = best_len[k]
+            end = k
+        k = k + 1
+    var chain: [i64] = []
+    while end >= 0:
+        chain.push(end)
+        end = prev[end]
+    var out_a: [i64] = []
+    var out_b: [i64] = []
+    var c = chain.len() - 1
+    while c >= 0:
+        out_a.push(ca[chain[c]])
+        out_b.push(cb[chain[c]])
+        c = c - 1
+    (out_a, out_b)
+
+fn scv_eg_push_hunk(hunks: [EditHunk], rel: text, a_from: i64, a_to: i64, b_from: i64, b_to: i64) -> [EditHunk]:
+    var out = hunks
+    if a_to > a_from or b_to > b_from:
+        val old_start = if a_to > a_from: a_from + 1 else: a_from
+        val new_start = if b_to > b_from: b_from + 1 else: b_from
+        out.push(EditHunk(rel: rel, old_start: old_start, old_len: a_to - a_from, new_start: new_start, new_len: b_to - b_from))
+    out
+
+fn scv_eg_hunks(rel: text, old_text: text, new_text: text) -> [EditHunk]:
+    val a = scv_eg_lines(old_text)
+    val b = scv_eg_lines(new_text)
+    var p = 0
+    while p < a.len() and p < b.len() and a[p] == b[p]:
+        p = p + 1
+    var s = 0
+    while s < a.len() - p and s < b.len() - p and a[a.len() - 1 - s] == b[b.len() - 1 - s]:
+        s = s + 1
+    val a_to = a.len() - s
+    val b_to = b.len() - s
+    var hunks: [EditHunk] = []
+    if a_to - p > SCV_EDIT_GRAPH_MAX_LINES or b_to - p > SCV_EDIT_GRAPH_MAX_LINES:
+        return scv_eg_push_hunk(hunks, rel, p, a_to, p, b_to)
+    val (aa, ab) = scv_eg_anchors(a, b, p, a_to, p, b_to)
+    var ca = p
+    var cb = p
+    var i = 0
+    while i < aa.len():
+        hunks = scv_eg_push_hunk(hunks, rel, ca, aa[i], cb, ab[i])
+        ca = aa[i] + 1
+        cb = ab[i] + 1
+        i = i + 1
+    scv_eg_push_hunk(hunks, rel, ca, a_to, cb, b_to)
+
+struct EditEntity:
+    old_ref: text
+    new_ref: text
+    old_start: i64
+    old_end: i64
+    new_start: i64
+    new_end: i64
+
+fn scv_eg_ref(u: DeclUnit) -> text:
+    "{u.rel}:{u.kind}:{u.qname}"
+
+fn scv_eg_entities(f: EditGraphFile) -> [EditEntity]:
+    val old_units = scv_refactor_units(f.old_rel, f.old_text)
+    val new_units = scv_refactor_units(f.new_rel, f.new_text)
+    var out: [EditEntity] = []
+    var used_new: [i64] = []
+    for o in old_units:
+        var ni = 0
+        var hit = -1
+        while ni < new_units.len():
+            if hit < 0 and new_units[ni].kind == o.kind and new_units[ni].qname == o.qname:
+                hit = ni
+            ni = ni + 1
+        if hit >= 0:
+            used_new.push(hit)
+            out.push(EditEntity(old_ref: scv_eg_ref(o), new_ref: scv_eg_ref(new_units[hit]), old_start: o.line_start, old_end: o.line_end, new_start: new_units[hit].line_start, new_end: new_units[hit].line_end))
+        else:
+            out.push(EditEntity(old_ref: scv_eg_ref(o), new_ref: "", old_start: o.line_start, old_end: o.line_end, new_start: 0, new_end: 0))
+    var ni = 0
+    while ni < new_units.len():
+        var used = false
+        for u in used_new:
+            if u == ni:
+                used = true
+        if not used:
+            out.push(EditEntity(old_ref: "", new_ref: scv_eg_ref(new_units[ni]), old_start: 0, old_end: 0, new_start: new_units[ni].line_start, new_end: new_units[ni].line_end))
+        ni = ni + 1
+    out
+
+fn scv_eg_range_overlaps(start: i64, len: i64, ls: i64, le: i64) -> bool:
+    if ls == 0:
+        return false
+    if len == 0:
+        # insertion point between lines: inside the entity when it lands
+        # after its first line and at or before its last line
+        return start >= ls and start <= le
+    val end = start + len - 1
+    start <= le and end >= ls
+
+fn scv_eg_range_text(s: i64, e: i64) -> text:
+    if s == 0:
+        "-"
+    else:
+        "{s}-{e}"
+
+fn scv_eg_ref_in(list: text, ref: text) -> bool:
+    if ref == "":
+        return false
+    for item in list.split(","):
+        if item == ref:
+            return true
+    false
+
+# Core builder over explicit file pairs (no repository needed).
+fn scv_edit_graph_from_files(files: [EditGraphFile]) -> text:
+    if files.len() == 0:
+        return "no changes\n"
+    var file_rows = ""
+    var hunk_rows = ""
+    var entity_rows = ""
+    var link_rows = ""
+    var hunks_total = 0
+    var entities_total = 0
+    var inputs: [RefactorFileInput] = []
+    var entity_refs_old: [text] = []
+    var entity_refs_new: [text] = []
+    for f in files:
+        if f.old_rel != "" and f.new_rel != "" and f.old_rel != f.new_rel:
+            file_rows = file_rows + "file {f.old_rel} -> {f.new_rel} renamed\n"
+            inputs.push(RefactorFileInput(rel: f.old_rel, old_text: f.old_text, new_text: ""))
+            inputs.push(RefactorFileInput(rel: f.new_rel, old_text: "", new_text: f.new_text))
+        elif f.old_rel == "":
+            file_rows = file_rows + "file {f.new_rel} added\n"
+            inputs.push(RefactorFileInput(rel: f.new_rel, old_text: "", new_text: f.new_text))
+        elif f.new_rel == "":
+            file_rows = file_rows + "file {f.old_rel} deleted\n"
+            inputs.push(RefactorFileInput(rel: f.old_rel, old_text: f.old_text, new_text: ""))
+        else:
+            file_rows = file_rows + "file {f.new_rel} modified\n"
+            inputs.push(RefactorFileInput(rel: f.new_rel, old_text: f.old_text, new_text: f.new_text))
+        val rel = if f.new_rel != "": f.new_rel else: f.old_rel
+        val hunks = scv_eg_hunks(rel, f.old_text, f.new_text)
+        val entities = scv_eg_entities(f)
+        val entity_base = entities_total
+        for e in entities:
+            entities_total = entities_total + 1
+            val label = if e.new_ref != "": e.new_ref else: e.old_ref
+            entity_rows = entity_rows + "entity e{entities_total} {label} old={scv_eg_range_text(e.old_start, e.old_end)} new={scv_eg_range_text(e.new_start, e.new_end)}\n"
+            entity_refs_old.push(e.old_ref)
+            entity_refs_new.push(e.new_ref)
+        for h in hunks:
+            hunks_total = hunks_total + 1
+            hunk_rows = hunk_rows + "hunk h{hunks_total} {h.rel} -{h.old_start},{h.old_len} +{h.new_start},{h.new_len}\n"
+            var ei = 0
+            while ei < entities.len():
+                val e = entities[ei]
+                if scv_eg_range_overlaps(h.old_start, h.old_len, e.old_start, e.old_end) or scv_eg_range_overlaps(h.new_start, h.new_len, e.new_start, e.new_end):
+                    link_rows = link_rows + "link hunk h{hunks_total} -> entity e{entity_base + ei + 1}\n"
+                ei = ei + 1
+    val ops = scv_refactor_infer(inputs)
+    var op_rows = ""
+    var ri = 0
+    for row in ops:
+        ri = ri + 1
+        val parts = row.split("|")
+        op_rows = op_rows + "op r{ri} {parts[0]} {parts[1]} -> {parts[2]} {parts[3]} {parts[5]}\n"
+        var ei = 0
+        while ei < entity_refs_old.len():
+            val in_from = scv_eg_ref_in(parts[1], entity_refs_old[ei]) or scv_eg_ref_in(parts[1], entity_refs_new[ei])
+            val in_to = scv_eg_ref_in(parts[2], entity_refs_old[ei]) or scv_eg_ref_in(parts[2], entity_refs_new[ei])
+            if in_from or in_to:
+                link_rows = link_rows + "link entity e{ei + 1} -> op r{ri}\n"
+            ei = ei + 1
+    "edit-graph files={files.len()} hunks={hunks_total} entities={entities_total} ops={ops.len()}\n" + file_rows + hunk_rows + entity_rows + op_rows + link_rows
+
+fn scv_eg_old_text(root: text, index: text, rel: text) -> text:
+    val old_chunk = scv_line_chunk(scv_line_for_path(index, rel))
+    val old_file = scv_chunk_path(root, old_chunk)
+    if file_exists(old_file):
+        file_read(old_file)
+    else:
+        ""
+
+# Repository entry: the status-index vs working-copy comparison.
+fn scv_edit_graph(root: text) -> text:
+    val raw = scv_diff(root, "--raw")
+    if raw == "no changes\n":
+        return raw
+    val index = if file_exists(scv_status_index_path(root)): file_read(scv_status_index_path(root)) else: ""
+    var files: [EditGraphFile] = []
+    for line in raw.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split(" ")
+        if parts.len() < 2:
+            continue
+        val kind = parts[0]
+        val rel = parts[1]
+        if kind == "modified":
+            files.push(EditGraphFile(old_rel: rel, new_rel: rel, old_text: scv_eg_old_text(root, index, rel), new_text: file_read("{root}/{rel}")))
+        elif kind == "added":
+            files.push(EditGraphFile(old_rel: "", new_rel: rel, old_text: "", new_text: file_read("{root}/{rel}")))
+        elif kind == "deleted":
+            files.push(EditGraphFile(old_rel: rel, new_rel: "", old_text: scv_eg_old_text(root, index, rel), new_text: ""))
+        elif kind == "renamed" and parts.len() >= 4:
+            files.push(EditGraphFile(old_rel: rel, new_rel: parts[3], old_text: scv_eg_old_text(root, index, rel), new_text: file_read("{root}/{parts[3]}")))
+    scv_edit_graph_from_files(files)
+
+export SCV_EDIT_GRAPH_MAX_ANCHORS, SCV_EDIT_GRAPH_MAX_LINES
+export EditGraphFile, EditHunk
+export scv_edit_graph, scv_edit_graph_from_files, scv_eg_hunks

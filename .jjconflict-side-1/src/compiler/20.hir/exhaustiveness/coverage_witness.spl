@@ -1,0 +1,108 @@
+# Coverage witness (A2, hardening plan 2026-08-21 6.5 / 17.3)
+#
+# `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md` 6.5
+# specifies that every exhaustive match generates a hidden witness:
+#
+#     StaticRequired(E) - StaticCovered(match) = {}
+#
+# This module is the record for that FIRST set difference -- the static one.
+# The `CompleteRequired`/`DynamicReachable` rows of 6.5 are deliberately NOT
+# modelled here: complete/dyn extension regions do not exist in the HIR yet
+# (there is no `case complete` / `case dyn` in HirPatternKind), so a field for
+# them would be a placeholder that always reads empty, and an always-empty set
+# difference is indistinguishable from a satisfied one. That is precisely the
+# false-green 11.6 forbids. They get added when the sealer lands and can
+# actually populate them.
+#
+# The witness is computed from IDS (see match_coverage.spl's header on why
+# names can never be the comparison key) and rendered to names only at the
+# very last step, for the human reading the diagnostic.
+
+use compiler.hir.match_coverage.{ResolvedMatchCoverage}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+
+# The diagnostic code of plan 17.3. Kept as a named constant so the spec and
+# the renderer cannot disagree about its spelling.
+pub fn coverage_witness_code() -> text:
+    "E-COMPLETE-001"
+
+struct CoverageWitness:
+    """One match's static coverage witness: the enum it is over, and the
+    static variants that no arm named."""
+    enum_name: text
+    missing_variant_names: [text]
+    has_wildcard: bool
+    annotated_exhaustive: bool
+    profile: AssuranceStrictness
+
+impl CoverageWitness:
+    fn is_satisfied() -> bool:
+        """True when `StaticRequired - StaticCovered` is empty, i.e. every
+        static variant was named explicitly."""
+        self.missing_variant_names.len() == 0
+
+    fn render() -> text:
+        """The 17.3 diagnostic, verbatim in shape:
+
+            E-COMPLETE-001:
+            non-exhaustive static match over HirExprKind
+
+            missing:
+              HirExprKind.HostGpuLane
+
+            `case complete` and `case dyn` do not cover static variants.
+            wildcards are forbidden for critical compiler IR.
+
+        Returns "" for a satisfied witness -- a caller that renders
+        unconditionally then emits a non-empty string is emitting a real
+        finding, never a blank one."""
+        if self.is_satisfied():
+            return ""
+        var out = coverage_witness_code() + ":\n"
+        out = out + "non-exhaustive static match over " + self.enum_name + "\n\n"
+        out = out + "missing:\n"
+        for name in self.missing_variant_names:
+            out = out + "  " + self.enum_name + "." + name + "\n"
+        out = out + "\n"
+        out = out + "`case complete` and `case dyn` do not cover static variants.\n"
+        out = out + "wildcards are forbidden for critical compiler IR.\n"
+        out
+
+# Build the witness for one resolved coverage record under a given profile.
+#
+# The witness is populated from `static_missing_variant_names()`, NOT
+# `missing_variant_names()`: the whole point of 6.5 is to see through the
+# wildcard, and the latter returns [] whenever one is present.
+#
+# Note this ALWAYS records the true missing set, at every profile -- the
+# profile is carried on the witness rather than being allowed to blank it out,
+# so a moderate-profile caller can still inspect what a critical build would
+# reject. Whether the finding is fatal is `should_reject()` below, kept
+# separate from what is true.
+pub fn coverage_witness_for(
+    coverage: ResolvedMatchCoverage,
+    profile: AssuranceStrictness,
+    annotated_exhaustive: bool
+) -> CoverageWitness:
+    CoverageWitness(
+        enum_name: coverage.enum_name,
+        missing_variant_names: coverage.static_missing_variant_names(),
+        has_wildcard: coverage.has_wildcard,
+        annotated_exhaustive: annotated_exhaustive,
+        profile: profile
+    )
+
+# True when this witness must FAIL the compile rather than merely warn: an
+# unsatisfied static witness under `critical`, or on any `@exhaustive` match at
+# any profile. Mirrors `ResolvedMatchCoverage.is_exhaustive_for` exactly --
+# that method is the authority on the policy and this is its witness-side
+# projection.
+#
+# Not `pub`: a plain `fn` is still importable via `use module.{name}`, and
+# keeping it non-pub avoids the `primitive_api` lint rule, which flags a
+# `pub fn` returning a bare `bool` from a public surface. Same reasoning as
+# `match_coverage_requires_hard_error` in 35.semantics.
+fn coverage_witness_should_reject(witness: CoverageWitness) -> bool:
+    if witness.is_satisfied():
+        return false
+    witness.annotated_exhaustive or witness.profile.at_least(AssuranceStrictness.Critical)

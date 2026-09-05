@@ -1,0 +1,69 @@
+# Bounded metadata applets for the filesystem-launched SimpleOS Simplebox.
+
+use os.userlib.fs.{file_stat_bounded, VfsFileStat}
+use os.kernel.types.fs_types.{FsNodeKind}
+
+extern fn stdout_write(data: text)
+
+val SIMPLEBOX_STAT_MAX_OPERANDS: u64 = 128u64
+val SIMPLEBOX_STAT_MAX_PATH_BYTES: u64 = 4096u64
+val SIMPLEBOX_STAT_MAX_OUTPUT_BYTES: i64 = 65536
+
+fn _simplebox_stat_kind(kind: FsNodeKind) -> text:
+    match kind:
+        case FsNodeKind.Directory: "directory"
+        case FsNodeKind.Symlink: "symbolic-link"
+        case FsNodeKind.Device: "device"
+        case FsNodeKind.Pipe: "pipe"
+        case _: "regular-file"
+
+fn _simplebox_stat_line(path: text, value: VfsFileStat) -> text:
+    val kind = _simplebox_stat_kind(value.kind)
+    var line = path + ": type=" + kind + " size=" + value.size.to_text()
+    if value.mode_available:
+        line = line + " mode=" + value.mode.to_text()
+    else:
+        line = line + " mode=unavailable"
+    if value.uid_gid_available:
+        line = line + " uid=" + value.uid.to_text() + " gid=" + value.gid.to_text()
+    else:
+        line = line + " uid_gid=unavailable"
+    if value.times_available:
+        line = line + " atime_ns=" + value.atime_ns.to_text() +
+            " mtime_ns=" + value.mtime_ns.to_text()
+    else:
+        line = line + " times=unavailable"
+    line + "\n"
+
+pub fn simplebox_stat(args: [text]) -> i32:
+    """Print bounded VFS metadata for each path without inventing absent fields."""
+    if args.len() == 0u64:
+        stdout_write("stat: missing file operand\n")
+        return 1
+    if args.len() > SIMPLEBOX_STAT_MAX_OPERANDS:
+        stdout_write("stat: too many files\n")
+        return 1
+
+    var lines: [text] = []
+    var output_bytes: i64 = 0
+    var exit_code: i32 = 0
+    for path in args:
+        var line = ""
+        if path.len() == 0u64 or path.len() > SIMPLEBOX_STAT_MAX_PATH_BYTES or
+            path.contains("\0"):
+            line = "stat: invalid path\n"
+            exit_code = 1
+        else:
+            match file_stat_bounded(path):
+                case Err(reason):
+                    line = "stat: " + path + ": " + reason + "\n"
+                    exit_code = 1
+                case Ok(value): line = _simplebox_stat_line(path, value)
+        val line_bytes = line.len().to_i64()
+        if line_bytes > SIMPLEBOX_STAT_MAX_OUTPUT_BYTES - output_bytes:
+            stdout_write("stat: output exceeds 65536-byte limit\n")
+            return 1
+        output_bytes = output_bytes + line_bytes
+        lines.push(line)
+    stdout_write(lines.join(""))
+    exit_code

@@ -1,0 +1,61 @@
+"""Generated parser semantic-value encoder contracts."""
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.blocks.blocks.value.{BlockValue}
+use compiler.frontend.generated.ast_semantic_value.{
+    ast_semantic_hash_seed, ast_semantic_hash_finish, ast_semantic_encode_expr
+}
+use std.io_runtime.{read_file_text}
+use std.spec.step
+
+fn semantic_digest(expr: Expr) -> text:
+    val state = ast_semantic_hash_seed()
+    ast_semantic_encode_expr(expr, state)
+    ast_semantic_hash_finish(state)
+
+fn no_span() -> Span:
+    Span(0, 0, 0, 0, "", 0)
+
+describe "generated AST semantic fingerprint contracts":
+    it "does not collapse integers separated by the former modulus":
+        step("Verify exact-width scalar encoding avoids the former modulo collision")
+        val zero = Expr(kind: ExprKind.IntLit(0), span: no_span())
+        val former_collision = Expr(kind: ExprKind.IntLit(1000000007), span: no_span())
+        expect(semantic_digest(zero) != semantic_digest(former_collision)).to_equal(true)
+
+    it "frames multibyte strings over their exact UTF-8 bytes in linear time":
+        step("Verify byte-domain traversal rather than character-index rescanning")
+        val multibyte = Expr(kind: ExprKind.StringLit("café", nil), span: no_span())
+        val ascii = Expr(kind: ExprKind.StringLit("cafe", nil), span: no_span())
+        expect(semantic_digest(multibyte) != semantic_digest(ascii)).to_equal(true)
+        val generated = read_file_text("src/compiler/10.frontend/generated/ast_semantic_value.spl")
+        expect(generated.contains("value.byte_at(i) as i64")).to_equal(true)
+        expect(generated.contains("value.char_at(i)")).to_equal(false)
+
+    it "hoists UTF-8 byte length out of semantic hashing traversal":
+        step("Verify each text hash computes byte length once before its hot loop")
+        val generated = read_file_text("src/compiler/10.frontend/generated/ast_semantic_value.spl")
+        expect(generated.contains("val byte_len = value.len()\n    var result = _ast_semantic_mix_i64(state, byte_len)")).to_equal(true)
+        expect(generated.contains("while i < byte_len:")).to_equal(true)
+        expect(generated.contains("while i < value.len():")).to_equal(false)
+
+    it "encodes custom-block raw payload semantics":
+        step("Verify CustomBlock and BlockValue.Raw payload bytes affect the fingerprint")
+        val left = Expr(kind: ExprKind.CustomBlock("dsl", BlockValue.Raw("alpha")), span: no_span())
+        val right = Expr(kind: ExprKind.CustomBlock("dsl", BlockValue.Raw("beta")), span: no_span())
+        expect(semantic_digest(left) != semantic_digest(right)).to_equal(true)
+
+    it "generates an explicit policy arm for every BlockValue variant":
+        step("Verify typed block values encode and type-erased values become uncacheable")
+        val generated = read_file_text("src/compiler/10.frontend/generated/ast_semantic_value.spl")
+        for arm in ["Expr", "LossBlock", "NogradBlock", "Raw", "Shell", "Sql",
+                    "Regex", "Json", "Markdown", "Graph", "Custom", "Error"]:
+            expect(generated.contains("case " + arm)).to_equal(true)
+        expect(generated.contains("_ast_semantic_mark_uncacheable(state, \"Any\")")).to_equal(true)
+
+    it "keeps the generated package re-export inside the freshness ownership set":
+        step("Verify freshness compares both the semantic artifact and its package initializer")
+        val gate = read_file_text("scripts/check/check-generated-visitors-fresh.shs")
+        expect(gate.contains("src/compiler/10.frontend/generated/ast_semantic_value.spl")).to_equal(true)
+        expect(gate.contains("src/compiler/10.frontend/generated/__init__.spl")).to_equal(true)

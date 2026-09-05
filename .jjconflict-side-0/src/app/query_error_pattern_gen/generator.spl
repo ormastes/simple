@@ -1,0 +1,165 @@
+use app.query_error_pattern_gen.patterns.{QueryErrorPatternSpec, query_error_pattern_specs}
+
+# Build-only limits. Runtime storage uses two u64 masks and u16 table indexes.
+struct QueryErrorGeneratorLimits:
+    max_patterns: i64
+    max_states: i64
+    max_edges: i64
+
+fn query_error_generator_limits() -> QueryErrorGeneratorLimits:
+    QueryErrorGeneratorLimits(max_patterns: 128, max_states: 65535, max_edges: 65535)
+
+struct QueryErrorGeneratedModel:
+    root_next: [i64]
+    edge_start: [i64]
+    edge_byte: [i64]
+    edge_next: [i64]
+    fail: [i64]
+    output_index: [i64]
+    output_lo: [u64]
+    output_hi: [u64]
+
+fn query_error_pattern_build_default() -> Result<QueryErrorGeneratedModel, text>:
+    query_error_pattern_build(query_error_pattern_specs(), query_error_generator_limits())
+
+# Build a deterministic sparse Aho-Corasick model without iterating Dict order.
+# Complexity is O(pattern bytes + 128 * states + states * unique masks).
+fn query_error_pattern_build(
+    specs: [QueryErrorPatternSpec],
+    limits: QueryErrorGeneratorLimits
+) -> Result<QueryErrorGeneratedModel, text>:
+    if specs.len() == 0:
+        return Err("query error matcher requires at least one pattern")
+    if specs.len() > limits.max_patterns or specs.len() > 128:
+        return Err("query error matcher pattern limit exceeded")
+    if limits.max_states < 1 or limits.max_states > 65535:
+        return Err("query error matcher state limit is invalid")
+    if limits.max_edges < 0 or limits.max_edges > 65535:
+        return Err("query error matcher edge limit is invalid")
+
+    var transitions: Dict<i64, i64> = {}
+    var transition_count = 0
+    var fail: [i64] = [0]
+    var direct_lo: [u64] = [0u64]
+    var direct_hi: [u64] = [0u64]
+
+    var pattern_index = 0
+    while pattern_index < specs.len():
+        val spec = specs[pattern_index]
+        if spec.id != pattern_index:
+            return Err("query error matcher IDs must be contiguous and ordered")
+        if spec.literal.len() == 0:
+            return Err("query error matcher literals must not be empty")
+
+        var state = 0
+        var offset = 0
+        while offset < spec.literal.len():
+            val byte = spec.literal.byte_at(offset)
+            if byte < 0 or byte >= 128:
+                return Err("query error matcher literals must be ASCII")
+            val key = state * 128 + byte
+            if transitions.contains_key(key):
+                state = transitions[key]
+            else:
+                val next_state = fail.len()
+                if next_state >= limits.max_states:
+                    return Err("query error matcher state limit exceeded")
+                if transition_count >= limits.max_edges:
+                    return Err("query error matcher edge limit exceeded")
+                transitions[key] = next_state
+                transition_count = transition_count + 1
+                fail.push(0)
+                direct_lo.push(0u64)
+                direct_hi.push(0u64)
+                state = next_state
+            offset = offset + 1
+
+        if spec.id < 64:
+            direct_lo[state] = direct_lo[state] | (1u64 << spec.id.to_u64())
+        else:
+            direct_hi[state] = direct_hi[state] | (1u64 << (spec.id - 64).to_u64())
+        pattern_index = pattern_index + 1
+
+    var root_next: [i64] = []
+    var byte = 0
+    while byte < 128:
+        val key = byte
+        if transitions.contains_key(key):
+            root_next.push(transitions[key])
+        else:
+            root_next.push(0)
+        byte = byte + 1
+
+    var edge_start: [i64] = [0]
+    var edge_byte: [i64] = []
+    var edge_next: [i64] = []
+    var state = 0
+    while state < fail.len():
+        byte = 0
+        while byte < 128:
+            val key = state * 128 + byte
+            if transitions.contains_key(key):
+                edge_byte.push(byte)
+                edge_next.push(transitions[key])
+            byte = byte + 1
+        edge_start.push(edge_byte.len())
+        state = state + 1
+
+    var queue: [i64] = []
+    byte = 0
+    while byte < 128:
+        val child = root_next[byte]
+        if child != 0:
+            queue.push(child)
+        byte = byte + 1
+
+    var cursor = 0
+    while cursor < queue.len():
+        state = queue[cursor]
+        var edge = edge_start[state]
+        while edge < edge_start[state + 1]:
+            byte = edge_byte[edge]
+            val child = edge_next[edge]
+            var fallback = fail[state]
+            var fallback_key = fallback * 128 + byte
+            while fallback != 0 and not transitions.contains_key(fallback_key):
+                fallback = fail[fallback]
+                fallback_key = fallback * 128 + byte
+            if transitions.contains_key(fallback_key):
+                fail[child] = transitions[fallback_key]
+            else:
+                fail[child] = 0
+            direct_lo[child] = direct_lo[child] | direct_lo[fail[child]]
+            direct_hi[child] = direct_hi[child] | direct_hi[fail[child]]
+            queue.push(child)
+            edge = edge + 1
+        cursor = cursor + 1
+
+    var output_lo: [u64] = [0u64]
+    var output_hi: [u64] = [0u64]
+    var output_index: [i64] = []
+    state = 0
+    while state < fail.len():
+        var found = -1
+        var output = 0
+        while output < output_lo.len() and found < 0:
+            if output_lo[output] == direct_lo[state] and output_hi[output] == direct_hi[state]:
+                found = output
+            output = output + 1
+        if found < 0:
+            found = output_lo.len()
+            output_lo.push(direct_lo[state])
+            output_hi.push(direct_hi[state])
+        output_index.push(found)
+        state = state + 1
+
+    Ok(QueryErrorGeneratedModel(
+        root_next: root_next,
+        edge_start: edge_start,
+        edge_byte: edge_byte,
+        edge_next: edge_next,
+        fail: fail,
+        output_index: output_index,
+        output_lo: output_lo,
+        output_hi: output_hi
+    ))

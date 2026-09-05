@@ -1,0 +1,144 @@
+# codex-impl
+#
+# Process-wide owner gate for the product aspect-loader bridge.
+#
+# `std.common.aspect_pack` is intentionally a single-owner container and may
+# not depend upward on hosted synchronization.  The compiler loader is the
+# first layer that owns every product mutation of that container, so it
+# serializes publication, pin/unpin, catalog replacement, and pack removal
+# here.  Hosted native providers implement AtomicI64 with a real SeqCst CAS.
+# The simple-core fallback remains single-thread-only and is not concurrency
+# evidence.
+
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use std.nogc_sync_mut.concurrent.thread.{thread_yield}
+use std.common.hash.djb2.{djb2_hash_text}
+
+val ASPECT_LIFECYCLE_WAIT_BUDGET_V1: i64 = 65536
+val ASPECT_LIFECYCLE_OPERATION_MASK_V1: i64 = 65535
+val ASPECT_LIFECYCLE_MAX_OWNER_SEQUENCE_V1: i64 = 140737488355327
+
+struct AspectLifecycleGateAdmissionV1:
+    acquired: bool
+    waited: bool
+    waited_same_operation: bool
+    owner_token: i64
+    operation_token: i64
+    yields: i64
+
+var _aspect_lifecycle_gate_v1: AtomicI64 = atomic_i64_new(0)
+var _aspect_lifecycle_next_owner_v1: AtomicI64 = atomic_i64_new(1)
+
+fn _aspect_lifecycle_operation_token_v1(operation_key: text) -> i64:
+    # Hash collisions remain safe:
+    # they can conservatively produce a typed retry, but cannot admit two
+    # owners or authorize a release by a non-owner.
+    djb2_hash_text(operation_key) & ASPECT_LIFECYCLE_OPERATION_MASK_V1
+
+fn _aspect_lifecycle_next_owner_token_v1() -> i64:
+    var tries = 0
+    while tries < ASPECT_LIFECYCLE_WAIT_BUDGET_V1:
+        val current = _aspect_lifecycle_next_owner_v1.load(
+            MemoryOrdering.Acquire)
+        if (current <= 0 or
+                current >= ASPECT_LIFECYCLE_MAX_OWNER_SEQUENCE_V1):
+            return 0
+        val following = current + 1
+        if _aspect_lifecycle_next_owner_v1.compare_exchange(
+                current, following,
+                MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return current
+        thread_yield()
+        tries = tries + 1
+    0
+
+fn aspect_lifecycle_identity_new_v1() -> i64:
+    """Allocate a stable logical-owner identity without wraparound reuse."""
+    _aspect_lifecycle_next_owner_token_v1()
+
+fn _aspect_lifecycle_state_token_v1(
+        owner_sequence: i64, operation_token: i64) -> i64:
+    (owner_sequence << 16) | operation_token
+
+fn aspect_lifecycle_gate_enter_v1(
+        operation_key: text) -> AspectLifecycleGateAdmissionV1:
+    """Elect exactly one loader-side owner with CAS.
+
+    A contending caller yields at most ASPECT_LIFECYCLE_WAIT_BUDGET_V1 times.
+    There is no retry sleep and no unbounded spin.  `waited` lets a first-use
+    caller distinguish "the owner failed" from "I was elected to perform a
+    fresh explicit retry" after it acquires the gate.
+    """
+    val owner_sequence = _aspect_lifecycle_next_owner_token_v1()
+    val operation_token = _aspect_lifecycle_operation_token_v1(operation_key)
+    if owner_sequence == 0:
+        return AspectLifecycleGateAdmissionV1(
+            acquired: false, waited: false, waited_same_operation: false,
+            owner_token: 0, operation_token: operation_token, yields: 0)
+    val owner_token = _aspect_lifecycle_state_token_v1(
+        owner_sequence, operation_token)
+    var yields = 0
+    var waited = false
+    var waited_same_operation = false
+    while yields < ASPECT_LIFECYCLE_WAIT_BUDGET_V1:
+        val observed = _aspect_lifecycle_gate_v1.load(
+            MemoryOrdering.Acquire)
+        if observed == 0:
+            if _aspect_lifecycle_gate_v1.compare_exchange(
+                    0, owner_token,
+                    MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+                return AspectLifecycleGateAdmissionV1(
+                    acquired: true, waited: waited,
+                    waited_same_operation: waited_same_operation,
+                    owner_token: owner_token,
+                    operation_token: operation_token, yields: yields)
+            # The bool-only CAS API cannot return the winning packed state.
+            # Treat this narrow lost-CAS window as same-operation contention:
+            # a first-use caller will consume a resident winner or return the
+            # explicit retry result, never perform an ambiguous implicit load.
+            waited = true
+            waited_same_operation = true
+        else:
+            waited = true
+            if (observed & ASPECT_LIFECYCLE_OPERATION_MASK_V1) ==
+                    operation_token:
+                waited_same_operation = true
+        thread_yield()
+        yields = yields + 1
+    AspectLifecycleGateAdmissionV1(
+        acquired: false, waited: waited,
+        waited_same_operation: waited_same_operation,
+        owner_token: owner_token, operation_token: operation_token,
+        yields: yields)
+
+fn aspect_lifecycle_gate_try_enter_v1(
+        operation_key: text) -> AspectLifecycleGateAdmissionV1:
+    """One non-blocking CAS attempt, primarily for owner integration specs."""
+    val owner_sequence = _aspect_lifecycle_next_owner_token_v1()
+    val operation_token = _aspect_lifecycle_operation_token_v1(operation_key)
+    if owner_sequence == 0:
+        return AspectLifecycleGateAdmissionV1(
+            acquired: false, waited: false, waited_same_operation: false,
+            owner_token: 0, operation_token: operation_token, yields: 0)
+    val owner_token = _aspect_lifecycle_state_token_v1(
+        owner_sequence, operation_token)
+    val acquired = _aspect_lifecycle_gate_v1.compare_exchange(
+        0, owner_token, MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+    AspectLifecycleGateAdmissionV1(
+        acquired: acquired, waited: false, waited_same_operation: false,
+        owner_token: owner_token, operation_token: operation_token, yields: 0)
+
+fn aspect_lifecycle_gate_exit_v1(owner_token: i64) -> bool:
+    """Release only when the caller still owns the published token.
+
+    A plain store would allow a stale or unrelated caller to erase a live
+    owner.  CAS makes release owner-authoritative using the same primitive
+    available in the hosted and narrow native providers.
+    """
+    if owner_token == 0:
+        return false
+    _aspect_lifecycle_gate_v1.compare_exchange(
+        owner_token, 0, MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+
+fn aspect_lifecycle_gate_locked_v1() -> bool:
+    _aspect_lifecycle_gate_v1.load(MemoryOrdering.Acquire) != 0

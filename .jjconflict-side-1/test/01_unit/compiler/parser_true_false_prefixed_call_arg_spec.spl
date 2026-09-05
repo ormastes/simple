@@ -1,0 +1,76 @@
+"""
+# Parser: `true_*` / `false_*` identifiers are ordinary names in call arguments
+
+**Category:** Syntax / Self-hosted frontend parity
+**Bug:** doc/08_tracking/bug/parser_true_false_prefix_call_arg_2026-08-01.md
+
+## Overview
+
+The self-hosted `parse_call_arg_raw` used to read any call argument whose
+identifier began with `true_` or `false_` as a *suffixed bool literal* — the
+text after the prefix being treated as a type suffix. The Rust seed has no such
+production, so the two compilers disagreed on ordinary code.
+
+The rule had two failure modes:
+
+- **Loud** — `f(true_target.id)` refused to parse, because the suffixed-bool
+  reading consumed the identifier and never ran the postfix `.field` parser.
+  This is what blocked Stage 3 on `vulkan_backend.spl`.
+- **Silent** — `f(true_value)` parsed, but became `true` carrying the type
+  suffix `value`, surfacing much later as `unresolved type: value` (or, where
+  the suffix happened to name a real type, as a wrong value with no diagnostic
+  at all).
+
+A parse error means this file will not load, so the declarations below are
+themselves the grammar coverage. The `it` blocks assert the identifiers still
+*evaluate* as the locals they name, which is what the silent mode broke.
+
+## Syntax
+
+```simple
+val true_target = Marker(id: 7)
+probe(true_target.id)      # field access, not a bool literal
+probe(true_value)          # ordinary local, not `true` with suffix `value`
+```
+"""
+
+use std.spec
+
+struct Marker:
+    id: i64
+
+fn take_i64(x: i64) -> i64:
+    return x
+
+fn take_two(a: i64, b: i64) -> i64:
+    return a * 100 + b
+
+# --- Loud mode: field access on a `true_`/`false_` local inside call args -----
+
+fn field_access_in_call_arg() -> i64:
+    val true_target = Marker(id: 7)
+    val false_target = Marker(id: 9)
+    return take_two(true_target.id, false_target.id)
+
+# --- Silent mode: bare `true_`/`false_` local passed as a call argument -------
+
+fn bare_local_in_call_arg() -> i64:
+    val true_value: i64 = 42
+    val false_value: i64 = 13
+    return take_two(true_value, false_value)
+
+# `true_` / `false_` locals must survive every argument position and still be
+# usable in ordinary expressions, not just as the whole argument.
+fn mixed_positions() -> i64:
+    val true_count: i64 = 3
+    return take_two(true_count + 1, take_i64(true_count))
+
+describe("true_/false_ prefixed identifiers in call arguments"):
+    it("passes a field of a true_/false_ prefixed local"):
+        assert_equal(field_access_in_call_arg(), 709)
+
+    it("passes a true_/false_ prefixed local by value, not as a bool literal"):
+        assert_equal(bare_local_in_call_arg(), 4213)
+
+    it("uses a true_ prefixed local inside larger argument expressions"):
+        assert_equal(mixed_positions(), 403)

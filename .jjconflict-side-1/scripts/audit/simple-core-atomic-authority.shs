@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/runtime/simple_core/core_atomic.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for raw in rt_ptr_read_i64 rt_ptr_write_i64 rt_ptr_write_i32 \
+    rt_ptr_write_u8 calloc free; do
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+done
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 14 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 6 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi, raw_ptr\]):' "$module")" -eq 6 ]
+[ "$(grep -c 'capabilities: \[raw_ptr\])' "$module")" -eq 8 ]
+for expected in _sffi_ptr_read_i64:4 _sffi_ptr_write_i64:4 \
+    _sffi_ptr_write_i32:2 _sffi_ptr_write_u8:2 _sffi_calloc:2 \
+    _sffi_free:2; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+for raw in rt_ptr_read_i64 rt_ptr_write_i64 rt_ptr_write_i32 rt_ptr_write_u8; do
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+done
+grep -q 'single-threaded raw-pointer fallback; not a concurrent atomic RMW' "$module"
+grep -q 'single-threaded unregistered raw handle; not a concurrent compare-exchange' "$module"
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "simple-core atomic authority audit: PASS (raw calls confined; non-atomic fallback and raw handles explicitly unsafe)"

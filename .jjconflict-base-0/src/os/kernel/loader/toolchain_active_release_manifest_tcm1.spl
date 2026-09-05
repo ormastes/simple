@@ -1,0 +1,268 @@
+"""Package-private, bounded TCM1 active-release manifest codec.
+
+TCM1 is a pure data boundary.  It neither opens media nor changes the boot
+catalog.  The decoder reconstructs only fixed loader-owned slots, so a wire
+producer cannot select an alias, traversal path, or caller-supplied location.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.structural.wire.{
+    WIRE_ENVELOPE_LEN, wire_check_envelope, wire_get_u32, wire_has,
+    wire_magic, wire_put_envelope, wire_put_u8, wire_put_u32}
+use std.common.structural.digest.hash256_codec.{
+    hash256_put, hash256_read, hash256_region_valid}
+
+val TCM1_VERSION_V1: i64 = 1
+val TCM1_ROW_COUNT_V1: i64 = 17
+val TCM1_MAX_WIRE_BYTES_V1: i64 = 4096
+val TCM1_PAYLOAD_MAX_BYTES_V1: i64 = 268435456
+val TCM1_SCR1_MAX_BYTES_V1: i64 = 16777216
+val TCM1_TOTAL_MEDIA_MAX_BYTES_V1: i64 = 536870912
+
+struct ToolchainActiveReleaseManifestRowTcm1:
+    payload_path: text
+    scr1_path: text
+    payload_sha256: text
+    payload_bytes: i64
+    scr1_sha256: text
+    scr1_bytes: i64
+
+struct ToolchainActiveReleaseManifestTcm1:
+    release_id: text
+    target: ManifestTarget
+    signer_key_id: text
+    root_sha256: text
+    rows: [ToolchainActiveReleaseManifestRowTcm1]
+
+struct ToolchainActiveReleaseManifestEncodeTcm1:
+    ok: bool
+    bytes: [u8]
+
+struct ToolchainActiveReleaseManifestParseTcm1:
+    ok: bool
+    value: ToolchainActiveReleaseManifestTcm1
+
+struct _Tcm1TextRead:
+    ok: bool
+    value: text
+    next: i64
+
+fn _tcm1_magic_v1() -> i64: wire_magic("TCM1")
+
+fn _empty_tcm1() -> ToolchainActiveReleaseManifestTcm1:
+    ToolchainActiveReleaseManifestTcm1(
+        release_id: "", target: ManifestTarget(os: "", arch: "", abi: ""),
+        signer_key_id: "", root_sha256: "", rows: [])
+
+fn _encode_reject_tcm1() -> ToolchainActiveReleaseManifestEncodeTcm1:
+    ToolchainActiveReleaseManifestEncodeTcm1(ok: false, bytes: [])
+
+fn _parse_reject_tcm1() -> ToolchainActiveReleaseManifestParseTcm1:
+    ToolchainActiveReleaseManifestParseTcm1(ok: false, value: _empty_tcm1())
+
+fn _hex64_lower_tcm1(value: text) -> bool:
+    if value.len() != 64 or value == "0" * 64: return false
+    var index: i64 = 0
+    while index < 64:
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _signer_key_id_tcm1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val valid = (code >= 97 and code <= 122) or
+            (code >= 48 and code <= 57) or code == 45 or code == 46 or code == 95
+        if not valid: return false
+        index = index + 1
+    true
+
+fn _target_tcm1(target: ManifestTarget) -> bool:
+    target.os == "simpleos" and target.abi == "simpleos" and
+        (target.arch == "x86_64" or target.arch == "aarch64" or
+         target.arch == "riscv64")
+
+fn _payload_paths_tcm1() -> [text]:
+    ["/sys/apps/simple_interpreter.smf", "/sys/apps/simple_compiler.smf",
+     "/sys/apps/simple_loader.smf", "/usr/bin/clang", "/usr/bin/ld.lld",
+     "/work/hello.elf", "/usr/include/.simpleos-sysroot.merkle",
+     "/usr/share/simpleos/simpleos.ld", "/usr/lib/crt0.o",
+     "/usr/lib/libsimpleos_c.a", "/usr/lib/libsimple_runtime.a", "/usr/lib/libm.a",
+     "/bin/simplebox", "/usr/bin/sha256sum", "/usr/bin/md5sum", "/usr/bin/grep",
+     "/usr/bin/ps"]
+
+fn _scr1_paths_tcm1() -> [text]:
+    ["/boot/catalog/simple_interpreter.scr1", "/boot/catalog/simple_compiler.scr1",
+     "/boot/catalog/simple_loader.scr1", "/boot/catalog/clang.scr1",
+     "/boot/catalog/ld.lld.scr1", "/boot/catalog/hello.elf.scr1",
+     "/boot/catalog/sysroot.merkle.scr1", "/boot/catalog/simpleos.ld.scr1",
+     "/boot/catalog/crt0.o.scr1", "/boot/catalog/libsimpleos_c.a.scr1",
+     "/boot/catalog/libsimple_runtime.a.scr1", "/boot/catalog/libm.a.scr1",
+     "/boot/catalog/simplebox.scr1", "/boot/catalog/sha256sum.scr1",
+     "/boot/catalog/md5sum.scr1", "/boot/catalog/grep.scr1", "/boot/catalog/ps.scr1"]
+
+fn _fixed_path_tcm1(value: text) -> bool:
+    if value.len() == 0 or value.char_code_at(0) != 47 or value.contains("//") or
+        value.contains("/./") or value.contains("/../") or value.contains(".."):
+        return false
+    true
+
+fn _put_text_tcm1(out: [u8], value: text) -> [u8]:
+    var bytes = wire_put_u32(out, value.len())
+    var index: i64 = 0
+    while index < value.len():
+        bytes = wire_put_u8(bytes, value.char_code_at(index))
+        index = index + 1
+    bytes
+
+fn _ascii_tcm1(code: i64) -> text:
+    val printable =
+        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    if code < 32 or code > 126: return ""
+    printable.substring(code - 32, code - 31)
+
+fn _read_text_tcm1(data: [u8], offset: i64, maximum: i64) -> _Tcm1TextRead:
+    if not wire_has(data, offset, 4):
+        return _Tcm1TextRead(ok: false, value: "", next: offset)
+    val count = wire_get_u32(data, offset)
+    if count <= 0 or count > maximum or not wire_has(data, offset + 4, count):
+        return _Tcm1TextRead(ok: false, value: "", next: offset)
+    var value = ""
+    var index: i64 = 0
+    while index < count:
+        val code = data[offset + 4 + index] & 0xff
+        if code < 32 or code > 126:
+            return _Tcm1TextRead(ok: false, value: "", next: offset)
+        value = value + _ascii_tcm1(code)
+        index = index + 1
+    _Tcm1TextRead(ok: true, value: value, next: offset + 4 + count)
+
+fn _bytes_equal_tcm1(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index: i64 = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+fn toolchain_active_release_manifest_tcm1_valid(
+    manifest: ToolchainActiveReleaseManifestTcm1
+) -> bool:
+    if not _hex64_lower_tcm1(manifest.release_id) or not _target_tcm1(manifest.target) or
+        not _signer_key_id_tcm1(manifest.signer_key_id) or
+        not _hex64_lower_tcm1(manifest.root_sha256):
+        return false
+    val payload_paths = _payload_paths_tcm1()
+    val scr1_paths = _scr1_paths_tcm1()
+    if payload_paths.len() != TCM1_ROW_COUNT_V1 or scr1_paths.len() != TCM1_ROW_COUNT_V1 or
+        manifest.rows.len() != TCM1_ROW_COUNT_V1:
+        return false
+    var total: i64 = 0
+    var index: i64 = 0
+    while index < TCM1_ROW_COUNT_V1:
+        val row = manifest.rows[index]
+        if row.payload_path != payload_paths[index] or row.scr1_path != scr1_paths[index] or
+            not _fixed_path_tcm1(row.payload_path) or not _fixed_path_tcm1(row.scr1_path) or
+            not _hex64_lower_tcm1(row.payload_sha256) or not _hex64_lower_tcm1(row.scr1_sha256) or
+            row.payload_bytes <= 0 or row.payload_bytes > TCM1_PAYLOAD_MAX_BYTES_V1 or
+            row.scr1_bytes <= 0 or row.scr1_bytes > TCM1_SCR1_MAX_BYTES_V1:
+            return false
+        if row.payload_bytes > TCM1_TOTAL_MEDIA_MAX_BYTES_V1 - total:
+            return false
+        total = total + row.payload_bytes
+        if row.scr1_bytes > TCM1_TOTAL_MEDIA_MAX_BYTES_V1 - total:
+            return false
+        total = total + row.scr1_bytes
+        index = index + 1
+    true
+
+fn encode_toolchain_active_release_manifest_tcm1(
+    manifest: ToolchainActiveReleaseManifestTcm1
+) -> ToolchainActiveReleaseManifestEncodeTcm1:
+    if not toolchain_active_release_manifest_tcm1_valid(manifest): return _encode_reject_tcm1()
+    var bytes = wire_put_envelope([], _tcm1_magic_v1(), TCM1_VERSION_V1)
+    bytes = _put_text_tcm1(bytes, manifest.release_id)
+    bytes = _put_text_tcm1(bytes, manifest.target.os)
+    bytes = _put_text_tcm1(bytes, manifest.target.arch)
+    bytes = _put_text_tcm1(bytes, manifest.target.abi)
+    bytes = _put_text_tcm1(bytes, manifest.signer_key_id)
+    bytes = _put_text_tcm1(bytes, manifest.root_sha256)
+    bytes = wire_put_u32(bytes, TCM1_ROW_COUNT_V1)
+    var index: i64 = 0
+    while index < TCM1_ROW_COUNT_V1:
+        val row = manifest.rows[index]
+        bytes = hash256_put(bytes, row.payload_sha256)
+        bytes = wire_put_u32(bytes, row.payload_bytes)
+        bytes = hash256_put(bytes, row.scr1_sha256)
+        bytes = wire_put_u32(bytes, row.scr1_bytes)
+        index = index + 1
+    if bytes.len() > TCM1_MAX_WIRE_BYTES_V1: return _encode_reject_tcm1()
+    ToolchainActiveReleaseManifestEncodeTcm1(ok: true, bytes: bytes)
+
+fn parse_toolchain_active_release_manifest_tcm1(
+    data: [u8]
+) -> ToolchainActiveReleaseManifestParseTcm1:
+    if data.len() < WIRE_ENVELOPE_LEN or data.len() > TCM1_MAX_WIRE_BYTES_V1 or
+        not wire_check_envelope(data, 0, _tcm1_magic_v1(), TCM1_VERSION_V1):
+        return _parse_reject_tcm1()
+    var offset = WIRE_ENVELOPE_LEN
+    val release_id = _read_text_tcm1(data, offset, 64)
+    if not release_id.ok: return _parse_reject_tcm1()
+    offset = release_id.next
+    val target_os = _read_text_tcm1(data, offset, 16)
+    if not target_os.ok: return _parse_reject_tcm1()
+    offset = target_os.next
+    val target_arch = _read_text_tcm1(data, offset, 16)
+    if not target_arch.ok: return _parse_reject_tcm1()
+    offset = target_arch.next
+    val target_abi = _read_text_tcm1(data, offset, 16)
+    if not target_abi.ok: return _parse_reject_tcm1()
+    offset = target_abi.next
+    val signer = _read_text_tcm1(data, offset, 128)
+    if not signer.ok: return _parse_reject_tcm1()
+    offset = signer.next
+    val root = _read_text_tcm1(data, offset, 64)
+    if not root.ok: return _parse_reject_tcm1()
+    offset = root.next
+    if not wire_has(data, offset, 4) or wire_get_u32(data, offset) != TCM1_ROW_COUNT_V1:
+        return _parse_reject_tcm1()
+    offset = offset + 4
+    val payload_paths = _payload_paths_tcm1()
+    val scr1_paths = _scr1_paths_tcm1()
+    if payload_paths.len() != TCM1_ROW_COUNT_V1 or scr1_paths.len() != TCM1_ROW_COUNT_V1:
+        return _parse_reject_tcm1()
+    var rows: [ToolchainActiveReleaseManifestRowTcm1] = []
+    var index: i64 = 0
+    while index < TCM1_ROW_COUNT_V1:
+        if not hash256_region_valid(data, offset): return _parse_reject_tcm1()
+        val payload_sha256 = hash256_read(data, offset)
+        offset = offset + 32
+        if not wire_has(data, offset, 4): return _parse_reject_tcm1()
+        val payload_bytes = wire_get_u32(data, offset)
+        offset = offset + 4
+        if not hash256_region_valid(data, offset): return _parse_reject_tcm1()
+        val scr1_sha256 = hash256_read(data, offset)
+        offset = offset + 32
+        if not wire_has(data, offset, 4): return _parse_reject_tcm1()
+        val scr1_bytes = wire_get_u32(data, offset)
+        offset = offset + 4
+        rows.push(ToolchainActiveReleaseManifestRowTcm1(
+            payload_path: payload_paths[index], scr1_path: scr1_paths[index],
+            payload_sha256: payload_sha256, payload_bytes: payload_bytes,
+            scr1_sha256: scr1_sha256, scr1_bytes: scr1_bytes))
+        index = index + 1
+    if offset != data.len(): return _parse_reject_tcm1()
+    val parsed = ToolchainActiveReleaseManifestTcm1(
+        release_id: release_id.value,
+        target: ManifestTarget(os: target_os.value, arch: target_arch.value,
+            abi: target_abi.value),
+        signer_key_id: signer.value, root_sha256: root.value, rows: rows)
+    if not toolchain_active_release_manifest_tcm1_valid(parsed): return _parse_reject_tcm1()
+    val canonical = encode_toolchain_active_release_manifest_tcm1(parsed)
+    if not canonical.ok or not _bytes_equal_tcm1(canonical.bytes, data):
+        return _parse_reject_tcm1()
+    ToolchainActiveReleaseManifestParseTcm1(ok: true, value: parsed)

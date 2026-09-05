@@ -1,0 +1,312 @@
+# LLVM Native Link Orchestrator
+#
+# Orchestrates the full native executable linking pipeline for LLVM backend:
+# 1. Compile C runtime sources to .o files
+# 2. Generate entry point LLVM IR and compile to .o
+# 3. Combine user objects + runtime objects + entry point
+# 4. Link everything into a native executable
+#
+# Usage:
+#   val result = link_llvm_native(user_objects, output, config, verbose)
+
+use app.io.sysinfo_ops.{getpid}
+use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use std.platform.{host_arch, host_os, is_macos}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.common.assurance.policy.{strictness_for_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
+# Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
+# facade already used by the sibling llvm_backend_tools.spl for process_run);
+# resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if is_simpleos_riscv64_target(target):
+        return true
+    if output.contains("simpleos_riscv64"):
+        return true
+    for obj in user_objects:
+        if obj.contains("simpleos_riscv64"):
+            return true
+    false
+
+fn is_simpleos_riscv64_target(target: text) -> bool:
+    target == "riscv64gc-simpleos" or target == "riscv64gc-unknown-simpleos" or target == "riscv64gc-unknown-simpleos-elf" or target == "riscv64gc-unknown-none" or target == "riscv64gc-unknown-none-elf" or target == "riscv64-simpleos" or target == "riscv64-unknown-simpleos" or target == "riscv64-unknown-simpleos-elf" or target == "riscv64-unknown-none" or target == "riscv64-unknown-none-elf"
+
+fn is_simpleos_arm64_link(output: text) -> bool:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    is_simpleos_arm64_target(target) or output.contains("simpleos_arm64")
+
+fn is_simpleos_arm64_target(target: text) -> bool:
+    target == "aarch64-simpleos" or target == "aarch64-unknown-simpleos" or target == "aarch64-unknown-simpleos-elf" or target == "aarch64-unknown-none" or target == "aarch64-unknown-none-elf"
+
+fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if is_simpleos_x86_64_target(target):
+        return true
+    if output.contains("simpleos_wm_simple_web_check") or output.contains("simpleos_x86_64"):
+        return true
+    false
+
+fn is_simpleos_x86_64_target(target: text) -> bool:
+    target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf" or target == "x86_64-unknown-none" or target == "x86_64-unknown-none-elf"
+
+fn simpleos_x86_64_sysroot() -> text:
+    val configured = env_get("SIMPLE_SYSROOT") ?? ""
+    if configured != "":
+        return configured
+    val legacy = env_get("SIMPLEOS_SYSROOT") ?? ""
+    if legacy != "":
+        return legacy
+    "build/os/sysroot"
+
+fn simpleos_x86_64_user_link_inputs(sysroot: text) -> [text]:
+    val configured_crt0 = env_get("SIMPLE_CRT0_PATH") ?? ""
+    val configured_libc = env_get("SIMPLE_LIBC_PATH") ?? ""
+    val configured_runtime = env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
+    val target_runtime = "build/os/simple-core-simpleos/libsimple_runtime.a"
+    val runtime = if configured_runtime != "":
+        configured_runtime
+    elif file_exists(target_runtime):
+        target_runtime
+    else:
+        "{sysroot}/lib/libsimple_runtime.a"
+    val inputs: [text] = [
+        if configured_crt0 != "": configured_crt0 else: "{sysroot}/lib/crt0.o",
+        runtime,
+        if configured_libc != "": configured_libc else: "{sysroot}/lib/libsimpleos_c.a"
+    ]
+    inputs
+
+fn is_simpleos_riscv32_link(user_objects: [text], output: text) -> bool:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    is_simpleos_riscv32_link_for_target(target, user_objects, output)
+
+fn is_simpleos_riscv32_link_for_target(target: text, user_objects: [text], output: text) -> bool:
+    if is_simpleos_riscv32_target(target):
+        return true
+    if target != "":
+        return false
+    if output.contains("riscv32") or output.contains("rv32"):
+        return true
+    for obj in user_objects:
+        if obj.contains("riscv32") or obj.contains("rv32"):
+            return true
+    false
+
+fn is_simpleos_riscv32_target(target: text) -> bool:
+    target == "riscv32imac-simpleos" or target == "riscv32imac-unknown-simpleos" or target == "riscv32imac-unknown-simpleos-elf" or target == "riscv32imac-unknown-none" or target == "riscv32imac-unknown-none-elf" or target == "riscv32-unknown-none" or target == "riscv32-unknown-none-elf"
+
+fn compile_simpleos_x86_64_c(src: text, obj: text, opt_level: i64) -> Result<text, text>:
+    var opt = "-O2"
+    if opt_level <= 0:
+        opt = "-O0"
+    elif opt_level == 1:
+        opt = "-Os"
+    val (_out, err, code) = process_run("cc", [
+        "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
+        "-ffunction-sections", "-fdata-sections", opt,
+        "-I", "examples/09_embedded/simple_os/arch/x86_64/boot",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS x86_64 C compile failed for {src}: {err}")
+    Ok(obj)
+
+fn compile_simpleos_arm64(src: text, obj: text, opt_level: i64) -> Result<text, text>:
+    var opt = "-O2"
+    if opt_level <= 0:
+        opt = "-O0"
+    elif opt_level == 1:
+        opt = "-Os"
+    val (_out, err, code) = process_run("clang", [
+        "-target", "aarch64-unknown-none-elf", "-c", "-ffreestanding", "-nostdlib",
+        "-fno-pie", "-ffunction-sections", "-fdata-sections", opt,
+        "-I", "examples/09_embedded/simple_os/arch/arm64/boot",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS ARM64 boot compile failed for {src}: {err}")
+    Ok(obj)
+
+fn simpleos_spl_start_symbol(user_objects: [text]) -> text:
+    for obj in user_objects:
+        for symbol in extract_symbols_nm(obj):
+            if symbol.name.ends_with("__spl_start"):
+                return symbol.name
+    ""
+
+fn simpleos_rt_symbol_is_optional_backend(name: text) -> bool:
+    """Freestanding-optional families -- the `RT_KEEP` counterpart from the
+    Rust seed's guard (linker/native_binary/stubs.rs:129).
+
+    These are hardware-accelerator / host-service backends that genuinely have
+    no baremetal implementation, and every caller is written to treat the nil
+    result as "backend unavailable", so auto_stubs.c's weak zero-returning stub
+    is the INTENDED answer. Every other `rt_*` reaching that stub is a
+    silent-corruption bug, so keep this list short and audited.
+
+    NOT a prefix here on purpose: `rt_simd_`. That family is dominated by
+    ARITHMETIC kernels (`rt_simd_add_f32x4`, `rt_simd_fma_f32x8`, ...) where nil
+    is silent numeric corruption, not "unavailable" -- a `rt_simd_` prefix would
+    have swallowed exactly the bug class this guard exists to catch. Only the
+    capability-probe / diagnostic-counter members are allowlisted, by exact
+    name. Same reasoning keeps `rt_engine2d_simd_*` (real span blitters, whose
+    nil answer is a blank framebuffer) off this list entirely.
+
+    NOT a prefix here either, for the same reason: `rt_arm_virtio_`. It was one
+    until 2026-07-28, and that swept an entire block-STORAGE READ path into the
+    "nil means unavailable" bucket
+    (doc/08_tracking/bug/rt_arm_virtio_blk_prefix_allowlist_defeats_fabrication_guard_2026-07-28.md).
+    `virtio_blk_arm_read_sector_bytes`
+    (src/os/drivers/virtio/_VirtioBlk/driver_class.spl) reads the status word as
+    `0xFFFFFFFF` -> fail, non-zero -> fail, **zero -> success**, so a weak
+    zero-returning stub reports SUCCESS with an empty buffer and FAT32 metadata
+    mis-parses silently -- nil is corruption here, not "unavailable", exactly
+    the `rt_simd_` criterion above. Only the six MMIO transport / capability
+    probes are admitted, by exact name; they are also precisely the six carried
+    by `allow_arm_virtio()` in
+    test/03_system/check/simpleos_kernel_fabricated_rt_symbol_guard_spec.spl,
+    and the two lists must stay identical.
+
+    Deliberately NOT admitted (sector data path -- a missing definition must
+    fail the link, never link a nil stub): `rt_arm_virtio_blk_dma_base` (base of
+    the buffer that HOLDS the payload), `_prepare_read`, `_read_sector_direct`,
+    `_sector_bytes`, `_status_u8`, `_wait_completion`, `_read_prefix`,
+    `_read_hello_smf`. arm32/arm64 supply real bodies for all of them; any other
+    arch that starts linking this driver is meant to fail closed here."""
+    if (name.starts_with("rt_vulkan_") or name.starts_with("rt_metal_") or
+            name.starts_with("rt_cuda_") or name.starts_with("rt_rocm_") or
+            name.starts_with("rt_oneapi_") or name.starts_with("rt_opencl_") or
+            name.starts_with("rt_directx_") or
+            name.starts_with("rt_host_gpu_queue_")):
+        return true
+    if (name == "rt_arm_virtio_blk_configure_queue" or
+            name == "rt_arm_virtio_blk_mmio_read_u32" or
+            name == "rt_arm_virtio_blk_mmio_read_u64" or
+            name == "rt_arm_virtio_blk_mmio_write_u32" or
+            name == "rt_arm_virtio_blk_queue_base" or
+            name == "rt_arm_virtio_blk_set_mmio_base"):
+        return true
+    (name == "rt_simd_detect_profile" or
+        name == "rt_simd_engine2d_neon_hits" or
+        name == "rt_simd_engine2d_neon_reset")
+
+fn simpleos_undefined_rt_symbols(objects: [text]) -> [text]:
+    """Undefined `rt_*` references across the user's objects, deduped.
+
+    `extract_symbols_nm` deliberately drops undefined and weak entries, so the
+    reference side needs its own `nm -u` pass."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in objects:
+        val (nm_out, _nm_err, nm_code) = process_run("nm", ["-u", obj])
+        if nm_code != 0:
+            continue
+        for line in nm_out.split("\n"):
+            for part in line.split(" "):
+                if part.starts_with("rt_") and not seen.has(part):
+                    seen[part] = true
+                    names.push(part)
+    names
+
+fn simpleos_undefined_simple_module_symbols(objects: [text]) -> [text]:
+    """Undefined pure-Simple (`lib__*` / `os__*`) references across the closure.
+
+    The OTHER half of the fabrication fail-open. The `rt_*` channel was built
+    after a nil-returning `rt_array_copy` shredded every array copy in the
+    guest, but the stub generator fabricates a weak nil body for ANY name left
+    undefined in the link set -- and `lib__*` / `os__*` were never filtered, so
+    a dropped pure-Simple body has been silently replaced by
+    `xor %eax,%eax; ret` since this guard was written.
+
+    Proven instance (2026-07-28): the WM kernel bound
+    `lib__gc_async_mut__gpu__browser_engine__simple_web_html_layout_renderer_layout__skip_wrap_spaces`
+    to an 8-byte nil stub from 3 call sites inside
+    `..._style__parse_font_shorthand_family`, because a cached object compiled
+    BEFORE that function moved to `..._foundation.spl` was reused and still
+    referenced the pre-move mangled name. The real body was in the same ELF
+    under the foundation prefix; nothing failed the link.
+
+    Uses its own `nm -u` pass for the same reason
+    `simpleos_undefined_rt_symbols` does: `extract_symbols_nm` drops undefined
+    entries."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in objects:
+        val (nm_out, _nm_err, nm_code) = process_run("nm", ["-u", obj])
+        if nm_code != 0:
+            continue
+        for line in nm_out.split("\n"):
+            for part in line.split(" "):
+                if not (part.starts_with("lib__") or part.starts_with("os__")):
+                    continue
+                if not seen.has(part):
+                    seen[part] = true
+                    names.push(part)
+    names
+
+fn simpleos_defined_symbols_any_binding(objects: [text]) -> [text]:
+    """Every DEFINED symbol in `objects`, deduped -- weak definitions included.
+
+    Deliberately NOT `extract_symbols_nm`: that helper drops `W/w/V/v` as well
+    as `U/u` (llvm_backend_tools.spl:42), which is right for its own callers
+    (it feeds codegen symbol tables and `__module_init` discovery) but is
+    catastrophic here. Weak linkage does NOT imply fabricated:
+    `baremetal_stubs.c` declares real implementations `__attribute__((weak))`
+    -- `rt_memcpy`, `rt_memset`, `rt_dma_alloc`, `rt_dma_phys_of`,
+    `rt_dma_virt_of`, `rt_file_read_bytes` all have genuine bodies. Reusing the
+    weak-dropping helper made every one of them permanently unclassifiable as
+    real, so the guard accused six real implementations and refused the link on
+    the very entry point its own baseline was measured from
+    (doc/08_tracking/bug/simpleos_fabricated_rt_guard_weak_real_false_positive_2026-07-28.md).
+
+    Binding is not the classifier and neither is the name; only the
+    disassembled BODY is (`simpleos_trivial_body_rt_symbols`). This function
+    answers "is it defined here at all", and the caller then subtracts the ones
+    whose bodies are constant-return fakes. Only `U`/`u` are skipped, because an
+    undefined reference is by definition not a definition.
+
+    Changing `extract_symbols_nm` itself was rejected: it is exported
+    (backend/__init__.spl:174,182) and its weak-dropping is load-bearing for
+    `llvm_backend.spl`'s object symbol tables, so widening it there would change
+    codegen behaviour to fix a link-guard bug."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in objects:
+        val (nm_out, _nm_err, nm_code) = process_run("nm", [obj])
+        if nm_code != 0:
+            continue
+        for line in nm_out.split("\n"):
+            var parts: [text] = []
+            for p in line.split(" "):
+                if p != "":
+                    parts.push(p)
+            val plen = parts.len()
+            if plen < 2:
+                continue
+            var type_code = ""
+            var sym_name = ""
+            if plen >= 3:
+                type_code = parts[1]
+                sym_name = parts[2]
+            else:
+                type_code = parts[0]
+                sym_name = parts[1]
+            if type_code == "U" or type_code == "u":
+                continue
+            if sym_name == "" or seen.has(sym_name):
+                continue
+            seen[sym_name] = true
+            names.push(sym_name)
+    names
+

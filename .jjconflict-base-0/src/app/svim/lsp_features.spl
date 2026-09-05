@@ -1,0 +1,370 @@
+# SVIM LSP Features
+#
+# Per-capability LSP functions for the SVIM TUI editor.
+# Each function builds a JSON-RPC request, queues it via SvimLspClient,
+# and provides a parser for the response.
+
+use app.svim.core.{
+    SvimSession, BufferId, DiagnosticItem, QuickfixItem
+}
+use app.svim.lsp_client.{
+    SvimLspClient, LspPosition, LspRange, LspLocation,
+    LspDiagnostic, LspHoverResult, LspCompletionItem, LspSymbolInfo,
+    _svim_lsp_next_id, _svim_lsp_send,
+    _q, _esc, _js, _jp, _jobj
+}
+
+# ---------------------------------------------------------------------------
+# Request builders — textDocument capabilities
+# ---------------------------------------------------------------------------
+
+fn _svim_lsp_text_document_position(uri: text, line: i64, character: i64) -> text:
+    """Build a TextDocumentPositionParams JSON object."""
+    var td_pairs: [text] = []
+    td_pairs.push(_jp("uri", _js(uri)))
+    var pos_pairs: [text] = []
+    pos_pairs.push(_jp("line", str(line)))
+    pos_pairs.push(_jp("character", str(character)))
+    var params_pairs: [text] = []
+    params_pairs.push(_jp("textDocument", _jobj(td_pairs)))
+    params_pairs.push(_jp("position", _jobj(pos_pairs)))
+    _jobj(params_pairs)
+
+fn _svim_lsp_request(client: SvimLspClient, method: text, params: text) -> i64:
+    """Send a JSON-RPC request and return the request ID."""
+    val id = _svim_lsp_next_id(client)
+    var req_pairs: [text] = []
+    req_pairs.push(_jp("jsonrpc", _js("2.0")))
+    req_pairs.push(_jp("id", str(id)))
+    req_pairs.push(_jp("method", _js(method)))
+    req_pairs.push(_jp("params", params))
+    _svim_lsp_send(client, _jobj(req_pairs))
+    id
+
+# ---------------------------------------------------------------------------
+# Go-to-definition
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_goto_definition(client: SvimLspClient, uri: text, line: i64, col: i64) -> i64:
+    """Send textDocument/definition request. Returns request ID."""
+    if not client.initialized:
+        return -1
+    val params = _svim_lsp_text_document_position(uri, line, col)
+    _svim_lsp_request(client, "textDocument/definition", params)
+
+fn svim_lsp_parse_location(json: text) -> LspLocation:
+    """Parse an LSP Location from a JSON response result."""
+    val uri = _svim_lsp_extract_field(json, "uri")
+    val start_line = _svim_lsp_extract_nested_int(json, "start", "line")
+    val start_char = _svim_lsp_extract_nested_int(json, "start", "character")
+    val end_line = _svim_lsp_extract_nested_int(json, "end", "line")
+    val end_char = _svim_lsp_extract_nested_int(json, "end", "character")
+    LspLocation(
+        uri: uri,
+        range: LspRange(
+            start_pos: LspPosition(line: start_line, character: start_char),
+            end_pos: LspPosition(line: end_line, character: end_char)
+        )
+    )
+
+# ---------------------------------------------------------------------------
+# Hover
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_hover(client: SvimLspClient, uri: text, line: i64, col: i64) -> i64:
+    """Send textDocument/hover request. Returns request ID."""
+    if not client.initialized:
+        return -1
+    val params = _svim_lsp_text_document_position(uri, line, col)
+    _svim_lsp_request(client, "textDocument/hover", params)
+
+fn svim_lsp_parse_hover(json: text) -> LspHoverResult:
+    """Parse a Hover response. Extracts contents.value or raw contents string."""
+    val value = _svim_lsp_extract_field(json, "value")
+    val contents = if value != "" then value else: _svim_lsp_extract_field(json, "contents")
+    LspHoverResult(contents: contents, range: nil)
+
+# ---------------------------------------------------------------------------
+# Completion
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_completion(client: SvimLspClient, uri: text, line: i64, col: i64) -> i64:
+    """Send textDocument/completion request. Returns request ID."""
+    if not client.initialized:
+        return -1
+    val params = _svim_lsp_text_document_position(uri, line, col)
+    _svim_lsp_request(client, "textDocument/completion", params)
+
+fn svim_lsp_parse_completion_items(json: text) -> [LspCompletionItem]:
+    """Parse a CompletionList or CompletionItem[] response."""
+    var items: [LspCompletionItem] = []
+    # Split on item boundaries — each item is a JSON object
+    val segments = _svim_lsp_split_array_items(json)
+    for seg in segments:
+        val label = _svim_lsp_extract_field(seg, "label")
+        if label != "":
+            val kind = _svim_lsp_extract_int(seg, "kind")
+            val detail = _svim_lsp_extract_field(seg, "detail")
+            val insert = _svim_lsp_extract_field(seg, "insertText")
+            val insert_text = if insert != "" then insert else: label
+            items.push(LspCompletionItem(
+                label: label,
+                kind: kind,
+                detail: detail,
+                insert_text: insert_text
+            ))
+    items
+
+# ---------------------------------------------------------------------------
+# Document Symbols
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_document_symbols(client: SvimLspClient, uri: text) -> i64:
+    """Send textDocument/documentSymbol request. Returns request ID."""
+    if not client.initialized:
+        return -1
+    var td_pairs: [text] = []
+    td_pairs.push(_jp("uri", _js(uri)))
+    var params_pairs: [text] = []
+    params_pairs.push(_jp("textDocument", _jobj(td_pairs)))
+    _svim_lsp_request(client, "textDocument/documentSymbol", _jobj(params_pairs))
+
+fn svim_lsp_parse_symbols(json: text) -> [LspSymbolInfo]:
+    """Parse a DocumentSymbol[] or SymbolInformation[] response."""
+    var symbols: [LspSymbolInfo] = []
+    val segments = _svim_lsp_split_array_items(json)
+    for seg in segments:
+        val name = _svim_lsp_extract_field(seg, "name")
+        if name != "":
+            val kind = _svim_lsp_extract_int(seg, "kind")
+            val detail = _svim_lsp_extract_field(seg, "detail")
+            val start_line = _svim_lsp_extract_nested_int(seg, "start", "line")
+            val start_char = _svim_lsp_extract_nested_int(seg, "start", "character")
+            val end_line = _svim_lsp_extract_nested_int(seg, "end", "line")
+            val end_char = _svim_lsp_extract_nested_int(seg, "end", "character")
+            symbols.push(LspSymbolInfo(
+                name: name,
+                kind: kind,
+                range: LspRange(
+                    start_pos: LspPosition(line: start_line, character: start_char),
+                    end_pos: LspPosition(line: end_line, character: end_char)
+                ),
+                detail: detail
+            ))
+    symbols
+
+# ---------------------------------------------------------------------------
+# Diagnostics — parse publishDiagnostics notification
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_parse_diagnostics(json: text) -> [LspDiagnostic]:
+    """Parse textDocument/publishDiagnostics notification params."""
+    var diagnostics: [LspDiagnostic] = []
+    val segments = _svim_lsp_split_array_items(json)
+    for seg in segments:
+        val message = _svim_lsp_extract_field(seg, "message")
+        if message != "":
+            val severity = _svim_lsp_extract_int(seg, "severity")
+            val source = _svim_lsp_extract_field(seg, "source")
+            val start_line = _svim_lsp_extract_nested_int(seg, "start", "line")
+            val start_char = _svim_lsp_extract_nested_int(seg, "start", "character")
+            val end_line = _svim_lsp_extract_nested_int(seg, "end", "line")
+            val end_char = _svim_lsp_extract_nested_int(seg, "end", "character")
+            diagnostics.push(LspDiagnostic(
+                range: LspRange(
+                    start_pos: LspPosition(line: start_line, character: start_char),
+                    end_pos: LspPosition(line: end_line, character: end_char)
+                ),
+                severity: severity,
+                message: message,
+                source: source
+            ))
+    diagnostics
+
+fn svim_lsp_apply_diagnostics(session: SvimSession, buffer_id: BufferId, lsp_diags: [LspDiagnostic]):
+    """Convert LSP diagnostics to DiagnosticItems and apply to the session."""
+    var items: [DiagnosticItem] = []
+    for diag in lsp_diags:
+        val sev = _svim_lsp_severity_text(diag.severity)
+        items.push(DiagnosticItem(
+            row: diag.range.start_pos.line,
+            col: diag.range.start_pos.character,
+            severity: sev,
+            message: diag.message
+        ))
+    session.replace_diagnostics(buffer_id, items)
+
+# ---------------------------------------------------------------------------
+# Symbol kind names (LSP specification constants)
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_symbol_kind_name(kind: i64) -> text:
+    """Human-readable name for LSP SymbolKind constants."""
+    if kind == 1:
+        return "File"
+    if kind == 2:
+        return "Module"
+    if kind == 3:
+        return "Namespace"
+    if kind == 5:
+        return "Class"
+    if kind == 6:
+        return "Method"
+    if kind == 7:
+        return "Property"
+    if kind == 8:
+        return "Field"
+    if kind == 9:
+        return "Constructor"
+    if kind == 10:
+        return "Enum"
+    if kind == 12:
+        return "Function"
+    if kind == 13:
+        return "Variable"
+    if kind == 14:
+        return "Constant"
+    if kind == 23:
+        return "Struct"
+    "Symbol"
+
+fn svim_lsp_completion_kind_name(kind: i64) -> text:
+    """Human-readable name for LSP CompletionItemKind constants."""
+    if kind == 1:
+        return "Text"
+    if kind == 2:
+        return "Method"
+    if kind == 3:
+        return "Function"
+    if kind == 4:
+        return "Constructor"
+    if kind == 5:
+        return "Field"
+    if kind == 6:
+        return "Variable"
+    if kind == 7:
+        return "Class"
+    if kind == 9:
+        return "Module"
+    if kind == 14:
+        return "Keyword"
+    if kind == 15:
+        return "Snippet"
+    "Item"
+
+# ---------------------------------------------------------------------------
+# Internal: minimal JSON field extraction
+# ---------------------------------------------------------------------------
+
+fn _svim_lsp_severity_text(severity: i64) -> text:
+    """Convert LSP DiagnosticSeverity integer to text."""
+    if severity == 1:
+        return "error"
+    if severity == 2:
+        return "warn"
+    if severity == 3:
+        return "info"
+    "hint"
+
+fn _svim_lsp_extract_field(json: text, key: text) -> text:
+    """Extract a string value for the given key from a JSON object."""
+    val search = _q() + key + _q() + ":"
+    val idx_opt = json.index_of(search)
+    var idx = -1
+    match idx_opt:
+        Some(i):
+            idx = i
+        nil:
+            return ""
+    if idx < 0:
+        return ""
+    val start = idx + search.len()
+    val after = json.substring(start).trim()
+    if after.starts_with(_q()):
+        val inner = after.substring(1)
+        val end_opt = inner.index_of(_q())
+        var end_idx = -1
+        match end_opt:
+            Some(i):
+                end_idx = i
+            nil:
+                return ""
+        if end_idx < 0:
+            return ""
+        return inner.substring(0, end_idx)
+    ""
+
+fn _svim_lsp_extract_int(json: text, key: text) -> i64:
+    """Extract an integer value for the given key from a JSON object."""
+    val search = _q() + key + _q() + ":"
+    val idx_opt = json.index_of(search)
+    var idx = -1
+    match idx_opt:
+        Some(i):
+            idx = i
+        nil:
+            return 0
+    if idx < 0:
+        return 0
+    val start = idx + search.len()
+    val after = json.substring(start).trim()
+    var num_str = ""
+    var i = 0
+    while i < after.len():
+        val ch = after.char_at(i)
+        if ch == "-" or (ch >= "0" and ch <= "9"):
+            num_str = num_str + ch
+        else:
+            break
+        i = i + 1
+    if num_str == "":
+        return 0
+    num_str.to_i64()
+
+fn _svim_lsp_extract_nested_int(json: text, outer_key: text, inner_key: text) -> i64:
+    """Extract an integer from a nested JSON object (e.g., range.start.line)."""
+    val outer_search = _q() + outer_key + _q() + ":"
+    val idx_opt = json.index_of(outer_search)
+    var idx = -1
+    match idx_opt:
+        Some(i):
+            idx = i
+        nil:
+            return 0
+    if idx < 0:
+        return 0
+    val rest = json.substring(idx + outer_search.len())
+    _svim_lsp_extract_int(rest, inner_key)
+
+fn _svim_lsp_split_array_items(json: text) -> [text]:
+    """Split a JSON array into individual object strings (shallow split on top-level braces)."""
+    var items: [text] = []
+    var depth = 0
+    var current = ""
+    var in_string = false
+    var prev_char = ""
+    var i = 0
+    while i < json.len():
+        val ch = json.char_at(i)
+        if in_string:
+            current = current + ch
+            if ch == _q() and prev_char != "\\":
+                in_string = false
+        else:
+            if ch == _q():
+                in_string = true
+                current = current + ch
+            elif ch == "{":
+                depth = depth + 1
+                current = current + ch
+            elif ch == "}":
+                depth = depth - 1
+                current = current + ch
+                if depth == 0:
+                    items.push(current)
+                    current = ""
+            elif depth > 0:
+                current = current + ch
+        prev_char = ch
+        i = i + 1
+    items

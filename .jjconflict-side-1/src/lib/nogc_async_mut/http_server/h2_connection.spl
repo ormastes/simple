@@ -1,0 +1,793 @@
+# HTTP/2 Connection — Async H2 connection multiplexer
+#
+# Manages a single HTTP/2 connection: preface validation, settings
+# exchange, stream tracking, and frame dispatch. Composes the sync
+# framing layer (h2_frame, h2_parser, h2_writer, h2_preface) with the
+# async IoDriver-based worker.
+#
+# Scope (HPACK wiring — W16):
+#   - Connection preface validation (RFC 9113 §3.4)
+#   - SETTINGS exchange (server SETTINGS + client SETTINGS ACK)
+#   - PING echo
+#   - WINDOW_UPDATE tracking (connection-level)
+#   - GOAWAY on unimplemented stream paths
+#   - Stream creation and frame routing to H2Stream
+#   - HPACK decode of request HEADERS → HttpRequestData
+#   - HPACK encode of response HttpResponseData → HEADERS+DATA frames
+#
+# Out of scope (follow-up milestones):
+#   - Server push (PUSH_PROMISE)
+#   - Priority / weighted scheduling
+#
+# Worker drains decoded requests via take_decoded_requests() and feeds
+# responses back via queue_h2_response(stream_id, resp).
+
+use std.http.h2.h2_frame.{
+    H2Frame, H2DataFrame, H2HeadersFrame, H2ContinuationFrame, H2SettingsFrame,
+    H2PingFrame, H2GoawayFrame, H2WindowUpdateFrame,
+    H2RstStreamFrame, H2Setting,
+    H2_FLAG_END_STREAM, H2_FLAG_END_HEADERS, H2_FLAG_ACK,
+    H2_SETTINGS_MAX_CONCURRENT_STREAMS, H2_SETTINGS_INITIAL_WINDOW_SIZE,
+    H2_SETTINGS_MAX_FRAME_SIZE,
+    H2_ERR_NO_ERROR, H2_ERR_PROTOCOL_ERROR, H2_ERR_INTERNAL_ERROR,
+    H2_ERR_COMPRESSION_ERROR
+}
+use std.http.h2.h2_parser.{h2_parse_frame_bounded, H2BoundedParseResult}
+use std.http.h2.h2_writer.{h2_write_frame}
+use std.http.h2.h2_preface.{h2_validate_preface, H2_CONNECTION_PREFACE_LEN}
+use std.common.hpack.encoder.{HpackHeader, HpackDecoderState, hpack_decoder_new}
+use std.common.hpack.decoder.{hpack_decode}
+use std.http_server.h2_request_headers.{h2_validate_request_headers}
+use std.http_server.h2_stream.{H2Stream, H2StreamState}
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+
+use std.common.string_core.{text_to_bytes}
+# ============================================================================
+# Connection-level defaults (RFC 9113 §6.5.2)
+# ============================================================================
+
+val DEFAULT_MAX_CONCURRENT_STREAMS: i64 = 100
+val DEFAULT_INITIAL_WINDOW_SIZE: i64 = 65535
+val DEFAULT_MAX_FRAME_SIZE: i64 = 16384
+val DEFAULT_CONNECTION_WINDOW: i64 = 65535
+val H2_MAX_RECV_BUFFER: i64 = 1048576
+val H2_MAX_HEADER_BLOCK_BYTES: i64 = 65536
+val H2_HPACK_TABLE_BYTES: i64 = 4096
+
+# ============================================================================
+# H2Connection
+# ============================================================================
+
+class H2Connection:
+    """Manages one HTTP/2 connection (multiple streams over a single TCP fd).
+
+    The worker feeds raw bytes via `on_data_received`; this class validates
+    the preface, parses frames, dispatches to per-stream H2Stream instances,
+    and accumulates outbound frame bytes in `pending_writes`.
+
+    Worker drains `pending_writes` via `take_pending_writes()` and submits
+    them through the IoDriver.
+    """
+    fd: i64
+    peer_addr: text
+    created_at: i64
+    last_activity: i64
+
+    # Receive buffer — bytes accumulate across on_data_received calls
+    recv_buf: [u8]
+
+    # Connection state
+    preface_validated: bool
+    settings_sent: bool
+    goaway_sent: bool
+    last_stream_id: i64
+    next_server_stream_id: i64
+    # RFC 9113 section 6.10: while nonzero, the next frame MUST be a
+    # CONTINUATION on this exact stream until END_HEADERS closes the envelope.
+    pending_continuation_stream_id: i64
+
+    # Negotiated settings (peer values)
+    peer_max_concurrent_streams: i64
+    peer_initial_window_size: i64
+    peer_max_frame_size: i64
+
+    # Local settings (what we advertise)
+    local_max_concurrent_streams: i64
+    local_initial_window_size: i64
+    local_max_frame_size: i64
+
+    # Flow control — connection-level windows
+    send_window: i64
+    recv_window: i64
+
+    # Active streams
+    streams: Dict<i64, H2Stream>
+
+    # Outbound frame buffer — worker drains this after each on_data_received
+    pending_writes: [u8]
+
+    # Stateful HPACK decoder. Dynamic entries are connection-scoped and never
+    # shared across peers or recreated between streams.
+    hpack_decoder: HpackDecoderState
+
+    # Decoded requests waiting for worker to drain via take_decoded_requests()
+    pending_requests: [(i64, HttpRequestData)]
+
+    pub(package) static fn new(fd: i64, peer_addr: text, now: i64) -> H2Connection:
+        """Create a new H2 connection after ALPN negotiation selects h2.
+
+        Immediately queues the server connection preface (SETTINGS frame).
+
+        Args:
+            fd: TCP socket file descriptor
+            peer_addr: Remote address string
+            now: Current epoch-ms timestamp
+        """
+        var conn = H2Connection(
+            fd: fd,
+            peer_addr: peer_addr,
+            created_at: now,
+            last_activity: now,
+            recv_buf: [],
+            preface_validated: false,
+            settings_sent: false,
+            goaway_sent: false,
+            last_stream_id: 0,
+            next_server_stream_id: 2,
+            pending_continuation_stream_id: 0,
+            peer_max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
+            peer_initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            peer_max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+            local_max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
+            local_initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            local_max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+            send_window: DEFAULT_CONNECTION_WINDOW,
+            recv_window: DEFAULT_CONNECTION_WINDOW,
+            streams: {},
+            pending_writes: [],
+            hpack_decoder: hpack_decoder_new(H2_HPACK_TABLE_BYTES),
+            pending_requests: []
+        )
+        # Server MUST send its SETTINGS as connection preface (RFC 9113 §3.4).
+        conn.queue_server_settings()
+        return conn
+
+    # ========================================================================
+    # Public interface — called by Worker
+    # ========================================================================
+
+    pub(package) me h2_on_data_received(data: [u8], now: i64) -> bool:
+        self.last_activity = now
+        if self.goaway_sent:
+            return false
+        # Bound connection-owned incremental input before copying it. A peer
+        # cannot grow retained partial input without limit while withholding a
+        # frame tail.
+        if self.recv_buf.len() > H2_MAX_RECV_BUFFER:
+            self.recv_buf = []
+            self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+            return false
+        if data.len() > H2_MAX_RECV_BUFFER - self.recv_buf.len():
+            self.recv_buf = []
+            self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+            return false
+        var i = 0
+        while i < data.len():
+            self.recv_buf.push(data[i])
+            i = i + 1
+        if not self.preface_validated:
+            if self.recv_buf.len() < H2_CONNECTION_PREFACE_LEN:
+                return true
+            if not h2_validate_preface(self.recv_buf):
+                self.recv_buf = []
+                self.queue_goaway(0, H2_ERR_PROTOCOL_ERROR)
+                return false
+            self.preface_validated = true
+            self.recv_buf = _slice_from(self.recv_buf, H2_CONNECTION_PREFACE_LEN)
+        return true
+
+    pub(package) me take_pending_writes() -> [u8]:
+        """Drain and return all queued outbound bytes.
+
+        Worker calls this after on_data_received and submits via
+        IoDriver.submit_send.
+        """
+        val out = self.pending_writes
+        self.pending_writes = []
+        return out
+
+    pub(package) me is_goaway_sent() -> bool:
+        """True if GOAWAY has been sent (connection is shutting down)."""
+        self.goaway_sent
+
+    pub(package) me is_idle_timeout(now: i64, timeout_ms: i64) -> bool:
+        """Check if connection has exceeded idle timeout."""
+        (now - self.last_activity) > timeout_ms
+
+    pub(package) me take_decoded_requests() -> [(i64, HttpRequestData)]:
+        """Drain and return all decoded H2 requests ready for processing.
+
+        Each entry is (stream_id, request). Worker should call
+        queue_h2_response(stream_id, response) for each entry after
+        routing through the middleware/handler pipeline.
+        """
+        val out = self.pending_requests
+        self.pending_requests = []
+        return out
+
+    me _queue_bytes(src: [u8]):
+        var i = 0
+        while i < src.len():
+            self.pending_writes.push(src[i])
+            i = i + 1
+
+    pub(package) me queue_h2_response(stream_id: i64, resp: HttpResponseData):
+        # Build HPACK-encoded header block inline
+        var hpack: [u8] = []
+        val st = resp.status
+        if st == 200: hpack.push(136)
+        if st == 204: hpack.push(137)
+        if st == 304: hpack.push(139)
+        if st == 404: hpack.push(141)
+        if st == 500: hpack.push(142)
+        if st != 200 and st != 204 and st != 304 and st != 404 and st != 500:
+            hpack.push(72)
+            val ss_bytes = text_to_bytes("{st}")
+            hpack.push(ss_bytes.len())
+            var si = 0
+            while si < ss_bytes.len():
+                hpack.push(ss_bytes[si])
+                si = si + 1
+        var hi = 0
+        while hi < resp.headers.len():
+            val pair = resp.headers[hi]
+            val hn_bytes = text_to_bytes(pair.0)
+            val hv_bytes = text_to_bytes(pair.1)
+            hpack.push(0)
+            hpack.push(hn_bytes.len())
+            var ni = 0
+            while ni < hn_bytes.len():
+                hpack.push(hn_bytes[ni])
+                ni = ni + 1
+            hpack.push(hv_bytes.len())
+            var vi = 0
+            while vi < hv_bytes.len():
+                hpack.push(hv_bytes[vi])
+                vi = vi + 1
+            hi = hi + 1
+
+        # Build body bytes
+        var body_bytes: [u8] = []
+        if resp.body_bytes.len() > 0:
+            body_bytes = resp.body_bytes
+        elif resp.body.len() > 0:
+            body_bytes = text_to_bytes(resp.body)
+
+        # Write HEADERS frame: type=1, flags=END_HEADERS(4) [+END_STREAM(1) if no body]
+        var hflags = 4
+        if body_bytes.len() == 0:
+            hflags = 5
+        val hlen = hpack.len()
+        self.pending_writes.push((hlen >> 16) & 255)
+        self.pending_writes.push((hlen >> 8) & 255)
+        self.pending_writes.push(hlen & 255)
+        self.pending_writes.push(1)
+        self.pending_writes.push(hflags)
+        self.pending_writes.push((stream_id >> 24) & 127)
+        self.pending_writes.push((stream_id >> 16) & 255)
+        self.pending_writes.push((stream_id >> 8) & 255)
+        self.pending_writes.push(stream_id & 255)
+        var qi = 0
+        while qi < hpack.len():
+            self.pending_writes.push(hpack[qi])
+            qi = qi + 1
+
+        # Write DATA frame if body present: type=0, flags=END_STREAM(1)
+        if body_bytes.len() > 0:
+            val dlen = body_bytes.len()
+            self.pending_writes.push((dlen >> 16) & 255)
+            self.pending_writes.push((dlen >> 8) & 255)
+            self.pending_writes.push(dlen & 255)
+            self.pending_writes.push(0)
+            self.pending_writes.push(1)
+            self.pending_writes.push((stream_id >> 24) & 127)
+            self.pending_writes.push((stream_id >> 16) & 255)
+            self.pending_writes.push((stream_id >> 8) & 255)
+            self.pending_writes.push(stream_id & 255)
+            var di = 0
+            while di < body_bytes.len():
+                self.pending_writes.push(body_bytes[di])
+                di = di + 1
+
+    # ========================================================================
+    # Frame consumption loop
+    # ========================================================================
+
+    pub(package) me consume_frames() -> bool:
+        if self.goaway_sent:
+            return false
+        # `handle_h2_recv` invokes this after every socket completion.  A TCP
+        # completion may contain fewer than the 24 client-preface bytes; those
+        # bytes are retained by `h2_on_data_received` and are not frame input.
+        # Parsing them early misclassifies ordinary fragmentation as a malformed
+        # frame and sends GOAWAY.  Wait until preface validation has consumed
+        # the complete prefix before entering the frame parser.
+        if not self.preface_validated:
+            return true
+        var offset = 0
+        var keep_going = true
+        var parsing = true
+        while parsing and offset < self.recv_buf.len():
+            match h2_parse_frame_bounded(self.recv_buf, offset, self.local_max_frame_size):
+                case Complete(ok):
+                    offset = offset + ok.consumed
+                    keep_going = self.dispatch_frame(ok.frame)
+                    if not keep_going or self.goaway_sent:
+                        keep_going = false
+                        parsing = false
+                case Ignored(consumed):
+                    # RFC 9113 extension frames are consumed even though this
+                    # endpoint has no handler for their semantics.
+                    if consumed <= 0:
+                        self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                        keep_going = false
+                        parsing = false
+                        offset = self.recv_buf.len()
+                    else:
+                        offset = offset + consumed
+                case Incomplete(required_bytes):
+                    # Retain only the unconsumed suffix. Admission already
+                    # bounded both the declared frame size and aggregate input.
+                    if required_bytes <= 0:
+                        self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                        keep_going = false
+                        offset = self.recv_buf.len()
+                    parsing = false
+                case Rejected(_):
+                    # Malformed frames are terminal connection errors. Discard
+                    # attacker-controlled residue before worker cancellation.
+                    self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                    keep_going = false
+                    parsing = false
+                    offset = self.recv_buf.len()
+        if offset > 0:
+            self.recv_buf = _slice_from(self.recv_buf, offset)
+        if self.recv_buf.len() > H2_MAX_RECV_BUFFER:
+            self.recv_buf = []
+            if not self.goaway_sent:
+                self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+            return false
+        return keep_going
+
+    # ========================================================================
+    # Frame dispatch
+    # ========================================================================
+
+    me dispatch_frame(frame: H2Frame) -> bool:
+        """Route a parsed frame to the appropriate handler.
+
+        Returns true to continue, false to close.
+        """
+        # Header-block fragments are a connection-wide serialization envelope,
+        # not merely per-stream state. No frame of any other type may be
+        # interleaved before END_HEADERS (RFC 9113 sections 4.3 and 6.10).
+        if self.pending_continuation_stream_id != 0:
+            match frame:
+                H2Frame.Continuation(cf):
+                    if cf.stream_id != self.pending_continuation_stream_id:
+                        self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                        return false
+                _:
+                    self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                    return false
+
+        match frame:
+            H2Frame.Settings(sf):
+                self.handle_settings(sf)
+                return true
+
+            H2Frame.Ping(pf):
+                self.handle_ping(pf)
+                return true
+
+            H2Frame.WindowUpdate(wf):
+                self.handle_window_update(wf)
+                return true
+
+            H2Frame.Goaway(gf):
+                # Peer is shutting down — stop accepting new streams
+                return false
+
+            H2Frame.Headers(hf):
+                self.handle_headers(hf)
+                return true
+
+            H2Frame.Data(df):
+                self.handle_data(df)
+                return true
+
+            H2Frame.RstStream(rf):
+                self.handle_rst_stream(rf)
+                return true
+
+            H2Frame.Priority(pr):
+                # Priority is deprecated in RFC 9113; ignore
+                return true
+
+            H2Frame.PushPromise(pp):
+                # Server does not receive PUSH_PROMISE; protocol error
+                self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                return false
+
+            H2Frame.Continuation(cf):
+                if self.pending_continuation_stream_id == 0:
+                    # Unknown stream, continuation after END_HEADERS, and a
+                    # second unowned fragment are all connection errors.
+                    self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                    return false
+                # Merge continuation header block into the stream accumulator
+                # NOTE: index read + contains_key, not .get() — Dict<K, class>
+                # .get() returns a corrupt payload under native codegen.
+                if self.streams.contains_key(cf.stream_id):
+                    var cs = self.streams[cf.stream_id]
+                    self.streams.remove(cf.stream_id)
+                    if cf.header_block.len() > H2_MAX_HEADER_BLOCK_BYTES - cs.recv_header_bytes:
+                        self.queue_goaway(self.last_stream_id, H2_ERR_COMPRESSION_ERROR)
+                        cs.close()
+                        cs.request_dispatched = true
+                        self.streams[cf.stream_id] = cs
+                        return false
+                    cs.on_headers(cf.header_block, cf.flags)
+                    if (cf.flags & H2_FLAG_END_HEADERS) != 0:
+                        self.pending_continuation_stream_id = 0
+                    if cs.is_request_complete() and not cs.request_dispatched:
+                        self._decode_and_buffer_request(cf.stream_id, cs)
+                        cs.request_dispatched = true
+                    self.streams[cf.stream_id] = cs
+                else:
+                    self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                    return false
+                return true
+
+    # ========================================================================
+    # SETTINGS handling
+    # ========================================================================
+
+    me handle_settings(sf: H2SettingsFrame):
+        """Process a SETTINGS frame from the peer.
+
+        If ACK, this acknowledges our SETTINGS. If not ACK, apply peer
+        settings and send ACK back.
+        """
+        if (sf.flags & H2_FLAG_ACK) != 0:
+            # Peer acknowledged our SETTINGS — nothing to update
+            return
+
+        # Apply peer settings
+        var idx = 0
+        while idx < sf.settings.len():
+            val s = sf.settings[idx]
+            if s.identifier == H2_SETTINGS_MAX_CONCURRENT_STREAMS:
+                self.peer_max_concurrent_streams = s.value
+            elif s.identifier == H2_SETTINGS_INITIAL_WINDOW_SIZE:
+                self.peer_initial_window_size = s.value
+            elif s.identifier == H2_SETTINGS_MAX_FRAME_SIZE:
+                self.peer_max_frame_size = s.value
+            idx = idx + 1
+
+        # ACK the peer's SETTINGS
+        self.queue_settings_ack()
+
+    me queue_server_settings():
+        """Queue our initial SETTINGS frame (server connection preface)."""
+        var settings: [H2Setting] = []
+        settings.push(H2Setting(
+            identifier: H2_SETTINGS_MAX_CONCURRENT_STREAMS,
+            value: self.local_max_concurrent_streams
+        ))
+        settings.push(H2Setting(
+            identifier: H2_SETTINGS_INITIAL_WINDOW_SIZE,
+            value: self.local_initial_window_size
+        ))
+        val frame = H2Frame.Settings(H2SettingsFrame(
+            flags: 0,
+            settings: settings
+        ))
+        val bytes = h2_write_frame(frame)
+        self._queue_bytes(bytes)
+        self.settings_sent = true
+
+    me queue_settings_ack():
+        """Queue a SETTINGS ACK frame."""
+        var empty: [H2Setting] = []
+        val frame = H2Frame.Settings(H2SettingsFrame(
+            flags: H2_FLAG_ACK,
+            settings: empty
+        ))
+        val bytes = h2_write_frame(frame)
+        self._queue_bytes(bytes)
+
+    # ========================================================================
+    # PING handling
+    # ========================================================================
+
+    me handle_ping(pf: H2PingFrame):
+        """Echo a PING frame back with ACK flag set."""
+        if (pf.flags & H2_FLAG_ACK) != 0:
+            # This is a PING ACK — nothing to do
+            return
+        val ack_frame = H2Frame.Ping(H2PingFrame(
+            flags: H2_FLAG_ACK,
+            opaque_data: pf.opaque_data
+        ))
+        val bytes = h2_write_frame(ack_frame)
+        self._queue_bytes(bytes)
+
+    # ========================================================================
+    # WINDOW_UPDATE handling
+    # ========================================================================
+
+    me handle_window_update(wf: H2WindowUpdateFrame):
+        """Process a WINDOW_UPDATE frame (connection or stream level)."""
+        if wf.stream_id == 0:
+            # Connection-level window update
+            self.send_window = self.send_window + wf.increment
+        else:
+            if self.streams.contains_key(wf.stream_id):
+                var s = self.streams[wf.stream_id]
+                self.streams.remove(wf.stream_id)
+                s.adjust_send_window(wf.increment)
+                self.streams[wf.stream_id] = s
+
+    # ========================================================================
+    # HEADERS handling
+    # ========================================================================
+
+    me handle_headers(hf: H2HeadersFrame):
+        """Process a HEADERS frame — create or update a stream.
+
+        Accumulates header blocks, then when END_HEADERS + END_STREAM are
+        both received, decodes via HPACK and buffers an HttpRequestData in
+        pending_requests for worker to drain and route.
+        """
+        val sid = hf.stream_id
+        if sid > self.last_stream_id:
+            self.last_stream_id = sid
+
+        # Create stream if new
+        var stream = H2Stream.new(sid, self.local_initial_window_size)
+        if not self.streams.contains_key(sid):
+            if hf.header_block.len() > H2_MAX_HEADER_BLOCK_BYTES:
+                self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
+                return
+            stream.on_headers(hf.header_block, hf.flags)
+        else:
+            stream = self.streams[sid]
+            self.streams.remove(sid)
+            if hf.header_block.len() > H2_MAX_HEADER_BLOCK_BYTES - stream.recv_header_bytes:
+                self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
+                stream.close()
+                stream.request_dispatched = true
+                self.streams[sid] = stream
+                return
+            stream.on_headers(hf.header_block, hf.flags)
+
+        # Check if request is complete (END_HEADERS + END_STREAM received)
+        if stream.is_request_complete() and not stream.request_dispatched:
+            self._decode_and_buffer_request(sid, stream)
+            stream.request_dispatched = true
+        self.streams[sid] = stream
+        if (hf.flags & H2_FLAG_END_HEADERS) == 0:
+            self.pending_continuation_stream_id = sid
+
+    me _decode_and_buffer_request(sid: i64, stream: H2Stream) -> bool:
+        """Decode HPACK header blocks and build an HttpRequestData.
+
+        Concatenates all received header block fragments, decodes via HPACK
+        static table, extracts pseudo-headers (:method, :path, :authority)
+        and regular headers, then buffers result in pending_requests.
+
+        On HPACK decode failure sends GOAWAY(COMPRESSION_ERROR) per RFC 7541 §6.
+        """
+        # Concatenate all header block fragments
+        val combined = stream.combined_header_block()
+
+        # HPACK decode
+        if combined.len() > H2_MAX_HEADER_BLOCK_BYTES:
+            self.queue_goaway(self.last_stream_id, H2_ERR_COMPRESSION_ERROR)
+            return false
+        val decoded = hpack_decode(combined, self.hpack_decoder)
+        var decoded_headers: [HpackHeader] = []
+        match decoded:
+            Err(_):
+                self.queue_goaway(self.last_stream_id, H2_ERR_COMPRESSION_ERROR)
+                return false
+            Ok(pair):
+                decoded_headers = pair.0
+                self.hpack_decoder = pair.1
+
+        val validation = h2_validate_request_headers(decoded_headers)
+        if not validation.valid:
+            self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
+            return false
+
+        # Extract pseudo-headers and regular headers
+        var method = ""
+        var path = ""
+        var query = ""
+        var authority = ""
+        var req_headers: [(text, text)] = []
+
+        var di = 0
+        while di < decoded_headers.len():
+            val entry = decoded_headers[di]
+            if entry.name == ":method":
+                method = entry.value
+            elif entry.name == ":path":
+                # Split path on first '?' into path + query
+                val qpos = _find_char(entry.value, 63)  # 63 = '?'
+                if qpos >= 0:
+                    path = _slice_text(entry.value, 0, qpos)
+                    query = _slice_text(entry.value, qpos + 1, entry.value.len())
+                else:
+                    path = entry.value
+            elif entry.name == ":authority":
+                authority = entry.value
+            elif entry.name == ":scheme":
+                pass_dn  # Ignore :scheme pseudo-header
+            else:
+                # Regular header — skip any remaining pseudo-headers defensively
+                if entry.name.len() > 0 and entry.name.byte_at(0) != 58:  # 58 = ':'
+                    req_headers.push((entry.name, entry.value))
+            di = di + 1
+
+        # Synthesize Host header from :authority (RFC 7540 §8.1.2.3)
+        if authority.len() > 0:
+            req_headers.push(("Host", authority))
+
+        # Assemble body from accumulated DATA frames
+        val body_bytes = stream.combined_data()
+        val body = bytes_to_text(body_bytes)
+
+        # Build HttpRequestData
+        val request = HttpRequestData(
+            method: method,
+            path: path,
+            query: query,
+            version: "HTTP/2",
+            headers: req_headers,
+            body: body,
+            params: {},
+            peer_addr: self.peer_addr
+        )
+
+        self.pending_requests.push((sid, request))
+        return true
+
+    # ========================================================================
+    # DATA handling
+    # ========================================================================
+
+    me handle_data(df: H2DataFrame):
+        """Process a DATA frame — append to stream body.
+
+        When END_STREAM arrives on DATA and END_HEADERS was already received,
+        the request is complete — decode and buffer it for worker to drain.
+        """
+        val sid = df.stream_id
+        if not self.streams.contains_key(sid):
+            # DATA on unknown stream — connection error
+            self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
+            return
+
+        var s = self.streams[sid]
+        self.streams.remove(sid)
+        s.on_data(df.data, df.flags)
+
+        # Credit connection-level receive window
+        val data_len = df.data.len()
+        if data_len > 0:
+            self.recv_window = self.recv_window - data_len
+            if self.recv_window < DEFAULT_CONNECTION_WINDOW / 2:
+                val increment = DEFAULT_CONNECTION_WINDOW - self.recv_window
+                self.queue_window_update(0, increment)
+                self.recv_window = self.recv_window + increment
+
+        # If DATA completed the request (END_STREAM after prior END_HEADERS),
+        # decode headers + body and buffer in pending_requests.
+        if s.is_request_complete() and not s.request_dispatched:
+            self._decode_and_buffer_request(sid, s)
+            s.request_dispatched = true
+        self.streams[sid] = s
+
+    # ========================================================================
+    # RST_STREAM handling
+    # ========================================================================
+
+    me handle_rst_stream(rf: H2RstStreamFrame):
+        """Process a RST_STREAM — close the stream."""
+        if self.streams.contains_key(rf.stream_id):
+            var s = self.streams[rf.stream_id]
+            self.streams.remove(rf.stream_id)
+            s.close()
+            self.streams[rf.stream_id] = s
+
+    # ========================================================================
+    # Outbound frame helpers
+    # ========================================================================
+
+    me queue_goaway(last_sid: i64, error_code: i64):
+        """Queue a GOAWAY frame and mark connection as shutting down."""
+        var empty: [u8] = []
+        val frame = H2Frame.Goaway(H2GoawayFrame(
+            last_stream_id: last_sid,
+            error_code: error_code,
+            debug_data: empty
+        ))
+        val bytes = h2_write_frame(frame)
+        self._queue_bytes(bytes)
+        self.goaway_sent = true
+
+    me queue_rst_stream(stream_id: i64, error_code: i64):
+        """Queue a RST_STREAM frame for a specific stream."""
+        val frame = H2Frame.RstStream(H2RstStreamFrame(
+            stream_id: stream_id,
+            error_code: error_code
+        ))
+        val bytes = h2_write_frame(frame)
+        self._queue_bytes(bytes)
+
+    me queue_window_update(stream_id: i64, increment: i64):
+        """Queue a WINDOW_UPDATE frame."""
+        val frame = H2Frame.WindowUpdate(H2WindowUpdateFrame(
+            stream_id: stream_id,
+            increment: increment
+        ))
+        val bytes = h2_write_frame(frame)
+        self._queue_bytes(bytes)
+
+# ============================================================================
+# Buffer helpers
+# ============================================================================
+
+fn _slice_from(buf: [u8], start: i64) -> [u8]:
+    """Return buf[start..] as a new [u8]."""
+    var out: [u8] = []
+    var i = start
+    while i < buf.len():
+        out.push(buf[i])
+        i = i + 1
+    return out
+
+fn _append_to(dst: [u8], src: [u8]):
+    """Append all bytes from src onto dst."""
+    var i = 0
+    while i < src.len():
+        dst.push(src[i])
+        i = i + 1
+
+fn _find_char(s: text, byte_val: i64) -> i64:
+    """Return index of first occurrence of byte_val in s, or -1."""
+    var i = 0
+    while i < s.len():
+        if s.byte_at(i) == byte_val:
+            return i
+        i = i + 1
+    return -1
+
+fn _slice_text(s: text, start: i64, end: i64) -> text:
+    """Return s[start..end) as a new text string."""
+    var buf: [u8] = []
+    var i = start
+    while i < end and i < s.len():
+        buf.push(s.byte_at(i))
+        i = i + 1
+    return bytes_to_text(buf)
+
+fn _byte_to_text(b: i64) -> text:
+    """Convert a single byte value to a one-character text string."""
+    var scratch: [u8] = []
+    scratch.push(b)
+    return bytes_to_text(scratch)
+
+use std.common.string_core.{bytes_to_text}

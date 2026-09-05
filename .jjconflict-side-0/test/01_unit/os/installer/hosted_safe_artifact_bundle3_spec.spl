@@ -1,0 +1,137 @@
+use std.spec
+use os.installer.hosted_safe_artifact_io_v1.{
+    hosted_safe_artifact_root_acquire_v1,
+    hosted_safe_artifact_root_close_v1,
+    hosted_safe_artifact_bundle3_begin_v1,
+    hosted_safe_artifact_bundle3_read_stage_v1,
+    hosted_safe_artifact_bundle3_slot_complete_v1,
+    hosted_safe_artifact_bundle3_identity_v1,
+    hosted_safe_artifact_bundle3_stage_scr1_v1,
+    hosted_safe_artifact_bundle3_finish_v1,
+}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+fn reset_bundle3_fixture(root: text):
+    val (_, _, status) = rt_process_run("/bin/sh", ["-c",
+        "rm -rf '" + root + "' && mkdir -p '" + root +
+        "' && printf clang > '" + root + "/clang'" +
+        " && printf lld > '" + root + "/lld'" +
+        " && printf hello > '" + root + "/hello.elf'"])
+    expect(status).to_equal(0)
+
+fn remove_bundle3_fixture(root: text):
+    val (_, _, status) = rt_process_run(
+        "/bin/sh", ["-c", "rm -rf '" + root + "'"])
+    expect(status).to_equal(0)
+
+fn begin_fixture(root: text, bundle_leaf: text):
+    val opened = hosted_safe_artifact_root_acquire_v1(root)
+    expect(opened.is_ok()).to_be(true)
+    val authority = opened.unwrap()
+    val begun = hosted_safe_artifact_bundle3_begin_v1(
+        authority, "clang", "lld", "hello.elf", bundle_leaf,
+        "clang", "clang.scr1", "ld.lld", "ld.lld.scr1",
+        "hello.elf", "hello.elf.scr1", 4096)
+    expect(begun.is_ok()).to_be(true)
+    (authority, begun.unwrap())
+
+describe "hosted safe-artifact fixed-three transaction":
+    it "commits all six leaves through one final bundle publication":
+        step("Open three distinct source identities below one retained root")
+        val root = "build/test-artifacts/hosted-safe-bundle3-commit"
+        reset_bundle3_fixture(root)
+        defer remove_bundle3_fixture(root)
+        val (authority, grant) = begin_fixture(root, "clang-toolchain")
+
+        step("Stage each payload, capture its identity, and stage its SCR1")
+        val expected = [[99u8, 108u8, 97u8, 110u8, 103u8],
+            [108u8, 108u8, 100u8], [104u8, 101u8, 108u8, 108u8, 111u8]]
+        var slot: i64 = 0
+        while slot < 3:
+            val read = hosted_safe_artifact_bundle3_read_stage_v1(grant, slot, 64)
+            expect(read.is_ok()).to_be(true)
+            expect(read.unwrap()).to_equal(expected[slot])
+            expect(hosted_safe_artifact_bundle3_slot_complete_v1(
+                grant, slot).unwrap()).to_be(true)
+            val identity = hosted_safe_artifact_bundle3_identity_v1(grant, slot)
+            expect(identity.is_ok()).to_be(true)
+            val identity_values = identity.unwrap()
+            expect(identity_values.len()).to_equal(6)
+            expect(identity_values[2]).to_equal(expected[slot].len())
+            expect(hosted_safe_artifact_bundle3_stage_scr1_v1(
+                grant, slot, [0x53u8, 0x43u8, 0x52u8, (slot + 1).to_u8()],
+                64).is_ok()).to_be(true)
+            slot = slot + 1
+
+        step("Publish only after every payload and signature leaf is complete")
+        val finished = hosted_safe_artifact_bundle3_finish_v1(grant, true)
+        expect(finished.is_ok()).to_be(true)
+        val receipt = finished.unwrap()
+        expect(receipt.committed).to_be(true)
+        expect(receipt.durable).to_be(true)
+        expect(receipt.quarantined).to_be(false)
+        expect(receipt.artifact_count).to_equal(3)
+        expect(rt_file_read_bytes("{root}/clang-toolchain/clang")).to_equal(expected[0])
+        expect(rt_file_read_bytes("{root}/clang-toolchain/ld.lld")).to_equal(expected[1])
+        expect(rt_file_read_bytes("{root}/clang-toolchain/hello.elf")).to_equal(expected[2])
+        expect(rt_file_exists("{root}/clang-toolchain/clang.scr1")).to_be(true)
+        expect(rt_file_exists("{root}/clang-toolchain/ld.lld.scr1")).to_be(true)
+        expect(rt_file_exists("{root}/clang-toolchain/hello.elf.scr1")).to_be(true)
+        expect(hosted_safe_artifact_root_close_v1(authority).is_ok()).to_be(true)
+
+    it "rolls back an explicitly cancelled transaction without exposing a partial bundle":
+        step("Begin a transaction and stage only one of the three payloads")
+        val root = "build/test-artifacts/hosted-safe-bundle3-cancel"
+        reset_bundle3_fixture(root)
+        defer remove_bundle3_fixture(root)
+        val (authority, grant) = begin_fixture(root, "clang-toolchain")
+        expect(hosted_safe_artifact_bundle3_read_stage_v1(
+            grant, 0, 64).is_ok()).to_be(true)
+
+        step("Cancel before the final atomic publication")
+        val finished = hosted_safe_artifact_bundle3_finish_v1(grant, false)
+        expect(finished.is_ok()).to_be(true)
+        val receipt = finished.unwrap()
+        expect(receipt.committed).to_be(false)
+        expect(receipt.rolled_back).to_be(true)
+        expect(receipt.artifact_count).to_equal(0)
+        expect(rt_file_exists("{root}/clang-toolchain")).to_be(false)
+        expect(hosted_safe_artifact_root_close_v1(authority).is_ok()).to_be(true)
+
+    it "rejects colliding source paths before creating transaction state":
+        step("Submit the same retained source for two independent roles")
+        val root = "build/test-artifacts/hosted-safe-bundle3-collision"
+        reset_bundle3_fixture(root)
+        defer remove_bundle3_fixture(root)
+        val opened = hosted_safe_artifact_root_acquire_v1(root)
+        expect(opened.is_ok()).to_be(true)
+        val authority = opened.unwrap()
+        val begun = hosted_safe_artifact_bundle3_begin_v1(
+            authority, "clang", "clang", "hello.elf", "clang-toolchain",
+            "clang", "clang.scr1", "ld.lld", "ld.lld.scr1",
+            "hello.elf", "hello.elf.scr1", 4096)
+        expect(begun.is_err()).to_be(true)
+        if val Err(reason) = begun:
+            expect(reason).to_equal("hosted-safe-bundle3-path-collision")
+        expect(rt_file_exists("{root}/clang-toolchain")).to_be(false)
+        expect(hosted_safe_artifact_root_close_v1(authority).is_ok()).to_be(true)
+
+    it "rejects an aggregate ceiling above the fixed three-gibibyte contract":
+        step("Submit a transaction bound that the facade and native owner both forbid")
+        val root = "build/test-artifacts/hosted-safe-bundle3-bound"
+        reset_bundle3_fixture(root)
+        defer remove_bundle3_fixture(root)
+        val opened = hosted_safe_artifact_root_acquire_v1(root)
+        expect(opened.is_ok()).to_be(true)
+        val authority = opened.unwrap()
+        val begun = hosted_safe_artifact_bundle3_begin_v1(
+            authority, "clang", "lld", "hello.elf", "clang-toolchain",
+            "clang", "clang.scr1", "ld.lld", "ld.lld.scr1",
+            "hello.elf", "hello.elf.scr1", 3221225473)
+        expect(begun.is_err()).to_be(true)
+        if val Err(reason) = begun:
+            expect(reason).to_equal("hosted-safe-bundle3-invalid-bound")
+        expect(hosted_safe_artifact_root_close_v1(authority).is_ok()).to_be(true)

@@ -1,0 +1,248 @@
+# 2D GPU Benchmark — Simple + CUDA (dlopen SFFI)
+#
+# Measures dispatch overhead: Simple's spl_wffi_call_i64 vs C direct calls.
+# Uses cuMemsetD32 for clear + row-by-row rect fill (all integer args).
+#
+# Usage:
+#   bin/simple test/perf/graphics_2d/bench_2d_gpu.spl
+
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64) -> i64
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+
+var FRAME_W: i64 = 640
+var FRAME_H: i64 = 480
+var PIXELS: i64 = 640 * 480
+var FB_BYTES: i64 = 640 * 480 * 4
+var WARMUP_FRAMES: i64 = 3
+var TIMED_FRAMES: i64 = 20
+
+var p_memset32: i64 = 0
+var p_ctx_sync: i64 = 0
+var args_sync: [i64] = []
+var args_ms: [i64] = []
+var d_fb: i64 = 0
+
+fn gpu_clear(color: i64):
+    args_ms[0] = d_fb
+    args_ms[1] = color
+    args_ms[2] = PIXELS
+    spl_wffi_call_i64(p_memset32, args_ms, 3)
+
+fn gpu_rect_fill(x: i64, y: i64, w: i64, h: i64, color: i64):
+    var row = 0
+    while row < h:
+        var ry = y + row
+        if ry >= 0 and ry < FRAME_H:
+            var rx = x
+            var rw = w
+            if rx < 0:
+                rw = rw + rx
+                rx = 0
+            if rx + rw > FRAME_W:
+                rw = FRAME_W - rx
+            if rw > 0:
+                var offset = (ry * FRAME_W + rx) * 4
+                args_ms[0] = d_fb + offset
+                args_ms[1] = color
+                args_ms[2] = rw
+                spl_wffi_call_i64(p_memset32, args_ms, 3)
+        row = row + 1
+
+fn gpu_sync():
+    spl_wffi_call_i64(p_ctx_sync, args_sync, 0)
+
+fn fill_color(idx: i64) -> i64:
+    if idx == 0: return 0xFF0000FF
+    if idx == 1: return 0xFF00FF00
+    if idx == 2: return 0xFFFF0000
+    if idx == 3: return 0xFF808080
+    return 0xFF00FFFF
+
+fn scene_fill() -> i64:
+    gpu_clear(0xFF000000)
+    var i = 0
+    while i < 20:
+        var col = (i * 37) % 5
+        var rx = (i * 19) % (FRAME_W - 1)
+        if rx < 0: rx = 0
+        var ry = (i * 11) % (FRAME_H - 1)
+        if ry < 0: ry = 0
+        var rw = 1 + (i * 7) % 200
+        var rh = 1 + (i * 13) % 100
+        gpu_rect_fill(rx, ry, rw, rh, fill_color(col))
+        i = i + 1
+    gpu_sync()
+    21
+
+fn scene_blit() -> i64:
+    gpu_clear(0xFF000000)
+    var count = 1
+    var ty = 0
+    while ty < FRAME_H:
+        var tx = 0
+        while tx < FRAME_W:
+            var c = fill_color(((tx / 64) + (ty / 64)) % 4)
+            gpu_rect_fill(tx, ty, 64, 64, c)
+            count = count + 1
+            tx = tx + 64
+        ty = ty + 64
+    gpu_sync()
+    count
+
+fn scene_scroll() -> i64:
+    var cx = FRAME_W / 4
+    var cy = FRAME_H / 4
+    var cw = FRAME_W / 2
+    var row_h = 2
+    var n_rows = 4
+    gpu_clear(0xFF808080)
+    var count = 2
+    var row = 0
+    while row < n_rows:
+        var ry = cy + row * (row_h + 1) - 1
+        var row_color = 0xFFFFFFFF
+        if row % 2 == 1: row_color = 0xFF000000
+        gpu_rect_fill(cx, ry, cw, row_h, row_color)
+        var ind_color = 0xFF0000FF
+        if row % 3 == 1: ind_color = 0xFFFF0000
+        if row % 3 == 2: ind_color = 0xFF00FF00
+        gpu_rect_fill(cx + cw - 2, ry, 2, row_h, ind_color)
+        count = count + 2
+        row = row + 1
+    gpu_sync()
+    count
+
+fn run_scene(name: text, scene_id: i64):
+    var wi = 0
+    while wi < WARMUP_FRAMES:
+        if scene_id == 0: scene_fill()
+        if scene_id == 1: scene_blit()
+        if scene_id == 2: scene_scroll()
+        wi = wi + 1
+
+    var samples: [i64] = []
+    var total_draws: i64 = 0
+    var fi = 0
+    while fi < TIMED_FRAMES:
+        var t0 = rt_time_now_monotonic_ms()
+        var draws: i64 = 0
+        if scene_id == 0: draws = scene_fill()
+        if scene_id == 1: draws = scene_blit()
+        if scene_id == 2: draws = scene_scroll()
+        var t1 = rt_time_now_monotonic_ms()
+        samples.push(t1 - t0)
+        total_draws = total_draws + draws
+        fi = fi + 1
+
+    # Sort for percentiles
+    var si = 0
+    while si < TIMED_FRAMES - 1:
+        var sj = 0
+        while sj < TIMED_FRAMES - 1 - si:
+            if samples[sj] > samples[sj + 1]:
+                var tmp = samples[sj]
+                samples[sj] = samples[sj + 1]
+                samples[sj + 1] = tmp
+            sj = sj + 1
+        si = si + 1
+
+    var p50_ms = samples[TIMED_FRAMES / 2]
+    var p95_ms = samples[TIMED_FRAMES - 1]
+    var avg_draws = total_draws / TIMED_FRAMES
+    var pps: i64 = 0
+    var dps: i64 = 0
+    if p50_ms > 0:
+        pps = (PIXELS * 1000) / p50_ms
+        dps = (avg_draws * 1000) / p50_ms
+    print "SCENE_RESULT scene=" + name + " backend=simple_cuda_sffi frame_count=" + TIMED_FRAMES.to_text() + " p50_ms=" + p50_ms.to_text() + " p95_ms=" + p95_ms.to_text() + " pixels_per_sec=" + pps.to_text() + " draws_per_sec=" + dps.to_text() + " mode=full"
+
+fn main():
+    print "========================================"
+    print "2D GPU Benchmark — Simple + CUDA (SFFI)"
+    print "========================================"
+    print ""
+
+    var lib = spl_dlopen("libcuda.so.1")
+    if lib == 0:
+        lib = spl_dlopen("libcuda.so")
+    if lib == 0:
+        print "FAIL: Cannot load libcuda.so"
+        return pass_dn
+
+    var p_init = spl_dlsym(lib, "cuInit")
+    var p_device_get = spl_dlsym(lib, "cuDeviceGet")
+    var p_ctx_create = spl_dlsym(lib, "cuCtxCreate_v2")
+    p_ctx_sync = spl_dlsym(lib, "cuCtxSynchronize")
+    var p_mem_alloc = spl_dlsym(lib, "cuMemAlloc_v2")
+    p_memset32 = spl_dlsym(lib, "cuMemsetD32_v2")
+
+    if p_init == 0 or p_memset32 == 0:
+        print "FAIL: Missing CUDA symbols"
+        return pass_dn
+
+    var args_i: [i64] = []
+    args_i.push(0)
+    var r = spl_wffi_call_i64(p_init, args_i, 1)
+    if r != 0:
+        print "FAIL: cuInit error=" + r.to_text()
+        return pass_dn
+
+    var dev_buf = rt_alloc(8)
+    var args_dg: [i64] = []
+    args_dg.push(dev_buf)
+    args_dg.push(0)
+    r = spl_wffi_call_i64(p_device_get, args_dg, 2)
+    if r != 0:
+        print "FAIL: cuDeviceGet"
+        return pass_dn
+    var dev_val = rt_ptr_read_i64(dev_buf, 0)
+
+    var ctx_buf = rt_alloc(8)
+    var args_cc: [i64] = []
+    args_cc.push(ctx_buf)
+    args_cc.push(0)
+    args_cc.push(dev_val)
+    r = spl_wffi_call_i64(p_ctx_create, args_cc, 3)
+    if r != 0:
+        print "FAIL: cuCtxCreate error=" + r.to_text()
+        return pass_dn
+
+    var fb_buf = rt_alloc(8)
+    var args_ma: [i64] = []
+    args_ma.push(fb_buf)
+    args_ma.push(FB_BYTES)
+    r = spl_wffi_call_i64(p_mem_alloc, args_ma, 2)
+    if r != 0:
+        print "FAIL: cuMemAlloc error=" + r.to_text()
+        return pass_dn
+    d_fb = rt_ptr_read_i64(fb_buf, 0)
+
+    # Pre-allocate hoisted arg arrays
+    args_sync = []
+    args_ms = []
+    args_ms.push(0)
+    args_ms.push(0)
+    args_ms.push(0)
+
+    print "Framebuffer: " + FRAME_W.to_text() + "x" + FRAME_H.to_text() + " (" + FB_BYTES.to_text() + " bytes)"
+    print "Warmup: " + WARMUP_FRAMES.to_text() + " frames, Timed: " + TIMED_FRAMES.to_text() + " frames"
+    print "Method: cuMemsetD32 (row-by-row rect fill, hoisted args)"
+    print ""
+
+    run_scene("fill_640x480", 0)
+    run_scene("blit_tiles", 1)
+    run_scene("clipped_scroll", 2)
+
+    print ""
+    print "========================================"
+
+    rt_free(fb_buf)
+    rt_free(ctx_buf)
+    rt_free(dev_buf)
+
+main()

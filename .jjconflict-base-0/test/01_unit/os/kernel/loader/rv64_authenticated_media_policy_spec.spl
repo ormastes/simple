@@ -1,0 +1,38 @@
+use std.spec.{describe, it, expect}
+use os.kernel.loader.riscv64_authenticated_media_policy.{
+    rv64_authenticated_media_root_matches_pin_v1,
+    rv64_authenticated_first_mount_id_v1, rv64_authenticated_first_mount_generation_v1,
+    rv64_authenticated_first_file_id_v1, rv64_authenticated_first_file_generation_v1
+}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{MountOptions, ExecuteTrust}
+use std.fs_driver.ops.{FsDriver}
+
+fn digest_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn digest_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+describe "RV64 authenticated media immutable trust pin":
+    it "accepts the exact pinned root identity only":
+        expect(rv64_authenticated_media_root_matches_pin_v1(
+            "root-v1", digest_a(), digest_b(), "root-v1", digest_a(), digest_b())).to_equal(true)
+
+    it "rejects an attacker replacing ELF signature and media PUB together":
+        expect(rv64_authenticated_media_root_matches_pin_v1(
+            "root-v1", digest_a(), digest_b(), "attacker-root", digest_b(), digest_a())).to_equal(false)
+        expect(rv64_authenticated_media_root_matches_pin_v1(
+            "root-v1", digest_a(), digest_b(), "root-v1", digest_b(), digest_b())).to_equal(false)
+
+    it "matches the actual first root mount and first execute-open coordinates":
+        var driver = FsFat32Driver.new_ram_backed_with_file("AUTHHELLO.ELF", "ELF!")
+        expect(driver.mount(MountOptions.default()).is_ok()).to_equal(true)
+        var table = MountTable.new()
+        expect(table.mount("/", DriverInstance.Fat32(driver), MountOptions.default()).is_ok()).to_equal(true)
+        val opened = table.open_for_execute("/AUTHHELLO.ELF", ExecuteTrust.Trusted)
+        expect(opened.is_ok()).to_equal(true)
+        val binding = opened.unwrap()
+        expect(binding.mount_id.id.to_u64()).to_equal(rv64_authenticated_first_mount_id_v1())
+        expect(binding.mount_generation).to_equal(rv64_authenticated_first_mount_generation_v1())
+        expect(binding.file_handle.id).to_equal(rv64_authenticated_first_file_id_v1())
+        expect(binding.content_generation).to_equal(rv64_authenticated_first_file_generation_v1())

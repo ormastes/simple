@@ -1,0 +1,109 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1
+}
+use os.kernel.loader.executable_x86_32_mapping_owner_v1.{
+    ExecutableX8632MappingReadinessErrorV1,
+    executable_x86_32_mapping_readiness_v1
+}
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _i386_elf(virtual_address: i64, file_offset: i64) -> [u8]:
+    var bytes: [u8] = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 1u8, 1u8, 1u8, 0u8, 0u8]
+    while bytes.len() < 16: bytes.push(0u8)
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 3)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, virtual_address)
+    bytes = _push_u32_le(bytes, 52)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 52)
+    bytes = _push_u16_le(bytes, 32)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, file_offset)
+    bytes = _push_u32_le(bytes, virtual_address)
+    bytes = _push_u32_le(bytes, virtual_address)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, 4096)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u32_le(bytes, 0x1000)
+    while bytes.len() < file_offset: bytes.push(0u8)
+    bytes.push(0x31u8)
+    bytes.push(0xC0u8)
+    bytes.push(0x40u8)
+    bytes.push(0xC3u8)
+    bytes
+
+fn _handle(bytes: [u8], arch: text, va: u64, offset: u64) -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1, open_handle_id: 43u64, mount_id: 7u64,
+        filesystem_name: "fat32", canonical_source_path: "/bin/hello-x86",
+        mount_generation: 3u64, file_id: 43u64, file_generation: 9u64,
+        size_bytes: bytes.len() as u64, role: "main-image",
+        target: ManifestTarget(os: "simpleos", arch: arch, abi: "simpleos"),
+        verified_load_ranges: [ExecutableLoadRangeV1(
+            file_offset: offset, file_size: 4u64, virtual_address: va,
+            memory_size: 4096u64, writable: false, executable: true)],
+        image_hash: sha256_u8_hex(bytes), admission_id: "x86-admission-1",
+        trust_epoch: 5u64, read_count: 0u64, read_bytes: 0u64, consumed: false)
+
+describe "authenticated x86-32 mapping readiness owner":
+    it "accepts exact ELF32 EM_386 evidence without consuming authority":
+        val bytes = _i386_elf(0x10000, 0x1000)
+        val ready = executable_x86_32_mapping_readiness_v1(
+            _handle(bytes, "x86", 0x10000u64, 0x1000u64), bytes)
+        expect(ready.ready).to_be_true()
+        expect(ready.error).to_equal(ExecutableX8632MappingReadinessErrorV1.None)
+        expect(ready.entry_point).to_equal(0x10000u64)
+        expect(ready.planned_pages).to_equal(1u64)
+        expect(ready.authority_consumed).to_be_false()
+
+    it "rejects target digest and layout substitution":
+        val bytes = _i386_elf(0x10000, 0x1000)
+        expect(executable_x86_32_mapping_readiness_v1(
+            _handle(bytes, "x86_64", 0x10000u64, 0x1000u64), bytes).error
+        ).to_equal(ExecutableX8632MappingReadinessErrorV1.TargetMismatch)
+        expect(executable_x86_32_mapping_readiness_v1(
+            _handle(bytes, "x86_64", 0x10000u64, 0x1000u64), bytes
+        ).authority_consumed).to_be_false()
+        var wrong = _handle(bytes, "x86", 0x10000u64, 0x1000u64)
+        wrong.image_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(executable_x86_32_mapping_readiness_v1(wrong, bytes).error
+        ).to_equal(ExecutableX8632MappingReadinessErrorV1.DigestMismatch)
+        expect(executable_x86_32_mapping_readiness_v1(
+            _handle(bytes, "x86", 0x11000u64, 0x1000u64), bytes).error
+        ).to_equal(ExecutableX8632MappingReadinessErrorV1.LayoutMismatch)
+
+    it "rejects noncongruent pages and the reserved stack window":
+        val misaligned = _i386_elf(0x10001, 0x1000)
+        expect(executable_x86_32_mapping_readiness_v1(
+            _handle(misaligned, "x86", 0x10001u64, 0x1000u64), misaligned).error
+        ).to_equal(ExecutableX8632MappingReadinessErrorV1.PageAlignmentInvalid)
+        val stack_alias = _i386_elf(0xB8000000, 0x1000)
+        expect(executable_x86_32_mapping_readiness_v1(
+            _handle(stack_alias, "x86", 0xB8000000u64, 0x1000u64), stack_alias).error
+        ).to_equal(ExecutableX8632MappingReadinessErrorV1.StackCollision)
+        val null_page = _i386_elf(0, 0x1000)
+        expect(executable_x86_32_mapping_readiness_v1(
+            _handle(null_page, "x86", 0u64, 0x1000u64), null_page).error
+        ).to_equal(ExecutableX8632MappingReadinessErrorV1.ElfRejected)

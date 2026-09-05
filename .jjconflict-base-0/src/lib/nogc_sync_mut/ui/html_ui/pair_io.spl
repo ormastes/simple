@@ -1,0 +1,55 @@
+# HtmlCssPair I/O — file-backed load/add/save operations for HtmlCssPair.
+#
+# This module is the impure (nogc_sync_mut tier) counterpart to the pure
+# std.common.ui.html_ui.pair module. It owns the file_read/file_write/
+# file_exists calls; the struct definition and text-only scan/rewrite
+# helpers stay in the common/ tier and are imported here (#35 core-lib
+# purity split — see doc/04_architecture/lib/host_io_layering/).
+#
+# Arrays are VALUE TYPES in Simple — all mutation returns a new struct.
+
+use std.io_runtime.{file_read, file_write, file_exists}
+use std.common.ui.html_ui.pair.{HtmlCssPair, _discover_css, _inject_link, _strip_links}
+
+# Build an HtmlCssPair by reading html_path and scanning for
+#   <link rel="stylesheet" href="...">
+# CSS path resolution is relative to the HTML file's directory.
+fn pair_load(html_path: text) -> HtmlCssPair:
+    val content = file_read(html_path)
+    val css = _discover_css(html_path, content)
+    HtmlCssPair(html_path: html_path, css_paths: css)
+
+# Return an updated pair with css_path added (and a <link> injected into the
+# HTML file if not already present). Creates an empty CSS file if missing.
+fn pair_add_css(pair: HtmlCssPair, css_path: text) -> HtmlCssPair:
+    # Check if already tracked
+    var i = 0
+    while i < pair.css_paths.len():
+        if pair.css_paths[i] == css_path:
+            return pair
+        i = i + 1
+    # Create empty CSS file if missing
+    if not file_exists(css_path):
+        file_write(css_path, "")
+    # Inject <link> into HTML
+    val html_content = file_read(pair.html_path)
+    val injected = _inject_link(html_content, css_path)
+    file_write(pair.html_path, injected)
+    val new_css = pair.css_paths + [css_path]
+    HtmlCssPair(html_path: pair.html_path, css_paths: new_css)
+
+# Persist the in-memory pair's html_path list back to disk by re-scanning
+# (no-op if the file already matches — used to flush after external edits).
+fn pair_save(pair: HtmlCssPair) -> bool:
+    val content = file_read(pair.html_path)
+    var rebuilt = _strip_links(content)
+    var i = 0
+    while i < pair.css_paths.len():
+        rebuilt = _inject_link(rebuilt, pair.css_paths[i])
+        i = i + 1
+    file_write(pair.html_path, rebuilt)
+    true
+
+export pair_load
+export pair_add_css
+export pair_save

@@ -1,0 +1,70 @@
+# codex-impl
+
+use std.tiny.common.status.{TinyStatus, TINY_OK, TINY_ERR_CAPACITY, TINY_ERR_INVALID}
+use std.tiny.common.types.{TinyHandle, TinyRect, tiny_intersect}
+use std.tiny.pane.model.{TinyPane, TinyResolvedPane, TINY_PANE_VISIBLE, TINY_PANE_POINTER}
+use std.tiny.pane.store.{TinyPaneStore}
+
+class TinyResolveResult:
+    status: TinyStatus
+    panes: [TinyResolvedPane]
+
+fn tiny_resolved_index(panes: [TinyResolvedPane], handle: TinyHandle) -> i32:
+    var i = 0
+    while i < panes.len():
+        if panes[i].id.index == handle.index and panes[i].id.generation == handle.generation: return i
+        i = i + 1
+    -1
+
+fn tiny_resolve_panes(store: TinyPaneStore, output: TinyRect, max_resolved: i32) -> TinyResolveResult:
+    var result: [TinyResolvedPane] = []
+    var remaining = store.handles.count()
+    if remaining > max_resolved:
+        return TinyResolveResult(status: TinyStatus.error(TINY_ERR_CAPACITY, remaining), panes: result)
+
+    # Repeated bounded passes accept arbitrary insertion order while requiring
+    # each parent to have resolved first.  No-progress means orphan or cycle.
+    var iteration = 0
+    while remaining > 0 and iteration <= store.handles.capacity:
+        var i = 0
+        while i < store.handles.capacity:
+            val handle = TinyHandle(index: i, generation: store.handles.generations[i])
+            if store.handles.occupied[i] and tiny_resolved_index(result, handle) < 0:
+                val pane = store.panes[i]
+                var parent_ready = not pane.parent.is_valid()
+                var parent_index = -1
+                if pane.parent.is_valid():
+                    val parent_status = store.validate(pane.parent)
+                    if parent_status.code != TINY_OK:
+                        return TinyResolveResult(status: parent_status, panes: result)
+                    parent_index = tiny_resolved_index(result, pane.parent)
+                    parent_ready = parent_index >= 0
+                if parent_ready:
+                    var resolved = TinyResolvedPane.root(
+                        pane.id, pane.local, output, pane.z, pane.flags, pane.content_id,
+                    )
+                    if parent_index >= 0:
+                        val parent = result[parent_index]
+                        val parent_pane = store.panes[parent.id.index]
+                        resolved = parent.resolve_child(
+                            pane.id, pane.local, pane.clip_local,
+                            parent_pane.scroll_x, parent_pane.scroll_y,
+                            pane.z, pane.flags, pane.content_id,
+                        )
+                    else:
+                        if not pane.clip_local.is_empty():
+                            val output_root = TinyResolvedPane.root(
+                                TinyHandle.invalid(), output, output, 0, 0, 0,
+                            )
+                            resolved = output_root.resolve_child(
+                                pane.id, pane.local, pane.clip_local, 0, 0,
+                                pane.z, pane.flags, pane.content_id,
+                            )
+                    result.push(resolved)
+                    remaining = remaining - 1
+            i = i + 1
+        iteration = iteration + 1
+
+    if remaining != 0:
+        return TinyResolveResult(status: TinyStatus.error(TINY_ERR_INVALID, remaining), panes: result)
+    TinyResolveResult(status: TinyStatus.ok(), panes: result)

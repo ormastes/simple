@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+t=$(mktemp -d); trap 'rm -rf "$t"' EXIT HUP INT TERM
+mkdir -p "$t/bundle/artifacts"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$t/key" >/dev/null 2>&1
+openssl pkey -in "$t/key" -pubout -out "$t/public" >/dev/null 2>&1
+h=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; r=$t/bundle/artifacts
+printf 'command\nglyph\nimage\n' > "$r/packed.events"; printf same > "$r/composition.bin"; cp "$r/composition.bin" "$r/gui.drawir"; printf '<!-- drawir-unsupported-count=0 -->\n' > "$r/web.drawir"
+ch=$(sha256sum "$r/composition.bin"|awk '{print $1}'); packed=$(printf '%s' 'draw-ir-packed-v3|arena=9001|generation=7|rows=1|1;'|sha256sum|awk '{print $1}'); printf 'packed_identity_schema=draw-ir-packed-identity-v3\narena_id=9001\ngeneration=7\nslot=0\nrow_count=1\ncomposition_bytes=4\ncomposition_sha256=%s\npacked_sha256=%s\nrow.0=1\n' "$ch" "$packed" > "$r/packed.identity"; printf 'generation=7\narena_id=9001\ncomposition_hash=%s\npacked_store_hash=%s\nrender_accepted=true\nqueue_state=published_taken_completed\nbackend=vulkan\n' "$ch" "$packed" > "$r/backend.env"; printf 'queue_id=q1\nsubmit_id=s1\nfence_id=f1\n' > "$r/queue.env"
+printf pixels > "$r/cpu.rgba"; cp "$r/cpu.rgba" "$r/device.rgba"; printf RDOCcapture > "$r/frame.rdc"; printf 'replay_open=pass\ngeneration=7\n' > "$r/replay.log"
+for f in allocation queue inflight; do printf 'capacity=1\nexact_admitted=1\nplus_one=2\nplus_one_reason=1\n' > "$r/$f.events"; done
+printf stable > "$r/overflow.before"; cp "$r/overflow.before" "$r/overflow.after"; : > "$r/fallback.events"; printf draw-command > "$r/drawir.entries"
+printf 'font_batch_count=1\natlas_upload_count=1\natlas_upload_bytes=1\nfont_cache_identity_count=1\n' > "$r/transient-owner.env"
+printf 'focus\nkey_input\npointer_down\npointer_up\nclick\n' > "$r/interaction.events"; printf '1\n2\n' > "$r/perf.samples"; printf 3 > "$r/rss.bytes"
+{
+ echo manifest_schema=mci-rendering-live-collector-v1; echo raw_vocabulary_schema=mci-rendering-raw-v1; echo artifact_mode=fixture; echo release_eligible=false; echo run_id=run1; echo source_hash=$h; echo configuration_hash=$h; echo device_identity=dev1
+ for f in "$r"/*; do echo artifact=$(basename "$f")\|$(sha256sum "$f"|awk '{print $1}'); done
+} > "$t/bundle/collector-manifest.env"
+openssl dgst -sha256 -sign "$t/key" -out "$t/bundle/collector-manifest.sig" "$t/bundle/collector-manifest.env"
+run_adapter() { sh scripts/tool/adapt-mci-v2-rendering-bundle.shs --bundle "$1" --output "$2" --mode fixture --collector-public "$t/public" --signing-key "$t/key" --key-id key1 --run-id run1 --source-hash "$h" --configuration-hash "$h" --device dev1 --captured-at-utc-ns 1 --valid-until-utc-ns 2 --command-limit 1 --glyph-limit 1 --image-limit 1 --queue-limit 1 --inflight-limit 1 --frame-p95-ns 2 --frame-p99-ns 2 --frame-deadline-ns 2 --max-rss-bytes 3; }
+run_adapter "$t/bundle" "$t/out" | grep -Fqx adapter_result=CONTRACT_ONLY
+grep -Fqx manifest_schema=mci-rendering-collector-manifest-v1 "$t/out/manifest.env"; grep -Fqx artifact_mode=fixture "$t/out/manifest.env"; [ "$(grep -c '^row=' "$t/out/manifest.env")" -eq 17 ]
+openssl dgst -sha256 -verify "$t/public" -signature "$t/out/manifest.sig" "$t/out/manifest.env" >/dev/null
+cp -a "$t/bundle" "$t/tamper"; printf changed >> "$t/tamper/artifacts/device.rgba"; if run_adapter "$t/tamper" "$t/tamper-out" >/dev/null 2>&1; then exit 1; fi
+cp -a "$t/bundle" "$t/missing"; rm "$t/missing/artifacts/frame.rdc"; if run_adapter "$t/missing" "$t/missing-out" >/dev/null 2>&1; then exit 1; fi
+cp -a "$t/bundle" "$t/semantic"; printf different > "$t/semantic/artifacts/device.rgba"; sed -i '/^artifact=device.rgba|/d' "$t/semantic/collector-manifest.env"; echo artifact=device.rgba\|$(sha256sum "$t/semantic/artifacts/device.rgba"|awk '{print $1}') >> "$t/semantic/collector-manifest.env"; openssl dgst -sha256 -sign "$t/key" -out "$t/semantic/collector-manifest.sig" "$t/semantic/collector-manifest.env"; if run_adapter "$t/semantic" "$t/semantic-out" >/dev/null 2>&1; then exit 1; fi
+for negative in hash render; do
+ cp -a "$t/bundle" "$t/$negative"
+ if [ "$negative" = hash ]; then sed -i 's/^composition_hash=.*/composition_hash=bad/' "$t/$negative/artifacts/backend.env"; else sed -i 's/^render_accepted=true/render_accepted=false/' "$t/$negative/artifacts/backend.env"; fi
+ sed -i '/^artifact=backend.env|/d' "$t/$negative/collector-manifest.env"; echo artifact=backend.env\|$(sha256sum "$t/$negative/artifacts/backend.env"|awk '{print $1}') >> "$t/$negative/collector-manifest.env"; openssl dgst -sha256 -sign "$t/key" -out "$t/$negative/collector-manifest.sig" "$t/$negative/collector-manifest.env"
+ if run_adapter "$t/$negative" "$t/$negative-out" >/dev/null 2>&1; then exit 1; fi
+done
+
+# The packed identity is independently recomputed by the adapter.  Refreshing
+# the signed raw-manifest entry must not make semantic row/hash/generation
+# mutations acceptable.
+for negative in packed-row packed-hash packed-generation packed-surplus-row; do
+ cp -a "$t/bundle" "$t/$negative"
+ case "$negative" in
+  packed-row) sed -i 's/^row\.0=.*/row.0=2/' "$t/$negative/artifacts/packed.identity" ;;
+  packed-hash) sed -i 's/^packed_sha256=.*/packed_sha256=bad/' "$t/$negative/artifacts/packed.identity" ;;
+  packed-generation) sed -i 's/^generation=7$/generation=8/' "$t/$negative/artifacts/packed.identity" ;;
+  packed-surplus-row) echo row.1=9 >> "$t/$negative/artifacts/packed.identity" ;;
+ esac
+ sed -i '/^artifact=packed.identity|/d' "$t/$negative/collector-manifest.env"; echo artifact=packed.identity\|$(sha256sum "$t/$negative/artifacts/packed.identity"|awk '{print $1}') >> "$t/$negative/collector-manifest.env"
+ openssl dgst -sha256 -sign "$t/key" -out "$t/$negative/collector-manifest.sig" "$t/$negative/collector-manifest.env"
+ if run_adapter "$t/$negative" "$t/$negative-out" >/dev/null 2>&1; then exit 1; fi
+done
+
+# Actual collector fixture -> adapter -> canonical producer integration.
+collector=build/test-mci-rendering-collector-adapter-$$; trap 'rm -rf "$t" "$collector"' EXIT HUP INT TERM
+repo=$(pwd -P); work=$repo/$collector/work
+build="sh scripts/check/build-vulkan-drawir-showcase-native.shs bin/simple $work/simple_showcase_vulkan $work/cache"
+run="/usr/bin/time -f %M -o $work/max-rss-kib env MCI_RENDERING_PROBE_DIR=$work/probe-source SIMPLE_SHOWCASE_CAPTURE=$work/device-readback.ppm SIMPLE_SHOWCASE_CPU_CAPTURE=$work/cpu-readback.ppm SIMPLE_SHOWCASE_FRAMES=20 $work/simple_showcase_vulkan"
+rdoc="RDOC_OUTPUT_DIR=$work/renderdoc RDOC_SIMPLE_BIN=$work/simple_showcase_vulkan sh scripts/tool/renderdoc-evidence.shs capture-simple"
+gate="BUILD_DIR=$work/renderdoc-gate RDOC_SIMPLE_EVIDENCE_ENV=$work/renderdoc/simple/evidence.env sh scripts/check/check-renderdoc-simple-gate.shs"
+ht() { printf '%s' "$1"|sha256sum|awk '{print $1}'; }
+{
+ echo policy_schema=mci-rendering-live-command-trust-v1; echo scope=fixture; echo collector_key_id=key1; echo collector_public_key_sha256=$(sha256sum "$t/public"|awk '{print $1}'); echo allow_fixture=true
+ echo command_engine2d_build_sha256=$(ht "$build"); echo command_engine2d_run_sha256=$(ht "$run"); echo command_renderdoc_capture_sha256=$(ht "$rdoc"); echo command_renderdoc_replay_gate_sha256=$(ht "$gate")
+} > "$t/collector-trust"
+sh scripts/tool/collect-mci-v2-rendering-live.shs --output "$collector" --mode fixture --signing-key "$t/key" --key-id key1 --trust-policy "$t/collector-trust" --run-id run1 --source-hash "$h" --configuration-hash "$h" --device dev1 --driver driver1 --queue queue1 >/dev/null
+run_adapter "$collector" "$t/pipeline" >/dev/null
+sh scripts/check/check-mci-v2-rendering.shs --contract-fixture --evidence "$collector/final" --manifest "$t/pipeline/manifest.env" --manifest-signature "$t/pipeline/manifest.sig" --collector-key "$t/pipeline/collector.pem" --collector-key-id key1 --collector-trust-policy "$t/pipeline/trust.env" --run-id run1 --source-hash "$h" --configuration-hash "$h" --captured-at-utc-ns 1 --valid-until-utc-ns 2 --now-utc-ns 1 | grep -Fq rendering_contract_result=CONTRACT_ONLY
+if sh scripts/check/check-mci-v2-rendering.shs --evidence "$collector/promoted" --manifest "$t/pipeline/manifest.env" --manifest-signature "$t/pipeline/manifest.sig" --collector-key "$t/pipeline/collector.pem" --collector-key-id key1 --collector-trust-policy "$t/pipeline/trust.env" --run-id run1 --source-hash "$h" --configuration-hash "$h" --captured-at-utc-ns 1 --valid-until-utc-ns 2 --now-utc-ns 1 >/dev/null 2>&1; then exit 1; fi
+echo mci-v2-rendering-bundle-adapter-contract:PASS

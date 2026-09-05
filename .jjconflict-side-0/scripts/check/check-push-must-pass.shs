@@ -1,0 +1,510 @@
+#!/bin/sh
+# Lightweight push-tier mandatory check. Reads normal pre-push ref rows on stdin.
+set -u
+
+ROOT=${MUST_CHECK_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
+[ -n "$ROOT" ] || { echo "push-must-check: FAIL — cannot locate repository root" >&2; exit 1; }
+ROOT=$(CDPATH= cd -- "$ROOT" 2>/dev/null && pwd -P) || {
+    echo "push-must-check: FAIL — cannot canonicalize repository root" >&2
+    exit 1
+}
+LEDGER_REL=${MUST_CHECK_LEDGER_REL:-doc/08_tracking/check/must_check_db.sdn}
+MANIFEST_REL=${MUST_CHECK_MANIFEST_REL:-config/check/must_check_gates.sdn}
+ZERO=0000000000000000000000000000000000000000
+MAX_PUSH_REF_ROWS=2
+MAX_EVIDENCE_BYTES=67108864
+ALLOW_EXTERNAL_EVIDENCE=0
+ALLOW_UNPROMOTED_LEDGER=0
+MUST_CHECK_CONFLICT_UNION_DONE=0
+RUNTIME_API_EXPECT_REMOVALS=${MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS:-}
+EVIDENCE_REV=""
+REQUIRED_BOOTSTRAP_IDS='compiler-stage1
+compiler-stage2
+compiler-stage3
+compiler-stage4
+stage4-tooling-matrix
+rules-full
+tree-guard-exhaustive-selftest
+bootstrap-essential-tools
+native-positional-build
+predicate-parser-native-build
+native-trailing-defaults
+class-identity-matrix
+engine-differential
+sdoctest-markdown-comments
+use-target-resolves
+c-runtime-compiles
+no-direct-rt
+raw-sffi-unsafe-ratchet
+signature-type-import-provenance
+perf-regression-tests
+process-wait-eintr-retry
+guard-wiring
+outline-parse-terminates
+runtime-api-regression-selftest
+interpreter-extern-registry-gap-selftest
+type-walk-constructor-parity-selftest
+interpreter-module-owners-selftest
+native-array-element-type
+windows-hook-installation
+caret-local-llm-launch
+caret-provider-wrappers
+caret-installed-provider-launches
+caret-messaging-primitives
+caret-agent-runtime-primitives
+caret-batch-process-adapter
+caret-production-multi-manager-launch
+caret-smux-multi-launch
+web-server-request-port
+web-server-gpu-nginx
+db-server-request-port
+db-server-gpu-sql
+simpleos-sbc-qemu-ls
+simpleos-clang-hello
+simpleos-simple-toolchain
+simpleos-server-executables
+riscv32-riscv64-shared
+simple-generated-vhdl-linux
+binary-size-go-parity
+interpreter-startup-parity
+rust-go-benchmark-parity'
+if [ "${MUST_CHECK_SELFTEST:-0}" = 1 ] && [ -n "${MUST_CHECK_REQUIRED_IDS_FIXTURE:-}" ]; then
+    REQUIRED_BOOTSTRAP_IDS=$MUST_CHECK_REQUIRED_IDS_FIXTURE
+fi
+
+die() { echo "push-must-check: FAIL — $*" >&2; exit 1; }
+
+case "$RUNTIME_API_EXPECT_REMOVALS" in
+    ''|*[!0-9]*)
+        [ -z "$RUNTIME_API_EXPECT_REMOVALS" ] ||
+            die "MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS must be a non-negative integer"
+        ;;
+esac
+
+fingerprint_rev() {
+    _rev=$1
+    _tree=$(mktemp) || return 1
+    git -C "$ROOT" ls-tree -r "$_rev" -- src scripts config test rules.sdl doc/07_guide doc/00_llm_process doc/glossary.md >"$_tree" 2>/dev/null || { rm -f "$_tree"; return 1; }
+    sed "\|[[:space:]]$LEDGER_REL$|d" "$_tree" | sha256sum | awk '{print $1}'
+    _rc=$?
+    rm -f "$_tree"
+    return "$_rc"
+}
+
+hash_file() { sha256sum -- "$1" 2>/dev/null | awk '{print $1}'; }
+
+resolve_evidence_path() {
+    _candidate=$1
+    case "$_candidate" in
+        /*)
+            [ "$ALLOW_EXTERNAL_EVIDENCE" -eq 1 ] || return 1
+            EVIDENCE_PATH=$_candidate
+            ;;
+        ''|..|../*|*/../*|*/..)
+            return 1
+            ;;
+        *) EVIDENCE_PATH="$ROOT/$_candidate" ;;
+    esac
+    if [ "$ALLOW_EXTERNAL_EVIDENCE" -eq 1 ]; then
+        _evidence_dir=$(CDPATH= cd -- "$(dirname -- "$EVIDENCE_PATH")" 2>/dev/null && pwd -P) || return 1
+        EVIDENCE_PATH="$_evidence_dir/$(basename -- "$EVIDENCE_PATH")"
+        [ -f "$EVIDENCE_PATH" ] && [ ! -L "$EVIDENCE_PATH" ] || return 1
+        EVIDENCE_SIZE=$(wc -c < "$EVIDENCE_PATH" | tr -d ' ') || return 1
+        EVIDENCE_REL=""
+        return 0
+    fi
+    _rel=${EVIDENCE_PATH#"$ROOT/"}
+    [ -n "$EVIDENCE_REV" ] || return 1
+    _entry=$(git -C "$ROOT" ls-tree "$EVIDENCE_REV" -- "$_rel" 2>/dev/null) || return 1
+    [ "$(printf '%s\n' "$_entry" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    _mode=$(printf '%s\n' "$_entry" | awk '{print $1}')
+    case "$_mode" in 100644|100755) ;; *) return 1 ;; esac
+    EVIDENCE_REL=$_rel
+    EVIDENCE_SIZE=$(git -C "$ROOT" cat-file -s "$EVIDENCE_REV:$_rel" 2>/dev/null) || return 1
+}
+
+hash_resolved_evidence() {
+    if [ "$ALLOW_EXTERNAL_EVIDENCE" -eq 1 ]; then
+        EVIDENCE_SHA=$(hash_file "$EVIDENCE_PATH") || return 1
+    else
+        EVIDENCE_SHA=$(git -C "$ROOT" show "$EVIDENCE_REV:$EVIDENCE_REL" 2>/dev/null | sha256sum | awk '{print $1}') || return 1
+    fi
+}
+
+field_from_text() {
+    _key=$1
+    awk -v key="$_key" '$1 == key ":" {gsub(/^[^:]*:[[:space:]]*/, ""); if (substr($0,1,1)=="\"") $0=substr($0,2); if (substr($0,length($0),1)=="\"") $0=substr($0,1,length($0)-1); print; exit}'
+}
+
+validate_ledger_text() {
+    _manifest=$1
+    _ledger=$2
+    _want_fp=$3
+    _manifest_tmp=$(mktemp) || return 2
+    _ledger_tmp=$(mktemp) || { rm -f "$_manifest_tmp"; return 2; }
+    _validation_tmp=$(mktemp) || { rm -f "$_manifest_tmp" "$_ledger_tmp"; return 2; }
+    printf '%s\n' "$_manifest" > "$_manifest_tmp"
+    printf '%s\n' "$_ledger" > "$_ledger_tmp"
+
+    # Parse and cross-check the complete registry and ledger once. The previous
+    # implementation launched awk/sed/tr once per field per row (roughly 400
+    # processes for the current ledger), dominating the supposedly light hook.
+    awk -F, -v want_fp="$_want_fp" -v allow_unpromoted="$ALLOW_UNPROMOTED_LEDGER" \
+        -v required="$(printf '%s' "$REQUIRED_BOOTSTRAP_IDS" | tr '\n' ' ')" '
+        function trim(v) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); return v }
+        function unquote(v) { v=trim(v); sub(/^"/, "", v); sub(/"$/, "", v); return v }
+        function fail() { bad=1 }
+        FNR == NR {
+            if ($0 ~ /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/) {
+                id=trim($1)
+                if (id in manifest_seen) fail()
+                manifest_seen[id]=1
+                manifest_order[++manifest_count]=id
+                manifest_blocking[id]=trim($3)
+                manifest_command[id]=unquote($5)
+            }
+            next
+        }
+        $1 ~ /^[[:space:]]*schema:[[:space:]]*/ {
+            v=$0; sub(/^[^:]*:[[:space:]]*/, "", v); schema=unquote(v); next
+        }
+        $1 ~ /^[[:space:]]*source_fingerprint:[[:space:]]*/ {
+            v=$0; sub(/^[^:]*:[[:space:]]*/, "", v); fingerprint=unquote(v); next
+        }
+        $0 ~ /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*(pass|todo|blocked|fail),/ {
+            id=trim($1)
+            if (id in ledger_seen) fail()
+            ledger_seen[id]=1
+            ledger_count++
+            status[id]=trim($2)
+            passed_at[id]=trim($3)
+            evidence[id]=unquote($5)
+            evidence_sha[id]=unquote($6)
+            ledger_command[id]=unquote($4)
+            owner[id]=unquote($7)
+            unblock[id]=unquote($8)
+        }
+        END {
+            if (schema != "simple.must-check-ledger/v3" || !manifest_count || !ledger_count) fail()
+            unpromoted=(fingerprint == "unrecorded" && allow_unpromoted == 1)
+            if (!unpromoted && fingerprint != want_fp) fail()
+            if (manifest_count != ledger_count) fail()
+            # Split on runs of space OR newline. `required` is handed in
+            # newline-flattened because a literal newline inside an awk -v
+            # assignment is a hard error on BSD awk (macOS): the whole guard died
+            # with "awk: newline in string compiler-stage1\ncomp... at source
+            # line 1" and every push from a mac was rejected as "ledger is
+            # malformed". gawk accepted it, which is why it went unnoticed.
+            required_count=split(required, required_ids, /[ \n]+/)
+            for (i=1; i<=required_count; i++)
+                if (required_ids[i] != "" && !(required_ids[i] in manifest_seen)) fail()
+            for (id in ledger_seen) if (!(id in manifest_seen)) fail()
+            for (i=1; i<=manifest_count; i++) {
+                id=manifest_order[i]
+                if (!(id in ledger_seen) || ledger_command[id] != manifest_command[id]) fail()
+                if (owner[id] == "" || owner[id] == "unassigned") fail()
+                if (status[id] == "pass") {
+                    if (unpromoted) fail()
+                    if (passed_at[id] !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/) fail()
+                    if (evidence[id] == "" || evidence[id] == "never" || evidence[id] == "pending required evidence") fail()
+                    if (evidence_sha[id] !~ /^[0-9a-f][0-9a-f]*$/ || length(evidence_sha[id]) != 64) fail()
+                    if (unblock[id] != "none" || evidence[id] ~ /\t/) fail()
+                } else {
+                    if (passed_at[id] != "never") fail()
+                    if (status[id] != "todo" && status[id] != "blocked") fail()
+                    if ((status[id] == "todo" || status[id] == "blocked") && (unblock[id] == "" || unblock[id] == "none")) fail()
+                    if (manifest_blocking[id] == "true" && !unpromoted) fail()
+                }
+            }
+            if (bad) exit 1
+            for (i=1; i<=manifest_count; i++) {
+                id=manifest_order[i]
+                if (status[id] == "pass") printf "P\t%s\t%s\t%s\n", id, evidence[id], evidence_sha[id]
+                else if (status[id] == "todo" || status[id] == "blocked") printf "T\t%s\n", id
+            }
+        }
+    ' "$_manifest_tmp" "$_ledger_tmp" > "$_validation_tmp"
+    _validation_rc=$?
+    rm -f "$_manifest_tmp" "$_ledger_tmp"
+    [ "$_validation_rc" -eq 0 ] || { rm -f "$_validation_tmp"; return 1; }
+
+    _evidence_total=0
+    _evidence_rc=0
+    _tab=$(printf '\t')
+    while IFS="$_tab" read -r _kind _id _evidence _evidence_sha; do
+        if [ "$_kind" = P ]; then
+            resolve_evidence_path "$_evidence" || { _evidence_rc=28; break; }
+            _evidence_size=$EVIDENCE_SIZE
+            case "$_evidence_size" in ''|*[!0-9]*) _evidence_rc=33; break ;; esac
+            _evidence_total=$(( _evidence_total + _evidence_size ))
+            [ "$_evidence_total" -le "$MAX_EVIDENCE_BYTES" ] || { _evidence_rc=34; break; }
+            hash_resolved_evidence || { _evidence_rc=28; break; }
+            [ "$EVIDENCE_SHA" = "$_evidence_sha" ] || { _evidence_rc=29; break; }
+        elif [ "$_kind" = T ]; then
+            echo "push-must-check: TODO $_id" >&2
+        fi
+    done < "$_validation_tmp"
+    rm -f "$_validation_tmp"
+    return "$_evidence_rc"
+}
+
+ledger_is_unpromoted_at_rev() {
+    _rev=$1
+    _text=$(git -C "$ROOT" show "$_rev:$LEDGER_REL" 2>/dev/null) || return 1
+    [ "$(printf '%s\n' "$_text" | field_from_text schema)" = simple.must-check-ledger/v3 ] || return 1
+    [ "$(printf '%s\n' "$_text" | field_from_text source_fingerprint)" = unrecorded ] || return 1
+    ! printf '%s\n' "$_text" | awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*pass,/ {found=1} END {exit !found}'
+}
+
+# run_push_gate <id> <push_blocking> <script> [args...]
+#
+# Honours the manifest's push_blocking column, which until 2026-08-23 was parsed
+# and then ignored: every push-tier row was hard-blocking, so the only two states
+# a guard could have were "blocks every push" and "runs nowhere at all". That is
+# why .claude/rules/vcs.md described several guards as "wired into the pre-push
+# hook" while they appeared in no enforcement surface — there was no tier a slow
+# or honestly-RED guard could occupy, so they occupied none.
+#
+# push_blocking=false runs the guard and RECORDS its verdict on stderr without
+# failing the push. An advisory verdict is not a pass and is never silent: the
+# line is emitted with the guard's real exit status so a human or a log scrape
+# can see it. The exit status is read directly into a variable on the line after
+# the invocation, never through a pipe — a pipeline's $? is the last command's.
+run_push_gate() {
+    _gate_id=$1; _gate_blocking=$2; shift 2
+    sh "$@"
+    _gate_rc=$?
+    if [ "$_gate_rc" -eq 0 ]; then
+        return 0
+    fi
+    if [ "$_gate_blocking" = true ]; then
+        echo "push-must-check: BLOCKING gate $_gate_id failed (exit $_gate_rc)" >&2
+        return 1
+    fi
+    echo "push-must-check: ADVISORY $_gate_id verdict exit=$_gate_rc (recorded, not blocking)" >&2
+    return 0
+}
+
+run_manifest_push_gates() {
+    _manifest=$1
+    _range=$2
+    _ref=$3
+    _push_rows=$(mktemp) || return 2
+    printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*push,/ {print}' > "$_push_rows"
+    [ -s "$_push_rows" ] || { rm -f "$_push_rows"; return 2; }
+    while IFS=, read -r _id _tier _blocking _mode _command _description; do
+        _id=$(printf '%s' "$_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        _mode=$(printf '%s' "$_mode" | tr -d ' ')
+        _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
+        [ -n "$_command" ] || { rm -f "$_push_rows"; return 2; }
+        _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
+        case "$_id:$_mode:$_command" in
+            'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
+                [ "${MUST_CHECK_CONFLICT_UNION_DONE:-0}" = 1 ] ||
+                    run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-tree-size:range:sh scripts/check/check-tree-size-push.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-conflict-markers:range:sh scripts/check/check-no-conflict-markers-push.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rules-quick:ref:sh scripts/check/check-rules-sdl.shs --scan-only --group quick --ref')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rules-sdl.shs" --scan-only --group quick --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-interpreter-module-owners:ref:sh scripts/check/check-interpreter-module-owners.shs --scan-only --ref')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-module-owners.shs" --scan-only --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-runtime-api-regression:range:sh scripts/check/check-runtime-api-regression-push.shs --scan-only')
+                if [ -n "$RUNTIME_API_EXPECT_REMOVALS" ]; then
+                    run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only --expect-removals "$RUNTIME_API_EXPECT_REMOVALS" "$_range" || { rm -f "$_push_rows"; return 1; }
+                else
+                    run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; }
+                fi ;;
+            'push-no-direct-rt:tree:sh scripts/check/check-no-direct-rt.shs')
+                # --roots src: reproduces the pre-2026-08-28 src-only scan scope so
+                # this MANDATORY pre-push gate keeps its existing meaning against the
+                # existing baseline. The widened default (src,examples,tools,scripts,test)
+                # is honestly RED against this baseline until a lane migrates that debt or
+                # the baseline is deliberately regenerated for the wider scope.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" --roots src || { rm -f "$_push_rows"; return 1; } ;;
+            'push-interpreter-extern-registry-gap:tree:sh scripts/check/check-interpreter-extern-registry-gap.shs --scan-only')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-extern-registry-gap.shs" --scan-only || { rm -f "$_push_rows"; return 1; } ;;
+            'push-sffi-v2-authority:tree:sh scripts/check/check-sffi-v2-authority.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sffi-v2-authority.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-signature-type-import-provenance:tree:sh scripts/check/check-signature-type-import-provenance.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-signature-type-import-provenance.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-type-walk-constructor-parity:tree:sh scripts/check/check-type-walk-constructor-parity.shs --scan-only')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-type-walk-constructor-parity.shs" --scan-only || { rm -f "$_push_rows"; return 1; } ;;
+            'push-perf-regression-tests:tree:sh scripts/check/check-perf-regression-tests.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-perf-regression-tests.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-use-target-resolves:tree:sh scripts/check/check-use-target-resolves.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-use-target-resolves.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-guard-wiring:tree:sh scripts/check/check-guard-wiring.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-outline-parse-terminates:tree:sh scripts/check/check-outline-parse-terminates.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-outline-parse-terminates.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-main-test-runnable:ref:sh scripts/check/check-main-test-runnable-push.shs --rev')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-main-test-runnable-push.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-c-runtime-compiles:tree:sh scripts/check/check-c-runtime-compiles-push.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-c-runtime-compiles-push.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-process-wait-eintr-retry:tree:sh scripts/check/check-process-wait-eintr-retry.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rt-dual-implementation:tree:sh scripts/check/check-rt-dual-implementation-ratchet.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-dual-implementation-ratchet.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-dual-run-shadow:tree:sh scripts/check/check-dual-run-shadow.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-dual-run-shadow.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-runtime-source-list-parity:tree:sh scripts/check/check-runtime-source-list-parity.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-source-list-parity.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-windows-checkout-damage:range:sh scripts/check/check-windows-checkout-damage-push.shs --scan-only')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-checkout-damage-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-c-runtime-compiles:tree:sh scripts/check/check-c-runtime-compiles-push.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-c-runtime-compiles-push.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-direct-rt:tree:sh scripts/check/check-no-direct-rt.shs --roots src')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" --roots src || { rm -f "$_push_rows"; return 1; } ;;
+            'push-guard-wiring:tree:sh scripts/check/check-guard-wiring.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-perf-regression-tests:tree:sh scripts/check/check-perf-regression-tests.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-perf-regression-tests.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-process-wait-eintr-retry:tree:sh scripts/check/check-process-wait-eintr-retry.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            *) rm -f "$_push_rows"; return 2 ;;
+        esac
+    done < "$_push_rows"
+    rm -f "$_push_rows"
+}
+
+run_conflict_tree_union() {
+    _ref_file=$1
+    set -- --rev-list-args-or-tips
+    while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+        [ "$_local_sha" = "$ZERO" ] || set -- "$@" "$_local_sha"
+    done < "$_ref_file"
+    [ "$#" -gt 1 ] || return 0
+    set -- "$@" --
+    while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+        [ "$_local_sha" = "$ZERO" ] || set -- "$@" "$_local_sha"
+    done < "$_ref_file"
+    set -- "$@" --not
+    _has_new=0
+    while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+        [ "$_local_sha" = "$ZERO" ] && continue
+        if [ "$_remote_sha" = "$ZERO" ]; then
+            _has_new=1
+        else
+            set -- "$@" "$_remote_sha"
+        fi
+    done < "$_ref_file"
+    if [ "$_has_new" -eq 1 ]; then
+        _push_remote=${MUST_CHECK_PUSH_REMOTE:-}
+        case "$_push_remote" in ''|*[!A-Za-z0-9._/-]*) die "new ref requires the actual push remote name" ;; esac
+        set -- "$@" "--remotes=$_push_remote"
+    fi
+    run_push_gate push-conflict-tree true "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$@"
+}
+
+if [ "${1:-}" = --self-test ]; then
+    _tmp=$(mktemp -d) || exit 2
+    trap 'rm -rf "$_tmp"' EXIT INT TERM
+    cp "$ROOT/$MANIFEST_REL" "$_tmp/manifest"
+    cp "$ROOT/$LEDGER_REL" "$_tmp/ledger"
+    printf '%s\n' 'self-test authoritative evidence' > "$_tmp/evidence"
+    _evidence_sha=$(hash_file "$_tmp/evidence") || exit 1
+    sed 's/source_fingerprint: "unrecorded"/source_fingerprint: "abc"/; s/compiler-stage1, todo, never/compiler-stage1, pass, 2000-01-01T00:00:00Z/; s/compiler-stage2, todo, never/compiler-stage2, pass, 2000-01-01T00:00:00Z/; s/compiler-stage3, todo, never/compiler-stage3, pass, 2000-01-01T00:00:00Z/; s/compiler-stage4, todo, never/compiler-stage4, pass, 2000-01-01T00:00:00Z/; s/stage4-tooling-matrix, todo, never/stage4-tooling-matrix, pass, 2000-01-01T00:00:00Z/' "$_tmp/ledger" > "$_tmp/pass-raw"
+    awk -F, -v ev="$_tmp/evidence" -v sha="$_evidence_sha" 'BEGIN{OFS=","} $2 ~ /pass/ {$5=" \"" ev "\""; $6=" \"" sha "\""; $8=" \"none\""} {print}' "$_tmp/pass-raw" > "$_tmp/pass"
+    ALLOW_EXTERNAL_EVIDENCE=1
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc || die "valid fixture rejected"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" stale && die "stale fixture accepted"
+    sed 's/compiler-stage4, pass/compiler-stage4, fail/' "$_tmp/pass" > "$_tmp/fail"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/fail")" abc && die "failed blocking row accepted"
+    sed 's/rules-full, todo, never/rules-full, fail, never/' "$_tmp/pass" > "$_tmp/nonblocking-fail"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/nonblocking-fail")" abc && die "failed nonblocking row accepted"
+    sed '/compiler-stage4,/d' "$_tmp/pass" > "$_tmp/missing"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/missing")" abc && die "missing row accepted"
+    cp "$_tmp/pass" "$_tmp/duplicate"
+    sed -n '/compiler-stage4,/p' "$_tmp/pass" >> "$_tmp/duplicate"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/duplicate")" abc && die "duplicate row accepted"
+    printf '%s\n' 'must_check_gates |id, tier, push_blocking, mode, command, description|' > "$_tmp/empty-manifest"
+    validate_ledger_text "$(cat "$_tmp/empty-manifest")" "$(cat "$_tmp/fail")" abc && die "empty manifest accepted"
+    sed 's/compiler-stage4, pass, 2000-01-01T00:00:00Z/compiler-stage4, pass, never/' "$_tmp/pass" > "$_tmp/no-pass-time"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/no-pass-time")" abc && die "PASS without timestamp accepted"
+    awk -F, 'BEGIN{OFS=","} $1 ~ /compiler-stage4/ {$5=" \"\""} {print}' "$_tmp/pass" > "$_tmp/no-evidence"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/no-evidence")" abc && die "PASS without evidence reference accepted"
+    sed 's/authoritative evidence/tampered evidence/' "$_tmp/evidence" > "$_tmp/tampered"
+    mv "$_tmp/tampered" "$_tmp/evidence"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc && die "tampered evidence accepted"
+    sed 's/, "compiler-team", "none"$/, "unassigned", "none"/' "$_tmp/pass" > "$_tmp/no-owner"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/no-owner")" abc && die "unowned row accepted"
+    sed 's/, "compiler-team", "none"$/, "compiler-team", "still pending"/' "$_tmp/pass" > "$_tmp/pass-with-unblock"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass-with-unblock")" abc && die "PASS with pending unblock accepted"
+    sed 's/compiler-stage4, pass, 2000-01-01T00:00:00Z/compiler-stage4, todo, never/; s/, "compiler-team", "none"$/, "compiler-team", "none"/' "$_tmp/pass" > "$_tmp/todo-without-unblock"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/todo-without-unblock")" abc && die "TODO without unblock accepted"
+    printf '%s\n' 'self-test authoritative evidence' > "$_tmp/evidence"
+    ALLOW_EXTERNAL_EVIDENCE=0
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc && die "external absolute evidence accepted"
+    awk -F, 'BEGIN{OFS=","} $2 ~ /pass/ {$5=" \"../outside-evidence\""} {print}' "$_tmp/pass" > "$_tmp/traversal"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/traversal")" abc && die "parent-traversal evidence accepted"
+    ALLOW_EXTERNAL_EVIDENCE=1
+    MAX_EVIDENCE_BYTES=1
+    hash_resolved_evidence() { : > "$_tmp/hash-called"; return 1; }
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc && die "oversize aggregate evidence accepted"
+    [ ! -e "$_tmp/hash-called" ] || die "oversize evidence was hashed before budget rejection"
+    ALLOW_UNPROMOTED_LEDGER=1
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/ledger")" ignored || die "unpromoted TODO fixture rejected"
+    sed 's/compiler-stage1, todo, never/compiler-stage1, pass, 2000-01-01T00:00:00Z/' "$_tmp/ledger" > "$_tmp/unpromoted-pass"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/unpromoted-pass")" ignored && die "unpromoted ledger with PASS accepted"
+    sed '/^[[:space:]]*rust-go-benchmark-parity,/d' "$_tmp/manifest" > "$_tmp/missing-required-manifest"
+    sed '/^[[:space:]]*rust-go-benchmark-parity,/d' "$_tmp/ledger" > "$_tmp/missing-required-ledger"
+    validate_ledger_text "$(cat "$_tmp/missing-required-manifest")" "$(cat "$_tmp/missing-required-ledger")" ignored && die "required TODO gate deletion accepted"
+    echo "push-must-check: PASS — 20 ledger fixtures checked"
+    exit 0
+fi
+
+[ -f "$ROOT/$MANIFEST_REL" ] || die "missing manifest $MANIFEST_REL"
+_pre_push_hook_context=0
+case "${1:-}" in
+    --from-pre-push-hook) _pre_push_hook_context=1; shift ;;
+    '') ;;
+    *) die "unknown argument: $1" ;;
+esac
+[ "$#" -eq 0 ] || die "unexpected trailing arguments"
+_refs=$(mktemp) || exit 2
+_unique_refs=$(mktemp) || exit 2
+trap 'rm -f "$_refs" "$_unique_refs"' EXIT INT TERM
+cat > "$_refs" || die "cannot read pushed ref rows"
+if [ ! -s "$_refs" ]; then
+    [ "$_pre_push_hook_context" -eq 1 ] || die "no pushed refs were provided outside the pre-push hook"
+    echo "push-must-check: PASS — 0 refs to push (no-op)"
+    exit 0
+fi
+
+awk 'NF != 4 {bad=1; next} !seen[$2 SUBSEP $4]++ {print} END {exit bad}' "$_refs" > "$_unique_refs" ||
+    die "malformed pushed ref row"
+_ref_count=$(wc -l < "$_unique_refs" | tr -d ' ')
+[ "$_ref_count" -gt 0 ] || die "no non-duplicate pushed refs were provided"
+[ "$_ref_count" -le "$MAX_PUSH_REF_ROWS" ] ||
+    die "$_ref_count unique ref updates exceed the bounded limit $MAX_PUSH_REF_ROWS; split the push"
+
+run_conflict_tree_union "$_unique_refs" || die "outgoing commit union contains a conflict tree or exceeds its bounded history limit"
+MUST_CHECK_CONFLICT_UNION_DONE=1
+export MUST_CHECK_CONFLICT_UNION_DONE
+
+while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+    [ "$_local_sha" = "$ZERO" ] && continue
+    _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
+    _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
+    _fp=$(fingerprint_rev "$_local_sha") || die "cannot fingerprint $_local_sha"
+    EVIDENCE_REV=$_local_sha
+    _predecessor=$_remote_sha
+    if [ "$_predecessor" = "$ZERO" ]; then
+        _predecessor=$(git -C "$ROOT" merge-base "$_local_sha" origin/main 2>/dev/null) || die "cannot derive new-ref base"
+    fi
+    ALLOW_UNPROMOTED_LEDGER=0
+    if ledger_is_unpromoted_at_rev "$_predecessor"; then
+        ALLOW_UNPROMOTED_LEDGER=1
+    fi
+    validate_ledger_text "$_manifest" "$_ledger" "$_fp" || die "ledger is malformed stale or has a non-passing push-blocking row"
+    _range="$_remote_sha..$_local_sha"
+    if [ "$_remote_sha" = "$ZERO" ]; then
+        _range="$_predecessor..$_local_sha"
+    fi
+    run_manifest_push_gates "$_manifest" "$_range" "$_local_sha" ||
+        die "one or more manifest-declared push gates failed"
+done < "$_unique_refs"
+
+echo "push-must-check: PASS — lightweight committed-tree and bootstrap-ledger checks passed"

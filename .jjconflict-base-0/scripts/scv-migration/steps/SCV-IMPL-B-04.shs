@@ -1,0 +1,39 @@
+#!/bin/sh
+# SCV-IMPL-B-04 — relational metadata store (textual SdnDatabase backend +
+# WAL; NOT the rt_sqlite emulation) with migration off the pipe-delimited
+# identity indexes.
+# Checks: library/spec files exist, all 11 schema tables are declared, the
+# acceptance spec runs green (last Results line = 0 failed).
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Committed UNSIGNED.
+set -u
+LIB="src/lib/scv/metadata_db.spl"
+SPEC="test/integration/app/scv_metadata_db_spec.spl"
+[ -f "$LIB" ] && [ -f "$SPEC" ] || { echo "ERROR — nothing was checked (missing files)"; exit 2; }
+checked=0
+bad=""
+for t in backend_revision logical_change implicit_snapshot path_state file_entity file_entity_version symbol_entity symbol_entity_version identity_relation parse_index event_batch; do
+  grep -q "\"$t\"" "$LIB" || bad="$bad table($t)"
+  checked=$((checked + 1))
+done
+grep -q 'scv_metadb_migrate_identity' "$LIB" || bad="$bad migration-fn"
+checked=$((checked + 1))
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-B-04.$$.log"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "$SPEC" > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RESULTS=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+[ "$rc" -eq 0 ] || bad="$bad spec-rc($rc)"
+case "$RESULTS" in
+  *", 0 failed"*) : ;;
+  "") bad="$bad spec(no-results-line)" ;;
+  *) bad="$bad spec($RESULTS)" ;;
+esac
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$bad" ]; then
+  echo "PASS — $checked check(s): 11 tables declared, identity migration wired, $RESULTS"
+  exit 0
+fi
+echo "FAIL — $checked check(s), unmet:$bad"
+exit 1

@@ -1,0 +1,158 @@
+# Standalone paint-chunk rasterizer (lane O3), per
+# `doc/03_plan/os/simpleos/screens/ws_d3_damage_present_investigation.md` §9:
+# O2 proved the raster-skip accounting layer (`paint_chunks_raster` in
+# property_trees.spl) but deliberately found ZERO consumers of it — the real
+# compositor pixel loop (`src/os/compositor/compositor.spl`,
+# `render_shapes.spl`) reads pixels through `get_pixel_buffer()`, which is a
+# LIVE ALIAS mutated elsewhere in place, so adding damage-skip logic there
+# would be a correctness regression (§9b: `read_pixels_damaged()` returns the
+# backend's own mirror; writes to it are visible without any new damage
+# being recorded).
+#
+# This module is NOT that integration. It is a genuinely new, minimal,
+# SAFE, standalone consumer: it owns its OWN pixel buffer (never aliased,
+# never touches `get_pixel_buffer()`), and for each chunk `paint_chunks_raster`
+# reports dirty this frame, paints a flat-colour rect into that buffer using
+# the scalar-oracle blend primitives (`oracle_fill_const` /
+# `oracle_src_over_const` — ground truth, not reinvented blending). Chunks
+# reported skipped are left byte-for-byte untouched. This proves the
+# revisions -> property-trees -> paint-chunks -> raster-skip pipeline saves
+# real per-pixel work end-to-end, without touching the aliasing hazard.
+#
+# Interpreter-divergence constraint: every array is a TOP-LEVEL field of one
+# holder class; cross-object work is a free function taking both holders as
+# plain parameters (same pattern as `paint_chunks_sync`). Integer verdict
+# codes, not enums.
+
+use common.ui.render_opt.revisions.{RenderRevisions, revisions_chunk_grouping_rev}
+use common.ui.render_opt.property_trees.{
+    PropertyTrees, PaintChunks, RasterStats, paint_chunks_raster,
+    paint_chunks_property_rev
+}
+use common.gpu.engine2d.scalar_oracle.oracle_fill_const
+
+# Per-chunk device-space rect + fill colour, indexed in lockstep with the
+# `PaintChunks` this rasterizer paints. Kept as a separate class (rather than
+# adding columns to `PaintChunks`) so property_trees.spl stays free of any
+# pixel-format opinion — this module owns the opinion, not the shared cache.
+class PaintChunkRects:
+    rect_x: [i64]
+    rect_y: [i64]
+    rect_w: [i64]
+    rect_h: [i64]
+    colour: [i64]
+    rect_count: i64
+
+    static fn create() -> PaintChunkRects:
+        PaintChunkRects(rect_x: [], rect_y: [], rect_w: [], rect_h: [],
+                        colour: [], rect_count: 0)
+
+    # Must be called in the same order as the matching `PaintChunks.add_chunk*`
+    # calls, so index `i` here lines up with chunk `i` there.
+    me add_rect(x: i64, y: i64, w: i64, h: i64, argb: i64) -> i64:
+        val idx = self.rect_count
+        self.rect_x.push(x)
+        self.rect_y.push(y)
+        self.rect_w.push(w)
+        self.rect_h.push(h)
+        self.colour.push(argb)
+        self.rect_count = idx + 1
+        idx
+
+class ChunkRasterBuffer:
+    # owned, non-aliased pixel storage: this module's own [u32], created and
+    # written only here — never `get_pixel_buffer()`, never shared.
+    pixels: [u32]
+    stride: i64
+    height: i64
+
+    static fn create(stride: i64, height: i64) -> ChunkRasterBuffer:
+        var buf: [u32] = []
+        var i: i64 = 0
+        val total = stride * height
+        while i < total:
+            buf.push(0)
+            i = i + 1
+        ChunkRasterBuffer(pixels: buf, stride: stride, height: height)
+
+    me get(x: i64, y: i64) -> u32:
+        self.pixels[(y * self.stride + x).to_i32()]
+
+# Rasterize exactly the chunks `paint_chunks_raster` reports dirty this frame
+# into `buf`, at the rects in `rects`, using the flat colour `rects.colour[i]`.
+# Skipped chunks are not touched at all — no read, no write. Returns the
+# `RasterStats` from the underlying skip-accounting call so a caller/spec can
+# assert on `rastered_count`/`skipped_count` directly.
+fn paint_chunk_rasterizer_run(chunks: PaintChunks, rects: PaintChunkRects,
+                              trees: PropertyTrees, revs: RenderRevisions,
+                              buf: ChunkRasterBuffer, component_gen: u32,
+                              theme_rev: u32, scale_rev: u32,
+                              viewport_gen: u32,
+                              capability_gen: u32) -> RasterStats:
+    # `paint_chunks_raster` only returns aggregate counts, not per-chunk
+    # detail, and it mutates each chunk's key to "fresh" as it goes — so
+    # staleness must be read BEFORE calling it, not inferred afterward. This
+    # mirrors its own key comparison exactly (same seven fields, same order)
+    # so this module never diverges from what it actually decided.
+    val grouping = revisions_chunk_grouping_rev(revs)
+    val prop = paint_chunks_property_rev(trees)
+    var dirty: [i64] = []
+    var i: i64 = 0
+    while i < chunks.chunk_count:
+        var stale = false
+        if chunks.key_component_gen[i] != component_gen:
+            stale = true
+        if chunks.key_grouping_rev[i] != grouping:
+            stale = true
+        if chunks.key_property_rev[i] != prop:
+            stale = true
+        if chunks.key_theme_rev[i] != theme_rev:
+            stale = true
+        if chunks.key_scale_rev[i] != scale_rev:
+            stale = true
+        if chunks.key_viewport_gen[i] != viewport_gen:
+            stale = true
+        if chunks.key_capability_gen[i] != capability_gen:
+            stale = true
+        if stale:
+            dirty.push(i)
+        i = i + 1
+
+    val stats = paint_chunks_raster(chunks, trees, revs, component_gen,
+                                     theme_rev, scale_rev, viewport_gen,
+                                     capability_gen)
+
+    var k: i64 = 0
+    while k < dirty.len():
+        val idx = dirty[k]
+        if idx < rects.rect_count:
+            paint_rect(buf, rects.rect_x[idx], rects.rect_y[idx],
+                      rects.rect_w[idx], rects.rect_h[idx], rects.colour[idx])
+        k = k + 1
+    stats
+
+# Flat-colour fill of one rect via the scalar-oracle store primitive
+# (`oracle_fill_const` — a STORE, not a blend, matching an opaque paint).
+# The fill span is clipped per row to `[0, buf.stride)` in x, the same way
+# `py` is already clipped to `[0, buf.height)` in y — see
+# `doc/08_tracking/bug/paint_rect_negative_x_row_bleed_2026-08-07.md`: without
+# this clip, a negative `x` makes `row_offset` land inside the tail of the
+# PRECEDING row's flat pixel storage, and the fill then bleeds forward across
+# the row boundary into that unrelated row instead of clipping to this one.
+fn paint_rect(buf: ChunkRasterBuffer, x: i64, y: i64, w: i64, h: i64, argb: i64):
+    var row: i64 = 0
+    while row < h:
+        val py = y + row
+        if py >= 0 and py < buf.height:
+            var x0 = x
+            if x0 < 0:
+                x0 = 0
+            var x1 = x + w
+            if x1 > buf.stride:
+                x1 = buf.stride
+            if x1 > x0:
+                val row_offset = py * buf.stride + x0
+                oracle_fill_const(buf.pixels, row_offset, x1 - x0, argb)
+        row = row + 1
+
+export PaintChunkRects, ChunkRasterBuffer, paint_chunk_rasterizer_run, paint_rect

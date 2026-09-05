@@ -1,0 +1,104 @@
+# @tag:system
+"""
+## Purpose and audience
+
+Portable smoke for UI interaction flow contracts, run by system-lane operators
+and the UI test-client maintainers. The full UI test client starts a web
+server and imports networking modules that are not parser-clean in the default
+interpreted system lane; demo rendering coverage remains in demo_render_spec.
+This file drives the real interaction products in-process instead: the web
+render input envelope encoder (common.ui.web_render_api) and the declarative
+access ensure engine (common.ui.access).
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Each scenario
+constructs a real UIEvent or access snapshot, feeds it through the product
+encoder or ensure engine, and asserts on the returned record.
+
+## Compatibility and limitations
+
+No HTTP server, TCP client, or live surface is started: input envelopes are
+encoded, not transported, and access ensure runs over a hand-built snapshot.
+Transport-level behavior is covered by the web test API lane.
+
+## Verification guidance and troubleshooting
+
+If a scenario fails, re-run this spec alone; the failing assertion's inline
+oracle comment names the envelope mapping or ensure verdict that regressed.
+"""
+# Lifecycle: research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: ui interaction portable smoke
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use common.ui.widget.{UIEvent}
+use common.ui.web_render_api.{web_render_input_envelope_from_event, web_render_input_envelope_to_json}
+use common.ui.access.{UiAccessSnapshot, UiAccessSurface, UiAccessNode, ui_access_ensure_result}
+
+fn _snapshot() -> UiAccessSnapshot:
+    val node = UiAccessNode(
+        canonical_id: "main#action_btn",
+        surface_id: "main",
+        widget_id: "action_btn",
+        kind: "button",
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text_value: "",
+        props: [],
+        child_ids: [],
+        action_names: []
+    )
+    val surface = UiAccessSurface(surface_id: "main", title: "Demo", active: true, window_id: "w1", app_id: "demo", root_canonical_id: "main#action_btn")
+    UiAccessSnapshot(
+        protocol_version: 1,
+        snapshot_revision: 1,
+        mode: "NORMAL",
+        active_surface: "main",
+        surfaces: [surface],
+        nodes: [node],
+        recent_events: []
+    )
+
+describe "UI interaction portable smoke":
+    # @manual scenario evidence
+    it "records keyboard navigation action":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol_json): encoded input envelope for the navigation keypress
+        step("send a j keypress through the input envelope encoder")
+        val env = web_render_input_envelope_from_event("electron", "main", UIEvent.KeyPress(key: "j"))
+        expect(env.event_type).to_equal("key")  # oracle: from_event maps KeyPress to the key event_type
+        expect(env.key).to_equal("j")  # oracle: the pressed key is carried verbatim in the envelope
+        val wire = web_render_input_envelope_to_json(env)
+        expect(wire.contains("\"event_type\":\"key\"")).to_equal(true)  # oracle: the transport JSON records the key event type
+        expect(wire.contains("\"key\":\"j\"")).to_equal(true)  # oracle: the transport JSON records the pressed key
+
+    it "records visibility and existence checks":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol_json): ensure verdicts for exists, visible, and the missing-id probe
+        step("ensure exists and visible over a snapshot holding action_btn")
+        val snapshot = _snapshot()
+        val exists = ui_access_ensure_result(snapshot, "main", "main#action_btn", "", "", false, 10, "exists", "")
+        expect(exists.satisfied).to_equal(true)  # oracle: exists is satisfied when the canonical node resolves in the snapshot
+        val visible = ui_access_ensure_result(snapshot, "main", "main#action_btn", "", "", false, 10, "visible", "")
+        expect(visible.satisfied).to_equal(true)  # oracle: visible is satisfied because the node carries visible=true
+        step("ensure exists for an id the snapshot does not hold")
+        val missing = ui_access_ensure_result(snapshot, "main", "main#missing_btn", "", "", false, 10, "exists", "")
+        expect(missing.satisfied).to_equal(false)  # oracle: the ensure engine fails closed for an unresolved canonical id
+
+    it "records drag source and target":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol_json): encoded envelopes for the drag start and drop pair
+        step("send a drag start from action_btn through the envelope encoder")
+        val start = web_render_input_envelope_from_event("electron", "main", UIEvent.DragStart(source_id: "action_btn", mime: "text/plain", data: "row-1"))
+        expect(start.event_type).to_equal("drag_start")  # oracle: from_event maps DragStart to the drag_start event_type
+        expect(start.target_id).to_equal("action_btn")  # oracle: the drag source is recorded in target_id
+        step("drop the dragged payload onto nav_list and encode the envelope")
+        val drop = web_render_input_envelope_from_event("electron", "main", UIEvent.DragDrop(mime: "text/plain", data: "row-1", x: 12, y: 30, source_id: "action_btn"))
+        expect(drop.event_type).to_equal("drag_drop")  # oracle: from_event maps DragDrop to the drag_drop event_type
+        expect(drop.target_id).to_equal("action_btn")  # oracle: the drop carries the originating source id in target_id
+        val wire = web_render_input_envelope_to_json(drop)
+        expect(wire.contains("\"event_type\":\"drag_drop\"")).to_equal(true)  # oracle: the transport JSON records the drop event type

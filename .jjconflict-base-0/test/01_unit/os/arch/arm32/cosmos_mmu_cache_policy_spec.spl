@@ -1,0 +1,189 @@
+"""Pure-Simple Cosmos MMU/cache policy and execution-decision evidence."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.arch.arm32.cosmos.cosmos_mmu_cache_policy.{
+    COSMOS_MMU_POLICY_DECISION_COUNT,
+    cosmos_mmu_cache_policy_decision_names,
+    cosmos_mmu_cache_policy_cache_way_shift,
+    cosmos_mmu_cache_policy_cache_way_shift_execution,
+    cosmos_mmu_cache_policy_cache_setway_operand,
+    cosmos_mmu_cache_policy_ttbr0_value,
+    cosmos_mmu_cache_policy_sctlr_apply_policy,
+    cosmos_mmu_cache_policy_sctlr_policy_valid,
+    cosmos_mmu_cache_policy_sctlr_policy_valid_execution,
+    cosmos_mmu_cache_policy_control_registers_valid,
+    cosmos_mmu_cache_policy_control_registers_valid_execution,
+    cosmos_mmu_cache_policy_control_policy_contract,
+    cosmos_mmu_cache_policy_scu_invalidate_mask,
+    cosmos_mmu_cache_policy_scu_invalidate_mask_execution,
+    cosmos_mmu_cache_policy_cache_enable_allowed,
+    cosmos_mmu_cache_policy_cache_enable_allowed_execution,
+    cosmos_mmu_cache_policy_section_descriptor,
+    cosmos_mmu_cache_policy_coarse_descriptor,
+    cosmos_mmu_cache_policy_small_page_descriptor,
+    cosmos_mmu_cache_policy_small_page_cached_rx_descriptor,
+    cosmos_mmu_cache_policy_small_page_cached_rw_xn_descriptor,
+    cosmos_mmu_cache_policy_l2_descriptor_executable,
+    cosmos_mmu_cache_policy_l2_descriptor_executable_execution,
+    cosmos_mmu_cache_policy_l2_descriptor_priv_writable,
+    cosmos_mmu_cache_policy_l2_descriptor_priv_writable_execution,
+    cosmos_mmu_cache_policy_l2_descriptor_write_execute,
+    cosmos_mmu_cache_policy_l2_descriptor_write_execute_execution,
+    cosmos_mmu_cache_policy_firmware_l2_descriptor_for_address,
+    cosmos_mmu_cache_policy_firmware_l2_descriptor_execution,
+    cosmos_mmu_cache_policy_device_section,
+    cosmos_mmu_cache_policy_device_section_execution,
+    cosmos_mmu_cache_policy_l1_descriptor_for_address,
+    cosmos_mmu_cache_policy_l1_descriptor_execution,
+    cosmos_mmu_cache_policy_ocm_l2_descriptor_for_address,
+    cosmos_mmu_cache_policy_ocm_l2_descriptor_execution,
+    cosmos_mmu_cache_policy_mmu_poll_allowed,
+    cosmos_mmu_cache_policy_mmu_poll_allowed_execution
+}
+
+describe "Cosmos pure-Simple MMU/cache policy":
+    it "preserves cache operands and control-register policy":
+        expect(cosmos_mmu_cache_policy_cache_way_shift(1u32)).to_equal(0u32)
+        expect(cosmos_mmu_cache_policy_cache_way_shift(2u32)).to_equal(31u32)
+        expect(cosmos_mmu_cache_policy_cache_way_shift(4u32)).to_equal(30u32)
+        expect(cosmos_mmu_cache_policy_cache_way_shift(8u32)).to_equal(29u32)
+        expect(cosmos_mmu_cache_policy_cache_setway_operand(
+            1u32, 3u32, 127u32, 5u32, 30u32
+        )).to_equal(0xC0000FE2u32)
+        expect(cosmos_mmu_cache_policy_ttbr0_value(
+            0x12345678u32)).to_equal(0x1234404Au32)
+        expect(cosmos_mmu_cache_policy_sctlr_apply_policy(
+            0u32)).to_equal(0x00001005u32)
+        expect(cosmos_mmu_cache_policy_sctlr_policy_valid(
+            0x00001005u32)).to_equal(1)
+        expect(cosmos_mmu_cache_policy_sctlr_policy_valid(
+            0x00003005u32)).to_equal(0)
+        expect(cosmos_mmu_cache_policy_control_registers_valid(
+            0x00100000u32, 0x00100000u32,
+            0x0010404Au32, 0x0010404Au32,
+            1u32, 0x00001005u32
+        )).to_equal(1)
+        expect(cosmos_mmu_cache_policy_control_policy_contract()).to_equal(1)
+
+    it "preserves descriptor boundaries and write-xor-execute policy":
+        expect(cosmos_mmu_cache_policy_section_descriptor(
+            0x18001234u32, 0x0001101Cu32)).to_equal(0x1801141Eu32)
+        expect(cosmos_mmu_cache_policy_coarse_descriptor(
+            0x12345678u32)).to_equal(0x12345401u32)
+        expect(cosmos_mmu_cache_policy_small_page_descriptor(
+            0xFFFC0123u32)).to_equal(0xFFFC0453u32)
+        expect(cosmos_mmu_cache_policy_small_page_cached_rx_descriptor(
+            0x00100123u32)).to_equal(0x0010065Eu32)
+        expect(cosmos_mmu_cache_policy_small_page_cached_rw_xn_descriptor(
+            0x00108123u32)).to_equal(0x0010845Fu32)
+        expect(cosmos_mmu_cache_policy_l2_descriptor_executable(
+            0x0010065Eu32)).to_equal(1)
+        expect(cosmos_mmu_cache_policy_l2_descriptor_priv_writable(
+            0x0010065Eu32)).to_equal(0)
+        expect(cosmos_mmu_cache_policy_l2_descriptor_write_execute(
+            0x00000012u32)).to_equal(1)
+        expect(cosmos_mmu_cache_policy_firmware_l2_descriptor_for_address(
+            0x00107FFFu32, 0x00108000u32)).to_equal(0x0010765Eu32)
+        expect(cosmos_mmu_cache_policy_firmware_l2_descriptor_for_address(
+            0x00108000u32, 0x00108000u32)).to_equal(0x0010845Fu32)
+        expect(cosmos_mmu_cache_policy_l1_descriptor_for_address(
+            0x00200000u32, 0x12345000u32, 0x12345678u32
+        )).to_equal(0x00211412u32)
+        expect(cosmos_mmu_cache_policy_l1_descriptor_for_address(
+            0x18000000u32, 0x12345000u32, 0x12345678u32
+        )).to_equal(0x1801141Eu32)
+        expect(cosmos_mmu_cache_policy_ocm_l2_descriptor_for_address(
+            0xFFFC0000u32)).to_equal(0xFFFC0453u32)
+
+    it "preserves SCU and bounded polling decisions":
+        expect(cosmos_mmu_cache_policy_scu_invalidate_mask(
+            0u32)).to_equal(0xFFFFu32)
+        expect(cosmos_mmu_cache_policy_scu_invalidate_mask(1u32)).to_equal(0u32)
+        expect(cosmos_mmu_cache_policy_cache_enable_allowed(
+            1u32, 0x40u32)).to_equal(1)
+        expect(cosmos_mmu_cache_policy_cache_enable_allowed(
+            0u32, 0x40u32)).to_equal(0)
+        expect(cosmos_mmu_cache_policy_mmu_poll_allowed(999999u32)).to_equal(1)
+        expect(cosmos_mmu_cache_policy_mmu_poll_allowed(1000000u32)).to_equal(0)
+
+    it "pins 37 named decisions and records all 74 outcomes in production evaluation":
+        val names = cosmos_mmu_cache_policy_decision_names()
+        expect(COSMOS_MMU_POLICY_DECISION_COUNT).to_equal(37u32)
+        expect(names.len()).to_equal(37)
+        expect(names[0]).to_equal("cache.multiple-ways")
+        expect(names[8]).to_equal("control.all-registers-valid")
+        expect(names[18]).to_equal("l2-write-execute.writable")
+        expect(names[27]).to_equal("l1.firmware-section")
+        expect(names[36]).to_equal("mmu.poll-allowed")
+
+        val executions = [
+            cosmos_mmu_cache_policy_cache_way_shift_execution(1u32),
+            cosmos_mmu_cache_policy_cache_way_shift_execution(2u32),
+            cosmos_mmu_cache_policy_sctlr_policy_valid_execution(0u32),
+            cosmos_mmu_cache_policy_sctlr_policy_valid_execution(0x00001005u32),
+            cosmos_mmu_cache_policy_sctlr_policy_valid_execution(0x00003005u32),
+            cosmos_mmu_cache_policy_control_registers_valid_execution(
+                1u32, 1u32, 2u32, 2u32, 1u32, 0x00001005u32),
+            cosmos_mmu_cache_policy_control_registers_valid_execution(
+                0u32, 1u32, 3u32, 2u32, 0u32, 0u32),
+            cosmos_mmu_cache_policy_scu_invalidate_mask_execution(0u32),
+            cosmos_mmu_cache_policy_scu_invalidate_mask_execution(1u32),
+            cosmos_mmu_cache_policy_cache_enable_allowed_execution(0u32, 0u32),
+            cosmos_mmu_cache_policy_cache_enable_allowed_execution(1u32, 0x40u32),
+            cosmos_mmu_cache_policy_l2_descriptor_executable_execution(0u32),
+            cosmos_mmu_cache_policy_l2_descriptor_executable_execution(2u32),
+            cosmos_mmu_cache_policy_l2_descriptor_executable_execution(3u32),
+            cosmos_mmu_cache_policy_l2_descriptor_priv_writable_execution(0u32),
+            cosmos_mmu_cache_policy_l2_descriptor_priv_writable_execution(0x12u32),
+            cosmos_mmu_cache_policy_l2_descriptor_priv_writable_execution(0x212u32),
+            cosmos_mmu_cache_policy_l2_descriptor_write_execute_execution(0x12u32),
+            cosmos_mmu_cache_policy_l2_descriptor_write_execute_execution(0x13u32),
+            cosmos_mmu_cache_policy_l2_descriptor_write_execute_execution(0x21Eu32),
+            cosmos_mmu_cache_policy_firmware_l2_descriptor_execution(
+                0u32, 0x00108000u32),
+            cosmos_mmu_cache_policy_firmware_l2_descriptor_execution(
+                0x00100000u32, 0x00108000u32),
+            cosmos_mmu_cache_policy_firmware_l2_descriptor_execution(
+                0x00108000u32, 0x00108000u32),
+            cosmos_mmu_cache_policy_firmware_l2_descriptor_execution(
+                0x00200000u32, 0x00108000u32),
+            cosmos_mmu_cache_policy_device_section_execution(0u32),
+            cosmos_mmu_cache_policy_device_section_execution(0x43C00000u32),
+            cosmos_mmu_cache_policy_device_section_execution(0x83C00000u32),
+            cosmos_mmu_cache_policy_device_section_execution(0xE0000000u32),
+            cosmos_mmu_cache_policy_device_section_execution(0xF8000000u32),
+            cosmos_mmu_cache_policy_device_section_execution(0xF8F00000u32),
+            cosmos_mmu_cache_policy_l1_descriptor_execution(
+                0u32, 0x12345000u32, 0x12345678u32),
+            cosmos_mmu_cache_policy_l1_descriptor_execution(
+                0x00100000u32, 0x12345000u32, 0x12345678u32),
+            cosmos_mmu_cache_policy_l1_descriptor_execution(
+                0x00200000u32, 0x12345000u32, 0x12345678u32),
+            cosmos_mmu_cache_policy_l1_descriptor_execution(
+                0x18000000u32, 0x12345000u32, 0x12345678u32),
+            cosmos_mmu_cache_policy_l1_descriptor_execution(
+                0x40000000u32, 0x12345000u32, 0x12345678u32),
+            cosmos_mmu_cache_policy_l1_descriptor_execution(
+                0x43C00000u32, 0x12345000u32, 0x12345678u32),
+            cosmos_mmu_cache_policy_l1_descriptor_execution(
+                0xFFF00000u32, 0x12345000u32, 0x12345678u32),
+            cosmos_mmu_cache_policy_ocm_l2_descriptor_execution(0xFFE00000u32),
+            cosmos_mmu_cache_policy_ocm_l2_descriptor_execution(0xFFF00000u32),
+            cosmos_mmu_cache_policy_ocm_l2_descriptor_execution(0xFFFC0000u32),
+            cosmos_mmu_cache_policy_mmu_poll_allowed_execution(0u32),
+            cosmos_mmu_cache_policy_mmu_poll_allowed_execution(1000000u32)
+        ]
+        var true_low = 0u32
+        var true_high = 0u32
+        var false_low = 0u32
+        var false_high = 0u32
+        for execution in executions:
+            true_low = true_low | execution.true_low
+            true_high = true_high | execution.true_high
+            false_low = false_low | execution.false_low
+            false_high = false_high | execution.false_high
+        expect(true_low).to_equal(0xFFFFFFFFu32)
+        expect(false_low).to_equal(0xFFFFFFFFu32)
+        expect(true_high).to_equal(0x1Fu32)
+        expect(false_high).to_equal(0x1Fu32)
+        print("COSMOS_MMU_SIMPLE_DECISIONS 37/37 outcomes=74/74")

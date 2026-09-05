@@ -1,0 +1,112 @@
+"""Office sheets named ranges (defined names) core behaviour spec.
+
+Covers defining a name for a single cell and for a range, lookup, listing,
+removal, target normalization, and resolution to concrete cell references.
+"""
+
+use std.spec
+use app.office.sheets.named_ranges.{NameStore, name_target_range, name_target_refs, validate_name, normalize_target}
+
+describe "NameStore.define and lookup":
+    """Define names for cells and ranges, then look them up."""
+
+    it "defines a name for a single cell":
+        var store = NameStore.new()
+        val reason = store.define("TaxRate", "B7")
+        expect(reason).to_equal("")
+        expect(store.lookup("TaxRate")).to_equal("B7")
+
+    it "defines a name for a range":
+        var store = NameStore.new()
+        expect(store.define("Sales", "A1:C3")).to_equal("")
+        expect(store.lookup("Sales")).to_equal("A1:C3")
+
+    it "normalizes the target to upper case":
+        var store = NameStore.new()
+        expect(store.define("Region", "a1:c3")).to_equal("")
+        expect(store.lookup("Region")).to_equal("A1:C3")
+
+    it "reports an undefined name as nil":
+        var store = NameStore.new()
+        expect(store.lookup("Missing") == nil).to_equal(true)
+
+    it "reports presence with has":
+        var store = NameStore.new()
+        store.define("Total", "D10")
+        expect(store.has("Total")).to_equal(true)
+        expect(store.has("Nope")).to_equal(false)
+
+describe "NameStore.list_names and count":
+    """List defined names in sorted original spelling."""
+
+    it "lists names sorted case-insensitively":
+        var store = NameStore.new()
+        store.define("Zebra", "A1")
+        store.define("alpha", "A2")
+        store.define("Mid", "A3")
+        expect(store.list_names()).to_equal(["alpha", "Mid", "Zebra"])
+
+    it "counts defined names":
+        var store = NameStore.new()
+        expect(store.count()).to_equal(0)
+        store.define("One", "A1")
+        store.define("Two", "A2")
+        expect(store.count()).to_equal(2)
+
+describe "NameStore.remove and redefine":
+    """Remove and deliberately overwrite definitions."""
+
+    it "removes an existing name":
+        var store = NameStore.new()
+        store.define("Temp", "B2")
+        expect(store.remove("Temp")).to_equal(true)
+        expect(store.has("Temp")).to_equal(false)
+
+    it "redefines an existing name to a new target":
+        var store = NameStore.new()
+        store.define("SalesBlock", "A1:A5")
+        expect(store.redefine("SalesBlock", "B1:B9")).to_equal("")
+        expect(store.lookup("SalesBlock")).to_equal("B1:B9")
+
+describe "name resolution":
+    """Resolve a name to a CellRange or to concrete cell references."""
+
+    it "resolves a range name to its cell references":
+        var store = NameStore.new()
+        store.define("Block", "A1:B2")
+        expect(name_target_refs(store, "Block")).to_equal(["A1", "A2", "B1", "B2"])
+
+    it "resolves a single-cell name to one reference":
+        var store = NameStore.new()
+        store.define("Cell", "C4")
+        expect(name_target_refs(store, "Cell")).to_equal(["C4"])
+
+    it "resolves an undefined name to an empty list":
+        var store = NameStore.new()
+        expect(name_target_refs(store, "Ghost")).to_equal([])
+
+    it "resolves a range name to a CellRange":
+        var store = NameStore.new()
+        store.define("Block", "A1:B2")
+        val range = name_target_range(store, "Block")
+        expect(range != nil).to_equal(true)
+        expect(range.start.col).to_equal(0)
+        expect(range.end_ref.row).to_equal(1)
+
+describe "target validation":
+    """Only valid A1 cells and ranges are accepted as targets."""
+
+    it "accepts a cell target":
+        expect(normalize_target("b7")).to_equal("B7")
+
+    it "rejects a non-A1 target":
+        expect(normalize_target("not a ref")).to_equal("")
+
+    it "rejects a definition with an invalid target":
+        var store = NameStore.new()
+        val reason = store.define("Bad", "hello")
+        expect(reason.contains("not a valid cell reference")).to_equal(true)
+        expect(store.has("Bad")).to_equal(false)
+
+    it "accepts a valid name in validate_name":
+        expect(validate_name("Tax_Rate.2")).to_equal("")

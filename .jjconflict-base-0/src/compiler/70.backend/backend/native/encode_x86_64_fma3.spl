@@ -1,0 +1,271 @@
+# src/compiler/70.backend/backend/native/encode_x86_64_fma3.spl
+#
+# x86_64 FMA3 Instruction Byte-Emit Encoder — Pure Simple
+#
+# Produces exact byte sequences for FMA3 fused-multiply-add YMM (256-bit) instructions:
+#   VFMADD132PS  (VEX.256.66.0F38.W0 98 /r) — rd = rd*rm + rn
+#   VFMADD213PS  (VEX.256.66.0F38.W0 A8 /r) — rd = rn*rd + rm
+#   VFMADD231PS  (VEX.256.66.0F38.W0 B8 /r) — rd = rn*rm + rd
+#   VFMSUB132PS  (VEX.256.66.0F38.W0 9A /r) — rd = rd*rm - rn
+#   VFMSUB213PS  (VEX.256.66.0F38.W0 AA /r) — rd = rn*rd - rm
+#   VFMSUB231PS  (VEX.256.66.0F38.W0 BA /r) — rd = rn*rm - rd
+#   VFNMADD213PS (VEX.256.66.0F38.W0 AC /r) — rd = -(rn*rd) + rm
+#   VFMADD132PD  (VEX.256.66.0F38.W1 98 /r) — double-precision variant
+#
+# VEX 3-byte prefix (C4h) for FMA3 YMM forms (L=1, 0F38 map, pp=01/66):
+#   Byte 0: 0xC4
+#   Byte 1: ~R  ~X  ~B  m4 m3 m2 m1 m0
+#     ~R   = 1 when rd < 8,  else 0  (inverted REX.R — extends ModRM.reg)
+#     ~X   = 1 (no SIB; register-direct only)
+#     ~B   = 1 when rm < 8,  else 0  (inverted REX.B — extends ModRM.rm)
+#     mmmmm= 00010 (2) for 0F38 map
+#   Byte 2: W  ~v3 ~v2 ~v1 ~v0  L  p1 p0
+#     W    = 0 for PS (single-precision), 1 for PD (double-precision)
+#     ~vvvv= inverted 4-bit vvvv index: (15 - rn)
+#     L    = 1 (256-bit YMM)
+#     pp   = 01 (0x66 prefix)
+#   Byte 3: opcode (98h, 9Ah, A8h, AAh, ACh, B8h, BAh)
+#   Byte 4: ModRM — mod=11, reg=rd%8, rm=rm%8
+#
+# Operand routing (rd, rn, rm convention):
+#   rd   → ModRM.reg  (destination, also first src in 132/231 forms)
+#   rn   → VEX.vvvv   (second operand in semantic order)
+#   rm   → ModRM.rm   (third operand / memory source)
+#
+# Arithmetic for VEX byte1 (0F38 map, mmmmm=2, no SIB):
+#   byte1 = 226 - (rd/8)*128 - (rm/8)*32
+#   (226 = 0xE2 = 1110_0010 = ~R=1, ~X=1, ~B=1, mmmmm=2)
+#
+# Arithmetic for VEX byte2:
+#   byte2_ps(rn) = (15 - rn)*8 + 5      (W=0, L=1→bit2=4, pp=01→1)
+#   byte2_pd(rn) = 128 + (15 - rn)*8 + 5  (W=1 adds 128)
+#
+# ALL byte goldens verified with llvm-mc --show-encoding -triple=x86_64 -mattr=+avx,+fma
+# Reference: Intel SDM Vol 2B §VFMADD132PS/PD, §VFMADD213PS, §VFMADD231PS,
+#            §VFMSUB132PS, §VFMSUB213PS, §VFMSUB231PS, §VFNMADD213PS;
+#            Vol 2A §2.3.5 (VEX prefix).
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _modrm_direct(reg: i64, rm: i64) -> i64:
+    """
+    ModRM byte for register-direct operands (mod=11).
+    mod=11 → 192; reg field uses low 3 bits of reg; rm field uses low 3 bits of rm.
+    """
+    192 + ((reg % 8) * 8) + (rm % 8)
+
+fn _fma3_vex_byte1(rd: i64, rm: i64) -> i64:
+    """
+    VEX Byte 1 for 0F38 map (mmmmm=2), register-register, no SIB.
+    ~R=1 when rd<8, ~X=1, ~B=1 when rm<8, mmmmm=2.
+    byte1 = 226 - (rd/8)*128 - (rm/8)*32
+    (226 = 0xE2 = ~R=1,~X=1,~B=1,mmmmm=00010)
+    """
+    226 - (rd / 8) * 128 - (rm / 8) * 32
+
+fn _fma3_vex_byte2_ps(rn: i64) -> i64:
+    """
+    VEX Byte 2 for single-precision FMA3 YMM: W=0, ~vvvv=(15-rn), L=1, pp=01.
+    byte2 = (15 - rn)*8 + 5
+    Bit layout: W=0, ~v3..~v0=(15-rn), L=1(bit2=4), pp=01(bit0=1) → +5
+    """
+    (15 - rn) * 8 + 5
+
+fn _fma3_vex_byte2_pd(rn: i64) -> i64:
+    """
+    VEX Byte 2 for double-precision FMA3 YMM: W=1, ~vvvv=(15-rn), L=1, pp=01.
+    byte2 = 128 + (15 - rn)*8 + 5
+    Bit layout: W=1(bit7=128), ~v3..~v0=(15-rn), L=1(bit2=4), pp=01(bit0=1) → +5
+    """
+    128 + (15 - rn) * 8 + 5
+
+fn _pack_vex3_fma_ymm(rd: i64, rn: i64, rm: i64, w: i64, opcode: i64) -> [i64]:
+    """
+    Core 3-byte VEX emit for FMA3 YMM instructions (0F38 map, L=1, pp=66).
+    rd:     destination YMM index 0..15 (ymm0=0, ymm1=1, ...)
+    rn:     second-operand YMM index 0..15, routed through VEX.vvvv
+    rm:     third-operand YMM index 0..15, routed through ModRM.rm
+    w:      0 for PS (single-precision), 1 for PD (double-precision)
+    opcode: FMA3 opcode byte (98h, 9Ah, A8h, AAh, ACh, B8h, BAh)
+    """
+    val b1    = _fma3_vex_byte1(rd, rm)
+    val b2    = (1 - w) * _fma3_vex_byte2_ps(rn) + w * _fma3_vex_byte2_pd(rn)
+    val modrm = _modrm_direct(rd, rm)
+    [0xC4, b1, b2, opcode, modrm]
+
+# ============================================================================
+# VFMADD132PS — VEX.256.66.0F38.W0 98 /r
+# VFMADD132PS ymm1, ymm2, ymm3/m256
+#   ymm1 ← ymm1 * ymm3/m256 + ymm2
+#   rd = rd*rm + rn
+# ============================================================================
+
+fn emit_vfmadd132ps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VFMADD132PS ymm, ymm, ymm — 256-bit fused multiply-add (132 form, single-prec).
+    Encoding: VEX.256.66.0F38.W0 98 /r
+    rd, rn, rm: YMM register indices 0..15.
+    Semantics: rd ← rd * rm + rn
+    rd → ModRM.reg, rn → VEX.vvvv, rm → ModRM.rm.
+    Example: emit_vfmadd132ps_ymm(0, 1, 2) → [0xC4, 0xE2, 0x75, 0x98, 0xC2]
+      byte2: W=0, ~vvvv=14(rn=1), L=1, pp=01 → 14*8+5=0x75
+    llvm-mc: vfmadd132ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0x98,0xc2]
+    Reference: Intel SDM Vol 2B §VFMADD132PS.
+    """
+    _pack_vex3_fma_ymm(rd, rn, rm, 0, 0x98)
+
+# ============================================================================
+# VFMADD213PS — VEX.256.66.0F38.W0 A8 /r
+# VFMADD213PS ymm1, ymm2, ymm3/m256
+#   ymm1 ← ymm2 * ymm1 + ymm3/m256
+#   rd = rn*rd + rm
+# ============================================================================
+
+fn emit_vfmadd213ps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VFMADD213PS ymm, ymm, ymm — 256-bit fused multiply-add (213 form, single-prec).
+    Encoding: VEX.256.66.0F38.W0 A8 /r
+    rd, rn, rm: YMM register indices 0..15.
+    Semantics: rd ← rn * rd + rm
+    rd → ModRM.reg, rn → VEX.vvvv, rm → ModRM.rm.
+    Example: emit_vfmadd213ps_ymm(0, 1, 2) → [0xC4, 0xE2, 0x75, 0xA8, 0xC2]
+    llvm-mc: vfmadd213ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xa8,0xc2]
+    Reference: Intel SDM Vol 2B §VFMADD213PS.
+    """
+    _pack_vex3_fma_ymm(rd, rn, rm, 0, 0xA8)
+
+# ============================================================================
+# VFMADD231PS — VEX.256.66.0F38.W0 B8 /r
+# VFMADD231PS ymm1, ymm2, ymm3/m256
+#   ymm1 ← ymm2 * ymm3/m256 + ymm1
+#   rd = rn*rm + rd
+# ============================================================================
+
+fn emit_vfmadd231ps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VFMADD231PS ymm, ymm, ymm — 256-bit fused multiply-add (231 form, single-prec).
+    Encoding: VEX.256.66.0F38.W0 B8 /r
+    rd, rn, rm: YMM register indices 0..15.
+    Semantics: rd ← rn * rm + rd
+    rd → ModRM.reg, rn → VEX.vvvv, rm → ModRM.rm.
+    Example: emit_vfmadd231ps_ymm(0, 1, 2) → [0xC4, 0xE2, 0x75, 0xB8, 0xC2]
+    llvm-mc: vfmadd231ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xb8,0xc2]
+    Reference: Intel SDM Vol 2B §VFMADD231PS.
+    """
+    _pack_vex3_fma_ymm(rd, rn, rm, 0, 0xB8)
+
+# ============================================================================
+# VFMSUB132PS — VEX.256.66.0F38.W0 9A /r
+# VFMSUB132PS ymm1, ymm2, ymm3/m256
+#   ymm1 ← ymm1 * ymm3/m256 - ymm2
+#   rd = rd*rm - rn
+# ============================================================================
+
+fn emit_vfmsub132ps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VFMSUB132PS ymm, ymm, ymm — 256-bit fused multiply-subtract (132 form, single-prec).
+    Encoding: VEX.256.66.0F38.W0 9A /r
+    rd, rn, rm: YMM register indices 0..15.
+    Semantics: rd ← rd * rm - rn
+    rd → ModRM.reg, rn → VEX.vvvv, rm → ModRM.rm.
+    Example: emit_vfmsub132ps_ymm(0, 1, 2) → [0xC4, 0xE2, 0x75, 0x9A, 0xC2]
+    llvm-mc: vfmsub132ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0x9a,0xc2]
+    Reference: Intel SDM Vol 2B §VFMSUB132PS.
+    """
+    _pack_vex3_fma_ymm(rd, rn, rm, 0, 0x9A)
+
+# ============================================================================
+# VFMSUB213PS — VEX.256.66.0F38.W0 AA /r
+# VFMSUB213PS ymm1, ymm2, ymm3/m256
+#   ymm1 ← ymm2 * ymm1 - ymm3/m256
+#   rd = rn*rd - rm
+# ============================================================================
+
+fn emit_vfmsub213ps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VFMSUB213PS ymm, ymm, ymm — 256-bit fused multiply-subtract (213 form, single-prec).
+    Encoding: VEX.256.66.0F38.W0 AA /r
+    rd, rn, rm: YMM register indices 0..15.
+    Semantics: rd ← rn * rd - rm
+    rd → ModRM.reg, rn → VEX.vvvv, rm → ModRM.rm.
+    Example: emit_vfmsub213ps_ymm(0, 1, 2) → [0xC4, 0xE2, 0x75, 0xAA, 0xC2]
+    llvm-mc: vfmsub213ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xaa,0xc2]
+    Reference: Intel SDM Vol 2B §VFMSUB213PS.
+    """
+    _pack_vex3_fma_ymm(rd, rn, rm, 0, 0xAA)
+
+# ============================================================================
+# VFMSUB231PS — VEX.256.66.0F38.W0 BA /r
+# VFMSUB231PS ymm1, ymm2, ymm3/m256
+#   ymm1 ← ymm2 * ymm3/m256 - ymm1
+#   rd = rn*rm - rd
+# ============================================================================
+
+fn emit_vfmsub231ps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VFMSUB231PS ymm, ymm, ymm — 256-bit fused multiply-subtract (231 form, single-prec).
+    Encoding: VEX.256.66.0F38.W0 BA /r
+    rd, rn, rm: YMM register indices 0..15.
+    Semantics: rd ← rn * rm - rd
+    rd → ModRM.reg, rn → VEX.vvvv, rm → ModRM.rm.
+    Example: emit_vfmsub231ps_ymm(0, 1, 2) → [0xC4, 0xE2, 0x75, 0xBA, 0xC2]
+    llvm-mc: vfmsub231ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xba,0xc2]
+    Reference: Intel SDM Vol 2B §VFMSUB231PS.
+    """
+    _pack_vex3_fma_ymm(rd, rn, rm, 0, 0xBA)
+
+# ============================================================================
+# VFNMADD213PS — VEX.256.66.0F38.W0 AC /r
+# VFNMADD213PS ymm1, ymm2, ymm3/m256
+#   ymm1 ← -(ymm2 * ymm1) + ymm3/m256
+#   rd = -(rn*rd) + rm
+# ============================================================================
+
+fn emit_vfnmadd213ps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VFNMADD213PS ymm, ymm, ymm — 256-bit fused negated multiply-add (213 form, single-prec).
+    Encoding: VEX.256.66.0F38.W0 AC /r
+    rd, rn, rm: YMM register indices 0..15.
+    Semantics: rd ← -(rn * rd) + rm
+    rd → ModRM.reg, rn → VEX.vvvv, rm → ModRM.rm.
+    Example: emit_vfnmadd213ps_ymm(0, 1, 2) → [0xC4, 0xE2, 0x75, 0xAC, 0xC2]
+    llvm-mc: vfnmadd213ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xac,0xc2]
+    Reference: Intel SDM Vol 2B §VFNMADD213PS.
+    """
+    _pack_vex3_fma_ymm(rd, rn, rm, 0, 0xAC)
+
+# ============================================================================
+# VFMADD132PD — VEX.256.66.0F38.W1 98 /r
+# VFMADD132PD ymm1, ymm2, ymm3/m256
+#   ymm1 ← ymm1 * ymm3/m256 + ymm2  (double-precision)
+#   rd = rd*rm + rn
+# ============================================================================
+
+fn emit_vfmadd132pd_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VFMADD132PD ymm, ymm, ymm — 256-bit fused multiply-add (132 form, double-prec).
+    Encoding: VEX.256.66.0F38.W1 98 /r
+    rd, rn, rm: YMM register indices 0..15.
+    Semantics: rd ← rd * rm + rn  (double-precision)
+    rd → ModRM.reg, rn → VEX.vvvv, rm → ModRM.rm.
+    Example: emit_vfmadd132pd_ymm(0, 1, 2) → [0xC4, 0xE2, 0xF5, 0x98, 0xC2]
+      byte2: W=1, ~vvvv=14(rn=1), L=1, pp=01 → 128+14*8+5=0xF5
+    llvm-mc: vfmadd132pd %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0xf5,0x98,0xc2]
+    Reference: Intel SDM Vol 2B §VFMADD132PD.
+    """
+    _pack_vex3_fma_ymm(rd, rn, rm, 1, 0x98)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_vfmadd132ps_ymm
+export emit_vfmadd213ps_ymm
+export emit_vfmadd231ps_ymm
+export emit_vfmsub132ps_ymm
+export emit_vfmsub213ps_ymm
+export emit_vfmsub231ps_ymm
+export emit_vfnmadd213ps_ymm
+export emit_vfmadd132pd_ymm

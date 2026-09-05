@@ -1,0 +1,83 @@
+"""
+## Purpose and audience
+Purpose: Pin the architecture-neutral DesktopShell baremetal input boundary.
+Audience: SimpleOS compositor and architecture-entry maintainers.
+"""
+# @req: REQ-OS-DESKTOP-INPUT-001
+
+use std.spec.*
+use app.io.mod.{file_read_text}
+use common.ui.host_input_event.{HostInputEvent}
+use os.compositor.baremetal_input_ingress.{
+    baremetal_input_ingress_register_poller,
+    baremetal_input_ingress_register_legacy_ready,
+    baremetal_input_ingress_poll,
+    baremetal_input_ingress_legacy_ready,
+}
+
+var _poll_count: i64 = 0
+
+fn _one_pointer_then_idle() -> HostInputEvent?:
+    _poll_count = _poll_count + 1
+    if _poll_count == 1:
+        return HostInputEvent.Pointer(12, 34, 0, false, 0)
+    nil
+
+fn _legacy_ready_fixture() -> bool:
+    true
+
+describe "DesktopShell baremetal input ownership boundary":
+    it "keeps architecture I/O behind compositor input owners":
+        step("Inspect the shell loop and compositor ingress source boundaries")
+        val shell = file_read_text(
+            "src/os/desktop/_DesktopShell/shell_runtime_methods.spl"
+        )
+        val shell_root = file_read_text("src/os/desktop/shell.spl")
+        val compositor = file_read_text("src/os/compositor/compositor.spl")
+        val x86_entry = file_read_text(
+            "examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
+        )
+
+        expect(shell).to_contain("baremetal_input_ingress_poll(input_handle)")
+        expect(shell).to_contain("apply_polled_input_backend_event(event)")
+        expect(shell).to_contain("val input_handle = self.baremetal_input_handle")
+        expect(shell.contains("port_inb(")).to_equal(false)
+        expect(shell_root.contains("os.kernel.boot.cpu.{port_inb}")).to_equal(false)
+        expect(shell_root.contains("legacy_ps2_input_gate")).to_equal(false)
+        expect(shell_root).to_contain("baremetal_input_handle: i64")
+        expect(x86_entry).to_contain("install_legacy_baremetal_readiness(legacy_ps2_input_ready)")
+        expect(compositor.contains("fn legacy_ps2_input_ready() -> bool:")).to_equal(false)
+
+    it "documents the allocation-free empty-poll contract":
+        step("Require the backend poll to precede the compositor copy")
+        val shell = file_read_text(
+            "src/os/desktop/_DesktopShell/shell_runtime_methods.spl"
+        )
+        val owner_at = shell.index_of("val input_handle = self.baremetal_input_handle")
+        val poll_at = shell.index_of("baremetal_input_ingress_poll(input_handle)")
+        val copy_at = shell.index_of("var input_compositor = self.compositor")
+        expect(owner_at).to_be_greater_than(0)
+        expect(poll_at).to_be_greater_than(owner_at)
+        expect(poll_at).to_be_greater_than(0)
+        expect(copy_at).to_be_greater_than(poll_at)
+
+    it "routes stateful producers through a stable scalar handle":
+        step("Register one producer and retain its module-owned poll state")
+        _poll_count = 0
+        val handle = baremetal_input_ingress_register_poller(
+            _one_pointer_then_idle
+        )
+        expect(handle).to_be_greater_than(0)
+        expect(baremetal_input_ingress_poll(handle) != nil).to_equal(true)
+        expect(baremetal_input_ingress_poll(handle)).to_be_nil()
+        expect(_poll_count).to_equal(2)
+        expect(baremetal_input_ingress_poll(0)).to_be_nil()
+
+    it "requires an explicit registered legacy readiness capability":
+        step("Reject invalid handles and resolve only a registered callback")
+        expect(baremetal_input_ingress_legacy_ready(0)).to_equal(false)
+        val handle = baremetal_input_ingress_register_legacy_ready(
+            _legacy_ready_fixture
+        )
+        expect(handle).to_be_greater_than(0)
+        expect(baremetal_input_ingress_legacy_ready(handle)).to_equal(true)

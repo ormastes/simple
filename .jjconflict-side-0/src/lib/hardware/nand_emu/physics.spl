@@ -1,0 +1,181 @@
+# ============================================================================
+# nand_emu — Physics core (Vt program / erase / drift / sense)
+# ============================================================================
+#
+# Pure functions modelling the threshold-voltage physics: ISPP program, erase,
+# retention drift, disturb drift, and sensing with lazy drift applied at read
+# time (doc §3.4, §7.3). All deterministic — noise derives from the per-cell
+# seed, never from wall-clock or global RNG state.
+#
+# Read rule (SLC, doc §3.1): the cell conducts when effective Vt < vref, so
+#   bit = 1 (erased)   if code <  vref
+#   bit = 0 (program)  if code >= vref
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+# ============================================================================
+
+use std.hardware.nand_emu.nand_types.{NeCellParams, NePageMeta, NeBlockMeta, NeSenseResult}
+
+# ----------------------------------------------------------------------------
+# Small deterministic helpers (private to the physics core).
+# ----------------------------------------------------------------------------
+
+fn ne_clamp_code(x: i64) -> i64:
+    """Clamp an integer Vt code into the u8 domain [0, 255] (sat_add clamp)."""
+    if x < 0:
+        0
+    elif x > 255:
+        255
+    else:
+        x
+
+fn ne_round_half(x: f64) -> i64:
+    """Round-half-away-from-zero of an f64 to i64 (deterministic)."""
+    if x >= 0.0:
+        (x + 0.5) as i64
+    else:
+        (x - 0.5) as i64
+
+fn ne_gauss_hash(x: i64) -> i64:
+    """splitmix32 finalizer (doc §3.3) — deterministic 32-bit avalanche hash.
+    All intermediates are masked to 32 bits so the mix is portable and never
+    overflows into the sign bit (32-bit x 32-bit const < 2^62)."""
+    var z: i64 = (x + 0x9E3779B9) & 0xFFFFFFFF
+    z = ((z ^ (z >> 16)) * 0x21F0AAAD) & 0xFFFFFFFF
+    z = ((z ^ (z >> 15)) * 0x735A2D97) & 0xFFFFFFFF
+    z = (z ^ (z >> 15)) & 0xFFFFFFFF
+    z
+
+fn ne_log10_milli(n: i64) -> i64:
+    """Return round(1000 * log10(n)) via a piecewise-linear per-decade
+    interpolation (integer decade approximation — chosen over libm log10 so the
+    result is EXACT at every power of ten and therefore hand-computable for
+    absolute test oracles). Monotonic non-decreasing; defined for n >= 1."""
+    if n <= 1:
+        return 0
+    var decade: i64 = 0
+    var lo: i64 = 1        # 10^decade
+    var hi: i64 = 10       # 10^(decade+1)
+    while hi <= n:
+        decade = decade + 1
+        lo = hi
+        hi = hi * 10
+    # lo <= n < hi, lo = 10^decade — linear interpolation inside the decade.
+    val frac_milli: i64 = ((n - lo) * 1000) / (hi - lo)
+    decade * 1000 + frac_milli
+
+# ----------------------------------------------------------------------------
+# SLC read rule (doc §3.1) — IMPLEMENTED (the core sense comparison).
+# ----------------------------------------------------------------------------
+
+pub fn ne_sense_bit(eff_code: i64, vref: i64) -> bool:
+    """SLC sense (doc §3.1): true = 1 (erased) when eff_code < vref, else 0."""
+    eff_code < vref
+
+# ----------------------------------------------------------------------------
+# Deterministic pseudo-gaussian noise (doc §3.3, Appendix B) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_gauss(sigma: i64, seed: i64) -> i64:
+    """Deterministic pseudo-gaussian offset derived from a cell seed (doc §3.3).
+
+    Method: sum-of-uniforms (Irwin-Hall / central-limit). Twelve independent
+    uniforms in [0, 1) — each a distinct splitmix32 draw keyed by the seed — sum
+    to an approximately N(6, 1) variate; subtracting 6 centres it on N(0, 1),
+    and scaling by `sigma` gives an integer offset with mean 0 and std ~= sigma.
+    Identical (sigma, seed) always yield identical noise, so runs are replayable
+    and diffable. sigma <= 0 returns 0 (no noise)."""
+    if sigma <= 0:
+        return 0
+    var s: f64 = 0.0
+    var k: i64 = 0
+    while k < 12:
+        val h: i64 = ne_gauss_hash(seed + k * 0x9E3779B9)
+        val u: f64 = ((h & 0xFFFF) as f64) / 65536.0
+        s = s + u
+        k = k + 1
+    ne_round_half((s - 6.0) * (sigma as f64))
+
+# ----------------------------------------------------------------------------
+# Program via ISPP (doc §7.3) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_program_cell(vt: i64, target_bit: bool, p: NeCellParams, seed: i64) -> i64:
+    """ISPP program of one cell (doc §7.3 program_cell).
+    target_bit true  => leave erased (return vt unchanged).
+    target_bit false => incremental-step pulse-and-verify: each pulse raises Vt
+      by the program-voltage step (ispp_step, the defining property of ISPP) plus
+      per-pulse gaussian jitter, until the verify level (pv_level) is reached or
+      the pulse budget (ispp_max) is exhausted (program failure). The ramping
+      program voltage (ispp_start + k*ispp_step) also diversifies the per-pulse
+      noise seed. sat_add clamps into the u8 code domain. Returns the new Vt code."""
+    if target_bit:
+        return vt
+    var v: i64 = vt
+    var pulse: i64 = p.ispp_start
+    var left: i64 = p.ispp_max
+    while left > 0 and v < p.pv_level:
+        v = ne_clamp_code(v + p.ispp_step + ne_gauss(p.prog_sigma, seed + pulse))
+        pulse = pulse + p.ispp_step
+        left = left - 1
+    v
+
+pub fn ne_erase_cell(vt: i64, p: NeCellParams, pe_cycles: i64, seed: i64) -> i64:
+    """Erase one cell back into the erased distribution (doc §7.3 / Appendix B).
+
+    Erase is destructive: the prior charge (`vt`) is irrelevant — the cell is
+    reset to the erased lobe. Wear widens the lobe and raises its floor:
+      sigma_eff  = erase_sigma      + wear_coef       * pe_cycles / 1000
+      floor_rise = erase_floor_coef * pe_cycles / 1000
+      code       = erase_mean + floor_rise + gauss(sigma_eff, seed)
+    clamped into the u8 code domain."""
+    val sigma_eff: i64 = p.erase_sigma + (p.wear_coef * (pe_cycles as f64) / 1000.0) as i64
+    val floor_rise: i64 = (p.erase_floor_coef * (pe_cycles as f64) / 1000.0) as i64
+    val base: i64 = p.erase_mean + floor_rise
+    ne_clamp_code(base + ne_gauss(sigma_eff, seed))
+
+# ----------------------------------------------------------------------------
+# Lazy drift deltas (doc §3.4, §7.3) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_retention_delta(dt_s: f64, pe_cycles: i64, vt: i64, p: NeCellParams) -> i64:
+    """Charge-loss delta ~ log10(time), worse for high Vt and worn cells
+    (doc §7.3 retention_delta). Erased/near-vref cells (vt <= 128) do not drift.
+
+      mag   = ret_coef * log10(1 + dt_s) * (1 + pe_cycles/1000)
+      delta = -(mag * (vt - 128) / 40)
+
+    log10 uses the integer-decade approximation (ne_log10_milli, exact at powers
+    of ten); the result is truncated toward zero as an integer Vt-code delta."""
+    if vt <= 128:
+        return 0
+    val log10v: f64 = (ne_log10_milli((1.0 + dt_s) as i64) as f64) / 1000.0
+    val wear: f64 = 1.0 + (pe_cycles as f64) / 1000.0
+    val mag: f64 = p.ret_coef * log10v * wear
+    val hi_factor: f64 = ((vt - 128) as f64) / 40.0
+    (-(mag * hi_factor)) as i64
+
+pub fn ne_disturb_delta(rd_count: i64, pd_count: i64, p: NeCellParams) -> i64:
+    """Read/program disturb delta from neighbor-activity counters (doc §3.4,
+    Appendix B). Disturb pushes cells UP (positive):
+      delta = rd_coef * rd_count / 10000 + pd_coef * pd_count / 200
+    rounded to the nearest Vt code. Monotonic non-decreasing in both counters."""
+    val rd: f64 = p.rd_coef * (rd_count as f64) / 10000.0
+    val pd: f64 = p.pd_coef * (pd_count as f64) / 200.0
+    ne_round_half(rd + pd)
+
+# ----------------------------------------------------------------------------
+# Full sense with lazy drift (doc §7.3 sense) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_sense(vt_stored: i64, meta: NePageMeta, blk: NeBlockMeta, p: NeCellParams, vref: i64, now: i64) -> NeSenseResult:
+    """Sense a cell with retention + disturb drift applied at read time
+    (doc §7.3). The emulated-time delta (now - last_prog_time) is taken directly
+    as the retention interval in seconds (faithful to the §7.3 pseudocode, which
+    passes the raw delta as dt_s). Effective Vt is clamped into the u8 domain and
+    compared against vref. Returns the sensed bit and the effective code."""
+    val dt_s: f64 = (now - meta.last_prog_time) as f64
+    val ret: i64 = ne_retention_delta(dt_s, blk.pe_cycles, vt_stored, p)
+    val dis: i64 = ne_disturb_delta(meta.rd_count, meta.pd_count, p)
+    val eff: i64 = ne_clamp_code(vt_stored + ret + dis)
+    NeSenseResult(bit: ne_sense_bit(eff, vref), eff_code: eff)

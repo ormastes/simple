@@ -1,0 +1,90 @@
+# Proves the fix for the descendant style write-back defect in
+# apply_css_rules_to_tree / apply_css_rules_to_tree_linear.
+#
+# be_dom_set_children is a pure constructor (it returns a NEW BeDomNode; it
+# does not mutate its argument in place). apply_rules_to_node /
+# apply_rules_to_node_indexed used to call it as a bare statement and
+# discard the return value, so a re-styled child's own inline style
+# survived (set_style mutates the node it's called on directly) but its
+# re-styled CHILDREN (i.e. everything below depth 1) never got written back
+# into the tree — only the root, and children of the root that had no
+# grandchildren of their own, ever ended up styled correctly.
+#
+# The fix makes apply_rules_to_node / apply_rules_to_node_indexed /
+# apply_css_rules_to_tree / apply_css_rules_to_tree_linear return the
+# updated BeDomNode (threading be_dom_set_children's return value back up
+# through the recursion, mirroring style_invalidation.spl's already-correct
+# apply_rules_to_node_invalidated), so callers must use the RETURNED tree.
+#
+# This spec builds a 3-level tree (root -> child -> grandchild) with rules
+# that should match at every level and asserts all three levels end up
+# styled — not just the root.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style_block.spl
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_children}
+use std.gc_async_mut.gpu.browser_engine.style_block.{
+    CssRule, CssDecl, apply_css_rules_to_tree, apply_css_rules_to_tree_linear}
+
+fn rule(selector: text, property: text, value: text) -> CssRule:
+    CssRule(selector: selector, declarations: [CssDecl(property: property, value: value)])
+
+fn el(tag: text, id: text, class_val: text, kids: [BeDomNode]) -> BeDomNode:
+    var attrs: Dict<text, text> = {}
+    if id != "":
+        attrs["id"] = id
+    if class_val != "":
+        attrs["class"] = class_val
+    BeDomNode(
+        node_id: 1,
+        tag_name: tag,
+        data: "",
+        attributes: attrs,
+        style: StyleProps.empty(),
+        children: kids,
+        parent_id: -1,
+        event_listener_types: [],
+        event_listener_actions: [],
+        event_listener_capture: [])
+
+fn build_tree() -> BeDomNode:
+    val grandchild = el("span", "leaf", "", [])
+    val child = el("div", "mid", "", [grandchild])
+    el("section", "top", "", [child])
+
+describe "apply_css_rules_to_tree / apply_css_rules_to_tree_linear descendant write-back":
+
+    it "applies computed styles to the grandchild, not just the root (indexed path)":
+        val rules = [
+            rule("#top", "background-color", "red"),
+            rule("#mid", "background-color", "green"),
+            rule("#leaf", "background-color", "blue")]
+        val styled = apply_css_rules_to_tree(build_tree(), rules)
+        expect(styled.style.background_color).to_equal("red")
+        val child = be_dom_get_children(styled)[0]
+        expect(child.style.background_color).to_equal("green")
+        val grandchild = be_dom_get_children(child)[0]
+        expect(grandchild.style.background_color).to_equal("blue")
+
+    it "applies computed styles to the grandchild, not just the root (linear path)":
+        val rules = [
+            rule("#top", "background-color", "red"),
+            rule("#mid", "background-color", "green"),
+            rule("#leaf", "background-color", "blue")]
+        val styled = apply_css_rules_to_tree_linear(build_tree(), rules)
+        expect(styled.style.background_color).to_equal("red")
+        val child = be_dom_get_children(styled)[0]
+        expect(child.style.background_color).to_equal("green")
+        val grandchild = be_dom_get_children(child)[0]
+        expect(grandchild.style.background_color).to_equal("blue")
+
+    it "applies a universal rule to every level of the tree (indexed path)":
+        val rules = [rule("*", "background-color", "teal")]
+        val styled = apply_css_rules_to_tree(build_tree(), rules)
+        expect(styled.style.background_color).to_equal("teal")
+        val child = be_dom_get_children(styled)[0]
+        expect(child.style.background_color).to_equal("teal")
+        val grandchild = be_dom_get_children(child)[0]
+        expect(grandchild.style.background_color).to_equal("teal")

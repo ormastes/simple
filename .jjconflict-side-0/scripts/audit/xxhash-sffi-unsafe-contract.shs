@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+decl=src/compiler_rust/lib/std/src/infra/hash.spl
+provider=src/compiler_rust/runtime/src/value/sffi/hash/xxhash.rs
+
+test "$(rg -c '^@unsafe\(reason: "legacy raw XXH3' "$decl")" -eq 6
+wrapper="$(sed -n '/^struct XxHasher:/,/^struct /p' "$decl")"
+test "$(printf '%s\n' "$wrapper" | rg -c 'unsafe\(capabilities: \[ffi\]\):')" -eq 6
+
+for suffix in new new_with_seed write finish reset free; do
+    name="rt_xxhash_${suffix}"
+    test "$(rg -c "^[[:space:]]+${name}\\(" "$decl")" -eq 1
+done
+
+write="$(sed -n '/^pub unsafe extern "C" fn rt_xxhash_write/,/^}/p' "$provider")"
+printf '%s\n' "$write" | rg -q 'usize::try_from\(data_len\)'
+! printf '%s\n' "$write" | rg -q 'data_len as usize'
+
+# The legacy finish ABI cannot distinguish a valid zero digest from an invalid
+# handle. Keep that limitation visible until status/out v2 replaces it.
+finish="$(sed -n '/^pub extern "C" fn rt_xxhash_finish/,/^}/p' "$provider")"
+printf '%s\n' "$finish" | rg -q '^        0$'
+
+echo "XXH3 SFFI audit: PASS (raw calls confined unsafe; length conversion checked; legacy digest/error ambiguity retained)"

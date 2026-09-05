@@ -1,0 +1,44 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+# Pure-Simple MIR lowering (self-hosted path, not the Rust seed). Sibling of
+# native_option_unwrap_receiver_unresolved_2026-08-09: the `.unwrap()` arm
+# recovers the receiver's owner from the Option's inner Named type, but the
+# `expr!` arm never did, so `m!.method()` / `val u: C = m!; u.method()` lowered
+# to the const-0 "unresolved method call" placeholder in pure-compiled native
+# code (pure-compiled probe printed via_method=0, post-fix 42).
+# Record: doc/08_tracking/bug/pure_mir_force_unwrap_class_receiver_unresolved_2026-08-22.md
+
+fn lower_fn(source: text, target: text) -> (text, text):
+    val parsed = parse_full_frontend(source, "force_unwrap.spl", "force_unwrap", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("force_unwrap.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with(".{target}"):
+            return (serialize_mir_function(function), errors)
+    ("", errors)
+
+val CELL = "class Cell:\n    n: i64\n    fn get_n() -> i64:\n        self.n\n\n"
+
+describe "force-unwrap class receiver provenance", tag: ["only-compiled"]:
+    it "resolves a method on a typed let of a force-unwrapped Option<class>":
+        val source = CELL + "fn probe(m: Cell?) -> i64:\n    val u: Cell = m!\n    u.get_n()\n"
+        val (mir, errors) = lower_fn(source, "probe")
+        expect(errors).to_equal("")
+        expect(mir).to_contain("force_unwrap.Cell.get_n")
+
+    it "resolves a method called directly on the force-unwrap expression":
+        val source = CELL + "fn probe(m: Cell?) -> i64:\n    m!.get_n()\n"
+        val (mir, errors) = lower_fn(source, "probe")
+        expect(errors).to_equal("")
+        expect(mir).to_contain("force_unwrap.Cell.get_n")

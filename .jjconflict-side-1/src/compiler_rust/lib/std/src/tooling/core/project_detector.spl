@@ -1,0 +1,219 @@
+# Project Detector
+# Detects language roots and project structure by scanning the filesystem
+
+use host.async_nogc_mut.io.fs
+use host.common.io.types.{FileType, DirEntry, FilePath, DirPath}
+use core.result.{Result, Ok, Err}
+use tooling.core.project.{Language, LanguageConfig}
+
+# Project detector - finds language roots in project
+pub class ProjectDetector:
+    pub root: text
+
+    pub fn new(root: text) -> ProjectDetector:
+        """Create project detector.
+
+        Args:
+            root: Project root directory
+        """
+        ProjectDetector { root: root }
+
+    pub fn detect_all_languages(self) -> List<LanguageConfig>:
+        """Detect all languages in project.
+
+        Returns:
+            List of detected language configurations
+
+        Example:
+            val detector = ProjectDetector.new(".")
+            val languages = detector.detect_all_languages()
+            for config in languages:
+                print("Found {config.language} at {config.root}")
+        """
+        val configs: List<LanguageConfig> = []
+
+        # Detect Simple
+        if self.has_simple_project():
+            configs.append(LanguageConfig.new(Language.Simple, self.root))
+
+        # Detect Rust
+        val rust_roots = self.find_cargo_projects()
+        for root in rust_roots:
+            configs.append(LanguageConfig.new(Language.Rust, root))
+
+        # Detect Python
+        val python_roots = self.find_python_projects()
+        for root in python_roots:
+            configs.append(LanguageConfig.new(Language.Python, root))
+
+        # Detect JavaScript/TypeScript
+        val js_roots = self.find_javascript_projects()
+        for root in js_roots:
+            if self.has_typescript(root):
+                configs.append(LanguageConfig.new(Language.TypeScript, root))
+            else:
+                configs.append(LanguageConfig.new(Language.JavaScript, root))
+
+        # Detect Go
+        val go_roots = self.find_go_projects()
+        for root in go_roots:
+            configs.append(LanguageConfig.new(Language.Go, root))
+
+        configs
+
+    pub fn has_simple_project(self) -> bool:
+        """Check if directory contains Simple project.
+
+        Returns:
+            True if simple.sdn or .spl files exist
+        """
+        self.file_exists("simple.sdn") or self.has_files_with_extension(".spl")
+
+    pub fn find_cargo_projects(self) -> List<text>:
+        """Find all Rust/Cargo projects.
+
+        Returns:
+            List of directories containing Cargo.toml
+        """
+        self.find_files_named("Cargo.toml")
+
+    pub fn find_python_projects(self) -> List<text>:
+        """Find all Python projects.
+
+        Returns:
+            List of directories containing setup.py, pyproject.toml, or requirements.txt
+        """
+        val roots: List<text> = []
+
+        roots.extend(self.find_files_named("setup.py"))
+        roots.extend(self.find_files_named("pyproject.toml"))
+        roots.extend(self.find_files_named("requirements.txt"))
+
+        # Deduplicate
+        self.deduplicate_paths(roots)
+
+    pub fn find_javascript_projects(self) -> List<text>:
+        """Find all JavaScript/Node projects.
+
+        Returns:
+            List of directories containing package.json
+        """
+        self.find_files_named("package.json")
+
+    pub fn find_go_projects(self) -> List<text>:
+        """Find all Go projects.
+
+        Returns:
+            List of directories containing go.mod
+        """
+        self.find_files_named("go.mod")
+
+    pub fn has_typescript(self, root: text) -> bool:
+        """Check if project uses TypeScript.
+
+        Args:
+            root: Project root to check
+
+        Returns:
+            True if tsconfig.json exists
+        """
+        self.file_exists_in(root, "tsconfig.json")
+
+    # Helper methods - File system operations
+
+    fn file_exists(name: text) -> bool:
+        """Check if file exists in project root."""
+        val path = self.root + "/" + name
+        fs.exists_sync(path as FilePath)
+
+    fn file_exists_in(dir: text, name: text) -> bool:
+        """Check if file exists in directory."""
+        val path = dir + "/" + name
+        fs.exists_sync(path as FilePath)
+
+    fn has_files_with_extension(ext: text) -> bool:
+        """Check if any files with extension exist."""
+        # Recursively search for files with extension
+        self.scan_for_extension(self.root, ext)
+
+    fn scan_for_extension(dir: text, ext: text) -> bool:
+        """Recursively scan directory for files with extension."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val name = entry.name() as text
+
+                    # Check if file has the extension
+                    if name.ends_with(ext):
+                        return true
+
+                    # Recursively search subdirectories
+                    if entry.file_type() == FileType.Directory:
+                        val subdir_path = entry.path() as text
+                        if self.scan_for_extension(subdir_path, ext):
+                            return true
+
+                false
+            Err(_):
+                false
+
+    fn find_files_named(name: text) -> List<text>:
+        """Find all files with given name recursively."""
+        val results: List<text> = []
+        self.find_files_named_recursive(self.root, name, results)
+        results
+
+    fn find_files_named_recursive(dir: text,
+        name: text,
+        results: List<text>
+    ):
+        """Recursively find files with given name."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val entry_name = entry.name() as text
+
+                    # If this is the file we're looking for, extract its directory
+                    if entry_name == name:
+                        val file_path = entry.path() as text
+                        # Get the directory containing this file
+                        val dir_path = self.get_parent_dir(file_path)
+                        results.append(dir_path)
+
+                    # Recursively search subdirectories
+                    if entry.file_type() == FileType.Directory:
+                        val subdir = entry.path() as text
+                        # Skip common exclude patterns
+                        if not self.should_skip_dir(entry_name):
+                            self.find_files_named_recursive(subdir, name, results)
+            Err(_):
+                # Ignore errors (permission denied, etc.)
+                pass
+
+    fn should_skip_dir(name: text) -> bool:
+        """Check if directory should be skipped."""
+        name == "node_modules" or name == "target" or name == "__pycache__" or name == ".git" or name == ".venv" or name == "venv" or name.starts_with(".")
+
+    fn get_parent_dir(path: text) -> text:
+        """Get parent directory from path."""
+        # Find last slash
+        val last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[0:last_slash]
+        else:
+            "."
+
+    fn deduplicate_paths(paths: List<text>) -> List<text>:
+        """Remove duplicate paths."""
+        val unique: List<text> = []
+        for path in paths:
+            if not self.contains_path(unique, path):
+                unique.append(path)
+        unique
+
+    fn contains_path(paths: List<text>, target: text) -> bool:
+        """Check if path is in list."""
+        for path in paths:
+            if path == target:
+                return true
+        false

@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+test_tmp=$(mktemp -d)
+trap 'rm -rf "$test_tmp"' EXIT INT TERM
+
+. "$repo_root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+write_valid_transcript() {
+    printf '%s\n' \
+        'schema=simple-bootstrap-command-transcript-v2' \
+        'executable:7:/bin/sh' \
+        'argv:12:native-build' \
+        'argv:9:--backend' \
+        'argv:4:llvm' \
+        'argv:7:--label' \
+        'argv:10:alpha:beta' \
+        >"$1"
+}
+
+expect_rejected() {
+    if bootstrap_stage3_transcript_argv_value_after "$1" "$2" \
+        >/dev/null 2>&1; then
+        fail "$3 was accepted"
+    fi
+}
+
+valid="$test_tmp/valid.transcript"
+write_valid_transcript "$valid"
+[ "$(bootstrap_stage3_transcript_argv_value_after \
+    "$valid" --backend)" = llvm ] || fail "valid option value was not decoded"
+[ "$(bootstrap_stage3_transcript_argv_value_after \
+    "$valid" --label)" = alpha:beta ] || fail "colon payload was not decoded"
+expect_rejected "$valid" --missing "missing option"
+
+duplicate="$test_tmp/duplicate.transcript"
+cp "$valid" "$duplicate"
+printf '%s\n' 'argv:9:--backend' 'argv:4:llvm' >>"$duplicate"
+expect_rejected "$duplicate" --backend "duplicate option"
+
+missing_next="$test_tmp/missing-next.transcript"
+cp "$valid" "$missing_next"
+printf '%s\n' 'argv:8:--orphan' >>"$missing_next"
+expect_rejected "$missing_next" --orphan "option without a following value"
+
+malformed_prefix="$test_tmp/malformed-prefix.transcript"
+cp "$valid" "$malformed_prefix"
+printf '%s\n' 'argv:x:unrelated' >>"$malformed_prefix"
+expect_rejected "$malformed_prefix" --backend "malformed unrelated argv prefix"
+
+leading_zero="$test_tmp/leading-zero.transcript"
+cp "$valid" "$leading_zero"
+printf '%s\n' 'argv:03:abc' >>"$leading_zero"
+expect_rejected "$leading_zero" --backend "noncanonical argv length"
+
+bad_unrelated_length="$test_tmp/bad-unrelated-length.transcript"
+cp "$valid" "$bad_unrelated_length"
+printf '%s\n' 'argv:2:abc' >>"$bad_unrelated_length"
+expect_rejected "$bad_unrelated_length" --backend \
+    "bad unrelated argv length"
+
+newline_split="$test_tmp/newline-split.transcript"
+cp "$valid" "$newline_split"
+printf '%s\n' 'argv:5:alpha' 'beta' >>"$newline_split"
+expect_rejected "$newline_split" --backend "newline-split argv payload"
+
+echo "PASS: bootstrap Stage 3 transcript argv decoder rejects malformed tails"

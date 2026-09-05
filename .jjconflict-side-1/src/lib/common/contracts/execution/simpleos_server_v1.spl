@@ -1,0 +1,399 @@
+# Frozen SimpleOS server lifecycle contract.
+#
+# This module contains values and validation only.  It deliberately has no
+# socket, process, filesystem, or scheduler dependency.  A protocol owner
+# adapts its resources to this parent-owned state machine and returns bounded
+# result frames to the owner for validation and commit.
+
+pub enum ServerLifecycleState:
+    Created
+    Validated
+    Bound
+    Ready
+    Draining
+    Closed
+    Failed
+    Cancelled
+
+pub enum ServerLifecycleError:
+    InvalidTransition
+    GenerationMismatch
+    InvalidQuota
+    MissingServiceIdentity
+    MissingBindIdentity
+    MissingProbeEvidence
+    WorkerLimitExceeded
+    ResultLimitExceeded
+    InvalidWorker
+    InvalidResultKind
+    StaleResult
+    DuplicateResult
+    ResultBytesExceeded
+    TerminalState
+    BusyOnClose
+    WorkerAlreadyComplete
+
+val MAX_SERVER_ID_BYTES: i64 = 128
+val MAX_SERVER_RESULT_KIND_BYTES: i64 = 64
+val MAX_SERVER_WORKERS: i64 = 256
+val MAX_SERVER_RESULTS: i64 = 1048576
+val MAX_SERVER_RESULT_BYTES: i64 = 67108864
+val MAX_SERVER_CONNECTIONS: i64 = 65536
+val MAX_SERVER_TASKS: i64 = 65536
+val MAX_SERVER_QUEUE_BYTES: i64 = 268435456
+val MAX_SERVER_TIMEOUT_MS: i64 = 3600000
+
+pub struct ServerLifecycleQuota:
+    max_workers: i64
+    max_results: i64
+    max_result_bytes: i64
+    max_connections: i64
+    max_tasks: i64
+    max_queue_bytes: i64
+    startup_timeout_ms: i64
+    drain_timeout_ms: i64
+
+pub struct ServerResultFrame:
+    generation: i64
+    worker_id: i64
+    sequence: i64
+    payload_bytes: i64
+    result_kind: text
+
+pub struct ServerLifecycleReceipt:
+    service_id: text
+    state: ServerLifecycleState
+    generation: i64
+    worker_count: i64
+    total_worker_admissions: i64
+    result_count: i64
+    active_connections: i64
+    active_tasks: i64
+    bind_identity: text
+    probe_identity: text
+    evidence_identity: text
+    terminal_code: text
+
+pub fn server_lifecycle_default_quota() -> ServerLifecycleQuota:
+    ServerLifecycleQuota(
+        max_workers: 1,
+        max_results: 1024,
+        max_result_bytes: 1048576,
+        max_connections: 1024,
+        max_tasks: 1024,
+        max_queue_bytes: 16777216,
+        startup_timeout_ms: 5000,
+        drain_timeout_ms: 5000
+    )
+
+pub fn server_lifecycle_quota_valid(quota: ServerLifecycleQuota) -> bool:
+    quota.max_workers > 0 and quota.max_workers <= MAX_SERVER_WORKERS and
+    quota.max_results > 0 and quota.max_results <= MAX_SERVER_RESULTS and
+    quota.max_result_bytes > 0 and quota.max_result_bytes <= MAX_SERVER_RESULT_BYTES and
+    quota.max_connections > 0 and quota.max_connections <= MAX_SERVER_CONNECTIONS and
+    quota.max_tasks > 0 and quota.max_tasks <= MAX_SERVER_TASKS and
+    quota.max_queue_bytes > 0 and quota.max_queue_bytes <= MAX_SERVER_QUEUE_BYTES and
+    quota.startup_timeout_ms > 0 and quota.startup_timeout_ms <= MAX_SERVER_TIMEOUT_MS and
+    quota.drain_timeout_ms > 0 and quota.drain_timeout_ms <= MAX_SERVER_TIMEOUT_MS
+
+fn _server_identity_valid(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed != "" and trimmed.len() <= MAX_SERVER_ID_BYTES
+
+fn _server_result_kind_valid(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed != "" and trimmed.len() <= MAX_SERVER_RESULT_KIND_BYTES
+
+fn _server_i64_contains(values: [i64], wanted: i64) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == wanted:
+            return true
+        i = i + 1
+    false
+
+fn server_lifecycle_transition_allowed(
+    current: ServerLifecycleState,
+    next: ServerLifecycleState
+) -> bool:
+    match current:
+        ServerLifecycleState.Created:
+            next == ServerLifecycleState.Validated or next == ServerLifecycleState.Failed or next == ServerLifecycleState.Cancelled
+        ServerLifecycleState.Validated:
+            next == ServerLifecycleState.Bound or next == ServerLifecycleState.Failed or next == ServerLifecycleState.Cancelled
+        ServerLifecycleState.Bound:
+            next == ServerLifecycleState.Ready or next == ServerLifecycleState.Failed or next == ServerLifecycleState.Cancelled
+        ServerLifecycleState.Ready:
+            next == ServerLifecycleState.Draining or next == ServerLifecycleState.Failed or next == ServerLifecycleState.Cancelled
+        ServerLifecycleState.Draining:
+            next == ServerLifecycleState.Closed or next == ServerLifecycleState.Failed or next == ServerLifecycleState.Cancelled
+        ServerLifecycleState.Closed: false
+        ServerLifecycleState.Failed: false
+        ServerLifecycleState.Cancelled: false
+
+pub class ServerLifecycleV1:
+    service_id: text
+    state: ServerLifecycleState
+    generation: i64
+    quota: ServerLifecycleQuota
+    worker_count: i64
+    next_worker_id: i64
+    active_worker_ids: [i64]
+    total_worker_admissions: i64
+    result_count: i64
+    last_result_sequence: i64
+    completed_worker_ids: [i64]
+    active_connections: i64
+    active_tasks: i64
+    queued_result_bytes: i64
+    bind_identity: text
+    probe_identity: text
+    evidence_identity: text
+    terminal_code: text
+    drain_source_generation: i64
+
+    me transition_to(
+        next: ServerLifecycleState,
+        expected_generation: i64
+    ) -> Result<(), ServerLifecycleError>:
+        if self.state == ServerLifecycleState.Closed or self.state == ServerLifecycleState.Failed or self.state == ServerLifecycleState.Cancelled:
+            return Err(ServerLifecycleError.TerminalState)
+        if expected_generation != self.generation:
+            return Err(ServerLifecycleError.GenerationMismatch)
+        if not server_lifecycle_transition_allowed(self.state, next):
+            return Err(ServerLifecycleError.InvalidTransition)
+        self.state = next
+        self.generation = self.generation + 1
+        Ok(())
+
+    me validate(expected_generation: i64) -> Result<(), ServerLifecycleError>:
+        if self.state != ServerLifecycleState.Created:
+            return Err(ServerLifecycleError.InvalidTransition)
+        if not _server_identity_valid(self.service_id):
+            return Err(ServerLifecycleError.MissingServiceIdentity)
+        if not server_lifecycle_quota_valid(self.quota):
+            return Err(ServerLifecycleError.InvalidQuota)
+        if expected_generation != self.generation:
+            return Err(ServerLifecycleError.GenerationMismatch)
+        self.transition_to(ServerLifecycleState.Validated, expected_generation)
+
+    me bind(bind_identity: text, expected_generation: i64) -> Result<(), ServerLifecycleError>:
+        if not _server_identity_valid(bind_identity):
+            return Err(ServerLifecycleError.MissingBindIdentity)
+        if self.state != ServerLifecycleState.Validated:
+            return Err(ServerLifecycleError.InvalidTransition)
+        val transitioned = self.transition_to(ServerLifecycleState.Bound, expected_generation)
+        match transitioned:
+            Ok(_):
+                self.bind_identity = bind_identity
+                Ok(())
+            Err(error): Err(error)
+
+    me mark_ready(
+        probe_identity: text,
+        evidence_identity: text,
+        expected_generation: i64
+    ) -> Result<(), ServerLifecycleError>:
+        if not _server_identity_valid(probe_identity) or not _server_identity_valid(evidence_identity):
+            return Err(ServerLifecycleError.MissingProbeEvidence)
+        if self.bind_identity.trim() == "":
+            return Err(ServerLifecycleError.MissingBindIdentity)
+        if self.state != ServerLifecycleState.Bound:
+            return Err(ServerLifecycleError.InvalidTransition)
+        val transitioned = self.transition_to(ServerLifecycleState.Ready, expected_generation)
+        match transitioned:
+            Ok(_):
+                self.probe_identity = probe_identity
+                self.evidence_identity = evidence_identity
+                Ok(())
+            Err(error): Err(error)
+
+    me admit_worker(expected_generation: i64) -> Result<i64, ServerLifecycleError>:
+        if self.state != ServerLifecycleState.Ready:
+            return Err(ServerLifecycleError.InvalidTransition)
+        if expected_generation != self.generation:
+            return Err(ServerLifecycleError.GenerationMismatch)
+        if self.worker_count >= self.quota.max_workers or
+            self.total_worker_admissions >= self.quota.max_workers:
+            return Err(ServerLifecycleError.WorkerLimitExceeded)
+        val worker_id = self.next_worker_id
+        self.worker_count = self.worker_count + 1
+        self.next_worker_id = self.next_worker_id + 1
+        self.total_worker_admissions = self.total_worker_admissions + 1
+        self.active_worker_ids.push(worker_id)
+        Ok(worker_id)
+
+    me accept_result(frame: ServerResultFrame) -> Result<(), ServerLifecycleError>:
+        if self.state != ServerLifecycleState.Ready and self.state != ServerLifecycleState.Draining:
+            return Err(ServerLifecycleError.InvalidTransition)
+        val generation_ok = frame.generation == self.generation or
+            (self.state == ServerLifecycleState.Draining and frame.generation == self.drain_source_generation)
+        if not generation_ok:
+            return Err(ServerLifecycleError.GenerationMismatch)
+        if frame.worker_id < 0 or not _server_i64_contains(self.active_worker_ids, frame.worker_id):
+            return Err(ServerLifecycleError.InvalidWorker)
+        if not _server_result_kind_valid(frame.result_kind):
+            return Err(ServerLifecycleError.InvalidResultKind)
+        if frame.sequence <= 0 or frame.sequence < self.last_result_sequence:
+            return Err(ServerLifecycleError.StaleResult)
+        if frame.sequence == self.last_result_sequence:
+            return Err(ServerLifecycleError.DuplicateResult)
+        if frame.payload_bytes < 0 or frame.payload_bytes > self.quota.max_result_bytes:
+            return Err(ServerLifecycleError.ResultBytesExceeded)
+        if self.result_count >= self.quota.max_results:
+            return Err(ServerLifecycleError.ResultLimitExceeded)
+        if self.queued_result_bytes < 0 or self.queued_result_bytes > self.quota.max_queue_bytes:
+            return Err(ServerLifecycleError.ResultBytesExceeded)
+        val remaining_queue_bytes = self.quota.max_queue_bytes - self.queued_result_bytes
+        if frame.payload_bytes > remaining_queue_bytes:
+            return Err(ServerLifecycleError.ResultBytesExceeded)
+        self.last_result_sequence = frame.sequence
+        self.result_count = self.result_count + 1
+        self.queued_result_bytes = self.queued_result_bytes + frame.payload_bytes
+        Ok(())
+
+    me complete_worker(worker_id: i64, expected_generation: i64) -> Result<(), ServerLifecycleError>:
+        if self.state != ServerLifecycleState.Ready and self.state != ServerLifecycleState.Draining:
+            return Err(ServerLifecycleError.InvalidTransition)
+        if expected_generation != self.generation:
+            return Err(ServerLifecycleError.GenerationMismatch)
+        if _server_i64_contains(self.completed_worker_ids, worker_id):
+            return Err(ServerLifecycleError.WorkerAlreadyComplete)
+        if worker_id < 0 or not _server_i64_contains(self.active_worker_ids, worker_id):
+            return Err(ServerLifecycleError.InvalidWorker)
+        var remaining_workers: [i64] = []
+        var i = 0
+        while i < self.active_worker_ids.len():
+            if self.active_worker_ids[i] != worker_id:
+                remaining_workers.push(self.active_worker_ids[i])
+            i = i + 1
+        self.active_worker_ids = remaining_workers
+        self.completed_worker_ids.push(worker_id)
+        self.worker_count = self.worker_count - 1
+        Ok(())
+
+    me commit_result_bytes(bytes: i64) -> bool:
+        if bytes < 0 or bytes > self.queued_result_bytes:
+            return false
+        self.queued_result_bytes = self.queued_result_bytes - bytes
+        true
+
+    me set_active_connections(count: i64) -> bool:
+        if count < 0 or count > self.quota.max_connections:
+            return false
+        self.active_connections = count
+        true
+
+    me set_active_tasks(count: i64) -> bool:
+        if count < 0 or count > self.quota.max_tasks:
+            return false
+        self.active_tasks = count
+        true
+
+    me begin_drain(expected_generation: i64) -> Result<(), ServerLifecycleError>:
+        val transitioned = self.transition_to(ServerLifecycleState.Draining, expected_generation)
+        match transitioned:
+            Ok(_):
+                self.drain_source_generation = expected_generation
+                Ok(())
+            Err(error): Err(error)
+
+    me close(expected_generation: i64) -> Result<(), ServerLifecycleError>:
+        if self.state != ServerLifecycleState.Draining:
+            return Err(ServerLifecycleError.InvalidTransition)
+        if self.worker_count > 0 or self.active_connections > 0 or
+            self.active_tasks > 0 or self.queued_result_bytes > 0:
+            return Err(ServerLifecycleError.BusyOnClose)
+        self.transition_to(ServerLifecycleState.Closed, expected_generation)
+
+    me fail(code: text, expected_generation: i64) -> Result<(), ServerLifecycleError>:
+        if code.trim() == "":
+            return Err(ServerLifecycleError.InvalidTransition)
+        if self.state == ServerLifecycleState.Closed or self.state == ServerLifecycleState.Failed or self.state == ServerLifecycleState.Cancelled:
+            return Err(ServerLifecycleError.TerminalState)
+        if expected_generation != self.generation:
+            return Err(ServerLifecycleError.GenerationMismatch)
+        if self.worker_count > 0 or self.active_connections > 0 or
+            self.active_tasks > 0 or self.queued_result_bytes > 0:
+            return Err(ServerLifecycleError.BusyOnClose)
+        self.terminal_code = code
+        self.transition_to(ServerLifecycleState.Failed, expected_generation)
+
+    me cancel(expected_generation: i64) -> Result<(), ServerLifecycleError>:
+        if self.state == ServerLifecycleState.Closed or self.state == ServerLifecycleState.Failed or self.state == ServerLifecycleState.Cancelled:
+            return Err(ServerLifecycleError.TerminalState)
+        if expected_generation != self.generation:
+            return Err(ServerLifecycleError.GenerationMismatch)
+        if self.worker_count > 0 or self.active_connections > 0 or
+            self.active_tasks > 0 or self.queued_result_bytes > 0:
+            return Err(ServerLifecycleError.BusyOnClose)
+        self.terminal_code = "cancelled"
+        self.transition_to(ServerLifecycleState.Cancelled, expected_generation)
+
+    fn ready_for_advertisement() -> bool:
+        self.state == ServerLifecycleState.Ready and
+        self.bind_identity.trim() != "" and
+        self.probe_identity.trim() != "" and
+        self.evidence_identity.trim() != ""
+
+    fn receipt() -> ServerLifecycleReceipt:
+        ServerLifecycleReceipt(
+            service_id: self.service_id,
+            state: self.state,
+            generation: self.generation,
+            worker_count: self.worker_count,
+            total_worker_admissions: self.total_worker_admissions,
+            result_count: self.result_count,
+            active_connections: self.active_connections,
+            active_tasks: self.active_tasks,
+            bind_identity: self.bind_identity,
+            probe_identity: self.probe_identity,
+            evidence_identity: self.evidence_identity,
+            terminal_code: self.terminal_code
+        )
+
+pub fn server_lifecycle_v1_new(
+    service_id: text,
+    quota: ServerLifecycleQuota
+) -> ServerLifecycleV1:
+    ServerLifecycleV1(
+        service_id: service_id,
+        state: ServerLifecycleState.Created,
+        generation: 0,
+        quota: quota,
+        worker_count: 0,
+        next_worker_id: 0,
+        active_worker_ids: [],
+        total_worker_admissions: 0,
+        result_count: 0,
+        last_result_sequence: 0,
+        completed_worker_ids: [],
+        active_connections: 0,
+        active_tasks: 0,
+        queued_result_bytes: 0,
+        bind_identity: "",
+        probe_identity: "",
+        evidence_identity: "",
+        terminal_code: "",
+        drain_source_generation: -1
+    )
+
+pub fn server_lifecycle_v1_default(service_id: text) -> ServerLifecycleV1:
+    server_lifecycle_v1_new(service_id, server_lifecycle_default_quota())
+
+pub fn server_lifecycle_v1_fields_consistent(server: ServerLifecycleV1) -> bool:
+    server.worker_count >= 0 and
+    server.worker_count == server.active_worker_ids.len() and
+    server.total_worker_admissions >= server.worker_count and
+    server.total_worker_admissions <= server.quota.max_workers and
+    server.completed_worker_ids.len() + server.worker_count == server.total_worker_admissions and
+    server.next_worker_id == server.total_worker_admissions
+
+export ServerLifecycleState, ServerLifecycleError, ServerLifecycleQuota
+export ServerResultFrame, ServerLifecycleReceipt, ServerLifecycleV1
+export server_lifecycle_default_quota, server_lifecycle_quota_valid
+export server_lifecycle_v1_new, server_lifecycle_v1_default
+export server_lifecycle_v1_fields_consistent
+export MAX_SERVER_ID_BYTES, MAX_SERVER_RESULT_KIND_BYTES, MAX_SERVER_WORKERS
+export MAX_SERVER_RESULTS, MAX_SERVER_RESULT_BYTES, MAX_SERVER_CONNECTIONS
+export MAX_SERVER_TASKS, MAX_SERVER_QUEUE_BYTES, MAX_SERVER_TIMEOUT_MS

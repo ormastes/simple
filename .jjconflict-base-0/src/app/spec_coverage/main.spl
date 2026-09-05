@@ -1,0 +1,251 @@
+# Simple CLI - spec-coverage command
+# Compare spec features against test results for coverage analysis
+
+use std.cli.cli_util (get_cli_args, parse_csv_fields)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use app.io.mod (file_exists, file_read, file_write)
+use std.log.{error}
+
+val FEATURE_DB_PATH = "doc/08_tracking/feature/feature_db.sdn"
+val TEST_DB_PATH = "doc/08_tracking/test/test_db.sdn"
+
+fn print_help():
+    print "Usage: simple spec-coverage [options]"
+    print ""
+    print "Analyze specification coverage against test results."
+    print ""
+    print "Options:"
+    print "  --by-category    Show coverage by category"
+    print "  --missing        Show incomplete features"
+    print "  --report=<fmt>   Output format: text (default), markdown"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help       Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+struct FeatureInfo:
+    id: text
+    category: text
+    name: text
+    status: text
+    valid: bool
+
+fn load_features() -> [FeatureInfo]:
+    if not file_exists(FEATURE_DB_PATH):
+        return []
+
+    val content = file_read(FEATURE_DB_PATH)
+    val lines = content.split("\n")
+    var features: [FeatureInfo] = []
+    var in_table = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("features |"):
+            in_table = true
+            continue
+        if not in_table or trimmed == "" or trimmed.starts_with("#"):
+            if in_table and trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with(" "):
+                in_table = false
+            continue
+
+        val fields = parse_csv_fields(trimmed)
+        if fields.len() >= 27:
+            features.push(FeatureInfo(
+                id: fields[0],
+                category: fields[1],
+                name: fields[4],
+                status: fields[6],
+                valid: fields[26] == "true"
+            ))
+        elif fields.len() >= 12:
+            features.push(FeatureInfo(
+                id: fields[0],
+                category: fields[1],
+                name: fields[2],
+                status: fields[10],
+                valid: fields[11] == "true"
+            ))
+
+    features
+
+fn display_summary(features: [FeatureInfo]):
+    var total = 0
+    var complete = 0
+    var in_progress = 0
+    var planned = 0
+    var failed = 0
+
+    for f in features:
+        if not f.valid: continue
+        total = total + 1
+        match f.status:
+            case "done": complete = complete + 1
+            case "complete": complete = complete + 1
+            case "current": in_progress = in_progress + 1
+            case "in_progress": in_progress = in_progress + 1
+            case "request": planned = planned + 1
+            case "planned": planned = planned + 1
+            case "failed": failed = failed + 1
+            case _: pass
+
+    val pct = if total > 0: (complete * 100) / total else: 0
+
+    print "Simple Language Specification Coverage"
+    print ""
+    print "Total features: {total}"
+    print "Done: {complete} ({pct}%)"
+    if in_progress > 0:
+        val ip_pct = (in_progress * 100) / total
+        print "Current: {in_progress} ({ip_pct}%)"
+    if planned > 0:
+        val pl_pct = (planned * 100) / total
+        print "Request: {planned} ({pl_pct}%)"
+    if failed > 0:
+        val f_pct = (failed * 100) / total
+        print "Failed: {failed} ({f_pct}%)"
+    print ""
+    print "Overall Coverage: {pct}%"
+
+fn display_by_category(features: [FeatureInfo]):
+    # Collect categories
+    var cats: [text] = []
+    var seen: Dict<text, bool> = {}
+    for f in features:
+        if f.valid and not seen.has(f.category):
+            cats.push(f.category)
+            seen[f.category] = true
+
+    print ""
+    print "Coverage by Category:"
+    print ""
+
+    for cat in cats:
+        var total = 0
+        var complete = 0
+        for f in features:
+            if f.valid and f.category == cat:
+                total = total + 1
+                if f.status == "done" or f.status == "complete":
+                    complete = complete + 1
+        val pct = if total > 0: (complete * 100) / total else: 0
+        print "  {cat}: {pct}% ({complete}/{total})"
+
+fn display_missing(features: [FeatureInfo]):
+    print ""
+    print "Missing/Incomplete Features:"
+    print ""
+
+    for f in features:
+        if f.valid and f.status != "done" and f.status != "complete":
+            val status_label = match f.status:
+                case "current": "Current"
+                case "in_progress": "In Progress"
+                case "request": "Request"
+                case "planned": "Planned"
+                case "failed": "Failed"
+                case _: f.status
+            print "  - {f.name} (ID: {f.id}, Category: {f.category})"
+            print "    Status: {status_label}"
+
+fn _coverage_counts(features: [FeatureInfo]) -> (i64, i64, i64, i64, i64):
+    var total: i64 = 0
+    var complete: i64 = 0
+    var in_progress: i64 = 0
+    var planned: i64 = 0
+    var failed: i64 = 0
+
+    for f in features:
+        if not f.valid:
+            continue
+        total = total + 1
+        match f.status:
+            case "done":
+                complete = complete + 1
+            case "complete":
+                complete = complete + 1
+            case "current":
+                in_progress = in_progress + 1
+            case "in_progress":
+                in_progress = in_progress + 1
+            case "request":
+                planned = planned + 1
+            case "planned":
+                planned = planned + 1
+            case "failed":
+                failed = failed + 1
+            case _:
+                pass
+
+    (total, complete, in_progress, planned, failed)
+
+fn render_json(features: [FeatureInfo]):
+    val (total, complete, in_progress, planned, failed) = _coverage_counts(features)
+    val pct = if total > 0: (complete * 100) / total else: 0
+    print "{\"command\":\"spec-coverage\",\"status\":\"ok\",\"total\":{total},\"complete\":{complete},\"in_progress\":{in_progress},\"planned\":{planned},\"failed\":{failed},\"coverage\":{pct}}"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("spec-coverage", log_opts.error)
+        return 1
+
+    var by_category = false
+    var show_missing = false
+    var report_format = "text"
+    var as_json = log_opts.log_mode == "json"
+
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--by-category":
+            by_category = true
+        elif arg == "--missing":
+            show_missing = true
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif arg.starts_with("--report="):
+            report_format = arg[9:]
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
+    val features = load_features()
+    if features.len() == 0:
+        if as_json:
+            print "{\"command\":\"spec-coverage\",\"status\":\"error\",\"total\":0,\"complete\":0,\"in_progress\":0,\"planned\":0,\"failed\":0,\"coverage\":0}"
+        else:
+            error("spec_coverage", "no features found in {FEATURE_DB_PATH}")
+        return 1
+
+    if log_opts.progress != "summary" and not as_json:
+        val progress_line = render_progress(log_opts.progress, features.len(), features.len(), "spec-coverage")
+        if progress_line != "":
+            print progress_line
+
+    if as_json:
+        render_json(features)
+        return 0
+
+    display_summary(features)
+
+    if by_category:
+        display_by_category(features)
+
+    if show_missing:
+        display_missing(features)
+
+    0

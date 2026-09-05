@@ -1,0 +1,184 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# forbidden_io_context_scan_spec
+#
+# Verifies the forbidden-I/O context scan runs check_all_forbidden_io_fns for
+# real against source text under src/lib/nogc_async_mut_noalloc and
+# src/compiler/99.loader, and that a genuine E-APACK008 violation (a
+# real-time/interrupt/noalloc-tagged function directly calling a lazy facet
+# acquisition entry point) is caught end-to-end through the real driver
+# (scripts/audit/forbidden_io_context_scan.spl) — not merely through the
+# hand-built manifest forbidden_io_checker_spec.spl uses. This is the proof
+# that distinguishes "wired" from "inert": before this driver existed,
+# check_forbidden_io_violations / check_all_forbidden_io_fns
+# (src/compiler/35.semantics/forbidden_io_checker.spl) had zero production
+# callers.
+
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
+use compiler.tools.verify.forbidden_io_context_scan.{
+    forbidden_io_function_identity, forbidden_io_owned_function_identity,
+    forbidden_io_context_scan_exit_code,
+    format_forbidden_io_context_scan_output
+}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Direct-acquire fixture: an @interrupt-context function calling
+# apk_load_facet directly. Placed under NOALLOC_ROOT (one of
+# forbidden_io_context_scan.SCAN_ROOTS) since that root is where @noalloc /
+# @realtime / @interrupt annotations already live in this tree.
+val DIRECT_PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_direct_probe_spec_fixture.spl"
+val DIRECT_PROBE_SOURCE = "# spec-owned sabotage fixture — deleted after each run\n\n@interrupt\nfn probe_forbidden_io_direct_spec_fixture() -> i64:\n    apk_load_facet(0, [], \"x\")\n    1\n"
+
+# Transitive-acquire fixture: a @noalloc-context function calling a
+# non-tagged helper that itself directly calls apk_load_aspect_manual.
+val TRANSITIVE_PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_transitive_probe_spec_fixture.spl"
+val TRANSITIVE_PROBE_SOURCE = "# spec-owned sabotage fixture — deleted after each run\n\nfn helper_acquires_directly_spec_fixture() -> i64:\n    apk_load_aspect_manual(0, [])\n    1\n\n@noalloc\nfn probe_forbidden_io_transitive_spec_fixture() -> i64:\n    helper_acquires_directly_spec_fixture()\n"
+
+# Same short helper name in two different files. Path-qualified identities
+# must keep the safe graph separate from the forbidden graph regardless of
+# directory-walk order.
+val DUPLICATE_SAFE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_duplicate_safe_fixture.spl"
+val DUPLICATE_SAFE_SOURCE = "fn duplicate_helper_spec_fixture() -> i64:\n    apk_try_facet(\"x\")\n    1\n\n@interrupt\nfn duplicate_safe_root_spec_fixture() -> i64:\n    duplicate_helper_spec_fixture()\n"
+val DUPLICATE_FORBIDDEN_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_duplicate_forbidden_fixture.spl"
+val DUPLICATE_FORBIDDEN_SOURCE = "fn duplicate_helper_spec_fixture() -> i64:\n    apk_load_facet(0, [], \"x\")\n    1\n\n@realtime\nfn duplicate_forbidden_root_spec_fixture() -> i64:\n    duplicate_helper_spec_fixture()\n"
+
+# Source specs are intentionally outside the production scan even when they
+# contain a tagged sabotage function.
+val EXCLUDED_PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_excluded_probe_spec.spl"
+val EXCLUDED_PROBE_SOURCE = "@interrupt\nfn excluded_probe_spec_fixture() -> i64:\n    apk_load_facet(0, [], \"x\")\n    1\n"
+
+val NON_SIMPLE_PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_non_simple_probe.txt"
+val NON_SIMPLE_PROBE_SOURCE = "@interrupt\nfn non_simple_probe_spec_fixture() -> i64:\n    apk_load_facet(0, [], \"x\")\n    1\n"
+
+val OWNER_COLLISION_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_owner_collision_fixture.spl"
+val OWNER_COLLISION_SOURCE = "class SafeOwnerSpecFixture:\n    @interrupt\n    fn duplicate_owner_root_spec_fixture() -> i64:\n        duplicate_owner_helper_spec_fixture()\n\n    fn duplicate_owner_helper_spec_fixture() -> i64:\n        apk_try_facet(\"x\")\n        1\n\nclass ForbiddenOwnerSpecFixture:\n    @noalloc\n    fn duplicate_owner_root_spec_fixture() -> i64:\n        duplicate_owner_helper_spec_fixture()\n\n    fn duplicate_owner_helper_spec_fixture() -> i64:\n        apk_load_facet(0, [], \"x\")\n        1\n"
+
+val CROSS_FILE_HELPER_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_cross_file_helper_fixture.spl"
+val CROSS_FILE_HELPER_SOURCE = "fn cross_file_helper_spec_fixture() -> i64:\n    apk_load_aspect_manual(0, [])\n    1\n"
+val CROSS_FILE_DECOY_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_cross_file_decoy_fixture.spl"
+val CROSS_FILE_DECOY_SOURCE = "fn cross_file_helper_spec_fixture() -> i64:\n    apk_try_facet(\"x\")\n    1\n"
+val CROSS_FILE_CALLER_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_cross_file_caller_fixture.spl"
+val CROSS_FILE_CALLER_SOURCE = "use std.nogc_async_mut_noalloc.collections._forbidden_io_cross_file_helper_fixture.{cross_file_helper_spec_fixture}\n\n@realtime\nfn cross_file_caller_spec_fixture() -> i64:\n    cross_file_helper_spec_fixture()\n"
+
+val UNRELATED_QUALIFIED_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_unrelated_qualified_fixture.spl"
+val UNRELATED_QUALIFIED_SOURCE = "use unrelated.io.{apk_load_facet}\n\n@interrupt\nfn unrelated_imported_same_basename_spec_fixture() -> i64:\n    apk_load_facet()\n    1\n\n@noalloc\nfn unrelated_colon_qualified_same_basename_spec_fixture() -> i64:\n    unrelated::path::apk_load_facet()\n    1\n\n@realtime\nfn unrelated_dot_qualified_same_basename_spec_fixture() -> i64:\n    unrelated.path.apk_load_facet()\n    1\n"
+
+describe "forbidden-io context scan":
+    # @manual scenario evidence
+
+    it "keeps the two success statuses distinct and violations at exit 1":
+        step("Check canonical no-tagged, tagged-clean, and violation status/output")
+        val no_tagged_messages: [text] = []
+        val no_tagged_output = format_forbidden_io_context_scan_output(0, no_tagged_messages, ["fixture/root"])
+        expect(forbidden_io_context_scan_exit_code(no_tagged_messages)).to_equal(0)
+        expect(no_tagged_output[0]).to_contain("found 0 real-time/interrupt/noalloc-tagged functions")
+
+        val tagged_clean_messages: [text] = []
+        val tagged_clean_output = format_forbidden_io_context_scan_output(3, tagged_clean_messages, ["fixture/root"])
+        expect(forbidden_io_context_scan_exit_code(tagged_clean_messages)).to_equal(0)
+        expect(tagged_clean_output[0]).to_contain("3 tagged fn(s) checked, 0 violations")
+
+        val violation_messages = ["error[E-APACK008]: fixture violation"]
+        val violation_output = format_forbidden_io_context_scan_output(1, violation_messages, ["fixture/root"])
+        expect(forbidden_io_context_scan_exit_code(violation_messages)).to_equal(1)
+        expect(violation_output[0]).to_equal(violation_messages[0])
+
+    it "reports a clean run when no forbidden-context I/O violation exists":
+        step("Run the repository scan in its tagged-clean state")
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("tagged fn(s) checked, 0 violations")
+
+    it "catches a real direct-acquire violation (interrupt-context fn calling apk_load_facet) end-to-end":
+        # @req REQ-SSPEC-SYSTEM
+        step("catches a real direct-acquire violation (interrupt-context fn calling apk_load_facet) end-to-end")
+        file_write(DIRECT_PROBE_PATH, DIRECT_PROBE_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(DIRECT_PROBE_PATH)
+
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("E-APACK008")
+        expect(result.0).to_contain("direct-acquire")
+        expect(result.0).to_contain("probe_forbidden_io_direct_spec_fixture")
+        expect(result.0).to_contain(forbidden_io_function_identity(DIRECT_PROBE_PATH, "probe_forbidden_io_direct_spec_fixture"))
+        expect(result.0).to_contain("apk_load_facet")
+
+    it "catches a real transitive-acquire violation (@noalloc fn calling a helper that directly acquires) end-to-end":
+        # @req REQ-SSPEC-SYSTEM
+        step("catches a real transitive-acquire violation (@noalloc fn calling a helper that directly acquires) end-to-end")
+        file_write(TRANSITIVE_PROBE_PATH, TRANSITIVE_PROBE_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(TRANSITIVE_PROBE_PATH)
+
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("E-APACK008")
+        expect(result.0).to_contain("transitive-acquire")
+        expect(result.0).to_contain("probe_forbidden_io_transitive_spec_fixture")
+        expect(result.0).to_contain(forbidden_io_function_identity(TRANSITIVE_PROBE_PATH, "probe_forbidden_io_transitive_spec_fixture"))
+        expect(result.0).to_contain("apk_load_aspect_manual")
+
+    it "does not collide same-named helpers from different source paths":
+        file_write(DUPLICATE_SAFE_PATH, DUPLICATE_SAFE_SOURCE)
+        file_write(DUPLICATE_FORBIDDEN_PATH, DUPLICATE_FORBIDDEN_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(DUPLICATE_SAFE_PATH)
+        file_delete(DUPLICATE_FORBIDDEN_PATH)
+
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain(forbidden_io_function_identity(DUPLICATE_FORBIDDEN_PATH, "duplicate_forbidden_root_spec_fixture"))
+        expect(result.0.contains(forbidden_io_function_identity(DUPLICATE_SAFE_PATH, "duplicate_safe_root_spec_fixture"))).to_equal(false)
+
+    it "keeps same-named methods separate by lexical owner within one source path":
+        file_write(OWNER_COLLISION_PATH, OWNER_COLLISION_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(OWNER_COLLISION_PATH)
+
+        val forbidden_identity = forbidden_io_owned_function_identity(OWNER_COLLISION_PATH, "ForbiddenOwnerSpecFixture", "duplicate_owner_root_spec_fixture")
+        val safe_identity = forbidden_io_owned_function_identity(OWNER_COLLISION_PATH, "SafeOwnerSpecFixture", "duplicate_owner_root_spec_fixture")
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain(forbidden_identity)
+        expect(result.0.contains(safe_identity)).to_equal(false)
+
+    it "resolves an imported cross-file helper without choosing its same-named decoy":
+        file_write(CROSS_FILE_HELPER_PATH, CROSS_FILE_HELPER_SOURCE)
+        file_write(CROSS_FILE_DECOY_PATH, CROSS_FILE_DECOY_SOURCE)
+        file_write(CROSS_FILE_CALLER_PATH, CROSS_FILE_CALLER_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(CROSS_FILE_CALLER_PATH)
+        file_delete(CROSS_FILE_DECOY_PATH)
+        file_delete(CROSS_FILE_HELPER_PATH)
+
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain(forbidden_io_function_identity(CROSS_FILE_CALLER_PATH, "cross_file_caller_spec_fixture"))
+        expect(result.0).to_contain(forbidden_io_function_identity(CROSS_FILE_HELPER_PATH, "cross_file_helper_spec_fixture"))
+
+    it "keeps unrelated imported and explicitly-qualified same-basename calls clean":
+        file_write(UNRELATED_QUALIFIED_PATH, UNRELATED_QUALIFIED_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(UNRELATED_QUALIFIED_PATH)
+
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("tagged fn(s) checked, 0 violations")
+        expect(result.0.contains("unrelated_imported_same_basename_spec_fixture")).to_equal(false)
+        expect(result.0.contains("unrelated_colon_qualified_same_basename_spec_fixture")).to_equal(false)
+        expect(result.0.contains("unrelated_dot_qualified_same_basename_spec_fixture")).to_equal(false)
+
+    it "excludes source spec files from the production context scan":
+        file_write(EXCLUDED_PROBE_PATH, EXCLUDED_PROBE_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(EXCLUDED_PROBE_PATH)
+
+        expect(result.2).to_equal(0)
+        expect(result.0.contains("excluded_probe_spec_fixture")).to_equal(false)
+
+    it "excludes non-Simple files from the production context scan":
+        file_write(NON_SIMPLE_PROBE_PATH, NON_SIMPLE_PROBE_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(NON_SIMPLE_PROBE_PATH)
+
+        expect(result.2).to_equal(0)
+        expect(result.0.contains("non_simple_probe_spec_fixture")).to_equal(false)

@@ -1,0 +1,293 @@
+# UTF-8 Encoding / Decoding Tests
+#
+# Tests for src/lib/common/encoding/utf8.spl
+# Covers: utf8_seq_len, utf8_decode_one, utf8_encode_one,
+#         utf8_codepoint_byte_len, utf8_count_codepoints,
+#         utf8_decode_all, utf8_encode_all, utf8_is_valid,
+#         text_byte_len, text_codepoint_len, text_codepoints,
+#         text_from_codepoints, char_from_codepoint
+
+use std.common.encoding.utf8.{
+    utf8_seq_len, utf8_decode_one, utf8_encode_one,
+    utf8_codepoint_byte_len,
+    utf8_decode_all, utf8_encode_all,
+    text_byte_len, text_codepoints,
+    text_from_codepoints, char_from_codepoint
+}
+
+# ============================================================================
+# utf8_seq_len
+# ============================================================================
+
+describe "utf8_seq_len":
+    it "returns 1 for ASCII bytes":
+        expect(utf8_seq_len(0x00)).to_equal(1)
+        expect(utf8_seq_len(0x41)).to_equal(1)  # 'A'
+        expect(utf8_seq_len(0x7F)).to_equal(1)
+
+    it "returns 0 for continuation bytes":
+        expect(utf8_seq_len(0x80)).to_equal(0)
+        expect(utf8_seq_len(0xBF)).to_equal(0)
+
+    it "returns 2 for 2-byte lead":
+        expect(utf8_seq_len(0xC0)).to_equal(2)
+        expect(utf8_seq_len(0xDF)).to_equal(2)
+
+    it "returns 3 for 3-byte lead":
+        expect(utf8_seq_len(0xE0)).to_equal(3)
+        expect(utf8_seq_len(0xEF)).to_equal(3)
+
+    it "returns 4 for 4-byte lead":
+        expect(utf8_seq_len(0xF0)).to_equal(4)
+        expect(utf8_seq_len(0xF7)).to_equal(4)
+
+    it "returns 0 for invalid lead bytes":
+        expect(utf8_seq_len(0xF8)).to_equal(0)
+        expect(utf8_seq_len(0xFF)).to_equal(0)
+        expect(utf8_seq_len(-1)).to_equal(0)
+
+# ============================================================================
+# utf8_encode_one
+# ============================================================================
+
+describe "utf8_encode_one":
+    it "encodes ASCII codepoints as single byte":
+        expect(utf8_encode_one(0x41)).to_equal([0x41])  # 'A'
+        expect(utf8_encode_one(0x00)).to_equal([0x00])
+        expect(utf8_encode_one(0x7F)).to_equal([0x7F])
+
+    it "encodes 2-byte codepoints":
+        # U+00E9 = e-acute = 0xC3 0xA9
+        val encoded = utf8_encode_one(0xE9)
+        expect(encoded.len()).to_equal(2)
+        expect(encoded[0]).to_equal(0xC3)
+        expect(encoded[1]).to_equal(0xA9)
+
+    it "encodes 3-byte codepoints":
+        # U+AC00 = first Hangul syllable 가 = 0xEA 0xB0 0x80
+        val encoded = utf8_encode_one(0xAC00)
+        expect(encoded.len()).to_equal(3)
+        expect(encoded[0]).to_equal(0xEA)
+        expect(encoded[1]).to_equal(0xB0)
+        expect(encoded[2]).to_equal(0x80)
+
+    it "encodes 4-byte codepoints":
+        # U+1F600 = grinning face emoji = 0xF0 0x9F 0x98 0x80
+        val encoded = utf8_encode_one(0x1F600)
+        expect(encoded.len()).to_equal(4)
+        expect(encoded[0]).to_equal(0xF0)
+        expect(encoded[1]).to_equal(0x9F)
+        expect(encoded[2]).to_equal(0x98)
+        expect(encoded[3]).to_equal(0x80)
+
+    it "replaces surrogates with U+FFFD":
+        val encoded = utf8_encode_one(0xD800)
+        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])
+
+    it "replaces out-of-range with U+FFFD":
+        val encoded = utf8_encode_one(0x110000)
+        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])
+
+    it "replaces negative with U+FFFD":
+        val encoded = utf8_encode_one(-1)
+        expect(encoded).to_equal([0xEF, 0xBF, 0xBD])
+
+# ============================================================================
+# utf8_decode_one
+# ============================================================================
+
+describe "utf8_decode_one":
+    it "decodes ASCII byte":
+        val result = utf8_decode_one([0x41], 0)
+        expect(result[0]).to_equal(0x41)
+        expect(result[1]).to_equal(1)
+
+    it "decodes 2-byte sequence":
+        # U+00E9 = 0xC3 0xA9
+        val result = utf8_decode_one([0xC3, 0xA9], 0)
+        expect(result[0]).to_equal(0xE9)
+        expect(result[1]).to_equal(2)
+
+    it "decodes 3-byte sequence for Korean":
+        # U+AC00 가 = 0xEA 0xB0 0x80
+        val result = utf8_decode_one([0xEA, 0xB0, 0x80], 0)
+        expect(result[0]).to_equal(0xAC00)
+        expect(result[1]).to_equal(3)
+
+    it "decodes 4-byte sequence for emoji":
+        # U+1F600 = 0xF0 0x9F 0x98 0x80
+        val result = utf8_decode_one([0xF0, 0x9F, 0x98, 0x80], 0)
+        expect(result[0]).to_equal(0x1F600)
+        expect(result[1]).to_equal(4)
+
+    it "returns replacement for continuation byte":
+        val result = utf8_decode_one([0x80], 0)
+        expect(result[0]).to_equal(0xFFFD)
+        expect(result[1]).to_equal(1)
+
+    it "returns replacement for truncated sequence":
+        # 3-byte lead but only 2 bytes available
+        val result = utf8_decode_one([0xEA, 0xB0], 0)
+        expect(result[0]).to_equal(0xFFFD)
+        expect(result[1]).to_equal(1)
+
+    it "rejects overlong 2-byte":
+        # Overlong: U+0041 encoded as 0xC1 0x81 (should be 1 byte)
+        val result = utf8_decode_one([0xC1, 0x81], 0)
+        expect(result[0]).to_equal(0xFFFD)
+        expect(result[1]).to_equal(2)
+
+    it "returns error for out-of-bounds offset":
+        val result = utf8_decode_one([0x41], 5)
+        expect(result[0]).to_equal(-1)
+        expect(result[1]).to_equal(0)
+
+    it "decodes at nonzero offset":
+        val result = utf8_decode_one([0x41, 0x42, 0x43], 1)
+        expect(result[0]).to_equal(0x42)
+        expect(result[1]).to_equal(1)
+
+# ============================================================================
+# utf8_codepoint_byte_len
+# ============================================================================
+
+describe "utf8_codepoint_byte_len":
+    it "returns 1 for ASCII":
+        expect(utf8_codepoint_byte_len(0x41)).to_equal(1)
+
+    it "returns 2 for Latin extended":
+        expect(utf8_codepoint_byte_len(0xE9)).to_equal(2)
+
+    it "returns 3 for CJK and Hangul":
+        expect(utf8_codepoint_byte_len(0xAC00)).to_equal(3)
+        expect(utf8_codepoint_byte_len(0x4E00)).to_equal(3)  # CJK ideograph
+
+    it "returns 4 for supplementary planes":
+        expect(utf8_codepoint_byte_len(0x1F600)).to_equal(4)
+        expect(utf8_codepoint_byte_len(0x10FFFF)).to_equal(4)
+
+# ============================================================================
+# utf8_encode_all / utf8_decode_all roundtrip
+# ============================================================================
+
+describe "utf8_encode_all and utf8_decode_all":
+    it "roundtrips ASCII":
+        val cps = [0x48, 0x65, 0x6C, 0x6C, 0x6F]  # "Hello"
+        val encoded = utf8_encode_all(cps)
+        val decoded = utf8_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips Korean":
+        # 가나다 = U+AC00 U+B098 U+B2E4
+        val cps = [0xAC00, 0xB098, 0xB2E4]
+        val encoded = utf8_encode_all(cps)
+        expect(encoded.len()).to_equal(9)  # 3 bytes each
+        val decoded = utf8_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips mixed ASCII and emoji":
+        # "Hi" + U+1F600
+        val cps = [0x48, 0x69, 0x1F600]
+        val encoded = utf8_encode_all(cps)
+        expect(encoded.len()).to_equal(6)  # 1+1+4
+        val decoded = utf8_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips Cyrillic":
+        # Привет = U+041F U+0440 U+0438 U+0432 U+0435 U+0442
+        val cps = [0x041F, 0x0440, 0x0438, 0x0432, 0x0435, 0x0442]
+        val encoded = utf8_encode_all(cps)
+        val decoded = utf8_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips Arabic":
+        # مرحبا = U+0645 U+0631 U+062D U+0628 U+0627
+        val cps = [0x0645, 0x0631, 0x062D, 0x0628, 0x0627]
+        val encoded = utf8_encode_all(cps)
+        val decoded = utf8_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips Japanese Hiragana":
+        # こんにちは = U+3053 U+3093 U+306B U+3061 U+306F
+        val cps = [0x3053, 0x3093, 0x306B, 0x3061, 0x306F]
+        val encoded = utf8_encode_all(cps)
+        val decoded = utf8_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips Chinese":
+        # 你好 = U+4F60 U+597D
+        val cps = [0x4F60, 0x597D]
+        val encoded = utf8_encode_all(cps)
+        expect(encoded.len()).to_equal(6)  # 3 bytes each
+        val decoded = utf8_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips Devanagari":
+        # नमस्ते = U+0928 U+092E U+0938 U+094D U+0924 U+0947
+        val cps = [0x0928, 0x092E, 0x0938, 0x094D, 0x0924, 0x0947]
+        val encoded = utf8_encode_all(cps)
+        val decoded = utf8_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "handles empty input":
+        val encoded = utf8_encode_all([])
+        expect(encoded.len()).to_equal(0)
+        val decoded = utf8_decode_all([])
+        expect(decoded.len()).to_equal(0)
+
+# ============================================================================
+# utf8_count_codepoints
+# ============================================================================
+
+describe "codepoint counting via decode_all":
+    it "counts ASCII bytes":
+        val decoded = utf8_decode_all([0x48, 0x65, 0x6C, 0x6C, 0x6F])
+        expect(decoded.len()).to_equal(5)
+
+    it "counts Korean 3-byte sequences":
+        val bytes = utf8_encode_all([0xAC00, 0xB098, 0xB2E4])
+        val decoded = utf8_decode_all(bytes)
+        expect(decoded.len()).to_equal(3)
+
+    it "counts emoji 4-byte sequences":
+        val bytes = utf8_encode_all([0x1F600, 0x1F601])
+        val decoded = utf8_decode_all(bytes)
+        expect(decoded.len()).to_equal(2)
+
+    it "counts empty":
+        val decoded = utf8_decode_all([])
+        expect(decoded.len()).to_equal(0)
+
+# ============================================================================
+# text operations
+# ============================================================================
+
+describe "text_byte_len":
+    it "returns byte length of ASCII text":
+        expect(text_byte_len("Hello")).to_equal(5)
+
+    it "returns byte length of empty text":
+        expect(text_byte_len("")).to_equal(0)
+
+describe "text_codepoints length":
+    it "returns codepoint count for ASCII":
+        val cps = text_codepoints("Hello")
+        expect(cps.len()).to_equal(5)
+
+describe "text_codepoints":
+    it "returns codepoints for ASCII":
+        val cps = text_codepoints("ABC")
+        expect(cps.len()).to_equal(3)
+        expect(cps[0]).to_equal(0x41)
+        expect(cps[1]).to_equal(0x42)
+        expect(cps[2]).to_equal(0x43)
+
+describe "char_from_codepoint":
+    it "converts ASCII codepoint to text":
+        expect(char_from_codepoint(0x41)).to_equal("A")
+        expect(char_from_codepoint(0x30)).to_equal("0")
+
+describe "text_from_codepoints":
+    it "creates text from ASCII codepoints":
+        val result = text_from_codepoints([0x48, 0x69])
+        expect(result).to_equal("Hi")

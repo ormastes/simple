@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+source_dir=${1:-}
+output_dir=${2:-}
+cargo_target_dir=${3:-}
+[ -f "$source_dir/libsimple_native_all.a" ] && [ -n "$output_dir" ] && [ -n "$cargo_target_dir" ] || {
+    echo "usage: $0 <frozen-provider-dir> <derived-provider-dir> <cargo-target-dir>" >&2
+    exit 1
+}
+[ ! -e "$output_dir" ] || { echo "output already exists: $output_dir" >&2; exit 1; }
+
+# Build the canonical default-feature provider.  simple-native-all's default
+# feature set deliberately excludes simple-compiler/llvm, so LLVM Support and
+# CommandLine have one owner: the final compiler backend selected by Phase2.
+env CARGO_TARGET_DIR="$cargo_target_dir" cargo build --release \
+    --manifest-path src/compiler_rust/Cargo.toml -p simple-native-all
+provider="$cargo_target_dir/release/libsimple_native_all.a"
+[ -f "$provider" ]
+
+if ar t "$provider" | grep -Eq '(^|/)(CommandLine|DebugCounter)\.cpp\.o$'; then
+    echo "error: default-feature provider unexpectedly contains LLVM Support owners" >&2
+    exit 1
+fi
+
+# Preserve the frozen 04ce capsule's hosted runtime and compiler backfill as an
+# indivisible compatibility root, replacing only its contaminated native-all
+# provider with the coherently rebuilt default-feature archive.
+mkdir -p "$output_dir"
+cp -a "$source_dir/." "$output_dir/"
+chmod u+w "$output_dir" "$output_dir/libsimple_native_all.a"
+cp "$provider" "$output_dir/libsimple_native_all.a"
+ranlib "$output_dir/libsimple_native_all.a"
+
+for symbol in rt_native_build rt_enum_discriminant rt_string_trim rt_string_lines; do
+    count=$(nm -g --defined-only "$output_dir/libsimple_native_all.a" 2>/dev/null |
+        awk -v wanted="$symbol" '$NF == wanted { n += 1 } END { print n + 0 }')
+    [ "$count" -eq 1 ] || { echo "error: provider export $symbol has count $count" >&2; exit 1; }
+done
+
+{
+    echo "source_capsule=$source_dir"
+    echo "source_native_all_sha256=$(sha256sum "$source_dir/libsimple_native_all.a" | awk '{print $1}')"
+    echo "coherent_native_all_sha256=$(sha256sum "$output_dir/libsimple_native_all.a" | awk '{print $1}')"
+    echo "cargo_version=$(cargo --version)"
+    echo "rustc_version=$(rustc --version)"
+    echo "llvm_support_members=0"
+} > "$output_dir/coherent-provider.env"
+chmod a-w "$output_dir/coherent-provider.env"
+echo "PASS: coherent default-feature provider capsule: $output_dir"

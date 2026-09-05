@@ -1,0 +1,86 @@
+# Network SFFI Bindings
+#
+# Low-level bindings for the network modules.
+#
+# READ THIS BEFORE ADDING AN `extern fn` HERE
+# ===========================================
+# An `@extern` whose name is NOT registered in
+# `src/compiler_rust/common/src/runtime_symbols.rs` returns **nil silently**
+# under the JIT. It does not fail to compile and it does not raise -- the caller
+# just gets nothing. So an unregistered extern here is a trap, not a stub.
+#
+# Audit 2026-08-05 (Defect 2 of
+# doc/08_tracking/bug/network_coverage_illusion_and_spec_tree_duplication_2026-08-05.md):
+# all 41 externs previously declared in this file were checked one by one
+# against `src/compiler_rust/` (anchored, quoted-name grep, vendor excluded).
+# **Zero** of them had a runtime implementation. Four names produced grep hits,
+# and none of the four was a registration:
+#   - `tcp_stream_connect`, `udp_socket_connect` -> `compiler/src/security.rs`
+#     ambient-API POLICY table (name -> required capability). A name list.
+#   - `http_request` -> `compiler/src/effects.rs` `NET_OPERATIONS`. A name list.
+#   - `bytes_to_string` -> `compiler/src/interpreter_extern/mod.rs` dispatch.
+#     Real, but INTERPRETER-ONLY: absent from `runtime_symbols.rs`, so it was
+#     still silent-nil under JIT/native.
+# Control: `rt_io_tcp_bind` IS in `runtime_symbols.rs` (line 762).
+#
+# NOTE ON REACH: `std.net.*` resolves to the `nogc_async_mut` tier FIRST from
+# every tier (`module_loader_resolve.spl`: "Default app mode is
+# nogc_async_mut"), so THIS file is the one all four `net/sffi.spl` copies
+# actually resolve to. Edits here are repo-wide.
+
+use std.error.{SimpleError, error}
+
+# ============================================================================
+# TCP -- REMOVED (2026-08-05)
+# ============================================================================
+#
+# The 24 `tcp_listener_*` / `tcp_stream_*` externs were deleted, not because
+# they were uncalled, but because their callers were first rerouted onto the
+# registered implementation:
+#
+#   - `net/tcp.spl` is now a facade re-exporting
+#     `std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}` (fd-based over the
+#     registered `rt_io_tcp_bind` / `rt_io_tcp_connect` / `rt_io_tcp_read` /
+#     ... family). Downstream importers -- `nogc_sync_mut/ui_test/http.spl`,
+#     `nogc_sync_mut/play/cdp/client.spl`,
+#     `nogc_sync_mut/security/enforcement/capability.spl` -- land there now.
+#   - `net/telnet.spl` calls `TcpStream.connect_timeout` and `rt_bytes_to_text`
+#     directly.
+#
+# So this is a reroute onto a live implementation, not a bare deletion.
+#
+# Still open elsewhere: `nogc_sync_mut/play/cdp/client.spl:616-622` declares its
+# own LOCAL copies of these same dead externs (`tcp_stream_connect_timeout`,
+# `tcp_stream_read`, `tcp_stream_write_all`, `tcp_stream_read_line`,
+# `tcp_stream_set_read_timeout`, `tcp_stream_set_nodelay`, `tcp_stream_close`).
+# Those are outside this module and are NOT fixed by this change.
+
+# URL parsing and percent coding use Pure-Simple owners.
+export use std.nogc_async_mut.http.url.{url_encode, url_decode}
+
+# ============================================================================
+# Utility -- IMPLEMENTED over registered runtime symbols
+# ============================================================================
+#
+# These two were dead externs; they are now real pure-Simple functions
+# forwarding to symbols that ARE in `runtime_symbols.rs`. Callers
+# (`net/http.spl:177`, `:629`) keep the same names and signatures.
+
+use std.common.string_core.{bytes_to_text}
+@unsafe(reason: "raw filesystem path and byte-array ABI; contract: false means the write failed", capabilities: [ffi])
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn bytes_to_string(bytes: [u8]) -> text:
+    """Decode raw bytes to text via the registered `rt_bytes_to_text`."""
+    bytes_to_text(bytes)
+
+fn file_write_bytes(path: text, data: [u8]) -> Result<(), SimpleError>:
+    """Write raw bytes to a file via the registered `rt_file_write_bytes`."""
+    val written = unsafe(capabilities: [ffi]):
+        rt_file_write_bytes(path, data)
+    if written:
+        Ok(())
+    else:
+        Err(error("failed to write bytes to {path}"))
+
+export bytes_to_string, file_write_bytes

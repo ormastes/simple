@@ -1,0 +1,187 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_dashboard_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_dashboard_evidence_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+SURFACE_MANIFEST="$BUILD_DIR/dashboard_evidence_surface_manifest.tsv"
+LIVE_EVIDENCE_ENV="${LLM_DASHBOARD_LIVE_EVIDENCE_ENV:-build/llm_dashboard_live/evidence.env}"
+STRICT_LIVE=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict-live)
+            STRICT_LIVE=1
+            ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-llm-dashboard-evidence.shs [--strict-live]"
+            echo "  --strict-live  require LLM_DASHBOARD_LIVE_EVIDENCE_ENV with llm_dashboard_live_status=pass"
+            exit 0
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST"
+
+artifact_size() {
+    path="$1"
+    if [ -s "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '0'
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -s "$path" ]; then
+        sha256sum "$path" | awk '{print $1}'
+    else
+        printf 'missing'
+    fi
+}
+
+run_spec() {
+    key="$1"
+    path="$2"
+    log="$BUILD_DIR/$key.log"
+    if "$SIMPLE_BIN" test "$path" --mode=interpreter --clean >"$log" 2>&1; then
+        eval "${key}_status=pass"
+        eval "${key}_exit=0"
+    else
+        code=$?
+        eval "${key}_status=fail"
+        eval "${key}_exit=$code"
+    fi
+}
+
+run_spec diagnostics_panel test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl
+run_spec vllm_control_route test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl
+run_spec agent_dashboard test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl
+run_spec log_modes test/02_integration/app/llm_dashboard_log_modes_spec.spl
+run_spec diagnostics_collector test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl
+run_spec tooling_collector test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl
+
+status="pass"
+for key in diagnostics_panel vllm_control_route agent_dashboard log_modes diagnostics_collector tooling_collector; do
+    eval "value=\${${key}_status}"
+    if [ "$value" != "pass" ]; then
+        status="fail"
+    fi
+done
+
+live_status="not_required"
+live_reason="default_route_and_collector_evidence_only"
+if [ "$STRICT_LIVE" -eq 1 ]; then
+    live_status="missing"
+    live_reason="missing_live_dashboard_evidence"
+    if [ -f "$LIVE_EVIDENCE_ENV" ]; then
+        evidence_status="$(sed -n 's/^llm_dashboard_live_status=//p' "$LIVE_EVIDENCE_ENV" | tail -n 1)"
+        evidence_reason="$(sed -n 's/^llm_dashboard_live_reason=//p' "$LIVE_EVIDENCE_ENV" | tail -n 1)"
+        if [ "$evidence_status" = "pass" ]; then
+            live_status="pass"
+            live_reason="${evidence_reason:-live_dashboard_passed}"
+        else
+            live_status="${evidence_status:-fail}"
+            live_reason="${evidence_reason:-live_dashboard_not_passed}"
+        fi
+    fi
+    if [ "$live_status" != "pass" ]; then
+        status="fail"
+    fi
+fi
+
+{
+    for path in \
+        scripts/check/check-llm-dashboard-evidence.shs \
+        test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl \
+        test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl \
+        test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl \
+        test/02_integration/app/llm_dashboard_log_modes_spec.spl \
+        test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl \
+        test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl \
+        doc/07_guide/app/dashboard.md \
+        doc/04_architecture/app/ui/kairos_like_simple_mcp_llm_dashboard.md \
+        doc/05_design/app/ui/kairos_like_simple_mcp_llm_dashboard.md \
+        "$BUILD_DIR/diagnostics_panel.log" \
+        "$BUILD_DIR/vllm_control_route.log" \
+        "$BUILD_DIR/agent_dashboard.log" \
+        "$BUILD_DIR/log_modes.log" \
+        "$BUILD_DIR/diagnostics_collector.log" \
+        "$BUILD_DIR/tooling_collector.log"
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+
+{
+    printf '%s\n' "llm_dashboard_evidence_status=$status"
+    printf '%s\n' "llm_dashboard_evidence_strict_live=$STRICT_LIVE"
+    printf '%s\n' "llm_dashboard_evidence_live_status=$live_status"
+    printf '%s\n' "llm_dashboard_evidence_live_reason=$live_reason"
+    printf '%s\n' "llm_dashboard_evidence_live_env=$LIVE_EVIDENCE_ENV"
+    printf '%s\n' "llm_dashboard_evidence_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "llm_dashboard_evidence_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "llm_dashboard_evidence_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "llm_dashboard_evidence_surface_manifest_sha256=$surface_manifest_sha256"
+    for key in diagnostics_panel vllm_control_route agent_dashboard log_modes diagnostics_collector tooling_collector; do
+        eval "value=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        printf '%s\n' "llm_dashboard_evidence_${key}_status=$value"
+        printf '%s\n' "llm_dashboard_evidence_${key}_exit=$exit_code"
+        printf '%s\n' "llm_dashboard_evidence_${key}_log_size=$(artifact_size "$BUILD_DIR/$key.log")"
+        printf '%s\n' "llm_dashboard_evidence_${key}_log_sha256=$(artifact_sha256 "$BUILD_DIR/$key.log")"
+    done
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Dashboard Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    if [ "$STRICT_LIVE" -eq 1 ]; then
+        printf '%s\n' "- strict_live: \`true\`"
+    else
+        printf '%s\n' "- strict_live: \`false\`"
+    fi
+    printf '%s\n' "- live_dashboard: \`$live_status\`"
+    printf '%s\n' "- live_reason: \`$live_reason\`"
+    printf '%s\n' "- live_env: \`$LIVE_EVIDENCE_ENV\`"
+    for key in diagnostics_panel vllm_control_route agent_dashboard log_modes diagnostics_collector tooling_collector; do
+        eval "value=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        printf '%s\n' "- ${key}: \`$value\` exit=\`$exit_code\` log=\`$BUILD_DIR/$key.log\`"
+        printf '%s\n' "  - log_size: \`$(artifact_size "$BUILD_DIR/$key.log")\`"
+        printf '%s\n' "  - log_sha256: \`$(artifact_sha256 "$BUILD_DIR/$key.log")\`"
+    done
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    if [ "$STRICT_LIVE" -eq 1 ]; then
+        printf 'This strict live check requires a separate live dashboard evidence env with `llm_dashboard_live_status=pass`. Local route, collector, and CLI evidence alone is not live operator-dashboard completion proof.\n'
+    else
+        printf 'This evidence proves the local dashboard diagnostics, vLLM control route planning, agent dashboard route, log-mode CLI, diagnostics collector, and tooling artifact collector contracts. It is not live operator-dashboard proof or live vLLM serving proof; live serving remains covered by the runtime vLLM host probe lane. Run with `--strict-live` when live dashboard evidence must pass.\n'
+    fi
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-dashboard-evidence"
+else
+    echo "STATUS: FAIL llm-dashboard-evidence"
+    exit 1
+fi

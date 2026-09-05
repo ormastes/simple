@@ -1,0 +1,202 @@
+# Host (CPU) `ProfileTarget` — wall-clock profiling for the host lane.
+#
+# Design: doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md §2, §5
+# Plan stream: P4.
+#
+# ===========================================================================
+# DISCOVERY RESULT (2026-08-09) — why `steps` is PROFILE_ABSENT on the host
+# ===========================================================================
+# This stream's opening task was to find out whether the interpreter already
+# maintains an instruction / AST-node counter that could back
+# `ProfileReport.steps`. The answer is NO. A counter exists, but only inside
+# Rust and it does not count what `steps` means:
+#
+#   src/compiler_rust/compiler/src/interpreter_state.rs:131
+#       static INSTRUCTION_COUNT: AtomicU64        ("reset per execution")
+#   src/compiler_rust/compiler/src/interpreter_state.rs:454-467
+#       check_execution_limit()  -- the only incrementer
+#   src/compiler_rust/compiler/src/interpreter_state.rs:470
+#       reset_execution_count()
+#   src/compiler_rust/compiler/src/interpreter_state.rs:480
+#       get_execution_count() -> u64
+#
+# Three independent reasons it cannot honestly back `steps`:
+#
+#   1. IT IS NOT AN INSTRUCTION COUNT. All 20 call sites are loop bodies
+#      (src/compiler_rust/compiler/src/interpreter_control.rs:36-40, invoked
+#      at :390, :436, :511, :3003, :3405) and iterator/collection combinator
+#      element steps (interpreter_helpers/collections.rs:86,106,136,157,197,
+#      216,244,263,291,310,351,372). Straight-line code and function calls
+#      increment it ZERO times, so a loop-free program would report 0 while
+#      executing thousands of expressions. Reporting that as `steps` would
+#      be exactly the fabricated number this contract forbids.
+#   2. IT IS OFF IN RELEASE. interpreter_state.rs:135/:138 gate
+#      EXECUTION_LIMIT_ENABLED on `#[cfg(debug_assertions)]`, and
+#      check_execution_limit() early-returns BEFORE incrementing when
+#      disabled -- so in the shipped driver it reads 0.
+#   3. IT IS NOT READABLE FROM SIMPLE. Only the SETTER is bound
+#      (`rt_fault_set_execution_limit`,
+#      src/lib/nogc_sync_mut/sffi/fault.spl:6 ->
+#      src/compiler_rust/compiler/src/interpreter_extern/cli.rs:536-546).
+#      There is no `get_execution_count` binding anywhere, and the native/AOT
+#      counterpart is a no-op stub
+#      (src/compiler_rust/compiler/src/linker/native_binary/stubs.rs:683).
+#
+# The pure-Simple interpreter (src/compiler/95.interp) has no step counter of
+# any kind -- mir_interpreter.spl / mir_interp_ops.spl have zero hits for
+# step/limit/fuel/budget.
+#
+# Enabling that counter would additionally ARM THE EXECUTION-LIMIT ABORT
+# path: profiling would change whether a program terminates. That disqualifies
+# it regardless of the other two reasons.
+#
+# So this implementation measures WALL CLOCK ONLY and reports
+# `steps: PROFILE_ABSENT`, with `detail` stating in words what is measured
+# and what is absent. Per profile_target.spl's own contract, "-1 when nothing
+# counts steps" is the correct answer, not a shortfall.
+#
+# ===========================================================================
+# CLOCK NOTE (a real cross-engine divergence, harmless for deltas)
+# ===========================================================================
+# `rt_time_now_nanos()` has two different implementations with two different
+# epochs:
+#   native / C  : src/runtime/runtime_time.c:62 -- CLOCK_MONOTONIC, ns since
+#                 the FIRST call in this process.
+#   interpreter : src/compiler_rust/compiler/src/interpreter_extern/time.rs:300
+#                 -- SystemTime ns since the UNIX epoch.
+# Absolute readings are therefore not comparable across engines. Both are
+# non-decreasing, so the end-minus-begin DIFFERENCE this module reports is
+# valid under either. Only differences are ever exposed; the raw reading is
+# private to this file.
+#
+# ===========================================================================
+# ZERO OVERHEAD WHEN PROFILING IS DISABLED
+# ===========================================================================
+# Two separate guarantees, both demonstrable rather than asserted:
+#
+#  (a) STRUCTURAL. This module installs no hook, no global counter, no
+#      callback, and no instrumentation in the interpreter, compiler, or
+#      runtime. It only reads a clock, and only from inside its own methods.
+#      A program that never constructs a HostProfileTarget executes exactly
+#      the instructions it executed before this file existed. This is
+#      checkable by symbol search: nothing outside this module and its spec
+#      references it.
+#  (b) DYNAMIC. A target attached with `AttachOpts.profile = false` takes the
+#      short branch in profile_begin()/profile_end(): no extern call, no
+#      clock read, no arithmetic. The accompanying spec MEASURES the
+#      disabled-path cost against the enabled path and asserts the disabled
+#      path is strictly cheaper -- an assertion that fails if the guard is
+#      removed.
+#
+# Lifecycle: profiling is ARMED AT ATTACH (`AttachOpts.profile`), matching the
+# shared interface, because GPU PROF-1 step counting cannot be turned on after
+# the program is uploaded. The host has no upload step, but it follows the
+# same lifecycle so the interface means one thing on every lane. There is
+# deliberately NO post-attach enable/disable method.
+#
+# Value-type note: classes are VALUE TYPES here (`val b = a` copies), so a
+# HostProfileTarget handle is not shared. Callers must keep and mutate ONE
+# handle across a begin/end pair; two copies are two independent profilers.
+
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.profile_target.{ProfileReport, PROFILE_ABSENT, profile_report_new, profile_report_unavailable}
+use std.common.debug.session_core.{AttachOpts}
+
+extern fn rt_time_now_nanos() -> i64
+
+pub fn host_profile_now_nanos() -> i64:
+    """Raw host clock reading, nanoseconds. Meaningful ONLY as a difference
+    -- the epoch differs between the native and interpreter implementations
+    (see the CLOCK NOTE above)."""
+    rt_time_now_nanos()
+
+pub fn host_profile_detail_measured() -> text:
+    """`ProfileReport.detail` for a real measurement: names exactly which
+    fields were measured and which are absent, per design §5."""
+    "target=host; wall_ns=measured(rt_time_now_nanos monotonic delta); " +
+    "device_ns=absent(host has no device); " +
+    "steps=absent(no interpreter step counter exists: " +
+    "interpreter_state.rs INSTRUCTION_COUNT counts loop iterations only, " +
+    "is release-disabled, and has no Simple-side getter)"
+
+pub fn host_profile_detail_disabled() -> text:
+    "target=host; profiling not armed at attach (AttachOpts.profile=false); no clock was read"
+
+pub fn host_profile_detail_no_begin() -> text:
+    "target=host; profile_end() with no matching profile_begin()"
+
+pub fn host_profile_detail_backwards() -> text:
+    "target=host; host clock went backwards between begin and end; duration refused"
+
+# ===========================================================================
+# The target
+# ===========================================================================
+#
+# Implements the shared `ProfileTarget` contract from
+# src/lib/common/debug/profile_target.spl:
+#   fn profile_level() -> CapLevel
+#   me profile_begin()
+#   me profile_end() -> ProfileReport
+#
+# `profile_begin` / `profile_end` are `me`, not `fn`: a `fn` trait method
+# receives a COPY of the receiver and silently discards the mutation, which
+# would make begin_ns read back as 0 with no diagnostic.
+pub class HostProfileTarget:
+    armed: bool
+    running: bool
+    begin_ns: i64
+
+    fn new(opts: AttachOpts) -> HostProfileTarget:
+        """Construct from attach options -- profiling is armed here or not at
+        all, matching the shared attach-time lifecycle."""
+        HostProfileTarget(armed: opts.profile, running: false, begin_ns: 0)
+
+    fn armed_target() -> HostProfileTarget:
+        """Convenience for callers that already decided to profile."""
+        HostProfileTarget(armed: true, running: false, begin_ns: 0)
+
+    fn disarmed_target() -> HostProfileTarget:
+        """A target that will read no clock at all."""
+        HostProfileTarget(armed: false, running: false, begin_ns: 0)
+
+    fn profile_level() -> CapLevel:
+        """Native when armed: `wall_ns` comes from a real host monotonic
+        clock, not a synthesis or an estimate. The tier names the mechanism
+        behind the numbers that ARE reported; fields with no mechanism behind
+        them are PROFILE_ABSENT and say so in `detail` (design §5).
+        Unavailable when profiling was not armed at attach."""
+        if self.armed:
+            CapLevel.Native
+        else:
+            CapLevel.Unavailable
+
+    me profile_begin():
+        """Arms measurement. Last-begin-wins per the trait contract: calling
+        it twice without an `end` restarts the window from the second call."""
+        if not self.armed:
+            # Disabled path: no extern call, no clock read, no arithmetic.
+            return
+        self.begin_ns = host_profile_now_nanos()
+        self.running = true
+
+    me profile_end() -> ProfileReport:
+        """Report for the window since the last `profile_begin`. Never
+        fabricates: an unarmed target, a missing begin, and a backwards clock
+        each produce a distinct Unavailable report."""
+        if not self.armed:
+            # Disabled path: no extern call, no clock read.
+            return profile_report_unavailable(host_profile_detail_disabled())
+        if not self.running:
+            return profile_report_unavailable(host_profile_detail_no_begin())
+        val end_ns = host_profile_now_nanos()
+        self.running = false
+        val delta = end_ns - self.begin_ns
+        if delta < 0:
+            return profile_report_unavailable(host_profile_detail_backwards())
+        profile_report_new(
+            CapLevel.Native,
+            delta,
+            PROFILE_ABSENT,
+            PROFILE_ABSENT,
+            host_profile_detail_measured(),
+        )

@@ -1,0 +1,211 @@
+#!/bin/sh
+# check-startup-syscall-budget.shs — pin module-resolution `statx` cost at startup.
+#
+# WHY THIS EXISTS
+# ---------------
+# Startup cost in this repo was assumed to be file READING: `.claude/rules/
+# commands.md` records "82 opens of src/lib/**.spl, zero .smf" and the startup
+# plan is written around load/parse work. Profiled 2026-08-20 against the
+# deployed seed (bin/release/x86_64-unknown-linux-gnu/simple, 59,773,320 bytes,
+# mtime 2026-08-19 15:14:28), `strace -c -f` on `simple lint` over a ONE-LINE
+# file said otherwise:
+#
+#   77.9%  futex        412 calls        (thread parking, not work)
+#   21.6%  statx    891,477 calls   202,042 ENOENT
+#    0.3%  readlink  13,482 calls    13,140 ENOENT
+#    0.05% openat     3,388 calls        <- the reads everyone was looking at
+#
+# Reading of that: the file reads are a rounding error. The cost is module
+# resolution PROBING a large fixed candidate set per import — the search-root
+# walk to the workspace boundary crossed with stdlib variant roots, numbered-dir
+# forms, and the legacy `rust/lib/std/src` / `simple/std_lib/src` / `std_lib/src`
+# layouts — with `src/compiler/00.common` alone stat'd 2,798 times in one
+# process, and the `exists() && is_file()` idiom paying two `statx` per question.
+#
+# NOTE FOR THE NEXT INVESTIGATOR — four parallel resolvers exist:
+#   compiler/src/interpreter_module/path_resolution.rs   (interpreter)
+#   compiler/src/module_resolver/{types,resolution}.rs   (compile pipeline)
+#   compiler/src/pipeline/module_loader.rs               (loader)
+#   src/compiler/99.loader/module_resolver/types.spl     (pure-Simple mirror)
+# The first one has a resolution cache and accounts for only 16,366 of the
+# 905,970 probes (measured by instrumenting it). Fixing it alone changed the
+# statx count by 0. The cost lives in the OTHER, uncached Rust resolvers. Do not
+# repeat that detour.
+#
+# This gate counts `statx` for a fixed trivial workload rather than wall time,
+# because wall time on this shared box swings with load (21-30 concurrent
+# `simple` processes seen) while the syscall count is deterministic.
+#
+# Measured on the same fixture:  before 905,970 statx / ~3.90s wall
+#                                after   31,650 statx / ~1.88s wall
+# Budget is 150,000 — ~4.7x headroom over the fixed cost, still ~6x below the
+# pre-fix number, so this gate FAILS on the pre-fix binary and passes now.
+#
+# STATUS: ADVISORY — honestly RED against the currently deployed `bin/simple`,
+# which is the pre-fix seed. The fix lives in `src/compiler_rust` and needs a
+# seed redeploy, which was deliberately not done here (other sessions are live
+# on the shared `bin/release/**`). Verified both ways on 2026-08-20:
+#   --binary bin/simple                    -> FAIL, lint(891477)   exit 1
+#   --binary <privately built fixed seed>  -> PASS, lint 31650      exit 0
+# Promote to MANDATORY once the fixed seed is deployed and this goes green.
+#
+# Verdict line is always the LAST line of stdout:
+#   PASS — <n> invocation(s) traced, <k> statx (budget <b>)      exit 0
+#   FAIL — ...                                                    exit 1
+#   ERROR — nothing was checked (<reason>)                        exit 2
+#
+# Usage:
+#   sh scripts/check/check-startup-syscall-budget.shs [--binary PATH] [--budget N]
+#   sh scripts/check/check-startup-syscall-budget.shs --selftest
+
+set -u
+
+BUDGET=150000
+BINARY=""
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) BINARY="$2"; shift 2 ;;
+        --budget) BUDGET="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2
+           echo "ERROR — nothing was checked (bad arguments)"; exit 2 ;;
+    esac
+done
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+# ---------------------------------------------------------------------------
+# Core measurement: run CMD under strace and print the statx count.
+# Prints nothing and returns non-zero when no count could be obtained.
+# ---------------------------------------------------------------------------
+count_statx() {
+    _out="$1"; shift
+    strace -c -f -e trace=statx,newfstatat,stat,lstat -o "$_out" "$@" >/dev/null 2>&1
+    # strace's own exit status is deliberately NOT read here: the traced
+    # command may legitimately exit non-zero (a lint finding). What matters is
+    # whether a counter line was produced. The whole stat family is summed
+    # because libc picks the syscall: Rust's std uses `statx`, /bin/sh's `[ -e ]`
+    # uses `newfstatat`, and older libcs use `stat`/`lstat`.
+    _n=$(awk '$NF ~ /^(statx|newfstatat|stat|lstat)$/ { t += $4 } END { if (t > 0) print t }' "$_out" 2>/dev/null)
+    case "$_n" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    echo "$_n"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal, runs before any real scan.
+# Fixtures are real executables probed by the real measurement function.
+# ---------------------------------------------------------------------------
+selftest() {
+    _d=$(mktemp -d) || { echo "selftest: mktemp failed" >&2; return 1; }
+    _fail=0
+
+    # Fixture 1: a binary that stats far more than the budget must FAIL.
+    cat > "$_d/hog" <<'EOS'
+#!/bin/sh
+i=0
+while [ $i -lt 4000 ]; do
+    [ -e /nonexistent-startup-budget-probe ] || true
+    i=$((i + 1))
+done
+EOS
+    chmod +x "$_d/hog"
+    _n=$(count_statx "$_d/hog.tr" "$_d/hog")
+    if [ $? -ne 0 ]; then
+        echo "selftest FAIL: hog fixture produced no statx count" >&2; _fail=1
+    elif [ "$_n" -le 100 ]; then
+        echo "selftest FAIL: hog fixture measured only $_n statx" >&2; _fail=1
+    fi
+
+    # Fixture 2: a quiet binary must measure far below the hog.
+    cat > "$_d/quiet" <<'EOS'
+#!/bin/sh
+[ -e / ] || true
+EOS
+    chmod +x "$_d/quiet"
+    _q=$(count_statx "$_d/quiet.tr" "$_d/quiet")
+    if [ $? -ne 0 ]; then
+        echo "selftest FAIL: quiet fixture produced no statx count" >&2; _fail=1
+    elif [ "$_q" -ge "$_n" ]; then
+        echo "selftest FAIL: quiet ($_q) not below hog ($_n)" >&2; _fail=1
+    fi
+
+    # Fixture 3: an unrunnable binary must yield NO count, so the caller is
+    # forced to ERROR rather than reporting a vacuous pass.
+    if count_statx "$_d/missing.tr" "$_d/does-not-exist" >/dev/null 2>&1; then
+        echo "selftest FAIL: missing binary produced a count" >&2; _fail=1
+    fi
+
+    # Fixture 4: the budget comparison itself discriminates.
+    if [ 200000 -le "$BUDGET" ] || [ 1000 -gt "$BUDGET" ]; then
+        echo "selftest FAIL: budget $BUDGET outside the sane 1000..200000 band" >&2; _fail=1
+    fi
+
+    rm -rf "$_d"
+    return $_fail
+}
+
+if ! command -v strace >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked (strace not available; absence of a tracer is absence of evidence)"
+    exit 2
+fi
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 4 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Real scan
+# ---------------------------------------------------------------------------
+if [ -z "$BINARY" ]; then
+    BINARY="$REPO_ROOT/bin/simple"
+fi
+if [ ! -x "$BINARY" ]; then
+    echo "ERROR — nothing was checked (no executable compiler at $BINARY)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+printf 'print("startup budget fixture")\n' > "$WORK/fixture.spl"
+
+INVOCATIONS=0
+TOTAL=0
+OFFENDERS=""
+
+for CMD in lint run; do
+    N=$(count_statx "$WORK/$CMD.tr" "$BINARY" "$CMD" "$WORK/fixture.spl")
+    if [ $? -ne 0 ]; then
+        echo "ERROR — nothing was checked (could not trace '$BINARY $CMD')"
+        exit 2
+    fi
+    INVOCATIONS=$((INVOCATIONS + 1))
+    TOTAL=$((TOTAL + N))
+    echo "  $CMD: $N statx"
+    if [ "$N" -gt "$BUDGET" ]; then
+        OFFENDERS="$OFFENDERS $CMD($N)"
+    fi
+done
+
+if [ "$INVOCATIONS" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 invocations traced)"
+    exit 2
+fi
+
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL — $INVOCATIONS invocation(s) traced, over budget $BUDGET:$OFFENDERS"
+    exit 1
+fi
+
+echo "PASS — $INVOCATIONS invocation(s) traced, $TOTAL statx total (budget $BUDGET each)"
+exit 0

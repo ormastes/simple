@@ -1,0 +1,60 @@
+#!/bin/sh
+# simple-repo-managed-hook: pre-push-worktree-launcher
+# ^ Identity marker. install-must-check-hooks.shs matches on this line to
+#   recognise an OLDER copy of THIS file already installed at
+#   .git/hooks/pre-push. Without it, changing this file made the installer treat
+#   the previously-installed launcher as a foreign local hook and preserve it as
+#   pre-push.local — which the dispatcher then CHAINS, and which itself execs the
+#   dispatcher: an infinite hook recursion. That is the "oldguard" recursion
+#   whose artifact scripts/hooks/pre-push says "could not be located by static
+#   search" (doc/08_tracking/bug/oldguard_prepush_probe_recursion_2026-08-26.md);
+#   its OLDGUARD_DEPTH sentinel is what stops it at 3 hops. Never remove this
+#   line, and never edit it without updating that installer check.
+# Stable shared-hooks launcher. Linked worktrees share one Git hooks directory,
+# so this file must resolve the worktree at invocation time instead of embedding
+# the absolute path of whichever worktree last ran the installer.
+set -u
+
+# Clear the git env git itself exports into a hook (2026-09-03).
+#
+# Git runs a hook with GIT_DIR (and sometimes GIT_WORK_TREE, GIT_INDEX_FILE,
+# GIT_PREFIX) exported, and chdirs to the working-tree root first. Every guard
+# below assumes plain "resolve the repo from cwd", so the inherited GIT_DIR is
+# pure harm, and in a LINKED worktree it is actively destructive: GIT_DIR then
+# names `<main>/.git/worktrees/<name>`, a gitdir with no adjacent working tree,
+# so
+#   * `git rev-parse --show-toplevel` fails with "this operation must be run in
+#     a work tree" — which is how check-guard-wiring.shs came to abort the
+#     mandatory push gate with "nothing was checked: not inside a git
+#     repository" on a perfectly healthy repo; and
+#   * a git command that (re)initialises config from that gitdir WRITES
+#     `core.bare` into the SHARED config, corrupting every worktree at once.
+#
+# The second one is not a hypothesis. Measured 2026-09-03: with core.bare
+# absent from .git/config, running `check-guard-wiring.shs --selftest-only`
+# with GIT_DIR exported left `core.bare` PRESENT afterwards ('' -> 'false').
+# That is the same key whose appearance as `true` is recorded in
+# doc/08_tracking/bug/shared_git_config_core_worktree_misdirects_prepush_guards_2026-08-08.md
+# and in this repo's dedicated core.bare sanity guard (">=3 times on 2026-08-17
+# alone, silently"), which is itself still wired to nothing — see the wiring
+# baseline. Deliberately NOT naming that guard's filename here: scripts/hooks/**
+# is a ROOT in check-guard-wiring.shs's textual reachability model, so spelling
+# the basename in a comment would mark it "wired" on the strength of prose that
+# executes nothing. The guards were corrupting the config on every push and
+# then refusing, on the next push, because of the corruption they had caused.
+#
+# Nothing in the hook chain cleared these before: `grep -n 'GIT_DIR' ` over
+# pre-push-worktree-launcher, pre-push, pre-push-conflict-tree-guard.shs and
+# check-push-must-pass.shs returned nothing at all.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "pre-push launcher: cannot locate active worktree root" >&2
+    exit 1
+}
+DISPATCHER="$ROOT/scripts/hooks/pre-push"
+[ -f "$DISPATCHER" ] || {
+    echo "pre-push launcher: missing tracked dispatcher $DISPATCHER" >&2
+    exit 1
+}
+exec sh "$DISPATCHER" "$@"

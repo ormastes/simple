@@ -1,0 +1,28 @@
+# @tag: unit, contract, native-build, phase-profile
+
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "Native-build phase-profile launch contract":
+    it "records a durable parent receipt before the interpreted worker starts":
+        val source = file_read("src/app/cli/native_build_main.spl")
+        val launch = source.find("process_run_timeout_live(simple_bin, worker_args")
+        val receipt = source.find("native-build:worker-launch")
+        expect(receipt).to_be_greater_than(-1)
+        expect(launch).to_be_greater_than(receipt)
+        expect(source).to_contain("SIMPLE_COMPILER_PHASE_PROFILE_FILE")
+        expect(source).to_contain("file_append(phase_profile_sink, \"native-build:worker-launch\\n\")")
+
+    it "keeps child and compiler handoff receipts in the worker path":
+        val worker = file_read("src/app/cli/native_build_worker.spl")
+        val compile_targets = file_read("src/app/io/_CliCompile/compile_targets.spl")
+        expect(worker).to_contain("native-build:worker-enter\\n")
+        expect(compile_targets).to_contain("native-build:driver-enter\\n")
+        val worker_main = worker.find("native-build:worker-enter")
+        val worker_call = worker.find("cli_native_build(native_build_entry_args())")
+        val driver_marker = compile_targets.find("native-build:driver-enter")
+        val option_decode = compile_targets.find("val option_error = cli_native_build_option_error(args)")
+        expect(worker_main).to_be_greater_than(-1)
+        expect(worker_call).to_be_greater_than(worker_main)
+        expect(driver_marker).to_be_greater_than(-1)
+        expect(option_decode).to_be_greater_than(driver_marker)

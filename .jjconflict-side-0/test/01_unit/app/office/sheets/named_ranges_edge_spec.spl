@@ -1,0 +1,128 @@
+"""Office sheets named ranges edge-case spec.
+
+Covers rejection of names colliding with A1 cell references, duplicates,
+case-insensitive lookup and duplicate detection, removal of a name that was
+never defined, and empty/whitespace/invalid-character names.
+"""
+
+use std.spec
+use app.office.sheets.named_ranges.{NameStore, validate_name}
+
+describe "collision with A1 cell references":
+    """A name that reads as a cell reference is ambiguous and rejected."""
+
+    it "rejects a plain A1 collision":
+        expect(validate_name("A1").contains("collides with cell reference")).to_equal(true)
+
+    it "rejects the last Excel cell XFD1048576":
+        expect(validate_name("XFD1048576").contains("collides with cell reference")).to_equal(true)
+
+    it "rejects a lower-case cell reference":
+        expect(validate_name("b7").contains("collides with cell reference")).to_equal(true)
+
+    it "does not store a colliding name":
+        var store = NameStore.new()
+        val reason = store.define("A1", "B2")
+        expect(reason.contains("collides")).to_equal(true)
+        expect(store.count()).to_equal(0)
+
+    it "rejects a word-plus-digits name that parses as a reference":
+        # RANGE1 looks like a word but is column RANGE, row 1.
+        expect(validate_name("Range1").contains("collides with cell reference")).to_equal(true)
+
+    it "accepts a name that merely starts like a reference":
+        expect(validate_name("A1Total")).to_equal("")
+
+describe "reserved R1C1 letters":
+    """R and C alone are reserved by R1C1 notation."""
+
+    it "rejects R":
+        expect(validate_name("R").contains("reserved")).to_equal(true)
+
+    it "rejects lower-case c":
+        expect(validate_name("c").contains("reserved")).to_equal(true)
+
+    it "accepts RC as a name":
+        expect(validate_name("RC")).to_equal("")
+
+describe "duplicates":
+    """A second definition of the same name is rejected, not silently applied."""
+
+    it "rejects an exact duplicate":
+        var store = NameStore.new()
+        store.define("Sales", "A1:A5")
+        val reason = store.define("Sales", "B1:B5")
+        expect(reason.contains("duplicate")).to_equal(true)
+
+    it "leaves the original target intact after a rejected duplicate":
+        var store = NameStore.new()
+        store.define("Sales", "A1:A5")
+        store.define("Sales", "B1:B5")
+        expect(store.lookup("Sales")).to_equal("A1:A5")
+        expect(store.count()).to_equal(1)
+
+    it "treats a differently-cased name as a duplicate":
+        var store = NameStore.new()
+        store.define("TaxRate", "B7")
+        expect(store.define("TAXRATE", "C9").contains("duplicate")).to_equal(true)
+
+describe "case sensitivity":
+    """Lookup is case-insensitive but the original spelling is preserved."""
+
+    it "looks a name up in any case":
+        var store = NameStore.new()
+        store.define("TaxRate", "B7")
+        expect(store.lookup("taxrate")).to_equal("B7")
+        expect(store.lookup("TAXRATE")).to_equal("B7")
+
+    it "preserves the original spelling in list_names":
+        var store = NameStore.new()
+        store.define("TaxRate", "B7")
+        expect(store.list_names()).to_equal(["TaxRate"])
+
+    it "removes a name given in a different case":
+        var store = NameStore.new()
+        store.define("TaxRate", "B7")
+        expect(store.remove("taxrate")).to_equal(true)
+        expect(store.count()).to_equal(0)
+
+describe "removing a name that does not exist":
+    """Removal reports false rather than failing or removing something else."""
+
+    it "returns false for an unknown name":
+        var store = NameStore.new()
+        expect(store.remove("Ghost")).to_equal(false)
+
+    it "leaves other names untouched":
+        var store = NameStore.new()
+        store.define("Keep", "A1")
+        store.remove("Ghost")
+        expect(store.count()).to_equal(1)
+        expect(store.lookup("Keep")).to_equal("A1")
+
+describe "empty and malformed names":
+    """Empty, whitespace-only and badly-formed names are rejected."""
+
+    it "rejects an empty name":
+        expect(validate_name("").contains("empty")).to_equal(true)
+
+    it "rejects a whitespace-only name":
+        expect(validate_name("   ").contains("empty")).to_equal(true)
+
+    it "rejects a name starting with a digit":
+        expect(validate_name("1Total").contains("must start with")).to_equal(true)
+
+    it "rejects a name containing a space":
+        expect(validate_name("Tax Rate").contains("invalid character")).to_equal(true)
+
+    it "rejects a name containing a hyphen":
+        expect(validate_name("Tax-Rate").contains("invalid character")).to_equal(true)
+
+    it "accepts a leading underscore":
+        expect(validate_name("_hidden")).to_equal("")
+
+    it "trims surrounding whitespace when defining":
+        var store = NameStore.new()
+        expect(store.define("  Padded  ", "A1")).to_equal("")
+        expect(store.list_names()).to_equal(["Padded"])
+        expect(store.lookup("Padded")).to_equal("A1")

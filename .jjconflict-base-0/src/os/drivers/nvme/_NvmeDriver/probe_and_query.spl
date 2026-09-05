@@ -1,0 +1,183 @@
+# NvmeDriver reversible probe and namespace query operations.
+use os.drivers.nvme.nvme_driver.*
+use os.drivers.nvme._NvmeDriver.driver_class.*
+use os.drivers.nvme.nvme_controller_contract.{NvmeNamespaceFacts}
+use os.drivers.nvme.nvme_sector_probe.{NvmeSectorProbeResult, nvme_sector_probe_result}
+use os.drivers.nvme.nvme_storage_model.{NvmeTransferEvidence, nvme_transfer_evidence}
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8}
+
+impl NvmeDriver:
+    me run_reversible_sector_probe(lba: u64) -> Result<NvmeSectorProbeResult, text>:
+        """Execute read/write/verify/restore on one sector and return readiness evidence."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        if self.sector_size == 0u32:
+            return Result.Err("NVMe: sector size unknown")
+        if lba >= self.sector_count:
+            return Result.Err("NVMe: probe lba beyond namespace capacity")
+
+        val bytes = self.sector_size.to_u64()
+        val original_result = self.alloc_dma(bytes)
+        if original_result.is_err():
+            return Result.Err("NVMe: probe original DMA allocation failed")
+        val original = original_result.unwrap()
+        val pattern_result = self.alloc_dma(bytes)
+        if pattern_result.is_err():
+            return Result.Err("NVMe: probe pattern DMA allocation failed")
+        val pattern = pattern_result.unwrap()
+        val verify_result = self.alloc_dma(bytes)
+        if verify_result.is_err():
+            return Result.Err("NVMe: probe verify DMA allocation failed")
+        val verify = verify_result.unwrap()
+
+        self.zero_memory(original.virt, bytes)
+        self.zero_memory(pattern.virt, bytes)
+        self.zero_memory(verify.virt, bytes)
+
+        val read_result = self.read_sectors(lba, 1u32, original.phys)
+        val read_ok = read_result.is_ok()
+        if not read_ok:
+            return Result.Err("NVMe: reversible probe read failed: " + read_result.unwrap_err())
+
+        var i: u64 = 0
+        while i < bytes:
+            val original_byte = mmio_read8(original.virt + i)
+            val pattern_byte = original_byte ^ 0xA5u8
+            mmio_write8(pattern.virt + i, pattern_byte)
+            i = i + 1
+
+        val write_result = self.write_sectors(lba, 1u32, pattern.phys)
+        var write_ok = write_result.is_ok()
+        if write_result.is_err():
+            return Result.Err("NVMe: reversible probe write failed: " + write_result.unwrap_err())
+        if write_ok:
+            val verify_read = self.read_sectors(lba, 1u32, verify.phys)
+            if verify_read.is_err():
+                return Result.Err("NVMe: reversible probe verify read failed: " + verify_read.unwrap_err())
+            else:
+                i = 0
+                while i < bytes:
+                    if mmio_read8(verify.virt + i) != mmio_read8(pattern.virt + i):
+                        write_ok = false
+                    i = i + 1
+
+        val restore_result = self.write_sectors(lba, 1u32, original.phys)
+        val restore_ok = restore_result.is_ok()
+        if restore_result.is_err():
+            return Result.Err("NVMe: reversible probe restore failed: " + restore_result.unwrap_err())
+        val completion_status: u32 = if read_ok and write_ok and restore_ok: 0u32 else: 1u32
+        Ok(nvme_sector_probe_result(lba, bytes, completion_status, read_ok, write_ok, restore_ok, true))
+
+    me transfer_evidence_from_reversible_probe(
+        lba: u64,
+        driver_placement: text,
+        grant_kind: text,
+        namespace_mode: text,
+        dma_isolated: bool,
+        iommu_or_broker: bool
+    ) -> Result<NvmeTransferEvidence, text>:
+        """Run the hardware sector probe and convert it into NVMe transfer evidence."""
+        val probe_result = self.run_reversible_sector_probe(lba)
+        if probe_result.is_err():
+            return Result.Err(probe_result.unwrap_err())
+        val probe = probe_result.unwrap()
+        Ok(nvme_transfer_evidence(
+            "simple-driver",
+            self.sector_count > 0u64 and self.sector_size >= 512u32,
+            self.admin_queue.depth > 0u16,
+            self.io_queue.depth > 0u16,
+            self.admin_queue.sq_doorbell != 0u64 and self.admin_queue.cq_doorbell != 0u64 and self.io_queue.sq_doorbell != 0u64 and self.io_queue.cq_doorbell != 0u64,
+            probe.completion_status == 0u32,
+            probe.read_ok,
+            probe.write_ok,
+            probe.restore_ok,
+            dma_isolated,
+            driver_placement,
+            grant_kind,
+            namespace_mode,
+            probe.used_shared_transfer_logic,
+            iommu_or_broker
+        ))
+
+
+    fn get_sector_count() -> u64:
+        """Total number of sectors on namespace 1."""
+        self.sector_count
+
+    me remember_namespace_facts(facts: NvmeNamespaceFacts):
+        var remembered: [NvmeNamespaceFacts] = []
+        var replaced = false
+        for existing in self.identified_namespaces:
+            if existing.nsid == facts.nsid:
+                remembered = remembered.push(facts)
+                replaced = true
+            else:
+                remembered = remembered.push(existing)
+        if not replaced:
+            remembered = remembered.push(facts)
+        self.identified_namespaces = remembered
+
+    fn namespace_sector_count(nsid: u32) -> Result<u64, text>:
+        if nsid == self.identified_nsid and self.sector_count > 0u64:
+            return Ok(self.sector_count)
+        if nsid == 1u32 and self.sector_count > 0u64:
+            return Ok(self.sector_count)
+        for facts in self.identified_namespaces:
+            if facts.nsid == nsid:
+                return Ok(facts.lba_count)
+        Err("NVMe: namespace not identified")
+
+    fn namespace_sector_size(nsid: u32) -> Result<u32, text>:
+        if nsid == self.identified_nsid and self.sector_size >= 512u32:
+            return Ok(self.sector_size)
+        if nsid == 1u32 and self.sector_size >= 512u32:
+            return Ok(self.sector_size)
+        for facts in self.identified_namespaces:
+            if facts.nsid == nsid and facts.formatted_lba_size >= 512u32:
+                return Ok(facts.formatted_lba_size)
+        Err("NVMe: namespace not identified")
+
+    fn namespace_count() -> u32:
+        self.controller_namespace_count
+
+    me identify_first_assignable_user_namespace(excluded_nsid: u32) -> Result<NvmeNamespaceFacts, text>:
+        """Identify the first usable namespace that is not owned by the system lease."""
+        if self.controller_namespace_count <= 1u32:
+            val fallback_nsid = if excluded_nsid == 2u32: 1u32 else: 2u32
+            val fallback_identify = self.identify_namespace_id(fallback_nsid)
+            if fallback_identify.is_ok():
+                for facts in self.identified_namespaces:
+                    if facts.nsid == fallback_nsid:
+                        return Ok(facts)
+            val detail = if fallback_identify.is_err(): fallback_identify.unwrap_err() else: "facts-not-recorded"
+            return Err("NVMe: no assignable user namespace count=" + self.controller_namespace_count.to_text() + " fallback_nsid=" + fallback_nsid.to_text() + " detail=" + detail)
+        var nsid = 1u32
+        while nsid <= self.controller_namespace_count:
+            if nsid != excluded_nsid:
+                val identify = self.identify_namespace_id(nsid)
+                if identify.is_ok():
+                    for facts in self.identified_namespaces:
+                        if facts.nsid == nsid:
+                            return Ok(facts)
+            nsid = nsid + 1u32
+        Err("NVMe: no assignable user namespace identified")
+
+    fn get_sector_size() -> u32:
+        """Sector size in bytes."""
+        self.sector_size
+
+    fn get_namespace_id() -> u32:
+        """Currently identified namespace ID for sector I/O commands."""
+        self.identified_nsid
+
+    fn capacity_bytes() -> u64:
+        """Total capacity in bytes."""
+        val ss = self.sector_size.to_u64()
+        self.sector_count * ss
+
+    fn is_initialized() -> bool:
+        self.initialized
+
+    # ========================================================================
+    # DMA Helpers
+    # ========================================================================

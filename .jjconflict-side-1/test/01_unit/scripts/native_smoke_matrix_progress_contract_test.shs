@@ -1,0 +1,145 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+matrix="${repo_root}/scripts/check/native-smoke-matrix.shs"
+artifact_root="${repo_root}/build/phase2_test_sweep/fixes/native_matrix_progress"
+mkdir -p "${artifact_root}"
+test_root=$(mktemp -d "${artifact_root}/contract.XXXXXX")
+mock="${test_root}/mock-simple"
+mock_log="${test_root}/mock.log"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+cat >"${mock}" <<'MOCK'
+#!/bin/sh
+set -eu
+
+: "${MOCK_NATIVE_LOG:?}"
+output=
+entry=
+cache=
+previous=
+clean=no
+for argument in "$@"; do
+  printf 'arg=%s\n' "${argument}" >>"${MOCK_NATIVE_LOG}"
+  case "${previous}" in
+    output) output=${argument} ;;
+    entry) entry=${argument} ;;
+    cache) cache=${argument} ;;
+  esac
+  previous=
+  case "${argument}" in
+    -o|--output) previous=output ;;
+    --entry) previous=entry ;;
+    --cache-dir) previous=cache ;;
+    --clean) clean=yes ;;
+  esac
+done
+
+[ "${clean}" = no ] || exit 90
+[ -n "${output}" ] || exit 91
+[ -n "${entry}" ] || exit 92
+[ -n "${cache}" ] || exit 93
+[ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ] || exit 94
+[ "${SIMPLE_BOOTSTRAP+x}" != x ] || exit 95
+printf 'cache=%s\nentry=%s\n' "${cache}" "${entry}" >>"${MOCK_NATIVE_LOG}"
+mkdir -p "${cache}"
+
+if [ "${MOCK_NATIVE_MODE:-success}" = hang ]; then
+  printf '%s\n' "$$" >"${MOCK_NATIVE_PID_FILE}"
+  while :; do sleep 1; done
+fi
+
+marker="${cache}/mock-shared-cache"
+if [ -f "${marker}" ]; then
+  echo 'cache_reused=yes' >>"${MOCK_NATIVE_LOG}"
+else
+  : >"${marker}"
+  echo 'cache_reused=no' >>"${MOCK_NATIVE_LOG}"
+fi
+
+case "${entry}" in
+  *case_arith_fn_call_*) expected=7 ;;
+  *case_if_elif_else_*) expected=3 ;;
+  *) exit 96 ;;
+esac
+printf '#!/bin/sh\nexit %s\n' "${expected}" >"${output}"
+chmod +x "${output}"
+MOCK
+chmod +x "${mock}"
+
+timeout_work="build/phase2_test_sweep/fixes/native_matrix_progress/timeout.$$"
+timeout_source="${timeout_work}/sources"
+timeout_cache="${repo_root}/${timeout_work}/cache"
+timeout_log="${test_root}/timeout.out"
+timeout_pid="${test_root}/timeout.pid"
+start_epoch=$(date +%s)
+set +e
+MOCK_NATIVE_MODE=hang \
+MOCK_NATIVE_LOG="${mock_log}" \
+MOCK_NATIVE_PID_FILE="${timeout_pid}" \
+SIMPLE_BINARY="${mock}" \
+NATIVE_SMOKE_CASES=arith_fn_call \
+NATIVE_SMOKE_WORK_DIR="${timeout_work}" \
+NATIVE_SMOKE_SOURCE_DIR="${timeout_source}" \
+NATIVE_SMOKE_CACHE_DIR="${timeout_cache}" \
+NATIVE_SMOKE_BUILD_TIMEOUT=1s \
+sh "${matrix}" >"${timeout_log}" 2>&1
+timeout_rc=$?
+set -e
+elapsed=$(( $(date +%s) - start_epoch ))
+
+[ "${timeout_rc}" -eq 1 ] || fail "timed-out matrix returned ${timeout_rc}, expected 1"
+[ "${elapsed}" -le 8 ] || fail "1s build deadline took ${elapsed}s"
+grep -Fq '[arith_fn_call] START build_deadline=1s' "${timeout_log}" || fail "START/deadline receipt missing"
+grep -Fq 'rc got=build-timeout want=7' "${timeout_log}" || fail "timeout result was not classified"
+[ -s "${timeout_pid}" ] || fail "hanging mock did not start"
+timed_pid=$(cat "${timeout_pid}")
+if kill -0 "${timed_pid}" 2>/dev/null; then
+  fail "timed-out mock process ${timed_pid} is still alive"
+fi
+
+success_work="build/phase2_test_sweep/fixes/native_matrix_progress/success.$$"
+success_source="${success_work}/sources"
+success_cache="${repo_root}/${success_work}/cache"
+success_log="${test_root}/success.out"
+MOCK_NATIVE_MODE=success \
+MOCK_NATIVE_LOG="${mock_log}" \
+SIMPLE_BINARY="${mock}" \
+NATIVE_SMOKE_CASES='arith_fn_call if_elif_else' \
+NATIVE_SMOKE_WORK_DIR="${success_work}" \
+NATIVE_SMOKE_SOURCE_DIR="${success_source}" \
+NATIVE_SMOKE_CACHE_DIR="${success_cache}" \
+NATIVE_SMOKE_BUILD_TIMEOUT=2s \
+sh "${matrix}" >"${success_log}" 2>&1
+
+grep -Fq 'native_smoke_matrix=true' "${success_log}" || fail "successful mock matrix did not pass"
+[ "$(grep -Fc "cache=${success_cache}" "${mock_log}")" -eq 2 ] || fail "shared cache was not passed to both cases"
+grep -Fq 'cache_reused=yes' "${mock_log}" || fail "second case did not reuse the shared cache"
+if grep -Fq 'arg=--clean' "${mock_log}"; then
+  fail "matrix passed --clean to the mock compiler"
+fi
+
+for invalid_case in work_traversal work_drive source_traversal source_drive; do
+  invalid_log="${test_root}/${invalid_case}.out"
+  set +e
+  case "${invalid_case}" in
+    work_traversal)
+      NATIVE_SMOKE_WORK_DIR='build/native/../escape' SIMPLE_BINARY="${mock}" sh "${matrix}" >"${invalid_log}" 2>&1 ;;
+    work_drive)
+      NATIVE_SMOKE_WORK_DIR='C:/escape' SIMPLE_BINARY="${mock}" sh "${matrix}" >"${invalid_log}" 2>&1 ;;
+    source_traversal)
+      NATIVE_SMOKE_WORK_DIR="${success_work}" NATIVE_SMOKE_SOURCE_DIR='../escape' SIMPLE_BINARY="${mock}" sh "${matrix}" >"${invalid_log}" 2>&1 ;;
+    source_drive)
+      NATIVE_SMOKE_WORK_DIR="${success_work}" NATIVE_SMOKE_SOURCE_DIR='C:/escape' SIMPLE_BINARY="${mock}" sh "${matrix}" >"${invalid_log}" 2>&1 ;;
+  esac
+  invalid_rc=$?
+  set -e
+  [ "${invalid_rc}" -eq 2 ] || fail "${invalid_case} returned ${invalid_rc}, expected config error 2"
+done
+
+echo "PASS: native smoke matrix deadline, cache reuse, and path contracts (${test_root})"

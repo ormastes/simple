@@ -1,0 +1,63 @@
+# Unsafe host-memory capsule for the CUDA NTT provider.
+#
+# Safe provider entry points validate sizes, ranges, handles, and batch bounds
+# before entering this module. Raw pointers never cross the public operation API.
+
+mod os.crypto.x25519_mlkem768.cuda_ntt_unsafe
+
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_read_i32,
+    raw_write_i64, raw_write_u32s_checksum}
+
+fn cuda_ntt_unsafe_alloc(byte_count: i64) -> i64:
+    if byte_count <= 0:
+        return 0
+    raw_alloc(byte_count)
+
+fn cuda_ntt_unsafe_free(ptr: i64, byte_count: i64):
+    if ptr == 0 or byte_count <= 0:
+        return
+    raw_free(ptr, byte_count)
+
+fn cuda_ntt_unsafe_clear(ptr: i64, byte_count: i64) -> bool:
+    if ptr == 0 or byte_count <= 0 or byte_count % 8 != 0:
+        return false
+    var offset: i64 = 0
+    while offset < byte_count:
+        raw_write_i64(ptr, offset, 0)
+        offset = offset + 8
+    true
+
+fn cuda_ntt_unsafe_write_input(ptr: i64, values: [u32],
+        count: i64) -> bool:
+    if ptr == 0 or count <= 0 or values.len().to_i64() != count:
+        return false
+    val _checksum = raw_write_u32s_checksum(ptr, values, count)
+    true
+
+fn cuda_ntt_unsafe_write_launch_args(values_ptr: i64, args_ptr: i64,
+        input_device: i64, output_device: i64, batch: i64) -> bool:
+    if values_ptr == 0 or args_ptr == 0:
+        return false
+    if input_device <= 0 or output_device <= 0 or batch <= 0 or batch > 65535:
+        return false
+    raw_write_i64(values_ptr, 0, input_device)
+    raw_write_i64(values_ptr, 8, output_device)
+    raw_write_i64(values_ptr, 16, batch)
+    raw_write_i64(args_ptr, 0, values_ptr)
+    raw_write_i64(args_ptr, 8, values_ptr + 8)
+    raw_write_i64(args_ptr, 16, values_ptr + 16)
+    true
+
+fn cuda_ntt_unsafe_read_i32s(ptr: i64, count: i64) -> list:
+    var out: list = []
+    if ptr == 0 or count <= 0:
+        return out
+    var i: i64 = 0
+    while i < count:
+        out.push(raw_read_i32(ptr, i * 4).to_i64())
+        i = i + 1
+    out
+
+export cuda_ntt_unsafe_alloc, cuda_ntt_unsafe_free
+export cuda_ntt_unsafe_clear, cuda_ntt_unsafe_write_input
+export cuda_ntt_unsafe_write_launch_args, cuda_ntt_unsafe_read_i32s

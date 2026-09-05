@@ -1,0 +1,182 @@
+# Explicit structural audit for versioned backend-provider boundaries.
+#
+# This module is deliberately not wired into compiler startup or request paths.
+# Callers must provide the exact files to audit, so the gate never performs a
+# hidden full-tree walk. Provider-private adapters, canonical SFFI owners, and
+# the exact legacy helper implementations are the only locations allowed to
+# call their corresponding LLVM, Cranelift, JIT, execution-manager, or legacy
+# compile surfaces directly.
+
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+pub val BACKEND_PROVIDER_CALL_ALLOWLIST: [text] = [
+    "src/compiler/70.backend/backend/",
+    "src/lib/nogc_sync_mut/sffi/",
+    "src/compiler/90.tools/sffi_gen/",
+]
+
+val BACKEND_JIT_CALL_ALLOWLIST: [text] = [
+    "src/compiler/70.backend/backend_plugin/",
+    "src/app/io/jit_sffi.spl",
+    "src/lib/nogc_sync_mut/sffi/",
+    "src/compiler/90.tools/sffi_gen/",
+]
+
+val BACKEND_LEGACY_COMPILE_OWNER_ALLOWLIST: [text] = [
+    "src/compiler/70.backend/backend/backend_helpers.spl",
+    "src/compiler/70.backend/backend/llvm_codegen_adapter.spl",
+    "src/compiler/70.backend/backend/llvm_lib_backend.spl",
+    "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl",
+]
+
+val BACKEND_LEGACY_COMPILE_HELPERS: [text] = [
+    "compile_module_with_backend",
+    "compile_module_with_backend_target_cpu",
+    "compile_module_with_backend_target_cpu_storage_bindings",
+    "compile_bootstrap_module_with_backend",
+    "llvm_compile_module_direct",
+    "llvm_compile_module_direct_compiled",
+    "llvm_lib_compile_module_direct",
+    "cranelift_compile_module_direct",
+]
+
+pub struct BackendPluginBoundaryViolation:
+    source_path: text
+    line: i64
+    provider: text
+    symbol: text
+
+pub fn backend_plugin_provider_calls_allowed(source_path: text) -> bool:
+    for prefix in BACKEND_PROVIDER_CALL_ALLOWLIST:
+        if source_path.starts_with(prefix):
+            return true
+    false
+
+fn _path_allowed(source_path: text, allowed_prefixes: [text]) -> bool:
+    for prefix in allowed_prefixes:
+        if source_path.starts_with(prefix):
+            return true
+    false
+
+fn _is_legacy_compile_helper(symbol: text) -> bool:
+    for helper in BACKEND_LEGACY_COMPILE_HELPERS:
+        if symbol == helper:
+            return true
+    false
+
+fn _is_ident_start(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+
+fn _is_ident_continue(ch: text) -> bool:
+    _is_ident_start(ch) or (ch >= "0" and ch <= "9")
+
+fn _provider_for_symbol(symbol: text) -> text:
+    if _is_legacy_compile_helper(symbol):
+        return "legacy-compile"
+    if symbol.starts_with("rt_exec_manager_"):
+        return "execution-manager"
+    if symbol.starts_with("rt_jit_"):
+        return "jit"
+    if symbol.starts_with("rt_cranelift_"):
+        return "cranelift"
+    if symbol.starts_with("llvm_"):
+        return "llvm"
+    ""
+
+fn _boundary_call_allowed(source_path: text, symbol: text) -> bool:
+    if _is_legacy_compile_helper(symbol):
+        return _path_allowed(
+            source_path, BACKEND_LEGACY_COMPILE_OWNER_ALLOWLIST)
+    if symbol.starts_with("rt_exec_manager_") or symbol.starts_with("rt_jit_"):
+        return _path_allowed(source_path, BACKEND_JIT_CALL_ALLOWLIST)
+    backend_plugin_provider_calls_allowed(source_path)
+
+fn _is_declaration_prefix(code: text, symbol_start: i64) -> bool:
+    val prefix = code[0:symbol_start].trim()
+    prefix.ends_with("fn") or prefix.ends_with("extern fn")
+
+fn _provider_calls_on_line(line: text) -> [text]:
+    """Return provider-specific call identifiers in executable source text.
+
+    Comments, quoted diagnostic/fixture text, and function declarations are
+    excluded. This is a structural regression gate, not a parser or a general
+    search for the words LLVM and Cranelift.
+    """
+    var calls: [text] = []
+    var i = 0
+    var in_string = false
+    var escaped = false
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+            i = i + 1
+            continue
+        if ch == "\"":
+            in_string = true
+            i = i + 1
+            continue
+        if ch == "#":
+            break
+        if not _is_ident_start(ch):
+            i = i + 1
+            continue
+
+        val start = i
+        i = i + 1
+        while i < line.len() and _is_ident_continue(line[i:i + 1]):
+            i = i + 1
+        val symbol = line[start:i]
+        var next = i
+        while next < line.len() and (line[next:next + 1] == " " or line[next:next + 1] == "\t"):
+            next = next + 1
+        if next < line.len() and line[next:next + 1] == "(":
+            val provider = _provider_for_symbol(symbol)
+            if provider != "" and not _is_declaration_prefix(line, start):
+                calls.push(symbol)
+    calls
+
+pub fn scan_backend_plugin_boundary_source(source_path: text, content: text) -> [BackendPluginBoundaryViolation]:
+    """Audit one supplied source buffer; allowed provider-owner paths pass."""
+    var violations: [BackendPluginBoundaryViolation] = []
+    val lines = content.split("\n")
+    var idx = 0
+    while idx < lines.len():
+        for symbol in _provider_calls_on_line(lines[idx]):
+            if not _boundary_call_allowed(source_path, symbol):
+                violations.push(BackendPluginBoundaryViolation(
+                    source_path: source_path,
+                    line: idx + 1,
+                    provider: _provider_for_symbol(symbol),
+                    symbol: symbol,
+                ))
+        idx = idx + 1
+    violations
+
+pub fn audit_backend_plugin_boundary_files(source_paths: [text]) -> [BackendPluginBoundaryViolation]:
+    """Explicit audit entry point.
+
+    Only the caller-provided files are read. There is intentionally no default
+    root and no directory walk, keeping this release/verification gate out of
+    startup and hot request paths.
+    """
+    var violations: [BackendPluginBoundaryViolation] = []
+    for source_path in source_paths:
+        for violation in scan_backend_plugin_boundary_source(
+                source_path, file_read(source_path)):
+            violations.push(violation)
+    violations
+
+pub fn enforce_backend_plugin_boundary_files(source_paths: [text]) -> Result<bool, text>:
+    val violations = audit_backend_plugin_boundary_files(source_paths)
+    if violations.len() == 0:
+        return Ok(true)
+    var diagnostics: [text] = []
+    for violation in violations:
+        diagnostics.push("{violation.source_path}:{violation.line}: direct {violation.provider} backend call '{violation.symbol}' is outside its explicit owner allowlist")
+    Err(diagnostics.join("\n"))

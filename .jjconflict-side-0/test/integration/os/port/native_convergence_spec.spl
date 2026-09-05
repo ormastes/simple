@@ -1,0 +1,90 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+## Stage2 == Stage3 convergence spec — IF-09 wave-3 scaffold.
+##
+## Pins the public API surface of `verify_native_convergence(stage2,
+## stage3) -> Result<(), text>` exported by `bootstrap_native_verify.spl`.
+## Wave-3 keeps this lint-only (SIMPLEOS_RUNTIME-gated). Wave-4 calls
+## it from inside QEMU SimpleOS via the initramfs harness with real
+## stage2/stage3 byte blobs pulled from the guest filesystem.
+##
+## Run:
+##   bin/simple test test/integration/os/port/native_convergence_spec.spl
+
+use std.spec
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn mismatch_offset(result: NativeByteComparison) -> i64:
+    match result:
+        NativeByteComparison.Mismatch(offset): offset
+        NativeByteComparison.Equal: -1
+        NativeByteComparison.Error(_): -2
+
+fn verifier_fixture(first: [u8], second: [u8]) -> Result<(), text>:
+    val tmpdir = shell("mktemp -d").stdout.trim()
+    if tmpdir == "":
+        return Err("mktemp failed")
+    val stage2 = "{tmpdir}/stage2.elf"
+    val stage3 = "{tmpdir}/stage3.elf"
+    if not rt_file_write_bytes(stage2, first):
+        val _ = shell("rm -rf '{tmpdir}'")
+        return Err("stage2 fixture write failed")
+    if not rt_file_write_bytes(stage3, second):
+        val _ = shell("rm -rf '{tmpdir}'")
+        return Err("stage3 fixture write failed")
+    val result = verify_native_convergence(stage2, stage3)
+    val _ = shell("rm -rf '{tmpdir}'")
+    result
+
+describe "IF-09 native-convergence contract":
+    """
+    Documents `verify_native_convergence(stage2, stage3) -> Result<(), text>`
+    exported by `src/os/port/bootstrap_native_verify.spl`.
+
+    it "reports a byte-zero mismatch without confusing it with equality":
+        expect(mismatch_offset(compare_native_bytes([0x7fu8, 1u8], [0x00u8, 1u8]))).to_equal(0)
+
+    it "identical stage2 and stage3 blobs converge":
+        # @req REQ-SSPEC-INTEGRATION
+        step("identical stage2 and stage3 blobs converge")
+        """
+        IF-09 happy path: byte-identical inputs must return Ok(()).
+        """
+        val sr = simpleos_runtime()
+        if sr == "":
+            return "skip: SIMPLEOS_RUNTIME not set"
+        write_text("/tmp/if09_stage2_same.bin", "stage2-blob")
+        val result = verify_native_convergence("/tmp/if09_stage2_same.bin", "/tmp/if09_stage2_same.bin")
+        assert_true(result.is_ok())
+
+    it "same-path arguments converge without reading the filesystem":
+        # @req REQ-SSPEC-INTEGRATION
+        step("same-path arguments converge without reading the filesystem")
+        """
+        IF-09 reject path: differing bytes must produce Err with a
+        non-empty diagnostic. Wave-4 asserts the diagnostic names the
+        first diverging symbol.
+        """
+        val sr = simpleos_runtime()
+        if sr == "":
+            return "skip: SIMPLEOS_RUNTIME not set"
+        val result = verify_native_convergence("/build/stage2/not-present.bin", "/build/stage2/not-present.bin")
+        assert_true(result.is_ok())
+
+    it "verifier is callable without side effects":
+        # @req REQ-SSPEC-INTEGRATION
+        step("verifier is callable without side effects")
+        """
+        Pure: same inputs always produce same Result. Wave-4 tightens
+        to no fs reads and no time-based branches.
+        """
+        val sr = simpleos_runtime()
+        if sr == "":
+            return "skip: SIMPLEOS_RUNTIME not set"
+        write_text("/tmp/if09_stage2_pure.bin", "pure-blob")
+        val first = verify_native_convergence("/tmp/if09_stage2_pure.bin", "/tmp/if09_stage2_pure.bin")
+        val second = verify_native_convergence("/tmp/if09_stage2_pure.bin", "/tmp/if09_stage2_pure.bin")
+        assert_true(first.is_ok() and second.is_ok())

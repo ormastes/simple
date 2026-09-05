@@ -1,0 +1,267 @@
+# Blink visual-effect LOWERING — blink.paint.effect_paint
+#
+# The geometry half of blocker 9 of `doc/03_plan/ui/rendering/blink_wiring_plan.md`.
+# Takes the typed effect descriptions from `blink.paint.effects` plus a box's
+# laid-out rect and appends the resulting rects to the same `PaintChunkRects`
+# list `blink.paint.style_paint` already produces — so the effects ride the
+# existing, already-proven rasterizer with no new pixel path.
+#
+# ## What "lowering to rects" can and cannot express
+#
+# `PaintChunkRects` is a flat list of axis-aligned rects, each with ONE flat
+# colour. That is the whole vocabulary. So:
+#
+#   - A gradient becomes N solid bands. It is a band approximation, and the
+#     band count is the caller's explicit argument, never a hidden default.
+#   - A blurred shadow becomes concentric bands of decreasing alpha. It is not
+#     a Gaussian; it is a linear falloff, specified below.
+#   - A rotated/skewed transform cannot produce an axis-aligned rect at all.
+#     `transform_bounds` returns the BOUNDING BOX and says so in its name;
+#     `paint_transformed_rect` refuses (Err) rather than silently painting the
+#     bounds as if they were the shape.
+#
+# Anything this vocabulary cannot represent is an `Err`, never a substituted
+# approximation that a smoke test would read as success.
+
+use std.common.color.types.{Color, from_rgba}
+use std.common.ui.render_opt.paint_chunk_rasterizer.{PaintChunkRects}
+use std.blink.paint.effects.{BoxShadow, Transform2D, GradientStop, LinearGradient}
+
+# Number of alpha bands a blurred shadow is approximated with. Fixed rather
+# than a parameter because it changes the shadow's LOOK, not its correctness,
+# and every spec number below is derived from it.
+val SHADOW_BLUR_BANDS: i64 = 4
+
+fn _round_i64(v: f64) -> i64:
+    if v < 0.0:
+        return (v - 0.5) as i64
+    (v + 0.5) as i64
+
+fn _argb(c: Color) -> i64:
+    c.to_argb_u32().to_i64()
+
+fn _scale_alpha(c: Color, factor: f64) -> Color:
+    from_rgba(c.r, c.g, c.b, _round_i64((c.a as f64) * factor))
+
+# ============================================================================
+# box-shadow
+# ============================================================================
+
+# Append `shadow` for the box `(x, y, w, h)`.
+#
+# The shadow's core rect is the border box offset by (offset_x, offset_y) and
+# outset by `spread` on every side — so a 10px spread grows the rect by 10 on
+# each edge, i.e. 20 in each dimension, exactly as CSS specifies.
+#
+# `blur` is approximated by SHADOW_BLUR_BANDS concentric bands OUTSIDE the core,
+# painted outermost-first so the inner, more opaque bands overwrite the outer
+# ones. Band k (k = 0 outermost, k = BANDS-1 innermost) is outset from the core
+# by `blur * (BANDS - k) / BANDS` and carries alpha `shadow_alpha * (k + 1) /
+# BANDS`. The core itself is painted last at full alpha. With BANDS = 4 and
+# blur = 8 that is outsets 8, 6, 4, 2 at alpha factors 0.25, 0.5, 0.75, 1.0,
+# then the core.
+#
+# Errors on `inset`: an inner shadow is a ring clipped to the padding box, which
+# a flat outset-rect vocabulary cannot express. Painting it as an outer shadow
+# would be visibly wrong in a way no rect assertion would catch.
+pub fn paint_box_shadow(rects: PaintChunkRects, x: f64, y: f64, w: f64, h: f64,
+                        shadow: BoxShadow) -> Result<i64, text>:
+    """Append `shadow` around the box `(x, y, w, h)`; Err on `inset`."""
+    if shadow.inset:
+        return Err("box-shadow: `inset` cannot be lowered to outset rects")
+    var painted = 0
+    val core_x = x + shadow.offset_x - shadow.spread
+    val core_y = y + shadow.offset_y - shadow.spread
+    val core_w = w + shadow.spread * 2.0
+    val core_h = h + shadow.spread * 2.0
+    if core_w <= 0.0 or core_h <= 0.0:
+        # A spread large enough to collapse the box paints nothing at all;
+        # that is a real CSS outcome, not a failure.
+        return Ok(0)
+    if shadow.blur > 0.0:
+        var k = 0
+        while k < SHADOW_BLUR_BANDS:
+            val out = shadow.blur * ((SHADOW_BLUR_BANDS - k) as f64) / (SHADOW_BLUR_BANDS as f64)
+            val factor = ((k + 1) as f64) / (SHADOW_BLUR_BANDS as f64)
+            val banded = _scale_alpha(shadow.color, factor)
+            rects.add_rect(_round_i64(core_x - out), _round_i64(core_y - out),
+                           _round_i64(core_w + out * 2.0), _round_i64(core_h + out * 2.0),
+                           _argb(banded))
+            painted = painted + 1
+            k = k + 1
+    rects.add_rect(_round_i64(core_x), _round_i64(core_y),
+                   _round_i64(core_w), _round_i64(core_h), _argb(shadow.color))
+    painted = painted + 1
+    Ok(painted)
+
+# Append every layer of a parsed `box-shadow` list. CSS paints the FIRST layer
+# on top, so the list is walked back-to-front here: the last layer is appended
+# first and later rects overwrite it.
+pub fn paint_box_shadows(rects: PaintChunkRects, x: f64, y: f64, w: f64, h: f64,
+                         shadows: [BoxShadow]) -> Result<i64, text>:
+    """Append all shadow layers back-to-front so layer 0 ends up on top."""
+    var painted = 0
+    var i = shadows.len() - 1
+    while i >= 0:
+        match paint_box_shadow(rects, x, y, w, h, shadows[i as i32]):
+            Ok(n):
+                painted = painted + n
+            Err(m):
+                return Err(m)
+        i = i - 1
+    Ok(painted)
+
+# ============================================================================
+# transform
+# ============================================================================
+
+# The axis-aligned bounding box of `(x, y, w, h)` mapped through `t`, as
+# (left, top, right, bottom). For a rotated rect this is strictly larger than
+# the rect itself — the name says `bounds` precisely so no caller mistakes it
+# for the transformed shape.
+pub fn transform_bounds(t: Transform2D, x: f64, y: f64, w: f64, h: f64) -> (f64, f64, f64, f64):
+    """Axis-aligned bounds of the box `(x, y, w, h)` under `t`."""
+    val p0 = t.apply(x, y)
+    val p1 = t.apply(x + w, y)
+    val p2 = t.apply(x, y + h)
+    val p3 = t.apply(x + w, y + h)
+    var min_x = p0.0
+    var max_x = p0.0
+    var min_y = p0.1
+    var max_y = p0.1
+    if p1.0 < min_x:
+        min_x = p1.0
+    if p1.0 > max_x:
+        max_x = p1.0
+    if p2.0 < min_x:
+        min_x = p2.0
+    if p2.0 > max_x:
+        max_x = p2.0
+    if p3.0 < min_x:
+        min_x = p3.0
+    if p3.0 > max_x:
+        max_x = p3.0
+    if p1.1 < min_y:
+        min_y = p1.1
+    if p1.1 > max_y:
+        max_y = p1.1
+    if p2.1 < min_y:
+        min_y = p2.1
+    if p2.1 > max_y:
+        max_y = p2.1
+    if p3.1 < min_y:
+        min_y = p3.1
+    if p3.1 > max_y:
+        max_y = p3.1
+    (min_x, min_y, max_x, max_y)
+
+# Append the box `(x, y, w, h)` transformed by `t`, filled with `color`.
+#
+# Only transforms that keep an axis-aligned rect axis-aligned can be painted
+# into a rect list: translation and scale (zero b and c), plus exact quarter
+# turns (zero a and d) — see `Transform2D.is_axis_aligned`. For exactly those,
+# `transform_bounds` returns the shape itself rather than a strict over-
+# approximation, which is what makes painting the bounds honest here.
+# Anything else is an Err: its true shape is a quadrilateral, and painting its
+# bounding box instead would put colour where the element is not.
+pub fn paint_transformed_rect(rects: PaintChunkRects, t: Transform2D,
+                              x: f64, y: f64, w: f64, h: f64,
+                              color: Color) -> Result<i64, text>:
+    """Append the transformed box; Err when `t` rotates or skews it off-axis."""
+    if not t.is_axis_aligned():
+        return Err("transform: rotation/skew cannot be lowered to an axis-aligned rect")
+    val b = transform_bounds(t, x, y, w, h)
+    val bw = b.2 - b.0
+    val bh = b.3 - b.1
+    if bw <= 0.0 or bh <= 0.0:
+        return Ok(0)
+    rects.add_rect(_round_i64(b.0), _round_i64(b.1), _round_i64(bw), _round_i64(bh), _argb(color))
+    Ok(1)
+
+# ============================================================================
+# linear-gradient
+# ============================================================================
+
+# The colour at fraction `p` (0.0..1.0) along `g`'s gradient line, by
+# component-wise linear interpolation between the two stops that bracket `p`.
+# Before the first stop and after the last, CSS extends the end colours.
+pub fn gradient_color_at(g: LinearGradient, p: f64) -> Color:
+    """Interpolated colour at fraction `p` along the gradient line."""
+    val n = g.stops.len()
+    if n == 0:
+        return from_rgba(0, 0, 0, 0)
+    if p <= g.stops[0 as i32].position:
+        return g.stops[0 as i32].color
+    if p >= g.stops[(n - 1) as i32].position:
+        return g.stops[(n - 1) as i32].color
+    var i = 1
+    while i < n:
+        val hi = g.stops[i as i32]
+        if p <= hi.position:
+            val lo = g.stops[(i - 1) as i32]
+            val span = hi.position - lo.position
+            var t = 0.0
+            if span > 0.0:
+                t = (p - lo.position) / span
+            return from_rgba(
+                _round_i64((lo.color.r as f64) + ((hi.color.r - lo.color.r) as f64) * t),
+                _round_i64((lo.color.g as f64) + ((hi.color.g - lo.color.g) as f64) * t),
+                _round_i64((lo.color.b as f64) + ((hi.color.b - lo.color.b) as f64) * t),
+                _round_i64((lo.color.a as f64) + ((hi.color.a - lo.color.a) as f64) * t)
+            )
+        i = i + 1
+    g.stops[(n - 1) as i32].color
+
+# Append `g` across the box `(x, y, w, h)` as `bands` solid strips.
+#
+# Only the four axis-aligned CSS gradient angles are lowerable: 0deg (to top),
+# 90deg (to right), 180deg (to bottom, the CSS default) and 270deg (to left).
+# A diagonal gradient's iso-colour lines are not parallel to a rect edge, so no
+# strip decomposition represents it — that is an Err, not a snapped-to-vertical
+# approximation.
+#
+# Band k covers the k-th equal slice of the box along the gradient direction and
+# is filled with the colour sampled at the slice's MIDPOINT, (k + 0.5) / bands.
+# Midpoint sampling means the strips are symmetric about the box centre; edge
+# sampling would bias every band toward the start colour.
+pub fn paint_linear_gradient(rects: PaintChunkRects, x: f64, y: f64, w: f64, h: f64,
+                             g: LinearGradient, bands: i64) -> Result<i64, text>:
+    """Append `g` over the box as `bands` solid strips; Err off-axis."""
+    if bands <= 0:
+        return Err("linear-gradient: band count must be positive, got {bands}")
+    var norm = g.angle_deg % 360.0
+    if norm < 0.0:
+        norm = norm + 360.0
+    val vertical = (norm == 0.0 or norm == 180.0)
+    val horizontal = (norm == 90.0 or norm == 270.0)
+    if not (vertical or horizontal):
+        return Err("linear-gradient: angle {g.angle_deg}deg is not axis-aligned")
+    # 0deg points to the TOP and 270deg to the LEFT, so for those two the
+    # gradient line runs against the increasing pixel coordinate.
+    val reversed = (norm == 0.0 or norm == 270.0)
+
+    var k = 0
+    while k < bands:
+        var frac = ((k as f64) + 0.5) / (bands as f64)
+        if reversed:
+            frac = 1.0 - frac
+        val c = gradient_color_at(g, frac)
+        # Band edges are computed from the exact fractional split and rounded
+        # once, so consecutive bands share an edge and leave no seam.
+        val lo = (k as f64) / (bands as f64)
+        val hi = ((k + 1) as f64) / (bands as f64)
+        if vertical:
+            val y0 = _round_i64(y + h * lo)
+            val y1 = _round_i64(y + h * hi)
+            rects.add_rect(_round_i64(x), y0, _round_i64(w), y1 - y0, _argb(c))
+        else:
+            val x0 = _round_i64(x + w * lo)
+            val x1 = _round_i64(x + w * hi)
+            rects.add_rect(x0, _round_i64(y), x1 - x0, _round_i64(h), _argb(c))
+        k = k + 1
+    Ok(bands)
+
+export SHADOW_BLUR_BANDS
+export paint_box_shadow, paint_box_shadows
+export transform_bounds, paint_transformed_rect
+export gradient_color_at, paint_linear_gradient

@@ -1,0 +1,190 @@
+# @tag:in-development
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of doc/03_plan/sspec_modernization_plan.md.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/sspec_modernization_plan_spec.spl
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented.
+"""
+# doc-path: doc/03_plan/sspec_modernization_plan.md
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/app/testing/in_development_tag.md
+# @manual_section: plan-acceptance
+
+# Each `it` below quotes one open `- [ ]` line from the "Definition of done
+# for the modernization" section of the plan verbatim in its name, so the
+# mapping back to the plan is mechanical. The plan's own text is the sole
+# source for every symbol referenced here (generator.spl's `--audience`
+# gate promised in Phase 1, `generate_feature_doc` in
+# src/app/spipe_docgen/spipe_docgen/generator.spl exported from
+# spipe_docgen/__init__.spl, `generate_req_trace_md` promised as a new
+# export of the not-yet-created src/lib/nogc_sync_mut/test_runner/req_trace.spl,
+# and the real, already-landed `EvidenceStatus.pending_review` in
+# src/lib/common/spec/evidence/model.spl). Traceability root: REQ-SSPEC-PLAN-ACCEPTANCE-001.
+
+use std.spec.{step}
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.common.crypto.sha256.{sha256_text}
+use app.spipe_docgen.spipe_docgen.{parse_spipe_file, generate_feature_doc}
+use std.common.spec.evidence.model.{EvidenceStatus, evidence_status_name}
+
+# ---------------------------------------------------------------------------
+# Shared fixture paths named directly in the plan's Definition-of-done table.
+# ---------------------------------------------------------------------------
+
+val todo_tui_spec_path = "test/03_system/app/todo/todo_tui_spec.spl"
+val scenario_manual_path = "doc/07_guide/app/spipe/scenario_manual_example.md"
+
+val gui_web_spec_path = "test/03_system/app/gui/gui_web_notes_spec.spl"
+val gui_web_manual_path = "doc/07_guide/app/spipe/manual_examples/gui_web_manual_example.md"
+
+val baremetal_network_spec_path = "test/03_system/os/baremetal/nvme_bit_table_spec.spl"
+val baremetal_network_manual_path = "doc/07_guide/app/spipe/manual_examples/baremetal_network_manual_example.md"
+
+val statistics_spec_path = "test/05_perf/compiler_perf_statistics_spec.spl"
+val statistics_manual_path = "doc/07_guide/app/spipe/manual_examples/statistics_manual_example.md"
+
+val req_trace_md_path = "doc/08_tracking/trace/req_trace.md"
+val test_db_path = "doc/08_tracking/test/test_db.sdn"
+
+val spipe_template_path = ".claude/templates/spipe_template.spl"
+val manual_first_marker = "manual-first authoring convention"
+
+# Regenerate a manual for `spec_path` under `audience` and sha256 it against
+# the byte-identical committed fixture at `manual_path`. `generate_feature_doc`
+# is called with the 3-arg `(doc, output_dir, audience)` signature Phase 1
+# promises ("generator.spl -- --audience gate"); today's landed signature is
+# 2-arg (doc, output_dir) with no audience parameter at all, so this call is
+# expected to fail to resolve until the gate lands.
+fn regenerate_manual_sha(spec_path: text, audience: text, output_dir: text) -> text:
+    val parsed = match parse_spipe_file(spec_path):
+        case Ok(doc): doc
+        case Err(e): fail("parse_spipe_file failed for {spec_path}: {e}")
+    val rendered = match generate_feature_doc(parsed, output_dir, audience):
+        case Ok(text_out): text_out
+        case Err(e): fail("generate_feature_doc failed for {spec_path} audience={audience}: {e}")
+    sha256_text(rendered)
+
+# `file_read` in std.nogc_sync_mut.io.file_ops is `(text) -> text`, NOT
+# `Result<text, text>` (file_ops.spl:108). Matching Ok/Err over it aborts every
+# example with "match expression exhausted without matching any pattern for str
+# value <file contents>" before the real oracle is ever evaluated — which is why
+# all 7 examples reported the same semantic error rather than their own verdicts.
+# Guard on `file_exists` and read directly; this stays fail-fast and does not
+# soften any assertion below.
+fn committed_manual_sha(manual_path: text) -> text:
+    if not file_exists(manual_path):
+        fail("could not read committed manual {manual_path}: file does not exist")
+    sha256_text(file_read(manual_path))
+
+describe "sspec_modernization_plan.md — open Definition-of-done checkboxes":
+
+    it "`scenario_manual_example.md` (todo) <- `todo_tui_spec.spl` `--audience=user` -- Phase 5.":
+        step("regenerate scenario_manual_example.md from todo_tui_spec.spl under --audience=user")
+        # @req REQ-SSPEC-PLAN-ACCEPTANCE-001
+        # @capture: sha256 of the regenerated manual text is the retained evidence for this oracle
+        val expected_manual_sha = committed_manual_sha(scenario_manual_path)
+        expect(file_exists(todo_tui_spec_path)).to_equal(true)
+        val actual_manual_sha = regenerate_manual_sha(
+            todo_tui_spec_path, "user", "/tmp/sspec_plan_acceptance/scenario_manual"
+        )
+        expect(actual_manual_sha).to_equal(expected_manual_sha)
+
+    it "`gui_web_manual_example.md` (notes) <- ported gui/web spec `--audience=user` -- Phase 4.":
+        step("regenerate gui_web_manual_example.md from the ported gui/web spec under --audience=user")
+        # @req REQ-SSPEC-PLAN-ACCEPTANCE-001
+        # @capture: sha256 digest of the rendered gui/web manual is the retained comparison evidence
+        val expected_manual_sha = committed_manual_sha(gui_web_manual_path)
+        expect(file_exists(gui_web_spec_path)).to_equal(true)
+        val actual_manual_sha = regenerate_manual_sha(
+            gui_web_spec_path, "user", "/tmp/sspec_plan_acceptance/gui_web_manual"
+        )
+        expect(actual_manual_sha).to_equal(expected_manual_sha)
+
+    it "`baremetal_network_manual_example.md` (nvme) <- ported bit_table spec -- Phase 3.":
+        step("regenerate baremetal_network_manual_example.md from the ported nvme bit_table spec")
+        # @req REQ-SSPEC-PLAN-ACCEPTANCE-001
+        # @capture: sha256 digest of the rendered bit_table manual is the retained comparison evidence
+        val expected_manual_sha = committed_manual_sha(baremetal_network_manual_path)
+        expect(file_exists(baremetal_network_spec_path)).to_equal(true)
+        val actual_manual_sha = regenerate_manual_sha(
+            baremetal_network_spec_path, "user", "/tmp/sspec_plan_acceptance/baremetal_network_manual"
+        )
+        expect(actual_manual_sha).to_equal(expected_manual_sha)
+
+    it "`statistics_manual_example.md` (compiler perf) <- ported statistics spec -- Phase 3.":
+        step("regenerate statistics_manual_example.md from the ported compiler-perf statistics spec")
+        # @req REQ-SSPEC-PLAN-ACCEPTANCE-001
+        # @capture: sha256 digest of the rendered statistics manual is the retained comparison evidence
+        val expected_manual_sha = committed_manual_sha(statistics_manual_path)
+        expect(file_exists(statistics_spec_path)).to_equal(true)
+        val actual_manual_sha = regenerate_manual_sha(
+            statistics_spec_path, "user", "/tmp/sspec_plan_acceptance/statistics_manual"
+        )
+        expect(actual_manual_sha).to_equal(expected_manual_sha)
+
+    it "Every user-facing scenario carries `@manual_section` + `@req`; `req_trace.md` regenerates per run and links each REQ-SSPEC-MODERN-00x to a covering scenario.":
+        step("regenerate req_trace.md and confirm every REQ-SSPEC-MODERN-00x id is linked to a covering scenario")
+        # @req REQ-SSPEC-PLAN-ACCEPTANCE-001
+        # @capture: the regenerated req_trace.md text is the retained traceability evidence
+        # req_trace.spl (New file promised in Phase 1) exports
+        # `generate_req_trace_md(db_path: text) -> Result<text, text>`, wired
+        # into `generate_all_docs` the same way `feature.md` is. No such
+        # module exists yet in src/lib/nogc_sync_mut/test_runner/, so this
+        # import is expected to fail to resolve.
+        use std.nogc_sync_mut.test_runner.req_trace.{generate_req_trace_md}
+
+        val expected_req_ids = [
+            "REQ-SSPEC-MODERN-001", "REQ-SSPEC-MODERN-002", "REQ-SSPEC-MODERN-003",
+            "REQ-SSPEC-MODERN-004", "REQ-SSPEC-MODERN-005", "REQ-SSPEC-MODERN-006",
+            "REQ-SSPEC-MODERN-007", "REQ-SSPEC-MODERN-008", "REQ-SSPEC-MODERN-009",
+            "REQ-SSPEC-MODERN-010"
+        ]
+        val trace_md = match generate_req_trace_md(test_db_path):
+            case Ok(md): md
+            case Err(e): fail("generate_req_trace_md failed: {e}")
+
+        val missing_req_ids = expected_req_ids.filter(fn(req_id: text): not trace_md.contains(req_id))
+        val expected_missing_count = 0
+        expect(missing_req_ids.len()).to_equal(expected_missing_count) # oracle: the plan's Traceability table names exactly these 10 REQ-SSPEC-MODERN ids, so zero is the only complete-coverage value
+
+        if not file_exists(req_trace_md_path):
+            fail("req_trace.md was not regenerated at {req_trace_md_path}")
+        val written = file_read(req_trace_md_path)
+        expect(sha256_text(written)).to_equal(sha256_text(trace_md))
+
+    it "All goldens `reviewed` (no `pending-review`); `bin/simple build check` + `check-req-traceability.shs --strict` green; `bin/simple build bootstrap` clean.":
+        step("confirm no manual-example golden is left in the pending-review state")
+        # @req REQ-SSPEC-PLAN-ACCEPTANCE-001
+        # @capture: the pending-review golden count under doc/07_guide/app/spipe/manual_examples is the retained evidence
+        # Only the `EvidenceStatus` enum half of this checkbox has actually
+        # landed (src/lib/common/spec/evidence/model.spl, 2026-08-08); the
+        # golden directory scan, `build check` wiring, and
+        # `check-req-traceability.shs --strict` combination it promises are
+        # not wired to any Simple-callable surface, so the real oracle here
+        # can only pin the enum's terminal state name and cannot yet drive
+        # a real golden-directory scan. Flagged as the too-vague checkbox
+        # for this reason.
+        val expected_pending_name = "PENDING-REVIEW"
+        val actual_pending_name = evidence_status_name(EvidenceStatus.pending_review)
+        expect(actual_pending_name).to_equal(expected_pending_name)
+
+        val expected_reviewed_pending_count = 0
+        use std.nogc_sync_mut.spec.capture.golden.{count_pending_review_goldens}
+        val actual_pending_count = count_pending_review_goldens("doc/07_guide/app/spipe/manual_examples")
+        expect(actual_pending_count).to_equal(expected_reviewed_pending_count)
+
+    it "spipe skill/template document the manual-first authoring convention.":
+        step("confirm the spipe template documents the manual-first authoring convention")
+        # @req REQ-SSPEC-PLAN-ACCEPTANCE-001
+        # @capture: the presence of the manual-first marker string in the committed template is the retained evidence
+        if not file_exists(spipe_template_path):
+            fail("could not read {spipe_template_path}: file does not exist")
+        val template_content = file_read(spipe_template_path)
+        val expected_present = true
+        val actual_present = template_content.contains(manual_first_marker)
+        expect(actual_present).to_equal(expected_present)

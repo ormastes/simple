@@ -1,0 +1,597 @@
+"""Bounded DBD persistence cleanup provider over the generic attempt fence.
+
+The owner authenticates task/lifecycle/transaction/attempt identity before it
+issues either side effect.  Callers execute the returned command in the DBD
+provider domain and commit the exact result.  Successful substeps survive a
+provider-authenticated cancellation/retry; copied commands become stale.
+
+This prerequisite is not wired to Scheduler or Zombie publication.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.scheduler.provider_cleanup_attempt_fence_v1.*
+
+pub val DBD_CLEANUP_PROVIDER_SLOT_LIMIT_V1: i64 = 64
+pub val DBD_CLEANUP_PERSISTENCE_OWNER_LIMIT_V1: i64 = 64
+pub val DBD_CLEANUP_PROVIDER_EVIDENCE_LIMIT_V1: i64 = 128
+
+pub enum DbdCleanupProviderStateV1:
+    Free
+    Fenced
+    Dispatching
+    RetainedPartial
+    CancelRequested
+    Cancelled
+    Completed
+    Indeterminate
+    Retired
+
+pub enum DbdCleanupActionV1:
+    JournalSync
+    QuarantineClose
+
+pub(package) struct DbdCleanupPersistenceOwnerV1:
+    _slot: i64
+    _generation: u64
+    _nonce: u64
+
+pub struct DbdCleanupPersistenceOwnerViewV1:
+    owner_id: u64
+    owner_generation: u64
+
+pub(package) struct DbdCleanupProviderHandleV1:
+    _slot: i64
+    _generation: u64
+    _nonce: u64
+
+pub(package) struct DbdCleanupDispatchV1:
+    _handle: DbdCleanupProviderHandleV1
+    _command_nonce: u64
+    _attempt_ordinal: u64
+    action: DbdCleanupActionV1
+    target: ProviderCleanupTargetViewV1
+    persistence_owner: DbdCleanupPersistenceOwnerViewV1
+
+pub struct DbdCleanupProviderReceiptV1:
+    task_id: u64
+    lifecycle_generation: u64
+    transaction_id: u64
+    transaction_generation: u64
+    attempt_ordinal: u64
+    journal_synced: bool
+    quarantine_closed: bool
+    terminal: bool
+    retryable: bool
+    cancelled: bool
+    indeterminate: bool
+    evidence_digest: text
+
+struct DbdCleanupProviderSlotV1:
+    state: DbdCleanupProviderStateV1
+    generation: u64
+    nonce: u64
+    attempt: ProviderCleanupAttemptV1?
+    permit: ProviderCleanupSideEffectStartV1?
+    cancel_request: ProviderCleanupCancelRequestV1?
+    cancel_ack: ProviderCleanupCancelAckV1?
+    target: ProviderCleanupTargetViewV1?
+    persistence_owner: DbdCleanupPersistenceOwnerV1?
+    persistence_owner_view: DbdCleanupPersistenceOwnerViewV1?
+    active_action: DbdCleanupActionV1?
+    active_command_nonce: u64
+    last_command_nonce: u64
+    last_action: DbdCleanupActionV1?
+    last_success: bool
+    last_evidence: text
+    journal_synced: bool
+    quarantine_closed: bool
+
+struct DbdCleanupPersistenceOwnerSlotV1:
+    occupied: bool
+    generation: u64
+    nonce: u64
+    owner_id: u64
+    owner_generation: u64
+
+struct DbdCleanupProviderOwnerV1:
+    quarantined: bool
+    next_nonce: u64
+    authority: ProviderCleanupAuthorityV1?
+    persistence_owners: [DbdCleanupPersistenceOwnerSlotV1]
+    slots: [DbdCleanupProviderSlotV1]
+
+val _dbd_cleanup_provider_mutex_v1: i64 = mutex_raw_create()
+var _dbd_cleanup_provider_owner_v1 = DbdCleanupProviderOwnerV1(
+    quarantined: false,
+    next_nonce: 0x444244434c45414eu64,
+    authority: nil,
+    persistence_owners: [],
+    slots: [])
+
+fn _dbd_cleanup_empty_slot_v1(generation: u64) -> DbdCleanupProviderSlotV1:
+    DbdCleanupProviderSlotV1(
+        state: DbdCleanupProviderStateV1.Free,
+        generation: generation, nonce: 0u64,
+        attempt: nil, permit: nil, cancel_request: nil, cancel_ack: nil,
+        target: nil, persistence_owner: nil, persistence_owner_view: nil,
+        active_action: nil, active_command_nonce: 0u64,
+        last_command_nonce: 0u64, last_action: nil,
+        last_success: false, last_evidence: "",
+        journal_synced: false, quarantine_closed: false)
+
+fn _dbd_cleanup_lock_v1() -> bool:
+    _dbd_cleanup_provider_mutex_v1 > 0 and
+        not _dbd_cleanup_provider_owner_v1.quarantined and
+        mutex_raw_lock(_dbd_cleanup_provider_mutex_v1)
+
+fn _dbd_cleanup_unlock_v1() -> bool:
+    if mutex_raw_unlock(_dbd_cleanup_provider_mutex_v1): return true
+    _dbd_cleanup_provider_owner_v1.quarantined = true
+    false
+
+fn _dbd_cleanup_next_nonce_locked_v1() -> u64:
+    if _dbd_cleanup_provider_owner_v1.next_nonce == 0xffffffffffffffffu64:
+        return 0u64
+    _dbd_cleanup_provider_owner_v1.next_nonce =
+        _dbd_cleanup_provider_owner_v1.next_nonce + 1u64
+    _dbd_cleanup_provider_owner_v1.next_nonce
+
+fn _dbd_cleanup_authority_locked_v1() -> ProviderCleanupAuthorityV1?:
+    if val authority = _dbd_cleanup_provider_owner_v1.authority:
+        return Some(authority)
+    val registered = provider_cleanup_register_v1("simpleos-dbd-persistence-v1")
+    if registered.is_err(): return nil
+    val authority = registered.unwrap()
+    _dbd_cleanup_provider_owner_v1.authority = Some(authority)
+    Some(authority)
+
+fn _dbd_cleanup_handle_index_locked_v1(
+    handle: DbdCleanupProviderHandleV1
+) -> i64:
+    if handle._slot < 0 or
+        handle._slot >= _dbd_cleanup_provider_owner_v1.slots.len() or
+        handle._generation == 0u64 or handle._nonce == 0u64:
+        return -1
+    val slot = _dbd_cleanup_provider_owner_v1.slots[handle._slot]
+    if slot.state == DbdCleanupProviderStateV1.Free or
+        slot.state == DbdCleanupProviderStateV1.Retired or
+        slot.generation != handle._generation or slot.nonce != handle._nonce:
+        return -1
+    handle._slot
+
+fn _dbd_cleanup_persistence_owner_index_locked_v1(
+    owner: DbdCleanupPersistenceOwnerV1
+) -> i64:
+    if owner._slot < 0 or
+        owner._slot >= _dbd_cleanup_provider_owner_v1.persistence_owners.len() or
+        owner._generation == 0u64 or owner._nonce == 0u64:
+        return -1
+    val slot = _dbd_cleanup_provider_owner_v1.persistence_owners[owner._slot]
+    if not slot.occupied or slot.generation != owner._generation or
+        slot.nonce != owner._nonce:
+        return -1
+    owner._slot
+
+fn _dbd_cleanup_receipt_v1(
+    slot: DbdCleanupProviderSlotV1,
+    retryable: bool,
+    indeterminate: bool
+) -> DbdCleanupProviderReceiptV1:
+    val target = slot.target.unwrap()
+    DbdCleanupProviderReceiptV1(
+        task_id: target.task_id,
+        lifecycle_generation: target.lifecycle_generation,
+        transaction_id: target.transaction_id,
+        transaction_generation: target.transaction_generation,
+        attempt_ordinal: target.attempt_ordinal,
+        journal_synced: slot.journal_synced,
+        quarantine_closed: slot.quarantine_closed,
+        terminal: slot.state == DbdCleanupProviderStateV1.Completed,
+        retryable: retryable,
+        cancelled: slot.state == DbdCleanupProviderStateV1.Cancelled,
+        indeterminate: indeterminate,
+        evidence_digest: slot.last_evidence)
+
+fn _dbd_cleanup_identity_live_locked_v1(
+    task_id: u64, lifecycle_generation: u64,
+    transaction_id: u64, transaction_generation: u64
+) -> bool:
+    for slot in _dbd_cleanup_provider_owner_v1.slots:
+        if slot.state != DbdCleanupProviderStateV1.Free and
+            slot.state != DbdCleanupProviderStateV1.Retired:
+            if val target = slot.target:
+                if target.task_id == task_id and
+                    target.lifecycle_generation == lifecycle_generation and
+                    target.transaction_id == transaction_id and
+                    target.transaction_generation == transaction_generation:
+                    return true
+    false
+
+pub(package) fn dbd_cleanup_provider_register_persistence_owner_v1(
+    owner_id: u64,
+    owner_generation: u64
+) -> Result<DbdCleanupPersistenceOwnerV1, text>:
+    if owner_id == 0u64 or owner_generation == 0u64:
+        return Err("invalid DBD persistence owner identity")
+    if not _dbd_cleanup_lock_v1(): return Err("DBD cleanup provider unavailable")
+    var index = -1
+    var i = 0
+    while i < _dbd_cleanup_provider_owner_v1.persistence_owners.len():
+        val existing = _dbd_cleanup_provider_owner_v1.persistence_owners[i]
+        if existing.occupied and existing.owner_id == owner_id:
+            _ = _dbd_cleanup_unlock_v1()
+            return Err("DBD persistence owner already registered")
+        if not existing.occupied and index < 0: index = i
+        i = i + 1
+    if index < 0 and _dbd_cleanup_provider_owner_v1.persistence_owners.len() >=
+        DBD_CLEANUP_PERSISTENCE_OWNER_LIMIT_V1:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD persistence owner registry full")
+    val nonce = _dbd_cleanup_next_nonce_locked_v1()
+    if nonce == 0u64:
+        _dbd_cleanup_provider_owner_v1.quarantined = true
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD persistence owner nonce exhausted")
+    val slot_generation = if index >= 0:
+        _dbd_cleanup_provider_owner_v1.persistence_owners[index].generation
+    else: 1u64
+    val slot = DbdCleanupPersistenceOwnerSlotV1(
+        occupied: true, generation: slot_generation, nonce: nonce,
+        owner_id: owner_id, owner_generation: owner_generation)
+    if index < 0:
+        index = _dbd_cleanup_provider_owner_v1.persistence_owners.len()
+        _dbd_cleanup_provider_owner_v1.persistence_owners.push(slot)
+    else:
+        _dbd_cleanup_provider_owner_v1.persistence_owners[index] = slot
+    val owner = DbdCleanupPersistenceOwnerV1(
+        _slot: index, _generation: slot_generation, _nonce: nonce)
+    if not _dbd_cleanup_unlock_v1():
+        return Err("DBD persistence owner registration indeterminate")
+    Ok(owner)
+
+pub(package) fn dbd_cleanup_provider_issue_v1(
+    persistence_owner: DbdCleanupPersistenceOwnerV1,
+    task_id: u64,
+    lifecycle_generation: u64,
+    transaction_id: u64,
+    transaction_generation: u64
+) -> Result<DbdCleanupProviderHandleV1, text>:
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        transaction_id == 0u64 or transaction_generation == 0u64:
+        return Err("invalid DBD cleanup identity")
+    if not _dbd_cleanup_lock_v1(): return Err("DBD cleanup provider unavailable")
+    val persistence_index =
+        _dbd_cleanup_persistence_owner_index_locked_v1(persistence_owner)
+    if persistence_index < 0:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("stale DBD persistence owner")
+    if _dbd_cleanup_identity_live_locked_v1(
+        task_id, lifecycle_generation, transaction_id, transaction_generation):
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup identity already live")
+    val authority = _dbd_cleanup_authority_locked_v1()
+    if authority == nil:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup fence registration failed")
+    var index = -1
+    var i = 0
+    while i < _dbd_cleanup_provider_owner_v1.slots.len():
+        if _dbd_cleanup_provider_owner_v1.slots[i].state ==
+            DbdCleanupProviderStateV1.Free:
+            index = i
+            break
+        i = i + 1
+    if index < 0 and _dbd_cleanup_provider_owner_v1.slots.len() >=
+        DBD_CLEANUP_PROVIDER_SLOT_LIMIT_V1:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup provider full")
+    val prior_generation = if index >= 0:
+        _dbd_cleanup_provider_owner_v1.slots[index].generation
+    else: 0u64
+    if prior_generation == 0xffffffffffffffffu64:
+        if index >= 0:
+            _dbd_cleanup_provider_owner_v1.slots[index].state =
+                DbdCleanupProviderStateV1.Retired
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup slot generation exhausted")
+    val nonce = _dbd_cleanup_next_nonce_locked_v1()
+    if nonce == 0u64:
+        _dbd_cleanup_provider_owner_v1.quarantined = true
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup nonce exhausted")
+    val attempt_result = provider_cleanup_issue_attempt_v1(
+        authority.unwrap(), task_id, lifecycle_generation,
+        transaction_id, transaction_generation)
+    if attempt_result.is_err():
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup fence issue failed")
+    val attempt = attempt_result.unwrap()
+    val target = ProviderCleanupTargetViewV1(
+        task_id: task_id, lifecycle_generation: lifecycle_generation,
+        transaction_id: transaction_id,
+        transaction_generation: transaction_generation,
+        attempt_ordinal: 1u64)
+    val slot = DbdCleanupProviderSlotV1(
+        state: DbdCleanupProviderStateV1.Fenced,
+        generation: prior_generation + 1u64, nonce: nonce,
+        attempt: Some(attempt), permit: nil,
+        cancel_request: nil, cancel_ack: nil, target: Some(target),
+        persistence_owner: Some(persistence_owner),
+        persistence_owner_view: Some(DbdCleanupPersistenceOwnerViewV1(
+            owner_id: _dbd_cleanup_provider_owner_v1.persistence_owners[
+                persistence_index].owner_id,
+            owner_generation: _dbd_cleanup_provider_owner_v1.persistence_owners[
+                persistence_index].owner_generation)),
+        active_action: nil, active_command_nonce: 0u64,
+        last_command_nonce: 0u64, last_action: nil,
+        last_success: false, last_evidence: "",
+        journal_synced: false, quarantine_closed: false)
+    if index < 0:
+        index = _dbd_cleanup_provider_owner_v1.slots.len()
+        _dbd_cleanup_provider_owner_v1.slots.push(slot)
+    else:
+        _dbd_cleanup_provider_owner_v1.slots[index] = slot
+    val handle = DbdCleanupProviderHandleV1(
+        _slot: index, _generation: slot.generation, _nonce: slot.nonce)
+    if not _dbd_cleanup_unlock_v1(): return Err("DBD cleanup issue indeterminate")
+    Ok(handle)
+
+pub(package) fn dbd_cleanup_provider_dispatch_v1(
+    handle: DbdCleanupProviderHandleV1
+) -> Result<DbdCleanupDispatchV1, text>:
+    if not _dbd_cleanup_lock_v1(): return Err("DBD cleanup provider unavailable")
+    val index = _dbd_cleanup_handle_index_locked_v1(handle)
+    if index < 0:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("stale DBD cleanup handle")
+    var slot = _dbd_cleanup_provider_owner_v1.slots[index]
+    if slot.state == DbdCleanupProviderStateV1.Dispatching:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup command already active")
+    if slot.state == DbdCleanupProviderStateV1.CancelRequested or
+        slot.state == DbdCleanupProviderStateV1.Cancelled or
+        slot.state == DbdCleanupProviderStateV1.Completed or
+        slot.state == DbdCleanupProviderStateV1.Indeterminate:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup dispatch unavailable")
+    val authority = _dbd_cleanup_provider_owner_v1.authority.unwrap()
+    if slot.permit == nil:
+        val started = provider_cleanup_start_side_effect_v1(
+            authority, slot.attempt.unwrap())
+        if started.is_err():
+            _ = _dbd_cleanup_unlock_v1()
+            return Err("DBD cleanup fence start failed")
+        slot.permit = Some(started.unwrap())
+        slot.target = Some(started.unwrap().target)
+    val action = if not slot.journal_synced:
+        DbdCleanupActionV1.JournalSync
+    else:
+        DbdCleanupActionV1.QuarantineClose
+    val command_nonce = _dbd_cleanup_next_nonce_locked_v1()
+    if command_nonce == 0u64:
+        slot.state = DbdCleanupProviderStateV1.Indeterminate
+        _dbd_cleanup_provider_owner_v1.slots[index] = slot
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup command nonce exhausted")
+    slot.active_action = Some(action)
+    slot.active_command_nonce = command_nonce
+    slot.state = DbdCleanupProviderStateV1.Dispatching
+    _dbd_cleanup_provider_owner_v1.slots[index] = slot
+    val command = DbdCleanupDispatchV1(
+        _handle: handle, _command_nonce: command_nonce,
+        _attempt_ordinal: slot.target.unwrap().attempt_ordinal,
+        action: action, target: slot.target.unwrap(),
+        persistence_owner: slot.persistence_owner_view.unwrap())
+    if not _dbd_cleanup_unlock_v1(): return Err("DBD cleanup dispatch indeterminate")
+    Ok(command)
+
+pub(package) fn dbd_cleanup_provider_commit_result_v1(
+    command: DbdCleanupDispatchV1,
+    success: bool,
+    evidence_digest: text
+) -> Result<DbdCleanupProviderReceiptV1, text>:
+    if evidence_digest.len() == 0 or
+        evidence_digest.len() > DBD_CLEANUP_PROVIDER_EVIDENCE_LIMIT_V1:
+        return Err("invalid DBD cleanup evidence")
+    if not _dbd_cleanup_lock_v1(): return Err("DBD cleanup provider unavailable")
+    val index = _dbd_cleanup_handle_index_locked_v1(command._handle)
+    if index < 0:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("stale DBD cleanup command")
+    var slot = _dbd_cleanup_provider_owner_v1.slots[index]
+    if _dbd_cleanup_persistence_owner_index_locked_v1(
+        slot.persistence_owner.unwrap()) < 0 or
+        slot.persistence_owner_view.unwrap().owner_id !=
+            command.persistence_owner.owner_id or
+        slot.persistence_owner_view.unwrap().owner_generation !=
+            command.persistence_owner.owner_generation or
+        slot.target.unwrap().attempt_ordinal != command._attempt_ordinal or
+        slot.target.unwrap().task_id != command.target.task_id or
+        slot.target.unwrap().lifecycle_generation !=
+            command.target.lifecycle_generation or
+        slot.target.unwrap().transaction_id != command.target.transaction_id or
+        slot.target.unwrap().transaction_generation !=
+            command.target.transaction_generation:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("unauthenticated DBD cleanup result")
+    if slot.last_command_nonce == command._command_nonce:
+        if slot.last_action == nil or slot.last_action.unwrap() != command.action or
+            slot.last_success != success or slot.last_evidence != evidence_digest:
+            _ = _dbd_cleanup_unlock_v1()
+            return Err("conflicting DBD cleanup result replay")
+        val replay = _dbd_cleanup_receipt_v1(
+            slot,
+            slot.state == DbdCleanupProviderStateV1.RetainedPartial or
+                slot.state == DbdCleanupProviderStateV1.CancelRequested,
+            false)
+        if not _dbd_cleanup_unlock_v1(): return Err("DBD cleanup replay indeterminate")
+        return Ok(replay)
+    val cancellation_pending =
+        slot.state == DbdCleanupProviderStateV1.CancelRequested
+    if (slot.state != DbdCleanupProviderStateV1.Dispatching and
+        not cancellation_pending) or
+        slot.active_command_nonce != command._command_nonce or
+        slot.active_action == nil or
+        slot.active_action.unwrap() != command.action:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("unauthenticated DBD cleanup result")
+    slot.last_command_nonce = command._command_nonce
+    slot.last_action = Some(command.action)
+    slot.last_success = success
+    slot.last_evidence = evidence_digest
+    slot.active_action = nil
+    slot.active_command_nonce = 0u64
+    if success:
+        match command.action:
+            DbdCleanupActionV1.JournalSync: slot.journal_synced = true
+            DbdCleanupActionV1.QuarantineClose: slot.quarantine_closed = true
+    if not success or not (slot.journal_synced and slot.quarantine_closed):
+        slot.state = if cancellation_pending:
+            DbdCleanupProviderStateV1.CancelRequested
+        else:
+            DbdCleanupProviderStateV1.RetainedPartial
+        _dbd_cleanup_provider_owner_v1.slots[index] = slot
+        val partial = _dbd_cleanup_receipt_v1(slot, true, false)
+        if not _dbd_cleanup_unlock_v1(): return Err("DBD cleanup result indeterminate")
+        return Ok(partial)
+    val authority = _dbd_cleanup_provider_owner_v1.authority.unwrap()
+    val completed = provider_cleanup_complete_v1(
+        authority, slot.permit.unwrap(), 0, "dbd-persistence-cleanup-complete")
+    if completed.is_err():
+        slot.state = DbdCleanupProviderStateV1.Indeterminate
+        _dbd_cleanup_provider_owner_v1.slots[index] = slot
+        val receipt = _dbd_cleanup_receipt_v1(slot, false, true)
+        _ = _dbd_cleanup_unlock_v1()
+        return Ok(receipt)
+    if provider_cleanup_finish_v1(authority, completed.unwrap()).is_err():
+        slot.state = DbdCleanupProviderStateV1.Indeterminate
+        _dbd_cleanup_provider_owner_v1.slots[index] = slot
+        val receipt = _dbd_cleanup_receipt_v1(slot, false, true)
+        _ = _dbd_cleanup_unlock_v1()
+        return Ok(receipt)
+    slot.state = DbdCleanupProviderStateV1.Completed
+    _dbd_cleanup_provider_owner_v1.slots[index] = slot
+    val terminal = _dbd_cleanup_receipt_v1(slot, false, false)
+    if not _dbd_cleanup_unlock_v1(): return Err("DBD cleanup completion indeterminate")
+    Ok(terminal)
+
+pub(package) fn dbd_cleanup_provider_request_cancel_v1(
+    handle: DbdCleanupProviderHandleV1
+) -> Result<bool, text>:
+    if not _dbd_cleanup_lock_v1(): return Err("DBD cleanup provider unavailable")
+    val index = _dbd_cleanup_handle_index_locked_v1(handle)
+    if index < 0:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("stale DBD cleanup handle")
+    var slot = _dbd_cleanup_provider_owner_v1.slots[index]
+    if slot.state == DbdCleanupProviderStateV1.CancelRequested:
+        if not _dbd_cleanup_unlock_v1():
+            return Err("DBD cleanup cancellation replay indeterminate")
+        return Ok(true)
+    if slot.state == DbdCleanupProviderStateV1.Completed or
+        slot.state == DbdCleanupProviderStateV1.Cancelled or
+        slot.state == DbdCleanupProviderStateV1.Indeterminate:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup attempt terminal")
+    val requested = provider_cleanup_request_cancel_v1(slot.attempt.unwrap())
+    if requested.is_err():
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup cancellation rejected")
+    slot.cancel_request = Some(requested.unwrap())
+    slot.state = DbdCleanupProviderStateV1.CancelRequested
+    _dbd_cleanup_provider_owner_v1.slots[index] = slot
+    if not _dbd_cleanup_unlock_v1(): return Err("DBD cleanup cancellation indeterminate")
+    Ok(true)
+
+pub(package) fn dbd_cleanup_provider_ack_cancelled_v1(
+    handle: DbdCleanupProviderHandleV1,
+    quiescence_digest: text
+) -> Result<DbdCleanupProviderReceiptV1, text>:
+    if quiescence_digest.len() == 0 or
+        quiescence_digest.len() > DBD_CLEANUP_PROVIDER_EVIDENCE_LIMIT_V1:
+        return Err("invalid DBD quiescence evidence")
+    if not _dbd_cleanup_lock_v1(): return Err("DBD cleanup provider unavailable")
+    val index = _dbd_cleanup_handle_index_locked_v1(handle)
+    if index < 0:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("stale DBD cleanup handle")
+    var slot = _dbd_cleanup_provider_owner_v1.slots[index]
+    if slot.state != DbdCleanupProviderStateV1.CancelRequested or
+        slot.active_action != nil or slot.active_command_nonce != 0u64:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup execution not quiescent")
+    val authority = _dbd_cleanup_provider_owner_v1.authority.unwrap()
+    val acked = provider_cleanup_ack_cancelled_v1(
+        authority, slot.cancel_request.unwrap(), quiescence_digest)
+    if acked.is_err():
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup cancellation acknowledgment rejected")
+    slot.cancel_ack = Some(acked.unwrap())
+    slot.state = DbdCleanupProviderStateV1.Cancelled
+    slot.last_evidence = quiescence_digest
+    _dbd_cleanup_provider_owner_v1.slots[index] = slot
+    val receipt = _dbd_cleanup_receipt_v1(slot, true, false)
+    if not _dbd_cleanup_unlock_v1(): return Err("DBD cancellation ACK indeterminate")
+    Ok(receipt)
+
+pub(package) fn dbd_cleanup_provider_retry_cancelled_v1(
+    handle: DbdCleanupProviderHandleV1
+) -> Result<DbdCleanupProviderReceiptV1, text>:
+    if not _dbd_cleanup_lock_v1(): return Err("DBD cleanup provider unavailable")
+    val index = _dbd_cleanup_handle_index_locked_v1(handle)
+    if index < 0:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("stale DBD cleanup handle")
+    var slot = _dbd_cleanup_provider_owner_v1.slots[index]
+    if slot.state != DbdCleanupProviderStateV1.Cancelled or slot.cancel_ack == nil:
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup cancellation not acknowledged")
+    val authority = _dbd_cleanup_provider_owner_v1.authority.unwrap()
+    val retried = provider_cleanup_retry_after_cancel_v1(
+        authority, slot.cancel_ack.unwrap())
+    if retried.is_err():
+        _ = _dbd_cleanup_unlock_v1()
+        return Err("DBD cleanup retry rejected")
+    slot.attempt = Some(retried.unwrap())
+    slot.permit = nil
+    slot.cancel_request = nil
+    slot.cancel_ack = nil
+    slot.target = Some(ProviderCleanupTargetViewV1(
+        task_id: slot.target.unwrap().task_id,
+        lifecycle_generation: slot.target.unwrap().lifecycle_generation,
+        transaction_id: slot.target.unwrap().transaction_id,
+        transaction_generation: slot.target.unwrap().transaction_generation,
+        attempt_ordinal: slot.target.unwrap().attempt_ordinal + 1u64))
+    slot.last_command_nonce = 0u64
+    slot.last_action = nil
+    slot.last_success = false
+    slot.last_evidence = ""
+    slot.state = DbdCleanupProviderStateV1.RetainedPartial
+    _dbd_cleanup_provider_owner_v1.slots[index] = slot
+    val receipt = _dbd_cleanup_receipt_v1(slot, true, false)
+    if not _dbd_cleanup_unlock_v1(): return Err("DBD cleanup retry indeterminate")
+    Ok(receipt)
+
+pub(package) fn dbd_cleanup_provider_consume_terminal_v1(
+    handle: DbdCleanupProviderHandleV1
+) -> bool:
+    if not _dbd_cleanup_lock_v1(): return false
+    val index = _dbd_cleanup_handle_index_locked_v1(handle)
+    if index < 0 or _dbd_cleanup_provider_owner_v1.slots[index].state !=
+        DbdCleanupProviderStateV1.Completed:
+        _ = _dbd_cleanup_unlock_v1()
+        return false
+    val generation = _dbd_cleanup_provider_owner_v1.slots[index].generation
+    _dbd_cleanup_provider_owner_v1.slots[index] =
+        _dbd_cleanup_empty_slot_v1(generation)
+    _dbd_cleanup_unlock_v1()
+
+export DbdCleanupPersistenceOwnerV1, DbdCleanupProviderHandleV1
+export DbdCleanupDispatchV1
+export dbd_cleanup_provider_register_persistence_owner_v1
+export dbd_cleanup_provider_issue_v1, dbd_cleanup_provider_dispatch_v1
+export dbd_cleanup_provider_commit_result_v1
+export dbd_cleanup_provider_request_cancel_v1
+export dbd_cleanup_provider_ack_cancelled_v1
+export dbd_cleanup_provider_retry_cancelled_v1
+export dbd_cleanup_provider_consume_terminal_v1

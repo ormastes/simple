@@ -1,0 +1,166 @@
+use std.spec.*
+use os.apps.servers_user.web_h2_response_owner_v1.{WebH2ResponseOwnerV1, WebH2ResponsePrepareStatusV1}
+use os.apps.servers_user.web_h2_request_owner_v1.{WebH2RequestOwnerV1}
+use os.apps.servers_user.web_h2_response_authority_v1.{WebH2ResponseAdmissionReceiptV1}
+use std.http.h2.h2_hpack.{HpackEntry, hpack_encode, hpack_static_table}
+use std.http.h2.h2_frame.{H2Frame, H2HeadersFrame, H2RstStreamFrame, H2_FLAG_END_HEADERS}
+
+class TestAdmissionV1:
+    owner: WebH2ResponseOwnerV1
+    request_owner: WebH2RequestOwnerV1
+    receipt: WebH2ResponseAdmissionReceiptV1
+
+fn _headers() -> [HpackEntry]:
+    [HpackEntry(name: ":status", value: "200"), HpackEntry(name: "content-type", value: "text/plain")]
+
+fn _admission(epoch: u64, stream_id: i64, connection_window: i64) -> TestAdmissionV1:
+    var response_owner = WebH2ResponseOwnerV1.create(connection_window, 16384)
+    var request_owner = WebH2RequestOwnerV1.create_bound(
+        response_owner.bind_request_owner(epoch))
+    val request_headers = [HpackEntry(name: ":method", value: "GET"), HpackEntry(name: ":scheme", value: "https"), HpackEntry(name: ":authority", value: "example.com"), HpackEntry(name: ":path", value: "/")]
+    val encoded = hpack_encode(request_headers, hpack_static_table())
+    val admitted = request_owner.admit_frame(H2Frame.Headers(H2HeadersFrame(stream_id: stream_id, flags: H2_FLAG_END_HEADERS, header_block: encoded.bytes)))
+    TestAdmissionV1(owner: response_owner, request_owner: request_owner,
+        receipt: admitted.response_admissions[0])
+
+describe "bounded transactional H2 response ownership":
+    it "accepts only the request-owner receipt bound to this connection":
+        val first = _admission(0xA501u64, 1, 65535)
+        val other = _admission(0xB502u64, 1, 65535)
+        var owner = first.owner
+        var copied_owner = first.owner
+        val cross_owner = owner.issue_lease(other.receipt, 65535)
+        expect(owner.stream_send_credit(cross_owner)).to_equal(-1)
+        val lease = owner.issue_lease(first.receipt, 65535)
+        expect(owner.stream_send_credit(lease)).to_equal(65535)
+        val replay = copied_owner.issue_lease(first.receipt, 65535)
+        expect(owner.stream_send_credit(replay)).to_equal(-1)
+        val first_prepared = owner.prepare_response(lease, _headers(), [], true)
+        var other_owner = other.owner
+        val other_lease = other_owner.issue_lease(other.receipt, 65535)
+        val other_prepared = other_owner.prepare_response(other_lease, _headers(), [], true)
+        expect(other_prepared.status).to_equal(WebH2ResponsePrepareStatusV1.Prepared)
+        expect(other_owner.commit_response(first_prepared.transaction)).to_equal(false)
+
+    it "prepares HEADERS before frame-sized DATA without spending credit":
+        val admission = _admission(0xA503u64, 1, 40000)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        var body: [u8] = []
+        var index: i64 = 0
+        while index < 20000:
+            body.push(97)
+            index = index + 1
+        val prepared = owner.prepare_response(lease, _headers(), body, true)
+        expect(prepared.status).to_equal(WebH2ResponsePrepareStatusV1.Prepared)
+        expect(prepared.wire_bytes[3]).to_equal(1u8)
+        expect(owner.connection_send_credit()).to_equal(40000)
+        expect(owner.commit_response(prepared.transaction)).to_equal(true)
+        expect(owner.connection_send_credit()).to_equal(20000)
+        expect(owner.commit_response(prepared.transaction)).to_equal(false)
+
+    it "abort preserves credits and permits one fresh transaction":
+        val admission = _admission(0xA504u64, 1, 20)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        val first = owner.prepare_response(lease, _headers(), [1u8, 2u8], true)
+        expect(owner.abort_response(first.transaction)).to_equal(true)
+        expect(owner.connection_send_credit()).to_equal(20)
+        expect(owner.abort_response(first.transaction)).to_equal(false)
+        expect(owner.prepare_response(lease, _headers(), [1u8], true).status).to_equal(WebH2ResponsePrepareStatusV1.Prepared)
+
+    it "blocks atomically when either flow-control window is short":
+        val admission = _admission(0xA505u64, 1, 1)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        val blocked = owner.prepare_response(lease, _headers(), [1u8, 2u8], true)
+        expect(blocked.status).to_equal(WebH2ResponsePrepareStatusV1.FlowBlocked)
+        expect(blocked.wire_bytes.len()).to_equal(0u64)
+        expect(owner.connection_send_credit()).to_equal(1)
+
+    it "applies stream WINDOW_UPDATE and SETTINGS initial-window delta transactionally":
+        val admission = _admission(0xA50Du64, 1, 65535)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        expect(owner.apply_stream_window_update_v1(1, 9)).to_be(true)
+        expect(owner.stream_send_credit(lease)).to_equal(65544)
+        expect(owner.apply_peer_settings_initial_window_v1(0)).to_be(true)
+        expect(owner.stream_send_credit(lease)).to_equal(9)
+        expect(owner.apply_peer_settings_initial_window_v1(2147483647)).to_be(false)
+        expect(owner.stream_send_credit(lease)).to_equal(9)
+        expect(owner.apply_stream_window_update_v1(1, 2147483647)).to_be(false)
+        expect(owner.stream_send_credit(lease)).to_equal(9)
+
+    it "does not rebase stream windows beneath an escaped prepared response":
+        val admission = _admission(0xA50Fu64, 1, 65535)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        val prepared = owner.prepare_response(lease, _headers(), [1u8], true)
+        expect(prepared.status).to_equal(WebH2ResponsePrepareStatusV1.Prepared)
+        expect(owner.apply_peer_settings_initial_window_v1(0)).to_be(false)
+        expect(owner.stream_send_credit(lease)).to_equal(65535)
+
+    it "rejects stale and cross-owner admissions":
+        val admission = _admission(0xA506u64, 1, 65535)
+        var owner = admission.owner
+        admission.request_owner.admit_frame(H2Frame.RstStream(H2RstStreamFrame(
+            stream_id: 1, error_code: 8)))
+        owner.revoke_request_stream(1)
+        val stale_first = owner.issue_lease(admission.receipt, 65535)
+        val stale_second = owner.issue_lease(admission.receipt, 65535)
+        expect(owner.stream_send_credit(stale_first)).to_equal(-1)
+        expect(owner.stream_send_credit(stale_second)).to_equal(-1)
+        val not_prepared = owner.prepare_response(stale_first, _headers(), [], true)
+        expect(not_prepared.status).to_equal(WebH2ResponsePrepareStatusV1.InvalidLease)
+        expect(owner.commit_response(not_prepared.transaction)).to_equal(false)
+
+    it "fails closed when a second request owner binding is requested":
+        var owner = WebH2ResponseOwnerV1.create(65535, 16384)
+        var copied_before_bind = owner
+        val first_binding = owner.bind_request_owner(0xA50Bu64)
+        val _ignored_second = copied_before_bind.bind_request_owner(0xA50Cu64)
+        var request_owner = WebH2RequestOwnerV1.create_bound(first_binding)
+        val request_headers = [HpackEntry(name: ":method", value: "GET"), HpackEntry(name: ":scheme", value: "https"), HpackEntry(name: ":authority", value: "example.com"), HpackEntry(name: ":path", value: "/")]
+        val encoded = hpack_encode(request_headers, hpack_static_table())
+        val admitted = request_owner.admit_frame(H2Frame.Headers(H2HeadersFrame(
+            stream_id: 1, flags: H2_FLAG_END_HEADERS, header_block: encoded.bytes)))
+        val rejected = owner.issue_lease(admitted.response_admissions[0], 65535)
+        expect(owner.stream_send_credit(rejected)).to_equal(-1)
+
+    it "request cancellation invalidates an already prepared transaction":
+        val admission = _admission(0xA50Au64, 1, 65535)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        val prepared = owner.prepare_response(lease, _headers(), [], true)
+        admission.request_owner.cancel()
+        expect(owner.abort_response(prepared.transaction)).to_equal(false)
+        expect(owner.commit_response(prepared.transaction)).to_equal(false)
+
+    it "sets END_STREAM once and refuses response replay":
+        val admission = _admission(0xA507u64, 1, 65535)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        val prepared = owner.prepare_response(lease, _headers(), [], true)
+        expect(prepared.wire_bytes[4] & 1u8).to_equal(1u8)
+        expect(owner.commit_response(prepared.transaction)).to_equal(true)
+        expect(owner.highest_completed_stream()).to_equal(1)
+        expect(owner.prepare_response(lease, _headers(), [], true).status).to_equal(WebH2ResponsePrepareStatusV1.InvalidLease)
+
+    it "requires one-shot END_STREAM and serializes cancellation with prepare":
+        val admission = _admission(0xA508u64, 1, 65535)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        expect(owner.prepare_response(lease, _headers(), [], false).status).to_equal(WebH2ResponsePrepareStatusV1.LifecycleError)
+        val prepared = owner.prepare_response(lease, _headers(), [], true)
+        expect(owner.cancel_stream(1)).to_equal(true)
+        expect(owner.commit_response(prepared.transaction)).to_equal(false)
+        expect(owner.abort_response(prepared.transaction)).to_equal(false)
+
+    it "rejects H2-invalid status TE content-length and body semantics":
+        val admission = _admission(0xA509u64, 1, 65535)
+        var owner = admission.owner
+        val lease = owner.issue_lease(admission.receipt, 65535)
+        expect(owner.prepare_response(lease, [HpackEntry(name: ":status", value: "101")], [], true).status).to_equal(WebH2ResponsePrepareStatusV1.InvalidHeaders)
+        expect(owner.prepare_response(lease, [HpackEntry(name: ":status", value: "200"), HpackEntry(name: "te", value: "gzip")], [], true).status).to_equal(WebH2ResponsePrepareStatusV1.InvalidHeaders)
+        expect(owner.prepare_response(lease, [HpackEntry(name: ":status", value: "200"), HpackEntry(name: "content-length", value: "2")], [1u8], true).status).to_equal(WebH2ResponsePrepareStatusV1.InvalidHeaders)
+        expect(owner.prepare_response(lease, [HpackEntry(name: ":status", value: "204")], [1u8], true).status).to_equal(WebH2ResponsePrepareStatusV1.InvalidHeaders)

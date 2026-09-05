@@ -1,0 +1,105 @@
+"""
+# Enum Attributes Reach HIR Unit Spec
+
+Regression spec for
+doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md: a
+decorator on an `enum` parsed cleanly and was then silently dropped, so no
+later pass could ask "is this enum `@closed`?".
+
+Two halves, matching the two links in the repaired chain:
+
+1. the parser now records the decorators on `ParserEnum.attributes`, exercised
+   end to end through `parse_full_frontend`;
+2. `HirEnum` carries `attributes: [HirAttribute]`, and `hir_attribute_from_raw`
+   is the exact conversion `lower_enum` applies to each parser spelling.
+
+The HIR half is asserted on a directly constructed `HirEnum` rather than by
+calling `HirLowering.lower_enum`, because that call returns nil under the Rust
+seed for ANY enum (verified against unmodified HEAD, independent of this
+change) — a separate, pre-existing defect.
+
+Unknown decorator names are PRESERVED, never rejected: other lanes own their
+own decorator vocabularies.
+"""
+
+use compiler.hir.{HirEnum, HirAttribute, hir_enum_has_attribute, hir_enum_attribute_args, hir_attribute_from_raw}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.config.{Logger}
+
+fn parsed_attributes(source: text, name: text) -> [text]:
+    """Raw decorator spellings on the single enum in `source`."""
+    val module = parse_full_frontend(source, name, name, Logger(level: 0))
+    var out: [text] = []
+    for e in module.enums.values():
+        for a in e.attributes:
+            out = out.push(a)
+    out
+
+fn enum_with_attributes(attrs: [HirAttribute]) -> HirEnum:
+    """A HirEnum with every field named explicitly.
+
+    The Rust seed fills PARTIAL named constructions POSITIONALLY, so a partial
+    construction here would silently misassign `attributes`."""
+    HirEnum(
+        symbol: SymbolId(id: 0),
+        name: "Color",
+        runtime_name: "Color",
+        type_params: [],
+        variants: [],
+        visibility: Visibility.Public,
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: Span(start: 0, end: 0, line: 1, col: 1, file: "spec", length: 0),
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {},
+        attributes: attrs
+    )
+
+describe "enum decorators reach HIR":
+    it "records @closed on the parsed enum":
+        val attrs = parsed_attributes("@closed\nenum Color:\n    Red\n    Green\n", "closed_enum")
+        expect(attrs.len()).to_equal(1)
+        expect(attrs[0]).to_equal("closed")
+
+    it "preserves two decorators in source order, including an unknown one":
+        val src = "@closed\n@totally_bogus_decorator_xyz\nenum Mode:\n    A\n    B\n"
+        val attrs = parsed_attributes(src, "two_decorators")
+        expect(attrs.len()).to_equal(2)
+        expect(attrs[0]).to_equal("closed")
+        expect(attrs[1]).to_equal("totally_bogus_decorator_xyz")
+
+    it "keeps decorator arguments as raw text":
+        val src = "@evolving(repr: u16, unknown: Unknown)\nenum Status:\n    Ok\n    Unknown\n"
+        val attrs = parsed_attributes(src, "evolving_enum")
+        expect(attrs.len()).to_equal(1)
+        expect(attrs[0]).to_equal("evolving(repr:u16,unknown:Unknown)")
+
+    it "leaves an undecorated enum with no attributes":
+        val attrs = parsed_attributes("enum Plain:\n    One\n    Two\n", "plain_enum")
+        expect(attrs.len()).to_equal(0)
+
+    it "splits a raw spelling into a HirAttribute name and args":
+        val bare = hir_attribute_from_raw("closed")
+        expect(bare.name).to_equal("closed")
+        expect(bare.args).to_equal("")
+        val with_args = hir_attribute_from_raw("evolving(repr:u16,unknown:Unknown)")
+        expect(with_args.name).to_equal("evolving")
+        expect(with_args.args).to_equal("repr:u16,unknown:Unknown")
+
+    it "answers hir_enum_has_attribute from the HirEnum attribute list":
+        val e = enum_with_attributes([hir_attribute_from_raw("closed")])
+        expect(e.attributes.len()).to_equal(1)
+        expect(hir_enum_has_attribute(e, "closed")).to_equal(true)
+        expect(hir_enum_has_attribute(e, "evolving")).to_equal(false)
+        expect(hir_enum_attribute_args(e, "closed")).to_equal("")
+
+    it "reports no attributes for an undecorated HirEnum":
+        val e = enum_with_attributes([])
+        expect(e.attributes.len()).to_equal(0)
+        expect(hir_enum_has_attribute(e, "closed")).to_equal(false)

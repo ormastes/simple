@@ -1,0 +1,59 @@
+# Reverse (incoming-edge) index over `EdgeRecord`s (S1-A).
+#
+# Pure `build_reverse_index(edges)` — the index is always DERIVED from the
+# edge list, never stored/mutated independently, so "rebuild == incremental"
+# holds by construction (there is no incremental path to diverge from
+# rebuild).
+#
+# COW-alias hazard (plan §3.5.2 / .claude/rules/code-style.md): never read a
+# collection into a local `val`/`var`, mutate it, and write it back — that
+# deep-copies the WHOLE dict per write. This module mutates only through the
+# single owning `ReverseIndexV1.by_target` field (`self.by_target[k].push(v)`
+# pattern via `_push_into`), and hoists `.keys()` calls above loops.
+
+use app.spipe.model.types.{EdgeRecord}
+
+class ReverseIndexV1:
+    var by_target: {text: [EdgeRecord]}
+
+    static fn empty() -> ReverseIndexV1:
+        ReverseIndexV1(by_target: {})
+
+    # Incoming edges whose `to_uid == target_uid`, source order preserved.
+    fn incoming(target_uid: text) -> [EdgeRecord]:
+        if self.by_target.has(target_uid):
+            self.by_target[target_uid]
+        else:
+            []
+
+    fn target_count() -> Int:
+        self.by_target.keys().len()
+
+    me _insert(edge: EdgeRecord):
+        if self.by_target.has(edge.to_uid):
+            self.by_target[edge.to_uid].push(edge)
+        else:
+            self.by_target[edge.to_uid] = [edge]
+
+# Builds a reverse index from a flat edge list. Pure: no filesystem, no
+# mutation of the input, deterministic w.r.t. input order (edges arrive at
+# each target in the order they appear in `edges`).
+fn build_reverse_index(edges: [EdgeRecord]) -> ReverseIndexV1:
+    var idx = ReverseIndexV1.empty()
+    for e in edges:
+        idx._insert(e)
+    idx
+
+# Rebuild-equals-incremental helper for specs: appending one edge and
+# rebuilding from scratch must equal incrementally inserting it into an
+# existing index. Compares only the observable shape (target -> edge-uid
+# list) rather than requiring deep struct equality support.
+fn reverse_index_shape(idx: ReverseIndexV1) -> {text: [text]}:
+    var shape: {text: [text]} = {}
+    val targets = idx.by_target.keys()
+    for t in targets:
+        var uids: [text] = []
+        for e in idx.by_target[t]:
+            uids.push(e.uid)
+        shape[t] = uids
+    shape

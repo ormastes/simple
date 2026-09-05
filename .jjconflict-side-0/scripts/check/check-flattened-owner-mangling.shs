@@ -1,0 +1,190 @@
+#!/bin/sh
+# Flattened-lane owner mangling: an imported `main` must stay reachable under an
+# owner-unique symbol, and must NEVER collide with the program entry `main`.
+#
+# Background. `pipeline::module_loader::strip_flattened_import_nodes` used to
+# DROP any imported function named `main`. `use m.{main as g}` then had no
+# definition to bind to, so the alias resolved to the ENTRY module's `main` and
+# recursed forever ("fatal runtime error: stack overflow"). The flattener now
+# renames the imported `main` to `flatten_owner_mangled_name(owner, "main")`,
+# mirroring the native-project lane's long-standing `raw_to_mangled`
+# module-prefix scheme, and HIR lowering recomputes the same symbol from the
+# import marker's `source_owner` field.
+# See doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md
+#
+# THIS CHECK IS A RESOLUTION CHECK, NOT A COMPILATION CHECK. The original defect
+# compiled perfectly and produced wrong code, so every case asserts on the VALUE
+# the program prints -- the value is only reachable from the correct function.
+#
+# Verdict is the last line of stdout:
+#   PASS -- <n> case(s) checked, ...     exit 0
+#   FAIL -- ...                          exit 1
+#   ERROR -- nothing was checked         exit 2
+
+set -u
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+[ -x "$SIMPLE_BIN" ] || SIMPLE_BIN="$(command -v simple 2>/dev/null || echo bin/simple)"
+case "$SIMPLE_BIN" in
+    /*) ;;
+    *)  SIMPLE_BIN="$(pwd)/$SIMPLE_BIN" ;;
+esac
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR -- nothing was checked (SIMPLE_BIN not executable: $SIMPLE_BIN)"
+    exit 2
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+checked=0
+failed=0
+
+# ---------------------------------------------------------------------------
+# Case 1 (NEGATIVE CONTROL): same-named function in a different module.
+#
+# Two `main`s exist: the entry's, and `target.spl`'s. The alias must reach
+# target's. `41 + argc` is chosen so the printed value identifies WHICH function
+# ran -- the entry `main` returns nothing and, if bound, recurses to a stack
+# overflow. This is the exact shape of src/os/kernel/arch/*/cstart.spl.
+# ---------------------------------------------------------------------------
+mkdir -p "$WORK/c1"
+cat > "$WORK/c1/target.spl" <<'EOF'
+pub fn main(argc: i32, argv: i64) -> i32:
+    return argc + 41
+EOF
+cat > "$WORK/c1/mid.spl" <<'EOF'
+use target.{main as baremetal_main}
+
+pub fn cstart_init(n: i32) -> i32:
+    return baremetal_main(n, 0)
+EOF
+cat > "$WORK/c1/entry.spl" <<'EOF'
+use mid.{cstart_init}
+
+fn main():
+    print("R:" + cstart_init(1).to_text())
+EOF
+
+# ---------------------------------------------------------------------------
+# Case 2: the entry `main` must NOT be displaced by the mangling. The imported
+# `main` is renamed; the entry keeps the bare `main` symbol and still runs.
+# A rename that captured the entry symbol would print nothing at all.
+# ---------------------------------------------------------------------------
+mkdir -p "$WORK/c2"
+cat > "$WORK/c2/target.spl" <<'EOF'
+pub fn main(argc: i32, argv: i64) -> i32:
+    return argc + 41
+EOF
+cat > "$WORK/c2/mid.spl" <<'EOF'
+use target.{main as baremetal_main}
+
+pub fn cstart_init(n: i32) -> i32:
+    return baremetal_main(n, 0)
+EOF
+cat > "$WORK/c2/entry.spl" <<'EOF'
+use mid.{cstart_init}
+
+fn main():
+    print("ENTRY")
+    print("R:" + cstart_init(2).to_text())
+EOF
+
+run_case() {
+    name="$1"; dir="$2"; want="$3"
+    checked=$((checked + 1))
+    # SIMPLE_JIT_STRICT=1 turns a silent interpreter fallback into a hard error,
+    # so a PASS cannot be earned by the interpreter lane (which was always
+    # correct here and would mask the codegen defect entirely).
+    out="$( cd "$dir" && SIMPLE_JIT_STRICT=1 timeout 180 "$SIMPLE_BIN" entry.spl 2>&1 )"
+    rc=$?
+    if [ "$rc" -ge 128 ]; then
+        # 134 = SIGABRT, which is exactly how the stack overflow surfaced.
+        echo "  FAIL  $name (signal/abort rc=$rc -- the wrong \`main\` was bound)"
+        failed=$((failed + 1))
+        return
+    fi
+    if printf '%s' "$out" | grep -q "$want"; then
+        echo "  ok    $name"
+    else
+        echo "  FAIL  $name (want '$want', rc=$rc)"
+        printf '%s\n' "$out" | sed 's/^/          | /' | tail -6
+        failed=$((failed + 1))
+    fi
+}
+
+echo "flattened-lane owner mangling check (SIMPLE_JIT_STRICT=1)"
+echo "binary: $SIMPLE_BIN"
+
+run_case "aliased_imported_main_resolves_to_target" "$WORK/c1" "R:42"
+run_case "entry_main_not_displaced"                 "$WORK/c2" "ENTRY"
+run_case "aliased_main_distinct_from_entry"         "$WORK/c2" "R:43"
+
+# ---------------------------------------------------------------------------
+# Case 4: the REAL import line, against the REAL module, that all six
+# src/os/kernel/arch/*/cstart.spl files share verbatim (`cstart.spl:5`). The six
+# files themselves cannot serve as the oracle: they abort earlier in HIR
+# lowering on an unrelated `MemoryRuntimeMapping.address_space_root` field-type
+# error, identically before and after this fix, so running them cannot
+# distinguish bound from unbound. Exercising their shared import line against
+# `os.runtime.baremetal.runtime_minimal` can, and does.
+#
+# `runtime_minimal.main` is `__simple_main() as i32`. Reaching it therefore
+# reports that `__simple_main` (the user entry hook, absent in this probe) is
+# not found -- a POSITIVE identification of that exact function body, not an
+# inference from the absence of an error. Binding the wrong `main` instead
+# recurses into the entry point and aborts.
+# ---------------------------------------------------------------------------
+#
+# The probe MUST live inside the repo and be invoked by a REPO-RELATIVE path.
+# `os.runtime.baremetal.runtime_minimal` only resolves from the project root, so
+# a copy in /tmp (or an absolute path) fails to import and reports the very same
+# "unresolved external symbol 'baremetal_main'" this check is looking for --
+# i.e. it would measure the harness and read as a product defect.
+if [ -f src/os/runtime/baremetal/runtime_minimal.spl ]; then
+    # A plain, dot-free directory name: a module path segment cannot begin with
+    # `.`, so a `mktemp`-style hidden name makes the import itself fail and the
+    # case reports a product defect that is not there.
+    PROBE_REL="flatten_mangle_probe_$$"
+    PROBE_DIR="$(pwd)/$PROBE_REL"
+    mkdir -p "$PROBE_DIR"
+    trap 'rm -rf "$WORK" "$PROBE_DIR"' EXIT
+    cat > "$PROBE_DIR/cstart_shape.spl" <<'EOF'
+use os.runtime.baremetal.runtime_minimal.{main as baremetal_main, __spl_exit}
+
+pub fn cstart_init(argc: i32, argv: u64) -> i32:
+    return baremetal_main(argc, argv)
+EOF
+    sed "s/@PROBE@/$PROBE_REL/" > "$PROBE_DIR/entry.spl" <<'EOF'
+use @PROBE@.cstart_shape.{cstart_init}
+
+fn main():
+    print("CSTART:" + cstart_init(0, 0).to_text())
+EOF
+    checked=$((checked + 1))
+    out="$( SIMPLE_JIT_STRICT=1 timeout 300 "$SIMPLE_BIN" "$PROBE_REL/entry.spl" 2>&1 )"
+    rc=$?
+    if [ "$rc" -ge 128 ]; then
+        echo "  FAIL  real_cstart_import_line (signal/abort rc=$rc -- the wrong \`main\` was bound)"
+        failed=$((failed + 1))
+    elif printf '%s' "$out" | grep -q "__simple_main"; then
+        echo "  ok    real_cstart_import_line"
+    else
+        echo "  FAIL  real_cstart_import_line (never reached runtime_minimal.main, rc=$rc)"
+        printf '%s\n' "$out" | sed 's/^/          | /' | tail -6
+        failed=$((failed + 1))
+    fi
+else
+    echo "  skip  real_cstart_import_line (not at repo root)"
+fi
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL -- $failed of $checked case(s) bound the wrong function"
+    exit 1
+fi
+echo "PASS -- $checked case(s) checked, aliased imported \`main\` resolves to its own module"
+exit 0
