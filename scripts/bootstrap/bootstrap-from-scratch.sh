@@ -452,6 +452,39 @@ if [ "${validate_bootstrap_receipt}" -eq 1 ]; then
   exit 0
 fi
 
+# Conflict-marker pre-flight. This script builds $PWD, not a commit, so a
+# parallel session mid-write in the shared working copy is read as source. On
+# 2026-09-05 a Stage-3 lane died 2 minutes in with "failed to parse
+# src/lib/nogc_sync_mut/io_runtime.spl at 64:1 ... found TripleLt" -- TripleLt
+# being `<<<`, a conflict marker -- while the file was clean in git, identical
+# to HEAD, and last committed 22 hours earlier. Its mtime was 51 seconds AFTER
+# the run started: another session held markers on disk for part of a minute.
+# Every conflict-marker guard in the repo is range-based on COMMITTED content
+# by deliberate design (see
+# doc/08_tracking/bug/conflict_markers_reported_at_origin_were_working_copy_only_2026-08-11.md),
+# so none of them can see this, and the wrapper had no pre-flight of its own.
+# The Rust side already refuses ("Rust inputs changed during full bootstrap");
+# this is the missing .spl equivalent.
+# Deliberately placed AFTER the --validate-bootstrap-receipt early exit so a
+# validation-only invocation never trips it, and BEFORE any stage starts.
+# A single line-initial marker is enough: unlike prose, no valid Simple source
+# begins a line with one, and a torn read often exposes only one side of the
+# pair. Costs ~0.2s over the tracked .spl set.
+# doc/08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md
+if git -C "${bootstrap_early_repo_root}" rev-parse --git-dir >/dev/null 2>&1; then
+  bootstrap_marker_hits=$(git -C "${bootstrap_early_repo_root}" grep -l -I \
+    -e '^<<<<<<<' -e '^>>>>>>>' -e '^%%%%%%%' -- 'src/*.spl' 2>/dev/null | head -5)
+  if [ -n "${bootstrap_marker_hits}" ]; then
+    echo "bootstrap-policy-error: working-copy-conflict-markers; refusing to build a torn tree" >&2
+    echo "${bootstrap_marker_hits}" | while IFS= read -r bootstrap_marker_file; do
+      [ -n "${bootstrap_marker_file}" ] && echo "  ${bootstrap_marker_file}" >&2
+    done
+    echo "  These are WORKING-COPY markers; git may well report the files clean by the" >&2
+    echo "  time you look. Re-run once the writing session has finished." >&2
+    exit 64
+  fi
+fi
+
 case "${progress_interval}" in
   ''|*[!0-9]*|0)
     echo "error: --progress-interval requires a positive integer" >&2
