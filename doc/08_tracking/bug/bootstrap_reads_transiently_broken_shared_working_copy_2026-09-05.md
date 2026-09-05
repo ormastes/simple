@@ -152,3 +152,69 @@ longer the stage runs.
   — why the marker guards are deliberately commit-scoped.
 - `stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md` — the run this
   aborted; that investigation is unaffected, only delayed.
+
+## UPDATE (2026-09-05, 15:11): a fourth contention mode — cross-session SIGTERM
+
+The snapshot worktree fixed the *source* races (Stage 2 and the admission both
+succeeded first try, after four consecutive failures in the shared tree). It
+cannot fix process-level contention, and that is what now blocks Stage 3.
+
+Five Stage-3 attempts died identically. `strace -f -e trace=kill,tgkill` on the
+worker names the sender outright:
+
+```
+1983604 15:11:49.192746 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER,
+                                     si_pid=1986862, si_uid=1000} ---
+1983604 15:11:52.454450 +++ killed by SIGTERM +++
+1983603 ... si_status=SIGTERM, si_utime=41723 /* 417.23 s */ ...
+1983602 15:11:54.790439 exit_group(-143)
+```
+
+`si_code=SI_USER` is an explicit `kill()` from another process, and **si_pid
+1986862 is not in the traced tree** (ours: 1983602 parent, 1983603 sh, 1983604
+worker; its own children are 1986877-1986884, allocated *after* the kill). So
+the worker is killed from outside — another session on this shared box. This
+host runs several concurrent agent sessions, at least one of which
+(`/tmp/claude-1000/-home-yoon-dev-simple/<other-session>/scratchpad/run_wt.sh`)
+is driving its own bootstrap out of `/home/yoon/dev/simple-bs`. No repo script
+carries a matching `pkill`, so the likely source is an ad-hoc `pkill -f` typed
+by another session — the same foot-gun that killed this session's own shell
+earlier today when a `pkill -f` pattern matched its own command line.
+
+### Corrections this trace forced, recorded because both were reported as fact
+
+1. **The death is at ~428 s, not 13.5 s.** The earlier figure came from reading
+   the last `[BOOTSTRAP-PHASE]` line, but `phase2:parse` emits no further phase
+   lines while it works, so that timestamp marks when parse *started*. Measured:
+   429 s / 428 s / 427 s across three runs, and `si_utime` confirms 417 s of CPU
+   in the worker — it was doing real work the whole time, not hung.
+2. **`_process_kill_group` is exonerated.** With `SIMPLE_PROC_DEBUG=1` actually
+   reaching the process (an earlier probe silently did not — the bootstrap
+   builds the stage3 child env from an explicit list and dropped the variable,
+   so its "NONE" result proved nothing), the line reads
+   `kill-group pgid=1980659 term_code=1`. `term_code=1` means `pkill` matched
+   nothing: the worker was already dead. It runs only on the failure path, so it
+   is cleanup, not cause.
+
+Also excluded by measurement, not argument: phase-isolated scheduling (identical
+death under `--strategy=adhoc`), parse/HIR shard children (`SIMPLE_FRONTEND_CACHE=0`
+⇒ both counts 0), the strategy qualifier (no `qualification.log`), a worker
+`--timeout` (absent from argv; `DEFAULT_TIMEOUT_MS` is 6 h), phase-verification
+budgets (1800/120/600 s), the wrapper's timeout and relay-error paths (zero
+`[TIMEOUT:` / `[ERROR:` markers), and OOM — RSS watched through the death point
+read 22.9 → 23.1 → 23.4 GB with **89 GB free**.
+
+### What this means for the Stage-3 SIGSEGV hunt
+
+The crash of interest is ~1 h 45 m into the run; no attempt has survived past
+7 minutes. The blocker is no longer a compiler defect or a source race but
+uncoordinated process management between sessions sharing one machine.
+
+Options, in order of cost:
+1. **Coordinate.** Ask the other session to stop broad `pkill -f`, or hold the
+   box for one 2-hour window. Cheapest and unblocks immediately.
+2. **Make the worker unmatchable.** A `pkill -f` matches on argv text; running
+   the worker via a copied binary under a neutral name in a private session
+   would dodge pattern kills, but it is a workaround that hides the coupling.
+3. **Isolate properly** — a container or a second UID — which is what a shared
+   build host actually wants, and the natural extension of the snapshot fix.
