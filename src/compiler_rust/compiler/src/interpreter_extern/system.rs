@@ -1185,15 +1185,6 @@ pub fn rt_process_spawn_guarded(args: &[Value]) -> Result<Value, CompileError> {
     process_spawn(args, true)
 }
 
-/// Wait for a spawned process to complete
-///
-/// Callable from Simple as: `rt_process_wait(pid, timeout_ms)`
-///
-/// # Arguments
-/// * `args` - Evaluated arguments [pid: Int, optional timeout_ms: Int]
-///
-/// # Returns
-/// * Int - exit code, -2 on timeout, or -1 on failure
 /// Exit status as the caller's `rt_process_wait` contract wants it: the code for
 /// a normal exit, `-(128 + signo)` for a signal death, `-1` only when neither is
 /// available. `ExitStatus::code()` returns `None` for a signal death, so the
@@ -1218,6 +1209,15 @@ fn wait_status_to_code(status: std::process::ExitStatus) -> i64 {
     -1
 }
 
+/// Wait for a spawned process to complete
+///
+/// Callable from Simple as: `rt_process_wait(pid, timeout_ms)`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments [pid: Int, optional timeout_ms: Int]
+///
+/// # Returns
+/// * Int - exit code, -2 on timeout, or -1 on failure
 pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_process_wait requires 1 argument (pid)"));

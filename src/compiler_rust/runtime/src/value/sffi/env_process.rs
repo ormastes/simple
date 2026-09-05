@@ -987,12 +987,6 @@ pub extern "C" fn rt_process_exists(pid: i64) -> bool {
     process_exists_os(pid)
 }
 
-/// Wait for a previously spawned async process to finish.
-/// If timeout_ms <= 0, waits indefinitely.
-/// If timeout_ms > 0, polls in a loop up to the timeout.
-/// Returns exit code, -2 on timeout, or -1 on error.
-/// Removes the child from the registry on success.
-#[no_mangle]
 /// Exit status as the caller's `rt_process_wait` contract wants it: the code for
 /// a normal exit, `-(128 + signo)` for a signal death, `-1` only when neither is
 /// available. `ExitStatus::code()` returns `None` for a signal death, so the
@@ -1017,6 +1011,12 @@ fn wait_status_to_code(status: std::process::ExitStatus) -> i64 {
     -1
 }
 
+/// Wait for a previously spawned async process to finish.
+/// If timeout_ms <= 0, waits indefinitely.
+/// If timeout_ms > 0, polls in a loop up to the timeout.
+/// Returns exit code, -2 on timeout, or -1 on error.
+/// Removes the child from the registry on success.
+#[no_mangle]
 pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
     if timeout_ms <= 0 {
         // Wait indefinitely
