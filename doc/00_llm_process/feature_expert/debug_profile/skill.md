@@ -245,3 +245,43 @@ boundary values — grep for the wrong pattern and cover each repeat);
 observed). Canonical wording: `.claude/agents/test.md` § "Every fix ships a
 reproduction spec AND similar-case specs"; SPipe process hook:
 `.claude/skills/spipe.md` § "Reproduce-first for bug-fix specs".
+
+## Host-verified debug ladder (2026-09-05)
+
+The canonical, command-by-command debugging order for this repo now lives at
+[`.claude/skills/lib/debug_ladder.md`](../../../../.claude/skills/lib/debug_ladder.md)
+(referenced from `.claude/agents/debug.md` and `.claude/agents/debug-analyst.md`).
+Every command in it was executed on this host or is explicitly marked BLOCKED
+with the reason — an aspirational debug guide is the failure mode it exists to
+prevent.
+
+Facts established while validating it against a real bug:
+
+- **`gdb` is absent on this darwin/arm64 host; `lldb` is at `/usr/bin/lldb`** and
+  is verified working against the seed binary. Do not write gdb recipes here.
+- **Pick the tier by symptom.** lldb is for a native crash. For an *interpreted
+  logic* bug (a wrong value) lldb tells you almost nothing — you are debugging
+  the interpreter, not the program. Use a probe `.spl` that prints real values
+  across the whole input domain. That is what actually found the defect below;
+  reading the source did not, because the source is correct for ASCII.
+- **Probe-script import gotcha:** `std.*` imports resolve anywhere, but `lib.*`
+  imports resolve relative to the **probe file's own directory**, not cwd. A probe
+  in `/tmp` silently cannot reach `lib.` modules.
+- **Specs DO run on a bootstrap-only host** via
+  `src/compiler_rust/target/bootstrap/simple run <spec.spl>`, which prints a
+  `SPEC FILE VERDICT` line and a meaningful exit code. `simple test <spec>` does
+  not exist on the seed. **Always read `executed=`** — `executed=0 failed=0` is a
+  vacuous run, not a pass.
+- **DAP / `simple debug` interpreter stepping remains BLOCKED** here: it needs the
+  full self-hosted CLI, which is not deployed. T32 is likewise not wired — no
+  `t32` server in `.mcp.json`, and the two scripts named in
+  `doc/07_guide/app/tools/cli.md:277-279` do not exist.
+
+Exercise outcome: walking the ladder on
+`doc/08_tracking/bug/wire_to_bytes_returns_empty_2026-07-28.md` confirmed that
+ticket FIXED, and the required generalization spec surfaced a **new** defect —
+byte values >= 128 corrupt on wire round-trip because the wire text goes through
+UTF-8-aware `text` concatenation. Filed at
+[`doc/08_tracking/bug/wire_to_bytes_high_byte_utf8_roundtrip_corruption_2026-09-05.md`](../../../08_tracking/bug/wire_to_bytes_high_byte_utf8_roundtrip_corruption_2026-09-05.md)
+with the reproduction spec GREEN and the generalization spec left RED, per
+`.claude/rules/testing.md`.
