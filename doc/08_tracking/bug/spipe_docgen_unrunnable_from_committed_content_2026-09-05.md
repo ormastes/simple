@@ -15,8 +15,8 @@ path, not only a developer convenience.
 
 ## Reproduction
 
-From a checkout of the committed tip (`67859c96792`), on an **untouched**
-pre-existing spec:
+From a checkout of `67859c96792` — `main`'s tip as of 2026-09-05 15:10, since
+advanced — on an **untouched** pre-existing spec:
 
 ```sh
 bin/simple spipe-docgen test/01_unit/app/sspec_maintain/cache_spec.spl \
@@ -85,6 +85,17 @@ to move.
   `OK <spec> (N lines)` and records a success that produced no manual. The
   error follows on a later line and the exit status is 1 — check the status,
   not the first line.
+
+## Verification scope
+
+Reproduced against `67859c96792` only. `main` has since moved (local
+`88c59bed70d`; remote `refs/heads/main` = `320e6d99e4b8b8540a65078f68ce8ffca15fd2b6`,
+not fetched locally). If the missing half lands in between, this record goes
+stale — re-run the reproduction above before acting on it.
+
+Note when checking the remote: `git ls-remote origin main` is ambiguous on this
+remote (592 heads; it returns `refs/heads/archive/2026-09-03/main` first). Ask
+for `refs/heads/main` explicitly.
 
 ## Related
 

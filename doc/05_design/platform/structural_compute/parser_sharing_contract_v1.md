@@ -1,7 +1,9 @@
 # Parser Sharing — Measured Audit and Next Shared Seam (contract v1)
 
 **Date:** 2026-09-05 · **Status:** audit complete; Seam 1 and Seam 3 landed in this worktree, Seam 2 proposed
-**Worktree:** `/home/yoon/dev/simple-parser-sharing` (detached `67859c96792`)
+**Worktree:** `/home/yoon/dev/simple-parser-sharing` — a LINKED git worktree
+(shared object store), detached at `67859c96792`, which was `main`'s tip at
+2026-09-05 15:10 and has since advanced
 **Audited state:** the `main` working copy at `/home/yoon/dev/simple` on
 2026-09-05, *including* Codex's 38 uncommitted modified files and its untracked
 `structural_adapter/`, `lexer_tape.spl`, `canonical_adapter.spl` work. The
