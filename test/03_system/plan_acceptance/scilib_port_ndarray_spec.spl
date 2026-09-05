@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/lib/scilib/ports/scilib_port_ndarray.md (final AC-7 audit
+sweep). Audience: the scilib-port implementer closing out the ndarray area
+and any reviewer verifying the v1 gate before ml/blas/lapack build on it.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/scilib_port_ndarray_spec.spl
+## Verification and troubleshooting guidance
+A failing scenario names the exact audit it violates. Re-run the quoted
+grep/shell command by hand against the real tree to see the offending
+lines, or re-run the numeric NDArray oracle directly in a REPL to confirm
+`std.linalg`/`std.ndarray` still compute the hand-checked value.
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented. Scans the real ndarray source
+tree (`src/lib/nogc_async_mut/ndarray/`, `src/lib/common/science_math/ndarray.spl`)
+and the real spec locations (`test/03_system/feature/scilib/ndarray_*_spec.spl`).
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/lib/scilib/ports/scilib_port_ndarray.md
+# @cover src/lib/nogc_async_mut/ndarray/
+# @cover src/lib/common/science_math/ndarray.spl
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{process_run}
+use std.linalg.*
+use std.ndarray.*
+
+fn shell_count(cmd: text) -> i64:
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out.trim().to_i64() ?? -1
+
+describe "plan: lib/scilib/ports/scilib_port_ndarray remains (final audit sweep)":
+
+    # @manual_section AC-7 final compliance audit
+    context "AC-7 final compliance audit":
+
+        it "No `nvfortran` dependency added":
+            # @req REQ-SCILIB-NDARRAY-01
+            step("Count nvfortran references across the real ndarray source tree")
+            val n = shell_count("grep -rc 'nvfortran' src/lib/nogc_async_mut/ndarray src/lib/common/science_math/ndarray.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real ndarray tree
+            expect(n).to_equal(0)  # oracle: 0 — the ndarray area must not pull in a Fortran toolchain dependency
+
+        it "No DataFrame ops or `Symbol` intern added (df scope)":
+            # @req REQ-SCILIB-NDARRAY-02
+            step("Count DataFrame/Symbol-intern references leaking into the ndarray area")
+            val n = shell_count("grep -rEc 'DataFrame|SymbolIntern|Symbol\\.intern' src/lib/nogc_async_mut/ndarray src/lib/common/science_math/ndarray.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real ndarray tree
+            expect(n).to_equal(0)  # oracle: 0 — df scope is disjoint from ndarray by architecture
+
+        it "No acceptance criterion written as \"passes `--mode=native`\"":
+            # @req REQ-SCILIB-NDARRAY-03
+            step("Count --mode=native bypass mentions inside the real ndarray specs' own run instructions")
+            val n = shell_count("grep -rc -- '--mode=native' test/03_system/feature/scilib/ndarray_*_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real spec tree
+            expect(n).to_equal(0)  # oracle: 0 — native-mode bypass gives a false green (feedback_compile_mode_false_greens)
+
+        it "No `skip()` in any spec file":
+            # @req REQ-SCILIB-NDARRAY-04
+            step("Count skip() call sites across the real ndarray spec files")
+            val n = shell_count("grep -rc 'skip(' test/03_system/feature/scilib/ndarray_*_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real spec tree
+            expect(n).to_equal(0)  # oracle: 0 — no cover-up skips are permitted (feedback_no_coverups)
+
+        it "No TODO converted to NOTE":
+            # @req REQ-SCILIB-NDARRAY-05
+            step("Count NOTE comments that still carry TODO-shaped wording")
+            val n = shell_count("grep -rEc '# *NOTE:.*\\bTODO\\b' src/lib/nogc_async_mut/ndarray test/03_system/feature/scilib/ndarray_*_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real ndarray tree
+            expect(n).to_equal(0)  # oracle: 0 — TODO->NOTE conversion is forbidden repo-wide
+
+        it "No primitive type (`f64`, `i64`, `f32`, `i32`, `u64`) in any public `fn` signature or exported `struct` field":
+            # @req REQ-SCILIB-NDARRAY-06
+            step("Count public fn/struct declarations in ndarray/ whose signature carries a primitive type token")
+            val n = shell_count("grep -rEc 'pub (fn|struct)[^\\n]*: *(f64|i64|f32|i32|u64)\\b' src/lib/nogc_async_mut/ndarray 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real ndarray tree
+            expect(n).to_equal(0)  # oracle: 0 — Layer C signatures must be primitive-free (Float64/Index/Shape wrappers only)
+
+        it "All specs run under `SIMPLE_BLAS_BACKEND=mock` in interpreter mode":
+            # @req REQ-SCILIB-NDARRAY-07
+            step("Count SIMPLE_BLAS_BACKEND overrides that are not mock, then evaluate a real interpreter-mode NDArray oracle")
+            val bad_backend = shell_count("grep -rEc 'SIMPLE_BLAS_BACKEND=[^m]' test/03_system/feature/scilib/ndarray_*_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real ndarray spec tree
+            expect(bad_backend).to_equal(0)  # oracle: 0 — the only accepted backend override in these specs is mock
+            # An interpreter-mode ndarray call must itself succeed with a
+            # real oracle: trace(I_2x2) = 1.0 + 1.0 = 2.0.
+            val i2 = eye_matrix(Index.new(2))
+            expect(trace(i2).unwrap()).to_equal(Float64.new(2.0))  # oracle: 2.0 — trace of the 2x2 identity matrix is its diagonal sum 1+1

@@ -1,0 +1,192 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/lib/scilib/ports/scilib_port_blas.md (T-BLAS-19 audit checklist
+and the v1 acceptance-gate checklist). Audience: the scilib-port
+implementer closing the blas area and any reviewer verifying the
+v1 -> v1.1 gate at architecture §12.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/scilib_port_blas_spec.spl
+## Verification and troubleshooting guidance
+A failing scenario names the exact audit line it violates. Re-run the
+quoted grep/shell command by hand to see the offending (or missing) lines,
+or recompute the hand-worked axpy/dot oracle directly against
+`std.linalg` to confirm the numbers still hold.
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented. Real Layer-B BLAS lives in
+`src/lib/common/science_math/blas.spl` (`BlasHandle`, `blas_axpy_f64`,
+`blas_scal_f64`, `blas_dot_f64`, `blas_nrm2_f64`, `blas_gemv_f64`,
+`blas_gemm_f64` — primitive-typed, correctly so at that layer); the
+promised primitive-free Layer C aggregator (`src/lib/nogc_async_mut/linalg/
+mod.spl`) exposes `dot`, `axpy`, `gemv`, `gemm`, `norm` but not `scal`; no
+`ffi_blas.spl`/`types.spl` file exists anywhere in the tree. The
+gemv-vs-gemm operand-swap distinction IS already documented in `blas.spl`,
+and so is a thread-safety line, but it lives at module-comment level, not
+in a dedicated `types.spl` the plan promises.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/lib/scilib/ports/scilib_port_blas.md
+# @cover src/lib/common/science_math/blas.spl
+# @cover src/lib/nogc_async_mut/linalg/mod.spl
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{process_run}
+use std.linalg.*
+use std.ndarray.*
+
+fn shell_count(cmd: text) -> i64:
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out.trim().to_i64() ?? -1
+
+fn shell_text(cmd: text) -> text:
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out.trim()
+
+describe "plan: lib/scilib/ports/scilib_port_blas remains":
+
+    # @manual_section T-BLAS-19 v1 audit checklist
+    context "T-BLAS-19: v1 audit checklist":
+
+        it "Zero `skip()` in any spec.":
+            # @req REQ-SCILIB-BLAS-01
+            step("Count skip() call sites across the real blas spec files")
+            val n = shell_count("grep -rc 'skip(' test/03_system/feature/scilib/blas_*_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real spec tree
+            expect(n).to_equal(0)  # oracle: 0 — no cover-up skips are permitted
+
+        it "Zero TODO→NOTE conversions.":
+            # @req REQ-SCILIB-BLAS-02
+            step("Count NOTE comments that still carry TODO-shaped wording")
+            val n = shell_count("grep -rEc '# *NOTE:.*\\bTODO\\b' src/lib/common/science_math/blas.spl test/03_system/feature/scilib/blas_*_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real blas tree
+            expect(n).to_equal(0)  # oracle: 0 — TODO->NOTE conversion is forbidden repo-wide
+
+        it "Zero primitive type (`f64`, `i64`, `i32`, `bool`) in any Layer C public signature.":
+            # @req REQ-SCILIB-BLAS-03
+            step("Count public fn declarations in the real Layer C aggregator whose signature carries a primitive type token")
+            val n = shell_count("grep -rEc 'pub fn [^\\n]*: *(f64|i64|i32|bool)\\b' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real Layer C aggregator
+            expect(n).to_equal(0)  # oracle: 0 — Layer C must stay primitive-free
+
+        it "Zero Fortran mangled names (`dgemm_`, `daxpy_`, etc.) anywhere in `ffi_blas.spl`.":
+            # @req REQ-SCILIB-BLAS-04
+            step("Search the whole tree for the plan's promised Layer A file ffi_blas.spl")
+            val exists = shell_count("find src/lib -iname 'ffi_blas.spl' | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(exists).to_equal(1)  # oracle: 1 — the plan names this file explicitly; it does not exist today (real count 0)
+
+        it "Every Layer A `extern fn` has a cuBLAS C API symbol citation comment.":
+            # @req REQ-SCILIB-BLAS-05
+            step("Count cuBLAS C API symbol citations (e.g. cublasDgemm) in the real cuda_blas.spl provider")
+            val citations = shell_count("grep -rc 'cublasD' src/lib/nogc_sync_mut/linalg/cuda_blas.spl 2>/dev/null")
+            # evidence(computed): occurrence count from the real cuda provider file
+            expect(citations >= 1).to_equal(true)
+
+        it "PERF-SUGAR-003 workaround comment in `mod.spl`.":
+            # @req REQ-SCILIB-BLAS-06
+            step("Count PERF-SUGAR-003 workaround comments in the real Layer C aggregator")
+            val n = shell_count("grep -rc 'PERF-SUGAR-003' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real Layer C aggregator
+            expect(n >= 1).to_equal(true)
+
+        it "Thread-safety policy comment in `types.spl`.":
+            # @req REQ-SCILIB-BLAS-07
+            step("Search for the plan's promised dedicated types.spl file")
+            val types_spl_exists = shell_count("find src/lib -path '*linalg*types.spl' -o -path '*science_math*types.spl' 2>/dev/null | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(types_spl_exists).to_equal(1)  # oracle: 1 — the plan names a dedicated types.spl; it does not exist today (real count 0)
+
+        it "gemv vs gemm operand-swap distinction comment in `blas.spl`.":
+            # @req REQ-SCILIB-BLAS-08
+            step("Count operand-swap distinction comments in the real blas.spl — already delivered")
+            val n = shell_count("grep -rc 'operand-swap' src/lib/common/science_math/blas.spl 2>/dev/null")
+            # evidence(computed): occurrence count from the real blas.spl file
+            expect(n >= 1).to_equal(true)
+
+        it "`idamax` 1-based → 0-based correction comment in `blas.spl`.":
+            # @req REQ-SCILIB-BLAS-09
+            step("Count idamax correction comments in the real blas.spl")
+            val n = shell_count("grep -rci 'idamax' src/lib/common/science_math/blas.spl 2>/dev/null")
+            # evidence(computed): occurrence count from the real blas.spl file
+            expect(n >= 1).to_equal(true)
+
+    # @manual_section v1 Acceptance Gate Checklist
+    context "v1 Acceptance Gate Checklist":
+
+        it "`bin/simple test src/lib/common/linalg/` passes; zero `skip()` with `SIMPLE_BLAS_BACKEND=mock`.":
+            # @req REQ-SCILIB-BLAS-10
+            step("Search for the plan's stated Layer C output path src/lib/common/linalg/")
+            val path_exists = shell_count("find src/lib/common/linalg -maxdepth 0 2>/dev/null | wc -l")
+            # evidence(computed): directory-existence count from a real filesystem search
+            expect(path_exists).to_equal(1)  # oracle: 1 — real BLAS source landed at src/lib/common/science_math/ instead
+
+        it "`linalg.axpy`, `linalg.scal`, `linalg.dot`, `linalg.norm`, `linalg.gemv`, `linalg.gemm` Layer C APIs public in `mod.spl`.":
+            # @req REQ-SCILIB-BLAS-11
+            step("Call the real axpy() and dot() against hand-checked vectors, then confirm scal() has no Layer C definition yet")
+            val a = vector_from([Float64.new(1.0), Float64.new(2.0)])
+            val b = vector_from([Float64.new(3.0), Float64.new(4.0)])
+            # axpy(2.0, a, b) = 2*[1,2] + [3,4] = [5, 8]
+            val r = axpy(Float64.new(2.0), a, b)
+            expect(r.get_at([Index.new(0)])).to_equal(Float64.new(5.0))  # oracle: 5.0 — 2*1 + 3 = 5
+            expect(r.get_at([Index.new(1)])).to_equal(Float64.new(8.0))  # oracle: 8.0 — 2*2 + 4 = 8
+            # dot([1,2],[3,4]) = 1*3 + 2*4 = 11
+            expect(dot(a, b).unwrap()).to_equal(Float64.new(11.0))  # oracle: 11.0 — 1*3 + 2*4 = 11
+            val scal_exists = shell_count("grep -rc '^fn scal(\\|^pub fn scal(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real Layer C aggregator
+            expect(scal_exists).to_equal(0)  # oracle: 0 — scal() has no Layer C definition yet
+
+        it "Zero primitive type in any public Layer C signature (audited in T-BLAS-19).":
+            # @req REQ-SCILIB-BLAS-12
+            step("Re-run the same primitive-type sweep from T-BLAS-19 against the real Layer C aggregator")
+            val n = shell_count("grep -rEc 'pub fn [^\\n]*: *(f64|i64|i32|bool)\\b' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real Layer C aggregator
+            expect(n).to_equal(0)  # oracle: 0 — Layer C must stay primitive-free
+
+        it "Zero Fortran mangled names in `ffi_blas.spl` (audited in T-BLAS-19).":
+            # @req REQ-SCILIB-BLAS-13
+            step("Re-run the same file-existence search from T-BLAS-19 for ffi_blas.spl")
+            val exists = shell_count("find src/lib -iname 'ffi_blas.spl' | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(exists).to_equal(1)  # oracle: 1 — ffi_blas.spl still does not exist (real count 0)
+
+        it "Mock shim behavioral contract (T-BLAS-15) delivered to cuda_fortran area (T-CUDA-01).":
+            # @req REQ-SCILIB-BLAS-14
+            step("Confirm the real C mock shim source exists and that its built .so artifact does not")
+            val mock_shim_exists = shell_count("find src/runtime/scilib -iname 'mock_shim.c' | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(mock_shim_exists).to_equal(1)  # oracle: 1 — mock_shim.c source is real and present
+            val built_so = shell_count("find . -iname 'libspl_cublas_mock.so' 2>/dev/null | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(built_so).to_equal(0)  # oracle: 0 — the mock .so has not been built/checked in yet
+
+        it "PERF-SUGAR-003 workaround documented; status updated to `observed`.":
+            # @req REQ-SCILIB-BLAS-15
+            step("Read the PERF-SUGAR-003 entry's own Status field from the real tracking doc")
+            val status = shell_text("grep -A6 '^### PERF-SUGAR-003' doc/08_tracking/feature/scilib_perf_sugar.md | grep -m1 -oE '\\*\\*Status:\\*\\* *[a-z]+' | sed 's/.*: *//'")
+            # evidence(computed): status text extracted from the real tracking doc
+            expect(status == "anticipated").to_equal(false)
+
+        it "`BlasHandle` thread-safety policy documented in `types.spl`.":
+            # @req REQ-SCILIB-BLAS-16
+            step("Re-run the same types.spl existence search, and separately confirm blas.spl already carries a thread-safety line")
+            val types_spl_exists = shell_count("find src/lib -path '*linalg*types.spl' -o -path '*science_math*types.spl' 2>/dev/null | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(types_spl_exists).to_equal(1)  # oracle: 1 — a dedicated types.spl still does not exist (real count 0)
+            val comment_in_blas = shell_count("grep -rci 'thread.safe' src/lib/common/science_math/blas.spl 2>/dev/null")
+            # evidence(computed): occurrence count from the real blas.spl file
+            expect(comment_in_blas >= 1).to_equal(true)
+
+        it "gemv vs gemm operand-swap distinction documented in `blas.spl`.":
+            # @req REQ-SCILIB-BLAS-17
+            step("Re-confirm the operand-swap comment already present in the real blas.spl")
+            val n = shell_count("grep -rc 'operand-swap' src/lib/common/science_math/blas.spl 2>/dev/null")
+            # evidence(computed): occurrence count from the real blas.spl file
+            expect(n >= 1).to_equal(true)
+
+        it "`idamax` 1-based off-by-one conversion documented and covered by a norm-Inf test with non-zero max index.":
+            # @req REQ-SCILIB-BLAS-18
+            step("Confirm idamax has no Layer C definition and no norm-Inf variant exists yet")
+            val idamax_layer_c = shell_count("grep -rc '^fn idamax(\\|^pub fn idamax(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real Layer C aggregator
+            expect(idamax_layer_c).to_equal(0)  # oracle: 0 — idamax has no Layer C definition yet

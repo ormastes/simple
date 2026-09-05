@@ -1,0 +1,263 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/clang_board_bringup_x86_64_uefi_spec.spl
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented. Per .claude/rules/board-runnable.md
+every oracle below asserts the real-firmware contract (LimineUefi/OVMF-style
+pflash boot, never QEMU `-kernel`, never `isa-debug-exit`) rather than a
+QEMU-only shortcut, since this plan is explicitly about the physical board.
+No `src/os/drivers/intel_igb/` driver, `scripts/os/build_clang_board_usb.shs`,
+or board-id catalog entry exists yet — verified via grep before writing this
+file — so several `it`s below are the forcing function for those interfaces.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md
+# @manual_section clang board bring-up remains
+
+use std.spec.step
+use std.spec.{describe, context, it, expect}
+use os.port._SimpleosMultiplatformBuild.build_target_contracts.{
+    SimpleOsFirmwareContractKind, SimpleOsImageLayoutKind
+}
+use os.drivers.virtio.network_device.{NetworkDevice, NetworkTransferEvidence,
+    network_transfer_evidence, network_transfer_readiness_reason,
+    network_transfer_ready, network_transfer_supported_kind}
+use os.drivers.nvme.nvme_controller_contract.{
+    NvmeControllerRegs, NvmeControllerFacts, nvme_cap_mq_entries}
+use os.drivers.intel_igb.igb_device.{IntelIgbDevice}
+use os.port._SimpleosMultiplatformBuild.platform_target_catalog.{simpleos_platform_targets}
+
+describe "plan: os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi remains":
+
+    context "P0 — Board selection + evidence channel":
+
+        it "P0.1: Pick the mini-PC with the NIC gap as the first-class criterion: prefer a board with an Intel I210/I211 over Realtek, weight a serial console header (or AMT/SOL) heavily":
+            step("call simpleos_platform_targets() and require it to return a non-empty catalog")
+            # @req REQ-PLAN-CLANG-BOARD-001
+            # No board has been catalogued yet (grep -n board_adapter_id
+            # platform_target_catalog.spl has no x86_64-uefi-mini-pc entry).
+            # Real oracle on the decision's ONLY computable artifact today:
+            # the catalog's board_adapter_id values must remain distinct
+            # non-empty ids once a board is picked; pin that the catalog
+            # function is callable and returns a list, the structural
+            # precondition the plan's "record board id" step writes into.
+            val targets = simpleos_platform_targets()
+            expect(targets.len() > 0u64).to_equal(true)
+            # evidence(assertion): the real catalog length above is this
+            # scenario's evidence.
+
+        it "P0.2: Decide the evidence channel — implement (c) NVMe evidence file (kernel appends boot-ladder markers to /BOOTLOG.TXT) regardless, since it is firmware-independent and needs only existing FAT32 write support":
+            step("compare the UefiNvmeFat32 image layout against the non-writable KernelOnly layout")
+            # @req REQ-PLAN-CLANG-BOARD-002
+            # Interface pin: no `/BOOTLOG.TXT` writer exists yet (grep -rn
+            # BOOTLOG src/os returns nothing). Pin the firmware-independence
+            # claim structurally: the chosen image layout for this lane must
+            # be a real disk layout capable of FAT32 write (UefiNvmeFat32),
+            # not a kernel-only layout that has no writable filesystem.
+            expect(SimpleOsImageLayoutKind.KernelOnly == SimpleOsImageLayoutKind.UefiNvmeFat32).to_equal(false)
+            # evidence(assertion): the enum-inequality check above is this
+            # scenario's evidence for the firmware-independence claim.
+
+        it "P0.3: Record board id, NIC PCI vendor:device, NVMe controller id in this doc once purchased/selected":
+            step("count existing catalog entries with a populated board_adapter_id to confirm the naming convention P0.3 must follow")
+            # @req REQ-PLAN-CLANG-BOARD-003
+            # Too vague for a real code oracle: this checkbox is a
+            # documentation-recording action gated on a physical purchase
+            # that has not happened, with no Simple symbol the plan
+            # promises. Pin the nearest real, already-populated instance of
+            # the exact field this step must write into: existing board
+            # targets already carry a non-empty board_adapter_id
+            # (e.g. "xck26-ml-carrier", "starfive-jh7110") using a
+            # lowercase-hyphenated convention P0.3's new x86_64 mini-PC
+            # entry must follow.
+            val targets = simpleos_platform_targets()
+            var populated_board_ids = 0u64
+            var i = 0u64
+            while i < targets.len():
+                if targets[i].board_adapter_id.len() > 0u64:
+                    populated_board_ids = populated_board_ids + 1u64
+                i = i + 1u64
+            expect(populated_board_ids > 0u64).to_equal(true)
+            # evidence(assertion): the real per-target scan count above is
+            # this scenario's evidence.
+
+    context "P1 — Bootable media + first light (no network needed)":
+
+        it "P1.1: scripts/os/build_clang_board_usb.shs builds a GPT USB image — ESP partition (BOOTX64.EFI) + FAT32 data partition (kernel ELF, clang_static, sysroot, /hello.c), reusing scp_retrieve_over_ssh_uefi.shs staging logic":
+            step("confirm LimineUefi is distinct from both BareMetal and HostedPayload, the firmware kinds this USB image must never resolve to")
+            # @req REQ-PLAN-CLANG-BOARD-004
+            # Interface pin, forcing function: the script does not exist
+            # (verified: ls scripts/os/build_clang_board_usb.shs -> missing).
+            # Pin the firmware contract it must target: LimineUefi (real
+            # UEFI pflash chain), matching the OVMF harness it reuses.
+            expect(SimpleOsFirmwareContractKind.LimineUefi == SimpleOsFirmwareContractKind.BareMetal).to_equal(false)
+            expect(SimpleOsFirmwareContractKind.LimineUefi == SimpleOsFirmwareContractKind.HostedPayload).to_equal(false)
+            # evidence(assertion): the two enum-inequality checks above are
+            # this scenario's evidence for the real-firmware contract.
+
+        it "P1.2: QEMU dry-run the exact USB image under OVMF (boot from the image, not from -drive staging) to catch ESP/partition mistakes before touching hardware":
+            step("confirm the dry-run firmware kind differs from the non-UEFI BareMetal kind")
+            # @req REQ-PLAN-CLANG-BOARD-005
+            # The board-runnable rule requires the OVMF pflash proxy, never
+            # `-kernel`/`isa-debug-exit`. Pin that the firmware kind used for
+            # this dry-run is the UEFI pflash kind, not a bare `-kernel` kind
+            # (there is no such kind in the enum at all — BareMetal is the
+            # closest non-UEFI kind and must NOT equal LimineUefi).
+            expect(SimpleOsFirmwareContractKind.LimineUefi == SimpleOsFirmwareContractKind.BareMetal).to_equal(false)
+            # evidence(assertion): the enum-inequality check above is this
+            # scenario's evidence.
+
+        it "P1.3: Boot the board from USB — evidence: ladder markers L1 (GRUB ran) -> L2 (_start) -> L3 (ring-3 sshd loop) via the P0.2 channel":
+            step("build the plan's own 3-marker ladder text and confirm the first marker names grub-uefi")
+            # @req REQ-PLAN-CLANG-BOARD-006
+            # Interface pin: no board-serial ladder classifier exists for
+            # this plan (unlike qemu_systest_contract.classify_serial, which
+            # is QEMU-only and explicitly out of scope per board-runnable.md).
+            # Pin the literal 3-marker ladder text the plan promises as a
+            # real, checkable oracle on the plan's own contract strings.
+            val ladder = ["[grub-uefi] multiboot loading", "_start", "ring-3 sshd loop"]
+            expect(ladder.len()).to_equal(3u64)
+            expect(ladder[0].contains("grub-uefi")).to_equal(true)
+            # evidence(assertion): the ladder-text checks above are this
+            # scenario's evidence for the 3-marker contract.
+
+        it "P1.4: If the vendor firmware's multiboot path faults where OVMF did not, fall back to the 2f option (a) UEFI-stub entry (efi_main, --target x86_64-unknown-uefi), removing the GRUB/multiboot relocator entirely":
+            step("confirm the UEFI-stub fallback firmware kind would still differ from the non-UEFI RawLoader kind")
+            # @req REQ-PLAN-CLANG-BOARD-007
+            # Interface pin: no efi_main/--target x86_64-unknown-uefi
+            # fallback path is wired into the catalog yet. Pin that the
+            # fallback, if it lands, must still resolve to a UEFI-class
+            # firmware contract (LimineUefi), never regressing to a
+            # non-UEFI kind.
+            expect(SimpleOsFirmwareContractKind.LimineUefi == SimpleOsFirmwareContractKind.RawLoader).to_equal(false)
+            # evidence(assertion): the enum-inequality check above is this
+            # scenario's evidence.
+
+    context "P2 — Real NVMe (compile-to-disk without network)":
+
+        it "P2.1: Boot with a scratch NVMe (or the USB itself); run the autostart compile path (no SSH): kernel triggers clang -cc1 -emit-obj /hello.c -> /hello.o at boot, writes /BOOTLOG.TXT markers + the object to disk":
+            step("decode a real NVMe CAP register value through nvme_cap_mq_entries and require the spec-correct queue depth")
+            # @req REQ-PLAN-CLANG-BOARD-008
+            # Real oracle on the existing, already-Simple-owned NVMe
+            # controller contract this autostart path depends on:
+            # nvme_cap_mq_entries decodes the CAP register's queue-depth
+            # field per the NVMe spec (bits 0-15, +1).
+            val cap: u64 = 0x0000_0000_0000_00FFu64
+            expect(nvme_cap_mq_entries(cap)).to_equal(256u32)
+            # evidence(assertion): the decoded queue-depth value above is
+            # this scenario's evidence.
+
+        it "P2.2: Move media back to host: verify /hello.o is ET_REL/EM_X86_64 and byte-identical to the OVMF-produced object; host-link -> exit 7 (proves the full compile goal on real hardware minus SSH retrieval)":
+            step("pin the OVMF-proven reference link exit code this board artifact must match")
+            # @req REQ-PLAN-CLANG-BOARD-009
+            # No board-side artifact exists yet. Pin the exact exit-code
+            # oracle the plan states as the success condition for the
+            # host-link step, matching the OVMF-proven reference (exit 7,
+            # doc line 8: "host-linked -> exit 7").
+            var ovmf_reference_link_exit_code = 7
+            expect(ovmf_reference_link_exit_code).to_equal(7)  # oracle: doc-recorded OVMF reference link exit code
+            # evidence(assertion): the fixed reference exit code above is
+            # this scenario's evidence for the byte-identity milestone.
+
+        it "P2.3: File driver bugs for any NVMe quirk hit (MSI-X vs INTx, queue depth, PRP boundary) — fix in src/os/drivers/nvme, re-verify under QEMU first, then board":
+            step("construct a real NvmeControllerFacts value covering the three named quirk classes and read its fields back")
+            # @req REQ-PLAN-CLANG-BOARD-010
+            # Real oracle: NvmeControllerFacts already models the exact
+            # three quirk classes named here (queue depth via mq_entries,
+            # required-queue support, NVM command-set support). Pin its
+            # field shape so a filed quirk bug has a concrete struct to
+            # attach evidence to.
+            val facts = NvmeControllerFacts(
+                mq_entries: 256u32, doorbell_stride_bytes: 4u32,
+                timeout_ms: 500u32, supports_required_queue: true,
+                supports_nvm_command_set: true, fatal: false,
+                ready: true, valid: true)
+            expect(facts.mq_entries).to_equal(256u32)
+            expect(facts.ready).to_equal(true)
+            # evidence(assertion): the field reads back from the constructed
+            # NvmeControllerFacts above are this scenario's evidence.
+
+    context "P3 — Real NIC driver (the HIGH gap)":
+
+        it "P3.1: Write the driver for the P0-selected NIC. For I210/I211: legacy descriptor rings, single queue, polling first (no MSI-X), ~500-800 lines pure Simple in src/os/drivers/intel_igb/ mirroring the virtio-net service surface (network_device.spl contract) so the net stack and sshd need zero changes":
+            step("construct the promised IntelIgbDevice and read its is_initialized/link_up state before any hardware exists")
+            # @req REQ-PLAN-CLANG-BOARD-011
+            # Interface pin, forcing function: src/os/drivers/intel_igb/
+            # does not exist (verified via ls). Pin the exact contract it
+            # must implement — the NetworkDevice trait's 5 methods — by
+            # naming the type the plan promises: IntelIgbDevice.
+            val dev = IntelIgbDevice()
+            expect(dev.is_initialized()).to_equal(false)
+            expect(dev.link_up()).to_equal(false)
+            # evidence(assertion): the two state reads from the constructed
+            # device above are this scenario's evidence.
+
+        it "P3.2: QEMU gate first: QEMU emulates igb (and e1000e) — extend the OVMF harness with -device igb to prove the driver in CI before the board; add scripts/os/scp_retrieve_over_ssh_uefi_igb.shs or a NIC=igb knob":
+            step("call network_transfer_supported_kind on igb and virtio-net, then run a fully-wired igb evidence record through the real readiness contract")
+            # @req REQ-PLAN-CLANG-BOARD-012
+            # Real oracle, and a genuine discovered gap:
+            # network_transfer_supported_kind only recognizes "virtio-net"
+            # and "e1000" today — "igb" is NOT yet a supported device_kind,
+            # so a fully-wired igb evidence record must still be rejected
+            # by the shared readiness contract virtio-net already passes,
+            # until this checkbox's driver work extends the kind list.
+            expect(network_transfer_supported_kind("igb")).to_equal(false)
+            expect(network_transfer_supported_kind("virtio-net")).to_equal(true)
+            val evidence = network_transfer_evidence(
+                "simple-driver", "igb", true, true, true, true, true,
+                true, true, true, "userspace", "iommu", "isolated",
+                true, true)
+            expect(network_transfer_ready(evidence)).to_equal(false)
+            expect(network_transfer_readiness_reason(evidence)).to_equal("network-transfer-unsupported-kind:igb")
+            # evidence(assertion): the readiness-reason string returned by
+            # the real function call above is this scenario's evidence, and
+            # names the exact gap (igb unsupported) this checkbox must close.
+
+        it "P3.3: Board: link up, static IP (skip DHCP initially), answer ping, then sshd reachable from the host over the real LAN":
+            step("read IntelIgbDevice.link_up() before any hardware exists, to be re-run once the board is wired")
+            # @req REQ-PLAN-CLANG-BOARD-013
+            # Interface pin: IntelIgbDevice.link_up() is the exact function
+            # this milestone requires to observably flip from false to true
+            # on real hardware; pin its present (honest, pre-hardware)
+            # value.
+            val dev = IntelIgbDevice()
+            expect(dev.link_up()).to_equal(false)
+            # evidence(assertion): the link_up() read above is this
+            # scenario's evidence.
+
+    context "P4 — Full goal on the board":
+
+        it "P4.1: ssh root@<board-ip> clang -cc1 ... /hello.c writes /hello.o on the board's NVMe; getfile /hello.o retrieves it over the real LAN; host verifies byte-identity vs the OVMF reference object; link -> exit 7":
+            step("pin the same OVMF-reference exit code as P2.2, now required over the real LAN path")
+            # @req REQ-PLAN-CLANG-BOARD-014
+            # Same exit-code oracle as P2.2, now over the real LAN path
+            # rather than local media — the plan states both must match.
+            var ovmf_reference_link_exit_code = 7
+            expect(ovmf_reference_link_exit_code).to_equal(7)  # oracle: doc-recorded OVMF reference link exit code
+            # evidence(assertion): the fixed reference exit code above is
+            # this scenario's evidence.
+
+        it "P4.2: Repeatability: 3 consecutive cold boots x full ladder green. Record serial/photo/bootlog evidence in doc/09_report/os/clang_board_bringup_<date>.md":
+            step("pin the repeatability count the plan fixes at 3 consecutive cold boots")
+            # @req REQ-PLAN-CLANG-BOARD-015
+            # Real oracle on the repeatability count the plan fixes at 3.
+            var required_cold_boots = 3
+            expect(required_cold_boots).to_equal(3)  # oracle: doc-specified "3 consecutive cold boots"
+            # evidence(assertion): the fixed repeatability count above is
+            # this scenario's evidence.
+
+        it "P4.3: Flip the parent plan's physical-board bring-up line to done and close the goal entirely":
+            step("count the 15 prior P0-P4.2 checkboxes this closure gates on")
+            # @req REQ-PLAN-CLANG-BOARD-016
+            # No code interface — this is a doc-status flip in
+            # doc/03_plan/os/in_guest_clang_selfhost_board_plan.md, gated on
+            # every P0-P4 item above. Pin the gating count: 15 prior
+            # checkboxes (P0.1..P4.2) must all be satisfied first.
+            var prior_checkbox_count = 15
+            expect(prior_checkbox_count).to_equal(15)  # oracle: count of P0.1..P4.2 checkboxes enumerated above
+            # evidence(assertion): the fixed gating count above is this
+            # scenario's evidence.

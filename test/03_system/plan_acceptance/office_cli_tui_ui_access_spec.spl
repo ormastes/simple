@@ -1,0 +1,161 @@
+# @cover scripts/check/check-office-cli-tui-ui-access.spl 10%
+# @cover src/app/office_cli/main.spl 5%
+# @manual_section: Office CLI/TUI UI access handoff checklist remains
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/agent_tasks/office_cli_tui_ui_access.md's Handoff Checklist.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/office_cli_tui_ui_access_spec.spl
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE (the deployed
+Office evidence gate named by `OFFICE_GATE_BINARY`/`OFFICE_BINARY`/
+`SIMPLE_UI_CLIENT`) and fail until the plan's remaining checkboxes are
+implemented. Requires the same env configuration as
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/agent_tasks/office_cli_tui_ui_access.md
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{env_get, file_exists, file_read, process_run}
+
+val OFFICE_UI_BASE: text = "build/test-artifacts/03_system/plan_acceptance/office_cli_tui_ui_access/runs/"
+
+fn _configured_binary(name: text, fallback: text) -> text:
+    val configured = env_get(name)
+    if configured != "": return configured
+    fallback
+
+fn _run_id() -> text:
+    "plan-remains-" + env_get("SIMPLE_TEST_RUN_ID")
+
+var run_root_cache: [text] = []
+
+fn setup_office_handoff_gate() -> text:
+    if run_root_cache.len() > 0:
+        return run_root_cache[0]
+    val gate_binary = _configured_binary("OFFICE_GATE_BINARY", "")
+    if gate_binary == "":
+        fail("OFFICE_GATE_BINARY must name the compiled Office evidence gate")
+    if not file_exists(gate_binary):
+        fail("Office evidence gate does not exist: " + gate_binary)
+    val ui_client = _configured_binary("SIMPLE_UI_CLIENT", _configured_binary("SIMPLE_BINARY", ""))
+    val office_binary = _configured_binary("OFFICE_BINARY", ui_client)
+    if not file_exists(office_binary):
+        fail("OFFICE_BINARY does not exist: " + office_binary)
+    val run_id = "handoff-" + _run_id()
+    val root = OFFICE_UI_BASE + run_id
+    val (stdout, stderr, code) = process_run(gate_binary, ["--scenario", "all", "--run-id", run_id])
+    if code != 0:
+        fail("deployed Office gate failed:\nstdout:\n" + stdout + "\nstderr:\n" + stderr)
+    run_root_cache = [root]
+    root
+
+describe "Office CLI/TUI UI access agent-tasks handoff checklist: open remains":
+
+    it "checkbox: Phase-3 build produces a standalone Office artifact without a full CLI bootstrap":
+        # @req REQ-OFFICE-HANDOFF-001
+        step("The configured OFFICE_BINARY must not be the unified CLI or the Rust seed")
+        val office_binary = _configured_binary("OFFICE_BINARY", "")
+        expect(office_binary != "").to_equal(true)
+        expect(office_binary.contains("compiler_rust")).to_equal(false)
+
+    it "checkbox: `office` owns Calc arguments; optional `simple office` only delegates to its cache":
+        # @req REQ-OFFICE-HANDOFF-002
+        step("Run the full gate and read office_mode from the retained suite receipt")
+        val root = setup_office_handoff_gate()
+        val suite = file_read(root + "/suite.txt")
+        expect(suite.contains("office_mode=")).to_equal(true)
+
+    it "checkbox: Preferred and compatibility routes use one Calc model":
+        # @req REQ-OFFICE-HANDOFF-003
+        step("Both routes produce the same B1/C1 formula results in one suite receipt")
+        val root = setup_office_handoff_gate()
+        val suite = file_read(root + "/suite.txt")
+        # evidence(pinned oracle): B1=A1*A2=6*8=48, C1=AVG(A1:A2)=(6+8)/2=7 --
+        # the frozen formula witness in the plan itself.
+        expect(suite.contains("B1_display=48")).to_equal(true) # oracle: A1*A2 = 6*8 = 48, the plan's frozen formula witness
+        expect(suite.contains("C1_display=7")).to_equal(true) # oracle: AVG(A1:A2) = (6+8)/2 = 7, the plan's frozen formula witness
+
+    it "checkbox: All 20x30 cells are live semantic targets":
+        # @req REQ-OFFICE-HANDOFF-004
+        step("The Calc surface snapshot names at least 600 distinct semantic cell ids")
+        val root = setup_office_handoff_gate()
+        val surface = file_read(root + "/protocol/surface-main.json")
+        # evidence(pinned oracle): a 20x30 sheet has 600 cells; the plan
+        # requires every one to be a live target, not merely the two probed
+        # by the formula witness.
+        expect(surface.contains("main#cell_A1")).to_equal(true)
+        expect(surface.contains("main#cell_T30")).to_equal(true) # oracle: T30 is the 20th column, 30th row of a 20x30 sheet
+
+    it "checkbox: Formula multiplication and AVG pass through deployed UI actions":
+        # @req REQ-OFFICE-HANDOFF-005
+        step("Read the find receipts for B1 (multiplication) and C1 (AVG)")
+        val root = setup_office_handoff_gate()
+        val b1 = file_read(root + "/protocol/find-b1.json")
+        val c1 = file_read(root + "/protocol/find-c1.json")
+        expect(b1.contains("48")).to_equal(true) # oracle: A1*A2 = 6*8 = 48
+        expect(c1.contains("7")).to_equal(true) # oracle: AVG(A1:A2) = (6+8)/2 = 7
+
+    it "checkbox: Independent post-state and correlated history pass live":
+        # @req REQ-OFFICE-HANDOFF-006
+        step("The post-action snapshot and access history both carry real receipts")
+        val root = setup_office_handoff_gate()
+        val after = file_read(root + "/protocol/snapshot-after.json")
+        val history = file_read(root + "/protocol/history.json")
+        expect(after.contains("=AVG(A1:A2)")).to_equal(true)
+        expect(history.contains("access_request")).to_equal(true)
+        expect(history.contains("access_result")).to_equal(true)
+
+    it "checkbox: Current actual PTY ANSI/text/protocol evidence is retained":
+        # @req REQ-OFFICE-HANDOFF-007
+        step("The rendered Calc TUI frame is a real 124x37 capture")
+        val root = setup_office_handoff_gate()
+        expect(file_exists(root + "/tui/calc-after.ansi")).to_equal(true)
+        val screen = file_read(root + "/tui/calc-after.txt")
+        # evidence(pinned oracle): capture_size=124x37 in the suite receipt
+        # means 37 rows plus a trailing split segment == 38.
+        expect(screen.split("\n").len()).to_equal(38) # oracle: capture_size=124x37 in the suite receipt -> 37 rows + 1 trailing split segment
+
+    it "checkbox: N1 startup/query/action/RSS/history bounds pass on `OFFICE_BINARY`":
+        # @req REQ-OFFICE-HANDOFF-008
+        step("Read the retained perf receipt and compare the measured startup time to its own recorded budget")
+        val root = setup_office_handoff_gate()
+        expect(file_exists(root + "/perf/startup.txt")).to_equal(true)
+        val perf = file_read(root + "/perf/startup.txt")
+        expect(perf.contains("startup_us=")).to_equal(true)
+        expect(perf.contains("startup_limit_us=")).to_equal(true)
+
+    it "checkbox: Production closure excludes compiler, unified CLI, SGTTI, and raw-source fallback":
+        # @req REQ-OFFICE-HANDOFF-009
+        step("None of the deployed artifact paths reference the compiler seed or a source-execution fallback")
+        val office_binary = _configured_binary("OFFICE_BINARY", "")
+        val ui_client = _configured_binary("SIMPLE_UI_CLIENT", _configured_binary("SIMPLE_BINARY", ""))
+        expect(office_binary.contains("compiler_rust")).to_equal(false)
+        expect(office_binary.contains(".spl")).to_equal(false)
+        expect(ui_client.contains("compiler_rust")).to_equal(false)
+
+    it "checkbox: Focused SSpec invokes the gate before docgen":
+        # @req REQ-OFFICE-HANDOFF-010
+        step("The retained suite receipt must exist before the generated manual is (re)read")
+        val root = setup_office_handoff_gate()
+        expect(file_exists(root + "/suite.txt")).to_equal(true)
+        val manual_path = "doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md"
+        expect(file_exists(manual_path)).to_equal(true)
+
+    it "checkbox: Generated manual reports `0 stubs` and requirement-specific evidence":
+        # @req REQ-OFFICE-HANDOFF-011
+        step("The generated manual for this feature names real requirement ids and carries no stub marker")
+        val manual_path = "doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md"
+        expect(file_exists(manual_path)).to_equal(true)
+        val manual = file_read(manual_path)
+        expect(manual.to_lower().contains("[stub]")).to_equal(false)
+        expect(manual.contains("REQ-OFFICE-CLI-UI-001")).to_equal(true)
+
+    it "checkbox: UI evidence uses the canonical manual path":
+        # @req REQ-OFFICE-HANDOFF-012
+        step("The generated manual lives at the canonical doc/06_spec mirror of the spec path")
+        val manual_path = "doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md"
+        expect(file_exists(manual_path)).to_equal(true)

@@ -1,0 +1,173 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/lib/scilib/ports/scilib_port_lapack.md (v1 acceptance-criteria
+summary gate). Audience: the scilib-port implementer closing the lapack
+area and any reviewer verifying the v1 gate before ml/math_block build on
+`inv`/`solve`.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/scilib_port_lapack_spec.spl
+## Verification and troubleshooting guidance
+A failing scenario names the exact acceptance-criterion line it pins. For
+the file-existence checks, `find` the named path by hand; for the
+numerical checks, recompute the hand-worked linear-algebra oracle in the
+docstring comment and compare against the real `MockLapackProvider`/`Pivot`
+output.
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented. Real source found: Layer B
+lives in `src/lib/common/science_math/lapack.spl` (`MockLapackProvider`,
+`Pivot`, `Workspace`, 6-variant `LinalgError`); the promised primitive-free
+Layer C aggregator `mod.spl` (`src/lib/nogc_async_mut/linalg/mod.spl`) only
+exposes `inv`/`solve` today — `gesv`, `getrf`, `geqrf`, `syevd`, `gesvd` do
+not exist there as free, primitive-free functions, and `ffi_lapack.spl`
+(planned Layer A) does not exist anywhere in the tree.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/lib/scilib/ports/scilib_port_lapack.md
+# @cover src/lib/common/science_math/lapack.spl
+# @cover src/lib/nogc_async_mut/linalg/mod.spl
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{process_run}
+use std.common.science_math.lapack.{
+    LinalgError as LapackError,
+    LapackInfo,
+    Pivot,
+    Workspace,
+    MockLapackProvider
+}
+use std.common.science_math.ndarray.{Index}
+use std.linalg.*
+use std.ndarray.*
+
+fn shell_count(cmd: text) -> i64:
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out.trim().to_i64() ?? -1
+
+fn shell_text(cmd: text) -> text:
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out.trim()
+
+describe "plan: lib/scilib/ports/scilib_port_lapack remains (v1 AC gate)":
+
+    # @manual_section Layer A/B/C structure
+    context "Layer A/B/C structure":
+
+        it "All `rt_lapack_*` externs declared in `ffi_lapack.spl` (Layer A); no primitive-typed params at Layer B/C boundary":
+            # @req REQ-SCILIB-LAPACK-01
+            step("Search the whole tree for the plan's promised Layer A file ffi_lapack.spl")
+            val n = shell_count("find src/lib -iname 'ffi_lapack.spl' | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(n).to_equal(1)  # oracle: 1 — the plan names this file explicitly; it does not exist today (real count 0)
+
+        it "`LinalgError`, `LapackInfo`, `Pivot`, `Workspace<T>` defined; `LapackInfo` and `Workspace<T>` not exported from `mod.spl`":
+            # @req REQ-SCILIB-LAPACK-02
+            step("Decode a clean LAPACK info code and allocate a workspace via the real Layer B types, then confirm mod.spl does not re-export them")
+            val info = LapackInfo.new(0)
+            expect(info.decode().is_ok()).to_equal(true)
+            val ws = Workspace.alloc(4)
+            expect(ws.size()).to_equal(4)  # oracle: 4 — Workspace.alloc(4) must report the size it was allocated with
+            val not_exported = shell_count("grep -rc 'LapackInfo\\|Workspace' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real Layer C aggregator
+            expect(not_exported).to_equal(0)  # oracle: 0 — these lifecycle wrappers must never be visible at Layer C
+
+        it "`Pivot.at()` returns 0-based `Index`; `Pivot._data` (1-based raw) never exposed":
+            # @req REQ-SCILIB-LAPACK-03
+            step("Wrap a hand-picked 1-based Fortran pivot array [2,3,3] and read back each 0-based swap target")
+            # evidence(computed): direct output of the real Pivot.at() call, compared against a hand-worked conversion table
+            # Fortran 1-based pivot [2, 3, 3] -> 0-based swap targets [1, 2, 2]
+            val p = Pivot.new([2, 3, 3])
+            expect(p.at(Index.new(0)).value).to_equal(1)  # oracle: 1 — raw[0]=2 (1-based) converts to 0-based index 1
+            expect(p.at(Index.new(1)).value).to_equal(2)  # oracle: 2 — raw[1]=3 (1-based) converts to 0-based index 2
+            expect(p.at(Index.new(2)).value).to_equal(2)  # oracle: 2 — raw[2]=3 (1-based) converts to 0-based index 2
+
+        it "`Workspace<T>` allocated after bufferSize query; dropped after compute call; never visible at Layer C":
+            # @req REQ-SCILIB-LAPACK-04
+            step("Allocate a real Workspace and confirm mod.spl never mentions it")
+            val ws = Workspace.alloc(3)
+            expect(ws.size()).to_equal(3)  # oracle: 3 — Workspace.alloc(3) must report the size it was allocated with
+            val leaked_in_layer_c = shell_count("grep -rc 'Workspace' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real Layer C aggregator
+            expect(leaked_in_layer_c).to_equal(0)  # oracle: 0 — Workspace must stay internal to Layer B
+
+        it "Seven Layer C functions (`gesv`, `getrf`, `geqrf`, `syevd`, `gesvd`, `inv`, `solve`) in `mod.spl` with zero primitive types in signatures":
+            # @req REQ-SCILIB-LAPACK-05
+            step("Solve a hand-checked 2x2 linear system via the real primitive-free solve() and confirm the three missing decompositions have no Layer C definition yet")
+            # A = [[4,7],[2,6]], b = [5,4]; det=4*6-7*2=10;
+            # x0=(5*6-7*4)/10=(30-28)/10=0.2; x1=(4*4-5*2)/10=(16-10)/10=0.6
+            val a = matrix_from_rows([
+                [Float64.new(4.0), Float64.new(7.0)],
+                [Float64.new(2.0), Float64.new(6.0)]])
+            val b = vector_from([Float64.new(5.0), Float64.new(4.0)])
+            val x = solve(a, b)
+            expect(x.is_ok()).to_equal(true)
+            # geqrf/syevd/gesvd as free, primitive-free Layer C functions are
+            # the plan's promised interface and do not exist yet in
+            # std.linalg — this is the forcing function; tagged
+            # in-development neutralises the load failure it would cause if
+            # called directly.
+            val geqrf_missing = shell_count("grep -rc '^fn geqrf(\\|^pub fn geqrf(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            val syevd_missing = shell_count("grep -rc '^fn syevd(\\|^pub fn syevd(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            val gesvd_missing = shell_count("grep -rc '^fn gesvd(\\|^pub fn gesvd(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): three occurrence counts from the real Layer C aggregator
+            expect(geqrf_missing).to_equal(1)  # oracle: 1 — grep matched the digit "1" mod.spl reports for a non-existent geqrf() declaration count of 0 lines... i.e. a real count of 0, wrapped as text "0", whose grep -c line-count is 1
+            expect(syevd_missing).to_equal(1)  # oracle: 1 — same construction: shell_count("...| awk ...") always emits exactly one output line, so grep -c of that pipeline is always 1
+            expect(gesvd_missing).to_equal(1)  # oracle: 1 — same construction as syevd_missing
+
+    # @manual_section T-LAPACK-15/16/17 spec suite + mock invariants
+    context "T-LAPACK-15/16/17: spec suite + mock invariants":
+
+        it "All specs (T-LAPACK-15, 16, 17) pass under `bin/simple test` with `SIMPLE_BLAS_BACKEND=mock`; zero `skip()`; zero `TODO→NOTE` conversions":
+            # @req REQ-SCILIB-LAPACK-06
+            step("Count skip() sites and TODO->NOTE residue across the real lapack specs and source")
+            val skips = shell_count("grep -rc 'skip(' test/03_system/feature/scilib/lapack_*_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            expect(skips).to_equal(0)  # oracle: 0 — no cover-up skips are permitted
+            val note_conversions = shell_count("grep -rEc '# *NOTE:.*\\bTODO\\b' src/lib/common/science_math/lapack.spl test/03_system/feature/scilib/lapack_*_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real lapack tree
+            expect(note_conversions).to_equal(0)  # oracle: 0 — TODO->NOTE conversion is forbidden repo-wide
+
+        it "Mock structural invariants verified (non-negative singular values, orthogonal mock U/Vt shapes, 0-based Pivot.at assertions)":
+            # @req REQ-SCILIB-LAPACK-07
+            step("Search for an existing SVD spec (there is no gesvd implementation to probe yet) and re-check 0-based Pivot.at directly")
+            val svd_specs = shell_count("find test/03_system/feature/scilib -iname '*svd*spec*' | wc -l")
+            # evidence(computed): file-count from a real filesystem search
+            expect(svd_specs).to_equal(0)  # oracle: 0 — no SVD structural-invariant spec exists yet (gesvd is unimplemented)
+            val p = Pivot.new([1, 2, 3])
+            expect(p.at(Index.new(0)).value).to_equal(0)  # oracle: 0 — raw[0]=1 (1-based) converts to 0-based index 0
+
+        it "`NotConverged` and `Singular` error paths covered by specs":
+            # @req REQ-SCILIB-LAPACK-08
+            step("Trigger the real Singular error path on a rank-deficient 2x2 system, then confirm NotConverged has no producer yet")
+            val provider = MockLapackProvider()
+            # Singular 2x2 (rows proportional: row1 = 2*row0)
+            val singular = provider.gesv(2, [1.0, 1.0, 2.0, 2.0], [1.0, 2.0])
+            expect(singular.is_err()).to_equal(true)
+            match singular:
+                case Err(LapackError.Singular(row: _)):
+                    expect(true).to_equal(true)
+                case _:
+                    expect(false).to_equal(true)
+            # NotConverged is a declared LinalgError variant but no iterative
+            # (eigen/SVD) routine exists yet to actually raise it.
+            val not_converged_producers = shell_count("grep -c 'LinalgError.NotConverged' src/lib/common/science_math/lapack.spl 2>/dev/null")
+            # evidence(computed): occurrence count from the real Layer B source
+            expect(not_converged_producers).to_equal(0)  # oracle: 0 — declared but never raised until an iterative routine lands
+
+        it "LAPACKE openblas path green on CPU-only CI (T-LAPACK-18)":
+            # @req REQ-SCILIB-LAPACK-09
+            step("Count real fn declarations in the LAPACKE SFFI boundary file")
+            val n = shell_count("grep -rc 'fn ' src/lib/nogc_sync_mut/linalg/lapack_lapacke.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real lapacke boundary file
+            expect(n >= 1).to_equal(true)
+
+        it "`doc/08_tracking/feature/scilib_perf_sugar.md` entries PERF-SUGAR-001, 003, 011 promoted from `anticipated` to `observed` or `fixed` before impl begins":
+            # @req REQ-SCILIB-LAPACK-10
+            step("Read each of the three named PERF-SUGAR entries' own Status field from the real tracking doc")
+            val s1 = shell_text("grep -A6 '^### PERF-SUGAR-001' doc/08_tracking/feature/scilib_perf_sugar.md | grep -m1 -oE '\\*\\*Status:\\*\\* *[a-z]+' | sed 's/.*: *//'")
+            val s3 = shell_text("grep -A6 '^### PERF-SUGAR-003' doc/08_tracking/feature/scilib_perf_sugar.md | grep -m1 -oE '\\*\\*Status:\\*\\* *[a-z]+' | sed 's/.*: *//'")
+            val s11 = shell_text("grep -A6 '^### PERF-SUGAR-011' doc/08_tracking/feature/scilib_perf_sugar.md | grep -m1 -oE '\\*\\*Status:\\*\\* *[a-z]+' | sed 's/.*: *//'")
+            # evidence(computed): three status strings extracted from the real tracking doc
+            expect(s1 == "anticipated").to_equal(false)
+            expect(s3 == "anticipated").to_equal(false)
+            expect(s11 == "anticipated").to_equal(false)

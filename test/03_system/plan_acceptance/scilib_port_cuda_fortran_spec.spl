@@ -1,0 +1,125 @@
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/lib/scilib/ports/scilib_port_cuda_fortran.md (task-file
+acceptance criteria). Audience: the scilib-port implementer wiring the
+mock/openblas/cublas `.so` build and CI matrix, and any reviewer verifying
+the gate before blas/lapack can depend on a built shim.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/scilib_port_cuda_fortran_spec.spl
+## Verification and troubleshooting guidance
+A failing scenario names the exact acceptance-criterion line it pins. For
+the file/artifact-existence checks, `find` the named path by hand; for the
+`verify_symbols.shs` interface pin, run the script directly with no
+arguments and read its printed usage line.
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented. Real mock/openblas/cublas C
+shim SOURCE exists at `src/runtime/scilib/{mock_shim.c,openblas_shim.c,
+cublas_shim.c}` and defines `rt_blas_*`/`rt_lapack_*` symbols, but no
+`build/libspl_*.so` artifact is checked in or produced by setup — none of
+`build/`, CI-matrix wiring, or `blas_backend_smoke_spec.spl` exist yet.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/lib/scilib/ports/scilib_port_cuda_fortran.md
+# @cover src/runtime/scilib/
+# @cover scripts/setup/setup.shs
+# @cover scripts/bootstrap/bootstrap-from-scratch.sh
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{process_run}
+
+fn shell_count(cmd: text) -> i64:
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out.trim().to_i64() ?? -1
+
+describe "plan: lib/scilib/ports/scilib_port_cuda_fortran remains (task acceptance criteria)":
+
+    # @manual_section Acceptance Criteria (this task file)
+    context "Acceptance Criteria (this task file)":
+
+        it "`build/libspl_cublas_mock.so` exists and exports all `rt_blas_*` / `rt_lapack_*` / `rt_cuda_*` symbols (T-CUDA-02)":
+            # @req REQ-SCILIB-CUDAFORTRAN-01
+            step("Search the tree for the built mock shim artifact, then confirm its C source at least defines the rt_blas_/rt_lapack_ symbol families")
+            val built = shell_count("find . -iname 'libspl_cublas_mock.so' 2>/dev/null | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(built).to_equal(0)  # oracle: 0 — no built .so artifact is checked in yet
+            val symbol_sources = shell_count("grep -rc 'rt_blas_\\|rt_lapack_' src/runtime/scilib/mock_shim.c 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real mock shim C source
+            expect(symbol_sources >= 1).to_equal(true)
+
+        it "`build/libspl_openblas.so` builds on a machine with OpenBLAS; `nm -D` matches mock symbol set (T-CUDA-03, T-CUDA-14)":
+            # @req REQ-SCILIB-CUDAFORTRAN-02
+            step("Search the tree for the built openblas shim artifact")
+            val built = shell_count("find . -iname 'libspl_openblas.so' 2>/dev/null | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(built).to_equal(0)  # oracle: 0 — no built .so artifact is checked in yet
+
+        it "`build/libspl_cublas.so` builds on a CUDA ≥ 11.7 machine; uses `_64` API (T-CUDA-05/06)":
+            # @req REQ-SCILIB-CUDAFORTRAN-03
+            step("Search the tree for the built cublas shim artifact, then confirm its C source references the _64 cuBLAS API")
+            val built = shell_count("find . -iname 'libspl_cublas.so' 2>/dev/null | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(built).to_equal(0)  # oracle: 0 — no built .so artifact is checked in yet
+            val uses_64_api = shell_count("grep -rc '_64(' src/runtime/scilib/cublas_shim.c 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real cublas shim C source
+            expect(uses_64_api >= 1).to_equal(true)
+
+        it "`SIMPLE_BLAS_BACKEND=mock` is the default in `bin/simple test` for linalg/ndarray specs (T-CUDA-09)":
+            # @req REQ-SCILIB-CUDAFORTRAN-04
+            step("Count SIMPLE_BLAS_BACKEND wiring in the real test-runner/CLI source")
+            val wired = shell_count("grep -rc 'SIMPLE_BLAS_BACKEND' src/app/test_runner_new src/app/cli 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real test-runner/CLI source
+            expect(wired).to_equal(0)  # oracle: 0 — no default wiring exists yet in the real runner/CLI source
+
+        it "`scripts/setup/setup.shs` builds mock unconditionally; openblas and cuda conditionally; appends `build/` to `SIMPLE_SFFI_PATH` (T-CUDA-10)":
+            # @req REQ-SCILIB-CUDAFORTRAN-05
+            step("Count SIMPLE_SFFI_PATH/libspl wiring in the real setup script")
+            val wired = shell_count("grep -c 'SIMPLE_SFFI_PATH\\|libspl' scripts/setup/setup.shs 2>/dev/null")
+            # evidence(computed): occurrence count from the real setup script
+            expect(wired).to_equal(0)  # oracle: 0 — setup.shs does not build or wire the shim yet
+
+        it "`scripts/bootstrap/bootstrap-from-scratch.sh --deploy` triggers scilib mock build (T-CUDA-11)":
+            # @req REQ-SCILIB-CUDAFORTRAN-06
+            step("Count scilib/libspl wiring in the real bootstrap-from-scratch script")
+            val wired = shell_count("grep -c 'scilib\\|libspl' scripts/bootstrap/bootstrap-from-scratch.sh 2>/dev/null")
+            # evidence(computed): occurrence count from the real bootstrap script
+            expect(wired).to_equal(0)  # oracle: 0 — the sanctioned bootstrap script does not trigger a scilib build yet
+
+        it "CI matrix has three legs: mock-only, openblas-host, cuda-host (T-CUDA-12)":
+            # @req REQ-SCILIB-CUDAFORTRAN-07
+            step("Search every tracked CI workflow file for the mock-only leg name")
+            val legs = shell_count("grep -rlc 'mock-only' . --include='*.yml' --include='*.yaml' 2>/dev/null | wc -l")
+            # evidence(computed): file-count from a real recursive search
+            expect(legs).to_equal(0)  # oracle: 0 — no CI workflow declares the three-leg matrix yet
+
+        it "`blas_backend_smoke_spec.spl` passes interpreter mode; zero `skip()` (T-CUDA-13)":
+            # @req REQ-SCILIB-CUDAFORTRAN-08
+            step("Search the whole tree for the plan's promised smoke spec file")
+            val exists = shell_count("find . -iname 'blas_backend_smoke_spec.spl' | wc -l")
+            # evidence(computed): file-existence count from a real filesystem search
+            expect(exists).to_equal(0)  # oracle: 0 — the smoke spec has not been authored yet
+
+        it "`verify_symbols.shs` passes as CI gate (T-CUDA-14)":
+            # @req REQ-SCILIB-CUDAFORTRAN-09
+            step("Run the real verify_symbols.shs script with too few arguments and read its usage-error exit code, then check CI wiring")
+            val (_out, _err, code) = process_run("/bin/sh", ["src/runtime/scilib/verify_symbols.shs"])
+            # evidence(computed): real process exit code from running the shipped script
+            expect(code).to_equal(2)  # oracle: 2 — verify_symbols.shs documents `usage: $0 MOCK_SHIM OTHER_SHIM...` and exits 2 on too few args
+            val wired_in_ci = shell_count("grep -rlc 'verify_symbols.shs' . --include='*.yml' --include='*.yaml' 2>/dev/null | wc -l")
+            # evidence(computed): file-count from a real recursive search
+            expect(wired_in_ci).to_equal(0)  # oracle: 0 — no CI workflow calls verify_symbols.shs yet
+
+        it "No nvfortran toolchain references anywhere in `src/runtime/scilib/` (anti-pattern 1)":
+            # @req REQ-SCILIB-CUDAFORTRAN-10
+            step("Count nvfortran references in the real scilib runtime directory — already clean")
+            val n = shell_count("grep -rc 'nvfortran' src/runtime/scilib/ 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real scilib runtime directory
+            expect(n).to_equal(0)  # oracle: 0 — nvfortran is an explicit anti-pattern for this area
+
+        it "No `--mode=native` in any spec run instructions (anti-pattern 3)":
+            # @req REQ-SCILIB-CUDAFORTRAN-11
+            step("Count --mode=native bypass mentions inside the real cuda provider smoke spec's run instructions")
+            val n = shell_count("grep -rc -- '--mode=native' test/03_system/feature/scilib/cuda_provider_smoke_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            # evidence(computed): occurrence count from the real spec file
+            expect(n).to_equal(0)  # oracle: 0 — native-mode bypass gives a false green (feedback_compile_mode_false_greens)

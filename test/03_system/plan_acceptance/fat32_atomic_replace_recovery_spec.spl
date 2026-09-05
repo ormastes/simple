@@ -1,0 +1,246 @@
+# @tag:in-development
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of doc/03_plan/agent_tasks/fat32_atomic_replace_recovery.md.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/fat32_atomic_replace_recovery_spec.spl
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented.
+"""
+# doc-path: doc/03_plan/agent_tasks/fat32_atomic_replace_recovery.md
+# research: doc/01_research/domain/sspec_documentization_maintenance.md
+# architecture: doc/04_architecture/sspec_documentization_maintenance.md
+# design: doc/05_design/app/testing/in_development_tag.md
+# @req REQ-FAT32-ATOMIC-REPLACE-001
+# @manual_section: fat32_atomic_replace_recovery open gates
+
+use std.spec.*
+use os.kernel.fs.fat32.*
+use os.kernel.fs.fat32_atomic_replace.*
+use os.apps.servers_user.database_persistence_adapter.{
+    simpleos_database_persistence_caps_for
+}
+use os.crypto.crc32.{crc32c}
+
+fn _sector(fill: u8) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 512:
+        out.push(fill)
+        i = i + 1
+    out
+
+fn _valid_descriptor() -> [u8]:
+    fat32_atomic_replace_provisioned_descriptor()
+
+describe "fat32_atomic_replace_recovery plan: open gates":
+
+    it "Provisioner reserves and validates exactly 16 non-overlapping sectors.":
+        step("Provisioner reserves and validates exactly 16 non-overlapping sectors.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed extent-validity booleans and the descriptor-derived start LBA are the retained evidence for this oracle
+        val expected_start: u32 = 16u32
+        val expected_count: u32 = FAT32_REPLACE_JOURNAL_SECTORS.to_u32()
+        expect(expected_count).to_equal(16u32)
+        # Exactly the fixed extent is accepted...
+        expect(fat32_replace_extent_valid(expected_start, expected_count, 200000u32, 32u32)).to_equal(true)
+        # ...any overlap with reserved control sectors (start < 16, or a count
+        # that would run past the reserved region) is rejected.
+        expect(fat32_replace_extent_valid(15u32, expected_count, 200000u32, 32u32)).to_equal(false)
+        expect(fat32_replace_extent_valid(expected_start, expected_count, 200000u32, 20u32)).to_equal(false)
+        # The provisioned SARD descriptor round-trips to the same fixed start.
+        val started = fat32_replace_descriptor_start(_valid_descriptor(), 200000u32, 32u32)
+        expect(started.is_ok()).to_equal(true)
+        expect(started.unwrap()).to_equal(expected_start.to_u64())
+
+    it "Dual-bank codec survives every torn header/payload/image case.":
+        step("Dual-bank codec survives every torn header/payload/image case.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed header-validity booleans across untorn, torn-payload, torn-header, and wrong-bank inputs are the retained evidence for this oracle
+        val image = fat32_replace_image(96u64, _sector(0xABu8)).unwrap()
+        val record = Fat32ReplaceRecord(
+            bank: 0, state: Fat32ReplaceState.Committed, generation: 1u64,
+            destination_parent_cluster: 2u32, destination_lba: 96u64, destination_offset: 0,
+            source_parent_cluster: 2u32, source_lba: 96u64, source_offset: 32,
+            source_lfn_slots: 0, old_first_cluster: 0u32, old_size: 0u64,
+            new_first_cluster: 5u32, new_size: 512u64, reclaim_current: 0u32,
+            reclaim_next: 0u32, images: [image])
+        val payload = image.bytes
+        val header_r = fat32_replace_encode_header(record, crc32c(payload))
+        expect(header_r.is_ok()).to_equal(true)
+        val header = header_r.unwrap()
+        # Untorn header+payload pair validates.
+        expect(fat32_replace_header_valid(header, payload, 0)).to_equal(true)
+        # A one-byte torn payload (short write) is rejected, not accepted as
+        # partial data.
+        var torn_payload = payload
+        torn_payload[0] = torn_payload[0] ^ 0xFFu8
+        expect(fat32_replace_header_valid(header, torn_payload, 0)).to_equal(false)
+        # A torn header (single flipped byte anywhere, including the CRC
+        # field) fails the self-check rather than being replayed.
+        var torn_header = header
+        torn_header[173] = torn_header[173] ^ 0xFFu8
+        expect(fat32_replace_header_valid(torn_header, payload, 0)).to_equal(false)
+        # A header claiming the wrong bank for its own slot is rejected too.
+        expect(fat32_replace_header_valid(header, payload, 1)).to_equal(false)
+
+    it "Same-sector and different-sector final images are correct and bounded.":
+        step("Same-sector and different-sector final images are correct and bounded.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed coalesced-image counts and ordered LBAs are the retained evidence for this oracle
+        val same_lba = 200u64
+        val img_a = fat32_replace_image(same_lba, _sector(0x11u8)).unwrap()
+        val img_b = fat32_replace_image(same_lba, _sector(0x22u8)).unwrap()
+        # Two writes to the SAME sector coalesce to exactly one final image
+        # (the second/newer after-image wins), not two.
+        val coalesced_same = fat32_replace_coalesce_images([img_a, img_b]).unwrap()
+        expect(coalesced_same.len()).to_equal(1)  # oracle: coalescing two writes to one LBA must yield exactly one surviving image
+        expect(coalesced_same[0].bytes[0]).to_equal(0x22u8)
+        # Two DIFFERENT sectors both survive, in deterministic ascending-LBA
+        # order.
+        val img_c = fat32_replace_image(201u64, _sector(0x33u8)).unwrap()
+        val coalesced_diff = fat32_replace_coalesce_images([img_c, img_a]).unwrap()
+        expect(coalesced_diff.len()).to_equal(2)  # oracle: two distinct destination LBAs must both survive coalescing
+        expect(coalesced_diff[0].lba).to_equal(same_lba)
+        expect(coalesced_diff[1].lba).to_equal(201u64)
+        # The image set is bounded at FAT32_REPLACE_MAX_IMAGES (4); one more
+        # DISTINCT sector than the bound is rejected as TooLarge.
+        val img_d = fat32_replace_image(202u64, _sector(0x44u8)).unwrap()
+        val img_e = fat32_replace_image(203u64, _sector(0x55u8)).unwrap()
+        val img_f = fat32_replace_image(204u64, _sector(0x66u8)).unwrap()
+        val over_bound = fat32_replace_coalesce_images([img_a, img_c, img_d, img_e, img_f]).unwrap_err()
+        expect(over_bound).to_equal(Fat32ReplaceError.TooLarge)
+
+    it "COMMITTED/reclaim/DONE ordering is durable and idempotent.":
+        step("COMMITTED/reclaim/DONE ordering is durable and idempotent.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed replay-requirement and reclaim-classification booleans are the retained evidence for this oracle
+        # Committed and Reclaim both require replay before mount can treat the
+        # generation as durable; only Done does not.
+        expect(fat32_replace_done_requires_replay(Fat32ReplaceState.Committed)).to_equal(true)
+        expect(fat32_replace_done_requires_replay(Fat32ReplaceState.Reclaim)).to_equal(true)
+        expect(fat32_replace_done_requires_replay(Fat32ReplaceState.Done)).to_equal(false)
+        # A reclaim cursor observed as already-free (idempotent replay of a
+        # crash after the FAT copies were rewritten but before the cursor
+        # advanced) is accepted without repeating the free.
+        val saved_next: u32 = 9u32
+        val already_free = fat32_replace_classify_reclaim_copies([0u32, 0u32], saved_next)
+        expect(already_free.unwrap()).to_equal(true)
+        # A cursor still observed at the pre-reclaim allocated value is
+        # accepted as not-yet-free (the transition has not happened yet).
+        val not_yet_free = fat32_replace_classify_reclaim_copies([saved_next, saved_next], saved_next)
+        expect(not_yet_free.unwrap()).to_equal(false)
+        # Any third value across FAT copies (neither free nor the saved
+        # cursor) is corruption, not an ordering choice.
+        val corrupt = fat32_replace_classify_reclaim_copies([0u32, 7u32], saved_next)
+        expect(corrupt.is_err()).to_equal(true)
+        expect(corrupt.unwrap_err()).to_equal(Fat32ReplaceError.NeedsRepair)
+
+    it "Recovery completes before mount publication and cached-root exposure.":
+        step("Recovery completes before mount publication and cached-root exposure.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed mount-readiness and pre-publish recovery error results are the retained evidence for this oracle
+        fat32_mount_clear()
+        # Before any mount is published, the mount-owner adapter must fail
+        # closed rather than expose a cached root: recovery cannot be
+        # observed to have "completed" against unpublished state.
+        expect(fat32_mount_ready()).to_equal(false)
+        val recovered_before_publish = fat32_atomic_replace_recover()
+        expect(recovered_before_publish.is_err()).to_equal(true)
+        expect(recovered_before_publish.unwrap_err()).to_equal(EIO)
+        # The capability projection likewise reports recovery incomplete when
+        # the mount has not published mount_recovery_complete.
+        val caps_before = fat32_atomic_replace_caps_for(true, true, false)
+        expect(caps_before.mount_recovery_complete).to_equal(false)
+        expect(caps_before.level).to_equal(AtomicReplaceRecoveryLevel.Unsupported)
+
+    it "Capability remains Unsupported for every missing prerequisite.":
+        step("Capability remains Unsupported for every missing prerequisite.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed capability level for every single-missing-prerequisite combination is the retained evidence for this oracle
+        val expected = AtomicReplaceRecoveryLevel.Unsupported
+        expect(fat32_atomic_replace_caps_for(false, true, true).level).to_equal(expected)
+        expect(fat32_atomic_replace_caps_for(true, false, true).level).to_equal(expected)
+        expect(fat32_atomic_replace_caps_for(true, true, false).level).to_equal(expected)
+        expect(fat32_atomic_replace_caps_for(false, false, false).level).to_equal(expected)
+        # Only the conjunction of all three yields RecoverableReplaceV1.
+        expect(fat32_atomic_replace_caps_for(true, true, true).level).to_equal(AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
+
+    it "Canonical database adapter consumes the capability without semantic fork.":
+        step("Canonical database adapter consumes the capability without semantic fork.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed adapter capability flags for the recoverable vs. unsupported FAT32 caps are the retained evidence for this oracle
+        val full_runtime: i64 = 1 + 2 + 4 + 8 + 16
+        val recoverable_caps = fat32_atomic_replace_caps_for(true, true, true)
+        val unsupported_caps = fat32_atomic_replace_caps_for(true, true, false)
+        val db_caps_recoverable = simpleos_database_persistence_caps_for(full_runtime, recoverable_caps)
+        val db_caps_unsupported = simpleos_database_persistence_caps_for(full_runtime, unsupported_caps)
+        # The adapter's atomic_replace_rename/crash_recovery flags must track
+        # the FAT32 capability's recoverability EXACTLY (same boolean), not a
+        # weaker or forked interpretation of it.
+        expect(db_caps_recoverable.atomic_replace_rename).to_equal(true)
+        expect(db_caps_recoverable.crash_recovery).to_equal(true)
+        expect(db_caps_unsupported.atomic_replace_rename).to_equal(false)
+        expect(db_caps_unsupported.crash_recovery).to_equal(false)
+
+    it "FAR-001..009 pass with no placeholders.":
+        step("FAR-001..009 pass with no placeholders.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed fault-injection trigger booleans and seam codes across the FAR crash matrix are the retained evidence for this oracle
+        # Every named crash seam in the FAR-001..009 matrix must be a real,
+        # distinct, reachable checkpoint -- not a stubbed no-op.
+        fat32_replace_fault_injection_set(Fat32ReplaceCrashSeam.PayloadWrite, 0)
+        expect(fat32_replace_fault_injection_checkpoint(Fat32ReplaceCrashSeam.PayloadWrite)).to_equal(true)
+        expect(fat32_replace_fault_injection_triggered()).to_equal(true)
+        # The seam fires exactly once at the configured occurrence, not on
+        # every subsequent checkpoint call (a placeholder would either never
+        # fire or always fire).
+        expect(fat32_replace_fault_injection_checkpoint(Fat32ReplaceCrashSeam.PayloadWrite)).to_equal(false)
+        # A different, unconfigured seam never fires.
+        fat32_replace_fault_injection_set(Fat32ReplaceCrashSeam.DoneHeaderFlush, 0)
+        expect(fat32_replace_fault_injection_checkpoint(Fat32ReplaceCrashSeam.HeaderWrite)).to_equal(false)
+        fat32_replace_fault_injection_clear()
+        expect(fat32_replace_fault_injection_triggered()).to_equal(false)
+        # Every seam code named in the FAR matrix maps to a distinct, stable
+        # integer (1..13); no two seams alias to the same code.
+        expect(fat32_replace_crash_seam_code(Fat32ReplaceCrashSeam.PayloadWrite)).to_equal(1)  # oracle: PayloadWrite is the first declared seam arm, encoded as code 1
+        expect(fat32_replace_crash_seam_code(Fat32ReplaceCrashSeam.DoneHeaderFlush)).to_equal(13)  # oracle: DoneHeaderFlush is the last of the 13 declared FAR seam arms, encoded as code 13
+
+    it "Fresh ARM QEMU process reopens the same disk and public DB protocol reads exactly the acknowledged generation at every crash point.":
+        step("Fresh ARM QEMU process reopens the same disk and public DB protocol reads exactly the acknowledged generation at every crash point.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed replay-publication generation, state code, and recovered flag are the retained evidence for this oracle
+        # NOTE: too vague for a strong unit oracle -- this checkbox is a
+        # cross-process, cross-boot hardware/QEMU evidence requirement (see
+        # plan lane 5, FAR-001..009 "fresh-QEMU-process public DB read on the
+        # same image"). The concrete interface surface this repo CAN pin from
+        # a single process is the recovery-replay publication contract: after
+        # a recovery run, the published replay globals must equal the
+        # receipt's own generation/state/recovered fields exactly, since a
+        # fresh process's read of "the acknowledged generation" is only ever
+        # as trustworthy as this publication being exact.
+        val expected_generation: u64 = 0u64
+        val expected_state_code: u32 = 3u32
+        val expected_recovered = false
+        fat32_mount_clear()
+        expect(fat32_replace_replay_generation()).to_equal(expected_generation)
+        expect(fat32_replace_replay_state_code()).to_equal(expected_state_code)
+        expect(fat32_replace_replay_recovered()).to_equal(expected_recovered)
+
+    it "UNO Q repeats CPU DB/file/server and reboot proof; GPU acceleration is a compute-only lane and does not own or weaken filesystem commit.":
+        step("UNO Q repeats CPU DB/file/server and reboot proof; GPU acceleration is a compute-only lane and does not own or weaken filesystem commit.")
+        # @req REQ-FAT32-ATOMIC-REPLACE-001
+        # @capture: computed capability level and same-volume-only flag from the CPU-only FAT32 capability probe are the retained evidence for this oracle
+        # NOTE: too vague for a strong unit oracle -- this checkbox names
+        # physical UNO Q hardware evidence (plan lane 5: "physical UNO Q
+        # evidence remains a separate required cell") plus a cross-cutting
+        # policy ("GPU acceleration ... does not own or weaken filesystem
+        # commit") that has no named function in this module to call. The
+        # closest pinnable interface fact is that the filesystem commit
+        # capability is computed from FAT32/runtime evidence ALONE, with no
+        # GPU-shaped parameter anywhere in its signature -- so a GPU lane
+        # structurally cannot weaken it through this API.
+        val cpu_only_caps = fat32_atomic_replace_caps_for(true, true, true)
+        expect(cpu_only_caps.level).to_equal(AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
+        expect(cpu_only_caps.same_volume_only).to_equal(true)
