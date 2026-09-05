@@ -470,3 +470,65 @@ The crash window in UPDATE 3 rests on the log tail (`hir 771/771` reached,
 own (e.g. `pkill -f '/home/yoon/dev/simple-bs/.*native_build_worker'`). This
 clone is shared by concurrent sessions; a bare command name is not a safe
 selector. The same sharpness cost the other session its own shell earlier today.
+
+## ROOT CAUSE of the "KILLED" population: an RSS monitor with a 24 GB ceiling
+
+`scripts/resource/kill_simple_monitor.shs` runs on this box and kills any
+`bin/simple run|test` process whose RSS exceeds **24,000 MB**
+(`KILL_SIMPLE_MEM_MB`). Its own log, `/tmp/kill_simple_monitor.log`, names the
+victims:
+
+```
+2026-09-05T14:09:42 KILL pid=1912942 reason=simple_rss measured=24455 limit=24000
+2026-09-05T14:21:35 KILL pid=1930788 reason=simple_rss measured=24254 limit=24000
+2026-09-05T14:33:18 KILL pid=1948655 reason=simple_rss measured=24766 limit=24000
+2026-09-05T14:45:11 KILL pid=1975993 reason=simple_rss measured=24749 limit=24000
+2026-09-05T14:54:04 KILL pid=1978668 reason=simple_rss measured=24112 limit=24000
+2026-09-05T15:02:26 KILL pid=1980660 reason=simple_rss measured=24071 limit=24000
+2026-09-05T15:11:49 KILL pid=1983604 reason=simple_rss measured=24118 limit=24000
+2026-09-05T16:37:30 KILL pid=2011613 reason=simple_rss measured=42655 limit=24000
+```
+
+22 kills in one day, all `reason=simple_rss`, all at the limit. Kills recur every
+~10-12 minutes, matching a Stage-3 worker crossing 24 GB roughly 7 minutes in.
+
+**A Stage-3 self-host cannot complete on this host while that monitor runs.**
+Workers legitimately reach 42-50 GB; the ceiling is 24 GB, so the run is killed
+long before the compiler can fail or succeed on its own terms.
+
+The monitor explicitly protects `simple_mcp_server`, `simple_lsp_mcp_server`,
+`tmux`, `claude`, `codex`, `node` and `npm`. Bootstrap workers are not on that
+list. That looks like an oversight rather than intent: a self-host worker is
+precisely the "large but legitimate" case the RSS guard is not meant to catch —
+its stated target is the no-GC balloon class that OOM-crashed the host
+(`simple_runaway_oom_host_crash_2026-06-14`).
+
+### What this invalidates
+
+Every run in this record whose only evidence is "worker was KILLED (reaped
+without a normal exit)" must be re-filtered before being counted as the SIGSEGV:
+
+- **SIGTERM, si_pid tracing to the monitor** — the RSS ceiling. Not the defect.
+- **SIGSEGV (signal 11 in /var/log/apport.log, plus a core dump)** — the defect.
+
+The apport signal-11 entries remain real and remain separate, so the crash
+window identified from the log tail (`hir 771/771` reached,
+`phase3:streaming_source_reclaim:done` absent) still stands. But the *population*
+of runs attributed to it was inflated by monitor kills.
+
+### Also retracted
+
+An earlier section of this record blamed a concurrent session's unanchored
+`pkill -f` for a peer's five killed runs, and that session accepted the blame.
+The monitor log refutes it for at least the first reported victim: pid 1983604
+was killed at 15:11:49 by the monitor, `reason=simple_rss measured=24118`. The
+unanchored `pkill` was a genuine practice error and the anchoring rule stands,
+but it is not the explanation for those deaths.
+
+### Fix options (owner decision)
+
+- Run the bootstrap with `KILL_SIMPLE_MEM_MB=65536` in its environment, or
+- add the `native_build_worker` argv to the monitor's protected list.
+
+Not changed here: the monitor is a shared resource guard and another session had
+a live run against it at the time of writing.
