@@ -64,3 +64,7 @@ Registry route added (`doc/00_llm_process/knowledge_registry.sdn` feature_routes
 - 2026-09-05 (Wave 1): commits `81285121` requirements, `7bdf002c` composition adapter, `68ff4d5b` closure gate, `7c292922` screen batching, `87cd2b4c` shared-WM route split. Side finding: `test/01_unit/app/ui/screen_ansi_spec.spl` was unparseable since `e274cd33719` (2026-08-27 modernization deleted its helpers and docstring opener); repaired, now 18/20 with 2 pre-existing RED (A/B identical on pre-batching screen.spl) — bug record `doc/08_tracking/bug/screen_ansi_suffix_style_overwrite_2026-09-05.md`.
 
 - 2026-09-05: imported three Downloads docs; verified R02–R08 at HEAD `56dd3059c2e`; seed `deps fast` closure `async_app.spl`=344 files (drivers/kernel/skia reached), `ui/main.spl`=79, `host_gui.spl`=4 (resolver stops); composition landed (28 callers, 35 specs), kernel_plugin absent; wrote addendum, design, plan, feature wiki.
+
+## Tiny ownership (2026-09-06)
+
+Transferred IN from `tiny_ui_web_wm` for perf-only edits: `tiny/gui/state.spl` (A04), `tiny/tui/{cell,render}.spl` (A05), `tiny/engine2d/software.spl` (A07). Public contracts and the Tiny lane's repair sources are read-only; geometry/cell/pixel parity against the old route is mandatory.
