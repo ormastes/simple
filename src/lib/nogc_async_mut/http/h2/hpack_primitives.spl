@@ -106,6 +106,8 @@ pub fn hpack_decode_int(buf: [u8], offset: i64, prefix_bits: i64) -> HpackIntRes
 #   H=1: Huffman-encoded (not supported — decode returns Err)
 # ============================================================================
 
+use std.string_core.{char_from_code}
+
 pub fn hpack_encode_string_raw(s: text) -> [u8]:
     """Encode string `s` as a raw (H=0) HPACK string literal.
 
@@ -117,7 +119,10 @@ pub fn hpack_encode_string_raw(s: text) -> [u8]:
     var i = 0
     while i < slen:
         val c = s[i]
-        out.push(c & 0xff)
+        # s[i] yields a 1-char text; take its byte before masking (text & int
+        # is a runtime type error — this loop never executed successfully before
+        # the fix, so every literal-without-indexing HPACK encode crashed).
+        out.push(c.byte_at(0) & 0xff)
         i = i + 1
     return out
 
@@ -148,11 +153,13 @@ pub fn hpack_decode_string(buf: [u8], offset: i64) -> HpackStringResult:
             val end = start + str_len
             if end > buf.len():
                 return HpackStringResult.Err("string literal truncated")
-            # Build text from raw bytes
+            # Build text from raw bytes. buf[i].to_text() rendered the DECIMAL
+            # DIGITS of the byte ("bar" -> "9897114"); a raw octet becomes a
+            # character via char_from_code, not to_text.
             var result = ""
             var i = start
             while i < end:
-                result = result + buf[i].to_text()
+                result = result + char_from_code(buf[i] as i64)
                 i = i + 1
             val total_consumed = header_consumed + str_len
             return HpackStringResult.Ok(HpackStringOk(value: result, consumed: total_consumed))
