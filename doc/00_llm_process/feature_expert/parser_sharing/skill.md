@@ -83,8 +83,8 @@ every independent attempt got it wrong the same way.
 - Gate: `scripts/check/check-parser-source-global-ratchet.shs` (+ baseline; push-tier, advisory)
 - Specs: `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (21),
   `test/01_unit/app/sspec_maintain/shared_lexer_string_state_spec.spl` (6),
-  `test/01_unit/app/spipe_docgen/shared_lexer_string_state_spec.spl` (9)
-- Fixtures: `test/fixtures/source_facts/` (12)
+  `test/01_unit/app/spipe_docgen/shared_lexer_string_state_spec.spl` (12)
+- Fixtures: `test/fixtures/source_facts/` (14)
 
 ## Known open
 
