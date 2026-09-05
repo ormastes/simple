@@ -47,6 +47,16 @@ plan-done (research, design, plan written 2026-09-05; implementation Wave 0 not 
 | B-3 | `nogc_async_mut/kernel_plugin` absent | static composition; consume when lint lane lands it |
 | B-4 | 800-module cap fix not redeployed | `SIMPLE_MODULE_LIMIT=4000` / `--no-session-daemon` |
 
+## Knowledge routing
+
+Registry route added (`doc/00_llm_process/knowledge_registry.sdn` feature_routes: `ui_slim_kernel_plugin` → group `rendering_ui`); receipt `.spipe/ui_slim_kernel_plugin/knowledge_selection.sdn`.
+
+## Commits (rebuild the landing from these; WC carries peer-owned conflicts)
+
+- `a2b14405` (change `msmzxovl/0`) — 8 files: addendum+tldr, design+tldr, plan+tldr, state, wiki. `msmzxovl/1` (`57482dff`, 35 files, undescribed) is a PEER reconcile copy sharing the change id — not ours, not abandoned.
+- `ae19f34c` — the three imported source documents (blobs `35abc223`, `f264f7cc`, `118bd27b`).
+- Landing route: detached worktree at origin sha + PR to `main`; never `jj git push` from this WC (peer conflicts in `doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md`, `scripts/check/guard_wiring_optout.txt`).
+
 ## Log
 
 - 2026-09-05: imported three Downloads docs; verified R02–R08 at HEAD `56dd3059c2e`; seed `deps fast` closure `async_app.spl`=344 files (drivers/kernel/skia reached), `ui/main.spl`=79, `host_gui.spl`=4 (resolver stops); composition landed (28 callers, 35 specs), kernel_plugin absent; wrote addendum, design, plan, feature wiki.
