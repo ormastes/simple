@@ -1,0 +1,255 @@
+# Shared Simple-source lexical facts published by CoreLexer.
+#
+# Entry layer: this spec drives REAL source text through the production
+# CoreLexer (`lex_init` / `lex_next`) — it does not hand-build tokens. Every
+# expected value below is a hand-verified constant, never the old scanner's
+# output compared to the new one: an equality between two implementations of
+# the same mistake passes while both are wrong.
+#
+# Fixtures live as FILES under test/fixtures/source_facts/ rather than as
+# inline literals, because the constructs under test (`"""`, escaped quotes,
+# CRLF) are exactly the ones a spec's own lexer mangles inside a literal.
+#
+# Design: doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md
+
+use std.spec.*
+use compiler.frontend.core.source_facts.{simple_code_lines, source_facts_line_count}
+use app.io.mod.{file_read_text}
+
+val FIXTURES: text = "test/fixtures/source_facts/"
+
+fn fixture(name: text) -> text:
+    file_read_text(FIXTURES + name)
+
+fn code_of(name: text) -> [text]:
+    simple_code_lines(fixture(name))
+
+fn triple_quote() -> text:
+    # Built by concatenation: a literal triple quote inside this spec's own
+    # source would open a docstring here.
+    "\"" + "\"" + "\""
+
+# ---------------------------------------------------------------------------
+# The two hand-rolled heuristics this shared fact replaces, reproduced verbatim
+# in shape from src/app/sspec_maintain/source_facts.spl so the specs below can
+# demonstrate a case where each is WRONG and the shared fact is right. They are
+# test-local on purpose: nothing may import them.
+# ---------------------------------------------------------------------------
+
+fn legacy_count_sub(haystack: text, needle: text) -> i64:
+    if needle == "" or haystack == "":
+        return 0
+    var count: i64 = 0
+    var rest = haystack
+    val needle_len = needle.len()
+    while rest != "":
+        val index = rest.index_of(needle)
+        if index < 0:
+            return count
+        count = count + 1
+        if index + needle_len >= rest.len():
+            return count
+        rest = rest.substring(index + needle_len)
+    count
+
+fn legacy_enters_triple_string(line: text) -> bool:
+    """The `in_triple_string` parity heuristic: odd count of triple quotes."""
+    legacy_count_sub(line, triple_quote()) % 2 == 1
+
+fn legacy_mask_line(line: text) -> text:
+    """The per-line in_string/escaped character walk."""
+    var out = ""
+    var in_string = false
+    var escaped = false
+    for ch in line:
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+            out = out + " "
+            continue
+        if ch == "\"":
+            in_string = true
+            out = out + ch
+            continue
+        if ch == "#":
+            return out
+        out = out + ch
+    out
+
+fn joined(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+describe "Shared Simple source lexical facts":
+
+    it "gives a consumer one code line per raw source line":
+        """A consumer indexes code lines beside `source.split(...)`, so the two
+        lengths must agree — including for a trailing newline and for a file
+        with no newline at all."""
+        step("Read every fixture and compare the code-line count to the raw split")
+        val names = ["docstring_mentions.spl", "triple_quote_inside_comment.spl",
+            "escaped_quote.spl", "comment_mentions.spl", "indent_preserved.spl",
+            "crlf_lines.spl", "empty.spl", "no_trailing_newline.spl"]
+        for name in names:
+            val raw = fixture(name)
+            expect(simple_code_lines(raw).len()).to_equal(raw.split("\n").len())
+
+    it "blanks a multi-line docstring so its narrative is not read as code":
+        """A docstring that talks ABOUT skipping is not a skip. This is the case
+        no per-line scanner can decide, because the docstring's later lines
+        carry no quote of their own."""
+        step("Extract code lines from a docstring that mentions skip( and describe")
+        val code = code_of("docstring_mentions.spl")
+
+        step("The docstring's opening line keeps only an empty quote pair")
+        expect(code[1].trim()).to_equal("\"\"")
+
+        step("Its continuation lines are empty — no narrative survives")
+        expect(code[2].trim()).to_equal("")
+        expect(code[3].trim()).to_equal("")
+        expect(code[4].trim()).to_equal("")
+        expect(code[3].contains("skip(")).to_equal(false)
+
+        step("No line of the file offers the mentioned tokens to a consumer")
+        expect(joined(code).contains("skip(")).to_equal(false)
+        expect(joined(code).contains("paragraph")).to_equal(false)
+
+    it "keeps the real code that surrounded the docstring":
+        """Blanking must remove the narrative, not the file."""
+        step("The declarations before and after the docstring survive")
+        val code = code_of("docstring_mentions.spl")
+        expect(code[0]).to_contain("describe")
+        expect(code[5]).to_contain("it")
+        expect(code[6]).to_contain("to_equal")
+
+    it "reads a triple quote inside a comment without swallowing the file":
+        """The heuristic this replaces counts triple quotes per line and tests
+        the parity, so one triple quote written inside a COMMENT reads as an
+        unterminated docstring and every following line is discarded."""
+        step("Confirm the legacy parity heuristic is WRONG on this line")
+        val raw_first = fixture("triple_quote_inside_comment.spl").split("\n")[0]
+        expect(legacy_enters_triple_string(raw_first)).to_equal(true)
+
+        step("The shared fact removes the comment entirely")
+        val code = code_of("triple_quote_inside_comment.spl")
+        expect(code[0].trim()).to_equal("")
+
+        step("The following line is still present, and its skip( is real code")
+        expect(code[1]).to_contain("skip")
+
+    it "blanks the contents of a string carrying escaped quotes":
+        """An escaped quote must not end the literal early and expose its tail."""
+        step("Extract code lines from a string containing an escaped quoted call")
+        val code = code_of("escaped_quote.spl")
+        expect(code[0].trim()).to_equal("val quoted = \"\"")
+
+        step("The genuine call on the next line is untouched")
+        expect(code[1]).to_contain("skip")
+
+    it "removes both trailing and whole-line comments":
+        """A mention in a comment is documentation, not a call."""
+        step("Extract code lines from a file whose comments mention skip(")
+        val code = code_of("comment_mentions.spl")
+        expect(code[0].trim()).to_equal("val x = 1")
+        expect(code[1].trim()).to_equal("")
+        expect(code[2].trim()).to_equal("val y = 2")
+
+        step("No comment text reaches the consumer")
+        expect(joined(code).contains("skip(")).to_equal(false)
+        expect(joined(code).contains("mention")).to_equal(false)
+
+    it "preserves indentation so indent-based analysis still works":
+        """Consumers derive scenario nesting from leading width; the shared fact
+        pads to the original column rather than emitting bare tokens."""
+        step("Extract code lines from a nested describe/it/expect")
+        val code = code_of("indent_preserved.spl")
+        expect(code[0].starts_with("describe")).to_equal(true)
+        expect(code[1].starts_with("    it")).to_equal(true)
+        expect(code[2].starts_with("        expect")).to_equal(true)
+
+    it "handles CRLF line endings":
+        """A Windows checkout must not shift every fact by one line."""
+        step("Extract code lines from a CRLF fixture")
+        val code = code_of("crlf_lines.spl")
+        expect(code.len()).to_equal(3)
+        expect(code[0].trim()).to_equal("val a = \"\"")
+        expect(code[1].trim()).to_equal("val b = 1")
+
+    it "handles an empty source and a source with no trailing newline":
+        """Boundary inputs must produce a usable, correctly sized result."""
+        step("An empty file yields exactly one empty code line")
+        val empty = code_of("empty.spl")
+        expect(empty.len()).to_equal(1)
+        expect(empty[0]).to_equal("")
+
+        step("A single line with no newline yields exactly that line")
+        val single = code_of("no_trailing_newline.spl")
+        expect(single.len()).to_equal(1)
+        expect(single[0].trim()).to_equal("val only = 1")
+
+    it "drops a lexer error token instead of injecting its diagnostic text":
+        """An Error token's text is a message, not source. Emitting it would
+        hand a consumer words the file never contained."""
+        step("Extract code lines from a file using non-ASCII identifiers")
+        val code = code_of("utf8_names.spl")
+
+        step("No diagnostic wording is present in any line")
+        expect(joined(code).contains("unexpected")).to_equal(false)
+        expect(joined(code).contains("character:")).to_equal(false)
+
+        step("The surrounding readable code is still reported")
+        expect(code[0]).to_contain("val")
+        expect(code[1]).to_contain("ok")
+
+    it "reports the same line count the raw split reports":
+        """`source_facts_line_count` is the sizing contract consumers rely on."""
+        step("Count lines for a newline-free, a trailing-newline, and an empty source")
+        expect(source_facts_line_count("")).to_equal(1)
+        expect(source_facts_line_count("a")).to_equal(1)
+        expect(source_facts_line_count("a\n")).to_equal(2)
+        expect(source_facts_line_count("a\nb\n")).to_equal(3)
+
+describe "Shared lexical facts versus the hand-rolled scanners they replace":
+
+    it "decides a docstring mention that the per-line masker gets wrong":
+        """This is the discriminating case that justifies the migration: the
+        per-line masker sees no quote on a docstring's continuation line, so it
+        returns the narrative verbatim and a downstream scan fires on it."""
+        step("Take the docstring CONTINUATION line, which carries no quote at all")
+        val raw = fixture("docstring_mentions.spl").split("\n")[3]
+        expect(raw).to_contain("skip(")
+
+        step("The legacy per-line masker leaves the mention exposed")
+        expect(legacy_mask_line(raw).contains("skip(")).to_equal(true)
+
+        step("The shared fact removes it")
+        expect(code_of("docstring_mentions.spl")[3].contains("skip(")).to_equal(false)
+
+    it "keeps a genuine call that both approaches must agree is real":
+        """The migration must not trade false positives for false negatives."""
+        step("A real skip( outside any string survives both")
+        val raw = fixture("escaped_quote.spl").split("\n")[1]
+        expect(legacy_mask_line(raw).contains("skip")).to_equal(true)
+        expect(code_of("escaped_quote.spl")[1].contains("skip")).to_equal(true)
+
+describe "Shared lexical facts sabotage arm":
+
+    it "fails when the string-blanking is defeated":
+        """A spec that passes whether or not blanking happens proves nothing.
+        This arm asserts the fixture genuinely CONTAINS the text that the
+        oracle above requires to be absent, so a no-op implementation of
+        simple_code_lines would turn those examples red rather than green."""
+        step("The raw fixture really does contain the mention being suppressed")
+        expect(fixture("docstring_mentions.spl").contains("skip(")).to_equal(true)
+        expect(fixture("comment_mentions.spl").contains("skip(")).to_equal(true)
+        expect(fixture("escaped_quote.spl").contains("skip(now)")).to_equal(true)
+
+        step("And the raw fixture is not already equal to the blanked result")
+        expect(joined(code_of("docstring_mentions.spl")) ==
+            fixture("docstring_mentions.spl")).to_equal(false)

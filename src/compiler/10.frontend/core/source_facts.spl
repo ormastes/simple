@@ -1,0 +1,139 @@
+# Shared Simple-source lexical facts, published by CoreLexer.
+#
+# WHY THIS EXISTS
+# ---------------
+# Several tools outside the compiler need to know, for a line of Simple source,
+# "what here is CODE, and what is merely text inside a string or a comment?"
+# Every one of them answered it by hand-scanning characters, and every one of
+# them got it wrong in the same way. Two live examples in this tree:
+#
+#   src/app/sspec_maintain/source_facts.spl
+#       _mask_strings_and_comment  - a per-line in_string/escaped character
+#                                    walk, patched twice for "a mention inside
+#                                    a string literal is not a statement".
+#       in_triple_string           - tracked by counting `"""` per line and
+#                                    testing the parity. A `"""` that appears
+#                                    INSIDE an ordinary string literal makes
+#                                    that count odd and swallows the rest of
+#                                    the file.
+#   src/app/spipe_docgen/spipe_docgen/parser.spl
+#       1,939 lines and 255 text-scan call sites over the same grammar.
+#
+# A per-line scanner cannot answer the question, because the question is not
+# per-line: a `"""` docstring spans lines, and whether column 12 of line 40 is
+# code depends on line 3. CoreLexer already knows. This module publishes what
+# it knows, so consumers stop reimplementing it.
+#
+# WHAT IT PUBLISHES
+# -----------------
+# `simple_code_lines(source)` returns one entry per source line holding only
+# that line's CODE, with string literal CONTENT replaced by an empty pair of
+# quotes and comments removed entirely. Column positions are preserved by
+# left-padding, so leading indentation — and therefore any indent-based
+# analysis a consumer already does — survives unchanged.
+#
+# LEXER CONTRACT THIS RELIES ON (measured, not assumed; see
+# test/01_unit/compiler/frontend/core_source_facts_spec.spl):
+#   - comments produce no token at all;
+#   - a `"""` docstring is one ordinary StringLit token on its opening line;
+#   - a StringLit's text is its content WITHOUT the surrounding quotes, so the
+#     replacement `""` is never longer than the source it stands in for and
+#     pad-to-column can never truncate a following token;
+#   - line and column are 1-based and column marks the token's first character;
+#   - end of input is TokenKind.Eof (190) and `lex_next` returns it forever.
+#
+# SCOPE - what this is NOT
+# ------------------------
+# This is a lexical fact, not a grammar. It says where the code is; it does not
+# say what the code means. No consumer may read it as shared Simple grammar,
+# which the parser-framework lane explicitly does not claim. See
+# doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md.
+#
+# Comments are DROPPED, so a consumer whose fact lives in a comment
+# (`# @req REQ-1`, `# @step: ...`) must keep reading the raw line for it. That
+# is a deliberate boundary, not an oversight: mixing the two is what made the
+# hand-rolled scanners ambiguous in the first place.
+
+use compiler.frontend.core.lexer.*
+
+# Token kind codes, from src/compiler/10.frontend/core/lexer_types.spl.
+# Named here so the scan reads as intent rather than as magic integers.
+val SOURCE_FACTS_TOK_STRING: i64 = 3
+val SOURCE_FACTS_TOK_NEWLINE: i64 = 180
+val SOURCE_FACTS_TOK_INDENT: i64 = 181
+val SOURCE_FACTS_TOK_DEDENT: i64 = 182
+val SOURCE_FACTS_TOK_EOF: i64 = 190
+# An Error token's `text` is a DIAGNOSTIC MESSAGE, not source. Measured: a
+# non-ASCII identifier such as `val 안녕 = 1` lexes to two kind-191 tokens whose
+# text is "unexpected character: 안". Placing that into the code line would
+# inject words the source never contained, so a consumer scanning for a token
+# could match the diagnostic instead. Error tokens are dropped; the resulting
+# gap is honest (the lexer could not read that span) where the message is not.
+val SOURCE_FACTS_TOK_ERROR: i64 = 191
+
+# A source with N newline characters has N+1 lines, which is exactly what
+# `text.split("\n")` yields — consumers index the two side by side, so the two
+# lengths must agree even for a trailing newline.
+fn source_facts_line_count(source: text) -> i64:
+    var count: i64 = 1
+    for ch in source:
+        if ch == "\n":
+            count = count + 1
+    count
+
+fn simple_code_lines(source: text) -> [text]:
+    """Code-only text per source line: string CONTENT blanked, comments removed.
+
+    Indentation and column positions are preserved. Element i corresponds to
+    `source.split("\n")[i]`.
+    """
+    val total = source_facts_line_count(source)
+    var lines: [text] = []
+    var seed: i64 = 0
+    while seed < total:
+        lines.push("")
+        seed = seed + 1
+    if source == "":
+        return lines
+
+    lex_init(source)
+    # The lexer reports Eof forever rather than terminating, so the loop is
+    # bounded by an explicit budget as well: a malformed source that somehow
+    # never reaches Eof must end the scan, not hang a consumer.
+    val budget = source.len() * 4 + 64
+    var steps: i64 = 0
+    while steps < budget:
+        steps = steps + 1
+        val kind = lex_next()
+        if kind == SOURCE_FACTS_TOK_EOF:
+            break
+        if kind == SOURCE_FACTS_TOK_NEWLINE or kind == SOURCE_FACTS_TOK_INDENT or
+                kind == SOURCE_FACTS_TOK_DEDENT or kind == SOURCE_FACTS_TOK_ERROR:
+            continue
+        val line = lex_token_line()
+        if line < 1 or line > total:
+            continue
+        var piece = lex_token_text()
+        if kind == SOURCE_FACTS_TOK_STRING:
+            # The content is what a consumer must not see; the quotes are kept
+            # so a scan for a quoted form still finds a quoted form.
+            piece = "\"\""
+        val index = line - 1
+        var current = lines[index]
+        val col = lex_token_col()
+        if current.len() >= col - 1:
+            # A token whose recorded column has already been consumed can only
+            # happen when a replacement ran wider than its source. Separate the
+            # two rather than letting them fuse into one spurious identifier.
+            if current != "":
+                current = current + " "
+        else:
+            while current.len() < col - 1:
+                current = current + " "
+        lines[index] = current + piece
+    lines
+
+export SOURCE_FACTS_TOK_STRING, SOURCE_FACTS_TOK_NEWLINE
+export SOURCE_FACTS_TOK_INDENT, SOURCE_FACTS_TOK_DEDENT, SOURCE_FACTS_TOK_EOF
+export SOURCE_FACTS_TOK_ERROR
+export source_facts_line_count, simple_code_lines
