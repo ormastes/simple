@@ -20,7 +20,7 @@ use std.spec.step
 use std.spec
 use std.spec.step
 use std.io_runtime.{file_read}
-use app.cli.native_build_main.{native_build_collect_diagnostics}
+use app.cli.native_build_main.{native_build_collect_diagnostics, native_build_normalize_exit_code}
 
 
 fn seed_wrapper_marker(src: text) -> text:
@@ -94,6 +94,19 @@ describe "native-build / bootstrap CLI entry source contract":
         val eof = native_build_collect_diagnostics("noise\nerror: eof")
         expect(eof.len()).to_equal(1)
         expect(eof[0]).to_equal("error: eof")
+
+    it "restores the sign of a zero-extended worker exit status":
+        ## The status is an i32 that arrives zero-extended, so -1 presents as
+        ## 4294967295 and a signal death -(128+signo) presents just below it.
+        ## Testing only for 4294967295 (what this did before 2026-09-05) left a
+        ## SIGSEGV surfacing as the unreadable 4294967157.
+        expect(native_build_normalize_exit_code(0)).to_equal(0)
+        expect(native_build_normalize_exit_code(1)).to_equal(1)
+        expect(native_build_normalize_exit_code(139)).to_equal(139)
+        expect(native_build_normalize_exit_code(4294967295)).to_equal(-1)
+        expect(native_build_normalize_exit_code(4294967157)).to_equal(-139)
+        expect(native_build_normalize_exit_code(4294967158)).to_equal(-138)
+        expect(native_build_normalize_exit_code(2147483647)).to_equal(2147483647)
 
     it "keeps the core-dump line that names a crashed worker":
         ## `timeout: the monitored command dumped core` is the ONLY evidence that

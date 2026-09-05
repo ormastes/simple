@@ -270,6 +270,23 @@ fn native_build_frontend_cache_dir_arg(args: [text]) -> text:
         i = i + 1
     ""
 
+fn native_build_normalize_exit_code(raw: i64) -> i64:
+    """The worker's exit status, sign-restored.
+
+    It is an i32 that arrives ZERO-EXTENDED across the wrapper boundary, so a
+    genuine -1 presents as 4294967295 (0xFFFFFFFF). Every `code == -1` test
+    downstream therefore never matched and BOTH abnormal-exit branches were dead
+    code: an operator saw the bare number 4294967295 instead of this file's own
+    accurate message.
+
+    Widened 2026-09-05 from an equality test on 4294967295 alone: `rt_process_wait`
+    now reports a signal death as `-(128+signo)`, and a SIGSEGV (-139) would
+    otherwise have surfaced as the equally unreadable 4294967157.
+    See doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md"""
+    if raw > 2147483647:
+        return raw - 4294967296
+    raw
+
 fn native_build_line_is_diagnostic(line: text) -> bool:
     """True for lines a caller greps for when deciding why native-build failed.
 
@@ -695,15 +712,7 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     if warm_receipt.eligible:
         env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, warm_receipt.candidate_path)
     val (stdout, stderr, code_raw) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
-    # The worker's exit status is an i32 that arrives ZERO-EXTENDED across the
-    # wrapper boundary, so a genuine -1 presents as 4294967295 (0xFFFFFFFF).
-    # Every `code == -1` test below therefore never matched and BOTH
-    # abnormal-exit branches were dead code: an operator saw the bare number
-    # 4294967295 from the `else` instead of this file's own accurate message
-    # ("wrapper exited abnormally (signal or wait failure, code -1)").
-    # Normalised once here so all downstream comparisons -- including the
-    # `code == 0` success checks -- see a real signed status.
-    val code = if code_raw == 4294967295: -1 else: code_raw
+    val code = native_build_normalize_exit_code(code_raw as i64)
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
     val output_ok = output_path != "" and file_exists(output_path)
@@ -743,6 +752,16 @@ pub fn run_native_build_worker(args: [text]) -> i64:
             eprint "  For a backtrace, let the crash reporter keep cores for unpackaged binaries, then re-run:"
             eprint "    printf '[main]\\nunpackaged=true\\n' > ~/.config/apport/settings"
             eprint "    apport-unpack /var/crash/<report>.crash /tmp/u && gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt"
+        elif code < -128:
+            # -(128+signo) from rt_process_wait: the wrapper really was killed,
+            # and the signal number survived. 139 = SIGSEGV, 137 = SIGKILL
+            # (an out-of-memory reaper), 143 = SIGTERM.
+            val signo = 0 - code - 128
+            eprint "error: native-build worker was KILLED by signal {signo} before producing a binary; NOT a compile failure."
+            if signo == 11 or signo == 6:
+                eprint "  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash)."
+            elif signo == 9 or signo == 15:
+                eprint "  hint: check for an out-of-memory reaper (earlyoom/systemd-oomd: 'journalctl -t earlyoom')."
         elif code == -1 and not stderr.contains("[TIMEOUT:"):
             # -1 without the wrapper's [TIMEOUT:] marker is NOT a timeout: the
             # wrapper died by a signal (status.code() is None) or the wait

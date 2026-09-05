@@ -188,11 +188,27 @@ gdb <stage2-admitted/simple> /tmp/u/CoreDump -batch -ex bt
 
 1. Re-run Stage 3 and take the backtrace. **This supersedes the module bisect**
    in the previous section — do not bisect before reading the trace.
-2. Port the signal fix to the Rust twins named above so `-(128+signo)` survives
-   there too (`rt_*` dual-implementation gap; the C half is already done). Note
-   `native_build_main.spl` currently only normalises the zero-extended
-   `4294967295` back to `-1`, so a `-139` would surface as `4294967157` — that
-   normalisation has to be widened in the same change.
+2. ~~Port the signal fix to the Rust twins~~ **DONE 2026-09-05.** A
+   `wait_status_to_code` helper in each of
+   `runtime/src/value/sffi/env_process.rs` and
+   `compiler/src/interpreter_extern/system.rs` replaces the four
+   `status.code().unwrap_or(-1)` sites in the two `rt_process_wait`
+   implementations, matching `runtime_process.c`. Scoped deliberately: the seed
+   has 28 `code().unwrap_or(-1)` sites and only those four are
+   `rt_process_wait`; `native_command_run`, `rt_process_execute` and the linker
+   invocations keep their existing contract.
+   The caller-side hazard this note predicted was real and is fixed in the same
+   change: `native_build_normalize_exit_code` (extracted from the inline test on
+   `4294967295` alone) now restores the sign across the whole zero-extended
+   range, so `-139` reads as `-139` rather than `4294967157`, and a new
+   `code < -128` arm names the signal — SIGSEGV/SIGABRT points at the core,
+   SIGKILL/SIGTERM at an OOM reaper.
+   `cargo check --release --bin simple` clean (0 errors); spec 11/11.
+   **Not in the run starting now:** without `--full-bootstrap` the bootstrap
+   never runs cargo and reuses the existing seed, and rebuilding
+   `target/bootstrap/simple` mid-flight would swap the binary out from under a
+   concurrent session. The Rust half takes effect on the next full bootstrap;
+   the pending run's value is the backtrace, which does not depend on it.
 3. Lead, not a hypothesis: the last file before the crash,
    `src/compiler/driver/pipeline_fn.spl`, chased the builtins `Option` / `text`
    / `i64` as re-exports through `compiler.common._Attributes.decl_attrs` and
