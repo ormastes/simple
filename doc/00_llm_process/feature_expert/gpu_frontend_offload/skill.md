@@ -39,7 +39,7 @@ frontend waves that follow the parser_framework landing.
 - Sosix host-proxy access for CUDA/Vulkan/Metal is owned by the sosix lane; Wave 4 consumes it.
 - `simple.sdn frontend.offload*` is documented but unread until GFO-005 threads `ProjectContext` into the parse pipeline; the driver forwards `config: ""`.
 - Warm-receipt rows and the driver receipt both derive from `frontend_offload_rows` — never re-derive the decision elsewhere.
-- `auto` is a seed keyword: `FrontendOffloadSwitch` must be constructed positionally until `doc/08_tracking/bug/auto_keyword_rejected_as_named_argument_label_2026-09-05.md` is fixed.
+- `auto` as a named-argument label needs a seed at or after #377 (`doc/08_tracking/bug/auto_keyword_rejected_as_named_argument_label_2026-09-05.md`, closed 2026-09-06); the deployed seed carries it.
 - The deployed `bin/simple` is the Rust seed; driver-level behavior is only observable on a self-hosted binary. Unit specs prove the resolver/decision without a deploy.
 - Verify one spec at a time: `SIMPLE_TIMEOUT_SECONDS=900 bin/simple test <spec> --no-session-daemon`, read the `Results:` line; `sh scripts/audit/direct-env-runtime-guard.shs --working` must stay clean.
 

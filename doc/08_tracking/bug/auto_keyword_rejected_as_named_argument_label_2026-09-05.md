@@ -1,6 +1,6 @@
 # `auto` is a hard keyword: rejected as a named-argument label
 
-**Date:** 2026-09-05 · **Status:** FIXED 2026-09-05 (seed parser; needs a rebuilt/deployed seed) · **Class:** reserved token rejected at the USE site
+**Date:** 2026-09-05 · **Status:** CLOSED 2026-09-06 (fixed in #377, seed deployed 2026-09-05 20:09, workaround dropped) · **Class:** reserved token rejected at the USE site
 (same family as `examples`/`and_then` 2026-08-10, `move` 2026-08-15, `admit`/`assume` 2026-08-21).
 
 ## Symptom
@@ -58,3 +58,7 @@ Regression spec: `test/01_unit/compiler/parser_auto_contextual_keyword_spec.spl`
 (3 examples; fails to load on a pre-fix seed). The positional workaround in
 `frontend_offload_switch.spl` stays until the deployed `bin/simple` seed carries
 this fix.
+
+## Closed (2026-09-06)
+
+The deployed seed (`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f…`) carries the fix; `frontend_offload_switch.spl` now constructs `FrontendOffloadSwitch` with named arguments at both sites and the positional workaround is gone.
