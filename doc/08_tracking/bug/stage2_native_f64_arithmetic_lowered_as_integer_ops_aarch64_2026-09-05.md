@@ -104,3 +104,43 @@ and is being discarded at instruction selection.
 above in full (the `f`/`g` table and the four bit-pattern predictions). Any
 file containing `val a = 1.5` / `val b = 2.25` / `print "{a + b}"` reproduces it
 in one line.
+
+## Why it happens: the guard exists and is not firing
+
+This is NOT a missing feature. The exact defect is already anticipated in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`:
+
+- `local_is_float` (`:677`) carries the docstring: "HIR `.type_` is frequently
+  nil on the flat path, so float-directed binop lowering must key off the MIR
+  local type. Without this, arithmetic on floats gets an i64 dest from
+  `infer_binop_type` and the backend emits integer add/mul on double BIT
+  PATTERNS (garbage results)."
+- Its single caller (`:3081`) overrides `infer_binop_type`'s result for
+  `Add|Sub|Mul|Div|Mod|Pow` when either operand is float.
+
+That is precisely the observed failure, and the guard is meant to prevent it.
+So the operands are not being recognised as float: `self.builder.local_type(local)`
+must be returning nil, or a non-F32/F64 kind, for f64 locals **on the
+BOOTSTRAP-FLAT path that Stage 2 uses**.
+
+That places this in the same family as the other flat-path defects found today
+rather than making it an isolated arithmetic bug:
+
+- `current_module_id` was never set on the flat paths (fixed today; upstream
+  reached the same conclusion in PR #369) — flat lowering skips per-module
+  identity setup that `lower_module` performs.
+- `HirType.type_` "is frequently nil on the flat path" per the docstring above.
+- The Stage-3 crash window sits in Dict-reading passes over
+  `Dict<text, HirModule>` under full-closure pressure.
+
+The common thread is that the flat bootstrap route does not carry the type and
+identity metadata the normal route does, and each consumer discovers this
+separately.
+
+### Next step
+
+Do not patch the arithmetic site. Determine why `builder.local_type()` yields no
+float kind for an f64 local on the flat path — whether the local is registered
+with a type at all, and where its MirType is assigned. A fix there repairs this
+defect and plausibly others in the same family, whereas special-casing the binop
+would leave the metadata gap intact.
