@@ -4,6 +4,7 @@
 use std.scv.lifecycle.model.{Approval, GateRun, GateBundle, LifecycleResult, lifecycle_ok, lifecycle_error}
 use app.sj.gate_manifest.{GateManifestPlan}
 use app.sj.lifecycle_policy.{parse_canonical_lifecycle_vcs_policy, lifecycle_policy_ref}
+use app.sj.operation.{SJ_OP_INTEGRATE, legacy_argv_operation, vcs_operation_valid}
 
 struct IntegrateRequest:
     change_id: text
@@ -105,4 +106,89 @@ fn plan_integration_with_policy(request: IntegrateRequest, approvals: [Approval]
             return _rejected(request, "SJ_GATE_EVIDENCE_MISSING", "required manifest gate lacks exact retained evidence: " + invocation.gate_id)
     base
 
+# Legacy-argv bridge: a compatibility argv line is translated into the typed
+# operation vocabulary and planned as a DRY RUN. This path never mutates a ref,
+# never invokes a backend, and has no execution branch to fall through to.
+struct LegacyPlanReport:
+    verdict: text
+    exit_code: i64
+    planned: i64
+    operation_kind: text
+    entity_id: text
+    target_ref: text
+    dry_run: bool
+    admitted: bool
+    code: text
+    reason: text
+    lines: [text]
+
+fn _legacy_plan_error(argv: [text], detail: text) -> LegacyPlanReport:
+    val lines = [
+        "sj typed dry-run plan (no refs are mutated)",
+        "  legacy argv     : " + argv.join(" "),
+        "ERROR — nothing was checked (" + detail + ")"
+    ]
+    LegacyPlanReport(
+        verdict: "ERROR", exit_code: 2i64, planned: 0i64,
+        operation_kind: "", entity_id: "", target_ref: "", dry_run: true,
+        admitted: false, code: "", reason: detail, lines: lines
+    )
+
+fn legacy_argv_integrate_plan(argv: [text]) -> LegacyPlanReport:
+    val operation = legacy_argv_operation(argv)
+    if not vcs_operation_valid(operation):
+        return _legacy_plan_error(argv, "legacy argv produced no valid typed operation")
+    val kind = operation.kind
+    if kind != SJ_OP_INTEGRATE:
+        return _legacy_plan_error(argv, "legacy argv maps to typed `" + kind + "`, which has no protected integration plan")
+    val entity_id = operation.entity_id
+    val target_ref = operation.target_ref
+    val dry_run = operation.dry_run
+    val reason = operation.reason
+    val request = IntegrateRequest(
+        change_id: entity_id, revision_id: "", base_revision_id: "",
+        expected_remote_revision: "", observed_remote_revision: "",
+        target_ref: target_ref, policy_digest: "", gate_profile: "",
+        actor: "", authority: "", dry_run: dry_run
+    )
+    val empty_bundle = GateBundle(
+        gate_bundle_id: "", revision_id: "", gate_run_ids: [], approval_ids: [],
+        complete: false, bundle_digest: "", policy_digest: ""
+    )
+    # No committed protected-ref policy source exists in this tree, so the
+    # protected-target predicate cannot be established and must fail closed.
+    val plan = plan_integration(request, [], empty_bundle, false)
+    val admitted = plan.admitted
+    val code = plan.code
+    val message = plan.message
+    var lines = [
+        "sj typed dry-run plan (no refs are mutated)",
+        "  legacy argv     : " + argv.join(" "),
+        "  typed operation : " + kind,
+        "  entity id       : " + entity_id,
+        "  target ref      : " + target_ref,
+        "  dry run         : " + (if dry_run: "true" else: "false"),
+        "  operation reason: " + reason,
+        "  protected-ref policy: not consulted (no committed protected-ref policy source)",
+        "  plan admitted   : " + (if admitted: "true" else: "false"),
+        "  plan code       : " + code,
+        "  plan message    : " + message
+    ]
+    if admitted:
+        for stepname in plan.steps:
+            lines.push("  would perform    : " + stepname)
+        lines.push("PASS — 1 operation(s) planned, admitted as dry-run only")
+        return LegacyPlanReport(
+            verdict: "PASS", exit_code: 0i64, planned: 1i64,
+            operation_kind: kind, entity_id: entity_id, target_ref: target_ref,
+            dry_run: dry_run, admitted: true, code: code, reason: reason, lines: lines
+        )
+    lines.push("FAIL — 1 operation(s) planned, not admitted: " + code)
+    LegacyPlanReport(
+        verdict: "FAIL", exit_code: 1i64, planned: 1i64,
+        operation_kind: kind, entity_id: entity_id, target_ref: target_ref,
+        dry_run: dry_run, admitted: false, code: code, reason: reason, lines: lines
+    )
+
 export IntegrateRequest, IntegratePlan, plan_integration, plan_integration_with_manifest, plan_integration_with_policy
+export LegacyPlanReport, legacy_argv_integrate_plan
