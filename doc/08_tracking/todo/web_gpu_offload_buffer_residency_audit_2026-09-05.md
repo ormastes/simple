@@ -1,0 +1,131 @@
+# Web renderer GPU offload / buffer residency audit — open items
+
+Date: 2026-09-05. Audit of the web render path
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl`
+-> `src/lib/gc_async_mut/gpu/engine2d/**`) for host/device boundary crossings
+and buffer-location defects.
+
+Two defects found in the same audit were FIXED and are not listed here (the
+double ancestor walk in `content_paint_hidden_by_ancestor`, and the repeated
+`+`-on-text gradient-stop accumulator). The already-recorded route-key defect
+(`web_draw_ir_route_key_serializes_whole_scene_per_frame_2026-09-05.md`) is out
+of scope here and is NOT restated.
+
+Nothing below was measured with a timer: this host has no Vulkan/Metal device
+available to this session, so every cost figure is a call/iteration count read
+off the source, not a wall-clock measurement.
+
+## 1. A whole Engine2D (and therefore every device buffer) is created and destroyed per route call
+
+`simple_web_layout_engine2d_fast.spl:265-281`
+(`_simple_web_layout_render_draw_ir_composition`) does
+`Engine2D.create_with_backend_fast(...)` … `engine.shutdown()` for **every**
+call, and the presenter's upload route
+(`simple_web_html_engine2d_presenter.spl:455-462`) does the same with
+`Engine2D.create_requested_backend(...)`. Per frame that is:
+
+| phase | engine create/destroy pairs per frame |
+|---|---|
+| sampling (`state.complete == false`, first 3 frames per route key) | 4 — gpu route (1) + upload route's software oracle (1) + upload route's presenter engine (1), and the oracle engine again on the second ordering leg |
+| steady, `should_offload == true` | 1 |
+| steady, `should_offload == false` | 3 (software oracle + presenter engine, per frame) |
+
+`VulkanBackend.init` / `MetalBackend.init` allocate the framebuffer, staging
+and font buffers on every one of those inits, at an extent that has not
+changed between frames — item 2(d) of the audit brief, at the coarsest
+possible granularity. The warm pools that `backend_metal_font.spl`
+(`packed_pool`, :215-232) and `backend_vulkan.spl` (`font_params_pool`,
+:285-286) added are torn down with the engine each frame, so they can only ever
+warm up *within* one frame.
+
+Not fixed: an engine cache keyed on `(backend, width, height)` needs a real
+device to prove it does not leak or reuse a poisoned context across frames, and
+the lifetime contract (`_discard_pending`, `completion_unknown`) is device
+state. This is the largest item in the audit and should be the next piece of
+work on this path.
+
+## 2. Full-surface per-pixel interpreted loops on every GPU-route frame
+
+- `simple_web_layout_engine2d_fast.spl:379` `_web_draw_ir_pixel_fingerprint` —
+  called at :504 on **every** steady-offload frame over the entire readback.
+  One interpreted loop iteration per pixel: 480,000 at 800x600, 8,294,400 at
+  3840x2160.
+- `simple_web_layout_engine2d_fast.spl:369` `_web_draw_ir_pixels_equal` —
+  same shape, on every steady non-offload frame (and twice per sampling frame,
+  at :563-565).
+- `engine2d/backend.spl:17-23` `engine2d_readback_with_identity` — sums every
+  pixel to build `Engine2DReadback.checksum` at every readback construction,
+  whether or not any caller reads the field.
+
+Not fixed: the obvious substitution — compare `Engine2DReadback.checksum`
+instead of hashing the pixels — is unsafe. That checksum is a plain modular
+SUM (`backend.spl:21`), so it is order-independent and trivially collidable,
+and the route code deliberately chose a collision-resistant identity (see the
+comment at `_web_draw_ir_key`). Making this cheap needs a bulk `rt_*` hash over
+the pixel block computed once at readback time and reused by both the
+fingerprint and the equality check; that is a runtime addition, not a local
+edit, and it cannot be validated against a device readback here.
+
+## 3. Host staging buffers allocated and freed per text batch (Metal)
+
+`backend_metal_font.spl:357` (`rt_alloc(packed_bytes)` / `rt_free` at :364) and
+`:367` (`rt_alloc(4)` / `rt_free` at :379) allocate and free host memory on
+every packed font dispatch, i.e. once per text batch per frame. The *device*
+side of exactly this buffer is already pooled by `_packed_slot` (:214-224)
+against a fixed `METAL_FONT_PACKED_MAX_BYTES` cap, so the host staging buffer
+could be pooled the same way with the same cap and the 4-byte word buffer could
+be a single long-lived allocation.
+
+Not fixed: reaching `_draw_packed` requires a live `MetalSession` with a
+compiled `pipe_font_atlas_composite_packed`, so no spec on this host can prove
+the change is behaviour-preserving. Cost is 2 host malloc/free pairs per text
+batch — real but small next to items 1 and 2.
+
+## 4. `gpu_lut_pack_dense` writes one FFI call per palette entry
+
+`engine2d/backend_metal_runtime_ops.spl:68-71` loops `rt_ptr_write_i32` once
+per palette entry while the bulk helper `rt_write_u32s_to_raw`
+(`metal_write_u32s_to_ptr`, :28-30) exists. The comment at :40-46 says this is
+deliberate for the upload-only LUT pilot. Recorded for completeness only:
+palettes are ≤256 entries and this is not on the web render path. No action
+proposed.
+
+## 5. Linear scan of the image list inside the per-node paint loop
+
+`simple_web_html_layout_renderer_paint_layout.spl:2185`
+`_html_draw_ir_image_index` scans `images` linearly and is called at :2263,
+:2403 and :3098 — the last of those inside the per-node × per-background-layer
+loop of `_html_draw_ir_commands`. Cost is O(nodes × layers × images) per frame.
+
+Not fixed: replacing it with a URI→index dict built once per frame is
+straightforward but changes a signature used by three call sites plus the
+background-layer lowering, and `images` is typically single-digit in every
+existing fixture, so the win could not be demonstrated by any spec available
+here. Worth doing when an image-heavy fixture exists to measure against.
+
+## 6. `build_ancestor_clip_cache` is built twice per frame
+
+`simple_web_html_layout_renderer_paint_layout.spl:2755`
+(`_html_draw_ir_visible_nodes`) and `:2825` (`_html_draw_ir_commands`) each
+build the cache, and `simple_web_html_layout_renderer.spl:1478,1481` calls both
+back to back with identical arguments. One redundant O(node_count) pass per
+frame (it short-circuits to empty when no node declares an overflow clip).
+
+Not fixed: threading the cache through changes the signature of both private
+functions and a third call site at `simple_web_html_layout_renderer.spl:2435`
+that calls `_html_draw_ir_visible_nodes` alone — more churn than the one linear
+pass is worth without a measurement to justify it.
+
+## 7. The steady non-offload route round-trips the device purely to verify
+
+`simple_web_layout_engine2d_fast.spl:539-548`: when `should_offload` is false
+the route still renders the software oracle, uploads it to the device, reads
+the full surface back, compares it pixel-for-pixel, and then returns pixels
+that are equal to the oracle either way. The device work is pure verification
+and the readback is full-surface where the brief's item 2(c) would want a
+changed-region readback.
+
+Not fixed: this is the designed policy (an honest A/B that keeps proving the
+device still agrees), not an oversight, and changing it is a policy decision
+rather than a defect fix. Recorded so the cost is visible: one full upload plus
+one full readback per frame on the non-offload steady state.

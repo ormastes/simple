@@ -5,6 +5,7 @@ use std.common.web.browser_renderer_protocol.{
     BrowserTextInputOverlay, browser_text_input_overlay_empty
 }
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use common.string_builder.{StringBuilder}
 # For the level-gated SIMPLE_TRACE_FONT_STYLE consumption trace below;
 # same import the sibling SIMPLE_TRACE_FONT_STYLE traces use in
 # simple_web_html_layout_renderer_core.spl:3.
@@ -89,12 +90,26 @@ fn content_hidden_by_ancestor(nodes: [HNode], styles: [Style], i: i32) -> bool:
 fn content_paint_hidden_by_ancestor(
     nodes: [HNode], styles: [Style], i: i32
 ) -> bool:
-    if content_hidden_by_ancestor(nodes, styles, i) or styles[i].opacity_pct <= 0:
+    if styles[i].opacity_pct <= 0:
         return true
     var cur = nodes[i].parent as i32
-    # cpu-lane-loop-ok: second depth-bounded ancestor walk, opacity_pct <= 0 only; bound is DOM depth, not an element count, so this is a detector false positive under the bound-based rule
+    # cpu-lane-loop-ok: ONE depth-bounded ancestor walk testing both hiding
+    # conditions. This used to be TWO walks of the same chain — a
+    # content_hidden_by_ancestor call followed by an opacity-only walk — which
+    # doubled the traversals of the hottest predicate in paint() (11 call
+    # sites, most of them once per node per frame). Bound is DOM depth, not an
+    # element count, so this is a detector false positive under the
+    # bound-based rule.
     while cur >= 0:
-        if styles[cur].opacity_pct <= 0:
+        # An <iframe> is a replaced element: its DOM subtree is NOT laid out or
+        # painted in the parent document — see content_hidden_by_ancestor above
+        # for the full note.
+        if (
+            styles[cur].display == "none" or
+            styles[cur].content_visibility_hidden or
+            nodes[cur].tag == "iframe" or
+            styles[cur].opacity_pct <= 0
+        ):
             return true
         cur = nodes[cur].parent as i32
     false
@@ -1693,18 +1708,22 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     # (decl_apply), so the legacy 2-color "background-image" prop below
     # renders it as "none" and the element painted no pixels at all.
     val gradient_stop_count = st.background_gradient_stop_colors.len()
-    var gradient_stops_raw = ""
+    # Accumulate through StringBuilder rather than `raw = raw + piece`: this
+    # runs once per gradient-bearing node per frame, and repeated `+` on text
+    # recopies the whole accumulated prefix on every stop.
+    var gradient_stops_builder = StringBuilder.new()
     var gsi = 0
     while gsi < gradient_stop_count:
         if gsi > 0:
-            gradient_stops_raw = gradient_stops_raw + ","
-        gradient_stops_raw = gradient_stops_raw + "{st.background_gradient_stop_colors[gsi]}"
+            gradient_stops_builder.push(",")
+        gradient_stops_builder.push("{st.background_gradient_stop_colors[gsi]}")
         gsi = gsi + 1
     gsi = 0
     while gsi < st.background_gradient_stop_positions.len():
-        gradient_stops_raw = gradient_stops_raw + ","
-        gradient_stops_raw = gradient_stops_raw + "{st.background_gradient_stop_positions[gsi]}"
+        gradient_stops_builder.push(",")
+        gradient_stops_builder.push("{st.background_gradient_stop_positions[gsi]}")
         gsi = gsi + 1
+    val gradient_stops_raw = gradient_stops_builder.build()
     val shadow_parse = parse_box_shadow_layers(
         st.box_shadow_raw, st.fg
     )
