@@ -177,6 +177,21 @@ it previously did one per frame. One discard in that window was a genuine
 churn. Note `web_draw_ir_gpu_route_sample` has no production caller, so the
 production benefit is the execution render and the presenter.
 
+**Consequence to be explicit about: parked engines are process-lifetime
+resident.** Both caches expose a drain (`web_draw_ir_engine_cache_drain`,
+`web_presenter_engine_cache_drain`, the first reachable through
+`web_draw_ir_gpu_route_policy_reset`), and **no production caller invokes
+either** — only specs do. So up to 4 parked engines per cache, each holding a
+framebuffer, staging buffer and font atlas, stay alive for the life of the
+process. At 4K that is not a rounding error.
+
+This is a deliberate trade, not an oversight, and the peak footprint is not
+worse than before: the same buffers previously existed during every frame and
+were freed after. What changed is that they are now held between frames instead
+of reallocated. The open work is wiring a drain into a host shutdown or
+surface-teardown path so a long-running host can release them; until that
+exists, treat the residency as the known cost of this item.
+
 **Item 7 — removed as waste.** In the steady non-offload branch both outcomes
 published the CACHED evidence, `pixels_match` was never updated, no receipt was
 written, and the returned pixels equalled the oracle either way, so nothing
@@ -198,8 +213,10 @@ written up as a live compiler defect that would have meant `engine.shutdown()`
 ran twice per present. **It did not reproduce.** Two minimal cases on the same
 2026-09-05 seed — a plain `Result<i64, text>`, and a class-valued
 `Result<Eng, text>` whose arm calls a method — each executed the arm exactly
-once. The likeliest explanation is that the enclosing function ran twice and
-the effect was misattributed to the match.
+once. **The cause of what was observed has NOT been established** — only that
+the stated defect does not reproduce in isolation. Do not substitute a
+confident alternative explanation either; that would repeat the same mistake
+one level up.
 
 No bug record was filed, because filing an unreproducible compiler defect is
 worse than filing nothing: it becomes a cited excuse for workarounds. The park
