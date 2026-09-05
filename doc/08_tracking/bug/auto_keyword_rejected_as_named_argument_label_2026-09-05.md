@@ -1,6 +1,6 @@
 # `auto` is a hard keyword: rejected as a named-argument label
 
-**Date:** 2026-09-05 · **Status:** OPEN · **Class:** reserved token rejected at the USE site
+**Date:** 2026-09-05 · **Status:** FIXED 2026-09-05 (seed parser; needs a rebuilt/deployed seed) · **Class:** reserved token rejected at the USE site
 (same family as `examples`/`and_then` 2026-08-10, `move` 2026-08-15, `admit`/`assume` 2026-08-21).
 
 ## Symptom
@@ -47,3 +47,14 @@ Make `auto` contextual in the named-argument position, exactly as
 Regression spec `test/01_unit/compiler/parser_auto_contextual_keyword_spec.spl`
 (to add with the fix) parses `P(auto: true)`; then drop the positional
 workaround in `frontend_offload_switch.spl`.
+
+## Fix (2026-09-05)
+
+`src/compiler_rust/parser/src/expressions/helpers.rs`: `TokenKind::Auto` added to
+the named-argument label match (beside `Examples`/`AndThen`) and to the
+`is_likely_named_arg` token list, so `P(auto: x)` parses and a missing comma
+before `auto` reports the specific "expected comma before argument" error.
+Regression spec: `test/01_unit/compiler/parser_auto_contextual_keyword_spec.spl`
+(3 examples; fails to load on a pre-fix seed). The positional workaround in
+`frontend_offload_switch.spl` stays until the deployed `bin/simple` seed carries
+this fix.
