@@ -23,7 +23,7 @@ it would deliver is labelled above `Unverified`.
 | wave | addendum deliverable | entry condition in this tree | current status |
 |---|---|---|---|
 | 1 | strict-off compiler proof (`release-minimal\|symbolized\|fault-capsule\|probeable`) | a deployable self-hosted `bin/simple` on this host | BLOCKED — bootstrap-only binary |
-| 2 | import/normalization: ELF core, minidump, Mach-O, firmware capsule, T32 importer; **bundle writer** | Wave 0 GREEN (0.1 + 0.2) | not started — writer admissible after 0.2 |
+| 2 | import/normalization: ELF core, minidump, Mach-O, firmware capsule, T32 importer; **bundle writer** | Wave 0 GREEN (0.1 + 0.2) | **ACTIVE 2026-09-06 — first slice only: the bundle writer** (`evidence_write_v1.spl`, `simple debug write`), emitting manifest + receipts + an all-`Unverified` state capsule, round-tripped through the reader. Importers (ELF/minidump/Mach-O/firmware/T32) NOT started — each needs a real artifact fixture and stays `Unverified` until one exists |
 | 3 | interpreter checkpoint/resume | Wave 2 writer emits a bundle the reader accepts | not started |
 | 4 | interpreter replay/reverse/fork | Wave 3 + event log with `deterministic` measured, not hard-coded (`evidence_replay_v1.spl:135`) | not started |
 | 5 | one firmware fault capsule (Cortex-M or RV32) | RV32 VM snapshot relabel resolved (0.4) + Wave 2 capsule importer | not started |
