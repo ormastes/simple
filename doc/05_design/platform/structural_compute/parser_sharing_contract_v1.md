@@ -304,6 +304,59 @@ command prints `OK <spec> (N lines)` and *then* errors, so a caller that reads
 only the first line will record a success that produced no manual. The mirror
 is owed once Codex lands `common.spl`; it is not waived.
 
+## Handoff to the parser_framework merge owner (2026-09-05)
+
+**Decision: this range is handed to Codex to land with its own work. It is not
+pushed and will not be pushed by this lane.** Rationale: every file it touches
+outside its own new files is owned by, or adjacent to, that lane's dirty set,
+and landing it independently would race a merge owner who has to reconcile it
+anyway.
+
+**The range:** `69d13e0c097..a05eb9277fb`, 9 commits, on a linked worktree at
+`/home/yoon/dev/simple-parser-sharing` (shared object store — the commits are
+readable from `main` without fetching, e.g.
+`git show a05eb9277fb:<path>`). The worktree HEAD is a gc root, so nothing is
+collected while it exists; **do not `git worktree remove` it until the range is
+landed or exported.**
+
+**Landing base is contested — read before rebasing.** Measured 2026-09-05:
+
+| ref | value |
+|---|---|
+| worktree base | `67859c96792` (main's tip at 15:10) |
+| local `main` | `88c59bed70d` |
+| local `origin/main` | `c8afd8a631c` — **stale**, never fetched to the real tip |
+| remote `refs/heads/main` | `320e6d99e4b8b8540a65078f68ce8ffca15fd2b6` |
+
+The machine additionally carries ~47 unpushed commits on the stale base. Use
+`git ls-remote origin refs/heads/main` explicitly — this remote has 592 heads
+and `ls-remote origin main` returns `refs/heads/archive/2026-09-03/main` first.
+
+**Expected conflicts:** `config/check/must_check_gates.sdn` and
+`scripts/check/check-push-must-pass.shs` (high-churn; one added row and one
+added case arm, both adjacent to the `push-dual-run-shadow` rows). Everything
+else in the range is either a new file or confined to
+`src/app/sspec_maintain/source_facts.spl`, which is clean at HEAD.
+
+**What must be re-verified after rebase**, since all evidence below was taken
+on `67859c96792` with the aarch64 seed:
+
+```sh
+bin/simple test test/01_unit/compiler/frontend/core_source_facts_spec.spl          # 21/21
+bin/simple test test/01_unit/app/sspec_maintain/shared_lexer_string_state_spec.spl #  6/6
+bin/simple test test/01_unit/app/sspec_maintain/pending_detection_spec.spl         #  5/5
+sh scripts/check/check-parser-source-global-ratchet.shs                            # PASS, globals=8
+```
+
+`scoring_spec` (18/20) and `rule_coverage_spec` (3/5) are red at HEAD too, with
+identical example names — do not attribute them to this range.
+
+**Two things this range deliberately leaves undone**, both belonging to the
+merge owner: the ~105-line uncommitted `spipe_docgen` change that makes
+`spipe-docgen` unrunnable from committed content
+(`doc/08_tracking/bug/spipe_docgen_unrunnable_from_committed_content_2026-09-05.md`),
+and therefore the `doc/06_spec` mirrors that change blocks.
+
 ## Explicit non-claims
 
 - No claim of shared Simple **grammar**. The plan forbids it and this audit
