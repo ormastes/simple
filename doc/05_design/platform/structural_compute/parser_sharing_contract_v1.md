@@ -89,6 +89,15 @@ matrix's own format so the merge owner can paste it in.
 |---|---|---|---|
 | Source-identity ratchet | CoreLexer | `current_core_source_*` reachable only from the snapshot owner | `scripts/check/check-parser-source-global-ratchet.shs` PASS; baseline 8 never rises; every reduction re-baselined deliberately |
 
+**Wired, advisory.** Per `.claude/rules/vcs.md`, a script with a baseline file
+enforces nothing — a guard runs only as a `tier=push` row in
+`config/check/must_check_gates.sdn` with a byte-matching case arm in
+`run_manifest_push_gates`. Both are added, as `push_blocking: false`: a
+brand-new gate records its verdict before it blocks. `check-guard-wiring.shs`
+confirms the wiring (`0 NEW unwired`); its own FAIL is `1 copied hook(s)`, a
+pre-existing linked-worktree hook artifact this lane did not touch. Promote to
+blocking once it has ridden a few pushes green.
+
 Rationale: 8 sites in 2 files is a closeable number, and freezing it converts
 "parser globals were eliminated" from prose into a checkable verdict. The gate
 is shipped with this document (see Part 3) precisely because it changes no
@@ -203,6 +212,29 @@ identical names; none is touched by this lane and none is hidden.
 Sabotage (`simple_code_lines` replaced by a no-op passthrough):
 **14/14 green → 8/14 sabotaged → 14/14 reverted**, before the two later
 regression examples were added.
+
+**Dependency cost of the new `app -> compiler.frontend` edge, measured with
+`bin/simple deps fast src/app/sspec_maintain/main.spl` at the pre-wiring
+revision and after:** closure **91 -> 94 files**. The three are exactly
+`core/lexer.spl`, `core/lexer_struct.spl`, `core/source_facts.spl` — the block
+registry and the rest of the frontend are NOT dragged in. Cycles unchanged at 3,
+all pre-existing in `std` (`io_runtime`/`process_ops`, `io`, `log`). The edge
+itself is not new to the codebase: seven `src/app/**` files already import
+`compiler.frontend`.
+
+**`bin/simple lint` could not be run on the changed files, for pre-existing
+reasons.** In this worktree it fails on *any* input, proven with a two-line
+control file:
+
+| mode | result on a 2-line trivial file |
+|---|---|
+| default (JIT) | abort, core dumped — `PANIC assertion failed: (diff >> 26 == -1) \|\| (diff >> 26 == 0)` at vendored `cranelift-jit/src/compiled_blob.rs:90`, an aarch64 ±128 MB branch-displacement overflow |
+| `SIMPLE_EXECUTION_MODE=interpreter` | `error: semantic: class CodeLine has no field named code` — inside the linter's own `35.semantics/lint/lint_text.spl`, which is clean at HEAD |
+
+Neither message mentions anything in this change (`CodeLine` appears in neither
+changed file). The same trivial file lints exit 0 from the main checkout, so
+this is a worktree/JIT-cache condition, not a defect in the new code — but it
+means **no lint evidence exists for these files** and the claim is not made.
 
 ### Incidental finding — `spipe-docgen` does not run at the committed tip
 
