@@ -1,9 +1,36 @@
+"""Link extraction from Markdown with byte-offset precision
+
+## Purpose and audience
+
+Scan Markdown files for every link form with exact byte offsets, so refactor
+tooling (S1-B) can rewrite only the target and nothing else — even in files
+with non-ASCII prose. Audience: documentation tooling maintainers and reviewers.
+
+## Link forms in simple documents
+
+Find inline, reference-use, autolink, and reference-definition forms exactly once.
+
+## Byte-offset correctness
+
+Reported ranges slice back to exact raw targets; end > start for all records.
+
+## Multibyte text safety
+
+UTF-8 safety: all link forms found despite surrounding non-ASCII, no drift.
+
+## Heading anchors and region exclusion
+
+Heading-anchor fragments resolve correctly; links in fences and code spans excluded.
+
+## Verification guidance and troubleshooting
+
+Each scenario verifies one aspect (form, precision, multibyte, anchors, exclusion).
 """
-As a documentation maintainer, I need every link form in a Markdown file
-found with exact byte offsets, so that later refactor tooling (S1-B) can
-rewrite only the link target and nothing else — even when the file mixes in
-non-ASCII prose.
-"""
+# Lifecycle: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md ;
+# doc/01_research/domain/sspec_documentization_maintenance.md
+# @manual_section: spipe-link-extraction
 use std.spec.*
 use app.io.mod.{file_read_text}
 use app.spipe.scan.links.{scan_links}
@@ -34,37 +61,44 @@ fn _count_form(links: [SourceRange], form: LinkForm) -> Int:
 
 describe "Link extraction from a simple Markdown document":
     it "finds inline, reference-use, autolink and reference-definition forms":
+        # @req REQ-LINK-001
+        # @capture: text_evidence("link_forms_found")
         step("Read the simple fixture document")
         val source = _fixture("simple_doc.md")
 
         step("Scan it for link records")
         val links = scan_links("simple_doc.md", source)
 
-        step("Every declared link form is present exactly once")
-        expect(_count_form(links, LinkForm.Inline)).to_equal(1)
-        expect(_count_form(links, LinkForm.ReferenceUse)).to_equal(1)
-        expect(_count_form(links, LinkForm.Autolink)).to_equal(1)
-        expect(_count_form(links, LinkForm.ReferenceDefinition)).to_equal(1)
+        step("Verify: every declared link form is present exactly once")
+        expect(_count_form(links, LinkForm.Inline)).to_equal(1)  # oracle: simple_doc.md fixture carries one example of each of four link forms
+        expect(_count_form(links, LinkForm.ReferenceUse)).to_equal(1)  # oracle: reference-use form count must match fixture definition (exactly 1)
+        expect(_count_form(links, LinkForm.Autolink)).to_equal(1)  # oracle: autolink form count must match fixture (exactly 1)
+        expect(_count_form(links, LinkForm.ReferenceDefinition)).to_equal(1)  # oracle: reference-definition form count must match fixture (exactly 1)
 
-        step("Links inside a fenced block and an inline code span are excluded")
+        step("Verify: links inside fenced blocks and inline code are excluded")
+        # evidence: no scanned link should have ignored.md as target (it is in excluded regions)
         for l in links:
             expect(l.raw_target).to_not_contain("ignored.md")
         return ()
 
     it "reports byte ranges that slice back to the exact raw target":
+        # @req REQ-LINK-002
+        # @capture: text_evidence("byte_range_precision")
         step("Scan the simple fixture")
         val source = _fixture("simple_doc.md")
         val links = scan_links("simple_doc.md", source)
 
-        step("Every SourceRange's target substring matches raw_target exactly")
+        step("Verify: every reported byte range slices to the exact raw target")
         for l in links:
             val sliced = _slice(source, l.target_start, l.target_end)
-            expect(sliced).to_equal(l.raw_target)
-            expect(l.end_offset).to_be_greater_than(l.start_offset)
-            expect(l.target_end).to_be_greater_than_or_equal(l.target_start)
+            expect(sliced).to_equal(l.raw_target)  # oracle: sliced bytes must byte-for-byte match the reported raw_target
+            expect(l.end_offset).to_be_greater_than(l.start_offset)  # oracle: end must be after start (strict inequality for non-empty)
+            expect(l.target_end).to_be_greater_than_or_equal(l.target_start)  # oracle: target_end >= target_start (equality allowed for edge cases)
         return ()
 
     it "cross-checks every found link against the stdlib markdown parser as an oracle":
+        # @req REQ-LINK-003
+        # @capture: text_evidence("stdlib_parser_crosscheck")
         step("Parse the same document with std.common.markdown (existence oracle)")
         val source = _fixture("simple_doc.md")
         val links = scan_links("simple_doc.md", source)
@@ -73,44 +107,50 @@ describe "Link extraction from a simple Markdown document":
         for b in blocks:
             all_block_text = all_block_text + b.content + "\n"
 
-        step("Every scanned link's full matched text appears in some stdlib block")
+        step("Verify: every scanned link's full matched text appears in stdlib parse blocks")
         for l in links:
             val matched = _slice(source, l.start_offset, l.end_offset)
-            expect(all_block_text).to_contain(matched)
+            expect(all_block_text).to_contain(matched)  # oracle: each link's [start_offset, end_offset] must appear in the stdlib block text (cross-validation)
         return ()
 
 describe "Byte-offset-safe scanning on a document containing multibyte text":
     it "finds every link form when non-ASCII prose surrounds each one":
+        # @req REQ-LINK-004
+        # @capture: text_evidence("multibyte_link_forms")
         step("Read the multibyte fixture, which has non-ASCII text before, inside, and after every link")
         val source = _fixture("multibyte_doc.md")
 
         step("Scan it for link records")
         val links = scan_links("multibyte_doc.md", source)
 
-        step("All four link forms are still found despite surrounding multibyte bytes")
-        expect(_count_form(links, LinkForm.Inline)).to_be_greater_than(0)
-        expect(_count_form(links, LinkForm.ReferenceUse)).to_be_greater_than(0)
-        expect(_count_form(links, LinkForm.Autolink)).to_be_greater_than(0)
-        expect(_count_form(links, LinkForm.ReferenceDefinition)).to_be_greater_than(0)
+        step("Verify: all four link forms are still found despite surrounding multibyte bytes")
+        expect(_count_form(links, LinkForm.Inline)).to_be_greater_than(0)  # oracle: each link form must be found at least once even surrounded by non-ASCII (UTF-8 safety)
+        expect(_count_form(links, LinkForm.ReferenceUse)).to_be_greater_than(0)  # oracle: reference-use form found at least once in multibyte context
+        expect(_count_form(links, LinkForm.Autolink)).to_be_greater_than(0)  # oracle: autolink form found at least once in multibyte context
+        expect(_count_form(links, LinkForm.ReferenceDefinition)).to_be_greater_than(0)  # oracle: reference-definition form found at least once in multibyte context
         return ()
 
     it "slices exactly the raw target out of the multibyte byte stream — no drift, no corruption":
+        # @req REQ-LINK-005
+        # @capture: text_evidence("multibyte_no_drift")
         step("Scan the multibyte fixture")
         val source = _fixture("multibyte_doc.md")
         val links = scan_links("multibyte_doc.md", source)
 
-        step("Every reported byte range slices back to raw_target verbatim, byte-for-byte")
+        step("Verify: every reported byte range slices back to raw_target verbatim, byte-for-byte")
         for l in links:
             val sliced = _slice(source, l.target_start, l.target_end)
-            expect(sliced).to_equal(l.raw_target)
+            expect(sliced).to_equal(l.raw_target)  # oracle: multibyte safety = no drift when slicing (UTF-8 boundaries respected)
         return ()
 
     it "resolves a heading-anchor link target to the matching section heading":
+        # @req REQ-LINK-006
+        # @capture: text_evidence("heading_anchor_resolution")
         step("Scan headings in the multibyte fixture")
         val source = _fixture("multibyte_doc.md")
         val headings = scan_headings(source)
 
-        step("The heading-anchor link's fragment resolves via heading_by_slug")
+        step("Verify: heading-anchor link's fragment resolves via heading_by_slug")
         val links = scan_links("multibyte_doc.md", source)
         var anchor_link: Option<SourceRange> = None
         for l in links:
@@ -118,24 +158,26 @@ describe "Byte-offset-safe scanning on a document containing multibyte text":
                 if frag.len() > 0:
                     anchor_link = Some(l)
 
-        expect(anchor_link.is_some()).to_be(true)
+        expect(anchor_link.is_some()).to_be(true)  # oracle: at least one heading-anchor link must exist in fixture
         if val Some(l) = anchor_link:
             if val Some(frag) = l.fragment:
                 val resolved = heading_by_slug(headings, frag)
-                expect(resolved.is_some()).to_be(true)
+                expect(resolved.is_some()).to_be(true)  # oracle: heading-anchor fragments must resolve to existing headings
         return ()
 
 describe "Region exclusion (fenced blocks and inline code spans)":
     it "excludes every byte inside a fence or code span from link scanning":
+        # @req REQ-LINK-007
+        # @capture: text_evidence("region_exclusion_fenced")
         step("Compute excluded regions for the simple fixture")
         val source = _fixture("simple_doc.md")
         val regions = excluded_regions(source)
 
-        step("At least one excluded region exists (the fence and the code span)")
-        expect(regions.len()).to_be_greater_than(0)
+        step("Verify: at least one excluded region exists (the fence and the code span)")
+        expect(regions.len()).to_be_greater_than(0)  # oracle: simple_doc.md fixture has at least one fenced block and one inline code span
 
-        step("No emitted link's start offset falls inside an excluded region")
+        step("Verify: no emitted link's start offset falls inside an excluded region")
         val links = scan_links("simple_doc.md", source)
         for l in links:
-            expect(is_excluded(l.start_offset, regions)).to_equal(false)
+            expect(is_excluded(l.start_offset, regions)).to_equal(false)  # oracle: all emitted links must be outside excluded regions (fail-closed exclusion)
         return ()
