@@ -1,0 +1,185 @@
+"""Capability-labelled Web/GUI scene islands (GPU scheduler hardening, REQ-GPU-SCHED-ISLAND-001).
+
+Pure, device-free contract. Declares the fixed subset of Web/GUI event,
+style, layout and render "islands" the GPU WebScene lane is allowed to offer
+device execution for, each carrying the capability bits it needs (from
+`draw_ir_v3_ports`) and the truth labels it may claim (from `gpu_epoch`).
+
+Non-admission rule: `gpu_scene_island_admit` never runs anything and never
+proves device execution. A successful admission still reports
+`submission_autonomy = none` and `scheduling_assurance = partial` (the host
+still submits) — only a real `Engine2dGpuEpochReceipt` advanced past
+`gpu_finished` with qualifying evidence may claim device execution, and that
+happens elsewhere, not here.
+"""
+
+use common.ui.draw_ir_v3_execution_route.{
+    DRAW_IR_V3_REASON_NONE,
+    DRAW_IR_V3_REASON_NO_DEVICE,
+    DRAW_IR_V3_REASON_MISSING_CAPABILITY,
+    DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE,
+    draw_ir_v3_missing_capabilities
+}
+use common.ui.draw_ir_v3_ports.{
+    DRAW_IR_V3_CAP_COMPUTE_PASSES,
+    DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+}
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PROFILE_CPU_REFERENCE,
+    ENGINE2D_GPU_TRUTH_NONE,
+    ENGINE2D_GPU_TRUTH_PARTIAL,
+    ENGINE2D_GPU_TRUTH_FULL,
+    Engine2dGpuTruthLabels,
+    engine2d_gpu_profile_is_required,
+    engine2d_gpu_truth_none
+}
+
+# --- Island kinds -----------------------------------------------------------
+
+pub val GPU_ISLAND_EVENT: text = "event"
+pub val GPU_ISLAND_STYLE: text = "style"
+pub val GPU_ISLAND_LAYOUT: text = "layout"
+pub val GPU_ISLAND_RENDER: text = "render"
+
+struct GpuSceneIsland:
+    kind: text
+    name: text
+    required_capabilities: u32
+    semantic_residency: text
+    data_residency: text
+
+struct GpuSceneIslandAdmission:
+    island_name: text
+    admitted: bool
+    reason_code: u32
+    missing_capabilities: u32
+    cpu_fallback_allowed: bool
+    truth: Engine2dGpuTruthLabels
+
+# --- Declared Web/GUI subset -------------------------------------------------
+
+fn _mk_island(kind: text, name: text, required_capabilities: u32, semantic_residency: text, data_residency: text) -> GpuSceneIsland:
+    GpuSceneIsland(
+        kind: kind,
+        name: name,
+        required_capabilities: required_capabilities,
+        semantic_residency: semantic_residency,
+        data_residency: data_residency
+    )
+
+fn gpu_scene_island_declared_subset() -> [GpuSceneIsland]:
+    """The frozen Web/GUI island subset: 2 event, 2 style, 3 layout, 2 render.
+
+    Event/style islands need only Tier 0 compute passes; layout additionally
+    needs indirect dispatch (Tier 1) to place boxes without a host readback.
+    `pointer_route`'s data_residency is partial: input is platform-thread-
+    affine host work per architecture, never device-resident.
+    `text_run_cached`'s semantic_residency is partial: its glyph atlas is
+    host-built, only the cached run is device-resident.
+    """
+    var islands: [GpuSceneIsland] = []
+    islands = islands.push(_mk_island(GPU_ISLAND_EVENT, "hit_test", DRAW_IR_V3_CAP_COMPUTE_PASSES, ENGINE2D_GPU_TRUTH_FULL, ENGINE2D_GPU_TRUTH_FULL))
+    islands = islands.push(_mk_island(GPU_ISLAND_EVENT, "pointer_route", DRAW_IR_V3_CAP_COMPUTE_PASSES, ENGINE2D_GPU_TRUTH_FULL, ENGINE2D_GPU_TRUTH_PARTIAL))
+    islands = islands.push(_mk_island(GPU_ISLAND_STYLE, "class_toggle", DRAW_IR_V3_CAP_COMPUTE_PASSES, ENGINE2D_GPU_TRUTH_FULL, ENGINE2D_GPU_TRUTH_FULL))
+    islands = islands.push(_mk_island(GPU_ISLAND_STYLE, "color_resolve", DRAW_IR_V3_CAP_COMPUTE_PASSES, ENGINE2D_GPU_TRUTH_FULL, ENGINE2D_GPU_TRUTH_FULL))
+    val layout_caps = DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+    islands = islands.push(_mk_island(GPU_ISLAND_LAYOUT, "flex_row", layout_caps, ENGINE2D_GPU_TRUTH_FULL, ENGINE2D_GPU_TRUTH_FULL))
+    islands = islands.push(_mk_island(GPU_ISLAND_LAYOUT, "flex_column", layout_caps, ENGINE2D_GPU_TRUTH_FULL, ENGINE2D_GPU_TRUTH_FULL))
+    islands = islands.push(_mk_island(GPU_ISLAND_LAYOUT, "absolute_box", layout_caps, ENGINE2D_GPU_TRUTH_FULL, ENGINE2D_GPU_TRUTH_FULL))
+    islands = islands.push(_mk_island(GPU_ISLAND_RENDER, "rect_fill", DRAW_IR_V3_CAP_COMPUTE_PASSES, ENGINE2D_GPU_TRUTH_FULL, ENGINE2D_GPU_TRUTH_FULL))
+    islands = islands.push(_mk_island(GPU_ISLAND_RENDER, "text_run_cached", DRAW_IR_V3_CAP_COMPUTE_PASSES, ENGINE2D_GPU_TRUTH_PARTIAL, ENGINE2D_GPU_TRUTH_FULL))
+    islands
+
+# --- Admission ---------------------------------------------------------------
+
+fn gpu_scene_island_admit(island: GpuSceneIsland, profile: text, device_available: bool, available_capabilities: u32) -> GpuSceneIslandAdmission:
+    """Pure admission: never runs anything, never proves device execution.
+
+    `cpu_reference` never admits (policy reason, no fallback needed since
+    there is nothing GPU-side to fall back from). A required profile (per
+    `engine2d_gpu_profile_is_required`) refuses outright on no-device or
+    missing-capability, with `cpu_fallback_allowed = false`: required profiles
+    never fall back to CPU semantics. Any other profile reports the same
+    refusal with `cpu_fallback_allowed = true`. A successful admission
+    reports the island's own truth labels plus `submission_autonomy = none`,
+    `scheduling_assurance = partial` (the host still submits)."""
+    if profile == ENGINE2D_GPU_PROFILE_CPU_REFERENCE:
+        return GpuSceneIslandAdmission(
+            island_name: island.name,
+            admitted: false,
+            reason_code: DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE,
+            missing_capabilities: 0u32,
+            cpu_fallback_allowed: true,
+            truth: engine2d_gpu_truth_none()
+        )
+
+    val required = engine2d_gpu_profile_is_required(profile)
+    val missing = draw_ir_v3_missing_capabilities(island.required_capabilities, available_capabilities)
+
+    if not device_available:
+        return GpuSceneIslandAdmission(
+            island_name: island.name,
+            admitted: false,
+            reason_code: DRAW_IR_V3_REASON_NO_DEVICE,
+            missing_capabilities: 0u32,
+            cpu_fallback_allowed: not required,
+            truth: engine2d_gpu_truth_none()
+        )
+
+    if missing != 0u32:
+        return GpuSceneIslandAdmission(
+            island_name: island.name,
+            admitted: false,
+            reason_code: DRAW_IR_V3_REASON_MISSING_CAPABILITY,
+            missing_capabilities: missing,
+            cpu_fallback_allowed: not required,
+            truth: engine2d_gpu_truth_none()
+        )
+
+    GpuSceneIslandAdmission(
+        island_name: island.name,
+        admitted: true,
+        reason_code: DRAW_IR_V3_REASON_NONE,
+        missing_capabilities: 0u32,
+        cpu_fallback_allowed: false,
+        truth: Engine2dGpuTruthLabels(
+            semantic_residency: island.semantic_residency,
+            data_residency: island.data_residency,
+            submission_autonomy: ENGINE2D_GPU_TRUTH_NONE,
+            scheduling_assurance: ENGINE2D_GPU_TRUTH_PARTIAL
+        )
+    )
+
+fn gpu_scene_islands_admit_all(profile: text, device_available: bool, available_capabilities: u32) -> [GpuSceneIslandAdmission]:
+    """Admit every declared island against one profile/device/capability triple."""
+    val islands = gpu_scene_island_declared_subset()
+    var admissions: [GpuSceneIslandAdmission] = []
+    var i: i64 = 0
+    val n: i64 = islands.len()
+    while i < n:
+        admissions = admissions.push(gpu_scene_island_admit(islands[i], profile, device_available, available_capabilities))
+        i = i + 1
+    admissions
+
+fn gpu_scene_islands_summary(admissions: [GpuSceneIslandAdmission]) -> text:
+    """"admitted=N refused=M fallback=K" over one admit_all result."""
+    var admitted: i64 = 0
+    var refused: i64 = 0
+    var fallback: i64 = 0
+    var i: i64 = 0
+    val n: i64 = admissions.len()
+    while i < n:
+        val a = admissions[i]
+        if a.admitted:
+            admitted = admitted + 1
+        else if a.cpu_fallback_allowed:
+            fallback = fallback + 1
+        else:
+            refused = refused + 1
+        i = i + 1
+    "admitted={admitted} refused={refused} fallback={fallback}"
+
+export GPU_ISLAND_EVENT, GPU_ISLAND_STYLE, GPU_ISLAND_LAYOUT, GPU_ISLAND_RENDER,
+    GpuSceneIsland, GpuSceneIslandAdmission,
+    gpu_scene_island_declared_subset, gpu_scene_island_admit,
+    gpu_scene_islands_admit_all, gpu_scene_islands_summary
