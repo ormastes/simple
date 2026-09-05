@@ -52,8 +52,10 @@ taken with the seed.
 Queue routing, a source scan, or an interpreter test does not prove GPU
 execution. Production qualification needs exact binary/device identity,
 timestamps, transfer/host-submit telemetry, retirement evidence, and negative
-controls. No provider reports a fence token or device timestamps yet, so every
-receipt in the tree is `routing_evidence_only`. That is the honest state.
+controls. Evidence qualifies only with DEVICE-side timestamps and real transfer
+bytes; host-bracketed empty submits never do. No provider reports a fence token
+or device timestamps yet, so every receipt in the tree is `routing_evidence_only`.
+That is the honest state.
 
 ## Astra architecture review accepted
 

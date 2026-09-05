@@ -158,12 +158,17 @@ fn engine2d_gpu_device_evidence_none() -> Engine2dGpuDeviceEvidence:
     Engine2dGpuDeviceEvidence(binary_identity: "", device_name: "", device_type: "", driver_identity: "", host_submit_ns: 0, host_complete_ns: 0, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 0, negative_control_passed: false)
 
 fn engine2d_gpu_device_evidence_qualifies(evidence: Engine2dGpuDeviceEvidence) -> bool:
-    """Production qualification bar: exact identities, monotonic host timestamps, a negative control."""
+    """Production qualification bar: exact identities, monotonic host timestamps,
+    a DEVICE-side timestamp pair, real transfer bytes, and a negative control.
+    Host-only facts never qualify: an empty submit brackets host time just as well.
+    """
     if evidence.binary_identity == "" or evidence.device_name == "" or evidence.driver_identity == "":
         return false
     if evidence.host_submit_ns <= 0 or evidence.host_complete_ns < evidence.host_submit_ns:
         return false
-    if evidence.device_timestamp_available and evidence.device_end_ticks < evidence.device_begin_ticks:
+    if not evidence.device_timestamp_available or evidence.device_end_ticks < evidence.device_begin_ticks:
+        return false
+    if evidence.transfer_bytes <= 0:
         return false
     evidence.negative_control_passed
 
@@ -226,9 +231,13 @@ fn engine2d_gpu_epoch_admit(request: Engine2dGpuEpochRequest, token: RingToken?,
         return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE, 0u32, "cpu_reference profile does not queue GPU epochs")
     val required = engine2d_gpu_profile_required_capabilities(request.profile)
     val missing = draw_ir_v3_missing_capabilities(required, available_capabilities)
+    # A queued epoch is a GPU route with no CPU lane: without a device it is
+    # refused for every GPU profile. Non-required profiles recover on the CPU
+    # at the route decision, before an epoch exists, never by queueing one.
+    if not device_available:
+        val fallback_note = if engine2d_gpu_profile_is_required(request.profile): "CPU semantic fallback is forbidden" else: "caller may take the CPU route instead"
+        return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_NO_DEVICE, 0u32, "no device: a GPU epoch never queues without one; {fallback_note}")
     if engine2d_gpu_profile_is_required(request.profile):
-        if not device_available:
-            return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_NO_DEVICE, 0u32, "required profile refuses: no device; CPU semantic fallback is forbidden")
         if missing != 0u32:
             return _engine2d_gpu_receipt(request, token, ENGINE2D_GPU_PHASE_REJECTED, true, DRAW_IR_V3_REASON_MISSING_CAPABILITY, missing, "required profile refuses: device lacks capabilities {missing}")
     if token == nil:
@@ -265,7 +274,7 @@ fn engine2d_gpu_epoch_advance(receipt: Engine2dGpuEpochReceipt, next_phase: text
     val next = _engine2d_gpu_phase_rank(next_phase)
     if next == 0 or next <= current:
         return receipt
-    if next == 5 and current < 4:
+    if next >= 5 and next <= 6 and current < 4:
         return receipt
     if not engine2d_gpu_truth_labels_valid(truth):
         return receipt
