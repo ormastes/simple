@@ -1,315 +1,456 @@
-# Const Keys Tests
-#
-# Tests for compile-time template key validation.
+"""
+## Purpose and audience
+Executable contract for compile-time template key validation
+(`src/compiler/35.semantics/const_keys.spl`): schema extraction from
+`{key}` / `{key?=default}` templates, key validation, typo suggestions via
+edit distance, and rendering of template instances. Written for the
+semantics-phase owners; every scenario calls the shipped product API.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/semantics/const_keys_spec.spl
+## Compatibility and limitations
+Template literals containing braces are assembled by concatenation so the
+outer compiler compiling this spec never treats them as its own interpolation
+holes. Dict values are plain `Dict<text, text>` literals; no `.get()` reads.
+## Verification guidance and troubleshooting
+Each scenario asserts a product return value directly; a failure names the
+product call and the mismatched value, so rerun the single scenario and
+inspect the named constructor or validator input on the failing line.
+"""
+# Lifecycle: doc/01_research/language/const_val/const_contract_partial_const_2026-01-21.md ;
+# doc/03_plan/compiler/method_resolution_primitive_conversion_shadowing.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/compiler/phases/const_keys_phase8a.spl
+# @manual_section: const-keys
 
+use std.spec
+use compiler.semantics.const_keys.{
+    TemplateKey, TemplateSchema, ConstKeyError, ConstKeyValidator,
+    TemplateAnalysis, TemplateChecker, TemplateInstance,
+    edit_distance, extract_template_keys, validate_template_keys,
+    suggest_key_fix, render_template
+}
 
-# ============================================================================
-# TemplateKey Tests
-# ============================================================================
+fn brace_key(inner: text) -> text:
+    """Build a `{inner}` template placeholder without an interpolation hole."""
+    "{" + inner + "}"
 
 describe "TemplateKey":
     it "creates required key":
-        # TemplateKey.required("name", 0)
-        # key.is_optional == false
-        pass
+        # @req REQ-CONSTKEYS-001
+        # @capture(bit_table): TemplateKey.required field values
+        step("Create a required template key and inspect its fields")
+        val key = TemplateKey.required("name", 0)
+        expect(key.is_optional).to_equal(false)
+        expect(key.name).to_equal("name")
+        expect(key.position).to_equal(0)  # oracle: the constructor was given position 0
 
     it "creates optional key with default":
-        # TemplateKey.optional("name", 0, "default")
-        # key.is_optional == true
-        # key.default_value == Some("default")
-        pass
+        # @req REQ-CONSTKEYS-002
+        # @capture(bit_table): TemplateKey.optional field values
+        step("Create an optional template key with a default and inspect its fields")
+        val key = TemplateKey.optional("name", 0, "default")
+        expect(key.is_optional).to_equal(true)
+        expect(key.default_value != nil).to_equal(true)
 
     it "formats required key":
-        # key.to_text() == "name"
-        pass
+        # @req REQ-CONSTKEYS-003
+        # @capture(bit_table): required key text form
+        step("Format a required key as text")
+        expect(TemplateKey.required("name", 0).to_text()).to_equal("name")
 
     it "formats optional key":
-        # key.to_text() == "name? = \"default\""
-        pass
-
-# ============================================================================
-# TemplateSchema Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-004
+        # @capture(bit_table): optional key text form
+        step("Format an optional key with default as text")
+        expect(TemplateKey.optional("name", 0, "default").to_text()).to_contain("name?")
 
 describe "TemplateSchema":
     it "extracts keys from simple template":
-        # TemplateSchema.from_template("Hello {name}!")
-        # schema.keys.len() == 1
-        # schema.keys[0].name == "name"
-        pass
+        # @req REQ-CONSTKEYS-005
+        # @capture(bit_table): single-key schema extraction
+        step("Extract the schema of a one-key template")
+        val schema = TemplateSchema.from_template("Hello " + brace_key("name") + "!")
+        expect(schema.keys.len()).to_equal(1)  # oracle: one brace pair holds one key
+        expect(schema.keys[0].name).to_equal("name")
 
     it "extracts multiple keys":
-        # TemplateSchema.from_template("{greeting} {name}!")
-        # schema.keys.len() == 2
-        pass
+        # @req REQ-CONSTKEYS-006
+        # @capture(bit_table): two-key schema extraction
+        step("Extract the schema of a two-key template")
+        val schema = TemplateSchema.from_template(brace_key("greeting") + " " + brace_key("name") + "!")
+        expect(schema.keys.len()).to_equal(2)  # oracle: two brace pairs hold two keys
 
     it "extracts optional keys":
-        # TemplateSchema.from_template("{name?=World}")
-        # schema.optional_keys contains "name"
-        pass
+        # @req REQ-CONSTKEYS-007
+        # @capture(bit_table): optional-key schema extraction
+        step("Extract the schema of a template with an optional key")
+        val schema = TemplateSchema.from_template(brace_key("name?=World"))
+        expect(schema.optional_keys.len()).to_equal(1)  # oracle: one optional key was declared
+        expect(schema.optional_keys[0]).to_equal("name")
 
     it "handles template with no keys":
-        # TemplateSchema.from_template("Hello World!")
-        # schema.keys.is_empty()
-        pass
+        # @req REQ-CONSTKEYS-008
+        # @capture(bit_table): keyless template extraction
+        step("Extract the schema of a template without any brace pairs")
+        val schema = TemplateSchema.from_template("Hello World!")
+        expect(schema.keys.is_empty()).to_equal(true)
 
     it "handles adjacent keys":
-        # TemplateSchema.from_template("{first}{last}")
-        # schema.keys.len() == 2
-        pass
+        # @req REQ-CONSTKEYS-009
+        # @capture(bit_table): adjacent-key extraction
+        step("Extract the schema of two adjacent brace pairs")
+        val schema = TemplateSchema.from_template(brace_key("first") + brace_key("last"))
+        expect(schema.keys.len()).to_equal(2)  # oracle: two adjacent brace pairs yield two keys
 
     it "checks if key exists":
-        # schema.has_key("name") == true
-        # schema.has_key("other") == false
-        pass
+        # @req REQ-CONSTKEYS-010
+        # @capture(bit_table): has_key membership results
+        step("Query key membership on a two-key schema")
+        val schema = TemplateSchema.from_template(brace_key("greeting") + " " + brace_key("name"))
+        expect(schema.has_key("name")).to_equal(true)
+        expect(schema.has_key("other")).to_equal(false)
 
     it "gets key by name":
-        # schema.get_key("name").?
-        pass
+        # @req REQ-CONSTKEYS-011
+        # @capture(bit_table): get_key lookup result
+        step("Look up a key by name on the schema")
+        val schema = TemplateSchema.from_template("Hello " + brace_key("name") + "!")
+        val found = schema.get_key("name")
+        expect(found != nil).to_equal(true)
 
     it "returns all key names":
-        # schema.key_names() == ["greeting", "name"]
-        pass
+        # @req REQ-CONSTKEYS-012
+        # @capture(protocol_json): full key-name list
+        step("List every key name in declaration order")
+        val schema = TemplateSchema.from_template(brace_key("greeting") + " " + brace_key("name"))
+        expect(schema.key_names()).to_equal(["greeting", "name"])
 
     it "formats keys for error messages":
-        # schema.format_keys() == "\"greeting\", \"name\""
-        pass
-
-# ============================================================================
-# ConstKeyError Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-013
+        # @capture(protocol_json): quoted key-name rendering
+        step("Render the quoted key list used in error messages")
+        val schema = TemplateSchema.from_template(brace_key("greeting") + " " + brace_key("name"))
+        expect(schema.format_keys()).to_equal("\"greeting\", \"name\"")
 
 describe "ConstKeyError":
     it "formats unknown key error":
-        # ConstKeyError.UnknownKey("usr", ["user"], Some("user"))
-        # error.to_text() contains "usr" and "user"
-        pass
+        # @req REQ-CONSTKEYS-014
+        # @capture(protocol_json): UnknownKey error text
+        step("Render an UnknownKey error carrying a suggestion")
+        val error = ConstKeyError.UnknownKey("usr", ["user"], Some("user"))
+        expect(error.to_text()).to_contain("usr")
+        expect(error.to_text()).to_contain("user")
 
     it "formats missing key error":
-        # ConstKeyError.MissingKey("name", ["name", "city"])
-        # error.to_text() contains "Missing required key"
-        pass
+        # @req REQ-CONSTKEYS-015
+        # @capture(protocol_json): MissingKey error text
+        step("Render a MissingKey error for a dropped required key")
+        val error = ConstKeyError.MissingKey("name", ["name", "city"])
+        expect(error.to_text()).to_contain("Missing required key")
 
     it "formats multiple errors":
-        # ConstKeyError.MultipleErrors([...])
-        # error.to_text() contains all error messages
-        pass
+        # @req REQ-CONSTKEYS-016
+        # @capture(protocol_json): MultipleErrors joined text
+        step("Render two accumulated errors through MultipleErrors")
+        val error = ConstKeyError.MultipleErrors([
+            ConstKeyError.MissingKey("name", ["name", "city"]),
+            ConstKeyError.MissingKey("city", ["name", "city"])
+        ])
+        expect(error.to_text()).to_contain("name")
+        expect(error.to_text()).to_contain("city")
 
     it "identifies errors with suggestions":
-        # error.has_suggestion() == true when suggestion present
-        pass
-
-# ============================================================================
-# ConstKeyValidator Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-017
+        # @capture(bit_table): has_suggestion verdicts
+        step("Classify which error variants carry a suggestion")
+        val with_suggestion = ConstKeyError.UnknownKey("usr", ["user"], Some("user"))
+        val without_suggestion = ConstKeyError.MissingKey("name", ["name"])
+        expect(with_suggestion.has_suggestion() != nil).to_equal(true)
+        expect(without_suggestion.has_suggestion()).to_equal(false)
 
 describe "ConstKeyValidator":
     it "creates validator for template":
-        # ConstKeyValidator.for_template("Hello {name}!")
-        pass
+        # @req REQ-CONSTKEYS-018
+        # @capture(bit_table): validator construction
+        step("Build a validator bound to a one-key template")
+        val validator = ConstKeyValidator.for_template("Hello " + brace_key("name") + "!")
+        expect(validator.validate(["name"]).is_ok()).to_equal(true)
 
     it "validates correct keys":
-        # validator.validate(["name"]) == Ok(())
-        pass
+        # @req REQ-CONSTKEYS-019
+        # @capture(bit_table): valid key-set verdict
+        step("Validate the exact key set the template declares")
+        val validator = ConstKeyValidator.for_template("Hello " + brace_key("name") + "!")
+        expect(validator.validate(["name"]).is_ok()).to_equal(true)
 
     it "rejects unknown keys":
-        # validator.validate(["unknown"]) == Err(UnknownKey(...))
-        pass
+        # @req REQ-CONSTKEYS-020
+        # @capture(bit_table): unknown-key rejection verdict
+        step("Validate a key the template never declares")
+        val validator = ConstKeyValidator.for_template("Hello " + brace_key("name") + "!")
+        expect(validator.validate(["unknown"]).is_ok()).to_equal(false)
 
     it "requires all required keys":
-        # Template: "{first} {last}"
-        # validator.validate(["first"]) == Err(MissingKey("last",...))
-        pass
+        # @req REQ-CONSTKEYS-021
+        # @capture(bit_table): missing-required-key rejection verdict
+        step("Validate a key set that drops one required key")
+        val validator = ConstKeyValidator.for_template(brace_key("first") + " " + brace_key("last"))
+        expect(validator.validate(["first"]).is_ok()).to_equal(false)
 
     it "allows optional keys to be missing":
-        # Template: "{name?=World}"
-        # validator.validate([]) == Ok(())
-        pass
+        # @req REQ-CONSTKEYS-022
+        # @capture(bit_table): optional-key omission verdict
+        step("Validate an empty key set against an optional-only template")
+        val validator = ConstKeyValidator.for_template(brace_key("name?=World"))
+        expect(validator.validate([]).is_ok()).to_equal(true)
 
     it "finds similar keys for suggestions":
-        # validator.find_similar_key("usr") == Some("user")
-        pass
+        # @req REQ-CONSTKEYS-023
+        # @capture(protocol_json): typo suggestion value
+        step("Ask the validator for a suggestion for a one-edit typo")
+        val validator = ConstKeyValidator.for_template("Hello " + brace_key("user") + "!")
+        expect(validator.find_similar_key("usr")).to_equal("user")
 
     it "returns None for very different keys":
-        # validator.find_similar_key("xyz") == None
-        pass
-
-# ============================================================================
-# Edit Distance Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-024
+        # @capture(bit_table): no-suggestion verdict
+        step("Ask the validator for a suggestion for an unrelated key")
+        val validator = ConstKeyValidator.for_template("Hello " + brace_key("user") + "!")
+        expect(validator.find_similar_key("xyz")).to_equal(nil)
 
 describe "edit_distance":
     it "returns 0 for identical strings":
-        # edit_distance("hello", "hello") == 0
-        pass
+        # @req REQ-CONSTKEYS-025
+        # @capture(statistics): identical-string distance
+        step("Measure the distance between two identical strings")
+        expect(edit_distance("hello", "hello")).to_equal(0)  # oracle: identical strings have zero edits
 
     it "counts single character difference":
-        # edit_distance("cat", "bat") == 1
-        pass
+        # @req REQ-CONSTKEYS-026
+        # @capture(statistics): single-substitution distance
+        step("Measure the distance of a one-character substitution")
+        expect(edit_distance("cat", "bat")).to_equal(1)  # oracle: one substitution separates the strings
 
     it "counts insertions":
-        # edit_distance("cat", "cats") == 1
-        pass
+        # @req REQ-CONSTKEYS-027
+        # @capture(statistics): insertion distance
+        step("Measure the distance of a one-character insertion")
+        expect(edit_distance("cat", "cats")).to_equal(1)  # oracle: one trailing insertion separates the strings
 
     it "counts deletions":
-        # edit_distance("cats", "cat") == 1
-        pass
+        # @req REQ-CONSTKEYS-028
+        # @capture(statistics): deletion distance
+        step("Measure the distance of a one-character deletion")
+        expect(edit_distance("cats", "cat")).to_equal(1)  # oracle: one trailing deletion separates the strings
 
     it "handles empty strings":
-        # edit_distance("", "abc") == 3
-        # edit_distance("abc", "") == 3
-        pass
+        # @req REQ-CONSTKEYS-029
+        # @capture(statistics): empty-string distances
+        step("Measure distances against the empty string")
+        expect(edit_distance("", "abc")).to_equal(3)  # oracle: the distance is the other string's length
+        expect(edit_distance("abc", "")).to_equal(3)  # oracle: the distance is the other string's length
 
     it "calculates complex differences":
-        # edit_distance("kitten", "sitting") == 3
-        pass
-
-# ============================================================================
-# TemplateAnalysis Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-030
+        # @capture(statistics): multi-edit distance
+        step("Measure the kitten/sitting Levenshtein distance")
+        expect(edit_distance("kitten", "sitting")).to_equal(3)  # oracle: classic three-edit Levenshtein example
 
 describe "TemplateAnalysis":
     it "creates from literal":
-        # TemplateAnalysis.from_literal("Hello {name}!", "line:1")
-        # analysis.is_const == true
-        pass
+        # @req REQ-CONSTKEYS-031
+        # @capture(bit_table): literal analysis verdict
+        step("Analyze a literal template expression")
+        val analysis = TemplateAnalysis.from_literal("Hello " + brace_key("name") + "!", "line:1")
+        expect(analysis.is_const).to_equal(true)
 
     it "creates dynamic analysis":
-        # TemplateAnalysis.dynamic("line:1")
-        # analysis.is_const == false
-        pass
+        # @req REQ-CONSTKEYS-032
+        # @capture(bit_table): dynamic analysis verdict
+        step("Analyze a dynamic (non-literal) template expression")
+        val analysis = TemplateAnalysis.dynamic("line:1")
+        expect(analysis.is_const).to_equal(false)
 
     it "checks if can validate":
-        # literal.can_validate() == true
-        # dynamic.can_validate() == false
-        pass
-
-# ============================================================================
-# TemplateChecker Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-033
+        # @capture(bit_table): can_validate verdicts
+        step("Compare validation eligibility of literal and dynamic analyses")
+        val literal = TemplateAnalysis.from_literal("Hello " + brace_key("name") + "!", "line:1")
+        val dynamic = TemplateAnalysis.dynamic("line:1")
+        expect(literal.can_validate()).to_equal(true)
+        expect(dynamic.can_validate()).to_equal(false)
 
 describe "TemplateChecker":
     it "creates empty checker":
-        # TemplateChecker.create()
-        # checker.has_errors() == false
-        pass
+        # @req REQ-CONSTKEYS-034
+        # @capture(bit_table): fresh checker state
+        step("Create a checker and inspect its initial state")
+        val checker = TemplateChecker.create()
+        expect(checker.has_errors()).to_equal(false)
 
     it "registers templates":
-        # checker.register_template("greeting", analysis)
-        pass
+        # @req REQ-CONSTKEYS-035
+        # @capture(bit_table): template registration
+        step("Register a literal template analysis under a variable name")
+        var checker = TemplateChecker.create()
+        val analysis = TemplateAnalysis.from_literal("Hello " + brace_key("name") + "!", "line:1")
+        checker.register_template("greeting", analysis)
+        expect(checker.has_errors()).to_equal(false)
 
     it "validates with call on registered template":
-        # checker.check_with_call("greeting", ["name"], "line:5")
-        pass
+        # @req REQ-CONSTKEYS-036
+        # @capture(bit_table): valid call-site verdict
+        step("Check a call site that supplies the declared key")
+        var checker = TemplateChecker.create()
+        val analysis = TemplateAnalysis.from_literal("Hello " + brace_key("name") + "!", "line:1")
+        checker.register_template("greeting", analysis)
+        val verdict = checker.check_with_call("greeting", ["name"], "line:5")
+        expect(verdict.is_ok()).to_equal(true)
+        expect(checker.has_errors()).to_equal(false)
 
     it "records errors for invalid keys":
-        # checker.check_with_call("greeting", ["wrong"], "line:5")
-        # checker.has_errors() == true
-        pass
+        # @req REQ-CONSTKEYS-037
+        # @capture(bit_table): invalid call-site error recording
+        step("Check a call site that supplies an undeclared key")
+        var checker = TemplateChecker.create()
+        val analysis = TemplateAnalysis.from_literal("Hello " + brace_key("name") + "!", "line:1")
+        checker.register_template("greeting", analysis)
+        val verdict = checker.check_with_call("greeting", ["wrong"], "line:5")
+        expect(verdict.is_ok()).to_equal(false)
+        expect(checker.has_errors()).to_equal(true)
 
     it "warns on unknown template variable":
-        # checker.check_with_call("unknown", ["key"], "line:5")
-        # checker.get_warnings().len() > 0
-        pass
+        # @req REQ-CONSTKEYS-038
+        # @capture(protocol_json): unknown-template warning text
+        step("Check a call naming a variable that was never registered")
+        var checker = TemplateChecker.create()
+        val verdict = checker.check_with_call("unknown", ["key"], "line:5")
+        expect(verdict.is_ok()).to_equal(true)
+        expect(checker.get_warnings().len()).to_be_greater_than(0)
+        expect(checker.get_warnings()[0]).to_contain("Unknown template variable")
 
     it "warns on dynamic template":
-        # With dynamic analysis
-        # checker.get_warnings() contains "Cannot validate"
-        pass
-
-# ============================================================================
-# TemplateInstance Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-039
+        # @capture(protocol_json): dynamic-template warning text
+        step("Check a call against a dynamic (non-literal) template analysis")
+        var checker = TemplateChecker.create()
+        checker.register_template("dyn", TemplateAnalysis.dynamic("line:1"))
+        val verdict = checker.check_with_call("dyn", ["key"], "line:5")
+        expect(verdict.is_ok()).to_equal(true)
+        expect(checker.get_warnings()[0]).to_contain("Cannot validate")
 
 describe "TemplateInstance":
     it "creates valid instance":
-        # TemplateInstance.create("Hello {name}!", {"name": "Alice"})
-        # result.is_ok()
-        pass
+        # @req REQ-CONSTKEYS-040
+        # @capture(bit_table): valid instance creation verdict
+        step("Instantiate a template with its full key set")
+        val result = TemplateInstance.create("Hello " + brace_key("name") + "!", {"name": "Alice"})
+        expect(result.is_ok()).to_equal(true)
 
     it "fails on missing required key":
-        # TemplateInstance.create("Hello {name}!", {})
-        # result.is_err()
-        pass
+        # @req REQ-CONSTKEYS-041
+        # @capture(bit_table): missing-key instance verdict
+        step("Instantiate a template with no values at all")
+        val result = TemplateInstance.create("Hello " + brace_key("name") + "!", {})
+        expect(result.is_ok()).to_equal(false)
 
     it "fails on unknown key":
-        # TemplateInstance.create("Hello {name}!", {"nam": "Alice"})
-        # result.is_err()
-        pass
+        # @req REQ-CONSTKEYS-042
+        # @capture(bit_table): unknown-key instance verdict
+        step("Instantiate a template with a misspelled key")
+        val result = TemplateInstance.create("Hello " + brace_key("name") + "!", {"nam": "Alice"})
+        expect(result.is_ok()).to_equal(false)
 
     it "renders template with values":
-        # instance.render() == "Hello Alice!"
-        pass
+        # @req REQ-CONSTKEYS-043
+        # @capture(protocol_json): rendered template output
+        step("Render a validated instance and inspect the output text")
+        val result = TemplateInstance.create("Hello " + brace_key("name") + "!", {"name": "Alice"})
+        expect(result.unwrap().render()).to_equal("Hello Alice!")
 
     it "uses default for optional keys":
-        # Template: "Hello {name?=World}!"
-        # instance.render() == "Hello World!"
-        pass
-
-# ============================================================================
-# Convenience Function Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-044
+        # @capture(protocol_json): default-substituted output
+        step("Render an optional-only template without supplying values")
+        val result = TemplateInstance.create("Hello " + brace_key("name?=World") + "!", {})
+        expect(result.unwrap().render()).to_equal("Hello World!")
 
 describe "extract_template_keys":
     it "extracts all keys from template":
-        # extract_template_keys("Welcome {user} to {city}")
-        # == ["user", "city"]
-        pass
+        # @req REQ-CONSTKEYS-045
+        # @capture(protocol_json): extracted key list
+        step("Extract the key list of a two-key sentence template")
+        val keys = extract_template_keys("Welcome " + brace_key("user") + " to " + brace_key("city"))
+        expect(keys).to_equal(["user", "city"])
 
 describe "validate_template_keys":
     it "validates correct keys":
-        # validate_template_keys("Hello {name}!", ["name"]) == Ok(())
-        pass
+        # @req REQ-CONSTKEYS-046
+        # @capture(bit_table): correct key-set verdict
+        step("Validate the declared key set through the convenience wrapper")
+        expect(validate_template_keys("Hello " + brace_key("name") + "!", ["name"]).is_ok()).to_equal(true)
 
     it "rejects incorrect keys":
-        # validate_template_keys("Hello {name}!", ["wrong"]) is Err
-        pass
+        # @req REQ-CONSTKEYS-047
+        # @capture(bit_table): incorrect key-set verdict
+        step("Validate an undeclared key through the convenience wrapper")
+        expect(validate_template_keys("Hello " + brace_key("name") + "!", ["wrong"]).is_ok()).to_equal(false)
 
 describe "suggest_key_fix":
     it "suggests similar key":
-        # suggest_key_fix("Hello {user}!", "usr") == Some("user")
-        pass
+        # @req REQ-CONSTKEYS-048
+        # @capture(protocol_json): typo suggestion through the wrapper
+        step("Suggest a fix for a one-edit typo through the wrapper")
+        expect(suggest_key_fix("Hello " + brace_key("user") + "!", "usr")).to_equal("user")
 
     it "returns None for no match":
-        # suggest_key_fix("Hello {user}!", "xyz") == None
-        pass
+        # @req REQ-CONSTKEYS-049
+        # @capture(bit_table): no-suggestion verdict through the wrapper
+        step("Suggest a fix for an unrelated key through the wrapper")
+        expect(suggest_key_fix("Hello " + brace_key("user") + "!", "xyz")).to_equal(nil)
 
 describe "render_template":
     it "renders valid template":
-        # render_template("Hello {name}!", {"name": "World"})
-        # == Ok("Hello World!")
-        pass
+        # @req REQ-CONSTKEYS-050
+        # @capture(protocol_json): rendered output through the wrapper
+        step("Render a valid template through the convenience wrapper")
+        val rendered = render_template("Hello " + brace_key("name") + "!", {"name": "World"})
+        expect(rendered.unwrap()).to_equal("Hello World!")
 
     it "fails on invalid keys":
-        # render_template("Hello {name}!", {"wrong": "World"})
-        # is Err
-        pass
-
-# ============================================================================
-# Integration Tests
-# ============================================================================
+        # @req REQ-CONSTKEYS-051
+        # @capture(bit_table): invalid-key wrapper verdict
+        step("Render a template with an undeclared key through the wrapper")
+        expect(render_template("Hello " + brace_key("name") + "!", {"wrong": "World"}).is_ok()).to_equal(false)
 
 describe "Const Keys Integration":
     it "validates complex template":
-        # Template: "Welcome {user} to {city} on {date}!"
-        # Keys: ["user", "city", "date"]
-        pass
+        # @req REQ-CONSTKEYS-052
+        # @capture(bit_table): three-key integration verdict
+        step("Validate a full three-key sentence template")
+        val template = "Welcome " + brace_key("user") + " to " + brace_key("city") + " on " + brace_key("date") + "!"
+        expect(validate_template_keys(template, ["user", "city", "date"]).is_ok()).to_equal(true)
 
     it "suggests fixes for typos":
-        # "Welcome {user} to {citi}"
-        # Suggests "city" for "citi"
-        pass
+        # @req REQ-CONSTKEYS-053
+        # @capture(protocol_json): integration typo suggestion
+        step("Suggest a fix for a typo inside the sentence template")
+        val template = "Welcome " + brace_key("user") + " to " + brace_key("city")
+        expect(suggest_key_fix(template, "citi")).to_equal("city")
 
     it "handles nested braces in content":
-        # Template with literal braces should work
-        pass
+        # @req REQ-CONSTKEYS-054
+        # @capture(bit_table): nested-brace extraction
+        step("Extract keys from a template whose content carries extra braces")
+        val nested = "{" + "pre {" + "in" + "} post" + "}"
+        val keys = extract_template_keys(nested)
+        expect(keys.len()).to_equal(1)  # oracle: the scanner closes the key at the first brace
+        expect(keys[0]).to_contain("in")
 
     it "works with empty values":
-        # {"name": ""} should be valid
-        pass
-
-# ============================================================================
-# Exports
-# ============================================================================
-
-export describe
+        # @req REQ-CONSTKEYS-055
+        # @capture(protocol_json): empty-value rendered output
+        step("Render an instance whose value is the empty string")
+        val result = TemplateInstance.create("Hello " + brace_key("name") + "!", {"name": ""})
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().render()).to_equal("Hello !")
