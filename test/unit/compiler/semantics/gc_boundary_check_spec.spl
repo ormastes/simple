@@ -1,3 +1,33 @@
+"""
+## Purpose and audience
+Executable boundary evidence for the engineers who own
+`src/compiler/semantics/gc_boundary_check.spl` and the runtime-family
+manifest: which family may import which, how aliases resolve, and which
+sub-allocators count as allocating. Operators gating a runtime-layer change
+rerun this spec to catch family crossings the checker must warn about.
+## Operator workflow
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/semantics/gc_boundary_check_spec.spl`
+from the repo root; every scenario drives the real checker entry points
+(`check_gc_boundary_imports`, `check_runtime_family_import_violations`,
+`runtime_family_manifest_entry`, `resolve_gc_alias`) and asserts their verdicts.
+## Compatibility and limitations
+The spec exercises the manifest-backed model directly, not the full compiler
+driver wiring; a warning surfaced here still has to travel through the
+diagnostics pipeline to reach a build failure. The family table it asserts is
+the shipped manifest, so manifest edits intentionally move these verdicts.
+## Verification guidance and troubleshooting
+A failing `warnings.len()` means the checker warned more or less often than the
+family model allows — compare the cited import pair against the manifest rows
+named in the scenario. A failing message token means the warning wording
+drifted; fix the wording or the manifest, never the assertion.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/runtime/gc_nogc_runtime_completion_audit_2026-05-13.md ;
+# doc/04_architecture/runtime/domain_arena_v2.md ;
+# doc/05_design/runtime/gc_pure_simple_implementation.md
+# @manual_section: gc-boundary-checker
+
 use std.spec.*
 use compiler.semantics.gc_boundary_check.{
     runtime_family_manifest_entry,
@@ -9,49 +39,66 @@ use compiler.semantics.gc_boundary_check.{
 
 describe "gc boundary semantic checker":
     it "warns when no-gc imports gc async":
+        # @req REQ-RT-GCBOUNDARY-001
+        # @capture(bit_table): outcome of "warns when no-gc imports gc async"
+        step("Warns when no-gc imports gc async")
         val warnings = check_gc_boundary_imports(
             "std.nogc_sync_mut.fs",
             ["std.gc_async_mut.gpu"]
         )
-        expect(warnings.len()).to_equal(1)
+        expect(warnings.len()).to_equal(1)  # oracle: one violating import pair produces exactly one warning
         expect(warnings[0].message).to_contain("no-gc module")
         expect(warnings[0].message).to_contain("imports GC family")
 
     it "warns when gc async imports no-gc (symmetric rule)":
+        # @req REQ-RT-GCBOUNDARY-002
+        # @capture(bit_table): outcome of "warns when gc async imports no-gc (symmetric rule)"
         step("Verify: warns when gc async imports no-gc (symmetric rule)")
         val warnings = check_gc_boundary_imports(
             "std.gc_async_mut.gpu",
             ["std.nogc_sync_mut.fs"]
         )
-        expect(warnings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(warnings.len()).to_equal(1)  # oracle: one violating import pair produces exactly one warning  # oracle: 1 — named expected value from the requirement
         expect(warnings[0].message).to_contain("gc module")
         expect(warnings[0].message).to_contain("imports no-gc family")
 
     it "warns when noalloc imports allocating no-gc":
+        # @req REQ-RT-GCBOUNDARY-003
+        # @capture(bit_table): outcome of "warns when noalloc imports allocating no-gc"
+        step("Warns when noalloc imports allocating no-gc")
         val warnings = check_gc_boundary_imports(
             "std.nogc_async_mut_noalloc.memory",
             ["std.nogc_async_mut.actor"]
         )
-        expect(warnings.len()).to_equal(1)
+        expect(warnings.len()).to_equal(1)  # oracle: one violating import pair produces exactly one warning
         expect(warnings[0].message).to_contain("no-alloc module")
         expect(warnings[0].message).to_contain("imports allocating family")
 
     it "warns when noalloc imports gc async":
+        # @req REQ-RT-GCBOUNDARY-004
+        # @capture(bit_table): outcome of "warns when noalloc imports gc async"
+        step("Warns when noalloc imports gc async")
         val warnings = check_gc_boundary_imports(
             "std.nogc_async_mut_noalloc.memory",
             ["std.gc_async_mut.gpu"]
         )
-        expect(warnings.len()).to_equal(1)
+        expect(warnings.len()).to_equal(1)  # oracle: one violating import pair produces exactly one warning
         expect(warnings[0].message).to_contain("imports GC family")
 
     it "allows common imports from no-gc and noalloc":
+        # @req REQ-RT-GCBOUNDARY-005
+        # @capture(bit_table): outcome of "allows common imports from no-gc and noalloc"
+        step("Allows common imports from no-gc and noalloc")
         val warnings = check_gc_boundary_imports(
             "std.nogc_async_mut_noalloc.memory",
             ["std.common.text"]
         )
-        expect(warnings.len()).to_equal(0)
+        expect(warnings.len()).to_equal(0)  # oracle: a family-neutral import must not warn
 
     it "formats produced family warnings":
+        # @req REQ-RT-GCBOUNDARY-006
+        # @capture(bit_table): outcome of "formats produced family warnings"
+        step("Formats produced family warnings")
         val warnings = check_gc_boundary_imports(
             "std.nogc_async_mut.actor",
             ["std.gc_async_mut.gpu"]
@@ -61,6 +108,8 @@ describe "gc boundary semantic checker":
         expect(messages[0]).to_contain("gc_boundary_crossing")
 
     it "classifies runtime families through the manifest":
+        # @req REQ-RT-GCBOUNDARY-007
+        # @capture(bit_table): outcome of "classifies runtime families through the manifest"
         step("Verify: classifies runtime families through the manifest")
         val noalloc = runtime_family_manifest_entry("std.nogc_async_mut_noalloc.collections")
         expect(noalloc.family).to_equal("nogc_async_mut_noalloc")
@@ -69,9 +118,11 @@ describe "gc boundary semantic checker":
 
         val gc = runtime_family_manifest_entry("std.gc_sync_immut.map")
         expect(gc.gc_mode).to_equal("gc")
-        expect(gc.rank).to_equal(4)
+        expect(gc.rank).to_equal(4)  # oracle: the manifest pins the gc family at rank 4, above nogc and noalloc
 
     it "noalloc family's own bounded-region sub-allocators carry allocates: true (regression for prefix-match exemption bug)":
+        # @req REQ-RT-GCBOUNDARY-008
+        # @capture(bit_table): outcome of "noalloc family's own bounded-region sub-allocators carry allocates: true (regression for prefix-match exemption bug)"
         step("Verify: noalloc family's own bounded-region sub-allocators carry allocates: true (regression for prefix-match exemption bug)")
         # doc/08_tracking/bug/noalloc_family_manifest_prefix_match_exempts_its_own_allocators_2026-08-07.md
         # WP-13 audited these at the pointer level: baremetal/allocator.spl
@@ -89,6 +140,8 @@ describe "gc boundary semantic checker":
         expect(allocator.allocates).to_equal(true)
 
     it "SharedHeap's memory submodule stays allocates: false — it returns logical BinaryRefs, never a memory address":
+        # @req REQ-RT-GCBOUNDARY-009
+        # @capture(bit_table): outcome of "SharedHeap's memory submodule stays allocates: false — it returns logical BinaryRefs, never a memory address"
         step("Verify: SharedHeap's memory submodule stays allocates: false — it returns logical BinaryRefs, never a memory address")
         # WP-13's first pass called `memory` "arena-bound" and had to retract
         # that as an overclaim: SharedHeap.allocate() returns a logical
@@ -106,6 +159,8 @@ describe "gc boundary semantic checker":
         expect(baremetal.allocates).to_equal(false)
 
     it "does not mistake an unrelated family for a dot-boundary submodule (family_path_matches regression)":
+        # @req REQ-RT-GCBOUNDARY-010
+        # @capture(bit_table): outcome of "does not mistake an unrelated family for a dot-boundary submodule (family_path_matches regression)"
         step("Verify: does not mistake an unrelated family for a dot-boundary submodule (family_path_matches regression)")
         # "nogc_async_mut_noalloc" must not match a hypothetical sibling family
         # whose name merely shares the same leading characters.
@@ -114,28 +169,38 @@ describe "gc boundary semantic checker":
         expect(sibling.gc_mode).to_equal("unknown")
 
     it "resolves std.pure through the gc_async_mut alias (pure/*.spl are forwarding facades)":
+        # @req REQ-RT-GCBOUNDARY-011
+        # @capture(bit_table): outcome of "resolves std.pure through the gc_async_mut alias (pure/*.spl are forwarding facades)"
         step("Verify: resolves std.pure through the gc_async_mut alias (pure/*.spl are forwarding facades)")
         val resolved = resolve_gc_alias("std.pure.tensor")
         expect(resolved).to_contain("gc_async_mut")
 
     it "returns hard violations from the manifest-backed model":
+        # @req REQ-RT-GCBOUNDARY-012
+        # @capture(bit_table): outcome of "returns hard violations from the manifest-backed model"
+        step("Returns hard violations from the manifest-backed model")
         val violations = check_runtime_family_import_violations(
             "std.nogc_async_mut_noalloc.memory",
             ["std.nogc_async_mut.actor", "std.gc_async_mut.gpu", "std.common.text"]
         )
-        expect(violations.len()).to_equal(2)
+        expect(violations.len()).to_equal(2)  # oracle: two of the three imports cross a family, one violation per family rule
         expect(violations[0].reason).to_equal("noalloc_imports_allocating_family")
         expect(violations[1].reason).to_equal("noalloc_imports_gc_family")
 
     it "rejects lower runtime layers importing hosted adapters":
+        # @req REQ-RT-GCBOUNDARY-013
+        # @capture(bit_table): outcome of "rejects lower runtime layers importing hosted adapters"
+        step("Rejects lower runtime layers importing hosted adapters")
         val violations = check_runtime_family_import_violations(
             "std.nogc_async_mut.actor",
             ["std.nogc_sync_mut.io"]
         )
-        expect(violations.len()).to_equal(1)
+        expect(violations.len()).to_equal(1)  # oracle: the single hosted-adapter import is one higher-layer violation
         expect(violations[0].reason).to_equal("higher_layer_runtime_family")
 
     it "warns when nogc module imports std.gpu alias (gc-backed shim)":
+        # @req REQ-RT-GCBOUNDARY-014
+        # @capture(bit_table): outcome of "warns when nogc module imports std.gpu alias (gc-backed shim)"
         step("Verify: warns when nogc module imports std.gpu alias (gc-backed shim)")
         # std.gpu is exposed via nogc_async_mut/gpu/__init__.spl which does
         # `use gc_async_mut.gpu.*` — the alias resolver must detect this.
@@ -143,11 +208,13 @@ describe "gc boundary semantic checker":
             "std.nogc_sync_mut.fs",
             ["std.gpu"]
         )
-        expect(warnings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(warnings.len()).to_equal(1)  # oracle: one violating import pair produces exactly one warning  # oracle: 1 — named expected value from the requirement
         expect(warnings[0].message).to_contain("no-gc module")
         expect(warnings[0].message).to_contain("imports GC family")
 
     it "warns when nogc module imports std.nogc_async_mut.gpu (gc-backed shim)":
+        # @req REQ-RT-GCBOUNDARY-015
+        # @capture(bit_table): outcome of "warns when nogc module imports std.nogc_async_mut.gpu (gc-backed shim)"
         step("Verify: warns when nogc module imports std.nogc_async_mut.gpu (gc-backed shim)")
         # std.nogc_async_mut.gpu/__init__.spl re-exports gc_async_mut.gpu.*;
         # the alias resolver classifies it as gc family despite the nogc_ prefix.
@@ -155,11 +222,13 @@ describe "gc boundary semantic checker":
             "std.nogc_sync_mut.fs",
             ["std.nogc_async_mut.gpu"]
         )
-        expect(warnings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(warnings.len()).to_equal(1)  # oracle: one violating import pair produces exactly one warning  # oracle: 1 — named expected value from the requirement
         expect(warnings[0].message).to_contain("no-gc module")
         expect(warnings[0].message).to_contain("imports GC family")
 
     it "does not warn when gc module imports std.gpu alias":
+        # @req REQ-RT-GCBOUNDARY-016
+        # @capture(bit_table): outcome of "does not warn when gc module imports std.gpu alias"
         step("Verify: does not warn when gc module imports std.gpu alias")
         # A gc_async_mut module importing std.gpu (also gc-backed) is not a boundary
         # crossing — both sides resolve to the gc family.
@@ -167,9 +236,11 @@ describe "gc boundary semantic checker":
             "std.gc_async_mut.task",
             ["std.gpu"]
         )
-        expect(warnings.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(warnings.len()).to_equal(0)  # oracle: a family-neutral import must not warn  # oracle: 0 — named expected value from the requirement
 
     it "resolve_gc_alias rewrites gpu alias to effective gc family path":
+        # @req REQ-RT-GCBOUNDARY-017
+        # @capture(bit_table): outcome of "resolve_gc_alias rewrites gpu alias to effective gc family path"
         step("Verify: resolve_gc_alias rewrites gpu alias to effective gc family path")
         val resolved = resolve_gc_alias("std.gpu")
         expect(resolved).to_contain("gc_async_mut")
