@@ -1,5 +1,32 @@
+"""
+## Purpose and audience
+Purpose: pin the hosted physical environment executor's capture-once,
+replay-exact contract for process poll, ambient environment, regular file,
+stream, clock, and random entropy surfaces under sealed capability policy.
+Audience: MCDC HAL runtime engineers who own the environment instruction
+executor and its capability/receipt wire contract.
+## Operator workflow
+Run this spec with
+`simple run test/02_integration/app/hal_environment_physical_executor_spec.spl`
+and read the per-scenario verdict lines; a failing scenario pinpoints the
+regressed executor behavior.
+## Compatibility and limitations
+Exercises the hosted executor wrappers only; file capture reads the checked-in
+config/critical_mode.sdn from the repository working directory and clock/random
+capture requires the nondeterministic authority bit, so no baremetal target is
+covered here.
+## Verification guidance and troubleshooting
+A failure names the opcode and policy combination that regressed; re-run this
+spec and compare the failing scenario's receipt fields (applied,
+physical_effect, allocation_count_after_seal) to reproduce locally.
+"""
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-011 REQ-016 REQ-017
+# Lifecycle: doc/01_research/local/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: hosted-physical-environment-executor
 
 use std.spec.*
 use app.io.{cwd, getpid}
@@ -43,6 +70,9 @@ fn capture_instruction(opcode: EnvOpcodeV1, capability_id: i64,
 
 describe "hosted physical environment executor":
     it "polls the current process through the canonical process facade":
+        # @req REQ-016
+        # @capture(protocol_binary): process-poll receipt with allocation count after seal
+        step("Poll the current process id through the hosted executor under capability 7")
         val executor = HostedProcessPollEnvExecutorV1(sealed: true)
         val operation = env_instruction_v1(
             29, 0, EnvOpcodeV1.ProcessPoll, 7, 0,
@@ -59,10 +89,13 @@ describe "hosted physical environment executor":
 
         expect(receipt.applied).to_be(true)
         expect(receipt.physical_effect).to_be(true)
-        expect(receipt.allocation_count_after_seal).to_equal(0)
-        expect(results[0]).to_equal(1u8)
+        expect(receipt.allocation_count_after_seal).to_equal(0)  # oracle: a sealed capture must allocate nothing after the seal point
+        expect(results[0]).to_equal(1u8)  # oracle: the executor encodes the live-process poll verdict as byte 1
 
     it "captures ambient environment once before seal and serves bytes without reread":
+        # @req REQ-016
+        # @capture(protocol_binary): environment-get capture receipt sized to the PATH value
+        step("Capture the ambient PATH value once and serve it from the sealed snapshot")
         val executor = hosted_prepare_environment_get_v1("PATH")
         val key = ascii_bytes("PATH")
         val result_capacity = executor.value_bytes.len()
@@ -79,10 +112,13 @@ describe "hosted physical environment executor":
 
         expect(receipt.applied).to_be(true)
         expect(receipt.physical_effect).to_be(true)
-        expect(receipt.allocation_count_after_seal).to_equal(0)
-        expect(receipt.observation.bytes_length).to_equal(result_capacity)
+        expect(receipt.allocation_count_after_seal).to_equal(0)  # oracle: a sealed capture must allocate nothing after the seal point
+        expect(receipt.observation.bytes_length).to_equal(result_capacity)  # oracle: the observation must carry exactly the captured PATH byte count
 
     it "fails closed for unsupported physical opcodes before any effect":
+        # @req REQ-017
+        # @capture(protocol_binary): rejected receipt preserving the untouched result byte
+        step("Submit an environment-get instruction to the process-poll executor and expect rejection")
         val executor = HostedProcessPollEnvExecutorV1(sealed: true)
         val operation = env_instruction_v1(
             29, 0, EnvOpcodeV1.EnvironmentGet, 7, 0,
@@ -98,9 +134,12 @@ describe "hosted physical environment executor":
         expect(receipt.applied).to_be(false)
         expect(env_instruction_status_to_i64(receipt.observation.status)).to_equal(
             env_instruction_status_to_i64(EnvInstructionStatusV1.UnsupportedCapability))
-        expect(results[0]).to_equal(9u8)
+        expect(results[0]).to_equal(9u8)  # oracle: the sentinel 9 must survive because no result byte may be written on rejection
 
     it "captures a bounded regular file once and replays without a second effect":
+        # @req REQ-011
+        # @capture(protocol_binary): file-read capture plus replay receipt pair with digests
+        step("Capture the bounded config file once and replay it from the observation")
         val root = cwd()
         val path = root + "/config/critical_mode.sdn"
         val executor = hosted_prepare_file_read_v1(path, root, 65536)
@@ -119,13 +158,16 @@ describe "hosted physical environment executor":
 
         expect(receipt.applied).to_be(true)
         expect(receipt.physical_effect).to_be(true)
-        expect(receipt.allocation_count_after_seal).to_equal(0)
+        expect(receipt.allocation_count_after_seal).to_equal(0)  # oracle: a sealed capture must allocate nothing after the seal point
         expect(replay.applied).to_be(true)
-        expect(replay.physical_effect).to_be(false)
-        expect(replay.allocation_count_after_seal).to_equal(0)
+        expect(replay.physical_effect).to_be(false)  # oracle: replay must serve the snapshot without a second physical read
+        expect(replay.allocation_count_after_seal).to_equal(0)  # oracle: replay allocates nothing after the seal point either
         expect(replayed).to_equal(captured)
 
     it "binds a prepared stream snapshot to its exact handle and capacity":
+        # @req REQ-011
+        # @capture(protocol_binary): stream-read transcript with divergent-handle rejection status
+        step("Bind stream handle 73 to its snapshot and reject a different handle")
         val payload: [u8] = [7u8, 8u8, 9u8]
         val executor = hosted_prepare_stream_read_v1(73, payload, 3, 3)
         var arguments: [u8] = [0u8; 8]
@@ -137,7 +179,7 @@ describe "hosted physical environment executor":
             arguments, results)
 
         expect(receipt.applied).to_be(true)
-        expect(receipt.allocation_count_after_seal).to_equal(0)
+        expect(receipt.allocation_count_after_seal).to_equal(0)  # oracle: a sealed capture must allocate nothing after the seal point
         expect(results).to_equal(payload)
 
         arguments[0] = 72u8
@@ -148,6 +190,9 @@ describe "hosted physical environment executor":
             env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
 
     it "captures clock and random once and blocks them without nondeterminism authority":
+        # @req REQ-017
+        # @capture(protocol_binary): clock/random capture receipts with the unsafe-instruction block
+        step("Capture clock and random once, then block the unauthorized clock read and replay it")
         val clock = hosted_prepare_clock_read_v1()
         val random = hosted_prepare_random_fill_v1(16)
         val clock_op = capture_instruction(EnvOpcodeV1.ClockRead, 11, 0, 8)
@@ -172,17 +217,20 @@ describe "hosted physical environment executor":
         expect(env_instruction_status_to_i64(
             blocked_clock.observation.status)).to_equal(
                 env_instruction_status_to_i64(EnvInstructionStatusV1.UnsafeInstruction))
-        expect(blocked_result[0]).to_equal(91u8)
+        expect(blocked_result[0]).to_equal(91u8)  # oracle: the sentinel 91 must survive because the blocked read may not write results
         expect(captured_clock.applied).to_be(true)
-        expect(captured_clock.allocation_count_after_seal).to_equal(0)
+        expect(captured_clock.allocation_count_after_seal).to_equal(0)  # oracle: a sealed capture must allocate nothing after the seal point
         expect(replayed_clock.applied).to_be(true)
-        expect(replayed_clock.physical_effect).to_be(false)
+        expect(replayed_clock.physical_effect).to_be(false)  # oracle: replay must serve the snapshot without a second physical read
         expect(clock_replay).to_equal(clock_result)
         expect(captured_random.applied).to_be(true)
-        expect(captured_random.allocation_count_after_seal).to_equal(0)
-        expect(captured_random.observation.bytes_length).to_equal(16)
+        expect(captured_random.allocation_count_after_seal).to_equal(0)  # oracle: a sealed capture must allocate nothing after the seal point
+        expect(captured_random.observation.bytes_length).to_equal(16)  # oracle: the random capture must fill exactly the requested 16 bytes
 
     it "rejects oversized capture before allocating or touching result storage":
+        # @req REQ-017
+        # @capture(protocol_binary): oversized-request rejection receipt with untouched storage
+        step("Request a 65537-byte random fill against the 32-byte authority and expect rejection")
         val executor = hosted_prepare_random_fill_v1(65537)
         val operation = capture_instruction(EnvOpcodeV1.RandomFill, 12, 0, 1)
         var result: [u8] = [55u8]
@@ -191,4 +239,4 @@ describe "hosted physical environment executor":
             operation, [], result)
 
         expect(receipt.applied).to_be(false)
-        expect(result[0]).to_equal(55u8)
+        expect(result[0]).to_equal(55u8)  # oracle: the sentinel 55 must survive because the oversized request may not touch result storage
