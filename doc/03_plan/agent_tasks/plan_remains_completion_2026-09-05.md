@@ -237,9 +237,13 @@ with `Compilation failed` / `executed=0` until A1 lands; the ✓ lines in
 groups (a)-(d) are produced THROUGH the crash path and are not evidence of
 the feature; (2) depa gate control — `lazy_parse_enabled` forced to read
 `"1"` by a temporary module edit, scenario 1 expected RED, module restored
-from a byte copy and checked with `git diff --stat`. Post-restore reruns of
-scilib and startup_perf were also started; the restored trees are
-byte-identical to HEAD (`git diff --stat` → 0 lines) either way.
+from a byte copy and checked with `git diff --stat`. Post-restore reruns completed:
+scilib → REQ-01 ✓ again (only REQ-06 red, 6/7); startup_perf → Phase E ✓
+again (`within_band` on the real 1298 baseline, 2/3 with Phase C
+pre-existing red). Both restored trees are byte-identical to HEAD
+(`git diff --stat` → 0 lines). In-development spec run observed so far:
+groups (a)-(c) ✓ (crash path), group (d) both ✗ — a tagged PASSING fixture
+cannot pass either, confirming no child executes on this host.
 
 Direction of each control, stated so red is not misread: scilib REQ-01,
 startup Phase E, depa gate — GREEN normally, plant → RED, restore → GREEN.
