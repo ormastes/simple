@@ -32,10 +32,11 @@ plan-done (research, design, plan written 2026-09-05; implementation Wave 0 not 
 - [x] research — `doc/01_research/ui/slim_kernel_plugin/repo_verification_addendum_2026-09-05.md`
 - [x] design — `doc/05_design/ui/slim_kernel_plugin/design.md`
 - [x] plan — `doc/03_plan/ui/slim_kernel_plugin/plan.md`
-- [ ] requirements — `doc/02_requirements/{feature,nfr}/ui_slim_kernel_plugin.md`
-- [ ] spec (Wave 1 RED-first)
-- [ ] implement
-- [ ] verify
+- [x] requirements — `doc/02_requirements/{feature,nfr}/ui_slim_kernel_plugin.md`
+- [x] spec (Wave 1 RED-first) — screen_batching, tui_route_closure, composition_adapter specs
+- [x] implement (Wave 1) — 2026-09-05: A03 screen batching (40→1 row copies, 11/11), P08 shared_wm_route split (async_app closure 343→9, 2/2), A02 composition_adapter (6/6), A01 `check-ui-slim-closure.shs` (selftest 5/5). All evidence is SEED-LANE (diagnostic), not a certified pure-Simple PASS.
+- [ ] verify — needs deployed pure-Simple `ui`; the closure gate must run as a push-tier manifest row (`config/check/must_check_gates.sdn`) once green
+- [ ] Wave 2 (event wait/watch, Tiny after transfer, packs) · Wave 3 (measure, certify)
 - [ ] ship
 
 ## Blockers ledger (2026-09-05)
@@ -58,5 +59,7 @@ Registry route added (`doc/00_llm_process/knowledge_registry.sdn` feature_routes
 - Landing route: detached worktree at origin sha + PR to `main`; never `jj git push` from this WC (peer conflicts in `doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md`, `scripts/check/guard_wiring_optout.txt`).
 
 ## Log
+
+- 2026-09-05 (Wave 1): commits `81285121` requirements, `7bdf002c` composition adapter, `68ff4d5b` closure gate, `7c292922` screen batching, `87cd2b4c` shared-WM route split. Side finding: `test/01_unit/app/ui/screen_ansi_spec.spl` was unparseable since `e274cd33719` (2026-08-27 modernization deleted its helpers and docstring opener); repaired, now 18/20 with 2 pre-existing RED (A/B identical on pre-batching screen.spl) — bug record `doc/08_tracking/bug/screen_ansi_suffix_style_overwrite_2026-09-05.md`.
 
 - 2026-09-05: imported three Downloads docs; verified R02–R08 at HEAD `56dd3059c2e`; seed `deps fast` closure `async_app.spl`=344 files (drivers/kernel/skia reached), `ui/main.spl`=79, `host_gui.spl`=4 (resolver stops); composition landed (28 callers, 35 specs), kernel_plugin absent; wrote addendum, design, plan, feature wiki.
