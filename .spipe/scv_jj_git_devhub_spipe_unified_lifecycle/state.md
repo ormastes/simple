@@ -60,7 +60,11 @@ Implement the complete agent-owned, pure-Simple base for the unified SCV/Jujutsu
 
 ## Phase
 
-agent-base-delivered-unverified
+stage-0.5-partially-wired-unverified
+
+(Was `agent-base-delivered-unverified` until 2026-09-05. Still UNVERIFIED for the
+same reason: the deployed `bin/simple` is the Rust seed, so nothing in this lane is
+an authoritative PASS. 0 of 18 acceptance criteria hold one.)
 
 ## Log
 
@@ -124,3 +128,43 @@ Todo DB prerequisite: existing TODO 270 (`hardening_resume_after_seed_redeploy_2
 - `.claude/commands`: N/A; DevHub lifecycle is a product CLI subcommand, not a Claude command.
 - `.gemini/commands`: N/A; no Gemini command consumes the observe-only base.
 - Generated-manual independent review remains open until the admitted Stage 4 docgen/`sspec-maintain` pass and final independent reviewer are available.
+- research-2026-09-05: Filed the two FULL research documents that the condensed
+  `..._2026-08-25.md` summarizes: `..._unified_lifecycle_full_2026-08-25.md` and
+  `..._unified_release_review_work_item_2026-08-25.md` (the latter is the only
+  source for the four SCV tag defects, release units, authority modes A/B/C, and
+  the R0-R4 review risk classes).
+- audit-2026-09-05: Measured the delivered base as DORMANT — real, unstubbed,
+  zero TODO markers, but no producer, executor, provider implementation, or
+  mutation path; ~20-25% of the 7-stage design. Doc audit: Stage 6a undesigned,
+  Stage 3 with zero architecture content, six NFRs with no test rows, no
+  Stage/REQ/AC cross-walk.
+- doc-2026-09-05: Plan rewritten (Stage 0.5 wiring + Stage 6a provider design as
+  BLOCKING; tag defects T-1..T-4; cross-walk and NFR ownership tables).
+  Architecture 37 -> 279 lines (Stage 3 written from nothing). Design 203 -> 597
+  (Stage 6a written from nothing).
+- impl-2026-09-05: Stage 0.5 items 1, 3, 4 landed. `bin/sj plan` reaches the typed
+  layer; `devhub lifecycle record-change` is the first production caller of
+  `lifecycle_store_write`; `LocalScvProvider` is the first `LifecycleProvider`
+  implementer. Specs 6/6, 7/7, 3/3 each verified red-then-green; 38/38 no
+  regressions. All diagnostic only.
+- trap-2026-09-05-eager-use: `use` resolves EAGERLY. strace showed an
+  `integrate_plan` import in `src/app/sj/main.spl` opening `scv/lifecycle` 4x on
+  every `bin/sj --help`. `bin/sj` execs `main.spl` FROM SOURCE and `land.shs`
+  invokes `sj`, so that import put the whole lifecycle graph on the push path for
+  the entire machine. Fixed by routing `plan` to a separate entry
+  (`src/app/sj/plan_main.spl`). NEVER add a lifecycle import to `main.spl`.
+- trap-2026-09-05-clobber: A concurrent session's checkout reverted EVERY tracked
+  file of this lane to HEAD with no `git status` trace; untracked files survived.
+  Recovery was possible only for files previously `git hash-object -w`'d. Hash
+  every file immediately after writing it in this tree, and RECORD the SHA — the
+  three sj files were lost because their SHAs were never taken.
+- open-2026-09-05: `sj plan`'s PASS branch is unreachable — `protected_target` is
+  hardcoded `false`, no protected-ref policy committed under `config/`, so every
+  plan ends `FAIL — SJ_POLICY_TARGET`. Stage 0.5 item 2 (gate-manifest/CAS half)
+  and item 5 (reachability guard) not started. `scripts/check/land.shs` now does a
+  raw `git push` and defers to a "reviewed CAS operation" with no executor. Four
+  of five provider traits have 0 implementers.
+- rejected_shortcuts-2026-09-05: Intercepting `sj git push` to force a dry-run —
+  REJECTED, it is `land.shs`'s path and would break every push on this machine.
+  Adding the lifecycle import to `main.spl` — tried, measured, reverted.
+
