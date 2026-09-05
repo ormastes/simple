@@ -571,3 +571,19 @@ The `## Acceptance matrix` section above is a different, pre-existing section
 Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/compiler_loader_script_crosslang_perf_spec.spl`
 (tagged `@tag:in-development`; one `it` per open box — see
 `doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).
+
+2026-09-05 host receipt (no box ticked): all three open boxes stay open. Their
+oracles exec `release/x86_64-unknown-linux-gnu/simple`, which on this host is a
+`ELF 64-bit LSB pie executable, x86-64` — `./release/x86_64-unknown-linux-gnu/simple
+--version` exits **126** (`exec format error`) on aarch64 macOS, matching the
+plan's own host matrix row ("macOS ... UNAVAILABLE"). Independently, the
+acceptance spec itself does not even load on this host: `bin/release/aarch64-apple-darwin/simple_seed
+run test/03_system/plan_acceptance/compiler_loader_script_crosslang_perf_spec.spl`
+fails with `error: semantic: variable 'always_inline' not found`, bisected to
+`use std.spec.{expect}` -> `src/lib/nogc_sync_mut/spec.spl:351-353` ->
+`src/lib/nogc_sync_mut/io_runtime.spl:178,180` (stale Jul-25 seed vs.
+`@always_inline` and `unsafe(capabilities:)`). Specs that avoid those modules
+do run on this host. Recorded in
+`doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`
+§ "Second manifestation". No candidate admission, perf row, or check verdict is
+claimed from this host.

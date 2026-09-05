@@ -72,6 +72,30 @@ All public API signatures use typed wrappers. Internal implementation may use pr
 | `Matrix<T>` | `struct Matrix<T> { _inner: NDArray<T> }` | `std.linalg.types` | rank-2 assertion on construction |
 | `Vector<T>` | `struct Vector<T> { _inner: NDArray<T> }` | `std.linalg.types` | rank-1 assertion on construction |
 
+**As-built correction — `Matrix<T>` / `Vector<T>` are declared but never constructed (2026-09-05).**
+The table above specifies `Matrix<T> { _inner: NDArray<T> }` and `Vector<T> { _inner: NDArray<T> }`
+in `std.linalg.types`, each applying a rank assertion on construction. The shipped tree does not
+match on any of those three points:
+
+- They live in `src/lib/nogc_async_mut/ndarray/mod.spl:49,52` as `struct Matrix<T>: inner: NDArray`
+  and `struct Vector<T>: inner: NDArray` — in the ndarray area, not a `std.linalg.types` module
+  (no `types.spl` exists in either area).
+- **Neither is ever constructed.** `/usr/bin/grep -rn "Matrix(\|Vector("
+  src/lib/nogc_async_mut/ndarray/` returns zero hits; the whole tree constructs no generic struct.
+  So there is no construction site at which a rank assertion could run — the assertion is not
+  merely unimplemented, it has nowhere to live.
+- Every shipped generator and consumer therefore passes a bare rank-2 `NDArray` carrying its own
+  `Shape`, and the rank check is a runtime guard inside the callee. `eye_matrix(size: Index) ->
+  NDArray` (`nogc_async_mut/linalg/linalg_core.spl:203`) and `trace(matrix: NDArray) ->
+  Result<Float64, LinalgError>` (`nogc_async_mut/linalg/mod.spl:209`, which rejects
+  `dtype != DType.F64` and `shape.dims.len() != 2` with `LinalgError.DimensionMismatch`) are the
+  canonical shape of that idiom.
+
+Treat the bare rank-2 `NDArray` as the current contract. Until `Matrix<T>` gains a constructor that
+performs the rank-2 assertion, adding the wrapper to a signature buys no checking and only widens
+the API. Reconcile in one direction — either implement the constructors and migrate the linalg
+surface onto them, or retire the two unconstructed structs — rather than leaving both shapes live.
+
 **Construction ergonomics:** Typed numeric literals (`2.718f64`) are available in Simple syntax. `Float64(x)` construction sugar should be a zero-cost wrapper. Free functions `f64(x)`, `idx(n)`, `shape(...)` may be provided as internal construction helpers that are not exported publicly — they return typed wrappers and are defined in `types.spl`.
 
 **Conversion at FFI:** Layers A and B form the primitive/wrapper conversion boundary. Layer A is raw `extern fn` with primitives (`i64`, `f64`, `ptr-as-i64`). Layer B wraps primitives in typed wrappers for return values and unwraps typed wrappers to primitives for arguments. Layer C (public API) is primitive-free throughout.

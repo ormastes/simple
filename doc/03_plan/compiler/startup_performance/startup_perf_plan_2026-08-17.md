@@ -378,6 +378,36 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
 - [ ] REMAINING — per-phase before/after snapshot spec with growth band not
   found; snapshots are one baseline, not a bracketing series. Tracked:
   `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+  Interface landed 2026-09-05, box deliberately NOT ticked: the gate function
+  `deps_growth_band_verdict(baseline_edges: i64, current_edges: i64,
+  band_pct: f64) -> text` now exists at `src/app/deps/growth_band.spl` and
+  answers `within_band` / `growth_beyond_band` / fail-closed `error:*` (a
+  non-positive baseline can never return a pass). Verdict table verified by a
+  direct driver under `bin/release/aarch64-apple-darwin/simple_seed`
+  (20,392,352 bytes, 2026-07-25 13:12): `(1298,1298,0.15)->within_band`,
+  `(1298,1200,0.15)->within_band`, `(1298,1400,0.15)->within_band` (7.9%),
+  `(1298,1600,0.15)->growth_beyond_band` (23.3%), `(0,1298,0.15)->
+  error:invalid_baseline`, `(1298,-1,0.15)->error:invalid_current`,
+  `(1298,1298,-0.1)->error:invalid_band`; 0.25s wall.
+  The acceptance `it` in
+  `test/03_system/plan_acceptance/startup_perf_plan_spec.spl` is still
+  UNEXECUTED: this spec's own import chain is poisoned for every deployed
+  binary here — `src/app/cli/help_surface_inventory.spl` (unparenthesized
+  multi-line boolean continuation) and `use std.spec.{expect}`, which reaches
+  `src/lib/nogc_sync_mut/io_runtime.spl:178,180` (`@always_inline`,
+  `unsafe(capabilities:)`) via `spec.spl:351-353`. This is NOT "no spec can
+  run here": specs whose imports avoid the poisoned modules do run, and a bare
+  `use std.spec` runs on the interpreter's built-in shims (which silently lack
+  the real module's vacuous-expect guard, so such a green is not a verdict) —
+  see `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`
+  § "Second manifestation". The current CLI-dir-aggregate closure count was
+  likewise NOT re-measured (`deps fast` needs a binary that can parse current
+  source), so no live within-band claim is made for the present tree.
+  Budget, stated for the pending measurement: baseline = **1298** files
+  (CLI-dir-aggregate closure, `doc/10_metrics/startup/coupling_cohesion_baseline_2026-08-17.md`),
+  band = **0.15** (15%), so the admission ceiling is **1492** files; the
+  measurement command is `bin/simple deps fast src/app/cli/__init__.spl`
+  (timeout 120s), pending a binary that can parse current source.
 
 ### Honest remaining list
 1. **Self-hosted deploy as default tooling** — `bin/simple` is still the

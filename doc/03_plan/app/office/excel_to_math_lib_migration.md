@@ -186,11 +186,17 @@ Replace internal `_sin_f64` calls with `math_bridge::excel_sin` etc.
 
 ### 4. Remove Duplicated Implementations
 Delete unused helper functions:
-- `_sin_f64`, `_cos_f64`, `_atan_f64` (now use math lib) — still present in
-  `formula.spl` as of 2026-09-05 (`fn _sin_f64` :3671, `_cos_f64` :3688, `_atan_f64` :3691)
-- `_sqrt_f64` (now use special.spl) — still present (`fn _sqrt_f64` :8593) and still
-  called by the `"SQRT"` case; `_ln_f64` / `_exp_f64` no longer exist (already removed)
-- `_PI` constant (now use MATH_PI) — still present (`val _PI` :3669), used by `"SQRTPI"`
+- `_sin_f64`, `_cos_f64`, `_atan_f64` (now use math lib) — **DELETED 2026-09-05.**
+  All call sites route through `excel_sin` / `excel_cos` / `excel_atan`.
+- `_sqrt_f64` (now use special.spl) — **DELETED 2026-09-05**; the `"SQRT"` case now
+  calls `excel_sqrt`. `_ln_f64` / `_exp_f64` no longer exist (removed earlier).
+- `_PI` constant (now use MATH_PI) — **DELETED 2026-09-05**; `formula.spl` imports
+  `MATH_PI` from `std.common.math.math`, and `"SQRTPI"` / `"DEGREES"` / `"RADIANS"`
+  now call `excel_sqrt_pi` / `excel_degrees` / `excel_radians`.
+
+`_atan2_f64`, `_sinh_f64` and `_cosh_f64` deliberately remain (used by the complex
+`IM*` functions) but now build on `excel_atan` / `MATH_PI` / `exp_f64`.
+`formula.spl`: 9,606 -> 9,558 lines.
 
 ### 5. Update SPipe Tests
 - Ensure all formula specs pass after migration
@@ -219,8 +225,20 @@ Delete unused helper functions:
 - [ ] Excel functions documented as using stdlib math
 - [ ] Code size reduced by ~500-1000 lines (duplicated implementations)
 - [ ] User-facing guide updated (doc/07_guide/app/office/excel_formulas.md)
-  - status 2026-09-05: that guide file does not exist; the only office guide is
-    `doc/07_guide/app/office/writing_calc_functions.md`, which does not mention `math_bridge`.
+  - status 2026-09-05: the guide now EXISTS and documents the
+    formula -> `math_bridge` -> `std.common.math` chain, the full function map and
+    the ASIN/ACOS endpoint values. Box left OPEN only because its `it` cannot be
+    executed on this host — see the blocker note below.
+
+**Blocker: no acceptance `it` is executable on this host (2026-09-05).** Every
+deployed binary predates the `unsafe(...)` capability blocks that
+`1b4edca296c` (SFFI v2 hardening, #75) added to `src/lib/common/math/math.spl`,
+so any module importing `std.common.math.math` — including `math_bridge.spl`
+and therefore `formula.spl` — fails to load
+(`parse: ... Unexpected token: expected expression, found Colon`). No box is
+ticked, per the tick-only-on-a-passing-`it` rule. Re-run after a seed redeploy:
+`doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`
+(section "Second instance, same class").
 
 ## Timeline Estimate
 

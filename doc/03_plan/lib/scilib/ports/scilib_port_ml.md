@@ -579,6 +579,21 @@ Check:
 - [ ] Zero TODO→NOTE conversions anywhere in ml source or specs
 - [ ] Zero primitive types (`f64`, `i64`, `bool`, `str`) in any public function signature or exported struct field
 - [ ] `nn/loss` and `nn/norm` are re-exported (grep for `pub use common.pure.nn`); no duplicate definition
+      — OPEN, and blocked on a plan-owner decision, not on implementation effort (2026-09-05).
+      The oracle (`test/03_system/plan_acceptance/scilib_port_ml_spec.spl`, `it "nn/loss and nn/norm
+      are re-exported"`) greps `src/lib/nogc_async_mut/ml` for the literal `pub use common.pure.nn`;
+      the count is 0 and the duplicate-definition half is already 0.
+      **The pinned path does not exist.** `src/lib/common/pure/` holds only `list.spl`; the real nn
+      is `src/lib/gc_async_mut/pure/nn/{loss,norm}.spl` (i.e. `std.gc_async_mut.pure.nn`). There is
+      therefore no spelling of `common.pure.nn` that resolves, and writing the literal line anyway
+      would be a text-match fake rather than a re-export.
+      Two viable closures, both outside an implementer's discretion:
+      (a) create `src/lib/common/pure/nn/{loss,norm}.spl` re-export shims so the pinned path becomes
+          real, or (b) move/rename the nn modules and amend the oracle to the real path.
+      **Extra hazard for either option:** `src/lib/gc_async_mut/pure/nn/loss.spl`'s own header states
+      the module is compiled-mode-only (`PureTensor<f64>` generics, "will only work in compiled mode,
+      not in the interpreter"). A facade re-export could break interpreter-mode loading of `std.ml`,
+      which every other ml spec depends on. Decide (a) vs (b) before anyone writes the line.
 - [x] `DType` and `Device` not defined in ml/ (nor referenced or re-exported — shipped ml operates on `[f64]`; the enums live only in ndarray) — verified src/lib/common/science_math/ndarray.spl:45 `pub enum DType`, :58 `pub enum Device`; `/usr/bin/grep -rn "enum DType\|enum Device" src/lib/common/science_math/ml_*.spl src/lib/nogc_async_mut/ml/` → 0 hits
 - [x] cuML not referenced anywhere in ml/ source — verified: `/usr/bin/grep -rni cuml src/lib/common/science_math/ src/lib/nogc_async_mut/ml/` → 0 hits
 - [x] PERF-SUGAR-003 observation entry promoted from `anticipated` to `observed` or `fixed` in `doc/08_tracking/feature/scilib_perf_sugar.md` — verified doc/08_tracking/feature/scilib_perf_sugar.md:105 `Status: fixed 2026-05-30` (entry header :100)

@@ -20,17 +20,33 @@
 
 - `src/app/office/sheets/math_bridge.spl` exists (`excel_sin` .. `excel_ceiling`, ~40 wrappers)
   and `formula.spl:19-24` imports it.
-- Phase 2 routing: 13 of 15 cases call the bridge (SIN :4252, COS :4256, TAN :4260,
-  ATAN :4267, ASIN :4271, ACOS :4275, SINH :4279, COSH :4283, TANH :4287, LOG :4294/4297,
-  EXP :4359, LN :4363, LOG10 :4367). **SQRT** (:6288, still `_sqrt_f64`) and **SQRTPI**
-  (:4355, still `sqrt_f64(x * _PI)`) are NOT migrated.
+- Phase 2 routing: **15 of 15** as of 2026-09-05. SQRT and SQRTPI were the last two;
+  they now call `excel_sqrt` / `excel_sqrt_pi`. DEGREES and RADIANS were routed at the
+  same time (`excel_degrees` / `excel_radians`) because they were the remaining `_PI`
+  consumers. The duplicated private helpers `_sin_f64`, `_cos_f64`, `_atan_f64`,
+  `_sqrt_f64` and the `_PI` constant are DELETED from `formula.spl` (9,606 -> 9,558
+  lines); `formula.spl` now imports `MATH_PI` from `std.common.math.math`.
 - Phase 3 routing: 0 of 7 — SUM/AVERAGE/COUNT/MIN/MAX/PRODUCT (:4236-4247) call the
   formula-local `eval_sum`/`eval_average`/`eval_count`/`eval_min`/`eval_max`/`eval_product`
   (:8482-8519); SUMSQ (:4377) is an inline loop. `excel_sum`/`excel_average` etc. exist in
-  the bridge but are unused by `formula.spl`.
-- Dispatch line numbers in the tables below are stale (measured when SIN was at 4503; it is
-  at 4252 now). `formula.spl` is 9606 lines. `src/lib/nogc_async_mut/math/` (step 0.3)
-  does not exist. The `/tmp/` research artifacts listed next are gone.
+  the bridge but are unused by `formula.spl`. **Deliberately left unrouted 2026-09-05:**
+  the two sets differ on empty ranges (`eval_product([])` = `0.0` vs
+  `excel_product([])` = `1.0`; `eval_count` returns `f64`, `excel_count` returns `i64`),
+  so the reroute is a behaviour change that must be verified against the formula specs
+  first — and no spec is executable on this host (see the blocker below).
+- Dispatch line numbers in the tables below are stale and have shifted again after the
+  2026-09-05 helper deletion. `formula.spl` is 9558 lines.
+  `src/lib/nogc_async_mut/math/` (step 0.3) does not exist. The `/tmp/` research
+  artifacts listed next are gone; the finalized migration checklist now lives in-tree at
+  `doc/07_guide/app/office/excel_to_math_migration_guide.md`, and the user-facing guide
+  at `doc/07_guide/app/office/excel_formulas.md`.
+- **Blocker: no acceptance `it` is executable on this host (2026-09-05).** Every deployed
+  binary predates the `unsafe(...)` capability blocks that `1b4edca296c` (SFFI v2
+  hardening, #75) added to `src/lib/common/math/math.spl`, so any module importing
+  `std.common.math.math` — including `math_bridge.spl` and therefore `formula.spl` —
+  fails to load. No box is ticked, per the tick-only-on-a-passing-`it` rule. Details:
+  `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`
+  (section "Second instance, same class").
 - Tests: `test/01_unit/app/office/sheets/math_bridge_*_spec.spl` (9 files) plus
   `formula_trig_spec.spl`, `formula_math_spec.spl`.
 

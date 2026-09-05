@@ -5,6 +5,22 @@
 **Area:** `std.ndarray`  
 **Target files (as planned):** `src/lib/nogc_sync_mut/ndarray/` (new dir), `src/lib/nogc_sync_mut/src/tensor.spl` (migration), `src/lib/nogc_sync_mut/src/tensor/` subtree (migration)  
 **Shipped files (2026-09-05, grep-verified):** `src/lib/common/science_math/ndarray.spl` (`DType` :45, `Device` :58), `src/lib/nogc_sync_mut/ndarray/rt_alloc.spl`, `src/lib/nogc_async_mut/linalg/torch_ndarray.spl`; the planned `types.spl`/`ops.spl`/`backend.spl`/`libtorch_backend.spl` and `src/tensor.spl` do not exist.  
+
+**As-built correction (2026-09-05) — the line above does not name where `std.ndarray` actually resolves.**
+`use std.ndarray` resolves to **`src/lib/nogc_async_mut/ndarray/`** (5 files: `__init__.spl`,
+`mod.spl`, `ndarray_generators.spl`, `ndarray_impl_ops.spl`, `ndarray_simd.spl`), and
+`use std.linalg` to **`src/lib/nogc_async_mut/linalg/`** — not the `nogc_sync_mut` copies.
+Evidence: `STDLIB_FAMILY_DIRS` in `src/compiler_rust/compiler/src/module_resolver/resolution.rs:21-28`
+searches `nogc_async_mut` **first**, ahead of `nogc_sync_mut`; `src/lib/nogc_sync_mut/ndarray/`
+holds only `__init__.spl` + `rt_alloc.spl`, and `src/lib/nogc_sync_mut/linalg/__init__.spl`
+exports only the six blas/lapack/fortran modules (no `export mod.*`).
+`src/lib/common/science_math/ndarray.spl` is a *dependency* of that tree (it supplies `Index`,
+`Axis`, `Shape`, `Stride`, `Device`, `Layout`, `KernelProfile`, `NdarrayError`, `Slice`,
+`BroadcastPlan`, `derive_row_major_strides`), not the module `std.ndarray` names.
+The rank-2 helpers the acceptance spec calls already ship in the linalg half:
+`eye_matrix(size: Index) -> NDArray` at `src/lib/nogc_async_mut/linalg/linalg_core.spl:203` and
+`trace(matrix: NDArray) -> Result<Float64, LinalgError>` at
+`src/lib/nogc_async_mut/linalg/mod.spl:209`, both exported from that area's `__init__.spl`.  
 **Namespace:** `use std.ndarray`  
 **Phase:** v1 = NDArray core + migration; v1.1 = I/O + alias removal + fancy/boolean indexing; v2 = pure-Simple backend slot  
 **Architecture lock:** Path B, OQ-A..F resolved. See `doc/05_design/scilib_port_architecture.md`.  
