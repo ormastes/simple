@@ -38,7 +38,19 @@
 set -u
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo_root" || exit 2
-SEED=${SIMPLE_SEED:-bin/release/aarch64-apple-darwin/simple_seed}
+# Seed selection (2026-09-05): the scorer's detector registry stores function
+# values in record fields, which the Jul-25 seed at
+# bin/release/aarch64-apple-darwin/simple_seed CANNOT call -- it dies with
+# `semantic: unknown symbol detector.detect` and the lane correctly ERRORs
+# rather than scoring nothing silently. Prefer a freshly built seed, which
+# handles it. SIMPLE_SEED still overrides both.
+if [ -n "${SIMPLE_SEED:-}" ]; then
+  SEED=$SIMPLE_SEED
+elif [ -x src/compiler_rust/target/bootstrap/simple ]; then
+  SEED=src/compiler_rust/target/bootstrap/simple
+else
+  SEED=bin/release/aarch64-apple-darwin/simple_seed
+fi
 if [ ! -x "$SEED" ]; then
   echo "ERROR — nothing was checked (seed binary not executable: $SEED)"; exit 2
 fi
@@ -132,7 +144,7 @@ AWK
 
 # ---- 2. prove the copies -----------------------------------------------------
 proof_ok=1
-for m in model rules score source_facts analyzer; do
+for m in model rules dimensions score source_facts analyzer registry; do
   src=src/app/sspec_maintain/$m.spl
   awk -f "$work/seedify.awk" "$src" | grep -vE '^use app\.sspec_maintain' | grep -vE '^use std\.(crypto|tooling)' > "$work/scorer/$m.spl"
   a=$(grep -vE '^[[:space:]]*#' "$src" | grep -vE '^use ' | tr -d '[:space:]' | shasum | cut -c1-12)
@@ -173,7 +185,7 @@ fn _ws_split(s: text) -> [text]:
         out.push(cur)
     out
 EOF
-  for m in model rules score source_facts analyzer; do
+  for m in model rules dimensions score source_facts analyzer registry; do
     echo; echo "# ===== copy of src/app/sspec_maintain/$m.spl ====="; cat "$work/scorer/$m.spl"
   done
   cat <<'EOF'
