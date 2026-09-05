@@ -2,6 +2,30 @@
 
 > This scenario shows maintainers how a logical change becomes exact review and gate evidence, then a protected dry-run plan and a conflict-safe remote projection. It deliberately performs no Git/JJ/provider mutation.
 
+<!-- sdn-diagram:id=scv_jj_git_devhub_spipe_unified_lifecycle_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=scv_jj_git_devhub_spipe_unified_lifecycle_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+scv_jj_git_devhub_spipe_unified_lifecycle_spec -> std
+scv_jj_git_devhub_spipe_unified_lifecycle_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=scv_jj_git_devhub_spipe_unified_lifecycle_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 2 | 2 | 0 | 0 |
@@ -24,7 +48,7 @@ This scenario shows maintainers how a logical change becomes exact review and ga
 | Design | doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md |
 | Research | doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md |
 | Source | `test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -171,59 +195,15 @@ expect(plan_integration(request, [approval], bundle, true).code).to_equal("SJ_RE
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/scv_jj_git_devhub_spipe_unified_lifecycle.md`
-- **Plan:** `doc/03_plan/sys_test/scv_jj_git_devhub_spipe_unified_lifecycle.md`
-- **Design:** `doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md`
-- **Research:** `doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md`
+- **Requirements:** [doc/02_requirements/feature/scv_jj_git_devhub_spipe_unified_lifecycle.md](doc/02_requirements/feature/scv_jj_git_devhub_spipe_unified_lifecycle.md)
+- **Plan:** [doc/03_plan/sys_test/scv_jj_git_devhub_spipe_unified_lifecycle.md](doc/03_plan/sys_test/scv_jj_git_devhub_spipe_unified_lifecycle.md)
+- **Design:** [doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md](doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md)
+- **Research:** [doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md](doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md)
 
 
 </details>
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-001`
-- `REQ-002`
-- `REQ-003`
-- `REQ-004`
-- `REQ-005`
-- `REQ-010`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `9ef678379409c68ca681b7ca6de5e6995172786858445bb912c07483686bd92c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `9ef678379409c68ca681b7ca6de5e6995172786858445bb912c07483686bd92c`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `9ef678379409c68ca681b7ca6de5e6995172786858445bb912c07483686bd92c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl
-mirror: doc/06_spec/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.md (current)
-findings: 3 blockers: 1
-  narrative=100 structure=100 oracle=100
-  traceability=60 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=91; blocker cap makes effective=49
-doc/06_spec/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 6 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-<!-- sspec-maintain:scorecard:end -->
+Generated by `simple spipe-docgen` (Simple).
+Source SHA-256: `a801dcb0a19e13474a979728a687b9061b8c7c2c379b5d53fb18f22c1f3b599c`

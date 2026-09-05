@@ -254,11 +254,31 @@ fn parse_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
     var force = ""
     var gate_profile = ""
     var server_enforcement_required = false
+    var in_protected_refs = false
     for raw in payload.split("\n"):
         val line = raw.trim()
-        if line.starts_with("schema:"):
+        # A policy-level section header closes the protected-ref block. Without
+        # this fence the `server_profiles:` block's own `update:`/`force:` keys
+        # kept overwriting the still-pending last protected ref, so the
+        # committed `recovery/*` read back as `update: deny` and the whole
+        # policy was rejected with "recovery refs must be append-only".
+        if line != "" and line.ends_with(":") and _policy_indent(raw) <= 2:
+            if ref_pattern != "":
+                refs.push(ProtectedRefPolicy(ref_pattern: ref_pattern, mutator: mutator, update: update, force: force, gate_profile: gate_profile, server_enforcement_required: server_enforcement_required))
+                ref_pattern = ""
+            in_protected_refs = line == "protected_refs:"
+            continue
+        # Only the outermost `schema:` names the policy document. Nested blocks
+        # (review admission, self-review decision, changed-path manifest) carry
+        # their own `schema:` keys; binding those clobbered the document schema
+        # and made the committed `.spipe/policy/vcs.sdn` parse as
+        # `spipe-changed-path-manifest/1`, i.e. "unsupported or missing schema".
+        if line.starts_with("schema:") and schema == "" and _policy_indent(raw) <= 2:
             schema = _policy_value(line)
-        elif line.starts_with("- ref:") or line.starts_with("- ref_pattern:"):
+            continue
+        if not in_protected_refs:
+            continue
+        if line.starts_with("- ref:") or line.starts_with("- ref_pattern:"):
             if ref_pattern != "":
                 refs.push(ProtectedRefPolicy(ref_pattern: ref_pattern, mutator: mutator, update: update, force: force, gate_profile: gate_profile, server_enforcement_required: server_enforcement_required))
             ref_pattern = _policy_value(line)
