@@ -827,7 +827,7 @@ Pure-Simple Backend Slot" contract is satisfied.
 - [x] No DataFrame ops or `Symbol` intern added (df scope) — verified: `/usr/bin/grep -c "groupby\|Symbol\|DataFrame" src/lib/common/science_math/ndarray.spl` → 0; df lives separately in `src/lib/nogc_sync_mut/df/mod.spl`
 - [x] No acceptance criterion written as "passes `--mode=native`" — verified: `/usr/bin/grep -rn "mode=native" doc/03_plan/lib/scilib/ports/scilib_port_ndarray.md test/03_system/feature/scilib/ndarray_*_spec.spl` → only negated mentions ("no `--mode=native`", plan :20), 0 positive criteria
 - [x] No `skip()` in any spec file — verified: `/usr/bin/grep -rn "skip()" test/03_system/feature/scilib/ndarray_*_spec.spl` → 0 call sites across 16 files (every hit is a "no skip()" docstring line)
-- [ ] No TODO converted to NOTE
+- [x] No TODO converted to NOTE — verified 2026-09-05: `grep -rEc '# *NOTE:.*\bTODO\b' src/lib/nogc_async_mut/ndarray test/03_system/feature/scilib/ndarray_*_spec.spl` → 0; `scilib_port_ndarray_spec.spl` REQ-SCILIB-NDARRAY-05 green on `src/compiler_rust/target/debug/simple run` (7 examples, 0 failures)
 - [ ] No primitive type (`f64`, `i64`, `f32`, `i32`, `u64`) in any public `fn` signature or exported `struct` field
 - [ ] All specs run under `SIMPLE_BLAS_BACKEND=mock` in interpreter mode
 

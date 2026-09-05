@@ -531,17 +531,18 @@ bin/simple test src/lib/common/science_math/ SIMPLE_BLAS_BACKEND=mock
 
 Audit checklist:
 - [x] Zero `skip()` in any spec — verified: `/usr/bin/grep -rn "skip()" src/lib/common/science_math/blas_level1_spec.spl test/03_system/feature/scilib/blas_*_spec.spl` → 0 call sites (only "no skip()" docstrings, e.g. src/lib/common/science_math/blas_level1_spec.spl:5)
-- [ ] Zero TODO→NOTE conversions.
+- [x] Zero TODO→NOTE conversions — verified 2026-09-05: `grep -rEc '# *NOTE:.*\bTODO\b' src/lib/common/science_math/blas.spl test/03_system/feature/scilib/blas_*_spec.spl` → 0; `scilib_port_blas_spec.spl` REQ-SCILIB-BLAS-02 green on `src/compiler_rust/target/debug/simple run`
 - [ ] Zero primitive type (`f64`, `i64`, `i32`, `bool`) in any Layer C public signature.
 - [x] Zero Fortran mangled names (`dgemm_`, `daxpy_`, etc.) in the shipped Layer A files (`src/lib/nogc_sync_mut/linalg/blas_openblas.spl`, `cuda_blas.spl`, `fortran_wrapper.spl`) — verified: `/usr/bin/grep -rn "dgemm_\|daxpy_\|dgesv_" src/lib/common/science_math/ src/lib/nogc_sync_mut/linalg/` → only two negative doc-comment mentions (src/lib/common/science_math/fortran_abi.spl:16, src/lib/nogc_sync_mut/linalg/fortran_wrapper.spl:20 "NOT dgemm_"); call sites use `rt_blas_*` (src/lib/nogc_sync_mut/linalg/cuda_blas.spl:28 `_scilib_call0("rt_blas_handle_create")`)
   - divergence: planned a static `ffi_blas.spl` extern layer; shipped as dynamic `_scilib_call*` lookups of `rt_blas_*` symbols in `cuda_blas.spl` (no `extern fn` declarations, `/usr/bin/grep -rn "extern.*rt_blas_" src/lib` → 0)
-- [ ] Every Layer A `extern fn` has a cuBLAS C API symbol citation comment.
+- [x] Every Layer A shim call site has a cuBLAS C API symbol citation comment — verified 2026-09-05: `grep -c 'cublasD' src/lib/nogc_sync_mut/linalg/cuda_blas.spl` → 3 (`cublasCreate_v2`, `cublasDestroy_v2`, `cublasDdot_v2_64`, `cublasDgemm_v2_64` cited at the `_scilib_call*` sites); `scilib_port_blas_spec.spl` REQ-SCILIB-BLAS-05 green
+  - divergence: Layer A is dynamic `_scilib_call*` lookups, not `extern fn` declarations, so the citations sit on the call sites
 - [x] PERF-SUGAR-003 workaround comment in `blas.spl` (no `mod.spl` exists) — verified src/lib/common/science_math/blas.spl:15 `# PERF-SUGAR-003: generic <T> variants deferred to v1.1`, :195; src/lib/common/science_math/blas_provider.spl:38
   - divergence: planned file `mod.spl`; shipped flat `src/lib/common/science_math/blas.spl`
 - [x] Thread-safety policy comment in `blas.spl` (no `types.spl` exists) — verified src/lib/common/science_math/blas.spl:12 `# THREAD-SAFETY: one handle per process in v1; actor boundary crossing forbidden.` (also src/lib/nogc_sync_mut/linalg/blas_openblas.spl:23, blas_cpu.spl:10)
   - divergence: planned file `types.spl`; shipped in `blas.spl` next to `pub class BlasHandle` (:46)
 - [x] gemv vs gemm operand-swap distinction comment in `blas.spl` — verified src/lib/common/science_math/blas.spl:143 `# gemv operand-swap: pass row-major A with CUBLAS_OP_T at Layer A.`, :166 `# Operand-swap (AB)^T = B^T A^T is applied at Layer A when calling cuBLAS.`
-- [ ] `idamax` 1-based → 0-based correction comment in `blas.spl`.
+- [x] `idamax` 1-based → 0-based correction comment in `blas.spl` — verified 2026-09-05: `grep -ci idamax src/lib/common/science_math/blas.spl` → 6; the comment states the conversion, the tie rule (lowest index) and why IDAMAX=0 is "no maximum" rather than position 0, and `blas_idamax_f64`/`blas_idamax0_f64`/`blas_norm_inf_f64` implement it; `scilib_port_blas_spec.spl` REQ-SCILIB-BLAS-09 green
 
 Promote perf-sugar entries:
 - PERF-SUGAR-003: update status to `observed`; document workaround (non-generic v1 specializations).
