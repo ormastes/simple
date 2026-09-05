@@ -241,9 +241,35 @@ from a byte copy and checked with `git diff --stat`. Post-restore reruns complet
 scilib → REQ-01 ✓ again (only REQ-06 red, 6/7); startup_perf → Phase E ✓
 again (`within_band` on the real 1298 baseline, 2/3 with Phase C
 pre-existing red). Both restored trees are byte-identical to HEAD
-(`git diff --stat` → 0 lines). In-development spec run observed so far:
-groups (a)-(c) ✓ (crash path), group (d) both ✗ — a tagged PASSING fixture
-cannot pass either, confirming no child executes on this host.
+(`git diff --stat` → 0 lines). In-development spec run COMPLETE (no `E1034`, exit 1, 5/9): groups (a)-(c)
+✓ (crash path), group (d) both ✗ — a tagged PASSING fixture cannot pass
+either — and group (e) both ✗ exactly as predicted:
+```
+  ✗ executes the tagged spec's `it`, sees the real assertion failure, and still neutralises it
+    SPEC FILE VERDICT: .../wip_failing_spec.spl outcome=NOT_RUN declared>=0 executed=0 ...
+    (output does not contain "expected 1 to equal 2" — the assertion never ran)
+  ✗ reddens the sweep for the IDENTICAL assertion when the tag is absent (control)
+    expected true to equal false   (= "Compilation failed" present: crash path, not the assertion)
+```
+This is the measured proof that the neutralisation-of-a-failing-assertion
+branch has not been exercised on this host; group (e) is the gate A1 must
+turn green.
+
+Depa gate control COMPLETE: `lazy_parse_enabled` forced to read `"1"` by a
+temporary edit of `module_loader_lazy.spl`:
+```
+  ✗ W2-A2: outline-parse module ... gated by SIMPLE_LAZY_PARSE=1 — expected 1 to equal 0
+  ✓ lazy_scan_probe ...   ✓ load_module_lazy registers ...
+```
+Module restored from the byte copy taken before the edit (`cmp` → identical;
+the `PLANTED CONTROL` marker is gone). `git diff` on that file is NOT empty,
+but the residual hunk is a PARALLEL session's uncommitted edit that was
+already in the working copy before the control (`_lazy_compiler_numbered_candidate`,
+a `compiler.<NN>.<name>` resolver candidate) — not mine. Side effect worth
+knowing: with that uncommitted edit present, depa scenario 3
+(`load_module_lazy` → 1, registry flips 0→1) now PASSES, i.e. the RED-by-design
+entry for depa in the § B table reflects HEAD; once that parallel edit lands,
+B1 may already be satisfied — re-run the spec before assigning Guide B1.
 
 Direction of each control, stated so red is not misread: scilib REQ-01,
 startup Phase E, depa gate — GREEN normally, plant → RED, restore → GREEN.
