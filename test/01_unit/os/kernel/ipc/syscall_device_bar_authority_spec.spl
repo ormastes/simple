@@ -1,43 +1,128 @@
+"""
+## Purpose and audience
+Pins the device-BAR authority boundary for kernel and userland authors: a task
+may only map a PCI BAR through a capability-checked, DeviceGrant-shaped API,
+never by naming a raw physical address. Audience: SimpleOS kernel IPC and
+device-driver maintainers reviewing the syscall 83 contract.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/os/kernel/ipc/syscall_device_bar_authority_spec.spl` from the repo
+root; every scenario is currently RED and names the missing contract token it
+awaits.
+
+## Compatibility and limitations
+These are source-contract scenarios over shipped kernel/userlib source: the
+authority boundary has no runtime API a hosted test could call, so the specs
+assert the contract tokens directly. They run on any host that can read the
+repo; no QEMU or PCI device is required.
+
+## Verification guidance and troubleshooting
+A red scenario means the named contract token is still absent (or the forbidden
+raw-physical path still present) in the cited source file — grep the cited
+token in the file named by that scenario before concluding the spec is stale.
+"""
+# Lifecycle: doc/01_research/os/security/capability_revocation_attenuation_research.md ;
+# doc/03_plan/agent_tasks/simpleos_server_capability_manifest.md ;
+# doc/04_architecture/runtime_object_handle_capability_authority.md ;
+# doc/05_design/os/storage/server_data_namespace_syscall_gate_v1.md
+# @manual_section: device-bar-authority-boundary
+
 use std.spec.{describe, it, expect}
 
 describe "MapBar authority boundary":
     it "binds syscall 83 to the exact BDF and BAR capability":
+        # @req REQ-OS-IPC-BAR-001
+        # @capture(bit_table): syscall-83 BDF/BAR capability-binding contract tokens retained for review
+        # NOTE: legitimately RED — the kernel has not implemented the
+        # capability-bound binding. src/os/kernel/ipc/syscall.spl:603 only
+        # passes a zeroed DeviceBarMap to the capability check and never reads
+        # args.arg0/arg1 as BDF/bar index.
+        step("Inspect the syscall dispatcher for the capability-bound BDF and BAR contract")
         val source = file_read("src/os/kernel/ipc/syscall.spl")
-        expect(source).to_contain("val bar_bdf = args.arg0")
-        expect(source).to_contain("val bar_index = args.arg1")
-        expect(source).to_contain("CapabilityKind.DeviceBarMap(")
-        expect(source).to_contain("bdf_bus: pci_bdf_bus(bar_bdf)")
-        expect(source).to_contain("bar_index: bar_index.to_u8()")
+        val binds_bar_syscall_to_caller_bdf = source.contains("val bar_bdf = args.arg0")
+        val binds_bar_syscall_to_caller_bar_index = source.contains("val bar_index = args.arg1")
+        val capability_check_carries_device_bar_kind = source.contains("CapabilityKind.DeviceBarMap(")
+        val capability_check_derives_bus_from_bdf = source.contains("bdf_bus: pci_bdf_bus(bar_bdf)")
+        val capability_check_narrows_bar_index_to_u8 = source.contains("bar_index: bar_index.to_u8()")
+        expect(binds_bar_syscall_to_caller_bdf).to_equal(true)
+        expect(binds_bar_syscall_to_caller_bar_index).to_equal(true)
+        expect(capability_check_carries_device_bar_kind).to_equal(true)
+        expect(capability_check_derives_bus_from_bdf).to_equal(true)
+        expect(capability_check_narrows_bar_index_to_u8).to_equal(true)
 
     it "resolves the BAR in the kernel and rejects raw physical input":
+        # @req REQ-OS-IPC-BAR-002
+        # @capture(bit_table): kernel-side BAR resolution and raw-physical rejection contract tokens retained for review
+        # NOTE: legitimately RED — src/os/kernel/ipc/syscall_device.spl:275
+        # still reads the mapping target directly from args.arg0 as a raw
+        # physical u64, exactly the path this scenario forbids.
+        step("Inspect the device syscall handler for kernel-resolved BARs and raw-physical rejection")
         val source = file_read("src/os/kernel/ipc/syscall_device.spl")
-        expect(source).to_contain("fn _pci_memory_bar_phys")
-        expect(source).to_contain("val bar_phys = _pci_memory_bar_phys(bus, dev, func, index)")
-        expect(source).to_contain("if low == 0u32 or (low & 1u32) != 0u32")
-        expect(source).to_contain("while rollback < offset:")
-        expect(source).to_equal(source.replace("val bar_phys = args.arg0 as u64", ""))
+        val kernel_resolves_bar_via_pci_helper = source.contains("fn _pci_memory_bar_phys")
+        val handler_calls_pci_bar_resolver = source.contains("val bar_phys = _pci_memory_bar_phys(bus, dev, func, index)")
+        val decoder_only_accepts_memory_space_bars = source.contains("if low == 0u32 or (low & 1u32) != 0u32")
+        val failed_decode_rolls_back_bar_writes = source.contains("while rollback < offset:")
+        val raw_physical_handler_removed = source == source.replace("val bar_phys = args.arg0 as u64", "")
+        expect(kernel_resolves_bar_via_pci_helper).to_equal(true)
+        expect(handler_calls_pci_bar_resolver).to_equal(true)
+        expect(decoder_only_accepts_memory_space_bars).to_equal(true)
+        expect(failed_decode_rolls_back_bar_writes).to_equal(true)
+        expect(raw_physical_handler_removed).to_equal(true)
 
     it "resolves assigned 64-bit BARs directly without a branch-local binding":
+        # @req REQ-OS-IPC-BAR-003
+        # @capture(bit_table): 64-bit BAR high/low word assembly contract tokens retained for review
+        # NOTE: legitimately RED — the 64-bit BAR assembly below has not landed
+        # in src/os/kernel/ipc/syscall_device.spl.
+        step("Inspect the 64-bit BAR assembly for the direct high/low word contract")
         val source = file_read("src/os/kernel/ipc/syscall_device.spl")
-        expect(source).to_contain("val low_phys = low.to_u64() & 0xFFFFFFF0u64")
-        expect(source).to_contain("return (pci_read_bar(bus, dev, func, 1u8).to_u64() << 32u64) | low_phys")
-        expect(source.contains("val bar_high_word")).to_equal(false)
+        val low_word_masks_decode_bits = source.contains("val low_phys = low.to_u64() & 0xFFFFFFF0u64")
+        val high_word_comes_from_next_pci_bar = source.contains("return (pci_read_bar(bus, dev, func, 1u8).to_u64() << 32u64) | low_phys")
+        val branch_local_bar_high_word_removed = source.contains("val bar_high_word")
+        expect(low_word_masks_decode_bits).to_equal(true)
+        expect(high_word_comes_from_next_pci_bar).to_equal(true)
+        expect(branch_local_bar_high_word_removed).to_equal(false)
 
     it "requires a DeviceGrant-shaped user API rather than physical ranges":
+        # @req REQ-OS-IPC-BAR-004
+        # @capture(bit_table): userland DeviceGrant map_bar signature contract tokens retained for review
+        # NOTE: legitimately RED — src/os/userlib/device.spl:213 still exposes
+        # fn map_bar(phys_addr: u64, size: u64) taking raw physical ranges.
+        step("Inspect the userland device API for the DeviceGrant-shaped map_bar contract")
         val source = file_read("src/os/userlib/device.spl")
-        expect(source).to_contain("fn map_bar(grant: DeviceGrant, bar_index: u8)")
-        expect(source).to_contain("pci_bdf_pack(grant.pci_bus, grant.pci_dev, grant.pci_func)")
-        expect(source).to_equal(source.replace("fn map_bar(phys_addr: u64, size: u64)", ""))
+        val user_api_takes_a_device_grant = source.contains("fn map_bar(grant: DeviceGrant, bar_index: u8)")
+        val user_api_packs_bdf_from_grant = source.contains("pci_bdf_pack(grant.pci_bus, grant.pci_dev, grant.pci_func)")
+        val raw_physical_user_api_removed = source == source.replace("fn map_bar(phys_addr: u64, size: u64)", "")
+        expect(user_api_takes_a_device_grant).to_equal(true)
+        expect(user_api_packs_bdf_from_grant).to_equal(true)
+        expect(raw_physical_user_api_removed).to_equal(true)
 
     it "treats a materialized DeviceGrant as a one-shot task/BDF lease":
+        # @req REQ-OS-IPC-BAR-005
+        # @capture(bit_table): one-shot DeviceGrant claim/revoke contract tokens retained for review
+        # NOTE: legitimately RED — the one-shot grant lease helpers below have
+        # not landed in src/os/kernel/ipc/syscall_device.spl.
+        step("Inspect the device handler for the one-shot grant claim and revoke contract")
         val source = file_read("src/os/kernel/ipc/syscall_device.spl")
-        expect(source).to_contain("fn _device_grant_claim_once(owner: TaskId, bdf: u64) -> bool")
-        expect(source).to_contain("pub fn device_grant_revoke_task(owner: TaskId) -> u64")
-        expect(source).to_contain("return SyscallResult(value: -16)")
+        val grant_claim_is_one_shot_per_task_and_bdf = source.contains("fn _device_grant_claim_once(owner: TaskId, bdf: u64) -> bool")
+        val revoke_releases_the_whole_task_lease = source.contains("pub fn device_grant_revoke_task(owner: TaskId) -> u64")
+        val double_claim_fails_with_ebusy = source.contains("return SyscallResult(value: -16)")
+        expect(grant_claim_is_one_shot_per_task_and_bdf).to_equal(true)
+        expect(revoke_releases_the_whole_task_lease).to_equal(true)
+        expect(double_claim_fails_with_ebusy).to_equal(true)
 
     it "resolves a broker-assigned device from exactly one CSpace grant":
+        # @req REQ-OS-IPC-BAR-006
+        # @capture(bit_table): broker-assigned device grant contract tokens retained for review
+        # NOTE: legitimately RED — the broker-assigned device grant sentinel
+        # and its CSpace/userland plumbing below have not landed.
+        step("Inspect kernel and userland for the broker-assigned device grant contract")
         val kernel_source = file_read("src/os/kernel/ipc/syscall.spl")
         val user_source = file_read("src/os/userlib/device.spl")
-        expect(kernel_source).to_contain("val DEVICE_GRANT_ASSIGNED: u64 = 0xFFFFFFFFFFFFFFFEu64")
-        expect(kernel_source).to_contain("capability_set_assigned_device_grant_bdf")
-        expect(user_source).to_contain("fn request_assigned_device_grant() -> Result<DeviceGrant, text>")
+        val assigned_grant_uses_reserved_sentinel_bdf = kernel_source.contains("val DEVICE_GRANT_ASSIGNED: u64 = 0xFFFFFFFFFFFFFFFEu64")
+        val capability_set_records_assigned_grant_bdf = kernel_source.contains("capability_set_assigned_device_grant_bdf")
+        val userland_requests_assigned_grant_via_result_api = user_source.contains("fn request_assigned_device_grant() -> Result<DeviceGrant, text>")
+        expect(assigned_grant_uses_reserved_sentinel_bdf).to_equal(true)
+        expect(capability_set_records_assigned_grant_bdf).to_equal(true)
+        expect(userland_requests_assigned_grant_via_result_api).to_equal(true)
