@@ -209,7 +209,8 @@ Related closed work: `fs-hardening-optimization` CLOSED 2026-05-23, `fs-opt-gene
 - [ ] **[OPEN]** QEMU broker session sharing (`qemu-perf-session` OPEN, phase 1-dev in progress) either completed or latency measured without session pooling and delta documented.
 
 ### Scheduler Fairness
-- [x] **[CLOSED]** Process isolation + scheduler landed (`scheduler-process-isolation` CLOSED 2026-05-20). — verified src/os/kernel/scheduler/scheduler_exec.spl:69 `pub fn _record_exec_user_handoff(entry: u64, sp: u64, ttbr0_root: u64)`
+- [x] **[CLOSED]** Process isolation + scheduler landed (`scheduler-process-isolation` CLOSED 2026-05-20). — citation replaced 2026-09-05; now verified src/os/kernel/abi/syscall_shim_process.spl:338 `dispatch_enter_user_blocking(a0, g_shim_scheduler)` reaching the real `@cfg(x86_64)` arm at src/os/kernel/arch/user_entry_bridge.spl:21-24 `dispatch_x86_64_enter_user(pid_hint, scheduler)`, with the address-space switch at src/os/kernel/memory/vmm_address_space.spl:314 `paging_switch_address_space(space.phys_root)`
+  - divergence: the previous citation (`scheduler_exec.spl:69 _record_exec_user_handoff`) does NOT hold and was replaced — only the `@cfg(arm64)` body calls anything; the arm32/riscv64/riscv32/x86_64/x86 bodies (`:73,:79,:85,:91,:97`) bind all three arguments to unused `val`s and do nothing, and this checklist is x86_64-scoped.
   - divergence: the "no public symbol duplication found" half is NOT re-verified here — `scripts/check/check-api-arch-guard.shs` is not a push-tier row in `config/check/must_check_gates.sdn`, so nothing enforces it.
 - [ ] **[OPEN]** Scheduler fairness metric (e.g. max/min CPU share ratio under N workers) measured by `os_fs_sched_bench_spec.spl` in QEMU x86_64; result recorded.
 

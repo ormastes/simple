@@ -85,17 +85,22 @@ Runtime externs needed (Rust seed additions → require `scripts/bootstrap/boots
       nowhere under `src/runtime` or `src/compiler_rust/runtime/src` — only the
       TODO at `src/lib/nogc_sync_mut/gpu/usm.spl:15-16`; KV260 board evidence
       stays a board claim, no `scripts/check/*.shs` asserts it)
-- [x] W3.2 frontend decorator wiring — verified parser
-      `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:25`
-      imports `decl_set_unroll_factor/pipeline_ii/memory_banks`
-      (`_Ast/decl_nodes.spl:1260-1278`), carried on MIR
+- [ ] W3.2 frontend decorator wiring — NOT verified (2026-09-05): the parser
+      only `use`s `decl_set_unroll_factor/pipeline_ii/memory_banks`
+      (`enum_module_body.spl:25`); those setters and their getters have ZERO call
+      sites anywhere under `src/`, so `@unroll/@pipeline/@memory` never reach the
+      AST and `func.unroll_factor` is never populated from source. An import is
+      not wiring. Downstream carriers do exist but are fed nothing: MIR
       `src/compiler/50.mir/mir_instruction_graph.spl:246 unroll_factor`, consumed
       by `src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl:301`;
       spec `test/01_unit/compiler/codegen/vhdl_kernel_attrs_contract_spec.spl`
-  - divergence: was bundled with W3.4/G4 in one box; split out because it landed
-    independently
+  - divergence: was bundled with W3.4/G4 in one box; split out on the claim that
+    it landed independently — retracted 2026-09-05, it did not land: the frontend
+    half is absent, so this box stays with W3.4/G4 as open FPGA-attribute work.
 - Found during W1: `grid` named-arg parser bug (P2) — `doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md`; API uses grid_dim/block_dim until fixed
-- [ ] W3.x — pending (headline). 2026-09-05: W3.2/W3.3 ticked above; W3.1
+- [ ] W3.x — pending (headline). 2026-09-05: W3.3 ticked above; W3.2 was ticked
+      and has been UNTICKED the same day (frontend decorator half absent — the
+      setters have zero call sites, see the W3.2 box); W3.1
       kernel→VHDL bridge exists only as the entity emitter
       `src/compiler/70.backend/backend/vhdl/vhdl_kernel_entity.spl` (no other
       VHDL file references `gpu_thread_id`/`gpu_kernel`); W3.4 open
