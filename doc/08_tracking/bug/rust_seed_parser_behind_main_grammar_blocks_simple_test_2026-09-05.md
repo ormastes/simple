@@ -66,3 +66,20 @@ restored the same day and the pure classification layer is verified
 21 examples, 0 failures). The **end-to-end** behaviour — a tagged failing
 spec being neutralised in a real sweep — remains UNVERIFIED on this host for
 the reason above, and is stated as unverified rather than assumed.
+
+## Update 2026-09-05 (later the same day): the per-spec `run` lane is dead too
+
+The closing sentence above is no longer true. `simple_seed run
+test/03_system/plan_acceptance/sspec_modernization_plan_spec.spl` — a spec
+that imports only `std.spec`, `file_ops`, `sha256` and two app modules — exits 1
+with `error: semantic: variable `always_inline` not found` (the `@always_inline`
+attribute in `src/lib/nogc_sync_mut/io/vulkan_sffi.spl`, reached through
+`file_ops`). A one-line probe `use std.nogc_sync_mut.io.file_ops.{file_read}`
+fails the same way, so any spec that reads a file cannot run under the seed.
+`std.cli.cli_util` dies on the `execution_metrics.spl:365` grammar gap listed
+above; `std.crypto.sha256` dies on `function unsafe not found`
+(`secure_memory.spl:5` `@unsafe(...)`). What DOES load: `std.tooling.easy_fix.types`
+and raw runtime externs (`rt_file_read_text`, `rt_file_exists`,
+`rt_file_write_text`, `rt_file_hash_sha256`) — which is how
+`scripts/check/sspec-score-seed-lane.shs` runs the sspec scorer here without
+touching `src/`.

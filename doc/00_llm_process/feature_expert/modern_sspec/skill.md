@@ -256,3 +256,37 @@ admitted pure-Simple CLI. Do not use the Rust bootstrap seed, a stale binary,
 or a skipped run as PASS evidence. Once a qualified environment exists, run the
 system spec, `spipe-docgen`, and `sspec-maintain` with that same admitted CLI,
 then update the lane state and manual provenance from the retained results.
+
+## Documentization score: the measured 90+ recipe and the seed-lane measurement (2026-09-05)
+
+The scorer (`src/app/sspec_maintain/`) is now documented rule-by-rule, with the
+exact token each `SSDOC-*` rule reads and the aggregate cost of each miss, in
+[`.claude/skills/spipe.md` § "Scoring 90+"](../../../../.claude/skills/spipe.md).
+Read that section before writing or converting any `*_spec.spl`; the scaffold
+`.claude/templates/spipe_template.spl` already carries the score-bearing shape.
+
+- **Two surfaces.** GATE = `analyze_sspec_text` (what `bin/simple test` enforces,
+  min 80 via `src/app/test_runner_new/sspec_score_gate.spl`); SCAN =
+  `analyze_sspec_pair_text` + lifecycle links (what `sspec-maintain scan`
+  reports) — SCAN is 2.5 lower with no `doc/06_spec` mirror (MNT-002). Target SCAN.
+- **Measured worked example:** `build/nb/fixtures/worked_example_spec.spl` (the
+  text in the skill) = GATE 100 / SCAN 97. Calibration fixtures predicted from
+  the source matched to the point (75, 49, 49, 100).
+- **Measurement on a bootstrap-only host:**
+  `sh scripts/check/sspec-score-seed-lane.shs <spec|dir>` — runs the real
+  scorer modules (whitespace/comment-only reshaped copies, proven by residue
+  hash, three named runtime-extern deltas) under the Rust seed. Why nothing
+  else works here:
+  [`doc/08_tracking/bug/phase2_native_build_hello_world_invalid_heap_and_scorer_segv_2026-09-05.md`](../../../08_tracking/bug/phase2_native_build_hello_world_invalid_heap_and_scorer_segv_2026-09-05.md),
+  [`doc/08_tracking/bug/rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05.md`](../../../08_tracking/bug/rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05.md).
+- **Scorer fixes landed the same day** (`source_facts.spl`): ORA-002 no longer
+  exempts `var` (reassigned bindings are excluded instead), a trailing comment
+  no longer hides a tautology, `# evidence(...)` prose no longer counts as a
+  capture (only `# @capture` / `.evidence.sdn` do on comment lines), MNT-009
+  strips sentence punctuation. Record + specs:
+  [`doc/08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md`](../../../08_tracking/bug/sspec_scorer_loopholes_var_tautology_comment_evidence_2026-09-05.md),
+  `test/01_unit/app/sspec_maintain/scorer_loopholes_spec.spl`,
+  `test/01_unit/app/sspec_maintain/scorer_loopholes_adjacent_spec.spl`.
+- **Not changed, deliberately:** MNT-002 (mirror) and MNT-007 (lifecycle links)
+  together cost at most 3.5 aggregate on SCAN and are true statements about the
+  spec; a 90 is reachable with both outstanding, so neither rule was weakened.
