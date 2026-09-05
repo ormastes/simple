@@ -19,6 +19,13 @@ grep census confirm this); those `it`s import a plausible module path so the
 unresolved symbol becomes the forcing function, per the lane contract.
 Oracles here are computed values (readback checksums, exit codes, resolution
 integers) -- never a hardcoded backend-name string and never file size.
+AUDIT 2026-09-05: A7 previously asserted the interim `blocked-physical`
+verdict (the NOT-done state) and A8 passed whenever `xrandr` was absent
+(missing tool -> 0 modes -> "expected 0"). A7 now pins the promoted verdict
+the checkbox actually closes on, and A8 requires a display-inventory tool
+to run successfully on this host AND identify a 7680x4320@80 mode; on a
+host without such a display both stay RED, which is the checkbox's honest
+state (the plan's own "WARN rather than fabricating scanout").
 ## Lifecycle
 Research doc/01_research/, plan
 doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md, architecture
@@ -32,6 +39,7 @@ hardening campaign are the umbrella lifecycle folders this spec traces to.
 # @manual_section "8K80 hardening acceptance A4-A8"
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.platform.{host_os}
 use std.spec.{step}
 use std.spec.{describe, it, expect}
 use app.wm_compare.strict_semantic_vulkan_producer.{strict_semantic_vulkan_producer_receipt}
@@ -54,6 +62,15 @@ fn receipt_field(receipt: text, key: text) -> text:
     while end_idx < receipt.len() and receipt.char_at(end_idx) != "\n":
         end_idx = end_idx + 1
     receipt.slice(start_idx, end_idx)
+
+fn count_lines_with_both(inventory: text, mode_token: text, rate_token: text) -> i64:
+    """Count inventory lines that carry BOTH the resolution token and the
+    refresh-rate token — one line per identified 7680x4320@80 mode."""
+    var n: i64 = 0
+    for line in inventory.split("\n"):
+        if line.contains(mode_token) and line.contains(rate_token):
+            n = n + 1
+    n
 
 describe "Render perf redesign plan — 8K80 hardening acceptance A4-A8 (doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md)":
 
@@ -115,26 +132,45 @@ describe "Render perf redesign plan — 8K80 hardening acceptance A4-A8 (doc/03_
         # Pin the promised typed verdict directly.
         use app.wm_compare.render_perf_aggregate.{render_perf_aggregate_receipt}
         val receipt = render_perf_aggregate_receipt(7680, 4320, 10)
-        step("Assert the reported status is exactly the documented blocked-physical verdict, not PASS or FAIL")
-        # @capture the aggregate receipt's own status field is the retained
-        # evidence for A7's promotion gate.
-        expect(receipt_field(receipt, "aggregate_receipt_status")).to_equal("blocked-physical")  # oracle: A7 text, exact verdict string "blocked-physical"
+        step("Assert the correlator saw BOTH software receipts inside the p95 budget with no disallowed fallback")
+        # @capture the aggregate receipt's own correlation fields are the
+        # retained evidence that A4 and A5 were each admitted.
+        expect(receipt_field(receipt, "aggregate_receipt_a4_p95_within_budget")).to_equal("true")  # oracle: A7 text, "A4 ... p95 <= 12,500,000 ns"
+        expect(receipt_field(receipt, "aggregate_receipt_a5_p95_within_budget")).to_equal("true")  # oracle: A7 text, "A5 ... p95 <= 12,500,000 ns"
+        expect(receipt_field(receipt, "aggregate_receipt_fallback_used")).to_equal("false")  # oracle: A7 text, "no disallowed fallback"
+        step("Assert the campaign is PROMOTED — the interim blocked-physical verdict does not close this checkbox")
+        # The checkbox closes only when correlated A6 evidence lets the
+        # aggregate "promote the full campaign". `blocked-physical` is the
+        # documented interim verdict and is exactly the state this `it`
+        # must NOT accept; the unit contract for that interim verdict
+        # belongs to the correlator's own spec, not to plan acceptance.
+        # @capture the aggregate receipt's status and a6 correlation fields
+        # are the retained evidence for A7's promotion gate.
+        expect(receipt_field(receipt, "aggregate_receipt_a6_correlated")).to_equal("true")  # oracle: A7 text, "until correlated A6 evidence is supplied"
+        expect(receipt_field(receipt, "aggregate_receipt_status")).to_equal("pass")  # oracle: A7 text — "not failure or PASS until ... A6"; PASS is the promoted verdict, "blocked-physical" is the interim one
 
     it "A8 — physical 80 Hz display evidence: EDID/connector/mode evidence must identify an attached 7680x4320@80 display path. If the host cannot expose that mode, the campaign ends WARN rather than fabricating scanout.":
         # @req REQ-RENDERPERF-A8
-        step("Query this host's real connector/mode inventory via xrandr")
-        # Measured 2026-08-14 on this lane's own dev host: sysfs exposes
-        # only one HDMI connector with modes no larger than 1920x1080, so
-        # the honest verdict on this box is WARN, never a fabricated PASS.
-        val (stdout_text, _stderr_text, _exit_code) = rt_process_run("sh", ["-c", "xrandr --query 2>/dev/null | grep -c '7680x4320'"])
-        var mode_count: i64 = 0
-        var i: i64 = 0
-        while i < stdout_text.len():
-            val ch = stdout_text.char_at(i)
-            if ch >= "0" and ch <= "9":
-                mode_count = mode_count * 10 + (ch.char_code() - "0".char_code())
-            i = i + 1
-        step("Assert the real mode count matches the honest WARN case this host is expected to report")
-        # @capture the parsed connector-mode count is the retained evidence
-        # -- a real xrandr query, never a claimed physical scanout.
-        expect(mode_count).to_equal(0)  # oracle: 2026-08-14 measured sysfs inventory, no 7680x4320 mode attached
+        step("Query this host's real connector/mode inventory with the display tool this OS provides")
+        # The inventory tool is chosen by host OS: `xrandr --query` on Linux
+        # (X11 connectors, one "WxH  rate*" line per mode) and
+        # `system_profiler SPDisplaysDataType` on darwin ("UI Looks like:
+        # 3440 x 1440 @ 50.00Hz" per display). A missing or failing tool is
+        # a FAIL, never zero-modes-therefore-pass: absence of an inventory
+        # is absence of evidence.
+        val os = host_os()
+        val is_darwin = os == "darwin" or os == "macos"
+        val tool = if is_darwin: "system_profiler" else: "xrandr"
+        val tool_args = if is_darwin: ["SPDisplaysDataType"] else: ["--query"]
+        val (stdout_text, _stderr_text, exit_code) = rt_process_run(tool, tool_args)
+        # @capture exit_code and stdout_text are the real inventory tool's own verdict and listing
+        expect(exit_code).to_equal(0)  # oracle: the inventory tool must run; a missing xrandr/system_profiler cannot identify any display path
+        expect(stdout_text.len() > 0u64).to_equal(true)  # oracle: an empty inventory identified nothing
+        step("Count inventory lines that identify a 7680x4320 mode at 80 Hz")
+        val mode_token = if is_darwin: "7680 x 4320" else: "7680x4320"
+        val rate_token = if is_darwin: "@ 80" else: "80.0"
+        val mode_count = count_lines_with_both(stdout_text, mode_token, rate_token)
+        step("Assert at least one attached 7680x4320@80 display path is identified")
+        # @capture mode_count is the parsed count of 8K@80 mode lines in the
+        # real inventory -- a real tool query, never a claimed physical scanout.
+        expect(mode_count > 0).to_equal(true)  # oracle: A8 text, "must identify an attached 7680x4320@80 display path"; a host without one ends WARN and this stays red
