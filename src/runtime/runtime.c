@@ -2104,6 +2104,22 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
     return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
 }
 
+/* C twin of the Rust lane's rt_phase_profile_record (mem_snapshot.rs): one
+ * phase_profile.v1 line per call, same token escaping and the same "-" run_id
+ * fallback as the Rust arm so a dual-run compares byte-for-byte. */
+int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len) {
+    char run_token[256], message_token[4096], line[8192];
+    const char* run_id = getenv("SIMPLE_EVIDENCE_RUN_ID");
+    if (!run_id || !*run_id) run_id = "-";
+    if (rt_mem_snapshot_token(run_token, sizeof(run_token), run_id, (int64_t)strlen(run_id)) < 0 ||
+        rt_mem_snapshot_token(message_token, sizeof(message_token), message, message_len) < 0) return 0;
+    int n = snprintf(line, sizeof(line),
+        "schema=simple.compiler.phase_profile.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld message=%s\n",
+        run_token, (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(),
+        message_token);
+    return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
+}
+
 int rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
     (void)fd; return 0;
