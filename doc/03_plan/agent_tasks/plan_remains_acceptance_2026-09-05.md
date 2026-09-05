@@ -93,3 +93,29 @@ Rules:
 - No inheritance; generics use `<>`; `.spl` only.
 - Do NOT edit the plan's checkboxes. Ticking a box is the implementation
   lane's job, not this one's.
+
+## Score bar: modern sspec >= 90 (added 2026-09-05, mid-lane)
+
+Every spec in this lane must reach a modern-sspec documentization score of
+**90 or higher**. The gate default in
+`src/app/test_runner_new/sspec_score_gate.spl` is 80; 90 is this lane's bar.
+Authority is the scorer itself — `src/app/sspec_maintain/rules.spl` (rules)
+and `score.spl` (aggregation, `effective_aggregate`) — not this prose.
+
+Shape that carries the score: docstring header with Purpose and audience /
+Operator workflow / Compatibility and limitations; `# @cover <path> <pct>`
+per source file under test; a `step("...")` per phase inside every `it`;
+`# oracle:` comments naming the expected constant and its provenance.
+`# @tag:in-development` stays.
+
+Never raise a score by deleting assertions. A spec that cannot reach 90 is
+reported with its score and the rule ids that cost it.
+
+**Measurement is currently BLOCKED on this host and the bar is therefore
+unverified.** `simple sspec-maintain scan <path> --min-score 90` needs a
+full-CLI binary, and none is deployed here; the Rust seed cannot parse the
+scorer (see
+`doc/08_tracking/bug/rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05.md`)
+and `native-build` of it fails with `unresolved type: Id` in
+`src/std/common/search/{ranking,types}.spl`. Until one of those is fixed, a
+claimed score is a claim, not a measurement, and must be written as one.
