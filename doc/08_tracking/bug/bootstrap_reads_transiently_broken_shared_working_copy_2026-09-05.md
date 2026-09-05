@@ -85,6 +85,39 @@ HEAD/dirty state at the end (`error: could not re-bind Stage 3 git HEAD/dirty
 state`, `error: bootstrap tool authority changed during Stage 2/3`), so a commit
 landing *during* a two-hour Stage-3 run can invalidate it after the work is done.
 
+## Three distinct failures in 70 minutes, same root
+
+Retrying the Stage-3 lane produced a different concurrency failure each time.
+They are worth listing together because each has its own error string, and any
+one of them read alone looks like a defect in the thing it names:
+
+| time | error | what actually happened |
+|---|---|---|
+| 12:03 | `failed to parse ... at 64:1 ... found TripleLt` | conflict markers on disk for part of a minute |
+| 12:44 | `bootstrap-admission-error: parent-stage2-sanity-candidate-mismatch` | the Stage-2 binary was being rewritten while the admission producer hashed it; its receipts were from 06:59, the binary from 12:43, and moments later the binary was gone |
+| 12:58 | `error: refused incomplete Stage 2 admission provenance` | two source files appeared mid-build |
+
+The third is the sharpest, because the guard that caught it is *correct* and its
+evidence is exact. `bootstrap-from-scratch.sh:2699-2703` refuses when the source
+snapshot taken before Stage 2 differs from the one taken after. Decoding the two
+`file-hex` rows that differ:
+
+```
+src/compiler/10.frontend/structural_adapter/core_lexer_adapter.spl   created 13:04:41
+src/compiler/10.frontend/structural_adapter/__init__.spl             created 13:06:06
+```
+
+The build ran 12:57:56 - 13:11:41. Another session created a new module inside
+that window. Tool authority was byte-identical and both sanity and receiver
+evidence said `status=pass`; the *only* thing wrong was that the tree moved.
+
+This is the measurement that settles the design question: a bootstrap that reads
+`$PWD` cannot complete on a machine where other sessions are actively developing,
+because the window it needs (~14 minutes for Stage 2, ~2 hours for Stage 3)
+is longer than the interval between their edits. Fix 3 below is therefore not a
+nice-to-have; retrying is not a workaround, it is a coin flip that gets worse the
+longer the stage runs.
+
 ## Impact
 
 - A Stage-3 lane (~1h45m to the point of interest) aborted at 2 minutes.
