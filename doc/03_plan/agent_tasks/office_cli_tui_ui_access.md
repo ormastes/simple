@@ -110,7 +110,7 @@ real failed expectation. Silent no-op helpers, `pass_todo`, and
 - [ ] N1 startup/query/action/RSS/history bounds pass on `OFFICE_BINARY`.
 - [ ] Production closure excludes compiler, unified CLI, SGTTI, and raw-source fallback.
 - [x] Focused SSpec invokes the gate before docgen. — verified test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:196 `setup_office_cli_tui_ui_access` (`process_run(gate_binary, ["--scenario", "all", "--run-id", run_id])`, fails closed on missing `OFFICE_GATE_BINARY`) and :234 `check_office_gate`
-- [ ] Generated manual reports `0 stubs` and requirement-specific evidence.
+- [x] Generated manual reports `0 stubs` and requirement-specific evidence. — verified `src/compiler_rust/target/debug/simple run test/03_system/plan_acceptance/office_cli_tui_ui_access_spec.spl` -> `checkbox: Generated manual reports \`0 stubs\` and requirement-specific evidence` PASS (12 examples, 9 failures), after regenerating `doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md` with docgen `0 stubs` and per-scenario `_Requirements: \`REQ-OFFICE-CLI-UI-001\` ... \`REQ-OFFICE-CLI-UI-010\`_
 - [ ] UI evidence uses the canonical manual path.
 
 Gate script (pure Simple, not `.shs`): `scripts/check/check-office-cli-tui-ui-access.spl`
