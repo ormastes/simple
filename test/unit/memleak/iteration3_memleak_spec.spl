@@ -1,12 +1,41 @@
-# Memory Leak Measurement Spec - Iteration 3
-#
-# Third of 3 sequential test files to measure parent-process memdiff.
-# Run all 3 together: bin/simple test --mem-check test/unit/memleak/
+"""
+## Purpose and audience
+Third and final sequential memory-leak measurement scenario for the
+parent-process memdiff harness. Operators running the mem-check lane over the
+memleak tree use this file as the closing workload whose RSS reading is
+compared against the first file; its assertions pin the workload shape and the
+RSS probe so a silent allocator regression fails instead of reporting a
+fake-clean memdiff.
+## Operator workflow
+Run all three iteration files together in one invocation of the mem-check
+test lane; this file prints the final VmRSS line that the harness compares
+against the baseline captured before the first workload ran.
+## Compatibility and limitations
+The RSS probe reads /proc/self/status, so on hosts without procfs (macOS)
+the status read comes back empty and the scenario asserts only that no
+malformed line was observed. The measurement itself is taken by the external
+harness around this file, not by the assertions inside it.
+## Verification guidance and troubleshooting
+A failure of the length oracle means the workload loop changed shape, not
+that memory leaked. If the final VmRSS line never prints, check that the
+host exposes procfs before trusting the memdiff; on macOS the absence is
+expected and the harness comparison is the authority.
+"""
+# Lifecycle: doc/01_research/runtime/actor_runtime_policy.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/runtime/async_identity_owned_process_lease.md ;
+# doc/05_design/infra/crash_containment_framework.md
+# @manual_section: memleak-measurement
+
+use std.spec.step
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Memleak iteration 3":
     it "performs typical test workload":
+        # @req REQ-MEMLEAK-HARNESS-003
+        # @capture(statistics): final parent RSS after this workload closes the memdiff comparison
+        step("Allocate a padded string array through the repeated workload loop")
         # Note: nested fn can't mutate outer closure vars, so we return the array
         fn do_work() -> [text]:
             var out: [text] = []
@@ -16,9 +45,12 @@ describe "Memleak iteration 3":
                 k = k + 1
             out
         val data = do_work()
-        expect(data.len()).to_equal(10)
+        expect(data.len()).to_equal(10)  # oracle: the loop pushes exactly one padded string per iteration, ten times
 
     it "reads final RSS for comparison":
+        # @req REQ-MEMLEAK-HARNESS-003
+        # @capture(statistics): the final VmRSS line is printed for the parent-process memdiff comparison
+        step("Read this process's final VmRSS line for the harness comparison")
         val status = rt_file_read_text("/proc/self/status") ?? ""
         var rss_line = ""
         if status != "":
@@ -28,4 +60,5 @@ describe "Memleak iteration 3":
                     rss_line = line
         if rss_line != "":
             print "  [RSS] {rss_line}"
-        expect(1).to_equal(1)
+        val rss_wellformed = status == "" or rss_line.starts_with("VmRSS:")
+        expect(rss_wellformed).to_equal(true)  # oracle: a nonempty status must yield a VmRSS-prefixed line; no procfs means no status at all
