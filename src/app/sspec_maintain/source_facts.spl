@@ -373,6 +373,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     # string-state tracking those lines END the current scenario early and
     # every assertion after the fixture lands outside any scenario (2026-08-22).
     var in_triple_string = false
+    # Enum members are bare capitalized names (`Pending`, `Ok`) and the bare
+    # form of `_is_pending` matches them exactly — wave 4D hit this on
+    # primitive_types_spec.spl (2026-09-05), where an enum variant line named
+    # `Pending` flagged the whole scenario as a pending scaffold even though
+    # the scenario carried real assertions. Track enum blocks: opened by a
+    # `enum ... :` header, closed by the first line at or left of its indent.
+    var enum_indent: i64 = -1
     for raw in lines:
         line_number = line_number + 1
         if in_triple_string:
@@ -382,6 +389,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         val line = raw.trim()
         val line_lower = line.lower()
         val indent = _indent_width(raw)
+        if enum_indent >= 0:
+            # close the enum block on dedent to its header's level (blank
+            # lines inside an enum body do not close it)
+            if line != "" and indent <= enum_indent:
+                enum_indent = -1
+        if line != "" and line_lower.starts_with("enum ") and line.ends_with(":"):
+            enum_indent = indent
         # A `#` comment cannot open a docstring; a comment that merely mentions
         # `"""` used to flip the string state and hide the rest of the file
         # from every per-line rule (the scaffold template lost all its
@@ -518,7 +532,7 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
                     planned_requirement_ids.push(requirement_id)
             requirements = all_requirement_ids.len()
             scenario_requirements = scenario_requirement_ids.len()
-        if current_line > 0 and _is_pending(line): scenario_pending = true
+        if current_line > 0 and enum_indent < 0 and _is_pending(line): scenario_pending = true
         # Source-text inspection is not system evidence, but reading a
         # GENERATED artifact (build output, tmp root) IS runtime observation
         # (2026-08-22): only flag when the read/assert targets src/ source or
