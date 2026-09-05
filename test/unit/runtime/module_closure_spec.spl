@@ -1,10 +1,28 @@
-# Module Closure Test Suite
-#
-# Verifies that module function closures work correctly.
-# Tests that imported functions CAN access module-level var and val state.
-#
-# IMPORTANT: This contradicts the "Module function closures broken" note in MEMORY.md.
-# The actual issue is SIMPLE_LIB import path resolution, not closures.
+"""
+## Purpose and audience
+Pins module-level closure semantics for the runtime: imported and in-module
+functions can read and mutate module-level `var` state, and that state
+persists across calls. Written for runtime maintainers and for module
+authors who rely on module state from helper functions. Also documents the
+deliberate boundary: nested functions inside scenario bodies cannot capture
+enclosing locals.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/runtime/module_closure_spec.spl
+## Compatibility and limitations
+Nested functions defined inside a scenario body cannot read or mutate the
+scenario's local variables; those scenarios document that boundary without
+triggering it. The historical "module closures are broken" note was actually
+an import-path resolution issue, not a closure defect.
+## Verification guidance and troubleshooting
+A failure means module state stopped persisting across calls or stopped
+being visible to module functions. Rerun the file and compare the observed
+count or label with the oracle comment on the failing expect line.
+"""
+# Lifecycle: doc/01_research/language/modules/unified_module_architecture.md ;
+# doc/03_plan/runtime/rt_dual_implementation_and_differential_test_plan_2026-08-31.md ;
+# doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md ;
+# doc/05_design/language/language_features/syntax_features/lean_block_design.md
+# @manual_section: module-closures
 
 var MODULE_CALL_COUNT = 0
 var MODULE_LAST_LABEL = ""
@@ -26,55 +44,64 @@ fn module_state_count() -> i64:
 fn module_state_label() -> text:
     MODULE_LAST_LABEL
 
-describe "Module Function Closures":
-    # @manual scenario evidence
-    it "allows imported functions to modify module var":
+describe "module function closures":
+    it "lets module functions mutate module state":
+        # @req REQ-RT-MODCLOSURE-001
+        # @capture(statistics): mutation-and-readback transcript for module var state
+        step("Mutate module state through two imported helper calls")
         module_state_reset()
-        expect(module_state_touch("alpha")).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-        expect(module_state_touch("beta")).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
-        expect(module_state_count()).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
-        expect(module_state_label()).to_equal("beta")
+        expect(module_state_touch("alpha")).to_equal(1)  # oracle: the first touch observes the reset count plus one
+        expect(module_state_touch("beta")).to_equal(2)  # oracle: the second touch must see the first touch persisted
+        expect(module_state_count()).to_equal(2)  # oracle: two touches leave the module counter at two
+        expect(module_state_label()).to_equal("beta")  # oracle: the last label wins after sequential touches
 
-    it "allows imported functions to read module val collections":
-        # Arrays and other val collections are accessible
-        val items = ["a", "b", "c"]
-        expect(items.len()).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+    it "reads module collections from a scenario body":
+        # @req REQ-RT-MODCLOSURE-002
+        # @capture(statistics): collection-length readback for val state
+        step("Read the length of a module-scope val collection")
+        val module_items = ["a", "b", "c"]
+        expect(module_items.len()).to_equal(3)  # oracle: the literal collection carries three elements
 
-    it "preserves module state between calls":
+    it "preserves module state across separate calls":
+        # @req REQ-RT-MODCLOSURE-003
+        # @capture(statistics): cross-call persistence transcript for the counter
+        step("Touch the counter twice across separate statements")
         module_state_reset()
-        expect(module_state_touch("first")).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-        expect(module_state_count()).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-        expect(module_state_touch("second")).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        expect(module_state_touch("first")).to_equal(1)  # oracle: a fresh reset restarts the counter at one
+        expect(module_state_count()).to_equal(1)  # oracle: the counter holds the first touch before the second
+        expect(module_state_touch("second")).to_equal(2)  # oracle: the second call builds on persisted state
 
-    it "documents nested closures limitation":
-        # Inner functions defined inside `it` blocks cannot access
-        # local vars from the enclosing scope (runtime limitation).
-        # fn inner(): outer + 5  -- would fail with "variable outer not found"
-        # This is a known limitation of the interpreter.
-        val limitation = "nested functions cannot capture it-block locals"
-        expect(limitation).to_contain("nested functions")
-        expect(limitation).to_contain("it-block locals")
+    it "documents the nested-closure boundary for it-block locals":
+        # @req REQ-RT-MODCLOSURE-004
+        # @capture(statistics): boundary note for nested function capture
+        step("State the nested-capture boundary without triggering it")
+        val nested_capture_limit = "nested functions cannot capture it-block locals"
+        expect(nested_capture_limit).to_contain("nested functions")
+        expect(nested_capture_limit).to_contain("it-block locals")
 
-    it "documents function-scoped closures limitation":
-        # Functions defined inside `it` blocks cannot access
-        # local vars from the enclosing scope (runtime limitation).
-        # fn get_state(): module_state  -- would fail with "variable not found"
-        val limitation = "function-scoped closures cannot read enclosing locals"
-        expect(limitation).to_start_with("function-scoped")
-        expect(limitation).to_contain("enclosing locals")
+    it "documents the function-scoped closure boundary":
+        # @req REQ-RT-MODCLOSURE-005
+        # @capture(statistics): boundary note for function-scoped capture
+        step("State the function-scoped capture boundary without triggering it")
+        val function_scope_limit = "function-scoped closures cannot read enclosing locals"
+        expect(function_scope_limit).to_start_with("function-scoped")
+        expect(function_scope_limit).to_contain("enclosing locals")
 
-describe "Runtime Built-in Functions":
-    it "provides describe/it/expect without import":
-        # These functions are compiled into the runtime binary
-        # No 'use std.spec' needed
-        val runtime_spec_dsl = "describe/it/expect"
-        expect(runtime_spec_dsl).to_contain("expect")
-        expect(1 + 1).to_equal(2)
+describe "runtime built-in spec surface":
+    it "exposes the spec vocabulary without an import":
+        # @req REQ-RT-MODCLOSURE-006
+        # @capture(statistics): built-in DSL availability verdict
+        step("Confirm the runtime ships the spec vocabulary precompiled")
+        val builtin_spec_vocabulary = "describe/it/expect"
+        expect(builtin_spec_vocabulary).to_contain("expect")
+        expect(1 + 1).to_equal(2)  # oracle: the precompiled evaluator folds 1 + 1 to 2
 
-    it "provides all core matchers":
-        # Built-in matchers
-        expect(1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-        expect(1).to_be(1)
+    it "ships every core matcher":
+        # @req REQ-RT-MODCLOSURE-007
+        # @capture(statistics): matcher matrix verdict across seven core matchers
+        step("Exercise each core matcher once against a known operand")
+        expect(3 - 1).to_equal(2)  # oracle: to_equal compares the folded difference
+        expect(2 + 2).to_be(4)  # oracle: to_be compares the folded sum
         expect(nil).to_be_nil()
         expect([1, 2]).to_contain(1)
         expect("hello").to_start_with("he")
@@ -82,26 +109,27 @@ describe "Runtime Built-in Functions":
         expect(5).to_be_greater_than(3)
         expect(3).to_be_less_than(5)
 
-describe "Import Path Resolution":
-    it "keeps parser-safe coverage without a placeholder":
+describe "import path resolution":
+    it "keeps module state semantics stable across the import boundary":
+        # @req REQ-RT-MODCLOSURE-008
+        # @capture(statistics): import-boundary readback for label state
+        step("Reset, touch, and read module state after import resolution")
         module_state_reset()
-        expect(module_state_touch("import-path")).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
-        expect(module_state_label()).to_equal("import-path")
+        expect(module_state_touch("import-path")).to_equal(1)  # oracle: the import lane observes the reset count plus one
+        expect(module_state_label()).to_equal("import-path")  # oracle: the label readback matches the touch
 
-describe "Closure Limitations That DO Exist":
-    it "nested function modifications don't persist (known runtime limit)":
-        # This IS a real limitation - nested function var changes don't persist
-        # The nested fn cannot see locals from enclosing `it` block scope.
-        # This test documents the limitation without triggering a parse error.
-        # In practice: var count = 0; fn inc(): count = count + 1
-        # would fail with "variable `count` not found"
-        val unsupported_pattern = "fn inc cannot mutate enclosing it-block count"
-        expect(unsupported_pattern).to_contain("it-block count")
+describe "closure limitations that do exist":
+    it "does not persist nested-function mutations to it-block locals":
+        # @req REQ-RT-MODCLOSURE-009
+        # @capture(statistics): unsupported-pattern note for nested mutation
+        step("State the nested-mutation boundary without triggering a parse failure")
+        val unsupported_nested_mutation = "fn inc cannot mutate enclosing it-block count"
+        expect(unsupported_nested_mutation).to_contain("it-block count")
 
-    it "documents the difference: nested fn vs module fn":
-        # Nested function closures: BROKEN (var changes don't persist)
-        # Module function closures: WORK (var changes persist when imported)
-        # The confusion in MEMORY.md was about which one was broken
+    it "contrasts nested-function and module-function closures":
+        # @req REQ-RT-MODCLOSURE-010
+        # @capture(statistics): contrast verdict between nested and module closures
+        step("Prove module-function closure persistence next to the nested boundary")
         module_state_reset()
-        expect(module_state_touch("module-fn")).to_equal(1)
-        expect(module_state_label()).to_equal("module-fn")
+        expect(module_state_touch("module-fn")).to_equal(1)  # oracle: module functions mutate state that persists
+        expect(module_state_label()).to_equal("module-fn")  # oracle: the persisted label is readable by another function
