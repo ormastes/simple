@@ -310,3 +310,24 @@ writer lands and the reader defect is fixed: R0 diagnose-from-dump (exact
 build/session/capture identity, then semantic replay) without rerunning the
 failing program — this is a target, not a landed capability, as of this
 writing.
+
+**Reader repaired 2026-09-05.** The `receipt_id` defect above is fixed:
+`DebugReceiptV1` now carries `receipt_id`, issued by `service_v1.spl` as
+`"receipt-<session>-<n>"`, and `service_v1.spl` also defines
+`central_debug_service_v1_session_count()` (OPEN sessions only) and
+`central_debug_service_v1_record_outcome(...)` (delegates to `_record`). The
+policy constructors `debug_policy_observe_only_v1`/`_development_v1` live in
+`service_v1`, not `contracts_v1` — import them from there.
+`inspect_debug_evidence_bundle_v1` now completes end to end on a valid bundle:
+contract spec 7/7, `evidence_inspect_v1_spec.spl` 5/5 on the bootstrap seed.
+**Still non-compiling** and untouched: `src/app/cli_debug/probe_executor_v1.spl`
+and `src/app/debug/interpreter_service_adapter_v1.spl`, which call
+`central_debug_service_v1_apply_probe`, `_authorize_at`, `_record_at`,
+`_receipts`, and reference `DebugProbeKindV1` / `DebugRootOperationV1.Probe` —
+none of which exist. Contracts to settle first:
+`doc/08_tracking/bug/debug_service_v1_probe_and_adapter_call_undefined_symbols_2026-09-05.md`.
+Note also `test/fixtures/debug/evidence_bundle_v1` is NOT a valid bundle (no
+artifact digest, no `receipts_digest`) — use `evidence_bundle_contract_v1`.
+
+## Lane docs (2026-09-05)
+- design: `doc/05_design/app/debug/debug_capability_truth_wave0_design.md` · plan: `doc/03_plan/app/debug/dump_replay_wave_plan.md` · state: `.spipe/debug_capability_truth_wave0/state.md` · receipt contract: `doc/07_guide/app/debug/state_capability_receipt_contract.md`

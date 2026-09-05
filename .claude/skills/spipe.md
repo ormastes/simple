@@ -495,25 +495,47 @@ measured **100**.
 
 `simple sspec-maintain scan` needs the full pure-Simple CLI, which is not
 deployed here (`bin/simple` and `bin/local/phase2-*/simple` are the bootstrap
-CLI; `simple_seed run src/app/sspec_maintain/main.spl` dies in the seed's
-parser). The working lane is
+CLI). **Two lanes work (both re-measured 2026-09-05, later session):**
 
 ```bash
+# 1. Fresh Sep-5 seed runs the scorer SOURCE directly (~6s/spec). The Jul-era
+#    seeds die in the parser (`variable always_inline not found`); this one does not.
+src/compiler_rust/target/bootstrap/simple run src/app/sspec_maintain/main.spl scan <spec.spl>
+
+# 2. Score check + per-rule point-loss histogram, fail-closed, target 90.
+#    Use this before shipping ANY new spec — two lane specs on 2026-09-05 sat at 81
+#    (EVD-001 x6, ORA-003 x2, MNT-007 x2) until checked.
+sh scripts/check/sspec-train.shs <spec.spl|dir> [...]            # SSPEC_TARGET_SCORE=90
+sh scripts/check/sspec-train.shs --split private_test            # the ONLY reportable training number
+
+# 3. Older lane, still works: reshaped module copies for Jul-era seed grammar.
 sh scripts/check/sspec-score-seed-lane.shs <spec.spl|dir> [...]   # ~60s for 40 specs
 ```
 
-It reshapes whitespace-only copies of the five scorer modules for the seed's
+Lane 2's `--split` reads `.spipe/training/splits.sdn` (7 `train` / 14 held-out
+`private_test`) and ERRORs before scoring if the checklist file no longer
+hashes to the frozen `checklist_digest` (stale `.spipe/spipe`? run
+`git submodule update`; edited checklist? re-partition with a NEW held-out set)
+or if a held-out path is cited in the checklist. Design/plan:
+`doc/05_design/infra/sspec/sspec_training_heldout_gate_design.md`,
+`doc/03_plan/infra/sspec/sspec_training_heldout_gate_plan.md`.
+Note lanes 1/2 score a mirror-less spec **90** where lane 3 scores **97**: lane 1/2
+hit the filed mirror double-count
+(`doc/08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md`);
+lane 3 does not. Same source, two ceilings — cite which lane produced a number.
+
+Lane 3 reshapes whitespace-only copies of the five scorer modules for the seed's
 older grammar, PROVES each copy equals its source modulo whitespace/comments
 (sha1 of the residue; a DIFF is exit 2), substitutes three named deltas the
 seed forces (zero-arg `split()`, `sha256_text`, `file_exists` — all via runtime
 externs, none in the rule logic), and prints per spec `GATE SCORE n` and
 `SCAN SCORE n` plus every finding with its rule id and deduction. Read the
-numbers; the script itself judges no threshold. Why the other lanes are dead
-(all measured 2026-09-05): `phase2 native-build` fails on a three-line hello
-world (`AOT compile error ... <invalid-heap:...>`, both backends) and exits 139
-after monomorphize completes on the analyzer entry; the seed's per-spec `run` lane dies on
-`variable always_inline not found` loading `file_ops` — records in
-`doc/08_tracking/bug/`.
+numbers; the script itself judges no threshold. Still dead (measured
+2026-09-05): `phase2 native-build` fails on a three-line hello world
+(`AOT compile error ... <invalid-heap:...>`, both backends) and exits 139 after
+monomorphize completes on the analyzer entry — records in `doc/08_tracking/bug/`.
+The earlier claim here that the seed `run` lane is dead was true of the Jul-25
+seeds only; see lane 1 above.
 
 ## Typed evidence (Modern SSpec)
 

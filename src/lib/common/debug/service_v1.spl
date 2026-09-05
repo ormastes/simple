@@ -27,6 +27,24 @@ class _DebugSessionRecordV1:
 
 var _DEBUG_SESSIONS_V1: [_DebugSessionRecordV1] = []
 var _DEBUG_NEXT_ID_V1: i64 = 1
+var _DEBUG_NEXT_RECEIPT_V1: i64 = 1
+
+fn _next_receipt_id(session_id: DebugSessionId) -> text:
+    """Session-bound receipt identifier. The session value is embedded so a
+    receipt read back out of a bundle can be tied to the session that issued
+    it without a side table."""
+    val n = _DEBUG_NEXT_RECEIPT_V1
+    _DEBUG_NEXT_RECEIPT_V1 = _DEBUG_NEXT_RECEIPT_V1 + 1
+    "receipt-" + session_id.value + "-" + str(n)
+
+pub fn central_debug_service_v1_session_count() -> i64:
+    """Number of sessions that are currently OPEN. A closed session is retained
+    for its receipt trail but is not counted, so open+close is observably
+    balanced."""
+    var n = 0
+    for s in _DEBUG_SESSIONS_V1:
+        if not s.closed: n = n + 1
+    n
 
 pub fn debug_policy_development_v1() -> DebugPolicyV1:
     """Permissive development-mode policy: Control and Domain operations are
@@ -77,6 +95,7 @@ pub fn central_debug_service_v1_authorize(session_id: DebugSessionId, operation:
     match _find_session(session_id):
         case None:
             return DebugReceiptV1(
+                receipt_id: _next_receipt_id(session_id),
                 session_id: session_id.value, operation: operation, perturbation: perturbation,
                 action: action, allowed: false, succeeded: false, execution_changed: false,
                 reason: "central debug service v1: unknown or closed session",
@@ -91,6 +110,7 @@ pub fn central_debug_service_v1_authorize(session_id: DebugSessionId, operation:
                 allowed = false
                 reason = "policy '" + s.policy.name + "' denies Domain operations"
             DebugReceiptV1(
+                receipt_id: _next_receipt_id(session_id),
                 session_id: session_id.value, operation: operation, perturbation: perturbation,
                 action: action, allowed: allowed, succeeded: false, execution_changed: false,
                 reason: reason,
@@ -98,10 +118,17 @@ pub fn central_debug_service_v1_authorize(session_id: DebugSessionId, operation:
 
 pub fn central_debug_service_v1_record(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
     DebugReceiptV1(
+        receipt_id: _next_receipt_id(session_id),
         session_id: session_id.value, operation: operation, perturbation: perturbation,
         action: action, allowed: true, succeeded: succeeded, execution_changed: execution_changed,
         reason: reason,
     )
+
+pub fn central_debug_service_v1_record_outcome(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
+    """Records the OUTCOME half of an authorize/record pair. Same shape as
+    `central_debug_service_v1_record`; the separate name exists because the
+    call sites record an outcome after an already-authorized operation."""
+    central_debug_service_v1_record(session_id, operation, perturbation, action, succeeded, execution_changed, reason)
 
 pub fn central_debug_service_v1_close(session_id: DebugSessionId) -> Result<(), text>:
     var found = false
