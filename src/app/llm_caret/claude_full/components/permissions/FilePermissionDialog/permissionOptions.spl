@@ -1,0 +1,89 @@
+"""
+Claude full FilePermissionDialog permissionOptions parity model.
+"""
+
+const FILE_PERMISSION_OPTIONS_SOURCE_LINES = 176
+
+class FilePermissionContext:
+    original_cwd: text
+    home_dir: text
+    allowed_working_path: text
+
+impl FilePermissionContext:
+    static fn new(originalCwd: text, homeDir: text, allowedWorkingPath: text) -> FilePermissionContext:
+        FilePermissionContext(original_cwd: originalCwd, home_dir: homeDir, allowed_working_path: allowedWorkingPath)
+
+class FilePermissionOption:
+    type_name: text
+    label: text
+    value: text
+    prompt_text: text
+    option_type: text
+    scope: text
+
+impl FilePermissionOption:
+    static fn new(typeName: text, label: text, value: text, promptText: text, optionType: text, scope: text) -> FilePermissionOption:
+        FilePermissionOption(type_name: typeName, label: label, value: value, prompt_text: promptText, option_type: optionType, scope: scope)
+
+fn normalizeFilePermissionPath(path: text) -> text:
+    path.replace("\\", "/").lower()
+
+fn filePermissionBasename(path: text) -> text:
+    val clean = path.replace("\\", "/")
+    val slash = clean.rfind("/")
+    if slash >= 0:
+        clean.substring(slash + 1, clean.len())
+    else:
+        clean
+
+fn filePermissionDirname(path: text) -> text:
+    val clean = path.replace("\\", "/")
+    val slash = clean.rfind("/")
+    if slash > 0:
+        filePermissionBasename(clean.substring(0, slash))
+    else:
+        "this directory"
+
+fn isInClaudeFolder(filePath: text, originalCwd: text) -> bool:
+    val path = normalizeFilePermissionPath(filePath)
+    val folder = normalizeFilePermissionPath(originalCwd + "/.claude/")
+    path.starts_with(folder)
+
+fn isInGlobalClaudeFolder(filePath: text, homeDir: text) -> bool:
+    val path = normalizeFilePermissionPath(filePath)
+    val folder = normalizeFilePermissionPath(homeDir + "/.claude/")
+    path.starts_with(folder)
+
+fn pathInAllowedWorkingPath(filePath: text, allowedWorkingPath: text) -> bool:
+    val path = normalizeFilePermissionPath(filePath)
+    val allowed = normalizeFilePermissionPath(allowedWorkingPath)
+    path == allowed or path.starts_with(allowed + "/")
+
+fn getFilePermissionOptions(filePath: text, context: FilePermissionContext, operationType: text, yesInputMode: bool, noInputMode: bool) -> [FilePermissionOption]:
+    var options: [FilePermissionOption] = []
+    if yesInputMode:
+        options.push(FilePermissionOption.new("input", "Yes", "yes", "and tell Claude what to do next", "accept-once", ""))
+    else:
+        options.push(FilePermissionOption.new("text", "Yes", "yes", "", "accept-once", ""))
+
+    val inClaude = isInClaudeFolder(filePath, context.original_cwd)
+    val inGlobalClaude = isInGlobalClaudeFolder(filePath, context.home_dir)
+    if (inClaude or inGlobalClaude) and operationType != "read":
+        val scope = if inGlobalClaude: "global-claude-folder" else: "claude-folder"
+        options.push(FilePermissionOption.new("text", "Yes, and allow Claude to edit its own settings for this session", "yes-claude-folder", "", "accept-session", scope))
+    else:
+        val sessionLabel = if pathInAllowedWorkingPath(filePath, context.allowed_working_path):
+            if operationType == "read": "Yes, during this session" else: "Yes, allow all edits during this session (shift+tab)"
+        else:
+            val dirName = filePermissionDirname(filePath)
+            if operationType == "read": "Yes, allow reading from " + dirName + "/ during this session" else: "Yes, allow all edits in " + dirName + "/ during this session (shift+tab)"
+        options.push(FilePermissionOption.new("text", sessionLabel, "yes-session", "", "accept-session", ""))
+
+    if noInputMode:
+        options.push(FilePermissionOption.new("input", "No", "no", "and tell Claude what to do differently", "reject", ""))
+    else:
+        options.push(FilePermissionOption.new("text", "No", "no", "", "reject", ""))
+    options
+
+fn filePermissionOptionsSourceLinesModeled() -> i64:
+    FILE_PERMISSION_OPTIONS_SOURCE_LINES

@@ -1,0 +1,72 @@
+# Fail-closed scalar/GPU paired-measurement entry point.
+#
+# Qualification v4 validates a canonical build admission, operation evidence,
+# and lifecycle counts.  This generic entry point still cannot prove that a
+# caller-constructed admission came from the persistent executor whose
+# snapshots bracket the workload, so it performs preflight only.
+
+mod app.test.x25519mlkem768_gpu_paired_measurement
+
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Config, X25519MlKem768Evidence}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768MeasurementQualification}
+use os.crypto.x25519_mlkem768.gpu_lifecycle_snapshot.{
+    X25519MlKem768GpuLifecycleDelta}
+use os.crypto.x25519_mlkem768.gpu_measurement_qualification.{
+    x25519_mlkem768_qualified_gpu_measurement_reason}
+use os.crypto.x25519_mlkem768.gpu_build_admission.{
+    X25519MlKem768GpuBuildAdmission}
+use app.test.x25519mlkem768_gpu_paired_measurement_contract.{
+    x25519_mlkem768_gpu_paired_count_reason}
+
+enum X25519MlKem768GpuPairedMeasurementBlocker:
+    InvalidPairCount
+    QualificationRejected
+    TrustedLiveExecutorAdmissionUnavailable
+
+struct X25519MlKem768GpuPairedMeasurementResult:
+    collected: bool
+    blocker: X25519MlKem768GpuPairedMeasurementBlocker
+    reason: text
+
+fn _blocked(blocker: X25519MlKem768GpuPairedMeasurementBlocker,
+        reason: text) -> X25519MlKem768GpuPairedMeasurementResult:
+    X25519MlKem768GpuPairedMeasurementResult(
+        collected: false, blocker: blocker, reason: reason)
+
+fn x25519_mlkem768_collect_gpu_paired_measurement(
+        qualification: X25519MlKem768MeasurementQualification,
+        config: X25519MlKem768Config,
+        build_admission: X25519MlKem768GpuBuildAdmission,
+        diagnostic_evidence: X25519MlKem768Evidence,
+        diagnostic_lifecycle: X25519MlKem768GpuLifecycleDelta,
+        pair_count: i64) -> X25519MlKem768GpuPairedMeasurementResult:
+    val count_reason = x25519_mlkem768_gpu_paired_count_reason(pair_count)
+    if count_reason != "":
+        return _blocked(
+            X25519MlKem768GpuPairedMeasurementBlocker.InvalidPairCount,
+            count_reason)
+
+    # These caller-provided values are diagnostic inputs to the canonical
+    # fail-closed policy only.  They are never promoted to live proof, and this
+    # entry point never performs cryptographic work from them.
+    val qualification_reason =
+        x25519_mlkem768_qualified_gpu_measurement_reason(
+            qualification, config, build_admission, diagnostic_evidence,
+            diagnostic_lifecycle)
+    if qualification_reason != "":
+        return _blocked(
+            X25519MlKem768GpuPairedMeasurementBlocker.QualificationRejected,
+            qualification_reason)
+
+    # Future qualification success is still insufficient until an executor-
+    # owning API supplies trusted before/after lifecycle snapshots from the
+    # same persistent CUDA, Vulkan, or Metal executor used for all operations.
+    _blocked(
+        X25519MlKem768GpuPairedMeasurementBlocker.TrustedLiveExecutorAdmissionUnavailable,
+        "gpu-paired-trusted-live-executor-admission-unavailable")
+
+export X25519MlKem768GpuPairedMeasurementBlocker
+export X25519MlKem768GpuPairedMeasurementResult
+export x25519_mlkem768_collect_gpu_paired_measurement

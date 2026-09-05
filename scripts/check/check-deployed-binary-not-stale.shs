@@ -1,0 +1,647 @@
+#!/bin/sh
+# Refuse to trust a deployed compiler binary that predates its own sources.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# Incident 2026-08-17 (doc/08_tracking/bug/
+# deployed_seed_predates_landed_parser_fixes_blocks_repo_2026-08-17.md):
+# every `bin/simple test` died instantly with a parse error in
+# src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl, and every push was
+# blocked because a pre-push guard's selftest tripped over the same file.
+#
+# THREE separate sessions independently misdiagnosed it, each in a way that
+# would have made things worse:
+#   * "origin/main's source is broken"          -- wrong, source was fine
+#   * "another lane's uncommitted work broke it" -- wrong
+#   * "an uncommitted fix exists in the main worktree, commit it"
+#                                                -- wrong, and committing it
+#                                                   would have REVERTED a lane
+#
+# The actual cause was on the BINARY axis, not the source axis: the deployed
+# `bin/simple` was a Rust seed built 2026-08-16 22:59Z, while two parser
+# fixes had landed in src/compiler_rust/ at 07:36Z (d7213eb61742) and 12:14Z
+# (17d3496f3f3) on 2026-08-17. The binary could not possibly contain them.
+# Rebuilding and redeploying fixed everything instantly, proven by ablation
+# on the binary axis with the source tree untouched.
+#
+# The recorded root-cause finding was that NOTHING in this repo compares the
+# deployed binary's age against the newest commit touching its sources. That
+# one comparison would have replaced three sessions of misdiagnosis with a
+# one-line verdict naming the two missing commits. This guard is that
+# comparison.
+#
+# It is not hypothetical maintenance: at 13:18Z the same day the deployed
+# binary was built 12:58Z while the newest src/compiler_rust/ commit was
+# 13:04:40Z -- already stale again, within the hour.
+#
+# ---------------------------------------------------------------------------
+# ALGORITHM
+# ---------------------------------------------------------------------------
+# 1. Resolve the deployed binary: `bin/simple`, which is a symlink into
+#    `bin/release/<triple>/simple`. Follow it to a real file and emit a
+#    RECEIPT -- resolved path, byte size, mtime (epoch + ISO), sha256.
+#    Nothing here is ever inferred from an exit code alone; the receipt is
+#    printed so a reader can check the guard's premise by hand.
+# 2. For each source scope (see SCOPE below), find the newest COMMITTER date
+#    among commits touching it: `git log -1 --format='%ct %H %s'`.
+# 3. Compare binary mtime against each scope's newest committer date.
+# 4. FAIL if the binary predates any of them, and NAME the commits in the
+#    window (binary_mtime, HEAD] -- the actionable part. "Stale" alone tells
+#    you nothing; "missing d7213eb61742 fix(parser): ... and 17d3496f3f3
+#    fix(parser): ..." tells you what to go read.
+#
+# ---------------------------------------------------------------------------
+# WHY COMMITTER DATE (%ct) AND NOT AUTHOR DATE (%at)
+# ---------------------------------------------------------------------------
+# Author date records when a patch was first written; it survives rebases,
+# cherry-picks and jj rewrites unchanged, so a patch authored last week and
+# rebased into main today still carries last week's author date. The question
+# this guard asks is "did this content enter the history I built from, after
+# I built?", and the timestamp that moves when content enters history is the
+# COMMITTER date. Using %at would make an old-authored, freshly-rebased fix
+# look older than a binary that cannot contain it -- exactly the false green
+# this guard exists to prevent. This repo force-rebases main continuously
+# across parallel lanes, so that is the normal case here, not an edge case.
+#
+# ---------------------------------------------------------------------------
+# SCOPE: src/compiler_rust/** AND src/runtime/** -- BOTH COUNT
+# ---------------------------------------------------------------------------
+# src/compiler_rust/** is obvious: it IS the seed compiler's source.
+#
+# src/runtime/** counts too, and the reasoning is deliberate rather than
+# defensive. The C runtime is statically linked into the deployed binary --
+# the same binary, one link step later. A change to `rt_*` semantics in
+# src/runtime/*.c is inside the shipped artifact just as much as a change to
+# a Rust parser rule, and a binary built before that change does not have it.
+# The repo already treats the two as one buildable unit elsewhere:
+# check-seed-builds-push.shs takes its fast path only when the range touches
+# NEITHER src/compiler_rust/ NOR src/runtime/, and
+# check-runtime-api-regression-push.shs guards the runtime's exported ABI
+# precisely because the compiler binary depends on it. Excluding the runtime
+# would leave a whole class of "I rebuilt yesterday, the rt_ fix landed this
+# morning, why is my JIT still wrong" open -- the identical failure mode on a
+# different file tree.
+#
+# Deliberately NOT in scope: `src/lib/**` and `src/compiler/**`. Per
+# .claude/rules/commands.md the stdlib and the pure-Simple compiler are read
+# as SOURCE on every process start (measured: 82 opens of src/lib/**.spl,
+# zero .smf). Nothing from them is baked into the binary, so their commit
+# dates say nothing about the binary's freshness. Folding them in would make
+# this guard fire on essentially every commit and it would be ignored within
+# a day -- a guard nobody heeds is worse than none. Vendored code is excluded
+# per CLAUDE.md's Owned-Code Scope, but only from the DIAGNOSTIC listing; a
+# vendored change is still a real relink, so it still counts for the date
+# comparison.
+#
+# ---------------------------------------------------------------------------
+# LIMITATION: MTIME IS A WEAK PROXY (stated, not papered over)
+# ---------------------------------------------------------------------------
+# The binary's mtime is the only build-time evidence available without a
+# recorded provenance stamp, and it is genuinely weak:
+#   * A rebuild that produces a BYTE-IDENTICAL binary still bumps mtime. The
+#     guard will then report fresh, which is harmless (the content really is
+#     current) but means a PASS is not proof a rebuild happened -- only that
+#     the file was touched after the commit.
+#   * A binary copied, restored from a backup, unpacked from an archive, or
+#     rsync'd without -t carries the COPY's mtime, not the build's. Such a
+#     binary can look arbitrarily fresh while containing arbitrarily old
+#     code. This is the direction that matters: a false PASS is possible.
+#   * Conversely `touch` alone silences the guard. That is a footgun, and it
+#     is named here rather than defended against, because no amount of
+#     shell can distinguish a touch from a build.
+#   * mtime has filesystem-dependent granularity and no timezone; the guard
+#     compares epoch seconds throughout to avoid a whole family of TZ bugs.
+# The sha256 in the receipt is what makes this tractable in practice: two
+# runs reporting the same sha with different mtimes tell you nothing was
+# rebuilt, and a reader can correlate the sha against a build log.
+# The real fix is a provenance stamp inside the binary (the commit sha it was
+# built from, queryable via `--version`), which would turn this age heuristic
+# into an exact ancestry test. That is a separate, larger change; this guard
+# is the cheap check that would have caught today's incident.
+#
+# ---------------------------------------------------------------------------
+# NON-VACUITY / FAIL-CLOSED
+# ---------------------------------------------------------------------------
+# A run that compared 0 source scopes is an ERROR (exit 2), never a pass.
+# NO BINARY PRESENT IS ERROR, NEVER A PASS -- absence of evidence is not
+# evidence of freshness, and a guard that greens on a missing artifact is the
+# fail-open shape .claude/rules/vcs.md documents repeatedly. Likewise a
+# scope that exists on disk but has no commits touching it yields no
+# comparison, and a run with no comparisons at all is ERROR.
+#
+# Every command's exit status is read DIRECTLY into a variable on the line
+# after the invocation, NEVER through a pipe: a pipeline's `$?` is the LAST
+# command's status (tail/grep/head), which is almost always 0. That false
+# green is a documented incident in this repo and it recurred today.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#   sh scripts/check/check-deployed-binary-not-stale.shs
+#   sh scripts/check/check-deployed-binary-not-stale.shs --root /path/to/worktree
+#   sh scripts/check/check-deployed-binary-not-stale.shs --binary bin/release/x/simple
+#   sh scripts/check/check-deployed-binary-not-stale.shs --selftest
+#   sh scripts/check/check-deployed-binary-not-stale.shs --grace 300
+#
+# Verdicts (always the LAST line of stdout):
+#   PASS — <n> source scope(s) checked, ...        exit 0   (n > 0 always)
+#   FAIL — ...                                      exit 1
+#   ERROR — nothing was checked (...)               exit 2
+
+SELF_NAME='check-deployed-binary-not-stale'
+
+CFG_ROOT=''
+CFG_BINARY=''
+CFG_SELFTEST_ONLY=0
+CFG_VERBOSE=0
+CFG_GRACE=0
+CFG_MAX_COMMITS=12
+
+# Source scopes whose commits invalidate a deployed binary. See SCOPE above.
+CFG_SCOPES='src/compiler_rust src/runtime'
+
+verdict_pass() {
+    printf 'PASS — %s\n' "$1"
+    exit 0
+}
+verdict_fail() {
+    printf 'FAIL — %s\n' "$1"
+    exit 1
+}
+verdict_error() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+TMPROOT=''
+cleanup() {
+    [ -n "$TMPROOT" ] && [ -d "$TMPROOT" ] && rm -rf "$TMPROOT"
+}
+trap cleanup EXIT HUP INT TERM
+
+note() {
+    printf '%s: %s\n' "$SELF_NAME" "$1"
+}
+vnote() {
+    [ "$CFG_VERBOSE" -eq 1 ] && note "$1"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# mtime / hashing helpers (portable across GNU and BSD userlands)
+# ---------------------------------------------------------------------------
+file_mtime_epoch() {
+    # $1 = path. Echoes epoch seconds; returns non-zero if undeterminable.
+    _fm=$(stat -c '%Y' "$1" 2>/dev/null)
+    _fm_rc=$?
+    if [ "$_fm_rc" -ne 0 ] || [ -z "$_fm" ]; then
+        _fm=$(stat -f '%m' "$1" 2>/dev/null)
+        _fm_rc=$?
+    fi
+    [ "$_fm_rc" -eq 0 ] && [ -n "$_fm" ] || return 1
+    printf '%s' "$_fm"
+    return 0
+}
+
+file_size_bytes() {
+    _fs=$(stat -c '%s' "$1" 2>/dev/null)
+    _fs_rc=$?
+    if [ "$_fs_rc" -ne 0 ] || [ -z "$_fs" ]; then
+        _fs=$(stat -f '%z' "$1" 2>/dev/null)
+        _fs_rc=$?
+    fi
+    [ "$_fs_rc" -eq 0 ] && [ -n "$_fs" ] || return 1
+    printf '%s' "$_fs"
+    return 0
+}
+
+epoch_to_iso() {
+    # Best-effort human rendering for the receipt. Never load-bearing: all
+    # comparisons use epoch seconds, so a failure here degrades the receipt's
+    # readability and nothing else.
+    _iso=$(date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+    _iso_rc=$?
+    if [ "$_iso_rc" -ne 0 ] || [ -z "$_iso" ]; then
+        _iso=$(date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+        _iso_rc=$?
+    fi
+    if [ "$_iso_rc" -ne 0 ] || [ -z "$_iso" ]; then
+        printf 'epoch:%s' "$1"
+    else
+        printf '%s' "$_iso"
+    fi
+    return 0
+}
+
+sha256_of() {
+    for _h in sha256sum 'shasum -a 256' sha256; do
+        # shellcheck disable=SC2086
+        _hv=$($_h "$1" 2>/dev/null)
+        _hv_rc=$?
+        if [ "$_hv_rc" -eq 0 ] && [ -n "$_hv" ]; then
+            # First whitespace-separated field is the digest for all three.
+            printf '%s' "${_hv%% *}"
+            return 0
+        fi
+    done
+    printf 'unavailable'
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Binary resolution
+# ---------------------------------------------------------------------------
+# Sets: BIN_PATH BIN_SIZE BIN_MTIME BIN_SHA
+# Returns 0 on success, 1 when no usable binary exists (caller -> ERROR).
+resolve_binary() {
+    _rb_root="$1"
+    _rb_want="$2"
+
+    BIN_PATH=''
+    BIN_SIZE=''
+    BIN_MTIME=''
+    BIN_SHA=''
+
+    if [ -n "$_rb_want" ]; then
+        case "$_rb_want" in
+            /*) _rb_cand="$_rb_want" ;;
+            *)  _rb_cand="$_rb_root/$_rb_want" ;;
+        esac
+    else
+        _rb_cand="$_rb_root/bin/simple"
+    fi
+
+    # Follow symlinks to the real deployed file. A dangling symlink must not
+    # be silently treated as absent-but-fine: it is still ERROR below.
+    _rb_real=$(readlink -f "$_rb_cand" 2>/dev/null)
+    _rb_rc=$?
+    if [ "$_rb_rc" -ne 0 ] || [ -z "$_rb_real" ]; then
+        _rb_real="$_rb_cand"
+    fi
+
+    [ -f "$_rb_real" ] || return 1
+
+    BIN_SIZE=$(file_size_bytes "$_rb_real") || return 1
+    BIN_MTIME=$(file_mtime_epoch "$_rb_real") || return 1
+    BIN_SHA=$(sha256_of "$_rb_real")
+    BIN_PATH="$_rb_real"
+    BIN_REQUESTED="$_rb_cand"
+    return 0
+}
+
+print_receipt() {
+    note "receipt: requested   = $BIN_REQUESTED"
+    note "receipt: resolved    = $BIN_PATH"
+    note "receipt: size        = $BIN_SIZE bytes"
+    note "receipt: mtime       = $BIN_MTIME ($(epoch_to_iso "$BIN_MTIME"))"
+    note "receipt: sha256      = $BIN_SHA"
+}
+
+# ---------------------------------------------------------------------------
+# Core evaluation
+# ---------------------------------------------------------------------------
+# evaluate_tree ROOT
+# Requires BIN_MTIME already set. Sets:
+#   EV_CHECKED   number of source scopes actually compared (0 => caller ERROR)
+#   EV_STALE     number of scopes newer than the binary
+#   EV_NEWEST    epoch of the newest commit across all compared scopes
+#   EV_DETAIL    per-scope one-line summaries
+#   EV_MISSING   newline-separated "<sha> <date> <subject>" the binary lacks
+#   EV_MISSCOUNT count of named missing commits
+evaluate_tree() {
+    _et_root="$1"
+
+    EV_CHECKED=0
+    EV_STALE=0
+    EV_NEWEST=0
+    EV_DETAIL=''
+    EV_MISSING=''
+    EV_MISSCOUNT=0
+    EV_STALESCOPES=''
+
+    for _sc in $CFG_SCOPES; do
+        [ -d "$_et_root/$_sc" ] || {
+            vnote "scope $_sc: not present on disk, skipped"
+            continue
+        }
+
+        # Newest COMMITTER date touching this scope. Status read directly.
+        _line=$(git -C "$_et_root" log -1 --format='%ct %H %s' -- "$_sc" 2>/dev/null)
+        _line_rc=$?
+        if [ "$_line_rc" -ne 0 ] || [ -z "$_line" ]; then
+            vnote "scope $_sc: no commits touch it, no comparison possible"
+            continue
+        fi
+
+        _ct=${_line%% *}
+        _rest=${_line#* }
+        _sha=${_rest%% *}
+        _subj=${_rest#* }
+
+        case "$_ct" in
+            ''|*[!0-9]*)
+                vnote "scope $_sc: unparseable committer date '$_ct', skipped"
+                continue ;;
+        esac
+
+        EV_CHECKED=$((EV_CHECKED + 1))
+        [ "$_ct" -gt "$EV_NEWEST" ] && EV_NEWEST="$_ct"
+
+        _cutoff=$((BIN_MTIME + CFG_GRACE))
+        if [ "$_ct" -gt "$_cutoff" ]; then
+            EV_STALE=$((EV_STALE + 1))
+            EV_STALESCOPES="$EV_STALESCOPES $_sc"
+            EV_DETAIL="$EV_DETAIL
+  STALE $_sc newest=$_ct ($(epoch_to_iso "$_ct")) $_sha $_subj"
+
+            # Name the commits the binary cannot contain. This listing is the
+            # actionable half of the verdict.
+            _win=$(git -C "$_et_root" log \
+                --format='%h %cI %s' \
+                --since="@$_cutoff" \
+                -- "$_sc" 2>/dev/null)
+            _win_rc=$?
+            if [ "$_win_rc" -eq 0 ] && [ -n "$_win" ]; then
+                EV_MISSING="$EV_MISSING$_win
+"
+            fi
+        else
+            EV_DETAIL="$EV_DETAIL
+  fresh $_sc newest=$_ct ($(epoch_to_iso "$_ct")) $_sha"
+        fi
+    done
+
+    if [ -n "$EV_MISSING" ]; then
+        # Deduplicate: a commit touching both scopes appears twice.
+        _ded=$(printf '%s' "$EV_MISSING" | grep -v '^$' | sort -u)
+        EV_MISSING="$_ded"
+        EV_MISSCOUNT=$(printf '%s\n' "$EV_MISSING" | grep -c '^..*$')
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest -- FATAL, runs before every scan
+# ---------------------------------------------------------------------------
+fx_git() {
+    git -C "$1" -c user.email=fx@fx -c user.name=fx \
+        -c commit.gpgsign=false "$@" >/dev/null 2>&1
+}
+
+# Build a throwaway repo with a commit in each scope at a known committer
+# date, plus a deployed binary at a chosen mtime.
+fx_make_repo() {
+    _fr_dir="$1"
+    _fr_commit_epoch="$2"
+    mkdir -p "$_fr_dir/src/compiler_rust" "$_fr_dir/src/runtime" \
+             "$_fr_dir/bin/release/fx-triple"
+    git init -q "$_fr_dir" >/dev/null 2>&1 || return 1
+
+    printf 'fn main() {}\n' >"$_fr_dir/src/compiler_rust/main.rs"
+    printf 'int rt_fx(void){return 0;}\n' >"$_fr_dir/src/runtime/rt_fx.c"
+    _fr_stamp=$(epoch_to_iso "$_fr_commit_epoch")
+    git -C "$_fr_dir" add -A >/dev/null 2>&1 || return 1
+    GIT_AUTHOR_DATE="$_fr_stamp" GIT_COMMITTER_DATE="$_fr_stamp" \
+        git -C "$_fr_dir" -c user.email=fx@fx -c user.name=fx \
+        commit -q -m 'fix(parser): fixture parser fix' >/dev/null 2>&1 || return 1
+    return 0
+}
+
+fx_deploy_binary() {
+    # $1 = repo dir, $2 = mtime epoch
+    _fd_real="$1/bin/release/fx-triple/simple"
+    printf 'ELF-ish fixture payload\n' >"$_fd_real" || return 1
+    chmod +x "$_fd_real"
+    ln -sf "release/fx-triple/simple" "$1/bin/simple" || return 1
+    _fd_stamp=$(date -u -d "@$2" '+%Y%m%d%H%M.%S' 2>/dev/null)
+    _fd_rc=$?
+    if [ "$_fd_rc" -ne 0 ] || [ -z "$_fd_stamp" ]; then
+        return 1
+    fi
+    touch -t "$_fd_stamp" "$_fd_real" || return 1
+    return 0
+}
+
+selftest() {
+    _pass=0
+    _total=0
+    _bad=''
+
+    # The fixtures encode their own fixed 1-hour offsets, so the selftest must
+    # be hermetic with respect to --grace. Without this, `--grace 100000` made
+    # fixtures 2 and 6 (the must-FAIL ones) report fresh and the guard refused
+    # to run at all -- fail-closed, but it rendered --grace unusable.
+    _saved_grace="$CFG_GRACE"
+    CFG_GRACE=0
+
+    _commit_at=1755400000        # a fixed, known committer date
+    _after=$((_commit_at + 3600))
+    _before=$((_commit_at - 3600))
+
+    # -- fixture 1: binary NEWER than the newest commit -> must be fresh -----
+    _total=$((_total + 1))
+    _f1="$TMPROOT/fx1"
+    if fx_make_repo "$_f1" "$_commit_at" && fx_deploy_binary "$_f1" "$_after" \
+       && resolve_binary "$_f1" '' \
+       && { evaluate_tree "$_f1"; [ "$EV_CHECKED" -eq 2 ] && [ "$EV_STALE" -eq 0 ]; }
+    then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture1_fresh_binary_must_pass(checked=${EV_CHECKED:-?},stale=${EV_STALE:-?})"
+    fi
+
+    # -- fixture 2: today's exact shape -- binary OLDER than a landed commit,
+    #               and the verdict must be able to NAME that commit. --------
+    _total=$((_total + 1))
+    _f2="$TMPROOT/fx2"
+    if fx_make_repo "$_f2" "$_commit_at" && fx_deploy_binary "$_f2" "$_before" \
+       && resolve_binary "$_f2" '' \
+       && { evaluate_tree "$_f2"
+            [ "$EV_CHECKED" -eq 2 ] && [ "$EV_STALE" -eq 2 ] \
+            && [ "$EV_MISSCOUNT" -ge 1 ] \
+            && printf '%s' "$EV_MISSING" | grep -q 'fixture parser fix'; }
+    then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture2_stale_binary_must_fail_and_name(checked=${EV_CHECKED:-?},stale=${EV_STALE:-?},missing=${EV_MISSCOUNT:-?})"
+    fi
+
+    # -- fixture 3: NO binary at all -> resolve must fail so caller ERRORs.
+    #               Absence of evidence is never a pass. -------------------
+    _total=$((_total + 1))
+    _f3="$TMPROOT/fx3"
+    if fx_make_repo "$_f3" "$_commit_at" && ! resolve_binary "$_f3" ''; then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture3_missing_binary_must_error"
+    fi
+
+    # -- fixture 3b: a DANGLING bin/simple symlink is also ERROR, not a pass.
+    _total=$((_total + 1))
+    _f3b="$TMPROOT/fx3b"
+    if fx_make_repo "$_f3b" "$_commit_at" \
+       && ln -sf 'release/fx-triple/simple' "$_f3b/bin/simple" \
+       && ! resolve_binary "$_f3b" ''
+    then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture3b_dangling_symlink_must_error"
+    fi
+
+    # -- fixture 4: VACUOUS -- a repo whose commits touch neither scope must
+    #               yield EV_CHECKED == 0, forcing the caller to ERROR. -----
+    _total=$((_total + 1))
+    _f4="$TMPROOT/fx4"
+    mkdir -p "$_f4/bin/release/fx-triple" "$_f4/src/compiler_rust" "$_f4/src/runtime"
+    if git init -q "$_f4" >/dev/null 2>&1 \
+       && printf 'doc\n' >"$_f4/README.md" \
+       && git -C "$_f4" add README.md >/dev/null 2>&1 \
+       && git -C "$_f4" -c user.email=fx@fx -c user.name=fx \
+            commit -q -m 'docs: unrelated' >/dev/null 2>&1 \
+       && fx_deploy_binary "$_f4" "$_after" \
+       && resolve_binary "$_f4" '' \
+       && { evaluate_tree "$_f4"; [ "$EV_CHECKED" -eq 0 ]; }
+    then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture4_vacuous_must_force_error(checked=${EV_CHECKED:-?})"
+    fi
+
+    # -- fixture 5: the receipt must be real, not a placeholder. -----------
+    _total=$((_total + 1))
+    if resolve_binary "$_f1" '' \
+       && [ -n "$BIN_SHA" ] && [ "$BIN_SHA" != 'unavailable' ] \
+       && [ "$BIN_SIZE" -gt 0 ] \
+       && case "$BIN_PATH" in */bin/release/fx-triple/simple) true ;; *) false ;; esac
+    then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture5_receipt_must_be_real(sha=${BIN_SHA:-?},size=${BIN_SIZE:-?},path=${BIN_PATH:-?})"
+    fi
+
+    # -- fixture 6: src/runtime/** alone must be able to make a binary stale.
+    #               This pins the SCOPE decision documented above: dropping
+    #               the runtime from CFG_SCOPES makes this fixture fail. ----
+    _total=$((_total + 1))
+    _f6="$TMPROOT/fx6"
+    _rt_late=$((_after + 7200))
+    if fx_make_repo "$_f6" "$_commit_at" && fx_deploy_binary "$_f6" "$_after" \
+       && printf 'int rt_fx2(void){return 1;}\n' >"$_f6/src/runtime/rt_fx2.c" \
+       && git -C "$_f6" add src/runtime/rt_fx2.c >/dev/null 2>&1 \
+       && GIT_AUTHOR_DATE="$(epoch_to_iso "$_rt_late")" \
+          GIT_COMMITTER_DATE="$(epoch_to_iso "$_rt_late")" \
+          git -C "$_f6" -c user.email=fx@fx -c user.name=fx \
+            commit -q -m 'fix(runtime): fixture runtime fix' >/dev/null 2>&1 \
+       && resolve_binary "$_f6" '' \
+       && { evaluate_tree "$_f6"
+            [ "$EV_CHECKED" -eq 2 ] && [ "$EV_STALE" -eq 1 ] \
+            && printf '%s' "$EV_MISSING" | grep -q 'fixture runtime fix'; }
+    then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture6_runtime_scope_counts(checked=${EV_CHECKED:-?},stale=${EV_STALE:-?})"
+    fi
+
+    CFG_GRACE="$_saved_grace"
+
+    printf '%s: selftest %s/%s fixtures correct\n' "$SELF_NAME" "$_pass" "$_total"
+    if [ "$_pass" -ne "$_total" ]; then
+        printf '%s: FAILING FIXTURES:%s\n' "$SELF_NAME" "$_bad"
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) CFG_SELFTEST_ONLY=1; shift ;;
+        --verbose|-v) CFG_VERBOSE=1; shift ;;
+        --root) shift; [ $# -gt 0 ] || verdict_error "--root needs a value"; CFG_ROOT="$1"; shift ;;
+        --binary) shift; [ $# -gt 0 ] || verdict_error "--binary needs a value"; CFG_BINARY="$1"; shift ;;
+        --grace)
+            shift
+            [ $# -gt 0 ] || verdict_error "--grace needs a value in seconds"
+            case "$1" in ''|*[!0-9]*) verdict_error "--grace must be a non-negative integer" ;; esac
+            CFG_GRACE="$1"; shift ;;
+        --help|-h)
+            sed -n '2,150p' "$0"
+            printf 'ERROR — nothing was checked (help requested)\n'
+            exit 2 ;;
+        *) verdict_error "unknown argument: $1" ;;
+    esac
+done
+
+TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/$SELF_NAME.XXXXXX") || \
+    verdict_error "could not create a temporary directory"
+
+command -v git >/dev/null 2>&1 || verdict_error "git is not available on this machine"
+
+# ---------------------------------------------------------------------------
+# Selftest is FATAL and runs before every scan.
+# ---------------------------------------------------------------------------
+if ! selftest; then
+    verdict_error "selftest failed -- the guard itself is not trustworthy"
+fi
+if [ "$CFG_SELFTEST_ONLY" -eq 1 ]; then
+    verdict_pass "selftest only, no scan requested (7 fixture(s) correct)"
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve the tree under inspection.
+# ---------------------------------------------------------------------------
+if [ -z "$CFG_ROOT" ]; then
+    CFG_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    _root_rc=$?
+    [ "$_root_rc" -eq 0 ] && [ -n "$CFG_ROOT" ] || \
+        verdict_error "not inside a git repository and no --root given"
+fi
+[ -d "$CFG_ROOT" ] || verdict_error "$CFG_ROOT is not a directory"
+
+git -C "$CFG_ROOT" rev-parse --git-dir >/dev/null 2>&1
+_isgit_rc=$?
+[ "$_isgit_rc" -eq 0 ] || verdict_error "$CFG_ROOT is not a git repository"
+
+note "inspecting tree = $CFG_ROOT"
+
+# ---------------------------------------------------------------------------
+# Resolve the deployed binary and print its RECEIPT. No binary => ERROR.
+# ---------------------------------------------------------------------------
+if ! resolve_binary "$CFG_ROOT" "$CFG_BINARY"; then
+    verdict_error "no deployed binary at ${CFG_BINARY:-bin/simple} under $CFG_ROOT (absence of evidence is not evidence of freshness)"
+fi
+print_receipt
+
+# ---------------------------------------------------------------------------
+# Compare.
+# ---------------------------------------------------------------------------
+evaluate_tree "$CFG_ROOT"
+printf '%s' "$EV_DETAIL"
+printf '\n'
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+    verdict_error "0 source scopes were compared under $CFG_ROOT (looked at: $CFG_SCOPES)"
+fi
+
+if [ "$EV_STALE" -gt 0 ]; then
+    _age=$((EV_NEWEST - BIN_MTIME))
+    if [ -n "$EV_MISSING" ]; then
+        _named=$(printf '%s\n' "$EV_MISSING" | head -"$CFG_MAX_COMMITS" | tr '\n' ';')
+        _more=''
+        [ "$EV_MISSCOUNT" -gt "$CFG_MAX_COMMITS" ] && \
+            _more=" (+$((EV_MISSCOUNT - CFG_MAX_COMMITS)) more)"
+        verdict_fail "$EV_CHECKED source scope(s) checked, deployed binary $BIN_PATH (mtime $(epoch_to_iso "$BIN_MTIME"), sha256 $BIN_SHA) predates$EV_STALESCOPES by ${_age}s and is MISSING $EV_MISSCOUNT commit(s): $_named$_more -- rebuild and redeploy before trusting any result from it"
+    fi
+    verdict_fail "$EV_CHECKED source scope(s) checked, deployed binary $BIN_PATH (mtime $(epoch_to_iso "$BIN_MTIME"), sha256 $BIN_SHA) predates$EV_STALESCOPES by ${_age}s (newest commit $(epoch_to_iso "$EV_NEWEST")); commit listing unavailable -- rebuild and redeploy"
+fi
+
+# A non-zero --grace must be stated in the verdict: under grace the binary is
+# NOT necessarily newer than every commit, only within tolerance of them.
+_gracenote=''
+[ "$CFG_GRACE" -gt 0 ] && _gracenote=" within the ${CFG_GRACE}s --grace tolerance of"
+[ -z "$_gracenote" ] && _gracenote=" newer than"
+
+verdict_pass "$EV_CHECKED source scope(s) checked, deployed binary $BIN_PATH (mtime $(epoch_to_iso "$BIN_MTIME"), sha256 $BIN_SHA) is$_gracenote every commit touching $CFG_SCOPES (newest $(epoch_to_iso "$EV_NEWEST")); note mtime is a build-time proxy, not a provenance stamp"

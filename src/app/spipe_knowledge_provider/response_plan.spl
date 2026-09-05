@@ -1,0 +1,240 @@
+use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
+
+val PROVIDER_JSON_SAFE_INTEGER_V1: i64 = 9007199254740991
+val PROVIDER_JSON_MAX_PLAN_INSTRUCTIONS_V1: i64 = 262144
+val PROVIDER_JSON_MAX_STEP_INSTRUCTIONS_V1: i64 = 256
+val PROVIDER_JSON_MAX_STEP_BYTES_V1: i64 = 4096
+val PROVIDER_JSON_MAX_SEGMENT_BYTES_V1: i64 = 4096
+
+struct ProviderJsonEmitInstructionV1:
+    kind: text
+    text_value: text?
+    integer_value: i64?
+    boolean_value: bool?
+
+struct ProviderResponsePlanV1:
+    instructions: [ProviderJsonEmitInstructionV1]
+    maximum_output_bytes: i64
+    # Exact immutable preflight result.  The emitter recomputes and compares
+    # it at its ownership boundary before any child capability can advance.
+    predicted_encoded_bytes: i64
+
+struct ProviderStepLimitsV1:
+    max_bytes: i64
+    max_json_events: i64
+    max_unicode_scalars: i64
+    max_sha_blocks: i64
+    max_comparisons: i64
+    max_output_bytes: i64
+
+struct ProviderWorkStepKindV1:
+    kind: text
+    produced_bytes: i64
+    produced_events: i64
+
+struct ProviderResponseTextEntryV1:
+    key: text
+    value: text
+
+struct _ResponsePlanFrameV1:
+    kind: text
+    var members: i64
+    var expects_value: bool
+    var last_key: text?
+
+fn provider_json_object_open_v1() -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "object_open", text_value: nil, integer_value: nil, boolean_value: nil)
+fn provider_json_object_close_v1() -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "object_close", text_value: nil, integer_value: nil, boolean_value: nil)
+fn provider_json_array_open_v1() -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "array_open", text_value: nil, integer_value: nil, boolean_value: nil)
+fn provider_json_array_close_v1() -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "array_close", text_value: nil, integer_value: nil, boolean_value: nil)
+fn provider_json_object_key_v1(value: text) -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "object_key", text_value: value, integer_value: nil, boolean_value: nil)
+fn provider_json_string_v1(value: text) -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "string", text_value: value, integer_value: nil, boolean_value: nil)
+fn provider_json_integer_v1(value: i64) -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "integer", text_value: nil, integer_value: value, boolean_value: nil)
+fn provider_json_boolean_v1(value: bool) -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "boolean", text_value: nil, integer_value: nil, boolean_value: value)
+fn provider_json_null_v1() -> ProviderJsonEmitInstructionV1:
+    ProviderJsonEmitInstructionV1(kind: "null", text_value: nil, integer_value: nil, boolean_value: nil)
+
+fn _response_unsigned_utf8_less(left: text, right: text) -> bool:
+    val a = left.bytes()
+    val b = right.bytes()
+    var i = 0
+    val common = if a.len() < b.len(): a.len() else: b.len()
+    while i < common:
+        if a[i] < b[i]: return true
+        if a[i] > b[i]: return false
+        i = i + 1
+    a.len() < b.len()
+
+fn _response_instruction_fields_valid(item: ProviderJsonEmitInstructionV1) -> bool:
+    if item.kind == "object_key" or item.kind == "string":
+        return item.text_value != nil and item.integer_value == nil and item.boolean_value == nil
+    if item.kind == "integer":
+        return item.text_value == nil and item.integer_value != nil and item.boolean_value == nil
+    if item.kind == "boolean":
+        return item.text_value == nil and item.integer_value == nil and item.boolean_value != nil
+    if item.kind == "object_open" or item.kind == "object_close" or
+            item.kind == "array_open" or item.kind == "array_close" or item.kind == "null":
+        return item.text_value == nil and item.integer_value == nil and item.boolean_value == nil
+    false
+
+fn _response_escaped_length(value: text) -> Result<i64, text>:
+    var total = 0
+    for byte in value.bytes():
+        val added = if byte == 34u8 or byte == 92u8 or byte == 8u8 or
+            byte == 9u8 or byte == 10u8 or byte == 12u8 or byte == 13u8: 2
+            elif byte < 32u8: 6 else: 1
+        if total > 9223372036854775807 - added: return Err("response_size_overflow")
+        total = total + added
+    Ok(total)
+
+fn _response_add_size(current: i64, added: i64, maximum: i64) -> Result<i64, text>:
+    if added < 0 or current < 0 or current > maximum or added > maximum - current:
+        return Err("limit_exceeded")
+    Ok(current + added)
+
+fn provider_response_plan_instruction_count_v1(count: i64) -> Result<i64, text>:
+    if count <= 0: return Err("invalid_response_plan")
+    if count > PROVIDER_JSON_MAX_PLAN_INSTRUCTIONS_V1:
+        return Err("limit_exceeded")
+    Ok(count)
+
+fn _response_complete_value(stack: [_ResponsePlanFrameV1], root_complete: bool) -> Result<([_ResponsePlanFrameV1], bool, i64), text>:
+    var frames = stack
+    if frames.len() == 0:
+        if root_complete: return Err("multiple_json_roots")
+        return Ok((frames, true, 0))
+    val top = frames.len() - 1
+    if frames[top].kind == "object":
+        if not frames[top].expects_value: return Err("json_key_required")
+        frames[top].expects_value = false
+    if frames[top].members == 9223372036854775807: return Err("json_member_overflow")
+    frames[top].members = frames[top].members + 1
+    Ok((frames, root_complete, 1))
+
+fn provider_response_plan_v1(instructions: [ProviderJsonEmitInstructionV1],
+                             maximum_output_bytes: i64) -> Result<ProviderResponsePlanV1, text>:
+    if maximum_output_bytes <= 0: return Err("invalid_response_plan")
+    provider_response_plan_instruction_count_v1(instructions.len())?
+    var stack: [_ResponsePlanFrameV1] = []
+    var root_complete = false
+    var aggregate_members = 0
+    var encoded_bytes = 0
+    for item in instructions:
+        if not _response_instruction_fields_valid(item): return Err("invalid_json_response_instruction")
+        if val value = item.text_value:
+            if unicode_normalize_nfc(value) != value: return Err("noncanonical_json_text")
+        if item.kind == "object_key":
+            if stack.len() == 0: return Err("json_key_outside_object")
+            val top = stack.len() - 1
+            if stack[top].kind != "object" or stack[top].expects_value: return Err("json_key_not_expected")
+            val key = item.text_value.unwrap()
+            if val previous = stack[top].last_key:
+                if not _response_unsigned_utf8_less(previous, key): return Err("noncanonical_json_key_order")
+            stack[top].last_key = key
+            stack[top].expects_value = true
+            var key_bytes = _response_escaped_length(key)? + 3
+            if stack[top].members > 0: key_bytes = key_bytes + 1
+            encoded_bytes = _response_add_size(encoded_bytes, key_bytes, maximum_output_bytes)?
+            continue
+        val opens = item.kind == "object_open" or item.kind == "array_open"
+        val closes = item.kind == "object_close" or item.kind == "array_close"
+        var item_bytes = 1
+        if item.kind == "string": item_bytes = _response_escaped_length(item.text_value.unwrap())? + 2
+        elif item.kind == "integer":
+            val integer_text = item.integer_value.unwrap().to_text()
+            val integer_bytes = integer_text.bytes()
+            item_bytes = integer_bytes.len()
+        elif item.kind == "boolean": item_bytes = if item.boolean_value.unwrap(): 4 else: 5
+        elif item.kind == "null": item_bytes = 4
+        if not closes and stack.len() > 0 and stack[stack.len() - 1].kind == "array" and
+                stack[stack.len() - 1].members > 0:
+            item_bytes = item_bytes + 1
+        encoded_bytes = _response_add_size(encoded_bytes, item_bytes, maximum_output_bytes)?
+        if closes:
+            if stack.len() == 0: return Err("json_close_without_container")
+            val top = stack.len() - 1
+            val expected = if item.kind == "object_close": "object" else: "array"
+            if stack[top].kind != expected: return Err("json_mismatched_container")
+            if stack[top].kind == "object" and stack[top].expects_value: return Err("json_missing_object_value")
+            stack.pop()
+            val completed = _response_complete_value(stack, root_complete)?
+            stack = completed.0
+            root_complete = completed.1
+            aggregate_members = aggregate_members + completed.2
+            if aggregate_members > 65536: return Err("limit_exceeded")
+            continue
+        if stack.len() == 0:
+            if root_complete: return Err("multiple_json_roots")
+        elif stack[stack.len() - 1].kind == "object" and not stack[stack.len() - 1].expects_value:
+            return Err("json_key_required")
+        if opens:
+            if stack.len() >= 16: return Err("limit_exceeded")
+            stack.push(_ResponsePlanFrameV1(kind: if item.kind == "object_open": "object" else: "array",
+                members: 0, expects_value: false, last_key: nil))
+        else:
+            if item.kind == "integer":
+                val integer = item.integer_value.unwrap()
+                if integer < -PROVIDER_JSON_SAFE_INTEGER_V1 or integer > PROVIDER_JSON_SAFE_INTEGER_V1:
+                    return Err("integer_out_of_range")
+            val completed = _response_complete_value(stack, root_complete)?
+            stack = completed.0
+            root_complete = completed.1
+            aggregate_members = aggregate_members + completed.2
+        if aggregate_members > 65536: return Err("limit_exceeded")
+    if not root_complete or stack.len() != 0: return Err("incomplete_json_plan")
+    Ok(ProviderResponsePlanV1(instructions: instructions,
+        maximum_output_bytes: maximum_output_bytes,
+        predicted_encoded_bytes: encoded_bytes))
+
+fn provider_response_payload_plan_v1(payload: text,
+                                     maximum_payload_bytes: i64,
+                                     maximum_output_bytes: i64) \
+        -> Result<ProviderResponsePlanV1, text>:
+    if maximum_payload_bytes < 0: return Err("invalid_response_plan")
+    if payload.bytes().len() > maximum_payload_bytes:
+        return Err("limit_exceeded")
+    provider_response_plan_v1([provider_json_string_v1(payload)],
+        maximum_output_bytes)
+
+fn provider_response_page_plan_v1(items: [text], maximum_items: i64,
+                                  maximum_output_bytes: i64) \
+        -> Result<ProviderResponsePlanV1, text>:
+    if maximum_items < 0: return Err("invalid_response_plan")
+    if items.len() > maximum_items: return Err("limit_exceeded")
+    var instructions = [provider_json_array_open_v1()]
+    for item in items: instructions.push(provider_json_string_v1(item))
+    instructions.push(provider_json_array_close_v1())
+    provider_response_plan_v1(instructions, maximum_output_bytes)
+
+fn provider_response_explanation_plan_v1(
+        entries: [ProviderResponseTextEntryV1], maximum_entries: i64,
+        maximum_output_bytes: i64) -> Result<ProviderResponsePlanV1, text>:
+    if maximum_entries < 0: return Err("invalid_response_plan")
+    if entries.len() > maximum_entries: return Err("limit_exceeded")
+    var instructions = [provider_json_object_open_v1()]
+    for entry in entries:
+        instructions.push(provider_json_object_key_v1(entry.key))
+        instructions.push(provider_json_string_v1(entry.value))
+    instructions.push(provider_json_object_close_v1())
+    provider_response_plan_v1(instructions, maximum_output_bytes)
+
+export ProviderJsonEmitInstructionV1, ProviderResponsePlanV1
+export ProviderStepLimitsV1, ProviderWorkStepKindV1, provider_response_plan_v1
+export ProviderResponseTextEntryV1
+export provider_response_payload_plan_v1, provider_response_page_plan_v1
+export provider_response_explanation_plan_v1
+export provider_response_plan_instruction_count_v1
+export PROVIDER_JSON_MAX_PLAN_INSTRUCTIONS_V1
+export PROVIDER_JSON_MAX_STEP_INSTRUCTIONS_V1, PROVIDER_JSON_MAX_STEP_BYTES_V1
+export PROVIDER_JSON_MAX_SEGMENT_BYTES_V1
+export provider_json_object_open_v1, provider_json_object_close_v1
+export provider_json_array_open_v1, provider_json_array_close_v1
+export provider_json_object_key_v1, provider_json_string_v1
+export provider_json_integer_v1, provider_json_boolean_v1, provider_json_null_v1

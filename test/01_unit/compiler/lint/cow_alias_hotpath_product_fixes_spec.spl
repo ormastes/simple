@@ -1,0 +1,113 @@
+"""
+## Purpose and audience
+Purpose: Pin the COW-alias hot-path fixes landed in product code, by mechanism
+(the shape is gone), not by wall-clock timing.
+Audience: compiler, stdlib, and runtime engineers.
+"""
+# @req: REQ-COMPILER-LINT-001 — stable requirement identity for this spec.
+
+# Reproduce + regression spec for the two product fixes shipped with the
+# PERF-COW-001/002/003 lint rule.
+#
+# WHY MECHANISM AND NOT TIMING
+# ----------------------------
+# The cost of a COW-alias hot path is O(collection size) per write and ZERO at
+# size zero, so a small fixture cannot distinguish O(1) from O(n) per write, and
+# a wall-clock threshold is flaky on a loaded box. The detectors therefore assert
+# the SHAPE is absent — exactly the argument in
+# doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md.
+#
+# Each expectation below FAILS on the pre-fix source (the counts were 7 and 3)
+# and passes after it. Reverting either source edit alone re-reds this spec.
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops (file_read)
+use compiler.semantics.lint.cow_alias_hotpath.{
+    CowAliasFinding,
+    check_cow_alias_hotpath
+}
+
+
+fn _findings_for(path: text) -> [CowAliasFinding]:
+    check_cow_alias_hotpath(file_read(path), path)
+
+
+describe "PERF-COW product fix: JS interpreter environment tables":
+    """
+    ## src/lib/common/js/engine/interpreter_types.spl
+
+    `create_env`, `set_var` and `define_var` each took a parallel table into a
+    local, pushed, and stored it back — so every environment creation and every
+    variable write deep-copied the whole table. Seven PERF-COW-001 findings
+    before the fix.
+    """
+
+    context "after pushing through the owning fields":
+        """
+        ### Scenario: the round-trip shape is gone
+        """
+
+        it "has no COW-alias findings":
+            step("Verify: interpreter_types.spl carries no COW-alias hot path")
+            # @req: REQ-COMPILER-LINT-001
+            val findings = _findings_for("src/lib/common/js/engine/interpreter_types.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — was 7 PERF-COW-001 pre-fix
+
+        it "still pushes onto every parallel table it owns":
+            step("Verify: the fix preserved the three-table append, not just the shape")
+            val src = file_read("src/lib/common/js/engine/interpreter_types.spl")
+            expect(src.contains("self.var_names.push(name)")).to_be_true()
+            expect(src.contains("self.var_values.push(value)")).to_be_true()
+            expect(src.contains("self.var_env_ids.push(env_id)")).to_be_true()
+            expect(src.contains("self.env_parent_ids.push(parent_id)")).to_be_true()
+
+
+describe "PERF-COW product fix: actor mailbox selective receive":
+    """
+    ## src/app/interpreter/async_runtime/mailbox.spl
+
+    `select` removed a matched message with `self.Q = remove_at(self.Q, i)` —
+    a by-value store-back whose helper additionally rebuilt the array through an
+    aliased `result = result.push(..)` rebind. Three PERF-COW-002 findings
+    before the fix.
+    """
+
+    context "after removing in place through the owning field":
+        """
+        ### Scenario: the by-value store-back shape is gone
+        """
+
+        it "has no COW-alias findings":
+            step("Verify: mailbox.spl carries no COW-alias hot path")
+            # @req: REQ-COMPILER-LINT-001
+            val findings = _findings_for("src/app/interpreter/async_runtime/mailbox.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — was 3 PERF-COW-002 pre-fix
+
+        it "no longer routes removal through the by-value helper":
+            step("Verify: the O(n^2) remove_at helper is gone, not merely bypassed")
+            val src = file_read("src/app/interpreter/async_runtime/mailbox.spl")
+            expect(src.contains("fn remove_at<T>")).to_be_false()
+            expect(src.contains("self._remove_high_at(i)")).to_be_true()
+            expect(src.contains("self._remove_normal_at(i)")).to_be_true()
+            expect(src.contains("self._remove_low_at(i)")).to_be_true()
+
+
+describe "PERF-COW neighbour: the lint itself must not commit the defect":
+    """
+    ## src/compiler/35.semantics/lint/cow_alias_hotpath.spl
+
+    A detector that carries the defect it detects is not credible. The rule uses
+    parallel arrays mutated through their owners and never calls `.keys()` in a
+    loop.
+    """
+
+    context "when the rule is pointed at its own source":
+        """
+        ### Scenario: self-application
+        """
+
+        it "reports nothing":
+            step("Verify: the rule source is clean under its own rule")
+            # @req: REQ-COMPILER-LINT-001
+            val findings = _findings_for("src/compiler/35.semantics/lint/cow_alias_hotpath.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — self-clean

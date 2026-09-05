@@ -1,0 +1,77 @@
+use std.spec
+use compiler.common.assurance.trust_audit.{TrustAuditStatus, audit_lean_axiom_report}
+
+describe "Formal Verification 2.0 transitive trust audit":
+    it "accepts exact no-axioms output without prefix collisions":
+        val closed = audit_lean_axiom_report(
+            "'Simple.closed' does not depend on any axioms",
+            ["Simple.closed"], [])
+        expect(closed.status).to_equal(TrustAuditStatus.Closed)
+        val forged = audit_lean_axiom_report(
+            "'Simple.closedForged' does not depend on any axioms",
+            ["Simple.closed"], [])
+        expect(forged.status).to_equal(TrustAuditStatus.Missing)
+
+    it "accepts a complete root report with no axioms":
+        val report = "declaration Simple.safe depends on axioms: []"
+        val audit = audit_lean_axiom_report(report, ["Simple.safe"], [])
+        expect(audit.status).to_equal(TrustAuditStatus.Closed)
+        expect(audit.permits_closed_verification()).to_equal(true)
+
+    it "accepts disclosed Lean logic axioms but rejects inline project axioms":
+        val logic = audit_lean_axiom_report("declaration Simple.logic depends on axioms: [propext, Quot.sound, Classical.choice]", ["Simple.logic"], [])
+        expect(logic.status).to_equal(TrustAuditStatus.Closed)
+        val project = audit_lean_axiom_report("declaration Simple.bad depends on axioms: [Board.hidden]", ["Simple.bad"], [])
+        expect(project.status).to_equal(TrustAuditStatus.Rejected)
+        expect(project.rejected_axioms).to_contain("Board.hidden")
+
+    it "rejects sorryAx even when normal Lean checking succeeded":
+        val report = "declaration Simple.safe depends on axioms:\naxiom sorryAx : Sort u"
+        val audit = audit_lean_axiom_report(report, ["Simple.safe"], [])
+        expect(audit.status).to_equal(TrustAuditStatus.Rejected)
+        expect(audit.rejected_axioms).to_contain("sorryAx")
+        expect(audit.permits_closed_verification()).to_equal(false)
+
+    it "rejects trusted native evaluation in the closed lane":
+        val report = "declaration Simple.fast depends on axioms:\naxiom Lean.trustCompiler : True"
+        val audit = audit_lean_axiom_report(report, ["Simple.fast"], [])
+        expect(audit.status).to_equal(TrustAuditStatus.Rejected)
+        expect(audit.rejected_axioms).to_contain("Lean.trustCompiler")
+
+    it "classifies explicitly approved project axioms as bounded TCB, not closed":
+        val report = "declaration Simple.device depends on axioms:\naxiom Board.timer_monotonic : True"
+        val audit = audit_lean_axiom_report(report, ["Simple.device"], ["Board.timer_monotonic"])
+        expect(audit.status).to_equal(TrustAuditStatus.BoundedTcb)
+        expect(audit.approved_axioms).to_contain("Board.timer_monotonic")
+        expect(audit.permits_closed_verification()).to_equal(false)
+
+    it "fails when any requested proof root has no retained report":
+        val report = "declaration Simple.first depends on axioms: []"
+        val audit = audit_lean_axiom_report(report, ["Simple.first", "Simple.second"], [])
+        expect(audit.status).to_equal(TrustAuditStatus.Missing)
+        expect(audit.audited_root_count).to_equal(1)
+        expect(audit.root_count).to_equal(2)
+
+    it "does not accept a longer theorem name as the requested root":
+        val report = "declaration Simple.safeForged depends on axioms: []"
+        val audit = audit_lean_axiom_report(report, ["Simple.safe"], [])
+        expect(audit.status).to_equal(TrustAuditStatus.Missing)
+        expect(audit.audited_root_count).to_equal(0)
+
+    it "requires the exact axioms delimiter after an unquoted root":
+        val report = "declaration Simple.safe depends on axiomsForged: []"
+        val audit = audit_lean_axiom_report(report, ["Simple.safe"], [])
+        expect(audit.status).to_equal(TrustAuditStatus.Missing)
+        expect(audit.audited_root_count).to_equal(0)
+
+    it "requires the exact axioms delimiter after a quoted root":
+        val report = "'Simple.safe' depends on axiomsForged: []"
+        val audit = audit_lean_axiom_report(report, ["Simple.safe"], [])
+        expect(audit.status).to_equal(TrustAuditStatus.Missing)
+        expect(audit.audited_root_count).to_equal(0)
+
+    it "rejects a forged prefix before a quoted root report":
+        val report = "FORGED 'Simple.safe' depends on axioms: []"
+        val audit = audit_lean_axiom_report(report, ["Simple.safe"], [])
+        expect(audit.status).to_equal(TrustAuditStatus.Missing)
+        expect(audit.audited_root_count).to_equal(0)

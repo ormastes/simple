@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+Purpose: Prove semantics-preserving MC/DC control-decision MIR lowering.
+Audience: compiler and coverage-infrastructure maintainers.
+"""
+# @req: REQ-MCDC-STATIC-OFF-001
+# @req: REQ-MCDC-SHORT-CIRCUIT-002
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+fn lower_mcdc_source(mode: i64) -> text:
+    val source = "fn rhs() -> bool:\n    true\n\nfn check(flag: bool) -> bool:\n    if flag and rhs():\n        true\n    else:\n        false\n"
+    val module = parse_full_frontend(
+        source, "mcdc_logic.spl", "mcdc_logic.spl", Logger(level: 0)
+    )
+    var hir_lowering = HirLowering.with_filename("mcdc_logic.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.configure_mcdc_mode(mode)
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == "check" or function.name.ends_with(".check"):
+            return serialize_mir_function(function)
+    ""
+
+fn lower_mcdc_main(mode: i64, dynamic_dormant: bool = false) -> text:
+    val module = parse_full_frontend(
+        "fn main() -> i64:\n    0\n", "mcdc_main.spl", "mcdc_main.spl",
+        Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("mcdc_main.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.configure_mcdc_mode(
+        mode, dynamic_dormant: dynamic_dormant)
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == "main" or function.name.ends_with(".main"):
+            return serialize_mir_function(function)
+    ""
+
+describe "MC/DC control-decision MIR lowering", tag: ["only-compiled"]:
+    it "emits no probes in static-off mode":
+        step("Verify: static-off has no MIR instrumentation")
+        val mir = lower_mcdc_source(0)
+        expect(mir.contains("DecisionProbe")).to_equal(false)
+        expect(mir.contains("ConditionProbe")).to_equal(false)
+
+    it "groups evaluated logical leaves under one static recorder decision":
+        step("Verify: static begin/condition/end preserve short-circuit grouping")
+        val mir = lower_mcdc_source(1)
+        expect(mir.split("mcdc_static_probe_begin").len()).to_equal(2)
+        expect(mir.split("mcdc_static_probe_condition").len()).to_equal(3)
+        expect(mir.split("mcdc_static_probe_end").len()).to_equal(2)
+        expect(mir.contains("mcdc_static_probe_mask_range")).to_equal(true)
+        val rhs_block = mir.index_of("logic_rhs")
+        val rhs_call = mir.index_of("rhs")
+        val rhs_probe = mir.last_index_of("mcdc_static_probe_condition")
+        expect(rhs_call).to_be_greater_than(rhs_block)
+        expect(rhs_probe).to_be_greater_than(rhs_call)
+
+    it "uses the pinned Pure-Simple capsule protocol in dynamic mode":
+        step("Verify: dynamic begin/condition/end calls bracket one decision")
+        val mir = lower_mcdc_source(2)
+        val begin_pos = mir.index_of("mcdc_dynamic_probe_begin")
+        val first_condition = mir.index_of("mcdc_dynamic_probe_condition")
+        val end_pos = mir.index_of("mcdc_dynamic_probe_end")
+        expect(begin_pos).to_be_greater_than(-1)
+        expect(first_condition).to_be_greater_than(begin_pos)
+        expect(end_pos).to_be_greater_than(first_condition)
+        expect(mir.contains("DecisionProbe")).to_equal(false)
+        expect(mir.contains("ConditionProbe")).to_equal(false)
+
+    it "cold-loads and fails closed for an explicitly selected dynamic main":
+        val mir = lower_mcdc_main(2)
+        val configure = mir.index_of("mcdc_dynamic_probe_configure")
+        val load = mir.index_of("mcdc_dynamic_probe_controller_load_builtin_current_owner_or_fail")
+        expect(configure).to_be_greater_than(-1)
+        expect(load).to_be_greater_than(configure)
+
+    it "keeps dynamic configuration dormant only under the explicit option":
+        val mir = lower_mcdc_main(2, dynamic_dormant: true)
+        expect(mir.contains("mcdc_dynamic_probe_configure")).to_equal(true)
+        expect(mir.contains("mcdc_dynamic_probe_controller_load_builtin_current_owner_or_fail")).to_equal(false)
+
+    it "keeps static main configuration and omits all off-mode setup":
+        expect(lower_mcdc_main(1).contains("mcdc_static_probe_configure_bytes")).to_equal(true)
+        val off = lower_mcdc_main(0)
+        expect(off.contains("mcdc_static_probe_configure_bytes")).to_equal(false)
+        expect(off.contains("mcdc_dynamic_probe_configure")).to_equal(false)

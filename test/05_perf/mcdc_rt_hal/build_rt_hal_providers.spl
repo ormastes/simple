@@ -1,0 +1,35 @@
+# One-shot typed build, invoked once before benchmark samples.
+use std.cli.cli_util.{get_cli_args}
+use std.common.env_access.model.{EnvAccessStatus, env_access_plan_error}
+use app.io.env_access_host.{execute_host_env_access_plan}
+use test.fixtures.rt_hal_external.fixture_plan.{RtHalExternalFixtureConfig, rt_hal_external_build_plan}
+
+fn argument(args: [text], name: text) -> text:
+    val prefix = "--" + name + "="
+    for item in args:
+        if item.starts_with(prefix): return item.substring(prefix.len())
+    ""
+
+fn main():
+    val args = get_cli_args()
+    val config = RtHalExternalFixtureConfig(repo: argument(args, "repo"),
+        cc: argument(args, "cc"), cc_hash: argument(args, "cc-sha256"),
+        rustc: argument(args, "rustc"), rustc_hash: argument(args, "rustc-sha256"),
+        c_output: argument(args, "c-output"), rust_output: argument(args, "rust-output"))
+    val plan = rt_hal_external_build_plan(config)
+    if env_access_plan_error(plan) != "":
+        print "status=BLOCKED code=RTHAL-BUILD-E-PLAN"
+        return
+    val receipts = match execute_host_env_access_plan(plan):
+        case Ok(value): value
+        case Err(_):
+            print "status=BLOCKED code=RTHAL-BUILD-E-EXECUTOR"
+            return
+    if receipts.len() != 2:
+        print "status=BLOCKED code=RTHAL-BUILD-E-RECEIPTS"
+    elif receipts[0].status != EnvAccessStatus.Executed or receipts[0].exit_code != 0:
+        print "status=BLOCKED code=RTHAL-BUILD-E-C"
+    elif receipts[1].status != EnvAccessStatus.Executed or receipts[1].exit_code != 0:
+        print "status=BLOCKED code=RTHAL-BUILD-E-RUST"
+    else:
+        print "status=ok providers=2"

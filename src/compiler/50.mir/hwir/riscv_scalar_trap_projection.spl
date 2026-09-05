@@ -1,0 +1,136 @@
+# Precise scalar trap/interrupt projection into the retirement-owner ABI.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp,
+    HwSignal}
+
+fn scalar_trap_ports(xlen: i32) -> [HwPort]:
+    [HwPort.input("in_valid", "Bits", 1),
+        HwPort.input("in_privilege", "Bits", 2), HwPort.input("in_pc", "Bits", xlen),
+        HwPort.input("in_pc_after", "Bits", xlen),
+        HwPort.input("in_original_instruction", "Bits", 32),
+        HwPort.input("in_canonical_instruction", "Bits", 32),
+        HwPort.input("in_instruction_length_bytes", "Bits", 3),
+        HwPort.input("in_rd", "Bits", 5), HwPort.input("in_rd_write", "Bits", 1),
+        HwPort.input("in_rd_value", "Bits", xlen),
+        HwPort.input("in_memory_address", "Bits", xlen),
+        HwPort.input("in_memory_read_mask", "Bits", 32),
+        HwPort.input("in_memory_write_mask", "Bits", 32),
+        HwPort.input("in_memory_read_data", "Bits", xlen),
+        HwPort.input("in_memory_write_data", "Bits", xlen),
+        HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("execute_trap_valid", "Bits", 1),
+        HwPort.input("execute_trap_cause", "Bits", xlen),
+        HwPort.input("execute_trap_tval", "Bits", xlen),
+        HwPort.input("memory_trap_valid", "Bits", 1),
+        HwPort.input("memory_trap_cause", "Bits", xlen),
+        HwPort.input("memory_trap_tval", "Bits", xlen),
+        HwPort.input("interrupt_valid", "Bits", 1),
+        HwPort.input("interrupt_cause", "Bits", xlen),
+        HwPort.output("dispatch_valid", "Bits", 1),
+        HwPort.output("dispatch_privilege", "Bits", 2),
+        HwPort.output("dispatch_original_instruction", "Bits", 32),
+        HwPort.output("dispatch_canonical_instruction", "Bits", 32),
+        HwPort.output("dispatch_instruction_length_bytes", "Bits", 3),
+        HwPort.output("dispatch_pc_before", "Bits", xlen),
+        HwPort.output("dispatch_pc_after", "Bits", xlen),
+        HwPort.output("dispatch_rd", "Bits", 5),
+        HwPort.output("dispatch_rd_write", "Bits", 1),
+        HwPort.output("dispatch_rd_value", "Bits", xlen),
+        HwPort.output("dispatch_memory_address", "Bits", xlen),
+        HwPort.output("dispatch_memory_read_mask", "Bits", 32),
+        HwPort.output("dispatch_memory_write_mask", "Bits", 32),
+        HwPort.output("dispatch_memory_read_data", "Bits", xlen),
+        HwPort.output("dispatch_memory_write_data", "Bits", xlen),
+        HwPort.output("dispatch_trap", "Bits", 1),
+        HwPort.output("dispatch_interrupt", "Bits", 1),
+        HwPort.output("dispatch_cause", "Bits", xlen),
+        HwPort.output("dispatch_tval", "Bits", xlen)]
+
+pub fn strict_riscv_scalar_trap_projection_hwir(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Prioritize and normalize one scalar event before retirement capture.
+
+    Priority is memory exception, execute exception, illegal instruction, then
+    interrupt. Synchronous exceptions always beat an interrupt for the same
+    instruction. Illegal `tval` preserves the original fetched encoding.
+    """
+    if module_name == "":
+        return Err("HWIR-E-RISCV-TRAP-PROJECTION-ID: scalar trap projection requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "": return Err(config_error)
+    val xlen = config.xlen
+    val ports = scalar_trap_ports(xlen)
+    val signals = [HwSignal.comb("illegal_tval", "Bits", xlen),
+        HwSignal.comb("execute_or_illegal", "Bits", 1),
+        HwSignal.comb("sync_trap", "Bits", 1), HwSignal.comb("not_sync_trap", "Bits", 1),
+        HwSignal.comb("selected_interrupt", "Bits", 1), HwSignal.comb("any_trap", "Bits", 1),
+        HwSignal.comb("valid_trap", "Bits", 1),
+        HwSignal.comb("valid_interrupt", "Bits", 1),
+        HwSignal.comb("selected_sync_cause_low", "Bits", xlen),
+        HwSignal.comb("selected_sync_cause", "Bits", xlen),
+        HwSignal.comb("selected_sync_tval_low", "Bits", xlen),
+        HwSignal.comb("selected_sync_tval", "Bits", xlen),
+        HwSignal.comb("selected_cause", "Bits", xlen),
+        HwSignal.comb("selected_tval", "Bits", xlen),
+        HwSignal.comb("not_any_trap", "Bits", 1),
+        HwSignal.comb("architectural_write_enable", "Bits", 1)]
+    val constants = [HwConstant.bits("zero1", 1, 0), HwConstant.bits("one1", 1, 1),
+        HwConstant.bits("zero2", 2, 0), HwConstant.bits("zero3", 3, 0),
+        HwConstant.bits("zero5", 5, 0), HwConstant.bits("zero32", 32, 0),
+        HwConstant.bits("zero_xlen", xlen, 0),
+        HwConstant.bits("illegal_instruction_cause", xlen, 2)]
+    val ops = [HwCombOp.unary("zext", "illegal_tval", "in_original_instruction", xlen),
+        HwCombOp.binary("or", "execute_or_illegal", "execute_trap_valid", "illegal_valid", 1),
+        HwCombOp.binary("or", "sync_trap", "memory_trap_valid", "execute_or_illegal", 1),
+        HwCombOp.binary("xor", "not_sync_trap", "sync_trap", "one1", 1),
+        HwCombOp.binary("and", "selected_interrupt", "interrupt_valid", "not_sync_trap", 1),
+        HwCombOp.binary("or", "any_trap", "sync_trap", "selected_interrupt", 1),
+        HwCombOp.binary("and", "valid_trap", "in_valid", "any_trap", 1),
+        HwCombOp.binary("and", "valid_interrupt", "in_valid", "selected_interrupt", 1),
+        HwCombOp.binary("xor", "not_any_trap", "any_trap", "one1", 1),
+        HwCombOp.binary("and", "architectural_write_enable", "in_valid", "not_any_trap", 1),
+        HwCombOp.unary("passthrough", "dispatch_valid", "in_valid", 1),
+        HwCombOp.unary("passthrough", "dispatch_trap", "valid_trap", 1),
+        HwCombOp.unary("passthrough", "dispatch_interrupt", "valid_interrupt", 1)]
+    val selects = [
+        HwSelectOp.mux("selected_sync_cause_low", "execute_trap_valid", "execute_trap_cause", "illegal_instruction_cause", xlen),
+        HwSelectOp.mux("selected_sync_cause", "memory_trap_valid", "memory_trap_cause", "selected_sync_cause_low", xlen),
+        HwSelectOp.mux("selected_sync_tval_low", "execute_trap_valid", "execute_trap_tval", "illegal_tval", xlen),
+        HwSelectOp.mux("selected_sync_tval", "memory_trap_valid", "memory_trap_tval", "selected_sync_tval_low", xlen),
+        HwSelectOp.mux("selected_cause", "sync_trap", "selected_sync_cause", "interrupt_cause", xlen),
+        HwSelectOp.mux("selected_tval", "sync_trap", "selected_sync_tval", "zero_xlen", xlen),
+        HwSelectOp.mux("dispatch_privilege", "in_valid", "in_privilege", "zero2", 2),
+        HwSelectOp.mux("dispatch_original_instruction", "in_valid", "in_original_instruction", "zero32", 32),
+        HwSelectOp.mux("dispatch_canonical_instruction", "in_valid", "in_canonical_instruction", "zero32", 32),
+        HwSelectOp.mux("dispatch_instruction_length_bytes", "in_valid", "in_instruction_length_bytes", "zero3", 3),
+        HwSelectOp.mux("dispatch_pc_before", "in_valid", "in_pc", "zero_xlen", xlen),
+        HwSelectOp.mux("dispatch_pc_after", "in_valid", "in_pc_after", "zero_xlen", xlen),
+        HwSelectOp.mux("dispatch_rd", "architectural_write_enable", "in_rd", "zero5", 5),
+        HwSelectOp.mux("dispatch_rd_write", "architectural_write_enable", "in_rd_write", "zero1", 1),
+        HwSelectOp.mux("dispatch_rd_value", "architectural_write_enable", "in_rd_value", "zero_xlen", xlen),
+        HwSelectOp.mux("dispatch_memory_address", "architectural_write_enable", "in_memory_address", "zero_xlen", xlen),
+        HwSelectOp.mux("dispatch_memory_read_mask", "architectural_write_enable", "in_memory_read_mask", "zero32", 32),
+        HwSelectOp.mux("dispatch_memory_write_mask", "architectural_write_enable", "in_memory_write_mask", "zero32", 32),
+        HwSelectOp.mux("dispatch_memory_read_data", "architectural_write_enable", "in_memory_read_data", "zero_xlen", xlen),
+        HwSelectOp.mux("dispatch_memory_write_data", "architectural_write_enable", "in_memory_write_data", "zero_xlen", xlen),
+        HwSelectOp.mux("dispatch_cause", "valid_trap", "selected_cause", "zero_xlen", xlen),
+        HwSelectOp.mux("dispatch_tval", "valid_trap", "selected_tval", "zero_xlen", xlen)]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: ops.len() + selects.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "priority"),
+                source_name: "riscv.scalar.trap.priority"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "illegal"),
+                source_name: "riscv.scalar.trap.illegal-encoding-preservation"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "normalize"),
+                source_name: "riscv.scalar.retirement.trap-normalization")],
+        ports: ports, signals: signals, constants: constants, comb_ops: ops,
+        compare_ops: [], select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(module)

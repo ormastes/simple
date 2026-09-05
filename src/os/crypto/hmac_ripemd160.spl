@@ -1,0 +1,85 @@
+# HMAC-RIPEMD-160 — Pure Simple Implementation
+#
+# HMAC (Hash-based Message Authentication Code) using RIPEMD-160 as the
+# underlying hash function, per RFC 2104 and RFC 2286.
+#
+# Parameters:
+#   Block size (B): 64 bytes
+#   Output size (L): 20 bytes (160 bits)
+#
+# Algorithm (RFC 2104):
+#   K' = K padded/hashed to B bytes (hash K if len(K) > B, zero-pad if shorter)
+#   ipad = K' XOR 0x36 repeated B times
+#   opad = K' XOR 0x5c repeated B times
+#   HMAC = RIPEMD-160(opad || RIPEMD-160(ipad || message))
+#
+# Implementation notes:
+#   - All inputs/outputs are list (i64 values, one per byte).
+#   - if/elif/else chains used throughout (sequential `if` returns fire only first).
+#   - Module-level helper functions used to avoid it-block var-mutation pitfall.
+#   - No mod crypto.types dependency (src/os/crypto defines its own helpers).
+
+use os.crypto.ripemd160.{ripemd160_bytes}
+
+# =============================================================================
+# HMAC-RIPEMD-160 Public API
+# =============================================================================
+
+# Compute HMAC-RIPEMD-160 of message using key.
+# key: arbitrary-length byte list
+# msg: arbitrary-length byte list
+# Returns: 20-byte list (160-bit MAC)
+fn hmac_ripemd160(key: list, msg: list) -> list:
+    val block_size = 64
+
+    # Step 1: Prepare K' — hash key if longer than block, zero-pad to block_size
+    var k_prime = []
+    if key.len() > block_size:
+        val hk = ripemd160_bytes(key)
+        var ki = 0
+        while ki < hk.len():
+            k_prime.push(hk.get(ki))
+            ki = ki + 1
+    else:
+        var ki = 0
+        while ki < key.len():
+            k_prime.push(key.get(ki))
+            ki = ki + 1
+
+    # Zero-pad K' to block_size
+    while k_prime.len() < block_size:
+        k_prime.push(0)
+
+    # Step 2: Build ipad and opad (K' XOR 0x36 / 0x5c)
+    var i_key_pad = []
+    var o_key_pad = []
+    var i = 0
+    while i < block_size:
+        val kb = k_prime.get(i)
+        i_key_pad.push(kb ^ 0x36)
+        o_key_pad.push(kb ^ 0x5c)
+        i = i + 1
+
+    # Step 3: Inner hash — RIPEMD-160(ipad || msg)
+    var inner_input = []
+    i = 0
+    while i < i_key_pad.len():
+        inner_input.push(i_key_pad.get(i))
+        i = i + 1
+    i = 0
+    while i < msg.len():
+        inner_input.push(msg.get(i))
+        i = i + 1
+    val inner_hash = ripemd160_bytes(inner_input)
+
+    # Step 4: Outer hash — RIPEMD-160(opad || inner_hash)
+    var outer_input = []
+    i = 0
+    while i < o_key_pad.len():
+        outer_input.push(o_key_pad.get(i))
+        i = i + 1
+    i = 0
+    while i < inner_hash.len():
+        outer_input.push(inner_hash.get(i))
+        i = i + 1
+    ripemd160_bytes(outer_input)

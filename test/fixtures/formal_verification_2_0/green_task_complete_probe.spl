@@ -1,0 +1,45 @@
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1, close_independent_replay_v1}
+use verification.simpleos_green_task_complete_refinement.{
+    GREEN_TASK_COMPLETE_CASE_COUNT_V1,
+    green_task_complete_verification_cache_key_v1,
+    validate_simpleos_green_task_complete_refinement_v1,
+    promote_simpleos_green_task_complete_refinement_v2}
+
+fn scheduler_axiom_report() -> text:
+    "'KernelScheduler.complete_refinement_bundle' depends on axioms: [propext]"
+
+fn checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "KernelScheduler", "KernelScheduler.complete_refinement_bundle", sha256_text("scheduler-olean"), sha256_text("policy"),
+        sha256_text("output"), ReplayOutcomeV1.Accepted, "")
+
+fn main() -> i64:
+    val model = validate_simpleos_green_task_complete_refinement_v1(
+        scheduler_axiom_report())
+    val replay = close_independent_replay_v1(
+        checker(ReplayCheckerClassV1.FreshLeanKernel),
+        checker(ReplayCheckerClassV1.IndependentKernel))
+    val proof = ProofReceiptV1(model.theorem_roots[0],
+        FormalStatus.ModelProven, "cache", sha256_text("scheduler-olean"), [
+            "fv2-simpleos-source-semantics:" + model.source_semantics_hash,
+            "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+        assurance_text_hash(scheduler_axiom_report()),
+        model.trust_manifest_hash, "", replay.hash())
+    val receipt = promote_simpleos_green_task_complete_refinement_v2(
+        model, proof, replay)
+    if receipt.diagnostic != "": return 1
+    if receipt.status != FormalStatus.SourceRefined: return 2
+    if receipt.checked_case_count != GREEN_TASK_COMPLETE_CASE_COUNT_V1: return 3
+    if receipt.counterexample_count != 0: return 4
+    if receipt.preserve_reason_mutant_counterexamples <= 0: return 5
+    if receipt.overwrite_done_mutant_counterexamples <= 0: return 6
+    if not receipt.permits_source_refinement(
+        green_task_complete_verification_cache_key_v1()): return 7
+    if receipt.status.permits_verified_release(): return 8
+    0

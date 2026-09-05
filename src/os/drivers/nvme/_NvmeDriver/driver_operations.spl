@@ -1,0 +1,829 @@
+# NvmeDriver lifecycle, controller/admin setup, bounded queue ownership, and DMA helpers.
+use os.drivers.nvme.nvme_driver.*
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_write32, mmio_read64, mmio_write64}
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+use os.drivers.nvme.nvme_queue_notify.*
+use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_from_resources, nvme_cq_doorbell_addr, nvme_dstrd_to_doorbell_stride_bytes}
+use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
+use os.drivers.nvme.nvme_controller_contract.{NvmeControllerRegs, nvme_controller_facts, nvme_controller_refusal_reason, nvme_cap_dstrd, nvme_namespace_facts, nvme_namespace_refusal_reason}
+use os.drivers.nvme.nvme_storage_model.{nvme_queue_is_system_reserved}
+use os.drivers.nvme._NvmeDriver.dma_allocation.{nvme_alloc_dma}
+use os.kernel.log.klog_api.{log_info}
+use common.string_core.{char_from_code}
+
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
+extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
+
+val NVME_DRIVER_MAX_DATA_QUEUE_ID: u16 = 3
+
+fn _nvme_identity_hex_digit(value: u8) -> text:
+    match value & 0x0fu8:
+        case 0u8: "0"
+        case 1u8: "1"
+        case 2u8: "2"
+        case 3u8: "3"
+        case 4u8: "4"
+        case 5u8: "5"
+        case 6u8: "6"
+        case 7u8: "7"
+        case 8u8: "8"
+        case 9u8: "9"
+        case 10u8: "a"
+        case 11u8: "b"
+        case 12u8: "c"
+        case 13u8: "d"
+        case 14u8: "e"
+        case _: "f"
+
+fn _nvme_identify_ascii(base: u64, offset: u64, length: u64) -> text:
+    # Encode the exact fixed-width Identify field without hosted UTF-8 helpers.
+    # Hex remains identity-preserving and safe in serial challenge tokens.
+    var out = "hex:"
+    var index: u64 = 0u64
+    while index < length:
+        val byte = mmio_read8(base + offset + index)
+        out = out + _nvme_identity_hex_digit(byte >> 4) + _nvme_identity_hex_digit(byte)
+        index = index + 1u64
+    out
+val NVME_DRIVER_MAX_TRACKED_QUEUE_OWNERS: u64 = 8
+val NVME_DRIVER_MAX_SYSTEM_NAMESPACES: u64 = 8
+var g_nvme_user_queue_owner_count: u64 = 0
+var g_nvme_user_queue_ids: [u16; 8] = [0; 8]
+var g_nvme_user_queue_controller_ids: [u32; 8] = [0; 8]
+var g_nvme_user_queue_nsids: [u32; 8] = [0; 8]
+var g_nvme_user_queue_owner_tasks: [u64; 8] = [0; 8]
+var g_nvme_user_queue_depths: [u16; 8] = [0; 8]
+var g_nvme_system_namespace_count: u64 = 0
+var g_nvme_system_queue_nsids: [u32; 8] = [0; 8]
+# Canonical in-process incarnation observed by the OS VFS authority. Zero
+# identity means reset/reinitialization is in progress or no trusted grant has
+# completed. This is deliberately not persisted across reboot.
+var g_nvme_current_device_identity: u64 = 0u64
+var g_nvme_current_device_generation: u64 = 0u64
+
+fn _nvme_identify_ascii(base: u64, offset: u64, width: u64) -> text:
+    """Read a fixed-width, space-padded NVMe Identify ASCII field.
+
+    NVMe serial/model/firmware fields are not NUL-terminated.  Trim trailing
+    spaces and NUL bytes while preserving every interior byte.  The bounded
+    width comes from the controller Identify layout, so no untrusted length is
+    used for MMIO reads.
+    """
+    var end = width
+    while end > 0u64:
+        val tail = mmio_read8(base + offset + end - 1u64)
+        if tail != 0u8 and tail != 32u8:
+            break
+        end = end - 1u64
+    var result: text = ""
+    var i = 0u64
+    while i < end:
+        val byte = mmio_read8(base + offset + i)
+        if byte == 0u8:
+            break
+        result = result + char_from_code(byte.to_i64())
+        i = i + 1u64
+    result
+
+export _nvme_identify_ascii
+
+pub fn nvme_current_device_identity() -> u64:
+    g_nvme_current_device_identity
+
+pub fn nvme_current_device_generation() -> u64:
+    g_nvme_current_device_generation
+
+fn nvme_next_device_generation(current: u64) -> Result<u64, text>:
+    if current == 18446744073709551615u64:
+        return Err("NVMe: device generation exhausted")
+    Ok(current + 1u64)
+
+fn nvme_reset_serialization_blocker() -> text:
+    "missing-simpleos-atomic-compare-exchange-or-scheduler-exclusion"
+
+pub fn nvme_reset_serialized_with_io() -> bool:
+    # The available SimpleOS mutex and atomic providers are single-core
+    # load/store stubs, not exclusion primitives. Keep durable promotion closed
+    # until this capability reports ready from an executable provider gate.
+    nvme_reset_serialization_blocker() == "ready"
+
+pub fn nvme_trusted_pci_identity(grant: DeviceGrant) -> Result<u64, text>:
+    if grant.pci_vendor == 0u16 or grant.pci_device == 0u16:
+        return Result.Err("NVMe: trusted device identity unavailable")
+    # Injective PCI BDF packing: vendor16 | device16 | bus8 | dev8 |
+    # function8. Namespace identity is bound separately in the token.
+    val identity = (grant.pci_vendor.to_u64() << 48) |
+        (grant.pci_device.to_u64() << 32) |
+        (grant.pci_bus.to_u64() << 24) |
+        (grant.pci_dev.to_u64() << 16) |
+        (grant.pci_func.to_u64() << 8)
+    if identity == 0u64:
+        return Result.Err("NVMe: trusted device identity collapsed to zero")
+    Ok(identity)
+
+impl NvmeDriver:
+    static fn new() -> NvmeDriver:
+        """Create an uninitialized NVMe driver."""
+        NvmeDriver(
+            bar0_virt: 0,
+            admin_queue: NvmeQueuePair.new(0, 32),
+            io_queue: NvmeQueuePair.new(1, 64),
+            user_io_queues: [],
+            notif_id: 0,
+            identified_nsid: 1u32,
+            identified_namespaces: [],
+            controller_namespace_count: 1u32,
+            controller_serial: "",
+            controller_model: "",
+            controller_firmware: "",
+            sector_count: 0,
+            sector_size: 512,
+            device_identity: 0u64,
+            device_generation: 0u64,
+            db_stride: 0,
+            initialized: false
+        )
+
+    # ========================================================================
+    # Initialization
+    # ========================================================================
+
+    me init_from_grant(grant: DeviceGrant) -> Result<bool, text>:
+        """Initialize NVMe controller from a DeviceGrant.
+
+        Performs the full NVMe init sequence: map BAR0, reset controller,
+        configure admin queues, identify controller/namespace, create I/O queues.
+        """
+        # Invalidate the current incarnation before touching controller state.
+        # A failed reinitialization must never leave an old adapter appearing
+        # ready while BAR/queues are being torn down or rebuilt.
+        self.initialized = false
+        self.device_identity = 0u64
+        g_nvme_current_device_identity = 0u64
+        self.notif_id = grant.irq_notification_id
+
+        # Step 1: Map BAR0.
+        #
+        # Real firmware (OVMF) assigns the 64-bit q35 NVMe BAR above 4GB
+        # (observed 0xC000004000) inside the kernel's EXCLUSIVE NVMe MMIO
+        # window (vmm_map_nvme_bar_high(), PML4[384] -> phys 0xC000000000,
+        # 64KiB page-mapped). For phys addresses inside that window, reference
+        # the SAME already-mapped higher-half VA the C bridge
+        # (_nvme_init_controller in baremetal_stubs.c) uses, computed as
+        # NVME_BAR_VIRT_BASE + (bar0_phys - NVME_BAR_PHYS_BASE), instead of a
+        # fresh syscall-83 per-task mapping -- avoids a second, independently
+        # constructed alias of the same physical registers. BARs outside the
+        # window (e.g. below 4GB under -kernel/SeaBIOS) keep the existing
+        # syscall-83 path unchanged.
+        if grant.bar0_phys >= NVME_BAR_PHYS_BASE and grant.bar0_phys < NVME_BAR_PHYS_BASE + NVME_BAR_WINDOW_SIZE:
+            self.bar0_virt = NVME_BAR_VIRT_BASE + (grant.bar0_phys - NVME_BAR_PHYS_BASE)
+            log_info("[nvme] " + "NVMe: BAR0 in high window, using pinned VA")
+        else:
+            val bar0_result = syscall(SYS_MAP_BAR, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
+            # Reject 0 (no device / unsatisfied) and small-negative errnos. Do
+            # NOT use `<= 0`: a valid higher-half kernel VA is NEGATIVE as i64
+            # and must be accepted. Without the 0-guard, bar0_virt=0 and the
+            # next MMIO read null-faults (cr2=0x0) instead of degrading to
+            # no-disk.
+            if bar0_result == 0 or (bar0_result < 0 and bar0_result > -4096):
+                return Result.Err("NVMe: failed to map BAR0 rc={bar0_result} phys={grant.bar0_phys} size={grant.bar0_size}")
+            self.bar0_virt = bar0_result.to_u64()
+        if self.bar0_virt == 0u64:
+            return Result.Err("NVMe: BAR0 mapped to null address")
+        log_info("[nvme] " + "NVMe: BAR0 mapped")
+
+        # Step 2: Read controller registers and validate CAP before queue setup.
+        val cap = mmio_read64(self.bar0_virt + 0x00)
+        val vs = mmio_read32(self.bar0_virt + 0x08)
+        val cc = mmio_read32(self.bar0_virt + 0x14)
+        val csts = mmio_read32(self.bar0_virt + 0x1C)
+        val facts = nvme_controller_facts(NvmeControllerRegs(cap: cap, vs: vs, cc: cc, csts: csts), 64u32)
+        val controller_reason = nvme_controller_refusal_reason(facts)
+        if controller_reason != "ready" and controller_reason != "nvme-controller-fatal":
+            return Result.Err("NVMe: controller " + controller_reason)
+        val dstrd = nvme_cap_dstrd(cap)
+        self.db_stride = dstrd
+        val mqes = facts.mq_entries.to_u16()
+        log_info("[nvme] " + "NVMe: CAP read, DSTRD={dstrd}, MQES={mqes}")
+
+        # Step 3: Disable controller
+        val disable_result = self.disable_controller()
+        if disable_result.is_err():
+            return disable_result
+
+        # Step 4: Allocate admin queue DMA memory
+        val admin_sq_size = 32u64 * 64
+        val admin_cq_size = 32u64 * 16
+        val admin_sq_result = self.alloc_dma(admin_sq_size)
+        if admin_sq_result.is_err():
+            return Result.Err("NVMe: failed to allocate admin SQ")
+        val admin_sq_addrs = admin_sq_result.unwrap()
+
+        val admin_cq_result = self.alloc_dma(admin_cq_size)
+        if admin_cq_result.is_err():
+            return Result.Err("NVMe: failed to allocate admin CQ")
+        val admin_cq_addrs = admin_cq_result.unwrap()
+
+        val admin_queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
+            qid: 0u16,
+            depth: 32u16,
+            sq_phys: admin_sq_addrs.phys,
+            sq_virt: admin_sq_addrs.virt,
+            cq_phys: admin_cq_addrs.phys,
+            cq_virt: admin_cq_addrs.virt,
+            bar0_virt: self.bar0_virt,
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride),
+            sq_dma_handle: admin_sq_addrs.handle,
+            cq_dma_handle: admin_cq_addrs.handle
+        ))
+        if admin_queue_result.is_err():
+            return Result.Err("NVMe: invalid admin queue resources: " + admin_queue_result.unwrap_err())
+        self.admin_queue = admin_queue_result.unwrap()
+
+        # Zero out queue memory
+        self.zero_memory(self.admin_queue.sq_virt, admin_sq_size)
+        self.zero_memory(self.admin_queue.cq_virt, admin_cq_size)
+        rt_dma_sync_for_device(admin_sq_addrs.handle, 2)
+        rt_dma_sync_for_device(admin_cq_addrs.handle, 2)
+
+        # Step 5: Write AQA (admin queue attributes)
+        # Bits 0-11: ASQS (admin SQ size, 0-based), Bits 16-27: ACQS (admin CQ size, 0-based)
+        val asqs = 31u32
+        val acqs = 31u32
+        val aqa = asqs | (acqs << 16)
+        mmio_write32(self.bar0_virt + 0x24, aqa)
+
+        # Step 6: Write ASQ (admin submission queue base address)
+        mmio_write64(self.bar0_virt + 0x28, self.admin_queue.sq_phys)
+
+        # Step 7: Write ACQ (admin completion queue base address)
+        mmio_write64(self.bar0_virt + 0x30, self.admin_queue.cq_phys)
+
+        # Step 8: Enable controller
+        val enable_result = self.enable_controller()
+        if enable_result.is_err():
+            return enable_result
+        log_info("[nvme] " + "NVMe: controller enabled")
+
+        # Step 9: Identify Controller (admin command, CNS=1)
+        val identify_ctrl_result = self.identify_controller()
+        if identify_ctrl_result.is_err():
+            return identify_ctrl_result
+        log_info("[nvme] " + "NVMe: controller identified")
+
+        # Step 10: Identify Namespace 1 (admin command, CNS=0, NSID=1)
+        val identify_ns_result = self.identify_namespace()
+        if identify_ns_result.is_err():
+            return identify_ns_result
+        log_info("[nvme] " + "NVMe: namespace identified, sectors={self.sector_count}, sector_size={self.sector_size}")
+
+        # Step 11: Set Number of Queues feature (feature ID 0x07)
+        val set_queues_result = self.set_num_queues(NVME_DRIVER_MAX_DATA_QUEUE_ID, NVME_DRIVER_MAX_DATA_QUEUE_ID)
+        if set_queues_result.is_err():
+            return set_queues_result
+
+        # Step 12: Create I/O Completion Queue (QID 1)
+        val create_iocq_result = self.create_io_completion_queue()
+        if create_iocq_result.is_err():
+            return create_iocq_result
+        log_info("[nvme] " + "NVMe: I/O CQ created")
+
+        # Step 13: Create I/O Submission Queue (QID 1)
+        val create_iosq_result = self.create_io_submission_queue()
+        if create_iosq_result.is_err():
+            return create_iosq_result
+        log_info("[nvme] " + "NVMe: I/O SQ created")
+
+        val incarnation = self.commit_device_incarnation(grant, self.identified_nsid)
+        if incarnation.is_err():
+            return Result.Err(incarnation.unwrap_err())
+        self.initialized = true
+        log_info("[nvme] " + "NVMe: initialization complete")
+        Result.Ok(true)
+
+    me init_baremetal(bar0_virt_addr: i64, dma_buf_addr: i64) -> Result<bool, text>:
+        """Initialize NVMe controller on baremetal (no DeviceGrant needed).
+
+        Uses raw BAR0 virtual address and DMA buffer from C heap.
+        No IRQ notifications — uses polling only.
+        """
+        self.initialized = false
+        self.device_identity = 0u64
+        g_nvme_current_device_identity = 0u64
+        self.bar0_virt = bar0_virt_addr
+        self.notif_id = 0  # No IRQ on baremetal, polling only
+        log_info("[nvme] BAR0 at 0x{bar0_virt_addr}")
+
+        # Read and validate controller registers before queue setup.
+        val cap = mmio_read64(self.bar0_virt + 0x00)
+        val vs = mmio_read32(self.bar0_virt + 0x08)
+        val cc = mmio_read32(self.bar0_virt + 0x14)
+        val csts = mmio_read32(self.bar0_virt + 0x1C)
+        val facts = nvme_controller_facts(NvmeControllerRegs(cap: cap, vs: vs, cc: cc, csts: csts), 64u32)
+        val controller_reason = nvme_controller_refusal_reason(facts)
+        if controller_reason != "ready" and controller_reason != "nvme-controller-fatal":
+            return Result.Err("[nvme] controller " + controller_reason)
+        val dstrd = nvme_cap_dstrd(cap)
+        self.db_stride = dstrd
+        val mqes = facts.mq_entries.to_u16()
+        log_info("[nvme] CAP: DSTRD={dstrd}, MQES={mqes}")
+
+        # Disable controller
+        val disable_result = self.disable_controller()
+        if disable_result.is_err():
+            return disable_result
+
+        val admin_sq_size = 32 * 64  # ADMIN_QUEUE_DEPTH * SQE_SIZE = 2048
+        val admin_cq_size = 32 * 16  # ADMIN_QUEUE_DEPTH * CQE_SIZE = 512
+        val sq_result = self.alloc_dma(admin_sq_size)
+        if sq_result.is_err():
+            return Result.Err("[nvme] failed to allocate admin SQ DMA")
+        val sq_dma = sq_result.unwrap()
+        val cq_result = self.alloc_dma(admin_cq_size)
+        if cq_result.is_err():
+            return Result.Err("[nvme] failed to allocate admin CQ DMA")
+        val cq_dma = cq_result.unwrap()
+
+        val admin_queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
+            qid: 0u16,
+            depth: 32u16,
+            sq_phys: sq_dma.phys,
+            sq_virt: sq_dma.virt,
+            cq_phys: cq_dma.phys,
+            cq_virt: cq_dma.virt,
+            bar0_virt: self.bar0_virt,
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride),
+            sq_dma_handle: sq_dma.handle,
+            cq_dma_handle: cq_dma.handle
+        ))
+        if admin_queue_result.is_err():
+            return Result.Err("[nvme] invalid admin queue resources: " + admin_queue_result.unwrap_err())
+        self.admin_queue = admin_queue_result.unwrap()
+
+        # Zero the queue memory
+        self.zero_memory(self.admin_queue.sq_virt, admin_sq_size)
+        self.zero_memory(self.admin_queue.cq_virt, admin_cq_size)
+        rt_dma_sync_for_device(sq_dma.handle, 2)
+        rt_dma_sync_for_device(cq_dma.handle, 2)
+
+        # Configure AQA, ASQ, ACQ registers
+        val aqa = (31 << 16) | 31  # 32-1 entries each
+        mmio_write32(self.bar0_virt + 0x24, aqa)
+        mmio_write64(self.bar0_virt + 0x28, self.admin_queue.sq_phys)
+        mmio_write64(self.bar0_virt + 0x30, self.admin_queue.cq_phys)
+        log_info("[nvme] Admin queues configured")
+
+        # Enable controller
+        val enable_result = self.enable_controller()
+        if enable_result.is_err():
+            return enable_result
+
+        log_info("[nvme] Controller enabled, running Identify...")
+
+        # Identify Controller
+        val ident_result = self.identify_controller()
+        if ident_result.is_err():
+            return ident_result
+
+        # Identify Namespace 1
+        val ns_result = self.identify_namespace()
+        if ns_result.is_err():
+            return ns_result
+
+        val set_queues_result = self.set_num_queues(NVME_DRIVER_MAX_DATA_QUEUE_ID, NVME_DRIVER_MAX_DATA_QUEUE_ID)
+        if set_queues_result.is_err():
+            return set_queues_result
+
+        val cq_create_result = self.create_io_completion_queue()
+        if cq_create_result.is_err():
+            return cq_create_result
+        val sq_create_result = self.create_io_submission_queue()
+        if sq_create_result.is_err():
+            return sq_create_result
+        log_info("[nvme] I/O queues created")
+
+        self.initialized = true
+        log_info("[nvme] Baremetal initialization complete")
+        Result.Ok(true)
+
+    # ========================================================================
+    # Controller Enable / Disable
+    # ========================================================================
+
+    me disable_controller() -> Result<bool, text>:
+        """Disable controller by clearing CC.EN and wait for CSTS.RDY == 0."""
+        self.initialized = false
+        self.device_identity = 0u64
+        g_nvme_current_device_identity = 0u64
+        val cc = mmio_read32(self.bar0_virt + 0x14)
+        val cc_disabled = cc & (0xFFFFFFFF ^ 1)
+        mmio_write32(self.bar0_virt + 0x14, cc_disabled)
+
+        # Wait for CSTS.RDY to clear
+        var i: u32 = 0
+        while i < READY_TIMEOUT:
+            val csts = mmio_read32(self.bar0_virt + 0x1C)
+            if (csts & 1) == 0:
+                log_info("[nvme] " + "NVMe: controller disabled")
+                return Result.Ok(true)
+            if (csts & 2) != 0:
+                return Result.Err("NVMe: controller fatal status during disable")
+            i = i + 1
+        Result.Err("NVMe: timeout waiting for controller disable")
+
+    me enable_controller() -> Result<bool, text>:
+        """Enable controller with NVM command set, 4KB pages, 64B SQ / 16B CQ entries."""
+        val cc: u32 = 0x00460001u32
+        mmio_write32(self.bar0_virt + 0x14, cc)
+
+        # Wait for CSTS.RDY to set
+        var i: u32 = 0
+        while i < READY_TIMEOUT:
+            val csts = mmio_read32(self.bar0_virt + 0x1C)
+            if (csts & 1) != 0:
+                return Result.Ok(true)
+            if (csts & 2) != 0:
+                return Result.Err("NVMe: controller fatal status during enable")
+            i = i + 1
+        val final_csts = mmio_read32(self.bar0_virt + 0x1C)
+        val final_cc = mmio_read32(self.bar0_virt + 0x14)
+        val final_aqa = mmio_read32(self.bar0_virt + 0x24)
+        val final_asq = mmio_read64(self.bar0_virt + 0x28)
+        val final_acq = mmio_read64(self.bar0_virt + 0x30)
+        Result.Err(
+            "NVMe: timeout waiting for controller ready csts=" + final_csts.to_u64().to_text() +
+            " cc=" + final_cc.to_u64().to_text() +
+            " aqa=" + final_aqa.to_u64().to_text() +
+            " asq=" + final_asq.to_text() +
+            " acq=" + final_acq.to_text()
+        )
+
+    # ========================================================================
+    # Admin Commands
+    # ========================================================================
+
+    me identify_controller() -> Result<bool, text>:
+        """Issue Identify Controller command (CNS=1).
+
+        Allocates a 4KB DMA buffer for the identify data structure.
+        We do not parse the full structure -- just verify the command succeeds.
+        """
+        val buf_result = self.alloc_dma(DMA_PAGE_SIZE)
+        if buf_result.is_err():
+            return Result.Err("NVMe: failed to allocate identify buffer")
+        val buf = buf_result.unwrap()
+        self.zero_memory(buf.virt, DMA_PAGE_SIZE)
+
+        val cmd_result = nvme_admin_identify_controller(buf.phys)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: identify controller " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+        self.admin_queue.submit_command(
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: identify controller timeout")
+        rt_dma_sync_for_cpu(buf.handle, 1)
+        val namespace_count = mmio_read32(buf.virt + IDENTITY_CONTROLLER_NN_OFFSET)
+        if namespace_count > 0u32:
+            self.controller_namespace_count = namespace_count
+        else:
+            self.controller_namespace_count = 1u32
+        self.controller_serial = _nvme_identify_ascii(buf.virt, IDENTITY_CONTROLLER_SN_OFFSET, IDENTITY_CONTROLLER_SN_LENGTH)
+        self.controller_model = _nvme_identify_ascii(buf.virt, IDENTITY_CONTROLLER_MN_OFFSET, IDENTITY_CONTROLLER_MN_LENGTH)
+        self.controller_firmware = _nvme_identify_ascii(buf.virt, IDENTITY_CONTROLLER_FR_OFFSET, IDENTITY_CONTROLLER_FR_LENGTH)
+        if self.controller_serial.len() == 0 or self.controller_model.len() == 0:
+            return Result.Err("NVMe: identify controller identity missing")
+        Result.Ok(true)
+
+    me identify_namespace() -> Result<bool, text>:
+        """Issue Identify Namespace command (CNS=0, NSID=1).
+
+        Reads namespace size (NSZE) and LBA format to determine sector count
+        and sector size for the first namespace.
+        """
+        self.identify_namespace_id(1u32)
+
+    me identify_namespace_id(nsid: u32) -> Result<bool, text>:
+        """Issue Identify Namespace command for a concrete NSID."""
+        val buf_result = self.alloc_dma(DMA_PAGE_SIZE)
+        if buf_result.is_err():
+            return Result.Err("NVMe: failed to allocate identify ns buffer")
+        val buf = buf_result.unwrap()
+        self.zero_memory(buf.virt, DMA_PAGE_SIZE)
+
+        val cmd_result = nvme_admin_identify_namespace(nsid, buf.phys)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: identify namespace " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+        self.admin_queue.submit_command(
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: identify namespace timeout")
+        rt_dma_sync_for_cpu(buf.handle, 1)
+
+        val nsze = mmio_read64(buf.virt + IDENTITY_NAMESPACE_NSZE_OFFSET)
+
+        # Parse FLBAS (Formatted LBA Size) at offset 26 to find active LBA format index
+        val flbas_raw = mmio_read32(buf.virt + IDENTITY_NAMESPACE_FLBAS_OFFSET)
+        val flbas = (flbas_raw & 0x0F).to_u8()
+
+        # Read LBA Format descriptor: LBAF0 is at offset 128, each LBAF is 4 bytes
+        val lbaf_offset = IDENTITY_NAMESPACE_LBAF0_OFFSET + flbas.to_u64() * 4
+        val lbaf = mmio_read32(buf.virt + lbaf_offset)
+        val facts = nvme_namespace_facts(nsid, nsze, flbas, lbaf)
+        val reason = nvme_namespace_refusal_reason(facts)
+        if reason != "ready":
+            return Result.Err("NVMe: namespace identify " + reason)
+        self.identified_nsid = facts.nsid
+        self.remember_namespace_facts(facts)
+        self.sector_count = facts.lba_count
+        self.sector_size = facts.formatted_lba_size
+
+        Result.Ok(true)
+
+    me set_num_queues(nsq: u16, ncq: u16) -> Result<bool, text>:
+        """Set Number of Queues feature (feature ID 0x07).
+
+        Requests nsq submission queues and ncq completion queues.
+        CDW11: bits[31:16] = NCQR (0-based), bits[15:0] = NSQR (0-based).
+        """
+        val cmd_result = nvme_admin_set_num_queues(nsq, ncq)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: set num queues " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+
+        self.admin_queue.submit_command(
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: set num queues timeout")
+        Result.Ok(true)
+
+    me create_io_completion_queue() -> Result<bool, text>:
+        """Create I/O Completion Queue (QID 1) via admin command.
+
+        Allocates DMA memory for the CQ and issues Create I/O CQ command.
+        CDW10: bits[31:16] = QSIZE (0-based), bits[15:0] = QID
+        CDW11: bit[0] = PC (physically contiguous), bits[31:16] = IV (interrupt vector)
+        """
+        val cq_size = 64u64 * 16
+        val cq_result = self.alloc_dma(cq_size)
+        if cq_result.is_err():
+            return Result.Err("NVMe: failed to allocate I/O CQ")
+        val cq = cq_result.unwrap()
+        self.io_queue.cq_virt = cq.virt
+        self.io_queue.cq_phys = cq.phys
+        self.io_queue.cq_dma_handle = cq.handle
+        self.zero_memory(cq.virt, cq_size)
+        rt_dma_sync_for_device(cq.handle, 2)
+
+        self.io_queue.cq_doorbell = nvme_cq_doorbell_addr(self.bar0_virt, 1u16, nvme_dstrd_to_doorbell_stride_bytes(self.db_stride))
+
+        val cmd_result = nvme_admin_create_io_completion_queue(1u16, 64u16, cq.phys)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: create I/O CQ " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+
+        self.admin_queue.submit_command(
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: create I/O CQ timeout")
+        Result.Ok(true)
+
+    me create_io_submission_queue() -> Result<bool, text>:
+        """Create I/O Submission Queue (QID 1) via admin command.
+
+        Allocates DMA memory for the SQ and issues Create I/O SQ command.
+        CDW10: bits[31:16] = QSIZE (0-based), bits[15:0] = QID
+        CDW11: bit[0] = PC, bits[31:16] = CQID (associated CQ)
+        """
+        val sq_size = 64u64 * 64
+        val sq_result = self.alloc_dma(sq_size)
+        if sq_result.is_err():
+            return Result.Err("NVMe: failed to allocate I/O SQ")
+        val sq = sq_result.unwrap()
+        self.io_queue.sq_virt = sq.virt
+        self.io_queue.sq_phys = sq.phys
+        self.zero_memory(sq.virt, sq_size)
+        rt_dma_sync_for_device(sq.handle, 2)
+
+        val io_queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
+            qid: 1u16,
+            depth: 64u16,
+            sq_phys: sq.phys,
+            sq_virt: sq.virt,
+            cq_phys: self.io_queue.cq_phys,
+            cq_virt: self.io_queue.cq_virt,
+            bar0_virt: self.bar0_virt,
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride),
+            sq_dma_handle: sq.handle,
+            cq_dma_handle: self.io_queue.cq_dma_handle
+        ))
+        if io_queue_result.is_err():
+            return Result.Err("NVMe: invalid I/O queue resources: " + io_queue_result.unwrap_err())
+        self.io_queue = io_queue_result.unwrap()
+
+        val cmd_result = nvme_admin_create_io_submission_queue(1u16, 64u16, 1u16, sq.phys)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: create I/O SQ " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
+
+        self.admin_queue.submit_command(
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
+        )
+
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: create I/O SQ timeout")
+        Result.Ok(true)
+
+    me ensure_user_data_queue(queue_id: u16, depth: u16) -> Result<bool, text>:
+        """Create or reuse a user data I/O queue used by user-assigned namespaces."""
+        if queue_id < SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID or queue_id > NVME_DRIVER_MAX_DATA_QUEUE_ID:
+            return Result.Err("NVMe: unsupported user data queue")
+        if depth == 0u16:
+            return Result.Err("NVMe: user data queue depth zero")
+        for existing in self.user_io_queues:
+            if existing.qid == queue_id:
+                if existing.depth < depth:
+                    return Result.Err("NVMe: user data queue depth too small")
+                return Result.Ok(true)
+        val queue_result = self.create_io_queue_pair(queue_id, depth)
+        if queue_result.is_err():
+            return queue_result
+        self.user_io_queues.push(queue_result.unwrap())
+        Result.Ok(true)
+
+    me user_data_queue_owner_reason(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64) -> text:
+        """Return ready only when a user data queue is unowned or owned by the same assignment."""
+        if queue_id < SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID or queue_id > NVME_DRIVER_MAX_DATA_QUEUE_ID:
+            return "NVMe: unsupported user data queue"
+        if depth == 0u16:
+            return "NVMe: user data queue depth zero"
+        if self.system_namespace_owned_for_raw_access(nsid):
+            return "NVMe: namespace mode conflict system/user"
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            val existing_queue_id = g_nvme_user_queue_ids[idx]
+            if existing_queue_id == queue_id:
+                if g_nvme_user_queue_controller_ids[idx] != controller_id:
+                    return "NVMe: user data queue controller conflict"
+                if g_nvme_user_queue_nsids[idx] != nsid:
+                    return "NVMe: user data queue namespace conflict"
+                if g_nvme_user_queue_owner_tasks[idx] != owner_task:
+                    return "NVMe: user data queue owner conflict"
+                if g_nvme_user_queue_depths[idx] < depth:
+                    return "NVMe: user data queue depth too small"
+                return "ready"
+            idx = idx + 1
+        "ready"
+
+    me remember_user_data_queue_owner(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64):
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            val existing_queue_id = g_nvme_user_queue_ids[idx]
+            if existing_queue_id == queue_id:
+                g_nvme_user_queue_ids[idx] = queue_id
+                g_nvme_user_queue_controller_ids[idx] = controller_id
+                g_nvme_user_queue_nsids[idx] = nsid
+                g_nvme_user_queue_owner_tasks[idx] = owner_task
+                g_nvme_user_queue_depths[idx] = depth
+                return
+            idx = idx + 1
+        if g_nvme_user_queue_owner_count >= NVME_DRIVER_MAX_TRACKED_QUEUE_OWNERS:
+            return
+        g_nvme_user_queue_ids[g_nvme_user_queue_owner_count] = queue_id
+        g_nvme_user_queue_controller_ids[g_nvme_user_queue_owner_count] = controller_id
+        g_nvme_user_queue_nsids[g_nvme_user_queue_owner_count] = nsid
+        g_nvme_user_queue_owner_tasks[g_nvme_user_queue_owner_count] = owner_task
+        g_nvme_user_queue_depths[g_nvme_user_queue_owner_count] = depth
+        g_nvme_user_queue_owner_count = g_nvme_user_queue_owner_count + 1u64
+
+    me system_namespace_owned_for_raw_access(nsid: u32) -> bool:
+        var idx: u64 = 0
+        while idx < g_nvme_system_namespace_count:
+            if g_nvme_system_queue_nsids[idx] == nsid:
+                return true
+            idx = idx + 1
+        false
+
+    me user_namespace_owned_for_raw_access(nsid: u32) -> bool:
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            if g_nvme_user_queue_nsids[idx] == nsid:
+                return true
+            idx = idx + 1
+        false
+
+    me remember_system_namespace_raw_access(nsid: u32):
+        if self.system_namespace_owned_for_raw_access(nsid):
+            return
+        if g_nvme_system_namespace_count >= NVME_DRIVER_MAX_SYSTEM_NAMESPACES:
+            return
+        g_nvme_system_queue_nsids[g_nvme_system_namespace_count] = nsid
+        g_nvme_system_namespace_count = g_nvme_system_namespace_count + 1u64
+
+    me raw_namespace_queue_access_reason(nsid: u32, queue_id: u16) -> text:
+        if nvme_queue_is_system_reserved(queue_id):
+            if self.user_namespace_owned_for_raw_access(nsid):
+                return "NVMe: namespace mode conflict system/user"
+            return "ready"
+        if self.system_namespace_owned_for_raw_access(nsid):
+            return "NVMe: namespace mode conflict system/user"
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            val existing_queue_id = g_nvme_user_queue_ids[idx]
+            if existing_queue_id == queue_id:
+                if g_nvme_user_queue_nsids[idx] != nsid:
+                    return "NVMe: user data queue namespace conflict"
+                return "ready"
+            idx = idx + 1
+        "NVMe: user data queue owner missing"
+
+    me release_user_data_queue_owner(queue_id: u16, controller_id: u32, nsid: u32, owner_task: u64) -> bool:
+        """Release the remembered owner of a user data queue after its namespace lease is gone."""
+        var idx: u64 = 0
+        while idx < g_nvme_user_queue_owner_count:
+            val existing_queue_id = g_nvme_user_queue_ids[idx]
+            if existing_queue_id == queue_id and g_nvme_user_queue_controller_ids[idx] == controller_id and g_nvme_user_queue_nsids[idx] == nsid and g_nvme_user_queue_owner_tasks[idx] == owner_task:
+                var move_idx = idx
+                while move_idx + 1u64 < g_nvme_user_queue_owner_count:
+                    g_nvme_user_queue_ids[move_idx] = g_nvme_user_queue_ids[move_idx + 1u64]
+                    g_nvme_user_queue_controller_ids[move_idx] = g_nvme_user_queue_controller_ids[move_idx + 1u64]
+                    g_nvme_user_queue_nsids[move_idx] = g_nvme_user_queue_nsids[move_idx + 1u64]
+                    g_nvme_user_queue_owner_tasks[move_idx] = g_nvme_user_queue_owner_tasks[move_idx + 1u64]
+                    g_nvme_user_queue_depths[move_idx] = g_nvme_user_queue_depths[move_idx + 1u64]
+                    move_idx = move_idx + 1u64
+                g_nvme_user_queue_owner_count = g_nvme_user_queue_owner_count - 1u64
+                return true
+            idx = idx + 1
+        false
+
+    me ensure_user_data_queue_for_assignment(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64) -> Result<bool, text>:
+        """Create or reuse a user data queue only for the same controller/namespace owner."""
+        val owner_reason = self.user_data_queue_owner_reason(queue_id, depth, controller_id, nsid, owner_task)
+        if owner_reason != "ready":
+            return Result.Err(owner_reason)
+        val queue_ready = self.ensure_user_data_queue(queue_id, depth)
+        if queue_ready.is_err():
+            return queue_ready
+        self.remember_user_data_queue_owner(queue_id, depth, controller_id, nsid, owner_task)
+        Result.Ok(true)
+
+    me commit_device_incarnation(grant: DeviceGrant, nsid: u32) -> Result<bool, text>:
+        """Commit a trusted in-process PCI/controller/namespace incarnation.
+
+        The grant is owned by pcimgr and the namespace was just identified by
+        this driver. Baremetal init has no trusted PCI identity and therefore
+        never calls this method. A failed initialization never advances the
+        generation.
+        """
+        if grant.pci_vendor == 0u16 or grant.pci_device == 0u16 or nsid == 0u32:
+            return Result.Err("NVMe: trusted device identity unavailable")
+        if self.device_generation != 0u64 and self.device_generation != g_nvme_current_device_generation:
+            return Result.Err("NVMe: device generation source diverged")
+        if self.device_identity != 0u64 and self.device_identity != g_nvme_current_device_identity:
+            return Result.Err("NVMe: device identity source diverged")
+        val identity_result = nvme_trusted_pci_identity(grant)
+        if identity_result.is_err():
+            return Result.Err(identity_result.unwrap_err())
+        val identity = identity_result.unwrap()
+        val next_generation_result = nvme_next_device_generation(g_nvme_current_device_generation)
+        if next_generation_result.is_err():
+            return Err(next_generation_result.unwrap_err())
+        val next_generation = next_generation_result.unwrap()
+        self.device_identity = identity
+        self.device_generation = next_generation
+        g_nvme_current_device_identity = identity
+        g_nvme_current_device_generation = next_generation
+        Ok(true)
+
+    fn get_device_identity() -> u64:
+        self.device_identity
+
+    fn get_device_generation() -> u64:
+        self.device_generation
+
+    fn alloc_dma(size: u64) -> Result<DmaAddrs, text>:
+        """Allocate a fresh DMA record without transferring driver ownership."""
+        nvme_alloc_dma(size)
+
+    fn zero_memory(addr: u64, size: u64):
+        """Zero out a region of memory using 32-bit MMIO writes."""
+        var offset: u64 = 0
+        while offset < size:
+            mmio_write32(addr + offset, 0)
+            offset = offset + 4

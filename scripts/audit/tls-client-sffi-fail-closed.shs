@@ -1,0 +1,144 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_file="$root/src/compiler_rust/compiler/src/interpreter_extern/net_tls_client.rs"
+canonical_facade="$root/src/lib/nogc_sync_mut/io/tls_sffi.spl"
+app_facade="$root/src/app/io/tls_sffi.spl"
+runtime_net="$root/src/compiler_rust/runtime/src/value/net.rs"
+runtime_stub="$root/src/compiler_rust/runtime/src/value/net_tls_stub.rs"
+runtime_value_mod="$root/src/compiler_rust/runtime/src/value/mod.rs"
+runtime_lib="$root/src/compiler_rust/runtime/src/lib.rs"
+runtime_tls="$root/src/compiler_rust/runtime/src/value/net_tls.rs"
+web_client="$root/src/app/ui.web/tls_client.spl"
+web_server="$root/src/app/ui.web/tls_serve_loop.spl"
+simpleos_tls="$root/src/os/kernel/net/tls_shim.spl"
+async_facade="$root/src/lib/nogc_async_mut/io/tls_sffi.spl"
+app_tls_ffi="$root/src/app/io/tls_ffi.spl"
+io_init="$root/src/lib/nogc_sync_mut/io/__init__.spl"
+failed=0
+
+if grep -n -E '_ => (RuntimeValue::NIL|0)|unwrap_or\((0|false)\)' "$source_file"; then
+    echo "TLS client SFFI contains a fabricated argument fallback" >&2
+    failed=1
+fi
+if ! grep -q 'struct RuntimeTextArg' "$source_file" ||
+   ! grep -q 'rt_string_free' "$source_file"; then
+    echo "TLS client SFFI input/output text must have scoped release ownership" >&2
+    failed=1
+fi
+if ! grep -q 'foreign text contract returned null' "$source_file"; then
+    echo "TLS client SFFI must reject null positive-length output" >&2
+    failed=1
+fi
+if grep -n -E 'extern fn rt_|^[[:space:]]*fn ' "$app_facade"; then
+    echo "application TLS compatibility facade duplicates providers or wrappers" >&2
+    failed=1
+fi
+if ! grep -q '^export use std\.nogc_sync_mut\.io\.tls_sffi\.\*$' "$app_facade"; then
+    echo "application TLS facade must re-export the canonical owner" >&2
+    failed=1
+fi
+if [ "$(grep -c '^[[:space:]]*extern fn rt_tls_' "$canonical_facade")" -ne 19 ]; then
+    echo "canonical TLS declaration inventory changed without contract review" >&2
+    failed=1
+fi
+if grep -R -n -E 'fn rt_tls_(client_read\(|client_read_timeout\(|server_read\()|"rt_tls_(client_read"|client_read_timeout"|server_read")' \
+    "$runtime_tls" "$runtime_value_mod" "$runtime_lib" "$simpleos_tls" \
+    "$root/src/compiler_rust/common/src/runtime_symbols.rs" "$canonical_facade"; then
+    echo "TLS must not advertise ambiguous legacy read providers" >&2
+    failed=1
+fi
+if grep -R -n -E 'fn rt_tls_(load_cert|load_key|verify_cert|get_cert_|free_cert|get_peer_cert|generate_self_signed_cert|hash_cert)|"rt_tls_(load_cert|load_key|verify_cert|get_cert_|free_cert|get_peer_cert|generate_self_signed_cert|hash_cert)' \
+    "$runtime_tls" "$runtime_value_mod" "$runtime_lib" "$simpleos_tls" \
+    "$root/src/compiler_rust/common/src/runtime_symbols.rs" "$canonical_facade" \
+    "$async_facade" "$app_tls_ffi" "$io_init"; then
+    echo "TLS must not advertise fabricated certificate utility providers" >&2
+    failed=1
+fi
+if grep -R -n -E 'fn rt_tls_(client_config_|server_config_)|"rt_tls_(client_config_|server_config_)' \
+    "$runtime_tls" "$runtime_value_mod" "$runtime_lib" "$simpleos_tls" \
+    "$root/src/compiler_rust/common/src/runtime_symbols.rs" "$canonical_facade"; then
+    echo "TLS must not advertise unimplemented configuration providers" >&2
+    failed=1
+fi
+for signature in \
+    'fn tls_connect(host: text, port: i64) -> Result<TlsClientConnection, text>:' \
+    'fn tls_connect_with_sni(host: text, port: i64, server_name: text) -> Result<TlsClientConnection, text>:' \
+    'fn tls_write(conn: TlsClientConnection, data: text) -> Result<i64, text>:' \
+    'fn tls_read(conn: TlsClientConnection, max_bytes: i64) -> Result<text, text>:' \
+    'fn tls_close(conn: TlsClientConnection) -> Result<(), text>:' \
+    'fn tls_server_accept(server: TlsServer) -> Result<TlsServerConnection, text>:' \
+    'fn tls_server_create(port: i64, cert_path: text, key_path: text) -> Result<TlsServer, text>:' \
+    'fn tls_server_write(conn: TlsServerConnection, data: text) -> Result<i64, text>:' \
+    'fn tls_server_close_connection(conn: TlsServerConnection) -> Result<(), text>:' \
+    'fn tls_server_shutdown(server: TlsServer) -> Result<(), text>:'
+do
+    if ! grep -qF "$signature" "$canonical_facade"; then
+        echo "canonical TLS safe wrapper lost typed result: $signature" >&2
+        failed=1
+    fi
+done
+if [ "$(grep -c '^@unsafe(.*capabilities: \[ffi\])' "$canonical_facade")" -ne 19 ]; then
+    echo "canonical TLS raw declarations lost minimal FFI authority tags" >&2
+    failed=1
+fi
+if grep -q '^extern fn rt_tls_' "$root/src/lib/nogc_sync_mut/io/browser_net_runtime.spl" ||
+   ! grep -q 'rt_tls_client_connect_address_with_sni_timeout' "$root/src/lib/nogc_sync_mut/io/browser_net_runtime.spl" ||
+   ! grep -q 'rt_tls_client_write_timeout' "$root/src/lib/nogc_sync_mut/io/browser_net_runtime.spl" ||
+   ! grep -q 'rt_tls_client_read_timeout_checked' "$root/src/lib/nogc_sync_mut/io/browser_net_runtime.spl"; then
+    echo "browser TLS must use canonical checked and real timeout providers" >&2
+    failed=1
+fi
+if ! grep -q 'fn tls_get_connection_info(conn: TlsClientConnection) -> Result<TlsConnectionInfo, text>:' "$canonical_facade" ||
+   ! grep -q 'fn tls_is_handshake_complete(conn: TlsClientConnection) -> Result<bool, text>:' "$canonical_facade" ||
+   grep -q 'rt_string_new(b"tcp"' "$runtime_tls" ||
+   grep -q 'rt_tls_is_handshake_complete(_conn: i64) -> bool' "$runtime_tls"; then
+    echo "TLS connection metadata must be nullable, truthful, and Result-lifted" >&2
+    failed=1
+fi
+if ! grep -q 'extern fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?' "$canonical_facade" ||
+   ! grep -q 'fn tls_server_read(conn: TlsServerConnection, max_bytes: i64) -> Result<text, text>:' "$canonical_facade" ||
+   ! grep -q 'rt_tls_server_read_checked' "$web_server" ||
+   grep -q '^[[:space:]]*rt_tls_server_read,$' "$web_server" ||
+   grep -q '^extern fn rt_tls_server_write_bytes' "$web_server"; then
+    echo "web TLS server must use canonical checked reads and declarations" >&2
+    failed=1
+fi
+if ! grep -q '^fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?:' "$simpleos_tls"; then
+    echo "SimpleOS TLS shim must fail closed for checked server reads" >&2
+    failed=1
+fi
+if ! grep -q '^fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) -> text?:' "$simpleos_tls" ||
+   ! grep -q '^fn rt_tls_client_read_timeout_checked(conn: i64, max_bytes: i64, timeout_ms: i64) -> text?:' "$simpleos_tls"; then
+    echo "SimpleOS TLS shim must fail closed for checked client reads" >&2
+    failed=1
+fi
+if ! grep -q 'extern fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) -> text?' "$canonical_facade" ||
+   ! grep -q 'rt_tls_client_read_checked' "$web_client" ||
+   grep -q '^[[:space:]]*rt_tls_client_read,$' "$web_client"; then
+    echo "web TLS client must use nullable checked reads, not ambiguous empty-text reads" >&2
+    failed=1
+fi
+if ! grep -q 'if checked { crate::value::RuntimeValue::NIL } else { empty_text() }' "$runtime_tls" ||
+   ! grep -q 'pub extern "C" fn rt_tls_client_read_checked' "$runtime_tls" ||
+   ! grep -q 'pub extern "C" fn rt_tls_server_read_checked' "$runtime_tls" ||
+   ! grep -q 'if n == 0' "$runtime_tls"; then
+    echo "checked TLS provider must distinguish failure NIL from clean EOF" >&2
+    failed=1
+fi
+if [ -e "$runtime_stub" ] || grep -q 'net_tls_stub.rs' "$runtime_net"; then
+    echo "TLS-disabled runtime must not export fabricated TLS providers" >&2
+    failed=1
+fi
+if ! grep -q '#\[cfg(feature = "runtime-tls")\]' "$runtime_value_mod" ||
+   ! grep -q '#\[cfg(feature = "runtime-tls")\]' "$runtime_lib"; then
+    echo "TLS runtime re-exports must be feature-gated with the real provider" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "TLS client SFFI fail-closed audit: PASS"

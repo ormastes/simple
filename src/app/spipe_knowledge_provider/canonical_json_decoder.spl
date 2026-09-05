@@ -1,0 +1,671 @@
+# Iterative, bounded canonical JSON decoder over segmented protocol bytes.
+# Canonical mutable state belongs to this decoder. Events are bounded owned
+# copies; no loan, generic `any` tree, recursive descent, or joined payload is
+# retained across calls.
+
+use std.common.encoding.utf8.{char_from_codepoint}
+use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
+use app.spipe_knowledge_provider.canonical_json_types.{ProviderJsonLimitsV1, ProviderJsonEventV1, ProviderDecodeStateV1, ProviderCanonicalJsonResultV1, JsonContainerFrameV1}
+use app.spipe_knowledge_provider.provider_utf8_decoder.{ProviderUtf8DecoderV1}
+use app.spipe_knowledge_provider.streaming_sha256.{Sha256StreamV1}
+use app.spipe_knowledge_provider.work_control.{ProviderBudgetPort, ProviderBudgetChargeV1, ProviderCheckpointPort, ProviderCheckpointProgressV1, provider_budget_category_json_events, provider_budget_category_tokens}
+
+val JSON_SAFE_INTEGER_MAX_V1: i64 = 9007199254740991
+fn _json_limits_valid(limits: ProviderJsonLimitsV1) -> bool:
+    limits.max_depth > 0 and limits.max_depth <= 16 and
+        limits.max_tokens > 0 and limits.max_tokens <= 262144 and
+        limits.max_aggregate_members > 0 and
+        limits.max_aggregate_members <= 65536 and
+        limits.max_decoded_string_bytes > 0 and
+        limits.max_decoded_string_bytes <= 1048576 and
+        limits.max_total_decoded_bytes > 0 and
+        limits.max_total_decoded_bytes <= 1048576
+
+fn _json_utf8_less(left: text, right: text) -> bool:
+    val a = left.bytes()
+    val b = right.bytes()
+    var i = 0
+    var n = a.len()
+    if b.len() < n: n = b.len()
+    while i < n:
+        if a[i] < b[i]: return true
+        if a[i] > b[i]: return false
+        i = i + 1
+    a.len() < b.len()
+
+# Return the complete width implied by a legal first UTF-8 byte. Invalid lead
+# bytes use width one and are rejected by the strict UTF-8 child. A legal lead
+# whose complete scalar is not yet in the offered slice remains unconsumed, so
+# the caller can resubmit that exact prefix with more bytes.
+fn _json_utf8_scalar_width(first: u8) -> i64:
+    if first <= 127u8: return 1
+    if first >= 194u8 and first <= 223u8: return 2
+    if first >= 224u8 and first <= 239u8: return 3
+    if first >= 240u8 and first <= 244u8: return 4
+    1
+
+# Owner-local transaction adapters. Charges are accumulated without touching
+# the request budget; checkpoints are intentionally deferred to the owner.
+class ProviderJsonTransitionBudgetV1 with ProviderBudgetPort:
+    var charges: [ProviderBudgetChargeV1]
+
+    static fn empty() -> ProviderJsonTransitionBudgetV1:
+        ProviderJsonTransitionBudgetV1(charges: [])
+
+    me charge(charge: ProviderBudgetChargeV1) -> Result<(), text>:
+        self.charge_all([charge])
+
+    me charge_all(next: [ProviderBudgetChargeV1]) -> Result<(), text>:
+        for charge in next:
+            if charge.amount <= 0: return Err("invalid_budget_charge")
+            var found = false
+            for i in 0..self.charges.len():
+                if self.charges[i].category == charge.category:
+                    val prior = self.charges[i].amount
+                    if charge.amount > 9223372036854775807 - prior:
+                        return Err("budget_charge_overflow")
+                    self.charges[i] = ProviderBudgetChargeV1(
+                        category: charge.category, amount: prior + charge.amount)
+                    found = true
+            if not found: self.charges.push(charge)
+        Ok(())
+
+    fn consumed(category: text) -> i64:
+        for charge in self.charges:
+            if charge.category == category: return charge.amount
+        0
+
+    fn limit(category: text) -> i64: 9223372036854775807
+
+class ProviderJsonTransitionCheckpointV1 with ProviderCheckpointPort:
+    me checkpoint(_progress: ProviderCheckpointProgressV1) -> Result<(), text>:
+        Ok(())
+
+class ProviderCanonicalJsonDecoderV1:
+    limits: ProviderJsonLimitsV1
+    var sha: Sha256StreamV1
+    var utf8: ProviderUtf8DecoderV1
+    var stack: [JsonContainerFrameV1]
+    var pending_event: ProviderJsonEventV1?
+    var lexical_state: text
+    var string_value: text
+    var string_is_key: bool
+    var string_start: i64
+    var string_decoded_bytes: i64
+    var number_negative: bool
+    var number_value: i64
+    var number_digits: i64
+    var number_start: i64
+    var literal_expected: text
+    var literal_index: i64
+    var literal_start: i64
+    var deferred_scalar: i64
+    var deferred_scalar_at: i64
+    var unicode_escape_value: i64
+    var unicode_escape_digits: i64
+    var raw_bytes: i64
+    var token_count: i64
+    var aggregate_members: i64
+    var total_decoded_bytes: i64
+    var maximum_depth: i64
+    var root_kind: text
+    var root_complete: bool
+    var input_final: bool
+    var failed: bool
+    var failure_reason: text
+    var finished: bool
+
+    static fn configured(limits: ProviderJsonLimitsV1,
+                         sha: Sha256StreamV1) -> Result<ProviderCanonicalJsonDecoderV1, text>:
+        if not _json_limits_valid(limits): return Err("invalid_json_limits")
+        Ok(ProviderCanonicalJsonDecoderV1(limits: limits, sha: sha,
+            utf8: ProviderUtf8DecoderV1.configured(), stack: [], pending_event: nil,
+            lexical_state: "value", string_value: "",
+            string_is_key: false, string_start: 0, string_decoded_bytes: 0,
+            number_negative: false, number_value: 0, number_digits: 0,
+            number_start: 0, literal_expected: "", literal_index: 0,
+            literal_start: 0, raw_bytes: 0, token_count: 0,
+            deferred_scalar: -1, deferred_scalar_at: 0,
+            unicode_escape_value: 0, unicode_escape_digits: 0,
+            aggregate_members: 0, total_decoded_bytes: 0, maximum_depth: 0,
+            root_kind: "", root_complete: false, input_final: false, failed: false,
+            failure_reason: "", finished: false))
+
+    fn _transition_copy() -> ProviderCanonicalJsonDecoderV1:
+        var frames: [JsonContainerFrameV1] = []
+        for frame in self.stack: frames.push(frame)
+        ProviderCanonicalJsonDecoderV1(limits: self.limits, sha: self.sha,
+            utf8: self.utf8, stack: frames, pending_event: self.pending_event,
+            lexical_state: self.lexical_state, string_value: self.string_value,
+            string_is_key: self.string_is_key, string_start: self.string_start,
+            string_decoded_bytes: self.string_decoded_bytes,
+            number_negative: self.number_negative, number_value: self.number_value,
+            number_digits: self.number_digits, number_start: self.number_start,
+            literal_expected: self.literal_expected, literal_index: self.literal_index,
+            literal_start: self.literal_start, deferred_scalar: self.deferred_scalar,
+            deferred_scalar_at: self.deferred_scalar_at,
+            unicode_escape_value: self.unicode_escape_value,
+            unicode_escape_digits: self.unicode_escape_digits,
+            raw_bytes: self.raw_bytes,
+            token_count: self.token_count,
+            aggregate_members: self.aggregate_members,
+            total_decoded_bytes: self.total_decoded_bytes,
+            maximum_depth: self.maximum_depth, root_kind: self.root_kind,
+            root_complete: self.root_complete, input_final: self.input_final,
+            failed: self.failed, failure_reason: self.failure_reason,
+            finished: self.finished)
+
+    me _publish_transition(next: ProviderCanonicalJsonDecoderV1):
+        self.sha = next.sha
+        self.utf8 = next.utf8
+        self.stack = next.stack
+        self.pending_event = next.pending_event
+        self.lexical_state = next.lexical_state
+        self.string_value = next.string_value
+        self.string_is_key = next.string_is_key
+        self.string_start = next.string_start
+        self.string_decoded_bytes = next.string_decoded_bytes
+        self.number_negative = next.number_negative
+        self.number_value = next.number_value
+        self.number_digits = next.number_digits
+        self.number_start = next.number_start
+        self.literal_expected = next.literal_expected
+        self.literal_index = next.literal_index
+        self.literal_start = next.literal_start
+        self.deferred_scalar = next.deferred_scalar
+        self.deferred_scalar_at = next.deferred_scalar_at
+        self.unicode_escape_value = next.unicode_escape_value
+        self.unicode_escape_digits = next.unicode_escape_digits
+        self.raw_bytes = next.raw_bytes
+        self.token_count = next.token_count
+        self.aggregate_members = next.aggregate_members
+        self.total_decoded_bytes = next.total_decoded_bytes
+        self.maximum_depth = next.maximum_depth
+        self.root_kind = next.root_kind
+        self.root_complete = next.root_complete
+        self.input_final = next.input_final
+
+    me _fail(reason: text) -> Result<ProviderDecodeStateV1, text>:
+        self.failed = true
+        self.failure_reason = reason
+        Err(reason)
+
+    me _charge_token(budget: ProviderBudgetPort) -> Result<(), text>:
+        if self.token_count >= self.limits.max_tokens:
+            return Err("limit_exceeded")
+        budget.charge(ProviderBudgetChargeV1(
+            category: provider_budget_category_tokens(), amount: 1))?
+        self.token_count = self.token_count + 1
+        Ok(())
+
+    # Event-producing grammar transitions reserve their complete externally
+    # visible cost in one owner call.  The bounded budget validates the whole
+    # batch before changing any counter, and this decoder changes no parse,
+    # root, or event state until that reservation succeeds.
+    me _reserve_token_event(budget: ProviderBudgetPort) -> Result<(), text>:
+        if self.token_count >= self.limits.max_tokens:
+            return Err("limit_exceeded")
+        if self.pending_event != nil:
+            return Err("event_queue_full")
+        budget.charge_all([
+            ProviderBudgetChargeV1(
+                category: provider_budget_category_tokens(), amount: 1),
+            ProviderBudgetChargeV1(
+                category: provider_budget_category_json_events(), amount: 1),
+        ])?
+        self.token_count = self.token_count + 1
+        Ok(())
+
+    fn _expecting_value() -> bool:
+        if self.stack.len() == 0: return not self.root_complete
+        val expected = self.stack[self.stack.len() - 1].expected
+        expected == "object_value" or expected == "array_value_or_end" or
+            expected == "array_value_required"
+
+    me _replace_top(frame: JsonContainerFrameV1):
+        self.stack[self.stack.len() - 1] = frame
+
+    me _complete_value() -> Result<(), text>:
+        if self.stack.len() == 0:
+            if self.root_complete: return Err("noncanonical_json")
+            self.root_complete = true
+            self.lexical_state = "after_root"
+            return Ok(())
+        val top = self.stack[self.stack.len() - 1]
+        if top.kind == "object":
+            if top.expected != "object_value": return Err("noncanonical_json")
+            if self.aggregate_members >= self.limits.max_aggregate_members:
+                return Err("limit_exceeded")
+            self.aggregate_members = self.aggregate_members + 1
+            self._replace_top(JsonContainerFrameV1(kind: "object",
+                expected: "object_comma_or_end", item_count: top.item_count + 1,
+                last_key: top.last_key, has_last_key: top.has_last_key))
+        else:
+            if top.expected != "array_value_or_end" and
+                top.expected != "array_value_required": return Err("noncanonical_json")
+            if self.aggregate_members >= self.limits.max_aggregate_members:
+                return Err("limit_exceeded")
+            self.aggregate_members = self.aggregate_members + 1
+            self._replace_top(JsonContainerFrameV1(kind: "array",
+                expected: "array_comma_or_end", item_count: top.item_count + 1,
+                last_key: "", has_last_key: false))
+        self.lexical_state = "structural"
+        Ok(())
+
+    me _open_container(kind: text, at: i64,
+                       budget: ProviderBudgetPort) -> Result<(), text>:
+        if not self._expecting_value(): return Err("noncanonical_json")
+        if self.stack.len() >= self.limits.max_depth: return Err("limit_exceeded")
+        self._reserve_token_event(budget)?
+        val next_expected = if kind == "object": "object_key_or_end" else: "array_value_or_end"
+        self.stack.push(JsonContainerFrameV1(kind: kind,
+            expected: next_expected, item_count: 0, last_key: "",
+            has_last_key: false))
+        if self.stack.len() > self.maximum_depth: self.maximum_depth = self.stack.len()
+        if self.stack.len() == 1 and self.root_kind == "": self.root_kind = kind
+        val event_kind = if kind == "object": "start_object" else: "start_array"
+        self.pending_event = ProviderJsonEventV1(kind: event_kind, key: nil,
+            text_value: nil, integer_value: nil, boolean_value: nil,
+            byte_start: at, byte_end: at + 1)
+        self.lexical_state = "structural"
+        Ok(())
+
+    me _close_container(kind: text, at: i64,
+                        budget: ProviderBudgetPort) -> Result<(), text>:
+        if self.stack.len() == 0: return Err("noncanonical_json")
+        val top = self.stack[self.stack.len() - 1]
+        if top.kind != kind: return Err("noncanonical_json")
+        if kind == "object" and top.expected != "object_key_or_end" and
+            top.expected != "object_comma_or_end": return Err("noncanonical_json")
+        if kind == "array" and top.expected != "array_value_or_end" and
+            top.expected != "array_comma_or_end": return Err("noncanonical_json")
+        # A just-consumed comma changes to a required state, so only the
+        # initial *_or_end states and completed-member states reach here.
+        if self.stack.len() > 1:
+            val parent = self.stack[self.stack.len() - 2]
+            if self.aggregate_members >= self.limits.max_aggregate_members and
+                (parent.expected == "object_value" or
+                 parent.expected == "array_value_or_end" or
+                 parent.expected == "array_value_required"):
+                return Err("limit_exceeded")
+        self._reserve_token_event(budget)?
+        self.stack.pop()
+        val event_kind = if kind == "object": "end_object" else: "end_array"
+        self.pending_event = ProviderJsonEventV1(kind: event_kind, key: nil,
+            text_value: nil, integer_value: nil, boolean_value: nil,
+            byte_start: at, byte_end: at + 1)
+        self._complete_value()
+
+    me _begin_string(at: i64) -> Result<(), text>:
+        var is_key = false
+        if self.stack.len() > 0:
+            val top = self.stack[self.stack.len() - 1]
+            is_key = top.kind == "object" and
+                (top.expected == "object_key_or_end" or
+                 top.expected == "object_key_required")
+        if not is_key and not self._expecting_value(): return Err("noncanonical_json")
+        self.lexical_state = "string"
+        self.string_value = ""
+        self.string_is_key = is_key
+        self.string_start = at
+        self.string_decoded_bytes = 0
+        Ok(())
+
+    me _append_string_scalar(scalar: i64) -> Result<(), text>:
+        val encoded = char_from_codepoint(scalar)
+        val added = encoded.bytes().len()
+        if added > self.limits.max_decoded_string_bytes - self.string_decoded_bytes:
+            return Err("limit_exceeded")
+        if added > self.limits.max_total_decoded_bytes - self.total_decoded_bytes:
+            return Err("limit_exceeded")
+        self.string_value = self.string_value + encoded
+        self.string_decoded_bytes = self.string_decoded_bytes + added
+        self.total_decoded_bytes = self.total_decoded_bytes + added
+        Ok(())
+
+    me _finish_string(at_end: i64,
+                      budget: ProviderBudgetPort) -> Result<(), text>:
+        if unicode_normalize_nfc(self.string_value) != self.string_value:
+            return Err("noncanonical_json")
+        if self.string_is_key:
+            val top = self.stack[self.stack.len() - 1]
+            if top.has_last_key and not _json_utf8_less(top.last_key, self.string_value):
+                return Err("noncanonical_json")
+            self._reserve_token_event(budget)?
+            self._replace_top(JsonContainerFrameV1(kind: "object",
+                expected: "object_colon", item_count: top.item_count,
+                last_key: self.string_value, has_last_key: true))
+            self.pending_event = ProviderJsonEventV1(kind: "key", key: self.string_value,
+                text_value: nil, integer_value: nil, boolean_value: nil,
+                byte_start: self.string_start, byte_end: at_end)
+            self.lexical_state = "structural"
+        else:
+            if self.stack.len() > 0 and
+                self.aggregate_members >= self.limits.max_aggregate_members:
+                return Err("limit_exceeded")
+            self._reserve_token_event(budget)?
+            if self.stack.len() == 0 and self.root_kind == "": self.root_kind = "string"
+            self.pending_event = ProviderJsonEventV1(kind: "string", key: nil,
+                text_value: self.string_value, integer_value: nil,
+                boolean_value: nil, byte_start: self.string_start,
+                byte_end: at_end)
+            val completed = self._complete_value()
+            if completed.is_err(): return Err(completed.unwrap_err())
+        self.string_value = ""
+        Ok(())
+
+    me _begin_number(scalar: i64, at: i64):
+        self.lexical_state = "number"
+        self.number_negative = scalar == 45
+        self.number_value = 0
+        self.number_digits = 0
+        self.number_start = at
+
+    me _number_digit(scalar: i64) -> Result<(), text>:
+        val digit = scalar - 48
+        if self.number_digits == 1 and self.number_value == 0:
+            return Err("noncanonical_json")
+        if self.number_value > (JSON_SAFE_INTEGER_MAX_V1 - digit) / 10:
+            return Err("noncanonical_json")
+        self.number_value = self.number_value * 10 + digit
+        self.number_digits = self.number_digits + 1
+        Ok(())
+
+    me _finish_number(at_end: i64,
+                      budget: ProviderBudgetPort) -> Result<(), text>:
+        if self.number_digits == 0: return Err("noncanonical_json")
+        if self.number_negative and self.number_value == 0:
+            return Err("noncanonical_json")
+        val value = if self.number_negative: 0 - self.number_value else: self.number_value
+        if self.stack.len() > 0 and
+            self.aggregate_members >= self.limits.max_aggregate_members:
+            return Err("limit_exceeded")
+        self._reserve_token_event(budget)?
+        if self.stack.len() == 0 and self.root_kind == "": self.root_kind = "integer"
+        self.pending_event = ProviderJsonEventV1(kind: "integer", key: nil,
+            text_value: nil, integer_value: value, boolean_value: nil,
+            byte_start: self.number_start, byte_end: at_end)
+        self._complete_value()
+
+    me _begin_literal(expected: text, at: i64):
+        self.lexical_state = "literal"
+        self.literal_expected = expected
+        self.literal_index = 1
+        self.literal_start = at
+
+    me _finish_literal(at_end: i64,
+                       budget: ProviderBudgetPort) -> Result<(), text>:
+        val kind = if self.literal_expected == "null": "null" else: "boolean"
+        if self.stack.len() > 0 and
+            self.aggregate_members >= self.limits.max_aggregate_members:
+            return Err("limit_exceeded")
+        self._reserve_token_event(budget)?
+        if self.stack.len() == 0 and self.root_kind == "": self.root_kind = kind
+        self.pending_event = ProviderJsonEventV1(kind: kind, key: nil, text_value: nil,
+            integer_value: nil,
+            boolean_value: if kind == "boolean": self.literal_expected == "true" else: nil,
+            byte_start: self.literal_start, byte_end: at_end)
+        self.literal_expected = ""
+        self._complete_value()
+
+    me _structural(scalar: i64, at: i64,
+                   budget: ProviderBudgetPort) -> Result<(), text>:
+        if scalar == 32 or scalar == 9 or scalar == 10 or scalar == 13:
+            return Err("noncanonical_json")
+        if self.root_complete: return Err("noncanonical_json")
+        if scalar == 123: return self._open_container("object", at, budget)
+        if scalar == 91: return self._open_container("array", at, budget)
+        if scalar == 34: return self._begin_string(at)
+        if scalar == 45 or (scalar >= 48 and scalar <= 57):
+            if not self._expecting_value(): return Err("noncanonical_json")
+            self._begin_number(scalar, at)
+            if scalar != 45: return self._number_digit(scalar)
+            return Ok(())
+        if scalar == 116 or scalar == 102 or scalar == 110:
+            if not self._expecting_value(): return Err("noncanonical_json")
+            if scalar == 116: self._begin_literal("true", at)
+            elif scalar == 102: self._begin_literal("false", at)
+            else: self._begin_literal("null", at)
+            return Ok(())
+        if self.stack.len() == 0: return Err("noncanonical_json")
+        val top = self.stack[self.stack.len() - 1]
+        if scalar == 58 and top.kind == "object" and top.expected == "object_colon":
+            self._charge_token(budget)?
+            self._replace_top(JsonContainerFrameV1(kind: "object",
+                expected: "object_value", item_count: top.item_count,
+                last_key: top.last_key, has_last_key: top.has_last_key))
+            return Ok(())
+        if scalar == 44 and top.expected == "object_comma_or_end":
+            self._charge_token(budget)?
+            self._replace_top(JsonContainerFrameV1(kind: "object",
+                expected: "object_key_required", item_count: top.item_count,
+                last_key: top.last_key, has_last_key: top.has_last_key))
+            return Ok(())
+        if scalar == 44 and top.expected == "array_comma_or_end":
+            self._charge_token(budget)?
+            self._replace_top(JsonContainerFrameV1(kind: "array",
+                expected: "array_value_required", item_count: top.item_count,
+                last_key: "", has_last_key: false))
+            return Ok(())
+        if scalar == 125: return self._close_container("object", at, budget)
+        if scalar == 93: return self._close_container("array", at, budget)
+        Err("noncanonical_json")
+
+    me _accept_scalar(scalar: i64, at: i64,
+                      budget: ProviderBudgetPort) -> Result<(), text>:
+        if self.lexical_state == "string":
+            if scalar == 34: return self._finish_string(at + 1, budget)
+            if scalar == 92:
+                self.lexical_state = "escape"
+                return Ok(())
+            if scalar < 32: return Err("noncanonical_json")
+            return self._append_string_scalar(scalar)
+        if self.lexical_state == "escape":
+            # Canonical serializer uses only these shortest named escapes.
+            if scalar == 117:
+                self.lexical_state = "unicode_escape"
+                self.unicode_escape_value = 0
+                self.unicode_escape_digits = 0
+                return Ok(())
+            if scalar == 34:
+                val added = self._append_string_scalar(34)
+                if added.is_err(): return Err(added.unwrap_err())
+            elif scalar == 92:
+                val added = self._append_string_scalar(92)
+                if added.is_err(): return Err(added.unwrap_err())
+            elif scalar == 98:
+                val added = self._append_string_scalar(8)
+                if added.is_err(): return Err(added.unwrap_err())
+            elif scalar == 102:
+                val added = self._append_string_scalar(12)
+                if added.is_err(): return Err(added.unwrap_err())
+            elif scalar == 110:
+                val added = self._append_string_scalar(10)
+                if added.is_err(): return Err(added.unwrap_err())
+            elif scalar == 114:
+                val added = self._append_string_scalar(13)
+                if added.is_err(): return Err(added.unwrap_err())
+            elif scalar == 116:
+                val added = self._append_string_scalar(9)
+                if added.is_err(): return Err(added.unwrap_err())
+            else:
+                return Err("noncanonical_json")
+            self.lexical_state = "string"
+            return Ok(())
+        if self.lexical_state == "unicode_escape":
+            var digit = -1
+            if scalar >= 48 and scalar <= 57: digit = scalar - 48
+            elif scalar >= 97 and scalar <= 102: digit = scalar - 87
+            if digit < 0: return Err("noncanonical_json")
+            self.unicode_escape_value = self.unicode_escape_value * 16 + digit
+            self.unicode_escape_digits = self.unicode_escape_digits + 1
+            if self.unicode_escape_digits == 4:
+                val value = self.unicode_escape_value
+                # Only C0 characters without a canonical short escape use
+                # lowercase `u00xx`; printable, non-ASCII and surrogate forms
+                # are non-minimal protocol encodings.
+                if value >= 32 or value == 8 or value == 9 or value == 10 or
+                    value == 12 or value == 13:
+                    return Err("noncanonical_json")
+                val added = self._append_string_scalar(value)
+                if added.is_err(): return Err(added.unwrap_err())
+                self.lexical_state = "string"
+            return Ok(())
+        if self.lexical_state == "number":
+            if scalar >= 48 and scalar <= 57: return self._number_digit(scalar)
+            self._finish_number(at, budget)?
+            self.deferred_scalar = scalar
+            self.deferred_scalar_at = at
+            return Ok(())
+        if self.lexical_state == "literal":
+            if scalar != self.literal_expected.byte_at(self.literal_index) as i64:
+                return Err("noncanonical_json")
+            self.literal_index = self.literal_index + 1
+            if self.literal_index == self.literal_expected.len():
+                return self._finish_literal(at + 1, budget)
+            return Ok(())
+        self._structural(scalar, at, budget)
+
+    me push(bytes: [u8], offset: i64, count: i64, final_chunk: bool,
+            budget: ProviderBudgetPort,
+            checkpoint: ProviderCheckpointPort) -> Result<ProviderDecodeStateV1, text>:
+        if self.failed: return Err(self.failure_reason)
+        if self.finished: return Err("decoder_complete")
+        if self.pending_event != nil:
+            return Ok(ProviderDecodeStateV1(kind: "event", consumed_bytes: 0,
+                event_pending: true))
+        if self.input_final: return Err("decoder_complete")
+        if offset < 0 or count < 0 or offset > bytes.len() or
+            count > bytes.len() - offset or count > 4096:
+            return self._fail("invalid_input")
+
+        var consumed = 0
+        while consumed < count and self.pending_event == nil:
+            # A number-ending delimiter belongs to the next parser step.  Emit
+            # the primitive without hashing or reporting that delimiter so the
+            # caller can move the event and resubmit the exact suffix.
+            if self.lexical_state == "number":
+                val peek = bytes[offset + consumed]
+                if peek < 48u8 or peek > 57u8:
+                    var candidate = self._transition_copy()
+                    var transition_budget = ProviderJsonTransitionBudgetV1.empty()
+                    val ended = candidate._finish_number(
+                        self.raw_bytes, transition_budget)
+                    if ended.is_err(): return self._fail(ended.unwrap_err())
+                    val checked = checkpoint.checkpoint(
+                        ProviderCheckpointProgressV1(stage: "canonical_json",
+                            bytes: 0, events: 1, scalars: 0,
+                            hash_blocks: 0, comparisons: 0))
+                    if checked.is_err(): return self._fail(checked.unwrap_err())
+                    val reserved = budget.charge_all(transition_budget.charges)
+                    if reserved.is_err(): return self._fail(reserved.unwrap_err())
+                    self._publish_transition(candidate)
+                    break
+            val scalar_width = _json_utf8_scalar_width(
+                bytes[offset + consumed])
+            val available = count - consumed
+            if scalar_width > available:
+                # An incomplete scalar has no admitted prefix: reported
+                # consumption, raw count, and SHA therefore all remain fixed.
+                # At final input, run the strict child only on a trial copy so
+                # it can classify truncation without publishing carry state.
+                if not final_chunk: break
+                var truncated_candidate = self._transition_copy()
+                var truncated_budget = ProviderJsonTransitionBudgetV1.empty()
+                var truncated_checkpoint = ProviderJsonTransitionCheckpointV1()
+                val truncated = truncated_candidate.utf8.push(bytes,
+                    offset + consumed, available, true,
+                    truncated_budget, truncated_checkpoint)
+                if truncated.is_err(): return self._fail(truncated.unwrap_err())
+                return self._fail("invalid_utf8")
+            val is_last = final_chunk and consumed + scalar_width == count
+            var candidate = self._transition_copy()
+            var transition_budget = ProviderJsonTransitionBudgetV1.empty()
+            var transition_checkpoint = ProviderJsonTransitionCheckpointV1()
+            val decoded = candidate.utf8.push(bytes, offset + consumed,
+                scalar_width, is_last,
+                transition_budget, transition_checkpoint)
+            if decoded.is_err(): return self._fail(decoded.unwrap_err())
+            val scalars = decoded.unwrap()
+            if scalars.len() != 1: return self._fail("invalid_utf8")
+            val scalar_at = self.raw_bytes
+            val accepted = candidate._accept_scalar(
+                scalars[0], scalar_at, transition_budget)
+            if accepted.is_err(): return self._fail(accepted.unwrap_err())
+            # Only bytes admitted by the UTF-8 and canonical grammar owners
+            # enter the authoritative payload digest.  In particular, a
+            # delimiter held for primitive completion is neither hashed nor
+            # reported consumed until its resubmitted parser step accepts it.
+            # Hash the exact accepted source slice, never reconstructed text.
+            # The complete scalar, grammar transition, digest, budget, and
+            # checkpoint live only in the candidate until owner commit.
+            val hashed = candidate.sha.update_bounded(bytes,
+                offset + consumed, scalar_width, transition_budget,
+                transition_checkpoint)
+            if hashed.is_err(): return self._fail(hashed.unwrap_err())
+            candidate.raw_bytes = candidate.raw_bytes + scalar_width
+            val checked = checkpoint.checkpoint(ProviderCheckpointProgressV1(
+                stage: "canonical_json", bytes: scalar_width,
+                events: if candidate.pending_event == nil: 0 else: 1,
+                scalars: scalars.len(), hash_blocks: 0, comparisons: 0))
+            if checked.is_err(): return self._fail(checked.unwrap_err())
+            val reserved = budget.charge_all(transition_budget.charges)
+            if reserved.is_err(): return self._fail(reserved.unwrap_err())
+            self._publish_transition(candidate)
+            consumed = consumed + scalar_width
+
+        if final_chunk and consumed == count:
+            if self.lexical_state == "number":
+                var candidate = self._transition_copy()
+                var transition_budget = ProviderJsonTransitionBudgetV1.empty()
+                val ended = candidate._finish_number(self.raw_bytes,
+                    transition_budget)
+                if ended.is_err(): return self._fail(ended.unwrap_err())
+                val checked = checkpoint.checkpoint(
+                    ProviderCheckpointProgressV1(stage: "canonical_json",
+                        bytes: 0, events: 1, scalars: 0,
+                        hash_blocks: 0, comparisons: 0))
+                if checked.is_err(): return self._fail(checked.unwrap_err())
+                val reserved = budget.charge_all(transition_budget.charges)
+                if reserved.is_err(): return self._fail(reserved.unwrap_err())
+                self._publish_transition(candidate)
+            if not self.root_complete or self.stack.len() != 0 or
+                self.lexical_state == "string" or self.lexical_state == "escape" or
+                self.lexical_state == "unicode_escape" or
+                self.lexical_state == "literal":
+                return self._fail("noncanonical_json")
+            self.input_final = true
+        val kind = if self.pending_event != nil: "event" elif self.input_final: "complete" elif consumed == 0: "need_input" else: "progressed"
+        Ok(ProviderDecodeStateV1(kind: kind, consumed_bytes: consumed,
+            event_pending: self.pending_event != nil))
+
+    me next_event() -> Result<ProviderJsonEventV1?, text>:
+        if self.failed: return Err(self.failure_reason)
+        if self.finished: return Err("decoder_complete")
+        if self.pending_event == nil: return Ok(nil)
+        val event = self.pending_event.unwrap()
+        self.pending_event = nil
+        Ok(event)
+
+    me finish(budget: ProviderBudgetPort,
+              checkpoint: ProviderCheckpointPort) -> Result<ProviderCanonicalJsonResultV1, text>:
+        if self.failed: return Err(self.failure_reason)
+        if self.finished: return Err("decoder_complete")
+        if self.pending_event != nil: return Err("event_pending")
+        if not self.input_final or not self.root_complete or self.stack.len() != 0:
+            self.failed = true
+            self.failure_reason = "incomplete_json"
+            return Err(self.failure_reason)
+        val digest_result = self.sha.finish(budget, checkpoint)
+        if digest_result.is_err():
+            self.failed = true
+            self.failure_reason = digest_result.unwrap_err()
+            return Err(self.failure_reason)
+        val digest = digest_result.unwrap()
+        self.finished = true
+        Ok(ProviderCanonicalJsonResultV1(payload_sha256: digest,
+            raw_bytes: self.raw_bytes, token_count: self.token_count,
+            aggregate_members: self.aggregate_members,
+            maximum_depth: self.maximum_depth))
+
+export ProviderCanonicalJsonDecoderV1

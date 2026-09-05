@@ -1,0 +1,869 @@
+# Pure-Simple RISC-V Gen2 HWIR qualification-receipt contract and writer.
+#
+# This module never executes RV32/RV64 commands. It only retains pre-existing,
+# hash-bound evidence from an admitted Stage-4 CLI into a fresh run directory.
+
+use app.io.mod.{cwd, dir_create_all, dir_remove, file_atomic_write, file_copy, file_exists,
+    file_hash_sha256, file_is_regular_no_follow, file_read}
+use std.cli.cli_util.{get_cli_args}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_number, json_to_string}
+use common.provenance.stage4_compiler_provenance.{
+    stage4_compiler_provenance_from_text, stage4_compiler_provenance_reason}
+
+val RISCV_GEN2_QUALIFICATION_SCHEMA = "riscv-gen2-hwir-qualification-run-v2"
+val RISCV_GEN2_QUALIFICATION_ROOT =
+    "build/evidence/riscv_gen2_hwir_foundation"
+val RISCV_GEN2_BRANCH_COVERAGE_THRESHOLD_BP: i64 = 8000
+val RISCV_GEN2_QUALIFICATION_PRODUCT =
+    "riscv-gen2-zca-trap-single-outstanding-v3"
+val RISCV_GEN2_QUALIFICATION_EXCLUSIONS = [
+    "generated VHDL artifacts",
+    "generated VHDL testbench literals",
+    "legacy V1 generators",
+    "separate architectural retirement producer"]
+
+extern fn rt_path_absolute(path: text) -> text
+
+class RiscvGen2QualificationRow:
+    architecture: text
+    product_id: text
+    target: text
+    profile: text
+    product_command_path: text
+    product_command_sha256: text
+    product_exit_code: i64
+    manifest_path: text
+    manifest_sha256: text
+    vhdl_path: text
+    vhdl_sha256: text
+    testbench_path: text
+    testbench_sha256: text
+    analyze_command_path: text
+    analyze_command_sha256: text
+    analyze_exit_code: i64
+    analyze_log_path: text
+    analyze_log_sha256: text
+    elaborate_command_path: text
+    elaborate_command_sha256: text
+    elaborate_exit_code: i64
+    elaborate_log_path: text
+    elaborate_log_sha256: text
+    run_command_path: text
+    run_command_sha256: text
+    run_exit_code: i64
+    run_log_path: text
+    run_log_sha256: text
+    source_identity_sha256: text
+    config_identity_sha256: text
+    graph_identity_sha256: text
+
+class RiscvGen2QualificationManifest:
+    cli_path: text
+    cli_sha256: text
+    cli_provenance_path: text
+    cli_provenance_sha256: text
+    source_revision: text
+    branch_coverage_command_path: text
+    branch_coverage_command_sha256: text
+    branch_coverage_log_path: text
+    branch_coverage_log_sha256: text
+    branch_coverage_basis_points: i64
+    owned_file_list_sha256: text
+    owned_file_manifest_path: text
+    owned_file_manifest_sha256: text
+    changed_files: [text]
+    exclusions: [text]
+    rows: [RiscvGen2QualificationRow]
+
+class RiscvGen2QualificationArtifacts:
+    run_dir: text
+    receipt_path: text
+    receipt_sha256: text
+    branch_coverage_basis_points: i64
+
+fn _g2_hex64(value: text) -> bool:
+    if value.len() != 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        val c = value[index:index + 1]
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+        index = index + 1
+    true
+
+fn _g2_uint(value: text) -> Result<i64, text>:
+    if value == "" or value.len() > 10 or
+            (value.len() > 1 and value.starts_with("0")):
+        return Err("qualification-manifest-integer-invalid")
+    var index: i64 = 0
+    while index < value.len():
+        val c = value[index:index + 1]
+        if c < "0" or c > "9":
+            return Err("qualification-manifest-integer-invalid")
+        index = index + 1
+    val parsed = value.parse_i64() ?? -1
+    if parsed < 0 or parsed > 1000000000:
+        return Err("qualification-manifest-integer-invalid")
+    Ok(parsed)
+
+fn _g2_safe_relative_path(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("\\") or
+            path.starts_with("./") or path.starts_with("../") or
+            path.contains("/../") or path.contains("/./") or
+            path.contains("//") or path.contains("\\") or
+            path.contains("\n") or path.contains("\r"):
+        return false
+    if path.len() >= 2 and path[1:2] == ":": return false
+    not (path == "." or path == ".." or path.ends_with("/.") or
+        path.ends_with("/.."))
+
+fn _g2_safe_run_id(run_id: text) -> bool:
+    if run_id == "" or run_id.len() > 128: return false
+    var index: i64 = 0
+    while index < run_id.len():
+        val c = run_id[index:index + 1]
+        if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+                (c >= "0" and c <= "9") or c == "-" or c == "_"):
+            return false
+        index = index + 1
+    true
+
+fn _g2_json_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"")
+        .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+fn _g2_parse_env(encoded: text) -> Result<Dict<text, text>, text>:
+    if not encoded.ends_with("\n") or encoded.ends_with("\n\n"):
+        return Err("qualification-manifest-termination-invalid")
+    var fields: Dict<text, text> = {}
+    for line in encoded.trim().split("\n"):
+        val separator = line.index_of("=")
+        if separator <= 0: return Err("qualification-manifest-row-invalid")
+        val key = line[0:separator]
+        val value = line[separator + 1:]
+        if key == "" or value == "" or fields.has(key):
+            return Err("qualification-manifest-row-invalid")
+        fields[key] = value
+    Ok(fields)
+
+fn _g2_required(fields: Dict<text, text>, key: text) -> Result<text, text>:
+    if not fields.has(key): return Err("qualification-manifest-missing-" + key)
+    val value = fields[key] ?? ""
+    if value == "": return Err("qualification-manifest-empty-" + key)
+    Ok(value)
+
+fn _g2_counted_values(fields: Dict<text, text>, count_key: text,
+        item_prefix: text, require_nonempty: bool) -> Result<[text], text>:
+    val count = _g2_uint(_g2_required(fields, count_key)?)?
+    if count > 256 or (require_nonempty and count == 0):
+        return Err("qualification-manifest-count-invalid-" + count_key)
+    var values: [text] = []
+    var index: i64 = 1
+    while index <= count:
+        val value = _g2_required(fields, item_prefix + index.to_text())?
+        if value.contains("\n") or value.contains("\r") or values.contains(value):
+            return Err("qualification-manifest-list-value-invalid-" + item_prefix)
+        values.push(value)
+        index = index + 1
+    Ok(values)
+
+fn _g2_owned_file_list_text(changed_files: [text]) -> text:
+    var encoded = ""
+    for changed_file in changed_files:
+        encoded = encoded + changed_file + "\n"
+    encoded
+
+fn _g2_owned_file_list_sha256(changed_files: [text]) -> text:
+    sha256_text(_g2_owned_file_list_text(changed_files))
+
+fn riscv_gen2_owned_file_manifest_matches(encoded: text,
+        changed_files: [text]) -> bool:
+    if not encoded.ends_with("\n") or encoded.ends_with("\n\n"):
+        return false
+    val rows = encoded.trim().split("\n")
+    if rows.len() != changed_files.len(): return false
+    var index: i64 = 0
+    while index < rows.len():
+        val row = rows[index]
+        if row.len() < 67 or row[64:66] != "  ": return false
+        val digest = row[0:64]
+        val path = row[66:]
+        if (not _g2_hex64(digest) or path != changed_files[index] or
+                not _g2_safe_relative_path(path) or
+                not file_is_regular_no_follow(path) or
+                file_hash_sha256(path) != digest):
+            return false
+        index = index + 1
+    true
+
+fn _g2_row_from_fields(fields: Dict<text, text>, index: i64,
+        architecture: text) -> Result<RiscvGen2QualificationRow, text>:
+    val prefix = "row_" + index.to_text() + "_"
+    if _g2_required(fields, prefix + "architecture")? != architecture:
+        return Err("qualification-manifest-row-architecture-invalid")
+    val expected_target = if architecture == "rv32":
+        "rv32-zca-cjal-critical"
+    else:
+        "rv64-zca-addiw-critical"
+    val expected_profile = if architecture == "rv32":
+        "riscv-gen2-rv32-zca-cjal-critical"
+    else:
+        "riscv-gen2-rv64-zca-addiw-critical"
+    val product_id = _g2_required(fields, prefix + "product_id")?
+    val target = _g2_required(fields, prefix + "target")?
+    val profile = _g2_required(fields, prefix + "profile")?
+    if (product_id != RISCV_GEN2_QUALIFICATION_PRODUCT or
+            target != expected_target or profile != expected_profile):
+        return Err("qualification-manifest-row-product-binding-invalid")
+    val product_command_path = _g2_required(fields, prefix + "product_command_path")?
+    val product_exit_code = _g2_uint(
+        _g2_required(fields, prefix + "product_exit_code")?)?
+    if product_exit_code != 0: return Err("qualification-manifest-row-exit-nonzero")
+    val manifest_path = _g2_required(fields, prefix + "manifest_path")?
+    val vhdl_path = _g2_required(fields, prefix + "vhdl_path")?
+    val testbench_path = _g2_required(fields, prefix + "testbench_path")?
+    val analyze_command_path = _g2_required(fields, prefix + "analyze_command_path")?
+    val analyze_log_path = _g2_required(fields, prefix + "analyze_log_path")?
+    val elaborate_command_path = _g2_required(fields, prefix + "elaborate_command_path")?
+    val elaborate_log_path = _g2_required(fields, prefix + "elaborate_log_path")?
+    val run_command_path = _g2_required(fields, prefix + "run_command_path")?
+    val run_log_path = _g2_required(fields, prefix + "run_log_path")?
+    for path in [product_command_path, manifest_path, vhdl_path, testbench_path,
+                 analyze_command_path,
+                 analyze_log_path, elaborate_command_path, elaborate_log_path,
+                 run_command_path, run_log_path]:
+        if not _g2_safe_relative_path(path):
+            return Err("qualification-manifest-row-path-invalid")
+    val product_command_sha = _g2_required(
+        fields, prefix + "product_command_sha256")?
+    val manifest_sha = _g2_required(fields, prefix + "manifest_sha256")?
+    val vhdl_sha = _g2_required(fields, prefix + "vhdl_sha256")?
+    val testbench_sha = _g2_required(fields, prefix + "testbench_sha256")?
+    val analyze_command_sha = _g2_required(fields, prefix + "analyze_command_sha256")?
+    val analyze_sha = _g2_required(fields, prefix + "analyze_log_sha256")?
+    val elaborate_command_sha = _g2_required(fields, prefix + "elaborate_command_sha256")?
+    val elaborate_sha = _g2_required(fields, prefix + "elaborate_log_sha256")?
+    val run_command_sha = _g2_required(fields, prefix + "run_command_sha256")?
+    val run_sha = _g2_required(fields, prefix + "run_log_sha256")?
+    val source_sha = _g2_required(fields, prefix + "source_identity_sha256")?
+    val config_sha = _g2_required(fields, prefix + "config_identity_sha256")?
+    val graph_sha = _g2_required(fields, prefix + "graph_identity_sha256")?
+    for digest in [product_command_sha, manifest_sha, vhdl_sha, testbench_sha,
+                   analyze_command_sha,
+                   analyze_sha, elaborate_command_sha, elaborate_sha,
+                   run_command_sha, run_sha, source_sha, config_sha, graph_sha]:
+        if not _g2_hex64(digest):
+            return Err("qualification-manifest-row-sha256-invalid")
+    val analyze_exit = _g2_uint(_g2_required(fields, prefix + "analyze_exit_code")?)?
+    val elaborate_exit = _g2_uint(_g2_required(fields, prefix + "elaborate_exit_code")?)?
+    val run_exit = _g2_uint(_g2_required(fields, prefix + "run_exit_code")?)?
+    if analyze_exit != 0 or elaborate_exit != 0 or run_exit != 0:
+        return Err("qualification-manifest-ghdl-exit-nonzero")
+    Ok(RiscvGen2QualificationRow(
+        architecture: architecture, product_id: product_id, target: target,
+        profile: profile, product_command_path: product_command_path,
+        product_command_sha256: product_command_sha,
+        product_exit_code: product_exit_code,
+        manifest_path: manifest_path, manifest_sha256: manifest_sha,
+        vhdl_path: vhdl_path, vhdl_sha256: vhdl_sha,
+        testbench_path: testbench_path, testbench_sha256: testbench_sha,
+        analyze_command_path: analyze_command_path,
+        analyze_command_sha256: analyze_command_sha, analyze_exit_code: analyze_exit,
+        analyze_log_path: analyze_log_path, analyze_log_sha256: analyze_sha,
+        elaborate_command_path: elaborate_command_path,
+        elaborate_command_sha256: elaborate_command_sha,
+        elaborate_exit_code: elaborate_exit,
+        elaborate_log_path: elaborate_log_path,
+        elaborate_log_sha256: elaborate_sha,
+        run_command_path: run_command_path, run_command_sha256: run_command_sha,
+        run_exit_code: run_exit,
+        run_log_path: run_log_path, run_log_sha256: run_sha,
+        source_identity_sha256: source_sha, config_identity_sha256: config_sha,
+        graph_identity_sha256: graph_sha))
+
+fn riscv_gen2_parse_qualification_manifest(
+        encoded: text) -> Result<RiscvGen2QualificationManifest, text>:
+    val fields = _g2_parse_env(encoded)?
+    var expected = [
+        "schema", "status", "cli_path", "cli_sha256", "cli_provenance_path",
+        "cli_provenance_sha256", "source_revision", "coverage_kind",
+        "branch_coverage_command_path", "branch_coverage_command_sha256",
+        "owned_file_list_sha256", "owned_file_manifest_path",
+        "owned_file_manifest_sha256", "changed_file_count", "exclusion_count",
+        "branch_coverage_threshold_basis_points", "branch_coverage_basis_points",
+        "branch_coverage_log_path", "branch_coverage_log_sha256"]
+    val changed_files = _g2_counted_values(
+        fields, "changed_file_count", "changed_file_", true)?
+    val exclusions = _g2_counted_values(
+        fields, "exclusion_count", "exclusion_", false)?
+    if exclusions != RISCV_GEN2_QUALIFICATION_EXCLUSIONS:
+        return Err("qualification-manifest-exclusions-invalid")
+    var list_index: i64 = 1
+    while list_index <= changed_files.len():
+        expected.push("changed_file_" + list_index.to_text())
+        list_index = list_index + 1
+    list_index = 1
+    while list_index <= exclusions.len():
+        expected.push("exclusion_" + list_index.to_text())
+        list_index = list_index + 1
+    for index in [1, 2]:
+        val prefix = "row_" + index.to_text() + "_"
+        for suffix in ["architecture", "product_id", "target", "profile",
+                "product_command_path", "product_command_sha256", "product_exit_code",
+                "manifest_path", "manifest_sha256", "vhdl_path",
+                "vhdl_sha256", "testbench_path", "testbench_sha256",
+                "analyze_command_path", "analyze_command_sha256", "analyze_exit_code",
+                "analyze_log_path", "analyze_log_sha256", "elaborate_command_path",
+                "elaborate_command_sha256", "elaborate_exit_code",
+                "elaborate_log_path", "elaborate_log_sha256", "run_command_path",
+                "run_command_sha256", "run_exit_code", "run_log_path", "run_log_sha256",
+                "source_identity_sha256",
+                "config_identity_sha256", "graph_identity_sha256"]:
+            expected.push(prefix + suffix)
+    for key in fields.keys():
+        if not expected.contains(key):
+            return Err("qualification-manifest-unknown-" + key)
+    if _g2_required(fields, "schema")? != RISCV_GEN2_QUALIFICATION_SCHEMA or
+            _g2_required(fields, "status")? != "passed" or
+            _g2_required(fields, "coverage_kind")? != "branch":
+        return Err("qualification-manifest-contract-invalid")
+    val threshold = _g2_uint(_g2_required(
+        fields, "branch_coverage_threshold_basis_points")?)?
+    val coverage = _g2_uint(_g2_required(fields, "branch_coverage_basis_points")?)?
+    if threshold != RISCV_GEN2_BRANCH_COVERAGE_THRESHOLD_BP or coverage < threshold or
+            coverage > 10000:
+        return Err("qualification-manifest-branch-coverage-invalid")
+    val owned_file_list_sha = _g2_required(fields, "owned_file_list_sha256")?
+    if not _g2_hex64(owned_file_list_sha):
+        return Err("qualification-manifest-owned-file-list-sha256-invalid")
+    if owned_file_list_sha != _g2_owned_file_list_sha256(changed_files):
+        return Err("qualification-manifest-owned-file-list-sha256-mismatch")
+    val owned_file_manifest_path = _g2_required(
+        fields, "owned_file_manifest_path")?
+    val owned_file_manifest_sha = _g2_required(
+        fields, "owned_file_manifest_sha256")?
+    if not _g2_safe_relative_path(owned_file_manifest_path):
+        return Err("qualification-manifest-owned-file-manifest-path-invalid")
+    if not _g2_hex64(owned_file_manifest_sha):
+        return Err("qualification-manifest-owned-file-manifest-sha256-invalid")
+    val cli_path = _g2_required(fields, "cli_path")?
+    val cli_provenance_path = _g2_required(fields, "cli_provenance_path")?
+    val coverage_log_path = _g2_required(fields, "branch_coverage_log_path")?
+    val coverage_command_path = _g2_required(
+        fields, "branch_coverage_command_path")?
+    for changed_file in changed_files:
+        if not _g2_safe_relative_path(changed_file):
+            return Err("qualification-manifest-changed-file-invalid")
+    var changed_index: i64 = 1
+    while changed_index < changed_files.len():
+        if changed_files[changed_index] <= changed_files[changed_index - 1]:
+            return Err("qualification-manifest-changed-file-order-invalid")
+        changed_index = changed_index + 1
+    for path in [cli_path, cli_provenance_path, coverage_command_path,
+                 coverage_log_path]:
+        if not _g2_safe_relative_path(path):
+            return Err("qualification-manifest-path-invalid")
+    val cli_sha = _g2_required(fields, "cli_sha256")?
+    val provenance_sha = _g2_required(fields, "cli_provenance_sha256")?
+    val source_revision = _g2_required(fields, "source_revision")?
+    val coverage_log_sha = _g2_required(fields, "branch_coverage_log_sha256")?
+    val coverage_command_sha = _g2_required(
+        fields, "branch_coverage_command_sha256")?
+    for digest in [cli_sha, provenance_sha, source_revision,
+                   coverage_command_sha, coverage_log_sha]:
+        if not _g2_hex64(digest):
+            return Err("qualification-manifest-sha256-invalid")
+    val rv32 = _g2_row_from_fields(fields, 1, "rv32")?
+    val rv64 = _g2_row_from_fields(fields, 2, "rv64")?
+    Ok(RiscvGen2QualificationManifest(
+        cli_path: cli_path, cli_sha256: cli_sha,
+        cli_provenance_path: cli_provenance_path,
+        cli_provenance_sha256: provenance_sha, source_revision: source_revision,
+        branch_coverage_command_path: coverage_command_path,
+        branch_coverage_command_sha256: coverage_command_sha,
+        branch_coverage_log_path: coverage_log_path,
+        branch_coverage_log_sha256: coverage_log_sha,
+        branch_coverage_basis_points: coverage,
+        owned_file_list_sha256: owned_file_list_sha,
+        owned_file_manifest_path: owned_file_manifest_path,
+        owned_file_manifest_sha256: owned_file_manifest_sha,
+        changed_files: changed_files,
+        exclusions: exclusions, rows: [rv32, rv64]))
+
+fn _g2_bound_file(path: text, expected_sha256: text) -> bool:
+    val canonical = rt_path_absolute(path) ?? ""
+    val expected = (rt_path_absolute(cwd()) ?? "") + "/" + path
+    file_is_regular_no_follow(path) and canonical == expected and
+        file_hash_sha256(path) == expected_sha256
+
+fn _g2_json_text(object: any, key: text) -> text:
+    val value = json_to_string(json_object_get(object, key))
+    if value == nil: "" else: value
+
+fn _g2_json_i64(object: any, key: text) -> i64:
+    val value = json_to_number(json_object_get(object, key))
+    if value == nil: -1 else: value as i64
+
+fn _g2_occurs_once(encoded: text, token: text) -> bool:
+    encoded.split(token).len() == 2
+
+fn _g2_absolute(path: text) -> text:
+    if path.starts_with("/"): path else: cwd() + "/" + path
+
+fn _g2_staging_prefix(row: RiscvGen2QualificationRow) -> text:
+    val suffix = "/" + row.architecture + ".vhd"
+    if not row.vhdl_path.ends_with(suffix): return ""
+    _g2_absolute(row.vhdl_path[0:row.vhdl_path.len() - suffix.len()])
+
+fn _g2_testbench_entities(architecture: text) -> [text]:
+    if architecture == "rv32":
+        ["strict_trap_extended_rv32_tb",
+         "strict_trap_stateful_protocol_rv32_tb",
+         "strict_trap_identity_rv32_tb"]
+    else:
+        ["strict_trap_extended_rv64_tb",
+         "strict_trap_stateful_protocol_rv64_tb",
+         "strict_trap_identity_rv64_tb"]
+
+fn _g2_commands_match(manifest: RiscvGen2QualificationManifest) -> bool:
+    val cli = _g2_absolute(manifest.cli_path)
+    if not manifest.branch_coverage_log_path.ends_with(".report"):
+        return false
+    val coverage_raw = manifest.branch_coverage_log_path[0:
+        manifest.branch_coverage_log_path.len() - ".report".len()] + ".sdn"
+    val expected_coverage = "RISCV_GEN2_ADMITTED_SIMPLE=" + cli +
+        " SIMPLE_SAFETY_PROFILE=critical SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=" +
+        coverage_raw + " " + cli + " test " +
+        "test/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.spl " +
+        "test/01_unit/app/riscv_gen2_qualification_receipt_spec.spl " +
+        "test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl " +
+        "test/01_unit/compiler/50.mir/hwir_predecode_contract_spec.spl " +
+        "--coverage --no-cache\n"
+    if file_read(manifest.branch_coverage_command_path) != expected_coverage:
+        return false
+    for row in manifest.rows:
+        val staging = _g2_staging_prefix(row)
+        if staging == "": return false
+        val vhdl = _g2_absolute(row.vhdl_path)
+        val testbench = _g2_absolute(row.testbench_path)
+        val workdir = staging + "/" + row.architecture + "-work"
+        val expected_product = "env SIMPLE_SAFETY_PROFILE=critical " + cli +
+            " run " + cwd() + "/src/app/cli/vhdl_compile_entry.spl" +
+            " --riscv-gen2-product " + RISCV_GEN2_QUALIFICATION_PRODUCT +
+            " --riscv-gen2-target " + row.target + " --output " + vhdl + "\n"
+        val expected_analyze = "ghdl -a --std=08 --workdir=" + workdir +
+            " " + vhdl + " " + testbench + "\n"
+        val entities = _g2_testbench_entities(row.architecture)
+        val expected_elaborate = "sh -c ghdl -e --std=08 --workdir='" + workdir +
+            "' '" + entities[0] + "' && ghdl -e --std=08 --workdir='" + workdir +
+            "' '" + entities[1] + "' && ghdl -e --std=08 --workdir='" + workdir +
+            "' '" + entities[2] + "'\n"
+        val expected_run = "sh -c ghdl -r --std=08 --workdir='" + workdir +
+            "' '" + entities[0] + "' --assert-level=error && ghdl -r --std=08 --workdir='" +
+            workdir + "' '" + entities[1] +
+            "' --assert-level=error && ghdl -r --std=08 --workdir='" + workdir +
+            "' '" + entities[2] + "' --assert-level=error\n"
+        if (file_read(row.product_command_path) != expected_product or
+                file_read(row.analyze_command_path) != expected_analyze or
+                file_read(row.elaborate_command_path) != expected_elaborate or
+                file_read(row.run_command_path) != expected_run):
+            return false
+    true
+
+fn riscv_gen2_qualification_product_manifest_matches(encoded: text,
+        row: RiscvGen2QualificationRow) -> bool:
+    # The shared JSON parser intentionally applies last-key-wins semantics.
+    # Reject duplicate authority-bearing keys before structural lookup so a
+    # syntactically valid duplicate cannot shadow the producer identity.
+    val compact = encoded.replace(" ", "").replace("\n", "")
+        .replace("\r", "").replace("\t", "")
+    for key in ["entry_entity", "source_closure_sha256", "vhdl",
+                "generation_route", "hwir", "config_profile", "graph_sha256",
+                "assurance_policy", "strictness", "target", "xlen"]:
+        if not _g2_occurs_once(compact, "\"" + key + "\":"):
+            return false
+    val root = json_parse(encoded)
+    if root == nil: return false
+    val hwir = json_object_get(root, "hwir")
+    val target = json_object_get(root, "target")
+    val assurance = json_object_get(root, "assurance_policy")
+    val vhdl = json_object_get(root, "vhdl")
+    val expected_entity = if row.architecture == "rv32":
+        "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend"
+    else:
+        "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend"
+    val expected_xlen: i64 = if row.architecture == "rv32": 32 else: 64
+    val expected_artifact_target = "riscv" + expected_xlen.to_text()
+    (_g2_json_text(root, "source_closure_sha256") == row.source_identity_sha256 and
+     _g2_json_text(root, "entry_entity") == expected_entity and
+     _g2_json_text(root, "generation_route") ==
+        "hwir-gen2-trap-stateful-product-v3" and
+     _g2_json_text(hwir, "config_profile") == row.profile and
+     _g2_json_text(hwir, "graph_sha256") == row.graph_identity_sha256 and
+     _g2_json_text(target, "name") == expected_artifact_target and
+     _g2_json_i64(target, "xlen") == expected_xlen and
+     _g2_json_text(target, "profile") == row.profile and
+     _g2_json_text(assurance, "strictness") == "critical" and
+     _g2_json_text(vhdl, "path") == _g2_absolute(row.vhdl_path) and
+     _g2_json_text(vhdl, "sha256") == row.vhdl_sha256)
+
+fn _g2_report_uint(encoded: text, key: text) -> i64:
+    var found: i64 = -1
+    var count: i64 = 0
+    for line in encoded.split("\n"):
+        if line.starts_with(key + "="):
+            val parsed = _g2_uint(line.substring(key.len() + 1))
+            if parsed.is_err(): return -1
+            found = parsed.unwrap()
+            count = count + 1
+    if count == 1: found else: -1
+
+fn _g2_report_text(encoded: text, key: text) -> text:
+    var found = ""
+    var count: i64 = 0
+    for line in encoded.split("\n"):
+        if line.starts_with(key + "="):
+            found = line.substring(key.len() + 1)
+            count = count + 1
+    if count == 1 and found != "": found else: ""
+
+fn _g2_coverage_report_matches(encoded: text,
+        manifest: RiscvGen2QualificationManifest) -> bool:
+    if not encoded.contains("# Coverage Report") or
+            not encoded.contains("decisions |"):
+        return false
+    val basis_points = _g2_report_uint(
+        encoded, "branch_coverage_basis_points")
+    val covered = _g2_report_uint(encoded, "branch_outcomes_covered")
+    val total = _g2_report_uint(encoded, "branch_outcomes_total")
+    if basis_points != manifest.branch_coverage_basis_points or total <= 0 or
+            covered < 0 or covered > total or covered * 10000 / total != basis_points:
+        return false
+    if _g2_report_uint(encoded, "changed_file_count") !=
+            manifest.changed_files.len():
+        return false
+    if _g2_report_text(encoded, "owned_file_list_sha256") !=
+            manifest.owned_file_list_sha256:
+        return false
+    var index: i64 = 0
+    while index < manifest.changed_files.len():
+        if _g2_report_text(encoded, "changed_file_" +
+                (index + 1).to_text()) != manifest.changed_files[index]:
+            return false
+        index = index + 1
+    var changed_rows: i64 = 0
+    for line in encoded.split("\n"):
+        if line.starts_with("changed_file_") and
+                not line.starts_with("changed_file_count="):
+            changed_rows = changed_rows + 1
+    if changed_rows != manifest.changed_files.len(): return false
+    true
+
+fn _g2_inputs_bound(manifest: RiscvGen2QualificationManifest) -> bool:
+    if (not _g2_bound_file(manifest.cli_path, manifest.cli_sha256) or
+            not _g2_bound_file(manifest.cli_provenance_path,
+                manifest.cli_provenance_sha256) or
+            not _g2_bound_file(manifest.branch_coverage_command_path,
+                manifest.branch_coverage_command_sha256) or
+            not _g2_bound_file(manifest.owned_file_manifest_path,
+                manifest.owned_file_manifest_sha256) or
+            not _g2_bound_file(manifest.branch_coverage_log_path,
+                manifest.branch_coverage_log_sha256)):
+        return false
+    if (not riscv_gen2_owned_file_manifest_matches(
+                file_read(manifest.owned_file_manifest_path),
+                manifest.changed_files) or
+            file_hash_sha256(manifest.owned_file_manifest_path) !=
+                manifest.owned_file_manifest_sha256):
+        return false
+    if not _g2_coverage_report_matches(file_read(
+            manifest.branch_coverage_log_path), manifest):
+        return false
+    if not _g2_commands_match(manifest): return false
+    val provenance = stage4_compiler_provenance_from_text(
+        file_read(manifest.cli_provenance_path))
+    if (stage4_compiler_provenance_reason(provenance, manifest.cli_sha256,
+            manifest.cli_provenance_sha256) != "ready" or
+            (provenance.output_path != manifest.cli_path and
+                provenance.output_path != cwd() + "/" + manifest.cli_path) or
+            provenance.source_revision != manifest.source_revision):
+        return false
+    for row in manifest.rows:
+        if (not _g2_bound_file(row.product_command_path,
+                    row.product_command_sha256) or
+                not _g2_bound_file(row.manifest_path, row.manifest_sha256) or
+                not _g2_bound_file(row.vhdl_path, row.vhdl_sha256) or
+                not _g2_bound_file(row.testbench_path, row.testbench_sha256) or
+                not _g2_bound_file(row.analyze_command_path,
+                    row.analyze_command_sha256) or
+                not _g2_bound_file(row.analyze_log_path, row.analyze_log_sha256) or
+                not _g2_bound_file(row.elaborate_command_path,
+                    row.elaborate_command_sha256) or
+                not _g2_bound_file(row.elaborate_log_path,
+                    row.elaborate_log_sha256) or
+                not _g2_bound_file(row.run_command_path,
+                    row.run_command_sha256) or
+                not _g2_bound_file(row.run_log_path, row.run_log_sha256)):
+            return false
+        val product_manifest = file_read(row.manifest_path)
+        val vhdl = file_read(row.vhdl_path)
+        val expected_xlen = if row.architecture == "rv32": "32" else: "64"
+        val expected_config_identity = sha256_text(
+            "riscv-gen2-config/v1\n" + row.target + "\n" + row.profile +
+            "\n" + expected_xlen + "\n")
+        if (not riscv_gen2_qualification_product_manifest_matches(
+                    product_manifest, row) or
+                row.config_identity_sha256 != expected_config_identity or
+                not vhdl.contains("graph=" + row.graph_identity_sha256)):
+            return false
+    true
+
+fn _g2_copy_bound(source: text, expected_sha256: text, destination: text) -> bool:
+    if file_exists(destination) or not file_copy(source, destination): return false
+    file_is_regular_no_follow(destination) and
+        file_hash_sha256(destination) == expected_sha256
+
+fn _g2_retained_inputs_bound(run_dir: text, manifest_path: text,
+        manifest_sha: text, manifest: RiscvGen2QualificationManifest) -> bool:
+    if (not _g2_bound_file(run_dir + "/run_manifest.env", manifest_sha) or
+            not _g2_bound_file(run_dir + "/compiler.bin", manifest.cli_sha256) or
+            not _g2_bound_file(run_dir + "/compiler.provenance.env",
+                manifest.cli_provenance_sha256) or
+            not _g2_bound_file(run_dir + "/branch_coverage.command",
+                manifest.branch_coverage_command_sha256) or
+            not _g2_bound_file(run_dir + "/owned-files.list",
+                manifest.owned_file_manifest_sha256) or
+            not _g2_bound_file(run_dir + "/branch_coverage.log",
+                manifest.branch_coverage_log_sha256)):
+        return false
+    if (not riscv_gen2_owned_file_manifest_matches(
+                file_read(run_dir + "/owned-files.list"),
+                manifest.changed_files) or
+            file_hash_sha256(run_dir + "/owned-files.list") !=
+                manifest.owned_file_manifest_sha256):
+        return false
+    var index: i64 = 0
+    while index < manifest.rows.len():
+        val row = manifest.rows[index]
+        val prefix = run_dir + "/" + row.architecture
+        if (not _g2_bound_file(prefix + ".product.command", row.product_command_sha256) or
+                not _g2_bound_file(prefix + ".manifest.json", row.manifest_sha256) or
+                not _g2_bound_file(prefix + ".vhd", row.vhdl_sha256) or
+                not _g2_bound_file(prefix + ".tb.vhd", row.testbench_sha256) or
+                not _g2_bound_file(prefix + ".analyze.command", row.analyze_command_sha256) or
+                not _g2_bound_file(prefix + ".analyze.log", row.analyze_log_sha256) or
+                not _g2_bound_file(prefix + ".elaborate.command", row.elaborate_command_sha256) or
+                not _g2_bound_file(prefix + ".elaborate.log", row.elaborate_log_sha256) or
+                not _g2_bound_file(prefix + ".run.command", row.run_command_sha256) or
+                not _g2_bound_file(prefix + ".run.log", row.run_log_sha256)):
+            return false
+        index = index + 1
+    file_hash_sha256(manifest_path) == manifest_sha
+
+fn _g2_render_row(row: RiscvGen2QualificationRow, retained_prefix: text) -> text:
+    "    {\"architecture\":\"{_g2_json_escape(row.architecture)}\",\n" +
+    "     \"product_id\":\"{_g2_json_escape(row.product_id)}\",\n" +
+    "     \"target\":\"{_g2_json_escape(row.target)}\",\n" +
+    "     \"profile\":\"{_g2_json_escape(row.profile)}\",\n" +
+    "     \"product_command\":{\"source_path\":\"{_g2_json_escape(row.product_command_path)}\",\"sha256\":\"{row.product_command_sha256}\",\"retained_path\":\"{retained_prefix}.product.command\"},\n" +
+    "     \"product_exit_code\":{row.product_exit_code},\n" +
+    "     \"product_manifest\":{\"source_path\":\"{_g2_json_escape(row.manifest_path)}\",\"sha256\":\"{row.manifest_sha256}\",\"retained_path\":\"{retained_prefix}.manifest.json\"},\n" +
+    "     \"vhdl\":{\"source_path\":\"{_g2_json_escape(row.vhdl_path)}\",\"sha256\":\"{row.vhdl_sha256}\",\"retained_path\":\"{retained_prefix}.vhd\"},\n" +
+    "     \"testbench\":{\"source_path\":\"{_g2_json_escape(row.testbench_path)}\",\"sha256\":\"{row.testbench_sha256}\",\"retained_path\":\"{retained_prefix}.tb.vhd\"},\n" +
+    "     \"ghdl_analyze\":{\"command\":{\"source_path\":\"{_g2_json_escape(row.analyze_command_path)}\",\"sha256\":\"{row.analyze_command_sha256}\",\"retained_path\":\"{retained_prefix}.analyze.command\"},\"exit_code\":{row.analyze_exit_code},\"log\":{\"source_path\":\"{_g2_json_escape(row.analyze_log_path)}\",\"sha256\":\"{row.analyze_log_sha256}\",\"retained_path\":\"{retained_prefix}.analyze.log\"}},\n" +
+    "     \"ghdl_elaborate\":{\"command\":{\"source_path\":\"{_g2_json_escape(row.elaborate_command_path)}\",\"sha256\":\"{row.elaborate_command_sha256}\",\"retained_path\":\"{retained_prefix}.elaborate.command\"},\"exit_code\":{row.elaborate_exit_code},\"log\":{\"source_path\":\"{_g2_json_escape(row.elaborate_log_path)}\",\"sha256\":\"{row.elaborate_log_sha256}\",\"retained_path\":\"{retained_prefix}.elaborate.log\"}},\n" +
+    "     \"ghdl_run\":{\"command\":{\"source_path\":\"{_g2_json_escape(row.run_command_path)}\",\"sha256\":\"{row.run_command_sha256}\",\"retained_path\":\"{retained_prefix}.run.command\"},\"exit_code\":{row.run_exit_code},\"log\":{\"source_path\":\"{_g2_json_escape(row.run_log_path)}\",\"sha256\":\"{row.run_log_sha256}\",\"retained_path\":\"{retained_prefix}.run.log\"}},\n" +
+    "     \"source_identity_sha256\":\"{row.source_identity_sha256}\",\n" +
+    "     \"config_identity_sha256\":\"{row.config_identity_sha256}\",\n" +
+    "     \"graph_identity_sha256\":\"{row.graph_identity_sha256}\"\n" +
+    "    }"
+
+fn _g2_render_text_array(values: [text]) -> text:
+    var rendered = "["
+    var index: i64 = 0
+    while index < values.len():
+        if index > 0: rendered = rendered + ","
+        rendered = rendered + "\"" + _g2_json_escape(values[index]) + "\""
+        index = index + 1
+    rendered + "]"
+
+fn riscv_gen2_render_qualification_receipt(
+        manifest: RiscvGen2QualificationManifest, run_id: text,
+        manifest_sha256: text) -> text:
+    "{\n" +
+    "  \"schema\":\"{RISCV_GEN2_QUALIFICATION_SCHEMA}\",\n" +
+    "  \"status\":\"passed\",\n" +
+    "  \"run_id\":\"{_g2_json_escape(run_id)}\",\n" +
+    "  \"run_manifest_sha256\":\"{manifest_sha256}\",\n" +
+    "  \"cli\":{\"source_path\":\"{_g2_json_escape(manifest.cli_path)}\",\"sha256\":\"{manifest.cli_sha256}\",\"retained_path\":\"compiler.bin\"},\n" +
+    "  \"cli_provenance\":{\"source_path\":\"{_g2_json_escape(manifest.cli_provenance_path)}\",\"sha256\":\"{manifest.cli_provenance_sha256}\",\"retained_path\":\"compiler.provenance.env\"},\n" +
+    "  \"source_revision\":\"{manifest.source_revision}\",\n" +
+    "  \"owned_file_list_sha256\":\"{manifest.owned_file_list_sha256}\",\n" +
+    "  \"owned_file_manifest\":{\"source_path\":\"{_g2_json_escape(manifest.owned_file_manifest_path)}\",\"sha256\":\"{manifest.owned_file_manifest_sha256}\",\"retained_path\":\"owned-files.list\"},\n" +
+    "  \"branch_coverage\":{\"kind\":\"branch\",\"command\":{\"source_path\":\"{_g2_json_escape(manifest.branch_coverage_command_path)}\",\"sha256\":\"{manifest.branch_coverage_command_sha256}\",\"retained_path\":\"branch_coverage.command\"},\"threshold_basis_points\":8000,\"basis_points\":{manifest.branch_coverage_basis_points},\"changed_files\":" + _g2_render_text_array(manifest.changed_files) + ",\"exclusions\":" + _g2_render_text_array(manifest.exclusions) + ",\"log\":{\"source_path\":\"{_g2_json_escape(manifest.branch_coverage_log_path)}\",\"sha256\":\"{manifest.branch_coverage_log_sha256}\",\"retained_path\":\"branch_coverage.log\"}},\n" +
+    "  \"rows\":[\n" + _g2_render_row(manifest.rows[0], "rv32") + ",\n" +
+    _g2_render_row(manifest.rows[1], "rv64") + "\n  ]\n}\n"
+
+fn riscv_gen2_write_qualification_receipt(
+        manifest_path: text, run_id: text
+        ) -> Result<RiscvGen2QualificationArtifacts, text>:
+    if not _g2_safe_relative_path(manifest_path) or not _g2_safe_run_id(run_id):
+        return Err("qualification-output-path-invalid")
+    if not file_is_regular_no_follow(manifest_path):
+        return Err("qualification-manifest-not-regular-no-follow")
+    val manifest_text = file_read(manifest_path)
+    val manifest_sha = file_hash_sha256(manifest_path)
+    if not _g2_hex64(manifest_sha): return Err("qualification-manifest-sha256-invalid")
+    val manifest = riscv_gen2_parse_qualification_manifest(manifest_text)?
+    if not _g2_inputs_bound(manifest):
+        return Err("qualification-input-binding-invalid")
+    # The runner creates the evidence root before composition. Validate that
+    # existing root before creating or removing anything through it; otherwise
+    # a symlinked parent could redirect publication and cleanup outside the
+    # repository.
+    val workspace = rt_path_absolute(cwd()) ?? ""
+    if (not file_exists(RISCV_GEN2_QUALIFICATION_ROOT) or workspace == "" or
+            (rt_path_absolute(RISCV_GEN2_QUALIFICATION_ROOT) ?? "") !=
+                workspace + "/" + RISCV_GEN2_QUALIFICATION_ROOT):
+        return Err("qualification-evidence-root-noncanonical")
+    val run_dir = RISCV_GEN2_QUALIFICATION_ROOT + "/" + run_id
+    val receipt_path = run_dir + "/qualification_receipt.json"
+    if file_exists(run_dir) or file_exists(receipt_path):
+        return Err("qualification-run-directory-exists")
+    if not dir_create_all(run_dir):
+        return Err("qualification-run-directory-create-failed")
+    if (rt_path_absolute(run_dir) ?? "") != workspace + "/" + run_dir:
+        if not dir_remove(run_dir, true):
+            return Err("qualification-partial-run-cleanup-failed")
+        return Err("qualification-run-directory-noncanonical")
+    if (not _g2_copy_bound(manifest_path, manifest_sha, run_dir + "/run_manifest.env") or
+            not _g2_copy_bound(manifest.cli_path, manifest.cli_sha256,
+                run_dir + "/compiler.bin") or
+            not _g2_copy_bound(manifest.cli_provenance_path,
+                manifest.cli_provenance_sha256, run_dir + "/compiler.provenance.env") or
+            not _g2_copy_bound(manifest.branch_coverage_command_path,
+                manifest.branch_coverage_command_sha256,
+                run_dir + "/branch_coverage.command") or
+            not _g2_copy_bound(manifest.owned_file_manifest_path,
+                manifest.owned_file_manifest_sha256,
+                run_dir + "/owned-files.list") or
+            not _g2_copy_bound(manifest.branch_coverage_log_path,
+                manifest.branch_coverage_log_sha256, run_dir + "/branch_coverage.log")):
+        if not dir_remove(run_dir, true):
+            return Err("qualification-partial-run-cleanup-failed")
+        return Err("qualification-evidence-copy-failed")
+    var row_index: i64 = 0
+    while row_index < manifest.rows.len():
+        val row = manifest.rows[row_index]
+        val prefix = run_dir + "/" + row.architecture
+        if (not _g2_copy_bound(row.product_command_path,
+                    row.product_command_sha256, prefix + ".product.command") or
+                not _g2_copy_bound(row.manifest_path, row.manifest_sha256,
+                    prefix + ".manifest.json") or
+                not _g2_copy_bound(row.vhdl_path, row.vhdl_sha256, prefix + ".vhd") or
+                not _g2_copy_bound(row.testbench_path, row.testbench_sha256,
+                    prefix + ".tb.vhd") or
+                not _g2_copy_bound(row.analyze_command_path,
+                    row.analyze_command_sha256, prefix + ".analyze.command") or
+                not _g2_copy_bound(row.analyze_log_path, row.analyze_log_sha256,
+                    prefix + ".analyze.log") or
+                not _g2_copy_bound(row.elaborate_command_path,
+                    row.elaborate_command_sha256, prefix + ".elaborate.command") or
+                not _g2_copy_bound(row.elaborate_log_path,
+                    row.elaborate_log_sha256, prefix + ".elaborate.log") or
+                not _g2_copy_bound(row.run_command_path, row.run_command_sha256,
+                    prefix + ".run.command") or
+                not _g2_copy_bound(row.run_log_path, row.run_log_sha256,
+                    prefix + ".run.log")):
+            if not dir_remove(run_dir, true):
+                return Err("qualification-partial-run-cleanup-failed")
+            return Err("qualification-evidence-copy-failed")
+        row_index = row_index + 1
+    if (file_hash_sha256(manifest_path) != manifest_sha or
+            not _g2_inputs_bound(manifest) or
+            not _g2_retained_inputs_bound(run_dir, manifest_path,
+                manifest_sha, manifest)):
+        if not dir_remove(run_dir, true):
+            return Err("qualification-partial-run-cleanup-failed")
+        return Err("qualification-input-mutated-during-retention")
+    val receipt = riscv_gen2_render_qualification_receipt(
+        manifest, run_id, manifest_sha)
+    # Receipt last: no claim-bearing file exists until every retained evidence
+    # member is present, hash-bound, and stable.
+    if not file_atomic_write(receipt_path, receipt):
+        if not dir_remove(run_dir, true):
+            return Err("qualification-partial-run-cleanup-failed")
+        return Err("qualification-receipt-write-failed")
+    if not file_is_regular_no_follow(receipt_path):
+        if not dir_remove(run_dir, true):
+            return Err("qualification-partial-run-cleanup-failed")
+        return Err("qualification-receipt-postwrite-invalid")
+    val receipt_sha = file_hash_sha256(receipt_path)
+    if not _g2_hex64(receipt_sha):
+        if not dir_remove(run_dir, true):
+            return Err("qualification-partial-run-cleanup-failed")
+        return Err("qualification-receipt-postwrite-invalid")
+    Ok(RiscvGen2QualificationArtifacts(
+        run_dir: run_dir, receipt_path: receipt_path, receipt_sha256: receipt_sha,
+        branch_coverage_basis_points: manifest.branch_coverage_basis_points))
+
+# This deliberately accepts only the composer boundary.  A shell runner must
+# create the evidence manifest from command-owned results first, then invoke
+# the admitted CLI on this source with these two switches.  There is no
+# `--emit-evidence` mode here, so this module cannot fabricate a GHDL result.
+fn _g2_parse_composer_cli(args: [text]) -> Result<(text, text), text>:
+    var manifest_path = ""
+    var run_id = ""
+    var index: i64 = 0
+    while index < args.len():
+        val option = args[index]
+        if index + 1 >= args.len():
+            return Err("qualification-cli-missing-value-" + option)
+        val value = args[index + 1]
+        if option == "--manifest":
+            if manifest_path != "": return Err("qualification-cli-duplicate-manifest")
+            manifest_path = value
+        elif option == "--run-id":
+            if run_id != "": return Err("qualification-cli-duplicate-run-id")
+            run_id = value
+        else:
+            return Err("qualification-cli-unknown-argument-" + option)
+        index = index + 2
+    if manifest_path == "" or run_id == "":
+        return Err("qualification-cli-required-argument-missing")
+    Ok((manifest_path, run_id))
+
+fn main() -> i64:
+    val (manifest_path, run_id) = match _g2_parse_composer_cli(get_cli_args()):
+        case Ok(value): value
+        case Err(reason):
+            print "schema=" + RISCV_GEN2_QUALIFICATION_SCHEMA
+            print "status=fail"
+            print "reason=" + reason
+            return 2
+    match riscv_gen2_write_qualification_receipt(manifest_path, run_id):
+        case Ok(artifacts):
+            print "schema=" + RISCV_GEN2_QUALIFICATION_SCHEMA
+            print "status=pass"
+            print "receipt_path=" + artifacts.receipt_path
+            print "receipt_sha256=" + artifacts.receipt_sha256
+            0
+        case Err(reason):
+            print "schema=" + RISCV_GEN2_QUALIFICATION_SCHEMA
+            print "status=fail"
+            print "reason=" + reason
+            1
+
+export RISCV_GEN2_QUALIFICATION_SCHEMA, RISCV_GEN2_QUALIFICATION_ROOT
+export RISCV_GEN2_BRANCH_COVERAGE_THRESHOLD_BP
+export RISCV_GEN2_QUALIFICATION_PRODUCT
+export RISCV_GEN2_QUALIFICATION_EXCLUSIONS
+export RiscvGen2QualificationRow, RiscvGen2QualificationManifest
+export RiscvGen2QualificationArtifacts
+export riscv_gen2_parse_qualification_manifest
+export riscv_gen2_render_qualification_receipt
+export riscv_gen2_write_qualification_receipt
+export riscv_gen2_qualification_product_manifest_matches

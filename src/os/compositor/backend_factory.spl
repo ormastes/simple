@@ -1,0 +1,204 @@
+# Screen-type selection and backend construction for the SimpleOS boot screen.
+#
+# Two responsibilities, deliberately split:
+#   * `resolve_screen_type` — PURE. Given a requested type and a runtime
+#     profile *value*, decide what we will actually run and why. This is the
+#     whole testable core; it touches no device and constructs nothing.
+#   * `create_screen_backend` — impure thin constructor switch over the
+#     already-resolved type.
+#
+# The runtime profile is a PARAMETER. The kernel builds its own profile from
+# detected hardware and passes it in; the `qemu_*`/`fpga_*` profiles in
+# `simpleos_config_matrix` stay test-only inputs to the same pure function.
+#
+# MDSOC: feature dimension, compositor layer
+
+use os.compositor.display_backend_core.{CompositorBackend}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.vulkan_compositor_backend.{VulkanCompositorBackend}
+use os.simpleos_config_matrix.{SimpleOsRuntimeProfile, profile_supports_capability}
+
+extern fn rt_env_get(key: text) -> text?
+
+val SCREEN_TYPE_NAMES: [text] = ["wm", "2d", "web", "gui", "vulkan"]
+
+enum ScreenType:
+    Wm
+    TwoD
+    Web
+    Gui
+    Vulkan
+
+class ScreenSelection:
+    requested: text
+    effective: text
+    reason: text
+    backend: CompositorBackend?
+    shell: text
+
+pub fn screen_type_from_text(name: text) -> ScreenType:
+    """Parse a screen-type name. Unknown text maps to `Wm`, the never-blank
+    floor (rc_conf already normalizes; this re-normalizes defensively)."""
+    val value = name.trim().to_lower()
+    if value == "2d":
+        return ScreenType.TwoD
+    if value == "web":
+        return ScreenType.Web
+    if value == "gui":
+        return ScreenType.Gui
+    if value == "vulkan":
+        return ScreenType.Vulkan
+    ScreenType.Wm
+
+pub fn screen_type_name(t: ScreenType) -> text:
+    """Canonical lower-case name for a screen type."""
+    match t:
+        case ScreenType.TwoD:
+            "2d"
+        case ScreenType.Web:
+            "web"
+        case ScreenType.Gui:
+            "gui"
+        case ScreenType.Vulkan:
+            "vulkan"
+        case _:
+            "wm"
+
+pub fn screen_capability_key(t: ScreenType) -> text:
+    """Profile capability a screen type needs before it can be selected."""
+    match t:
+        case ScreenType.TwoD:
+            "simple2d-engine2d"
+        case ScreenType.Web:
+            "framebuffer"
+        case ScreenType.Gui:
+            "framebuffer"
+        case ScreenType.Vulkan:
+            # `requires_vulkan` in simpleos_config_matrix.spl. NOTE: passing
+            # this gate only means the profile claims Vulkan is present --
+            # VulkanCompositorBackend.is_available() is unconditionally
+            # false regardless (see vulkan_compositor_backend.spl), so
+            # selecting this screen type never yields working GPU rendering.
+            "vulkan"
+        case _:
+            "wm"
+
+pub fn resolve_screen_type(
+    requested: text,
+    profile: SimpleOsRuntimeProfile
+) -> (text, text):
+    """Pure. Return `(effective, reason)` for a requested screen type.
+
+    `wm` is the never-blank floor and short-circuits BEFORE any capability
+    check — a profile with `supports_wm: false` (e.g. the FPGA serial profile)
+    must still resolve `wm` to `wm`, otherwise the fallback has no terminus.
+
+    Every other type consults ONLY `profile_supports_capability`. Fallback
+    chain: requested -> "2d" (when simple2d-engine2d is supported) -> "wm".
+    `reason` is "" on a clean hit, else `unsupported:<requested>:<capability>`.
+    """
+    val t = screen_type_from_text(requested)
+    val name = screen_type_name(t)
+    if name == "wm":
+        return ("wm", "")
+    val capability = screen_capability_key(t)
+    if profile_supports_capability(profile, capability):
+        return (name, "")
+    val why = "unsupported:{name}:{capability}"
+    if name != "2d" and profile_supports_capability(profile, "simple2d-engine2d"):
+        return ("2d", why)
+    ("wm", why)
+
+pub fn screen_type_from_env_or(default_type: text) -> text:
+    """Host mirror of `rc_conf_screen_type()`. Reads SIMPLE_SCREEN_TYPE and
+    applies the identical normalization + fail-closed-to-wm rule, so the guest
+    (rc.conf) and the host (env) feed the SAME `resolve_screen_type`.
+
+    Orthogonal to SIMPLE_2D_BACKEND, which selects the *renderer* inside the
+    2d lane and is left untouched here.
+    """
+    val configured: text = rt_env_get("SIMPLE_SCREEN_TYPE") ?? ""
+    val raw = configured.trim().to_lower()
+    if raw == "":
+        return screen_type_name(screen_type_from_text(default_type))
+    for t in SCREEN_TYPE_NAMES:
+        if raw == t:
+            return raw
+    "wm"
+
+pub fn screen_selection_reason_or_none(reason: text) -> text:
+    """`reason` rendered for the single-line [screen] boot log."""
+    if reason == "":
+        return "none"
+    reason
+
+pub fn create_screen_backend(
+    requested: text,
+    width: i32,
+    height: i32,
+    profile: SimpleOsRuntimeProfile
+) -> ScreenSelection:
+    """Resolve, then construct. Registry is a `match`, NOT a Dict — dicts of
+    struct/class values are corrupt under native codegen.
+
+    Trait note, since the arms are NOT uniform:
+      * `wm`  — the framebuffer path is `FramebufferBackend`, which implements
+                `RenderBackend` (fb_backend.spl:133), NOT `CompositorBackend`.
+                It is therefore not constructed here: the kernel keeps the
+                verbatim BGA path for `wm` (init_services `_init_display_service`)
+                and this arm returns `backend: nil` so no unused
+                RenderBackend->CompositorBackend adapter has to exist.
+      * `2d`  — `Engine2dCompositorBackend` implements `CompositorBackend`
+                (compositor_engine2d.spl:282).
+      * `web` — `BrowserCompositorBackend` implements `CompositorBackend`
+                (browser_compositor_backend.spl:48).
+      * `gui` — host-window-server only; never resolves here on a profile
+                without it, so it has no construction arm of its own.
+      * `vulkan` — `VulkanCompositorBackend` implements `CompositorBackend`
+                (vulkan_compositor_backend.spl), registered here so the
+                plumbing exists, but every drawing method on it is a
+                rejecting no-op and `is_available()` is hardcoded `false`.
+                Selecting this screen type constructs the backend object;
+                it does not make anything render via Vulkan. See the
+                honesty contract at the top of vulkan_compositor_backend.spl.
+    """
+    val decided = resolve_screen_type(requested, profile)
+    val effective = decided.0
+    val reason = decided.1
+    val t = screen_type_from_text(effective)
+    match t:
+        case ScreenType.TwoD:
+            ScreenSelection(
+                requested: requested,
+                effective: effective,
+                reason: reason,
+                backend: Engine2dCompositorBackend.create_from_env(width, height),
+                shell: "2d"
+            )
+        case ScreenType.Web:
+            ScreenSelection(
+                requested: requested,
+                effective: effective,
+                reason: reason,
+                backend: BrowserCompositorBackend.new(width, height),
+                shell: "web"
+            )
+        case ScreenType.Vulkan:
+            ScreenSelection(
+                requested: requested,
+                effective: effective,
+                reason: reason,
+                backend: VulkanCompositorBackend.create_from_env(width, height),
+                shell: "vulkan"
+            )
+        case _:
+            # `wm` floor (and any `gui` that survived resolution on a host
+            # profile): the caller owns framebuffer/host-window setup.
+            ScreenSelection(
+                requested: requested,
+                effective: effective,
+                reason: reason,
+                backend: nil,
+                shell: effective
+            )

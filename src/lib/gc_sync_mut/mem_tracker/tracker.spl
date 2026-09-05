@@ -1,0 +1,90 @@
+# GC-Aware Memory Tracker
+#
+# Tracks memory allocation patterns under GC mode.
+# Unlike NoGC tracking (which monitors malloc/free pairs),
+# GC tracking monitors heap growth, collection cycles, and
+# object survival rates.
+
+use std.gc.{GcHeap, GcStats}
+
+# ============================================================================
+# GcMemTracker - GC Memory Usage Tracker
+# ============================================================================
+
+class GcMemTracker:
+    """Tracks GC memory usage and collection statistics.
+
+    Records allocation events and GC cycle data for analysis.
+    Useful for detecting memory leaks (objects that survive too many
+    collection cycles) and tuning GC parameters.
+    """
+    heap: GcHeap
+    records: [GcTrackRecord]
+    snapshot_count: i64
+
+struct GcTrackRecord:
+    """Single snapshot of GC memory state."""
+    timestamp: i64
+    total_allocated: usize
+    total_collected: usize
+    live_objects: usize
+    gc_cycles: i64
+    survival_rate: f64
+
+struct GcTrackerStats:
+    """Aggregated tracker statistics."""
+    peak_allocated: usize
+    total_collections: i64
+    avg_survival_rate: f64
+    snapshots: i64
+
+fn gc_tracker_new(heap: GcHeap) -> GcMemTracker:
+    """Create a new GC memory tracker."""
+    GcMemTracker(heap: heap, records: [], snapshot_count: 0)
+
+fn gc_tracker_record(tracker: GcMemTracker):
+    """Record a memory usage snapshot.
+
+    Call periodically to track memory trends.
+    """
+    val stats = tracker.heap.stats()
+    val live = stats.total_allocated - stats.total_collected
+    val survival = if stats.total_allocated > 0:
+        (live as f64) / (stats.total_allocated as f64)
+    else:
+        0.0
+    val record = GcTrackRecord(
+        timestamp: tracker.snapshot_count,
+        total_allocated: stats.total_allocated,
+        total_collected: stats.total_collected,
+        live_objects: live,
+        gc_cycles: stats.gc_cycles,
+        survival_rate: survival
+    )
+    tracker.records.push(record)
+    tracker.snapshot_count = tracker.snapshot_count + 1
+
+fn gc_tracker_stats(tracker: GcMemTracker) -> GcTrackerStats:
+    """Compute aggregated statistics from all recorded snapshots."""
+    var peak: usize = 0
+    var total_survival: f64 = 0.0
+    var max_cycles: i64 = 0
+
+    for record in tracker.records:
+        if record.total_allocated > peak:
+            peak = record.total_allocated
+        total_survival = total_survival + record.survival_rate
+        if record.gc_cycles > max_cycles:
+            max_cycles = record.gc_cycles
+
+    val avg_survival = if tracker.records.len() > 0:
+        total_survival / (tracker.records.len() as f64)
+    else:
+        0.0
+
+    GcTrackerStats(
+        peak_allocated: peak,
+        total_collections: max_cycles,
+        avg_survival_rate: avg_survival,
+        snapshots: tracker.snapshot_count
+    )

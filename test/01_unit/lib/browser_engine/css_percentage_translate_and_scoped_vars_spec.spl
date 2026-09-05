@@ -1,0 +1,93 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-FEATURE
+# Reproduce spec for two browser-engine style defects (both FAIL before the fix):
+#   * percentage translate() resolved as raw pixels, so the box left the viewport
+#   * custom properties declared on a non-`:root` selector were never collected,
+#     so their `var()` references stayed literal
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
+use std.gc_async_mut.gpu.browser_engine.html_string_parser.{browser_renderer_normalize_style_rules}
+
+val WIDTH: i32 = 32
+val HEIGHT: i32 = 24
+
+fn _render(style: text, body: text) -> [u32]:
+    val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(style)
+    val html = "<html><head><style>" + css + "</style></head><body>" + body + "</body></html>"
+    render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT).pixel_data
+
+fn _pixel_at(pixels: [u32], x: i32, y: i32) -> u32:
+    val idx = y * WIDTH + x
+    if idx < 0 or idx >= pixels.len():
+        return 0x00000000u32
+    pixels[idx]
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+describe "browser engine percentage transforms and scoped custom properties":
+    # @manual scenario evidence
+
+    context "percentage translate resolves against the element border box":
+
+        it "translate percentages move the box by a fraction of its own size":
+            # @req REQ-SSPEC-FEATURE
+            step("translate percentages move the box by a fraction of its own size")
+            val pixels = _render(
+                "div { width: 10px; height: 8px; background-color: #ea580c; transform: translate(50%, 25%); }",
+                "<div></div>")
+            expect(_pixel_at(pixels, 0, 0)).to_equal(0xFFFFFFFFu32)
+            expect(_pixel_at(pixels, 5, 2)).to_equal(0xFFEA580Cu32)
+
+        it "translateX percentage uses the element width":
+            # @req REQ-SSPEC-FEATURE
+            step("translateX percentage uses the element width")
+            val pixels = _render(
+                "div { width: 10px; height: 4px; background-color: #7c3aed; transform: translateX(50%); }",
+                "<div></div>")
+            expect(_pixel_at(pixels, 5, 0)).to_equal(0xFF7C3AEDu32)
+
+        it "pixel translate is unchanged by percentage support":
+            # @req REQ-SSPEC-FEATURE
+            step("pixel translate is unchanged by percentage support")
+            val pixels = _render(
+                "div { width: 4px; height: 4px; background-color: #dc2626; transform: translate(4px, 4px); }",
+                "<div></div>")
+            expect(_pixel_at(pixels, 4, 4)).to_equal(0xFFDC2626u32)
+
+    context "custom properties declared outside :root":
+
+        it "var() resolves a custom property declared on an ordinary selector":
+            # @req REQ-SSPEC-FEATURE
+            step("var() resolves a custom property declared on an ordinary selector")
+            val pixels = _render(
+                "div { --brand: #dc2626; background-color: var(--brand); width: 12px; height: 8px; }",
+                "<div></div>")
+            expect(_count_color(pixels, 0xFFDC2626u32) > 0).to_equal(true)
+
+        it "a :root definition still wins over a later scoped definition":
+            # @req REQ-SSPEC-FEATURE
+            step("a :root definition still wins over a later scoped definition")
+            val pixels = _render(
+                ":root { --brand: #16a34a; } div { --brand: #dc2626; background-color: var(--brand); width: 12px; height: 8px; }",
+                "<div></div>")
+            expect(_count_color(pixels, 0xFF16A34Au32) > 0).to_equal(true)
+
+        it "a custom property declared after its var() reference still resolves":
+            # @req REQ-SSPEC-FEATURE
+            step("a custom property declared after its var() reference still resolves")
+            val pixels = _render(
+                "div { background-color: var(--late); --late: #0891b2; width: 12px; height: 8px; }",
+                "<div></div>")
+            expect(_count_color(pixels, 0xFF0891B2u32) > 0).to_equal(true)

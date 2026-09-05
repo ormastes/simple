@@ -1,0 +1,116 @@
+"""Focused contracts for loader-owned signed catalog snapshot reads."""
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use os.kernel.loader.signed_catalog_snapshot_reader_v1.*
+use os.kernel.loader.simplebox_catalog_media_boot_v1.{
+    SimpleboxCatalogMediaBootErrorV1, SimpleboxCatalogMediaLayoutV1,
+    simplebox_catalog_media_cleanup_error_v1,
+    simplebox_catalog_media_same_bundle_epoch_v1}
+
+fn _catalog_table_v1(path: text, bytes: [u8]) -> MountTable:
+    var table = MountTable.new()
+    table.mount(
+        "/", DriverInstance.DbFs(DbFsDriver.new_hosted()),
+        MountOptions.default()).unwrap()
+    val file = table.open(path, OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(
+        file.id, PositionedDriverKind.Dbfs, 0u64, bytes).unwrap()
+    table.close(file).unwrap()
+    table
+
+fn _catalog_write_v1(table: MountTable, path: text, bytes: [u8]):
+    val file = table.open(path, OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(
+        file.id, PositionedDriverKind.Dbfs, 0u64, bytes).unwrap()
+    table.close(file).unwrap()
+
+describe "signed catalog stable snapshot reader v1":
+    it "streams a payload digest across chunks without returning payload bytes":
+        val bytes: [u8] = [113u8; 65537]
+        var table = _catalog_table_v1("/payload.bin", bytes)
+        val digested = signed_catalog_snapshot_digest_v1(
+            table, "/payload.bin", 268435456u64).unwrap()
+        expect(digested.size).to_equal(65537u64)
+        expect(digested.content_sha256).to_equal(sha256_u8_hex(bytes))
+        expect(digested.seal.content_sha256).to_equal(digested.content_sha256)
+        table.unmount("/").unwrap()
+
+    it "reads across 64 KiB boundaries seals the exact bytes and closes":
+        val bytes: [u8] = [97u8; 65537]
+        var table = _catalog_table_v1("/catalog.scr1", bytes)
+        val read = signed_catalog_snapshot_read_v1(
+            table, "/catalog.scr1", 65537u64).unwrap()
+        expect(read.bytes).to_equal(bytes)
+        expect(read.seal.size).to_equal(65537u64)
+        expect(read.seal.content_sha256).to_equal(sha256_u8_hex(bytes))
+        expect(read.seal.canonical_source_path).to_equal("/catalog.scr1")
+        table.unmount("/").unwrap()
+
+    it "rejects invalid bounds oversize files and missing paths without leases":
+        var table = _catalog_table_v1(
+            "/catalog.scr1", [1u8, 2u8, 3u8, 4u8])
+        expect(signed_catalog_snapshot_read_v1(
+            table, "/catalog.scr1", 0u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-bound-invalid")
+        expect(signed_catalog_snapshot_read_v1(
+            table, "/catalog.scr1", 16777217u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-bound-invalid")
+        expect(signed_catalog_snapshot_digest_v1(
+            table, "/catalog.scr1", 268435457u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-bound-invalid")
+        expect(signed_catalog_snapshot_read_v1(
+            table, "/catalog.scr1", 3u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-open-failed")
+        expect(signed_catalog_snapshot_read_v1(
+            table, "/missing.scr1", 16u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-open-failed")
+        table.unmount("/").unwrap()
+
+    it "closes an already-open snapshot after replacement invalidates its generation":
+        var table = _catalog_table_v1(
+            "/catalog.scr1", [1u8, 2u8, 3u8, 4u8])
+        val opened = table.open_stable_snapshot(
+            "/catalog.scr1", 16u64).unwrap()
+        val writer = table.open(
+            "/catalog.scr1", OpenFlags.write_only()).unwrap()
+        table.positioned_write_bytes(
+            writer.id, PositionedDriverKind.Dbfs, 0u64, [9u8, 8u8, 7u8, 6u8]).unwrap()
+        table.close(writer).unwrap()
+        expect(signed_catalog_snapshot_read_opened_v1(
+            table, opened, 16u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-read-failed")
+        # Successful unmount proves the rejected retained lease was closed.
+        table.unmount("/").unwrap()
+
+    it "rejects three closed observations captured across a bundle epoch change":
+        var table = _catalog_table_v1("/simplebox", [1u8])
+        _catalog_write_v1(table, "/simplebox.scr1", [2u8])
+        _catalog_write_v1(table, "/simplebox.trust", [3u8])
+        val artifact = signed_catalog_snapshot_read_v1(
+            table, "/simplebox", 16u64).unwrap()
+        # A namespace mutation separates the artifact observation from the
+        # signed record and trust observations even though every file is stable.
+        _catalog_write_v1(table, "/epoch-marker", [4u8])
+        val scr1 = signed_catalog_snapshot_read_v1(
+            table, "/simplebox.scr1", 16u64).unwrap()
+        val trust = signed_catalog_snapshot_read_v1(
+            table, "/simplebox.trust", 16u64).unwrap()
+        expect(simplebox_catalog_media_same_bundle_epoch_v1(
+            SimpleboxCatalogMediaLayoutV1(
+                artifact_path: "/simplebox", scr1_path: "/simplebox.scr1",
+                trust_config_path: "/simplebox.trust"),
+            artifact, scr1, trust)).to_be(false)
+        table.unmount("/").unwrap()
+
+    it "surfaces cleanup indeterminacy instead of the intended media error":
+        expect(simplebox_catalog_media_cleanup_error_v1(
+            false, SimpleboxCatalogMediaBootErrorV1.MediaPartial)).to_equal(
+                SimpleboxCatalogMediaBootErrorV1.CleanupIndeterminate)
+        expect(simplebox_catalog_media_cleanup_error_v1(
+            true, SimpleboxCatalogMediaBootErrorV1.MediaPartial)).to_equal(
+                SimpleboxCatalogMediaBootErrorV1.MediaPartial)

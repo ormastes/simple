@@ -1,0 +1,253 @@
+# Atomic scheduler publication for one retained authenticated i386 mapping.
+
+use std.fs_driver.mount_table.{MountTable}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    ExecutableAuthorityJointLeaseV1
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_commit_joint_reservation_v1,
+    executable_loader_retrieve_once,
+    executable_loader_release_retrieved,
+    executable_loader_revoke
+}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1,
+    executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.x86_32_authenticated_mapping_owner_v1.{
+    X8632AuthenticatedMappingReceiptV1,
+    X8632AuthenticatedMappingStateV1,
+    X8632MappingTcbTransferDispositionV1,
+    x86_32_authenticated_mapping_destroy_v1,
+    x86_32_authenticated_mapping_transfer_to_tcb_v1
+}
+use os.kernel.scheduler.x86_32_mapping_adoption_reservation_v1.{
+    SchedulerX8632AdoptionReservationDispositionV1,
+    scheduler_x86_32_adoption_reserve_v1,
+    scheduler_x86_32_adoption_cancel_v1
+}
+use os.kernel.scheduler.scheduler_types.{
+    Scheduler, TaskControlBlock, TIME_SLICE_TICKS,
+    _initial_user_task_context
+}
+use os.kernel.scheduler.scheduler_task_mgmt.{_find_empty_slot_in}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionObservationHandleV1,
+    scheduler_execution_observe_adoption_handle_with_launch_v1,
+    scheduler_execution_cancel_adoption_handle_v1
+}
+use os.kernel.scheduler.server_data_launch_grant_registry.{
+    ServerDataLaunchGrantInstallStatusV1,
+    server_data_launch_grant_install_before_publication_v1,
+    server_data_launch_grant_rollback_before_publication_v1,
+    server_data_launch_grant_quarantine_before_publication_v1
+}
+use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+use os.kernel.ipc.capability.{register_task_vmspace}
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority,
+    default_task_schedule, default_task_isolation
+}
+use os.kernel.types.capability_types.{CapabilitySet, capability_set_bind_owner}
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+use os.kernel.types.arm32_mapping_handle_v1.{scheduler_arm32_mapping_handle_absent_v1}
+use os.kernel.types.riscv32_mapping_handle_v1.{scheduler_riscv32_mapping_handle_absent_v1}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
+
+pub(package) struct SchedulerX8632AdoptionResultV1:
+    scheduler: Scheduler
+    pid: i64
+    cleanup_indeterminate: bool
+
+fn _x86_32_destroy_untransferred_v1(
+    receipt: X8632AuthenticatedMappingReceiptV1
+) -> bool:
+    val destroyed = x86_32_authenticated_mapping_destroy_v1(receipt)
+    destroyed.state == X8632AuthenticatedMappingStateV1.Destroyed
+
+fn _x86_32_adoption_failed_v1(
+    scheduler: Scheduler,
+    pid: i64,
+    cleanup_indeterminate: bool
+) -> SchedulerX8632AdoptionResultV1:
+    SchedulerX8632AdoptionResultV1(
+        scheduler: scheduler, pid: pid,
+        cleanup_indeterminate: cleanup_indeterminate)
+
+pub(package) fn scheduler_x86_32_adopt_authenticated_mapping_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    joint_lease: ExecutableAuthorityJointLeaseV1,
+    consumer: ExecutableLoadConsumerV1,
+    mapping: X8632AuthenticatedMappingReceiptV1,
+    image_handle: ExecutableImageHandleV1,
+    launch: ExecutableLaunchArgumentsV1,
+    caps: CapabilitySet
+) -> SchedulerX8632AdoptionResultV1:
+    """Bind mapping handle and lifecycle identity before ready publication."""
+    var owner = scheduler
+    # ExecutableLaunchArgumentsV1 is transport data, not authority.  Repeat
+    # validation at the scheduler owner and reject a wrong active kernel before
+    # either the scheduler reservation or the one-shot loader commit occurs.
+    val checked_launch = executable_launch_arguments_v1_validate(
+        launch.path, launch.argv, launch.envp)
+    if checked_launch.is_err() or get_arch() != Architecture.X86:
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        return _x86_32_adoption_failed_v1(owner, -13, not cleaned)
+    val owned_launch = checked_launch.unwrap()
+    if (mapping.state != X8632AuthenticatedMappingStateV1.MappedBlocked or
+        mapping.root_phys == 0u64 or mapping.entry_point == 0u64 or
+        mapping.initial_stack_pointer == 0u64):
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        return _x86_32_adoption_failed_v1(owner, -13, not cleaned)
+    var task_slot = _find_empty_slot_in(owner.tasks)
+    if task_slot < 0 and owner.current.id == 0u64: task_slot = 0
+    if task_slot < 0:
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        return _x86_32_adoption_failed_v1(owner, -11, not cleaned)
+
+    val reservation = scheduler_x86_32_adoption_reserve_v1(image_handle)
+    if (reservation.disposition !=
+            SchedulerX8632AdoptionReservationDispositionV1.Reserved or
+        reservation.ticket == nil):
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        return _x86_32_adoption_failed_v1(
+            owner, -13, not cleaned or reservation.disposition ==
+                SchedulerX8632AdoptionReservationDispositionV1.Indeterminate)
+    val ticket = reservation.ticket.unwrap()
+    if reservation.identity == nil:
+        val cancelled = scheduler_x86_32_adoption_cancel_v1(ticket, image_handle)
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        return _x86_32_adoption_failed_v1(
+            owner, -13, not cleaned or cancelled.disposition ==
+                SchedulerX8632AdoptionReservationDispositionV1.Indeterminate)
+    if executable_loader_commit_joint_reservation_v1(
+        authorities, token, joint_lease, consumer, mapping.entry_point,
+        owned_launch.path).is_err():
+        val cancelled = scheduler_x86_32_adoption_cancel_v1(ticket, image_handle)
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        return _x86_32_adoption_failed_v1(
+            owner, -13, not cleaned or cancelled.disposition ==
+                SchedulerX8632AdoptionReservationDispositionV1.Indeterminate)
+    val retrieved_result = executable_loader_retrieve_once(authorities, token)
+    if retrieved_result.is_err():
+        val cancelled = scheduler_x86_32_adoption_cancel_v1(ticket, image_handle)
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        # Commit is irreversible, so aborting the joint lease cannot clean this
+        # path.  Revoke owns the still-open source handle from Committed state.
+        val revoked = executable_loader_revoke(table, authorities, token)
+        return _x86_32_adoption_failed_v1(
+            owner, -13, not cleaned or revoked.is_err() or
+                cancelled.disposition ==
+                    SchedulerX8632AdoptionReservationDispositionV1.Indeterminate)
+    val retrieved = retrieved_result.unwrap().image_handle
+    val identity = reservation.identity.unwrap()
+    val child = TaskId(id: identity.task_id)
+    if (child.id == 0u64 or child.id > 0xFFFFFFFFu64 or
+        identity.lifecycle_generation == 0u64 or
+        identity.lifecycle_generation > 0xFFFFFFFFu64):
+        _ = scheduler_x86_32_adoption_cancel_v1(ticket, image_handle)
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        val released = executable_loader_release_retrieved(
+            table, authorities, token)
+        return _x86_32_adoption_failed_v1(
+            owner, -75, not cleaned or released.is_err())
+
+    val grant = server_data_launch_grant_install_before_publication_v1(
+        child.id, identity.lifecycle_generation, 1u64, retrieved)
+    if (grant.status != ServerDataLaunchGrantInstallStatusV1.NotApplicable and
+        grant.status != ServerDataLaunchGrantInstallStatusV1.Installed):
+        _ = scheduler_x86_32_adoption_cancel_v1(ticket, image_handle)
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        val released = executable_loader_release_retrieved(
+            table, authorities, token)
+        return _x86_32_adoption_failed_v1(
+            owner, -13, not cleaned or released.is_err())
+    val observation = scheduler_execution_observe_adoption_handle_with_launch_v1(
+        child.id, owner.current.id, retrieved, owned_launch)
+    if observation == nil:
+        if grant.handle != nil:
+            val grant_handle = grant.handle.unwrap()
+            if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
+                _ = server_data_launch_grant_quarantine_before_publication_v1(grant_handle)
+        _ = scheduler_x86_32_adoption_cancel_v1(ticket, image_handle)
+        val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+        val released = executable_loader_release_retrieved(
+            table, authorities, token)
+        return _x86_32_adoption_failed_v1(
+            owner, -11, not cleaned or released.is_err())
+    val observation_handle: SchedulerExecutionObservationHandleV1 = observation.unwrap()
+    val transferred = x86_32_authenticated_mapping_transfer_to_tcb_v1(
+        ticket, mapping, retrieved, mapping.entry_point,
+        mapping.initial_stack_pointer)
+    if transferred.disposition != X8632MappingTcbTransferDispositionV1.Committed or
+        transferred.identity == nil or transferred.root_phys == 0u64:
+        _ = scheduler_execution_cancel_adoption_handle_v1(observation_handle)
+        if grant.handle != nil:
+            val grant_handle = grant.handle.unwrap()
+            if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
+                _ = server_data_launch_grant_quarantine_before_publication_v1(grant_handle)
+        # Rejected proves that ownership stayed with this authenticated
+        # receipt, so local destruction is both required and legal.  A
+        # malformed Committed result (missing identity/root) may already have
+        # moved ownership just like Indeterminate; quarantine it in the mapping
+        # owner instead of attempting a raw destroy through the stale receipt.
+        if transferred.disposition == X8632MappingTcbTransferDispositionV1.Rejected:
+            val cleaned = _x86_32_destroy_untransferred_v1(mapping)
+            val released = executable_loader_release_retrieved(
+                table, authorities, token)
+            return _x86_32_adoption_failed_v1(
+                owner, -13, not cleaned or released.is_err())
+        _ = executable_loader_release_retrieved(table, authorities, token)
+        return _x86_32_adoption_failed_v1(owner, -13, true)
+
+    val committed_identity = transferred.identity.unwrap()
+    if (committed_identity.task_id != child.id or
+        committed_identity.lifecycle_generation != identity.lifecycle_generation):
+        # The mapping is committed to an unexpected lifecycle. It remains
+        # quarantined in its owner; never publish or attempt raw-root cleanup.
+        _ = scheduler_execution_cancel_adoption_handle_v1(observation_handle)
+        _ = executable_loader_release_retrieved(table, authorities, token)
+        return _x86_32_adoption_failed_v1(owner, -5, true)
+    val user_context = _initial_user_task_context(
+        mapping.entry_point, mapping.initial_stack_pointer)
+    val task = TaskControlBlock(
+        id: child, lifecycle_generation: identity.lifecycle_generation,
+        name: "authenticated-x86-32-user-{child.id}",
+        state: TaskState.Ready, priority: TaskPriority.Normal, is_user: true,
+        entry_point: mapping.entry_point, context: user_context,
+        user_context: Some(user_context), address_space: transferred.root_phys,
+        kernel_stack: 0u64, user_stack: mapping.initial_stack_pointer,
+        capabilities: capability_set_bind_owner(caps, child.id),
+        parent: Some(owner.current),
+        schedule: default_task_schedule(TaskPriority.Normal),
+        isolation: default_task_isolation(identity.lifecycle_generation),
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
+        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
+        x86_32_mapping_handle: transferred.handle, exec_generation: 1u64)
+    # This assignment is the sole publication point. The retained mapping
+    # handle, lifecycle identity, root scalar, and TCB become visible together;
+    # the task is not runnable until the later ready-queue publication.
+    owner.tasks[task_slot] = task
+    register_task_vmspace(child.id.to_u32(), ProcessVmSpace(
+        pml4: transferred.root_phys, id: identity.lifecycle_generation,
+        vma_count: 0, areas: []))
+    cap_init_task_record(child, true)
+    owner._enqueue_ready_at_slot(child, task_slot)
+    val released = executable_loader_release_retrieved(
+        table, authorities, token)
+    SchedulerX8632AdoptionResultV1(
+        scheduler: owner, pid: child.id as i64,
+        cleanup_indeterminate: released.is_err())
+
+export SchedulerX8632AdoptionResultV1
+export scheduler_x86_32_adopt_authenticated_mapping_v1

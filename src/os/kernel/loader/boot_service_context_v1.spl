@@ -1,0 +1,43 @@
+"""Atomic scheduler/IPC publication for a finite boot-service pouch.
+
+This owner does not mint authority.  Its caller must already possess a
+sealed-policy-derived, pledged concrete pouch.  It binds that pouch to the
+new scheduler task, mirrors the identical bound value into IPC, then and only
+then makes the task current.  Any pre-activation failure removes both halves.
+"""
+
+use os.kernel.scheduler.scheduler_types.{
+    Scheduler, scheduler_boot_current_stage_task_id_v1
+}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilitySet, capability_set_bind_owner}
+
+pub fn boot_service_context_publish_v1(
+    scheduler: Scheduler, ipc: IpcManager, source_pouch: CapabilitySet
+) -> TaskId?:
+    """Publish one real boot service task after exact IPC mirroring.
+
+    Ambient/full authority and empty pouches are rejected by the scheduler
+    stage.  The original source pouch is not retained: only its owner-bound
+    exact copy is installed into both owners.
+    """
+    val stage = scheduler.stage_boot_current_task_v1(source_pouch)
+    if not stage.?: return nil
+    val reservation = stage.unwrap()
+    val task = TaskId(id: scheduler_boot_current_stage_task_id_v1(reservation))
+    val bound = capability_set_bind_owner(source_pouch, task.id)
+    if bound.caps.len() == 0 or
+        not ipc.install_boot_task_pouch_exact_v1(task, bound):
+        _ = scheduler.abort_boot_current_task_v1(reservation)
+        return nil
+    val activated = scheduler.activate_boot_current_task_v1(reservation)
+    if not activated.?:
+        ipc.remove_boot_task_pouch_v1(task)
+        _ = scheduler.abort_boot_current_task_v1(reservation)
+        return nil
+    # Activation verifies the reservation identity before publishing it as the
+    # scheduler's current task, so its returned identity is the staged one.
+    Some(activated.unwrap())
+
+export boot_service_context_publish_v1

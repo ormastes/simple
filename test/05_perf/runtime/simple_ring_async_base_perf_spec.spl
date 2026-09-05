@@ -1,0 +1,240 @@
+# codex-system-test
+# @evidence-display: links
+"""
+Measured hosted-reference performance evidence for SimpleRing V1.
+
+This spec exercises the real SimpleRing and SoftwareRingProvider. It records
+wall-clock p50/p99/p99.9 and throughput without declaring an unmeasured speed
+target. It does not prove allocation behavior, RSS bounds, a native provider,
+or mission qualification. A retained baseline from an admitted pure-Simple
+self-hosted runtime is required before regression thresholds may be selected.
+"""
+
+use std.spec.*
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_async_mut.async_ring.simple_ring.{
+    SimpleRing, SimpleRingError, RingBatchPolicy
+}
+use std.nogc_async_mut.async_ring.software_provider.{SoftwareRingProvider}
+
+const PERF_OWNER_ID: u64 = 6201u64
+const SINGLE_ITERATIONS: i64 = 2000
+const BATCH_ITERATIONS: i64 = 500
+const BATCH_DEPTH: i64 = 8
+
+struct RingPerfMetrics:
+    operations: u64
+    elapsed_us: i64
+    throughput_ops_per_second: i64
+    p50_us: i64
+    p99_us: i64
+    p99_9_us: i64
+    high_water: u64
+    full_events: u64
+    batches: u64
+    batch_items: u64
+    provider_kicks: u64
+    latency_samples: u64
+    caller_latency_total_us: u64
+    caller_latency_max_us: u64
+    checksum: i64
+
+fn percentile_nearest_rank(samples: [i64], thousandths: i64) -> i64:
+    if samples.len() == 0:
+        return 0
+    samples.sort()
+    var index = (samples.len() * thousandths + 999) / 1000 - 1
+    if index < 0:
+        index = 0
+    if index >= samples.len():
+        index = samples.len() - 1
+    samples[index]
+
+fn positive_elapsed_us(started_at: i64, completed_at: i64) -> i64:
+    val elapsed = completed_at - started_at
+    if elapsed > 0: elapsed else: 1
+
+fn run_single_cycle_measurement() -> RingPerfMetrics:
+    val ring = match SimpleRing<i64, i64>.create(7201u64, PERF_OWNER_ID, 32):
+        case Ok(value): value
+        case Err(_): fail("single-cycle ring construction failed")
+    val provider = match SoftwareRingProvider<i64, i64>.create(8201u64, 32):
+        case Ok(value): value
+        case Err(_): fail("single-cycle provider construction failed")
+    var samples_us: [i64] = []
+    var checksum: i64 = 0
+    val wall_started = time_now_unix_micros()
+    var iteration: i64 = 0
+    while iteration < SINGLE_ITERATIONS:
+        val cycle_started = time_now_unix_micros()
+        val task_key = (iteration + 1).to_u64()
+        val reservation = match ring.reserve(PERF_OWNER_ID, task_key):
+            case Ok(value): value
+            case Err(_): fail("single-cycle reservation failed")
+        match ring.commit(PERF_OWNER_ID, reservation, iteration):
+            case Ok(_): ()
+            case Err(_): fail("single-cycle commit failed")
+        val provider_started = time_now_unix_micros().to_u64()
+        val submission = match provider.take_one_at(ring, provider_started):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("single-cycle provider observed no work")
+            case Err(_): fail("single-cycle provider take failed")
+        val provider_completed = time_now_unix_micros().to_u64()
+        match provider.complete_success_at(
+            ring, submission, submission.operation + 1, provider_completed):
+            case Ok(wake):
+                if wake.wake_key != task_key:
+                    fail("single-cycle wake targeted the wrong task")
+            case Err(_): fail("single-cycle completion failed")
+        val completion = match ring.take_completion(PERF_OWNER_ID):
+            case Ok(Some(value)): value
+            case Ok(nil): fail("single-cycle terminal completion missing")
+            case Err(_): fail("single-cycle completion take failed")
+        if val value = completion.value:
+            checksum = checksum + value
+        else:
+            fail("single-cycle success carried no value")
+        samples_us.push(time_now_unix_micros() - cycle_started)
+        iteration = iteration + 1
+    val elapsed_us = positive_elapsed_us(wall_started, time_now_unix_micros())
+    val telemetry = ring.telemetry()
+    val counters = provider.counters()
+    RingPerfMetrics(
+        operations: SINGLE_ITERATIONS.to_u64(), elapsed_us: elapsed_us,
+        throughput_ops_per_second: SINGLE_ITERATIONS * 1000000 / elapsed_us,
+        p50_us: percentile_nearest_rank(samples_us, 500),
+        p99_us: percentile_nearest_rank(samples_us, 990),
+        p99_9_us: percentile_nearest_rank(samples_us, 999),
+        high_water: telemetry.high_water, full_events: telemetry.full_events,
+        batches: telemetry.batches, batch_items: telemetry.batch_items,
+        provider_kicks: counters.kicks,
+        latency_samples: telemetry.completion_latency_samples,
+        caller_latency_total_us: telemetry.completion_latency_total,
+        caller_latency_max_us: telemetry.completion_latency_max,
+        checksum: checksum)
+
+fn run_batch_cycle_measurement() -> RingPerfMetrics:
+    val ring = match SimpleRing<i64, i64>.create(7202u64, PERF_OWNER_ID, BATCH_DEPTH):
+        case Ok(value): value
+        case Err(_): fail("batch-cycle ring construction failed")
+    val provider = match SoftwareRingProvider<i64, i64>.create(8202u64, BATCH_DEPTH):
+        case Ok(value): value
+        case Err(_): fail("batch-cycle provider construction failed")
+    var task_keys: [u64] = []
+    var operations: [i64] = []
+    var slot: i64 = 0
+    while slot < BATCH_DEPTH:
+        task_keys.push((9000 + slot).to_u64())
+        operations.push(slot)
+        slot = slot + 1
+    var samples_us: [i64] = []
+    var checksum: i64 = 0
+    val wall_started = time_now_unix_micros()
+    var iteration: i64 = 0
+    while iteration < BATCH_ITERATIONS:
+        val cycle_started = time_now_unix_micros()
+        match ring.commit_batch(
+            PERF_OWNER_ID, task_keys, operations, RingBatchPolicy.AllOrNothing):
+            case Ok(receipt):
+                if receipt.committed != BATCH_DEPTH.to_u64():
+                    fail("batch-cycle receipt reported the wrong item count")
+            case Err(_): fail("batch-cycle commit failed")
+        match ring.reserve(PERF_OWNER_ID, 99999u64):
+            case Err(SimpleRingError.Full): ()
+            case Err(_): fail("full batch ring returned the wrong error")
+            case Ok(_): fail("full batch ring admitted excess work")
+        slot = 0
+        while slot < BATCH_DEPTH:
+            val provider_started = time_now_unix_micros().to_u64()
+            val submission = match provider.take_one_at(ring, provider_started):
+                case Ok(Some(value)): value
+                case Ok(nil): fail("batch-cycle provider observed no work")
+                case Err(_): fail("batch-cycle provider take failed")
+            val provider_completed = time_now_unix_micros().to_u64()
+            match provider.complete_success_at(
+                ring, submission, submission.operation + 1, provider_completed):
+                case Ok(wake):
+                    if wake.wake_key != task_keys[slot]:
+                        fail("batch-cycle wake targeted the wrong task")
+                case Err(_): fail("batch-cycle completion failed")
+            slot = slot + 1
+        slot = 0
+        while slot < BATCH_DEPTH:
+            val completion = match ring.take_completion(PERF_OWNER_ID):
+                case Ok(Some(value)): value
+                case Ok(nil): fail("batch-cycle terminal completion missing")
+                case Err(_): fail("batch-cycle completion take failed")
+            if val value = completion.value:
+                checksum = checksum + value
+            else:
+                fail("batch-cycle success carried no value")
+            slot = slot + 1
+        samples_us.push(time_now_unix_micros() - cycle_started)
+        iteration = iteration + 1
+    val elapsed_us = positive_elapsed_us(wall_started, time_now_unix_micros())
+    val operation_count = (BATCH_ITERATIONS * BATCH_DEPTH).to_u64()
+    val telemetry = ring.telemetry()
+    val counters = provider.counters()
+    RingPerfMetrics(
+        operations: operation_count, elapsed_us: elapsed_us,
+        throughput_ops_per_second: operation_count.to_i64() * 1000000 / elapsed_us,
+        p50_us: percentile_nearest_rank(samples_us, 500),
+        p99_us: percentile_nearest_rank(samples_us, 990),
+        p99_9_us: percentile_nearest_rank(samples_us, 999),
+        high_water: telemetry.high_water, full_events: telemetry.full_events,
+        batches: telemetry.batches, batch_items: telemetry.batch_items,
+        provider_kicks: counters.kicks,
+        latency_samples: telemetry.completion_latency_samples,
+        caller_latency_total_us: telemetry.completion_latency_total,
+        caller_latency_max_us: telemetry.completion_latency_max,
+        checksum: checksum)
+
+fn print_measurement(lane: text, metrics: RingPerfMetrics):
+    print "simple_ring_perf lane={lane} timer=std.io_runtime.time_now_unix_micros " +
+        "runtime_required=pure-simple-self-hosted runtime_path_hash=retain-with-run " +
+        "source_revision=retain-with-run host_cpu=retain-with-run baseline=needed " +
+        "operations={metrics.operations} elapsed_us={metrics.elapsed_us} " +
+        "throughput_ops_per_second={metrics.throughput_ops_per_second} " +
+        "p50_us={metrics.p50_us} p99_us={metrics.p99_us} p99_9_us={metrics.p99_9_us} " +
+        "high_water={metrics.high_water} full_events={metrics.full_events} " +
+        "batches={metrics.batches} batch_items={metrics.batch_items} " +
+        "provider_kicks={metrics.provider_kicks} latency_samples={metrics.latency_samples} " +
+        "caller_latency_total_us={metrics.caller_latency_total_us} " +
+        "caller_latency_max_us={metrics.caller_latency_max_us} checksum={metrics.checksum}"
+
+describe "SimpleRing async base measured performance":
+    # @req: REQ-SRA-001, REQ-SRA-007, REQ-SRA-011, REQ-SRA-017, NFR-SRA-002
+    # NFR-SRA-008 input only: no retained baseline/RSS row exists yet.
+    it "records real single-cycle latency, throughput, and bounded telemetry":
+        step("Measure repeated fixed-capacity ring cycles")
+        val metrics = run_single_cycle_measurement()
+        print_measurement("single", metrics)
+        expect(metrics.operations).to_equal(SINGLE_ITERATIONS.to_u64())
+        expect(metrics.elapsed_us).to_be_greater_than(0)
+        expect(metrics.throughput_ops_per_second).to_be_greater_than(0)
+        expect(metrics.p50_us).to_be_less_than(metrics.p99_us + 1)
+        expect(metrics.p99_us).to_be_less_than(metrics.p99_9_us + 1)
+        expect(metrics.high_water).to_equal(1u64)
+        expect(metrics.full_events).to_equal(0u64)
+        expect(metrics.provider_kicks).to_equal(metrics.operations)
+        expect(metrics.latency_samples).to_equal(metrics.operations)
+        expect(metrics.checksum).to_be_greater_than(0)
+
+    # @req: REQ-SRA-003, REQ-SRA-011, REQ-SRA-017, NFR-SRA-001, NFR-SRA-002
+    # NFR-SRA-008 input only: no retained baseline/RSS row exists yet.
+    it "records full-depth batch latency, throughput, and backpressure telemetry":
+        step("Measure repeated all-or-nothing batch cycles")
+        val metrics = run_batch_cycle_measurement()
+        print_measurement("batch", metrics)
+        expect(metrics.operations).to_equal((BATCH_ITERATIONS * BATCH_DEPTH).to_u64())
+        expect(metrics.elapsed_us).to_be_greater_than(0)
+        expect(metrics.throughput_ops_per_second).to_be_greater_than(0)
+        expect(metrics.p50_us).to_be_less_than(metrics.p99_us + 1)
+        expect(metrics.p99_us).to_be_less_than(metrics.p99_9_us + 1)
+        expect(metrics.high_water).to_equal(BATCH_DEPTH.to_u64())
+        expect(metrics.full_events).to_equal(BATCH_ITERATIONS.to_u64())
+        expect(metrics.batches).to_equal(BATCH_ITERATIONS.to_u64())
+        expect(metrics.batch_items).to_equal(metrics.operations)
+        expect(metrics.provider_kicks).to_equal(metrics.operations)
+        expect(metrics.latency_samples).to_equal(metrics.operations)
+        expect(metrics.checksum).to_be_greater_than(0)

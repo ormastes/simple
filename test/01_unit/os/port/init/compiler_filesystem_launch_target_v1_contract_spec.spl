@@ -1,0 +1,67 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use os.port.init.compiler_filesystem_launch_target_v1.{
+    simpleos_compiler_fs_launch_target_v1,
+}
+
+describe "SimpleOS compiler filesystem 64-bit launch target wiring":
+    it "keeps SimpleOS and Clang target identities explicit for all production 64-bit guests":
+        val x86 = simpleos_compiler_fs_launch_target_v1("x86_64-unknown-simpleos")
+        val arm = simpleos_compiler_fs_launch_target_v1("aarch64-unknown-simpleos")
+        val rv = simpleos_compiler_fs_launch_target_v1("riscv64gc-unknown-simpleos")
+        expect(x86.valid).to_be(true)
+        expect(x86.arch).to_equal("x86_64")
+        expect(x86.platform_triple).to_equal("x86_64-unknown-simpleos")
+        expect(x86.compiler_triple).to_equal("x86_64-unknown-simpleos")
+        expect(x86.clang_isa_args.len()).to_equal(0)
+        expect(arm.valid).to_be(true)
+        expect(arm.arch).to_equal("arm64")
+        expect(arm.platform_triple).to_equal("aarch64-unknown-simpleos")
+        expect(arm.compiler_triple).to_equal("aarch64-unknown-simpleos")
+        expect(arm.clang_isa_args.len()).to_equal(0)
+        expect(rv.valid).to_be(true)
+        expect(rv.arch).to_equal("riscv64")
+        expect(rv.platform_triple).to_equal("riscv64gc-unknown-simpleos")
+        expect(rv.compiler_triple).to_equal("riscv64-unknown-simpleos")
+        expect(rv.clang_isa_args).to_equal(["-march=rv64gc", "-mabi=lp64d"])
+
+    it "rejects near misses foreign triples and every 32-bit spelling":
+        val rejected = [
+            "x86_64-unknown-simpleos-extra", "aarch64-simpleos",
+            "riscv64-unknown-simpleos", "x86_32-unknown-simpleos",
+            "i686-unknown-simpleos", "arm-unknown-simpleos",
+            "riscv32-unknown-simpleos", "x86_64-unknown-linux-gnu", "",
+        ]
+        for triple in rejected:
+            val target = simpleos_compiler_fs_launch_target_v1(triple)
+            expect(target.valid).to_be(false)
+            expect(target.arch).to_equal("")
+            expect(target.compiler_triple).to_equal("")
+            expect(target.clang_isa_args.len()).to_equal(0)
+            expect(target.reason).to_equal("unsupported-simpleos-target")
+
+    it "binds both filesystem launch paths and receipts to the validated decision":
+        val init_source = file_read("src/os/port/init/simpleos_smoke_init.spl")
+        expect(init_source).to_contain(
+            "simpleos_compiler_fs_current_launch_target_v1()")
+        expect(init_source).to_contain("val SOSIX_EVIDENCE_HOST = \"linux\"")
+        expect(init_source).to_contain(
+            "\"--target\", launch_target.compiler_triple")
+        expect(init_source).to_contain(
+            "for isa_arg in launch_target.clang_isa_args:")
+        expect(init_source).to_contain(
+            "SOSIX_EVIDENCE_HOST, launch_target.arch, nonce")
+        expect(init_source).to_contain(
+            "TRIVIAL_SELFHOST_FAIL phase=target reason={launch_target.reason}")
+        expect(init_source).to_contain(
+            "SMOKE_CLANG_FAIL phase=target reason={launch_target.reason}")
+        expect(init_source.contains("val SOSIX_EVIDENCE_ARCH = \"x86_64\"")).to_be(false)
+        expect(init_source.contains("env_get(\"SIMPLEOS_TARGET_TRIPLE\")")).to_be(false)
+
+    it "uses the architecture-local guest identity already owned by crt0 and libc":
+        val target_source = file_read(
+            "src/os/port/init/compiler_filesystem_launch_target_v1.spl")
+        val guest_target_source = file_read("src/app/simpleos_tool/guest_target.spl")
+        expect(target_source).to_contain("simpleos_guest_target_current()")
+        expect(guest_target_source).to_contain(
+            "simpleos_guest_target_for_arch_id(simpleos_guest_arch_id())")

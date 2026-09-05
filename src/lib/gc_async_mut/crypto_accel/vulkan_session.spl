@@ -1,0 +1,384 @@
+# Crypto-owned persistent Vulkan compute session for pinned SPIR-V modules.
+# The session never compiles GLSL and retains resources when completion is
+# unknown, preventing unsafe release after a possibly submitted command.
+
+mod std.gc_async_mut.crypto_accel.vulkan_session
+
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_init, vulkan_sffi_shutdown_reaped,
+    vulkan_sffi_is_available, vulkan_sffi_device_count,
+    vulkan_sffi_select_device, vulkan_sffi_device_type,
+    vulkan_sffi_device_name,
+    vulkan_sffi_selected_device_driver_identity,
+    vulkan_sffi_selected_device_driver_identity_hash,
+    vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
+    vulkan_sffi_copy_to_buffer, vulkan_sffi_read_buffer_bytes,
+    vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
+    vulkan_sffi_create_compute_pipeline, vulkan_sffi_destroy_pipeline,
+    vulkan_sffi_create_descriptor_set, vulkan_sffi_bind_buffer,
+    vulkan_sffi_destroy_descriptor_set, vulkan_sffi_begin_compute,
+    vulkan_sffi_bind_pipeline, vulkan_sffi_bind_descriptors,
+    vulkan_sffi_push_constants, vulkan_sffi_dispatch,
+    vulkan_sffi_end_compute, vulkan_sffi_discard_command,
+    vulkan_sffi_fence_submission_supported,
+    vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
+    vulkan_sffi_destroy_fence, vulkan_sffi_reap_dependency_quarantine}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_quarantine_dependencies,
+    vulkan_sffi_quarantine_unsubmitted_command,
+    vulkan_sffi_recover_dependency_quarantine}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+val _CRYPTO_VULKAN_STORAGE_BUFFER: i64 = 0x80
+
+fn _vulkan_u32_le(value: i64) -> [u8]:
+    [
+        (value & 0xFF).to_u8(),
+        ((value >> 8) & 0xFF).to_u8(),
+        ((value >> 16) & 0xFF).to_u8(),
+        ((value >> 24) & 0xFF).to_u8()
+    ]
+
+class CryptoVulkanSession:
+    device_ordinal: i64
+    forward_shader: i64
+    inverse_shader: i64
+    forward_pipeline: i64
+    inverse_pipeline: i64
+    input_buffer: i64
+    output_buffer: i64
+    zeta_buffer: i64
+    zeta_digest: text
+    capacity_bytes: i64
+    initialized: bool
+    completion_unknown: bool
+    release_pending: bool
+    device_identity: i64
+    device_name: text
+    driver_identity: text
+    generation: i64
+    pending_fence: i64
+    quarantine_retry_attempts: i64
+    last_quarantine_retry_reason: text
+
+    static fn create() -> CryptoVulkanSession:
+        CryptoVulkanSession.create_for_device(0)
+
+    static fn create_for_device(device_ordinal: i64) -> CryptoVulkanSession:
+        CryptoVulkanSession(
+            device_ordinal: device_ordinal,
+            forward_shader: 0, inverse_shader: 0,
+            forward_pipeline: 0, inverse_pipeline: 0,
+            input_buffer: 0, output_buffer: 0, zeta_buffer: 0,
+            zeta_digest: "",
+            capacity_bytes: 0, initialized: false,
+            completion_unknown: false, release_pending: false,
+            device_identity: 0, device_name: "", driver_identity: "",
+            generation: 0,
+            pending_fence: 0, quarantine_retry_attempts: 0,
+            last_quarantine_retry_reason: "")
+
+    me init(forward_spirv: [u8], inverse_spirv: [u8], entry: text) -> text:
+        if self.initialized or self.completion_unknown or self.release_pending:
+            return "vulkan-session-state-invalid"
+        if forward_spirv.len() < 4 or inverse_spirv.len() < 4 or entry == "":
+            return "vulkan-binary-artifact-invalid"
+        if self.device_ordinal < 0:
+            return "vulkan-device-ordinal-invalid"
+        val vulkan_missing = not vulkan_sffi_is_available()
+        if vulkan_missing:
+            return "vulkan-unavailable"
+        val initialization_failed = not vulkan_sffi_init()
+        if initialization_failed:
+            return "vulkan-unavailable"
+        val device_count = vulkan_sffi_device_count()
+        if device_count < 1:
+            return "vulkan-unavailable"
+        if self.device_ordinal >= device_count:
+            return "vulkan-device-ordinal-unavailable"
+        if not vulkan_sffi_select_device(self.device_ordinal):
+            self.shutdown()
+            return "vulkan-device-select-failed"
+        val device_type = vulkan_sffi_device_type(self.device_ordinal)
+        if device_type != "discrete" and device_type != "integrated":
+            self.shutdown()
+            return "vulkan-physical-device-required"
+        self.device_identity =
+            vulkan_sffi_selected_device_driver_identity_hash()
+        self.device_name = vulkan_sffi_device_name(self.device_ordinal)
+        self.driver_identity =
+            vulkan_sffi_selected_device_driver_identity()
+        if (self.device_identity <= 0 or self.device_name == "" or
+                self.driver_identity == ""):
+            self.shutdown()
+            return "vulkan-device-identity-unavailable"
+        self.forward_shader = vulkan_sffi_compile_spirv(forward_spirv)
+        self.inverse_shader = vulkan_sffi_compile_spirv(inverse_spirv)
+        if self.forward_shader <= 0 or self.inverse_shader <= 0:
+            self.shutdown()
+            return "vulkan-shader-load-failed"
+        self.forward_pipeline = vulkan_sffi_create_compute_pipeline(
+            self.forward_shader, entry, 8)
+        self.inverse_pipeline = vulkan_sffi_create_compute_pipeline(
+            self.inverse_shader, entry, 8)
+        if self.forward_pipeline <= 0 or self.inverse_pipeline <= 0:
+            self.shutdown()
+            return "vulkan-pipeline-create-failed"
+        self.initialized = true
+        self.generation = self.generation + 1
+        ""
+
+    me _release_buffers() -> bool:
+        if self.completion_unknown or self.release_pending:
+            return false
+        if not self._clear_data_buffers():
+            return false
+        if self.input_buffer > 0:
+            if vulkan_sffi_free_buffer(self.input_buffer):
+                self.input_buffer = 0
+        if self.output_buffer > 0:
+            if vulkan_sffi_free_buffer(self.output_buffer):
+                self.output_buffer = 0
+        if self.zeta_buffer > 0:
+            if vulkan_sffi_free_buffer(self.zeta_buffer):
+                self.zeta_buffer = 0
+        val released = (self.input_buffer == 0 and
+            self.output_buffer == 0 and self.zeta_buffer == 0)
+        if released:
+            self.capacity_bytes = 0
+            self.zeta_digest = ""
+        released
+
+    me _clear_data_buffers() -> bool:
+        if self.capacity_bytes <= 0:
+            return true
+        var zeros: [u8] = []
+        var index: i64 = 0
+        while index < self.capacity_bytes:
+            zeros.push(0u8)
+            index = index + 1
+        val input_clear = self.input_buffer <= 0 or
+            vulkan_sffi_copy_to_buffer(self.input_buffer, zeros, 0)
+        val output_clear = self.output_buffer <= 0 or
+            vulkan_sffi_copy_to_buffer(self.output_buffer, zeros, 0)
+        val cleared = input_clear and output_clear
+        if not cleared:
+            # Retain the buffers and make the session terminal until an
+            # explicit device-idle recovery can prove a safe retry.
+            self.release_pending = true
+        cleared
+
+    me _ensure_capacity(byte_count: i64, zeta_bytes: [u8]) -> bool:
+        if zeta_bytes.len() != 512:
+            return false
+        val requested_zeta_digest = sha256_u8_hex(zeta_bytes)
+        if (self.capacity_bytes >= byte_count and self.input_buffer > 0 and
+                self.output_buffer > 0 and self.zeta_buffer > 0 and
+                self.zeta_digest == requested_zeta_digest):
+            return true
+        if not self._release_buffers():
+            return false
+        self.input_buffer = vulkan_sffi_alloc_buffer(
+            byte_count, _CRYPTO_VULKAN_STORAGE_BUFFER)
+        self.output_buffer = vulkan_sffi_alloc_buffer(
+            byte_count, _CRYPTO_VULKAN_STORAGE_BUFFER)
+        self.zeta_buffer = vulkan_sffi_alloc_buffer(
+            zeta_bytes.len().to_i64(), _CRYPTO_VULKAN_STORAGE_BUFFER)
+        self.capacity_bytes = byte_count
+        val data_buffer_missing = self.input_buffer <= 0 or self.output_buffer <= 0
+        val zeta_buffer_missing = self.zeta_buffer <= 0
+        if data_buffer_missing or zeta_buffer_missing:
+            self._release_buffers()
+            return false
+        val zeta_copied = vulkan_sffi_copy_to_buffer(
+            self.zeta_buffer, zeta_bytes, 0)
+        if zeta_copied:
+            self.zeta_digest = requested_zeta_digest
+        zeta_copied
+
+    me prepare_buffers(byte_count: i64, zeta_bytes: [u8]) -> text:
+        """Allocate persistent measurement buffers without submitting work."""
+        if (not self.initialized or self.completion_unknown or
+                self.release_pending):
+            return "vulkan-session-unavailable"
+        if (byte_count <= 0 or byte_count > 65535 * 1024 or
+                zeta_bytes.len() != 512):
+            return "vulkan-buffer-preparation-invalid"
+        if not self._ensure_capacity(byte_count, zeta_bytes):
+            return "vulkan-buffer-allocation-failed"
+        ""
+
+    me execute(input: [u8], zetas: [u8], polynomial_count: i64,
+            inverse: bool) -> Result<[u8], text>:
+        if (not self.initialized or self.completion_unknown or
+                self.release_pending):
+            return Err("vulkan-session-unavailable")
+        val invalid_polynomial_count = polynomial_count <= 0
+        if invalid_polynomial_count:
+            return Err("vulkan-input-size-invalid")
+        val invalid_input_size = input.len().to_i64() != polynomial_count * 1024
+        if invalid_input_size:
+            return Err("vulkan-input-size-invalid")
+        if zetas.len() != 512:
+            return Err("vulkan-zeta-table-invalid")
+        val quarantine_failed = not vulkan_sffi_reap_dependency_quarantine()
+        if quarantine_failed:
+            return Err("vulkan-fenced-submit-unavailable")
+        val fence_unavailable = not vulkan_sffi_fence_submission_supported()
+        if fence_unavailable:
+            return Err("vulkan-fenced-submit-unavailable")
+        if not self._ensure_capacity(input.len().to_i64(), zetas):
+            return Err("vulkan-buffer-allocation-failed")
+        if not vulkan_sffi_copy_to_buffer(self.input_buffer, input, 0):
+            val _cleared = self._clear_data_buffers()
+            return Err("vulkan-upload-failed")
+        val pipeline = if inverse:
+            self.inverse_pipeline
+        else:
+            self.forward_pipeline
+        val descriptor = vulkan_sffi_create_descriptor_set(pipeline)
+        if descriptor <= 0:
+            val _cleared = self._clear_data_buffers()
+            return Err("vulkan-descriptor-create-failed")
+        var ready = vulkan_sffi_bind_buffer(
+            descriptor, 0, self.input_buffer)
+        if ready:
+            ready = vulkan_sffi_bind_buffer(
+                descriptor, 1, self.output_buffer)
+        if ready:
+            ready = vulkan_sffi_bind_buffer(
+                descriptor, 2, self.zeta_buffer)
+        var command: i64 = 0
+        if ready:
+            command = vulkan_sffi_begin_compute()
+            ready = command > 0
+        if ready:
+            ready = vulkan_sffi_bind_pipeline(command, pipeline)
+        if ready:
+            ready = vulkan_sffi_bind_descriptors(command, descriptor)
+        if ready:
+            var push = _vulkan_u32_le(polynomial_count)
+            val stages = _vulkan_u32_le(7)
+            var i: i64 = 0
+            while i < stages.len().to_i64():
+                push.push(stages[i])
+                i = i + 1
+            ready = vulkan_sffi_push_constants(command, pipeline, push)
+        if ready:
+            ready = vulkan_sffi_dispatch(
+                command, polynomial_count, 1, 1)
+        if ready:
+            ready = vulkan_sffi_end_compute(command)
+        if not ready:
+            if command > 0:
+                val discarded = vulkan_sffi_discard_command(command)
+                if not discarded:
+                    vulkan_sffi_quarantine_unsubmitted_command(
+                        command, descriptor, 0)
+                    self.completion_unknown = true
+                    self.release_pending = true
+                    return Err("vulkan-command-release-unknown")
+            val descriptor_destroyed =
+                vulkan_sffi_destroy_descriptor_set(descriptor)
+            if not descriptor_destroyed:
+                vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+                self.release_pending = true
+                return Err("vulkan-command-cleanup-pending")
+            if not self._clear_data_buffers():
+                return Err("vulkan-buffer-clear-failed")
+            return Err("vulkan-command-record-failed")
+        val fence = vulkan_sffi_submit_and_wait_fence(command)
+        if fence < 0:
+            vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+            self.completion_unknown = true
+            self.release_pending = true
+            return Err("vulkan-submit-completion-unknown")
+        if fence == 0:
+            val _descriptor_destroyed =
+                vulkan_sffi_destroy_descriptor_set(descriptor)
+            if not self._clear_data_buffers():
+                return Err("vulkan-buffer-clear-failed")
+            return Err("vulkan-submit-failed")
+        val completed = vulkan_sffi_wait_fence(fence, 0)
+        if not completed:
+            self.pending_fence = fence
+            vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+            self.completion_unknown = true
+            self.release_pending = true
+            return Err("vulkan-fence-wait-failed")
+        val fence_destroyed = vulkan_sffi_destroy_fence(fence)
+        val descriptor_destroyed =
+            vulkan_sffi_destroy_descriptor_set(descriptor)
+        if not fence_destroyed:
+            self.pending_fence = fence
+            self.release_pending = true
+        if not descriptor_destroyed:
+            vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+            self.release_pending = true
+        if self.release_pending:
+            val _cleared = self._clear_data_buffers()
+            return Err("vulkan-completion-cleanup-pending")
+        val output = vulkan_sffi_read_buffer_bytes(
+            self.output_buffer, input.len().to_i64(), 0)
+        if not self._clear_data_buffers():
+            return Err("vulkan-buffer-clear-failed")
+        if output.len() != input.len():
+            return Err("vulkan-device-readback-failed")
+        Ok(output)
+
+    me retry_terminal_completion() -> text:
+        if not self.completion_unknown and not self.release_pending:
+            self.last_quarantine_retry_reason = "vulkan-quarantine-not-pending"
+            return self.last_quarantine_retry_reason
+        self.quarantine_retry_attempts = self.quarantine_retry_attempts + 1
+        if not vulkan_sffi_recover_dependency_quarantine():
+            self.last_quarantine_retry_reason =
+                "vulkan-quarantine-device-idle-unproven"
+            return self.last_quarantine_retry_reason
+        if not self._clear_data_buffers():
+            self.last_quarantine_retry_reason =
+                "vulkan-quarantine-buffer-clear-failed"
+            return self.last_quarantine_retry_reason
+        if (self.pending_fence > 0 and
+                not vulkan_sffi_destroy_fence(self.pending_fence)):
+            self.last_quarantine_retry_reason =
+                "vulkan-quarantine-fence-release-pending"
+            return self.last_quarantine_retry_reason
+        self.pending_fence = 0
+        self.completion_unknown = false
+        self.release_pending = false
+        self.last_quarantine_retry_reason = "vulkan-quarantine-retry-complete"
+        self.last_quarantine_retry_reason
+
+    me shutdown() -> text:
+        if self.completion_unknown or self.release_pending:
+            return "vulkan-session-cleanup-pending"
+        if not self._release_buffers():
+            return "vulkan-session-buffer-release-pending"
+        if self.forward_pipeline > 0:
+            if vulkan_sffi_destroy_pipeline(self.forward_pipeline):
+                self.forward_pipeline = 0
+        if self.inverse_pipeline > 0:
+            if vulkan_sffi_destroy_pipeline(self.inverse_pipeline):
+                self.inverse_pipeline = 0
+        if self.forward_pipeline > 0 or self.inverse_pipeline > 0:
+            return "vulkan-session-pipeline-release-pending"
+        if self.forward_shader > 0:
+            if vulkan_sffi_destroy_shader(self.forward_shader):
+                self.forward_shader = 0
+        if self.inverse_shader > 0:
+            if vulkan_sffi_destroy_shader(self.inverse_shader):
+                self.inverse_shader = 0
+        if self.forward_shader > 0 or self.inverse_shader > 0:
+            return "vulkan-session-shader-release-pending"
+        if not vulkan_sffi_shutdown_reaped():
+            return "vulkan-session-global-shutdown-pending"
+        self.initialized = false
+        self.device_identity = 0
+        self.device_name = ""
+        self.driver_identity = ""
+        self.pending_fence = 0
+        self.release_pending = false
+        ""
+
+export CryptoVulkanSession

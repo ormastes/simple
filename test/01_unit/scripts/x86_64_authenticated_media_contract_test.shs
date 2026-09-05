@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+fail() { echo "x86-64-auth-media-contract: $*" >&2; exit 1; }
+fixture=src/os/kernel/loader/x86_64_authenticated_media_fixture.spl
+spawn=src/os/kernel/loader/x86_64_fs_exec_spawn.spl
+entry=examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl
+builder=scripts/os/build_x86_64_authenticated_fsexec.shs
+roundtrip=test/02_integration/os/x86_64_authenticated_media_roundtrip_test.shs
+grep -q 'open_for_execute(executable_path' "$fixture" || fail 'caller-bound execute-open absent'
+grep -q '_canonical_media_sidecar_set_v1' "$fixture" || fail 'canonical path tuple gate absent'
+grep -q 'if executable_path == "/FSEXEC.ELF"' "$fixture" || fail 'hello caller path absent'
+grep -q 'if executable_path == "/SERVERS.ELF"' "$fixture" || fail 'server caller path absent'
+grep -q '^    false$' "$fixture" || fail 'arbitrary executable path does not fail closed'
+grep -q 'executable_loader_admit_authenticated_open_binding_v1' "$fixture" || fail 'loader admission absent'
+grep -q 'x86_64_authenticated_pinned_public_key_hex_v1' "$fixture" || fail 'immutable trust pin absent'
+grep -q 'file_generation.unwrap() != binding.content_generation' "$fixture" || fail 'live file generation not bound'
+grep -q 'fs_exec_adopt_authenticated_v1' "$spawn" || fail 'scheduler consumer absent'
+grep -q 'fs_exec_spawn_as(0, path, argv, envp)' "$spawn" || fail 'path-only denial facade changed'
+grep -q 'x86_64_authenticated_media_execute_v1(Scheduler.new(), g_mount_table)' "$entry" || fail 'boot entry bypasses authenticated consumer'
+grep -q 'scheduler, table, "/FSEXEC.ELF", "/AUTHHEL.MAN", "/AUTHHEL.ADM"' "$fixture" || fail 'canonical boot caller tuple absent'
+grep -q 'hello from SimpleOS LLVM' "$builder" || fail 'real hello payload absent'
+grep -q 'host-vs-Simple authenticated media roundtrip' "$roundtrip" || fail 'roundtrip oracle absent'
+if grep -q '__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__' "$builder"; then
+    fail 'signed executable must not be mutated by nonce patching'
+fi
+echo 'PASS x86_64 authenticated media contract'

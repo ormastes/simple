@@ -1,0 +1,655 @@
+# @feature simplebox.filesystem-applets
+# Streaming filesystem applets for the filesystem-launched SimpleOS simplebox.
+
+use os.userlib.fs.{
+    file_open_direct, file_read_direct, file_write_direct, file_write_progress_direct, file_close_direct,
+    file_sync_direct, file_rename_direct, list_directory_bounded, readlink
+}
+use os.userlib.ipc_protocol.{
+    VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC, VFS_OPEN_O_APPEND
+}
+use nogc_async_mut_noalloc.path.{bm_path_normalize}
+use os.kernel.types.fs_types.{DirEntry}
+use os.libc.simpleos_string.{libc_strcmp}
+
+@unsafe(reason: "foreign stdout provider is not artifact-verified", capabilities: [ffi])
+extern fn stdout_write(data: text)
+
+@always_inline
+fn _simplebox_stdout_write(data: text):
+    unsafe(capabilities: [ffi]):
+        stdout_write(data)
+
+pub const SIMPLEBOX_FILE_LIMIT: i64 = 128
+pub const SIMPLEBOX_FILE_BYTES_LIMIT: u64 = 67108864u64
+pub const SIMPLEBOX_READ_CHUNK_BYTES: u64 = 65536u64
+pub const SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT: u64 = 4096u64
+pub const SIMPLEBOX_TAIL_LINE_LIMIT: i64 = 1000000
+
+pub fn simplebox_readlink(args: [text]) -> i32:
+    """Print one bounded symbolic-link target through canonical VFS IPC."""
+    if args.len() == 0u64:
+        _simplebox_stdout_write("readlink: missing operand\n")
+        return 1
+    if args.len() > 1u64:
+        _simplebox_stdout_write("readlink: too many operands\n")
+        return 1
+    val path = args[0]
+    if path.len() == 0u64 or path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+        _simplebox_stdout_write("readlink: invalid path length\n")
+        return 1
+    match readlink(path):
+        case Err(reason):
+            _simplebox_stdout_write("readlink: " + path + ": " + reason + "\n")
+            1
+        case Ok(target):
+            _simplebox_stdout_write(target + "\n")
+            0
+
+pub struct SimpleboxWordCount:
+    lines: u64
+    words: u64
+    bytes: u64
+    in_word: bool
+
+pub fn simplebox_count_bytes(prior: SimpleboxWordCount, chunk: [u8]) -> SimpleboxWordCount:
+    # POSIX-byte semantics: LF counts lines; SP, HT, LF, CR, VT and FF delimit
+    # words. Every other byte, including non-UTF-8 bytes, belongs to a word.
+    var lines = prior.lines
+    var words = prior.words
+    var in_word = prior.in_word
+    for byte in chunk:
+        if byte == 10u8:
+            lines = lines + 1u64
+        val whitespace = (byte == 32u8 or byte == 9u8 or byte == 10u8 or
+            byte == 13u8 or byte == 11u8 or byte == 12u8)
+        if whitespace:
+            in_word = false
+        elif not in_word:
+            words = words + 1u64
+            in_word = true
+    SimpleboxWordCount(lines: lines, words: words,
+        bytes: prior.bytes + chunk.len(), in_word: in_word)
+
+pub fn simplebox_head_prefix_bytes(chunk: [u8], remaining_lines: i64) -> (u64, i64, bool):
+    if remaining_lines <= 0:
+        return (0u64, 0, true)
+    var lines = remaining_lines
+    var index: u64 = 0u64
+    while index < chunk.len():
+        if chunk[index] == 10u8:
+            lines = lines - 1
+            if lines == 0:
+                return (index + 1u64, 0, true)
+        index = index + 1u64
+    (chunk.len(), lines, false)
+
+fn _write_stdout_bytes(bytes: [u8]) -> Result<bool, text>:
+    var offset: u64 = 0u64
+    while offset < bytes.len():
+        val remaining = bytes.slice(offset as i64, bytes.len() as i64)
+        match file_write_direct(1, remaining):
+            case Err(reason): return Err(reason)
+            case Ok(count):
+                if count == 0u64 or count > remaining.len():
+                    return Err("write made invalid progress")
+                offset = offset + count
+    Ok(true)
+
+fn _write_all_direct(fd: i32, bytes: [u8]) -> Result<bool, text>:
+    var offset: u64 = 0u64
+    while offset < bytes.len():
+        val remaining = bytes.slice(offset, bytes.len())
+        match file_write_progress_direct(fd, remaining):
+            case Err(reason): return Err(reason)
+            case Ok(count):
+                if count == 0u64:
+                    return Err("write made no progress")
+                offset = offset + count
+    Ok(true)
+
+fn _tee_close_outputs(fds: [i32]) -> bool:
+    var closed = true
+    for fd in fds:
+        if not file_close_direct(fd):
+            closed = false
+    closed
+
+pub fn simplebox_tee(args: [text]) -> i32:
+    """Copy bounded stdin to stdout and each named file.
+
+    `-a` selects append; the default creates or truncates. Input, operand
+    count, and path sizes share Simplebox's filesystem bounds. Every output
+    retries partial writes and rejects a zero-progress descriptor.
+    """
+    var append = false
+    var start: u64 = 0u64
+    if args.len() > 0u64 and args[0] == "-a":
+        append = true
+        start = 1u64
+    elif args.len() > 0u64 and args[0].starts_with("-") and args[0] != "--":
+        _simplebox_stdout_write("tee: unsupported option: " + args[0] + "\n")
+        return 1
+    elif args.len() > 0u64 and args[0] == "--":
+        start = 1u64
+    if args.len() - start > SIMPLEBOX_FILE_LIMIT:
+        _simplebox_stdout_write("tee: too many files\n")
+        return 1
+
+    var outputs: [i32] = []
+    val flags = VFS_OPEN_O_WRONLY | VFS_OPEN_O_CREAT |
+        (if append: VFS_OPEN_O_APPEND else: VFS_OPEN_O_TRUNC)
+    var index = start
+    while index < args.len():
+        val path = args[index]
+        if path.len() == 0u64 or path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+            val _closed = _tee_close_outputs(outputs)
+            _simplebox_stdout_write("tee: invalid path length\n")
+            return 1
+        match file_open_direct(path, flags):
+            case Err(reason):
+                val _closed = _tee_close_outputs(outputs)
+                _simplebox_stdout_write("tee: " + path + ": " + reason + "\n")
+                return 1
+            case Ok(fd): outputs.push(fd)
+        index = index + 1u64
+
+    var consumed: u64 = 0u64
+    var failure = ""
+    var complete = false
+    while not complete and failure == "":
+        match file_read_direct(0, SIMPLEBOX_READ_CHUNK_BYTES):
+            case Err(reason): failure = "stdin: " + reason
+            case Ok(chunk):
+                if chunk.len() == 0u64:
+                    complete = true
+                elif consumed + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                    failure = "input exceeds simplebox byte limit"
+                else:
+                    match _write_all_direct(1, chunk):
+                        case Err(reason): failure = "stdout: " + reason
+                        case Ok(_):
+                            for fd in outputs:
+                                if failure == "":
+                                    match _write_all_direct(fd, chunk):
+                                        case Err(reason): failure = reason
+                                        case Ok(_): ()
+                            if failure == "":
+                                consumed = consumed + chunk.len()
+    if not _tee_close_outputs(outputs) and failure == "":
+        failure = "close failed"
+    if failure != "":
+        _simplebox_stdout_write("tee: " + failure + "\n")
+        return 1
+    0
+
+fn _file_args_with_limit(command: text, args: [text]) -> Result<[text], text>:
+    if args.len() == 0:
+        return Err("{command}: missing file operand")
+    if args.len() > SIMPLEBOX_FILE_LIMIT:
+        return Err("{command}: too many files")
+    Ok(args)
+
+fn _close_result(fd: i32, prior_error: text) -> text:
+    val closed = file_close_direct(fd)
+    if prior_error != "":
+        return prior_error
+    if not closed:
+        return "close failed"
+    ""
+
+pub fn simplebox_cat(args: [text]) -> i32:
+    val checked = _file_args_with_limit("cat", args)
+    match checked:
+        case Err(reason):
+            _simplebox_stdout_write(reason + "\n")
+            1
+        case Ok(paths):
+            for path in paths:
+                val opened = file_open_direct(path, 0u32)
+                match opened:
+                    case Err(reason):
+                        _simplebox_stdout_write("cat: " + path + ": " + reason + "\n")
+                        return 1
+                    case Ok(fd):
+                        var consumed: u64 = 0u64
+                        var failure = ""
+                        var complete = false
+                        while not complete and failure == "":
+                            val read = file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES)
+                            match read:
+                                case Err(reason): failure = reason
+                                case Ok(chunk):
+                                    if chunk.len() == 0u64:
+                                        complete = true
+                                    elif consumed + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                                        failure = "file exceeds simplebox byte limit"
+                                    else:
+                                        val write = _write_stdout_bytes(chunk)
+                                        match write:
+                                            case Err(reason): failure = "stdout: " + reason
+                                            case Ok(_): consumed = consumed + chunk.len()
+                        failure = _close_result(fd, failure)
+                        if failure != "":
+                            _simplebox_stdout_write("cat: " + path + ": " + failure + "\n")
+                            return 1
+            0
+
+fn _parse_head_args(args: [text]) -> Result<(i64, [text]), text>:
+    var line_limit: i64 = 10
+    var start: u64 = 0u64
+    if args.len() >= 2u64 and args[0] == "-n":
+        val parsed = args[1].parse_i64()
+        if parsed == nil or parsed.unwrap() < 0:
+            return Err("head: invalid line count")
+        line_limit = parsed.unwrap()
+        start = 2u64
+    val checked = _file_args_with_limit("head", args.slice(start, args.len()))
+    match checked:
+        case Err(reason): Err(reason)
+        case Ok(paths): Ok((line_limit, paths))
+
+pub fn simplebox_head(args: [text]) -> i32:
+    val parsed = _parse_head_args(args)
+    match parsed:
+        case Err(reason):
+            _simplebox_stdout_write(reason + "\n")
+            1
+        case Ok((line_limit, paths)):
+            for path in paths:
+                val opened = file_open_direct(path, 0u32)
+                match opened:
+                    case Err(reason):
+                        _simplebox_stdout_write("head: " + path + ": " + reason + "\n")
+                        return 1
+                    case Ok(fd):
+                        var remaining = line_limit
+                        var consumed: u64 = 0u64
+                        var failure = ""
+                        var complete = remaining == 0
+                        while not complete and failure == "":
+                            val read = file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES)
+                            match read:
+                                case Err(reason): failure = reason
+                                case Ok(chunk):
+                                    if chunk.len() == 0u64:
+                                        complete = true
+                                    elif consumed + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                                        failure = "file exceeds simplebox byte limit"
+                                    else:
+                                        val (prefix_len, next_remaining, reached) = simplebox_head_prefix_bytes(chunk, remaining)
+                                        val write = _write_stdout_bytes(chunk.slice(0u64, prefix_len))
+                                        match write:
+                                            case Err(reason): failure = "stdout: " + reason
+                                            case Ok(_):
+                                                consumed = consumed + chunk.len()
+                                                remaining = next_remaining
+                                                complete = reached
+                        failure = _close_result(fd, failure)
+                        if failure != "":
+                            _simplebox_stdout_write("head: " + path + ": " + failure + "\n")
+                            return 1
+            0
+
+fn _parse_tail_args(args: [text]) -> Result<(i64, [text]), text>:
+    var line_limit: i64 = 10
+    var start: u64 = 0u64
+    if args.len() >= 2u64 and args[0] == "-n":
+        val parsed = args[1].parse_i64()
+        if parsed == nil or parsed.unwrap() < 0 or parsed.unwrap() > SIMPLEBOX_TAIL_LINE_LIMIT:
+            return Err("tail: invalid line count")
+        line_limit = parsed.unwrap()
+        start = 2u64
+    val checked = _file_args_with_limit("tail", args.slice(start, args.len()))
+    match checked:
+        case Err(reason): Err(reason)
+        case Ok(paths): Ok((line_limit, paths))
+
+fn _tail_start_offset(chunks: [[u8]], total_bytes: u64, line_limit: i64) -> u64:
+    if line_limit == 0 or total_bytes == 0u64:
+        return total_bytes
+    var remaining = line_limit
+    var global_end = total_bytes
+    var chunk_index = chunks.len()
+    # A terminal LF closes the final requested line; do not treat the empty
+    # position after it as an extra line.
+    var skip_terminal_lf = true
+    while chunk_index > 0u64:
+        chunk_index = chunk_index - 1u64
+        val chunk = chunks[chunk_index]
+        var index = chunk.len()
+        while index > 0u64:
+            index = index - 1u64
+            val byte = chunk[index]
+            if skip_terminal_lf and byte == 10u8:
+                skip_terminal_lf = false
+            else:
+                skip_terminal_lf = false
+                if byte == 10u8:
+                    remaining = remaining - 1
+                    if remaining == 0:
+                        return global_end - chunk.len() + index + 1u64
+        global_end = global_end - chunk.len()
+    0u64
+
+fn _write_tail_chunks(chunks: [[u8]], start_offset: u64) -> Result<bool, text>:
+    var base: u64 = 0u64
+    for chunk in chunks:
+        val chunk_end = base + chunk.len()
+        if chunk_end > start_offset:
+            val local_start = if start_offset > base: start_offset - base else: 0u64
+            val write = _write_stdout_bytes(chunk.slice(local_start, chunk.len()))
+            match write:
+                case Err(reason): return Err(reason)
+                case Ok(_): ()
+        base = chunk_end
+    Ok(true)
+
+pub fn simplebox_tail(args: [text]) -> i32:
+    """Print the last ten lines by default, bounded through canonical VFS IPC."""
+    val parsed = _parse_tail_args(args)
+    match parsed:
+        case Err(reason):
+            _simplebox_stdout_write(reason + "\n")
+            1
+        case Ok((line_limit, paths)):
+            for path in paths:
+                val opened = file_open_direct(path, 0u32)
+                match opened:
+                    case Err(reason):
+                        _simplebox_stdout_write("tail: " + path + ": " + reason + "\n")
+                        return 1
+                    case Ok(fd):
+                        var chunks: [[u8]] = []
+                        var consumed: u64 = 0u64
+                        var failure = ""
+                        var complete = false
+                        while not complete and failure == "":
+                            val read = file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES)
+                            match read:
+                                case Err(reason): failure = reason
+                                case Ok(chunk):
+                                    if chunk.len() == 0u64:
+                                        complete = true
+                                    elif consumed + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                                        failure = "file exceeds simplebox byte limit"
+                                    else:
+                                        consumed = consumed + chunk.len()
+                                        chunks.push(chunk)
+                        failure = _close_result(fd, failure)
+                        if failure == "":
+                            val start_offset = _tail_start_offset(chunks, consumed, line_limit)
+                            match _write_tail_chunks(chunks, start_offset):
+                                case Err(reason): failure = "stdout: " + reason
+                                case Ok(_): ()
+                        if failure != "":
+                            _simplebox_stdout_write("tail: " + path + ": " + failure + "\n")
+                            return 1
+            0
+
+fn _wc_line(count: SimpleboxWordCount, path: text) -> text:
+    "{count.lines} {count.words} {count.bytes} {path}\n"
+
+pub fn simplebox_wc(args: [text]) -> i32:
+    val checked = _file_args_with_limit("wc", args)
+    match checked:
+        case Err(reason):
+            _simplebox_stdout_write(reason + "\n")
+            1
+        case Ok(paths):
+            var total = SimpleboxWordCount(lines: 0u64, words: 0u64, bytes: 0u64, in_word: false)
+            for path in paths:
+                val opened = file_open_direct(path, 0u32)
+                match opened:
+                    case Err(reason):
+                        _simplebox_stdout_write("wc: " + path + ": " + reason + "\n")
+                        return 1
+                    case Ok(fd):
+                        var count = SimpleboxWordCount(lines: 0u64, words: 0u64, bytes: 0u64, in_word: false)
+                        var failure = ""
+                        var complete = false
+                        while not complete and failure == "":
+                            val read = file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES)
+                            match read:
+                                case Err(reason): failure = reason
+                                case Ok(chunk):
+                                    if chunk.len() == 0u64:
+                                        complete = true
+                                    elif count.bytes + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                                        failure = "file exceeds simplebox byte limit"
+                                    else:
+                                        count = simplebox_count_bytes(count, chunk)
+                        failure = _close_result(fd, failure)
+                        if failure != "":
+                            _simplebox_stdout_write("wc: " + path + ": " + failure + "\n")
+                            return 1
+                        _simplebox_stdout_write(_wc_line(count, path))
+                        total = SimpleboxWordCount(lines: total.lines + count.lines,
+                            words: total.words + count.words, bytes: total.bytes + count.bytes,
+                            in_word: false)
+            if paths.len() > 1u64:
+                _simplebox_stdout_write(_wc_line(total, "total"))
+            0
+
+pub fn simplebox_basename_value(path: text, suffix: text) -> text:
+    """Return the final path component after bounded caller admission.
+
+    Trailing slashes are ignored, except that an all-slash path names `/`.
+    A non-empty suffix is removed only when it is a proper suffix, preserving
+    the conventional `basename foo foo` result of `foo`.
+    """
+    if path == "":
+        return ""
+    var end = path.len()
+    while end > 1u64 and path.byte_at(end - 1u64) == 47u8:
+        end = end - 1u64
+    if end == 1u64 and path.byte_at(0u64) == 47u8:
+        return "/"
+    var start = end
+    while start > 0u64 and path.byte_at(start - 1u64) != 47u8:
+        start = start - 1u64
+    val component = path.slice(start, end)
+    if suffix != "" and component.len() > suffix.len() and component.ends_with(suffix):
+        return component.slice(0u64, component.len() - suffix.len())
+    component
+
+pub fn simplebox_basename(args: [text]) -> i32:
+    """Print one bounded path basename with an optional literal suffix."""
+    if args.len() == 0u64:
+        _simplebox_stdout_write("basename: missing operand\n")
+        return 1
+    if args.len() > 2u64:
+        _simplebox_stdout_write("basename: too many operands\n")
+        return 1
+    val path = args[0]
+    val suffix = if args.len() == 2u64 then args[1] else: ""
+    if path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT or
+       suffix.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+        _simplebox_stdout_write("basename: operand exceeds 4096-byte limit\n")
+        return 1
+    _simplebox_stdout_write(simplebox_basename_value(path, suffix) + "\n")
+    0
+
+pub fn simplebox_dirname_value(path: text) -> text:
+    """Return the lexical parent of one admitted path without filesystem I/O.
+
+    Trailing slashes are ignored before removing the final component.  A path
+    without a slash (including the empty path) has parent `.`, while an
+    all-slash path and a component immediately below the root have parent `/`.
+    Repeated separators in the retained prefix are collapsed only at its end.
+    """
+    if path == "":
+        return "."
+    var end = path.len()
+    while end > 0u64 and path.byte_at(end - 1u64) == 47u8:
+        end = end - 1u64
+    if end == 0u64:
+        return "/"
+    while end > 0u64 and path.byte_at(end - 1u64) != 47u8:
+        end = end - 1u64
+    if end == 0u64:
+        return "."
+    while end > 1u64 and path.byte_at(end - 1u64) == 47u8:
+        end = end - 1u64
+    path.slice(0u64, end)
+
+pub fn simplebox_dirname(args: [text]) -> i32:
+    """Print one bounded POSIX-like lexical parent path."""
+    if args.len() == 0u64:
+        _simplebox_stdout_write("dirname: missing operand\n")
+        return 1
+    if args.len() > 1u64:
+        _simplebox_stdout_write("dirname: too many operands\n")
+        return 1
+    val path = args[0]
+    if path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+        _simplebox_stdout_write("dirname: operand exceeds 4096-byte limit\n")
+        return 1
+    _simplebox_stdout_write(simplebox_dirname_value(path) + "\n")
+    0
+
+fn _two_path_args(command: text, args: [text]) -> Result<(text, text), text>:
+    if args.len() < 2u64:
+        return Err("{command}: missing file operand")
+    if args.len() > 2u64:
+        return Err("{command}: too many operands")
+    if args[0] == "" or args[1] == "":
+        return Err("{command}: empty path")
+    Ok((args[0], args[1]))
+
+pub fn simplebox_cp(args: [text]) -> i32:
+    """Copy one bounded regular file without buffering the complete payload."""
+    val parsed = _two_path_args("cp", args)
+    match parsed:
+        case Err(reason):
+            _simplebox_stdout_write(reason + "\n")
+            1
+        case Ok((source, destination)):
+            if bm_path_normalize(source) == bm_path_normalize(destination):
+                _simplebox_stdout_write("cp: source and destination are the same path\n")
+                return 1
+            val source_opened = file_open_direct(source, 0u32)
+            match source_opened:
+                case Err(reason):
+                    _simplebox_stdout_write("cp: " + source + ": " + reason + "\n")
+                    1
+                case Ok(source_fd):
+                    # O_WRONLY | O_CREAT | O_TRUNC. The kernel remains the
+                    # path/descriptor authority and validates every copied byte.
+                    val destination_opened = file_open_direct(destination, 0xC1u32)
+                    match destination_opened:
+                        case Err(reason):
+                            val _ = file_close_direct(source_fd)
+                            _simplebox_stdout_write("cp: " + destination + ": " + reason + "\n")
+                            1
+                        case Ok(destination_fd):
+                            var copied: u64 = 0u64
+                            var failure = ""
+                            var complete = false
+                            while not complete and failure == "":
+                                val read = file_read_direct(source_fd, SIMPLEBOX_READ_CHUNK_BYTES)
+                                match read:
+                                    case Err(reason): failure = "read: " + reason
+                                    case Ok(chunk):
+                                        if chunk.len() == 0u64:
+                                            complete = true
+                                        elif copied > SIMPLEBOX_FILE_BYTES_LIMIT or
+                                             chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT - copied:
+                                            failure = "source exceeds simplebox byte limit"
+                                        else:
+                                            var write_offset: u64 = 0u64
+                                            while write_offset < chunk.len() and failure == "":
+                                                # Keep the driver's freshly returned chunk on the
+                                                # common full-write path.  Materialize a suffix only
+                                                # when a short write actually requires a retry.
+                                                val remaining = if write_offset == 0u64 then chunk else:
+                                                    chunk.slice(write_offset as i64, chunk.len() as i64)
+                                                match file_write_direct(destination_fd, remaining):
+                                                    case Err(reason): failure = "write: " + reason
+                                                    case Ok(count):
+                                                        if count == 0u64 or count > remaining.len():
+                                                            failure = "write made invalid progress"
+                                                        else:
+                                                            write_offset = write_offset + count
+                                                            copied = copied + count
+                            if failure == "":
+                                match file_sync_direct(destination_fd):
+                                    case Err(reason): failure = reason
+                                    case Ok(_): ()
+                            failure = _close_result(source_fd, failure)
+                            failure = _close_result(destination_fd, failure)
+                            if failure != "":
+                                _simplebox_stdout_write("cp: " + source + " -> " + destination + ": " + failure + "\n")
+                                return 1
+                            0
+
+pub fn simplebox_mv(args: [text]) -> i32:
+    """Atomically rename one path through the kernel-owned filesystem API."""
+    val parsed = _two_path_args("mv", args)
+    match parsed:
+        case Err(reason):
+            _simplebox_stdout_write(reason + "\n")
+            1
+        case Ok((source, destination)):
+            if bm_path_normalize(source) == bm_path_normalize(destination):
+                return 0
+            match file_rename_direct(source, destination):
+                case Err(reason):
+                    _simplebox_stdout_write("mv: " + source + " -> " + destination + ": " + reason + "\n")
+                    1
+                case Ok(_): 0
+
+fn _simplebox_dir_entry_after(left: DirEntry, right: DirEntry) -> bool:
+    libc_strcmp(left.name.bytes(), right.name.bytes()) > 0
+
+fn _simplebox_dir_sift_down(entries: [DirEntry], root: u64, end: u64):
+    if end == 0u64:
+        return
+    var parent = root
+    while parent <= (end - 1u64) / 2u64:
+        var child = parent * 2u64 + 1u64
+        if child < end and _simplebox_dir_entry_after(entries[child + 1u64], entries[child]):
+            child = child + 1u64
+        if not _simplebox_dir_entry_after(entries[child], entries[parent]):
+            return
+        val temporary = entries[parent]
+        entries[parent] = entries[child]
+        entries[child] = temporary
+        parent = child
+
+fn _simplebox_sort_directory_entries(entries: [DirEntry]):
+    """In-place bytewise heapsort: O(n log n), O(1) auxiliary storage."""
+    if entries.len() < 2u64:
+        return
+    var root = entries.len() / 2u64
+    while root > 0u64:
+        root = root - 1u64
+        _simplebox_dir_sift_down(entries, root, entries.len() - 1u64)
+    var end = entries.len() - 1u64
+    while end > 0u64:
+        val temporary = entries[0u64]
+        entries[0u64] = entries[end]
+        entries[end] = temporary
+        end = end - 1u64
+        _simplebox_dir_sift_down(entries, 0u64, end)
+
+pub fn simplebox_ls(args: [text]) -> i32:
+    """List one capability-authorized canonical-VFS directory."""
+    if args.len() > 1u64:
+        _simplebox_stdout_write("ls: too many operands\n")
+        return 1
+    val path = if args.len() == 0u64 then "/" else: args[0]
+    match list_directory_bounded(path):
+        case Err(reason):
+            _simplebox_stdout_write("ls: " + path + ": " + reason + "\n")
+            1
+        case Ok(listing):
+            val entries = listing.entries
+            _simplebox_sort_directory_entries(entries)
+            var output_parts: [text] = []
+            for entry in entries:
+                output_parts.push(entry.name)
+                output_parts.push("\n")
+            if output_parts.len() > 0u64:
+                _simplebox_stdout_write(output_parts.join(""))
+            0

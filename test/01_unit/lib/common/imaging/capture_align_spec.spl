@@ -1,0 +1,119 @@
+# @cover src/lib/common/imaging/capture_align.spl 90%
+# @tag: imaging, alignment, screenshot
+#
+# Capture Alignment Specification
+#
+# Verifies the integer shift-alignment search over synthetic ARGB buffers:
+# exact recovery of a known (dx, dy) shift, the no-match case, and the
+# tie-break toward the smallest offset.
+#
+# Plan: doc/03_plan/agent_tasks/rendering_lane_hardening_2026-08-19.md (Phase 1)
+
+use std.spec.{describe, context, it, expect}
+use std.common.imaging.capture_align.{align_buffers, ShiftAlignment}
+
+fn make_pattern(width: i32, height: i32) -> [u32]:
+    """Deterministic non-repeating pattern so shifts are unambiguous."""
+    var out: [u32] = []
+    var y = 0
+    while y < height:
+        var x = 0
+        while x < width:
+            out.push((0xFF000000u32) | ((x * 7 + y * 131 + (x * y)) & 0xFFFFFF).to_u32())
+            x = x + 1
+        y = y + 1
+    out
+
+fn shift_pattern(width: i32, height: i32, dx: i32, dy: i32, fill: u32) -> [u32]:
+    """b[x, y] = pattern[x - dx, y - dy]; outside pixels get `fill`.
+
+    With this construction, a[x, y] == b[x + dx, y + dy], which is exactly
+    the offset convention align_buffers reports.
+    """
+    val src = make_pattern(width, height)
+    var out: [u32] = []
+    var y = 0
+    while y < height:
+        var x = 0
+        while x < width:
+            val sx = x - dx
+            val sy = y - dy
+            if sx >= 0 and sx < width and sy >= 0 and sy < height:
+                out.push(src[sy * width + sx])
+            else:
+                out.push(fill)
+            x = x + 1
+        y = y + 1
+    out
+
+describe "capture_align align_buffers":
+
+    context "identical buffers":
+
+        it "reports (0, 0) with a perfect score and zero differing pixels":
+            val a = make_pattern(16, 12)
+            val r = align_buffers(a, a, 16, 12, 4)
+            expect(r.dx).to_equal(0)
+            expect(r.dy).to_equal(0)
+            expect(r.score).to_equal(16 * 12)
+            expect(r.overlap).to_equal(16 * 12)
+            expect(r.differing_pixels).to_equal(0)
+
+    context "known shift recovery":
+
+        it "recovers a (+3, +2) shift exactly with a clean overlap":
+            val a = make_pattern(16, 12)
+            val b = shift_pattern(16, 12, 3, 2, 0xFF123456u32)
+            val r = align_buffers(a, b, 16, 12, 8)
+            expect(r.dx).to_equal(3)
+            expect(r.dy).to_equal(2)
+            expect(r.score).to_equal((16 - 3) * (12 - 2))
+            expect(r.differing_pixels).to_equal(0)
+
+        it "recovers a negative (-2, -1) shift exactly":
+            val a = make_pattern(16, 12)
+            val b = shift_pattern(16, 12, -2, -1, 0xFF123456u32)
+            val r = align_buffers(a, b, 16, 12, 8)
+            expect(r.dx).to_equal(-2)
+            expect(r.dy).to_equal(-1)
+            expect(r.differing_pixels).to_equal(0)
+
+    context "no-match case":
+
+        it "reports zero score when the buffers share no pixels at any offset":
+            var a: [u32] = []
+            var b: [u32] = []
+            var i = 0
+            while i < 8 * 8:
+                a.push(0xFF000000u32)
+                b.push(0xFFFFFFFFu32)
+                i = i + 1
+            val r = align_buffers(a, b, 8, 8, 3)
+            expect(r.score).to_equal(0)
+            expect(r.dx).to_equal(0)
+            expect(r.dy).to_equal(0)
+            expect(r.differing_pixels).to_equal(r.overlap)
+
+    context "tie-break":
+
+        it "prefers the smallest |dx|+|dy| on a uniform buffer (all offsets tie per overlap)":
+            # Uniform buffers: score == overlap at every offset, and overlap
+            # is maximal only at (0, 0), so the largest-score winner is (0, 0).
+            var a: [u32] = []
+            var i = 0
+            while i < 10 * 10:
+                a.push(0xFF336699u32)
+                i = i + 1
+            val r = align_buffers(a, a, 10, 10, 4)
+            expect(r.dx).to_equal(0)
+            expect(r.dy).to_equal(0)
+            expect(r.score).to_equal(100)
+
+    context "degenerate input":
+
+        it "returns a zero result on mismatched buffer sizes":
+            val a = make_pattern(4, 4)
+            val b = make_pattern(5, 4)
+            val r = align_buffers(a, b, 4, 4, 2)
+            expect(r.score).to_equal(0)
+            expect(r.overlap).to_equal(0)

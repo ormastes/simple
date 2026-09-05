@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+facade="$root/src/os/kernel/arch/riscv64/display.spl"
+runtime="$root/src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+entry="$root/examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl"
+
+check_pair() {
+    simple_signature=$1
+    c_signature=$2
+    grep -Fq "$simple_signature" "$facade" || {
+        echo "RV64 display ABI missing facade: $simple_signature" >&2
+        exit 1
+    }
+    grep -Fq "$c_signature" "$runtime" || {
+        echo "RV64 display ABI missing runtime owner: $c_signature" >&2
+        exit 1
+    }
+}
+
+check_pair "extern fn rt_display_init() -> i64" "spl_i64 rt_display_init(void)"
+check_pair "extern fn rt_display_framebuffer_address() -> u64" "spl_u64 rt_display_framebuffer_address(void)"
+check_pair "extern fn rt_display_width() -> i64" "spl_i64 rt_display_width(void)"
+check_pair "extern fn rt_display_height() -> i64" "spl_i64 rt_display_height(void)"
+check_pair "extern fn rt_display_pitch() -> i64" "spl_i64 rt_display_pitch(void)"
+check_pair "extern fn rt_display_bpp() -> i64" "spl_i64 rt_display_bpp(void)"
+check_pair "extern fn rt_display_generation() -> i64" "spl_i64 rt_display_generation(void)"
+check_pair "extern fn rt_display_present() -> i64" "spl_i64 rt_display_present(void)"
+
+grep -Fq "return g_rt_display_ready ? g_rt_gpu_fb : 0;" "$runtime"
+grep -Fq "return g_rt_display_ready ? RT_GPU_WIDTH : 0;" "$runtime"
+grep -Fq "return g_rt_display_ready ? RT_GPU_HEIGHT : 0;" "$runtime"
+grep -Fq "return g_rt_display_ready ? (spl_i64)(RT_GPU_WIDTH * sizeof(spl_u32)) : 0;" "$runtime"
+grep -Fq "return g_rt_display_ready ? (spl_i64)(sizeof(spl_u32) * 8U) : 0;" "$runtime"
+grep -Fq "return g_rt_display_ready ? g_rt_display_generation : 0;" "$runtime"
+
+flush_body=$(sed -n '/^spl_i64 rt_gui_flush(void)/,/^}/p' "$runtime")
+printf '%s\n' "$flush_body" | grep -Fq "if (!g_rt_display_ready || !g_rt_gpu_fb)"
+printf '%s\n' "$flush_body" | grep -Fq "return -1;"
+printf '%s\n' "$flush_body" | grep -Fq "return rt_gpu_cmd_transfer_flush();"
+
+present_body=$(sed -n '/^spl_i64 rt_display_present(void)/,/^}/p' "$runtime")
+printf '%s\n' "$present_body" | grep -Fq "spl_i64 result = rt_gui_flush();"
+printf '%s\n' "$present_body" | grep -Fq "if (result == 0)"
+printf '%s\n' "$present_body" | grep -Fq "g_rt_display_generation = g_rt_display_generation + 1;"
+grep -Fq "fatal reason=scanout-generation" "$entry"
+grep -Fq "scanout-present address={address} width={width} height={height} stride={pitch} bpp={bpp} format=bgra8888 generation={display_generation} scene_revision={revision}" "$entry"
+echo "RV64_DISPLAY_ABI_CONTRACT: PASS"

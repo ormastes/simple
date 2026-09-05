@@ -1,0 +1,45 @@
+# Reproducing spec — aliased `mut` / non-`mut` parameter write-back clobber.
+#
+# Bug: doc/08_tracking/bug/aliased_array_mut_param_mutation_lost_interpreter_2026-08-06.md
+#
+# When the same caller variable is passed to BOTH a `mut` parameter and a
+# non-`mut` parameter, the interpreter's per-argument write-back loop
+# (src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs,
+# `write_back_mutable_arguments`) runs once per ARGUMENT and does not consult
+# the parameter's mutability. The non-`mut` parameter still holds the pre-call
+# snapshot, so its write-back silently reverts the `mut` parameter's mutation.
+# Exit code 0, no diagnostic — a silent wrong result.
+#
+# Measured RED before the fix (2026-08-17, bin/simple = Rust seed):
+#   interpreter -> PROBE_VERDICT: FAIL 4   (arrays and dicts)
+#   jit         -> PROBE_VERDICT: PASS     (the JIT was already correct)
+#
+# WHY A SUBPROCESS. A spec body executes on the tree-walk interpreter under a
+# single engine, so it cannot compare engines or observe a JIT/interpreter
+# divergence. The oracle is the sibling probe
+# `probe_aliased_mut_param_writeback.spl`, run as a subprocess under BOTH
+# engines. Every check inside it compares against an ABSOLUTE literal, never
+# "the two engines agree".
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_aliased_mut_param_writeback.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "aliased mut/non-mut parameter write-back":
+    it "keeps the mutation on the interpreter when the same array is passed as both mut and non-mut":
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_VERDICT: PASS")
+
+    it "keeps the mutation on the jit lane as well":
+        val out = run_probe_in_mode("jit")
+        expect(out).to_contain("PROBE_VERDICT: PASS")

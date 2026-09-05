@@ -1,0 +1,38 @@
+"""
+# Bracket Index on the Right of `<` — regalloc.spl:158 Reproducer
+
+Reduced directly from `src/compiler/70.backend/backend/native/regalloc.spl:158`,
+the site named in the P1 report:
+
+    if target_start < block_start_pos[block.block_id]:
+
+The seed's postfix layer speculatively read the `<` as the start of a generic
+argument list, and `parse_type` emitted a "Use angle brackets: name<...>"
+deprecation warning as a side effect before the speculation backtracked.
+
+This spec pins the SEMANTICS of that shape: the comparison must be evaluated as
+a comparison against the indexed element, not as a generic type application. The
+spurious-diagnostic half of the defect is pinned in the parser crate, at
+`src/compiler_rust/parser/src/lt_index_hint_leak_tests.rs`, because a leaked
+warning is not observable from a running program.
+
+See doc/08_tracking/bug/parser_bracket_index_after_less_than_still_misread_as_generics_2026-08-17.md
+"""
+
+describe "Bracket index after `<` (regalloc.spl:158 reproducer)":
+
+    it "compares against the indexed element, not a generic application":
+        val block_start_pos = [10, 20, 30]
+        val target_start = 5
+        # The exact failing shape: `<` immediately followed by name[index].
+        assert_true(target_start < block_start_pos[0])
+
+    it "evaluates the same index identically with and without a preceding `<`":
+        val block_start_pos = [10, 20, 30]
+        val block_id = 1
+        # Line 156-157 of regalloc.spl parsed fine; line 158 differed only by
+        # the preceding `<`. Both must reach the same element.
+        val direct = block_start_pos[block_id]
+        expect(direct).to_equal(20)
+        assert_true(5 < block_start_pos[block_id])
+        assert_false(50 < block_start_pos[block_id])

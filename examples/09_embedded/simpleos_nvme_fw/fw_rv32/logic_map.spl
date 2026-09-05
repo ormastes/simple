@@ -1,0 +1,136 @@
+fn rv32_map_cap_limit(cap: i64) -> i64:
+    if cap < 0:
+        return 0
+    if cap > 4:
+        return 4
+    cap
+
+fn rv32_map_lba_valid(lba: i64) -> bool:
+    lba >= 0 and lba < 128
+
+fn rv32_map_ppn_valid(ppn: i64) -> bool:
+    ppn == -1 or (ppn >= 0 and ppn < 4096)
+
+fn rv32_map_sanitize_ppn(ppn: i64) -> i64:
+    if rv32_map_ppn_valid(ppn):
+        return ppn
+    -1
+
+fn rv32_map_selftest() -> i64:
+    # Four scalar slots stand in for the host L2pMap's pre-sized write-back cache.
+    var fail = 0
+    var cap = 4
+    var tick = 0
+    var hits = 0
+    var misses = 0
+    var evicts = 0
+
+    var l2p10 = -1
+    var l2p11 = -1
+    var l2p12 = -1
+    var l2p13 = -1
+
+    var lba0 = -1
+    var ppn0 = -1
+    var dirty0 = 0
+    var age0 = 0
+    var lba1 = -1
+    var ppn1 = -1
+    var dirty1 = 0
+    var age1 = 0
+    var lba2 = -1
+    var ppn2 = -1
+    var dirty2 = 0
+    var age2 = 0
+    var lba3 = -1
+    var ppn3 = -1
+    var dirty3 = 0
+    var age3 = 0
+
+    if rv32_map_cap_limit(-1) != 0:
+        fail = fail + 1
+    if rv32_map_cap_limit(7) != 4:
+        fail = fail + 1
+    if rv32_map_sanitize_ppn(4096) != -1:
+        fail = fail + 1
+    if rv32_map_lba_valid(128):
+        fail = fail + 1
+
+    # update(10, 100), then lookup(10): served from dirty cache, not backing L2P.
+    if rv32_map_lba_valid(10) and rv32_map_ppn_valid(100):
+        tick = tick + 1
+        lba0 = 10
+        ppn0 = 100
+        dirty0 = 1
+        age0 = tick
+    if lba0 == 10:
+        hits = hits + 1
+        tick = tick + 1
+        age0 = tick
+        if rv32_map_sanitize_ppn(ppn0) != 100:
+            fail = fail + 1
+    if hits != 1 or l2p10 != -1:
+        fail = fail + 1
+
+    # flush(): dirty cache entry becomes the authoritative flash-resident L2P.
+    if dirty0 == 1 and lba0 == 10 and rv32_map_ppn_valid(ppn0):
+        l2p10 = ppn0
+        dirty0 = 0
+    if l2p10 != 100 or dirty0 != 0:
+        fail = fail + 1
+
+    # crash_volatile(): cache is gone, backing L2P survives.
+    lba0 = -1
+    ppn0 = -1
+    age0 = 0
+    tick = 0
+    misses = misses + 1
+    if lba0 != -1 or ppn0 != -1 or l2p10 != 100:
+        fail = fail + 1
+    if misses != 1:
+        fail = fail + 1
+
+    # Fill all slots, then evict the oldest dirty entry on the next distinct update.
+    lba0 = 10
+    ppn0 = 200
+    dirty0 = 1
+    age0 = 1
+    lba1 = 11
+    ppn1 = 201
+    dirty1 = 1
+    age1 = 2
+    lba2 = 12
+    ppn2 = 202
+    dirty2 = 1
+    age2 = 3
+    lba3 = 13
+    ppn3 = 203
+    dirty3 = 1
+    age3 = 4
+    tick = 4
+    if rv32_map_cap_limit(cap) == 4 and age0 < age1 and age0 < age2 and age0 < age3:
+        if dirty0 == 1 and lba0 == 10 and rv32_map_ppn_valid(ppn0):
+            l2p10 = ppn0
+        evicts = evicts + 1
+        tick = tick + 1
+        lba0 = 14
+        ppn0 = 204
+        dirty0 = 1
+        age0 = tick
+    if l2p10 != 200 or lba0 != 14 or ppn0 != 204 or evicts != 1:
+        fail = fail + 1
+
+    # Invalid writes are inert.
+    if rv32_map_lba_valid(12) and rv32_map_ppn_valid(4096):
+        l2p12 = 4096
+    if l2p12 != -1:
+        fail = fail + 1
+    if rv32_map_lba_valid(128) and rv32_map_ppn_valid(300):
+        l2p13 = 300
+    if l2p13 != -1:
+        fail = fail + 1
+    if rv32_map_lba_valid(-1) and rv32_map_ppn_valid(301):
+        l2p11 = 301
+    if l2p11 != -1 or l2p13 != -1:
+        fail = fail + 1
+    fail

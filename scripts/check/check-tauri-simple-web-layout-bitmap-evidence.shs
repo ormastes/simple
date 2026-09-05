@@ -1,0 +1,506 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tauri_simple_web_layout_bitmap_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/tauri_simple_web_layout_bitmap_evidence_$(date -u +%F).md}"
+HTML_PATH="${TAURI_LAYOUT_HTML_PATH:-}"
+EXPECTED_ARGB="${TAURI_LAYOUT_EXPECTED_ARGB_PATH:-}"
+WIDTH="${TAURI_LAYOUT_WIDTH:-96}"
+HEIGHT="${TAURI_LAYOUT_HEIGHT:-64}"
+CAPTURED_PNG="$BUILD_DIR/tauri-window.png"
+CAPTURED_RAW="$BUILD_DIR/tauri-window.rgba"
+CAPTURED_ARGB="$BUILD_DIR/tauri-argb.json"
+TAURI_OUT="$BUILD_DIR/tauri.out"
+TAURI_ERR="$BUILD_DIR/tauri.err"
+WEBKIT_OUT="$BUILD_DIR/webkit-snapshot.out"
+WEBKIT_ERR="$BUILD_DIR/webkit-snapshot.err"
+TAURI_PROOF="$BUILD_DIR/tauri-proof.json"
+VALIDATED_ENV="$BUILD_DIR/tauri-proof.validation.env"
+VALIDATOR="scripts/check/validate-tauri-simple-web-layout-proof.js"
+XVFB_SESSION_OUT="$BUILD_DIR/xvfb-session.out"
+XVFB_SESSION_ERR="$BUILD_DIR/xvfb-session.err"
+FRAME_US_PATH="$BUILD_DIR/frame-us.txt"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$CAPTURED_PNG" "$CAPTURED_RAW" "$CAPTURED_ARGB" "$TAURI_OUT" "$TAURI_ERR" "$WEBKIT_OUT" "$WEBKIT_ERR" "$TAURI_PROOF" "$VALIDATED_ENV" "$XVFB_SESSION_OUT" "$XVFB_SESSION_ERR" "$FRAME_US_PATH" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+field_of_json() {
+    key="$1"
+    file="$2"
+    node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p[process.argv[2]] ?? ''))" "$file" "$key"
+}
+
+field_of_env() {
+    key="$1"
+    file="$2"
+    if [ -s "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "tauri_simple_web_layout_status=unavailable"
+        echo "tauri_simple_web_layout_reason=$reason"
+        echo "tauri_simple_web_layout_width=$WIDTH"
+        echo "tauri_simple_web_layout_height=$HEIGHT"
+        echo "tauri_simple_web_layout_html_path=$HTML_PATH"
+        echo "tauri_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
+        echo "tauri_simple_web_layout_captured_png_path=$CAPTURED_PNG"
+        echo "tauri_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
+        echo "tauri_simple_web_layout_captured_argb_written=false"
+        echo "tauri_simple_web_layout_proof_symlink_status="
+        echo "tauri_simple_web_layout_proof_hardlink_status="
+        echo "tauri_simple_web_layout_captured_argb_file_status=fail"
+        echo "tauri_simple_web_layout_captured_argb_file_reason=not-run"
+        echo "tauri_simple_web_layout_captured_argb_artifact_status=unavailable"
+        echo "tauri_simple_web_layout_captured_argb_symlink_status="
+        echo "tauri_simple_web_layout_captured_argb_hardlink_status="
+        echo "tauri_simple_web_layout_captured_argb_size_bytes="
+        echo "tauri_simple_web_layout_captured_argb_format="
+        echo "tauri_simple_web_layout_captured_argb_producer="
+        echo "tauri_simple_web_layout_captured_argb_width="
+        echo "tauri_simple_web_layout_captured_argb_height="
+        echo "tauri_simple_web_layout_captured_argb_pixel_count="
+        echo "tauri_simple_web_layout_captured_argb_nonzero_pixel_count=0"
+        echo "tauri_simple_web_layout_captured_argb_checksum="
+        echo "tauri_simple_web_layout_captured_argb_weighted_checksum="
+        echo "tauri_simple_web_layout_mismatch_count=0"
+        echo "tauri_simple_web_layout_requested_width=$WIDTH"
+        echo "tauri_simple_web_layout_requested_height=$HEIGHT"
+        echo "tauri_simple_web_layout_blur_or_tolerance_used=false"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Tauri Simple Web Layout Bitmap Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+        echo "- blur/tolerance used: false"
+        echo "- captured ARGB artifact: fail / not-run / unavailable"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+emit_fail() {
+    reason="$1"
+    {
+        echo "tauri_simple_web_layout_status=fail"
+        echo "tauri_simple_web_layout_reason=$reason"
+        echo "tauri_simple_web_layout_width=$WIDTH"
+        echo "tauri_simple_web_layout_height=$HEIGHT"
+        echo "tauri_simple_web_layout_html_path=$HTML_PATH"
+        echo "tauri_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
+        echo "tauri_simple_web_layout_captured_png_path=$CAPTURED_PNG"
+        echo "tauri_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
+        echo "tauri_simple_web_layout_captured_argb_written=false"
+        echo "tauri_simple_web_layout_captured_argb_file_status=fail"
+        echo "tauri_simple_web_layout_captured_argb_file_reason=not-run"
+        echo "tauri_simple_web_layout_captured_argb_artifact_status=fail"
+        echo "tauri_simple_web_layout_captured_argb_size_bytes="
+        echo "tauri_simple_web_layout_captured_argb_format="
+        echo "tauri_simple_web_layout_captured_argb_producer="
+        echo "tauri_simple_web_layout_captured_argb_width="
+        echo "tauri_simple_web_layout_captured_argb_height="
+        echo "tauri_simple_web_layout_captured_argb_pixel_count="
+        echo "tauri_simple_web_layout_captured_argb_nonzero_pixel_count=0"
+        echo "tauri_simple_web_layout_captured_argb_checksum="
+        echo "tauri_simple_web_layout_captured_argb_weighted_checksum="
+        echo "tauri_simple_web_layout_mismatch_count=0"
+        echo "tauri_simple_web_layout_requested_width=$WIDTH"
+        echo "tauri_simple_web_layout_requested_height=$HEIGHT"
+        echo "tauri_simple_web_layout_blur_or_tolerance_used=false"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Tauri Simple Web Layout Bitmap Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- blur/tolerance used: false"
+        echo "- captured ARGB artifact: fail / not-run / fail"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$BUILD_DIR/evidence.env"
+        if [ -s "$TAURI_ERR" ]; then
+            echo
+            echo "## Tauri stderr"
+            sed 's/^/- /' "$TAURI_ERR"
+        fi
+        if [ -s "$XVFB_SESSION_ERR" ]; then
+            echo
+            echo "## Xvfb session stderr"
+            sed 's/^/- /' "$XVFB_SESSION_ERR"
+        fi
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+require_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        emit_unavailable "$2"
+        exit 1
+    fi
+}
+
+HOST_UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+case "$HOST_UNAME_S" in
+    Darwin)
+        TAURI_CAPTURE_PRODUCER="${TAURI_CAPTURE_PRODUCER:-macos-wkwebview-snapshot}"
+        TAURI_CAPTURE_EXPECTED_PROFILE="${TAURI_CAPTURE_EXPECTED_PROFILE:-wkwebview}"
+        ;;
+    Linux)
+        TAURI_CAPTURE_PRODUCER="${TAURI_CAPTURE_PRODUCER:-tauri-x11-window-screenshot}"
+        TAURI_CAPTURE_EXPECTED_PROFILE="${TAURI_CAPTURE_EXPECTED_PROFILE:-webkitgtk}"
+        ;;
+    *)
+        TAURI_CAPTURE_PRODUCER="${TAURI_CAPTURE_PRODUCER:-tauri-capture-backend-unimplemented}"
+        TAURI_CAPTURE_EXPECTED_PROFILE="${TAURI_CAPTURE_EXPECTED_PROFILE:-none}"
+        ;;
+esac
+
+if [ "$HTML_PATH" = "" ] || [ ! -s "$HTML_PATH" ]; then
+    emit_unavailable "missing-layout-html"
+    exit 1
+fi
+if [ "$EXPECTED_ARGB" = "" ] || [ ! -s "$EXPECTED_ARGB" ]; then
+    emit_unavailable "missing-expected-argb"
+    exit 1
+fi
+
+require_cmd node "node-unavailable"
+
+if [ ! -f "$VALIDATOR" ]; then
+    emit_unavailable "missing-tauri-proof-validator"
+    exit 1
+fi
+
+case "$HOST_UNAME_S" in
+    Darwin)
+        require_cmd swift "swift-unavailable"
+        if [ ! -f tools/tauri-live-bitmap/capture_snapshot.swift ]; then
+            emit_unavailable "missing-macos-wkwebview-snapshot-backend"
+            exit 1
+        fi
+        ;;
+    Linux)
+        require_cmd cargo "cargo-unavailable"
+        require_cmd xvfb-run "xvfb-run-unavailable"
+        require_cmd dbus-run-session "dbus-run-session-unavailable"
+        require_cmd xdotool "xdotool-unavailable"
+        require_cmd import "imagemagick-import-unavailable"
+        require_cmd convert "imagemagick-convert-unavailable"
+        require_cmd openbox "openbox-unavailable"
+        ;;
+    *)
+        emit_unavailable "tauri-capture-host-backend-unimplemented"
+        exit 1
+        ;;
+esac
+
+HTML_ABS="$(cd "$(dirname -- "$HTML_PATH")" && pwd)/$(basename -- "$HTML_PATH")"
+PNG_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$CAPTURED_PNG")"
+OUT_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$TAURI_OUT")"
+ERR_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$TAURI_ERR")"
+XVFB_SESSION_OUT_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$XVFB_SESSION_OUT")"
+XVFB_SESSION_ERR_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$XVFB_SESSION_ERR")"
+FRAME_US_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$FRAME_US_PATH")"
+TAURI_URL="file://$HTML_ABS"
+SCREEN_WIDTH="${TAURI_SCREEN_WIDTH:-1280}"
+SCREEN_HEIGHT="${TAURI_SCREEN_HEIGHT:-1024}"
+WAIT_STEPS="${TAURI_CAPTURE_WAIT_STEPS:-60}"
+
+if [ "$HOST_UNAME_S" = "Darwin" ]; then
+    set +e
+    WEBKIT_CAPTURE_HTML="$HTML_ABS" \
+    WEBKIT_CAPTURE_WIDTH="$WIDTH" \
+    WEBKIT_CAPTURE_HEIGHT="$HEIGHT" \
+    WEBKIT_CAPTURE_RAW_RGBA="$CAPTURED_RAW" \
+    WEBKIT_CAPTURE_FRAME_US="$FRAME_US_PATH" \
+        swift tools/tauri-live-bitmap/capture_snapshot.swift >"$WEBKIT_OUT" 2>"$WEBKIT_ERR"
+    capture_code=$?
+    set -e
+else
+    set +e
+    TAURI_URL="$TAURI_URL" PNG_ABS="$PNG_ABS" OUT_ABS="$OUT_ABS" ERR_ABS="$ERR_ABS" FRAME_US_ABS="$FRAME_US_ABS" WIDTH="$WIDTH" HEIGHT="$HEIGHT" WAIT_STEPS="$WAIT_STEPS" \
+    GDK_BACKEND=x11 WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1 GTK_USE_PORTAL=0 GIO_USE_PORTALS=0 \
+    SIMPLE_TAURI_CAPTURE_WINDOW=1 SIMPLE_TAURI_CAPTURE_WIDTH="$WIDTH" SIMPLE_TAURI_CAPTURE_HEIGHT="$HEIGHT" \
+        xvfb-run -a -s "-screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" dbus-run-session -- sh -eu >"$XVFB_SESSION_OUT_ABS" 2>"$XVFB_SESSION_ERR_ABS" <<'CAPTURE'
+cd tools/tauri-shell
+openbox >/dev/null 2>&1 &
+wm_pid=$!
+sleep 0.5
+npm run prepare:dist >/dev/null 2>&1 || true
+cargo run --manifest-path src-tauri/Cargo.toml -- --url "$TAURI_URL" >"$OUT_ABS" 2>"$ERR_ABS" &
+pid=$!
+win_id=""
+i=0
+while [ "$i" -lt "$WAIT_STEPS" ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null || true
+        kill "$wm_pid" 2>/dev/null || true
+        wait "$wm_pid" 2>/dev/null || true
+        exit 23
+    fi
+    candidates="$({
+        xdotool search --pid "$pid" 2>/dev/null || true
+        xdotool search --name "simple-tauri-shell" 2>/dev/null || true
+        xdotool search --name "Simple" 2>/dev/null || true
+        xdotool search --onlyvisible --class simple-tauri-shell 2>/dev/null || true
+    } | awk '/^[0-9]+$/ {print}' | sort -u)"
+    for candidate in $candidates; do
+        info="$(xwininfo -id "$candidate" 2>/dev/null || true)"
+        echo "$info" | grep -q "Class: InputOutput" || continue
+        candidate_width="$(printf '%s\n' "$info" | sed -n 's/^  Width: //p' | head -n 1)"
+        candidate_height="$(printf '%s\n' "$info" | sed -n 's/^  Height: //p' | head -n 1)"
+        case "$candidate_width:$candidate_height" in
+            *[!0-9:]*|:|*:|"") continue ;;
+        esac
+        if [ "$candidate_width" -ge "$WIDTH" ] && [ "$candidate_height" -ge "$HEIGHT" ]; then
+            win_id="$candidate"
+            break
+        fi
+    done
+    if [ "$win_id" != "" ]; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.25
+done
+if [ "$win_id" = "" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    kill "$wm_pid" 2>/dev/null || true
+    wait "$wm_pid" 2>/dev/null || true
+    exit 22
+fi
+xdotool windowmap "$win_id" >/dev/null 2>&1 || true
+xdotool windowmove "$win_id" 0 0 >/dev/null 2>&1 || true
+xdotool windowsize "$win_id" "$WIDTH" "$HEIGHT" >/dev/null 2>&1 || true
+sleep 1
+start_ns="$(date +%s%N)"
+import -window "$win_id" "$PNG_ABS" >/dev/null 2>&1
+code=$?
+end_ns="$(date +%s%N)"
+printf '%s\n' "$(( (end_ns - start_ns) / 1000 ))" >"$FRAME_US_ABS"
+kill "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null || true
+kill "$wm_pid" 2>/dev/null || true
+wait "$wm_pid" 2>/dev/null || true
+exit "$code"
+CAPTURE
+    capture_code=$?
+    set -e
+fi
+FRAME_US="$(cat "$FRAME_US_PATH" 2>/dev/null || echo 0)"
+
+if [ "$HOST_UNAME_S" = "Darwin" ]; then
+    if [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_RAW" ]; then
+        emit_fail "macos-wkwebview-snapshot-failed"
+        exit 1
+    fi
+elif [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_PNG" ]; then
+    reason="tauri-window-capture-failed"
+    if [ "$capture_code" -eq 22 ]; then
+        reason="tauri-xvfb-window-unavailable"
+    elif [ "$capture_code" -eq 23 ]; then
+        reason="tauri-process-exited-before-window"
+    fi
+    emit_fail "$reason"
+    exit 1
+fi
+
+if [ "$HOST_UNAME_S" != "Darwin" ]; then
+    if ! convert "$CAPTURED_PNG" -crop "${WIDTH}x${HEIGHT}+0+0" -alpha set -depth 8 "rgba:$CAPTURED_RAW" >/dev/null 2>&1; then
+        emit_fail "tauri-screenshot-rgba-convert-failed"
+        exit 1
+    fi
+fi
+
+set +e
+TAURI_CAPTURE_RAW_RGBA="$CAPTURED_RAW" \
+TAURI_CAPTURE_WIDTH="$WIDTH" \
+TAURI_CAPTURE_HEIGHT="$HEIGHT" \
+TAURI_CAPTURE_OUTPUT="$CAPTURED_ARGB" \
+TAURI_CAPTURE_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" \
+TAURI_CAPTURE_EXPECTED_PROFILE="$TAURI_CAPTURE_EXPECTED_PROFILE" \
+TAURI_CAPTURE_PRODUCER="$TAURI_CAPTURE_PRODUCER" \
+TAURI_CAPTURE_PROOF_PATH="$TAURI_PROOF" \
+TAURI_CAPTURE_FRAME_US="$FRAME_US" \
+    node tools/tauri-live-bitmap/raw_rgba_to_argb.js >"$BUILD_DIR/tauri-capture.out" 2>&1
+proof_code=$?
+set -e
+
+if [ "$proof_code" -ne 0 ]; then
+    reason="$(sed -n 's/^tauri_capture_reason=//p' "$BUILD_DIR/tauri-capture.out" | tail -n 1)"
+    if [ "$reason" = "" ] && [ -s "$TAURI_PROOF" ]; then
+        reason="$(field_of_json reason "$TAURI_PROOF")"
+    fi
+    if [ "$reason" = "" ]; then
+        reason="tauri-argb-conversion-failed"
+    fi
+    case "$reason" in
+        missing-raw-rgba-path|missing-dimensions|missing-raw-rgba-file)
+            emit_unavailable "$reason"
+            ;;
+        *)
+            emit_fail "$reason"
+            ;;
+    esac
+    exit 1
+fi
+
+set +e
+TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER="$TAURI_CAPTURE_PRODUCER" node "$VALIDATOR" "$TAURI_PROOF" >"$VALIDATED_ENV"
+validation_code=$?
+set -e
+
+validation_status="$(field_of_env tauri_simple_web_layout_validation_status "$VALIDATED_ENV")"
+validation_reason="$(field_of_env tauri_simple_web_layout_validation_reason "$VALIDATED_ENV")"
+checksum="$(field_of_env tauri_simple_web_layout_tauri_checksum "$VALIDATED_ENV")"
+expected_checksum="$(field_of_env tauri_simple_web_layout_simple_checksum "$VALIDATED_ENV")"
+weighted="$(field_of_env tauri_simple_web_layout_tauri_weighted_checksum "$VALIDATED_ENV")"
+expected_weighted="$(field_of_env tauri_simple_web_layout_simple_weighted_checksum "$VALIDATED_ENV")"
+mismatch_count="$(field_of_env tauri_simple_web_layout_mismatch_count "$VALIDATED_ENV")"
+frame_us="$(field_of_env tauri_simple_web_layout_tauri_frame_us "$VALIDATED_ENV")"
+captured_argb_path="$(field_of_env tauri_simple_web_layout_captured_argb_path "$VALIDATED_ENV")"
+captured_argb_written="$(field_of_env tauri_simple_web_layout_captured_argb_written "$VALIDATED_ENV")"
+captured_argb_file_status="$(field_of_env tauri_simple_web_layout_captured_argb_file_status "$VALIDATED_ENV")"
+captured_argb_file_reason="$(field_of_env tauri_simple_web_layout_captured_argb_file_reason "$VALIDATED_ENV")"
+captured_argb_artifact_status="$(field_of_env tauri_simple_web_layout_captured_argb_artifact_status "$VALIDATED_ENV")"
+proof_symlink_status="$(field_of_env tauri_simple_web_layout_proof_symlink_status "$VALIDATED_ENV")"
+proof_hardlink_status="$(field_of_env tauri_simple_web_layout_proof_hardlink_status "$VALIDATED_ENV")"
+captured_argb_symlink_status="$(field_of_env tauri_simple_web_layout_captured_argb_symlink_status "$VALIDATED_ENV")"
+captured_argb_hardlink_status="$(field_of_env tauri_simple_web_layout_captured_argb_hardlink_status "$VALIDATED_ENV")"
+captured_argb_size_bytes="$(field_of_env tauri_simple_web_layout_captured_argb_size_bytes "$VALIDATED_ENV")"
+captured_argb_format="$(field_of_env tauri_simple_web_layout_captured_argb_format "$VALIDATED_ENV")"
+captured_argb_producer="$(field_of_env tauri_simple_web_layout_captured_argb_producer "$VALIDATED_ENV")"
+captured_argb_width="$(field_of_env tauri_simple_web_layout_captured_argb_width "$VALIDATED_ENV")"
+captured_argb_height="$(field_of_env tauri_simple_web_layout_captured_argb_height "$VALIDATED_ENV")"
+captured_argb_pixel_count="$(field_of_env tauri_simple_web_layout_captured_argb_pixel_count "$VALIDATED_ENV")"
+captured_argb_nonzero_pixel_count="$(field_of_env tauri_simple_web_layout_captured_argb_nonzero_pixel_count "$VALIDATED_ENV")"
+captured_argb_checksum="$(field_of_env tauri_simple_web_layout_captured_argb_checksum "$VALIDATED_ENV")"
+captured_argb_weighted_checksum="$(field_of_env tauri_simple_web_layout_captured_argb_weighted_checksum "$VALIDATED_ENV")"
+requested_width="$(field_of_env tauri_simple_web_layout_requested_width "$VALIDATED_ENV")"
+requested_height="$(field_of_env tauri_simple_web_layout_requested_height "$VALIDATED_ENV")"
+blur_used="$(field_of_env tauri_simple_web_layout_blur_or_tolerance_used "$VALIDATED_ENV")"
+expected_profile="$(field_of_env tauri_simple_web_layout_expected_profile "$VALIDATED_ENV")"
+expected_overlay_pixel_count="$(field_of_env tauri_simple_web_layout_expected_overlay_pixel_count "$VALIDATED_ENV")"
+
+status=pass
+reason=pass
+if [ "$validation_code" -ne 0 ] || [ "$validation_status" != "pass" ]; then
+    case "$validation_reason" in
+        checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch|captured-argb-checksum-mismatch|captured-argb-weighted-checksum-mismatch)
+            status=divergent
+            ;;
+        *)
+            status=fail
+            ;;
+    esac
+    reason="${validation_reason:-tauri-proof-validation-failed}"
+elif [ "$proof_symlink_status" != "pass" ]; then
+    status=fail
+    reason=proof-json-symlink-status-not-pass
+elif [ "$proof_hardlink_status" != "pass" ]; then
+    status=fail
+    reason=proof-json-hardlink-status-not-pass
+elif [ "$captured_argb_symlink_status" != "pass" ]; then
+    status=fail
+    reason=captured-argb-symlink-status-not-pass
+elif [ "$captured_argb_hardlink_status" != "pass" ]; then
+    status=fail
+    reason=captured-argb-hardlink-status-not-pass
+elif [ "$captured_argb_artifact_status" != "pass" ]; then
+    status=fail
+    reason=captured-argb-artifact-status-not-pass
+elif [ ! -s "$CAPTURED_ARGB" ]; then
+    status=fail
+    reason=missing-captured-argb-file
+fi
+
+{
+    echo "tauri_simple_web_layout_status=$status"
+    echo "tauri_simple_web_layout_reason=$reason"
+    echo "tauri_simple_web_layout_validation_status=${validation_status:-}"
+    echo "tauri_simple_web_layout_validation_reason=${validation_reason:-}"
+    echo "tauri_simple_web_layout_width=$WIDTH"
+    echo "tauri_simple_web_layout_height=$HEIGHT"
+    echo "tauri_simple_web_layout_html_path=$HTML_PATH"
+    echo "tauri_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
+    echo "tauri_simple_web_layout_captured_png_path=$CAPTURED_PNG"
+    echo "tauri_simple_web_layout_captured_argb_path=${captured_argb_path:-$CAPTURED_ARGB}"
+    echo "tauri_simple_web_layout_requested_width=$requested_width"
+    echo "tauri_simple_web_layout_requested_height=$requested_height"
+    echo "tauri_simple_web_layout_simple_checksum=$expected_checksum"
+    echo "tauri_simple_web_layout_tauri_checksum=$checksum"
+    echo "tauri_simple_web_layout_simple_weighted_checksum=$expected_weighted"
+    echo "tauri_simple_web_layout_tauri_weighted_checksum=$weighted"
+    echo "tauri_simple_web_layout_mismatch_count=$mismatch_count"
+    echo "tauri_simple_web_layout_blur_or_tolerance_used=$blur_used"
+    echo "tauri_simple_web_layout_expected_profile=$expected_profile"
+    echo "tauri_simple_web_layout_expected_overlay_pixel_count=$expected_overlay_pixel_count"
+    echo "tauri_simple_web_layout_tauri_frame_us=$frame_us"
+    echo "tauri_simple_web_layout_captured_argb_written=$captured_argb_written"
+    echo "tauri_simple_web_layout_proof_symlink_status=${proof_symlink_status:-}"
+    echo "tauri_simple_web_layout_proof_hardlink_status=${proof_hardlink_status:-}"
+    echo "tauri_simple_web_layout_captured_argb_file_status=${captured_argb_file_status:-}"
+    echo "tauri_simple_web_layout_captured_argb_file_reason=${captured_argb_file_reason:-}"
+    echo "tauri_simple_web_layout_captured_argb_artifact_status=${captured_argb_artifact_status:-}"
+    echo "tauri_simple_web_layout_captured_argb_symlink_status=${captured_argb_symlink_status:-}"
+    echo "tauri_simple_web_layout_captured_argb_hardlink_status=${captured_argb_hardlink_status:-}"
+    echo "tauri_simple_web_layout_captured_argb_size_bytes=${captured_argb_size_bytes:-}"
+    echo "tauri_simple_web_layout_captured_argb_format=${captured_argb_format:-}"
+    echo "tauri_simple_web_layout_captured_argb_producer=${captured_argb_producer:-}"
+    echo "tauri_simple_web_layout_captured_argb_width=${captured_argb_width:-}"
+    echo "tauri_simple_web_layout_captured_argb_height=${captured_argb_height:-}"
+    echo "tauri_simple_web_layout_captured_argb_pixel_count=${captured_argb_pixel_count:-}"
+    echo "tauri_simple_web_layout_captured_argb_nonzero_pixel_count=${captured_argb_nonzero_pixel_count:-}"
+    echo "tauri_simple_web_layout_captured_argb_checksum=${captured_argb_checksum:-}"
+    echo "tauri_simple_web_layout_captured_argb_weighted_checksum=${captured_argb_weighted_checksum:-}"
+    echo "tauri_simple_web_layout_exit_code=$capture_code"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Tauri Simple Web Layout Bitmap Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- mismatch count: $mismatch_count"
+    echo "- blur/tolerance used: $blur_used"
+    echo "- Tauri frame us: $frame_us"
+    echo "- captured ARGB path: ${captured_argb_path:-$CAPTURED_ARGB}"
+    echo "- captured ARGB file status: ${captured_argb_file_status:-}"
+    echo "- captured ARGB file reason: ${captured_argb_file_reason:-}"
+    echo "- captured ARGB artifact status: ${captured_argb_artifact_status:-}"
+    echo "- captured ARGB artifact: ${captured_argb_file_status:-} / ${captured_argb_file_reason:-} / ${captured_argb_artifact_status:-}"
+    echo "- captured ARGB size bytes: ${captured_argb_size_bytes:-}"
+    echo "- captured ARGB format: ${captured_argb_format:-}"
+    echo "- captured ARGB producer: ${captured_argb_producer:-}"
+    echo "- captured ARGB dimensions: ${captured_argb_width:-}x${captured_argb_height:-}"
+    echo "- captured ARGB pixels: ${captured_argb_pixel_count:-}"
+    echo "- captured ARGB nonzero pixels: ${captured_argb_nonzero_pixel_count:-}"
+    echo "- captured ARGB checksum: ${captured_argb_checksum:-}"
+    echo "- captured ARGB weighted checksum: ${captured_argb_weighted_checksum:-}"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    if [ -s "$TAURI_ERR" ]; then
+        echo "## Tauri stderr"
+        sed 's/^/- /' "$TAURI_ERR"
+    fi
+    if [ -s "$WEBKIT_ERR" ]; then
+        echo "## WKWebView snapshot stderr"
+        sed 's/^/- /' "$WEBKIT_ERR"
+    fi
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

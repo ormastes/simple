@@ -1,0 +1,131 @@
+"""
+Form Validation
+
+Provides Validator, ValidationRule, and functions for validating
+Dict<text, text> form params.
+
+Usage:
+    var v = validator_new()
+    v = validator_add_rule(v, "username", ValidationRule.Required)
+    v = validator_add_rule(v, "username", ValidationRule.MinLength(3))
+    v = validator_add_rule(v, "email", ValidationRule.Email)
+    val ok = validator_validate(v, params)
+    if not ok:
+        val err = validator_first_error(v)
+"""
+
+# ============================================================================
+# ValidationRule enum
+# ============================================================================
+
+enum ValidationRule:
+    """A single validation rule applied to a named field."""
+    Required
+    MinLength(i64)
+    MaxLength(i64)
+    Email
+    Numeric
+    Regex(text)
+
+# ============================================================================
+# Validator
+# ============================================================================
+
+struct ValidatorRule:
+    """Binding of a rule to a field name."""
+    field: text
+    rule: ValidationRule
+
+class Validator:
+    """Accumulates validation rules and error messages."""
+    rules: [ValidatorRule]
+    errors: [text]
+
+fn validator_new() -> Validator:
+    """Create an empty Validator."""
+    Validator(rules: [], errors: [])
+
+fn validator_add_rule(v: Validator, field: text, rule: ValidationRule) -> Validator:
+    """Append a validation rule for a field. Returns updated Validator."""
+    v.rules.push(ValidatorRule(field: field, rule: rule))
+    v
+
+fn validator_validate(v: Validator, params: Dict<text, text>) -> bool:
+    """Run all rules against params, collecting error messages.
+
+    Returns true if no errors were found.
+    """
+    v.errors = []
+    var i = 0
+    while i < v.rules.len():
+        val binding = v.rules[i]
+        val field = binding.field
+        val value = params.get(field) ?? ""
+        val err = check_rule(field, value, binding.rule)
+        if err.len() > 0:
+            v.errors.push(err)
+        i = i + 1
+    v.errors.len() == 0
+
+fn validator_has_errors(v: Validator) -> bool:
+    """Return true if any validation errors were recorded."""
+    v.errors.len() > 0
+
+fn validator_first_error(v: Validator) -> text:
+    """Return the first error message, or "" if none."""
+    if v.errors.len() == 0:
+        return ""
+    v.errors[0]
+
+fn validator_all_errors(v: Validator) -> [text]:
+    """Return all error messages."""
+    v.errors
+
+# ============================================================================
+# Internal rule checker
+# ============================================================================
+
+fn check_rule(field: text, value: text, rule: ValidationRule) -> text:
+    match rule:
+        ValidationRule.Required:
+            if value.len() == 0:
+                return "{field} is required"
+        ValidationRule.MinLength(min):
+            if value.len() < min:
+                return "{field} must be at least {min} characters"
+        ValidationRule.MaxLength(max):
+            if value.len() > max:
+                return "{field} must be at most {max} characters"
+        ValidationRule.Email:
+            if not is_valid_email(value):
+                return "{field} must be a valid email address"
+        ValidationRule.Numeric:
+            if not is_numeric(value):
+                return "{field} must be a number"
+        ValidationRule.Regex(pattern):
+            pass_dn  # Regex validation requires runtime support; skip for now
+    ""
+
+fn is_valid_email(value: text) -> bool:
+    """Basic email format check: contains exactly one @ with non-empty parts."""
+    val at_pos = value.index_of("@")
+    if at_pos <= 0:
+        return false
+    val domain = value.substring(at_pos + 1, value.len())
+    domain.len() > 0 and domain.contains(".")
+
+fn is_numeric(value: text) -> bool:
+    """Return true if value is a non-empty string of digits."""
+    if value.len() == 0:
+        return false
+    var i = 0
+    var start = 0
+    if value.len() > 0 and value.char_at(0) == '-':
+        start = 1
+    i = start
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch < '0' or ch > '9':
+            return false
+        i = i + 1
+    true

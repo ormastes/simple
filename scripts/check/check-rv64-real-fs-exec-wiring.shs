@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+fail() { echo "rv64-real-fs-exec-wiring: $*" >&2; exit 1; }
+[ "${1:-}" = "--self-test" ] || fail "usage: $0 --self-test"
+
+entry=examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl
+owner=src/os/kernel/loader/riscv64_fs_exec_spawn.spl
+runtime=examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c
+user_entry=src/os/kernel/arch/riscv64/user_entry.spl
+builder=scripts/check/rebuild-sosix-qemu-media.shs
+
+grep -Fq 'vfs_boot_init_riscv64_virtio_fat32' "$entry" || fail "canonical RV64 VFS mount absent"
+grep -Fq 'riscv64_fs_exec_real_nonce("/FSEXEC.ELF", nonce)' "$entry" || fail "mounted ELF call absent"
+grep -Fq 'rt_riscv_qemu_nonce_text' "$entry" || fail "target nonce bridge absent"
+grep -Fq '_mounted_contains_nonce_marker(mounted, nonce)' "$owner" || fail "mounted-byte nonce authentication absent"
+grep -Fq 'fs_exec_prepare_spawn_from_bytes' "$owner" || fail "real ELF loader handoff absent"
+grep -Fq 'FS_PROGRAM_END rc=37 reaped=true' "$owner" || fail "exit receipt absent"
+grep -Fq 'reap_blocking_user_task(task.id, exit_code.to_i32())' "$user_entry" || fail "exact child reap absent"
+grep -Fq 'RuntimeValue rt_riscv_qemu_nonce_text(void)' "$runtime" || fail "runtime nonce extraction absent"
+grep -Fq -- '--source src/os --source src/lib --source examples/09_embedded/simple_os' "$builder" || fail "RV64 owner source closure absent"
+
+echo "PASS RV64 real filesystem execution wiring"

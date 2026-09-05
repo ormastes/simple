@@ -1,0 +1,228 @@
+#!/bin/sh
+# check-compiler-schema-fresh.shs — the compiler schema registry must be
+# GENERATED, never hand-edited (hardening plan §11.2 / §11.9).
+#
+# Regenerates the registry into a temp dir and diffs it against the checked-in
+# copy under spec/compiler_schema/registry/. A stale registry is a FAIL; a
+# missing enum source (nothing to extract) is an ERROR, never a pass.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS — <n> variant(s) across <k> enum(s), <p> production(s), 0 orphan
+#          tag(s), 0 dead production(s), 0 stale row(s), registry fresh  exit 0
+#   FAIL — stale: <files>                                          exit 1
+#   FAIL — grammar cross-check: <o> orphan tag(s), <d> dead
+#          production(s), <s> stale row(s): <names>                 exit 1
+#   ERROR — nothing was checked (<reason>)                         exit 2
+#
+# --root <dir> checks an alternate tree (both the enum SOURCES and the
+# registry are resolved under it); default is the repo root. The generator
+# itself always runs from the repo, since module resolution needs the stdlib.
+#
+# The GRAMMAR axis (hardening plan §11.3, lane C1) is part of the same
+# registry: `generate` emits spec/compiler_schema/registry/
+# compiler.frontend.Grammar.sdn alongside the enum registries, so a stale
+# grammar registry is a stale registry. The cross-check is FATAL (since
+# 2026-08-21, when the 19-orphan / 11-dead backlog was driven to zero): any
+# E-GRAMMAR-ORPHAN-TAG, E-GRAMMAR-DEAD-PRODUCTION, E-GRAMMAR-STALE-RESERVED or
+# E-GRAMMAR-STALE-ENTRY row is a FAIL naming the offenders. A reserved tag
+# (parser never stamps it, downstream still matches on it) is listed with a
+# reason in the extractor, never silently excused: the moment it is stamped or
+# its const disappears the reservation itself goes stale and FAILs. Also fatal:
+# a grammar registry that disagrees with the tree, or a run that extracted
+# ZERO productions (missing parser sources) — absence of evidence is not a
+# pass.
+#
+# --selftest runs first and is fatal.
+
+set -u
+
+# Phase 9: mint an evidence receipt for this gate's verdict (additive; never
+# changes the verdict or the exit status). See scripts/check/lib/emit_receipt.shs.
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/emit_receipt.shs"
+
+REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+SIMPLE_BIN=${SIMPLE_BIN:-"$REPO_ROOT/bin/simple"}
+GEN_MAIN="src/app/compiler_schema/main.spl"
+REG_DIR="spec/compiler_schema/registry"
+
+verdict_error() {
+    echo "ERROR — nothing was checked ($1)"
+    exit 2
+}
+
+# Regenerate <repo_root> into <out_dir>; echo the variant count, or empty on failure.
+regen() {
+    _root=$1
+    _out=$2
+    # Always run from the real repo (module resolution needs the stdlib tree);
+    # SIMPLE_REPO_ROOT selects which tree the enum SOURCES are read from.
+    ( cd "$REPO_ROOT" && SIMPLE_REPO_ROOT="$_root" "$SIMPLE_BIN" run "$GEN_MAIN" generate "$_out" ) \
+        > "$_out.log" 2>&1
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        return 1
+    fi
+    grep -o 'generated [0-9]* variant' "$_out.log" | head -1 | awk '{print $2}'
+    return 0
+}
+
+scan() {
+    _root=$1
+    _tmp=$(mktemp -d) || verdict_error "mktemp failed"
+    _out="$_tmp/registry"
+    _count=$(regen "$_root" "$_out")
+    if [ -z "$_count" ]; then
+        rm -rf "$_tmp"
+        verdict_error "generator failed in $_root"
+    fi
+    if [ "$_count" -eq 0 ]; then
+        rm -rf "$_tmp"
+        verdict_error "generator extracted 0 variants (missing enum source?)"
+    fi
+    if [ ! -d "$_root/$REG_DIR" ]; then
+        rm -rf "$_tmp"
+        echo "FAIL — stale: $REG_DIR missing entirely"
+        exit 1
+    fi
+    _enums=$(grep -c '^enum:' "$_out/index.sdn")
+    _prod=$(grep -o 'grammar: [0-9]* production' "$_out.log" | head -1 | awk '{print $2}')
+    _orph=$(grep -o '[0-9]* orphan tag' "$_out.log" | head -1 | awk '{print $1}')
+    _dead=$(grep -o '[0-9]* dead production' "$_out.log" | head -1 | awk '{print $1}')
+    _stl=$(grep -o '[0-9]* stale row' "$_out.log" | head -1 | awk '{print $1}')
+    [ -n "$_stl" ] || _stl=0
+    if [ -z "$_prod" ]; then
+        rm -rf "$_tmp"
+        verdict_error "generator emitted no grammar report"
+    fi
+    if [ "$_prod" -eq 0 ]; then
+        rm -rf "$_tmp"
+        verdict_error "generator extracted 0 parser productions (missing frontend core sources?)"
+    fi
+    _stale=""
+    for f in "$_out"/*.sdn; do
+        _name=$(basename "$f")
+        if ! cmp -s "$f" "$_root/$REG_DIR/$_name"; then
+            _stale="$_stale $_name"
+        fi
+    done
+    for f in "$_root/$REG_DIR"/*.sdn; do
+        _name=$(basename "$f")
+        if [ ! -f "$_out/$_name" ]; then
+            _stale="$_stale $_name(orphan)"
+        fi
+    done
+    _offenders=""
+    if [ "$_orph" -gt 0 ] || [ "$_dead" -gt 0 ] || [ "$_stl" -gt 0 ]; then
+        _offenders=$(grep -E '^  (tag|production|subject): ' "$_out/compiler.frontend.Grammar.sdn" | grep -v '^  tag: .*: ' | awk '{print $2}' | sort -u | tr '\n' ' ')
+    fi
+    rm -rf "$_tmp"
+    # Receipts are minted only for a scan of the REAL repo root. The selftest
+    # runs this same function against fixture repos; a receipt from a fixture
+    # would be evidence about a temp dir, which is worse than no evidence.
+    if [ -n "$_stale" ]; then
+        _verdict="FAIL — stale:$_stale"
+        echo "$_verdict"
+        [ "$_root" = "$REPO_ROOT" ] && { emit_receipt "check-compiler-schema-fresh" "$_verdict" || true; }
+        exit 1
+    fi
+    if [ -n "$_offenders" ]; then
+        _verdict="FAIL — grammar cross-check: $_orph orphan tag(s), $_dead dead production(s), $_stl stale row(s): $_offenders"
+        echo "$_verdict"
+        [ "$_root" = "$REPO_ROOT" ] && { emit_receipt "check-compiler-schema-fresh" "$_verdict" || true; }
+        exit 1
+    fi
+    _verdict="PASS — $_count variant(s) across $_enums enum(s), $_prod production(s), $_orph orphan tag(s), $_dead dead production(s), $_stl stale row(s), registry fresh"
+    echo "$_verdict"
+    [ "$_root" = "$REPO_ROOT" ] && { emit_receipt "check-compiler-schema-fresh" "$_verdict" || true; }
+    exit 0
+}
+
+selftest() {
+    _st=$(mktemp -d) || { echo "selftest ERROR: mktemp failed"; exit 2; }
+    _fix="$_st/repo"
+    mkdir -p "$_fix"
+    # Fixture repo: the real generator sources + the real compiler enum sources.
+    ( cd "$REPO_ROOT" && tar cf - src/app/compiler_schema src/compiler/10.frontend/core \
+        src/compiler/10.frontend/desugar \
+        src/compiler/10.frontend/ast.spl \
+        src/compiler/10.frontend/parser_types_expr.spl \
+        src/compiler/20.hir/hir_definitions.spl src/compiler/20.hir/hir_types.spl \
+        src/compiler/50.mir/mir_instruction_kinds.spl \
+        src/compiler/50.mir/mir_instruction_support.spl \
+        src/compiler/50.mir/mir_types.spl "$REG_DIR" ) | ( cd "$_fix" && tar xf - )
+
+    # 1. Fresh registry must PASS.
+    _r=$( scan "$_fix" ); _rc=$?
+    case "$_r" in
+        PASS*) : ;;
+        *) echo "selftest FAIL: fresh fixture did not PASS: $_r"; rm -rf "$_st"; exit 2 ;;
+    esac
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL: fresh fixture exit $_rc"; rm -rf "$_st"; exit 2; }
+
+    # 2. A hand-edited registry must FAIL.
+    _victim=$(ls "$_fix/$REG_DIR"/*.sdn | head -1)
+    echo "  hand_edited: yes" >> "$_victim"
+    _r=$( scan "$_fix" ); _rc=$?
+    case "$_r" in
+        FAIL*) : ;;
+        *) echo "selftest FAIL: hand-edited registry did not FAIL: $_r"; rm -rf "$_st"; exit 2 ;;
+    esac
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL: hand-edited exit $_rc (want 1)"; rm -rf "$_st"; exit 2; }
+    ( cd "$REPO_ROOT" && tar cf - "$REG_DIR" ) | ( cd "$_fix" && tar xf - )
+
+    # 3. A missing enum source must ERROR, not pass.
+    _empty="$_st/empty"
+    mkdir -p "$_empty"
+    ( cd "$REPO_ROOT" && tar cf - src/app/compiler_schema "$REG_DIR" ) | ( cd "$_empty" && tar xf - )
+    _r=$( scan "$_empty" ); _rc=$?
+    case "$_r" in
+        ERROR*) : ;;
+        *) echo "selftest FAIL: missing enum sources did not ERROR: $_r"; rm -rf "$_st"; exit 2 ;;
+    esac
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL: missing-source exit $_rc (want 2)"; rm -rf "$_st"; exit 2; }
+
+    # 4. Deleting a parser source must FAIL (proves the grammar axis is really
+    #    in the diff set, not just carried along).
+    rm -f "$_fix/src/compiler/10.frontend/core/parser_stmts.spl"
+    _r=$( scan "$_fix" ); _rc=$?
+    case "$_r" in
+        FAIL*) : ;;
+        *) echo "selftest FAIL: deleted parser source did not FAIL: $_r"; rm -rf "$_st"; exit 2 ;;
+    esac
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL: deleted-parser exit $_rc (want 1)"; rm -rf "$_st"; exit 2; }
+
+    # 5. The cross-check is FATAL: a flat-AST tag no production stamps must
+    #    FAIL even when the registry is perfectly fresh. Restore the parser
+    #    source, inject an orphan const, regenerate the fixture's own registry
+    #    so freshness cannot be what fails, then scan.
+    ( cd "$REPO_ROOT" && tar cf - src/compiler/10.frontend/core/parser_stmts.spl ) | ( cd "$_fix" && tar xf - )
+    echo "const EXPR_SELFTEST_ORPHAN = 9901" >> "$_fix/src/compiler/10.frontend/core/_AstExpr/nodes.spl"
+    _fresh=$(regen "$_fix" "$_fix/$REG_DIR") || { echo "selftest FAIL: fixture regen failed"; rm -rf "$_st"; exit 2; }
+    _r=$( scan "$_fix" ); _rc=$?
+    case "$_r" in
+        "FAIL — grammar cross-check: 1 orphan tag(s)"*EXPR_SELFTEST_ORPHAN*) : ;;
+        *) echo "selftest FAIL: orphan tag did not FAIL the cross-check: $_r"; rm -rf "$_st"; exit 2 ;;
+    esac
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL: orphan-tag exit $_rc (want 1)"; rm -rf "$_st"; exit 2; }
+
+    rm -rf "$_st"
+    echo "selftest: 5/5 fixtures OK"
+}
+
+SCAN_ROOT="$REPO_ROOT"
+DO_SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) DO_SELFTEST_ONLY=1; shift ;;
+        --root) shift; [ $# -gt 0 ] || verdict_error "--root needs a directory"
+                SCAN_ROOT=$(cd "$1" 2>/dev/null && pwd) || verdict_error "--root directory not found"
+                shift ;;
+        *) verdict_error "unknown argument: $1" ;;
+    esac
+done
+
+selftest || exit 2
+if [ "$DO_SELFTEST_ONLY" -eq 1 ]; then
+    exit 0
+fi
+scan "$SCAN_ROOT"

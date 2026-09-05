@@ -1,0 +1,202 @@
+# Loader-owned executable signature authority.
+# Trust roots are installed once by platform configuration. Callers may submit
+# signatures, but cannot submit or select the key that authorizes them.
+
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use std.common.contracts.execution.simpleos_executable_v1.{SimpleArtifactManifest}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableAdmissionV1}
+
+pub struct ExecutableTrustedSignerV1:
+    key_id: text
+    public_key: [u8]
+
+val _loader_crypto_mutex: i64 = mutex_raw_create()
+var _loader_crypto_roots: [ExecutableTrustedSignerV1] = []
+var _loader_crypto_initialized: bool = false
+var _loader_crypto_quarantined: bool = false
+
+fn _copy_bytes(source: [u8]) -> [u8]:
+    var out: [u8] = []
+    for byte in source:
+        out.push(byte)
+    out
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var different: u8 = 0u8
+    var i = 0u64
+    while i < a.len():
+        different = different | (a[i] ^ b[i])
+        i = i + 1u64
+    different == 0u8
+
+fn _root_valid(root: ExecutableTrustedSignerV1) -> bool:
+    root.key_id.trim() != "" and root.key_id.len() <= 128 and
+        root.public_key.len() == 32
+
+fn _roots_valid(roots: [ExecutableTrustedSignerV1]) -> bool:
+    if roots.len() == 0 or roots.len() > 16:
+        return false
+    var i = 0
+    while i < roots.len():
+        if not _root_valid(roots[i]):
+            return false
+        var j = 0
+        while j < i:
+            if roots[j].key_id == roots[i].key_id:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn _unlock(ok: bool) -> bool:
+    if not mutex_raw_unlock(_loader_crypto_mutex):
+        _loader_crypto_quarantined = true
+        return false
+    ok
+
+pub fn executable_loader_trust_roots_initialize(
+    roots: [ExecutableTrustedSignerV1]
+) -> bool:
+    if not _roots_valid(roots) or _loader_crypto_quarantined:
+        return false
+    if not mutex_raw_lock(_loader_crypto_mutex):
+        return false
+    if _loader_crypto_initialized:
+        var same = roots.len() == _loader_crypto_roots.len()
+        var i = 0
+        while same and i < roots.len():
+            same = roots[i].key_id == _loader_crypto_roots[i].key_id and
+                _bytes_equal(roots[i].public_key, _loader_crypto_roots[i].public_key)
+            i = i + 1
+        return _unlock(same)
+    var installed: [ExecutableTrustedSignerV1] = []
+    for root in roots:
+        installed.push(ExecutableTrustedSignerV1(
+            key_id: root.key_id, public_key: _copy_bytes(root.public_key)))
+    _loader_crypto_roots = installed
+    _loader_crypto_initialized = true
+    _unlock(true)
+
+fn _append_field(body: text, value: text) -> text:
+    body + value.len().to_text() + ":" + value
+
+pub fn executable_manifest_signing_body_v1(
+    manifest: SimpleArtifactManifest,
+    admission: ExecutableAdmissionV1,
+    image_hash: text
+) -> [u8]:
+    # Length-prefix every attacker-controlled scalar. Arrays are ordered and
+    # counted, making concatenation and reordering unambiguous.
+    var body = "simpleos-executable-admission-v1"
+    body = _append_field(body, manifest.format_version.to_text())
+    body = _append_field(body, manifest.artifact_kind)
+    body = _append_field(body, manifest.target.os)
+    body = _append_field(body, manifest.target.arch)
+    body = _append_field(body, manifest.target.abi)
+    body = _append_field(body, manifest.entrypoint)
+    body = _append_field(body, manifest.required_abi_features.len().to_text())
+    for item in manifest.required_abi_features:
+        body = _append_field(body, item)
+    body = _append_field(body, manifest.required_services.len().to_text())
+    for item in manifest.required_services:
+        body = _append_field(body, item)
+    body = _append_field(body, manifest.required_capabilities.to_text())
+    body = _append_field(body, manifest.resource_limits.max_memory_bytes.to_text())
+    body = _append_field(body, manifest.resource_limits.max_open_handles.to_text())
+    body = _append_field(body, manifest.resource_limits.max_threads.to_text())
+    body = _append_field(body, manifest.resource_limits.cpu_budget_us.to_text())
+    body = _append_field(body, manifest.namespace_template)
+    body = _append_field(body, manifest.native_libraries.len().to_text())
+    for item in manifest.native_libraries:
+        body = _append_field(body, item)
+    body = _append_field(body, manifest.smf_libraries.len().to_text())
+    for item in manifest.smf_libraries:
+        body = _append_field(body, item)
+    body = _append_field(body, manifest.interpreter)
+    body = _append_field(body, manifest.argument_schema.len().to_text())
+    for item in manifest.argument_schema:
+        body = _append_field(body, item.name)
+        body = _append_field(body, item.value_kind)
+        body = _append_field(body, item.required.to_text())
+        body = _append_field(body, item.default_value)
+    body = _append_field(body, manifest.startup_preloads.len().to_text())
+    for item in manifest.startup_preloads:
+        body = _append_field(body, item.source_arg)
+        body = _append_field(body, item.fixed_path)
+        body = _append_field(body, item.mode)
+        body = _append_field(body, item.required.to_text())
+        body = _append_field(body, item.maximum_bytes.to_text())
+        body = _append_field(body, item.access)
+        body = _append_field(body, item.prefault.to_text())
+        body = _append_field(body, item.hash_policy)
+    body = _append_field(body, manifest.debug_identity)
+    body = _append_field(body, manifest.content_hashes.len().to_text())
+    for digest in manifest.content_hashes:
+        body = _append_field(body, digest)
+    body = _append_field(body, admission.admission_id)
+    body = _append_field(body, image_hash)
+    body = _append_field(body, admission.trust_epoch.to_text())
+    body = _append_field(body, admission.mount_id.to_text())
+    body = _append_field(body, admission.mount_generation.to_text())
+    body = _append_field(body, admission.file_id.to_text())
+    body = _append_field(body, admission.file_generation.to_text())
+    body = _append_field(body, admission.effective_capabilities.to_text())
+    body = _append_field(body, admission.kernel_hash)
+    body = _append_field(body, admission.firmware_profile)
+    body = _append_field(body, admission.compiler_identity)
+    body = _append_field(body, admission.source_identity)
+    body = _append_field(body, admission.config_identity)
+    text_to_bytes_pure(body)
+
+pub fn executable_manifest_hash_v1(
+    manifest: SimpleArtifactManifest,
+    admission: ExecutableAdmissionV1,
+    image_hash: text
+) -> text:
+    sha256_u8_hex(executable_manifest_signing_body_v1(manifest, admission, image_hash))
+
+pub(package) fn executable_loader_signature_verify_trusted_v1(
+    key_id: text,
+    manifest: SimpleArtifactManifest,
+    admission: ExecutableAdmissionV1,
+    image_hash: text,
+    signature: [u8]
+) -> bool:
+    if signature.len() != 64 or _loader_crypto_quarantined:
+        return false
+    if not mutex_raw_lock(_loader_crypto_mutex):
+        return false
+    if not _loader_crypto_initialized:
+        return _unlock(false)
+    var key: [u8] = []
+    for root in _loader_crypto_roots:
+        if root.key_id == key_id:
+            key = _copy_bytes(root.public_key)
+    if not _unlock(true) or key.len() != 32 or
+        admission.trust_root_hash != sha256_u8_hex(key):
+        return false
+    pure_ed25519_verify(
+        key,
+        executable_manifest_signing_body_v1(manifest, admission, image_hash),
+        signature)
+
+pub fn executable_loader_signature_authorized_v1(
+    key_id: text,
+    manifest: SimpleArtifactManifest,
+    admission: ExecutableAdmissionV1,
+    image_hash: text,
+    signature: [u8]
+) -> bool:
+    """Diagnostic verification result only; it is not executable authority."""
+    executable_loader_signature_verify_trusted_v1(
+        key_id, manifest, admission, image_hash, signature)
+
+export ExecutableTrustedSignerV1
+export executable_loader_trust_roots_initialize
+export executable_manifest_signing_body_v1, executable_manifest_hash_v1
+export executable_loader_signature_authorized_v1

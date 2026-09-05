@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+
+Pins `_is_pending`'s statement-position rule (source_facts.spl): pending
+detection fires only on a pending STATEMENT, never on a line that merely
+MENTIONS a marker in a comment or inside a string literal.
+
+Regression specs for the 2026-09-01 fix: the final `fail("todo:` marker used
+`contains` (mention-matching) while every sibling marker used `==` /
+`starts_with`, and `_calls_skip` could be fired by `skip(` inside a string
+literal or a trailing comment. Both directions are pinned: mentions must NOT
+flag, genuine pending statements MUST still flag.
+
+# @req REQ-SSPEC-ORA-001
+"""
+use std.spec.*
+use app.sspec_maintain.*
+use app.sspec_maintain.model.*
+use std.spec.step
+
+fn pending_of(body_line: text) -> bool:
+    # Wrap one body line in a scenario; report the scenario's pending flag.
+    val src = "describe \"d\":\n    it \"case\":\n        " + body_line + "\n        expect(1).to_equal(2)\n"
+    val facts = extract_sspec_source_facts("probe_spec.spl", src)
+    facts.scenarios[0].pending
+
+describe "pending detection is statement-position, not mention":
+    it "does not flag a comment mentioning fail(\"todo:":
+        # @req REQ-SSPEC-ORA-001
+        step("Classify a scenario whose only marker text is inside a comment")
+        val q = "\""
+        expect(pending_of("# scaffolds use fail(" + q + "todo: reason" + q + ") - see guide")).to_equal(false)
+
+    it "does not flag skip( inside a string literal":
+        step("Classify a real assertion whose string argument contains skip(")
+        val q = "\""
+        expect(pending_of("expect(validate_predicate(" + q + "!execution(* skip(..))" + q + ")).to_equal(" + q + q + ")")).to_equal(false)
+
+    it "does not flag a comment or trailing comment mentioning skip()":
+        step("Classify comment-only and code-plus-trailing-comment mentions")
+        expect(pending_of("# a missing kernel is RED - do NOT skip() it")).to_equal(false)
+        expect(pending_of("val n = 1  # never skip() here")).to_equal(false)
+
+    it "still flags every genuine pending statement form":
+        # Negative control for the tightening: a genuine pending statement
+        # going undetected would silently count scaffolding as real coverage.
+        step("Classify each genuine pending statement form")
+        val q = "\""
+        expect(pending_of("pass_todo")).to_equal(true)
+        expect(pending_of("pass_do_nothing")).to_equal(true)
+        expect(pending_of("pass_dn")).to_equal(true)
+        expect(pending_of("pass_todo(" + q + "later" + q + ")")).to_equal(true)
+        expect(pending_of("pending")).to_equal(true)
+        expect(pending_of("pending(" + q + "later" + q + ")")).to_equal(true)
+        expect(pending_of("fail(" + q + "todo: implement X" + q + ")")).to_equal(true)
+        expect(pending_of("skip(" + q + "GHDL unavailable" + q + ", reason)")).to_equal(true)
+        expect(pending_of("val gate = skip(" + q + "no avx2" + q + ")")).to_equal(true)
+
+    it "keeps *_skip( helper calls as real oracles, not skips":
+        step("Classify a call to a *_skip(name) helper")
+        val q = "\""
+        expect(pending_of("test_env_gate_skip(" + q + "name" + q + ")")).to_equal(false)
+
+    it "does not flag a bare enum variant member named Pending":
+        # Regression for the 2026-09-05 false positive (sspec wave 4D): a
+        # scenario that declares an enum whose member is literally `Pending`
+        # was flagged as a pending scaffold even though it carried real
+        # assertions. Enum members are bare names and match the bare form.
+        # @req REQ-SSPEC-ORA-001
+        # @capture(bit_table): enum-member classification
+        step("Classify a scenario that declares and asserts an enum with a Pending member")
+        val q = "\""
+        val src = "describe " + q + "d" + q + ":\n    it " + q + "case" + q + ":\n        enum State:\n            Pending\n            Done\n        val s = State.Pending\n        expect(s == State.Pending).to_equal(true)\n"
+        val facts = extract_sspec_source_facts("probe_spec.spl", src)
+        expect(facts.scenarios[0].pending).to_equal(false)
+
+    it "still flags a bare pending statement after an enum block closes":
+        # Control for the enum-member exemption: the block must close on
+        # dedent, so a genuine pending statement after it still flags.
+        # @req REQ-SSPEC-ORA-001
+        # @capture(bit_table): post-enum scaffold classification
+        step("Classify a genuine pending statement that follows an enum declaration")
+        val q = "\""
+        val src = "describe " + q + "d" + q + ":\n    it " + q + "case" + q + ":\n        enum State:\n            Pending\n        pending\n"
+        val facts = extract_sspec_source_facts("probe_spec.spl", src)
+        expect(facts.scenarios[0].pending).to_equal(true)

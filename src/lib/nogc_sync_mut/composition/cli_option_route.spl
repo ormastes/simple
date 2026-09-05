@@ -1,0 +1,264 @@
+# SCI option-route data layer (Phase C, research §5.9-§5.12, §6.3).
+#
+# Records + validation + lexical `--x<ns>-<key>[=<value>]` splitter only.
+# No provider loading, no argv side effects, no codec edits: the section id
+# below is reserved append-only and encoded by the Phase B/C codec owner.
+
+val SCI_SECTION_CLI_OPTION_ROUTE_V1: i64 = 10
+
+# value_mode dispatch constants
+val CLI_VALUE_MODE_FLAG: i64 = 1
+val CLI_VALUE_MODE_REQUIRED: i64 = 2
+val CLI_VALUE_MODE_OPTIONAL: i64 = 3
+
+# action_kind dispatch constants
+val CLI_ACTION_PLAN_PATCH: i64 = 1
+val CLI_ACTION_PROVIDER_FORWARD: i64 = 2
+val CLI_ACTION_HELP_ONLY: i64 = 3
+
+# availability dispatch constants
+val CLI_AVAILABILITY_REQUIRED: i64 = 1
+val CLI_AVAILABILITY_OPTIONAL: i64 = 2
+
+# missing_policy dispatch constants
+val CLI_MISSING_ERROR: i64 = 1
+val CLI_MISSING_WARN_SKIP: i64 = 2
+val CLI_MISSING_SILENT_SKIP: i64 = 3
+
+# scope_kind dispatch constants
+val CLI_SCOPE_GLOBAL: i64 = 1
+val CLI_SCOPE_COMMAND: i64 = 2
+
+# token classification kinds (splitter / boundary helper)
+val CLI_TOKEN_EXTENSION: i64 = 1        # well-formed --x<ns>-<key>[=<value>]
+val CLI_TOKEN_EXACT_OPTION: i64 = 2     # other --token (exact SCI lookup domain)
+val CLI_TOKEN_POSITIONAL: i64 = 3       # non-option token
+val CLI_TOKEN_TERMINATOR: i64 = 4       # the hard `--`
+val CLI_TOKEN_PROGRAM_ARG: i64 = 5      # any token after `--`, never intercepted
+val CLI_TOKEN_MALFORMED: i64 = 6        # --x token violating the grammar
+
+# validation / lookup diagnostic codes
+val CLI_ROUTE_OK: i64 = 0
+val CLI_ROUTE_ERR_RESERVED_SPELLING: i64 = 1
+val CLI_ROUTE_ERR_DUPLICATE_ALIAS: i64 = 2
+val CLI_ROUTE_ERR_DUPLICATE_NAMESPACE: i64 = 3
+val CLI_ROUTE_ERR_UNKNOWN_NAMESPACE: i64 = 4
+val CLI_ROUTE_ERR_BAD_FIELD: i64 = 5
+val CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE: i64 = 6
+
+class SimpleCliOptionRouteRecordV1:
+    option_id: text
+    spelling: text
+    aliases: [text]
+    scope_kind: i64
+    value_mode: i64
+    action_kind: i64
+    provider_id: text
+    forward_name: text
+    help_summary: text
+    semantic_class: text
+    availability: i64
+    missing_policy: i64
+
+class SimpleCliExtensionNamespaceRecordV1:
+    namespace: text
+    provider_id: text
+    availability: i64
+    missing_policy: i64
+
+# Structured splitter result. On kind == CLI_TOKEN_MALFORMED, error_code holds
+# CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE; namespace/key/value are empty.
+class CliExtensionTokenV1:
+    kind: i64
+    namespace: text
+    key: text
+    value: text
+    has_value: bool
+    error_code: i64
+
+class CliOptionRouteDiagnosticV1:
+    ok: bool
+    code: i64
+    detail: text
+
+fn _diag_ok() -> CliOptionRouteDiagnosticV1:
+    CliOptionRouteDiagnosticV1(ok: true, code: CLI_ROUTE_OK, detail: "")
+
+fn _diag_err(code: i64, detail: text) -> CliOptionRouteDiagnosticV1:
+    CliOptionRouteDiagnosticV1(ok: false, code: code, detail: detail)
+
+fn _is_lower(ch: text) -> bool:
+    ch >= "a" and ch <= "z"
+
+fn _is_ns_char(ch: text) -> bool:
+    _is_lower(ch) or (ch >= "0" and ch <= "9") or ch == "_"
+
+# namespace must match [a-z][a-z0-9_]{0,31}
+fn cli_namespace_shape_valid_v1(namespace: text) -> bool:
+    val n = namespace.len()
+    if n < 1 or n > 32: return false
+    if not _is_lower(namespace.slice(0, 1)): return false
+    var i = 1
+    while i < n:
+        if not _is_ns_char(namespace.slice(i, i + 1)): return false
+        i = i + 1
+    true
+
+# Reserved core spellings and the whole --x prefix can never be registered.
+fn cli_spelling_reserved_v1(spelling: text) -> bool:
+    if spelling == "-h" or spelling == "--help": return true
+    if spelling == "-V" or spelling == "--version": return true
+    if spelling == "--": return true
+    spelling.starts_with("--x")
+
+# Lexical splitter for one argv token. Pure, allocation-minimal, never looks
+# at the next token: a value REQUIRES `=` (research §5.9 rule 3).
+fn split_cli_extension_token_v1(token: text) -> CliExtensionTokenV1:
+    if token == "--":
+        return CliExtensionTokenV1(kind: CLI_TOKEN_TERMINATOR, namespace: "", key: "", value: "", has_value: false, error_code: CLI_ROUTE_OK)
+    if not token.starts_with("--"):
+        return CliExtensionTokenV1(kind: CLI_TOKEN_POSITIONAL, namespace: "", key: "", value: "", has_value: false, error_code: CLI_ROUTE_OK)
+    if not token.starts_with("--x"):
+        return CliExtensionTokenV1(kind: CLI_TOKEN_EXACT_OPTION, namespace: "", key: "", value: "", has_value: false, error_code: CLI_ROUTE_OK)
+    # --x form: find the first `-` after `--x` (namespace/key delimiter) and
+    # the first `=` (key/value delimiter). Namespace never contains `-`.
+    val body_start = 3
+    val n = token.len()
+    var dash = -1
+    var eq = -1
+    var i = body_start
+    while i < n:
+        val ch = token.slice(i, i + 1)
+        if ch == "=":
+            eq = i
+            break
+        if ch == "-" and dash < 0:
+            dash = i
+        i = i + 1
+    if dash < 0 or dash == body_start:
+        return CliExtensionTokenV1(kind: CLI_TOKEN_MALFORMED, namespace: "", key: "", value: "", has_value: false, error_code: CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE)
+    val namespace = token.slice(body_start, dash)
+    if not cli_namespace_shape_valid_v1(namespace):
+        return CliExtensionTokenV1(kind: CLI_TOKEN_MALFORMED, namespace: "", key: "", value: "", has_value: false, error_code: CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE)
+    val key_end = if eq >= 0: eq else: n
+    val key = token.slice(dash + 1, key_end)
+    if key.len() == 0:
+        return CliExtensionTokenV1(kind: CLI_TOKEN_MALFORMED, namespace: "", key: "", value: "", has_value: false, error_code: CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE)
+    if eq >= 0:
+        return CliExtensionTokenV1(kind: CLI_TOKEN_EXTENSION, namespace: namespace, key: key, value: token.slice(eq + 1, n), has_value: true, error_code: CLI_ROUTE_OK)
+    CliExtensionTokenV1(kind: CLI_TOKEN_EXTENSION, namespace: namespace, key: key, value: "", has_value: false, error_code: CLI_ROUTE_OK)
+
+# Boundary-aware classification of a whole token list: after the hard `--`
+# every token is a program argument and nothing is intercepted (§5.9 rule 6).
+fn classify_cli_tokens_v1(tokens: [text]) -> [CliExtensionTokenV1]:
+    var out: [CliExtensionTokenV1] = []
+    var terminated = false
+    var i = 0
+    while i < tokens.len():
+        if terminated:
+            out.push(CliExtensionTokenV1(kind: CLI_TOKEN_PROGRAM_ARG, namespace: "", key: "", value: "", has_value: false, error_code: CLI_ROUTE_OK))
+        else:
+            val tok = split_cli_extension_token_v1(tokens[i])
+            if tok.kind == CLI_TOKEN_TERMINATOR: terminated = true
+            out.push(tok)
+        i = i + 1
+    out
+
+fn _value_mode_valid(mode: i64) -> bool:
+    mode == CLI_VALUE_MODE_FLAG or mode == CLI_VALUE_MODE_REQUIRED or mode == CLI_VALUE_MODE_OPTIONAL
+
+fn _action_kind_valid(kind: i64) -> bool:
+    kind == CLI_ACTION_PLAN_PATCH or kind == CLI_ACTION_PROVIDER_FORWARD or kind == CLI_ACTION_HELP_ONLY
+
+fn _availability_valid(a: i64) -> bool:
+    a == CLI_AVAILABILITY_REQUIRED or a == CLI_AVAILABILITY_OPTIONAL
+
+fn _missing_policy_valid(p: i64) -> bool:
+    p == CLI_MISSING_ERROR or p == CLI_MISSING_WARN_SKIP or p == CLI_MISSING_SILENT_SKIP
+
+fn _scope_kind_valid(s: i64) -> bool:
+    s == CLI_SCOPE_GLOBAL or s == CLI_SCOPE_COMMAND
+
+# Fail-closed registry table for option routes + extension namespaces.
+class SimpleCliOptionRouteTableV1:
+    var routes: [SimpleCliOptionRouteRecordV1]
+    var namespaces: [SimpleCliExtensionNamespaceRecordV1]
+
+    static fn create() -> SimpleCliOptionRouteTableV1:
+        SimpleCliOptionRouteTableV1(routes: [], namespaces: [])
+
+    me register_route(record: SimpleCliOptionRouteRecordV1) -> CliOptionRouteDiagnosticV1:
+        if record.option_id.len() == 0 or record.spelling.len() == 0:
+            return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "empty option_id or spelling")
+        if not _value_mode_valid(record.value_mode): return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "value_mode")
+        if not _action_kind_valid(record.action_kind): return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "action_kind")
+        if not _availability_valid(record.availability): return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "availability")
+        if not _missing_policy_valid(record.missing_policy): return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "missing_policy")
+        if not _scope_kind_valid(record.scope_kind): return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "scope_kind")
+        if cli_spelling_reserved_v1(record.spelling):
+            return _diag_err(CLI_ROUTE_ERR_RESERVED_SPELLING, record.spelling)
+        var a = 0
+        while a < record.aliases.len():
+            if cli_spelling_reserved_v1(record.aliases[a]):
+                return _diag_err(CLI_ROUTE_ERR_RESERVED_SPELLING, record.aliases[a])
+            a = a + 1
+        # duplicate detection across all existing spellings + aliases; a
+        # command-scoped route may only collide with a different command scope.
+        var i = 0
+        while i < self.routes.len():
+            val other = self.routes[i]
+            val global_conflict = record.scope_kind == CLI_SCOPE_GLOBAL or other.scope_kind == CLI_SCOPE_GLOBAL
+            if global_conflict and _spellings_overlap(record, other):
+                return _diag_err(CLI_ROUTE_ERR_DUPLICATE_ALIAS, record.spelling)
+            i = i + 1
+        self.routes.push(record)
+        _diag_ok()
+
+    me register_namespace(record: SimpleCliExtensionNamespaceRecordV1) -> CliOptionRouteDiagnosticV1:
+        if not cli_namespace_shape_valid_v1(record.namespace):
+            return _diag_err(CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE, record.namespace)
+        if record.provider_id.len() == 0:
+            return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "empty provider_id")
+        if not _availability_valid(record.availability): return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "availability")
+        if not _missing_policy_valid(record.missing_policy): return _diag_err(CLI_ROUTE_ERR_BAD_FIELD, "missing_policy")
+        var i = 0
+        while i < self.namespaces.len():
+            if self.namespaces[i].namespace == record.namespace:
+                return _diag_err(CLI_ROUTE_ERR_DUPLICATE_NAMESPACE, record.namespace)
+            i = i + 1
+        self.namespaces.push(record)
+        _diag_ok()
+
+class CliNamespaceLookupV1:
+    ok: bool
+    code: i64
+    record: SimpleCliExtensionNamespaceRecordV1
+
+fn _empty_namespace_record() -> SimpleCliExtensionNamespaceRecordV1:
+    SimpleCliExtensionNamespaceRecordV1(namespace: "", provider_id: "", availability: CLI_AVAILABILITY_REQUIRED, missing_policy: CLI_MISSING_ERROR)
+
+# Exact SCI namespace lookup: unknown namespace is an EXPLICIT error record,
+# never a silent pass-through (§5.12 fail-closed table).
+fn cli_lookup_namespace_v1(table: SimpleCliOptionRouteTableV1, namespace: text) -> CliNamespaceLookupV1:
+    var i = 0
+    while i < table.namespaces.len():
+        if table.namespaces[i].namespace == namespace:
+            return CliNamespaceLookupV1(ok: true, code: CLI_ROUTE_OK, record: table.namespaces[i])
+        i = i + 1
+    CliNamespaceLookupV1(ok: false, code: CLI_ROUTE_ERR_UNKNOWN_NAMESPACE, record: _empty_namespace_record())
+
+fn _spelling_in(record: SimpleCliOptionRouteRecordV1, spelling: text) -> bool:
+    if record.spelling == spelling: return true
+    var i = 0
+    while i < record.aliases.len():
+        if record.aliases[i] == spelling: return true
+        i = i + 1
+    false
+
+fn _spellings_overlap(a: SimpleCliOptionRouteRecordV1, b: SimpleCliOptionRouteRecordV1) -> bool:
+    if _spelling_in(b, a.spelling): return true
+    var i = 0
+    while i < a.aliases.len():
+        if _spelling_in(b, a.aliases[i]): return true
+        i = i + 1
+    false

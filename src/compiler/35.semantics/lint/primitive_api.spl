@@ -1,0 +1,241 @@
+# primitive_api Lint
+#
+# Warns when bare primitives (i64, i32, f64, f32, bool) appear in:
+# - Function parameter types (all visibility levels)
+# - Function return types (all visibility levels)
+# - Struct/class field types (all visibility levels)
+#
+# Does NOT warn on:
+# - Constructor arguments (ActorId(value: 42)) - the literal 42 is fine
+# - Expression-level usage of primitives
+# - Code annotated with @allow(primitive_api)
+# - Pure math functions where all params + return are the same primitive
+#   (e.g., fn abs(x: f64) -> f64, fn max(a: i64, b: i64) -> i64)
+
+use compiler.frontend.ast.{Node, FunctionDef, StructDef, ClassDef}
+use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
+
+# NOTE (2026-08-09): `compiler.frontend.ast`'s FunctionDef.params and
+# StructDef/ClassDef.fields are declared `[text]` — flat 'name: Type' entries
+# (see the "# DESUGARED" markers in ast.spl), not `[Param]`/`[ParserField]`
+# objects. This file used to field-access `.ty`/`.name` on those text entries
+# as if they were rich AST nodes, which parses fine but cannot be lowered
+# ("cannot infer field type ... struct 'String' field 'ty'") — see
+# doc/08_tracking/bug/paren_less_accessor_whole_module_de_jit_2026-08-08.md.
+# Sibling `semantic_api/checker.spl` already parses the same flat-text shape
+# correctly; this file now does the same with local `_pf_name_of`/`_pf_type_of`
+# helpers instead of enum-typed field access.
+
+struct LintWarning:
+    message: text
+    item_name: text
+    field_or_param: text
+    code: text                  # "primitive_api" (default) | "raw_unit"
+
+    fn fmt() -> text:
+        val prefix = if self.code == "": "primitive_api" else: self.code
+        "{prefix}: {self.message} in '{self.item_name}' ({self.field_or_param})"
+
+# Parameter/field name from a flat-AST 'name: Type' text entry.
+fn _pf_name_of(entry: text) -> text:
+    val idx = entry.index_of(":")
+    var name = if idx >= 0: entry.slice(0, idx) else: entry
+    name = name.trim()
+    if name.starts_with("mut "):
+        name = name.slice(4).trim()
+    name
+
+# Type text of a flat-AST 'name: Type' entry; "" when untyped.
+fn _pf_type_of(entry: text) -> text:
+    val idx = entry.index_of(":")
+    if idx < 0:
+        return ""
+    entry.slice(idx + 1).trim()
+
+# Canonical table: compiler.semantics.lint.primitive_types (includes bool).
+fn is_bare_primitive(ty_text: text) -> bool:
+    """Check if a type name is a bare primitive that should be wrapped."""
+    is_bare_primitive_name(ty_text.trim())
+
+fn is_pure_math_function(func: FunctionDef) -> bool:
+    """Check if a function is a pure math helper where all params and return share the same primitive type.
+    Examples: fn abs(x: f64) -> f64, fn max(a: i64, b: i64) -> i64"""
+    # Must have at least 1 parameter and a return type
+    if func.params.len() == 0:
+        return false
+    if not func.has_return_type:
+        return false
+
+    val ret_name = func.return_type.trim()
+
+    # Return type must be a bare primitive
+    if not is_bare_primitive(ret_name):
+        return false
+
+    # All parameter types must match the return type
+    for param_entry in func.params:
+        val pty = _pf_type_of(param_entry)
+        if pty == "":
+            return false
+        if pty != ret_name:
+            return false
+
+    true
+
+fn check_function(func: FunctionDef) -> [LintWarning]:
+    """Check a function for bare primitive usage (all visibility levels)."""
+    var warnings = []
+
+    # Exempt pure math functions (all params + return are same primitive)
+    if is_pure_math_function(func):
+        return []
+
+    # Check parameters
+    for param_entry in func.params:
+        val pname = _pf_name_of(param_entry)
+        val pty = _pf_type_of(param_entry)
+        if pty != "" and is_bare_primitive(pty):
+            warnings.push(LintWarning(
+                message: "bare primitive parameter type",
+                item_name: func.name,
+                field_or_param: "param '{pname}'",
+                code: "primitive_api"
+            ))
+
+    # Check return type
+    if func.has_return_type:
+        if is_bare_primitive(func.return_type):
+            warnings.push(LintWarning(
+                message: "bare primitive return type",
+                item_name: func.name,
+                field_or_param: "return type",
+                code: "primitive_api"
+            ))
+
+    warnings
+
+fn check_struct(struct_def: StructDef) -> [LintWarning]:
+    """Check a struct for bare primitive fields (all visibility levels)."""
+    var warnings = []
+
+    for field_entry in struct_def.fields:
+        val fname = _pf_name_of(field_entry)
+        val fty = _pf_type_of(field_entry)
+        if fty != "" and is_bare_primitive(fty):
+            warnings.push(LintWarning(
+                message: "bare primitive field type",
+                item_name: struct_def.name,
+                field_or_param: "field '{fname}'",
+                code: "primitive_api"
+            ))
+
+    warnings
+
+fn check_class(class_def: ClassDef) -> [LintWarning]:
+    """Check a class for bare primitive fields (all visibility levels)."""
+    var warnings = []
+
+    for field_entry in class_def.fields:
+        val fname = _pf_name_of(field_entry)
+        val fty = _pf_type_of(field_entry)
+        if fty != "" and is_bare_primitive(fty):
+            warnings.push(LintWarning(
+                message: "bare primitive field type",
+                item_name: class_def.name,
+                field_or_param: "field '{fname}'",
+                code: "primitive_api"
+            ))
+
+    warnings
+
+fn check_module_items(items: [Node]) -> [LintWarning]:
+    """Run primitive_api lint on all module items."""
+    var warnings = []
+
+    for item in items:
+        match item:
+            case Function(func):
+                val fn_warnings = check_function(func)
+                for w in fn_warnings:
+                    warnings.push(w)
+            case Struct(struct_def):
+                val s_warnings = check_struct(struct_def)
+                for w in s_warnings:
+                    warnings.push(w)
+            case Class(class_def):
+                val c_warnings = check_class(class_def)
+                for w in c_warnings:
+                    warnings.push(w)
+            case _: pass
+
+    warnings
+
+# ---------------------------------------------------------------------------
+# raw_unit — call-site lint (unit-system-consolidation AC-4)
+# ---------------------------------------------------------------------------
+#
+# Emits when a raw integer/float literal is passed to a parameter whose type
+# is owned by a `unit.*` module (i.e., a unit type). Suppressible via
+# `#[allow(raw_unit)]` on the call site / enclosing statement / function /
+# module (handled by the shared allow-attr machinery).
+
+fn is_unit_type(ty_text: text) -> bool:
+    """A type is a 'unit type' if its (flat-AST) type text starts with `unit.`.
+
+    Covers both forms the compiler can produce here: a resolved qualified path
+    or an unresolved dotted name — both come through as plain text in the flat
+    AST, e.g. 'unit.foo.bar'."""
+    ty_text.starts_with("unit.")
+
+fn is_raw_primitive_expr(expr: any) -> bool:
+    """True for integer/float literals WITHOUT a unit suffix (ExprInt/ExprFloat
+    or AST nodes with kind IntLit/FloatLit). Suffixed literals — `10_km`,
+    `1.5_kg` — are treated as already unit-typed and do NOT trigger."""
+    match expr:
+        case IntLit(_): true
+        case FloatLit(_): true
+        case ExprInt(_): true
+        case ExprFloat(_): true
+        # Suffixed literals lower to typed nodes elsewhere; any kind carrying
+        # a suffix name is NOT a raw primitive.
+        case SuffixedInt(_, _): false
+        case SuffixedFloat(_, _): false
+        case _: false
+
+fn check_call_site(callee_name: text, args: [any], callee: FunctionDef) -> [LintWarning]:
+    """Emit `raw_unit` warnings for each arg where the callee's matching
+    parameter is a unit-typed param and the arg expression is a raw primitive
+    literal.
+
+    Caller responsibility: pass the resolved callee's `FunctionDef` plus the
+    call's argument expressions (AST nodes) and the callee's printable name.
+    This is the direct form used by resolution passes that already have the
+    three values in hand (e.g., `HirExpr::Call(callee, args)` in HIR)."""
+    var warnings = []
+    val params = callee.params
+    var i: i64 = 0
+    for arg in args:
+        if i >= params.len():
+            break
+        val param_entry = params[i]
+        val pty = _pf_type_of(param_entry)
+        if pty != "" and is_unit_type(pty) and is_raw_primitive_expr(arg):
+            val pname = _pf_name_of(param_entry)
+            val unit_name = unit_type_short(pty)
+            val msg = "raw primitive passed to unit-typed parameter '{pname}: {unit_name}'; use '<N>_{unit_name}' postfix or explicit conversion"
+            warnings.push(LintWarning(
+                message: msg,
+                item_name: callee_name,
+                field_or_param: "arg #{i} ('{pname}')",
+                code: "raw_unit"
+            ))
+        i = i + 1
+    warnings
+
+fn unit_type_short(ty_text: text) -> text:
+    """Last segment of a unit type's module path — i.e., the short unit symbol
+    (e.g. 'unit.length.km' → 'km')."""
+    val parts = ty_text.split(".")
+    if parts.len() == 0:
+        return ty_text
+    parts[parts.len() - 1]

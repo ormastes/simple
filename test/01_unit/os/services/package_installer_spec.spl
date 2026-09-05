@@ -1,0 +1,51 @@
+# @cover src/os/services/package_installer.spl
+
+"""
+# PackageInstaller.uninstall must remove the manifest, not just the binary
+
+`uninstall()` computes `manifest_path = "{app_path}{MANIFEST_SUFFIX}"` and its
+own docstring says manifest removal is "Text-based manifest removal via
+g_vfs_write_file_text(path, \"\")" — but the function body never called it.
+The binary was deleted while the `.pkg.sdn` manifest was silently left behind
+on every uninstall (still readable with its old, stale content afterward).
+"""
+
+use std.spec
+use os.services.package_installer.{PackageInstaller, make_package_installer}
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test,
+    _mount_hosted_rootfs_for_test,
+    g_vfs_write_file_text,
+    g_vfs_write_file_bytes,
+    g_vfs_read_file_text,
+    g_vfs_file_exists,
+}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.types.{MountOptions}
+
+fn _nvfs_posix_root() -> DriverInstance:
+    var d = NvfsPosixDriver.new("nvfs-posix-root-pkg")
+    d.mount(MountOptions.default()).unwrap()
+    DriverInstance.NvfsPosix(d)
+
+describe "PackageInstaller.uninstall removes the manifest alongside the binary":
+
+    it "clears the .pkg.sdn manifest, not only the app binary":
+        _clear_vfs_rootfs_for_test()
+        expect(_mount_hosted_rootfs_for_test(_nvfs_posix_root())).to_equal(true)
+
+        val app_path = "/apps/demo_app"
+        val manifest_path = "/apps/demo_app.pkg.sdn"
+
+        # Seed a binary and its manifest, as install_from_path/pkg writers would.
+        expect(g_vfs_write_file_text(app_path, "BINARYBYTES")).to_equal(true)
+        expect(g_vfs_write_file_text(manifest_path, "name: demo_app\nversion: 1\n")).to_equal(true)
+        expect(g_vfs_file_exists(manifest_path)).to_equal(true)
+
+        val installer = make_package_installer()
+        val ok = installer.uninstall(app_path)
+        expect(ok).to_equal(true)
+
+        # The manifest must be cleared (empty text), not left with stale content.
+        expect(g_vfs_read_file_text(manifest_path)).to_equal("")

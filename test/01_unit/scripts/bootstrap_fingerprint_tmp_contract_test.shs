@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-authority-wiring.shs"
+tmp="$root/build/bootstrap-fingerprint-tmp-contract.$$"
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT INT TERM
+output="$tmp/output"
+scratch="$output/rust-authority-fingerprint-tmp"
+manifest="$output/fingerprint-error.manifest"
+error_log="$output/fingerprint-error.log"
+trace="$output/trace"
+mkdir -p "$output" "$tmp/unwritable-default-tmp"
+chmod 500 "$tmp/unwritable-default-tmp"
+
+bootstrap_stage3_seed_inputs_fingerprint() {
+  printf '%s\n' "${TMPDIR}" >>"$trace"
+  if [ -e "$output/fail-helper" ]; then
+    echo 'mktemp: No space left on device' >&2
+    return 73
+  fi
+  printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+}
+
+for phase in pre post commit; do
+  value=$(TMPDIR="$tmp/unwritable-default-tmp" \
+    bootstrap_authority_seed_inputs_fingerprint "$phase" "$scratch" \
+      "$manifest" "$error_log" root cranelift none /bin platform)
+  [ "$value" = \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]
+done
+[ "$(wc -l <"$trace" | tr -d ' ')" -eq 3 ]
+while IFS= read -r observed; do
+  [ "$observed" = "$scratch" ] || exit 1
+done <"$trace"
+[ ! -e "$manifest" ] && [ ! -e "$error_log" ]
+
+: >"$output/fail-helper"
+if TMPDIR="$tmp/unwritable-default-tmp" \
+  bootstrap_authority_seed_inputs_fingerprint post "$scratch" "$manifest" \
+    "$error_log" root cranelift none /bin platform >/dev/null; then
+  echo 'FAIL: simulated ENOSPC fingerprint unexpectedly succeeded' >&2
+  exit 1
+else
+  [ "$?" -eq 73 ] || exit 1
+fi
+grep -Fqx 'phase=post' "$manifest"
+grep -Fqx 'status=73' "$manifest"
+grep -Fqx "tmpdir=$scratch" "$manifest"
+grep -Fqx 'phase=post' "$error_log"
+grep -Fqx 'mktemp: No space left on device' "$error_log"
+
+rm -f "$output/fail-helper"
+value=$(bootstrap_authority_seed_inputs_fingerprint commit "$scratch" \
+  "$manifest" "$error_log" root cranelift none /bin platform)
+[ "$value" = \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]
+[ ! -e "$manifest" ] && [ ! -e "$error_log" ]
+echo 'bootstrap fingerprint tmp contract: PASS'

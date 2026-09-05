@@ -1,0 +1,189 @@
+# SSH Session — Service Request and Authentication Phases (Phases 3 & 4)
+#
+# Extracted from ssh_session.spl.
+# Contains: impl SshSession.do_service_request(), impl SshSession.do_auth()
+
+use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
+use os.apps.sshd.ssh_hex.{format_hex, format_hex_width}
+use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_KEXINIT, SSH_MSG_IGNORE, SSH_MSG_UNIMPLEMENTED, SSH_MSG_DEBUG, SSH_MSG_EXT_INFO, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_service_accept, ssh_build_disconnect}
+use os.apps.sshd.ssh_auth.{SshUserDb, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_check_public_key_auth, ssh_build_auth_success, ssh_build_userauth_pk_ok}
+use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
+use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, ssh_pre_auth_control_budget_allows, _bytes_to_hex, _read_text_field_fast, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _payload_field_is_publickey, _publickey_only_auth_failure_payload, _is_ssh_userauth_service_request}
+use os.kernel.log.klog_api.{log_info}
+
+
+fn _ct_bytes_equal(a: [u8], b: [u8]) -> bool:
+    """Constant-time byte comparison. Length mismatch returns false early
+    (length is not secret); equal-length inputs always visit every byte so
+    the compare time does not reveal which byte differs (plan A3)."""
+    if a.len() != b.len():
+        return false
+    var diff: u8 = 0
+    var i: u64 = 0
+    while i < a.len():
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    diff == 0
+
+impl SshSession:
+
+    # ========================================================================
+    # Phase 3: Service Request
+    # ========================================================================
+
+    me do_service_request() -> bool:
+        """Handle SSH_MSG_SERVICE_REQUEST for 'ssh-userauth'."""
+        log_info("[app.sshd] " + "[sshd-session] service request")
+        while true:
+            val payload = self.recv_packet_payload()
+            if payload.len() == 0:
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
+                return false
+
+            val msg_type = ssh_session_u8_at(payload, 0)
+            if msg_type == SSH_MSG_KEXINIT:
+                if not self.do_rekey(payload):
+                    self.transition_closed()
+                    return false
+            elif msg_type == 7 or msg_type == 2 or msg_type == 4:
+                log_info("[app.sshd] " + "[sshd-session] skip pre-auth msg type=0x{format_hex(msg_type.to_i64())}")
+                pass_dn
+            else:
+                if not _is_ssh_userauth_service_request(payload):
+                    self.disconnect(2, "invalid service request")
+                    return false
+
+                val accept = ssh_build_service_accept("ssh-userauth")
+                self.send_packet(accept)
+                log_info("[app.sshd] " + "[sshd-session] service request ok")
+                return true
+
+    # ========================================================================
+    # Phase 4: Authentication
+    # ========================================================================
+
+    me do_auth() -> bool:
+        """Handle authentication requests. Loops until success or max attempts."""
+        log_info("[app.sshd] " + "[sshd-session] auth")
+        var attempts: u32 = 0
+        var control_packets: u32 = 0
+        var rekeys: u32 = 0
+
+        while attempts < MAX_AUTH_ATTEMPTS:
+            val payload = self.recv_packet_payload()
+            # Do not log payload bytes: auth payloads embed the password.
+            if payload.len() == 0:
+                self.transition_closed()
+                return false
+
+            val auth_msg_type = ssh_session_u8_at(payload, 0)
+            if auth_msg_type == SSH_MSG_DISCONNECT:
+                # The peer has already terminated the transport.  Do not
+                # charge a terminal packet as an authentication attempt or
+                # answer it with a second disconnect.
+                self.transition_closed()
+                return false
+            if auth_msg_type == SSH_MSG_KEXINIT:
+                control_packets = control_packets + 1u32
+                rekeys = rekeys + 1u32
+                if not ssh_pre_auth_control_budget_allows(control_packets, rekeys):
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "authentication transport budget exceeded")
+                    return false
+                if not self.do_rekey(payload):
+                    self.transition_closed()
+                    return false
+                continue
+            if auth_msg_type == SSH_MSG_EXT_INFO or auth_msg_type == SSH_MSG_IGNORE or auth_msg_type == SSH_MSG_UNIMPLEMENTED or auth_msg_type == SSH_MSG_DEBUG:
+                control_packets = control_packets + 1u32
+                if not ssh_pre_auth_control_budget_allows(control_packets, rekeys):
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "authentication transport budget exceeded")
+                    return false
+                log_info("[app.sshd] auth skip type=0x{format_hex_width(auth_msg_type.to_u64(), 2)}")
+                continue
+
+            if auth_msg_type != 50:
+                # Ignore non-auth messages during auth phase
+                attempts = attempts + 1
+                continue
+
+            val r_user = _read_text_field_fast(payload, 1)
+            val user = match r_user:
+                Ok(parsed_user):
+                    parsed_user
+                Err(_):
+                    attempts = attempts + 1
+                    val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                    self.send_packet(disc)
+                    self.transition_closed()
+                    return false
+            val r_service = _read_text_field_fast(payload, user.next_offset)
+            val service = match r_service:
+                Ok(parsed_service):
+                    parsed_service
+                Err(_):
+                    attempts = attempts + 1
+                    val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                    self.send_packet(disc)
+                    self.transition_closed()
+                    return false
+            if not _payload_field_is_ssh_connection(payload, user.next_offset):
+                attempts = attempts + 1
+                val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                self.send_packet(disc)
+                self.transition_closed()
+                return false
+
+            if _payload_field_is_none(payload, service.next_offset):
+                # "none" is still an authentication request.  Charge it to
+                # the bounded request budget so a peer cannot keep a pre-auth
+                # session alive indefinitely by repeating method discovery.
+                attempts = attempts + 1
+                val fail = _publickey_only_auth_failure_payload()
+                self.send_packet(fail)
+
+            elif _payload_field_is_password(payload, service.next_offset):
+                # Password auth is disabled: do not copy the secret field into
+                # an immutable text value while zeroization is unavailable.
+                attempts = attempts + 1
+                val fail = _publickey_only_auth_failure_payload()
+                self.send_packet(fail)
+
+            elif _payload_field_is_publickey(payload, service.next_offset):
+                val parsed = ssh_parse_auth_request(payload)
+                match parsed:
+                    case Err(_):
+                        attempts = attempts + 1
+                        self.send_packet(_publickey_only_auth_failure_payload())
+                    case Ok(request):
+                        val check = ssh_check_public_key_auth(
+                            request, self.session_id, self.user_db)
+                        if check.probe_accepted:
+                            # PK_OK discloses that the key is authorized but is
+                            # not authentication success.  Bound probes like
+                            # every other pre-auth request to prevent unlimited
+                            # key enumeration and session pinning.
+                            attempts = attempts + 1
+                            self.send_packet(ssh_build_userauth_pk_ok(
+                                check.algorithm, check.key_blob))
+                        elif check.valid:
+                            self.authenticated_user = request.username
+                            self.capability_authenticated = true
+                            self.send_packet(ssh_build_auth_success())
+                            self.state = SshSessionState.Interactive
+                            return true
+                        else:
+                            attempts = attempts + 1
+                            self.send_packet(_publickey_only_auth_failure_payload())
+
+            else:
+                attempts = attempts + 1
+                val fail = _publickey_only_auth_failure_payload()
+                self.send_packet(fail)
+
+        # Too many failed attempts
+        self.disconnect(14, "too many authentication failures")
+        false
+
+# Exported for constant-time-compare unit coverage (plan A3). These are pure
+# comparison helpers with no session/socket state.
+export _ct_bytes_equal

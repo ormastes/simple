@@ -1,0 +1,68 @@
+"""Legacy i18n CLI extraction and catalog memory-performance smoke."""
+# @tag: perf, memory, i18n, cli
+
+use std.spec.*
+use std.io_runtime.{time_now_unix_micros, file_read}
+use app.i18n.main.{extract_i18n_strings, generate_locale_catalog,
+    generate_locale_template}
+
+fn cli_perf_corpus(messages: i64) -> text:
+    var lines: [text] = []
+    var i: i64 = 0
+    while i < messages:
+        lines.push("Message{i}_\"한국어 العربية हिन्दी 日本語 😀 value {i}\"")
+        i = i + 1
+    lines.join("\n")
+
+fn cli_perf_hwm_kib() -> i64:
+    val status = file_read("/proc/self/status")
+    for line in status.split("\n"):
+        if line.starts_with("VmHWM:"):
+            var value: i64 = 0
+            var seen = false
+            var i: i64 = 0
+            while i < line.len():
+                val code = line.char_code_at(i)
+                if code >= 48 and code <= 57:
+                    value = value * 10 + code - 48
+                    seen = true
+                else:
+                    if seen: return value
+                i = i + 1
+            if seen: return value
+    0
+
+fn cli_perf_percentiles(samples: [i64]) -> [i64]:
+    var ordered = samples
+    ordered.sort()
+    [ordered[ordered.len() / 2], ordered[ordered.len() - 1]]
+
+describe "i18n CLI extraction memory performance":
+    it "extracts multilingual catalogs with bounded output and explicit memory availability":
+        val corpus = cli_perf_corpus(256)
+        var samples: [i64] = []
+        var catalog_bytes: i64 = 0
+        var template_bytes: i64 = 0
+        var checksum: i64 = 0
+        var sample: i64 = 0
+        while sample < 7:
+            val started = time_now_unix_micros()
+            val strings = extract_i18n_strings(corpus, "perf.spl")
+            val catalog = generate_locale_catalog(strings)
+            val template = generate_locale_template("ko-KR", strings)
+            samples.push(time_now_unix_micros() - started)
+            expect(strings.len()).to_equal(256)
+            catalog_bytes = catalog.len()
+            template_bytes = template.len()
+            checksum = checksum + strings.len() + catalog_bytes + template_bytes
+            sample = sample + 1
+        val latency = cli_perf_percentiles(samples)
+        val hwm = cli_perf_hwm_kib()
+        expect(latency[1]).to_be_less_than(5000001)
+        expect(hwm).to_be_greater_than(0)
+        print "text_perf operation=i18n_cli_extract_catalog samples=7 messages=256" +
+            " input_bytes={corpus.len()} catalog_bytes={catalog_bytes}" +
+            " template_bytes={template_bytes} p50_us={latency[0]}" +
+            " p95_us={latency[1]} process_hwm_kib={hwm}" +
+            " allocation_count=unavailable allocated_bytes=unavailable" +
+            " transient_bytes=unavailable retained_bytes=unavailable checksum={checksum}"

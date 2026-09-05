@@ -1,0 +1,79 @@
+#!/bin/sh
+# Canonical Stage 3 bootstrap provenance facade.
+#
+# Keep this file small: each sourced module is independently byte-bound by the
+# manifest, and consumers source only this canonical facade.
+
+: "${BOOTSTRAP_STAGE3_FACADE_PATH:?canonical facade path is required}"
+bootstrap_stage3_facade_dir=$(
+    CDPATH= cd -- "$(dirname -- "$BOOTSTRAP_STAGE3_FACADE_PATH")" && pwd -P
+) || return 1 2>/dev/null || exit 1
+[ "$BOOTSTRAP_STAGE3_FACADE_PATH" = \
+    "$bootstrap_stage3_facade_dir/bootstrap-stage3-provenance.shs" ] || {
+    return 1 2>/dev/null || exit 1
+}
+
+bootstrap_stage3_authority_module="$bootstrap_stage3_facade_dir/bootstrap-stage3/authority.shs"
+bootstrap_stage3_command_module="$bootstrap_stage3_facade_dir/bootstrap-stage3/command-snapshot.shs"
+bootstrap_stage3_sanity_module="$bootstrap_stage3_facade_dir/bootstrap-stage3/sanity.shs"
+bootstrap_stage3_manifest_write_module="$bootstrap_stage3_facade_dir/bootstrap-stage3/manifest-write.shs"
+bootstrap_stage3_manifest_verify_module="$bootstrap_stage3_facade_dir/bootstrap-stage3/manifest-verify.shs"
+bootstrap_stage3_self_test_module="$bootstrap_stage3_facade_dir/bootstrap-stage3/self-test.shs"
+
+for bootstrap_stage3_helper_module in \
+    "$bootstrap_stage3_authority_module" \
+    "$bootstrap_stage3_command_module" \
+    "$bootstrap_stage3_sanity_module" \
+    "$bootstrap_stage3_manifest_write_module" \
+    "$bootstrap_stage3_manifest_verify_module" \
+    "$bootstrap_stage3_self_test_module"; do
+    [ -f "$bootstrap_stage3_helper_module" ] &&
+        [ ! -L "$bootstrap_stage3_helper_module" ] || {
+        echo "bootstrap Stage 3 provenance: helper module invalid" >&2
+        return 1 2>/dev/null || exit 1
+    }
+    . "$bootstrap_stage3_helper_module"
+done
+
+bootstrap_stage3_helper_bundle_snapshot() {
+    bootstrap_stage3_bundle_output=$1
+    bootstrap_stage3_bundle_tmp="${bootstrap_stage3_bundle_output}.tmp.$$"
+    : >"$bootstrap_stage3_bundle_tmp" || return 1
+    for bootstrap_stage3_bundle_file in \
+        "$bootstrap_stage3_facade_dir/bootstrap-stage3-provenance.shs" \
+        "$bootstrap_stage3_authority_module" \
+        "$bootstrap_stage3_command_module" \
+        "$bootstrap_stage3_sanity_module" \
+        "$bootstrap_stage3_manifest_write_module" \
+        "$bootstrap_stage3_manifest_verify_module" \
+        "$bootstrap_stage3_self_test_module"; do
+        [ "$(bootstrap_stage3_canonical_file \
+            "$bootstrap_stage3_bundle_file")" = \
+            "$bootstrap_stage3_bundle_file" ] || return 1
+        printf '%s  %s\n' \
+            "$(bootstrap_stage3_hash_file "$bootstrap_stage3_bundle_file")" \
+            "$bootstrap_stage3_bundle_file" \
+            >>"$bootstrap_stage3_bundle_tmp" || return 1
+    done
+    mv "$bootstrap_stage3_bundle_tmp" "$bootstrap_stage3_bundle_output"
+}
+
+bootstrap_stage3_helper_bundle_fingerprint() {
+    bootstrap_stage3_bundle_dir=$(
+        mktemp -d "${TMPDIR:-/tmp}/bootstrap-stage3-helpers.XXXXXX"
+    ) || return 1
+    bootstrap_stage3_bundle_snapshot="$bootstrap_stage3_bundle_dir/modules"
+    bootstrap_stage3_helper_bundle_snapshot \
+        "$bootstrap_stage3_bundle_snapshot" || {
+        rm -rf "$bootstrap_stage3_bundle_dir"
+        return 1
+    }
+    bootstrap_stage3_bundle_sha=$(
+        bootstrap_stage3_hash_file "$bootstrap_stage3_bundle_snapshot"
+    ) || {
+        rm -rf "$bootstrap_stage3_bundle_dir"
+        return 1
+    }
+    rm -rf "$bootstrap_stage3_bundle_dir"
+    printf '%s\n' "$bootstrap_stage3_bundle_sha"
+}

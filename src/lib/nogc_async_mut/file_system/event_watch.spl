@@ -1,0 +1,138 @@
+# File-system event watch (SCV-IMPL-E-01).
+#
+# Pure-Simple polling event source with deterministic test injection:
+# monotonic sequence tokens, rename pairing (cookie-matched from/to),
+# overflow classification, and an ignore policy.
+#
+# TODO(SCV-IMPL-E-01): extract the compiler-driver Rust notify watcher into
+# src/runtime/fswatch/ and back fswatch_native_open with it. Until that lands
+# the native bridge fails EXPLICITLY (it never silently degrades to polling).
+
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, is_dir}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+
+struct FsWatchEvent:
+    """One file-system event with a monotonic sequence token."""
+    seq: i64
+    kind: text     # created | modified | deleted | renamed | rename_from | rename_to | overflow
+    path: text
+    related: text  # rename cookie / paired path; "" when unused
+
+struct FsWatchState:
+    """Polling watcher state: root, sequence counter, ignore policy, snapshot."""
+    root: text
+    next_seq: i64
+    ignores: [text]
+    snapshot: [text]   # "stamp\tpath" rows from the last reconcile
+    overflowed: bool
+    pending: [FsWatchEvent]
+
+fn fswatch_ignored(ignores: [text], path: text) -> bool:
+    for ig in ignores:
+        if ig != "" and path.contains(ig):
+            return true
+    false
+
+fn fswatch_stamp(path: text) -> text:
+    val digest = file_hash_sha256(path)
+    if digest == "": "missing" else: digest
+
+fn fswatch_scan(root: text, ignores: [text]) -> [text]:
+    var rows: [text] = []
+    for path in dir_walk(root):
+        if not is_dir(path) and not fswatch_ignored(ignores, path):
+            rows.push("{fswatch_stamp(path)}\t{path}")
+    rows
+
+fn fswatch_open(root: text, ignores: [text]) -> FsWatchState:
+    FsWatchState(root: root, next_seq: 1, ignores: ignores,
+                 snapshot: fswatch_scan(root, ignores), overflowed: false, pending: [])
+
+fn fswatch_snapshot_lookup(snapshot: [text], path: text) -> text:
+    for row in snapshot:
+        val parts = row.split("\t")
+        if parts.len() >= 2 and parts[1] == path:
+            return parts[0]
+    ""
+
+# Deterministic test injection: queue an event without touching the disk.
+fn fswatch_inject(state: FsWatchState, kind: text, path: text, related: text) -> FsWatchState:
+    var next = state
+    if fswatch_ignored(next.ignores, path):
+        return next
+    next.pending.push(FsWatchEvent(seq: next.next_seq, kind: kind, path: path, related: related))
+    next.next_seq = next.next_seq + 1
+    next
+
+# Overflow classification: the OS queue (or a test) reports lost events.
+fn fswatch_mark_overflow(state: FsWatchState) -> FsWatchState:
+    var next = state
+    next.overflowed = true
+    next
+
+# Poll for events. Overflow collapses everything into ONE overflow event and
+# forces a resnapshot — consumers must rescan; watcher output is only a hint.
+fn fswatch_poll(state: FsWatchState) -> (FsWatchState, [FsWatchEvent]):
+    var next = state
+    var events: [FsWatchEvent] = []
+    if next.overflowed:
+        events.push(FsWatchEvent(seq: next.next_seq, kind: "overflow", path: next.root, related: ""))
+        next.next_seq = next.next_seq + 1
+        next.overflowed = false
+        next.pending = []
+        next.snapshot = fswatch_scan(next.root, next.ignores)
+        return (next, events)
+    val fresh = fswatch_scan(next.root, next.ignores)
+    for row in fresh:
+        val parts = row.split("\t")
+        if parts.len() >= 2:
+            val old = fswatch_snapshot_lookup(next.snapshot, parts[1])
+            if old == "":
+                events.push(FsWatchEvent(seq: next.next_seq, kind: "created", path: parts[1], related: ""))
+                next.next_seq = next.next_seq + 1
+            elif old != parts[0]:
+                events.push(FsWatchEvent(seq: next.next_seq, kind: "modified", path: parts[1], related: ""))
+                next.next_seq = next.next_seq + 1
+    for row in next.snapshot:
+        val parts = row.split("\t")
+        if parts.len() >= 2 and fswatch_snapshot_lookup(fresh, parts[1]) == "":
+            events.push(FsWatchEvent(seq: next.next_seq, kind: "deleted", path: parts[1], related: ""))
+            next.next_seq = next.next_seq + 1
+    for ev in next.pending:
+        events.push(ev)
+    next.pending = []
+    next.snapshot = fresh
+    (next, events)
+
+fn _fswatch_seq_used(used: [i64], seq: i64) -> bool:
+    for u in used:
+        if u == seq:
+            return true
+    false
+
+# Rename pairing: a rename_from and a rename_to sharing the same cookie
+# (`related`) collapse into one "renamed" event (path = new, related = old).
+fn fswatch_pair_renames(events: [FsWatchEvent]) -> [FsWatchEvent]:
+    var out: [FsWatchEvent] = []
+    var used: [i64] = []
+    for ev in events:
+        if _fswatch_seq_used(used, ev.seq):
+            continue
+        if ev.kind == "rename_from" and ev.related != "":
+            var paired = false
+            for other in events:
+                if not paired and other.kind == "rename_to" and other.related == ev.related and not _fswatch_seq_used(used, other.seq):
+                    out.push(FsWatchEvent(seq: other.seq, kind: "renamed", path: other.path, related: ev.path))
+                    used.push(ev.seq)
+                    used.push(other.seq)
+                    paired = true
+            if not paired:
+                out.push(ev)
+        else:
+            out.push(ev)
+    out
+
+# Native Rust notify bridge — NOT yet extracted (see TODO at top).
+# Fails explicitly so no caller can mistake polling for native watching.
+fn fswatch_native_open(root: text) -> text:
+    "ERROR fswatch native bridge unavailable for {root}: src/runtime/fswatch/ notify extraction not landed (SCV-IMPL-E-01); use fswatch_open (polling)"

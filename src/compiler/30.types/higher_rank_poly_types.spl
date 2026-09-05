@@ -1,0 +1,721 @@
+"""
+Higher-Rank Polymorphism - Types and Core Definitions
+
+Kind system, type variables, quantifiers, polymorphic types,
+quantifier context, substitution, and higher-rank unifier.
+"""
+
+type Symbol = text
+
+# ============================================================================
+# Kind System
+# ============================================================================
+
+enum Kind:
+    """
+    Kind system for types
+
+    Examples:
+        * (Star) - kind of ordinary types (i32, String, Bool)
+        * -> * (Arrow) - kind of type constructors (Vec, Option)
+        * -> * -> * - kind of binary type constructors (Result, Map)
+    """
+    Star
+    Arrow(from: Kind, to: Kind)
+
+impl Kind:
+    fn to_string() -> text:
+        match self:
+            case Star: "*"
+            case Arrow(from, to):
+                "({from.to_string()} -> {to.to_string()})"
+
+    fn is_star() -> bool:
+        match self:
+            case Star: true
+            case _: false
+
+    fn is_arrow() -> bool:
+        match self:
+            case Arrow(_, _): true
+            case _: false
+
+# ============================================================================
+# Type Variable
+# ============================================================================
+
+class TypeVar:
+    """
+    Type variable with kind
+
+    Examples:
+        T : * (ordinary type variable)
+        F : * -> * (type constructor variable)
+    """
+    id: i64
+    name: text
+    kind: text  # Kind
+
+impl TyVar:
+    static fn new(id: i64, name: Symbol, kind: Kind) -> TypeVar:
+        TypeVar(
+            id: id,
+            name: name,
+            kind: kind
+        )
+
+    fn to_string() -> text:
+        "{self.name}:{self.kind.to_string()}"
+
+    fn has_star_kind() -> bool:
+        self.kind.is_star()
+
+# ============================================================================
+# Quantifier
+# ============================================================================
+
+enum Quantifier:
+    """
+    Quantifier for polymorphic types
+
+    Forall: universal quantification (forall T. t)
+    Exists: existential quantification (exists T. t)
+    """
+    Forall(ty_var: TypeVar)
+    Exists(ty_var: TypeVar)
+
+impl Quantifier:
+    fn to_string() -> text:
+        match self:
+            case Forall(ty_var):
+                "forall {ty_var.name}"
+            case Exists(ty_var):
+                "exists {ty_var.name}"
+
+    fn get_var() -> TypeVar:
+        match self:
+            case Forall(ty_var): ty_var
+            case Exists(ty_var): ty_var
+
+    fn is_forall() -> bool:
+        match self:
+            case Forall(_): true
+            case _: false
+
+    fn is_exists() -> bool:
+        match self:
+            case Exists(_): true
+            case _: false
+
+# ============================================================================
+# Type System
+# ============================================================================
+
+enum HirType:
+    Int
+    Str
+    Bool
+    Named(name: Symbol)
+    Arrow(from: HirType, to: HirType)
+    TypeVariable(id: i64)
+    Forall(quantifiers: [TypeVar], body: HirType)
+    Skolem(id: i64)
+    Error
+
+impl HirType:
+    fn to_string() -> text:
+        match self:
+            case Int: "i32"
+            case Str: "String"
+            case Bool: "bool"
+            case Named(name): name
+            case Arrow(from, to):
+                "({from.to_string()} -> {to.to_string()})"
+            case TypeVariable(id): "?{id}"
+            case Forall(quantifiers, body):
+                "forall ... . {body.to_string()}"
+            case Skolem(id): "sk_{id}"
+            case Error: "<error>"
+
+    fn type_name() -> Symbol:
+        match self:
+            case Int: "i32"
+            case Str: "String"
+            case Bool: "bool"
+            case Named(name): name
+            case Arrow(_, _): "Arrow"
+            case TypeVariable(id): "TypeVar{id}"
+            case Forall(_, _): "Forall"
+            case Skolem(id): "Skolem{id}"
+            case Error: "<error>"
+
+    fn matches(other: HirType) -> bool:
+        """Simple type matching (for testing)"""
+        match (self, other):
+            case (Int, Int): true
+            case (Str, Str): true
+            case (Bool, Bool): true
+            case (Named(n1), Named(n2)): n1 == n2
+            case (TypeVariable(id1), TypeVariable(id2)): id1 == id2
+            case (Skolem(id1), Skolem(id2)): id1 == id2
+            case _: false
+
+    fn is_forall() -> bool:
+        match self:
+            case Forall(_, _): true
+            case _: false
+
+    fn is_skolem() -> bool:
+        match self:
+            case Skolem(_): true
+            case _: false
+
+    fn is_var() -> bool:
+        match self:
+            case TypeVariable(_): true
+            case _: false
+
+# ============================================================================
+# Polymorphic Type
+# ============================================================================
+
+class PolyType:
+    """
+    Polymorphic type with explicit quantifiers
+
+    Examples:
+        forall T. T -> T
+        forall T, U. (T, U) -> U
+        forall T. (forall U. fn(T, U) -> U) -> T (rank-2)
+    """
+    quantifiers: text  # [Quantifier]
+    body: text         # HirType
+
+impl PolyType:
+    static fn new(quantifiers: [Quantifier], body: HirType) -> PolyType:
+        PolyType(
+            quantifiers: quantifiers,
+            body: body
+        )
+
+    static fn monomorphic(body: HirType) -> PolyType:
+        """Create monomorphic type (no quantifiers)"""
+        PolyType(
+            quantifiers: [],
+            body: body
+        )
+
+    fn is_monomorphic() -> bool:
+        """Check if type has no quantifiers"""
+        self.quantifiers.len() == 0
+
+    fn quantifier_count() -> i64:
+        """Count number of quantifiers"""
+        self.quantifiers.len()
+
+    fn to_string() -> text:
+        if self.is_monomorphic():
+            return self.body.to_string()
+
+        var quant_strs = []
+        for q in self.quantifiers:
+            quant_strs.push(q.to_string())
+
+        val quants = if quant_strs.len() > 0: quant_strs[0] else: ""
+        "forall {quants}. {self.body.to_string()}"
+
+    fn to_hir_type() -> HirType:
+        """Convert to HirType representation"""
+        if self.is_monomorphic():
+            return self.body
+
+        HirType.Forall(quantifiers: self.quantifiers, body: self.body)
+
+# ============================================================================
+# Type Schemes (for let-polymorphism)
+# ============================================================================
+
+class TypeScheme:
+    """
+    Type scheme for let-bound variables
+
+    Examples:
+        let id = fn(x): x
+        # Generalize: forall T. T -> T
+
+        let const = fn(x): fn(y): x
+        # Generalize: forall T, U. T -> U -> T
+    """
+    poly_type: text  # PolyType
+
+impl TypeScheme:
+    static fn new(poly_type: PolyType) -> TypeScheme:
+        TypeScheme(poly_type: poly_type)
+
+    static fn from_mono(body: HirType) -> TypeScheme:
+        """Create scheme from monomorphic type"""
+        val poly = PolyType.monomorphic(body)
+        TypeScheme(poly_type: poly)
+
+    fn is_polymorphic() -> bool:
+        not self.poly_type.is_monomorphic()
+
+    fn to_string() -> text:
+        self.poly_type.to_string()
+
+# ============================================================================
+# Quantifier Level
+# ============================================================================
+
+class QuantifierLevel:
+    """
+    Tracks the scope level and rigidity of a quantified variable
+
+    Examples:
+        level: 0 (top-level)
+        level: 1 (first nested forall)
+        level: 2 (second nested forall)
+
+        is_rigid: true  (skolem constant - cannot be unified)
+        is_rigid: false (inference variable - can be unified)
+    """
+    level: i64
+    is_rigid: bool
+
+impl QuantifierLevel:
+    static fn new(level: i64, is_rigid: bool) -> QuantifierLevel:
+        QuantifierLevel(
+            level: level,
+            is_rigid: is_rigid
+        )
+
+    static fn skolem(level: i64) -> QuantifierLevel:
+        """Create a rigid (skolem) level"""
+        QuantifierLevel(level: level, is_rigid: true)
+
+    static fn inference(level: i64) -> QuantifierLevel:
+        """Create an inference variable level"""
+        QuantifierLevel(level: level, is_rigid: false)
+
+    fn to_string() -> text:
+        val rigidity = if self.is_rigid: "rigid" else: "flex"
+        "L{self.level}({rigidity})"
+
+# ============================================================================
+# Scope Tracker (Helper)
+# ============================================================================
+
+class ScopeTracker:
+    """
+    Helper for tracking scope entry/exit in a structured way
+
+    Example:
+        val tracker = ScopeTracker.new(ctx)
+
+        tracker.enter_scope()  # Enter forall
+        # ... type check ...
+        tracker.exit_scope()   # Exit forall
+
+        assert tracker.is_balanced(), "Scopes balanced"
+    """
+    ctx: text             # QuantifierContext
+    scope_stack: text     # [i64] - stack of scope levels
+
+impl ScopeTracker:
+    static fn new(ctx: QuantifierContext) -> ScopeTracker:
+        ScopeTracker(
+            ctx: ctx,
+            scope_stack: []
+        )
+
+    me enter_scope() -> i64:
+        """Enter a scope and push to stack"""
+        val level = self.ctx.enter_forall()
+        self.scope_stack.push(level)
+        level
+
+    me exit_scope():
+        """Exit a scope and pop from stack"""
+        if self.scope_stack.len() > 0:
+            # Pop level
+            val popped = self.scope_stack[self.scope_stack.len() - 1]
+            # Remove last element (placeholder)
+
+            self.ctx.exit_forall()
+
+    fn is_balanced() -> bool:
+        """Check if all scopes are balanced (no unclosed scopes)"""
+        self.scope_stack.len() == 0
+
+    fn depth() -> i64:
+        """Get current scope depth"""
+        self.scope_stack.len()
+
+# ============================================================================
+# Quantifier Context
+# ============================================================================
+
+class QuantifierContext:
+    """
+    Tracks quantifier scopes during type checking
+
+    Maintains:
+    - Currently bound type variables
+    - Skolem constant generation
+    - Inference variable generation
+    - Scope nesting levels
+
+    Example usage:
+        val ctx = QuantifierContext.new()
+
+        # Enter forall T
+        ctx.enter_forall()
+        ctx.bind_var(t_var, QuantifierLevel.inference(1))
+
+        # ... type check body ...
+
+        # Exit forall T
+        ctx.exit_forall()
+    """
+    bound_vars: text       # Dict<i64, QuantifierLevel> - maps var id to level
+    skolem_counter: i64    # Counter for generating unique skolems
+    scope_level: i64       # Current scope nesting level
+    inference_counter: i64 # Counter for generating inference variables
+
+impl QuantifierContext:
+    static fn new() -> QuantifierContext:
+        QuantifierContext(
+            bound_vars: {},
+            skolem_counter: 0,
+            scope_level: 0,
+            inference_counter: 0
+        )
+
+    me enter_forall() -> i64:
+        """
+        Enter a forall scope
+
+        Returns: the new scope level
+        """
+        self.scope_level = self.scope_level + 1
+        self.scope_level
+
+    me exit_forall():
+        """
+        Exit a forall scope
+
+        Removes all variables bound at the current level
+        """
+        # For now, just decrease scope level
+        # In a real implementation, we'd remove variables at current level
+        # But dict iteration/removal in Simple is tricky, so we skip it
+
+        self.scope_level = self.scope_level - 1
+
+    me bind_var(type_var: TypeVar, level: QuantifierLevel):
+        """Bind a type variable at a given level"""
+        self.bound_vars[type_var.id] = level
+
+    fn is_bound(type_var: TypeVar) -> bool:
+        """Check if a type variable is bound"""
+        type_var.id in self.bound_vars
+
+    fn get_level(type_var: TypeVar) -> QuantifierLevel:
+        """
+        Get the level of a bound type variable
+
+        Returns: level info or dummy level if not bound
+        """
+        val var_id = type_var.id
+
+        if var_id in self.bound_vars:
+            return self.bound_vars[var_id]
+
+        # Return dummy level
+        QuantifierLevel(level: 0, is_rigid: false)
+
+    me fresh_skolem() -> i64:
+        """
+        Generate a fresh skolem constant
+
+        Returns: unique skolem id
+        """
+        val id = self.skolem_counter
+        self.skolem_counter = self.skolem_counter + 1
+        id
+
+    me fresh_inference_var() -> i64:
+        """
+        Generate a fresh inference variable
+
+        Returns: unique inference variable id
+        """
+        val id = self.inference_counter
+        self.inference_counter = self.inference_counter + 1
+        id
+
+    fn current_level() -> i64:
+        """Get current scope level"""
+        self.scope_level
+
+    fn bound_var_count() -> i64:
+        """Count bound variables"""
+        self.bound_vars.len()
+
+    me reset():
+        """Reset context to initial state"""
+        self.bound_vars = {}
+        self.skolem_counter = 0
+        self.scope_level = 0
+        self.inference_counter = 0
+
+# ============================================================================
+# Type Substitution
+# ============================================================================
+
+class Substitution:
+    """
+    Type variable substitution
+
+    Maps type variable ids to types
+    """
+    mapping: text  # Dict<i64, HirType>
+
+impl Substitution:
+    static fn new() -> Substitution:
+        Substitution(mapping: {})
+
+    me add(var_id: i64, ty: HirType):
+        """Add a substitution"""
+        self.mapping[var_id] = ty
+
+    fn get(var_id: i64) -> HirType:
+        """Get substitution for a variable"""
+        if var_id in self.mapping:
+            return self.mapping[var_id]
+        HirType.Error
+
+    fn has(var_id: i64) -> bool:
+        """Check if variable has a substitution"""
+        var_id in self.mapping
+
+    fn apply(ty: HirType) -> HirType:
+        """Apply substitution to a type"""
+        match ty:
+            case TypeVariable(id):
+                if self.has(id):
+                    return self.get(id)
+                ty
+
+            case Arrow(from, to):
+                val from_subst = self.apply(from)
+                val to_subst = self.apply(to)
+                HirType.Arrow(from: from_subst, to: to_subst)
+
+            case Forall(quantifiers, body):
+                # Don't substitute under forall (bound variables)
+                # In real impl, would check shadowing
+                val body_subst = self.apply(body)
+                HirType.Forall(quantifiers: quantifiers, body: body_subst)
+
+            case _:
+                ty
+
+# ============================================================================
+# Higher-Rank Unifier
+# ============================================================================
+
+class HigherRankUnifier:
+    """
+    Core algorithms for higher-rank polymorphism
+
+    Instantiation: forall T. t ~> t[T := ?a]
+    - Replace quantified variables with fresh inference variables
+    - Used when checking function arguments
+
+    Skolemization: forall T. t ~> t[T := sk_i]
+    - Replace quantified variables with rigid constants
+    - Used when checking expected types
+
+    Unification: check if two types can be made equal
+    - Handles forall on left (instantiate) and right (skolemize)
+    - Enforces skolem rigidity
+
+    Subsumption: check if one type is more general than another
+    """
+    ctx: text  # QuantifierContext
+
+impl HigherRankUnifier:
+    static fn new(ctx: QuantifierContext) -> HigherRankUnifier:
+        HigherRankUnifier(ctx: ctx)
+
+    me instantiate(ty: HirType) -> HirType:
+        """
+        Instantiate quantifiers with fresh inference variables
+
+        Example:
+            forall T. T -> T
+            ~> ?0 -> ?0
+        """
+        match ty:
+            case Forall(quantifiers, body):
+                # Create substitution for quantified variables
+                val subst = Substitution.new()
+
+                for type_var in quantifiers:
+                    val fresh_var = self.ctx.fresh_inference_var()
+                    subst.add(type_var.id, HirType.TypeVariable(id: fresh_var))
+
+                # Apply substitution to body
+                subst.apply(body)
+
+            case _:
+                # Not a forall - return as is
+                ty
+
+    me skolemize(ty: HirType) -> HirType:
+        """
+        Skolemize quantifiers with rigid constants
+
+        Example:
+            forall T. T -> T
+            ~> sk_0 -> sk_0
+        """
+        match ty:
+            case Forall(quantifiers, body):
+                # Create substitution for quantified variables
+                val subst = Substitution.new()
+
+                for type_var in quantifiers:
+                    val skolem_id = self.ctx.fresh_skolem()
+                    subst.add(type_var.id, HirType.Skolem(id: skolem_id))
+
+                # Apply substitution to body
+                subst.apply(body)
+
+            case _:
+                # Not a forall - return as is
+                ty
+
+    me deep_skolemize(ty: HirType) -> HirType:
+        """
+        Deep skolemization for rank-2+ types
+
+        Skolemizes foralls in negative (contravariant) positions
+
+        Example:
+            (forall T. T -> T) -> i32
+            ~> (sk_0 -> sk_0) -> i32
+        """
+        match ty:
+            case Arrow(from, to):
+                # from is contravariant (negative position)
+                # to is covariant (positive position)
+                val from_skolem = self.deep_skolemize(from)
+                val to_inst = self.deep_instantiate(to)
+                HirType.Arrow(from: from_skolem, to: to_inst)
+
+            case Forall(quantifiers, body):
+                # Forall in negative position - skolemize
+                self.skolemize(ty)
+
+            case _:
+                ty
+
+    me deep_instantiate(ty: HirType) -> HirType:
+        """
+        Deep instantiation for rank-2+ types
+
+        Instantiates foralls in positive (covariant) positions
+        """
+        match ty:
+            case Arrow(from, to):
+                # from is contravariant
+                # to is covariant
+                val from_skolem = self.deep_skolemize(from)
+                val to_inst = self.deep_instantiate(to)
+                HirType.Arrow(from: from_skolem, to: to_inst)
+
+            case Forall(quantifiers, body):
+                # Forall in positive position - instantiate
+                self.instantiate(ty)
+
+            case _:
+                ty
+
+    me unify(ty1: HirType, ty2: HirType) -> bool:
+        """
+        Unify two types with higher-rank support
+
+        Rules:
+        1. Forall left: instantiate and unify
+        2. Forall right: skolemize and unify
+        3. Skolem: rigid, only unifies with itself
+        4. TypeVariable: flexible, can unify with non-skolem
+        5. Arrow: unify components
+        """
+        match (ty1, ty2):
+            # Forall left: instantiate
+            case (Forall(_, _), _):
+                val inst = self.instantiate(ty1)
+                self.unify(inst, ty2)
+
+            # Forall right: skolemize
+            case (_, Forall(_, _)):
+                val skolem = self.skolemize(ty2)
+                self.unify(ty1, skolem)
+
+            # Skolem: only unifies with itself
+            case (Skolem(id1), Skolem(id2)):
+                id1 == id2
+
+            # Skolem cannot unify with inference variable
+            case (Skolem(_), TypeVariable(_)):
+                false
+            case (TypeVariable(_), Skolem(_)):
+                false
+
+            # Inference variables can unify with each other
+            case (TypeVariable(id1), TypeVariable(id2)):
+                true  # In real impl, would update substitution
+
+            # Inference variable can unify with concrete type
+            case (TypeVariable(_), _):
+                true  # In real impl, would update substitution
+            case (_, TypeVariable(_)):
+                true  # In real impl, would update substitution
+
+            # Arrow: unify components
+            case (Arrow(from1, to1), Arrow(from2, to2)):
+                val from_unifies = self.unify(from1, from2)
+                val to_unifies = self.unify(to1, to2)
+                from_unifies and to_unifies
+
+            # Base types
+            case (Int, Int): true
+            case (Str, Str): true
+            case (Bool, Bool): true
+            case (Named(n1), Named(n2)): n1 == n2
+
+            # Otherwise: fail
+            case _:
+                false
+
+    me subsumes(poly1: HirType, poly2: HirType) -> bool:
+        """
+        Check if poly1 is more polymorphic than poly2
+
+        poly1 subsumes poly2 if poly1 is at least as general
+
+        Examples:
+            forall T. T -> T  subsumes  i32 -> i32
+            forall T, U. (T, U) -> U  subsumes  forall U. (i32, U) -> U
+        """
+        # Instantiate poly2
+        val inst2 = self.instantiate(poly2)
+
+        # Skolemize poly1
+        val skolem1 = self.skolemize(poly1)
+
+        # Check if skolem1 unifies with inst2
+        self.unify(skolem1, inst2)

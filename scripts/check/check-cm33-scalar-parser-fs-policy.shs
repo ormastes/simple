@@ -1,0 +1,233 @@
+#!/bin/sh
+# Fail-closed Stage-4 evidence gate for the Cortex-M scalar/parser/FS policy.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/bin/simple}
+CC_BIN=${CC:-clang}
+NM_BIN=${NM:-nm}
+POLICY_REL=src/os/kernel/arch/cortex_m33/scalar_parser_fs_policy.spl
+POLICY=$ROOT/$POLICY_REL
+PIN=$ROOT/test/fixture/os/cortex_m33_scalar_parser_fs_policy_coverage_pin.env
+PROBE=$ROOT/test/fixture/os/cortex_m33_scalar_parser_fs_policy_probe.spl
+COVERAGE_PROBE=$ROOT/test/fixture/os/cortex_m33_scalar_parser_fs_policy_coverage_probe.spl
+ORACLE=$ROOT/test/fixture/os/cortex_m33_scalar_parser_fs_policy_oracle.c
+ABI_HARNESS=$ROOT/test/fixture/os/cortex_m33_scalar_parser_fs_policy_c_abi.c
+SPEC=$ROOT/test/01_unit/os/kernel/arch/cortex_m33_scalar_parser_fs_policy_spec.spl
+SHIM=$ROOT/src/os/kernel/arch/cortex_m33/cm33_shim.c
+ACCESS_REL=src/os/kernel/arch/cortex_m33/access_policy.spl
+EVIDENCE_DIR=$ROOT/build/coverage/cm33-scalar-parser-fs
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cm33-scalar-parser-fs.XXXXXX")
+trap 'case ${SCRATCH:-} in /tmp/cm33-scalar-parser-fs.*|${TMPDIR:-/tmp}/cm33-scalar-parser-fs.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL cm33-scalar-parser-fs-policy: $*" >&2
+    exit 1
+}
+
+blocked() {
+    echo "BLOCKED cm33-scalar-parser-fs-policy: $*" >&2
+    exit 2
+}
+
+pin_value() {
+    sed -n "s/^$1=//p" "$PIN"
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+# No parity, coverage, ABI, object, or link receipt is admitted from a seed or
+# an unproven/stale candidate.  This check intentionally runs before evidence.
+[ -x "$SIMPLE_BIN" ] || blocked "missing executable pure-Simple compiler"
+BOOTSTRAP_STAGE3_FACADE_PATH=$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs
+STAGE4_PROVENANCE_HELPER_PATH=$ROOT/scripts/check/lib/stage4-candidate-provenance.shs
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL=$(bootstrap_stage3_canonical_file "$SIMPLE_BIN") ||
+    blocked "cannot resolve pure-Simple compiler canonically"
+SIMPLE_PROVENANCE=${SIMPLE_PROVENANCE:-${SIMPLE_CANONICAL}.provenance.env}
+stage4_verify_candidate_provenance "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    blocked "admitted current-tree Stage-4 provenance is required"
+case $($SIMPLE_CANONICAL --version 2>&1 || true) in
+    *"Rust-built Simple binary is a bootstrap seed"*)
+        blocked "a bootstrap seed cannot prove this migration" ;;
+esac
+
+for tool in "$CC_BIN" "$NM_BIN" sha256sum diff grep awk llvm-readobj llvm-nm llvm-objdump; do
+    command -v "$tool" >/dev/null 2>&1 || blocked "required tool unavailable: $tool"
+done
+
+[ "$(pin_value schema)" = cm33-scalar-parser-fs-coverage/v1 ] || fail coverage-pin-schema
+[ "$(pin_value owner_source)" = "$POLICY_REL" ] || fail coverage-pin-owner
+POLICY_SHA=$(hash_file "$POLICY")
+[ "$(pin_value owner_source_sha256)" = "$POLICY_SHA" ] || fail coverage-pin-source-hash-stale
+grep -n -o 'CM33-SPF-D[0-9][0-9]' "$POLICY" >"$SCRATCH/decision-ids.txt"
+DECISION_IDS_SHA=$(hash_file "$SCRATCH/decision-ids.txt")
+[ "$(pin_value decision_ids_sha256)" = "$DECISION_IDS_SHA" ] || fail coverage-pin-decision-ids-stale
+[ "$(wc -l <"$SCRATCH/decision-ids.txt" | tr -d ' ')" = "$(pin_value decision_sites)" ] || fail decision-site-count
+awk -F: '{print $2}' "$SCRATCH/decision-ids.txt" >"$SCRATCH/observed-ids.txt"
+awk 'BEGIN { for (i = 1; i <= 22; i++) printf "CM33-SPF-D%02d\n", i }' >"$SCRATCH/required-ids.txt"
+diff -u "$SCRATCH/required-ids.txt" "$SCRATCH/observed-ids.txt" || fail decision-id-set
+[ "$(pin_value branch_outcomes_total)" = 44 ] || fail branch-outcome-pin
+if grep -Eq 'coverage_(hit|mask|required|reset)|COVERAGE_REQUIRED' "$POLICY"; then
+    fail owner-authored-coverage-counter
+fi
+
+# Independent C oracle versus actual execution of the production Simple owner.
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic "$ORACLE" -o "$SCRATCH/c-oracle"
+"$SCRATCH/c-oracle" >"$SCRATCH/c.out"
+(cd "$ROOT" && "$SIMPLE_CANONICAL" run "$PROBE") >"$SCRATCH/simple.out" 2>"$SCRATCH/simple.log"
+diff -u "$SCRATCH/c.out" "$SCRATCH/simple.out" || fail oracle-parity-mismatch
+
+# Compiler/runtime branch probes, mapped back to the exact pinned decision IDs.
+# Interpreted `run` is deliberately insufficient: it emits a zero-denominator
+# report unless the owner was compiled with branch probes.
+COVERAGE_BIN=$SCRATCH/coverage-probe
+(cd "$ROOT" && "$SIMPLE_CANONICAL" compile "$COVERAGE_PROBE" --native \
+    --coverage --no-strip -o "$COVERAGE_BIN") >"$SCRATCH/coverage-build.log" 2>&1 ||
+    fail coverage-probe-build-failed
+[ -s "$COVERAGE_BIN" ] || fail coverage-probe-binary-missing
+SIMPLE_COVERAGE=1 "$COVERAGE_BIN" >"$SCRATCH/coverage.sdn" 2>"$SCRATCH/coverage-probe.log" ||
+    fail coverage-probe-run-failed
+[ -s "$SCRATCH/coverage.sdn" ] || fail compiler-runtime-coverage-artifact-missing
+: >"$SCRATCH/decision-execution.tsv"
+while IFS=: read -r line decision_id; do
+    awk -F', *' -v owner="/$POLICY_REL" -v wanted="$line" -v id="$decision_id" '
+        index($2, owner) == length($2) - length(owner) + 1 && ($3 + 0) == wanted {
+            print id "\t" ($3 + 0) "\t" ($4 + 0) "\t" (($5 + 0) > 0 ? 1 : 0) "\t" (($6 + 0) > 0 ? 1 : 0)
+        }
+    ' "$SCRATCH/coverage.sdn" >"$SCRATCH/one-decision.tsv"
+    [ "$(wc -l <"$SCRATCH/one-decision.tsv" | tr -d ' ')" = 1 ] ||
+        fail "compiler-runtime-decision-row-missing-or-duplicate:$decision_id"
+    cat "$SCRATCH/one-decision.tsv" >>"$SCRATCH/decision-execution.tsv"
+done <"$SCRATCH/decision-ids.txt"
+DECISION_SITES=$(wc -l <"$SCRATCH/decision-execution.tsv" | tr -d ' ')
+BRANCH_COVERED=$(awk -F '\t' '{ covered += $4 + $5 } END { print covered + 0 }' "$SCRATCH/decision-execution.tsv")
+[ "$DECISION_SITES" -eq 22 ] || fail compiler-runtime-decision-site-total
+[ "$BRANCH_COVERED" -eq 44 ] || fail "compiler-runtime-branch-outcomes-incomplete:$BRANCH_COVERED/44"
+DECISION_EXECUTION_SHA=$(hash_file "$SCRATCH/decision-execution.tsv")
+
+# Source boundary: the former C implementations may only acquire bytes/table
+# slots, consume Simple receipts, and write raw memory/table state.
+grep -F 'cm33_policy_streq((uint8_t)*a, (uint8_t)*b)' "$SHIM" >/dev/null || fail streq-bridge-missing
+grep -F 'cm33_policy_parse_hex_digit(c)' "$SHIM" >/dev/null || fail parse-bridge-missing
+grep -F 'cm33_policy_fs_add_file(fs_count, fs_used, size' "$SHIM" >/dev/null || fail fs-add-bridge-missing
+grep -F 'cm33_policy_fs_find(i, fs_count, names_equal)' "$SHIM" >/dev/null || fail fs-find-bridge-missing
+grep -F 'static void uart_init(void)' "$SHIM" >/dev/null || fail uart-bridge-removed
+grep -F '__asm volatile' "$SHIM" >/dev/null || fail assembly-bridge-removed
+if grep -F "if (c >= '0' && c <= '9')" "$SHIM" >/dev/null; then fail c-parse-policy-remains; fi
+if grep -F 'if (fs_count >= FS_MAX_FILES) return' "$SHIM" >/dev/null; then fail c-fs-admission-policy-remains; fi
+
+# Host scalar ABI/object/link call proof.
+HOST_OBJ=$SCRATCH/scalar-policy-host.o
+(cd "$ROOT" && "$SIMPLE_CANONICAL" native-build --backend llvm \
+    --source src/os/kernel/arch/cortex_m33 --entry "$POLICY_REL" --entry-closure \
+    --target x86_64-unknown-linux-gnu --emit-object --cache-dir "$SCRATCH/cache-host" \
+    -o "$HOST_OBJ") >"$SCRATCH/host-object.log" 2>&1 || fail host-policy-object-build-failed
+[ -s "$HOST_OBJ" ] || fail host-policy-object-missing
+EXPECTED_EXPORTS='cm33_policy_fs_add_file
+cm33_policy_fs_add_name
+cm33_policy_fs_find
+cm33_policy_fs_init
+cm33_policy_memcpy_simple
+cm33_policy_parse_hex_digit
+cm33_policy_parse_hex_prefix
+cm33_policy_starts_with
+cm33_policy_streq
+cm33_policy_strlen_simple'
+OBSERVED_EXPORTS=$("$NM_BIN" --defined-only --extern-only --format=posix "$HOST_OBJ" |
+    awk '{print $1}' | LC_ALL=C sort)
+[ "$OBSERVED_EXPORTS" = "$EXPECTED_EXPORTS" ] || fail host-policy-export-set
+HOST_UNDEFINED=$("$NM_BIN" --undefined-only --format=posix "$HOST_OBJ" |
+    awk '{print $1}' | LC_ALL=C sort)
+[ -z "$HOST_UNDEFINED" ] || fail "unexpected-policy-undefined-symbol:$HOST_UNDEFINED"
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic \
+    "$ABI_HARNESS" "$HOST_OBJ" -o "$SCRATCH/c-abi"
+"$SCRATCH/c-abi" >"$SCRATCH/c-abi.out" || fail c-abi-call-failed
+grep -F 'status=PASS exports=10/10 scalar_u32=true' "$SCRATCH/c-abi.out" >/dev/null || fail c-abi-receipt
+
+build_policy_object() {
+    target=$1
+    output=$2
+    cache=$3
+    (cd "$ROOT" && "$SIMPLE_CANONICAL" native-build --backend llvm \
+        --source src/os/kernel/arch/cortex_m33 --entry "$POLICY_REL" --entry-closure \
+        --target "$target" --emit-object --cache-dir "$cache" -o "$output") ||
+        fail "target-policy-object-build-failed:$target"
+}
+
+build_access_object() {
+    target=$1
+    output=$2
+    cache=$3
+    (cd "$ROOT" && "$SIMPLE_CANONICAL" native-build --backend llvm \
+        --source src/os/kernel/arch/cortex_m33 --entry "$ACCESS_REL" --entry-closure \
+        --target "$target" --emit-object --cache-dir "$cache" -o "$output") ||
+        fail "target-access-object-build-failed:$target"
+}
+
+V8_POLICY=$SCRATCH/scalar-policy-v8m.o
+V7_POLICY=$SCRATCH/scalar-policy-v7em.o
+V8_ACCESS=$SCRATCH/access-policy-v8m.o
+V7_ACCESS=$SCRATCH/access-policy-v7em.o
+build_policy_object thumbv8m.main-none-eabi "$V8_POLICY" "$SCRATCH/cache-v8-policy"
+build_policy_object thumbv7em-none-eabi "$V7_POLICY" "$SCRATCH/cache-v7-policy"
+build_access_object thumbv8m.main-none-eabi "$V8_ACCESS" "$SCRATCH/cache-v8-access"
+build_access_object thumbv7em-none-eabi "$V7_ACCESS" "$SCRATCH/cache-v7-access"
+sh "$ROOT/scripts/check/check-cm33-scalar-parser-fs-object.shs" an505 "$V8_POLICY"
+sh "$ROOT/scripts/check/check-cm33-scalar-parser-fs-object.shs" stm32u585 "$V8_POLICY"
+sh "$ROOT/scripts/check/check-cm33-scalar-parser-fs-object.shs" ra4m1 "$V7_POLICY"
+sh "$ROOT/scripts/check/check-cortex-m-policy-object.shs" an505 "$V8_ACCESS"
+sh "$ROOT/scripts/check/check-cortex-m-policy-object.shs" stm32u585 "$V8_ACCESS"
+sh "$ROOT/scripts/check/check-cortex-m-policy-object.shs" ra4m1 "$V7_ACCESS"
+
+BOARD_DIR=$ROOT/src/os/kernel/arch/cortex_m33
+"$CC_BIN" --target=thumbv8m.main-none-eabihf -mcpu=cortex-m33 -mthumb -mfloat-abi=soft \
+    -I "$BOARD_DIR" -nostdlib -nostartfiles -ffreestanding -O1 \
+    -T "$ROOT/src/compiler/70.backend/baremetal/cortex_m33/linker.ld" \
+    "$SHIM" "$V8_ACCESS" "$V8_POLICY" -fuse-ld=lld -o "$SCRATCH/an505.elf" ||
+    fail full-image-link-failed:an505
+"$CC_BIN" --target=thumbv8m.main-none-eabihf -mcpu=cortex-m33 -mthumb -mfloat-abi=soft \
+    -DTARGET_STM32U585 -DSIMPLEOS_PROTECTION_MODE_TEXT=\"enforce\" \
+    -I "$BOARD_DIR" -nostdlib -nostartfiles -ffreestanding -O1 \
+    -T "$ROOT/src/compiler/70.backend/baremetal/cortex_m33/linker_stm32u585.ld" \
+    "$SHIM" "$V8_ACCESS" "$V8_POLICY" -fuse-ld=lld -o "$SCRATCH/stm32u585.elf" ||
+    fail full-image-link-failed:stm32u585
+"$CC_BIN" --target=thumbv7em-none-eabihf -mcpu=cortex-m4 -mthumb -mfloat-abi=soft \
+    -DTARGET_RA4M1 -DSIMPLEOS_PROTECTION_MODE_TEXT=\"enforce\" \
+    -I "$BOARD_DIR" -nostdlib -nostartfiles -ffreestanding -O1 \
+    -T "$ROOT/src/compiler/70.backend/baremetal/cortex_m33/linker_ra4m1.ld" \
+    "$SHIM" "$V7_ACCESS" "$V7_POLICY" -fuse-ld=lld -o "$SCRATCH/ra4m1.elf" ||
+    fail full-image-link-failed:ra4m1
+
+(cd "$ROOT" && "$SIMPLE_CANONICAL" test "$SPEC" --no-cache) >"$SCRATCH/spec.log" 2>&1 || fail focused-spec-failed
+grep -F 'outcome=OK' "$SCRATCH/spec.log" >/dev/null || fail focused-spec-did-not-pass
+
+mkdir -p "$EVIDENCE_DIR"
+cp "$SCRATCH/decision-execution.tsv" "$EVIDENCE_DIR/decision-execution.tsv"
+cp "$SCRATCH/coverage.sdn" "$EVIDENCE_DIR/coverage.sdn"
+RECEIPT=$EVIDENCE_DIR/receipt.sdn
+{
+    echo "schema=cm33-scalar-parser-fs-evidence/v1"
+    echo "status=pass"
+    echo "compiler_path=$SIMPLE_CANONICAL"
+    echo "compiler_sha256=$(hash_file "$SIMPLE_CANONICAL")"
+    echo "compiler_provenance=$SIMPLE_PROVENANCE"
+    echo "owner_source=$POLICY_REL"
+    echo "owner_source_sha256=$POLICY_SHA"
+    echo "decision_ids_sha256=$DECISION_IDS_SHA"
+    echo "decision_execution_sha256=$DECISION_EXECUTION_SHA"
+    echo "decision_sites=22"
+    echo "branch_outcomes_covered=44"
+    echo "branch_outcomes_total=44"
+    echo "oracle_parity=exact"
+    echo "c_abi_exports=10"
+    echo "arm_objects=an505,stm32u585,ra4m1"
+    echo "full_images_linked=an505,stm32u585,ra4m1"
+    echo "physical_board_evidence=not-included"
+} >"$RECEIPT"
+
+echo "cm33_scalar_parser_fs_policy status=PASS oracle_parity=exact branch_outcomes=44/44 c_abi=10/10 objects=3/3 full_links=3/3 receipt=$RECEIPT"

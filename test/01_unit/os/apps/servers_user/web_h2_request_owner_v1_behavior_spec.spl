@@ -1,0 +1,151 @@
+use std.spec.*
+use os.apps.servers_user.web_h2_request_owner_v1.{WebH2RequestOwnerV1, WebH2RequestFrameResultV1, WebH2RequestFrameStatusV1, WebH2RequestEventKindV1}
+use std.http.h2.h2_hpack.{HpackEntry, hpack_encode, hpack_static_table}
+use std.http.h2.h2_frame.{H2Frame, H2HeadersFrame, H2_FLAG_END_HEADERS, H2_FLAG_END_STREAM}
+
+fn _admit_headers(headers: [HpackEntry]) -> WebH2RequestFrameResultV1:
+    var owner = WebH2RequestOwnerV1.create()
+    val encoded = hpack_encode(headers, hpack_static_table())
+    owner.admit_frame(H2Frame.Headers(H2HeadersFrame(
+        stream_id: 1,
+        flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+        header_block: encoded.bytes)))
+
+fn _request(method: text, scheme: text, authority: text, path: text) -> [HpackEntry]:
+    [HpackEntry(name: ":method", value: method),
+     HpackEntry(name: ":scheme", value: scheme),
+     HpackEntry(name: ":authority", value: authority),
+     HpackEntry(name: ":path", value: path)]
+
+describe "H2 hostile pseudo-field rejection before request events":
+    it "fails terminally when malformed Huffman follows a dynamic table update":
+        var owner = WebH2RequestOwnerV1.create()
+        val malformed = [0x20u8, 0x40u8, 0x81u8, 0xffu8]
+        val first = owner.admit_frame(H2Frame.Headers(H2HeadersFrame(
+            stream_id: 1, flags: H2_FLAG_END_HEADERS, header_block: malformed)))
+        expect(first.status).to_equal(WebH2RequestFrameStatusV1.CompressionError)
+        val second = owner.admit_frame(H2Frame.Headers(H2HeadersFrame(
+            stream_id: 3, flags: H2_FLAG_END_HEADERS, header_block: [0x82u8])))
+        expect(second.blocker).to_equal("h2-request-owner-failed")
+
+    it "admits one strict HTTPS origin-form request":
+        val result = _admit_headers(_request("GET", "https", "example.com", "/safe?q=1"))
+        expect(result.status).to_equal(WebH2RequestFrameStatusV1.Accepted)
+        expect(result.events.len()).to_equal(2u64)
+        expect(result.events[0].kind).to_equal(WebH2RequestEventKindV1.Headers)
+
+    it "rejects a method containing HTTP separators":
+        val result = _admit_headers(_request("GE T", "https", "example.com", "/"))
+        expect(result.status).to_equal(WebH2RequestFrameStatusV1.ProtocolError)
+        expect(result.blocker).to_equal("invalid-method-token")
+        expect(result.events.len()).to_equal(0u64)
+
+    it "rejects cleartext and malformed schemes":
+        val cleartext = _admit_headers(_request("GET", "http", "example.com", "/"))
+        expect(cleartext.status).to_equal(WebH2RequestFrameStatusV1.ProtocolError)
+        expect(cleartext.blocker).to_equal("unsupported-or-invalid-request-scheme")
+        val malformed = _admit_headers(_request("GET", "1https", "example.com", "/"))
+        expect(malformed.status).to_equal(WebH2RequestFrameStatusV1.ProtocolError)
+        expect(malformed.events.len()).to_equal(0u64)
+        val malformed_later = _admit_headers(_request("GET", "https_", "example.com", "/"))
+        expect(malformed_later.blocker).to_equal("unsupported-or-invalid-request-scheme")
+        expect(malformed_later.events.len()).to_equal(0u64)
+
+    it "rejects absolute-form fragment and non-OPTIONS asterisk paths":
+        val absolute = _admit_headers(_request("GET", "https", "example.com", "https://example.com/x"))
+        expect(absolute.status).to_equal(WebH2RequestFrameStatusV1.ProtocolError)
+        expect(absolute.blocker).to_equal("invalid-origin-form-path")
+        expect(absolute.events.len()).to_equal(0u64)
+        val fragment = _admit_headers(_request("GET", "https", "example.com", "/x#fragment"))
+        expect(fragment.status).to_equal(WebH2RequestFrameStatusV1.ProtocolError)
+        expect(fragment.blocker).to_equal("invalid-origin-form-path")
+        expect(fragment.events.len()).to_equal(0u64)
+        val asterisk = _admit_headers(_request("GET", "https", "example.com", "*"))
+        expect(asterisk.status).to_equal(WebH2RequestFrameStatusV1.ProtocolError)
+        expect(asterisk.blocker).to_equal("asterisk-path-requires-options")
+        expect(asterisk.events.len()).to_equal(0u64)
+
+    it "admits only the exact OPTIONS asterisk form":
+        val result = _admit_headers(_request("OPTIONS", "https", "example.com", "*"))
+        expect(result.status).to_equal(WebH2RequestFrameStatusV1.Accepted)
+        expect(result.events[0].kind).to_equal(WebH2RequestEventKindV1.Headers)
+
+    it "rejects userinfo malformed authority and semantic Host disagreement":
+        val userinfo = _admit_headers(_request("GET", "https", "user@example.com", "/"))
+        expect(userinfo.blocker).to_equal("missing-or-invalid-authority")
+        expect(userinfo.events.len()).to_equal(0u64)
+        var mismatch = _request("GET", "https", "example.com", "/")
+        mismatch.push(HpackEntry(name: "host", value: "example.net"))
+        val mismatch_result = _admit_headers(mismatch)
+        expect(mismatch_result.blocker).to_equal("host-authority-mismatch")
+        expect(mismatch_result.events.len()).to_equal(0u64)
+
+    it "admits case-insensitive Host authority equality and Host fallback":
+        var equal = _request("GET", "https", "Example.com:0443", "/")
+        equal.push(HpackEntry(name: "host", value: "example.COM"))
+        val equal_result = _admit_headers(equal)
+        expect(equal_result.status).to_equal(WebH2RequestFrameStatusV1.Accepted)
+        val fallback = _admit_headers([HpackEntry(name: ":method", value: "GET"), HpackEntry(name: ":scheme", value: "https"), HpackEntry(name: ":path", value: "/"), HpackEntry(name: "host", value: "example.com")])
+        expect(fallback.status).to_equal(WebH2RequestFrameStatusV1.Accepted)
+
+    it "rejects a request with neither authority nor Host":
+        val missing = _admit_headers([HpackEntry(name: ":method", value: "GET"), HpackEntry(name: ":scheme", value: "https"), HpackEntry(name: ":path", value: "/")])
+        expect(missing.status).to_equal(WebH2RequestFrameStatusV1.ProtocolError)
+        expect(missing.blocker).to_equal("missing-or-invalid-authority")
+        expect(missing.events.len()).to_equal(0u64)
+
+    it "rejects CONNECT because no tunnel transport is owned":
+        val result = _admit_headers([HpackEntry(name: ":method", value: "CONNECT"), HpackEntry(name: ":authority", value: "example.com:0443"), HpackEntry(name: "host", value: "EXAMPLE.com:443")])
+        expect(result.status).to_equal(WebH2RequestFrameStatusV1.ProtocolError)
+        expect(result.blocker).to_equal("connect-method-not-owned")
+        expect(result.events.len()).to_equal(0u64)
+
+    it "validates the CONNECT pseudo-header set before unsupported dispatch":
+        val path = _admit_headers([HpackEntry(name: ":method", value: "CONNECT"), HpackEntry(name: ":authority", value: "example.com:443"), HpackEntry(name: ":path", value: "/")])
+        expect(path.blocker).to_equal("invalid-connect-pseudo-header-set")
+        val missing = _admit_headers([HpackEntry(name: ":method", value: "CONNECT")])
+        expect(missing.blocker).to_equal("missing-or-invalid-connect-authority")
+        expect(missing.events.len()).to_equal(0u64)
+
+    it "rejects CONNECT authorities without an explicit port":
+        val dns = _admit_headers([HpackEntry(name: ":method", value: "CONNECT"), HpackEntry(name: ":authority", value: "example.com")])
+        expect(dns.blocker).to_equal("connect-authority-requires-port")
+        val ipv4 = _admit_headers([HpackEntry(name: ":method", value: "CONNECT"), HpackEntry(name: ":authority", value: "192.0.2.1")])
+        expect(ipv4.blocker).to_equal("connect-authority-requires-port")
+        val ipv6 = _admit_headers([HpackEntry(name: ":method", value: "CONNECT"), HpackEntry(name: ":authority", value: "[2001:db8::1]")])
+        expect(ipv6.blocker).to_equal("connect-authority-requires-port")
+
+    it "rejects pseudo-fields after regular fields and duplicate pseudo-fields":
+        val late = _admit_headers([HpackEntry(name: ":method", value: "GET"), HpackEntry(name: "host", value: "example.com"), HpackEntry(name: ":scheme", value: "https"), HpackEntry(name: ":path", value: "/")])
+        expect(late.blocker).to_equal("pseudo-header-after-regular-header")
+        val duplicate = _admit_headers([HpackEntry(name: ":method", value: "GET"), HpackEntry(name: ":method", value: "POST"), HpackEntry(name: ":scheme", value: "https"), HpackEntry(name: ":authority", value: "example.com"), HpackEntry(name: ":path", value: "/")])
+        expect(duplicate.blocker).to_equal("duplicate-method-pseudo-header")
+
+    it "rejects unknown pseudo-fields and uppercase field names":
+        val unknown = _admit_headers([HpackEntry(name: ":method", value: "GET"), HpackEntry(name: ":scheme", value: "https"), HpackEntry(name: ":authority", value: "example.com"), HpackEntry(name: ":path", value: "/"), HpackEntry(name: ":status", value: "200")])
+        expect(unknown.blocker).to_equal("invalid-request-pseudo-header")
+        val uppercase = _admit_headers([HpackEntry(name: ":method", value: "GET"), HpackEntry(name: ":scheme", value: "https"), HpackEntry(name: ":authority", value: "example.com"), HpackEntry(name: ":path", value: "/"), HpackEntry(name: "Accept", value: "*/*")])
+        expect(uppercase.blocker).to_equal("invalid-header-name")
+
+    it "rejects connection-specific fields and non-trailers TE":
+        var connection = _request("GET", "https", "example.com", "/")
+        connection.push(HpackEntry(name: "connection", value: "close"))
+        expect(_admit_headers(connection).blocker).to_equal("connection-specific-header")
+        var bad_te = _request("GET", "https", "example.com", "/")
+        bad_te.push(HpackEntry(name: "te", value: "gzip"))
+        expect(_admit_headers(bad_te).blocker).to_equal("connection-specific-header")
+        var trailers = _request("GET", "https", "example.com", "/")
+        trailers.push(HpackEntry(name: "te", value: "trailers"))
+        expect(_admit_headers(trailers).status).to_equal(WebH2RequestFrameStatusV1.Accepted)
+
+    it "rejects field values with leading or trailing whitespace":
+        var leading = _request("GET", "https", "example.com", "/")
+        leading.push(HpackEntry(name: "accept", value: " */*"))
+        val leading_result = _admit_headers(leading)
+        expect(leading_result.blocker).to_equal("invalid-header-value")
+        expect(leading_result.events.len()).to_equal(0u64)
+        var trailing = _request("GET", "https", "example.com", "/")
+        trailing.push(HpackEntry(name: "te", value: "trailers\t"))
+        val trailing_result = _admit_headers(trailing)
+        expect(trailing_result.blocker).to_equal("invalid-header-value")
+        expect(trailing_result.events.len()).to_equal(0u64)

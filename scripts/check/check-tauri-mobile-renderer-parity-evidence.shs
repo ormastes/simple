@@ -1,0 +1,1982 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tauri_mobile_renderer_parity_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/tauri_mobile_renderer_parity_evidence_$(date -u +%F).md}"
+PRODUCTION_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_web_renderer_parity_evidence/evidence.env}"
+IOS_SCRIPT="${TAURI_MOBILE_RENDERER_IOS_SCRIPT:-scripts/check/check-tauri-ios-mobile-renderer-evidence.shs}"
+ANDROID_SCRIPT="${TAURI_MOBILE_RENDERER_ANDROID_SCRIPT:-scripts/check/check-tauri-android-mobile-renderer-evidence.shs}"
+IOS_RENDER_LOG_VALIDATOR="${TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR:-scripts/check/validate-tauri-ios-render-log-proof.js}"
+ANDROID_RENDER_LOG_VALIDATOR="${TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR:-scripts/check/validate-tauri-android-render-log-proof.js}"
+IOS_LOG_EXTRA="${TAURI_MOBILE_RENDERER_IOS_LOG:-}"
+ANDROID_LOG_EXTRA="${TAURI_MOBILE_RENDERER_ANDROID_LOG:-}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+PNG_MIN_DISTINCT_COLORS=16
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+current_source_revision() {
+    if [ "${GUI_WEB_2D_SOURCE_REVISION:-}" != "" ]; then
+        echo "$GUI_WEB_2D_SOURCE_REVISION"
+    elif command -v jj >/dev/null 2>&1 && jj root >/dev/null 2>&1; then
+        jj log -r @ --no-pager --no-graph -T 'commit_id.short(12)' 2>/dev/null || echo unknown
+    elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git rev-parse --short=12 HEAD 2>/dev/null || echo unknown
+    else
+        echo unknown
+    fi
+}
+
+SOURCE_REVISION="${SOURCE_REVISION:-$(current_source_revision)}"
+
+num_at_least() {
+    value="$1"
+    min="$2"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -ge "$min" ]
+}
+
+file_size_bytes() {
+    path="$1"
+    if [ -f "$path" ]; then
+        wc -c <"$path" | tr -d '[:space:]'
+    else
+        echo ""
+    fi
+}
+
+file_link_count() {
+    path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        count="$(stat -c '%h' "$path" 2>/dev/null || stat -f '%l' "$path" 2>/dev/null || true)"
+        case "$count" in
+            ''|*[!0-9]*) echo "" ;;
+            *) echo "$count" ;;
+        esac
+    else
+        echo ""
+    fi
+}
+
+same_file_identity() {
+    left="$1"
+    right="$2"
+    [ -n "$left" ] && [ -n "$right" ] || return 1
+    [ -e "$left" ] && [ -e "$right" ] || return 1
+    if [ "$left" = "$right" ]; then
+        return 0
+    fi
+    if command -v stat >/dev/null 2>&1; then
+        left_id="$(stat -f '%d:%i' "$left" 2>/dev/null || stat -c '%d:%i' "$left" 2>/dev/null || true)"
+        right_id="$(stat -f '%d:%i' "$right" 2>/dev/null || stat -c '%d:%i' "$right" 2>/dev/null || true)"
+        [ -n "$left_id" ] && [ "$left_id" = "$right_id" ] && return 0
+    fi
+    return 1
+}
+
+artifact_file_reason() {
+    path="$1"
+    expected_size="$2"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    link_count="$(file_link_count "$path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        echo hardlink
+        return
+    fi
+    actual_size="$(file_size_bytes "$path")"
+    if [ -n "$expected_size" ] && [ "$actual_size" != "$expected_size" ]; then
+        echo size-mismatch
+        return
+    fi
+    echo pass
+}
+
+artifact_file_status() {
+    reason="$1"
+    if [ "$reason" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+lane_output_env_preflight_reason() {
+    path="$1"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -n "$path" ] && [ -e "$path" ] && [ ! -f "$path" ]; then
+        echo not-regular
+        return
+    fi
+    if [ -f "$path" ]; then
+        link_count="$(file_link_count "$path")"
+        if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+            echo hardlink
+            return
+        fi
+    fi
+    echo pass
+}
+
+lane_output_env_postflight_reason() {
+    path="$1"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    if [ ! -f "$path" ]; then
+        echo not-regular
+        return
+    fi
+    link_count="$(file_link_count "$path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        echo hardlink
+        return
+    fi
+    echo pass
+}
+
+lane_output_env_status() {
+    if [ "$1" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+write_lane_failure_env() {
+    path="$1"
+    name="$2"
+    reason="$3"
+    rm -f "$path" 2>/dev/null || true
+    if [ ! -e "$path" ]; then
+        printf 'status=fail\nreason=%s-lane-output-env-%s\n' "$name" "$reason" >"$path" || true
+    fi
+}
+
+num_positive() {
+    value="$1"
+    awk -v value="$value" 'BEGIN {
+        if (value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 > 0) exit 0
+        exit 1
+    }'
+}
+
+num_positive_at_most() {
+    value="$1"
+    max="$2"
+    awk -v value="$value" -v max="$max" 'BEGIN {
+        if (value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 > 0 && value + 0 <= max + 0) exit 0
+        exit 1
+    }'
+}
+
+mobile_mdi_detail_pass() {
+    window_count="$1"
+    image_count="$2"
+    html_renderable="$3"
+    taskbar_item_count="$4"
+    taskbar_icon_count="$5"
+    width="$6"
+    height="$7"
+    device_pixel_ratio="$8"
+    screen_orientation="$9"
+    performance_available="${10}"
+    performance_delta="${11}"
+    input_to_paint="${12}"
+    animation_available="${13}"
+    animation_frames="${14}"
+    css_animation="${15}"
+    num_at_least "$window_count" 4 &&
+        num_at_least "$image_count" 1 &&
+        [ "$html_renderable" = "true" ] &&
+        num_at_least "$taskbar_item_count" 4 &&
+        num_at_least "$taskbar_icon_count" 4 &&
+        num_at_least "$width" 300 &&
+        num_at_least "$height" 300 &&
+        num_positive "$device_pixel_ratio" &&
+        { [ "$screen_orientation" = "portrait" ] || [ "$screen_orientation" = "landscape" ]; } &&
+        [ "$performance_available" = "true" ] &&
+        num_positive_at_most "$performance_delta" 1000 &&
+        num_positive_at_most "$input_to_paint" 1000 &&
+        [ "$animation_available" = "true" ] &&
+        num_at_least "$animation_frames" 2 &&
+        [ "$css_animation" = "true" ]
+}
+
+mobile_mdi_event_detail_pass() {
+    has_desktop="$1"
+    drag_runtime="$2"
+    drag_events="$3"
+    drag_moved="$4"
+    window_runtime="$5"
+    action_control="$6"
+    input_control="$7"
+    body_click="$8"
+    body_input="$9"
+    body_key="${10}"
+    event_sequence="${11}"
+    taskbar_icons="${12}"
+    taskbar_labels="${13}"
+    [ "$has_desktop" = "true" ] &&
+        [ "$drag_runtime" = "true" ] &&
+        [ "$drag_events" = "true" ] &&
+        [ "$drag_moved" = "true" ] &&
+        [ "$window_runtime" = "true" ] &&
+        [ "$action_control" = "true" ] &&
+        [ "$input_control" = "true" ] &&
+        [ "$body_click" = "true" ] &&
+        [ "$body_input" = "true" ] &&
+        [ "$body_key" = "true" ] &&
+        [ "$event_sequence" = "window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key" ] &&
+        [ "$taskbar_icons" = "true" ] &&
+        [ "$taskbar_labels" = "true" ]
+}
+
+production_backend_detail_pass() {
+    backend_status="$1"
+    backend_exact="$2"
+    backend_cpu_diff="$3"
+    backend_metal_resolved="$4"
+    backend_metal_diff="$5"
+    backend_metal_frame="$6"
+    backend_metal_command_queue_handle="$7"
+    backend_software_checksum="$8"
+    backend_cpu_simd_checksum="$9"
+    backend_metal_checksum="${10}"
+    backend_metal_gpu_checksum="${11}"
+    backend_checksum_match="${12}"
+    backend_same_frame_readback="${13}"
+    backend_readback_source="${14}"
+    backend_tolerance="${15}"
+    [ "$backend_status" = "pass" ] &&
+        [ "$backend_exact" = "true" ] &&
+        [ "$backend_cpu_diff" = "0" ] &&
+        [ "$backend_metal_diff" = "0" ] &&
+        [ -n "$backend_metal_resolved" ] &&
+        [ "$backend_checksum_match" = "true" ] &&
+        [ "$backend_same_frame_readback" = "true" ] &&
+        num_positive "$backend_software_checksum" &&
+        num_positive "$backend_cpu_simd_checksum" &&
+        num_positive "$backend_metal_checksum" &&
+        [ "$backend_software_checksum" = "$backend_cpu_simd_checksum" ] &&
+        [ "$backend_software_checksum" = "$backend_metal_checksum" ] &&
+        { [ "$backend_metal_resolved" != "metal" ] || { [ "$backend_metal_frame" = "true" ] && [ "$backend_readback_source" = "device_readback" ] && num_at_least "$backend_metal_command_queue_handle" 1 && num_positive "$backend_metal_gpu_checksum" && [ "$backend_software_checksum" = "$backend_metal_gpu_checksum" ]; }; } &&
+        [ "$backend_tolerance" = "false" ]
+}
+
+production_backend_timing_pass() {
+    sample_count="$1"
+    elapsed_min="$2"
+    elapsed_avg="$3"
+    elapsed_max="$4"
+    throughput_min="$5"
+    throughput_avg="$6"
+    throughput_max="$7"
+    timing_status="$8"
+    [ "$timing_status" = "pass" ] &&
+        num_at_least "$sample_count" 1 &&
+        num_positive "$elapsed_min" &&
+        num_positive "$elapsed_avg" &&
+        num_positive "$elapsed_max" &&
+        num_positive "$throughput_min" &&
+        num_positive "$throughput_avg" &&
+        num_positive "$throughput_max"
+}
+
+production_metal_render_log_pass() {
+    backend_metal_resolved="$1"
+    render_log_status="$2"
+    required_api="$3"
+    generated_gate="$4"
+    framebuffer_gate="$5"
+    browser_gate="$6"
+    pairwise_gate="$7"
+    argb_source_gate="$8"
+    gpu_capture_gate="$9"
+    blocked_gate_count="${10}"
+    if [ "$backend_metal_resolved" != "metal" ]; then
+        return 0
+    fi
+    [ "$render_log_status" = "pass" ] &&
+        [ "$required_api" = "metal" ] &&
+        [ "$generated_gate" = "pass" ] &&
+        [ "$framebuffer_gate" = "pass" ] &&
+        [ "$browser_gate" = "pass" ] &&
+        [ "$pairwise_gate" = "pass" ] &&
+        [ "$argb_source_gate" = "pass" ] &&
+        { [ "$gpu_capture_gate" = "pass" ] || [ "$gpu_capture_gate" = "not-required" ]; } &&
+        [ "$blocked_gate_count" = "0" ]
+}
+
+grep_any_file() {
+    pattern="$1"
+    shift
+    for file in "$@"; do
+        if [ -n "$file" ] && [ -s "$file" ] && grep -Eiq "$pattern" "$file"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+mdi_proof_file_reason() {
+    path="$1"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        echo json-validator-missing
+        return
+    fi
+    shift
+    node - "$path" "$@" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+const expected = process.argv.slice(3);
+function fail(reason) {
+  console.log(reason);
+  process.exit(0);
+}
+let proof;
+try {
+  proof = JSON.parse(fs.readFileSync(path, 'utf8'));
+} catch (_err) {
+  fail('invalid-json');
+}
+function integerAtLeast(value, min) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= min;
+}
+function positiveAtMost(value, max) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= max;
+}
+function eventSequenceText(value) {
+  if (!Array.isArray(value)) return '';
+  return value.map((entry) => String(entry).replace(/[\r\n]/g, ' ')).join(',');
+}
+const expectedEventSequence = 'window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key';
+const eventPass =
+  integerAtLeast(proof.count, 4) &&
+  proof.hasDesktop === true &&
+  proof.hasDragRuntime === true &&
+  proof.hasDragEvents === true &&
+  proof.dragMoved === true &&
+  proof.hasWindowEventRuntime === true &&
+  proof.appActionControlFound === true &&
+  proof.appInputControlFound === true &&
+  proof.bodyClickRouted === true &&
+  proof.bodyInputRouted === true &&
+  proof.bodyKeyRouted === true &&
+  eventSequenceText(proof.eventSequence) === expectedEventSequence &&
+  integerAtLeast(proof.taskbarItemCount, 4) &&
+  integerAtLeast(proof.taskbarIconCount, 4) &&
+  proof.taskbarIconsVisible === true &&
+  proof.taskbarLabelsVisible === true;
+const renderPass = integerAtLeast(proof.imageCount, 1) && proof.htmlRenderable === true;
+const capturePass =
+  integerAtLeast(proof.viewportWidth, 300) &&
+  integerAtLeast(proof.viewportHeight, 300) &&
+  typeof proof.devicePixelRatio === 'number' &&
+  Number.isFinite(proof.devicePixelRatio) &&
+  proof.devicePixelRatio > 0 &&
+  (proof.screenOrientation === 'portrait' || proof.screenOrientation === 'landscape');
+const performancePass =
+  proof.performanceNowAvailable === true &&
+  positiveAtMost(proof.performanceNowDeltaMs, 1000);
+const interactionPass = positiveAtMost(proof.inputToPaintMs, 1000);
+const animationPass =
+  proof.animationFrameAvailable === true &&
+  integerAtLeast(proof.animationFrameCount, 2) &&
+  proof.cssAnimationProbe === true;
+if (!(eventPass && renderPass && capturePass && performancePass && interactionPass && animationPass)) {
+  fail('contract-missing');
+}
+function boolText(value) {
+  if (value === true) return 'true';
+  if (value === false) return 'false';
+  return '';
+}
+function numberText(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  return String(value);
+}
+function integerText(value) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) return '';
+  return String(value);
+}
+if (expected.length > 0) {
+  const actual = [
+    integerText(proof.count),
+    integerText(proof.imageCount),
+    boolText(proof.htmlRenderable),
+    integerText(proof.taskbarItemCount),
+    integerText(proof.taskbarIconCount),
+    boolText(proof.hasDesktop),
+    boolText(proof.hasDragRuntime),
+    boolText(proof.hasDragEvents),
+    boolText(proof.dragMoved),
+    boolText(proof.hasWindowEventRuntime),
+    boolText(proof.appActionControlFound),
+    boolText(proof.appInputControlFound),
+    boolText(proof.bodyClickRouted),
+    boolText(proof.bodyInputRouted),
+    boolText(proof.bodyKeyRouted),
+    eventSequenceText(proof.eventSequence),
+    boolText(proof.taskbarIconsVisible),
+    boolText(proof.taskbarLabelsVisible),
+    integerText(proof.viewportWidth),
+    integerText(proof.viewportHeight),
+    numberText(proof.devicePixelRatio),
+    proof.screenOrientation || '',
+    boolText(proof.performanceNowAvailable),
+    numberText(proof.performanceNowDeltaMs),
+    numberText(proof.inputToPaintMs),
+    boolText(proof.animationFrameAvailable),
+    integerText(proof.animationFrameCount),
+    boolText(proof.cssAnimationProbe),
+  ];
+  if (expected.length !== actual.length) fail('row-count-mismatch');
+  for (let i = 0; i < actual.length; i += 1) {
+    if (actual[i] !== expected[i]) fail('row-mismatch');
+  }
+}
+console.log('pass');
+NODE
+}
+
+mdi_proof_file_status() {
+    if [ "$1" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+png_file_reason() {
+    path="$1"
+    min_width="${2:-300}"
+    min_height="${3:-300}"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo png-symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    link_count="$(file_link_count "$path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        echo png-hardlink
+        return
+    fi
+    magic="$(od -An -tx1 -N8 "$path" 2>/dev/null | tr -d ' \n')"
+    if [ "$magic" != "89504e470d0a1a0a" ]; then
+        echo png-signature-missing
+        return
+    fi
+    ihdr_length="$(od -An -tx1 -j8 -N4 "$path" 2>/dev/null | tr -d ' \n')"
+    ihdr_type="$(od -An -tx1 -j12 -N4 "$path" 2>/dev/null | tr -d ' \n')"
+    if [ "$ihdr_length" != "0000000d" ] || [ "$ihdr_type" != "49484452" ]; then
+        echo png-ihdr-missing
+        return
+    fi
+    width_hex="$(od -An -tx1 -j16 -N4 "$path" 2>/dev/null | tr -d ' \n')"
+    height_hex="$(od -An -tx1 -j20 -N4 "$path" 2>/dev/null | tr -d ' \n')"
+    if [ -z "$width_hex" ] || [ -z "$height_hex" ] || [ "$width_hex" = "00000000" ] || [ "$height_hex" = "00000000" ]; then
+        echo png-dimensions-missing
+        return
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        echo png-dimension-validator-missing
+        return
+    fi
+    dimension_reason="$(node - "$path" "$min_width" "$min_height" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+function minDimension(value) {
+  return /^[0-9]+$/.test(String(value || '')) ? Number(value) : 300;
+}
+const minWidth = minDimension(process.argv[3]);
+const minHeight = minDimension(process.argv[4]);
+const data = fs.readFileSync(path);
+if (data.length < 24) {
+  console.log('png-dimensions-missing');
+  process.exit(0);
+}
+const width = data.readUInt32BE(16);
+const height = data.readUInt32BE(20);
+if (width < minWidth || height < minHeight) {
+  console.log(`png-dimensions-too-small:${width}x${height}<${minWidth}x${minHeight}`);
+} else {
+  console.log('pass');
+}
+NODE
+)"
+    if [ "$dimension_reason" != "pass" ]; then
+        echo "$dimension_reason"
+        return
+    fi
+    chunk_reason="$(node - "$path" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+let data;
+try {
+  data = fs.readFileSync(path);
+} catch (_err) {
+  console.log('png-image-chunks-missing');
+  process.exit(0);
+}
+let offset = 8;
+let sawIdat = false;
+let sawIend = false;
+while (offset + 12 <= data.length) {
+  const length = data.readUInt32BE(offset);
+  const type = data.toString('ascii', offset + 4, offset + 8);
+  const dataStart = offset + 8;
+  const crcStart = dataStart + length;
+  const next = crcStart + 4;
+  if (next > data.length) {
+    console.log('png-image-chunks-missing');
+    process.exit(0);
+  }
+  if (type === 'IDAT' && length > 0) {
+    sawIdat = true;
+  }
+  if (type === 'IEND') {
+    sawIend = true;
+    break;
+  }
+  offset = next;
+}
+console.log(sawIdat && sawIend ? 'pass' : 'png-image-chunks-missing');
+NODE
+)"
+    if [ "$chunk_reason" != "pass" ]; then
+        echo "$chunk_reason"
+        return
+    fi
+    content_reason="$(node - "$path" <<'NODE'
+const fs = require('fs');
+const zlib = require('zlib');
+const path = process.argv[2];
+
+function finish(reason) {
+  console.log(reason);
+  process.exit(0);
+}
+
+let data;
+try {
+  data = fs.readFileSync(path);
+} catch (_err) {
+  finish('png-content-unreadable');
+}
+
+let offset = 8;
+let width = 0;
+let height = 0;
+let bitDepth = 0;
+let colorType = -1;
+let interlace = 0;
+const idat = [];
+while (offset + 12 <= data.length) {
+  const length = data.readUInt32BE(offset);
+  const type = data.toString('ascii', offset + 4, offset + 8);
+  const start = offset + 8;
+  const end = start + length;
+  const next = end + 4;
+  if (next > data.length) finish('png-image-chunks-missing');
+  if (type === 'IHDR') {
+    width = data.readUInt32BE(start);
+    height = data.readUInt32BE(start + 4);
+    bitDepth = data[start + 8];
+    colorType = data[start + 9];
+    interlace = data[start + 12];
+  } else if (type === 'IDAT') {
+    idat.push(data.subarray(start, end));
+  } else if (type === 'IEND') {
+    break;
+  }
+  offset = next;
+}
+
+if (width <= 0 || height <= 0 || idat.length === 0) finish('png-content-missing');
+if (bitDepth !== 8 || interlace !== 0 || ![0, 2, 6].includes(colorType)) {
+  finish('png-content-unsupported-format');
+}
+
+const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 1;
+const stride = width * channels;
+let inflated;
+try {
+  inflated = zlib.inflateSync(Buffer.concat(idat));
+} catch (_err) {
+  finish('png-content-invalid-deflate');
+}
+if (inflated.length < (stride + 1) * height) finish('png-content-truncated');
+
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
+}
+
+const previous = Buffer.alloc(stride);
+const current = Buffer.alloc(stride);
+const unique = new Set();
+let inputOffset = 0;
+for (let y = 0; y < height; y += 1) {
+  const filter = inflated[inputOffset];
+  inputOffset += 1;
+  inflated.copy(current, 0, inputOffset, inputOffset + stride);
+  inputOffset += stride;
+  for (let x = 0; x < stride; x += 1) {
+    const left = x >= channels ? current[x - channels] : 0;
+    const up = previous[x];
+    const upLeft = x >= channels ? previous[x - channels] : 0;
+    if (filter === 1) current[x] = (current[x] + left) & 255;
+    else if (filter === 2) current[x] = (current[x] + up) & 255;
+    else if (filter === 3) current[x] = (current[x] + Math.floor((left + up) / 2)) & 255;
+    else if (filter === 4) current[x] = (current[x] + paeth(left, up, upLeft)) & 255;
+    else if (filter !== 0) finish('png-content-invalid-filter');
+  }
+  for (let x = 0; x < stride; x += channels) {
+    if (channels === 4) {
+      unique.add(`${current[x]},${current[x + 1]},${current[x + 2]},${current[x + 3]}`);
+    } else if (channels === 3) {
+      unique.add(`${current[x]},${current[x + 1]},${current[x + 2]},255`);
+    } else {
+      unique.add(`${current[x]},${current[x]},${current[x]},255`);
+    }
+    if (unique.size >= 16) finish('pass');
+  }
+  current.copy(previous);
+}
+finish(`png-content-too-flat:${unique.size}`);
+NODE
+)"
+    echo "$content_reason"
+}
+
+png_file_status() {
+    if [ "$(png_file_reason "$1" "${2:-300}" "${3:-300}")" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+png_file_status_from_reason() {
+    if [ "$1" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+png_dimension_value() {
+    path="$1"
+    offset="$2"
+    if [ -z "$path" ] || [ ! -f "$path" ]; then
+        echo ""
+        return
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        echo ""
+        return
+    fi
+    node - "$path" "$offset" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+const offset = Number(process.argv[3]);
+try {
+  const data = fs.readFileSync(path);
+  if (data.length < offset + 4) {
+    console.log('');
+  } else {
+    const value = data.readUInt32BE(offset);
+    console.log(value > 0 ? String(value) : '');
+  }
+} catch (_err) {
+  console.log('');
+}
+NODE
+}
+
+png_width_value() {
+    png_dimension_value "$1" 16
+}
+
+png_height_value() {
+    png_dimension_value "$1" 20
+}
+
+png_distinct_color_count_from_reason() {
+    reason="$1"
+    case "$reason" in
+        pass) echo "$PNG_MIN_DISTINCT_COLORS" ;;
+        png-content-too-flat:*) echo "${reason#png-content-too-flat:}" ;;
+        *) echo "" ;;
+    esac
+}
+
+png_pixel_diversity_status() {
+    count="$1"
+    if num_at_least "$count" "$PNG_MIN_DISTINCT_COLORS"; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+screenshot_artifact_detail_pass() {
+    actual_size="$1"
+    width="$2"
+    height="$3"
+    min_width="$4"
+    min_height="$5"
+    num_at_least "$actual_size" 1 &&
+        num_at_least "$width" "$min_width" &&
+        num_at_least "$height" "$min_height"
+}
+
+run_lane() {
+    name="$1"
+    script="$2"
+    out="$BUILD_DIR/${name}.out"
+    err="$BUILD_DIR/${name}.err"
+    code_file="$BUILD_DIR/${name}.code"
+    code=0
+    lane_output_file_reason="$(lane_output_env_preflight_reason "$out")"
+    rm -f "$out" "$err" "$code_file" 2>/dev/null || true
+    if [ "$lane_output_file_reason" = "pass" ]; then
+        sh "$script" >"$out" 2>"$err" || code=$?
+        lane_output_file_reason="$(lane_output_env_postflight_reason "$out")"
+    else
+        code=126
+        write_lane_failure_env "$out" "$name" "$lane_output_file_reason"
+        : >"$err"
+    fi
+    if [ "$lane_output_file_reason" != "pass" ]; then
+        write_lane_failure_env "$out" "$name" "$lane_output_file_reason"
+        if [ "$code" -eq 0 ]; then
+            code=126
+        fi
+    fi
+    lane_output_file_status="$(lane_output_env_status "$lane_output_file_reason")"
+    printf '%s\n' "$code" >"$code_file"
+}
+
+write_report() {
+    {
+        echo "# Tauri Mobile Renderer Parity Evidence"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- production parity source: $PRODUCTION_ENV"
+        echo "- iOS: $ios_status ($ios_reason)"
+        echo "- Android: $android_status ($android_reason)"
+        echo "- iOS expected GPU/log contract: $ios_expected_gpu_backend / $ios_metal_log_status"
+        echo "- Android expected GPU/log contract: $android_expected_gpu_backend / $android_vulkan_log_status"
+        echo "- iOS lane output env artifact: $ios_lane_output_env_file_status / $ios_lane_output_env_file_reason"
+        echo "- Android lane output env artifact: $android_lane_output_env_file_status / $android_lane_output_env_file_reason"
+        echo "- iOS render-log coherent source artifact: $ios_render_log_coherent_source_file_status / $ios_render_log_coherent_source_file_reason / $ios_render_log_coherent_source_artifact_status"
+        echo "- Android render-log coherent source artifact: $android_render_log_coherent_source_file_status / $android_render_log_coherent_source_file_reason / $android_render_log_coherent_source_artifact_status"
+        echo "- iOS MDI proof artifact: $ios_mdi_proof_file_status / $ios_mdi_proof_file_reason / marker $ios_mdi_proof_marker_source_artifact_status / alias $ios_mdi_proof_marker_source_alias_reason"
+        echo "- Android MDI proof artifact: $android_mdi_proof_file_status / $android_mdi_proof_file_reason / marker $android_mdi_proof_marker_source_artifact_status / alias $android_mdi_proof_marker_source_alias_reason"
+        echo "- iOS screenshot artifact: $ios_screenshot_file_status / $ios_screenshot_file_reason / $ios_screenshot_artifact_status / ${ios_screenshot_width}x${ios_screenshot_height} / colors $ios_screenshot_distinct_color_count"
+        echo "- Android screenshot artifact: $android_screenshot_file_status / $android_screenshot_file_reason / $android_screenshot_artifact_status / ${android_screenshot_width}x${android_screenshot_height} / colors $android_screenshot_distinct_color_count"
+        echo "- iOS MDI render/event/capture/perf/interaction/animation: $ios_mdi_render_status / $ios_mdi_event_status / $ios_mdi_capture_status / $ios_mdi_performance_status / $ios_mdi_interaction_latency_status / $ios_mdi_animation_status"
+        echo "- iOS MDI event detail: windows=$ios_mdi_proof_window_count images=$ios_mdi_render_image_count html=$ios_mdi_render_html_renderable taskbar=$ios_mdi_event_taskbar_item_count/$ios_mdi_event_taskbar_icon_count desktop=$ios_mdi_event_has_desktop drag_runtime=$ios_mdi_event_drag_runtime_available drag_events=$ios_mdi_event_drag_events_available moved=$ios_mdi_event_drag_moved window_runtime=$ios_mdi_event_window_event_runtime_available action=$ios_mdi_event_app_action_control_found input=$ios_mdi_event_app_input_control_found body_click=$ios_mdi_event_body_click_routed body_input=$ios_mdi_event_body_input_routed body_key=$ios_mdi_event_body_key_routed sequence=$ios_mdi_event_sequence icons=$ios_mdi_event_taskbar_icons_visible labels=$ios_mdi_event_taskbar_labels_visible"
+        echo "- iOS MDI capture/perf/animation detail: viewport=${ios_mdi_capture_viewport_width}x$ios_mdi_capture_viewport_height dpr=$ios_mdi_capture_device_pixel_ratio orientation=$ios_mdi_capture_screen_orientation perf=$ios_mdi_performance_now_available delta_ms=$ios_mdi_performance_now_delta_ms input_to_paint_ms=$ios_mdi_input_to_paint_ms animation=$ios_mdi_animation_frame_available frames=$ios_mdi_animation_frame_count css=$ios_mdi_css_animation_probe"
+        echo "- Android MDI render/event/capture/perf/interaction/animation: $android_mdi_render_status / $android_mdi_event_status / $android_mdi_capture_status / $android_mdi_performance_status / $android_mdi_interaction_latency_status / $android_mdi_animation_status"
+        echo "- Android MDI event detail: windows=$android_mdi_proof_window_count images=$android_mdi_render_image_count html=$android_mdi_render_html_renderable taskbar=$android_mdi_event_taskbar_item_count/$android_mdi_event_taskbar_icon_count desktop=$android_mdi_event_has_desktop drag_runtime=$android_mdi_event_drag_runtime_available drag_events=$android_mdi_event_drag_events_available moved=$android_mdi_event_drag_moved window_runtime=$android_mdi_event_window_event_runtime_available action=$android_mdi_event_app_action_control_found input=$android_mdi_event_app_input_control_found body_click=$android_mdi_event_body_click_routed body_input=$android_mdi_event_body_input_routed body_key=$android_mdi_event_body_key_routed sequence=$android_mdi_event_sequence icons=$android_mdi_event_taskbar_icons_visible labels=$android_mdi_event_taskbar_labels_visible"
+        echo "- Android MDI capture/perf/animation detail: viewport=${android_mdi_capture_viewport_width}x$android_mdi_capture_viewport_height dpr=$android_mdi_capture_device_pixel_ratio orientation=$android_mdi_capture_screen_orientation perf=$android_mdi_performance_now_available delta_ms=$android_mdi_performance_now_delta_ms input_to_paint_ms=$android_mdi_input_to_paint_ms animation=$android_mdi_animation_frame_available frames=$android_mdi_animation_frame_count css=$android_mdi_css_animation_probe"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+}
+
+production_status="$(value_of production_gui_web_renderer_parity_status "$PRODUCTION_ENV")"
+production_layout_status="$(value_of production_gui_web_renderer_parity_layout_manifest_status "$PRODUCTION_ENV")"
+production_surface_status="$(value_of production_gui_web_renderer_parity_surface_manifest_status "$PRODUCTION_ENV")"
+production_no_fake="$(value_of production_gui_web_renderer_parity_surface_manifest_no_fake_capture "$PRODUCTION_ENV")"
+production_backend_status="$(value_of production_gui_web_renderer_parity_backend_status "$PRODUCTION_ENV")"
+production_backend_exact="$(value_of production_gui_web_renderer_parity_backend_exact "$PRODUCTION_ENV")"
+production_backend_cpu_diff="$(value_of production_gui_web_renderer_parity_backend_cpu_simd_different_pixels "$PRODUCTION_ENV")"
+production_backend_metal_resolved="$(value_of production_gui_web_renderer_parity_backend_metal_resolved "$PRODUCTION_ENV")"
+production_backend_metal_diff="$(value_of production_gui_web_renderer_parity_backend_metal_different_pixels "$PRODUCTION_ENV")"
+production_backend_metal_frame="$(value_of production_gui_web_renderer_parity_backend_metal_gpu_frame_complete "$PRODUCTION_ENV")"
+production_backend_metal_command_queue_handle="$(value_of production_gui_web_renderer_parity_backend_metal_command_queue_handle "$PRODUCTION_ENV")"
+production_backend_software_checksum="$(value_of production_gui_web_renderer_parity_backend_software_checksum "$PRODUCTION_ENV")"
+production_backend_cpu_simd_checksum="$(value_of production_gui_web_renderer_parity_backend_cpu_simd_checksum "$PRODUCTION_ENV")"
+production_backend_metal_checksum="$(value_of production_gui_web_renderer_parity_backend_metal_checksum "$PRODUCTION_ENV")"
+production_backend_metal_gpu_checksum="$(value_of production_gui_web_renderer_parity_backend_metal_gpu_readback_checksum "$PRODUCTION_ENV")"
+production_backend_checksum_match="$(value_of production_gui_web_renderer_parity_backend_checksum_match "$PRODUCTION_ENV")"
+production_backend_same_frame_readback="$(value_of production_gui_web_renderer_parity_backend_same_frame_readback "$PRODUCTION_ENV")"
+production_backend_readback_source="$(value_of production_gui_web_renderer_parity_backend_readback_source "$PRODUCTION_ENV")"
+production_backend_tolerance="$(value_of production_gui_web_renderer_parity_backend_blur_or_tolerance_used "$PRODUCTION_ENV")"
+production_backend_sample_count="$(value_of production_gui_web_renderer_parity_backend_sample_count "$PRODUCTION_ENV")"
+production_backend_elapsed_min="$(value_of production_gui_web_renderer_parity_backend_total_elapsed_us_min "$PRODUCTION_ENV")"
+production_backend_elapsed_avg="$(value_of production_gui_web_renderer_parity_backend_total_elapsed_us_avg "$PRODUCTION_ENV")"
+production_backend_elapsed_max="$(value_of production_gui_web_renderer_parity_backend_total_elapsed_us_max "$PRODUCTION_ENV")"
+production_backend_throughput_min="$(value_of production_gui_web_renderer_parity_backend_total_pixels_per_second_min "$PRODUCTION_ENV")"
+production_backend_throughput_avg="$(value_of production_gui_web_renderer_parity_backend_total_pixels_per_second_avg "$PRODUCTION_ENV")"
+production_backend_throughput_max="$(value_of production_gui_web_renderer_parity_backend_total_pixels_per_second_max "$PRODUCTION_ENV")"
+production_backend_timing_status="$(value_of production_gui_web_renderer_parity_backend_timing_status "$PRODUCTION_ENV")"
+production_metal_render_log_status="$(value_of production_gui_web_renderer_parity_metal_render_log_status "$PRODUCTION_ENV")"
+production_metal_render_log_required_api="$(value_of production_gui_web_renderer_parity_metal_render_log_required_api "$PRODUCTION_ENV")"
+production_metal_render_log_generated_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_generated_readback_gate_status "$PRODUCTION_ENV")"
+production_metal_render_log_framebuffer_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_framebuffer_readback_gate_status "$PRODUCTION_ENV")"
+production_metal_render_log_browser_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_browser_backing_gate_status "$PRODUCTION_ENV")"
+production_metal_render_log_pairwise_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_pairwise_gate_status "$PRODUCTION_ENV")"
+production_metal_render_log_argb_source_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_argb_source_gate_status "$PRODUCTION_ENV")"
+production_metal_render_log_gpu_capture_gate="$(value_of production_gui_web_renderer_parity_metal_render_log_gpu_capture_gate_status "$PRODUCTION_ENV")"
+production_metal_render_log_blocked_gate_count="$(value_of production_gui_web_renderer_parity_metal_render_log_blocked_gate_count "$PRODUCTION_ENV")"
+
+tauri_v2_status=fail
+tauri_v2_reason=missing-tauri-v2-contract
+if grep -Eq 'tauri[[:space:]]*=[[:space:]]*\{[^\n]*version[[:space:]]*=[[:space:]]*"2' tools/tauri-shell/src-tauri/Cargo.toml 2>/dev/null &&
+    grep -Eq '"@tauri-apps/cli"[[:space:]]*:[[:space:]]*"\^2' tools/tauri-shell/package.json 2>/dev/null; then
+    tauri_v2_status=pass
+    tauri_v2_reason=tauri-v2-configured
+fi
+
+ios_project_status=fail
+ios_project_reason=missing-generated-ios-project
+if [ -d tools/tauri-shell/src-tauri/gen/apple ] &&
+    [ -f tools/tauri-shell/src-tauri/gen/apple/simple-tauri-shell.xcodeproj/project.pbxproj ] &&
+    [ -f tools/tauri-shell/src-tauri/gen/apple/simple-tauri-shell_iOS/Info.plist ]; then
+    ios_project_status=pass
+    ios_project_reason=generated-ios-project-present
+fi
+
+android_project_status=fail
+android_project_reason=missing-generated-android-project
+if [ -d tools/tauri-shell/src-tauri/gen/android ] &&
+    [ -f tools/tauri-shell/src-tauri/gen/android/app/src/main/AndroidManifest.xml ] &&
+    [ -f tools/tauri-shell/src-tauri/gen/android/app/src/main/java/com/simple/ui/MainActivity.kt ]; then
+    android_project_status=pass
+    android_project_reason=generated-android-project-present
+fi
+
+ios_exit_code=""
+ios_lane_output_env_file_status=unavailable
+ios_lane_output_env_file_reason=not-run
+ios_status=unavailable
+ios_reason=not-run
+ios_tooling=""
+ios_screenshot=""
+ios_log_stream=""
+ios_dev_log=""
+ios_render_log_status=unavailable
+ios_render_log_validation_status=unavailable
+ios_render_log_validation_reason=not-run
+ios_render_log_requested_source_count=0
+ios_render_log_source_count=0
+ios_render_log_missing_source_count=0
+ios_render_log_empty_source_count=0
+ios_render_log_symlink_source_count=0
+ios_render_log_hardlink_source_count=0
+ios_render_log_duplicate_source_count=0
+ios_render_log_nonregular_source_count=0
+ios_render_log_html_len=""
+ios_render_log_source_coherence_status=unavailable
+ios_render_log_coherent_source_path=""
+ios_render_log_coherent_source_size_bytes=""
+ios_render_log_coherent_source_actual_size_bytes=""
+ios_render_log_coherent_source_file_reason=not-run
+ios_render_log_coherent_source_file_status=unavailable
+ios_render_log_coherent_source_artifact_status=unavailable
+ios_render_log_marker_status=unavailable
+ios_render_log_marker_source=missing
+ios_render_log_metal_marker_status=unavailable
+ios_render_log_fallback_marker_status=unavailable
+ios_render_log_tauri_context_status=unavailable
+ios_render_log_metal_context_status=unavailable
+ios_render_log_failure_marker_status=unavailable
+ios_layout_status=unavailable
+ios_metal_log_status=unavailable
+ios_mdi_proof_json=""
+ios_mdi_proof_status=unavailable
+ios_mdi_failure_marker_status=unavailable
+ios_mdi_proof_requested_source_count=""
+ios_mdi_proof_source_count=""
+ios_mdi_proof_marker_source_count=""
+ios_mdi_proof_missing_source_count=""
+ios_mdi_proof_symlink_source_count=""
+ios_mdi_proof_hardlink_source_count=""
+ios_mdi_proof_duplicate_source_count=""
+ios_mdi_proof_empty_source_count=""
+ios_mdi_proof_nonregular_source_count=""
+ios_mdi_proof_marker_source_path=""
+ios_mdi_proof_marker_source_size_bytes=""
+ios_mdi_proof_marker_source_actual_size_bytes=""
+ios_mdi_proof_marker_source_file_reason=not-run
+ios_mdi_proof_marker_source_file_status=unavailable
+ios_mdi_proof_marker_source_artifact_status=unavailable
+ios_mdi_proof_marker_source_alias_reason=not-run
+ios_mdi_render_status=unavailable
+ios_mdi_event_status=unavailable
+ios_mdi_capture_status=unavailable
+ios_mdi_performance_status=unavailable
+ios_mdi_interaction_latency_status=unavailable
+ios_mdi_animation_status=unavailable
+ios_mdi_proof_window_count=""
+ios_mdi_render_image_count=""
+ios_mdi_render_html_renderable=""
+ios_mdi_event_taskbar_item_count=""
+ios_mdi_event_taskbar_icon_count=""
+ios_mdi_event_has_desktop=""
+ios_mdi_event_drag_runtime_available=""
+ios_mdi_event_drag_events_available=""
+ios_mdi_event_drag_moved=""
+ios_mdi_event_window_event_runtime_available=""
+ios_mdi_event_app_action_control_found=""
+ios_mdi_event_app_input_control_found=""
+ios_mdi_event_body_click_routed=""
+ios_mdi_event_body_input_routed=""
+ios_mdi_event_body_key_routed=""
+ios_mdi_event_sequence=""
+ios_mdi_event_taskbar_icons_visible=""
+ios_mdi_event_taskbar_labels_visible=""
+ios_mdi_capture_viewport_width=""
+ios_mdi_capture_viewport_height=""
+ios_mdi_capture_device_pixel_ratio=""
+ios_mdi_capture_screen_orientation=""
+ios_mdi_performance_now_available=""
+ios_mdi_performance_now_delta_ms=""
+ios_mdi_input_to_paint_ms=""
+ios_mdi_animation_frame_available=""
+ios_mdi_animation_frame_count=""
+ios_mdi_css_animation_probe=""
+ios_screenshot_file_status=unavailable
+ios_screenshot_file_reason=not-run
+ios_screenshot_artifact_status=unavailable
+ios_screenshot_actual_size_bytes=""
+ios_screenshot_width=""
+ios_screenshot_height=""
+ios_screenshot_distinct_color_count=""
+ios_screenshot_distinct_color_min="$PNG_MIN_DISTINCT_COLORS"
+ios_screenshot_pixel_diversity_status=unavailable
+ios_mdi_proof_file_status=unavailable
+ios_mdi_proof_file_reason=not-run
+ios_expected_gpu_backend=metal
+if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
+    run_lane ios "$IOS_SCRIPT"
+    ios_lane_output_env_file_status="$lane_output_file_status"
+    ios_lane_output_env_file_reason="$lane_output_file_reason"
+    ios_exit_code="$(cat "$BUILD_DIR/ios.code")"
+    ios_status="$(value_of status "$BUILD_DIR/ios.out")"
+    ios_reason="$(value_of reason "$BUILD_DIR/ios.out")"
+    ios_tooling="$(value_of ios_tooling "$BUILD_DIR/ios.out")"
+    ios_screenshot="$(value_of ios_screenshot "$BUILD_DIR/ios.out")"
+    ios_log_stream="$(value_of ios_log_stream "$BUILD_DIR/ios.out")"
+    ios_dev_log="$(value_of ios_dev_log "$BUILD_DIR/ios.out")"
+    ios_render_log_status="$(value_of ios_render_log_status "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_json="$(value_of ios_mdi_proof_json "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_status="$(value_of ios_mdi_proof_status "$BUILD_DIR/ios.out")"
+    ios_mdi_failure_marker_status="$(value_of ios_mdi_failure_marker_status "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_requested_source_count="$(value_of ios_mdi_proof_requested_source_count "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_source_count="$(value_of ios_mdi_proof_source_count "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_marker_source_count="$(value_of ios_mdi_proof_marker_source_count "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_missing_source_count="$(value_of ios_mdi_proof_missing_source_count "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_symlink_source_count="$(value_of ios_mdi_proof_symlink_source_count "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_hardlink_source_count="$(value_of ios_mdi_proof_hardlink_source_count "$BUILD_DIR/ios.out")"
+    if [ -z "$ios_mdi_proof_hardlink_source_count" ]; then ios_mdi_proof_hardlink_source_count=0; fi
+    ios_mdi_proof_duplicate_source_count="$(value_of ios_mdi_proof_duplicate_source_count "$BUILD_DIR/ios.out")"
+    if [ -z "$ios_mdi_proof_duplicate_source_count" ]; then ios_mdi_proof_duplicate_source_count=0; fi
+    ios_mdi_proof_empty_source_count="$(value_of ios_mdi_proof_empty_source_count "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_nonregular_source_count="$(value_of ios_mdi_proof_nonregular_source_count "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_marker_source_path="$(value_of ios_mdi_proof_marker_source_path "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_marker_source_size_bytes="$(value_of ios_mdi_proof_marker_source_size_bytes "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_marker_source_actual_size_bytes="$(file_size_bytes "$ios_mdi_proof_marker_source_path")"
+    ios_mdi_proof_marker_source_file_reason="$(artifact_file_reason "$ios_mdi_proof_marker_source_path" "$ios_mdi_proof_marker_source_size_bytes")"
+    ios_mdi_proof_marker_source_file_status="$(artifact_file_status "$ios_mdi_proof_marker_source_file_reason")"
+    ios_mdi_proof_marker_source_artifact_status="$ios_mdi_proof_marker_source_file_status"
+    ios_mdi_render_status="$(value_of ios_mdi_render_status "$BUILD_DIR/ios.out")"
+    ios_mdi_event_status="$(value_of ios_mdi_event_status "$BUILD_DIR/ios.out")"
+    ios_mdi_capture_status="$(value_of ios_mdi_capture_status "$BUILD_DIR/ios.out")"
+    ios_mdi_performance_status="$(value_of ios_mdi_performance_status "$BUILD_DIR/ios.out")"
+    ios_mdi_interaction_latency_status="$(value_of ios_mdi_interaction_latency_status "$BUILD_DIR/ios.out")"
+    ios_mdi_animation_status="$(value_of ios_mdi_animation_status "$BUILD_DIR/ios.out")"
+    ios_mdi_proof_window_count="$(value_of ios_mdi_proof_window_count "$BUILD_DIR/ios.out")"
+    ios_mdi_render_image_count="$(value_of ios_mdi_render_image_count "$BUILD_DIR/ios.out")"
+    ios_mdi_render_html_renderable="$(value_of ios_mdi_render_html_renderable "$BUILD_DIR/ios.out")"
+    ios_mdi_event_taskbar_item_count="$(value_of ios_mdi_event_taskbar_item_count "$BUILD_DIR/ios.out")"
+    ios_mdi_event_taskbar_icon_count="$(value_of ios_mdi_event_taskbar_icon_count "$BUILD_DIR/ios.out")"
+    ios_mdi_event_has_desktop="$(value_of ios_mdi_event_has_desktop "$BUILD_DIR/ios.out")"
+    ios_mdi_event_drag_runtime_available="$(value_of ios_mdi_event_drag_runtime_available "$BUILD_DIR/ios.out")"
+    ios_mdi_event_drag_events_available="$(value_of ios_mdi_event_drag_events_available "$BUILD_DIR/ios.out")"
+    ios_mdi_event_drag_moved="$(value_of ios_mdi_event_drag_moved "$BUILD_DIR/ios.out")"
+    ios_mdi_event_window_event_runtime_available="$(value_of ios_mdi_event_window_event_runtime_available "$BUILD_DIR/ios.out")"
+    ios_mdi_event_app_action_control_found="$(value_of ios_mdi_event_app_action_control_found "$BUILD_DIR/ios.out")"
+    ios_mdi_event_app_input_control_found="$(value_of ios_mdi_event_app_input_control_found "$BUILD_DIR/ios.out")"
+    ios_mdi_event_body_click_routed="$(value_of ios_mdi_event_body_click_routed "$BUILD_DIR/ios.out")"
+    ios_mdi_event_body_input_routed="$(value_of ios_mdi_event_body_input_routed "$BUILD_DIR/ios.out")"
+    ios_mdi_event_body_key_routed="$(value_of ios_mdi_event_body_key_routed "$BUILD_DIR/ios.out")"
+    ios_mdi_event_sequence="$(value_of ios_mdi_event_sequence "$BUILD_DIR/ios.out")"
+    ios_mdi_event_taskbar_icons_visible="$(value_of ios_mdi_event_taskbar_icons_visible "$BUILD_DIR/ios.out")"
+    ios_mdi_event_taskbar_labels_visible="$(value_of ios_mdi_event_taskbar_labels_visible "$BUILD_DIR/ios.out")"
+    ios_mdi_capture_viewport_width="$(value_of ios_mdi_capture_viewport_width "$BUILD_DIR/ios.out")"
+    ios_mdi_capture_viewport_height="$(value_of ios_mdi_capture_viewport_height "$BUILD_DIR/ios.out")"
+    ios_mdi_capture_device_pixel_ratio="$(value_of ios_mdi_capture_device_pixel_ratio "$BUILD_DIR/ios.out")"
+    ios_mdi_capture_screen_orientation="$(value_of ios_mdi_capture_screen_orientation "$BUILD_DIR/ios.out")"
+    ios_mdi_performance_now_available="$(value_of ios_mdi_performance_now_available "$BUILD_DIR/ios.out")"
+    ios_mdi_performance_now_delta_ms="$(value_of ios_mdi_performance_now_delta_ms "$BUILD_DIR/ios.out")"
+    ios_mdi_input_to_paint_ms="$(value_of ios_mdi_input_to_paint_ms "$BUILD_DIR/ios.out")"
+    ios_mdi_animation_frame_available="$(value_of ios_mdi_animation_frame_available "$BUILD_DIR/ios.out")"
+    ios_mdi_animation_frame_count="$(value_of ios_mdi_animation_frame_count "$BUILD_DIR/ios.out")"
+    ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$BUILD_DIR/ios.out")"
+    ios_screenshot_file_reason="$(png_file_reason "$ios_screenshot" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height")"
+    ios_screenshot_file_status="$(png_file_status_from_reason "$ios_screenshot_file_reason")"
+    ios_screenshot_artifact_status="$ios_screenshot_file_status"
+    ios_screenshot_actual_size_bytes="$(file_size_bytes "$ios_screenshot")"
+    ios_screenshot_width="$(png_width_value "$ios_screenshot")"
+    ios_screenshot_height="$(png_height_value "$ios_screenshot")"
+    ios_screenshot_distinct_color_count="$(png_distinct_color_count_from_reason "$ios_screenshot_file_reason")"
+    ios_screenshot_pixel_diversity_status="$(png_pixel_diversity_status "$ios_screenshot_distinct_color_count")"
+    ios_mdi_proof_file_reason="$(mdi_proof_file_reason "$ios_mdi_proof_json" \
+        "$ios_mdi_proof_window_count" "$ios_mdi_render_image_count" "$ios_mdi_render_html_renderable" \
+        "$ios_mdi_event_taskbar_item_count" "$ios_mdi_event_taskbar_icon_count" \
+        "$ios_mdi_event_has_desktop" "$ios_mdi_event_drag_runtime_available" "$ios_mdi_event_drag_events_available" \
+        "$ios_mdi_event_drag_moved" "$ios_mdi_event_window_event_runtime_available" \
+        "$ios_mdi_event_app_action_control_found" "$ios_mdi_event_app_input_control_found" \
+        "$ios_mdi_event_body_click_routed" "$ios_mdi_event_body_input_routed" "$ios_mdi_event_body_key_routed" \
+        "$ios_mdi_event_sequence" \
+        "$ios_mdi_event_taskbar_icons_visible" "$ios_mdi_event_taskbar_labels_visible" \
+        "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height" "$ios_mdi_capture_device_pixel_ratio" \
+        "$ios_mdi_capture_screen_orientation" "$ios_mdi_performance_now_available" "$ios_mdi_performance_now_delta_ms" \
+        "$ios_mdi_input_to_paint_ms" "$ios_mdi_animation_frame_available" "$ios_mdi_animation_frame_count" \
+        "$ios_mdi_css_animation_probe")"
+    ios_mdi_proof_file_status="$(mdi_proof_file_status "$ios_mdi_proof_file_reason")"
+    ios_mdi_proof_marker_source_alias_reason=pass
+    if [ "$ios_mdi_proof_file_status" = "pass" ] && [ "$ios_mdi_proof_marker_source_file_status" = "pass" ] && same_file_identity "$ios_mdi_proof_json" "$ios_mdi_proof_marker_source_path"; then
+        ios_mdi_proof_marker_source_alias_reason=proof-json-overlaps-marker-source
+    fi
+    ios_render_log_validation_env="$BUILD_DIR/ios_render_log.validation.env"
+    if [ -f "$IOS_RENDER_LOG_VALIDATOR" ]; then
+        ios_render_validation_code=0
+        node "$IOS_RENDER_LOG_VALIDATOR" "$ios_log_stream" "$ios_dev_log" "$IOS_LOG_EXTRA" >"$ios_render_log_validation_env" \
+            || ios_render_validation_code=$?
+        cat "$ios_render_log_validation_env"
+        ios_render_log_validation_status="$(value_of ios_render_log_validation_status "$ios_render_log_validation_env")"
+        ios_render_log_validation_reason="$(value_of ios_render_log_validation_reason "$ios_render_log_validation_env")"
+        ios_render_log_requested_source_count="$(value_of ios_render_log_requested_source_count "$ios_render_log_validation_env")"
+        ios_render_log_source_count="$(value_of ios_render_log_source_count "$ios_render_log_validation_env")"
+        ios_render_log_missing_source_count="$(value_of ios_render_log_missing_source_count "$ios_render_log_validation_env")"
+        ios_render_log_empty_source_count="$(value_of ios_render_log_empty_source_count "$ios_render_log_validation_env")"
+        ios_render_log_symlink_source_count="$(value_of ios_render_log_symlink_source_count "$ios_render_log_validation_env")"
+        ios_render_log_hardlink_source_count="$(value_of ios_render_log_hardlink_source_count "$ios_render_log_validation_env")"
+        if [ -z "$ios_render_log_hardlink_source_count" ]; then ios_render_log_hardlink_source_count=0; fi
+        ios_render_log_duplicate_source_count="$(value_of ios_render_log_duplicate_source_count "$ios_render_log_validation_env")"
+        if [ -z "$ios_render_log_duplicate_source_count" ]; then ios_render_log_duplicate_source_count=0; fi
+        ios_render_log_nonregular_source_count="$(value_of ios_render_log_nonregular_source_count "$ios_render_log_validation_env")"
+        ios_render_log_html_len="$(value_of ios_render_log_html_len "$ios_render_log_validation_env")"
+        ios_render_log_source_coherence_status="$(value_of ios_render_log_source_coherence_status "$ios_render_log_validation_env")"
+        ios_render_log_coherent_source_path="$(value_of ios_render_log_coherent_source_path "$ios_render_log_validation_env")"
+        ios_render_log_coherent_source_size_bytes="$(value_of ios_render_log_coherent_source_size_bytes "$ios_render_log_validation_env")"
+        ios_render_log_coherent_source_actual_size_bytes="$(file_size_bytes "$ios_render_log_coherent_source_path")"
+        ios_render_log_coherent_source_file_reason="$(artifact_file_reason "$ios_render_log_coherent_source_path" "$ios_render_log_coherent_source_size_bytes")"
+        ios_render_log_coherent_source_file_status="$(artifact_file_status "$ios_render_log_coherent_source_file_reason")"
+        ios_render_log_coherent_source_artifact_status="$ios_render_log_coherent_source_file_status"
+        ios_render_log_marker_status="$(value_of ios_render_log_marker_status "$ios_render_log_validation_env")"
+        ios_render_log_marker_source="$(value_of ios_render_log_marker_source "$ios_render_log_validation_env")"
+        ios_render_log_metal_marker_status="$(value_of ios_render_log_metal_marker_status "$ios_render_log_validation_env")"
+        ios_render_log_fallback_marker_status="$(value_of ios_render_log_fallback_marker_status "$ios_render_log_validation_env")"
+        ios_render_log_tauri_context_status="$(value_of ios_render_log_tauri_context_status "$ios_render_log_validation_env")"
+        ios_render_log_metal_context_status="$(value_of ios_render_log_metal_context_status "$ios_render_log_validation_env")"
+        ios_render_log_failure_marker_status="$(value_of ios_render_log_failure_marker_status "$ios_render_log_validation_env")"
+        if [ "$ios_render_validation_code" -eq 0 ] && [ "$ios_render_log_validation_status" = "pass" ]; then
+            ios_render_log_status=pass
+            ios_metal_log_status=pass
+        elif [ "$ios_status" = "pass" ]; then
+            ios_render_log_status="$ios_render_log_marker_status"
+            ios_metal_log_status="$ios_render_log_metal_marker_status"
+            if [ "$ios_render_log_failure_marker_status" = "fail" ]; then
+                ios_reason=ios-render-log-failure-marker
+            elif [ "$ios_render_log_fallback_marker_status" = "fail" ]; then
+                ios_reason=ios-render-log-fallback-gpu
+            elif [ "$ios_render_log_marker_status" != "pass" ]; then
+                ios_reason=ios-render-log-marker-missing
+            elif [ "$ios_render_log_metal_marker_status" != "pass" ]; then
+                ios_reason=ios-metal-log-marker-missing
+            elif [ "$ios_render_log_tauri_context_status" != "pass" ]; then
+                ios_reason=ios-tauri-wkwebview-context-missing
+            elif [ "$ios_render_log_metal_context_status" != "pass" ]; then
+                ios_reason=ios-metal-context-missing
+            elif [ "$ios_render_log_source_coherence_status" != "pass" ]; then
+                ios_reason=ios-render-log-source-mismatch
+            elif [ "$ios_render_log_missing_source_count" != "0" ]; then
+                ios_reason=ios-render-log-source-missing
+            elif [ "$ios_render_log_symlink_source_count" != "0" ]; then
+                ios_reason=ios-render-log-source-symlink
+            elif [ "$ios_render_log_hardlink_source_count" != "0" ]; then
+                ios_reason=ios-render-log-source-hardlink
+            elif [ "$ios_render_log_duplicate_source_count" != "0" ]; then
+                ios_reason=ios-render-log-source-duplicate
+            elif [ "$ios_render_log_nonregular_source_count" != "0" ]; then
+                ios_reason=ios-render-log-source-not-regular
+            elif [ "$ios_render_log_empty_source_count" != "0" ]; then
+                ios_reason=ios-render-log-source-empty
+            else
+                ios_reason="${ios_render_log_validation_reason:-ios-render-log-validation-failed}"
+            fi
+        fi
+    elif [ "$ios_status" = "pass" ]; then
+        ios_render_log_status=fail
+        ios_metal_log_status=fail
+        ios_render_log_validation_status=fail
+        ios_render_log_validation_reason=ios-render-log-validator-missing
+        ios_reason=ios-render-log-validator-missing
+    fi
+    if [ "$ios_status" = "pass" ] && [ "$ios_screenshot_file_status" = "pass" ]; then
+        ios_layout_status=pass
+    elif [ "$ios_status" = "pass" ]; then
+        ios_layout_status=fail
+        ios_reason=ios-screenshot-png-missing
+    fi
+else
+    ios_reason=missing-ios-evidence-script
+fi
+
+android_exit_code=""
+android_lane_output_env_file_status=unavailable
+android_lane_output_env_file_reason=not-run
+android_status=unavailable
+android_reason=not-run
+android_screenshot=""
+android_logcat=""
+android_gpu_log=""
+android_render_log_status=unavailable
+android_render_log_validation_status=unavailable
+android_render_log_validation_reason=not-run
+android_render_log_requested_source_count=0
+android_render_log_source_count=0
+android_render_log_missing_source_count=0
+android_render_log_empty_source_count=0
+android_render_log_symlink_source_count=0
+android_render_log_hardlink_source_count=0
+android_render_log_duplicate_source_count=0
+android_render_log_nonregular_source_count=0
+android_render_log_html_len=""
+android_render_log_source_coherence_status=unavailable
+android_render_log_coherent_source_path=""
+android_render_log_coherent_source_size_bytes=""
+android_render_log_coherent_source_actual_size_bytes=""
+android_render_log_coherent_source_file_reason=not-run
+android_render_log_coherent_source_file_status=unavailable
+android_render_log_coherent_source_artifact_status=unavailable
+android_render_log_marker_status=unavailable
+android_render_log_vulkan_marker_status=unavailable
+android_render_log_foreground_marker_status=unavailable
+android_render_log_failure_marker_status=unavailable
+android_layout_status=unavailable
+android_vulkan_log_status=unavailable
+android_mdi_proof_json=""
+android_mdi_proof_status=unavailable
+android_mdi_failure_marker_status=unavailable
+android_mdi_proof_requested_source_count=""
+android_mdi_proof_source_count=""
+android_mdi_proof_marker_source_count=""
+android_mdi_proof_missing_source_count=""
+android_mdi_proof_symlink_source_count=""
+android_mdi_proof_hardlink_source_count=""
+android_mdi_proof_duplicate_source_count=""
+android_mdi_proof_empty_source_count=""
+android_mdi_proof_nonregular_source_count=""
+android_mdi_proof_marker_source_path=""
+android_mdi_proof_marker_source_size_bytes=""
+android_mdi_proof_marker_source_actual_size_bytes=""
+android_mdi_proof_marker_source_file_reason=not-run
+android_mdi_proof_marker_source_file_status=unavailable
+android_mdi_proof_marker_source_artifact_status=unavailable
+android_mdi_proof_marker_source_alias_reason=not-run
+android_mdi_render_status=unavailable
+android_mdi_event_status=unavailable
+android_mdi_capture_status=unavailable
+android_mdi_performance_status=unavailable
+android_mdi_interaction_latency_status=unavailable
+android_mdi_animation_status=unavailable
+android_mdi_proof_window_count=""
+android_mdi_render_image_count=""
+android_mdi_render_html_renderable=""
+android_mdi_event_taskbar_item_count=""
+android_mdi_event_taskbar_icon_count=""
+android_mdi_event_has_desktop=""
+android_mdi_event_drag_runtime_available=""
+android_mdi_event_drag_events_available=""
+android_mdi_event_drag_moved=""
+android_mdi_event_window_event_runtime_available=""
+android_mdi_event_app_action_control_found=""
+android_mdi_event_app_input_control_found=""
+android_mdi_event_body_click_routed=""
+android_mdi_event_body_input_routed=""
+android_mdi_event_body_key_routed=""
+android_mdi_event_sequence=""
+android_mdi_event_taskbar_icons_visible=""
+android_mdi_event_taskbar_labels_visible=""
+android_mdi_capture_viewport_width=""
+android_mdi_capture_viewport_height=""
+android_mdi_capture_device_pixel_ratio=""
+android_mdi_capture_screen_orientation=""
+android_mdi_performance_now_available=""
+android_mdi_performance_now_delta_ms=""
+android_mdi_input_to_paint_ms=""
+android_mdi_animation_frame_available=""
+android_mdi_animation_frame_count=""
+android_mdi_css_animation_probe=""
+android_screenshot_file_status=unavailable
+android_screenshot_file_reason=not-run
+android_screenshot_artifact_status=unavailable
+android_screenshot_actual_size_bytes=""
+android_screenshot_width=""
+android_screenshot_height=""
+android_screenshot_distinct_color_count=""
+android_screenshot_distinct_color_min="$PNG_MIN_DISTINCT_COLORS"
+android_screenshot_pixel_diversity_status=unavailable
+android_mdi_proof_file_status=unavailable
+android_mdi_proof_file_reason=not-run
+android_expected_gpu_backend=vulkan
+if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
+    run_lane android "$ANDROID_SCRIPT"
+    android_lane_output_env_file_status="$lane_output_file_status"
+    android_lane_output_env_file_reason="$lane_output_file_reason"
+    android_exit_code="$(cat "$BUILD_DIR/android.code")"
+    android_status="$(value_of status "$BUILD_DIR/android.out")"
+    android_reason="$(value_of reason "$BUILD_DIR/android.out")"
+    android_screenshot="$(value_of android_screenshot "$BUILD_DIR/android.out")"
+    android_logcat="$(value_of android_logcat "$BUILD_DIR/android.out")"
+    android_gpu_log="$(value_of android_gpu_log "$BUILD_DIR/android.out")"
+    android_render_log_status="$(value_of android_render_log_status "$BUILD_DIR/android.out")"
+    android_render_log_validation_status="$(value_of android_render_log_validation_status "$BUILD_DIR/android.out")"
+    android_render_log_validation_reason="$(value_of android_render_log_validation_reason "$BUILD_DIR/android.out")"
+    android_render_log_requested_source_count="$(value_of android_render_log_requested_source_count "$BUILD_DIR/android.out")"
+    android_render_log_source_count="$(value_of android_render_log_source_count "$BUILD_DIR/android.out")"
+    android_render_log_missing_source_count="$(value_of android_render_log_missing_source_count "$BUILD_DIR/android.out")"
+    android_render_log_empty_source_count="$(value_of android_render_log_empty_source_count "$BUILD_DIR/android.out")"
+    android_render_log_symlink_source_count="$(value_of android_render_log_symlink_source_count "$BUILD_DIR/android.out")"
+    android_render_log_hardlink_source_count="$(value_of android_render_log_hardlink_source_count "$BUILD_DIR/android.out")"
+    if [ -z "$android_render_log_hardlink_source_count" ]; then android_render_log_hardlink_source_count=0; fi
+    android_render_log_duplicate_source_count="$(value_of android_render_log_duplicate_source_count "$BUILD_DIR/android.out")"
+    if [ -z "$android_render_log_duplicate_source_count" ]; then android_render_log_duplicate_source_count=0; fi
+    android_render_log_nonregular_source_count="$(value_of android_render_log_nonregular_source_count "$BUILD_DIR/android.out")"
+    if [ -z "$android_render_log_nonregular_source_count" ]; then android_render_log_nonregular_source_count=0; fi
+    android_render_log_html_len="$(value_of android_render_log_html_len "$BUILD_DIR/android.out")"
+    android_render_log_source_coherence_status="$(value_of android_render_log_source_coherence_status "$BUILD_DIR/android.out")"
+    android_render_log_coherent_source_path="$(value_of android_render_log_coherent_source_path "$BUILD_DIR/android.out")"
+    android_render_log_coherent_source_size_bytes="$(value_of android_render_log_coherent_source_size_bytes "$BUILD_DIR/android.out")"
+    android_render_log_coherent_source_actual_size_bytes="$(file_size_bytes "$android_render_log_coherent_source_path")"
+    android_render_log_coherent_source_file_reason="$(artifact_file_reason "$android_render_log_coherent_source_path" "$android_render_log_coherent_source_size_bytes")"
+    android_render_log_coherent_source_file_status="$(artifact_file_status "$android_render_log_coherent_source_file_reason")"
+        android_render_log_marker_status="$(value_of android_render_log_marker_status "$BUILD_DIR/android.out")"
+        android_render_log_vulkan_marker_status="$(value_of android_render_log_vulkan_marker_status "$BUILD_DIR/android.out")"
+        android_render_log_foreground_marker_status="$(value_of android_render_log_foreground_marker_status "$BUILD_DIR/android.out")"
+        android_render_log_failure_marker_status="$(value_of android_render_log_failure_marker_status "$BUILD_DIR/android.out")"
+    android_mdi_proof_json="$(value_of android_mdi_proof_json "$BUILD_DIR/android.out")"
+    android_mdi_proof_status="$(value_of android_mdi_proof_status "$BUILD_DIR/android.out")"
+    android_mdi_failure_marker_status="$(value_of android_mdi_failure_marker_status "$BUILD_DIR/android.out")"
+    android_mdi_proof_requested_source_count="$(value_of android_mdi_proof_requested_source_count "$BUILD_DIR/android.out")"
+    android_mdi_proof_source_count="$(value_of android_mdi_proof_source_count "$BUILD_DIR/android.out")"
+    android_mdi_proof_marker_source_count="$(value_of android_mdi_proof_marker_source_count "$BUILD_DIR/android.out")"
+    android_mdi_proof_missing_source_count="$(value_of android_mdi_proof_missing_source_count "$BUILD_DIR/android.out")"
+    android_mdi_proof_symlink_source_count="$(value_of android_mdi_proof_symlink_source_count "$BUILD_DIR/android.out")"
+    android_mdi_proof_hardlink_source_count="$(value_of android_mdi_proof_hardlink_source_count "$BUILD_DIR/android.out")"
+    if [ -z "$android_mdi_proof_hardlink_source_count" ]; then android_mdi_proof_hardlink_source_count=0; fi
+    android_mdi_proof_duplicate_source_count="$(value_of android_mdi_proof_duplicate_source_count "$BUILD_DIR/android.out")"
+    if [ -z "$android_mdi_proof_duplicate_source_count" ]; then android_mdi_proof_duplicate_source_count=0; fi
+    android_mdi_proof_empty_source_count="$(value_of android_mdi_proof_empty_source_count "$BUILD_DIR/android.out")"
+    android_mdi_proof_nonregular_source_count="$(value_of android_mdi_proof_nonregular_source_count "$BUILD_DIR/android.out")"
+    android_mdi_proof_marker_source_path="$(value_of android_mdi_proof_marker_source_path "$BUILD_DIR/android.out")"
+    android_mdi_proof_marker_source_size_bytes="$(value_of android_mdi_proof_marker_source_size_bytes "$BUILD_DIR/android.out")"
+    android_mdi_proof_marker_source_actual_size_bytes="$(file_size_bytes "$android_mdi_proof_marker_source_path")"
+    android_mdi_proof_marker_source_file_reason="$(artifact_file_reason "$android_mdi_proof_marker_source_path" "$android_mdi_proof_marker_source_size_bytes")"
+    android_mdi_proof_marker_source_file_status="$(artifact_file_status "$android_mdi_proof_marker_source_file_reason")"
+    android_mdi_proof_marker_source_artifact_status="$android_mdi_proof_marker_source_file_status"
+    android_mdi_render_status="$(value_of android_mdi_render_status "$BUILD_DIR/android.out")"
+    android_mdi_event_status="$(value_of android_mdi_event_status "$BUILD_DIR/android.out")"
+    android_mdi_capture_status="$(value_of android_mdi_capture_status "$BUILD_DIR/android.out")"
+    android_mdi_performance_status="$(value_of android_mdi_performance_status "$BUILD_DIR/android.out")"
+    android_mdi_interaction_latency_status="$(value_of android_mdi_interaction_latency_status "$BUILD_DIR/android.out")"
+    android_mdi_animation_status="$(value_of android_mdi_animation_status "$BUILD_DIR/android.out")"
+    android_mdi_proof_window_count="$(value_of android_mdi_proof_window_count "$BUILD_DIR/android.out")"
+    android_mdi_render_image_count="$(value_of android_mdi_render_image_count "$BUILD_DIR/android.out")"
+    android_mdi_render_html_renderable="$(value_of android_mdi_render_html_renderable "$BUILD_DIR/android.out")"
+    android_mdi_event_taskbar_item_count="$(value_of android_mdi_event_taskbar_item_count "$BUILD_DIR/android.out")"
+    android_mdi_event_taskbar_icon_count="$(value_of android_mdi_event_taskbar_icon_count "$BUILD_DIR/android.out")"
+    android_mdi_event_has_desktop="$(value_of android_mdi_event_has_desktop "$BUILD_DIR/android.out")"
+    android_mdi_event_drag_runtime_available="$(value_of android_mdi_event_drag_runtime_available "$BUILD_DIR/android.out")"
+    android_mdi_event_drag_events_available="$(value_of android_mdi_event_drag_events_available "$BUILD_DIR/android.out")"
+    android_mdi_event_drag_moved="$(value_of android_mdi_event_drag_moved "$BUILD_DIR/android.out")"
+    android_mdi_event_window_event_runtime_available="$(value_of android_mdi_event_window_event_runtime_available "$BUILD_DIR/android.out")"
+    android_mdi_event_app_action_control_found="$(value_of android_mdi_event_app_action_control_found "$BUILD_DIR/android.out")"
+    android_mdi_event_app_input_control_found="$(value_of android_mdi_event_app_input_control_found "$BUILD_DIR/android.out")"
+    android_mdi_event_body_click_routed="$(value_of android_mdi_event_body_click_routed "$BUILD_DIR/android.out")"
+    android_mdi_event_body_input_routed="$(value_of android_mdi_event_body_input_routed "$BUILD_DIR/android.out")"
+    android_mdi_event_body_key_routed="$(value_of android_mdi_event_body_key_routed "$BUILD_DIR/android.out")"
+    android_mdi_event_sequence="$(value_of android_mdi_event_sequence "$BUILD_DIR/android.out")"
+    android_mdi_event_taskbar_icons_visible="$(value_of android_mdi_event_taskbar_icons_visible "$BUILD_DIR/android.out")"
+    android_mdi_event_taskbar_labels_visible="$(value_of android_mdi_event_taskbar_labels_visible "$BUILD_DIR/android.out")"
+    android_mdi_capture_viewport_width="$(value_of android_mdi_capture_viewport_width "$BUILD_DIR/android.out")"
+    android_mdi_capture_viewport_height="$(value_of android_mdi_capture_viewport_height "$BUILD_DIR/android.out")"
+    android_mdi_capture_device_pixel_ratio="$(value_of android_mdi_capture_device_pixel_ratio "$BUILD_DIR/android.out")"
+    android_mdi_capture_screen_orientation="$(value_of android_mdi_capture_screen_orientation "$BUILD_DIR/android.out")"
+    android_mdi_performance_now_available="$(value_of android_mdi_performance_now_available "$BUILD_DIR/android.out")"
+    android_mdi_performance_now_delta_ms="$(value_of android_mdi_performance_now_delta_ms "$BUILD_DIR/android.out")"
+    android_mdi_input_to_paint_ms="$(value_of android_mdi_input_to_paint_ms "$BUILD_DIR/android.out")"
+    android_mdi_animation_frame_available="$(value_of android_mdi_animation_frame_available "$BUILD_DIR/android.out")"
+    android_mdi_animation_frame_count="$(value_of android_mdi_animation_frame_count "$BUILD_DIR/android.out")"
+    android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$BUILD_DIR/android.out")"
+    android_screenshot_file_reason="$(png_file_reason "$android_screenshot" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height")"
+    android_screenshot_file_status="$(png_file_status_from_reason "$android_screenshot_file_reason")"
+    android_screenshot_artifact_status="$android_screenshot_file_status"
+    android_screenshot_actual_size_bytes="$(file_size_bytes "$android_screenshot")"
+    android_screenshot_width="$(png_width_value "$android_screenshot")"
+    android_screenshot_height="$(png_height_value "$android_screenshot")"
+    android_screenshot_distinct_color_count="$(png_distinct_color_count_from_reason "$android_screenshot_file_reason")"
+    android_screenshot_pixel_diversity_status="$(png_pixel_diversity_status "$android_screenshot_distinct_color_count")"
+    android_mdi_proof_file_reason="$(mdi_proof_file_reason "$android_mdi_proof_json" \
+        "$android_mdi_proof_window_count" "$android_mdi_render_image_count" "$android_mdi_render_html_renderable" \
+        "$android_mdi_event_taskbar_item_count" "$android_mdi_event_taskbar_icon_count" \
+        "$android_mdi_event_has_desktop" "$android_mdi_event_drag_runtime_available" "$android_mdi_event_drag_events_available" \
+        "$android_mdi_event_drag_moved" "$android_mdi_event_window_event_runtime_available" \
+        "$android_mdi_event_app_action_control_found" "$android_mdi_event_app_input_control_found" \
+        "$android_mdi_event_body_click_routed" "$android_mdi_event_body_input_routed" "$android_mdi_event_body_key_routed" \
+        "$android_mdi_event_sequence" \
+        "$android_mdi_event_taskbar_icons_visible" "$android_mdi_event_taskbar_labels_visible" \
+        "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height" "$android_mdi_capture_device_pixel_ratio" \
+        "$android_mdi_capture_screen_orientation" "$android_mdi_performance_now_available" "$android_mdi_performance_now_delta_ms" \
+        "$android_mdi_input_to_paint_ms" "$android_mdi_animation_frame_available" "$android_mdi_animation_frame_count" \
+        "$android_mdi_css_animation_probe")"
+    android_mdi_proof_file_status="$(mdi_proof_file_status "$android_mdi_proof_file_reason")"
+    android_mdi_proof_marker_source_alias_reason=pass
+    if [ "$android_mdi_proof_file_status" = "pass" ] && [ "$android_mdi_proof_marker_source_file_status" = "pass" ] && same_file_identity "$android_mdi_proof_json" "$android_mdi_proof_marker_source_path"; then
+        android_mdi_proof_marker_source_alias_reason=proof-json-overlaps-marker-source
+    fi
+    android_render_log_validation_env="$BUILD_DIR/android_render_log.validation.env"
+    if [ -f "$ANDROID_RENDER_LOG_VALIDATOR" ]; then
+        android_render_validation_code=0
+        set -- "$android_logcat"
+        if [ -n "$android_gpu_log" ] && [ -s "$android_gpu_log" ]; then
+            set -- "$@" "$android_gpu_log"
+        fi
+        if [ -n "$ANDROID_LOG_EXTRA" ]; then
+            set -- "$@" "$ANDROID_LOG_EXTRA"
+        fi
+        node "$ANDROID_RENDER_LOG_VALIDATOR" "$@" >"$android_render_log_validation_env" \
+            || android_render_validation_code=$?
+        cat "$android_render_log_validation_env"
+        android_render_log_validation_status="$(value_of android_render_log_validation_status "$android_render_log_validation_env")"
+        android_render_log_validation_reason="$(value_of android_render_log_validation_reason "$android_render_log_validation_env")"
+        android_render_log_requested_source_count="$(value_of android_render_log_requested_source_count "$android_render_log_validation_env")"
+        android_render_log_source_count="$(value_of android_render_log_source_count "$android_render_log_validation_env")"
+        android_render_log_missing_source_count="$(value_of android_render_log_missing_source_count "$android_render_log_validation_env")"
+        android_render_log_empty_source_count="$(value_of android_render_log_empty_source_count "$android_render_log_validation_env")"
+        android_render_log_symlink_source_count="$(value_of android_render_log_symlink_source_count "$android_render_log_validation_env")"
+        android_render_log_hardlink_source_count="$(value_of android_render_log_hardlink_source_count "$android_render_log_validation_env")"
+        if [ -z "$android_render_log_hardlink_source_count" ]; then android_render_log_hardlink_source_count=0; fi
+        android_render_log_duplicate_source_count="$(value_of android_render_log_duplicate_source_count "$android_render_log_validation_env")"
+        if [ -z "$android_render_log_duplicate_source_count" ]; then android_render_log_duplicate_source_count=0; fi
+        android_render_log_nonregular_source_count="$(value_of android_render_log_nonregular_source_count "$android_render_log_validation_env")"
+        if [ -z "$android_render_log_nonregular_source_count" ]; then android_render_log_nonregular_source_count=0; fi
+        android_render_log_html_len="$(value_of android_render_log_html_len "$android_render_log_validation_env")"
+        android_render_log_source_coherence_status="$(value_of android_render_log_source_coherence_status "$android_render_log_validation_env")"
+        android_render_log_coherent_source_path="$(value_of android_render_log_coherent_source_path "$android_render_log_validation_env")"
+        android_render_log_coherent_source_size_bytes="$(value_of android_render_log_coherent_source_size_bytes "$android_render_log_validation_env")"
+        android_render_log_coherent_source_actual_size_bytes="$(file_size_bytes "$android_render_log_coherent_source_path")"
+        android_render_log_coherent_source_file_reason="$(artifact_file_reason "$android_render_log_coherent_source_path" "$android_render_log_coherent_source_size_bytes")"
+        android_render_log_coherent_source_file_status="$(artifact_file_status "$android_render_log_coherent_source_file_reason")"
+        android_render_log_coherent_source_artifact_status="$android_render_log_coherent_source_file_status"
+        android_render_log_marker_status="$(value_of android_render_log_marker_status "$android_render_log_validation_env")"
+        android_render_log_vulkan_marker_status="$(value_of android_render_log_vulkan_marker_status "$android_render_log_validation_env")"
+        android_render_log_foreground_marker_status="$(value_of android_render_log_foreground_marker_status "$android_render_log_validation_env")"
+        android_render_log_failure_marker_status="$(value_of android_render_log_failure_marker_status "$android_render_log_validation_env")"
+        if [ "$android_render_validation_code" -eq 0 ] && [ "$android_render_log_validation_status" = "pass" ]; then
+            android_render_log_status=pass
+            android_vulkan_log_status=pass
+        elif [ "$android_status" = "pass" ]; then
+            android_render_log_status="$android_render_log_marker_status"
+            android_vulkan_log_status="$android_render_log_vulkan_marker_status"
+            if [ "$android_render_log_failure_marker_status" = "fail" ]; then
+                android_reason=android-render-log-failure-marker
+            elif [ "$android_render_log_marker_status" != "pass" ]; then
+                android_reason="${android_render_log_validation_reason:-android-render-log-marker-missing}"
+            elif [ "$android_render_log_vulkan_marker_status" != "pass" ]; then
+                android_reason=android-vulkan-log-marker-missing
+            elif [ "$android_render_log_foreground_marker_status" != "pass" ]; then
+                android_reason=android-foreground-marker-missing
+            elif [ "$android_render_log_missing_source_count" != "0" ]; then
+                android_reason=android-render-log-source-missing
+            elif [ "$android_render_log_symlink_source_count" != "0" ]; then
+                android_reason=android-render-log-source-symlink
+            elif [ "$android_render_log_hardlink_source_count" != "0" ]; then
+                android_reason=android-render-log-source-hardlink
+            elif [ "$android_render_log_duplicate_source_count" != "0" ]; then
+                android_reason=android-render-log-source-duplicate
+            elif [ "$android_render_log_nonregular_source_count" != "0" ]; then
+                android_reason=android-render-log-source-not-regular
+            elif [ "$android_render_log_empty_source_count" != "0" ]; then
+                android_reason=android-render-log-source-empty
+            elif [ "$android_render_log_source_coherence_status" != "pass" ]; then
+                android_reason=android-render-log-source-mismatch
+            else
+                android_reason="${android_render_log_validation_reason:-android-render-log-validation-failed}"
+            fi
+        fi
+    elif [ "$android_status" = "pass" ]; then
+        android_render_log_status=fail
+        android_vulkan_log_status=fail
+        android_render_log_validation_status=fail
+        android_render_log_validation_reason=android-render-log-validator-missing
+        android_reason=android-render-log-validator-missing
+    fi
+    if [ "$android_status" = "pass" ] && [ "$android_screenshot_file_status" = "pass" ]; then
+        android_layout_status=pass
+    elif [ "$android_status" = "pass" ]; then
+        android_layout_status=fail
+        android_reason=android-screenshot-png-missing
+    fi
+    if [ "$android_render_log_validation_status" = "unavailable" ] && grep_any_file 'Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk' "$android_logcat" "$android_gpu_log" "$ANDROID_LOG_EXTRA"; then
+        android_vulkan_log_status=pass
+    elif [ "$android_render_log_validation_status" = "unavailable" ] && [ "$android_status" = "pass" ]; then
+        android_vulkan_log_status=fail
+        android_reason=android-vulkan-log-marker-missing
+    fi
+else
+    android_reason=missing-android-evidence-script
+fi
+
+status=pass
+reason=pass
+if [ "$production_status" != "pass" ] || [ "$production_layout_status" != "pass" ] || [ "$production_surface_status" != "pass" ] || [ "$production_no_fake" != "true" ]; then
+    status=fail
+    reason=desktop-production-parity-source-not-pass
+elif ! production_backend_detail_pass "$production_backend_status" "$production_backend_exact" "$production_backend_cpu_diff" "$production_backend_metal_resolved" "$production_backend_metal_diff" "$production_backend_metal_frame" "$production_backend_metal_command_queue_handle" "$production_backend_software_checksum" "$production_backend_cpu_simd_checksum" "$production_backend_metal_checksum" "$production_backend_metal_gpu_checksum" "$production_backend_checksum_match" "$production_backend_same_frame_readback" "$production_backend_readback_source" "$production_backend_tolerance"; then
+    status=fail
+    reason=desktop-production-backend-parity-contract-missing
+elif ! production_backend_timing_pass "$production_backend_sample_count" "$production_backend_elapsed_min" "$production_backend_elapsed_avg" "$production_backend_elapsed_max" "$production_backend_throughput_min" "$production_backend_throughput_avg" "$production_backend_throughput_max" "$production_backend_timing_status"; then
+    status=fail
+    reason=desktop-production-backend-timing-evidence-missing
+elif ! production_metal_render_log_pass "$production_backend_metal_resolved" "$production_metal_render_log_status" "$production_metal_render_log_required_api" "$production_metal_render_log_generated_gate" "$production_metal_render_log_framebuffer_gate" "$production_metal_render_log_browser_gate" "$production_metal_render_log_pairwise_gate" "$production_metal_render_log_argb_source_gate" "$production_metal_render_log_gpu_capture_gate" "$production_metal_render_log_blocked_gate_count"; then
+    status=fail
+    reason=desktop-production-metal-render-log-contract-missing
+elif [ "$tauri_v2_status" != "pass" ]; then
+    status=fail
+    reason="$tauri_v2_reason"
+elif [ "$ios_project_status" != "pass" ]; then
+    status=fail
+    reason="$ios_project_reason"
+elif [ "$android_project_status" != "pass" ]; then
+    status=fail
+    reason="$android_project_reason"
+elif [ "$ios_lane_output_env_file_status" != "pass" ]; then
+    status=fail
+    reason=ios-lane-output-env-$ios_lane_output_env_file_reason
+elif [ "$android_lane_output_env_file_status" != "pass" ]; then
+    status=fail
+    reason=android-lane-output-env-$android_lane_output_env_file_reason
+elif [ "$ios_screenshot_file_status" = "pass" ] && [ "$ios_screenshot_artifact_status" != "pass" ]; then
+    status=fail
+    reason=ios-screenshot-artifact-status-missing
+elif [ "$ios_screenshot_file_status" = "pass" ] && ! screenshot_artifact_detail_pass "$ios_screenshot_actual_size_bytes" "$ios_screenshot_width" "$ios_screenshot_height" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height"; then
+    status=fail
+    reason=ios-screenshot-artifact-proof-missing
+elif [ "$ios_screenshot_file_status" = "pass" ] && { [ "$ios_screenshot_pixel_diversity_status" != "pass" ] || ! num_at_least "$ios_screenshot_distinct_color_count" "$PNG_MIN_DISTINCT_COLORS"; }; then
+    status=fail
+    reason=ios-screenshot-pixel-diversity-missing
+elif [ "$ios_status" = "fail" ]; then
+    status=fail
+    reason="${ios_reason:-ios-mobile-renderer-evidence-failed}"
+elif [ "$ios_status" != "pass" ]; then
+    status=unavailable
+    reason="ios-mobile-renderer-evidence-unavailable"
+elif [ "$ios_render_log_status" != "pass" ]; then
+    status=fail
+    reason="$ios_reason"
+elif [ "$ios_render_log_validation_status" != "pass" ]; then
+    status=fail
+    reason="${ios_reason:-$ios_render_log_validation_reason}"
+elif [ -z "$ios_render_log_coherent_source_path" ] || ! num_at_least "$ios_render_log_coherent_source_size_bytes" 1; then
+    status=fail
+    reason=ios-render-log-coherent-source-missing
+elif [ "$ios_render_log_coherent_source_file_status" != "pass" ] || [ "$ios_render_log_coherent_source_artifact_status" != "pass" ]; then
+    status=fail
+    if [ "$ios_render_log_coherent_source_file_reason" = "symlink" ]; then
+        reason=ios-render-log-coherent-source-symlink
+    elif [ "$ios_render_log_coherent_source_file_reason" = "hardlink" ]; then
+        reason=ios-render-log-coherent-source-hardlink
+    elif [ "$ios_render_log_coherent_source_file_reason" = "size-mismatch" ]; then
+        reason=ios-render-log-coherent-source-size-mismatch
+    else
+        reason=ios-render-log-coherent-source-artifact-missing
+    fi
+elif [ "$ios_layout_status" != "pass" ]; then
+    status=fail
+    reason="$ios_reason"
+elif [ "$ios_metal_log_status" != "pass" ]; then
+    status=fail
+    reason="$ios_reason"
+elif [ "$ios_mdi_proof_file_status" != "pass" ]; then
+    status=fail
+    if [ "$ios_mdi_proof_file_reason" = "missing" ]; then
+        reason=ios-mdi-proof-json-missing
+    elif [ "$ios_mdi_proof_file_reason" = "symlink" ]; then
+        reason=ios-mdi-proof-json-symlink
+    else
+        reason=ios-mdi-proof-json-invalid
+    fi
+elif [ -n "$ios_mdi_proof_empty_source_count" ] && [ "$ios_mdi_proof_empty_source_count" != "0" ]; then
+    status=fail
+    reason=ios-mdi-proof-source-empty
+elif [ -n "$ios_mdi_proof_symlink_source_count" ] && [ "$ios_mdi_proof_symlink_source_count" != "0" ]; then
+    status=fail
+    reason=ios-mdi-proof-source-symlink
+elif [ -n "$ios_mdi_proof_hardlink_source_count" ] && [ "$ios_mdi_proof_hardlink_source_count" != "0" ]; then
+    status=fail
+    reason=ios-mdi-proof-source-hardlink
+elif [ -n "$ios_mdi_proof_duplicate_source_count" ] && [ "$ios_mdi_proof_duplicate_source_count" != "0" ]; then
+    status=fail
+    reason=ios-mdi-proof-source-duplicate
+elif [ -n "$ios_mdi_proof_nonregular_source_count" ] && [ "$ios_mdi_proof_nonregular_source_count" != "0" ]; then
+    status=fail
+    reason=ios-mdi-proof-source-not-regular
+elif ! num_at_least "$ios_mdi_proof_marker_source_count" 1; then
+    status=fail
+    reason=ios-mdi-proof-marker-source-missing
+elif [ -z "$ios_mdi_proof_marker_source_path" ] || ! num_at_least "$ios_mdi_proof_marker_source_size_bytes" 1; then
+    status=fail
+    reason=ios-mdi-proof-marker-source-artifact-missing
+elif [ "$ios_mdi_proof_marker_source_file_status" != "pass" ] || [ "$ios_mdi_proof_marker_source_artifact_status" != "pass" ]; then
+    status=fail
+    if [ "$ios_mdi_proof_marker_source_file_reason" = "symlink" ]; then
+        reason=ios-mdi-proof-marker-source-symlink
+    elif [ "$ios_mdi_proof_marker_source_file_reason" = "hardlink" ]; then
+        reason=ios-mdi-proof-marker-source-hardlink
+    elif [ "$ios_mdi_proof_marker_source_file_reason" = "size-mismatch" ]; then
+        reason=ios-mdi-proof-marker-source-size-mismatch
+    else
+        reason=ios-mdi-proof-marker-source-artifact-missing
+    fi
+elif [ "$ios_mdi_proof_marker_source_alias_reason" != "pass" ]; then
+    status=fail
+    reason=ios-mdi-proof-marker-source-overlap
+elif [ "$ios_mdi_proof_missing_source_count" != "0" ] || ! num_at_least "$ios_mdi_proof_source_count" 1; then
+    status=fail
+    reason=ios-mdi-proof-source-missing
+elif [ "$ios_mdi_failure_marker_status" = "fail" ]; then
+    status=fail
+    reason=ios-mdi-failure-marker
+elif [ "$ios_mdi_failure_marker_status" != "pass" ]; then
+    status=fail
+    reason=ios-mdi-failure-marker-status-missing
+elif [ "$ios_mdi_proof_status" != "pass" ] || [ "$ios_mdi_render_status" != "pass" ] || [ "$ios_mdi_event_status" != "pass" ] || [ "$ios_mdi_capture_status" != "pass" ] || [ "$ios_mdi_performance_status" != "pass" ] || [ "$ios_mdi_interaction_latency_status" != "pass" ] || [ "$ios_mdi_animation_status" != "pass" ]; then
+    status=fail
+    reason=ios-mdi-render-event-capture-performance-animation-proof-missing
+elif ! mobile_mdi_event_detail_pass "$ios_mdi_event_has_desktop" "$ios_mdi_event_drag_runtime_available" "$ios_mdi_event_drag_events_available" "$ios_mdi_event_drag_moved" "$ios_mdi_event_window_event_runtime_available" "$ios_mdi_event_app_action_control_found" "$ios_mdi_event_app_input_control_found" "$ios_mdi_event_body_click_routed" "$ios_mdi_event_body_input_routed" "$ios_mdi_event_body_key_routed" "$ios_mdi_event_sequence" "$ios_mdi_event_taskbar_icons_visible" "$ios_mdi_event_taskbar_labels_visible"; then
+    status=fail
+    reason=ios-mdi-render-event-capture-performance-animation-proof-incomplete
+elif ! mobile_mdi_detail_pass "$ios_mdi_proof_window_count" "$ios_mdi_render_image_count" "$ios_mdi_render_html_renderable" "$ios_mdi_event_taskbar_item_count" "$ios_mdi_event_taskbar_icon_count" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height" "$ios_mdi_capture_device_pixel_ratio" "$ios_mdi_capture_screen_orientation" "$ios_mdi_performance_now_available" "$ios_mdi_performance_now_delta_ms" "$ios_mdi_input_to_paint_ms" "$ios_mdi_animation_frame_available" "$ios_mdi_animation_frame_count" "$ios_mdi_css_animation_probe"; then
+    status=fail
+    reason=ios-mdi-render-event-capture-performance-animation-proof-incomplete
+elif [ "$android_screenshot_file_status" = "pass" ] && [ "$android_screenshot_artifact_status" != "pass" ]; then
+    status=fail
+    reason=android-screenshot-artifact-status-missing
+elif [ "$android_screenshot_file_status" = "pass" ] && ! screenshot_artifact_detail_pass "$android_screenshot_actual_size_bytes" "$android_screenshot_width" "$android_screenshot_height" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height"; then
+    status=fail
+    reason=android-screenshot-artifact-proof-missing
+elif [ "$android_screenshot_file_status" = "pass" ] && { [ "$android_screenshot_pixel_diversity_status" != "pass" ] || ! num_at_least "$android_screenshot_distinct_color_count" "$PNG_MIN_DISTINCT_COLORS"; }; then
+    status=fail
+    reason=android-screenshot-pixel-diversity-missing
+elif [ "$android_status" = "fail" ]; then
+    status=fail
+    reason="${android_reason:-android-mobile-renderer-evidence-failed}"
+elif [ "$android_status" != "pass" ]; then
+    status=unavailable
+    reason="android-mobile-renderer-evidence-unavailable"
+elif [ "$android_render_log_status" != "pass" ]; then
+    status=fail
+    reason="$android_reason"
+elif [ "$android_render_log_validation_status" != "pass" ]; then
+    status=fail
+    reason="${android_reason:-$android_render_log_validation_reason}"
+elif [ -z "$android_render_log_coherent_source_path" ] || ! num_at_least "$android_render_log_coherent_source_size_bytes" 1; then
+    status=fail
+    reason=android-render-log-coherent-source-missing
+elif [ "$android_render_log_coherent_source_file_status" != "pass" ] || [ "$android_render_log_coherent_source_artifact_status" != "pass" ]; then
+    status=fail
+    if [ "$android_render_log_coherent_source_file_reason" = "symlink" ]; then
+        reason=android-render-log-coherent-source-symlink
+    elif [ "$android_render_log_coherent_source_file_reason" = "hardlink" ]; then
+        reason=android-render-log-coherent-source-hardlink
+    elif [ "$android_render_log_coherent_source_file_reason" = "size-mismatch" ]; then
+        reason=android-render-log-coherent-source-size-mismatch
+    else
+        reason=android-render-log-coherent-source-artifact-missing
+    fi
+elif [ "$android_layout_status" != "pass" ]; then
+    status=fail
+    reason="$android_reason"
+elif [ "$android_vulkan_log_status" != "pass" ]; then
+    status=fail
+    reason="$android_reason"
+elif [ "$android_render_log_foreground_marker_status" != "pass" ]; then
+    status=fail
+    reason="${android_reason:-android-foreground-marker-missing}"
+elif [ "$android_mdi_proof_file_status" != "pass" ]; then
+    status=fail
+    if [ "$android_mdi_proof_file_reason" = "missing" ]; then
+        reason=android-mdi-proof-json-missing
+    elif [ "$android_mdi_proof_file_reason" = "symlink" ]; then
+        reason=android-mdi-proof-json-symlink
+    else
+        reason=android-mdi-proof-json-invalid
+    fi
+elif [ -n "$android_mdi_proof_empty_source_count" ] && [ "$android_mdi_proof_empty_source_count" != "0" ]; then
+    status=fail
+    reason=android-mdi-proof-source-empty
+elif [ -n "$android_mdi_proof_symlink_source_count" ] && [ "$android_mdi_proof_symlink_source_count" != "0" ]; then
+    status=fail
+    reason=android-mdi-proof-source-symlink
+elif [ -n "$android_mdi_proof_hardlink_source_count" ] && [ "$android_mdi_proof_hardlink_source_count" != "0" ]; then
+    status=fail
+    reason=android-mdi-proof-source-hardlink
+elif [ -n "$android_mdi_proof_duplicate_source_count" ] && [ "$android_mdi_proof_duplicate_source_count" != "0" ]; then
+    status=fail
+    reason=android-mdi-proof-source-duplicate
+elif [ -n "$android_mdi_proof_nonregular_source_count" ] && [ "$android_mdi_proof_nonregular_source_count" != "0" ]; then
+    status=fail
+    reason=android-mdi-proof-source-not-regular
+elif ! num_at_least "$android_mdi_proof_marker_source_count" 1; then
+    status=fail
+    reason=android-mdi-proof-marker-source-missing
+elif [ -z "$android_mdi_proof_marker_source_path" ] || ! num_at_least "$android_mdi_proof_marker_source_size_bytes" 1; then
+    status=fail
+    reason=android-mdi-proof-marker-source-artifact-missing
+elif [ "$android_mdi_proof_marker_source_file_status" != "pass" ] || [ "$android_mdi_proof_marker_source_artifact_status" != "pass" ]; then
+    status=fail
+    if [ "$android_mdi_proof_marker_source_file_reason" = "symlink" ]; then
+        reason=android-mdi-proof-marker-source-symlink
+    elif [ "$android_mdi_proof_marker_source_file_reason" = "hardlink" ]; then
+        reason=android-mdi-proof-marker-source-hardlink
+    elif [ "$android_mdi_proof_marker_source_file_reason" = "size-mismatch" ]; then
+        reason=android-mdi-proof-marker-source-size-mismatch
+    else
+        reason=android-mdi-proof-marker-source-artifact-missing
+    fi
+elif [ "$android_mdi_proof_marker_source_alias_reason" != "pass" ]; then
+    status=fail
+    reason=android-mdi-proof-marker-source-overlap
+elif [ "$android_mdi_proof_missing_source_count" != "0" ] || ! num_at_least "$android_mdi_proof_source_count" 1; then
+    status=fail
+    reason=android-mdi-proof-source-missing
+elif [ "$android_mdi_failure_marker_status" = "fail" ]; then
+    status=fail
+    reason=android-mdi-failure-marker
+elif [ "$android_mdi_failure_marker_status" != "pass" ]; then
+    status=fail
+    reason=android-mdi-failure-marker-status-missing
+elif [ "$android_mdi_proof_status" != "pass" ] || [ "$android_mdi_render_status" != "pass" ] || [ "$android_mdi_event_status" != "pass" ] || [ "$android_mdi_capture_status" != "pass" ] || [ "$android_mdi_performance_status" != "pass" ] || [ "$android_mdi_interaction_latency_status" != "pass" ] || [ "$android_mdi_animation_status" != "pass" ]; then
+    status=fail
+    reason=android-mdi-render-event-capture-performance-animation-proof-missing
+elif ! mobile_mdi_event_detail_pass "$android_mdi_event_has_desktop" "$android_mdi_event_drag_runtime_available" "$android_mdi_event_drag_events_available" "$android_mdi_event_drag_moved" "$android_mdi_event_window_event_runtime_available" "$android_mdi_event_app_action_control_found" "$android_mdi_event_app_input_control_found" "$android_mdi_event_body_click_routed" "$android_mdi_event_body_input_routed" "$android_mdi_event_body_key_routed" "$android_mdi_event_sequence" "$android_mdi_event_taskbar_icons_visible" "$android_mdi_event_taskbar_labels_visible"; then
+    status=fail
+    reason=android-mdi-render-event-capture-performance-animation-proof-incomplete
+elif ! mobile_mdi_detail_pass "$android_mdi_proof_window_count" "$android_mdi_render_image_count" "$android_mdi_render_html_renderable" "$android_mdi_event_taskbar_item_count" "$android_mdi_event_taskbar_icon_count" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height" "$android_mdi_capture_device_pixel_ratio" "$android_mdi_capture_screen_orientation" "$android_mdi_performance_now_available" "$android_mdi_performance_now_delta_ms" "$android_mdi_input_to_paint_ms" "$android_mdi_animation_frame_available" "$android_mdi_animation_frame_count" "$android_mdi_css_animation_probe"; then
+    status=fail
+    reason=android-mdi-render-event-capture-performance-animation-proof-incomplete
+fi
+
+{
+    echo "tauri_mobile_renderer_parity_status=$status"
+    echo "tauri_mobile_renderer_parity_reason=$reason"
+    echo "tauri_mobile_renderer_parity_source_revision=$SOURCE_REVISION"
+    echo "gui_web_2d_evidence_source_revision=$SOURCE_REVISION"
+    echo "tauri_mobile_renderer_parity_production_env=$PRODUCTION_ENV"
+    echo "tauri_mobile_renderer_parity_production_status=$production_status"
+    echo "tauri_mobile_renderer_parity_production_layout_manifest_status=$production_layout_status"
+    echo "tauri_mobile_renderer_parity_production_surface_manifest_status=$production_surface_status"
+    echo "tauri_mobile_renderer_parity_production_no_fake_capture=$production_no_fake"
+    echo "tauri_mobile_renderer_parity_production_backend_status=$production_backend_status"
+    echo "tauri_mobile_renderer_parity_production_backend_exact=$production_backend_exact"
+    echo "tauri_mobile_renderer_parity_production_backend_cpu_simd_different_pixels=$production_backend_cpu_diff"
+    echo "tauri_mobile_renderer_parity_production_backend_metal_resolved=$production_backend_metal_resolved"
+    echo "tauri_mobile_renderer_parity_production_backend_metal_different_pixels=$production_backend_metal_diff"
+    echo "tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete=$production_backend_metal_frame"
+    echo "tauri_mobile_renderer_parity_production_backend_metal_command_queue_handle=$production_backend_metal_command_queue_handle"
+    echo "tauri_mobile_renderer_parity_production_backend_software_checksum=$production_backend_software_checksum"
+    echo "tauri_mobile_renderer_parity_production_backend_cpu_simd_checksum=$production_backend_cpu_simd_checksum"
+    echo "tauri_mobile_renderer_parity_production_backend_metal_checksum=$production_backend_metal_checksum"
+    echo "tauri_mobile_renderer_parity_production_backend_metal_gpu_readback_checksum=$production_backend_metal_gpu_checksum"
+    echo "tauri_mobile_renderer_parity_production_backend_checksum_match=$production_backend_checksum_match"
+    echo "tauri_mobile_renderer_parity_production_backend_same_frame_readback=$production_backend_same_frame_readback"
+    echo "tauri_mobile_renderer_parity_production_backend_readback_source=$production_backend_readback_source"
+    echo "tauri_mobile_renderer_parity_production_backend_blur_or_tolerance_used=$production_backend_tolerance"
+    echo "tauri_mobile_renderer_parity_production_backend_sample_count=$production_backend_sample_count"
+    echo "tauri_mobile_renderer_parity_production_backend_total_elapsed_us_min=$production_backend_elapsed_min"
+    echo "tauri_mobile_renderer_parity_production_backend_total_elapsed_us_avg=$production_backend_elapsed_avg"
+    echo "tauri_mobile_renderer_parity_production_backend_total_elapsed_us_max=$production_backend_elapsed_max"
+    echo "tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_min=$production_backend_throughput_min"
+    echo "tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_avg=$production_backend_throughput_avg"
+    echo "tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_max=$production_backend_throughput_max"
+    echo "tauri_mobile_renderer_parity_production_backend_timing_status=$production_backend_timing_status"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_status=$production_metal_render_log_status"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_required_api=$production_metal_render_log_required_api"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_generated_readback_gate_status=$production_metal_render_log_generated_gate"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_framebuffer_readback_gate_status=$production_metal_render_log_framebuffer_gate"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_browser_backing_gate_status=$production_metal_render_log_browser_gate"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_pairwise_gate_status=$production_metal_render_log_pairwise_gate"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_argb_source_gate_status=$production_metal_render_log_argb_source_gate"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_gpu_capture_gate_status=$production_metal_render_log_gpu_capture_gate"
+    echo "tauri_mobile_renderer_parity_production_metal_render_log_blocked_gate_count=$production_metal_render_log_blocked_gate_count"
+    echo "tauri_mobile_renderer_parity_tauri_v2_status=$tauri_v2_status"
+    echo "tauri_mobile_renderer_parity_tauri_v2_reason=$tauri_v2_reason"
+    echo "tauri_mobile_renderer_parity_ios_project_status=$ios_project_status"
+    echo "tauri_mobile_renderer_parity_ios_project_reason=$ios_project_reason"
+    echo "tauri_mobile_renderer_parity_android_project_status=$android_project_status"
+    echo "tauri_mobile_renderer_parity_android_project_reason=$android_project_reason"
+    echo "tauri_mobile_renderer_parity_ios_exit_code=$ios_exit_code"
+    echo "tauri_mobile_renderer_parity_ios_lane_output_env_file_status=$ios_lane_output_env_file_status"
+    echo "tauri_mobile_renderer_parity_ios_lane_output_env_file_reason=$ios_lane_output_env_file_reason"
+    echo "tauri_mobile_renderer_parity_ios_status=$ios_status"
+    echo "tauri_mobile_renderer_parity_ios_reason=$ios_reason"
+    echo "tauri_mobile_renderer_parity_ios_tooling=$ios_tooling"
+    echo "tauri_mobile_renderer_parity_ios_expected_gpu_backend=$ios_expected_gpu_backend"
+    echo "tauri_mobile_renderer_parity_ios_tauri_backend=tauri2-wkwebview"
+    echo "tauri_mobile_renderer_parity_ios_render_log_status=$ios_render_log_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_validation_status=$ios_render_log_validation_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_validation_reason=$ios_render_log_validation_reason"
+    echo "tauri_mobile_renderer_parity_ios_render_log_requested_source_count=$ios_render_log_requested_source_count"
+    echo "tauri_mobile_renderer_parity_ios_render_log_source_count=$ios_render_log_source_count"
+    echo "tauri_mobile_renderer_parity_ios_render_log_missing_source_count=$ios_render_log_missing_source_count"
+    echo "tauri_mobile_renderer_parity_ios_render_log_empty_source_count=$ios_render_log_empty_source_count"
+    echo "tauri_mobile_renderer_parity_ios_render_log_symlink_source_count=$ios_render_log_symlink_source_count"
+    echo "tauri_mobile_renderer_parity_ios_render_log_hardlink_source_count=$ios_render_log_hardlink_source_count"
+    echo "tauri_mobile_renderer_parity_ios_render_log_duplicate_source_count=$ios_render_log_duplicate_source_count"
+    echo "tauri_mobile_renderer_parity_ios_render_log_nonregular_source_count=$ios_render_log_nonregular_source_count"
+    echo "tauri_mobile_renderer_parity_ios_render_log_html_len=$ios_render_log_html_len"
+    echo "tauri_mobile_renderer_parity_ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=$ios_render_log_coherent_source_path"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=$ios_render_log_coherent_source_size_bytes"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=$ios_render_log_coherent_source_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=$ios_render_log_coherent_source_file_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=$ios_render_log_coherent_source_file_reason"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_artifact_status=$ios_render_log_coherent_source_artifact_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_marker_status=$ios_render_log_marker_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_marker_source=$ios_render_log_marker_source"
+    echo "tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=$ios_render_log_metal_marker_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status=$ios_render_log_fallback_marker_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=$ios_render_log_tauri_context_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_metal_context_status=$ios_render_log_metal_context_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_failure_marker_status=$ios_render_log_failure_marker_status"
+    echo "tauri_mobile_renderer_parity_ios_layout_status=$ios_layout_status"
+    echo "tauri_mobile_renderer_parity_ios_metal_log_status=$ios_metal_log_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_json=$ios_mdi_proof_json"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_file_status=$ios_mdi_proof_file_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=$ios_mdi_proof_file_reason"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_status=$ios_mdi_proof_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_failure_marker_status=$ios_mdi_failure_marker_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_requested_source_count=$ios_mdi_proof_requested_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_source_count=$ios_mdi_proof_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_count=$ios_mdi_proof_marker_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count=$ios_mdi_proof_missing_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_symlink_source_count=$ios_mdi_proof_symlink_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_hardlink_source_count=$ios_mdi_proof_hardlink_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_duplicate_source_count=$ios_mdi_proof_duplicate_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_empty_source_count=$ios_mdi_proof_empty_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_nonregular_source_count=$ios_mdi_proof_nonregular_source_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_path=$ios_mdi_proof_marker_source_path"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_size_bytes=$ios_mdi_proof_marker_source_size_bytes"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_actual_size_bytes=$ios_mdi_proof_marker_source_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_status=$ios_mdi_proof_marker_source_file_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_reason=$ios_mdi_proof_marker_source_file_reason"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_artifact_status=$ios_mdi_proof_marker_source_artifact_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_alias_reason=$ios_mdi_proof_marker_source_alias_reason"
+    echo "tauri_mobile_renderer_parity_ios_mdi_render_status=$ios_mdi_render_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_render_image_count=$ios_mdi_render_image_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_render_html_renderable=$ios_mdi_render_html_renderable"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_status=$ios_mdi_event_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_window_count=$ios_mdi_proof_window_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_taskbar_item_count=$ios_mdi_event_taskbar_item_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_taskbar_icon_count=$ios_mdi_event_taskbar_icon_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_has_desktop=$ios_mdi_event_has_desktop"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_drag_runtime_available=$ios_mdi_event_drag_runtime_available"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_drag_events_available=$ios_mdi_event_drag_events_available"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_drag_moved=$ios_mdi_event_drag_moved"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_window_event_runtime_available=$ios_mdi_event_window_event_runtime_available"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_app_action_control_found=$ios_mdi_event_app_action_control_found"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_app_input_control_found=$ios_mdi_event_app_input_control_found"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed=$ios_mdi_event_body_click_routed"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_body_input_routed=$ios_mdi_event_body_input_routed"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_body_key_routed=$ios_mdi_event_body_key_routed"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_sequence=$ios_mdi_event_sequence"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_taskbar_icons_visible=$ios_mdi_event_taskbar_icons_visible"
+    echo "tauri_mobile_renderer_parity_ios_mdi_event_taskbar_labels_visible=$ios_mdi_event_taskbar_labels_visible"
+    echo "tauri_mobile_renderer_parity_ios_mdi_capture_status=$ios_mdi_capture_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_capture_viewport_width=$ios_mdi_capture_viewport_width"
+    echo "tauri_mobile_renderer_parity_ios_mdi_capture_viewport_height=$ios_mdi_capture_viewport_height"
+    echo "tauri_mobile_renderer_parity_ios_mdi_capture_device_pixel_ratio=$ios_mdi_capture_device_pixel_ratio"
+    echo "tauri_mobile_renderer_parity_ios_mdi_capture_screen_orientation=$ios_mdi_capture_screen_orientation"
+    echo "tauri_mobile_renderer_parity_ios_mdi_performance_status=$ios_mdi_performance_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_performance_now_available=$ios_mdi_performance_now_available"
+    echo "tauri_mobile_renderer_parity_ios_mdi_performance_now_delta_ms=$ios_mdi_performance_now_delta_ms"
+    echo "tauri_mobile_renderer_parity_ios_mdi_interaction_latency_status=$ios_mdi_interaction_latency_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_input_to_paint_ms=$ios_mdi_input_to_paint_ms"
+    echo "tauri_mobile_renderer_parity_ios_mdi_animation_status=$ios_mdi_animation_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_animation_frame_available=$ios_mdi_animation_frame_available"
+    echo "tauri_mobile_renderer_parity_ios_mdi_animation_frame_count=$ios_mdi_animation_frame_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_css_animation_probe=$ios_mdi_css_animation_probe"
+    echo "tauri_mobile_renderer_parity_ios_screenshot=$ios_screenshot"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_file_status=$ios_screenshot_file_status"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_file_reason=$ios_screenshot_file_reason"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_artifact_status=$ios_screenshot_artifact_status"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_actual_size_bytes=$ios_screenshot_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_width=$ios_screenshot_width"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_height=$ios_screenshot_height"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_distinct_color_count=$ios_screenshot_distinct_color_count"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_distinct_color_min=$ios_screenshot_distinct_color_min"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_pixel_diversity_status=$ios_screenshot_pixel_diversity_status"
+    echo "tauri_mobile_renderer_parity_ios_log_stream=$ios_log_stream"
+    echo "tauri_mobile_renderer_parity_ios_dev_log=$ios_dev_log"
+    echo "tauri_mobile_renderer_parity_android_exit_code=$android_exit_code"
+    echo "tauri_mobile_renderer_parity_android_lane_output_env_file_status=$android_lane_output_env_file_status"
+    echo "tauri_mobile_renderer_parity_android_lane_output_env_file_reason=$android_lane_output_env_file_reason"
+    echo "tauri_mobile_renderer_parity_android_status=$android_status"
+    echo "tauri_mobile_renderer_parity_android_reason=$android_reason"
+    echo "tauri_mobile_renderer_parity_android_expected_gpu_backend=$android_expected_gpu_backend"
+    echo "tauri_mobile_renderer_parity_android_tauri_backend=tauri2-android-webview"
+    echo "tauri_mobile_renderer_parity_android_render_log_status=$android_render_log_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_validation_status=$android_render_log_validation_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_validation_reason=$android_render_log_validation_reason"
+    echo "tauri_mobile_renderer_parity_android_render_log_requested_source_count=$android_render_log_requested_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_source_count=$android_render_log_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_missing_source_count=$android_render_log_missing_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_empty_source_count=$android_render_log_empty_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_symlink_source_count=$android_render_log_symlink_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_hardlink_source_count=$android_render_log_hardlink_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_duplicate_source_count=$android_render_log_duplicate_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_nonregular_source_count=$android_render_log_nonregular_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_html_len=$android_render_log_html_len"
+    echo "tauri_mobile_renderer_parity_android_render_log_source_coherence_status=$android_render_log_source_coherence_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_coherent_source_path=$android_render_log_coherent_source_path"
+    echo "tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=$android_render_log_coherent_source_size_bytes"
+    echo "tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes=$android_render_log_coherent_source_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=$android_render_log_coherent_source_file_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=$android_render_log_coherent_source_file_reason"
+    echo "tauri_mobile_renderer_parity_android_render_log_coherent_source_artifact_status=$android_render_log_coherent_source_artifact_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_marker_status=$android_render_log_marker_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_vulkan_marker_status=$android_render_log_vulkan_marker_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_foreground_marker_status=$android_render_log_foreground_marker_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_failure_marker_status=$android_render_log_failure_marker_status"
+    echo "tauri_mobile_renderer_parity_android_layout_status=$android_layout_status"
+    echo "tauri_mobile_renderer_parity_android_vulkan_log_status=$android_vulkan_log_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_json=$android_mdi_proof_json"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_file_status=$android_mdi_proof_file_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_file_reason=$android_mdi_proof_file_reason"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_status=$android_mdi_proof_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_failure_marker_status=$android_mdi_failure_marker_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_requested_source_count=$android_mdi_proof_requested_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_source_count=$android_mdi_proof_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count=$android_mdi_proof_marker_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_missing_source_count=$android_mdi_proof_missing_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_symlink_source_count=$android_mdi_proof_symlink_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_hardlink_source_count=$android_mdi_proof_hardlink_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_duplicate_source_count=$android_mdi_proof_duplicate_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_empty_source_count=$android_mdi_proof_empty_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_nonregular_source_count=$android_mdi_proof_nonregular_source_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_path=$android_mdi_proof_marker_source_path"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_size_bytes=$android_mdi_proof_marker_source_size_bytes"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_actual_size_bytes=$android_mdi_proof_marker_source_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=$android_mdi_proof_marker_source_file_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason=$android_mdi_proof_marker_source_file_reason"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_artifact_status=$android_mdi_proof_marker_source_artifact_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason=$android_mdi_proof_marker_source_alias_reason"
+    echo "tauri_mobile_renderer_parity_android_mdi_render_status=$android_mdi_render_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_render_image_count=$android_mdi_render_image_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_render_html_renderable=$android_mdi_render_html_renderable"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_status=$android_mdi_event_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_window_count=$android_mdi_proof_window_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_taskbar_item_count=$android_mdi_event_taskbar_item_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_taskbar_icon_count=$android_mdi_event_taskbar_icon_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_has_desktop=$android_mdi_event_has_desktop"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_drag_runtime_available=$android_mdi_event_drag_runtime_available"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_drag_events_available=$android_mdi_event_drag_events_available"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_drag_moved=$android_mdi_event_drag_moved"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_window_event_runtime_available=$android_mdi_event_window_event_runtime_available"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_app_action_control_found=$android_mdi_event_app_action_control_found"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_app_input_control_found=$android_mdi_event_app_input_control_found"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_body_click_routed=$android_mdi_event_body_click_routed"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_body_input_routed=$android_mdi_event_body_input_routed"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_body_key_routed=$android_mdi_event_body_key_routed"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_sequence=$android_mdi_event_sequence"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_taskbar_icons_visible=$android_mdi_event_taskbar_icons_visible"
+    echo "tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible=$android_mdi_event_taskbar_labels_visible"
+    echo "tauri_mobile_renderer_parity_android_mdi_capture_status=$android_mdi_capture_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_capture_viewport_width=$android_mdi_capture_viewport_width"
+    echo "tauri_mobile_renderer_parity_android_mdi_capture_viewport_height=$android_mdi_capture_viewport_height"
+    echo "tauri_mobile_renderer_parity_android_mdi_capture_device_pixel_ratio=$android_mdi_capture_device_pixel_ratio"
+    echo "tauri_mobile_renderer_parity_android_mdi_capture_screen_orientation=$android_mdi_capture_screen_orientation"
+    echo "tauri_mobile_renderer_parity_android_mdi_performance_status=$android_mdi_performance_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_performance_now_available=$android_mdi_performance_now_available"
+    echo "tauri_mobile_renderer_parity_android_mdi_performance_now_delta_ms=$android_mdi_performance_now_delta_ms"
+    echo "tauri_mobile_renderer_parity_android_mdi_interaction_latency_status=$android_mdi_interaction_latency_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_input_to_paint_ms=$android_mdi_input_to_paint_ms"
+    echo "tauri_mobile_renderer_parity_android_mdi_animation_status=$android_mdi_animation_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_animation_frame_available=$android_mdi_animation_frame_available"
+    echo "tauri_mobile_renderer_parity_android_mdi_animation_frame_count=$android_mdi_animation_frame_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_css_animation_probe=$android_mdi_css_animation_probe"
+    echo "tauri_mobile_renderer_parity_android_screenshot=$android_screenshot"
+    echo "tauri_mobile_renderer_parity_android_screenshot_file_status=$android_screenshot_file_status"
+    echo "tauri_mobile_renderer_parity_android_screenshot_file_reason=$android_screenshot_file_reason"
+    echo "tauri_mobile_renderer_parity_android_screenshot_artifact_status=$android_screenshot_artifact_status"
+    echo "tauri_mobile_renderer_parity_android_screenshot_actual_size_bytes=$android_screenshot_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_android_screenshot_width=$android_screenshot_width"
+    echo "tauri_mobile_renderer_parity_android_screenshot_height=$android_screenshot_height"
+    echo "tauri_mobile_renderer_parity_android_screenshot_distinct_color_count=$android_screenshot_distinct_color_count"
+    echo "tauri_mobile_renderer_parity_android_screenshot_distinct_color_min=$android_screenshot_distinct_color_min"
+    echo "tauri_mobile_renderer_parity_android_screenshot_pixel_diversity_status=$android_screenshot_pixel_diversity_status"
+    echo "tauri_mobile_renderer_parity_android_logcat=$android_logcat"
+    echo "tauri_mobile_renderer_parity_android_gpu_log=$android_gpu_log"
+} >"$OUT_ENV"
+
+write_report
+cat "$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    exit 0
+fi
+exit 1

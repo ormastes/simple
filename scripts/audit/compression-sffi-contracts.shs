@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io/compress_sffi.spl"
+
+declarations=$(grep -Ec '^[[:space:]]*extern fn rt_(gzip|deflate|zip|tar|targz)_' "$owner")
+if [ "$declarations" -ne 24 ]; then
+    echo "compression extern inventory changed without contract review" >&2
+    exit 1
+fi
+
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_(gzip|deflate|zip|tar|targz)_/ {
+        if (previous_is_ffi) tagged++
+    }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every compression declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+
+if rg -l --glob '!vendor/**' --glob '!**/vendor/**' \
+    --glob '*.{c,cc,cpp,h,rs}' \
+    '(pub )?(unsafe )?extern "C" fn rt_(gzip|deflate|zip|tar|targz)_|^[[:space:]]*[A-Za-z_][A-Za-z0-9_ *]*rt_(gzip|deflate|zip|tar|targz)_.*\{' \
+    "$root/src/runtime" "$root/src/compiler_rust" | grep -q .; then
+    echo "compression provider appeared; review ABI, bounds, ownership, and extraction policy" >&2
+    exit 1
+fi
+
+echo "compression SFFI contract audit: PASS (24 unsafe declarations; provider still required)"

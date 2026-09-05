@@ -1,0 +1,179 @@
+"""A compiled agent must enter through the shared live CSpace launcher."""
+
+use std.spec.{describe, it, expect}
+use os.security.llm_profiles.profile_registry.{LlmProfile, LLM_RIGHT_FS_READ}
+use os.security.llm_profiles.agent_workload_policy.{AgentPolicySpec, compile_agent_policy}
+use os.security.llm_profiles.agent_runtime.{launch_compiled_agent_into_scheduler, terminate_agent_subtree}
+use os.kernel.ipc.cspace_spawn.{CapGrant, atten_identity}
+use os.kernel.types.capability_types.{CapabilityKind}
+use os.kernel.loader.workload_image_hash.{workload_image_blake3_hash}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_seed_parent_caps}
+use os.kernel.security.execution_context.{kernel_call_context_from_task}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskPriority, TaskId, TaskState}
+use os.kernel.arch.arch_context.{Architecture}
+use os.services.workload.workload_manifest.{
+    WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
+    ResourceBudget, LifecyclePolicy, ObservabilityPolicy, WorkloadManifest
+}
+
+fn _push_u16(buffer: [u8], value: i64) -> [u8]:
+    var bytes = buffer
+    bytes.push((value & 0xFF).to_u8())
+    bytes.push(((value >> 8) & 0xFF).to_u8())
+    bytes
+
+fn _push_u32(buffer: [u8], value: i64) -> [u8]:
+    var bytes = buffer
+    bytes.push((value & 0xFF).to_u8())
+    bytes.push(((value >> 8) & 0xFF).to_u8())
+    bytes.push(((value >> 16) & 0xFF).to_u8())
+    bytes.push(((value >> 24) & 0xFF).to_u8())
+    bytes
+
+fn _push_u64(buffer: [u8], value: i64) -> [u8]:
+    var bytes = _push_u32(buffer, value & 0xFFFFFFFF)
+    _push_u32(bytes, (value >> 32) & 0xFFFFFFFF)
+
+fn _minimal_x86_64_elf() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16(bytes, 2)
+    bytes = _push_u16(bytes, 62)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 64)
+    bytes = _push_u64(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 64)
+    bytes = _push_u16(bytes, 56)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u32(bytes, 5)
+    bytes = _push_u64(bytes, 0x80)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 0x1000)
+    while bytes.len() < 0x80:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+fn _compiled_agent(bytes: [u8]):
+    val digest = workload_image_blake3_hash(bytes)
+    val workload = WorkloadManifest(
+        identity: WorkloadIdentitySpec(
+            principal_id: "agent:1", tenant_id: "tenant", image_hash: digest,
+            signer: "test", parent_principal: "session:1", expires_at_ms: 1u64
+        ),
+        image: ImageSpec(executable_path: "/workspace/agent.smf", content_hash: digest, signer: "test"),
+        authority: AuthorityRequest(grants: [CapGrant(label: "workspace.read", requested: CapabilityKind.FileRead(path_prefix: "/workspace"), atten: atten_identity())]),
+        isolation: IsolationSpec(filesystem_view: "/workspace", process_view: "private", ipc_view: "private", network_view: "none", syscall_allowlist: [4u64]),
+        resources: ResourceBudget(cpu_weight: 1u64, memory_pages: 1u64, process_limit: 1u64, io_weight: 1u64, network_bytes: 0u64, wall_time_ms: 1000u64),
+        lifecycle: LifecyclePolicy(restart_policy: "never", max_restarts: 0u64, watchdog_timeout_ms: 0u64),
+        observability: ObservabilityPolicy(audit_required: true, log_retention_ms: 1000u64)
+    )
+    val profile = LlmProfile(
+        name: "agent", version: 1, rights: LLM_RIGHT_FS_READ,
+        fs_read_roots: ["/workspace"], fs_write_roots: [], fs_exec_roots: [],
+        net_hosts: [], secrets_labels: [], max_cpu_pct: 100, max_mem_mb: 1024,
+        max_wallclock_sec: 60, max_cost_cents: 100, max_tokens: 1000
+    )
+    compile_agent_policy(AgentPolicySpec(
+        workload: workload, profile: profile, allowed_child_depth: 1u64,
+        model_token_budget: 100u64, tool_call_budget: 10u64, approval_policy: "human"
+    ))
+
+fn _parent_scheduler() -> Scheduler:
+    var scheduler = Scheduler.new()
+    scheduler.create_task(0x1000, TaskPriority.High,
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_APP_LAUNCHER, 0u64))
+    scheduler.schedule()
+    scheduler
+
+describe "agent runtime launch":
+    it "creates an agent in the shared scheduler with a pledged child CSpace":
+        val bytes = _minimal_x86_64_elf()
+        val compiled = _compiled_agent(bytes)
+        var scheduler = _parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            val launched = launch_compiled_agent_into_scheduler(
+                kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(launched.pid).to_be_greater_than(0)
+            val child = launched.scheduler.get_task(TaskId(id: launched.pid as u64))
+            if child != nil:
+                expect(child.capabilities.is_pledged).to_equal(true)
+                expect(child.security.parent_job_id).to_equal(parent.security.job_id)
+
+    it "rejects a mutable compiled policy with an empty approval contract":
+        val bytes = _minimal_x86_64_elf()
+        val compiled = _compiled_agent(bytes)
+        var scheduler = _parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            var invalid = compiled.unwrap()
+            invalid.approval_policy = ""
+            val launched = launch_compiled_agent_into_scheduler(
+                kernel_call_context_from_task(parent), invalid, bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(launched.pid).to_equal(-13)
+
+    it "rejects an unlimited ProcessSpawn attenuation in a mutable policy":
+        val bytes = _minimal_x86_64_elf()
+        var compiled = _compiled_agent(bytes)
+        var scheduler = _parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            var invalid = compiled.unwrap()
+            invalid.execution.spawn_spec.grants = [CapGrant(
+                label: "subagent", requested: CapabilityKind.ProcessSpawn,
+                atten: atten_identity()
+            )]
+            val launched = launch_compiled_agent_into_scheduler(
+                kernel_call_context_from_task(parent), invalid, bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(launched.pid).to_equal(-13)
+
+    it "lets the live parent job emergency-stop its agent subtree":
+        val bytes = _minimal_x86_64_elf()
+        val compiled = _compiled_agent(bytes)
+        var scheduler = _parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            val launched = launch_compiled_agent_into_scheduler(
+                kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            if launched.pid > 0:
+                var ipc = IpcManager.new()
+                val agent_port = ipc.create_port(
+                    TaskId(id: launched.pid as u64), "agent-emergency-stop")
+                expect(agent_port.id).to_be_greater_than(0u64)
+                val stopped = terminate_agent_subtree(
+                    kernel_call_context_from_task(parent), launched.pid, -125,
+                    launched.scheduler, ipc)
+                expect(stopped.terminated).to_be_greater_than(0u64)
+                expect(stopped.ipc.connect("agent-emergency-stop")).to_equal(nil)
+                val exited = stopped.scheduler.get_task(TaskId(id: launched.pid as u64))
+                if exited != nil:
+                    expect(exited.state).to_equal(TaskState.Zombie)

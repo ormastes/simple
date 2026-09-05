@@ -1,0 +1,210 @@
+# codex-impl
+
+use std.tiny.common.abi.{TinyDrawStreamV1, TinyRenderedSurfaceV1, TINY_ABI_MAJOR, TINY_ABI_MINOR, TINY_2D_CAP_SOFTWARE_V1, TINY_DRAW_STREAM_V1_NAME_LENGTH, tiny_draw_stream_validate, tiny_surface_checksum}
+use std.tiny.common.status.{TinyStatus, TINY_ERR_INVALID, TINY_ERR_UNSUPPORTED}
+use std.tiny.common.types.{TinyRect, tiny_add_i32_saturating, tiny_intersect}
+use std.tiny.draw.opcode.*
+use std.tiny.draw.validate.{tiny_draw_validate_counted}
+use std.tiny.engine2d.pixel_format.*
+use std.tiny.wm_contract.ports.{Tiny2DBackendV1}
+
+class TinySoftware2D:
+    surface_width: i32
+    surface_height: i32
+    pixel_format: i32
+    pixels: [i32]
+    max_commands: i32
+    max_stack_depth: i32
+    surface_id: i64
+    frame_id: i64
+    source_stream_hash: i64
+    source_word_count: i32
+    clip_stack: [TinyRect]
+    translate_x_stack: [i32]
+    translate_y_stack: [i32]
+
+    static fn create(width: i32, height: i32, pixel_format: i32) -> TinySoftware2D:
+        var pixels: [i32] = []
+        var count = 0
+        if width > 0 and height > 0 and width <= 2147483647 / height:
+            count = width * height
+        var i = 0
+        while i < count:
+            pixels.push(0)
+            i = i + 1
+        var clips: [TinyRect] = []
+        var txs: [i32] = []
+        var tys: [i32] = []
+        i = 0
+        while i < 17:
+            clips.push(TinyRect.empty())
+            txs.push(0)
+            tys.push(0)
+            i = i + 1
+        TinySoftware2D(surface_width: width, surface_height: height, pixel_format: pixel_format,
+            pixels: pixels, max_commands: 4096, max_stack_depth: 16,
+            surface_id: 1, frame_id: 0, source_stream_hash: 0, source_word_count: 0,
+            clip_stack: clips, translate_x_stack: txs, translate_y_stack: tys)
+
+    fn width() -> i32: self.surface_width
+    fn height() -> i32: self.surface_height
+    fn pixel_at(x: i32, y: i32) -> i32:
+        if self.surface_width <= 0 or self.surface_height <= 0 or self.surface_width > 2147483647 / self.surface_height: return 0
+        if x < 0 or y < 0 or x >= self.surface_width or y >= self.surface_height: return 0
+        self.pixels[y * self.surface_width + x]
+
+    fn checksum() -> i64: tiny_surface_checksum(self.pixels)
+
+    fn capability_bits() -> i64: TINY_2D_CAP_SOFTWARE_V1
+
+    me execute_stream(stream: TinyDrawStreamV1) -> TinyStatus:
+        if self.surface_width <= 0 or self.surface_height <= 0 or self.surface_width > 2147483647 / self.surface_height:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_SURFACE)
+        if self.pixels.len() != self.surface_width * self.surface_height:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_SURFACE)
+        if self.max_stack_depth < 0 or self.max_stack_depth >= self.clip_stack.len() or self.max_stack_depth >= self.translate_x_stack.len() or self.max_stack_depth >= self.translate_y_stack.len():
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_SURFACE)
+        if self.pixel_format != TINY_PIXEL_ARGB8888 and self.pixel_format != TINY_PIXEL_RGB565:
+            return TinyStatus.error(TINY_ERR_UNSUPPORTED, TINY_DRAW_DETAIL_PIXEL_FORMAT)
+        val envelope_valid = tiny_draw_stream_validate(stream, self.max_commands * 8, TINY_DRAW_STREAM_V1_NAME_LENGTH)
+        if not envelope_valid.is_ok(): return envelope_valid
+        if (stream.required_capability_bits & self.capability_bits()) != stream.required_capability_bits:
+            return TinyStatus.error(TINY_ERR_UNSUPPORTED, TINY_DRAW_DETAIL_CAPABILITY)
+        val valid = tiny_draw_validate_counted(stream.words, stream.word_count, self.max_commands, self.max_stack_depth)
+        if not valid.is_ok(): return valid
+        val executed = self.execute_valid(stream.words, stream.word_count)
+        if executed.is_ok():
+            self.frame_id = self.frame_id + 1
+            self.source_stream_hash = stream.stable_name_hash
+            self.source_word_count = stream.word_count
+        executed
+
+    fn surface_receipt() -> TinyRenderedSurfaceV1:
+        TinyRenderedSurfaceV1(
+            abi_major: TINY_ABI_MAJOR,
+            abi_minor: TINY_ABI_MINOR,
+            surface_id: self.surface_id,
+            frame_id: self.frame_id,
+            source_stream_hash: self.source_stream_hash,
+            source_word_count: self.source_word_count,
+            backend_capability_bits: self.capability_bits(),
+            width: self.surface_width,
+            height: self.surface_height,
+            pixel_format: self.pixel_format,
+            pixels: self.pixels,
+            pixel_count: self.pixels.len(),
+            checksum: self.checksum(),
+        )
+
+    me store_pixel(x: i32, y: i32, argb: i32):
+        if self.surface_width <= 0 or self.surface_height <= 0 or self.surface_width > 2147483647 / self.surface_height: return
+        if x < 0 or y < 0 or x >= self.surface_width or y >= self.surface_height: return
+        var value = argb
+        if self.pixel_format == TINY_PIXEL_RGB565:
+            value = tiny_argb_to_rgb565(argb)
+        self.pixels[y * self.surface_width + x] = value
+
+    me fill_clipped(rect: TinyRect, clip: TinyRect, color: i32):
+        val area = tiny_intersect(rect, clip)
+        var y = area.y
+        while y < area.bottom():
+            var x = area.x
+            while x < area.right():
+                self.store_pixel(x, y, color)
+                x = x + 1
+            y = y + 1
+
+    me execute_valid(stream: [i32], word_count: i32) -> TinyStatus:
+        val surface = TinyRect(x: 0, y: 0, width: self.surface_width, height: self.surface_height)
+        self.clip_stack[0] = surface
+        self.translate_x_stack[0] = 0
+        self.translate_y_stack[0] = 0
+        var clip_depth = 1
+        var translate_depth = 1
+        var at = 0
+        while at < word_count:
+            val opcode = stream[at]
+            at = at + 1
+            if opcode == TINY_DRAW_END: return TinyStatus.ok()
+            if opcode == TINY_DRAW_CLEAR:
+                self.fill_clipped(surface, surface, stream[at])
+                at = at + 1
+            else if opcode == TINY_DRAW_FILL_RECT or opcode == TINY_DRAW_BORDER_RECT:
+                val x = tiny_add_i32_saturating(stream[at], self.translate_x_stack[translate_depth - 1])
+                val y = tiny_add_i32_saturating(stream[at + 1], self.translate_y_stack[translate_depth - 1])
+                val width = stream[at + 2]
+                val height = stream[at + 3]
+                val color = stream[at + 4]
+                val clip = self.clip_stack[clip_depth - 1]
+                if opcode == TINY_DRAW_FILL_RECT:
+                    self.fill_clipped(TinyRect(x: x, y: y, width: width, height: height), clip, color)
+                else:
+                    self.fill_clipped(TinyRect(x: x, y: y, width: width, height: 1), clip, color)
+                    self.fill_clipped(TinyRect(x: x, y: tiny_add_i32_saturating(y, height - 1), width: width, height: 1), clip, color)
+                    self.fill_clipped(TinyRect(x: x, y: y, width: 1, height: height), clip, color)
+                    self.fill_clipped(TinyRect(x: tiny_add_i32_saturating(x, width - 1), y: y, width: 1, height: height), clip, color)
+                at = at + 5
+            else if opcode == TINY_DRAW_PUSH_CLIP:
+                val translated = TinyRect(
+                    x: tiny_add_i32_saturating(stream[at], self.translate_x_stack[translate_depth - 1]),
+                    y: tiny_add_i32_saturating(stream[at + 1], self.translate_y_stack[translate_depth - 1]),
+                    width: stream[at + 2], height: stream[at + 3],
+                )
+                self.clip_stack[clip_depth] = tiny_intersect(self.clip_stack[clip_depth - 1], translated)
+                clip_depth = clip_depth + 1
+                at = at + 4
+            else if opcode == TINY_DRAW_POP_CLIP:
+                clip_depth = clip_depth - 1
+            else if opcode == TINY_DRAW_PUSH_TRANSLATE:
+                self.translate_x_stack[translate_depth] = tiny_add_i32_saturating(self.translate_x_stack[translate_depth - 1], stream[at])
+                self.translate_y_stack[translate_depth] = tiny_add_i32_saturating(self.translate_y_stack[translate_depth - 1], stream[at + 1])
+                translate_depth = translate_depth + 1
+                at = at + 2
+            else if opcode == TINY_DRAW_POP_TRANSLATE:
+                translate_depth = translate_depth - 1
+            else if opcode == TINY_DRAW_GLYPH_MONO:
+                val x0 = tiny_add_i32_saturating(stream[at], self.translate_x_stack[translate_depth - 1])
+                val y0 = tiny_add_i32_saturating(stream[at + 1], self.translate_y_stack[translate_depth - 1])
+                val width = stream[at + 2]
+                val height = stream[at + 3]
+                val color = stream[at + 4]
+                val clip = self.clip_stack[clip_depth - 1]
+                var row = 0
+                while row < height:
+                    val mask = stream[at + 5 + row]
+                    var col = 0
+                    while col < width:
+                        val px = tiny_add_i32_saturating(x0, col)
+                        val py = tiny_add_i32_saturating(y0, row)
+                        if ((mask >> col) & 1) != 0 and px >= clip.x and py >= clip.y and px < clip.right() and py < clip.bottom():
+                            self.store_pixel(px, py, color)
+                        col = col + 1
+                    row = row + 1
+                at = at + 5 + height
+            else if opcode == TINY_DRAW_BLIT_ARGB:
+                val x0 = tiny_add_i32_saturating(stream[at], self.translate_x_stack[translate_depth - 1])
+                val y0 = tiny_add_i32_saturating(stream[at + 1], self.translate_y_stack[translate_depth - 1])
+                val width = stream[at + 2]
+                val height = stream[at + 3]
+                val clip = self.clip_stack[clip_depth - 1]
+                var row = 0
+                while row < height:
+                    var col = 0
+                    while col < width:
+                        val px = tiny_add_i32_saturating(x0, col)
+                        val py = tiny_add_i32_saturating(y0, row)
+                        if px >= clip.x and py >= clip.y and px < clip.right() and py < clip.bottom():
+                            self.store_pixel(px, py, stream[at + 4 + row * width + col])
+                        col = col + 1
+                    row = row + 1
+                at = at + 4 + width * height
+        TinyStatus.error(TINY_ERR_INVALID, TINY_DRAW_DETAIL_TRUNCATED)
+
+impl Tiny2DBackendV1 for TinySoftware2D:
+    fn width() -> i32: self.surface_width
+    fn height() -> i32: self.surface_height
+    fn capability_bits() -> i64: TINY_2D_CAP_SOFTWARE_V1
+    fn rendered_surface() -> TinyRenderedSurfaceV1: self.surface_receipt()
+    fn checksum() -> i64: tiny_surface_checksum(self.pixels)
+    me execute(stream: TinyDrawStreamV1) -> TinyStatus:
+        self.execute_stream(stream)

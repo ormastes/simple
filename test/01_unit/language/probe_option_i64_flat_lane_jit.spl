@@ -1,0 +1,74 @@
+# Run-path probe for the flat `i64?` (HirType::Pointer{inner:i64}) optional lane.
+#
+# Executed as a SUBPROCESS by option_i64_flat_lane_class_spec.spl under both
+# SIMPLE_EXECUTION_MODE=interpreter and =jit. A spec body runs interpreted, so
+# this probe is the only way the JIT lane can be observed at all.
+#
+# Every oracle below is an ABSOLUTE literal this probe did not itself compute.
+# It never asserts "the two engines agree" — that would pass while both engines
+# are wrong in the same way.
+#
+# Defect under test: `nil` lowers to the bare constant 3
+# (src/compiler_rust/compiler/src/mir/lower/lowering_expr_literal.rs:50,
+# `lower_nil_expr` -> MirInst::ConstInt { value: 3 }) while the flat i64? lane
+# carries a RAW, untagged payload. A true payload of exactly 3 is therefore
+# bit-for-bit indistinguishable from nil by construction, and is LOST across
+# `== nil`, `??` and `if val` alike.
+# See doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md
+
+var failures: i64 = 0
+
+fn check(name: text, actual: text, expected: text):
+    if actual == expected:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " expected=" + expected + " actual=" + actual)
+        failures = failures + 1
+
+fn str_of_bool(b: bool) -> text:
+    if b:
+        return "yes"
+    return "no"
+
+fn eq_nil_of(a: i64?) -> text:
+    if a == nil:
+        return "nil"
+    return "some"
+
+fn coalesce_of(a: i64?) -> i64:
+    return a ?? -1
+
+fn if_val_of(a: i64?) -> text:
+    if val x = a:
+        if x == 3:
+            return "some3"
+        return "some_other"
+    return "none"
+
+fn main():
+    # --- `== nil` must be false for EVERY non-nil payload, and true only for nil.
+    check("eq_nil_payload_0", eq_nil_of(0), "some")
+    check("eq_nil_payload_1", eq_nil_of(1), "some")
+    check("eq_nil_payload_2", eq_nil_of(2), "some")
+    check("eq_nil_payload_3", eq_nil_of(3), "some")
+    check("eq_nil_payload_4", eq_nil_of(4), "some")
+    check("eq_nil_payload_11", eq_nil_of(11), "some")
+    check("eq_nil_payload_neg1", eq_nil_of(-1), "some")
+    check("eq_nil_actual_nil", eq_nil_of(nil), "nil")
+
+    # --- `??` must return the payload, never the default, for a non-nil optional.
+    check("coalesce_payload_0", str_of_bool(coalesce_of(0) == 0), "yes")
+    check("coalesce_payload_2", str_of_bool(coalesce_of(2) == 2), "yes")
+    check("coalesce_payload_3", str_of_bool(coalesce_of(3) == 3), "yes")
+    check("coalesce_payload_4", str_of_bool(coalesce_of(4) == 4), "yes")
+    check("coalesce_actual_nil", str_of_bool(coalesce_of(nil) == -1), "yes")
+
+    # --- `if val` must bind for EVERY non-nil payload.
+    check("if_val_payload_3", if_val_of(3), "some3")
+    check("if_val_payload_4", if_val_of(4), "some_other")
+    check("if_val_actual_nil", if_val_of(nil), "none")
+
+    if failures == 0:
+        print("OPTION_I64_FLAT_LANE PROBE: ALL PASS")
+    else:
+        print("OPTION_I64_FLAT_LANE PROBE: FAILURES")

@@ -1,0 +1,813 @@
+# Simple Language - Query Lint Infrastructure
+#
+# Lint infrastructure and basic checks: source lint entry point,
+# AST lint passes, deprecated patterns, unused variables, unreachable code.
+
+use app.cli.query_helpers.{_count_indent}
+use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name, query_file_read_rich, query_file_exists, query_json_escape, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE, _DIAG_SEVERITY_OVERRIDE_COUNT}
+use app.cli.query_lint_checks.{_check_match_exhaustiveness_text, _check_closure_capture_text, _check_ignored_return_text_indexed, _check_multiline_bool_text, _check_safety_text, _check_visibility_text, _check_print_to_log_text, QueryIndentSuccessorIndex, _query_indent_successor_index}
+use app.cli.query_lint_scan.{lint_scan_line, deprecated_new_columns}
+use app.cli.query_source_mask.{deprecated_dunder_facts}
+# Strictness-tier severity routing: resolve the LintConfig (sdn profile= + @lint_profile)
+# and translate per-code Allow/Deny into the diagnostic severity override map, so the
+# LSP/build lint path honors the strictness tier — matching `simple lint`.
+use compiler.tools.lint._LintMain.config_and_model.{LintConfig, LintLevel, map_lint_code_to_config_name, find_project_sdn}
+
+# AST-based lint pass imports
+use compiler.core.ast.{module_get_decls}
+use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser_set_had_error}
+use compiler.frontend.trace_policy.{frontend_trace_suppression_set}
+use compiler.semantics.lint.argument_count.{check_argument_count}
+use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
+use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
+use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
+use compiler.semantics.lint.stub_impl.{check_stub_impl}
+use compiler.semantics.lint.star_import.{StarWildcardWarning, check_star_import_file, check_star_export_file}
+use compiler.semantics.lint.critical_file_guard.{check_all_critical_files}
+use compiler.semantics.lint.wide_public.{check_wide_public_file}
+use compiler.semantics.gc_boundary_check.{FamilyImportWarning, check_gc_boundary_imports, format_family_warnings}
+use compiler.semantics.lint.param_tag.{ParamTagWarning, check_param_tag, extract_param_names_from_sig, extract_param_types_from_sig}
+
+# --- Strictness-tier severity routing (reliable-mode plan, P1 / R1 step 3) ---
+
+# Lint codes emitted by this path that have a LintConfig config-name mapping.
+fn _governed_lint_codes() -> [text]:
+    ["primitive_api", "bare_bool", "simple_script_required",
+     "T001", "T002", "T003", "T004", "ARG001", "ARG002", "ACC001", "NAME001",
+     "DTYP001",
+     "COLL001", "COLL002", "COLL003", "COLL004", "COLL005", "COLL006",
+     "COLL007", "COLL008", "COLL009", "COLL010", "COLL011", "COLL012",
+     "COLL013", "COLL014", "COLL015", "COLL016", "COLL017", "COLL018",
+     "COLL019",
+     "STUB001", "STUB002", "STUB003",
+     "SPIPE001", "SPIPE002", "SPIPE003", "SPIPE004", "SPIPE005", "SPIPE006", "SPIPE007",
+     "I001", "I002", "I003", "C002",
+     "MEXH001", "MEXH002", "MEXH003", "MEXH004", "MEXH005",
+     "REQC001", "REQC002", "REQC003", "REQC004",
+     "UI001", "UI002", "UI003", "DIAG001",
+     "W001", "W002", "W003", "ST001", "ST002", "ST003",
+     "S001", "S002", "S003", "CC001", "CC002",
+     "CLOS001", "RET001", "BOOL001", "SAFE001", "SAFE003",
+     "W0401", "W0402", "W0403", "W0404", "D001", "TRK001"]
+
+# Translate the resolved config into _DIAG_SEVERITY_OVERRIDE: Allow -> -1 (suppress),
+# Deny -> 1 (LSP error). Warn / unconfigurable codes stay unmapped (severity kept).
+fn _apply_lint_config_overrides(cfg: LintConfig):
+    _DIAG_SEVERITY_OVERRIDE = {}
+    _DIAG_SEVERITY_OVERRIDE_COUNT = 0
+    for code in _governed_lint_codes():
+        val config_name = map_lint_code_to_config_name(code)
+        if config_name == "":
+            continue
+        val level = cfg.get_level(config_name)
+        match level:
+            case Allow:
+                _DIAG_SEVERITY_OVERRIDE[code] = -1
+                _DIAG_SEVERITY_OVERRIDE_COUNT = _DIAG_SEVERITY_OVERRIDE_COUNT + 1
+            case Deny:
+                # Query collection diagnostics are still source-pattern facts.
+                # A profile is policy, not typed proof, so keep them advisory.
+                if not code.starts_with("COLL"):
+                    _DIAG_SEVERITY_OVERRIDE[code] = 1
+                    _DIAG_SEVERITY_OVERRIDE_COUNT = _DIAG_SEVERITY_OVERRIDE_COUNT + 1
+            case Warn:
+                val _ = 0
+
+# True while a strictness tier (or explicit [lints] config) governs this file, so
+# tier-only lints (e.g. primitive_api) emit; the override map then routes severity.
+var _LINT_TIER_ACTIVE: bool = false
+
+# Resolve the LintConfig for file+source (sdn [lints] profile= + @lint_profile attr)
+# and load its severity overrides.
+fn _load_lint_config_for(file: text, lines: [text]):
+    var cfg = LintConfig.new()
+    val sdn = find_project_sdn(file)
+    if sdn != "":
+        cfg = LintConfig.from_sdn_file(sdn)
+    cfg.apply_file_attributes_lines(lines)
+    # Only override emitted severities when a strictness tier or explicit [lints]/
+    # @allow/@deny config is present; with neither, leave the legacy LSP severities
+    # untouched (nil profile == today's exact behavior — zero default change).
+    if cfg.profile.? or cfg.levels.len() > 0:
+        _LINT_TIER_ACTIVE = true
+        _apply_lint_config_overrides(cfg)
+    else:
+        _LINT_TIER_ACTIVE = false
+        _DIAG_SEVERITY_OVERRIDE = {}
+        _DIAG_SEVERITY_OVERRIDE_COUNT = 0
+
+fn _clear_lint_config_overrides():
+    _LINT_TIER_ACTIVE = false
+    _DIAG_SEVERITY_OVERRIDE = {}
+    _DIAG_SEVERITY_OVERRIDE_COUNT = 0
+
+fn _lint_code_suppressed(code: text) -> bool:
+    _DIAG_SEVERITY_OVERRIDE.has(code) and _DIAG_SEVERITY_OVERRIDE[code] < 0
+
+# Reliable-mode R2: surface bare-primitive public-API usage on the LSP/build path.
+# Mirrors the compiled-engine check in
+# `compiler.tools.fix.rules.impl_.lint_primitive_api` (pub fns, params + return,
+# pure-math exemption; includes bool per the canonical table). Reuses
+# `param_tag`'s text signature parsers so the parsing logic is not duplicated. Tier-
+# gated: emits only when a strictness tier / [lints] config is active, and the
+# `_DIAG_SEVERITY_OVERRIDE` map (governed code "primitive_api") then routes severity
+# per tier — moderate suppresses, lib warns, reliable denies.
+# Canonical table: compiler.semantics.lint.primitive_types.
+fn _pa_is_primitive(t: text) -> bool:
+    is_bare_primitive_name(t)
+
+fn _pa_ret_type(sig: text) -> text:
+    val cp = sig.index_of(")")
+    if cp < 0:
+        return ""
+    val rest = sig.slice(cp + 1)
+    val arrow = rest.index_of("->")
+    if arrow < 0:
+        return ""
+    var after = rest.slice(arrow + 2)
+    val colon = after.index_of(":")
+    if colon >= 0:
+        after = after.slice(0, colon)
+    after = after.trim()
+    if (after == "" or after.contains("<") or after.contains("[")
+        or after.contains("(") or after.contains("{")):
+        return ""
+    after
+
+fn _emit_primitive_api_text(lines: [text], file: text, format: text) -> i64:
+    if not _LINT_TIER_ACTIVE:
+        return 0
+    var count = 0
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        val line_num = i + 1
+        val is_extern = trimmed.starts_with("extern fn ")
+        val is_pub = (trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ")
+                      or trimmed.starts_with("pub static fn "))
+        if is_pub and not is_extern:
+            val ptypes = extract_param_types_from_sig(trimmed)
+            val pnames = extract_param_names_from_sig(trimmed)
+            val rtype = _pa_ret_type(trimmed)
+            # Pure-math exemption: every param and the return are one shared primitive.
+            var all_same = _pa_is_primitive(rtype)
+            var k = 0
+            while k < ptypes.len():
+                if ptypes[k] != rtype or not _pa_is_primitive(ptypes[k]):
+                    all_same = false
+                k = k + 1
+            if not (all_same and ptypes.len() > 0):
+                var pi = 0
+                while pi < ptypes.len():
+                    val tn = ptypes[pi]
+                    var pname = "?"
+                    if pi < pnames.len():
+                        pname = pnames[pi]
+                    if _pa_is_primitive(tn):
+                        if format == "json":
+                            _diag_emit_or_collect("{\"severity\":2,\"code\":\"primitive_api\",\"message\":\"public API parameter '{pname}' uses bare primitive type '{tn}' — wrap in a domain type\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+                        else:
+                            print "{file}:{line_num}: warning[primitive_api]: public API parameter '{pname}' uses bare primitive type '{tn}'"
+                        count = count + 1
+                    pi = pi + 1
+                if _pa_is_primitive(rtype):
+                    if format == "json":
+                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"primitive_api\",\"message\":\"public API return type uses bare primitive type '{rtype}' — wrap in a domain type\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+                    else:
+                        print "{file}:{line_num}: warning[primitive_api]: public API return type uses bare primitive type '{rtype}'"
+                    count = count + 1
+        i = i + 1
+    count
+
+fn _emit_lint_if_readable(file: text, format: text):
+    """Emit lint diagnostics if the file is readable."""
+    if query_file_exists(file):
+        val source = query_file_read_rich(file) ?? ""
+        if source != "":
+            _emit_source_lint_diagnostics(file, source, format)
+
+fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, [text]):
+    """Run the full lint pipeline in a nested JSON collection scope.
+
+    The scalar preserves legacy per-rule producer counting. Suppression handling
+    differs between rule families, so `collected.len()` is the authoritative
+    emitted count."""
+    val previous_mode = _DIAG_COLLECT_MODE
+    val previous_collected = _DIAG_COLLECTED
+    val previous_overrides = _DIAG_SEVERITY_OVERRIDE
+    val previous_override_count = _DIAG_SEVERITY_OVERRIDE_COUNT
+    val previous_tier_active = _LINT_TIER_ACTIVE
+
+    _DIAG_COLLECT_MODE = true
+    _DIAG_COLLECTED = []
+    _DIAG_SEVERITY_OVERRIDE = {}
+    _DIAG_SEVERITY_OVERRIDE_COUNT = 0
+    _LINT_TIER_ACTIVE = false
+
+    val count = _emit_source_lint_diagnostics(file, source, "json")
+    val collected = _DIAG_COLLECTED
+
+    # The lint owner restores its private tier flag together with the shared
+    # collector policy. Nested callers keep their exact outer buffer/policy;
+    # inner diagnostics are returned separately and are never appended to it.
+    _DIAG_COLLECT_MODE = previous_mode
+    _DIAG_COLLECTED = previous_collected
+    _DIAG_SEVERITY_OVERRIDE = previous_overrides
+    _DIAG_SEVERITY_OVERRIDE_COUNT = previous_override_count
+    _LINT_TIER_ACTIVE = previous_tier_active
+    (count, collected)
+
+fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
+    """Run lint checks and emit diagnostics.
+
+    Performs text-level analysis for:
+    - Unused variables/imports (text heuristic: val/var declarations not referenced)
+    - Deprecated patterns (Type__method syntax, .new() constructors, bare pass)
+    - Unreachable code (statements after return)
+    - Match exhaustiveness (match without wildcard arm)
+    - DEPR005: #[name] attribute syntax (use @name instead)
+
+    Then runs AST-based lint passes for:
+    - ARG001/ARG002: argument count (>7 warn, >12 error)
+    - COLL001-008: collection efficiency anti-patterns
+    - DTYP001: duplicate typed argument detection
+    - STUB001/002: stub implementation detection
+    - W0406: star import warnings
+    - W0407: star export warnings
+    - W0404: wide public API warnings
+    PTAG001/002 run in the preceding text pass. The project-level critical-file
+    guard has a separate entry point.
+
+    Returns the legacy per-rule producer count. Suppression/count timing differs
+    across rule families; collection callers use the collected array length as
+    the authoritative emitted count.
+    """
+    var previous_trace_suppressed = false
+    if format == "json":
+        previous_trace_suppressed = frontend_trace_suppression_set(true)
+    val lines = source.split("\n")
+    # The complete lint pipeline owns one canonical line array. Reuse it for
+    # file attributes instead of splitting the source again in LintConfig.
+    _load_lint_config_for(file, lines)
+    val source_locations = _query_ast_lint_location_index(lines)
+    val indent_successors = _query_indent_successor_index(lines)
+    var count = 0
+    count = count + _emit_basic_line_lints(
+        lines, indent_successors, file, format)
+    count = count + _emit_text_heuristic_lints(
+        lines, source_locations, indent_successors, file, format)
+    count = count + _emit_primitive_api_text(lines, file, format)
+    count = count + _run_ast_lint_passes(
+        source, source_locations, file, format)
+    _clear_lint_config_overrides()
+    if format == "json":
+        frontend_trace_suppression_set(previous_trace_suppressed)
+    count
+
+fn _emit_basic_line_lints(
+    lines: [text], indent_successors: QueryIndentSuccessorIndex,
+    file: text, format: text
+) -> i64:
+    var count = 0
+    val deprecated_columns = deprecated_new_columns(lines)
+    val deprecated_dunders = deprecated_dunder_facts(lines)
+    var deprecated_dunder_i = 0
+    var lint_i = 0
+    while lint_i < lines.len():
+        val scan = lint_scan_line(lines, lint_i)
+        val trimmed = scan.trimmed
+        val line_num = scan.line_num
+
+        while (deprecated_dunder_i < deprecated_dunders.len() and
+            deprecated_dunders[deprecated_dunder_i].line == line_num):
+            val fact = deprecated_dunders[deprecated_dunder_i]
+            if format == "json":
+                _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{fact.name}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{fact.start_column},\"end_line\":{line_num},\"end_col\":{fact.end_column},\"tags\":[2],\"source\":\"simple-lint\"}")
+            else:
+                print "{file}:{line_num}: warning[DEPR001]: '{fact.name}()' uses deprecated Type__method() syntax"
+            count = count + 1
+            deprecated_dunder_i = deprecated_dunder_i + 1
+        count = count + _check_hash_bracket_attribute(trimmed, line_num, file, format)
+
+        val deprecated_new_col = deprecated_columns[lint_i]
+        if deprecated_new_col > 0:
+            if format == "json":
+                _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR002\",\"message\":\"'.new()' constructor is deprecated, use StructName(field: value) syntax\",\"line\":{line_num},\"col\":{deprecated_new_col},\"end_line\":{line_num},\"end_col\":{deprecated_new_col + 5},\"tags\":[2],\"source\":\"simple-lint\"}")
+            else:
+                print "{file}:{line_num}: warning[DEPR002]: '.new()' constructor is deprecated"
+            count = count + 1
+
+        if (trimmed == "pass" or trimmed.starts_with("pass ") or trimmed.starts_with("pass#")):
+            if not trimmed.starts_with("pass_"):
+                if format == "json":
+                    _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR003\",\"message\":\"bare 'pass' is deprecated, use pass_do_nothing or pass_todo\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":5,\"tags\":[2],\"source\":\"simple-lint\"}")
+                else:
+                    print "{file}:{line_num}: warning[DEPR003]: bare 'pass' is deprecated"
+                count = count + 1
+
+        if indent_successors.is_return_statement[lint_i]:
+            val successor = indent_successors.next_same_or_shallower[lint_i]
+            if (successor >= 0 and
+                _count_indent(lines[successor]) == scan.indent):
+                val next_unreachable = successor + 1
+                val successor_col = indent_successors.first_executable_column[successor]
+                val successor_end_col = indent_successors.first_token_end_column[successor]
+                if format == "json":
+                    _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":{successor_col},\"end_line\":{next_unreachable},\"end_col\":{successor_end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
+                else:
+                    print "{file}:{next_unreachable}: warning[UNREACH001]: unreachable code after return"
+                count = count + 1
+
+        lint_i = lint_i + 1
+    count
+
+fn _emit_text_heuristic_lints(
+    lines: [text], source_locations: QueryAstLintLocationIndex,
+    indent_successors: QueryIndentSuccessorIndex,
+    file: text, format: text
+) -> i64:
+    var count = 0
+    count = count + _check_unused_vars_text(lines, file, format)
+    count = count + _check_gc_boundary_imports_text(source_locations, file, format)
+    count = count + _check_match_exhaustiveness_text(lines, file, format)
+    count = count + _check_closure_capture_text(lines, file, format)
+    count = count + _check_ignored_return_text_indexed(
+        lines, file, format, indent_successors)
+    count = count + _check_print_to_log_text(lines, file, format)
+    count = count + _check_multiline_bool_text(lines, file, format)
+    count = count + _check_safety_text(lines, file, format)
+    count = count + _check_visibility_text(lines, file, format)
+    count = count + _check_param_tag_text(lines, file, format)
+    count
+
+fn _check_param_tag_text(lines: [text], file: text, format: text) -> i64:
+    """Emit PTAG001/PTAG002 warnings for public functions with untagged same-type primitive params."""
+    # PTAG001/PTAG002 scope: src/lib/ only (AC-5 annotation sweep covered lib; compiler/app not yet annotated)
+    if not file.contains("src/lib/"):
+        return 0
+    val warnings = check_param_tag(lines, file)
+    var count = 0
+    for w in warnings:
+        val sev = 2  # Warning
+        if format == "json":
+            val msg = _escape_json(w.message)
+            val hint = _escape_json(w.hint)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg} — {hint}\",\"line\":{w.line_num},\"col\":1,\"end_line\":{w.line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{w.line_num}: warning[{w.code}]: {w.message} — {w.hint}"
+        count = count + 1
+    count
+
+fn _check_gc_boundary_imports_text(
+    source_locations: QueryAstLintLocationIndex, file: text, format: text
+) -> i64:
+    """Emit GC/runtime-family boundary warnings for direct source imports."""
+    val source_module = _runtime_module_from_file_path(file)
+    if source_module == "":
+        return 0
+
+    val warnings = check_gc_boundary_imports(
+        source_module, source_locations.imported_modules)
+    val messages = format_family_warnings(warnings)
+    var count = 0
+    for msg in messages:
+        val w: FamilyImportWarning = warnings[count]
+        val imported = w.imported_module
+        val line_num = source_locations.import_lines[imported] ?? 1
+        if format == "json":
+            val json_msg = _escape_json(msg)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"gc_boundary_crossing\",\"message\":\"{json_msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {msg}"
+        count = count + 1
+    count
+
+fn _runtime_module_from_file_path(file: text) -> text:
+    """Convert a runtime-family source path to the module form used by GC checks."""
+    val marker = "src/lib/"
+    val idx = file.index_of(marker)
+    if idx < 0:
+        return ""
+    var rel = file.substring(idx + marker.len())
+    if rel.ends_with(".spl"):
+        rel = rel.substring(0, rel.len() - 4)
+    rel.replace("/", ".")
+
+fn _extract_import_module_path(line: text) -> text:
+    val trimmed = line.trim()
+    var rest = ""
+    if trimmed.starts_with("use "):
+        rest = trimmed.substring(4).trim()
+    elif trimmed.starts_with("import "):
+        rest = trimmed.substring(7).trim()
+    else:
+        return ""
+
+    rest = _truncate_import_suffix(rest, "#")
+    rest = _truncate_import_suffix(rest, "{")
+    rest = _truncate_import_suffix(rest, "(")
+    rest = _truncate_import_suffix(rest, " as ")
+    rest = rest.trim()
+    if rest.ends_with(";"):
+        rest = rest.substring(0, rest.len() - 1).trim()
+    rest
+
+fn _truncate_import_suffix(value: text, marker: text) -> text:
+    val idx = value.index_of(marker)
+    if idx < 0:
+        return value
+    value.substring(0, idx)
+
+fn _check_hash_bracket_attribute(trimmed: text, line_num: i64, file: text, format: text) -> i64:
+    """Check for legacy #[name] attribute syntax — should be @name instead.
+
+    Matches lines starting with #[ followed by an identifier and ].
+    Skips comment-directive forms like #[allow(...)] and #[bypass] which
+    are intentionally scanned as text by the lint/visibility systems."""
+    if not trimmed.starts_with("#["):
+        return 0
+    val after = trimmed.substring(2, trimmed.len())
+    var name_end = 0
+    while name_end < after.len():
+        val c = after.substring(name_end, name_end + 1)
+        val is_ident = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+        if not is_ident:
+            break
+        name_end = name_end + 1
+    if name_end == 0:
+        return 0
+    val attr_name = after.substring(0, name_end)
+    if attr_name == "allow" or attr_name == "bypass":
+        return 0
+    val rest = after.substring(name_end, after.len()).trim()
+    if not (rest.starts_with("]") or rest.starts_with("(")):
+        return 0
+    if format == "json":
+        val col = 1
+        _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR005\",\"message\":\"'#[{attr_name}]' uses deprecated syntax, use '@{attr_name}' instead\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{col + 2 + name_end + 1},\"tags\":[2],\"source\":\"simple-lint\"}")
+    else:
+        print "{file}:{line_num}: warning[DEPR005]: '#[{attr_name}]' is deprecated, use '@{attr_name}' instead"
+    1
+
+fn _check_unused_vars_text(lines: [text], file: text, format: text) -> i64:
+    """Text-based heuristic for unused variable detection.
+
+    Builds one identifier-frequency table per function, then compares every
+    declaration against that table. The declaration line is excluded exactly
+    as in the compatibility implementation, without rescanning the function
+    for every declaration.
+    """
+    var count = 0
+    var line_index = 0
+    while line_index < lines.len():
+        val trimmed = lines[line_index].trim()
+        if not _query_unused_function_header(trimmed):
+            line_index = line_index + 1
+            continue
+        val function_end = _query_unused_function_end(lines, line_index)
+        count = count + _emit_unused_in_function(
+            lines, line_index, function_end, file, format)
+        line_index = function_end + 1
+    count
+
+fn _query_unused_function_header(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or
+        trimmed.starts_with("static fn ") or
+        trimmed.starts_with("pub static fn ") or
+        trimmed.starts_with("async fn ") or
+        trimmed.starts_with("pub async fn ") or
+        trimmed.starts_with("me ") or trimmed.starts_with("pub me ")
+
+fn _query_unused_function_end(lines: [text], function_start: i64) -> i64:
+    val function_indent = _count_indent(lines[function_start])
+    var function_end = function_start
+    var line_index = function_start + 1
+    while line_index < lines.len():
+        val trimmed = lines[line_index].trim()
+        # A sibling method is a new function even though both are nested under
+        # the same class. Stop at every nonblank line outside this body, not
+        # only at module indentation.
+        if (trimmed != "" and
+            _count_indent(lines[line_index]) <= function_indent):
+            break
+        if trimmed != "": function_end = line_index
+        line_index = line_index + 1
+    function_end
+
+struct QueryUnusedDeclaration:
+    name: text
+    line_index: i64
+    declaration_occurrences: i64
+    source_column: i64
+
+fn _query_word_char(character: text) -> bool:
+    (character >= "a" and character <= "z") or
+        (character >= "A" and character <= "Z") or
+        (character >= "0" and character <= "9") or character == "_"
+
+fn _query_word_count(line: text, target: text) -> i64:
+    var count = 0
+    var pos = 0
+    while pos < line.len():
+        if not _query_word_char(line.substring(pos, pos + 1)):
+            pos = pos + 1
+            continue
+        val start = pos
+        while pos < line.len() and _query_word_char(line.substring(pos, pos + 1)):
+            pos = pos + 1
+        if line.substring(start, pos) == target: count = count + 1
+    count
+
+fn _emit_unused_in_function(
+    lines: [text], function_start: i64, function_end: i64,
+    file: text, format: text
+) -> i64:
+    var word_counts: Dict<text, i64> = {}
+    var declarations: [QueryUnusedDeclaration] = []
+    var line_index = function_start
+    while line_index <= function_end:
+        val line = lines[line_index]
+        val trimmed = line.trim()
+        var word_pos = 0
+        while word_pos < line.len():
+            if not _query_word_char(line.substring(word_pos, word_pos + 1)):
+                word_pos = word_pos + 1
+                continue
+            val word_start = word_pos
+            while (word_pos < line.len() and
+                _query_word_char(line.substring(word_pos, word_pos + 1))):
+                word_pos = word_pos + 1
+            val word = line.substring(word_start, word_pos)
+            word_counts[word] = (word_counts[word] ?? 0) + 1
+        var name = ""
+        var declaration_prefix = ""
+        if trimmed.starts_with("val "):
+            name = _extract_decl_name(trimmed.substring(4))
+            declaration_prefix = "val "
+        elif trimmed.starts_with("var "):
+            name = _extract_decl_name(trimmed.substring(4))
+            declaration_prefix = "var "
+        if name != "" and not name.starts_with("_"):
+            val prefix_pos = _find_in_line(line, declaration_prefix)
+            val source_column = _find_in_line_from(
+                line, name, prefix_pos + declaration_prefix.len()) + 1
+            declarations.push(QueryUnusedDeclaration(
+                name, line_index, _query_word_count(line, name), source_column))
+        line_index = line_index + 1
+
+    var count = 0
+    for declaration in declarations:
+        if (word_counts[declaration.name] ?? 0) > declaration.declaration_occurrences:
+            continue
+        val line_num = declaration.line_index + 1
+        if format == "json":
+            val col = declaration.source_column
+            val end_col = col + declaration.name.len()
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNUSED001\",\"message\":\"variable '{declaration.name}' is declared but never used\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: warning[UNUSED001]: variable '{declaration.name}' is declared but never used"
+        count = count + 1
+    count
+
+struct QueryAstLintLocationIndex:
+    callable_lines: Dict<text, i64>
+    use_star_lines: Dict<text, i64>
+    export_star_lines: Dict<text, i64>
+    imported_modules: [text]
+    import_lines: Dict<text, i64>
+
+fn _query_callable_name(trimmed: text) -> text:
+    val is_declaration = trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or
+        trimmed.starts_with("static fn ") or trimmed.starts_with("pub static fn ") or
+        trimmed.starts_with("async fn ") or trimmed.starts_with("pub async fn ") or
+        trimmed.starts_with("me ") or trimmed.starts_with("pub me ")
+    if not is_declaration: return ""
+    var marker = ""
+    var position = trimmed.find("fn ")
+    if position >= 0:
+        marker = "fn "
+    else:
+        position = trimmed.find("me ")
+        if position >= 0: marker = "me "
+    if marker == "": return ""
+    val suffix = trimmed[position + marker.len():]
+    var finish = suffix.find("(")
+    val generic = suffix.find("<")
+    val colon = suffix.find(":")
+    if finish < 0 or (generic >= 0 and generic < finish): finish = generic
+    if finish < 0 or (colon >= 0 and colon < finish): finish = colon
+    if finish <= 0: return ""
+    suffix[0:finish].trim()
+
+fn _query_star_module(trimmed: text, keyword: text) -> text:
+    if not trimmed.starts_with(keyword): return ""
+    var suffix = trimmed[keyword.len():]
+    if keyword == "export " and suffix.starts_with("use "):
+        suffix = suffix[4:]
+    val star = suffix.find(".*")
+    if star <= 0: return ""
+    suffix[0:star].trim()
+
+fn _query_ast_lint_location_index(lines: [text]) -> QueryAstLintLocationIndex:
+    var callable_lines: Dict<text, i64> = {}
+    var use_star_lines: Dict<text, i64> = {}
+    var export_star_lines: Dict<text, i64> = {}
+    var imported_modules: [text] = []
+    var import_lines: Dict<text, i64> = {}
+    var line_index = 0
+    while line_index < lines.len():
+        val trimmed = lines[line_index].trim()
+        val callable = _query_callable_name(trimmed)
+        if callable != "" and not callable_lines.has(callable):
+            callable_lines[callable] = line_index + 1
+        val use_module = _query_star_module(trimmed, "use ")
+        if use_module != "" and not use_star_lines.has(use_module):
+            use_star_lines[use_module] = line_index + 1
+        val export_module = _query_star_module(trimmed, "export ")
+        if export_module != "" and not export_star_lines.has(export_module):
+            export_star_lines[export_module] = line_index + 1
+        val imported = _extract_import_module_path(lines[line_index])
+        if imported != "":
+            imported_modules.push(imported)
+            if not import_lines.has(imported):
+                import_lines[imported] = line_index + 1
+        line_index = line_index + 1
+    QueryAstLintLocationIndex(
+        callable_lines, use_star_lines, export_star_lines,
+        imported_modules, import_lines)
+
+fn _query_callable_line(index: QueryAstLintLocationIndex, name: text) -> i64:
+    index.callable_lines[name] ?? 1
+
+fn _query_wildcard_line(
+    index: QueryAstLintLocationIndex, keyword: text, module_path: text
+) -> i64:
+    if keyword == "use ": return index.use_star_lines[module_path] ?? 1
+    index.export_star_lines[module_path] ?? 1
+
+fn _emit_wildcard_warnings(warnings: [StarWildcardWarning], locations: QueryAstLintLocationIndex, file: text, format: text, keyword: text) -> i64:
+    var count = 0
+    for w in warnings:
+        if _lint_code_suppressed(w.code):
+            continue
+        val line_num = _query_wildcard_line(locations, keyword, w.module_path)
+        if format == "json":
+            val msg = _escape_json(w.message)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: warning[{w.code}]: {w.message}"
+        count = count + 1
+    count
+
+fn _severity_text_to_json(severity: text) -> i64:
+    """Convert severity string to LSP severity number.
+    1=Error, 2=Warning, 3=Information, 4=Hint
+    """
+    if severity == "error" or severity == "ERROR" or severity == "CRITICAL":
+        return 1
+    if severity == "WARNING" or severity == "warning":
+        return 2
+    if severity == "INFO" or severity == "info" or severity == "MEDIUM":
+        return 3
+    if severity == "HIGH":
+        return 2
+    2
+
+fn _run_ast_lint_passes(
+    source: text, locations: QueryAstLintLocationIndex,
+    file: text, format: text
+) -> i64:
+    """Parse source into AST and run all AST-based lint passes.
+
+    Runs the following checks after parsing the source:
+    - ARG001/ARG002: argument count (>7 warn, >12 error)
+    - COLL001-008: collection efficiency anti-patterns
+    - DTYP001: duplicate typed argument detection
+    - STUB001/002: stub implementation detection
+    - W0406: star import warnings
+    - W0404: wide public API warnings
+
+    Returns the number of diagnostics emitted.
+    """
+    var count = 0
+    # Parse source into the AST arena. The checked result must cross the parser
+    # module boundary by value; parse_module_silent() followed by
+    # parser_has_errors() can fail open in self-hosted execution.
+    val previous_parse_error = parser_has_errors()
+    val parse_failed = parse_module_silent_checked(source, file)
+    parser_set_had_error(previous_parse_error)
+    if parse_failed:
+        val message = "NOT LINTED: source did not parse - every AST-based query lint was skipped for this file"
+        if format == "json":
+            _diag_emit_or_collect("{\"severity\":1,\"code\":\"PARSE001\",\"message\":\"{message}\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:1: error[PARSE001]: {message}"
+        return 1
+    val decl_indices = module_get_decls()
+
+    if decl_indices.len() == 0:
+        return 0
+
+    # --- C1: ARG001/ARG002 — argument count checks ---
+    val arg_warnings = check_argument_count(decl_indices)
+    for w in arg_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
+        val line_num = w.line
+        val sev = _severity_text_to_json(w.severity)
+        if format == "json":
+            val msg = _escape_json(w.message)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
+        count = count + 1
+
+    # --- C2: COLL001-008 — collection efficiency patterns ---
+    val coll_warnings = check_collection_patterns(decl_indices)
+    for w in coll_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
+        val line_num = _query_callable_line(locations, w.item_name)
+        # These legacy checks run before type/effect completion. Keep them at
+        # warning severity and disclose the missing proof rather than allowing
+        # a textual HIGH label to look like a proven error.
+        val uncertainty = "source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved"
+        if format == "json":
+            val msg = _escape_json(w.message)
+            val item_evidence = _escape_json("item=" + w.item_name)
+            val severity_evidence = _escape_json("source_severity=" + w.severity)
+            val uncertainty_json = _escape_json(uncertainty)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"confidence\":\"source-pattern\",\"evidence\":[\"{item_evidence}\",\"{severity_evidence}\"],\"uncertainty\":\"{uncertainty_json}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: warning[{w.code}]: {w.message}"
+            print "  confidence: source-pattern"
+            print "  evidence: item={w.item_name}"
+            print "  evidence: source_severity={w.severity}"
+            print "  uncertainty: {uncertainty}"
+        count = count + 1
+
+    # --- C3: DTYP001 — duplicate typed argument detection ---
+    val dtyp_warnings = check_duplicate_typed_args(decl_indices)
+    for w in dtyp_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
+        val line_num = w.line
+        val sev = _severity_text_to_json(w.severity)
+        if format == "json":
+            val msg = _escape_json(w.message)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
+        count = count + 1
+
+    # --- C4: STUB001/002 — stub implementation detection ---
+    val stub_warnings = check_stub_impl(decl_indices)
+    for w in stub_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
+        val line_num = w.line
+        val sev = _severity_text_to_json(w.severity)
+        # STUB warnings get Unnecessary tag (faded rendering in IDE)
+        if format == "json":
+            val msg = _escape_json(w.message)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
+        count = count + 1
+
+    # --- C5a/C5c: Star wildcard warnings (W0406 import, W0407 export) ---
+    val star_warnings = check_star_import_file(decl_indices, file)
+    count = count + _emit_wildcard_warnings(star_warnings, locations, file, format, "use ")
+    val star_export_warnings = check_star_export_file(decl_indices, file)
+    count = count + _emit_wildcard_warnings(star_export_warnings, locations, file, format, "export ")
+
+    # --- C5b: Wide public API warnings (W0404) ---
+    val wide_warnings = check_wide_public_file(decl_indices, file)
+    for w in wide_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
+        # Module-level warning, report on line 1
+        if format == "json":
+            val msg = _escape_json(w.message)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg} ({w.export_count} symbols, threshold {w.threshold})\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:1: warning[{w.code}]: {w.message} ({w.export_count} symbols, threshold {w.threshold})"
+        count = count + 1
+
+    count
+
+fn _escape_json(value: text) -> text:
+    query_json_escape(value)
+
+fn emit_critical_file_guard(format: text) -> i64:
+    val warnings = check_all_critical_files("config/critical_files.sdn")
+    var count = 0
+    for w in warnings:
+        if format == "json":
+            val msg = _escape_json(w.message)
+            val sev = if w.severity == "ERROR": 1 else: 2
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"critical-file-guard\",\"file\":\"{w.file_path}\"}")
+        else:
+            print "{w.file_path}: {w.severity}[{w.code}]: {w.message}"
+        count = count + 1
+    count

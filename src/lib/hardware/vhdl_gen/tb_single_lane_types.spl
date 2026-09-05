@@ -1,0 +1,360 @@
+# Structured VHDL generation primitives for the single-lane GHDL testbenches
+# (tb_rv32_nvme_fw_smoke / tb_rv32_simpleos_boot_tiny / tb_rv32_tiny_bram_soc /
+# tb_rv64_soak).
+#
+# Same construction-API style as gen_types.spl: typed descriptor arrays are
+# elaborated at generator time into VHDL text. No Dict anywhere (determinism:
+# seed Dict order is random per process); arrays only. These emitters cover the
+# shapes an entity-less testbench needs that the core emitters do not:
+#   - `use std.env.all` library header (stop/finish), no textio
+#   - entity with generics but NO port clause
+#   - signal / constant / variable declaration blocks with group-local widths
+#   - DUT instantiation with row-wrapped generic map / port map association
+#   - `report ... & ... severity <sev>;` continuation chains (incl. the shared
+#     debug-register dump used by three of the four testbenches)
+#   - reset-release process, clocked UART-tap process, wait-guard process
+#
+# Named `vgtb_*` / `VgTb*` to stay clear of the core generator's symbol space
+# (the interpreter keeps a FLAT function/struct registry, so a duplicate name in
+# a sibling module silently hijacks the import).
+
+use std.hardware.vhdl_gen.gen_types.*
+
+# ---------------------------------------------------------------------------
+# Descriptors
+# ---------------------------------------------------------------------------
+
+# One `signal` / `constant` / `variable` declaration. `name_w` is the width of
+# the name field INCLUDING the space before the colon, matching VgPortSpec's
+# convention: testbench declaration groups align group-locally (and some groups
+# in the goldens keep a width inherited from a wider sibling file), so the width
+# is carried per item rather than recomputed.
+struct VgTbDecl:
+    pre_comments: [text]
+    name: text
+    name_w: i64
+    ty: text
+    init: text             # "" when the declaration has no `:= <init>`
+
+# One `formal => actual` association in a generic map / port map.
+struct VgTbAssoc:
+    formal: text
+    actual: text
+
+# One arm of an `if/elsif` terminal-marker chain inside a UART line
+# accumulator: `if llen <cmp> <len_expr> and lbuf(1 to <len_expr>) = <match_expr>`.
+struct VgTbMarkerArm:
+    cmp: text              # comparison against the accumulated length (">=" / "=")
+    len_expr: text         # length bound, reused as the lbuf slice bound
+    match_expr: text       # quoted literal or constant the slice is compared to
+    reached: text          # value reported as `reached=<...>`
+
+# A component instantiation. `generic_rows` / `port_rows` give how many
+# associations share each emitted line — the associations themselves are data,
+# only the line wrapping is layout metadata.
+struct VgTbInst:
+    label: text
+    entity_name: text
+    generics: [VgTbAssoc]
+    generic_rows: [i64]
+    ports: [VgTbAssoc]
+    port_rows: [i64]
+
+fn vgtb_join(lines: [text]) -> text:
+    lines.join("\n")
+
+fn vgtb_decl(name: text, name_w: i64, ty: text, init: text) -> VgTbDecl:
+    VgTbDecl(pre_comments: no_lines(), name: name, name_w: name_w, ty: ty, init: init)
+
+fn vgtb_decl_c(pre: [text], name: text, name_w: i64, ty: text, init: text) -> VgTbDecl:
+    VgTbDecl(pre_comments: pre, name: name, name_w: name_w, ty: ty, init: init)
+
+fn vgtb_assoc(formal: text, actual: text) -> VgTbAssoc:
+    VgTbAssoc(formal: formal, actual: actual)
+
+# `name => name` — the common case where the tb signal mirrors the port name.
+fn vgtb_wire(name: text) -> VgTbAssoc:
+    VgTbAssoc(formal: name, actual: name)
+
+fn vgtb_append_decls(dst: [VgTbDecl], src: [VgTbDecl]) -> [VgTbDecl]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i])
+        i = i + 1
+    out
+
+fn vgtb_append_assocs(dst: [VgTbAssoc], src: [VgTbAssoc]) -> [VgTbAssoc]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i])
+        i = i + 1
+    out
+
+fn vgtb_append_i64(dst: [i64], src: [i64]) -> [i64]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i])
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Structural emitters
+# ---------------------------------------------------------------------------
+
+# Library header with the two optional clauses selected by the caller:
+# `std.textio` for any tb that writes a line or a file, `std.env` for any tb
+# that calls `stop`. Clause order is fixed (ieee -> textio -> env) so repeated
+# generation is byte-identical.
+fn vgtb_library_header_sel(textio: bool, env: bool) -> [text]:
+    var l: [text] = []
+    l = l.push("library ieee;")
+    l = l.push("use ieee.std_logic_1164.all;")
+    l = l.push("use ieee.numeric_std.all;")
+    if textio:
+        l = l.push("use std.textio.all;")
+    if env:
+        l = l.push("use std.env.all;")
+    l
+
+# Testbench library header: no textio (nothing is read from a file here), but
+# `std.env` for the `stop` procedure every one of these testbenches calls.
+fn vgtb_library_header() -> [text]:
+    vgtb_library_header_sel(false, true)
+
+# Testbench entity: generics only, no port clause (a tb has no boundary).
+fn vgtb_entity(name: text, gens: [VgGenericSpec]) -> [text]:
+    var l: [text] = []
+    l = l.push("entity " + name + " is")
+    if gens.len() > 0:
+        l = l.push("  generic (")
+        var i = 0
+        while i < gens.len():
+            val g = gens[i]
+            l = vg_append(l, g.pre_comments)
+            var line = "    " + vg_pad(g.name, g.name_w) + ": " + g.ty + " := " + g.default_val
+            if i < gens.len() - 1:
+                line = line + ";"
+            l = l.push(line)
+            i = i + 1
+        l = l.push("  );")
+    l = l.push("end entity " + name + ";")
+    l
+
+fn vgtb_arch_head(arch: text, entity_name: text) -> text:
+    "architecture " + arch + " of " + entity_name + " is"
+
+fn vgtb_arch_foot(arch: text) -> text:
+    "end architecture " + arch + ";"
+
+# One declaration rendered WITHOUT indent or pre-comments, so callers that pack
+# several declarations onto a single golden line (`signal a : t; signal b : t;`)
+# reuse the exact same field layout as the one-per-line emitter below.
+fn vgtb_decl_text(keyword: text, d: VgTbDecl) -> text:
+    var line = keyword + " " + vg_pad(d.name, d.name_w) + ": " + d.ty
+    if d.init != "":
+        line = line + " := " + d.init
+    line + ";"
+
+fn vgtb_decls(indent: i64, keyword: text, decls: [VgTbDecl]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    var i = 0
+    while i < decls.len():
+        val d = decls[i]
+        l = vg_append(l, d.pre_comments)
+        l = l.push(ind + vgtb_decl_text(keyword, d))
+        i = i + 1
+    l
+
+# Row-packed sibling of vgtb_decls: `rows[r]` declarations share emitted line r,
+# joined by a single space (the product-testbench goldens' dense header style).
+fn vgtb_decl_rows(indent: i64, keyword: text, decls: [VgTbDecl], rows: [i64]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    var idx = 0
+    var r = 0
+    while r < rows.len():
+        val count = rows[r]
+        var cells: [text] = []
+        var k = 0
+        while k < count:
+            val d = decls[idx + k]
+            l = vg_append(l, d.pre_comments)
+            cells = cells.push(vgtb_decl_text(keyword, d))
+            k = k + 1
+        idx = idx + count
+        l = l.push(ind + cells.join(" "))
+        r = r + 1
+    l
+
+# `clk <= not clk after <half> ns;` — the free-running clock every tb drives.
+fn vgtb_clock_driver(half_period_ns: i64) -> text:
+    "  clk <= not clk after " + half_period_ns.to_text() + " ns;"
+
+# `sep` is the association arrow spelling: the single-lane goldens write
+# `formal => actual`, the product-testbench goldens write `formal=>actual`.
+fn vgtb_assoc_row_sep(items: [VgTbAssoc], start: i64, count: i64, sep: text) -> text:
+    var cells: [text] = []
+    var i = 0
+    while i < count:
+        cells = cells.push(items[start + i].formal + sep + items[start + i].actual)
+        i = i + 1
+    cells.join(", ")
+
+fn vgtb_assoc_row(items: [VgTbAssoc], start: i64, count: i64) -> text:
+    vgtb_assoc_row_sep(items, start, count, " => ")
+
+# `generic map (...)` / `port map (...)` with explicit layout metadata:
+#   open_ind    indent of the `<kw> map (` line
+#   row_ind     indent of each continuation row
+#   inline_first true => row 0 rides the `<kw> map (` line instead of its own
+# A single row always collapses onto the open line (both styles agree there).
+fn vgtb_map_block_at(kw: text, items: [VgTbAssoc], rows: [i64], close: text,
+                     sep: text, open_ind: i64, row_ind: i64, inline_first: bool) -> [text]:
+    var l: [text] = []
+    if items.len() == 0:
+        return l
+    val oi = vg_spaces(open_ind)
+    val ri = vg_spaces(row_ind)
+    if rows.len() == 1:
+        l = l.push(oi + kw + " map (" + vgtb_assoc_row_sep(items, 0, rows[0], sep) + close)
+        return l
+    var idx = 0
+    var r = 0
+    while r < rows.len():
+        val row = vgtb_assoc_row_sep(items, idx, rows[r], sep)
+        idx = idx + rows[r]
+        var head = ri
+        if r == 0 and inline_first:
+            head = oi + kw + " map ("
+        elif r == 0:
+            l = l.push(oi + kw + " map (")
+        if r == rows.len() - 1:
+            l = l.push(head + row + close)
+        else:
+            l = l.push(head + row + ",")
+        r = r + 1
+    l
+
+fn vgtb_map_block(kw: text, items: [VgTbAssoc], rows: [i64], close: text) -> [text]:
+    vgtb_map_block_at(kw, items, rows, close, " => ", 4, 6, false)
+
+fn vgtb_inst(inst: VgTbInst) -> [text]:
+    var l: [text] = []
+    l = l.push("  " + inst.label + " : entity work." + inst.entity_name)
+    l = vg_append(l, vgtb_map_block("generic", inst.generics, inst.generic_rows, ")"))
+    l = vg_append(l, vgtb_map_block("port", inst.ports, inst.port_rows, ");"))
+    l
+
+# `report <head>` plus `& <tail>` continuation lines two columns deeper; the
+# severity clause rides the final line.
+fn vgtb_report(indent: i64, head: text, tails: [text], severity: text) -> [text]:
+    val ind = vg_spaces(indent)
+    val cont = vg_spaces(indent + 2)
+    var l: [text] = []
+    if tails.len() == 0:
+        l = l.push(ind + "report " + head + " severity " + severity + ";")
+        return l
+    l = l.push(ind + "report " + head)
+    var i = 0
+    while i < tails.len():
+        var line = cont + "& " + tails[i]
+        if i == tails.len() - 1:
+            line = line + " severity " + severity + ";"
+        l = l.push(line)
+        i = i + 1
+    l
+
+# Same, but the severity clause sits alone on the wrapped final line.
+fn vgtb_report_sev_line(indent: i64, head: text, tails: [text], severity: text) -> [text]:
+    val ind = vg_spaces(indent)
+    val cont = vg_spaces(indent + 2)
+    var l: [text] = []
+    l = l.push(ind + "report " + head)
+    var i = 0
+    while i < tails.len():
+        l = l.push(cont + "& " + tails[i])
+        i = i + 1
+    l = l.push(cont + "severity " + severity + ";")
+    l
+
+# `report "<tag> pc=0x" & to_hstring(debug_pc) & " ins=0x" & ...` — the debug
+# register dump shared by the nvme / boot-tiny / bram-soc stuck reports. `regs`
+# are the bare tap names; each maps to signal `debug_<reg>`.
+fn vgtb_reg_dump_report(indent: i64, tag: text, regs: [text], severity: text) -> [text]:
+    val head = "\"" + tag + " " + regs[0] + "=0x\" & to_hstring(debug_" + regs[0] + ")"
+    var tails: [text] = []
+    var i = 1
+    while i < regs.len():
+        tails = tails.push("\" " + regs[i] + "=0x\" & to_hstring(debug_" + regs[i] + ")")
+        i = i + 1
+    vgtb_report(indent, head, tails, severity)
+
+# `report "<tag> <k>=" & integer'image(<expr>) & ...` — the budget banner the
+# generic-parameterised testbenches print before releasing reset.
+fn vgtb_int_fields_report(indent: i64, tag: text, fields: [VgTbAssoc], severity: text) -> [text]:
+    val head = "\"" + tag + " " + fields[0].formal + "=\" & integer'image(" + fields[0].actual + ")"
+    var tails: [text] = []
+    var i = 1
+    while i < fields.len():
+        tails = tails.push("\" " + fields[i].formal + "=\" & integer'image(" + fields[i].actual + ")")
+        i = i + 1
+    vgtb_report(indent, head, tails, severity)
+
+# Reset-release process: optional banner lines, then hold reset for `wait_expr`.
+fn vgtb_reset_process(head_lines: [text], wait_expr: text) -> [text]:
+    var l: [text] = []
+    l = l.push("  process")
+    l = l.push("  begin")
+    l = vg_append(l, head_lines)
+    l = l.push("    wait for " + wait_expr + ";")
+    l = l.push("    rst <= '0';")
+    l = l.push("    wait;")
+    l = l.push("  end process;")
+    l
+
+# Clocked debug-UART tap process. The `process(clk)` / `rising_edge` /
+# `rst = '0' and debug_uart_valid = '1'` scaffold is identical in all three
+# tap-based testbenches; only the declarations and the body differ.
+fn vgtb_uart_tap_process(decls: [VgTbDecl], body: [text]) -> [text]:
+    vgtb_clocked_process(vgtb_decls(4, "variable", decls),
+        "rst = '0' and debug_uart_valid = '1'", body)
+
+# `process(clk)` / declarations / `rising_edge(clk)` / one boolean guard. The
+# tap process above is this scaffold with the tap-valid guard; the payload
+# cycle-counter and the ISA-gate sampler reuse it with their own conditions.
+# `decl_lines` is pre-rendered so a process can mix declaration keywords
+# (`variable` and `file` interleaved), which a single vgtb_decls call cannot.
+fn vgtb_clocked_process(decl_lines: [text], cond: text, body: [text]) -> [text]:
+    var l: [text] = []
+    l = l.push("  process(clk)")
+    l = vg_append(l, decl_lines)
+    l = l.push("  begin")
+    l = l.push("    if rising_edge(clk) then")
+    l = l.push("      if " + cond + " then")
+    l = vg_append(l, body)
+    l = l.push("      end if;")
+    l = l.push("    end if;")
+    l = l.push("  end process;")
+    l
+
+# `ch := character'val(to_integer(unsigned(debug_uart_byte)));` at `indent`.
+fn vgtb_tap_byte_to_char(indent: i64) -> text:
+    vg_spaces(indent) + "ch := character'val(to_integer(unsigned(debug_uart_byte)));"
+
+# Wait-guard process: `wait for <t>; if not done then <body> end if; wait;`.
+fn vgtb_guard_process(head_lines: [text], wait_expr: text, body: [text]) -> [text]:
+    var l: [text] = []
+    l = l.push("  process")
+    l = l.push("  begin")
+    l = vg_append(l, head_lines)
+    l = l.push("    wait for " + wait_expr + ";")
+    l = l.push("    if not done then")
+    l = vg_append(l, body)
+    l = l.push("    end if;")
+    l = l.push("    wait;")
+    l = l.push("  end process;")
+    l

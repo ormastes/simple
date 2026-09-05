@@ -1,0 +1,172 @@
+# Blink border + box-shadow paint — blink.paint.border_paint
+#
+# Closes the "borders, box-shadow" half of exit criterion 4 for the blink
+# render lane (`doc/03_plan` render-lane plan; see `html_pixels.spl`'s header
+# for the full criterion list). `paint_chunks_from_styled_layout`
+# (style_paint.spl) emits one BACKGROUND rect per box and states in its own
+# header that it emits "no borders"; this is the sibling that fills that gap,
+# kept separate for the same reason `text_paint.spl` is separate: a
+# genuinely different rect shape (up to 5 extra rects per box: 4 border edges
+# plus 1 shadow), not a modification of the single background rect.
+#
+# Two entry points, each a flat `PaintChunkRects` the caller composes into the
+# same rasterizer pass as background/text — no new consumer needed:
+#
+#   paint_border_chunks_from_styled_layout(layout)      -> border edge rects
+#   paint_box_shadow_chunks_from_styled_layout(layout)   -> shadow rects
+#
+# WHAT IS COVERED:
+#   - Solid, uniform-per-side borders: `border-<side>-width/-style/-color`,
+#     all 4 sides independently, wired through `blink.style.cascade` (which
+#     now runs every declaration block through `blink.style.shorthand
+#     .expand_declarations` before applying it, so `border: 2px solid red`
+#     and `border-top: 1px dashed blue` both resolve to the same 12
+#     longhands this module reads — see cascade.spl's header for the wiring).
+#     A side paints when its resolved style is neither `none` nor `hidden`
+#     AND its resolved width is > 0 AND its resolved colour is not fully
+#     transparent; any one of those makes it skip, matching real CSS
+#     (`border-style: none` computes `border-width` to 0 regardless of what
+#     was authored, and a 0-width or invisible border paints nothing).
+#   - `box-shadow`, SINGLE shadow, NO BLUR: an axis-aligned rect the same size
+#     as the box, offset by `(offset-x, offset-y)`, painted in the shadow
+#     colour BEFORE the box's own background/border paint on top of it. With
+#     no blur to soften the edge this is exact, not an approximation: the
+#     part of the shadow rect the box covers is legitimately overpainted, and
+#     only the offset sliver shows through — precisely what a zero-blur,
+#     zero-spread `box-shadow` looks like.
+#
+# WHAT IS DELIBERATELY NOT COVERED (stated, not hidden — see
+# `doc/03_plan` for the follow-up):
+#   - `border-radius` (rounded corners) — the rasterizer beneath this
+#     (`paint_chunk_rasterizer.paint_rect`) only draws axis-aligned
+#     rectangles; a rounded corner needs a per-pixel mask or an arc
+#     rasterizer, neither of which exists in this pipeline.
+#   - `border-style` is NOT distinguished beyond "paints" vs "does not
+#     paint": dashed/dotted/double/groove/ridge/inset/outset all paint as one
+#     opaque rect per edge, the same as `solid`. A dashed border and a solid
+#     border of the same width/colour are pixel-identical here. Genuine
+#     dash-pattern or groove-shading rendering is out of scope for this pass.
+#   - `box-shadow` blur-radius and spread-radius are parsed as valid tokens
+#     by `cascade._parse_box_shadow` (so their presence doesn't reject the
+#     declaration) but are NOT modelled: the painted rect is always exactly
+#     the box's own size, never blurred or grown/shrunk by spread.
+#   - Only the FIRST shadow of a comma-separated `box-shadow` list is read;
+#     `inset` shadows are treated identically to outer shadows (no clipping
+#     to the box's padding box).
+#   - Border thickness does NOT reserve layout space: `style_bridge`'s
+#     `BoxModel` still hardcodes all four border widths to 0 (see that
+#     module's own comment), so a thick border paints OVER the box's outer
+#     edge pixels rather than pushing content inward. This mirrors how this
+#     lane already treats padding/margin as paint-time-only in earlier
+#     landings, and is the same reason a border here is drawn AT the box's
+#     existing `rect_for` edges rather than outside them.
+#   - Transforms and gradients remain fully unimplemented — the paint
+#     primitive this whole pipeline is built on (`paint_rect`) is a flat
+#     axis-aligned solid-colour STORE; neither a coordinate transform nor a
+#     per-pixel colour ramp fits that primitive without a materially
+#     different rasterizer, so they are out of scope for this landing and
+#     tracked as open work rather than attempted here.
+
+use std.blink.entity.computed_style.{ComputedStyle}
+use std.blink.layout.style_bridge.{StyledLayout}
+use std.common.ui.render_opt.paint_chunk_rasterizer.{PaintChunkRects}
+
+# True when a resolved border side should actually paint a pixel: not
+# `none`/`hidden`, a strictly positive width, and a non-transparent colour.
+fn _border_side_paints(style_kw: text, width_px: f64, argb: i64) -> bool:
+    if style_kw == "none" or style_kw == "hidden":
+        return false
+    if width_px <= 0.0:
+        return false
+    val alpha = (argb >> 24) & 0xFF
+    alpha != 0
+
+# Emit up to 4 edge rects for one box's border, drawn AT the box's own
+# `(left, top, right, bottom)` rect (see module header: border thickness does
+# not reserve layout space, so the edge rect is painted on top of the box's
+# own outer pixels, one border-width thick, inset from that edge).
+fn _paint_box_border(rects: PaintChunkRects, style: ComputedStyle,
+                     left: f64, top: f64, right: f64, bottom: f64):
+    val l = left.to_i64()
+    val t = top.to_i64()
+    val r = right.to_i64()
+    val b = bottom.to_i64()
+    val w = r - l
+    val h = b - t
+
+    val top_w = style.border_top_width.to_px()
+    val top_argb = style.border_top_color.to_sk_color()
+    if _border_side_paints(style.border_top_style, top_w, top_argb):
+        val th = top_w.to_i64()
+        if th > 0 and w > 0:
+            rects.add_rect(l, t, w, th, top_argb)
+
+    val bottom_w = style.border_bottom_width.to_px()
+    val bottom_argb = style.border_bottom_color.to_sk_color()
+    if _border_side_paints(style.border_bottom_style, bottom_w, bottom_argb):
+        val bh = bottom_w.to_i64()
+        if bh > 0 and w > 0:
+            rects.add_rect(l, b - bh, w, bh, bottom_argb)
+
+    val left_w = style.border_left_width.to_px()
+    val left_argb = style.border_left_color.to_sk_color()
+    if _border_side_paints(style.border_left_style, left_w, left_argb):
+        val lw = left_w.to_i64()
+        if lw > 0 and h > 0:
+            rects.add_rect(l, t, lw, h, left_argb)
+
+    val right_w = style.border_right_width.to_px()
+    val right_argb = style.border_right_color.to_sk_color()
+    if _border_side_paints(style.border_right_style, right_w, right_argb):
+        val rw = right_w.to_i64()
+        if rw > 0 and h > 0:
+            rects.add_rect(r - rw, t, rw, h, right_argb)
+
+# Walk `layout.node_ids`/`layout.styles` in index-parallel order (same
+# iteration shape as `paint_chunks_from_styled_layout`) and emit border edge
+# rects for every box whose resolved style paints at least one side.
+pub fn paint_border_chunks_from_styled_layout(layout: StyledLayout) -> PaintChunkRects:
+    """Flatten a styled, laid-out document into border-edge paint rects."""
+    var rects = PaintChunkRects.create()
+    var i = 0
+    while i < layout.node_ids.len():
+        val node_id = layout.node_ids[i as i32]
+        val style = layout.styles[i as i32]
+        match layout.rect_for(node_id):
+            Some(r):
+                _paint_box_border(rects, style, r.0, r.1, r.2, r.3)
+            None:
+                pass_do_nothing()
+        i = i + 1
+    rects
+
+# Walk the same list and emit one shadow rect per box that declared a
+# `box-shadow`, offset by `(box_shadow_x, box_shadow_y)` from the box's own
+# rect and sized identically to it (see module header: this is exact for a
+# zero-blur, zero-spread shadow since the caller paints it BEFORE the box's
+# own background/border on top).
+pub fn paint_box_shadow_chunks_from_styled_layout(layout: StyledLayout) -> PaintChunkRects:
+    """Flatten a styled, laid-out document into box-shadow paint rects."""
+    var rects = PaintChunkRects.create()
+    var i = 0
+    while i < layout.node_ids.len():
+        val node_id = layout.node_ids[i as i32]
+        val style = layout.styles[i as i32]
+        if style.box_shadow_set:
+            match layout.rect_for(node_id):
+                Some(r):
+                    val w = (r.2 - r.0).to_i64()
+                    val h = (r.3 - r.1).to_i64()
+                    if w > 0 and h > 0:
+                        val sx = r.0 + style.box_shadow_x.to_px()
+                        val sy = r.1 + style.box_shadow_y.to_px()
+                        val argb = style.box_shadow_color.to_sk_color()
+                        val alpha = (argb >> 24) & 0xFF
+                        if alpha != 0:
+                            rects.add_rect(sx.to_i64(), sy.to_i64(), w, h, argb)
+                None:
+                    pass_do_nothing()
+        i = i + 1
+    rects
+
+export paint_border_chunks_from_styled_layout, paint_box_shadow_chunks_from_styled_layout

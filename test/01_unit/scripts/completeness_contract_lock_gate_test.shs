@@ -1,0 +1,24 @@
+#!/bin/sh
+# Exercises scripts/check/check-completeness-contract-lock.shs:
+#   selftest passes; --no-census PASSes on the locked tree; a contract doc edit
+#   FAILs with "contract hash drifted"; an unknown flag is ERROR exit 2.
+set -eu
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+CHECK="scripts/check/check-completeness-contract-lock.shs"
+DOC="doc/02_requirements/language/critical_completeness.md"
+fails=0
+check() { # check <name> <expected-rc> <expected-last-line-substr> <args...>
+    _n=$1; _erc=$2; _sub=$3; shift 3
+    set +e; _out=$(sh "$CHECK" "$@" 2>/dev/null); _rc=$?; set -e
+    _last=$(printf '%s\n' "$_out" | tail -1)
+    case "$_last" in *"$_sub"*) _ok=1 ;; *) _ok=0 ;; esac
+    if [ "$_rc" -eq "$_erc" ] && [ "$_ok" -eq 1 ]; then echo "ok   $_n"; else echo "FAIL $_n: rc=$_rc last=$_last"; fails=$((fails+1)); fi
+}
+check selftest 0 "selftest only" --selftest
+check locked 0 "hash locked" --no-census
+check badflag 2 "ERROR — nothing was checked" --bogus
+cp "$DOC" "$DOC.bak"; trap 'mv "$DOC.bak" "$DOC"' EXIT HUP INT TERM
+printf '\nx\n' >> "$DOC"
+check drift 1 "contract hash drifted" --no-census
+[ "$fails" -eq 0 ] && echo "PASS — 4 case(s) checked" || { echo "FAIL — $fails case(s) failed"; exit 1; }

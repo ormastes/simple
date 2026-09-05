@@ -1,0 +1,50 @@
+"""
+## Purpose and audience
+Purpose: Pin watch dependency matching while changed-path normalization is hoisted.
+Audience: watch and tooling maintainers.
+"""
+
+use std.spec.*
+use app.watch.deps.{FileDeps, DepGraph, normalize_dep_file_path, file_matches_import, find_dependents}
+
+fn sample_graph() -> DepGraph:
+    DepGraph(deps: [
+        FileDeps(path: "src/app/first.spl", imports: ["std.io.file_ops", "std.other", "std.io.file_ops"]),
+        FileDeps(path: "src/app/second.spl", imports: ["lib.io.file_ops"]),
+        FileDeps(path: "src/app/unrelated.spl", imports: ["std.net.socket"])
+    ])
+
+describe "watch dependency changed-path normalization":
+    it "normalizes slash styles once into the same module-like path":
+        step("Verify: slash and backslash paths have identical normalized text")
+        expect(normalize_dep_file_path("src/lib/io/file_ops.spl")).to_equal("src.lib.io.file_ops.spl")
+        expect(normalize_dep_file_path("src\\lib\\io\\file_ops.spl")).to_equal("src.lib.io.file_ops.spl")
+
+    it "preserves std lib app and compiler prefix matching":
+        step("Verify: compatibility wrapper preserves prefix stripping")
+        val changed = "src/lib/nogc_sync_mut/io/file_ops.spl"
+        expect(file_matches_import(changed, "std.io.file_ops")).to_equal(true)
+        expect(file_matches_import(changed, "lib.io.file_ops")).to_equal(true)
+        expect(file_matches_import("src/app/watch/deps.spl", "app.watch.deps")).to_equal(true)
+        expect(file_matches_import("src/compiler/60.mir_opt/mod.spl", "compiler.60.mir_opt.mod")).to_equal(true)
+
+    it "returns graph-order dependents once across repeated imports and changes":
+        step("Verify: hoisting does not reorder or duplicate dependents")
+        val result = find_dependents(sample_graph(), [
+            "src/lib/nogc_sync_mut/io/file_ops.spl",
+            "src/lib/nogc_sync_mut/io/other.spl"
+        ])
+        expect(result.len()).to_equal(2)
+        expect(result[0]).to_equal("src/app/first.spl")
+        expect(result[1]).to_equal("src/app/second.spl")
+
+    it "pins existing changed-file ordering behavior":
+        step("Verify: self first excludes while dependency first may retain")
+        val graph = DepGraph(deps: [
+            FileDeps(path: "src/app/first.spl", imports: ["std.io.file_ops"])
+        ])
+        val self_first = find_dependents(graph, ["src/app/first.spl", "src/lib/io/file_ops.spl"])
+        val dependency_first = find_dependents(graph, ["src/lib/io/file_ops.spl", "src/app/first.spl"])
+        expect(self_first.len()).to_equal(0)
+        expect(dependency_first.len()).to_equal(1)
+        expect(dependency_first[0]).to_equal("src/app/first.spl")

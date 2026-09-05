@@ -1,0 +1,66 @@
+# Remote-main cache promotion — C9 SLICE 1 (policy gateway only).
+#
+# ############################################################################
+# THE REMOTE WRITE STEP IS DELIBERATELY ABSENT.
+#
+# This workflow validates promotion requests and stops. It does NOT publish
+# anything to the trusted remote-main cache namespace, and it references NO
+# secrets — there is nothing here that could authenticate a remote write even
+# if a step tried. The writer lands in C9 slice 2, at which point this file
+# gains exactly one credentialed step, gated on the gateway's exit code.
+#
+# Corollary that must survive slice 2: remote-main is written ONLY from this
+# protected, main-only workflow. Developer machines never write remote-main
+# (driver_cache layer rule 6) — there is no flag or env var that flips it, and
+# none may be added.
+# ############################################################################
+name: cache-promotion
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-promotion-main
+  cancel-in-progress: false
+
+jobs:
+  validate-promotions:
+    name: Validate cache promotion requests
+    runs-on: ubuntu-latest
+    steps:
+      # Fail-closed ref guard. `on.push.branches` already restricts this, but a
+      # workflow re-run or a future trigger addition must not be able to run
+      # promotion validation from a non-main ref.
+      - name: Guard — refuse to run from a non-main ref
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "ERROR — nothing was checked (ref $GITHUB_REF is not refs/heads/main)"
+            exit 2
+          fi
+          echo "ref guard: $GITHUB_REF"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate promotion requests
+        env:
+          CACHE_PROMOTION_REQUEST_DIR: build/cache/promotion/requests
+          CACHE_PROMOTION_OUT_DIR: build/cache/promotion/approved
+        run: sh scripts/ci/cache-promote.shs
+
+      - name: Upload approved receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-promotion-approved
+          path: build/cache/promotion/approved
+          if-no-files-found: ignore
+
+      # NO remote publish step here. See the banner at the top of this file.

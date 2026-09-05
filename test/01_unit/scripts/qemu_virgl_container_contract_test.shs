@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+dockerfile=$root/tools/docker/Dockerfile.qemu-virgl-headless
+launcher=$root/scripts/tool/qemu-system-x86_64-virgl-container.shs
+capability=$root/scripts/check/check-headless-qemu-virgl-container.shs
+runner=$root/scripts/check/check-qemu-gtk-wm-capture-container.shs
+qmp_source=$root/src/app/test/simpleos_desktop_qmp_launch.spl
+
+sh -n "$launcher" "$capability" "$runner" "$root/scripts/setup/build-headless-qemu-virgl-container.shs"
+
+grep -Eq '^FROM ubuntu@sha256:[0-9a-f]{64}$' "$dockerfile"
+grep -Fq 'ARG QEMU_VERSION=1:8.2.2+ds-0ubuntu1.18' "$dockerfile"
+! grep -Eq '^FROM .*:(latest|rolling)' "$dockerfile"
+
+for invariant in '--network none' '--read-only' '--cap-drop ALL' '--security-opt no-new-privileges' '--user "$host_uid:$host_gid"' '--device /dev/kvm' '--device "$render_node"'; do
+    grep -Fq -- "$invariant" "$launcher"
+done
+grep -Fq 'LD_PRELOAD=/usr/lib/x86_64-linux-gnu/qemu/ui-opengl.so' "$launcher"
+grep -Fq 'MESA_SHADER_CACHE_DISABLE=true' "$launcher"
+
+grep -Fq 'missing-admitted-simple-bin' "$runner"
+grep -Fq 'SIMPLEOS_DESKTOP_QMP_TARGET=wm-simple-web' "$runner"
+grep -Fq 'SIMPLEOS_DESKTOP_QMP_KEEPALIVE=1' "$runner"
+grep -Fq 'SIMPLEOS_DESKTOP_QMP_VIRGL=1' "$runner"
+grep -Fq 'check-headless-qemu-virgl-container.shs' "$runner"
+grep -Fq 'check-qemu-gtk-wm-capture-evidence.shs' "$runner"
+
+grep -Fq 'qmp_env_get("SIMPLEOS_DESKTOP_QMP_VIRGL")' "$qmp_source"
+grep -Fq 'qmp_env_get("SIMPLEOS_DESKTOP_QMP_QEMU_SYSTEM")' "$qmp_source"
+grep -Fq '["-display", "egl-headless,rendernode=/dev/dri/renderD128", "-device", "virtio-vga-gl"]' "$qmp_source"
+grep -Fq 'gui_mode: use_virgl' "$qmp_source"
+
+grep -Fq 'headless_qemu_virgl_adapter_module_sha256=' "$capability"
+grep -Fq 'headless_qemu_virgl_guest_capture=unclaimed' "$capability"
+
+echo 'qemu virgl container contract: PASS'

@@ -1,0 +1,46 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_diff_log_mode_fixture"
+
+fn _setup_fixture():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + " && printf 'one\\ntwo\\n' > " + FIXTURE_DIR + "/old.spl && printf 'one\\nthree\\n' > " + FIXTURE_DIR + "/new.spl"
+    ])
+
+fn _run_diff(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/diff/main.spl\" " + joined
+    ])
+
+describe "diff log mode CLI options":
+    it "shows shared log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_diff(["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_diff(["--log-mode=json", "old.spl", "new.spl"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"diff\"")
+        expect(out).to_contain("\"status\":\"ok\"")
+        expect(out).to_contain("\"modifications\":1")
+
+    it "supports dot progress":
+        _setup_fixture()
+        val (out, err, code) = _run_diff(["--progress=dot", "--stat", "old.spl", "new.spl"])
+        expect(code).to_equal(0)
+        expect(out).to_contain(".")
+        expect(out).to_contain("1 modifications")
+
+    it "rejects invalid log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_diff(["--log-mode=noisy", "old.spl", "new.spl"])
+        expect(code).to_equal(1)

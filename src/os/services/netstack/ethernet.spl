@@ -1,0 +1,199 @@
+# Ethernet Frame Layer
+#
+# MDSOC: feature dimension, network layer
+# Parses and builds Ethernet II frames.
+# EtherType dispatch to upper layers (ARP, IPv4).
+#
+# Frame format:
+#   [6 bytes dst MAC] [6 bytes src MAC] [2 bytes EtherType] [payload ...]
+#   Minimum frame: 60 bytes (padded), maximum: 1514 bytes.
+
+val ETHERTYPE_IPV4: u16 = 0x0800
+val ETHERTYPE_ARP: u16 = 0x0806
+val ETHERTYPE_IPV6: u16 = 0x86DD
+
+val ETH_HEADER_SIZE: u64 = 14   # 6 dst + 6 src + 2 type
+val ETH_MIN_FRAME: u64 = 60
+val ETH_MAX_FRAME: u64 = 1514
+val ETH_ADDR_LEN: u64 = 6
+
+# ============================================================================
+# MAC Address
+# ============================================================================
+
+struct EthAddress:
+    """6-byte MAC address."""
+    b0: u8
+    b1: u8
+    b2: u8
+    b3: u8
+    b4: u8
+    b5: u8
+
+impl EthAddress:
+    static fn from_bytes(data: [u8], offset: u64) -> EthAddress:
+        """Read a 6-byte MAC address from data at the given offset."""
+        EthAddress(
+            b0: data[offset],
+            b1: data[offset + 1],
+            b2: data[offset + 2],
+            b3: data[offset + 3],
+            b4: data[offset + 4],
+            b5: data[offset + 5]
+        )
+
+    static fn broadcast() -> EthAddress:
+        """Return the Ethernet broadcast address FF:FF:FF:FF:FF:FF."""
+        EthAddress(b0: 0xFF, b1: 0xFF, b2: 0xFF, b3: 0xFF, b4: 0xFF, b5: 0xFF)
+
+    static fn zero() -> EthAddress:
+        """Return the zero MAC address 00:00:00:00:00:00."""
+        EthAddress(b0: 0, b1: 0, b2: 0, b3: 0, b4: 0, b5: 0)
+
+    static fn from_driver_mac(mac: [u8]) -> EthAddress:
+        """Create from a 6-byte array returned by VirtioNetDriver.mac_address()."""
+        EthAddress(
+            b0: mac[0], b1: mac[1], b2: mac[2],
+            b3: mac[3], b4: mac[4], b5: mac[5]
+        )
+
+    fn equals(other: EthAddress) -> bool:
+        (self.b0 == other.b0 and self.b1 == other.b1 and
+         self.b2 == other.b2 and self.b3 == other.b3 and
+         self.b4 == other.b4 and self.b5 == other.b5)
+
+    fn is_broadcast() -> bool:
+        (self.b0 == 0xFF and self.b1 == 0xFF and self.b2 == 0xFF and
+         self.b3 == 0xFF and self.b4 == 0xFF and self.b5 == 0xFF)
+
+    fn is_zero() -> bool:
+        (self.b0 == 0 and self.b1 == 0 and self.b2 == 0 and
+         self.b3 == 0 and self.b4 == 0 and self.b5 == 0)
+
+    fn to_bytes() -> [u8]:
+        """Return as a 6-byte array."""
+        [self.b0, self.b1, self.b2, self.b3, self.b4, self.b5]
+
+    fn to_text() -> text:
+        """Format as colon-separated hex: AA:BB:CC:DD:EE:FF."""
+        val s0 = _hex_byte(self.b0)
+        val s1 = _hex_byte(self.b1)
+        val s2 = _hex_byte(self.b2)
+        val s3 = _hex_byte(self.b3)
+        val s4 = _hex_byte(self.b4)
+        val s5 = _hex_byte(self.b5)
+        "{s0}:{s1}:{s2}:{s3}:{s4}:{s5}"
+
+# ============================================================================
+# Ethernet Frame
+# ============================================================================
+
+struct EthFrame:
+    """Parsed Ethernet II frame."""
+    dst: EthAddress
+    src: EthAddress
+    ethertype: u16
+    payload: [u8]
+
+# ============================================================================
+# Parse / Build
+# ============================================================================
+
+fn eth_parse(data: [u8]) -> Result<EthFrame, text>:
+    """Parse raw bytes into an Ethernet frame.
+
+    Validates minimum length (14 bytes header). Extracts destination MAC,
+    source MAC, EtherType, and payload.
+    """
+    if data.len() < ETH_HEADER_SIZE:
+        return Err("ethernet frame too short: {data.len()} < {ETH_HEADER_SIZE}")
+
+    val dst = EthAddress.from_bytes(data, 0)
+    val src = EthAddress.from_bytes(data, 6)
+
+    # EtherType is big-endian (network byte order)
+    val ethertype: u16 = (data[12].to_u16() << 8) | data[13].to_u16()
+
+    # Extract payload (everything after the 14-byte header)
+    var payload: [u8] = []
+    var i: u64 = ETH_HEADER_SIZE
+    while i < data.len():
+        payload.push(data[i])
+        i = i + 1
+
+    Ok(EthFrame(dst: dst, src: src, ethertype: ethertype, payload: payload))
+
+fn eth_build(dst: EthAddress, src: EthAddress, ethertype: u16, payload: [u8]) -> [u8]:
+    """Build raw Ethernet frame bytes.
+
+    Constructs: 6 bytes dst + 6 bytes src + 2 bytes ethertype + payload.
+    Pads to minimum 60 bytes if the total is shorter.
+    """
+    var frame: [u8] = []
+
+    # Destination MAC
+    frame.push(dst.b0)
+    frame.push(dst.b1)
+    frame.push(dst.b2)
+    frame.push(dst.b3)
+    frame.push(dst.b4)
+    frame.push(dst.b5)
+
+    # Source MAC
+    frame.push(src.b0)
+    frame.push(src.b1)
+    frame.push(src.b2)
+    frame.push(src.b3)
+    frame.push(src.b4)
+    frame.push(src.b5)
+
+    # EtherType (big-endian)
+    frame.push(((ethertype >> 8) & 0xFF).to_u8())
+    frame.push((ethertype & 0xFF).to_u8())
+
+    # Payload
+    var i: u64 = 0
+    while i < payload.len():
+        frame.push(payload[i])
+        i = i + 1
+
+    # Pad to minimum Ethernet frame size (60 bytes)
+    while frame.len() < ETH_MIN_FRAME:
+        frame.push(0)
+
+    frame
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _hex_nibble(n: u8) -> text:
+    """Convert a 4-bit value to a single hex character."""
+    if n < 10:
+        match n:
+            0: "0"
+            1: "1"
+            2: "2"
+            3: "3"
+            4: "4"
+            5: "5"
+            6: "6"
+            7: "7"
+            8: "8"
+            9: "9"
+            _: "?"
+    else:
+        match n:
+            10: "A"
+            11: "B"
+            12: "C"
+            13: "D"
+            14: "E"
+            15: "F"
+            _: "?"
+
+fn _hex_byte(b: u8) -> text:
+    """Format a byte as two uppercase hex digits."""
+    val hi = _hex_nibble((b >> 4) & 0x0F)
+    val lo = _hex_nibble(b & 0x0F)
+    "{hi}{lo}"

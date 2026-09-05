@@ -1,0 +1,61 @@
+# @cover src/os/apps/servers_user/main.spl
+
+# @req: REQ-SIMPLEOS-SERVER-LISTENER-001
+"""
+The filesystem-launched combined server owns every HTTP listener it creates.
+Bind/listen failures close the newly created descriptor, and a successful HTTP
+listener is closed if the peer database listener cannot be published.
+"""
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+use os.apps.servers_user.main.{
+    http_listener_requires_partial_startup_close,
+    listener_requires_setup_failure_close
+}
+
+describe "SimpleOS combined-server listener ownership":
+    it "closes only an owned HTTP listener during partial startup failure":
+        # @req: REQ-SIMPLEOS-SERVER-LISTENER-001
+        step("Decide cleanup from the two listener publication outcomes")
+        expect(http_listener_requires_partial_startup_close(true, -1)).to_equal(true)
+        expect(http_listener_requires_partial_startup_close(false, -1)).to_equal(false)
+        expect(http_listener_requires_partial_startup_close(true, 9)).to_equal(false)
+        expect(http_listener_requires_partial_startup_close(false, 9)).to_equal(false)
+
+    it "closes the created descriptor on bind and listen errors":
+        # @req: REQ-SIMPLEOS-SERVER-LISTENER-001
+        step("Decide cleanup across every socket setup ownership state")
+        expect(listener_requires_setup_failure_close(false, false, false)).to_equal(false)
+        expect(listener_requires_setup_failure_close(true, false, false)).to_equal(true)
+        expect(listener_requires_setup_failure_close(true, true, false)).to_equal(true)
+        expect(listener_requires_setup_failure_close(true, true, true)).to_equal(false)
+
+    it "uses the ownership decision once at each fallible boundary":
+        # @req: REQ-SIMPLEOS-SERVER-LISTENER-001
+        step("Inspect the bind and listen failure branches")
+        val source = file_read("src/os/apps/servers_user/main.spl")
+        val bind_error = source.find(
+            "listener_requires_setup_failure_close(true, false, false)")
+        val listen_error = source.find(
+            "listener_requires_setup_failure_close(true, true, false)")
+        expect(bind_error).to_be_greater_than(-1)
+        expect(listen_error).to_be_greater_than(bind_error)
+        val bind_branch = source.split(
+            "listener_requires_setup_failure_close(true, false, false)")[1].split(
+                "case Ok(_):")[0]
+        val listen_branch = source.split(
+            "listener_requires_setup_failure_close(true, true, false)")[1].split(
+                "case Ok(_): Ok(listener)")[0]
+        expect(bind_branch.split("close_fd(listener.fd)").len()).to_equal(2)
+        expect(listen_branch.split("close_fd(listener.fd)").len()).to_equal(2)
+        expect(source).to_contain("close_fd(http_result.unwrap().fd)")
+
+    it "preserves the successful listener for the existing serve loop":
+        # @req: REQ-SIMPLEOS-SERVER-LISTENER-001
+        step("Confirm successful startup still transfers the HTTP listener")
+        val source = file_read("src/os/apps/servers_user/main.spl")
+        expect(source).to_contain("case Ok(_): Ok(listener)")
+        expect(source).to_contain("val http_listener = http_result.unwrap()")
+        expect(source).to_contain("handle_http(http_listener, secure_policy)")

@@ -1,0 +1,185 @@
+
+# CSS Float Layout (CSS 2.1 §9.5.1)
+#
+# FloatBox, FloatContext, FloatPos types and all float placement helpers.
+# No BeLayoutBox field access — safe to import cross-module.
+
+use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, css_get_overflow}
+
+# =========================================================================
+# Float Layout Types (CSS 2.1 §9.5.1)
+# =========================================================================
+
+class FloatBox:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    side: i32
+
+class FloatContext:
+    left_floats: [FloatBox]
+    right_floats: [FloatBox]
+    current_y: i32
+
+    static fn create() -> FloatContext:
+        var lf: [FloatBox] = []
+        var rf: [FloatBox] = []
+        FloatContext(
+            left_floats: lf,
+            right_floats: rf,
+            current_y: 0
+        )
+
+    static fn at_y(y: i32) -> FloatContext:
+        var lf: [FloatBox] = []
+        var rf: [FloatBox] = []
+        FloatContext(
+            left_floats: lf,
+            right_floats: rf,
+            current_y: y
+        )
+
+class FloatPos:
+    x: i32
+    y: i32
+
+fn float_available_width_at(y: i32, ctx: FloatContext, total_width: i32) -> i32:
+    var left_intrusion = 0
+    var right_intrusion = 0
+    var li = 0
+    while li < ctx.left_floats.len():
+        val fl = ctx.left_floats[li]
+        li = li + 1
+        if y >= fl.y and y < (fl.y + fl.height):
+            val intrusion = fl.x + fl.width
+            if intrusion > left_intrusion:
+                left_intrusion = intrusion
+    var ri = 0
+    while ri < ctx.right_floats.len():
+        val fr = ctx.right_floats[ri]
+        ri = ri + 1
+        if y >= fr.y and y < (fr.y + fr.height):
+            val intrusion = total_width - fr.x
+            if intrusion > right_intrusion:
+                right_intrusion = intrusion
+    val available = total_width - left_intrusion - right_intrusion
+    if available > 0: available else: 0
+
+fn float_left_offset_at(y: i32, ctx: FloatContext) -> i32:
+    var left_edge = 0
+    var li = 0
+    while li < ctx.left_floats.len():
+        val fl = ctx.left_floats[li]
+        li = li + 1
+        if y >= fl.y and y < (fl.y + fl.height):
+            val edge = fl.x + fl.width
+            if edge > left_edge:
+                left_edge = edge
+    left_edge
+
+fn float_clear_y(clear_code: i32, ctx: FloatContext) -> i32:
+    var clear_y = ctx.current_y
+    if clear_code == 1 or clear_code == 3:
+        var li = 0
+        while li < ctx.left_floats.len():
+            val fl = ctx.left_floats[li]
+            li = li + 1
+            val bottom = fl.y + fl.height
+            if bottom > clear_y:
+                clear_y = bottom
+    if clear_code == 2 or clear_code == 3:
+        var ri = 0
+        while ri < ctx.right_floats.len():
+            val fr = ctx.right_floats[ri]
+            ri = ri + 1
+            val bottom = fr.y + fr.height
+            if bottom > clear_y:
+                clear_y = bottom
+    clear_y
+
+fn float_next_clear_y(y: i32, ctx: FloatContext) -> i32:
+    var min_bottom = y
+    var found = false
+    var li = 0
+    while li < ctx.left_floats.len():
+        val fl = ctx.left_floats[li]
+        li = li + 1
+        if y >= fl.y and y < (fl.y + fl.height):
+            val bottom = fl.y + fl.height
+            if not found or bottom < min_bottom:
+                min_bottom = bottom
+                found = true
+    var ri = 0
+    while ri < ctx.right_floats.len():
+        val fr = ctx.right_floats[ri]
+        ri = ri + 1
+        if y >= fr.y and y < (fr.y + fr.height):
+            val bottom = fr.y + fr.height
+            if not found or bottom < min_bottom:
+                min_bottom = bottom
+                found = true
+    if found: min_bottom else: y
+
+fn float_find_position(width: i32, side: i32, y: i32, ctx: FloatContext, available: i32) -> FloatPos:
+    if side == 1:
+        var left_edge = 0
+        var li = 0
+        while li < ctx.left_floats.len():
+            val fl = ctx.left_floats[li]
+            li = li + 1
+            if y >= fl.y and y < (fl.y + fl.height):
+                val edge = fl.x + fl.width
+                if edge > left_edge:
+                    left_edge = edge
+        return FloatPos(x: left_edge, y: y)
+    var right_edge = available
+    var ri = 0
+    while ri < ctx.right_floats.len():
+        val fr = ctx.right_floats[ri]
+        ri = ri + 1
+        if y >= fr.y and y < (fr.y + fr.height):
+            if fr.x < right_edge:
+                right_edge = fr.x
+    FloatPos(x: right_edge - width, y: y)
+
+fn float_place(float_w: i32, float_h: i32, side: i32, ctx: FloatContext, container_width: i32) -> FloatPos:
+    var try_y = ctx.current_y
+    var attempts = 0
+    while attempts < 100:
+        val avail = float_available_width_at(try_y, ctx, container_width)
+        if avail >= float_w:
+            return float_find_position(float_w, side, try_y, ctx, container_width)
+        val next_y = float_next_clear_y(try_y, ctx)
+        if next_y <= try_y:
+            return float_find_position(float_w, side, try_y, ctx, container_width)
+        try_y = next_y
+        attempts = attempts + 1
+    float_find_position(float_w, side, try_y, ctx, container_width)
+
+fn float_context_height(ctx: FloatContext) -> i32:
+    var max_bottom = 0
+    var li = 0
+    while li < ctx.left_floats.len():
+        val fl = ctx.left_floats[li]
+        li = li + 1
+        val bottom = fl.y + fl.height
+        if bottom > max_bottom:
+            max_bottom = bottom
+    var ri = 0
+    while ri < ctx.right_floats.len():
+        val fr = ctx.right_floats[ri]
+        ri = ri + 1
+        val bottom = fr.y + fr.height
+        if bottom > max_bottom:
+            max_bottom = bottom
+    max_bottom
+
+fn float_is_bfc_root(style: StyleProps) -> bool:
+    val overflow = css_get_overflow(style)
+    if overflow != "visible" and overflow != "":
+        return true
+    val disp = style.display
+    if disp == "flow-root" or disp == "flex" or disp == "inline-flex":
+        return true
+    false

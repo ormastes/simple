@@ -1,0 +1,176 @@
+# Flat-AST -> parser-AST transition table for the bootstrap frontend bridge
+# (src/compiler/10.frontend/_FlatAstBridge/).
+#
+# Row shape is the shared `transition: from/to/state/reason/test` format defined
+# by src/compiler/00.common/transition/ (lane A3). States:
+#   Implemented          -- a dedicated dispatch arm maps this tag onto the
+#                           same-named target node.
+#   Normalized(target)   -- a dedicated arm maps it onto a DIFFERENT target on
+#                           purpose; `to` names the real target.
+#   Unsupported(reason)  -- no arm; the node reaches the generic catch-all.
+#                           Every such row is LOUD as of lane C2: the fallback
+#                           raises a parser_error, so parser_has_errors() goes
+#                           true instead of the node vanishing silently.
+#   NotApplicable(reason)-- the tag constant exists but nothing ever allocates
+#                           the node, so it cannot reach the bridge.
+#
+# Lane C2 (flat-bridge transition census). Generated from a census of the tag
+# constants and of the dispatch arms; keep it in sync when an arm is added.
+#
+# Source of truth: module_assembly.spl :: flat_ast_to_module decl loop
+# (17 tags, 13 handled).
+#
+# Emitted in the shared reference dialect (flat `transition:` blocks, an
+# explicit `universe:` block, lowercase state tags) so
+# src/compiler/00.common/transition/transition_table.spl can compute
+# Missing = Universe - declared non-vacuously (universe_declared: true).
+# The `universe:` list below is EVERY tag constant declared in
+# src/compiler/10.frontend/core/_Ast/decl_nodes.spl -- 17 of them -- not merely the ones
+# this bridge happens to handle, which is what makes an omitted row show
+# up as Missing instead of silently disappearing. The numeric flat tag
+# lives in each row's `reason:` rather than in `from:`, because the
+# loader's variant_name_of() takes the text after the last dot verbatim
+# and a ' (tag=N)' suffix would never match a bare universe entry.
+
+table: flat_decl_to_ast_decl
+producer: FlatDeclKind
+consumer: ParserModule
+source: src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+
+universe:
+  - FN
+  - EXTERN_FN
+  - STRUCT
+  - VAL
+  - VAR
+  - USE
+  - EXPORT
+  - ENUM
+  - IMPL
+  - CLASS
+  - CE
+  - LAZY_VAL
+  - CLI
+  - AOP_ADVICE
+  - DI_BINDING
+  - ARCH_RULE
+  - TYPE_ALIAS
+
+transition:
+  from: FlatDeclKind.FN
+  to: "ParserModule.functions[] (ParserFunction)"
+  state: "Implemented"
+  reason: "(flat tag 1) Handled by flat_ast_to_module's decl chain (convert_decl_fn)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.EXTERN_FN
+  to: "ParserModule.functions[] (extern ParserFunction)"
+  state: "Implemented"
+  reason: "(flat tag 2) Handled by flat_ast_to_module's decl chain (convert_decl_extern_fn)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.STRUCT
+  to: "ParserModule.structs[] / .classes[] / .traits[]"
+  state: "Implemented"
+  reason: "(flat tag 3) Handled by flat_ast_to_module's decl chain (struct-body arm; a trait decl marked by decl_set_trait is rebuilt into module.traits)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.VAL
+  to: "ParserModule.globals[] (immutable)"
+  state: "Implemented"
+  reason: "(flat tag 4) Handled by flat_ast_to_module's decl chain (val/var arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.VAR
+  to: "ParserModule.globals[] (mutable)"
+  state: "Implemented"
+  reason: "(flat tag 5) Handled by flat_ast_to_module's decl chain (val/var arm, is_mutable set from the tag)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.USE
+  to: "ParserModule.imports[]"
+  state: "Implemented"
+  reason: "(flat tag 6) Handled by flat_ast_to_module's decl chain (use arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.EXPORT
+  to: "ParserModule.exports[]"
+  state: "Implemented"
+  reason: "(flat tag 7) Handled by flat_ast_to_module's decl chain (export arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.ENUM
+  to: "ParserModule.enums[]"
+  state: "Implemented"
+  reason: "(flat tag 8) Handled by flat_ast_to_module's decl chain (enum arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.IMPL
+  to: "ParserModule.impls[] (methods via convert_decl_method_fn)"
+  state: "Implemented"
+  reason: "(flat tag 9) Handled by flat_ast_to_module's decl chain (impl arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.CLASS
+  to: "(none)"
+  state: "NotApplicable(never-allocated)"
+  reason: "(flat tag 10) DECL_CLASS is declared in _Ast/decl_nodes.spl:236 but nothing ever calls decl_alloc(DECL_CLASS, ..): the only references in 10.frontend are re-exports and a c_codegen import. A `class` decl arrives through the struct-body path as DECL_STRUCT (tag 3) instead, so this tag cannot reach the bridge."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.CE
+  to: "(declaration dropped) + parser_error(loud fallback)"
+  state: "Unsupported(no-dispatch-arm-loud-fallback, doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md)"
+  reason: "(flat tag 11) `ce N:` / comptime-eval block declarations are allocated by _Ast/decl_nodes.spl:762 (decl_ce_block) from real source, but the flat_ast_to_module decl chain has no arm for tag 11. Before lane C2 the chain simply ran off the end and the whole declaration vanished from the module with no diagnostic at all -- strictly worse than the expression/statement NilLit case, because a dropped decl leaves no node behind. Now loud."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_unsupported_loud_spec.spl"
+
+transition:
+  from: FlatDeclKind.LAZY_VAL
+  to: "(declaration dropped) + parser_error(loud fallback)"
+  state: "Unsupported(no-dispatch-arm-loud-fallback, doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md)"
+  reason: "(flat tag 12) `lazy val` declarations are allocated by _Ast/decl_nodes.spl:575 (decl_lazy_val_binding) from real source; no arm for tag 12. Same silent-drop class as DECL_CE; loud as of lane C2."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_unsupported_loud_spec.spl"
+
+transition:
+  from: FlatDeclKind.CLI
+  to: "(declaration dropped) + parser_error(loud fallback)"
+  state: "Unsupported(no-dispatch-arm-loud-fallback, doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md)"
+  reason: "(flat tag 13) `cli` declarations (and their nested subcommands) are allocated by _Ast/decl_nodes.spl:747 (decl_cli_def) and parser_cli.spl:325; no arm for tag 13. Same silent-drop class as DECL_CE; loud as of lane C2."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_unsupported_loud_spec.spl"
+
+transition:
+  from: FlatDeclKind.AOP_ADVICE
+  to: "ParserModule aspect registry (aspect_registry_declare)"
+  state: "Implemented"
+  reason: "(flat tag 14) Handled by flat_ast_to_module's decl chain (aop advice arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.DI_BINDING
+  to: "ParserModule DI bindings"
+  state: "Implemented"
+  reason: "(flat tag 15) Handled by flat_ast_to_module's decl chain (di binding arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.ARCH_RULE
+  to: "ParserModule arch rules / layer registry"
+  state: "Implemented"
+  reason: "(flat tag 16) Handled by flat_ast_to_module's decl chain (arch rule arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"
+
+transition:
+  from: FlatDeclKind.TYPE_ALIAS
+  to: "ParserModule.type_aliases[] (ParserTypeAlias)"
+  state: "Implemented"
+  reason: "(flat tag 17) Handled by flat_ast_to_module's decl chain (type alias arm)."
+  test: "test/01_unit/compiler/frontend/flat_bridge_coverage/flat_decl_transition_census_spec.spl"

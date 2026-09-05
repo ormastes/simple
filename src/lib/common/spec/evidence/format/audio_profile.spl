@@ -1,0 +1,152 @@
+# Audio/media evidence profiles (E7 domain profile, evidence manifest v1).
+#
+# This module is pure: it turns a captured audio buffer into `CanonicalEvidence`
+# nodes that the shared comparator in `evidence_comparator.spl` can check. It
+# owns no capture, no codec decoding, and no playback — a provider elsewhere
+# records the samples and calls in here.
+#
+# f64 is banned in this layer (repo rule). Samples are already-decoded integer
+# PCM (interleaved across channels); level statistics (RMS, peak) are reported
+# in the SAME scale as the input samples — callers document what that scale
+# means for their source (e.g. 16-bit PCM full scale = 32767). `audio_rms_scaled`
+# additionally takes an explicit `scale` multiplier so a caller can request a
+# higher-precision (e.g. milli-unit) RMS without this module assuming f64
+# square-root: the RMS here is computed via pure-integer Newton's method on
+# scaled sums, never floating point.
+#
+# Guide: doc/07_guide/infra/sspec_typed_evidence.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md §7
+
+use std.common.spec.evidence.model.{
+    EvidenceNode, CanonicalEvidence,
+    evidence_node_at, canonical_evidence
+}
+
+# Interleaved PCM samples: for stereo, [L0, R0, L1, R1, ...].
+# `duration_ms` is NOT stored here as an independently-asserted field — it is
+# always derived from sample_count/sample_rate_hz/channel_count via
+# `audio_duration_ms`, so it can never disagree with the actual sample data.
+pub struct AudioSampleSet:
+    channel_count: i64
+    sample_rate_hz: i64
+    bit_depth: i64
+    samples: [i64]
+
+pub fn audio_sample_set_is_valid(set: AudioSampleSet) -> bool:
+    if set.samples.len() == 0:
+        return false
+    if set.sample_rate_hz <= 0:
+        return false
+    if set.channel_count <= 0:
+        return false
+    true
+
+fn abs_i64(v: i64) -> i64:
+    if v < 0:
+        return 0 - v
+    v
+
+# Integer square root via Newton's method (no f64). `n` must be >= 0.
+fn isqrt_i64(n: i64) -> i64:
+    if n <= 0:
+        return 0
+    var x = n
+    var y = (x + 1) / 2
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+    x
+
+# Duration is always derived from the sample count, never taken as a
+# caller-asserted field: an independently-set duration could silently
+# disagree with the number of samples actually captured. Per-channel frame
+# count is samples.len() / channel_count; duration_ms = frames * 1000 / rate.
+pub fn audio_duration_ms(sample_count: i64, sample_rate_hz: i64, channel_count: i64) -> i64:
+    if sample_rate_hz <= 0 or channel_count <= 0:
+        return -1
+    val frames = sample_count / channel_count
+    (frames * 1000) / sample_rate_hz
+
+# Root-mean-square level, scaled by `scale` (e.g. pass 1 for raw-unit RMS,
+# 1000 for milli-unit precision) before the integer square root is taken, so
+# a caller can recover sub-unit precision without this module ever touching
+# f64: sqrt(mean(sample^2) * scale^2) == sqrt(mean(sample^2)) * scale exactly
+# only in real arithmetic, so we instead scale the SUM before averaging to
+# keep the precision gain: rms = isqrt(mean(sample^2 * scale^2)).
+pub fn audio_rms_scaled(samples: [i64], scale: i64) -> i64:
+    if samples.len() == 0:
+        return -1
+    var total: i64 = 0
+    for s in samples:
+        total = total + (s * s)
+    val mean_sq = total / samples.len()
+    isqrt_i64(mean_sq * scale * scale)
+
+# Maximum absolute sample value across the buffer.
+pub fn audio_peak_scaled(samples: [i64]) -> i64:
+    var peak: i64 = 0
+    for s in samples:
+        val a = abs_i64(s)
+        if a > peak:
+            peak = a
+    peak
+
+# Fraction of samples whose absolute value is at or below `silence_threshold`,
+# reported in parts-per-thousand (permille) so the result stays an exact
+# integer instead of a fractional ratio that would need f64.
+pub fn audio_silence_ratio_permille(samples: [i64], silence_threshold: i64) -> i64:
+    if samples.len() == 0:
+        return -1
+    var quiet: i64 = 0
+    for s in samples:
+        if abs_i64(s) <= silence_threshold:
+            quiet = quiet + 1
+    (quiet * 1000) / samples.len()
+
+fn audio_sample_set_nodes(set: AudioSampleSet) -> [EvidenceNode]:
+    val duration_ms = audio_duration_ms(set.samples.len(), set.sample_rate_hz, set.channel_count)
+    val rms = audio_rms_scaled(set.samples, 1)
+    val peak = audio_peak_scaled(set.samples)
+    val silence = audio_silence_ratio_permille(set.samples, 0)
+    [
+        evidence_node_at("audio.channel_count", "{set.channel_count}", 0),
+        evidence_node_at("audio.sample_rate_hz", "{set.sample_rate_hz}", 1),
+        evidence_node_at("audio.bit_depth", "{set.bit_depth}", 2),
+        evidence_node_at("audio.duration_ms", "{duration_ms}", 3),
+        evidence_node_at("audio.rms", "{rms}", 4),
+        evidence_node_at("audio.peak", "{peak}", 5),
+        evidence_node_at("audio.silence_ratio_permille", "{silence}", 6)
+    ]
+
+# Converts a captured sample set into canonical evidence. An empty sample
+# set, a non-positive sample rate, or a zero channel count are all refused
+# rather than reported as a passing zero: a zero RMS / zero duration over no
+# real capture looks like a clean, silent measurement instead of the absence
+# of one.
+pub fn audio_to_evidence(set: AudioSampleSet, profile_id: text) -> CanonicalEvidence:
+    if set.samples.len() == 0:
+        return CanonicalEvidence(
+            kind: "audio",
+            profile_id: profile_id,
+            parse_ok: false,
+            parse_error: "audio sample set has no samples",
+            nodes: []
+        )
+    if set.sample_rate_hz <= 0:
+        return CanonicalEvidence(
+            kind: "audio",
+            profile_id: profile_id,
+            parse_ok: false,
+            parse_error: "audio sample set has non-positive sample_rate_hz " + "{set.sample_rate_hz}",
+            nodes: []
+        )
+    if set.channel_count <= 0:
+        return CanonicalEvidence(
+            kind: "audio",
+            profile_id: profile_id,
+            parse_ok: false,
+            parse_error: "audio sample set has non-positive channel_count " + "{set.channel_count}",
+            nodes: []
+        )
+
+    canonical_evidence("audio", profile_id, audio_sample_set_nodes(set))

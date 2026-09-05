@@ -1,0 +1,78 @@
+# Lossless 256-bit ABI-digest codec shared by SCI records and the provider
+# query ABI.
+#
+# SCI locks `abi_digest` as one canonical lowercase 64-hex SHA-256 string; the
+# provider query ABI carries fixed-width scalars only. This module is the one
+# place that converts between the two, WITHOUT truncating or re-hashing:
+# the 32 digest bytes are carried as four ordered u64 words, `w0` first.
+#
+# Byte order is explicit and frozen: `w0` is digest bytes 0..7 read
+# BIG-ENDIAN (bytes[0] is the most significant byte of w0), `w1` is bytes
+# 8..15, `w2` bytes 16..23, `w3` bytes 24..31. Big-endian was chosen because
+# it makes the word tuple read in the same order as the hex text, so a
+# mismatch is diagnosable by eye.
+
+use std.nogc_sync_mut.composition.provider_contract.{SimpleAbiDigest256V1}
+
+class SimpleAbiDigestParseV1:
+    ok: bool
+    value: SimpleAbiDigest256V1
+    diagnostic: text
+
+fn simple_abi_digest_zero_v1() -> SimpleAbiDigest256V1:
+    SimpleAbiDigest256V1(w0: 0, w1: 0, w2: 0, w3: 0)
+
+fn simple_abi_digest_is_zero_v1(value: SimpleAbiDigest256V1) -> bool:
+    value.w0 == 0 and value.w1 == 0 and value.w2 == 0 and value.w3 == 0
+
+fn simple_abi_digest_equals_v1(a: SimpleAbiDigest256V1, b: SimpleAbiDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+
+val _ABI_DIGEST_HEX_ALPHABET = "0123456789abcdef"
+
+fn _hex_nibble(c: text) -> i64:
+    # Canonical SCI digests are lowercase only; uppercase is rejected so two
+    # spellings of the same digest can never compare unequal by accident.
+    var i = 0
+    while i < 16:
+        if _ABI_DIGEST_HEX_ALPHABET.substring(i, i + 1) == c:
+            return i
+        i = i + 1
+    -1
+
+fn simple_abi_digest_parse_hex_v1(hex: text) -> SimpleAbiDigestParseV1:
+    if hex.len() != 64:
+        return SimpleAbiDigestParseV1(ok: false, value: simple_abi_digest_zero_v1(), diagnostic: "abi-digest-length-invalid")
+    var words: [u64] = [0, 0, 0, 0]
+    var i = 0
+    while i < 64:
+        val nibble = _hex_nibble(hex.substring(i, i + 1))
+        if nibble < 0:
+            return SimpleAbiDigestParseV1(ok: false, value: simple_abi_digest_zero_v1(), diagnostic: "abi-digest-not-lowercase-hex")
+        val slot = i / 16
+        words[slot] = (words[slot] << 4) | (nibble as u64)
+        i = i + 1
+    val value = SimpleAbiDigest256V1(w0: words[0], w1: words[1], w2: words[2], w3: words[3])
+    if simple_abi_digest_is_zero_v1(value):
+        # An all-zero digest is the wire's "not declared" sentinel, so it must
+        # never be produced by a real locked SCI value.
+        return SimpleAbiDigestParseV1(ok: false, value: value, diagnostic: "abi-digest-all-zero")
+    SimpleAbiDigestParseV1(ok: true, value: value, diagnostic: "")
+
+fn _u64_to_hex16(value: u64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 60
+    while shift >= 0:
+        val nibble = ((value >> (shift as u64)) & 15) as i64
+        out = out + digits.substring(nibble, nibble + 1)
+        shift = shift - 4
+    out
+
+fn simple_abi_digest_to_hex_v1(value: SimpleAbiDigest256V1) -> text:
+    _u64_to_hex16(value.w0) + _u64_to_hex16(value.w1) +
+        _u64_to_hex16(value.w2) + _u64_to_hex16(value.w3)
+
+export SimpleAbiDigestParseV1
+export simple_abi_digest_zero_v1, simple_abi_digest_is_zero_v1, simple_abi_digest_equals_v1
+export simple_abi_digest_parse_hex_v1, simple_abi_digest_to_hex_v1

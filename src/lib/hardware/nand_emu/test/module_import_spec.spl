@@ -1,0 +1,103 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — Module import probe spec
+# ============================================================================
+#
+# Imports EVERY nand_emu submodule and asserts one absolute-oracle fact per
+# module against a known datasheet / model value (never self-comparison). This
+# is the skeleton gate: it proves every module parses, registers, and resolves
+# through the nested package layout, and that the implemented-just-enough
+# constants/pure-functions return their documented values.
+#
+# Facts trace to doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md.
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.nand_emu.nand_types.{NeProfile, NeOpKind, ne_default_cell_params, ne_vt_pv_level}
+use hardware.nand_emu.geometry.ne_profile_geometry
+use hardware.nand_emu.vt_array.ne_vt_ram_bytes
+use hardware.nand_emu.physics.ne_sense_bit
+use hardware.nand_emu.cmd_fsm.ne_cmd_legal_during_busy
+use hardware.nand_emu.status.ne_status_after_reset
+use hardware.nand_emu.edc.ne_parity_byte
+use hardware.nand_emu.badblock.ne_good_block_marker
+use hardware.nand_emu.fault.ne_fault_spo
+use hardware.nand_emu.chip.ne_chip_new
+use hardware.nand_emu.rtl.pin_frontend.ne_latch_classify
+
+fn main():
+
+    describe("nand_types"):
+        it("exposes the Appendix B default program-verify level"):
+            """Appendix B / doc §3.1: PV level is Vt code 148 (+0.50 V) and the
+            default cell params carry ispp_max = 20 pulses."""
+            expect(ne_vt_pv_level()).to_equal(148)
+            expect(ne_default_cell_params().ispp_max).to_equal(20)
+
+    describe("geometry"):
+        it("resolves the S1 profile to a 528-byte page"):
+            """doc §4.1: profile S1 nano is a single 528-byte sector page."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            expect(geo.page_bytes).to_equal(528)
+            expect(geo.total_pages).to_equal(32)
+
+    describe("vt_array"):
+        it("sizes the S1 Vt array to 132 KB"):
+            """doc §4.1: Vt RAM = page_bytes * 8 * pages = 528 * 8 * 32 = 135168."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            expect(ne_vt_ram_bytes(geo)).to_equal(135168)
+
+    describe("physics"):
+        it("senses erased low as 1 and programmed high as 0"):
+            """doc §3.1 SLC read rule: bit = 1 when eff Vt < vref, else 0. The
+            erased mean (88) reads 1 and the programmed mean (168) reads 0 at
+            vref 128."""
+            expect(ne_sense_bit(88, 128)).to_equal(true)
+            expect(ne_sense_bit(168, 128)).to_equal(false)
+
+    describe("cmd_fsm"):
+        it("permits only 70h/F1h/7Bh/FFh during busy"):
+            """doc §7.2: Read Status (70h) is legal during busy; a Read (00h) is
+            a CmdDuringBusy violation."""
+            expect(ne_cmd_legal_during_busy(0x70)).to_equal(true)
+            expect(ne_cmd_legal_during_busy(0x00)).to_equal(false)
+
+    describe("status"):
+        it("reads C0h after reset with WP high"):
+            """doc §1.4: after reset with WP high the status register reads C0h."""
+            expect(ne_status_after_reset(true)).to_equal(0xC0)
+            expect(ne_status_after_reset(false)).to_equal(0x40)
+
+    describe("edc"):
+        it("computes odd/even byte parity"):
+            """1-bit EDC building block: 0x07 has three set bits (parity 1),
+            0x03 has two set bits (parity 0)."""
+            expect(ne_parity_byte(0x07)).to_equal(1)
+            expect(ne_parity_byte(0x03)).to_equal(0)
+
+    describe("badblock"):
+        it("uses FFh as the good-block marker"):
+            """doc §8 scenario 9: a good block reads FFh at the bad-block marker;
+            factory-bad blocks carry a non-FFh value."""
+            expect(ne_good_block_marker()).to_equal(255)
+
+    describe("fault"):
+        it("builds a sudden-power-off descriptor at the requested pulse"):
+            """doc §8 scenario 5: SPO aborts a program at a chosen ISPP pulse."""
+            val f = ne_fault_spo(NeOpKind.Program, 8, 100)
+            expect(f.at_pulse).to_equal(8)
+            expect(f.target_row).to_equal(100)
+
+    describe("chip"):
+        it("constructs an S1 chip carrying the resolved geometry"):
+            """doc §9.4: attach + load_profile yields a chip whose geometry is
+            the S1 528-byte page."""
+            val chip = ne_chip_new(NeProfile.S1)
+            expect(chip.geometry.page_bytes).to_equal(528)
+
+    describe("rtl.pin_frontend"):
+        it("classifies CLE high / ALE low as a command latch"):
+            """doc §5.1: CLE asserted with ALE deasserted is a Command cycle."""
+            val kind = ne_latch_classify(true, false)
+            expect(kind.to_text()).to_equal("command")

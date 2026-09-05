@@ -1,0 +1,81 @@
+# Pure-Simple BDD runtime subset used by native SPipe specs.
+
+@unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+
+@unsafe(reason: "raw tagged-value stdout write status ABI", capabilities: [ffi])
+extern fn rt_stdout_write(value: i64) -> i64
+@unsafe(reason: "raw tagged-value stdout line write status ABI", capabilities: [ffi])
+extern fn rt_println_value(value: i64) -> i64
+@unsafe(reason: "raw integer to owned tagged-string conversion ABI", capabilities: [ffi])
+extern fn rt_raw_i64_to_string(value: i64) -> i64
+
+@always_inline
+fn _sffi_core_bdd_load_i64(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_i64(ptr, offset)
+
+@always_inline
+fn _sffi_core_bdd_stdout_write(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_stdout_write(value)
+
+@always_inline
+fn _sffi_core_bdd_println_value(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_println_value(value)
+
+@always_inline
+fn _sffi_core_bdd_raw_i64_to_string(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_raw_i64_to_string(value)
+
+var bdd_passed: i64 = 0
+var bdd_failed: i64 = 0
+var bdd_current_failed = false
+
+pub fn rt_bdd_describe_start_rv(name: i64):
+    _sffi_core_bdd_println_value(name)
+
+pub fn rt_bdd_describe_end():
+    _sffi_core_bdd_stdout_write(_sffi_core_bdd_raw_i64_to_string(bdd_passed + bdd_failed))
+    _sffi_core_bdd_stdout_write(" examples, ")
+    _sffi_core_bdd_stdout_write(_sffi_core_bdd_raw_i64_to_string(bdd_failed))
+    _sffi_core_bdd_stdout_write(" failures\n")
+
+pub fn rt_bdd_it_start_rv(name: i64):
+    bdd_current_failed = false
+    _sffi_core_bdd_stdout_write("  ")
+    _sffi_core_bdd_stdout_write(name)
+
+pub fn rt_bdd_it_end(passed: i64):
+    if passed != 0 and not bdd_current_failed:
+        bdd_passed = bdd_passed + 1
+        _sffi_core_bdd_stdout_write(" pass\n")
+    else:
+        bdd_failed = bdd_failed + 1
+        _sffi_core_bdd_stdout_write(" fail\n")
+
+pub fn rt_bdd_expect_truthy_rv(value: i64):
+    var boxed_u64_zero = false
+    if (value & 7) == 1:
+        val ptr = value & -8
+        if ptr >= 4096 and (_sffi_core_bdd_load_i64(ptr, 0) & 4294967295) == 0x55494E54:
+            boxed_u64_zero = _sffi_core_bdd_load_i64(ptr, 8) == 0
+    if value == 0 or value == 3 or value == 19 or boxed_u64_zero:
+        bdd_current_failed = true
+
+pub fn rt_bdd_expect_truthy(value: i64):
+    rt_bdd_expect_truthy_rv(value)
+
+pub fn rt_bdd_format_results() -> i64:
+    rt_bdd_describe_end()
+    bdd_failed
+
+pub fn rt_bdd_executed_count() -> i64:
+    bdd_passed + bdd_failed
+
+pub fn rt_bdd_clear_state():
+    bdd_passed = 0
+    bdd_failed = 0
+    bdd_current_failed = false

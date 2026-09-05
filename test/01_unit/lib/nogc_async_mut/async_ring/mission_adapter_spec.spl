@@ -1,0 +1,317 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.common.contracts.execution.async_profile_v1.{
+    AsyncProfile, AsyncProfilePreset, AsyncRingMapping,
+    async_profile_common_v1, async_profile_mission_alloc_v1,
+    async_profile_mission_pool_v1
+}
+use std.common.contracts.execution.simple_ring_async_v1.{
+    RingMappingGrade, RingTerminalKind, TaskPollResult
+}
+use std.nogc_async_mut.async_ring.simple_ring.{
+    SimpleRingError, RingCancelOutcome
+}
+use std.nogc_async_mut.async_ring.mission_adapter.{
+    MissionRingLifecycle, MissionRingEvidenceLevel, MissionRingEvidence,
+    MissionRingAdapterError, MissionSimpleRingAdapter
+}
+
+const OWNER: u64 = 7u64
+
+fn adapter(capacity: i64) -> MissionSimpleRingAdapter<i64, i64>:
+    match MissionSimpleRingAdapter<i64, i64>.create(OWNER, 99u64, capacity):
+        case Ok(value): value
+        case Err(_): fail("adapter construction failed")
+
+fn alloc_evidence(capacity: u64) -> MissionRingEvidence:
+    MissionRingEvidence(
+        provider_mapping: RingMappingGrade.Direct, fallback_selected: false,
+        sealed_arena: true, arena_capacity: capacity,
+        static_pool_ready: false, static_pool_capacity: 0u64,
+        task_slots: 1024u64, operation_slots: 4096u64,
+        buffer_slots: 4096u64, trace_slots: 1024u64,
+        deadline_slots: 1024u64, timer_slots: 1024u64,
+        join_cancel_slots: 1024u64,
+        maximum_frame_bytes: 512u64, compiler_known_frame_bytes: 128u64)
+
+fn pool_evidence(capacity: u64) -> MissionRingEvidence:
+    MissionRingEvidence(
+        provider_mapping: RingMappingGrade.Direct, fallback_selected: false,
+        sealed_arena: false, arena_capacity: 0u64,
+        static_pool_ready: true, static_pool_capacity: capacity,
+        task_slots: 1024u64, operation_slots: 4096u64,
+        buffer_slots: 4096u64, trace_slots: 1024u64,
+        deadline_slots: 1024u64, timer_slots: 1024u64,
+        join_cancel_slots: 1024u64,
+        maximum_frame_bytes: 512u64, compiler_known_frame_bytes: 128u64)
+
+fn configure_alloc(value: MissionSimpleRingAdapter<i64, i64>):
+    match value.configure(OWNER, async_profile_mission_alloc_v1(), alloc_evidence(value.capacity().to_u64())):
+        case Ok(_): ()
+        case Err(_): fail("mission_alloc configuration failed")
+
+fn reserve(value: MissionSimpleRingAdapter<i64, i64>, task_key: u64):
+    match value.reserve(OWNER, task_key):
+        case Ok(item): item
+        case Err(_): fail("reservation failed")
+
+describe "mission SimpleRing adapter admission evidence":
+    # @manual scenario evidence
+    it "constructs in Configuring and rejects invalid identities":
+        # @req REQ-SSPEC-LIB
+        step("constructs in Configuring and rejects invalid identities")
+        match MissionSimpleRingAdapter<i64, i64>.create(0u64, 1u64, 1):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.InvalidOwner)
+            case Ok(_): fail("zero owner accepted")
+        match MissionSimpleRingAdapter<i64, i64>.create(OWNER, 0u64, 1):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.InvalidRingId)
+            case Ok(_): fail("zero ring accepted")
+        match MissionSimpleRingAdapter<i64, i64>.create(OWNER, 1u64, 0):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.InvalidCapacity)
+            case Ok(_): fail("zero capacity accepted")
+        expect(adapter(2).lifecycle()).to_equal(MissionRingLifecycle.Configuring)
+
+    it "admits mission_alloc only with sealed bounded arena evidence":
+        # @req REQ-SSPEC-LIB
+        step("admits mission_alloc only with sealed bounded arena evidence")
+        val value = adapter(2)
+        val receipt = match value.configure(
+            OWNER, async_profile_mission_alloc_v1(), alloc_evidence(2u64)):
+            case Ok(item): item
+            case Err(_): fail("valid mission_alloc rejected")
+        expect(value.lifecycle()).to_equal(MissionRingLifecycle.Ready)
+        expect(receipt.profile_id).to_equal("mission_alloc")
+        expect(receipt.capacity).to_equal(2u64)
+        expect(receipt.evidence_level).to_equal(MissionRingEvidenceLevel.HostedPreallocatedV1)
+        expect(receipt.link_time_static_proven).to_be(false)
+        expect(receipt.allocation_free_proven).to_be(false)
+        expect(receipt.profile_fingerprint.len()).to_be_greater_than(0)
+
+    it "admits mission_pool only with fixed pool and compiler frame bounds":
+        # @req REQ-SSPEC-LIB
+        step("admits mission_pool only with fixed pool and compiler frame bounds")
+        val value = adapter(3)
+        val receipt = match value.configure(
+            OWNER, async_profile_mission_pool_v1(), pool_evidence(3u64)):
+            case Ok(item): item
+            case Err(_): fail("valid mission_pool rejected")
+        expect(receipt.profile_id).to_equal("mission_pool")
+        expect(value.profile_fingerprint()).to_equal(receipt.profile_fingerprint)
+
+    it "rejects non-mission, indirect, fallback, and undersized evidence":
+        # @req REQ-SSPEC-LIB
+        step("rejects non-mission, indirect, fallback, and undersized evidence")
+        val ordinary = adapter(2)
+        match ordinary.configure(OWNER, async_profile_common_v1(), alloc_evidence(2u64)):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.NonMissionProfile)
+            case Ok(_): fail("ordinary profile admitted")
+        var indirect = alloc_evidence(2u64)
+        indirect.provider_mapping = RingMappingGrade.Translated
+        match adapter(2).configure(OWNER, async_profile_mission_alloc_v1(), indirect):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.DirectMappingRequired)
+            case Ok(_): fail("translated provider admitted")
+        var fallback = alloc_evidence(2u64)
+        fallback.fallback_selected = true
+        match adapter(2).configure(OWNER, async_profile_mission_alloc_v1(), fallback):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.FallbackForbidden)
+            case Ok(_): fail("fallback admitted")
+        var arena = alloc_evidence(1u64)
+        arena.sealed_arena = true
+        match adapter(2).configure(OWNER, async_profile_mission_alloc_v1(), arena):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.ArenaCapacityInsufficient)
+            case Ok(_): fail("undersized arena admitted")
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), pool_evidence(1u64)):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.StaticPoolCapacityInsufficient)
+            case Ok(_): fail("undersized pool admitted")
+
+    it "rejects missing, excessive, and profile-exceeding bounds":
+        # @req REQ-SSPEC-LIB
+        step("rejects missing, excessive, and profile-exceeding bounds")
+        var missing = pool_evidence(2u64)
+        missing.compiler_known_frame_bytes = 0u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), missing):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.FrameBoundRequired)
+            case Ok(_): fail("missing frame bound admitted")
+        var excessive = pool_evidence(2u64)
+        excessive.compiler_known_frame_bytes = 513u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), excessive):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.FrameBoundExceeded)
+            case Ok(_): fail("excessive frame admitted")
+        var bounded = async_profile_mission_alloc_v1()
+        bounded.bounds.max_tasks = 1u64
+        bounded.bounds.max_operations = 1u64
+        bounded.bounds.max_buffers = 1u64
+        bounded.bounds.max_traces = 1u64
+        bounded.bounds.max_deadlines = 1u64
+        match adapter(2).configure(OWNER, bounded, alloc_evidence(2u64)):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.CapacityExceedsProfile)
+            case Ok(_): fail("capacity above profile admitted")
+
+    it "rejects every undersized mission resource class before Ready":
+        # @req REQ-SSPEC-LIB
+        step("rejects every undersized mission resource class before Ready")
+        var evidence = pool_evidence(2u64)
+        evidence.task_slots = 1023u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), evidence):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.TaskCapacityInsufficient)
+            case Ok(_): fail("undersized task pool admitted")
+        evidence = pool_evidence(2u64)
+        evidence.operation_slots = 4095u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), evidence):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.OperationCapacityInsufficient)
+            case Ok(_): fail("undersized operation pool admitted")
+        evidence = pool_evidence(2u64)
+        evidence.buffer_slots = 4095u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), evidence):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.BufferCapacityInsufficient)
+            case Ok(_): fail("undersized buffer pool admitted")
+        evidence = pool_evidence(2u64)
+        evidence.trace_slots = 1023u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), evidence):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.TraceCapacityInsufficient)
+            case Ok(_): fail("undersized trace pool admitted")
+        evidence = pool_evidence(2u64)
+        evidence.deadline_slots = 1023u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), evidence):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.DeadlineCapacityInsufficient)
+            case Ok(_): fail("undersized deadline pool admitted")
+        evidence = pool_evidence(2u64)
+        evidence.timer_slots = 1023u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), evidence):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.TimerCapacityInsufficient)
+            case Ok(_): fail("undersized timer pool admitted")
+        evidence = pool_evidence(2u64)
+        evidence.join_cancel_slots = 1023u64
+        match adapter(2).configure(OWNER, async_profile_mission_pool_v1(), evidence):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.JoinCancelCapacityInsufficient)
+            case Ok(_): fail("undersized join/cancellation pool admitted")
+
+describe "mission SimpleRing adapter owner and lifecycle":
+    it "rejects every operation before Ready and rejects foreign owners":
+        # @req REQ-SSPEC-LIB
+        step("rejects every operation before Ready and rejects foreign owners")
+        val value = adapter(1)
+        match value.reserve(OWNER, 10u64):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.NotReady)
+            case Ok(_): fail("pre-Ready operation admitted")
+        match value.configure(8u64, async_profile_mission_alloc_v1(), alloc_evidence(1u64)):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.WrongOwner)
+            case Ok(_): fail("foreign owner configured")
+        configure_alloc(value)
+        match value.reserve(8u64, 10u64):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.WrongOwner)
+            case Ok(_): fail("foreign owner reserved")
+        match value.configure(OWNER, async_profile_mission_alloc_v1(), alloc_evidence(1u64)):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.NotConfiguring)
+            case Ok(_): fail("Ready adapter reconfigured")
+
+    it "requires a drained ring before terminal quiescence":
+        # @req REQ-SSPEC-LIB
+        step("requires a drained ring before terminal quiescence")
+        val value = adapter(1)
+        configure_alloc(value)
+        val held = reserve(value, 10u64)
+        match value.quiesce(OWNER):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.RingNotDrained)
+            case Ok(_): fail("occupied ring quiesced")
+        match value.release(OWNER, held):
+            case Ok(_): ()
+            case Err(_): fail("release failed")
+        match value.quiesce(OWNER):
+            case Ok(_): ()
+            case Err(_): fail("drained ring did not quiesce")
+        expect(value.lifecycle()).to_equal(MissionRingLifecycle.Quiesced)
+        match value.reserve(OWNER, 20u64):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.NotReady)
+            case Ok(_): fail("post-quiesce operation admitted")
+        match value.quiesce(OWNER):
+            case Err(error): expect(error).to_equal(MissionRingAdapterError.AlreadyQuiesced)
+            case Ok(_): fail("second quiesce accepted")
+
+describe "mission SimpleRing adapter forwarding":
+    it "returns canonical Pending and wakes exactly the submitting task":
+        # @req REQ-SSPEC-LIB
+        step("returns canonical Pending and wakes exactly the submitting task")
+        val value = adapter(2)
+        configure_alloc(value)
+        val held = reserve(value, 1234u64)
+        val pending = match value.commit(OWNER, held, 41):
+            case Ok(item): item
+            case Err(_): fail("commit failed")
+        match pending:
+            case TaskPollResult.Pending(token): expect(token.ring_id).to_equal(99u64)
+            case TaskPollResult.Ready(_): fail("latency operation reported Ready")
+        val submission = match value.provider_take(OWNER):
+            case Ok(item): item
+            case Err(_): fail("provider take failed")
+        if val item = submission:
+            val wake = match value.complete_success(OWNER, item, 42):
+                case Ok(receipt): receipt
+                case Err(_): fail("completion failed")
+            expect(wake.wake_key).to_equal(1234u64)
+            expect(wake.token).to_equal(item.token)
+            expect(wake.kind).to_equal(RingTerminalKind.Success)
+        else:
+            fail("submission missing")
+        val completion = match value.take_completion(OWNER):
+            case Ok(item): item
+            case Err(_): fail("completion take failed")
+        if val item = completion:
+            expect(item.task_key).to_equal(1234u64)
+            expect(item.kind).to_equal(RingTerminalKind.Success)
+            if val result = item.value:
+                expect(result).to_equal(42)
+            else:
+                fail("completion value missing")
+        else:
+            fail("completion missing")
+        expect(value.occupancy()).to_equal(0u64)
+
+    it "forwards bounded batch, failure, cancellation, and reset semantics":
+        # @req REQ-SSPEC-LIB
+        step("forwards bounded batch, failure, cancellation, and reset semantics")
+        val value = adapter(2)
+        configure_alloc(value)
+        match value.commit_batch(OWNER, [10u64, 20u64], [1, 2]):
+            case Ok(receipt): expect(receipt.committed).to_equal(2u64)
+            case Err(_): fail("bounded batch failed")
+        match value.commit_batch(OWNER, [30u64], [3]):
+            case Err(MissionRingAdapterError.RingRejected(error)):
+                expect(error).to_equal(SimpleRingError.Full)
+            case _: fail("full ring batch did not fail closed")
+        val first = match value.provider_take(OWNER):
+            case Ok(item): item
+            case Err(_): fail("first take failed")
+        if val submission = first:
+            match value.complete_failure(OWNER, submission, "device-fault"):
+                case Ok(wake): expect(wake.kind).to_equal(RingTerminalKind.Failure)
+                case Err(_): fail("failure publish failed")
+        else:
+            fail("first submission missing")
+        val second = match value.provider_take(OWNER):
+            case Ok(item): item
+            case Err(_): fail("second take failed")
+        if val submission = second:
+            match value.cancel(OWNER, submission.token):
+                case Ok(RingCancelOutcome.ProviderCancelRequested(_)): ()
+                case _: fail("provider cancellation not requested")
+            match value.complete_cancelled(OWNER, submission, "cancelled"):
+                case Ok(wake): expect(wake.kind).to_equal(RingTerminalKind.Cancelled)
+                case Err(_): fail("cancel completion failed")
+        else:
+            fail("second submission missing")
+        val reset = match value.reset(OWNER):
+            case Ok(receipt): receipt
+            case Err(_): fail("reset failed")
+        expect(reset.invalidated).to_equal(2u64)
+        expect(value.occupancy()).to_equal(0u64)
+        expect(value.telemetry().completions).to_equal(2u64)

@@ -1,0 +1,81 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "Vulkan Engine2D presenter physical-adapter receipt":
+    it "keeps the raw hooks in the canonical no-GC presenter facade":
+        val facade = file_read(
+            "src/lib/nogc_sync_mut/gpu/engine2d/vulkan_presenter.spl")
+        val compatibility = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/vulkan_presenter.spl")
+        expect(facade).to_contain(
+            "rt_vk_engine2d_presenter_physical_adapter_identity")
+        expect(facade).to_contain(
+            "rt_vk_engine2d_presenter_physical_adapter_driver_identity")
+        expect(facade).to_contain(
+            "rt_vk_engine2d_presenter_engine2d_buffer_owned")
+        expect(facade).to_contain("struct VulkanEngine2dPresenterReceipt")
+        expect(facade).to_contain("fn receipt_for(engine2d_buffer_handle: i64)")
+        expect(facade).to_contain("engine2d_buffer_ownership_status == 1")
+        expect(facade).to_contain("rt_vk_engine2d_presenter_recreate")
+        expect(facade).to_contain("me recreate(width: i32, height: i32) -> bool:")
+        expect(compatibility).to_contain(
+            "export use std.nogc_sync_mut.gpu.engine2d.vulkan_presenter")
+
+    it "derives adapter identity from the presenter device and rejects foreign buffers":
+        val runtime = file_read(
+            "src/compiler_rust/runtime/src/value/gpu_vulkan/vulkan_sffi/swapchain.rs")
+        expect(runtime).to_contain("physical_adapter_driver_identity: CString")
+        expect(runtime).to_contain("device.physical_device()")
+        expect(runtime).to_contain("physical.properties.vendor_id")
+        expect(runtime).to_contain("physical.properties.device_id")
+        expect(runtime).to_contain("engine2d_presenter_adapter_identity_tag")
+        expect(runtime).to_contain("buffer.belongs_to(&device)")
+        expect(runtime).to_contain(
+            "engine2d_presenter_owns_engine2d_buffer(&presenter, engine2d_buffer_handle) != 1")
+        expect(runtime).to_contain("never falls back to a resource handle or sentinel")
+
+    it "fails closed before direct present and emits the ownership-qualified receipt":
+        val compositor = file_read("src/os/compositor/compositor_engine2d.spl")
+        expect(compositor).to_contain("val receipt = owner.receipt_for(framebuffer)")
+        expect(compositor).to_contain("if not receipt.is_valid():")
+        expect(compositor).to_contain("vulkan_physical_adapter_identity")
+        expect(compositor).to_contain("vulkan_physical_adapter_driver_identity")
+        expect(compositor).to_contain("vulkan_engine2d_buffer_ownership_status")
+        expect(compositor).to_contain("physical_adapter_identity=")
+
+    it "preserves an adopted presenter device instead of reselecting it":
+        val session = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
+        expect(session).to_contain("self.device = vulkan_get_device()")
+        expect(session).to_contain("self.selected_device_index = -2")
+        expect(session).to_contain("adopted-presenter-device")
+        expect(session).to_contain("vulkan_sffi_selected_device_type()")
+        expect(session).to_contain(
+            "vulkan_sffi_selected_device_driver_identity()")
+        expect(session).to_contain("if vulkan_sffi_device_count() < 1:")
+
+    it "keeps swapchain recreation on the typed runtime ABI path":
+        val runtime = file_read(
+            "src/compiler_rust/runtime/src/vulkan_graphics_runtime.rs")
+        val adapter = file_read(
+            "src/compiler_rust/compiler/src/interpreter_extern/vulkan_presenter.rs")
+        val registry = file_read(
+            "src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
+        val codegen = file_read(
+            "src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val native_all = file_read("src/compiler_rust/native_all/src/lib.rs")
+        val manifest = file_read(
+            "src/compiler_rust/common/src/runtime_symbols.rs")
+        expect(runtime).to_contain("rt_vk_engine2d_presenter_recreate")
+        expect(adapter).to_contain("pub fn recreate(args: &[Value])")
+        expect(registry).to_contain(
+            "rt_vk_engine2d_presenter_recreate\", vulkan_presenter::recreate")
+        expect(codegen).to_contain(
+            "RuntimeFuncSpec::new(\"rt_vk_engine2d_presenter_recreate\", &[I64, I32, I32], &[I32])")
+        expect(native_all).to_contain(
+            "RT_VK_ENGINE2D_PRESENTER_RECREATE_PROVIDER")
+        expect(native_all).to_contain(
+            "RT_VK_ENGINE2D_PRESENTER_PRESENT_RETAINED_PROVIDER: extern \"C\" fn(i64, i64, i64, i64) -> i32")
+        expect(manifest).to_contain(
+            "rt_vk_engine2d_presenter_present_damage_array")
+        expect(manifest).to_contain("rt_vk_engine2d_presenter_recreate")

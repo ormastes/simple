@@ -1,0 +1,457 @@
+# Shared CSS colour parsing — the one home for turning CSS colour syntax into
+# `common.color.types.Color`.
+#
+# Provides: named_color, parse_hex_color, parse_css_color.
+#
+# Every entry point returns `Color?`. A value this module does not understand
+# is `nil`, never a substituted colour: a caller that silently swapped in black
+# would paint a wrong pixel that no smoke test can see. Callers decide what an
+# unparsable colour means for them (CSS says: drop the declaration).
+#
+# This module exists so the parsing lives in ONE place. `common` is importable
+# from every lane, including leaf lanes such as `blink` that may not reach into
+# `gc_async_mut`. Extend this table rather than starting a private copy.
+#
+# Coverage: the CSS Level 4 named-colour table (148 names including the `grey`
+# and `aqua`/`fuchsia` aliases and `transparent`), `#RGB`/`#RGBA`/`#RRGGBB`/
+# `#RRGGBBAA`, `rgb()`/`rgba()` and `hsl()`/`hsla()` in both the legacy
+# comma-separated and the modern space-separated `/ alpha` forms, with
+# percentage channels.
+#
+# Not covered (returns nil, on purpose): `currentColor`, `color()`, `lab()`,
+# `lch()`, `oklab()`, `oklch()`, `hwb()`, `color-mix()`, `var()`, `calc()`.
+
+use std.common.color.types.{Color, from_rgba}
+use std.common.color.convert.{hsl_to_rgb}
+
+# ============================================================================
+# Named colours
+# ============================================================================
+
+pub fn named_color(name: text) -> Color?:
+    """Return the CSS named colour `name` denotes, or nil when it is not one."""
+    val n = name.to_lower()
+    if n == "black": return from_rgba(0, 0, 0, 255)
+    if n == "white": return from_rgba(255, 255, 255, 255)
+    if n == "red": return from_rgba(255, 0, 0, 255)
+    if n == "green": return from_rgba(0, 128, 0, 255)
+    if n == "blue": return from_rgba(0, 0, 255, 255)
+    if n == "transparent": return from_rgba(0, 0, 0, 0)
+    if n == "yellow": return from_rgba(255, 255, 0, 255)
+    if n == "orange": return from_rgba(255, 165, 0, 255)
+    if n == "gray" or n == "grey": return from_rgba(128, 128, 128, 255)
+    if n == "cyan" or n == "aqua": return from_rgba(0, 255, 255, 255)
+    if n == "magenta" or n == "fuchsia": return from_rgba(255, 0, 255, 255)
+    if n == "silver": return from_rgba(192, 192, 192, 255)
+    if n == "maroon": return from_rgba(128, 0, 0, 255)
+    if n == "olive": return from_rgba(128, 128, 0, 255)
+    if n == "navy": return from_rgba(0, 0, 128, 255)
+    if n == "teal": return from_rgba(0, 128, 128, 255)
+    if n == "purple": return from_rgba(128, 0, 128, 255)
+    if n == "lime": return from_rgba(0, 255, 0, 255)
+    if n == "aliceblue": return from_rgba(240, 248, 255, 255)
+    if n == "antiquewhite": return from_rgba(250, 235, 215, 255)
+    if n == "aquamarine": return from_rgba(127, 255, 212, 255)
+    if n == "azure": return from_rgba(240, 255, 255, 255)
+    if n == "beige": return from_rgba(245, 245, 220, 255)
+    if n == "bisque": return from_rgba(255, 228, 196, 255)
+    if n == "blanchedalmond": return from_rgba(255, 235, 205, 255)
+    if n == "blueviolet": return from_rgba(138, 43, 226, 255)
+    if n == "brown": return from_rgba(165, 42, 42, 255)
+    if n == "burlywood": return from_rgba(222, 184, 135, 255)
+    if n == "cadetblue": return from_rgba(95, 158, 160, 255)
+    if n == "chartreuse": return from_rgba(127, 255, 0, 255)
+    if n == "chocolate": return from_rgba(210, 105, 30, 255)
+    if n == "coral": return from_rgba(255, 127, 80, 255)
+    if n == "cornflowerblue": return from_rgba(100, 149, 237, 255)
+    if n == "cornsilk": return from_rgba(255, 248, 220, 255)
+    if n == "crimson": return from_rgba(220, 20, 60, 255)
+    if n == "darkblue": return from_rgba(0, 0, 139, 255)
+    if n == "darkcyan": return from_rgba(0, 139, 139, 255)
+    if n == "darkgoldenrod": return from_rgba(184, 134, 11, 255)
+    if n == "darkgray" or n == "darkgrey": return from_rgba(169, 169, 169, 255)
+    if n == "darkgreen": return from_rgba(0, 100, 0, 255)
+    if n == "darkkhaki": return from_rgba(189, 183, 107, 255)
+    if n == "darkmagenta": return from_rgba(139, 0, 139, 255)
+    if n == "darkolivegreen": return from_rgba(85, 107, 47, 255)
+    if n == "darkorange": return from_rgba(255, 140, 0, 255)
+    if n == "darkorchid": return from_rgba(153, 50, 204, 255)
+    if n == "darkred": return from_rgba(139, 0, 0, 255)
+    if n == "darksalmon": return from_rgba(233, 150, 122, 255)
+    if n == "darkseagreen": return from_rgba(143, 188, 143, 255)
+    if n == "darkslateblue": return from_rgba(72, 61, 139, 255)
+    if n == "darkslategray" or n == "darkslategrey": return from_rgba(47, 79, 79, 255)
+    if n == "darkturquoise": return from_rgba(0, 206, 209, 255)
+    if n == "darkviolet": return from_rgba(148, 0, 211, 255)
+    if n == "deeppink": return from_rgba(255, 20, 147, 255)
+    if n == "deepskyblue": return from_rgba(0, 191, 255, 255)
+    if n == "dimgray" or n == "dimgrey": return from_rgba(105, 105, 105, 255)
+    if n == "dodgerblue": return from_rgba(30, 144, 255, 255)
+    if n == "firebrick": return from_rgba(178, 34, 34, 255)
+    if n == "floralwhite": return from_rgba(255, 250, 240, 255)
+    if n == "forestgreen": return from_rgba(34, 139, 34, 255)
+    if n == "gainsboro": return from_rgba(220, 220, 220, 255)
+    if n == "ghostwhite": return from_rgba(248, 248, 255, 255)
+    if n == "gold": return from_rgba(255, 215, 0, 255)
+    if n == "goldenrod": return from_rgba(218, 165, 32, 255)
+    if n == "greenyellow": return from_rgba(173, 255, 47, 255)
+    if n == "honeydew": return from_rgba(240, 255, 240, 255)
+    if n == "hotpink": return from_rgba(255, 105, 180, 255)
+    if n == "indianred": return from_rgba(205, 92, 92, 255)
+    if n == "indigo": return from_rgba(75, 0, 130, 255)
+    if n == "ivory": return from_rgba(255, 255, 240, 255)
+    if n == "khaki": return from_rgba(240, 230, 140, 255)
+    if n == "lavender": return from_rgba(230, 230, 250, 255)
+    if n == "lavenderblush": return from_rgba(255, 240, 245, 255)
+    if n == "lawngreen": return from_rgba(124, 252, 0, 255)
+    if n == "lemonchiffon": return from_rgba(255, 250, 205, 255)
+    if n == "lightblue": return from_rgba(173, 216, 230, 255)
+    if n == "lightcoral": return from_rgba(240, 128, 128, 255)
+    if n == "lightcyan": return from_rgba(224, 255, 255, 255)
+    if n == "lightgoldenrodyellow": return from_rgba(250, 250, 210, 255)
+    if n == "lightgray" or n == "lightgrey": return from_rgba(211, 211, 211, 255)
+    if n == "lightgreen": return from_rgba(144, 238, 144, 255)
+    if n == "lightpink": return from_rgba(255, 182, 193, 255)
+    if n == "lightsalmon": return from_rgba(255, 160, 122, 255)
+    if n == "lightseagreen": return from_rgba(32, 178, 170, 255)
+    if n == "lightskyblue": return from_rgba(135, 206, 250, 255)
+    if n == "lightslategray" or n == "lightslategrey": return from_rgba(119, 136, 153, 255)
+    if n == "lightsteelblue": return from_rgba(176, 196, 222, 255)
+    if n == "lightyellow": return from_rgba(255, 255, 224, 255)
+    if n == "limegreen": return from_rgba(50, 205, 50, 255)
+    if n == "linen": return from_rgba(250, 240, 230, 255)
+    if n == "mediumaquamarine": return from_rgba(102, 205, 170, 255)
+    if n == "mediumblue": return from_rgba(0, 0, 205, 255)
+    if n == "mediumorchid": return from_rgba(186, 85, 211, 255)
+    if n == "mediumpurple": return from_rgba(147, 112, 219, 255)
+    if n == "mediumseagreen": return from_rgba(60, 179, 113, 255)
+    if n == "mediumslateblue": return from_rgba(123, 104, 238, 255)
+    if n == "mediumspringgreen": return from_rgba(0, 250, 154, 255)
+    if n == "mediumturquoise": return from_rgba(72, 209, 204, 255)
+    if n == "mediumvioletred": return from_rgba(199, 21, 133, 255)
+    if n == "midnightblue": return from_rgba(25, 25, 112, 255)
+    if n == "mintcream": return from_rgba(245, 255, 250, 255)
+    if n == "mistyrose": return from_rgba(255, 228, 225, 255)
+    if n == "moccasin": return from_rgba(255, 228, 181, 255)
+    if n == "navajowhite": return from_rgba(255, 222, 173, 255)
+    if n == "oldlace": return from_rgba(253, 245, 230, 255)
+    if n == "olivedrab": return from_rgba(107, 142, 35, 255)
+    if n == "orangered": return from_rgba(255, 69, 0, 255)
+    if n == "orchid": return from_rgba(218, 112, 214, 255)
+    if n == "palegoldenrod": return from_rgba(238, 232, 170, 255)
+    if n == "palegreen": return from_rgba(152, 251, 152, 255)
+    if n == "paleturquoise": return from_rgba(175, 238, 238, 255)
+    if n == "palevioletred": return from_rgba(219, 112, 147, 255)
+    if n == "papayawhip": return from_rgba(255, 239, 213, 255)
+    if n == "peachpuff": return from_rgba(255, 218, 185, 255)
+    if n == "peru": return from_rgba(205, 133, 63, 255)
+    if n == "pink": return from_rgba(255, 192, 203, 255)
+    if n == "plum": return from_rgba(221, 160, 221, 255)
+    if n == "powderblue": return from_rgba(176, 224, 230, 255)
+    if n == "rebeccapurple": return from_rgba(102, 51, 153, 255)
+    if n == "rosybrown": return from_rgba(188, 143, 143, 255)
+    if n == "royalblue": return from_rgba(65, 105, 225, 255)
+    if n == "saddlebrown": return from_rgba(139, 69, 19, 255)
+    if n == "salmon": return from_rgba(250, 128, 114, 255)
+    if n == "sandybrown": return from_rgba(244, 164, 96, 255)
+    if n == "seagreen": return from_rgba(46, 139, 87, 255)
+    if n == "seashell": return from_rgba(255, 245, 238, 255)
+    if n == "sienna": return from_rgba(160, 82, 45, 255)
+    if n == "skyblue": return from_rgba(135, 206, 235, 255)
+    if n == "slateblue": return from_rgba(106, 90, 205, 255)
+    if n == "slategray" or n == "slategrey": return from_rgba(112, 128, 144, 255)
+    if n == "snow": return from_rgba(255, 250, 250, 255)
+    if n == "springgreen": return from_rgba(0, 255, 127, 255)
+    if n == "steelblue": return from_rgba(70, 130, 180, 255)
+    if n == "tan": return from_rgba(210, 180, 140, 255)
+    if n == "thistle": return from_rgba(216, 191, 216, 255)
+    if n == "tomato": return from_rgba(255, 99, 71, 255)
+    if n == "turquoise": return from_rgba(64, 224, 208, 255)
+    if n == "violet": return from_rgba(238, 130, 238, 255)
+    if n == "wheat": return from_rgba(245, 222, 179, 255)
+    if n == "whitesmoke": return from_rgba(245, 245, 245, 255)
+    if n == "yellowgreen": return from_rgba(154, 205, 50, 255)
+    nil
+
+# ============================================================================
+# Hex notation
+# ============================================================================
+
+# One hex digit's value, or -1 when `c` is not a hex digit.
+fn _hex_digit(c: text) -> i64:
+    val table = "0123456789abcdef"
+    val lowered = c.to_lower()
+    var i = 0
+    while i < 16:
+        if table.slice(i, i + 1) == lowered:
+            return i
+        i = i + 1
+    -1
+
+# Two hex characters as one 0..255 byte, or -1 when either is not hex.
+fn _hex_byte(s: text, at: i64) -> i64:
+    val hi = _hex_digit(s.slice(at, at + 1))
+    val lo = _hex_digit(s.slice(at + 1, at + 2))
+    if hi < 0 or lo < 0:
+        return -1
+    hi * 16 + lo
+
+# One hex character doubled into a 0..255 byte (`f` is `ff`), or -1.
+fn _hex_nibble(s: text, at: i64) -> i64:
+    val v = _hex_digit(s.slice(at, at + 1))
+    if v < 0:
+        return -1
+    v * 17
+
+pub fn parse_hex_color(raw: text) -> Color?:
+    """Return the colour `raw` denotes in #RGB/#RGBA/#RRGGBB/#RRGGBBAA form, else nil."""
+    val trimmed: text = raw.trim()
+    val s: text = trimmed.to_lower()
+    if not s.starts_with("#"):
+        return nil
+    if s.len() == 4:
+        val r3 = _hex_nibble(s, 1)
+        val g3 = _hex_nibble(s, 2)
+        val b3 = _hex_nibble(s, 3)
+        if r3 < 0 or g3 < 0 or b3 < 0:
+            return nil
+        return from_rgba(r3, g3, b3, 255)
+    if s.len() == 5:
+        val r4 = _hex_nibble(s, 1)
+        val g4 = _hex_nibble(s, 2)
+        val b4 = _hex_nibble(s, 3)
+        val a4 = _hex_nibble(s, 4)
+        if r4 < 0 or g4 < 0 or b4 < 0 or a4 < 0:
+            return nil
+        return from_rgba(r4, g4, b4, a4)
+    if s.len() == 7:
+        val r6 = _hex_byte(s, 1)
+        val g6 = _hex_byte(s, 3)
+        val b6 = _hex_byte(s, 5)
+        if r6 < 0 or g6 < 0 or b6 < 0:
+            return nil
+        return from_rgba(r6, g6, b6, 255)
+    if s.len() == 9:
+        val r8 = _hex_byte(s, 1)
+        val g8 = _hex_byte(s, 3)
+        val b8 = _hex_byte(s, 5)
+        val a8 = _hex_byte(s, 7)
+        if r8 < 0 or g8 < 0 or b8 < 0 or a8 < 0:
+            return nil
+        return from_rgba(r8, g8, b8, a8)
+    nil
+
+# ============================================================================
+# Numeric arguments
+# ============================================================================
+
+# True when `s` is a plain decimal number. `to_f64()` answers 0.0 for garbage,
+# so every argument is checked for shape BEFORE it is converted — otherwise
+# `rgb(red, 0, 0)` would parse as a valid black.
+fn _is_number(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var digits = 0
+    var dots = 0
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c == "+" or c == "-":
+            if i != 0:
+                return false
+        elif c == ".":
+            dots = dots + 1
+            if dots > 1:
+                return false
+        else:
+            val code = s.char_code_at(i)
+            if code < 48 or code > 57:
+                return false
+            digits = digits + 1
+        i = i + 1
+    digits > 0
+
+fn _round_i64(v: f64) -> i64:
+    if v < 0.0:
+        return (v - 0.5) as i64
+    (v + 0.5) as i64
+
+fn _clamp(v: i64, lo: i64, hi: i64) -> i64:
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    v
+
+# Strip one trailing unit (`%`, `deg`) and report whether it was there.
+fn _strip_suffix(s: text, suffix: text) -> text:
+    if s.ends_with(suffix):
+        return s.slice(0, s.len() - suffix.len())
+    s
+
+# An rgb() colour channel: `0..255`, or a percentage of 255. -1 on a bad token.
+fn _rgb_channel(part: text) -> i64:
+    val s: text = part.trim()
+    if s.ends_with("%"):
+        val body: text = _strip_suffix(s, "%")
+        if not _is_number(body):
+            return -1
+        val pct = body.to_f64()
+        return _clamp(_round_i64(pct * 255.0 / 100.0), 0, 255)
+    if not _is_number(s):
+        return -1
+    val n = s.to_f64()
+    _clamp(_round_i64(n), 0, 255)
+
+# An alpha argument: `0..1`, or a percentage. -1 on a bad token.
+fn _alpha_channel(part: text) -> i64:
+    val s: text = part.trim()
+    if s.ends_with("%"):
+        val body: text = _strip_suffix(s, "%")
+        if not _is_number(body):
+            return -1
+        val pct = body.to_f64()
+        return _clamp(_round_i64(pct * 255.0 / 100.0), 0, 255)
+    if not _is_number(s):
+        return -1
+    val n = s.to_f64()
+    _clamp(_round_i64(n * 255.0), 0, 255)
+
+# A percentage argument scaled to 0..100 (hsl saturation/lightness). -1 on a
+# bad token. The `%` is required by CSS for these two.
+fn _percent_arg(part: text) -> i64:
+    val s: text = part.trim()
+    if not s.ends_with("%"):
+        return -1
+    val body: text = _strip_suffix(s, "%")
+    if not _is_number(body):
+        return -1
+    _clamp(_round_i64(body.to_f64()), 0, 100)
+
+# A hue argument in degrees, normalised to 0..359. -1 on a bad token.
+fn _hue_arg(part: text) -> i64:
+    val trimmed: text = part.trim()
+    val s: text = _strip_suffix(trimmed, "deg")
+    if not _is_number(s):
+        return -1
+    var h = _round_i64(s.to_f64()) % 360
+    if h < 0:
+        h = h + 360
+    h
+
+# ============================================================================
+# Functional notation
+# ============================================================================
+
+# Split the inside of a colour function into its arguments. Returns nil when
+# the argument list is malformed. Both CSS forms are accepted:
+#   legacy: `a, b, c` / `a, b, c, alpha`
+#   modern: `a b c` / `a b c / alpha`
+# Mixing them (a comma list with a `/`) is invalid, as is a trailing comma.
+fn _split_args(inner_raw: text) -> [text]?:
+    val inner: text = inner_raw.trim()
+    if inner.len() == 0:
+        return nil
+    var has_comma = false
+    var has_slash = false
+    var i = 0
+    while i < inner.len():
+        val c = inner.slice(i, i + 1)
+        if c == ",":
+            has_comma = true
+        elif c == "/":
+            has_slash = true
+        i = i + 1
+    if has_comma and has_slash:
+        return nil
+
+    var parts: [text] = []
+    var current = ""
+    var j = 0
+    while j < inner.len():
+        val c = inner.slice(j, j + 1)
+        val separator = (c == "," or c == "/" or c == " " or c == "\t" or c == "\n")
+        if separator:
+            if current.len() > 0:
+                parts.push(current)
+                current = ""
+            # A leading comma or slash is a malformed list (`rgb(,1,2)`). A
+            # separator after a value is fine — `rgb(1 2 3 / 0.5)` has a space
+            # on both sides of the slash. A trailing one is caught below.
+            elif parts.len() == 0:
+                return nil
+        else:
+            current = current + c
+        j = j + 1
+    if current.len() > 0:
+        parts.push(current)
+    if inner.ends_with(",") or inner.ends_with("/"):
+        return nil
+    parts
+
+# Return the text between the first `(` and the final `)` of `s`, or nil when
+# `s` is not `name(...)`.
+fn _fn_inner(s: text, name: text) -> text?:
+    val prefix = name + "("
+    if not s.starts_with(prefix):
+        return nil
+    if not s.ends_with(")"):
+        return nil
+    s.slice(prefix.len(), s.len() - 1)
+
+# The optional fourth argument as a 0..255 alpha; 255 when absent, -1 when
+# present but malformed. Computed by a helper rather than by reassigning a
+# `var` inside the `if val` binding block — that write does not survive here.
+fn _args_alpha(parts: [text]) -> i64:
+    if parts.len() == 4:
+        return _alpha_channel(parts[3 as i32])
+    255
+
+fn _parse_rgb_fn(inner: text) -> Color?:
+    if val parts = _split_args(inner):
+        if parts.len() < 3 or parts.len() > 4:
+            return nil
+        val r = _rgb_channel(parts[0 as i32])
+        val g = _rgb_channel(parts[1 as i32])
+        val b = _rgb_channel(parts[2 as i32])
+        val a = _args_alpha(parts)
+        if r < 0 or g < 0 or b < 0 or a < 0:
+            return nil
+        return from_rgba(r, g, b, a)
+    nil
+
+fn _parse_hsl_fn(inner: text) -> Color?:
+    if val parts = _split_args(inner):
+        if parts.len() < 3 or parts.len() > 4:
+            return nil
+        val h = _hue_arg(parts[0 as i32])
+        val s = _percent_arg(parts[1 as i32])
+        val l = _percent_arg(parts[2 as i32])
+        val a = _args_alpha(parts)
+        if h < 0 or s < 0 or l < 0 or a < 0:
+            return nil
+        val rgb = hsl_to_rgb(h, s, l)
+        return from_rgba(rgb.r, rgb.g, rgb.b, a)
+    nil
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+pub fn parse_css_color(raw: text) -> Color?:
+    """Return the colour `raw` denotes, or nil when the syntax is unsupported."""
+    val trimmed: text = raw.trim()
+    val s: text = trimmed.to_lower()
+    if s.len() == 0:
+        return nil
+    if s.starts_with("#"):
+        return parse_hex_color(s)
+    if val rgb_inner = _fn_inner(s, "rgba"):
+        return _parse_rgb_fn(rgb_inner)
+    if val rgb_inner2 = _fn_inner(s, "rgb"):
+        return _parse_rgb_fn(rgb_inner2)
+    if val hsl_inner = _fn_inner(s, "hsla"):
+        return _parse_hsl_fn(hsl_inner)
+    if val hsl_inner2 = _fn_inner(s, "hsl"):
+        return _parse_hsl_fn(hsl_inner2)
+    named_color(s)

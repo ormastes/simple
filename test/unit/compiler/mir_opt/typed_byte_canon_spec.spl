@@ -1,0 +1,110 @@
+# @cover src/compiler/60.mir_opt/mir_opt/typed_byte_canon.spl 80%
+"""
+# MIR Transforms Specification (Bounds-Check Extension + Typed-Byte Canonicalization)
+
+**Feature IDs:** #hw-access-optimization-infra
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** Draft
+**Plan:** doc/03_plan/pure_simple_lib_standalone_hw_plan.md
+**Artifacts:** N/A
+
+## Overview
+
+Validates both MIR optimization transforms from AC-4:
+1. Bounds-check elimination extension with explicit-range and constant-index proofs
+2. TypedByteCanon pass for typed-byte load/store canonicalization (width widening, alignment)
+
+## Behavior
+
+- BoundsCheckElimination extended with ExplicitRangeProof and ConstantIndexProof
+- TypedByteCanon implements MirPass trait
+- TypedByteCanon depends on bounds_check_elimination
+- Canonicalization widens narrow byte loads/stores when safe
+"""
+
+use std.spec
+use compiler.mir_opt.mir_opt.bounds_check_elim.{ExplicitRangeProof, ConstantIndexProof}
+use compiler.mir_opt.mir_opt.typed_byte_canon.{TypedByteCanon, create_typed_byte_canon_pass}
+use compiler.mir_opt.mod.{PassKind}
+
+
+# ============================================================================
+# AC-4: MIR transforms — bounds-check extension
+# ============================================================================
+
+describe "BoundsCheckElimination Extended":
+    describe "ExplicitRangeProof":
+        it "AC-4: proof struct holds var_id, lower_bound, upper_bound":
+            val proof = ExplicitRangeProof(var_id: 1, lower_bound: 0, upper_bound: 10, proof_key: "range_1")
+
+            expect(proof.var_id).to_equal(1)
+            expect(proof.lower_bound).to_equal(0)
+            expect(proof.upper_bound).to_equal(10)
+
+        it "AC-4: proof_key is a non-empty text":
+            val proof = ExplicitRangeProof(var_id: 1, lower_bound: 0, upper_bound: 10, proof_key: "range_guard_x")
+
+            val key_len = proof.proof_key.len()
+            expect(key_len).to_be_greater_than(0)
+
+    describe "ConstantIndexProof":
+        it "AC-4: proof struct holds index_const and arr_local_id":
+            val proof = ConstantIndexProof(index_const: 3, arr_local_id: 42, proof_key: "const_idx_3")
+
+            expect(proof.index_const).to_equal(3)
+            expect(proof.arr_local_id).to_equal(42)
+
+        it "AC-4: constant index proof can eliminate known-safe access":
+            val proof = ConstantIndexProof(index_const: 0, arr_local_id: 10, proof_key: "first_elem")
+
+            # Index 0 on any non-empty array is always safe
+            val is_zero_idx = proof.index_const == 0
+            expect(is_zero_idx).to_equal(true)
+
+
+# ============================================================================
+# AC-4: MIR transforms — TypedByteCanon pass
+# ============================================================================
+
+describe "TypedByteCanon":
+    describe "create_typed_byte_canon_pass":
+        it "AC-4: creates pass with zero initial counters":
+            val pass_obj = create_typed_byte_canon_pass()
+
+            expect(pass_obj.rewrites).to_equal(0)
+            expect(pass_obj.widened_loads).to_equal(0)
+            expect(pass_obj.widened_stores).to_equal(0)
+
+    describe "MirPass trait":
+        it "AC-4: name returns typed_byte_canon":
+            val pass_obj = create_typed_byte_canon_pass()
+            val pass_name = pass_obj.name()
+
+            expect(pass_name).to_equal("typed_byte_canon")
+
+        it "AC-4: description is non-empty":
+            val pass_obj = create_typed_byte_canon_pass()
+            val desc = pass_obj.description()
+
+            val desc_len = desc.len()
+            expect(desc_len).to_be_greater_than(0)
+
+        it "AC-4: is_analysis_pass returns false":
+            val pass_obj = create_typed_byte_canon_pass()
+            val is_analysis = pass_obj.is_analysis_pass()
+
+            expect(is_analysis).to_equal(false)
+
+        it "AC-4: dependencies includes bounds_check_elimination":
+            val pass_obj = create_typed_byte_canon_pass()
+            val deps = pass_obj.dependencies()
+
+            expect(deps).to_contain("bounds_check_elimination")
+
+    describe "PassKind enum":
+        it "AC-4: PassKind has TypedByteCanon variant":
+            val kind = PassKind.TypedByteCanon
+
+            val is_tbc = kind == PassKind.TypedByteCanon
+            expect(is_tbc).to_equal(true)

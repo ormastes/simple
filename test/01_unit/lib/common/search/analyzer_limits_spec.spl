@@ -1,0 +1,154 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md
+
+use std.spec.step
+use std.spec
+
+use lib.common.search.analyzer.{
+    AnalyzerIdentityV1, AnalyzerLimitsV1, SearchFieldIdentityV1, AnalyzerErrorV1,
+    analyze_field_v1, analyze_query_v1, unsigned_utf8_less,
+    analyzer_identity_spipe_unicode_lex_v1, analyzer_limits_of,
+    analyzer_stop_words_v1, analyzer_stop_words_self_consistent_v1,
+}
+use lib.common.search.analyzer_contract.{ANALYZER_STOP_WORDS_SHA256}
+
+describe "analyzer bounded seam (spipe-unicode-lex-v1)":
+    it "carries the frozen analyzer identity and stop-word digest":
+        # @req REQ-SSPEC-LIB
+        step("carries the frozen analyzer identity and stop-word digest")
+        val identity = analyzer_identity_spipe_unicode_lex_v1()
+        expect(identity.analyzer_id).to_equal("spipe-unicode-lex-v1")
+        expect(identity.unicode_version).to_equal("17.0.0")
+        expect(identity.stop_words_id).to_equal("en-basic-v1")
+        expect(identity.stop_words_sha256).to_equal("6f0a7c26d3d0e3d06a2fbbbeaa1843294f83c3be26baf1c04651191e011510bf")
+        expect(identity.stop_words_sha256).to_equal(ANALYZER_STOP_WORDS_SHA256)
+        expect(analyzer_stop_words_v1().len()).to_equal(6)
+        expect(analyzer_stop_words_self_consistent_v1()).to_equal(true)
+
+    it "exposes the exact frozen query limits tuple":
+        # @req REQ-SSPEC-LIB
+        step("exposes the exact frozen query limits tuple")
+        val limits = AnalyzerLimitsV1.query_default()
+        expect(limits.max_input_bytes).to_equal(4096)
+        expect(limits.max_normalized_bytes).to_equal(4096)
+        expect(limits.max_token_bytes).to_equal(4096)
+        expect(limits.max_tokens).to_equal(128)
+        expect(limits.max_distinct_terms).to_equal(128)
+
+    it "analyzes a bounded field and assigns positions before stop-word removal":
+        # @req REQ-SSPEC-LIB
+        step("analyzes a bounded field and assigns positions before stop-word removal")
+        val identity = analyzer_identity_spipe_unicode_lex_v1()
+        val limits = analyzer_limits_of(1048576, 1048576, 4096, 524288, 524288)
+        val result = analyze_field_v1("Alpha and BETA", SearchFieldIdentityV1.Body, identity, limits)
+        match result:
+            Ok(analyzed):
+                expect(analyzed.tokens.len()).to_equal(2)
+                expect(analyzed.tokens[0].value).to_equal("alpha")
+                expect(analyzed.tokens[0].position).to_equal(1)
+                expect(analyzed.tokens[1].value).to_equal("beta")
+                expect(analyzed.tokens[1].position).to_equal(3)
+            Err(e):
+                expect(true).to_equal(false)
+
+    it "appends the untrimmed normalized value at position zero for Identifier fields, deduplicated":
+        # @req REQ-SSPEC-LIB
+        step("appends the untrimmed normalized value at position zero for Identifier fields, deduplicated")
+        val identity = analyzer_identity_spipe_unicode_lex_v1()
+        val limits = analyzer_limits_of(1048576, 1048576, 4096, 524288, 524288)
+        val result = analyze_field_v1("REQ-SEARCH-001", SearchFieldIdentityV1.Identifier, identity, limits)
+        match result:
+            Ok(analyzed):
+                val last = analyzed.tokens[analyzed.tokens.len() - 1]
+                expect(last.exact_identifier).to_equal(true)
+                expect(last.position).to_equal(0)
+                expect(last.value).to_equal("req-search-001")
+                # deduplication: exact value not also present as a prose token
+                var prose_dupes = 0
+                var i = 0
+                while i < analyzed.tokens.len() - 1:
+                    if analyzed.tokens[i].value == last.value:
+                        prose_dupes = prose_dupes + 1
+                    i = i + 1
+                expect(prose_dupes).to_equal(0)
+            Err(e):
+                expect(true).to_equal(false)
+
+    it "rejects invalid limits":
+        # @req REQ-SSPEC-LIB
+        step("rejects invalid limits")
+        val identity = analyzer_identity_spipe_unicode_lex_v1()
+        val bad_limits = analyzer_limits_of(0, 4096, 4096, 128, 128)
+        val result = analyze_field_v1("hello", SearchFieldIdentityV1.Body, identity, bad_limits)
+        match result:
+            Ok(analyzed):
+                expect(true).to_equal(false)
+            Err(e):
+                expect(e).to_equal(AnalyzerErrorV1.InvalidLimits)
+
+    it "rejects field input beyond the hard 1,048,576-byte ceiling":
+        # @req REQ-SSPEC-LIB
+        step("rejects field input beyond the hard 1,048,576-byte ceiling")
+        val identity = analyzer_identity_spipe_unicode_lex_v1()
+        val limits = analyzer_limits_of(1048576, 1048576, 4096, 524288, 524288)
+        var big = ""
+        var i = 0
+        while i < 1048577:
+            big = big + "a"
+            i = i + 1
+        val result = analyze_field_v1(big, SearchFieldIdentityV1.Body, identity, limits)
+        match result:
+            Ok(analyzed):
+                expect(true).to_equal(false)
+            Err(e):
+                expect(e).to_equal(AnalyzerErrorV1.InputLimitExceeded)
+
+    it "rejects input exceeding the caller-supplied max_input_bytes":
+        # @req REQ-SSPEC-LIB
+        step("rejects input exceeding the caller-supplied max_input_bytes")
+        val identity = analyzer_identity_spipe_unicode_lex_v1()
+        val limits = analyzer_limits_of(4, 4096, 4096, 128, 128)
+        val result = analyze_field_v1("hello world", SearchFieldIdentityV1.Body, identity, limits)
+        match result:
+            Ok(analyzed):
+                expect(true).to_equal(false)
+            Err(e):
+                expect(e).to_equal(AnalyzerErrorV1.InputLimitExceeded)
+
+    it "analyzes a query with distinct sorted terms and query term frequency":
+        # @req REQ-SSPEC-LIB
+        step("analyzes a query with distinct sorted terms and query term frequency")
+        val identity = analyzer_identity_spipe_unicode_lex_v1()
+        val limits = AnalyzerLimitsV1.query_default()
+        val result = analyze_query_v1("beta alpha beta", identity, limits)
+        match result:
+            Ok(analyzed):
+                expect(analyzed.terms.len()).to_equal(2)
+                expect(analyzed.terms[0].value).to_equal("alpha")
+                expect(analyzed.terms[0].qtf).to_equal(1)
+                expect(analyzed.terms[1].value).to_equal("beta")
+                expect(analyzed.terms[1].qtf).to_equal(2)
+            Err(e):
+                expect(true).to_equal(false)
+
+    it "rejects a query analyzed with limits other than the exact frozen tuple":
+        # @req REQ-SSPEC-LIB
+        step("rejects a query analyzed with limits other than the exact frozen tuple")
+        val identity = analyzer_identity_spipe_unicode_lex_v1()
+        val wrong_limits = analyzer_limits_of(4096, 4096, 4096, 128, 64)
+        val result = analyze_query_v1("alpha beta", identity, wrong_limits)
+        match result:
+            Ok(analyzed):
+                expect(true).to_equal(false)
+            Err(e):
+                expect(e).to_equal(AnalyzerErrorV1.InvalidLimits)
+
+    it "orders unsigned_utf8_less by codepoint (unsigned-byte-order-preserving)":
+        # @req REQ-SSPEC-LIB
+        step("orders unsigned_utf8_less by codepoint, matching unsigned UTF-8 byte order")
+        expect(unsigned_utf8_less("alpha", "beta")).to_equal(true)
+        expect(unsigned_utf8_less("beta", "alpha")).to_equal(false)
+        expect(unsigned_utf8_less("alpha", "alpha")).to_equal(false)
+        expect(unsigned_utf8_less("a", "ab")).to_equal(true)
+        expect(unsigned_utf8_less("ab", "a")).to_equal(false)

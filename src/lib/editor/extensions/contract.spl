@@ -1,0 +1,223 @@
+# Extension Kernel Contract — validated extension ids, semver + range
+# checks, typed contribution descriptors, and the shared error type.
+#
+# Leaf module: no imports. Everything else in the extension kernel may
+# depend on this file; this file depends on nothing.
+#
+# Provides: ExtensionId, SemVer, SemVerRange, ExtensionHostPlacement,
+#           CommandDescriptor, LanguageDescriptor, CustomEditorDescriptor,
+#           KeybindingDescriptor, ThemeRefDescriptor, ExtensionError.
+
+# ---- extension id -----------------------------------------------------------
+
+# A validated extension identifier: dot-separated segments of lowercase
+# letters, digits, '-' and '_' (e.g. "markdown-language", "acme.notes").
+struct ExtensionId:
+    value: text
+
+fn _extension_id_char_ok(ch: text) -> bool:
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    ch == "-" or ch == "_"
+
+fn extension_id_is_valid(raw: text) -> bool:
+    if raw == "":
+        return false
+    val segments = raw.split(".")
+    for segment in segments:
+        if segment == "":
+            return false
+        for c in segment.chars():
+            if not _extension_id_char_ok(c):
+                return false
+    true
+
+fn extension_id_parse(raw: text) -> Result<ExtensionId, ExtensionError>:
+    if extension_id_is_valid(raw):
+        Ok(ExtensionId(value: raw))
+    else:
+        Err(ExtensionError.InvalidId(reason: raw))
+
+# ---- semver -----------------------------------------------------------------
+
+struct SemVer:
+    major: i64
+    minor: i64
+    patch: i64
+
+# Parse one non-negative decimal component; -1 on invalid.
+fn _semver_component(t: text) -> i64:
+    if t == "":
+        return -1
+    var out = 0
+    for ch in t.chars():
+        val digit = "0123456789".index_of(ch)
+        if digit < 0:
+            return -1
+        out = out * 10 + digit
+    out
+
+fn semver_parse(raw: text) -> SemVer?:
+    val parts = raw.trim().split(".")
+    if parts.len() != 3:
+        return None
+    val major = _semver_component(parts[0])
+    val minor = _semver_component(parts[1])
+    val patch = _semver_component(parts[2])
+    if major < 0 or minor < 0 or patch < 0:
+        return None
+    Some(SemVer(major: major, minor: minor, patch: patch))
+
+# -1 / 0 / 1 for a < b / a == b / a > b.
+fn semver_compare(a: SemVer, b: SemVer) -> i64:
+    if a.major != b.major:
+        return if a.major < b.major then -1 else: 1
+    if a.minor != b.minor:
+        return if a.minor < b.minor then -1 else: 1
+    if a.patch != b.patch:
+        return if a.patch < b.patch then -1 else: 1
+    0
+
+fn semver_to_text(v: SemVer) -> text:
+    v.major.to_text() + "." + v.minor.to_text() + "." + v.patch.to_text()
+
+# ---- semver ranges ----------------------------------------------------------
+
+# kind: "any" | "exact" | "min" | "min_max"
+#   any:     matches every version ("*" or empty range text)
+#   exact:   "1.2.3" — only that version
+#   min:     ">=1.2.3" — min inclusive
+#   min_max: ">=1.2.3 <2.0.0" — min inclusive, max exclusive
+struct SemVerRange:
+    kind: text
+    min: SemVer
+    max: SemVer
+
+fn semver_range_any() -> SemVerRange:
+    SemVerRange(
+        kind: "any",
+        min: SemVer(major: 0, minor: 0, patch: 0),
+        max: SemVer(major: 0, minor: 0, patch: 0)
+    )
+
+fn semver_range_parse(raw: text) -> SemVerRange?:
+    val trimmed = raw.trim()
+    if trimmed == "" or trimmed == "*":
+        return Some(semver_range_any())
+    if not trimmed.starts_with(">="):
+        match semver_parse(trimmed):
+            case Some(v):
+                return Some(SemVerRange(kind: "exact", min: v, max: v))
+            case None:
+                return None
+    val rest = trimmed.slice(2, trimmed.len()).trim()
+    val lt = rest.index_of("<")
+    if lt < 0:
+        match semver_parse(rest):
+            case Some(v):
+                return Some(SemVerRange(
+                    kind: "min",
+                    min: v,
+                    max: SemVer(major: 0, minor: 0, patch: 0)
+                ))
+            case None:
+                return None
+    val min_text = rest.slice(0, lt).trim()
+    val max_text = rest.slice(lt + 1, rest.len()).trim()
+    match semver_parse(min_text):
+        case Some(lo):
+            match semver_parse(max_text):
+                case Some(hi):
+                    Some(SemVerRange(kind: "min_max", min: lo, max: hi))
+                case None:
+                    None
+        case None:
+            None
+
+fn semver_range_contains(range: SemVerRange, v: SemVer) -> bool:
+    if range.kind == "any":
+        return true
+    if range.kind == "exact":
+        return semver_compare(v, range.min) == 0
+    if range.kind == "min":
+        return semver_compare(v, range.min) >= 0
+    if range.kind == "min_max":
+        return semver_compare(v, range.min) >= 0 and semver_compare(v, range.max) < 0
+    false
+
+# ---- host placement ---------------------------------------------------------
+
+enum ExtensionHostPlacement:
+    Builtin
+    InProcess
+    Worker
+
+# "" defaults to InProcess; unknown values also map to InProcess (callers
+# that need to reject unknown values should use extension_host_placement_known).
+fn extension_host_placement_parse(raw: text) -> ExtensionHostPlacement:
+    if raw == "builtin":
+        return ExtensionHostPlacement.Builtin
+    if raw == "worker":
+        return ExtensionHostPlacement.Worker
+    ExtensionHostPlacement.InProcess
+
+fn extension_host_placement_known(raw: text) -> bool:
+    raw == "" or raw == "builtin" or raw == "in_process" or raw == "worker"
+
+fn extension_host_placement_text(p: ExtensionHostPlacement) -> text:
+    match p:
+        case Builtin: "builtin"
+        case InProcess: "in_process"
+        case Worker: "worker"
+
+# ---- typed contribution descriptors ----------------------------------------
+
+struct CommandDescriptor:
+    id: text
+    title: text
+    category: text
+
+struct LanguageDescriptor:
+    id: text
+    extensions: [text]
+
+struct CustomEditorDescriptor:
+    id: text
+    document_kind: text
+    priority: i64
+
+struct KeybindingDescriptor:
+    command: text
+    key: text
+    when: text
+
+struct ThemeRefDescriptor:
+    id: text
+    label: text
+    ui_theme: text
+    path: text
+
+# ---- errors -----------------------------------------------------------------
+
+enum ExtensionError:
+    InvalidId(reason: text)
+    InvalidVersion(reason: text)
+    InvalidRange(reason: text)
+    NotFound(name: text)
+    NotActive(name: text)
+    DuplicateCommand(id: text)
+    CommandFailed(reason: text)
+    DecodeFailed(reason: text)
+
+fn extension_error_text(e: ExtensionError) -> text:
+    match e:
+        case InvalidId(reason): "invalid extension id: " + reason
+        case InvalidVersion(reason): "invalid version: " + reason
+        case InvalidRange(reason): "invalid version range: " + reason
+        case NotFound(name): "extension not found: " + name
+        case NotActive(name): "extension not active: " + name
+        case DuplicateCommand(id): "duplicate command id: " + id
+        case CommandFailed(reason): "command failed: " + reason
+        case DecodeFailed(reason): "manifest decode failed: " + reason

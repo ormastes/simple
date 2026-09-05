@@ -1,0 +1,101 @@
+#!/bin/sh
+# Build and sign the immutable RV64 authenticated hello-world payload.
+set -eu
+
+fail() { echo "rv64-authhello-builder: $*" >&2; exit 1; }
+[ "$#" -eq 4 ] || fail 'usage: OUTPUT_DIR KERNEL_ELF SIGNING_KEY_PEM PUBLIC_KEY_PEM'
+out=$1 kernel=$2 private_key=$3 public_key=$4
+[ -s "$kernel" ] && [ -s "$private_key" ] && [ -s "$public_key" ] || fail 'missing input'
+for tool in clang ld.lld openssl sha256sum awk od dd; do
+    command -v "$tool" >/dev/null 2>&1 || fail "missing tool:$tool"
+done
+mkdir -p "$out"
+mount_id=${SIMPLEOS_RV64_AUTH_MOUNT_ID:-}
+mount_generation=${SIMPLEOS_RV64_AUTH_MOUNT_GENERATION:-}
+file_id=${SIMPLEOS_RV64_AUTH_FILE_ID:-}
+file_generation=${SIMPLEOS_RV64_AUTH_FILE_GENERATION:-}
+for coordinate in "$mount_id" "$mount_generation" "$file_id" "$file_generation"; do
+    case "$coordinate" in ''|*[!0-9]*|0) fail 'explicit nonzero ExecuteOpenBinding coordinates required' ;; esac
+done
+work=$(mktemp -d "${TMPDIR:-/tmp}/rv64-authhello.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+cat > "$work/hello.S" <<'EOF'
+.option norvc
+.section .text
+.global _start
+_start:
+  la s1,message
+  la s2,message_end
+  sub s2,s2,s1
+1:
+  lbu a0,0(s1)
+  li a7,60
+  ecall
+  addi s1,s1,1
+  addi s2,s2,-1
+  bnez s2,1b
+  li a0,0
+  li a7,0
+  ecall
+2:
+  wfi
+  j 2b
+.section .rodata
+message: .ascii "hello from SimpleOS LLVM\n"
+message_end:
+EOF
+clang --target=riscv64-unknown-none-elf -c -ffreestanding -nostdlib \
+    "$work/hello.S" -o "$work/hello.o"
+ld.lld -m elf64lriscv -static --build-id=none -z max-page-size=4096 \
+    -e _start -Ttext=0x201000 "$work/hello.o" -o "$work/AUTHHELLO.ELF"
+
+image_hash=$(sha256sum "$work/AUTHHELLO.ELF" | awk '{print $1}')
+kernel_hash=$(sha256sum "$kernel" | awk '{print $1}')
+openssl pkey -pubin -in "$public_key" -outform DER -out "$work/public.der" >/dev/null 2>&1
+pub_size=$(wc -c < "$work/public.der" | tr -d ' ')
+[ "$pub_size" -ge 32 ] || fail 'public key DER too short'
+dd if="$work/public.der" of="$work/public.raw" bs=1 skip=$((pub_size - 32)) count=32 2>/dev/null
+trust_hash=$(sha256sum "$work/public.raw" | awk '{print $1}')
+
+body=$work/signing.body
+contract_tool=${SIMPLEOS_RV64_AUTH_CONTRACT_TOOL:-}
+[ -x "$contract_tool" ] || fail 'SIMPLEOS_RV64_AUTH_CONTRACT_TOOL must name the admitted Simple canonical-body producer'
+"$contract_tool" "$body" "$image_hash" "$kernel_hash" "$trust_hash" \
+    "$mount_id" "$mount_generation" "$file_id" "$file_generation" ||
+    fail 'Simple canonical signing-body producer failed'
+[ -s "$body" ] || fail 'Simple canonical signing body is empty'
+domain=$(dd if="$body" bs=1 count=32 2>/dev/null)
+[ "$domain" = simpleos-executable-admission-v1 ] || fail 'canonical signing domain mismatch'
+manifest_hash=$(sha256sum "$body" | awk '{print $1}')
+openssl pkeyutl -sign -rawin -inkey "$private_key" -in "$body" \
+    -out "$work/signature.raw" >/dev/null 2>&1 || fail 'Ed25519 signing failed'
+[ "$(wc -c < "$work/signature.raw" | tr -d ' ')" -eq 64 ] || fail 'signature size'
+openssl pkeyutl -verify -rawin -pubin -inkey "$public_key" \
+    -sigfile "$work/signature.raw" -in "$body" >/dev/null 2>&1 ||
+    fail 'signing key does not match provisioned trust root'
+
+{
+    echo schema=simpleos-authhello-manifest-v1
+    echo "image_hash=$image_hash"
+} > "$work/AUTHHEL.MAN"
+{
+    echo schema=simpleos-authhello-admission-v1
+    echo "manifest_hash=$manifest_hash"
+    echo "kernel_hash=$kernel_hash"
+    echo "trust_root_hash=$trust_hash"
+    echo "mount_id=$mount_id"
+    echo "mount_generation=$mount_generation"
+    echo "file_id=$file_id"
+    echo "file_generation=$file_generation"
+} > "$work/AUTHHEL.ADM"
+printf 'schema=simpleos-authhello-proof-v1\nsigner_key_id=rv64-qemu-acceptance-v1\nsignature_hex=%s\n' \
+    "$(od -An -tx1 -v "$work/signature.raw" | tr -d ' \n')" > "$work/AUTHHEL.SIG"
+printf 'schema=simpleos-authhello-trust-root-v1\nkey_id=rv64-qemu-acceptance-v1\npublic_key_hex=%s\n' \
+    "$(od -An -tx1 -v "$work/public.raw" | tr -d ' \n')" > "$work/AUTHHEL.PUB"
+
+for name in AUTHHELLO.ELF AUTHHEL.MAN AUTHHEL.ADM AUTHHEL.SIG AUTHHEL.PUB; do
+    cp "$work/$name" "$out/$name.tmp"
+    mv "$out/$name.tmp" "$out/$name"
+done
+echo "rv64_authhello_built=pass image_sha256=$image_hash manifest_sha256=$manifest_hash"

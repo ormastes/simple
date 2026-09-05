@@ -1,0 +1,246 @@
+# Loader-owned LLVM/Clang/LLD hello-world execution evidence.
+#
+# A host or caller may describe a successful run, but descriptions are never
+# authority.  The only mint function is package-private and reads every bound
+# artifact through the guest VFS.  Public code can only consume an opaque token
+# once; copying a token or a returned receipt cannot recreate loader state.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionEvidenceTokenV1, scheduler_execution_evidence_consume_once_v1
+}
+use os.services.process_execution_evidence.{ProcessExecutionStageV1, ProcessExecutionResultV1}
+use os.kernel.loader.guest_toolchain_execution_contract.{
+    GuestToolchainHelloExpectedV1,
+    guest_toolchain_hello_execution_chain_v1_validate
+}
+
+pub const GUEST_TOOLCHAIN_HELLO_AUTHORITY_V1: i64 = 1
+
+pub enum GuestToolchainHelloAuthorityErrorV1:
+    InvalidOwner
+    SerializationUnavailable
+    FilesystemEvidenceMissing
+    ArtifactDigestMismatch
+    SourceDigestMismatch
+    ObjectDigestMismatch
+    ExecutableDigestMismatch
+    ExecutionEvidenceInvalid
+    OutputMismatch
+    Exhausted
+    InvalidToken
+    AlreadyConsumed
+
+pub struct GuestToolchainHelloAuthorityTokenV1:
+    slot_index: i64
+    generation: u64
+    nonce: u64
+
+pub struct GuestToolchainHelloAuthorizationV1:
+    schema_version: i64
+    target_triple: text
+    filesystem_name: text
+    llvm_sha256: text
+    clang_sha256: text
+    lld_sha256: text
+    source_sha256: text
+    object_sha256: text
+    executable_sha256: text
+    observed_stdout: text
+    filesystem_generation: u64
+    clang_child_id: u64
+    lld_child_id: u64
+    hello_child_id: u64
+    execution_authorized: bool
+
+pub class GuestToolchainHelloAuthorityOwnerV1:
+    epoch: u64
+
+struct GuestToolchainHelloSlotV1:
+    generation: u64
+    nonce: u64
+    consumed: bool
+    authorization: GuestToolchainHelloAuthorizationV1
+
+struct GuestToolchainHelloStateV1:
+    epoch: u64
+    nonce_counter: u64
+    slots: [GuestToolchainHelloSlotV1]
+
+val _guest_toolchain_hello_mutex: i64 = mutex_raw_create()
+var _guest_toolchain_hello_state: GuestToolchainHelloStateV1? = nil
+
+fn _lock() -> bool:
+    _guest_toolchain_hello_mutex > 0 and mutex_raw_lock(_guest_toolchain_hello_mutex)
+
+fn _unlock() -> bool:
+    mutex_raw_unlock(_guest_toolchain_hello_mutex)
+
+fn _mix64(value: u64) -> u64:
+    var mixed = value ^ (value >> 30)
+    mixed = mixed * 0xBF58476D1CE4E5B9
+    mixed = mixed ^ (mixed >> 27)
+    mixed = mixed * 0x94D049BB133111EB
+    mixed ^ (mixed >> 31)
+
+fn _read_digest(path: text) -> text:
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() == 0:
+        return ""
+    sha256_u8_hex(bytes)
+
+pub fn guest_toolchain_hello_authority_initialize(
+    nonce_seed: u64
+) -> Result<GuestToolchainHelloAuthorityOwnerV1, GuestToolchainHelloAuthorityErrorV1>:
+    if nonce_seed == 0u64:
+        return Err(GuestToolchainHelloAuthorityErrorV1.InvalidOwner)
+    if not _lock():
+        return Err(GuestToolchainHelloAuthorityErrorV1.SerializationUnavailable)
+    var epoch = _mix64(nonce_seed ^ 0x4755455354544F4F)
+    if epoch == 0u64:
+        epoch = 1u64
+    match _guest_toolchain_hello_state:
+        case nil:
+            _guest_toolchain_hello_state = Some(GuestToolchainHelloStateV1(
+                epoch: epoch, nonce_counter: nonce_seed, slots: []))
+        case Some(state):
+            if state.epoch != epoch:
+                _unlock()
+                return Err(GuestToolchainHelloAuthorityErrorV1.InvalidOwner)
+    if not _unlock():
+        return Err(GuestToolchainHelloAuthorityErrorV1.SerializationUnavailable)
+    Ok(GuestToolchainHelloAuthorityOwnerV1(epoch: epoch))
+
+pub(package) fn guest_toolchain_hello_issue_from_guest_filesystem_v1(
+    owner: GuestToolchainHelloAuthorityOwnerV1,
+    expected: GuestToolchainHelloExpectedV1,
+    clang_token: SchedulerExecutionEvidenceTokenV1,
+    lld_token: SchedulerExecutionEvidenceTokenV1,
+    hello_token: SchedulerExecutionEvidenceTokenV1
+) -> Result<GuestToolchainHelloAuthorityTokenV1, GuestToolchainHelloAuthorityErrorV1>:
+    """Consume process results and re-read the completed chain in loader scope."""
+    val clang_consumed = scheduler_execution_evidence_consume_once_v1(clang_token)
+    if not clang_consumed.?:
+        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
+    val lld_consumed = scheduler_execution_evidence_consume_once_v1(lld_token)
+    if not lld_consumed.?:
+        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
+    val hello_consumed = scheduler_execution_evidence_consume_once_v1(hello_token)
+    if not hello_consumed.?:
+        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
+    val clang_result = clang_consumed.unwrap()
+    val lld_result = lld_consumed.unwrap()
+    val hello_result = hello_consumed.unwrap()
+    val llvm_digest = _read_digest(expected.llvm_path)
+    val clang_digest = _read_digest(expected.clang_path)
+    val lld_digest = _read_digest(expected.lld_path)
+    val source_digest = _read_digest(expected.source_path)
+    val object_digest = _read_digest(expected.object_path)
+    val executable_digest = _read_digest(expected.executable_path)
+    if llvm_digest == "" or clang_digest == "" or lld_digest == "" or
+       source_digest == "" or object_digest == "" or executable_digest == "":
+        return Err(GuestToolchainHelloAuthorityErrorV1.FilesystemEvidenceMissing)
+    if llvm_digest != expected.llvm_sha256 or clang_digest != expected.clang_sha256 or
+       lld_digest != expected.lld_sha256:
+        return Err(GuestToolchainHelloAuthorityErrorV1.ArtifactDigestMismatch)
+    if source_digest != expected.source_sha256:
+        return Err(GuestToolchainHelloAuthorityErrorV1.SourceDigestMismatch)
+    if object_digest != expected.object_sha256:
+        return Err(GuestToolchainHelloAuthorityErrorV1.ObjectDigestMismatch)
+    if executable_digest != expected.executable_sha256:
+        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutableDigestMismatch)
+    if clang_result.image_hash != clang_digest or lld_result.image_hash != lld_digest or
+       hello_result.image_hash != executable_digest or clang_result.exit_code != 0 or
+       lld_result.exit_code != 0 or hello_result.exit_code != 0 or
+       clang_result.parent_id != lld_result.parent_id or
+       clang_result.parent_id != hello_result.parent_id or
+       clang_result.child_id == lld_result.child_id or
+       clang_result.child_id == hello_result.child_id or
+       lld_result.child_id == hello_result.child_id or
+       clang_result.mount_generation != lld_result.mount_generation or
+       clang_result.mount_generation != hello_result.mount_generation or
+       clang_result.stdout_bytes.len() != 0 or lld_result.stdout_bytes.len() != 0 or
+       hello_result.stdout_bytes != text_to_bytes_pure(expected.expected_stdout):
+        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
+    if not _lock():
+        return Err(GuestToolchainHelloAuthorityErrorV1.SerializationUnavailable)
+    var issued: GuestToolchainHelloAuthorityTokenV1? = nil
+    match _guest_toolchain_hello_state:
+        case nil: issued = nil
+        case Some(current):
+            var state = current
+            if state.epoch == owner.epoch and state.slots.len() < 4096:
+                val slot_index = state.slots.len()
+                val generation = 1u64
+                var nonce = _mix64(state.nonce_counter ^ owner.epoch ^ (slot_index as u64))
+                if nonce == 0u64:
+                    nonce = 1u64
+                state.nonce_counter = state.nonce_counter + 1u64
+                state.slots.push(GuestToolchainHelloSlotV1(
+                    generation: generation,
+                    nonce: nonce,
+                    consumed: false,
+                    authorization: GuestToolchainHelloAuthorizationV1(
+                        schema_version: GUEST_TOOLCHAIN_HELLO_AUTHORITY_V1,
+                        target_triple: expected.target_triple,
+                        filesystem_name: expected.filesystem_name,
+                        llvm_sha256: llvm_digest,
+                        clang_sha256: clang_digest,
+                        lld_sha256: lld_digest,
+                        source_sha256: source_digest,
+                        object_sha256: object_digest,
+                        executable_sha256: executable_digest,
+                        observed_stdout: expected.expected_stdout,
+                        filesystem_generation: hello_result.filesystem_generation,
+                        clang_child_id: clang_result.child_id,
+                        lld_child_id: lld_result.child_id,
+                        hello_child_id: hello_result.child_id,
+                        execution_authorized: true)))
+                issued = Some(GuestToolchainHelloAuthorityTokenV1(
+                    slot_index: slot_index, generation: generation, nonce: nonce))
+            _guest_toolchain_hello_state = Some(state)
+    if not _unlock():
+        return Err(GuestToolchainHelloAuthorityErrorV1.SerializationUnavailable)
+    match issued:
+        case Some(token): Ok(token)
+        case nil: Err(GuestToolchainHelloAuthorityErrorV1.Exhausted)
+
+pub fn guest_toolchain_hello_consume_once_v1(
+    owner: GuestToolchainHelloAuthorityOwnerV1,
+    token: GuestToolchainHelloAuthorityTokenV1
+) -> Result<GuestToolchainHelloAuthorizationV1, GuestToolchainHelloAuthorityErrorV1>:
+    if not _lock():
+        return Err(GuestToolchainHelloAuthorityErrorV1.SerializationUnavailable)
+    var result: GuestToolchainHelloAuthorizationV1? = nil
+    var error = GuestToolchainHelloAuthorityErrorV1.InvalidToken
+    match _guest_toolchain_hello_state:
+        case nil: error = GuestToolchainHelloAuthorityErrorV1.InvalidToken
+        case Some(current):
+            var state = current
+            if state.epoch == owner.epoch and token.slot_index >= 0 and
+               token.slot_index < state.slots.len():
+                val slot = state.slots[token.slot_index]
+                if slot.generation == token.generation and slot.nonce == token.nonce:
+                    if slot.consumed:
+                        error = GuestToolchainHelloAuthorityErrorV1.AlreadyConsumed
+                    else:
+                        var updated = slot
+                        updated.consumed = true
+                        state.slots[token.slot_index] = updated
+                        result = Some(slot.authorization)
+            _guest_toolchain_hello_state = Some(state)
+    if not _unlock():
+        return Err(GuestToolchainHelloAuthorityErrorV1.SerializationUnavailable)
+    match result:
+        case Some(authorization): Ok(authorization)
+        case nil: Err(error)
+
+export GuestToolchainHelloAuthorityErrorV1
+export GuestToolchainHelloAuthorityTokenV1, GuestToolchainHelloAuthorizationV1
+export GuestToolchainHelloAuthorityOwnerV1
+export guest_toolchain_hello_authority_initialize
+export guest_toolchain_hello_consume_once_v1
+export GUEST_TOOLCHAIN_HELLO_AUTHORITY_V1

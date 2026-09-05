@@ -1,0 +1,98 @@
+# Pure-Simple `simple-core` raw-pointer atomic fallback.
+#
+# The simple-core lane owns the rt_atomic_* ABI used by no-GC libraries during
+# bootstrap and single-threaded package builds. Hosted/platform runtimes may
+# replace these with true atomic operations for concurrent execution.
+
+@unsafe(reason: "nonnull raw read; atomic-cell allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+@unsafe(reason: "nonnull raw store; atomic-cell allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+@unsafe(reason: "nonnull raw store; atomic-cell allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+@unsafe(reason: "nonnull raw store; atomic-cell allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw libc zeroed heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "raw libc owned allocation release ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+
+@always_inline
+fn _sffi_core_atomic_ptr_read_i64(addr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_read_i64(addr, offset)
+
+@always_inline
+fn _sffi_core_atomic_ptr_write_i64(addr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_i64(addr, offset, value)
+
+@always_inline
+fn _sffi_core_atomic_ptr_write_i32(addr: i64, offset: i64, value: i32):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_i32(addr, offset, value)
+
+@always_inline
+fn _sffi_core_atomic_ptr_write_u8(addr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_u8(addr, offset, value)
+
+@always_inline
+fn _sffi_core_atomic_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        calloc(count, size)
+
+@always_inline
+fn _sffi_core_atomic_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@unsafe(reason: "caller owns the nonnull raw atomic-cell address and extent", capabilities: [raw_ptr])
+pub fn rt_atomic_load_u64(addr: i64) -> i64:
+    return _sffi_core_atomic_ptr_read_i64(addr, 0)
+
+@unsafe(reason: "caller owns the nonnull raw atomic-cell address and extent", capabilities: [raw_ptr])
+pub fn rt_atomic_store_u64(addr: i64, value: i64):
+    _sffi_core_atomic_ptr_write_i64(addr, 0, value)
+
+@unsafe(reason: "single-threaded raw-pointer fallback; not a concurrent atomic RMW", capabilities: [raw_ptr])
+pub fn rt_atomic_fetch_add_u64(addr: i64, delta: i64) -> i64:
+    val old = rt_atomic_load_u64(addr)
+    rt_atomic_store_u64(addr, old + delta)
+    return old
+
+@unsafe(reason: "caller owns the nonnull raw atomic-cell address and extent", capabilities: [raw_ptr])
+pub fn rt_atomic_store_u32(addr: i64, value: i64):
+    _sffi_core_atomic_ptr_write_i32(addr, 0, value as i32)
+
+@unsafe(reason: "caller owns the nonnull raw atomic-cell address and extent", capabilities: [raw_ptr])
+pub fn rt_atomic_store_u8(addr: i64, value: i64):
+    _sffi_core_atomic_ptr_write_u8(addr, 0, value)
+
+# Hosted runtimes use a registry of true atomics. The bootstrap simple-core
+# lane is single-threaded, so a pointer-backed i64 provides the same handle ABI
+# without generated stubs; hosted concurrency continues to select its richer
+# runtime owner.
+pub fn rt_atomic_int_new(initial: i64) -> i64:
+    val handle = _sffi_core_atomic_calloc(1, 8)
+    if handle > 0:
+        _sffi_core_atomic_ptr_write_i64(handle, 0, initial)
+    handle
+
+@unsafe(reason: "unregistered raw atomic handle must originate from rt_atomic_int_new and remain live", capabilities: [raw_ptr])
+pub fn rt_atomic_int_load(handle: i64) -> i64:
+    if handle < 4096: 0 else: _sffi_core_atomic_ptr_read_i64(handle, 0)
+
+@unsafe(reason: "single-threaded unregistered raw handle; not a concurrent compare-exchange", capabilities: [raw_ptr])
+pub fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new_value: i64) -> i8:
+    if handle < 4096:
+        return 0
+    if _sffi_core_atomic_ptr_read_i64(handle, 0) != current:
+        return 0
+    _sffi_core_atomic_ptr_write_i64(handle, 0, new_value)
+    1
+
+@unsafe(reason: "unregistered raw atomic handle must be live and uniquely released", capabilities: [raw_ptr])
+pub fn rt_atomic_int_free(handle: i64):
+    if handle >= 4096:
+        _sffi_core_atomic_free(handle)

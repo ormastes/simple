@@ -1,0 +1,137 @@
+# Board Vulkan — Intel Gen12 dword-stream -> CmdPacket ADAPTER.
+#
+# Purpose: bridge `encoder_intel_gen12.spl` (emits raw dwords) and
+# `boundary_cmdstream_canonicalize.spl` (consumes `CmdPacket` values), so the
+# encoder's real output can finally be run through the comparator. Neither
+# file is edited by this one.
+#
+# Scope: pure decoding (deterministic computation), the mirror image of the
+# encoder's pure encoding. No hardware access, no execution.
+#
+# Key concepts:
+#   - MI commands (Command Type 0x0, CONFIDENT layout) decode directly: a
+#     6-bit opcode at bits[28:23], no length field, one dword each for the
+#     two opcodes the encoder emits (MI_NOOP, MI_BATCH_BUFFER_END).
+#   - GFXPIPE packets (Command Type 0x3) decode their CONFIDENT parts only:
+#     the DWord Length field (bits[7:0], via the encoder's own
+#     `total_dwords_from_length_field`) and the combined 13-bit
+#     Pipeline/Opcode/Sub-Opcode span (bits[28:16]) as ONE opaque value.
+#     This adapter never re-derives the internal Pipeline/Opcode/Sub-Opcode
+#     split — that split is opcode-specific and was deliberately left
+#     UNCERTAIN by the encoder's own docstring. Two decode paths exist:
+#       * `decode_dword_stream_to_packets` — always succeeds for a
+#         well-formed stream, carrying the combined GFXPIPE field as an
+#         OPAQUE identifier (`GFXPIPE_OPAQUE_<n>`). It never claims to know
+#         which real 3DSTATE_*/3DPRIMITIVE instruction it saw.
+#       * `decode_dword_stream_to_packets_named` — takes a caller-supplied
+#         `Dict<i64, text>` mapping combined-field values to confirmed real
+#         opcode names. A combined field with no entry in the map is a
+#         typed REFUSAL (`AdaptError` naming the field), never a guess.
+#
+# Why a decoder is worth having at all: an encoder/decoder round trip through
+# an INDEPENDENTLY-written canonical form (the comparator) catches bugs a
+# single-direction test cannot — e.g. an off-by-one in the DWord Length
+# convention would encode fine and decode fine on its own, but disagree with
+# the comparator's own notion of packet length.
+
+use os.drivers.gpu.board_vulkan.encoder_intel_gen12.{
+    decode_mi_command_type, decode_mi_opcode, decode_gfxpipe_command_type,
+    decode_gfxpipe_length_field, total_dwords_from_length_field,
+    MI_COMMAND_TYPE, GFXPIPE_COMMAND_TYPE, MI_OPCODE_NOOP, MI_OPCODE_BATCH_BUFFER_END
+}
+use os.drivers.gpu.board_vulkan.boundary_cmdstream_canonicalize.{CmdField, CmdPacket, cmd_field, cmd_packet}
+
+pub struct AdaptError:
+    field_name: text
+    message: text
+
+fn adapt_error(field_name: text, message: text) -> AdaptError:
+    AdaptError(field_name: field_name, message: message)
+
+# === Bit-field helper for the GFXPIPE combined span only ===
+#
+# Extracting bits[28:16] as ONE 13-bit value is itself CONFIDENT (the
+# encoder's own docstring says so); only the internal split within that span
+# is UNCERTAIN. This helper stops exactly at the confident boundary.
+fn _extract_gfxpipe_combined_field(dword: i64) -> i64:
+    (dword >> 16) & ((1 << 13) - 1)
+
+# === Opaque-identifier decode path (always succeeds on a well-formed
+# stream; never guesses the GFXPIPE sub-field split) ===
+
+pub fn decode_dword_stream_to_packets(dwords: [i64]) -> Result<[CmdPacket], AdaptError>:
+    var out: [CmdPacket] = []
+    var i: i64 = 0
+    while i < dwords.len():
+        val dword = dwords[i]
+        val mi_type = decode_mi_command_type(dword)
+        if mi_type == MI_COMMAND_TYPE:
+            val opcode = decode_mi_opcode(dword)
+            if opcode == MI_OPCODE_NOOP:
+                out.push(cmd_packet("MI_NOOP", 1, []))
+                i = i + 1
+            elif opcode == MI_OPCODE_BATCH_BUFFER_END:
+                out.push(cmd_packet("MI_BATCH_BUFFER_END", 1, []))
+                i = i + 1
+            else:
+                return Err(adapt_error("mi_opcode", "unknown fixed-length MI opcode, refusing to guess its length/name: " + opcode.to_text()))
+        elif decode_gfxpipe_command_type(dword) == GFXPIPE_COMMAND_TYPE:
+            val length_field = decode_gfxpipe_length_field(dword)
+            val total_dwords = total_dwords_from_length_field(length_field)
+            if total_dwords < 1:
+                return Err(adapt_error("total_dwords", "recovered GFXPIPE total_dwords below minimum of 1: " + total_dwords.to_text()))
+            if i + total_dwords > dwords.len():
+                return Err(adapt_error("total_dwords", "GFXPIPE packet at index " + i.to_text() + " claims " + total_dwords.to_text() + " dwords but only " + (dwords.len() - i).to_text() + " remain"))
+            val combined = _extract_gfxpipe_combined_field(dword)
+            var payload: [CmdField] = []
+            var j: i64 = 1
+            while j < total_dwords:
+                payload.push(cmd_field("operand_" + (j - 1).to_text(), dwords[i + j].to_text()))
+                j = j + 1
+            out.push(cmd_packet("GFXPIPE_OPAQUE_" + combined.to_text(), total_dwords, payload))
+            i = i + total_dwords
+        else:
+            return Err(adapt_error("command_type", "unknown Command Type bits[31:29], refusing to guess packet class: " + decode_mi_command_type(dword).to_text()))
+    Ok(out)
+
+# === Named-mapping decode path: refuses a GFXPIPE packet whose combined
+# field has no CONFIRMED entry in `opcode_names`, rather than guessing. MI
+# packets never need a mapping (their names are fixed/CONFIDENT). ===
+
+pub fn decode_dword_stream_to_packets_named(dwords: [i64], opcode_names: Dict<i64, text>) -> Result<[CmdPacket], AdaptError>:  # opcode_names: combined-field value -> confirmed real opcode name
+    var out: [CmdPacket] = []
+    var i: i64 = 0
+    while i < dwords.len():
+        val dword = dwords[i]
+        val mi_type = decode_mi_command_type(dword)
+        if mi_type == MI_COMMAND_TYPE:
+            val opcode = decode_mi_opcode(dword)
+            if opcode == MI_OPCODE_NOOP:
+                out.push(cmd_packet("MI_NOOP", 1, []))
+                i = i + 1
+            elif opcode == MI_OPCODE_BATCH_BUFFER_END:
+                out.push(cmd_packet("MI_BATCH_BUFFER_END", 1, []))
+                i = i + 1
+            else:
+                return Err(adapt_error("mi_opcode", "unknown fixed-length MI opcode, refusing to guess its length/name: " + opcode.to_text()))
+        elif decode_gfxpipe_command_type(dword) == GFXPIPE_COMMAND_TYPE:
+            val length_field = decode_gfxpipe_length_field(dword)
+            val total_dwords = total_dwords_from_length_field(length_field)
+            if total_dwords < 1:
+                return Err(adapt_error("total_dwords", "recovered GFXPIPE total_dwords below minimum of 1: " + total_dwords.to_text()))
+            if i + total_dwords > dwords.len():
+                return Err(adapt_error("total_dwords", "GFXPIPE packet at index " + i.to_text() + " claims " + total_dwords.to_text() + " dwords but only " + (dwords.len() - i).to_text() + " remain"))
+            val combined = _extract_gfxpipe_combined_field(dword)
+            if not opcode_names.contains_key(combined):
+                return Err(adapt_error("pipeline_opcode", "no confirmed Pipeline/Opcode/Sub-Opcode name mapping for combined field " + combined.to_text() + " — refusing to guess the split"))
+            val name = opcode_names[combined]
+            var payload: [CmdField] = []
+            var j: i64 = 1
+            while j < total_dwords:
+                payload.push(cmd_field("operand_" + (j - 1).to_text(), dwords[i + j].to_text()))
+                j = j + 1
+            out.push(cmd_packet(name, total_dwords, payload))
+            i = i + total_dwords
+        else:
+            return Err(adapt_error("command_type", "unknown Command Type bits[31:29], refusing to guess packet class: " + decode_mi_command_type(dword).to_text()))
+    Ok(out)

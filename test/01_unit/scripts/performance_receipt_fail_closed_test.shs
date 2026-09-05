@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+VALIDATOR="$ROOT/scripts/check/check-external-must-check-receipt.shs"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+: >"$work/receipt.env"
+: >"$work/artifact.env"
+
+grep -Fq 'check-interpreter-startup-parity.shs' "$VALIDATOR"
+grep -Fq 'check-rust-go-benchmark-parity.shs' "$VALIDATOR"
+grep -Fq 'check-performance-target-identity.shs' "$VALIDATOR"
+grep -Fq 'benchmark_build_origin' "$VALIDATOR"
+grep -Fq 'benchmark_rust_compiler 104857600' "$VALIDATOR"
+grep -Fq 'benchmark_go_compiler 104857600' "$VALIDATOR"
+grep -Fq 'load_named_artifact_blob simple_compiler 104857600' "$VALIDATOR"
+awk '
+    /if \[ "\$expected_gate" = rust-go-benchmark-parity \]/ { lane=1 }
+    lane && /check-performance-target-identity\.shs/ { target=NR }
+    lane && /load_named_artifact_blob simple_compiler 104857600/ { compiler=NR; exit }
+    END { exit !(target > 0 && target < compiler) }
+' "$VALIDATOR"
+echo 'PASS: quantitative performance receipts use lane semantic validators'

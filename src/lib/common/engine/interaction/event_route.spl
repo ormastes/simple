@@ -1,0 +1,157 @@
+# event_route.spl — Unified 2D interaction core: capture/target/bubble
+# dispatch.
+#
+# Listener handlers RETURN an action bitmask (ACTION_*) instead of relying
+# on a `me` mutation made from inside a callback (a different module than
+# this dispatcher) propagating back into dispatch()'s own loop variables.
+# That keeps dispatch's control-flow correctness independent of any
+# reference-vs-value assumption about cross-module receiver mutation (a
+# confirmed landmine for at least `struct` receivers -- see
+# src/lib/common/net/byte_cursor.spl's byvalue_reader_cursor_no_advance_
+# cross_module_2026-06-15 note). dispatch() still writes the final
+# stop/immediate/prevent-default state onto the event's own fields itself
+# (a same-function, same-module assignment) before returning, but the
+# returned DispatchOutcome is the authoritative result to assert against.
+
+use std.common.engine.interaction.pointer_event.{PointerEvent2D, PHASE_CAPTURE, PHASE_TARGET, PHASE_BUBBLE}
+
+val ACTION_NONE: i32 = 0
+val ACTION_STOP_PROPAGATION: i32 = 1
+val ACTION_STOP_IMMEDIATE: i32 = 2
+val ACTION_PREVENT_DEFAULT: i32 = 4
+
+class EventListener2D:
+    """One registered listener. `kind == -1` matches any PointerEvent2D
+    kind. `use_capture` selects the capture phase (root->target, exclusive
+    of target) vs the bubble phase (target->root, exclusive of target);
+    both kinds of listener fire at the target phase itself, matching DOM
+    addEventListener semantics. `once` listeners are dropped from the
+    returned listener list after they fire -- see DispatchOutcome's note
+    on why the caller must use the RETURNED array."""
+    node_id: i64
+    kind: i32
+    use_capture: bool
+    once: bool
+    handler: fn(PointerEvent2D) -> i32
+
+    static fn create(node_id: i64, kind: i32, use_capture: bool, once: bool, handler: fn(PointerEvent2D) -> i32) -> EventListener2D:
+        EventListener2D(node_id: node_id, kind: kind, use_capture: use_capture, once: once, handler: handler)
+
+struct DispatchOutcome:
+    """Result of dispatch() (and its internal per-node firing step, which
+    reuses this same shape). fired_node_ids records fire order for test
+    observability. remaining_listeners is the listener list with any fired
+    `once` entries dropped -- arrays are value types in this language, so
+    the caller MUST use this returned array as its new listener list
+    instead of continuing to use the one it passed in."""
+    fired_node_ids: [i64]
+    remaining_listeners: [EventListener2D]
+    stopped: bool
+    stopped_immediate: bool
+    default_prevented: bool
+
+fn _fire_node(event: PointerEvent2D, listeners: [EventListener2D], node_id: i64, want_capture: bool, want_bubble: bool, fired_in: [i64], stop_in: bool, stop_immediate_in: bool, prevented_in: bool) -> DispatchOutcome:
+    """Fire every listener on `node_id` whose kind and phase match. Once
+    `stopped_immediate` becomes true (set by an earlier listener on this
+    SAME node), later matching listeners on this node are skipped for
+    firing but still kept registered (immediate-stop blocks firing, not
+    registration)."""
+    var fired = fired_in
+    var kept: [EventListener2D] = []
+    var stopped = stop_in
+    var stopped_immediate = stop_immediate_in
+    var prevented = prevented_in
+    var i = 0
+    while i < listeners.len():
+        val l = listeners[i]
+        val on_node = l.node_id == node_id
+        val kind_match = l.kind == -1 or l.kind == event.kind
+        val phase_match = (l.use_capture and want_capture) or (not l.use_capture and want_bubble)
+        if on_node and kind_match and phase_match and not stopped_immediate:
+            val action = l.handler(event)
+            fired.push(node_id)
+            if (action & ACTION_STOP_PROPAGATION) != 0:
+                stopped = true
+            if (action & ACTION_STOP_IMMEDIATE) != 0:
+                stopped = true
+                stopped_immediate = true
+            if (action & ACTION_PREVENT_DEFAULT) != 0:
+                prevented = true
+            if not l.once:
+                kept.push(l)
+        else:
+            kept.push(l)
+        i = i + 1
+    DispatchOutcome(
+        fired_node_ids: fired,
+        remaining_listeners: kept,
+        stopped: stopped,
+        stopped_immediate: stopped_immediate,
+        default_prevented: prevented
+    )
+
+fn dispatch(mut event: PointerEvent2D, listeners: [EventListener2D], ancestor_path: [i64]) -> DispatchOutcome:
+    """Full capture -> target -> bubble dispatch over `ancestor_path`
+    (root-to-target; the LAST element is the target). stopPropagation
+    blocks remaining ANCESTORS (the current node's own remaining listeners
+    still fire); stopImmediatePropagation additionally blocks remaining
+    listeners on the CURRENT node. Non-bubbling events (event.bubbles ==
+    false) skip the bubble phase entirely. Empty ancestor_path (nothing
+    hit) is a no-op that returns the listeners list unchanged."""
+    val n = ancestor_path.len()
+    if n == 0:
+        return DispatchOutcome(fired_node_ids: [], remaining_listeners: listeners, stopped: false, stopped_immediate: false, default_prevented: false)
+    val target_id = ancestor_path[n - 1]
+
+    var fired: [i64] = []
+    var live = listeners
+    var stopped = false
+    var stopped_immediate = false
+    var prevented = false
+
+    event.phase = PHASE_CAPTURE
+    var i = 0
+    while i < n - 1 and not stopped:
+        val step = _fire_node(event, live, ancestor_path[i], true, false, fired, stopped, stopped_immediate, prevented)
+        fired = step.fired_node_ids
+        live = step.remaining_listeners
+        stopped = step.stopped
+        stopped_immediate = step.stopped_immediate
+        prevented = step.default_prevented
+        i = i + 1
+
+    if not stopped:
+        event.phase = PHASE_TARGET
+        val step = _fire_node(event, live, target_id, true, true, fired, stopped, stopped_immediate, prevented)
+        fired = step.fired_node_ids
+        live = step.remaining_listeners
+        stopped = step.stopped
+        stopped_immediate = step.stopped_immediate
+        prevented = step.default_prevented
+
+    if event.bubbles and not stopped:
+        event.phase = PHASE_BUBBLE
+        var j = n - 2
+        while j >= 0 and not stopped:
+            val step = _fire_node(event, live, ancestor_path[j], false, true, fired, stopped, stopped_immediate, prevented)
+            fired = step.fired_node_ids
+            live = step.remaining_listeners
+            stopped = step.stopped
+            stopped_immediate = step.stopped_immediate
+            prevented = step.default_prevented
+            j = j - 1
+
+    event.stop_flag = stopped
+    event.stop_immediate_flag = stopped_immediate
+    event.default_prevented = prevented
+
+    DispatchOutcome(
+        fired_node_ids: fired,
+        remaining_listeners: live,
+        stopped: stopped,
+        stopped_immediate: stopped_immediate,
+        default_prevented: prevented
+    )
+
+export ACTION_NONE, ACTION_STOP_PROPAGATION, ACTION_STOP_IMMEDIATE, ACTION_PREVENT_DEFAULT
+export EventListener2D, DispatchOutcome, dispatch

@@ -1,0 +1,99 @@
+"""Least-authority pouch and catalog projection for guest Clang sysroots.
+
+The compiler task receives one include-tree read prefix and five exact file
+reads.  It never receives `/usr` or `/usr/lib` authority.  Catalog projection
+is intentionally separate from minting: callers must bind the five immutable
+files to authenticated installed-artifact rows before using the grant plan.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.types.capability_types.{
+    CapabilityKind, CapabilitySet, CAP_RIGHT_READ
+}
+use os.kernel.ipc.cspace_spawn.{CapGrant, AttenuationSpec}
+use os.kernel.loader.installed_artifact_catalog_v1.{
+    InstalledArtifactRecordV1, installed_artifact_catalog_lookup_target_v1
+}
+
+pub val CLANG_SYSROOT_INCLUDE_PATH_V1: text = "/usr/include"
+pub val CLANG_SYSROOT_INCLUDE_MANIFEST_PATH_V1: text =
+    "/usr/include/.simpleos-sysroot.merkle"
+pub val CLANG_SYSROOT_LINKER_SCRIPT_PATH_V1: text =
+    "/usr/share/simpleos/simpleos.ld"
+pub val CLANG_SYSROOT_CRT0_PATH_V1: text = "/usr/lib/crt0.o"
+pub val CLANG_SYSROOT_LIBC_PATH_V1: text = "/usr/lib/libsimpleos_c.a"
+pub val CLANG_SYSROOT_RUNTIME_PATH_V1: text = "/usr/lib/libsimple_runtime.a"
+pub val CLANG_SYSROOT_LIBM_PATH_V1: text = "/usr/lib/libm.a"
+pub const CLANG_SYSROOT_READ_GRANT_COUNT_V1: i64 = 6
+
+pub struct ClangSysrootCatalogProjectionV1:
+    include_manifest: InstalledArtifactRecordV1
+    linker_script: InstalledArtifactRecordV1
+    crt0: InstalledArtifactRecordV1
+    libc: InstalledArtifactRecordV1
+    runtime: InstalledArtifactRecordV1
+    libm: InstalledArtifactRecordV1
+
+pub struct ClangSysrootLaunchGrantPlanV1:
+    exact_authority: bool
+    grants: [CapGrant]
+
+fn _read_grant_v1(label: text, path: text) -> CapGrant:
+    CapGrant(
+        label: label,
+        requested: CapabilityKind.FileRead(path_prefix: path),
+        atten: AttenuationSpec(
+            rights_mask: CAP_RIGHT_READ, path_prefix: "",
+            depth_limit: 0, single_use: false))
+
+pub fn clang_sysroot_launch_grant_plan_v1() -> ClangSysrootLaunchGrantPlanV1:
+    val grants = [
+        _read_grant_v1("clang.sysroot.headers.read", CLANG_SYSROOT_INCLUDE_PATH_V1),
+        _read_grant_v1("clang.sysroot.linker-script.read", CLANG_SYSROOT_LINKER_SCRIPT_PATH_V1),
+        _read_grant_v1("clang.sysroot.crt0.read", CLANG_SYSROOT_CRT0_PATH_V1),
+        _read_grant_v1("clang.sysroot.libc.read", CLANG_SYSROOT_LIBC_PATH_V1),
+        _read_grant_v1("clang.sysroot.runtime.read", CLANG_SYSROOT_RUNTIME_PATH_V1),
+        _read_grant_v1("clang.sysroot.libm.read", CLANG_SYSROOT_LIBM_PATH_V1),
+    ]
+    ClangSysrootLaunchGrantPlanV1(
+        exact_authority: grants.len() == CLANG_SYSROOT_READ_GRANT_COUNT_V1,
+        grants: grants)
+
+fn _exact_read_count_v1(caps: CapabilitySet, path: text) -> i64:
+    var count: i64 = 0
+    for token in caps.caps:
+        if token.kind == CapabilityKind.FileRead(path_prefix: path):
+            count = count + 1
+    count
+
+pub fn clang_sysroot_caps_exact_v1(caps: CapabilitySet) -> bool:
+    """Check only the six sysroot reads inside a larger pledged launch pouch."""
+    caps.is_pledged and
+        _exact_read_count_v1(caps, CLANG_SYSROOT_INCLUDE_PATH_V1) == 1 and
+        _exact_read_count_v1(caps, CLANG_SYSROOT_LINKER_SCRIPT_PATH_V1) == 1 and
+        _exact_read_count_v1(caps, CLANG_SYSROOT_CRT0_PATH_V1) == 1 and
+        _exact_read_count_v1(caps, CLANG_SYSROOT_LIBC_PATH_V1) == 1 and
+        _exact_read_count_v1(caps, CLANG_SYSROOT_RUNTIME_PATH_V1) == 1 and
+        _exact_read_count_v1(caps, CLANG_SYSROOT_LIBM_PATH_V1) == 1
+
+pub(package) fn clang_sysroot_catalog_projection_v1(
+    target: ManifestTarget
+) -> ClangSysrootCatalogProjectionV1?:
+    """Resolve every immutable link input from the sealed signed catalog.
+    """
+    val include_manifest = installed_artifact_catalog_lookup_target_v1(
+        CLANG_SYSROOT_INCLUDE_MANIFEST_PATH_V1, target) ?? return nil
+    val linker_script = installed_artifact_catalog_lookup_target_v1(
+        CLANG_SYSROOT_LINKER_SCRIPT_PATH_V1, target) ?? return nil
+    val crt0 = installed_artifact_catalog_lookup_target_v1(
+        CLANG_SYSROOT_CRT0_PATH_V1, target) ?? return nil
+    val libc = installed_artifact_catalog_lookup_target_v1(
+        CLANG_SYSROOT_LIBC_PATH_V1, target) ?? return nil
+    val runtime = installed_artifact_catalog_lookup_target_v1(
+        CLANG_SYSROOT_RUNTIME_PATH_V1, target) ?? return nil
+    val libm = installed_artifact_catalog_lookup_target_v1(
+        CLANG_SYSROOT_LIBM_PATH_V1, target) ?? return nil
+    Some(ClangSysrootCatalogProjectionV1(
+        include_manifest: include_manifest,
+        linker_script: linker_script, crt0: crt0, libc: libc,
+        runtime: runtime, libm: libm))

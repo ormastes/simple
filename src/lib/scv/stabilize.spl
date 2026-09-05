@@ -1,0 +1,290 @@
+# SCV stabilization tooling: checkpoint, doctor, backend verifier.
+# Design: doc/01_research/app/tools/scv/scv_migration_stabilization_2026-08-25.md §2-§4.
+
+use app.io.mod (file_exists, file_read, file_copy, dir_create, dir_walk, process_run)
+use std.nogc_sync_mut.io.file_ops.{file_rename}
+use std.nogc_sync_mut.io.dir_ops.{dir_list}
+use std.scv.core.{scv_repo_dir, scv_objects_dir, scv_head_path, scv_workspace_path, scv_object_path, scv_chunk_path}
+use std.scv.store.{scv_repo_exists, scv_repo_format_version, scv_current_op, scv_read_workspace_commit, scv_write_text, scv_hash_text, scv_content_id_for_file, scv_object_field, scv_create_parent_dir}
+use std.scv.integrity.{scv_current_tree_content, scv_validate_deterministic_object_hashes, scv_validate_current_bookmarks, scv_validate_current_head, scv_validate_parser_index}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.scv.journal.{scv_wal_recover, scv_journal_record_event}
+
+fn scv_checkpoints_dir(root: text) -> text:
+    "{scv_repo_dir(root)}/checkpoints"
+
+# Must-back-up state only (stabilization §2): operation heads, refs, changes,
+# lineage objects and content chunks. Rebuildable state (parser registry/index,
+# syntax cache, packs, status/object indexes) is deliberately excluded.
+fn scv_checkpoint_rel_sources(root: text) -> [text]:
+    var out: [text] = []
+    for rel in ["HEAD_OP", "meta/workspaces.sdn", "meta/bookmarks.sdn", "meta/tags.sdn", "meta/change_seq.sdn"]:
+        if file_exists("{scv_repo_dir(root)}/{rel}"):
+            out.push(rel)
+    for kind in ["operations", "changes", "commits", "trees", "files", "chunks", "conflicts"]:
+        val prefix = "{scv_repo_dir(root)}/"
+        for path in dir_walk("{scv_objects_dir(root)}/{kind}"):
+            if path.starts_with(prefix):
+                out.push(path[prefix.len():])
+    out
+
+fn scv_checkpoint(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val rels = scv_checkpoint_rel_sources(root)
+    if rels.len() == 0:
+        return "ERROR — nothing was checked (no checkpoint sources)\n"
+    var row_list: [text] = []
+    for rel in rels:
+        val src = "{scv_repo_dir(root)}/{rel}"
+        row_list.push("{scv_content_id_for_file(src)} {rel}\n")
+    val rows = row_list.join("")
+    val manifest = "format: 1\nhead_op: {scv_current_op(root)}\ncommit: {scv_read_workspace_commit(root)}\nfiles: {rels.len()}\n--\n{rows}"
+    val id = scv_hash_text("checkpoint", manifest)
+    val final_dir = "{scv_checkpoints_dir(root)}/{id}"
+    if file_exists("{final_dir}/manifest.sdn"):
+        return "checkpoint {id} files={rels.len()} (exists)\n"
+    dir_create(scv_checkpoints_dir(root), true)
+    val stage = "{scv_checkpoints_dir(root)}/.stage_{id}_{current_time_ms()}"
+    for rel in rels:
+        val dst = "{stage}/data/{rel}"
+        scv_create_parent_dir(dst)
+        if not file_copy("{scv_repo_dir(root)}/{rel}", dst):
+            return "ERROR checkpoint copy failed: {rel}\n"
+    scv_write_text("{stage}/manifest.sdn", manifest)
+    if not file_rename(stage, final_dir):
+        return "ERROR checkpoint publish failed: {id}\n"
+    scv_journal_record_event(root, scv_current_op(root), "checkpoint", id, id)
+    "checkpoint {id} files={rels.len()}\n"
+
+fn scv_checkpoint_manifest_id_ok(id: text, manifest: text) -> bool:
+    scv_hash_text("checkpoint", manifest) == id
+
+fn scv_checkpoint_verify(root: text, id: text) -> text:
+    val dir = "{scv_checkpoints_dir(root)}/{id}"
+    val manifest_path = "{dir}/manifest.sdn"
+    if not file_exists(manifest_path):
+        return "ERROR — nothing was checked (missing checkpoint {id})\n"
+    val manifest = file_read(manifest_path)
+    var errors = ""
+    if not scv_checkpoint_manifest_id_ok(id, manifest):
+        errors = errors + "manifest hash mismatch: {id}\n"
+    var checked = 0
+    var in_rows = false
+    for line in manifest.split("\n"):
+        if not in_rows:
+            if line == "--":
+                in_rows = true
+            continue
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val sep = trimmed.index_of(" ")
+        if sep <= 0:
+            errors = errors + "bad manifest row: {trimmed}\n"
+            continue
+        val sha = trimmed[:sep]
+        val rel = trimmed[sep + 1:]
+        val data = "{dir}/data/{rel}"
+        if not file_exists(data):
+            errors = errors + "missing checkpoint file: {rel}\n"
+        elif scv_content_id_for_file(data) != sha:
+            errors = errors + "checkpoint file hash mismatch: {rel}\n"
+        checked = checked + 1
+    if checked == 0 and errors == "":
+        return "ERROR — nothing was checked (empty checkpoint {id})\n"
+    if errors == "":
+        "OK checkpoint {id} files={checked}\n"
+    else:
+        "ERROR checkpoint verify failed\n{errors}"
+
+fn scv_checkpoint_list(root: text) -> text:
+    val dir = scv_checkpoints_dir(root)
+    if not file_exists(dir):
+        return "no checkpoints\n"
+    var out = ""
+    for name in dir_list(dir):
+        val trimmed = name.trim()
+        if trimmed == "" or trimmed.starts_with("."):
+            continue
+        out = out + trimmed + "\n"
+    if out == "": "no checkpoints\n" else: out
+
+# --- doctor -----------------------------------------------------------------
+
+fn scv_doctor_head_view_default(root: text) -> text:
+    val op = if file_exists(scv_head_path(root)): file_read(scv_head_path(root)).trim() else: ""
+    if op == "":
+        return ""
+    val op_path = scv_object_path(root, "operations", op)
+    if not file_exists(op_path):
+        return ""
+    val view_id = scv_object_field(file_read(op_path), "view")
+    if view_id == "":
+        return ""
+    val view_path = scv_object_path(root, "operations", view_id)
+    if not file_exists(view_path):
+        return ""
+    scv_object_field(file_read(view_path), "default")
+
+fn scv_doctor_checkpoints_ok(root: text) -> bool:
+    val dir = scv_checkpoints_dir(root)
+    if not file_exists(dir):
+        return true
+    for name in dir_list(dir):
+        val trimmed = name.trim()
+        if trimmed == "" or trimmed.starts_with("."):
+            continue
+        val manifest_path = "{dir}/{trimmed}/manifest.sdn"
+        if not file_exists(manifest_path):
+            return false
+        if not scv_checkpoint_manifest_id_ok(trimmed, file_read(manifest_path)):
+            return false
+    true
+
+# Cheap health check (stabilization §3): one `<component>  OK|STALE|FAIL` row
+# per check, then a fail-closed verdict line. STALE is non-fatal (rebuildable
+# or reconcilable state); the stale derived workspace pointer is reconciled
+# from the published head view, which is the single publication point.
+fn scv_doctor(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    var out = ""
+    var checks = 0
+    var failed = 0
+    # WAL recovery first: an incomplete trailing transaction is rolled back
+    # (or forward) before any state below is validated. STALE is non-fatal.
+    val wal_result = scv_wal_recover(root)
+    val journal_row = if wal_result == "wal clean\n": "OK" else: "STALE"
+    out = out + "journal  {journal_row}\n"
+    checks = checks + 1
+    val objects_ok = scv_validate_deterministic_object_hashes(root) == ""
+    val objects_row = if objects_ok: "OK" else: "FAIL"
+    out = out + "objects  {objects_row}\n"
+    checks = checks + 1
+    if not objects_ok:
+        failed = failed + 1
+    val refs_ok = scv_validate_current_bookmarks(root) == ""
+    val refs_row = if refs_ok: "OK" else: "FAIL"
+    out = out + "refs  {refs_row}\n"
+    checks = checks + 1
+    if not refs_ok:
+        failed = failed + 1
+    val head_ok = scv_validate_current_head(root) == ""
+    val head_row = if head_ok: "OK" else: "FAIL"
+    out = out + "operation heads  {head_row}\n"
+    checks = checks + 1
+    if not head_ok:
+        failed = failed + 1
+    val view_default = scv_doctor_head_view_default(root)
+    var view_row = "FAIL"
+    if view_default != "":
+        if scv_read_workspace_commit(root) == view_default:
+            view_row = "OK"
+        else:
+            scv_write_text(scv_workspace_path(root), "default: {view_default}\n")
+            view_row = "STALE"
+    out = out + "view  {view_row}\n"
+    checks = checks + 1
+    if view_row == "FAIL":
+        failed = failed + 1
+    val checkpoints_ok = scv_doctor_checkpoints_ok(root)
+    val checkpoints_row = if checkpoints_ok: "OK" else: "FAIL"
+    out = out + "checkpoints  {checkpoints_row}\n"
+    checks = checks + 1
+    if not checkpoints_ok:
+        failed = failed + 1
+    val parser_row = if scv_validate_parser_index(root) == "": "OK" else: "STALE"
+    out = out + "parser index  {parser_row}\n"
+    checks = checks + 1
+    val format_version = scv_repo_format_version(root)
+    val format_row = if format_version == 1 or format_version == 2: "OK" else: "FAIL"
+    out = out + "format  v{format_version}  {format_row}\n"
+    checks = checks + 1
+    if format_row == "FAIL":
+        failed = failed + 1
+    if failed == 0:
+        out + "PASS — {checks} check(s), 0 failed\n"
+    else:
+        out + "FAIL — {checks} check(s), {failed} failed\n"
+
+# --- verify-backends --------------------------------------------------------
+
+fn scv_git_lookup(paths: [text], values: [text], key: text) -> text:
+    var i = 0
+    while i < paths.len():
+        if paths[i] == key:
+            return values[i]
+        i = i + 1
+    ""
+
+# Backend differential verifier (stabilization §4): the SCV current tree must
+# match the git tree path-for-path and byte-for-byte. Byte comparison reuses
+# git itself: `git hash-object` over the SCV chunk must equal the ls-tree blob
+# id, which is exact for text and binary alike.
+fn scv_verify_backends_git(root: text, git_dir: text, rev: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    val tree_content = scv_current_tree_content(root)
+    val (ls_out, ls_err, ls_code) = process_run("git", ["-C", git_dir, "ls-tree", "-r", rev])
+    if ls_code != 0:
+        return "ERROR — nothing was checked (git ls-tree failed: {ls_err.trim()})\n"
+    var git_paths: [text] = []
+    var git_shas: [text] = []
+    var mismatches = ""
+    var mismatch_count = 0
+    var compared = 0
+    for line in ls_out.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val tab = trimmed.index_of("\t")
+        if tab <= 0:
+            continue
+        val meta_parts = trimmed[:tab].split(" ")
+        val git_path = trimmed[tab + 1:]
+        if meta_parts.len() < 3:
+            continue
+        if meta_parts[1] != "blob":
+            mismatches = mismatches + "unsupported git entry: {git_path}\n"
+            mismatch_count = mismatch_count + 1
+            continue
+        git_paths.push(git_path)
+        git_shas.push(meta_parts[2])
+    var scv_paths: [text] = []
+    for row in tree_content.split("\n"):
+        val trimmed = row.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() < 3:
+            continue
+        val rel = parts[0]
+        val chunk = parts[2]
+        scv_paths.push(rel)
+        val git_sha = scv_git_lookup(git_paths, git_shas, rel)
+        compared = compared + 1
+        if git_sha == "":
+            mismatches = mismatches + "missing in git: {rel}\n"
+            mismatch_count = mismatch_count + 1
+            continue
+        val (hash_out, hash_err, hash_code) = process_run("git", ["-C", git_dir, "hash-object", scv_chunk_path(root, chunk)])
+        if hash_code != 0:
+            mismatches = mismatches + "unreadable scv bytes: {rel} {hash_err.trim()}\n"
+            mismatch_count = mismatch_count + 1
+        elif hash_out.trim() != git_sha:
+            mismatches = mismatches + "bytes differ: {rel}\n"
+            mismatch_count = mismatch_count + 1
+    var i = 0
+    while i < git_paths.len():
+        if scv_git_lookup(scv_paths, scv_paths, git_paths[i]) == "":
+            mismatches = mismatches + "missing in scv: {git_paths[i]}\n"
+            mismatch_count = mismatch_count + 1
+            compared = compared + 1
+        i = i + 1
+    if compared == 0:
+        return "ERROR — nothing was checked (no paths on either side)\n"
+    if mismatch_count == 0:
+        "PASS — {compared} path(s) compared, 0 mismatches\n"
+    else:
+        "{mismatches}FAIL — {mismatch_count} mismatch(es): see rows above\n"

@@ -1,0 +1,67 @@
+# SimpleOS riscv64 in-guest DEV TOOL component sanity entry (OpenSBI lane).
+#
+# Sibling of caret_component_entry.spl; see that file's header for why the four
+# components are probed as SEPARATE kernels rather than one (the combined
+# entry's --entry-closure union leaves ~500 rt_* symbols undefined, so one
+# component's closure must not hold the others hostage).
+#
+# Boot chain and forbidden-flag policy identical to hello_world_sbi_entry.spl:
+# real OpenSBI v1.4 fw_payload via -bios only, NEVER -kernel, NEVER
+# isa-debug-exit. COMPILER: the RUST SEED.
+#
+# WHAT THIS PROVES: a REAL lint rule from the real linter runs inside the guest
+# over source text. The clean snippet must yield zero findings and the dirty
+# snippet at least one — two conditions in opposite directions, so a rule that
+# degraded to "always clean" or "always flags" fails this row rather than
+# passing it. The rule is `lint_os_freestanding_patterns`, unmodified product
+# code; this file supplies the snippets and prints what came back.
+#
+# NEVER interpolate an integer into text — that emits rt_raw_i64_to_string,
+# which the freestanding riscv64 runtime does not provide, and the link dies.
+
+use compiler.tools.lint._LintMain.os_freestanding_lints.{lint_os_freestanding_patterns}
+
+@unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
+extern fn serial_println(msg: text)
+
+fn devtool_component_row() -> i64:
+    """Run the REAL os-freestanding lint rule over two snippets."""
+    val clean = "fn f() -> i64:\n    val x = 1\n    x\n"
+    # A module-level global whose initializer is a CALL — exactly what
+    # _fsk_check_global_call_init flags in a freestanding OS source file. The
+    # path matters: os_freestanding_lint_in_scope() only fires under src/os/ or
+    # examples/09_embedded/, so a path outside those would make BOTH snippets
+    # silent and the row would look clean for the wrong reason.
+    val dirty = "val g = make_thing()\nfn f() -> i64:\n    0\n"
+
+    val clean_warnings = lint_os_freestanding_patterns("src/os/probe_clean.spl", clean)
+    val dirty_warnings = lint_os_freestanding_patterns("src/os/probe_dirty.spl", dirty)
+
+    serial_println("[devtool] lint src/os/probe_clean.spl  (expect no findings)")
+    serial_println("[devtool] lint src/os/probe_dirty.spl  (expect a finding)")
+    for w in dirty_warnings:
+        serial_println("[devtool] finding: " + w.message)
+
+    var rc = 0
+    if clean_warnings.len() != 0:
+        serial_println("[devtool] FAIL clean snippet produced findings")
+        rc = 1
+    if dirty_warnings.len() == 0:
+        serial_println("[devtool] FAIL dirty snippet produced no finding — the rule is inert")
+        rc = 1
+    if rc == 0:
+        serial_println("COMPONENT_DEVTOOL_SIMPLEOS_RISCV64_OK real lint rule ran in-guest, clean snippet silent and dirty snippet flagged")
+    rc
+
+fn spl_start():
+    """riscv64 in-guest dev-tool sanity entry, reached from crt0.S ->
+    boot_entry in S-mode after OpenSBI's firmware-performed handover."""
+    serial_println("")
+    serial_println("[components] SimpleOS riscv64 in-guest toolchain components (OpenSBI fw_payload)")
+    serial_println("[components] serial up, exercising real product modules")
+    val rc = devtool_component_row()
+    if rc == 0:
+        serial_println("[components] all component rows exited rc=0")
+    else:
+        serial_println("[components] at least one component row exited rc=nonzero")
+    serial_println("[components] parking")

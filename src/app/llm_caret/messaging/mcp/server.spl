@@ -1,0 +1,272 @@
+#![allow(primitive_api, unnamed_duplicate_typed_args)]
+@allow(primitive_api, unnamed_duplicate_typed_args)
+"""Production core for the twelve canonical LLM Caret messaging MCP tools."""
+
+use app.llm_caret.messaging.mcp.types.*
+use app.llm_caret.messaging.adapter.server.auth.{authorize, has_scope}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredArtifact}
+use app.llm_caret.messaging.application.room_service.{RoomMembership, create_direct_room, identity_can_read}
+use app.llm_caret.messaging.application.message_service.{prepare_message, notify_all_allowed}
+use app.llm_caret.messaging.application.profile_service.{find_agent_profile}
+use app.llm_caret.messaging.application.task_service.{MessagingTask, TaskState, create_task, transition_task}
+use app.llm_caret.messaging.domain.model.{AgentProfile, MessageOrigin, Room, RoomKind}
+
+fn required_scope(tool: ChatTool) -> text:
+    match tool:
+        case ChatTool.Join: "room:write"
+        case ChatTool.Leave: "room:write"
+        case ChatTool.Send: "room:write"
+        case ChatTool.Read: "room:read"
+        case ChatTool.MarkRead: "room:read"
+        case ChatTool.Who: "profile:read"
+        case ChatTool.OpenPrivate: "dm:write"
+        case ChatTool.NotifyAll: "room:write"
+        case ChatTool.Assign: "agent:control"
+        case ChatTool.TaskUpdate: "agent:control"
+        case ChatTool.PublishArtifact: "agent:control"
+        case ChatTool.GetContext: "room:read"
+
+fn mutating(tool: ChatTool) -> bool:
+    tool != ChatTool.Read and tool != ChatTool.Who and tool != ChatTool.GetContext
+
+fn key_valid(key: text) -> bool:
+    val size = key.trim().len()
+    size >= 8 and size <= 200
+
+fn membership_index(items: [RoomMembership], room_id: text, identity_id: text) -> i64:
+    for index in 0..items.len():
+        if items[index].room_id == room_id and items[index].identity_id == identity_id: return index
+    -1
+
+fn task_index(items: [MessagingTask], task_id: text) -> i64:
+    for index in 0..items.len():
+        if items[index].task_id == task_id: return index
+    -1
+
+fn artifact_index(items: [PublishedArtifact], artifact_id: text) -> i64:
+    for index in 0..items.len():
+        if items[index].artifact_id == artifact_id: return index
+    -1
+
+fn success(resource_id: text, evidence: text) -> ChatToolResult:
+    ChatToolResult(ok: true, status: 200, error: "", duplicate: false,
+        resource_id: resource_id, evidence: evidence, messages: [], profiles: [], tasks: [], artifacts: [])
+
+class MessagingMcpServer:
+    store: PureSqlMessagingStore
+    rooms: [Room]
+    memberships: [RoomMembership]
+    profiles: [AgentProfile]
+    tasks: [MessagingTask]
+    artifacts: [PublishedArtifact]
+    handled_keys: [text]
+    handled_resources: [text]
+    handled_evidence: [text]
+
+    static fn memory() -> MessagingMcpServer:
+        MessagingMcpServer(store: PureSqlMessagingStore.open_memory(), rooms: [], memberships: [],
+            profiles: [], tasks: [], artifacts: [], handled_keys: [], handled_resources: [], handled_evidence: [])
+
+    static fn open(path: text) -> MessagingMcpServer:
+        val store = PureSqlMessagingStore.open(path)
+        var artifacts: [PublishedArtifact] = []
+        for item in store.artifacts():
+            artifacts.push(PublishedArtifact(artifact_id: item.artifact_id, task_id: item.task_id,
+                room_id: item.room_id, media_type: item.media_type, value: item.value,
+                published_by: item.published_by, created_at: item.created_at))
+        MessagingMcpServer(store: store, rooms: store.rooms(), memberships: store.memberships(),
+            profiles: store.profiles(), tasks: store.tasks(), artifacts: artifacts,
+            handled_keys: [], handled_resources: [], handled_evidence: [])
+
+    me close() -> bool: self.store.close()
+
+    me register_room(room: Room, memberships: [RoomMembership]) -> bool:
+        if not self.store.create_room(room).ok: return false
+        self.rooms.push(room)
+        for membership in memberships:
+            if not self.store.put_membership(membership).ok: return false
+            self.memberships.push(membership)
+        true
+
+    me register_profile(profile: AgentProfile):
+        self.store.put_profile(profile)
+        self.profiles.push(profile)
+
+    fn room(room_id: text) -> Room: self.store.room(room_id)
+
+    fn can_read(room: Room, identity_id: text) -> bool:
+        identity_can_read(room, self.memberships, identity_id)
+
+    me dispatch(request: ChatToolRequest) -> ChatToolResult:
+        val auth = authorize(request.principal, required_scope(request.tool), request.workspace_id, request.occurred_at)
+        if not auth.allowed: return empty_chat_result(auth.status, auth.error)
+        if mutating(request.tool):
+            if not key_valid(request.idempotency_key): return empty_chat_result(400, "stable_idempotency_key_required")
+            val persisted = self.store.mcp_idempotency(request.idempotency_key)
+            if persisted.resource_id != "":
+                return ChatToolResult(ok: true, status: 200, error: "", duplicate: true,
+                    resource_id: persisted.resource_id, evidence: persisted.evidence,
+                    messages: [], profiles: [], tasks: [], artifacts: [])
+            for index in 0..self.handled_keys.len():
+                if self.handled_keys[index] == request.idempotency_key:
+                    return ChatToolResult(ok: true, status: 200, error: "", duplicate: true,
+                        resource_id: self.handled_resources[index], evidence: self.handled_evidence[index],
+                        messages: [], profiles: [], tasks: [], artifacts: [])
+
+        val result = match request.tool:
+            case ChatTool.Join: self.chat_join(request)
+            case ChatTool.Leave: self.chat_leave(request)
+            case ChatTool.Send: self.chat_send(request)
+            case ChatTool.Read: self.chat_read(request, false)
+            case ChatTool.MarkRead: self.chat_mark_read(request)
+            case ChatTool.Who: self.chat_who(request)
+            case ChatTool.OpenPrivate: self.chat_open_private(request)
+            case ChatTool.NotifyAll: self.chat_notify_all(request)
+            case ChatTool.Assign: self.chat_assign(request)
+            case ChatTool.TaskUpdate: self.chat_task_update(request)
+            case ChatTool.PublishArtifact: self.chat_publish_artifact(request)
+            case ChatTool.GetContext: self.chat_get_context(request)
+        if mutating(request.tool) and result.ok:
+            self.handled_keys.push(request.idempotency_key)
+            self.handled_resources.push(result.resource_id)
+            self.handled_evidence.push(result.evidence)
+            self.store.put_mcp_idempotency(request.idempotency_key, result.resource_id,
+                result.evidence, request.occurred_at)
+        result
+
+    me chat_join(request: ChatToolRequest) -> ChatToolResult:
+        val room = self.room(request.room_id)
+        if room.room_id.value == "": return empty_chat_result(404, "room_not_found")
+        if request.identity_id != request.principal.identity_id and not has_scope(request.principal, "room:manage"):
+            return empty_chat_result(403, "cannot_join_other_identity")
+        if membership_index(self.memberships, request.room_id, request.identity_id) < 0:
+            val membership = RoomMembership(room_id: request.room_id, identity_id: request.identity_id,
+                role: "member", joined_at: request.occurred_at)
+            if not self.store.put_membership(membership).ok: return empty_chat_result(500, "membership_write_failed")
+            self.memberships.push(membership)
+        success(request.room_id, "membership_joined")
+
+    me chat_leave(request: ChatToolRequest) -> ChatToolResult:
+        if request.identity_id != request.principal.identity_id and not has_scope(request.principal, "room:manage"):
+            return empty_chat_result(403, "cannot_leave_other_identity")
+        val index = membership_index(self.memberships, request.room_id, request.identity_id)
+        if index < 0: return empty_chat_result(404, "membership_not_found")
+        if not self.store.delete_membership(request.room_id, request.identity_id).ok:
+            return empty_chat_result(500, "membership_delete_failed")
+        self.memberships.remove(index)
+        success(request.room_id, "membership_left")
+
+    me chat_send(request: ChatToolRequest) -> ChatToolResult:
+        val room = self.room(request.room_id)
+        if room.room_id.value == "": return empty_chat_result(404, "room_not_found")
+        if not self.can_read(room, request.principal.identity_id): return empty_chat_result(403, "room_access_denied")
+        if request.body.len() > 65536: return empty_chat_result(413, "message_too_large")
+        val prepared = prepare_message(request.message_id, request.workspace_id, request.room_id, 1,
+            request.principal.identity_id, request.agent_id, request.origin, request.body, "", "", "mcp:" + request.message_id,
+            "", 0, request.occurred_at)
+        if not prepared.accepted: return empty_chat_result(400, prepared.error)
+        val appended = self.store.append_message(prepared.message, request.idempotency_key)
+        if not appended.ok: return empty_chat_result(409, appended.error)
+        val result = success(appended.message_id, "accepted")
+        ChatToolResult(ok: true, status: 200, error: "", duplicate: appended.duplicate,
+            resource_id: result.resource_id, evidence: result.evidence, messages: [], profiles: [], tasks: [], artifacts: [])
+
+    fn chat_read(request: ChatToolRequest, context_only: bool) -> ChatToolResult:
+        val room = self.room(request.room_id)
+        if room.room_id.value == "": return empty_chat_result(404, "room_not_found")
+        if not self.can_read(room, request.principal.identity_id): return empty_chat_result(403, "room_access_denied")
+        var cap = request.limit
+        if cap < 1: cap = if context_only: 8 else: 50
+        if context_only and cap > 32: cap = 32
+        if not context_only and cap > 200: cap = 200
+        val messages = self.store.message_history(request.room_id, request.after_seq, cap)
+        ChatToolResult(ok: true, status: 200, error: "", duplicate: false, resource_id: request.room_id,
+            evidence: if context_only: "bounded_context" else: "canonical_history", messages: messages,
+            profiles: [], tasks: [], artifacts: [])
+
+    me chat_get_context(request: ChatToolRequest) -> ChatToolResult:
+        val result = self.chat_read(request, true)
+        if not result.ok: return result
+        var message_ids: [text] = []
+        var token_estimate = 0
+        for message in result.messages:
+            message_ids.push(message.message_id.value)
+            token_estimate = token_estimate + (message.body.len() + 3) / 4
+        var profile_ids: [text] = []
+        for profile in self.profiles:
+            if profile.room_ids.contains(request.room_id): profile_ids.push(profile.agent_id.value)
+        val bundle_id = if request.context_bundle_id != "": request.context_bundle_id else:
+            "ctx-" + request.room_id + "-" + request.after_seq.to_text() + "-" + request.limit.to_text()
+        val stored = self.store.put_context_manifest(bundle_id, request.task_id, message_ids,
+            profile_ids, "", "room-summary-v1", "redaction-v1", token_estimate, request.occurred_at)
+        if not stored.ok: return empty_chat_result(500, stored.error)
+        ChatToolResult(ok: true, status: 200, error: "", duplicate: false,
+            resource_id: bundle_id, evidence: "bounded_context_manifest", messages: result.messages,
+            profiles: [], tasks: [], artifacts: [])
+
+    me chat_mark_read(request: ChatToolRequest) -> ChatToolResult:
+        val room = self.room(request.room_id)
+        if room.room_id.value == "" or not self.can_read(room, request.principal.identity_id):
+            return empty_chat_result(403, "room_access_denied")
+        val stored = self.store.advance_cursor(request.room_id, request.principal.identity_id, request.after_seq, request.occurred_at)
+        if not stored.ok: return empty_chat_result(400, stored.error)
+        success(request.room_id, "local_cursor")
+
+    fn chat_who(request: ChatToolRequest) -> ChatToolResult:
+        if request.agent_id == "":
+            return ChatToolResult(ok: true, status: 200, error: "", duplicate: false, resource_id: "all",
+                evidence: "canonical_profiles", messages: [], profiles: self.profiles, tasks: [], artifacts: [])
+        val lookup = find_agent_profile(self.profiles, request.agent_id)
+        if not lookup.found: return empty_chat_result(404, lookup.error)
+        ChatToolResult(ok: true, status: 200, error: "", duplicate: false, resource_id: lookup.profile.agent_id.value,
+            evidence: "canonical_profile", messages: [], profiles: [lookup.profile], tasks: [], artifacts: [])
+
+    me chat_open_private(request: ChatToolRequest) -> ChatToolResult:
+        val created = create_direct_room(request.room_id, request.workspace_id, request.principal.identity_id,
+            request.target_identity_id, request.occurred_at)
+        if not created.accepted: return empty_chat_result(400, created.error)
+        if not self.register_room(created.room, created.memberships): return empty_chat_result(409, "room_write_failed")
+        success(request.room_id, "primitive_direct_room")
+
+    me chat_notify_all(request: ChatToolRequest) -> ChatToolResult:
+        if not has_scope(request.principal, "room:manage") and not has_scope(request.principal, "admin:workspace"):
+            return empty_chat_result(403, "scope_required:room:manage")
+        if not notify_all_allowed(["notify_all"], request.origin): return empty_chat_result(409, "agent_update_cannot_notify_all")
+        self.chat_send(request)
+
+    me chat_assign(request: ChatToolRequest) -> ChatToolResult:
+        val created = create_task(request.task_id, request.message_id, request.agent_id, request.body, request.occurred_at)
+        if not created.accepted: return empty_chat_result(400, created.error)
+        if not self.store.put_task(created.task).ok: return empty_chat_result(500, "task_write_failed")
+        self.tasks.push(created.task)
+        val result = success(request.task_id, "task_queued")
+        ChatToolResult(ok: result.ok, status: result.status, error: result.error, duplicate: false,
+            resource_id: result.resource_id, evidence: result.evidence, messages: [], profiles: [], tasks: [created.task], artifacts: [])
+
+    me chat_task_update(request: ChatToolRequest) -> ChatToolResult:
+        val index = task_index(self.tasks, request.task_id)
+        if index < 0: return empty_chat_result(404, "task_not_found")
+        val changed = transition_task(self.tasks[index], request.task_state, request.body, request.detail, request.occurred_at)
+        if not changed.accepted: return empty_chat_result(409, changed.error)
+        if not self.store.put_task(changed.task).ok: return empty_chat_result(500, "task_write_failed")
+        self.tasks[index] = changed.task
+        ChatToolResult(ok: true, status: 200, error: "", duplicate: false, resource_id: request.task_id,
+            evidence: "task_state_changed", messages: [], profiles: [], tasks: [changed.task], artifacts: [])
+
+    me chat_publish_artifact(request: ChatToolRequest) -> ChatToolResult:
+        if task_index(self.tasks, request.task_id) < 0: return empty_chat_result(404, "task_not_found")
+        if request.artifact_id.trim() == "" or request.body.trim() == "": return empty_chat_result(400, "artifact_content_required")
+        if request.body.len() > 1048576: return empty_chat_result(413, "artifact_too_large")
+        if artifact_index(self.artifacts, request.artifact_id) >= 0: return empty_chat_result(409, "artifact_id_conflict")
+        val artifact = PublishedArtifact(artifact_id: request.artifact_id, task_id: request.task_id,
+            room_id: request.room_id, media_type: request.detail, value: request.body,
+            published_by: request.principal.identity_id, created_at: request.occurred_at)
+        val stored = self.store.put_artifact(StoredArtifact(artifact_id: artifact.artifact_id,
+            task_id: artifact.task_id, room_id: artifact.room_id, media_type: artifact.media_type,
+            value: artifact.value, published_by: artifact.published_by, created_at: artifact.created_at))
+        if not stored.ok: return empty_chat_result(409, stored.error)
+        self.artifacts.push(artifact)
+        ChatToolResult(ok: true, status: 200, error: "", duplicate: false, resource_id: request.artifact_id,
+            evidence: "artifact_published", messages: [], profiles: [], tasks: [], artifacts: [artifact])
+
+export MessagingMcpServer

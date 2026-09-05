@@ -1,0 +1,114 @@
+# Semantic completeness state, linkage, and activation — the three INDEPENDENT
+# axes of the hardening plan (§5.1, §5.2, §5.3 of
+# doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md).
+#
+# They are separate enums on purpose. §5.2 is explicit: "Do not encode linkage
+# into the semantic state." A release may statically link `hir_gpu` without
+# changing its persistent complete-extension identity, so a combined
+# `StaticLinkedComplete`-style enum would make serialized identity depend on
+# build configuration — the exact defect §7.1 exists to prevent.
+
+# Semantic completeness: WHEN the constructor universe closes (§5.1).
+enum Closure:
+    Static      # closes at source/compiler build; exhaustive at compile time
+    Complete    # closes at config/link/seal; exhaustive at the seal
+    Dyn         # never closes while running; no whole-world proof
+
+impl Closure:
+    fn name() -> text:
+        match self:
+            Closure.Static: "static"
+            Closure.Complete: "complete"
+            Closure.Dyn: "dyn"
+
+# HOW the implementation reaches the process (§5.2). Orthogonal to Closure.
+enum Linkage:
+    StaticLink
+    Dynload
+
+impl Linkage:
+    fn name() -> text:
+        match self:
+            Linkage.StaticLink: "static_link"
+            Linkage.Dynload: "dynload"
+
+# WHEN the module becomes live (§5.3).
+enum Activation:
+    Startup
+    FirstUse
+    Command
+    Manual
+    Hotspot
+
+impl Activation:
+    fn name() -> text:
+        match self:
+            Activation.Startup: "startup"
+            Activation.FirstUse: "first_use"
+            Activation.Command: "command"
+            Activation.Manual: "manual"
+            Activation.Hotspot: "hotspot"
+
+# The §5.3 critical restriction table, exactly.
+#
+#   closure:   static   allowed
+#              complete allowed after seal
+#              dyn      rejected (must be frozen into complete first)
+#   activation startup        allowed
+#              first_use      allowed only when already verified and sealed
+#              command/manual allowed only before entering critical execution
+#              hotspot        rejected for semantics-changing modules/aspects
+#
+# Two of those eight rows are UNCONDITIONAL rejections and are decidable from
+# (closure, activation) alone — those are the Err cases here. The remaining
+# "allowed <condition>" rows are admitted, and the condition that still has to
+# hold is named by `critical_precondition`, which is the honest split: this
+# function cannot observe whether a seal has happened or whether critical
+# execution has been entered, and silently returning Ok while pretending the
+# condition were checked is how a restriction table stops restricting.
+fn closure_rejected_in_critical(closure: Closure) -> bool:
+    match closure:
+        Closure.Static: false
+        Closure.Complete: false
+        Closure.Dyn: true
+
+fn activation_rejected_in_critical(activation: Activation) -> bool:
+    match activation:
+        Activation.Startup: false
+        Activation.FirstUse: false
+        Activation.Command: false
+        Activation.Manual: false
+        Activation.Hotspot: true
+
+pub fn critical_admits(closure: Closure, activation: Activation) -> Result<(), text>:
+    if closure_rejected_in_critical(closure):
+        return Err("closure=dyn is rejected in critical: freeze it into complete before critical execution (plan 5.3)")
+    if activation_rejected_in_critical(activation):
+        return Err("activation=hotspot is rejected in critical for semantics-changing modules and aspects (plan 5.3)")
+    Ok(())
+
+fn closure_precondition(closure: Closure) -> text:
+    match closure:
+        Closure.Static: ""
+        Closure.Complete: "complete closure is admitted only after the universe seal"
+        Closure.Dyn: ""
+
+fn activation_precondition(activation: Activation) -> text:
+    match activation:
+        Activation.Startup: ""
+        Activation.FirstUse: "first_use requires the module code/hash to be already verified and sealed"
+        Activation.Command: "command activation is admitted only before entering critical execution"
+        Activation.Manual: "manual activation is admitted only before entering critical execution"
+        Activation.Hotspot: ""
+
+# The residual obligation for an admitted (closure, activation) pair. Empty
+# text means the pair is unconditionally allowed. Only meaningful for a pair
+# `critical_admits` accepted -- this annotates a pass, it is not a second gate.
+pub fn critical_precondition(closure: Closure, activation: Activation) -> text:
+    val c = closure_precondition(closure)
+    val a = activation_precondition(activation)
+    if c == "":
+        return a
+    if a == "":
+        return c
+    c + "; " + a

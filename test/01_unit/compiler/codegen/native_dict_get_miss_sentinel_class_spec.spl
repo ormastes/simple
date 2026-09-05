@@ -1,0 +1,188 @@
+"""
+# Native `--entry-closure`: the `Dict.get()` MISS-SENTINEL class
+
+**Category:** Codegen / MIR dict read lowering (similar-problem detection)
+**Bug:** doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md
+
+## Why this spec exists — the coverage hole that let a landed fix silently rot
+
+`test/01_unit/compiler/dict_get_miss_returns_nil_spec.spl` already pins this
+defect, and it is a good spec, but it drives exactly two engines out of
+process: `interpret` and `jit`. Its own header states the in-process examples
+are "green both before and after the MIR fix".
+
+The defect is neither an interpreter nor a JIT defect. It lives in the MIR
+lowering that only the **native `--entry-closure`** lane compiles. So the one
+lane that can reproduce it was the one lane nothing exercised.
+
+That gap was not theoretical. The 2026-08-01 fix
+(`dict_get_preserve_flat_nil`, plus the `Option<bool>` raw-word arm) was
+**un-wired** at some later point: `.get(k)`'s arm in
+`_MirLoweringExpr/method_calls_literals.spl` called `lower_dict_runtime_get`,
+which hardcodes `as_option: false`, leaving `as_option: true` with **zero call
+sites in the tree**. The entire guard became dead code and every value type
+silently reverted to the pre-fix behaviour, while the existing spec stayed
+green on interpret and jit throughout. Measured 2026-08-17 on a native build,
+before the re-wiring:
+
+| probe | measured before | expected |
+|---|---|---|
+| `Dict<text,i64>` miss `== nil` | `NOTNIL` | `NIL` |
+| `Dict<text,i64>` miss `?? -77` | `0` | `-77` |
+| `Dict<text,text>` miss `== nil` | `NOTNIL` | `NIL` |
+
+Note the middle rows: the bug doc had recorded `i64` and `bool` as **FIXED**
+and only `text` as residual. On the native lane all three were broken, so the
+doc's "still open for text" framing understated it — the fix was not partial,
+it was disconnected.
+
+## What this spec adds beyond the reproducer
+
+A miss reading as nil is only half the contract. The other half is that a
+**present** value must never read as nil — a guard that returns nil too
+eagerly trades a silent wrong answer for a different silent wrong answer, and
+the reproducing assertions alone would not notice. Every value type below is
+therefore probed on BOTH lanes, and each stored value is chosen to be the one
+most likely to be confused with the sentinel:
+
+| value type | miss must be nil | present value that must NOT be nil |
+|---|---|---|
+| `i64` | yes | a stored **`0`** — the pre-fix substitute value |
+| `text` | yes | a stored **empty string** — decodes near NULL |
+| `bool` | yes | both **`true`** and **`false`** (an `Option<bool>` has 3 states in 1 word) |
+| struct | yes | a real struct, fields readable after the guard |
+
+The stored-`0` and empty-string rows are the ones with teeth: under the defect
+a miss looked present, and under a naive over-eager fix these look missing.
+
+## Engines
+
+This spec is deliberately native-only and single-build. The interpreter and
+JIT lanes are already covered by the reproducing spec cited above; repeating
+them here would add runtime without adding a lane. The subprocess is the whole
+point — an in-process example here would be vacuous.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# NOTE: no `{...}` interpolation in the embedded source — a `{name}` inside a
+# spec's own string literal is resolved by the SPEC's lexer, which kills the
+# whole file with `zero-examples` before any example runs.
+val CLASS_SOURCE: text = ("struct P:\n" +
+    "    x: i64\n" +
+    "    y: i64\n" +
+    "\n" +
+    "fn main():\n" +
+    "    var di: Dict<text, i64> = {}\n" +
+    "    di[\"zero\"] = 0\n" +
+    "    print(\"I64\")\n" +
+    "    if di.get(\"absent\") == nil:\n" +
+    "        print(\"MISS-NIL\")\n" +
+    "    else:\n" +
+    "        print(\"MISS-BAD\")\n" +
+    "    if di.get(\"zero\") == nil:\n" +
+    "        print(\"ZERO-BAD\")\n" +
+    "    else:\n" +
+    "        print(\"ZERO-PRESENT\")\n" +
+    "    print(di.get(\"absent\") ?? -77)\n" +
+    "    print(di.get(\"zero\") ?? -77)\n" +
+    "    var dt: Dict<text, text> = {}\n" +
+    "    dt[\"empty\"] = \"\"\n" +
+    "    dt[\"k\"] = \"yes\"\n" +
+    "    print(\"TEXT\")\n" +
+    "    if dt.get(\"absent\") == nil:\n" +
+    "        print(\"MISS-NIL\")\n" +
+    "    else:\n" +
+    "        print(\"MISS-BAD\")\n" +
+    "    if dt.get(\"empty\") == nil:\n" +
+    "        print(\"EMPTY-BAD\")\n" +
+    "    else:\n" +
+    "        print(\"EMPTY-PRESENT\")\n" +
+    "    if dt.get(\"k\") == nil:\n" +
+    "        print(\"HIT-BAD\")\n" +
+    "    else:\n" +
+    "        print(\"HIT-PRESENT\")\n" +
+    "    var db: Dict<text, bool> = {}\n" +
+    "    db[\"t\"] = true\n" +
+    "    db[\"f\"] = false\n" +
+    "    print(\"BOOL\")\n" +
+    "    if db.get(\"absent\") == nil:\n" +
+    "        print(\"MISS-NIL\")\n" +
+    "    else:\n" +
+    "        print(\"MISS-BAD\")\n" +
+    "    if db.get(\"t\") == nil:\n" +
+    "        print(\"TRUE-BAD\")\n" +
+    "    else:\n" +
+    "        print(\"TRUE-PRESENT\")\n" +
+    "    if db.get(\"f\") == nil:\n" +
+    "        print(\"FALSE-BAD\")\n" +
+    "    else:\n" +
+    "        print(\"FALSE-PRESENT\")\n" +
+    "    var ds: Dict<text, P> = {}\n" +
+    "    ds[\"p\"] = P(x: 41, y: 43)\n" +
+    "    print(\"STRUCT\")\n" +
+    "    if ds.get(\"absent\") == nil:\n" +
+    "        print(\"MISS-NIL\")\n" +
+    "    else:\n" +
+    "        print(\"MISS-BAD\")\n" +
+    "    if val hv = ds.get(\"p\"):\n" +
+    "        print(hv.x)\n" +
+    "        print(hv.y)\n" +
+    "    else:\n" +
+    "        print(\"STRUCT-BAD\")\n")
+
+fn native_build_and_run_class() -> text:
+    val dir = "build/test-artifacts/native_dict_get_miss_class"
+    val src = dir + "/miss_class_repro.spl"
+    val bin_out = dir + "/miss_class_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, CLASS_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "Dict.get() distinguishes a miss from a present value on the native lane":
+
+    it "routes the miss sentinel around the decode for every guardable value type":
+        # Deliberately ONE example: this costs a full native-build, and spec
+        # module globals do not persist across examples, so splitting the
+        # value types into separate `it` blocks would mean four builds.
+        step("Build the value-type sweep once and run the resulting binary")
+        val out = native_build_and_run_class()
+
+        step("Refuse to pass on a build that produced nothing")
+        # Without this, BUILD-FAILED would satisfy every `not contains`
+        # assertion below and the spec would be vacuously green.
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("I64")
+        expect(out).to_contain("TEXT")
+        expect(out).to_contain("BOOL")
+        expect(out).to_contain("STRUCT")
+
+        step("i64: a miss is nil, and a STORED ZERO is not — the pre-fix substitute value")
+        expect(out).to_contain("I64\nMISS-NIL\nZERO-PRESENT\n-77\n0")
+        expect(out.contains("MISS-BAD")).to_equal(false)
+        expect(out.contains("ZERO-BAD")).to_equal(false)
+
+        step("text: a miss is nil, and a stored EMPTY STRING is not")
+        # This is the row the bug doc recorded as the residual open gap. The
+        # true cause was never str-specific decoding — the guard never ran.
+        expect(out).to_contain("TEXT\nMISS-NIL\nEMPTY-PRESENT\nHIT-PRESENT")
+        expect(out.contains("EMPTY-BAD")).to_equal(false)
+        expect(out.contains("HIT-BAD")).to_equal(false)
+
+        step("bool: three states in one word — miss, stored true and stored false all distinct")
+        expect(out).to_contain("BOOL\nMISS-NIL\nTRUE-PRESENT\nFALSE-PRESENT")
+        expect(out.contains("TRUE-BAD")).to_equal(false)
+        expect(out.contains("FALSE-BAD")).to_equal(false)
+
+        step("struct: the passthrough arm keeps a miss nil and a hit's fields readable")
+        expect(out).to_contain("STRUCT\nMISS-NIL\n41\n43")
+        expect(out.contains("STRUCT-BAD")).to_equal(false)

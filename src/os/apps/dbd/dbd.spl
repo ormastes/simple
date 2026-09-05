@@ -1,0 +1,1000 @@
+# dbd — SimpleOS in-guest database daemon transport
+#
+# THE real Simple db server: std.nogc_sync_mut.redis.server.RedisServer (the
+# same pure-Simple RESP engine src/app/redis_server/main.spl runs hosted).
+# This file is ONLY the freestanding-kernel transport seam. The protocol module
+# reuses RedisServer's parser and dispatcher verbatim; this transport does not
+# convert decrypted bytes to RESP text before mutable byte framing completes.
+# AUTH never becomes text; each complete non-credential command becomes text
+# exactly once for the canonical RESP engine.
+#
+# Two storage backends, selected at replay time:
+#   - dbfs-engine: the DBFS key/value engine directly. Legitimately
+#     DBFS-specific — it IS the db engine, not a generic file store. Lane C1
+#     is landing the DbFsDriver root-mount integration; until a live DBFS
+#     engine handle is reachable from this boot entry, dbd_try_dbfs_backend()
+#     returns false and dbd falls back to vfs-log so this lane does not
+#     falsely advertise DBFS durability.
+#   - vfs-log: RedisServer has no persistence of its own (pure in-memory
+#     store — see server.spl), so durability is a write-ahead journal of
+#     mutating commands (SET/DEL), replayed at startup by re-dispatching
+#     each journaled command through the REAL RedisServer.dispatch() (never
+#     duplicating SET/DEL/GET semantics). The journal itself is read/written
+#     through the switchable VFS hub (os.services.vfs.vfs_init —
+#     g_vfs_read_file_bytes / g_vfs_write_file_bytes), which routes to
+#     whatever root filesystem driver is mounted (FAT32 today, DBFS once
+#     Lane C1's DbFsDriver lands) — no filesystem-specific token appears in
+#     this file.
+#
+# The RESP engine + journal/replay logic lives in the pure, spec-tested
+# os.apps.dbd.dbd_protocol module (which wraps the real
+# std.nogc_sync_mut.redis.server.RedisServer). This file is ONLY the
+# freestanding transport seam.
+#
+# Networking: the true per-socket rt_net_* primitives (rt_net_socket/bind/
+# listen/accept/send_bytes/recv_bytes/close), the same primitives sshd's own
+# rt_boot_tcp_* convenience wrappers are built on (see sshd.spl) and the same
+# ones src/os/kernel/boot/http_baremetal.spl now uses — NOT
+# std.nogc_sync_mut.io.tcp.{TcpListener,TcpStream} (the hosted OS-socket
+# wrapper RedisServer.run()/serve_connection() use), which is not proven
+# under x86_64-unknown-none freestanding. RedisServer.run()/serve_connection()
+# are therefore not called here; this file's accept/read/write loop mirrors
+# serve_connection()'s buffering logic (drain all complete commands per read,
+# retain a trailing partial fragment) on top of the freestanding primitives.
+
+use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, DbdTransactionOwnerV1, DbdTransactionQueueStatusV1, dbd_command_is_mutating, dbd_command_has_durable_journal_semantics, dbd_command_terminates_session, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
+use os.apps.dbd.dbd_auth_ingress.{
+    DbdMutableAuthRequestOwnerV1, DbdAuthIngressStatusV1
+}
+use os.apps.dbd.dbd_command_ingress.{
+    DbdAuthenticatedRespIngressV1, DbdCommandIngressStatusV1
+}
+use os.apps.dbd.dbd_dbfs_adapter.{
+    DbdDbfsAdapter, dbd_dbfs_adapter_from_driver,
+    dbd_dbfs_adapter_from_filesystem_vfs, DBD_DBFS_JOURNAL_PATH_V1,
+    DBD_DBFS_QUARANTINE_PATH_V1
+}
+use os.apps.dbd.dbd_provisioning.{DbdProvisioningOwnerV1}
+use os.apps.dbd.dbd_close_owner.{
+    DbdCloseOwnerV1, DbdCloseStateV1, DbdCloseDispositionV1
+}
+use os.apps.dbd.dbd_tls.{
+    DbdTlsSessionV1, DbdTlsIngressStatusV1
+}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_write_file_bytes, g_vfs_file_exists}
+use os.services.vfs.vfs_boot_init.{g_mount_table}
+use os.tls13.server.{
+    Tls13ServerContext, Tls13AcceptResult, tls13_accept
+}
+use std.common.contracts.execution.simpleos_server_v1.{ServerLifecycleState, ServerLifecycleV1, server_lifecycle_v1_default}
+use std.common.string_core.{text_to_bytes}
+use os.userlib.server_startup.{server_startup_evidence_consume_v1}
+
+extern fn serial_println(msg: text)
+extern fn rt_net_socket(proto: i64) -> i64
+extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
+extern fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64
+extern fn rt_net_accept(sock_fd: i64) -> i64
+extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
+extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
+extern fn rt_net_close(sock_fd: i64) -> i64
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+pub val DBD_PORT: i64 = 5433
+val DBD_LOG_PATH: text = DBD_DBFS_JOURNAL_PATH_V1
+val DBD_QUARANTINE_PATH: text = DBD_DBFS_QUARANTINE_PATH_V1
+val DBD_MAX_LINE_BYTES: i64 = DBD_MAX_JOURNAL_LINE_BYTES
+val DBD_RECV_BOUND_BYTES: i64 = 4096  # bound on one socket read
+# Ciphertext is attacker-controlled work even when it authenticates to no
+# application bytes yet.  The plaintext session budget therefore cannot be
+# the only connection-lifetime bound: a peer could otherwise keep this
+# single-owner daemon occupied indefinitely with a fragmented TLS trickle.
+# These limits admit ample TLS framing overhead above the 64 KiB plaintext
+# budget while bounding receive dispatch and retained cryptographic work.
+val DBD_MAX_TLS_WIRE_BYTES_PER_SESSION: i64 = 2 * 1024 * 1024
+val DBD_MAX_TLS_RECEIVES_PER_SESSION: i64 = 4096
+val DBD_STARTUP_BLOCKED_RC: i64 = -95
+val DBD_MAX_SEND_ATTEMPTS: i64 = 256
+val DBD_SEND_RETRY_WINDOW_BYTES: u64 = 4096u64
+val DBD_MAX_SESSION_ID: i64 = 9223372036854775807
+
+# Decode helper mirroring sshd's decode_net_runtime_i32/fd (see sshd.spl):
+# the direct baremetal net runtime returns ENCODE_INT(value) for successes.
+fn _dbd_decode_i64(raw: i64) -> i64:
+    if raw > 7:
+        return raw >> 3
+    raw
+
+fn _dbd_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _dbd_journal_wire_bytes_valid(bytes: [u8]) -> bool:
+    """Admit only printable ASCII J1 bytes and LF record boundaries."""
+    for byte in bytes:
+        if byte != 10u8 and (byte < 32u8 or byte > 126u8):
+            return false
+    true
+
+fn _dbd_byte_window(bytes: [u8], start: u64, maximum: u64) -> [u8]:
+    var out: [u8] = []
+    var i = start
+    var end = bytes.len()
+    if maximum < end - start:
+        end = start + maximum
+    while i < end:
+        out.push(bytes[i])
+        i = i + 1u64
+    out
+
+fn _dbd_send_all(sock_fd: i64, bytes: [u8]) -> bool:
+    if bytes.len() == 0:
+        return false
+    var sent: u64 = 0
+    var zero_writes: i64 = 0
+    var attempts: i64 = 0
+    while sent < bytes.len():
+        if attempts >= DBD_MAX_SEND_ATTEMPTS:
+            return false
+        attempts = attempts + 1
+        # Give the transport the original record on the common first attempt.
+        # After a short write, materialize at most one fixed retry window;
+        # repeatedly copying the complete remaining record amplifies partial
+        # writes into attempt_count * response_size transient bytes.
+        val remaining = if sent == 0u64:
+            bytes
+        else:
+            _dbd_byte_window(bytes, sent, DBD_SEND_RETRY_WINDOW_BYTES)
+        val wrote_i = rt_net_send_bytes(sock_fd, remaining)
+        if wrote_i < 0:
+            return false
+        val wrote = wrote_i.to_u64()
+        if wrote > remaining.len():
+            return false
+        if wrote == 0:
+            zero_writes = zero_writes + 1
+            if zero_writes > 16:
+                return false
+        else:
+            zero_writes = 0
+            sent = sent + wrote
+    true
+
+fn _dbd_log(message: text):
+    serial_println(dbd_redact_diagnostic(message))
+
+fn _dbd_quarantine_exact(bytes: [u8]) -> bool:
+    """Preserve one exact corrupt-log copy without replacing prior evidence."""
+    if bytes.len() == 0:
+        return false
+    if g_vfs_file_exists(DBD_QUARANTINE_PATH):
+        return _dbd_bytes_equal(g_vfs_read_file_bytes(DBD_QUARANTINE_PATH), bytes)
+    if not g_vfs_write_file_bytes(DBD_QUARANTINE_PATH, bytes):
+        return false
+    _dbd_bytes_equal(g_vfs_read_file_bytes(DBD_QUARANTINE_PATH), bytes)
+
+enum DbdTlsSendStatusV1:
+    Sent
+    BudgetRejected
+    TransportFailed
+
+class DbdLiveClientSessionV1:
+    """Single mutable owner for one accepted client's hot-path state."""
+    tls: DbdTlsSessionV1
+    auth: DbdMutableAuthRequestOwnerV1
+    budget: DbdSessionBudget
+    commands: DbdAuthenticatedRespIngressV1
+    transaction: DbdTransactionOwnerV1
+
+    static fn create(
+        tls: DbdTlsSessionV1,
+        auth: DbdMutableAuthRequestOwnerV1
+    ) -> DbdLiveClientSessionV1:
+        DbdLiveClientSessionV1(
+            tls: tls,
+            auth: auth,
+            budget: DbdSessionBudget.new(),
+            commands: DbdAuthenticatedRespIngressV1.new(),
+            transaction: DbdTransactionOwnerV1.new()
+        )
+
+    me send_text(sock_fd: i64, message: text) -> DbdTlsSendStatusV1:
+        if not self.budget.admit_response(message.len()):
+            return DbdTlsSendStatusV1.BudgetRejected
+        val record = self.tls.seal_application(
+            text_to_bytes(message))
+        if record.len() == 0:
+            return DbdTlsSendStatusV1.TransportFailed
+        if not _dbd_send_all(sock_fd, record):
+            return DbdTlsSendStatusV1.TransportFailed
+        DbdTlsSendStatusV1.Sent
+
+    me close():
+        self.tls.close()
+        self.auth.close()
+        self.commands.close()
+        self.transaction.clear()
+        self.budget.close()
+
+pub class DbdServer:
+    """Freestanding-kernel wrapper around the real RedisServer engine."""
+    engine: DbdEngine
+    log_text: text          # exact durable journal bytes persisted so far
+    backend_is_dbfs: bool
+    persistence: DbdPersistenceBudget
+    quarantine_present: bool
+    listener_close: DbdCloseOwnerV1
+    client_close: DbdCloseOwnerV1
+    listener_close_terminal_code: text
+    lifecycle: ServerLifecycleV1
+    credential_provider: DbdCredentialProvider
+    next_auth_session_id: i64
+    dbfs_adapter: DbdDbfsAdapter
+    provisioning: DbdProvisioningOwnerV1
+    startup_evidence_consumed: bool
+
+impl DbdServer:
+    pub static fn new() -> DbdServer:
+        DbdServer(engine: DbdEngine.new(), log_text: "", backend_is_dbfs: false,
+                  persistence: DbdPersistenceBudget.new(),
+                  quarantine_present: false,
+                  listener_close: DbdCloseOwnerV1.new("listener"),
+                  client_close: DbdCloseOwnerV1.new("client"),
+                  listener_close_terminal_code: "",
+                  lifecycle: server_lifecycle_v1_default("simpleos-dbd"),
+                  credential_provider: DbdCredentialProvider.new(),
+                  next_auth_session_id: 1,
+                  dbfs_adapter: DbdDbfsAdapter.detached("dbfs-root-driver-unavailable"),
+                  provisioning: DbdProvisioningOwnerV1.new(),
+                  startup_evidence_consumed: false)
+
+    pub static fn new_filesystem_launched_v1() -> DbdServer:
+        """Acquire one-shot startup evidence only for the canonical FS entry."""
+        var server = DbdServer.new()
+        server.startup_evidence_consumed =
+            server_startup_evidence_consume_v1()
+        server
+
+    pub fn startup_evidence_ready_v1() -> bool:
+        self.startup_evidence_consumed
+
+    pub me provision_service(
+        principal: text, credential: [u8], cert_chain: [[u8]],
+        private_key: [u8], signature_scheme: u16
+    ) -> bool:
+        if not self.startup_evidence_consumed: return false
+        if not self.provisioning.admit(
+            principal, credential, cert_chain, private_key, signature_scheme):
+            self.credential_provider.revoke()
+            return false
+        self.credential_provider = self.provisioning.provider
+        true
+
+    pub fn service_ready() -> bool:
+        self.startup_evidence_consumed and
+            self.provisioning.ready() and self.credential_provider.configured and
+            self.dbfs_adapter.ready() and self.persistence.healthy
+
+    pub fn service_blocker() -> text:
+        if not self.startup_evidence_consumed:
+            return "server-startup-evidence-unavailable"
+        if not self.provisioning.ready(): return self.provisioning.blocker()
+        if not self.dbfs_adapter.ready(): return self.dbfs_adapter.blocker()
+        if not self.persistence.healthy: return "dbd-persistence-quarantined"
+        ""
+
+    pub me close_service() -> bool:
+        """Close the whole service owner and destroy retained provisioning."""
+        var resources_closed = true
+        if self.client_close.owns_fd():
+            resources_closed = self.attempt_client_resource_close() ==
+                DbdCloseDispositionV1.Closed
+        if self.listener_close.owns_fd():
+            resources_closed = self.close_listener() and resources_closed
+        self.provisioning.close()
+        self.credential_provider.revoke()
+        val storage_closed = self.dbfs_adapter.close()
+        resources_closed and storage_closed and
+            not self.provisioning.ready() and
+            not self.credential_provider.configured
+
+    pub me attach_filesystem_dbfs_vfs(
+        dbfs_root: bool, durable_sync: bool, transactional_replace: bool
+    ) -> bool:
+        if not self.startup_evidence_consumed: return false
+        # A live adapter already owns its mount-generation lease and staging
+        # generation.  Reconstructing it from repeated compatibility claims
+        # would reset the temporary-name sequence and could collide with an
+        # in-flight or previously published commit.  Keep the authoritative
+        # owner intact. The booleans are launch-time compatibility claims, not
+        # revocation authority; returning false while retaining a ready adapter
+        # would also violate the caller's false => nonempty blocker contract.
+        # A real clear/remount changes the authoritative capability generation,
+        # making ready() false and taking the reconstruction path below.
+        if self.dbfs_adapter.ready():
+            return true
+        self.dbfs_adapter = dbd_dbfs_adapter_from_filesystem_vfs(
+            dbfs_root, durable_sync, transactional_replace)
+        self.dbfs_adapter.ready()
+
+    me configure_authentication(principal: text, credential: [u8]) -> bool:
+        """Hash a copied credential into the digest-only verifier.
+
+        Simple arrays have value semantics, so this API cannot erase the
+        caller's buffer. Network readiness remains blocked until a transfer or
+        volatile-secret owner can prove caller-side lifetime and zeroization.
+        """
+        var provider = self.credential_provider
+        val configured = provider.configure_bytes(principal, credential)
+        self.credential_provider = provider
+        configured
+
+    me new_auth_owner() -> DbdMutableAuthRequestOwnerV1:
+        if self.next_auth_session_id <= 0:
+            return DbdMutableAuthRequestOwnerV1.new(0)
+        val session_id = self.next_auth_session_id
+        if self.next_auth_session_id >= DBD_MAX_SESSION_ID:
+            self.next_auth_session_id = 0
+        else:
+            self.next_auth_session_id = self.next_auth_session_id + 1
+        DbdMutableAuthRequestOwnerV1.new(session_id)
+
+    # ------------------------------------------------------------------
+    # dbfs-engine backend probe (Lane C1 integration point)
+    # ------------------------------------------------------------------
+
+    me try_dbfs_backend() -> bool:
+        """Return true iff a live DBFS engine handle is reachable for the
+        mounted root today. Currently always false: Lane C1's DbFsDriver
+        root-mount is in flight and does not yet expose a boot-reachable
+        engine handle from this freestanding entry. Flip this to a real
+        probe (route the durability journal through the DBFS engine's own
+        persistence instead of the vfs-log journal below) once that lands —
+        do not block on it until then.
+        """
+        val resolved = g_mount_table.resolve_driver(DBD_LOG_PATH)
+        if resolved.is_err():
+            self.dbfs_adapter = DbdDbfsAdapter.detached("dbfs-root-driver-unavailable")
+            _dbd_log("[dbd] DBFS blocked reason=" + self.dbfs_adapter.blocker())
+            return false
+        self.dbfs_adapter = dbd_dbfs_adapter_from_driver(resolved.unwrap())
+        if not self.dbfs_adapter.ready():
+            _dbd_log("[dbd] DBFS blocked reason=" + self.dbfs_adapter.blocker())
+            return false
+        true
+
+    # ------------------------------------------------------------------
+    # vfs-log backend: write-ahead journal of mutating commands, replayed
+    # through the REAL RedisServer.dispatch() at startup.
+    # ------------------------------------------------------------------
+
+    pub me replay_log():
+        """Load existing durable state at startup. Selects and logs the backend."""
+        if self.dbfs_adapter.ready() or self.try_dbfs_backend():
+            self.backend_is_dbfs = true
+            val recovered = self.dbfs_adapter.read_existing_bounded(
+                DBD_LOG_PATH, DBD_MAX_JOURNAL_BYTES)
+            if recovered.is_err():
+                if recovered.unwrap_err() == "dbfs-recovery-journal-not-found":
+                    self.log_text = ""
+                    self.persistence = DbdPersistenceBudget.new()
+                    self.quarantine_present = false
+                    _dbd_log("[dbd] backend=dbfs-engine (no existing log)")
+                    return
+                self.persistence = DbdPersistenceBudget.new()
+                self.persistence.mark_unhealthy()
+                _dbd_log("[dbd] DBFS recovery blocked reason=" + recovered.unwrap_err())
+                return
+            val recovered_bytes = recovered.unwrap()
+            if not _dbd_journal_wire_bytes_valid(recovered_bytes):
+                self.persistence = DbdPersistenceBudget.restored(
+                    0, recovered_bytes.len().to_i64())
+                self.persistence.mark_unhealthy()
+                val _ = self.dbfs_adapter.quarantine(
+                    "dbfs-recovery-noncanonical-journal-bytes")
+                return
+            self.log_text = rt_string_from_byte_array(recovered_bytes)
+            val replayed = self.engine.replay_journal(self.log_text)
+            if replayed < 0:
+                self.persistence = DbdPersistenceBudget.restored(0, self.log_text.len())
+                self.persistence.mark_unhealthy()
+                val _ = self.dbfs_adapter.quarantine("dbfs-recovery-corrupt-journal")
+                return
+            self.persistence = DbdPersistenceBudget.restored(replayed, self.log_text.len())
+            self.quarantine_present = false
+            _dbd_log("[dbd] backend=dbfs-engine replayed={replayed}")
+            return
+        self.backend_is_dbfs = false
+        if not g_vfs_file_exists(DBD_LOG_PATH):
+            self.log_text = ""
+            self.persistence = DbdPersistenceBudget.new()
+            self.quarantine_present = false
+            _dbd_log("[dbd] backend=vfs-log (no existing log)")
+            return
+        val bytes = g_vfs_read_file_bytes(DBD_LOG_PATH)
+        if not _dbd_journal_wire_bytes_valid(bytes):
+            _dbd_log("[dbd] noncanonical journal bytes rejected; service quarantined")
+            self.log_text = ""
+            self.persistence = DbdPersistenceBudget.restored(
+                0, bytes.len().to_i64())
+            self.persistence.mark_unhealthy()
+            self.quarantine_present = _dbd_quarantine_exact(bytes)
+            return
+        self.log_text = rt_string_from_byte_array(bytes)
+        # Replay every journaled mutation through the REAL engine (dbd_protocol
+        # decodes each line and re-dispatches via RedisServer.dispatch()).
+        val replayed = self.engine.replay_journal(self.log_text)
+        if replayed < 0:
+            _dbd_log("[dbd] journal rejected; service quarantined")
+            # Preserve the exact durable bytes for diagnosis/recovery and keep
+            # the daemon fail-closed. Never silently turn corruption into an
+            # empty database.
+            self.persistence = DbdPersistenceBudget.restored(0, self.log_text.len())
+            self.persistence.mark_unhealthy()
+            self.quarantine_present = _dbd_quarantine_exact(bytes)
+            if not self.quarantine_present:
+                _dbd_log("[dbd] quarantine copy unavailable; original retained")
+            return
+        self.persistence = DbdPersistenceBudget.restored(replayed, self.log_text.len())
+        self.quarantine_present = false
+        _dbd_log("[dbd] backend=vfs-log replayed={replayed}")
+
+    me persist_journal_line(line: text) -> bool:
+        """Append one durable journal record. Fail-closed: only returns true
+        when the full updated journal verifiably round-trips through the
+        VFS write hub.
+
+        This bounded fallback is intentionally not called performant: lacking
+        a crash-atomic append+sync VFS primitive, it rewrites and rereads the
+        complete journal for every mutation.  The tracked DBFS/TLS/auth gap
+        records the resulting O(total journal bytes) per-operation blocker.
+        """
+        if line.len() <= 0 or line.len() > DBD_MAX_LINE_BYTES:
+            return false
+        val appended_bytes = line.len() + 1
+        if not self.persistence.can_append(appended_bytes):
+            _dbd_log("[dbd] persist FAILED (journal record limit or unhealthy journal)")
+            return false
+        val updated = self.log_text + line + "\n"
+        if updated.len() > DBD_MAX_JOURNAL_BYTES:
+            _dbd_log("[dbd] persist FAILED (journal limit)")
+            return false
+        val expected = text_to_bytes(updated)
+        if not g_vfs_write_file_bytes(DBD_LOG_PATH, expected):
+            _dbd_log("[dbd] persist FAILED (write rejected)")
+            self.persistence.mark_unhealthy()
+            val observed = g_vfs_read_file_bytes(DBD_LOG_PATH)
+            self.quarantine_present = _dbd_quarantine_exact(observed)
+            return false
+        val verify = g_vfs_read_file_bytes(DBD_LOG_PATH)
+        if not _dbd_bytes_equal(verify, expected):
+            _dbd_log("[dbd] persist FAILED (verify mismatch)")
+            self.persistence.mark_unhealthy()
+            self.quarantine_present = _dbd_quarantine_exact(verify)
+            return false
+        self.log_text = updated
+        if not self.persistence.commit_verified(appended_bytes):
+            # The exact record is already durable.  Quarantine later work but
+            # report this publication as committed so the caller applies the
+            # same mutation in memory; otherwise restart would reveal a write
+            # that the live engine skipped.
+            self.persistence.mark_unhealthy()
+            _dbd_log("[dbd] durable accounting diverged after publication")
+        true
+
+    # ------------------------------------------------------------------
+    # Command handling — durability wraps the REAL dispatch(); it never
+    # duplicates SET/GET/DEL semantics.
+    # ------------------------------------------------------------------
+
+    me handle_command(args: [text]) -> text:
+        if not self.persistence.healthy:
+            return "-ERR durable journal unavailable\r\n"
+        if args.len() == 0:
+            return self.engine.dispatch(args)
+        # Durability wraps the REAL dispatch(); mutation classification and
+        # journal encoding live in dbd_protocol (spec-tested), not here.
+        if not dbd_command_is_mutating(args[0]):
+            return self.engine.dispatch(args)
+        # The shared Redis engine also mutates through INCR, EXPIRE, and
+        # FLUSHALL. Until the journal defines exact replay semantics for those
+        # commands, reject them before dispatch rather than acknowledge a
+        # memory-only mutation that disappears after filesystem restart.
+        if not dbd_command_has_durable_journal_semantics(args[0]):
+            return "-ERR durable command unsupported\r\n"
+        if self.backend_is_dbfs:
+            val journal_line = dbd_encode_journal_line(args)
+            if journal_line == "" or journal_line.len() > DBD_MAX_LINE_BYTES:
+                return "-ERR command too long to journal\r\n"
+            val appended_bytes = journal_line.len() + 1
+            if not self.persistence.can_append(appended_bytes):
+                return "-ERR persist failed\r\n"
+            val updated = self.log_text + journal_line + "\n"
+            val committed = self.dbfs_adapter.commit_and_sync(
+                DBD_LOG_PATH, rt_string_to_byte_array(updated))
+            if committed.is_err():
+                self.persistence.mark_unhealthy()
+                if self.dbfs_adapter.commit_outcome_uncertain():
+                    return "-ERR durable publication outcome uncertain\r\n"
+                return "-ERR persist failed\r\n"
+            self.log_text = updated
+            if not self.persistence.commit_verified(appended_bytes):
+                # Publication is authoritative after commit_and_sync(). Keep
+                # the live engine aligned with recovery and quarantine only
+                # subsequent work.
+                self.persistence.mark_unhealthy()
+            return self.engine.dispatch(args)
+        val journal_line = dbd_encode_journal_line(args)
+        if journal_line == "" or journal_line.len() > DBD_MAX_LINE_BYTES:
+            return "-ERR command too long to journal\r\n"
+        if not self.persist_journal_line(journal_line):
+            return "-ERR persist failed\r\n"
+        self.engine.dispatch(args)
+
+    me handle_transaction(commands: [[text]]) -> text:
+        """Publish one bounded MULTI mutation set, then dispatch in order.
+
+        DBFS receives one generation-bound transactional replacement for the
+        whole write set. No queued command reaches the canonical Redis owner
+        before that publication succeeds, so a failed EXEC has no partial
+        in-memory or durable effect. Read-only batches need no journal write.
+        """
+        if commands.len() == 0:
+            return "*0\r\n"
+        var journal_lines: [text] = []
+        var journal_bytes: i64 = 0
+        var mutation_count: i64 = 0
+        for args in commands:
+            if args.len() > 0 and dbd_command_is_mutating(args[0]):
+                if not dbd_command_has_durable_journal_semantics(args[0]):
+                    return "-EXECABORT durable command unsupported\r\n"
+                val line = dbd_encode_journal_line(args)
+                if line == "" or line.len() > DBD_MAX_LINE_BYTES:
+                    return "-EXECABORT command cannot be journaled\r\n"
+                val added = line.len() + 1
+                if added > DBD_MAX_JOURNAL_BYTES - journal_bytes:
+                    return "-EXECABORT transaction journal limit\r\n"
+                journal_lines.push(line)
+                journal_bytes = journal_bytes + added
+                mutation_count = mutation_count + 1
+        if mutation_count > 0:
+            if not self.backend_is_dbfs or not self.dbfs_adapter.ready():
+                return "-EXECABORT DBFS transaction owner unavailable\r\n"
+            if not self.persistence.can_append_batch(
+                mutation_count, journal_bytes):
+                return "-EXECABORT durable journal limit\r\n"
+            if journal_bytes > DBD_MAX_JOURNAL_BYTES - self.log_text.len():
+                return "-EXECABORT durable journal limit\r\n"
+            # Join once: repeated text concatenation makes an N-command EXEC
+            # quadratic in journal bytes under value semantics.
+            val journal_suffix = journal_lines.join("\n") + "\n"
+            val updated = self.log_text + journal_suffix
+            val committed = self.dbfs_adapter.commit_and_sync(
+                DBD_LOG_PATH, rt_string_to_byte_array(updated))
+            if committed.is_err():
+                self.persistence.mark_unhealthy()
+                if self.dbfs_adapter.commit_outcome_uncertain():
+                    return "-ERR EXEC durable outcome uncertain\r\n"
+                return "-EXECABORT durable publication failed\r\n"
+            self.log_text = updated
+            if not self.persistence.commit_verified_batch(
+                mutation_count, journal_bytes):
+                # The complete transaction journal is already published.
+                # Dispatch it below so live state matches restart state, then
+                # leave the owner unhealthy to reject subsequent mutations.
+                self.persistence.mark_unhealthy()
+        var response_parts: [text] = [
+            "*" + commands.len().to_text() + "\r\n"]
+        for args in commands:
+            response_parts.push(self.engine.dispatch(args))
+        response_parts.join("")
+
+    # ------------------------------------------------------------------
+    # Listener/session ownership.  The canonical DbdServer value owns both
+    # the socket and every durability mutation; no value-taking wrapper may
+    # dispatch commands on a disposable owner copy.
+    # ------------------------------------------------------------------
+
+    pub me bind_listener(port: i64) -> i64:
+        if not self.startup_evidence_consumed: return DBD_STARTUP_BLOCKED_RC
+        if self.listener_close.owns_fd() or
+            self.lifecycle.state != ServerLifecycleState.Created:
+            return -16
+        if not self.service_ready():
+            val _ = self.lifecycle.fail(
+                self.service_blocker(), self.lifecycle.generation)
+            _dbd_log("[dbd] startup blocked reason=" + self.service_blocker())
+            return DBD_STARTUP_BLOCKED_RC
+        val validated = self.lifecycle.validate(self.lifecycle.generation)
+        if validated.is_err():
+            return -22
+        val sock_fd = _dbd_decode_i64(rt_net_socket(1))
+        if sock_fd < 0:
+            val _ = self.lifecycle.fail("socket-create-failed", self.lifecycle.generation)
+            return sock_fd
+        if not self.listener_close.acquire(sock_fd):
+            _ = rt_net_close(sock_fd)
+            return -16
+        val bind_rc = _dbd_decode_i64(rt_net_bind(sock_fd, port))
+        if bind_rc < 0:
+            self.listener_close_terminal_code = "socket-bind-failed"
+            val closed = self.attempt_listener_resource_close()
+            if closed == DbdCloseDispositionV1.Closed:
+                self.finalize_listener_close_lifecycle()
+            return bind_rc
+        val listen_rc = _dbd_decode_i64(rt_net_listen(sock_fd, 8))
+        if listen_rc < 0:
+            self.listener_close_terminal_code = "socket-listen-failed"
+            val closed = self.attempt_listener_resource_close()
+            if closed == DbdCloseDispositionV1.Closed:
+                self.finalize_listener_close_lifecycle()
+            return listen_rc
+        val bound = self.lifecycle.bind("tcp:dbd:" + port.to_text(), self.lifecycle.generation)
+        if bound.is_err():
+            self.listener_close_terminal_code = "lifecycle-bind-failed"
+            val closed = self.attempt_listener_resource_close()
+            if closed == DbdCloseDispositionV1.Closed:
+                self.finalize_listener_close_lifecycle()
+            return -22
+        # Readiness is derived only from the already-owned provisioning,
+        # mounted durable DBFS adapter, and the successfully bound listener.
+        val ready = self.lifecycle.mark_ready(
+            "dbd-owned-provisioning-dbfs-probe",
+            "dbd-bounded-tls-auth-durable-commit-v1",
+            self.lifecycle.generation)
+        if ready.is_err():
+            self.listener_close_terminal_code = "lifecycle-ready-failed"
+            val closed = self.attempt_listener_resource_close()
+            if closed == DbdCloseDispositionV1.Closed:
+                self.finalize_listener_close_lifecycle()
+            return -22
+        sock_fd
+
+    me attempt_listener_resource_close() -> DbdCloseDispositionV1:
+        if not self.listener_close.can_attempt_close():
+            return self.listener_close.commit_close_result(-1)
+        val close_rc = rt_net_close(self.listener_close.fd)
+        val closed = self.listener_close.commit_close_result(close_rc)
+        if closed != DbdCloseDispositionV1.Closed:
+            _dbd_log("[dbd] " + self.listener_close.last_error)
+        closed
+
+    me finalize_listener_close_lifecycle():
+        if self.listener_close.state != DbdCloseStateV1.Closed or
+            self.listener_close_terminal_code == "" or
+            self.lifecycle.active_connections > 0 or
+            self.lifecycle.worker_count > 0:
+            return
+        if self.lifecycle.state == ServerLifecycleState.Closed or
+            self.lifecycle.state == ServerLifecycleState.Failed or
+            self.lifecycle.state == ServerLifecycleState.Cancelled:
+            self.listener_close_terminal_code = ""
+            return
+        if self.listener_close_terminal_code == "cancelled":
+            val cancelled = self.lifecycle.cancel(self.lifecycle.generation)
+            if cancelled.is_ok():
+                self.listener_close_terminal_code = ""
+        else:
+            val failed = self.lifecycle.fail(
+                self.listener_close_terminal_code, self.lifecycle.generation)
+            if failed.is_ok():
+                self.listener_close_terminal_code = ""
+
+    me close_listener() -> bool:
+        if self.listener_close_terminal_code == "":
+            self.listener_close_terminal_code = "cancelled"
+        val closed = self.attempt_listener_resource_close()
+        if closed != DbdCloseDispositionV1.Closed:
+            return false
+        self.finalize_listener_close_lifecycle()
+        true
+
+    me attempt_client_resource_close() -> DbdCloseDispositionV1:
+        if not self.client_close.can_attempt_close():
+            return self.client_close.commit_close_result(-1)
+        val close_rc = rt_net_close(self.client_close.fd)
+        val closed = self.client_close.commit_close_result(close_rc)
+        if closed == DbdCloseDispositionV1.Closed:
+            val _ = self.lifecycle.set_active_connections(0)
+            self.finalize_listener_close_lifecycle()
+        else:
+            _dbd_log("[dbd] " + self.client_close.last_error)
+        closed
+
+    me retry_pending_closes() -> bool:
+        """Retry each non-quarantined descriptor at most once per poll."""
+        var all_closed = true
+        if self.client_close.can_attempt_close():
+            if self.attempt_client_resource_close() != DbdCloseDispositionV1.Closed:
+                all_closed = false
+        elif self.client_close.owns_fd():
+            all_closed = false
+        if self.listener_close.can_attempt_close():
+            if self.attempt_listener_resource_close() != DbdCloseDispositionV1.Closed:
+                all_closed = false
+        elif self.listener_close.owns_fd():
+            all_closed = false
+        self.finalize_listener_close_lifecycle()
+        all_closed
+
+    me carry_close_owners_across_restart() -> bool:
+        val listener_carried = self.listener_close.carry_restart()
+        val client_carried = self.client_close.carry_restart()
+        listener_carried and client_carried
+
+    me finish_client(client_fd: i64, budget: DbdSessionBudget):
+        budget.close()
+        if not self.client_close.owns_fd():
+            val _ = self.client_close.acquire(client_fd)
+        val _ = self.attempt_client_resource_close()
+
+    me serve_tls_client(client_fd: i64, context: Tls13ServerContext) -> bool:
+        """Authenticate TLS records and a mutable-byte RESP AUTH request.
+
+        Before the per-connection identity is admitted, no decrypted byte is
+        converted to immutable text.  After admission, only post-AUTH command
+        bytes enter the canonical RESP parser and every reply is sealed by the
+        same TLS session owner.
+        """
+        val created = DbdTlsSessionV1.from_context(context)
+        if created.is_err():
+            self.finish_client(client_fd, DbdSessionBudget.new())
+            return true
+        val live = DbdLiveClientSessionV1.create(
+            created.unwrap(), self.new_auth_owner())
+        var tls_wire_bytes: i64 = 0
+        var tls_receive_count: i64 = 0
+        while true:
+            val received = rt_net_recv_bytes(client_fd, DBD_RECV_BOUND_BYTES)
+            if received.len() == 0:
+                break
+            val received_bytes = received.len().to_i64()
+            # Compare by subtraction so admission remains overflow-safe if
+            # either policy grows.  Count the socket dispatch separately:
+            # byte bounds alone do not stop a one-byte-at-a-time slow peer
+            # from monopolizing this synchronous service owner.
+            if (received_bytes <= 0 or
+                tls_receive_count >= DBD_MAX_TLS_RECEIVES_PER_SESSION or
+                tls_wire_bytes > DBD_MAX_TLS_WIRE_BYTES_PER_SESSION or
+                received_bytes >
+                    DBD_MAX_TLS_WIRE_BYTES_PER_SESSION - tls_wire_bytes):
+                live.close()
+                self.finish_client(client_fd, live.budget)
+                return true
+            tls_receive_count = tls_receive_count + 1
+            tls_wire_bytes = tls_wire_bytes + received_bytes
+            var ingress = live.tls.ingest(received)
+            if (ingress.status != DbdTlsIngressStatusV1.NeedMore and
+                ingress.status != DbdTlsIngressStatusV1.Authenticated):
+                val _ = ingress.zeroize_plaintext_frames()
+                live.close()
+                self.finish_client(client_fd, live.budget)
+                return true
+
+            var frame_index: u64 = 0
+            while frame_index < ingress.plaintext_frames.len():
+                if not live.budget.admit_receive(
+                    ingress.plaintext_frames[frame_index].len().to_i64()):
+                    val _ = live.send_text(
+                        client_fd, "-ERR session byte quota exceeded\r\n")
+                    val _ = ingress.zeroize_plaintext_frames()
+                    live.close()
+                    self.finish_client(client_fd, live.budget)
+                    return true
+                if not live.auth.can_dispatch():
+                    val auth_status = live.auth.ingest(
+                        self.credential_provider,
+                        ingress.plaintext_frames[frame_index])
+                    val _ = ingress.zeroize_plaintext_frame(frame_index)
+                    if auth_status == DbdAuthIngressStatusV1.Authenticated:
+                        if live.send_text(client_fd, "+OK\r\n") !=
+                            DbdTlsSendStatusV1.Sent:
+                            val _ = ingress.zeroize_plaintext_frames()
+                            live.close()
+                            self.finish_client(client_fd, live.budget)
+                            return true
+                        var trailing = live.auth.take_authenticated_trailing()
+                        if trailing.len() > 0:
+                            val command_status = live.commands.ingest(trailing)
+                            var trailing_index: u64 = 0
+                            while trailing_index < trailing.len():
+                                trailing[trailing_index] = 0u8
+                                trailing_index = trailing_index + 1u64
+                            if command_status !=
+                                DbdCommandIngressStatusV1.Accepted:
+                                val _ = live.send_text(
+                                    client_fd,
+                                    "-ERR command framing rejected\r\n")
+                                val _ = ingress.zeroize_plaintext_frames()
+                                live.close()
+                                self.finish_client(client_fd, live.budget)
+                                return true
+                    elif auth_status == DbdAuthIngressStatusV1.Rejected:
+                        if live.send_text(
+                            client_fd, "-ERR authentication failed\r\n") !=
+                            DbdTlsSendStatusV1.Sent:
+                            val _ = ingress.zeroize_plaintext_frames()
+                            live.close()
+                            self.finish_client(client_fd, live.budget)
+                            return true
+                    elif auth_status != DbdAuthIngressStatusV1.NeedMore:
+                        val _ = live.send_text(
+                            client_fd,
+                            "-ERR authentication framing rejected\r\n")
+                        val _ = ingress.zeroize_plaintext_frames()
+                        live.close()
+                        self.finish_client(client_fd, live.budget)
+                        return true
+                else:
+                    val command_status = live.commands.ingest(
+                        ingress.plaintext_frames[frame_index])
+                    val _ = ingress.zeroize_plaintext_frame(frame_index)
+                    if command_status != DbdCommandIngressStatusV1.Accepted:
+                        val _ = live.send_text(
+                            client_fd, "-ERR command framing rejected\r\n")
+                        val _ = ingress.zeroize_plaintext_frames()
+                        live.close()
+                        self.finish_client(client_fd, live.budget)
+                        return true
+
+                if live.auth.can_dispatch():
+                    var draining = true
+                    while draining:
+                        match live.commands.take_next():
+                            case nil:
+                                draining = false
+                            case Some(owned_command):
+                                if owned_command.auth_command:
+                                    val _ = owned_command.zeroize_owned_bytes()
+                                    val _ = live.send_text(
+                                        client_fd,
+                                        "-ERR repeated authentication rejected\r\n")
+                                    val _ = ingress.zeroize_plaintext_frames()
+                                    live.close()
+                                    self.finish_client(client_fd, live.budget)
+                                    return true
+                                val command_text =
+                                    rt_string_from_byte_array(
+                                        owned_command.bytes)
+                                val _ = owned_command.zeroize_owned_bytes()
+                                val parsed = dbd_parse_next_authenticated_command(
+                                    command_text)
+                                if not parsed.2 or parsed.1.len() != 0:
+                                    val _ = live.send_text(
+                                        client_fd,
+                                        "-ERR command framing rejected\r\n")
+                                    val _ = ingress.zeroize_plaintext_frames()
+                                    live.close()
+                                    self.finish_client(client_fd, live.budget)
+                                    return true
+                                if not live.budget.admit_request():
+                                    val _ = live.send_text(
+                                        client_fd,
+                                        "-ERR request quota exceeded\r\n")
+                                    val _ = ingress.zeroize_plaintext_frames()
+                                    live.close()
+                                    self.finish_client(client_fd, live.budget)
+                                    return true
+                                val terminal_command =
+                                    dbd_command_terminates_session(parsed.0)
+                                var reply = ""
+                                val command = if parsed.0.len() > 0:
+                                    parsed.0[0].upper()
+                                else:
+                                    ""
+                                if terminal_command:
+                                    # QUIT owns the connection lifecycle, not
+                                    # the transaction queue. Drop uncommitted
+                                    # work before producing its terminal reply.
+                                    live.transaction.clear()
+                                    reply = self.handle_command(parsed.0)
+                                elif command == "MULTI":
+                                    if live.transaction.begin(parsed.0):
+                                        reply = "+OK\r\n"
+                                    else:
+                                        reply = "-ERR MULTI calls cannot be nested or carry arguments\r\n"
+                                elif command == "DISCARD":
+                                    if parsed.0.len() != 1:
+                                        reply = "-ERR wrong number of arguments for 'discard'\r\n"
+                                    elif live.transaction.discard():
+                                        reply = "+OK\r\n"
+                                    else:
+                                        reply = "-ERR DISCARD without MULTI\r\n"
+                                elif command == "EXEC":
+                                    if parsed.0.len() != 1:
+                                        reply = "-ERR wrong number of arguments for 'exec'\r\n"
+                                    elif not live.transaction.is_active():
+                                        reply = "-ERR EXEC without MULTI\r\n"
+                                    elif live.transaction.is_failed():
+                                        val _ = live.transaction.discard()
+                                        reply = "-EXECABORT transaction discarded because of previous errors\r\n"
+                                    else:
+                                        val transaction_commands =
+                                            live.transaction.take_for_exec()
+                                        reply = self.handle_transaction(
+                                            transaction_commands)
+                                elif live.transaction.is_active():
+                                    match live.transaction.queue(parsed.0):
+                                        case DbdTransactionQueueStatusV1.Queued:
+                                            reply = "+QUEUED\r\n"
+                                        case DbdTransactionQueueStatusV1.LimitExceeded:
+                                            reply = "-ERR transaction queue limit exceeded\r\n"
+                                        case DbdTransactionQueueStatusV1.DurabilityUnsupported:
+                                            reply = "-ERR command lacks durable transaction semantics\r\n"
+                                        case DbdTransactionQueueStatusV1.InvalidControl:
+                                            reply = "-ERR command invalid inside MULTI\r\n"
+                                        case DbdTransactionQueueStatusV1.NotActive:
+                                            reply = "-ERR transaction owner inactive\r\n"
+                                else:
+                                    reply = self.handle_command(parsed.0)
+                                val send_status = live.send_text(client_fd, reply)
+                                if send_status == DbdTlsSendStatusV1.BudgetRejected:
+                                    val _ = live.send_text(
+                                        client_fd,
+                                        "-ERR response quota exceeded\r\n")
+                                    val _ = ingress.zeroize_plaintext_frames()
+                                    live.close()
+                                    self.finish_client(client_fd, live.budget)
+                                    return true
+                                if send_status == DbdTlsSendStatusV1.TransportFailed:
+                                    val _ = ingress.zeroize_plaintext_frames()
+                                    live.close()
+                                    self.finish_client(client_fd, live.budget)
+                                    return true
+                                if terminal_command:
+                                    # QUIT is terminal only after its canonical
+                                    # reply is fully sealed and written. close()
+                                    # wipes incomplete and already-framed
+                                    # pipelined bytes so no post-QUIT command can
+                                    # escape through a later drain iteration.
+                                    val _ = ingress.zeroize_plaintext_frames()
+                                    live.close()
+                                    self.finish_client(client_fd, live.budget)
+                                    return true
+                frame_index = frame_index + 1u64
+            val _ = ingress.zeroize_plaintext_frames()
+        live.close()
+        self.finish_client(client_fd, live.budget)
+        true
+
+    pub me accept_and_handle_once() -> bool:
+        """Handle one connection on this owner's listener.
+
+        The method mutates the canonical DbdServer, so verified journal state
+        and record counts survive into every subsequent connection. The typed
+        TLS config is obtained from this service's admitted provisioning owner;
+        a socket caller cannot substitute key material or a readiness flag.
+        """
+        if not self.service_ready() or
+            not self.credential_provider.configured or
+            not self.listener_close.is_open() or self.client_close.owns_fd() or
+            self.lifecycle.state != ServerLifecycleState.Ready or
+            not self.lifecycle.ready_for_advertisement():
+            return false
+        val tls_config_result = self.provisioning.tls_config()
+        if tls_config_result.is_err(): return false
+        val tls_config = tls_config_result.unwrap()
+        val client_fd = _dbd_decode_i64(rt_net_accept(self.listener_close.fd))
+        if client_fd < 0:
+            return false
+        if not self.client_close.acquire(client_fd):
+            return false
+        if not self.lifecycle.set_active_connections(1):
+            val _ = self.attempt_client_resource_close()
+            return false
+        match tls13_accept(client_fd, tls_config):
+            case Tls13AcceptResult.Failed(_):
+                self.finish_client(client_fd, DbdSessionBudget.new())
+                true
+            case Tls13AcceptResult.Accepted(context):
+                self.serve_tls_client(client_fd, context)

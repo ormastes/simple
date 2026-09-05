@@ -1,0 +1,111 @@
+#!/bin/sh
+# Build and run the canonical retained Web -> DrawIR -> Engine2D 8K benchmark.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-}
+BUILD_DIR=${WEB_DRAWIR_8K_BUILD_DIR:-"$ROOT_DIR/build/web_drawir_8k_native"}
+OUTPUT=${WEB_DRAWIR_8K_OUTPUT:-"$BUILD_DIR/bench_web_draw_ir_8k_frame_switch"}
+CACHE_DIR=${WEB_DRAWIR_8K_CACHE_DIR:-"$BUILD_DIR/cache"}
+BUDGET_SECONDS=${WEB_DRAWIR_8K_BUILD_BUDGET_SECONDS:-240}
+NATIVE_BACKEND=${WEB_DRAWIR_8K_NATIVE_BACKEND:-cranelift}
+RUNTIME_BUNDLE=${WEB_DRAWIR_8K_RUNTIME_BUNDLE:-core-c-bootstrap}
+RUNTIME_PATH=${WEB_DRAWIR_8K_RUNTIME_PATH:-}
+LOG="$BUILD_DIR/native-build.log"
+RUN_LOG="$BUILD_DIR/run.log"
+
+mkdir -p "$BUILD_DIR" "$CACHE_DIR"
+
+case "$BUDGET_SECONDS" in
+    ''|*[!0-9]*) echo "FAIL: WEB_DRAWIR_8K_BUILD_BUDGET_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+if [ "$BUDGET_SECONDS" -le 0 ]; then
+    echo "FAIL: WEB_DRAWIR_8K_BUILD_BUDGET_SECONDS must be positive" >&2
+    exit 2
+fi
+case "$NATIVE_BACKEND" in
+    cranelift|llvm) ;;
+    *) echo "FAIL: WEB_DRAWIR_8K_NATIVE_BACKEND must be cranelift or llvm" >&2; exit 2 ;;
+esac
+
+. "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
+if [ -z "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN=$(simple_compiler_select --root "$ROOT_DIR") || {
+        echo "BLOCKED: no verified pure-Simple compiler is available" >&2
+        exit 6
+    }
+fi
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "BLOCKED: Simple compiler is not executable: $SIMPLE_BIN" >&2
+    exit 6
+fi
+VERSION_TEXT=$({ "$SIMPLE_BIN" --version; } 2>&1) || {
+    echo "BLOCKED: compiler identity probe failed: $SIMPLE_BIN" >&2
+    exit 6
+}
+if [ -z "$VERSION_TEXT" ]; then
+    echo "BLOCKED: compiler identity probe returned no identity: $SIMPLE_BIN" >&2
+    exit 6
+fi
+if simple_compiler_is_seed "$SIMPLE_BIN"; then
+    echo "BLOCKED: benchmark requires pure-Simple self-hosted compiler, not bootstrap seed" >&2
+    exit 6
+fi
+if ! simple_compiler_usable "$SIMPLE_BIN"; then
+    echo "BLOCKED: Web DrawIR 8K requires a usable pure-Simple self-hosted compiler: $SIMPLE_BIN" >&2
+    exit 6
+fi
+
+if [ -z "$RUNTIME_PATH" ]; then
+    COMPILER_STAGE_DIR=$(dirname -- "$(dirname -- "$SIMPLE_BIN")")
+    RUNTIME_CANDIDATE="$COMPILER_STAGE_DIR/stage2-runtime-authority"
+    if [ -f "$RUNTIME_CANDIDATE/libsimple_runtime.a" ]; then
+        RUNTIME_PATH=$RUNTIME_CANDIDATE
+    fi
+fi
+
+set -- native-build --backend "$NATIVE_BACKEND" --runtime-bundle "$RUNTIME_BUNDLE"
+if [ -n "$RUNTIME_PATH" ]; then
+    set -- "$@" --runtime-path "$RUNTIME_PATH"
+fi
+
+set +e
+env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH \
+    SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BIN" "$@" \
+    --source "$ROOT_DIR/src/lib" --source "$ROOT_DIR/src/os" \
+    --source "$ROOT_DIR/test/05_perf/graphics_2d" \
+    --entry-closure --cache-dir "$CACHE_DIR" \
+    --entry "$ROOT_DIR/test/05_perf/graphics_2d/bench_web_draw_ir_8k_retained_native.spl" \
+    --strip --timeout "$BUDGET_SECONDS" --output "$OUTPUT" >"$LOG" 2>&1
+BUILD_STATUS=$?
+set -e
+
+if [ "$BUILD_STATUS" -ne 0 ]; then
+    sed -n '1,160p' "$LOG"
+    echo "FAIL: bounded Web DrawIR native-build exited $BUILD_STATUS (budget=${BUDGET_SECONDS}s)" >&2
+    exit "$BUILD_STATUS"
+fi
+if [ ! -x "$OUTPUT" ]; then
+    echo "FAIL: native-build reported success without an executable: $OUTPUT" >&2
+    exit 3
+fi
+if grep -q 'stub functions for unresolved symbols' "$LOG"; then
+    echo "FAIL: Web DrawIR artifact contains unresolved-symbol stubs" >&2
+    exit 4
+fi
+
+"$OUTPUT" >"$RUN_LOG" 2>&1
+sed -n '1,80p' "$RUN_LOG"
+if ! grep -q '^WEB_DRAW_IR_8K_SWITCH status=pass ' "$RUN_LOG"; then
+    echo "FAIL: native artifact did not produce a passing Web DrawIR 8K receipt" >&2
+    exit 5
+fi
+for field in viewport=7680x4320 backend= source_revision= p50_ns= p95_ns= rss_kb= fallback= readback_mode= checksum= redraw_frames= reused_frames=; do
+    if ! grep -q "$field" "$RUN_LOG"; then
+        echo "FAIL: Web DrawIR 8K receipt is missing $field" >&2
+        exit 5
+    fi
+done
+
+echo "PASS: cached Web DrawIR 8K native artifact: $OUTPUT"

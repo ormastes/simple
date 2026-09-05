@@ -1,0 +1,1403 @@
+//! Dynamic SFFI dispatch for extern functions via runtime library loading.
+//!
+//! When an `extern fn rt_*()` call is not found in the built-in dispatch table,
+//! this module attempts to resolve it dynamically by loading the runtime shared
+//! library (`libsimple_runtime.so` / `.dylib` / `.dll`) and calling the function
+//! via `dlsym`.
+//!
+//! ## Satellite Libraries
+//!
+//! Functions with known prefixes (e.g. `rt_ts_*`, `rt_torch_*`) are resolved
+//! from satellite shared libraries (`libspl_ts.so`, `libspl_torch.so`, etc.)
+//! when they are not found in the main runtime library.  Satellite libraries
+//! are loaded lazily on first use.
+//!
+//! ## Value Marshalling
+//!
+//! The runtime's `RuntimeValue` is `#[repr(transparent)]` over `u64`, so it maps
+//! directly to `i64` in C ABI. The interpreter's `Value` enum is marshalled
+//! to/from `i64` at the boundary:
+//! - `Value::Int(n)` -> `n as i64`
+//! - `Value::Bool(b)` -> `b as i64`
+//! - every value without an admitted integer representation is rejected
+//!
+//! Return values are interpreted as `i64` and wrapped back as `Value::Int`.
+
+use crate::error::{codes, CompileError, ErrorContext};
+use crate::codegen::runtime_sffi;
+use crate::plugin_manifest;
+use crate::value::Value;
+use simple_simd::{active_simd_tier, SimdTier};
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+#[derive(Clone, Copy)]
+struct CachedDynamicSymbol {
+    address: usize,
+    arity: usize,
+}
+
+/// Global state for the dynamically loaded runtime library.
+struct DynamicRuntime {
+    /// Handle from dlopen (0 if not loaded or failed)
+    handle: usize,
+    /// Active tier used for the current handle/symbol cache
+    active_tier: Option<SimdTier>,
+    /// Cached symbol lookups: function name -> function pointer address
+    symbols: HashMap<String, CachedDynamicSymbol>,
+}
+
+static DYNAMIC_RUNTIME: std::sync::LazyLock<Mutex<DynamicRuntime>> = std::sync::LazyLock::new(|| {
+    Mutex::new(DynamicRuntime {
+        handle: 0,
+        active_tier: None,
+        symbols: HashMap::new(),
+    })
+});
+
+fn unsupported_conversion(message: impl Into<String>) -> CompileError {
+    let context = ErrorContext::new()
+        .with_code(codes::SFFI_UNSUPPORTED_CONVERSION)
+        .with_help("use a generated typed SFFI adapter for this ABI value");
+    CompileError::semantic_with_context(message, context)
+}
+
+fn null_function_pointer(name: &str) -> CompileError {
+    let context = ErrorContext::new()
+        .with_code(codes::SFFI_NULL_FORBIDDEN)
+        .with_help("resolve and validate the required symbol before invocation");
+    CompileError::semantic_with_context(
+        format!("dynamic SFFI dispatch: function '{name}' has a null function pointer"),
+        context,
+    )
+}
+
+/// Known satellite library prefixes.
+///
+/// Function names matching `rt_PREFIX_*` where PREFIX is in this list
+/// will be resolved from the corresponding satellite library
+/// (`libspl_PREFIX.so` / `.dylib` / `.dll`).
+const SATELLITE_PREFIXES: &[&str] = &["ts", "torch", "cuda", "vulkan", "vhdl"];
+
+/// State for a lazily-loaded satellite shared library.
+struct SatelliteLibrary {
+    /// Handle from dlopen (0 if not loaded or failed)
+    handle: usize,
+    /// Whether we already attempted to load (to avoid repeated failures)
+    attempted: bool,
+    /// Cached symbol lookups: function name -> function pointer address
+    symbols: HashMap<String, CachedDynamicSymbol>,
+}
+
+/// Global map of satellite prefix -> library state.
+static SATELLITE_LIBRARIES: std::sync::LazyLock<Mutex<HashMap<String, SatelliteLibrary>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Global map of manifest library path -> library state.
+static MANIFEST_LIBRARIES: std::sync::LazyLock<Mutex<HashMap<String, SatelliteLibrary>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Attempt to find and load the runtime shared library.
+///
+/// Search order:
+/// 1. Same directory as the current executable
+/// 2. `../lib/` relative to the current executable
+/// 3. System library paths (via dlopen with just the library name)
+fn load_runtime_library() -> usize {
+    let lib_name = runtime_lib_name();
+    let active_tier = active_simd_tier();
+
+    // Try paths relative to the current executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            // 1. Same directory as executable
+            for candidate in runtime_library_candidates(exe_dir.join(&lib_name), active_tier) {
+                if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+                    tracing::debug!("Loaded runtime library from: {}", candidate.display());
+                    return handle;
+                }
+            }
+
+            // 2. ../lib/ relative to executable
+            for candidate in runtime_library_candidates(exe_dir.join("../lib").join(&lib_name), active_tier) {
+                if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+                    tracing::debug!("Loaded runtime library from: {}", candidate.display());
+                    return handle;
+                }
+            }
+
+            // 3. ../lib/ without canonicalization (in case symlinks differ)
+            if let Some(parent) = exe_dir.parent() {
+                for candidate in runtime_library_candidates(parent.join("lib").join(&lib_name), active_tier) {
+                    if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+                        tracing::debug!("Loaded runtime library from: {}", candidate.display());
+                        return handle;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Also try cargo target directory (for development)
+    // Look for target/debug/ or target/release/ relative to current dir
+    for profile in &["debug", "release", "bootstrap"] {
+        let cargo_path = PathBuf::from(format!("target/{}/{}", profile, lib_name));
+        for candidate in runtime_library_candidates(cargo_path, active_tier) {
+            if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+                tracing::debug!("Loaded runtime library from cargo target: {}", candidate.display());
+                return handle;
+            }
+        }
+    }
+
+    // 5. System library search (just pass the name, let the OS find it)
+    for candidate in runtime_library_candidates(PathBuf::from(&lib_name), active_tier) {
+        if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+            tracing::debug!("Loaded runtime library from system path: {}", candidate.display());
+            return handle;
+        }
+    }
+
+    tracing::debug!("Could not find runtime library: {}", lib_name);
+    0
+}
+
+/// Get the platform-specific library name.
+fn runtime_lib_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "libsimple_runtime.dylib".to_string()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "simple_runtime.dll".to_string()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "libsimple_runtime.so".to_string()
+    }
+}
+
+fn runtime_library_candidates(path: PathBuf, simd_tier: SimdTier) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let use_bare_names = path.parent().is_none();
+    for variant in runtime_variant_tiers(simd_tier) {
+        let variant_name = runtime_variant_library_name(variant);
+        if use_bare_names {
+            candidates.push(PathBuf::from(variant_name));
+        } else {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            candidates.push(parent.join(variant_name));
+        }
+    }
+    candidates.push(path);
+    candidates
+}
+
+fn runtime_variant_tiers(simd_tier: SimdTier) -> Vec<SimdTier> {
+    let mut variants = Vec::new();
+    for fallback in simd_tier.best_available_implementation().compatible_fallbacks() {
+        if let Some(runtime_variant) = dynamic_runtime_variant(*fallback) {
+            if !variants.contains(&runtime_variant) {
+                variants.push(runtime_variant);
+            }
+        }
+    }
+    variants
+}
+
+fn dynamic_runtime_variant(simd_tier: SimdTier) -> Option<SimdTier> {
+    match simd_tier.best_available_implementation() {
+        SimdTier::X86_64Avx2 => Some(SimdTier::X86_64Avx2),
+        SimdTier::X86_64Sse2 => Some(SimdTier::X86_64Sse2),
+        SimdTier::Aarch64Neon => Some(SimdTier::Aarch64Neon),
+        SimdTier::Riscv64Rvv => Some(SimdTier::Riscv64Rvv),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_variant_library_name(simd_tier: SimdTier) -> String {
+    format!("libsimple_runtime.{}.so", simd_tier.as_str())
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_variant_library_name(simd_tier: SimdTier) -> String {
+    format!("libsimple_runtime.{}.dylib", simd_tier.as_str())
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_variant_library_name(simd_tier: SimdTier) -> String {
+    format!("simple_runtime.{}.dll", simd_tier.as_str())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn runtime_variant_library_name(simd_tier: SimdTier) -> String {
+    format!("libsimple_runtime.{}.so", simd_tier.as_str())
+}
+
+/// Derive the satellite prefix from a function name, if it matches a known prefix.
+///
+/// The convention is `rt_PREFIX_rest` where PREFIX is checked against
+/// `SATELLITE_PREFIXES`.  Returns `None` for functions that belong to the
+/// main runtime (e.g. `rt_file_read_text`) or don't start with `rt_`.
+fn derive_satellite_prefix(name: &str) -> Option<&'static str> {
+    let rest = name.strip_prefix("rt_")?;
+    // Extract the second segment (between first and second underscores)
+    let prefix_end = rest.find('_')?;
+    let prefix = &rest[..prefix_end];
+    // Must be at least 2 chars (skip single-char prefixes like `rt_f_*`)
+    if prefix.len() < 2 {
+        return None;
+    }
+    SATELLITE_PREFIXES.iter().find(|&&p| p == prefix).copied()
+}
+
+/// Get the platform-specific satellite library name for a given prefix.
+fn satellite_lib_name(prefix: &str) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        format!("libspl_{}.dylib", prefix)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        format!("spl_{}.dll", prefix)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        format!("libspl_{}.so", prefix)
+    }
+}
+
+/// Attempt to find and load a satellite shared library.
+///
+/// Uses the same search strategy as `load_runtime_library()` plus an
+/// additional `build/` directory search for development convenience.
+fn load_satellite_library(prefix: &str) -> usize {
+    let lib_name = satellite_lib_name(prefix);
+
+    // Try paths relative to the current executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            // 1. Same directory as executable
+            let same_dir = exe_dir.join(&lib_name);
+            if let Some(handle) = try_dlopen(&same_dir.to_string_lossy()) {
+                tracing::debug!("Loaded satellite library '{}' from: {}", prefix, same_dir.display());
+                return handle;
+            }
+
+            // 2. ../lib/ relative to executable
+            let lib_dir = exe_dir.join("../lib").join(&lib_name);
+            if let Some(handle) = try_dlopen(&lib_dir.to_string_lossy()) {
+                tracing::debug!("Loaded satellite library '{}' from: {}", prefix, lib_dir.display());
+                return handle;
+            }
+
+            // 3. ../lib/ without canonicalization
+            if let Some(parent) = exe_dir.parent() {
+                let lib_dir2 = parent.join("lib").join(&lib_name);
+                if let Some(handle) = try_dlopen(&lib_dir2.to_string_lossy()) {
+                    tracing::debug!("Loaded satellite library '{}' from: {}", prefix, lib_dir2.display());
+                    return handle;
+                }
+            }
+        }
+    }
+
+    // 4. Cargo target directories (development)
+    for profile in &["debug", "release", "bootstrap"] {
+        let cargo_path = format!("target/{}/{}", profile, lib_name);
+        if let Some(handle) = try_dlopen(&cargo_path) {
+            tracing::debug!(
+                "Loaded satellite library '{}' from cargo target: {}",
+                prefix,
+                cargo_path
+            );
+            return handle;
+        }
+    }
+
+    // 5. build/ directory (development — satellite libs may be built here)
+    let build_path = format!("build/{}", lib_name);
+    if let Some(handle) = try_dlopen(&build_path) {
+        tracing::debug!("Loaded satellite library '{}' from build dir: {}", prefix, build_path);
+        return handle;
+    }
+
+    // 6. System library search
+    if let Some(handle) = try_dlopen(&lib_name) {
+        tracing::debug!("Loaded satellite library '{}' from system path: {}", prefix, lib_name);
+        return handle;
+    }
+
+    tracing::debug!("Could not find satellite library '{}': {}", prefix, lib_name);
+    0
+}
+
+/// Try to call a function from a satellite library, given its prefix.
+///
+/// Returns `Some(Ok(Value))` if the function was found and called,
+/// `Some(Err(...))` on call failure, or `None` if not found.
+fn try_call_satellite(prefix: &str, name: &str, evaluated_args: &[Value]) -> Option<Result<Value, CompileError>> {
+    let mut satellites = match SATELLITE_LIBRARIES.lock() {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+
+    let sat = satellites
+        .entry(prefix.to_string())
+        .or_insert_with(|| SatelliteLibrary {
+            handle: 0,
+            attempted: false,
+            symbols: HashMap::new(),
+        });
+
+    // Lazy-load the satellite library on first access
+    if !sat.attempted {
+        sat.attempted = true;
+        sat.handle = load_satellite_library(prefix);
+    }
+
+    if sat.handle == 0 {
+        return None;
+    }
+
+    // Look up the symbol (with caching)
+    let fptr = if let Some(&cached) = sat.symbols.get(name) {
+        if cached.address == 0 {
+            return None; // Previously looked up and not found
+        }
+        if cached.arity != evaluated_args.len() {
+            return Some(Err(unsupported_conversion(format!(
+                "dynamic SFFI cached ABI arity mismatch for function '{name}': admitted {}, call {}",
+                cached.arity,
+                evaluated_args.len()
+            ))));
+        }
+        cached.address
+    } else {
+        if let Err(error) = validate_dynamic_i64_contract(name, evaluated_args.len()) {
+            return Some(Err(error));
+        }
+        match dlsym_lookup(sat.handle, name) {
+            Some(addr) => {
+                sat.symbols.insert(
+                    name.to_string(),
+                    CachedDynamicSymbol {
+                        address: addr,
+                        arity: evaluated_args.len(),
+                    },
+                );
+                addr
+            }
+            None => {
+                sat.symbols
+                    .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                return None;
+            }
+        }
+    };
+
+    // Drop the lock before calling the function
+    drop(satellites);
+
+    // Marshal arguments and call
+    Some(call_fptr(fptr, name, evaluated_args))
+}
+
+/// Resolved class bundle: constructor, destructor, and method function pointers.
+#[derive(Debug, Clone)]
+pub struct ResolvedClassBundle {
+    pub class_name: String,
+    pub constructor_fptr: usize,
+    pub destructor_fptr: usize,
+    /// Method name -> function pointer address
+    pub method_fptrs: HashMap<String, usize>,
+}
+
+/// Global cache of resolved class bundles: "library_path::ClassName" -> bundle.
+static RESOLVED_CLASS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, ResolvedClassBundle>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Resolve all symbols for a manifest class entry from a loaded library.
+///
+/// Given a library handle and a `PluginClassEntry`, this function resolves
+/// the constructor, destructor, and all method symbols via dlsym and returns
+/// them as a `ResolvedClassBundle`.
+///
+/// Returns `None` if the library handle is 0 or required symbols are missing.
+pub fn resolve_manifest_class(
+    library_path: &str,
+    class: &crate::plugin_manifest::PluginClassEntry,
+) -> Option<ResolvedClassBundle> {
+    // Check cache first
+    let cache_key = format!("{}::{}", library_path, class.name);
+    {
+        let cache = RESOLVED_CLASS_CACHE.lock().ok()?;
+        if let Some(bundle) = cache.get(&cache_key) {
+            return Some(bundle.clone());
+        }
+    }
+
+    // Ensure the library is loaded
+    let mut libraries = MANIFEST_LIBRARIES.lock().ok()?;
+    let state = libraries
+        .entry(library_path.to_string())
+        .or_insert_with(|| SatelliteLibrary {
+            handle: 0,
+            attempted: false,
+            symbols: HashMap::new(),
+        });
+
+    if !state.attempted {
+        state.attempted = true;
+        state.handle = try_dlopen(library_path).unwrap_or(0);
+    }
+
+    if state.handle == 0 {
+        return None;
+    }
+
+    let handle = state.handle;
+    drop(libraries);
+
+    // Resolve constructor
+    let constructor_fptr = dlsym_lookup(handle, &class.constructor)?;
+
+    // Resolve destructor
+    let destructor_fptr = dlsym_lookup(handle, &class.destructor)?;
+
+    // Resolve all methods
+    let mut method_fptrs = HashMap::new();
+    for method in &class.methods {
+        let fptr = dlsym_lookup(handle, &method.symbol)?;
+        method_fptrs.insert(method.name.clone(), fptr);
+    }
+
+    let bundle = ResolvedClassBundle {
+        class_name: class.name.clone(),
+        constructor_fptr,
+        destructor_fptr,
+        method_fptrs,
+    };
+
+    // Cache the bundle
+    if let Ok(mut cache) = RESOLVED_CLASS_CACHE.lock() {
+        cache.insert(cache_key, bundle.clone());
+    }
+
+    Some(bundle)
+}
+
+/// Try to call a class-related symbol (constructor, destructor, or method) from
+/// a manifest library. The symbol name is matched against class entries to find
+/// the correct function pointer.
+///
+/// Returns `Some(Ok(Value))` on success, `Some(Err(...))` on failure, or `None`
+/// if the symbol is not a class symbol.
+fn try_call_manifest_class_method(
+    library_path: &str,
+    name: &str,
+    evaluated_args: &[Value],
+) -> Option<Result<Value, CompileError>> {
+    // Look up class entries from the manifest
+    let manifest_cache = {
+        let cache = crate::plugin_manifest::PLUGIN_MANIFEST_CACHE.lock().ok()?;
+        cache.clone()
+    };
+
+    if !manifest_cache.loaded {
+        return None;
+    }
+
+    for plugin in &manifest_cache.manifest.plugins {
+        if plugin.library != library_path {
+            continue;
+        }
+        for class in &plugin.classes {
+            // Check constructor
+            if class.constructor == name {
+                if let Some(bundle) = resolve_manifest_class(library_path, class) {
+                    return Some(call_fptr(bundle.constructor_fptr, name, evaluated_args));
+                }
+            }
+            // Check destructor
+            if class.destructor == name {
+                if let Some(bundle) = resolve_manifest_class(library_path, class) {
+                    return Some(call_fptr(bundle.destructor_fptr, name, evaluated_args));
+                }
+            }
+            // Check methods
+            for method in &class.methods {
+                if method.symbol == name {
+                    if let Some(bundle) = resolve_manifest_class(library_path, class) {
+                        if let Some(&fptr) = bundle.method_fptrs.get(&method.name) {
+                            return Some(call_fptr(fptr, name, evaluated_args));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Try to call a function from a library explicitly mapped by the plugin manifest.
+fn try_call_manifest_library(
+    library_path: &str,
+    name: &str,
+    evaluated_args: &[Value],
+) -> Option<Result<Value, CompileError>> {
+    let mut libraries = match MANIFEST_LIBRARIES.lock() {
+        Ok(libraries) => libraries,
+        Err(_) => return None,
+    };
+
+    let state = libraries
+        .entry(library_path.to_string())
+        .or_insert_with(|| SatelliteLibrary {
+            handle: 0,
+            attempted: false,
+            symbols: HashMap::new(),
+        });
+
+    if !state.attempted {
+        state.attempted = true;
+        state.handle = try_dlopen(library_path).unwrap_or(0);
+    }
+
+    if state.handle == 0 {
+        return Some(Err(CompileError::runtime(format!(
+            "plugin library could not be loaded for '{}': {}",
+            name, library_path
+        ))));
+    }
+
+    let fptr = if let Some(&cached) = state.symbols.get(name) {
+        if cached.address == 0 {
+            // Symbol not found as a flat function — try class dispatch before failing
+            drop(libraries);
+            if let Some(result) = try_call_manifest_class_method(library_path, name, evaluated_args) {
+                return Some(result);
+            }
+            return Some(Err(CompileError::runtime(format!(
+                "plugin symbol '{}' not found in {}",
+                name, library_path
+            ))));
+        }
+        if cached.arity != evaluated_args.len() {
+            return Some(Err(unsupported_conversion(format!(
+                "dynamic SFFI cached ABI arity mismatch for function '{name}': admitted {}, call {}",
+                cached.arity,
+                evaluated_args.len()
+            ))));
+        }
+        cached.address
+    } else {
+        if let Err(error) = validate_dynamic_i64_contract(name, evaluated_args.len()) {
+            return Some(Err(error));
+        }
+        match dlsym_lookup(state.handle, name) {
+            Some(addr) => {
+                state.symbols.insert(
+                    name.to_string(),
+                    CachedDynamicSymbol {
+                        address: addr,
+                        arity: evaluated_args.len(),
+                    },
+                );
+                addr
+            }
+            None => {
+                state
+                    .symbols
+                    .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                // Symbol not found as a flat function — try class dispatch before failing
+                drop(libraries);
+                if let Some(result) = try_call_manifest_class_method(library_path, name, evaluated_args) {
+                    return Some(result);
+                }
+                return Some(Err(CompileError::runtime(format!(
+                    "plugin symbol '{}' not found in {}",
+                    name, library_path
+                ))));
+            }
+        }
+    };
+
+    drop(libraries);
+    Some(call_fptr(fptr, name, evaluated_args))
+}
+
+/// Try to dlopen a library path, returning the handle or None.
+fn try_dlopen(path: &str) -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let c_path = CString::new(path).ok()?;
+        let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+        if handle.is_null() {
+            None
+        } else {
+            Some(handle as usize)
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn LoadLibraryA(lpLibFileName: *const u8) -> isize;
+        }
+        let c_path = CString::new(path).ok()?;
+        let handle = unsafe { LoadLibraryA(c_path.as_ptr() as *const u8) };
+        if handle == 0 {
+            None
+        } else {
+            Some(handle as usize)
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Look up a symbol in the loaded runtime library.
+fn dlsym_lookup(handle: usize, name: &str) -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let c_name = CString::new(name).ok()?;
+        let sym = unsafe { libc::dlsym(handle as *mut libc::c_void, c_name.as_ptr()) };
+        if sym.is_null() {
+            None
+        } else {
+            Some(sym as usize)
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::ffi::c_void;
+        }
+        let c_name = CString::new(name).ok()?;
+        let sym = unsafe { GetProcAddress(handle as isize, c_name.as_ptr() as *const u8) };
+        if sym.is_null() {
+            None
+        } else {
+            Some(sym as usize)
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (handle, name);
+        None
+    }
+}
+
+/// Marshal an admitted integer scalar to an `i64` for passing to C functions.
+///
+/// The runtime functions generally operate on `RuntimeValue` which is a
+/// `#[repr(transparent)]` wrapper around `u64`. For the interpreter, we
+/// The generic dispatcher has no authoritative signature or ownership
+/// contract. It therefore accepts only values whose representation is already
+/// the narrow integer ABI supported by this legacy path. Other values must use
+/// a typed interpreter adapter.
+/// - Int -> direct i64
+fn value_to_i64(val: &Value) -> Result<i64, CompileError> {
+    match val {
+        Value::Int(n) => Ok(*n),
+        other => Err(unsupported_conversion(format!(
+            "dynamic SFFI dispatch does not admit argument type '{}' without a typed ABI contract",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Convert an i64 return value back to a Value.
+///
+/// Since we don't know the return type at this level, we return it as Int.
+/// The caller (Simple code) will interpret it appropriately.
+fn i64_to_value(v: i64) -> Value {
+    Value::Int(v)
+}
+
+/// Admit only contracts that exactly match the legacy dispatcher's physical
+/// `extern "C" fn(i64, ...) -> i64` call shape. Name-only manifests and mixed
+/// integer widths are not sufficient ABI evidence.
+fn validate_dynamic_i64_contract(name: &str, arity: usize) -> Result<(), CompileError> {
+    let spec = runtime_sffi::spec_for(name).ok_or_else(|| {
+        unsupported_conversion(format!(
+            "dynamic SFFI dispatch has no compiler-owned ABI contract for function '{name}'"
+        ))
+    })?;
+    if spec.params.len() != arity {
+        return Err(unsupported_conversion(format!(
+            "dynamic SFFI dispatch ABI arity mismatch for function '{name}': contract {}, call {arity}",
+            spec.params.len()
+        )));
+    }
+    if spec.params.iter().any(|ty| *ty != cranelift_codegen::ir::types::I64)
+        || spec.returns != [cranelift_codegen::ir::types::I64]
+    {
+        return Err(unsupported_conversion(format!(
+            "dynamic SFFI dispatch requires an exact all-i64 -> i64 contract for function '{name}'"
+        )));
+    }
+    Ok(())
+}
+
+fn strict_i64_array(value: &Value, name: &str) -> Result<Vec<i64>, CompileError> {
+    let items = match value {
+        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
+        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "{name} requires an [i64] argument, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    items.iter().map(Value::as_int).collect()
+}
+
+fn strict_owned_bytes(value: &Value, name: &str) -> Result<Box<[u8]>, CompileError> {
+    if let Some(bytes) = value.byte_array_view() {
+        return Ok(bytes.to_vec().into_boxed_slice());
+    }
+    let items = match value {
+        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
+        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "{name} requires a packed-byte array, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items {
+        let value = item.as_int()?;
+        let byte = u8::try_from(value)
+            .map_err(|_| CompileError::semantic(format!("{name} byte value {value} is out of bounds")))?;
+        bytes.push(byte);
+    }
+    Ok(bytes.into_boxed_slice())
+}
+
+/// Interpreter adapter for the provider-query v1 raw pointer ABI.
+pub fn rt_provider_query_v1_call_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::semantic(
+            "rt_provider_query_v1_call expects 3 arguments".to_string(),
+        ));
+    }
+    let status = simple_runtime::rt_provider_query_v1_call(args[0].as_int()?, args[1].as_int()?, args[2].as_int()?);
+    Ok(Value::Int(i64::from(status)))
+}
+
+/// Interpreter owner for the one-call dynamic byte descriptor ABI.
+pub fn spl_wffi_call_i64_with_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 6 {
+        return Err(CompileError::semantic(
+            "spl_wffi_call_i64_with_bytes expects 6 arguments".to_string(),
+        ));
+    }
+    let fptr = args[0].as_int()?;
+    if fptr == 0 {
+        return Err(null_function_pointer("spl_wffi_call_i64_with_bytes"));
+    }
+    let mut raw_args = strict_i64_array(&args[1], "spl_wffi_call_i64_with_bytes prefix")?;
+    let owner = strict_owned_bytes(&args[2], "spl_wffi_call_i64_with_bytes")?;
+    let offset = usize::try_from(args[3].as_int()?)
+        .map_err(|_| CompileError::semantic("byte offset must be non-negative".to_string()))?;
+    let length = usize::try_from(args[4].as_int()?)
+        .map_err(|_| CompileError::semantic("byte length must be non-negative".to_string()))?;
+    let end = offset
+        .checked_add(length)
+        .filter(|end| *end <= owner.len())
+        .ok_or_else(|| CompileError::semantic("byte descriptor is out of bounds".to_string()))?;
+    let suffix = strict_i64_array(&args[5], "spl_wffi_call_i64_with_bytes suffix")?;
+    if raw_args.len() + suffix.len() + 2 > 8 {
+        return Err(CompileError::semantic(
+            "spl_wffi_call_i64_with_bytes supports at most 8 foreign arguments".to_string(),
+        ));
+    }
+    let ptr = if length == 0 {
+        0
+    } else {
+        owner[offset..end].as_ptr() as i64
+    };
+    raw_args.push(ptr);
+    raw_args.push(length as i64);
+    raw_args.extend(suffix);
+    let values: Vec<Value> = raw_args.into_iter().map(Value::Int).collect();
+    call_fptr(fptr as usize, "spl_wffi_call_i64_with_bytes", &values)
+}
+
+pub fn spl_wffi_call_i64_with_bytes_checked_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match spl_wffi_call_i64_with_bytes_fn(args) {
+        Ok(value) => Ok(Value::array(vec![Value::Int(0), value])),
+        Err(error) => {
+            let status = if error.to_string().contains("null function pointer") {
+                2
+            } else {
+                1
+            };
+            Ok(Value::array(vec![Value::Int(status), Value::Int(0)]))
+        }
+    }
+}
+
+pub fn spl_fonts_call_init_blob_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::semantic(
+            "spl_fonts_call_init_blob expects 3 arguments".to_string(),
+        ));
+    }
+    let fptr = args[0].as_int()?;
+    let blob = strict_owned_bytes(&args[1], "spl_fonts_call_init_blob blob")?;
+    let digest = strict_owned_bytes(&args[2], "spl_fonts_call_init_blob digest")?;
+    if fptr == 0 {
+        return Err(null_function_pointer("spl_fonts_call_init_blob"));
+    }
+    type Init = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
+    let function = unsafe { std::mem::transmute::<usize, Init>(fptr as usize) };
+    Ok(Value::Int(unsafe {
+        function(
+            blob.as_ptr() as i64,
+            blob.len() as i64,
+            digest.as_ptr() as i64,
+            digest.len() as i64,
+        )
+    }))
+}
+
+pub fn spl_fonts_call_init_path_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic(
+            "spl_fonts_call_init_path expects 2 arguments".to_string(),
+        ));
+    }
+    let fptr = args[0].as_int()?;
+    let path = strict_owned_bytes(&args[1], "spl_fonts_call_init_path path")?;
+    if fptr == 0 {
+        return Err(null_function_pointer("spl_fonts_call_init_path"));
+    }
+    type Init = unsafe extern "C" fn(i64, i64) -> i64;
+    let function = unsafe { std::mem::transmute::<usize, Init>(fptr as usize) };
+    Ok(Value::Int(unsafe { function(path.as_ptr() as i64, path.len() as i64) }))
+}
+
+pub fn spl_fonts_call_layout_text_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::semantic(
+            "spl_fonts_call_layout_text expects 4 arguments".to_string(),
+        ));
+    }
+    let fptr = args[0].as_int()?;
+    let text = strict_owned_bytes(&args[1], "spl_fonts_call_layout_text text")?;
+    let size = args[2].as_int()?;
+    let max_width = args[3].as_int()?;
+    if fptr == 0 {
+        return Err(null_function_pointer("spl_fonts_call_layout_text"));
+    }
+    type Layout = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
+    let function = unsafe { std::mem::transmute::<usize, Layout>(fptr as usize) };
+    Ok(Value::Int(unsafe {
+        function(text.as_ptr() as i64, text.len() as i64, size, max_width)
+    }))
+}
+
+/// Marshal arguments and call a resolved function pointer.
+///
+/// This is the shared call path used by both the main runtime dispatch and
+/// satellite library dispatch.
+/// Maximum arity the untyped dynamic dispatcher can transmute a signature for.
+/// Kept in lockstep with the `match nargs` arms in `call_fptr`.
+const MAX_DYNAMIC_SFFI_ARGS: usize = 13;
+
+fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value, CompileError> {
+    if fptr == 0 {
+        return Err(null_function_pointer(name));
+    }
+
+    // Marshal arguments to i64.
+    //
+    // Packed into a fixed-size stack array rather than a `Vec`: the arity is
+    // hard-capped at MAX_DYNAMIC_SFFI_ARGS by the dispatch match below, so a
+    // heap allocation per dynamic SFFI call bought nothing. See
+    // doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md.
+    let nargs = evaluated_args.len();
+    if nargs > MAX_DYNAMIC_SFFI_ARGS {
+        // Preserve the pre-existing error precedence: an inadmissible argument
+        // type was reported before the arity error, so keep marshalling first.
+        for value in evaluated_args {
+            value_to_i64(value)?;
+        }
+        return Err(CompileError::runtime(format!(
+            "dynamic SFFI dispatch: function '{}' has {} arguments (max {} supported)",
+            name, nargs, MAX_DYNAMIC_SFFI_ARGS
+        )));
+    }
+    let mut args = [0i64; MAX_DYNAMIC_SFFI_ARGS];
+    for (slot, value) in args.iter_mut().zip(evaluated_args.iter()) {
+        *slot = value_to_i64(value)?;
+    }
+
+    // Call the function pointer with the appropriate number of arguments.
+    // Safety: We trust that the function exists in the runtime and that the
+    // caller has provided the correct number and types of arguments.
+    // All runtime functions use extern "C" ABI with i64-sized args/returns.
+    let result: i64 = unsafe {
+        match nargs {
+            0 => {
+                let f: extern "C" fn() -> i64 = std::mem::transmute(fptr);
+                f()
+            }
+            1 => {
+                let f: extern "C" fn(i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0])
+            }
+            2 => {
+                let f: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0], args[1])
+            }
+            3 => {
+                let f: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0], args[1], args[2])
+            }
+            4 => {
+                let f: extern "C" fn(i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0], args[1], args[2], args[3])
+            }
+            5 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0], args[1], args[2], args[3], args[4])
+            }
+            6 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0], args[1], args[2], args[3], args[4], args[5])
+            }
+            7 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+            }
+            8 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+            }
+            9 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
+                )
+            }
+            10 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                    std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
+                )
+            }
+            11 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                    std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10],
+                )
+            }
+            12 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                    std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10],
+                    args[11],
+                )
+            }
+            13 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                    std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10],
+                    args[11], args[12],
+                )
+            }
+            // Unreachable: arity was bounds-checked above, before marshalling.
+            _ => {
+                return Err(CompileError::runtime(format!(
+                    "dynamic SFFI dispatch: function '{}' has {} arguments (max {} supported)",
+                    name, nargs, MAX_DYNAMIC_SFFI_ARGS
+                )));
+            }
+        }
+    };
+
+    Ok(i64_to_value(result))
+}
+
+/// Try to call a function dynamically via the runtime shared library.
+///
+/// Resolution order:
+/// 1. Look up in the main runtime library (`libsimple_runtime`)
+/// 2. If not found and the name matches a known satellite prefix (`rt_PREFIX_*`),
+///    try the corresponding satellite library (`libspl_PREFIX`)
+///
+/// Returns `Some(Ok(Value))` if the function was found and called successfully,
+/// `Some(Err(...))` if found but the call failed, or `None` if the function
+/// was not found in any library.
+pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<Value, CompileError>> {
+    // `manifest_ok()` reads the cached flag through a guard; `manifest_error()`
+    // clones the message and is only reached on the (cold) failure branch.
+    if !plugin_manifest::manifest_ok() {
+        let error = plugin_manifest::manifest_error().unwrap_or_default();
+        return Some(Err(CompileError::runtime(format!("plugin manifest error: {}", error))));
+    }
+
+    if let Some(library_path) = plugin_manifest::library_for_symbol(name) {
+        if let Some(result) = try_call_manifest_library(&library_path, name, evaluated_args) {
+            return Some(result);
+        }
+    }
+
+    // --- Step 1: Try the main runtime library ---
+    let runtime_result = {
+        let active_tier = active_simd_tier();
+        let mut rt = match DYNAMIC_RUNTIME.lock() {
+            Ok(rt) => rt,
+            Err(_) => return None,
+        };
+
+        // Refresh the runtime handle and symbol cache whenever the active tier
+        // changes, and retry loading after prior misses so config/env edits or
+        // newly installed runtime variants can take effect in a long-lived process.
+        if rt.active_tier != Some(active_tier) {
+            rt.handle = 0;
+            rt.symbols.clear();
+            rt.active_tier = Some(active_tier);
+        }
+        if rt.handle == 0 {
+            rt.handle = load_runtime_library();
+        }
+
+        if rt.handle == 0 {
+            None // No runtime library available
+        } else {
+            // Look up the symbol (with caching)
+            if let Some(&cached) = rt.symbols.get(name) {
+                if cached.address == 0 {
+                    None // Previously looked up and not found
+                } else if cached.arity != evaluated_args.len() {
+                    return Some(Err(unsupported_conversion(format!(
+                        "dynamic SFFI cached ABI arity mismatch for function '{name}': admitted {}, call {}",
+                        cached.arity,
+                        evaluated_args.len()
+                    ))));
+                } else {
+                    Some(cached.address)
+                }
+            } else {
+                if let Err(error) = validate_dynamic_i64_contract(name, evaluated_args.len()) {
+                    return Some(Err(error));
+                }
+                match dlsym_lookup(rt.handle, name) {
+                    Some(addr) => {
+                        rt.symbols.insert(
+                            name.to_string(),
+                            CachedDynamicSymbol {
+                                address: addr,
+                                arity: evaluated_args.len(),
+                            },
+                        );
+                        Some(addr)
+                    }
+                    None => {
+                        rt.symbols
+                            .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                        None
+                    }
+                }
+            }
+        }
+    }; // rt lock dropped here
+
+    if let Some(fptr) = runtime_result {
+        return Some(call_fptr(fptr, name, evaluated_args));
+    }
+
+    // --- Step 2: Try satellite libraries ---
+    if let Some(prefix) = derive_satellite_prefix(name) {
+        return try_call_satellite(prefix, name, evaluated_args);
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn sum13(
+        a0: i64,
+        a1: i64,
+        a2: i64,
+        a3: i64,
+        a4: i64,
+        a5: i64,
+        a6: i64,
+        a7: i64,
+        a8: i64,
+        a9: i64,
+        a10: i64,
+        a11: i64,
+        a12: i64,
+    ) -> i64 {
+        a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12
+    }
+
+    /// MECHANISM PIN: argument marshalling uses a fixed `[i64; MAX_DYNAMIC_SFFI_ARGS]`
+    /// stack array, not a per-call heap `Vec<i64>`. The arity cap is what makes
+    /// that sound, so pin both ends of it: the maximum arity still dispatches
+    /// correctly, and one over the cap is still rejected with the arity error.
+    /// doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md
+    #[test]
+    fn call_fptr_dispatches_at_the_arity_cap_and_rejects_one_over() {
+        assert_eq!(MAX_DYNAMIC_SFFI_ARGS, 13);
+
+        let args: Vec<Value> = (1..=13).map(Value::Int).collect();
+        let result = call_fptr(sum13 as usize, "sum13", &args).expect("max-arity call dispatches");
+        assert_eq!(result, Value::Int((1..=13).sum()));
+
+        let too_many: Vec<Value> = (1..=14).map(Value::Int).collect();
+        let error = call_fptr(sum13 as usize, "sum13", &too_many).expect_err("one over the cap is rejected");
+        assert!(
+            error.to_string().contains("14 arguments (max 13 supported)"),
+            "unexpected arity error: {error}"
+        );
+    }
+
+    /// The arity error must not preempt the pre-existing inadmissible-argument
+    /// error: marshalling ran first before the fixed-array rewrite, and callers
+    /// relying on that diagnostic must keep seeing it.
+    #[test]
+    fn over_arity_call_still_reports_an_inadmissible_argument_first() {
+        let mut args: Vec<Value> = (1..=13).map(Value::Int).collect();
+        args.push(Value::Str("nope".to_string().into()));
+        let error = call_fptr(sum13 as usize, "sum13", &args).expect_err("inadmissible argument is rejected");
+        assert!(
+            error.to_string().contains("does not admit argument type"),
+            "expected the conversion error to take precedence, got: {error}"
+        );
+    }
+
+    unsafe extern "C" fn inspect_bytes(tag: i64, ptr: i64, len: i64, suffix: i64) -> i64 {
+        if tag != 7 || suffix != 9 || ptr == 0 || len != 3 {
+            return -1;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        bytes.iter().map(|value| i64::from(*value)).sum()
+    }
+
+    extern "C" fn echo_i64(value: i64) -> i64 {
+        value
+    }
+
+    fn ints(values: &[i64]) -> Value {
+        Value::array(values.iter().copied().map(Value::Int).collect())
+    }
+
+    #[test]
+    fn packed_byte_foreign_capability_is_input_only() {
+        let result = spl_wffi_call_i64_with_bytes_fn(&[
+            Value::Int(inspect_bytes as usize as i64),
+            ints(&[7]),
+            Value::byte_array(vec![1, 2, 3]),
+            Value::Int(0),
+            Value::Int(3),
+            ints(&[9]),
+        ])
+        .expect("scoped dispatch should succeed");
+        assert_eq!(result, Value::Int(6));
+    }
+
+    #[test]
+    fn packed_byte_foreign_descriptor_rejects_out_of_bounds() {
+        let error = spl_wffi_call_i64_with_bytes_fn(&[
+            Value::Int(inspect_bytes as usize as i64),
+            ints(&[7]),
+            Value::byte_array(vec![1, 2, 3]),
+            Value::Int(2),
+            Value::Int(2),
+            ints(&[9]),
+        ])
+        .expect_err("out-of-bounds descriptor must fail closed");
+        assert!(error.to_string().contains("out of bounds"));
+    }
+
+    #[test]
+    fn generic_dispatch_rejects_values_without_typed_contracts() {
+        for unsupported in [
+            Value::Nil,
+            Value::Float(1.5),
+            Value::Str("text".to_string().into()),
+            ints(&[1, 2]),
+        ] {
+            let error = call_fptr(echo_i64 as usize, "echo_i64", &[unsupported])
+                .expect_err("untyped dynamic values must fail closed");
+            assert!(error.to_string().contains("does not admit argument type"));
+            assert_eq!(
+                error.context().and_then(|context| context.code.as_deref()),
+                Some(codes::SFFI_UNSUPPORTED_CONVERSION)
+            );
+        }
+    }
+
+    #[test]
+    fn generic_dispatch_rejects_embedded_nul_text_instead_of_zero() {
+        let error = call_fptr(echo_i64 as usize, "echo_i64", &[Value::Str("a\0b".to_string().into())])
+            .expect_err("embedded-NUL text has no admitted generic ABI");
+        assert!(error.to_string().contains("does not admit argument type"));
+        assert_eq!(
+            error.context().and_then(|context| context.code.as_deref()),
+            Some(codes::SFFI_UNSUPPORTED_CONVERSION)
+        );
+    }
+
+    #[test]
+    fn generic_dispatch_rejects_null_function_pointer() {
+        let error = call_fptr(0, "missing", &[Value::Int(1)]).expect_err("null function pointer must fail closed");
+        assert!(error.to_string().contains("null function pointer"));
+        assert_eq!(
+            error.context().and_then(|context| context.code.as_deref()),
+            Some(codes::SFFI_NULL_FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn scoped_byte_adapter_rejects_null_function_pointer() {
+        let error = spl_wffi_call_i64_with_bytes_fn(&[
+            Value::Int(0),
+            ints(&[]),
+            Value::byte_array(Vec::new()),
+            Value::Int(0),
+            Value::Int(0),
+            ints(&[]),
+        ])
+        .expect_err("null function pointer must fail closed");
+        assert!(error.to_string().contains("null function pointer"));
+    }
+
+    #[test]
+    fn generic_dispatch_accepts_integers_and_rejects_boolean_coercion() {
+        assert_eq!(
+            call_fptr(echo_i64 as usize, "echo_i64", &[Value::Int(42)]).unwrap(),
+            Value::Int(42)
+        );
+        assert!(call_fptr(echo_i64 as usize, "echo_i64", &[Value::Bool(true)]).is_err());
+    }
+
+    #[test]
+    fn generic_dynamic_resolution_requires_an_exact_compiler_owned_i64_contract() {
+        validate_dynamic_i64_contract("rt_close_fd", 1).expect("exact i64 contract is admitted");
+
+        for (name, arity) in [("rt_decision_probe", 2), ("rt_close_fd", 0), ("rt_not_registered", 1)] {
+            let error = validate_dynamic_i64_contract(name, arity)
+                .expect_err("missing, mixed-width, and wrong-arity contracts must fail closed");
+            assert_eq!(
+                error.context().and_then(|context| context.code.as_deref()),
+                Some(codes::SFFI_UNSUPPORTED_CONVERSION)
+            );
+        }
+    }
+
+    #[test]
+    fn packed_byte_foreign_capability_cannot_escape_call() {
+        let input = Value::frozen_byte_array(vec![4, 5, 6]);
+        let result = spl_wffi_call_i64_with_bytes_fn(&[
+            Value::Int(inspect_bytes as usize as i64),
+            ints(&[7]),
+            input.clone(),
+            Value::Int(0),
+            Value::Int(3),
+            ints(&[9]),
+        ])
+        .expect("scoped dispatch should succeed");
+        assert_eq!(result, Value::Int(15));
+        assert_eq!(input.byte_array_view(), Some([4, 5, 6].as_slice()));
+    }
+
+    #[test]
+    fn runtime_candidates_try_variants_before_scalar() {
+        let default_path = PathBuf::from(format!("target/debug/{}", runtime_lib_name()));
+        let candidates = runtime_library_candidates(default_path, SimdTier::X86_64Avx512);
+        let names = candidates
+            .iter()
+            .map(|value| value.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                runtime_variant_library_name(SimdTier::X86_64Avx2),
+                runtime_variant_library_name(SimdTier::X86_64Sse2),
+                runtime_lib_name(),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_candidates_do_not_duplicate_collapsed_variants() {
+        let default_path = PathBuf::from(runtime_lib_name());
+        let candidates = runtime_library_candidates(default_path, SimdTier::Aarch64Sve2);
+        let names = candidates
+            .iter()
+            .map(|value| value.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![runtime_variant_library_name(SimdTier::Aarch64Neon), runtime_lib_name(),]
+        );
+    }
+
+    #[test]
+    fn runtime_candidates_keep_bare_names_for_system_path_lookup() {
+        let default_path = PathBuf::from(runtime_lib_name());
+        let candidates = runtime_library_candidates(default_path, SimdTier::X86_64Avx512);
+        let names = candidates
+            .iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                runtime_variant_library_name(SimdTier::X86_64Avx2),
+                runtime_variant_library_name(SimdTier::X86_64Sse2),
+                runtime_lib_name(),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_candidates_keep_explicit_parent_for_sibling_probes() {
+        let default_path = PathBuf::from(format!("target/debug/{}", runtime_lib_name()));
+        let candidates = runtime_library_candidates(default_path, SimdTier::X86_64Avx512);
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(format!(
+                "target/debug/{}",
+                runtime_variant_library_name(SimdTier::X86_64Avx2)
+            ))
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from(format!(
+                "target/debug/{}",
+                runtime_variant_library_name(SimdTier::X86_64Sse2)
+            ))
+        );
+    }
+}

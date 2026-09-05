@@ -1,0 +1,665 @@
+# MCP Server Setup and Usage
+
+The Simple MCP (Model Context Protocol) server currently provides 151 tools, 3
+resources, and 2 prompts for code intelligence, debugging, build, VCS,
+analysis, and UI access -- accessible from Claude Code and Claude Desktop.
+
+Writing or migrating a server: use the McpServer facade — see
+`mcp_framework.md` (+tldr) and the ~30-line example in
+`examples/10_tooling/minimal_mcp/`. Startup work: follow the
+startup-reduction ladder in `startup_performance.md` (+tldr).
+
+MCP scenarios are the exemplar for scenario-based generated manuals. New or
+changed MCP SPipe tests should generate `doc/06_spec/...` pages that read like
+operator manuals: initialize server, list tools, call a tool, inspect response,
+and diagnose failure, with protocol/API/exec/log captures attached to the step
+that produced them. Follow `doc/07_guide/infra/sspec_scenario_manual.md` and
+fold matrix, schema-detail, and edge-case rows by default.
+
+The concrete target shape and review checklist live in
+`doc/03_plan/sys_test/mcp_scenario_manual_quality.md`.
+
+---
+
+## Setup
+
+### Claude Code
+
+The MCP server is configured via `.mcp.json` in the project root (auto-detected by Claude Code).
+
+```json
+{
+  "mcpServers": {
+    "simple-mcp": {
+      "command": "bin/simple_mcp_server",
+      "args": []
+    }
+  }
+}
+```
+
+Install platform-specific config automatically:
+
+```bash
+sh config/mcp/install.shs
+```
+
+On Windows PowerShell or CMD environments where `sh` is not installed, use the
+native installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File config\mcp\install.ps1
+```
+
+The Windows installer writes `config\mcp\win\.mcp.json` to the project root and
+registers Codex MCP servers directly against `bin\simple_mcp_server.cmd` and
+`bin\simple_lsp_mcp_server.cmd`.
+
+### Claude Desktop
+
+Configure in the Claude Desktop config file:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "simple-lang": {
+      "command": "/path/to/simple/bin/simple_mcp_server",
+      "args": [],
+      "env": {
+        "SIMPLE_PROJECT_ROOT": "/path/to/simple"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop after config changes.
+
+### Verify Installation
+
+> **Current source/deploy caveat (2026-08-10):** host-native MCP and LSP MCP
+> artifacts are hash-admitted and their wrappers return real initialize
+> responses. Explicit interpreter mode is also excluded in source from the
+> compiler driver's whole-project bulk loader; imports remain lazy through the
+> interpreter module resolver. However, deployed `bin/simple` still predates
+> that loader fix and the JIT symbol registration. Its focused integration gate
+> was killed before scenarios at 68.18 s / 1.34 GiB (a raised diagnostic reached
+> 111.33 s / 2.50 GiB). This is not after-fix performance evidence: admit and
+> deploy a fresh pure-Simple compiler, then require a real scenario verdict and
+> before/after timing from `.spipe/mcp-failures-interpreter-perf/state.md`.
+
+```bash
+# Test server startup
+echo '{"jsonrpc":"2.0","id":"2","method":"tools/list"}' | bin/simple_mcp_server
+
+# Run integration tests
+SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
+```
+
+For local command-wrapper coverage, use the command-line handshake system spec:
+
+```bash
+bin/simple check test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl
+bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --native
+```
+
+That spec launches each Simple-created MCP wrapper, runs `--json` readiness,
+sends `initialize`, `notifications/initialized`, and `tools/list`, and requires
+the response inside the configured time limit. The helper is pure Simple
+stdlib code: no Node.js wrapper and no direct `rt_*` extern declarations. The
+matching plan and generated/manual page are:
+
+- `doc/03_plan/sys_test/mcp_cmdline_handshake.md`
+- `doc/06_spec/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.md`
+
+When updating MCP specs, also regenerate and review their scenario manuals:
+
+```bash
+bin/simple spipe-docgen test/03_system/feature/app/mcp_protocol_runtime_spec.spl --output doc/06_spec
+bin/simple spipe-docgen test/02_integration/app/mcp_stdio_integration_spec.spl --output doc/06_spec
+```
+
+The generated manual should be useful without opening the test source. If it
+shows raw test mechanics as the primary content, revise step helpers,
+`@step` text, `@capture` evidence, and folded visibility policy.
+
+### Benchmarking startup — what NOT to measure with
+
+Two measurement paths report numbers that are dominated by the harness rather
+than by the server, and neither may be used as a startup benchmark:
+
+- **Never benchmark via `test/03_system/tools/mcp/mcp_startup_test_system.shs`.**
+  It feeds the server from a sleep-delayed subshell so each JSON-RPC message
+  arrives separately: three one-second delays per server (`sleep 1` x 3 for the
+  MCP run and again for the LSP MCP run, 7 `sleep` occurrences in the file). Its
+  wall time therefore has a ~3000 ms floor that has nothing to do with startup
+  cost, which is larger than the entire 5000 ms budget's headroom. That script is
+  a message-framing smoke harness, not a stopwatch.
+- **Never benchmark via `npx`.** An `npx @simple-lang/mcp-server` invocation pays
+  Node process start, npm registry/cache resolution, and package extraction
+  before the native binary is even exec'd. That prelude is unbounded (it can hit
+  the network) and is not part of the server's startup path.
+
+Use instead:
+
+```bash
+# Whole-gate timing: prints mcp_startup_ms= and lsp_mcp_startup_ms= itself
+sh scripts/check/check-mcp-native-smoke.shs
+
+# Single-process startup floor: no MCP framing, no handler imports
+bin/simple_mcp_server --probe
+```
+
+Both drive the real binary directly with no sleeps. Record binary identity
+(`readlink -f`, size, mtime) alongside any number you report — the deployed
+artifacts are replaced in place.
+
+### Repair Broken Tool Discovery
+
+If an MCP client starts the server but refuses to load tools, first verify the
+native protocol output instead of reinstalling blindly:
+
+```bash
+bin/simple check src/app/mcp
+bin/simple check src/app/simple_lsp_mcp
+SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
+```
+
+The common failure in April 2026 was a malformed static `tools/list` fallback:
+some tools listed required arguments, but `inputSchema.properties` was empty.
+Strict clients reject that schema because every required argument must also be
+declared under `properties`.
+
+Expected smoke output includes:
+
+```text
+mcp_tools_json_valid=true
+mcp_tools_schema_valid=true
+lsp_tools_json_valid=true
+lsp_tools_schema_valid=true
+```
+
+If schema validation fails:
+
+1. Run the detailed diagnostic and keep its failing `*_schema_valid=false`
+   line:
+
+   ```bash
+   bin/simple test test/03_system/feature/app/mcp_protocol_runtime_spec.spl
+   bin/simple test test/03_system/feature/app/mcp_cli_passthrough_diag_spec.spl
+   ```
+
+2. Check `src/app/mcp/main.spl` static schema helpers. Any parameter added to a
+   required list in the static fallback must be emitted in
+   `inputSchema.properties`.
+
+3. Check `src/app/mcp/tool_table.spl` for the authoritative table-driven tool
+   metadata. Static fallback schemas should stay conservative and valid; rich
+   per-tool schemas belong in the tool table.
+
+4. Rebuild and rerun the native smoke:
+
+   ```bash
+   bin/simple check src/app/mcp
+   bin/simple check src/app/simple_lsp_mcp
+   SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
+   scripts/check/check-mcp-native-smoke.shs
+   ```
+
+5. If the npm package or registry wrapper changed, also run the core-lane
+   package builds and smoke the produced binaries:
+
+   ```bash
+   bin/simple native-build --runtime-bundle core-c-bootstrap --source src/app --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
+   bin/simple native-build --runtime-bundle core-c-bootstrap --source src/app --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
+   ```
+
+   The package binaries must stay on a Simple/C core lane. Removed aliases
+   such as `--runtime-bundle rust-hosted`, `hosted`, `hosted-runtime`, and
+   `all` must fail closed, not validate MCP/LSP packages.
+
+Do not publish npm, registry metadata, or plugin bundles while either
+`*_json_valid`, `*_schema_valid`, or `mcp_wm_text_tools_present` is false.
+
+---
+
+## Architecture
+
+```
+Claude Code / Claude Desktop
+    | JSON-RPC 2.0 over stdio
+    v
+bin/simple_mcp_server
+    |-> Tool handlers (lazy loaded)
+    |-> Bug/Feature/Test DB resources
+    |-> Debug session manager
+```
+
+- **Protocol**: JSON-RPC 2.0 over stdio
+- **MCP Version**: 2025-06-18
+- **Startup**: < 1s (optimized single-process)
+- **Tool count**: 151 tools in the current source fallback path
+- **Wrapper fallback**: `bin/simple_mcp_server` delegates to the native binary
+  first, then falls back to the source MCP entrypoint when native `tools/list`
+  is stale or a `play_wm_text_*` request needs the current source handlers.
+
+---
+
+## Tool Reference
+
+### Debug Session (19 tools)
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `debug_create_session` | Create debug session | program |
+| `debug_list_sessions` | List active sessions | |
+| `debug_close_session` | Close session | session_id |
+| `debug_set_breakpoint` | Set breakpoint | session_id, file, line |
+| `debug_remove_breakpoint` | Remove breakpoint | session_id, breakpoint_id |
+| `debug_continue` | Continue execution | session_id |
+| `debug_step` | Step through code | session_id, mode |
+| `debug_get_variables` | Get variables | session_id |
+| `debug_stack_trace` | Get stack trace | session_id |
+| `debug_evaluate` | Evaluate expression | session_id, expression |
+| `debug_set_function_breakpoint` | Function breakpoint | session_id, function_name |
+| `debug_enable_breakpoint` | Enable/disable | session_id, breakpoint_id, enabled |
+| `debug_get_source` | Get source code | session_id, file |
+| `debug_watch` | Watch expression | session_id, action |
+| `debug_set_variable` | Set variable value | session_id, name, value |
+| `debug_set_data_breakpoint` | Data breakpoint | session_id, name |
+| `debug_list_data_breakpoints` | List data breakpoints | session_id |
+| `debug_remove_data_breakpoint` | Remove data breakpoint | session_id, breakpoint_id |
+| `debug_terminate` | Terminate session | session_id |
+
+### Debug Logging (6 tools)
+
+| Tool | Description |
+|------|-------------|
+| `debug_log_enable` | Enable logging (optional: pattern) |
+| `debug_log_disable` | Disable logging |
+| `debug_log_clear` | Clear logs |
+| `debug_log_query` | Query logs (filter by type, function, etc.) |
+| `debug_log_tree` | Log tree view |
+| `debug_log_status` | Logging status |
+
+### Diagnostics (7 tools)
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `simple_read` | Read with diagnostics | path |
+| `simple_check` | Syntax/type check | path |
+| `simple_symbols` | List symbols | path |
+| `simple_status` | Project status | |
+| `simple_edit` | Edit file | path, old_string, new_string |
+| `simple_multi_edit` | Batch edit | path, edits |
+| `simple_run` | Run Simple code | path |
+
+### VCS (4 tools)
+
+| Tool | Description |
+|------|-------------|
+| `simple_diff` | Show diff (optional: revision, paths) |
+| `simple_log` | Commit history (optional: limit, revsets) |
+| `simple_squash` | Squash commits |
+| `simple_new` | Create change |
+
+### CLI (6 tools)
+
+| Tool | Description |
+|------|-------------|
+| `simple_test` | Run tests (optional: path, filter) |
+| `simple_build` | Build project (optional: release, target) |
+| `simple_format` | Format code |
+| `simple_lint` | Lint code |
+| `simple_fix` | Auto-fix issues (required: path) |
+| `simple_doc_coverage` | Doc coverage report |
+
+### Query (5 tools)
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `simple_definition` | Go-to-definition | file, line |
+| `simple_references` | Find references | file, line |
+| `simple_hover` | Type + docs | file, line |
+| `simple_completions` | Completions | file, line |
+| `simple_type_at` | Type at position | file, line |
+
+### Analysis (6 tools)
+
+| Tool | Description |
+|------|-------------|
+| `simple_api` | Module API (optional: module, query, visibility) |
+| `simple_dependencies` | Dependency graph |
+| `simple_api_diff` | API surface diff (required: file) |
+| `simple_context` | Context pack or SQL context query |
+| `simple_ponytail` | Over-engineering audit or simplification report |
+| `simple_search` | Code search (required: query) |
+
+`simple_context` shares the `src/app/context` implementation with the CLI. The
+CLI accepts:
+
+- `context <file> --index` to render a local serialized context-pack index.
+- `context <file> --query=<text>` to build/query a one-file local index.
+- `context <file> --sql --index [--db=<path>]` to build the index through the
+  embedded SQLite facade.
+- `context <file> --sql --query=<text> [--db=<path>]` to query SQLite-backed
+  context records with `backend: sqlite` in the output.
+- `context --sql --query=<text> --db=<path>` to query a persisted SQLite-backed
+  context database without requiring a source file.
+- `context --sql --query=<text> --db=<path> --source-filter=<text>` to narrow
+  persisted SQL query results by stored source path.
+
+The MCP tool accepts `file`, optional `target`, `format` (`text`, `markdown`, or
+`json`), `index=true`, `query`, `sql=true`, `db`, and `source_filter`. `file` is
+optional only for the `sql=true` plus non-empty `query` shape; ordinary context
+generation still requires a source file. These fields are forwarded to the
+existing `context` CLI subprocess so source-mode MCP does not import the large
+context/compiler graph directly.
+
+The SQL-backed context path uses the existing `app.io.sqlite_sffi` facade. In
+interpreter mode the compiler provides a narrow `rt_sqlite_*` subset for context
+indexing/querying: open/close, create table, delete, prepared insert/bind,
+select explicit columns, count, ordered rows, and simple `LIKE`. It is not a
+general SQL planner. Public context output must render explicit statuses such
+as `ready`, `empty_query`, `no_matches`, or `unavailable`; it must not expose the
+internal absence marker.
+
+`simple_ponytail` reuses the shared Ponytail audit rules used by the CLI-facing
+helpers. It accepts `file`, optional `format` (`text`, `markdown`, or `json`),
+and optional `mode`: `audit` returns the default over-engineering audit, while
+`simplification` returns concrete cut/replace suggestions. JSON responses expose
+both `audit` and `report` fields so older audit clients and newer generic report
+clients can read the same result.
+
+### UI Access (11 tools)
+
+These tools expose the canonical semantic UI model over active `UISession`
+surfaces.
+
+| Tool | Description |
+|------|-------------|
+| `ui_access_snapshot` | Read the canonical UI access snapshot |
+| `ui_access_surface` | Read one named UI surface and its nodes |
+| `ui_access_find` | Find canonical nodes by surface, kind, text, or focus |
+| `ui_access_act` | Dispatch an action against a canonical UI node |
+| `ui_access_history` | Read recent UI access events |
+| `ui_access_observe` | Read the narrowest canonical view for a surface, node, or filtered query |
+| `ui_access_state` | Read or set constrained declarative surface/node state over the canonical protocol |
+| `ui_access_value` | Read or write typed values for canonical `input`, `textfield`, and `textarea` nodes |
+| `ui_access_query` | Query canonical UI nodes with structured JSON results |
+| `ui_access_ensure` | Ensure a bounded declarative expectation over canonical UI query results |
+| `ui_access_adapter_snapshot` | Read additive source/target metadata around a canonical snapshot |
+| `ui_access_visual_probe` | Read semantic marks and issues from the vision sidecar |
+
+For the operator workflow and HTTP route equivalents, see
+[tooling/ui_access.md](ui_access.md).
+
+### LSP (14 tools)
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `simple_signature_help` | Parameter hints | file, line |
+| `simple_rename` | Rename symbol | file, line, new_name |
+| `simple_code_actions` | Quick fixes | file, line |
+| `simple_workspace_symbols` | Search symbols | query |
+| `simple_call_hierarchy` | Call chains | file, line |
+| `simple_type_hierarchy` | Type tree | file, line |
+| `simple_semantic_tokens` | Semantic tokens | file |
+| `simple_inlay_hints` | Inlay annotations | file |
+| `simple_selection_range` | Smart selection | file, line |
+| `simple_document_formatting` | Format document | file |
+| `simple_document_highlight` | Same-file refs | file, line |
+| `simple_type_definition` | Type definition | file, line |
+| `simple_implementation` | Trait impls | file, line |
+| `simple_folding_range` | Folding ranges | file |
+
+### Context (7 tools)
+
+Repo-native replacement for the user-level "context-mode" plugin. Handlers:
+`src/app/mcp/main_lazy_ctx_tools.spl`; specs:
+`test/01_unit/app/mcp/ctx_tools_spec.spl` and
+`test/01_unit/app/mcp/ctx_hooks_spec.spl`.
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `simple_ctx_index` | Chunk (~1200 chars, line-aligned) + index text with a source label | content |
+| `simple_ctx_search` | Ranked BM25 (k1=1.2, b=0.75) search; per-query hit blocks with source/score/snippet | queries (or query) |
+| `simple_ctx_execute` | Run shell/javascript/simple code in a bounded sandbox; stdout only, stderr summarized | code |
+| `simple_ctx_execute_file` | Same, with a file exposed as `$1`/`$FILE` (shell), `process.argv[2]` (js), first arg (simple) | path, code |
+| `simple_ctx_batch_execute` | Run commands, index each output under `source#i`, answer queries in one call | commands |
+| `simple_ctx_fetch_and_index` | GET via the Simple http client (http/https only, no JS), cap bytes, strip tags, index | url |
+| `simple_ctx_stats` | Store location, chunk/source counts, bytes indexed/returned/saved, per-tool call counts | |
+| `simple_token_stats` | Per-feature token savings (ctx-mimic, ponytail-mimic, total; 7-day window); `reset: true` or `args: "--reset"` clears the ledger | |
+| `simple_token_burn` | Code burn: which feature/tool spent the budget, ranked by bytes returned to the model, with tokens saved vs the unoptimized original | |
+| `simple_log_optimize` | Filter a clang/rust/ninja/cmake/simple build log through its plugin descriptor; no `log` argument lists the installed plugins | log |
+
+- **Persistent store**: `.simple/ctx/` (override with `SIMPLE_CTX_DIR`), two
+  SDN tables (`chunks.sdn` append-only with a linear row reader, `stats.sdn`
+  rewritten atomically) — survives across server processes and sessions,
+  unlike the plugin's per-process temp DB. Every hot path over captured
+  output is linear and built from native string ops (no per-char loops):
+  see `doc/08_tracking/bug/mcp_ctx_batch_execute_crash_hang_on_real_output_2026-08-28.md`.
+- **Sandbox**: `std.nogc_sync_mut.io.resource_scope` bounded run — wall
+  timeout (default 15 s, max 120 s), per-command capture cap enforced at the
+  reader (default 8 MiB; `SIMPLE_CTX_CAPTURE_MAX_BYTES` env or `capture_bytes`
+  param, hard max 64 MiB; a truncated capture is marked inline and counted as
+  `capture_truncations` in `simple_ctx_stats`), `ulimit`-based pid and
+  memory caps (cgroup v2 when available). Note `ulimit -u` counts the whole
+  user, so the pid budget uses the `Large` class (2048) on shared hosts.
+- **Fetch cap**: default 256 KiB, hard max 2 MiB, applied before tag
+  stripping; non-http(s) schemes are refused.
+
+**Context hooks** (`.claude/hooks/*.shs`, wired in `.claude/settings.json`,
+POSIX/dash-clean, each with `--selftest`): `bash_net_blocker.shs` (fail-closed
+deny of curl/wget/inline-HTTP Bash with a redirect to the ctx tools),
+`webfetch_deny.shs` (fail-closed WebFetch deny), `bash_output_hint.shs` and
+`read_analysis_hint.shs` (fail-open additionalContext hints for likely
+>20-line commands and Read-for-analysis of large files).
+
+### Token savings
+
+`simple_token_stats` shows, per feature, how many tokens the two mimics keep
+out of the model context. Ledger: `.simple/ctx/telemetry.sdn` (next to the
+ctx store, `SIMPLE_CTX_DIR` override), one row per call:
+`id, feature, tool, ts, captured, returned, hit`. Findings memo:
+`.simple/ctx/telemetry_memo.sdn` keyed by content hash. Both are written
+atomically (tmp + rename). Code: `src/app/mcp/main_lazy_telemetry.spl`.
+
+| Field | Meaning |
+|-------|---------|
+| `bytes_captured` | Raw bytes the tool consumed — program stdout+stderr, fetched page, indexed text, or the source file ponytail scanned. This is what a plain `Bash`/`Read` would have put in the context. |
+| `bytes_returned` | The tool result text actually sent back to the LLM. |
+| `tokens_saved` | `max(0, bytes_captured - bytes_returned) / 4` (4 bytes ≈ 1 token) over cache MISSES only. Summed per feature and over the last 7 days. |
+| `cache_hits` | ponytail calls answered from the content-hash memo. A hit returns byte-identical findings, so it saves 0 tokens and adds nothing to `bytes_captured`. |
+| `repeat_work_avoided_bytes` | Sum over hits of the prior analysis bytes (source scanned + findings produced) that were NOT recomputed. Latency/CPU saved, not context saved (double-counted into `tokens_saved` until 2026-08-28). |
+
+### Code burn — where the tokens went
+
+`simple_token_stats` answers "how much did the mimics save". `simple_token_burn`
+answers the other half: **which** tool spent the budget. It groups the same
+ledger by `feature/tool`, ranks on `bytes_returned` (what actually reached the
+model), and prints each row's share plus its saving against the unoptimized
+original, ending with the whole-session comparison:
+
+```text
+feature/tool | calls | bytes_to_model | share% | tokens_saved_vs_original
+logopt/logopt:ninja | 1 | 900 | 55% | 9775
+ctx/simple_ctx_search | 1 | 420 | 25% | 0
+TOTAL | 3 | 1620 | 100% | 11700
+unoptimized original would have been ~48420 byte(s); optimized to 1620 (3% of original)
+```
+
+A row with `tokens_saved = 0` is not a defect: a search result has nothing to
+compare against, because no raw capture stood behind it.
+
+### Toolchain log optimizers (plugins)
+
+Smart truncation is blind — a 40 KB ninja log is mostly progress lines, and the
+one `FAILED:` that matters can sit past the cap. A **log-opt plugin** classifies
+lines instead, so the error survives and the noise never reaches the model.
+
+A plugin is ONE SDN file under `config/log_opt/` (override `SIMPLE_LOG_OPT_DIR`);
+its name is the file's basename. Drop a new file in and it is live on the next
+call — no code change, no rebuild, which is what makes these app-specific
+plugins dynamically loadable:
+
+```text
+log_opt | kind, pattern |
+    detect, ninja:
+    keep,   FAILED:
+    drop,   ] Building
+```
+
+| kind | meaning |
+|------|---------|
+| `detect` | any match claims the log for this plugin; the plugin with the most hits wins |
+| `keep` | line is always retained — checked BEFORE `drop` |
+| `drop` | line is removed |
+
+Patterns are plain substrings; a leading `^` anchors to the line start.
+Deliberately not regex: a descriptor is data a user edits by hand, and a bad
+regex in a log filter would fail the whole capture.
+
+Shipped descriptors: `clang` (include chains, macro-expansion notes),
+`rust` (cargo progress, `= note:`/`= help:` hints), `ninja` (`[n/m]` progress),
+`cmake` (`-- Detecting`/`-- Found` probe chatter), `simple`
+(`warning[...]`, `Session setup`, `[native-incremental]` — while every verdict
+line named in `.claude/rules/testing.md` is an explicit `keep`).
+
+The engine runs inside `ctx_cap_exec_stdout`, i.e. on every
+`simple_ctx_execute` / `_batch_execute`, **before** the size cap, and each
+application is recorded as `logopt/logopt:<name>` so `simple_token_burn`
+attributes the saving per plugin. The **raw** text is what gets indexed, so a
+dropped line is still reachable through `simple_ctx_search`.
+
+Code: `src/app/mcp/main_lazy_log_opt.spl`. Spec:
+`test/01_unit/app/mcp/log_opt_burn_spec.spl`.
+
+**Why context-mode saves tokens.** `simple_ctx_batch_execute` / `_execute` /
+`_fetch_and_index` run the program (or GET the page) inside the server, store
+the full output in the BM25 chunk store, and return only ranked snippets (or
+stdout with stderr collapsed to one line). The raw output never enters the
+model context; a later `simple_ctx_search` pulls just the chunks a query
+ranks. Every `simple_ctx_*` call records `captured` vs `returned`, so the
+saving is per call and cumulative. Measured 2026-08-28 (source-mode server,
+one `cat` of four `src/app/mcp` files): captured 140,511 B, returned 3,199 B,
+34,328 tokens saved on that one call.
+
+**Why ponytail saves tokens.** (a) The lazy ladder returns rung-tagged
+findings that are far shorter than the source it stands in for (measured:
+35,273 B source -> 1,002 B findings). (b) Repeat calls on unchanged bytes are
+answered from the memo: key = sha256(mode + level + file content), so an
+edited file misses and a renamed-but-identical file hits. A hit returns the
+cached findings verbatim, sets `hit=1`, and reports the prior analysis
+(source bytes read + findings produced) as `repeat_work_avoided_bytes` — not
+as a token saving, since the model receives the same bytes either way. The memo
+is file-mode only — a `diff` request is one-shot and never memoized — and
+is taken before the optional `lint: true` append. `reset` truncates the
+ledger only; the memo survives (it is a cache, not a counter).
+
+`simple_ctx_stats` keeps its old fields and adds `telemetry_calls`,
+`telemetry_bytes_captured`, `telemetry_bytes_returned`,
+`telemetry_tokens_saved`, `telemetry_tokens_saved_7d` for the ctx feature.
+Spec: `test/01_unit/app/mcp/token_stats_spec.spl`. Research:
+`doc/01_research/app/mcp/token_reduction_context_mode_ponytail_2026-08-28.md`.
+
+### Code Query (3 tools)
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `simple_ast_query` | Structural pattern match | query |
+| `simple_sem_query` | Semantic query (SQL-like) | query |
+| `simple_query_schema` | Query node types | |
+
+**AST Query examples:**
+```bash
+bin/simple query ast-query '(function name: "main")'
+bin/simple query ast-query '(struct)' --files src/app/cli/ --format json
+```
+
+**Semantic Query examples:**
+```bash
+bin/simple query sem-query 'FIND fn WHERE return_type = "i64"'
+bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_count > 2'
+```
+
+---
+
+## Resources (URIs)
+
+| URI | Description |
+|-----|-------------|
+| `file:///{path}` | File contents |
+| `symbol:///{name}` | Symbol info |
+| `type:///{name}` | Type info |
+| `tree:///{path}` | Directory tree |
+| `bugdb://all` | All bugs |
+| `bugdb://open` | Open bugs |
+| `bugdb://critical` | P0/P1 bugs |
+| `bugdb://bug/{id}` | Single bug |
+| `bugdb://stats` | Bug statistics |
+
+---
+
+## Extending the Server
+
+### Add a New Tool
+
+1. Add handler in `src/app/mcp/bootstrap/main_optimized.spl`:
+   ```simple
+   fn handle_my_tool(params: Dict) -> Result<text, text>:
+       val path = params.get("path")?
+       Ok("result")
+   ```
+
+2. Register schema in `src/app/mcp/mcp_lib/schema.spl`
+
+3. Rebuild: `bin/simple build src/app/mcp/bootstrap/main_optimized.spl`
+
+---
+
+## Troubleshooting
+
+**Server not found:**
+- Verify `.mcp.json` exists with valid JSON: `python3 -m json.tool .mcp.json`
+- Check binary is executable: `ls -la bin/simple_mcp_server`
+- Restart Claude Desktop / Claude Code
+
+**Tools not working:**
+- Check `SIMPLE_PROJECT_ROOT` env var is set correctly
+- Check logs: `~/Library/Logs/Claude/` (macOS) or `~/.config/Claude/logs/` (Linux)
+- Run `scripts/check/check-mcp-native-smoke.shs`; it must report
+  `mcp_wm_text_tools_present=true` for the common WM text tools.
+
+**Stale LSP MCP binary (server behaves old / wrong version):**
+- `.mcp.json` and `config/mcp/install.shs` launch `simple-lsp-mcp` from
+  `bin/release/linux-x86_64/simple_lsp_mcp_server`, but builds deploy to
+  `bin/release/x86_64-unknown-linux-gnu/` and `build/bootstrap/mcp-package/`.
+  The launch path is not refreshed by a rebuild and can go stale.
+- Diagnose: probe `serverInfo.version` and compare with the wrapper:
+  ```bash
+  printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}\n' \
+    | bin/release/linux-x86_64/simple_lsp_mcp_server | grep -o '"version":"[0-9.]*"'
+  bin/simple_lsp_mcp_server --version
+  ```
+- Fix: re-copy the fresh build over the launch path. Direct `cp` fails with
+  "Text file busy" while a session is running the server — copy to a temp name
+  and `mv` over it (rename is safe against a running process):
+  ```bash
+  cp bin/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server bin/release/linux-x86_64/simple_lsp_mcp_server.new
+  mv -f bin/release/linux-x86_64/simple_lsp_mcp_server.new bin/release/linux-x86_64/simple_lsp_mcp_server
+  ```
+- Running sessions keep the old inode; reconnect MCP (or restart the session)
+  to pick up the new binary. Stale-candidate probes also show up as
+  `timeout: the monitored command dumped core` in `.simple/logs/simple_lsp_mcp_stderr.log`
+  and `native_probe_failed` lines in `.simple/logs/simple_lsp_mcp_startup.log`.
+
+---
+
+## Source Code
+
+- **MCP server**: `src/app/mcp/`
+- **Config installer**: `config/mcp/install.shs`
+- **Tests**: `test/02_integration/app/mcp_*_spec.spl`

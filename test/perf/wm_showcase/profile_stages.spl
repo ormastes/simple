@@ -1,0 +1,83 @@
+# PR0 — wall-clock stage breakdown of the wm_showcase packed-scene render
+# path. Prints one `profile_stage name=<n> ms=<t>` line per stage.
+#
+# HARNESS CONSTRAINTS (each one was hit for real while writing this):
+# - ZERO field reads on imported structs in this module: any such read fails
+#   JIT type inference here ("cannot infer field type while lowering main"),
+#   drops this whole module AND its callee tree to the interpreter (~10-1000x),
+#   and — separately — under that interpreted fallback the cross-file impl of
+#   VulkanBackend._flush_pending_compute is not merged, so the run dies with a
+#   phantom "method not found". Struct-consuming work is therefore timed only
+#   through whole imported calls (session.capture()), never per-field here.
+# - Spec order (wm_showcase_window_specs): 0=gui 1=web 2=browser 3=terminal
+#   4=2d. Web (index 1) runs LAST: it can exceed the environment's 60s monitor
+#   kill, and a partial transcript must still cover every other stage.
+# - rect_matches cost is DERIVED: capture_total - (render_frame +
+#   pixel_readback + checksum + distinct_colors + taskbar_model), since the
+#   per-entry loop needs struct field reads this module must not perform.
+use app.wm_showcase.session.{
+    WM_SHOWCASE_DESKTOP_H,
+    WM_SHOWCASE_DESKTOP_W,
+    WmShowcaseSession,
+    wm_showcase_checksum,
+    wm_showcase_distinct_colors,
+    wm_showcase_window_specs,
+}
+
+extern fn rt_time_now_nanos() -> i64
+
+fn now_ms() -> i64:
+    rt_time_now_nanos() / 1000000
+
+fn main():
+    val t0 = now_ms()
+    var session = WmShowcaseSession.start(
+        WM_SHOWCASE_DESKTOP_W, WM_SHOWCASE_DESKTOP_H
+    )
+    print "profile_stage name=session_start ms={now_ms() - t0}"
+
+    val specs = wm_showcase_window_specs()
+    var si = 0
+    while si < specs.len():
+        if si != 1:
+            val ta = now_ms()
+            val ok = session.open_window(specs[si])
+            print "profile_stage name=open_index_{si} ms={now_ms() - ta} accepted={ok}"
+        si = si + 1
+
+    # capture() sub-stages, same calls in the same order capture() makes them
+    val t1 = now_ms()
+    session.comp.render_frame()
+    print "profile_stage name=render_frame ms={now_ms() - t1}"
+
+    val t2 = now_ms()
+    val pixels = session.comp.pure_simple_pixel_buffer()
+    print "profile_stage name=pixel_readback ms={now_ms() - t2} px={pixels.len()}"
+
+    val t4 = now_ms()
+    val sum = wm_showcase_checksum(pixels)
+    print "profile_stage name=checksum ms={now_ms() - t4} sum={sum}"
+
+    val t5 = now_ms()
+    val colors = wm_showcase_distinct_colors(pixels)
+    print "profile_stage name=distinct_colors ms={now_ms() - t5} colors={colors}"
+
+    val t6 = now_ms()
+    val entries = session.comp.taskbar_model().running.len()
+    print "profile_stage name=taskbar_model ms={now_ms() - t6} entries={entries}"
+
+    # whole capture() as the session runs it (includes rect_matches loop)
+    val t7 = now_ms()
+    val cap = session.capture()
+    print "profile_stage name=capture_total ms={now_ms() - t7}"
+
+    # second capture = warm-frame cost (no window state change in between)
+    val t8 = now_ms()
+    val cap2 = session.capture()
+    print "profile_stage name=capture_total_warm ms={now_ms() - t8}"
+    print "profile_total_preweb ms={now_ms() - t0}"
+
+    val tw = now_ms()
+    val web_ok = session.open_window(specs[1])
+    print "profile_stage name=open_index_1_web ms={now_ms() - tw} accepted={web_ok}"
+    print "profile_total ms={now_ms() - t0}"

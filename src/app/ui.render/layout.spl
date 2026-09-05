@@ -1,0 +1,155 @@
+# Shared TUI Layout Primitives
+#
+# Reusable layout types and functions for gridding and measuring rectangular
+# regions.  Used by llm_dashboard, office apps, and any TUI that needs
+# structured panel placement.
+#
+# Proportional and fixed panel splitting lives in std.tui.layout
+# (src/lib/nogc_sync_mut/tui/layout.spl): split_vertical, split_horizontal,
+# split_vertical_fixed, split_horizontal_fixed, center_rect.  Do not
+# re-implement those here.
+
+use common.string_builder.{StringBuilder}
+
+# =========================================================================
+# LayoutRect
+# =========================================================================
+
+class LayoutRect:
+    """A positioned rectangle on the terminal grid (0-based coords)."""
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+    static fn new(x: i32, y: i32, w: i32, h: i32) -> LayoutRect:
+        return LayoutRect(x: x, y: y, width: w, height: h)
+
+    fn contains(px: i32, py: i32) -> bool:
+        """True if (px, py) is inside this rectangle."""
+        return (px >= self.x and px < self.x + self.width
+            and py >= self.y and py < self.y + self.height)
+
+    fn shrink(margin: i32) -> LayoutRect:
+        """Return a new rect inset by `margin` on every side."""
+        val m2 = margin * 2
+        val w = if self.width > m2: self.width - m2 else: 0
+        val h = if self.height > m2: self.height - m2 else: 0
+        return LayoutRect(
+            x: self.x + margin,
+            y: self.y + margin,
+            width: w,
+            height: h
+        )
+
+    fn right() -> i32:
+        """X coordinate one past the right edge."""
+        return self.x + self.width
+
+    fn bottom() -> i32:
+        """Y coordinate one past the bottom edge."""
+        return self.y + self.height
+
+# =========================================================================
+# Grid Layout
+# =========================================================================
+
+fn grid_layout(area: LayoutRect, rows: i32, cols: i32, gap: i32) -> [[LayoutRect]]:
+    """Split `area` into a rows x cols grid with `gap` pixels between cells.
+
+    Returns a list of rows, each row a list of LayoutRects.
+    """
+    if rows <= 0 or cols <= 0:
+        return []
+
+    val total_gap_x = gap * (cols - 1)
+    val total_gap_y = gap * (rows - 1)
+    val cell_w = if cols > 0: (area.width - total_gap_x) / cols else: 0
+    val cell_h = if rows > 0: (area.height - total_gap_y) / rows else: 0
+
+    var result: [[LayoutRect]] = []
+    var r = 0
+    while r < rows:
+        var row_rects: [LayoutRect] = []
+        var c = 0
+        while c < cols:
+            val cx = area.x + c * (cell_w + gap)
+            val cy = area.y + r * (cell_h + gap)
+            # Last column/row absorbs rounding remainder
+            val w = if c == cols - 1: area.x + area.width - cx else: cell_w
+            val h = if r == rows - 1: area.y + area.height - cy else: cell_h
+            row_rects.push(LayoutRect(x: cx, y: cy, width: w, height: h))
+            c = c + 1
+        result.push(row_rects)
+        r = r + 1
+    return result
+
+# =========================================================================
+# Text Measurement Helpers
+# =========================================================================
+
+fn _is_ansi_terminator(ch: text) -> bool:
+    """Check if ch is a letter A-Z or a-z (terminates ANSI CSI sequence)."""
+    val terminators = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    return terminators.contains(ch)
+
+fn text_width(s: text) -> i32:
+    """Visible width of `s`, stripping ANSI escape sequences."""
+    var width = 0
+    var in_esc = false
+    val chars = s.split("")
+    for ch in chars:
+        if ch == "":
+            pass_dn
+        elif ch == "\u{001b}":
+            in_esc = true
+        elif in_esc:
+            if _is_ansi_terminator(ch):
+                in_esc = false
+        else:
+            width = width + 1
+    return width
+
+fn truncate_to_width(s: text, max_width: i32) -> text:
+    """Truncate `s` to at most `max_width` visible characters.
+
+    Preserves ANSI sequences that appear before the cut-off.
+    Appends ellipsis if truncated.
+    """
+    if max_width <= 0:
+        return ""
+    var sb = StringBuilder.new()
+    var visible = 0
+    var in_esc = false
+    val chars = s.split("")
+    for ch in chars:
+        if ch == "":
+            pass_dn
+        elif ch == "\u{001b}":
+            in_esc = true
+            sb.push(ch)
+        elif in_esc:
+            sb.push(ch)
+            if _is_ansi_terminator(ch):
+                in_esc = false
+        else:
+            if visible >= max_width:
+                if max_width >= 3:
+                    val result = sb.to_text()
+                    return "{result}..."
+                return sb.to_text()
+            sb.push(ch)
+            visible = visible + 1
+    return sb.to_text()
+
+fn pad_to_width(s: text, width: i32) -> text:
+    """Pad `s` with trailing spaces to reach `width` visible chars."""
+    val vis = text_width(s)
+    if vis >= width:
+        return s
+    var padded = s
+    var i = vis
+    while i < width:
+        padded = "{padded} "
+        i = i + 1
+    return padded

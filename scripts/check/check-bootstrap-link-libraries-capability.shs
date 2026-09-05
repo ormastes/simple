@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+linker="$root/src/compiler_rust/compiler/src/pipeline/native_project/linker.rs"
+simple_linker="$root/src/compiler/70.backend/backend/llvm_native_link.spl"
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+grep -Fq 'simple.native-link-libraries.v1' "$linker" ||
+  fail "native linker capability marker is missing"
+grep -Fq 'std::env::var("SIMPLE_LINK_LIBRARIES")' "$linker" ||
+  fail "native linker does not read SIMPLE_LINK_LIBRARIES"
+grep -Fq 'add_link_libraries(&mut cmd, &configured_libraries' "$linker" ||
+  fail "validated libraries are not added to the native link command"
+grep -Fq 'simple_link_libraries_accepts_names_and_rejects_linker_injection' "$linker" ||
+  fail "focused validation test is missing"
+grep -Fq 'simple_link_libraries_emit_driver_arguments_in_declared_order' "$linker" ||
+  fail "focused ordering test is missing"
+grep -Fq 'simple.native-link-libraries.v1' "$simple_linker" ||
+  fail "pure-Simple compiler closure capability marker is missing"
+grep -Fq 'env_get("SIMPLE_LINK_LIBRARIES")' "$simple_linker" ||
+  fail "pure-Simple compiler closure does not read SIMPLE_LINK_LIBRARIES"
+grep -Fq 'libraries: configured_libraries' "$simple_linker" ||
+  fail "pure-Simple compiler closure does not pass libraries to the linker"
+
+gate_line=$(grep -n 'bootstrap_require_link_libraries_source_capability;' "$bootstrap" |
+  tail -1 | cut -d: -f1)
+admit_line=$(grep -n 'cp -p "${stage2_bin}" "${stage2_admitted_bin}"' "$bootstrap" |
+  tail -1 | cut -d: -f1)
+[ -n "$gate_line" ] && [ -n "$admit_line" ] ||
+  fail "Stage 2 capability gate or admission copy is missing"
+[ "$gate_line" -lt "$admit_line" ] ||
+  fail "Stage 2 capability gate must run before the admitted compiler is published"
+
+before_stale_line=$(grep -n \
+  'bootstrap_stage2_inputs_unchanged before-stage2-admission' "$bootstrap" |
+  tail -1 | cut -d: -f1)
+after_stale_line=$(grep -n \
+  'bootstrap_stage2_inputs_unchanged after-stage2-admission' "$bootstrap" |
+  tail -1 | cut -d: -f1)
+[ -n "$before_stale_line" ] && [ -n "$after_stale_line" ] ||
+  fail "Stage 2 stale-input admission gates are missing"
+[ "$before_stale_line" -lt "$admit_line" ] &&
+  [ "$admit_line" -lt "$after_stale_line" ] ||
+  fail "Stage 2 admission copy must be enclosed by stale-input gates"
+grep -Fq 'bootstrap_stage3_source_snapshot "${stage2_admission_source}"' \
+  "$bootstrap" || fail "pure-Simple source admission snapshot is missing"
+grep -Fq 'bootstrap_stage3_seed_inputs_fingerprint "${repo_root}" "${backend}"' \
+  "$bootstrap" || fail "Rust/runtime source admission fingerprint is missing"
+grep -Fq 'bootstrap_stage3_directory_snapshot "${stage2_admission_runtime}"' \
+  "$bootstrap" || fail "runtime authority admission snapshot is missing"
+grep -Fq 'rm -f "${stage2_admitted_bin}"' "$bootstrap" ||
+  fail "failed post-copy stale admission is not removed"
+
+echo "PASS: Stage 2 admission requires validated SIMPLE_LINK_LIBRARIES capability"

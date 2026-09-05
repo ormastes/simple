@@ -1,0 +1,83 @@
+# codex-impl
+
+# Optional service-form adapter.  This module is deliberately not exported by
+# os.services.tiny_wm.__init__, so linked kiosk closures do not pull it in.
+use std.tiny.common.abi.{TINY_ABI_MAJOR, TINY_ABI_MINOR, TINY_ABI_DETAIL_VERSION}
+use std.tiny.common.event.{TinyEvent}
+use std.tiny.common.status.{TinyStatus, TINY_ERR_ABI}
+use std.tiny.common.types.{TinyRect}
+use std.tiny.wm_contract.ports.{TinyWmPortV1}
+use os.services.tiny_wm.model.{TinyWmFrameReceipt, TinyWmKiosk}
+
+class TinyWmServiceCapsule:
+    kiosk: TinyWmKiosk
+    admission: TinyStatus
+    accepted_requests: i32
+    rejected_requests: i32
+
+    static fn connect(width: i32, height: i32, max_surfaces: i32, client_abi_major: i32, client_abi_minor: i32) -> TinyWmServiceCapsule:
+        var admission = TinyStatus.ok()
+        if client_abi_major != TINY_ABI_MAJOR or client_abi_minor < 0 or client_abi_minor > TINY_ABI_MINOR:
+            admission = TinyStatus.error(TINY_ERR_ABI, TINY_ABI_DETAIL_VERSION)
+        TinyWmServiceCapsule(
+            kiosk: TinyWmKiosk.create(width, height, max_surfaces),
+            admission: admission,
+            accepted_requests: 0,
+            rejected_requests: 0,
+        )
+
+    fn is_admitted() -> bool:
+        self.admission.is_ok()
+
+    me admit_request() -> TinyStatus:
+        if not self.admission.is_ok():
+            self.rejected_requests = self.rejected_requests + 1
+            return self.admission
+        self.accepted_requests = self.accepted_requests + 1
+        TinyStatus.ok()
+
+    me service_set_root(content_id: i32) -> TinyStatus:
+        val admitted = self.admit_request()
+        if not admitted.is_ok(): return admitted
+        self.kiosk.set_root_impl(content_id)
+
+    me service_open_popup(content_id: i32, bounds: TinyRect) -> TinyStatus:
+        val admitted = self.admit_request()
+        if not admitted.is_ok(): return admitted
+        self.kiosk.open_popup_impl(content_id, bounds)
+
+    me service_close_popup(content_id: i32) -> TinyStatus:
+        val admitted = self.admit_request()
+        if not admitted.is_ok(): return admitted
+        self.kiosk.close_popup_impl(content_id)
+
+    me service_dispatch(event: TinyEvent) -> TinyStatus:
+        val admitted = self.admit_request()
+        if not admitted.is_ok(): return admitted
+        self.kiosk.dispatch_impl(event)
+
+    me service_frame() -> TinyStatus:
+        val admitted = self.admit_request()
+        if not admitted.is_ok(): return admitted
+        self.kiosk.frame_receipt().status
+
+    me frame_receipt() -> TinyWmFrameReceipt:
+        val admitted = self.admit_request()
+        if admitted.is_ok(): return self.kiosk.frame_receipt()
+        TinyWmFrameReceipt(
+            status: admitted,
+            damage: [],
+            damage_count: 0,
+            direct_present: false,
+            visible_surfaces: 0,
+            focused_content_id: -1,
+            captured_content_id: -1,
+            routed_content_id: -1,
+        )
+
+impl TinyWmPortV1 for TinyWmServiceCapsule:
+    me set_root(content_id: i32) -> TinyStatus: self.service_set_root(content_id)
+    me open_popup(content_id: i32, bounds: TinyRect) -> TinyStatus: self.service_open_popup(content_id, bounds)
+    me close_popup(content_id: i32) -> TinyStatus: self.service_close_popup(content_id)
+    me dispatch(event: TinyEvent) -> TinyStatus: self.service_dispatch(event)
+    me frame() -> TinyStatus: self.service_frame()

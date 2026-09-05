@@ -1,0 +1,51 @@
+#!/bin/sh
+# Build the authenticated HTTPS provider for hosted browser native builds.
+# OpenSSL is optional, so this stays outside compile_runtime_objects and enters
+# only browser builds through SIMPLE_LINK_OBJECTS.
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+OUT_DIR="$REPO_ROOT/build/sffi"
+SRC="$REPO_ROOT/src/runtime/runtime_https_openssl_core.c"
+
+case "$(uname -s)" in
+  Linux|FreeBSD) ;;
+  *) echo "[build_simple_runtime_https_openssl_sffi] unsupported host" >&2; exit 1 ;;
+esac
+
+command -v pkg-config >/dev/null 2>&1 && pkg-config --exists openssl || {
+  echo "[build_simple_runtime_https_openssl_sffi] OpenSSL development package unavailable" >&2
+  exit 1
+}
+[ -s "$SRC" ] || {
+  echo "[build_simple_runtime_https_openssl_sffi] missing $SRC" >&2
+  exit 1
+}
+
+CC="${CC:-cc}"
+mkdir -p "$OUT_DIR"
+DST="$OUT_DIR/libsimple_runtime_https_openssl_wm.so"
+
+# shellcheck disable=SC2046
+"$CC" -shared -Os -fPIC -std=gnu11 -Wall -Wextra -Werror \
+  -I"$REPO_ROOT/src/runtime" \
+  $(pkg-config --cflags openssl) \
+  -Wl,-soname,libsimple_runtime_https_openssl_wm.so \
+  "$SRC" -o "$DST.new" \
+  $(pkg-config --libs openssl) -lpthread
+
+for symbol in \
+  rt_tls_client_connect rt_tls_client_connect_with_sni \
+  rt_tls_client_connect_address_with_sni_timeout \
+  rt_tls_client_write rt_tls_client_read rt_tls_client_close \
+  rt_tls_client_write_timeout rt_tls_client_read_timeout \
+  rt_tls_get_protocol_version
+do
+  nm -g "$DST.new" 2>/dev/null | grep -Eq "[[:space:]][Tt][[:space:]]_?${symbol}$" || {
+    echo "[build_simple_runtime_https_openssl_sffi] provider lacks $symbol" >&2
+    rm -f "$DST.new"
+    exit 1
+  }
+done
+mv "$DST.new" "$DST"
+echo "[build_simple_runtime_https_openssl_sffi] staged: $DST"

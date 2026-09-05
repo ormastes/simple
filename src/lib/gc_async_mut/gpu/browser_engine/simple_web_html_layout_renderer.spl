@@ -1,0 +1,2714 @@
+# Public facade for the Simple web HTML layout renderer.
+
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_layout.*
+
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrBatch,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrEmbeddingConfig,
+    DrawIrSourceInfo,
+    draw_ir_batch_with_source,
+    draw_ir_composition,
+    draw_ir_embed_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect_bounds,
+    draw_ir_rect_intersection,
+    draw_ir_rect_clipped,
+    draw_ir_rect_translate,
+    draw_ir_source_html_ast
+}
+use std.common.web.browser_renderer_protocol.{
+    BrowserTextInputOverlay, browser_text_input_overlay_empty
+}
+use common.render_scene.scene.{SceneCommand, scene_fill_rect}
+use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.color.types.{from_rgba}
+use std.common.animation.timing.{
+    TimingFunction, evaluate_timing, parse_timing_function
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{tile_paint_flag_enabled}
+use std.gc_async_mut.gpu.browser_engine.style_block_parse.{extract_keyframes, KeyframeRegistry}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{
+    BrowserCssAnimationInstance, CSSDeclaration, CSSValue,
+    animation_css_value_text, sample_keyframes_with_underlying,
+    browser_css_animation_capacity_available
+}
+
+fn _simple_web_extract_keyframes(html: text) -> KeyframeRegistry:
+    if not _simple_web_html_source_admitted(
+        html, SIMPLE_WEB_MAX_HTML_BYTES
+    ):
+        return KeyframeRegistry.new()
+    extract_keyframes(html)
+
+pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32, id: text, field: text) -> text:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    # Pass every parameter explicitly. An omitted trailing default was
+    # observed taking a non-default value in the freestanding SimpleOS kernel
+    # build (the `trace_stages` receipt fired from this call site even though
+    # the only trace-enabled caller never ran), so this render path does not
+    # rely on default-argument materialization.
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(
+        nodes,
+        styles,
+        child_index,
+        0,
+        0,
+        0,
+        width,
+        height,
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        empty_starts,
+        empty_ends,
+        neg_one_i32_list(node_count)
+    )
+    var i = 0
+    while i < node_count:  # cpu-lane-loop-ok: linear id lookup over the parsed node list in the debug-only layout query entry; bound is node_count, single pass, not on any paint path
+        val node = nodes[i]
+        if node.id_attr == id:
+            val x = boxes.bx[i]
+            val y = boxes.by[i]
+            val w = boxes.bw[i]
+            val h = boxes.bh[i]
+            if field == "x": return x.to_string()
+            if field == "y": return y.to_string()
+            if field == "w": return w.to_string()
+            if field == "h": return h.to_string()
+            if field == "margin_t": return styles[i].margin_t.to_string()
+            if field == "margin_b": return styles[i].margin_b.to_string()
+        i = i + 1
+    ""
+
+fn _simple_web_layout_element(node: HNode) -> bool:
+    (
+        node.tag != "#text" and node.tag != "style" and
+        node.tag != "script" and node.tag != "title" and
+        node.tag != "head" and node.tag != "meta" and
+        node.tag != "link" and node.tag != "base"
+    )
+
+fn _simple_web_element_child_ordinal(
+    nodes: [HNode], child_index: HtmlChildIndex,
+    parent_index: i32, target_index: i32
+) -> i32:
+    var ordinal = 0
+    var child = child_index.first_child[parent_index]
+    while child >= 0:  # cpu-lane-loop-ok: walks one parent's sibling chain to find a child's element ordinal; bound is that parent's child count, not the document
+        if _simple_web_layout_element(nodes[child]):
+            if child == target_index:
+                return ordinal
+            ordinal = ordinal + 1
+        child = child_index.next_sibling[child]
+    -1
+
+fn _simple_web_node_target_key(
+    nodes: [HNode], child_index: HtmlChildIndex, node_index: i32
+) -> text:
+    if node_index < 0 or node_index >= nodes.len():
+        return ""
+    var body = node_index
+    while body >= 0 and nodes[body].tag != "body":  # cpu-lane-loop-ok: ancestor walk from a node up to <body>; bound is tree depth, not an element count - flagged by the gate's any-loop-header approximation of the design's bound-based rule
+        body = nodes[body].parent.to_i32()
+    if body < 0:
+        return ""
+    if node_index == body:
+        return "path:"
+    var reversed: [i32] = [0; nodes.len()]
+    var depth = 0
+    var current = node_index
+    while current != body and current >= 0:  # cpu-lane-loop-ok: ancestor walk emitting one path ordinal per level; bound is tree depth - flagged by the gate's any-loop-header approximation of the design's bound-based rule
+        val parent = nodes[current].parent.to_i32()
+        if parent < 0:
+            return ""
+        val ordinal = _simple_web_element_child_ordinal(
+            nodes, child_index, parent, current
+        )
+        if ordinal < 0:
+            return ""
+        reversed[depth] = ordinal
+        depth = depth + 1
+        current = parent
+    var path = "path:"
+    var part = depth - 1
+    while part >= 0:  # cpu-lane-loop-ok: reverses the depth-many path ordinals collected above into the target-key text; bound is tree depth, not an element count
+        if part < depth - 1:
+            path = path + "/"
+        path = path + reversed[part].to_text()
+        part = part - 1
+    path
+
+class _SimpleWebAnimationFrameIndex:
+    target_keys: [text]
+    signatures: [text]
+    keyframes_by_name: Dict<text, i32>
+    instances_by_target: Dict<text, i32>
+
+class _SimpleWebAnimationApplyResult:
+    styles: [Style]
+    property_work_count: i64
+
+class _SimpleWebAnimationSchedule:
+    animation_end_ms: i64
+    animation_next_ms: i64
+
+fn _simple_web_animation_target_keys(
+    nodes: [HNode], child_index: HtmlChildIndex
+) -> [text]:
+    var target_keys = [""; nodes.len()]
+    var body_index = -1
+    var node_index = 0
+    while node_index < nodes.len():  # cpu-lane-loop-ok: one scan for the <body> node, breaks on first hit; bound is node_count, runs once per animation frame-index build
+        if nodes[node_index].tag == "body":
+            body_index = node_index
+            target_keys[node_index] = "path:"
+            break
+        node_index = node_index + 1
+    if body_index < 0:
+        return target_keys
+
+    var parent_index = body_index
+    while parent_index < nodes.len():  # cpu-lane-loop-ok: single top-down pass assigning every node its animation target key; bound is node_count - this IS the bulk replacement for the per-node path walk
+        if target_keys[parent_index] != "":
+            var ordinal = 0
+            var child = child_index.first_child[parent_index]
+            while child >= 0:  # cpu-lane-loop-ok: inner sibling chain of the current parent; every node is visited exactly once as a child, so the enclosing pass stays O(node_count)
+                if _simple_web_layout_element(nodes[child]):
+                    val separator = if target_keys[parent_index] == "path:":
+                        ""
+                    else:
+                        "/"
+                    target_keys[child] = (
+                        target_keys[parent_index] + separator +
+                        ordinal.to_text()
+                    )
+                    ordinal = ordinal + 1
+                child = child_index.next_sibling[child]
+        parent_index = parent_index + 1
+    target_keys
+
+fn _simple_web_hit_target_key(
+    nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
+    boxes: LayoutResult, width: i32, height: i32, x: i32, y: i32
+) -> text:
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        width, height
+    )
+    var best = -1
+    var best_z = -2147483647
+    var i = 0
+    while i < nodes.len():  # cpu-lane-loop-ok: one pass over nodes picking the topmost hit box; bound is node_count and it runs per pointer event, not per frame
+        val node = nodes[i]
+        val style = styles[i]
+        val clip = paint_clip_at(clip_cache, i)
+        val hit_x = x.to_i64()
+        val hit_y = y.to_i64()
+        val box_x = boxes.bx[i].to_i64()
+        val box_y = boxes.by[i].to_i64()
+        val inside = (
+            boxes.bw[i] > 0 and boxes.bh[i] > 0 and
+            hit_x >= box_x and hit_y >= box_y and
+            hit_x < box_x + boxes.bw[i].to_i64() and
+            hit_y < box_y + boxes.bh[i].to_i64() and
+            x >= clip.x0 and y >= clip.y0 and
+            x < clip.x1 and y < clip.y1
+        )
+        if (
+            inside and node.tag != "#text" and node.tag != "#root" and
+            style.display != "none" and not style.visibility_hidden and
+            not content_hidden_by_ancestor(nodes, styles, i) and
+            (best < 0 or style.z_index > best_z or
+             (style.z_index == best_z and i > best))
+        ):
+            best = i
+            best_z = style.z_index
+        i = i + 1
+    if best < 0:
+        return ""
+    _simple_web_node_target_key(nodes, child_index, best)
+
+pub fn simple_web_layout_hit_test_target_at_time(
+    html: text, width: i32, height: i32,
+    x: i32, y: i32, animation_time_ms: i64
+) -> text:
+    simple_web_layout_hit_test_target_at_time_with_animations(
+        html, width, height, x, y, animation_time_ms, []
+    )
+
+pub fn simple_web_layout_hit_test_target_at_time_with_animations(
+    html: text, width: i32, height: i32,
+    x: i32, y: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance]
+) -> text:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    var styles = compute_styles(nodes, rules, child_index, false, true)
+    if animation_time_ms >= 0:
+        val registry = _simple_web_extract_keyframes(html)
+        if registry.entries.len() > 0:
+            val frame_index = _simple_web_animation_frame_index(
+                styles, nodes, child_index, registry, animation_instances,
+                false
+            )
+            val animation_apply = _apply_css_animations(
+                nodes, styles, registry, animation_time_ms,
+                animation_instances, frame_index
+            )
+            styles = animation_apply.styles
+    val node_count = nodes.len() as i32
+    val boxes = layout(
+        nodes, styles, child_index, 0, 0, 0, width, height,
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        empty_i32_lists(node_count), empty_i32_lists(node_count),
+        neg_one_i32_list(node_count)
+    )
+    _simple_web_hit_target_key(
+        nodes, styles, child_index, boxes, width, height, x, y
+    )
+
+pub struct SimpleWebInputTextHitMap:
+    target_key: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    source_boundary_bytes: [i64]
+    boundary_x_px: [i32]
+
+class SimpleWebLayoutHitIndex:
+    nodes: [HNode]
+    styles: [Style]
+    child_index: HtmlChildIndex
+    boxes: LayoutResult
+    width: i32
+    height: i32
+    input_text_hits: [SimpleWebInputTextHitMap]
+
+pub fn simple_web_layout_hit_test_index(
+    index: SimpleWebLayoutHitIndex, x: i32, y: i32
+) -> text:
+    _simple_web_hit_target_key(
+        index.nodes, index.styles, index.child_index, index.boxes,
+        index.width, index.height, x, y
+    )
+
+class SimpleWebLayoutDrawIrResult:
+    composition: DrawIrComposition
+    # Budget-exhaustion verdict, captured at the moment this result was built.
+    # The Draw IR analogue of SimpleWebLayoutPixelResult.render_degraded, and
+    # necessary for the same reason: `composition` alone cannot express
+    # exhaustion.
+    #
+    # When layout trips its deadline, layout_with_style zeroes bw/bh for every
+    # subtree it did not reach; _html_draw_ir_visible then reports every such
+    # node invisible (box_w <= 0), so _html_draw_ir_commands emits nothing for
+    # it. The canvas rect is emitted unconditionally, so a fully-truncated
+    # render returns a well-formed composition holding exactly ONE command --
+    # shaped precisely like a successful render of an empty document. A
+    # per-stage comparison against that composition reads "Simple produced no
+    # div" as a layout mismatch, when the truth is "layout never ran".
+    #
+    # The module-global simple_web_layout_last_render_degraded() is NOT a
+    # substitute, for the reason already documented on the pixel result: it is
+    # cleared by the next _web_budget_begin, so a caller that renders the
+    # baseline, then renders the lane, then compares, reads the LANE's status.
+    # These two fields travel with the result and stay valid for its lifetime.
+    render_degraded: bool
+    # "" when complete; otherwise the WEB_BUDGET_SITE_* name of the first
+    # exhaustion exit taken (e.g. "style-cascade", "layout-subtree").
+    degrade_reason: text
+    material_fallback: WebRenderMaterialFallbackProvenance
+    material_witness: SimpleWebLayoutMaterialWitness
+    animation_end_ms: i64
+    animation_next_ms: i64
+    animation_property_work_count: i64
+    hit_index: SimpleWebLayoutHitIndex
+    resolved_input_view_start_byte: i64
+    resolved_scroll_y: i32
+    max_scroll_y: i32
+    document_html: text
+    rules: Rules
+    base_styles: [Style]
+    raw_boxes: LayoutResult
+    animation_registry: KeyframeRegistry
+    material_entries: [text]
+    material_counts: [i64]
+    cpu_material_nodes: [i32]
+    solid_material_nodes: [i32]
+
+fn _simple_web_root_sticky_admitted(
+    nodes: [HNode], node_index: i32
+) -> bool:
+    var ancestor = nodes[node_index].parent as i32
+    while ancestor >= 0 and ancestor < nodes.len():  # cpu-lane-loop-ok: ancestor walk that bails at the first non-root/html/body ancestor; bound is tree depth, not an element count - flagged by the gate's any-loop-header approximation of the design's bound-based rule
+        val tag = nodes[ancestor].tag
+        if tag != "#root" and tag != "html" and tag != "body":
+            return false
+        ancestor = nodes[ancestor].parent as i32
+    true
+
+class _SimpleWebScrolledLayout:
+    boxes: LayoutResult
+    resolved_scroll_y: i32
+    max_scroll_y: i32
+
+fn _simple_web_scrolled_layout(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    viewport_width: i32, viewport_height: i32, scroll_y: i32
+) -> _SimpleWebScrolledLayout:
+    var raw_bottom = boxes.height.to_i64()
+    var i = 0
+    while i < boxes.by.len():  # cpu-lane-loop-ok: first of two box passes: computes the raw document bottom; bound is the box count (== node_count), once per compose
+        val bottom = boxes.by[i].to_i64() + boxes.bh[i].to_i64()
+        if bottom > raw_bottom:
+            raw_bottom = bottom
+        i = i + 1
+    val extent_height = if raw_bottom > 2147483647:
+        2147483647
+    elif raw_bottom > viewport_height.to_i64():
+        raw_bottom.to_i32()
+    else:
+        viewport_height
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        viewport_width, extent_height
+    )
+
+    var content_bottom = viewport_height.to_i64()
+    i = 0
+    while i < boxes.by.len():  # cpu-lane-loop-ok: second box pass: clips each box against its ancestor clip for the scrollable content bottom; needs the clip cache derived from pass one so it cannot be merged; bound is the box count
+        val clip = paint_clip_at(clip_cache, i)
+        val node_x0 = boxes.bx[i].to_i64()
+        val node_y0 = boxes.by[i].to_i64()
+        val node_x1 = node_x0 + boxes.bw[i].to_i64()
+        val node_y1 = node_y0 + boxes.bh[i].to_i64()
+        if (node_x1 > clip.x0.to_i64() and node_x0 < clip.x1.to_i64() and
+            node_y1 > clip.y0.to_i64() and node_y0 < clip.y1.to_i64()):
+            val clipped_bottom = if node_y1 < clip.y1.to_i64():
+                node_y1
+            else:
+                clip.y1.to_i64()
+            if clipped_bottom > content_bottom:
+                content_bottom = clipped_bottom
+        i = i + 1
+    var max_scroll = content_bottom - viewport_height.to_i64()
+    if max_scroll < 0:
+        max_scroll = 0
+    var resolved = if scroll_y > 0: scroll_y.to_i64() else: 0
+    if resolved > max_scroll:
+        resolved = max_scroll
+    var has_top_sticky = false
+    var has_top_sticky_index = 0
+    while has_top_sticky_index < styles.len():  # cpu-lane-loop-ok: scans styles for a root-scroll top-inset sticky box; bound is the style count (== node_count), once per compose
+        val style = styles[has_top_sticky_index]
+        if (
+            style.position_sticky and
+            style.top_px != SIMPLE_WEB_STICKY_TOP_AUTO and
+            _simple_web_root_sticky_admitted(nodes, has_top_sticky_index)
+        ):
+            has_top_sticky = true
+        has_top_sticky_index = has_top_sticky_index + 1
+    var shifted_by = if resolved == 0 and not has_top_sticky:
+        boxes.by
+    else:
+        shifted_i32_list(boxes.by, 0 - resolved.to_i32())
+    if has_top_sticky:
+        # ponytail: root-scroll/top-inset sticky only; add scroll-container
+        # bounds and other inset axes when those conformance slices land.
+        var subtree_delta: [i32] = [0; nodes.len()]
+        var has_sticky_ancestor: [bool] = [false; nodes.len()]
+        var node_index = 0
+        while node_index < styles.len():  # cpu-lane-loop-ok: top-down sticky-shift pass propagating subtree deltas from the parent entry; bound is the style count, runs only when a top sticky box exists
+            val parent = nodes[node_index].parent as i32
+            val inherited_delta = if parent >= 0:
+                subtree_delta[parent]
+            else:
+                0
+            val nested = if parent >= 0:
+                has_sticky_ancestor[parent] or styles[parent].position_sticky
+            else:
+                false
+            shifted_by[node_index] = (
+                shifted_by[node_index] + inherited_delta
+            )
+            var own_delta = 0
+            val style = styles[node_index]
+            if (
+                not nested and style.position_sticky and
+                style.top_px != SIMPLE_WEB_STICKY_TOP_AUTO and
+                _simple_web_root_sticky_admitted(nodes, node_index) and
+                shifted_by[node_index] < style.top_px
+            ):
+                own_delta = style.top_px - shifted_by[node_index]
+                shifted_by[node_index] = style.top_px
+            subtree_delta[node_index] = inherited_delta + own_delta
+            has_sticky_ancestor[node_index] = nested
+            node_index = node_index + 1
+    val shifted = LayoutResult(
+        bx: boxes.bx,
+        by: shifted_by,
+        bw: boxes.bw,
+        bh: boxes.bh,
+        wrap_starts: boxes.wrap_starts,
+        wrap_ends: boxes.wrap_ends,
+        intrinsic_widths: boxes.intrinsic_widths,
+        height: boxes.height
+    )
+    _SimpleWebScrolledLayout(
+        boxes: shifted,
+        resolved_scroll_y: resolved.to_i32(),
+        max_scroll_y: max_scroll.to_i32()
+    )
+
+class SimpleWebLayoutMaterialWitness:
+    cpu_composited_count: i32
+    cpu_composited_sha256: text
+    solid_material_count: i32
+    solid_material_sha256: text
+
+struct _SimpleWebInputTextHitBuild:
+    target_keys: [text]
+    hits: [SimpleWebInputTextHitMap]
+    resolved_view_start_byte: i64
+
+fn _simple_web_input_text_hit_build(
+    nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
+    boxes: LayoutResult, width: i32, height: i32,
+    overlay: BrowserTextInputOverlay
+) -> _SimpleWebInputTextHitBuild:
+    var target_keys: [text] = [""; nodes.len()]
+    var hits: [SimpleWebInputTextHitMap] = []
+    var resolved_view_start_byte = overlay.view_start_byte
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        width, height
+    )
+    var i = 0
+    while i < nodes.len():  # cpu-lane-loop-ok: one pass over nodes building the text-input hit map; bound is node_count and the target-key/paint-plan work fires only for <input> elements
+        if (
+            nodes[i].tag == "input" and
+            input_accepts_text_overlay(nodes[i]) and
+            styles[i].display != "none" and
+            not styles[i].visibility_hidden and
+            boxes.bw[i] > 0 and boxes.bh[i] > 0
+        ):
+            val target_key = _simple_web_node_target_key(
+                nodes, child_index, i
+            )
+            target_keys[i] = target_key
+            val content_w = (
+                boxes.bw[i] - styles[i].border_l - styles[i].border_r -
+                styles[i].pad_l - styles[i].pad_r
+            )
+            val advance = style_text_advance(styles[i])
+            val glyph_advance = if advance > 0: advance else: 1
+            val plan = if target_key == overlay.target_key:
+                input_text_paint_plan_with_overlay(
+                    nodes[i], styles[i],
+                    boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
+                    paint_clip_at(clip_cache, i), overlay
+                )
+            else:
+                input_text_paint_plan(
+                    nodes[i], styles[i],
+                    boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
+                    paint_clip_at(clip_cache, i),
+                    content_w / glyph_advance + 1
+                )
+            if target_key == overlay.target_key:
+                resolved_view_start_byte = plan.resolved_view_start_byte
+            hits.push(SimpleWebInputTextHitMap(
+                target_key: target_key,
+                x: plan.clip.x0,
+                y: plan.clip.y0,
+                width: plan.clip.x1 - plan.clip.x0,
+                height: plan.clip.y1 - plan.clip.y0,
+                source_boundary_bytes: plan.source_boundary_bytes,
+                boundary_x_px: plan.boundary_x_px
+            ))
+        i = i + 1
+    _SimpleWebInputTextHitBuild(
+        target_keys: target_keys,
+        hits: hits,
+        resolved_view_start_byte: resolved_view_start_byte
+    )
+
+pub fn simple_web_layout_material_provenance_after_execution(witness: SimpleWebLayoutMaterialWitness, skipped_command_count: i32, pixel_count: i32, expected_pixel_count: i32, executed_cpu_material_count: i32) -> WebRenderMaterialFallbackProvenance:
+    simple_web_layout_material_provenance_after_backend_execution(
+        witness,
+        skipped_command_count,
+        pixel_count,
+        expected_pixel_count,
+        executed_cpu_material_count,
+        0,
+        "",
+        "",
+        0,
+        0
+    )
+
+pub fn simple_web_layout_material_provenance_after_backend_execution(
+    witness: SimpleWebLayoutMaterialWitness,
+    skipped_command_count: i32,
+    pixel_count: i32,
+    expected_pixel_count: i32,
+    executed_cpu_material_count: i32,
+    executed_metal_material_count: i32,
+    glass_execution_target: text,
+    readback_source: text,
+    glass_backend_handle: i64,
+    glass_device_identity: i64
+) -> WebRenderMaterialFallbackProvenance:
+    if skipped_command_count != 0 or pixel_count != expected_pixel_count:
+        if witness.cpu_composited_count > 0 or witness.solid_material_count > 0:
+            print "[web-material-provenance] witness-dropped-at-integrity-gate skipped={skipped_command_count} pixels={pixel_count} expected={expected_pixel_count} cpu_witness={witness.cpu_composited_count} solid_witness={witness.solid_material_count}"
+        return WebRenderMaterialFallbackProvenance.none()
+    if witness.cpu_composited_count > 0:
+        if (witness.cpu_composited_count ==
+                executed_metal_material_count and
+            executed_cpu_material_count == 0 and
+            glass_execution_target == "metal-device-glass-v1" and
+            readback_source == "device_readback" and
+            glass_backend_handle > 0 and glass_device_identity > 0 and
+            witness.cpu_composited_sha256.len() == 64):
+            return WebRenderMaterialFallbackProvenance.metal_device_composited(
+                witness.cpu_composited_sha256)
+        if (witness.cpu_composited_count == executed_cpu_material_count and
+            executed_metal_material_count == 0 and
+            witness.cpu_composited_sha256.len() == 64):
+            return WebRenderMaterialFallbackProvenance.cpu_composited(
+                witness.cpu_composited_sha256)
+        # Defect signal, bounded (fires only when a realized witness fails to
+        # convert): names the exact mismatch instead of a silent kind="none".
+        print "[web-material-provenance] witness-unconverted cpu_witness={witness.cpu_composited_count} cpu_executed={executed_cpu_material_count} metal_executed={executed_metal_material_count} sha_len={witness.cpu_composited_sha256.len()} target={glass_execution_target} readback={readback_source}"
+        return WebRenderMaterialFallbackProvenance.none()
+    if (executed_cpu_material_count != 0 or
+        executed_metal_material_count != 0):
+        # Executed material with NO witness: the sidecar channel lost the
+        # entries between the style pass and this decision. Bounded defect
+        # signal, same rationale as witness-unconverted above.
+        print "[web-material-provenance] executed-without-witness cpu_executed={executed_cpu_material_count} metal_executed={executed_metal_material_count} solid_witness={witness.solid_material_count}"
+        return WebRenderMaterialFallbackProvenance.none()
+    if (witness.solid_material_count > 0 and
+        witness.solid_material_sha256.len() == 64):
+        return WebRenderMaterialFallbackProvenance.solid(
+            "cpu-raster-backdrop-sampling-unavailable",
+            witness.solid_material_sha256)
+    WebRenderMaterialFallbackProvenance.none()
+
+pub fn simple_web_material_fallback_realized(declared: bool, bg: u32, gradient_from: u32, gradient_to: u32, layers_raw: text) -> bool:
+    declared and ((bg >> 24) & 255u32) == 255u32 and gradient_from == 0u32 and gradient_to == 0u32 and layers_raw == ""
+
+fn _simple_web_material_witness_from_sidecar(
+    entries: [text], counts: [i64]
+) -> SimpleWebLayoutMaterialWitness:
+    if entries.len() < 2 or counts.len() < 2:
+        return SimpleWebLayoutMaterialWitness(
+            cpu_composited_count: 0,
+            cpu_composited_sha256: "",
+            solid_material_count: 0,
+            solid_material_sha256: "")
+    val cpu_count = counts[0]
+    val solid_count = counts[1]
+    SimpleWebLayoutMaterialWitness(
+        cpu_composited_count: cpu_count as i32,
+        cpu_composited_sha256:
+            if cpu_count > 0: sha256_text(entries[0]) else: "",
+        solid_material_count: solid_count as i32,
+        solid_material_sha256:
+            if solid_count > 0: sha256_text(entries[1]) else: "")
+
+fn _simple_web_visible_material_witness(
+    entries: [text], cpu_nodes: [i32], solid_nodes: [i32],
+    visible_nodes: [bool]
+) -> SimpleWebLayoutMaterialWitness:
+    if entries.len() < 2:
+        return _simple_web_material_witness_from_sidecar([], [])
+    val cpu_lines = entries[0].split("\n")
+    val solid_lines = entries[1].split("\n")
+    var cpu_filtered: [text] = [""; cpu_lines.len()]
+    var solid_filtered: [text] = [""; solid_lines.len()]
+    cpu_filtered[0] = cpu_lines[0]
+    solid_filtered[0] = solid_lines[0]
+    var cpu_filtered_count = 1
+    var solid_filtered_count = 1
+    var counts: [i64] = [0, 0]
+    var i = 0
+    while i < cpu_nodes.len() and i + 1 < cpu_lines.len():  # cpu-lane-loop-ok: filters the cpu-composited material sidecar down to visible nodes; bound is the recorded cpu material node count, not the document
+        val node = cpu_nodes[i]
+        if node >= 0 and node < visible_nodes.len() and visible_nodes[node]:
+            cpu_filtered[cpu_filtered_count] = cpu_lines[i + 1]
+            cpu_filtered_count = cpu_filtered_count + 1
+            counts[0] = counts[0] + 1
+        i = i + 1
+    i = 0
+    while i < solid_nodes.len() and i + 1 < solid_lines.len():  # cpu-lane-loop-ok: same filter for the solid material sidecar; bound is the recorded solid material node count
+        val node = solid_nodes[i]
+        if node >= 0 and node < visible_nodes.len() and visible_nodes[node]:
+            solid_filtered[solid_filtered_count] = solid_lines[i + 1]
+            solid_filtered_count = solid_filtered_count + 1
+            counts[1] = counts[1] + 1
+        i = i + 1
+    _simple_web_material_witness_from_sidecar(
+        [
+            cpu_filtered.slice(0, cpu_filtered_count).join("\n"),
+            solid_filtered.slice(0, solid_filtered_count).join("\n")
+        ],
+        counts
+    )
+
+fn _animation_direction_progress(progress: f64, direction: text, iteration: i64) -> f64:
+    if direction == "reverse":
+        return 1.0 - progress
+    if direction == "alternate" and iteration % 2 != 0:
+        return 1.0 - progress
+    if direction == "alternate-reverse" and iteration % 2 == 0:
+        return 1.0 - progress
+    progress
+
+fn _animation_direction_is_forwards(direction: text, iteration: i64) -> bool:
+    if direction == "reverse":
+        return false
+    if direction == "alternate":
+        return iteration % 2 == 0
+    if direction == "alternate-reverse":
+        return iteration % 2 != 0
+    true
+
+fn _css_animation_signature(st: Style) -> text:
+    (
+        st.animation_name + "\u001f" +
+        st.animation_duration_ms.to_text() + "\u001f" +
+        st.animation_delay_ms.to_text() + "\u001f" +
+        st.animation_timing_function + "\u001f" +
+        st.animation_iteration_count + "\u001f" +
+        st.animation_direction + "\u001f" +
+        st.animation_fill_mode
+    )
+
+val CSS_ANIMATION_MAX_TIME_MS: i64 = 9223372036854775807
+val CSS_ANIMATION_MIN_TIME_MS: i64 = -9223372036854775808
+
+fn _css_animation_iteration_count(raw: text) -> f64:
+    if raw == "infinite":
+        return -1.0
+    if val parsed = parse_animation_iteration_number_token(raw):
+        return parsed
+    1.0
+
+fn _css_animation_add_ms_no_wrap(base_ms: i64, delta_ms: i64) -> i64:
+    if (
+        delta_ms > 0 and
+        base_ms > CSS_ANIMATION_MAX_TIME_MS - delta_ms
+    ):
+        return CSS_ANIMATION_MAX_TIME_MS
+    if (
+        delta_ms < 0 and
+        base_ms < CSS_ANIMATION_MIN_TIME_MS - delta_ms
+    ):
+        return CSS_ANIMATION_MIN_TIME_MS
+    base_ms + delta_ms
+
+fn _css_animation_sub_ms_no_wrap(base_ms: i64, delta_ms: i64) -> i64:
+    if (
+        delta_ms > 0 and
+        base_ms < CSS_ANIMATION_MIN_TIME_MS + delta_ms
+    ):
+        return CSS_ANIMATION_MIN_TIME_MS
+    if (
+        delta_ms < 0 and
+        base_ms > CSS_ANIMATION_MAX_TIME_MS + delta_ms
+    ):
+        return CSS_ANIMATION_MAX_TIME_MS
+    base_ms - delta_ms
+
+fn _css_animation_active_duration_ms(
+    duration_ms: i64, iteration_count: f64
+) -> i64:
+    if iteration_count < 0.0:
+        return -1
+    val active_duration = duration_ms.to_f64() * iteration_count
+    if (
+        active_duration != active_duration or
+        active_duration > CSS_ANIMATION_MAX_FINITE_ITERATIONS
+    ):
+        return CSS_ANIMATION_MAX_TIME_MS
+    if active_duration <= 0.0:
+        return 0
+    active_duration.ceil().to_i64()
+
+fn _css_animation_next_frame_ms(current_time_ms: i64) -> i64:
+    val next_ms = _css_animation_add_ms_no_wrap(current_time_ms, 16)
+    if next_ms <= current_time_ms:
+        return -1
+    next_ms
+
+fn _simple_web_animation_frame_index(
+    styles: [Style], nodes: [HNode], child_index: HtmlChildIndex,
+    registry: KeyframeRegistry,
+    instances: [BrowserCssAnimationInstance], include_signatures: bool
+) -> _SimpleWebAnimationFrameIndex:
+    val target_keys = _simple_web_animation_target_keys(nodes, child_index)
+    var signatures: [text] = if include_signatures:
+        [""; styles.len()]
+    else:
+        []
+    var style_index = 0
+    while style_index < styles.len():  # cpu-lane-loop-ok: optional animation-signature pass over styles; bound is the style count and only the reconcile caller requests signatures
+        if (include_signatures and
+            styles[style_index].animation_name != "none" and
+            styles[style_index].animation_duration_ms > 0
+        ):
+            signatures[style_index] = _css_animation_signature(
+                styles[style_index]
+            )
+        style_index = style_index + 1
+
+    var keyframes_by_name: Dict<text, i32> = {}
+    var keyframe_index = 0
+    while keyframe_index < registry.entries.len():  # cpu-lane-loop-ok: builds the keyframe-name to index dict; bound is the declared @keyframes count
+        keyframes_by_name[registry.entries[keyframe_index].name] = (
+            keyframe_index
+        )
+        keyframe_index = keyframe_index + 1
+
+    var instances_by_target: Dict<text, i32> = {}
+    var instance_index = 0
+    while instance_index < instances.len():  # cpu-lane-loop-ok: builds the target-key to instance index dict; bound is the live animation instance count (capacity-capped)
+        instances_by_target[instances[instance_index].target_key] = (
+            instance_index
+        )
+        instance_index = instance_index + 1
+    _SimpleWebAnimationFrameIndex(
+        target_keys: target_keys,
+        signatures: signatures,
+        keyframes_by_name: keyframes_by_name,
+        instances_by_target: instances_by_target
+    )
+
+pub fn simple_web_layout_reconcile_animation_instances(
+    html: text, width: i32, current_time_ms: i64,
+    new_epoch_ms: i64, reset_descendants: bool,
+    previous: [BrowserCssAnimationInstance]
+) -> [BrowserCssAnimationInstance]:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val registry = _simple_web_extract_keyframes(html)
+    if registry.entries.len() == 0:
+        return []
+    val frame_index = _simple_web_animation_frame_index(
+        styles, nodes, child_index, registry, previous, true
+    )
+    var reconciled: [BrowserCssAnimationInstance] = []
+    var style_index = 0
+    while style_index < styles.len():  # cpu-lane-loop-ok: one pass over styles reconciling declared animations against the previous instance list; bound is the style count, runs on animation reconcile, not on paint
+        val st = styles[style_index]
+        val keyframe_index = (
+            frame_index.keyframes_by_name.get(st.animation_name) ?? -1
+        )
+        if (
+            st.animation_name != "none" and
+            st.animation_duration_ms > 0 and
+            keyframe_index >= 0
+        ):
+            val target_key = frame_index.target_keys[style_index]
+            if (
+                target_key != "" and
+                browser_css_animation_capacity_available(reconciled.len())
+            ):
+                val signature = frame_index.signatures[style_index]
+                val paused = st.animation_play_state == "paused"
+                val duration_ms = st.animation_duration_ms.to_i64()
+                val delay_ms = st.animation_delay_ms.to_i64()
+                val iteration_count = _css_animation_iteration_count(
+                    st.animation_iteration_count
+                )
+                val old_index = (
+                    frame_index.instances_by_target.get(target_key) ?? -1
+                )
+                if (
+                    (not reset_descendants or target_key == "path:") and
+                    old_index >= 0 and
+                    previous[old_index].signature == signature
+                ):
+                    val old = previous[old_index]
+                    if paused and not old.paused:
+                        val elapsed = _css_animation_sub_ms_no_wrap(
+                            current_time_ms, old.start_time_ms
+                        )
+                        val paused_elapsed = if elapsed > 0:
+                            elapsed
+                        else:
+                            0
+                        reconciled.push(BrowserCssAnimationInstance(
+                            target_key: target_key,
+                            signature: signature,
+                            start_time_ms: old.start_time_ms,
+                            paused: true,
+                            paused_elapsed_ms: paused_elapsed,
+                            duration_ms: duration_ms,
+                            delay_ms: delay_ms,
+                            timing: old.timing,
+                            iteration_count: iteration_count
+                        ))
+                    elif not paused and old.paused:
+                        reconciled.push(BrowserCssAnimationInstance(
+                            target_key: target_key,
+                            signature: signature,
+                            start_time_ms: _css_animation_sub_ms_no_wrap(
+                                current_time_ms, old.paused_elapsed_ms
+                            ),
+                            paused: false,
+                            paused_elapsed_ms: old.paused_elapsed_ms,
+                            duration_ms: duration_ms,
+                            delay_ms: delay_ms,
+                            timing: old.timing,
+                            iteration_count: iteration_count
+                        ))
+                    else:
+                        reconciled.push(old)
+                else:
+                    if val timing = parse_timing_function(
+                        st.animation_timing_function
+                    ):
+                        reconciled.push(BrowserCssAnimationInstance(
+                            target_key: target_key,
+                            signature: signature,
+                            start_time_ms: new_epoch_ms,
+                            paused: paused,
+                            paused_elapsed_ms: 0,
+                            duration_ms: duration_ms,
+                            delay_ms: delay_ms,
+                            timing: timing,
+                            iteration_count: iteration_count
+                        ))
+        style_index = style_index + 1
+    reconciled
+
+fn _animation_progress(
+    st: Style, animation_time_ms: i64, timing: TimingFunction
+) -> f64?:
+    if st.animation_name == "none" or st.animation_duration_ms <= 0:
+        return nil
+    val elapsed = _css_animation_sub_ms_no_wrap(
+        animation_time_ms, st.animation_delay_ms.to_i64()
+    )
+    if elapsed < 0:
+        if st.animation_fill_mode == "backwards" or st.animation_fill_mode == "both":
+            val directed_before = _animation_direction_progress(
+                0.0, st.animation_direction, 0
+            )
+            val current_direction_forwards = (
+                _animation_direction_is_forwards(st.animation_direction, 0)
+            )
+            return Some(evaluate_timing(
+                timing, directed_before, current_direction_forwards
+            ))
+        return nil
+    val iteration_count = _css_animation_iteration_count(
+        st.animation_iteration_count
+    )
+    if iteration_count == 0.0:
+        if (
+            st.animation_fill_mode == "forwards" or
+            st.animation_fill_mode == "both"
+        ):
+            val directed_zero = _animation_direction_progress(
+                0.0, st.animation_direction, 0
+            )
+            val current_direction_forwards = (
+                _animation_direction_is_forwards(st.animation_direction, 0)
+            )
+            return Some(evaluate_timing(
+                timing, directed_zero, not current_direction_forwards
+            ))
+        return nil
+    val duration = st.animation_duration_ms.to_i64()
+    val active_duration = duration.to_f64() * iteration_count
+    if (
+        iteration_count > 0.0 and
+        elapsed.to_f64() >= active_duration
+    ):
+        if st.animation_fill_mode != "forwards" and st.animation_fill_mode != "both":
+            return nil
+        val whole_iterations = iteration_count.floor()
+        val fractional_iteration = iteration_count - whole_iterations
+        val terminal_iteration = if fractional_iteration > 0.0:
+            whole_iterations.to_i64()
+        else:
+            whole_iterations.to_i64() - 1
+        val terminal_progress = if fractional_iteration > 0.0:
+            fractional_iteration
+        else:
+            1.0
+        val directed_terminal = _animation_direction_progress(
+            terminal_progress, st.animation_direction, terminal_iteration
+        )
+        val current_direction_forwards = _animation_direction_is_forwards(
+            st.animation_direction, terminal_iteration
+        )
+        return Some(evaluate_timing(
+            timing, directed_terminal, not current_direction_forwards
+        ))
+    val iteration = elapsed / duration
+    val local = (elapsed % duration).to_f64() / duration.to_f64()
+    val directed = _animation_direction_progress(local, st.animation_direction, iteration)
+    Some(evaluate_timing(timing, directed, false))
+
+fn _animation_computed_length(value: i32) -> CSSValue:
+    CSSValue.Length(v: value.to_f64(), unit: "px")
+
+fn _animation_computed_color(value: u32) -> CSSValue:
+    CSSValue.Color(color: from_rgba(
+        ((value >> 16) & 255u32).to_i64(),
+        ((value >> 8) & 255u32).to_i64(),
+        (value & 255u32).to_i64(),
+        ((value >> 24) & 255u32).to_i64()
+    ))
+
+fn _animation_computed_value(st: Style, property: text) -> CSSValue?:
+    if property == "width": return Some(_animation_computed_length(st.width_px))
+    if property == "height": return Some(_animation_computed_length(st.height_px))
+    if property == "min-width": return Some(_animation_computed_length(st.min_width_px))
+    if property == "max-width": return Some(_animation_computed_length(st.max_width_px))
+    if property == "min-height": return Some(_animation_computed_length(st.min_height_px))
+    if property == "max-height": return Some(_animation_computed_length(st.max_height_px))
+    if property == "top": return Some(_animation_computed_length(st.top_px))
+    if property == "right": return Some(_animation_computed_length(st.right_px))
+    if property == "bottom": return Some(_animation_computed_length(st.bottom_px))
+    if property == "left": return Some(_animation_computed_length(st.left_px))
+    if property == "margin-top": return Some(_animation_computed_length(st.margin_t))
+    if property == "margin-right": return Some(_animation_computed_length(st.margin_r))
+    if property == "margin-bottom": return Some(_animation_computed_length(st.margin_b))
+    if property == "margin-left": return Some(_animation_computed_length(st.margin_l))
+    if property == "padding-top": return Some(_animation_computed_length(st.pad_t))
+    if property == "padding-right": return Some(_animation_computed_length(st.pad_r))
+    if property == "padding-bottom": return Some(_animation_computed_length(st.pad_b))
+    if property == "padding-left": return Some(_animation_computed_length(st.pad_l))
+    if property == "border-top-width": return Some(_animation_computed_length(st.border_t))
+    if property == "border-right-width": return Some(_animation_computed_length(st.border_r))
+    if property == "border-bottom-width": return Some(_animation_computed_length(st.border_b))
+    if property == "border-left-width": return Some(_animation_computed_length(st.border_l))
+    if property == "border-top-left-radius": return Some(_animation_computed_length(st.border_radius_tl_px))
+    if property == "border-top-right-radius": return Some(_animation_computed_length(st.border_radius_tr_px))
+    if property == "border-bottom-right-radius": return Some(_animation_computed_length(st.border_radius_br_px))
+    if property == "border-bottom-left-radius": return Some(_animation_computed_length(st.border_radius_bl_px))
+    if property == "color": return Some(_animation_computed_color(st.fg))
+    if property == "background-color": return Some(_animation_computed_color(st.bg))
+    if property == "border-top-color": return Some(_animation_computed_color(st.border_color_t))
+    if property == "border-right-color": return Some(_animation_computed_color(st.border_color_r))
+    if property == "border-bottom-color": return Some(_animation_computed_color(st.border_color_b))
+    if property == "border-left-color": return Some(_animation_computed_color(st.border_color_l))
+    if property == "font-size": return Some(_animation_computed_length(st.font_size))
+    if property == "font-weight":
+        return Some(CSSValue.Keyword(v: if st.bold: "bold" else: "normal"))
+    if property == "line-height":
+        return Some(_animation_computed_length(style_line_h(st)))
+    if property == "letter-spacing": return Some(_animation_computed_length(st.letter_spacing_px))
+    if property == "word-spacing": return Some(_animation_computed_length(st.word_spacing_px))
+    if property == "text-indent": return Some(_animation_computed_length(st.text_indent_px))
+    if property == "opacity":
+        return Some(CSSValue.Number(v: st.opacity_pct.to_f64() / 100.0))
+    if property == "flex-grow": return Some(CSSValue.Number(v: st.flex_grow.to_f64()))
+    if property == "flex-shrink": return Some(CSSValue.Number(v: st.flex_shrink.to_f64()))
+    if property == "flex-basis": return Some(_animation_computed_length(st.flex_basis_px))
+    if property == "row-gap": return Some(_animation_computed_length(st.row_gap_px))
+    if property == "column-gap": return Some(_animation_computed_length(st.column_gap_px))
+    if property == "z-index": return Some(CSSValue.Number(v: st.z_index.to_f64()))
+    nil
+
+fn _apply_css_animations(
+    nodes: [HNode], styles: [Style], registry: KeyframeRegistry,
+    animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    frame_index: _SimpleWebAnimationFrameIndex
+) -> _SimpleWebAnimationApplyResult:
+    if registry.entries.len() == 0:
+        return _SimpleWebAnimationApplyResult(
+            styles: styles, property_work_count: 0
+        )
+    var animated = styles
+    var property_work_count: i64 = 0
+    var style_index = 0
+    while style_index < animated.len():
+        val st = animated[style_index]
+        val keyframe_index = (
+            frame_index.keyframes_by_name.get(st.animation_name) ?? -1
+        )
+        if (
+            st.animation_name != "none" and
+            st.animation_duration_ms > 0 and
+            keyframe_index >= 0
+        ):
+            val target_key = frame_index.target_keys[style_index]
+            val matched_index = (
+                frame_index.instances_by_target.get(target_key) ?? -1
+            )
+            val local_animation_time_ms = if matched_index >= 0:
+                val instance = animation_instances[matched_index]
+                if instance.paused:
+                    instance.paused_elapsed_ms
+                else:
+                    _css_animation_sub_ms_no_wrap(
+                        animation_time_ms, instance.start_time_ms
+                    )
+            elif st.animation_play_state == "paused":
+                0
+            else:
+                animation_time_ms
+            val parsed_timing = if matched_index >= 0:
+                Some(animation_instances[matched_index].timing)
+            else:
+                parse_timing_function(st.animation_timing_function)
+            if val timing = parsed_timing:
+                if val Some(progress) = _animation_progress(
+                    st, local_animation_time_ms, timing
+                ):
+                    val entry = registry.entries[keyframe_index]
+                    var underlying: [CSSDeclaration] = []
+                    var underlying_by_property: Dict<text, bool> = {}
+                    for keyframe in entry.frames:
+                        for declaration in keyframe.properties:
+                            property_work_count = property_work_count + 1
+                            val known = (
+                                underlying_by_property.get(
+                                    declaration.property
+                                ) ?? false
+                            )
+                            if not known:
+                                underlying_by_property[declaration.property] = true
+                                if val Some(value) = _animation_computed_value(
+                                    st, declaration.property
+                                ):
+                                    underlying.push(CSSDeclaration.create(
+                                        declaration.property, value
+                                    ))
+                    val updates = sample_keyframes_with_underlying(
+                        style_index.to_i64(), entry.frames, progress,
+                        underlying
+                    )
+                    var declaration_fragments: [text] = []
+                    for update in updates:
+                        declaration_fragments.push(
+                            update.property + ":" +
+                            animation_css_value_text(update.value)
+                        )
+                    val declarations = declaration_fragments.join(";")
+                    if declarations.len() > 0:
+                        animated[style_index] = apply_decls(
+                            st, declarations, st.font_size
+                        )
+        style_index = style_index + 1
+    _SimpleWebAnimationApplyResult(
+        styles: simple_web_enforce_details_visibility(nodes, animated),
+        property_work_count: property_work_count
+    )
+
+fn _simple_web_css_animation_instance_next_ms(
+    instance: BrowserCssAnimationInstance, current_time_ms: i64
+) -> i64:
+    if instance.paused:
+        return -1
+    if instance.duration_ms <= 0:
+        return -1
+    val start_ms = _css_animation_add_ms_no_wrap(
+        instance.start_time_ms, instance.delay_ms
+    )
+    if current_time_ms < start_ms:
+        return start_ms
+    if instance.iteration_count < 0.0:
+        return _css_animation_next_frame_ms(current_time_ms)
+    val end_ms = (
+        _css_animation_add_ms_no_wrap(
+            start_ms,
+            _css_animation_active_duration_ms(
+                instance.duration_ms, instance.iteration_count
+            )
+        )
+    )
+    if current_time_ms < end_ms:
+        val next_frame_ms = _css_animation_next_frame_ms(current_time_ms)
+        if next_frame_ms < 0:
+            return -1
+        return min(next_frame_ms, end_ms)
+    -1
+
+pub fn simple_web_layout_animation_instances_next_ms(
+    instances: [BrowserCssAnimationInstance], current_time_ms: i64
+) -> i64:
+    var next_ms: i64 = -1
+    for instance in instances:  # cpu-lane-loop-ok: min over the live animation instances' next-tick times; bound is the instance count
+        val candidate_ms = _simple_web_css_animation_instance_next_ms(
+            instance, current_time_ms
+        )
+        if candidate_ms >= 0 and (next_ms < 0 or candidate_ms < next_ms):
+            next_ms = candidate_ms
+    next_ms
+
+fn _simple_web_layout_animation_schedule(
+    styles: [Style], current_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    frame_index: _SimpleWebAnimationFrameIndex
+) -> _SimpleWebAnimationSchedule:
+    var latest_end: i64 = -1
+    var next_change: i64 = -1
+    var style_index = 0
+    while style_index < styles.len():  # cpu-lane-loop-ok: one pass over styles computing the frame's animation end/next timestamps; bound is the style count, once per animation-schedule build
+        val st = styles[style_index]
+        val keyframe_index = (
+            frame_index.keyframes_by_name.get(st.animation_name) ?? -1
+        )
+        if (
+            st.animation_name != "none" and
+            st.animation_duration_ms > 0 and
+            keyframe_index >= 0
+        ):
+            val target_key = frame_index.target_keys[style_index]
+            val matched_index = (
+                frame_index.instances_by_target.get(target_key) ?? -1
+            )
+            val matched = matched_index >= 0
+            val paused = if matched:
+                animation_instances[matched_index].paused
+            else:
+                st.animation_play_state == "paused"
+            val start_time_ms = if matched:
+                animation_instances[matched_index].start_time_ms
+            else:
+                0
+            val animation_start = (
+                _css_animation_add_ms_no_wrap(
+                    start_time_ms, st.animation_delay_ms.to_i64()
+                )
+            )
+            val iteration_count = _css_animation_iteration_count(
+                st.animation_iteration_count
+            )
+            val infinite = iteration_count < 0.0
+            var animation_end: i64 = -1
+            if infinite:
+                if not paused:
+                    latest_end = -2
+            else:
+                animation_end = _css_animation_add_ms_no_wrap(
+                    animation_start,
+                    _css_animation_active_duration_ms(
+                        st.animation_duration_ms.to_i64(), iteration_count
+                    )
+                )
+                if animation_end < 0:
+                    animation_end = 0
+                if latest_end != -2 and animation_end > latest_end:
+                    latest_end = animation_end
+
+            if not paused and current_time_ms >= 0:
+                var candidate: i64 = -1
+                if matched:
+                    candidate = _simple_web_css_animation_instance_next_ms(
+                        animation_instances[matched_index], current_time_ms
+                    )
+                elif current_time_ms < animation_start:
+                    candidate = animation_start
+                elif infinite:
+                    candidate = _css_animation_next_frame_ms(
+                        current_time_ms
+                    )
+                elif current_time_ms < animation_end:
+                    candidate = _css_animation_next_frame_ms(
+                        current_time_ms
+                    )
+                    if candidate > animation_end:
+                        candidate = animation_end
+                if candidate >= 0 and (
+                    next_change < 0 or candidate < next_change
+                ):
+                    next_change = candidate
+        style_index = style_index + 1
+    _SimpleWebAnimationSchedule(
+        animation_end_ms: latest_end,
+        animation_next_ms: next_change
+    )
+
+pub fn simple_web_layout_animation_end_ms(
+    html: text, width: i32
+) -> i64:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val registry = _simple_web_extract_keyframes(html)
+    if registry.entries.len() == 0:
+        return -1
+    val frame_index = _simple_web_animation_frame_index(
+        styles, nodes, child_index, registry, [], false
+    )
+    _simple_web_layout_animation_schedule(
+        styles, -1, [], frame_index
+    ).animation_end_ms
+
+fn _simple_web_fractional_opacity_command_roots(
+    nodes: [HNode], styles: [Style], owner_nodes: [i32]
+) -> (bool, [i32], i32):
+    if nodes.len() != styles.len():
+        return (false, [], 0)
+    var node_roots: [i32] = [-1; nodes.len()]
+    var has_root = false
+    var i: i32 = 0
+    while i < nodes.len():  # cpu-lane-loop-ok: single top-down pass assigning each node its fractional-opacity surface root; bound is node_count, once per compose
+        val parent = nodes[i].parent as i32
+        val parent_root = if parent >= 0 and parent < i:
+            node_roots[parent]
+        else:
+            -1
+        val opacity = styles[i].opacity_pct
+        if opacity > 0 and opacity < 100:
+            # ponytail: nested opacity needs a surface tree; independent
+            # sibling surfaces stay flat and preserve canonical paint order.
+            if (
+                parent_root >= 0 or nodes[i].tag == "#root" or
+                nodes[i].tag == "html" or nodes[i].tag == "body"
+            ):
+                return (false, [], 0)
+            node_roots[i] = i
+            has_root = true
+        else:
+            node_roots[i] = parent_root
+        if (
+            node_roots[i] >= 0 and
+            styles[i].backdrop_filter_raw != ""
+        ):
+            return (false, [], 0)
+        i = i + 1
+    if not has_root:
+        return (false, [], 0)
+    var command_roots: [i32] = []
+    var closed: [bool] = [false; nodes.len()]
+    var previous = -1
+    var root_count = 0
+    for owner in owner_nodes:  # cpu-lane-loop-ok: maps each emitted DrawIR command to its owner's opacity root and detects reopened runs; bound is the command count
+        if owner < 0 or owner >= node_roots.len():
+            return (false, [], 0)
+        val root = node_roots[owner]
+        if root != previous:
+            if previous >= 0:
+                closed[previous] = true
+            if root >= 0 and closed[root]:
+                return (false, [], 0)
+            if root >= 0:
+                root_count = root_count + 1
+            previous = root
+        command_roots.push(root)
+    (root_count > 0, command_roots, root_count)
+
+fn _simple_web_fractional_opacity_root_bounded(
+    styles: [Style], boxes: LayoutResult, root: i32,
+    width: i32, height: i32
+) -> bool:
+    if root < 0 or root >= styles.len():
+        return false
+    val st = styles[root]
+    val x = boxes.bx[root].to_i64()
+    val y = boxes.by[root].to_i64()
+    val w = boxes.bw[root].to_i64()
+    val h = boxes.bh[root].to_i64()
+    (
+        st.overflow_hidden and st.outline_w == 0 and
+        st.box_shadow_raw == "" and st.box_shadow_color == 0u32 and
+        x >= 0 and y >= 0 and w > 0 and h > 0 and
+        x + w <= width.to_i64() and y + h <= height.to_i64()
+    )
+
+fn _simple_web_draw_ir_css_background(command: DrawIrCommand) -> bool:
+    for prop in command.computed_style:  # cpu-lane-loop-ok: scans one command's computed_style list for the css-background image role; bound is that command's property count
+        if prop.key == "image-role" and prop.value == "css-background":
+            return true
+    false
+
+fn _simple_web_draw_ir_translate_command(
+    command: DrawIrCommand, dx: i32, dy: i32
+) -> DrawIrCommand:
+    var translated = command
+    translated.x = translated.x + dx
+    translated.y = translated.y + dy
+    translated.border_rect = draw_ir_rect_translate(
+        translated.border_rect, dx, dy
+    )
+    translated.content_rect = draw_ir_rect_translate(
+        translated.content_rect, dx, dy
+    )
+    translated.hit_rect = draw_ir_rect_translate(
+        translated.hit_rect, dx, dy
+    )
+    translated.clip_rect = draw_ir_rect_translate(
+        translated.clip_rect, dx, dy
+    )
+    translated
+
+fn _simple_web_iframe_fractional_ancestor(
+    nodes: [HNode], styles: [Style], node_index: i32
+) -> bool:
+    var current = node_index
+    while current >= 0 and current < styles.len():  # cpu-lane-loop-ok: ancestor walk looking for a fractional-opacity ancestor of an iframe; bound is tree depth, not an element count - flagged by the gate's any-loop-header approximation of the design's bound-based rule
+        if styles[current].opacity_pct < 100:
+            return true
+        current = nodes[current].parent
+    false
+
+fn _simple_web_draw_ir_has_material_request(
+    composition: DrawIrComposition
+) -> bool:
+    for batch in composition.batches:  # cpu-lane-loop-ok: batch level of a single linear scan of one admitted iframe child composition; total work is that child composition's size, once per embedded iframe
+        for command in batch.commands:  # cpu-lane-loop-ok: command level of the same one-shot material-request scan over an iframe child composition
+            for prop in command.computed_style:  # cpu-lane-loop-ok: property level of the same scan; bound is one command's computed_style count and it returns on the first match
+                if prop.key == "wm-material-request":
+                    return true
+    false
+
+fn _simple_web_layout_merge_material_witness(
+    witnesses: [SimpleWebLayoutMaterialWitness]
+) -> SimpleWebLayoutMaterialWitness:
+    var cpu_count = 0
+    var solid_count = 0
+    var cpu_parts: [text] = []
+    var solid_parts: [text] = []
+    var cpu_single_hash = ""
+    var solid_single_hash = ""
+    for witness in witnesses:  # cpu-lane-loop-ok: folds the parent witness plus one witness per embedded iframe; bound is the iframe child count
+        if witness.cpu_composited_count > 0:
+            cpu_count = cpu_count + witness.cpu_composited_count
+            cpu_parts.push("{witness.cpu_composited_count}:{witness.cpu_composited_sha256}")
+            cpu_single_hash = witness.cpu_composited_sha256
+        if witness.solid_material_count > 0:
+            solid_count = solid_count + witness.solid_material_count
+            solid_parts.push("{witness.solid_material_count}:{witness.solid_material_sha256}")
+            solid_single_hash = witness.solid_material_sha256
+    SimpleWebLayoutMaterialWitness(
+        cpu_composited_count: cpu_count,
+        cpu_composited_sha256: if cpu_parts.len() == 0: "" elif cpu_parts.len() == 1: cpu_single_hash else: sha256_text("v1\n" + cpu_parts.join("\n") + "\n"),
+        solid_material_count: solid_count,
+        solid_material_sha256: if solid_parts.len() == 0: "" elif solid_parts.len() == 1: solid_single_hash else: sha256_text("v1\n" + solid_parts.join("\n") + "\n")
+    )
+
+fn _simple_web_layout_segment_batch(
+    source: DrawIrSourceInfo, embedding: DrawIrEmbeddingConfig,
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    opacity_root: i32, opacity_root_count: i32,
+    segment_index: i32, commands: [DrawIrCommand]
+) -> DrawIrBatch:
+    if opacity_root >= 0:
+        val bounded = opacity_root_count > 1
+        val opacity_embedding = draw_ir_embedding_config(
+            "html-opacity-{opacity_root}",
+            _html_draw_ir_component_id(nodes[opacity_root], opacity_root),
+            if bounded: boxes.bx[opacity_root] else: 0,
+            if bounded: boxes.by[opacity_root] else: 0,
+            if bounded: boxes.bw[opacity_root] else: embedding.width,
+            if bounded: boxes.bh[opacity_root] else: embedding.height,
+            0, styles[opacity_root].opacity_pct * 10, true
+        )
+        return draw_ir_batch_with_source(
+            "html-layout-{segment_index}", DRAW_IR_BACKEND_CPU,
+            opacity_embedding, commands, source
+        )
+    draw_ir_batch_with_source(
+        "html-layout-{segment_index}", DRAW_IR_BACKEND_CPU,
+        embedding, commands, source
+    )
+
+fn _simple_web_layout_compose_retained(
+    html: text,
+    nodes: [HNode],
+    rules: Rules,
+    child_index: HtmlChildIndex,
+    base_styles: [Style],
+    styles: [Style],
+    raw_boxes: LayoutResult,
+    animation_registry: KeyframeRegistry,
+    animation_schedule: _SimpleWebAnimationSchedule,
+    animation_time_ms: i64,
+    animation_property_work_count: i64,
+    material_entries: [text],
+    material_counts: [i64],
+    cpu_material_nodes: [i32],
+    solid_material_nodes: [i32],
+    width: i32,
+    height: i32,
+    vector_fonts: bool,
+    scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    images: [SimpleOsHostGpuImageResource],
+    depth: i32
+) -> SimpleWebLayoutDrawIrResult:
+    val scrolled = _simple_web_scrolled_layout(
+        nodes, styles, raw_boxes, width, height, scroll_y
+    )
+    val boxes = scrolled.boxes
+    val source = draw_ir_source_html_ast(
+        "simple_web_html_layout_renderer", "html", "", "", "",
+        "layout", "1"
+    )
+    val embedding = draw_ir_embedding_config(
+        "html", "document", 0, 0, width, height, 0, 1000, true
+    )
+    val input_hit_build = _simple_web_input_text_hit_build(
+        nodes, styles, child_index, boxes, width, height, overlay
+    )
+    val visible_nodes = _html_draw_ir_visible_nodes(
+        nodes, styles, boxes, width, height
+    )
+    val (commands, command_owner_nodes) = _html_draw_ir_commands(
+        nodes, styles, boxes, width, height, vector_fonts,
+        input_hit_build.target_keys, overlay, visible_nodes, images
+    )
+    val canvas_color = _web_canvas_background(
+        nodes, styles, argb(255, 255, 255)
+    )
+    val canvas = _html_draw_ir_canvas_command(width, height, canvas_color)
+    var batches: [DrawIrBatch] = []
+    var child_witnesses: [SimpleWebLayoutMaterialWitness] = []
+    val (opacity_found, opacity_command_roots, opacity_root_count) = (
+        _simple_web_fractional_opacity_command_roots(
+            nodes, styles, command_owner_nodes)
+    )
+    var opacity_supported = (
+        opacity_found and opacity_command_roots.len() == commands.len()
+    )
+    if opacity_supported and opacity_root_count > 1:
+        var admission_index = 0
+        var admitted_root = -1
+        var surface_pixel_work: i64 = 0
+        val viewport_pixel_work = width.to_i64() * height.to_i64()
+        var pooled_width = -1
+        var pooled_height = -1
+        while admission_index < commands.len():  # cpu-lane-loop-ok: opacity-surface admission scan over the emitted commands; bound is the command count and it runs only when more than one opacity root exists
+            val root = opacity_command_roots[admission_index]
+            if root >= 0 and (
+                not _simple_web_fractional_opacity_root_bounded(
+                    styles, boxes, root, width, height
+                ) or _simple_web_draw_ir_css_background(
+                    commands[admission_index]
+                )
+            ):
+                opacity_supported = false
+            if root >= 0 and root != admitted_root:
+                if pooled_width < 0:
+                    pooled_width = boxes.bw[root]
+                    pooled_height = boxes.bh[root]
+                elif (
+                    boxes.bw[root] != pooled_width or
+                    boxes.bh[root] != pooled_height
+                ):
+                    opacity_supported = false
+                surface_pixel_work = surface_pixel_work + (
+                    boxes.bw[root].to_i64() * boxes.bh[root].to_i64()
+                )
+                if surface_pixel_work > viewport_pixel_work:
+                    opacity_supported = false
+                admitted_root = root
+            admission_index = admission_index + 1
+    # One backwards-free prepass gives each owner a single insertion point.
+    # Rechecking the remaining command suffix for every iframe made this path
+    # quadratic on pages with many independently painted replaced elements.
+    var last_command_index_by_owner: [i32] = [-1; nodes.len()]
+    var command_index = 0
+    while command_index < command_owner_nodes.len():  # cpu-lane-loop-ok: backwards-free prepass recording each owner's last command index; bound is the command count and it exists precisely to replace a former quadratic suffix rescan (see comment above)
+        val owner = command_owner_nodes[command_index]
+        if owner >= 0 and owner < last_command_index_by_owner.len():
+            last_command_index_by_owner[owner] = command_index
+        command_index = command_index + 1
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
+    )
+    var run_root = -1
+    var run_commands: [DrawIrCommand] = [canvas]
+    var segment_index = 0
+    command_index = 0
+    while command_index < commands.len():  # cpu-lane-loop-ok: the main compose pass: one visit per emitted DrawIR command to cut opacity/iframe batch boundaries; bound is the command count, CPU lane builds DrawIR by design
+        val next_root = if opacity_supported:
+            opacity_command_roots[command_index]
+        else:
+            -1
+        if next_root != run_root:
+            if run_commands.len() > 0:
+                batches.push(_simple_web_layout_segment_batch(
+                    source, embedding, nodes, styles, boxes, run_root,
+                    opacity_root_count, segment_index, run_commands
+                ))
+                segment_index = segment_index + 1
+            run_root = next_root
+            run_commands = []
+        val command = if run_root >= 0 and opacity_root_count > 1:
+            _simple_web_draw_ir_translate_command(
+                commands[command_index], 0 - boxes.bx[run_root],
+                0 - boxes.by[run_root]
+            )
+        else:
+            commands[command_index]
+        run_commands.push(command)
+        val owner = command_owner_nodes[command_index]
+        if (
+            owner >= 0 and owner < nodes.len() and
+            nodes[owner].tag == "iframe" and
+            last_command_index_by_owner[owner] == command_index
+        ):
+            val st = styles[owner]
+            val content = draw_ir_rect_bounds(
+                boxes.bx[owner] + st.border_l + st.pad_l,
+                boxes.by[owner] + st.border_t + st.pad_t,
+                if boxes.bw[owner] - st.border_l - st.border_r - st.pad_l - st.pad_r > 0: boxes.bw[owner] - st.border_l - st.border_r - st.pad_l - st.pad_r else: 0,
+                if boxes.bh[owner] - st.border_t - st.border_b - st.pad_t - st.pad_b > 0: boxes.bh[owner] - st.border_t - st.border_b - st.pad_t - st.pad_b else: 0
+            )
+            val paint_clip = paint_clip_at(clip_cache, owner)
+            val visible = draw_ir_rect_intersection(content,
+                draw_ir_rect_bounds(paint_clip.x0, paint_clip.y0,
+                    paint_clip.x1 - paint_clip.x0, paint_clip.y1 - paint_clip.y0))
+            if visible.width > 0 and visible.height > 0:
+                val owner_id = _html_draw_ir_component_id(nodes[owner], owner)
+                val placeholder = draw_ir_rect_clipped(
+                    "{owner_id}:iframe-placeholder", content.x, content.y,
+                    content.width, content.height, WEB_IFRAME_PLACEHOLDER,
+                    visible
+                )
+                val now = rt_time_now_micros()
+                if (
+                    depth + 1 > WEB_IFRAME_DEPTH_CAP or
+                    now >= _web_render_deadline_us or
+                    _simple_web_iframe_fractional_ancestor(nodes, styles, owner)
+                ):
+                    if run_root >= 0 and opacity_root_count > 1:
+                        run_commands.push(_simple_web_draw_ir_translate_command(
+                            placeholder, 0 - boxes.bx[run_root],
+                            0 - boxes.by[run_root]
+                        ))
+                    else:
+                        run_commands.push(placeholder)
+                else:
+                    val save_deadline = _web_render_deadline_us
+                    val child_deadline = now + (save_deadline - now) / 2
+                    val child_html = _web_iframe_child_html(nodes[owner])
+                    val child_rules = if attr_value(nodes[owner].attrs_raw, "space").trim().lower() == "shared": rules else: _web_empty_rules()
+                    val child = _simple_web_layout_compose_document(
+                        child_html, content.width, content.height,
+                        vector_fonts, animation_time_ms, 0,
+                        browser_text_input_overlay_empty(), [], [], child_rules,
+                        depth + 1, child_deadline
+                    )
+                    _web_render_deadline_us = save_deadline
+                    if _simple_web_draw_ir_has_material_request(child.composition):
+                        if run_root >= 0 and opacity_root_count > 1:
+                            run_commands.push(_simple_web_draw_ir_translate_command(
+                                placeholder, 0 - boxes.bx[run_root],
+                                0 - boxes.by[run_root]
+                            ))
+                        else:
+                            run_commands.push(placeholder)
+                    else:
+                        # An admitted child is the only case that needs a new
+                        # flat batch boundary. Denials stay in this group.
+                        batches.push(_simple_web_layout_segment_batch(
+                            source, embedding, nodes, styles, boxes, run_root,
+                            opacity_root_count, segment_index, run_commands
+                        ))
+                        segment_index = segment_index + 1
+                        run_commands = []
+                        val embedded = draw_ir_embed_composition(
+                            child.composition, content.x, content.y,
+                            visible, "{owner_id}:iframe:{depth + 1}",
+                            owner_id, 0
+                        )
+                        for batch in embedded:  # cpu-lane-loop-ok: appends the batches produced by one embedded iframe composition; bound is that child's batch count
+                            batches.push(batch)
+                        child_witnesses.push(child.material_witness)
+        command_index = command_index + 1
+    if run_commands.len() > 0:
+        batches.push(_simple_web_layout_segment_batch(
+            source, embedding, nodes, styles, boxes, run_root,
+            opacity_root_count, segment_index, run_commands
+        ))
+    val composition = draw_ir_composition(
+        "html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches
+    )
+    val parent_material_witness = _simple_web_visible_material_witness(
+        material_entries, cpu_material_nodes, solid_material_nodes,
+        visible_nodes
+    )
+    val material_witness = _simple_web_layout_merge_material_witness(
+        [parent_material_witness] + child_witnesses
+    )
+    SimpleWebLayoutDrawIrResult(
+        composition: composition,
+        render_degraded: simple_web_layout_last_render_degraded(),
+        degrade_reason: simple_web_layout_last_render_degrade_reason(),
+        material_fallback: simple_web_layout_material_provenance_after_execution(
+            material_witness, 0, 1, 1, 0
+        ),
+        material_witness: material_witness,
+        animation_end_ms: animation_schedule.animation_end_ms,
+        animation_next_ms: animation_schedule.animation_next_ms,
+        animation_property_work_count: animation_property_work_count,
+        hit_index: SimpleWebLayoutHitIndex(
+            nodes: nodes,
+            styles: styles,
+            child_index: child_index,
+            boxes: boxes,
+            width: width,
+            height: height,
+            input_text_hits: input_hit_build.hits
+        ),
+        resolved_input_view_start_byte:
+            input_hit_build.resolved_view_start_byte,
+        resolved_scroll_y: scrolled.resolved_scroll_y,
+        max_scroll_y: scrolled.max_scroll_y,
+        document_html: html,
+        rules: rules,
+        base_styles: base_styles,
+        raw_boxes: raw_boxes,
+        animation_registry: animation_registry,
+        material_entries: material_entries,
+        material_counts: material_counts,
+        cpu_material_nodes: cpu_material_nodes,
+        solid_material_nodes: solid_material_nodes
+    )
+
+# Comparability gate for the Draw IR display list, the exact analogue of
+# `simple_web_layout_software_pixels_presentable` for the pixel oracle: a
+# composition truncated by budget exhaustion is NOT a display list of the page
+# and must never be compared against another engine's artifact as though it
+# were. Callers that diff, gate, or capture evidence from a composition test
+# this first; a false answer means "these are whatever commands got emitted
+# before the clock ran out", not "the page has no elements".
+pub fn simple_web_layout_draw_ir_comparable(
+    result: SimpleWebLayoutDrawIrResult
+) -> bool:
+    not result.render_degraded
+
+# Per-render decision string in the campaign's established shape (compare
+# `simple_web_layout_software_present_decision`): every decline names a concrete
+# reason, so a one-command composition from exhaustion reads as an explicit
+# refusal rather than a successful render of nothing.
+pub fn simple_web_layout_draw_ir_compare_decision(
+    result: SimpleWebLayoutDrawIrResult
+) -> text:
+    if result.render_degraded:
+        return "draw-ir:declined:compared=none:reason=budget-exhausted:" + result.degrade_reason
+    "draw-ir:comparable:full-display-list:reason=budget-complete"
+
+fn _simple_web_layout_compose_document(
+    html: text, width: i32, height: i32, vector_fonts: bool,
+    animation_time_ms: i64, scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource],
+    extra_rules: Rules, depth: i32, deadline_us: i64
+) -> SimpleWebLayoutDrawIrResult:
+    val render_start_us = rt_time_now_micros()
+    val _phase_on = _web_phase_trace_enabled()
+    if deadline_us > 0:
+        _web_render_deadline_us = deadline_us
+    val budget_us = if _web_render_deadline_us > render_start_us:
+        _web_render_deadline_us - render_start_us
+    else:
+        1
+    val nodes = parse_html(html)
+    # Pass every parameter explicitly. An omitted trailing default was
+    # observed taking a non-default value in the freestanding SimpleOS kernel
+    # build (the `trace_stages` receipt fired from this call site even though
+    # the only trace-enabled caller never ran), so this render path does not
+    # rely on default-argument materialization.
+    val own_rules = extract_css_vw(html, width, false)
+    val rules = Rules(
+        group_parts: extra_rules.group_parts + own_rules.group_parts,
+        group_specificities: extra_rules.group_specificities + own_rules.group_specificities,
+        decls: extra_rules.decls + own_rules.decls,
+        important_decls: extra_rules.important_decls + own_rules.important_decls
+    )
+    # A document that tokenizes but yields no element nodes is always a defect,
+    # never honest content: every downstream stage (style, layout, material
+    # provenance) then degrades silently while the frame still reports
+    # "rendered". Report the inputs that separate an empty document from a
+    # collapsed tokenizer so such a frame stays attributable.
+    if (nodes.len() <= 1 and
+        _simple_web_html_source_admitted(html, SIMPLE_WEB_MAX_HTML_BYTES)):
+        # `split_parts` comes from the runtime `split` builtin; `lt_portable`
+        # counts the same "<" in plain Simple. On the 2026-07-26 SimpleOS run
+        # this receipt read `html_len=5794 nodes=0 split_parts=18` — far too few
+        # parts for 5.8 KB of markup — while every `[web-scan]` divergence and
+        # bail receipt stayed silent, i.e. the collapse is upstream of the
+        # tokenizer. These two counters separate the remaining candidates: if
+        # they disagree, `split` truncated; if they agree and are both small,
+        # the document handed to us was already short of markup and the defect
+        # is in whoever produced it (scene_to_html).
+        val split_parts = html.split("<").len()
+        var lt_portable = 0
+        var lt_scan = 0
+        while lt_scan < html.len():  # cpu-lane-loop-ok: per-character '<' count over the source; runs only inside the degenerate-parse diagnostic branch (nodes.len() <= 1), which is a defect receipt, never a healthy frame
+            if html.char_code_at(lt_scan) == 60:
+                lt_portable = lt_portable + 1
+            lt_scan = lt_scan + 1
+        print "[web-layout] degenerate-parse html_len={html.len()} nodes={nodes.len()} split_parts={split_parts} lt_portable={lt_portable} rules={rules.group_parts.len()}"
+        # 2026-07-26 guest run answered the counter question: split_parts=18,
+        # lt_portable=17 — they AGREE, so `split` is honest and the document
+        # really has only 17 tags in 5.8 KB. The producer is the defect. Dump
+        # raw char codes (freestanding-safe: integers only, no text handles)
+        # from the head and the middle so the next run shows what the bulk of
+        # the document actually is.
+        var head_codes = ""
+        var dump_i = 0
+        while dump_i < 96 and dump_i < html.len():  # cpu-lane-loop-ok: fixed 96-character head dump, min(96, html.len()) - a literal bound, not a string length, and only on the degenerate-parse diagnostic branch
+            head_codes = "{head_codes} {html.char_code_at(dump_i)}"
+            dump_i = dump_i + 1
+        print "[web-layout] degenerate-head-codes{head_codes}"
+        var mid_codes = ""
+        var mid_i = html.len() / 2
+        val mid_end = mid_i + 96
+        while mid_i < mid_end and mid_i < html.len():  # cpu-lane-loop-ok: fixed 96-character mid-document dump (mid_end = mid_i + 96) - a literal bound, not a string length, and only on the degenerate-parse diagnostic branch
+            mid_codes = "{mid_codes} {html.char_code_at(mid_i)}"
+            mid_i = mid_i + 1
+        print "[web-layout] degenerate-mid-codes{mid_codes}"
+        # 2026-07-26 second guest run: head decodes to a well-formed
+        # `<!DOCTYPE html><html data-wm-theme=...` shell and the middle is the
+        # <style> payload, and the HOST parses this exact shape to nodes=5 —
+        # so the producer is honest and the collapse is a guest-side per-part
+        # parse divergence. Dump each split part's opening codes so the next
+        # guest run shows which parts the parser mis-classified.
+        val dump_parts = html.split("<")
+        var part_i = 1
+        while part_i < dump_parts.len():  # cpu-lane-loop-ok: one diagnostic line per '<'-split part; degenerate-parse branch only, where the document is by definition tiny (the receipt fires at nodes.len() <= 1)
+            val part = dump_parts[part_i]
+            var part_codes = ""
+            var pc = 0
+            while pc < 12 and pc < part.len():  # cpu-lane-loop-ok: fixed 12-character prefix dump per split part - a literal bound, not a string length; degenerate-parse diagnostic branch only
+                part_codes = "{part_codes} {part.char_code_at(pc)}"
+                pc = pc + 1
+            print "[web-layout] degenerate-part i={part_i} len={part.len()} codes{part_codes}"
+            part_i = part_i + 1
+    val child_index = build_child_index(nodes)
+    if _phase_on:
+        print "[web-phase] phase=parse elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000} nodes={nodes.len()}"
+    _web_budget_rearm(render_start_us + budget_us * 7 / 10)
+    var material_entries: [text] = ["", ""]
+    var material_counts: [i64] = [0, 0]
+    var cpu_material_nodes: [i32] = []
+    var solid_material_nodes: [i32] = []
+    if _phase_on:
+        print "[web-phase] phase=style_start elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+    val base_styles = compute_styles_with_material(
+        nodes, rules, child_index, false, vector_fonts,
+        material_entries, material_counts,
+        cpu_material_nodes, solid_material_nodes)
+    if _phase_on:
+        print "[web-phase] phase=style_end elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+    var styles = base_styles
+    val animation_registry = _simple_web_extract_keyframes(html)
+    var animation_schedule = _SimpleWebAnimationSchedule(
+        animation_end_ms: -1,
+        animation_next_ms: -1
+    )
+    var animation_property_work_count: i64 = 0
+    if animation_registry.entries.len() > 0:
+        val animation_frame_index = _simple_web_animation_frame_index(
+            styles, nodes, child_index, animation_registry,
+            animation_instances, false
+        )
+        animation_schedule = _simple_web_layout_animation_schedule(
+            styles, animation_time_ms, animation_instances,
+            animation_frame_index
+        )
+        if animation_time_ms >= 0:
+            val animation_apply = _apply_css_animations(
+                nodes, styles, animation_registry, animation_time_ms,
+                animation_instances, animation_frame_index
+            )
+            styles = animation_apply.styles
+            animation_property_work_count = (
+                animation_apply.property_work_count
+            )
+    styles = simple_web_resolve_collapsed_table_borders(
+        nodes, child_index, styles
+    )
+    _web_budget_rearm(render_start_us + budget_us * 9 / 10)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val raw_boxes = layout(
+        nodes,
+        styles,
+        child_index,
+        0,
+        0,
+        0,
+        width,
+        height,
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        empty_starts,
+        empty_ends,
+        neg_one_i32_list(node_count)
+    )
+    if _phase_on:
+        print "[web-phase] phase=layout elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+    val _phase_composed = _simple_web_layout_compose_retained(
+        html, nodes, rules, child_index, base_styles, styles, raw_boxes,
+        animation_registry, animation_schedule, animation_time_ms,
+        animation_property_work_count,
+        material_entries, material_counts, cpu_material_nodes,
+        solid_material_nodes, width, height, vector_fonts, scroll_y,
+        overlay, images, depth
+    )
+    if _phase_on:
+        # "compose_shaping" -- _simple_web_layout_compose_retained builds the
+        # DrawIrComposition, which is where per-#text-node glyph shaping
+        # (_html_draw_ir_command's resolve_font_metrics_with_language call in
+        # simple_web_html_layout_renderer_paint_layout.spl) actually runs, a
+        # SECOND font-metric resolution per #text node distinct from style's.
+        print "[web-phase] phase=compose_shaping elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+    _phase_composed
+
+pub class SimpleWebRetainedLayoutPreparation:
+    html: text
+    nodes: [HNode]
+    rules: Rules
+    child_index: HtmlChildIndex
+    base_styles: [Style]
+    styles: [Style]
+    animation_registry: KeyframeRegistry
+    animation_schedule: _SimpleWebAnimationSchedule
+    animation_time_ms: i64
+    animation_property_work_count: i64
+    material_entries: [text]
+    material_counts: [i64]
+    cpu_material_nodes: [i32]
+    solid_material_nodes: [i32]
+    width: i32
+    height: i32
+    vector_fonts: bool
+    scroll_y: i32
+    overlay: BrowserTextInputOverlay
+    images: [SimpleOsHostGpuImageResource]
+
+pub fn simple_web_layout_prepare_retained(
+    html: text, width: i32, height: i32, vector_fonts: bool,
+    animation_time_ms: i64, scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebRetainedLayoutPreparation:
+    val env_override = _web_render_budget_ms_env_override()
+    val area_floor_ms = (width as i64) * (height as i64) / 16
+    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
+    _web_budget_begin(if env_override > 0: env_override else: default_budget_ms)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    var material_entries: [text] = ["", ""]
+    var material_counts: [i64] = [0, 0]
+    var cpu_material_nodes: [i32] = []
+    var solid_material_nodes: [i32] = []
+    val base_styles = compute_styles_with_material(
+        nodes, rules, child_index, false, vector_fonts,
+        material_entries, material_counts,
+        cpu_material_nodes, solid_material_nodes
+    )
+    var styles = base_styles
+    val animation_registry = _simple_web_extract_keyframes(html)
+    var animation_schedule = _SimpleWebAnimationSchedule(
+        animation_end_ms: -1, animation_next_ms: -1
+    )
+    var animation_property_work_count: i64 = 0
+    if animation_registry.entries.len() > 0:
+        val animation_frame_index = _simple_web_animation_frame_index(
+            styles, nodes, child_index, animation_registry,
+            animation_instances, false
+        )
+        animation_schedule = _simple_web_layout_animation_schedule(
+            styles, animation_time_ms, animation_instances,
+            animation_frame_index
+        )
+        if animation_time_ms >= 0:
+            val animation_apply = _apply_css_animations(
+                nodes, styles, animation_registry, animation_time_ms,
+                animation_instances, animation_frame_index
+            )
+            styles = animation_apply.styles
+            animation_property_work_count = animation_apply.property_work_count
+    styles = simple_web_resolve_collapsed_table_borders(
+        nodes, child_index, styles
+    )
+    SimpleWebRetainedLayoutPreparation(
+        html: html, nodes: nodes, rules: rules, child_index: child_index,
+        base_styles: base_styles, styles: styles,
+        animation_registry: animation_registry,
+        animation_schedule: animation_schedule,
+        animation_time_ms: animation_time_ms,
+        animation_property_work_count: animation_property_work_count,
+        material_entries: material_entries, material_counts: material_counts,
+        cpu_material_nodes: cpu_material_nodes,
+        solid_material_nodes: solid_material_nodes,
+        width: width, height: height, vector_fonts: vector_fonts,
+        scroll_y: scroll_y, overlay: overlay, images: images
+    )
+
+pub fn simple_web_layout_empty_retained() -> LayoutResult:
+    LayoutResult(
+        bx: [], by: [], bw: [], bh: [], wrap_starts: [], wrap_ends: [],
+        intrinsic_widths: [], height: 0
+    )
+
+pub fn simple_web_layout_compose_prepared(
+    prepared: SimpleWebRetainedLayoutPreparation,
+    raw_boxes: LayoutResult
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_compose_retained(
+        prepared.html, prepared.nodes, prepared.rules, prepared.child_index,
+        prepared.base_styles, prepared.styles, raw_boxes,
+        prepared.animation_registry, prepared.animation_schedule,
+        prepared.animation_time_ms,
+        prepared.animation_property_work_count,
+        prepared.material_entries, prepared.material_counts,
+        prepared.cpu_material_nodes, prepared.solid_material_nodes,
+        prepared.width, prepared.height, prepared.vector_fonts,
+        prepared.scroll_y, prepared.overlay, prepared.images, 0
+    )
+
+fn _simple_web_layout_render_html_draw_ir_result_at_time(
+    html: text, width: i32, height: i32, vector_fonts: bool,
+    animation_time_ms: i64, scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    val env_override = _web_render_budget_ms_env_override()
+    val area_floor_ms = (width as i64) * (height as i64) / 16
+    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
+    val resolved_budget_ms = if env_override > 0: env_override else: default_budget_ms
+    _web_budget_begin(resolved_budget_ms)
+    _simple_web_layout_compose_document(
+        html, width, height, vector_fonts, animation_time_ms, scroll_y,
+        overlay, animation_instances, images, _web_empty_rules(), 0,
+        _web_render_deadline_us
+    )
+
+fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, vector_fonts, -1, 0,
+        browser_text_input_overlay_empty(), [], []
+    )
+
+pub fn simple_web_layout_animation_needs_layout(
+    prior: SimpleWebLayoutDrawIrResult
+) -> bool:
+    var registry_index_by_name: Dict<text, i32> = {}
+    var registry_index = 0
+    while registry_index < prior.animation_registry.entries.len():  # cpu-lane-loop-ok: builds the keyframe-name to index dict; bound is the declared @keyframes count
+        registry_index_by_name[
+            prior.animation_registry.entries[registry_index].name
+        ] = registry_index
+        registry_index = registry_index + 1
+    var active_entries = [false; prior.animation_registry.entries.len()]
+    for style in prior.base_styles:  # cpu-lane-loop-ok: marks which @keyframes entries any base style actually activates; bound is the base style count, once per needs-layout decision
+        if style.animation_name != "none" and style.animation_duration_ms > 0:
+            val active_index = (
+                registry_index_by_name.get(style.animation_name) ?? -1
+            )
+            if active_index >= 0:
+                active_entries[active_index] = true
+    registry_index = 0
+    for entry in prior.animation_registry.entries:  # cpu-lane-loop-ok: per-@keyframes-entry scan deciding whether any animated property forces layout; bound is the declared @keyframes count
+        if not active_entries[registry_index]:
+            registry_index = registry_index + 1
+            continue
+        for frame in entry.frames:  # cpu-lane-loop-ok: per-keyframe scan inside one active @keyframes entry; bound is that entry's declared keyframes
+            for declaration in frame.properties:  # cpu-lane-loop-ok: per-declaration scan inside one keyframe; bound is that keyframe's declared properties and it returns on the first layout-affecting property
+                val property = declaration.property.trim().lower()
+                if (
+                    property != "background-color" and
+                    property != "color" and property != "opacity"
+                ):
+                    return true
+        registry_index = registry_index + 1
+    false
+
+pub fn simple_web_layout_rerender_retained(
+    prior: SimpleWebLayoutDrawIrResult,
+    dirty_stage: text,
+    width: i32,
+    height: i32,
+    animation_time_ms: i64,
+    scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    val nodes = prior.hit_index.nodes
+    val child_index = prior.hit_index.child_index
+    var rules = prior.rules
+    var base_styles = prior.base_styles
+    var material_entries = prior.material_entries
+    var material_counts = prior.material_counts
+    var cpu_material_nodes = prior.cpu_material_nodes
+    var solid_material_nodes = prior.solid_material_nodes
+    if dirty_stage == "css":
+        rules = extract_css_vw(prior.document_html, width, false)
+        material_entries = ["", ""]
+        material_counts = [0, 0]
+        cpu_material_nodes = []
+        solid_material_nodes = []
+        base_styles = compute_styles_with_material(
+            nodes, rules, child_index, false, true,
+            material_entries, material_counts,
+            cpu_material_nodes, solid_material_nodes
+        )
+
+    var styles = if dirty_stage == "paint":
+        prior.hit_index.styles
+    else:
+        base_styles
+    var animation_schedule = _SimpleWebAnimationSchedule(
+        animation_end_ms: prior.animation_end_ms,
+        animation_next_ms: prior.animation_next_ms
+    )
+    # This diagnostic is frame-local. Retained paint-only frames do not apply
+    # animation declarations and therefore must not inherit a prior frame's
+    # work count.
+    var animation_property_work_count: i64 = 0
+    if dirty_stage != "paint" and prior.animation_registry.entries.len() > 0:
+        val animation_frame_index = _simple_web_animation_frame_index(
+            styles, nodes, child_index, prior.animation_registry,
+            animation_instances, false
+        )
+        animation_schedule = _simple_web_layout_animation_schedule(
+            styles, animation_time_ms, animation_instances,
+            animation_frame_index
+        )
+        if animation_time_ms >= 0:
+            val animation_apply = _apply_css_animations(
+                nodes, styles, prior.animation_registry, animation_time_ms,
+                animation_instances, animation_frame_index
+            )
+            styles = animation_apply.styles
+            animation_property_work_count = (
+                animation_apply.property_work_count
+            )
+    if dirty_stage != "paint":
+        styles = simple_web_resolve_collapsed_table_borders(
+            nodes, child_index, styles
+        )
+
+    var raw_boxes = prior.raw_boxes
+    if dirty_stage != "paint" and dirty_stage != "animation-paint":
+        val node_count = nodes.len() as i32
+        raw_boxes = layout(
+            nodes, styles, child_index, 0, 0, 0, width, height,
+            zero_i32_list(node_count), zero_i32_list(node_count),
+            zero_i32_list(node_count), zero_i32_list(node_count),
+            empty_i32_lists(node_count), empty_i32_lists(node_count),
+            neg_one_i32_list(node_count)
+        )
+    _simple_web_layout_compose_retained(
+        prior.document_html, nodes, rules, child_index, base_styles, styles,
+        raw_boxes, prior.animation_registry, animation_schedule,
+        animation_time_ms,
+        animation_property_work_count,
+        material_entries, material_counts, cpu_material_nodes,
+        solid_material_nodes, width, height, true, scroll_y, overlay, images, 0
+    )
+
+pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
+    _simple_web_layout_render_html_draw_ir_result(html, width, height, true).composition
+
+pub fn simple_web_layout_render_html_draw_ir_with_images(
+    html: text, width: i32, height: i32,
+    images: [SimpleOsHostGpuImageResource]
+) -> DrawIrComposition:
+    simple_web_layout_render_html_draw_ir_result_with_images(
+        html, width, height, images
+    ).composition
+
+pub fn simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result(html, width, height, true)
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_images(
+    html: text, width: i32, height: i32,
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, -1, 0,
+        browser_text_input_overlay_empty(), [], images
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_at_time(html: text, width: i32, height: i32, animation_time_ms: i64) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, 0,
+        browser_text_input_overlay_empty(), [], []
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_images(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, 0,
+        browser_text_input_overlay_empty(), [], images
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, 0,
+        browser_text_input_overlay_empty(), animation_instances, []
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, 0,
+        browser_text_input_overlay_empty(), animation_instances, images
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    overlay: BrowserTextInputOverlay
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, 0, overlay, [], []
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_time_with_images(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    overlay: BrowserTextInputOverlay,
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, 0, overlay, [], images
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    scroll_y: i32, overlay: BrowserTextInputOverlay
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, scroll_y, overlay, [], []
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    scroll_y: i32, overlay: BrowserTextInputOverlay,
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, scroll_y, overlay,
+        [], images
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    scroll_y: i32, overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, scroll_y, overlay,
+        animation_instances, []
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    scroll_y: i32, overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, scroll_y, overlay,
+        animation_instances, images
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_cpu_bitmap(html: text, width: i32, height: i32) -> DrawIrComposition:
+    _simple_web_layout_render_html_draw_ir_result(html, width, height, false).composition
+
+pub fn simple_web_layout_render_html_draw_ir_cpu_bitmap_with_images(
+    html: text, width: i32, height: i32,
+    images: [SimpleOsHostGpuImageResource]
+) -> DrawIrComposition:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, false, -1, 0,
+        browser_text_input_overlay_empty(), [], images
+    ).composition
+
+# Stage-timed variant of the software render entry: prints per-stage wall
+# times so render-cost regressions can be localized without a debugger.
+pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
+    _web_budget_begin(budget_ms)
+    val t0 = rt_time_now_micros()
+    val nodes = parse_html(html)
+    val t1 = rt_time_now_micros()
+    print "[layout-trace] parse_html_ms={(t1 - t0) / 1000} nodes={nodes.len()}"
+    val rules = extract_css_vw(html, width, true)
+    val t2 = rt_time_now_micros()
+    print "[layout-trace] extract_css_ms={(t2 - t1) / 1000}"
+    val child_index = build_child_index(nodes)
+    val t_child_index = rt_time_now_micros()
+    print "[layout-trace] build_child_index_ms={(t_child_index - t2) / 1000}"
+    val styles = compute_styles(nodes, rules, child_index, true, true)
+    val t3 = rt_time_now_micros()
+    print "[layout-trace] compute_styles_ms={(t3 - t_child_index) / 1000}"
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(nodes, styles, child_index, 0, 0, 0, width, height, zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), empty_starts, empty_ends, neg_one_i32_list(node_count))
+    val t4 = rt_time_now_micros()
+    print "[layout-trace] layout_ms={(t4 - t3) / 1000}"
+    var trace_i = 0
+    while trace_i < node_count:  # cpu-lane-loop-ok: one pass over nodes printing the html/body/main box receipt; bound is node_count and this is the stage-timed diagnostic render entry point only
+        val trace_node = nodes[trace_i]
+        if trace_node.tag == "html" or trace_node.tag == "body" or trace_node.tag == "main":
+            val trace_style = styles[trace_i]
+            print "[layout-trace-box] tag={trace_node.tag} x={boxes.bx[trace_i]} y={boxes.by[trace_i]} w={boxes.bw[trace_i]} h={boxes.bh[trace_i]} bg={trace_style.bg} gradient_from={trace_style.background_gradient_from} gradient_to={trace_style.background_gradient_to} opacity={trace_style.opacity_pct}"
+        trace_i = trace_i + 1
+    val white = argb(255, 255, 255)
+    val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
+    var fb = browser_layout_framebuffer_filled(base, width, height)
+    val t_init = rt_time_now_micros()
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    val t_paint = rt_time_now_micros()
+    var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    val t5 = rt_time_now_micros()
+    print "[layout-trace] framebuffer_init_ms={(t_init - t4) / 1000} trace_setup_ms={(t_paint - t_init) / 1000} paint_draw_ms={(t5 - t_paint) / 1000} paint_ms={(t5 - t4) / 1000} widget_mode={widget_mode}"
+    painted
+
+class SimpleWebLayoutPixelResult:
+    pixels: [u32]
+    material_fallback: WebRenderMaterialFallbackProvenance
+    # Budget-exhaustion verdict, captured at the moment this result was built.
+    #
+    # `pixels` alone cannot express exhaustion: the framebuffer is allocated at
+    # width*height BEFORE paint, so a render that trips its deadline during the
+    # style cascade returns a correctly-sized, entirely uniform buffer that is
+    # shaped exactly like a successful render of a blank page. That made a
+    # comparison against this oracle pass by both sides being empty.
+    #
+    # The module-global `simple_web_layout_last_render_degraded()` is NOT a
+    # substitute: it is cleared by the next `_web_budget_begin`, so a caller
+    # that renders the oracle, then renders the lane, then compares, reads the
+    # LANE's status. These two fields travel with the result and stay valid for
+    # its whole lifetime.
+    render_degraded: bool
+    # "" when complete; otherwise the WEB_BUDGET_SITE_* name of the first
+    # exhaustion exit taken (e.g. "style-cascade", "paint-text").
+    degrade_reason: text
+
+# Presentability gate for the CPU software oracle, the analogue of
+# `_web_gpu_readback_device_proven` for the GPU lane: a page truncated by
+# budget exhaustion is NOT a rendered page and must never be published as one.
+# Callers that present, compare, or capture evidence from these pixels test
+# this first; a false answer means "the pixels are whatever got done before the
+# clock ran out", not "the page is blank".
+pub fn simple_web_layout_software_pixels_presentable(
+    result: SimpleWebLayoutPixelResult
+) -> bool:
+    not result.render_degraded
+
+# Per-render decision string in the campaign's established shape (compare
+# `simple_web_layout_render_html_gpu_first_decision`): every decline names a
+# concrete reason, so a blank page from exhaustion reads as an explicit
+# refusal rather than a successful render of nothing.
+pub fn simple_web_layout_software_present_decision(
+    result: SimpleWebLayoutPixelResult
+) -> text:
+    if result.render_degraded:
+        return "software-oracle:declined:presented=none:reason=budget-exhausted:" + result.degrade_reason
+    "software-oracle:presented:full-frame:reason=budget-complete"
+
+# Probe entry: run the CPU software oracle once and return its decision string.
+# Mirrors simple_web_layout_render_html_gpu_first_decision so a spec can assert
+# the honest verdict of a single render without threading the result struct.
+pub fn simple_web_layout_render_html_software_decision(
+    html: text, width: i32, height: i32, budget_ms: i64
+) -> text:
+    simple_web_layout_software_present_decision(
+        simple_web_layout_render_html_software_result(html, width, height, budget_ms)
+    )
+
+pub fn simple_web_layout_render_html_software_result(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> SimpleWebLayoutPixelResult:
+    # Stage-local budget allocation: a single wall-clock budget is partitioned
+    # across style -> layout -> paint so a phase that consumes its whole slice
+    # (compute_styles on a hostile/huge real page, in practice) doesn't zero out
+    # every later phase. Total wall-clock never exceeds the caller's budget_ms —
+    # only the boundary between phases moves. See _web_budget_rearm().
+    val render_start_us = rt_time_now_micros()
+    val env_override = _web_render_budget_ms_env_override()
+    val area_floor_ms = (width as i64) * (height as i64) / 16
+    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
+    val resolved_budget_ms = if budget_ms <= 0 or budget_ms == WEB_RENDER_BUDGET_MS:
+        if env_override > 0: env_override else: default_budget_ms
+    else:
+        budget_ms
+    _web_budget_begin(resolved_budget_ms)
+    val budget_us = resolved_budget_ms * 1000
+    val nodes = parse_html(html)
+    # Pass every parameter explicitly. An omitted trailing default was
+    # observed taking a non-default value in the freestanding SimpleOS kernel
+    # build (the `trace_stages` receipt fired from this call site even though
+    # the only trace-enabled caller never ran), so this render path does not
+    # rely on default-argument materialization.
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    # Style gets at most 70% of the total budget.
+    _web_budget_rearm(render_start_us + budget_us * 7 / 10)
+    var material_entries: [text] = ["", ""]
+    var material_counts: [i64] = [0, 0]
+    var cpu_material_nodes: [i32] = []
+    var solid_material_nodes: [i32] = []
+    val styles = compute_styles_with_material(
+        nodes, rules, child_index, false, true,
+        material_entries, material_counts,
+        cpu_material_nodes, solid_material_nodes)
+    # Layout always gets a slice up to 90%, even if style spent its whole 70%.
+    _web_budget_rearm(render_start_us + budget_us * 9 / 10)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(
+        nodes,
+        styles,
+        child_index,
+        0,
+        0,
+        0,
+        width,
+        height,
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        empty_starts,
+        empty_ends,
+        neg_one_i32_list(node_count)
+    )
+    # Paint gets the final slice: the original full deadline.
+    _web_budget_rearm(render_start_us + budget_us)
+    val white = argb(255, 255, 255)
+    val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
+    var fb = browser_layout_framebuffer_filled(base, width, height)
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    # Tile-render-culling dispatch site (doc/03_plan/ui/rendering/
+    # tile_render_culling_plan.md): SIMPLE_WEB_TILE_PAINT=1 routes the paint
+    # through the tiled lane. Default off — the flag-off path below is the
+    # unmodified classic painter, byte-identical to before this feature.
+    var painted = if tile_paint_flag_enabled() and not widget_mode:
+        paint_tiled(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode, 0, height)
+    else:
+        paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    val material_witness = _simple_web_visible_material_witness(
+        material_entries, cpu_material_nodes, solid_material_nodes,
+        _html_draw_ir_visible_nodes(nodes, styles, boxes, width, height)
+    )
+    # Capture the budget verdict HERE, while it still describes THIS render.
+    # Reading the global later would report whichever render ran most recently.
+    SimpleWebLayoutPixelResult(
+        pixels: painted,
+        material_fallback: simple_web_layout_material_provenance_after_execution(
+            material_witness, 0, painted.len(), width * height, 0),
+        render_degraded: simple_web_layout_last_render_degraded(),
+        degrade_reason: simple_web_layout_last_render_degrade_reason()
+    )
+
+# Spec/benchmark entry for the CPU tile-render-culling lane: renders `html`
+# into a full document-space framebuffer (width x height) and, when `tiled`,
+# rasters only ops visible in the tiles intersecting viewport rows
+# [viewport_y, viewport_y + viewport_h) plus the 512px prefetch margin
+# (occlusion-culled ops are skipped too). `tiled` false runs the classic
+# paint() on the exact same pipeline — the non-tiled baseline for the
+# pixel-parity oracle. Same-budget on both lanes keeps runs deterministic.
+pub fn simple_web_layout_render_html_software_pixels_tile_lane(
+    html: text, width: i32, height: i32,
+    viewport_y: i32, viewport_h: i32, tiled: bool
+) -> [u32]:
+    # A deliberately huge fixed budget: the tiled-vs-classic comparison must
+    # be deterministic, and a wall-clock budget break that lands differently
+    # in the two lanes would fake a parity diff. Degraded-render behavior is
+    # covered by the production entry, not this oracle.
+    val lane_budget_ms: i64 = 3600000
+    _web_budget_begin(lane_budget_ms)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(nodes, styles, child_index, 0, 0, 0, width, height, zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), empty_starts, empty_ends, neg_one_i32_list(node_count))
+    val white = argb(255, 255, 255)
+    val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
+    var fb = browser_layout_framebuffer_filled(base, width, height)
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    var painted = if tiled:
+        paint_tiled(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode, viewport_y, viewport_h)
+    else:
+        paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    painted
+
+pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
+    simple_web_layout_render_html_software_result(html, width, height, budget_ms).pixels
+
+# GPU display-list frame: real solid-fill ops plus a CPU ground-truth
+# framebuffer only when residual paint is required. Solid-only frames leave
+# `fb` empty so successful GPU execution does not first rasterize the same
+# pixels on the CPU. Backend failure reconstructs that mirror lazily.
+class WebGpuPaintFrame:
+    fb: [u32]
+    fill_ops: [SceneCommand]
+    width: i32
+    height: i32
+    base: u32
+    cpu_paint_pixels: i32
+
+fn _web_gpu_paint_state(
+    nodes: [HNode], styles: [Style]
+) -> ([bool], [bool], i32):
+    val node_count = nodes.len() as i32
+    var visible: [bool] = [false; node_count]
+    var opaque: [bool] = [false; node_count]
+    var subtree_allowed: [bool] = [false; node_count]
+    var visits = 0
+    var i: i32 = 0
+    while i < node_count:  # cpu-lane-loop-ok: single top-down pass deriving per-node visible/opaque/subtree-allowed flags from the parent's entry; bound is node_count and it replaces per-node ancestor rewalks
+        val parent = nodes[i].parent as i32
+        val ancestor_allowed = parent < 0 or subtree_allowed[parent]
+        val ancestor_opaque = parent < 0 or opaque[parent]
+        val st = styles[i]
+        visible[i] = (
+            ancestor_allowed and st.display != "none" and
+            not st.visibility_hidden
+        )
+        opaque[i] = ancestor_opaque and st.opacity_pct == 100
+        subtree_allowed[i] = (
+            ancestor_allowed and st.display != "none" and
+            not st.content_visibility_hidden and
+            nodes[i].tag != "iframe"
+        )
+        visits = visits + 1
+        i = i + 1
+    (visible, opaque, visits)
+
+pub fn simple_web_layout_debug_gpu_paint_state_visits(
+    html: text, width: i32
+) -> i32:
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val styles = compute_styles(
+        nodes, rules, build_child_index(nodes), false, true
+    )
+    val (_, _, visits) = _web_gpu_paint_state(nodes, styles)
+    visits
+
+# Emit a fill_rect op for every node whose background is a plain opaque
+# border-box rectangle — i.e. exactly the case where paint() writes a flat
+# `st.bg | 0xFF000000` slab over (bx,by,bw,bh) with no rounding/opacity/gradient.
+# Ops are emitted in node-index order, which matches normal-flow paint order
+# (parent before child). Anything ambiguous is skipped and handled by the
+# presenter's residual blit, so this walk is conservative: skipping a node only
+# reduces GPU offload, it never breaks parity.
+fn _web_gpu_solid_fill_ops(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], width: i32, height: i32, widget_mode: bool, paint_visible: [bool], paint_opaque: [bool]) -> [SceneCommand]:
+    var ops: [SceneCommand] = []
+    if widget_mode:
+        return ops
+    val node_count = nodes.len() as i32
+    var i: i32 = 0
+    while i < node_count:
+        val nd = nodes[i]
+        val st = styles[i]
+        val x = bx[i]
+        val y = by[i]
+        val w = bw[i]
+        val h = bh[i]
+        val visible = paint_visible[i] and paint_opaque[i]
+        val is_text = nd.tag == "#text"
+        val solid_alpha = ((st.bg >> 24) & 255u32)
+        val no_gradient = st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32
+        val no_radius = st.border_radius_tl_px == 0 and st.border_radius_tr_px == 0 and st.border_radius_br_px == 0 and st.border_radius_bl_px == 0
+        val border_box_clip = st.background_clip == "border-box"
+        val plain_solid = (visible and not is_text and st.opacity_pct == 100 and solid_alpha == 255u32 and no_gradient and no_radius and border_box_clip and w > 0 and h > 0 and x < width and y < height)
+        if plain_solid:
+            val argb_color = (st.bg | 0xFF000000u32)
+            ops = ops.push(scene_fill_rect(x, y, w, h, argb_color as i32))
+        i = i + 1
+    ops
+
+fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool, paint_visible: [bool], paint_opaque: [bool]) -> bool:
+    if widget_mode:
+        return false
+    val node_count = nodes.len() as i32
+    var i: i32 = 0
+    while i < node_count:  # cpu-lane-loop-ok: one pass over nodes testing whether the frame is entirely solid fills; bound is node_count and every disqualifying node returns immediately
+        val nd = nodes[i]
+        val st = styles[i]
+        val visible = paint_visible[i]
+        if visible:
+            if not paint_opaque[i]:
+                return false
+            if nd.tag == "iframe":
+                # Iframe content is a blitted child bitmap, not a solid fill op;
+                # force the full CPU paint path so _web_paint_iframes can run.
+                return false
+            if nd.tag == "#text":
+                if nd.text_trimmed != "":
+                    return false
+            else:
+                val has_bg = st.bg != 0u32
+                val solid_alpha = ((st.bg >> 24) & 255u32) == 255u32
+                val has_gradient = st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32
+                val has_extra_paint = st.border_w > 0 or st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0 or st.outline_w > 0 or st.box_shadow_raw != "" or st.bg_layers_raw != "" or st.overflow_auto_y or nd.has_icon_image_class or nd.has_focused_class
+                val plain_radius = st.border_radius_tl_px == 0 and st.border_radius_tr_px == 0 and st.border_radius_br_px == 0 and st.border_radius_bl_px == 0
+                val plain_solid_bg = has_bg and solid_alpha and not has_gradient and st.opacity_pct == 100 and plain_radius and st.background_clip == "border-box"
+                if has_gradient or has_extra_paint:
+                    return false
+                if has_bg and not plain_solid_bg:
+                    return false
+            i = i + 1
+        else:
+            i = i + 1
+    true
+
+pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> WebGpuPaintFrame:
+    _web_budget_begin(budget_ms)
+    val nodes = parse_html(html)
+    # Pass every parameter explicitly. An omitted trailing default was
+    # observed taking a non-default value in the freestanding SimpleOS kernel
+    # build (the `trace_stages` receipt fired from this call site even though
+    # the only trace-enabled caller never ran), so this render path does not
+    # rely on default-argument materialization.
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(
+        nodes,
+        styles,
+        child_index,
+        0,
+        0,
+        0,
+        width,
+        height,
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        empty_starts,
+        empty_ends,
+        neg_one_i32_list(node_count)
+    )
+    val white = argb(255, 255, 255)
+    val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
+    val (paint_visible, paint_opaque, _) = (
+        _web_gpu_paint_state(nodes, styles)
+    )
+    val fill_ops = _web_gpu_solid_fill_ops(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        width, height, widget_mode, paint_visible, paint_opaque
+    )
+    if _web_gpu_solid_only_frame(
+        nodes, styles, widget_mode, paint_visible, paint_opaque
+    ):
+        return WebGpuPaintFrame(fb: [], fill_ops: fill_ops, width: width, height: height, base: base, cpu_paint_pixels: 0)
+    var fb = browser_layout_framebuffer_filled(base, width, height)
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    WebGpuPaintFrame(fb: painted, fill_ops: fill_ops, width: width, height: height, base: base, cpu_paint_pixels: width * height)
+
+# Render at a scroll offset: preserve viewport layout, then shift paint
+# coordinates so allocation stays bounded by WxH.
+# This re-render approach keeps each call stateless.
+pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width: i32, height: i32, scroll_y: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
+    _web_budget_begin(budget_ms)
+    if width <= 0 or height <= 0:
+        return []
+    val nodes = parse_html(html)
+    # Pass every parameter explicitly. An omitted trailing default was
+    # observed taking a non-default value in the freestanding SimpleOS kernel
+    # build (the `trace_stages` receipt fired from this call site even though
+    # the only trace-enabled caller never ran), so this render path does not
+    # rely on default-argument materialization.
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(
+        nodes,
+        styles,
+        child_index,
+        0,
+        0,
+        0,
+        width,
+        height,
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        empty_starts,
+        empty_ends,
+        neg_one_i32_list(node_count)
+    )
+    val scrolled = _simple_web_scrolled_layout(
+        nodes, styles, boxes, width, height, scroll_y
+    )
+    val shifted_boxes = scrolled.boxes
+    val white = argb(255, 255, 255)
+    val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
+    var fb = browser_layout_framebuffer_filled(base, width, height)
+    val wrap_cache = TextWrapCache(
+        starts: shifted_boxes.wrap_starts, ends: shifted_boxes.wrap_ends
+    )
+    var painted = paint(
+        nodes, styles, shifted_boxes.bx, shifted_boxes.by,
+        shifted_boxes.bw, shifted_boxes.bh, wrap_cache,
+        fb, width, height, widget_mode
+    )
+    painted = _web_paint_iframes(
+        nodes, styles, shifted_boxes.bx, shifted_boxes.by,
+        shifted_boxes.bw, shifted_boxes.bh, rules,
+        painted, width, height, 0
+    )
+    painted

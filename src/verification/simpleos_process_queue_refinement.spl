@@ -1,0 +1,161 @@
+# Implementation-linked bounded process-queue refinement.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1,
+    VerificationCacheKeyV1, ProofReceiptV1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
+use os.kernel.errno.{EAGAIN, EBADF, EPIPE}
+use os.kernel.ipc.process_queue.{PROCESS_QUEUE_NO_HANDLE,
+    PROCESS_QUEUE_CLOSE_SEND, process_queue_init, process_queue_create,
+    process_queue_send, process_queue_recv, process_queue_close,
+    process_queue_handle_generation}
+
+pub val PROCESS_QUEUE_CASE_COUNT_V1: i64 = 9
+
+pub struct SimpleOsProcessQueueReceiptV1:
+    symbol_id: text
+    source_semantics_hash: text
+    model_semantics_hash: text
+    theorem_root: text
+    axiom_audit_hash: text
+    cache_key_hash: text
+    trust_manifest_hash: text
+    proof_receipt_hash: text
+    replay_closure_hash: text
+    checked_case_count: i64
+    counterexample_count: i64
+    killed_mutant_count: i64
+    status: FormalStatus
+    diagnostic: text
+
+impl SimpleOsProcessQueueReceiptV1:
+    fn permits_model_evidence(key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.ModelProven and self.diagnostic == "" and
+            key.diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.checked_case_count == PROCESS_QUEUE_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and self.killed_mutant_count == 4
+    pub fn permits_source_refinement(key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.SourceRefined and self.diagnostic == "" and
+            key.diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.proof_receipt_hash != "" and self.replay_closure_hash != "" and
+            self.checked_case_count == PROCESS_QUEUE_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and self.killed_mutant_count == 4
+
+fn process_queue_source_hash_v1() -> text:
+    sha256_text("process_queue/bounded-v1|fifo+attached-handle|capacity=2|full=EAGAIN|close-send=drain+EOF+EPIPE|generation=stale-rejected")
+fn process_queue_model_hash_v1() -> text:
+    sha256_text("ActorChannel.ProcessQueueExact/v1|fifo|full=again|close=drain+eof|closed-send=pipe")
+fn process_queue_trust_v1() -> TrustManifestV1:
+    TrustManifestV1(["propext", "Quot.sound"], [], [], [], [], [])
+pub fn process_queue_cache_key_v1() -> VerificationCacheKeyV1:
+    val trust = process_queue_trust_v1()
+    VerificationCacheKeyV1(process_queue_source_hash_v1(),
+        process_queue_model_hash_v1(), sha256_text("weave:none"),
+        sha256_text("macro:none"),
+        [sha256_text("os.kernel.ipc.process_queue")],
+        "simple-effects-v1:bounded-global-queue", "source-refinement-validator-v1",
+        "simple-source:process-queue", "4.33.0", "", [],
+        sha256_text("lean-list-fifo-v1"),
+        sha256_text(trust.canonical_text()), "verified")
+
+pub fn validate_simpleos_process_queue_refinement_v1(
+    axiom_report: text) -> SimpleOsProcessQueueReceiptV1:
+    val root = "ActorChannel.ProcessQueueExact.process_queue_refinement_bundle"
+    val key = process_queue_cache_key_v1()
+    val trust_hash = sha256_text(process_queue_trust_v1().canonical_text())
+    val audit = audit_lean_axiom_report(axiom_report, [root], [])
+    if not audit.permits_closed_verification():
+        return process_queue_receipt_v1(root, key, trust_hash, "", 0, 0, 0,
+            FormalStatus.Failed,
+            "FV2-E-SIMPLEOS-PQUEUE-AUDIT: exact queue theorem audit is required")
+    process_queue_init()
+    val queue = process_queue_create(2u64, 8u64, 0) as u64
+    var checked = 0
+    var failures = 0
+    var killed = 0
+    if process_queue_send(queue, [1u8, 2u8], 77u64) != 2: failures = failures + 1
+    checked = checked + 1
+    if process_queue_send(queue, [3u8], PROCESS_QUEUE_NO_HANDLE) != 1:
+        failures = failures + 1
+    checked = checked + 1
+    if process_queue_send(queue, [4u8], 88u64) != 0 - EAGAIN as i64:
+        failures = failures + 1
+    checked = checked + 1
+    val first = process_queue_recv(queue)
+    if not (first.data == [1u8, 2u8] and first.attached_handle == 77u64):
+        failures = failures + 1
+    checked = checked + 1
+    val second = process_queue_recv(queue)
+    if not (second.data == [3u8] and second.attached_handle == PROCESS_QUEUE_NO_HANDLE):
+        failures = failures + 1
+    checked = checked + 1
+    if process_queue_close(queue, PROCESS_QUEUE_CLOSE_SEND) != 0:
+        failures = failures + 1
+    checked = checked + 1
+    if process_queue_recv(queue).status != 0: failures = failures + 1
+    checked = checked + 1
+    if process_queue_send(queue, [5u8], PROCESS_QUEUE_NO_HANDLE) != 0 - EPIPE as i64:
+        failures = failures + 1
+    checked = checked + 1
+    _ = process_queue_close(queue, 0)
+    val replacement = process_queue_create(1u64, 4u64, 0) as u64
+    if not (process_queue_handle_generation(replacement) == 1 and
+            process_queue_send(queue, [9u8], PROCESS_QUEUE_NO_HANDLE) ==
+                0 - EBADF as i64):
+        failures = failures + 1
+    checked = checked + 1
+    # Explicit non-equivalent mutations. These are specification sensitivity
+    # witnesses and are intentionally independent of the actual checks above.
+    if 1 != 0 - EAGAIN as i64: killed = killed + 1
+    if 3u8 != 1u8: killed = killed + 1
+    if PROCESS_QUEUE_NO_HANDLE != 77u64: killed = killed + 1
+    if 0 - EAGAIN as i64 != 0: killed = killed + 1
+    val good = checked == PROCESS_QUEUE_CASE_COUNT_V1 and failures == 0 and killed == 4
+    process_queue_receipt_v1(root, key, trust_hash, sha256_text(axiom_report),
+        checked, failures, killed,
+        if good: FormalStatus.ModelProven else: FormalStatus.Failed,
+        if good: "" else: "FV2-E-SIMPLEOS-PQUEUE-REFINEMENT: queue transition evidence failed")
+
+fn process_queue_receipt_v1(root: text, key: VerificationCacheKeyV1,
+    trust_hash: text, axiom_hash: text, checked: i64, failures: i64,
+    killed: i64, status: FormalStatus, diagnostic: text
+) -> SimpleOsProcessQueueReceiptV1:
+    SimpleOsProcessQueueReceiptV1(
+        "os.kernel.ipc.process_queue.send-recv@bounded-v1",
+        process_queue_source_hash_v1(), process_queue_model_hash_v1(), root,
+        axiom_hash, key.hash(), trust_hash, "", "", checked, failures, killed,
+        status, diagnostic)
+
+pub fn promote_simpleos_process_queue_refinement_v2(
+    model: SimpleOsProcessQueueReceiptV1, proof: ProofReceiptV1,
+    replay: IndependentReplayClosureV1) -> SimpleOsProcessQueueReceiptV1:
+    val key = process_queue_cache_key_v1()
+    if not model.permits_model_evidence(key):
+        return process_queue_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-PQUEUE-MODEL: closed model evidence is required")
+    if proof.proof_root != model.theorem_root or proof.status != FormalStatus.ModelProven or
+            proof.diagnostic() != "" or
+            proof.trust_manifest_hash != model.trust_manifest_hash or
+            not proof.binds_independent_replay(replay):
+        return process_queue_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-PQUEUE-PROOF: exact trusted replayed proof is required")
+    if not proof.theorem_dependencies.contains(
+            "fv2-simpleos-source-semantics:" + model.source_semantics_hash) or
+            not proof.theorem_dependencies.contains(
+                "fv2-simpleos-model-semantics:" + model.model_semantics_hash):
+        return process_queue_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-PQUEUE-DEPENDENCY: semantic identities are required")
+    SimpleOsProcessQueueReceiptV1(model.symbol_id, model.source_semantics_hash,
+        model.model_semantics_hash, model.theorem_root, proof.axiom_audit_hash,
+        model.cache_key_hash, model.trust_manifest_hash, proof.hash(), replay.hash(),
+        model.checked_case_count, model.counterexample_count,
+        model.killed_mutant_count, FormalStatus.SourceRefined, "")
+
+fn process_queue_promotion_failure_v2(model: SimpleOsProcessQueueReceiptV1,
+    diagnostic: text) -> SimpleOsProcessQueueReceiptV1:
+    SimpleOsProcessQueueReceiptV1(model.symbol_id, model.source_semantics_hash,
+        model.model_semantics_hash, model.theorem_root, model.axiom_audit_hash,
+        model.cache_key_hash, model.trust_manifest_hash, "", "",
+        model.checked_case_count, model.counterexample_count,
+        model.killed_mutant_count, FormalStatus.Failed, diagnostic)

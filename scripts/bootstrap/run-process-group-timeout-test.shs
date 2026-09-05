@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+runner="$repo_root/scripts/bootstrap/run-process-group-timeout.shs"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM HUP
+
+child_pid_file="$work/child.pid"
+status=0
+"$runner" 1 1 sh -c '
+  child_pid_file=$1
+  sh -c "trap \"\" TERM; while :; do sleep 1; done" &
+  child=$!
+  printf "%s\n" "$child" >"$child_pid_file"
+  while :; do sleep 1; done
+' sh "$child_pid_file" || status=$?
+
+[ "$status" -eq 124 ] || { echo "FAIL: expected timeout 124, got $status" >&2; exit 1; }
+[ -s "$child_pid_file" ] || { echo "FAIL: descendant pid was not recorded" >&2; exit 1; }
+child=$(sed -n '1p' "$child_pid_file")
+if kill -0 "$child" 2>/dev/null; then
+  echo "FAIL: timed-out descendant survived: $child" >&2
+  exit 1
+fi
+echo "PASS: timeout terminated and reaped process group"

@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+CLI="$ROOT/src/app/cli/_CliMain/main_and_help.spl"
+OWNER="$ROOT/src/app/io/_CliCommands/run_commands.spl"
+HARNESS="$ROOT/scripts/check/check-cross-language-perf.shs"
+
+need() {
+    pattern=$1
+    file=$2
+    grep -Fq "$pattern" "$file" || {
+        echo "FAIL: missing contract '$pattern' in ${file#$ROOT/}" >&2
+        exit 1
+    }
+}
+
+# Opt-in and one stable machine grammar, owned where execution is final.
+need 'SIMPLE_EXECUTION_MODE_RECEIPT' "$OWNER"
+need 'simple_execution_mode_v1 requested={requested} actual={actual} fallback={fallback_text}' "$OWNER"
+need 'case Ok(exit_code):' "$OWNER"
+need 'emit_execution_mode_receipt("smf-loader", "smf-loader", false)' "$OWNER"
+need 'case Err(message):' "$OWNER"
+need 'emit_execution_mode_receipt(requested, "interpreter",' "$OWNER"
+
+# Explicit interpreter requests survive the CLI-to-driver process boundary;
+# an unavailable requested engine is recorded as a fallback, never admitted.
+need 'env_set("SIMPLE_EXECUTION_MODE", "interpret")' "$CLI"
+need 'env_set("SIMPLE_EXECUTION_REQUESTED_MODE", requested_mode)' "$CLI"
+need 'SIMPLE_EXECUTION_SELECTION_FALLBACK' "$CLI"
+need 'selection_fallback or requested != "interpreter"' "$OWNER"
+
+# Admission is fail-closed: every measured process has exactly one exact
+# receipt; interpreter and SMF rows cannot be silently retained otherwise.
+need 'grep -Fxc "$_expected_receipt"' "$HARNESS"
+need "grep -c '^simple_execution_mode_v1 '" "$HARNESS"
+need 'retained_simple_mode_measure "simple_interpreter" "interpreter" "interpreter"' "$HARNESS"
+need 'SIMPLE_NO_BOOTSTRAP_DELEGATE=1' "$HARNESS"
+need 'retained_simple_mode_measure "simple_smf_loader" "smf-loader" "smf-loader"' "$HARNESS"
+
+receipt_probe=$(mktemp)
+trap 'rm -f "$receipt_probe"' EXIT HUP INT TERM
+expected='simple_execution_mode_v1 requested=interpreter actual=interpreter fallback=false'
+printf '%s\n' "$expected" >"$receipt_probe"
+[ "$(grep -Fxc "$expected" "$receipt_probe")" -eq 1 ] || {
+    echo 'FAIL: positive interpreter receipt was not admitted' >&2
+    exit 1
+}
+printf '%s\n' 'simple_execution_mode_v1 requested=jit actual=interpreter fallback=true' >"$receipt_probe"
+[ "$(grep -Fxc "$expected" "$receipt_probe")" -eq 0 ] || {
+    echo 'FAIL: forced fallback receipt was falsely admitted' >&2
+    exit 1
+}
+: >"$receipt_probe"
+[ "$(grep -Fxc "$expected" "$receipt_probe")" -eq 0 ] || {
+    echo 'FAIL: missing/malformed-artifact receipt was falsely admitted' >&2
+    exit 1
+}
+
+# The only SMF receipt is textually inside the success arm.  The error arm
+# must remain receipt-free, which covers malformed-artifact false admission.
+smf_success_line=$(grep -n 'emit_execution_mode_receipt("smf-loader"' "$OWNER" | cut -d: -f1)
+smf_error_line=$(grep -n 'case Err(message):' "$OWNER" | awk -F: -v s="$smf_success_line" '$1 > s { print $1; exit }')
+[ -n "$smf_success_line" ] && [ -n "$smf_error_line" ] && [ "$smf_success_line" -lt "$smf_error_line" ] || {
+    echo 'FAIL: SMF receipt is not confined to the successful execution arm' >&2
+    exit 1
+}
+
+echo 'PASS: execution-mode receipt ownership and fail-closed harness admission'

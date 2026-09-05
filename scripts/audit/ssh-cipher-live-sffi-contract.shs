@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/apps/sshd/ssh_cipher_live.spl"
+provider="$root/src/compiler_rust/runtime/src/value/aes.rs"
+
+if grep -E '(serial_println|_bytes_to_hex|^extern fn rt_bytes_u8_at)' "$module" >/dev/null; then
+    echo "SSH cipher regained secret diagnostics or byte-access FFI" >&2
+    exit 1
+fi
+
+externs=$(grep -c '^extern fn ' "$module")
+scopes=$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")
+if [ "$externs" -ne 3 ] || [ "$scopes" -ne 3 ]; then
+    echo "SSH cipher foreign-boundary inventory changed" >&2
+    exit 1
+fi
+
+grep -q 'iv.len() != 12u64' "$module"
+grep -q 'enc_key_s2c.len() != 32u64' "$module"
+grep -q 'enc_key_s2c.len() != 16u64' "$module"
+grep -q 'encrypted_with_tag.len() != body.len() + GCM_TAG_LEN' "$module"
+grep -q 'not _ssh_gcm_frame_allowed(data)' "$module"
+grep -q 'status != 0x01 or result.len() != ct_len + 1u64' "$module"
+grep -q 'payload.len() > packet_length - 1u64' "$module"
+grep -q 'data.len() != ct_len' "$module"
+
+grep -q 'AesGcmDecryptOutcome::TagMismatch => vec!\[0x00\]' "$provider"
+grep -q 'out.push(0x01)' "$provider"
+
+echo "SSH cipher SFFI contract audit: PASS (fixed key/IV/frame/status/output contracts; three minimal foreign scopes; secret diagnostics absent)"

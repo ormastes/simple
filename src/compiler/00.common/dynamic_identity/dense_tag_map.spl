@@ -1,0 +1,274 @@
+# DenseTagMap — the process-local dense reindexing of a sealed constructor
+# universe (plan §7.3), the §7.5 seal-time checks, and the §7.4 serialization
+# rule.
+#
+# §7.3: after a configuration is sealed, static and complete variants are
+# reindexed into ONE dense local range
+#     0 .. static_count - 1              static
+#     static_count .. sealed_count - 1   frozen complete
+#     DYN_MARKER + registry_index        open dyn
+# so that static and complete dispatch are near identical.
+#
+# The order within each band is the ascending PERSISTENT TUPLE order, not the
+# order constructors were added. That is the whole point of §7.1: two machines
+# that select the same set in different orders must produce the same map and
+# the same seal hash, otherwise a serialized artifact from one is misread by
+# the other.
+#
+# §7.4: "Never serialize the process-local dense tag." `serialize_variant`
+# below writes persistent identity only, and fails closed if the record it
+# built carries any field outside the allowed set.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.dynamic_identity.persistent_id.{PersistentExtensionId, sort_persistent_ids}
+use compiler.common.dynamic_identity.identity_error.{IdentityError}
+
+# Dyn tags live above every possible dense tag. 1 << 30 keeps the marker well
+# inside i32 range so a 32-bit target (§7.5 "unsupported 32-bit layout") can
+# still carry a tag, while leaving 2^30 dense slots -- far beyond any capacity
+# a seal check will admit.
+pub fn dyn_marker() -> i64:
+    1073741824
+
+struct TagCapacity:
+    """Tag-space budget checked at seal time (§7.5).
+
+    - static_capacity: how many static constructors the owner enum's static
+      tag field can represent.
+    - dense_capacity: how many static+complete constructors the frozen dense
+      range can represent.
+    """
+    static_capacity: i64
+    dense_capacity: i64
+
+# One constructor as CLAIMED by a provider manifest: the tuple plus the hash
+# the manifest asserts for it. Keeping the claim separate from the tuple is
+# what makes the §7.5 "mismatched stable-ID tuple and claimed hash" check
+# possible at all -- if the hash were always recomputed from the tuple on
+# read, a corrupted manifest would be silently normalized.
+struct ClaimedVariant:
+    id: PersistentExtensionId
+    claimed_hash: text
+
+# Convenience: a claim that is self-consistent by construction, for callers
+# that produce a manifest rather than read one.
+pub fn claim_of(id: PersistentExtensionId) -> ClaimedVariant:
+    ClaimedVariant(id: id, claimed_hash: id.identity_hash())
+
+struct DenseTagMap:
+    """A sealed, frozen dense tag assignment.
+
+    `entries` is in dense-tag order: indices 0..static_count-1 are the static
+    band, static_count..sealed_count-1 the frozen complete band. Both bands are
+    internally sorted by persistent tuple.
+    """
+    entries: [PersistentExtensionId]
+    static_count: i64
+    sealed_count: i64
+    seal_hash: text
+
+impl DenseTagMap:
+    # persistent identity -> dense tag. Linear over the sealed set; a seal
+    # holds tens to low hundreds of constructors and tuple equality is the
+    # authority, so an index keyed by the hash would only add a way to be
+    # wrong.
+    fn to_dense(id: PersistentExtensionId) -> Result<i64, text>:
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].equals(id):
+                return Ok(i)
+            i = i + 1
+        Err("not in seal: " + id.canonical_text())
+
+    # dense tag -> persistent identity.
+    fn to_persistent(tag: i64) -> Result<PersistentExtensionId, text>:
+        if tag >= dyn_marker():
+            return Err("tag " + tag.to_text() + " is an open dyn tag, not a sealed dense tag")
+        if tag < 0 or tag >= self.sealed_count:
+            return Err("dense tag " + tag.to_text() + " outside sealed range 0.."
+                + self.sealed_count.to_text())
+        Ok(self.entries[tag])
+
+    fn is_static_tag(tag: i64) -> bool:
+        tag >= 0 and tag < self.static_count
+
+    fn is_complete_tag(tag: i64) -> bool:
+        tag >= self.static_count and tag < self.sealed_count
+
+    fn is_dyn_tag(tag: i64) -> bool:
+        tag >= dyn_marker()
+
+# An open-dyn tag for a runtime registry index. Never sealed, never
+# serialized; it exists only so the three domains are expressible in one i64.
+pub fn dyn_tag(registry_index: i64) -> i64:
+    dyn_marker() + registry_index
+
+fn identity_check(claims: [ClaimedVariant]) -> Result<i64, IdentityError>:
+    var seen: [text] = []
+    var ordinals: [text] = []
+    var i = 0
+    while i < claims.len():
+        val c = claims[i]
+        val canonical = c.id.canonical_text()
+        val computed = c.id.identity_hash()
+        if c.claimed_hash != computed:
+            return Err(IdentityError.TupleHashMismatch(canonical, c.claimed_hash, computed))
+        var j = 0
+        while j < seen.len():
+            if seen[j] == canonical:
+                return Err(IdentityError.IdentityCollision(canonical))
+            j = j + 1
+        val okey = c.id.provider_ordinal_key()
+        var k = 0
+        while k < ordinals.len():
+            if ordinals[k] == okey:
+                return Err(IdentityError.ProviderLocalOrdinalReuse(
+                    c.id.owner_enum, c.id.provider_module, c.id.local_ordinal))
+            k = k + 1
+        seen.push(canonical)
+        ordinals.push(okey)
+        i = i + 1
+    Ok(claims.len())
+
+fn ids_of(claims: [ClaimedVariant]) -> [PersistentExtensionId]:
+    var out: [PersistentExtensionId] = []
+    var i = 0
+    while i < claims.len():
+        out.push(claims[i].id)
+        i = i + 1
+    out
+
+fn concat_claims(a: [ClaimedVariant], b: [ClaimedVariant]) -> [ClaimedVariant]:
+    var out: [ClaimedVariant] = []
+    var i = 0
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    var j = 0
+    while j < b.len():
+        out.push(b[j])
+        j = j + 1
+    out
+
+fn seal_hash_of(entries: [PersistentExtensionId], static_count: i64) -> text:
+    var parts: [text] = ["SimpleUniverseSealV1", "static_count:" + static_count.to_text(),
+        "sealed_count:" + entries.len().to_text()]
+    var i = 0
+    while i < entries.len():
+        parts.push(entries[i].canonical_text())
+        i = i + 1
+    "SEALV1-" + sha256_text(parts.join("\n"))
+
+# Freeze a selected universe into a dense map.
+#
+# The static and complete sets are checked TOGETHER for collision and ordinal
+# reuse -- a complete extension that duplicates a static constructor is the
+# same defect as two complete extensions colliding -- but are sorted and
+# banded separately, because the static band must keep tags 0..static_count-1
+# whatever complete extensions were selected.
+pub fn freeze_universe(statics: [ClaimedVariant], completes: [ClaimedVariant],
+        capacity: TagCapacity) -> Result<DenseTagMap, IdentityError>:
+    if statics.len() > capacity.static_capacity:
+        return Err(IdentityError.StaticCountOverflow(statics.len(), capacity.static_capacity))
+    val total = statics.len() + completes.len()
+    val dense_cap = capacity.dense_capacity
+    if total > dense_cap or dense_cap > dyn_marker():
+        return Err(IdentityError.CompleteCountOverflow(total, dense_cap))
+    identity_check(concat_claims(statics, completes))?
+    val static_sorted = sort_persistent_ids(ids_of(statics))
+    val complete_sorted = sort_persistent_ids(ids_of(completes))
+    var entries: [PersistentExtensionId] = []
+    var i = 0
+    while i < static_sorted.len():
+        entries.push(static_sorted[i])
+        i = i + 1
+    var j = 0
+    while j < complete_sorted.len():
+        entries.push(complete_sorted[j])
+        j = j + 1
+    Ok(DenseTagMap(
+        entries: entries,
+        static_count: static_sorted.len(),
+        sealed_count: entries.len(),
+        seal_hash: seal_hash_of(entries, static_sorted.len())
+    ))
+
+# The only field keys a serialized variant record may carry (§7.4). `dense_tag`
+# is absent by construction AND by the check below -- the check exists so that
+# adding a field to the writer without revisiting this list fails loudly
+# instead of leaking a process-local tag into a persisted artifact.
+pub fn serialized_field_keys() -> [text]:
+    ["owner_enum", "provider_module", "constructor_name", "local_ordinal",
+     "schema_abi_version", "identity_hash", "payload_schema_version",
+     "payload_hash", "seal_hash"]
+
+fn key_allowed(key: text) -> bool:
+    val allowed = serialized_field_keys()
+    var i = 0
+    while i < allowed.len():
+        if allowed[i] == key:
+            return true
+        i = i + 1
+    false
+
+# Serialize the variant currently holding `tag`. Takes a tag because that is
+# what a running program has in hand, and writes the PERSISTENT identity
+# because that is the only thing §7.4 permits on the wire.
+pub fn serialize_variant(map: DenseTagMap, tag: i64, payload_schema_version: i64,
+        payload_hash: text) -> Result<text, text>:
+    val id = map.to_persistent(tag)?
+    var keys: [text] = ["owner_enum", "provider_module", "constructor_name",
+        "local_ordinal", "schema_abi_version", "identity_hash",
+        "payload_schema_version", "payload_hash", "seal_hash"]
+    var values: [text] = [id.owner_enum, id.provider_module, id.constructor_name,
+        id.local_ordinal.to_text(), id.schema_abi_version.to_text(),
+        id.identity_hash(), payload_schema_version.to_text(), payload_hash,
+        map.seal_hash]
+    if keys.len() != values.len():
+        return Err("serializer field/value arity mismatch")
+    var lines: [text] = []
+    var i = 0
+    while i < keys.len():
+        if not key_allowed(keys[i]):
+            return Err("refusing to serialize forbidden field: " + keys[i])
+        lines.push(keys[i] + ": " + values[i])
+        i = i + 1
+    Ok(lines.join("\n"))
+
+# Read back the identity a record names. Bijection with `serialize_variant` is
+# only meaningful against the SAME seal -- which is exactly the §19.6 property
+# "persistent_id -> dense_tag -> persistent_id is bijective within seal".
+pub fn deserialize_to_dense(map: DenseTagMap, record: text) -> Result<i64, text>:
+    val lines = record.split("\n")
+    var id = PersistentExtensionId(owner_enum: "", provider_module: "",
+        constructor_name: "", local_ordinal: -1, schema_abi_version: -1)
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val cut = line.index_of(": ")
+        if cut < 0:
+            return Err("malformed record line: " + line)
+        val key = line.substring(0, cut)
+        val value = line.substring(cut + 2, line.len())
+        if key == "owner_enum":
+            id = PersistentExtensionId(owner_enum: value, provider_module: id.provider_module,
+                constructor_name: id.constructor_name, local_ordinal: id.local_ordinal,
+                schema_abi_version: id.schema_abi_version)
+        if key == "provider_module":
+            id = PersistentExtensionId(owner_enum: id.owner_enum, provider_module: value,
+                constructor_name: id.constructor_name, local_ordinal: id.local_ordinal,
+                schema_abi_version: id.schema_abi_version)
+        if key == "constructor_name":
+            id = PersistentExtensionId(owner_enum: id.owner_enum, provider_module: id.provider_module,
+                constructor_name: value, local_ordinal: id.local_ordinal,
+                schema_abi_version: id.schema_abi_version)
+        if key == "local_ordinal":
+            id = PersistentExtensionId(owner_enum: id.owner_enum, provider_module: id.provider_module,
+                constructor_name: id.constructor_name, local_ordinal: value.to_i64(),
+                schema_abi_version: id.schema_abi_version)
+        if key == "schema_abi_version":
+            id = PersistentExtensionId(owner_enum: id.owner_enum, provider_module: id.provider_module,
+                constructor_name: id.constructor_name, local_ordinal: id.local_ordinal,
+                schema_abi_version: value.to_i64())
+        i = i + 1
+    map.to_dense(id)

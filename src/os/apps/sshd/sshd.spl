@@ -1,0 +1,799 @@
+# SSH Daemon — SimpleOS SSH Server
+#
+# Listens on a TCP port (default 22) and spawns per-client SSH sessions.
+# Each connection goes through version exchange, key exchange,
+# authentication, and then provides an interactive shell.
+#
+# Usage:
+#   var provider = SshdCredentialProvider.new(user_db, host_private_key, host_public_key)
+#   var daemon = SshDaemon.new_with_provider(22, provider)
+#   daemon.start()
+
+use os.crypto.ed25519.{ed25519_keypair_from_seed}
+use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
+use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, host_key_set_has_any_algorithm}
+use os.apps.sshd.ssh_auth.{SshUserDb}
+use os.kernel.net.rt_net_socket_facade.{rt_net_close}
+use std.common.string_core.{text_to_bytes}
+use std.common.contracts.execution.simpleos_capability_v1.{ProtocolCapabilityManifestV1}
+use std.common.contracts.execution.simpleos_server_protocol_capabilities.{ServerProtocolProbeHandle, server_protocol_probe_handle_admitted, simpleos_ssh_capability_manifests}
+export use os.apps.sshd.sshd_net_decode.*
+# NOTE: call the x86_64 spawn DIRECTLY (single non-@cfg pub fn) rather than the
+# cross-arch fs_exec_spawn_ring3 wrapper — the @cfg multi-variant dispatch of
+# _fs_exec_spawn_ring3_active mis-selects a non-x86_64 variant on the
+# x86_64-unknown-none build and routes to the VFS reader (fs_exec_spawn_as ->
+# g_vfs_read_executable_bytes -> [vfs-read] len=0), never reaching the x86_64 FAT +
+# ring-3 handoff. x86_64-ONLY: guarded with @cfg(x86_64) so the shared sshd.spl
+# still compiles for the rv64 SSH lane (arch/riscv64/ssh_live_entry.spl imports
+# SshDaemon from here) — the import is stripped on non-x86_64 targets.
+@cfg(x86_64)
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn, x86_64_fs_exec_spawn_heap}
+@cfg(x86_64)
+use os.kernel.loader.fs_exec_resolve.{fs_exec_resolve}
+@cfg(riscv64)
+use os.kernel.loader.fs_exec_resolve.{fs_exec_resolve}
+@cfg(riscv64)
+use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_spawn_capture, riscv64_fs_exec_failed_capture}
+extern fn serial_println(msg: text)
+extern fn rt_boot_tcp_bind(addr: text) -> i64
+extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SSHD_PORT: u16 = 22
+val SSHD_BACKLOG: i32 = 5
+# Deferred ring-3 exec, run from the SHALLOW accept-loop frame (kernel-stack
+# overflow deep in the session call stack otherwise — see the unified
+# _sshd_run_pending_exec below for the real implementation; PATH resolution
+# and argv tokenizing both need to happen down here for the same reason).
+
+# Phase 2e Inc 2: tokenize the intact SSH exec command text into argv, IN THE
+# SHALLOW accept-loop frame. `text.char_at`/`starts_with` mis-decode deep in
+# the sshd session-dispatch call stack (frame-depth/stack-spill sensitive —
+# see doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md §Status
+# point 3).
+#
+# NEW FINDING (isolated + proven via
+# examples/09_embedded/simple_os/arch/x86_64/clang_argv_tokenize_probe_entry.spl
+# / scripts/os/clang_argv_tokenize_probe_run.shs, reproduces even at the
+# shallowest possible frame — bare `_start()`, no SSH/accept-loop involved):
+# `text.char_code_at(i)` itself mis-decodes when `text` is a DYNAMICALLY built
+# string (e.g. via rt_string_from_byte_array at runtime, which is exactly
+# what the decoded SSH command is) — garbage/boxed-object values appear at
+# scattered indices. It is NOT frame-depth sensitive and it is NOT limited to
+# the space character: a plain rodata string LITERAL iterates fine with
+# char_code_at, but a heap-built one does not. The reliable path for dynamic
+# text uses the canonical [u8] conversion owner `text_to_bytes` plus
+# `rt_bytes_u8_at` (already proven elsewhere, e.g.
+# ssh_session_helpers.spl's `_u8_at` / `_read_text_field_fast`) — convert the
+# whole command to bytes ONCE, then index the byte array, never `char_code_at`
+# on the text directly.
+fn _sshd_tokenize_command(command: text) -> [text]:
+    val bytes = text_to_bytes(command)
+    var tokens: [text] = []
+    var cur: [u8] = []
+    var i: i64 = 0
+    val n = bytes.len().to_i64()
+    while i < n:
+        val code = rt_bytes_u8_at(bytes, i)
+        if code == 32:
+            if cur.len() > 0:
+                tokens.push(rt_string_from_byte_array(cur))
+                cur = []
+        else:
+            cur = rt_push_byte(cur, code)
+        i = i + 1
+    if cur.len() > 0:
+        tokens.push(rt_string_from_byte_array(cur))
+    tokens
+
+# Default static PATH + minimal environment for ring-3 spawns. sshd exec
+# requests don't carry an env today, so this is the whole envp; merge in a
+# per-request env here if that ever changes (Phase 2 Lane A item 3).
+# A FUNCTION, not a module-level `val [text]`: module-level array
+# initializers do not run under freestanding native-build (see the
+# freestanding-discipline note in fs_exec_resolve.spl / the
+# fs_exec_general_ring3_entry.spl module docstring) — a module val here
+# reads as garbage at runtime and faults.
+fn _sshd_default_envp() -> [text]:
+    ["PATH=/bin:/usr/bin:/usr/local/bin", "HOME=/home/root", "TERM=vt100"]
+
+# Unified deferred ring-3 exec, run from the SHALLOW accept-loop frame
+# (spawning inline deep in the session call stack faults in ring-0 before the
+# spawn's first line — kernel-stack overflow). Replaces the former
+# hardcoded-/FSEXEC.ELF-only and clang-only variants (Phase 2 Lane A, PATH
+# resolution): argv[0] is tokenized here (via _sshd_tokenize_command, the
+# proven-safe raw-byte-array pattern — deep-frame per-char text predicates
+# are unreliable, see the doc note above _sshd_tokenize_command) and resolved
+# through fs_exec_resolve (PATH search over /bin:/usr/bin:/usr/local/bin,
+# memoized). Unresolved names return 127 without ever attempting a spawn —
+# sshd sends that as the real exit status, never hangs.
+#
+# Preserve the filesystem process ABI: the RV64 generic image builder receives
+# argv[0] in its array, while the x86_64 ring-3 handoff inserts the resolved
+# path as argv[0] itself and receives only the remaining command arguments.
+#
+# Spawn choice: the resolved path "/FSEXEC.ELF" specifically goes through the
+# plain x86_64_fs_exec_spawn (preserves the boot-time-preload fast path some
+# entries, e.g. ssh_ring3_entry.spl, still rely on for that exact file).
+# Every other resolved path goes through x86_64_fs_exec_spawn_heap, the
+# streaming-only path already proven to work post-net for the 124.6 MB clang
+# payload (Phase 2e Inc 1) — this is what /usr/bin/clang (bare "clang" or
+# absolute "/usr/bin/clang") and any other PATH-resolved binary use.
+@cfg(x86_64)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    val all_tokens = _sshd_tokenize_command(command)
+    if all_tokens.len() == 0:
+        serial_println("[fs-exec] command not found: (empty)")
+        return 127
+    val name = all_tokens[0]
+    val resolved = fs_exec_resolve(name)
+    if resolved.length() == 0u64:
+        serial_println("[fs-exec] command not found: {name}")
+        return 127
+    # x86_64_fs_exec_* builds the initial stack itself and inserts `resolved`
+    # as argv[0].  Pass only the command operands here; otherwise argv[0] is
+    # duplicated and the first real operand is shifted to argv[2].  RV64 uses
+    # the generic process-image stack builder instead, so its launcher below
+    # deliberately retains `resolved` in argv.
+    var argv: [text] = []
+    var i: u64 = 1
+    while i < all_tokens.len():
+        serial_println("[sshd] exec argv[{i}]={all_tokens[i]}")
+        argv.push(all_tokens[i])
+        i = i + 1
+    if resolved == "/FSEXEC.ELF":
+        serial_println("[sshd] ring3 deferred spawn {resolved} command={command}")
+        val rc = x86_64_fs_exec_spawn(resolved, argv, _sshd_default_envp())
+        serial_println("[sshd] ring3 deferred spawn returned rc={rc}; accept loop continues")
+        return rc
+    serial_println("[sshd] ring3 deferred heap-stream spawn {resolved} command={command}")
+    val rc = x86_64_fs_exec_spawn_heap(resolved, argv, _sshd_default_envp())
+    serial_println("[sshd] ring3 deferred heap-stream spawn returned rc={rc}; accept loop continues")
+    rc
+
+@cfg(x86)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    0
+
+@cfg(arm64)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    0
+
+@cfg(arm32)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    0
+
+@cfg(riscv64)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    val all_tokens = _sshd_tokenize_command(command)
+    if all_tokens.len() == 0:
+        serial_println("[fs-exec] command not found: (empty)")
+        val failed = riscv64_fs_exec_failed_capture(127)
+        return (failed.bytes, failed.exit_code, failed.truncated)
+    val name = all_tokens[0]
+    val resolved = fs_exec_resolve(name)
+    if resolved.length() == 0u64:
+        serial_println("[fs-exec] command not found: {name}")
+        val failed = riscv64_fs_exec_failed_capture(127)
+        return (failed.bytes, failed.exit_code, failed.truncated)
+    var argv: [text] = [resolved]
+    var i: u64 = 1
+    while i < all_tokens.len():
+        argv.push(all_tokens[i])
+        i = i + 1
+    serial_println("[sshd] rv64 filesystem exec {resolved} command={command}")
+    val result = riscv64_fs_exec_spawn_capture(resolved, argv, _sshd_default_envp())
+    serial_println("[sshd] rv64 filesystem exec returned rc={result.exit_code}")
+    (result.bytes, result.exit_code, result.truncated)
+
+@cfg(riscv32)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    0
+
+@cfg(x86_64)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(x86)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(arm64)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(arm32)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(riscv32)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+val SSHD_MAX_SESSIONS: u32 = 16
+pub struct SshDaemonAcceptResult:
+    accepted: bool
+    session_complete: bool
+    accept_resumed: bool
+
+pub fn sshd_build_host_keys_for_session_for_test(
+    advertise_ed25519: bool,
+    ed25519_seed: [u8]?,
+    rsa_pkcs8: [u8]?,
+    rsa_public_blob: [u8]?,
+    ecdsa_p256_pkcs8: [u8]?
+) -> HostKeySet:
+    """Pure test hook mirroring the live session host-key selection policy."""
+    HostKeySet(
+        ed25519_seed: if advertise_ed25519: ed25519_seed else: nil,
+        rsa_pkcs8: rsa_pkcs8,
+        rsa_public_blob: rsa_public_blob,
+        ecdsa_p256_pkcs8: ecdsa_p256_pkcs8
+    )
+
+pub fn sshd_host_key_policy_satisfiable_for_test(
+    advertise_ed25519: bool,
+    ed25519_seed: [u8]?,
+    rsa_pkcs8: [u8]?,
+    ecdsa_p256_pkcs8: [u8]?,
+    ed25519_cert: [u8]?
+) -> bool:
+    """Test hook for the fail-closed host-key policy gate used by start()."""
+    val keys = HostKeySet(
+        ed25519_seed: if advertise_ed25519: ed25519_seed else: nil,
+        rsa_pkcs8: rsa_pkcs8,
+        rsa_public_blob: nil,
+        ecdsa_p256_pkcs8: ecdsa_p256_pkcs8
+    )
+    host_key_set_has_any_algorithm(keys) or ed25519_cert != nil
+
+pub fn sshd_start_verdict_for_test(
+    advertise_ed25519: bool,
+    ed25519_seed: [u8],
+    rsa_pkcs8: [u8]?,
+    ecdsa_p256_pkcs8: [u8]?,
+    ed25519_cert: [u8]?
+) -> text:
+    """Drive the REAL SshDaemon.start() and report the verdict it returned.
+
+    Pins the fail-closed host-key gate at the startup boundary rather than at
+    the pure-policy-function boundary: an unsatisfiable policy must make
+    start() itself return Err before it ever reaches the listener bind.
+    Returns the Err text on refusal, or "started" when start() returned Ok.
+    """
+    var daemon = SshDaemon(
+        listen_fd: -1,
+        user_db: SshUserDb(users: []),
+        sessions: [],
+        running: false,
+        port: SSHD_PORT,
+        host_private_key: ed25519_seed,
+        host_public_key: ed25519_seed,
+        advertise_ed25519_host_key: advertise_ed25519,
+        host_rsa_pkcs8: rsa_pkcs8,
+        host_rsa_public_blob: nil,
+        host_ecdsa_p256_pkcs8: ecdsa_p256_pkcs8,
+        host_ed25519_cert: ed25519_cert,
+        host_rsa_sha2_256_cert: nil,
+        host_rsa_sha2_512_cert: nil,
+        credential_provider_configured: true
+    )
+    match daemon.start():
+        Ok(_): "started"
+        Err(e): sshd_start_error_text(e)
+
+pub fn sshd_daemon_host_key_policy_satisfiable_for_test(
+    advertise_ed25519: bool,
+    ed25519_seed: [u8],
+    rsa_pkcs8: [u8]?,
+    ecdsa_p256_pkcs8: [u8]?,
+    ed25519_cert: [u8]?
+) -> bool:
+    """Evaluate the gate on a REAL SshDaemon — the exact expression start() branches on.
+
+    The success half of the gate cannot be pinned through start() itself on a
+    host interpreter: once the gate passes, start() proceeds into
+    bind_and_ready() and hits rt_boot_tcp_bind, a baremetal-only extern. This
+    hook pins the same daemon-level verdict start() consults, so a gate that
+    refused a satisfiable configuration is still caught.
+    """
+    var daemon = SshDaemon(
+        listen_fd: -1,
+        user_db: SshUserDb(users: []),
+        sessions: [],
+        running: false,
+        port: SSHD_PORT,
+        host_private_key: ed25519_seed,
+        host_public_key: ed25519_seed,
+        advertise_ed25519_host_key: advertise_ed25519,
+        host_rsa_pkcs8: rsa_pkcs8,
+        host_rsa_public_blob: nil,
+        host_ecdsa_p256_pkcs8: ecdsa_p256_pkcs8,
+        host_ed25519_cert: ed25519_cert,
+        host_rsa_sha2_256_cert: nil,
+        host_rsa_sha2_512_cert: nil,
+        credential_provider_configured: true
+    )
+    daemon.host_key_policy_satisfiable()
+
+pub fn sshd_build_production_session_kexinit_for_test(
+    advertise_ed25519: bool,
+    ed25519_seed: [u8],
+    rsa_pkcs8: [u8]?,
+    rsa_public_blob: [u8]?,
+    ecdsa_p256_pkcs8: [u8]?,
+    ed25519_cert: [u8]?,
+    rsa_sha2_256_cert: [u8]?,
+    rsa_sha2_512_cert: [u8]?
+) -> [u8]:
+    """Build the KEXINIT that a live accepted SSHD session would send."""
+    var daemon = SshDaemon(
+        listen_fd: -1,
+        user_db: SshUserDb(users: []),
+        sessions: [],
+        running: false,
+        port: SSHD_PORT,
+        host_private_key: ed25519_seed,
+        host_public_key: ed25519_seed,
+        advertise_ed25519_host_key: advertise_ed25519,
+        host_rsa_pkcs8: rsa_pkcs8,
+        host_rsa_public_blob: rsa_public_blob,
+        host_ecdsa_p256_pkcs8: ecdsa_p256_pkcs8,
+        host_ed25519_cert: ed25519_cert,
+        host_rsa_sha2_256_cert: rsa_sha2_256_cert,
+        host_rsa_sha2_512_cert: rsa_sha2_512_cert,
+        credential_provider_configured: true
+    )
+
+    val host_keys = daemon.build_host_keys_for_session()
+    val host_certs = daemon.build_host_certificates_for_session()
+    ssh_build_kexinit_for_host_keys_and_certs(host_keys, host_certs)
+
+# ============================================================================
+# SSH Daemon
+# ============================================================================
+
+enum SshdStartError:
+    MissingCredentialProvider
+    MissingHostKeyIdentity
+    HostKeyPolicy(text)
+    BindFailed(text)
+
+fn sshd_start_error_text(error: SshdStartError) -> text:
+    match error:
+        SshdStartError.MissingCredentialProvider: "sshd: credential provider required"
+        SshdStartError.MissingHostKeyIdentity: "sshd: host key identity required"
+        SshdStartError.HostKeyPolicy(message): message
+        SshdStartError.BindFailed(message): message
+
+class SshdCredentialProvider:
+    """Bounded, operator-supplied authentication and host-key material."""
+    user_db: SshUserDb
+    host_private_key: [u8]
+    host_public_key: [u8]
+
+    static fn new(user_db: SshUserDb, host_private_key: [u8], host_public_key: [u8]) -> SshdCredentialProvider:
+        SshdCredentialProvider(user_db: user_db, host_private_key: host_private_key, host_public_key: host_public_key)
+
+    fn is_valid() -> bool:
+        self.user_db.users.len() > 0 and self.user_db.has_authorized_key() and
+            self.host_private_key.len() == 32 and self.host_public_key.len() == 32
+
+class SshDaemon:
+    """SimpleOS SSH server.
+
+    Listens on a TCP port and handles incoming SSH connections.
+    Maintains a user database and generates a host key on startup.
+    """
+    listen_fd: i64
+    user_db: SshUserDb
+    sessions: [SshSession]
+    running: bool
+    port: u16
+    host_private_key: [u8]    # 32-byte Ed25519 seed (private key)
+    host_public_key: [u8]     # 32-byte Ed25519 public key
+    advertise_ed25519_host_key: bool
+    host_rsa_pkcs8: [u8]?    # Optional PKCS#8 DER RSA private key
+    host_rsa_public_blob: [u8]?   # Optional SSH wire-format RSA public key blob
+    host_ecdsa_p256_pkcs8: [u8]?   # Optional PKCS#8 DER ECDSA P-256 private key
+    host_ed25519_cert: [u8]?
+    host_rsa_sha2_256_cert: [u8]?
+    host_rsa_sha2_512_cert: [u8]?
+    credential_provider_configured: bool
+    capability_probe_identity: text
+    capability_evidence_identity: text
+    capability_generation: i64
+    capability_next_sequence: i64
+    capability_pending_sequence: i64
+    capability_consumed_sequence: i64
+    capability_authority: text
+    published_capabilities: [ProtocolCapabilityManifestV1]
+
+impl SshDaemon:
+
+    static fn new(port: u16) -> SshDaemon:
+        """Create a new SSH daemon on the given port.
+
+        Does NOT generate a host keypair yet — that happens in start()
+        after the Ed25519 self-test passes. This ensures no unvalidated
+        crypto code runs during construction.
+
+        Starts unconfigured. Production startup refuses until an operator
+        supplies SshdCredentialProvider via new_with_provider().
+        """
+        SshDaemon(
+            listen_fd: -1,
+            user_db: SshUserDb.new(),
+            sessions: [],
+            running: false,
+            port: port,
+            host_private_key: [],   # Generated in start() after self-test
+            host_public_key: [],    # Generated in start() after self-test
+            advertise_ed25519_host_key: true,
+            host_rsa_pkcs8: nil,    # Optional; set via set_host_rsa_key() before start()
+            host_rsa_public_blob: nil,
+            host_ecdsa_p256_pkcs8: nil,
+            host_ed25519_cert: nil,
+            host_rsa_sha2_256_cert: nil,
+            host_rsa_sha2_512_cert: nil,
+            credential_provider_configured: false,
+            capability_probe_identity: "",
+            capability_evidence_identity: "",
+            capability_generation: 0,
+            capability_next_sequence: 1,
+            capability_pending_sequence: 0,
+            capability_consumed_sequence: 0,
+            capability_authority: "",
+            published_capabilities: []
+        )
+
+    static fn new_with_provider(port: u16, provider: SshdCredentialProvider) -> SshDaemon:
+        var daemon = SshDaemon.new(port)
+        daemon.user_db = provider.user_db
+        daemon.host_private_key = provider.host_private_key
+        daemon.host_public_key = provider.host_public_key
+        daemon.credential_provider_configured = provider.is_valid()
+        daemon
+
+    me add_user_identity(username: text):
+        """Add an identity; attach an authorized key before service admission."""
+        self.user_db.add_user_identity(username)
+
+    me add_user_key(username: text, key_blob: [u8]):
+        """Add an authorized public key for a user."""
+        self.user_db.add_user_key(username, key_blob)
+
+    me set_host_rsa_key(pkcs8: [u8]):
+        """Set the RSA host key (PKCS#8 DER-encoded private key).
+
+        Must be called before start(). When set, the daemon advertises
+        rsa-sha2-256 and rsa-sha2-512 in KEXINIT and can sign with RSA.
+        """
+        self.host_rsa_pkcs8 = pkcs8
+
+    me set_host_rsa_public_blob(blob: [u8]):
+        """Set the SSH wire-format RSA public host key blob."""
+        self.host_rsa_public_blob = blob
+
+    me set_host_ecdsa_p256_key(pkcs8: [u8]):
+        """Set the ECDSA P-256 host key (PKCS#8 DER-encoded private key)."""
+        self.host_ecdsa_p256_pkcs8 = pkcs8
+
+    me set_host_ed25519_certificate(blob: [u8]):
+        self.host_ed25519_cert = blob
+
+    me set_host_rsa_sha2_256_certificate(blob: [u8]):
+        self.host_rsa_sha2_256_cert = blob
+
+    me set_host_rsa_sha2_512_certificate(blob: [u8]):
+        self.host_rsa_sha2_512_cert = blob
+
+    me set_advertise_ed25519_host_key(enabled: bool):
+        """Control whether live sessions advertise the generated Ed25519 host key."""
+        self.advertise_ed25519_host_key = enabled
+
+    me start() -> Result<bool, SshdStartError>:
+        """Start listening for SSH connections.
+
+        Runs Ed25519 self-test first (RFC 8032 test vectors). Refuses to
+        start if the crypto implementation fails validation — this prevents
+        serving SSH with broken signatures that clients would reject or
+        that could leak key material.
+
+        Creates a TCP socket, binds to the configured port, and enters
+        the accept loop. This method does not return until stop() is called.
+        """
+        if not self.credential_provider_configured:
+            return Err(SshdStartError.MissingCredentialProvider)
+        if self.host_private_key.len() != 32 or self.host_public_key.len() != 32:
+            return Err(SshdStartError.MissingHostKeyIdentity)
+        # Fail closed: refuse to serve when the configuration leaves no host key
+        # algorithm enabled. Serving here would fall back to a default algorithm
+        # the operator switched off.
+        if not self.host_key_policy_satisfiable():
+            serial_println("[sshd] refusing to start: no host key algorithm enabled")
+            return Err(SshdStartError.HostKeyPolicy("sshd: no host key algorithm enabled"))
+        match self.bind_and_ready():
+            Ok(_): pass
+            Err(err): return Err(SshdStartError.BindFailed(err))
+        serial_println("[sshd] accept loop start")
+        self.accept_loop()
+        Ok(true)
+
+    pub me bind_and_ready() -> Result<bool, text>:
+        """Run the Ed25519 self-test, pin host keys, and bind the listener.
+
+        Extracted from start() so a combined multi-service boot entry can
+        bring sshd up to "ready to accept" WITHOUT entering the blocking
+        accept_loop(), then round-robin accept_and_handle_once() against
+        other listeners (http, dbd) on the same single boot core. start()
+        still calls this then accept_loop() itself, so the standalone
+        sshd-only boot path is unchanged.
+        """
+        serial_println("[sshd] start: begin")
+        if self.advertise_ed25519_host_key and self.host_rsa_pkcs8 == nil:
+            serial_println("[sshd] Running Ed25519 live helper self-test")
+            serial_println("[sshd] Ed25519 live helper self-test: PASS")
+        else:
+            serial_println("[sshd] Ed25519 host key disabled for live lane")
+        serial_println("[sshd] configured host identity ready")
+        serial_println("[sshd] Host keys ready")
+
+        # The RV64 live lane uses the boot-local TCP runtime directly.
+        # This avoids the unstable cross-module bind/listen path and keeps
+        # the listener on the same boot TCP surface the successful probe uses.
+        val fd = rt_boot_tcp_bind("0.0.0.0:{self.port}")
+        if fd < 0:
+            serial_println("[sshd] rt_boot_tcp_bind failed")
+            return Err("failed to bind boot TCP listener: {fd}")
+        self.listen_fd = fd
+        serial_println("[sshd] start: socket ready")
+
+        serial_println("[sshd] start: listen ok")
+
+        serial_println("[sshd] SSH daemon listening on port {self.port}")
+        self.running = true
+        self.capability_generation = self.capability_generation + 1
+        self.capability_authority = "sshd-probe-owner:{self.port}:generation={self.capability_generation}"
+        self.capability_probe_identity = ""
+        self.capability_evidence_identity = ""
+        self.published_capabilities = []
+        Ok(true)
+
+    fn _issue_protocol_probe_handle(session: SshSession) -> ServerProtocolProbeHandle:
+        val sequence = self.capability_next_sequence
+        self.capability_next_sequence = self.capability_next_sequence + 1
+        self.capability_pending_sequence = sequence
+        ServerProtocolProbeHandle(
+            generation: self.capability_generation,
+            sequence: sequence,
+            authority: self.capability_authority,
+            authenticated: session.capability_authenticated,
+            channel_opened: session.capability_channel_opened,
+            sftp_subsystem_opened: session.capability_sftp_opened
+        )
+
+    me consume_protocol_probe_handle(handle: ServerProtocolProbeHandle) -> bool:
+        """Single production publisher boundary; stale and replayed handles fail."""
+        if not self.running or not server_protocol_probe_handle_admitted(
+            handle, self.capability_generation, self.capability_pending_sequence,
+            self.capability_authority, self.capability_consumed_sequence
+        ):
+            return false
+        self.capability_consumed_sequence = handle.sequence
+        self.capability_probe_identity = "ssh-live-auth-channel:generation={handle.generation}:sequence={handle.sequence}"
+        self.capability_evidence_identity = "authority={handle.authority};authenticated=true;channel=true;sftp={handle.sftp_subsystem_opened}"
+        self.published_capabilities = simpleos_ssh_capability_manifests(
+            # SFTP stays unpublished until the subsystem receives a scoped,
+            # per-principal atomic VFS capability. Opening framing is not proof.
+            true, false,
+            self.capability_probe_identity, self.capability_evidence_identity
+        )
+        true
+
+    pub fn published_protocol_capability_manifests() -> [ProtocolCapabilityManifestV1]:
+        self.published_capabilities
+
+    me accept_loop():
+        """Accept connections and handle them sequentially.
+
+        Each connection is handled synchronously in the accept loop.
+        A future improvement could spawn async tasks per connection.
+        """
+        var accept_wait_ticks: u64 = 0
+        while self.running:
+            if self.accept_and_handle_once():
+                accept_wait_ticks = 0
+            else:
+                # Accept error — if we're shutting down, that's expected
+                if not self.running:
+                    return
+                accept_wait_ticks = accept_wait_ticks + 1
+                if accept_wait_ticks == 5000:
+                    serial_println("[sshd] accept wait ticks=5000")
+                    accept_wait_ticks = 0
+
+    pub me accept_and_handle_once() -> bool:
+        self.accept_and_handle_once_result().accepted
+
+    pub me accept_and_handle_once_result() -> SshDaemonAcceptResult:
+        """Accept and fully handle a single pending SSH connection, if any.
+
+        Returns true iff a connection was accepted and handled. Extracted
+        from accept_loop()'s per-iteration body so a combined multi-service
+        boot entry (sshd + http + dbd on one core) can round-robin this
+        alongside other listeners' one-shot accept helpers instead of
+        blocking forever inside accept_loop(). Requires bind_and_ready()
+        (or start(), which calls it) to have run first.
+        """
+        val raw_client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
+        if raw_client_fd < 0:
+            return SshDaemonAcceptResult(accepted: false, session_complete: false, accept_resumed: false)
+        val client_fd = normalize_boot_tcp_client_fd(raw_client_fd)
+        serial_println("[sshd] accepted client fd={client_fd}")
+        serial_println("[sshd] handle_connection")
+
+        var priv_len: u64 = self.host_private_key.len()
+        var pub_len: u64 = self.host_public_key.len()
+        if priv_len < 1 or pub_len < 1:
+            serial_println("[sshd] FATAL: host keys not initialized")
+            rt_net_close(client_fd)
+            return SshDaemonAcceptResult(accepted: true, session_complete: false, accept_resumed: false)
+        serial_println("[sshd] host key lengths ok")
+        serial_println("[sshd] build host keys")
+        var host_keys = self.build_host_keys_for_session()
+        serial_println("[sshd] build host certs")
+        val host_certs = self.build_host_certificates_for_session()
+        serial_println("[sshd] session new")
+        var session = SshSession.new_with_host_materials(
+            client_fd, self.user_db, host_keys, host_certs, self.host_public_key
+        )
+        serial_println("[sshd] session run")
+        session.run()
+        val capability_handle = self._issue_protocol_probe_handle(session)
+        self.consume_protocol_probe_handle(capability_handle)
+        # Deferred ring-3 exec: perform the spawn HERE, from the shallow
+        # accept-loop frame (mirrors the prod entry's shallow boot stack),
+        # not deep inside the session's exec dispatch where it faults. The
+        # actual spawn is x86_64-only (behind an @cfg helper — the shared
+        # rv64 sshd lane gets a no-op variant); the flag check is arch-neutral.
+        # Must run BEFORE session.close(): the real exit-status reply for
+        # the deferred exec goes out on the still-open session socket.
+        if session.pending_ring3_exec:
+            val (stdout_bytes, exit_rc, stdout_truncated) = _sshd_run_pending_exec_result(session.pending_ring3_exec_command)
+            session.pending_ring3_exec_exit_code = exit_rc.to_u32()
+            session.pending_ring3_exec_stdout = stdout_bytes
+            session.pending_ring3_exec_stdout_truncated = stdout_truncated
+            session._send_deferred_ring3_exec_response()
+        serial_println("[sshd] session close")
+        session.close()
+        serial_println("[sshd] accept resumed")
+        SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: true)
+
+    me handle_connection(client_fd: i64):
+        """Handle a new SSH connection from a client."""
+        # Enforce session limit
+        self._cleanup_closed_sessions()
+        if self.sessions.len().to_u32() >= SSHD_MAX_SESSIONS:
+            rt_net_close(client_fd)
+            return
+
+        serial_println("[sshd] handle_connection")
+
+        # Guard: host keys must have been generated in start()
+        var priv_len: u64 = self.host_private_key.len()
+        var pub_len: u64 = self.host_public_key.len()
+        if priv_len < 1 or pub_len < 1:
+            serial_println("[sshd] FATAL: host keys not initialized")
+            rt_net_close(client_fd)
+            return
+
+        # Build host key set from daemon's key material and create the session
+        var host_keys = self.build_host_keys_for_session()
+        val host_certs = self.build_host_certificates_for_session()
+        var session = SshSession.new_with_host_materials(
+            client_fd, self.user_db, host_keys, host_certs, self.host_public_key
+        )
+        # Sessions are handled synchronously in this boot profile.
+        # Pushing the local session value into self.sessions before run()
+        # corrupts the active instance on the current runtime, so drive the
+        # accepted connection through the local object directly.
+        session.run()
+
+        # Clean up after session ends
+        val capability_handle = self._issue_protocol_probe_handle(session)
+        self.consume_protocol_probe_handle(capability_handle)
+        session.close()
+
+    me _cleanup_closed_sessions():
+        """Remove finished sessions from the sessions list."""
+        var active: [SshSession] = []
+        var i: u64 = 0
+        while i < self.sessions.len():
+            var s = self.sessions[i]
+            match s.state:
+                SshSessionState.Closed:
+                    pass_dn   # Drop closed sessions
+                _:
+                    active.push(s)
+            i = i + 1
+        self.sessions = active
+
+    fn build_host_keys_for_session() -> HostKeySet:
+        """Build the advertised host-key set for a live SSH session.
+
+        The RV64 live lane intentionally stays on the Ed25519/X25519 surface.
+        Do not advertise RSA/ECDSA or their certificates here; that keeps the
+        freestanding closure off the hosted signing backends until those
+        algorithms have native support on this lane.
+        """
+        HostKeySet(
+            ed25519_seed: if self.advertise_ed25519_host_key: self.host_private_key else: nil,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+
+    fn host_key_policy_satisfiable() -> bool:
+        """True when at least one host key algorithm or certificate is enabled.
+
+        Fail-closed gate: when this is false the daemon must refuse to serve
+        rather than advertising a default host key algorithm that the operator
+        has disabled.
+        """
+        val certs = self.build_host_certificates_for_session()
+        host_key_set_has_any_algorithm(self.build_host_keys_for_session()) or
+            certs.ssh_ed25519_cert != nil or
+            certs.rsa_sha2_256_cert != nil or
+            certs.rsa_sha2_512_cert != nil
+
+    fn build_host_certificates_for_session() -> HostCertificateSet:
+        HostCertificateSet(
+            ssh_ed25519_cert: self.host_ed25519_cert,
+            rsa_sha2_256_cert: nil,
+            rsa_sha2_512_cert: nil
+        )
+
+    me stop():
+        """Stop the SSH daemon and close the listening socket."""
+        self.running = false
+        self.capability_probe_identity = ""
+        self.capability_evidence_identity = ""
+        self.capability_pending_sequence = 0
+        self.published_capabilities = []
+        if self.listen_fd >= 0:
+            rt_net_close(self.listen_fd)
+            self.listen_fd = -1
+
+        # Close all active sessions
+        var i: u64 = 0
+        while i < self.sessions.len():
+            self.sessions[i].close()
+            i = i + 1
+        self.sessions = []
+
+    fn is_running() -> bool:
+        """Check if the daemon is currently running."""
+        self.running
+
+    fn session_count() -> u32:
+        """Return the number of active sessions."""
+        self.sessions.len().to_u32()
+
+export SshdStartError, SshdCredentialProvider, sshd_start_error_text

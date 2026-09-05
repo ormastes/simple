@@ -1,0 +1,464 @@
+#!/bin/sh
+# check-cow-alias-hotpath.shs — ratchet on COW-alias hot-path shapes in Simple
+# compiler source.
+#
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# A run that scanned 0 files is ERROR, never a pass.
+#
+# WHY THIS EXISTS
+# ---------------
+# Simple has value semantics implemented as copy-on-write: a collection is an
+# Arc-backed container and a mutation goes through Arc::make_mut, which
+# deep-copies the WHOLE collection whenever the Arc is aliased (strong_count > 1).
+# That is correct — two live bindings must not observe each other's writes — but
+# it is catastrophic when the "alias" is an accidental temporary the code did not
+# need. Three textual shapes create exactly that:
+#
+#   ROUNDTRIP  val t = self.table ... t.push(x) ... self.table = t
+#              The local and the field hold the same Arc across the write, so
+#              every single push deep-copies the whole table: O(n) per write,
+#              O(n^2) overall.
+#
+#   BYVALUE    self.xs = push_into(self.xs, v)
+#              The field still holds the Arc while the helper's parameter binding
+#              holds it too — same aliasing, same O(n) per call.
+#
+#   CARRIERSELF    state.xs = state.xs.push(v)          (widened 2026-08-26)
+#   CARRIERBYVALUE state.xs = push_into(state.xs, v)     (widened 2026-08-26)
+#              Same aliasing as ROUNDTRIP/BYVALUE, but the carrier is ANY
+#              root — `self` or a local carrier variable — and CARRIERSELF
+#              covers the method-call-on-the-field form. The three rules above
+#              were anchored on the literal `self.` AND required the field to
+#              be a call ARGUMENT, so REXVISIT
+#              (module_reexport_materialization.spl:67-69, a local
+#              HirReexportWalkState) fell through both holes at once.
+#              Discriminator is structural, not type-based: the SAME
+#              root.field path on both sides of the `=`. `x.f = y.f.push(v)`,
+#              `x.f = x.g.push(v)` and the correct single-owner idiom
+#              `state.xs.push(v)` / `state.depths[i] = d` are NOT offenders.
+#
+#   KEYSINLOOP .keys() / .values() inside a while/for body
+#              Materializes a fresh vector of every key on each iteration: O(n)
+#              per iteration, O(n^2) per loop. Hoist it above the loop.
+#
+# These are invisible on small fixtures (a 5-element table copies in nanoseconds)
+# and catastrophic on the real 667-module closure. Counters find them at runtime;
+# this script finds them before they land.
+#
+# This is a RATCHET, not a hard zero-bar: the tree already carries offenders, so
+# the current population is frozen in the baseline and any push that ADDS one
+# fails. A baselined offender that no longer exists is a STALE baseline and also
+# fails — a baseline that no longer describes the tree is how a ratchet silently
+# stops ratcheting.
+#
+# Deliberate-update path: --generate-baseline. For REVIEWED updates only. Do not
+# "fix" a FAIL with it without reading the diff.
+#
+# Usage: sh scripts/check/check-cow-alias-hotpath.shs [--root DIR] [--selftest-only]
+#                                                     [--list] [--generate-baseline]
+
+set -u
+
+ROOT="$(pwd)"
+SELFTEST_ONLY=0
+LIST=0
+GENERATE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) shift; ROOT="${1:-}" ;;
+    --selftest-only) SELFTEST_ONLY=1 ;;
+    --list) LIST=1 ;;
+    --generate-baseline) GENERATE=1 ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+  shift
+done
+
+BASELINE="$ROOT/scripts/check/cow_alias_hotpath_baseline.txt"
+
+# scan <dir> -> stdout: one "KIND<TAB>relpath<TAB>detail" line per offender,
+# sorted. Also writes the scanned-file count to $COUNT_FILE.
+scan() {
+  s_root="$1"
+  s_prefix="${2:-}"
+  s_count=0
+  for f in $(find "$s_root" -name '*.spl' -type f 2>/dev/null | sort); do
+    s_count=$((s_count + 1))
+    rel="$s_prefix${f#"$s_root"/}"
+    awk -v rel="$rel" '
+      # Function boundary: a top-level "fn "/"pub fn " resets the per-function
+      # state, so a `val t = self.x` in one function cannot pair with a
+      # `self.x = t` in the next.
+      /^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]/ {
+        delete taken; delete mutated; delete varying; ltop = 0; fname = $0
+        sub(/^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+/, "", fname)
+        sub(/[(:].*$/, "", fname)
+        # loop depth resets with the function
+        next
+      }
+      # ROUNDTRIP part 1: val/var X = self.FIELD
+      match($0, /^[[:space:]]*(val|var)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(:[^=]*)?=[[:space:]]*self\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
+        line = $0
+        lhs = line; sub(/^[[:space:]]*(val|var)[[:space:]]+/, "", lhs); sub(/[[:space:]:=].*$/, "", lhs)
+        rhs = line; sub(/^.*self\./, "", rhs); sub(/[[:space:]]*$/, "", rhs)
+        taken[lhs] = rhs; takenline[lhs] = NR
+        next
+      }
+      # ROUNDTRIP part 2: X.push( / X[..] = / X.set( / X.insert(
+      {
+        for (v in taken) {
+          if ($0 ~ ("(^|[^A-Za-z0-9_])" v "\\.(push|set|insert|add|append|remove)\\(") ||
+              $0 ~ ("(^|[^A-Za-z0-9_])" v "\\[[^]]*\\][[:space:]]*=")) {
+            mutated[v] = 1
+          }
+        }
+      }
+      # ROUNDTRIP part 3: self.FIELD = X  (store-back closes the round trip)
+      match($0, /^[[:space:]]*self\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
+        f2 = $0; sub(/^[[:space:]]*self\./, "", f2); sub(/[[:space:]]*=.*$/, "", f2)
+        r2 = $0; sub(/^.*=[[:space:]]*/, "", r2); sub(/[[:space:]]*$/, "", r2)
+        if ((r2 in taken) && taken[r2] == f2 && (r2 in mutated)) {
+          printf "ROUNDTRIP\t%s\t%s:%d:%s.%s\n", rel, fname, takenline[r2], "self", f2
+          delete taken[r2]; delete mutated[r2]
+        }
+        next
+      }
+      # BYVALUE: self.FIELD = helper(self.FIELD, ...)
+      match($0, /^[[:space:]]*self\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*\([[:space:]]*self\./) {
+        f3 = $0; sub(/^[[:space:]]*self\./, "", f3); sub(/[[:space:]]*=.*$/, "", f3)
+        a3 = $0; sub(/^.*\([[:space:]]*self\./, "", a3); sub(/[^A-Za-z0-9_].*$/, "", a3)
+        if (f3 == a3) printf "BYVALUE\t%s\t%s:%d:self.%s\n", rel, fname, NR, f3
+        next
+      }
+      # ---- widened carrier rules (2026-08-26, REXVISIT) --------------------
+      # The three rules above are anchored on the literal `self.`, so a COW
+      # round trip through a LOCAL carrier variable was invisible. That is the
+      # exact hole REXVISIT fell through
+      # (20.hir/hir_lowering/_Items/module_reexport_materialization.spl:67-69):
+      #     state.surface_indices = state.surface_indices.push(facade_index)
+      # `state` is a local HirReexportWalkState, not `self`, and the shape is a
+      # method call ON the field rather than a helper call taking the field as
+      # an ARGUMENT -- so BOTH the anchoring and the shape missed it. Note the
+      # shape gap is independent of the anchoring one: `self.xs = self.xs.push(v)`
+      # was missed too, because BYVALUE above requires `helper(self.xs, ...)`.
+      #
+      # Discriminator is structural and needs no type knowledge: the SAME
+      # root.field path appears on both sides of the `=`. `x.f = y.f.push(v)`
+      # (different root) and `x.f = x.g.push(v)` (different field) are
+      # legitimate and must not be flagged. POSIX awk has no backreferences, so
+      # the two sides are extracted with sub() and compared as strings.
+      #
+      # These blocks deliberately do NOT `next`: the self-anchored rules above
+      # consume their lines, and letting these fall through keeps the
+      # KEYSINLOOP indent bookkeeping below seeing exactly the lines it saw
+      # before this widening, so no existing baseline row can shift.
+
+      # CARRIERSELF: PATH = PATH.mutator(...)  e.g. state.xs = state.xs.push(v)
+      match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+\.(push|set|insert|add|append|remove|extend|concat)\(/) {
+        cl = $0; sub(/^[[:space:]]*/, "", cl); sub(/[[:space:]]*=.*$/, "", cl)
+        cr = $0; sub(/^[^=]*=[[:space:]]*/, "", cr)
+        sub(/\.(push|set|insert|add|append|remove|extend|concat)\(.*$/, "", cr)
+        if (cl == cr) printf "CARRIERSELF\t%s\t%s:%d:%s\n", rel, fname, NR, cl
+      }
+      # CARRIERBYVALUE: PATH = helper(PATH, ...) on a non-self carrier root.
+      # The self-rooted case is already BYVALUE above; excluding it here keeps
+      # each offender in exactly one class.
+      match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*\([[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+[[:space:],)]/) {
+        bl = $0; sub(/^[[:space:]]*/, "", bl); sub(/[[:space:]]*=.*$/, "", bl)
+        br = $0; sub(/^[^(]*\([[:space:]]*/, "", br); sub(/[^A-Za-z0-9_.].*$/, "", br); sub(/\.$/, "", br)
+        if (bl == br && bl !~ /^self\./) printf "CARRIERBYVALUE\t%s\t%s:%d:%s\n", rel, fname, NR, bl
+      }
+      # KEYSINLOOP: .keys()/.values() inside a while/for body, on a receiver
+      # that does NOT change with the loop.
+      #
+      # Indentation-scoped: a loop header pushes its indent, and any deeper line
+      # until the indent returns is inside that body (a stack, so leaving an
+      # inner loop does not lose the outer one).
+      #
+      # The loop-INVARIANT qualifier is load-bearing, not a softening. The cost
+      # this rule exists to catch is re-materializing THE SAME key array on
+      # every iteration: O(n) per iteration, O(n^2) per loop. When the receiver
+      # is rebound each iteration -- `for surface in ...` then
+      # `surface.callables.keys()`, or `val module = mods[i]` then
+      # `module.structs.keys()` -- each materialization is of a DIFFERENT dict,
+      # every key is visited exactly once, and the total is O(total entries):
+      # optimal, and not rewritable into anything cheaper. Flagging those was a
+      # false positive that made the baseline describe cost that is not there.
+      #
+      # (Direct dict iteration is NOT the alternative: `for (k, v) in d` exists
+      # and matches keys() order exactly, but the interpreter iter_to_vec helper
+      # materializes a Vec of (k, v) tuples and the runtime offers only
+      # rt_dict_keys / rt_dict_values / rt_dict_entries -- all materializing.
+      # There is no cursor/view iteration anywhere, so rewriting a keys() loop
+      # into a (k, v) loop allocates strictly more, not less.)
+      #
+      # "Varying" = bound inside the loop: a for-pattern name, or a val/var
+      # declared at an indent deeper than the innermost enclosing loop header.
+      {
+        ind = match($0, /[^ ]/); if (ind == 0) ind = 999
+        while (ltop > 0 && ind <= lind[ltop]) {
+          # Strictly deeper than the closing header = bound inside its body.
+          # A val at the SAME indent as the header is a sibling in the ENCLOSING
+          # body and must survive; the loop pattern names are recorded at
+          # header+0.5 so they are dropped here while siblings are not.
+          for (v in varying) if (varying[v] > lind[ltop]) delete varying[v]
+          ltop--
+        }
+        if ($0 ~ /^[[:space:]]*(while|for)[[:space:]].*:[[:space:]]*$/) {
+          if ($0 ~ /^[[:space:]]*for[[:space:]]/) {
+            pat = $0
+            sub(/^[[:space:]]*for[[:space:]]+/, "", pat)
+            sub(/[[:space:]]+in[[:space:]].*$/, "", pat)
+            gsub(/[()]/, "", pat)
+            n = split(pat, pv, /[[:space:]]*,[[:space:]]*/)
+            for (pi = 1; pi <= n; pi++)
+              if (pv[pi] ~ /^[A-Za-z_][A-Za-z0-9_]*$/) varying[pv[pi]] = ind + 0.5
+          }
+          ltop++; lind[ltop] = ind
+          next
+        }
+        if (ltop > 0 && $0 ~ /^[[:space:]]*(val|var)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) {
+          lv = $0
+          sub(/^[[:space:]]*(val|var)[[:space:]]+/, "", lv)
+          sub(/[^A-Za-z0-9_].*$/, "", lv)
+          if (lv != "") varying[lv] = ind
+        }
+        if (ltop > 0 && $0 ~ /\.(keys|values)\(\)/ && $0 !~ /^[[:space:]]*#/) {
+          # Receiver root: walk left from ".keys()"/".values()" over the
+          # member/index chain and take the leading identifier.
+          kp = match($0, /\.(keys|values)\(\)/)
+          pre = substr($0, 1, kp - 1)
+          sub(/^.*[^A-Za-z0-9_.\]\[]/, "", pre)
+          root = pre
+          sub(/[^A-Za-z0-9_].*$/, "", root)
+          if (!(root in varying))
+            printf "KEYSINLOOP\t%s\t%s:%d\n", rel, fname, NR
+        }
+      }
+    ' "$f"
+  done
+  echo "$s_count" > "$COUNT_FILE"
+}
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+  st_dir="$(mktemp -d)"
+  trap 'rm -rf "$st_dir"' EXIT
+  mkdir -p "$st_dir/src"
+
+  cat > "$st_dir/src/roundtrip.spl" <<'EOF'
+fn add_one(self, v: i64):
+    val t = self.table
+    t.push(v)
+    self.table = t
+EOF
+  cat > "$st_dir/src/byvalue.spl" <<'EOF'
+fn add_two(self, v: i64):
+    self.xs = push_into(self.xs, v)
+EOF
+  cat > "$st_dir/src/keysinloop.spl" <<'EOF'
+fn walk(self):
+    var i = 0
+    while i < 10:
+        val ks = self.table.keys()
+        i = i + 1
+EOF
+  cat > "$st_dir/src/clean.spl" <<'EOF'
+fn add_three(self, v: i64):
+    self.table.push(v)
+
+fn walk2(self):
+    val ks = self.table.keys()
+    for k in ks:
+        print(k)
+EOF
+  # Cross-function: a take in one function and a store-back in the NEXT must
+  # not pair up into a false offender.
+  cat > "$st_dir/src/crossfn.spl" <<'EOF'
+fn take_only(self):
+    val t = self.table
+    t.push(1)
+
+fn store_only(self, t: [i64]):
+    self.table = t
+EOF
+
+  # Loop-VARYING receiver: each iteration materializes the keys of a DIFFERENT
+  # dict, so the total is O(total entries), not O(n^2). Must NOT be flagged --
+  # both the for-pattern binding and the val-bound-inside-the-loop shape.
+  cat > "$st_dir/src/varying.spl" <<'EOF'
+fn walk_surfaces(self):
+    for surface in self.surfaces:
+        val names = surface.callables.keys()
+        print(names.len())
+
+fn walk_modules(self, mods: [Module]):
+    var i = 0
+    while i < mods.len():
+        val module = mods[i]
+        val struct_names = module.structs.keys()
+        print(struct_names.len())
+        i = i + 1
+EOF
+  # Nested loops: an invariant receiver in the INNER body must be flagged, and
+  # so must one that sits in the OUTER body AFTER the inner loop closes -- that
+  # second line is the one a single non-stacked loop indent silently loses.
+  cat > "$st_dir/src/nestedloop.spl" <<'EOF'
+fn walk_nested(self):
+    for a in self.outer:
+        for b in self.inner:
+            val ks = self.table.keys()
+            print(ks.len())
+        val ks2 = self.table.keys()
+        print(ks2.len())
+EOF
+
+  # REXVISIT replay: a COW round trip through a LOCAL carrier variable, in the
+  # exact shape that sat unflagged in module_reexport_materialization.spl.
+  # Also pins the self-rooted method-call form, which the self-anchored
+  # BYVALUE rule missed for a second, independent reason (it wants the field as
+  # a call ARGUMENT, not as the call RECEIVER).
+  cat > "$st_dir/src/carrier_local.spl" <<'EOF'
+fn note_visit(state: HirReexportWalkState, facade_index: i64, wanted: str, depth: i64):
+    state.surface_indices = state.surface_indices.push(facade_index)
+    state.wanted_names = state.wanted_names.push(wanted)
+    state.depths = state.depths.push(depth)
+
+fn note_self(self, v: i64):
+    self.rows = self.rows.push(v)
+
+fn note_byvalue(state: HirReexportWalkState, v: i64):
+    state.rows = push_into(state.rows, v)
+EOF
+  # The legitimate single-owner idiom, plus the two near-miss negatives that
+  # pin the same-root-same-field discriminator. A false positive here would be
+  # worse than the bug: this is the CORRECT way to write the mutation.
+  cat > "$st_dir/src/carrier_clean.spl" <<'EOF'
+fn note_ok(state: HirReexportWalkState, v: i64, i: i64, depth: i64):
+    state.surface_indices.push(v)
+    state.depths[i] = depth
+    state.a.b[i].c = depth
+
+fn near_miss_other_root(x: Carrier, y: Carrier, v: i64):
+    x.rows = y.rows.push(v)
+
+fn near_miss_other_field(x: Carrier, v: i64):
+    x.rows = x.cols.push(v)
+
+fn scalar_is_not_a_collection(state: Walk, k: i64):
+    state.best = state.best.max(k)
+EOF
+
+  COUNT_FILE="$st_dir/count"
+  st_out="$(scan "$st_dir")"
+  st_files="$(cat "$COUNT_FILE")"
+
+  st_fail=0
+  echo "$st_out" | grep -q "^ROUNDTRIP	src/roundtrip.spl" || { echo "selftest: roundtrip fixture not flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "^BYVALUE	src/byvalue.spl"     || { echo "selftest: by-value fixture not flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "^KEYSINLOOP	src/keysinloop.spl" || { echo "selftest: keys-in-loop fixture not flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "	src/clean.spl"              && { echo "selftest: clean fixture must not be flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "	src/crossfn.spl"            && { echo "selftest: cross-function pair must not be flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "	src/varying.spl"            && { echo "selftest: loop-varying keys() receiver must not be flagged"; st_fail=1; }
+  st_nested="$(echo "$st_out" | grep -c "^KEYSINLOOP	src/nestedloop.spl")"
+  [ "$st_nested" -eq 2 ] || { echo "selftest: expected 2 nested-loop offenders, got $st_nested"; st_fail=1; }
+  st_carrier="$(echo "$st_out" | grep -c "^CARRIERSELF	src/carrier_local.spl")"
+  [ "$st_carrier" -eq 4 ] || { echo "selftest: expected 4 CARRIERSELF offenders (3 REXVISIT + 1 self-rooted), got $st_carrier"; st_fail=1; }
+  echo "$st_out" | grep -q "^CARRIERBYVALUE	src/carrier_local.spl" || { echo "selftest: local-carrier by-value fixture not flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "	src/carrier_clean.spl"              && { echo "selftest: single-owner/near-miss carrier fixture must not be flagged"; st_fail=1; }
+  [ "$st_files" -eq 9 ] || { echo "selftest: expected 9 scanned files, got $st_files"; st_fail=1; }
+
+  # Empty tree must scan 0 files, so the caller is forced to ERROR.
+  st_empty="$(mktemp -d)"
+  COUNT_FILE="$st_empty/count"
+  scan "$st_empty" >/dev/null
+  [ "$(cat "$COUNT_FILE")" -eq 0 ] || { echo "selftest: empty tree must scan 0 files"; st_fail=1; }
+
+  # Fixture 9: the lib half of the scan is live and its rows carry the "lib/"
+  # prefix. Without this, dropping the second scan() call would go unnoticed.
+  COUNT_FILE="$st_dir/count"
+  st_pref="$(scan "$st_dir" "lib/")"
+  echo "$st_pref" | grep -q "^ROUNDTRIP	lib/src/roundtrip.spl" || { echo "selftest: prefixed scan did not emit lib/-prefixed rows"; st_fail=1; }
+  rm -rf "$st_empty"
+
+  rm -rf "$st_dir"; trap - EXIT
+  return $st_fail
+}
+
+if ! selftest; then
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+  echo "PASS — selftest only, 12 fixture(s) checked"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- real scan
+# Two trees are scanned, not one. src/lib was unscanned until 2026-08-23 and
+# carried 211 offenders the ratchet could never see -- a ratchet with a hole
+# that big is not a ratchet. Lib offenders are recorded with a "lib/" prefix so
+# they cannot collide with a compiler-relative path of the same name.
+SRC="$ROOT/src/compiler"
+LIBSRC="$ROOT/src/lib"
+if [ ! -d "$SRC" ]; then
+  echo "ERROR — nothing was checked (no $SRC)"
+  exit 2
+fi
+if [ ! -d "$LIBSRC" ]; then
+  echo "ERROR — nothing was checked (no $LIBSRC)"
+  exit 2
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+COUNT_FILE="$TMP/count_c"
+scan "$SRC" "" | sort > "$TMP/cur_c"
+FILES_C="$(cat "$COUNT_FILE")"
+COUNT_FILE="$TMP/count_l"
+scan "$LIBSRC" "lib/" | sort > "$TMP/cur_l"
+FILES_L="$(cat "$COUNT_FILE")"
+cat "$TMP/cur_c" "$TMP/cur_l" | sort > "$TMP/current"
+FILES=$((FILES_C + FILES_L))
+
+if [ "$FILES_C" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 .spl files under $SRC)"
+  exit 2
+fi
+if [ "$FILES_L" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 .spl files under $LIBSRC)"
+  exit 2
+fi
+
+CURRENT_N="$(wc -l < "$TMP/current" | tr -d ' ')"
+
+if [ "$LIST" -eq 1 ]; then
+  cat "$TMP/current"
+fi
+
+if [ "$GENERATE" -eq 1 ]; then
+  cp "$TMP/current" "$BASELINE"
+  echo "PASS — $FILES file(s) scanned, baseline regenerated with $CURRENT_N offender(s)"
+  exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+  echo "ERROR — nothing was checked (no baseline at $BASELINE; run --generate-baseline)"
+  exit 2
+fi
+
+sort "$BASELINE" > "$TMP/base"
+NEW="$(comm -23 "$TMP/current" "$TMP/base")"
+STALE="$(comm -13 "$TMP/current" "$TMP/base")"
+NEW_N=$(printf '%s' "$NEW" | grep -c . || true)
+STALE_N=$(printf '%s' "$STALE" | grep -c . || true)
+
+if [ "$NEW_N" -gt 0 ] || [ "$STALE_N" -gt 0 ]; then
+  [ "$NEW_N" -gt 0 ] && { echo "newly introduced:"; printf '%s\n' "$NEW"; }
+  [ "$STALE_N" -gt 0 ] && { echo "stale baseline entries (offender gone — regenerate after review):"; printf '%s\n' "$STALE"; }
+  echo "FAIL — $FILES file(s) scanned, $CURRENT_N offender(s), $NEW_N new, $STALE_N stale"
+  exit 1
+fi
+
+echo "PASS — $FILES file(s) scanned, $CURRENT_N offender(s) checked, 0 new, 0 stale"
+exit 0

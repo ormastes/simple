@@ -1,0 +1,141 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.claude_full.ink.events.input_event.{InputEvent, ParsedKey, isSgrMouseFragment, isNonAlphanumericKey, specialSequenceInput}
+
+fn inputFor(name: text, sequence: text) -> text:
+    InputEvent.new(ParsedKey.new(name, sequence)).input
+
+fn main() -> ():
+    describe("ink InputEvent", fn() -> ():
+        it("passes a plain printable sequence through unchanged", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise passes a plain printable sequence through unchanged")
+            expect(inputFor("a", "a")).to_equal("a")
+        )
+
+        it("clears input for non-alphanumeric named keys", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise clears input for non-alphanumeric named keys")
+            expect(inputFor("up", "\u{1b}[A")).to_equal("")
+            expect(inputFor("escape", "\u{1b}")).to_equal("")
+            expect(inputFor("tab", "\t")).to_equal("")
+        )
+
+        it("maps arrow names onto the corresponding key flags", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise maps arrow names onto the corresponding key flags")
+            val up = InputEvent.new(ParsedKey.new("up", "\u{1b}[A"))
+            expect(up.key.upArrow).to_equal(true)
+            expect(up.key.downArrow).to_equal(false)
+            val right = InputEvent.new(ParsedKey.new("right", "\u{1b}[C"))
+            expect(right.key.rightArrow).to_equal(true)
+            expect(right.key.upArrow).to_equal(false)
+        )
+
+        it("treats escape as meta", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise treats escape as meta")
+            expect(InputEvent.new(ParsedKey.new("escape", "\u{1b}")).key.meta).to_equal(true)
+        )
+
+        it("treats option as meta but keeps super distinct", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise treats option as meta but keeps super distinct")
+            var p = ParsedKey.new("a", "a")
+            p.option = true
+            p.superKey = true
+            val e = InputEvent.new(p)
+            expect(e.key.meta).to_equal(true)
+            expect(e.key.superKey).to_equal(true)
+        )
+
+        it("uses the key name as input when ctrl is held", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise uses the key name as input when ctrl is held")
+            var p = ParsedKey.new("c", "\u{3}")
+            p.ctrl = true
+            val e = InputEvent.new(p)
+            expect(e.input).to_equal("c")
+            expect(e.key.ctrl).to_equal(true)
+        )
+
+        it("normalizes ctrl+space to an actual space", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise normalizes ctrl+space to an actual space")
+            var p = ParsedKey.new("space", "\u{0}")
+            p.ctrl = true
+            expect(InputEvent.new(p).input).to_equal(" ")
+        )
+
+        it("resolves a Kitty CSI-u sequence through the parsed name", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise resolves a Kitty CSI-u sequence through the parsed name")
+            expect(inputFor("space", "\u{1b}[32;1u")).to_equal(" ")
+        )
+
+        it("resolves an application-keypad sequence to the parsed digit", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise resolves an application-keypad sequence to the parsed digit")
+            expect(inputFor("1", "\u{1b}O1")).to_equal("1")
+        )
+
+        it("suppresses SGR mouse fragments that arrive without a key name", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise suppresses SGR mouse fragments that arrive without a key name")
+            expect(inputFor("", "[<0;1;1M")).to_equal("")
+            expect(isSgrMouseFragment("[<0;1;1M")).to_equal(true)
+            expect(isSgrMouseFragment("[<0;1;1")).to_equal(false)
+            expect(isSgrMouseFragment("a")).to_equal(false)
+        )
+
+        it("suppresses a function-key code that carries no name", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise suppresses a function-key code that carries no name")
+            var p = ParsedKey.new("", "\u{1b}[15~")
+            p.code = "[15~"
+            expect(InputEvent.new(p).input).to_equal("")
+        )
+
+        it("sets shift for a single uppercase character", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise sets shift for a single uppercase character")
+            expect(InputEvent.new(ParsedKey.new("A", "A")).key.shift).to_equal(true)
+            expect(InputEvent.new(ParsedKey.new("a", "a")).key.shift).to_equal(false)
+        )
+
+        it("classifies non-alphanumeric key names", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise classifies non-alphanumeric key names")
+            expect(isNonAlphanumericKey("backspace")).to_equal(true)
+            expect(isNonAlphanumericKey("delete")).to_equal(true)
+            expect(isNonAlphanumericKey("a")).to_equal(false)
+        )
+
+        it("maps special sequence names to their input text", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise maps special sequence names to their input text")
+            expect(specialSequenceInput("space")).to_equal(" ")
+            expect(specialSequenceInput("escape")).to_equal("")
+            expect(specialSequenceInput("")).to_equal("")
+            expect(specialSequenceInput("f5")).to_equal("f5")
+        )
+
+        it("keeps the originating keypress on the event", fn() -> ():
+            # @req REQ-SSPEC-UNIT
+            step("exercise keeps the originating keypress on the event")
+            val e = InputEvent.new(ParsedKey.new("up", "\u{1b}[A"))
+            expect(e.keypress.name).to_equal("up")
+            expect(e.keypress.sequence).to_equal("\u{1b}[A")
+        )
+    )
+    # ponytail: explicit unit return - trailing describe() leaks a value into
+    # the process exit code, so a 0-failure spec exits 1. Bug: doc/08_tracking/bug/
+    # spec_describe_in_main_leaks_exit_code_2026-08-30.md
+    return ()

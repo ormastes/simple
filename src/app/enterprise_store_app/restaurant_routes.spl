@@ -1,0 +1,134 @@
+"""
+# Enterprise Web App — restaurant route family (/restaurant/*)
+
+Dispatched from `main.store_app_handle` AFTER the hardened prelude
+(limits -> path safety -> session auth). Executes ONLY the frozen guarded
+commands of `std.enterprise_restaurant`; every rendered business value goes
+through `esc()`, every response through `secured()`.
+
+Routes:
+- POST /restaurant/table/open        — session, venue, table, party, idem
+- POST /restaurant/order/line        — session, line, sku, qty, mods, idem
+- POST /restaurant/kitchen/ready     — session, line, idem
+- POST /restaurant/line/served       — session, line, idem
+- POST /restaurant/bill/close        — session, idem
+- GET  /restaurant/session/:table/view — ACTIVE session at the table (any
+  venue): escaped lines (sku, qty, modifiers, status) + served total.
+  404 `no-session` when the table has no active session.
+
+## The read is role-gated (W12-B)
+
+`GET /restaurant/session/:table/view` re-checks the FROZEN `role_allows`
+policy with `restaurant.table.open` — the action the family's own writes
+already require — exactly as the back-office families do. It was
+authenticated-only until W12-B under a "customer-facing" rationale, but the
+page renders another party's open bill: every ordered line, its sku,
+quantity, modifiers, preparation status and the served total. Reaching it
+needs no booking reference and no ownership proof, only a table id, so any
+authenticated session in the tenant could walk `t1..tN` and read every open
+bill in the venue. That is a staff surface, and it is now gated like one.
+"""
+
+use std.common.net.http_core.{match_route_pattern, extract_route_params}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, role_allows
+}
+use std.nogc_sync_mut.enterprise_restaurant.restaurant.{
+    restaurant_session_state, restaurant_line_status, restaurant_session_total,
+    table_open_session, order_add_line, kitchen_mark_ready, line_mark_served,
+    bill_close_session
+}
+use app.enterprise_store_app.web_common.{esc, form_value, form_int, secured, deny}
+
+# table_active_session finds the ACTIVE session at `table_id` (any venue):
+# the newest `opened` session at the table whose stream has not closed.
+fn table_active_session(store: EnterpriseStore, tenant_id: text, table_id: text) -> text:
+    var newest = ""
+    val rows = store_rows(store, "rest_session_events", "id, tenant_id, session_id, venue_id, table_id, event, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "table_id") == table_id:
+            if sqlite_row_get(row, "event") == "opened":
+                newest = sqlite_row_get(row, "session_id")
+    if newest == "":
+        return ""
+    if restaurant_session_state(store, tenant_id, newest) == "closed":
+        return ""
+    newest
+
+# page_session_view renders the session's ordered lines (escaped) + served total.
+fn page_session_view(store: EnterpriseStore, tenant_id: text, table_id: text, session_id: text) -> text:
+    var body = "<h1>Table Session</h1>"
+    body = body + "<p>Table: <span class=\"table\">" + esc(table_id) + "</span></p>"
+    body = body + "<p>Session: <span class=\"session\">" + esc(session_id) + "</span></p><ul>"
+    val rows = store_rows(store, "rest_line_events", "id, tenant_id, session_id, line_id, event, sku, qty, modifiers, price_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "session_id") == session_id:
+            if sqlite_row_get(row, "event") == "ordered":
+                val line_id = sqlite_row_get(row, "line_id")
+                val status = restaurant_line_status(store, tenant_id, session_id, line_id)
+                body = body + "<li data-line=\"" + esc(line_id) + "\">" + esc(sqlite_row_get(row, "sku"))
+                body = body + " x" + esc(sqlite_row_get(row, "qty")) + " [" + esc(sqlite_row_get(row, "modifiers")) + "] "
+                body = body + "<span class=\"status\">" + esc(status) + "</span></li>"
+    val total = restaurant_session_total(store, tenant_id, session_id)
+    body + "</ul><p>Served total: <span class=\"total\">" + esc("{total}") + "</span></p>"
+
+fn command_page(reason: text, detail: text) -> HttpResponse:
+    secured(HttpResponse.html("<p class=\"result\">" + esc(reason) + ": " + esc(detail) + "</p>"))
+
+# restaurant_routes_handle serves every /restaurant/* route; unknown subpaths 404.
+fn restaurant_routes_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, body: text) -> HttpResponse:
+    if method == "GET" and match_route_pattern("/restaurant/session/:table/view", path):
+        if not role_allows(who.role, "restaurant.table.open"):
+            return deny("forbidden", who.actor_id)
+        val params = extract_route_params("/restaurant/session/:table/view", path)
+        var table_id = ""
+        for p in params:
+            if p.0 == "table":
+                table_id = p.1
+        val session_id = table_active_session(store, tenant.tenant_id, table_id)
+        if session_id == "":
+            return deny("no-session", table_id)
+        return secured(HttpResponse.html(page_session_view(store, tenant.tenant_id, table_id, session_id)))
+    if method == "POST" and match_route_pattern("/restaurant/table/open", path):
+        val session_id = form_value(body, "session")
+        val env = CommandEnvelope(request_id: "req-open-" + session_id, idempotency_key: form_value(body, "idem"), action: "restaurant.table.open", payload: body)
+        val r = table_open_session(store, session, tenant, who, env, session_id,
+            form_value(body, "venue"), form_value(body, "table"), form_int(body, "party"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/restaurant/order/line", path):
+        val line_id = form_value(body, "line")
+        val env = CommandEnvelope(request_id: "req-line-" + line_id, idempotency_key: form_value(body, "idem"), action: "restaurant.order.add", payload: body)
+        val r = order_add_line(store, session, tenant, who, env, form_value(body, "session"),
+            line_id, form_value(body, "sku"), form_int(body, "qty"), form_value(body, "mods"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/restaurant/kitchen/ready", path):
+        val line_id = form_value(body, "line")
+        val env = CommandEnvelope(request_id: "req-ready-" + line_id, idempotency_key: form_value(body, "idem"), action: "restaurant.kitchen.ready", payload: body)
+        val r = kitchen_mark_ready(store, session, tenant, who, env, form_value(body, "session"), line_id)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/restaurant/line/served", path):
+        val line_id = form_value(body, "line")
+        val env = CommandEnvelope(request_id: "req-served-" + line_id, idempotency_key: form_value(body, "idem"), action: "restaurant.line.serve", payload: body)
+        val r = line_mark_served(store, session, tenant, who, env, form_value(body, "session"), line_id)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/restaurant/bill/close", path):
+        val session_id = form_value(body, "session")
+        val env = CommandEnvelope(request_id: "req-close-" + session_id, idempotency_key: form_value(body, "idem"), action: "restaurant.bill.close", payload: body)
+        val r = bill_close_session(store, session, tenant, who, env, session_id)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    secured(HttpResponse.error(HttpStatus.NotFound, "no such route"))
+
+export restaurant_routes_handle

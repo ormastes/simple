@@ -1,0 +1,155 @@
+# codex-system-test
+# @req REQ-008 REQ-009 REQ-010 REQ-011
+"""Focused unit contract for DebugServiceV1 probe and evidence lifecycle."""
+
+use std.spec.*
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1,
+    DebugProbeKindV1, DebugEvidenceArtifactV1, DebugTargetNodeV1,
+    debug_policy_development_v1,
+}
+use std.common.debug.service_v1.{DebugServiceV1}
+
+fn require_session(result: Result<DebugSessionId, text>) -> DebugSessionId:
+    match result:
+        case Ok(session_id): session_id
+        case Err(reason): fail("expected debug session: {reason}")
+
+fn add_host_target(service: DebugServiceV1, session_id: DebugSessionId):
+    val host = DebugTargetNodeV1(
+        target_id: "host",
+        parent_target_id: "",
+        kind: "host",
+        label: "Host",
+    )
+    val capability = DebugCapabilityV1(
+        target_id: "host",
+        support: CapLevel.Native,
+        verification: DebugVerificationV1.FixtureVerified,
+        perturbation: DebugPerturbationV1.Passive,
+        reason: "unit fixture",
+    )
+    match service.add_target(session_id, host, capability):
+        case Ok(_): pass_do_nothing("host target added")
+        case Err(reason): fail("host target rejected: {reason}")
+
+describe "DebugServiceV1 probe lifecycle":
+    it "should apply list and remove a development probe with receipted perturbation":
+        val service = DebugServiceV1.create()
+        val session_id = require_session(service.open_session("build-probe", debug_policy_development_v1()))
+        add_host_target(service, session_id)
+        val applied = match service.apply_probe(
+            session_id,
+            DebugProbeKindV1.Log,
+            "host",
+            "src/app/main.spl:7",
+            DebugPerturbationV1.Cooperative,
+            123456,
+        ):
+            case Ok(probe): probe
+            case Err(reason): fail("probe apply rejected: {reason}")
+        expect(applied.session_id.value).to_equal(session_id.value)
+        expect(applied.target_id).to_equal("host")
+        expect(applied.expires_at_ns).to_equal(123456)
+        expect(service.probes_for(session_id).len()).to_equal(1)
+        match service.remove_probe(session_id, applied.probe_id):
+            case Ok(_): pass_do_nothing("probe removed")
+            case Err(reason): fail("probe remove rejected: {reason}")
+        expect(service.probes_for(session_id).len()).to_equal(0)
+        val receipts = service.receipts_for(session_id)
+        expect(receipts[2].action).to_equal("probe.apply")
+        expect(receipts[2].perturbation == DebugPerturbationV1.Cooperative).to_equal(true)
+        expect(receipts[2].outcome).to_equal("accepted")
+        expect(receipts[3].action).to_equal("probe.remove")
+        expect(receipts[3].outcome).to_equal("accepted")
+
+    it "should deny probe application under observe-only policy and retain denial receipt":
+        val service = DebugServiceV1.create()
+        val session_id = require_session(service.open_observe_session("build-observe"))
+        add_host_target(service, session_id)
+        match service.apply_probe(
+            session_id,
+            DebugProbeKindV1.Watch,
+            "host",
+            "state.value",
+            DebugPerturbationV1.Stopping,
+            123456,
+        ):
+            case Ok(_): fail("observe-only probe was accepted")
+            case Err(reason): expect(reason).to_equal("probe denied by policy")
+        expect(service.probes_for(session_id).len()).to_equal(0)
+        val receipts = service.receipts_for(session_id)
+        expect(receipts[2].action).to_equal("probe.apply")
+        expect(receipts[2].allowed).to_equal(false)
+        expect(receipts[2].perturbation == DebugPerturbationV1.Stopping).to_equal(true)
+        expect(receipts[2].outcome).to_equal("denied")
+
+    it "should remove every applied probe when the owning session closes":
+        val service = DebugServiceV1.create()
+        val session_id = require_session(service.open_session("build-close-probes", debug_policy_development_v1()))
+        add_host_target(service, session_id)
+        match service.apply_probe(session_id, DebugProbeKindV1.Log, "host", "a:1", DebugPerturbationV1.Passive, 100):
+            case Ok(_): pass_do_nothing("first probe applied")
+            case Err(reason): fail("first probe rejected: {reason}")
+        match service.apply_probe(session_id, DebugProbeKindV1.Trace, "host", "b:2", DebugPerturbationV1.Cooperative, 200):
+            case Ok(_): pass_do_nothing("second probe applied")
+            case Err(reason): fail("second probe rejected: {reason}")
+        expect(service.probes_for(session_id).len()).to_equal(2)
+        match service.close_session(session_id):
+            case Ok(_): pass_do_nothing("session closed")
+            case Err(reason): fail("session close rejected: {reason}")
+        expect(service.probes_for(session_id).len()).to_equal(0)
+        val receipts = service.receipts_for(session_id)
+        val close_receipt = receipts[receipts.len() - 1]
+        expect(close_receipt.action).to_equal("session.close")
+        expect(close_receipt.perturbation == DebugPerturbationV1.Cooperative).to_equal(true)
+        # Registry/probe bookkeeping changed, but no target execution change
+        # is implied by closing the service session itself.
+        expect(close_receipt.execution_changed).to_equal(false)
+        expect(close_receipt.outcome).to_equal("accepted")
+
+describe "DebugServiceV1 evidence lifecycle":
+    it "should bind valid evidence to the exact session build and preserve its digest":
+        val service = DebugServiceV1.create()
+        val session_id = require_session(service.open_observe_session("build-evidence-sha256"))
+        val artifact = DebugEvidenceArtifactV1(
+            path: "raw/core",
+            media_type: "application/x-core",
+            digest: "sha256:0123456789abcdef",
+            native: true,
+            privacy_label: "restricted",
+        )
+        val manifest = match service.export_evidence(session_id, 987654321, [artifact]):
+            case Ok(value): value
+            case Err(reason): fail("valid evidence rejected: {reason}")
+        expect(manifest.schema).to_equal("debug-evidence-v1")
+        expect(manifest.session_id.value).to_equal(session_id.value)
+        expect(manifest.build_id).to_equal("build-evidence-sha256")
+        expect(manifest.captured_at_ns).to_equal(987654321)
+        expect(manifest.artifacts.len()).to_equal(1)
+        expect(manifest.artifacts[0].digest).to_equal("sha256:0123456789abcdef")
+        val receipts = service.receipts_for(session_id)
+        expect(receipts[1].action).to_equal("evidence.export")
+        expect(receipts[1].perturbation == DebugPerturbationV1.Passive).to_equal(true)
+        expect(receipts[1].outcome).to_equal("accepted")
+
+    it "should reject a missing digest and receipt the failed export as denied":
+        val service = DebugServiceV1.create()
+        val session_id = require_session(service.open_observe_session("build-invalid-evidence"))
+        val artifact = DebugEvidenceArtifactV1(
+            path: "raw/core",
+            media_type: "application/x-core",
+            digest: "",
+            native: true,
+            privacy_label: "restricted",
+        )
+        match service.export_evidence(session_id, 987654321, [artifact]):
+            case Ok(_): fail("evidence without a digest was accepted")
+            case Err(reason): expect(reason).to_equal("evidence artifacts require path and digest")
+        val receipts = service.receipts_for(session_id)
+        expect(receipts.len()).to_equal(2)
+        expect(receipts[1].action).to_equal("evidence.export")
+        expect(receipts[1].allowed).to_equal(false)
+        expect(receipts[1].outcome).to_equal("denied")
+        expect(receipts[1].reason).to_equal("evidence artifacts require path and digest")
