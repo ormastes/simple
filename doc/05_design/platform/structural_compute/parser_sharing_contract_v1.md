@@ -126,7 +126,7 @@ are new files by construction.
 
 | Lane | Owner | Deliverable | Acceptance gate |
 |---|---|---|---|
-| Simple source lexical facts | CoreLexer | `simple_code_lines(source)` — per-line code with string CONTENT blanked and comments removed, columns preserved | 16/16 module spec; a no-op implementation must turn it red |
+| Simple source lexical facts | CoreLexer | `simple_code_lines(source)` — per-line code with string CONTENT blanked and comments removed, columns preserved | 28/28 module spec (16 at first landing); a no-op implementation must turn it red |
 | First consumer | sspec_maintain | `_mask_strings_and_comment` deleted; `_is_pending` reads the shared fact | consumer suite equals its HEAD baseline example-for-example |
 | String state | sspec_maintain | `in_triple_string` parity tracker deleted; replaced by `simple_string_continuation_lines` | new spec red against the old tracker, green after; corpus arm checked against an independent `it "` count |
 | Docgen body end | spipe_docgen | `find_scenario_body_end` no longer ends a scenario body on a string-continuation line; the fact is threaded as a parameter through its 7-function chain (no module global) | 3 new examples red at the walker-fixed HEAD (6/9), green after (9/9); corpus arm on `resource_wrapper_gen_spec.spl` (golden at col 0 from line 61, assertions after line 82) |
@@ -142,8 +142,11 @@ block and lost the real one after it, feature title included. Originally
 deferred because the file sat in another lane's dirty set; that set was wiped
 mid-session, which removed the reason.
 
-**The parity tracker was losing 2,182 lines.** Replaying it over every
-`*_spec.spl`: 32 files start a swallow at a comment line containing one triple
+**The parity tracker was losing ~2,100 lines.** This lane's replay over every
+`*_spec.spl` measured 32 files / 2,182 lines; an independent replay by the
+reviewing agent at the PR tip measured 36 / 2,191 (31 / 2,058 excluding the
+five specs this PR adds — whose own header comments trip the same tracker).
+Per-file worst cases agree. 32 files start a swallow at a comment line containing one triple
 quote — worst `test/01_unit/test_runner/tag_parsing_spec.spl` at 181 of 182
 lines, from line 1, so the scorer reported ZERO scenarios for a real spec.
 This was deferred in the first pass as "a behavior change beyond this seam";
@@ -243,9 +246,10 @@ mislabels such as `encoding/toml.spl` are other-grammar):
 `lib/nogc_sync_mut/tooling/easy_fix/rules_helpers.spl`, `lib/nogc_sync_mut/ui_test/parse.spl`.
 
 **Assessed and deliberately left:** `test_runner/mode_filter.spl` — its
-tracker is wrong (a one-line `"""doc"""` leaves it in docstring mode for the
-rest of the file) but its only consumer effect is dropping plain `#` comments
-while still collecting `# @…` directives, so mode detection survives the bug.
+tracker is wrong (a one-line `"""doc"""` leaves it in docstring mode until the
+next `"""`-leading line) but its only consumer effect is dropping plain `#`
+comments while still collecting `# @…` directives, so mode detection survives
+the bug.
 No discriminating consumer fixture, no migration.
 
 **Blocked, not deferred — by Seam 1's debt:** every tracker under
@@ -269,8 +273,8 @@ and must never touch CoreLexer.
 - `src/compiler/10.frontend/core/source_facts.spl` — the shared lexical fact.
 - `src/app/sspec_maintain/source_facts.spl` — first production consumer; the
   hand-rolled masker deleted.
-- `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (16 examples) and
-  nine fixture files under `test/fixtures/source_facts/`.
+- `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (28 examples; 16 at
+  first landing) and 17 fixture files under `test/fixtures/source_facts/`.
 - This document.
 
 No file in Codex's dirty set was edited. `source_facts.spl` is clean at HEAD;
@@ -290,6 +294,7 @@ uses. Findings therefore describe the seed, not a self-hosted compiler.
 | `app/check/check_sspec_guidance_shared_lexer_spec.spl` | 7/7 | **5/7 at HEAD** — only the two positive arms red |
 | `sspec_maintain/shared_lexer_string_state_spec.spl` | 6/6 | 3/6 against the old tracker |
 | `spipe_docgen/shared_lexer_string_state_spec.spl` | 12/12 | 2/12 vs original walkers; 6/12 vs walker-fixed-only |
+| `check_multifile_transient_scope_spec.spl` | 4/4 | 4/4 |
 | ten `app/cli` specs reaching the lint scanners | identical | 2/6, 1/2, 0-exec, 1/2, 0-exec, 0-exec, 0-exec, 11/11, 0-exec, 0-exec — same before and after |
 | `sspec_maintain/pending_detection_spec.spl` | 5/5 | 5/5 |
 | `sspec_maintain/scoring_spec.spl` | 18/20 | 18/20 |
