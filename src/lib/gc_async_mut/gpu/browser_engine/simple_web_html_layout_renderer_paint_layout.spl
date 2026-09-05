@@ -2182,20 +2182,27 @@ fn _html_draw_ir_wrap_extra_line_commands(
         line_i = line_i + 1
     out
 
-fn _html_draw_ir_image_index(
-    images: [SimpleOsHostGpuImageResource], image_uri: text
-) -> i32:
+fn _html_draw_ir_image_index_by_uri(
+    images: [SimpleOsHostGpuImageResource]
+) -> Dict<text, i32>:
+    # First VALID resource per uri wins, exactly like the linear scan this
+    # index replaces: an invalid entry never shadows a later valid one.
+    var by_uri: Dict<text, i32> = {}
     var index = 0
+    # cpu-lane-loop-ok: one pass over the image list building the uri -> index map that every per-node lookup reads; bound is images.len(), built once per _html_draw_ir_commands
     while index < images.len():
         val image = images[index]
-        if (
-            image.image_uri == image_uri and image.width > 0 and
-            image.height > 0 and
-            image.pixels.len() == image.width.to_i64() * image.height.to_i64()
-        ):
-            return index
+        if image.width > 0 and image.height > 0 and
+            image.pixels.len() == image.width.to_i64() * image.height.to_i64() and
+            not by_uri.contains_key(image.image_uri):
+            by_uri[image.image_uri] = index
         index = index + 1
-    -1
+    by_uri
+
+fn _html_draw_ir_image_index(
+    image_index: Dict<text, i32>, image_uri: text
+) -> i32:
+    image_index.get(image_uri) ?? -1
 
 fn _html_draw_ir_fit_size(
     object_fit: text, box_w: i32, box_h: i32,
@@ -2233,14 +2240,14 @@ fn _html_draw_ir_fit_size(
 fn _html_draw_ir_image_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     i: i32, images: [SimpleOsHostGpuImageResource],
-    ancestor_clip: ClipRect
+    image_index_by_uri: Dict<text, i32>, ancestor_clip: ClipRect
 ) -> DrawIrCommand?:
     val node = nodes[i]
     if node.tag != "img" and node.tag != "video":
         return nil
     val image_attr = if node.tag == "video": "poster" else: "src"
     val image_uri = attr_value(node.attrs_raw, image_attr).trim()
-    val image_index = _html_draw_ir_image_index(images, image_uri)
+    val image_index = _html_draw_ir_image_index(image_index_by_uri, image_uri)
     if image_index < 0:
         return nil
     val st = styles[i]
@@ -2372,6 +2379,7 @@ fn _html_draw_ir_background_layers(st: Style) -> [HtmlDrawIrBackgroundLayer]:
 fn _html_draw_ir_background_image_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     i: i32, images: [SimpleOsHostGpuImageResource],
+    image_index_by_uri: Dict<text, i32>,
     ancestor_clip: ClipRect, viewport_width: i32, viewport_height: i32,
     layer: HtmlDrawIrBackgroundLayer
 ) -> DrawIrCommand?:
@@ -2380,7 +2388,7 @@ fn _html_draw_ir_background_image_command(
         layer.image_uri == ""
     ):
         return nil
-    val image_index = _html_draw_ir_image_index(images, layer.image_uri)
+    val image_index = _html_draw_ir_image_index(image_index_by_uri, layer.image_uri)
     if image_index < 0:
         return nil
     val image = images[image_index]
@@ -2750,12 +2758,8 @@ fn _html_draw_ir_visible(
 
 fn _html_draw_ir_visible_nodes(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
-    width: i32, height: i32
+    clip_cache: PaintClipCache
 ) -> [bool]:
-    val clip_cache = build_ancestor_clip_cache(
-        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
-        width, height
-    )
     var visible: [bool] = [false; nodes.len()]
     var i: i32 = 0
     # cpu-lane-loop-ok: one visibility decision per node into a reusable [bool] mask so downstream Draw IR emission does not recompute visibility; bound is nodes.len()
@@ -2825,6 +2829,9 @@ fn _html_draw_ir_commands(
     val clip_cache = build_ancestor_clip_cache(
         nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
     )
+    # One uri -> index map per render. The per-node loop below used to rescan
+    # the whole image list for every img, video and background layer.
+    val image_index_by_uri = _html_draw_ir_image_index_by_uri(images)
     var commands: [DrawIrCommand] = []
     var owner_nodes: [i32] = []
     var scrollbar_lowering = false
@@ -3075,14 +3082,15 @@ fn _html_draw_ir_commands(
                 val background_layers = _html_draw_ir_background_layers(styles[i])
                 var backgrounds_ready = background_layers.len() > 0
                 for layer in background_layers:
-                    if _html_draw_ir_image_index(images, layer.image_uri) < 0:
+                    if _html_draw_ir_image_index(image_index_by_uri, layer.image_uri) < 0:
                         backgrounds_ready = false
                 var background_index = background_layers.len() - 1
                 var lowered_backgrounds: [DrawIrCommand] = []
                 # cpu-lane-loop-ok: lowers the declared background layers back-to-front; bound is background_layers.len(), which _html_draw_ir_two_url_background_layers caps at 2 (or 1 for the single-image form)
                 while backgrounds_ready and background_index >= 0:
                     if val background_command = _html_draw_ir_background_image_command(
-                        nodes, styles, boxes, i, images, node_clip, width, height,
+                        nodes, styles, boxes, i, images, image_index_by_uri,
+                        node_clip, width, height,
                         background_layers[background_index]
                     ):
                         var background = background_command
@@ -3105,7 +3113,7 @@ fn _html_draw_ir_commands(
                     commands.push(border_overlay)
                     owner_nodes.push(i)
             if val image_command = _html_draw_ir_image_command(
-                nodes, styles, boxes, i, images, node_clip
+                nodes, styles, boxes, i, images, image_index_by_uri, node_clip
             ):
                 var image = image_command
                 image.parent_id = component_id

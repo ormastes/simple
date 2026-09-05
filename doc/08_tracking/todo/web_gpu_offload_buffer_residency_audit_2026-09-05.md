@@ -129,3 +129,30 @@ Not fixed: this is the designed policy (an honest A/B that keeps proving the
 device still agrees), not an oversight, and changing it is a policy decision
 rather than a defect fix. Recorded so the cost is visible: one full upload plus
 one full readback per frame on the non-offload steady state.
+
+## Completion ledger — opened 2026-09-05
+
+Which of the items above can actually be finished on this machine, and which
+are blocked on hardware that does not exist here. "Completable" means the fix
+is pure Simple and its effect is provable by a spec without a GPU device; it
+does NOT mean the speedup can be measured here, and no item below may ship
+with a measured claim attached.
+
+| # | Item | Status | Why |
+|---|---|---|---|
+| 1 | Per-route Engine2D create/destroy | COMPLETABLE | Engine lifetime is pure Simple; a reuse cache is provable by counting creates in a spec |
+| 2 | Full-surface per-pixel loops + collidable checksum | COMPLETABLE | The checksum being a plain modular SUM is a correctness bug, not just a cost; provable directly |
+| 3 | Metal host staging alloc/free per text batch | COMPLETABLE | Introduced by the packed-font change in this same PR; pooled the same way the device buffers are |
+| 4 | `gpu_lut_pack_dense` per-entry FFI | COMPLETABLE | A bulk helper already exists and is already used elsewhere in the same file |
+| 5 | Image-list linear scan in the per-node loop | COMPLETABLE | Pure indexing change |
+| 6 | `build_ancestor_clip_cache` built twice | COMPLETABLE | Pure dedupe |
+| 7 | Verification-only device round trip on the steady non-offload route | COMPLETABLE | Route logic is pure Simple |
+| — | DirectX GPU text path | BLOCKED | No Windows and no DXVK host; see the DirectX gap record |
+| — | Device measurement of the Metal packed path | BLOCKED | No Metal-featured binary on this host |
+| — | Web route key whole-scene serialize + hash per frame | BLOCKED-BY-DESIGN | Needs a generation counter on `DrawIrComposition`, a wide struct change across every DrawIR producer |
+| — | Simple side of the Chrome comparison | OUT OF SCOPE HERE | The renderer is not linked into `simple_runner.spl`; that is a harness build change, not a perf fix |
+
+**Rule for anyone closing one of these:** every fix needs one runnable check in
+the nearest existing spec, and the spec must be run and its verdict line
+quoted. A source-only argument that a loop got shorter is not evidence. None of
+these may be reported as a speedup, because nothing here can measure one.
