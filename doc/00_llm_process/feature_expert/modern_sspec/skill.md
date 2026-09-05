@@ -331,3 +331,34 @@ Read that section before writing or converting any `*_spec.spl`; the scaffold
   documented contract and scores the same spec **97**. Filed, with two RED specs,
   deliberately NOT fixed — a fix shifts every score in the repo:
   [`doc/08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md`](../../../08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md).
+
+## Known limitation of the current loop (2026-09-05, honest, not hedged)
+
+The training loop above (checklist -> low-effort worker -> `sh
+scripts/check/sspec-train.shs` score -> edit the checklist -> re-score on the
+*same* specs) is the shape flagged as a "wrong flywheel" in
+`doc/01_research/infra/spipe/spipe_skill_foundry_debug_training.md` §30: a loop
+that scores work, edits the guidance from the score, then re-scores with that
+same guidance can raise its own numbers without raising capability.
+
+The honest split, reconstructed from commit timestamps rather than memory — the
+loop did better than a pure flywheel, and worse than a clean experiment:
+
+- **Held-out: 14 of 21 specs.** The checklist was rewritten at 13:50 from
+  round-1 evidence on three files. Round 2 (3 specs), the sonnet batch (4), the
+  blocker batch (3) and the final near-target batch (4) were all scored *after*
+  that, on files the checklist had never been tuned against. All 14 reached
+  >=90. That is genuine transfer evidence.
+- **Same-case: 7 of 21.** The three round-1 leftovers were the exact files whose
+  failure motivated the rewrite. The four-spec batch that stalled at 84/84/84/88
+  triggered the 14:00 ORA-003 edit and was then re-run against it. Those seven
+  only show the checklist can be tuned until a known file passes — the flywheel
+  failure itself — and should not be counted as capability.
+
+So the defensible claim is **14/14 on held-out specs**, not 21/21. Still
+missing: a *standing* held-out partition (the split above is retrospective, not
+enforced), a leak check on the checklist text, and a same-case-exclusion rule
+inside the loop. See `.claude/skills/lib/debug_ladder.md` "Anti-flywheel rules"
+for the three counter-rules (held-out set, no same-case validation, leak
+gate) that a future revision of this loop should apply before trusting its own
+reported gains.
