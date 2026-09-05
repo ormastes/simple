@@ -42,7 +42,12 @@ Both were live in `src/app/sspec_maintain/source_facts.spl`, both measured 2026-
    character walk returns a docstring's CONTINUATION line verbatim — the line carries
    no quote of its own — so a scan for `skip(` fires on prose. Patched twice upstream
    before being deleted.
-2. **A triple-quote parity count is not string state.** `count('"""') % 2 == 1` is
+2. **A triple-quote parity count is not string state**, and neither is a
+   one-line-at-a-time docstring flag. spipe_docgen's two walkers could not tell a
+   docstring's bare closing `"""` from a FIXTURE string's (`val src = """ ... """`),
+   so they entered docstring mode on the way OUT of a fixture. **70 spec files open
+   a fixture string; 38 close it with a bare `"""`** — the exact trigger.
+   Also: `count('"""') % 2 == 1` is
    right only for well-formed docstrings. One triple quote in a COMMENT flips it and
    discards every line until the next triple quote. **Replaying the legacy tracker
    over every `*_spec.spl`: 32 files affected, 2,182 lines discarded** — worst
@@ -77,8 +82,9 @@ every independent attempt got it wrong the same way.
   `doc/03_plan/platform/structural_compute/parser_framework_plan.md`
 - Gate: `scripts/check/check-parser-source-global-ratchet.shs` (+ baseline; push-tier, advisory)
 - Specs: `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (21),
-  `test/01_unit/app/sspec_maintain/shared_lexer_string_state_spec.spl` (6)
-- Fixtures: `test/fixtures/source_facts/` (9)
+  `test/01_unit/app/sspec_maintain/shared_lexer_string_state_spec.spl` (6),
+  `test/01_unit/app/spipe_docgen/shared_lexer_string_state_spec.spl` (6)
+- Fixtures: `test/fixtures/source_facts/` (11)
 
 ## Known open
 
@@ -86,6 +92,9 @@ every independent attempt got it wrong the same way.
   generator/parser/analyzer reference a ~105-line change that is still uncommitted
   across four files. So no `doc/06_spec` mirror exists for the specs above, and none
   can be generated until that lane lands. Do not hand-write one.
-- `src/app/spipe_docgen/spipe_docgen/parser.spl` (1,939 lines, 255 text-scan sites) is
-  still an independent line-oriented Simple front end. It is the largest remaining
-  duplicate and is deferred only because it sits in another lane's dirty set.
+- `src/app/spipe_docgen/spipe_docgen/parser.spl` now consumes both facts for its two
+  docstring walkers (`parse_spipe_file` doc-block collection and
+  `extract_test_structure_with_default`). Its remaining ~250 text-scan sites are
+  per-line *grammar* recognition (`describe `, `it `, `step(`), not string state —
+  leave them. `find_scenario_body_end` is still indent-only and not string-aware; a
+  fixture's column-0 lines end a scenario body early. Measure before migrating.

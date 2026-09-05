@@ -129,6 +129,17 @@ are new files by construction.
 | Simple source lexical facts | CoreLexer | `simple_code_lines(source)` — per-line code with string CONTENT blanked and comments removed, columns preserved | 16/16 module spec; a no-op implementation must turn it red |
 | First consumer | sspec_maintain | `_mask_strings_and_comment` deleted; `_is_pending` reads the shared fact | consumer suite equals its HEAD baseline example-for-example |
 | String state | sspec_maintain | `in_triple_string` parity tracker deleted; replaced by `simple_string_continuation_lines` | new spec red against the old tracker, green after; corpus arm checked against an independent `it "` count |
+| Docgen walkers | spipe_docgen | `in_docstring` per-line flag deleted from `extract_test_structure_with_default`; `parse_spipe_file`'s doc-block opener guarded by the same fact | new spec 6/6, **2/6 against the old walkers** (only the control and sabotage arm green); its three pre-existing baselines byte-identical (37/65, 5/5, 0-executed) |
+
+**The docgen walkers were misreading 38 real files.** Both decided "am I in a
+docstring?" from the current line alone, so a fixture string's bare closing
+`"""` — 38 of the 70 spec files that open a fixture string close it that way —
+put them INTO docstring mode on the way out. `extract_test_structure` then
+dropped the next `describe` heading while rendering the fixture's interior as
+real structure; `parse_spipe_file` collected the following code as a bogus doc
+block and lost the real one after it, feature title included. Originally
+deferred because the file sat in another lane's dirty set; that set was wiped
+mid-session, which removed the reason.
 
 **The parity tracker was losing 2,182 lines.** Replaying it over every
 `*_spec.spl`: 32 files start a swallow at a comment line containing one triple
@@ -235,6 +246,10 @@ shared fact were added; the current numbers supersede it.)
 Reproduce-first for the string-state fix: the consumer spec was run against the
 OLD parity tracker first and went **3/6, with all three bug arms red**, then
 6/6 with the fix.
+
+**Docgen dependency cost**, same method: `spipe_docgen/main.spl` closure
+**17 -> 22 files** (`lexer.spl`, `lexer_struct.spl`, `source_facts.spl`, and the
+two `string_core` facades the lexer already pulls). Cycles unchanged.
 
 **Dependency cost of the new `app -> compiler.frontend` edge, measured with
 `bin/simple deps fast src/app/sspec_maintain/main.spl` at the pre-wiring

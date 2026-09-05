@@ -8,6 +8,12 @@
 
 use app.spipe_docgen.spipe_docgen.common.{DocBlock, FeatureMetadata, SspecDoc, ValidationResult, spipe_dbg, native_fs_read_string, native_fs_exists}
 use std.math_repr.{to_text, render_latex_raw}
+# Which lines sit inside a string opened earlier is CoreLexer's fact, not this
+# file's. Two walkers here decided it from one line at a time and both misread
+# a fixture's bare closing `"""` as a docstring OPENER — 38 spec files in this
+# tree carry exactly that shape (measured 2026-09-05). See
+# doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md.
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 
 # ============================================================================
 # PARSER MODULE
@@ -36,6 +42,10 @@ fn parse_spipe_file(path: text) -> Result<SspecDoc, text>:
     val lines = content.split("\n")
     val lines_len = lines.len()
     spipe_dbg("got {lines_len} lines")
+    # Element i pairs with lines[i]: true when the line continues a string
+    # opened earlier. A bare `"""` that CLOSES a fixture string is such a line
+    # and must not be taken for the opener of a doc block.
+    val string_continuation = simple_string_continuation_lines(content)
     var doc_blocks = []
     var feature_title = ""
     var feature_ids = []
@@ -90,7 +100,7 @@ fn parse_spipe_file(path: text) -> Result<SspecDoc, text>:
                 feature_ids.push(id)
 
         # Check for doc block start (standalone """ on its own line)
-        if trimmed == "\"\"\"":
+        if trimmed == "\"\"\"" and not string_continuation[i]:
             val start_line = i
             i = i + 1
 
@@ -1731,28 +1741,29 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
     val resolved_file_visibility = manual_default(file_visibility, default_visibility)
     var result_parts: [text] = []
     var i = 0
-    var in_docstring = false
+    # Both facts index beside lines[i]. They replace a per-line docstring flag
+    # that could not tell a docstring's bare closing `"""` from a fixture
+    # string's — so `val src = """ ... """` put the walker into docstring mode
+    # on the way OUT and it discarded every scenario until the next triple quote.
+    val string_continuation = simple_string_continuation_lines(content)
+    val code_lines = simple_code_lines(content)
 
     while i < lines.len():
         val line = lines[i]
         val trimmed = line.trim()
 
-        # Handle multi-line docstring content — skip until closing """
-        if in_docstring:
-            if trimmed == "\"\"\"" or trimmed.ends_with("\"\"\""):
-                in_docstring = false
+        # Inside a string opened earlier: content, not structure. Covers a
+        # docstring's interior and closing line, and a fixture's too.
+        if string_continuation[i]:
             i = i + 1
             continue
 
-        # Detect standalone """ opening (multi-line block)
-        if trimmed == "\"\"\"":
-            in_docstring = true
-            i = i + 1
-            continue
-
-        # Detect inline multi-line start: """text (no closing """ on same line)
-        if trimmed.starts_with("\"\"\"") and not (trimmed.ends_with("\"\"\"") and trimmed.len() > 6):
-            in_docstring = true
+        # The OPENING line of a multi-line docstring carries no structure
+        # either: its code view is exactly an empty quote pair and the next
+        # line continues it. A fixture opener (`val src = """`) keeps its code
+        # and is deliberately NOT skipped; a one-line `"""doc"""` has no
+        # continuation and falls through, as before.
+        if code_lines[i].trim() == "\"\"" and i + 1 < lines.len() and string_continuation[i + 1]:
             i = i + 1
             continue
 

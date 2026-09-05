@@ -1,0 +1,126 @@
+# spipe_docgen reads string state from CoreLexer, not from one line at a time.
+#
+# Two walkers in spipe_docgen/parser.spl decided "am I inside a docstring?" by
+# inspecting the current line alone. Neither could tell a docstring's bare
+# closing `"""` from a FIXTURE string's — `val src = """ ... """` — so on the
+# way out of a fixture both entered docstring mode and discarded everything up
+# to the next triple quote:
+#   - parse_spipe_file collected a bogus doc block made of the following code,
+#     and lost the real standalone doc block after it (and the feature title);
+#   - extract_test_structure dropped the next `describe` heading, while
+#     rendering the fixture's INTERIOR as if it were real structure.
+#
+# Measured 2026-09-05: 70 `*_spec.spl` files open a fixture string, and 38 of
+# them close it with a bare `"""` line — the exact trigger.
+#
+# Entry layer: real source text through the production parser. The fixture is
+# a FILE because a triple quote inside this spec's own literals would open a
+# docstring here.
+#
+# Design: doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md
+
+use std.spec.*
+use app.spipe_docgen.parser.{parse_spipe_file, extract_test_structure}
+use app.io.mod.{file_read_text}
+
+val FIXTURE: text = "test/fixtures/source_facts/docgen_fixture_string_then_scenario.spl"
+val PLAIN: text = "test/fixtures/source_facts/docgen_plain_spec.spl"
+
+fn structure() -> text:
+    extract_test_structure(file_read_text(FIXTURE))
+
+describe "docgen structure extraction survives a fixture string":
+
+    it "keeps the describe heading that follows a fixture string":
+        """The heading after the fixture is the one the old walker lost."""
+        step("Render the structure of a spec whose first scenario holds a fixture string")
+        val md = structure()
+
+        step("Both real describe blocks are headings")
+        expect(md).to_contain("### before")
+        expect(md).to_contain("### after")
+
+    it "does not promote the fixture's interior to structure":
+        """Text inside a string is content. The old walker rendered a
+        `describe` written inside a fixture as a real H3."""
+        step("Render the same structure")
+        val md = structure()
+
+        step("Nothing from inside the fixture string became a heading")
+        expect(md.contains("NOT A SCENARIO")).to_equal(false)
+        expect(md.contains("NOT AN IT")).to_equal(false)
+
+    it "renders the docstring of the describe that follows the fixture":
+        """Under the old walker this describe was consumed inside bogus
+        docstring mode, so its docstring never reached the manual."""
+        step("Render the structure")
+        val md = structure()
+
+        step("The describe's inline docstring is rendered as its subtitle")
+        expect(md).to_contain("A one-line docstring on the describe.")
+
+    it "is unchanged on a spec with no fixture strings at all":
+        """Control: behaviour the old walker got RIGHT must not regress. This
+        example must pass against the old walker AND the new one."""
+        step("Render a plain spec — a doc block, a describe with a docstring, one it")
+        val md = extract_test_structure(file_read_text(PLAIN))
+        expect(md).to_contain("### plain")
+        expect(md).to_contain("A one-line docstring on the describe.")
+
+        step("Its standalone doc block and title are collected as before")
+        val doc = parse_spipe_file(PLAIN).unwrap()
+        expect(doc.doc_blocks.len()).to_equal(1)
+        expect(doc.feature_title).to_equal("Plain Title")
+
+    it "renders every real describe of a committed spec that carries the construct":
+        """Corpus arm with an independent oracle: the number of `###` headings
+        must equal the number of column-0 `describe` lines in the file — counted
+        here without the extractor, so the assertion has something to be wrong
+        against. This file opens a raw fixture string at line 32 and closes it
+        with a bare triple quote at line 34; its only describe is at line 106."""
+        step("Count column-0 describe lines in a real spec, independently")
+        val path = "test/03_system/compiler/native_cli_mode_transport_regression_spec.spl"
+        val raw = file_read_text(path)
+        var describes: i64 = 0
+        for line in raw.split("\n"):
+            if line.starts_with("describe \""):
+                describes = describes + 1
+        expect(describes).to_equal(1)
+
+        step("The rendered structure has exactly that many H3 headings")
+        var headings: i64 = 0
+        for line in extract_test_structure(raw).split("\n"):
+            if line.starts_with("### "):
+                headings = headings + 1
+        expect(headings).to_equal(describes)
+
+describe "docgen doc-block collection survives a fixture string":
+
+    it "collects the real standalone doc block after the fixture, not a bogus one":
+        """The old walker took the fixture's closing `\"\"\"` as an opener and
+        swallowed the following code as documentation; the real block after
+        it was then lost along with the feature title."""
+        step("Parse the fixture spec file")
+        val doc = parse_spipe_file(FIXTURE).unwrap()
+
+        step("Exactly one doc block is found, and it is the real one")
+        expect(doc.doc_blocks.len()).to_equal(1)
+        expect(doc.doc_blocks[0].content).to_contain("real documentation")
+        expect(doc.doc_blocks[0].content.contains("expect(parse(src))")).to_equal(false)
+
+        step("The feature title comes from that real block")
+        expect(doc.feature_title).to_equal("Real Title")
+
+describe "docgen string-state sabotage arm":
+
+    it "confirms the fixture really carries the construct under test":
+        """A spec asserting an absence proves nothing unless the input really
+        contains the thing."""
+        step("The fixture contains a fixture string closed by a bare triple quote")
+        val raw = file_read_text(FIXTURE)
+        val tq = "\"" + "\"" + "\""
+        expect(raw).to_contain("val src = " + tq)
+        expect(raw).to_contain("\n" + tq + "\n")
+
+        step("And it really does contain the decoy scenario text")
+        expect(raw).to_contain("NOT A SCENARIO")
