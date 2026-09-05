@@ -1,5 +1,28 @@
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-011 REQ-012 REQ-013 REQ-015 REQ-016 REQ-017
+"""
+## Purpose and audience
+Executable contract for the captured HAL device-payload V1 ABI: payload
+normalization, exact caller-owned byte comparison, read-once replay cursors,
+and the three-provider compare owner. Written for the rt(hal) runtime
+hardening owners and reviewers of the mcdc mission-critical lane.
+## Operator workflow
+Run the file with the seed lane:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/structural/hal_provider_device_payload_v1_spec.spl`
+and read the `SPEC FILE VERDICT` line.
+## Compatibility and limitations
+Exercises the pure-Simple structural providers only; no real device, IRQ
+line, or DMA engine is touched, and replay is asserted to stay copy-only.
+## Verification guidance and troubleshooting
+A failure names the payload builder or replay status that broke; re-run the
+single file and compare against the lifecycle evidence linked below before
+touching the provider implementation.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_hal_runtime_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_hal_runtime_hardening.md ;
+# doc/04_architecture/mcdc_hal_runtime_hardening.md ;
+# doc/05_design/mcdc_hal_runtime_hardening.md
+# @manual_section: captured payload normalization and compare owner
 
 use std.spec.*
 use std.common.structural.hal_provider.*
@@ -25,6 +48,9 @@ fn payload(sequence: i64, kind: HalCapturedPayloadKindV1,
 
 describe "captured HAL randomness and device provider payload":
     it "normalizes randomness, IRQ, MMIO, and DMA without a device handle":
+        # @req REQ-011
+        # @capture(bit_table): well-formed verdicts for the four payload kinds
+        step("Build random, IRQ, MMIO, and DMA payloads and check each is well formed")
         val random = payload(0, HalCapturedPayloadKindV1.RandomBytes,
             EnvOpcodeV1.RandomFill, 4, 1)
         val irq = payload(1, HalCapturedPayloadKindV1.Interrupt,
@@ -39,6 +65,9 @@ describe "captured HAL randomness and device provider payload":
         expect(hal_captured_device_payload_v1_well_formed(dma)).to_be(true)
 
     it "compares exact caller-owned bytes instead of trusting the digest":
+        # @req REQ-012
+        # @capture(bit_table): exact-equal verdicts for matching and corrupted bytes
+        step("Compare two lanes by exact caller-owned bytes, then corrupt one byte")
         val a = payload(0, HalCapturedPayloadKindV1.RandomBytes,
             EnvOpcodeV1.RandomFill, 4, 1)
         val b = payload(0, HalCapturedPayloadKindV1.RandomBytes,
@@ -51,6 +80,9 @@ describe "captured HAL randomness and device provider payload":
             b, [9u8, 11u8, 99u8, 13u8, 14u8])).to_be(false)
 
     it "consumes read-once observations once in exact sequence":
+        # @req REQ-013
+        # @capture(bit_table): replay status, effect flag, allocation and consumed counts
+        step("Replay one MMIO observation, then replay the same token again")
         var cursor = hal_device_payload_replay_cursor_v1(77, 4)
         val recorded = payload(0, HalCapturedPayloadKindV1.Mmio,
             EnvOpcodeV1.MmioRead, 4, 3)
@@ -58,14 +90,17 @@ describe "captured HAL randomness and device provider payload":
         val first = cursor.replay(recorded, bytes, recorded, bytes)
         expect(first.status).to_equal(HalPayloadReplayStatusV1.Replayed)
         expect(first.physical_effect).to_be(false)
-        expect(first.allocation_count).to_equal(0)
+        expect(first.allocation_count).to_equal(0)  # oracle: replay is contractually copy-only, so it may allocate nothing
         val reused_token = payload(1, HalCapturedPayloadKindV1.Mmio,
             EnvOpcodeV1.MmioRead, 4, 3)
         val second = cursor.replay(reused_token, bytes, reused_token, bytes)
         expect(second.status).to_equal(HalPayloadReplayStatusV1.AlreadyConsumed)
-        expect(second.consumed_count).to_equal(1)
+        expect(second.consumed_count).to_equal(1)  # oracle: only the first replay consumes the read-once token, so the count stays at one
 
     it "fails closed on region overflow, changed grants, and wrong payload kind":
+        # @req REQ-013
+        # @capture(bit_table): closed-failure statuses for overflow, grant drift, kind mismatch
+        step("Replay against a short region, a changed grant, and a mismatched payload kind")
         var cursor = hal_device_payload_replay_cursor_v1(77, 4)
         val mmio = payload(0, HalCapturedPayloadKindV1.Mmio,
             EnvOpcodeV1.MmioRead, 4, 3)
@@ -84,6 +119,9 @@ describe "captured HAL randomness and device provider payload":
         expect(hal_captured_device_payload_v1_well_formed(wrong_kind)).to_be(false)
 
     it "commits three exact provider candidates only through the parent owner":
+        # @req REQ-015
+        # @capture(statistics): receipt status, provider mask, commit and effect counters
+        step("Submit PureSimple, C, and Rust candidates and read the parent receipt")
         var owner = hal_device_compare_owner_v1(
             77, 4, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
         val value = payload(0, HalCapturedPayloadKindV1.Dma,
@@ -101,12 +139,15 @@ describe "captured HAL randomness and device provider payload":
         val receipt = owner.receipt()
         expect(receipt.status).to_equal(
             HalDeviceCompareOwnerStatusV1.CommitReady)
-        expect(receipt.equivalent_provider_mask).to_equal(7)
+        expect(receipt.equivalent_provider_mask).to_equal(7)  # oracle: three providers occupy bitmask bits 1|2|4, so full equivalence is exactly 7
         expect(receipt.commit_allowed).to_be(true)
         expect(receipt.physical_effect).to_be(false)
-        expect(receipt.allocation_count).to_equal(0)
+        expect(receipt.allocation_count).to_equal(0)  # oracle: an all-equal compare is copy-only and must allocate nothing
 
     it "uses alpha beta and normal difference policies without replay effects":
+        # @req REQ-016
+        # @capture(bit_table): per-run-mode receipt status and commit permission
+        step("Drive the alpha, beta, and normal run modes through a C-lane difference")
         val value = payload(0, HalCapturedPayloadKindV1.Mmio,
             EnvOpcodeV1.MmioRead, 4, 3)
         val bytes = [0u8, 1u8, 2u8, 3u8, 4u8]
@@ -138,10 +179,13 @@ describe "captured HAL randomness and device provider payload":
         var normal = hal_device_compare_owner_v1(
             77, 4, HalRunMode.NormalPreferred, HalProviderKind.Rust)
         normal.submit(HalProviderKind.Rust, value, bytes, value, bytes)
-        expect(normal.receipt().expected_provider_mask).to_equal(4)
+        expect(normal.receipt().expected_provider_mask).to_equal(4)  # oracle: normal mode expects only the preferred Rust lane, whose provider bit is 4
         expect(normal.receipt().commit_allowed).to_be(true)
 
     it "rejects duplicate provider publication in fixed slots":
+        # @req REQ-017
+        # @capture(bit_table): duplicate-submit status and final receipt classification
+        step("Publish the same provider twice, then read the receipt verdict")
         var owner = hal_device_compare_owner_v1(
             77, 4, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
         val value = payload(0, HalCapturedPayloadKindV1.RandomBytes,

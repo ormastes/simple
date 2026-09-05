@@ -1,5 +1,29 @@
 # @feature mcdc_hal_runtime_hardening
 # @req REQ-009 REQ-011 REQ-016 REQ-017 NFR-005 NFR-006
+"""
+## Purpose and audience
+Executable contract for the tagged rt(hal) environment binding V1: clock
+tag binding, opcode-to-operation admission, read-once replay with sealed
+plans, V2 trace positions and receipts, and the extraction/replay cost
+source contract. Written for the rt(hal) runtime hardening owners.
+## Operator workflow
+Run the file with the seed lane:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/common/structural/rt_hal_environment_binding_spec.spl`
+and read the `SPEC FILE VERDICT` line.
+## Compatibility and limitations
+Covers the pure-Simple structural binding and plan functions only; the
+V2 receipt surface is exercised through its typed adapters, and the cost
+scenario reads shipped source as a source contract rather than benchmarking.
+## Verification guidance and troubleshooting
+A failure names the binding, plan, or replay receipt that broke; re-run the
+single file and compare against the lifecycle evidence linked below before
+changing extraction or replay-cursor code.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/mcdc_rt_hal_hardening.md ;
+# doc/05_design/mcdc_rt_hal_hardening.md
+# @manual_section: tagged environment binding and replay
 
 use std.spec.*
 use std.io_runtime.{file_read}
@@ -14,6 +38,9 @@ use std.common.structural.hal_provider.{
 
 describe "tagged rt(hal) environment binding":
     it "binds the actual clock tag to one ordered fixed-capacity access":
+        # @req REQ-009
+        # @capture(bit_table): extraction acceptance, sequence, opcode, sealed trace count
+        step("Bind the monotonic clock tag, extract one clock read, and seal the binding")
         val initial = rt_hal_environment_binding_v1(
             RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1, 71, 1)
         val step = rt_hal_environment_extract_v1(
@@ -22,12 +49,15 @@ describe "tagged rt(hal) environment binding":
         val sealed = rt_hal_environment_binding_seal_v1(step.binding)
 
         expect(step.accepted).to_be(true)
-        expect(step.instruction.sequence).to_equal(0)
+        expect(step.instruction.sequence).to_equal(0)  # oracle: this is the first and only extraction, so the ordered sequence starts at zero
         expect(step.instruction.opcode).to_equal(EnvOpcodeV1.ClockRead)
         expect(rt_hal_environment_binding_complete_v1(sealed)).to_be(true)
-        expect(rt_hal_environment_binding_trace_v1(sealed).instruction_count).to_equal(1)
+        expect(rt_hal_environment_binding_trace_v1(sealed).instruction_count).to_equal(1)  # oracle: exactly one clock read was extracted before sealing, so the trace holds one instruction
 
     it "rejects an opcode that does not belong to the tagged operation":
+        # @req REQ-011
+        # @capture(bit_table): rejection acceptance and empty sealed extraction
+        step("Extract an EnvironmentGet opcode against a clock-tagged binding")
         val initial = rt_hal_environment_binding_v1(
             RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1, 72, 1)
         val wrong = rt_hal_environment_extract_v1(
@@ -35,13 +65,16 @@ describe "tagged rt(hal) environment binding":
             0, 4, 4, 0, 8, 8)
 
         expect(wrong.accepted).to_be(false)
-        expect(wrong.binding.extraction.instruction_count).to_equal(0)
+        expect(wrong.binding.extraction.instruction_count).to_equal(0)  # oracle: a rejected opcode records no instruction, so the extraction stays empty
         expect(wrong.binding.extraction.sealed).to_be(true)
         expect(rt_hal_environment_plan_admitted_v1(
             rt_hal_environment_plan_v1(wrong.binding),
             RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1)).to_be(false)
 
     it "replays caller-owned bytes once without ambient effect or allocation":
+        # @req REQ-016
+        # @capture(bit_table): replay receipt, cursor counts, duplicate refusal
+        step("Replay one sealed clock-read observation, then attempt a duplicate replay")
         val extracted = rt_hal_environment_extract_v1(
             rt_hal_environment_binding_v1(
                 RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1, 73, 2),
@@ -69,10 +102,10 @@ describe "tagged rt(hal) environment binding":
             physical.observation, [], recorded, replayed)
 
         expect(first.receipt.physical_effect).to_be(false)
-        expect(first.receipt.allocation_count_after_seal).to_equal(0)
-        expect(first.replay.cursor.consumed_count).to_equal(1)
+        expect(first.receipt.allocation_count_after_seal).to_equal(0)  # oracle: replay is contractually copy-only over caller bytes, so it allocates nothing
+        expect(first.replay.cursor.consumed_count).to_equal(1)  # oracle: exactly one replay consumes the read-once cursor
         expect(duplicate.accepted).to_be(false)
-        expect(duplicate.replay.cursor.consumed_count).to_equal(1)
+        expect(duplicate.replay.cursor.consumed_count).to_equal(1)  # oracle: the refused duplicate consumes nothing further, so the count stays at one
         expect(duplicate.replay.cursor.sealed).to_be(true)
         expect(replayed[0]).to_equal(99u8)
 
@@ -89,6 +122,9 @@ describe "tagged rt(hal) environment binding":
         expect(extra_result[0]).to_equal(77u8)
 
     it "keeps the manifest operation identity in the sealed replay plan":
+        # @req REQ-017
+        # @capture(bit_table): admission verdicts, V2 trace position fields, receipt admission
+        step("Seal a clock-tagged plan, probe wrong identities, and admit one V2 result")
         val extracted = rt_hal_environment_extract_v1(
             rt_hal_environment_binding_v1(
                 RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1, 75, 1),
@@ -105,9 +141,9 @@ describe "tagged rt(hal) environment binding":
         expect(env_replay_cursor_v1_well_formed(wrong.cursor)).to_be(false)
 
         val position = hal_environment_trace_position_v2(plan, 0)
-        expect(position.length).to_equal(1)
-        expect(position.capacity).to_equal(1)
-        expect(position.cursor).to_equal(0)
+        expect(position.length).to_equal(1)  # oracle: the sealed plan holds exactly the one extracted clock read
+        expect(position.capacity).to_equal(1)  # oracle: the binding was created with fixed capacity one
+        expect(position.cursor).to_equal(0)  # oracle: the receipt cursor starts before any result is consumed
         expect(position.identity_hi == plan.trace.plan_digest_hi).to_be(false)
 
         val receipt = hal_environment_plan_receipt_v2(
@@ -130,6 +166,9 @@ describe "tagged rt(hal) environment binding":
             wrong_receipt, result)).to_be(false)
 
     it "admits existing typed adapters under a manifest operation identity":
+        # @req REQ-009
+        # @capture(bit_table): adapter extraction acceptance and instruction sequence
+        step("Bind a FileRead operation through the typed opcode adapter and extract one read")
         val initial = rt_hal_environment_binding_v1(
             rt_hal_environment_operation_for_opcode_v1(EnvOpcodeV1.FileRead),
             74, 1)
@@ -138,9 +177,12 @@ describe "tagged rt(hal) environment binding":
             0, 12, 12, 0, 32, 32)
 
         expect(file.accepted).to_be(true)
-        expect(file.instruction.sequence).to_equal(0)
+        expect(file.instruction.sequence).to_equal(0)  # oracle: this is the first and only extraction on the fresh binding
 
     it "keeps extraction scalar O(1) and replay free of ambient rereads":
+        # @req REQ-011
+        # @capture(source_contract): shipped hal_binding.spl loop and ambient-read absence
+        step("Read the shipped binding source and assert the extraction and replay sections stay loop-free and ambient-free")
         val source = file_read(
             "src/lib/common/structural/environment_instruction/hal_binding.spl")
         val extract_begin = source.find("fn rt_hal_environment_extract_v1(")
