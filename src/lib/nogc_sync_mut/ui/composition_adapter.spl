@@ -1,0 +1,129 @@
+# UI composition adapter — admits UI product providers through the EXISTING
+# composition authority (`std.nogc_sync_mut.composition.provider_contract`)
+# via a sealed static path. No directory scan, no manifest parse, no loader
+# thread, no new registry authority, no new lifecycle.
+#
+# Reuses provider_contract.spl's numeric-handle / u64-capability-bitmask
+# convention directly (`SimpleProviderQueryResultV1.interface_handle`,
+# `SimpleProviderQueryV1.requested_capability_bits`) rather than inventing a
+# parallel capability record: a `UiProviderDescriptor.capability_bits` is the
+# same "sum of bits" shape as `requested_capability_bits`, and
+# `UiKindHandleV1.interface_handle` is the same u64 the query result already
+# carries.
+#
+# ponytail: dynamic admission (directory scan / manifest / hot reload) is
+# deliberately out of scope here — YAGNI until the SMF provider route
+# (`std.nogc_sync_mut.composition.cli_registry`'s SMF mode) reopens once the
+# dynSMF reopen gates pass (see design.md "Adaptations to the external
+# design"). This module only ever resolves a fixed, caller-supplied list.
+
+val UI_KIND_TERMINAL: u32 = 1
+val UI_KIND_HOST_WINDOW: u32 = 2
+val UI_KIND_RENDERER: u32 = 3
+val UI_KIND_TEXT: u32 = 4
+val UI_KIND_PACK: u32 = 5
+
+val UI_ADMIT_OK: i64 = 0
+val UI_ADMIT_ERR_DUPLICATE_ID: i64 = 1
+val UI_ADMIT_ERR_ABI_MISMATCH: i64 = 2
+val UI_ADMIT_ERR_MISSING_KIND: i64 = 3
+val UI_ADMIT_ERR_FORBIDDEN_CAPABILITY: i64 = 4
+val UI_ADMIT_ERR_EXCLUSIVE_KIND_CONFLICT: i64 = 5
+
+fn _is_exclusive_kind(kind: u32) -> bool:
+    kind == UI_KIND_TERMINAL or kind == UI_KIND_HOST_WINDOW
+
+class UiProviderDescriptor:
+    provider_id: u64
+    kind: u32
+    abi_version: u32
+    interface_handle: u64
+    capability_bits: u64
+
+class UiRecipe:
+    expected_abi_version: u32
+    required_kinds: [u32]
+    forbidden_capability_bits: u64
+
+class UiKindHandleV1:
+    kind: u32
+    interface_handle: u64
+
+class UiAdmissionDiagnosticV1:
+    ok: bool
+    code: i64
+    detail: text
+
+class UiAdmission:
+    diagnostic: UiAdmissionDiagnosticV1
+    handles: [UiKindHandleV1]
+
+fn _admit_ok(handles: [UiKindHandleV1]) -> UiAdmission:
+    UiAdmission(
+        diagnostic: UiAdmissionDiagnosticV1(ok: true, code: UI_ADMIT_OK, detail: ""),
+        handles: handles
+    )
+
+fn _admit_err(code: i64, detail: text) -> UiAdmission:
+    UiAdmission(
+        diagnostic: UiAdmissionDiagnosticV1(ok: false, code: code, detail: detail),
+        handles: []
+    )
+
+# Admits `descriptors` against `recipe` through a sealed static path.
+#
+# Fail-closed, in order: duplicate provider id; ABI version mismatch; more
+# than one provider of an exclusive kind (terminal / host_window); a
+# provider carrying a forbidden capability bit; a required kind with no
+# admitted provider. Success returns one resolved handle per required kind
+# (design.md "Admission and hot calls" — callers resolve once at activation,
+# never per hot call).
+fn admit_static(descriptors: [UiProviderDescriptor], recipe: UiRecipe) -> UiAdmission:
+    var seen_ids: [u64] = []
+    var exclusive_seen: [u32] = []
+    var i = 0
+    while i < descriptors.len():
+        val d = descriptors[i]
+
+        var j = 0
+        while j < seen_ids.len():
+            if seen_ids[j] == d.provider_id:
+                return _admit_err(UI_ADMIT_ERR_DUPLICATE_ID, "duplicate provider id")
+            j = j + 1
+        seen_ids.push(d.provider_id)
+
+        if d.abi_version != recipe.expected_abi_version:
+            return _admit_err(UI_ADMIT_ERR_ABI_MISMATCH, "abi version mismatch")
+
+        if _is_exclusive_kind(d.kind):
+            var k = 0
+            while k < exclusive_seen.len():
+                if exclusive_seen[k] == d.kind:
+                    return _admit_err(UI_ADMIT_ERR_EXCLUSIVE_KIND_CONFLICT, "exclusive kind admitted twice")
+                k = k + 1
+            exclusive_seen.push(d.kind)
+
+        if (d.capability_bits & recipe.forbidden_capability_bits) != 0:
+            return _admit_err(UI_ADMIT_ERR_FORBIDDEN_CAPABILITY, "forbidden capability present")
+
+        i = i + 1
+
+    var handles: [UiKindHandleV1] = []
+    var r = 0
+    while r < recipe.required_kinds.len():
+        val required_kind = recipe.required_kinds[r]
+        var resolved: u64 = 0
+        var found = false
+        var s = 0
+        while s < descriptors.len():
+            if descriptors[s].kind == required_kind:
+                resolved = descriptors[s].interface_handle
+                found = true
+                break
+            s = s + 1
+        if not found:
+            return _admit_err(UI_ADMIT_ERR_MISSING_KIND, "required kind absent")
+        handles.push(UiKindHandleV1(kind: required_kind, interface_handle: resolved))
+        r = r + 1
+
+    _admit_ok(handles)

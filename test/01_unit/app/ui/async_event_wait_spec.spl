@@ -1,0 +1,267 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+#
+"""
+# Async TUI event wait — A06 (Wave 2, slim-UI plan)
+
+The async TUI run loop used to drain `try_recv()` and then `thread_sleep(16)`,
+a ~60 fps periodic wake that fires even when nothing happens. This spec pins
+the replacement: a blocking wait on the event channel, so the consumer wakes
+once per delivered event batch and never on a timer.
+
+Wakes are COUNTED and asserted at their exact value, never claimed to be zero
+(`NFR-UI-SLIM-005`). The counter is module state in `app.ui.tui.event_wait`,
+read and reset through free functions — the same shape as
+`screen_row_copy_count` in `app.ui.tui.screen`.
+
+Behaviour that must survive the change (`REQ-UI-SLIM-001`): no input is lost,
+quit unblocks promptly, a producer stream is consumed in order, and the file
+reload contract (content comparison, not mtime) is unchanged.
+
+Environment note recorded with the evidence: under the bootstrap seed
+interpreter `thread_spawn` runs its closure SYNCHRONOUSLY, so a live idle
+window with a concurrent producer cannot be produced here. Arrival over time
+is therefore modelled by a self-feeding session: event k+1 is enqueued only
+after event k has been handled.
+"""
+# doc-path: doc/03_plan/ui/slim_kernel_plugin/plan.md
+# Lifecycle: doc/01_research/ui/slim_kernel_plugin/simple_slim_ui_parallel_agent_briefs_2026-09-05.md ;
+# doc/04_architecture/tiny_ui_web_wm.md ;
+# doc/05_design/ui/slim_kernel_plugin/design.md
+# @manual_section: event-wait-acceptance
+
+use std.spec.step
+use std.spec.*
+
+use std.nogc_async_mut.concurrent.channel.{channel_new}
+use std.nogc_sync_mut.sffi.time.{time_now_ms}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_remove}
+use common.ui.widget.{UIEvent}
+use common.ui.state.{is_quit_event}
+use app.ui.tui.event_wait.{collect_event_batch, event_wait_wake_count, event_wait_wake_reset}
+use app.ui.tui.async_app.{AsyncTuiApp}
+
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+val fixture_dir = "build/a06_event_wait"
+
+fn ui_source(root_id: text, title: text) -> text:
+    """A minimal .ui.sdn document; both arguments are 3 characters, so two
+    documents built by this helper always have exactly the same byte length."""
+    return "app:\n    title: \"{title}\"\nlayout:\n    type: vbox\n    id: {root_id}\n    children:\n        c1:\n            type: text\n            id: c1\n            content: \"body\"\n"
+
+fn write_fixture(name: text, content: text) -> text:
+    val path = "{fixture_dir}/{name}"
+    file_write(path, content)
+    return path
+
+fn feed_event(index: i32) -> UIEvent:
+    if index >= 7:
+        return UIEvent.Quit
+    return UIEvent.FocusNext
+
+# ============================================================================
+# (a) Idle wake oracle — NFR-UI-SLIM-005
+# ============================================================================
+
+describe "async TUI event wait — wake accounting":
+
+    it "wakes exactly once per delivered event and spends no timer sleep":
+        # @req REQ-UI-SLIM-009
+        # @req REQ-UI-SLIM-001
+        step("Reset the wake counter and open an event channel")
+        event_wait_wake_reset()
+        val ch = channel_new()
+
+        step("Run a self-feeding session of 8 sequential arrivals, 7 FocusNext then Quit")
+        val started_ms = time_now_ms()
+        var produced = 0
+        var handled = 0
+        var quit_seen = false
+        ch.send(feed_event(produced))
+        produced = produced + 1
+        while handled < 8:
+            val batch = collect_event_batch(ch)
+            if batch.len() == 0:
+                handled = 8
+            else:
+                var i = 0
+                while i < batch.len():
+                    if is_quit_event(batch[i]):
+                        quit_seen = true
+                    handled = handled + 1
+                    i = i + 1
+                if produced < 8 and not quit_seen:
+                    ch.send(feed_event(produced))
+                    produced = produced + 1
+        val elapsed_ms = time_now_ms() - started_ms
+        ch.close()
+
+        # @capture(counter): event_wait_wake_count() after an 8-arrival session
+        step("The pump woke once per arrival — 8 counted wakes, reported not claimed zero")
+        expect(event_wait_wake_count()).to_equal(8)  # oracle: one blocking recv per arrival, no timer tick
+
+        # @capture(timing): wall-clock span of the 8-arrival session
+        step("The session cost far less than the 16 ms cadence's mandatory 128 ms of sleep")
+        expect(elapsed_ms < 64).to_equal(true)  # oracle: 8 x 16 ms = 128 ms under the old poll loop
+
+        step("The terminating Quit was delivered")
+        expect(quit_seen).to_equal(true)
+
+    it "returns an empty batch instead of spinning once the channel is closed and drained":
+        # @req REQ-UI-SLIM-009
+        step("Close an empty channel, then ask the pump for a batch")
+        event_wait_wake_reset()
+        val ch = channel_new()
+        ch.close()
+        val started_ms = time_now_ms()
+        val batch = collect_event_batch(ch)
+        val elapsed_ms = time_now_ms() - started_ms
+
+        # @capture(counter): one counted wake for the terminal close
+        step("The pump returned an empty batch after exactly one counted wake")
+        expect(batch.len()).to_equal(0)  # oracle: closed and drained yields no events
+        expect(event_wait_wake_count()).to_equal(1)
+
+        step("It returned promptly rather than waiting out the runtime's 30 s receive cap")
+        expect(elapsed_ms < 1000).to_equal(true)  # oracle: close drops the sender, waking the receiver
+
+# ============================================================================
+# (b) (c) (d) (f) Delivery contract — REQ-UI-SLIM-001
+# ============================================================================
+
+describe "async TUI event wait — delivery contract":
+
+    it "does not lose input that is admitted before the wait is entered":
+        # @req REQ-UI-SLIM-001
+        step("Admit an event, then enter the wait")
+        event_wait_wake_reset()
+        val ch = channel_new()
+        ch.send(UIEvent.KeyPress(key: "j"))
+        val batch = collect_event_batch(ch)
+
+        # @capture(counter): batch contents for a pre-admitted event
+        step("The already-queued event is delivered by the first wait, not dropped")
+        expect(batch.len()).to_equal(1)  # oracle: recv drains the queue before it blocks
+        expect(event_wait_wake_count()).to_equal(1)
+
+    it "unblocks promptly on a quit event and reports it as quit":
+        # @req REQ-UI-SLIM-001
+        step("Admit a Quit event and time the wait that collects it")
+        val ch = channel_new()
+        ch.send(UIEvent.Quit)
+        val started_ms = time_now_ms()
+        val batch = collect_event_batch(ch)
+        val elapsed_ms = time_now_ms() - started_ms
+
+        # @capture(timing): bounded unblock latency for quit
+        step("Quit arrives within a bounded time and is recognised")
+        expect(elapsed_ms < 1000).to_equal(true)  # oracle: bounded, not the 30 s receive cap
+        expect(is_quit_event(batch[0])).to_equal(true)
+
+    it "consumes a continuous producer stream fully and in order":
+        # @req REQ-UI-SLIM-001
+        step("Admit five distinct events back to back")
+        val ch = channel_new()
+        ch.send(UIEvent.FocusNext)
+        ch.send(UIEvent.FocusPrev)
+        ch.send(UIEvent.CommandMode)
+        ch.send(UIEvent.NormalMode)
+        ch.send(UIEvent.Quit)
+
+        step("Collect them in one batch")
+        val batch = collect_event_batch(ch)
+
+        # @capture(order): the five-element batch as delivered
+        step("All five are present, FIFO, with Quit last")
+        expect(batch.len()).to_equal(5)  # oracle: the drain must not stop early
+        expect(is_quit_event(batch[0])).to_equal(false)
+        expect(is_quit_event(batch[4])).to_equal(true)
+
+    it "delivers a resize followed immediately by quit in that order":
+        # @req REQ-UI-SLIM-001
+        step("Admit a Resize and then a Quit with no gap")
+        val ch = channel_new()
+        ch.send(UIEvent.Resize(width: 120, height: 40))
+        ch.send(UIEvent.Quit)
+
+        step("Collect the pair")
+        val batch = collect_event_batch(ch)
+
+        # @capture(order): resize-then-quit batch
+        step("Both are present and the resize is not swallowed by the quit")
+        expect(batch.len()).to_equal(2)  # oracle: the quit must not truncate the batch
+        expect(is_quit_event(batch[0])).to_equal(false)
+        expect(is_quit_event(batch[1])).to_equal(true)
+
+# ============================================================================
+# (e) File reload contract — REQ-UI-SLIM-001
+# ============================================================================
+
+describe "async TUI file reload — content, not mtime":
+
+    it "detects a same-size rapid rewrite because it compares content":
+        # @req REQ-UI-SLIM-001
+        step("Create a UI file and open an app on it")
+        val first_source = ui_source("raa", "one")
+        val second_source = ui_source("rbb", "two")
+        val path = write_fixture("same_size.ui.sdn", first_source)
+        val opened = AsyncTuiApp.new(path)
+        var root_before = ""
+        var root_after = ""
+        var same_length = false
+        match opened:
+            Err(e):
+                fail("AsyncTuiApp.new rejected the fixture: {e}")
+            Ok(app):
+                root_before = app.session.current_state().tree.root_id
+                step("Rewrite it with a byte-identical-length document and reload")
+                same_length = first_source.len() == second_source.len()
+                file_write(path, second_source)
+                app.reload_file()
+                root_after = app.session.current_state().tree.root_id
+
+        # @capture(state): root id before and after the same-size rewrite
+        step("The reload saw the change even though the byte count did not move")
+        expect(same_length).to_equal(true)  # oracle: mtime-blind detection is only proven on equal-length rewrites
+        expect(root_before).to_equal("raa")
+        expect(root_after).to_equal("rbb")
+
+    it "keeps the previous tree when the rewritten file has no layout to parse":
+        # @req REQ-UI-SLIM-001
+        step("Open an app on a well-formed UI file")
+        val path = write_fixture("degenerate.ui.sdn", ui_source("rkp", "one"))
+        val opened = AsyncTuiApp.new(path)
+        var kept = ""
+        match opened:
+            Err(e):
+                fail("AsyncTuiApp.new rejected the fixture: {e}")
+            Ok(app):
+                step("Rewrite it with content that carries no layout section and reload")
+                file_write(path, "not a ui document at all\n")
+                app.reload_file()
+                kept = app.session.current_state().tree.root_id
+
+        # @capture(state): root id retained across a degenerate reload
+        step("The app still holds a usable tree rather than crashing")
+        expect(kept.len() > 0).to_equal(true)  # oracle: a non-empty root id proves the session survived
+
+    it "does not crash when the watched file has been deleted":
+        # @req REQ-UI-SLIM-001
+        step("Open an app on a UI file, then delete the file")
+        val path = write_fixture("deleted.ui.sdn", ui_source("rgo", "one"))
+        val opened = AsyncTuiApp.new(path)
+        var survived = false
+        match opened:
+            Err(e):
+                fail("AsyncTuiApp.new rejected the fixture: {e}")
+            Ok(app):
+                file_remove(path)
+                step("Reload against the missing file")
+                app.reload_file()
+                survived = app.session.current_state().tree.root_id.len() > 0
+
+        # @capture(state): session state after reloading a deleted file
+        step("Reload returned without faulting and the tree is intact")
+        expect(survived).to_equal(true)  # oracle: the file_exists guard short-circuits the reload
