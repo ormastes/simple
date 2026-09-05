@@ -1,0 +1,462 @@
+#!/bin/sh
+# check-plan-acceptance-swept.shs — is test/03_system/plan_acceptance/ swept by
+# anything at all, and does every spec in it actually load and run?
+#
+# WHY THIS EXISTS (measured 2026-09-05)
+# ------------------------------------
+# `test/03_system/plan_acceptance/` holds 36 acceptance specs and NO bootstrap
+# phase and NO push-tier gate sweeps that directory. The nearest thing,
+# `push-main-test-runnable`, runs a single doctest fixture — it proves the test
+# CLI starts, not that this suite is exercised. So the entire "bootstrap skips
+# in-development specs" property (Gap A) is untested in CI: 36 specs sit there
+# unexercised by any enforcement surface.
+#
+# WHAT THIS GUARD ASSERTS — TWO ASSERTIONS, BOTH REQUIRED
+# -------------------------------------------------------
+# 1. COVERAGE. A `push,`-tier row exists in `config/check/must_check_gates.sdn`
+#    whose command names this script, AND a `'<id>:<mode>:<command>')` case arm
+#    that byte-matches that row exists in `run_manifest_push_gates`
+#    (`scripts/check/check-push-must-pass.shs`). Per .claude/rules/vcs.md both
+#    halves are required: "a manifest row alone is not wiring and a dispatch case
+#    alone is dead code", and the fail-closed `*)` arm returns 2 for an unmatched
+#    row, so a row without an arm blocks EVERY push.
+#
+#    Honest limitation, stated rather than papered over: once this guard is
+#    dispatched, assertion 1 is tautologically true when run FROM the dispatcher
+#    — it is checking its own wiring. That makes it the TDD lever (it is what
+#    fails before the wiring lands and passes after), not the durable CI lever.
+#    The durable enforcer against someone later DELETING the wiring is
+#    `check-guard-wiring.shs`, which reports a guard that reaches no enforcement
+#    surface as NEW unwired debt and is itself push-blocking. Assertion 1 still
+#    earns its place standalone: run by hand or from a bootstrap lane it detects
+#    a half-landed wiring (row without arm, arm without row) that guard-wiring's
+#    reachability scan alone does not distinguish.
+#
+# 2. SWEEP (non-vacuity). Every `*_spec.spl` under the suite directory is
+#    actually EXECUTED, one process per spec, and must LOAD AND RUN: its output
+#    must carry a `SPEC FILE VERDICT: ... executed=N` line with N > 0.
+#
+# WHAT THIS GUARD DELIBERATELY DOES **NOT** ASSERT
+# ------------------------------------------------
+# * It does not assert that the examples PASS. A spec that loads, runs 34
+#   examples and fails 13 of them is NOT an offender here — it is counted and
+#   named in the verdict. Making example-pass the bar would make this gate red
+#   for reasons unrelated to "is the suite swept".
+# * It does not assert the `@tag:in-development` SKIP/COUNT semantics, which is
+#   the other half of Gap A. It cannot: `simple test` over this directory fails
+#   at compile in the seed for every spec (filed as
+#   `rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05`), while
+#   per-spec `simple run <spec>` works. Per-spec `run` has no tag filter, so it
+#   executes in-development specs rather than skipping and counting them.
+#   ALL 36 specs in this suite carry `@tag:in-development` (measured
+#   2026-09-05), so under `simple test` the correct behaviour would be 36 SKIPs
+#   that are still COUNTED — a property this guard structurally cannot see.
+#   The verdict line SAYS SO, every run. A gate that claimed the stronger
+#   property while checking the weaker one is the exact drift .claude/rules/vcs.md
+#   was written to stop.
+#
+# WHY ADVISORY (`push_blocking: false`)
+# -------------------------------------
+# Two independent reasons, either sufficient:
+#   * Like `push-dual-run-shadow`, it needs a runnable Simple binary. The only
+#     runner that executes these specs today is a dev artifact
+#     (`src/compiler_rust/target/debug/simple`) that most push hosts do not
+#     have; with no runner this guard ERRORs (exit 2), and as a blocking row that
+#     would block every push from a binary-less host.
+#   * Runtime. Serial, 36 specs, measured 2026-09-05 end to end at ~13 min on a
+#     loaded host (~7.7s for the fastest spec; the slowest single spec is
+#     minutes). That is too slow to hard-block
+#     an interactive push, and a gate routed around with `--no-verify` protects
+#     nothing. It is NOT "fixed" by sweeping a sample: a sampled sweep would
+#     check something weaker than it claims, which is the trap above.
+#
+# VERDICT (last line of stdout, per .claude/rules/vcs.md)
+#   PASS  — <n> spec(s) executed ...              exit 0
+#   FAIL  — ...                                    exit 1
+#   ERROR — nothing was checked (<reason>)         exit 2
+# A run that fed 0 specs to a runner is ERROR, never a pass. No runner at all is
+# ERROR, never a pass — absence of a runner is absence of evidence.
+#
+# `--selftest` runs before every scan and is fatal (8 fixtures).
+#
+# Options (the overrides exist so the selftest can drive the REAL scanner
+# against fixtures instead of re-implementing it):
+#   --selftest            run fixtures only, then exit
+#   --manifest FILE       must_check_gates.sdn to read
+#   --dispatcher FILE     check-push-must-pass.shs to read
+#   --spec-dir DIR        suite directory to sweep
+#   --runner PATH         binary invoked as `PATH run <spec>`
+#   --spec-timeout SECS   per-spec timeout (default 300; needs timeout/gtimeout)
+
+set -u
+
+SCRIPT_BASENAME=check-plan-acceptance-swept.shs
+ROOT=$(cd "$(dirname "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (cannot resolve repo root)"; exit 2; }
+
+DEF_MANIFEST="$ROOT/config/check/must_check_gates.sdn"
+DEF_DISPATCHER="$ROOT/scripts/check/check-push-must-pass.shs"
+DEF_SPEC_DIR="$ROOT/test/03_system/plan_acceptance"
+
+MANIFEST=""
+DISPATCHER=""
+SPEC_DIR=""
+RUNNER="${PLAN_ACCEPTANCE_RUNNER:-}"
+SPEC_TIMEOUT=300
+DO_SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) DO_SELFTEST_ONLY=1; shift ;;
+        --manifest) MANIFEST=$2; shift 2 ;;
+        --dispatcher) DISPATCHER=$2; shift 2 ;;
+        --spec-dir) SPEC_DIR=$2; shift 2 ;;
+        --runner) RUNNER=$2; shift 2 ;;
+        --spec-timeout) SPEC_TIMEOUT=$2; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+[ -n "$MANIFEST" ] || MANIFEST=$DEF_MANIFEST
+[ -n "$DISPATCHER" ] || DISPATCHER=$DEF_DISPATCHER
+[ -n "$SPEC_DIR" ] || SPEC_DIR=$DEF_SPEC_DIR
+
+# ---------------------------------------------------------------- coverage ---
+# Emits, on stdout, one of:
+#   ok <id> <blocking>
+#   norow
+#   noarm <id> <mode>
+coverage_probe() {
+    _manifest=$1
+    _dispatcher=$2
+    [ -f "$_manifest" ] || { echo "nomanifest"; return 0; }
+    [ -f "$_dispatcher" ] || { echo "nodispatcher"; return 0; }
+
+    # Same row selector the real dispatcher uses (run_manifest_push_gates).
+    _row=$(awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*push,/ {print}' "$_manifest" |
+           grep -F "$SCRIPT_BASENAME" | head -1)
+    if [ -z "$_row" ]; then
+        echo "norow"
+        return 0
+    fi
+    _id=$(printf '%s' "$_row" | cut -d, -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    _blocking=$(printf '%s' "$_row" | cut -d, -f3 | tr -d ' ')
+    _mode=$(printf '%s' "$_row" | cut -d, -f4 | tr -d ' ')
+    _command=$(printf '%s' "$_row" | cut -d, -f5 | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
+
+    # Byte-match against the case arm, exactly as the fail-closed dispatcher does.
+    if grep -qF "'$_id:$_mode:$_command')" "$_dispatcher"; then
+        echo "ok $_id $_blocking"
+    else
+        echo "noarm $_id $_mode"
+    fi
+}
+
+# ------------------------------------------------------------------ runner ---
+# A candidate is admitted only if it can actually EXECUTE a Simple source file.
+# Existence is not enough: the deployed stage4 CLI at bin/simple on this host
+# answers `run` with "unknown command 'run'" (measured 2026-09-05), so an
+# existence-only probe would pick it and report all 36 specs as "did not load"
+# — red for a reason that has nothing to do with the suite.
+runner_supports_run() {
+    _cand=$1
+    _probe_dir=$(mktemp -d) || return 1
+    printf 'fn main():\n    print("plan-acceptance-runner-probe")\n' > "$_probe_dir/probe_spec.spl"
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" 120 "$_cand" run "$_probe_dir/probe_spec.spl" >/dev/null 2>&1
+    else
+        "$_cand" run "$_probe_dir/probe_spec.spl" >/dev/null 2>&1
+    fi
+    _prc=$?
+    rm -rf "$_probe_dir"
+    [ "$_prc" -eq 0 ]
+}
+
+resolve_runner() {
+    if [ -n "$RUNNER" ]; then
+        [ -x "$RUNNER" ] || return 1
+        runner_supports_run "$RUNNER" || return 1
+        echo "$RUNNER"
+        return 0
+    fi
+    for _c in "$ROOT/bin/simple" "$ROOT/src/compiler_rust/target/debug/simple"; do
+        [ -x "$_c" ] || continue
+        runner_supports_run "$_c" || continue
+        echo "$_c"
+        return 0
+    done
+    return 1
+}
+
+TIMEOUT_BIN=""
+for _t in timeout gtimeout; do
+    if command -v "$_t" >/dev/null 2>&1; then TIMEOUT_BIN=$_t; break; fi
+done
+
+# run_one <runner> <spec> -> prints "<class> <executed>"; class in RAN|FAILEXAMPLES|NO_LOAD|CRASH
+run_one() {
+    _runner=$1
+    _spec=$2
+    if [ -n "$TIMEOUT_BIN" ]; then
+        _out=$("$TIMEOUT_BIN" "$SPEC_TIMEOUT" "$_runner" run "$_spec" 2>&1)
+    else
+        _out=$("$_runner" run "$_spec" 2>&1)
+    fi
+    _rc=$?
+    _v=$(printf '%s\n' "$_out" | grep -F 'SPEC FILE VERDICT:' | tail -1)
+    _exec=$(printf '%s\n' "$_v" | sed -n 's/.*executed=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    if [ "$_rc" -eq 124 ] || [ "$_rc" -ge 128 ]; then
+        echo "CRASH ${_exec:-0} $_rc"
+        return 0
+    fi
+    if [ -z "$_v" ] || [ -z "$_exec" ] || [ "$_exec" -eq 0 ]; then
+        echo "NO_LOAD 0 $_rc"
+        return 0
+    fi
+    _failed=$(printf '%s\n' "$_v" | sed -n 's/.*failed=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    if [ -n "$_failed" ] && [ "$_failed" -gt 0 ]; then
+        echo "FAILEXAMPLES $_exec $_rc"
+    else
+        echo "RAN $_exec $_rc"
+    fi
+}
+
+# ---------------------------------------------------------------- selftest ---
+ST_FAILURES=0
+ST_ASSERTS=0
+
+_mk_manifest() {
+    # $1 dest, $2 = with-row (1/0)
+    {
+        echo "must_check_gates |id, tier, push_blocking, mode, command, description|"
+        echo "    push-c-runtime-compiles, push, true, tree, \"sh scripts/check/check-c-runtime-compiles-push.shs\", \"unrelated row\""
+        if [ "$2" = 1 ]; then
+            echo "    push-plan-acceptance-swept, push, false, tree, \"sh scripts/check/$SCRIPT_BASENAME\", \"fixture row\""
+        fi
+    } > "$1"
+}
+
+_mk_dispatcher() {
+    # $1 dest, $2 = with-arm (1/0)
+    {
+        echo "run_manifest_push_gates() {"
+        echo "    case \"\$_id:\$_mode:\$_command\" in"
+        if [ "$2" = 1 ]; then
+            echo "        'push-plan-acceptance-swept:tree:sh scripts/check/$SCRIPT_BASENAME')"
+            echo "            run_push_gate \"\$_id\" \"\$_blocking\" \"\$ROOT/scripts/check/$SCRIPT_BASENAME\" ;;"
+        fi
+        echo "        *) return 2 ;;"
+        echo "    esac"
+        echo "}"
+    } > "$1"
+}
+
+_mk_runner() {
+    # $1 dest, $2 marker path, $3 = name of a spec that must emit NO verdict ("" = none)
+    cat > "$1" <<EOF
+#!/bin/sh
+echo "fixture-runner" >> "$2"
+_spec=\$2
+case "\$(basename "\$_spec")" in
+    ${3:-__none__}) echo "compile error: fixture"; exit 1 ;;
+esac
+echo "SPEC FILE VERDICT: \$_spec outcome=OK declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0"
+exit 0
+EOF
+    chmod +x "$1"
+}
+
+_st_assert() {
+    # $1 label, $2 expected exit, $3 expected substring in verdict, rest: args
+    _label=$1; _want_rc=$2; _want_sub=$3; shift 3
+    ST_ASSERTS=$((ST_ASSERTS + 1))
+    _o=$(PLAN_ACCEPTANCE_SELFTEST_RUNNING=1 sh "$0" "$@" 2>&1)
+    _rc=$?
+    _verdict=$(printf '%s\n' "$_o" | tail -1)
+    if [ "$_rc" != "$_want_rc" ]; then
+        echo "selftest FAIL [$_label]: exit $_rc, wanted $_want_rc — verdict: $_verdict"
+        ST_FAILURES=$((ST_FAILURES + 1))
+        return 0
+    fi
+    case "$_verdict" in
+        *"$_want_sub"*) : ;;
+        *)
+            echo "selftest FAIL [$_label]: verdict missing '$_want_sub' — got: $_verdict"
+            ST_FAILURES=$((ST_FAILURES + 1))
+            return 0 ;;
+    esac
+    echo "selftest ok   [$_label]"
+}
+
+run_selftest() {
+    _wd=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed in selftest)"; exit 2; }
+
+    # fixture spec dirs
+    mkdir -p "$_wd/specs" "$_wd/empty" "$_wd/specs_bad"
+    for _n in alpha beta gamma; do echo "# fixture" > "$_wd/specs/${_n}_spec.spl"; done
+    for _n in alpha broken; do echo "# fixture" > "$_wd/specs_bad/${_n}_spec.spl"; done
+
+    _mk_manifest "$_wd/manifest_wired.sdn" 1
+    _mk_manifest "$_wd/manifest_norow.sdn" 0
+    _mk_dispatcher "$_wd/dispatcher_wired.shs" 1
+    _mk_dispatcher "$_wd/dispatcher_noarm.shs" 0
+    _mk_runner "$_wd/runner.sh" "$_wd/marker" ""
+    _mk_runner "$_wd/runner_bad.sh" "$_wd/marker_bad" "broken_spec.spl"
+
+    # (a) fully wired, 3 specs that load and run -> PASS
+    _st_assert "wired suite sweeps clean" 0 "PASS — 3 spec(s) executed" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs" --runner "$_wd/runner.sh"
+
+    # (a2) the fixture runner is what actually ran (never the real binary)
+    ST_ASSERTS=$((ST_ASSERTS + 1))
+    if [ -f "$_wd/marker" ] && [ "$(wc -l < "$_wd/marker" | tr -d ' ')" -ge 3 ]; then
+        echo "selftest ok   [fixture runner really executed each spec]"
+    else
+        echo "selftest FAIL [fixture runner really executed each spec]: marker absent or short"
+        ST_FAILURES=$((ST_FAILURES + 1))
+    fi
+
+    # (b) manifest row present, dispatch arm absent -> FAIL naming the missing arm
+    _st_assert "row without dispatch arm fails" 1 "no dispatch arm" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_noarm.shs" \
+        --spec-dir "$_wd/specs" --runner "$_wd/runner.sh"
+
+    # (c) neither row nor arm -> FAIL "swept by no push-tier enforcement surface"
+    _st_assert "unswept suite fails" 1 "swept by no push-tier enforcement surface" \
+        --manifest "$_wd/manifest_norow.sdn" --dispatcher "$_wd/dispatcher_noarm.shs" \
+        --spec-dir "$_wd/specs" --runner "$_wd/runner.sh"
+
+    # (d) wired, but one spec emits no verdict line -> FAIL naming it
+    _st_assert "spec that does not load fails, named" 1 "broken_spec.spl" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_bad" --runner "$_wd/runner_bad.sh"
+
+    # (d2) the offender FAIL line must ALSO carry the wiring status — that is the
+    #      branch taken while the suite is red, and it is the property this guard
+    #      exists to report.
+    _st_assert "offender FAIL still reports the wiring" 1 "push_blocking=false" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_bad" --runner "$_wd/runner_bad.sh"
+
+    # (e) wired, empty spec dir -> 0 executed -> ERROR, never a pass
+    _st_assert "empty suite is ERROR not PASS" 2 "ERROR — nothing was checked" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/empty" --runner "$_wd/runner.sh"
+
+    # (f) no runner at all -> ERROR, never a pass
+    _st_assert "missing runner is ERROR not PASS" 2 "ERROR — nothing was checked" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs" --runner "$_wd/no-such-runner"
+
+    # (g) a runner that EXISTS but cannot execute Simple source (the deployed
+    #     stage4 CLI answers `run` with "unknown command") is ERROR, not a
+    #     36-offender FAIL blamed on the suite.
+    printf '#!/bin/sh\necho "error: unknown command '\''run'\''" >&2\nexit 1\n' > "$_wd/runner_norun.sh"
+    chmod +x "$_wd/runner_norun.sh"
+    _st_assert "runner without 'run' is ERROR not a suite FAIL" 2 "ERROR — nothing was checked" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs" --runner "$_wd/runner_norun.sh"
+
+    rm -rf "$_wd"
+    if [ "$ST_FAILURES" -ne 0 ]; then
+        echo "selftest: $ST_FAILURES of $ST_ASSERTS assertion(s) FAILED — scan not attempted"
+        return 1
+    fi
+    echo "selftest: $ST_ASSERTS assertion(s) passed"
+    return 0
+}
+
+# The selftest re-invokes this script; without this guard it would recurse.
+if [ "${PLAN_ACCEPTANCE_SELFTEST_RUNNING:-0}" != 1 ]; then
+    run_selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+    [ "$DO_SELFTEST_ONLY" = 1 ] && exit 0
+else
+    [ "$DO_SELFTEST_ONLY" = 1 ] && exit 0
+fi
+
+# -------------------------------------------------------------------- scan ---
+COV=$(coverage_probe "$MANIFEST" "$DISPATCHER")
+COV_KIND=$(printf '%s' "$COV" | cut -d' ' -f1)
+COV_ID=$(printf '%s' "$COV" | cut -d' ' -f2)
+COV_EXTRA=$(printf '%s' "$COV" | cut -d' ' -f3)
+
+case "$COV_KIND" in
+    nomanifest) echo "ERROR — nothing was checked (manifest not found: $MANIFEST)"; exit 2 ;;
+    nodispatcher) echo "ERROR — nothing was checked (dispatcher not found: $DISPATCHER)"; exit 2 ;;
+esac
+
+[ -d "$SPEC_DIR" ] || { echo "ERROR — nothing was checked (spec dir not found: $SPEC_DIR)"; exit 2; }
+
+RUNNER_PATH=$(resolve_runner) || {
+    echo "ERROR — nothing was checked (no runnable Simple binary; set --runner or PLAN_ACCEPTANCE_RUNNER)"
+    exit 2
+}
+
+SPECS=$(find "$SPEC_DIR" -maxdepth 1 -name '*_spec.spl' -type f | sort)
+[ -n "$SPECS" ] || { echo "ERROR — nothing was checked (0 spec files under $SPEC_DIR)"; exit 2; }
+
+N_ATTEMPTED=0
+N_RAN=0
+N_FAILEX=0
+OFFENDERS=""
+FAILEX_NAMES=""
+
+for _spec in $SPECS; do
+    N_ATTEMPTED=$((N_ATTEMPTED + 1))
+    _t0=$(date +%s)
+    _r=$(run_one "$RUNNER_PATH" "$_spec")
+    _t1=$(date +%s)
+    _class=$(printf '%s' "$_r" | cut -d' ' -f1)
+    _base=$(basename "$_spec")
+    # One key=value diagnostic line per spec. A multi-minute run that emits
+    # nothing between the selftest and the verdict is unreadable, and the
+    # slowest-spec number is the input to any later timeout decision.
+    echo "plan_acceptance_spec=$_base class=$_class executed=$(printf '%s' "$_r" | cut -d' ' -f2) rc=$(printf '%s' "$_r" | cut -d' ' -f3) secs=$((_t1 - _t0))"
+    case "$_class" in
+        RAN) N_RAN=$((N_RAN + 1)) ;;
+        FAILEXAMPLES)
+            N_RAN=$((N_RAN + 1)); N_FAILEX=$((N_FAILEX + 1))
+            FAILEX_NAMES="$FAILEX_NAMES $_base" ;;
+        NO_LOAD) OFFENDERS="$OFFENDERS $_base(did-not-load)" ;;
+        CRASH) OFFENDERS="$OFFENDERS $_base(crashed rc=$(printf '%s' "$_r" | cut -d' ' -f3))" ;;
+    esac
+done
+
+[ "$N_ATTEMPTED" -gt 0 ] || { echo "ERROR — nothing was checked (0 spec invocations executed)"; exit 2; }
+
+N_TAGGED=$(grep -l '@tag:in-development' $SPECS 2>/dev/null | wc -l | tr -d ' ')
+
+DISCLAIMER="example pass/fail and @tag:in-development skip+count semantics NOT asserted ($N_TAGGED/$N_ATTEMPTED specs carry the tag; per-spec 'run' has no tag filter, and 'simple test' over this dir fails at compile in the seed — rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05)"
+
+echo "plan_acceptance_spec_dir=$SPEC_DIR"
+echo "plan_acceptance_runner=$RUNNER_PATH"
+echo "plan_acceptance_specs_attempted=$N_ATTEMPTED"
+echo "plan_acceptance_specs_loaded_and_ran=$N_RAN"
+echo "plan_acceptance_specs_with_example_failures=$N_FAILEX"
+echo "plan_acceptance_in_development_tagged=$N_TAGGED"
+echo "plan_acceptance_coverage=$COV_KIND"
+
+case "$COV_KIND" in
+    norow)
+        echo "FAIL — $N_ATTEMPTED spec(s) executed, $N_RAN loaded and ran; but $SPEC_DIR is swept by no push-tier enforcement surface (no push-tier row in $(basename "$MANIFEST") names $SCRIPT_BASENAME)"
+        exit 1 ;;
+    noarm)
+        echo "FAIL — $N_ATTEMPTED spec(s) executed, $N_RAN loaded and ran; but push-tier row '$COV_ID' has no dispatch arm in $(basename "$DISPATCHER") (a manifest row alone is not wiring; the fail-closed *) arm blocks every push)"
+        exit 1 ;;
+esac
+
+if [ -n "$OFFENDERS" ]; then
+    # The wiring status belongs on the FAIL line too. This is the branch the
+    # gate actually takes while the suite is red, so omitting it would leave the
+    # very property this guard exists to report off the last line of stdout.
+    echo "FAIL — $N_ATTEMPTED spec(s) executed under $RUNNER_PATH, $(printf '%s' "$OFFENDERS" | wc -w | tr -d ' ') failed to load/run:$OFFENDERS; swept by push-tier gate '$COV_ID' push_blocking=$COV_EXTRA; $DISCLAIMER"
+    exit 1
+fi
+
+VERDICT="PASS — $N_ATTEMPTED spec(s) executed under $RUNNER_PATH, all $N_RAN loaded and ran"
+if [ "$N_FAILEX" -gt 0 ]; then
+    VERDICT="$VERDICT ($N_FAILEX with failing examples:$FAILEX_NAMES)"
+fi
+VERDICT="$VERDICT; swept by push-tier gate '$COV_ID' push_blocking=$COV_EXTRA; $DISCLAIMER"
+echo "$VERDICT"
+exit 0
