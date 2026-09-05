@@ -40,7 +40,7 @@ open checkbox in the plan's doc-path below.
 
 use std.spec.{step}
 use std.spec.{describe, context, it, expect}
-use std.io_runtime.{file_read}
+use std.io_runtime.{file_read, process_run}
 use app.io.mod.{file_exists}
 use app.test_audit.aspect_dynload_plan.{
     ASPECT_DYNLOAD_CURRENT_MANIFEST_PATH,
@@ -164,9 +164,26 @@ describe "plan: compiler/aspect_dynload lane remains":
             # runtime core's own decision ledger, not by a Rust HAL.
             val required = cosmos_runtime_core_coverage_required()
             val mask = cosmos_runtime_core_coverage_mask()
-            step("Require both ledger words to be real u64 values")
-            expect(required >= 0u64).to_equal(true)
-            expect(mask >= 0u64).to_equal(true)
+            step("Pin the ledger's decision shape and require the observed mask to stay inside it")
+            # AUDIT 2026-09-05: `required >= 0u64` / `mask >= 0u64` is true of
+            # every u64 and could not fail. The ledger declares 13 decisions,
+            # each with two outcomes, so the required word is exactly the low
+            # 26 bits; any observed outcome outside that word is a decision
+            # the ledger does not know about.
+            expect(required).to_equal(0x03FFFFFFu64)  # oracle: cosmos_runtime_core.spl:7-8 — 13 decisions x 2 outcomes = 26 required bits
+            expect(mask <= required).to_equal(true)  # oracle: an outcome bit above bit 25 names a decision the ledger never declared
+            step("Census Rust HAL sources under src/os outside the explicitly retained reference/bootstrap dirs")
+            # The checkbox is about RUST HAL code, so count it: every `.rs`
+            # under src/os that is not under the retained
+            # src/os/port/rust/ (std port + examples) or src/os/toolchain/rust/
+            # (toolchain reference) trees is an owned Rust HAL file.
+            val (all_out, _e1, _c1) = process_run("/bin/sh", ["-c", "find src/os -name '*.rs' | wc -l | tr -d ' '"])
+            val (owned_out, _e2, _c2) = process_run("/bin/sh", ["-c", "find src/os -name '*.rs' | grep -v '^src/os/port/rust/' | grep -v '^src/os/toolchain/rust/' | wc -l | tr -d ' '"])
+            val all_rs = all_out.trim().to_i64() ?? -1
+            val owned_rs = owned_out.trim().to_i64() ?? -1
+            # @capture: all_rs is the total .rs census under src/os (control), owned_rs the count outside the retained dirs
+            expect(all_rs > 0).to_equal(true)  # oracle: the retained reference code exists, so a zero total means the census scanned nothing
+            expect(owned_rs).to_equal(0)  # oracle: 0 — no owned Rust HAL implementation remains outside the retained dirs
 
         it "Scoped C HAL implementation is deleted only after pure-Simple replacement and target evidence.":
             step("Locate the dual-run parity gate that authorises a C deletion")
@@ -249,9 +266,15 @@ describe "plan: compiler/aspect_dynload lane remains":
             val hits = apk_loader_cache_hits(ld)
             step("Derive an ABI joinpoint slot key for a known owner/symbol site")
             val key = joinpoint_key("owner", "symbol", 0)
-            step("Require both lifecycle primitives to answer in contract shape")
-            expect(hits >= 0).to_equal(true)
+            step("Require a fresh loader to start with zeroed counters and a deterministic slot key")
+            # AUDIT 2026-09-05: `hits >= 0` is true of every i64 and could not
+            # fail. apk_loader_new's contract is "a loader with zeroed
+            # counters", so a fresh loader must report exactly 0 hits, and
+            # the key derivation must be a pure function of its inputs.
+            expect(hits).to_equal(0)  # oracle: aspect_pack.apk_loader_new docstring — zeroed counters
             expect(key.len() > 0u64).to_equal(true)
+            expect(joinpoint_key("owner", "symbol", 0)).to_equal(key)  # oracle: same site -> same slot key (deterministic ABI slot)
+            expect(joinpoint_key("owner", "symbol", 1) == key).to_equal(false)  # oracle: a different site index must not alias the same slot
 
         it "Sol confirms useful commits preserved and only stale/wrong repository and process state removed.":
             step("Read the lane plan's cleanup obligation text")

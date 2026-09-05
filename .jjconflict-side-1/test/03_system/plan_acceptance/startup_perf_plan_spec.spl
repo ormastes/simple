@@ -16,22 +16,24 @@ Tagged in-development: these pin the promised INTERFACE and fail until the
 plan's remaining checkboxes are implemented.
 
 Coverage note: the plan's third open checkbox ("REMAINING — per-phase
-before/after snapshot spec with growth band") names no existing function
-anywhere in `src/` (verified via `grep -rn growth_band src/` before writing
-this file: zero hits). The Phase E acceptance text only promises "a spec
-[that] compares two committed snapshots and fails on unexplained growth
-beyond a configured band" — no concrete symbol. `deps_growth_band_verdict`
-below is this lane's forcing-function name for that promised interface,
-chosen to mirror the `src/app/deps/` module the plan already owns; its
-absence is deliberate (unresolved-symbol load failure, neutralized by the
-in-development tag) rather than an oversight.
+before/after snapshot spec with growth band") promises "a spec [that]
+compares two committed snapshots and fails on unexplained growth beyond a
+configured band". The gate function `deps_growth_band_verdict` landed at
+`src/app/deps/growth_band.spl` on 2026-09-05 (the plan's own Phase E note
+says so and deliberately leaves the box unticked). What is still missing is
+the SPEC that feeds it two REAL snapshots — so the Phase E scenario below is
+that spec: it parses the committed baseline out of the metrics document and
+recomputes the current CLI-dir-aggregate closure with the real `deps`
+scanner, then asks the gate for its verdict.
+AUDIT 2026-09-05: the previous Phase E oracle passed two literals (1298,
+1298) to the gate, so it compared a constant to itself and could not fail.
 ## Verification
 A green run means `resolve_component_verdict`, the CLI-surface snapshot and
-migration-report functions, and (once landed) `deps_growth_band_verdict` all
-answer with the documented literal verdict strings. Troubleshooting: a load
-failure naming `deps_growth_band_verdict` unresolved is the intended
-in-development signal for the still-missing Phase E checkbox, not a harness
-defect.
+migration-report functions, and `deps_growth_band_verdict` over the
+recomputed closure all answer with the documented literal verdict strings.
+Troubleshooting: a Phase E failure naming `growth_beyond_band` means the CLI
+closure really grew more than 15% past the committed baseline — record a new
+reviewed baseline in the metrics doc only after explaining the growth.
 ## Lifecycle
 doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md
 doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
@@ -45,6 +47,8 @@ doc/05_design/compiler/incremental_build/per_lane_private_caches.md
 # @manual_section "Startup-perf plan Phase B/C/E remains"
 
 use std.spec.{describe, context, it, expect, step}
+use std.io_runtime.{file_read, dir_list}
+use app.deps.scanner.{_scan_file_recursive}
 use std.common.structural.component.descriptor.{
     component_v1_make,
     resolve_component_verdict
@@ -58,6 +62,47 @@ use app.cli.help_surface_report.{
     cli_surface_completion_candidates_v1,
 }
 use app.deps.growth_band.{deps_growth_band_verdict}
+
+val BASELINE_DOC: text = "doc/10_metrics/startup/coupling_cohesion_baseline_2026-08-17.md"
+# The baseline row reads: `| **CLI dir aggregate** (all 81 `.spl` under
+# `src/app/cli/`) | **1298** | ...` — the closure cell is the first bold
+# number after this anchor.
+val BASELINE_ROW_ANCHOR: text = "`src/app/cli/`) | **"
+
+fn parse_baseline_closure(doc: text) -> i64:
+    """Parse the committed CLI-dir-aggregate closure count out of the metrics
+    document. Returns -1 when the anchor row is missing so a vanished
+    baseline can never read as a zero-growth pass."""
+    val at = doc.index_of(BASELINE_ROW_ANCHOR)
+    if at < 0:
+        return -1
+    var i = at + BASELINE_ROW_ANCHOR.len()
+    var n: i64 = 0
+    var digits = 0
+    while i < doc.len():
+        val d = "0123456789".index_of(doc.slice(i, i + 1))
+        if d < 0:
+            break
+        n = n * 10 + d
+        digits = digits + 1
+        i = i + 1
+    if digits == 0:
+        return -1
+    n
+
+fn current_cli_closure_files() -> i64:
+    """Recompute the CLI-dir-aggregate closure with the real deps scanner:
+    the union of every transitive import reachable from every `.spl`
+    directly under src/app/cli/, counted as files."""
+    var visited: {text: bool} = {}
+    var roots = 0
+    for entry in dir_list("src/app/cli"):
+        if entry.ends_with(".spl"):
+            roots = roots + 1
+            visited = _scan_file_recursive("src/app/cli/" + entry, visited)
+    if roots == 0:
+        return -1
+    visited.len()
 
 describe "plan: compiler/startup_performance/startup_perf_plan_2026-08-17 remains":
 
@@ -117,23 +162,28 @@ describe "plan: compiler/startup_performance/startup_perf_plan_2026-08-17 remain
 
         it "REMAINING — per-phase before/after snapshot spec with growth band not found; snapshots are one baseline, not a bracketing series.":
             # @req REQ-STARTUP-003
-            step("Load the committed baseline and current CLI-dir-aggregate edge counts")
-            # Interface pin: Phase E's acceptance text promises "a spec
-            # [that] compares two committed snapshots and fails on
-            # unexplained growth beyond a configured band". No such
-            # function exists in src/ yet. deps_growth_band_verdict(
-            # baseline_edges, current_edges, band_pct) -> text is this
-            # lane's forcing-function shape for that interface: given the
-            # committed baseline CLI-dir-aggregate edge count (1298 files,
-            # doc/10_metrics/startup/coupling_cohesion_baseline_2026-08-17.md)
-            # and a same-or-smaller current count, the verdict must read
-            # "within_band" — never a silent pass on an unmeasured delta.
-            val baseline_closure_files = 1298
-            val current_closure_files = 1298
-            step("Resolve the growth-band verdict for the same-count baseline/current pair")
+            step("Parse the committed baseline closure count out of the metrics document")
+            # Phase E's acceptance text promises "a spec [that] compares two
+            # committed snapshots and fails on unexplained growth beyond a
+            # configured band". The BEFORE snapshot is the committed metrics
+            # row; the AFTER snapshot is recomputed here with the real deps
+            # scanner over the same 81-root CLI directory. Neither side is a
+            # literal, so the verdict can actually change.
+            val baseline_closure_files = parse_baseline_closure(file_read(BASELINE_DOC))
+            # @capture baseline_closure_files is parsed from the committed metrics row, not typed here
+            expect(baseline_closure_files).to_equal(1298)  # oracle: the committed 2026-08-17 CLI-dir-aggregate closure cell reads **1298**
+            step("Recompute the current CLI-dir-aggregate closure with the real deps scanner")
+            val current_closure_files = current_cli_closure_files()
+            # @capture current_closure_files is the scanner's live union closure over src/app/cli/*.spl
+            expect(current_closure_files > 0).to_equal(true)  # oracle: a scan over 81+ real roots that reaches zero files scanned nothing (testing.md measurement trap)
+            step("Resolve the growth-band verdict for the committed/current pair at the plan's 15% band")
             val verdict = deps_growth_band_verdict(baseline_closure_files, current_closure_files, 0.15)
-            # oracle: "within_band" is the documented verdict string for a same-or-smaller
-            # current count against the committed baseline (Phase E acceptance text); a
-            # different or missing string signals unexplained growth rather than a silent pass
+            # oracle: "within_band" is the documented verdict string when the current count is at
+            # most 15% above the committed baseline (Phase E acceptance text); "growth_beyond_band"
+            # or any "error:*" verdict is a real red, never a silent pass on an unmeasured delta
             # @capture verdict is the real computed return value of deps_growth_band_verdict(...)
             expect(verdict).to_equal("within_band")
+            step("Control: the gate must reject the same current count against a baseline it exceeds by more than the band")
+            val control = deps_growth_band_verdict(current_closure_files / 2, current_closure_files, 0.15)
+            # @capture control is the verdict for a baseline half the current count (100% growth)
+            expect(control).to_equal("growth_beyond_band")  # oracle: 100% growth is beyond a 15% band — proves the gate discriminates on these inputs
