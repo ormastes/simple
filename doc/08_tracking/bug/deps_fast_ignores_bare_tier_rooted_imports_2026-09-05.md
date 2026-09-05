@@ -1,7 +1,7 @@
 # `deps fast`/`deps deep` silently ignore bare tier-rooted imports (fail-open closure)
 
 **Filed:** 2026-09-05
-**Status:** OPEN — repro confirmed, resolver NOT fixed (out of scope for this record's author)
+**Status:** RESOLVED 2026-09-06 — fixed in `src/app/deps/scanner.spl` (pure Simple); regression spec `test/01_unit/app/deps/bare_tier_root_imports_spec.spl` (7 examples, 0 failures; sspec score 83/100)
 **Severity:** High — every closure-based gate and doc built on `deps fast`/`deps deep` reports an undercounted, fail-open result
 
 ## Summary
@@ -119,7 +119,7 @@ directly under `src/lib/`, e.g. `common`, `nogc_sync_mut`, `nogc_async_mut`,
 for `std.X`/`lib.X` (`doc/07_guide/language/module_system.md` § Module Path
 Syntax: "`use std.X` and `use lib.X` both resolve from `src/lib/`") — i.e.
 `common.ui.key_code` and `std.common.ui.key_code` must resolve to the same
-file, `src/lib/common/ui/key_code.spl`. **Do not fix in this change** — this
+file, `src/lib/common/ui/key_code.spl`. **Fixed 2026-09-06 — see Resolution below.** (Original note: do not fix in this change) — this
 record exists to unblock that separate fix; this change only hardens the one
 gate that was relying on the broken tool.
 
@@ -127,3 +127,69 @@ gate that was relying on the broken tool.
 
 - `build/nb/fixtures/deps_root_probe.spl`, `build/nb/fixtures/deps_root_probe2.spl`
   (untracked, left in place for re-repro).
+
+## Which implementation produced the buggy output (checked 2026-09-06)
+
+`deps` is **not** a Rust command. `src/compiler_rust/driver/src/main.rs:730-739`
+registers it as `CommandEntry { name: "deps", app_path: "src/app/deps/main.spl",
+rust_handler: Handler::Custom(...) }` whose Rust handler only prints
+`error: deps app not found` — it is an absence fallback, never an
+implementation. The seed therefore *interprets* `src/app/deps/main.spl`, so the
+buggy output above came from the pure-Simple scanner. The record's wording "the
+seed's `deps fast`" meant "deps run under the seed binary", not "a Rust deps".
+No Rust mirror fix is needed.
+
+## Resolution (2026-09-06)
+
+Root cause — `src/app/deps/scanner.spl`, `_deps_resolve_module`:
+`_deps_module_to_relpath` (was :36, now :52) aliases only `std.` -> `lib.`;
+step 3 tried `src/<relpath>` (for `common.ui.key_code` that is
+`src/common/ui/key_code.spl`, which does not exist), and step 4's `src/lib/<tier>/…`
+search was gated on `relpath.starts_with("lib/")` (was :144). A bare tier root
+therefore never had `src/lib/` prepended, `_deps_resolve_module` returned `""`,
+and both `_scan_file_recursive` and `_direct_imports` skipped it under
+`if resolved != ""` — silently.
+
+Fix (three parts, all in `scanner.spl`):
+1. `_deps_lib_tiers()` / `_deps_is_lib_tier()` (:40-50) — the 10-family tier
+   list copied in order from `module_loader_resolve.spl`'s `fams`. The old
+   step-4 list had only 5 of the 10 and is now the same constant.
+2. New step **3b** (:159-171): when the first path segment is a tier directory,
+   try `src/lib/<relpath>.spl` then `src/lib/<relpath>/mod.spl`. `common.ui.key_code`
+   and `std.common.ui.key_code` now resolve to the same file.
+3. New `_unresolved_imports(file_path) -> [text]` returning the module names of
+   direct imports that resolve to nothing; `_run_fast` and `_run_normal` print
+   `Unresolved imports: N` plus one `UNRESOLVED: <module>` line each. A hole in
+   the closure is now reported instead of dropped.
+
+Evidence (seed = `src/compiler_rust/target/bootstrap/simple`):
+
+| | before | after |
+|---|---|---|
+| `deps fast src/app/ui_showcase/hosts/host_gui.spl` direct imports | 1 | 6 |
+| same, unique `src/**.spl` in reported closure | 2 | 40 |
+| `check-ui-slim-closure.shs` on host_gui | `PASS — 2 file(s), 0 forbidden` (blind) | `PASS — 40 file(s), 0 forbidden` |
+
+Regression spec `test/01_unit/app/deps/bare_tier_root_imports_spec.spl`: 7/7
+GREEN after the fix. The discriminating RED is **4 of 7** — measured by
+disabling step 3b alone — namely the two bare-root resolutions, the bare-root
+transitive-closure case, and "a resolvable bare tier import is NOT reported as
+unresolved"; the `std.`-prefixed control and the missing-module negative are
+green either way, as they should be. (The very first draft showed every example failing,
+but that was confounded: `_unresolved_imports` did not exist yet and the fixture
+`use` lines were written with inline `{Symbol}`, which Simple treats as string
+interpolation. Both are fixed; do not read that run as resolver RED.)
+Pre-existing `deps_tool_spec.spl` (17) and `deps_deep_spec.spl` (13) stay green.
+
+Two disclosures:
+- Part 1 also changes the **order** of the existing step-4 `lib/`-prefixed
+  search: it was `nogc_sync_mut, nogc_async_mut, gc_async_mut,
+  nogc_async_mut_noalloc, common`, and is now the canonical resolver's order
+  (`nogc_async_mut` first). A `std.X` that falls through to step 4 and exists in
+  more than one tier can now resolve to a different tier's file than before —
+  that is the alignment with the real module resolver, but it is a behaviour
+  change on entries unrelated to this bug.
+- `_unresolved_imports` covers an entry's **direct** imports only.
+  `_scan_file_recursive` still skips an unresolvable transitive edge silently,
+  and `_run_deep` prints no unresolved line. "Reported, not dropped" is
+  therefore a property of the entry's direct imports, not of the whole closure.

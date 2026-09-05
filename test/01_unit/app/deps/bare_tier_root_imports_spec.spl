@@ -1,0 +1,153 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/compiler/deps/bare_tier_root_imports.md ; plan: doc/03_plan/compiler/deps/bare_tier_root_imports.md ; architecture: doc/04_architecture/compiler/deps/bare_tier_root_imports.md ; design: doc/05_design/compiler/deps/bare_tier_root_imports.md
+# Bug: doc/08_tracking/bug/deps_fast_ignores_bare_tier_rooted_imports_2026-09-05.md
+
+"""
+## Purpose and audience
+
+Purpose: `deps fast`/`deps normal` must resolve bare tier-rooted imports (`use
+common.X`, `use nogc_sync_mut.X`) to the same file as the `std.`-prefixed
+spelling, and must REPORT — never silently drop — a direct import it cannot
+resolve.
+
+Audience: engineers confirming the reported dependency closure is complete
+rather than fail-open.
+
+## Scope, assumptions and preconditions
+
+Must be run from the repository root: the resolver's `src/` and `src/lib/`
+fallbacks are current-working-directory relative. Scratch fixtures are written
+under `build/nb/` and are never executed — only their `use` lines are parsed.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/app/deps/bare_tier_root_imports_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the deps resolver.
+
+## Troubleshooting
+
+A failure naming `src/lib/common/ui/key_code.spl` means step 3b of
+`_deps_resolve_module` (`src/app/deps/scanner.spl`) no longer maps a bare tier
+root onto `src/lib/`. A failure in `_unresolved_imports` means an unresolvable
+import is being dropped silently again.
+
+## Compatibility and limitations
+
+`_unresolved_imports` covers an entry's DIRECT imports only; unresolvable
+transitive edges inside `_scan_file_recursive` are still skipped silently.
+"""
+
+# doc-path: doc/01_research/compiler/deps/bare_tier_root_imports.md
+# doc-path: doc/03_plan/compiler/deps/bare_tier_root_imports.md
+# doc-path: doc/04_architecture/compiler/deps/bare_tier_root_imports.md
+# doc-path: doc/05_design/compiler/deps/bare_tier_root_imports_oracles.md
+# @manual: primary
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_write, mkdir_p}
+use app.deps.scanner.{_direct_imports, _unresolved_imports, _scan_file_recursive}
+
+val SCRATCH = "build/nb/deps_bare_root_spec"
+
+val BARE_COMMON = SCRATCH + "/bare_common.spl"
+val BARE_TIER   = SCRATCH + "/bare_tier.spl"
+val STD_CONTROL = SCRATCH + "/std_control.spl"
+val MISSING     = SCRATCH + "/missing_import.spl"
+
+val KEY_CODE_TARGET = "src/lib/common/ui/key_code.spl"
+val RENDERER_TARGET = "src/lib/nogc_sync_mut/ui/gui_renderer.spl"
+val MISSING_MODULE  = "common.ui.no_such_module_zzz"
+
+# `{` / `}` are string-interpolation delimiters in Simple, so a fixture `use`
+# line with a brace list must be assembled by concatenation, not written inline.
+fn _use_line(module_path: text, symbol: text) -> text:
+    "use " + module_path + "." + "{" + symbol + "}" + "\n\nfn main():\n    pass\n"
+
+fn _write_fixtures() -> bool:
+    val ok_dir = mkdir_p(SCRATCH)
+    val a = file_write(BARE_COMMON, _use_line("common.ui.key_code", "KeyCode"))
+    val b = file_write(BARE_TIER, _use_line("nogc_sync_mut.ui.gui_renderer", "GuiRenderer"))
+    val c = file_write(STD_CONTROL, _use_line("std.common.ui.key_code", "KeyCode"))
+    val d = file_write(MISSING, _use_line(MISSING_MODULE, "Nope"))
+    ok_dir and a and b and c and d
+
+fn _has_suffix(items: [text], needle: text) -> bool:
+    var found = false
+    for it in items:
+        if it.contains(needle):
+            found = true
+    found
+
+describe "deps resolver: bare tier-rooted imports":
+    # @manual scenario evidence
+
+    describe "a bare tier root resolves exactly like the std. spelling":
+
+        it "the std.common.ui.key_code control resolves to src/lib/common/ui/key_code.spl":
+            # @req REQ-SSPEC-UNIT
+            step("write the four scratch fixtures")
+            expect(_write_fixtures()).to_be_true()
+            step("resolve the direct imports of the std.-prefixed control fixture")
+            val directs = _direct_imports(STD_CONTROL)
+            expect(directs.len()).to_equal(1)   # oracle: the control fixture declares exactly one `use` line
+            expect(_has_suffix(directs, KEY_CODE_TARGET)).to_be_true()
+
+        it "the bare common.ui.key_code form resolves to the same file as the std. form":
+            # @req REQ-SSPEC-UNIT
+            step("write the four scratch fixtures")
+            expect(_write_fixtures()).to_be_true()
+            step("resolve the direct imports of the bare common.-rooted fixture")
+            val directs = _direct_imports(BARE_COMMON)
+            expect(directs.len()).to_equal(1)   # oracle: one `use` line, and it must resolve — 0 was the fail-open bug
+            expect(_has_suffix(directs, KEY_CODE_TARGET)).to_be_true()
+
+        it "the bare nogc_sync_mut.ui.gui_renderer form resolves under src/lib/nogc_sync_mut":
+            # @req REQ-SSPEC-UNIT
+            step("write the four scratch fixtures")
+            expect(_write_fixtures()).to_be_true()
+            step("resolve the direct imports of the bare nogc_sync_mut.-rooted fixture")
+            val directs = _direct_imports(BARE_TIER)
+            expect(directs.len()).to_equal(1)   # oracle: one `use` line, resolved into a second lib tier, not just `common`
+            expect(_has_suffix(directs, RENDERER_TARGET)).to_be_true()
+
+        it "the bare form pulls its target into the transitive closure":
+            # @req REQ-SSPEC-UNIT
+            step("write the four scratch fixtures")
+            expect(_write_fixtures()).to_be_true()
+            step("walk the full transitive closure from the bare-rooted fixture")
+            var visited: {text: bool} = {}
+            visited = _scan_file_recursive(BARE_COMMON, visited)
+            var files: [text] = []
+            for k in visited.keys():
+                files.push(k)
+            step("the bare-rooted target must be inside the closure, not only in the direct list")
+            expect(_has_suffix(files, KEY_CODE_TARGET)).to_be_true()
+
+    describe "an unresolvable import is reported, not silently dropped":
+
+        it "a nonexistent module is absent from the resolved direct imports":
+            # @req REQ-SSPEC-UNIT
+            step("write the four scratch fixtures")
+            expect(_write_fixtures()).to_be_true()
+            step("resolve the direct imports of the deliberately broken fixture")
+            val directs = _direct_imports(MISSING)
+            expect(directs.len()).to_equal(0)   # oracle: no file exists for the sabotage module, so nothing may be invented
+
+        it "a nonexistent module is named by _unresolved_imports":
+            # @req REQ-SSPEC-UNIT
+            step("write the four scratch fixtures")
+            expect(_write_fixtures()).to_be_true()
+            step("collect the unresolved direct imports of the broken fixture")
+            val missing = _unresolved_imports(MISSING)
+            expect(missing.len()).to_equal(1)   # oracle: exactly the one sabotage `use` line is reported back
+            expect(missing[0]).to_equal(MISSING_MODULE)
+
+        it "a resolvable bare tier import is NOT reported as unresolved":
+            # @req REQ-SSPEC-UNIT
+            step("write the four scratch fixtures")
+            expect(_write_fixtures()).to_be_true()
+            step("collect the unresolved direct imports of the bare-rooted fixture")
+            val missing = _unresolved_imports(BARE_COMMON)
+            expect(missing.len()).to_equal(0)   # oracle: a bare tier root now resolves, so nothing is left over

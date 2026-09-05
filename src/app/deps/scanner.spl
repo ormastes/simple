@@ -33,6 +33,22 @@ fn _deps_path_join(a: text, b: text) -> text:
         return b
     a + "/" + b
 
+# Tier directories directly under src/lib/. Mirrors the `fams` list in
+# src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl so that
+# `common.X` and `std.common.X` resolve to the same file. Order matters: it is
+# the same search order the real module resolver uses for `std.X`/`lib.X`.
+fn _deps_lib_tiers() -> [text]:
+    ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut",
+     "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut",
+     "nogc_async_mut_noalloc"]
+
+fn _deps_is_lib_tier(segment: text) -> bool:
+    var found = false
+    for tier in _deps_lib_tiers():
+        if _deps_str_eq(tier, segment):
+            found = true
+    found
+
 fn _deps_module_to_relpath(module_name: text) -> text:
     # std.X -> lib/X  (std is alias for lib/)
     var name = module_name
@@ -140,10 +156,23 @@ fn _deps_resolve_module(module_name: text, current_file: text) -> text:
     if r6 != "":
         return r6
 
+    # 3b. Bare tier-rooted import: `use common.X` / `use nogc_sync_mut.X`.
+    #     The first segment is a tier directory directly under src/lib/, so the
+    #     module resolves exactly as the `std.`-prefixed spelling would.
+    #     See doc/08_tracking/bug/deps_fast_ignores_bare_tier_rooted_imports_2026-09-05.md
+    if parts.len() >= 1 and _deps_is_lib_tier(parts[0]):
+        val tier_spl = "src/lib/" + relpath + ".spl"
+        val rt1 = _deps_try_exists(tier_spl)
+        if rt1 != "":
+            return rt1
+        val tier_mod = "src/lib/" + relpath + "/mod.spl"
+        val rt2 = _deps_try_exists(tier_mod)
+        if rt2 != "":
+            return rt2
+
     # 4. lib subdirectory search for std./lib. imports
     if relpath.starts_with("lib/"):
-        val lib_subdirs = ["nogc_sync_mut", "nogc_async_mut", "gc_async_mut",
-                           "nogc_async_mut_noalloc", "common"]
+        val lib_subdirs = _deps_lib_tiers()
         val base_name = relpath.substring(4)   # strip "lib/"
         for sub in lib_subdirs:
             val candidate = "src/lib/" + sub + "/" + base_name + ".spl"
@@ -280,6 +309,32 @@ fn _direct_imports(file_path: text) -> [text]:
                     result.push(resolved)
     result
 
+# Collect the module names of direct imports that could NOT be resolved to a
+# file on disk. An unresolved import is a hole in the reported closure, so it is
+# reported rather than silently dropped (the fail-open behaviour recorded in
+# doc/08_tracking/bug/deps_fast_ignores_bare_tier_rooted_imports_2026-09-05.md).
+fn _unresolved_imports(file_path: text) -> [text]:
+    val content = rt_file_read_text(file_path) ?? ""
+    if content == "":
+        return []
+    val lines = content.split("\n")
+    var result: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if not (trimmed.starts_with("use ") or trimmed.starts_with("export use ")):
+            continue
+        val mods = _parse_use_line(trimmed)
+        for mod_name in mods:
+            val resolved = _deps_resolve_module(mod_name, file_path)
+            if resolved == "":
+                var already = false
+                for r in result:
+                    if _deps_str_eq(r, mod_name):
+                        already = true
+                if not already:
+                    result.push(mod_name)
+    result
+
 # ===== Output helpers =====
 
 fn _sort_texts(items: [text]) -> [text]:
@@ -348,6 +403,11 @@ fn _run_fast(entry_file: text) -> i64:
     val directs = _direct_imports(entry_file)
     print "=== deps fast: {entry_file} ==="
     print "Direct imports: {directs.len()}"
+    val unresolved = _unresolved_imports(entry_file)
+    if unresolved.len() > 0:
+        print "Unresolved imports: {unresolved.len()}"
+        for u in unresolved:
+            print "  UNRESOLVED: {u}"
     print ""
     for imp in directs:
         var imp_visited: {text: bool} = {}
@@ -377,6 +437,11 @@ fn _run_normal(entry_file: text) -> i64:
     val directs = _direct_imports(entry_file)
     print "=== deps normal: {entry_file} ==="
     print "Direct imports: {directs.len()}"
+    val unresolved = _unresolved_imports(entry_file)
+    if unresolved.len() > 0:
+        print "Unresolved imports: {unresolved.len()}"
+        for u in unresolved:
+            print "  UNRESOLVED: {u}"
     print ""
     # Collect transitive sets per direct import
     var import_sets: [{text: bool}] = []
