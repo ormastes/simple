@@ -1,7 +1,9 @@
 # One-pass structural fact extraction. O(source bytes + scenarios).
 use app.sspec_maintain.model.*
 use std.crypto.sha256.{sha256_text}
-use std.text_advanced.{split_whitespace}
+# The code-vs-text question is CoreLexer's to answer, not this file's. See
+# doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md.
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 
 fn _quoted_name(line: text) -> text:
     val parts = line.split("\"")
@@ -15,34 +17,7 @@ fn _is_standalone_assertion(line: text) -> bool:
         lower.contains("assert_true(") or lower.contains("assert_false(") or
         lower.contains("assert_contains(") or lower.contains("assert_nil(")
 
-fn _cut_comment(line: text) -> text:
-    # The line up to the first `#` outside a double-quoted string, string
-    # contents kept. A trailing comment after an assertion used to defeat
-    # every text comparison on its expected side: `expect(x).to_equal(7)  #
-    # oracle: ...` parsed its expected value as `7)  # oracle: ...`, so a
-    # `var x = 7` tautology no longer matched its binding (ORA-002 missed)
-    # while the same comment's `# oracle:` marker excused ORA-003 — one line
-    # earned both exemptions (plan-acceptance lane, 2026-09-05).
-    var out = ""
-    var in_string = false
-    var escaped = false
-    for ch in line:
-        if in_string:
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                in_string = false
-        elif ch == "\"":
-            in_string = true
-        elif ch == "#":
-            return out
-        out = out + ch
-    out
-
-fn _is_real_assertion(raw_line: text) -> bool:
-    val line = _cut_comment(raw_line)
+fn _is_real_assertion(line: text) -> bool:
     val lower = line.lower()
     val trimmed = lower.trim()
     val assertion = lower.contains("expect(") or lower.contains("assert(") or
@@ -100,35 +75,6 @@ fn _count_sub(haystack: text, needle: text) -> i64:
         rest = rest.substring(index + needle_len)
     count
 
-fn _mask_strings_and_comment(lower: text) -> text:
-    # Blank out double-quoted string CONTENTS (honoring \" escapes) and cut
-    # the line at the first `#` outside any string, so the skip( scan cannot
-    # fire on a mention inside a string literal ("... skip(..) ...") or a
-    # trailing comment (`val n = 1  # never skip() here`) — the same
-    # mention-vs-statement class ORA-001 already fixed for pass_todo/pending
-    # (2026-09-01). Quotes are kept so removal cannot splice new tokens.
-    var out = ""
-    var in_string = false
-    var escaped = false
-    for ch in lower:
-        if in_string:
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                in_string = false
-                out = out + "\""
-        else:
-            if ch == "\"":
-                in_string = true
-                out = out + "\""
-            elif ch == "#":
-                return out
-            else:
-                out = out + ch
-    out
-
 fn _calls_skip(trimmed_lower: text) -> bool:
     # A pending scaffold is a CALL to skip(...) — `test_env_gate_skip(` and
     # other *_skip(name) helpers are real oracles, not skips (2026-08-22).
@@ -145,7 +91,7 @@ fn _calls_skip(trimmed_lower: text) -> bool:
         rest = rest.substring(index + 4)
     false
 
-fn _is_pending(line: text) -> bool:
+fn _is_pending(line: text, code_line: text) -> bool:
     # ORA-001 pending detection must fire only on a pending STATEMENT, not on
     # any line that mentions the keyword: specs that TEST pass_todo behavior,
     # embed it in fixture strings, or reference it in comments were all being
@@ -186,7 +132,11 @@ fn _is_pending(line: text) -> bool:
     # `# never skip()` comments cannot fire it; genuine `skip("reason", ...)`
     # and `val gate = skip(...)` still match because the call itself sits
     # outside any string literal.
-    lower.starts_with("fail(\"todo:") or _calls_skip(_mask_strings_and_comment(lower))
+    # `code_line` is CoreLexer's code-only view of this same line: string
+    # CONTENT blanked, comment removed. It replaces a hand-rolled per-line
+    # in_string/escaped character walk that could not see a docstring spanning
+    # lines, because the question is not answerable one line at a time.
+    lower.starts_with("fail(\"todo:") or _calls_skip(code_line.trim().lower())
 
 fn _contains_requirement(line: text) -> bool:
     line.contains("REQ-") or line.contains("@req")
@@ -200,13 +150,12 @@ fn _requirement_ids(line: text) -> [text]:
     for separator in ["\"", "'", "(", ")", "[", "]", "{", "}", ":", ",", ";", ".", "#", "\\"]:
         normalized = normalized.replace(separator, " ")
     var ids: [text] = []
-    for token in split_whitespace(normalized):
+    for token in normalized.split():
         if token.starts_with("REQ-") and not ids.contains(token):
             ids.push(token)
     ids
 
-fn _assertion_parts(raw_line: text) -> (text, text):
-    val line = _cut_comment(raw_line)
+fn _assertion_parts(line: text) -> (text, text):
     val lower = line.lower()
     val actual_start = lower.index_of("expect(")
     val separator = lower.index_of(").to_equal(")
@@ -231,35 +180,17 @@ fn _is_numeric_literal(value: text) -> bool:
 
 fn _assignment(line: text) -> (text, text):
     val trimmed = line.trim()
-    # Both `val` and `var` bindings feed the tautology heuristic. `var` used
-    # to be exempt (a loop flag `var found = false` ... `expect(found)
-    # .to_equal(false)` is not a tautology), but the exemption was keyed on
-    # the KEYWORD, so `var x = 3` / `expect(x).to_equal(3)` passed ORA-002 by
-    # a one-word swap — and acceptance specs written 2026-09-05 leaned on
-    # exactly that. The loop-flag case is now handled where it belongs: a
-    # binding that is REASSIGNED before the assertion (`_is_reassignment`)
-    # is excluded from the tautology check instead of the keyword.
-    if (not trimmed.starts_with("val ") and not trimmed.starts_with("var ")) or
-            not trimmed.contains("="):
+    # Only immutable `val` bindings feed the tautology heuristic: a `var`
+    # initialized to a literal is typically a flag mutated inside a loop
+    # (`var found = false` ... `expect(found).to_equal(false)`), where the
+    # binding's initial text says nothing about the asserted value.
+    if not trimmed.starts_with("val ") or not trimmed.contains("="):
         return ("", "")
     val pieces = trimmed.split("=")
     if pieces.len() < 2: return ("", "")
-    val names = split_whitespace(pieces[0].trim())
+    val names = pieces[0].trim().split()
     if names.len() < 2: return ("", "")
     (names[names.len() - 1], pieces[1].trim())
-
-fn _is_reassignment(line: text, name: text) -> bool:
-    # `name = ...`, `name += ...`, `name[i] = ...`, `name.push(...)` — any
-    # statement that can change what `name` holds after its binding line.
-    # Method calls are counted as mutations without inspecting them: erring
-    # towards "reassigned" only ever REMOVES a tautology finding, so a
-    # non-mutating `name.len()` can hide a tautology but never invent one.
-    val trimmed = line.trim()
-    if trimmed.starts_with(name + " =") or trimmed.starts_with(name + "=") or
-            trimmed.starts_with(name + " +=") or trimmed.starts_with(name + " -=") or
-            trimmed.starts_with(name + "[") or trimmed.starts_with(name + "."):
-        return true
-    false
 
 fn _is_adverse_name(name: text) -> bool:
     val lower = name.lower()
@@ -328,6 +259,15 @@ fn _calls_asserting_helper(line: text, helper_names: [text]) -> bool:
 
 fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     val lines = source.split("\n")
+    # One lexical pass over the whole file. Element i pairs with lines[i].
+    val code_lines = simple_code_lines(source)
+    # Which lines continue a string opened earlier. Replaces a per-line
+    # `count('\"\"\"') % 2` parity tracker that is correct only for
+    # well-formed docstrings: a triple quote inside a COMMENT flipped it and
+    # discarded every following line. Measured 2026-09-05: 31 *_spec.spl files
+    # in this tree trip that, two of them at line 3, so the whole file's
+    # scenario facts were lost.
+    val string_continuation = simple_string_continuation_lines(source)
     val lower = source.lower()
     val asserting_helper_names = _asserting_helper_names(lines)
     var scenarios: [SspecScenarioFacts] = []
@@ -348,11 +288,6 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     # scenario; asserting <name>.contains(...) downstream is the same
     # source-text pseudo-oracle as the direct expect(source.contains(...)).
     var scenario_source_vars: [text] = []
-    # Names bound in this scenario (insertion order) and the subset that has
-    # been reassigned since binding; a reassigned binding's initial text says
-    # nothing about the asserted value, so it leaves the tautology check.
-    var scenario_binding_names: [text] = []
-    var scenario_reassigned: [text] = []
     # Duplicated-narrative boilerplate detection (2026-08-27): the same long
     # Purpose/plan/design comment pasted 3+ times marks generated filler.
     # (Origin/main used these two without declaring them; declared at merge.)
@@ -372,38 +307,14 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     # Triple-quoted fixture strings often contain column-0 lines; without
     # string-state tracking those lines END the current scenario early and
     # every assertion after the fixture lands outside any scenario (2026-08-22).
-    var in_triple_string = false
-    # Enum members are bare capitalized names (`Pending`, `Ok`) and the bare
-    # form of `_is_pending` matches them exactly — wave 4D hit this on
-    # primitive_types_spec.spl (2026-09-05), where an enum variant line named
-    # `Pending` flagged the whole scenario as a pending scaffold even though
-    # the scenario carried real assertions. Track enum blocks: opened by a
-    # `enum ... :` header, closed by the first line at or left of its indent.
-    var enum_indent: i64 = -1
+    # The state is now CoreLexer's, not a parity count of this file's own.
     for raw in lines:
         line_number = line_number + 1
-        if in_triple_string:
-            if _count_sub(raw, "\"\"\"") > 0:
-                in_triple_string = false
+        if string_continuation[line_number - 1]:
             continue
         val line = raw.trim()
         val line_lower = line.lower()
         val indent = _indent_width(raw)
-        if enum_indent >= 0:
-            # close the enum block on dedent to its header's level (blank
-            # lines inside an enum body do not close it)
-            if line != "" and indent <= enum_indent:
-                enum_indent = -1
-        if line != "" and line_lower.starts_with("enum ") and line.ends_with(":"):
-            enum_indent = indent
-        # A `#` comment cannot open a docstring; a comment that merely mentions
-        # `"""` used to flip the string state and hide the rest of the file
-        # from every per-line rule (the scaffold template lost all its
-        # scenarios to one such comment, 2026-09-05). Closing detection above
-        # still honours `#`-led lines because Markdown headings inside a
-        # docstring start with `#`.
-        if not line.starts_with("#") and _count_sub(raw, "\"\"\"") % 2 == 1:
-            in_triple_string = true
         if current_line > 0 and line != "" and indent <= current_indent:
             scenarios.push(_finish_scenario(current_name, current_line,
                 line_number - 1, scenario_steps, scenario_assertions,
@@ -451,22 +362,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             scenario_magic_expected = 0
             scenario_bindings = {}
             scenario_source_vars = []
-            scenario_binding_names = []
-            scenario_reassigned = []
             scenario_requirement_ids = []
         val (assigned_name, assigned_value) = _assignment(line)
         if current_line > 0 and assigned_name != "":
             scenario_bindings[assigned_name] = assigned_value
-            if not scenario_binding_names.contains(assigned_name):
-                scenario_binding_names.push(assigned_name)
             if assigned_value.contains("file_read(") and assigned_value.contains("src/") and
                     not scenario_source_vars.contains(assigned_name):
                 scenario_source_vars.push(assigned_name)
-        elif current_line > 0 and not line.starts_with("#"):
-            for bound_name in scenario_binding_names:
-                if not scenario_reassigned.contains(bound_name) and
-                        _is_reassignment(line, bound_name):
-                    scenario_reassigned.push(bound_name)
         if current_line > 0 and line_lower.contains("step(\""):
             steps = steps + 1
             scenario_steps = scenario_steps + 1
@@ -483,8 +385,7 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             if current_line > 0: scenario_assertions = scenario_assertions + 1
             val (actual, expected) = _assertion_parts(line)
             val local_arithmetic = actual != "" and (_is_numeric_literal(actual) or
-                (scenario_bindings.has(actual) and scenario_bindings[actual] == expected and
-                    not scenario_reassigned.contains(actual)))
+                (scenario_bindings.has(actual) and scenario_bindings[actual] == expected))
             if local_arithmetic: scenario_local_arithmetic = true
             if expected != "" and _is_numeric_literal(expected) and
                     not line_lower.contains("# explained:") and
@@ -498,25 +399,14 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         # per-kind modules (terminal_grid, gui_image/action_trace,
         # binary_layout/bit_table) or a `<spec>.evidence.sdn` sidecar — none of
         # which contain the literal `capture_`/`evidence(` substrings.
-        # A COMMENT line counts only through the two forms docgen actually
-        # renders as evidence — a `# @capture` annotation (attached to the
-        # next step, see spipe_docgen parser `pending_capture`) or a named
-        # `<spec>.evidence.sdn` sidecar. The call-form substrings are code
-        # signals; matched inside a comment they let an explanatory remark
-        # like `# evidence(pinned oracle): ...` earn the evidence dimension
-        # without any capture (found in the plan-acceptance lane, 2026-09-05).
-        val capture_line = if line.starts_with("#"):
-            line_lower.contains("@capture") or line_lower.contains(".evidence.sdn")
-        else:
-            line_lower.contains("capture_") or
+        if current_line > 0 and (line_lower.contains("capture_") or
                 line_lower.contains("@capture") or line_lower.contains("evidence(") or
                 line_lower.contains("evidence_manifest(") or
                 line_lower.contains("render_manual(") or
                 line_lower.contains("terminal_grid") or line_lower.contains("tui_grid") or
                 line_lower.contains("gui_image") or line_lower.contains("action_trace") or
                 line_lower.contains("bit_table") or line_lower.contains("binary_layout") or
-                line_lower.contains(".evidence.sdn")
-        if current_line > 0 and capture_line:
+                line_lower.contains(".evidence.sdn")):
             captures = captures + 1
             scenario_captures = scenario_captures + 1
         if _contains_requirement(line):
@@ -532,7 +422,8 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
                     planned_requirement_ids.push(requirement_id)
             requirements = all_requirement_ids.len()
             scenario_requirements = scenario_requirement_ids.len()
-        if current_line > 0 and enum_indent < 0 and _is_pending(line): scenario_pending = true
+        if current_line > 0 and _is_pending(line, code_lines[line_number - 1]):
+            scenario_pending = true
         # Source-text inspection is not system evidence, but reading a
         # GENERATED artifact (build output, tmp root) IS runtime observation
         # (2026-08-22): only flag when the read/assert targets src/ source or
@@ -567,21 +458,7 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         lower.contains("ambiguity behavior")
     var lifecycle_paths: [text] = []
     for raw in lines:
-        # "\\" splits escape sequences off a path embedded in a string literal
-        # ("doc/03_plan/x.md.\nSee" -> doc/03_plan/x.md), as _requirement_ids does.
-        for raw_token in split_whitespace(raw.replace("`", " ").replace("\"", " ").replace("\\", " ")):
-            # Prose punctuation is not part of a path: "see doc/03_plan/x.md."
-            # and "doc/03_plan/x.md," used to become MNT-009 stale-link
-            # findings for paths that exist (every plan-acceptance spec hit
-            # this, 2026-09-05). A bare directory token ("doc/01_research/")
-            # names no file and is skipped rather than reported missing.
-            var token = raw_token
-            while token.ends_with(".") or token.ends_with(",") or
-                    token.ends_with(";") or token.ends_with(":") or
-                    token.ends_with(")"):
-                token = token[:-1]
-            if token.ends_with("/"):
-                continue
+        for token in raw.replace("`", " ").replace("\"", " ").split():
             if (token.starts_with("doc/01_research/") or
                     token.starts_with("doc/03_plan/") or
                     token.starts_with("doc/04_architecture/") or

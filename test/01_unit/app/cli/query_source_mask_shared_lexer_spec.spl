@@ -1,0 +1,152 @@
+# The query/check lint scanners take string detection from CoreLexer.
+#
+# `query_source_mask.spl` masks strings and comments for four `simple query` /
+# `simple check` scanners. Its byte walkers recognised only double-quoted
+# strings, so a single-quoted `'…'` string was invisible to them:
+#   - `if c == '#': return 1`         the `#` inside the string was read as a
+#                                     comment start; `return` was never seen
+#   - `if x == '"""':`                the `"""` inside the string flipped the
+#                                     triple-string mode and every following
+#                                     line up to the NEXT `"""` in the file
+#                                     vanished from scanning
+# Measured 2026-09-05: 20 src files carry one of those shapes; two are the
+# window-swallowing form, in the compiler's own tooling.
+#
+# Columns stay BYTE columns: consumers hand them to byte-indexed helpers over
+# the raw line, so a character-column projection would corrupt them on any
+# line with a multibyte character. Only "which bytes are payload" moved.
+#
+# Design: doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md
+
+use std.spec.*
+use app.cli.query_source_mask.{code_pattern_line_facts, deprecated_dunder_facts}
+use app.cli.query_source_mask.{first_code_pattern_columns}
+use app.cli.check_tier.{TierKeywords, build_tier_keyword_index, check_one_file_indexed}
+use app.io.mod.{file_read_text, file_write}
+
+fn tq() -> text:
+    "\"" + "\"" + "\""
+
+describe "lint scanners see single-quoted strings":
+
+    it "keeps scanning after a single-quoted string that holds a triple quote":
+        """The window-swallowing case. Before: every line after it, up to the
+        next triple quote in the file, reported no executable token and no
+        pattern."""
+        step("Scan a return statement that follows `if x == '\"\"\"':`")
+        val lines = ["if x == '" + tq() + "':", "    return 1", "val y = 2"]
+        val facts = code_pattern_line_facts(lines, ["return"])
+
+        step("The return on the next line is found at its byte column")
+        expect(facts[1].pattern_columns[0]).to_equal(5)
+        expect(facts[1].first_executable_column).to_equal(5)
+        expect(facts[1].first_code_column).to_equal(5)
+
+        step("And the line after that is still scanned")
+        expect(facts[2].first_executable_column).to_equal(1)
+
+    it "does not read a hash inside a single-quoted string as a comment":
+        step("Scan `if c == '#': return 1`")
+        val facts = code_pattern_line_facts(["if c == '#': return 1"], ["return"])
+
+        step("The return after the string is found at byte column 14")
+        expect(facts[0].pattern_columns[0]).to_equal(14)
+
+    it "finds a deprecated dunder call after a single-quoted string":
+        step("Scan `if c == '#': Foo__bar(1)`")
+        val facts = deprecated_dunder_facts(["if c == '#': Foo__bar(1)"])
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].name).to_equal("Foo__bar")
+        expect(facts[0].start_column).to_equal(14)
+
+    it "still ignores a hash inside a double-quoted string and honours a real comment":
+        """Control: behaviour the byte walker got RIGHT must not change."""
+        step("Scan a string containing a hash, then a trailing comment holding `return`")
+        val facts = code_pattern_line_facts(
+            ["val s = \"# not comment\"  # return here is a comment", "    return 3"], ["return"])
+        expect(facts[0].pattern_columns[0]).to_equal(0)
+        expect(facts[0].first_executable_column).to_equal(1)
+        expect(facts[1].pattern_columns[0]).to_equal(5)
+
+    it "reports byte columns, not character columns":
+        """A two-byte `é` inside a string precedes the match: `return` starts
+        at byte 11, character 10. Consumers index the raw line with this
+        column, so it must stay the byte column (12), never the character
+        column (11). Same answer before and after — this pins the contract."""
+        step("Scan a line where a multibyte character precedes the pattern")
+        val facts = code_pattern_line_facts(["x = \"é\" + return_x()"], ["return"])
+        expect(facts[0].pattern_columns[0]).to_equal(12)
+
+    it "treats the interior of a multi-line string as non-executable":
+        """The one place the old triple-string logic was right: interior and
+        closing-only lines carry no executable token, the opener does."""
+        step("Scan a docstring across three lines")
+        val lines = ["fn f():", "    " + tq() + "doc", "    more", "    " + tq(), "    return 1"]
+        val facts = code_pattern_line_facts(lines, ["return"])
+        expect(facts[1].first_executable_column).to_equal(5)
+        expect(facts[2].first_executable_column).to_equal(0)
+        expect(facts[3].first_executable_column).to_equal(0)
+        expect(facts[4].pattern_columns[0]).to_equal(5)
+
+    it "keeps the single-line column projection consistent with the full one":
+        step("Project the same lines through first_code_pattern_columns")
+        val lines = ["if x == '" + tq() + "':", "    return 1"]
+        expect(first_code_pattern_columns(lines, "return")).to_equal([0, 5])
+
+    it "scans the swallowed window of a real compiler source":
+        """Corpus arm with an independent oracle. aorte_obligation_census_scan.spl
+        has `starts_with('\"\"\"')` at line 246 and its next triple quote at
+        line 283; a plain text count finds FOUR return statements in between
+        (248, 251, 253, 260). Before, that whole window reported nothing."""
+        step("Scan the real file for return patterns")
+        val raw = file_read_text("src/compiler/90.tools/verify/aorte_obligation_census_scan.spl")
+        val lines = raw.split("\n")
+        val facts = code_pattern_line_facts(lines, ["return"])
+
+        step("Count executable lines and return hits inside the window 247..282")
+        var executable_in_window: i64 = 0
+        var returns_in_window: i64 = 0
+        var i = 246
+        while i < 282 and i < facts.len():
+            if facts[i].first_executable_column > 0:
+                executable_in_window = executable_in_window + 1
+            if facts[i].pattern_columns[0] > 0:
+                returns_in_window = returns_in_window + 1
+            i = i + 1
+        expect(executable_in_window).to_be_greater_than(0)
+        expect(returns_in_window).to_be_greater_than(3)
+
+describe "tier checking sees single-quoted strings":
+
+    it "does not count a tier keyword that only appears inside a single-quoted string":
+        """check_tier masked strings with the same per-line walker, so `asm`
+        inside `'…'` was counted as a full-tier keyword in a seed-tier file."""
+        step("Build a keyword index where `asm` needs the full tier")
+        val index = build_tier_keyword_index(TierKeywords(
+            seed: ["val"], core: ["val"], full: ["val", "asm"]))
+
+        step("Write a seed-tier file whose only `asm` is a word inside a single-quoted string")
+        val path = "build/test-artifacts/source_facts/tier_sq_string.spl"
+        file_write(path, "val s = 'use asm here'\n")
+        expect(check_one_file_indexed(path, "seed", index)).to_equal(0)
+
+    it "still counts a tier keyword used as code":
+        """Control for the same checker."""
+        step("Write a seed-tier file that uses `asm` as code")
+        val index = build_tier_keyword_index(TierKeywords(
+            seed: ["val"], core: ["val"], full: ["val", "asm"]))
+        val path = "build/test-artifacts/source_facts/tier_code.spl"
+        file_write(path, "val s = asm\n")
+        expect(check_one_file_indexed(path, "seed", index)).to_equal(1)
+
+describe "lint scanner sabotage arm":
+
+    it "confirms the inputs really carry the constructs under test":
+        step("The single-quoted inputs really contain a triple quote and a hash")
+        expect("if x == '" + tq() + "':").to_contain(tq())
+        expect("if c == '#': return 1").to_contain("'#'")
+
+        step("The corpus file really has the construct at line 246 and a triple quote at 283")
+        val raw = file_read_text("src/compiler/90.tools/verify/aorte_obligation_census_scan.spl")
+        expect(raw.split("\n")[245]).to_contain("starts_with('" + tq() + "')")
+        expect(raw.split("\n")[282]).to_contain(tq())
