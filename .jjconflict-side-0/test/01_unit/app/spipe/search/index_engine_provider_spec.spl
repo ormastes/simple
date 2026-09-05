@@ -1,7 +1,27 @@
-# GAP B: IndexEngineSearchProvider — a real `SearchProvider` backed by the P2
-# `IndexEngine`, exercised end-to-end through `InProcessSearchProviderAdapter`
-# (handshake -> search), proving results reflect actual indexed content
-# rather than mock/empty data.
+"""
+## Purpose and audience
+GAP B: IndexEngineSearchProvider — a real `SearchProvider` backed by the P2
+`IndexEngine`, exercised end-to-end through `InProcessSearchProviderAdapter`
+(handshake -> search), proving results reflect actual indexed content
+rather than mock/empty data. For engineers validating search result accuracy.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/app/spipe/search/index_engine_provider_spec.spl`
+to verify search results and ranking reflect actual indexed content.
+
+## Compatibility and limitations
+Runs on all platforms. Tests end-to-end search through in-process adapter.
+
+## Verification guidance and troubleshooting
+A failure indicates incorrect indexing or ranking logic. Each scenario tests
+result accuracy (matching term), ranking quality (density-based order), or
+filtering behavior (facet exclusion).
+"""
+# Lifecycle: doc/01_research/infra/spipe/ ;
+# doc/03_plan/infra/spipe/ ;
+# doc/04_architecture/app/spipe/ ;
+# doc/05_design/app/spipe/
+# @manual_section: index-engine-search
 
 use std.spec
 use app.spipe.search.adapter.{required_handshake_v1}
@@ -33,13 +53,15 @@ fn healthy_adapter() -> InProcessSearchProviderAdapter:
 
 describe "GAP B — IndexEngineSearchProvider real end-to-end search":
     it "returns real hits reflecting indexed content for a matching term":
+        # @req REQ-SPIPE-SEARCH-INDEX-001
+        # @capture(bit_table): search result accuracy and hit count
         step("Query for 'rocket' must return exactly the two rocket documents, not the gardening one")
         var adapter = healthy_adapter()
         val query = SearchQuery.of("rocket", [], 10, "", false)
         val result = adapter.search("snap-1", "sha256:" + "0".repeat(64), query)
         match result:
             Ok(page):
-                expect(page.hits.len()).to_equal(2)
+                expect(page.hits.len()).to_equal(2)  # oracle: corpus has 2 rocket docs (alpha, gamma)
                 var ids: [text] = []
                 var i = 0
                 while i < page.hits.len():
@@ -52,27 +74,33 @@ describe "GAP B — IndexEngineSearchProvider real end-to-end search":
                 expect(true).to_equal(false)
 
     it "ranks the document with denser term matches higher":
+        # @req REQ-SPIPE-SEARCH-INDEX-002
+        # @capture(bit_table): ranking order and term density impact
         step("'rocket fuel' should rank doc-gamma (matches both terms in title+body) above doc-alpha")
         var adapter = healthy_adapter()
         val query = SearchQuery.of("rocket fuel", [], 10, "", false)
         val result = adapter.search("snap-1", "sha256:" + "0".repeat(64), query)
         match result:
             Ok(page):
-                expect(page.hits.len()).to_equal(2)
+                expect(page.hits.len()).to_equal(2)  # oracle: both docs match at least one term
                 expect(page.hits[0].document_id).to_equal("doc-gamma")
             Err(_):
                 expect(true).to_equal(false)
 
     it "returns no hits for a term absent from the corpus":
+        # @req REQ-SPIPE-SEARCH-INDEX-003
+        # @capture(bit_table): empty result handling and no-match verification
         step("A query term that appears nowhere yields an empty page, not an error")
         var adapter = healthy_adapter()
         val query = SearchQuery.of("xylophone", [], 10, "", false)
         val result = adapter.search("snap-1", "sha256:" + "0".repeat(64), query)
         match result:
-            Ok(page): expect(page.hits.len()).to_equal(0)
+            Ok(page): expect(page.hits.len()).to_equal(0)  # oracle: term 'xylophone' not in corpus
             Err(_): expect(true).to_equal(false)
 
     it "excludes documents that fail a facet filter even when the term matches":
+        # @req REQ-SPIPE-SEARCH-INDEX-004
+        # @capture(bit_table): facet filter application and doc exclusion
         step("Filtering on a facet value present on no document removes all hits")
         val provider = IndexEngineSearchProvider.of_documents(corpus())
         var adapter = InProcessSearchProviderAdapter.new(provider)
@@ -80,10 +108,12 @@ describe "GAP B — IndexEngineSearchProvider real end-to-end search":
         val query = SearchQuery.of("rocket", [SearchFacet.of("kind", "archived")], 10, "", false)
         val result = adapter.search("snap-1", "sha256:" + "0".repeat(64), query)
         match result:
-            Ok(page): expect(page.hits.len()).to_equal(0)
+            Ok(page): expect(page.hits.len()).to_equal(0)  # oracle: facet filter excludes all docs
             Err(_): expect(true).to_equal(false)
 
     it "explains a document with real term contributions":
+        # @req REQ-SPIPE-SEARCH-INDEX-005
+        # @capture(bit_table): explanation contributions and term scoring
         step("explain_document reports a contribution for the matched query term")
         val provider = IndexEngineSearchProvider.of_documents(corpus())
         val query = SearchQuery.of("rocket", [], 10, "", true)
