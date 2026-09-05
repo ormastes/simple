@@ -23,7 +23,7 @@ use app.wm_compare.production_native_cpu_draw_ir_frame.{
     production_native_cpu_draw_ir_frame_receipt, production_native_cpu_draw_ir_frame_field
 }
 use app.wm_compare.strict_semantic_vulkan_producer.{strict_semantic_vulkan_producer_receipt}
-use app.wm_compare_host.io_runtime.{file_exists, env_get}
+use app.wm_compare_host.io_runtime.{file_exists, file_read, env_get}
 
 # Per-frame budget for 80 Hz: 1s / 80 = 12.5 ms.
 pub val RENDER_PERF_AGGREGATE_BUDGET_NS: i64 = 12500000
@@ -34,27 +34,62 @@ fn _field(receipt: text, key: text) -> text:
 fn _i64_field(receipt: text, key: text) -> i64:
     _field(receipt, key).parse_int() ?? 0
 
-# A4's own gate: it passed, stayed inside the budget, proved no fallback, and
-# reported a known completion.
-pub fn render_perf_aggregate_software_receipt_admissible(receipt: text) -> bool:
+fn _bool_text(value: bool) -> text:
+    if value: return "true"
+    "false"
+
+# Purely the p95-vs-budget question the field name asks -- a measured, nonzero
+# p95 at or under the 80 Hz per-frame budget.
+pub fn render_perf_aggregate_p95_within_budget(receipt: text) -> bool:
     val p95 = _i64_field(receipt, "producer_receipt_p95_ns")
+    p95 > 0 and p95 <= RENDER_PERF_AGGREGATE_BUDGET_NS
+
+# A4/A5's own gate: it passed, stayed inside the budget, proved no fallback,
+# and reported a known completion.
+pub fn render_perf_aggregate_software_receipt_admissible(receipt: text) -> bool:
     (_field(receipt, "producer_receipt_status") == "pass" and
-        p95 > 0 and p95 <= RENDER_PERF_AGGREGATE_BUDGET_NS and
+        render_perf_aggregate_p95_within_budget(receipt) and
         _field(receipt, "producer_receipt_fallback_used") == "false" and
         _field(receipt, "producer_receipt_completion_known") == "true")
 
-# The A6 physical receipt this campaign refuses to fabricate.
+# The A6 physical receipt this campaign refuses to fabricate. A directory, not
+# a single fixed filename, so a real physical-capture run can drop its own
+# receipt without this correlator needing to know its run id in advance.
+pub fn render_perf_aggregate_physical_receipt_dir() -> text:
+    val override_dir = env_get("RENDER_PERF_A6_RECEIPT_DIR") ?? ""
+    if override_dir != "":
+        return override_dir
+    "build/render_perf/physical_8k80"
+
 pub fn render_perf_aggregate_physical_receipt_path() -> text:
-    val override_path = env_get("PHYSICAL_RECEIPT") ?? ""
-    if override_path != "":
-        return override_path
-    "build/render_perf/8k80_container/current/physical_receipt.env"
+    render_perf_aggregate_physical_receipt_dir() + "/physical_receipt.env"
+
+# True only when a real A6 receipt file exists at the path above AND its own
+# `physical_receipt_checksum_end` correlates with the A5 checksum the software
+# producer actually measured for the same revision transition. A present but
+# uncorrelated file (stale run, mismatched checksum, missing field) is not
+# correlation -- it is the honest `false` this field exists to distinguish
+# from a hand-waved "the directory exists so it must be fine".
+pub fn render_perf_aggregate_a6_correlated(vulkan_receipt: text) -> bool:
+    val path = render_perf_aggregate_physical_receipt_path()
+    if not file_exists(path):
+        return false
+    val physical_receipt = file_read(path)
+    if physical_receipt == "":
+        return false
+    val physical_checksum = _field(physical_receipt, "physical_receipt_checksum_end")
+    val vulkan_checksum = _field(vulkan_receipt, "producer_receipt_checksum_end")
+    if physical_checksum == "" or vulkan_checksum == "":
+        return false
+    if _field(physical_receipt, "physical_receipt_status") != "pass":
+        return false
+    physical_checksum == vulkan_checksum
 
 pub fn render_perf_aggregate_receipt_values(
     status: text, reason: text, width: i32, height: i32, sample_count: i32,
-    cpu_status: text, cpu_p95_ns: i64, cpu_admissible: bool,
-    vulkan_status: text, vulkan_p95_ns: i64, vulkan_admissible: bool,
-    physical_present: bool
+    cpu_status: text, cpu_p95_ns: i64, a4_p95_within_budget: bool,
+    vulkan_status: text, vulkan_p95_ns: i64, a5_p95_within_budget: bool,
+    fallback_used: bool, a6_correlated: bool
 ) -> text:
     "aggregate_receipt_status=" + status + "\n" +
         "aggregate_receipt_reason=" + reason + "\n" +
@@ -64,11 +99,12 @@ pub fn render_perf_aggregate_receipt_values(
         "aggregate_receipt_sample_count=" + sample_count.to_string() + "\n" +
         "aggregate_receipt_a4_status=" + cpu_status + "\n" +
         "aggregate_receipt_a4_p95_ns=" + cpu_p95_ns.to_string() + "\n" +
-        "aggregate_receipt_a4_admissible=" + (if cpu_admissible: "true" else: "false") + "\n" +
+        "aggregate_receipt_a4_p95_within_budget=" + _bool_text(a4_p95_within_budget) + "\n" +
         "aggregate_receipt_a5_status=" + vulkan_status + "\n" +
         "aggregate_receipt_a5_p95_ns=" + vulkan_p95_ns.to_string() + "\n" +
-        "aggregate_receipt_a5_admissible=" + (if vulkan_admissible: "true" else: "false") + "\n" +
-        "aggregate_receipt_a6_physical_receipt_present=" + (if physical_present: "true" else: "false") + "\n"
+        "aggregate_receipt_a5_p95_within_budget=" + _bool_text(a5_p95_within_budget) + "\n" +
+        "aggregate_receipt_fallback_used=" + _bool_text(fallback_used) + "\n" +
+        "aggregate_receipt_a6_correlated=" + _bool_text(a6_correlated) + "\n"
 
 pub fn render_perf_aggregate_receipt(
     width: i32, height: i32, sample_count: i32
@@ -83,7 +119,12 @@ pub fn render_perf_aggregate_receipt(
     val vulkan_p95 = _i64_field(vulkan_receipt, "producer_receipt_p95_ns")
     val cpu_ok = render_perf_aggregate_software_receipt_admissible(cpu_receipt)
     val vulkan_ok = render_perf_aggregate_software_receipt_admissible(vulkan_receipt)
-    val physical_present = file_exists(render_perf_aggregate_physical_receipt_path())
+    val cpu_within_budget = render_perf_aggregate_p95_within_budget(cpu_receipt)
+    val vulkan_within_budget = render_perf_aggregate_p95_within_budget(vulkan_receipt)
+    val cpu_fallback = _field(cpu_receipt, "producer_receipt_fallback_used") != "false"
+    val vulkan_fallback = _field(vulkan_receipt, "producer_receipt_fallback_used") != "false"
+    val fallback_used = cpu_fallback or vulkan_fallback
+    val a6_correlated = render_perf_aggregate_a6_correlated(vulkan_receipt)
     var status = "failed"
     var reason = ""
     if not cpu_ok and not vulkan_ok:
@@ -92,20 +133,24 @@ pub fn render_perf_aggregate_receipt(
         reason = "a4-software-evidence-rejected"
     elif not vulkan_ok:
         reason = "a5-software-evidence-rejected"
-    elif not physical_present:
+    elif fallback_used:
+        reason = "disallowed-fallback-used"
+    elif not a6_correlated:
         status = "blocked-physical"
-        reason = "missing-physical-receipt"
+        reason = "missing-or-uncorrelated-physical-receipt"
     else:
         status = "pass"
         reason = "pass"
     render_perf_aggregate_receipt_values(
         status, reason, width, height, sample_count,
-        cpu_status, cpu_p95, cpu_ok,
-        vulkan_status, vulkan_p95, vulkan_ok,
-        physical_present)
+        cpu_status, cpu_p95, cpu_within_budget,
+        vulkan_status, vulkan_p95, vulkan_within_budget,
+        fallback_used, a6_correlated)
 
 export RENDER_PERF_AGGREGATE_BUDGET_NS
 export render_perf_aggregate_software_receipt_admissible
+export render_perf_aggregate_physical_receipt_dir
 export render_perf_aggregate_physical_receipt_path
+export render_perf_aggregate_a6_correlated
 export render_perf_aggregate_receipt_values
 export render_perf_aggregate_receipt
