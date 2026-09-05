@@ -1,4 +1,15 @@
-# SOSIX async read/write operations.
+"""SOSIX legacy fd-level read/write route (kernel `fd_io` -> `async_io_rw` -> here).
+
+Unified 2026-09-05 (design §2, plan G2 unit level): the serial branch emits
+bytes through the COM1 owner instead of reporting a fabricated count; an
+invalid descriptor is `-EBADF` (-9) while request-slot exhaustion is
+`-EAGAIN` (-11, `error_v1.SOSIX_STATUS_QUEUE_FULL`) so callers can tell them
+apart; and the synchronous wrappers no longer spin. Every request completes
+inline (the VFS chunk loop runs before the request id is returned), so a
+not-yet-complete request is a contract violation reported as -11, never a busy
+wait. Routing this onto the v1 positioned stack (`positioned_syscall_v1`) is
+plan task G3.
+"""
 
 use os.kernel.fd_table.{fd_is_valid, fd_get_offset, fd_set_offset, fd_get_type, fd_get_backend_handle}
 use os.userlib.fs.{vfs_ipc_request_bytes}
@@ -6,10 +17,12 @@ use os.userlib.ipc_protocol.{VFS_READ, VFS_WRITE, VFS_SEEK}
 use os.sosix.io_state.{
     sosix_io_backend_for_fd_type
 }
+use os.kernel.arch.x86.com1_common.{x86_com1_write_byte, x86_com1_read_byte}
 
-extern fn rt_port_inb(port: u16) -> u8
 extern fn mmio_write8(addr: u64, value: u8)
 extern fn mmio_read8(addr: u64) -> u8
+val _SOSIX_STATUS_BAD_DESCRIPTOR: i64 = -9
+val _SOSIX_STATUS_QUEUE_FULL: i64 = -11
 val _SOSIX_ASYNC_FREE: u8 = 0
 val _SOSIX_ASYNC_PENDING: u8 = 1
 val _SOSIX_ASYNC_COMPLETE: u8 = 2
@@ -39,7 +52,7 @@ fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
     if fd_type == 6:
         val req = _sosix_rw_alloc_request()
         if req < _SOSIX_MAX_ASYNC_REQUESTS:
-            val byte = rt_port_inb(0x3F8)
+            val byte = x86_com1_read_byte()
             mmio_write8(buf_addr, byte)
             _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, 1)
         return req
@@ -109,7 +122,11 @@ fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
     if fd_type == 6:
         val req = _sosix_rw_alloc_request()
         if req < _SOSIX_MAX_ASYNC_REQUESTS:
-            _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, count as i64)
+            var emitted: u64 = 0
+            while emitted < count:
+                x86_com1_write_byte(mmio_read8(buf_addr + emitted))
+                emitted = emitted + 1
+            _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, emitted as i64)
         return req
 
     if sosix_io_backend_for_fd_type(fd_type) != 2:
@@ -163,23 +180,29 @@ fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
     req
 
 fn sosix_sync_read(fd: i32, buf_addr: u64, count: u64) -> i64:
-    """Blocking compatibility read over the native SOSIX async request."""
+    """Synchronous compatibility read: same inline request, no busy wait."""
+    if not fd_is_valid(fd):
+        return _SOSIX_STATUS_BAD_DESCRIPTOR
     val req = sosix_async_read(fd, buf_addr: buf_addr, count: count)
     if req >= _SOSIX_MAX_ASYNC_REQUESTS:
-        return -9
-    while not _sosix_rw_is_complete(req):
-        continue
+        return _SOSIX_STATUS_QUEUE_FULL
+    if not _sosix_rw_is_complete(req):
+        _sosix_rw_free_request(req)
+        return _SOSIX_STATUS_QUEUE_FULL
     val result = _sosix_rw_get_result(req)
     _sosix_rw_free_request(req)
     result
 
 fn sosix_sync_write(fd: i32, buf_addr: u64, count: u64) -> i64:
-    """Blocking compatibility write over the native SOSIX async request."""
+    """Synchronous compatibility write: same inline request, no busy wait."""
+    if not fd_is_valid(fd):
+        return _SOSIX_STATUS_BAD_DESCRIPTOR
     val req = sosix_async_write(fd, buf_addr: buf_addr, count: count)
     if req >= _SOSIX_MAX_ASYNC_REQUESTS:
-        return -9
-    while not _sosix_rw_is_complete(req):
-        continue
+        return _SOSIX_STATUS_QUEUE_FULL
+    if not _sosix_rw_is_complete(req):
+        _sosix_rw_free_request(req)
+        return _SOSIX_STATUS_QUEUE_FULL
     val result = _sosix_rw_get_result(req)
     _sosix_rw_free_request(req)
     result
@@ -234,3 +257,5 @@ fn _sosix_async_read_u64(buf: [u8], offset: u64) -> u64:
         value = value | ((buf[offset + i] as u64) << (i * 8))
         i = i + 1
     value
+
+export sosix_async_read, sosix_async_write, sosix_sync_read, sosix_sync_write

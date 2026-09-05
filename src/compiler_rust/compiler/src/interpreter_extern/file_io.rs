@@ -2449,11 +2449,33 @@ pub fn rt_dir_remove_all(args: &[Value]) -> Result<Value, CompileError> {
 // File Descriptor Operations
 // ============================================================================
 
-/// Open file
+/// Open file and return a real descriptor (-1 on error), mirroring the
+/// runtime's `rt_file_open` (mode 0=ReadOnly, 1=ReadWrite, 2=WriteOnly).
 pub fn rt_file_open(args: &[Value]) -> Result<Value, CompileError> {
-    let _path = extract_path(args, 0)?;
-    // Simplified - return -1 (not implemented for interpreter)
-    Ok(Value::Int(-1))
+    let path = extract_path(args, 0)?;
+    let mode = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::IntoRawFd;
+        let result = match mode {
+            0 => OpenOptions::new().read(true).open(&path),
+            1 => OpenOptions::new().read(true).write(true).open(&path),
+            2 => OpenOptions::new().write(true).open(&path),
+            _ => return Ok(Value::Int(-1)),
+        };
+        match result {
+            Ok(file) => Ok(Value::Int(i64::from(file.into_raw_fd()))),
+            Err(_) => Ok(Value::Int(-1)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(Value::Int(-1))
+    }
 }
 
 /// Get file size
@@ -2461,9 +2483,77 @@ pub fn rt_file_get_size(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(-1))
 }
 
-/// Close file
-pub fn rt_file_close(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(false))
+/// Close a descriptor opened by `rt_file_open`; true when close(2) succeeded.
+pub fn rt_file_close(args: &[Value]) -> Result<Value, CompileError> {
+    let fd = match args.first() {
+        Some(Value::Int(n)) if *n >= 0 && *n <= i64::from(i32::MAX) => *n as i32,
+        _ => return Ok(Value::Bool(false)),
+    };
+    #[cfg(unix)]
+    {
+        Ok(Value::Bool(unsafe { libc::close(fd) } == 0))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Ok(Value::Bool(false))
+    }
+}
+
+fn fd_positioned_args(name: &str, args: &[Value]) -> Result<Option<(i32, i64, i64, i64)>, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(&format!(
+            "{name} requires 4 arguments (fd, buffer, len, offset)"
+        )));
+    }
+    let fd = args[0].as_int()?;
+    let buffer = args[1].as_int()?;
+    let len = args[2].as_int()?;
+    let offset = args[3].as_int()?;
+    if fd < 0 || fd > i64::from(i32::MAX) || buffer <= 0 || len < 0 || offset < 0 {
+        return Ok(None);
+    }
+    Ok(Some((fd as i32, buffer, len, offset)))
+}
+
+/// Exact `pread(2)` into a caller-owned buffer address; bytes read or `-errno`.
+pub fn rt_fd_pread(args: &[Value]) -> Result<Value, CompileError> {
+    let Some((fd, buffer, len, offset)) = fd_positioned_args("rt_fd_pread", args)? else {
+        return Ok(Value::Int(-i64::from(libc::EINVAL)));
+    };
+    #[cfg(unix)]
+    {
+        let n = unsafe { libc::pread(fd, buffer as *mut libc::c_void, len as usize, offset as libc::off_t) };
+        if n < 0 {
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
+            return Ok(Value::Int(-i64::from(code)));
+        }
+        Ok(Value::Int(n as i64))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::Int(-i64::from(libc::ENOSYS)))
+    }
+}
+
+/// Exact `pwrite(2)` from a caller-owned buffer address; bytes written or `-errno`.
+pub fn rt_fd_pwrite(args: &[Value]) -> Result<Value, CompileError> {
+    let Some((fd, buffer, len, offset)) = fd_positioned_args("rt_fd_pwrite", args)? else {
+        return Ok(Value::Int(-i64::from(libc::EINVAL)));
+    };
+    #[cfg(unix)]
+    {
+        let n = unsafe { libc::pwrite(fd, buffer as *const libc::c_void, len as usize, offset as libc::off_t) };
+        if n < 0 {
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
+            return Ok(Value::Int(-i64::from(code)));
+        }
+        Ok(Value::Int(n as i64))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::Int(-i64::from(libc::ENOSYS)))
+    }
 }
 
 // ============================================================================
