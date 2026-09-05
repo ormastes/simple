@@ -84,22 +84,22 @@ snapshot_run() {
         echo "ERROR — nothing was checked (snapshot worktree is empty)" >&2
         return 2
     fi
-    # Share the cargo target dir so a --full-bootstrap reuses warm artifacts and
-    # so the seed lands where the bootstrap looks for it
-    # (src/compiler_rust/target/bootstrap/simple, a repo-relative path). cargo's
-    # own lock serialises us against any concurrent build.
-    if [ -d "${snap_repo}/src/compiler_rust/target" ] &&
-       [ -d "${sr_wt}/src/compiler_rust" ] &&
-       [ ! -e "${sr_wt}/src/compiler_rust/target" ]; then
-        ln -s "${snap_repo}/src/compiler_rust/target" "${sr_wt}/src/compiler_rust/target"
-    fi
+    # Deliberately NO cargo-target symlink. Tried it 2026-09-05 to reuse warm
+    # artifacts; the run died in 30 seconds with "error: failed to fingerprint
+    # Rust seed inputs", and bootstrap-authority-wiring.shs documents exactly
+    # why: "The fingerprint has several silent `return 1` paths (PATH shape,
+    # target triple, SYMLINKS UNDER THE SEED TREES)". So the worktree gets its
+    # own real target/ and the first --full-bootstrap here is a cold cargo
+    # build. Keep the worktree (--keep) and later runs are warm.
+    # CARGO_TARGET_DIR is not an alternative: the bootstrap resolves the seed at
+    # the repo-relative path src/compiler_rust/target/bootstrap/simple, so
+    # redirecting cargo's output moves the seed out from under it.
     echo "snapshot: worktree ${sr_wt} (${sr_files} tracked files)"
     ( cd "$sr_wt" && eval "$snap_inner \"\$@\"" ) 2>&1
     sr_rc=$?
     if [ "$sr_keep" -eq 1 ] || [ "$sr_rc" -ne 0 ]; then
         echo "snapshot: worktree KEPT at ${sr_wt} (rc=${sr_rc}); remove with: git -C ${snap_repo} worktree remove --force ${sr_wt}"
     else
-        rm -f "${sr_wt}/src/compiler_rust/target"
         git -C "$snap_repo" worktree remove --force "$sr_wt" >/dev/null 2>&1
         echo "snapshot: worktree removed"
     fi
