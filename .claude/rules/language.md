@@ -18,7 +18,7 @@ alwaysApply: false
 - **Error handling:** Use `Result<T, E>` + `?` operator (no try/catch/throw keywords — by design)
 
 ## Runtime Limitations
-- **Multi-line booleans** - wrap in parentheses: `if (a and\n   b):` works
+- **Multi-line booleans** continue naturally after a trailing `and`/`or` — no parentheses needed. Do NOT add `(...)` merely for line continuation (user directive 2026-09-05: it hurts readability); parens are for precedence grouping only. See `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`.
 - **Nested closure capture** - can READ outer vars, CANNOT MODIFY (module closures work fine)
 - **Chained methods on erased receivers** - chains fail only when a link's receiver type is erased (e.g. from ANY/dict); typed chains work. Workaround: intermediate typed `val`
 - **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`, `examples`, `and_then`

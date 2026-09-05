@@ -687,19 +687,22 @@ symbol is present in one but not the other.
 
 - [ ] `build/libspl_cublas_mock.so` exists and exports all `rt_blas_*` / `rt_lapack_*` /
   `rt_cuda_*` symbols (T-CUDA-02)
-- [ ] `build/libspl_openblas.so` builds on a machine with OpenBLAS; `nm -D` matches mock symbol
-  set (T-CUDA-03, T-CUDA-14)
+  - note (2026-09-05): shipped artifact is `build/libspl_scilib_mock.so` built from `src/runtime/scilib/mock_shim.c` by scripts/check/check-scilib-runtime-shims.shs:18,40 (7 `rt_blas_*` + 7 `rt_lapack_*` + 4 `rt_cuda_*` definitions). NOT all symbols: the Simple side calls `rt_blas_handle_create`, `rt_lapack_handle_create`, `rt_cuda_api_version` (src/lib/nogc_sync_mut/linalg/cuda_blas.spl:28 `_scilib_call0("rt_blas_handle_create")`) and `/usr/bin/grep -rn rt_blas_handle_create src/runtime/` → 0 definitions in any shim.
+- [x] `build/libspl_scilib_openblas.so` is built by the gate (real OpenBLAS enabled via `-DSIMPLE_SCILIB_ENABLE_REAL_OPENBLAS` when `OPENBLAS_LIBS` is set) and its `nm -D` symbol set is diffed against the mock
+  set (T-CUDA-03, T-CUDA-14) — verified scripts/check/check-scilib-runtime-shims.shs:19,37,41 and src/runtime/scilib/verify_symbols.shs:36-37 `nm -D "$shim" ... diff -u "$mock_symbols" "$shim_symbols"`
+  - divergence: planned name `build/libspl_openblas.so`; shipped `build/libspl_scilib_openblas.so` (also copied to `$OPENBLAS_SFFI_DIR/libspl_scilib.so`, gate :21,:43)
 - [ ] `build/libspl_cublas.so` builds on a CUDA ≥ 11.7 machine; uses `_64` API (T-CUDA-05/06)
 - [ ] `SIMPLE_BLAS_BACKEND=mock` is the default in `bin/simple test` for linalg/ndarray specs
   (T-CUDA-09)
+  - note (2026-09-05): no runner default exists (`/usr/bin/grep -rn SIMPLE_BLAS_BACKEND src/app/` → 0). The science_math `blas_*_f64` functions hard-route to `MockCpuBlasProvider` (src/lib/common/science_math/blas.spl:198 `_mock_provider()`, 9 call sites), but the provider path in `src/lib/nogc_sync_mut/linalg/blas_cpu.spl:5,25` defaults to `scalar` when the env var is unset — so mock is not the default there.
 - [ ] `scripts/setup/setup.shs` builds mock unconditionally; openblas and cuda conditionally; appends
   `build/` to `SIMPLE_SFFI_PATH` (T-CUDA-10)
 - [ ] `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` triggers scilib mock build (T-CUDA-11)
 - [ ] CI matrix has three legs: mock-only, openblas-host, cuda-host (T-CUDA-12)
 - [ ] `blas_backend_smoke_spec.spl` passes interpreter mode; zero `skip()` (T-CUDA-13)
 - [ ] `verify_symbols.shs` passes as CI gate (T-CUDA-14)
-- [ ] No nvfortran toolchain references anywhere in `src/runtime/scilib/` (anti-pattern 1)
-- [ ] No `--mode=native` in any spec run instructions (anti-pattern 3)
+- [x] No nvfortran toolchain references anywhere in `src/runtime/scilib/` (anti-pattern 1) — verified: `/usr/bin/grep -rn nvfortran src/runtime/scilib/ src/lib/common/science_math/ src/lib/nogc_sync_mut/` → 0 hits
+- [x] No `--mode=native` in any spec run instructions (anti-pattern 3) — verified: `/usr/bin/grep -rn "mode=native" test/03_system/feature/scilib/ src/lib/common/science_math/*_spec.spl scripts/check/check-scilib-runtime-shims.shs` → 0 positive uses (only "no `--mode=native`" docstrings; the gate runs `--mode=interpreter`, scripts/check/check-scilib-runtime-shims.shs:69)
 
 ---
 
@@ -713,3 +716,9 @@ symbol is present in one but not the other.
 | **R-CUDA-4: Symbol set drift** — blas/lapack task files add a new symbol; one or more shims miss it | Medium | `verify_symbols.shs` (T-CUDA-14) runs as a required CI gate; any drift fails CI before any spec runs |
 | **R-CUDA-5: OpenBLAS row-major vs column-major double-swap** — openblas shim accidentally applies operand swap that Layer B already applied | Low–Medium | Document clearly in `openblas_shim.c` header comment; CI openblas-host leg verifies `I @ I = I` numerically |
 | **R-CUDA-6: cuSOLVER workspace per-call malloc cost** — each `rt_lapack_dgetrf` call allocates and frees a CUDA workspace | Low | Acceptable for v1; PERF-SUGAR-004 tracks batching mitigation; internal workspace is freed before function returns |
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/scilib_port_cuda_fortran_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

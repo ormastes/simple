@@ -1,7 +1,42 @@
 # @cover src/app/startup/component_dynsmf_wiring.spl 85%
-"""Production component graph admission and admitted-byte dynSMF startup wiring."""
+"""
+## Purpose and audience
+Pins the production component-graph admission and dynSMF startup wiring in
+src/app/startup/component_dynsmf_wiring.spl: registry-backed retained images,
+digest verification, capability policy, descriptor validation, and the
+fail-closed diagnostics an operator sees when trusted admission is missing.
+Written for the engineers owning the component/dynSMF startup path and for
+operators auditing why a component failed to start.
+
+## Operator workflow
+Run the file with the self-hosted runner:
+./src/compiler_rust/target/bootstrap/simple run
+test/02_integration/app/simple/component_dynsmf_production_wiring_spec.spl
+Scenarios stage real artifacts under build/ and remove them again; a green run
+means the startup owner admits, loads, and renders components as documented.
+
+## Compatibility and limitations
+The scenarios exercise the interpreted lane; on this host the JIT falls back
+to the interpreter for the aspect-pack module graph. Failure-mode scenarios
+assert the rendered diagnostic strings, which are the shipped operator
+contract, so renaming a diagnostic code is a breaking change to this spec.
+Source-contract scenarios read the wiring source to pin invariants that have
+no runtime API of their own.
+
+## Verification guidance and troubleshooting
+A trusted_admission_missing failure means the trust registry was not staged or
+the artifact digest changed; a capability_denied failure means policy bits
+moved. A source-contract failure means the wiring source was restructured:
+update the contract probes in the same change that moves the code.
+"""
+# Lifecycle: doc/01_research/local/aspect_dynload.md ;
+# doc/03_plan/agent_tasks/low_dependency_ui_dynsmf.md ;
+# doc/04_architecture/ui/low_dependency_ui_dynsmf.md ;
+# doc/05_design/low_dependency_ui_dynsmf_tldr.md
+# @manual_section: production component dynSMF startup wiring
 
 use std.spec.{describe, it, expect}
+use std.spec.step
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.string_core.{char_code}
 use app.io.mod.{file_delete, file_read_text, file_write, file_write_bytes}
@@ -117,6 +152,9 @@ fn component_prod_cleanup():
 
 describe "production component dynSMF startup call":
     it "uses the OS registry retained image after the artifact path mutates":
+        # @req REQ-DYSMF-001
+        # @capture(protocol_binary): admitted artifact bytes and the retained registry digest
+        step("Admit the artifact into the trust registry, mutate the artifact, and start the component")
         val fixture = dynsmf_admitted_startup_fixture("file_io", component_prod_artifact_path(), "std.io", "1", "open", false)
         val trust_path = "build/_component_dynsmf_trust.sdn"
         val config_path = "build/_component_dynsmf_registry_config.sdn"
@@ -141,7 +179,7 @@ describe "production component dynSMF startup call":
             config_path,
             registry)
         expect(result.ok).to_equal(true)
-        expect(result.session.loaded.len()).to_equal(1)
+        expect(result.session.loaded.len()).to_equal(1)  # oracle: only file_io is admitted, so exactly one component loads
         expect(result.session.loaded[0].content_hash).to_equal(fixture.request.artifact.content_hash)
         file_delete(trust_path)
         file_delete(config_path)
@@ -150,6 +188,9 @@ describe "production component dynSMF startup call":
         component_prod_cleanup()
 
     it "loads a component from its retained admitted image and returns the updated session":
+        # @req REQ-DYSMF-002
+        # @capture(statistics): loaded component count, rendered evidence, and unload reason
+        step("Load the component from the admitted image, render the result, and unload it")
         val fixture = dynsmf_admitted_startup_fixture("file_io", component_prod_artifact_path(), "std.io", "1", "open", false)
         file_write_bytes(component_prod_artifact_path(), fixture.artifact_bytes)
         val result = component_dynsmf_startup_from_admitted_values(
@@ -162,7 +203,7 @@ describe "production component dynSMF startup call":
         )
         val rendered = component_dynsmf_result_render(result)
         expect(result.ok).to_equal(true)
-        expect(result.session.loaded.len()).to_equal(1)
+        expect(result.session.loaded.len()).to_equal(1)  # oracle: the single admitted request loads exactly one component
         expect(result.session.loaded[0].id).to_equal("file_io")
         expect(result.session.loaded[0].content_hash).to_equal(fixture.request.artifact.content_hash)
         expect(rendered).to_contain("admitted_dynsmf_loaded:file_io")
@@ -171,6 +212,9 @@ describe "production component dynSMF startup call":
         component_prod_cleanup()
 
     it "fails closed when the config-path compatibility entry has no trusted admission registry":
+        # @req REQ-DYSMF-003
+        # @capture(bit_table): trusted-admission diagnostic for the registry-less start
+        step("Start the component from config paths with no admission registry staged")
         val bytes = component_prod_prepare()
         val config_path = "build/_component_dynsmf_config.sdn"
         val descriptor_path = "build/_component_dynsmf_descriptors.sdn"
@@ -192,6 +236,9 @@ describe "production component dynSMF startup call":
         component_prod_cleanup()
 
     it "requires an explicit trusted request for a dynamic startup activation":
+        # @req REQ-DYSMF-004
+        # @capture(bit_table): error prefix and per-component absence probes
+        step("Start all three configured components without any trusted request")
         val bytes = component_prod_prepare()
         val result = component_dynsmf_startup_from_values(
             dynsmf_session_new("component-production", dynsmf_policy_default()),
@@ -208,6 +255,9 @@ describe "production component dynSMF startup call":
         component_prod_cleanup()
 
     it "fails closed when capability policy denies the startup candidate":
+        # @req REQ-DYSMF-005
+        # @capture(protocol_json): capability_denied diagnostic row
+        step("Demand capability bit 2 that the resolver never grants")
         val bytes = component_prod_prepare()
         val result = component_dynsmf_startup_from_values(
             dynsmf_session_new("component-capability-denied", dynsmf_policy_default()),
@@ -220,6 +270,9 @@ describe "production component dynSMF startup call":
         component_prod_cleanup()
 
     it "rejects missing trusted admission before reading a configured artifact":
+        # @req REQ-DYSMF-006
+        # @capture(bit_table): zero-digest admission verdict
+        step("Admit against the all-zero digest before any artifact is read")
         component_prod_prepare()
         val result = component_dynsmf_startup_from_values(
             dynsmf_session_new("component-stale-hash", dynsmf_policy_default()),
@@ -232,6 +285,9 @@ describe "production component dynSMF startup call":
         component_prod_cleanup()
 
     it "rejects descriptor blocks that omit an explicit activation":
+        # @req REQ-DYSMF-007
+        # @capture(protocol_json): missing_explicit_activation diagnostic row
+        step("Drop the activation field from the descriptor and start the component")
         val descriptor_source = "component:\n  id: file_io\n  version: 1\n  presence: on\n  placement: dynamic\n  provides: io.file\n"
         val result = component_dynsmf_startup_from_values(
             dynsmf_session_new("component-implicit-activation", dynsmf_policy_default()),
@@ -243,19 +299,37 @@ describe "production component dynSMF startup call":
         expect(component_dynsmf_result_render(result)).to_contain("descriptor_catalog_invalid:*:missing_explicit_activation:file_io")
 
     it "keeps the production startup owner free of process, shell, and directory-scan calls":
-        val source = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
-        expect(source.contains("process_spawn_async(")).to_equal(false)
-        expect(source.contains("process_run(")).to_equal(false)
-        expect(source.contains("directory_entries(")).to_equal(false)
-        expect(source.contains("dynsmf_dispatch_background_compiles(")).to_equal(false)
+        # @req REQ-DYSMF-008
+        # @capture(bit_table): forbidden-call probes over the startup owner source
+        step("Read the production startup owner source and probe it for forbidden calls")
+        val startup_owner_source = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
+        val owner_free_of_process_spawn = startup_owner_source.contains("process_spawn_async(") == false
+        val owner_free_of_process_run = startup_owner_source.contains("process_run(") == false
+        val owner_free_of_directory_scan = startup_owner_source.contains("directory_entries(") == false
+        val owner_free_of_background_compiles = startup_owner_source.contains("dynsmf_dispatch_background_compiles(") == false
+        expect(owner_free_of_process_spawn).to_equal(true)  # oracle: the startup owner must never spawn processes directly
+        expect(owner_free_of_process_run).to_equal(true)  # oracle: no synchronous shell-outs belong on the startup path
+        expect(owner_free_of_directory_scan).to_equal(true)  # oracle: startup must not scan directories for components
+        expect(owner_free_of_background_compiles).to_equal(true)  # oracle: background compiles are dispatched outside the startup owner
 
     it "retains the one digest-verified image through admitted session load":
-        val source = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
-        expect(source).to_contain("val exact_bytes = file_read_bytes(admitted.artifact_path)")
-        expect(source).to_contain("val actual_digest = sha256_u8_hex(exact_bytes)")
-        expect(source).to_contain("artifact_bytes: exact_bytes")
-        expect(source).to_contain("dynsmf_session_load_admitted(out_session, item.component_id, image!.request, image!.artifact_bytes)")
-        expect(source).to_contain("out_session = dynsmf_session_load_admitted")
-        expect(source).to_contain("trusted_admission_manifest_mismatch")
-        expect(source).to_contain("trusted_admission_digest_mismatch")
-        expect(source.contains("dynsmf_session_load_checked(")).to_equal(false)
+        # @req REQ-DYSMF-009
+        # @capture(bit_table): admitted-load contract probes over the wiring source
+        step("Read the wiring source and probe the admitted-image load contract")
+        val wiring_source = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
+        val admitted_path_read_into_exact_bytes = wiring_source.contains("val exact_bytes = file_read_bytes(admitted.artifact_path)")
+        val actual_digest_computed_over_exact_bytes = wiring_source.contains("val actual_digest = sha256_u8_hex(exact_bytes)")
+        val image_carries_the_exact_bytes = wiring_source.contains("artifact_bytes: exact_bytes")
+        val admitted_load_call_present = wiring_source.contains("dynsmf_session_load_admitted(out_session, item.component_id, image!.request, image!.artifact_bytes)")
+        val session_reassigned_by_admitted_load = wiring_source.contains("out_session = dynsmf_session_load_admitted")
+        val manifest_mismatch_diagnosed = wiring_source.contains("trusted_admission_manifest_mismatch")
+        val digest_mismatch_diagnosed = wiring_source.contains("trusted_admission_digest_mismatch")
+        val checked_load_route_absent = wiring_source.contains("dynsmf_session_load_checked(") == false
+        expect(admitted_path_read_into_exact_bytes).to_equal(true)  # oracle: the admitted image must be read from its admitted artifact path
+        expect(actual_digest_computed_over_exact_bytes).to_equal(true)  # oracle: the loaded bytes are digest-verified before use
+        expect(image_carries_the_exact_bytes).to_equal(true)  # oracle: the verified bytes, not a re-read, reach the session load
+        expect(admitted_load_call_present).to_equal(true)  # oracle: admitted loads route through dynsmf_session_load_admitted
+        expect(session_reassigned_by_admitted_load).to_equal(true)  # oracle: the session is reassigned from the admitted load result
+        expect(manifest_mismatch_diagnosed).to_equal(true)  # oracle: manifest mismatches are diagnosed by code
+        expect(digest_mismatch_diagnosed).to_equal(true)  # oracle: digest mismatches are diagnosed by code
+        expect(checked_load_route_absent).to_equal(true)  # oracle: the unchecked dynsmf_session_load_checked route must not exist in the owner

@@ -1,362 +1,363 @@
 """
-# Capture Buffer and Virtual Register Remapping Specification
+## Purpose and audience
 
-**Feature IDs:** #VREGMAP-001 to #VREGMAP-020
-**Category:** Runtime | Memory Management
-**Difficulty:** 4/5
-**Status:** Planned
+Pins the runtime contract behind capture buffers and virtual-register (vreg)
+remapping: closures must read captured values correctly, values must survive
+reuse and remapping, live ranges must be respected, and every optimization
+must stay invisible to observable behavior. Written for runtime and interpreter
+engineers who need the optimization's user-visible contract on record.
 
-## Overview
+## Operator workflow
 
-This specification covers advanced virtual register (vreg) remapping and capture
-buffer management at the runtime level. These are internal optimization features
-that affect how the interpreter manages memory and registers during function
-execution.
+Run `simple run test/03_system/feature/usage/capture_buffer_vreg_remapping_spec.spl`.
+Every scenario executes real closures, loops, and calls on the host
+interpreter; no GPU and no debugger are involved.
 
-## Key Concepts
+## Compatibility and limitations
 
-| Concept | Description |
-|---------|-------------|
-| Virtual Register (vreg) | Compiler-internal register representing values during execution |
-| Capture Buffer | Runtime buffer capturing values into closure/lambda scopes |
-| Remapping | Optimization to reuse vregs across code regions |
-| Live Range | Set of instructions where a vreg is actively used |
-| Interference | Two vregs conflict if their live ranges overlap |
+Scenarios observe behavior, not registers: vreg reuse and remapping are
+asserted through the values that survive them, because the register file
+itself is not exposed to user code. Diagnosing which optimization broke
+requires the interpreter's own trace lane.
 
-## Behavior
+## Verification guidance and troubleshooting
 
-- Virtual registers are allocated for each value in the program
-- Capture buffers copy values from outer scope into closure scope
-- Remapping allows vregs to be reused when live ranges don't overlap
-- Optimization reduces memory pressure and improves cache locality
-- All changes are transparent to the user - language behavior unchanged
-
-## Related Specifications
-
-- [Closures and Lambdas](closures_spec.spl) - Capture semantics
-- [Memory Management](memory_management_spec.spl) - GC and allocation
-- [Function Calls](function_calls_spec.spl) - Call conventions
+Rerun the command above. Each oracle comment states how the expected value
+decomposes into captured and computed parts, so a failing sum names the half
+that broke. A failure after a compiler change means an optimization changed
+observable behavior — fix the compiler, never the expectation.
 """
+# Lifecycle: doc/01_research/compiler/performance/interpreter_memory_explosion_2026-04-03.md ;
+# doc/03_plan/versioned_codegen_backend_plugin.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/language/memory/gc_nogc_module_parity.md
+# @manual_section: capture-buffer-vreg-remapping
 
-
-
-# ============================================================================
-# Test Group 1: Basic Capture Buffer Creation
-# ============================================================================
+use std.spec.step
 
 describe "Capture Buffer Creation":
     # @manual scenario evidence
-    # ## Basic Capture Buffer Creation
-    #
-    # Tests that capture buffers are created correctly when closures capture
-    # variables from outer scope.
-
     it "creates capture buffer for single captured variable":
+        # @req REQ-VREG-001
+        step("Capture one variable in a closure and read it back")
+        # @capture(statistics): closure returns the captured 10
         val x = 10
         val closure = \: x
-        expect(closure()).to_equal(10)
+        expect(closure()).to_equal(10)  # oracle: the buffer holds the captured 10
 
     it "creates capture buffer for multiple variables":
+        # @req REQ-VREG-002
+        step("Capture two variables in one closure and sum them")
+        # @capture(statistics): closure returns captured 5 + 15
         val a = 5
         val b = 15
         val closure = \: a + b
-        expect(closure()).to_equal(20)
+        expect(closure()).to_equal(20)  # oracle: both captures visible, 5 + 15
 
     it "captures variable in nested closure":
+        # @req REQ-VREG-003
+        step("Capture through two closure levels and read the innermost")
+        # @capture(statistics): nested closure returns the captured 100
         val outer = 100
         val f = \: \: outer
         val inner = f()
-        expect(inner()).to_equal(100)
+        expect(inner()).to_equal(100)  # oracle: the capture survives both levels
 
     it "captures in lambda with parameters":
+        # @req REQ-VREG-004
+        step("Mix a captured factor with a call argument inside a lambda")
+        # @capture(statistics): 2 * 5 through the captured factor
         val factor = 2
         val double = \x: x * factor
-        expect(double(5)).to_equal(10)
-
-
-# ============================================================================
-# Test Group 2: Capture Buffer Scope Isolation
-# ============================================================================
+        expect(double(5)).to_equal(10)  # oracle: captured 2 times argument 5
 
 describe "Capture Buffer Scope Isolation":
-    # ## Capture Buffer Scope Isolation
-    #
-    # Tests that captured buffers correctly isolate values from different scopes.
-
     it "captures value at definition time":
+        # @req REQ-VREG-005
+        step("Read a closure bound before any later rebinding could occur")
+        # @capture(statistics): closure returns the definition-time 10
         val x = 10
         val closure = \: x
         # x may be modified after, but closure retains captured value
-        expect(closure()).to_equal(10)
+        expect(closure()).to_equal(10)  # oracle: the buffer froze the definition-time 10
 
     it "captures in loop iteration":
+        # @req REQ-VREG-006
+        step("Push one closure per loop iteration and count them")
+        # @capture(statistics): three per-iteration closures collected
         var closures = []
         for i in [0, 1, 2]:
             closures.push(\: i)
         # Each closure captures its own i value
-        expect(closures.len()).to_equal(3)
+        expect(closures.len()).to_equal(3)  # oracle: one closure per iteration
 
     it "captures different scopes separately":
+        # @req REQ-VREG-007
+        step("Capture x and y in separate closures and read each")
+        # @capture(statistics): f reads 1, g reads 2 — no cross-talk
         val x = 1
         val f = \: x
         val y = 2
         val g = \: y
-        expect(f()).to_equal(1)
-        expect(g()).to_equal(2)
-
-
-# ============================================================================
-# Test Group 3: Virtual Register Allocation
-# ============================================================================
+        expect(f()).to_equal(1)  # oracle: f's buffer holds x's 1
+        expect(g()).to_equal(2)  # oracle: g's buffer holds y's 2
 
 describe "Virtual Register Allocation":
-    # ## Virtual Register Allocation
-    #
-    # Tests basic virtual register allocation for values.
-
     it "allocates vreg for simple variable":
-        val x = 42
-        expect(x).to_equal(42)
+        # @req REQ-VREG-008
+        step("Bind a computed value and read the vreg back")
+        # @capture(statistics): computed 40 + 2 reads back as 42
+        val x = 40 + 2
+        expect(x).to_equal(42)  # oracle: 40 + 2 evaluated before the read
 
     it "allocates vreg for expression result":
+        # @req REQ-VREG-009
+        step("Bind an addition result and read the vreg back")
+        # @capture(statistics): 10 + 20 reads back as 30
         val result = 10 + 20
-        expect(result).to_equal(30)
+        expect(result).to_equal(30)  # oracle: 10 + 20 evaluated into the vreg
 
     it "allocates vregs for multiple values":
+        # @req REQ-VREG-010
+        step("Bind three values and sum their vregs")
+        # @capture(statistics): 1 + 2 + 3 across three vregs
         val a = 1
         val b = 2
         val c = 3
-        expect(a + b + c).to_equal(6)
+        expect(a + b + c).to_equal(6)  # oracle: one vreg per binding, 1 + 2 + 3
 
     it "allocates vreg for array element":
+        # @req REQ-VREG-011
+        step("Read an element out of an array into its own vreg")
+        # @capture(statistics): arr[0] reads back as 10
         val arr = [10, 20, 30]
         val first = arr[0]
-        expect(first).to_equal(10)
-
-
-# ============================================================================
-# Test Group 4: Virtual Register Reuse Across Scopes
-# ============================================================================
+        expect(first).to_equal(10)  # oracle: element 0 of the literal array
 
 describe "Virtual Register Reuse":
-    # ## Virtual Register Reuse
-    #
-    # Tests that virtual registers are reused when values don't interfere.
-
     it "reuses vreg in sequential statements":
+        # @req REQ-VREG-012
+        step("Let a die, bind b, and read only b back")
+        # @capture(statistics): sequential b reads back as 20
         val a = 10
         val b = 20          # a is dead, can reuse its vreg
-        expect(b).to_equal(20)
+        expect(b).to_equal(20)  # oracle: reuse must not leak a's 10 into b
 
     it "reuses vreg after value is no longer needed":
+        # @req REQ-VREG-013
+        step("Rebind a var from its own old value and read the result")
+        # @capture(statistics): 5 + 10 reads back as 15
         var x = 5
         x = x + 10          # Old value can be reused
-        expect(x).to_equal(15)
+        expect(x).to_equal(15)  # oracle: old 5 consumed before the reuse, 5 + 10
 
     it "does not reuse interfering vregs":
+        # @req REQ-VREG-014
+        step("Keep a live across a second binding and read the second")
+        # @capture(statistics): b reads back as 10 + 20 while a stays live
         val a = 10
         val b = a + 20      # a is still live, must use different vreg
-        expect(b).to_equal(30)
+        expect(b).to_equal(30)  # oracle: live a contributed 10, not stale garbage
 
     it "reuses vregs in branches":
+        # @req REQ-VREG-015
+        step("Take the true branch of a conditional into a reused vreg")
+        # @capture(statistics): true branch yields 10
         val cond = true
         val x = if cond: 10 else: 20
-        expect(x).to_equal(10)
-
-
-# ============================================================================
-# Test Group 5: Live Range Analysis
-# ============================================================================
+        expect(x).to_equal(10)  # oracle: the taken branch's 10 lands in the vreg
 
 describe "Live Range Analysis":
-    # ## Live Range Analysis
-    #
-    # Tests correct identification of variable live ranges.
-
     it "detects live range of simple variable":
+        # @req REQ-VREG-016
+        step("Use x after its binding and read the derived value")
+        # @capture(statistics): 5 + 1 reads back as 6
         val x = 5
         val y = x + 1       # x is live here
-        expect(y).to_equal(6)
+        expect(y).to_equal(6)  # oracle: live x contributed 5
 
     it "detects live range extends to final use":
+        # @req REQ-VREG-017
+        step("Keep two bindings live into one sum")
+        # @capture(statistics): 10 + 20 with both live
         val a = 10
         val b = 20
         val c = a + b       # Both a and b are live
-        expect(c).to_equal(30)
+        expect(c).to_equal(30)  # oracle: both live values contributed, 10 + 20
 
     it "detects live range ends after last use":
+        # @req REQ-VREG-018
+        step("Consume temp once and read only the derived result")
+        # @capture(statistics): 100 * 2 reads back as 200
         val temp = 100
         val result = temp * 2  # temp is dead after this
-        expect(result).to_equal(200)
+        expect(result).to_equal(200)  # oracle: last use contributed 100 * 2
 
     it "handles nested live ranges":
+        # @req REQ-VREG-019
+        step("Chain two derivations through overlapping live ranges")
+        # @capture(statistics): outer 5 + inner 15 reads back as 20
         val outer = 5
         val inner = outer + 10
         val combined = outer + inner
-        expect(combined).to_equal(20)
-
-
-# ============================================================================
-# Test Group 6: Register Remapping in Loops
-# ============================================================================
+        expect(combined).to_equal(20)  # oracle: 5 + (5 + 10)
 
 describe "Register Remapping in Loops":
-    # ## Register Remapping in Loops
-    #
-    # Tests virtual register remapping optimization in loop contexts.
-
     it "remaps vregs in loop iterations":
+        # @req REQ-VREG-020
+        step("Reuse the local's vreg across three iterations and accumulate")
+        # @capture(statistics): 2 + 4 + 6 accumulated across remaps
         var sum = 0
         for i in [1, 2, 3]:
             val local = i * 2    # Can reuse vreg each iteration
             sum = sum + local
-        expect(sum).to_equal(12)
+        expect(sum).to_equal(12)  # oracle: 2 + 4 + 6
 
     it "handles nested loops with remapping":
+        # @req REQ-VREG-021
+        step("Count increments across a 2x2 nested loop")
+        # @capture(statistics): 2 x 2 = 4 increments
         var count = 0
         for i in [0, 1]:
             for j in [0, 1]:
                 count = count + 1
-        expect(count).to_equal(4)
+        expect(count).to_equal(4)  # oracle: four inner iterations
 
     it "preserves values across loop iterations":
+        # @req REQ-VREG-022
+        step("Accumulate one pushed value per iteration")
+        # @capture(statistics): three pushed values retained
         var accumulated = []
         for i in [1, 2, 3]:
             accumulated.push(i)
-        expect(accumulated.len()).to_equal(3)
-
-
-# ============================================================================
-# Test Group 7: Capture Buffer with Remapped Registers
-# ============================================================================
+        expect(accumulated.len()).to_equal(3)  # oracle: one entry per iteration
 
 describe "Capture Buffer with Remapped Registers":
-    # ## Capture Buffer with Remapped Registers
-    #
-    # Tests interaction between capture buffers and vreg remapping.
-
     it "captures value despite vreg reuse":
+        # @req REQ-VREG-023
+        step("Capture a value whose vreg is eligible for reuse")
+        # @capture(statistics): closure still reads the captured 42
         val captured = 42
         val closure = \: captured
         # Even if captured's vreg was reused, closure should work
-        expect(closure()).to_equal(42)
+        expect(closure()).to_equal(42)  # oracle: the buffer kept the captured 42
 
     it "captures multiple values with remapping":
+        # @req REQ-VREG-024
+        step("Capture two values whose vregs were remapped and sum them")
+        # @capture(statistics): closure returns 10 + 20
         val a = 10
         val b = 20
         val f = \: a + b
         # Both a and b are captured
-        expect(f()).to_equal(30)
+        expect(f()).to_equal(30)  # oracle: both captures intact, 10 + 20
 
     it "captures in loop with vreg remapping":
+        # @req REQ-VREG-025
+        step("Capture the per-iteration local into a closure each iteration")
+        # @capture(statistics): three per-iteration closures collected
         var closures = []
         for i in [10, 20, 30]:
             val current = i
             closures.push(\: current)
-        expect(closures.len()).to_equal(3)
-
-
-# ============================================================================
-# Test Group 8: Register Interference Detection
-# ============================================================================
+        expect(closures.len()).to_equal(3)  # oracle: one buffered capture per iteration
 
 describe "Register Interference Detection":
-    # ## Register Interference Detection
-    #
-    # Tests that interference between vregs is correctly identified.
-
     it "detects interference between live ranges":
+        # @req REQ-VREG-026
+        step("Chain two live bindings into a third and read the result")
+        # @capture(statistics): c reads back as 10 + 15
         val a = 10
         val b = a + 5       # a interferes with b
         val c = a + b       # All three interfere
-        expect(c).to_equal(25)
+        expect(c).to_equal(25)  # oracle: 10 + (10 + 5)
 
     it "detects no interference for sequential values":
+        # @req REQ-VREG-027
+        step("Let a die via a discard binding and read only b")
+        # @capture(statistics): sequential b reads back as 20
         val a = 10
         val _ = a
         val b = 20          # No interference - a is dead
-        expect(b).to_equal(20)
+        expect(b).to_equal(20)  # oracle: dead a cannot pollute b's 20
 
     it "handles complex interference patterns":
+        # @req REQ-VREG-028
+        step("Build a four-binding interference chain and read the tip")
+        # @capture(statistics): d reads back as 5
         val a = 1
         val b = a + 1
         val c = a + b
         val d = b + c
-        expect(d).to_equal(5)
-
-
-# ============================================================================
-# Test Group 9: Capture Buffer Cleanup
-# ============================================================================
+        expect(d).to_equal(5)  # oracle: b 2 + c 3
 
 describe "Capture Buffer Cleanup":
-    # ## Capture Buffer Cleanup
-    #
-    # Tests that capture buffers are properly managed during execution.
-
     it "maintains captured values across calls":
+        # @req REQ-VREG-029
+        step("Call the same closure three times and require stable captures")
+        # @capture(statistics): 105, 110, 105 across three calls
         val base = 100
         val add = \x: base + x
-        expect(add(5)).to_equal(105)
-        expect(add(10)).to_equal(110)
-        expect(add(5)).to_equal(105)
+        expect(add(5)).to_equal(105)  # oracle: first call, 100 + 5
+        expect(add(10)).to_equal(110)  # oracle: second call, 100 + 10
+        expect(add(5)).to_equal(105)  # oracle: third call repeats the first
 
     it "isolates different capture buffers":
+        # @req REQ-VREG-030
+        step("Mint two closures from one factory and read each buffer")
+        # @capture(statistics): f1 reads 1, f2 reads 2
         fn make_closure(x):
             \: x
         val f1 = make_closure(1)
         val f2 = make_closure(2)
-        expect(f1()).to_equal(1)
-        expect(f2()).to_equal(2)
+        expect(f1()).to_equal(1)  # oracle: f1's own buffer
+        expect(f2()).to_equal(2)  # oracle: f2's own buffer
 
     it "handles closure returning closure":
+        # @req REQ-VREG-031
+        step("Mint add5 from an adder factory and call it")
+        # @capture(statistics): add5(3) reads back as 8
         val make_adder = \n: \x: n + x
         val add5 = make_adder(5)
-        expect(add5(3)).to_equal(8)
-
-
-# ============================================================================
-# Test Group 10: Register Spillage
-# ============================================================================
+        expect(add5(3)).to_equal(8)  # oracle: captured 5 + argument 3
 
 describe "Register Spillage":
-    # ## Register Spillage
-    #
-    # Tests behavior when too many values are live (spillage to stack/memory).
-
     it "handles many live values":
+        # @req REQ-VREG-032
+        step("Keep five values live at once and sum them")
+        # @capture(statistics): 1+2+3+4+5 with five live vregs
         val a = 1
         val b = 2
         val c = 3
         val d = 4
         val e = 5
         val result = a + b + c + d + e
-        expect(result).to_equal(15)
+        expect(result).to_equal(15)  # oracle: all five live values contributed
 
     it "handles complex expressions with many values":
+        # @req REQ-VREG-033
+        step("Evaluate a four-parenthesis expression in one binding")
+        # @capture(statistics): (3 * 7) + (11 * 15) = 186
         val result = ((1 + 2) * (3 + 4)) + ((5 + 6) * (7 + 8))
-        expect(result).to_equal(186)
-
-
-# ============================================================================
-# Test Group 11: Function Call and Register Preservation
-# ============================================================================
+        expect(result).to_equal(186)  # oracle: 21 + 165
 
 describe "Register Preservation Across Calls":
-    # ## Register Preservation Across Calls
-    #
-    # Tests that values are preserved across function calls.
-
     it "preserves local values across function call":
+        # @req REQ-VREG-034
+        step("Keep a live across a call and sum it with the call result")
+        # @capture(statistics): 10 + double(5) reads back as 20
         fn double(x):
             x * 2
 
         val a = 10
         val b = double(5)
         val c = a + b
-        expect(c).to_equal(20)
+        expect(c).to_equal(20)  # oracle: a's 10 survived the call, 10 + 10
 
     it "preserves values in nested calls":
+        # @req REQ-VREG-035
+        step("Pass a live value through two nested calls")
+        # @capture(statistics): g(5) = (5+1)*2 reads back as 12
         fn f(x):
             x + 1
 
@@ -365,115 +366,112 @@ describe "Register Preservation Across Calls":
 
         val base = 5
         val result = g(base)
-        expect(result).to_equal(12)
-
-
-# ============================================================================
-# Test Group 12: Optimization Effects (Observable Behavior)
-# ============================================================================
+        expect(result).to_equal(12)  # oracle: (5 + 1) * 2
 
 describe "Optimization Observable Effects":
-    # ## Optimization Observable Effects
-    #
-    # Tests that optimization doesn't change observable behavior.
-
     it "produces correct result after vreg reuse":
+        # @req REQ-VREG-036
+        step("Sum a five-element array through a reused accumulator")
+        # @capture(statistics): 1+2+3+4+5 after reuse
         val arr = [1, 2, 3, 4, 5]
         var sum = 0
         for i in arr:
             sum = sum + i
-        expect(sum).to_equal(15)
+        expect(sum).to_equal(15)  # oracle: every element contributed once
 
     it "preserves value semantics":
+        # @req REQ-VREG-037
+        step("Copy a value through a second binding and read the copy")
+        # @capture(statistics): y reads back the copied 42
         val x = 42
         val y = x
-        expect(y).to_equal(42)
+        expect(y).to_equal(42)  # oracle: the copy carries x's value
 
     it "maintains mutation semantics":
+        # @req REQ-VREG-038
+        step("Increment a counter twice and read it")
+        # @capture(statistics): two increments reach 2
         var count = 0
         count = count + 1
         count = count + 1
-        expect(count).to_equal(2)
-
-
-# ============================================================================
-# Test Group 13: Closure Capture Buffer Edge Cases
-# ============================================================================
+        expect(count).to_equal(2)  # oracle: 0 + 1 + 1
 
 describe "Closure Capture Edge Cases":
-    # ## Closure Capture Edge Cases
-    #
-    # Tests edge cases in capture buffer handling.
-
     it "captures in deeply nested closures":
+        # @req REQ-VREG-039
+        step("Read a capture through three closure levels")
+        # @capture(statistics): third-level call returns the captured 1
         val deep_val = 1
         val deep_fn1 = \: deep_val
         val deep_fn2 = \: deep_fn1()
         val deep_fn3 = \: deep_fn2()
-        expect(deep_fn3()).to_equal(1)
+        expect(deep_fn3()).to_equal(1)  # oracle: the capture traverses all three levels
 
     it "captures the same variable multiple times":
+        # @req REQ-VREG-040
+        step("Reference one capture three times inside a single closure")
+        # @capture(statistics): 10 + 10 + 10 from one buffer
         val triple_val = 10
         val triple_fn = \: triple_val + triple_val + triple_val
-        expect(triple_fn()).to_equal(30)
+        expect(triple_fn()).to_equal(30)  # oracle: three reads of the same capture
 
     it "captures from multiple scopes via lambda":
+        # @req REQ-VREG-041
+        step("Derive an inner value from an outer capture inside a lambda")
+        # @capture(statistics): inner closure returns 100 + 1
         val outer = 100
         val make_inner = \:
             val inner = outer + 1
             \: inner
         val inner_f = make_inner()
-        expect(inner_f()).to_equal(101)
-
-
-# ============================================================================
-# Test Group 14: Memory Layout and Alignment
-# ============================================================================
+        expect(inner_f()).to_equal(101)  # oracle: outer 100 carried into the derived 101
 
 describe "Capture Buffer Memory Layout":
-    # ## Capture Buffer Memory Layout
-    #
-    # Tests that capture buffers maintain correct memory alignment.
-
     it "stores mixed-type captures":
+        # @req REQ-VREG-042
+        step("Capture int, float, and text in one closure and render them")
+        # @capture(protocol_json): the rendered "10, 3.14, text" payload
         val i = 10
         val f = 3.14
         val s = "text"
         val closure = \: "{i}, {f}, {s}"
         val result = closure()
-        expect(result).to_equal("10, 3.14, text")
+        expect(result).to_equal("10, 3.14, text")  # oracle: each capture renders at its own width
 
     it "captures different sized values":
+        # @req REQ-VREG-043
+        step("Capture i32 and i64 widths in one closure and sum them")
+        # @capture(statistics): 1 + 2 across mixed widths
         val a: i32 = 1
         val b: i64 = 2
         val closure = \: a + b
-        expect(closure()).to_equal(3)
-
-
-# ============================================================================
-# Test Group 15: Performance Characteristics
-# ============================================================================
+        expect(closure()).to_equal(3)  # oracle: both widths promoted into the sum
 
 describe "Performance Characteristics":
-    # ## Performance Characteristics
-    #
-    # Tests performance-related behavior (correctness, not timing).
-
     it "processes many captures efficiently":
+        # @req REQ-VREG-044
+        step("Sum ten buffered values in one loop")
+        # @capture(statistics): 1..10 sums to 55
         val values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         var sum = 0
         for v in values:
             sum = sum + v
-        expect(sum).to_equal(55)
+        expect(sum).to_equal(55)  # oracle: 10 * 11 / 2
 
     it "handles array of closures":
+        # @req REQ-VREG-045
+        step("Collect five per-iteration closures into one array")
+        # @capture(statistics): five buffered closures collected
         var closures = []
         for i in [0, 1, 2, 3, 4]:
             val current = i
             closures.push(\: current)
-        expect(closures.len()).to_equal(5)
+        expect(closures.len()).to_equal(5)  # oracle: one closure per element
 
     it "processes filtered captures":
+        # @req REQ-VREG-046
+        step("Filter a five-element array down to its even values")
+        # @capture(statistics): two even values survive the filter
         val values = [1, 2, 3, 4, 5]
         val evens = values.filter(_1 % 2 == 0)
-        expect(evens.len()).to_equal(2)
+        expect(evens.len()).to_equal(2)  # oracle: only 2 and 4 are even

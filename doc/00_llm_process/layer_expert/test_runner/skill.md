@@ -502,3 +502,24 @@ worktree under `/mnt/data/worktrees/` was reaped mid-investigation by another se
 put throwaway probe trees outside that directory.
 
 Record: `doc/08_tracking/bug/full_suite_aborts_mcdc_dynamic_probe_symbol_2026-08-26.md`.
+
+## The sspec documentization score gate, and how to measure it here (2026-09-05)
+
+`src/app/test_runner_new/sspec_score_gate.spl` scores every `*_spec.spl` the
+runner is handed with `analyze_sspec_text` (source only — the GATE surface) and
+turns any score below `SIMPLE_SSPEC_MIN_SCORE` (default **80**, `0` disables)
+into an ERROR line and exit 1. Scores are cached under
+`.simple/cache/sspec-score-gate/` keyed on path + source hash + schema string;
+a scorer change with an unchanged schema string is NOT invalidated by the cache
+key (the real rule/tool versions are only written as a comment in the cache
+file) — after editing `src/app/sspec_maintain/`, delete that directory.
+
+`simple sspec-maintain scan` reports a stricter SCAN surface (adds MNT-002 for a
+missing `doc/06_spec` mirror and MNT-009 for stale lifecycle links); the
+rule-by-rule recipe that reaches 90+ on it, with measured numbers, is
+[`.claude/skills/spipe.md` § "Scoring 90+"](../../../../.claude/skills/spipe.md).
+On this host neither `bin/simple test` nor `sspec-maintain` runs (bootstrap-only
+CLI, seed parser behind main); measure with
+`sh scripts/check/sspec-score-seed-lane.shs <spec|dir>`, which prints both
+surfaces per spec from proven copies of the real scorer modules. Feature
+expert: [modern_sspec](../../feature_expert/modern_sspec/skill.md).
