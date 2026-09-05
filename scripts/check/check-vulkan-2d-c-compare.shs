@@ -1,0 +1,162 @@
+#!/bin/sh
+# check-vulkan-2d-c-compare.shs — Engine2D Vulkan 2D perf vs the C reference.
+#
+# THE CONTRACT
+#   test/05_perf/bench/vulkan_2d_c/vk2d_bench.c is the C Vulkan reference (adapted from the
+#   Magicalbat/videos single-file headless compute example): per frame it does
+#   vkCmdFillBuffer clear + N rect-fill compute dispatches + optional host
+#   readback, with ONE queue submit + ONE fence wait per frame.
+#   test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl drives Simple's Engine2D vulkan backend
+#   through the identical workload (clear + N draw_rect_filled + submit_batch
+#   + present + read_pixels_with_source).
+#
+#   This script runs both and aggregates an evidence file:
+#     build/vulkan-2d-c-compare/evidence.env
+#   with compare_ratio_x1000 = simple_fps * 1000 / c_fps and
+#   compare_status=pass when the ratio meets the budget (default 10%,
+#   override with VK2D_BUDGET_X1000).
+#
+# MODES
+#   (default)          live: build+run what the machine offers, then aggregate.
+#                      A leg that cannot run (no clang/vulkan headers, no
+#                      MoltenVK ICD, no vulkan seed binary) is recorded as
+#                      status=skipped with an explicit reason — never a fake
+#                      pass.
+#   --aggregate DIR    read DIR/c.env + DIR/simple.env and emit the aggregate
+#                      to stdout only. This is the spec-tested downgrade path.
+#
+# Exit: 0 when aggregate is pass or skipped, 1 when both legs ran and the
+# ratio is below budget.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+BENCH_DIR="$ROOT/test/05_perf/bench/vulkan_2d_c"
+OUT_DIR="$ROOT/build/vulkan-2d-c-compare"
+BUDGET_X1000=${VK2D_BUDGET_X1000:-100}
+W=${VK2D_W:-800}
+H=${VK2D_H:-600}
+RECTS=${VK2D_RECTS:-64}
+FRAMES=${VK2D_FRAMES:-300}
+
+fail() { echo "check-vulkan-2d-c-compare: $*" >&2; exit 1; }
+
+# ratio_status C_FPS_X1000 SIMPLE_FPS_X1000 C_STATUS SIMPLE_STATUS C_REASON SIMPLE_REASON
+# Emits the four aggregate lines on stdout.
+aggregate() {
+    c_fps=$1; s_fps=$2; c_st=$3; s_st=$4; c_reason=$5; s_reason=$6
+    echo "compare_budget_x1000=$BUDGET_X1000"
+    if [ "$c_st" != pass ]; then
+        echo "compare_status=skipped"
+        echo "compare_ratio_x1000=0"
+        echo "compare_reason=c-leg-$c_st:$c_reason"
+        return 0
+    fi
+    if [ "$s_st" != pass ]; then
+        echo "compare_status=skipped"
+        echo "compare_ratio_x1000=0"
+        echo "compare_reason=simple-leg-$s_st:$s_reason"
+        return 0
+    fi
+    if [ "$c_fps" -le 0 ]; then
+        echo "compare_status=fail"
+        echo "compare_ratio_x1000=0"
+        echo "compare_reason=c-fps-nonpositive:$c_fps"
+        return 1
+    fi
+    ratio=$((s_fps * 1000 / c_fps))
+    echo "compare_ratio_x1000=$ratio"
+    if [ "$ratio" -ge "$BUDGET_X1000" ]; then
+        echo "compare_status=pass"
+        echo "compare_reason=within-budget:$ratio>=$BUDGET_X1000"
+        return 0
+    fi
+    echo "compare_status=fail"
+    echo "compare_reason=below-budget:$ratio<$BUDGET_X1000"
+    return 1
+}
+
+value_of() {
+    # value_of FILE KEY — last wins, empty when absent
+    sed -n "s/^$2=//p" "$1" | tail -1
+}
+
+if [ "${1:-}" = "--aggregate" ]; then
+    [ $# -eq 2 ] || fail "--aggregate needs a row directory"
+    dir=$2
+    [ -f "$dir/c.env" ] || fail "missing $dir/c.env"
+    [ -f "$dir/simple.env" ] || fail "missing $dir/simple.env"
+    aggregate \
+        "$(value_of "$dir/c.env" c_fps_x1000)" \
+        "$(value_of "$dir/simple.env" simple_fps_x1000)" \
+        "$(value_of "$dir/c.env" c_status)" \
+        "$(value_of "$dir/simple.env" simple_status)" \
+        "$(value_of "$dir/c.env" c_reason)" \
+        "$(value_of "$dir/simple.env" simple_reason)"
+    exit $?
+fi
+
+# ── live mode ──────────────────────────────────────────────────────────────
+mkdir -p "$OUT_DIR"
+
+c_status=skipped; c_reason=not-attempted; c_fps=0; c_bin="$OUT_DIR/vk2d_bench"
+ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
+if ! command -v clang >/dev/null 2>&1; then
+    c_reason=no-clang
+elif ! command -v glslangValidator >/dev/null 2>&1; then
+    c_reason=no-glslangValidator
+elif [ ! -f /opt/homebrew/include/vulkan/vulkan.h ]; then
+    c_reason=no-vulkan-headers
+elif [ ! -f "$ICD" ]; then
+    c_reason=no-vulkan-icd
+else
+    (cd "$OUT_DIR" && glslangValidator -V "$BENCH_DIR/rect.comp.glsl" -o rect.spv) &&
+    clang -std=c99 -O2 "$BENCH_DIR/vk2d_bench.c" \
+        -I/opt/homebrew/include -L/opt/homebrew/lib -lvulkan -o "$c_bin" ||
+        fail "C reference build failed (toolchain present but compile broke)"
+    c_out=$(cd "$OUT_DIR" && VK_ICD_FILENAMES="$ICD" ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 | tail -1)
+    case $c_out in
+        c-vulkan-2d*fps=*)
+            c_status=pass; c_reason=measured
+            c_fps=$(echo "$c_out" | sed -n 's/.*fps=\([0-9.]*\).*/\1/p')
+            c_fps=$(awk "BEGIN{ printf \"%d\", $c_fps * 1000 }")
+            echo "c_line=$c_out"
+            ;;
+        *) c_status=fail; c_reason="no-fps-line:$(echo "$c_out" | head -c 80)" ;;
+    esac
+fi
+
+simple_status=skipped; simple_reason=not-attempted; s_fps=0
+SEED="$ROOT/src/compiler_rust/target/vulkan/release/simple"
+if [ "$c_status" = skipped ]; then
+    simple_reason=c-leg-skipped
+elif [ ! -x "$SEED" ]; then
+    simple_reason=no-vulkan-seed-binary
+else
+    s_out=$(cd "$ROOT" && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_LIB=src \
+        VK_ICD_FILENAMES="$ICD" VK2D_W="$W" VK2D_H="$H" VK2D_RECTS="$RECTS" VK2D_FRAMES="$FRAMES" \
+        "$SEED" run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl 2>/dev/null | grep '^simple-vulkan-2d' | tail -1) || true
+    case $s_out in
+        simple-vulkan-2d*fps~=*)
+            simple_status=pass; simple_reason=measured
+            s_fps=$(echo "$s_out" | sed -n 's/.*fps~=\([0-9]*\).*/\1/p')
+            s_fps=$((s_fps * 1000))
+            echo "simple_line=$s_out"
+            ;;
+        *) simple_status=fail; simple_reason="no-fps-line:$(echo "$s_out" | head -c 80)" ;;
+    esac
+fi
+
+{
+    echo "c_status=$c_status"
+    echo "c_reason=$c_reason"
+    echo "c_fps_x1000=$c_fps"
+    echo "simple_status=$simple_status"
+    echo "simple_reason=$simple_reason"
+    echo "simple_fps_x1000=$s_fps"
+} | tee "$OUT_DIR/c.env.raw" >/dev/null
+# Split rows for the --aggregate contract path.
+{ echo "c_status=$c_status"; echo "c_reason=$c_reason"; echo "c_fps_x1000=$c_fps"; } > "$OUT_DIR/c.env"
+{ echo "simple_status=$simple_status"; echo "simple_reason=$simple_reason"; echo "simple_fps_x1000=$s_fps"; } > "$OUT_DIR/simple.env"
+
+aggregate "$c_fps" "$s_fps" "$c_status" "$simple_status" "$c_reason" "$simple_reason" \
+    | tee "$OUT_DIR/evidence.env"
