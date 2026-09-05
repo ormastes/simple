@@ -168,20 +168,74 @@ PureSimple backend)
 ## Acceptance Criteria
 
 - [ ] `test/01_unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl` completes
-      within 60s in interpreter mode (RSA-2048 sign + verify)
+      within 60s in interpreter mode (RSA-2048 sign + verify) — STILL OPEN,
+      correctness reached but not the budget: with `_pss_bi_mod_exp` delegating
+      to `bi_mod_exp_montgomery` the spec passes 6 examples / 0 failures in
+      **569s** (`9:29.62` wall, `simple_seed run`, 2026-09-05). That is a real
+      pass on the algorithm and a ~9.5x miss on the 60s budget. The remaining
+      cost is interpreter-side, exactly as Phase 4 predicted: ~2048 Montgomery
+      squarings + 512 multiplies per 2048-bit modexp, each rebuilding padded
+      limb arrays because arrays are value types.
+      Controlled A/B, one tree and one binary, only `src/os/crypto/rsa_pss.spl`
+      toggled: the schoolbook shifted-modulus path at `HEAD` did NOT finish a
+      single example inside a 1500s cap (`24:58.08` wall, killed), while the
+      Montgomery path completed all 6 in 569s. Montgomery is therefore a >2.6x
+      improvement and not a regression — it is simply not yet 9.5x more.
 - [ ] `test/01_unit/lib/crypto/rsa_pkcs1_v15_spec.spl` passes via PureSimple
-      backend in interpreter mode (not HostedReference)
-- [ ] No new dependency on `rt_embedded_host_rsa_component`
-- [ ] Shared bigint module with full test coverage — PARTIAL: shipped as
-      `src/lib/common/math/bignum/{limb,bignat,fixed}.spl` (specs
-      `test/01_unit/lib/math/bignum/{limb_spike,bignat,fixed}_spec.spl`), not
-      as `src/lib/common/math/bigint.spl`; still open because neither
-      `src/os/crypto/rsa_pss.spl` nor `rsa_fallback.spl` imports it (0 hits for
-      `math.bignum` in `src/os/crypto/rsa_*.spl`, 2026-09-05)
-  - divergence: planned one `bigint.spl`; shipped a `bignum/` package split into
-    variable-length `bignat` and constant-shape `fixed` layers
-- [ ] Montgomery multiply round-trips correctly for random inputs
-- [ ] All existing RSA/crypto specs pass without regression
+      backend in interpreter mode (not HostedReference) — STILL OPEN and NOT
+      touched by this lane: the spec's own header records that the PureSimple
+      backend needs `rt_tls13_sha256`, unregistered in interpreter mode. The
+      spec is 10 examples / 6 failures both with and without this lane's change
+      (`rsa_sha512_sign_embedded_host` unresolved), so flipping the backend
+      selector today would only convert one red into another.
+- [x] No new dependency on `rt_embedded_host_rsa_component` — verified 2026-09-05:
+      acceptance `it` "checkbox: No new dependency on
+      `rt_embedded_host_rsa_component`" green under
+      `src/compiler_rust/target/debug/simple run
+      test/03_system/plan_acceptance/rsa_modexp_montgomery_barrett_spec.spl`
+      (6 examples, 3 failures; this `it` among the 3 passing, zero `E1034` in the
+      run so the real `std.spec` module was loaded, not the interpreter shims)
+- [x] Shared bigint module with full test coverage — verified 2026-09-05:
+      `src/lib/common/math/bigint.spl` created (30-bit-limb `bi_*` API over
+      `math/bignum/{limb,bignat}`, plus `MontgomeryCtx`/`BarrettCtx` and both
+      reducers), with `test/01_unit/lib/math/bigint_spec.spl` green at
+      6 examples / 0 failures on both
+      `bin/release/aarch64-apple-darwin/simple_seed run` and
+      `src/compiler_rust/target/debug/simple run`. Negative control run
+      (`mont_mismatches` expectation flipped to 99999) failed as
+      `assert_equal failed: expected 99999, got 0`, proving the green
+      discriminates and the comparison values are really computed.
+      Acceptance `it` "checkbox: Shared `src/lib/common/math/bigint.spl` with
+      full test coverage" green in the same acceptance run.
+  - divergence: `bigint.spl` is a facade over the shipped `bignum/` package
+    (`bignat` for variable-length public arithmetic) rather than a second copy
+    of that arithmetic; the plan's `bi_from_bytes` / `bi_to_bytes` were NOT
+    added because `bignat.{from,to}_bytes_{be,le}` already cover them and
+    nothing in this lane calls a `bi_`-prefixed alias.
+  - `src/os/crypto/rsa_pss.spl` now imports it (`_pss_bi_mod_exp` delegates to
+    `bi_mod_exp_montgomery`); `rsa_fallback.spl` is NOT migrated — see the
+    still-open perf box below.
+- [x] Montgomery multiply round-trips correctly for random inputs — verified
+      2026-09-05: acceptance `it` "checkbox: Montgomery multiply round-trips
+      correctly for random inputs" green in the acceptance run above, and
+      `test/01_unit/lib/math/bigint_spec.spl` additionally cross-checks
+      `bi_mod_exp_montgomery` AND `bi_mod_exp_barrett` against
+      `_ref_pow_mod` (an independent square-and-multiply built only from
+      schoolbook multiply + binary-long-division `bi_mod`) over 6 deterministic
+      LCG vectors on a 3-limb odd modulus: 0 Montgomery mismatches, 0 Barrett
+      mismatches, 0 Montgomery-vs-Barrett mismatches. Barrett is separately
+      pinned against `bi_mod` on 8 multi-limb products.
+- [ ] All existing RSA/crypto specs pass without regression — STILL OPEN:
+      the acceptance `it` shells out to `bin/simple test`, and `bin/simple` on
+      this host has no `test` command (`error: unknown command 'test'`), so the
+      oracle cannot report. Measured directly instead, per spec, with
+      `bin/release/aarch64-apple-darwin/simple_seed run`:
+      `rsa_pss_sha256_kat_spec` 3+4 examples / 0 failures,
+      `rsa_pss_smoke_spec` 2 / 0, `rsa_pss_sha256_roundtrip_slow_spec` 6 / 0
+      (real RSA-2048 sign+verify through the new Montgomery path).
+      `rsa_pkcs1_v15_spec` is 10 examples / 6 failures — but it is 10/6 at
+      `HEAD` too, with `rsa_pss.spl` reverted, so it is pre-existing
+      (`rsa_sha512_sign_embedded_host` unresolved), not a regression.
 
 ## Risk Factors
 
