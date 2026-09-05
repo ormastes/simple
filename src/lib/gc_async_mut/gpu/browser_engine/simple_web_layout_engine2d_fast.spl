@@ -38,6 +38,7 @@ use std.gc_async_mut.io.mod_stub.{env_get}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage,
     engine2d_draw_ir_adv_composition_with_images,
@@ -131,6 +132,122 @@ var _web_draw_ir_last_comparison_receipt: text = ""
 var _web_draw_ir_last_evidence: WebGpuPaintTimingEvidence = web_gpu_paint_timing_evidence("", 0, 0, 0, 0, 0, false, false, false)
 val WEB_DRAW_IR_ROUTE_CACHE_MAX: i32 = 16
 
+# Item 1 of doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md:
+# a whole Engine2D — and with it the framebuffer, staging and font device
+# buffers that VulkanBackend.init / MetalBackend.init allocate — was created and
+# destroyed on every route call, at a surface extent that had not changed
+# between frames. Park the engine between calls instead, keyed on the only
+# identity that determines whether the parked device state is still valid: the
+# CANONICAL backend key plus the surface extent.
+#
+# A parked handle is never evidence that the device is healthy. `_web_fast_engine_healthy`
+# is re-evaluated on both park and acquire, and anything it cannot vouch for is
+# torn down and rebuilt: a different extent, a different backend, an engine that
+# did not get the backend it was asked for (create_with_backend_fast never
+# fails — it silently falls back, and a fallback surface must never be handed
+# back as though the requested backend had initialized), or a device whose
+# in-flight work state is unknown (`completion_unknown`, `vulkan_font_state_unknown`).
+# Fail closed: when in doubt, discard and recreate.
+class _WebFastEngineSlot:
+    backend: text
+    width: i32
+    height: i32
+    engine: Engine2D
+
+var _web_fast_engine_slots: [_WebFastEngineSlot] = []
+var _web_fast_engine_creates: i32 = 0
+var _web_fast_engine_reuses: i32 = 0
+var _web_fast_engine_discards: i32 = 0
+# One slot per canonical backend. The route runs at most two backends per frame
+# (the software oracle and the requested lane); the cap only bounds a caller
+# that cycles backend names.
+val WEB_FAST_ENGINE_SLOT_MAX: i32 = 4
+
+fn _web_fast_engine_healthy(
+    engine: Engine2D, canonical_backend: text, width: i32, height: i32
+) -> bool:
+    if engine.w != width or engine.h != height:
+        return false
+    if engine.selected_backend_name != canonical_backend:
+        return false
+    if engine.vulkan_font_state_unknown:
+        return false
+    if val Some(vulkan) = engine.vulkan_backend:
+        if not vulkan.initialized:
+            return false
+        if vulkan.completion_unknown:
+            return false
+    if val Some(metal) = engine.metal_backend:
+        if not metal.initialized:
+            return false
+    true
+
+fn _web_fast_engine_slot_index(canonical_backend: text) -> i32:
+    var index = 0
+    while index < _web_fast_engine_slots.len():
+        if _web_fast_engine_slots[index].backend == canonical_backend:
+            return index
+        index = index + 1
+    -1
+
+fn _web_fast_engine_acquire(
+    width: i32, height: i32, backend_name: text
+) -> Engine2D:
+    val canonical = backend_canonical_name(backend_name)
+    val found = _web_fast_engine_slot_index(canonical)
+    if found >= 0:
+        val slot = _web_fast_engine_slots[found]
+        _web_fast_engine_slots.remove(found)
+        var reusable = slot.width == width and slot.height == height
+        if reusable:
+            reusable = _web_fast_engine_healthy(slot.engine, canonical, width, height)
+        if reusable:
+            _web_fast_engine_reuses = _web_fast_engine_reuses + 1
+            return slot.engine
+        slot.engine.shutdown()
+        _web_fast_engine_discards = _web_fast_engine_discards + 1
+    _web_fast_engine_creates = _web_fast_engine_creates + 1
+    Engine2D.create_with_backend_fast(width, height, backend_name)
+
+fn _web_fast_engine_release(
+    engine: Engine2D, width: i32, height: i32, backend_name: text
+):
+    val canonical = backend_canonical_name(backend_name)
+    if not _web_fast_engine_healthy(engine, canonical, width, height):
+        engine.shutdown()
+        _web_fast_engine_discards = _web_fast_engine_discards + 1
+        return
+    if _web_fast_engine_slots.len() >= WEB_FAST_ENGINE_SLOT_MAX:
+        val evicted = _web_fast_engine_slots[0]
+        _web_fast_engine_slots.remove(0)
+        evicted.engine.shutdown()
+        _web_fast_engine_discards = _web_fast_engine_discards + 1
+    _web_fast_engine_slots.push(_WebFastEngineSlot(
+        backend: canonical, width: width, height: height, engine: engine))
+
+# Teardown for every parked engine. Called from web_draw_ir_gpu_route_policy_reset()
+# so a parked device buffer can never outlive the policy that parked it, and so
+# a caller shutting the route down releases them explicitly rather than leaking.
+pub fn web_draw_ir_engine_cache_drain():
+    var index = 0
+    while index < _web_fast_engine_slots.len():
+        _web_fast_engine_slots[index].engine.shutdown()
+        _web_fast_engine_discards = _web_fast_engine_discards + 1
+        index = index + 1
+    _web_fast_engine_slots = []
+
+pub fn web_draw_ir_engine_cache_create_count() -> i32:
+    _web_fast_engine_creates
+
+pub fn web_draw_ir_engine_cache_reuse_count() -> i32:
+    _web_fast_engine_reuses
+
+pub fn web_draw_ir_engine_cache_discard_count() -> i32:
+    _web_fast_engine_discards
+
+pub fn web_draw_ir_engine_cache_live_count() -> i32:
+    _web_fast_engine_slots.len()
+
 fn _web_draw_ir_copy_evidence(value: WebGpuPaintTimingEvidence) -> WebGpuPaintTimingEvidence:
     WebGpuPaintTimingEvidence(
         backend_name: value.backend_name,
@@ -150,6 +267,10 @@ fn _web_draw_ir_copy_evidence(value: WebGpuPaintTimingEvidence) -> WebGpuPaintTi
     )
 
 pub fn web_draw_ir_gpu_route_policy_reset():
+    web_draw_ir_engine_cache_drain()
+    _web_fast_engine_creates = 0
+    _web_fast_engine_reuses = 0
+    _web_fast_engine_discards = 0
     _web_draw_ir_route_states = []
     _web_draw_ir_route_consults = 0
     _web_draw_ir_route_canonical_submissions = 0
@@ -266,7 +387,7 @@ fn _simple_web_layout_render_draw_ir_composition(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text, image_resources: [SimpleOsHostGpuImageResource]
 ) -> Engine2dDrawIrAdvResult:
-    var engine = Engine2D.create_with_backend_fast(width, height, backend_name)
+    var engine = _web_fast_engine_acquire(width, height, backend_name)
     engine.clear(0u32)
     var images: [Engine2dResolvedDrawIrImage] = []
     for image in image_resources:
@@ -276,7 +397,7 @@ fn _simple_web_layout_render_draw_ir_composition(
     val render = engine2d_draw_ir_adv_composition_with_images(
         engine, composition, true, images
     )
-    engine.shutdown()
+    _web_fast_engine_release(engine, width, height, backend_name)
     render
 
 fn _simple_web_layout_draw_ir_once(
@@ -451,6 +572,22 @@ fn _web_draw_ir_upload_route(
         readback: readback, oracle_pixels: oracle.pixels, elapsed_us: elapsed_us,
         skipped_command_count: oracle.skipped_command_count)
 
+# The upload route without its device leg: renders the canonical software
+# oracle and nothing else. Used only where the device round trip records
+# nothing (see the steady non-offload branch of _web_draw_ir_choose_route). It
+# is still a canonical route submission and still reports the oracle's skipped
+# command count, so both remain observable exactly as before.
+fn _web_draw_ir_oracle_route(
+    composition: DrawIrComposition, width: i32, height: i32
+) -> _WebDrawIrTimedRoute:
+    _web_draw_ir_route_canonical_submissions = _web_draw_ir_route_canonical_submissions + 1
+    val oracle = _simple_web_layout_render_draw_ir_composition(
+        composition, width, height, "software", [])
+    _WebDrawIrTimedRoute(
+        readback: engine2d_readback([], "not_requested"),
+        oracle_pixels: oracle.pixels, elapsed_us: 0,
+        skipped_command_count: oracle.skipped_command_count)
+
 fn _web_draw_ir_gpu_route(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text
@@ -530,15 +667,23 @@ fn _web_draw_ir_choose_route(
                 return []
             return fallback.oracle_pixels
 
-        val upload = _web_draw_ir_upload_route(
-            composition, width, height, backend_name)
-        if upload.skipped_command_count != 0:
+        # Item 7 of doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md.
+        # This branch used to upload the oracle to the device, read the whole
+        # surface back and compare it pixel-for-pixel. That round trip recorded
+        # NOTHING: both outcomes published the cached `state.evidence`
+        # unchanged, `state.pixels_match` was never updated, no comparison
+        # receipt was written, and the pixels returned equalled the oracle on
+        # either side of the comparison. It was pure waste, not an A/B whose
+        # result anyone could read. The evidence that DECIDES this route is
+        # gathered by the first-N sampling frames below (`state.complete ==
+        # false`), which still run the full upload + gpu A/B and still latch
+        # `pixels_match` / `*_device_proven`; only an already-decided steady
+        # frame skips the device.
+        val oracle = _web_draw_ir_oracle_route(composition, width, height)
+        if oracle.skipped_command_count != 0:
             return []
-        if _web_draw_ir_pixels_equal(upload.readback.pixels, upload.oracle_pixels):
-            _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(state.evidence)
-            return upload.readback.pixels
         _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(state.evidence)
-        return upload.oracle_pixels
+        return oracle.oracle_pixels
 
     val sample = state.upload_samples.len()
     var upload = _WebDrawIrTimedRoute(

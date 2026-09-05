@@ -156,3 +156,52 @@ with a measured claim attached.
 the nearest existing spec, and the spec must be run and its verdict line
 quoted. A source-only argument that a loop got shorter is not evidence. None of
 these may be reported as a speedup, because nothing here can measure one.
+
+## Items 1 and 7 closed 2026-09-05
+
+**Item 1 — engine reuse.** Both route paths now acquire and release a pooled
+engine instead of creating and destroying one per call:
+`simple_web_layout_engine2d_fast.spl` (slot cache plus drain and counters) and
+`simple_web_html_engine2d_presenter.spl`. The key is the canonical backend name
+plus the extent. Invalidation is fail-closed and re-evaluated on BOTH park and
+acquire: extent change, backend change, a `selected_backend_name` that does not
+match the canonical request (so a silent CPU fallback is never parked as though
+the device came up), an uninitialized Vulkan or Metal backend,
+`completion_unknown`, and an unknown Vulkan font state. Anything not parked is
+shut down.
+
+Measured over 4 frames at 8x4 on the "vulkan" route: fast-engine creates went
+2, 0, 1, 0, and the presenter attempted 1 create across all four frames where
+it previously did one per frame. One discard in that window was a genuine
+`completion_unknown` catch, which is the fail-closed path working rather than
+churn. Note `web_draw_ir_gpu_route_sample` has no production caller, so the
+production benefit is the execution render and the presenter.
+
+**Item 7 — removed as waste.** In the steady non-offload branch both outcomes
+published the CACHED evidence, `pixels_match` was never updated, no receipt was
+written, and the returned pixels equalled the oracle either way, so nothing
+could observe the comparison. It is now an oracle-only route. Sampling frames
+still run the full A/B, so the evidence that decides the route is unchanged.
+
+Verified: `web_draw_ir_engine_reuse_spec` 7/7 (new: same-dims reuse, extent
+change, backend change, failed engine not cached, drain teardown, presenter
+invalidation, item 7), `web_gpu_present_paint_coverage_spec` 23/23,
+`web_draw_ir_route_key_memory_spec` 1/1.
+`simple_web_engine2d_renderer_spec` fails 7 both with the cache active and with
+it force-bypassed, byte-identical, so that red is pre-existing and unrelated.
+
+### Unconfirmed observation — do NOT cite this as a known defect
+
+While item 1 was being written, a print inside the `Ok(engine)` arm of a
+`val x = match <Result>:` appeared to fire twice for one call, and was first
+written up as a live compiler defect that would have meant `engine.shutdown()`
+ran twice per present. **It did not reproduce.** Two minimal cases on the same
+2026-09-05 seed — a plain `Result<i64, text>`, and a class-valued
+`Result<Eng, text>` whose arm calls a method — each executed the arm exactly
+once. The likeliest explanation is that the enclosing function ran twice and
+the effect was misattributed to the match.
+
+No bug record was filed, because filing an unreproducible compiler defect is
+worse than filing nothing: it becomes a cited excuse for workarounds. The park
+still sits outside the match, which is the right shape regardless. If anyone
+sees this again, capture the FULL call path, not just the arm.

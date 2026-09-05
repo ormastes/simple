@@ -7,6 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 }
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
@@ -440,6 +441,125 @@ fn present_gpu_paint_readback(frame: WebGpuPaintFrame, backend_name: text, base:
     readback
 
 # ---------------------------------------------------------------------------
+# Presenter engine reuse — item 1 of
+# doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md
+# ---------------------------------------------------------------------------
+# The upload present path below created and destroyed a whole Engine2D — and
+# every device buffer its backend init allocates — on every call, at an extent
+# that had not changed between frames. Park it instead, keyed on the canonical
+# backend key plus the surface extent.
+#
+# A parked handle is never evidence that the device is healthy: the predicate is
+# re-evaluated on both park and acquire, and anything it cannot vouch for is
+# torn down and recreated. An engine that failed to initialize is never parked
+# at all — `create_requested_backend` returns Err and there is no engine to park,
+# and an engine whose `selected_backend_name` is not the backend that was asked
+# for is discarded rather than handed back. Fail closed: when in doubt, recreate.
+class _WebPresenterEngineSlot:
+    backend: text
+    width: i32
+    height: i32
+    engine: Engine2D
+
+var _web_presenter_engine_slots: [_WebPresenterEngineSlot] = []
+# Counted at the point of the create ATTEMPT, not at a successful create, so a
+# backend that cannot initialize on this host is still visible as work avoided.
+var _web_presenter_engine_create_attempts: i32 = 0
+var _web_presenter_engine_reuses: i32 = 0
+var _web_presenter_engine_discards: i32 = 0
+val WEB_PRESENTER_ENGINE_SLOT_MAX: i32 = 4
+
+fn _web_presenter_engine_healthy(
+    engine: Engine2D, canonical_backend: text, width: i32, height: i32
+) -> bool:
+    if engine.w != width or engine.h != height:
+        return false
+    if engine.selected_backend_name != canonical_backend:
+        return false
+    if engine.vulkan_font_state_unknown:
+        return false
+    if val Some(vulkan) = engine.vulkan_backend:
+        if not vulkan.initialized:
+            return false
+        if vulkan.completion_unknown:
+            return false
+    if val Some(metal) = engine.metal_backend:
+        if not metal.initialized:
+            return false
+    true
+
+fn _web_presenter_engine_slot_index(canonical_backend: text) -> i32:
+    var index = 0
+    while index < _web_presenter_engine_slots.len():
+        if _web_presenter_engine_slots[index].backend == canonical_backend:
+            return index
+        index = index + 1
+    -1
+
+fn _web_presenter_engine_acquire(
+    width: i32, height: i32, backend_name: text
+) -> Result<Engine2D, text>:
+    val canonical = backend_canonical_name(backend_name)
+    val found = _web_presenter_engine_slot_index(canonical)
+    if found >= 0:
+        val slot = _web_presenter_engine_slots[found]
+        _web_presenter_engine_slots.remove(found)
+        var reusable = slot.width == width and slot.height == height
+        if reusable:
+            reusable = _web_presenter_engine_healthy(slot.engine, canonical, width, height)
+        if reusable:
+            _web_presenter_engine_reuses = _web_presenter_engine_reuses + 1
+            return Ok(slot.engine)
+        slot.engine.shutdown()
+        _web_presenter_engine_discards = _web_presenter_engine_discards + 1
+    _web_presenter_engine_create_attempts = _web_presenter_engine_create_attempts + 1
+    Engine2D.create_requested_backend(width, height, backend_name)
+
+fn _web_presenter_engine_release(
+    engine: Engine2D, width: i32, height: i32, backend_name: text
+):
+    val canonical = backend_canonical_name(backend_name)
+    if not _web_presenter_engine_healthy(engine, canonical, width, height):
+        engine.shutdown()
+        _web_presenter_engine_discards = _web_presenter_engine_discards + 1
+        return
+    if _web_presenter_engine_slots.len() >= WEB_PRESENTER_ENGINE_SLOT_MAX:
+        val evicted = _web_presenter_engine_slots[0]
+        _web_presenter_engine_slots.remove(0)
+        evicted.engine.shutdown()
+        _web_presenter_engine_discards = _web_presenter_engine_discards + 1
+    _web_presenter_engine_slots.push(_WebPresenterEngineSlot(
+        backend: canonical, width: width, height: height, engine: engine))
+
+# Teardown for every parked presenter engine, so a parked device buffer never
+# outlives the caller that parked it.
+pub fn web_presenter_engine_cache_drain():
+    var index = 0
+    while index < _web_presenter_engine_slots.len():
+        _web_presenter_engine_slots[index].engine.shutdown()
+        _web_presenter_engine_discards = _web_presenter_engine_discards + 1
+        index = index + 1
+    _web_presenter_engine_slots = []
+
+pub fn web_presenter_engine_cache_reset():
+    web_presenter_engine_cache_drain()
+    _web_presenter_engine_create_attempts = 0
+    _web_presenter_engine_reuses = 0
+    _web_presenter_engine_discards = 0
+
+pub fn web_presenter_engine_cache_create_attempt_count() -> i32:
+    _web_presenter_engine_create_attempts
+
+pub fn web_presenter_engine_cache_reuse_count() -> i32:
+    _web_presenter_engine_reuses
+
+pub fn web_presenter_engine_cache_discard_count() -> i32:
+    _web_presenter_engine_discards
+
+pub fn web_presenter_engine_cache_live_count() -> i32:
+    _web_presenter_engine_slots.len()
+
+# ---------------------------------------------------------------------------
 # Default (upload-bound) present path — unchanged
 # ---------------------------------------------------------------------------
 fn present_layout_pixels_with_engine2d_readback(pixels: [u32], width: i32, height: i32, backend_name: text, base: u32) -> Engine2DReadback:
@@ -452,18 +572,34 @@ fn present_layout_pixels_with_engine2d_readback(pixels: [u32], width: i32, heigh
     # Route non-CPU backends to Engine2D for GPU rendering (Vulkan, CUDA, Metal, etc.)
     # Create the GPU backend, fill with base color, then blit layout pixels on top.
     # If the GPU backend fails to initialize, fall back to software pixels.
-    val engine_result = Engine2D.create_requested_backend(width, height, normalized_backend)
+    val engine_result = _web_presenter_engine_acquire(width, height, normalized_backend)
     val readback = match engine_result:
         Ok(engine):
             engine.clear(base)
             if pixels.len() == width * height:
                 engine.draw_image(0, 0, width, height, pixels)
             val gpu_pixels = engine.read_pixels_with_source()
-            engine.shutdown()
             gpu_pixels
         Err(_):
             # GPU backend unavailable; return software pixels as fallback
             engine2d_readback(pixels, "cpu_fallback")
+    # The park is hoisted OUT of the match arm on purpose: parking must happen
+    # exactly once, and a second park of the same engine would put two slots on
+    # one handle. `if val Ok(...)` also reads better here than a match whose
+    # value is discarded.
+    #
+    # A duplicate-execution effect was observed in situ while this was written
+    # (a print inside an `Ok(engine)` arm of `val x = match <Result>:` appearing
+    # twice for one call) and was first written up here as a compiler defect.
+    # That claim did NOT survive checking: two minimal reproductions on the same
+    # 2026-09-05 seed — a plain `Result<i64, text>` and a class-valued
+    # `Result<Eng, text>` whose arm calls a method — each ran the arm exactly
+    # once. So do not treat "match arms run twice" as a known defect of this
+    # toolchain on the strength of this comment. Whatever was seen was more
+    # likely the enclosing function running twice. See the audit doc's
+    # unconfirmed-observation note before spending time on it.
+    if val Ok(used) = engine_result:
+        _web_presenter_engine_release(used, width, height, normalized_backend)
     readback
 
 # `expected_pixels` is i64 on purpose. `width * height` in i32 WRAPS, and a
