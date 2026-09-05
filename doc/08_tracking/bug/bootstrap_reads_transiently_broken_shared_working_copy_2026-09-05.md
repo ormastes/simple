@@ -250,3 +250,64 @@ Consequences to keep straight:
 - This does not weaken the case for fix 3. The four contention modes above are
   caused by reading a *moving* tree; a half-landed tip is a separate defect that
   is equally present in `$PWD` builds the moment the working copy is clean.
+
+## CORRECTION (2026-09-05, 16:50): the SIGTERMs were a repo-owned RSS guard, not a peer
+
+The cross-session-SIGTERM section above is **wrong about the cause** and is
+retained only as history. The killer is
+`scripts/resource/kill_simple_monitor.shs`, a daemon in this repo that kills any
+`bin/simple run|test` exceeding **24 GB RSS**. Its own log, `/tmp/kill_simple_monitor.log`,
+names the exact pids I traced:
+
+```
+2026-09-05T15:11:49 KILL pid=1983604 reason=simple_rss measured=24118 limit=24000
+2026-09-05T16:37:30 WARN pid=2011613 rss=42655MB
+2026-09-05T16:37:30 KILL pid=2011613 reason=simple_rss measured=42655 limit=24000
+```
+
+Both entries carry the full `native_build_worker.spl` argv. The `si_pid 2074427`
+my strace recorded is the kill helper of monitor pid 2074271, started 11 s
+earlier. 22 kills today, every one `reason=simple_rss` at the 24000 MB limit.
+
+**This explains the determinism that never fit an external killer.** I noted
+early that 427/428/429 s across three runs was too tight for coincidence and
+could not account for it. It is not a timer at all: the worker's memory growth
+is deterministic, so it crosses 24 GB at the same point in the same work every
+run. Same mechanism, expressed in seconds.
+
+**The load-bearing consequence: a Stage-3 self-host cannot complete on this host
+while that monitor runs with its current ceiling.** A worker legitimately
+reaches 42-50 GB — measured 41.7 GB steady at 22 minutes, and 42,655 MB at the
+kill. The cap is 24 GB. Every run is killed on the way up, which is why seven
+consecutive attempts died and none reached the phase-3 SIGSEGV.
+
+The script protects `simple_mcp_server`, `simple_lsp_mcp_server`, tmux, claude,
+codex, node and npm by name. A bootstrap worker is not on that list, which reads
+as an oversight rather than intent: a self-host worker is precisely the
+"legitimately enormous" case the list exists to spare.
+
+### What this retracts
+
+- "Another session on this shared box killed our worker" — **retracted.** A peer
+  did run unanchored `pkill -f` patterns and confirmed it, and that is a real
+  practice defect, but the measured deaths at 14:09, 14:21, 14:33, 14:45, 14:54,
+  15:02, 15:11 and 16:37 are all `reason=simple_rss` in the monitor's log. I
+  accepted a confession that the evidence did not support, and the peer
+  volunteered the retraction after finding the log.
+- Any run counted toward the phase-3 SIGSEGV population that died by SIGTERM
+  needs re-filtering. A SIGTERM whose `si_pid` traces to the monitor is evidence
+  of the RSS ceiling, not of the compiler defect. The `signal 11` apport entries
+  remain real and remain separate.
+
+### Fix options (not applied — a shared guard, and not mine to change alone)
+
+1. Raise the ceiling for the bootstrap lane only: `KILL_SIMPLE_MEM_MB=65536` in
+   the **monitor daemon's** environment, then restart the monitor. The script's
+   own error text says `SIMPLE_TIMEOUT_SECONDS` does not affect this limit.
+2. Add the `native_build_worker.spl` argv to `is_protected()` (line 191), which
+   is the narrower change and matches the existing intent of that list.
+3. Leave it and accept that Stage-3 self-host is not reproducible on this host.
+
+Option 2 is the smallest correct change; option 1 is reversible and needs no
+edit to a shared script. Either way the decision belongs to whoever owns the
+box, not to a single lane mid-run.
