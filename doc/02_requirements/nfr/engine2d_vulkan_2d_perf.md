@@ -4,7 +4,7 @@
 - **Status:** measured baseline; targets below
 - **Research:** `doc/01_research/local/2d_rendering_perf_dma_alignment_soa_async.md`,
   `doc/01_research/domain/2d_renderer_gpu_offload_patterns.md`
-- **Harness:** `bench/vulkan_2d_c/` (C reference adapted from the Magicalbat
+- **Harness:** `test/05_perf/bench/vulkan_2d_c/` (C reference adapted from the Magicalbat
   single-file headless Vulkan compute example; Simple counterpart driving
   Engine2D), gated by `scripts/check/check-vulkan-2d-c-compare.shs` +
   `test/03_system/check/engine2d_vulkan_2d_perf_contract_spec.spl`

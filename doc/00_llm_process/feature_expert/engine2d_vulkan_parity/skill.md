@@ -12,7 +12,7 @@ compared byte for byte. This is a measurement harness, not a renderer.
 - NFR: `doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md`
 - Research: `doc/01_research/local/2d_rendering_perf_dma_alignment_soa_async.md`
 - Bug: `doc/08_tracking/bug/emu_shape_decomposition_emits_one_gpu_dispatch_per_pixel_2026-09-03.md`
-- Harness: `bench/vulkan_2d_c/`
+- Harness: `test/05_perf/bench/vulkan_2d_c/`
 
 ## Gates
 
@@ -35,7 +35,7 @@ compared byte for byte. This is a measurement harness, not a renderer.
    not the shape maths. Span-form (one rect per row) is the fix; it is what
    `emu_draw_circle_filled` already does and why filled shapes are ~25x while
    outlines are ~144x.
-3. **Both legs MUST load `bench/vulkan_2d_c/scenes.txt`.** When each generated
+3. **Both legs MUST load `test/05_perf/bench/vulkan_2d_c/scenes.txt`.** When each generated
    its own rect set they rendered different pictures (60.1% vs 63.9% coverage)
    and no pixel comparison meant anything. Never re-derive the set per
    language: C's u64 xorshift and Simple's i64 sign-masked variant diverge

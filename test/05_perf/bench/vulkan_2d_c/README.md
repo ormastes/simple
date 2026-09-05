@@ -31,7 +31,7 @@ VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json ./vk2d_bench 8
 
 ```sh
 SIMPLE_LIB=src VK_ICD_FILENAMES=.../MoltenVK_icd.json \
-  src/compiler_rust/target/vulkan/release/simple run bench/vulkan_2d_c/vk2d_bench.spl
+  src/compiler_rust/target/vulkan/release/simple run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl
 # knobs: VK2D_W VK2D_H VK2D_RECTS VK2D_FRAMES VK2D_READBACK
 ```
 

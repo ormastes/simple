@@ -133,7 +133,7 @@ holds; the number does not.
 | `src/app/ui_showcase/hosts/main_2d.spl:36-37` | 320x240 | **this agent** | the in-file comment at `:32-33` records *why*: the surface is allocated one `push` per pixel and painted per command in-language. The small default is a **symptom**; the defect is the per-pixel interpreted allocation path. Raising this default without fixing that path makes the host unusable. |
 | `src/app/ui_showcase/hosts/main_web.spl:27-28` | 800x600 | **this agent** | small-framebuffer-tuned. |
 | `src/app/ui_showcase/hosts/main_gui.spl:24-25` | `WIDGET_SHOWCASE_WINDOW_W/H` | this agent (indirect) | window-manager geometry, not a framebuffer target; correctly not resolution-swept. |
-| `bench/vulkan_2d_c/feature_showcase.spl:24-25` | `const W: i32 = 800`, `const H: i32 = 600` | **other agent** | compile-time constants, not env-overridable — the bench cannot be swept at all without an edit. |
+| `test/05_perf/bench/vulkan_2d_c/feature_showcase.spl:24-25` | `const W: i32 = 800`, `const H: i32 = 600` | **other agent** | compile-time constants, not env-overridable — the bench cannot be swept at all without an edit. |
 | `scripts/check/check-ui-showcase-exact-backend-matrix.shs:73` | `SIMPLE_SHOWCASE_W=320` | this agent | the **only** gate that pins the resolution explicitly; every other spec takes the host default. |
 
 `src/lib/gc_async_mut/gpu/engine2d/engine.spl` — **explicitly clean**: its only
@@ -282,7 +282,7 @@ host allocation per call at 8K.
 to at least `65536`, or replace the fixed bound with an overflow check on
 `w * h`.
 
-**CR-10 — `bench/vulkan_2d_c/feature_showcase.spl:24-25`.**
+**CR-10 — `test/05_perf/bench/vulkan_2d_c/feature_showcase.spl:24-25`.**
 `const W: i32 = 800` / `const H: i32 = 600` are compile-time constants, so the
 bench cannot be swept without an edit. Make them read
 `SIMPLE_SHOWCASE_W`/`SIMPLE_SHOWCASE_H` with the 8K screen target as the default,

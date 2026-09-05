@@ -1,7 +1,7 @@
 // vk2d_bench.c — headless Vulkan 2D rect-fill benchmark.
 //
 // Adapted from the Magicalbat/videos vulkan-compute single-file C99 example
-// (bench/vulkan_2d_c/main.c, fetched verbatim from
+// (test/05_perf/bench/vulkan_2d_c/main.c, fetched verbatim from
 // https://raw.githubusercontent.com/Magicalbat/videos/main/vulkan-compute/main.c):
 // same instance/device/memory strategy (one HOST_VISIBLE|HOST_COHERENT
 // allocation, first compute queue, one-shot command buffers, fence wait).

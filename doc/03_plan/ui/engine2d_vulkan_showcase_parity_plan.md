@@ -6,7 +6,7 @@
 - **Builds on:** `doc/01_research/local/2d_rendering_perf_dma_alignment_soa_async.md`
   (fix list items 1-5), `doc/01_research/domain/2d_renderer_gpu_offload_patterns.md`
 - **Measured baseline:** `doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md`
-- **Harness:** `bench/vulkan_2d_c/`, `scripts/check/check-vulkan-2d-c-compare.shs`
+- **Harness:** `test/05_perf/bench/vulkan_2d_c/`, `scripts/check/check-vulkan-2d-c-compare.shs`
 
 ## Why this plan exists
 
@@ -165,7 +165,7 @@ committed table is bit-identical by construction and self-evidently so.
 ## Results (2026-09-03)
 
 ### P1 — shared scene table: DONE
-`bench/vulkan_2d_c/scenes.txt`, verified byte-identical to C's own generator
+`test/05_perf/bench/vulkan_2d_c/scenes.txt`, verified byte-identical to C's own generator
 (`VK2D_DUMP_RECTS`, 64/64 rows). Both legs now agree exactly:
 `nonclear` 288504 = 288504, `checksum` 10460147 = 10460147 (previously 288504
 vs 306818 and 10460147 vs 11073548).
@@ -178,7 +178,7 @@ against a single flipped bit.
 
 ### P4 — feature showcase + backend parity: DONE for the exercised surface
 
-`bench/vulkan_2d_c/feature_showcase.spl` (**38 timed marks**, ~32 distinct draw
+`test/05_perf/bench/vulkan_2d_c/feature_showcase.spl` (**38 timed marks**, ~32 distinct draw
 primitives of the 34-primitive census) +
 `scripts/check/check-engine2d-backend-parity.shs`:
 **PASS — 1,920,000 bytes across 38 primitives, 0 differing** between the cpu

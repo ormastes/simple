@@ -13,7 +13,7 @@ attempted and failed. Fine at <= 2880x1864.
 
 ## The contradiction, which narrows it
 
-`bench/vulkan_2d_c/vk2d_bench.spl` on the SAME backend, SAME binary and SAME
+`test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl` on the SAME backend, SAME binary and SAME
 7680x4320 framebuffer reads back **successfully** — measured repeatedly, e.g.
 `readback_us=624490` over 8 frames with correct pixel content, and the
 Simple-vs-C bit-diff gate passes.
@@ -56,7 +56,7 @@ B=src/compiler_rust/target/vulkan/release/simple
 env $E VK2D_BACKEND=vulkan SHOWCASE_MODE=virtual SHOWCASE_W=7680 SHOWCASE_H=4320 \
   $B run src/app/ui_showcase/hosts/main_primitive_showcase.spl     # 0 pixels
 env $E VK2D_W=7680 VK2D_H=4320 VK2D_RECTS=64 VK2D_FRAMES=8 \
-  $B run bench/vulkan_2d_c/vk2d_bench.spl                          # succeeds
+  $B run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl                          # succeeds
 ```
 
 Related: `doc/08_tracking/bug/vulkan_engine2d_sequential_frames_flaky_moltenvk_2026-09-02.md`.
