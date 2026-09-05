@@ -1,0 +1,159 @@
+"""Provider conformance contract for the Engine2D GPU scheduler.
+
+Pure, device-free grading of what a GPU provider (Vulkan, Metal, DirectX)
+actually offers the epoch scheduler. A provider report is a statement of
+observed facts; this module turns it into a conformance grade and decides
+whether autonomous (device-initiated) submission may be enabled at all.
+
+Non-admission rule: a report describes routing capability only. Grading here
+never proves device execution — only `engine2d_gpu_epoch_advance` with
+qualifying evidence can do that. A provider that cannot distinguish
+submit / gpu_finished / complete / retire, or cannot hand back a fence token,
+is graded `routing_only`, which is the honest state of every provider in this
+tree today.
+
+FACT: "directx" in this tree is D3D11 via DXVK
+(src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl:78). There is no
+D3D12 provider, so no api_level produced here may ever say "d3d12".
+"""
+
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_TRUTH_NONE,
+    ENGINE2D_GPU_TRUTH_PARTIAL,
+    ENGINE2D_GPU_TRUTH_FULL,
+    Engine2dGpuTruthLabels,
+    engine2d_gpu_profile_allows_autonomous_submission
+}
+
+# --- Provider names and API levels ------------------------------------------
+
+pub val ENGINE2D_GPU_PROVIDER_VULKAN: text = "vulkan"
+pub val ENGINE2D_GPU_PROVIDER_METAL: text = "metal"
+pub val ENGINE2D_GPU_PROVIDER_DIRECTX: text = "directx"
+
+pub val ENGINE2D_GPU_API_LEVEL_VULKAN: text = "vulkan-1.x"
+pub val ENGINE2D_GPU_API_LEVEL_METAL: text = "metal"
+pub val ENGINE2D_GPU_API_LEVEL_DIRECTX: text = "d3d11-dxvk"
+
+# --- Conformance grades ------------------------------------------------------
+
+pub val ENGINE2D_GPU_GRADE_FULL: text = "full"
+pub val ENGINE2D_GPU_GRADE_ROUTING_ONLY: text = "routing_only"
+pub val ENGINE2D_GPU_GRADE_UNAVAILABLE: text = "unavailable"
+
+struct Engine2dGpuProviderReport:
+    provider: text
+    api_level: text
+    available: bool
+    device_name: text
+    device_type: text
+    driver_identity: text
+    capabilities: u32
+    distinct_phases: bool
+    fence_token_available: bool
+    device_timestamps_available: bool
+    probe_error: text
+
+struct Engine2dGpuProviderConformance:
+    provider: text
+    conformant: bool
+    grade: text
+    autonomous_submission_allowed: bool
+    missing_for_full: text
+    truth: Engine2dGpuTruthLabels
+
+fn engine2d_gpu_provider_api_level(provider: text) -> text:
+    """Canonical API level per provider. `directx` is D3D11 via DXVK, never D3D12."""
+    if provider == ENGINE2D_GPU_PROVIDER_VULKAN:
+        return ENGINE2D_GPU_API_LEVEL_VULKAN
+    if provider == ENGINE2D_GPU_PROVIDER_METAL:
+        return ENGINE2D_GPU_API_LEVEL_METAL
+    if provider == ENGINE2D_GPU_PROVIDER_DIRECTX:
+        return ENGINE2D_GPU_API_LEVEL_DIRECTX
+    "unknown"
+
+fn engine2d_gpu_provider_report_unavailable(provider: text, reason: text) -> Engine2dGpuProviderReport:
+    """A provider that is absent, failed to initialise, or cannot be probed here."""
+    Engine2dGpuProviderReport(
+        provider: provider,
+        api_level: engine2d_gpu_provider_api_level(provider),
+        available: false,
+        device_name: "",
+        device_type: "",
+        driver_identity: "",
+        capabilities: 0u32,
+        distinct_phases: false,
+        fence_token_available: false,
+        device_timestamps_available: false,
+        probe_error: reason
+    )
+
+fn _engine2d_gpu_join_reason(accumulated: text, item: text) -> text:
+    if accumulated == "":
+        return item
+    "{accumulated};{item}"
+
+fn engine2d_gpu_provider_missing_for_full(report: Engine2dGpuProviderReport) -> text:
+    """The named gaps between this report and a `full` grade; empty when there are none."""
+    var missing = ""
+    if not report.available:
+        return "unavailable"
+    if not report.fence_token_available:
+        missing = _engine2d_gpu_join_reason(missing, "fence token not exposed")
+    if not report.distinct_phases:
+        missing = _engine2d_gpu_join_reason(missing, "phases not distinguished (submit/gpu_finished/complete/retire)")
+    if report.device_name == "":
+        missing = _engine2d_gpu_join_reason(missing, "device name not reported")
+    if report.driver_identity == "":
+        missing = _engine2d_gpu_join_reason(missing, "driver identity not reported")
+    missing
+
+fn engine2d_gpu_provider_conformance(report: Engine2dGpuProviderReport, profile: text) -> Engine2dGpuProviderConformance:
+    """Grade a provider report and decide whether autonomous submission is permitted.
+
+    `unavailable` when the provider is absent. `routing_only` when it is present
+    but cannot fence or cannot separate the lifecycle phases — routing evidence
+    is all such a provider can supply. `full` only when every gap is closed.
+    Autonomous submission additionally requires the profile to allow it and the
+    device to report an autonomy capability; a `routing_only` provider never
+    gets it, whatever the profile asks for.
+    """
+    val missing = engine2d_gpu_provider_missing_for_full(report)
+    val grade = if not report.available: ENGINE2D_GPU_GRADE_UNAVAILABLE else: if missing == "": ENGINE2D_GPU_GRADE_FULL else: ENGINE2D_GPU_GRADE_ROUTING_ONLY
+    val conformant = grade == ENGINE2D_GPU_GRADE_FULL
+    val autonomous = conformant and engine2d_gpu_profile_allows_autonomous_submission(profile, report.capabilities)
+    val assurance = if grade == ENGINE2D_GPU_GRADE_FULL: ENGINE2D_GPU_TRUTH_FULL else: if grade == ENGINE2D_GPU_GRADE_ROUTING_ONLY: ENGINE2D_GPU_TRUTH_PARTIAL else: ENGINE2D_GPU_TRUTH_NONE
+    val autonomy = if autonomous: ENGINE2D_GPU_TRUTH_FULL else: ENGINE2D_GPU_TRUTH_NONE
+    Engine2dGpuProviderConformance(
+        provider: report.provider,
+        conformant: conformant,
+        grade: grade,
+        autonomous_submission_allowed: autonomous,
+        missing_for_full: missing,
+        truth: Engine2dGpuTruthLabels(
+            semantic_residency: ENGINE2D_GPU_TRUTH_NONE,
+            data_residency: ENGINE2D_GPU_TRUTH_NONE,
+            submission_autonomy: autonomy,
+            scheduling_assurance: assurance
+        )
+    )
+
+fn engine2d_gpu_provider_conformance_summary(conformance: Engine2dGpuProviderConformance) -> text:
+    "provider={conformance.provider};grade={conformance.grade};conformant={conformance.conformant};autonomous={conformance.autonomous_submission_allowed};missing={conformance.missing_for_full};autonomy={conformance.truth.submission_autonomy};assurance={conformance.truth.scheduling_assurance}"
+
+export ENGINE2D_GPU_PROVIDER_VULKAN
+export ENGINE2D_GPU_PROVIDER_METAL
+export ENGINE2D_GPU_PROVIDER_DIRECTX
+export ENGINE2D_GPU_API_LEVEL_VULKAN
+export ENGINE2D_GPU_API_LEVEL_METAL
+export ENGINE2D_GPU_API_LEVEL_DIRECTX
+export ENGINE2D_GPU_GRADE_FULL
+export ENGINE2D_GPU_GRADE_ROUTING_ONLY
+export ENGINE2D_GPU_GRADE_UNAVAILABLE
+export Engine2dGpuProviderReport
+export Engine2dGpuProviderConformance
+export engine2d_gpu_provider_api_level
+export engine2d_gpu_provider_report_unavailable
+export engine2d_gpu_provider_missing_for_full
+export engine2d_gpu_provider_conformance
+export engine2d_gpu_provider_conformance_summary

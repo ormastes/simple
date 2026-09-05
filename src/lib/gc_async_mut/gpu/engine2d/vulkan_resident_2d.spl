@@ -1,0 +1,403 @@
+"""Fixed-arena Vulkan resident-2D vertical slice and device evidence.
+
+Plan step 3 of the GPU scheduler hardening arc. The arena is created once with
+a bounded `DrawIrPackedGenerationStoreV3` and is never grown: every frame
+reuses the same slots through admit -> write -> seal -> publish -> take ->
+complete. Two properties are the point of the slice and are counted, not
+asserted in prose:
+
+- `semantic_rebuilds` stays 0 while the scene identity (a rows-only fold, no
+  growing text) is unchanged, so resubmitting the same scene never rebuilds
+  semantics on the host.
+- `readbacks` stays 0: nothing in this module ever copies device memory back.
+
+Non-admission rule: a receipt produced here is routing evidence only. Device
+execution is claimed exclusively through `engine2d_gpu_epoch_advance` with
+evidence that `engine2d_gpu_device_evidence_qualifies` accepts, and that
+evidence is built from a real `VulkanSession` plus a real queue round-trip.
+"""
+
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PHASE_GPU_FINISHED,
+    ENGINE2D_GPU_PHASE_REJECTED,
+    ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL,
+    Engine2dGpuDeviceEvidence,
+    Engine2dGpuEpochReceipt,
+    Engine2dGpuEpochRequest,
+    engine2d_gpu_device_evidence_none,
+    engine2d_gpu_device_evidence_qualifies,
+    engine2d_gpu_epoch_admit,
+    engine2d_gpu_epoch_advance,
+    engine2d_gpu_epoch_receipt_summary,
+    engine2d_gpu_truth_none
+}
+use common.mission_critical.draw_ir_packed_generation_store_v3.{
+    DRAW_IR_PACKED_REASON_OK,
+    DRAW_IR_PACKED_REASON_STALE,
+    DrawIrPackedAdmissionV3,
+    DrawIrPackedGenerationRefV3,
+    DrawIrPackedGenerationStoreV3,
+    DrawIrPackedHandoffV3,
+    DrawIrPackedSealV3,
+    DrawIrPackedSubmissionV3
+}
+use common.contracts.execution.simple_ring_async_v1.{
+    RingGeneration,
+    RingPayloadLease,
+    RingPayloadOwnership,
+    RingToken
+}
+use common.ui.draw_ir_v3_execution_route.{
+    DRAW_IR_V3_REASON_CAPACITY_OVERFLOW,
+    DRAW_IR_V3_REASON_DEVICE_FAULT,
+    DRAW_IR_V3_REASON_NONE
+}
+use common.ui.draw_ir_v3_ports.{
+    DRAW_IR_V3_CAP_COMPUTE_PASSES,
+    DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+pub val ENGINE2D_VULKAN_RESIDENT_GATE_REASON: text = "needs SIMPLE_GPU_TEST=1 and a Vulkan device whose session initialises"
+
+# Environment variable carrying the exact identity of the running binary. It is
+# the only binary-identity source in the tree (`dual_run_binary_identity` reads
+# the same key); when it is unset the evidence field stays EMPTY so that
+# `engine2d_gpu_device_evidence_qualifies` refuses, which is the honest result.
+pub val ENGINE2D_VULKAN_BINARY_IDENTITY_ENV: text = "SIMPLE_BINARY_IDENTITY"
+
+# The capabilities an initialised VulkanSession genuinely has: compute passes
+# (its pipelines are compute pipelines) and indirect dispatch
+# (vkCmdDispatchIndirect is Vulkan 1.0 core). Exactly the pair the resident
+# profile requires. The device-generated-command / work-graph bits are NOT
+# claimed here: nothing in this tree probes for them.
+pub val ENGINE2D_VULKAN_CORE_CAPABILITIES: u32 = DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+
+struct Engine2dVulkanResidentFrame:
+    """One frame's outcome: the epoch receipt plus the arena facts it was admitted under."""
+    receipt: Engine2dGpuEpochReceipt
+    admitted: bool
+    store_reason: u16
+    generation: u64
+    scene_identity: u64
+
+struct Engine2dVulkanResidentSliceReport:
+    frames_requested: i64
+    frames_submitted: i64
+    semantic_rebuilds: i64
+    readbacks: i64
+    session_initialised: bool
+    init_error: text
+    device_name: text
+    device_type: text
+    driver_identity: text
+    negative_control_passed: bool
+    evidence_qualifies: bool
+    device_execution_proven: bool
+    last_phase: text
+    submit_failures: i64
+    host_submit_ns: i64
+    host_complete_ns: i64
+    summary: text
+
+class Engine2dVulkanResidentArena:
+    """A fixed, never-grown packed-generation arena driving the resident slice."""
+    store: DrawIrPackedGenerationStoreV3
+    arena_id: u64
+    arena_generation: u64
+    frames_submitted: i64
+    semantic_rebuilds: i64
+    readbacks: i64
+    last_scene_identity: u64
+
+fn engine2d_vulkan_resident_scene_identity(rows: [u64]) -> u64:
+    """Rows-only content identity: shifts and xor only, so it never grows text and never overflows.
+
+    The store's own sealed `content_hash` folds the per-admission generation in
+    and therefore differs for two identical scenes; it cannot answer "is this
+    the same scene". This fold can.
+    """
+    var mixed = 0xcbf29ce484222325u64 ^ (rows.len() as u64)
+    var i = 0
+    while i < rows.len():
+        mixed = ((mixed << 7u64) | (mixed >> 57u64)) ^ (rows[i] ^ 0x9e3779b97f4a7c15u64)
+        i = i + 1
+    mixed
+
+fn engine2d_vulkan_resident_arena(arena_id: u64, slot_count: u32, rows_per_slot: u32, queue_capacity: u32) -> Engine2dVulkanResidentArena:
+    """Create the arena once. There is no grow path and no second allocation."""
+    Engine2dVulkanResidentArena(
+        store: DrawIrPackedGenerationStoreV3.bounded(arena_id, slot_count, rows_per_slot, queue_capacity),
+        arena_id: arena_id,
+        arena_generation: 1u64,
+        frames_submitted: 0,
+        semantic_rebuilds: 0,
+        readbacks: 0,
+        last_scene_identity: 0u64
+    )
+
+fn _resident_refusal(request: Engine2dGpuEpochRequest, reason_code: u32, store_reason: u16, diagnostic: text) -> Engine2dVulkanResidentFrame:
+    Engine2dVulkanResidentFrame(
+        receipt: Engine2dGpuEpochReceipt(
+            profile: request.profile,
+            queue_handle: request.queue_handle,
+            backend_handle: request.backend_handle,
+            queue_generation: request.queue_generation,
+            operation_generation: request.operation_generation,
+            scene_generation: request.scene_generation,
+            surface_generation: request.surface_generation,
+            arena_generation: request.arena_generation,
+            token: nil,
+            phase: ENGINE2D_GPU_PHASE_REJECTED,
+            terminal: true,
+            reason_code: reason_code,
+            missing_capabilities: 0u32,
+            truth: engine2d_gpu_truth_none(),
+            routing_evidence_only: true,
+            device_execution_proven: false,
+            diagnostic: diagnostic
+        ),
+        admitted: false,
+        store_reason: store_reason,
+        generation: 0u64,
+        scene_identity: 0u64
+    )
+
+impl Engine2dVulkanResidentArena:
+    me frame(scene_rows: [u64], request: Engine2dGpuEpochRequest, session_available: bool, caps: u32) -> Engine2dVulkanResidentFrame:
+        """Run one frame through the fixed arena and return its epoch receipt.
+
+        Every failure path releases the slot (`abort`/`complete`) so the next
+        frame finds the same storage free: that reuse is what makes the arena
+        fixed rather than merely bounded.
+        """
+        if request.arena_generation != self.arena_generation:
+            return _resident_refusal(request, DRAW_IR_V3_REASON_NONE, DRAW_IR_PACKED_REASON_STALE,
+                "stale arena generation {request.arena_generation}; arena is {self.arena_generation}")
+        var generation_ref = DrawIrPackedGenerationRefV3(arena_id: self.arena_id, generation: 0u64, slot: 0u32)
+        match self.store.admit(scene_rows.len() as u32):
+            case DrawIrPackedAdmissionV3.Refused(reason):
+                return _resident_refusal(request, DRAW_IR_V3_REASON_CAPACITY_OVERFLOW, reason,
+                    "fixed arena refused the frame: store reason {reason}")
+            case DrawIrPackedAdmissionV3.Admitted(reference):
+                generation_ref = reference
+        var i = 0
+        while i < scene_rows.len():
+            val written = self.store.write(generation_ref, scene_rows[i])
+            if written != DRAW_IR_PACKED_REASON_OK:
+                self.store.abort(generation_ref)
+                return _resident_refusal(request, DRAW_IR_V3_REASON_DEVICE_FAULT, written,
+                    "packed write refused at row {i}")
+            i = i + 1
+        var submission = DrawIrPackedSubmissionV3(generation_ref: generation_ref, row_count: 0u32, content_hash: "")
+        match self.store.seal(generation_ref):
+            case DrawIrPackedSealV3.Refused(reason):
+                self.store.abort(generation_ref)
+                return _resident_refusal(request, DRAW_IR_V3_REASON_DEVICE_FAULT, reason, "seal refused")
+            case DrawIrPackedSealV3.Sealed(sealed):
+                submission = sealed
+        val published = self.store.publish(submission)
+        if published != DRAW_IR_PACKED_REASON_OK:
+            self.store.abort(generation_ref)
+            return _resident_refusal(request, DRAW_IR_V3_REASON_CAPACITY_OVERFLOW, published, "handoff queue refused the generation")
+        match self.store.take():
+            case DrawIrPackedHandoffV3.Refused(reason):
+                return _resident_refusal(request, DRAW_IR_V3_REASON_DEVICE_FAULT, reason, "handoff queue was empty")
+            case DrawIrPackedHandoffV3.Ready(taken):
+                submission = taken
+        if not self.store.matches(submission, scene_rows):
+            self.store.complete(submission.generation_ref)
+            return _resident_refusal(request, DRAW_IR_V3_REASON_DEVICE_FAULT, DRAW_IR_PACKED_REASON_STALE,
+                "taken generation does not match the submitted rows")
+        # Release the slot back into the fixed pool. No readback happens here or
+        # anywhere else in this module, which is why `readbacks` stays 0.
+        self.store.complete(submission.generation_ref)
+        val identity = engine2d_vulkan_resident_scene_identity(scene_rows)
+        if self.last_scene_identity != 0u64 and identity != self.last_scene_identity:
+            self.semantic_rebuilds = self.semantic_rebuilds + 1
+        self.last_scene_identity = identity
+        self.frames_submitted = self.frames_submitted + 1
+        val token = RingToken(
+            ring_id: self.arena_id,
+            slot: submission.generation_ref.slot as u64,
+            generation: RingGeneration(value: submission.generation_ref.generation)
+        )
+        Engine2dVulkanResidentFrame(
+            receipt: engine2d_gpu_epoch_admit(request, token, session_available, caps),
+            admitted: true,
+            store_reason: DRAW_IR_PACKED_REASON_OK,
+            generation: submission.generation_ref.generation,
+            scene_identity: identity
+        )
+
+fn engine2d_vulkan_resident_frame(arena: Engine2dVulkanResidentArena, scene_rows: [u64], request: Engine2dGpuEpochRequest, session_available: bool, caps: u32) -> Engine2dVulkanResidentFrame:
+    """Free-function entry point; the arena is mutated in place and keeps its counters."""
+    var owned = arena
+    owned.frame(scene_rows, request, session_available, caps)
+
+fn engine2d_vulkan_resident_request(profile: text, arena_generation: u64, scene_generation: u64, row_count: i64) -> Engine2dGpuEpochRequest:
+    """A resident-slice epoch request over a registered payload lease."""
+    Engine2dGpuEpochRequest(
+        profile: profile,
+        queue_handle: 1,
+        backend_handle: 1,
+        queue_generation: 1u64,
+        operation_generation: scene_generation,
+        scene_generation: scene_generation,
+        surface_generation: 1u64,
+        arena_generation: arena_generation,
+        payload_lease: RingPayloadLease(
+            ownership: RingPayloadOwnership.RegisteredLease,
+            owner_id: 1u64,
+            handle: 1u64,
+            generation: RingGeneration(value: 1u64),
+            byte_length: (row_count * 8) as u64
+        ),
+        command_count: row_count,
+        packet_bytes: row_count * 8,
+        content_hash: 0u64
+    )
+
+fn engine2d_vulkan_binary_identity() -> text:
+    """Exact identity of the running binary, or empty when the host did not supply one.
+
+    Empty is deliberate: an "unavailable" placeholder would be non-empty and
+    would slip past `engine2d_gpu_device_evidence_qualifies`.
+    """
+    env_get(ENGINE2D_VULKAN_BINARY_IDENTITY_ENV)
+
+fn engine2d_vulkan_device_evidence(device_name: text, device_type: text, driver_identity: text, host_submit_ns: i64, host_complete_ns: i64, transfer_bytes: i64, negative_control_passed: bool) -> Engine2dGpuDeviceEvidence:
+    """Device evidence for the Vulkan slice: real identities and real host timestamps only.
+
+    `device_timestamp_available` is reported false because this tree exposes no
+    Vulkan query-pool extern at all, so there is no honest device tick to read.
+    """
+    # TODO: [gpu][P2] When a VkQueryPool timestamp extern exists it must supply
+    # the timestamp-valid bits, the queue's timestampPeriod, and a begin/end tick
+    # pair written by vkCmdWriteTimestamp around the resident dispatch; only then
+    # may device_timestamp_available become true and device_begin/end_ticks be
+    # filled from the device instead of staying zero.
+    Engine2dGpuDeviceEvidence(
+        binary_identity: engine2d_vulkan_binary_identity(),
+        device_name: device_name,
+        device_type: device_type,
+        driver_identity: driver_identity,
+        host_submit_ns: host_submit_ns,
+        host_complete_ns: host_complete_ns,
+        device_timestamp_available: false,
+        device_begin_ticks: 0,
+        device_end_ticks: 0,
+        transfer_bytes: transfer_bytes,
+        negative_control_passed: negative_control_passed
+    )
+
+fn engine2d_vulkan_resident_device_ready() -> bool:
+    """Live probe: a Vulkan loader alone is not a device.
+
+    `vulkan_available()` answers true on hosts where `VulkanSession.init()`
+    still fails (measured on macOS 2026-09-05: available=true, init_error
+    "runtime-init"), so a gate built on availability alone would run the device
+    scenario against a session that never came up.
+    """
+    val session = VulkanSession.create()
+    val rc = session.init()
+    val ready = rc == 0 and session.is_valid()
+    if ready:
+        session.release()
+    ready
+
+fn _resident_host_ns() -> i64:
+    time_now_unix_micros() * 1000
+
+fn _resident_report(frames: i64, arena: Engine2dVulkanResidentArena, session_initialised: bool, init_error: text, device_name: text, device_type: text, driver_identity: text, negative_control_passed: bool, submit_failures: i64, evidence: Engine2dGpuDeviceEvidence, receipt: Engine2dGpuEpochReceipt) -> Engine2dVulkanResidentSliceReport:
+    val qualifies = engine2d_gpu_device_evidence_qualifies(evidence)
+    Engine2dVulkanResidentSliceReport(
+        frames_requested: frames,
+        frames_submitted: arena.frames_submitted,
+        semantic_rebuilds: arena.semantic_rebuilds,
+        readbacks: arena.readbacks,
+        session_initialised: session_initialised,
+        init_error: init_error,
+        device_name: device_name,
+        device_type: device_type,
+        driver_identity: driver_identity,
+        negative_control_passed: negative_control_passed,
+        evidence_qualifies: qualifies,
+        device_execution_proven: receipt.device_execution_proven,
+        last_phase: receipt.phase,
+        submit_failures: submit_failures,
+        host_submit_ns: evidence.host_submit_ns,
+        host_complete_ns: evidence.host_complete_ns,
+        summary: "frames={arena.frames_submitted}/{frames};rebuilds={arena.semantic_rebuilds};readbacks={arena.readbacks};submit_failures={submit_failures};device={device_name};qualifies={qualifies};{engine2d_gpu_epoch_receipt_summary(receipt)}"
+    )
+
+fn engine2d_vulkan_resident_slice_run(frames: i64, scene_rows: [u64], caps: u32) -> Engine2dVulkanResidentSliceReport:
+    """Run the resident slice on a real VulkanSession and report what was actually proven.
+
+    The caller gates this on `vulkan_available()` and its own environment
+    switch. When the session cannot initialise, every receipt stays
+    routing-only and the report carries the session's own `init_error`.
+    """
+    var arena = engine2d_vulkan_resident_arena(0x5245534944u64, 2u32, (scene_rows.len() as u32) + 1u32, 2u32)
+    val session = VulkanSession.create()
+    val rc = session.init()
+    if rc != 0 or not session.is_valid():
+        val blocked = _resident_refusal(
+            engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation, 1u64, scene_rows.len()),
+            DRAW_IR_V3_REASON_DEVICE_FAULT, DRAW_IR_PACKED_REASON_OK,
+            "vulkan session did not initialise: rc={rc} {session.init_error}")
+        return _resident_report(frames, arena, false, session.init_error, session.device_name, session.device_type, session.driver_identity, false, 0, engine2d_gpu_device_evidence_none(), blocked.receipt)
+    var last = _resident_refusal(
+        engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation, 1u64, scene_rows.len()),
+        DRAW_IR_V3_REASON_NONE, DRAW_IR_PACKED_REASON_OK, "no frame ran").receipt
+    val submit_ns = _resident_host_ns()
+    var transferred = 0
+    var submit_failures = 0
+    var frame_index = 0
+    while frame_index < frames:
+        # A real queue round-trip per frame. An empty command buffer is still a
+        # genuine submit+wait, which is what the host timestamps bracket.
+        val cmd = session.create_command_buffer()
+        if cmd == 0 or session.submit_and_wait(cmd) != 0:
+            submit_failures = submit_failures + 1
+        val request = engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation, 1u64, scene_rows.len())
+        val outcome = arena.frame(scene_rows, request, true, caps)
+        last = outcome.receipt
+        transferred = transferred + scene_rows.len() * 8
+        frame_index = frame_index + 1
+    val complete_ns = _resident_host_ns()
+    # Negative control: a request carrying a generation the fixed arena never
+    # issued must be refused, so a passing run cannot be explained by "the
+    # arena accepts everything".
+    val stale = arena.frame(scene_rows, engine2d_vulkan_resident_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL, arena.arena_generation + 1u64, 1u64, scene_rows.len()), true, caps)
+    val negative_control_passed = stale.receipt.phase == ENGINE2D_GPU_PHASE_REJECTED
+    # A queue round-trip that failed is not evidence of device execution. One
+    # failed submit voids the whole run's evidence rather than being averaged away.
+    val evidence = if submit_failures > 0:
+        engine2d_gpu_device_evidence_none()
+    else:
+        engine2d_vulkan_device_evidence(session.device_name, session.device_type, session.driver_identity, submit_ns, complete_ns, transferred, negative_control_passed)
+    val proven = engine2d_gpu_epoch_advance(last, ENGINE2D_GPU_PHASE_GPU_FINISHED, evidence, engine2d_gpu_truth_none())
+    # release() clears the identity fields, so copy them first.
+    val device_name = session.device_name
+    val device_type = session.device_type
+    val driver_identity = session.driver_identity
+    session.release()
+    _resident_report(frames, arena, true, "", device_name, device_type, driver_identity, negative_control_passed, submit_failures, evidence, proven)
+
+export ENGINE2D_VULKAN_RESIDENT_GATE_REASON
+export ENGINE2D_VULKAN_BINARY_IDENTITY_ENV
+export ENGINE2D_VULKAN_CORE_CAPABILITIES
+export Engine2dVulkanResidentArena
+export Engine2dVulkanResidentFrame
+export Engine2dVulkanResidentSliceReport
+export engine2d_vulkan_resident_scene_identity
+export engine2d_vulkan_resident_arena
+export engine2d_vulkan_resident_frame
+export engine2d_vulkan_resident_request
+export engine2d_vulkan_binary_identity
+export engine2d_vulkan_device_evidence
+export engine2d_vulkan_resident_device_ready
+export engine2d_vulkan_resident_slice_run
