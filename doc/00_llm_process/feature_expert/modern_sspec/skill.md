@@ -290,3 +290,44 @@ Read that section before writing or converting any `*_spec.spl`; the scaffold
 - **Not changed, deliberately:** MNT-002 (mirror) and MNT-007 (lifecycle links)
   together cost at most 3.5 aggregate on SCAN and are true statements about the
   spec; a 90 is reachable with both outstanding, so neither rule was weakened.
+
+## Training loop + plugin arch (2026-09-05, later session)
+
+- **The checklist, not the model, decides the score.** Controlled: same model
+  (haiku), same low effort, three specs each — old `≥80` checklist gave
+  **84/78/78 (all fail)**; rewritten `≥90` checklist gave **90/95/90 (all pass)**.
+  A second batch on sonnet, including a blocker file, went **49→90** and
+  90/90/90/90 in one iteration each, with the checklist reported sufficient.
+  Checklist: `doc/00_llm_process/spipe/skill.md` § "Modern SSpec Score ≥ 90".
+- **The one rule that decides everything:** clear every finding EXCEPT the five
+  mirror-only IDs (`MNT-002/005/008`, `EVD-002/003`) and you land on exactly 90.
+  `EVD-001` and `MNT-001/003/004/006/007/009` are source-fixable but share a
+  dimension with mirror rules, so workers mistake them for unfixable and stop at
+  84. Worked example: `balance_score_spec.spl` had ZERO NAR/BEH/ORA/TRC/COV
+  findings and still scored 84 (EVD-001 ×3 + MNT-001).
+- **`# @req` placement is worth 38 points.** Above the `it` line → `TRC-003`
+  blocker → 49. Inside the `it` body → 87. Proven with a one-line diff.
+- **Scorer is now plugin architecture.** `dimensions.spl` holds the dimension
+  weights, blocker cap and release target as DATA; `analyzer.spl` holds 24
+  per-rule `_detect_*` functions behind `sspec_source_detectors()` /
+  `sspec_manual_detectors()`; `registry.spl` unions the rule_ids.
+  **Adding a scoring algorithm = one detector fn + one registry row** — no
+  dispatcher and no weight literal to edit. Refactor parity was byte-identical.
+  Bidirectional coverage is pinned by
+  `test/01_unit/app/sspec_maintain/detector_registry_coverage_spec.spl`.
+  **Any new scorer module must also be added to the hardcoded module list in
+  `scripts/check/sspec-score-seed-lane.shs`** — omitting it broke that lane.
+- **Measurement tool:** `sh scripts/check/sspec-train.shs <dir>` scores a tree and
+  prints a **per-rule histogram** (which rule costs the most points), fail-closed
+  (0 specs scanned = exit 2). Use it to find which rule the checklist is still
+  failing to convey — a rule that keeps firing across batches is a checklist
+  defect, not a spec defect.
+- **The MNT-002 "-2.5" figure above understates the real penalty, and that is a
+  filed bug.** `scan` charges MNT-005/MNT-008/EVD-002/EVD-003 even when NO mirror
+  file exists, penalising one absence five times (~7 aggregate points, not 2.5).
+  Root cause: `src/app/sspec_maintain/main.spl` reads the mirror with `file_read`,
+  which swallows a missing-file `Err` into `""`, so the analyzer receives
+  `Some("")` = "stale but present" instead of `None`. The seed lane implements the
+  documented contract and scores the same spec **97**. Filed, with two RED specs,
+  deliberately NOT fixed — a fix shifts every score in the repo:
+  [`doc/08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md`](../../../08_tracking/bug/sspec_scan_manual_findings_fire_without_mirror_2026-09-05.md).

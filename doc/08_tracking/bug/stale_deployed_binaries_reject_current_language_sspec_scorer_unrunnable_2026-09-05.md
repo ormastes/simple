@@ -3,6 +3,38 @@
 Date: 2026-09-05. Found while trying to run `sspec-maintain scan` (modern sspec
 documentization score) for the all-specs-to-80 goal.
 
+## WORKAROUND FOUND (2026-09-05, later the same day) — the scorer IS runnable
+
+The binary census below missed one candidate, and it is the one that works:
+
+```bash
+/Users/ormastes/simple/src/compiler_rust/target/bootstrap/simple \
+  run src/app/sspec_maintain/main.spl scan <spec-path>
+```
+
+Measured: **rc=0, ~6 s per spec**, emitting the real verdict pair
+(`SSpec documentization score: 49/100` / `raw=73; blocker cap makes effective=49`)
+and the full SSDOC finding list. That binary is a **Rust seed built Sep 5
+12:35** — 44 minutes after the `bin/local/phase2-...` build at 11:51 that row 5
+of the table below records as broken — so it postdates every parser gap named
+under Root cause and parses current source cleanly.
+
+Two corrections to the table below, both worth keeping:
+
+- `bin/simple` does not merely fail to *parse*; the binary it resolves to is a
+  **bootstrap CLI that has no `run`, `test`, `lint`, or `sspec-maintain`
+  subcommand at all** (`bin/simple run x.spl` → `error: unknown command 'run'`).
+  That is a different failure from stale-parse, and probing only `bin/simple`
+  conflates the two. `--version` printing `simple-bootstrap` is the tell.
+- A "seed built today" is not automatically usable and a "seed built Jul 25" is
+  not automatically stale-by-date alone — check the actual build timestamp of
+  `src/compiler_rust/target/*/simple`, not just `bin/`.
+
+Status: the scorer lane is **unblocked**; this record stays OPEN because the
+underlying defect (no current full-CLI binary deployed to `bin/`) is unfixed,
+and the seed still prints "do not use as the normal tool". Deploying a current
+`bin/simple` remains the real fix.
+
 ## Symptom
 
 Every binary available on this host failed before the scorer could run:
