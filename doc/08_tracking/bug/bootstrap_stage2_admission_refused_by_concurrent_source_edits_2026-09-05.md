@@ -87,3 +87,44 @@ Progress had to be read from log growth and phase transitions instead.
   differed nor which files changed. Both are already computed at that point;
   printing the first few differing paths would turn a 3-run investigation into a
   one-line read.
+
+## Confirmed 2026-09-05 22:19 — isolation makes it pass
+
+The hypothesis was tested, not assumed. The **same command** that failed three
+times in the shared checkout was run in a private worktree pinned to
+`origin/main` (`82d8bb16f85`), with nothing else writing to it:
+
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+    --strategy=adhoc --full-bootstrap --stop-after-stage2 --mode=dynload
+```
+
+Result:
+
+```
+Stage 2: running bootstrap compiler sanity
+Stage 2: proving struct receiver/runtime capability
+Stage 2 admitted; stopping before Stage 3 as requested.
+```
+
+The decisive input flipped:
+
+| input | shared checkout | pinned worktree |
+|---|---|---|
+| `source-inputs-before` vs `-after` | **DIFFERS (14 entries)** | **IDENTICAL** |
+| `stage2-sanity.env` | `status=pass` | `status=pass` |
+| `stage2-receiver.env` | `status=pass` | `status=pass` |
+| verdict | `refused incomplete Stage 2 admission provenance` (exit 4) | **admitted** |
+
+Artifacts produced: `stage3/aarch64-apple-darwin/stage2-admitted/`,
+`stage2-provenance.receipt` (769 B), `stage2-sanity.receipt` (438 B), and the
+139,546,712-byte Stage 2 compiler.
+
+So the gate was never wrong and Stage 2 was never broken: the shared checkout is
+simply not a valid place to bootstrap while other sessions write to `src/**`.
+
+**Operational note.** The isolated run needs its own Rust target (5.4 GB); it
+was given 17 GiB of headroom and settled at 8.7 GiB free. Symlinking
+`src/compiler_rust/target` at the main checkout's target to save that space does
+NOT work — the run fails immediately with `error: failed to fingerprint Rust
+seed inputs`. Give the worktree a real target directory.
