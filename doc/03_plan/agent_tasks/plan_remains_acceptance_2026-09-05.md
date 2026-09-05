@@ -119,3 +119,33 @@ scorer (see
 and `native-build` of it fails with `unresolved type: Id` in
 `src/std/common/search/{ranking,types}.spl`. Until one of those is fixed, a
 claimed score is a claim, not a measurement, and must be written as one.
+
+## The verification lane, found 2026-09-05 (supersedes "nothing runs here")
+
+**`src/compiler_rust/target/debug/simple run <spec>` is a real, working lane
+and was in the tree the whole time.** It is a debug build of the Rust seed
+from CURRENT source (Sep 4 18:13), so it parses `unsafe(...)`,
+`@always_inline` and the rest that the Jul-25 `bin/release/**/simple_seed`
+rejects.
+
+Much of this session was spent concluding, wrongly and in several stages,
+that specs could not be executed on this host. They can.
+
+**Proof it is not the built-in-shim false-green path** (the trap that made a
+bare `use std.spec` look green earlier):
+
+```
+it "vacuous":
+    expect("x")          # no matcher
+```
+→ `✗ vacuous — vacuous expect: expect(x) was never consumed by a matcher`,
+and **no `E1034`** in the output. That is the real `std.spec` module talking.
+Under the degraded shim path the same scenario passes as `✓ vacuous`.
+
+Measured on real acceptance specs: `dependency_analysis_spec.spl` →
+`3 examples, 0 failures`; `scilib_port_ndarray_spec.spl` → `7 examples, 1
+failure` with a substantive red. It executes and it discriminates.
+
+Rule for this lane: **verify with the debug binary, never with
+`bin/release/.../simple_seed run`, and never trust a green from a spec whose
+output contains `E1034`.** A box may be ticked on this lane's evidence.
