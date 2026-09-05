@@ -355,7 +355,10 @@ stderr visible: the orchestrator relays it only on failure. The link step of
 this direct form fails in this shell environment (`collect2`), which is after
 phase 4 and irrelevant to the window.
 
-## UPDATE 3 (2026-09-05): `gdb bt` will NOT symbolize this class of crash
+## UPDATE 4 (2026-09-05): `gdb bt` will NOT symbolize this class of crash
+
+(Renumbered from a second "UPDATE 3" — a parallel session added the post-loop-window
+UPDATE 3 above concurrently and both landed with the same number.)
 
 The apport route was dry-run against a real, unrelated compiler SIGSEGV that
 landed while waiting for the box: `bin/simple fmt <file>` (another session,
