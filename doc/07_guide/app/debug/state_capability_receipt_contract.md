@@ -2,7 +2,8 @@
 
 ## Status (read this first)
 
-**A pure-data contract exists. A producer does not.** This is Wave 0 of the
+**A pure-data contract exists; the one producer only ever writes
+`Unverified`.** This is Wave 0 of the
 dump/replay design plan: freeze `StateCapabilityReceiptV1` as a value type
 with a constructor and a validator, before any capsule producer is built.
 
@@ -12,8 +13,12 @@ with a constructor and a validator, before any capsule producer is built.
   `state_capability_receipt_validate_v1` (pure validator). No I/O.
 - **Spec pinning this contract:**
   `test/01_unit/lib/common/debug/state_capability_receipt_v1_spec.spl`.
-- **Producer (does not exist yet):** nothing in this repo emits a real
-  `StateCapabilityReceiptV1` from a captured artifact. That is later waves of
+- **Producer (exists, all-`Unverified` only):**
+  `src/app/cli_debug/evidence_write_v1.spl` writes
+  `<bundle>/normalized/state_capsule.sdn` — a validated receipt whose six
+  capabilities are all `Unverified("evidence_write_v1")`, because a bundle of
+  copied bytes proves no capability. Promoting any of them to `Supported` from
+  a real capture is still later waves of
   `doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md`.
 
 ## Source of truth
@@ -79,10 +84,10 @@ a capsule must never imply capability merely because it contains bytes.
 rejects any receipt where a capability is `Supported` but `proof_receipts`
 is empty. This is the only cross-field rule enforced in v1.
 
-## Producer (does not exist yet)
+## Producer (all-`Unverified` only)
 
-Mirroring `debug_evidence_bundle_contract.md`: nothing in this repo
-constructs a `StateCapabilityReceiptV1` from a real capture. A future
+Mirroring `debug_evidence_bundle_contract.md`: the only producer is the
+evidence-bundle writer, and it emits nothing above `Unverified`. Any future
 producer must call `state_capability_receipt_unverified_v1` first, then only
 promote a capability to `Supported` after recording a proof receipt —
 never construct one directly with a hand-picked status.

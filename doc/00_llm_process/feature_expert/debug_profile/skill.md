@@ -329,5 +329,15 @@ none of which exist. Contracts to settle first:
 Note also `test/fixtures/debug/evidence_bundle_v1` is NOT a valid bundle (no
 artifact digest, no `receipts_digest`) — use `evidence_bundle_contract_v1`.
 
+**Writer landed 2026-09-06 (Wave 2).** `src/app/cli_debug/evidence_write_v1.spl`,
+`write_debug_evidence_bundle_v1(root, build_id, artifact_paths)`; CLI
+`simple debug write <root> --build-id sha256:<hex> <artifact>...`. Copies existing
+files into `<root>/artifacts/` and emits `manifest.sdn`, `receipts.sdn` (the
+authorize+record pair of one `Evidence`/`Passive` `write-bundle`) and
+`normalized/state_capsule.sdn`; output is accepted by
+`inspect_debug_evidence_bundle_v1` (`evidence_write_v1_spec.spl` 5/5, seed).
+NOT done: no core/minidump/trace CAPTURE, no ELF-core parser, no capability above
+`Unverified` — a bundle proves identity and integrity, never replayability.
+
 ## Lane docs (2026-09-05)
 - design: `doc/05_design/app/debug/debug_capability_truth_wave0_design.md` · plan: `doc/03_plan/app/debug/dump_replay_wave_plan.md` · state: `.spipe/debug_capability_truth_wave0/state.md` · receipt contract: `doc/07_guide/app/debug/state_capability_receipt_contract.md`
