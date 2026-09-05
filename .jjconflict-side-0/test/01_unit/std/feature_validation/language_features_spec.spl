@@ -1,14 +1,30 @@
-# # Language Features Validation
-#
-# **Feature IDs:** #15 Variables, #24 Closures, #2 Parser
-# **Category:** Language
-# **Status:** Complete
-#
-# ## Overview
-#
-# Validates core language features including variable declarations (val/var/let),
-# lambda syntax and closure capture, and parser functionality basics.
-
+"""
+## Purpose and audience
+Validates the core language feature contracts a compiled or interpreted
+program relies on: val/var/let declaration semantics, type inference from
+literals and expressions, lambda syntax with closure capture, higher-order
+map/filter usage, and the parser's handling of arithmetic, comparison,
+logical, string, control-flow, function, and collection constructs. Written
+for language maintainers tracking feature regressions and for feature
+validators gating a release.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/std/feature_validation/language_features_spec.spl
+## Compatibility and limitations
+These scenarios run under the engine the test driver selects; compiled-lane
+parity for the arithmetic subset is pinned separately by the codegen
+validation file's out-of-process probe. Closure capture is read-only in the
+interpreter, which is the documented behavior these scenarios assert.
+## Verification guidance and troubleshooting
+A failure names the exact language construct that drifted. Rerun the file,
+isolate the failing scenario, and compare the observed value with the oracle
+comment on the failing expect line; the oracle states the folded value the
+implementation must produce.
+"""
+# Lifecycle: doc/01_research/language/grammar/const_vs_val_grammar.md ;
+# doc/03_plan/language/text_index_alignment_addendum_2026-07-30.md ;
+# doc/04_architecture/parser_framework.md ;
+# doc/05_design/language/language_features/syntax_features/ufcs_dot_operator_design.md
+# @manual_section: language-features
 
 # ============================================================================
 # Feature #15: Variables
@@ -16,267 +32,405 @@
 
 use std.spec.step
 
-describe "Feature #15 - Variables":
-    # @manual scenario evidence
-    # ## Variable Declarations
-    #
-    # Variable declarations with val for immutable bindings, var for mutable
-    # bindings, and let as an alternative immutable binding. Supports type
-    # annotations and type inference.
-
+describe "variable declarations":
     context "val declarations (immutable)":
         it "declares immutable integer":
-            val x = 42
-            expect(x).to_equal(42)
+            # @req REQ-LANG-FEATURES-001
+            # @capture(statistics): immutable integer binding readback
+            step("Bind an integer through an expression initializer and read it back")
+            val declared_answer = 40 + 2
+            expect(declared_answer).to_equal(42)  # oracle: the immutable binding must carry the folded initializer
 
         it "declares immutable string":
-            val name = "Alice"
-            expect(name).to_equal("Alice")
+            # @req REQ-LANG-FEATURES-002
+            # @capture(statistics): immutable string binding content and length
+            step("Bind a string literal and read its content back")
+            val author_name = "Alice"
+            expect(author_name).to_start_with("Alice")
+            expect(author_name.len()).to_equal(5)  # oracle: the binding carries exactly the five declared characters
 
         it "declares immutable boolean":
-            val flag = true
-            expect(flag).to_equal(true)
+            # @req REQ-LANG-FEATURES-003
+            # @capture(statistics): immutable boolean binding negation readback
+            step("Bind a boolean literal and negate it")
+            val feature_switch = true
+            expect(not feature_switch).to_equal(false)  # oracle: negating the declared true must fold to false
 
         it "declares immutable array":
-            val items = [1, 2, 3]
-            expect(items.len()).to_equal(3)
+            # @req REQ-LANG-FEATURES-004
+            # @capture(statistics): immutable array binding length readback
+            step("Bind an array literal and read its length")
+            val bound_items = [1, 2, 3]
+            expect(bound_items.len()).to_equal(3)  # oracle: the literal array carries three elements
 
         it "declares immutable with expression":
-            val result = 2 + 3 * 4
-            expect(result).to_equal(14)
+            # @req REQ-LANG-FEATURES-005
+            # @capture(statistics): precedence-folded initializer readback
+            step("Bind a mixed-precedence expression and read the folded value")
+            val precedence_result = 2 + 3 * 4
+            expect(precedence_result).to_equal(14)  # oracle: multiplication binds first, folding to 14
 
     context "var declarations (mutable)":
         it "declares mutable integer":
-            var count = 0
-            count = count + 1
-            expect(count).to_equal(1)
+            # @req REQ-LANG-FEATURES-006
+            # @capture(statistics): mutable counter increment verdict
+            step("Increment a mutable counter once")
+            var declared_count = 0
+            declared_count = declared_count + 1
+            expect(declared_count).to_equal(1)  # oracle: one increment over the zero initializer folds to one
 
         it "allows reassignment":
-            var value = 10
-            value = 20
-            expect(value).to_equal(20)
+            # @req REQ-LANG-FEATURES-007
+            # @capture(statistics): reassignment overwrite verdict
+            step("Reassign a mutable binding and read the new value")
+            var reassigned_value = 10
+            reassigned_value = 20
+            expect(reassigned_value).to_equal(20)  # oracle: the last assignment wins over the initializer
 
         it "supports mutation in loops":
-            var total = 0
-            for i in [1, 2, 3, 4, 5]:
-                total = total + i
-            expect(total).to_equal(15)
+            # @req REQ-LANG-FEATURES-008
+            # @capture(statistics): loop-accumulated sum verdict
+            step("Accumulate a mutable total across a five-element loop")
+            var loop_total = 0
+            for loop_item in [1, 2, 3, 4, 5]:
+                loop_total = loop_total + loop_item
+            expect(loop_total).to_equal(15)  # oracle: the sum of one through five folds to fifteen
 
         it "supports mutable string":
-            var msg = "hello"
-            msg = "world"
-            expect(msg).to_equal("world")
+            # @req REQ-LANG-FEATURES-009
+            # @capture(statistics): string reassignment overwrite verdict
+            step("Reassign a mutable string binding")
+            var mutable_message = "hello"
+            mutable_message = "world"
+            expect(mutable_message).to_equal("world")  # oracle: the reassignment replaces the initializer wholesale
 
     context "let declarations":
         it "declares immutable binding with let":
-            let x = 100
-            expect(x).to_equal(100)
+            # @req REQ-LANG-FEATURES-010
+            # @capture(statistics): let-binding derived readback
+            step("Bind through let and derive a quotient from it")
+            let quartered_span = 100
+            expect(quartered_span / 4).to_equal(25)  # oracle: the let binding evaluates and divides to twenty-five
 
         it "declares let with string":
-            let greeting = "hi"
-            expect(greeting).to_equal("hi")
+            # @req REQ-LANG-FEATURES-011
+            # @capture(statistics): let-string composition readback
+            step("Bind a string through let and compose with a suffix")
+            let short_greeting = "hi"
+            expect(short_greeting + " there").to_equal("hi there")  # oracle: the let binding composes into the full phrase
 
     context "type inference":
         it "infers integer type":
-            val x = 42
-            expect(x).to_equal(42)
+            # @req REQ-LANG-FEATURES-012
+            # @capture(statistics): inferred-integer binding readback
+            step("Bind an integer expression without annotation and read it back")
+            val inferred_count = 21 * 2
+            expect(inferred_count).to_equal(42)  # oracle: the inferred integer binding carries the folded product
 
         it "infers string type":
-            val s = "hello"
-            expect(s).to_start_with("h")
+            # @req REQ-LANG-FEATURES-013
+            # @capture(statistics): inferred-string binding prefix readback
+            step("Bind a string literal without annotation and read its prefix")
+            val inferred_greeting = "hello"
+            expect(inferred_greeting).to_start_with("h")
 
         it "infers boolean type":
-            val b = true
-            expect(b).to_equal(true)
+            # @req REQ-LANG-FEATURES-014
+            # @capture(statistics): inferred-boolean negation readback
+            step("Bind a boolean expression without annotation and negate it")
+            val inferred_switch = not false
+            expect(inferred_switch).to_equal(true)  # oracle: negating false folds to the inferred true binding
 
         it "infers from expressions":
-            val sum = 1 + 2
-            expect(sum).to_equal(3)
+            # @req REQ-LANG-FEATURES-015
+            # @capture(statistics): expression-inferred sum readback
+            step("Bind an addition expression without annotation and read the sum")
+            val inferred_sum = 1 + 2
+            expect(inferred_sum).to_equal(3)  # oracle: the inferred binding folds one plus two to three
 
 # ============================================================================
 # Feature #24: Closures
 # ============================================================================
 
-describe "Feature #24 - Closures":
-    # ## Lambda Functions and Closures
-    #
-    # Lambda functions (anonymous functions) with lexical closure.
-    # Captures variables from enclosing scope (read-only in interpreter).
-
+describe "lambda closures":
     context "lambda syntax":
         it "creates simple lambda":
-            val double = _1 * 2
-            expect(double(5)).to_equal(10)
+            # @req REQ-LANG-FEATURES-016
+            # @capture(statistics): placeholder-argument lambda doubling verdict
+            step("Double five through a placeholder-argument lambda")
+            val placeholder_double = _1 * 2
+            expect(placeholder_double(5)).to_equal(10)  # oracle: the lambda doubles its argument, folding to ten
 
         it "creates lambda with two parameters":
-            val add = \a, b: a + b
-            expect(add(3, 4)).to_equal(7)
+            # @req REQ-LANG-FEATURES-017
+            # @capture(statistics): two-parameter lambda sum verdict
+            step("Add three and four through a two-parameter lambda")
+            val lambda_add = \a, b: a + b
+            expect(lambda_add(3, 4)).to_equal(7)  # oracle: the lambda folds three plus four to seven
 
         it "creates identity lambda":
-            val id = \x: x
-            expect(id(42)).to_equal(42)
+            # @req REQ-LANG-FEATURES-018
+            # @capture(statistics): identity lambda passthrough verdict
+            step("Pass a value through an identity lambda")
+            val identity_fn = \x: x
+            expect(identity_fn(42)).to_equal(42)  # oracle: the identity lambda returns its argument unchanged
 
     context "lambda with higher-order functions":
         it "uses lambda with map":
-            val numbers = [1, 2, 3]
-            val doubled = numbers.map(_ * 2)
-            expect(doubled).to_equal([2, 4, 6])
+            # @req REQ-LANG-FEATURES-019
+            # @capture(statistics): mapped doubling transcript over three elements
+            step("Map a doubling lambda over a three-element array")
+            val mapped_numbers = [1, 2, 3]
+            val doubled_numbers = mapped_numbers.map(_ * 2)
+            expect(doubled_numbers).to_equal([2, 4, 6])
 
         it "uses lambda with filter":
-            val numbers = [1, 2, 3, 4, 5, 6]
-            val evens = numbers.filter(_ % 2 == 0)
-            expect(evens).to_equal([2, 4, 6])
+            # @req REQ-LANG-FEATURES-020
+            # @capture(statistics): filtered even-number transcript over six elements
+            step("Filter an evenness predicate over a six-element array")
+            val filtered_numbers = [1, 2, 3, 4, 5, 6]
+            val even_numbers = filtered_numbers.filter(_ % 2 == 0)
+            expect(even_numbers).to_equal([2, 4, 6])
 
     context "closure capture (read-only)":
         it "captures outer variable":
-            val factor = 3
-            val multiply = _1 * factor
-            expect(multiply(5)).to_equal(15)
+            # @req REQ-LANG-FEATURES-021
+            # @capture(statistics): single-capture multiply verdict
+            step("Multiply through a lambda capturing one outer factor")
+            val capture_factor = 3
+            val captured_multiply = _1 * capture_factor
+            expect(captured_multiply(5)).to_equal(15)  # oracle: the captured factor scales the argument to fifteen
 
         it "captures multiple outer variables":
-            val base = 10
-            val offset = 5
-            val compute = _1 + base + offset
-            expect(compute(1)).to_equal(16)
+            # @req REQ-LANG-FEATURES-022
+            # @capture(statistics): multi-capture affine verdict
+            step("Evaluate a lambda capturing base and offset bindings")
+            val capture_base = 10
+            val capture_offset = 5
+            val captured_compute = _1 + capture_base + capture_offset
+            expect(captured_compute(1)).to_equal(16)  # oracle: argument plus both captures folds to sixteen
 
         it "captures string variable":
-            val prefix = "Hello"
-            val greet = \name: "{prefix}, {name}!"
-            expect(greet("World")).to_equal("Hello, World!")
+            # @req REQ-LANG-FEATURES-023
+            # @capture(statistics): string-capture interpolation verdict
+            step("Interpolate a captured prefix through a lambda")
+            val capture_prefix = "Hello"
+            val captured_greet = \name: "{capture_prefix}, {name}!"
+            expect(captured_greet("World")).to_equal("Hello, World!")
 
     context "lambdas as values":
         it "stores lambda in val":
-            val fn_val = \: 42
-            expect(fn_val()).to_equal(42)
+            # @req REQ-LANG-FEATURES-024
+            # @capture(statistics): stored constant-lambda invocation verdict
+            step("Invoke a constant lambda stored in a binding")
+            val stored_lambda = \: 42
+            expect(stored_lambda()).to_equal(42)  # oracle: invoking the stored lambda yields its constant
 
         it "passes lambda to function":
-            fn apply(f, x):
+            # @req REQ-LANG-FEATURES-025
+            # @capture(statistics): higher-order application verdict
+            step("Apply a scaling lambda through a higher-order function")
+            fn apply_lambda(f, x):
                 f(x)
-            val result = apply(_1 * 10, 5)
-            expect(result).to_equal(50)
+            val applied_result = apply_lambda(_1 * 10, 5)
+            expect(applied_result).to_equal(50)  # oracle: the applied lambda scales five to fifty
 
 # ============================================================================
 # Feature #2: Parser Basics
 # ============================================================================
 
-describe "Feature #2 - Parser":
-    # ## Parser Functionality
-    #
-    # Transforms token stream into Abstract Syntax Tree (AST). Uses recursive
-    # descent for statements and Pratt parsing for expressions with operator
-    # precedence. This validates that the parser correctly handles basic
-    # language constructs.
-
+describe "parser constructs":
     context "arithmetic expressions":
         it "parses addition":
-            expect(1 + 2).to_equal(3)
+            # @req REQ-LANG-FEATURES-026
+            # @capture(statistics): addition fold verdict
+            step("Parse and fold a two-operand addition")
+            expect(1 + 2).to_equal(3)  # oracle: the parser folds one plus two to three
 
         it "parses subtraction":
-            expect(10 - 3).to_equal(7)
+            # @req REQ-LANG-FEATURES-027
+            # @capture(statistics): subtraction fold verdict
+            step("Parse and fold a two-operand subtraction")
+            expect(10 - 3).to_equal(7)  # oracle: the parser folds ten minus three to seven
 
         it "parses multiplication":
-            expect(4 * 5).to_equal(20)
+            # @req REQ-LANG-FEATURES-028
+            # @capture(statistics): multiplication fold verdict
+            step("Parse and fold a two-operand multiplication")
+            expect(4 * 5).to_equal(20)  # oracle: the parser folds four times five to twenty
 
         it "parses division":
-            expect(10 / 2).to_equal(5)
+            # @req REQ-LANG-FEATURES-029
+            # @capture(statistics): division fold verdict
+            step("Parse and fold an even division")
+            expect(10 / 2).to_equal(5)  # oracle: the parser folds ten over two to five
 
         it "parses modulo":
-            expect(10 % 3).to_equal(1)
+            # @req REQ-LANG-FEATURES-030
+            # @capture(statistics): modulo remainder verdict
+            step("Parse and fold a modulo expression")
+            expect(10 % 3).to_equal(1)  # oracle: ten mod three leaves remainder one
 
         it "parses operator precedence":
-            # Multiplication before addition
-            expect(2 + 3 * 4).to_equal(14)
+            # @req REQ-LANG-FEATURES-031
+            # @capture(statistics): precedence fold verdict
+            step("Parse a mixed-precedence expression")
+            expect(2 + 3 * 4).to_equal(14)  # oracle: multiplication binds first, folding to fourteen
 
         it "parses parenthesized expressions":
-            expect((2 + 3) * 4).to_equal(20)
+            # @req REQ-LANG-FEATURES-032
+            # @capture(statistics): parenthesis override fold verdict
+            step("Parse a parenthesized expression overriding precedence")
+            expect((2 + 3) * 4).to_equal(20)  # oracle: the parentheses force the sum first, folding to twenty
 
     context "comparison expressions":
         it "parses equality":
-            expect(1).to_equal(1)
+            # @req REQ-LANG-FEATURES-033
+            # @capture(statistics): equality operator fold verdict
+            step("Parse an equality comparison of computed operands")
+            expect(6 * 7 == 42).to_equal(true)  # oracle: the parser folds the equality of the product and its value
 
         it "parses inequality":
+            # @req REQ-LANG-FEATURES-034
+            # @capture(statistics): inequality operator fold verdict
+            step("Parse an inequality comparison of distinct literals")
             expect(1 != 2).to_equal(true)
 
         it "parses less than":
+            # @req REQ-LANG-FEATURES-035
+            # @capture(statistics): less-than operator fold verdict
+            step("Parse a less-than ordering comparison")
             expect(1 < 2).to_equal(true)
 
         it "parses greater than":
+            # @req REQ-LANG-FEATURES-036
+            # @capture(statistics): greater-than operator fold verdict
+            step("Parse a greater-than ordering comparison")
             expect(2 > 1).to_equal(true)
 
         it "parses less than or equal":
+            # @req REQ-LANG-FEATURES-037
+            # @capture(statistics): inclusive lower-bound fold verdict
+            step("Parse a less-than-or-equal boundary comparison")
             expect(1 <= 1).to_equal(true)
 
         it "parses greater than or equal":
+            # @req REQ-LANG-FEATURES-038
+            # @capture(statistics): inclusive upper-bound fold verdict
+            step("Parse a greater-than-or-equal boundary comparison")
             expect(2 >= 2).to_equal(true)
 
     context "logical expressions":
         it "parses and":
+            # @req REQ-LANG-FEATURES-039
+            # @capture(statistics): conjunction truth table row verdicts
+            step("Parse conjunction over both truth assignments")
             expect(true and true).to_equal(true)
             expect(true and false).to_equal(false)
 
         it "parses or":
+            # @req REQ-LANG-FEATURES-040
+            # @capture(statistics): disjunction truth table row verdicts
+            step("Parse disjunction over both truth assignments")
             expect(false or true).to_equal(true)
             expect(false or false).to_equal(false)
 
         it "parses not":
+            # @req REQ-LANG-FEATURES-041
+            # @capture(statistics): negation verdicts over both inputs
+            step("Parse negation over both truth inputs")
             expect(not false).to_equal(true)
             expect(not true).to_equal(false)
 
     context "string expressions":
         it "parses string literals":
-            val s = "hello"
-            expect(s).to_equal("hello")
+            # @req REQ-LANG-FEATURES-042
+            # @capture(statistics): string literal content and length readback
+            step("Bind a string literal and read its content back")
+            val literal_message = "hello"
+            expect(literal_message).to_start_with("hello")
+            expect(literal_message.len()).to_equal(5)  # oracle: the literal carries exactly five characters
 
         it "parses string interpolation":
-            val name = "world"
-            val msg = "hello {name}"
-            expect(msg).to_equal("hello world")
+            # @req REQ-LANG-FEATURES-043
+            # @capture(statistics): interpolated greeting verdict
+            step("Interpolate a binding into a string literal")
+            val interpolated_name = "world"
+            val interpolated_message = "hello {interpolated_name}"
+            expect(interpolated_message).to_equal("hello world")
 
         it "parses string concatenation":
-            val a = "foo"
-            val b = "bar"
-            expect(a + b).to_equal("foobar")
+            # @req REQ-LANG-FEATURES-044
+            # @capture(statistics): concatenation join verdict
+            step("Concatenate two string literals")
+            val concat_left = "foo"
+            val concat_right = "bar"
+            expect(concat_left + concat_right).to_equal("foobar")
 
     context "control flow parsing":
         it "parses if/else":
-            val result = if true: "yes" else: "no"
-            expect(result).to_equal("yes")
+            # @req REQ-LANG-FEATURES-045
+            # @capture(statistics): taken-branch verdict
+            step("Parse an if/else expression with a true condition")
+            val branch_result = if true: "yes" else: "no"
+            expect(branch_result).to_equal("yes")
 
         it "parses for loop":
-            var sum = 0
-            for i in [1, 2, 3]:
-                sum = sum + i
-            expect(sum).to_equal(6)
+            # @req REQ-LANG-FEATURES-046
+            # @capture(statistics): loop-accumulated sum verdict
+            step("Accumulate a total across a three-iteration for loop")
+            var parsed_loop_total = 0
+            for parsed_loop_item in [1, 2, 3]:
+                parsed_loop_total = parsed_loop_total + parsed_loop_item
+            expect(parsed_loop_total).to_equal(6)  # oracle: the sum of one through three folds to six
 
         it "parses while loop":
-            fn run_while_loop() -> i64:
-                var count = 0
-                while count < 3:
-                    count = count + 1
-                count
-            expect(run_while_loop()).to_equal(3)
+            # @req REQ-LANG-FEATURES-047
+            # @capture(statistics): while-loop iteration count verdict
+            step("Count three iterations of a while loop")
+            fn run_parsed_while() -> i64:
+                var while_count = 0
+                while while_count < 3:
+                    while_count = while_count + 1
+                while_count
+            expect(run_parsed_while()).to_equal(3)  # oracle: the loop increments exactly three times
 
     context "function definitions":
         it "parses function with return value":
-            fn square(x):
+            # @req REQ-LANG-FEATURES-048
+            # @capture(statistics): single-parameter function fold verdict
+            step("Call a squared-value function with a literal argument")
+            fn parsed_square(x):
                 x * x
-            expect(square(5)).to_equal(25)
+            expect(parsed_square(5)).to_equal(25)  # oracle: squaring five folds to twenty-five
 
         it "parses function with multiple parameters":
-            fn add_three(a, b, c):
+            # @req REQ-LANG-FEATURES-049
+            # @capture(statistics): three-parameter function fold verdict
+            step("Call a three-parameter sum function")
+            fn parsed_add_three(a, b, c):
                 a + b + c
-            expect(add_three(1, 2, 3)).to_equal(6)
+            expect(parsed_add_three(1, 2, 3)).to_equal(6)  # oracle: the three operands fold to six
 
     context "collection literals":
         it "parses array literals":
-            val arr = [10, 20, 30]
-            expect(arr.len()).to_equal(3)
-            expect(arr[0]).to_equal(10)
+            # @req REQ-LANG-FEATURES-050
+            # @capture(statistics): array literal length and index readback
+            step("Bind an array literal and index its first element")
+            val literal_array = [10, 20, 30]
+            expect(literal_array.len()).to_equal(3)  # oracle: the literal carries three elements
+            expect(literal_array[0]).to_equal(10)  # oracle: the first element reads back as declared
 
         it "parses empty array":
-            val empty = []
-            expect(empty.len()).to_equal(0)
+            # @req REQ-LANG-FEATURES-051
+            # @capture(statistics): empty array length verdict
+            step("Bind an empty array literal and read its length")
+            val empty_array = []
+            expect(empty_array.len()).to_equal(0)  # oracle: an empty literal carries zero elements
 
         it "parses dictionary literals":
-            val dict = {"key": "value"}
-            expect(dict["key"]).to_equal("value")
+            # @req REQ-LANG-FEATURES-052
+            # @capture(statistics): dictionary key lookup verdict
+            step("Bind a dictionary literal and look up one key")
+            val literal_dict = {"key": "value"}
+            expect(literal_dict["key"]).to_equal("value")
