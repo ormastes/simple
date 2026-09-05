@@ -4,9 +4,10 @@
 
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl 60%
 # @tag: unit, web, draw_ir, gpu, residency
-"""Engine2D reuse across web Draw IR route calls, and the steady non-offload route.
+"""Engine2D reuse across web Draw IR route calls, the steady non-offload route,
+and the per-pixel oracle fingerprint.
 
-Items 1 and 7 of
+Items 1, 2 and 7 of
 doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md.
 Every assertion below is an OPERATION COUNT — engines created, reused,
 discarded, parked; device round trips attempted. Nothing here is a timing
@@ -32,8 +33,10 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     web_draw_ir_engine_cache_reuse_count,
     web_draw_ir_gpu_route_canonical_submission_count,
     web_draw_ir_gpu_route_last_evidence,
+    web_draw_ir_fingerprint_pixels_scanned,
     web_draw_ir_gpu_route_policy_reset,
-    web_draw_ir_gpu_route_sample
+    web_draw_ir_gpu_route_sample,
+    web_draw_ir_oracle_fingerprint
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
     present_layout_pixels_with_engine2d_readback,
@@ -188,3 +191,47 @@ describe "Web Draw IR Engine2D reuse across route calls":
         expect(web_presenter_engine_cache_create_attempt_count()).to_equal(attempts_while_sampling)
         expect(web_draw_ir_gpu_route_canonical_submission_count()).to_equal(
             submissions_while_sampling + 1)
+
+    it "fingerprints the oracle surface only for a route that will read it":
+        # @req REQ-SSPEC-LIB
+        step("fingerprints the oracle surface only for a route that will read it")
+        _reset_all()
+        val composition = _reuse_composition(8, 4)
+        var frame = 0
+        while frame < 4:
+            web_draw_ir_gpu_route_sample(composition, 8, 4, "vulkan")
+            frame = frame + 1
+        # The route ends non-offload here (no device is reachable from this
+        # session), and the oracle fingerprint has exactly one reader: the
+        # steady OFFLOAD branch. So on this route nothing can ever read it, and
+        # nothing should ever compute it.
+        expect(web_draw_ir_gpu_route_last_evidence().should_offload).to_equal(false)
+        expect(web_draw_ir_fingerprint_pixels_scanned()).to_equal(0)
+
+    it "keeps the offload gate's fingerprint able to fail a genuine mismatch":
+        # @req REQ-SSPEC-LIB
+        step("keeps the offload gate's fingerprint able to fail a genuine mismatch")
+        _reset_all()
+        val oracle = _solid_pixels(8 * 4)
+        val baseline = web_draw_ir_oracle_fingerprint(oracle)
+        # Same pixels, same fingerprint: a matching GPU surface still passes.
+        expect(web_draw_ir_oracle_fingerprint(_solid_pixels(8 * 4))).to_equal(baseline)
+        # One pixel different out of 32: the gate operand separates it.
+        var one_off = _solid_pixels(8 * 4)
+        one_off[17] = 0xff000000u32
+        expect(web_draw_ir_oracle_fingerprint(one_off) == baseline).to_equal(false)
+        # A pure REORDER of the same pixel values. Engine2DReadback.checksum is
+        # a plain modular sum and cannot see this; the fingerprint folds the
+        # index, so it can. This is why the gate must not be swapped for the
+        # checksum.
+        var swapped = _solid_pixels(8 * 4)
+        swapped[3] = 0xff112233u32
+        swapped[9] = 0xff445566u32
+        var reordered = _solid_pixels(8 * 4)
+        reordered[3] = 0xff445566u32
+        reordered[9] = 0xff112233u32
+        expect(
+            web_draw_ir_oracle_fingerprint(swapped) ==
+                web_draw_ir_oracle_fingerprint(reordered)).to_equal(false)
+        # A truncated surface is a mismatch, not a near miss.
+        expect(web_draw_ir_oracle_fingerprint(_solid_pixels(8 * 4 - 1)) == baseline).to_equal(false)

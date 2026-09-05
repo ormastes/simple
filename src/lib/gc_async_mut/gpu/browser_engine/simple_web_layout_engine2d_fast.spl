@@ -271,6 +271,7 @@ pub fn web_draw_ir_gpu_route_policy_reset():
     _web_fast_engine_creates = 0
     _web_fast_engine_reuses = 0
     _web_fast_engine_discards = 0
+    _web_draw_ir_fingerprint_pixels_scanned = 0
     _web_draw_ir_route_states = []
     _web_draw_ir_route_consults = 0
     _web_draw_ir_route_canonical_submissions = 0
@@ -497,7 +498,27 @@ fn _web_draw_ir_pixels_equal(left: [u32], right: [u32]) -> bool:
         index = index + 1
     true
 
+# Item 2 of doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md:
+# this is one interpreted loop iteration per pixel — 480,000 at 800x600,
+# 8,294,400 at 3840x2160 — so every call has to be justified by a reader. The
+# counter below is the evidence for that: it is the ONLY way a spec can show,
+# on a host with no GPU device, that a scan was avoided rather than merely
+# moved. Reset with the rest of the route policy.
+var _web_draw_ir_fingerprint_pixels_scanned: i64 = 0
+
+pub fn web_draw_ir_fingerprint_pixels_scanned() -> i64:
+    _web_draw_ir_fingerprint_pixels_scanned
+
+# The fingerprint is the operand of the steady-offload correctness gate (the
+# `gpu_match` comparison in _web_draw_ir_choose_route). That gate cannot be
+# reached on a host with no device, so this is the seam a spec uses to prove the
+# gate operand still separates a genuine mismatch — including a pure REORDER,
+# which the order-independent Engine2DReadback.checksum cannot see.
+pub fn web_draw_ir_oracle_fingerprint(pixels: [u32]) -> i64:
+    _web_draw_ir_pixel_fingerprint(pixels)
+
 fn _web_draw_ir_pixel_fingerprint(pixels: [u32]) -> i64:
+    _web_draw_ir_fingerprint_pixels_scanned = _web_draw_ir_fingerprint_pixels_scanned + pixels.len().to_i64()
     var first: i64 = 2166136261
     var second: i64 = 5381
     var index = 0
@@ -703,7 +724,6 @@ fn _web_draw_ir_choose_route(
 
     state.upload_samples.push(upload.elapsed_us)
     state.gpu_samples.push(gpu.elapsed_us)
-    state.oracle_fingerprint = _web_draw_ir_pixel_fingerprint(upload.oracle_pixels)
     state.pixels_match = (
         state.pixels_match and
         _web_draw_ir_pixels_equal(upload.readback.pixels, upload.oracle_pixels) and
@@ -738,6 +758,20 @@ fn _web_draw_ir_choose_route(
         state.commands_complete)
     state.evidence = evidence
     state.complete = evidence.sample_count >= 3
+    # Item 2 of doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md.
+    # `oracle_fingerprint` has exactly ONE reader: the steady branch above,
+    # guarded by `state.complete and state.evidence.should_offload`. It used to
+    # be recomputed over the whole oracle surface on every sampling frame, so on
+    # a route that offloads the first two writes were overwritten unread, and on
+    # a route that does NOT offload — every host without a proven device — all
+    # three were written and never read at all. Compute it under precisely the
+    # condition it is read under. This is not a weakened comparison: `complete`
+    # latches here and the evidence that latches it is the same evidence the
+    # reader consults, so the stored value is identical to the one the old
+    # last-write-wins assignment left behind. The fingerprint function and the
+    # `gpu_match` comparison are untouched.
+    if state.complete and evidence.should_offload:
+        state.oracle_fingerprint = _web_draw_ir_pixel_fingerprint(upload.oracle_pixels)
     val state_index = _web_draw_ir_state_index(key)
     if state_index >= 0:
         _web_draw_ir_route_states[state_index] = state
