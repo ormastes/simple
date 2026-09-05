@@ -87,3 +87,66 @@ self-identifies in its `--version` banner; the admission gate rejects it.
   site could never have resolved. Route audit concluded the `.initialized` guard
   needs no sibling changes. Lane state:
   `.spipe/restart12_engine2d_font_seed_review/state.md`.
+
+## Metal reached Vulkan's font batching — 2026-09-05
+
+Metal's font composite now has the same shape Vulkan has carried since
+2026-08-12. Read this before touching either backend's font path, because the
+two are now deliberately twins and a change to one without the other is a
+divergence, not an improvement.
+
+The shared frozen contract:
+
+| Piece | Vulkan | Metal |
+|---|---|---|
+| Packed shader | `font_atlas_composite_vulkan_glsl_source` | `font_atlas_composite_metal_packed_source` |
+| Packer | `vulkan_font_packed_params` -> `[u8]` | `metal_font_packed_params` -> `[u32]` |
+| Frame contract | `vulkan_font_frame_batch_contract` | `metal_font_frame_batch_contract` |
+| Warm reuse | `font_params_pool` / `font_descriptor_pool` | `packed_pool` |
+| Flush | `_flush_pending_compute` | `MetalFontBackendState.flush` |
+
+Word layout is frozen and identical on both: 8 header words
+(atlas_w, atlas_h, atlas_count, dst_w, dst_h, dst_count, glyph_count,
+max_pixels), then 7 words per glyph (atlas_x, atlas_y, w, h, dst_x, dst_y,
+color). `max_pixels` at word 7 is host-side only — it is the dispatch width;
+no shader reads it. The glyph cap is 4096 on both.
+
+Traps this cost time:
+
+- **A single shared packed buffer is wrong.** Batch N+1 overwrites it before
+  batch N's dispatch runs. Both backends pool one buffer per pending batch and
+  reset the pool index on flush.
+- **MSL has no `buffer.length()`.** The GLSL gets its bounds checks free from
+  `p.words.length()`; the MSL binds the word count at buffer(3) to get the
+  same guarantee. Do not drop that binding as "redundant" — it is the only
+  thing bounding a GPU-side read if the packer is ever wrong.
+- **Deferring text means ordering is yours to keep.** Metal's primitives still
+  submit immediately, each from its own command buffer, so `font.flush()` runs
+  at all six of those sites plus readback, present and `submit_batch`. Adding a
+  seventh immediate command-buffer site without a flush silently paints the
+  frame out of order.
+- **`begin_frame` must be wired or the contract is meaningless.** It resets the
+  per-frame counters at `clear()`, after the previous frame's flush. Without
+  that call the counters accumulate and `frame_batch_contract_met` is false
+  from frame 2 on.
+- **The completion latch cascades by design.** A failed dispatch sets
+  `completion_unknown` and every later draw early-returns, exactly like the
+  Vulkan/MoltenVK behavior in
+  `doc/08_tracking/bug/vulkan_engine2d_sequential_frames_flaky_moltenvk_2026-09-02.md`.
+  Only encode and dispatch failure set it; allocation failures do not.
+
+## Verification, Metal packed lane
+
+| Level | Spec | Status |
+|---|---|---|
+| Unit, no device | `test/01_unit/lib/gc_async_mut/gpu/engine2d/metal_font_packed_parity_spec.spl` | live, 5/5 |
+
+That spec proves layout parity with Vulkan byte for byte, shared constants and
+dispatch arithmetic, and the one-command/one-commit/one-wait frame contract.
+**It does not prove device execution.** No Metal-featured binary exists on the
+reference machine, so the packed path's real speedup is unmeasured and the 21x
+figure in `doc/01_research/local/metal_2d_frame_cost_perf.md` predates it.
+
+DirectX gets none of this and cannot until it has a GPU text path at all —
+both its text entrypoints delegate to the software mirror. Scope recorded in
+`doc/08_tracking/bug/directx_2d_has_no_gpu_text_path_2026-09-05.md`.
