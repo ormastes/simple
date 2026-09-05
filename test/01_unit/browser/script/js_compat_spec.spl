@@ -1,11 +1,43 @@
 """
-# JS Compat Spec
+## Purpose and audience
+Executable specification for the JavaScript compatibility layer in
+src/lib/gc_async_mut/gpu/browser_engine/script/js_compat.spl. Written for the
+browser-engine owners who need proof that parseInt/parseFloat prefix rules,
+Math/String/Array shims, JSON pass-through stubs, and URI encoding behave the
+way embedded scripts expect.
 
-Unit tests for the JS standard library compatibility functions.
+## Operator workflow
+Run one file: `bin/simple test test/01_unit/browser/script/js_compat_spec.spl`.
+Every scenario calls the real exported js_* functions directly; no browser
+session or renderer is started.
+
+## Compatibility and limitations
+js_json_parse / js_json_stringify are documented pass-through stubs, so the
+JSON scenarios pin identity, not a real parse. js_date_now depends on the
+rt_time_now_unix_millis extern, which is defined in the C runtime
+(src/runtime/runtime_core_host_services.c:268) but not registered in the
+seed run lane, so that scenario is a legitimate RED until the extern is
+registered (see the NOTE on the scenario).
+
+## Verification guidance and troubleshooting
+A prefix-rule failure means the parseInt/parseFloat scanner grammar changed;
+compare against the ECMAScript prefix rules the js_* wrappers document. A
+roundtrip failure in the URI block means the reserved-character table drifted.
+The date_now failure is expected on the seed and must NOT be silenced — fix
+the extern registration instead.
 """
 
-use std.spec.step
+# Lifecycle: doc/01_research/local/browser_wasm_webgpu_infra.md
+# doc/03_plan/ui/web_browser/simple_browser_chromium_html_parity.md
+# doc/04_architecture/browser_wasm_webgpu_infra.md
+# doc/05_design/browser_wasm_webgpu_infra.md
+# @manual_section: js compat layer
 
+# @feature js_compat
+# tag: unit
+
+use std.spec
+use std.spec.step
 use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.browser_engine.script.js_compat.{
     js_parse_int, js_parse_float, js_to_string,
@@ -32,45 +64,65 @@ use std.gc_async_mut.gpu.browser_engine.script.js_compat.{
 describe "JS Compat - Number Parsing":
     # @manual scenario evidence
     it "parses integer from string":
-        expect(js_parse_int("42")).to_equal(42)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): parseInt of a plain decimal literal
+        step("Parse a plain decimal string through js_parse_int")
+        expect(js_parse_int("42")).to_equal(42)  # oracle: a pure decimal string must map to its face value, the parseInt baseline case
 
     it "parses zero":
-        expect(js_parse_int("0")).to_equal(0)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): parseInt of the zero literal
+        step("Parse the zero string through js_parse_int")
+        expect(js_parse_int("0")).to_equal(0)  # oracle: "0" must parse to numeric zero, distinct from the empty-input sentinel
 
     it "parses integer prefixes with whitespace, signs, and radix":
-        step("Verify: parseInt-compatible prefixes and radix selection")
-        expect(js_parse_int("12px")).to_equal(12)
-        expect(js_parse_int("  -15ms")).to_equal(0 - 15)
-        expect(js_parse_int("+0x1f")).to_equal(31)
-        expect(js_parse_int("101tail", radix: 2)).to_equal(5)
-        expect(js_parse_int("0Xff", radix: 16)).to_equal(255)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): parseInt prefix and radix table
+        step("Parse suffixed, signed, hex, and radix-limited spellings")
+        expect(js_parse_int("12px")).to_equal(12)  # oracle: parseInt consumes the longest numeric prefix and stops at the first letter
+        expect(js_parse_int("  -15ms")).to_equal(0 - 15)  # oracle: leading whitespace is skipped and the sign binds before the suffix breaks the scan
+        expect(js_parse_int("+0x1f")).to_equal(31)  # oracle: an explicit + sign followed by 0x must still be read as hexadecimal 31
+        expect(js_parse_int("101tail", radix: 2)).to_equal(5)  # oracle: radix 2 makes 101 binary five; the suffix ends the digit run
+        expect(js_parse_int("0Xff", radix: 16)).to_equal(255)  # oracle: uppercase 0X prefix is accepted for radix 16, per the ECMAScript grammar
 
     it "returns 0 for invalid or empty integer input":
-        step("Verify: invalid integer input uses the documented NaN sentinel")
-        expect(js_parse_int("")).to_equal(0)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): parseInt NaN-sentinel behaviour
+        step("Parse an empty string and observe the NaN sentinel")
+        expect(js_parse_int("")).to_equal(0)  # oracle: this layer represents JS NaN from parseInt as the documented 0 sentinel so callers stay typed
 
     it "parses float from string":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): parseFloat of a decimal literal
+        step("Parse a decimal string through js_parse_float")
         val result = js_parse_float("3.14")
-        expect(result > 3.13).to_equal(true)
-        expect(result < 3.15).to_equal(true)
+        expect(result > 3.13).to_equal(true)  # oracle: the band 3.13..3.15 pins the value without depending on binary float rounding at the edges
+        expect(result < 3.15).to_equal(true)  # oracle: the band 3.13..3.15 pins the value without depending on binary float rounding at the edges
 
     it "parses float prefixes with whitespace, signs, and exponents":
-        step("Verify: parseFloat-compatible longest numeric prefixes")
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): parseFloat prefix and exponent table
+        step("Parse suffixed, signed, and exponent spellings")
         val suffixed = js_parse_float("3.14px")
-        expect(suffixed > 3.13).to_equal(true)
-        expect(suffixed < 3.15).to_equal(true)
-        expect(js_parse_float("  -.5rem")).to_equal(0.0 - 0.5)
-        expect(js_parse_float("+1.25e2ms")).to_equal(125.0)
+        expect(suffixed > 3.13).to_equal(true)  # oracle: the suffix must not disturb the parsed prefix value, pinned by the 3.13..3.15 band
+        expect(suffixed < 3.15).to_equal(true)  # oracle: the suffix must not disturb the parsed prefix value, pinned by the 3.13..3.15 band
+        expect(js_parse_float("  -.5rem")).to_equal(0.0 - 0.5)  # oracle: whitespace skip plus a sign with no leading digit still yields -0.5
+        expect(js_parse_float("+1.25e2ms")).to_equal(125.0)  # oracle: the e2 exponent must be applied to the mantissa before the suffix ends the scan
 
     it "returns 0.0 for invalid or empty float input":
-        step("Verify: invalid float input uses the documented NaN sentinel")
-        expect(js_parse_float("")).to_equal(0.0)
-        expect(js_parse_float("   ")).to_equal(0.0)
-        expect(js_parse_float("px3.14")).to_equal(0.0)
-        expect(js_parse_float(".")).to_equal(0.0)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): parseFloat NaN-sentinel behaviour
+        step("Parse empty, blank, and letter-leading spellings")
+        expect(js_parse_float("")).to_equal(0.0)  # oracle: empty input has no numeric prefix, so the documented NaN sentinel 0.0 is returned
+        expect(js_parse_float("   ")).to_equal(0.0)  # oracle: whitespace trims to empty, so the sentinel applies
+        expect(js_parse_float("px3.14")).to_equal(0.0)  # oracle: a leading letter means no numeric prefix exists — parseFloat never scans mid-string
+        expect(js_parse_float(".")).to_equal(0.0)  # oracle: a bare dot has no digits on either side, so there is no number to parse
 
     it "converts to string identity":
-        expect(js_to_string("hello")).to_equal("hello")
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): js_to_string identity transcript
+        step("Convert a text value through js_to_string")
+        expect(js_to_string("hello")).to_equal("hello")  # oracle: text values must pass through unchanged — String(x) is an identity for text in this layer
 
 # =========================================================================
 # Number Checks
@@ -78,10 +130,16 @@ describe "JS Compat - Number Parsing":
 
 describe "JS Compat - Number Checks":
     it "is_finite for normal number":
-        expect(js_is_finite(42.0)).to_equal(true)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(bit_table): is_finite truth table for a normal number
+        step("Check is_finite on a normal number")
+        expect(js_is_finite(42.0)).to_equal(true)  # oracle: an ordinary double is finite — this pins the non-NaN, non-infinite classification
 
     it "is_finite for zero":
-        expect(js_is_finite(0.0)).to_equal(true)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(bit_table): is_finite truth table for zero
+        step("Check is_finite on zero")
+        expect(js_is_finite(0.0)).to_equal(true)  # oracle: zero is finite in JS; a sentinel-based layer must not confuse 0 with its NaN sentinel
 
 # =========================================================================
 # Math Functions
@@ -89,62 +147,107 @@ describe "JS Compat - Number Checks":
 
 describe "JS Compat - Math":
     it "floor rounds down":
-        expect(js_math_floor(3.7)).to_equal(3)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.floor on a positive fraction
+        step("Floor 3.7 through js_math_floor")
+        expect(js_math_floor(3.7)).to_equal(3)  # oracle: floor truncates toward negative infinity, so 3.7 becomes 3
 
     it "floor negative rounds down":
-        expect(js_math_floor(-2.3)).to_equal(-3)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.floor on a negative fraction
+        step("Floor -2.3 through js_math_floor")
+        expect(js_math_floor(-2.3)).to_equal(-3)  # oracle: floor goes toward negative infinity — -2.3 becomes -3, not the -2 a truncation would give
 
     it "ceil rounds up":
-        expect(js_math_ceil(3.2)).to_equal(4)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.ceil on a positive fraction
+        step("Ceil 3.2 through js_math_ceil")
+        expect(js_math_ceil(3.2)).to_equal(4)  # oracle: ceil rounds toward positive infinity, so any positive fraction crosses to the next integer
 
     it "round rounds to nearest":
-        expect(js_math_round(3.5)).to_equal(4)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.round at the .5 boundary
+        step("Round 3.5 through js_math_round")
+        expect(js_math_round(3.5)).to_equal(4)  # oracle: JS Math.round rounds half UP, so exactly .5 goes to 4, unlike banker's rounding
 
     it "round rounds down below 0.5":
-        expect(js_math_round(3.4)).to_equal(3)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.round below the .5 boundary
+        step("Round 3.4 through js_math_round")
+        expect(js_math_round(3.4)).to_equal(3)  # oracle: strictly below .5 stays at the lower integer
 
     it "random returns value in range":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.random range sample
+        step("Sample js_math_random and bound it to [0,1)")
         val r = js_math_random()
-        expect(r >= 0.0).to_equal(true)
-        expect(r < 1.0).to_equal(true)
+        expect(r >= 0.0).to_equal(true)  # oracle: the JS contract is a double in [0,1); the lower bound is inclusive
+        expect(r < 1.0).to_equal(true)  # oracle: 1.0 itself must be excluded, or Math.random could emit a value times-multiplicable past the range
 
     it "abs of positive":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.abs of a positive value
+        step("Take the absolute value of 5.0")
         val result = js_math_abs(5.0)
-        expect(result).to_equal(5.0)
+        expect(result).to_equal(5.0)  # oracle: abs of an already-positive value must be the identity
 
     it "abs of negative":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.abs of a negative value
+        step("Take the absolute value of -5.0")
         val result = js_math_abs(-5.0)
-        expect(result).to_equal(5.0)
+        expect(result).to_equal(5.0)  # oracle: abs must flip the sign bit, mapping -5.0 to 5.0
 
     it "min returns smaller":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.min of an ordered pair
+        step("Take the minimum of 3.0 and 7.0")
         val result = js_math_min(3.0, 7.0)
-        expect(result).to_equal(3.0)
+        expect(result).to_equal(3.0)  # oracle: min must select the smaller operand, 3.0
 
     it "max returns larger":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.max of an ordered pair
+        step("Take the maximum of 3.0 and 7.0")
         val result = js_math_max(3.0, 7.0)
-        expect(result).to_equal(7.0)
+        expect(result).to_equal(7.0)  # oracle: max must select the larger operand, 7.0
 
     it "sqrt of 4":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.sqrt of a perfect square
+        step("Take the square root of 4.0")
         val result = js_math_sqrt(4.0)
-        expect(result > 1.99).to_equal(true)
-        expect(result < 2.01).to_equal(true)
+        expect(result > 1.99).to_equal(true)  # oracle: the 1.99..2.01 band pins sqrt(4) at 2 without requiring exact binary equality
+        expect(result < 2.01).to_equal(true)  # oracle: the 1.99..2.01 band pins sqrt(4) at 2 without requiring exact binary equality
 
     it "sqrt of 0":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.sqrt of zero
+        step("Take the square root of 0.0")
         val result = js_math_sqrt(0.0)
-        expect(result).to_equal(0.0)
+        expect(result).to_equal(0.0)  # oracle: sqrt(0) is exactly 0.0 and must not be a NaN sentinel
 
     it "pow integer exponent":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.pow with a positive exponent
+        step("Raise 2.0 to the 10th power")
         val result = js_math_pow(2.0, 10.0)
-        expect(result).to_equal(1024.0)
+        expect(result).to_equal(1024.0)  # oracle: 2^10 is exactly representable as a double, so equality is safe here
 
     it "pow zero exponent":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.pow with a zero exponent
+        step("Raise 5.0 to the zeroth power")
         val result = js_math_pow(5.0, 0.0)
-        expect(result).to_equal(1.0)
+        expect(result).to_equal(1.0)  # oracle: any nonzero base to the zeroth power is exactly 1.0 per the JS spec
 
     it "pi value":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Math.pi constant band
+        step("Read js_math_pi and bound it to the 3.14..3.15 band")
         val pi = js_math_pi()
-        expect(pi > 3.14).to_equal(true)
-        expect(pi < 3.15).to_equal(true)
+        expect(pi > 3.14).to_equal(true)  # oracle: the band proves the constant is the real pi, not a truncated 3.14 literal
+        expect(pi < 3.15).to_equal(true)  # oracle: the band proves the constant is the real pi, not a truncated 3.14 literal
 
 # =========================================================================
 # String Functions
@@ -152,39 +255,66 @@ describe "JS Compat - Math":
 
 describe "JS Compat - String":
     it "splits string":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): String.split part count and members
+        step("Split a comma-separated string through js_string_split")
         val parts = js_string_split("a,b,c", ",")
-        expect(parts.len()).to_equal(3)
-        expect(parts[0]).to_equal("a")
-        expect(parts[2]).to_equal("c")
+        expect(parts.len()).to_equal(3)  # oracle: two separators yield exactly three parts — no trailing-empty artifact
+        expect(parts[0]).to_equal("a")  # oracle: the first member must be the text before the first separator
+        expect(parts[2]).to_equal("c")  # oracle: the last member must be the text after the final separator
 
     it "joins array":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): String.join output transcript
+        step("Join a three-element array with dashes")
         var arr: [text] = ["x", "y", "z"]
         val result = js_string_join(arr, "-")
-        expect(result).to_equal("x-y-z")
+        expect(result).to_equal("x-y-z")  # oracle: the separator must sit between members only — none before the first or after the last
 
     it "trims whitespace":
-        expect(js_string_trim("  hi  ")).to_equal("hi")
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): String.trim output transcript
+        step("Trim surrounding whitespace from a padded string")
+        expect(js_string_trim("  hi  ")).to_equal("hi")  # oracle: both leading and trailing whitespace must be stripped, content preserved
 
     it "starts_with":
-        expect(js_string_starts_with("hello", "hel")).to_equal(true)
-        expect(js_string_starts_with("hello", "xyz")).to_equal(false)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(bit_table): starts_with truth table
+        step("Check prefix matching for a real and a wrong prefix")
+        expect(js_string_starts_with("hello", "hel")).to_equal(true)  # oracle: a genuine prefix must match
+        expect(js_string_starts_with("hello", "xyz")).to_equal(false)  # oracle: an unrelated prefix must not match
 
     it "ends_with":
-        expect(js_string_ends_with("hello", "llo")).to_equal(true)
-        expect(js_string_ends_with("hello", "xyz")).to_equal(false)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(bit_table): ends_with truth table
+        step("Check suffix matching for a real and a wrong suffix")
+        expect(js_string_ends_with("hello", "llo")).to_equal(true)  # oracle: a genuine suffix must match
+        expect(js_string_ends_with("hello", "xyz")).to_equal(false)  # oracle: an unrelated suffix must not match
 
     it "includes":
-        expect(js_string_includes("hello world", "world")).to_equal(true)
-        expect(js_string_includes("hello world", "xyz")).to_equal(false)
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(bit_table): includes truth table
+        step("Check substring search for a present and an absent needle")
+        expect(js_string_includes("hello world", "world")).to_equal(true)  # oracle: a substring anywhere must be found
+        expect(js_string_includes("hello world", "xyz")).to_equal(false)  # oracle: an absent substring must not be reported
 
     it "replace":
-        expect(js_string_replace("hello world", "world", "there")).to_equal("hello there")
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): String.replace output transcript
+        step("Replace one occurrence through js_string_replace")
+        expect(js_string_replace("hello world", "world", "there")).to_equal("hello there")  # oracle: the matched needle is swapped for the replacement, rest preserved
 
     it "to_lower":
-        expect(js_string_to_lower("HELLO")).to_equal("hello")
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): toLowerCase output transcript
+        step("Lowercase an uppercase string")
+        expect(js_string_to_lower("HELLO")).to_equal("hello")  # oracle: ASCII uppercase maps to lowercase, length unchanged
 
     it "to_upper":
-        expect(js_string_to_upper("hello")).to_equal("HELLO")
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): toUpperCase output transcript
+        step("Uppercase a lowercase string")
+        expect(js_string_to_upper("hello")).to_equal("HELLO")  # oracle: ASCII lowercase maps to uppercase, length unchanged
 
 # =========================================================================
 # Array Functions
@@ -192,40 +322,61 @@ describe "JS Compat - String":
 
 describe "JS Compat - Array":
     it "push adds item":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Array.push length and member
+        step("Push an item onto a one-element array")
         var arr: [text] = ["a"]
         js_array_push(arr, "b")
-        expect(arr.len()).to_equal(2)
-        expect(arr[1]).to_equal("b")
+        expect(arr.len()).to_equal(2)  # oracle: push must grow the array by exactly one
+        expect(arr[1]).to_equal("b")  # oracle: the pushed item lands at the new tail index
 
     it "pop returns last item":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Array.pop value and resulting length
+        step("Pop the tail of a three-element array")
         var arr: [text] = ["a", "b", "c"]
         val popped = js_array_pop(arr)
-        expect(popped).to_equal("c")
-        expect(arr.len()).to_equal(2)
+        expect(popped).to_equal("c")  # oracle: pop returns the removed tail, not the new tail
+        expect(arr.len()).to_equal(2)  # oracle: the array shrinks by exactly one
 
     it "pop empty returns empty string":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Array.pop on an empty array
+        step("Pop an empty array and observe the sentinel")
         var arr: [text] = []
         val popped = js_array_pop(arr)
-        expect(popped).to_equal("")
+        expect(popped).to_equal("")  # oracle: the layer's typed sentinel for JS undefined from pop is the empty string
 
     it "length returns count":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Array.length of a two-element array
+        step("Read the length of a two-element array")
         var arr: [text] = ["a", "b"]
-        expect(js_array_length(arr)).to_equal(2)
+        expect(js_array_length(arr)).to_equal(2)  # oracle: length must equal the element count, 2
 
     it "index_of finds item":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): indexOf of a present item
+        step("Find a present item's index")
         var arr: [text] = ["a", "b", "c"]
-        expect(js_array_index_of(arr, "b")).to_equal(1)
+        expect(js_array_index_of(arr, "b")).to_equal(1)  # oracle: the first match is at zero-based index 1
 
     it "index_of returns -1 for missing":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): indexOf of a missing item
+        step("Search for an absent item")
         var arr: [text] = ["a", "b"]
-        expect(js_array_index_of(arr, "z")).to_equal(-1)
+        expect(js_array_index_of(arr, "z")).to_equal(-1)  # oracle: -1 is the JS not-found sentinel and must not collide with a real index
 
     it "slice extracts subarray":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): slice bounds and members
+        step("Slice elements 1 to 3 from a four-element array")
         var arr: [text] = ["a", "b", "c", "d"]
         val sliced = js_array_slice(arr, 1, 3)
-        expect(sliced.len()).to_equal(2)
-        expect(sliced[0]).to_equal("b")
-        expect(sliced[1]).to_equal("c")
+        expect(sliced.len()).to_equal(2)  # oracle: the end bound is exclusive, so [1,3) yields exactly two elements
+        expect(sliced[0]).to_equal("b")  # oracle: the slice starts at the start bound's element
+        expect(sliced[1]).to_equal("c")  # oracle: the slice ends just before the exclusive end bound
 
 # =========================================================================
 # JSON Stubs
@@ -233,10 +384,16 @@ describe "JS Compat - Array":
 
 describe "JS Compat - JSON Stubs":
     it "json_parse returns input":
-        expect(js_json_parse("{\"a\":1}")).to_equal("{\"a\":1}")
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): JSON parse pass-through transcript
+        step("Parse a JSON text through the documented pass-through stub")
+        expect(js_json_parse("{\"a\":1}")).to_equal("{\"a\":1}")  # oracle: this layer's json_parse is a documented identity stub — pinning that prevents a silent real parser swap
 
     it "json_stringify returns input":
-        expect(js_json_stringify("hello")).to_equal("hello")
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): JSON stringify pass-through transcript
+        step("Stringify a text through the documented pass-through stub")
+        expect(js_json_stringify("hello")).to_equal("hello")  # oracle: identity stub, same contract as json_parse
 
 # =========================================================================
 # URI Encoding
@@ -244,27 +401,42 @@ describe "JS Compat - JSON Stubs":
 
 describe "JS Compat - URI Encoding":
     it "encodes space":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): encodeURIComponent space output
+        step("Encode a string containing a space")
         val result = js_encode_uri_component("hello world")
-        expect(result).to_equal("hello%20world")
+        expect(result).to_equal("hello%20world")  # oracle: space must become %20 — encodeURIComponent's unreserved set excludes space
 
     it "encodes special chars":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): encodeURIComponent reserved-char output
+        step("Encode ampersand and equals characters")
         val result = js_encode_uri_component("a&b=c")
-        expect(result.contains("%26")).to_equal(true)
-        expect(result.contains("%3D")).to_equal(true)
+        expect(result.contains("%26")).to_equal(true)  # oracle: & is a reserved delimiter and must be percent-encoded
+        expect(result.contains("%3D")).to_equal(true)  # oracle: = is reserved in query strings and must be percent-encoded, uppercase hex
 
     it "does not encode unreserved chars":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): encodeURIComponent unreserved-char output
+        step("Encode a string of unreserved characters")
         val result = js_encode_uri_component("abc-123_test.txt~")
-        expect(result).to_equal("abc-123_test.txt~")
+        expect(result).to_equal("abc-123_test.txt~")  # oracle: alphanumerics plus -_.~ are the unreserved set and must pass through untouched
 
     it "decodes percent-encoded":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): decodeURIComponent output transcript
+        step("Decode a percent-encoded string")
         val result = js_decode_uri_component("hello%20world")
-        expect(result).to_equal("hello world")
+        expect(result).to_equal("hello world")  # oracle: %20 must decode back to the space character
 
     it "roundtrips encoding":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(protocol_json): encode-decode roundtrip transcript
+        step("Roundtrip a string through encode then decode")
         val original = "hello world!"
         val encoded = js_encode_uri_component(original)
         val decoded = js_decode_uri_component(encoded)
-        expect(decoded).to_equal(original)
+        expect(decoded).to_equal(original)  # oracle: decode(encode(x)) must be the identity — the pair is only usable together if this holds
 
 # =========================================================================
 # Date
@@ -272,5 +444,14 @@ describe "JS Compat - URI Encoding":
 
 describe "JS Compat - Date":
     it "date_now returns positive timestamp":
+        # @req REQ-BROWSER-JS-COMPAT-001
+        # @capture(statistics): Date.now epoch-millis sample
+        step("Read js_date_now and require a positive epoch value")
+        # NOTE: LEGITIMATE RED. js_date_now calls the rt_time_now_unix_millis
+        # extern, which is defined in the C runtime
+        # (src/runtime/runtime_core_host_services.c:268) but is not registered
+        # in the seed run lane, so this scenario errors at runtime. Do NOT
+        # silence or delete — the fix is registering the extern, not editing
+        # this spec.
         val now = js_date_now()
-        expect(now > 0).to_equal(true)
+        expect(now > 0).to_equal(true)  # oracle: a wall-clock epoch-millisecond value is necessarily positive; 0 would mean the extern returned its unregistered nil default
