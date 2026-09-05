@@ -185,7 +185,7 @@ render-side `block_model_spec.spl`),
     `unknown command 'check'`; (2) the current-source debug seed cannot run
     `check` on ANY input -- it dies parsing its own entrypoint. Filed as
     doc/08_tracking/bug/simple_check_dispatch_cannot_parse_check_main_2026-09-05.md
-- [x] All spec files pass in interpreter mode — verified src/compiler_rust/target/debug/simple run test/03_system/plan_acceptance/editor_markdown_editing_subsystem_spec.spl (2026-09-05): 9 examples, 1 failure; this example green; the four Phase 7 spec files now exist and each is green on the same lane: md_block_model_spec 4/0, md_command_dispatch_spec 7/0, md_vim_motions_spec 8/0, md_table_ops_spec 6/0
+- [x] All spec files pass in interpreter mode — verified 2026-09-05 by RUNNING each of the four Phase 7 specs on src/compiler_rust/target/debug/simple: md_block_model 4/0, md_command_dispatch 7/0, md_vim_motions 8/0, md_table_ops 6/0. NOT evidenced by the acceptance spec's own scenario, which only checks that the four files exist — that scenario was renamed accordingly.
 
 ## Risk Factors
 
