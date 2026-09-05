@@ -12,9 +12,26 @@ remote provider, and **0 of 18 acceptance criteria hold an authoritative PASS**
 **Ceiling: "Stage 0.5 done" for this lane can only ever mean source-complete
 with diagnostic evidence — never "verified" — until a non-seed `bin/simple` is
 deployed.** Sequenced closure criteria: § "Path to Stage 0.5 done" below.
-New same-day finding: the committed `.spipe/policy/vcs.sdn` is REJECTED by its
-own canonical parser (see "Measured reality"), so the protected-target
-predicate cannot be wired until that parse defect is fixed.
+**Closed later the same day (commits `56d032e6f0d`, `9738a969190`):** Stage 0.5
+items 1-5 are now source-complete. The `.spipe/policy/vcs.sdn` rejection had two
+causes in `parse_lifecycle_vcs_policy`, both fixed — a schema clobber
+(`lifecycle_policy.spl:257`) and a section bleed (`:276`). `bin/sj plan` now
+prints `protected target : true` from the real committed policy and pins 16 gate
+ids. The reachability guard `scripts/check/check-lifecycle-reachability.shs`
+landed and its baseline moved 92 -> 88 dormant symbols, removals only.
+
+**Two things did NOT close, and neither is a wiring bug:**
+1. The committed policy still fails the CANONICAL contract on two genuine policy
+   disagreements (`review/*` force `deny` vs `lease_only`; `candidate/*` profile
+   `candidate` vs `release`). `resolve_protected_target` is bound to the basic
+   parser so the success branch is not dead; `plan_integration_with_policy:81`
+   remains canonical-bound, so two parsers currently disagree about the same
+   file. A human owes that decision:
+   `doc/08_tracking/bug/committed_vcs_policy_fails_canonical_contract_2026-09-05.md`.
+2. Report-level `PASS` is STRUCTURALLY unreachable from `bin/sj plan <argv>` —
+   argv carries no revision identity, so every plan ends `SJ_IDENTITY_MISSING`.
+   That is an identity gap, not a mutation gap. Reaching a report-level PASS
+   needs a revision-identity source, which is Stage 1/2 work, not Stage 0.5.
 
 > **Same-session supersession.** The "Measured reality" section below was written
 > against the pre-landing tree earlier on 2026-09-05 and is retained as history.
@@ -28,7 +45,7 @@ predicate cannot be wired until that parse defect is fixed.
 **Acceptance:** `scv_jj_git_devhub_spipe_unified_lifecycle_acceptance.md` (same dir);
 AC-1..AC-18 are defined only in
 `.spipe/scv_jj_git_devhub_spipe_unified_lifecycle/state.md:17-34` (phase
-`agent-base-delivered-unverified`, `:63`).
+`stage-0.5-source-complete-unverified`).
 
 ## Measured reality
 

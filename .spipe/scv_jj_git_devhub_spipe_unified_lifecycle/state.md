@@ -60,11 +60,11 @@ Implement the complete agent-owned, pure-Simple base for the unified SCV/Jujutsu
 
 ## Phase
 
-stage-0.5-partially-wired-unverified
+stage-0.5-source-complete-unverified
 
 (Was `agent-base-delivered-unverified` until 2026-09-05. Still UNVERIFIED for the
-same reason: the deployed `bin/simple` is the Rust seed, so nothing in this lane is
-an authoritative PASS. 0 of 18 acceptance criteria hold one.)
+same reason: the deployed `bin/simple` is the Rust seed, so no result in this lane
+is an authoritative PASS. 0 of 18 acceptance criteria hold one.)
 
 ## Log
 
@@ -128,43 +128,67 @@ Todo DB prerequisite: existing TODO 270 (`hardening_resume_after_seed_redeploy_2
 - `.claude/commands`: N/A; DevHub lifecycle is a product CLI subcommand, not a Claude command.
 - `.gemini/commands`: N/A; no Gemini command consumes the observe-only base.
 - Generated-manual independent review remains open until the admitted Stage 4 docgen/`sspec-maintain` pass and final independent reviewer are available.
-- research-2026-09-05: Filed the two FULL research documents that the condensed
-  `..._2026-08-25.md` summarizes: `..._unified_lifecycle_full_2026-08-25.md` and
-  `..._unified_release_review_work_item_2026-08-25.md` (the latter is the only
-  source for the four SCV tag defects, release units, authority modes A/B/C, and
-  the R0-R4 review risk classes).
+- research-2026-09-05: Filed the two full research documents the condensed
+  `..._2026-08-25.md` summarizes:
+  `doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_full_2026-08-25.md`
+  and `doc/01_research/app/tools/scv/scv_jj_git_unified_release_review_work_item_2026-08-25.md`
+  (the latter is the source for the four SCV tag defects, release units, authority
+  modes A/B/C, and the R0-R4 review risk classes).
 - audit-2026-09-05: Measured the delivered base as DORMANT — real, unstubbed,
   zero TODO markers, but no producer, executor, provider implementation, or
-  mutation path; ~20-25% of the 7-stage design. Doc audit: Stage 6a undesigned,
-  Stage 3 with zero architecture content, six NFRs with no test rows, no
-  Stage/REQ/AC cross-walk.
-- doc-2026-09-05: Plan rewritten (Stage 0.5 wiring + Stage 6a provider design as
-  BLOCKING; tag defects T-1..T-4; cross-walk and NFR ownership tables).
-  Architecture 37 -> 279 lines (Stage 3 written from nothing). Design 203 -> 597
+  mutation path; roughly 20-25% of the 7-stage design. Doc-chain audit found
+  Stage 6a undesigned, Stage 3 with zero architecture content, six NFRs with no
+  test rows, and no Stage/REQ/AC cross-walk.
+- doc-2026-09-05: Plan rewritten (Stage 0.5 wiring and Stage 6a provider design
+  added as BLOCKING; tag defects T-1..T-4; cross-walk and NFR ownership tables).
+  Architecture 37 -> 278 lines (Stage 3 written from nothing). Design 203 -> ~600
   (Stage 6a written from nothing).
 - impl-2026-09-05: Stage 0.5 items 1, 3, 4 landed. `bin/sj plan` reaches the typed
   layer; `devhub lifecycle record-change` is the first production caller of
   `lifecycle_store_write`; `LocalScvProvider` is the first `LifecycleProvider`
-  implementer. Specs 6/6, 7/7, 3/3 each verified red-then-green; 38/38 no
-  regressions. All diagnostic only.
-- trap-2026-09-05-eager-use: `use` resolves EAGERLY. strace showed an
-  `integrate_plan` import in `src/app/sj/main.spl` opening `scv/lifecycle` 4x on
-  every `bin/sj --help`. `bin/sj` execs `main.spl` FROM SOURCE and `land.shs`
-  invokes `sj`, so that import put the whole lifecycle graph on the push path for
-  the entire machine. Fixed by routing `plan` to a separate entry
-  (`src/app/sj/plan_main.spl`). NEVER add a lifecycle import to `main.spl`.
-- trap-2026-09-05-clobber: A concurrent session's checkout reverted EVERY tracked
-  file of this lane to HEAD with no `git status` trace; untracked files survived.
-  Recovery was possible only for files previously `git hash-object -w`'d. Hash
-  every file immediately after writing it in this tree, and RECORD the SHA — the
-  three sj files were lost because their SHAs were never taken.
-- open-2026-09-05: `sj plan`'s PASS branch is unreachable — `protected_target` is
-  hardcoded `false`, no protected-ref policy committed under `config/`, so every
-  plan ends `FAIL — SJ_POLICY_TARGET`. Stage 0.5 item 2 (gate-manifest/CAS half)
-  and item 5 (reachability guard) not started. `scripts/check/land.shs` now does a
-  raw `git push` and defers to a "reviewed CAS operation" with no executor. Four
-  of five provider traits have 0 implementers.
-- rejected_shortcuts-2026-09-05: Intercepting `sj git push` to force a dry-run —
-  REJECTED, it is `land.shs`'s path and would break every push on this machine.
-  Adding the lifecycle import to `main.spl` — tried, measured, reverted.
+  implementer. Specs 6/6, 7/7, 3/3, each verified red-then-green; 38/38 no
+  regressions across 10 lifecycle specs. All diagnostic only.
+- impl-2026-09-05-trap: `use` resolves EAGERLY (strace: an unreferenced
+  `integrate_plan` import in `src/app/sj/main.spl` opened `scv/lifecycle` 4x on
+  every `bin/sj --help`). Because `bin/sj:37` execs `main.spl` from source and
+  `land.shs` invokes it, that import put the whole lifecycle graph on the push
+  path for the entire machine. Fixed by routing `plan` to a separate entry
+  (`src/app/sj/plan_main.spl`, `bin/sj:37-45`); `main.spl`'s executable content
+  and import set are unchanged. Do not re-add a lifecycle import to `main.spl`.
+- open-2026-09-05: `sj plan`'s PASS branch is unreachable — `protected_target`
+  is hardcoded `false` and no protected-ref policy is committed under `config/`,
+  so every plan ends `FAIL — SJ_POLICY_TARGET`. Stage 0.5 item 2 (gate-manifest /
+  CAS half of the executor) and item 5 (reachability guard) are not started.
+  `scripts/check/land.shs` now does a raw `git push` and defers to a "reviewed CAS
+  operation" that has no executor. Four of five provider traits have 0 implementers.
+- rejected_shortcuts-2026-09-05: Intercepting `sj git push` to force a dry-run was
+  considered and REJECTED — it is `land.shs`'s path and would break every push on
+  this machine. Adding the lifecycle import to `main.spl` was tried, measured, and
+  reverted (see impl-2026-09-05-trap).
+- close-2026-09-05: Stage 0.5 items 1-5 source-complete across commits
+  `35a216c1923`, `e6446521cd3`, `9014ddab1a4`, `56d032e6f0d`, `5d2fab5bd9a`,
+  `9738a969190`. Two `parse_lifecycle_vcs_policy` defects fixed (schema clobber
+  `lifecycle_policy.spl:257`, section bleed `:276`) — the committed seven-ref
+  `.spipe/policy/vcs.sdn` had never been read correctly, and NO spec parsed it
+  (every policy spec used an inline payload, which is how it survived since
+  2026-08-27). `bin/sj plan` now reports `protected target : true` and pins 16
+  real gate ids. Reachability guard landed; baseline 92 -> 88, removals only.
+  Both stale `doc/06_spec` manuals regenerated (0 stubs), which surfaced an
+  invalid `# @manual scenario evidence` value that docgen had been publishing as
+  a visible warning.
+- trap-2026-09-05-reachability: the guard's `prod` counter excludes SAME-FILE
+  callers by design (`check-lifecycle-reachability.shs:226`). A symbol called
+  only from its own defining file therefore reads dormant. That is intended — it
+  measures exported surface with an external consumer — but do not read a FAIL as
+  "nothing calls this"; read it as "nothing OUTSIDE this file calls this".
+- open-2026-09-05-final: (a) committed policy vs canonical contract disagree on
+  `review/*` force and `candidate/*` profile — human decision, filed at
+  `doc/08_tracking/bug/committed_vcs_policy_fails_canonical_contract_2026-09-05.md`;
+  two parsers currently disagree about the same file and that split must not
+  become permanent. (b) report-level PASS is structurally unreachable from
+  `sj plan <argv>` (no revision identity in argv) — Stage 1/2 work. (c) 88
+  dormant symbols remain baselined. (d) `land.shs` raw `git push` deferring to a
+  CAS operation with no executor — Stage 2.4. (e) four `LifecycleProvider` traits
+  still have zero implementers, deliberately: building them for a count is
+  forbidden unused code, real work is Stage 6a.
 
