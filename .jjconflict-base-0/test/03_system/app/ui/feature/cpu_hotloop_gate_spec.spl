@@ -1,4 +1,43 @@
-use std.spec.{describe, it, expect}
+"""
+## Purpose and audience
+
+Contract for the CPU-lane hot-loop enforcement gate
+(`scripts/check/check-cpu-hotloop-idiom.shs`): the gate script exists, the
+designated hot-path roster covers the real CPU hot files, the four violation
+classes are documented, and every detection, annotation-semantics and
+ratchet behaviour is pinned by a fixture control run against the gate
+itself. Audience: UI/CPU-lane maintainers and whoever touches the gate or
+the designated file set.
+
+## Operator workflow
+
+Run `simple run test/03_system/app/ui/feature/cpu_hotloop_gate_spec.spl`.
+Source-contract scenarios read the shipped gate and roster; behaviour
+scenarios run the gate over checked-in fixtures with an empty baseline so
+a single detected construct surfaces deterministically as new=1.
+
+## Compatibility and limitations
+
+The gate is a shell script driven through `sh`; on a host without it the
+behaviour scenarios fail on the run itself rather than skipping. Fixture
+controls are ratcheted against `/dev/null`, so results are independent of
+the real committed baseline. The gate's recursion blind spot is documented,
+not covered — that is asserted, not accidentally silent.
+
+## Verification guidance and troubleshooting
+
+A failure names the fixture or contract clause that moved (offender class,
+annotation position, ratchet shift). Rerun the single file to reproduce;
+if the real-designated-set scenario fails, run the gate directly with
+`--update-baseline` only after reviewing the diff — that flag exists for
+reviewed baseline updates, not for making a red scenario green.
+"""
+# Lifecycle: research doc/01_research/compiler/optimization_plugin_jit_hotspot.md ;
+# plan doc/03_plan/compiler/optimization/optimization_plugin_jit_hotspot.md ;
+# architecture doc/04_architecture/app/mcp/mcp_performance_regression_enforcement.md ;
+# design doc/05_design/runtime/optimization_plugin_jit_hotspot.md
+
+use std.spec.{describe, it, expect, step}
 use std.io_runtime.{read_file, file_exists}
 use std.process.{run}
 
@@ -19,67 +58,98 @@ fn _run_fixture(list: text) -> (text, i64):
     _run_gate(["--file-list", "{FIX}/{list}", "--baseline", "/dev/null"])
 
 describe "CPU-lane hot-loop enforcement gate (design §6.1 / plan W2)":
-    # @manual scenario evidence
+    # @manual_section: cpu-hotloop-gate
+
     it "has a gate script":
-        expect(file_exists("scripts/check/check-cpu-hotloop-idiom.shs")).to_equal(true)
+        # @req REQ-CPU-HOTLOOP-001
+        # @capture(statistics): gate-script existence verdict
+        step("Check the enforcement gate script is checked in at its documented path")
+        expect(file_exists("scripts/check/check-cpu-hotloop-idiom.shs")).to_equal(true)  # oracle: the gate path is the one the preflight and this spec both drive
 
     it "has a checked-in designated hot-path file set covering the real CPU hot paths":
+        # @req REQ-CPU-HOTLOOP-002
+        # @capture(statistics): the designated hot-path roster's covered files
+        step("Read the designated roster and assert the real hot-path files are listed")
+        val designated_hot_path_roster = read_file("scripts/check/cpu_lane_hotpath_files.txt")
         expect(file_exists("scripts/check/cpu_lane_hotpath_files.txt")).to_equal(true)
-        val files = read_file("scripts/check/cpu_lane_hotpath_files.txt")
-        expect(files.contains("backend_software.spl")).to_equal(true)
-        expect(files.contains("backend_emu.spl")).to_equal(true)
-        expect(files.contains("compositor.spl")).to_equal(true)
-        expect(files.contains("helpers_text.spl")).to_equal(true)
-        expect(files.contains("famous_site_glyph_compositor.spl")).to_equal(true)
-        expect(files.contains("src/os/compositor/compositor.spl")).to_equal(true)
+        expect(designated_hot_path_roster.contains("backend_software.spl")).to_equal(true)
+        expect(designated_hot_path_roster.contains("backend_emu.spl")).to_equal(true)
+        expect(designated_hot_path_roster.contains("compositor.spl")).to_equal(true)
+        expect(designated_hot_path_roster.contains("helpers_text.spl")).to_equal(true)
+        expect(designated_hot_path_roster.contains("famous_site_glyph_compositor.spl")).to_equal(true)
+        expect(designated_hot_path_roster.contains("src/os/compositor/compositor.spl")).to_equal(true)
 
     it "documents the four violation classes (LOOP / BYTE / SUBSTR / CHAIN)":
-        val source = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
-        expect(source.contains("LOOP_PATTERN")).to_equal(true)
-        expect(source.contains("SUBSTR_PATTERN")).to_equal(true)
-        expect(source.contains("U8_DECL_PATTERN")).to_equal(true)
-        expect(source.contains("CHAIN_PATTERN")).to_equal(true)
-        expect(source.contains("cpu-lane-loop-ok")).to_equal(true)
+        # @req REQ-CPU-HOTLOOP-003
+        # @capture(statistics): the four violation-class pattern names found in the gate source
+        step("Read the gate source and assert all four violation classes are declared")
+        val gate_class_documentation = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
+        expect(gate_class_documentation.contains("LOOP_PATTERN")).to_equal(true)
+        expect(gate_class_documentation.contains("SUBSTR_PATTERN")).to_equal(true)
+        expect(gate_class_documentation.contains("U8_DECL_PATTERN")).to_equal(true)
+        expect(gate_class_documentation.contains("CHAIN_PATTERN")).to_equal(true)
+        expect(gate_class_documentation.contains("cpu-lane-loop-ok")).to_equal(true)
 
     it "documents the recursion blind spot instead of pretending coverage":
-        val source = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
-        expect(source.contains("recursion")).to_equal(true)
+        # @req REQ-CPU-HOTLOOP-004
+        # @capture(statistics): the honesty note in the gate about uncovered recursion
+        step("Read the gate source and assert the recursion blind spot is stated")
+        val gate_honesty_documentation = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
+        expect(gate_honesty_documentation.contains("recursion")).to_equal(true)
 
     it "supports a baseline ratchet with update, file-list and baseline overrides":
-        val source = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
-        expect(source.contains("cpu_lane_hotloop_baseline.txt")).to_equal(true)
-        expect(source.contains("--update-baseline")).to_equal(true)
-        expect(source.contains("--file-list")).to_equal(true)
-        expect(source.contains("--baseline")).to_equal(true)
+        # @req REQ-CPU-HOTLOOP-005
+        # @capture(statistics): the gate's ratchet CLI surface as shipped
+        step("Read the gate source and assert the ratchet override flags exist")
+        val gate_baseline_surface = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
+        expect(gate_baseline_surface.contains("cpu_lane_hotloop_baseline.txt")).to_equal(true)
+        expect(gate_baseline_surface.contains("--update-baseline")).to_equal(true)
+        expect(gate_baseline_surface.contains("--file-list")).to_equal(true)
+        expect(gate_baseline_surface.contains("--baseline")).to_equal(true)
 
     it "reports machine-readable key=value status lines":
-        val source = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
-        expect(source.contains("cpu_lane_hotloop_new=")).to_equal(true)
-        expect(source.contains("cpu_lane_hotloop_ok=")).to_equal(true)
+        # @req REQ-CPU-HOTLOOP-006
+        # @capture(statistics): the key=value status keys the gate emits
+        step("Read the gate source and assert the machine-readable status keys")
+        val gate_status_surface = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
+        expect(gate_status_surface.contains("cpu_lane_hotloop_new=")).to_equal(true)
+        expect(gate_status_surface.contains("cpu_lane_hotloop_ok=")).to_equal(true)
 
     it "keeps a content-keyed baseline (COUNT<TAB>CLASS<TAB>file<TAB>text, no line numbers)":
+        # @req REQ-CPU-HOTLOOP-007
+        # @capture(statistics): the checked-in content-keyed baseline's class column
+        step("Read the committed baseline and assert it carries loop-class rows")
+        val content_keyed_baseline = read_file("scripts/check/cpu_lane_hotloop_baseline.txt")
         expect(file_exists("scripts/check/cpu_lane_hotloop_baseline.txt")).to_equal(true)
-        val baseline = read_file("scripts/check/cpu_lane_hotloop_baseline.txt")
-        expect(baseline.contains("LOOP")).to_equal(true)
+        expect(content_keyed_baseline.contains("LOOP")).to_equal(true)
 
     # --- detection positive controls (each must flag new=1) ---
 
     it "flags a fresh unannotated per-element loop (LOOP)":
+        # @req REQ-CPU-HOTLOOP-008
+        # @capture(statistics): gate verdict and named offender for the bare LOOP fixture
+        step("Run the gate over the unannotated-loop fixture with an empty baseline")
         val (out, code) = _run_fixture("offender_file_list.txt")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: one new offender must fail the gate
         expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
         expect(out.contains("cpu_lane_hotloop_ok=false")).to_equal(true)
         expect(out.contains("known_offender.spl")).to_equal(true)
 
     it "flags an idiomatic .for_each/.map/.each escape chain (CHAIN)":
+        # @req REQ-CPU-HOTLOOP-009
+        # @capture(statistics): gate verdict and named offender for the CHAIN fixture
+        step("Run the gate over the escape-chain fixture with an empty baseline")
         val (out, code) = _run_fixture("chain_file_list.txt")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: the chained escape is a violation class, so the gate exits nonzero
         expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
         expect(out.contains("chain_offender.spl")).to_equal(true)
 
     it "flags a multi-line parenthesized loop condition (LOOP, colon on a later line)":
+        # @req REQ-CPU-HOTLOOP-010
+        # @capture(statistics): gate verdict and named offender for the multi-line header fixture
+        step("Run the gate over the multi-line-condition fixture with an empty baseline")
         val (out, code) = _run_fixture("multiline_file_list.txt")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: splitting the header across lines must not evade detection
         expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
         expect(out.contains("multiline_offender.spl")).to_equal(true)
 
@@ -89,54 +159,78 @@ describe "CPU-lane hot-loop enforcement gate (design §6.1 / plan W2)":
     # say which loop changed. Refining the key must NOT change the scored total,
     # so new stays 2 — this asserts the fix is a key refinement, not a loosening.
     it "keys each multi-line loop header distinctly instead of collapsing to `while (`":
+        # @req REQ-CPU-HOTLOOP-011
+        # @capture(statistics): distinct header keys and unchanged new=2 total for the twin-header fixture
+        step("Run the gate over two distinct multi-line headers and check the per-header keys")
         val (out, code) = _run_fixture("multiline_distinct_file_list.txt")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: two offenders stay two; the key refinement changed attribution, not the total
         expect(out.contains("cpu_lane_hotloop_new=2")).to_equal(true)
         expect(out.contains("while ( i < n and a < b ):")).to_equal(true)
         expect(out.contains("while ( j < n and b > a ):")).to_equal(true)
         expect(out.contains("multiline_distinct_offender.spl:while (\n")).to_equal(false)
 
     it "flags byte indexing when the [u8] declaration is in the same file (BYTE)":
+        # @req REQ-CPU-HOTLOOP-012
+        # @capture(statistics): gate verdict and named offender for the same-file BYTE fixture
+        step("Run the gate over the byte-indexing fixture with the u8 declaration in-file")
         val (out, code) = _run_fixture("byte_offender_file_list.txt")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: an in-file [u8] indexed per element is exactly the BYTE class
         expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
         expect(out.contains("byte_offender.spl")).to_equal(true)
 
     it "does not leak a [u8] name into another designated file":
+        # @req REQ-CPU-HOTLOOP-013
+        # @capture(statistics): clean gate verdict proving cross-file u8 isolation
+        step("Run the gate over a second file that merely mentions the u8 name")
         val (out, code) = _run_fixture("byte_cross_file_list.txt")
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: the [u8] declaration binds per file, so a mention elsewhere is clean
         expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
         expect(out.contains("cpu_lane_hotloop_ok=true")).to_equal(true)
 
     # --- annotation semantics (header exempts; def line does NOT) ---
 
     it "passes a clean fixture (loop annotated on its header + a loop-free fn)":
+        # @req REQ-CPU-HOTLOOP-014
+        # @capture(statistics): clean gate verdict for the annotated-header fixture
+        step("Run the gate over the clean fixture with a header-annotated loop")
         val (out, code) = _run_fixture("clean_file_list.txt")
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: a header annotation exempts the loop, so the gate passes
         expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
         expect(out.contains("cpu_lane_hotloop_ok=true")).to_equal(true)
 
     it "exempts a loop annotated on its HEADER line (new=0)":
+        # @req REQ-CPU-HOTLOOP-015
+        # @capture(statistics): exempt verdict for a header-line annotation
+        step("Run the gate over a loop whose cpu-lane-loop-ok sits on the header line")
         val (out, code) = _run_fixture("header_ok_file_list.txt")
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: the documented exemption position is the header line
         expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
 
     it "does NOT exempt a loop when the annotation sits on the def line (new=1)":
+        # @req REQ-CPU-HOTLOOP-016
+        # @capture(statistics): offender verdict for a misplaced def-line annotation
+        step("Run the gate over a loop whose annotation sits on the def line instead")
         val (out, code) = _run_fixture("def_annotated_file_list.txt")
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: the exemption is position-sensitive; a def-line annotation does not count
         expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
 
     # --- ratchet survives line shifts (content-keyed) ---
 
     it "ratchets clean when a baselined loop has moved to a different line (new=0)":
+        # @req REQ-CPU-HOTLOOP-017
+        # @capture(statistics): clean verdict proving the baseline keys on content, not line numbers
+        step("Run the gate over a shifted loop against the matching fixture baseline")
         val (out, code) = _run_gate(["--file-list", "{FIX}/shift_file_list.txt", "--baseline", "{FIX}/shift_baseline.txt"])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: the content-keyed baseline must ignore pure line shifts
         expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
 
     # --- ratchet is clean on the real designated set ---
 
     it "ratchets clean on the real designated file set (baseline == current, new=0)":
+        # @req REQ-CPU-HOTLOOP-018
+        # @capture(statistics): the production ratchet verdict over the real designated set
+        step("Run the gate with no overrides over the committed designated set")
         val (out, code) = _run_gate([])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: the committed baseline must match the committed hot paths exactly
         expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
         expect(out.contains("cpu_lane_hotloop_ok=true")).to_equal(true)

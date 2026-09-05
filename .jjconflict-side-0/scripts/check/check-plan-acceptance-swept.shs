@@ -42,18 +42,19 @@
 #   examples and fails 13 of them is NOT an offender here — it is counted and
 #   named in the verdict. Making example-pass the bar would make this gate red
 #   for reasons unrelated to "is the suite swept".
-# * It does not assert the `@tag:in-development` SKIP/COUNT semantics, which is
-#   the other half of Gap A. It cannot: `simple test` over this directory fails
-#   at compile in the seed for every spec (filed as
-#   `rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05`), while
-#   per-spec `simple run <spec>` works. Per-spec `run` has no tag filter, so it
-#   executes in-development specs rather than skipping and counting them.
-#   ALL 36 specs in this suite carry `@tag:in-development` (measured
-#   2026-09-05), so under `simple test` the correct behaviour would be 36 SKIPs
-#   that are still COUNTED — a property this guard structurally cannot see.
-#   The verdict line SAYS SO, every run. A gate that claimed the stronger
-#   property while checking the weaker one is the exact drift .claude/rules/vcs.md
-#   was written to stop.
+# * UPDATED 2026-09-05 (Guide A2 hardening — see the HARDENING section below
+#   for the mechanism): per-file `@tag:in-development` neutralisation
+#   (SKIP-vs-load-failure, UNEXPECTED PASS) IS now asserted, via a single
+#   directory-wide `<runner> run src/app/test_runner_new/main.spl <SPEC_DIR>`
+#   invocation. What remains UNASSERTED is only the suite-level SKIP+COUNT
+#   *summary row* (`In-development: N skipped ...`) — this guard does not
+#   invoke `simple test` (which still fails at compile in the seed for this
+#   directory, filed as
+#   `rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05`), so
+#   it never observes the summary line `print_in_development_summary` prints
+#   only at the very end of a `simple test` run. That narrower gap is pinned
+#   separately by `test/02_integration/test_runner/in_development_tag_runner_spec.spl`.
+#   The verdict line SAYS SO, every run.
 #
 # WHY ADVISORY (`push_blocking: false`)
 # -------------------------------------
@@ -77,7 +78,9 @@
 # A run that fed 0 specs to a runner is ERROR, never a pass. No runner at all is
 # ERROR, never a pass — absence of a runner is absence of evidence.
 #
-# `--selftest` runs before every scan and is fatal (8 fixtures).
+# `--selftest` runs before every scan and is fatal (12 fixtures: the original
+# 9 plus the 3 hardening fixtures below — E1034-anywhere, tagged-assertion
+# neutralisation, and tagged-load-failure-vs-neutralisation).
 #
 # Options (the overrides exist so the selftest can drive the REAL scanner
 # against fixtures instead of re-implementing it):
@@ -87,6 +90,52 @@
 #   --spec-dir DIR        suite directory to sweep
 #   --runner PATH         binary invoked as `PATH run <spec>`
 #   --spec-timeout SECS   per-spec timeout (default 300; needs timeout/gtimeout)
+#   --sweep-timeout SECS  timeout for the single in-development sweep invocation
+#                         over the whole spec dir (default 1800)
+#
+# HARDENING (2026-09-05, Guide A2)
+# ---------------------------------
+# Three additions on top of the landed guard, none of which touch the two
+# assertions above:
+#
+# * E1034 anywhere in ANY captured output (per-spec loop or the neutralisation
+#   sweep below) is `ERROR — nothing was checked (imports degraded to shims)`,
+#   exit 2 — a run whose imports silently fell back to built-in shims proves
+#   nothing, so its verdict must not be reported as a PASS or a scoped FAIL.
+#
+# * Crash-vs-assertion / load-failure-vs-neutralised-assertion distinction.
+#   The per-spec loop above proves LOADING (executed>0); it says nothing about
+#   whether the suite-level `@tag:in-development` neutralisation machinery
+#   (src/lib/nogc_sync_mut/spec/in_development.spl, wired into
+#   `src/app/test_runner_new/test_runner_main.spl`) actually reaches these
+#   files. That machinery only activates when the tagged file is part of a
+#   DIRECTORY sweep (`in_development_explicitly_targeted` returns false only
+#   then) — naming the file directly, which is what the per-spec loop above
+#   does, always gets the honest ExplicitRun verdict, never a SKIP/UNEXPECTED
+#   PASS marker. So a SECOND, single invocation is run here:
+#   `<runner> run src/app/test_runner_new/main.spl <SPEC_DIR>` (one process for
+#   the whole directory) — the same shape
+#   `test/02_integration/test_runner/in_development_tag_runner_spec.spl`
+#   uses to prove the wiring, and the reason Guide A1 had to fix
+#   `find_simple_binary`/the native-diversion first ("the sweep needs a
+#   runner that executes children"). For every `# @tag:in-development` spec,
+#   its output is classified from the COMBINED marker + verdict evidence:
+#     - `IN-DEVELOPMENT SKIP <file> (...)` line AND that file's own
+#       `SPEC FILE VERDICT: ... executed>=1 failed>=1` -> a genuine assertion
+#       failure was neutralised. Fine, not an offender.
+#     - `IN-DEVELOPMENT UNEXPECTED PASS <file> (...)` line -> fine, not an
+#       offender (that is the intended "ready to promote" signal).
+#     - `IN-DEVELOPMENT SKIP <file> (...)` line but that file's own verdict
+#       shows `executed=0` -> the file never ran at all; `classify_in_development`
+#       neutralises a load/import failure exactly the same way it neutralises
+#       a real assertion failure (both fold through the `errored` branch), so
+#       the SKIP marker ALONE cannot tell them apart and Gap A hid behind
+#       exactly this. Reported as an offender under the label
+#       `load-failure-neutralised:<name>` — a load failure, not a neutralised
+#       assertion.
+#     - neither marker present for a tagged file -> also
+#       `load-failure-neutralised:<name>(no-marker)`: the neutralisation
+#       machinery never classified it at all.
 
 set -u
 
@@ -102,6 +151,7 @@ DISPATCHER=""
 SPEC_DIR=""
 RUNNER="${PLAN_ACCEPTANCE_RUNNER:-}"
 SPEC_TIMEOUT=300
+SWEEP_TIMEOUT="${PLAN_ACCEPTANCE_SWEEP_TIMEOUT:-1800}"
 DO_SELFTEST_ONLY=0
 
 while [ $# -gt 0 ]; do
@@ -112,6 +162,7 @@ while [ $# -gt 0 ]; do
         --spec-dir) SPEC_DIR=$2; shift 2 ;;
         --runner) RUNNER=$2; shift 2 ;;
         --spec-timeout) SPEC_TIMEOUT=$2; shift 2 ;;
+        --sweep-timeout) SWEEP_TIMEOUT=$2; shift 2 ;;
         *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
     esac
 done
@@ -202,6 +253,10 @@ run_one() {
         _out=$("$_runner" run "$_spec" 2>&1)
     fi
     _rc=$?
+    if printf '%s\n' "$_out" | grep -q 'E1034'; then
+        echo "E1034 0 $_rc"
+        return 0
+    fi
     _v=$(printf '%s\n' "$_out" | grep -F 'SPEC FILE VERDICT:' | tail -1)
     _exec=$(printf '%s\n' "$_v" | sed -n 's/.*executed=\([0-9][0-9]*\).*/\1/p' | tail -1)
     if [ "$_rc" -eq 124 ] || [ "$_rc" -ge 128 ]; then
@@ -262,6 +317,59 @@ esac
 echo "SPEC FILE VERDICT: \$_spec outcome=OK declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0"
 exit 0
 EOF
+    chmod +x "$1"
+}
+
+_mk_runner_neutr() {
+    # $1 dest — a fixture runner usable for BOTH call shapes the hardened
+    # script now makes:
+    #   runner run <spec-file>                          (per-spec loop)
+    #   runner run <.../test_runner_new/main.spl> <dir>  (neutralisation sweep)
+    # Classification is driven by MARKER TEXT inside each fixture .spl file
+    # (E1034_MARKER / LOAD_FAIL_MARKER / the `@tag:in-development` comment
+    # itself), never by filename, so it exercises the real script's parsing
+    # the same way real child output would.
+    cat > "$1" <<'RUNNEOF'
+#!/bin/sh
+_cmd=$1
+_target=$2
+case "$_target" in
+    */test_runner_new/main.spl)
+        _dir=$3
+        for _f in "$_dir"/*_spec.spl; do
+            [ -f "$_f" ] || continue
+            if grep -q E1034_MARKER "$_f"; then
+                echo "E1034: shimmed import for $_f"
+                continue
+            fi
+            if grep -q '@tag:in-development' "$_f"; then
+                if grep -q LOAD_FAIL_MARKER "$_f"; then
+                    echo "IN-DEVELOPMENT SKIP $_f (1 expected failure(s); @tag:in-development)"
+                    echo "SPEC FILE VERDICT: $_f outcome=NOT_RUN declared>=0 executed=0 passed=0 failed=0 skipped=0 dropped=0"
+                else
+                    echo "IN-DEVELOPMENT SKIP $_f (1 expected failure(s); @tag:in-development)"
+                    echo "SPEC FILE VERDICT: $_f outcome=OK declared>=1 executed=1 passed=0 failed=1 skipped=1 dropped=0"
+                fi
+            else
+                echo "SPEC FILE VERDICT: $_f outcome=OK declared>=1 executed=1 passed=1 failed=0 skipped=0 dropped=0"
+            fi
+        done
+        exit 0
+        ;;
+    *)
+        if grep -q E1034_MARKER "$_target" 2>/dev/null; then
+            echo "E1034: shimmed import for $_target"
+            exit 1
+        fi
+        if grep -q LOAD_FAIL_MARKER "$_target" 2>/dev/null; then
+            echo "Error: Compilation failed: unresolved import"
+            exit 1
+        fi
+        echo "SPEC FILE VERDICT: $_target outcome=OK declared>=1 executed=1 passed=0 failed=1 skipped=0 dropped=0"
+        exit 0
+        ;;
+esac
+RUNNEOF
     chmod +x "$1"
 }
 
@@ -357,6 +465,43 @@ run_selftest() {
         --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
         --spec-dir "$_wd/specs" --runner "$_wd/runner_norun.sh"
 
+    # ---- hardening fixtures (Guide A2): E1034, and crash/load-failure vs
+    # neutralised-assertion classification for `@tag:in-development` specs.
+    # Fixture SOURCES are real .spl-shaped text written with printf (never a
+    # Simple text literal containing `{...}`, which is interpolation, not
+    # literal braces); a small fixture runner (`_mk_runner_neutr`) stands in
+    # for the real binary and classifies purely from marker text INSIDE each
+    # file, so the script under test does the real parsing work.
+    _mk_runner_neutr "$_wd/runner_neutr.sh"
+    mkdir -p "$_wd/specs_neutr_ok" "$_wd/specs_neutr_loadfail" "$_wd/specs_e1034"
+    printf '# @tag:in-development\nuse std.spec.*\n\ndescribe "wip":\n    it "not yet":\n        expect(1).to_equal(2)\n' \
+        > "$_wd/specs_neutr_ok/wip_failing_spec.spl"
+    printf '# @tag:in-development\n# LOAD_FAIL_MARKER: app.spipe.kb unresolved\nuse std.spec.*\nuse app.spipe.kb.{missing_symbol}\n' \
+        > "$_wd/specs_neutr_loadfail/wip_unloadable_spec.spl"
+    printf '# @tag:in-development\n# E1034_MARKER: imports degraded to shims\nuse std.spec.*\n' \
+        > "$_wd/specs_e1034/wip_shimmed_spec.spl"
+
+    # (h) a tagged spec that genuinely executes and fails its assertion is
+    #     classified as a neutralised ASSERTION failure, not an offender.
+    _st_assert "tagged failing spec classified neutralised-assertion" 0 "PASS —" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_neutr_ok" --runner "$_wd/runner_neutr.sh"
+
+    # (i) a tagged spec neutralised with executed=0 is a LOAD FAILURE — the
+    #     SKIP marker alone cannot tell the two apart, which is exactly the
+    #     shape Gap A hid behind. Reported under its own offender label.
+    _st_assert "tagged load failure classified load-failure-neutralised" 1 \
+        "load-failure-neutralised:wip_unloadable_spec.spl" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_neutr_loadfail" --runner "$_wd/runner_neutr.sh"
+
+    # (j) E1034 anywhere in captured output means imports degraded to shims:
+    #     ERROR, never a PASS and never a scoped FAIL naming offenders.
+    _st_assert "E1034 anywhere aborts as ERROR" 2 \
+        "ERROR — nothing was checked (imports degraded to shims" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_e1034" --runner "$_wd/runner_neutr.sh"
+
     rm -rf "$_wd"
     if [ "$ST_FAILURES" -ne 0 ]; then
         echo "selftest: $ST_FAILURES of $ST_ASSERTS assertion(s) FAILED — scan not attempted"
@@ -412,6 +557,14 @@ for _spec in $SPECS; do
     # nothing between the selftest and the verdict is unreadable, and the
     # slowest-spec number is the input to any later timeout decision.
     echo "plan_acceptance_spec=$_base class=$_class executed=$(printf '%s' "$_r" | cut -d' ' -f2) rc=$(printf '%s' "$_r" | cut -d' ' -f3) secs=$((_t1 - _t0))"
+    # E1034 anywhere means imports silently degraded to built-in shims: the
+    # whole run's evidence is worthless, not just this one spec's. Exit HERE,
+    # in the real script process (never inside run_one's command-substitution
+    # subshell, whose `exit` would only end the subshell).
+    if [ "$_class" = "E1034" ]; then
+        echo "ERROR — nothing was checked (imports degraded to shims: E1034 detected in $_base output)"
+        exit 2
+    fi
     case "$_class" in
         RAN) N_RAN=$((N_RAN + 1)) ;;
         FAILEXAMPLES)
@@ -424,9 +577,64 @@ done
 
 [ "$N_ATTEMPTED" -gt 0 ] || { echo "ERROR — nothing was checked (0 spec invocations executed)"; exit 2; }
 
-N_TAGGED=$(grep -l '@tag:in-development' $SPECS 2>/dev/null | wc -l | tr -d ' ')
+TAGGED_LIST=$(grep -l '@tag:in-development' $SPECS 2>/dev/null)
+N_TAGGED=0
+[ -z "$TAGGED_LIST" ] || N_TAGGED=$(printf '%s\n' "$TAGGED_LIST" | grep -c .)
 
-DISCLAIMER="example pass/fail and @tag:in-development skip+count semantics NOT asserted ($N_TAGGED/$N_ATTEMPTED specs carry the tag; per-spec 'run' has no tag filter, and 'simple test' over this dir fails at compile in the seed — rust_seed_parser_behind_main_grammar_blocks_simple_test_2026-09-05)"
+# ---------------------------------------------------- neutralisation sweep ---
+# Only the specs that actually carry the tag need the second, directory-wide
+# invocation (see the HARDENING comment in the file header for why a
+# per-spec `run <spec>` call can never observe a SKIP/UNEXPECTED PASS
+# marker). Untagged specs are already fully classified by the loop above.
+NEUTR_OFFENDERS=""
+N_NEUTR_ASSERT=0
+N_NEUTR_PASS=0
+if [ -n "$TAGGED_LIST" ]; then
+    SWEEP_ENTRY="$ROOT/src/app/test_runner_new/main.spl"
+    [ -f "$SWEEP_ENTRY" ] || { echo "ERROR — nothing was checked (sweep entry not found: $SWEEP_ENTRY)"; exit 2; }
+    if [ -n "$TIMEOUT_BIN" ]; then
+        SWEEP_OUT=$("$TIMEOUT_BIN" "$SWEEP_TIMEOUT" "$RUNNER_PATH" run "$SWEEP_ENTRY" "$SPEC_DIR" 2>&1)
+    else
+        SWEEP_OUT=$("$RUNNER_PATH" run "$SWEEP_ENTRY" "$SPEC_DIR" 2>&1)
+    fi
+    SWEEP_RC=$?
+    if printf '%s\n' "$SWEEP_OUT" | grep -q 'E1034'; then
+        echo "ERROR — nothing was checked (imports degraded to shims: E1034 detected in the neutralisation sweep of $SPEC_DIR)"
+        exit 2
+    fi
+    echo "plan_acceptance_neutralisation_sweep_rc=$SWEEP_RC"
+
+    for _tspec in $TAGGED_LIST; do
+        _tbase=$(basename "$_tspec")
+        _skip_hit=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'IN-DEVELOPMENT SKIP' | grep -F "$_tbase" | head -1)
+        _pass_hit=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'IN-DEVELOPMENT UNEXPECTED PASS' | grep -F "$_tbase" | head -1)
+        _tverdict=$(printf '%s\n' "$SWEEP_OUT" | grep -F 'SPEC FILE VERDICT:' | grep -F "$_tbase" | tail -1)
+        _texec=$(printf '%s\n' "$_tverdict" | sed -n 's/.*executed=\([0-9][0-9]*\).*/\1/p' | tail -1)
+        _tfailed=$(printf '%s\n' "$_tverdict" | sed -n 's/.*failed=\([0-9][0-9]*\).*/\1/p' | tail -1)
+        if [ -n "$_skip_hit" ]; then
+            if [ -n "$_texec" ] && [ "$_texec" -ge 1 ] && [ -n "$_tfailed" ] && [ "$_tfailed" -ge 1 ]; then
+                N_NEUTR_ASSERT=$((N_NEUTR_ASSERT + 1))
+            else
+                # classify_in_development neutralises a load/import failure
+                # through the SAME `errored` branch as a real assertion
+                # failure, so the SKIP marker alone cannot distinguish them —
+                # this file's own verdict shows it never ran (or its verdict
+                # is missing/malformed). That is the exact shape Gap A hid
+                # behind: report it as a LOAD FAILURE, not a neutralised
+                # assertion.
+                NEUTR_OFFENDERS="$NEUTR_OFFENDERS load-failure-neutralised:$_tbase"
+            fi
+        elif [ -n "$_pass_hit" ]; then
+            N_NEUTR_PASS=$((N_NEUTR_PASS + 1))
+        else
+            # Neither marker fired for a tagged file at all: the
+            # neutralisation machinery never classified it.
+            NEUTR_OFFENDERS="$NEUTR_OFFENDERS load-failure-neutralised:$_tbase(no-marker)"
+        fi
+    done
+fi
+
+DISCLAIMER="@tag:in-development neutralisation verified per-file via a single directory-wide sweep (SKIP-vs-load-failure, UNEXPECTED PASS): $N_TAGGED/$N_ATTEMPTED specs carry the tag, $N_NEUTR_ASSERT neutralised as genuine assertion failures, $N_NEUTR_PASS as unexpected passes; the suite-level SKIP+COUNT summary row semantics are NOT independently re-asserted here (see test/02_integration/test_runner/in_development_tag_runner_spec.spl)"
 
 echo "plan_acceptance_spec_dir=$SPEC_DIR"
 echo "plan_acceptance_runner=$RUNNER_PATH"
@@ -445,11 +653,12 @@ case "$COV_KIND" in
         exit 1 ;;
 esac
 
-if [ -n "$OFFENDERS" ]; then
+ALL_OFFENDERS="$OFFENDERS$NEUTR_OFFENDERS"
+if [ -n "$ALL_OFFENDERS" ]; then
     # The wiring status belongs on the FAIL line too. This is the branch the
     # gate actually takes while the suite is red, so omitting it would leave the
     # very property this guard exists to report off the last line of stdout.
-    echo "FAIL — $N_ATTEMPTED spec(s) executed under $RUNNER_PATH, $(printf '%s' "$OFFENDERS" | wc -w | tr -d ' ') failed to load/run:$OFFENDERS; swept by push-tier gate '$COV_ID' push_blocking=$COV_EXTRA; $DISCLAIMER"
+    echo "FAIL — $N_ATTEMPTED spec(s) executed under $RUNNER_PATH, $(printf '%s' "$ALL_OFFENDERS" | wc -w | tr -d ' ') failed to load/run or neutralise cleanly:$ALL_OFFENDERS; swept by push-tier gate '$COV_ID' push_blocking=$COV_EXTRA; $DISCLAIMER"
     exit 1
 fi
 

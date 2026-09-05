@@ -12,8 +12,8 @@ direction of travel, not a description of the tree; the 8.6k-line JS package in
 licenses more JS. New implementation is `.spl` under `src/app/spipe/`.
 
 **Revision 3 (2026-09-05): the goal is a full knowledge base, and the binding
-constraint turned out to be WIRING, not features.** Slice 1 built 3,617 lines
-across 11 packages and exposed two CLI verbs; nine packages are unreachable and
+constraint turned out to be WIRING, not features.** Slice 1 built 3,952 lines
+across 11 units and exposed two CLI verbs; seven of them are unreachable and
 no CI gate references any of them. Meanwhile a whole pure-Simple SPipe serving
 stack sits next door (`src/app/spipe_mcp/`, `src/lib/nogc_sync_mut/spipe/`,
 `src/app/spipe_knowledge_provider/`), imports `app.spipe.*` zero times, and is
@@ -32,7 +32,9 @@ Revision 2's text below is retained as history; where it disagrees with §1.5,
 ### 1.1 `examples/05_stdlib/spipe` — this IS the current SPipe package, and it is JavaScript
 
 Not `.spl`. 344 files; `src/` is 8,649 lines of ES modules (`"type": "module"`,
-package `@simple-lang/spipe` v0.2.0). `test/` is 4,106 lines of `node --test`.
+package `@simple-lang/spipe` v0.2.0 — **wrong, corrected 2026-09-05: `package.json:3`
+says 0.1.0**, so the "0.1.0 vs 0.2.0 two-generation" framing in §1.2 does not hold
+as written). `test/` is 4,106 lines of `node --test`.
 The only Simple in it is two parity probes: `test/support/dbfs_wave4_parity_probe.spl`,
 `test/support/simple_provider_wave4_parity_probe.spl`.
 
@@ -95,7 +97,7 @@ knew about three of them and none of the three that are actually live.
 
 | # | Location | Lines | State |
 |---|---|---:|---|
-| 1 | `src/app/spipe/` — the knowledge compiler | 3,617 | 11 packages, **2 live CLI verbs**, 0 gates |
+| 1 | `src/app/spipe/` — the knowledge compiler | 3,952 | 11 units, **2 CLI verbs**, 7 units unreachable, 0 gates |
 | 2 | `src/app/spipe_mcp/main.spl` — MCP server | 543 | **runnable, NOT deployed** — protocol `2025-06-18`, ~33 tools, but absent from `.mcp.json` |
 | 3 | `src/lib/nogc_sync_mut/spipe/` | 1,094 | what #2 serves — so also undeployed |
 | 4 | `src/app/spipe_knowledge_provider/` | 9,429 | out-of-process lexical provider; #1's `search/process_adapter.spl` already speaks to it |
@@ -107,17 +109,16 @@ no serving surface, while a serving surface sits beside it serving unrelated cod
 (`codebase_ingest`, `hook_event`, `minimality`, `tree_context`). That disconnection
 — not any missing algorithm — is the reason Slice 1 delivers no user-visible value.
 
-**And the wiring target is itself unwired.** `.mcp.json` launches exactly two
-servers — `simple-mcp` (`bin/simple_mcp_server`) and `simple-lsp-mcp`. `spipe_mcp`
-is in neither. So S2-W cannot simply "expose the compiler through `spipe_mcp`" and
+**And the wiring target is itself unwired.** `.mcp.json` launches three servers —
+`simple-mcp` (`bin/simple_mcp_server`), `simple-lsp-mcp` and `stitch`. `spipe_mcp`
+is in none of them. So S2-W cannot simply "expose the compiler through `spipe_mcp`" and
 call it reachable; that would move the code one layer up and leave it equally
 invisible to an operator. **The only surface agents actually reach today is
 `simple-mcp`'s `simple_ctx_*` tools**, which is what `CLAUDE.md` routes every agent
-to. S2-W must therefore either deploy `spipe_mcp` in `.mcp.json` or land the
-knowledge surface behind `simple-mcp`. The design doc picks the facade
-(`app.spipe.kb`) precisely so that this is a transport choice, not a rewrite —
-but the choice must be made and evidenced by an operator-visible invocation, not
-by a symbol existing in a file.
+to. **That choice is made in §9.2: the facade `app.spipe.kb` is surfaced through
+`simple-mcp`, and deploying `spipe_mcp` is explicitly not the acceptance path.**
+It must be evidenced by an operator-visible invocation, never by a symbol
+existing in a file.
 
 Caveat recorded honestly: the `simple_ctx_*` tools were **not available in this
 session** (the `simple-mcp` server exposed only `simple_pipe` / `simple_search`,
@@ -131,10 +132,13 @@ Corrections to §8's landed claims:
 - **Packages: 11, not 5.** `main.spl` plus admission, balance, diagnostics, model,
   refactor, scan, fusion, graph, identity, search.
 - **Specs: 18, not 9** (`test/01_unit/app/spipe/`).
-- **Reachability: 2 of 11.** `main.spl:114-139` dispatches only `registry`, `admit`,
-  `--help`, `-h`. Everything else is library code no operator can invoke.
+- **Reachability: 4 of 11 units, 7 wholly unreachable.** `main.spl:114-139`
+  dispatches only `registry`, `admit`, `--help`, `-h`, reaching `diagnostics` and
+  `admission`; `model` is reached only for two type definitions (`main.spl:20`).
+  The seven that no operator can invoke at all: balance, refactor, scan, fusion,
+  graph, identity, search.
 - **`main.spl:3-4` is itself stale** — it says `graph`/`links`/`score` "do not exist
-  yet in this package", but `scan/` (398 lines) and `balance/` (334) are on disk
+  yet in this package", but `scan/` (398 lines) and `balance/` (369) are on disk
   beside it. The entrypoint's own comment describes a tree two commits old.
 - **PR #149 is undocumented.** `scan`, `identity`, `graph`, `fusion`, `search`
   (2,376 lines) landed in one commit `b657337c997` dated the same day this plan
@@ -160,7 +164,8 @@ construction (measured; see the knowledge-surface audit):
 
 - `src/lib/common/search/` — production BM25/TF-IDF/roaring/top-k engine. Its
   `inverted_index.spl` (`InvertedIndex`, positional postings) is the one
-  persisted-capable index in the tree and **has zero consumers**.
+  persisted-capable index in the tree and **has zero product consumers** — only
+  its own spec and an `__init__.spl:20` re-export.
 - `src/app/spipe/search/index_engine_provider.spl` reuses that library's *types
   and contracts* (`document`, `snapshot`, `analyzer`, `query`, `top_k`,
   `explain`) but **not `inverted_index`** — it scores by scanning every
@@ -172,11 +177,11 @@ construction (measured; see the knowledge-surface audit):
 - `src/lib/nogc_sync_mut/db/dbfs_engine/fts/` — a **third** BM25:
   `FtsInvertedIndex` + `fts_bm25_search`, with its own tokenizer. Unlike the
   other two it *is* wired — `src/app/io/context_ops.spl:475` constructs it, and
-  `src/app/spipe_mcp/main.spl:4` imports `context_ops`. So the live MCP server
+  `src/app/spipe_mcp/main.spl:4` imports `context_ops`. So `spipe_mcp`
   already reaches a working inverted index; just not the one in `common/search`.
 - **Net: THREE BM25 implementations.** One unused index (`common/search`,
-  `struct InvertedIndex:68`, zero consumers — verified by repo-wide grep with a
-  control, 2026-09-05), one per-query scanner in `simple_ctx_*`, one per-query
+  `struct InvertedIndex:68`, zero *product* consumers — only its own spec and an
+  `__init__.spl:20` re-export; verified by repo-wide grep with a control, 2026-09-05), one per-query scanner in `simple_ctx_*`, one per-query
   scanner in `index_engine_provider.spl`, plus one wired-but-separate FTS index
   under `dbfs_engine`. That is the dedup target in §9 S2-R. The question is not
   "pick one of two" — it is **"why is the repo's one persisted positional index
@@ -430,11 +435,11 @@ missed locations #2/#3 (§1.5). Re-decided against the measured tree and
 
 | Wave | Rev-2 verdict | Rev-3 verdict | Why (evidence) |
 |---|---|---|---|
-| **MCP surface** | slice 2 | **SLICE 2, first** | Reason inverted: there is nothing to build. `spipe_mcp` is live with ~33 tools (§1.5 #2); the work is *connecting* it, and the research flags tool-count bloat as the live risk. |
+| **MCP surface** | slice 2 | **SLICE 2, first** | Reason inverted: there is nothing to build. `spipe_mcp` already implements ~33 tools (§1.5 #2) but is undeployed, so the work is to surface the `app.spipe.kb` facade through **`simple-mcp`** (the server `.mcp.json` launches) per §9.2 — not to "connect `spipe_mcp`". Research flags tool-count bloat as the standing risk. |
 | **W2 skill compiler** | cut | **SLICE 2 (as reuse)** | `llm_process_gen` already compiles 168 `skill.md` from a manifest. "Build a skill compiler" was never the task; wiring SPipe knowledge into the existing generator is. |
-| **W6 pair experts** | cut ("most speculative") | **SLICE 3, narrowed to `pair select`** | Both corpora already exist (`feature_expert/` + `layer_expert/`, 174 dirs). Only *selection* was missing. Speculative in rev 2 because the corpora were assumed absent; they are not. The pair *protocol* (§8.4-8.6 role switching) stays CUT — that is process, not code. |
+| **W6 pair experts** | cut ("most speculative") | **SLICE 3, narrowed to `pair select`** | Both corpora already exist (`feature_expert/` + `layer_expert/`, 151 dirs (104 feature + 47 layer)). Only *selection* was missing. Speculative in rev 2 because the corpora were assumed absent; they are not. The pair *protocol* (§8.4-8.6 role switching) stays CUT — that is process, not code. |
 | **W7 score components** | slice 2 | **KEEP CUT** | Semantic-purity/Stability/Reachability need signals the tree cannot produce offline. Renormalized weights stand. Fix the §1.5 `config.sdn`/`config.spl` split first — two sources of truth is the live defect, not a missing third component. |
-| **W8 `--apply`** | slice 2 | **SLICE 3** | Gated behind the eval harness and a green `refactor/plan.spl` spec — that module has **no spec at all** today (§8.1 seam 5). Mutating the doc tree from an untested planner is not acceptable. |
+| **W8 `--apply`** | slice 2 | **SLICE 3** | Gated behind the eval harness and behind widening `refactor/plan.spl` coverage — today it is exercised only inside `refactor_rewrite_spec.spl` (§8.1 seam 5), with no fault-injection arm for a partially-applied plan. Mutating the doc tree from a thinly-tested planner is not acceptable. |
 | **W9 GitHub writer** | cut | **KEEP CUT** | Unchanged. Local read-only `admit` remains the boundary; `admit` is not even reachable from a gate yet. |
 | **W10 Leiden** | cut | **KEEP CUT** | Research §4: GraphRAG community detection buys global-summary queries SPipe does not serve, at high cost. The existing `graph-bfs-v1` BFS is the cheaper right answer. |
 | **W11 promotion** | cut | **KEEP CUT** | Reviewed semantic ownership change; no measurable retrieval benefit. Revisit only after §9's eval harness can score it. |
@@ -747,8 +752,9 @@ legacy`. Free ranges as §2.1 only.
    AST (research §9.1). Preferred payoff: add source offsets + link nodes to
    `std.common.markdown`, then swap the scanner's core. Revisit on first
    fidelity bug.
-2. `.spipe/spipe` (0.1.0) and `examples/05_stdlib/spipe` (0.2.0) are
-   independently versioned writable copies. Cross-repo; untouched in slice 1.
+2. `.spipe/spipe` and `examples/05_stdlib/spipe` are independently writable
+   copies (both report 0.1.0 in `package.json`; the "two generations" framing in
+   §1.2 is wrong — corrected 2026-09-05). Cross-repo; untouched in slice 1.
 3. Score components Semantic purity / Stability / Reachability unimplemented;
    renormalized weights with originals retained in `config.sdn`.
 4. `REQ-SPKC-031` is a permanent numbering gap.
@@ -778,8 +784,8 @@ legacy`. Free ranges as §2.1 only.
     `_mcp_views.md §1–§2` and `_search_providers.md §1` need amending to point at
     the reconciliation doc rather than leaving two truths on disk.
 13. **Debt:** `SourceRange` should compose a `ByteSpan`; frozen-type request.
-14. **Correction:** this plan referred to `src/app/cli/dispatch/table.spl`; the
-    dispatch table is `src/app/cli/dispatch/table.spl`.
+14. **Corrected in place 2026-09-05:** two references to a `src/app/io/dispatch/`
+    table were wrong; the dispatch table is `src/app/cli/dispatch/table.spl`.
 15. **Reserved:** diagnostic codes SPK550–569 for retrieval/citation. Check them
     against the registry before use — §2.1 records that five earlier SPK
     assignments collided with shipped code.
@@ -849,11 +855,15 @@ mutation-red evidence.
    The claim is still unconfirmed — the row is *verify, then fix or file*.
 4. **STILL TWO SOURCES OF TRUTH.** `config.sdn`'s own header admits `config.spl`
    hardcodes the same numbers by hand (`config.spl:25-28`).
-5. **NEW — `refactor/plan.spl` has no spec at all.** Not one of the 18 spec files
-   covers it. `model/types.spl`, `balance/config.spl` and `balance/components/*`
-   are likewise only reachable through umbrella specs. W8 `--apply` is blocked on
-   this (§4.1a).
-6. **NEW — nine of eleven packages are unreachable, and nothing is gated.** See
+5. **NEW — thin spec coverage, but NOT absent (corrected 2026-09-05).** An earlier
+   draft of this revision claimed `refactor/plan.spl` "has no spec at all". That
+   was FALSE and is retracted: `test/01_unit/app/spipe/refactor_rewrite_spec.spl:26`
+   imports `build_refactor_plan` and exercises it under
+   `describe "refactor plan construction"` (:96). The real, smaller finding is
+   that no *dedicated* `refactor_plan_spec.spl` exists, and `model/types.spl`,
+   `balance/config.spl` and `balance/components/*` are reachable only through
+   umbrella specs. Do not write a duplicate spec.
+6. **NEW — seven of eleven units are unreachable, and nothing is gated.** See
    §1.5. This is the headline seam and the reason §9 leads with wiring.
 
 ### 8.2 Process finding for the next slice
@@ -874,7 +884,7 @@ Int` in byte-scanning context — a cast error, not a missing type. The plan's
 ## 9. SLICE 2 — CONNECT, MEASURE, THEN IMPROVE (revision 3, 2026-09-05)
 
 **Governing decision: Slice 2 ships no new retrieval algorithm until the tree is
-connected and measurable.** §1.5 shows 3,617 lines behind two verbs and zero
+connected and measurable.** §1.5 shows 3,952 lines behind two verbs and zero
 gates; §4.1a shows the eval harness is the precondition for every claimed lift.
 Building more retrieval on top of that would add unreachable, unmeasured code to
 a pile of unreachable, unmeasured code.
@@ -891,11 +901,12 @@ alias mutation, closure capture, erased-receiver chains, native Dict `f64` gaps,
 Slice 2 therefore runs in **three ordered stages**, not one fan-out:
 
 ```
-Stage A (serial, one owner)    S2-W wiring + S2-E eval harness
+Stage A (serial, ONE OWNER EACH;  S2-W wiring, then S2-E eval harness
+          S2-W lands first)
                                      |  confirm on disk, gate green
 Stage B (parallel, 3 owners)   S2-C chunking | S2-R retrieval | S2-P provenance
                                      |  all three gated by S2-E
-Stage C (serial)               S2-K knowledge surface (cards, pair select)
+Stage C (serial)               S2-M ctx migration -> S2-K knowledge surface
 ```
 
 Stage B may not start until Stage A's gate is green in CI, not merely "landed".
@@ -904,11 +915,19 @@ Stage B may not start until Stage A's gate is green in CI, not merely "landed".
 
 **S2-W — Wiring and consolidation (Stage A, blocking, one owner).**
 The single highest-value change in this plan. No new algorithms.
-- Expose the nine unreachable packages. Per the design doc's §1 decision, route
-  through the **existing** `src/app/spipe_mcp` rather than a second MCP server —
-  debt #7's "dispatch-table contention" argument applies to `bin/simple`
-  subcommands, not to a server that already exists and already runs.
-- **Do not simply add nine packages' worth of tools.** `spipe_mcp` already
+- Expose the seven unreachable packages **behind one facade, `app.spipe.kb`**
+  (design §2.1). No transport may import `app.spipe.*` directly; they import the
+  facade. This is what makes the transport question a configuration choice rather
+  than a rewrite.
+- **Transport decision, stated once so it cannot drift:** the facade is surfaced
+  through **`simple-mcp`** (`bin/simple_mcp_server`), because that is the server
+  `.mcp.json` actually launches and the one `CLAUDE.md` routes every agent to.
+  `spipe_mcp` keeps its existing tools and gains a delegation to the same facade,
+  but **deploying `spipe_mcp` is NOT the acceptance path** — an undeployed server
+  cannot satisfy §9.4. A `bin/simple knowledge` verb row in
+  `src/app/cli/dispatch/table.spl` lands alongside it as the operator-facing
+  surface (this closes debt #7: sibling rows already exist there).
+- **Do not simply add seven units' worth of tools.** `spipe_mcp` already
   advertises ~33 tools, which the research places inside the measured tool-count
   degradation band (RAG-MCP: 43.13% task success with a filtered tool set vs
   13.62% with all tools in the prompt). Expanding it naively makes the server
@@ -922,14 +941,26 @@ The single highest-value change in this plan. No new algorithms.
 - Delete the stale `main.spl:3-4` header comment claiming `scan`/`balance` do not
   exist.
 - Fix seam 4: `config.spl` parses `config.sdn`; one source of truth.
-- Write the missing `refactor/plan_spec.spl` (seam 5) and join `refactor/plan.spl`
-  to the reverse index (seam 2).
+- Join `refactor/plan.spl` to the reverse index (seam 2). Do **not** add a
+  `refactor_plan_spec.spl` — that module is already covered by
+  `refactor_rewrite_spec.spl` §"refactor plan construction"; widen that spec
+  instead if coverage proves thin.
 - Verify seam 3 (`bin/simple run <script> --`), then fix it or file the bug record
   — it does not exist today and CLAUDE.md forbids leaving it as a usage comment.
-- Land a `scripts/check/check-spipe-knowledge-compiler.shs` gate and a `push`-tier
-  row in `config/check/must_check_gates.sdn`. Fail-closed, `--selftest` fatal, and
-  a run that checked 0 packages is `ERROR`, never a pass.
+- Land **one** gate, `scripts/check/check-spipe-knowledge-compiler.shs`, covering
+  reachability only (every package invocable through the facade). S2-E owns the
+  separate retrieval-quality gate `check-kb-retrieval-eval.shs`; they are two
+  gates with two subjects and must not be merged. The DoD-2 push-tier row is this
+  reachability gate. Fail-closed, `--selftest` fatal, and a run that checked 0
+  packages is `ERROR`, never a pass. It enters the manifest as `push_blocking=false`
+  (advisory) until a self-hosted `bin/simple` exists on push hosts, per the
+  advisory-tier precedent in `.claude/rules/vcs.md`.
 - Document PR #149's 2,376 orphaned lines in this plan or retire them.
+- Also owned by S2-W (design §3 modules otherwise unassigned): the
+  `src/app/spipe/main.spl` verbs `index|search|get|cards|select|eval|cite`; the
+  `spipe_mcp` 33→11 tool collapse (design §5 step 5); the SPK550–569 reservation
+  in `diagnostics/registry.sdn` (check for collisions first, §2.1); and any
+  `doc/00_llm_process/knowledge_registry.sdn` routing rows.
 
 **S2-E — Eval harness (Stage A, blocking, one owner).**
 Gold query set in SDN; recall@k and nDCG; a `scripts/check/` gate.
@@ -949,38 +980,64 @@ would otherwise swamp the index; the design doc decides the policy.
 
 **S2-R — Retrieval pipeline (Stage B).**
 Order: lexical BM25 → graph expansion (`graph-bfs-v1`, exists) → RRF fusion
-(`fusion/rrf.spl`, exists, `RRF_DEFAULT_K = 60`) → proximity reranking → budget
+(`fusion/rrf.spl`, exists; `RRF_DEFAULT_K = 60` is defined in
+`src/lib/common/search/fusion_types.spl:25`) → proximity reranking → budget
 packing. **One index, not two scanners**: `src/lib/common/search/inverted_index.spl`
 becomes the persisted index and both existing per-query scanners route through it
-(§1.5). This is a dedup, not a new engine.
+(§1.5). This is a dedup, not a new engine. S2-R also owns design §3's
+`index/manifest.spl` (content-addressed invalidation) and
+`search/pipeline_config.spl` (pins `rrf_k`, SDM and decay as data, not defaults),
+since Stage B consumes both.
 Explicitly NOT in scope: semantic chunking, LSA, LLM entity extraction, hashed
 pseudo-embeddings — each is a research-backed non-improvement (§4.1a).
 
 **S2-P — Provenance and citation (Stage B).**
-Every served answer traceable to file + byte range, reusing `model/types.spl`'s
-existing `SourceRange`. No new range type.
+Every served answer traceable to file + byte range. `SourceRange` stays **frozen
+and unchanged** (it is the link-edge type); S2-P adds a `ByteSpan` and a
+`Citation{ByteSpan, content_hash, …}` record to `model/types.spl` as a
+frozen-type request, so a citation is verifiable offline by re-hashing. Reuse
+the existing byte-offset convention; do not introduce a second, competing range
+representation.
+
+**S2-M — ctx migration and cleanup (Stage C, follows S2-R).**
+Design §5 step 3's tail, which no other package owns: migrate `.simple/ctx/`
+v1→v2 through the existing `simple_ctx_upgrade`, then delete the inline ctx BM25
+and chunker once the facade serves the same queries. **Owns no module Stage B
+depends on** — `index/manifest.spl` and `search/pipeline_config.spl` belong to
+S2-R, which consumes them.
 
 **S2-K — Knowledge surface (Stage C).**
 Progressive-disclosure cards over the existing `doc/00_llm_process/` corpus via
-`llm_process_gen` (reuse, not a new skill compiler). `spipe pair select` lands
-here if and only if S2-E can score whether the selection helps; otherwise it
-moves to Slice 3.
+`llm_process_gen` (reuse, not a new skill compiler). Owns design §3's
+`card/emit.spl` and `select/pair.spl`. `spipe pair select` lands here if and only
+if S2-E can score whether the selection helps; otherwise it moves to Slice 3.
 
 ### 9.3 Out of scope for Slice 2
 
-`--apply` mutation (Slice 3, blocked on S2-E + the `refactor/plan.spl` spec),
+`--apply` mutation (Slice 3, blocked on S2-E and on widened
+`refactor_rewrite_spec.spl` coverage incl. a partial-apply fault-injection arm),
 GitHub writeback, Leiden, promotion, logical mounts, embeddings. Rationale per
 row in §4.1a.
 
 ### 9.4 Definition of done
 
-1. `bin/simple`-reachable or MCP-reachable surface for all 11 packages, proven by
-   a spec that *invokes* each one — not by asserting a symbol exists in a source
-   file (source-text assertions are not evidence).
+1. All 11 units reachable through **either** `bin/simple knowledge` **or** a
+   server that `.mcp.json` actually launches (`simple-mcp`) — an undeployed
+   server does not satisfy this. Proven by a spec that *invokes* each unit, never
+   by asserting a symbol exists in a source file (source-text assertions are not
+   evidence).
 2. A push-tier gate that goes red when the knowledge compiler breaks, with its
    sabotage arm demonstrated in the commit message: pre-sabotage green,
    sabotaged red, reverted green.
 3. An eval number for retrieval, absolute and reproducible, recorded with the
-   binary identity that produced it.
-4. `doc/00_llm_process/feature_expert/spipe_knowledge_compiler/skill.md` refreshed
-   — it currently describes the JS implementation and is stale in full.
+   binary identity that produced it (`readlink -f bin/simple` + size/mtime,
+   bracketed before and after the run). The number is only meaningful against a
+   recorded baseline: S2-E writes `kb_eval_baseline.sdn` at Stage A against the
+   CURRENT per-query scanner, and every later stage reports its delta. The gate
+   goes red on a drop beyond its stated tolerance, on a stale baseline, or on an
+   unresolvable gold target — "some number was produced" is not a pass.
+4. Downstream knowledge refreshed in the same change as the code, per
+   `.claude/rules/vcs.md`: the feature wiki
+   (`doc/00_llm_process/feature_expert/spipe_knowledge_compiler/skill.md`, brought
+   current 2026-09-05) plus the matching `layer_expert/` entry, and the two design
+   sections named in debt #12.

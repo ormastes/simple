@@ -78,17 +78,36 @@ remain single-owner and bounded.
       imports `fat32_atomic_replace_caps`, `:65` combines it with
       `rt_simpleos_file_atomic_caps()`; kernel route guard
       `src/os/kernel/ipc/syscall_file.spl:789 fat32_atomic_replace_path_allowed`
-- [ ] FAR-001..009 pass with no placeholders.
-      - status 2026-09-05: all nine `describe` blocks exist in
-        `test/01_unit/os/kernel/fs/fat32_atomic_replace_recovery_spec.spl`
-        with 0 `fail(`/`pending(` placeholders; a green RUN is not recorded —
-        on this host `bin/simple` has no `test` command and `simple_seed test`
-        aborts on an unrelated parse error in `src/app/io/mod.spl`, so the box
-        stays open until a runner verdict is captured.
+- [x] FAR-001..009 pass with no placeholders.
+      — verified 2026-09-05 by two green runner verdicts on
+      `src/compiler_rust/target/debug/simple` (current-source Rust seed, built
+      2026-09-04 18:13; the sanctioned `bin/release/aarch64-apple-darwin/simple_seed`
+      of 2026-07-25 cannot parse current stdlib source — it dies in
+      `src/lib/common/encoding/utf8.spl`, see
+      `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`):
+      `test/01_unit/os/kernel/fs/fat32_atomic_replace_recovery_spec.spl`
+      `outcome=OK executed=14 passed=14 failed=0`, and
+      `test/03_system/plan_acceptance/fat32_atomic_replace_recovery_spec.spl`
+      `10 examples, 0 failures`. The runs execute the REAL `std.spec` module,
+      not the interpreter's built-in shims — proven by a control spec whose
+      matcher-less `expect("x")` is rejected as `vacuous expect`, which the
+      shims accept.
 - [ ] Fresh ARM QEMU process reopens the same disk and public DB protocol reads
       exactly the acknowledged generation at every crash point.
+      - status 2026-09-05: the acceptance oracle
+        (`test/03_system/plan_acceptance/fat32_atomic_replace_recovery_spec.spl`,
+        `it "Fresh ARM QEMU process reopens …"`) PASSES, but that `it` states in
+        its own comment that it is a single-process PROXY for the replay
+        publication contract, not the cross-process/cross-boot QEMU evidence
+        this box requires. No fresh-QEMU-process read on the same image was
+        captured, so the box stays open.
 - [ ] UNO Q repeats CPU DB/file/server and reboot proof; GPU acceleration is a
       compute-only lane and does not own or weaken filesystem commit.
+      - status 2026-09-05: the acceptance oracle
+        (`it "UNO Q repeats CPU DB/file/server …"`) PASSES, but it only pins the
+        structural fact that the capability signature has no GPU-shaped
+        parameter. The box names PHYSICAL UNO Q hardware evidence, which was not
+        obtained; the box stays open.
 
 ## Acceptance
 

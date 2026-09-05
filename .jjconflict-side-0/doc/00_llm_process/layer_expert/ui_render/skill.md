@@ -94,6 +94,15 @@ highest-capability Codex):
 
 ## Pixel/Perf Reality (WS-D; read before any SIMD work)
 
+- **2026-09-05 web 4K hot paths:** the Simple web tile painter must build its
+  at-most-three-ops-per-node list with one bounded allocation and indexed
+  writes; repeated value-array `push` is quadratic. The GPU route cache must
+  not retain full serialized Draw IR scene text per entry; bounded identity is
+  safe only because current-frame pixel, command-completeness, device, and
+  dimension proof remains mandatory before promotion. Focused specs are
+  `tile_op_buffer_linear_finish_spec.spl` and
+  `web_draw_ir_route_key_memory_spec.spl`.
+
 - **Pixels are boxed `int64_t`**, via `engine2d_box_pixel` / `engine2d_unbox_pixel`
   (`src/runtime/runtime_simd_dispatch.c:663` / `:667`). They are **not packed
   u32**. Any kernel design assuming packed u32 SIMD lanes is **invalid** and will
