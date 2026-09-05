@@ -4,12 +4,23 @@ use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffe
 use std::sync::Arc;
 use crate::value::{
     byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_byte_array_new, rt_byte_array_new_len,
-    RuntimeValue,
+    HeapObjectType, RuntimeArray, RuntimeValue,
 };
 
-// A tightly packed 8K ARGB framebuffer is 132,710,400 bytes. Keep the raw ABI
-// bounded while allowing one complete 8K seed/upload.
-const MAX_RAW_TRANSFER_BYTES: i64 = 256 * 1024 * 1024;
+// Raw-ABI transfer ceiling. Sized from the two DEFAULT render targets, not
+// from a small framebuffer with the large ones as an afterthought:
+//
+//   7680x4320 (8K screen) = 33,177,600 px = 132,710,400 bytes
+//   8192x8192 (square 8K) = 67,108,864 px = 268,435,456 bytes
+//
+// The previous value was exactly 268,435,456, so 8192x8192 passed only because
+// the check is `>` and not `>=` — it sat precisely ON the boundary, and any
+// larger target (or any transfer carrying one extra byte of padding) was
+// rejected outright. That is a resolution ceiling disguised as a safety cap.
+// 2 GiB keeps the ABI bounded against absurd requests while admitting
+// 16384x16384 (1 GiB) with headroom, so neither default target is near the
+// edge and there is no practical upper bound on supported resolutions.
+const MAX_RAW_TRANSFER_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 
 // ============================================================================
 // Buffer Management
@@ -429,6 +440,183 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_array(
     status
 }
 
+/// One-call pixel readback: download a device buffer straight into a Simple
+/// `[u32]` array AND compute the readback identity checksum in the same pass.
+///
+/// Replaces the per-pixel Simple marshalling chain this used to pay per frame
+/// (`vulkan_sffi_read_buffer_bytes` → `_bytes_to_pixel_array` 4-byte-extract
+/// loop → `engine2d_readback_with_identity` modulo-checksum loop): measured at
+/// 800×600 under JIT those loops cost ~20.3 ms + ~8.1 ms per frame (see
+/// doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md). The checksum algorithm
+/// is byte-identical to `engine2d_readback_with_identity`
+/// ((acc + px) % 2147483647, in order), so receipts see the same values.
+///
+/// Returns the checksum on success, -1 on ANY failure. It must NOT be 0:
+/// the destination is caller-allocated and reused across frames, so the
+/// caller cannot detect failure by inspecting the array (the old tuple
+/// variant returned an empty array and callers checked its length; that
+/// signal no longer exists). A 0 sentinel would be indistinguishable from a
+/// legitimately-0 checksum, and a fail-open here silently redisplays the
+/// PREVIOUS frame's pixels while marking the host mirror valid. A real
+/// checksum is always in [0, 2^31-2], so -1 is unambiguous.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_readback_u32_checksum(
+    data: RuntimeValue,
+    pixel_count: i64,
+    handle: i64,
+    offset: i64,
+) -> i64 {
+    if pixel_count <= 0 || offset < 0 {
+        return -1;
+    }
+    let Some(arr) =
+        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(data, HeapObjectType::Array)
+    else {
+        return -1;
+    };
+    let (len, data_ptr) = unsafe { ((*arr).len, (*arr).data) };
+    let Ok(pixel_count_u64) = u64::try_from(pixel_count) else {
+        return -1;
+    };
+    if len < pixel_count_u64 || data_ptr.is_null() {
+        return -1;
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return -1;
+    };
+    if byte_count > MAX_RAW_TRANSFER_BYTES {
+        return -1;
+    }
+    let t_dl_start = std::time::Instant::now();
+    let slots = unsafe { std::slice::from_raw_parts_mut(data_ptr, pixel_count as usize) };
+    let trace = std::env::var("SIMPLE_VK_DL_TRACE").as_deref() == Ok("1");
+    let mut t_slot_us: u128 = 0;
+    // Fill the caller's slots straight out of the MAPPED staging memory. The
+    // previous shape called `download_range`, which allocated a Vec the full
+    // size of the framebuffer and memcpy'd the mapping into it before this
+    // loop ever ran. At 8K that intermediate is 132MB allocated + 132MB copied
+    // per frame (measured 5-10ms + 29-88ms on Apple/MoltenVK), for bytes that
+    // are read exactly once. `download_range_with` borrows the mapping so the
+    // per-frame host traffic is one pass, not three. 8K is the sizing target:
+    // the saving is proportional to pixel count and no threshold gates it, so
+    // smaller framebuffers take the same path and simply save less.
+    let filled = {
+        let state = STATE.lock();
+        let Some(buf) = state.buffers.get(&handle) else {
+            return -1;
+        };
+        if offset + byte_count > buf.size() as i64 {
+            return -1;
+        }
+        match buf.download_range_with(offset as u64, byte_count as u64, |bytes| {
+            // A short download would leave the tail of the caller's reused
+            // buffer holding the PREVIOUS frame while the loop silently
+            // stopped early and the checksum still looked plausible. Fail
+            // closed instead.
+            if bytes.len() as i64 != byte_count {
+                return -1i64;
+            }
+            let t_slot = std::time::Instant::now();
+            // The checksum is defined as the sequential fold
+            // `acc = (acc + px) % 2147483647`. Every `px` is non-negative, and
+            // addition modulo M is a ring homomorphism, so that fold is
+            // exactly `(sum of px) % M`. Summing first and reducing ONCE is
+            // therefore byte-identical to the old result while removing a
+            // 64-bit integer division from the per-pixel dependency chain —
+            // the division, not the memory traffic, dominated this loop.
+            // A u128 accumulator cannot overflow for any transfer this runtime
+            // admits: MAX_RAW_TRANSFER_BYTES caps the count at 2^26 pixels and
+            // each px is below 2^32.
+            let mut sum: u128 = 0;
+            for (slot, chunk) in slots.iter_mut().zip(bytes.chunks_exact(4)) {
+                let px = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as i64;
+                *slot = RuntimeValue::from_int(px);
+                sum += px as u128;
+            }
+            t_slot_us = t_slot.elapsed().as_micros();
+            (sum % 2_147_483_647u128) as i64
+        }) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        }
+    };
+    if filled < 0 {
+        return -1;
+    }
+    if trace {
+        eprintln!(
+            "rb_trace download_us={} slotloop_us={}",
+            t_dl_start.elapsed().as_micros() - t_slot_us,
+            t_slot_us
+        );
+    }
+    filled
+}
+
+/// Copy `count` u32 pixel slots from `src` into `dst`, both Simple `[u32]`
+/// arrays, and return `count` (or -1 on any validation failure).
+///
+/// This exists because the Vulkan readback facade must hand the caller an
+/// array it does not retain, and the pure-Simple element loop that did so cost
+/// ~482ms per 8K frame under JIT — by itself more than half the frame. Both
+/// sides are RuntimeValue slot arrays with identical representation, so the
+/// copy is a single `copy_nonoverlapping` over slots (never over raw u32
+/// bytes: the destination must keep the slot tagging the source already has).
+///
+/// Fails closed rather than copying a partial prefix: a short copy would leave
+/// the tail of the destination holding an earlier frame, which is exactly the
+/// silent-stale-pixels failure this whole path is written to avoid.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_u32_slots(
+    dst: RuntimeValue,
+    src: RuntimeValue,
+    count: i64,
+) -> i64 {
+    if count < 0 {
+        return -1;
+    }
+    if count == 0 {
+        return 0;
+    }
+    let Some(dst_arr) =
+        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(dst, HeapObjectType::Array)
+    else {
+        return -1;
+    };
+    let Some(src_arr) =
+        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(src, HeapObjectType::Array)
+    else {
+        return -1;
+    };
+    let (dst_len, dst_ptr) = unsafe { ((*dst_arr).len, (*dst_arr).data) };
+    let (src_len, src_ptr) = unsafe { ((*src_arr).len, (*src_arr).data) };
+    let Ok(count_u64) = u64::try_from(count) else {
+        return -1;
+    };
+    if dst_len < count_u64 || src_len < count_u64 || dst_ptr.is_null() || src_ptr.is_null() {
+        return -1;
+    }
+    if std::ptr::eq(dst_ptr as *const RuntimeValue, src_ptr as *const RuntimeValue) {
+        return count;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, count as usize);
+    }
+    count
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_readback_u32_checksum(
+    _data: RuntimeValue,
+    _pixel_count: i64,
+    _handle: i64,
+    _offset: i64,
+) -> i64 {
+    -1
+}
+
 #[no_mangle]
 pub extern "C" fn rt_vulkan_copy_from_buffer_strided(
     data: RuntimeValue,
@@ -597,9 +785,17 @@ mod tests {
     }
 
     #[test]
-    fn raw_transfer_cap_covers_one_8k_argb_frame() {
-        assert!(MAX_RAW_TRANSFER_BYTES >= 7_680 * 4_320 * 4);
-        assert_eq!(MAX_RAW_TRANSFER_BYTES, 256 * 1024 * 1024);
+    fn raw_transfer_cap_covers_both_default_8k_targets_with_headroom() {
+        // 8K screen.
+        assert!(MAX_RAW_TRANSFER_BYTES >= 7_680i64 * 4_320 * 4);
+        // Square 8K — the old 256MiB cap admitted this ONLY because the guard
+        // is `>` and 8192*8192*4 is exactly 256MiB. Pin real headroom so a
+        // default target is never one byte from rejection.
+        assert!(MAX_RAW_TRANSFER_BYTES > 8_192i64 * 8_192 * 4);
+        assert!(MAX_RAW_TRANSFER_BYTES >= 2 * 8_192i64 * 8_192 * 4);
+        // And no practical ceiling below 16K square.
+        assert!(MAX_RAW_TRANSFER_BYTES >= 16_384i64 * 16_384 * 4);
+        assert_eq!(MAX_RAW_TRANSFER_BYTES, 2 * 1024 * 1024 * 1024);
     }
 
     #[test]

@@ -265,3 +265,189 @@ field with no default that no constructor argument names is silently nil, and
 NOTHING in the tree reports it — not construction, not the type checker. The
 audit above is a two-command diff and should be re-run whenever a field is added
 to this struct.
+
+## Verification 2026-09-02: the blocker IS cleared; a NEW frontier is MIR lowering itself
+
+Two builds were run with the fix applied (`module_lowering.spl`, content later
+committed as `ae4ea13e847`; base HEAD `c80479229e2`, seed md5
+`286f66b8615dce0e0da788f0550c4008`).
+
+**The `contains`-on-nil failure is gone.** Neither run produced any
+`[mnf-debug]`/`[mnf-expr]` line or any `error:` line. Both got strictly further
+than every previous build:
+
+| run | instrumentation | reached | outcome |
+|---|---|---|---|
+| run2 | `SIMPLE_INTERP_OOB_DEBUG=1` + `SIMPLE_DEBUG_FIELD_ACCESS=1` | `monomorphize ... complete step 4/6` | silent ~37 min in the next phase, then killed by the harness |
+| run3 | `SIMPLE_INTERP_OOB_DEBUG=1` only (no per-call stack snapshot) | `monomorphize ... complete step 4/6` | silent **>30 min** and still running at the time of writing |
+
+**What the silent phase is.** `driver_orchestration.spl:291` emits the
+`monomorphize ... complete step 4/6` receipt and then falls directly into
+phase 5's mode dispatch, which for this build is `self.aot_compile()` ->
+`lower_to_mir`. That matches the run1 `[mnf-debug-spl]` stack exactly
+(`... -> aot_compile -> lower_to_mir -> lower_module -> ...`). **`lower_to_mir`
+emits no progress logging whatsoever**, so total stdout silence is its normal
+appearance, not evidence of a hang by itself. This phase had never been entered
+before this fix.
+
+**Observed characteristics of the silent phase (run3, uninstrumented):**
+- CPU advances ~60 s per 60 s wall — a steady ~100% of one core, so it is not
+  blocked on I/O or a lock;
+- RSS is pinned at **3,312,380 K ± 20 K** across 30+ minutes;
+- stdout frozen at 243,698 bytes, stderr at 39,563 bytes.
+
+Steady CPU with RSS flat to within 20 KB is the signature of a **non-allocating
+tight loop**, which is suspicious — but it is NOT proof: the interpreter pools
+memory, `lower_to_mir` is silent by construction, and this input has no
+baseline for the phase because no build has ever reached it. Slow-but-
+terminating and looping are both consistent with the evidence gathered so far.
+Stated as undetermined rather than guessed.
+
+**Therefore the MIR error count is still NOT produced, and the last real
+full-build number remains 133.** No count from this lane supersedes it. In
+particular no entry count (`[bootstrap-error-count] count=0`) should be reported
+in its place — that is a different quantity and has misled before.
+
+**Next step for whoever picks this up:** `lower_to_mir` needs a progress receipt
+per module (the same `log_build_progress` the other five phases already emit) so
+this phase stops being unobservable. That single change converts "silent for 30
+minutes, cause unknown" into either a visible per-module rate or an exact module
+id where it stops. It is a much better investment than another blind 45-minute
+run.
+
+### Correction: BOTH verification runs were killed EXTERNALLY, not by the build
+
+run3's `rc=1` above is the harness's exit code, not a build verdict — the task
+harness stopped the background job at ~19:06 while it was still inside
+`lower_to_mir`. run2 was stopped the same way. So neither run is evidence of a
+build FAILURE:
+
+- run3 stderr contains **0** lines matching `^error` and **0** `[mnf-debug]` /
+  `[mnf-expr]` lines;
+- the last receipts written were `hir ... complete step 3/6` and
+  `monomorphize ... complete step 4/6`, with `[mono] generic_fns=0 call_sites=0
+  specializations=0 unresolved=0`.
+
+The correct reading is: **the build got further than ever before and was cut
+off, twice, by the harness's background-job limit — not by a compiler error.**
+Whether `lower_to_mir` terminates on this input is still unmeasured, and the
+30-minute silent-CPU observation above stands as the only data on it.
+
+Practical consequence for the next attempt: this build needs a runner that will
+not be reaped (a detached process writing to a file, or a machine-level `nohup`
+lane), because the phase now under test outlives the harness's tolerance.
+
+### Protocol re-verified after the change (2026-09-02)
+The compiler change is in MIR lowering and the deployed MCP server still
+interprets source, so no MCP behaviour was expected to move; verified anyway
+rather than assumed, through the real `bin/simple_mcp_server.cmd` wrapper:
+
+- `initialize` -> `{"protocolVersion":"2025-06-18", ...,
+  "serverInfo":{"name":"simple-mcp-full","version":"4.0.0"}}`;
+- `tools/call simple_symbols` on
+  `test/01_unit/compiler/50.mir/mir_lowering_global_maps_initialized_spec.spl`
+  returned symbols whose ranges are CORRECT, not merely non-empty: `h` at
+  0-based lines 79/83/87 character 12, which are exactly the three
+  `        var h = Holder.initialized()` bindings (1-based 80/84/88) with `h` in
+  column 12.
+
+### Tasks not reachable this session
+Re-enabling the native `simple_mcp_server` artifact and re-measuring startup /
+peak RSS against the interpreted baseline (4.3-5.0 s, 248-261 MB) were
+conditional on the native build COMPLETING. It did not, so no artifact was
+produced, nothing was re-enabled, and no startup/RSS number is reported. The
+stale `bin/release/x86_64-pc-windows-msvc/simple_mcp_server.exe.disabled`
+(2,657,280 bytes, dated Apr 23) was deliberately NOT renamed into place: both
+wrappers would then execute a months-old binary, which would look like success
+while proving nothing about this lane.
+
+### The silence was ALREADY explained — no new logging is needed
+
+`lower_to_mir_with_target_context`
+(`src/compiler/80.driver/driver_pipeline_lowering.spl:196`) already emits a
+per-module receipt, but it is gated:
+
+```
+direct_idx = direct_idx + 1
+if direct_idx % 64 == 0 or direct_idx == self.ctx.sources.len():
+    log_build_progress("mir", "modules", direct_idx, ...)      # :300-303
+```
+
+With ~100 sources the FIRST `mir` receipt cannot appear until module **64**. So
+30+ minutes of stdout silence in this phase is the expected appearance of
+lowering fewer than 64 modules — it is NOT evidence of a loop, and the earlier
+"non-allocating tight loop" reading should be treated as unsupported.
+
+There is also a genuine per-module marker one line earlier —
+`log_phase("aot:lower_to_mir:module:done idx={..} module={..} functions={..}")`
+(`:286`) — gated behind `driver_phase_trace_enabled()`
+(`driver_log_helpers.spl:21`), i.e. **`SIMPLE_COMPILER_PHASE_PROFILE=1`** or
+`SIMPLE_COMPILER_TRACE=1`. `log_phase` prints to BOTH stderr and stdout
+(`:111,116`) precisely so it survives the native-build worker's capture chain.
+
+So the observability this record earlier proposed building already exists and
+just needed switching on. Turning it on is the correct next measurement, not a
+code change.
+
+### run4: detached, traced, in flight
+Launched 2026-09-02 ~19:20 with `SIMPLE_COMPILER_PHASE_PROFILE=1` (plus
+`SIMPLE_INTERP_OOB_DEBUG=1`, `SIMPLE_DUMP_COMPILE_ERRORS=1`,
+`SIMPLE_CACHE_SCOPE=run4`), started via `Start-Process -WindowStyle Hidden` so
+it is NOT a child of the agent harness and cannot be reaped like run2/run3.
+
+```
+launcher : <scratchpad>/mcp/run4.cmd     (cmd PID 9236)
+stdout   : <scratchpad>/mcp/run4.out
+stderr   : <scratchpad>/mcp/run4.err
+exit code: <scratchpad>/mcp/run4.rc      (written only on exit)
+scratchpad = C:\Users\ormas\AppData\Local\Temp\claude\
+             C--Users-ormas-dev-simple\9199c2f5-882d-4ada-9b3a-b9e6bc05af76\scratchpad
+```
+
+Confirmed alive and already emitting `[BOOTSTRAP-PHASE]` markers 45 s in.
+
+**How to harvest the answer** (no rerun needed):
+```
+grep -c 'aot:lower_to_mir:module:done' run4.out     # modules lowered so far
+grep    'aot:lower_to_mir:module:done' run4.out | tail -3
+```
+Modules advancing ⇒ the phase is merely SLOW (look to the CoW-alias quadratic
+class, `.claude/rules/code-style.md`; `src/compiler` carries 297 open findings).
+Stuck at one idx ⇒ a real loop, and that line names the module.
+A categorizer for the eventual error listing is at
+`<scratchpad>/mcp/categorize.sh` (`sh categorize.sh run4.out run4.err`).
+
+### run4 corrected launch (supersedes the PID/paths above)
+
+The first two run4 launches failed for launcher reasons, not compiler ones, and
+both are worth recording because each is a Windows trap:
+
+1. **Backslash `.spl` ARGUMENTS break the source closure.** Invoking
+   `simple.exe run src\app\cli\native_build_worker.spl src\app\mcp\main.spl`
+   dies in ~200 ms with
+
+   ```
+   [BOOTSTRAP-PHASE] +211ms phase1:load_sources:closure:scan path=src\app\mcp\main.spl imports=10 content_len=18179
+   error: semantic: cannot iterate over this type: Nil
+   ```
+
+   The file IS found and scanned (`imports=10`, `content_len=18179`), so this is
+   not "file not found" — something downstream of the scan returns nil for a
+   backslash path and the diagnostic does not mention paths at all. Same
+   unhelpful shape as
+   `doc/08_tracking/bug/lint_cannot_iterate_nil_mcp_sdk_app_2026-08-28.md`.
+   Forward slashes work. Worth filing separately if anyone hits it again.
+2. **cmd.exe will not launch an EXE named with forward slashes**
+   (`'src' is not recognized...`, rc=9009).
+
+So the working invocation on Windows needs BOTH conventions at once — a
+backslash executable path and forward-slash arguments:
+
+```
+src\compiler_rust\target\release\simple.exe run src/app/cli/native_build_worker.spl src/app/mcp/main.spl
+```
+
+Relaunched on that form and confirmed progressing (`parse 18/100` at 50 s),
+detached, cmd PID **5016**. Output paths are unchanged (`run4.out` / `run4.err`
+/ `run4.rc` in the scratchpad `mcp/` directory listed above), as is the harvest
+recipe.
