@@ -1,70 +1,138 @@
-# Semihost Transport Unit Tests
-#
-# Tests transport constants, config struct defaults, and capability
-# flag disjointness. Interpreter-mode tests (no QEMU needed).
+"""
+## Purpose and audience
+Pins the wire contract of the baremetal semihost transport: operation
+numbers, capability bit flags, default configuration, and the power-of-two
+ring-buffer arithmetic the buffered lane relies on. Written for maintainers
+of the semihost transport and for anyone porting the runner to a new board
+or QEMU machine model.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/lib/nogc_async_mut_noalloc/baremetal/semihost_transport_spec.spl
+## Compatibility and limitations
+Interpreter-mode tests only: no QEMU guest is started and no UART is
+touched. The binary-framing and interned-handle transports are exercised
+elsewhere; this file pins the constants and pure helpers they build on.
+## Verification guidance and troubleshooting
+Every failure names the constant or helper that drifted from the pinned
+value. The oracle comment on each expect line states the external source of
+truth (ARM semihosting operation numbers, QEMU virt machine layout, or the
+bit-disjointness invariant) so a drift can be triaged without reading the
+product module.
+"""
+# Lifecycle: doc/01_research/runtime/cudagdb_semihost_lane_spike.md ;
+# doc/03_plan/hardware/baremetal/web_baremetal_size_restart_2026-05-28.md ;
+# doc/04_architecture/hardware/crash_containment_framework_baremetal_simplified.md ;
+# doc/05_design/hardware/semihosting_system_api_design.md
 
+use std.nogc_async_mut_noalloc.baremetal.semihost_transport.{
+    TRANSPORT_WRITEC, TRANSPORT_WRITE0, TRANSPORT_WRITE, TRANSPORT_BATCH_N,
+    TRANSPORT_BUFFERED, TRANSPORT_UART, TRANSPORT_RAW_BINARY, TRANSPORT_INTERNED,
+    CAP_WRITEC, CAP_WRITE0, CAP_WRITE, CAP_UART, CAP_INTERNED,
+    RAW_BINARY_MAGIC, next_power_of_2, semihost_batch_size, semihost_uart_base
+}
+
+# @manual_section: transport-constants
 describe "Transport Constants":
-    # @manual scenario evidence
     it "WRITEC is 1":
-        val TRANSPORT_WRITEC = 1
-        expect(TRANSPORT_WRITEC).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-001
+        # @capture(bit_table): SYS_WRITEC operation number vs pinned value 1
+        step("Read the shipped TRANSPORT_WRITEC constant and compare with the ARM semihost operation number")
+        expect(TRANSPORT_WRITEC).to_equal(1)  # oracle: ARM semihosting SYS_WRITEC is operation 0x03 -> slot 1 in our transport table
 
     it "WRITE0 is 2":
-        val TRANSPORT_WRITE0 = 2
-        expect(TRANSPORT_WRITE0).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-002
+        # @capture(bit_table): SYS_WRITE0 operation number vs pinned value 2
+        step("Read the shipped TRANSPORT_WRITE0 constant and compare with the ARM semihost operation number")
+        expect(TRANSPORT_WRITE0).to_equal(2)  # oracle: ARM semihosting SYS_WRITE0 is operation 0x04 -> slot 2 in our transport table
 
     it "WRITE is 3":
-        val TRANSPORT_WRITE = 3
-        expect(TRANSPORT_WRITE).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-003
+        # @capture(bit_table): SYS_WRITE operation number vs pinned value 3
+        step("Read the shipped TRANSPORT_WRITE constant and compare with the ARM semihost operation number")
+        expect(TRANSPORT_WRITE).to_equal(3)  # oracle: ARM semihosting SYS_WRITE is operation 0x05 -> slot 3 in our transport table
 
     it "BATCH_N is 4":
-        val TRANSPORT_BATCH_N = 4
-        expect(TRANSPORT_BATCH_N).to_equal(4)  # oracle: expected value 4 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-004
+        # @capture(bit_table): batched SYS_WRITE operation number vs pinned value 4
+        step("Read the shipped TRANSPORT_BATCH_N constant and compare with the pinned slot")
+        expect(TRANSPORT_BATCH_N).to_equal(4)  # oracle: batched SYS_WRITE is our own fourth transport slot, after the three ARM operations
 
     it "BUFFERED is 5":
-        val TRANSPORT_BUFFERED = 5
-        expect(TRANSPORT_BUFFERED).to_equal(5)  # oracle: expected value 5 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-005
+        # @capture(bit_table): buffered transport slot vs pinned value 5
+        step("Read the shipped TRANSPORT_BUFFERED constant and compare with the pinned slot")
+        expect(TRANSPORT_BUFFERED).to_equal(5)  # oracle: the ring-buffered lane occupies the fifth transport slot
 
     it "UART is 6":
-        val TRANSPORT_UART = 6
-        expect(TRANSPORT_UART).to_equal(6)  # oracle: expected value 6 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-006
+        # @capture(bit_table): direct-UART transport slot vs pinned value 6
+        step("Read the shipped TRANSPORT_UART constant and compare with the pinned slot")
+        expect(TRANSPORT_UART).to_equal(6)  # oracle: the direct-UART lane occupies the sixth transport slot
 
     it "RAW_BINARY is 7":
-        val TRANSPORT_RAW_BINARY = 7
-        expect(TRANSPORT_RAW_BINARY).to_equal(7)  # oracle: expected value 7 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-007
+        # @capture(bit_table): framed binary transport slot vs pinned value 7
+        step("Read the shipped TRANSPORT_RAW_BINARY constant and compare with the pinned slot")
+        expect(TRANSPORT_RAW_BINARY).to_equal(7)  # oracle: the framed binary lane occupies the seventh transport slot
 
     it "INTERNED is 8":
-        val TRANSPORT_INTERNED = 8
-        expect(TRANSPORT_INTERNED).to_equal(8)  # oracle: expected value 8 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-008
+        # @capture(bit_table): interned-handle transport slot vs pinned value 8
+        step("Read the shipped TRANSPORT_INTERNED constant and compare with the pinned slot")
+        expect(TRANSPORT_INTERNED).to_equal(8)  # oracle: the SYS_WRITE_HANDLE interned extension occupies the eighth transport slot
 
     it "all transport constants are unique":
-        val values = [1, 2, 3, 4, 5, 6, 7, 8]
-        expect(values.len()).to_equal(8)  # oracle: expected value 8 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-TRANSPORT-009
+        # @capture(bit_table): pairwise uniqueness of the eight transport slots
+        step("Pairwise-compare the eight shipped transport constants for collisions")
+        val transports = [TRANSPORT_WRITEC, TRANSPORT_WRITE0, TRANSPORT_WRITE, TRANSPORT_BATCH_N, TRANSPORT_BUFFERED, TRANSPORT_UART, TRANSPORT_RAW_BINARY, TRANSPORT_INTERNED]
+        var i = 0
+        var collisions = 0
+        while i < transports.len():
+            var j = i + 1
+            while j < transports.len():
+                if transports[i] == transports[j]:
+                    collisions = collisions + 1
+                j = j + 1
+            i = i + 1
+        expect(collisions).to_equal(0)  # oracle: eight distinct lanes need eight distinct operation numbers, so zero pairwise collisions
 
+# @manual_section: capability-flags
 describe "Capability Flags":
     it "CAP_WRITEC is 1":
-        val CAP_WRITEC = 1
-        expect(CAP_WRITEC).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CAPS-001
+        # @capture(bit_table): CAP_WRITEC bit pattern vs pinned value 1
+        step("Read the shipped CAP_WRITEC flag and compare with its bit position")
+        expect(CAP_WRITEC).to_equal(1)  # oracle: capability flags are single bits, and WRITEC owns bit 0
 
     it "CAP_WRITE0 is 2":
-        val CAP_WRITE0 = 2
-        expect(CAP_WRITE0).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CAPS-002
+        # @capture(bit_table): CAP_WRITE0 bit pattern vs pinned value 2
+        step("Read the shipped CAP_WRITE0 flag and compare with its bit position")
+        expect(CAP_WRITE0).to_equal(2)  # oracle: capability flags are single bits, and WRITE0 owns bit 1
 
     it "CAP_WRITE is 4":
-        val CAP_WRITE = 4
-        expect(CAP_WRITE).to_equal(4)  # oracle: expected value 4 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CAPS-003
+        # @capture(bit_table): CAP_WRITE bit pattern vs pinned value 4
+        step("Read the shipped CAP_WRITE flag and compare with its bit position")
+        expect(CAP_WRITE).to_equal(4)  # oracle: capability flags are single bits, and WRITE owns bit 2
 
     it "CAP_UART is 8":
-        val CAP_UART = 8
-        expect(CAP_UART).to_equal(8)  # oracle: expected value 8 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CAPS-004
+        # @capture(bit_table): CAP_UART bit pattern vs pinned value 8
+        step("Read the shipped CAP_UART flag and compare with its bit position")
+        expect(CAP_UART).to_equal(8)  # oracle: capability flags are single bits, and UART owns bit 3
 
     it "CAP_INTERNED is 16":
-        val CAP_INTERNED = 16
-        expect(CAP_INTERNED).to_equal(16)  # oracle: expected value 16 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CAPS-005
+        # @capture(bit_table): CAP_INTERNED bit pattern vs pinned value 16
+        step("Read the shipped CAP_INTERNED flag and compare with its bit position")
+        expect(CAP_INTERNED).to_equal(16)  # oracle: capability flags are single bits, and INTERNED owns bit 4
 
     it "capability flags are disjoint powers of 2":
-        val caps = [1, 2, 4, 8, 16]
-        # Each pair OR'd must differ from each individual
+        # @req REQ-SEMIHOST-CAPS-006
+        # @capture(bit_table): pairwise OR-disjointness of the five capability bits
+        step("OR every pair of shipped capability flags and require each OR to differ from both operands")
+        val caps = [CAP_WRITEC, CAP_WRITE0, CAP_WRITE, CAP_UART, CAP_INTERNED]
         var i = 0
         var all_disjoint = true
         while i < 5:
@@ -77,62 +145,66 @@ describe "Capability Flags":
                     all_disjoint = false
                 j = j + 1
             i = i + 1
-        expect(all_disjoint).to_equal(true)
+        expect(all_disjoint).to_equal(true)  # oracle: bit flags are only independently negotiable if no flag implies another
 
     it "full capability mask combines all flags":
-        val all_caps = 1 | 2 | 4 | 8 | 16
-        expect(all_caps).to_equal(31)  # oracle: expected value 31 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CAPS-007
+        # @capture(bit_table): OR of all capability flags vs pinned mask 31
+        step("OR the five shipped capability flags into one mask and compare with the pinned value")
+        val all_caps = CAP_WRITEC | CAP_WRITE0 | CAP_WRITE | CAP_UART | CAP_INTERNED
+        expect(all_caps).to_equal(31)  # oracle: bits 0..4 all set is 2^5 - 1, the advertise-everything mask
 
+# @manual_section: config-defaults
 describe "Config Defaults":
     it "default batch_size is 3":
-        val default_batch = 3
-        expect(default_batch).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CONFIG-001
+        # @capture(bit_table): shipped default semihost_batch_size vs pinned value 3
+        step("Read the shipped default semihost_batch_size variable and compare with the pinned default")
+        expect(semihost_batch_size).to_equal(3)  # oracle: the transport tunes 3 bytes per SYS_WRITE as its batch default
 
     it "default UART base is 0x10000000":
-        val default_uart = 0x10000000
-        expect(default_uart).to_equal(268435456)  # oracle: expected value 268435456 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CONFIG-002
+        # @capture(bit_table): shipped default semihost_uart_base vs QEMU virt UART0 address
+        step("Read the shipped default semihost_uart_base variable and compare with the QEMU virt machine address")
+        expect(semihost_uart_base).to_equal(268435456)  # oracle: 0x10000000 is UART0 on the QEMU virt machine
 
     it "RAW_BINARY_MAGIC is 0x53 (ASCII S)":
-        val magic = 0x53
-        expect(magic).to_equal(83)  # oracle: expected value 83 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-CONFIG-003
+        # @capture(bit_table): frame magic byte vs ASCII 'S'
+        step("Read the shipped RAW_BINARY_MAGIC and compare with the ASCII code for S")
+        expect(RAW_BINARY_MAGIC).to_equal(83)  # oracle: 0x53 is ASCII 'S', the first byte of every framed binary record
 
+# @manual_section: ring-buffer-arithmetic
 describe "Ring Buffer Power-of-2":
     it "next_power_of_2 for 1 is 1":
-        var v = 0
-        v = v | (v >> 1)
-        v = v | (v >> 2)
-        v = v | (v >> 4)
-        v = v | (v >> 8)
-        v = v | (v >> 16)
-        # n=1 => v = 1-1 = 0, result = 0+1 = 1
-        expect(v + 1).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-RING-001
+        # @capture(bit_table): next_power_of_2(1) vs pinned value 1
+        step("Call the shipped next_power_of_2 helper with 1 and compare with the pinned result")
+        expect(next_power_of_2(1)).to_equal(1)  # oracle: a 1-slot ring is already a power of two and must not be rounded up
 
     it "next_power_of_2 for 5 is 8":
-        var v = 5 - 1  # 4
-        v = v | (v >> 1)   # 4|2 = 6
-        v = v | (v >> 2)   # 6|1 = 7
-        v = v | (v >> 4)   # 7|0 = 7
-        v = v | (v >> 8)   # 7
-        v = v | (v >> 16)  # 7
-        expect(v + 1).to_equal(8)  # oracle: expected value 8 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-RING-002
+        # @capture(bit_table): next_power_of_2(5) vs pinned value 8
+        step("Call the shipped next_power_of_2 helper with 5 and compare with the pinned result")
+        expect(next_power_of_2(5)).to_equal(8)  # oracle: the smallest power of two that fits 5 slots is 8
 
     it "next_power_of_2 for 16 is 16":
-        var v = 16 - 1  # 15
-        v = v | (v >> 1)   # 15
-        v = v | (v >> 2)   # 15
-        v = v | (v >> 4)   # 15
-        v = v | (v >> 8)   # 15
-        v = v | (v >> 16)  # 15
-        expect(v + 1).to_equal(16)  # oracle: expected value 16 is the behavior asserted by this regression spec
+        # @req REQ-SEMIHOST-RING-003
+        # @capture(bit_table): next_power_of_2(16) vs pinned value 16
+        step("Call the shipped next_power_of_2 helper with 16 and compare with the pinned result")
+        expect(next_power_of_2(16)).to_equal(16)  # oracle: an exact power-of-two capacity must round to itself
 
     it "bitmask wrapping works for capacity 4":
-        val mask = 3  # capacity 4 - 1
+        # @req REQ-SEMIHOST-RING-004
+        # @capture(bit_table): index wrap sequence 1,2,3,0 for a capacity-4 mask
+        step("Derive the capacity-4 mask from the shipped next_power_of_2 helper and walk four increments through it")
+        val mask = next_power_of_2(4) - 1  # oracle: capacity 4 masks to the low 2 bits
         var idx = 0
         idx = (idx + 1) & mask
-        expect(idx).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        expect(idx).to_equal(1)  # oracle: first increment lands on slot 1
         idx = (idx + 1) & mask
-        expect(idx).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        expect(idx).to_equal(2)  # oracle: second increment lands on slot 2
         idx = (idx + 1) & mask
-        expect(idx).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+        expect(idx).to_equal(3)  # oracle: third increment lands on the last slot
         idx = (idx + 1) & mask
-        expect(idx).to_equal(0)  # wraps around
+        expect(idx).to_equal(0)  # oracle: fourth increment wraps back to slot 0
