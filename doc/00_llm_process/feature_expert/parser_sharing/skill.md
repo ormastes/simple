@@ -92,6 +92,29 @@ every independent attempt got it wrong the same way.
   trackers remain; the `35.semantics/lint` family is BLOCKED by the 8 global-lexer
   sites (re-entrancy), not merely deferred.
 
+## Seams 6-8 (2026-09-06)
+
+| tool | tracker removed | defect | corpus |
+|---|---|---|---|
+| `app/check/concurrency_lint.spl` | whole-source char walker | a `'…'` string holding `"""` left it believing a string was open; the next line's deprecated import was masked away and its E-PAR-002 never fired. It also blanked the OPENING quote, so two E-PAR-004 string-argument checks could never match — dead at HEAD, probed at 0 diagnostics | 7 src files |
+| `test_runner` preprocess x3 (`test_result_wrapper`, `test_runner_execute` lib + app copies) | `in_docstring` toggled by any `"""`-prefixed line | a ONE-LINE docstring toggled it on and nothing toggled it off; every later import and top-level declaration was pushed, indented, into `fn main()` | 1,657 spec files |
+| `90.tools/verify/aorte_obligation_census_scan.spl` | per-line `"""` parity count | ran on the raw line BEFORE the comment check, so a comment mentioning the delimiter dropped the next obligation site from the certification census | 45 src files |
+
+**Measured and NOT migrated** — `backend_plugin_boundary_scan.spl`: the defect
+shape is real (a docstring continuation line has no quote, so its prose is
+scanned as code), but a corpus replay found **0** files where a continuation
+line carries a provider call. No discriminating input in the tree ⇒ no
+migration. Also rejected: `query_diagnostics`, `svim/lsp_features`,
+`ui_test/parse`, `jupyter_kernel`, `mcp/main_lazy_json` (all JSON),
+`verify/checker.spl` (Lean), `builtin_blocks_shell` (shell) — other grammars,
+must never call CoreLexer. `mode_filter` re-confirmed harmless. Fragment-level
+matchers (`spipe_matching_close_paren`, `easy_fix/rules_helpers`) take a
+substring with no line context — signature mismatch, not migratable as-is.
+
+**Threading note:** the preprocess loop became `while line_index < lines.len()`
+with the index advanced at the TOP, so every one of its ~10 `continue` paths
+stays correct. A `for … in` loop cannot carry the fact index.
+
 ## Known open
 
 - `spipe-docgen` does not run from committed content at all — the committed
